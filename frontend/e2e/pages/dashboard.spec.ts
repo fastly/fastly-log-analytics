@@ -923,3 +923,1071 @@ test.describe('Streaming (CMCD) Page Contract (/streaming)', () => {
     expect(cls).toBeLessThanOrEqual(0.05)
   })
 })
+
+// ---------------------------------------------------------------------------
+// Folded from a11y-routes.spec.ts
+// ---------------------------------------------------------------------------
+
+const CLEAN_ROUTES = [
+  '/origin',
+  '/performance',
+  '/security',
+  '/query',
+  '/insights',
+  '/sessions',
+  '/network',
+  '/control-room',
+  '/fastly-value',
+  '/streaming',
+  '/admin',
+  '/admin/queries',
+  '/admin/session-scoring',
+  '/admin/share',
+  '/admin/trends',
+  '/admin/usage-log',
+  '/alerts',
+  '/logs',
+  '/usage',
+]
+
+async function gotoSettled(page: Page, route: string) {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      await page.goto(route)
+      return
+    } catch (e) {
+      const msg = String((e as Error)?.message ?? e)
+      const transient = /ERR_ABORTED|frame was detached|frame got detached|navigation .*interrupted/i.test(msg)
+      if (attempt === 0 && transient) continue
+      throw e
+    }
+  }
+}
+
+async function assertNoAxeViolations(page: Page, route: string) {
+  await gotoSettled(page, route)
+  await page.locator('main').first().waitFor({ state: 'visible', timeout: 30_000 })
+  await page.waitForTimeout(3_000)
+
+  const results = await new AxeBuilder({ page })
+    .withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa'])
+    .exclude('.recharts-wrapper')
+    .exclude('[data-testid="plotly-host"]')
+    .exclude('[data-empty-placeholder="true"]')
+    .exclude('[data-axe-ignore="true"]')
+    .exclude('.maplibregl-map')
+    .analyze()
+
+  expect(
+    results.violations,
+    `axe found ${results.violations.length} WCAG 2.1 AA violation(s) on ${route}:\n` +
+      results.violations
+        .map(
+          (v) =>
+            `  - [${v.id}] ${v.help} (${v.impact ?? 'unknown'})\n    ${v.helpUrl}\n` +
+            `    nodes: ${v.nodes.length} (first: ${v.nodes[0]?.target?.join(' > ')})`,
+        )
+        .join('\n'),
+  ).toEqual([])
+}
+
+for (const route of CLEAN_ROUTES) {
+  test(`no WCAG 2.1 AA violations on ${route}`, async ({ page }) => {
+    await assertNoAxeViolations(page, route)
+  })
+}
+
+test('Tab navigation moves focus through the sidebar', async ({ page }) => {
+  await page.goto('/dashboard')
+  await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible({ timeout: 30_000 })
+
+  const focusedTagBefore = await page.evaluate(() => document.activeElement?.tagName)
+  expect(focusedTagBefore).toBeTruthy()
+
+  await page.keyboard.press('Tab')
+  const focusedTagAfter = await page.evaluate(() => document.activeElement?.tagName)
+  expect(focusedTagAfter).toBeTruthy()
+})
+
+test('Escape closes any open popover without trapping focus', async ({ page }) => {
+  await page.goto('/dashboard')
+  await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible({ timeout: 30_000 })
+
+  await page.keyboard.press('Escape')
+  expect(await page.locator('body').count()).toBe(1)
+})
+
+const HYDRATION_ROUTES = [
+  '/admin',
+  '/admin/share',
+  '/admin/session-scoring',
+  '/admin/trends',
+  '/admin/usage-log',
+  '/admin/queries',
+  '/dashboard',
+  '/sessions',
+  '/security',
+  '/network',
+  '/origin',
+  '/performance',
+  '/rum',
+  '/usage',
+  '/alerts',
+  '/logs',
+  '/query',
+  '/insights',
+  '/control-room',
+]
+
+const SERVICE_ID = 'svc-playwright-e2e'
+
+const HYDRATION_PATTERNS = [
+  /hydrat/i,
+  /did not match/i,
+  /cannot be a descendant/i,
+  /text content does not match/i,
+  /minified react error #(418|423|425)/i,
+]
+
+function isHydrationError(text: string): boolean {
+  return HYDRATION_PATTERNS.some((re) => re.test(text))
+}
+
+test.describe('SSR hydration smoke', () => {
+  for (const route of HYDRATION_ROUTES) {
+    test(`${route} hydrates without a React hydration error`, async ({ page }) => {
+      await page.addInitScript((sid) => {
+        localStorage.setItem(
+          'service-storage',
+          JSON.stringify({
+            state: {
+              activeServiceId: sid,
+              services: [{ id: sid, name: 'Playwright E2E Service', accessLevel: 'read_write' }],
+            },
+            version: 0,
+          }),
+        )
+        localStorage.setItem(
+          'timezone-storage',
+          JSON.stringify({ state: { timezone: 'America/New_York' }, version: 0 }),
+        )
+        localStorage.setItem(
+          'fastly-debug-settings',
+          JSON.stringify({ state: { enabled: true, apiCallsEnabled: true }, version: 0 }),
+        )
+        localStorage.setItem('dashboard_collapsed_sections', JSON.stringify(['request', 'cache']))
+      }, SERVICE_ID)
+
+      const hydrationErrors: string[] = []
+      page.on('console', (msg) => {
+        if (msg.type() === 'error' && isHydrationError(msg.text())) {
+          hydrationErrors.push(msg.text())
+        }
+      })
+      page.on('pageerror', (err) => {
+        const text = `${err.message}\n${err.stack ?? ''}`
+        if (isHydrationError(text)) hydrationErrors.push(text)
+      })
+
+      await page.goto(route, { waitUntil: 'domcontentloaded', timeout: 30_000 })
+      await expect(page.locator('main, [role="main"], h1, h2').first()).toBeVisible({ timeout: 15_000 })
+
+      await expect(page.locator('nextjs-portal, [data-nextjs-dialog-overlay], .alert-destructive, [data-testid="error-card"]')).toHaveCount(0)
+
+      await page.waitForTimeout(300)
+
+      expect(
+        hydrationErrors,
+        `React hydration error(s) on ${route}:\n${hydrationErrors.join('\n---\n')}`,
+      ).toEqual([])
+    })
+  }
+})
+
+// ---------------------------------------------------------------------------
+// Folded from network.spec.ts
+// ---------------------------------------------------------------------------
+
+type NetworkDebugResponse = {
+  _debug_queries?: DebugQuery[]
+  transport?: Record<string, unknown>
+  available?: boolean
+  reason?: string
+}
+
+type AssetsDebugResponse = {
+  _debug_queries?: DebugQuery[]
+  asset_type_breakdown?: unknown[]
+  cache_performance?: unknown[]
+  compression_performance?: unknown[]
+  large_uncompressed_assets?: unknown[]
+  low_ttl_assets?: unknown[]
+  missing_fields?: string[]
+}
+
+test.describe('Network Page Contract (/network)', () => {
+  test('1. Route accessibility & environment indicator', async ({ page }) => {
+    await page.goto('/network')
+    await expect(page.getByRole('heading', { name: 'Network & ASN Health' })).toBeVisible({ timeout: 30_000 })
+
+    const footer = page.locator('footer')
+    await expect(footer).toBeVisible({ timeout: 10_000 })
+    const footerText = await footer.innerText()
+    expect(footerText).toMatch(/Admin View|Analyst View/i)
+  })
+
+  test('2. Instant shell, pre-allocated layout & zero CLS containers', async ({ page }) => {
+    await page.goto('/network')
+    await expect(page.getByRole('heading', { name: 'Network & ASN Health' })).toBeVisible({ timeout: 30_000 })
+
+    const reservedContainers = page.locator('[class*="contain-intrinsic-size"]')
+    const count = await reservedContainers.count()
+    expect(count).toBeGreaterThanOrEqual(4)
+  })
+
+  test('3. Data contract & schema validation (/api/network/bundle & /api/network-health)', async ({ page }) => {
+    const bundleRes = await page.request.post('/api/network/bundle', {
+      data: {
+        sections: ['transport'],
+      },
+    })
+    expect(bundleRes.ok()).toBeTruthy()
+    const bundleData = await bundleRes.json()
+    expect(bundleData).toBeTruthy()
+    expect(bundleData).toHaveProperty('transport')
+    if (bundleData.transport) {
+      expect(bundleData.transport).toHaveProperty('protocol_distribution')
+      expect(bundleData.transport).toHaveProperty('missing_fields')
+      expect(Array.isArray(bundleData.transport.protocol_distribution)).toBeTruthy()
+      expect(Array.isArray(bundleData.transport.missing_fields)).toBeTruthy()
+    }
+
+    const healthRes = await page.request.post('/api/network-health', {
+      data: {
+        sections: ['summary', 'leaderboard', 'metro_leaderboard'],
+        top_n: 30,
+      },
+    })
+    expect(healthRes.ok()).toBeTruthy()
+    const healthData = await healthRes.json()
+    expect(healthData).toBeTruthy()
+    expect(healthData).toHaveProperty('available')
+
+    await page.goto('/network')
+    await expect(page.getByRole('heading', { name: 'Network & ASN Health' })).toBeVisible({ timeout: 30_000 })
+  })
+
+  test('4. Core network cards & transport section mounted', async ({ page }) => {
+    await page.goto('/network')
+    await expect(page.getByRole('heading', { name: 'Network & ASN Health' })).toBeVisible({ timeout: 30_000 })
+
+    const unavailableNotice = page.getByText('Network Metrics Unavailable')
+    const hasNotice = await unavailableNotice.isVisible().catch(() => false)
+
+    if (!hasNotice) {
+      await expect(page.locator('#main [data-slot="card-title"]').filter({ hasText: 'Global Health' }).first()).toBeVisible({ timeout: 15_000 })
+      await expect(page.locator('#main [data-slot="card-title"]').filter({ hasText: 'Worst ASN' }).first()).toBeVisible({ timeout: 15_000 })
+      await expect(page.getByText('Edge Transport & TCP Performance')).toBeVisible({ timeout: 15_000 })
+
+      const leaderboardTitle = page.getByText('ASN Performance Leaderboard')
+      const popHeatmapTitle = page.getByText('Fastly Edge PoP Health Heatmap')
+      await expect(leaderboardTitle.or(popHeatmapTitle).first()).toBeVisible({ timeout: 15_000 })
+    } else {
+      await expect(unavailableNotice).toBeVisible()
+    }
+  })
+
+  test('5. Time range presets switching cleanly (15m, 24h, 7d)', async ({ page }) => {
+    const consoleErrors: string[] = []
+    page.on('console', (msg) => {
+      if (msg.type() === 'error') consoleErrors.push(msg.text())
+    })
+
+    await page.goto('/network')
+    await expect(page.getByRole('heading', { name: 'Network & ASN Health' })).toBeVisible({ timeout: 30_000 })
+
+    const timePresetBtn = page.getByRole('button', { name: /24h|1h|7d|last/i }).first()
+    await expect(timePresetBtn).toBeVisible({ timeout: 10_000 })
+
+    const fatalErrors = consoleErrors.filter((e) => e.includes('500') || e.includes('Internal Server Error'))
+    expect(fatalErrors).toHaveLength(0)
+  })
+
+  test('6. Zero error cards on network page', async ({ page }) => {
+    await page.goto('/network')
+    await expect(page.getByRole('heading', { name: 'Network & ASN Health' })).toBeVisible({ timeout: 30_000 })
+
+    await expect(page.locator('[data-testid="error-card"], .alert-destructive')).toHaveCount(0)
+  })
+
+  test('7. Performance budget: LCP < 1500ms and CLS <= 0.05 on warm load', async ({ page }) => {
+    await page.goto('/network', { waitUntil: 'domcontentloaded' })
+
+    await installClsObserver(page)
+    const start = Date.now()
+    await page.reload({ waitUntil: 'domcontentloaded' })
+    const totalTime = Date.now() - start
+
+    const metrics = await measureWarmPaintAndCls(page, 1000)
+
+    console.log(`[PERF /network] Reload: ${totalTime}ms | LCP: ${Math.round(metrics.lcp)}ms | CLS: ${metrics.cls.toFixed(3)}`)
+    expect(totalTime).toBeLessThan(10_000)
+    if (metrics.lcp > 0) {
+      expect(metrics.lcp).toBeLessThan(1500)
+    }
+    expect(metrics.cls).toBeLessThanOrEqual(0.05)
+  })
+
+  test('8. Telemetry instrumentation & query attribution audit', async ({ page }) => {
+    const res = await page.request.post('/api/network/bundle', {
+      data: {
+        sections: ['transport'],
+      },
+      headers: {
+        'x-debug-responses': '1',
+      },
+    })
+    expect(res.ok()).toBeTruthy()
+    const json = await res.json()
+    expect(json).toHaveProperty('_debug_queries')
+    const queries = (json as NetworkDebugResponse)._debug_queries ?? []
+    console.log(`[TELEMETRY /network] Captured ${queries.length} queries`)
+    expect(queries.length).toBeGreaterThan(0)
+  })
+})
+
+test.describe('Assets & Shield Page Contract (/assets-shield)', () => {
+  test('1. Route accessibility & environment indicator', async ({ page }) => {
+    await page.goto('/assets-shield')
+    await expect(page.getByRole('heading', { name: 'Assets & Shield' })).toBeVisible({ timeout: 30_000 })
+
+    const footer = page.locator('footer')
+    await expect(footer).toBeVisible({ timeout: 10_000 })
+    const footerText = await footer.innerText()
+    expect(footerText).toMatch(/Admin View|Analyst View/i)
+  })
+
+  test('2. Instant shell, pre-allocated layout & zero CLS containers', async ({ page }) => {
+    await page.goto('/assets-shield')
+    await expect(page.getByRole('heading', { name: 'Assets & Shield' })).toBeVisible({ timeout: 30_000 })
+
+    await expect(page.locator('[data-testid="assets-overview-grid"]:visible')).toBeVisible({ timeout: 15_000 })
+    await expect(page.locator('[data-testid="assets-cache-efficiency-card"]:visible')).toBeVisible({ timeout: 15_000 })
+    await expect(page.locator('[data-testid="assets-compression-card"]:visible')).toBeVisible({ timeout: 15_000 })
+    await expect(page.locator('[data-testid="assets-uncompressed-card"]:visible')).toBeVisible({ timeout: 15_000 })
+    await expect(page.locator('[data-testid="assets-low-ttl-card"]:visible')).toBeVisible({ timeout: 15_000 })
+
+    const reservedContainers = page.locator('[class*="contain-intrinsic-size"]')
+    const count = await reservedContainers.count()
+    expect(count).toBeGreaterThanOrEqual(5)
+  })
+
+  test('3. Data contract & schema validation (/api/assets/aggregates)', async ({ page }) => {
+    const postRes = await page.request.post('/api/assets/aggregates', {
+      data: {
+        range_token: '24h',
+      },
+    })
+    expect(postRes.ok()).toBeTruthy()
+    const postData = await postRes.json()
+    expect(postData).toBeTruthy()
+    expect(postData).toHaveProperty('asset_type_breakdown')
+    expect(postData).toHaveProperty('cache_performance')
+    expect(postData).toHaveProperty('compression_performance')
+    expect(postData).toHaveProperty('large_uncompressed_assets')
+    expect(postData).toHaveProperty('low_ttl_assets')
+    expect(postData).toHaveProperty('missing_fields')
+    expect(Array.isArray(postData.asset_type_breakdown)).toBeTruthy()
+    expect(Array.isArray(postData.cache_performance)).toBeTruthy()
+    expect(Array.isArray(postData.compression_performance)).toBeTruthy()
+    expect(Array.isArray(postData.large_uncompressed_assets)).toBeTruthy()
+    expect(Array.isArray(postData.low_ttl_assets)).toBeTruthy()
+    expect(Array.isArray(postData.missing_fields)).toBeTruthy()
+
+    const getRes = await page.request.get('/api/assets/aggregates?range_token=24h')
+    expect(getRes.ok()).toBeTruthy()
+    const getData = await getRes.json()
+    expect(getData).toHaveProperty('asset_type_breakdown')
+    expect(getData).toHaveProperty('missing_fields')
+
+    await page.goto('/assets-shield')
+    await expect(page.getByRole('heading', { name: 'Assets & Shield' })).toBeVisible({ timeout: 30_000 })
+  })
+
+  test('4. Core asset cards & breakdown sections render properly', async ({ page }) => {
+    await page.goto('/assets-shield')
+    await expect(page.getByRole('heading', { name: 'Assets & Shield' })).toBeVisible({ timeout: 30_000 })
+
+    await expect(page.getByRole('heading', { name: 'Cache Efficiency by Asset Type' })).toBeVisible({ timeout: 15_000 })
+    await expect(page.getByRole('heading', { name: 'Payload Compression Efficiency' })).toBeVisible({ timeout: 15_000 })
+    await expect(page.getByRole('heading', { name: 'Large Uncompressed Assets' })).toBeVisible({ timeout: 15_000 })
+    await expect(page.getByRole('heading', { name: 'Low Cache-TTL Hotspots' })).toBeVisible({ timeout: 15_000 })
+  })
+
+  test('5. Time range presets switching cleanly (15m, 24h, 7d)', async ({ page }) => {
+    const consoleErrors: string[] = []
+    page.on('console', (msg) => {
+      if (msg.type() === 'error') consoleErrors.push(msg.text())
+    })
+
+    await page.goto('/assets-shield')
+    await expect(page.getByRole('heading', { name: 'Assets & Shield' })).toBeVisible({ timeout: 30_000 })
+
+    const timePresetBtn = page.getByRole('button', { name: /24h|1h|7d|last/i }).first()
+    await expect(timePresetBtn).toBeVisible({ timeout: 10_000 })
+
+    const fatalErrors = consoleErrors.filter((e) => e.includes('500') || e.includes('Internal Server Error'))
+    expect(fatalErrors).toHaveLength(0)
+  })
+
+  test('6. Zero error cards on assets page', async ({ page }) => {
+    await page.goto('/assets-shield')
+    await expect(page.getByRole('heading', { name: 'Assets & Shield' })).toBeVisible({ timeout: 30_000 })
+
+    await expect(page.locator('[data-testid="error-card"], .alert-destructive')).toHaveCount(0)
+  })
+
+  test('7. Performance budget: LCP < 1500ms and CLS <= 0.05 on warm load', async ({ page }) => {
+    await page.goto('/assets-shield', { waitUntil: 'domcontentloaded' })
+
+    await installClsObserver(page)
+    const start = Date.now()
+    await page.reload({ waitUntil: 'domcontentloaded' })
+    const totalTime = Date.now() - start
+
+    const metrics = await measureWarmPaintAndCls(page, 1000)
+
+    console.log(`[PERF /assets-shield] Reload: ${totalTime}ms | LCP: ${Math.round(metrics.lcp)}ms | CLS: ${metrics.cls.toFixed(3)}`)
+    expect(totalTime).toBeLessThan(10_000)
+    if (metrics.lcp > 0) {
+      expect(metrics.lcp).toBeLessThan(1500)
+    }
+    expect(metrics.cls).toBeLessThanOrEqual(0.05)
+  })
+
+  test('8. Telemetry instrumentation & query attribution audit', async ({ page }) => {
+    const res = await page.request.post('/api/assets/aggregates', {
+      data: {
+        range_token: '24h',
+      },
+      headers: {
+        'x-debug-responses': '1',
+      },
+    })
+    expect(res.ok()).toBeTruthy()
+    const json = await res.json()
+    expect(json).toHaveProperty('_debug_queries')
+    const queries = (json as AssetsDebugResponse)._debug_queries ?? []
+    console.log(`[TELEMETRY /assets-shield] Captured ${queries.length} queries`)
+    expect(queries.length).toBeGreaterThan(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Folded from performance.spec.ts
+// ---------------------------------------------------------------------------
+
+type PerformanceDebugResponse = {
+  _debug_queries?: DebugQuery[]
+  waterfall?: Record<string, unknown>
+  top_urls?: unknown[]
+  top_asns?: unknown[]
+  ttl_dist?: unknown[]
+  scatter?: unknown[]
+  _approx?: boolean
+}
+
+type OriginDebugResponse = {
+  _debug_queries?: DebugQuery[]
+  summary?: Record<string, unknown>
+  timeseries?: Record<string, unknown>
+  slow_urls?: Record<string, unknown>
+  status_codes?: Record<string, unknown>
+  path_breakdown?: Record<string, unknown>
+  pop_latency?: Record<string, unknown>
+  ip_health?: Record<string, unknown>
+  has_data?: boolean
+}
+
+test.describe('Performance Page Contract (/performance)', () => {
+  test('1. Route accessibility & environment indicator', async ({ page }) => {
+    await page.goto('/performance')
+    await expect(page.getByRole('heading', { name: 'Performance' })).toBeVisible({ timeout: 30_000 })
+
+    const footer = page.locator('footer')
+    await expect(footer).toBeVisible({ timeout: 10_000 })
+    const footerText = await footer.innerText()
+    expect(footerText).toMatch(/Admin View|Analyst View/i)
+  })
+
+  test('2. Instant shell, pre-allocated layout & zero CLS containers', async ({ page }) => {
+    await page.goto('/performance')
+    await expect(page.getByRole('heading', { name: 'Performance' })).toBeVisible({ timeout: 30_000 })
+
+    const waterfallCard = page.getByText('End-to-End Latency Waterfall (Average)').locator('visible=true')
+    await expect(waterfallCard).toBeVisible({ timeout: 15_000 })
+
+    const reservedContainers = page.locator('[class*="contain-intrinsic-size"]')
+    const count = await reservedContainers.count()
+    expect(count).toBeGreaterThanOrEqual(3)
+  })
+
+  test('3. Data contract & round-trip verification (/api/performance/aggregates)', async ({ page }) => {
+    const apiRes = await page.request.post('/api/performance/aggregates', {
+      data: {
+        range_token: '24h',
+        sort_by: 'p99',
+      },
+    })
+    expect(apiRes.ok()).toBeTruthy()
+    const data = await apiRes.json()
+    expect(data).toBeTruthy()
+    expect(data).toHaveProperty('waterfall')
+    expect(data).toHaveProperty('top_urls')
+    expect(data).toHaveProperty('top_asns')
+    expect(data).toHaveProperty('ttl_dist')
+    expect(data).toHaveProperty('scatter')
+
+    await page.goto('/performance')
+    await expect(page.getByRole('heading', { name: 'Performance' })).toBeVisible({ timeout: 30_000 })
+  })
+
+  test('4. All 5 core performance cards render properly', async ({ page }) => {
+    await page.goto('/performance')
+    await expect(page.getByRole('heading', { name: 'Performance' })).toBeVisible({ timeout: 30_000 })
+
+    await expect(page.getByText('End-to-End Latency Waterfall (Average)').locator('visible=true')).toBeVisible({ timeout: 15_000 })
+    await expect(page.getByText('Slowest URLs').locator('visible=true')).toBeVisible({ timeout: 15_000 })
+    await expect(page.getByText('Slowest Networks').locator('visible=true')).toBeVisible({ timeout: 15_000 })
+    await expect(page.getByText('Cache TTL Distribution').locator('visible=true')).toBeVisible({ timeout: 15_000 })
+    await expect(page.getByText('Origin vs Edge Processing (ms)').locator('visible=true')).toBeVisible({ timeout: 15_000 })
+  })
+
+  test('5. Time range presets and adaptive history extents', async ({ page }) => {
+    await page.goto('/performance')
+    await expect(page.getByRole('heading', { name: 'Performance' })).toBeVisible({ timeout: 30_000 })
+
+    const timePresetBtn = page.getByRole('button', { name: /24h|1h|7d|last/i }).first()
+    await expect(timePresetBtn).toBeVisible({ timeout: 10_000 })
+  })
+
+  test('6. Column visibility controls on latency tables', async ({ page }) => {
+    await page.goto('/performance')
+    await expect(page.getByRole('heading', { name: 'Performance' })).toBeVisible({ timeout: 30_000 })
+
+    const colBtn = page.getByRole('button', { name: /columns/i }).first()
+    if (await colBtn.isVisible()) {
+      await colBtn.click()
+      await expect(page.getByRole('menuitemcheckbox', { name: /p99/i }).or(page.getByText(/p99/i)).first()).toBeVisible({ timeout: 5_000 })
+    }
+  })
+
+  test('7. Non-empty Plotly visualizations and zero error cards', async ({ page }) => {
+    await page.goto('/performance')
+    await expect(page.getByRole('heading', { name: 'Performance' })).toBeVisible({ timeout: 30_000 })
+
+    const plotlyChart = page.locator('.js-plotly-plot, .plotly').first()
+    await expect(plotlyChart).toBeVisible({ timeout: 20_000 })
+    await expect(plotlyChart.locator('.main-svg').first()).toBeVisible({ timeout: 10_000 })
+
+    await expect(page.locator('[data-testid="error-card"], .alert-destructive')).toHaveCount(0)
+  })
+
+  test('8. Performance budget: LCP < 1500ms and CLS <= 0.05 on warm load', async ({ page }) => {
+    await page.goto('/performance', { waitUntil: 'domcontentloaded' })
+
+    await installClsObserver(page)
+    const start = Date.now()
+    await page.reload({ waitUntil: 'domcontentloaded' })
+    const totalTime = Date.now() - start
+
+    const metrics = await measureWarmPaintAndCls(page, 1000)
+
+    console.log(`[PERF /performance] Reload: ${totalTime}ms | LCP: ${Math.round(metrics.lcp)}ms | CLS: ${metrics.cls.toFixed(3)}`)
+    expect(totalTime).toBeLessThan(10_000)
+    if (metrics.lcp > 0) {
+      expect(metrics.lcp).toBeLessThan(1500)
+    }
+    expect(metrics.cls).toBeLessThanOrEqual(0.05)
+  })
+
+  test('9. Telemetry instrumentation & query attribution audit', async ({ page }) => {
+    const res = await page.request.post('/api/performance/aggregates', {
+      data: {
+        range_token: '24h',
+        sort_by: 'p99',
+      },
+      headers: {
+        'x-debug-responses': '1',
+      },
+    })
+    expect(res.ok()).toBeTruthy()
+    const json = await res.json()
+    expect(json).toHaveProperty('_debug_queries')
+    const queries = (json as PerformanceDebugResponse)._debug_queries ?? []
+    console.log(`[TELEMETRY /performance] Captured ${queries.length} queries`)
+    expect(queries.length).toBeGreaterThan(0)
+  })
+})
+
+test.describe('Origin Page Contract (/origin)', () => {
+  test('1. Route accessibility & environment indicator', async ({ page }) => {
+    await page.goto('/origin')
+    await expect(page.getByRole('heading', { name: 'Origin Performance' })).toBeVisible({ timeout: 30_000 })
+
+    const footer = page.locator('footer')
+    await expect(footer).toBeVisible({ timeout: 10_000 })
+    const footerText = await footer.innerText()
+    expect(footerText).toMatch(/Admin View|Analyst View/i)
+  })
+
+  test('2. Instant shell, pre-allocated layout & zero CLS containers', async ({ page }) => {
+    await page.goto('/origin')
+    await expect(page.getByRole('heading', { name: 'Origin Performance' })).toBeVisible({ timeout: 30_000 })
+
+    const originLatencyCard = page.locator('#main [data-slot="card-title"]').filter({ hasText: 'Origin Latency' }).first()
+    await expect(originLatencyCard).toBeVisible({ timeout: 15_000 })
+
+    const reservedContainers = page.locator('[class*="contain-intrinsic-size"]')
+    const count = await reservedContainers.count()
+    expect(count).toBeGreaterThanOrEqual(6)
+  })
+
+  test('3. Data contract & round-trip verification (/api/origin/aggregates)', async ({ page }) => {
+    const apiRes = await page.request.post('/api/origin/aggregates', {
+      data: {
+        range_token: '24h',
+        timeseries_metric: 'ttfb',
+        timeseries_percentile: 'p95',
+      },
+    })
+    expect(apiRes.ok()).toBeTruthy()
+    const data = await apiRes.json()
+    expect(data).toBeTruthy()
+    expect(data).toHaveProperty('summary')
+    expect(data).toHaveProperty('timeseries')
+    expect(data).toHaveProperty('slow_urls')
+    expect(data).toHaveProperty('status_codes')
+    expect(data).toHaveProperty('path_breakdown')
+    expect(data).toHaveProperty('pop_latency')
+    expect(data).toHaveProperty('ip_health')
+
+    await page.goto('/origin')
+    await expect(page.getByRole('heading', { name: 'Origin Performance' })).toBeVisible({ timeout: 30_000 })
+  })
+
+  test('4. All core origin cards render properly', async ({ page }) => {
+    await page.goto('/origin')
+    await expect(page.getByRole('heading', { name: 'Origin Performance' })).toBeVisible({ timeout: 30_000 })
+
+    await expect(page.locator('#main [data-slot="card-title"]').filter({ hasText: 'Origin TTFB (P50)' }).first()).toBeVisible({ timeout: 15_000 })
+    await expect(page.locator('#main [data-slot="card-title"]').filter({ hasText: 'Origin TTFB (P95)' }).first()).toBeVisible({ timeout: 15_000 })
+    await expect(page.locator('#main [data-slot="card-title"]').filter({ hasText: 'Origin Error Rate' }).first()).toBeVisible({ timeout: 15_000 })
+    await expect(page.locator('#main [data-slot="card-title"]').filter({ hasText: 'Fetch Volume' }).first()).toBeVisible({ timeout: 15_000 })
+
+    await expect(page.locator('#main [data-slot="card-title"]').filter({ hasText: 'Origin Latency' }).first()).toBeVisible({ timeout: 15_000 })
+    await expect(page.locator('#main [data-slot="card-title"]').filter({ hasText: 'Status Code Distribution' }).first()).toBeVisible({ timeout: 15_000 })
+
+    await expect(page.locator('#main [data-slot="card-title"]').filter({ hasText: 'Slowest URLs at Origin' }).first()).toBeVisible({ timeout: 15_000 })
+    await expect(page.locator('#main [data-slot="card-title"]').filter({ hasText: 'Origin Performance by POP' }).first()).toBeVisible({ timeout: 15_000 })
+    await expect(page.locator('#main [data-slot="card-title"]').filter({ hasText: 'Origin IP Health' }).first()).toBeVisible({ timeout: 15_000 })
+    await expect(page.locator('#main [data-slot="card-title"]').filter({ hasText: 'Origin Payload Size' }).first()).toBeVisible({ timeout: 15_000 })
+  })
+
+  test('5. Time range presets and adaptive history extents (15m, 24h, 30d)', async ({ page }) => {
+    const consoleErrors: string[] = []
+    page.on('console', (msg) => {
+      if (msg.type() === 'error') consoleErrors.push(msg.text())
+    })
+
+    await page.goto('/origin')
+    await expect(page.getByRole('heading', { name: 'Origin Performance' })).toBeVisible({ timeout: 30_000 })
+
+    const timePresetBtn = page.getByRole('button', { name: /24h|1h|7d|last/i }).first()
+    await expect(timePresetBtn).toBeVisible({ timeout: 10_000 })
+
+    const fatalErrors = consoleErrors.filter((e) => e.includes('500') || e.includes('Internal Server Error'))
+    expect(fatalErrors).toHaveLength(0)
+  })
+
+  test('6. Column visibility controls on latency tables', async ({ page }) => {
+    await page.goto('/origin')
+    await expect(page.getByRole('heading', { name: 'Origin Performance' })).toBeVisible({ timeout: 30_000 })
+
+    const colBtn = page.getByRole('button', { name: /columns/i }).first()
+    if (await colBtn.isVisible()) {
+      await colBtn.click()
+      await expect(page.getByRole('menuitemcheckbox', { name: /p95/i }).or(page.getByText(/p95/i)).first()).toBeVisible({ timeout: 5_000 })
+    }
+  })
+
+  test('7. Non-empty Plotly visualizations and zero error cards', async ({ page }) => {
+    await page.goto('/origin')
+    await expect(page.getByRole('heading', { name: 'Origin Performance' })).toBeVisible({ timeout: 30_000 })
+
+    const plotlyChart = page.locator('.js-plotly-plot, .plotly').first()
+    if (await plotlyChart.isVisible()) {
+      await expect(plotlyChart.locator('.main-svg').first()).toBeVisible({ timeout: 10_000 })
+    }
+
+    await expect(page.locator('[data-testid="error-card"], .alert-destructive')).toHaveCount(0)
+  })
+
+  test('8. Performance budget: LCP < 1500ms and CLS <= 0.05 on warm load', async ({ page }) => {
+    await page.goto('/origin', { waitUntil: 'domcontentloaded' })
+
+    await installClsObserver(page)
+    const start = Date.now()
+    await page.reload({ waitUntil: 'domcontentloaded' })
+    const totalTime = Date.now() - start
+
+    const metrics = await measureWarmPaintAndCls(page, 1000)
+
+    console.log(`[PERF /origin] Reload: ${totalTime}ms | LCP: ${Math.round(metrics.lcp)}ms | CLS: ${metrics.cls.toFixed(3)}`)
+    expect(totalTime).toBeLessThan(10_000)
+    if (metrics.lcp > 0) {
+      expect(metrics.lcp).toBeLessThan(1500)
+    }
+    expect(metrics.cls).toBeLessThanOrEqual(0.05)
+  })
+
+  test('9. Telemetry instrumentation & query attribution audit', async ({ page }) => {
+    const res = await page.request.post('/api/origin/aggregates', {
+      data: {
+        range_token: '24h',
+        timeseries_metric: 'ttfb',
+        timeseries_percentile: 'p95',
+      },
+      headers: {
+        'x-debug-responses': '1',
+      },
+    })
+    expect(res.ok()).toBeTruthy()
+    const json = await res.json()
+    expect(json).toHaveProperty('_debug_queries')
+    const queries = (json as OriginDebugResponse)._debug_queries ?? []
+    console.log(`[TELEMETRY /origin] Captured ${queries.length} queries`)
+    expect(queries.length).toBeGreaterThan(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Folded from insights.spec.ts
+// ---------------------------------------------------------------------------
+
+type InsightsDebugResponse = {
+  _debug_queries?: DebugQuery[]
+  insights?: unknown[]
+  computed_at?: string
+  timing_ms?: Record<string, number>
+}
+
+type RequestFactsDebugResponse = {
+  _debug_queries?: DebugQuery[]
+  rows?: Array<Record<string, unknown>>
+  metadata?: {
+    status?: string
+    exact?: boolean
+    coverage?: number
+    freshness_lag_seconds?: number
+    mode?: string
+    watermark?: Record<string, unknown>
+  }
+  next_cursor?: string | null
+}
+
+test.describe('Insights Page Contract (/insights)', () => {
+  test('1. Route accessibility & environment indicator', async ({ page }) => {
+    await page.goto('/insights')
+    await expect(page.getByRole('heading', { name: 'Anomaly Detection' })).toBeVisible({ timeout: 30_000 })
+
+    const footer = page.locator('footer')
+    await expect(footer).toBeVisible({ timeout: 10_000 })
+    const footerText = await footer.innerText()
+    expect(footerText).toMatch(/Admin View|Analyst View/i)
+  })
+
+  test('2. Instant shell, pre-allocated layout & zero CLS containers', async ({ page }) => {
+    await page.goto('/insights')
+    await expect(page.getByRole('heading', { name: 'Anomaly Detection' })).toBeVisible({ timeout: 30_000 })
+
+    const reservedContainers = page.locator('[class*="contain-intrinsic-size"]')
+    await expect(reservedContainers.first()).toBeVisible({ timeout: 15_000 })
+    const count = await reservedContainers.count()
+    expect(count).toBeGreaterThanOrEqual(1)
+
+    const content = page.locator('[data-testid="insights-grid"], [data-testid="insights-empty-pass"], [data-testid="insights-grid-loading"]').first()
+    await expect(content).toBeVisible({ timeout: 15_000 })
+  })
+
+  test('3. Data contract & schema validation (/api/insights & /api/insight-availability)', async ({ page }) => {
+    const availRes = await page.request.get('/api/insight-availability')
+    expect(availRes.ok()).toBeTruthy()
+    const availData = await availRes.json()
+    expect(availData).toHaveProperty('insights')
+    expect(Array.isArray(availData.insights)).toBeTruthy()
+    if (availData.insights.length > 0) {
+      expect(availData.insights[0]).toHaveProperty('id')
+      expect(availData.insights[0]).toHaveProperty('available')
+    }
+
+    const apiRes = await page.request.post('/api/insights', {
+      data: {
+        window_size_hrs: 1,
+        baseline_hours: 24,
+        filters: {},
+      },
+    })
+    expect(apiRes.ok()).toBeTruthy()
+    const data = await apiRes.json()
+    expect(data).toHaveProperty('insights')
+    expect(data).toHaveProperty('computed_at')
+    expect(Array.isArray(data.insights)).toBeTruthy()
+  })
+
+  test('4. Instant client-side tab switching across all 5 category tabs and All', async ({ page }) => {
+    await page.goto('/insights')
+    await expect(page.getByRole('heading', { name: 'Anomaly Detection' })).toBeVisible({ timeout: 30_000 })
+
+    const tabs = ['all', 'security', 'origin', 'edge', 'network', 'traffic']
+
+    for (const tabKey of tabs) {
+      const trigger = page
+        .locator(`button[data-tab="${tabKey}"]`)
+        .or(page.locator(`button[data-alias="${tabKey}"]`))
+        .first()
+
+      await expect(trigger).toBeVisible({ timeout: 10_000 })
+      await trigger.click()
+
+      await expect(trigger).toHaveAttribute('aria-selected', 'true')
+
+      const activeContent = page
+        .locator(`[data-tab-content="${tabKey}"]`)
+        .or(page.locator(`[data-alias="${tabKey}"]`))
+        .first()
+
+      await expect(activeContent).toBeVisible({ timeout: 10_000 })
+    }
+  })
+
+  test('5. Plausible detector values or clean normal parameters pass states', async ({ page }) => {
+    await page.goto('/insights')
+    await expect(page.getByRole('heading', { name: 'Anomaly Detection' })).toBeVisible({ timeout: 30_000 })
+
+    const emptyPass = page.locator('[data-testid="insights-empty-pass"]').first()
+    const cardsGrid = page.locator('[data-testid="insights-grid"]').first()
+
+    await expect(emptyPass.or(cardsGrid)).toBeVisible({ timeout: 30_000 })
+
+    const hasEmptyPass = await emptyPass.isVisible()
+    const hasCardsGrid = await cardsGrid.isVisible()
+
+    expect(hasEmptyPass || hasCardsGrid).toBeTruthy()
+
+    if (hasEmptyPass) {
+      await expect(emptyPass).toContainText(/No anomalies detected/i)
+      await expect(emptyPass).toContainText(/baseline parameters/i)
+    } else {
+      const card = cardsGrid.locator('.rounded-xl, .border').first()
+      await expect(card).toBeVisible({ timeout: 10_000 })
+    }
+  })
+
+  test('6. Time range preset transitions (window vs baseline)', async ({ page }) => {
+    await page.goto('/insights?window=24&baseline=168&tab=security')
+    await expect(page.getByRole('heading', { name: 'Anomaly Detection' })).toBeVisible({ timeout: 30_000 })
+
+    const secTrigger = page.locator('button[data-tab="security"]').first()
+    await expect(secTrigger).toBeVisible({ timeout: 10_000 })
+    await expect(secTrigger).toHaveAttribute('aria-selected', 'true')
+  })
+
+  test('7. Performance budget: LCP < 1500ms and CLS <= 0.05 on warm load', async ({ page }) => {
+    await page.goto('/insights', { waitUntil: 'domcontentloaded' })
+
+    await installClsObserver(page)
+    const start = Date.now()
+    await page.reload({ waitUntil: 'domcontentloaded' })
+    const totalTime = Date.now() - start
+
+    const metrics = await measureWarmPaintAndCls(page, 1000)
+
+    console.log(`[PERF /insights] Reload: ${totalTime}ms | LCP: ${Math.round(metrics.lcp)}ms | CLS: ${metrics.cls.toFixed(3)}`)
+    expect(totalTime).toBeLessThan(10_000)
+    if (metrics.lcp > 0) {
+      expect(metrics.lcp).toBeLessThan(1500)
+    }
+    expect(metrics.cls).toBeLessThanOrEqual(0.05)
+  })
+
+  test('8. Telemetry instrumentation & query attribution audit', async ({ page }) => {
+    const res = await page.request.post('/api/insights', {
+      data: {
+        window_size_hrs: 1,
+        baseline_hours: 24,
+        filters: {},
+      },
+      headers: {
+        'x-debug-responses': '1',
+      },
+    })
+    expect(res.ok()).toBeTruthy()
+    const json = await res.json() as InsightsDebugResponse
+    expect(json).toHaveProperty('insights')
+    if (json._debug_queries) {
+      console.log(`[TELEMETRY /insights] Captured ${json._debug_queries.length} queries`)
+      expect(json._debug_queries.length).toBeGreaterThan(0)
+    }
+  })
+})
+
+test.describe('High-Scale Request Facts Page Contract (/high-scale/request-facts)', () => {
+  test('1. Route accessibility & environment indicator', async ({ page }) => {
+    await page.goto('/high-scale/request-facts')
+    await expect(
+      page.getByRole('heading', { name: 'High-scale request facts' })
+    ).toBeVisible({ timeout: 30_000 })
+
+    const footer = page.locator('footer')
+    await expect(footer).toBeVisible({ timeout: 10_000 })
+    const footerText = await footer.innerText()
+    expect(footerText).toMatch(/Admin View|Analyst View/i)
+  })
+
+  test('2. Instant shell, pre-allocated layout & zero-CLS containers', async ({ page }) => {
+    await page.goto('/high-scale/request-facts')
+    await expect(
+      page.getByRole('heading', { name: 'High-scale request facts' })
+    ).toBeVisible({ timeout: 30_000 })
+
+    const reservedContainers = page.locator('[class*="contain-intrinsic-size"]')
+    const count = await reservedContainers.count()
+    expect(count).toBeGreaterThanOrEqual(2)
+  })
+
+  test('3. Data contract & schema validation (/api/high-scale/request-facts)', async ({ page }) => {
+    const serviceId = await getFirstServiceId(page)
+    expect(serviceId).toBeTruthy()
+
+    const now = new Date()
+    const oneHourAgo = new Date(now.getTime() - 3600 * 1000)
+
+    const getRes = await page.request.get(
+      `/api/high-scale/request-facts?service_id=${encodeURIComponent(serviceId!)}&start_time=${encodeURIComponent(oneHourAgo.toISOString())}&end_time=${encodeURIComponent(now.toISOString())}&limit=10`
+    )
+    expect(getRes.ok()).toBeTruthy()
+    const getData = (await getRes.json()) as RequestFactsDebugResponse
+    expect(Array.isArray(getData.rows)).toBeTruthy()
+    expect(getData.metadata).toBeTruthy()
+    expect(['complete', 'partial', 'unavailable']).toContain(getData.metadata?.status)
+    expect(['clickhouse', 'duckdb_emulation']).toContain(getData.metadata?.mode)
+
+    const postRes = await page.request.post(
+      `/api/high-scale/services/${encodeURIComponent(serviceId!)}/request-facts`,
+      {
+        data: {
+          start_time: oneHourAgo.toISOString(),
+          end_time: now.toISOString(),
+          limit: 10,
+          emulate_standard: true,
+        },
+      }
+    )
+    expect(postRes.ok()).toBeTruthy()
+    const postData = (await postRes.json()) as RequestFactsDebugResponse
+    expect(Array.isArray(postData.rows)).toBeTruthy()
+    expect(postData.metadata?.watermark?.service_id).toBe(serviceId)
+  })
+
+  test('4. Metadata bar, mode badge, filter bar, and request facts table render cleanly', async ({ page }) => {
+    await page.goto('/high-scale/request-facts')
+    await expect(
+      page.getByRole('heading', { name: 'High-scale request facts' })
+    ).toBeVisible({ timeout: 30_000 })
+
+    await expect(page.getByTestId('high-scale-facts-card')).toBeVisible({ timeout: 20_000 })
+    await expect(page.getByTestId('high-scale-metadata')).toBeVisible({ timeout: 15_000 })
+    await expect(page.getByTestId('high-scale-mode-badge')).toBeVisible({ timeout: 15_000 })
+
+    const badgeText = await page.getByTestId('high-scale-mode-badge').innerText()
+    expect(badgeText).toMatch(/DuckDB Standard Mode Emulation|ClickHouse Distributed Cluster/)
+
+    await expect(page.getByTestId('high-scale-filters')).toBeVisible()
+    await expect(page.getByTestId(' high-scale-table-wrapper'.trim())).toBeVisible()
+    await expect(page.locator('[role="alert"].border-destructive')).toHaveCount(0)
+  })
+
+  test('5. Interactive filter controls (status, domain, pop, batch_id) & clear filters', async ({ page }) => {
+    const consoleErrors: string[] = []
+    page.on('console', (msg) => {
+      if (msg.type() === 'error') consoleErrors.push(msg.text())
+    })
+
+    await page.goto('/high-scale/request-facts')
+    await expect(page.getByTestId('high-scale-facts-card')).toBeVisible({ timeout: 20_000 })
+
+    await page.getByTestId('filter-status').fill('200')
+    await page.getByTestId('filter-pop').fill('IAD')
+    await expect(page.getByTestId('filter-clear')).toBeVisible()
+
+    await page.getByTestId('filter-clear').click()
+    await expect(page.getByTestId('filter-status')).toHaveValue('')
+    await expect(page.getByTestId('filter-pop')).toHaveValue('')
+
+    const fatalErrors = consoleErrors.filter(
+      (e) => e.includes('500') || e.includes('Internal Server Error')
+    )
+    expect(fatalErrors).toHaveLength(0)
+  })
+
+  test('6. Performance budget: FCP < 400ms / LCP < 1500ms and CLS <= 0.05 on warm load', async ({ page }) => {
+    await page.goto('/high-scale/request-facts', { waitUntil: 'domcontentloaded' })
+
+    await installClsObserver(page)
+    const start = Date.now()
+    await page.reload({ waitUntil: 'domcontentloaded' })
+    const totalTime = Date.now() - start
+
+    const metrics = await measureWarmPaintAndCls(page, 1000)
+
+    console.log(
+      `[PERF /high-scale/request-facts] Reload: ${totalTime}ms | FCP: ${Math.round(metrics.fcp)}ms | LCP: ${Math.round(metrics.lcp)}ms | CLS: ${metrics.cls.toFixed(3)}`
+    )
+    expect(totalTime).toBeLessThan(10_000)
+    if (metrics.lcp > 0) {
+      expect(metrics.lcp).toBeLessThan(1500)
+    }
+    expect(metrics.cls).toBeLessThanOrEqual(0.05)
+  })
+
+  test('7. Telemetry instrumentation & query attribution audit', async ({ page }) => {
+    const serviceId = await getFirstServiceId(page)
+    expect(serviceId).toBeTruthy()
+
+    const now = new Date()
+    const oneHourAgo = new Date(now.getTime() - 3600 * 1000)
+
+    const res = await page.request.post(
+      `/api/high-scale/services/${encodeURIComponent(serviceId!)}/request-facts`,
+      {
+        data: {
+          start_time: oneHourAgo.toISOString(),
+          end_time: now.toISOString(),
+          limit: 10,
+          emulate_standard: true,
+        },
+        headers: {
+          'X-Page-Load-ID': `e2e-hs-facts-${Date.now()}`,
+          'x-debug-responses': '1',
+        },
+      }
+    )
+    expect(res.ok()).toBeTruthy()
+    const json = (await res.json()) as RequestFactsDebugResponse
+    expect(json).toHaveProperty('_debug_queries')
+    const queries = json._debug_queries ?? []
+    console.log(`[TELEMETRY /high-scale/request-facts] Captured ${queries.length} queries`)
+    expect(queries.length).toBeGreaterThan(0)
+  })
+})

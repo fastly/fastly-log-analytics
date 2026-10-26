@@ -14,7 +14,7 @@ import type {
   ProvisionService,
   Step,
   WizardMode,
-} from "./types";
+} from "./ProvisionWizard";
 import { clearDraft } from "./useWizardState";
 
 // ── fetchTerraformPreview ──

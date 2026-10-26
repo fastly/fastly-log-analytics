@@ -26,8 +26,7 @@ import { cn, keyByOccurrence } from '@/lib/utils'
 import { AlertTriangle, Info, CheckCircle, AlertCircle, HelpCircle, Loader2, ScanSearch, Gauge, Timer, Activity, Repeat, Hash, Users, Clock, TrendingUp, TrendingDown, Minus, ArrowUpRight, MapIcon, LineChart } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { formatCount, formatCountMaybe, formatDuration } from '@/lib/format'
-import { CacheCollapseModal } from './CacheCollapseModal'
-import { BotFindingModal } from './BotFindingModal'
+import { CacheCollapseModal, BotFindingModal } from './InsightDetailModal'
 
 type CardOf<Id extends InsightCardData['id']> = Extract<InsightCardData, { id: Id }>
 
@@ -605,7 +604,7 @@ const InsightHelpModal = dynamic(
 )
 
 const ImpossibleDistanceModal = dynamic(
-  () => import('./ImpossibleDistanceModal').then((m) => m.ImpossibleDistanceModal),
+  () => import('./InsightDetailModal').then((m) => m.ImpossibleDistanceModal),
   { ssr: false },
 )
 

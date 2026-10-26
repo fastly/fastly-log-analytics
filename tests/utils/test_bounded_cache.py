@@ -360,9 +360,7 @@ def _unthrottled(path: str, only_funcs: set[str] | None, only_msg: str | None) -
     return out
 
 
-_DROP_TABLE_FILES = sorted(
-    [*(ROOT / "backend" / "repositories").glob("*.py"), ROOT / "backend" / "core" / "_duckdb_status.py"]
-)
+_DROP_TABLE_FILES = sorted([*(ROOT / "backend" / "repositories").glob("*.py"), ROOT / "backend" / "core" / "duckdb.py"])
 
 
 @pytest.mark.parametrize(

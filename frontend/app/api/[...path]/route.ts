@@ -1,4 +1,4 @@
-import { proxyUpstreamRequest } from '@/lib/upstream-proxy'
+import { proxyUpstreamRequest } from '@/lib/api'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'

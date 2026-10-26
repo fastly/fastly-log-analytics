@@ -2,34 +2,24 @@
 
 import React, { useState, useMemo, useEffect } from 'react'
 import { useQuery, keepPreviousData } from '@tanstack/react-query'
-import { adminFetch, client, extractApiError } from '@/lib/api'
-import { unwrapClient } from '@/lib/api'
+import { useRouter } from 'next/navigation'
+import { ArrowLeft, Download, Database, Zap, Globe, DollarSign, Trash2, RefreshCw, AlertTriangle, Loader2 } from 'lucide-react'
+import type { ColumnDef } from '@tanstack/react-table'
+import { adminFetch, client, extractApiError, unwrapClient } from '@/lib/api'
 import { downloadBlob, buildServiceHref } from '@/lib/utils'
 import type { components } from '@/types/api'
 import { useServiceStore } from '@/stores/filterStore'
 import { DataTable } from '@/components/DataTable'
-import { Button } from '@/components/ui/button'
-import { PageHeader } from '@/components/ui/confirm-dialog'
-import { StatCard } from '@/components/ui/confirm-dialog'
-import { ArrowLeft, Download, Database, Zap, Globe, DollarSign, Trash2, RefreshCw, AlertTriangle, Loader2 } from 'lucide-react'
-import { buttonVariants } from '@/components/ui/button'
-import { useRouter } from 'next/navigation'
+import { Button, buttonVariants } from '@/components/ui/button'
+import { PageHeader, StatCard, ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { useDateFormat } from '@/hooks/useSSE'
 import { useMounted } from '@/hooks/useBootstrap'
 import { formatAbbreviatedCount, formatBytes, formatCount, toQueryDate } from '@/lib/format'
-import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Skeleton } from '@/components/ui/skeleton'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
-import { ColumnDef } from '@tanstack/react-table'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { AnalyticsCard, TimeSeriesChart, type AnalyticsCardError } from '@/components/AnalyticsCard'
 import { CHART_COLORS } from '@/lib/chart-helpers'
 
@@ -41,17 +31,14 @@ const LOG_ACCOUNTING_PRESETS = [
 ]
 
 export function LogAccountingPanel() {
-  // SSR-safe: ['log-accounting'] is a live client-only query never seeded into
-  // the SSR cache. The server renders the totals grid with `?? 0` fallbacks
-  // while the client paints '—'/loading at hydration → React #418. Force the
-  // loading branch until mounted so both renders agree.
   const mounted = useMounted()
   const [presetIdx, setPresetIdx] = useState(1)
   const preset = LOG_ACCOUNTING_PRESETS[presetIdx]
   const { data, isLoading, isFetching, error } = useQuery({
     queryKey: ['log-accounting', preset.hours, preset.by],
     queryFn: async ({ signal }) => {
-      const { data, error } = await client.GET('/api/admin/log-accounting', { signal,
+      const { data, error } = await client.GET('/api/admin/log-accounting', {
+        signal,
         params: { query: { hours: preset.hours, by: preset.by } },
       })
       if (error) throw new Error(extractApiError(error))
@@ -67,11 +54,7 @@ export function LogAccountingPanel() {
   const buckets = data?.buckets ?? []
   const gapPct = totals?.gap_pct ?? 0
   const gapAbsPct = Math.abs(gapPct) * 100
-  // Gap = Fastly requests − our ingested rows. `requests` sits 1:1 with our
-  // rows on every service, so any sustained positive gap is real loss.
   const gapColor =
-    // WCAG AA: green-600/yellow-600 on the light card fail 4.5:1; deepen to -700
-    // in light mode (dark mode keeps the brighter -400 shade on its dark card).
     gapAbsPct <= 0.1 ? 'text-green-700 dark:text-green-400'
     : gapAbsPct <= 1 ? 'text-yellow-700 dark:text-yellow-400'
     : 'text-destructive'
@@ -101,38 +84,23 @@ export function LogAccountingPanel() {
     )
   }, [catchup])
 
-  const chartData = useMemo(() => ([
-    {
-      x: buckets.map((b) => b.ts),
-      y: buckets.map((b) => b.fastly_requests),
-      type: 'scatter',
-      mode: 'lines',
-      name: 'Fastly requests',
-      line: { color: CHART_COLORS.info, width: 2 },
-    },
-    {
-      x: buckets.map((b) => b.ts),
-      y: buckets.map((b) => b.our_rows),
-      type: 'scatter',
-      mode: 'lines',
-      name: 'We ingested (rows)',
-      line: { color: CHART_COLORS.success, width: 2, dash: 'dot' },
-    },
-    {
-      x: buckets.map((b) => b.ts),
-      y: buckets.map((b) => b.file_count),
-      type: 'scatter',
-      mode: 'lines',
-      name: 'Files ingested',
-      yaxis: 'y2',
-      line: { color: '#a855f7', width: 1.5, dash: 'dash' },
-    },
-  ]), [buckets])
+  const chartData = useMemo(() => [
+    { x: buckets.map((b) => b.ts), y: buckets.map((b) => b.fastly_requests), type: 'scatter', mode: 'lines', name: 'Fastly requests', line: { color: CHART_COLORS.info, width: 2 } },
+    { x: buckets.map((b) => b.ts), y: buckets.map((b) => b.our_rows), type: 'scatter', mode: 'lines', name: 'We ingested (rows)', line: { color: CHART_COLORS.success, width: 2, dash: 'dot' } },
+    { x: buckets.map((b) => b.ts), y: buckets.map((b) => b.file_count), type: 'scatter', mode: 'lines', name: 'Files ingested', yaxis: 'y2', line: { color: '#a855f7', width: 1.5, dash: 'dash' } },
+  ], [buckets])
 
   const chartLayout = useMemo(() => ({
     yaxis: { title: { text: 'requests / rows' } },
     yaxis2: { title: { text: 'files' }, overlaying: 'y', side: 'right', showgrid: false },
   }), [])
+
+  const summaryTiles = [
+    { label: 'Fastly requests', value: formatCount(totals?.fastly_requests ?? 0), color: '' },
+    { label: 'We ingested', value: formatCount(totals?.our_rows ?? 0), color: '' },
+    { label: 'Gap (rows)', value: formatCount(totals?.gap ?? 0), color: gapColor },
+    { label: 'Gap %', value: `${(gapPct * 100).toFixed(3)}%`, color: gapColor },
+  ]
 
   return (
     <AnalyticsCard
@@ -158,13 +126,10 @@ export function LogAccountingPanel() {
       }
     >
       <div className={`min-h-[312px] transition-opacity ${mounted && isFetching && !!data ? 'opacity-40 pointer-events-none' : ''}`}>
-        {(!mounted || (isLoading && !data)) ? (
+        {!mounted || (isLoading && !data) ? (
           <div>
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
-              <Skeleton className="h-[54px] w-full rounded-md" />
-              <Skeleton className="h-[54px] w-full rounded-md" />
-              <Skeleton className="h-[54px] w-full rounded-md" />
-              <Skeleton className="h-[54px] w-full rounded-md" />
+              {[0, 1, 2, 3].map((i) => <Skeleton key={i} className="h-[54px] w-full rounded-md" />)}
             </div>
             <div className="h-[240px] flex items-center justify-center rounded-md border border-dashed border-muted bg-muted/10 text-xs text-muted-foreground italic">
               Loading log accounting…
@@ -173,22 +138,12 @@ export function LogAccountingPanel() {
         ) : error ? null : (
           <>
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
-              <div className="rounded-md border border-muted bg-muted/20 px-3 py-2">
-                <div className="text-[9px] font-bold uppercase tracking-wider text-muted-foreground">Fastly requests</div>
-                <div className="font-mono text-base">{formatCount(totals?.fastly_requests ?? 0)}</div>
-              </div>
-              <div className="rounded-md border border-muted bg-muted/20 px-3 py-2">
-                <div className="text-[9px] font-bold uppercase tracking-wider text-muted-foreground">We ingested</div>
-                <div className="font-mono text-base">{formatCount(totals?.our_rows ?? 0)}</div>
-              </div>
-              <div className="rounded-md border border-muted bg-muted/20 px-3 py-2">
-                <div className="text-[9px] font-bold uppercase tracking-wider text-muted-foreground">Gap (rows)</div>
-                <div className={`font-mono text-base ${gapColor}`}>{formatCount(totals?.gap ?? 0)}</div>
-              </div>
-              <div className="rounded-md border border-muted bg-muted/20 px-3 py-2">
-                <div className="text-[9px] font-bold uppercase tracking-wider text-muted-foreground">Gap %</div>
-                <div className={`font-mono text-base ${gapColor}`}>{(gapPct * 100).toFixed(3)}%</div>
-              </div>
+              {summaryTiles.map((tile) => (
+                <div key={tile.label} className="rounded-md border border-muted bg-muted/20 px-3 py-2">
+                  <div className="text-[9px] font-bold uppercase tracking-wider text-muted-foreground">{tile.label}</div>
+                  <div className={`font-mono text-base ${tile.color}`}>{tile.value}</div>
+                </div>
+              ))}
             </div>
             {data?.sustained_loss && (
               <div className="mb-3 text-xs px-3 py-2 rounded-md border border-destructive/40 bg-destructive/10 text-destructive">
@@ -235,28 +190,19 @@ export function fmtCost(n: number): string {
   return `$${n.toFixed(6)}`
 }
 
-export function buildUsageLogColumns(
-  full: (ts: string) => string,
-): ColumnDef<UsageLogEntry>[] {
+const monoMutedCell = <K extends keyof UsageLogEntry>(key: K) =>
+  function MonoMutedCell({ row }: { row: { original: UsageLogEntry } }) {
+    return <span className="font-mono text-xs text-muted-foreground">{(row.original[key] as string | null) ?? '—'}</span>
+  }
+
+export function buildUsageLogColumns(full: (ts: string) => string): ColumnDef<UsageLogEntry>[] {
   return [
     {
       accessorKey: 'timestamp',
       header: 'Timestamp',
-      cell: ({ row }) => (
-        <span className="font-mono text-xs text-muted-foreground whitespace-nowrap">
-          {full(row.original.timestamp)}
-        </span>
-      ),
+      cell: ({ row }) => <span className="font-mono text-xs text-muted-foreground whitespace-nowrap">{full(row.original.timestamp)}</span>,
     },
-    {
-      accessorKey: 'service_id',
-      header: 'Service',
-      cell: ({ row }) => (
-        <span className="font-mono text-xs text-muted-foreground">
-          {row.original.service_id ?? '—'}
-        </span>
-      ),
-    },
+    { accessorKey: 'service_id', header: 'Service', cell: monoMutedCell('service_id') },
     {
       accessorKey: 'operation_class',
       header: 'Class',
@@ -270,42 +216,19 @@ export function buildUsageLogColumns(
     {
       accessorKey: 'operation_type',
       header: 'Operation',
-      cell: ({ row }) => (
-        <span className="font-mono text-xs">{row.original.operation_type ?? '—'}</span>
-      ),
+      cell: ({ row }) => <span className="font-mono text-xs">{row.original.operation_type ?? '—'}</span>,
     },
-    {
-      accessorKey: 'url',
-      header: 'URL / Path',
-      cell: ({ row }) => (
-        <span className="font-mono text-xs text-muted-foreground">
-          {row.original.url ?? '—'}
-        </span>
-      ),
-    },
+    { accessorKey: 'url', header: 'URL / Path', cell: monoMutedCell('url') },
     {
       accessorKey: 'bytes',
       header: 'Bytes',
-      cell: ({ row }) => row.original.bytes != null
-        ? <span className="font-mono text-xs tabular-nums">{formatBytes(row.original.bytes)}</span>
-        : <span className="text-muted-foreground text-xs">—</span>,
+      cell: ({ row }) =>
+        row.original.bytes != null
+          ? <span className="font-mono text-xs tabular-nums">{formatBytes(row.original.bytes)}</span>
+          : <span className="text-muted-foreground text-xs">—</span>,
     },
-    {
-      accessorKey: 'function_name',
-      header: 'Function',
-      cell: ({ row }) => (
-        <span className="font-mono text-xs text-muted-foreground">{row.original.function_name ?? '—'}</span>
-      ),
-    },
-    {
-      accessorKey: 'process_context',
-      header: 'Process',
-      cell: ({ row }) => (
-        <span className="font-mono text-xs text-muted-foreground">
-          {row.original.process_context ?? '—'}
-        </span>
-      ),
-    },
+    { accessorKey: 'function_name', header: 'Function', cell: monoMutedCell('function_name') },
+    { accessorKey: 'process_context', header: 'Process', cell: monoMutedCell('process_context') },
     {
       accessorKey: 'status',
       header: 'Status',
@@ -317,9 +240,10 @@ export function buildUsageLogColumns(
     {
       accessorKey: 'estimated_cost',
       header: 'Est. Cost',
-      cell: ({ row }) => row.original.estimated_cost != null
-        ? <span className="font-mono text-xs tabular-nums">{fmtCost(row.original.estimated_cost)}</span>
-        : <span className="text-muted-foreground text-xs">—</span>,
+      cell: ({ row }) =>
+        row.original.estimated_cost != null
+          ? <span className="font-mono text-xs tabular-nums">{fmtCost(row.original.estimated_cost)}</span>
+          : <span className="text-muted-foreground text-xs">—</span>,
     },
   ]
 }
@@ -338,21 +262,13 @@ interface UsageLogFiltersProps {
 }
 
 export function UsageLogFilters({
-  preset,
-  setPreset,
-  usageType,
-  setUsageType,
-  operationFilter,
-  setOperationFilter,
-  processFilter,
-  setProcessFilter,
-  isFetching,
-  isLoading,
+  preset, setPreset, usageType, setUsageType, operationFilter, setOperationFilter,
+  processFilter, setProcessFilter, isFetching, isLoading,
 }: UsageLogFiltersProps) {
   return (
     <div data-testid="admin-usage-log-filters" className="flex flex-wrap items-center gap-3 px-4 py-3 border-b">
       <div className="flex items-center gap-1.5">
-        {DATE_PRESETS.map(p => (
+        {DATE_PRESETS.map((p) => (
           <Button
             key={p.hours}
             data-testid={`admin-usage-log-preset-${p.hours}h`}
@@ -369,16 +285,20 @@ export function UsageLogFilters({
 
       <div className="flex items-center gap-1.5">
         <Label htmlFor="usage-log-type" className="text-xs text-muted-foreground shrink-0">Type</Label>
-        <Select value={usageType || 'all'} onValueChange={v => setUsageType(!v || v === 'all' ? '' : v)}>
+        <Select value={usageType || 'all'} onValueChange={(v) => setUsageType(!v || v === 'all' ? '' : v)}>
           <SelectTrigger id="usage-log-type" data-testid="admin-usage-log-type-select" className="h-7 text-xs w-32">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value="all" className="text-xs">All</SelectItem>
-            <SelectItem value="FOS" className="text-xs">FOS (A+B)</SelectItem>
-            <SelectItem value="FOS-A" className="text-xs">FOS Class A</SelectItem>
-            <SelectItem value="FOS-B" className="text-xs">FOS Class B</SelectItem>
-            <SelectItem value="CDN" className="text-xs">CDN</SelectItem>
+            {[
+              ['all', 'All'],
+              ['FOS', 'FOS (A+B)'],
+              ['FOS-A', 'FOS Class A'],
+              ['FOS-B', 'FOS Class B'],
+              ['CDN', 'CDN'],
+            ].map(([val, label]) => (
+              <SelectItem key={val} value={val} className="text-xs">{label}</SelectItem>
+            ))}
           </SelectContent>
         </Select>
       </div>
@@ -391,7 +311,7 @@ export function UsageLogFilters({
           className="h-7 text-xs w-40 font-mono"
           placeholder="e.g. GET_OBJECT"
           value={operationFilter}
-          onChange={e => setOperationFilter(e.target.value)}
+          onChange={(e) => setOperationFilter(e.target.value)}
         />
       </div>
 
@@ -403,7 +323,7 @@ export function UsageLogFilters({
           className="h-7 text-xs w-44 font-mono"
           placeholder="e.g. cron:sync"
           value={processFilter}
-          onChange={e => setProcessFilter(e.target.value)}
+          onChange={(e) => setProcessFilter(e.target.value)}
         />
       </div>
 
@@ -421,16 +341,9 @@ interface UsageLogClientProps {
 
 export default function UsageLogClient({ initialServiceId, initialNowMs }: UsageLogClientProps = {}) {
   const router = useRouter()
-  const storeActiveServiceId = useServiceStore(s => s.activeServiceId)
+  const storeActiveServiceId = useServiceStore((s) => s.activeServiceId)
   const activeServiceId = storeActiveServiceId ?? initialServiceId ?? null
   const { full } = useDateFormat()
-  // SSR-safe: `now` below is seeded from `initialNowMs` passed by the RSC
-  // shell (page.tsx). When not provided, it falls back to `new Date()`.
-  // Pinning `initialNowMs` ensures the server render and the client's
-  // hydration render compute the exact same minute-floored query window,
-  // preventing React hydration mismatches (#418) when navigating across
-  // a minute boundary. Gate the export href on mount so the server HTML
-  // never carries an unsynchronized time-derived URL.
   const mounted = useMounted()
 
   const [preset, setPreset] = useState<number>(24)
@@ -442,12 +355,6 @@ export default function UsageLogClient({ initialServiceId, initialNowMs }: Usage
 
   const [now, setNow] = useState(() => (initialNowMs ? new Date(initialNowMs) : new Date()))
   useEffect(() => {
-    // Gate the 30s tick on tab visibility so a backgrounded admin tab
-    // doesn't keep rotating `now` and refetching ~MB of usage_log every
-    // minute. Re-tick immediately on visibility-restore so the rolled
-    // window matches the moment the user returns to the tab, while
-    // preserving `initialNowMs` on first mount so the SSR-seeded query
-    // key is not invalidated on initial hydration.
     const tick = () => setNow(new Date())
     let id: ReturnType<typeof setInterval> | null = null
     const start = (tickNow: boolean) => {
@@ -461,10 +368,7 @@ export default function UsageLogClient({ initialServiceId, initialNowMs }: Usage
         id = null
       }
     }
-    const onVis = () => {
-      if (document.visibilityState === 'visible') start(true)
-      else stop()
-    }
+    const onVis = () => (document.visibilityState === 'visible' ? start(true) : stop())
     if (document.visibilityState === 'visible') start(false)
     document.addEventListener('visibilitychange', onVis)
     return () => {
@@ -472,33 +376,11 @@ export default function UsageLogClient({ initialServiceId, initialNowMs }: Usage
       stop()
     }
   }, [])
-  // Floor `now` to the minute so the 30 s setInterval tick that drives
-  // `now` doesn't churn the React Query cache key twice a minute on
-  // tabs left open. The aggregate has minute-grain at best and the
-  // user-facing windows are multi-hour; minute-rounding here trades
-  // a ≤60 s lag for halving refetches and bounding the cache leak
-  // on long-lived admin sessions.
+
   const nowFlooredMs = Math.floor(now.getTime() / 60_000) * 60_000
   const startTime = useMemo(() => toQueryDate(new Date(nowFlooredMs - preset * 3600 * 1000)), [preset, nowFlooredMs])
   const endTime = useMemo(() => toQueryDate(new Date(nowFlooredMs)), [nowFlooredMs])
 
-  const exportParams = new URLSearchParams({
-    service_id: activeServiceId || '',
-    start: startTime,
-    end: endTime,
-    ...(usageType ? { usage_type: usageType } : {}),
-    ...(processFilter ? { process_context: processFilter } : {}),
-    ...(operationFilter ? { operation_type: operationFilter } : {}),
-    page_size: '500',
-  })
-
-  // Chunked first-paint: a 50-row HEAD batch lands quickly so the aggregate
-  // StatCards + the first screenful of rows render long before the full
-  // 500-row backfill returns. The aggregate is window-wide (computed over
-  // every row in the filter window, not page-bounded; see
-  // backend/routers/admin_usage.py:127-136), so the head response carries
-  // the correct totals immediately. Both queries share the same
-  // ``nowFlooredMs``-derived window so the two fetches correlate.
   const baseQuery = {
     service_id: activeServiceId || '',
     start: startTime,
@@ -508,48 +390,29 @@ export default function UsageLogClient({ initialServiceId, initialNowMs }: Usage
     ...(operationFilter ? { operation_type: operationFilter } : {}),
   }
 
-  const headQuery = useQuery({
-    queryKey: ['usage-log', 'head', activeServiceId, startTime, endTime, usageType, processFilter, operationFilter],
-    queryFn: async ({ signal }) => {
-      const { data, error } = await client.GET('/api/admin/usage-log', { signal,
-        params: { query: { ...baseQuery, page_size: 50 } },
+  const exportParams = new URLSearchParams({ ...baseQuery, page_size: '500' })
+
+  const makeUsageQueryOpts = (kind: 'head' | 'full', pageSize: number, enabled: boolean) => ({
+    queryKey: ['usage-log', kind, activeServiceId, startTime, endTime, usageType, processFilter, operationFilter],
+    queryFn: async ({ signal }: { signal: AbortSignal }) => {
+      const { data, error } = await client.GET('/api/admin/usage-log', {
+        signal,
+        params: { query: { ...baseQuery, page_size: pageSize } },
       })
       if (error) throw new Error(extractApiError(error))
       return data as UsageLogResponse
     },
-    enabled: !!activeServiceId,
+    enabled,
     placeholderData: keepPreviousData,
     staleTime: 30_000,
     refetchInterval: 30_000,
     refetchIntervalInBackground: false,
   })
 
-  const fullQuery = useQuery({
-    queryKey: ['usage-log', 'full', activeServiceId, startTime, endTime, usageType, processFilter, operationFilter],
-    queryFn: async ({ signal }) => {
-      const { data, error } = await client.GET('/api/admin/usage-log', { signal,
-        params: { query: { ...baseQuery, page_size: 500 } },
-      })
-      if (error) throw new Error(extractApiError(error))
-      return data as UsageLogResponse
-    },
-    // Gate the heavier 500-row backfill on the head landing first so we
-    // never block the aggregate render on the slower query.
-    enabled: !!activeServiceId && !!headQuery.data,
-    placeholderData: keepPreviousData,
-    staleTime: 30_000,
-    refetchInterval: 30_000,
-    refetchIntervalInBackground: false,
-  })
+  const headQuery = useQuery(makeUsageQueryOpts('head', 50, !!activeServiceId))
+  const fullQuery = useQuery(makeUsageQueryOpts('full', 500, !!activeServiceId && !!headQuery.data))
 
-  // Prefer the full backfill once it lands; fall back to the head for
-  // first-paint of the aggregate + the first 50 rows.
   const data = fullQuery.data ?? headQuery.data
-  // First-paint loading state tracks the head — once 50 rows are visible
-  // the page is usable; the backfill just expands the table. Force loading
-  // until mounted so the server render (live client-only query → no data) and
-  // the client's first render agree on the loading skeleton instead of the
-  // server painting '—'/0 values that the client then diverges from (#418).
   const isLoading = !mounted || (headQuery.isLoading && !data)
   const isFetching = headQuery.isFetching || fullQuery.isFetching
   const isRefreshing = mounted && isFetching && !isLoading
@@ -561,9 +424,7 @@ export default function UsageLogClient({ initialServiceId, initialNowMs }: Usage
   async function purgeAll() {
     setPurging(true)
     try {
-      await unwrapClient(client.DELETE('/api/admin/usage-log', {
-        params: { query: { service_id: activeServiceId || '' } },
-      }))
+      await unwrapClient(client.DELETE('/api/admin/usage-log', { params: { query: { service_id: activeServiceId || '' } } }))
       setPurgeOpen(false)
       refetch()
     } finally {
@@ -572,13 +433,10 @@ export default function UsageLogClient({ initialServiceId, initialNowMs }: Usage
   }
 
   const agg = data?.aggregate
-  // service_id is hoisted to the response root (saves ~50 B per row on
-  // the wire). The UsageTable still wants it per-row for its Service
-  // column, so re-inject it from the response context here.
   const entries = useMemo(() => {
     const rows = data?.entries ?? []
     const sid = (data as { service_id?: string | null } | undefined)?.service_id ?? activeServiceId ?? null
-    return rows.map(e => ({ ...e, service_id: sid }))
+    return rows.map((e) => ({ ...e, service_id: sid }))
   }, [data, activeServiceId])
 
   const renderBreakdown = (breakdown: Record<string, number> | undefined) => {
@@ -598,25 +456,16 @@ export default function UsageLogClient({ initialServiceId, initialNowMs }: Usage
   }
 
   const columns = useMemo(() => buildUsageLogColumns(full), [full])
-
   const exportUrl = `/api/admin/usage-log/export?${exportParams.toString()}`
 
   return (
     <div data-testid="admin-usage-log-root" className="space-y-6">
-      <PageHeader
-        title="FOS Usage Log"
-        description="Fastly Object Storage and CDN operations captured for cost analysis."
-      >
+      <PageHeader title="FOS Usage Log" description="Fastly Object Storage and CDN operations captured for cost analysis.">
         <div
           data-testid="admin-usage-log-toolbar"
           className="flex flex-wrap items-center gap-2 min-h-[36px] [contain-intrinsic-size:auto_36px] [content-visibility:auto]"
         >
-          <Button
-            data-testid="admin-usage-log-back-btn"
-            variant="outline"
-            size="sm"
-            onClick={() => router.push(buildServiceHref('/admin', activeServiceId))}
-          >
+          <Button data-testid="admin-usage-log-back-btn" variant="outline" size="sm" onClick={() => router.push(buildServiceHref('/admin', activeServiceId))}>
             <ArrowLeft className="h-3.5 w-3.5 mr-1.5" /> Admin
           </Button>
           <Button
@@ -668,7 +517,6 @@ export default function UsageLogClient({ initialServiceId, initialNowMs }: Usage
         </Button>
       </div>
 
-      {/* Aggregate stats */}
       <div
         data-testid="admin-usage-log-kpi-reservation"
         className={`grid grid-cols-2 md:grid-cols-4 gap-3 min-h-[164px] [contain-intrinsic-size:auto_164px] [content-visibility:auto] transition-opacity ${
@@ -681,12 +529,7 @@ export default function UsageLogClient({ initialServiceId, initialNowMs }: Usage
           icon={Zap}
           iconClassName="text-blue-500"
           className="min-h-[164px]"
-          sub={
-            <div className="space-y-1">
-              <div>{agg ? fmtCost(agg.estimated_cost_class_a) : '—'}</div>
-              {renderBreakdown(agg?.class_a_breakdown)}
-            </div>
-          }
+          sub={<div className="space-y-1"><div>{agg ? fmtCost(agg.estimated_cost_class_a) : '—'}</div>{renderBreakdown(agg?.class_a_breakdown)}</div>}
           loading={isLoading}
         />
         <StatCard
@@ -695,12 +538,7 @@ export default function UsageLogClient({ initialServiceId, initialNowMs }: Usage
           icon={Database}
           iconClassName="text-green-500"
           className="min-h-[164px]"
-          sub={
-            <div className="space-y-1">
-              <div>{agg ? fmtCost(agg.estimated_cost_class_b) : '—'}</div>
-              {renderBreakdown(agg?.class_b_breakdown)}
-            </div>
-          }
+          sub={<div className="space-y-1"><div>{agg ? fmtCost(agg.estimated_cost_class_b) : '—'}</div>{renderBreakdown(agg?.class_b_breakdown)}</div>}
           loading={isLoading}
         />
         <StatCard
@@ -735,18 +573,16 @@ export default function UsageLogClient({ initialServiceId, initialNowMs }: Usage
               <div>for selected period</div>
               {agg && (
                 <div className="mt-1.5 pt-1.5 border-t border-border/50 space-y-0.5">
-                  <div className="flex items-center justify-between text-[10px] uppercase tracking-wider text-muted-foreground">
-                    <span className="truncate mr-2">FOS Class A</span>
-                    <span className="font-mono">{fmtCost(agg.estimated_cost_class_a)}</span>
-                  </div>
-                  <div className="flex items-center justify-between text-[10px] uppercase tracking-wider text-muted-foreground">
-                    <span className="truncate mr-2">FOS Class B</span>
-                    <span className="font-mono">{fmtCost(agg.estimated_cost_class_b)}</span>
-                  </div>
-                  <div className="flex items-center justify-between text-[10px] uppercase tracking-wider text-muted-foreground">
-                    <span className="truncate mr-2">CDN Egress</span>
-                    <span className="font-mono">{fmtCost(agg.estimated_cost_cdn)}</span>
-                  </div>
+                  {[
+                    ['FOS Class A', agg.estimated_cost_class_a],
+                    ['FOS Class B', agg.estimated_cost_class_b],
+                    ['CDN Egress', agg.estimated_cost_cdn],
+                  ].map(([lbl, cost]) => (
+                    <div key={lbl as string} className="flex items-center justify-between text-[10px] uppercase tracking-wider text-muted-foreground">
+                      <span className="truncate mr-2">{lbl}</span>
+                      <span className="font-mono">{fmtCost(cost as number)}</span>
+                    </div>
+                  ))}
                 </div>
               )}
             </div>
@@ -755,17 +591,11 @@ export default function UsageLogClient({ initialServiceId, initialNowMs }: Usage
         />
       </div>
 
-      <div
-        data-testid="admin-usage-log-chart-reservation"
-        className="min-h-[380px] [contain-intrinsic-size:auto_380px] [content-visibility:auto]"
-      >
+      <div data-testid="admin-usage-log-chart-reservation" className="min-h-[380px] [contain-intrinsic-size:auto_380px] [content-visibility:auto]">
         <LogAccountingPanel />
       </div>
 
-      <div
-        data-testid="admin-usage-log-table-reservation"
-        className="rounded-lg border bg-card min-h-[520px] [contain-intrinsic-size:auto_520px] [content-visibility:auto]"
-      >
+      <div data-testid="admin-usage-log-table-reservation" className="rounded-lg border bg-card min-h-[520px] [contain-intrinsic-size:auto_520px] [content-visibility:auto]">
         <UsageLogFilters
           preset={preset}
           setPreset={setPreset}
@@ -780,21 +610,11 @@ export default function UsageLogClient({ initialServiceId, initialNowMs }: Usage
         />
 
         <div className={isRefreshing ? 'opacity-40 pointer-events-none transition-opacity' : 'transition-opacity'}>
-          {isLoading && (
-            <div className="sr-only" role="status">
-              Loading FOS usage ledger...
-            </div>
-          )}
-          <DataTable
-            columns={columns}
-            data={entries}
-            isLoading={isLoading}
-            searchKey="url"
-          />
+          {isLoading && <div className="sr-only" role="status">Loading FOS usage ledger...</div>}
+          <DataTable columns={columns} data={entries} isLoading={isLoading} searchKey="url" />
         </div>
       </div>
 
-      {/* Purge confirmation dialog */}
       <ConfirmDialog
         open={purgeOpen}
         onOpenChange={setPurgeOpen}

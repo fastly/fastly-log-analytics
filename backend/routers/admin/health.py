@@ -9,6 +9,7 @@ import os
 import re
 import sys
 import time
+from collections import deque
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -23,8 +24,12 @@ from backend.celery_status import (
     purge_ingest_ledger_entries,
     retry_ingest_ledger_entries,
 )
-from backend.core import duckdb as _db
+from backend.core import duckdb as _db_mod
 from backend.core import duckdb_pool as _pool
+from backend.core import metadata as _meta_mod
+
+_db: Any = _db_mod
+from backend.core.query_registry import query_registry
 from backend.core.share_db.settings import get_setting, set_setting
 from backend.cron.jobs import metadata as _recycle
 from backend.cron.jobs import metadata as metric_snapshots
@@ -39,7 +44,18 @@ from backend.models.admin import (
     MetricHistoryBatchResponse,
     SyncStatusResponse,
 )
-from backend.models.admin_actions import DuckdbRecycleResponse, VclHealthResponse
+from backend.models.admin_actions import (
+    ActiveQueryRow,
+    CancelResponse,
+    DuckdbRecycleResponse,
+    QueryMonitorConfigResponse,
+    SlowQueriesClearResponse,
+    SlowQueriesCountResponse,
+    SlowQueriesResponse,
+    SnapshotResponse,
+    SummaryResponse,
+    VclHealthResponse,
+)
 from backend.models.admin_status import (
     CeleryStatusResponse,
     DuckdbStatusResponse,
@@ -55,6 +71,7 @@ from backend.utils.router_utils import (
     bad_request,
     iter_with_disconnect_ping,
     make_error,
+    not_found,
     query_errors,
     raise_internal,
     require_service_id,
@@ -126,9 +143,6 @@ def _sample_metric_history() -> dict[str, Any]:
 
 
 def _sample_queries_summary() -> dict[str, Any] | None:
-    from backend.core.query_registry import query_registry
-    from backend.routers.admin_queries import _ensure_enabled
-
     _ensure_enabled()
     return query_registry.summary()
 
@@ -136,9 +150,6 @@ def _sample_queries_summary() -> dict[str, Any] | None:
 def _sample_slow_queries_count(service_id: str | None) -> dict[str, Any] | None:
     if not service_id:
         return None
-    from backend.core import metadata as _meta_mod
-    from backend.routers.admin_queries import _ensure_enabled
-
     _ensure_enabled()
     since_utc = time.time() - 24 * 3600
     return {
@@ -468,14 +479,13 @@ def health_snapshot(probe_fos: bool = False) -> dict[str, Any]:
     if probe_fos:
         try:
             from backend import config as _svcconfig
-            from backend.core.duckdb import fos_reachable
 
             fos_out: dict = {}
             for cfg in _svcconfig.list_configs():
                 sid = cfg.get("service_id") or cfg.get("name")
                 try:
                     src = _svcconfig.config_to_source(cfg)
-                    fos_out[sid] = fos_reachable(src)
+                    fos_out[sid] = _db.fos_reachable(src)
                 except Exception as e:
                     fos_out[sid] = {"reachable": False, "error": str(e)[:200]}
             out["fos"] = fos_out
@@ -790,7 +800,6 @@ def sync_status(
     force: bool = Query(default=False),
 ) -> SyncStatusResponse:
     from backend import config as svcconfig
-    from backend.core.duckdb import get_connection, get_sync_status
     from backend.utils.telemetry import clear_queries
 
     clear_queries()
@@ -819,9 +828,9 @@ def sync_status(
                 return resp_cached
 
         is_durable = svcconfig.is_durable_serving_mode(src)
-        _con = get_connection(source=src, max_wait=5, skip_view_update=True, read_only=is_durable)
+        _con = _db.get_connection(source=src, max_wait=5, skip_view_update=True, read_only=is_durable)
         try:
-            status = get_sync_status(_con, src, skip_fos=skip_fos, force=force)
+            status = _db.get_sync_status(_con, src, skip_fos=skip_fos, force=force)
         finally:
             _con.close()
 
@@ -921,12 +930,272 @@ async def log_extents_stream(
 @router.get("/admin/ingested-files", response_model=IngestedFilesResponse)
 @query_errors(status_code=500)
 def ingested_files(source: dict[str, Any] = Depends(get_source)) -> IngestedFilesResponse:
-    from backend.core.duckdb import get_ingested_files
-
-    res = get_ingested_files(None, source)
+    res = _db.get_ingested_files(None, source)
     response: IngestedFilesResponse = IngestedFilesResponse.with_telemetry(files=res)
     return response
 
 
+# ---------------------------------------------------------------------------
+# Live Query Monitor endpoints (folded from backend.routers.admin_queries)
+# ---------------------------------------------------------------------------
+
+admin_queries_router = router
+
+
+def _enabled() -> bool:
+    return os.environ.get("QUERY_MONITOR_ENABLED", "true").strip().lower() not in (
+        "false",
+        "0",
+        "no",
+        "off",
+        "",
+    )
+
+
+def _ensure_enabled() -> None:
+    if not _enabled():
+        raise HTTPException(status_code=404, detail=not_found("query_monitor_disabled"))
+
+
+_CANCEL_RATE_PER_SEC = 10
+_CANCEL_WINDOW_S = 1.0
+_cancel_history: dict[str, deque[float]] = {}
+
+
+def _check_cancel_rate(admin_id: str) -> bool:
+    now = time.monotonic()
+    history = _cancel_history.setdefault(admin_id, deque(maxlen=_CANCEL_RATE_PER_SEC * 2))
+    cutoff = now - _CANCEL_WINDOW_S
+    while history and history[0] < cutoff:
+        history.popleft()
+    if len(history) >= _CANCEL_RATE_PER_SEC:
+        return False
+    history.append(now)
+    return True
+
+
+def _admin_id_from_request(request: Request) -> str:
+    """Same logic as :func:`backend.core.request_context._build_attribution_from_request`
+    — keep them in sync if the admin-id derivation ever moves."""
+    from backend.utils.remote_access import client_ip
+
+    return client_ip(request, default="unknown") or "admin"
+
+
+@router.get(
+    "/admin/queries",
+    response_model=SnapshotResponse,
+    tags=["admin", "query-monitor"],
+    dependencies=[Depends(require_admin)],
+)
+def list_queries(
+    since_seq: int = Query(0, ge=0),
+    include_completed: bool = Query(False),
+    cold_limit: int | None = Query(None, ge=1, le=400),
+) -> SnapshotResponse:
+    _ensure_enabled()
+    snap = query_registry.snapshot(
+        since_seq=since_seq,
+        full_sql=False,
+        include_completed=include_completed,
+        all_active=True,
+        cold_limit=cold_limit,
+    )
+    return SnapshotResponse(**snap)
+
+
+@router.get(
+    "/admin/queries/summary",
+    response_model=SummaryResponse,
+    tags=["admin", "query-monitor"],
+    dependencies=[Depends(require_admin)],
+)
+def queries_summary() -> SummaryResponse:
+    _ensure_enabled()
+    return SummaryResponse(**query_registry.summary())
+
+
+@router.get(
+    "/admin/slow-queries/count",
+    response_model=SlowQueriesCountResponse,
+    tags=["admin", "query-monitor"],
+    dependencies=[Depends(require_admin)],
+)
+def count_persisted_slow_queries(
+    service_id: str = Depends(get_service_id),
+    since_hours: int = Query(24, ge=1, le=24 * 30),
+    threshold_ms: float = Query(1000.0, ge=0.0),
+) -> dict[str, Any]:
+    """Cheap row-count for the operations-overview card."""
+    _ensure_enabled()
+    service_id = require_service_id(service_id)
+    since_utc = time.time() - since_hours * 3600
+    return {
+        "count": _meta_mod.count_slow_queries(service_id, since_utc=since_utc, threshold_ms=threshold_ms),
+        "since_hours": since_hours,
+        "threshold_ms": threshold_ms,
+    }
+
+
+@router.get(
+    "/admin/slow-queries",
+    response_model=SlowQueriesResponse,
+    response_model_exclude_unset=True,
+    tags=["admin", "query-monitor"],
+    dependencies=[Depends(require_admin)],
+)
+def list_persisted_slow_queries(
+    service_id: str = Depends(get_service_id),
+    since_hours: int = Query(24, ge=1, le=24 * 30),
+    threshold_ms: float = Query(100.0, ge=0.0),
+    kind: str | None = Query(None, pattern="^(analyst|admin|cron|system)$"),
+    db_type: str | None = Query(None, pattern="^(DuckDB|Postgres|ClickHouse|SQLite)$"),
+    sort: str = Query("recent", pattern="^(recent|duration)$"),
+    limit: int = Query(200, ge=1, le=2000),
+) -> dict[str, Any]:
+    """Persistent slow-SQL history from the PostgreSQL ``slow_queries`` table."""
+    _ensure_enabled()
+    service_id = require_service_id(service_id)
+    since_utc = time.time() - since_hours * 3600
+    rows = _meta_mod.list_slow_queries(
+        service_id,
+        since_utc=since_utc,
+        threshold_ms=threshold_ms,
+        kind=kind,
+        db_type=db_type,
+        sort_by_duration=(sort == "duration"),
+        limit=limit,
+    )
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        out.append(
+            {
+                "query_id": r["query_id"],
+                "db_type": r["db_type"],
+                "service_id": r["service_id"],
+                "sql_preview": r["sql_preview"],
+                "sql": r["sql_full"],
+                "sql_len": r["sql_len"],
+                "started_at_utc": r["started_at_utc"],
+                "ended_at_utc": r["ended_at_utc"],
+                "duration_ms": r["duration_ms"],
+                "outcome": r["outcome"],
+                "error_type": r["error_type"],
+                "error_message": r["error_message"],
+                "peak_memory_mb": r["peak_memory_mb"],
+                "attribution": {
+                    "kind": r["attr_kind"],
+                    "label": r["attr_label"],
+                    "principal_id": r["attr_principal_id"],
+                    "caller_qualname": r["attr_caller_qualname"],
+                    "caller_file": r["attr_caller_file"],
+                    "request_path": r["attr_request_path"],
+                    "request_id": r["attr_request_id"],
+                    "cron_job": r["attr_cron_job"],
+                    "cron_run_id": r["attr_cron_run_id"],
+                    "pool_slot": r["attr_pool_slot"],
+                },
+            }
+        )
+    return {"rows": out, "since_hours": since_hours, "threshold_ms": threshold_ms}
+
+
+@router.delete(
+    "/admin/slow-queries",
+    response_model=SlowQueriesClearResponse,
+    tags=["admin", "query-monitor"],
+    dependencies=[Depends(require_admin)],
+)
+def clear_persisted_slow_queries(
+    request: Request,
+    service_id: str = Depends(get_service_id),
+) -> SlowQueriesClearResponse:
+    """Clear persisted slow-SQL history for *service_id* and record an audit entry."""
+    _ensure_enabled()
+    service_id = require_service_id(service_id)
+    deleted = _meta_mod.clear_slow_queries(service_id)
+    admin_id = _admin_id_from_request(request)
+    try:
+        _meta_mod.record_audit(
+            service_id,
+            "slow_queries_cleared",
+            {"deleted": deleted, "admin_id": admin_id},
+            actor=admin_id,
+        )
+    except Exception:
+        logger.warning("slow_queries_cleared audit write failed", exc_info=True)
+    return SlowQueriesClearResponse(deleted=deleted, service_id=service_id)
+
+
+@router.get(
+    "/admin/queries/{qid}",
+    response_model=ActiveQueryRow,
+    response_model_exclude_unset=True,
+    tags=["admin", "query-monitor"],
+    dependencies=[Depends(require_admin)],
+)
+def get_query(qid: int) -> dict[str, Any]:
+    """Fetch the full SQL + attribution for a single in-flight query."""
+    _ensure_enabled()
+    active = query_registry.get(qid)
+    if active is None:
+        raise HTTPException(status_code=404, detail=not_found("query_not_found"))
+    snap = query_registry.snapshot(since_seq=qid - 1, full_sql=True)
+    row: dict[str, Any] | None = next((r for r in snap["active"] if r["query_id"] == qid), None)
+    if row is None:
+        raise HTTPException(status_code=404, detail=not_found("query_not_found"))
+    return row
+
+
+@router.post(
+    "/admin/queries/{qid}/cancel",
+    response_model=CancelResponse,
+    tags=["admin", "query-monitor"],
+    dependencies=[Depends(require_admin)],
+)
+def cancel_query(qid: int, request: Request) -> CancelResponse:
+    _ensure_enabled()
+    admin_id = _admin_id_from_request(request)
+    if not _check_cancel_rate(admin_id):
+        raise HTTPException(
+            status_code=429,
+            detail=make_error("cancel_rate_limit_exceeded"),
+            headers={"Retry-After": "1"},
+        )
+    active = query_registry.get(qid)
+    svc_id = active.service_id if active is not None else None
+    state = query_registry.cancel_query(qid, admin_id=admin_id)
+    if state == "cancelled" and svc_id:
+        try:
+            _meta_mod.record_audit(
+                svc_id,
+                "query_cancelled",
+                {"query_id": qid, "admin_id": admin_id},
+                actor=admin_id,
+            )
+        except Exception:
+            logger.warning("query_cancelled audit write failed", exc_info=True)
+    return CancelResponse(state=state, query_id=qid)
+
+
+@router.get(
+    "/admin/app-config/query-monitor",
+    response_model=QueryMonitorConfigResponse,
+    tags=["admin", "query-monitor"],
+    dependencies=[Depends(require_admin)],
+)
+def query_monitor_config() -> dict[str, Any]:
+    """Tiny config endpoint the frontend hits on mount to decide whether to
+    render the Live Query Monitor tab."""
+    return {"enabled": _enabled()}
+
+
+from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry  # noqa: E402
+
+_CacheRegistry.register("routers.admin_queries._cancel_history", _cancel_history)
+
 sys.modules["backend.system_metrics_sampler"] = sys.modules[__name__]
 sys.modules["backend.routers.admin.sync_status"] = sys.modules[__name__]
+sys.modules["backend.routers.admin_queries"] = sys.modules[__name__]
+if "backend.routers" in sys.modules:
+    setattr(sys.modules["backend.routers"], "admin_queries", sys.modules[__name__])

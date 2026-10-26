@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from typing import Any
 
 import pytest
+from backend.high_scale.registry_bootstrap import HighScaleService
 
 from backend.high_scale.archive_models import ServingWatermark
-from backend.high_scale.registry_bootstrap import HighScaleService
 from backend.high_scale.rum import rum_analytics
 
 
@@ -610,3 +611,380 @@ def test_live_event_query_failures_propagate() -> None:
 
     with pytest.raises(RuntimeError, match="unavailable"):
         rum_live_events(_env_service(Broken()), START, END, 50)
+
+
+# ── Merged from tests/high_scale/test_rum_integration.py ──
+import os
+import subprocess
+from collections.abc import Callable, Iterator
+from email.parser import BytesParser
+from email.policy import default
+from pathlib import Path
+from uuid import uuid4
+
+import httpx
+
+from backend.config import ClickHouseConfig
+from backend.core.clickhouse_client import ClickHouseClient
+
+_skip_unless_real_ch = pytest.mark.skipif(
+    os.getenv("RUN_RUM_CLICKHOUSE_INTEGRATION") != "1", reason="explicit real ClickHouse RUM gate"
+)
+
+
+def _ch_fact(
+    ts: str,
+    *,
+    request_id: str | None = None,
+    client_id: str = "fixture-client",
+    service_id: str = "TestRum",
+    state: str = "visible",
+    **fields: Any,
+) -> dict[str, Any]:
+    return {
+        "service_id": service_id,
+        "event_id": str(uuid4()),
+        "event_timestamp": ts,
+        "ingest_timestamp": ts,
+        "source_object_key": "raw/fixture.gz",
+        "source_object_version": "fixture",
+        "line_ordinal": 0,
+        "transform_version": "fixture",
+        "batch_id": str(uuid4()),
+        "publication_state": state,
+        "client_id": client_id,
+        "request_event_id": request_id,
+        "pathname": "/",
+        "country": "US",
+        **fields,
+    }
+
+
+def _ch_vital(ts: str, metric: str, value: float, **kwargs: Any) -> dict[str, Any]:
+    return _ch_fact(ts, metric_name=metric, metric_value=value, metric_rating="good", **kwargs)
+
+
+def _ch_error(ts: str, **kwargs: Any) -> dict[str, Any]:
+    return _ch_fact(ts, **{"error_message": "fixture exception", "error_file": "fixture.js", **kwargs})
+
+
+@pytest.fixture
+def run_analytics_and_live(run_analytics: Callable[..., Any]) -> Callable[..., Any]:
+    def run(vitals: list[dict[str, Any]], errors: list[dict[str, Any]]) -> Any:
+        return run_analytics(vitals, errors, live=True)
+
+    return run
+
+
+@pytest.fixture
+def run_analytics() -> Iterator[Callable[..., dict[str, Any]]]:
+    clients: list[ClickHouseClient] = []
+
+    def run(
+        vitals: list[dict[str, Any]],
+        errors: list[dict[str, Any]],
+        start: str | None = "2026-09-01T00:00:00Z",
+        end: str | None = "2026-09-01T02:00:00Z",
+        filters: dict[str, Any] | None = None,
+        live: bool = False,
+    ) -> Any:
+        schema = Path("backend/high_scale/sql/rum_schema.sql").read_text()
+        schema = re.sub(r"ReplicatedMergeTree\([^;]*?\)", "MergeTree()", schema)
+        schema = re.sub(r"\nTTL [^;]*;", ";", schema)
+        publication_schema = Path("backend/high_scale/sql/publication_schema.sql").read_text()
+        publication_schema = re.sub(
+            r"ReplicatedReplacingMergeTree\(([^)]+)\)\s*\('[^']+',\s*'[^']+'\)",
+            r"ReplacingMergeTree(\1)",
+            publication_schema,
+        )
+        seed = publication_schema + "\n" + schema
+        for table, domain, rows in (
+            ("rum_vitals_facts", "rum_vitals", vitals),
+            ("rum_error_facts", "rum_errors", errors),
+        ):
+            if rows:
+                seed += f"\nINSERT INTO {table} FORMAT JSONEachRow\n"
+                seed += "\n".join(json.dumps(row) for row in rows) + "\n;\n"
+                seed += "\nINSERT INTO high_scale_batch_publications FORMAT JSONEachRow\n"
+                seed += (
+                    "\n".join(
+                        json.dumps(
+                            {
+                                "batch_id": row["batch_id"],
+                                "service_id": row["service_id"],
+                                "domain": domain,
+                                "generation": "1",
+                                "batch_digest": "fixture",
+                                "expected_rows": 1,
+                                "visible_rows": 1,
+                                "quorum_acked": 1,
+                                "publication_state": "visible",
+                                "manifest_version": 2,
+                                "updated_at": row["ingest_timestamp"],
+                            }
+                        )
+                        for row in rows
+                    )
+                    + "\n;\n"
+                )
+
+        def transport(request: httpx.Request) -> httpx.Response:
+            form = BytesParser(policy=default).parsebytes(
+                f"Content-Type: {request.headers['content-type']}\r\n\r\n".encode() + request.read()
+            )
+            fields: dict[str, str] = {}
+            for part in form.iter_parts():
+                name = part.get_param("name", header="content-disposition")
+                payload = part.get_payload(decode=True)
+                assert isinstance(name, str) and isinstance(payload, bytes)
+                fields[name] = payload.decode()
+            command = [
+                "docker",
+                "run",
+                "--rm",
+                "-i",
+                "--entrypoint",
+                "clickhouse",
+                os.getenv("RUM_CLICKHOUSE_TEST_IMAGE", "clickhouse/clickhouse-server:25.8.4.13"),
+                "local",
+                "--multiquery",
+                "--format=JSON",
+                "--date_time_input_format=best_effort",
+                "--output_format_json_quote_64bit_integers=0",
+            ]
+            command += [f"--{name}={value}" for name, value in fields.items() if name.startswith("param_")]
+            completed = subprocess.run(
+                command,
+                input=seed + "\n" + fields["query"] + ";",
+                text=True,
+                capture_output=True,
+                timeout=60,
+                check=True,
+            )
+            return httpx.Response(200, content=completed.stdout.encode())
+
+        settings = ClickHouseConfig(host="localhost", port=8123, database="default", user="default", password="")
+        client = ClickHouseClient(settings, transport=httpx.MockTransport(transport))
+        clients.append(client)
+        watermark = ServingWatermark("TestRum", "request", 0, None, None, None, None, None, True)
+        service = HighScaleService("TestRum", client, b"test-secret", watermark)
+        if live:
+            return rum_live_events(service, start, end, 50, filters)
+        return rum_analytics(service, start, end, filters)
+
+    yield run
+    for client in clients:
+        client.close()
+
+
+@_skip_unless_real_ch
+def test_real_sql_distinct_counts_inclusive_bounds_and_missing_buckets(run_analytics) -> None:
+    shared_id = str(uuid4())
+    ts = "2026-09-01T00:00:00Z"
+    result = run_analytics(
+        [
+            _ch_vital(ts, "LCP", 1000, request_id=shared_id),
+            _ch_vital(ts, "CLS", 0.1, request_id=shared_id),
+            _ch_vital(ts, "event_click", 1, request_id=shared_id),
+            _ch_vital(ts, "LCP", 5000, client_id="second"),
+            _ch_vital("2026-09-01T02:00:00Z", "CLS", 0.2),
+            _ch_vital("2026-09-01T02:00:00.001Z", "LCP", 9000),
+            _ch_vital(ts, "LCP", 99999, state="pending"),
+            _ch_vital(ts, "LCP", 99999, service_id="TestOther"),
+        ],
+        [
+            _ch_error(ts, request_id=shared_id),
+            _ch_error(ts, request_id=shared_id),
+        ],
+    )
+    assert result["no_data"] is False
+    assert result["beacon_count"] == 3 and result["pageview_count"] == 3
+    assert result["interaction_count"] == 1 and result["error_count"] == 1
+    assert result["vitals"]["lcp"]["p75"] == 4.0
+    trends = result["trends"]
+    assert trends["lcp"] == [4.0, None, None] and trends["cls"] == [0.1, None, 0.2]
+    assert trends["pageviews"] == [2, 0, 1] and trends["interactions"] == [1, 0, 0]
+    assert trends["errors"] == [1, 0, 0] and trends["error_rate"] == [33.33, None, 0.0]
+    assert result["worst_pages"][0]["views"] == 3 and result["worst_pages"][0]["lcp_p75"] == 4.0
+    assert result["worst_pages"][0]["error_rate"] == 25.0
+    assert result["errors"] == [{"message": "fixture exception", "file": "fixture.js", "line": 0, "col": 0, "count": 2}]
+    assert result["environments"] == {"browsers": {"Unknown": 3}, "os": {"Unknown": 3}, "devices": {"Unknown": 3}}
+
+
+@_skip_unless_real_ch
+def test_real_sql_environments_error_positions_and_filters(run_analytics) -> None:
+    ts = "2026-09-01T00:30:00Z"
+    shared = str(uuid4())
+    vitals = [
+        _ch_vital(ts, "LCP", 1000, request_id=shared, browser="Chrome", os="macOS", device="Desktop", country="US"),
+        _ch_vital(ts, "CLS", 0.1, request_id=shared, browser="Chrome", os="macOS", device="Desktop", country="US"),
+        _ch_vital(ts, "LCP", 2000, client_id="b", browser="Firefox", os="Linux", device="Desktop", country="DE"),
+        _ch_vital(ts, "LCP", 3000, client_id="c", browser="Chrome", os="Android", device="Mobile", country="US"),
+    ]
+    errors = [
+        _ch_error(ts, client_id="b", browser="Firefox", error_line=12, error_col=34, country="DE"),
+        _ch_error(ts, client_id="b2", browser="Firefox", error_line=12, error_col=34, country="DE"),
+        _ch_error(ts, client_id="c", browser="Chrome", error_line=7, error_col=1, country="US"),
+    ]
+
+    result = run_analytics(vitals, errors)
+    assert result["environments"] == {
+        "browsers": {"Chrome": 2, "Firefox": 1},
+        "os": {"macOS": 1, "Linux": 1, "Android": 1},
+        "devices": {"Desktop": 2, "Mobile": 1},
+    }
+    assert result["errors"][0] == {
+        "message": "fixture exception",
+        "file": "fixture.js",
+        "line": 12,
+        "col": 34,
+        "count": 2,
+    }
+    assert {"line": 7, "col": 1} == {key: result["errors"][1][key] for key in ("line", "col")}
+
+    german = run_analytics(vitals, errors, filters={"country": {"mode": "include", "values": ["DE"]}})
+    assert german["environments"]["browsers"] == {"Firefox": 1}
+    assert german["error_count"] == 2 and german["pageview_count"] == 1
+
+    not_chrome = run_analytics(vitals, errors, filters={"browser": {"mode": "exclude", "values": ["Chrome"]}})
+    assert not_chrome["environments"]["browsers"] == {"Firefox": 1} and not_chrome["error_count"] == 2
+
+
+@_skip_unless_real_ch
+def test_real_sql_live_events_carry_real_environment_fields(run_analytics_and_live) -> None:
+    ts = "2026-09-01T00:30:00Z"
+    events = run_analytics_and_live(
+        [
+            _ch_vital(
+                ts,
+                "LCP",
+                2400,
+                browser="Firefox",
+                os="Linux",
+                device="Desktop",
+                city="Berlin",
+                region="BE",
+                pop="FRA",
+                tls="1.3",
+                ttfb=0.042,
+                country="DE",
+            )
+        ],
+        [_ch_error("2026-09-01T00:29:00Z", error_message="boom")],
+    )
+    assert [event["type"] for event in events] == ["pageview", "error"]
+    first = events[0]
+    assert first["browser"] == "Firefox" and first["os"] == "Linux"
+    assert first["raw_log"]["city"] == "Berlin" and first["raw_log"]["pop"] == "FRA" and first["raw_log"]["ttfb"] == 42
+    assert first["desc"] == "Metric LCP: 2400.0 (GOOD)"
+    assert events[1]["browser"] == "Unknown" and events[1]["desc"] == "boom"
+
+
+@_skip_unless_real_ch
+@pytest.mark.parametrize("hours,points", [(48, 49), (49, 3), (24 * 30, 31)])
+def test_real_sql_daily_buckets_aggregate_all_hours(run_analytics, hours: int, points: int) -> None:
+    from datetime import timedelta
+
+    start = datetime(2026, 9, 1, tzinfo=UTC)
+    result = run_analytics(
+        [
+            _ch_vital("2026-09-01T00:00:00Z", "lcp", 1000),
+            _ch_vital("2026-09-01T23:00:00Z", "lcp", 5000),
+        ],
+        [_ch_error("2026-09-02T00:00:00Z")],
+        start.isoformat(),
+        (start + timedelta(hours=hours)).isoformat(),
+    )
+    trends = result["trends"]
+    assert all(len(values) == points for values in trends.values())
+    assert trends["timestamps"] == sorted(trends["timestamps"])
+    assert trends["lcp"][0] == (1.0 if hours == 48 else 4.0)
+    assert sum(trends["pageviews"]) == 2 and sum(trends["errors"]) == 1
+    errors_only_bucket = 24 if hours == 48 else 1
+    assert trends["lcp"][errors_only_bucket] is None and trends["cls"][errors_only_bucket] is None
+    assert trends["error_rate"][errors_only_bucket] == 100.0
+
+
+@_skip_unless_real_ch
+def test_real_sql_errors_only_is_not_onboarding(run_analytics) -> None:
+    result = run_analytics([], [_ch_error("2026-09-01T01:00:00Z")])
+    assert result["no_data"] is False
+    assert result["beacon_count"] == result["error_count"] == 1
+    assert result["pageview_count"] == result["interaction_count"] == 0
+    assert result["trends"]["lcp"] == result["trends"]["cls"] == [None, None, None]
+    assert result["trends"]["error_rate"] == [None, 100.0, None]
+    assert result["errors"] and result["worst_pages"] == []
+
+
+@_skip_unless_real_ch
+@pytest.mark.parametrize("older_data", [False, True])
+def test_real_sql_empty_range_and_never_configured(run_analytics, older_data: bool) -> None:
+    result = run_analytics([_ch_vital("2026-08-01T00:00:00Z", "LCP", 1000)] if older_data else [], [])
+    assert result["no_data"] is not older_data and result["beacon_count"] == 0
+    assert result["trends"]["lcp"] == ([None] * 3 if older_data else [])
+    assert result["trends"]["pageviews"] == ([0] * 3 if older_data else [])
+    assert result["vitals"]["lcp"]["p75"] is None and result["worst_pages"] == result["errors"] == []
+
+
+@_skip_unless_real_ch
+def test_real_sql_utc_offsets_and_partial_hour_edges(run_analytics) -> None:
+    result = run_analytics(
+        [
+            _ch_vital("2026-09-01T00:14:59.999Z", "LCP", 9999),
+            _ch_vital("2026-09-01T00:15:00Z", "LCP", 2000),
+            _ch_vital("2026-09-01T01:15:00Z", "LCP", 3000),
+            _ch_vital("2026-09-01T01:15:00.001Z", "LCP", 9999),
+        ],
+        [],
+        "2026-08-31T18:15:00-06:00",
+        "2026-08-31T19:15:00-06:00",
+    )
+    assert result["trends"]["timestamps"] == ["2026-09-01T00:00:00+00:00", "2026-09-01T01:00:00+00:00"]
+    assert result["trends"]["lcp"] == [2.0, 3.0] and result["beacon_count"] == 2
+
+
+@_skip_unless_real_ch
+def test_real_sql_metric_formats_zero_and_case_normalization(run_analytics) -> None:
+    ts = "2026-09-01T00:00:00Z"
+    shared = str(uuid4())
+    result = run_analytics(
+        [
+            _ch_vital(ts, "LCP", 1000, request_id=shared),
+            _ch_vital(ts, "lcp", 5000, request_id=shared),
+            _ch_vital(ts, "CLS", 0, request_id=shared),
+            _ch_vital(ts, "INP", 123.9, request_id=shared),
+            _ch_vital(ts, "FID", 12.34, request_id=shared),
+            _ch_vital(ts, "FCP", 1500, request_id=shared),
+            _ch_vital(ts, "TTFB", 0.5, request_id=shared),
+        ],
+        [],
+    )
+    vitals = result["vitals"]
+    assert vitals["lcp"]["p75"] == result["trends"]["lcp"][0] == 4.0
+    assert vitals["cls"]["p75"] == result["trends"]["cls"][0] == 0.0
+    assert vitals["inp"]["p75"] == 123 and vitals["fid"] == {"p75": 12.3, "fcp": 1.5, "ttfb": 0.5}
+    assert vitals["lcp"]["distribution"] == {"good": 100, "needs_improvement": 0, "poor": 0}
+    assert result["beacon_count"] == result["pageview_count"] == 1
+
+
+@_skip_unless_real_ch
+def test_real_sql_interactions_only_keep_measurements_null(run_analytics) -> None:
+    result = run_analytics([_ch_vital("2026-09-01T01:00:00Z", "event_click", 0)], [])
+    assert result["beacon_count"] == result["interaction_count"] == 1
+    assert result["pageview_count"] == result["error_count"] == 0
+    assert result["trends"]["lcp"] == result["trends"]["cls"] == [None, None, None]
+    assert result["trends"]["error_rate"] == [None, 0.0, None]
+
+
+@_skip_unless_real_ch
+def test_real_sql_empty_request_ids_use_client_timestamp_identity(run_analytics) -> None:
+    ts = "2026-09-01T00:00:00Z"
+    result = run_analytics(
+        [
+            _ch_vital(ts, "LCP", 1000),
+            _ch_vital(ts, "CLS", 0.1),
+        ],
+        [_ch_error(ts)],
+    )
+    assert result["beacon_count"] == 1 and result["pageview_count"] == 1 and result["error_count"] == 1
+    assert result["worst_pages"][0]["error_rate"] == 50.0

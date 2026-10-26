@@ -302,7 +302,8 @@ from backend.core.field_registry import REGISTRY as _FIELD_REGISTRY
 # top-N machinery picks them up, but the cross-cutting loops below skip
 # them in batch-stats / column-need passes (their backing column is what
 # actually goes into the temp table).
-_VIRTUAL_FIELDS = ("waf_sig_ind", "edge_score_reason_ind")
+_VIRTUAL_BACKING = {"waf_sig_ind": "waf_sig", "edge_score_reason_ind": "edge_score_reason"}
+_VIRTUAL_FIELDS = tuple(_VIRTUAL_BACKING)
 FIELDS = [f.code for f in _FIELD_REGISTRY if f.code != "_source_file"] + list(_VIRTUAL_FIELDS)
 
 NON_TOP_N_FIELDS = frozenset(
@@ -626,13 +627,9 @@ def _compute_dashboard_aggregates(
     if "timestamp" in actual_cols:
         needed_cols.add('"timestamp"')
     for field in fields:
-        if field in _VIRTUAL_FIELDS:
-            # Virtual fields are exploded from a backing column further
-            # down; make sure the backing column is in the temp table.
-            if field == "waf_sig_ind" and "waf_sig" in actual_cols:
-                needed_cols.add('"waf_sig"')
-            elif field == "edge_score_reason_ind" and "edge_score_reason" in actual_cols:
-                needed_cols.add('"edge_score_reason"')
+        if field in _VIRTUAL_BACKING:
+            if (bcol := _VIRTUAL_BACKING[field]) in actual_cols:
+                needed_cols.add(f'"{bcol}"')
             continue
         if field in actual_cols:
             needed_cols.add(f'"{field}"')
@@ -992,11 +989,6 @@ def _compute_dashboard_aggregates(
         # the rollup reader picks them up via the same path as regular
         # fields. Saves the runtime-unnest cost in _exploded_top_n
         # (was ~1.2s + ~0.7s on prod 30d for the two CSV fields).
-        from backend.core.rollups import _VIRTUAL_FIELD_BACKING as _VFB
-
-        def _virtuals_with_backing(in_set) -> list[str]:
-            return [v for v in _VIRTUAL_FIELDS if v in fields and _VFB.get(v) in in_set]
-
         if use_rollups:
             batch_fields = [
                 f for f in fields if f not in _VIRTUAL_FIELDS and f in actual_cols and f not in NON_TOP_N_FIELDS
@@ -1006,7 +998,7 @@ def _compute_dashboard_aggregates(
             # silently skips fields with no data, so a service that
             # hasn't backfilled yet just falls through to the runtime
             # explode below.
-            batch_fields += _virtuals_with_backing(actual_cols)
+            batch_fields += [v for v, bcol in _VIRTUAL_BACKING.items() if v in fields and bcol in actual_cols]
         else:
             # Non-rollup path uses execute_top_n_batch which COUNT(...)s
             # the field as a real column. Virtual fields aren't real
@@ -1184,10 +1176,8 @@ def _compute_dashboard_aggregates(
                 results[virtual_id] = {"top": [], "total": 0}
 
         if include_top_n:
-            timer.call("waf_sig_ind_explode", lambda: _exploded_top_n("waf_sig_ind", "waf_sig"))
-            timer.call(
-                "edge_score_reason_ind_explode", lambda: _exploded_top_n("edge_score_reason_ind", "edge_score_reason")
-            )
+            for _vid, _bcol in _VIRTUAL_BACKING.items():
+                timer.call(f"{_vid}_explode", lambda v=_vid, b=_bcol: _exploded_top_n(v, b))
 
         # Special handling for conn_requests (bucketed histogram).
         # Skipped entirely when the caller (e.g. /charts) doesn't render it.
@@ -1199,14 +1189,13 @@ def _compute_dashboard_aggregates(
         # needs the real where_clause + params (not the temp's "1=1").
         t_conn_req_0 = time.perf_counter()
         if include_conn_requests and "conn_requests" in actual_cols:
-            hist = None
-            if use_rollups:
-                hist = runner.try_conn_requests_hist_from_rollup(
-                    start_time,
-                    end_time,
-                    has_filters=bool(filters),
-                    actual_cols=actual_cols,
+            hist = (
+                runner.try_conn_requests_hist_from_rollup(
+                    start_time, end_time, has_filters=bool(filters), actual_cols=actual_cols
                 )
+                if use_rollups
+                else None
+            )
             if hist is not None:
                 results["conn_requests"] = hist
             else:
@@ -1216,16 +1205,13 @@ def _compute_dashboard_aggregates(
                     where_clause=where_clause,
                 )
                 res = runner.execute(q, params).fetchall()
-                total_conn = sum(r[1] for r in res)
                 results["conn_requests"] = {
                     "top": [{"value": r[0], "count": r[1]} for r in res],
-                    "total": total_conn,
+                    "total": sum(r[1] for r in res),
                 }
         else:
             results["conn_requests"] = {"top": [], "total": 0}
-        section_timings.append(
-            {"section": "conn_requests", "time_ms": round((time.perf_counter() - t_conn_req_0) * 1000, 2)}
-        )
+        timer.mark("conn_requests", t_conn_req_0)
 
         # Time series. Skipped entirely when the caller (e.g. /charts)
         # doesn't render the chart.
@@ -1253,6 +1239,7 @@ def _compute_dashboard_aggregates(
                 or (chart_metric in ("5xx", "4xx") and "status" in actual_cols)
                 or (chart_metric == "hit_rate" and "cache" in actual_cols)
             )
+            _skip_raw_time_series = False
             if use_rollups and rollup_metric_ok and rollup_col_ok:
                 t_ts_rollup_0 = time.perf_counter()
                 rollup_series = runner.try_time_series_from_rollup(
@@ -1268,12 +1255,7 @@ def _compute_dashboard_aggregates(
                     # read to substitute its own timestamp clamp.
                     unfiltered_window=True,
                 )
-                section_timings.append(
-                    {
-                        "section": "time_series:rollup_attempt",
-                        "time_ms": round((time.perf_counter() - t_ts_rollup_0) * 1000, 2),
-                    }
-                )
+                timer.mark("time_series:rollup_attempt", t_ts_rollup_0)
                 if rollup_series is not None:
                     time_series = rollup_series
                     chart_metric_out = chart_metric
@@ -1281,10 +1263,6 @@ def _compute_dashboard_aggregates(
                     # All other aggregations (top-N, signal unnest, etc.) still
                     # run on the temp table; only the chart is short-circuited.
                     _skip_raw_time_series = True
-                else:
-                    _skip_raw_time_series = False
-            else:
-                _skip_raw_time_series = False
 
             if not _skip_raw_time_series:
                 extra_where = ""
@@ -1336,7 +1314,7 @@ def _compute_dashboard_aggregates(
                     if len(r) >= 3 and r[2] is not None:
                         pt["category"] = str(r[2])
                     time_series.append(pt)
-        section_timings.append({"section": "time_series", "time_ms": round((time.perf_counter() - t_ts_0) * 1000, 2)})
+        timer.mark("time_series", t_ts_0)
 
         # Map data. Skipped entirely when the caller (e.g. /charts)
         # doesn't render the world map.
@@ -1363,7 +1341,7 @@ def _compute_dashboard_aggregates(
                     where_clause=where_clause,
                 )
                 map_data = [{"country": r[0], "count": r[1]} for r in runner.execute(map_q, params).fetchall()]
-        section_timings.append({"section": "map_data", "time_ms": round((time.perf_counter() - t_map_0) * 1000, 2)})
+        timer.mark("map_data", t_map_0)
 
         payload: dict[str, Any] = {
             "data": results,
@@ -1470,6 +1448,9 @@ def get_field_values(
 
     table_name = _safe_table(src["name"])
 
+    def _resp(vals: list) -> dict:
+        return {"values": vals, "field": field, **runner.telemetry()}
+
     # Try top-values cache first (no-search path only)
     if not search:
         try:
@@ -1485,13 +1466,13 @@ def get_field_values(
                         from backend.core.duckdb import enrich_asn_labels
 
                         enrich_asn_labels(vals, src["name"])
-                    return {"values": vals, "field": field, **runner.telemetry()}
+                    return _resp(vals)
         except Exception:
             logger.debug("get_field_values: step failed (ignored)", exc_info=True)
 
     actual_cols = runner.get_schema_cols()
     if not actual_cols:
-        return {"values": [], "field": field, **runner.telemetry()}
+        return _resp([])
 
     # Exclude the field's own filter so picker shows all available values
     filters_excl = {k: v for k, v in filters.items() if k != field}
@@ -1500,19 +1481,16 @@ def get_field_values(
     if field == "_bot_name":
         # SPECIAL HANDLING FOR VIRTUAL BOT NAME FIELD
         if "ua" not in actual_cols:
-            return {"values": [], "field": field, **runner.telemetry()}
+            return _resp([])
 
         try:
             from backend.utils.bot_sources import build_matcher, get_bot_regex_pattern
         except ImportError:
-            return {"values": [], "field": field, **runner.telemetry()}
+            return _resp([])
 
         # Optimization: use regex pre-filter from known bot literals
         pattern = get_bot_regex_pattern(200)
-        ua_filter = ""
-        if pattern:
-            pattern_sql = escape_sql_literal(pattern)
-            ua_filter = f"AND regexp_matches(ua, '{pattern_sql}')"
+        ua_filter = f"AND regexp_matches(ua, '{escape_sql_literal(pattern)}')" if pattern else ""
 
         # We query unique UAs to keep local bot-matching overhead manageable
         q = SQL.FIELD_VALUES_BOT_UA.format(
@@ -1537,23 +1515,15 @@ def get_field_values(
                     continue
 
                 if bot_id not in bot_counts:
-                    bot_counts[bot_id] = {
-                        "value": bot_id,
-                        "label": bot_name,
-                        "count": 0,
-                    }
+                    bot_counts[bot_id] = {"value": bot_id, "label": bot_name, "count": 0}
                 bot_counts[bot_id]["count"] += cnt
 
         sorted_vals = sorted(bot_counts.values(), key=lambda x: x["count"], reverse=True)
-        return {"values": sorted_vals[:limit], "field": field, **runner.telemetry()}
+        return _resp(sorted_vals[:limit])
 
     # Virtual fields that explode a CSV backing column: filter-lookup
     # routes through the same unnest path so click-to-filter on a
     # specific signal / reason works the same as native columns.
-    _VIRTUAL_BACKING = {
-        "waf_sig_ind": "waf_sig",
-        "edge_score_reason_ind": "edge_score_reason",
-    }
     is_signals_individual = field in _VIRTUAL_BACKING
     backing_col = _VIRTUAL_BACKING[field] if is_signals_individual else clean_field
     if backing_col not in actual_cols:
@@ -1614,7 +1584,7 @@ def get_field_values(
 
     result = runner.execute_with_retry(q, search_params)
     if result is None:
-        return {"values": [], "field": field, **runner.telemetry()}
+        return _resp([])
     res = result.fetchall()
 
     vals = [{"value": r[0], "count": r[1]} for r in res]
@@ -1623,7 +1593,7 @@ def get_field_values(
 
         enrich_asn_labels(vals, src["name"])
 
-    return {"values": vals, "field": field, **runner.telemetry()}
+    return _resp(vals)
 
 
 # A-3 (CacheRegistry): register the dashboard response cache so the

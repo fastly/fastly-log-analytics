@@ -21,7 +21,7 @@ import { formatCount } from '@/lib/format'
 import { downloadBlob } from '@/lib/utils'
 
 const ImpossibleDistanceModal = dynamic(
-  () => import('@/components/Insights/ImpossibleDistanceModal').then((m) => m.ImpossibleDistanceModal),
+  () => import('@/components/Insights/InsightDetailModal').then((m) => m.ImpossibleDistanceModal),
   { ssr: false }
 )
 

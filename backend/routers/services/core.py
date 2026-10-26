@@ -14,14 +14,16 @@ from fastapi.responses import StreamingResponse
 from backend.core.duckdb import ensure_cid_salt
 from backend.deps import get_service_id, get_source
 from backend.models._base import DEFAULT_ERROR_RESPONSES
-from backend.models.provision import CustomFieldsExportFile, CustomFieldsImportBody, ProvisionLakeInfoResponse
 from backend.models.services import (
     CredentialsUpdateResponse,
     CronScheduleResponse,
+    CustomFieldsExportFile,
+    CustomFieldsImportBody,
     CustomFieldsImportResponse,
     LogFieldsUpdateRequest,
     LogFieldsUpdateResponse,
     OkMessageResponse,
+    ProvisionLakeInfoResponse,
     ServiceCredentialsBody,
     ServiceCronSettingsBody,
     ServicesListResponse,
@@ -234,21 +236,17 @@ async def cron_logs_stream(run_id: int, service_id: str | None = Depends(get_ser
 
     from backend.cron_progress import get_progress
 
+    def _normalize_cron_status(s: str) -> str:
+        return "done" if s in ("success", "done") else "error" if s in ("failed", "error") else s
+
     async def stream():
         last_idx = 0
         retries = 0
-        # 3 s is plenty: start_cron_run() and start_progress() run sequentially
-        # in the admin endpoints (see backend/routers/admin.py), so the gap is
-        # microseconds in practice. If we're still waiting after 3 s, the row
-        # is orphaned (server restarted mid-run) and we should surface that
-        # immediately so the UI can switch out of "Loading logs..." instead of
-        # hanging for 30 s.
         max_retries = 6  # 6 × 0.5 s = 3 s
         while True:
             evs = get_progress(run_id, last_idx, service_id=service_id)
             if evs is None:
                 if last_idx == 0:
-                    # Fall back to metadata database if progress cache doesn't have it (completed / historical)
                     try:
                         from backend.core import metadata as metadata_db
 
@@ -256,24 +254,15 @@ async def cron_logs_stream(run_id: int, service_id: str | None = Depends(get_ser
                             row = await asyncio.to_thread(metadata_db.get_cron_run_result, service_id, run_id)
                             if row:
                                 status = row["status"]
-                                # Normalize SQLite status values (success -> done, failed -> error) for SSE client compatibility
-                                normalized_status = (
-                                    "done"
-                                    if status in ("success", "done")
-                                    else "error"
-                                    if status in ("failed", "error")
-                                    else status
-                                )
+                                normalized_status = _normalize_cron_status(status)
                                 log_output = row["log_output"]
                                 if normalized_status in ("done", "error") or log_output:
                                     if log_output:
-                                        lines = log_output.split("\n")
                                         has_terminal = False
-                                        for line in lines:
+                                        for line in log_output.split("\n"):
                                             if not line.strip():
                                                 continue
-                                            t = "status"
-                                            msg = line
+                                            t, msg = "status", line
                                             if line.startswith("[") and "]" in line:
                                                 bracket_end = line.find("]")
                                                 bracket_content = line[1:bracket_end].lower()
@@ -286,19 +275,11 @@ async def cron_logs_stream(run_id: int, service_id: str | None = Depends(get_ser
                                                     "success",
                                                     "failed",
                                                 ):
-                                                    # Map sub-line types as well
-                                                    t = (
-                                                        "done"
-                                                        if bracket_content in ("success", "done")
-                                                        else "error"
-                                                        if bracket_content in ("failed", "error")
-                                                        else bracket_content
-                                                    )
+                                                    t = _normalize_cron_status(bracket_content)
                                                     msg = line[bracket_end + 1 :].strip()
                                             if t in ("done", "error"):
                                                 has_terminal = True
                                             yield json.dumps({"type": t, "message": msg})
-
                                         if not has_terminal and normalized_status in ("done", "error"):
                                             yield json.dumps(
                                                 {
@@ -307,17 +288,16 @@ async def cron_logs_stream(run_id: int, service_id: str | None = Depends(get_ser
                                                 }
                                             )
                                     else:
-                                        # No log output — generate a helpful message based on task type and status
                                         task_name = (
                                             row.get("task") if isinstance(row, dict) else (row["task"] if row else None)
                                         ) or "unknown task"
-
-                                        msg = f"Run completed with status {status}."
-                                        if normalized_status == "done" and task_name == "rum_sync":
-                                            msg = "No new RUM logs found."
-                                        elif normalized_status == "done":
-                                            msg = f"{task_name} completed with no data."
-
+                                        msg = (
+                                            "No new RUM logs found."
+                                            if normalized_status == "done" and task_name == "rum_sync"
+                                            else f"{task_name} completed with no data."
+                                            if normalized_status == "done"
+                                            else f"Run completed with status {status}."
+                                        )
                                         yield json.dumps({"type": normalized_status, "message": msg})
                                     return
                     except Exception as e:
@@ -667,7 +647,7 @@ def api_service_log_fields_get(service_id: str):
 def api_service_log_fields_set(request: Request, service_id: str, body: LogFieldsUpdateRequest):
 
     from backend.core import field_registry as lf
-    from backend.provision.cmcd_fields import reconcile_system_custom_fields
+    from backend.provision.orchestrator import reconcile_system_custom_fields
 
     require_service_in_scope(request, service_id)
 
@@ -779,7 +759,7 @@ def api_service_update_logging_settings(
         raise HTTPException(status_code=400, detail={"error": "Sample rate must be between 1 and 100"})
     token = stored_fastly_token(cfg)
     endpoint_name = prov.get("endpoint_name", "Fastly Object Storage Logs")
-    from backend.provision.utils import analytics_log_path
+    from backend.provision.cli import analytics_log_path
 
     path = analytics_log_path()
 

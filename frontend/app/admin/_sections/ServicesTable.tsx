@@ -2,66 +2,33 @@
 import React, { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useRouter } from 'next/navigation'
-import { client, extractApiError } from '@/lib/api'
-import { unwrapClient } from '@/lib/api'
+import { adminFetch, client, extractApiError, unwrapClient } from '@/lib/api'
 import { queryKeys } from '@/lib/query-keys'
-import { cronCacheBust } from '@/lib/admin-stream-apply'
+import { cronCacheBust } from '@/hooks/useSSE'
 import { useMounted } from '@/hooks/useBootstrap'
 import { useServiceStore } from '@/stores/filterStore'
-// Direct import (not via the barrel) so the page bundle drops the
-// @dnd-kit tree that the reorder-enabled DataTable pulls in.
 import { DataTableReadonly as DataTable } from '@/components/DataTable'
 import { ProvisionWizard } from '@/components/ProvisionWizard/ProvisionWizard'
-import { TeardownDialog } from '@/components/TeardownDialog'
-import { DeleteDataDialog } from '@/components/TeardownDialog'
+import { DeleteDataDialog, TeardownDialog } from '@/components/TeardownDialog'
 import { CronSettingsModal } from '@/components/CronSettingsModal/CronSettingsModal'
 import { LogSettingsModal } from '@/components/LogSettingsModal/LogSettingsModal'
-import { InviteAnalystDialog } from '@/components/InviteAnalystDialog'
+import { InviteAnalystDialog } from '@/components/share-dashboard/InvitationsPanel'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogDescription,
-  DialogFooter,
-} from '@/components/ui/dialog'
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
+  DropdownMenu, DropdownMenuContent, DropdownMenuItem,
+  DropdownMenuSeparator, DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { Badge } from '@/components/ui/badge'
-import { cn, downloadBlob, panelDialogContent, panelDialogHeaderSolid, panelDialogFooter } from '@/lib/utils'
+import { cn, downloadBlob, panelDialogContent, panelDialogFooter, panelDialogHeaderSolid } from '@/lib/utils'
 import { formatBytes, formatCount } from '@/lib/format'
-import { adminFetch } from '@/lib/api'
 import {
-  AlertCircle,
-  Bot,
-  ChevronDown,
-  CloudDownload,
-  Eraser,
-  ExternalLink,
-  Eye,
-  KeyRound,
-  Play,
-  Plus,
-  Settings,
-  Settings2,
-  Trash2,
-  UserPlus,
+  AlertCircle, Bot, ChevronDown, CloudDownload, Eraser, ExternalLink,
+  Eye, KeyRound, Play, Plus, Settings, Settings2, Trash2, UserPlus,
 } from 'lucide-react'
 import type { ColumnDef } from '@tanstack/react-table'
 import type { ServiceConfig } from '@/types/api'
@@ -80,19 +47,28 @@ interface ServiceColumnDeps {
   openCredentials: (s: ServiceConfig) => void
 }
 
+function MonoExternalCell({ text, href, title }: { text: string; href: string; title: string }) {
+  return (
+    <div className="flex items-center gap-1.5">
+      <span className="font-mono text-xs text-muted-foreground">{text}</span>
+      <a
+        href={href}
+        target="_blank"
+        rel="noreferrer"
+        className="text-muted-foreground hover:text-foreground opacity-50 hover:opacity-100 transition-opacity"
+        title={title}
+      >
+        <ExternalLink className="h-3 w-3" />
+      </a>
+    </div>
+  )
+}
+
 export function buildServiceColumns(deps: ServiceColumnDeps): ColumnDef<ServiceConfig>[] {
   const {
-    activeServiceId,
-    switchToService,
-    servicesLength,
-    setCronService,
-    setSettingsService,
-    setDeleteDataService,
-    setTeardownService,
-    setInviteService,
-    openNgwaf,
-    openRum,
-    openCredentials,
+    activeServiceId, switchToService, servicesLength, setCronService,
+    setSettingsService, setDeleteDataService, setTeardownService,
+    setInviteService, openNgwaf, openRum, openCredentials,
   } = deps
 
   return [
@@ -115,43 +91,20 @@ export function buildServiceColumns(deps: ServiceColumnDeps): ColumnDef<ServiceC
       size: 160,
       cell: ({ row }) => {
         const id = row.getValue('service_id') as string
-        return (
-          <div className="flex items-center gap-1.5">
-            <span className="font-mono text-xs text-muted-foreground">{id}</span>
-            <a
-              href={`https://manage.fastly.com/configure/services/${id}`}
-              target="_blank"
-              rel="noreferrer"
-              className="text-muted-foreground hover:text-foreground opacity-50 hover:opacity-100 transition-opacity"
-              title="View Service in Fastly"
-            >
-              <ExternalLink className="h-3 w-3" />
-            </a>
-          </div>
-        )
+        return <MonoExternalCell text={id} href={`https://manage.fastly.com/configure/services/${id}`} title="View Service in Fastly" />
       },
     },
     {
       accessorKey: 'fos_bucket',
       header: 'FOS Bucket',
       size: 180,
-      cell: ({ row }) => {
-        const bucket = row.getValue('fos_bucket') as string
-        return (
-          <div className="flex items-center gap-1.5">
-            <span className="font-mono text-xs text-muted-foreground">{bucket}</span>
-            <a
-              href="https://manage.fastly.com/resources/object-storage/buckets"
-              target="_blank"
-              rel="noreferrer"
-              className="text-muted-foreground hover:text-foreground opacity-50 hover:opacity-100 transition-opacity"
-              title="View Object Storage in Fastly"
-            >
-              <ExternalLink className="h-3 w-3" />
-            </a>
-          </div>
-        )
-      },
+      cell: ({ row }) => (
+        <MonoExternalCell
+          text={row.getValue('fos_bucket') as string}
+          href="https://manage.fastly.com/resources/object-storage/buckets"
+          title="View Object Storage in Fastly"
+        />
+      ),
     },
     {
       id: 'local_cache',
@@ -162,8 +115,8 @@ export function buildServiceColumns(deps: ServiceColumnDeps): ColumnDef<ServiceC
         const size = row.original.duckdb_size_bytes
         const files = row.original.cache_file_count || 0
         const rows = row.original.log_row_count || 0
-
-        return size ? (
+        if (!size) return <span className="text-xs text-muted-foreground italic">No cache</span>
+        return (
           <div className="flex flex-col gap-0.5">
             <span className="font-mono text-xs tabular-nums text-muted-foreground">{formatBytes(size)}</span>
             <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
@@ -179,9 +132,7 @@ export function buildServiceColumns(deps: ServiceColumnDeps): ColumnDef<ServiceC
                       e.stopPropagation()
                       const sid = row.original.service_id
                       void adminFetch(`/api/download-all?service_id=${encodeURIComponent(sid)}&include=local`).then(
-                        async (res) => {
-                          if (res.ok) downloadBlob(await res.blob(), `${sid}_local_cache.zip`)
-                        },
+                        async (res) => { if (res.ok) downloadBlob(await res.blob(), `${sid}_local_cache.zip`) },
                       )
                     }}
                     title="Download local cache as ZIP"
@@ -194,8 +145,6 @@ export function buildServiceColumns(deps: ServiceColumnDeps): ColumnDef<ServiceC
               <span>{formatCount(rows)} rows</span>
             </div>
           </div>
-        ) : (
-          <span className="text-xs text-muted-foreground italic">No cache</span>
         )
       },
     },
@@ -206,10 +155,9 @@ export function buildServiceColumns(deps: ServiceColumnDeps): ColumnDef<ServiceC
       size: 140,
       cell: ({ row }) => {
         const service = row.original
-        const cron = service.cron_sync
         return (
           <div className="flex items-center gap-2">
-            {cron?.enabled ? (
+            {service.cron_sync?.enabled ? (
               <Badge variant="success" className="shadow-none px-1.5 py-0 uppercase text-[10px] font-bold">Enabled</Badge>
             ) : (
               <Badge variant="secondary" className="px-1.5 py-0 shadow-none uppercase text-[10px] font-bold">Disabled</Badge>
@@ -235,7 +183,6 @@ export function buildServiceColumns(deps: ServiceColumnDeps): ColumnDef<ServiceC
       cell: ({ row }) => {
         const service = row.original
         const isActive = service.service_id === activeServiceId
-
         return (
           <div className="flex items-center gap-2">
             <DropdownMenu>
@@ -307,11 +254,9 @@ export function buildServiceColumns(deps: ServiceColumnDeps): ColumnDef<ServiceC
 interface CredentialsDialogProps {
   service: ServiceConfig | null
   onClose: () => void
-  /** Re-initialized whenever a new service is opened (token vs manual). */
   initialMode: 'token' | 'manual'
 }
 
-/** Keyed so opening a different service (or mode) starts from fresh form state. */
 export function CredentialsDialog(props: CredentialsDialogProps) {
   return <CredentialsDialogBody key={`${props.service?.service_id ?? ''}|${props.initialMode}`} {...props} />
 }
@@ -323,16 +268,12 @@ function CredentialsDialogBody({ service, onClose, initialMode }: CredentialsDia
   const [credSecretKey, setCredSecretKey] = useState('')
 
   const credentialsMutation = useMutation({
-    mutationFn: async ({ service_id, payload }: { service_id: string; payload: { api_token: string } | { access_key: string; secret_key: string } }) => {
-      return unwrapClient(client.PATCH("/api/services/{service_id}/credentials", {
+    mutationFn: async ({ service_id, payload }: { service_id: string; payload: { api_token: string } | { access_key: string; secret_key: string } }) =>
+      unwrapClient(client.PATCH('/api/services/{service_id}/credentials', {
         params: { path: { service_id } },
-        // The body model defaults each field to ""; the generated type marks them all required.
-        body: { api_token: '', access_key: '', secret_key: '', ...payload }
-      }))
-    },
-    onSuccess: () => {
-      onClose()
-    },
+        body: { api_token: '', access_key: '', secret_key: '', ...payload },
+      })),
+    onSuccess: () => onClose(),
   })
 
   function handleClose() {
@@ -342,7 +283,7 @@ function CredentialsDialogBody({ service, onClose, initialMode }: CredentialsDia
 
   return (
     <Dialog open={!!service} onOpenChange={(open) => { if (!open) handleClose() }}>
-      <DialogContent className={cn("sm:max-w-md", panelDialogContent)}>
+      <DialogContent className={cn('sm:max-w-md', panelDialogContent)}>
         <DialogHeader className={panelDialogHeaderSolid}>
           <DialogTitle>Rotate FOS Credentials</DialogTitle>
           <DialogDescription>
@@ -354,27 +295,21 @@ function CredentialsDialogBody({ service, onClose, initialMode }: CredentialsDia
         </DialogHeader>
 
         <div className="px-6 py-4 space-y-4 overflow-y-auto flex-1">
-          {/* Mode toggle — admins only */}
           {service?.access_level === 'read_write' && (
             <div className="flex rounded-md border overflow-hidden text-xs font-semibold">
-              <button
-                type="button"
-                className={`flex-1 py-1.5 transition-colors ${credMode === 'token' ? 'bg-primary text-primary-foreground' : 'hover:bg-muted text-muted-foreground'}`}
-                onClick={() => { setCredMode('token'); credentialsMutation.reset() }}
-              >
-                Auto (API Token)
-              </button>
-              <button
-                type="button"
-                className={`flex-1 py-1.5 transition-colors ${credMode === 'manual' ? 'bg-primary text-primary-foreground' : 'hover:bg-muted text-muted-foreground'}`}
-                onClick={() => { setCredMode('manual'); credentialsMutation.reset() }}
-              >
-                Manual
-              </button>
+              {(['token', 'manual'] as const).map((m) => (
+                <button
+                  key={m}
+                  type="button"
+                  className={`flex-1 py-1.5 transition-colors ${credMode === m ? 'bg-primary text-primary-foreground' : 'hover:bg-muted text-muted-foreground'}`}
+                  onClick={() => { setCredMode(m); credentialsMutation.reset() }}
+                >
+                  {m === 'token' ? 'Auto (API Token)' : 'Manual'}
+                </button>
+              ))}
             </div>
           )}
 
-          {/* Token mode */}
           {credMode === 'token' && service?.access_level === 'read_write' && (
             <div className="space-y-1.5">
               <Label htmlFor="cred-api-token" className="text-sm">Fastly API Token</Label>
@@ -392,7 +327,6 @@ function CredentialsDialogBody({ service, onClose, initialMode }: CredentialsDia
             </div>
           )}
 
-          {/* Manual mode */}
           {(credMode === 'manual' || service?.access_level !== 'read_write') && (
             <>
               <div className="space-y-1.5">
@@ -456,7 +390,6 @@ interface NgwafDialogProps {
   onClose: () => void
 }
 
-/** Keyed on the service id so opening a different service starts from fresh form state. */
 export function NgwafDialog(props: NgwafDialogProps) {
   return <NgwafDialogBody key={props.service?.service_id ?? ''} {...props} />
 }
@@ -467,16 +400,11 @@ function NgwafDialogBody({ service, onClose }: NgwafDialogProps) {
   const [ngwafWorkspaces, setNgwafWorkspaces] = useState<{ id: string; name: string }[]>([])
   const [ngwafFetchError, setNgwafFetchError] = useState('')
   const [ngwafSaved, setNgwafSaved] = useState(false)
-  // Security: backend now requires a caller-supplied Fastly token for
-  // the PATCH that rebinds the workspace. The admin enters the same token
-  // they use to fetch the workspaces list, so the constant-time stored-key
-  // match in the backend lets through the legitimate admin flow without
-  // requiring them to remember it from somewhere else.
   const [ngwafApiToken, setNgwafApiToken] = useState('')
 
   const fetchWorkspacesMutation = useMutation({
     mutationFn: async ({ serviceId, token }: { serviceId: string; token: string }) => {
-      const data = await unwrapClient(client.GET("/api/provision/ngwaf-workspaces", {
+      const data = await unwrapClient(client.GET('/api/provision/ngwaf-workspaces', {
         params: { query: { service_id: serviceId } },
         headers: { Authorization: `Bearer ${token}` },
       }))
@@ -486,29 +414,22 @@ function NgwafDialogBody({ service, onClose }: NgwafDialogProps) {
       setNgwafWorkspaces([])
       setNgwafFetchError('')
     },
-    onSuccess: (workspaces) => {
-      setNgwafWorkspaces(workspaces)
-    },
-    onError: (e) => {
-      setNgwafFetchError(extractApiError(e) || 'Could not load workspaces')
-    },
+    onSuccess: (workspaces) => setNgwafWorkspaces(workspaces),
+    onError: (e) => setNgwafFetchError(extractApiError(e) || 'Could not load workspaces'),
   })
 
   const saveWorkspaceMutation = useMutation({
-    mutationFn: async ({ serviceId, token, workspaceId }: { serviceId: string; token: string; workspaceId: string | null }) => {
-      return unwrapClient(client.PATCH("/api/provision/services/{service_id}/ngwaf-workspace", {
+    mutationFn: async ({ serviceId, token, workspaceId }: { serviceId: string; token: string; workspaceId: string | null }) =>
+      unwrapClient(client.PATCH('/api/provision/services/{service_id}/ngwaf-workspace', {
         params: { path: { service_id: serviceId } },
         headers: { Authorization: `Bearer ${token}` },
         body: { ngwaf_workspace_id: workspaceId },
-      }))
-    },
+      })),
     onSuccess: () => {
       setNgwafSaved(true)
       queryClient.invalidateQueries({ queryKey: queryKeys.services() })
     },
-    onError: (e) => {
-      setNgwafFetchError(extractApiError(e) || 'Failed to save')
-    },
+    onError: (e) => setNgwafFetchError(extractApiError(e) || 'Failed to save'),
   })
 
   const ngwafFetching = fetchWorkspacesMutation.isPending
@@ -516,7 +437,7 @@ function NgwafDialogBody({ service, onClose }: NgwafDialogProps) {
 
   return (
     <Dialog open={!!service} onOpenChange={(open) => { if (!open) onClose() }}>
-      <DialogContent className={cn("sm:max-w-md", panelDialogContent)}>
+      <DialogContent className={cn('sm:max-w-md', panelDialogContent)}>
         <DialogHeader className={panelDialogHeaderSolid}>
           <DialogTitle className="flex items-center gap-2">
             <Bot className="h-5 w-5 text-primary" />
@@ -528,13 +449,9 @@ function NgwafDialogBody({ service, onClose }: NgwafDialogProps) {
         </DialogHeader>
 
         <div className="px-6 py-4 space-y-4 overflow-y-auto flex-1">
-          {/* Security: token must be supplied before workspace fetch
-              AND before workspace save. Single input drives both. */}
           {service && !ngwafSaved && (
             <div className="space-y-1">
-              <Label htmlFor="ngwaf-api-token" className="text-xs font-semibold">
-                Fastly API token
-              </Label>
+              <Label htmlFor="ngwaf-api-token" className="text-xs font-semibold">Fastly API token</Label>
               <p className="text-[10px] text-muted-foreground">
                 Required to list AND save NGWAF workspace bindings (security /).
               </p>
@@ -553,8 +470,7 @@ function NgwafDialogBody({ service, onClose }: NgwafDialogProps) {
                   variant="outline"
                   disabled={!ngwafApiToken.trim() || ngwafFetching}
                   onClick={() => {
-                    if (!service) return
-                    fetchWorkspacesMutation.mutate({ serviceId: service.service_id, token: ngwafApiToken })
+                    if (service) fetchWorkspacesMutation.mutate({ serviceId: service.service_id, token: ngwafApiToken })
                   }}
                   className="h-8 text-xs"
                 >
@@ -574,10 +490,8 @@ function NgwafDialogBody({ service, onClose }: NgwafDialogProps) {
                   <SelectValue placeholder="Choose a workspace…" />
                 </SelectTrigger>
                 <SelectContent>
-                  {ngwafWorkspaces.map(w => (
-                    <SelectItem key={w.id} value={w.id} className="text-xs">
-                      {w.name}
-                    </SelectItem>
+                  {ngwafWorkspaces.map((w) => (
+                    <SelectItem key={w.id} value={w.id} className="text-xs">{w.name}</SelectItem>
                   ))}
                 </SelectContent>
               </Select>
@@ -620,15 +534,12 @@ function NgwafDialogBody({ service, onClose }: NgwafDialogProps) {
   )
 }
 
-
 export function ServicesTable() {
   const queryClient = useQueryClient()
   const mounted = useMounted()
-  // Separate selectors — each subscribes to only its slice. Destructuring
-  // useServiceStore() rebuilds the table on every setServices/setInitialized.
-  const storeServiceId = useServiceStore(s => s.activeServiceId)
+  const storeServiceId = useServiceStore((s) => s.activeServiceId)
   const activeServiceId = mounted ? storeServiceId : null
-  const setActiveServiceId = useServiceStore(s => s.setActiveServiceId)
+  const setActiveServiceId = useServiceStore((s) => s.setActiveServiceId)
   const router = useRouter()
   const [cronService, setCronService] = useState<ServiceConfig | null>(null)
   const [settingsService, setSettingsService] = useState<ServiceConfig | null>(null)
@@ -636,24 +547,15 @@ export function ServicesTable() {
   const [deleteDataService, setDeleteDataService] = useState<ServiceConfig | null>(null)
   const [inviteService, setInviteService] = useState<ServiceConfig | null>(null)
   const [credentialsService, setCredentialsService] = useState<ServiceConfig | null>(null)
-  // Cached "initial mode" for the credentials dialog — picked when the
-  // dialog opens so the child can re-init local state for each new service.
   const [credInitialMode, setCredInitialMode] = useState<'token' | 'manual'>('token')
   const [wizardOpen, setWizardOpen] = useState(false)
   const [ngwafService, setNgwafService] = useState<ServiceConfig | null>(null)
 
-  function openCredentials(service: ServiceConfig) {
+  const openCredentials = React.useCallback((service: ServiceConfig) => {
     setCredInitialMode(service.access_level === 'read_write' ? 'token' : 'manual')
     setCredentialsService(service)
-  }
+  }, [])
 
-  // Switch the active service + navigate to its dashboard. Invalidates the
-  // bootstrap query so its services list / active_service_id refresh BEFORE
-  // useBootstrap's reconcile effect runs — otherwise switching to a freshly-
-  // added service whose id isn't yet in the cached (5-min staleTime)
-  // bootstrap.services makes the reconcile treat the selection as unknown and
-  // revert it to the previous service, bouncing the admin back + to /admin.
-  // Mirrors the teardown invalidate below.
   const switchToService = React.useCallback(
     (id: string) => {
       setActiveServiceId(id)
@@ -673,18 +575,20 @@ export function ServicesTable() {
 
   const { data: services, isLoading, isFetching, isError, error } = useQuery({
     queryKey: queryKeys.services(),
-    queryFn: async ({ signal }) => {
-      return unwrapClient(client.GET("/api/services", { signal }))
-    },
+    queryFn: async ({ signal }) => unwrapClient(client.GET('/api/services', { signal })),
   })
 
   const isRefreshing = isFetching && !isLoading
 
   const handleRefreshAll = React.useCallback(() => {
-    void queryClient.invalidateQueries({ queryKey: queryKeys.services() })
-    void queryClient.invalidateQueries({ queryKey: queryKeys.admin.overviewAll() })
-    void queryClient.invalidateQueries({ queryKey: queryKeys.admin.healthSnapshot() })
-    void queryClient.invalidateQueries({ queryKey: queryKeys.syncStatus(activeServiceId) })
+    for (const queryKey of [
+      queryKeys.services(),
+      queryKeys.admin.overviewAll(),
+      queryKeys.admin.healthSnapshot(),
+      queryKeys.syncStatus(activeServiceId),
+    ]) {
+      void queryClient.invalidateQueries({ queryKey })
+    }
   }, [queryClient, activeServiceId])
 
   const columns = React.useMemo(
@@ -726,12 +630,7 @@ export function ServicesTable() {
         </div>
 
         {isLoading && (
-          <div
-            className="text-xs text-muted-foreground"
-            role="status"
-            aria-live="polite"
-            data-testid="services-loading-status"
-          >
+          <div className="text-xs text-muted-foreground" role="status" aria-live="polite" data-testid="services-loading-status">
             Loading service configs...
           </div>
         )}
@@ -763,33 +662,15 @@ export function ServicesTable() {
         </div>
       </div>
 
-      <ProvisionWizard
-        open={wizardOpen}
-        onOpenChange={setWizardOpen}
-      />
+      <ProvisionWizard open={wizardOpen} onOpenChange={setWizardOpen} />
 
       {cronService && (
-        <CronSettingsModal
-          service={cronService}
-          open={!!cronService}
-          onOpenChange={(open) => !open && setCronService(null)}
-        />
+        <CronSettingsModal service={cronService} open={!!cronService} onOpenChange={(open) => !open && setCronService(null)} />
       )}
-
       {settingsService && (
-        <LogSettingsModal
-          service={settingsService}
-          open={!!settingsService}
-          onOpenChange={(open) => !open && setSettingsService(null)}
-        />
+        <LogSettingsModal service={settingsService} open={!!settingsService} onOpenChange={(open) => !open && setSettingsService(null)} />
       )}
-
-      <InviteAnalystDialog
-        service={inviteService}
-        open={!!inviteService}
-        onOpenChange={(open) => !open && setInviteService(null)}
-      />
-
+      <InviteAnalystDialog service={inviteService} open={!!inviteService} onOpenChange={(open) => !open && setInviteService(null)} />
       <TeardownDialog
         service={teardownService}
         open={!!teardownService}
@@ -800,7 +681,6 @@ export function ServicesTable() {
           setTeardownService(null)
         }}
       />
-
       <DeleteDataDialog
         service={deleteDataService}
         open={!!deleteDataService}
@@ -811,17 +691,8 @@ export function ServicesTable() {
           setDeleteDataService(null)
         }}
       />
-
-      <CredentialsDialog
-        service={credentialsService}
-        initialMode={credInitialMode}
-        onClose={() => setCredentialsService(null)}
-      />
-
-      <NgwafDialog
-        service={ngwafService}
-        onClose={() => setNgwafService(null)}
-      />
+      <CredentialsDialog service={credentialsService} initialMode={credInitialMode} onClose={() => setCredentialsService(null)} />
+      <NgwafDialog service={ngwafService} onClose={() => setNgwafService(null)} />
     </>
   )
 }

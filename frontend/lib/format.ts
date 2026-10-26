@@ -1,32 +1,45 @@
-import { formatDistanceToNow, parseISO } from 'date-fns'
+import { differenceInSeconds, formatDistanceToNow, parseISO } from 'date-fns'
 import { formatInTimeZone, toDate } from 'date-fns-tz'
 
-/**
- * Centralized formatting and date utilities for the Fastly Log Analysis frontend.
- */
-
-// Binary units (1 KB = 1024 B); matches GCP/AWS/Fastly console conventions.
-// Bumps to the next unit once the value would show 4+ digits (e.g. 1023.24 MB
-// reads as "1 GB" instead), rather than only at the strict 1024 boundary.
-export function formatBytes(bytes: number): string {
-  if (bytes === 0) return '0 B'
-  const k = 1024
-  const sizes = ['B', 'KB', 'MB', 'GB', 'TB']
-  let value = bytes
-  let i = 0
-  while (value >= 1000 && i < sizes.length - 1) {
-    value /= k
-    i++
+const _numFmtCache = new Map<string, Intl.NumberFormat>()
+function getNumberFormat(locale?: string, options?: Intl.NumberFormatOptions): Intl.NumberFormat {
+  const key = `${locale ?? ''}|${options ? JSON.stringify(options) : ''}`
+  let fmt = _numFmtCache.get(key)
+  if (!fmt) {
+    fmt = new Intl.NumberFormat(locale, options)
+    _numFmtCache.set(key, fmt)
   }
-  return parseFloat(value.toFixed(2)) + ' ' + sizes[i]
+  return fmt
 }
 
-/**
- * Binary byte formatter with fixed per-unit decimals (B as-is, KB/MB 1 decimal,
- * GB 2 decimals) and strict 1024 thresholds. ``maxUnit: 'MB'`` keeps counting
- * in MB past 1 GiB. Distinct from ``formatBytes`` above, which bumps units at
- * 1000 and trims trailing zeros.
- */
+const _dtFmtCache = new Map<string, Intl.DateTimeFormat>()
+function getDateTimeFormat(locale: string | undefined, options: Intl.DateTimeFormatOptions): Intl.DateTimeFormat {
+  const key = `${locale ?? ''}|${JSON.stringify(options)}`
+  let fmt = _dtFmtCache.get(key)
+  if (!fmt) {
+    fmt = new Intl.DateTimeFormat(locale, options)
+    _dtFmtCache.set(key, fmt)
+  }
+  return fmt
+}
+
+const _relFmt = typeof Intl !== 'undefined' && typeof Intl.RelativeTimeFormat === 'function'
+  ? new Intl.RelativeTimeFormat('en', { numeric: 'always', style: 'narrow' })
+  : null
+
+const BYTE_UNITS = ['B', 'KB', 'MB', 'GB', 'TB'] as const
+
+export function formatBytes(bytes: number): string {
+  if (bytes === 0) return '0 B'
+  let value = bytes
+  let i = 0
+  while (value >= 1000 && i < BYTE_UNITS.length - 1) {
+    value /= 1024
+    i++
+  }
+  return `${parseFloat(value.toFixed(2))} ${BYTE_UNITS[i]}`
+}
+
 export function formatBytesTiered(
   bytes: number | null | undefined,
   options: { maxUnit?: 'MB' | 'GB'; nullText?: string } = {},
@@ -40,22 +53,16 @@ export function formatBytesTiered(
 }
 
 interface ElapsedOptions {
-  /** Seconds at which the minute / hour / day units take over. */
   minutesFrom?: number
   hoursFrom?: number
-  /** ``Infinity`` caps the ladder at hours. */
   daysFrom?: number
   rounding?: 'floor' | 'round'
-  /** Fixed decimals for the second / minute / hour / day units (0 = integer via ``rounding``). */
   fractionDigits?: { seconds?: number; minutes?: number; hours?: number; days?: number }
-  /** Below this many seconds, render ``just now`` (no suffix). */
   justNowBelow?: number
   suffix?: string
   fallback?: string
 }
 
-/** Compact elapsed-time ladder: 45s / 12m / 3h / 6d, parameterised so every
- *  caller keeps its own thresholds, rounding and decimals. */
 export function formatElapsed(seconds: number | null | undefined, options: ElapsedOptions = {}): string {
   const {
     minutesFrom = 60,
@@ -78,11 +85,8 @@ export function formatElapsed(seconds: number | null | undefined, options: Elaps
   return unit(seconds / 86400, fractionDigits.days, 'd')
 }
 
-/** BotSourcesPanel: "just now" under 2 minutes, then m / h / d ago. */
 export const ELAPSED_RELATIVE_AGO_JUST_NOW: ElapsedOptions = { suffix: ' ago', justNowBelow: 120 }
-/** ResumeBanner: s / m / h / d ago. */
 export const ELAPSED_RELATIVE_AGO: ElapsedOptions = { suffix: ' ago' }
-/** SystemHealthCard: 45s / 12m / 3.4h / 6.2d, rounded. */
 export const ELAPSED_AGE_COMPACT: ElapsedOptions = {
   rounding: 'round',
   minutesFrom: 90,
@@ -90,7 +94,6 @@ export const ELAPSED_AGE_COMPACT: ElapsedOptions = {
   daysFrom: 172800,
   fractionDigits: { hours: 1, days: 1 },
 }
-/** HighScaleRequestFactsPanel: 45s / 12m / 3.4h (never days), rounded. */
 export const ELAPSED_FRESHNESS: ElapsedOptions = {
   rounding: 'round',
   daysFrom: Infinity,
@@ -100,131 +103,76 @@ export const ELAPSED_FRESHNESS: ElapsedOptions = {
 export function resolveCountryName(code: string): string {
   if (!code || code.length !== 2 || typeof Intl === 'undefined') return code
   try {
-    const regionNames = new Intl.DisplayNames(['en'], { type: 'region' })
-    return regionNames.of(code.toUpperCase()) || code
+    return new Intl.DisplayNames(['en'], { type: 'region' }).of(code.toUpperCase()) || code
   } catch {
     return code
   }
 }
 
 export function formatCompactCount(n: number): string {
-  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1).replace(/\.0$/, '') + 'M'
-  if (n >= 1_000) return (n / 1_000).toFixed(1).replace(/\.0$/, '') + 'k'
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1).replace(/\.0$/, '')}k`
   return String(n)
 }
 
 export function formatAbbreviatedCount(n: number, millionDecimals = 1): string {
-  if (n >= 1e9) return (n / 1e9).toFixed(millionDecimals) + 'B'
-  if (n >= 1e6) return (n / 1e6).toFixed(millionDecimals) + 'M'
-  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K'
+  if (n >= 1e9) return `${(n / 1e9).toFixed(millionDecimals)}B`
+  if (n >= 1e6) return `${(n / 1e6).toFixed(millionDecimals)}M`
+  if (n >= 1e3) return `${(n / 1e3).toFixed(1)}K`
   return formatCount(n)
 }
 
-const _defaultNumberFormat = new Intl.NumberFormat(undefined)
-const _optionsNumberFormatCache = new Map<string, Intl.NumberFormat>()
-
 export function formatCount(n: number, options?: Intl.NumberFormatOptions): string {
-  if (!options) {
-    return _defaultNumberFormat.format(n)
-  }
-  const key = JSON.stringify(options)
-  let fmt = _optionsNumberFormatCache.get(key)
-  if (!fmt) {
-    fmt = new Intl.NumberFormat(undefined, options)
-    _optionsNumberFormatCache.set(key, fmt)
-  }
-  return fmt.format(n)
+  return getNumberFormat(undefined, options).format(n)
 }
 
 export function formatCountMaybe(n: number | null | undefined, options?: Intl.NumberFormatOptions): string | undefined {
   return n == null ? undefined : formatCount(n, options)
 }
 
-/**
- * Formats a raw value (like bytes or country codes) based on its field name.
- */
 export function formatValue(field: string | undefined, value: string | number | null | undefined): string {
   if (value === null || value === undefined) return 'null'
-
   if (typeof value === 'number') {
-    if (field?.includes('bytes')) return formatBytes(value)
-    return value.toLocaleString()
+    return field?.includes('bytes') ? formatBytes(value) : formatCount(value)
   }
-
   const str = String(value)
-
-  // Country Code resolution
-  if (field === 'country' && str.length === 2) {
-    return resolveCountryName(str)
-  }
-
-  if (field === 'pop' || field === 'region') {
-    return str.toUpperCase()
-  }
-
-  if (field === 'city') {
-    return str.toLowerCase().replace(/(^|[^\w])(\w)/g, m => m.toUpperCase())
-  }
-
+  if (field === 'country' && str.length === 2) return resolveCountryName(str)
+  if (field === 'pop' || field === 'region') return str.toUpperCase()
+  if (field === 'city') return str.toLowerCase().replace(/(^|[^\w])(\w)/g, (m) => m.toUpperCase())
   if (field === 'proto' || field === 'tls') {
     const num = Number(value)
     if (!isNaN(num)) return parseFloat(num.toFixed(1)).toString()
   }
-
   return str
 }
 
 export function formatCurrency(amount: number): string {
-  if (amount >= 1000) return '$' + (amount / 1000).toFixed(1).replace(/\.0$/, '') + 'k'
-  if (amount >= 1) return '$' + amount.toFixed(2)
-  return '$' + amount.toFixed(4)
+  if (amount >= 1000) return `$${(amount / 1000).toFixed(1).replace(/\.0$/, '')}k`
+  return `$${amount.toFixed(amount >= 1 ? 2 : 4)}`
 }
 
 export function formatUSD(n: number, options?: { subDollarDigits?: number }): string {
-  if (n >= 1000) return '$' + n.toFixed(0).replace(/\B(?=(\d{3})+(?!\d))/g, ',')
-  if (n >= 1) return '$' + n.toFixed(2)
-  return '$' + n.toFixed(options?.subDollarDigits ?? 4)
+  if (n >= 1000) return `$${getNumberFormat('en-US', { maximumFractionDigits: 0 }).format(Number(n.toFixed(0)))}`
+  return `$${n.toFixed(n >= 1 ? 2 : (options?.subDollarDigits ?? 4))}`
 }
 
-/**
- * Calculates the percentage delta between two numeric values.
- */
 export function calculateDelta(current: number, previous: number | undefined): number | null {
-  if (previous === undefined || previous === 0) return null;
-  return ((current - previous) / previous) * 100;
+  return previous ? ((current - previous) / previous) * 100 : null
 }
 
-/**
- * Formats a percentage ratio (e.g. 0.1234 -> "12.3%").
- * Expects a ratio between 0 and 1.
- */
 export function formatPercent(ratio: number, options?: { decimals?: number }): string {
-  const decimals = options?.decimals ?? 1
-  return `${(ratio * 100).toFixed(decimals)}%`
+  return `${(ratio * 100).toFixed(options?.decimals ?? 1)}%`
 }
 
-/**
- * Formats an already-scaled percentage value (e.g. 12.3 -> "12.3%") with nullish fallback.
- */
 export function formatPctValue(v: number | null | undefined, decimals?: number): string {
   if (v == null) return '—'
   return `${decimals != null ? v.toFixed(decimals) : v}%`
 }
 
-/**
- * Formats a millisecond value with nullish fallback.
- */
 export function formatMs(v: number | null | undefined, decimals = 1, unit = ' ms'): string {
-  if (v == null) return '—'
-  return `${v.toFixed(decimals)}${unit}`
+  return v == null ? '—' : `${v.toFixed(decimals)}${unit}`
 }
 
-/**
- * Tailwind badge classes keyed by HTTP status class.
- * - `'class'` (default): 2xx emerald, 3xx sky, 4xx amber, 5xx destructive.
- * - `'traffic-light'`: 2xx green, 3xx yellow, everything else red; a falsy
- *   status renders muted (the Insights cache-collapse modal's palette).
- */
 export function statusBadgeClass(
   status: number | string | null | undefined,
   variant: 'class' | 'traffic-light' = 'class',
@@ -245,32 +193,18 @@ export function statusBadgeClass(
   return 'bg-muted text-muted-foreground'
 }
 
-// ---------------------------------------------------------------------------
-// Date & Timezone Helpers (folded from date.ts)
-// ---------------------------------------------------------------------------
-
 export function toUTCDate(date: string | Date): Date {
   if (date instanceof Date) return date
   if (!date) return new Date(NaN)
-
-  // If it's already a valid ISO string with timezone, parse it
-  if (date.includes('T') && (date.includes('Z') || /[+-]\d{2}:?\d{2}$/.test(date))) {
-    return parseISO(date)
-  }
-
-  // Handle common "YYYY-MM-DD HH:mm:ss" format from backends
-  const utcStr = date.includes('Z') || /[+-]\d{2}:?\d{2}$/.test(date)
-    ? date.replace(' ', 'T')
-    : date.replace(' ', 'T') + 'Z'
-
-  return parseISO(utcStr)
+  const hasTz = date.includes('Z') || /[+-]\d{2}:?\d{2}$/.test(date)
+  if (date.includes('T') && hasTz) return parseISO(date)
+  return parseISO(hasTz ? date.replace(' ', 'T') : `${date.replace(' ', 'T')}Z`)
 }
 
 export function formatForInput(date: string | Date, tz: string) {
   try {
     const d = toUTCDate(date)
-    if (isNaN(d.getTime())) return ''
-    return formatInTimeZone(d, tz, "yyyy-MM-dd'T'HH:mm:ss")
+    return isNaN(d.getTime()) ? '' : formatInTimeZone(d, tz, "yyyy-MM-dd'T'HH:mm:ss")
   } catch {
     return ''
   }
@@ -279,8 +213,7 @@ export function formatForInput(date: string | Date, tz: string) {
 export function parseFromInput(dateStr: string, tz: string) {
   try {
     const d = toDate(dateStr, { timeZone: tz })
-    if (isNaN(d.getTime())) return null
-    return d.toISOString()
+    return isNaN(d.getTime()) ? null : d.toISOString()
   } catch {
     return null
   }
@@ -289,8 +222,7 @@ export function parseFromInput(dateStr: string, tz: string) {
 export function formatDate(date: string | Date, tz: string, pattern: string = 'yyyy-MM-dd h:mm:ss a') {
   try {
     const d = toUTCDate(date)
-    if (isNaN(d.getTime())) return 'Invalid Date'
-    return formatInTimeZone(d, tz, pattern)
+    return isNaN(d.getTime()) ? 'Invalid Date' : formatInTimeZone(d, tz, pattern)
   } catch (e) {
     console.error('Error formatting date:', date, e)
     return 'Invalid Date'
@@ -300,45 +232,24 @@ export function formatDate(date: string | Date, tz: string, pattern: string = 'y
 export function formatRelative(date: string | Date) {
   try {
     const d = toUTCDate(date)
-    if (isNaN(d.getTime())) return 'Invalid Date'
-    return formatDistanceToNow(d, { addSuffix: true })
+    return isNaN(d.getTime()) ? 'Invalid Date' : formatDistanceToNow(d, { addSuffix: true })
   } catch {
     return 'Invalid Date'
   }
 }
 
-function getTimeDiff(date: string | Date) {
-  const d = toUTCDate(date)
-  if (isNaN(d.getTime())) return null
-
-  const now = new Date()
-  const diffSec = Math.floor((now.getTime() - d.getTime()) / 1000)
-  return { diffSec, absSec: Math.abs(diffSec) }
-}
-
 export function formatTimeAgo(date: string | Date) {
-  const diff = getTimeDiff(date)
-  if (!diff) return ''
-  const { diffSec } = diff
-
-  if (diffSec < 0) return "just now"
-  if (diffSec < 60) return `${diffSec}s ago`
-
-  if (diffSec < 3600) {
-    const m = Math.floor(diffSec / 60)
-    const s = diffSec % 60
-    return `${m}m ${s}s ago`
-  }
-  if (diffSec < 86400) {
-    const h = Math.floor(diffSec / 3600)
-    const m = Math.floor((diffSec % 3600) / 60)
-    const s = diffSec % 60
-    return `${h}h ${m}m ${s}s ago`
-  }
-  const d = Math.floor(diffSec / 86400)
-  const h = Math.floor((diffSec % 86400) / 3600)
+  const d = toUTCDate(date)
+  if (isNaN(d.getTime())) return ''
+  const diffSec = differenceInSeconds(new Date(), d)
+  if (diffSec < 0) return 'just now'
+  if (diffSec < 60) return _relFmt ? _relFmt.format(-diffSec, 'second') : `${diffSec}s ago`
+  const s = diffSec % 60
   const m = Math.floor((diffSec % 3600) / 60)
-  return `${d}d ${h}h ${m}m ago`
+  if (diffSec < 3600) return `${m}m ${s}s ago`
+  const h = Math.floor((diffSec % 86400) / 3600)
+  if (diffSec < 86400) return `${h}h ${m}m ${s}s ago`
+  return `${Math.floor(diffSec / 86400)}d ${h}h ${m}m ago`
 }
 
 export function getTimezoneAbbr(date: Date, tz: string) {
@@ -350,110 +261,67 @@ export function formatLocalDateTime(
   options?: Intl.DateTimeFormatOptions,
 ): string {
   const d = value instanceof Date ? value : new Date(value)
-  return d.toLocaleString(undefined, options)
+  if (isNaN(d.getTime())) return d.toLocaleString(undefined, options)
+  return options ? getDateTimeFormat(undefined, options).format(d) : d.toLocaleString()
 }
 
 export function formatCompactDuration(seconds: number): string {
-  if (seconds <= 0) return 'any second'
-  return formatElapsed(seconds)
+  return seconds <= 0 ? 'any second' : formatElapsed(seconds)
 }
 
 export function formatDuration(seconds: number | null | undefined, options?: { round?: boolean }): string {
   if (seconds == null || seconds < 0) return '—'
-  const round = options?.round ?? true
-  const rounded = round ? Math.round(seconds) : seconds
+  const rounded = (options?.round ?? true) ? Math.round(seconds) : seconds
   if (rounded < 60) return `${rounded}s`
-
   const m = Math.floor(rounded / 60)
   const s = rounded % 60
-  if (m < 60) {
-    return s > 0 ? `${m}m ${s}s` : `${m}m`
-  }
-
+  if (m < 60) return s > 0 ? `${m}m ${s}s` : `${m}m`
   const h = Math.floor(m / 60)
-  const mRemaining = m % 60
-  if (h < 24) {
-    return mRemaining > 0 ? `${h}h ${mRemaining}m` : `${h}h`
-  }
-
+  const mRem = m % 60
+  if (h < 24) return mRem > 0 ? `${h}h ${mRem}m` : `${h}h`
   const d = Math.floor(h / 24)
-  const hRemaining = h % 24
-  return hRemaining > 0 ? `${d}d ${hRemaining}h` : `${d}d`
+  const hRem = h % 24
+  return hRem > 0 ? `${d}d ${hRem}h` : `${d}d`
 }
 
-/**
- * Safari-safe, deterministic UTC timestamp formatter.
- * Connects the date and time parts manually to bypass browser connection-string locale drift
- * (which throws React hydration errors on dehydrated SSR pages).
- */
 export function formatDeterministicUTC(iso: string | null | undefined): string {
   if (!iso) return '—'
   try {
     const d = new Date(iso)
     if (isNaN(d.getTime())) return iso
-
-    const datePart = d.toLocaleDateString('en-US', {
-      timeZone: 'UTC',
-      year: 'numeric',
-      month: 'short',
-      day: 'numeric',
-    })
-    const timePart = d.toLocaleTimeString('en-US', {
-      timeZone: 'UTC',
-      hour: '2-digit',
-      minute: '2-digit',
-    })
+    const datePart = getDateTimeFormat('en-US', { timeZone: 'UTC', year: 'numeric', month: 'short', day: 'numeric' }).format(d)
+    const timePart = getDateTimeFormat('en-US', { timeZone: 'UTC', hour: '2-digit', minute: '2-digit' }).format(d)
     return `${datePart}, ${timePart} UTC`
   } catch {
     return iso
   }
 }
 
-const _bucketFormatters = new Map<string, Intl.DateTimeFormat>()
-
-function _getBucketFormatter(tz: string): Intl.DateTimeFormat {
-  let fmt = _bucketFormatters.get(tz)
-  if (!fmt) {
-    fmt = new Intl.DateTimeFormat('en-US', {
-      timeZone: tz,
-      month: 'short',
-      day: 'numeric',
-      hour: 'numeric',
-      minute: '2-digit',
-      second: '2-digit',
-      hour12: true,
-    })
-    _bucketFormatters.set(tz, fmt)
-  }
-  return fmt
-}
-
-/** Map-bucket label ("Jun 15, 3:30:45 PM") in ``tz``; naive ISO strings are read as UTC, unparseable input is returned as-is. */
 export function formatBucket(iso: string, tz: string): string {
   if (!iso) return ''
-  const utc = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(iso) ? iso : iso + 'Z'
+  const utc = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(iso) ? iso : `${iso}Z`
   const d = new Date(utc)
   if (isNaN(d.getTime())) return iso
-  return _getBucketFormatter(tz).format(d)
+  return getDateTimeFormat('en-US', {
+    timeZone: tz,
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: true,
+  }).format(d)
 }
 
-/**
- * Parse a status-cache extent string to epoch millis. Handles full ISO
- * timestamps and the date-only ("YYYY-MM-DD") shorthand the status cache
- * can emit: for date-only values the `earliest` edge is treated as
- * start-of-day and the `latest` edge as end-of-day (UTC), mirroring the
- * snap parsing in FilterBar. Returns null for missing/invalid input.
- */
 export function parseExtentMs(value: unknown, edge: 'earliest' | 'latest'): number | null {
   if (typeof value !== 'string' || value.length === 0) return null
-  const iso =
-    value.length === 10
-      ? `${value}${edge === 'earliest' ? 'T00:00:00.000Z' : 'T23:59:59.999Z'}`
-      : value
+  const iso = value.length === 10
+    ? `${value}${edge === 'earliest' ? 'T00:00:00.000Z' : 'T23:59:59.999Z'}`
+    : value
   const t = Date.parse(iso)
   return Number.isNaN(t) ? null : t
 }
 
 export function toQueryDate(d: Date): string {
-  return d.toISOString().slice(0, 19) + 'Z'
+  return `${d.toISOString().slice(0, 19)}Z`
 }

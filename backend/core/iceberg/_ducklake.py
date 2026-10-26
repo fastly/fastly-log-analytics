@@ -146,42 +146,33 @@ def _default_data_path(source: dict) -> str:
     return str(local_path)
 
 
-def _ducklake_attach(con, source: dict, read_only: bool = False) -> bool:
-    """Attach the DuckLake catalog for ``source`` as ``lake`` on ``con``.
-
-    Returns True when the catalog is attached (including "already
-    attached"), False on failure. On a read-write attach the size-cap
-    option is (re)asserted — see module docstring.
-    """
-    # DUCKLAKE_CATALOG must be a PostgreSQL DSN. Under the v3 unified Postgres
-    # architecture, all deployment modes require a PostgreSQL DuckLake catalog.
+def _resolve_catalog_dsn(service_id: object) -> str | None:
+    """Resolve and normalize the mandatory PostgreSQL DuckLake catalog DSN."""
     dsn = config.DUCKLAKE_CATALOG
-    service_id = source.get("service_id") or source.get("name", "default")
-
     if not dsn:
         logger.error(
             "[ducklake] %s: DUCKLAKE_CATALOG is unset; PostgreSQL DSN is required",
             service_id,
         )
-        return False
-    elif dsn.startswith(("postgres://", "postgresql://")):
-        dsn = f"postgres:{dsn}"
-    elif not dsn.startswith("postgres:"):
-        env_dsn = os.environ.get("DUCKLAKE_CATALOG", "")
-        if env_dsn.startswith(("postgres://", "postgresql://")):
-            dsn = f"postgres:{env_dsn}"
-        else:
-            logger.error(
-                "[ducklake] %s: DUCKLAKE_CATALOG must be a postgres DSN, got: %s",
-                service_id,
-                dsn,
-            )
-            return False
+        return None
+    if dsn.startswith(("postgres://", "postgresql://")):
+        return f"postgres:{dsn}"
+    if dsn.startswith("postgres:"):
+        return dsn
+    env_dsn = os.environ.get("DUCKLAKE_CATALOG", "")
+    if env_dsn.startswith(("postgres://", "postgresql://")):
+        return f"postgres:{env_dsn}"
+    logger.error(
+        "[ducklake] %s: DUCKLAKE_CATALOG must be a postgres DSN, got: %s",
+        service_id,
+        dsn,
+    )
+    return None
 
+
+def _resolve_data_path(source: dict, service_id: object) -> str:
+    """Resolve DATA_PATH for ``source`` and enforce the remote-S3 scan guard."""
     data_path = config.DUCKLAKE_DATA_PATH or _default_data_path(source)
-
-    # Failsafe Guardrail: Analytical data must never be read/scanned over remote S3/HTTP
-    # unless explicitly permitted via ALLOW_REMOTE_S3_PARQUET_SCAN=1.
     if data_path.startswith(("s3://", "http://", "https://")):
         allow_remote = os.getenv("ALLOW_REMOTE_S3_PARQUET_SCAN", "0").lower() in (
             "1",
@@ -198,54 +189,100 @@ def _ducklake_attach(con, source: dict, read_only: bool = False) -> bool:
                 data_path,
                 local_fallback,
             )
-            data_path = local_fallback
-        else:
-            logger.warning(
-                "⚠️ [storage-guard] Remote S3 DuckLake parquet scan is actively allowed via ALLOW_REMOTE_S3_PARQUET_SCAN=1 "
-                "(service=%s, data_path=%s). Queries will incur S3 network latency.",
-                service_id,
-                data_path,
-            )
-
-    # Everything below — extension load included — races with any other
-    # connection in this process attaching the same "lake" alias
-    # concurrently; see _attach_lock's docstring. A hang was observed in
-    # testing when only the ATTACH statements were serialized and
-    # INSTALL/LOAD ducklake was left outside the lock, so the whole
-    # function body is covered.
-    if not _attach_lock.acquire(timeout=_ATTACH_LOCK_TIMEOUT_S):
+            return local_fallback
         logger.warning(
-            "[ducklake] %s: timed out after %.0fs waiting for the process-wide attach lock — "
-            "another connection's ATTACH is taking unusually long (e.g. a concurrent cron writer "
-            "mid-ingest). Failing fast instead of hanging this caller's pool connection indefinitely.",
+            "⚠️ [storage-guard] Remote S3 DuckLake parquet scan is actively allowed via ALLOW_REMOTE_S3_PARQUET_SCAN=1 "
+            "(service=%s, data_path=%s). Queries will incur S3 network latency.",
             service_id,
-            _ATTACH_LOCK_TIMEOUT_S,
+            data_path,
         )
+    return data_path
+
+
+def _acquire_attach_lock(service_id: object, reason: str) -> bool:
+    """Acquire the process-wide ``_attach_lock`` with timeout logging."""
+    if _attach_lock.acquire(timeout=_ATTACH_LOCK_TIMEOUT_S):
+        return True
+    logger.warning("[ducklake] %s: %s", service_id, reason)
+    return False
+
+
+def _sleep_releasing_attach_lock(service_id: object, reason: str) -> bool:
+    """Release ``_attach_lock``, sleep for the conflict backoff, and re-acquire."""
+    _attach_lock.release()
+    time.sleep(_ATTACH_CONFLICT_RETRY_SLEEP_S)
+    return _acquire_attach_lock(
+        service_id,
+        f"timed out re-acquiring the attach lock while retrying after {reason}",
+    )
+
+
+def _detach_unlocked(con, aliases: tuple[str, ...] = ("lake",), *, ignore_errors: bool = True) -> None:
+    """Execute ``DETACH <alias>`` for each alias when caller already holds ``_attach_lock``."""
+    for alias in aliases:
+        try:
+            con.execute(f"DETACH {alias}")
+        except Exception:
+            if not ignore_errors:
+                raise
+            logger.debug("_ducklake: DETACH %s failed (ignored)", alias, exc_info=True)
+
+
+def _probe_lake_usable(con) -> Exception | None:
+    """Return None when ``ducklake_snapshots('lake')`` succeeds, else the exception."""
+    try:
+        con.execute("SELECT 1 FROM ducklake_snapshots('lake') LIMIT 1").fetchone()
+        return None
+    except Exception as exc:
+        return exc
+
+
+def _load_ducklake_extension(con, service_id: object) -> bool:
+    """Configure extension directory and load the DuckLake extension."""
+    bundled_extension = os.getenv("DUCKLAKE_EXTENSION_PATH")
+    try:
+        extension_directory = os.getenv("DUCKDB_EXTENSION_DIRECTORY")
+        if extension_directory:
+            os.makedirs(extension_directory, exist_ok=True)
+            con.execute(f"SET extension_directory = '{escape_sql_literal(extension_directory)}';")
+        if bundled_extension:
+            con.execute(f"LOAD '{escape_sql_literal(bundled_extension)}';")
+        else:
+            try:
+                con.execute("LOAD ducklake;")
+            except Exception:
+                con.execute("INSTALL ducklake; LOAD ducklake;")
+        return True
+    except Exception as e:
+        source_description = "bundled" if bundled_extension else "installed"
+        logger.warning("[ducklake] %s: failed to load %s DuckLake extension: %s", service_id, source_description, e)
         return False
-    # Tracks whether THIS thread currently holds _attach_lock. The
-    # file-handle-conflict retry loop below releases the lock during its
-    # backoff sleep and re-acquires it afterward, so the single `finally`
-    # release at the bottom must only fire when we're actually still
-    # holding it (otherwise a timed-out re-acquire would double-release).
+
+
+def _ducklake_attach(con, source: dict, read_only: bool = False) -> bool:
+    """Attach the DuckLake catalog for ``source`` as ``lake`` on ``con``.
+
+    Returns True when the catalog is attached (including "already
+    attached"), False on failure. On a read-write attach the size-cap
+    option is (re)asserted — see module docstring.
+    """
+    service_id = source.get("service_id") or source.get("name", "default")
+    dsn = _resolve_catalog_dsn(service_id)
+    if not dsn:
+        return False
+    data_path = _resolve_data_path(source, service_id)
+
+    if not _acquire_attach_lock(
+        service_id,
+        f"timed out after {_ATTACH_LOCK_TIMEOUT_S:.0f}s waiting for the process-wide attach lock — "
+        "another connection's ATTACH is taking unusually long (e.g. a concurrent cron writer "
+        "mid-ingest). Failing fast instead of hanging this caller's pool connection indefinitely.",
+    ):
+        return False
+
     lock_held = True
     try:
-        bundled_extension = os.getenv("DUCKLAKE_EXTENSION_PATH")
-        try:
-            extension_directory = os.getenv("DUCKDB_EXTENSION_DIRECTORY")
-            if extension_directory:
-                os.makedirs(extension_directory, exist_ok=True)
-                escaped_extension_directory = escape_sql_literal(extension_directory)
-                con.execute(f"SET extension_directory = '{escaped_extension_directory}';")
-            if bundled_extension:
-                con.execute(f"LOAD '{escape_sql_literal(bundled_extension)}';")
-            else:
-                try:
-                    con.execute("LOAD ducklake;")
-                except Exception:
-                    con.execute("INSTALL ducklake; LOAD ducklake;")
-        except Exception as e:
-            source_description = "bundled" if bundled_extension else "installed"
-            logger.warning("[ducklake] %s: failed to load %s DuckLake extension: %s", service_id, source_description, e)
+        if not _load_ducklake_extension(con, service_id):
             return False
 
         try:
@@ -255,46 +292,28 @@ def _ducklake_attach(con, source: dict, read_only: bool = False) -> bool:
             return False
         if attached:
             existing_read_only = bool(attached[0])
-            # A read-only CALLER never needs to force a downgrade: an
-            # existing READ-WRITE attach already supports SELECT queries
-            # just fine, and — critically — "lake" is a per-db-path shared
-            # attach, not a per-Python-connection one (duckdb.connect() to
-            # the SAME service .duckdb file reuses one underlying instance,
-            # so every connection to that file sees the SAME attached
-            # "lake"). Unconditionally detaching on a mode mismatch used to
-            # mean: any get_connection() reader that raced a live writer
-            # (ingest/buffer/commit, which needs read_only=False) would rip
-            # the writer's in-flight attach out from under it, mid-use, to
-            # re-attach its own read-only preference — which is exactly the
-            # DuckDB-core "Unique file handle conflict ... in the process of
-            # being detached" race observed at backend cold start, when the
-            # pool warm-up / view pre-warm / legacy-adoption sweep / first
-            # cron tick all open connections in the same narrow window.
-            # Only an actual write CALLER (read_only=False) still needs to
-            # force the upgrade below when it finds a read-only attach —
-            # DuckDB itself has no "upgrade in place" primitive.
+            # Read-only callers reuse an existing read-write attach without detaching;
+            # see module docstring and ADR-18 on avoiding unique file handle conflicts.
             if existing_read_only or not read_only:
-                if bool(attached[0]) == read_only:
-                    try:
-                        con.execute("SELECT 1 FROM ducklake_snapshots('lake') LIMIT 1").fetchone()
-                    except Exception as e:
-                        try:
-                            con.execute("DETACH lake")
-                        except Exception as detach_err:
-                            logger.warning(
-                                "[ducklake] %s: existing lake catalog is unusable (%s) and detach failed: %s",
-                                service_id,
-                                e,
-                                detach_err,
-                            )
-                            return False
-                    else:
+                if existing_read_only == read_only:
+                    probe_err = _probe_lake_usable(con)
+                    if probe_err is None:
                         if not read_only:
                             _apply_target_file_size(con)
                         return True
+                    try:
+                        _detach_unlocked(con, ("lake",), ignore_errors=False)
+                    except Exception as detach_err:
+                        logger.warning(
+                            "[ducklake] %s: existing lake catalog is unusable (%s) and detach failed: %s",
+                            service_id,
+                            probe_err,
+                            detach_err,
+                        )
+                        return False
                 else:
                     try:
-                        con.execute("DETACH lake")
+                        _detach_unlocked(con, ("lake",), ignore_errors=False)
                     except Exception as detach_err:
                         logger.warning(
                             "[ducklake] %s: failed to detach mismatched lake catalog: %s",
@@ -303,16 +322,12 @@ def _ducklake_attach(con, source: dict, read_only: bool = False) -> bool:
                         )
                         return False
             else:
-                # existing is READ-WRITE, caller only wants READ-ONLY:
-                # reuse the existing (stronger) attach as-is rather than
-                # detaching it.
-                try:
-                    con.execute("SELECT 1 FROM ducklake_snapshots('lake') LIMIT 1").fetchone()
-                except Exception as e:
+                probe_err = _probe_lake_usable(con)
+                if probe_err is not None:
                     logger.warning(
                         "[ducklake] %s: existing read-write lake catalog is unusable for read: %s",
                         service_id,
-                        e,
+                        probe_err,
                     )
                     return False
                 return True
@@ -326,7 +341,7 @@ def _ducklake_attach(con, source: dict, read_only: bool = False) -> bool:
             return False
         if orphaned_metadata:
             try:
-                con.execute("DETACH __ducklake_metadata_lake")
+                _detach_unlocked(con, ("__ducklake_metadata_lake",), ignore_errors=False)
             except Exception as detach_err:
                 logger.warning(
                     "[ducklake] %s: failed to detach orphaned DuckLake metadata catalog: %s",
@@ -336,10 +351,8 @@ def _ducklake_attach(con, source: dict, read_only: bool = False) -> bool:
                 return False
 
         ro = ", READ_ONLY" if read_only else ""
-        attach_sql = (
-            f"ATTACH 'ducklake:{escape_sql_literal(dsn)}' AS lake "
-            f"(DATA_PATH '{escape_sql_literal(data_path)}'{ro}, OVERRIDE_DATA_PATH TRUE, DATA_INLINING_ROW_LIMIT 0);"
-        )
+        base_opts = f"DATA_PATH '{escape_sql_literal(data_path)}', OVERRIDE_DATA_PATH TRUE, DATA_INLINING_ROW_LIMIT 0"
+        attach_sql = f"ATTACH 'ducklake:{escape_sql_literal(dsn)}' AS lake ({base_opts}{ro});"
         for attempt in range(_ATTACH_CONFLICT_RETRY_ATTEMPTS):
             try:
                 con.execute(attach_sql)
@@ -347,15 +360,9 @@ def _ducklake_attach(con, source: dict, read_only: bool = False) -> bool:
             except Exception as e:
                 msg = str(e).lower()
                 if read_only and attempt == 0 and ("does not exist" in msg or "explicitly disabled" in msg):
-                    # A read-only attach of a not-yet-initialized catalog fails ("does
-                    # not exist - and creating a new DuckLake is explicitly disabled") —
-                    # initialize it on-demand with a transient read-write attach, then retry in the loop.
                     try:
-                        con.execute(
-                            f"ATTACH 'ducklake:{escape_sql_literal(dsn)}' AS __lake_init "
-                            f"(DATA_PATH '{escape_sql_literal(data_path)}', OVERRIDE_DATA_PATH TRUE, DATA_INLINING_ROW_LIMIT 0);"
-                        )
-                        con.execute("DETACH __lake_init")
+                        con.execute(f"ATTACH 'ducklake:{escape_sql_literal(dsn)}' AS __lake_init ({base_opts});")
+                        _detach_unlocked(con, ("__lake_init",), ignore_errors=False)
                         continue
                     except Exception as init_err:
                         if "already attached" not in str(init_err) and "already exists" not in str(init_err):
@@ -365,29 +372,11 @@ def _ducklake_attach(con, source: dict, read_only: bool = False) -> bool:
                                 init_err,
                             )
                 if "unique file handle conflict" in msg or "already attached by database" in msg:
-                    for alias in ("lake", "__ducklake_metadata_lake"):
-                        try:
-                            con.execute(f"DETACH {alias}")
-                        except Exception:
-                            logger.debug("_ducklake_attach: con.execute failed (ignored)", exc_info=True)
+                    _detach_unlocked(con, ("lake", "__ducklake_metadata_lake"))
                     if attempt < _ATTACH_CONFLICT_RETRY_ATTEMPTS - 1:
-                        # Release the process-wide lock while we wait: the
-                        # conflict is with a DIFFERENT connection's already
-                        # -completed (and thus already-unlocked) attach, so
-                        # holding _attach_lock here only forces an unrelated
-                        # third connection to needlessly queue behind our
-                        # wait. Re-acquire before the next attempt.
-                        _attach_lock.release()
-                        lock_held = False
-                        time.sleep(_ATTACH_CONFLICT_RETRY_SLEEP_S)
-                        if not _attach_lock.acquire(timeout=_ATTACH_LOCK_TIMEOUT_S):
-                            logger.warning(
-                                "[ducklake] %s: timed out re-acquiring the attach lock while retrying "
-                                "after a file-handle conflict",
-                                service_id,
-                            )
+                        lock_held = _sleep_releasing_attach_lock(service_id, "a file-handle conflict")
+                        if not lock_held:
                             return False
-                        lock_held = True
                         continue
                     logger.warning(
                         "[ducklake] %s: failed to attach ducklake catalog after %d attempts over ~%.0fs "
@@ -399,29 +388,19 @@ def _ducklake_attach(con, source: dict, read_only: bool = False) -> bool:
                     )
                     return False
                 if ("database with name" in msg and "already exists" in msg) or ("already attached" in msg):
-                    # Check if the mode matches what we want
                     try:
                         row = con.execute(
                             "SELECT readonly FROM duckdb_databases() WHERE database_name = 'lake'"
                         ).fetchone()
                         if row and bool(row[0]) == read_only:
                             return True
-                        elif row:
-                            # Mode mismatch. Detach and let the loop retry.
+                        if row:
                             try:
-                                con.execute("DETACH lake")
+                                _detach_unlocked(con, ("lake",), ignore_errors=False)
                                 if attempt < _ATTACH_CONFLICT_RETRY_ATTEMPTS - 1:
-                                    _attach_lock.release()
-                                    lock_held = False
-                                    time.sleep(_ATTACH_CONFLICT_RETRY_SLEEP_S)
-                                    if not _attach_lock.acquire(timeout=_ATTACH_LOCK_TIMEOUT_S):
-                                        logger.warning(
-                                            "[ducklake] %s: timed out re-acquiring the attach lock while retrying "
-                                            "after a mode mismatch",
-                                            service_id,
-                                        )
+                                    lock_held = _sleep_releasing_attach_lock(service_id, "a mode mismatch")
+                                    if not lock_held:
                                         return False
-                                    lock_held = True
                                     continue
                             except Exception as detach_err:
                                 logger.warning(
@@ -436,7 +415,6 @@ def _ducklake_attach(con, source: dict, read_only: bool = False) -> bool:
                 logger.warning("[ducklake] %s: failed to attach ducklake catalog: %s", service_id, e)
                 return False
         else:
-            # If the loop exhausts all attempts without breaking (e.g., continue on last attempt)
             logger.warning("[ducklake] %s: failed to attach ducklake catalog (retries exhausted)", service_id)
             return False
 
@@ -449,34 +427,14 @@ def _ducklake_attach(con, source: dict, read_only: bool = False) -> bool:
 
 
 def _ducklake_detach(con, aliases: tuple[str, ...] = ("lake",), service_id: str = "default") -> None:
-    """Detach ``aliases`` from ``con`` under the same process-wide lock ``_ducklake_attach`` uses.
-
-    DETACH mutates the same shared/racy DuckLake catalog state that ATTACH
-    does (see ``_attach_lock``'s docstring — the race was verified
-    empirically across connections attached to the same on-disk file). A
-    raw, unlocked ``con.execute("DETACH lake")`` from one connection can rip
-    the catalog out from under another connection concurrently inside a
-    locked ``_ducklake_attach`` call on a different connection, which is
-    what produced production's "Schema with name lake does not exist!"
-    commit failures — the OTHER connection's attach/inspection assumed
-    "lake" would stay attached and was never re-verified afterward. Every
-    caller that used to call ``con.execute("DETACH lake")`` directly must
-    route through this helper instead.
-    """
-    if not _attach_lock.acquire(timeout=_ATTACH_LOCK_TIMEOUT_S):
-        logger.warning(
-            "[ducklake] %s: timed out after %.0fs waiting for the process-wide attach lock to detach %s",
-            service_id,
-            _ATTACH_LOCK_TIMEOUT_S,
-            aliases,
-        )
+    """Detach ``aliases`` from ``con`` under the same process-wide lock ``_ducklake_attach`` uses."""
+    if not _acquire_attach_lock(
+        service_id,
+        f"timed out after {_ATTACH_LOCK_TIMEOUT_S:.0f}s waiting for the process-wide attach lock to detach {aliases}",
+    ):
         return
     try:
-        for alias in aliases:
-            try:
-                con.execute(f"DETACH {alias}")
-            except Exception:
-                logger.debug("_ducklake_detach: con.execute failed (ignored)", exc_info=True)
+        _detach_unlocked(con, aliases)
     finally:
         _attach_lock.release()
 

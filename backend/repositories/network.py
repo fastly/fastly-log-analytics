@@ -416,12 +416,25 @@ def _opt_float(val: Any, ndigits: int | None = None) -> float | None:
 
 
 def _get_schema_cols_cached(src: dict, table_name: str, get_runner: Callable[[], QueryRunner]) -> set[str]:
-    from backend.core._duckdb_status import _schema_cache
-
-    cached_schema = _schema_cache.get((src["name"], table_name, True))
+    cached_schema = _db._schema_cache.get((src["name"], table_name, True))
     if cached_schema is not None:
         return {c["name"] for c in cached_schema}
     return set(get_runner().get_schema_cols())
+
+
+def _lazy_runner(con_factory: Any, src: dict) -> tuple[Callable[[], QueryRunner], Callable[[], dict[str, Any]]]:
+    runner: QueryRunner | None = None
+
+    def get_runner() -> QueryRunner:
+        nonlocal runner
+        if runner is None:
+            runner = QueryRunner(con_factory, src)
+        return runner
+
+    def telemetry() -> dict[str, Any]:
+        return runner.telemetry() if runner is not None else {"telemetry": {}}
+
+    return get_runner, telemetry
 
 
 def get_health(
@@ -510,26 +523,17 @@ def get_health(
 
     observation = _memo.result({}, state="bypass" if force_refresh else "miss")
     table_name = _safe_table(src["name"])
+    get_runner, _telemetry = _lazy_runner(con_factory, src)
 
-    _runner: QueryRunner | None = None
-
-    def get_runner() -> QueryRunner:
-        nonlocal _runner
-        if _runner is None:
-            _runner = QueryRunner(con_factory, src)
-        return _runner
+    def _unavailable(reason: str) -> dict[str, Any]:
+        return {"available": False, "reason": reason, **observation, **_telemetry()}
 
     _t = _time.perf_counter()
     actual_cols = _get_schema_cols_cached(src, table_name, get_runner)
     timer.mark("get_schema_cols", _t, activity="overhead", current_execution=True)
 
     if not {"tcp_rtt", "asn"}.issubset(actual_cols):
-        return {
-            "available": False,
-            "reason": "Enable Groups F and G (Network Quality) in your log field configuration.",
-            **observation,
-            **(_runner.telemetry() if _runner else {"telemetry": {}}),
-        }
+        return _unavailable("Enable Groups F and G (Network Quality) in your log field configuration.")
 
     has_ploss = "ploss" in actual_cols
     has_rtt_min = "rtt_min" in actual_cols
@@ -846,12 +850,7 @@ def get_health(
         try:
             (countries, heatmap_rows, map_rows, metro_rows), is_leader = coalesce(temp_key, _build_temp_results)
         except _TempTableUnavailable:
-            return {
-                "available": False,
-                "reason": "Data temporarily unavailable — view refresh failed. Retry in a moment.",
-                **observation,
-                **(_runner.telemetry() if _runner else {"telemetry": {}}),
-            }
+            return _unavailable("Data temporarily unavailable — view refresh failed. Retry in a moment.")
         if not is_leader:
             # This request never acquired its own temp table — it borrowed
             # the leader's already-computed rows. Mirrors "network:temp_skipped"
@@ -1027,23 +1026,22 @@ def get_health(
             return idx
 
         dma_map = _db._get_dma_map() if has_metro and (map_rows or metro_rows) else {}
+
+        def _dma_city(metro_raw: Any, fallback: str) -> tuple[int | None, str]:
+            mc = _parse_metro_code(metro_raw)
+            return mc, dma_map[str(mc)] if mc is not None and str(mc) in dma_map else fallback
+
         if map_rows:
             map_by_bucket: dict[str, list[dict]] = {}
             for r in map_rows:
                 ctry = r[0]
                 city = r[1] or ""
                 lat, lon = _opt_float(r[2]), _opt_float(r[3])
-                metro_raw = r[4]
                 bucket = _bucket_str(r[5])
                 rtt, pkt, err = _opt_float(r[6]), _opt_float(r[7]), _opt_float(r[8])
                 reqs = int(r[9])
                 hs = _health_score(None, None, pkt, None, err)
-                metro_code = _parse_metro_code(metro_raw)
-                display_city = (
-                    dma_map[str(metro_code)]
-                    if metro_code is not None and str(metro_code) in dma_map
-                    else (city.title() if city else "")
-                )
+                metro_code, display_city = _dma_city(r[4], city.title() if city else "")
 
                 map_by_bucket.setdefault(bucket, []).append(
                     {
@@ -1070,13 +1068,9 @@ def get_health(
                 ctry = r[0]
                 city = r[1] or ""
                 region = r[2] or ""
-                metro_raw = r[3]
                 pkt, err = _opt_float(r[5]), _opt_float(r[6])
                 hs = _health_score(None, None, pkt, None, err)
-                metro_code = _parse_metro_code(metro_raw)
-                city_for_label = (
-                    dma_map[str(metro_code)] if metro_code is not None and str(metro_code) in dma_map else city
-                )
+                _, city_for_label = _dma_city(r[3], city)
                 display = format_city_label(city_for_label, ctry, region)
 
                 metro_leaderboard.append(
@@ -1241,28 +1235,28 @@ def get_health(
             "countries": countries,
             "has_metro": has_metro,
             "section_timings": section_timings,
-            **(_runner.telemetry() if _runner else {"telemetry": {}}),
+            **_telemetry(),
         }
-        if _want("buckets"):
-            payload["buckets"] = all_buckets
-        if _want("heatmap"):
-            payload["heatmap"] = heatmap
-        if _want("map_buckets"):
-            payload["map_buckets"] = map_buckets
-        if _want("cities"):
-            payload["cities"] = cities_list
-        if _want("leaderboard"):
-            payload["leaderboard"] = leaderboard
-        if _want("metro_leaderboard"):
-            payload["metro_leaderboard"] = metro_leaderboard
-        if _want("summary"):
-            payload["summary"] = {
-                "global_health_score": global_hs,
-                "avg_rtt_ms": avg_rtt_ms,
-                "total_reqs": total_reqs,
-                "worst_asn": worst_asn,
-                "worst_country": worst_country,
-            }
+        for sec_key, sec_val in (
+            ("buckets", all_buckets),
+            ("heatmap", heatmap),
+            ("map_buckets", map_buckets),
+            ("cities", cities_list),
+            ("leaderboard", leaderboard),
+            ("metro_leaderboard", metro_leaderboard),
+            (
+                "summary",
+                {
+                    "global_health_score": global_hs,
+                    "avg_rtt_ms": avg_rtt_ms,
+                    "total_reqs": total_reqs,
+                    "worst_asn": worst_asn,
+                    "worst_country": worst_country,
+                },
+            ),
+        ):
+            if _want(sec_key):
+                payload[sec_key] = sec_val
         # Write for EVERY section-set (the key is sections-partitioned), not
         # only ``sections is None`` — that's what makes the live FE shapes
         # cacheable. SECURITY: only cache a result that carries real signal so
@@ -1317,14 +1311,7 @@ def get_quality(
     section_timings = timer.entries
 
     table_name = _safe_table(src["name"])
-
-    _runner: QueryRunner | None = None
-
-    def get_runner() -> QueryRunner:
-        nonlocal _runner
-        if _runner is None:
-            _runner = QueryRunner(con_factory, src)
-        return _runner
+    get_runner, _ = _lazy_runner(con_factory, src)
 
     _t = _time.perf_counter()
     rolled = get_runner().try_network_quality_from_rollup(
@@ -1472,14 +1459,7 @@ def get_transport_metrics(
 ) -> dict[str, Any]:
     timer = SectionTimer()
     table_name = _safe_table(src["name"])
-    runner: QueryRunner | None = None
-
-    def get_runner() -> QueryRunner:
-        nonlocal runner
-        if runner is None:
-            c = con_factory() if callable(con_factory) else con_factory
-            runner = QueryRunner(c, src)
-        return runner
+    get_runner, _ = _lazy_runner(con_factory, src)
 
     actual_cols = set(get_runner().get_schema_cols())
     optional_fields = ["tcp_rtt", "retrans", "ploss", "delivery_rate"]
@@ -1508,44 +1488,33 @@ def get_transport_metrics(
     except Exception:
         return default_resp
 
-    if filters is None:
-        filters = {}
-
-    params, where_clause = build_where_clause(start_time, end_time, filters, list(actual_cols), inline_params=True)
-
-    select_parts = ["COUNT(*) AS total_reqs"]
-    if "resp_bytes" in actual_cols:
-        select_parts.append(f"{sum_or_zero('resp_bytes')} AS total_bytes")
-    elif "bytes" in actual_cols:
-        select_parts.append(f"{sum_or_zero('bytes')} AS total_bytes")
-    else:
-        select_parts.append("0 AS total_bytes")
+    params, where_clause = build_where_clause(
+        start_time, end_time, filters or {}, list(actual_cols), inline_params=True
+    )
 
     _rtt_quants = (("0.50", "rtt_p50"), ("0.90", "rtt_p90"), ("0.95", "rtt_p95"), ("0.99", "rtt_p99"))
-    if "tcp_rtt" in actual_cols:
-        select_parts.extend(
-            f"approx_quantile(CAST(tcp_rtt AS DOUBLE), {q}) FILTER (WHERE tcp_rtt IS NOT NULL AND tcp_rtt > 0) / 1000.0 AS {alias}"
+    bytes_col = "resp_bytes" if "resp_bytes" in actual_cols else ("bytes" if "bytes" in actual_cols else None)
+    select_parts = [
+        "COUNT(*) AS total_reqs",
+        f"{sum_or_zero(bytes_col)} AS total_bytes" if bytes_col else "0 AS total_bytes",
+        *(
+            (
+                f"approx_quantile(CAST(tcp_rtt AS DOUBLE), {q}) FILTER (WHERE tcp_rtt IS NOT NULL AND tcp_rtt > 0) / 1000.0 AS {alias}"
+                if "tcp_rtt" in actual_cols
+                else f"NULL AS {alias}"
+            )
             for q, alias in _rtt_quants
-        )
-    else:
-        select_parts.extend(f"NULL AS {alias}" for _, alias in _rtt_quants)
-
-    if "retrans" in actual_cols:
-        select_parts.append("AVG(CAST(retrans AS DOUBLE)) FILTER (WHERE retrans IS NOT NULL) AS avg_retrans")
-    else:
-        select_parts.append("NULL AS avg_retrans")
-
-    if "ploss" in actual_cols:
-        select_parts.append("AVG(CAST(ploss AS DOUBLE)) FILTER (WHERE ploss IS NOT NULL) * 100.0 AS avg_ploss_pct")
-    else:
-        select_parts.append("NULL AS avg_ploss_pct")
-
-    if "delivery_rate" in actual_cols:
-        select_parts.append(
-            "AVG(CAST(delivery_rate AS DOUBLE)) FILTER (WHERE delivery_rate IS NOT NULL AND delivery_rate > 0) * 8.0 / 1e6 AS avg_del_rate_mbps"
-        )
-    else:
-        select_parts.append("NULL AS avg_del_rate_mbps")
+        ),
+        "AVG(CAST(retrans AS DOUBLE)) FILTER (WHERE retrans IS NOT NULL) AS avg_retrans"
+        if "retrans" in actual_cols
+        else "NULL AS avg_retrans",
+        "AVG(CAST(ploss AS DOUBLE)) FILTER (WHERE ploss IS NOT NULL) * 100.0 AS avg_ploss_pct"
+        if "ploss" in actual_cols
+        else "NULL AS avg_ploss_pct",
+        "AVG(CAST(delivery_rate AS DOUBLE)) FILTER (WHERE delivery_rate IS NOT NULL AND delivery_rate > 0) * 8.0 / 1e6 AS avg_del_rate_mbps"
+        if "delivery_rate" in actual_cols
+        else "NULL AS avg_del_rate_mbps",
+    ]
 
     main_sql = f"SELECT {', '.join(select_parts)} FROM {table_name} WHERE {where_clause}"
     _t0 = _time.perf_counter()
@@ -1566,47 +1535,24 @@ def get_transport_metrics(
         logger.warning("Failed to query transport aggregates: %s", e)
         return default_resp
 
-    def _shape_proto_rows(proto_rows: list[tuple]) -> list[dict[str, Any]]:
-        sum_proto_reqs = sum(r[1] for r in proto_rows) or total_requests or 1
-        return [
-            {
-                "protocol": str(r[0]),
-                "requests": int(r[1]),
-                "share_pct": round(int(r[1]) * 100.0 / sum_proto_reqs, 2),
-            }
-            for r in proto_rows
-        ]
-
-    protocol_distribution = []
+    protocol_distribution: list[dict[str, Any]] = []
     proto_col = "protocol" if "protocol" in actual_cols else ("proto" if "proto" in actual_cols else None)
-    if proto_col:
-        _t1 = _time.perf_counter()
-        proto_sql = f"""
-            SELECT
-                CASE
+    proto_expr = (
+        f"""CASE
                     WHEN CAST({proto_col} AS VARCHAR) IN ('3.0', '3', 'HTTP/3') THEN 'HTTP/3'
                     WHEN CAST({proto_col} AS VARCHAR) IN ('2.0', '2', 'HTTP/2') THEN 'HTTP/2'
                     WHEN CAST({proto_col} AS VARCHAR) IN ('1.1', 'HTTP/1.1') THEN 'HTTP/1.1'
                     WHEN CAST({proto_col} AS VARCHAR) IN ('1.0', 'HTTP/1.0') THEN 'HTTP/1.0'
                     ELSE COALESCE(CAST({proto_col} AS VARCHAR), 'Other')
-                END AS proto_clean,
-                COUNT(*) AS reqs
-            FROM {table_name}
-            WHERE {where_clause}
-            GROUP BY proto_clean
-            ORDER BY reqs DESC
-        """
-        try:
-            proto_rows = get_runner().execute(proto_sql, params).fetchall()
-            timer.mark("protocol_distribution", _t1, source="live", activity="compute", current_execution=True)
-            protocol_distribution = _shape_proto_rows(proto_rows)
-        except Exception as e:
-            logger.warning("Failed to query protocol distribution: %s", e)
-    elif "transport" in actual_cols:
+                END"""
+        if proto_col
+        else ("UPPER(COALESCE(CAST(transport AS VARCHAR), 'TCP'))" if "transport" in actual_cols else None)
+    )
+    if proto_expr:
         _t1 = _time.perf_counter()
         proto_sql = f"""
             SELECT
-                UPPER(COALESCE(CAST(transport AS VARCHAR), 'TCP')) AS proto_clean,
+                {proto_expr} AS proto_clean,
                 COUNT(*) AS reqs
             FROM {table_name}
             WHERE {where_clause}
@@ -1616,9 +1562,17 @@ def get_transport_metrics(
         try:
             proto_rows = get_runner().execute(proto_sql, params).fetchall()
             timer.mark("protocol_distribution", _t1, source="live", activity="compute", current_execution=True)
-            protocol_distribution = _shape_proto_rows(proto_rows)
-        except Exception:
-            logger.debug("get_transport_metrics: step failed (ignored)", exc_info=True)
+            sum_proto_reqs = sum(r[1] for r in proto_rows) or total_requests or 1
+            protocol_distribution = [
+                {
+                    "protocol": str(r[0]),
+                    "requests": int(r[1]),
+                    "share_pct": round(int(r[1]) * 100.0 / sum_proto_reqs, 2),
+                }
+                for r in proto_rows
+            ]
+        except Exception as e:
+            logger.warning("Failed to query protocol distribution: %s", e)
 
     return {
         **default_resp,

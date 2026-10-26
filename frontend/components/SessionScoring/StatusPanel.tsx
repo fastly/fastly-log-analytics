@@ -1,92 +1,111 @@
 'use client'
 
 import * as React from 'react'
-import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { AlertTriangle, ExternalLink, Info, LineChart, ListChecks, Power, PowerOff, RefreshCw, ShieldAlert, ShieldCheck, ShieldOff, TrendingUp } from 'lucide-react'
-import {
-  invalidateServiceScoringQueries,
-  PerReasonAucHelp,
-  RocPrCurvesHelp,
-  scoringAnalyticsCompositeKey,
-  scoringConfigCompositeKey,
-  StatusPanelHelp,
-  useScoringQuery,
-} from '@/components/SessionScoring/help-content'
-
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { AlertTriangle, Archive, Check, Clock, Database, ExternalLink, FileCode, Info, Layers, LineChart, ListChecks, Loader2, Lock, Pencil, Power, PowerOff, RefreshCw, ShieldAlert, ShieldCheck, ShieldOff, Trash2, TrendingUp, X } from 'lucide-react'
+import { invalidateServiceScoringQueries, PerReasonAucHelp, RocPrCurvesHelp, scoringAnalyticsCompositeKey, scoringConfigCompositeKey, StatusPanelHelp, useScoringQuery } from '@/components/SessionScoring/help-content'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { ConfirmDialog, CopyButton } from '@/components/ui/confirm-dialog'
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { ConfirmDialog, CopyButton, LabelWithInfo } from '@/components/ui/confirm-dialog'
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Switch } from '@/components/ui/switch'
-import { AnalyticsCard, CardErrorState } from '@/components/AnalyticsCard'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
+import { AnalyticsCard, CardErrorState, type AnalyticsCardError } from '@/components/AnalyticsCard'
 import { PlotlyChart } from '@/components/PlotlyChart'
 import { SSEModal } from '@/components/SSEModal'
-import { client, extractApiError, unwrapClient } from '@/lib/api'
-import type { components } from '@/types/api.generated'
+import { useMounted } from '@/hooks/useBootstrap'
+import { useDateFormat } from '@/hooks/useSSE'
+import { client, unwrapClient } from '@/lib/api'
 import { CHART_COLORS } from '@/lib/chart-helpers'
-import { formatLocalDateTime, formatPctValue } from '@/lib/format'
-import { showToast } from '@/lib/utils'
+import { formatBytes, formatBytesTiered, formatCountMaybe, formatLocalDateTime, formatPctValue, formatRelative } from '@/lib/format'
+import { queryKeys } from '@/lib/query-keys'
+import { cn } from '@/lib/utils'
+import { useServiceStore } from '@/stores/filterStore'
+import type { Expect, WireParity } from '@/types/api'
+import type { components } from '@/types/api.generated'
 
-interface StatusPanelProps {
-  serviceId: string
+// =============================================================================
+// 1. Session Scoring Status, L2 Enforcement, ROC/PR Curves & Per-Reason AUC
+// =============================================================================
+
+export interface StatusPanelProps { serviceId: string }
+type ScoringEvaluation = components['schemas']['ScoringEvaluationResponse']
+type CurvePoint = NonNullable<components['schemas']['ScoringCurvePoint']>
+
+const formatActivated = (raw: string): string => {
+  const d = new Date(raw)
+  return isNaN(d.getTime()) ? raw : formatLocalDateTime(d)
 }
 
-// Generated from the /scoring/evaluation response_model — single source of truth.
-type ScoringEvaluation = components['schemas']['ScoringEvaluationResponse']
+function Field({ label, value }: { label: string; value: React.ReactNode }) {
+  return (
+    <div className="flex items-center gap-2">
+      <span className="text-muted-foreground text-xs w-32 shrink-0">{label}:</span>
+      <span className="text-xs">{value}</span>
+    </div>
+  )
+}
+
+function AucField({ evalData }: { evalData: ScoringEvaluation }) {
+  if (!evalData.has_min_samples) {
+    return (
+      <Field
+        label="Matrix Quality"
+        value={
+          <span className="text-xs text-muted-foreground">
+            Need {evalData.min_per_class}+ good / {evalData.min_per_class}+ bad labels
+            <span className="ml-1 text-foreground tabular-nums">(have {evalData.n_good}/{evalData.n_bad})</span>
+          </span>
+        }
+      />
+    )
+  }
+  if (evalData.error) return <Field label="Matrix Quality" value={<span className="text-xs text-amber-600">{evalData.error}</span>} />
+  const auc = evalData.auc ?? 0
+  const passed = !!evalData.passed
+  const colorClass = passed ? 'text-emerald-600' : 'text-amber-600'
+  return (
+    <Field
+      label="Matrix Quality (AUC)"
+      value={
+        <span className="text-xs">
+          <span className={`font-mono font-semibold tabular-nums ${colorClass}`}>{auc.toFixed(3)}</span>
+          <span className={`ml-1 font-semibold ${colorClass}`}>— {passed ? 'PASS' : 'BELOW THRESHOLD'}</span>
+          <span className="ml-1 text-muted-foreground">
+            (n={evalData.n_good} good / {evalData.n_bad} bad{evalData.threshold ? `, threshold ${evalData.threshold.toFixed(2)}` : ''})
+          </span>
+        </span>
+      }
+    />
+  )
+}
 
 export function StatusPanel({ serviceId }: StatusPanelProps) {
   const queryClient = useQueryClient()
-  // No refetchInterval: polling 4 endpoints every 30-60s caused
-  // constant .duckdb-wal churn that ate ~1.5GB of mds_stores + VS Code
-  // extension-host RAM. Refresh happens after enable/disable via refetch().
   const { data, isLoading, isFetching, error, refetch } = useScoringQuery(
     ['scoring-status', serviceId],
-    () =>
-      client.GET('/api/services/{service_id}/scoring/status', {
-        params: { path: { service_id: serviceId } },
-      }),
+    () => client.GET('/api/services/{service_id}/scoring/status', { params: { path: { service_id: serviceId } } }),
   )
 
   const enabled = !!data?.enabled
   const pragmasMissing = !enabled && data?.preflight_pragmas_ready === false
   const [pragmaModalOpen, setPragmaModalOpen] = React.useState(false)
-
-  if (data?.preflight_pragmas_ready === true && pragmaModalOpen) {
-    setPragmaModalOpen(false)
-  }
+  if (data?.preflight_pragmas_ready === true && pragmaModalOpen) setPragmaModalOpen(false)
 
   const accountTeamMessage = `Hi Fastly team — please enable the preflight request body preservation service pragmas on Fastly service ${serviceId} (preserving unsent request bodies across VCL restarts and omitting request bodies when backend requests are rewritten to GET or HEAD) so we can enable our Session Scoring Compute preflight pass.`
 
-  // After an enable / disable / redeploy SSE stream closes, the scoring config
-  // and analytics have all changed (or the stores were just created), so the
-  // L2 card, latency chart, etc. would otherwise show stale pre-op data until a
-  // manual refresh. refetch() only covers scoring-status, so also invalidate
-  // every scoring-* query for THIS service. Predicate-match so the
-  // sinceHours-suffixed analytics keys (['scoring-health', id, hours], …) match.
   const refreshScoring = React.useCallback(() => {
     refetch()
     invalidateServiceScoringQueries(queryClient, serviceId)
   }, [queryClient, refetch, serviceId])
 
-  // Matrix-quality (ROC-AUC) — only fire when scoring is actually on.
-  // Cache invalidation handled server-side via _bust_analytics_cache on
-  // label POST/PATCH/DELETE; client-side staleTime keeps the StatusPanel
-  // from re-fetching on every focus change.
   const { data: evalData } = useScoringQuery(
     ['scoring-evaluation', serviceId],
-    () =>
-      client.GET('/api/services/{service_id}/scoring/evaluation', {
-        params: { path: { service_id: serviceId } },
-      }),
+    () => client.GET('/api/services/{service_id}/scoring/evaluation', { params: { path: { service_id: serviceId } } }),
     { enabled, staleTime: 30_000 },
   )
 
@@ -110,10 +129,7 @@ export function StatusPanel({ serviceId }: StatusPanelProps) {
                 title="Redeploy Scorer"
                 description={
                   <div className="space-y-2">
-                    <p>
-                      Push the latest scorer build to the edge for{' '}
-                      <code className="text-xs bg-muted px-1 rounded">{serviceId}</code>:
-                    </p>
+                    <p>Push the latest scorer build to the edge for <code className="text-xs bg-muted px-1 rounded">{serviceId}</code>:</p>
                     <ul className="text-sm text-muted-foreground list-disc pl-5 space-y-1">
                       <li>Checks the live edge first: re-uploads the Wasm only if the build changed</li>
                       <li>Re-activates the logging VCL only if the scoring snippets/backend changed</li>
@@ -126,11 +142,7 @@ export function StatusPanel({ serviceId }: StatusPanelProps) {
                 body={{}}
                 onClose={refreshScoring}
                 trigger={
-                  <Button
-                    variant={data?.scorer_drift ? 'default' : 'outline'}
-                    size="sm"
-                    data-testid="admin-session-scoring-redeploy-btn"
-                  >
+                  <Button variant={data?.scorer_drift ? 'default' : 'outline'} size="sm" data-testid="admin-session-scoring-redeploy-btn">
                     <RefreshCw className="h-3.5 w-3.5 mr-1" /> Redeploy
                   </Button>
                 }
@@ -153,12 +165,7 @@ export function StatusPanel({ serviceId }: StatusPanelProps) {
                 body={{}}
                 onClose={refreshScoring}
                 trigger={
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="text-rose-700 border-rose-300 hover:bg-rose-50"
-                    data-testid="admin-session-scoring-disable-btn"
-                  >
+                  <Button variant="outline" size="sm" className="text-rose-700 border-rose-300 hover:bg-rose-50" data-testid="admin-session-scoring-disable-btn">
                     <PowerOff className="h-3.5 w-3.5 mr-1" /> Disable
                   </Button>
                 }
@@ -166,12 +173,7 @@ export function StatusPanel({ serviceId }: StatusPanelProps) {
             </div>
           ) : pragmasMissing ? (
             <>
-              <Button
-                variant="default"
-                size="sm"
-                data-testid="admin-session-scoring-enable-btn"
-                onClick={() => setPragmaModalOpen(true)}
-              >
+              <Button variant="default" size="sm" data-testid="admin-session-scoring-enable-btn" onClick={() => setPragmaModalOpen(true)}>
                 <Power className="h-3.5 w-3.5 mr-1" /> Enable
               </Button>
               <Dialog open={pragmaModalOpen} onOpenChange={setPragmaModalOpen}>
@@ -179,9 +181,7 @@ export function StatusPanel({ serviceId }: StatusPanelProps) {
                   <DialogHeader>
                     <DialogTitle>Preflight Request Body Preservation Required</DialogTitle>
                     <DialogDescription>
-                      Before enabling the Session Scoring Compute scorer on{' '}
-                      <code className="text-xs bg-muted px-1 rounded">{serviceId}</code>, your Fastly account team must
-                      enable preflight request body preservation on this service.
+                      Before enabling the Session Scoring Compute scorer on <code className="text-xs bg-muted px-1 rounded">{serviceId}</code>, your Fastly account team must enable preflight request body preservation on this service.
                     </DialogDescription>
                   </DialogHeader>
                   <div className="space-y-3 py-2 text-sm">
@@ -189,58 +189,21 @@ export function StatusPanel({ serviceId }: StatusPanelProps) {
                       <AlertTriangle className="h-4 w-4 mt-0.5 shrink-0" />
                       <div className="text-xs space-y-1">
                         <div className="font-semibold">Why is this required?</div>
-                        <div>
-                          Session Scoring routes each request through a lightweight Compute preflight sub-request
-                          (rewritten to <code>GET</code>) and then restarts VCL to forward the original request to your
-                          origin. Without service-level preflight body preservation enabled,{' '}
-                          <code>POST</code>/<code>PUT</code>/<code>PATCH</code> request bodies can be drained or stall
-                          when forwarding to origin after the restart.
-                        </div>
+                        <div>Session Scoring routes each request through a lightweight Compute preflight sub-request (rewritten to <code>GET</code>) and then restarts VCL to forward the original request to your origin. Without service-level preflight body preservation enabled, <code>POST</code>/<code>PUT</code>/<code>PATCH</code> request bodies can be drained or stall when forwarding to origin after the restart.</div>
                       </div>
                     </div>
                     <div className="space-y-1.5">
-                      <div className="text-xs font-medium text-muted-foreground">
-                        Send this request to your Fastly account team:
-                      </div>
-                      <pre
-                        className="rounded border bg-muted/60 p-3 text-xs whitespace-pre-wrap break-words font-mono"
-                        data-testid="admin-session-scoring-pragma-message"
-                      >
-                        {accountTeamMessage}
-                      </pre>
+                      <div className="text-xs font-medium text-muted-foreground">Send this request to your Fastly account team:</div>
+                      <pre className="rounded border bg-muted/60 p-3 text-xs whitespace-pre-wrap break-words font-mono" data-testid="admin-session-scoring-pragma-message">{accountTeamMessage}</pre>
                     </div>
                   </div>
                   <DialogFooter className="gap-2 sm:justify-between">
-                    <CopyButton
-                      text={accountTeamMessage}
-                      label="Copy Message"
-                      copiedLabel="Copied"
-                      variant="outline"
-                      size="sm"
-                      className=""
-                      iconClassName="h-3.5 w-3.5"
-                      data-testid="admin-session-scoring-pragma-copy-btn"
-                    />
+                    <CopyButton text={accountTeamMessage} label="Copy Message" copiedLabel="Copied" variant="outline" size="sm" className="" iconClassName="h-3.5 w-3.5" data-testid="admin-session-scoring-pragma-copy-btn" />
                     <div className="flex items-center gap-2">
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        onClick={() => refetch()}
-                        disabled={isFetching}
-                        data-testid="admin-session-scoring-pragma-recheck-btn"
-                      >
-                        <RefreshCw className={`h-3.5 w-3.5 mr-1 ${isFetching ? 'animate-spin' : ''}`} />
-                        Check Again
+                      <Button type="button" variant="outline" size="sm" onClick={() => refetch()} disabled={isFetching} data-testid="admin-session-scoring-pragma-recheck-btn">
+                        <RefreshCw className={`h-3.5 w-3.5 mr-1 ${isFetching ? 'animate-spin' : ''}`} /> Check Again
                       </Button>
-                      <Button
-                        type="button"
-                        variant="default"
-                        size="sm"
-                        onClick={() => setPragmaModalOpen(false)}
-                      >
-                        Close
-                      </Button>
+                      <Button type="button" variant="default" size="sm" onClick={() => setPragmaModalOpen(false)}>Close</Button>
                     </div>
                   </DialogFooter>
                 </DialogContent>
@@ -255,11 +218,7 @@ export function StatusPanel({ serviceId }: StatusPanelProps) {
                     <AlertTriangle className="h-4 w-4 mt-0.5 shrink-0" />
                     <div className="text-xs space-y-1">
                       <div className="font-semibold">Experimental feature</div>
-                      <div>
-                        Session scoring has not been validated against production traffic at scale.
-                        Run it on a non-critical service first, watch the scorer Compute service&apos;s
-                        error rate, and keep the disable path handy.
-                      </div>
+                      <div>Session scoring has not been validated against production traffic at scale. Run it on a non-critical service first, watch the scorer Compute service&apos;s error rate, and keep the disable path handy.</div>
                     </div>
                   </div>
                   <p>This will enable session scoring on <code className="text-xs bg-muted px-1 rounded">{serviceId}</code>:</p>
@@ -273,11 +232,7 @@ export function StatusPanel({ serviceId }: StatusPanelProps) {
                     <Info className="h-4 w-4 mt-0.5 shrink-0" />
                     <div className="text-xs space-y-1">
                       <div className="font-semibold">Log fields</div>
-                      <div>
-                        Scoring also needs the standard request fields for context — <strong>URL, method, user agent, and geo</strong>.
-                        Enabling scoring ensures those stay logged (added automatically if this service was set up with a minimal
-                        log-field set), so scored sessions show <em>which</em> requests were flagged, not just the score.
-                      </div>
+                      <div>Scoring also needs the standard request fields for context — <strong>URL, method, user agent, and geo</strong>. Enabling scoring ensures those stay logged (added automatically if this service was set up with a minimal log-field set), so scored sessions show <em>which</em> requests were flagged, not just the score.</div>
                     </div>
                   </div>
                   <p className="text-xs text-muted-foreground italic">Click <strong>Start</strong> to proceed.</p>
@@ -299,13 +254,9 @@ export function StatusPanel({ serviceId }: StatusPanelProps) {
           <div className="flex items-center gap-2" data-testid="admin-session-scoring-status-line">
             <span className="text-muted-foreground">Status:</span>
             {enabled ? (
-              <Badge variant="default" className="bg-emerald-600" data-testid="admin-session-scoring-status-badge">
-                Enabled
-              </Badge>
+              <Badge variant="default" className="bg-emerald-600" data-testid="admin-session-scoring-status-badge">Enabled</Badge>
             ) : (
-              <Badge variant="secondary" data-testid="admin-session-scoring-status-badge">
-                Disabled
-              </Badge>
+              <Badge variant="secondary" data-testid="admin-session-scoring-status-badge">Disabled</Badge>
             )}
           </div>
 
@@ -314,100 +265,39 @@ export function StatusPanel({ serviceId }: StatusPanelProps) {
               {data?.scorer_drift && (
                 <div className="flex items-start gap-2 rounded border border-amber-300 bg-amber-50 px-2.5 py-1.5 text-amber-900">
                   <AlertTriangle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
-                  <div className="text-xs">
-                    <span className="font-semibold">Redeploy needed.</span> The edge is running an older
-                    scorer build{data.drift_detail ? ` (${data.drift_detail})` : ''} than the one shipped to
-                    the backend. Click <strong>Redeploy</strong> above to push the latest.
-                  </div>
+                  <div className="text-xs"><span className="font-semibold">Redeploy needed.</span> The edge is running an older scorer build{data.drift_detail ? ` (${data.drift_detail})` : ''} than the one shipped to the backend. Click <strong>Redeploy</strong> above to push the latest.</div>
                 </div>
               )}
               {!data?.scorer_drift && data?.drift_known === false && (
                 <div className="flex items-start gap-2 rounded border bg-muted/40 px-2.5 py-1.5 text-muted-foreground">
                   <Info className="h-3.5 w-3.5 mt-0.5 shrink-0" />
-                  <div className="text-xs">
-                    <span className="font-semibold text-foreground">Drift detection not baselined.</span>{' '}
-                    This service was enabled before edge-drift tracking shipped, so we can&apos;t tell
-                    whether the edge is up to date. Click <strong>Redeploy</strong> once to baseline it —
-                    after that a banner appears here whenever the edge falls behind.
-                  </div>
+                  <div className="text-xs"><span className="font-semibold text-foreground">Drift detection not baselined.</span> This service was enabled before edge-drift tracking shipped, so we can&apos;t tell whether the edge is up to date. Click <strong>Redeploy</strong> once to baseline it — after that a banner appears here whenever the edge falls behind.</div>
                 </div>
               )}
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-x-6 gap-y-2">
                 {data?.scoring_service_id && (
-                  <Field
-                    label="Scoring Service ID"
-                    value={
-                      <div className="flex items-center gap-1.5">
-                        <code className="text-xs">{data.scoring_service_id}</code>
-                        <a
-                          href={`https://manage.fastly.com/configure/services/${data.scoring_service_id}`}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="text-muted-foreground hover:text-foreground opacity-50 hover:opacity-100 transition-opacity"
-                          title="View Service in Fastly"
-                        >
-                          <ExternalLink className="h-3 w-3" />
-                        </a>
-                      </div>
-                    }
-                  />
+                  <Field label="Scoring Service ID" value={
+                    <div className="flex items-center gap-1.5">
+                      <code className="text-xs">{data.scoring_service_id}</code>
+                      <a href={`https://manage.fastly.com/configure/services/${data.scoring_service_id}`} target="_blank" rel="noreferrer" className="text-muted-foreground hover:text-foreground opacity-50 hover:opacity-100 transition-opacity" title="View Service in Fastly"><ExternalLink className="h-3 w-3" /></a>
+                    </div>
+                  } />
                 )}
                 {typeof data?.scoring_active_version === 'number' && (
-                  <Field
-                    label="Active Version"
-                    value={
-                      <div className="flex items-center gap-1.5">
-                        <code className="text-xs">v{data.scoring_active_version}</code>
-                        {data?.scoring_service_id && (
-                          <a
-                            href={`https://manage.fastly.com/configure/services/${data.scoring_service_id}/versions`}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="text-muted-foreground hover:text-foreground opacity-50 hover:opacity-100 transition-opacity"
-                            title="View versions in Fastly"
-                          >
-                            <ExternalLink className="h-3 w-3" />
-                          </a>
-                        )}
-                      </div>
-                    }
-                  />
+                  <Field label="Active Version" value={
+                    <div className="flex items-center gap-1.5">
+                      <code className="text-xs">v{data.scoring_active_version}</code>
+                      {data?.scoring_service_id && <a href={`https://manage.fastly.com/configure/services/${data.scoring_service_id}/versions`} target="_blank" rel="noreferrer" className="text-muted-foreground hover:text-foreground opacity-50 hover:opacity-100 transition-opacity" title="View versions in Fastly"><ExternalLink className="h-3 w-3" /></a>}
+                    </div>
+                  } />
                 )}
-                {data?.scoring_activated_at && (
-                  <Field
-                    label="Activated"
-                    value={
-                      <span className="text-xs text-muted-foreground" title={data.scoring_activated_at}>
-                        {formatActivated(data.scoring_activated_at)}
-                      </span>
-                    }
-                  />
-                )}
-                {data?.scoring_service_name && (
-                  <Field label="Service Name" value={data.scoring_service_name} />
-                )}
+                {data?.scoring_activated_at && <Field label="Activated" value={<span className="text-xs text-muted-foreground" title={data.scoring_activated_at}>{formatActivated(data.scoring_activated_at)}</span>} />}
+                {data?.scoring_service_name && <Field label="Service Name" value={data.scoring_service_name} />}
                 {data?.scoring_domain && (
-                  <Field
-                    label="Domain"
-                    value={
-                      <a
-                        href={`https://${data.scoring_domain}/_status`}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="text-primary hover:underline inline-flex items-center gap-1"
-                      >
-                        {data.scoring_domain}
-                        <ExternalLink className="h-3 w-3" />
-                      </a>
-                    }
-                  />
+                  <Field label="Domain" value={<a href={`https://${data.scoring_domain}/_status`} target="_blank" rel="noreferrer" className="text-primary hover:underline inline-flex items-center gap-1">{data.scoring_domain} <ExternalLink className="h-3 w-3" /></a>} />
                 )}
-                {data?.matrix_version && (
-                  <Field label="Matrix Version" value={<code className="text-xs">{data.matrix_version}</code>} />
-                )}
-                {data?.enabled_at && (
-                  <Field label="Enabled At" value={<span className="text-xs text-muted-foreground">{data.enabled_at}</span>} />
-                )}
+                {data?.matrix_version && <Field label="Matrix Version" value={<code className="text-xs">{data.matrix_version}</code>} />}
+                {data?.enabled_at && <Field label="Enabled At" value={<span className="text-xs text-muted-foreground">{data.enabled_at}</span>} />}
                 {evalData && <AucField evalData={evalData} />}
               </div>
             </>
@@ -416,29 +306,16 @@ export function StatusPanel({ serviceId }: StatusPanelProps) {
           {!enabled && !isLoading && (
             <>
               {pragmasMissing && (
-                <div
-                  className="flex items-start gap-2 rounded border border-amber-300 bg-amber-50 px-2.5 py-1.5 text-amber-900"
-                  data-testid="admin-session-scoring-pragma-warning"
-                >
+                <div className="flex items-start gap-2 rounded border border-amber-300 bg-amber-50 px-2.5 py-1.5 text-amber-900" data-testid="admin-session-scoring-pragma-warning">
                   <AlertTriangle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
-                  <div className="text-xs">
-                    <span className="font-semibold">Prerequisite required.</span> Preflight request body
-                    preservation is not yet enabled on this service. Click <strong>Enable</strong> for instructions
-                    to share with your Fastly account team.
-                  </div>
+                  <div className="text-xs"><span className="font-semibold">Prerequisite required.</span> Preflight request body preservation is not yet enabled on this service. Click <strong>Enable</strong> for instructions to share with your Fastly account team.</div>
                 </div>
               )}
               <div className="flex items-start gap-2 rounded border border-amber-300 bg-amber-50 px-2.5 py-1.5 text-amber-900">
                 <AlertTriangle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
-                <div className="text-xs">
-                  <span className="font-semibold">Experimental.</span> Not yet validated against
-                  production traffic at scale — run on a non-critical service first.
-                </div>
+                <div className="text-xs"><span className="font-semibold">Experimental.</span> Not yet validated against production traffic at scale — run on a non-critical service first.</div>
               </div>
-              <p className="text-xs text-muted-foreground">
-                Session scoring is off. Click <strong>Enable</strong> to provision the scorer Compute service and start
-                scoring every request at the edge.
-              </p>
+              <p className="text-xs text-muted-foreground">Session scoring is off. Click <strong>Enable</strong> to provision the scorer Compute service and start scoring every request at the edge.</p>
             </>
           )}
         </div>
@@ -447,118 +324,29 @@ export function StatusPanel({ serviceId }: StatusPanelProps) {
   )
 }
 
-// Render a Fastly version timestamp (ISO-ish) as a readable local datetime;
-// fall back to the raw string if it doesn't parse. The raw value is kept in
-// the title attribute by the caller.
-function formatActivated(raw: string): string {
-  const d = new Date(raw)
-  return isNaN(d.getTime()) ? raw : formatLocalDateTime(d)
-}
-
-function Field({ label, value }: { label: string; value: React.ReactNode }) {
-  return (
-    <div className="flex items-center gap-2">
-      <span className="text-muted-foreground text-xs w-32 shrink-0">{label}:</span>
-      <span className="text-xs">{value}</span>
-    </div>
-  )
-}
-
-function AucField({ evalData }: { evalData: ScoringEvaluation }) {
-  // Sub-min-samples: render a self-explaining CTA instead of a misleading
-  // 0.5 AUC. The numbers in parens make the gap concrete (e.g. "have
-  // 2/0" tells the operator they need 1 more good + 3 bad).
-  if (!evalData.has_min_samples) {
-    return (
-      <Field
-        label="Matrix Quality"
-        value={
-          <span className="text-xs text-muted-foreground">
-            Need {evalData.min_per_class}+ good / {evalData.min_per_class}+ bad labels
-            <span className="ml-1 text-foreground tabular-nums">
-              (have {evalData.n_good}/{evalData.n_bad})
-            </span>
-          </span>
-        }
-      />
-    )
-  }
-  if (evalData.error) {
-    return (
-      <Field
-        label="Matrix Quality"
-        value={<span className="text-xs text-amber-600">{evalData.error}</span>}
-      />
-    )
-  }
-  // has_min_samples + no error → AUC is real.
-  const auc = evalData.auc ?? 0
-  const passed = !!evalData.passed
-  const colorClass = passed ? 'text-emerald-600' : 'text-amber-600'
-  return (
-    <Field
-      label="Matrix Quality (AUC)"
-      value={
-        <span className="text-xs">
-          <span className={`font-mono font-semibold tabular-nums ${colorClass}`}>
-            {auc.toFixed(3)}
-          </span>
-          <span className={`ml-1 font-semibold ${colorClass}`}>
-            — {passed ? 'PASS' : 'BELOW THRESHOLD'}
-          </span>
-          <span className="ml-1 text-muted-foreground">
-            (n={evalData.n_good} good / {evalData.n_bad} bad
-            {evalData.threshold ? `, threshold ${evalData.threshold.toFixed(2)}` : ''})
-          </span>
-        </span>
-      }
-    />
-  )
-}
-
-interface L2EnforcementCardProps {
-  serviceId: string
-  sinceHours?: number
-}
-
-const DESCRIPTION =
-  'Decide when edge Layer-2 (route-transition anomaly) joins the enforced score. L2 is always logged; this only gates blocking.'
-
-const fmtDays = (n: number | null | undefined) => (n == null ? '—' : n.toFixed(1))
+export interface L2EnforcementCardProps { serviceId: string; sinceHours?: number }
+const L2_DESCRIPTION = 'Decide when edge Layer-2 (route-transition anomaly) joins the enforced score. L2 is always logged; this only gates blocking.'
+const fmtDaysFixed = (n: number | null | undefined) => (n == null ? '—' : n.toFixed(1))
 
 export function L2EnforcementCard({ serviceId, sinceHours = 24 }: L2EnforcementCardProps) {
   const queryClient = useQueryClient()
-  // null = dialog closed; true/false = pending target enabled-state under confirm.
   const [pendingEnable, setPendingEnable] = React.useState<boolean | null>(null)
 
   const { data, isLoading, isError, error, refetch } = useScoringQuery(
     ['scoring-l2-enforce', serviceId],
-    () =>
-      client.GET('/api/services/{service_id}/scoring/l2-enforce', {
-        params: { path: { service_id: serviceId } },
-      }),
+    () => client.GET('/api/services/{service_id}/scoring/l2-enforce', { params: { path: { service_id: serviceId } } }),
     { staleTime: 30_000 },
   )
 
-  // "What L2 would flag" (l2_high_pct) rides the health query the page already
-  // fetches + seeds — read the same key so we don't fire a second request.
   const { data: health } = useScoringQuery(
     ['scoring-health', serviceId, sinceHours],
-    () =>
-      client.GET('/api/services/{service_id}/scoring/health', {
-        params: { path: { service_id: serviceId }, query: { since_hours: sinceHours } },
-      }),
+    () => client.GET('/api/services/{service_id}/scoring/health', { params: { path: { service_id: serviceId }, query: { since_hours: sinceHours } } }),
     { staleTime: 30_000 },
   )
 
   const mutation = useMutation({
     mutationFn: async (enabled: boolean) =>
-      unwrapClient(
-        client.PUT('/api/services/{service_id}/scoring/l2-enforce', {
-          params: { path: { service_id: serviceId }, query: { confirm: true } },
-          body: { enabled },
-        }),
-      ),
+      unwrapClient(client.PUT('/api/services/{service_id}/scoring/l2-enforce', { params: { path: { service_id: serviceId }, query: { confirm: true } }, body: { enabled } })),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['scoring-l2-enforce', serviceId] })
       queryClient.invalidateQueries({ queryKey: scoringAnalyticsCompositeKey(serviceId) })
@@ -567,39 +355,21 @@ export function L2EnforcementCard({ serviceId, sinceHours = 24 }: L2EnforcementC
   })
 
   if (isError) {
-    // A 400 here means scoring isn't enabled yet (no config store) — that's not a
-    // failure, just a precondition. Map it to friendly copy; surface anything
-    // else as a real error.
     const raw = String(error?.message || 'Unknown error')
-    // A 400 here means scoring isn't enabled yet / the config store isn't
-    // resolvable. The openapi client may surface either "status 400" or the raw
-    // backend detail ("Scoring not enabled or config store missing"), so match
-    // both rather than leaking the raw string. A freshly-enabled service that
-    // still shows this is just a pre-enable fetch the StatusPanel re-invalidates.
-    const friendly =
-      /status 400|http 400|config store missing|scoring not enabled/i.test(raw) ||
-      (error as { status?: number } | null)?.status === 400
-        ? 'Enable session scoring for this service to manage L2 enforcement.'
-        : raw
+    const friendly = /status 400|http 400|config store missing|scoring not enabled/i.test(raw) || (error as { status?: number } | null)?.status === 400
+      ? 'Enable session scoring for this service to manage L2 enforcement.'
+      : raw
     return (
-      <AnalyticsCard title="L2 enforcement" description={DESCRIPTION}>
-        <CardErrorState
-          icon={<ShieldAlert className="h-4 w-4" />}
-          title="L2 enforcement unavailable"
-          message={friendly}
-          onRetry={() => refetch()}
-        />
+      <AnalyticsCard title="L2 enforcement" description={L2_DESCRIPTION}>
+        <CardErrorState icon={<ShieldAlert className="h-4 w-4" />} title="L2 enforcement unavailable" message={friendly} onRetry={() => refetch()} />
       </AnalyticsCard>
     )
   }
 
   if (isLoading || !data) {
     return (
-      <AnalyticsCard title="L2 enforcement" description={DESCRIPTION}>
-        <div className="space-y-3" aria-busy="true">
-          <Skeleton className="h-16 w-full" />
-          <Skeleton className="h-12 w-full" />
-        </div>
+      <AnalyticsCard title="L2 enforcement" description={L2_DESCRIPTION}>
+        <div className="space-y-3" aria-busy="true"><Skeleton className="h-16 w-full" /><Skeleton className="h-12 w-full" /></div>
       </AnalyticsCard>
     )
   }
@@ -612,30 +382,15 @@ export function L2EnforcementCard({ serviceId, sinceHours = 24 }: L2EnforcementC
   const rampPct = Math.round((data.ramp_progress ?? 0) * 100)
 
   return (
-    <AnalyticsCard
-      title="L2 enforcement"
-      description={DESCRIPTION}
-      icon={<ShieldAlert className="h-4 w-4" />}
-    >
+    <AnalyticsCard title="L2 enforcement" description={L2_DESCRIPTION} icon={<ShieldAlert className="h-4 w-4" />}>
       <div className="space-y-4">
-        {/* Readiness / status banner. */}
         {enabled ? (
           <Alert className="border-green-300 bg-green-50/60 dark:bg-green-950/20">
             <TrendingUp className="h-4 w-4 text-green-600" />
-            <AlertTitle className="text-green-900 dark:text-green-300">
-              L2 contributes to enforcement
-            </AlertTitle>
+            <AlertTitle className="text-green-900 dark:text-green-300">L2 contributes to enforcement</AlertTitle>
             <AlertDescription className="text-green-800 dark:text-green-400">
-              {data.fully_ramped ? (
-                <>L2 is fully active in the enforced score.</>
-              ) : (
-                <>
-                  Fading in — {rampPct}% of full weight
-                  {data.warmup_days_remaining != null && (
-                    <> (~{fmtDays(data.warmup_days_remaining)} days to full)</>
-                  )}
-                  . The ramp opens at 0% at opt-in, so there&apos;s no instant block.
-                </>
+              {data.fully_ramped ? <>L2 is fully active in the enforced score.</> : (
+                <>Fading in — {rampPct}% of full weight{data.warmup_days_remaining != null && <> (~{fmtDaysFixed(data.warmup_days_remaining)} days to full)</>}. The ramp opens at 0% at opt-in, so there&apos;s no instant block.</>
               )}
             </AlertDescription>
           </Alert>
@@ -644,7 +399,7 @@ export function L2EnforcementCard({ serviceId, sinceHours = 24 }: L2EnforcementC
             <ShieldCheck className="h-4 w-4 text-green-600" />
             <AlertTitle className="text-green-900 dark:text-green-300">Ready to enable</AlertTitle>
             <AlertDescription className="text-green-800 dark:text-green-400">
-              {fmtDays(ageDays)} days of observed L2 data (≥{readinessDays} recommended).
+              {fmtDaysFixed(ageDays)} days of observed L2 data (≥{readinessDays} recommended).
               {l2HighPct != null && <> About {formatPctValue(l2HighPct, 1)} of recent sessions would be flagged by L2.</>}
             </AlertDescription>
           </Alert>
@@ -653,93 +408,51 @@ export function L2EnforcementCard({ serviceId, sinceHours = 24 }: L2EnforcementC
             <ShieldAlert className="h-4 w-4 text-amber-600" />
             <AlertTitle className="text-amber-900 dark:text-amber-300">Not yet recommended</AlertTitle>
             <AlertDescription className="text-amber-800 dark:text-amber-400">
-              Only {fmtDays(ageDays)} days of observed L2 data so far (≥{readinessDays} recommended).
-              Enabling blocking now is risky — you haven&apos;t seen enough of how L2 scores real
-              traffic.
+              Only {fmtDaysFixed(ageDays)} days of observed L2 data so far (≥{readinessDays} recommended). Enabling blocking now is risky — you haven&apos;t seen enough of how L2 scores real traffic.
               {l2HighPct != null && <> It would currently flag ~{formatPctValue(l2HighPct, 1)} of sessions.</>}
             </AlertDescription>
           </Alert>
         )}
 
-        {/* The opt-in switch (soft gate — always usable, gated by a confirm). */}
         <div className="flex items-center justify-between gap-4 rounded-md border bg-card p-3">
           <div className="space-y-0.5">
-            <div id="l2-enforce-label" className="text-sm font-medium">
-              Enforce L2 (live edge blocking)
-            </div>
-            <div className="text-xs text-muted-foreground">
-              {enabled
-                ? 'On — L2 contributes to the enforced score.'
-                : 'Off — L2 is observe-only (computed and logged, never blocks).'}
-            </div>
+            <div id="l2-enforce-label" className="text-sm font-medium">Enforce L2 (live edge blocking)</div>
+            <div className="text-xs text-muted-foreground">{enabled ? 'On — L2 contributes to the enforced score.' : 'Off — L2 is observe-only (computed and logged, never blocks).'}</div>
           </div>
-          <Switch
-            checked={enabled}
-            aria-labelledby="l2-enforce-label"
-            disabled={mutation.isPending}
-            onCheckedChange={(next) => setPendingEnable(next)}
-          />
+          <Switch checked={enabled} aria-labelledby="l2-enforce-label" disabled={mutation.isPending} onCheckedChange={(next) => setPendingEnable(next)} />
         </div>
       </div>
 
       <ConfirmDialog
         open={pendingEnable !== null}
-        onOpenChange={(open) => {
-          if (!open && !mutation.isPending) setPendingEnable(null)
-        }}
+        onOpenChange={(open) => { if (!open && !mutation.isPending) setPendingEnable(null) }}
         isPending={mutation.isPending}
         isDangerous={pendingEnable === true}
         title={pendingEnable ? 'Enable L2 enforcement (LIVE)' : 'Disable L2 enforcement'}
         description={
           pendingEnable ? (
             !ready ? (
-              <>
-                <strong>Heads up:</strong> only {fmtDays(ageDays)} days of observed L2 data so far
-                (≥{readinessDays} recommended). Enabling now means L2 starts contributing to live
-                edge blocking before you&apos;ve seen how it scores real traffic. It fades in over{' '}
-                {rampDays} days from now (starting at 0, so no instant block), but consider waiting
-                until the readiness gauge is green. Enable anyway?
-              </>
+              <><strong>Heads up:</strong> only {fmtDaysFixed(ageDays)} days of observed L2 data so far (≥{readinessDays} recommended). Enabling now means L2 starts contributing to live edge blocking before you&apos;ve seen how it scores real traffic. It fades in over {rampDays} days from now (starting at 0, so no instant block), but consider waiting until the readiness gauge is green. Enable anyway?</>
             ) : (
-              <>
-                L2 will join the enforced score, fading in over {rampDays} days from now (starting at
-                0% weight, so no instant block).
-                {l2HighPct != null && <> About {formatPctValue(l2HighPct, 1)} of recent sessions would be flagged by L2.</>}{' '}
-                Effective at the edge within seconds.
-              </>
+              <>L2 will join the enforced score, fading in over {rampDays} days from now (starting at 0% weight, so no instant block).{l2HighPct != null && <> About {formatPctValue(l2HighPct, 1)} of recent sessions would be flagged by L2.</>} Effective at the edge within seconds.</>
             )
           ) : (
-            <>
-              Disable L2 enforcement. L2 returns to observe-only — still computed and logged, but it
-              stops contributing to the enforced score (no edge blocking from L2). Effective within
-              seconds. Re-enabling later restarts the {rampDays}-day fade-in.
-            </>
+            <>Disable L2 enforcement. L2 returns to observe-only — still computed and logged, but it stops contributing to the enforced score (no edge blocking from L2). Effective within seconds. Re-enabling later restarts the {rampDays}-day fade-in.</>
           )
         }
         confirmLabel={pendingEnable ? 'Enable' : 'Disable'}
-        onConfirm={() => {
-          if (pendingEnable === null) return
-          mutation.mutate(pendingEnable, { onSettled: () => setPendingEnable(null) })
-        }}
+        onConfirm={() => { if (pendingEnable !== null) mutation.mutate(pendingEnable, { onSettled: () => setPendingEnable(null) }) }}
       />
     </AnalyticsCard>
   )
 }
 
-type CurvePoint = NonNullable<components['schemas']['ScoringCurvePoint']>
-
-interface RocPrCurvesProps {
-  serviceId: string
-  sinceHours?: number
-}
+export interface RocPrCurvesProps { serviceId: string; sinceHours?: number }
 
 export function RocPrCurves({ serviceId }: RocPrCurvesProps) {
   const { data, isLoading, isError, error, refetch } = useScoringQuery(
     ['scoring-curves', serviceId],
-    () =>
-      client.GET('/api/services/{service_id}/scoring/curves', {
-        params: { path: { service_id: serviceId } },
-      }),
+    () => client.GET('/api/services/{service_id}/scoring/curves', { params: { path: { service_id: serviceId } } }),
     { staleTime: 30_000 },
   )
 
@@ -752,43 +465,38 @@ export function RocPrCurves({ serviceId }: RocPrCurvesProps) {
       helpTitle="About ROC & PR Curves"
     >
       {isError ? (
-        <CardErrorState
-          icon={<Info className="h-4 w-4" />}
-          title="Failed to load ROC + PR curves"
-          message={error?.message || 'Unknown error'}
-          onRetry={() => refetch()}
-        />
+        <CardErrorState icon={<Info className="h-4 w-4" />} title="Failed to load ROC + PR curves" message={error?.message || 'Unknown error'} onRetry={() => refetch()} />
       ) : isLoading || !data ? (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-          <Skeleton className="h-64 w-full" />
-          <Skeleton className="h-64 w-full" />
-        </div>
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-3"><Skeleton className="h-64 w-full" /><Skeleton className="h-64 w-full" /></div>
       ) : !data.has_min_samples ? (
         <div className="p-6 border border-dashed rounded-md text-center text-sm text-muted-foreground">
-          Need {data.min_per_class}+ good and {data.min_per_class}+ bad labels to plot
-          meaningful curves
-          <span className="ml-1 text-foreground font-mono tabular-nums">
-            (have {data.n_good}/{data.n_bad})
-          </span>
-          {data.note && (
-            <div className="mt-2 text-xs">
-              <span className="text-amber-600">{data.note}</span>
-            </div>
-          )}
+          Need {data.min_per_class}+ good and {data.min_per_class}+ bad labels to plot meaningful curves
+          <span className="ml-1 text-foreground font-mono tabular-nums">(have {data.n_good}/{data.n_bad})</span>
+          {data.note && <div className="mt-2 text-xs"><span className="text-amber-600">{data.note}</span></div>}
         </div>
       ) : (
         <div className="space-y-3">
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-            <RocChart points={data.roc ?? []} auc={data.auc ?? 0} />
-            <PrChart points={data.pr ?? []} ap={data.average_precision ?? 0} />
+            <CurveChart
+              header={`ROC — AUC ${(data.auc ?? 0).toFixed(3)}`}
+              xTitle="False positive rate"
+              yTitle="True positive rate"
+              traces={[
+                { x: (data.roc ?? []).map((p: CurvePoint) => p.fpr ?? 0), y: (data.roc ?? []).map((p: CurvePoint) => p.tpr ?? 0), type: 'scatter', mode: 'lines+markers', name: 'ROC', line: { color: '#0ea5e9', width: 2 }, marker: { size: 4 }, hovertemplate: 'threshold=%{customdata}<br>FPR=%{x:.3f}<br>TPR=%{y:.3f}<extra></extra>', customdata: (data.roc ?? []).map((p: CurvePoint) => p.threshold) },
+                { x: [0, 1], y: [0, 1], type: 'scatter', mode: 'lines', name: 'random', line: { color: CHART_COLORS.neutral, width: 1, dash: 'dash' }, hoverinfo: 'skip' },
+              ]}
+            />
+            <CurveChart
+              header={`Precision-Recall — AP ${(data.average_precision ?? 0).toFixed(3)}`}
+              xTitle="Recall"
+              yTitle="Precision"
+              traces={[
+                { x: (data.pr ?? []).map((p: CurvePoint) => p.recall ?? 0), y: (data.pr ?? []).map((p: CurvePoint) => p.precision ?? 0), type: 'scatter', mode: 'lines+markers', name: 'PR', line: { color: CHART_COLORS.success, width: 2 }, marker: { size: 4 }, hovertemplate: 'threshold=%{customdata}<br>recall=%{x:.3f}<br>precision=%{y:.3f}<extra></extra>', customdata: (data.pr ?? []).map((p: CurvePoint) => p.threshold) },
+              ]}
+            />
           </div>
           <p className="text-[11px] text-muted-foreground italic text-center">
-            n={data.n_good} good / {data.n_bad} bad · AUC{' '}
-            <span className="font-mono tabular-nums font-semibold">{(data.auc ?? 0).toFixed(3)}</span>{' '}
-            · Average precision{' '}
-            <span className="font-mono tabular-nums font-semibold">
-              {(data.average_precision ?? 0).toFixed(3)}
-            </span>
+            n={data.n_good} good / {data.n_bad} bad · AUC <span className="font-mono tabular-nums font-semibold">{(data.auc ?? 0).toFixed(3)}</span> · Average precision <span className="font-mono tabular-nums font-semibold">{(data.average_precision ?? 0).toFixed(3)}</span>
           </p>
         </div>
       )}
@@ -796,77 +504,11 @@ export function RocPrCurves({ serviceId }: RocPrCurvesProps) {
   )
 }
 
-function RocChart({ points, auc }: { points: CurvePoint[]; ap?: number; auc: number }) {
-  const traces = [
-    {
-      x: points.map((p) => p.fpr ?? 0),
-      y: points.map((p) => p.tpr ?? 0),
-      type: 'scatter',
-      mode: 'lines+markers',
-      name: 'ROC',
-      line: { color: '#0ea5e9', width: 2 },
-      marker: { size: 4 },
-      hovertemplate: 'threshold=%{customdata}<br>FPR=%{x:.3f}<br>TPR=%{y:.3f}<extra></extra>',
-      customdata: points.map((p) => p.threshold),
-    },
-    {
-      x: [0, 1],
-      y: [0, 1],
-      type: 'scatter',
-      mode: 'lines',
-      name: 'random',
-      line: { color: CHART_COLORS.neutral, width: 1, dash: 'dash' },
-      hoverinfo: 'skip',
-    },
-  ]
+function CurveChart({ header, xTitle, yTitle, traces }: { header: string; xTitle: string; yTitle: string; traces: Record<string, unknown>[] }) {
   return (
     <div className="border rounded-md p-2">
-      <div className="text-[10px] uppercase tracking-wider text-muted-foreground px-2 pb-1">
-        ROC — AUC {auc.toFixed(3)}
-      </div>
-      <PlotlyChart
-        data={traces}
-        height={240}
-        layout={{
-          xaxis: { title: 'False positive rate', range: [0, 1] },
-          yaxis: { title: 'True positive rate', range: [0, 1] },
-          showlegend: false,
-          margin: { l: 50, r: 10, t: 10, b: 40 },
-        }}
-      />
-    </div>
-  )
-}
-
-function PrChart({ points, ap }: { points: CurvePoint[]; ap: number }) {
-  const traces = [
-    {
-      x: points.map((p) => p.recall ?? 0),
-      y: points.map((p) => p.precision ?? 0),
-      type: 'scatter',
-      mode: 'lines+markers',
-      name: 'PR',
-      line: { color: CHART_COLORS.success, width: 2 },
-      marker: { size: 4 },
-      hovertemplate: 'threshold=%{customdata}<br>recall=%{x:.3f}<br>precision=%{y:.3f}<extra></extra>',
-      customdata: points.map((p) => p.threshold),
-    },
-  ]
-  return (
-    <div className="border rounded-md p-2">
-      <div className="text-[10px] uppercase tracking-wider text-muted-foreground px-2 pb-1">
-        Precision-Recall — AP {ap.toFixed(3)}
-      </div>
-      <PlotlyChart
-        data={traces}
-        height={240}
-        layout={{
-          xaxis: { title: 'Recall', range: [0, 1] },
-          yaxis: { title: 'Precision', range: [0, 1] },
-          showlegend: false,
-          margin: { l: 50, r: 10, t: 10, b: 40 },
-        }}
-      />
+      <div className="text-[10px] uppercase tracking-wider text-muted-foreground px-2 pb-1">{header}</div>
+      <PlotlyChart data={traces} height={240} layout={{ xaxis: { title: xTitle, range: [0, 1] }, yaxis: { title: yTitle, range: [0, 1] }, showlegend: false, margin: { l: 50, r: 10, t: 10, b: 40 } }} />
     </div>
   )
 }
@@ -874,10 +516,7 @@ function PrChart({ points, ap }: { points: CurvePoint[]; ap: number }) {
 export function PerReasonAucCard({ serviceId }: { serviceId: string }) {
   const { data, isLoading, isError, error, refetch } = useScoringQuery(
     ['scoring-evaluation-per-reason', serviceId],
-    () =>
-      client.GET('/api/services/{service_id}/scoring/evaluation/per-reason', {
-        params: { path: { service_id: serviceId } },
-      }),
+    () => client.GET('/api/services/{service_id}/scoring/evaluation/per-reason', { params: { path: { service_id: serviceId } } }),
     { staleTime: 30_000 },
   )
 
@@ -890,32 +529,15 @@ export function PerReasonAucCard({ serviceId }: { serviceId: string }) {
       helpTitle="About AUC by Rule"
     >
       {isError ? (
-        <CardErrorState
-          icon={<Info className="h-4 w-4" />}
-          title="Failed to load per-rule AUC"
-          message={(error as Error | null)?.message || 'Unknown error'}
-          onRetry={() => refetch()}
-        />
+        <CardErrorState icon={<Info className="h-4 w-4" />} title="Failed to load per-rule AUC" message={(error as Error | null)?.message || 'Unknown error'} onRetry={() => refetch()} />
       ) : isLoading || !data ? (
-        <div className="space-y-2">
-          {['r1', 'r2', 'r3', 'r4', 'r5'].map((k) => (
-            <Skeleton key={k} className="h-10 w-full" />
-          ))}
-        </div>
+        <div className="space-y-2">{['r1', 'r2', 'r3', 'r4', 'r5'].map((k) => <Skeleton key={k} className="h-10 w-full" />)}</div>
       ) : !data.has_min_samples_overall ? (
         <div className="p-4 border border-dashed rounded-md text-center text-sm text-muted-foreground">
-          Per-rule breakdown unlocks once headline AUC is computable —
-          <span className="ml-1 text-foreground font-mono">
-            need {data.min_per_class}+ good / {data.min_per_class}+ bad labels (have{' '}
-            {data.n_good}/{data.n_bad})
-          </span>
+          Per-rule breakdown unlocks once headline AUC is computable —<span className="ml-1 text-foreground font-mono">need {data.min_per_class}+ good / {data.min_per_class}+ bad labels (have {data.n_good}/{data.n_bad})</span>
         </div>
       ) : (
-        <div className="space-y-1.5">
-          {data.buckets.map((b) => (
-            <BucketRow key={b.reason} bucket={b} />
-          ))}
-        </div>
+        <div className="space-y-1.5">{data.buckets.map((b: components['schemas']['ScoringPerReasonBucket']) => <BucketRow key={b.reason} bucket={b} />)}</div>
       )}
     </AnalyticsCard>
   )
@@ -926,32 +548,393 @@ function BucketRow({ bucket }: { bucket: components['schemas']['ScoringPerReason
     return (
       <div className="flex items-center justify-between gap-3 p-2 rounded-md border bg-muted/20 text-xs">
         <span className="font-mono">{bucket.reason}</span>
-        <span className="text-muted-foreground">
-          need {bucket.min_per_class}+ good / {bucket.min_per_class}+ bad with this reason
-          <span className="ml-1 text-foreground tabular-nums">
-            (have {bucket.n_good}/{bucket.n_bad})
-          </span>
-        </span>
+        <span className="text-muted-foreground">need {bucket.min_per_class}+ good / {bucket.min_per_class}+ bad with this reason<span className="ml-1 text-foreground tabular-nums">(have {bucket.n_good}/{bucket.n_bad})</span></span>
       </div>
     )
   }
-
   const passed = !!bucket.passed
   const aucClass = passed ? 'text-emerald-600' : 'text-amber-600'
   return (
     <div className="flex items-center justify-between gap-3 p-2 rounded-md border text-xs">
       <span className="font-mono">{bucket.reason}</span>
       <div className="flex items-center gap-2">
-        <span className={`font-mono font-semibold tabular-nums ${aucClass}`}>
-          {(bucket.auc ?? 0).toFixed(3)}
-        </span>
-        <Badge variant={passed ? 'success' : 'secondary'} className="text-[10px]">
-          {passed ? 'PASS' : 'BELOW'}
-        </Badge>
-        <span className="text-muted-foreground text-[10px] tabular-nums">
-          n={bucket.n_good}g / {bucket.n_bad}b
-        </span>
+        <span className={`font-mono font-semibold tabular-nums ${aucClass}`}>{(bucket.auc ?? 0).toFixed(3)}</span>
+        <Badge variant={passed ? 'success' : 'secondary'} className="text-[10px]">{passed ? 'PASS' : 'BELOW'}</Badge>
+        <span className="text-muted-foreground text-[10px] tabular-nums">n={bucket.n_good}g / {bucket.n_bad}b</span>
       </div>
+    </div>
+  )
+}
+
+// =============================================================================
+// 2. DuckLake / Iceberg Status & 90-Day Storage Distribution Calendar
+// =============================================================================
+
+export function IcebergStatus({ accessLevel }: { accessLevel?: string }) {
+  const activeServiceId = useServiceStore((s) => s.activeServiceId)
+  const { full, abbr } = useDateFormat()
+
+  const { data: info, isLoading, error } = useQuery({
+    queryKey: queryKeys.admin.iceberg(activeServiceId),
+    queryFn: async () => unwrapClient(client.GET('/api/admin/iceberg-info')),
+    enabled: !!activeServiceId,
+    staleTime: 60_000,
+    refetchInterval: 5 * 60_000,
+    refetchIntervalInBackground: false,
+  })
+
+  if (!activeServiceId) return null
+  if (error) return <CardErrorState icon={<Info className="h-4 w-4" />} title="Failed to load DuckLake table info" message={error?.message || 'Unknown error'} />
+
+  const stats = [
+    { label: 'Snapshots', value: info?.snapshots ?? 0, icon: Layers, tooltip: 'Total number of atomic commits in the DuckLake table history.' },
+    { label: 'Data Files', value: info?.data_files ?? 0, icon: FileCode, tooltip: 'Number of Parquet data files currently in the DuckLake table.' },
+    { label: 'Total Size', value: formatBytes(info?.size_bytes ?? 0), icon: Database, tooltip: 'Cumulative size of all data files in the DuckLake table.' },
+    { label: 'Latest Commit', value: info?.latest_snapshot_at ? formatRelative(info.latest_snapshot_at) : 'Never', icon: Clock, tooltip: info?.latest_snapshot_at ? `${full(info.latest_snapshot_at)} ${abbr()}` : 'No snapshots yet.' },
+  ]
+
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+        {stats.map((stat) => (
+          <Card key={stat.label} className="shadow-none border-muted/60">
+            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+              <CardTitle className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground flex items-center gap-1.5">
+                <LabelWithInfo label={stat.label} info={stat.tooltip} className="gap-1.5" labelClassName="text-[10px] font-bold uppercase tracking-wider text-muted-foreground" />
+              </CardTitle>
+              <stat.icon className="h-3.5 w-3.5 text-muted-foreground/60" />
+            </CardHeader>
+            <CardContent>
+              {isLoading ? <Skeleton className="h-7 w-20" /> : (
+                <TooltipProvider>
+                  <Tooltip>
+                    <TooltipTrigger render={<div className="text-xl font-mono font-bold tracking-tight rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" tabIndex={0} role="button" aria-label={`${stat.label}: ${stat.value}`}>{stat.value}</div>} />
+                    <TooltipContent className="text-xs">{stat.tooltip}</TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
+              )}
+            </CardContent>
+          </Card>
+        ))}
+      </div>
+
+      {accessLevel !== 'read_only' && (
+        <Card className="shadow-none border-muted/60 bg-muted/5">
+          <CardContent className="p-4 flex flex-col md:flex-row md:items-center justify-between gap-4">
+            <div className="flex items-center gap-3">
+              <div className="p-2 bg-blue-500/10 rounded-full"><Archive className="h-4 w-4 text-blue-500" /></div>
+              <div>
+                <h4 className="text-sm font-semibold">Local Buffer Status</h4>
+                <p className="text-xs text-muted-foreground">Data ingested but not yet committed to the DuckLake table.</p>
+              </div>
+            </div>
+            <div className="flex items-center gap-6">
+              <div className="flex flex-col">
+                <span className="text-[10px] font-bold uppercase text-muted-foreground">Pending Files</span>
+                {isLoading ? <Skeleton className="h-5 w-12 mt-1" /> : <span className="text-sm font-mono font-bold">{info?.buffer_files ?? 0}</span>}
+              </div>
+              <div className="flex flex-col">
+                <span className="text-[10px] font-bold uppercase text-muted-foreground">Buffer Size</span>
+                {isLoading ? <Skeleton className="h-5 w-16 mt-1" /> : <span className="text-sm font-mono font-bold">{formatBytes(info?.buffer_size_bytes ?? 0)}</span>}
+              </div>
+              <div className="flex items-center gap-2 ml-4">
+                {info?.buffer_files ? info.buffer_files > 0 && (
+                  <Badge variant="outline" className="h-6 px-2 text-[10px] bg-blue-500/10 text-blue-600 border-blue-500/20 animate-pulse shadow-none uppercase font-bold">Pending Commit</Badge>
+                ) : null}
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {info?.table_location && (
+        <div className="px-4 py-2 bg-muted/30 rounded-md border border-dashed flex items-center justify-between">
+          <div className="flex items-center gap-2 overflow-hidden">
+            <Database className="h-3 w-3 text-muted-foreground shrink-0" />
+            <span className="text-[10px] text-muted-foreground font-mono truncate">{info.table_location}</span>
+          </div>
+          <span className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest ml-4 shrink-0">
+            Hadoop Catalog (Fastly Object Storage {info.region ? `- ${info.region}` : ''})
+          </span>
+        </div>
+      )}
+    </div>
+  )
+}
+
+export function IcebergCalendar() {
+  const activeServiceId = useServiceStore((s) => s.activeServiceId)
+
+  const { data: calendar, isLoading } = useQuery({
+    queryKey: queryKeys.admin.icebergCalendar(activeServiceId),
+    queryFn: async () => unwrapClient(client.GET('/api/admin/iceberg-calendar')),
+    enabled: !!activeServiceId,
+    staleTime: 60_000,
+    refetchInterval: 5 * 60_000,
+    refetchIntervalInBackground: false,
+  })
+
+  const days = React.useMemo(() => {
+    const today = new Date()
+    today.setHours(0, 0, 0, 0)
+    const pad = (n: number) => n.toString().padStart(2, '0')
+    return Array.from({ length: 90 }, (_, i) => {
+      const d = new Date(today)
+      d.setDate(d.getDate() - i)
+      return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+    }).reverse()
+  }, [])
+
+  if (!activeServiceId) return null
+
+  return (
+    <Card className="shadow-none border-muted/60">
+      <CardHeader className="pb-2">
+        <CardTitle className="text-sm font-semibold">DuckLake Storage Distribution</CardTitle>
+        <CardDescription className="text-xs">Physical data file counts and sizes partitioned by day.</CardDescription>
+      </CardHeader>
+      <CardContent>
+        {isLoading ? (
+          <div className="flex items-center gap-2 py-6 text-sm text-muted-foreground animate-pulse">
+            <Loader2 className="h-3 w-3 animate-spin" /> Loading distribution data...
+          </div>
+        ) : (
+          <div className="flex flex-wrap gap-1">
+            {days.map((date) => {
+              const entry = calendar?.[date]
+              const dayData = Array.isArray(entry) ? undefined : entry
+              const hasData = !!dayData
+              return (
+                <TooltipProvider key={date}>
+                  <Tooltip>
+                    <TooltipTrigger render={<span className="inline-block rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" tabIndex={0} role="button" aria-label={hasData ? `${date}: ${dayData.data_files} files, ${formatBytes(dayData.size_bytes)}` : `${date}: no data`} />}>
+                      <div className={cn('h-4 w-4 rounded-sm transition-colors border', hasData ? 'bg-blue-500 border-blue-600/20 hover:bg-blue-400' : 'bg-muted/30 border-border/50 hover:bg-muted/50')} />
+                    </TooltipTrigger>
+                    <TooltipContent className="text-xs max-w-[200px] p-2 space-y-1">
+                      <div className="font-bold border-b border-muted/20 pb-1 mb-1">{date}</div>
+                      {hasData ? (
+                        <>
+                          <div className="flex justify-between gap-4"><span className="text-muted-foreground">Files:</span><span className="font-mono">{dayData.data_files}</span></div>
+                          <div className="flex justify-between gap-4"><span className="text-muted-foreground">Size:</span><span className="font-mono">{formatBytes(dayData.size_bytes)}</span></div>
+                        </>
+                      ) : <div className="text-muted-foreground italic">No data files</div>}
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
+              )
+            })}
+          </div>
+        )}
+        <div className="mt-4 flex items-center gap-4 text-[10px] text-muted-foreground uppercase font-bold tracking-wider">
+          <div className="flex items-center gap-1.5"><div className="h-2 w-2 rounded-sm bg-blue-500" /><span>Committed Data</span></div>
+          <div className="flex items-center gap-1.5"><div className="h-2 w-2 rounded-sm bg-muted/30 border" /><span>No Data</span></div>
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
+
+// =============================================================================
+// 3. Metadata Storage Card
+// =============================================================================
+
+type TableStat = { rows: number; bytes: number | null }
+type StorageResponse = {
+  tables: Record<string, TableStat>
+  db_bytes: number | null
+  db_path: string
+  retention: { usage_log_days: number; ingested_files_days: number; cron_runs_days: number }
+  ingested_files_locked?: boolean
+}
+type _TableStatParity = Expect<WireParity<TableStat, components['schemas']['MetadataTableStat']>>
+type _RetentionParity = Expect<WireParity<StorageResponse['retention'], components['schemas']['MetadataRetentionValues']>>
+type _StorageParity = Expect<WireParity<StorageResponse, components['schemas']['MetadataStorageResponse']>>
+
+const TRIMMABLE = ['usage_log', 'ingested_files', 'cron_runs'] as const
+const REFERENCE = ['alerts', 'saved_views', 'audit_log', 'in_flight_buffers', 'locally_compacted_files'] as const
+
+const TABLE_LABELS: Record<string, { label: string; sub: string }> = {
+  usage_log: { label: 'FOS / CDN usage log', sub: 'every Class A/B + CDN read recorded for cost analytics' },
+  ingested_files: { label: 'Ingested files index', sub: 'one row per parsed .gz so we never re-ingest' },
+  cron_runs: { label: 'Cron run history', sub: 'audit trail for sync, optimize, cleanup, etc.' },
+  alerts: { label: 'Saved alerts', sub: 'user-configured alert rules' },
+  saved_views: { label: 'Saved dashboard views', sub: 'user-saved filter combinations' },
+  audit_log: { label: 'Admin audit log', sub: 'admin actions (settings, teardown, share invites)' },
+  in_flight_buffers: { label: 'In-flight ingest buffers', sub: 'pending parquet writes mid-sync' },
+  locally_compacted_files: { label: 'Local-compaction registry', sub: 'tracks compacted source files to block re-download' },
+}
+
+const fmtRetentionDays = (n: number): string => (n <= 0 ? 'disabled' : n === 1 ? '1 day' : `${n} days`)
+
+export function MetadataStorageCard() {
+  const qc = useQueryClient()
+  const mounted = useMounted()
+
+  const { data, isLoading, isFetching, error } = useQuery<StorageResponse>({
+    queryKey: queryKeys.admin.metadataStorage(),
+    queryFn: async () => (await unwrapClient(client.GET('/api/admin/metadata-storage'))) as StorageResponse,
+    staleTime: 30_000,
+    refetchInterval: 5 * 60_000,
+    refetchIntervalInBackground: false,
+    retry: 1,
+  })
+
+  const [editing, setEditing] = React.useState(false)
+  const [draft, setDraft] = React.useState({ usage_log_days: '', ingested_files_days: '', cron_runs_days: '' })
+
+  const beginEdit = () => {
+    if (!data) return
+    setDraft({
+      usage_log_days: String(data.retention.usage_log_days),
+      ingested_files_days: String(data.retention.ingested_files_days),
+      cron_runs_days: String(data.retention.cron_runs_days),
+    })
+    setEditing(true)
+  }
+
+  const saveRetention = useMutation({
+    mutationFn: async () =>
+      unwrapClient(client.PATCH('/api/admin/metadata-retention', {
+        body: {
+          usage_log_days: Math.max(0, parseInt(draft.usage_log_days, 10) || 0),
+          ingested_files_days: Math.max(0, parseInt(draft.ingested_files_days, 10) || 0),
+          cron_runs_days: Math.max(0, parseInt(draft.cron_runs_days, 10) || 0),
+        },
+      })),
+    onSuccess: () => {
+      setEditing(false)
+      qc.invalidateQueries({ queryKey: queryKeys.admin.metadataStorage() })
+    },
+  })
+
+  const rows = data
+    ? [
+        ...TRIMMABLE.map((name) => ({ name, trimmable: true, stat: data.tables[name] })),
+        ...REFERENCE.map((name) => ({ name, trimmable: false, stat: data.tables[name] })),
+      ].filter((r) => r.stat)
+    : []
+
+  const headerAction = data ? (
+    <SSEModal
+      title="Run metadata cleanup now"
+      description={
+        <div className="space-y-2 text-sm">
+          <p>Trims rows from <code className="text-xs">usage_log</code>, <code className="text-xs">ingested_files</code>, and <code className="text-xs">cron_runs</code> older than the active retention windows ({fmtRetentionDays(data.retention.usage_log_days)} / {fmtRetentionDays(data.retention.ingested_files_days)} / {fmtRetentionDays(data.retention.cron_runs_days)}), then VACUUMs the SQLite file so the on-disk size drops to reflect the deletions.</p>
+          <p className="text-muted-foreground">Current file: <span className="tabular-nums font-medium">{formatBytesTiered(data.db_bytes, { maxUnit: 'GB' })}</span>. VACUUM is single-threaded and rewrites the whole file — on a multi-GB DB it can take several minutes. The run is also written to <code className="text-xs">cron_runs</code> and surfaces on the Data Management history grid.</p>
+        </div>
+      }
+      endpoint="/api/admin/metadata-cleanup"
+      body={{}}
+      onClose={() => qc.invalidateQueries({ queryKey: queryKeys.admin.metadataStorage() })}
+      trigger={<Button size="sm" variant="outline"><Trash2 className="h-3.5 w-3.5 mr-1.5" /> Cleanup now</Button>}
+    />
+  ) : undefined
+
+  const LOCKED_REASON = 'cron_sync.delete_after=false on this service. Raw .gz files stay in FOS forever, so ingested_files is the only thing stopping the daily full_sync from re-ingesting every aged-out file. Cleanup of this table is force-disabled regardless of the configured retention.'
+
+  return (
+    <AnalyticsCard
+      title="Metadata Storage"
+      icon={<Database className="h-4 w-4" />}
+      description="Per-table row counts + on-disk size for this service's metadata.db. Daily auto-cleanup at 03:15 UTC."
+      isLoading={!mounted || isLoading}
+      isFetching={mounted && isFetching}
+      error={mounted ? (error as AnalyticsCardError | null) : null}
+      headerAction={headerAction}
+    >
+      {mounted && data ? (
+        <div className="space-y-4">
+          <div className="p-3 border rounded-lg bg-muted/30 space-y-2">
+            <div className="flex items-center justify-between">
+              <div className="text-[11px] sm:text-[10px] uppercase tracking-wider text-muted-foreground font-medium">Retention policy</div>
+              {editing ? (
+                <div className="flex items-center gap-1">
+                  <Button size="sm" variant="ghost" className="h-6 px-2 text-xs" onClick={() => saveRetention.mutate()} disabled={saveRetention.isPending}><Check className="h-3 w-3 mr-1" /> {saveRetention.isPending ? 'Saving…' : 'Save'}</Button>
+                  <Button size="sm" variant="ghost" className="h-6 px-2 text-xs" onClick={() => setEditing(false)} disabled={saveRetention.isPending}><X className="h-3 w-3 mr-1" /> Cancel</Button>
+                </div>
+              ) : (
+                <Button size="sm" variant="ghost" className="h-6 px-2 text-xs" onClick={beginEdit}><Pencil className="h-3 w-3 mr-1" /> Edit</Button>
+              )}
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <RetentionField label="usage_log retention" editing={editing} value={data.retention.usage_log_days} draft={draft.usage_log_days} onDraftChange={(v) => setDraft((d) => ({ ...d, usage_log_days: v }))} />
+              <RetentionField label="ingested_files retention" editing={editing} value={data.retention.ingested_files_days} draft={draft.ingested_files_days} onDraftChange={(v) => setDraft((d) => ({ ...d, ingested_files_days: v }))} locked={data.ingested_files_locked} lockedReason={LOCKED_REASON} />
+              <RetentionField label="cron_runs retention" editing={editing} value={data.retention.cron_runs_days} draft={draft.cron_runs_days} onDraftChange={(v) => setDraft((d) => ({ ...d, cron_runs_days: v }))} />
+            </div>
+            {saveRetention.isError && <div className="text-xs text-destructive pt-1">Save failed: {(saveRetention.error as Error)?.message ?? 'unknown error'}</div>}
+            {editing && <div className="text-[11px] sm:text-[10px] text-muted-foreground pt-1">Set a value to 0 to disable cleanup for that table.</div>}
+          </div>
+
+          <div className="border rounded-lg overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="bg-muted/50">
+                <tr className="text-left">
+                  <th className="px-3 py-2 font-medium">Table</th>
+                  <th className="px-3 py-2 font-medium text-right">Rows</th>
+                  <th className="px-3 py-2 font-medium text-right">Size</th>
+                  <th className="px-3 py-2 font-medium text-center">Trim policy</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r) => {
+                  const { label, sub } = TABLE_LABELS[r.name] ?? { label: r.name, sub: '' }
+                  return (
+                    <tr key={r.name} className="border-t">
+                      <td className="px-3 py-2">
+                        <div className="text-sm font-medium">{label}</div>
+                        <div className="text-[11px] sm:text-[10px] text-muted-foreground font-mono">{r.name}</div>
+                        {sub && <div className="text-[11px] sm:text-[10px] text-muted-foreground mt-0.5">{sub}</div>}
+                      </td>
+                      <td className="px-3 py-2 text-right tabular-nums align-top">{formatCountMaybe(r.stat.rows) ?? '–'}</td>
+                      <td className="px-3 py-2 text-right tabular-nums align-top">{formatBytesTiered(r.stat.bytes, { maxUnit: 'GB' })}</td>
+                      <td className="px-3 py-2 text-center align-top">
+                        {r.trimmable ? (
+                          <Badge variant="secondary" className="text-[11px] sm:text-[10px]">
+                            {fmtRetentionDays(r.name === 'usage_log' ? data.retention.usage_log_days : r.name === 'ingested_files' ? data.retention.ingested_files_days : data.retention.cron_runs_days)}
+                          </Badge>
+                        ) : (
+                          <span className="text-xs text-muted-foreground" title="Not subject to retention cleanup — these are user/admin data, not append-only telemetry.">—</span>
+                        )}
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+              <tfoot className="bg-muted/30 border-t">
+                <tr>
+                  <td className="px-3 py-2 font-medium text-xs uppercase tracking-wider">Total DB file</td>
+                  <td className="px-3 py-2"></td>
+                  <td className="px-3 py-2 text-right font-semibold tabular-nums">{formatBytesTiered(data.db_bytes, { maxUnit: 'GB' })}</td>
+                  <td className="px-3 py-2"></td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+        </div>
+      ) : null}
+    </AnalyticsCard>
+  )
+}
+
+function RetentionField({ label, editing, value, draft, onDraftChange, locked, lockedReason }: {
+  label: string; editing: boolean; value: number; draft: string; onDraftChange: (v: string) => void; locked?: boolean; lockedReason?: string
+}) {
+  return (
+    <div>
+      <div className="text-[11px] sm:text-[10px] uppercase tracking-wider text-muted-foreground flex items-center gap-1">
+        {label}
+        {locked && <span title={lockedReason} className="inline-flex items-center text-amber-500" aria-label="locked"><Lock className="h-3 w-3" aria-hidden="true" /></span>}
+      </div>
+      {editing ? (
+        <div className="flex items-center gap-1.5 mt-1">
+          <Input type="number" min={0} value={locked ? '0' : draft} onChange={(e) => onDraftChange(e.target.value)} disabled={locked} className="h-7 w-20 text-sm tabular-nums" title={locked ? lockedReason : undefined} aria-label={`${label} retention in days`} />
+          <span className="text-xs text-muted-foreground">days</span>
+        </div>
+      ) : (
+        <div className={`text-sm font-semibold tabular-nums ${locked ? 'text-muted-foreground italic' : ''}`} title={locked ? lockedReason : undefined}>
+          {locked ? 'disabled (delete_after=false)' : fmtRetentionDays(value)}
+        </div>
+      )}
     </div>
   )
 }

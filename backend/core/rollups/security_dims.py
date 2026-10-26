@@ -56,12 +56,25 @@ convention as :mod:`.origin_dims`.
 from __future__ import annotations
 
 import logging
+import math
+import os
 import sys
+from collections.abc import Generator
+from datetime import UTC, datetime, timedelta
 
+from backend.core.fastly.client import fastly_paginate
+from backend.core.metadata.pg_connection import (
+    get_pg_readonly_connection,
+    get_pg_thread_connection,
+)
 from backend.core.metric_expressions import coalesce, sum_or_zero
+from backend.utils.date_utils import iso_z, iso_z_now, parse_iso_utc
 from backend.utils.pop_utils import build_pop_haversine_case_sql
+from backend.utils.sql_validator import escape_sql_literal
 
 from ._common import (
+    NGWAF_BOTS_BUNDLE_FILENAME,
+    NGWAF_BOTS_TS_BUNDLE_FILENAME,
     SECURITY_BOT_EFF_BUNDLE_FILENAME,
     SECURITY_BOT_EFF_UA_TOP_K,
     SECURITY_CONN_REUSE_BUNDLE_FILENAME,
@@ -73,11 +86,14 @@ from ._common import (
     SECURITY_TOPIPS_BUNDLE_TOP_K,
     VERIFIED_BOTS_TS_BUNDLE_FILENAME,
     MultiBundleSpec,
+    _day_bundled_root,
+    _hour_bundled_root,
     backfill_missing_bundles,
     backfill_multi_spec_bundles,
     build_multi_spec_bundles,
     build_per_hour_bundles,
     parquet_zstd_target,
+    unlink_quiet,
 )
 
 logger = logging.getLogger(__name__)
@@ -421,8 +437,507 @@ def backfill_verified_bots_ts_bundles(service_id: str, source: dict) -> int:
     )
 
 
+# ---------------------------------------------------------------------------
+# Per-hour NGWAF-bots rollups (formerly backend.core.rollups.ngwaf_bots)
+# ---------------------------------------------------------------------------
+
+# Empty-but-valid relation: same shape as the VALUES literal below, zero rows.
+# Keeps the JOIN a no-op (not a skip) when the cache exists but has no
+# bot-tagged rows yet — the caller still writes the load-bearing empty
+# parquet that marks a bot-quiet hour as covered.
+_EMPTY_NGWAF_VALUES_SQL = (
+    "(SELECT NULL::VARCHAR AS waf_req_id, NULL::VARCHAR AS bot_name, "
+    "NULL::VARCHAR AS wellknown_bot_name, NULL::VARCHAR AS category WHERE FALSE) AS nb"
+)
+
+
+def _read_ngwaf_bots_as_values_sql(db_path: str | None = None) -> str | None:
+    """Fetch the ``ngwaf_bots`` cache table via Postgres (or test SQLite file)
+    and render it as a DuckDB ``VALUES`` literal aliased
+    ``nb(waf_req_id, bot_name, wellknown_bot_name, category)``.
+    """
+    rows = []
+    if db_path and os.path.exists(db_path):
+        import sqlite3
+
+        try:
+            con = sqlite3.connect(db_path, timeout=5)
+            try:
+                col_names = {r[1] for r in con.execute("PRAGMA table_info(ngwaf_bots)").fetchall()}
+                wk_expr = "wellknown_bot_name" if "wellknown_bot_name" in col_names else "NULL"
+                rows = con.execute(
+                    f"SELECT waf_req_id, bot_name, {wk_expr}, category FROM ngwaf_bots WHERE bot_name IS NOT NULL"
+                ).fetchall()
+            finally:
+                con.close()
+        except Exception as e:
+            logger.warning("[rollups] failed reading ngwaf_bots test cache at %s: %s", db_path, e)
+            return None
+    else:
+        from backend.core.metadata import pg_connection
+
+        try:
+            pconn = pg_connection.get_pg_readonly_connection()
+            try:
+                cur = pconn.execute(
+                    "SELECT waf_req_id, bot_name, wellknown_bot_name, category "
+                    "FROM ngwaf_bots WHERE bot_name IS NOT NULL"
+                )
+                rows = [
+                    (r["waf_req_id"], r["bot_name"], r["wellknown_bot_name"], r["category"]) for r in cur.fetchall()
+                ]
+            finally:
+                pconn.close()
+        except Exception as e:
+            logger.warning("[rollups] failed reading ngwaf_bots cache from postgres: %s", e)
+            return None
+
+    if not rows:
+        return _EMPTY_NGWAF_VALUES_SQL
+
+    def esc(v: object) -> str:
+        return "NULL" if v is None else "'" + escape_sql_literal(str(v)) + "'"
+
+    values = ", ".join(f"({esc(r[0])}, {esc(r[1])}, {esc(r[2])}, {esc(r[3])})" for r in rows)
+    return f"(VALUES {values}) AS nb(waf_req_id, bot_name, wellknown_bot_name, category)"
+
+
+def _purge_stale_ngwaf_bots_parquets(source: dict) -> int:
+    """Unlink pre-wellknown_bot_name ``ngwaf_bots.parquet`` files (Trap #24).
+
+    Earlier versions wrote ``(bot_name, category, count)`` without
+    ``wellknown_bot_name``. Both ``backfill_missing_bundles`` and
+    ``compact_closed_days`` skip hours/days whose output file already exists,
+    so stale 3-column parquets would block rebundling and break the
+    4-column reader / day compactor. Inspecting parquet footer schemas is
+    sub-ms per file.
+    """
+    import pyarrow.parquet as pq
+
+    purged = 0
+    for root, prefix in ((_hour_bundled_root(source), "hour="), (_day_bundled_root(source), "day=")):
+        if not os.path.isdir(root):
+            continue
+        try:
+            entries = sorted(os.listdir(root))
+        except OSError:
+            continue
+        for entry in entries:
+            if not entry.startswith(prefix):
+                continue
+            p = os.path.join(root, entry, NGWAF_BOTS_BUNDLE_FILENAME)
+            if not os.path.isfile(p):
+                continue
+            try:
+                names = set(pq.read_schema(p).names)
+            except Exception:
+                names = set()
+            if "wellknown_bot_name" not in names:
+                unlink_quiet(p)
+                unlink_quiet(f"{p}.done")
+                purged += 1
+    return purged
+
+
+def _ngwaf_bots_eligibility(cols: set[str], *, require_timestamp: bool = False) -> dict[str, str] | None:
+    if "waf_req_id" not in cols or (require_timestamp and "timestamp" not in cols):
+        return None
+    from backend import config as svcconfig
+
+    db_path = svcconfig.ngwaf_sqlite_cache_override()
+    if db_path and not os.path.exists(db_path):
+        return None
+    values_sql = _read_ngwaf_bots_as_values_sql(db_path)
+    if values_sql is None:
+        return None
+    return {"ngwaf_values_sql": values_sql}
+
+
+def build_ngwaf_bots_bundles(service_id: str, source: dict, hours: list[str]) -> int:
+    """Write a per-hour ngwaf_bots rollup for each closed hour."""
+
+    def eligibility(cols, table_ident):
+        return _ngwaf_bots_eligibility(cols)
+
+    def build_copy_sql(ctx, table_ident, start_iso, end_iso, tmp_path):
+        return (
+            f"COPY ("
+            f"  SELECT CAST(nb.bot_name AS VARCHAR) AS bot_name, "
+            f"         CAST(nb.wellknown_bot_name AS VARCHAR) AS wellknown_bot_name, "
+            f"         CAST(nb.category AS VARCHAR) AS category, "
+            f"         CAST(COUNT(*) AS BIGINT) AS count "
+            f"  FROM {table_ident} t "
+            f"  INNER JOIN {ctx['ngwaf_values_sql']} "
+            f"          ON t.waf_req_id = nb.waf_req_id "
+            f"  WHERE t.timestamp >= TIMESTAMPTZ '{start_iso}' "
+            f"    AND t.timestamp <  TIMESTAMPTZ '{end_iso}' "
+            f"    AND t.waf_req_id IS NOT NULL "
+            f"    AND nb.bot_name IS NOT NULL "
+            f"  GROUP BY 1, 2, 3"
+            f") {parquet_zstd_target(tmp_path)}"
+        )
+
+    return build_per_hour_bundles(
+        service_id,
+        source,
+        hours,
+        bundle_filename=NGWAF_BOTS_BUNDLE_FILENAME,
+        tmp_prefix=".tmp_nb_",
+        label="ngwaf_bots",
+        eligibility=eligibility,
+        build_copy_sql=build_copy_sql,
+        logger=logger,
+    )
+
+
+def backfill_ngwaf_bots_bundles(service_id: str, source: dict) -> int:
+    """Self-heal pass: build ngwaf_bots.parquet for every closed hour that
+    has all_fields.parquet (or time_series.parquet) but no 4-column
+    ngwaf_bots.parquet yet.
+    """
+    _purge_stale_ngwaf_bots_parquets(source)
+    return backfill_missing_bundles(
+        service_id,
+        source,
+        bundle_filename=NGWAF_BOTS_BUNDLE_FILENAME,
+        label="ngwaf_bots",
+        builder=build_ngwaf_bots_bundles,
+        logger=logger,
+    )
+
+
+def build_ngwaf_bots_ts_bundles(service_id: str, source: dict, hours: list[str]) -> int:
+    """Write a per-hour minute-bucketed ngwaf_bots_ts rollup for each closed hour."""
+
+    def eligibility(cols, table_ident):
+        return _ngwaf_bots_eligibility(cols, require_timestamp=True)
+
+    def build_copy_sql(ctx, table_ident, start_iso, end_iso, tmp_path):
+        return (
+            f"COPY ("
+            f"  SELECT CAST(date_trunc('minute', t.timestamp) AS TIMESTAMPTZ) AS bucket_ts, "
+            f"         CAST(nb.bot_name AS VARCHAR) AS bot_name, "
+            f"         CAST(COUNT(*) AS BIGINT) AS count "
+            f"  FROM {table_ident} t "
+            f"  INNER JOIN {ctx['ngwaf_values_sql']} "
+            f"          ON t.waf_req_id = nb.waf_req_id "
+            f"  WHERE t.timestamp >= TIMESTAMPTZ '{start_iso}' "
+            f"    AND t.timestamp <  TIMESTAMPTZ '{end_iso}' "
+            f"    AND t.waf_req_id IS NOT NULL "
+            f"    AND nb.bot_name IS NOT NULL "
+            f"  GROUP BY 1, 2"
+            f") {parquet_zstd_target(tmp_path)}"
+        )
+
+    return build_per_hour_bundles(
+        service_id,
+        source,
+        hours,
+        bundle_filename=NGWAF_BOTS_TS_BUNDLE_FILENAME,
+        tmp_prefix=".tmp_nbts_",
+        label="ngwaf_bots_ts",
+        eligibility=eligibility,
+        build_copy_sql=build_copy_sql,
+        logger=logger,
+    )
+
+
+def backfill_ngwaf_bots_ts_bundles(service_id: str, source: dict) -> int:
+    """Self-heal pass: build ngwaf_bots_ts.parquet for every closed hour that
+    has all_fields.parquet (or time_series.parquet) but no ngwaf_bots_ts.parquet yet.
+    """
+    return backfill_missing_bundles(
+        service_id,
+        source,
+        bundle_filename=NGWAF_BOTS_TS_BUNDLE_FILENAME,
+        label="ngwaf_bots_ts",
+        builder=build_ngwaf_bots_ts_bundles,
+        logger=logger,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Fastly NGWAF API client & bot cache helpers (formerly backend.utils.ngwaf)
+# ---------------------------------------------------------------------------
+
+_API_PREFIX = "/ngwaf/v1"
+
+
+def fetch_verified_bots_paged(
+    api_key: str,
+    workspace_id: str,
+    from_ts: str,
+    until_ts: str | None = None,
+    page_limit: int = 500,
+) -> Generator[tuple[list[dict], str | None, int]]:
+    """Yield (page_records, latest_timestamp, raw_page_count) for each page of VERIFIED-BOT requests."""
+    from backend.core.fastly.client import is_mock_mode
+
+    if is_mock_mode():
+        yield [], None, 0
+        return
+
+    relative_from = _get_relative_time_range(from_ts)
+
+    q = f"tag:VERIFIED-BOT from:{relative_from}"
+    if until_ts:
+        relative_until = _get_relative_time_range(until_ts)
+        q += f" until:{relative_until}"
+
+    for data in fastly_paginate(
+        f"{_API_PREFIX}/workspaces/{workspace_id}/requests",
+        token=api_key,
+        style="cursor",
+        params={"q": q, "limit": page_limit},
+        page_delay=0.1,
+    ):
+        raw_data = data.get("data", [])
+        records: list[dict] = []
+        latest_ts: str | None = None
+
+        for r in raw_data:
+            record = _extract_bot_record(r)
+            if record:
+                records.append(record)
+                ts = record.get("timestamp")
+                if ts and (latest_ts is None or ts > latest_ts):
+                    latest_ts = ts
+
+        yield records, latest_ts, len(raw_data)
+
+
+def _get_relative_time_range(ts_str: str) -> str:
+    """Convert an ISO timestamp to a rounded-up relative NGWAF time string (e.g. -5d, -15min)."""
+    ts = parse_iso_utc(ts_str)
+    if ts is None:
+        if ts_str.startswith("-"):
+            return ts_str
+        return "-1d"
+
+    delta = datetime.now(UTC) - ts
+    seconds = delta.total_seconds()
+
+    if seconds > 86400:
+        days = math.ceil(seconds / 86400)
+        return f"-{days}d"
+
+    if seconds > 3600:
+        hours = math.ceil(seconds / 3600)
+        return f"-{hours}h"
+
+    mins = math.ceil(seconds / 900) * 15
+    return f"-{max(mins, 1)}min"
+
+
+def _extract_bot_record(r: dict) -> dict | None:
+    """Extract bot info from a single NGWAF request record. Returns None if no VERIFIED-BOT signal."""
+    signals = r.get("signals", [])
+
+    verified = next((s for s in signals if s.get("id") == "VERIFIED-BOT"), None)
+    if not verified:
+        return None
+
+    subcat = next(
+        (s for s in signals if s.get("id", "").startswith("VERIFIED-BOT.") and s["id"] != "VERIFIED-BOT"),
+        None,
+    )
+
+    bot_name = verified.get("value")
+    category = subcat["id"].replace("VERIFIED-BOT.", "") if subcat else None
+
+    user_agent = r.get("user_agent") or next(
+        (
+            h["value"]
+            for h in r.get("request_headers", [])
+            if isinstance(h, dict) and h.get("name", "").lower() == "user-agent"
+        ),
+        None,
+    )
+
+    return {
+        "waf_req_id": r.get("id"),
+        "bot_name": bot_name,
+        "category": category,
+        "user_agent": user_agent,
+        "server_name": r.get("server_name"),
+        "timestamp": r.get("timestamp"),
+    }
+
+
+def oldest_unenriched_timestamp(src: dict) -> str | None:
+    """Return the oldest log-table timestamp that has a waf_req_id not yet in
+    the bot cache. Returns None if the query fails or the log table has no
+    unenriched rows.
+    """
+    from backend.core.duckdb import get_connection
+    from backend.repositories._base import _safe_table
+
+    table_name = _safe_table(src["name"])
+
+    try:
+        con = get_connection(source=src, max_wait=5, skip_view_update=True, read_only=True)
+        try:
+            from backend.repositories._base import attach_ngwaf_cache
+
+            with attach_ngwaf_cache(con, ["waf_req_id"], alias="_ngwaf_oldest") as attached:
+                if attached:
+                    row = con.execute(f"""
+                        SELECT MIN(t.timestamp)
+                        FROM {table_name} t
+                        LEFT JOIN temp._ngwaf_oldest_ngwaf_bots nb USING (waf_req_id)
+                        WHERE t.waf_req_id IS NOT NULL
+                          AND t.waf_req_id != ''
+                          AND t.waf_sig LIKE '%VERIFIED-BOT%'
+                          AND nb.waf_req_id IS NULL
+                    """).fetchone()
+                    ts = row[0] if row and row[0] else None
+                    if ts:
+                        if hasattr(ts, "strftime"):
+                            return iso_z(ts)
+                        return str(ts)
+        finally:
+            con.close()
+    except Exception:
+        logger.debug("oldest_unenriched_timestamp: con.close failed (ignored)", exc_info=True)
+
+    return None
+
+
+def _get_conn():
+    return get_pg_thread_connection()
+
+
+def _get_readonly_conn():
+    return get_pg_readonly_connection()
+
+
+def get_last_timestamp(workspace_id: str) -> str | None:
+    """Return last_timestamp_synced for workspace, or None if no sync has run yet."""
+    con = _get_readonly_conn()
+    try:
+        row = con.execute(
+            "SELECT last_timestamp_synced FROM ngwaf_sync_state WHERE workspace_id = ?",
+            (workspace_id,),
+        ).fetchone()
+        if row and row["last_timestamp_synced"]:
+            return row["last_timestamp_synced"]
+        return None
+    finally:
+        con.close()
+
+
+def update_sync_watermark(workspace_id: str, until_ts: str) -> None:
+    """Advance the high-water mark to until_ts after a completed scan."""
+    con = _get_conn()
+    try:
+        con.execute(
+            """
+            INSERT INTO ngwaf_sync_state (workspace_id, last_timestamp_synced)
+            VALUES (?, ?)
+            ON CONFLICT (workspace_id) DO UPDATE SET last_timestamp_synced = EXCLUDED.last_timestamp_synced
+            """,
+            (workspace_id, until_ts),
+        )
+        con.commit()
+    finally:
+        con.close()
+
+
+def upsert_bots(records: list[dict], workspace_id: str, latest_timestamp: str | None) -> None:
+    """Insert or replace bot records and update sync state in one transaction. Idempotent."""
+    con = _get_conn()
+    now = iso_z_now()
+    rows = [
+        (
+            r["waf_req_id"],
+            r.get("bot_name"),
+            r.get("category"),
+            r.get("wellknown_bot_id"),
+            r.get("wellknown_bot_name"),
+            now,
+        )
+        for r in records
+        if r.get("waf_req_id")
+    ]
+    try:
+        if rows:
+            con.executemany(
+                """
+                INSERT INTO ngwaf_bots
+                    (waf_req_id, bot_name, category, wellknown_bot_id, wellknown_bot_name, synced_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT (waf_req_id) DO UPDATE SET
+                    bot_name = EXCLUDED.bot_name,
+                    category = EXCLUDED.category,
+                    wellknown_bot_id = EXCLUDED.wellknown_bot_id,
+                    wellknown_bot_name = EXCLUDED.wellknown_bot_name,
+                    synced_at = EXCLUDED.synced_at
+                """,
+                rows,
+            )
+        if latest_timestamp:
+            try:
+                _pts = parse_iso_utc(latest_timestamp)
+                next_ts = iso_z(_pts + timedelta(seconds=1)) if _pts else latest_timestamp
+            except ValueError:
+                next_ts = latest_timestamp
+            con.execute(
+                """
+                INSERT INTO ngwaf_sync_state (workspace_id, last_timestamp_synced)
+                VALUES (?, ?)
+                ON CONFLICT (workspace_id) DO UPDATE SET last_timestamp_synced = EXCLUDED.last_timestamp_synced
+                """,
+                (workspace_id, next_ts),
+            )
+        con.commit()
+    finally:
+        con.close()
+
+
+def cleanup_old_bots(retention_days: int) -> int:
+    """Delete rows with synced_at older than retention_days. Returns deleted row count."""
+    cutoff = iso_z(datetime.now(UTC) - timedelta(days=retention_days))
+    con = _get_conn()
+    try:
+        cur = con.execute("DELETE FROM ngwaf_bots WHERE synced_at < ?", (cutoff,))
+        con.commit()
+        return cur.rowcount or 0
+    finally:
+        con.close()
+
+
+def get_cache_stats() -> dict:
+    """Return summary statistics of cached NGWAF bot records."""
+    con = _get_readonly_conn()
+    try:
+        cur = con.execute("SELECT count(*) FROM ngwaf_bots")
+        total_bots = cur.fetchone()[0]
+
+        workspaces: dict[str, str | None] = {}
+        cur = con.execute("SELECT workspace_id, last_timestamp_synced FROM ngwaf_sync_state")
+        for r in cur.fetchall():
+            workspaces[r["workspace_id"]] = r["last_timestamp_synced"]
+
+        cur = con.execute(
+            "SELECT bot_name, count(*) AS cnt FROM ngwaf_bots WHERE bot_name IS NOT NULL GROUP BY bot_name ORDER BY count(*) DESC LIMIT 10"
+        )
+        top_bots = {r["bot_name"]: r["cnt"] for r in cur.fetchall()}
+
+        return {
+            "total_cached_bots": total_bots,
+            "workspaces": workspaces,
+            "top_bots": top_bots,
+        }
+    finally:
+        con.close()
+
+
 for _legacy_mod in (
     "backend.core.rollups.security_proxies",
     "backend.core.rollups.verified_bots_ts",
+    "backend.core.rollups.ngwaf_bots",
+    "backend.utils.ngwaf",
 ):
     sys.modules[_legacy_mod] = sys.modules[__name__]
+if "backend.utils" in sys.modules:
+    setattr(sys.modules["backend.utils"], "ngwaf", sys.modules[__name__])

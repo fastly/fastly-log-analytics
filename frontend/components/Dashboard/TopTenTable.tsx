@@ -26,7 +26,7 @@ import {
 import { useDebounce } from '@/hooks/useDashboardCards'
 import { useFieldValues, useLogFieldsCatalog } from '@/hooks/useBootstrap'
 import { useMaskIps } from '@/hooks/useBootstrap'
-import { useCopyToClipboard } from '@/hooks/useAdminEventStream'
+import { useCopyToClipboard } from '@/hooks/useSSE'
 
 interface FieldSearchDialogProps {
   field: string

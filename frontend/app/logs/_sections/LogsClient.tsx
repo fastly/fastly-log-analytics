@@ -1,16 +1,23 @@
 'use client'
 
-import React, { useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import dynamic from 'next/dynamic'
 import { client, extractApiError, unwrapClient } from '@/lib/api'
 import { showToast, cn } from '@/lib/utils'
-import { cronCacheBust } from '@/lib/admin-stream-apply'
+import { cronCacheBust, useSSE, useDateFormat, type SyncStatus } from '@/hooks/useSSE'
 import { queryKeys } from '@/lib/query-keys'
 import { useServiceStore } from '@/stores/filterStore'
-import { useDateFormat, type useSSE } from '@/hooks/useSSE'
 import { Badge } from '@/components/ui/badge'
-import { Button } from "@/components/ui/button"
+import { Button, buttonVariants } from "@/components/ui/button"
+import { CopyButton, PageHeader } from '@/components/ui/confirm-dialog'
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from '@/components/ui/dialog'
 import {
   Tooltip,
   TooltipContent,
@@ -37,13 +44,16 @@ import {
   Loader2,
   Maximize2,
   Minimize2,
+  Settings,
+  Clock,
+  X,
+  Check,
 } from 'lucide-react'
 import { NoServiceSelected } from '@/components/ReportLayout'
 import { useBootstrapResolved } from '@/hooks/useBootstrap'
 import { ScrollArea } from '@/components/ui/scroll-area'
-import { SyncFromCloudModal } from '@/components/SyncStatusBadge/SyncStatusBadge'
-import { DataTableReadonly, ColumnVisibilityDropdown, ingestedFilesColumns } from '@/components/DataTable'
-import { PageHeader } from '@/components/ui/confirm-dialog'
+import { SyncFromCloudModal, LiveElapsed } from '@/components/SyncStatusBadge/SyncStatusBadge'
+import { DataTableReadonly, ColumnVisibilityDropdown, DateTimeCell, ingestedFilesColumns } from '@/components/DataTable'
 import { Input } from '@/components/ui/input'
 import {
   Select,
@@ -52,22 +62,858 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
-import { formatCountMaybe, formatBytes } from '@/lib/format'
+import { formatCount, formatCountMaybe, formatBytes } from '@/lib/format'
 import type { ColumnDef } from '@tanstack/react-table'
 import type { components } from '@/types/api.generated'
-import type { SyncStatus } from '@/hooks/useEventStream'
 
 import { useLogsPageState, type CronRun } from '../_state'
 import Loading from '../loading'
-import { useCronColumns } from './CronColumns'
-import { useAuditColumns } from './AuditColumns'
-import { FloatingOperationsDock } from './FloatingOperationsDock'
-import { CronTab } from './CronTab'
+import { CronTab, CRON_EXPLANATIONS, CRON_DISPLAY_NAMES } from './CronTab'
 import { ControlledSSEModal as SSEModal } from '@/components/SSEModal'
 
 type CronRunsResponse = components['schemas']['CronRunsResponse']
 type SchemaColumn = components['schemas']['SchemaResponse']['schema'][number]
 type IngestedFile = components['schemas']['IngestedFile']
+type AuditLogEntry = components['schemas']['AuditLogEntry']
+type TreeNode = components['schemas']['TreeNode']
+
+interface AuditDetails {
+  bucket?: string
+  fos_bucket_name?: string
+  prefix?: string
+  fos_prefix?: string
+  region?: string
+  fos_region?: string
+  sample_rate?: number | string
+  log_period?: number | string
+  edge_only?: boolean
+  cdn_url?: string
+  enable_cron_sync?: boolean
+  log_retention_days?: number
+  delete_after?: boolean
+  log_fields?: { groups?: string[]; field_overrides?: Record<string, boolean> }
+  log_fields_deployed?: boolean
+  groups_before?: string[]
+  groups_after?: string[]
+  fields_added?: string[]
+  fields_removed?: string[]
+}
+
+export type CatalogMaps = {
+  groups: Record<string, { label: string; description: string }>
+  fields: Record<string, { label: string; description: string }>
+}
+
+const DASH_CELL = <span className="text-muted-foreground">—</span>
+const PROCESSING_CELL = <span className="font-mono text-muted-foreground text-xs italic">Processing...</span>
+
+const NO_FILES_TASKS = new Set([
+  'expire_snapshots', 'rollup_compact_daily', 'rollup_hour_heal',
+  'metadata_cleanup', 'insights_prewarmer', 'partial_hour_merge',
+])
+const NO_ROWS_TASKS = new Set([
+  ...NO_FILES_TASKS, 'optimize', 'commit', 'rum_commit', 'local_compact',
+])
+
+const ADMIN_ONLY_CRON_COLUMNS: ColumnDef<CronRun>[] = [
+  {
+    accessorKey: 'files_deleted_fos',
+    header: 'Log Files Deleted',
+    cell: ({ row }) =>
+      row.original.status === 'running' || row.original.task !== 'log_discovery' ? DASH_CELL : (
+        <span className="font-mono text-muted-foreground tabular-nums text-xs">
+          {formatCount(row.original.files_deleted_fos || 0)}
+        </span>
+      ),
+  },
+  {
+    id: 'rows_committed',
+    header: 'Rows Committed',
+    cell: ({ row }) => {
+      if (row.original.status === 'running') return PROCESSING_CELL
+      const val = row.original.task === 'commit' ? row.original.rows_ingested : null
+      return (
+        <span className="font-mono text-muted-foreground tabular-nums text-xs">
+          {val != null ? formatCount(val) : DASH_CELL}
+        </span>
+      )
+    },
+  },
+]
+
+export function useCronColumns(isAnalyst: boolean): ColumnDef<CronRun>[] {
+  return React.useMemo(() => [
+    {
+      accessorKey: 'started_at',
+      id: 'started_at',
+      meta: { label: 'Started At' },
+      header: 'Started At',
+      cell: ({ row }) => <DateTimeCell iso={row.original.started_at} />,
+    },
+    {
+      id: 'finished_at',
+      meta: { label: 'Finished At' },
+      accessorFn: (row) =>
+        row.started_at && row.duration_s != null
+          ? new Date(new Date(row.started_at).getTime() + row.duration_s * 1000).toISOString()
+          : null,
+      enableSorting: false,
+      header: () => <span className="text-xs font-medium px-2.5">Finished At</span>,
+      cell: ({ row }) => {
+        const { status, started_at: startIso, duration_s: dur } = row.original
+        if (status === 'running' || !startIso || dur == null) return DASH_CELL
+        return <DateTimeCell iso={new Date(new Date(startIso).getTime() + dur * 1000).toISOString()} />
+      },
+    },
+    {
+      accessorKey: 'task',
+      id: 'task',
+      meta: { label: 'Task' },
+      header: 'Task',
+      cell: ({ row }) => {
+        const { task, summary } = row.original
+        const isSync = task === 'log_discovery' || task === 'metadata_sync'
+        return (
+          <div className="flex flex-col gap-1 py-1">
+            <TooltipProvider delay={200}>
+              <Tooltip>
+                <TooltipTrigger render={
+                  <Badge className={cn("w-fit px-1.5 py-0 shadow-none text-[10px] uppercase font-bold", isSync ? "bg-blue-500/10 text-blue-600 hover:bg-blue-500/20" : "bg-purple-500/10 text-purple-600 hover:bg-purple-500/20")}>
+                    {CRON_DISPLAY_NAMES[task] || task}
+                  </Badge>
+                } />
+                <TooltipContent side="right" className="max-w-[250px] text-xs">
+                  <p>{CRON_EXPLANATIONS[task] || 'Background job.'}</p>
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+            {summary && <span className="text-[11px] text-muted-foreground whitespace-normal break-words leading-tight">{summary}</span>}
+          </div>
+        )
+      },
+    },
+    {
+      accessorKey: 'status',
+      id: 'status',
+      meta: { label: 'Status' },
+      header: 'Status',
+      cell: ({ row }) => {
+        const { status: val, error_message: err, corrupt_rows } = row.original
+        if (val === 'running') {
+          return (
+            <Badge variant="outline" className="shadow-none px-1.5 py-0 uppercase text-[10px] font-bold border-blue-500/30 text-blue-700 dark:text-blue-400 bg-blue-500/10 flex items-center gap-1 w-fit">
+              <Loader2 className="w-3 h-3 animate-spin" /> Running
+            </Badge>
+          )
+        }
+        if (val === 'skipped') return <Badge variant="secondary" className="shadow-none px-1.5 py-0 uppercase text-[10px] font-bold">No Alerts</Badge>
+        if (val === 'success' && (!corrupt_rows || corrupt_rows === 0)) {
+          return <Badge variant="success" className="shadow-none px-1.5 py-0 uppercase text-[10px] font-bold">Success</Badge>
+        }
+        if (val === 'partial_success' || (val === 'success' && (corrupt_rows ?? 0) > 0)) {
+          return <Badge variant="warning" className="shadow-none px-1.5 py-0 uppercase text-[10px] font-bold">Partial Success</Badge>
+        }
+        return (
+          <div className="flex items-center gap-1.5">
+            <Tooltip>
+              <TooltipTrigger render={<Badge variant="destructive" className="px-1.5 py-0 shadow-none uppercase text-[10px] font-bold" />}>
+                Error
+              </TooltipTrigger>
+              <TooltipContent className="max-w-[400px] break-words bg-destructive text-white dark:text-white">
+                <p className="text-xs font-mono">{err || 'Unknown error'}</p>
+              </TooltipContent>
+            </Tooltip>
+            {err && (
+              <CopyButton
+                text={err}
+                ariaLabel="Copy full error message"
+                title="Copy full error message"
+                stopPropagation
+                className="h-6 w-6 text-muted-foreground hover:text-foreground"
+              />
+            )}
+          </div>
+        )
+      },
+    },
+    {
+      accessorKey: 'duration_s',
+      id: 'duration_s',
+      meta: { label: 'Duration' },
+      header: 'Duration',
+      cell: ({ row }) => {
+        const s = row.original.duration_s
+        if (s == null) return <span className="font-mono text-muted-foreground tabular-nums text-xs">—</span>
+        if (row.original.status === 'running') {
+          return <LiveElapsed startedAt={row.original.started_at} className="font-mono text-blue-700 dark:text-blue-300 tabular-nums text-xs font-medium" />
+        }
+        const fmt = s < 1 ? `${Math.round(s * 1000)}ms` : s < 60 ? `${s.toFixed(1)}s` : `${Math.floor(s / 60)}m ${Math.round(s % 60)}s`
+        return <span className="font-mono text-muted-foreground tabular-nums text-xs">{fmt}</span>
+      },
+    },
+    {
+      accessorKey: 'files_downloaded',
+      id: 'files_downloaded',
+      meta: { label: 'Files Downloaded' },
+      header: 'Files Processed',
+      cell: ({ row }) => {
+        if (row.original.status === 'running') return PROCESSING_CELL
+        const { task, files_downloaded, rows_ingested, parquet_files_optimized } = row.original
+        if (NO_FILES_TASKS.has(task)) return DASH_CELL
+
+        let count = files_downloaded || 0
+        let label = 'raw logs'
+        if (task === 'alerts') {
+          label = count === 1 ? 'alert evaluated' : 'alerts evaluated'
+        } else if (task === 'commit' || task === 'rum_commit') {
+          if (!rows_ingested) return DASH_CELL
+          count = 1
+          label = 'cloud file cached'
+        } else if (task === 'metadata_sync') {
+          if (!isAnalyst) return DASH_CELL
+          label = 'cloud files downloaded'
+        } else if (task === 'optimize') {
+          count = parquet_files_optimized || 0
+          label = 'files merged'
+        } else if (task === 'local_compact') {
+          label = 'files merged'
+        } else if (task === 'rum_sync' || task === 'rum_discovery') {
+          label = 'raw RUM logs'
+        } else if (task === 'ngwaf_sync') {
+          label = count === 1 ? 'bot record' : 'bot records'
+        }
+
+        return (
+          <span className="font-mono text-muted-foreground tabular-nums text-xs" title={label}>
+            {formatCount(count)} <span className="text-[10px] text-muted-foreground">{label}</span>
+          </span>
+        )
+      },
+    },
+    {
+      accessorKey: 'rows_ingested',
+      header: isAnalyst ? 'Log Entries Imported' : 'Log Entries Processed',
+      cell: ({ row }) => {
+        if (row.original.status === 'running') return PROCESSING_CELL
+        const { task, rows_ingested, corrupt_rows, error_message } = row.original
+        if (NO_ROWS_TASKS.has(task)) return DASH_CELL
+
+        if (task === 'alerts') {
+          const triggered = rows_ingested || 0
+          return triggered === 0 ? DASH_CELL : (
+            <span className="font-mono tabular-nums text-xs text-amber-500 font-medium">
+              {triggered} {triggered === 1 ? 'alert triggered' : 'alerts triggered'}
+            </span>
+          )
+        }
+
+        const rows = rows_ingested || 0
+        const corrupt = corrupt_rows || 0
+        if (task === 'metadata_sync') {
+          return rows === 0 ? DASH_CELL : (
+            <span className="font-mono text-muted-foreground tabular-nums text-xs">{formatCount(rows)}</span>
+          )
+        }
+
+        return (
+          <div className="flex items-center gap-2">
+            <span className="font-mono text-muted-foreground tabular-nums text-xs">{formatCount(rows)}</span>
+            {corrupt > 0 && (
+              <div className="flex items-center gap-1 group/corrupt">
+                <Tooltip>
+                  <TooltipTrigger render={<Badge variant="destructive" className="px-1.5 py-0 shadow-none text-[10px] font-bold" />}>
+                    {formatCount(corrupt)} Skipped
+                  </TooltipTrigger>
+                  <TooltipContent>
+                    These lines were skipped due to missing timestamps or invalid JSON structure.
+                  </TooltipContent>
+                </Tooltip>
+                {error_message && (
+                  <CopyButton
+                    text={error_message}
+                    ariaLabel="Copy corrupt-line details"
+                    title="Copy corrupt lines"
+                    stopPropagation
+                    className="h-5 w-5 text-muted-foreground hover:text-foreground opacity-0 group-hover/corrupt:opacity-100 transition-opacity"
+                  />
+                )}
+              </div>
+            )}
+          </div>
+        )
+      },
+    },
+    ...(isAnalyst ? [] : ADMIN_ONLY_CRON_COLUMNS),
+  ], [isAnalyst])
+}
+
+function AuditKVRow({ label, value }: { label: string; value: React.ReactNode }) {
+  return (
+    <div className="flex justify-between items-center text-xs">
+      <span className="text-muted-foreground">{label}</span>
+      <span className="font-mono">{value}</span>
+    </div>
+  )
+}
+
+function AuditGroupDiffCard({
+  title,
+  colorClass,
+  bgClass,
+  ids,
+  groups,
+}: {
+  title: string
+  colorClass: string
+  bgClass: string
+  ids: string[]
+  groups: CatalogMaps['groups']
+}) {
+  return (
+    <div className={cn("border rounded-md p-3", bgClass)}>
+      <h4 className={cn("text-xs font-semibold mb-2 uppercase tracking-wide", colorClass)}>{title}</h4>
+      <div className="text-[10px] font-medium text-muted-foreground mb-1 uppercase">Groups</div>
+      <div className="flex flex-col gap-1">
+        {ids.map((id) => {
+          const g = groups[id === null ? "null" : String(id)]
+          return <div key={id} className="text-xs font-mono text-foreground/80 break-words">{g ? g.label : id}</div>
+        })}
+        {!ids.length && <div className="text-xs italic text-muted-foreground">None</div>}
+      </div>
+    </div>
+  )
+}
+
+export function useAuditColumns(catalogMaps: CatalogMaps): ColumnDef<AuditLogEntry>[] {
+  return React.useMemo(() => [
+    {
+      accessorKey: 'timestamp',
+      id: 'timestamp',
+      meta: { label: 'Time' },
+      header: 'Time',
+      cell: ({ row }) => <DateTimeCell iso={row.original.timestamp} />,
+    },
+    {
+      accessorKey: 'event_type',
+      id: 'event_type',
+      meta: { label: 'Event Type' },
+      header: 'Event Type',
+      cell: ({ row }) => {
+        const type = row.original.event_type || 'unknown'
+        const colorClass =
+          type === 'provision' ? 'bg-green-500/10 text-green-600' :
+          type === 'teardown' ? 'bg-red-500/10 text-red-600' :
+          type === 'fastly_activation' ? 'bg-blue-500/10 text-blue-600' :
+          type.includes('update') ? 'bg-amber-500/10 text-amber-600' :
+          'bg-slate-500/10 text-slate-600'
+        return (
+          <Badge className={cn("w-fit px-1.5 py-0 shadow-none text-[10px] uppercase font-bold", colorClass)}>
+            {type.replace(/_/g, ' ')}
+          </Badge>
+        )
+      },
+    },
+    {
+      accessorKey: 'actor',
+      id: 'actor',
+      meta: { label: 'Actor' },
+      header: 'Actor',
+      cell: ({ row }) => <span className="text-muted-foreground">{row.original.actor}</span>,
+    },
+    {
+      accessorKey: 'details',
+      id: 'details',
+      meta: { label: 'Details' },
+      header: 'Details',
+      cell: ({ row }) => {
+        const details: AuditDetails = row.original.details
+        if (!details || typeof details !== 'object' || Object.keys(details).length === 0) {
+          return <span className="text-muted-foreground italic text-[10px]">No details available</span>
+        }
+        const type = row.original.event_type || 'unknown'
+
+        return (
+          <Dialog>
+            <DialogTrigger className={cn(buttonVariants({ variant: "ghost", size: "sm" }), "h-6 text-[10px] bg-muted/40 hover:bg-muted/60 text-muted-foreground")}>
+              <FileCode className="h-3 w-3 mr-1.5" /> View Details
+            </DialogTrigger>
+            <DialogContent className="max-w-2xl max-h-[80vh] overflow-y-auto">
+              <DialogHeader>
+                <DialogTitle className="text-sm font-semibold capitalize flex items-center gap-2">
+                  <Settings className="w-4 h-4 text-primary" />
+                  {type.replace(/_/g, ' ')} Details
+                </DialogTitle>
+              </DialogHeader>
+
+              {type === 'provision' ? (
+                <div className="space-y-4 mt-2">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div className="border rounded-md p-3 bg-muted/20">
+                      <h4 className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide mb-2 flex items-center gap-1.5">
+                        <Database className="w-3 h-3" /> Storage
+                      </h4>
+                      <div className="space-y-1.5">
+                        <AuditKVRow label="Bucket" value={details.bucket || details.fos_bucket_name || '-'} />
+                        <AuditKVRow label="Prefix" value={details.prefix || details.fos_prefix || '(none)'} />
+                        <AuditKVRow label="Region" value={details.region || details.fos_region || '-'} />
+                      </div>
+                    </div>
+
+                    <div className="border rounded-md p-3 bg-muted/20">
+                      <h4 className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide mb-2 flex items-center gap-1.5">
+                        <Settings className="w-3 h-3" /> Configuration
+                      </h4>
+                      <div className="space-y-1.5">
+                        <AuditKVRow label="Sample Rate" value={`${details.sample_rate || '-'}${details.sample_rate ? '%' : ''}`} />
+                        {details.log_period && <AuditKVRow label="Log Period" value={`${details.log_period}s`} />}
+                        {details.edge_only !== undefined && <AuditKVRow label="Edge Only" value={details.edge_only ? 'Yes' : 'No'} />}
+                        {details.cdn_url && (
+                          <div className="flex items-center text-sm">
+                            <span className="text-muted-foreground w-32">CDN URL</span>
+                            <span className="font-mono truncate ml-2 max-w-[200px]" title={details.cdn_url}>{details.cdn_url}</span>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
+                  {(details.enable_cron_sync !== undefined || details.log_retention_days !== undefined) && (
+                    <div className="border rounded-md p-3 bg-muted/20">
+                      <h4 className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide mb-2 flex items-center gap-1.5">
+                        <Clock className="w-3 h-3" /> Automation & Retention
+                      </h4>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-8 gap-y-1.5">
+                        {details.enable_cron_sync !== undefined && <AuditKVRow label="Cron Sync" value={details.enable_cron_sync ? 'Enabled' : 'Disabled'} />}
+                        {details.log_retention_days !== undefined && <AuditKVRow label="Retention" value={`${details.log_retention_days} days`} />}
+                        {details.delete_after !== undefined && <AuditKVRow label="Auto Delete" value={details.delete_after ? 'Yes' : 'No'} />}
+                      </div>
+                    </div>
+                  )}
+
+                  {details.log_fields && (
+                    <div className="border rounded-md p-3 bg-muted/20">
+                      <h4 className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide mb-3 flex items-center gap-1.5 border-b pb-2">
+                        <ClipboardList className="w-3 h-3" /> Initial Log Fields
+                      </h4>
+                      <div className="space-y-4">
+                        <div>
+                          <div className="text-[10px] font-medium text-muted-foreground mb-2 uppercase">Selected Groups</div>
+                          <div className="flex flex-wrap gap-1.5">
+                            {details.log_fields.groups?.map((id) => {
+                              const g = catalogMaps.groups[id === null ? "null" : String(id)]
+                              return (
+                                <Badge key={id} variant="outline" className="text-[10px] py-0 font-normal bg-background/50">
+                                  {g ? g.label : id}
+                                </Badge>
+                              )
+                            })}
+                            {(!details.log_fields.groups || details.log_fields.groups.length === 0) && (
+                              <span className="text-xs text-muted-foreground italic">None</span>
+                            )}
+                          </div>
+                        </div>
+
+                        {details.log_fields.field_overrides && Object.keys(details.log_fields.field_overrides).length > 0 && (
+                          <div>
+                            <div className="text-[10px] font-medium text-muted-foreground mb-2 uppercase">Field Overrides</div>
+                            <div className="flex flex-wrap gap-1.5">
+                              {Object.entries(details.log_fields.field_overrides).map(([id, enabled]) => {
+                                const f = catalogMaps.fields[id]
+                                return (
+                                  <Badge
+                                    key={id}
+                                    className={cn(
+                                      "text-[10px] py-0 font-normal border shadow-none",
+                                      enabled ? "bg-green-500/10 text-green-600 border-green-500/20" : "bg-red-500/10 text-red-600 border-red-500/20"
+                                    )}
+                                  >
+                                    {enabled ? '+' : '-'}{f ? f.label : id}
+                                  </Badge>
+                                )
+                              })}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ) : type === 'logging_settings_update' ? (
+                <div className="space-y-4 mt-2">
+                  <div className="border rounded-md p-3 bg-muted/20">
+                    <h4 className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide mb-3 flex items-center gap-1.5 border-b pb-2">
+                      <Settings className="w-3 h-3" /> Settings Deployed
+                    </h4>
+                    <div className="flex flex-col gap-2">
+                      {Object.entries(details).map(([key, val]) => {
+                        if (key === 'log_fields_deployed') return null
+                        const { from, to } = val as { from?: unknown; to?: unknown }
+                        return (
+                          <div key={key} className="flex justify-between items-center text-xs">
+                            <span className="text-muted-foreground capitalize">{key.replace(/_/g, ' ')}</span>
+                            <div className="flex items-center gap-2">
+                              <span className="text-muted-foreground line-through opacity-70">{String(from)}</span>
+                              <ChevronRight className="w-3 h-3 text-muted-foreground" />
+                              <span className="font-mono">{String(to)}</span>
+                            </div>
+                          </div>
+                        )
+                      })}
+                      {Object.keys(details).filter(k => k !== 'log_fields_deployed').length === 0 && (
+                        <span className="text-xs text-muted-foreground italic">No settings changed.</span>
+                      )}
+                    </div>
+                  </div>
+                  {details.log_fields_deployed && (
+                    <div className="border rounded-md p-3 bg-green-500/10 border-green-500/20">
+                      <h4 className="text-[10px] font-semibold text-green-700 uppercase tracking-wide mb-2 flex items-center gap-1.5">
+                        <ClipboardList className="w-3 h-3" /> Log Format Updated
+                      </h4>
+                      <p className="text-xs text-green-700/80">
+                        The latest standard and custom field selections have been compiled into VCL and deployed to Fastly.
+                      </p>
+                    </div>
+                  )}
+                </div>
+              ) : type === 'log_format_update' && details.groups_before && details.groups_after ? (
+                <div className="space-y-4">
+                  <div className="grid grid-cols-2 gap-4">
+                    <AuditGroupDiffCard title="Before" colorClass="text-red-600" bgClass="bg-red-500/5" ids={details.groups_before} groups={catalogMaps.groups} />
+                    <AuditGroupDiffCard title="After" colorClass="text-green-600" bgClass="bg-green-500/5" ids={details.groups_after} groups={catalogMaps.groups} />
+                  </div>
+
+                  {((details.fields_added?.length ?? 0) > 0 || (details.fields_removed?.length ?? 0) > 0) && (
+                    <div className="grid grid-cols-2 gap-4 mt-2">
+                      <div className="border rounded-md p-3 border-red-200 dark:border-red-900/30">
+                        <div className="text-[10px] font-medium text-red-600 mb-1 uppercase flex items-center gap-1.5"><X className="w-3 h-3" /> Fields Removed</div>
+                        <div className="flex flex-col gap-1">
+                          {details.fields_removed?.map((id) => {
+                            const f = catalogMaps.fields[id]
+                            return <div key={id} className="text-xs font-mono text-red-600/90 break-words" title={f?.description}>- {f ? f.label : id}</div>
+                          })}
+                          {!details.fields_removed?.length && <div className="text-xs italic text-muted-foreground">None</div>}
+                        </div>
+                      </div>
+                      <div className="border rounded-md p-3 border-green-200 dark:border-green-900/30">
+                        <div className="text-[10px] font-medium text-green-600 mb-1 uppercase flex items-center gap-1.5"><Check className="w-3 h-3" /> Fields Added</div>
+                        <div className="flex flex-col gap-1">
+                          {details.fields_added?.map((id) => {
+                            const f = catalogMaps.fields[id]
+                            return <div key={id} className="text-xs font-mono text-green-600/90 break-words" title={f?.description}>+ {f ? f.label : id}</div>
+                          })}
+                          {!details.fields_added?.length && <div className="text-xs italic text-muted-foreground">None</div>}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="flex flex-col gap-2 mt-2">
+                  {Object.entries(details).map(([key, value]) => {
+                    if (
+                      (key.toLowerCase().includes('prefix') && !value) ||
+                      value === '' || value === null || value === undefined ||
+                      (type === 'fastly_activation' && key === 'active')
+                    ) return null
+                    const valString = typeof value === 'object' ? JSON.stringify(value, null, 2) : String(value)
+                    return (
+                      <div key={key} className="flex flex-col border rounded p-3 bg-muted/20">
+                        <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide mb-1.5">{key.replace(/_/g, ' ')}</span>
+                        {typeof value === 'object' ? (
+                          <pre className="text-xs font-mono bg-background p-2 rounded overflow-x-auto text-foreground/90 whitespace-pre-wrap">{valString}</pre>
+                        ) : (
+                          <span className="text-sm font-mono text-foreground/90 break-all">{valString}</span>
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+            </DialogContent>
+          </Dialog>
+        )
+      },
+    },
+  ], [catalogMaps])
+}
+
+export function CronLiveLog({
+  runId,
+  singleLine = false,
+  terminalMode = !singleLine,
+  startedAt,
+  onDone,
+}: {
+  runId: number | string | undefined
+  singleLine?: boolean
+  terminalMode?: boolean
+  startedAt?: string
+  onDone?: () => void
+}) {
+  const { lines, status, start, stop } = useSSE()
+  const startedForRunId = useRef<number | string | undefined>(undefined)
+  const doneFiredForRunId = useRef<number | string | undefined>(undefined)
+  const { full, abbr } = useDateFormat()
+
+  useEffect(() => {
+    if (runId && startedForRunId.current !== runId) {
+      startedForRunId.current = runId
+      doneFiredForRunId.current = undefined
+      start(`/api/cron-runs/${runId}/stream`)
+    }
+    return () => {
+      if (startedForRunId.current !== undefined) {
+        stop()
+        startedForRunId.current = undefined
+      }
+    }
+  }, [runId, start, stop])
+
+  useEffect(() => {
+    if ((status === 'done' || status === 'error') && onDone && doneFiredForRunId.current !== runId) {
+      doneFiredForRunId.current = runId
+      onDone()
+    }
+  }, [status, onDone, runId])
+
+  const recentLines = singleLine ? lines.slice(-1) : terminalMode ? lines : lines.slice(-2)
+
+  if (recentLines.length === 0) {
+    if (singleLine) {
+      return (
+        <div className="flex items-center gap-1.5 text-[9px] font-mono text-muted-foreground truncate h-full w-full">
+          {status === 'streaming' ? (
+            <><Loader2 className="w-3 h-3 animate-spin shrink-0" /> <span className="truncate">Loading logs...</span></>
+          ) : status === 'error' ? (
+            <span className="text-red-500 truncate">Failed to load logs.</span>
+          ) : (
+            <span className="text-muted-foreground/50 truncate italic">Waiting...</span>
+          )}
+        </div>
+      )
+    }
+
+    return (
+      <div className="flex flex-col gap-1 w-full font-mono text-xs text-zinc-400 py-1">
+        {startedAt && (
+          <div className="text-zinc-500 border-b border-zinc-900 pb-1.5 mb-1.5">
+            [SESSION INITIATED AT: {full(startedAt)} {abbr()}]
+          </div>
+        )}
+        <div className="flex items-center gap-2">
+          {status === 'streaming' ? (
+            <><Loader2 className="w-3.5 h-3.5 animate-spin shrink-0 text-blue-400" /> <span>Streaming console output...</span></>
+          ) : status === 'error' ? (
+            <span className="text-red-400">Failed to stream logs.</span>
+          ) : (
+            <span className="text-zinc-500 italic">Waiting for stream...</span>
+          )}
+        </div>
+      </div>
+    )
+  }
+
+  if (singleLine) {
+    return (
+      <div className="flex flex-col text-[9px] font-mono text-muted-foreground truncate w-full h-full justify-center">
+        {recentLines.map((line, i) => {
+          let text = (line.message as string) || (line.type === 'file_done' ? `Processed ${line.file_name}` : line.type === 'done' ? 'Done.' : JSON.stringify(line))
+          if (text.length > 80) text = text.substring(0, 80) + '...'
+          return (
+            <div key={line._id ?? `idx-${i}`} className="truncate w-full" title={typeof line.message === 'string' ? line.message : text}>
+              {line.type === 'error' ? <span className="text-red-500">{text}</span> :
+               line.type === 'done' ? <span className="text-emerald-500">{text}</span> :
+               line.type === 'status' ? <span className="text-blue-400">{text}</span> :
+               line.type === 'file_done' ? <span className="text-muted-foreground">Processed {String(line.file_name)}</span> :
+               <span>{text}</span>}
+            </div>
+          )
+        })}
+      </div>
+    )
+  }
+
+  return (
+    <div
+      role="log"
+      aria-live="polite"
+      aria-atomic="false"
+      aria-label={terminalMode ? "Cron job output stream" : "Recent cron output"}
+      className={terminalMode
+        ? "flex flex-col gap-1.5 w-full font-mono text-xs leading-relaxed text-zinc-200"
+        : "flex flex-col gap-0.5 mt-1.5 bg-background/50 border border-border/50 p-2 rounded text-[10px] font-mono text-muted-foreground w-[280px] max-w-sm overflow-hidden"
+      }
+    >
+      {terminalMode && startedAt && (
+        <div className="text-zinc-500 border-b border-zinc-900 pb-1.5 mb-1.5">
+          [SESSION INITIATED AT: {full(startedAt)} {abbr()}]
+        </div>
+      )}
+      {recentLines.map((line, i) => {
+        const text = (line.message as string) || (line.type === 'file_done' ? `Processed ${line.file_name}` : line.type === 'done' ? 'Done.' : JSON.stringify(line))
+        return (
+          <div
+            key={line._id ?? `idx-${i}`}
+            className={terminalMode ? "whitespace-pre-wrap break-all w-full text-zinc-300" : "truncate w-full"}
+            title={typeof line.message === 'string' ? line.message : text}
+          >
+            {line.type === 'error' ? <span className="text-red-400 font-medium">{text}</span> :
+             line.type === 'done' ? <span className="text-emerald-400 font-semibold">{text}</span> :
+             line.type === 'status' ? <span className="text-blue-400">{text}</span> :
+             line.type === 'file_done' ? <span className="text-zinc-400">Processed {String(line.file_name)}</span> :
+             <span>{text}</span>}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+export function FloatingOperationsDock({
+  displayedJobs,
+  setDisplayedJobs,
+  isOpen,
+  setIsOpen,
+  selectedJobId,
+  setSelectedJobId,
+  onDismiss,
+}: {
+  displayedJobs: CronRun[]
+  setDisplayedJobs: React.Dispatch<React.SetStateAction<CronRun[]>>
+  isOpen: boolean
+  setIsOpen: (open: boolean) => void
+  selectedJobId: number | string | null
+  setSelectedJobId: (id: number | string | null) => void
+  onDismiss: (id: number) => void
+}) {
+  const { full, abbr } = useDateFormat()
+  if (displayedJobs.length === 0) return null
+
+  const activeJob = displayedJobs.find(j => j.id === selectedJobId) || displayedJobs[0]
+  const runningCount = displayedJobs.filter(j => j.status === 'running').length
+
+  return (
+    <div className="fixed bottom-6 right-6 z-50 flex flex-col items-end gap-2 pointer-events-auto">
+      {!isOpen ? (
+        <button
+          onClick={() => setIsOpen(true)}
+          aria-expanded={false}
+          aria-controls="floating-ops-panel"
+          aria-label={
+            runningCount > 0
+              ? `${runningCount} active operation${runningCount > 1 ? 's' : ''} running, open console`
+              : `${displayedJobs.length} completed operation${displayedJobs.length > 1 ? 's' : ''}, open console`
+          }
+          className={cn(
+            "px-4 py-2.5 rounded-full text-xs font-semibold flex items-center gap-2.5 shadow-2xl transition-all hover:scale-105 duration-200 cursor-pointer border",
+            runningCount > 0
+              ? "bg-blue-600 hover:bg-blue-700 text-white border-blue-500/20 animate-bounce"
+              : "bg-zinc-850 hover:bg-zinc-800 text-zinc-300 border-zinc-700/50"
+          )}
+        >
+          {runningCount > 0 ? <RefreshCw className="h-3.5 w-3.5 animate-spin text-blue-200" /> : <Database className="h-3.5 w-3.5 text-zinc-400" />}
+          <span>
+            {runningCount > 0
+              ? `${runningCount} active operation${runningCount > 1 ? 's' : ''} running...`
+              : `${displayedJobs.length} completed operation${displayedJobs.length > 1 ? 's' : ''} (logs)`}
+          </span>
+        </button>
+      ) : (
+        <div id="floating-ops-panel" className="bg-zinc-950 text-zinc-100 border border-zinc-800 rounded-lg shadow-2xl w-[440px] sm:w-[500px] h-[380px] flex flex-col overflow-hidden animate-in slide-in-from-bottom-5 duration-300">
+          <div className="flex items-center justify-between px-3 py-2 bg-zinc-900 border-b border-zinc-800 shrink-0">
+            <div className="flex items-center gap-2 text-xs font-semibold text-zinc-300">
+              <Database className="h-3.5 w-3.5 text-blue-500" />
+              <span>Console Log Terminal</span>
+            </div>
+            <button
+              onClick={() => setIsOpen(false)}
+              aria-expanded={true}
+              aria-controls="floating-ops-panel"
+              aria-label="Minimize console"
+              className="text-zinc-400 hover:text-zinc-200 p-1 hover:bg-zinc-800 rounded cursor-pointer transition-colors"
+            >
+              <ChevronDown className="h-4 w-4" />
+            </button>
+          </div>
+
+          {displayedJobs.length > 1 && (
+            <div className="flex border-b border-zinc-800 bg-zinc-900/50 overflow-x-auto scrollbar-none shrink-0 px-2 pt-1 gap-1">
+              {displayedJobs.map((job) => {
+                const isActive = job.id === selectedJobId
+                const taskLabel = job.task === 'metadata_sync' ? 'sync' : job.task
+                return (
+                  <div
+                    key={job.id}
+                    className={cn(
+                      "rounded-t text-[10px] font-mono uppercase tracking-wider flex items-center gap-1.5 border-t border-x transition-all shrink-0",
+                      isActive
+                        ? "bg-zinc-950 text-blue-400 border-zinc-800 border-b-zinc-950 font-bold"
+                        : "bg-transparent text-zinc-400 border-transparent hover:text-zinc-200 hover:bg-zinc-800/30"
+                    )}
+                  >
+                    <button
+                      type="button"
+                      onClick={() => setSelectedJobId(job.id)}
+                      className="pl-3 py-1.5 flex items-center gap-1.5 cursor-pointer uppercase tracking-wider"
+                    >
+                      <span className={cn("w-1.5 h-1.5 rounded-full transition-colors duration-300", job.status === 'running' ? "bg-blue-500 animate-pulse" : "bg-zinc-600")} />
+                      {taskLabel}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onDismiss(job.id)}
+                      className="mr-3 hover:bg-zinc-800 p-0.5 rounded text-zinc-500 hover:text-zinc-300 cursor-pointer"
+                      title="Dismiss task"
+                      aria-label={`Dismiss ${taskLabel} task`}
+                    >
+                      <X className="h-2.5 w-2.5" />
+                    </button>
+                  </div>
+                )
+              })}
+            </div>
+          )}
+
+          <div className="flex-1 p-3 font-mono bg-zinc-950 overflow-y-auto flex flex-col justify-between">
+            <div className="flex-1 overflow-hidden flex flex-col">
+              <div className="text-[10px] text-zinc-500 border-b border-zinc-900 pb-1 mb-2 flex items-center justify-between shrink-0">
+                <span>STREAM ID: {activeJob?.id}{activeJob?.started_at && ` • STARTED: ${full(activeJob.started_at)} ${abbr()}`}</span>
+                {activeJob?.status === 'running' ? (
+                  <span className="text-emerald-500 font-bold uppercase animate-pulse">● LIVE STREAMING</span>
+                ) : (
+                  <span className="text-zinc-500 font-bold uppercase">● COMPLETED</span>
+                )}
+              </div>
+              <div className="flex-1 overflow-y-auto min-h-0 bg-black/30 rounded border border-zinc-900 p-2">
+                <CronLiveLog
+                  key={activeJob?.id}
+                  runId={activeJob?.id}
+                  singleLine={false}
+                  startedAt={activeJob?.started_at}
+                  onDone={() => {
+                    if (activeJob?.id) {
+                      setDisplayedJobs(prev => prev.map(j => j.id === activeJob.id ? { ...j, status: 'completed' } : j))
+                    }
+                  }}
+                />
+              </div>
+            </div>
+
+            <div className="mt-2 pt-2 border-t border-zinc-900 flex items-center justify-between text-[10px] text-zinc-500 shrink-0">
+              <span>Task: {activeJob?.task}</span>
+              <button
+                onClick={() => onDismiss(activeJob?.id)}
+                className="text-red-400 hover:text-red-300 hover:underline cursor-pointer"
+              >
+                Dismiss Active View
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
 
 const hasStats = (col: SchemaColumn) => col.null_percentage !== undefined
 const populatedPct = (col: SchemaColumn) =>
@@ -98,9 +944,7 @@ const SCHEMA_COLUMNS: ColumnDef<SchemaColumn>[] = [
       const text = pct != null ? pct.toFixed(1) : '—'
       return (
         <span className="block font-mono text-xs text-right tabular-nums">
-          {hasStats(row.original) ? (
-            <span className={text === '0.0' ? 'text-muted-foreground/30' : ''}>{text}%</span>
-          ) : '—'}
+          {hasStats(row.original) ? <span className={text === '0.0' ? 'text-muted-foreground/30' : ''}>{text}%</span> : '—'}
         </span>
       )
     },
@@ -210,7 +1054,7 @@ export function ServiceHistoryTab({
   setEventFilter,
   activeServiceId,
 }: {
-  auditColumns: ColumnDef<components['schemas']['AuditLogEntry']>[]
+  auditColumns: ColumnDef<AuditLogEntry>[]
   auditLogs: components['schemas']['AuditLogsResponse'] | undefined
   isLoadingAudit: boolean
   isFetchingAudit: boolean
@@ -231,21 +1075,19 @@ export function ServiceHistoryTab({
           <div className="flex flex-col sm:flex-row sm:items-center justify-between p-4 border-b gap-4">
             <div className="flex items-center gap-4">
               <h3 className="text-sm font-medium whitespace-nowrap">Service History</h3>
-              <div className="flex items-center gap-2">
-                <Select value={eventFilter} onValueChange={(v) => setEventFilter(v || 'all')}>
-                  <SelectTrigger className="h-8 w-[200px] text-xs">
-                    <SelectValue placeholder="All events" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="all">All events</SelectItem>
-                    <SelectItem value="provision">Provision</SelectItem>
-                    <SelectItem value="fastly_activation">Fastly Activation</SelectItem>
-                    <SelectItem value="cron_settings_update">Cron Settings Update</SelectItem>
-                    <SelectItem value="logging_settings_update">Log Settings Updated</SelectItem>
-                    <SelectItem value="log_format_update">Log Format Update</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
+              <Select value={eventFilter} onValueChange={(v) => setEventFilter(v || 'all')}>
+                <SelectTrigger className="h-8 w-[200px] text-xs">
+                  <SelectValue placeholder="All events" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All events</SelectItem>
+                  <SelectItem value="provision">Provision</SelectItem>
+                  <SelectItem value="fastly_activation">Fastly Activation</SelectItem>
+                  <SelectItem value="cron_settings_update">Cron Settings Update</SelectItem>
+                  <SelectItem value="logging_settings_update">Log Settings Updated</SelectItem>
+                  <SelectItem value="log_format_update">Log Format Update</SelectItem>
+                </SelectContent>
+              </Select>
             </div>
             <div className="flex items-center gap-2">
               <ColumnVisibilityDropdown table={table} />
@@ -299,6 +1141,27 @@ export function QuickActionsBar({
   setConsoleOpen: (open: boolean) => void
 }) {
   const queryClient = useQueryClient()
+  const isReadOnly = status?.access_level === 'read_only'
+
+  const triggerCronAction = async (
+    endpoint: '/api/admin/ingest-logs' | '/api/admin/commit-iceberg',
+    title: string,
+    description: string,
+  ) => {
+    try {
+      const data = (await unwrapClient(client.POST(endpoint, {}))) as { run_id?: number | string } | undefined
+      const runId = data?.run_id
+      if (!runId) { showToast('No run id returned'); return }
+      setSseTitle(title)
+      setSseDescription(description)
+      setIsSSEModalOpen(true)
+      reset()
+      start(`/api/cron-runs/${runId}/stream`)
+      cronCacheBust(queryClient, activeServiceId)
+    } catch (e) {
+      showToast(extractApiError(e))
+    }
+  }
 
   return (
     <div className="flex flex-wrap items-center gap-2 bg-muted/30 p-2 rounded-lg border">
@@ -309,23 +1172,8 @@ export function QuickActionsBar({
             size="sm"
             variant="default"
             className="h-8 text-xs bg-primary text-primary-foreground hover:bg-primary/90"
-            disabled={status?.access_level === 'read_only'}
-            onClick={async () => {
-              try {
-                const data = await unwrapClient(client.POST("/api/admin/ingest-logs", {}))
-                // 200 body is an opaque dict; the run_id keys the SSE stream.
-                const runId = data?.run_id
-                if (!runId) { showToast('No run id returned'); return }
-                setSseTitle('Importing Logs')
-                setSseDescription('Downloading new raw logs from Fastly Object Storage and processing them...')
-                setIsSSEModalOpen(true)
-                reset()
-                start(`/api/cron-runs/${runId}/stream`)
-                cronCacheBust(queryClient, activeServiceId)
-              } catch (e) {
-                showToast(extractApiError(e))
-              }
-            }}
+            disabled={isReadOnly}
+            onClick={() => triggerCronAction('/api/admin/ingest-logs', 'Importing Logs', 'Downloading new raw logs from Fastly Object Storage and processing them...')}
           >
             <RefreshCw className="h-3 w-3 mr-1.5" /> Import Logs
           </Button>
@@ -333,7 +1181,7 @@ export function QuickActionsBar({
             size="sm"
             variant="outline"
             className="h-8 text-xs bg-background"
-            disabled={status?.access_level === 'read_only'}
+            disabled={isReadOnly}
             onClick={() => setIsSyncModalOpen(true)}
             title="Open the range-picker to backfill a specific historical window (e.g., to close an Ingest Gap)"
           >
@@ -343,22 +1191,8 @@ export function QuickActionsBar({
             size="sm"
             variant="outline"
             className="h-8 text-xs bg-background"
-            disabled={status?.access_level === 'read_only'}
-            onClick={async () => {
-              try {
-                const data = await unwrapClient(client.POST("/api/admin/commit-iceberg", {}))
-                const runId = data?.run_id
-                if (!runId) { showToast('No run id returned'); return }
-                setSseTitle('Committing Buffer')
-                setSseDescription('Flushing local Parquet buffer to the shared Iceberg table in Object Storage...')
-                setIsSSEModalOpen(true)
-                reset()
-                start(`/api/cron-runs/${runId}/stream`)
-                cronCacheBust(queryClient, activeServiceId)
-              } catch (e) {
-                showToast(extractApiError(e))
-              }
-            }}
+            disabled={isReadOnly}
+            onClick={() => triggerCronAction('/api/admin/commit-iceberg', 'Committing Buffer', 'Flushing local Parquet buffer to the shared Iceberg table in Object Storage...')}
           >
             <Archive className="h-3 w-3 mr-1.5" /> Commit Buffer
           </Button>
@@ -398,10 +1232,7 @@ export function QuickActionsBar({
           const latestSync = recentCrons?.entries?.find((e) => e.task === 'log_discovery') ||
                              cronLogs?.entries?.find((e) => e.task === 'log_discovery')
           if (latestSync) {
-            setDisplayedJobs(prev => {
-              if (prev.some((j) => j.id === latestSync.id)) return prev
-              return [...prev, { ...latestSync, status: latestSync.status }]
-            })
+            setDisplayedJobs(prev => prev.some((j) => j.id === latestSync.id) ? prev : [...prev, { ...latestSync, status: latestSync.status }])
             setSelectedConsoleJobId(latestSync.id)
             setConsoleOpen(true)
           } else {
@@ -415,13 +1246,6 @@ export function QuickActionsBar({
   )
 }
 
-// Lazy-mount the heavy tab content. Cron + ServiceHistory + Ingestion
-// are the default landing tabs; the four below only matter when the
-// operator clicks into them. ``ssr: false`` skips the SSR pass — none
-// of them render server-side anyway (they hit DuckDB and S3 client-
-// side via React Query hooks).
-type TreeNode = components['schemas']['TreeNode']
-
 interface TreeProps {
   prefix: string
   level: number
@@ -429,12 +1253,11 @@ interface TreeProps {
   forceExpand?: boolean
 }
 
-function Node({ node, prefix, level, type, forceExpand }: { node: TreeNode, prefix: string, level: number, type: 'iceberg' | 'raw', forceExpand?: boolean }) {
+function Node({ node, prefix, level, type, forceExpand }: TreeProps & { node: TreeNode }) {
   const [isOpen, setIsOpen] = useState(false)
   const { full, abbr, relative } = useDateFormat()
   const activeServiceId = useServiceStore(s => s.activeServiceId)
 
-  // A defined `forceExpand` overrides the open state whenever it changes (adjusted during render).
   const [seenForceExpand, setSeenForceExpand] = useState<boolean | undefined>(undefined)
   if (forceExpand !== seenForceExpand) {
     setSeenForceExpand(forceExpand)
@@ -484,9 +1307,7 @@ function Node({ node, prefix, level, type, forceExpand }: { node: TreeNode, pref
             </div>
           </div>
         </div>
-        {isOpen && (
-          <Tree prefix={`${prefix}${node.name}/`} level={level + 1} type={type} forceExpand={forceExpand} />
-        )}
+        {isOpen && <Tree prefix={`${prefix}${node.name}/`} level={level + 1} type={type} forceExpand={forceExpand} />}
       </div>
     )
   }
@@ -511,9 +1332,6 @@ function Node({ node, prefix, level, type, forceExpand }: { node: TreeNode, pref
         {node.mtime && (
           <TooltipProvider>
             <Tooltip>
-              {/* A-8 (a11y, WCAG 2.1.1): tabIndex + role="button" so
-                  keyboard users can focus the relative-time label and
-                  reveal the full timestamp tooltip. */}
               <TooltipTrigger render={
                 <span
                   tabIndex={0}
@@ -533,9 +1351,9 @@ function Node({ node, prefix, level, type, forceExpand }: { node: TreeNode, pref
         <div className="w-20 flex items-center justify-end gap-2">
           {node.sync_status === 'synced' && <Badge variant="outline" className="px-1.5 py-0 h-5 text-[10px] bg-green-500/10 text-green-600 border-green-500/20 shadow-none"><Cloud className="w-3 h-3 mr-1"/> Synced</Badge>}
           {node.sync_status === 'local' && <Badge variant="outline" className="px-1.5 py-0 h-5 text-[10px] bg-blue-500/10 text-blue-600 border-blue-500/20 shadow-none"><HardDrive className="w-3 h-3 mr-1"/> Local</Badge>}
-          {node.sync_status === 'cloud' && <Badge variant="outline" className="px-1.5 py-0 h-5 text-[10px] bg-purple-500/10 text-purple-600 border-purple-500/20 shadow-none"><Cloud className="w-3 h-3 mr-1"/> Cloud</Badge>}
-          {!node.sync_status && node.is_cloud && <Badge variant="outline" className="px-1.5 py-0 h-5 text-[10px] bg-purple-500/10 text-purple-600 border-purple-500/20 shadow-none"><Cloud className="w-3 h-3 mr-1"/> Cloud</Badge>}
-
+          {(node.sync_status === 'cloud' || (!node.sync_status && node.is_cloud)) && (
+            <Badge variant="outline" className="px-1.5 py-0 h-5 text-[10px] bg-purple-500/10 text-purple-600 border-purple-500/20 shadow-none"><Cloud className="w-3 h-3 mr-1"/> Cloud</Badge>
+          )}
           {node.key && (
             <Button
               variant="ghost"
@@ -587,9 +1405,7 @@ function Tree({ prefix, level, type, forceExpand }: TreeProps) {
     )
   }
 
-  const nodes = data.nodes
-
-  if (nodes.length === 0) {
+  if (data.nodes.length === 0) {
     return (
       <div className="py-2 text-xs text-muted-foreground italic" style={{ paddingLeft: `${level * 16 + 32}px` }}>
         Empty directory
@@ -599,7 +1415,7 @@ function Tree({ prefix, level, type, forceExpand }: TreeProps) {
 
   return (
     <div className="flex flex-col">
-      {nodes.map((node: TreeNode) => (
+      {data.nodes.map((node: TreeNode) => (
         <Node key={node.name} node={node} prefix={prefix} level={level} type={type} forceExpand={forceExpand} />
       ))}
     </div>
@@ -649,18 +1465,29 @@ export function FileBrowser({ type }: { type: 'iceberg' | 'raw' }) {
     </div>
   )
 }
+
 const IcebergStatus = dynamic(
-  () => import('@/components/IcebergStatus/IcebergStatus').then(m => m.IcebergStatus),
+  () => import('@/components/SessionScoring/StatusPanel').then(m => m.IcebergStatus),
   { ssr: false },
 )
 const IcebergCalendar = dynamic(
-  () => import('@/components/IcebergStatus/IcebergStatus').then(m => m.IcebergCalendar),
+  () => import('@/components/SessionScoring/StatusPanel').then(m => m.IcebergCalendar),
   { ssr: false },
 )
 const MetadataStorageCard = dynamic(
-  () => import('@/components/MetadataStorageCard').then(m => m.MetadataStorageCard),
+  () => import('@/components/SessionScoring/StatusPanel').then(m => m.MetadataStorageCard),
   { ssr: false },
 )
+
+const LOG_TABS = [
+  { value: 'cron', label: 'Cron Runs', icon: History, adminOnly: false },
+  { value: 'service_history', label: 'Service History', icon: ClipboardList, adminOnly: false },
+  { value: 'ingestion', label: 'Ingestion History', icon: Database, adminOnly: true },
+  { value: 'iceberg', label: 'DuckLake Storage', icon: Archive, adminOnly: false },
+  { value: 'metadata_storage', label: 'Metadata Storage', icon: HardDrive, adminOnly: true },
+  { value: 'raw', label: 'Available Logs', icon: FileCode, adminOnly: true },
+  { value: 'schema', label: 'DuckDB Schema', icon: FileCode, adminOnly: false },
+] as const
 
 export default function LogsClient({ initialTab }: { initialTab?: string } = {}) {
   const s = useLogsPageState(initialTab)
@@ -670,18 +1497,10 @@ export default function LogsClient({ initialTab }: { initialTab?: string } = {})
   const auditColumns = useAuditColumns(s.catalogMaps)
   const cronColumns = useCronColumns(s.isAnalyst)
 
-  // Suppress the NoServiceSelected fallback until bootstrap has
-  // resolved — otherwise a cold load with empty localStorage flashes
-  // the fallback for one render tick before HydrationBoundary or the
-  // client-side useBootstrap fetch lands the active_service_id into
-  // the React Query cache that useEffectiveServiceId (now used inside
-  // useLogsPageState) reads from.
   if (!s.activeServiceId && bootstrapResolved) {
     return <NoServiceSelected icon={Database} message="Please select a service from the header to access admin controls." />
   }
   if (!s.activeServiceId) {
-    // Bootstrap in flight — render the height-matched route skeleton rather
-    // than collapsing the main container to 0px and flashing the footer up.
     return <Loading />
   }
 
@@ -712,33 +1531,11 @@ export default function LogsClient({ initialTab }: { initialTab?: string } = {})
       <Tabs value={s.activeTab} onValueChange={s.handleTabChange} className="w-full">
         <ScrollArea className="w-full max-w-full overflow-hidden">
           <TabsList className="w-full flex">
-            <TabsTrigger value="cron" className="flex-1 flex items-center justify-center gap-2 text-xs">
-              <History className="h-4 w-4" /> Cron Runs
-            </TabsTrigger>
-            <TabsTrigger value="service_history" className="flex-1 flex items-center justify-center gap-2 text-xs">
-              <ClipboardList className="h-4 w-4" /> Service History
-            </TabsTrigger>
-            {!s.isAnalyst && (
-              <TabsTrigger value="ingestion" className="flex-1 flex items-center justify-center gap-2 text-xs">
-                <Database className="h-4 w-4" /> Ingestion History
+            {LOG_TABS.filter(t => !s.isAnalyst || !t.adminOnly).map(({ value, label, icon: Icon }) => (
+              <TabsTrigger key={value} value={value} className="flex-1 flex items-center justify-center gap-2 text-xs">
+                <Icon className="h-4 w-4" /> {label}
               </TabsTrigger>
-            )}
-            <TabsTrigger value="iceberg" className="flex-1 flex items-center justify-center gap-2 text-xs">
-              <Archive className="h-4 w-4" /> DuckLake Storage
-            </TabsTrigger>
-            {!s.isAnalyst && (
-              <TabsTrigger value="metadata_storage" className="flex-1 flex items-center justify-center gap-2 text-xs">
-                <HardDrive className="h-4 w-4" /> Metadata Storage
-              </TabsTrigger>
-            )}
-            {!s.isAnalyst && (
-              <TabsTrigger value="raw" className="flex-1 flex items-center justify-center gap-2 text-xs">
-                <FileCode className="h-4 w-4" /> Available Logs
-              </TabsTrigger>
-            )}
-            <TabsTrigger value="schema" className="flex-1 flex items-center justify-center gap-2 text-xs">
-              <FileCode className="h-4 w-4" /> DuckDB Schema
-            </TabsTrigger>
+            ))}
           </TabsList>
         </ScrollArea>
 
@@ -786,24 +1583,17 @@ export default function LogsClient({ initialTab }: { initialTab?: string } = {})
           />
         </TabsContent>
 
-        {/* Gate the dynamic-imported tabs on activeTab so the bundled
-         * chunks defer until the user actually clicks in. Radix' default
-         * is render-all (CSS-hide non-active), which would mount every
-         * panel on the cron landing — defeating the dynamic() split. */}
         <TabsContent value="iceberg" className="mt-4 space-y-4">
           {s.activeTab === 'iceberg' && (
             <>
               <IcebergStatus accessLevel={s.status?.access_level ?? undefined} />
               <IcebergCalendar />
-
               <div className="border rounded-lg overflow-hidden bg-card">
                 <div className="p-4 border-b">
                   <h3 className="text-sm font-medium">Iceberg Data Lake Layout</h3>
                   <p className="text-xs text-muted-foreground mt-1">Direct view into the Iceberg metadata and data files in Object Storage.</p>
                 </div>
-                <div className="p-0">
-                  <FileBrowser type="iceberg" />
-                </div>
+                <FileBrowser type="iceberg" />
               </div>
             </>
           )}
@@ -820,9 +1610,7 @@ export default function LogsClient({ initialTab }: { initialTab?: string } = {})
                 <h3 className="text-sm font-medium">Available Logs</h3>
                 <p className="text-xs text-muted-foreground mt-1">Raw .gz files delivered by Fastly waiting to be processed.</p>
               </div>
-              <div className="p-0">
-                <FileBrowser type="raw" />
-              </div>
+              <FileBrowser type="raw" />
             </>
           )}
         </TabsContent>

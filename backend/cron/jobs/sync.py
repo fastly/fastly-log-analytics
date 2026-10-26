@@ -23,8 +23,6 @@ from dataclasses import dataclass
 from datetime import UTC
 from typing import Any
 
-from backend.cron.decorators import cron_task
-from backend.cron.lifecycle import cron_run
 from backend.cron.scheduler import (
     _check_buffer_backlog,
     _check_disk_space,
@@ -33,9 +31,51 @@ from backend.cron.scheduler import (
     _elapsed_since,
     _extract_log_text,
     _log_and_add_progress,
+    cron_run,
+    cron_task,
 )
 
 logger = logging.getLogger("backend.scheduler")
+
+
+def _refuse_if_dev_no_crons(service_id: str, label: str) -> bool:
+    from backend.cron.scheduler import dev_mode_no_crons
+
+    if dev_mode_no_crons():
+        logger.warning("[scheduler] %s: FLA_DEV_NO_CRONS=1 — %s refused.", service_id, label)
+        return True
+    return False
+
+
+def _spawn_local_compaction(
+    src: dict,
+    service_id: str,
+    *,
+    compact_active_hour: bool = False,
+    refresh_on_merge: bool = False,
+) -> None:
+    def _worker() -> None:
+        try:
+            from backend.core import local_compaction as _lc
+
+            res = (
+                _lc.compact_local_partitions(src, compact_active_hour=True)
+                if compact_active_hour
+                else _lc.compact_local_partitions(src)
+            )
+            if refresh_on_merge and isinstance(res, dict) and res.get("files_merged", 0) > 0:
+                refresh_view_and_warm_pool(src, service_id, log_prefix="[compact-on-sync] ")
+        except Exception as e:
+            logger.warning("[scheduler] %s: post-sync local compaction failed: %s", service_id, e)
+
+    try:
+        threading.Thread(
+            target=_worker,
+            name=f"local-compact-on-sync:{service_id}",
+            daemon=True,
+        ).start()
+    except Exception as e:
+        logger.warning("[scheduler] %s: post-sync local compaction failed to launch: %s", service_id, e)
 
 
 # ── Shared cron job helpers (formerly backend.cron.jobs._common) ─────────────
@@ -400,28 +440,14 @@ def _run_log_discovery_cron(
     start_time: str | None = None,
     end_time: str | None = None,
 ) -> None:
-    """Ingest new raw .gz files from FOS into the local buffer.
-
-    Does NOT commit to Iceberg — that is handled by the separate commit_{id} job
-    so ingest cadence and cloud-freshness can be tuned independently.
-    """
-    from backend.cron.scheduler import dev_mode_no_crons
-
-    # Defense-in-depth: even if a job somehow gets scheduled OR a manual
-    # /admin/ingest-logs call comes in with force=True, refuse to ingest
-    # when the dev kill switch is set. force=True intentionally bypasses
-    # the provisioning.cron_sync.enabled config — this env var beats both.
-    if dev_mode_no_crons():
-        logger.warning("[scheduler] %s: FLA_DEV_NO_CRONS=1 — sync refused.", service_id)
+    """Ingest new raw .gz files from FOS into the local buffer."""
+    if _refuse_if_dev_no_crons(service_id, "sync"):
         return
 
     from backend import config as svcconfig
     from backend.core.duckdb import get_source_for_service, refresh_config_status
     from backend.core.ingest import _new_object_outcome, ingest
 
-    # No start-of-tick active-request gate here: a deferred tick waits a full
-    # interval, and dashboard/SSE polling kept it tripped, chaining 20-30 s of
-    # request lag. Mid-tick yield_to_api still gives in-flight requests priority.
     cfg = svcconfig.load_config(service_id)
     if not cfg:
         logger.warning("[scheduler] %s: config not found, skipping.", service_id)
@@ -437,17 +463,12 @@ def _run_log_discovery_cron(
 
     prov = cfg.get("provisioning", {})
     sync_cfg = prov.get("cron_sync", {})
-
     sync_enabled = sync_cfg.get("enabled", True)
-
     delete_after = svcconfig.resolve_raw_delete_after(cfg, delete_after)
-
     _display = get_service_display_label(service_id, cfg)
 
     # ── 1. Ingest ─────────────────────────────────────────────────────────────
     if sync_enabled or force:
-        # For manual runs (run_id is not None), we ignore the default limit unless
-        # it was explicitly passed in.
         is_manual = run_id is not None
         start_time, _ = apply_time_range_pinning(
             service_id,
@@ -474,11 +495,6 @@ def _run_log_discovery_cron(
             run_id = run.run_id
 
             if svcconfig.is_high_scale_mode(src):
-                # Celery/ledger data plane: run discovery INLINE so the
-                # cron_runs row carries the real outcome — files discovered, real
-                # duration, real errors — instead of a fake instant "dispatched"
-                # success that blinds recent_cron_failures and deep health.
-                # Only per-file convert work fans out to q.ingest.
                 from datetime import datetime, timedelta
 
                 from backend.core.ingest import discover_prefix
@@ -502,10 +518,14 @@ def _run_log_discovery_cron(
                                 break
                             time.sleep(3)
                         now = datetime.now(UTC)
-                        pass_discovered = 0
-                        for i in range(5):
-                            prefix = minute_list_prefix(now - timedelta(minutes=i))
-                            pass_discovered += discover_prefix(service_id, prefix_subpath=prefix, run_id=run_id)
+                        pass_discovered = sum(
+                            discover_prefix(
+                                service_id,
+                                prefix_subpath=minute_list_prefix(now - timedelta(minutes=i)),
+                                run_id=run_id,
+                            )
+                            for i in range(5)
+                        )
                         discovered += pass_discovered
                         if pass_discovered == 0:
                             break
@@ -515,22 +535,11 @@ def _run_log_discovery_cron(
                         else "No new files",
                         files_downloaded=discovered,
                     )
-                    # NOTE: deliberately NOT calling refresh_config_status here —
-                    # it opens the per-service .duckdb file, and a worker-side
-                    # open fights the backend's readers for the single-writer
-                    # file lock. Freshness for SSR comes from read-time overlays
-                    # instead: compute_sync_status_cached overlays dedicated file
-                    # timestamps from the committed ledger. Request-event extents
-                    # cannot be inferred from object names; those cached metrics
-                    # refresh on backend restart / on-demand
-                    # /api/sync-status calls.
                 except Exception as e:
                     run.fail("Log discovery failed", error_message=str(e))
                     logger.exception("[ledger] %s: log discovery failed: %s", service_id, e)
                 return
 
-            # Disk pre-check: refuse to start if free space is below the floor.
-            # Avoids the "pull from FOS, write fails, repeat next tick" cost loop.
             from backend.core.duckdb import _cache_dir
 
             ok, disk_msg = _check_disk_space(_cache_dir(src), service_id, "log_discovery")
@@ -540,18 +549,23 @@ def _run_log_discovery_cron(
                 return
 
             logger.info("▶️  \x1b[94m[log_discovery]\x1b[0m %s: Log Discovery job started.", _display)
-
             start_time_exec = time.time()
 
             def elapsed() -> str:
                 return _elapsed_since(start_time_exec)
 
+            def _progress_status(message: str) -> None:
+                _log_and_add_progress(
+                    run_id,
+                    service_id,
+                    job_name="log_discovery",
+                    event={"type": "status", "message": f"{elapsed()} {message}"},
+                )
+
             msg = "Starting log discovery..."
             if start_time or end_time:
                 msg += f" (Range: {start_time or 'Start'} to {end_time or 'End'})"
-            _log_and_add_progress(
-                run_id, service_id, job_name="log_discovery", event={"type": "status", "message": f"{elapsed()} {msg}"}
-            )
+            _progress_status(msg)
 
             done_event: dict = {}
             ingest_outcomes = _new_object_outcome(processed=0)
@@ -559,8 +573,6 @@ def _run_log_discovery_cron(
             inserted_rows = 0
             corrupt_rows = 0
 
-            # Max files per pass: 250 on incremental ticks to bound pass latency to <= 5s,
-            # allowing adaptive re-poll passes and scheduler ticks to stay responsive without starving.
             max_incremental_files = int(os.environ.get("INGEST_INCREMENTAL_MAX_FILES", "250"))
             pass_max_files = max_incremental_files if not is_manual else 5000
             pass_max_seconds = 20 if not is_manual else 240
@@ -568,12 +580,13 @@ def _run_log_discovery_cron(
 
             def _publish_pass_rows() -> None:
                 nonlocal published_pass_rows
-
-                def _progress(ev: dict) -> None:
-                    _log_and_add_progress(run_id, service_id, job_name="log_discovery", event=ev)
-
                 refresh_view_and_warm_pool(
-                    src, service_id, log_prefix=f"{elapsed()} [adaptive] ", progress_log=_progress
+                    src,
+                    service_id,
+                    log_prefix=f"{elapsed()} [adaptive] ",
+                    progress_log=lambda ev: _log_and_add_progress(
+                        run_id, service_id, job_name="log_discovery", event=ev
+                    ),
                 )
                 publish_sync_status_safe(service_id, "scheduler")
                 published_pass_rows = inserted_rows
@@ -592,15 +605,15 @@ def _run_log_discovery_cron(
                     incremental_only=not is_manual,
                 ):
                     _log_and_add_progress(run_id, service_id, job_name="log_discovery", event=event)
-
-                    if event.get("type") == "file_done":
+                    ev_type = event.get("type")
+                    if ev_type == "file_done":
                         processed_files = event.get("current", processed_files)
                         inserted_rows = event.get("total_inserted", inserted_rows)
                         corrupt_rows = event.get("total_corrupt", corrupt_rows)
-                    elif event.get("type") == "done":
+                    elif ev_type == "done":
                         done_event = event
                         ingest_outcomes = event.get("outcome_counters", ingest_outcomes)
-                    elif event.get("type") == "error":
+                    elif ev_type == "error":
                         summary = "Ingestion failed"
                         if processed_files > 0:
                             summary += f" after processing {processed_files} files ({inserted_rows} rows)"
@@ -622,9 +635,6 @@ def _run_log_discovery_cron(
                 else:
                     if done_event:
                         if done_event.get("new_files", 0) == 0:
-                            # The reconcile can reclaim strands (raw files left by an
-                            # interrupted prior run) on an otherwise-idle tick — surface
-                            # that count + message so the self-heal is visible in history.
                             reclaimed = done_event.get("deleted_files", 0)
                             if reclaimed:
                                 summary = (
@@ -672,8 +682,6 @@ def _run_log_discovery_cron(
                                 outcome_counters=outcome_counters,
                             )
 
-                            # Republish the persistent DuckDB view so dashboard reads (read_only + skip_view_update)
-                            # pick up the new buffer parquets immediately without waiting for commit_interval_mins.
                             already_published = bool(
                                 published_pass_rows > 0 and published_pass_rows == done_event.get("rows_inserted", 0)
                             )
@@ -688,25 +696,9 @@ def _run_log_discovery_cron(
                                 )
 
                             if done_event.get("new_files", 0) > 1:
-                                import threading as _t
-
-                                def _compact_and_refresh():
-                                    try:
-                                        from backend.core import local_compaction as _lc
-
-                                        res = _lc.compact_local_partitions(src, compact_active_hour=True)
-                                        if res.get("files_merged", 0) > 0:
-                                            refresh_view_and_warm_pool(src, service_id, log_prefix="[compact-on-sync] ")
-                                    except Exception as e:
-                                        logger.warning(
-                                            "[scheduler] %s: post-sync local compaction failed: %s", service_id, e
-                                        )
-
-                                _t.Thread(
-                                    target=_compact_and_refresh,
-                                    name=f"local-compact-on-sync:{service_id}",
-                                    daemon=True,
-                                ).start()
+                                _spawn_local_compaction(
+                                    src, service_id, compact_active_hour=True, refresh_on_merge=True
+                                )
 
                             if done_event.get("touched_hours"):
                                 _finish_post_ingest_view_and_rollups(
@@ -746,48 +738,21 @@ def _run_log_discovery_cron(
                 )
 
     # ── 2. Refresh cached status ──────────────────────────────────────────────
-    # Single 60s window covers both the heavy refresh (top_values cache) and
-    # the heavy usage-log phase (reconcile_fastly_stats) — claim once per tick
-    # and share the verdict so they don't drift relative to each other.
     do_heavy_refresh = _claim_heavy_refresh(service_id) or bool(force)
     should_refresh_status = bool(done_event.get("rows_inserted", 0) > 0 or do_heavy_refresh or force)
     if should_refresh_status:
         if (sync_enabled or force) and run_id is not None:
             _msg_suffix = "+ filter suggestions" if do_heavy_refresh else "(header only)"
-            _log_and_add_progress(
-                run_id,
-                service_id,
-                job_name="log_discovery",
-                event={
-                    "type": "status",
-                    "message": f"{elapsed()} Refreshing sync status {_msg_suffix}...",
-                },
-            )
+            _progress_status(f"Refreshing sync status {_msg_suffix}...")
         _t0 = time.time()
         try:
             refresh_config_status(service_id, include_top_values=False)
         except Exception:
             pass
-
-        # Publish AFTER the existing refresh persists queryable request extents.
-        # Filename metadata cannot stand in for MAX(timestamp); publishing before
-        # this refresh leaves connected browsers one ingest behind indefinitely.
-        # No additional scan is needed and header polls remain cached-only.
         publish_sync_status_safe(service_id, "scheduler")
-
         if run_id is not None:
-            _log_and_add_progress(
-                run_id,
-                service_id,
-                job_name="log_discovery",
-                event={
-                    "type": "status",
-                    "message": f"{elapsed()} refresh_config_status: {int((time.time() - _t0) * 1000)}ms",
-                },
-            )
+            _progress_status(f"refresh_config_status: {int((time.time() - _t0) * 1000)}ms")
 
-    # Top values + schema run after publish: the pass costs ~5 s on a busy
-    # service and the extents it would publish are already persisted above.
     if do_heavy_refresh:
         _t0 = time.time()
         try:
@@ -795,21 +760,9 @@ def _run_log_discovery_cron(
         except Exception:
             pass
         if run_id is not None:
-            _log_and_add_progress(
-                run_id,
-                service_id,
-                job_name="log_discovery",
-                event={
-                    "type": "status",
-                    "message": f"{elapsed()} refresh_config_status (heavy): {int((time.time() - _t0) * 1000)}ms",
-                },
-            )
+            _progress_status(f"refresh_config_status (heavy): {int((time.time() - _t0) * 1000)}ms")
 
     # ── 3. Invalidate dashboard cache ─────────────────────────────────────────
-    # Gate on DASHBOARD_CACHE_TTL > 0: when the TTL is 0 (the current
-    # default), the cache is never written, so the iteration is always
-    # over an empty list. Skip the import + work entirely so the cron
-    # tick doesn't pay for permanently-no-op accounting.
     _t0 = time.time()
     _invalidated = 0
     try:
@@ -824,33 +777,11 @@ def _run_log_discovery_cron(
     except Exception:
         pass
     if run_id is not None and _invalidated:
-        _log_and_add_progress(
-            run_id,
-            service_id,
-            job_name="log_discovery",
-            event={
-                "type": "status",
-                "message": f"{elapsed()} dashboard cache invalidate ({_invalidated} keys): {int((time.time() - _t0) * 1000)}ms",
-            },
-        )
+        _progress_status(f"dashboard cache invalidate ({_invalidated} keys): {int((time.time() - _t0) * 1000)}ms")
 
     # ── 4. Usage log bookkeeping ──────────────────────────────────────────────
-    # Each ingested raw log file = 1 billable Class A PutObject by Fastly's edge.
-    # Synthesise those rows + flush in-process FOS/CDN calls + purge old entries.
-    # Idempotent — safe to call after every sync, including after a retry.
-    # The whole phase rides the 60s heavy-refresh window: it costs ~3s and
-    # ran between every tick's last ingest pass and the next tick's first,
-    # widening the request-lag sawtooth. Usage Log reads at hourly grain.
     if (sync_enabled or force) and run_id is not None and do_heavy_refresh:
-        _log_and_add_progress(
-            run_id,
-            service_id,
-            job_name="log_discovery",
-            event={
-                "type": "status",
-                "message": f"{elapsed()} Updating usage log (Fastly-edge writes, in-process calls, retention purge)...",
-            },
-        )
+        _progress_status("Updating usage log (Fastly-edge writes, in-process calls, retention purge)...")
 
     def _usage_log_phase() -> None:
         from backend.core.duckdb import backfill_fastly_edge_writes, reconcile_fastly_stats
@@ -874,7 +805,6 @@ def _run_log_discovery_cron(
             lambda n: f"Backfilled {n} Fastly-edge PUTs to usage log",
             "backfill",
         )
-        # Reconcile per-hour op counts over a 26h window so the 24h Usage Log view stays fully reconciled.
         _run_usage_step(
             lambda: reconcile_fastly_stats(src, hours_back=26),
             lambda n: f"Reconciled {n} hourly Fastly stats gap(s)",
@@ -882,7 +812,6 @@ def _run_log_discovery_cron(
         )
         run_usage_log_cleanup(service_id)
 
-    # Run _usage_log_phase inline inside the @cron_task executor to avoid leaked threads on timeout.
     if do_heavy_refresh:
         _t0 = time.time()
         try:
@@ -890,22 +819,9 @@ def _run_log_discovery_cron(
         except Exception as e:
             logger.warning("[scheduler] %s: usage_log phase failed: %s", service_id, e)
         if run_id is not None:
-            _log_and_add_progress(
-                run_id,
-                service_id,
-                job_name="log_discovery",
-                event={
-                    "type": "status",
-                    "message": f"{elapsed()} usage_log phase: {int((time.time() - _t0) * 1000)}ms",
-                },
-            )
+            _progress_status(f"usage_log phase: {int((time.time() - _t0) * 1000)}ms")
 
     # ── 5. Final duration record ──────────────────────────────────────────────
-    # The initial log_cron_run snapshot was taken before phases 1.5-4 (view
-    # refresh, refresh_config_status, cache invalidate, usage_log) emitted
-    # their per-phase timing events — refresh log_output too. silent=False
-    # so a failed update surfaces in the log stream (other cron jobs swallow,
-    # but sync is the high-frequency tick where divergence matters).
     if sync_enabled or force:
         finalize_cron_duration(
             src,
@@ -919,12 +835,6 @@ def _run_log_discovery_cron(
 
 # ── _run_full_sweep (daily catch-net) ────────────────────────────────────────
 
-
-# Default budget for a full sweep — bounded enough that one run can't pin a
-# pod for >15 min and can't burn through too many S3 GETs at once. Heal-
-# triggered invocations override these via ``_run_full_sweep(...,
-# max_files=N, max_seconds=N)`` when sustained loss is severe (see
-# ``_run_gap_heal``); the daily catch-net keeps the conservative defaults.
 _FULL_SWEEP_DEFAULT_MAX_FILES = 20_000
 _FULL_SWEEP_DEFAULT_MAX_SECONDS = 900
 
@@ -937,27 +847,8 @@ def _run_full_sweep(
     run_id: int | None = None,
     force: bool = False,
 ) -> None:
-    """Daily catch-net: full LIST over raw/request/ to pick up late-arriving files.
-
-    The minute-cadence sync uses a 4h ``StartAfter`` lookback to bound LIST
-    cost. If a Fastly POP backfills logs older than that window (recovery,
-    timestamp skew, manual replay), the incremental scan never sees them.
-    This sweep lists the entire raw/request/ prefix once a day and ingests anything
-    not already in ``ingested_files``. Logged as task=``full_sync`` so users
-    can distinguish catch-net runs from regular sync in the cron history.
-
-    ``max_files`` / ``max_seconds`` are exposed so ``_run_gap_heal`` can
-    push a bigger budget through during severe sustained-loss recovery —
-    healing 200k missing files at the default 20k/run would take >40 hours
-    of throttled cycles.
-    """
-    from backend.cron.scheduler import dev_mode_no_crons
-
-    # Defense-in-depth — gap_heal can invoke this directly, and that
-    # path was the leading bypass-candidate for the dev-ingestion
-    # surprise. The kill switch beats the gap_heal trigger.
-    if dev_mode_no_crons():
-        logger.warning("[scheduler] %s: FLA_DEV_NO_CRONS=1 — full_sweep refused.", service_id)
+    """Daily catch-net: full LIST over raw/request/ to pick up late-arriving files."""
+    if _refuse_if_dev_no_crons(service_id, "full_sweep"):
         return
 
     from backend import config as svcconfig
@@ -996,7 +887,6 @@ def _run_full_sweep(
         effective_max_files = max_files
         effective_max_seconds = max_seconds
 
-        # Dynamic queue-depth / backlog adaptation when running with default budget:
         if max_files == _FULL_SWEEP_DEFAULT_MAX_FILES:
             if configured_max_files is not None:
                 effective_max_files = int(configured_max_files)
@@ -1031,10 +921,6 @@ def _run_full_sweep(
             effective_max_seconds = int(configured_max_seconds)
 
         if svcconfig.is_high_scale_mode(src):
-            # Celery data plane: the catch-net is a full-prefix LIST diffed into
-            # the ingest_ledger (converts fan out from there). Running the v2
-            # file-based ingest here would open the per-service .duckdb from a
-            # worker — the cross-process single-writer lock hazard.
             from backend.core.ingest import discover_prefix
 
             run.include_log_output = False
@@ -1099,8 +985,6 @@ def _run_full_sweep(
             corrupt_message = "\n".join(corrupt_details) if corrupt_details else None
             outcome_counters = done_event.get("outcome_counters")
             has_ingest_errors = _has_ingest_outcome_errors(outcome_counters, corrupt_rows_cnt)
-            # full_sync is the whole-bucket backstop for the stranded-delete reconcile,
-            # so it can reclaim strands of any age; record + surface that count too.
             reclaimed = done_event.get("deleted_files", 0)
             summary = (
                 "No late-arriving files found"
@@ -1139,42 +1023,25 @@ def _run_full_sweep(
 
 # ── _run_gap_heal (periodic detector → triggers full_sweep) ──────────────────
 
-
-# Default throttle between gap-heal-triggered full_sweep invocations — used
-# for mild loss only. ``_gap_heal_severity`` shortens it (and bumps the
-# sweep budget) as the loss gets worse so a 200k-line burst doesn't take
-# 40+ hours to drain at 20k files/run.
 GAP_HEAL_THROTTLE_HOURS = 4
 
 
-# Severity bands. Lower bound is "any loss the detector flagged" (≥5% gap
-# over ≥2 buckets — already filtered by ``compute_log_accounting``); each
-# band tightens the throttle and widens the sweep budget so heal can keep
-# pace with the burst.
 @dataclass(frozen=True)
 class _GapHealSeverityBand:
     name: str
-    # Sustained-loss thresholds — entering this band requires EITHER the
-    # gap_pct or the total_lost_lines floor to be hit.
     min_gap_pct: float
     min_lost_lines: int
-    # How long to throttle between heal-triggered sweeps. The detector
-    # itself still runs every 30 min; this just bounds how often it
-    # actually invokes a sweep.
     throttle_hours: float
-    # Sweep budget overrides — passed to ``_run_full_sweep``. Larger sweeps
-    # cost more S3 calls per run but drain backlog faster.
     sweep_max_files: int
     sweep_max_seconds: int
 
 
 _GAP_HEAL_SEVERITY_BANDS: tuple[_GapHealSeverityBand, ...] = (
-    # Severest first — first match wins.
     _GapHealSeverityBand(
         name="critical",
         min_gap_pct=0.80,
         min_lost_lines=500_000,
-        throttle_hours=0.0,  # every detector tick is allowed to trigger
+        throttle_hours=0.0,
         sweep_max_files=100_000,
         sweep_max_seconds=1800,
     ),
@@ -1182,7 +1049,7 @@ _GAP_HEAL_SEVERITY_BANDS: tuple[_GapHealSeverityBand, ...] = (
         name="severe",
         min_gap_pct=0.50,
         min_lost_lines=100_000,
-        throttle_hours=0.25,  # 15 min
+        throttle_hours=0.25,
         sweep_max_files=50_000,
         sweep_max_seconds=1500,
     ),
@@ -1206,21 +1073,13 @@ _GAP_HEAL_SEVERITY_BANDS: tuple[_GapHealSeverityBand, ...] = (
 
 
 def _gap_heal_severity(max_gap_pct: float, total_lost_lines: int) -> _GapHealSeverityBand:
-    """Return the first severity band whose floor either field clears.
-
-    Tested via threshold matrix in ``test_gap_heal_severity.py`` — keep the
-    band tuple sorted severest-first so the bisection here works.
-    """
+    """Return the first severity band whose floor either field clears."""
     for band in _GAP_HEAL_SEVERITY_BANDS:
         if max_gap_pct >= band.min_gap_pct or total_lost_lines >= band.min_lost_lines:
             return band
-    return _GAP_HEAL_SEVERITY_BANDS[-1]  # defensive — last band is the catch-all
+    return _GAP_HEAL_SEVERITY_BANDS[-1]
 
 
-# Tracks the wall-clock time of the most recent gap_heal that actually
-# triggered a full_sweep. Lives in-process so a service restart clears it
-# (acceptable: a restart implies the operator is paying attention; one
-# extra sweep at startup is fine). Keyed by service_id.
 _GAP_HEAL_LAST_TRIGGER: dict[str, float] = {}
 
 
@@ -1238,26 +1097,8 @@ def _run_gap_heal(
     run_id: int | None = None,
     force: bool = False,
 ) -> None:
-    """Periodic gap detector that triggers a full_sweep when sustained loss
-    is observed between Fastly's authoritative ``requests`` counts and
-    our ingested rows.
-
-    Sustained loss = ≥LOG_ACCOUNTING_MIN_RUN consecutive completed hourly
-    buckets with gap_pct ≥ LOG_ACCOUNTING_LOSS_THRESHOLD. The in-flight
-    bucket is excluded (Fastly Stats lags ingest), matching the UI callout.
-
-    Throttled to one heal per GAP_HEAL_THROTTLE_HOURS hours so that a
-    persistent gap (e.g. Fastly→FOS transport loss we cannot recover from)
-    doesn't thrash the scheduler.
-    """
-    from backend.cron.scheduler import dev_mode_no_crons
-
-    # Defense-in-depth: gap_heal's whole job is to call _run_full_sweep
-    # when it sees a sustained gap. Local dev compared against prod's
-    # FOS bucket sees a 100% "gap" by construction. Refuse the heal in
-    # dev-mode to avoid kicking off a full sweep over the prod data.
-    if dev_mode_no_crons():
-        logger.warning("[scheduler] %s: FLA_DEV_NO_CRONS=1 — gap_heal refused.", service_id)
+    """Periodic gap detector that triggers a full_sweep when sustained loss is observed."""
+    if _refuse_if_dev_no_crons(service_id, "gap_heal"):
         return
 
     from backend.core.duckdb import get_source_for_service
@@ -1316,13 +1157,7 @@ def _run_gap_heal(
                 )
                 return
 
-            # Sustained loss observed — apply severity-scaled throttle to the
-            # actual heal trigger. Worse loss = shorter throttle + bigger sweep
-            # budget. See ``_gap_heal_severity`` for the bands.
             band = _gap_heal_severity(sustained.max_gap_pct, sustained.total_lost_lines)
-            # Module-global lookup at call time so patches on
-            # ``backend.cron.jobs.sync._last_successful_gap_heal_trigger``
-            # intercept the call.
             last_heal = _last_successful_gap_heal_trigger(service_id)
             if not force and band.throttle_hours > 0 and last_heal is not None:
                 elapsed_hours = (time.time() - last_heal) / 3600.0
@@ -1350,11 +1185,6 @@ def _run_gap_heal(
             logger.warning("🩹 \x1b[33m[gap_heal]\x1b[0m %s: %s", _display, msg)
             _log_and_add_progress(run_id, service_id, job_name="gap_heal", event={"type": "status", "message": msg})
             run.warn(msg)
-            # Mark heal trigger BEFORE invoking the sweep so a long-running sweep
-            # doesn't itself trip a second gap_heal tick into re-triggering. Both
-            # resolve from module globals at call time so patches at
-            # ``backend.cron.jobs.sync._mark_gap_heal_triggered`` /
-            # ``backend.cron.jobs.sync._run_full_sweep`` keep intercepting.
             _mark_gap_heal_triggered(service_id)
             _run_full_sweep(
                 service_id,
@@ -1367,8 +1197,6 @@ def _run_gap_heal(
             logger.exception("[gap_heal] %s: unexpected error", service_id)
 
 
-# R-1: drain the gap-heal trigger timestamp dict between tests so an
-# earlier test's last-trigger doesn't suppress a sweep in the next.
 from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry  # noqa: E402
 
 _CacheRegistry.register("cron.jobs.sync._GAP_HEAL_LAST_TRIGGER", _GAP_HEAL_LAST_TRIGGER)
@@ -1379,12 +1207,7 @@ _CacheRegistry.register("cron.jobs.sync._GAP_HEAL_LAST_TRIGGER", _GAP_HEAL_LAST_
 
 @cron_task("cron_commit", job_name="commit")
 def _run_commit(service_id: str, force: bool = False, run_id: int | None = None) -> None:
-    """Commit the local buffer to the shared Iceberg table in FOS.
-
-    Runs on its own cadence (commit_interval_mins) — independent of how often
-    raw files are ingested. This lets the user control cloud data freshness
-    without changing the Fastly logging endpoint period.
-    """
+    """Commit the local buffer to the shared Iceberg table in FOS."""
     from backend import config as svcconfig
     from backend.core.duckdb import get_source_for_service
 
@@ -1418,13 +1241,6 @@ def _run_commit(service_id: str, force: bool = False, run_id: int | None = None)
             return
         run_id = run.run_id
         if svcconfig.is_high_scale_mode(src):
-            # Celery/ledger data plane: converts commit to DuckLake per insert, so
-            # this job's role is adjacent-small-file compaction. Run it INLINE
-            # (this job already executes on a worker in external mode) so the
-            # cron_runs lease is held for the duration — a dispatch-and-forget
-            # released the mutual-exclusion lease before the merge ran, letting
-            # overlapping ticks run concurrent merges — and the row records the
-            # real outcome instead of a fake instant success.
             from backend.core.ingest import finalize_committed_raw, merge_lake_files
             from backend.core.metadata.base import get_con
 
@@ -1432,9 +1248,6 @@ def _run_commit(service_id: str, force: bool = False, run_id: int | None = None)
             try:
                 merge_lake_files(service_id)
 
-                # Honest per-run counts for the cron row: how many files the
-                # convert workers landed since the previous commit tick, and
-                # how many durable raw .gz files we deleted (delete_after).
                 meta_con = get_con(service_id)
                 prev = meta_con.execute(
                     "SELECT started_at FROM cron_runs WHERE service_id = ? AND task = 'commit' "
@@ -1466,9 +1279,6 @@ def _run_commit(service_id: str, force: bool = False, run_id: int | None = None)
                 logger.exception("[ledger] %s: DuckLake merge / raw finalization failed", service_id)
             return
 
-        # Disk pre-check: commits write manifest cache + cloud-staged parquet
-        # locally before upload. A full disk during commit can corrupt the
-        # iceberg state midway, which is much worse than refusing to start.
         from backend.core.duckdb import _cache_dir as _commit_cache_dir
 
         ok, disk_msg = _check_disk_space(_commit_cache_dir(src), service_id, "commit")
@@ -1496,11 +1306,6 @@ def _run_commit(service_id: str, force: bool = False, run_id: int | None = None)
             quarantine_suffix = f" ⚠ quarantined {quarantined} unreadable file(s)" if quarantined else ""
             commit_error = _buffer_result_error(result, "") or ""
             incomplete_suffix = f"; commit incomplete: {commit_error}" if commit_error else ""
-            # Post-commit backlog probe: if anything is still in the buffer after a
-            # successful commit, the next commit was racing with a fresh ingest OR
-            # the drain is genuinely stuck (catalog perms, schema mismatch, etc.).
-            # The threshold scales with commit_interval_mins so "stuck" means
-            # "older than what a single commit cycle could reasonably leave behind."
             backlog_suffix = _check_buffer_backlog(
                 src, service_id, commit_interval_mins=int(sync_cfg.get("commit_interval_mins", 5))
             )
@@ -1523,7 +1328,6 @@ def _run_commit(service_id: str, force: bool = False, run_id: int | None = None)
                     event={"type": "error" if commit_error else "done", "message": summary},
                 )
 
-                # ── Post-commit view refresh + pool warm ──
                 refresh_view_and_warm_pool(
                     src,
                     service_id,
@@ -1531,7 +1335,6 @@ def _run_commit(service_id: str, force: bool = False, run_id: int | None = None)
                     progress_log=lambda ev: _log_and_add_progress(run_id, service_id, job_name="commit", event=ev),
                 )
 
-                # ── On-demand metadata sync ──
                 try:
                     from backend.cron.jobs import metadata as _metadata_jobs
 
@@ -1541,19 +1344,7 @@ def _run_commit(service_id: str, force: bool = False, run_id: int | None = None)
                         run_id, service_id, job_name="commit", event={"type": "warning", "message": e}
                     )
 
-                # ── Compact-on-sync ──
-                try:
-                    import threading as _t
-
-                    from backend.core import local_compaction as _lc
-
-                    _t.Thread(
-                        target=lambda: _lc.compact_local_partitions(src),
-                        name=f"local-compact-on-sync:{service_id}",
-                        daemon=True,
-                    ).start()
-                except Exception as e:
-                    logger.warning("[scheduler] %s: post-sync local compaction failed to launch: %s", service_id, e)
+                _spawn_local_compaction(src, service_id)
             else:
                 summary_start = "No buffer files committed" if commit_error else "No new data to commit"
                 summary = summary_start + quarantine_suffix + incomplete_suffix + backlog_suffix

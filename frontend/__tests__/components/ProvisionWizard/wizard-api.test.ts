@@ -30,7 +30,7 @@ import {
   runAnalyzeLake,
   validateMutationFn,
 } from '@/components/ProvisionWizard/useWizardState'
-import { INITIAL_CONFIG } from '@/components/ProvisionWizard/types'
+import { INITIAL_CONFIG } from '@/components/ProvisionWizard/ProvisionWizard'
 import { useServiceStore } from '@/stores/filterStore'
 import { server } from '@/__tests__/helpers/msw/handlers'
 

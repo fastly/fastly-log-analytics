@@ -1049,7 +1049,6 @@ from backend.routers import (
     dashboard,
     high_scale,
     network,
-    performance,
     rum,
     session_scoring,
 )
@@ -1059,7 +1058,6 @@ app.include_router(high_scale.router)
 app.include_router(dashboard.insights_router)
 app.include_router(session_scoring.sessions_router)
 app.include_router(network.router)
-app.include_router(performance.router)
 app.include_router(alerts.views_router)
 app.include_router(alerts.router)
 app.include_router(network.origin_router)
@@ -1069,12 +1067,10 @@ app.include_router(rum.asset_router)
 
 from backend.routers import (  # noqa: E402
     admin,
-    admin_queries,
     bootstrap,
     provision,
     services,
     share_admin,
-    share_auth,
     share_oauth,
     usage,
 )
@@ -1084,14 +1080,12 @@ app.include_router(services.router)
 app.include_router(usage.router)
 app.include_router(admin.router)
 # Analyst-safe sync-status siblings carry the neutral "meta" tag (not the
-# admin router's "admin" tag) — see backend/routers/admin/sync_status.py.
+# admin router's "admin" tag) — see backend/routers/admin/health.py.
 app.include_router(admin.sync_status.meta_router)
-app.include_router(admin_queries.router)
 app.include_router(provision.router)
 app.include_router(share_admin.sharing_domain_router)
 app.include_router(session_scoring.router)
 app.include_router(bootstrap.debug_router)
-app.include_router(share_auth.router)
 app.include_router(share_oauth.router)
 app.include_router(share_admin.router)
 # E2E/dev-only in-process mock OIDC provider — mounted ONLY when OAUTH_MOCK_IDP=1

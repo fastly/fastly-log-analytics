@@ -971,12 +971,11 @@ class TestCdnMissTracking:
 # ── Merged from test_telemetry_response_middleware.py ───────────────────────
 
 import pytest
+from backend.utils.telemetry_response_middleware import TelemetryResponseBodyMiddleware
 from fastapi import FastAPI, Response
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.testclient import TestClient
 from starlette.responses import JSONResponse, StreamingResponse
-
-from backend.utils.telemetry_response_middleware import TelemetryResponseBodyMiddleware
 
 
 def _build_app(*, with_gzip: bool = False) -> FastAPI:
@@ -1607,3 +1606,212 @@ class TestTelemetryResponseMiddleware:
         new = _reconstruct(_FakeResp(), b'{"ok":true}')
         assert new.status_code == 200
         assert new.body == b'{"ok":true}'
+
+
+# ── Merged from tests/utils/test_hll.py ─────────────────────────────────────
+
+from backend.utils.hll import DEFAULT_PRECISION, SERIALIZATION_VERSION, HyperLogLog, _alpha
+
+
+def test_construction_default_precision():
+    hll = HyperLogLog()
+    assert hll.precision == DEFAULT_PRECISION and hll.m == 256 and hll.count() == 0
+
+
+def test_construction_explicit_precision():
+    for p in (4, 6, 8, 10, 12, 14, 16):
+        hll = HyperLogLog(precision=p)
+        assert hll.precision == p and hll.m == 1 << p
+
+
+def test_construction_rejects_invalid_precision():
+    for bad in (-1, 0, 3, 17, 32):
+        with pytest.raises(ValueError, match="precision must be in"):
+            HyperLogLog(precision=bad)
+
+
+@pytest.mark.parametrize(
+    "n,tol",
+    [
+        (10, 0.20),
+        (50, 0.20),
+        (500, 0.10),
+        (5000, 0.10),
+        (50_000, 0.10),
+        (100_000, 0.10),
+    ],
+)
+def test_count_accuracy_within_tolerance(n: int, tol: float):
+    hll = HyperLogLog(precision=DEFAULT_PRECISION)
+    for i in range(n):
+        hll.add(f"item-{i}")
+    estimate = hll.count()
+    rel_err = abs(estimate - n) / n
+    assert rel_err <= tol, f"n={n}: estimate={estimate}, expected≈{n}, rel_err={rel_err:.3f}"
+
+
+def test_add_is_idempotent():
+    hll_once, hll_many = HyperLogLog(), HyperLogLog()
+    items = [f"ip-{i}" for i in range(100)]
+    for ip in items:
+        hll_once.add(ip)
+    for _ in range(5):
+        for ip in items:
+            hll_many.add(ip)
+    assert hll_once.to_bytes() == hll_many.to_bytes() and hll_once.count() == hll_many.count()
+
+
+def test_update_iterable_matches_add_loop():
+    items = [f"x-{i}" for i in range(200)]
+    hll_a, hll_b = HyperLogLog(), HyperLogLog()
+    for item in items:
+        hll_a.add(item)
+    hll_b.update(items)
+    assert hll_a.to_bytes() == hll_b.to_bytes()
+
+
+def test_merge_equivalent_to_single_sketch():
+    left_items = [f"a-{i}" for i in range(300)]
+    right_items = [f"b-{i}" for i in range(300)]
+    overlapping = [f"both-{i}" for i in range(100)]
+
+    hll_left, hll_right = HyperLogLog(), HyperLogLog()
+    hll_left.update(left_items + overlapping)
+    hll_right.update(right_items + overlapping)
+
+    hll_merged = HyperLogLog()
+    hll_merged.merge(hll_left)
+    hll_merged.merge(hll_right)
+
+    hll_combined = HyperLogLog()
+    hll_combined.update(left_items + right_items + overlapping)
+    assert hll_merged.to_bytes() == hll_combined.to_bytes()
+
+
+def test_merge_is_associative():
+    a, b, c = HyperLogLog(), HyperLogLog(), HyperLogLog()
+    a.update(f"a-{i}" for i in range(50))
+    b.update(f"b-{i}" for i in range(50))
+    c.update(f"c-{i}" for i in range(50))
+
+    left = HyperLogLog()
+    left.merge(a)
+    left.merge(b)
+    left.merge(c)
+
+    bc = HyperLogLog()
+    bc.merge(b)
+    bc.merge(c)
+    right = HyperLogLog()
+    right.merge(a)
+    right.merge(bc)
+    assert left.to_bytes() == right.to_bytes()
+
+
+def test_merge_rejects_precision_mismatch():
+    with pytest.raises(ValueError, match="merge precision mismatch"):
+        HyperLogLog(precision=8).merge(HyperLogLog(precision=10))
+
+
+def test_to_bytes_layout_pinned():
+    hll = HyperLogLog(precision=8)
+    hll.update(f"x-{i}" for i in range(100))
+    blob = hll.to_bytes()
+    assert blob[0] == SERIALIZATION_VERSION and blob[1] == 8 and len(blob) == 258
+
+
+def test_round_trip_serialization_lossless():
+    hll = HyperLogLog()
+    hll.update(f"ip-{i}" for i in range(2500))
+    blob = hll.to_bytes()
+    restored = HyperLogLog.from_bytes(blob)
+    assert restored.to_bytes() == blob and restored.count() == hll.count()
+
+
+def test_round_trip_across_precisions():
+    for p in (4, 8, 12, 16):
+        hll = HyperLogLog(precision=p)
+        hll.update(f"k-{p}-{i}" for i in range(200))
+        blob = hll.to_bytes()
+        assert len(blob) == 2 + (1 << p)
+        restored = HyperLogLog.from_bytes(blob)
+        assert restored.precision == p and restored.to_bytes() == blob
+
+
+def test_from_bytes_rejects_unknown_version():
+    with pytest.raises(ValueError, match="unknown HLL serialization version"):
+        HyperLogLog.from_bytes(bytes([99, 8]) + bytes(256))
+
+
+def test_from_bytes_rejects_length_mismatch():
+    with pytest.raises(ValueError, match="sketch blob length mismatch"):
+        HyperLogLog.from_bytes(bytes([SERIALIZATION_VERSION, 8]) + bytes(100))
+
+
+def test_from_bytes_rejects_invalid_precision():
+    with pytest.raises(ValueError, match="invalid precision in blob"):
+        HyperLogLog.from_bytes(bytes([SERIALIZATION_VERSION, 3]))
+
+
+def test_from_bytes_rejects_too_short():
+    for short in (b"", b"\x01"):
+        with pytest.raises(ValueError, match="sketch blob too short"):
+            HyperLogLog.from_bytes(short)
+
+
+def test_hash_is_stable_across_calls():
+    items = [f"ip-{i}" for i in range(500)]
+    sketches = [HyperLogLog() for _ in range(3)]
+    for s in sketches:
+        s.update(items)
+    a = sketches[0].to_bytes()
+    for s in sketches[1:]:
+        assert s.to_bytes() == a
+
+
+def test_count_empty_sketch_is_zero():
+    assert HyperLogLog().count() == 0
+
+
+def test_count_single_item():
+    hll = HyperLogLog()
+    hll.add("solo-ip")
+    assert 0 < hll.count() <= 5
+
+
+def test_len_returns_count():
+    hll = HyperLogLog()
+    hll.update(f"x-{i}" for i in range(100))
+    assert len(hll) == hll.count()
+
+
+def test_add_accepts_bytes_and_str():
+    hll_str, hll_bytes = HyperLogLog(), HyperLogLog()
+    items = ["1.2.3.4", "5.6.7.8", "ffff::1"]
+    hll_str.update(items)
+    hll_bytes.update(s.encode("utf-8") for s in items)
+    assert hll_str.to_bytes() == hll_bytes.to_bytes()
+
+
+def test_documented_error_bound_holds_on_average():
+    relative_errors = []
+    for n in (100, 500, 1_000, 5_000, 10_000, 50_000):
+        hll = HyperLogLog()
+        hll.update(f"item-{i}" for i in range(n))
+        relative_errors.append(abs(hll.count() - n) / n)
+    assert sum(relative_errors) / len(relative_errors) < 0.13
+
+
+def test_alpha_constant_matches_documented_values():
+    assert _alpha(16) == pytest.approx(0.673)
+    assert _alpha(32) == pytest.approx(0.697)
+    assert _alpha(64) == pytest.approx(0.709)
+    assert _alpha(128) == pytest.approx(0.7213 / (1.0 + 1.079 / 128))
+    assert _alpha(256) == pytest.approx(0.7213 / (1.0 + 1.079 / 256), rel=1e-12)
+
+
+def test_count_does_not_raise_math_domain_error_under_extreme_bucket_ranks():
+    hll = HyperLogLog(precision=8)
+    hll._buckets = [25 for _ in hll._buckets]
+    n = hll.count()
+    assert isinstance(n, int) and n >= 0

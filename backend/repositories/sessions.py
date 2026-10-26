@@ -359,41 +359,23 @@ def _build_active_hour_session_sql(
     ``[max(active_hour_start, user_start), min(active_hour_end, user_end))``.
     Used to UNION with rollup paths so the chart is current to the second.
     """
-    ja4_expr = '"ja4"' if "ja4" in actual_cols else "CAST(NULL AS VARCHAR)"
-    country_expr = 'CAST(MIN("country") AS VARCHAR)' if "country" in actual_cols else "CAST(NULL AS VARCHAR)"
-    asn_expr = 'CAST(MIN("asn") AS INTEGER)' if "asn" in actual_cols else "CAST(NULL AS INTEGER)"
-    reqs_4xx = (
-        'CAST(SUM(CASE WHEN "status" BETWEEN 400 AND 499 THEN 1 ELSE 0 END) AS BIGINT)'
-        if "status" in actual_cols
-        else "CAST(0 AS BIGINT)"
-    )
-    reqs_5xx = (
-        'CAST(SUM(CASE WHEN "status" >= 500 THEN 1 ELSE 0 END) AS BIGINT)'
-        if "status" in actual_cols
-        else "CAST(0 AS BIGINT)"
-    )
-    resp_bytes_sum = sum_or_zero('"resp_bytes"')
-    tcp_rtt_sum = sum_or_zero('"tcp_rtt"', zero="0.0")
-    total_bytes = f"CAST({resp_bytes_sum} AS BIGINT)" if "resp_bytes" in actual_cols else "CAST(0 AS BIGINT)"
-    rtt_sum = f"CAST({tcp_rtt_sum} AS DOUBLE)" if "tcp_rtt" in actual_cols else "CAST(0.0 AS DOUBLE)"
-    rtt_count = (
-        'CAST(COUNT(*) FILTER (WHERE "tcp_rtt" IS NOT NULL) AS BIGINT)'
-        if "tcp_rtt" in actual_cols
-        else "CAST(0 AS BIGINT)"
-    )
-    edge_cnt = (
-        'CAST(SUM(CASE WHEN "edge" = 1 THEN 1 ELSE 0 END) AS BIGINT)' if "edge" in actual_cols else "CAST(0 AS BIGINT)"
-    )
-    shield_cnt = (
-        'CAST(SUM(CASE WHEN "edge" = 0 THEN 1 ELSE 0 END) AS BIGINT)' if "edge" in actual_cols else "CAST(0 AS BIGINT)"
-    )
-    ua_min_expr = 'CAST(MIN("ua") AS VARCHAR)' if "ua" in actual_cols else "CAST(NULL AS VARCHAR)"
-    edge_sid_expr = 'CAST(MAX("edge_sid") AS VARCHAR)' if "edge_sid" in actual_cols else "CAST(NULL AS VARCHAR)"
-    cmcd_cnt = (
-        'CAST(COUNT(*) FILTER (WHERE "cmcd_sid" IS NOT NULL AND "cmcd_sid" != \'\') AS BIGINT)'
-        if "cmcd_sid" in actual_cols
-        else "CAST(0 AS BIGINT)"
-    )
+
+    def _col(c: str, expr: str, default: str = "CAST(0 AS BIGINT)") -> str:
+        return expr if c in actual_cols else default
+
+    ja4_expr = _col("ja4", '"ja4"', "CAST(NULL AS VARCHAR)")
+    country_expr = _col("country", 'CAST(MIN("country") AS VARCHAR)', "CAST(NULL AS VARCHAR)")
+    asn_expr = _col("asn", 'CAST(MIN("asn") AS INTEGER)', "CAST(NULL AS INTEGER)")
+    reqs_4xx = _col("status", 'CAST(SUM(CASE WHEN "status" BETWEEN 400 AND 499 THEN 1 ELSE 0 END) AS BIGINT)')
+    reqs_5xx = _col("status", 'CAST(SUM(CASE WHEN "status" >= 500 THEN 1 ELSE 0 END) AS BIGINT)')
+    total_bytes = _col("resp_bytes", f"CAST({sum_or_zero('"resp_bytes"')} AS BIGINT)")
+    rtt_sum = _col("tcp_rtt", f"CAST({sum_or_zero('"tcp_rtt"', zero='0.0')} AS DOUBLE)", "CAST(0.0 AS DOUBLE)")
+    rtt_count = _col("tcp_rtt", 'CAST(COUNT(*) FILTER (WHERE "tcp_rtt" IS NOT NULL) AS BIGINT)')
+    edge_cnt = _col("edge", 'CAST(SUM(CASE WHEN "edge" = 1 THEN 1 ELSE 0 END) AS BIGINT)')
+    shield_cnt = _col("edge", 'CAST(SUM(CASE WHEN "edge" = 0 THEN 1 ELSE 0 END) AS BIGINT)')
+    ua_min_expr = _col("ua", 'CAST(MIN("ua") AS VARCHAR)', "CAST(NULL AS VARCHAR)")
+    edge_sid_expr = _col("edge_sid", 'CAST(MAX("edge_sid") AS VARCHAR)', "CAST(NULL AS VARCHAR)")
+    cmcd_cnt = _col("cmcd_sid", 'CAST(COUNT(*) FILTER (WHERE "cmcd_sid" IS NOT NULL AND "cmcd_sid" != \'\') AS BIGINT)')
 
     live_start = max(active_hour_dt, user_start)
     live_end = min(active_hour_dt + timedelta(hours=1), user_end)
@@ -481,6 +463,75 @@ def _build_rollup_filter_sql(rollup_filters: FiltersDict | None) -> str:
     if not parts:
         return ""
     return " AND " + " AND ".join(parts)
+
+
+def _schema_cap_flags(actual_cols: set[str]) -> dict[str, bool]:
+    return {
+        "has_rtt": "tcp_rtt" in actual_cols,
+        "has_ja4": "ja4" in actual_cols,
+        "has_edge": "edge" in actual_cols,
+        "has_edge_sid": "edge_sid" in actual_cols,
+        "has_cmcd": "cmcd_sid" in actual_cols,
+    }
+
+
+def _shape_session_rows(
+    rows: list[tuple],
+    col_names: list[str],
+    *,
+    from_rollup: bool,
+    has_cmcd: bool,
+) -> tuple[list[dict], int]:
+    sessions: list[dict] = []
+    total = 0
+    for row in rows:
+        d = dict(zip(col_names, row))
+        if from_rollup:
+            row_total = d.pop("total_sessions", None)
+            if row_total is not None and total == 0:
+                total = int(row_total)
+        for k in ("session_start", "session_end"):
+            if d.get(k) is not None:
+                d[k] = str(d[k])
+        if from_rollup:
+            d.pop("rtt_sum", None)
+            d.pop("rtt_count", None)
+            d["is_streaming"] = d.get("cmcd_count", 0) > 0
+        elif has_cmcd:
+            d["is_streaming"] = (d.pop("streaming_reqs", 0) or 0) > 0
+        sessions.append(d)
+    return sessions, max(total, len(sessions))
+
+
+def _sessions_envelope(
+    sessions: list[dict],
+    src: dict,
+    total: int,
+    page: int,
+    limit: int,
+    actual_cols: set[str],
+    min_reqs_flag: int,
+    min_4xx_pct_flag: float,
+    section_timings: list,
+    telemetry: dict,
+    *,
+    rollup_served: bool = False,
+) -> dict:
+    res = {
+        "sessions": sessions,
+        "asn_names": _build_asn_label_map(sessions, src),
+        "total": total,
+        "page": page,
+        "limit": limit,
+        **_schema_cap_flags(actual_cols),
+        "min_reqs_flag": min_reqs_flag,
+        "min_4xx_pct_flag": min_4xx_pct_flag,
+        "section_timings": section_timings,
+    }
+    if rollup_served:
+        res["_rollup_served"] = True
+    res.update(telemetry)
+    return res
 
 
 def _build_asn_label_map(sessions: list[dict], src: dict) -> dict[int, str]:
@@ -787,44 +838,20 @@ def _get_sessions_from_rollup(
     rows, col_names = exec_out
     section_timings.append({"section": "sessions_rollup_query", "time_ms": round((time.perf_counter() - _t) * 1000, 2)})
 
-    sessions: list[dict] = []
-    total = 0
-    for row in rows:
-        d = dict(zip(col_names, row))
-        row_total = d.pop("total_sessions", None)
-        if row_total is not None and total == 0:
-            total = int(row_total)
-        for k in ("session_start", "session_end"):
-            if d.get(k) is not None:
-                d[k] = str(d[k])
-        # Drop fields the front-end doesn't use from the rollup output.
-        d.pop("rtt_sum", None)
-        d.pop("rtt_count", None)
-        d["is_streaming"] = d.get("cmcd_count", 0) > 0
-        sessions.append(d)
-    if total < len(sessions):
-        total = len(sessions)
-    asn_names = _build_asn_label_map(sessions, src)
-
-    return {
-        "sessions": sessions,
-        "asn_names": asn_names,
-        "total": total,
-        "page": page,
-        "limit": limit,
-        "has_rtt": has_rtt,
-        "has_ja4": has_ja4,
-        "has_edge": has_edge,
-        "has_edge_sid": has_edge_sid,
-        "has_cmcd": has_cmcd,
-        "min_reqs_flag": min_reqs_flag,
-        "min_4xx_pct_flag": min_4xx_pct_flag,
-        "section_timings": section_timings,
-        # Hint for the frontend that median/unique_urls are reduced on
-        # the rollup path. The current frontend ignores unknown keys.
-        "_rollup_served": True,
-        **runner.telemetry(),
-    }
+    sessions, total = _shape_session_rows(rows, col_names, from_rollup=True, has_cmcd=has_cmcd)
+    return _sessions_envelope(
+        sessions,
+        src,
+        total,
+        page,
+        limit,
+        actual_cols,
+        min_reqs_flag,
+        min_4xx_pct_flag,
+        section_timings,
+        runner.telemetry(),
+        rollup_served=True,
+    )
 
 
 def get_sessions(
@@ -873,22 +900,21 @@ def get_sessions(
         except ValueError:
             raise
 
-    _t = time.perf_counter()
-    actual_cols = set(runner.get_schema_cols())
-    timer.mark("get_schema_cols", _t)
-    if not actual_cols:
+    def _empty_resp(cols: set[str]) -> dict:
         return empty_schema_response(
             sessions=[],
             total=0,
             page=page,
             limit=limit,
-            has_rtt=False,
-            has_ja4=False,
-            has_edge=False,
-            has_edge_sid=False,
-            has_cmcd=False,
+            **_schema_cap_flags(cols),
             **runner.telemetry(),
         )
+
+    _t = time.perf_counter()
+    actual_cols = set(runner.get_schema_cols())
+    timer.mark("get_schema_cols", _t)
+    if not actual_cols:
+        return _empty_resp(set())
 
     _t = time.perf_counter()
     params, where_clause = build_where_clause(start_time, end_time, filters, list(actual_cols), partition_pruning=True)
@@ -985,42 +1011,36 @@ def get_sessions(
                     _memo.put(cache_key, rollup_result, strip=("section_timings",))
                 return rollup_result
 
-    group_cols = ["ip"]
-    if has_ja4:
-        group_cols.append("ja4")
-
+    group_cols = ["ip"] + (["ja4"] if has_ja4 else [])
     group_key = ", ".join(f'"{c}"' for c in group_cols)
     part_key = group_key
 
-    extra_aggs = ""
-    if has_cmcd:
-        extra_aggs += """, COUNT(*) FILTER (WHERE "cmcd_sid" IS NOT NULL AND "cmcd_sid" != '') AS streaming_reqs"""
-    if has_edge_sid:
-        # Representative cookie session id per (ip[, ja4]) session.
-        # MAX() across rows in the same session ensures a stable value;
-        # rows where the inbound request had no valid cookie store ''
-        # (see backend/provision/session_scoring_orchestrator.py).
-        extra_aggs += ', MAX("edge_sid") AS edge_sid'
-    if has_edge:
-        extra_aggs += ', SUM(CASE WHEN "edge" = 1 THEN 1 ELSE 0 END) AS edge_count'
-        extra_aggs += ', SUM(CASE WHEN "edge" = 0 THEN 1 ELSE 0 END) AS shield_count'
-    if has_asn:
-        extra_aggs += ', MIN("asn") AS asn'
-    if has_country:
-        extra_aggs += ', MIN("country") AS country'
-    if has_status:
-        extra_aggs += (
-            ', SUM(CASE WHEN "status" >= 400 AND "status" < 500 THEN 1 ELSE 0 END) AS reqs_4xx'
-            ', SUM(CASE WHEN "status" >= 500 THEN 1 ELSE 0 END) AS reqs_5xx'
+    # Representative cookie session id per (ip[, ja4]) session uses MAX("edge_sid")
+    # so rows where the inbound request had no valid cookie ('') lose to real IDs.
+    extra_aggs = "".join(
+        frag
+        for flag, frag in (
+            (has_cmcd, """, COUNT(*) FILTER (WHERE "cmcd_sid" IS NOT NULL AND "cmcd_sid" != '') AS streaming_reqs"""),
+            (has_edge_sid, ', MAX("edge_sid") AS edge_sid'),
+            (
+                has_edge,
+                ', SUM(CASE WHEN "edge" = 1 THEN 1 ELSE 0 END) AS edge_count'
+                ', SUM(CASE WHEN "edge" = 0 THEN 1 ELSE 0 END) AS shield_count',
+            ),
+            (has_asn, ', MIN("asn") AS asn'),
+            (has_country, ', MIN("country") AS country'),
+            (
+                has_status,
+                ', SUM(CASE WHEN "status" >= 400 AND "status" < 500 THEN 1 ELSE 0 END) AS reqs_4xx'
+                ', SUM(CASE WHEN "status" >= 500 THEN 1 ELSE 0 END) AS reqs_5xx',
+            ),
+            (has_resp_bytes, ', SUM("resp_bytes") AS total_bytes'),
+            (has_rtt, ', MEDIAN("tcp_rtt") / 1000.0 AS median_rtt_ms'),
+            (has_ua, ', MIN("ua") AS ua'),
+            (has_url, ', COUNT(DISTINCT "url") AS unique_urls'),
         )
-    if has_resp_bytes:
-        extra_aggs += ', SUM("resp_bytes") AS total_bytes'
-    if has_rtt:
-        extra_aggs += ', MEDIAN("tcp_rtt") / 1000.0 AS median_rtt_ms'
-    if has_ua:
-        extra_aggs += ', MIN("ua") AS ua'
-    if has_url:
-        extra_aggs += ', COUNT(DISTINCT "url") AS unique_urls'
+        if flag
+    )
 
     flag_parts = [f"req_count >= {min_reqs_flag}"]
     if has_status:
@@ -1083,36 +1103,14 @@ def get_sessions(
     result = runner.execute_with_retry(data_sql, params)
     timer.mark("sessions_query", _t)
     if result is None:
-        return empty_schema_response(
-            sessions=[],
-            total=0,
-            page=page,
-            limit=limit,
-            has_rtt=has_rtt,
-            has_ja4=has_ja4,
-            has_edge=has_edge,
-            has_edge_sid=has_edge_sid,
-            has_cmcd=has_cmcd,
-            **runner.telemetry(),
-        )
+        return _empty_resp(actual_cols)
 
     _t = time.perf_counter()
     rows = result.fetchall()
     timer.mark("fetchall", _t)
     col_names = [desc[0] for desc in con.description]
 
-    sessions: list[dict] = []
-    for row in rows:
-        d = dict(zip(col_names, row))
-        for k in ("session_start", "session_end"):
-            if d.get(k) is not None:
-                d[k] = str(d[k])
-        if has_cmcd:
-            d["is_streaming"] = (d.pop("streaming_reqs", 0) or 0) > 0
-        sessions.append(d)
-    total = len(sessions)
-
-    asn_names = _build_asn_label_map(sessions, src)
+    sessions, total = _shape_session_rows(rows, col_names, from_rollup=False, has_cmcd=has_cmcd)
 
     if (not rows and offset > 0) or len(sessions) == limit:
         _t = time.perf_counter()
@@ -1127,22 +1125,18 @@ def get_sessions(
     elif rows and offset > 0:
         total = offset + len(sessions)
 
-    res = {
-        "sessions": sessions,
-        "asn_names": asn_names,
-        "total": total,
-        "page": page,
-        "limit": limit,
-        "has_rtt": has_rtt,
-        "has_ja4": has_ja4,
-        "has_edge": has_edge,
-        "has_edge_sid": has_edge_sid,
-        "has_cmcd": has_cmcd,
-        "min_reqs_flag": min_reqs_flag,
-        "min_4xx_pct_flag": min_4xx_pct_flag,
-        "section_timings": section_timings,
-        **runner.telemetry(),
-    }
+    res = _sessions_envelope(
+        sessions,
+        src,
+        total,
+        page,
+        limit,
+        actual_cols,
+        min_reqs_flag,
+        min_4xx_pct_flag,
+        section_timings,
+        runner.telemetry(),
+    )
     if cache_key is not None:
         _memo.put(cache_key, res, strip=("section_timings",))
     return res

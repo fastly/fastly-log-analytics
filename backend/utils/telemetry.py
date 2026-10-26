@@ -1253,6 +1253,821 @@ class HyperLogLog:
         return f"HyperLogLog(p={self._p}, estimate≈{self.count()})"
 
 
+HLL_SKETCH_NAMES: tuple[str, ...] = ("hll_sketch",)
+
+
+def get_hll_sketch(precision: int = DEFAULT_PRECISION) -> HyperLogLog:
+    return HyperLogLog(precision=precision)
+
+
+def merge_hll_sketches(blobs: Iterable[bytes | bytearray], precision: int = DEFAULT_PRECISION) -> int:
+    acc: HyperLogLog | None = None
+    for blob in blobs:
+        if not blob:
+            continue
+        sketch = HyperLogLog.from_bytes(blob)
+        if acc is None:
+            acc = sketch
+        else:
+            acc.merge(sketch)
+    return acc.count() if acc is not None else 0
+
+
+def query_hll_distinct(blobs: Iterable[bytes | bytearray]) -> int:
+    return merge_hll_sketches(blobs)
+
+
+def query_hll_distinct_by_bucket(rows: Iterable[tuple[Any, bytes | bytearray]]) -> dict[Any, int]:
+    buckets: dict[Any, HyperLogLog] = {}
+    for key, blob in rows:
+        if not blob:
+            continue
+        sketch = HyperLogLog.from_bytes(blob)
+        if key not in buckets:
+            buckets[key] = sketch
+        else:
+            buckets[key].merge(sketch)
+    return {k: v.count() for k, v in buckets.items()}
+
+
+def query_hll_distinct_filtered(blobs: Iterable[bytes | bytearray]) -> int:
+    return merge_hll_sketches(blobs)
+
+
 sys.modules["backend.utils.hll"] = sys.modules[__name__]
 if _utils_pkg is not None:
     _utils_pkg.hll = sys.modules[__name__]  # type: ignore[attr-defined]
+
+
+# ---------------------------------------------------------------------------
+# Relative-range window resolver (folded from backend.utils.time_window)
+# ---------------------------------------------------------------------------
+
+from datetime import timedelta  # noqa: E402
+
+from backend.utils.date_utils import iso_z, parse_iso_utc  # noqa: E402
+
+STATIC_DEFAULT: tuple[float, float] = (24.0, 168.0)
+
+_BANDS: tuple[tuple[float, float, float], ...] = (
+    (1.0, 0.25, 1.0),
+    (4.0, 1.0, 1.0),
+    (24.0, 4.0, 1.0),
+    (48.0, 4.0, 24.0),
+    (168.0, 24.0, 24.0),
+    (math.inf, 24.0, 168.0),
+)
+
+
+def history_hours_from_earliest(earliest: str | None, *, now: datetime | None = None) -> float | None:
+    """Hours of history available = ``now − earliest_log_at``, floored at 0."""
+    dt = parse_iso_utc(earliest)
+    if dt is None:
+        return None
+    anchor = now if now is not None else datetime.now(UTC)
+    return max(0.0, (anchor - dt).total_seconds() / 3600.0)
+
+
+def pick_insights_default(history_hours: float | None) -> tuple[float, float]:
+    """Map available history to the default ``(window_hours, baseline_hours)``."""
+    if history_hours is None or not math.isfinite(history_hours):
+        return STATIC_DEFAULT
+    for upper, window, baseline in _BANDS:
+        if history_hours < upper:
+            return (window, baseline)
+    return STATIC_DEFAULT
+
+
+ANCHOR_QUANTUM_SECONDS = 60
+
+_FIXED_TOKEN_DELTAS: dict[str, timedelta] = {
+    "1h": timedelta(hours=1),
+    "3h": timedelta(hours=3),
+    "6h": timedelta(hours=6),
+    "12h": timedelta(hours=12),
+    "24h": timedelta(hours=24),
+    "3d": timedelta(days=3),
+    "7d": timedelta(days=7),
+    "30d": timedelta(days=30),
+}
+
+VALID_RANGE_TOKENS: frozenset[str] = frozenset(_FIXED_TOKEN_DELTAS) | {"auto"}
+
+
+def is_valid_range_token(token: str | None) -> bool:
+    """True when ``token`` is a recognized relative-range token."""
+    return token in VALID_RANGE_TOKENS
+
+
+def quantize_anchor(anchor: str | None, *, now: datetime | None = None) -> str:
+    """Floor an anchor instant to the ``ANCHOR_QUANTUM_SECONDS`` grid → ISO-Z."""
+    dt = parse_iso_utc(anchor) if anchor else None
+    if dt is None:
+        dt = now if now is not None else datetime.now(UTC)
+    epoch = int(dt.timestamp())
+    floored = epoch - (epoch % ANCHOR_QUANTUM_SECONDS)
+    return iso_z(datetime.fromtimestamp(floored, tz=UTC))
+
+
+def _pick_auto_token(earliest_log_at: str | None, *, now: datetime) -> str:
+    """Resolve ``"auto"`` to a concrete fixed token from the service's history."""
+    history_hours = history_hours_from_earliest(earliest_log_at, now=now)
+    if history_hours is None:
+        return "7d"
+    if history_hours < 7 * 24:
+        return "24h"
+    if history_hours < 30 * 24:
+        return "7d"
+    return "30d"
+
+
+def resolve_window(
+    range_token: str | None,
+    anchor: str | None,
+    *,
+    earliest_log_at: str | None = None,
+    now: datetime | None = None,
+) -> tuple[str, str]:
+    """Resolve ``(range_token, anchor) -> (start_iso, end_iso)`` deterministically."""
+    if not is_valid_range_token(range_token):
+        raise ValueError(f"unrecognized range_token: {range_token!r}")
+
+    now_dt = now if now is not None else datetime.now(UTC)
+    quantized = quantize_anchor(anchor, now=now_dt)
+    anchor_dt = parse_iso_utc(quantized)
+    if anchor_dt is None:
+        raise RuntimeError("anchor_dt is unexpectedly None")
+
+    if range_token == "auto":
+        token = _pick_auto_token(earliest_log_at, now=now_dt)
+    else:
+        if range_token is None:
+            raise RuntimeError("range_token is unexpectedly None")
+        token = range_token
+
+    delta = _FIXED_TOKEN_DELTAS[token]
+    start_dt = anchor_dt - delta
+    return iso_z(start_dt), iso_z(anchor_dt)
+
+
+def invite_clamp_fingerprint(analyst_session: object | None) -> str | None:
+    """Stable cache-key fragment identifying the analyst's invite-clamp shape."""
+    if analyst_session is None:
+        return None
+    qs = getattr(analyst_session, "query_start_time", None)
+    qe = getattr(analyst_session, "query_end_time", None)
+    qw = getattr(analyst_session, "query_window_hours", None)
+    raw = f"{qs or ''}|{qe or ''}|{qw or ''}"
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+
+# ---------------------------------------------------------------------------
+# Thread-safe LRU+TTL cache & CacheRegistry (folded from backend.utils.bounded_cache)
+# ---------------------------------------------------------------------------
+
+from collections.abc import Iterator  # noqa: E402
+
+import cachetools  # noqa: E402
+
+_MISSING = object()
+
+
+class BoundedTTLCache:
+    """Thread-safe LRU+TTL cache backed by ``cachetools.TTLCache``."""
+
+    def __init__(
+        self,
+        maxsize: int | None = None,
+        ttl_seconds: float = 60.0,
+        *,
+        max_entries: int | None = None,
+        name: str | None = None,
+    ) -> None:
+        resolved_max = max_entries if max_entries is not None else (256 if maxsize is None else maxsize)
+        if resolved_max <= 0:
+            raise ValueError("maxsize must be positive")
+        if ttl_seconds <= 0:
+            raise ValueError("ttl_seconds must be positive")
+        self.maxsize = resolved_max
+        self.ttl = float(ttl_seconds)
+        self.ttl_seconds = float(ttl_seconds)
+        self.name = name
+        self._cache: cachetools.TTLCache = cachetools.TTLCache(
+            maxsize=resolved_max,
+            ttl=float(ttl_seconds),
+            timer=lambda: time.monotonic(),
+        )
+        self.lock = threading.RLock()
+
+    def __contains__(self, key: Any) -> bool:
+        with self.lock:
+            return key in self._cache
+
+    def __getitem__(self, key: Any) -> Any:
+        with self.lock:
+            return self._cache[key]
+
+    def get(self, key: Any, default: Any = None) -> Any:
+        with self.lock:
+            return self._cache.get(key, default)
+
+    def __setitem__(self, key: Any, value: Any) -> None:
+        with self.lock:
+            self._cache[key] = value
+
+    def set(self, key: Any, value: Any) -> None:
+        self[key] = value
+
+    def put(self, key: Any, value: Any) -> None:
+        self[key] = value
+
+    def __delitem__(self, key: Any) -> None:
+        with self.lock:
+            del self._cache[key]
+
+    def delete(self, key: Any) -> bool:
+        with self.lock:
+            return self._cache.pop(key, _MISSING) is not _MISSING
+
+    def pop(self, key: Any, default: Any = _MISSING) -> Any:
+        with self.lock:
+            if default is _MISSING:
+                return self._cache.pop(key)
+            return self._cache.pop(key, default)
+
+    def clear(self) -> None:
+        with self.lock:
+            self._cache.clear()
+
+    def __len__(self) -> int:
+        with self.lock:
+            return len(self._cache)
+
+    def __iter__(self) -> Iterator[Any]:
+        with self.lock:
+            return iter(list(self._cache.keys()))
+
+    def keys(self) -> list[Any]:
+        with self.lock:
+            return list(self._cache.keys())
+
+    def values(self) -> list[Any]:
+        with self.lock:
+            return list(self._cache.values())
+
+    def items(self) -> list[tuple[Any, Any]]:
+        with self.lock:
+            return list(self._cache.items())
+
+
+BoundedCache = BoundedTTLCache
+
+
+class CacheRegistry:
+    """Singleton-style registry of module-level caches."""
+
+    _entries: dict[str, Any] = {}
+    _lock = threading.Lock()
+
+    @classmethod
+    def register(cls, name: str, cache: Any) -> None:
+        with cls._lock:
+            cls._entries[name] = cache
+
+    @classmethod
+    def clear_all(cls) -> None:
+        with cls._lock:
+            entries = list(cls._entries.items())
+        for _name, cache in entries:
+            clear_fn = getattr(cache, "clear", None)
+            if callable(clear_fn):
+                try:
+                    clear_fn()
+                except Exception:  # pragma: no cover — best-effort drain
+                    continue
+
+    @classmethod
+    def clear(cls, name: str) -> bool:
+        with cls._lock:
+            cache = cls._entries.get(name)
+        if cache is None:
+            return False
+        clear_fn = getattr(cache, "clear", None)
+        if not callable(clear_fn):
+            return False
+        try:
+            clear_fn()
+            return True
+        except Exception:  # pragma: no cover — best-effort drain
+            return False
+
+    @classmethod
+    def names(cls) -> list[str]:
+        with cls._lock:
+            return list(cls._entries.keys())
+
+    @classmethod
+    def reset(cls) -> None:
+        with cls._lock:
+            cls._entries.clear()
+
+
+# ---------------------------------------------------------------------------
+# Backstop telemetry response middleware & active request counter
+# (folded from backend.utils.telemetry_response_middleware & active_requests)
+# ---------------------------------------------------------------------------
+
+import os as _os  # noqa: E402
+from collections.abc import Callable  # noqa: E402
+
+from starlette.middleware.base import BaseHTTPMiddleware  # noqa: E402
+from starlette.requests import Request  # noqa: E402
+from starlette.responses import Response  # noqa: E402
+
+_JSON_CONTENT_TYPES: tuple[str, ...] = ("application/json",)
+_STREAMING_CONTENT_TYPES: tuple[str, ...] = (
+    "text/event-stream",
+    "application/octet-stream",
+    "application/x-ndjson",
+    "application/jsonl",
+)
+
+
+def _content_type(response: Response) -> str:
+    return (response.headers.get("content-type") or response.media_type or "").lower()
+
+
+def _is_json_response(response: Response) -> bool:
+    """True iff the response's Content-Type identifies it as JSON."""
+    media = _content_type(response)
+    return any(media.startswith(t) for t in _JSON_CONTENT_TYPES)
+
+
+def _is_streaming_content_type(response: Response) -> bool:
+    media = _content_type(response)
+    return any(media.startswith(t) for t in _STREAMING_CONTENT_TYPES)
+
+
+class TelemetryResponseBodyMiddleware(BaseHTTPMiddleware):
+    """Inject telemetry into JSON dict responses that lack it."""
+
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+
+        try:
+            from backend.models.common import _DEBUG_ENVELOPE_KEYS, _debug_responses_enabled
+        except Exception:
+            return response
+
+        master_enabled = _debug_responses_enabled()
+
+        is_remote = getattr(request.state, "is_remote", False)
+        analyst_query_enabled = analyst_api_enabled = False
+        if is_remote and master_enabled:
+            from backend.utils.remote_access import analyst_debug_visibility
+
+            analyst_query_enabled, analyst_api_enabled = analyst_debug_visibility(request)
+        if _is_streaming_content_type(response):
+            return response
+        if not _is_json_response(response):
+            return response
+
+        opt_in = master_enabled and (
+            request.headers.get("x-debug-responses") == "1" or _os.getenv("DEBUG_RESPONSES_FORCE_INCLUDE") == "1"
+        )
+        if is_remote and opt_in and getattr(request.state, "_analyst_envelope_complete", False):
+            return response
+
+        try:
+            body_chunks: list[bytes] = []
+            async for chunk in response.body_iterator:
+                body_chunks.append(chunk)
+            body = b"".join(body_chunks)
+        except Exception as e:
+            logger.warning("[telemetry-middleware] failed to read response body: %s", e)
+            return response
+
+        if not body:
+            return _reconstruct(response, body)
+
+        try:
+            parsed: Any = json.loads(body)
+        except (ValueError, json.JSONDecodeError) as e:
+            logger.debug("[telemetry-middleware] body not JSON-parseable: %s", e)
+            return _reconstruct(response, body)
+
+        if not isinstance(parsed, dict):
+            return _reconstruct(response, body)
+
+        if not opt_in:
+            stripped = False
+            keys_to_strip = (*_DEBUG_ENVELOPE_KEYS, "_is_cached") if master_enabled else _DEBUG_ENVELOPE_KEYS
+            for k in keys_to_strip:
+                if k in parsed:
+                    parsed.pop(k)
+                    stripped = True
+            if not stripped:
+                return _reconstruct(response, body)
+            try:
+                new_body = json.dumps(parsed, default=str).encode("utf-8")
+            except Exception as e:
+                logger.warning("[telemetry-middleware] failed to strip telemetry: %s", e)
+                return _reconstruct(response, body)
+            return _reconstruct(response, new_body)
+
+        if "_debug_queries" in parsed:
+            return _reconstruct(response, body)
+
+        try:
+            inject_queries = analyst_query_enabled if is_remote else True
+            inject_api_calls = analyst_api_enabled if is_remote else True
+
+            if inject_queries:
+                parsed["_debug_queries"] = get_queries()
+                pg_queries = list(get_sqlite_queries())
+                parsed["_debug_postgres"] = pg_queries
+                parsed["_debug_sqlite"] = pg_queries
+            if inject_api_calls:
+                parsed["_debug_calls"] = get_tracked_calls()
+
+            if not is_remote or inject_queries or inject_api_calls:
+                parsed.setdefault("_is_cached", False)
+            new_body = json.dumps(parsed, default=str).encode("utf-8")
+        except Exception as e:
+            logger.warning("[telemetry-middleware] failed to inject telemetry: %s", e)
+            return _reconstruct(response, body)
+
+        return _reconstruct(response, new_body)
+
+
+def _reconstruct(original: Response, body: bytes) -> Response:
+    """Build a new ``Response`` from ``body`` with the original's status code, media type, and headers."""
+    drop = (b"content-length", b"content-encoding", b"content-type")
+    media_type = original.media_type
+    if media_type is None:
+        for k, v in original.raw_headers:
+            if k.lower() == b"content-type":
+                try:
+                    media_type = v.decode("ascii")
+                except UnicodeDecodeError:
+                    pass
+                break
+    new = Response(content=body, status_code=original.status_code, media_type=media_type)
+    new.raw_headers.extend((k, v) for k, v in original.raw_headers if k.lower() not in drop)
+    return new
+
+
+_active_requests_logger = logging.getLogger("backend.utils.active_requests")
+
+_lock = threading.Lock()
+_active_count = 0
+_defer_started_at: dict[tuple[str, str], float] = {}
+
+
+def increment_active_requests() -> None:
+    global _active_count
+    with _lock:
+        _active_count += 1
+
+
+def decrement_active_requests() -> None:
+    global _active_count
+    with _lock:
+        if _active_count > 0:
+            _active_count -= 1
+
+
+def active_request_count() -> int:
+    """Snapshot read of the in-flight count. Mostly useful for tests."""
+    with _lock:
+        return _active_count
+
+
+def should_defer_cron(job_name: str, service_id: str, *, max_defer_secs: float = 30.0) -> bool:
+    """Returns True if the cron tick should be SKIPPED for now."""
+    key = (job_name, service_id)
+    with _lock:
+        if _active_count == 0:
+            _defer_started_at.pop(key, None)
+            return False
+        now = time.monotonic()
+        started = _defer_started_at.get(key)
+        if started is None:
+            _defer_started_at[key] = now
+            return True
+        if (now - started) >= max_defer_secs:
+            _defer_started_at.pop(key, None)
+            _active_requests_logger.warning(
+                "[active-request-gate] %s/%s ran after %.1fs of active-request deferrals — "
+                "sustained traffic on this service; consider raising max_defer_secs.",
+                job_name,
+                service_id,
+                now - started,
+            )
+            return False
+        return True
+
+
+def yield_to_api(
+    *,
+    max_wait_secs: float = 1.0,
+    poll_interval: float = 0.1,
+    sleep_fn: Callable[[float], None] | None = None,
+) -> float:
+    """Cooperative yield: if API requests are in flight, sleep briefly to let them make progress."""
+    if active_request_count() == 0:
+        return 0.0
+    sleep = sleep_fn or time.sleep
+    deadline = time.monotonic() + max_wait_secs
+    slept = 0.0
+    while time.monotonic() < deadline:
+        sleep(poll_interval)
+        slept += poll_interval
+        if active_request_count() == 0:
+            return slept
+    return slept
+
+
+def _reset_for_tests() -> None:
+    """Tests: clear counter + defer windows between cases."""
+    global _active_count
+    with _lock:
+        _active_count = 0
+        _defer_started_at.clear()
+
+
+class _ActiveRequestsResetAdapter:
+    """Exposes ``.clear()`` → ``_reset_for_tests()`` for CacheRegistry."""
+
+    @staticmethod
+    def clear() -> None:
+        _reset_for_tests()
+
+
+CacheRegistry.register("utils.active_requests", _ActiveRequestsResetAdapter())
+
+
+# ---------------------------------------------------------------------------
+# structlog configuration, atomic file writes & error redaction
+# (folded from backend.utils.structlog_config, atomic_write, error_redaction)
+# ---------------------------------------------------------------------------
+
+import re  # noqa: E402
+import tempfile  # noqa: E402
+from collections.abc import MutableMapping  # noqa: E402
+from contextlib import suppress  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+from opentelemetry import trace  # noqa: E402
+
+
+def _add_otel_trace_context(_logger: Any, _method_name: str, event_dict: dict[str, Any]) -> dict[str, Any]:
+    """structlog processor: inject active OTel trace_id + span_id."""
+    span = trace.get_current_span()
+    if span is not None and span.is_recording():
+        ctx = span.get_span_context()
+        if ctx.is_valid:
+            event_dict["trace_id"] = format(ctx.trace_id, "032x")
+            event_dict["span_id"] = format(ctx.span_id, "016x")
+    return event_dict
+
+
+def _drop_uvicorn_color_message(
+    _logger: Any, _method_name: str, event_dict: MutableMapping[str, Any]
+) -> MutableMapping[str, Any]:
+    """structlog processor: drop uvicorn's internal ``color_message`` extra."""
+    event_dict.pop("color_message", None)
+    return event_dict
+
+
+def effective_format() -> str:
+    """The renderer that's actually active: ``"json"`` or ``"console"``."""
+    return "json" if os.environ.get("STRUCTLOG_FORMAT", "console").lower() == "json" else "console"
+
+
+def configure_structlog() -> None:
+    """Configure structlog + bridge stdlib through it. Idempotent."""
+    use_json = os.environ.get("STRUCTLOG_FORMAT", "console").lower() == "json"
+
+    shared_processors: list[Any] = [
+        structlog.contextvars.merge_contextvars,
+        structlog.processors.add_log_level,
+        structlog.processors.TimeStamper(fmt="iso", utc=True),
+        _add_otel_trace_context,
+        structlog.processors.StackInfoRenderer(),
+    ]
+
+    renderer: Any = (
+        structlog.processors.JSONRenderer()
+        if use_json
+        else structlog.dev.ConsoleRenderer(
+            colors=sys.stderr.isatty(),
+            sort_keys=True,
+            exception_formatter=structlog.dev.RichTracebackFormatter(
+                color_system="truecolor" if sys.stderr.isatty() else None,
+                show_locals=False,
+            ),
+        )
+    )
+
+    structlog.configure(
+        processors=[
+            *shared_processors,
+            structlog.processors.format_exc_info,
+            structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
+        ],
+        wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
+        context_class=dict,
+        logger_factory=structlog.stdlib.LoggerFactory(),
+        cache_logger_on_first_use=True,
+    )
+
+    formatter = structlog.stdlib.ProcessorFormatter(
+        foreign_pre_chain=[*shared_processors, structlog.stdlib.ExtraAdder(), _drop_uvicorn_color_message],
+        processor=renderer,
+    )
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(formatter)
+
+    root = logging.getLogger()
+    root.handlers[:] = [handler]
+    root.setLevel(logging.INFO)
+
+
+_UVICORN_LOGGERS = ("uvicorn", "uvicorn.error", "uvicorn.access")
+
+
+def bridge_uvicorn_loggers() -> None:
+    """Route uvicorn's loggers through the shared structlog root handler."""
+    for name in _UVICORN_LOGGERS:
+        uv_logger = logging.getLogger(name)
+        uv_logger.handlers = []
+        uv_logger.propagate = True
+
+
+audit_log = structlog.get_logger("audit")
+
+
+@contextmanager
+def atomic_temp_path(
+    target: str | Path,
+    *,
+    prefix: str | None = None,
+    suffix: str = ".tmp",
+    mode: int | None = None,
+) -> Iterator[Path]:
+    """Yield a sibling temporary file path that is atomically replaced onto ``target`` on exit."""
+    dst = Path(target)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=prefix if prefix is not None else f".{dst.name}.",
+        suffix=suffix,
+        dir=str(dst.parent),
+    )
+    os.close(fd)
+    tmp_path = Path(tmp_name)
+    try:
+        if mode is not None:
+            os.chmod(tmp_path, mode)
+        yield tmp_path
+        if tmp_path.exists():
+            os.replace(tmp_path, dst)
+    finally:
+        with suppress(OSError):
+            if tmp_path.exists():
+                tmp_path.unlink()
+
+
+def atomic_write_bytes(
+    target: str | Path,
+    data: bytes,
+    *,
+    fsync: bool = False,
+    mode: int | None = None,
+    prefix: str | None = None,
+    suffix: str = ".tmp",
+    fallback_in_place_errnos: set[int] | None = None,
+) -> None:
+    """Atomically write ``data`` to ``target`` via a sibling temporary file and ``os.replace``."""
+    dst = Path(target)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=prefix if prefix is not None else f".{dst.name}.",
+        suffix=suffix,
+        dir=str(dst.parent),
+    )
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            if fsync:
+                f.flush()
+                os.fsync(f.fileno())
+        if mode is not None:
+            os.chmod(tmp_name, mode)
+        os.replace(tmp_name, dst)
+    except OSError as e:
+        with suppress(OSError):
+            os.unlink(tmp_name)
+        err_msg = str(e).lower()
+        if fallback_in_place_errnos and (
+            e.errno in fallback_in_place_errnos or "busy" in err_msg or "permission" in err_msg
+        ):
+            with open(dst, "wb") as f:
+                f.write(data)
+                if fsync:
+                    f.flush()
+                    os.fsync(f.fileno())
+            return
+        raise
+    except BaseException:
+        with suppress(OSError):
+            os.unlink(tmp_name)
+        raise
+
+
+def atomic_write_json(
+    target: str | Path,
+    data: Any,
+    *,
+    indent: int | None = 2,
+    sort_keys: bool = False,
+    separators: tuple[str, str] | None = None,
+    default: Callable[[Any], Any] | None = None,
+    fsync: bool = False,
+    prefix: str | None = None,
+    suffix: str = ".tmp",
+    fallback_in_place_errnos: set[int] | None = None,
+) -> None:
+    """Serialize ``data`` as UTF-8 JSON and atomically write it to ``target``."""
+    payload = json.dumps(
+        data,
+        indent=indent,
+        sort_keys=sort_keys,
+        separators=separators,
+        default=default,
+    ).encode("utf-8")
+    atomic_write_bytes(
+        target,
+        payload,
+        fsync=fsync,
+        prefix=prefix,
+        suffix=suffix,
+        fallback_in_place_errnos=fallback_in_place_errnos,
+    )
+
+
+ABS_PATH_RE = re.compile(r"(?<![A-Za-z0-9])/(?:srv|var|tmp|data|home|opt|usr|mnt|app)\b(?:/[A-Za-z0-9_./-]*)?")
+CID_SALT_LITERAL_RE = re.compile(r"(sha256\(\s*CONCAT\(\s*')[^']*(')", re.IGNORECASE)
+
+REDACTED = "[redacted]"
+_MIN_SALT_LEN = 8
+_known_salts: set[str] = set()
+_salts_lock = threading.Lock()
+
+
+def register_salt(salt: str | None) -> None:
+    """Remember cid salts so their literal values are scrubbed from later text."""
+    if isinstance(salt, str) and len(salt) >= _MIN_SALT_LEN:
+        with _salts_lock:
+            _known_salts.add(salt)
+
+
+def scrub_secrets(text: str) -> str:
+    with _salts_lock:
+        salts = sorted(_known_salts, key=len, reverse=True)
+    for salt in salts:
+        text = text.replace(salt, REDACTED)
+    return CID_SALT_LITERAL_RE.sub(r"\1[redacted-salt]\2", text)
+
+
+def redact_error_text(msg: object) -> str:
+    """Strip absolute server paths and cid-salt material from analyst-visible text."""
+    return ABS_PATH_RE.sub("<path>", scrub_secrets(str(msg)))
+
+
+_FOLDED_TELEMETRY_SUBMODULES: tuple[str, ...] = (
+    "sqlite_profiler",
+    "valkey_publisher",
+    "hll",
+    "log_throttle",
+    "usage_logger",
+    "time_window",
+    "bounded_cache",
+    "cache_registry",
+    "telemetry_response_middleware",
+    "active_requests",
+    "structlog_config",
+    "atomic_write",
+    "error_redaction",
+)
+_this_telemetry_mod = sys.modules[__name__]
+for _submod_name in _FOLDED_TELEMETRY_SUBMODULES:
+    sys.modules[f"backend.utils.{_submod_name}"] = _this_telemetry_mod
+    if _utils_pkg is not None:
+        setattr(_utils_pkg, _submod_name, _this_telemetry_mod)
+
+_backend_pkg = sys.modules.get("backend")
+if _backend_pkg is not None and hasattr(_backend_pkg, "_MODULE_ALIASES"):
+    _backend_pkg._MODULE_ALIASES.update(
+        {f"backend.utils.{_submod_name}": "backend.utils.telemetry" for _submod_name in _FOLDED_TELEMETRY_SUBMODULES}
+    )

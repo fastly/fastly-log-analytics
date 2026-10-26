@@ -5,7 +5,7 @@ import { PageHeader } from '@/components/ui/confirm-dialog'
 import { ServicesTable } from './_sections/ServicesTable'
 import { GlobalSettings, PricingSettings } from './_sections/GlobalSettings'
 import { OperationsOverview, AdminPrefetchLinks } from './_sections/OperationsOverview'
-import { QuarantineSection } from './_sections/QuarantineSection'
+import { QuarantineSection } from '@/app/control-room/_sections/ControlRoomClient'
 
 export const dynamic = 'force-dynamic'
 

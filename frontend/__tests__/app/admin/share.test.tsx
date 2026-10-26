@@ -54,9 +54,14 @@ vi.mock('@/components/SessionScoring/ScorerSeriesCard', () => ({
   ScorerErrorsChart: () => null,
   ScorerSeriesCard: () => null,
 }))
-vi.mock('@/components/SessionScoring/ScoringHealthCard', () => ({
+vi.mock('@/components/SessionScoring/ScoringAdminPanels', () => ({
   ScoringHealthCard: () => null,
   ScorerFailOpenBreakdownCard: () => null,
+  MatrixVersionsCard: () => null,
+  AuditLogTab: () => null,
+  ExcludeRegexCard: () => null,
+  RetrainButton: () => null,
+  RotateKeyButton: () => null,
 }))
 vi.mock('@/components/SessionScoring/StatusPanel', () => ({
   StatusPanel: ({ serviceId }: { serviceId: string }) => (
@@ -68,15 +73,6 @@ vi.mock('@/components/SessionScoring/StatusPanel', () => ({
 }))
 vi.mock('@/components/SessionScoring/ThresholdSlider', () => ({ ThresholdSlider: () => null }))
 vi.mock('@/components/SessionScoring/TopFlaggedTable', () => ({ TopFlaggedTable: () => null }))
-vi.mock('@/components/SessionScoring/MatrixVersionsCard', () => ({
-  MatrixVersionsCard: () => null,
-  AuditLogTab: () => null,
-}))
-vi.mock('@/components/SessionScoring/ExcludeRegexCard', () => ({ ExcludeRegexCard: () => null }))
-vi.mock('@/components/SessionScoring/RetrainButton', () => ({
-  RetrainButton: () => null,
-  RotateKeyButton: () => null,
-}))
 
 const API_BASE = getApiBase()
 

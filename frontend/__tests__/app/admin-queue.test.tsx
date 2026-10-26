@@ -16,8 +16,8 @@ vi.mock('@/lib/api', async (importOriginal) => ({
   },
 }))
 
-vi.mock('@/hooks/useAdminEventStream', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('@/hooks/useAdminEventStream')>()),
+vi.mock('@/hooks/useSSE', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/hooks/useSSE')>()),
   useAdminEventStream: () => ({ state: 'open' as const }),
 }))
 

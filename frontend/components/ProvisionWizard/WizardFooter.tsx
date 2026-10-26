@@ -12,7 +12,7 @@ import { CheckCircle2, ChevronLeft, Loader2, Plus, RotateCcw } from "lucide-reac
 import { ELAPSED_RELATIVE_AGO, formatElapsed } from "@/lib/format";
 import { cn, panelDialogFooter } from "@/lib/utils";
 import type { WizardState } from "./useWizardState";
-import { getStepsForMode, type Step, type WizardDraft } from "./types";
+import { getStepsForMode, type Step, type WizardDraft } from "./ProvisionWizard";
 
 // ─── ResumeBanner ───────────────────────────────────────────────────────────
 

@@ -50,7 +50,7 @@ import {
   buildDotFeatures,
 } from '@/components/Map/ShieldingMap'
 import { rafThrottle, ChoroplethMap, MapPrewarm, useMapResize } from '@/components/Map/ChoroplethMap'
-import { ImpossibleDistanceModal } from '@/components/Insights/ImpossibleDistanceModal'
+import { ImpossibleDistanceModal } from '@/components/Insights/InsightDetailModal'
 import { InsightHelpModal } from '@/components/Insights/InsightHelpModal'
 
 // ── Helper unit tests ─────────────────────────────────────────────────────────

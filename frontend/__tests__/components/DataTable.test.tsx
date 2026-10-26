@@ -30,7 +30,7 @@ import { server } from '@/__tests__/helpers/msw/handlers'
 import { getApiBase } from '@/lib/api'
 import { useServiceStore } from '@/stores/filterStore'
 import { SchemaTab } from '@/app/logs/_sections/LogsClient'
-import { BotSourcesPanel } from '@/app/admin/_sections/BotSourcesPanel'
+import { BotSourcesPanel } from '@/app/control-room/_sections/ControlRoomClient'
 import type { components } from '@/types/api.generated'
 import type { CellContext, ColumnDef } from '@tanstack/react-table'
 

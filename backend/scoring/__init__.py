@@ -19,15 +19,20 @@ from __future__ import annotations
 
 import sys as _sys
 
-from backend.scoring import evaluate, features
+from backend.scoring import features
 
 normalize = features
 scorer = features
 labels = features
 fixtures = features
-matrix = evaluate
+evaluate = features
+matrix = features
 _sys.modules.setdefault("backend.scoring.normalize", features)
 _sys.modules.setdefault("backend.scoring.scorer", features)
 _sys.modules.setdefault("backend.scoring.labels", features)
 _sys.modules.setdefault("backend.scoring.fixtures", features)
-_sys.modules.setdefault("backend.scoring.matrix", evaluate)
+_sys.modules.setdefault("backend.scoring.evaluate", features)
+_sys.modules.setdefault("backend.scoring.matrix", features)
+if "backend" in _sys.modules and hasattr(_sys.modules["backend"], "_MODULE_ALIASES"):
+    _sys.modules["backend"]._MODULE_ALIASES["backend.scoring.evaluate"] = "backend.scoring.features"
+    _sys.modules["backend"]._MODULE_ALIASES["backend.scoring.matrix"] = "backend.scoring.features"

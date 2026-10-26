@@ -33,33 +33,25 @@ logger = logging.getLogger(__name__)
 
 # ── SQL templates (folded from backend/repositories/_sql/performance.py) ────
 
-TOP_URLS = f"""
-    SELECT url,
+
+def _top_latency_sql(col: str, min_reqs: int) -> str:
+    return f"""
+    SELECT {col},
            count(*) AS reqs,
            AVG(CAST(elapsed AS DOUBLE)) / 1000.0 as avg,
            {percentile_ms_expr("CAST(elapsed AS DOUBLE)", 0.5, approx=True)} as p50,
            {percentile_ms_expr("CAST(elapsed AS DOUBLE)", 0.95, approx=True)} as p95,
            {percentile_ms_expr("CAST(elapsed AS DOUBLE)", 0.99, approx=True)} as p99
     FROM {{temp_table}}
-    WHERE url IS NOT NULL AND elapsed IS NOT NULL
-    GROUP BY url
-    HAVING count(*) > 5
+    WHERE {col} IS NOT NULL AND elapsed IS NOT NULL
+    GROUP BY {col}
+    HAVING count(*) > {min_reqs}
     ORDER BY {{sort_idx}} DESC LIMIT 20
 """
 
-TOP_ASNS = f"""
-    SELECT asn,
-           count(*) AS reqs,
-           AVG(CAST(elapsed AS DOUBLE)) / 1000.0 as avg,
-           {percentile_ms_expr("CAST(elapsed AS DOUBLE)", 0.5, approx=True)} as p50,
-           {percentile_ms_expr("CAST(elapsed AS DOUBLE)", 0.95, approx=True)} as p95,
-           {percentile_ms_expr("CAST(elapsed AS DOUBLE)", 0.99, approx=True)} as p99
-    FROM {{temp_table}}
-    WHERE asn IS NOT NULL AND elapsed IS NOT NULL
-    GROUP BY asn
-    HAVING count(*) > 10
-    ORDER BY {{sort_idx}} DESC LIMIT 20
-"""
+
+TOP_URLS = _top_latency_sql("url", 5)
+TOP_ASNS = _top_latency_sql("asn", 10)
 
 TTL_DIST = """
     SELECT
@@ -175,6 +167,19 @@ def _perf_memo_key(
     return digest_cache_key(payload, src)
 
 
+def _active_perf_memo_key(
+    src: dict,
+    start_time: str | None,
+    end_time: str | None,
+    filters: FiltersDict | None,
+    sort_by: str = "p99",
+    sections: set[str] | None = None,
+) -> str | None:
+    if _PERF_CACHE_TTL <= 0 or start_time is None or end_time is None:
+        return None
+    return _perf_memo_key(src, start_time, end_time, filters, sort_by, sections)
+
+
 def peek_performance_aggregates(
     src: dict,
     start_time: str | None,
@@ -184,10 +189,8 @@ def peek_performance_aggregates(
     sections: set[str] | None = None,
 ) -> dict | None:
     """Return a cached performance aggregates response without acquiring a DuckDB connection."""
-    if _PERF_CACHE_TTL <= 0 or start_time is None or end_time is None:
-        return None
-    key = _perf_memo_key(src, start_time, end_time, filters, sort_by, sections)
-    cached = _memo.get_with_telemetry(key)
+    key = _active_perf_memo_key(src, start_time, end_time, filters, sort_by, sections)
+    cached = _memo.get_with_telemetry(key) if key is not None else None
     return dict(cached) if cached is not None else None
 
 
@@ -197,6 +200,13 @@ def peek_performance_aggregates(
 # ``timestamp`` — the window predicate is applied at temp-creation time and no
 # performance section SELECTs timestamp from the temp.
 _PERF_TEMP_COL_ORDER = ("url", "asn", "ttfb", "elapsed", "cache", "ttl", "ottfb", "ottlb")
+_PERF_SECTION_DEFAULTS: dict[str, Any] = {
+    "top_urls": [],
+    "top_asns": [],
+    "ttl_dist": [],
+    "scatter": [],
+    "waterfall": {},
+}
 
 
 def get_performance_aggregates(
@@ -208,9 +218,8 @@ def get_performance_aggregates(
     sort_by: str = "p99",
     sections: set[str] | None = None,
 ) -> dict:
-    cache_key: str | None = None
-    if _PERF_CACHE_TTL > 0 and start_time is not None and end_time is not None:
-        cache_key = _perf_memo_key(src, start_time, end_time, filters, sort_by, sections)
+    cache_key = _active_perf_memo_key(src, start_time, end_time, filters, sort_by, sections)
+    if cache_key is not None:
         cached = _memo.get_with_telemetry(cache_key)
         if cached is not None:
             return dict(cached)
@@ -255,11 +264,7 @@ def _compute_performance_aggregates(
     timer.mark("get_schema_cols", _t, activity="overhead", current_execution=True)
     if not actual_cols:
         return {
-            "top_urls": [],
-            "top_asns": [],
-            "ttl_dist": [],
-            "scatter": [],
-            "waterfall": {},
+            **{k: ([] if isinstance(v, list) else {}) for k, v in _PERF_SECTION_DEFAULTS.items()},
             "section_timings": section_timings,
             **runner.telemetry(),
         }
@@ -269,15 +274,7 @@ def _compute_performance_aggregates(
     timer.mark("build_where_clause", _t, activity="overhead", current_execution=True)
 
     results = {**runner.telemetry()}
-
-    sort_idx_map = {"avg": 3, "p50": 4, "p95": 5, "p99": 6}
-    sort_idx = sort_idx_map.get(sort_by, 6)
-
-    _want_top_urls = _want("top_urls")
-    _want_top_asns = _want("top_asns")
-    _want_ttl = _want("ttl_dist")
-    _want_waterfall = _want("waterfall")
-    _want_scatter = _want("scatter")
+    sort_idx = {"avg": 3, "p50": 4, "p95": 5, "p99": 6}.get(sort_by, 6)
 
     def _resolve_asns(asn_res: list) -> list[dict]:
         """Attach ASN labels to the (asn, reqs, avg, p50, p95, p99) tuples
@@ -313,105 +310,100 @@ def _compute_performance_aggregates(
         live_sections.add(section)
         needed_cols.update(c for c in cols if c in actual_cols)
 
-    # 1. Top URLs by Latency — perf_latency rollup (unfiltered, >= 48 h);
-    # per-URL elapsed percentiles request-weight-averaged across hours + re-
-    # ranked by sort_by. Live fallback reads {url, elapsed} from the temp.
-    _t = _time.perf_counter()
-    if _want_top_urls and "url" in actual_cols and "elapsed" in actual_cols:
-        rolled = runner.try_perf_latency_from_rollup(
-            start_time,
-            end_time,
-            dimension="url",
-            sort_by=sort_by,
-            has_filters=bool(filters),
-            min_requests=5,
-            limit=20,
-        )
+    def _try_rollup_section(
+        sec: str,
+        req_cols: set[str],
+        rollup_mark: str,
+        skip_mark: str,
+        fetch_fn: Callable[[], Any],
+        apply_fn: Callable[[Any], None],
+    ) -> None:
+        t0 = _time.perf_counter()
+        if not _want(sec):
+            return
+        if not all(c in actual_cols for c in req_cols):
+            results[sec] = []
+            timer.mark(skip_mark, t0, activity="skipped", current_execution=True)
+            return
+        rolled = fetch_fn()
         timer.mark(
-            "top_urls_query_rollup",
-            _t,
+            rollup_mark,
+            t0,
             source="rollup",
             activity="compute" if rolled is not None else "overhead",
             current_execution=True,
             outcome="served" if rolled is not None else "fallback",
         )
         if rolled is not None:
-            results["top_urls"] = [
-                {
-                    "url": r["value"],
-                    "requests": r["requests"],
-                    "avg": r["avg_ms"],
-                    "p50": r["p50_ms"],
-                    "p95": r["p95_ms"],
-                    "p99": r["p99_ms"],
-                }
-                for r in rolled["rows"]
-            ]
-            results["approx"] = True
+            apply_fn(rolled)
         else:
-            _need("top_urls", {"url", "elapsed"})
-    elif _want_top_urls:
-        results["top_urls"] = []
-        timer.mark("top_urls_query", _t, activity="skipped", current_execution=True)
+            _need(sec, req_cols)
 
-    # 3. Top ASNs by Latency — same rollup; live fallback reads {asn, elapsed}.
-    _t = _time.perf_counter()
-    if _want_top_asns and "asn" in actual_cols and "elapsed" in actual_cols:
-        rolled = runner.try_perf_latency_from_rollup(
-            start_time,
-            end_time,
-            dimension="asn",
-            sort_by=sort_by,
-            has_filters=bool(filters),
-            min_requests=10,
-            limit=20,
+    # 1. Top URLs + 3. Top ASNs by Latency — perf_latency rollup (unfiltered, >= 48 h);
+    # per-dim elapsed percentiles request-weight-averaged across hours + re-ranked by sort_by.
+    def _apply_top_urls(rolled: dict[str, Any]) -> None:
+        results["top_urls"] = [
+            {
+                "url": r["value"],
+                "requests": r["requests"],
+                "avg": r["avg_ms"],
+                "p50": r["p50_ms"],
+                "p95": r["p95_ms"],
+                "p99": r["p99_ms"],
+            }
+            for r in rolled["rows"]
+        ]
+        results["approx"] = True
+
+    def _apply_top_asns(rolled: dict[str, Any]) -> None:
+        results["approx"] = True
+        results["top_asns"] = _resolve_asns(
+            [(r["value"], r["requests"], r["avg_ms"], r["p50_ms"], r["p95_ms"], r["p99_ms"]) for r in rolled["rows"]]
         )
-        timer.mark(
-            "top_asns_query_rollup",
-            _t,
-            source="rollup",
-            activity="compute" if rolled is not None else "overhead",
-            current_execution=True,
-            outcome="served" if rolled is not None else "fallback",
+
+    for sec, dim, min_reqs, apply_fn in (
+        ("top_urls", "url", 5, _apply_top_urls),
+        ("top_asns", "asn", 10, _apply_top_asns),
+    ):
+
+        def _fetch_perf_rollup(_dim: str = dim, _min: int = min_reqs) -> Any:
+            return runner.try_perf_latency_from_rollup(
+                start_time,
+                end_time,
+                dimension=_dim,
+                sort_by=sort_by,
+                has_filters=bool(filters),
+                min_requests=_min,
+                limit=20,
+            )
+
+        _try_rollup_section(
+            sec,
+            {dim, "elapsed"},
+            f"{sec}_query_rollup",
+            f"{sec}_query",
+            _fetch_perf_rollup,
+            apply_fn,
         )
-        if rolled is not None:
-            asn_res = [
-                (r["value"], r["requests"], r["avg_ms"], r["p50_ms"], r["p95_ms"], r["p99_ms"]) for r in rolled["rows"]
-            ]
-            results["approx"] = True
-            results["top_asns"] = _resolve_asns(asn_res)
-        else:
-            _need("top_asns", {"asn", "elapsed"})
-    elif _want_top_asns:
-        results["top_asns"] = []
-        timer.mark("top_asns_query", _t, activity="skipped", current_execution=True)
 
     # 5. Cache TTL Distribution — EXACT histogram rollup (COUNT sums, MIN-of-MIN
     # composes; no _approx). Live fallback reads {ttl} from the temp.
-    _t = _time.perf_counter()
-    if _want_ttl and "ttl" in actual_cols:
-        rolled_ttl = runner.try_perf_ttl_dist_from_rollup(start_time, end_time, has_filters=bool(filters))
-        timer.mark(
-            "ttl_dist_rollup",
-            _t,
-            source="rollup",
-            activity="compute" if rolled_ttl is not None else "overhead",
-            current_execution=True,
-            outcome="served" if rolled_ttl is not None else "fallback",
-        )
-        if rolled_ttl is not None:
-            results["ttl_dist"] = rolled_ttl
-        else:
-            _need("ttl_dist", {"ttl"})
-    elif _want_ttl:
-        results["ttl_dist"] = []
-        timer.mark("ttl_dist_query", _t, activity="skipped", current_execution=True)
+    _try_rollup_section(
+        "ttl_dist",
+        {"ttl"},
+        "ttl_dist_rollup",
+        "ttl_dist_query",
+        lambda: runner.try_perf_ttl_dist_from_rollup(start_time, end_time, has_filters=bool(filters)),
+        lambda rolled_ttl: results.__setitem__("ttl_dist", rolled_ttl),
+    )
 
     # 6 + 7. Scatter + waterfall: always live. Scatter is a uniform 300-row
     # SAMPLE (not aggregatable) and waterfall is auto-paired with it
     # (_WATERFALL_SCATTER_PAIR). When top_urls/top_asns/ttl_dist are all
     # served from rollups (or not requested), skip materializing a full-window
     # temp table and query the base logs relation directly with partition_pruning.
+    _want_scatter = _want("scatter")
+    _want_waterfall = _want("waterfall")
     _want_scatter_waterfall = _want_scatter or _want_waterfall
     if _want_scatter_waterfall and "ttfb" in actual_cols and "elapsed" in actual_cols:
         if live_sections:
@@ -439,8 +431,7 @@ def _compute_performance_aggregates(
     try:
         if "top_urls" in live_sections and temp_table:
             _t = _time.perf_counter()
-            url_q = SQL.TOP_URLS.format(temp_table=temp_table, sort_idx=sort_idx)
-            url_res = runner.execute(url_q).fetchall()
+            url_res = runner.execute(SQL.TOP_URLS.format(temp_table=temp_table, sort_idx=sort_idx)).fetchall()
             results["top_urls"] = [
                 {"url": r[0], "requests": r[1], "avg": r[2], "p50": r[3], "p95": r[4], "p99": r[5]} for r in url_res
             ]
@@ -448,15 +439,13 @@ def _compute_performance_aggregates(
 
         if "top_asns" in live_sections and temp_table:
             _t = _time.perf_counter()
-            asn_q = SQL.TOP_ASNS.format(temp_table=temp_table, sort_idx=sort_idx)
-            asn_res = runner.execute(asn_q).fetchall()
+            asn_res = runner.execute(SQL.TOP_ASNS.format(temp_table=temp_table, sort_idx=sort_idx)).fetchall()
             timer.mark("top_asns_query", _t, source="live", activity="compute", current_execution=True)
             results["top_asns"] = _resolve_asns(asn_res)
 
         if "ttl_dist" in live_sections and temp_table:
             _t = _time.perf_counter()
-            ttl_q = SQL.TTL_DIST.format(temp_table=temp_table)
-            ttl_res = runner.execute(ttl_q).fetchall()
+            ttl_res = runner.execute(SQL.TTL_DIST.format(temp_table=temp_table)).fetchall()
             results["ttl_dist"] = [{"bucket": r[0], "count": r[1]} for r in ttl_res]
             timer.mark("ttl_dist_query", _t, source="live", activity="compute", current_execution=True)
 
@@ -466,9 +455,7 @@ def _compute_performance_aggregates(
             # is None and we query the base logs relation directly with partition_pruning.
             _t = _time.perf_counter()
             if temp_table:
-                source_rel = temp_table
-                comp_where = "WHERE ttfb IS NOT NULL AND elapsed IS NOT NULL"
-                q_params = None
+                source_rel, comp_where, q_params = temp_table, "WHERE ttfb IS NOT NULL AND elapsed IS NOT NULL", None
             else:
                 source_rel = f'"{table_name}"'
                 comp_where = (
@@ -514,16 +501,9 @@ def _compute_performance_aggregates(
     # Backstop: any requested section left unpopulated (temp-create failure, or
     # a live section whose required column was absent) gets its empty default so
     # the response shape stays stable regardless of which path served it.
-    if _want_top_urls and "top_urls" not in results:
-        results["top_urls"] = []
-    if _want_top_asns and "top_asns" not in results:
-        results["top_asns"] = []
-    if _want_ttl and "ttl_dist" not in results:
-        results["ttl_dist"] = []
-    if _want_scatter and "scatter" not in results:
-        results["scatter"] = []
-    if _want_waterfall and "waterfall" not in results:
-        results["waterfall"] = {}
+    for sec, default in _PERF_SECTION_DEFAULTS.items():
+        if _want(sec) and sec not in results:
+            results[sec] = [] if isinstance(default, list) else {}
 
     results.update(runner.telemetry())
     results["section_timings"] = section_timings

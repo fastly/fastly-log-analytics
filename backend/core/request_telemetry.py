@@ -1135,6 +1135,58 @@ class RequestMetricsObserver:
 
 observer = RequestMetricsObserver()
 
+from backend.utils.telemetry import (  # noqa: E402, F401
+    _BANDS,
+    _FIXED_TOKEN_DELTAS,
+    _FOLDED_TELEMETRY_SUBMODULES,
+    _JSON_CONTENT_TYPES,
+    _MIN_SALT_LEN,
+    _MISSING,
+    _STREAMING_CONTENT_TYPES,
+    _UVICORN_LOGGERS,
+    ABS_PATH_RE,
+    ANCHOR_QUANTUM_SECONDS,
+    CID_SALT_LITERAL_RE,
+    REDACTED,
+    STATIC_DEFAULT,
+    VALID_RANGE_TOKENS,
+    BoundedCache,
+    BoundedTTLCache,
+    CacheRegistry,
+    TelemetryResponseBodyMiddleware,
+    _ActiveRequestsResetAdapter,
+    _add_otel_trace_context,
+    _content_type,
+    _drop_uvicorn_color_message,
+    _is_json_response,
+    _is_streaming_content_type,
+    _known_salts,
+    _pick_auto_token,
+    _reconstruct,
+    _reset_for_tests,
+    _salts_lock,
+    active_request_count,
+    atomic_temp_path,
+    atomic_write_bytes,
+    atomic_write_json,
+    audit_log,
+    bridge_uvicorn_loggers,
+    configure_structlog,
+    decrement_active_requests,
+    effective_format,
+    history_hours_from_earliest,
+    increment_active_requests,
+    invite_clamp_fingerprint,
+    is_valid_range_token,
+    pick_insights_default,
+    quantize_anchor,
+    redact_error_text,
+    register_salt,
+    resolve_window,
+    scrub_secrets,
+    should_defer_cron,
+    yield_to_api,
+)
 
 _this_module = sys.modules[__name__]
 sys.modules["backend.core.high_scale_sections"] = _this_module
@@ -1155,5 +1207,9 @@ if _backend_pkg is not None:
                 "backend.core.query_attribution": "backend.core.request_telemetry",
                 "backend.core.request_metrics": "backend.core.request_telemetry",
                 "backend.request_metrics_observer": "backend.core.request_telemetry",
+                **{
+                    f"backend.utils.{_submod_name}": "backend.utils.telemetry"
+                    for _submod_name in _FOLDED_TELEMETRY_SUBMODULES
+                },
             }
         )

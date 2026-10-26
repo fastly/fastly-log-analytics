@@ -25,15 +25,12 @@ vi.mock('@/hooks/useSSE', async (importOriginal) => ({
     full: (d: string) => `FULL(${d})`,
     abbr: () => 'TZ',
   }),
+  cronCacheBust: vi.fn(),
 }))
 
 vi.mock('@/lib/utils', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/utils')>()),
   showToast: showToastMock,
-}))
-vi.mock('@/lib/admin-stream-apply', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('@/lib/admin-stream-apply')>()),
-  cronCacheBust: vi.fn(),
 }))
 
 vi.mock('@/stores/filterStore', async () => (await import('../helpers/page-smoke')).serviceStoreModuleMock())
@@ -100,12 +97,6 @@ vi.mock('@/app/logs/_state', () => ({
   })),
 }))
 
-vi.mock('@/app/logs/_sections/CronColumns', () => ({ useCronColumns: () => [] }))
-vi.mock('@/app/logs/_sections/AuditColumns', () => ({ useAuditColumns: () => [] }))
-vi.mock('@/app/logs/_sections/FloatingOperationsDock', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('@/app/logs/_sections/FloatingOperationsDock')>()),
-  FloatingOperationsDock: () => null,
-}))
 vi.mock('@/app/logs/_sections/CronTab', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/app/logs/_sections/CronTab')>()),
   CronTab: () => <div data-testid="cron-tab" />,
@@ -126,9 +117,8 @@ vi.mock('@/components/ReportLayout', async (importOriginal) => ({
   NoServiceSelected: () => null,
 }))
 
-import { CronLiveLog } from '@/app/logs/_sections/FloatingOperationsDock'
 import { LogSyncSection } from '@/components/CronSettingsModal/Schedule'
-import LogsClient, { QuickActionsBar } from '@/app/logs/_sections/LogsClient'
+import LogsClient, { CronLiveLog, QuickActionsBar } from '@/app/logs/_sections/LogsClient'
 import { CRON_EXPLANATIONS, CRON_DISPLAY_NAMES, CRON_GROUPS } from '@/app/logs/_sections/CronTab'
 
 let errorSpy: ReturnType<typeof spyOnConsoleError>

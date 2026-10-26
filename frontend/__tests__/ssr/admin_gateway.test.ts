@@ -23,7 +23,7 @@ afterEach(() => {
 describe('certificate gateway SSR trust', () => {
   it('forwards authenticated admin traffic on a non-loopback hostname', async () => {
     inbound({ host: 'admin.example.com', 'x-admin-gateway-token': secret })
-    const { ssrUpstreamGet } = await import('@/lib/ssr/_transport')
+    const { ssrUpstreamGet } = await import('@/lib/api')
     await withTestHttpServer(
       (_req, res) => {
         res.end(JSON.stringify(upstreamBody))
@@ -40,7 +40,7 @@ describe('certificate gateway SSR trust', () => {
 
   it('rejects a forged credential even with a localhost Host', async () => {
     inbound({ host: 'localhost:3000', 'x-admin-gateway-token': 'forged' })
-    const { ssrUpstreamGet } = await import('@/lib/ssr/_transport')
+    const { ssrUpstreamGet } = await import('@/lib/api')
     await withTestHttpServer(
       (_req, res) => {
         res.end(JSON.stringify(upstreamBody))
@@ -54,7 +54,7 @@ describe('certificate gateway SSR trust', () => {
 
   it('does not prefetch admin data for a cross-site browser request', async () => {
     inbound({ host: 'admin.example.com', 'x-admin-gateway-token': secret, 'sec-fetch-site': 'cross-site' })
-    const { ssrUpstreamGet } = await import('@/lib/ssr/_transport')
+    const { ssrUpstreamGet } = await import('@/lib/api')
     await withTestHttpServer(
       (_req, res) => {
         res.end(JSON.stringify(upstreamBody))
@@ -68,7 +68,7 @@ describe('certificate gateway SSR trust', () => {
 
   it('disables the old localhost admin shortcut in required mode', async () => {
     inbound({ host: 'localhost:3000' })
-    const { ssrUpstreamGet } = await import('@/lib/ssr/_transport')
+    const { ssrUpstreamGet } = await import('@/lib/api')
     await withTestHttpServer(
       (_req, res) => {
         res.end(JSON.stringify(upstreamBody))
@@ -82,7 +82,7 @@ describe('certificate gateway SSR trust', () => {
 
   it('keeps public ingress traffic on the analyst path', async () => {
     inbound({ host: 'analyst.example.com', 'x-proxied-by-caddy': '1' })
-    const { ssrUpstreamGet } = await import('@/lib/ssr/_transport')
+    const { ssrUpstreamGet } = await import('@/lib/api')
     await withTestHttpServer(
       (_req, res) => {
         res.end(JSON.stringify(upstreamBody))
@@ -98,7 +98,7 @@ describe('certificate gateway SSR trust', () => {
 
   it('never promotes a public marked request even if it carries a gateway token', async () => {
     inbound({ host: 'analyst.example.com', 'x-proxied-by-caddy': '1', 'x-admin-gateway-token': secret })
-    const { ssrUpstreamGet } = await import('@/lib/ssr/_transport')
+    const { ssrUpstreamGet } = await import('@/lib/api')
     await withTestHttpServer(
       (_req, res) => {
         res.end(JSON.stringify(upstreamBody))
@@ -112,7 +112,7 @@ describe('certificate gateway SSR trust', () => {
 
   it('does not let caller-supplied extraHeaders forge a gateway credential', async () => {
     inbound({ host: 'analyst.example.com', 'x-proxied-by-caddy': '1' })
-    const { ssrUpstreamGet } = await import('@/lib/ssr/_transport')
+    const { ssrUpstreamGet } = await import('@/lib/api')
     await withTestHttpServer(
       (_req, res) => {
         res.end(JSON.stringify(upstreamBody))
@@ -462,7 +462,7 @@ describe('ssrUpstreamGet — debug-responses cookie propagation', () => {
         res.end('{}')
       },
       async (srv) => {
-        const { ssrUpstreamGet } = await import('@/lib/ssr/_transport')
+        const { ssrUpstreamGet } = await import('@/lib/api')
         const out = await ssrUpstreamGet({ path: '/api/bootstrap', logPrefix: 'test' })
         expect(out).not.toBeNull()
         expect(srv.lastRequest?.headers['x-debug-responses']).toBe('1')
@@ -480,7 +480,7 @@ describe('ssrUpstreamGet — debug-responses cookie propagation', () => {
         res.end('{}')
       },
       async (srv) => {
-        const { ssrUpstreamGet } = await import('@/lib/ssr/_transport')
+        const { ssrUpstreamGet } = await import('@/lib/api')
         const out = await ssrUpstreamGet({ path: '/api/bootstrap', logPrefix: 'test' })
         expect(out).not.toBeNull()
         expect(srv.lastRequest?.headers['x-debug-responses']).toBeUndefined()
@@ -498,7 +498,7 @@ describe('ssrUpstreamGet — debug-responses cookie propagation', () => {
         res.end('{}')
       },
       async (srv) => {
-        const { ssrUpstreamGet } = await import('@/lib/ssr/_transport')
+        const { ssrUpstreamGet } = await import('@/lib/api')
         const out = await ssrUpstreamGet({ path: '/api/bootstrap', logPrefix: 'test' })
         expect(out).not.toBeNull()
         expect(srv.lastRequest?.headers['x-debug-responses']).toBeUndefined()
@@ -516,7 +516,7 @@ describe('ssrUpstreamGet — debug-responses cookie propagation', () => {
         res.end('{}')
       },
       async (srv) => {
-        const { ssrUpstreamGet } = await import('@/lib/ssr/_transport')
+        const { ssrUpstreamGet } = await import('@/lib/api')
         const out = await ssrUpstreamGet({ path: '/api/bootstrap', logPrefix: 'test' })
         expect(out).not.toBeNull()
         expect(srv.lastRequest?.headers['x-debug-responses']).toBeUndefined()
@@ -543,7 +543,7 @@ describe('ssrUpstreamGet — debug-responses cookie propagation', () => {
         res.end('{"recovered":true}')
       },
       async () => {
-        const { ssrUpstreamGet } = await import('@/lib/ssr/_transport')
+        const { ssrUpstreamGet } = await import('@/lib/api')
         const out = await ssrUpstreamGet({ path: '/api/bootstrap', logPrefix: 'test' })
         expect(out).not.toBeNull()
         expect(out?.statusCode).toBe(200)

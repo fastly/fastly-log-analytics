@@ -5,7 +5,7 @@ import Loading from '@/app/admin/usage-log/loading'
 import UsagePage from '@/app/usage/page'
 import SessionsPage from '@/app/sessions/page'
 import StreamingClient from '@/app/streaming/_sections/StreamingClient'
-import { DEFAULTS, reducer, calculate, type PrefillResponse } from '@/components/CostCalculator/calc'
+import { DEFAULTS, reducer, calculate, type PrefillResponse } from '@/components/CostCalculator/CostCalculator'
 import { createTestQueryClient, renderWithQuery } from '../helpers/page-smoke'
 import React from 'react'
 import { spyOnConsoleError } from '../helpers/page-smoke'
@@ -48,7 +48,8 @@ vi.mock('@/lib/api', async (importOriginal) => ({
 }))
 
 vi.mock('@/components/PlotlyChart', async () => (await import('../helpers/page-smoke')).plotlyChartModuleMock())
-vi.mock('@/components/CostCalculator/CostCalculator', () => ({
+vi.mock('@/components/CostCalculator/CostCalculator', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/components/CostCalculator/CostCalculator')>()),
   CostCalculator: () => <div data-testid="cost-calculator" />,
 }))
 let useMockDataTable = true

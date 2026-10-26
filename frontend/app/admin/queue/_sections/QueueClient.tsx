@@ -10,13 +10,12 @@ import { DataTableReadonly } from '@/components/DataTable'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
-import { Sparkline } from '@/components/Sparkline'
+import { Sparkline } from '@/app/dashboard/_sections/DashboardClient'
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
 import type { components } from '@/types/api.generated'
-
-import { useAdminEventStream } from '@/hooks/useAdminEventStream'
+import { useAdminEventStream } from '@/hooks/useSSE'
 import { queryKeys } from '@/lib/query-keys'
-import { QuarantineSection } from '@/app/admin/_sections/QuarantineSection'
+import { QuarantineSection } from '@/app/control-room/_sections/ControlRoomClient'
 
 type TrendBatch = components['schemas']['MetricHistoryBatchResponse']
 type ActiveTask = components['schemas']['CeleryActiveTask']
@@ -26,8 +25,10 @@ type LedgerEntry = components['schemas']['IngestLedgerEntry']
 type QueueDepth = [name: string, count: number]
 type LedgerStatusFilter = 'problem' | 'all' | 'dead_letter' | 'quarantined' | 'discovered' | 'claimed' | 'committed'
 
-function formatBytes(bytes: number | null | undefined): string | null {
-  if (bytes === null || bytes === undefined || bytes <= 0) return null
+const VALID_LEDGER_STATUSES = ['discovered', 'claimed', 'committed', 'quarantined', 'dead_letter'] as const
+
+function formatLedgerBytes(bytes: number | null | undefined): string | null {
+  if (bytes == null || bytes <= 0) return null
   if (bytes < 1024) return `${bytes} B`
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`
@@ -41,14 +42,7 @@ function makeCol<T>(
   render: (row: T) => React.ReactNode,
   enableSorting = true,
 ): ColumnDef<T> {
-  return {
-    id,
-    header,
-    size,
-    accessorFn,
-    enableSorting,
-    cell: ({ row }) => render(row.original),
-  }
+  return { id, header, size, accessorFn, enableSorting, cell: ({ row }) => render(row.original) }
 }
 
 const QUEUE_COLUMNS: ColumnDef<QueueDepth>[] = [
@@ -67,9 +61,7 @@ const INPROCESS_SCHEDULE_COLUMNS: ColumnDef<InProcessScheduleEntry>[] = [
   makeCol('name', 'Job ID', 320, (s) => s.name, (s) => <span className="font-mono text-xs font-medium">{s.name}</span>),
   makeCol('trigger', 'Trigger / Cadence', 280, (s) => s.trigger, (s) => <span className="font-mono text-xs text-muted-foreground">{s.trigger}</span>),
   makeCol('next_run_at', 'Next Scheduled Run', 240, (s) => s.next_run_at ?? 0, (s) => (
-    <span className="text-xs tabular-nums">
-      {s.next_run_at ? formatLocalDateTime(s.next_run_at * 1000) : '—'}
-    </span>
+    <span className="text-xs tabular-nums">{s.next_run_at ? formatLocalDateTime(s.next_run_at * 1000) : '—'}</span>
   )),
 ]
 
@@ -78,54 +70,30 @@ const INPROCESS_ACTIVE_COLUMNS: ColumnDef<InProcessActiveRun>[] = [
   makeCol('task', 'Task', 260, (r) => r.task ?? '—', (r) => <span className="font-mono text-xs font-medium">{r.task ?? '—'}</span>, false),
   makeCol('service_id', 'Service ID', 260, (r) => r.service_id ?? 'global', (r) => <span className="font-mono text-xs text-muted-foreground">{r.service_id ?? 'global'}</span>, false),
   makeCol('started_at', 'Started At', 220, (r) => r.started_at ?? 0, (r) => (
-    <span className="text-xs tabular-nums">
-      {r.started_at ? formatLocalDateTime(r.started_at * 1000) : '—'}
-    </span>
+    <span className="text-xs tabular-nums">{r.started_at ? formatLocalDateTime(r.started_at * 1000) : '—'}</span>
   ), false),
 ]
 
 function SummaryStatTile({
-  label,
-  value,
-  sublabel,
-  valueClassName = '',
+  label, value, sublabel, valueClassName = '',
 }: {
-  label: string
-  value: React.ReactNode
-  sublabel: React.ReactNode
-  valueClassName?: string
+  label: string; value: React.ReactNode; sublabel: React.ReactNode; valueClassName?: string
 }) {
   return (
     <div className="rounded-lg border border-border/60 bg-muted/20 p-2.5">
       <div className="text-xs text-muted-foreground uppercase">{label}</div>
-      <div className={`text-2xl font-semibold tabular-nums mt-0.5 ${valueClassName}`}>
-        {value}
-      </div>
+      <div className={`text-2xl font-semibold tabular-nums mt-0.5 ${valueClassName}`}>{value}</div>
       <div className="text-[11px] text-muted-foreground mt-0.5 truncate">{sublabel}</div>
     </div>
   )
 }
 
 function TrendSparklineCard({
-  title,
-  description,
-  label,
-  latestValue,
-  points,
-  isLoading,
-  trendsLoading,
-  isTrendsRefetching,
-  trendsError,
+  title, description, label, latestValue, points, isLoading, trendsLoading, isTrendsRefetching, trendsError,
 }: {
-  title: string
-  description: string
-  label: string
-  latestValue: number | null
-  points: React.ComponentProps<typeof Sparkline>['points']
-  isLoading: boolean
-  trendsLoading: boolean
-  isTrendsRefetching: boolean
-  trendsError: unknown
+  title: string; description: string; label: string; latestValue: number | null
+  points: React.ComponentProps<typeof Sparkline>['points']; isLoading: boolean
+  trendsLoading: boolean; isTrendsRefetching: boolean; trendsError: unknown
 }) {
   return (
     <AnalyticsCard
@@ -139,20 +107,13 @@ function TrendSparklineCard({
       isEmpty={!isLoading && !trendsLoading && !trendsError && points.length === 0}
     >
       <div className="flex items-baseline justify-between mb-1">
-        <div className="text-2xl font-semibold tabular-nums">
-          {latestValue === null ? '–' : latestValue}
-        </div>
+        <div className="text-2xl font-semibold tabular-nums">{latestValue === null ? '–' : latestValue}</div>
         <div className="text-xs text-muted-foreground">
           {points.length > 0 ? `${points.length} samples` : 'no samples yet'}
         </div>
       </div>
       <div className="h-[64px] text-foreground/70">
-        <Sparkline
-          points={isLoading ? [] : points}
-          height={64}
-          label={label}
-          formatValue={(v) => String(v)}
-        />
+        <Sparkline points={isLoading ? [] : points} height={64} label={label} formatValue={(v) => String(v)} />
       </div>
     </AnalyticsCard>
   )
@@ -163,25 +124,11 @@ export function QueueClient() {
   const { state: sseConnected } = useAdminEventStream(true, ['celery-status'])
   const [ledgerFilter, setLedgerFilter] = React.useState<LedgerStatusFilter>('problem')
   const [actionBusyKey, setActionBusyKey] = React.useState<string | null>(null)
-  const [actionNotice, setActionNotice] = React.useState<{
-    kind: 'success' | 'error'
-    message: string
-  } | null>(null)
+  const [actionNotice, setActionNotice] = React.useState<{ kind: 'success' | 'error'; message: string } | null>(null)
 
-  const {
-    data,
-    isLoading,
-    isFetching,
-    isFetched,
-    error,
-    refetch,
-  } = useQuery({
+  const { data, isLoading, isFetching, isFetched, error, refetch } = useQuery({
     queryKey: queryKeys.admin.celeryStatus(),
-    queryFn: async ({ signal }) => {
-      return unwrapClient(client.GET('/api/admin/celery/status', { signal }))
-    },
-    // We only poll if SSE isn't fully established as a fallback,
-    // otherwise the stream pushes to this query key directly.
+    queryFn: async ({ signal }) => unwrapClient(client.GET('/api/admin/celery/status', { signal })),
     refetchInterval: sseConnected === 'open' ? false : 5000,
   })
 
@@ -191,64 +138,36 @@ export function QueueClient() {
   const shouldInspectLedger = problemCount > 0 || ledgerFilter !== 'problem'
 
   const {
-    data: ledgerData,
-    isLoading: ledgerLoading,
-    isFetching: ledgerFetching,
-    error: ledgerError,
-    refetch: refetchLedger,
+    data: ledgerData, isLoading: ledgerLoading, isFetching: ledgerFetching, error: ledgerError, refetch: refetchLedger,
   } = useQuery({
     queryKey: queryKeys.admin.celeryLedger(ledgerFilter, null, 0),
-    queryFn: async ({ signal }) => {
-      return unwrapClient(
+    queryFn: async ({ signal }) =>
+      unwrapClient(
         client.GET('/api/admin/celery/ledger', {
-          params: {
-            query: {
-              status: ledgerFilter,
-              limit: 50,
-              offset: 0,
-            },
-          },
+          params: { query: { status: ledgerFilter, limit: 50, offset: 0 } },
           signal,
         }),
-      )
-    },
+      ),
     enabled: shouldInspectLedger,
   })
 
   const {
-    data: trends,
-    isLoading: trendsLoading,
-    isFetching: trendsFetching,
-    isFetched: trendsFetched,
-    error: trendsError,
-    refetch: refetchTrends,
+    data: trends, isLoading: trendsLoading, isFetching: trendsFetching, isFetched: trendsFetched, error: trendsError, refetch: refetchTrends,
   } = useQuery({
     queryKey: queryKeys.admin.metricHistoryBatch('1h'),
-    queryFn: async ({ signal }) => {
-      return (await unwrapClient(
-        client.GET('/api/admin/metric-history/batch', {
-          params: { query: { since: '1h' } },
-          signal,
-        }),
-      )) as TrendBatch
-    },
+    queryFn: async ({ signal }) =>
+      (await unwrapClient(client.GET('/api/admin/metric-history/batch', { params: { query: { since: '1h' } }, signal }))) as TrendBatch,
     refetchInterval: 60_000,
   })
 
   const isStatusRefetching = isFetching && isFetched && !isLoading
   const isTrendsRefetching = trendsFetching && trendsFetched && !trendsLoading
-
-  const isRefreshing =
-    isStatusRefetching ||
-    isTrendsRefetching ||
-    (ledgerFetching && !ledgerLoading)
+  const isRefreshing = isStatusRefetching || isTrendsRefetching || (ledgerFetching && !ledgerLoading)
 
   const handleRefresh = React.useCallback(() => {
     void refetch()
     void refetchTrends()
-    if (shouldInspectLedger) {
-      void refetchLedger()
-    }
+    if (shouldInspectLedger) void refetchLedger()
   }, [refetch, refetchTrends, refetchLedger, shouldInspectLedger])
 
   const refreshLedgerAfterAction = React.useCallback(async () => {
@@ -309,9 +228,7 @@ export function QueueClient() {
   const handleBulkRetry = React.useCallback(
     () =>
       runLedgerAction('bulk-retry', 'Bulk retry failed', async () => {
-        const res = await unwrapClient(
-          client.POST('/api/admin/celery/ledger/retry', { body: { status: bulkTargetStatus } }),
-        )
+        const res = await unwrapClient(client.POST('/api/admin/celery/ledger/retry', { body: { status: bulkTargetStatus } }))
         return `Requeued ${res.affected ?? 0} file(s) for retry${res.dispatched ? ` (dispatched ${res.dispatched} to Celery)` : ''}.`
       }),
     [bulkTargetStatus, runLedgerAction],
@@ -320,9 +237,7 @@ export function QueueClient() {
   const handleBulkPurge = React.useCallback(
     () =>
       runLedgerAction('bulk-purge', 'Bulk dismiss failed', async () => {
-        const res = await unwrapClient(
-          client.POST('/api/admin/celery/ledger/purge', { body: { status: bulkTargetStatus } }),
-        )
+        const res = await unwrapClient(client.POST('/api/admin/celery/ledger/purge', { body: { status: bulkTargetStatus } }))
         return `Dismissed ${res.affected ?? 0} dead-letter/quarantined ledger entry(s).`
       }),
     [bulkTargetStatus, runLedgerAction],
@@ -352,9 +267,7 @@ export function QueueClient() {
           {isLoading ? (
             <>
               <Skeleton className="h-5 w-28 rounded-full" />
-              <span className="text-xs text-muted-foreground">
-                Inspecting scheduler &amp; ingest status...
-              </span>
+              <span className="text-xs text-muted-foreground">Inspecting scheduler &amp; ingest status...</span>
             </>
           ) : (
             <Badge
@@ -376,23 +289,13 @@ export function QueueClient() {
             </Badge>
           )}
           {!isStandardMode && data?.workers?.error ? (
-            <span className="text-xs text-amber-600 dark:text-amber-400 font-mono">
-              Inspect warning: {data.workers.error}
-            </span>
+            <span className="text-xs text-amber-600 dark:text-amber-400 font-mono">Inspect warning: {data.workers.error}</span>
           ) : null}
-          {error ? (
-            <span role="alert" className="text-xs text-red-500">
-              Error: {(error as Error).message}
-            </span>
-          ) : null}
+          {error ? <span role="alert" className="text-xs text-red-500">Error: {(error as Error).message}</span> : null}
         </div>
         <Button
-          variant="outline"
-          size="sm"
-          onClick={handleRefresh}
-          disabled={isLoading || isRefreshing}
-          data-testid="admin-queue-refresh-btn"
-          className="gap-1.5"
+          variant="outline" size="sm" onClick={handleRefresh} disabled={isLoading || isRefreshing}
+          data-testid="admin-queue-refresh-btn" className="gap-1.5"
         >
           <RefreshCw className={`h-3.5 w-3.5 ${isRefreshing ? 'animate-spin' : ''}`} />
           Refresh
@@ -404,91 +307,56 @@ export function QueueClient() {
         className="grid grid-cols-1 md:grid-cols-2 gap-4 min-h-[204px] [contain-intrinsic-size:auto_204px] [content-visibility:auto]"
       >
         {isStandardMode ? (
-          <>
-            {[
-              {
-                key: 'standard-ingest-summary',
-                title: 'Standard Ingest Summary',
-                description: 'Tracked synchronous file ingestion and quarantine state across all services.',
-                loadingMessage: 'Loading ingest telemetry...',
-                testId: 'admin-queue-standard-ingest-summary',
-                tiles: [
-                  {
-                    label: 'Ingested Files',
-                    value: formatCount(standardIngestedFiles),
-                    sublabel: 'Tracked in PostgreSQL ingested_files',
-                  },
-                  {
-                    label: 'Quarantined Items',
-                    value: formatCount(standardQuarantinedItems),
-                    valueClassName: standardQuarantinedItems > 0 ? 'text-amber-600 dark:text-amber-400' : '',
-                    sublabel: 'Corrupt files & lines preserved on disk',
-                  },
-                ],
-              },
-              {
-                key: 'standard-scheduler-overview',
-                title: 'In-Process Scheduler Overview',
-                description: 'APScheduler background cron tasks and active PostgreSQL job leases.',
-                loadingMessage: 'Loading scheduler telemetry...',
-                testId: 'admin-queue-standard-scheduler-summary',
-                tiles: [
-                  {
-                    label: 'Registered Schedules',
-                    value: inprocessSchedules.length,
-                    sublabel: 'Active APScheduler jobs',
-                  },
-                  {
-                    label: 'Active Cron Runs',
-                    value: inprocessActiveRuns.length,
-                    sublabel: 'Currently executing in-process jobs',
-                  },
-                ],
-              },
-            ].map((card) => (
-              <AnalyticsCard
-                key={card.key}
-                title={card.title}
-                description={card.description}
-                className="min-h-[204px]"
-                isLoading={isLoading}
-                isFetching={isStatusRefetching}
-                loadingMessage={card.loadingMessage}
-                error={error as AnalyticsCardError | null}
-              >
-                <div className="grid grid-cols-2 gap-4 pt-1 min-h-[100px]" data-testid={card.testId}>
-                  {card.tiles.map((tile) => (
-                    <SummaryStatTile key={tile.label} {...tile} />
-                  ))}
-                </div>
-              </AnalyticsCard>
-            ))}
-          </>
+          [
+            {
+              key: 'standard-ingest-summary',
+              title: 'Standard Ingest Summary',
+              description: 'Tracked synchronous file ingestion and quarantine state across all services.',
+              loadingMessage: 'Loading ingest telemetry...',
+              testId: 'admin-queue-standard-ingest-summary',
+              tiles: [
+                { label: 'Ingested Files', value: formatCount(standardIngestedFiles), sublabel: 'Tracked in PostgreSQL ingested_files' },
+                {
+                  label: 'Quarantined Items',
+                  value: formatCount(standardQuarantinedItems),
+                  valueClassName: standardQuarantinedItems > 0 ? 'text-amber-600 dark:text-amber-400' : '',
+                  sublabel: 'Corrupt files & lines preserved on disk',
+                },
+              ],
+            },
+            {
+              key: 'standard-scheduler-overview',
+              title: 'In-Process Scheduler Overview',
+              description: 'APScheduler background cron tasks and active PostgreSQL job leases.',
+              loadingMessage: 'Loading scheduler telemetry...',
+              testId: 'admin-queue-standard-scheduler-summary',
+              tiles: [
+                { label: 'Registered Schedules', value: inprocessSchedules.length, sublabel: 'Active APScheduler jobs' },
+                { label: 'Active Cron Runs', value: inprocessActiveRuns.length, sublabel: 'Currently executing in-process jobs' },
+              ],
+            },
+          ].map((card) => (
+            <AnalyticsCard
+              key={card.key} title={card.title} description={card.description} className="min-h-[204px]"
+              isLoading={isLoading} isFetching={isStatusRefetching} loadingMessage={card.loadingMessage}
+              error={error as AnalyticsCardError | null}
+            >
+              <div className="grid grid-cols-2 gap-4 pt-1 min-h-[100px]" data-testid={card.testId}>
+                {card.tiles.map((tile) => <SummaryStatTile key={tile.label} {...tile} />)}
+              </div>
+            </AnalyticsCard>
+          ))
         ) : (
           <>
             <TrendSparklineCard
-              key="celery-queue-depth"
-              title="Total Queue Depth (1h)"
-              description="Aggregate sum of all Celery queue lengths."
-              label="Queue Depth"
-              latestValue={latestQueue}
-              points={queuePoints}
-              isLoading={isLoading}
-              trendsLoading={trendsLoading}
-              isTrendsRefetching={isTrendsRefetching}
-              trendsError={trendsError}
+              key="celery-queue-depth" title="Total Queue Depth (1h)" description="Aggregate sum of all Celery queue lengths."
+              label="Queue Depth" latestValue={latestQueue} points={queuePoints} isLoading={isLoading}
+              trendsLoading={trendsLoading} isTrendsRefetching={isTrendsRefetching} trendsError={trendsError}
             />
             <TrendSparklineCard
-              key="celery-active-tasks"
-              title="Active Tasks (1h)"
-              description="Total actively executing Celery tasks across all workers."
-              label="Active Tasks"
-              latestValue={latestWorker}
-              points={workerPoints}
-              isLoading={isLoading}
-              trendsLoading={trendsLoading}
-              isTrendsRefetching={isTrendsRefetching}
-              trendsError={trendsError}
+              key="celery-active-tasks" title="Active Tasks (1h)" description="Total actively executing Celery tasks across all workers."
+              label="Active Tasks" latestValue={latestWorker} points={workerPoints} isLoading={isLoading}
+              trendsLoading={trendsLoading} isTrendsRefetching={isTrendsRefetching} trendsError={trendsError}
             />
           </>
         )}
@@ -510,19 +378,13 @@ export function QueueClient() {
             error={error as AnalyticsCardError | null}
             helpContent={
               <div className="space-y-4 text-sm">
-                <p>
-                  Displays corrupt raw archive files and malformed JSON log lines isolated on local disk during synchronous ingest.
-                </p>
-                <p>
-                  Operators can inspect or download quarantined artifacts for forensic debugging or purge them once resolved.
-                </p>
+                <p>Displays corrupt raw archive files and malformed JSON log lines isolated on local disk during synchronous ingest.</p>
+                <p>Operators can inspect or download quarantined artifacts for forensic debugging or purge them once resolved.</p>
               </div>
             }
           >
             {standardQuarantinedItems === 0 ? (
-              <p className="text-sm text-muted-foreground">
-                No corrupt files or malformed log lines are currently quarantined on disk.
-              </p>
+              <p className="text-sm text-muted-foreground">No corrupt files or malformed log lines are currently quarantined on disk.</p>
             ) : (
               <QuarantineSection />
             )}
@@ -539,9 +401,7 @@ export function QueueClient() {
             error={error as AnalyticsCardError | null}
             helpContent={
               <div className="space-y-4 text-sm">
-                <p>
-                  This table shows the current number of pending messages waiting to be processed in each Celery queue.
-                </p>
+                <p>This table shows the current number of pending messages waiting to be processed in each Celery queue.</p>
                 <ul className="list-disc pl-5 space-y-2">
                   <li><strong>celery:</strong> The default fallback queue.</li>
                   <li><strong>q.ingest:</strong> Primary ingest queue for discovering and batch-processing log files.</li>
@@ -554,13 +414,7 @@ export function QueueClient() {
               <p className="text-sm text-muted-foreground">No queues found or Celery mode is inactive.</p>
             ) : (
               <div data-testid="admin-queue-depths-table">
-                <DataTableReadonly
-                  columns={QUEUE_COLUMNS}
-                  data={queues}
-                  hideToolbar
-                  showPagination={false}
-                  tableCaption="Celery queue depths"
-                />
+                <DataTableReadonly columns={QUEUE_COLUMNS} data={queues} hideToolbar showPagination={false} tableCaption="Celery queue depths" />
               </div>
             )}
           </AnalyticsCard>
@@ -583,12 +437,8 @@ export function QueueClient() {
             error={error as AnalyticsCardError | null}
             helpContent={
               <div className="space-y-4 text-sm">
-                <p>
-                  Displays all background cron tasks currently holding an active execution lease in PostgreSQL (`job_runs`).
-                </p>
-                <p>
-                  In Standard deployment mode, background sync, commit, compaction, and maintenance tasks execute in-process via APScheduler rather than external Celery workers.
-                </p>
+                <p>Displays all background cron tasks currently holding an active execution lease in PostgreSQL (`job_runs`).</p>
+                <p>In Standard deployment mode, background sync, commit, compaction, and maintenance tasks execute in-process via APScheduler rather than external Celery workers.</p>
               </div>
             }
           >
@@ -598,13 +448,7 @@ export function QueueClient() {
               </p>
             ) : (
               <div data-testid="admin-queue-inprocess-active-table">
-                <DataTableReadonly
-                  columns={INPROCESS_ACTIVE_COLUMNS}
-                  data={inprocessActiveRuns}
-                  hideToolbar
-                  showPagination={false}
-                  tableCaption="Active in-process cron jobs"
-                />
+                <DataTableReadonly columns={INPROCESS_ACTIVE_COLUMNS} data={inprocessActiveRuns} hideToolbar showPagination={false} tableCaption="Active in-process cron jobs" />
               </div>
             )}
           </AnalyticsCard>
@@ -620,12 +464,8 @@ export function QueueClient() {
             error={error as AnalyticsCardError | null}
             helpContent={
               <div className="space-y-4 text-sm">
-                <p>
-                  Displays all currently running Celery worker nodes and the tasks they are actively executing.
-                </p>
-                <p>
-                  If a worker is listed but has no active tasks, it is idle and waiting for messages from the queue.
-                </p>
+                <p>Displays all currently running Celery worker nodes and the tasks they are actively executing.</p>
+                <p>If a worker is listed but has no active tasks, it is idle and waiting for messages from the queue.</p>
               </div>
             }
           >
@@ -642,13 +482,7 @@ export function QueueClient() {
                       </Badge>
                     </h4>
                     {tasks.length > 0 ? (
-                      <DataTableReadonly
-                        columns={TASK_COLUMNS}
-                        data={tasks}
-                        hideToolbar
-                        showPagination={false}
-                        tableCaption={`Active tasks on ${workerName}`}
-                      />
+                      <DataTableReadonly columns={TASK_COLUMNS} data={tasks} hideToolbar showPagination={false} tableCaption={`Active tasks on ${workerName}`} />
                     ) : (
                       <p className="text-xs text-muted-foreground italic">Idle</p>
                     )}
@@ -674,9 +508,7 @@ export function QueueClient() {
           error={error as AnalyticsCardError | null}
           helpContent={
             <div className="space-y-4 text-sm">
-              <p>
-                Shows the global sum of tracked file ingestion states across all services in the PostgreSQL ingest_ledger table.
-              </p>
+              <p>Shows the global sum of tracked file ingestion states across all services in the PostgreSQL ingest_ledger table.</p>
               <ul className="list-disc pl-5 space-y-2">
                 <li><strong>DISCOVERED:</strong> Found in FOS, waiting to be claimed by a worker.</li>
                 <li><strong>CLAIMED:</strong> Currently being downloaded, transformed, or queued for commit.</li>
@@ -696,19 +528,14 @@ export function QueueClient() {
                   const isDeadLetter = status === 'dead_letter' && count > 0
                   const isQuarantined = status === 'quarantined' && count > 0
                   const isSelected = ledgerFilter === status
-                  const validFilterStatus = (
-                    ['discovered', 'claimed', 'committed', 'quarantined', 'dead_letter'] as const
-                  ).includes(status as 'discovered' | 'claimed' | 'committed' | 'quarantined' | 'dead_letter')
+                  const validFilterStatus = (VALID_LEDGER_STATUSES as readonly string[]).includes(status)
                   return (
                     <button
                       type="button"
                       key={status}
                       data-testid={`admin-queue-ledger-${status}`}
                       onClick={() => {
-                        if (!validFilterStatus) return
-                        setLedgerFilter((prev) =>
-                          prev === status ? 'problem' : (status as LedgerStatusFilter),
-                        )
+                        if (validFilterStatus) setLedgerFilter((prev) => (prev === status ? 'problem' : (status as LedgerStatusFilter)))
                       }}
                       className={[
                         'flex flex-col items-center justify-center p-4 border rounded-lg bg-card min-w-[120px] transition-colors text-left cursor-pointer hover:border-foreground/30',
@@ -718,9 +545,7 @@ export function QueueClient() {
                             ? 'border-amber-500/40 bg-amber-500/5 text-amber-600 dark:text-amber-400'
                             : '',
                         isSelected ? 'ring-2 ring-primary/40 border-primary/50' : '',
-                      ]
-                        .filter(Boolean)
-                        .join(' ')}
+                      ].filter(Boolean).join(' ')}
                     >
                       <span className="text-3xl font-bold tabular-nums">{count}</span>
                       <span className="text-xs text-muted-foreground uppercase mt-1">{status}</span>
@@ -740,12 +565,7 @@ export function QueueClient() {
                   }`}
                 >
                   <span>{actionNotice.message}</span>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="h-6 px-2 text-xs"
-                    onClick={() => setActionNotice(null)}
-                  >
+                  <Button variant="ghost" size="sm" className="h-6 px-2 text-xs" onClick={() => setActionNotice(null)}>
                     Dismiss
                   </Button>
                 </div>
@@ -758,26 +578,18 @@ export function QueueClient() {
                     No dead-letter or quarantined files requiring operator attention. Click any status card above to inspect ledger rows.
                   </span>
                   <Button
-                    variant="outline"
-                    size="sm"
-                    className="h-7 text-xs"
-                    data-testid="admin-queue-ledger-inspect-all-btn"
-                    onClick={() => setLedgerFilter('all')}
+                    variant="outline" size="sm" className="h-7 text-xs"
+                    data-testid="admin-queue-ledger-inspect-all-btn" onClick={() => setLedgerFilter('all')}
                   >
                     Inspect Recent Entries
                   </Button>
                 </div>
               ) : (
-                <div
-                  data-testid="admin-queue-ledger-inspector"
-                  className="rounded-lg border border-border bg-muted/10 p-3 space-y-3"
-                >
+                <div data-testid="admin-queue-ledger-inspector" className="rounded-lg border border-border bg-muted/10 p-3 space-y-3">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <div className="flex flex-wrap items-center gap-1.5">
                       <span className="text-xs font-medium text-muted-foreground mr-1 flex items-center gap-1">
-                        {problemCount > 0 ? (
-                          <AlertTriangle className="h-3.5 w-3.5 text-amber-500" />
-                        ) : null}
+                        {problemCount > 0 ? <AlertTriangle className="h-3.5 w-3.5 text-amber-500" /> : null}
                         Filter:
                       </span>
                       {(
@@ -803,33 +615,22 @@ export function QueueClient() {
                     </div>
 
                     {problemCount > 0 &&
-                    (ledgerFilter === 'problem' ||
-                      ledgerFilter === 'dead_letter' ||
-                      ledgerFilter === 'quarantined') ? (
+                    (ledgerFilter === 'problem' || ledgerFilter === 'dead_letter' || ledgerFilter === 'quarantined') ? (
                       <div className="flex flex-wrap items-center gap-2">
                         <Button
-                          type="button"
-                          variant="outline"
-                          size="sm"
-                          className="h-7 gap-1 text-xs"
-                          disabled={actionBusyKey !== null}
-                          data-testid="admin-queue-ledger-retry-all"
+                          type="button" variant="outline" size="sm" className="h-7 gap-1 text-xs"
+                          disabled={actionBusyKey !== null} data-testid="admin-queue-ledger-retry-all"
                           onClick={() => void handleBulkRetry()}
                         >
-                          <RotateCcw className="h-3 w-3" />
-                          Retry All
+                          <RotateCcw className="h-3 w-3" /> Retry All
                         </Button>
                         <Button
-                          type="button"
-                          variant="outline"
-                          size="sm"
+                          type="button" variant="outline" size="sm"
                           className="h-7 gap-1 text-xs text-red-600 dark:text-red-400 hover:text-red-700"
-                          disabled={actionBusyKey !== null}
-                          data-testid="admin-queue-ledger-purge-all"
+                          disabled={actionBusyKey !== null} data-testid="admin-queue-ledger-purge-all"
                           onClick={() => void handleBulkPurge()}
                         >
-                          <Trash2 className="h-3 w-3" />
-                          Dismiss All
+                          <Trash2 className="h-3 w-3" /> Dismiss All
                         </Button>
                       </div>
                     ) : null}
@@ -849,10 +650,7 @@ export function QueueClient() {
                       No ingest ledger entries match filter <span className="font-mono">{ledgerFilter}</span>.
                     </p>
                   ) : (
-                    <div
-                      className="max-h-[380px] overflow-auto rounded-md border border-border bg-card"
-                      data-testid="admin-queue-ledger-entries"
-                    >
+                    <div className="max-h-[380px] overflow-auto rounded-md border border-border bg-card" data-testid="admin-queue-ledger-entries">
                       <table className="w-full text-xs border-collapse">
                         <thead className="bg-muted/50 text-muted-foreground sticky top-0 z-10 border-b">
                           <tr>
@@ -866,19 +664,12 @@ export function QueueClient() {
                         </thead>
                         <tbody className="divide-y divide-border">
                           {ledgerData.items.map((item) => {
-                            const isProblemRow =
-                              item.status === 'dead_letter' || item.status === 'quarantined'
-                            const tsSec =
-                              item.claimed_at ?? item.discovered_at ?? item.committed_at ?? null
-                            const sizeLabel = formatBytes(item.size_bytes)
-                            const rowBusyRetry =
-                              actionBusyKey === `retry:${item.service_id}:${item.object_key}`
+                            const isProblemRow = item.status === 'dead_letter' || item.status === 'quarantined'
+                            const tsSec = item.claimed_at ?? item.discovered_at ?? item.committed_at ?? null
+                            const sizeLabel = formatLedgerBytes(item.size_bytes)
+                            const rowBusyRetry = actionBusyKey === `retry:${item.service_id}:${item.object_key}`
                             return (
-                              <tr
-                                key={`${item.service_id}:${item.object_key}`}
-                                data-testid="admin-queue-ledger-row"
-                                className="hover:bg-muted/30 align-top"
-                              >
+                              <tr key={`${item.service_id}:${item.object_key}`} data-testid="admin-queue-ledger-row" className="hover:bg-muted/30 align-top">
                                 <td className="px-3 py-2.5 whitespace-nowrap">
                                   <Badge
                                     variant={item.status === 'dead_letter' ? 'destructive' : 'outline'}
@@ -895,35 +686,19 @@ export function QueueClient() {
                                 </td>
                                 <td className="px-3 py-2.5 whitespace-nowrap">
                                   <div className="flex flex-col gap-0.5">
-                                    <Badge variant="secondary" className="w-fit uppercase text-[10px]">
-                                      {item.source_type}
-                                    </Badge>
-                                    <span className="font-mono text-[11px] text-muted-foreground">
-                                      {item.service_id}
-                                    </span>
+                                    <Badge variant="secondary" className="w-fit uppercase text-[10px]">{item.source_type}</Badge>
+                                    <span className="font-mono text-[11px] text-muted-foreground">{item.service_id}</span>
                                   </div>
                                 </td>
                                 <td className="px-3 py-2.5 min-w-[280px]">
-                                  <div className="font-mono text-xs break-all text-foreground">
-                                    {item.object_key}
-                                  </div>
+                                  <div className="font-mono text-xs break-all text-foreground">{item.object_key}</div>
                                   {item.error_kind || item.last_error ? (
                                     <div className="mt-1 flex flex-wrap items-baseline gap-1.5 text-[11px] text-red-600 dark:text-red-400">
-                                      {item.error_kind ? (
-                                        <span className="rounded bg-red-500/10 px-1.5 py-0.5 font-mono font-medium">
-                                          {item.error_kind}
-                                        </span>
-                                      ) : null}
-                                      {item.last_error ? (
-                                        <span className="font-mono break-all">{item.last_error}</span>
-                                      ) : null}
+                                      {item.error_kind ? <span className="rounded bg-red-500/10 px-1.5 py-0.5 font-mono font-medium">{item.error_kind}</span> : null}
+                                      {item.last_error ? <span className="font-mono break-all">{item.last_error}</span> : null}
                                     </div>
                                   ) : null}
-                                  {sizeLabel ? (
-                                    <div className="mt-0.5 text-[11px] text-muted-foreground">
-                                      Size: {sizeLabel}
-                                    </div>
-                                  ) : null}
+                                  {sizeLabel ? <div className="mt-0.5 text-[11px] text-muted-foreground">Size: {sizeLabel}</div> : null}
                                 </td>
                                 <td className="px-3 py-2.5 whitespace-nowrap">
                                   <div className="tabular-nums font-medium">
@@ -931,8 +706,7 @@ export function QueueClient() {
                                   </div>
                                   {item.originating_task ? (
                                     <div className="font-mono text-[11px] text-muted-foreground">
-                                      {item.originating_task}
-                                      {item.originating_run_id ? ` #${item.originating_run_id}` : ''}
+                                      {item.originating_task}{item.originating_run_id ? ` #${item.originating_run_id}` : ''}
                                     </div>
                                   ) : null}
                                 </td>
@@ -943,26 +717,17 @@ export function QueueClient() {
                                   {isProblemRow ? (
                                     <div className="inline-flex items-center gap-1.5">
                                       <Button
-                                        type="button"
-                                        variant="outline"
-                                        size="sm"
-                                        className="h-7 px-2 text-xs gap-1"
-                                        disabled={actionBusyKey !== null}
-                                        data-testid="admin-queue-ledger-retry-row"
+                                        type="button" variant="outline" size="sm" className="h-7 px-2 text-xs gap-1"
+                                        disabled={actionBusyKey !== null} data-testid="admin-queue-ledger-retry-row"
                                         onClick={() => void handleRetryItem(item)}
                                       >
-                                        <RotateCcw
-                                          className={`h-3 w-3 ${rowBusyRetry ? 'animate-spin' : ''}`}
-                                        />
+                                        <RotateCcw className={`h-3 w-3 ${rowBusyRetry ? 'animate-spin' : ''}`} />
                                         Retry
                                       </Button>
                                       <Button
-                                        type="button"
-                                        variant="ghost"
-                                        size="sm"
+                                        type="button" variant="ghost" size="sm"
                                         className="h-7 px-2 text-xs gap-1 text-red-600 dark:text-red-400 hover:text-red-700"
-                                        disabled={actionBusyKey !== null}
-                                        data-testid="admin-queue-ledger-purge-row"
+                                        disabled={actionBusyKey !== null} data-testid="admin-queue-ledger-purge-row"
                                         onClick={() => void handlePurgeItem(item)}
                                       >
                                         <Trash2 className="h-3 w-3" />
@@ -1001,12 +766,8 @@ export function QueueClient() {
           error={error as AnalyticsCardError | null}
           helpContent={
             <div className="space-y-4 text-sm">
-              <p>
-                Displays all registered background schedules running in-process via APScheduler across both Standard and High-Scale deployment modes.
-              </p>
-              <p>
-                These recurrent jobs handle log discovery, DuckLake commits, local compaction, rollup healing, cloud maintenance, and alert evaluation.
-              </p>
+              <p>Displays all registered background schedules running in-process via APScheduler across both Standard and High-Scale deployment modes.</p>
+              <p>These recurrent jobs handle log discovery, DuckLake commits, local compaction, rollup healing, cloud maintenance, and alert evaluation.</p>
             </div>
           }
         >
@@ -1015,11 +776,8 @@ export function QueueClient() {
           ) : (
             <div data-testid="admin-queue-inprocess-schedules-table">
               <DataTableReadonly
-                columns={INPROCESS_SCHEDULE_COLUMNS}
-                data={inprocessSchedules}
-                hideToolbar
-                showPagination={false}
-                tableCaption="In-process APScheduler jobs"
+                columns={INPROCESS_SCHEDULE_COLUMNS} data={inprocessSchedules}
+                hideToolbar showPagination={false} tableCaption="In-process APScheduler jobs"
               />
             </div>
           )}

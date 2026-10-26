@@ -50,7 +50,7 @@ vi.mock('@/hooks/useBootstrap', async (importOriginal) => {
 })
 
 import { TrafficChart } from '@/app/dashboard/_sections/DashboardClient'
-import { CardGrid, CARD_CATEGORIES } from '@/app/dashboard/_sections/CardGrid'
+import { CardGrid, CARD_CATEGORIES } from '@/app/dashboard/_sections/DashboardClient'
 import { FieldSearchDialog } from '@/components/Dashboard/TopTenTable'
 import { useFilterStore } from '@/stores/filterStore'
 import { usePopGeoStore } from '@/stores/filterStore'

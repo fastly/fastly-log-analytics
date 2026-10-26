@@ -11,7 +11,7 @@ import { http, HttpResponse } from 'msw'
 import { axe } from 'vitest-axe'
 import React, { isValidElement } from 'react'
 import { InsightCard, InsightItemRow, ScriptedTrafficModal, type ScriptedTrafficData } from '@/components/Insights/InsightCard'
-import { CacheCollapseModal } from '@/components/Insights/CacheCollapseModal'
+import { CacheCollapseModal } from '@/components/Insights/InsightDetailModal'
 import { getPerformanceContent } from '@/components/Insights/InsightHelpModal/sections/performance'
 import { getSecurityContent } from '@/components/Insights/InsightHelpModal/sections/security'
 import { getTrafficContent } from '@/components/Insights/InsightHelpModal'
@@ -51,14 +51,12 @@ vi.mock('@/components/Insights/InsightHelpModal', async (importOriginal) => ({
   InsightHelpModal: ({ isOpen }: { isOpen: boolean }) =>
     isOpen ? <div data-testid="help-modal-open" /> : null,
 }))
-vi.mock('@/components/Insights/ImpossibleDistanceModal', () => ({
-  ImpossibleDistanceModal: ({ isOpen }: { isOpen: boolean }) =>
-    isOpen ? <div data-testid="distance-modal-open" /> : null,
-}))
-vi.mock('@/components/Insights/CacheCollapseModal', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('@/components/Insights/CacheCollapseModal')>()
+vi.mock('@/components/Insights/InsightDetailModal', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/components/Insights/InsightDetailModal')>()
   return {
     ...actual,
+    ImpossibleDistanceModal: ({ isOpen }: { isOpen: boolean }) =>
+      isOpen ? <div data-testid="distance-modal-open" /> : null,
     CacheCollapseModal: (props: React.ComponentProps<typeof actual.CacheCollapseModal>) =>
       realInsightSubcomponentsRef.value ? (
         <actual.CacheCollapseModal {...props} />

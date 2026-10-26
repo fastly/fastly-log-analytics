@@ -1,16 +1,21 @@
 'use client'
 
-import {
-  GlobalHealthHelp, AvgRttHelp, WorstAsnHelp, WorstRegionHelp, HeatmapHelp,
-  AsnLeaderboardHelp, MetroLeaderboardHelp, ShieldingHelp, NetworkQualityHelp,
-  SHIELDING_COLUMNS, getShieldingLabels, adjustShieldingRows,
-  SHIELDING_MIN_REQUESTS_OPTIONS, SHIELDING_MIN_REQUESTS_DEFAULT, HealthBadge,
-} from "./help-content"
 import React, { useState, type Dispatch, type SetStateAction } from 'react'
 import Link from 'next/link'
+import dynamic from 'next/dynamic'
 import type { ColumnDef } from '@tanstack/react-table'
 import { PopHealthHeatmap } from '@/components/network/PopHealthHeatmap'
-import { DataTable, DataTableReadonly, ColumnVisibilityDropdown, FilterValueCell, PopLabel } from '@/components/DataTable'
+import {
+  DataTable,
+  DataTableReadonly,
+  ColumnVisibilityDropdown,
+  FilterValueCell,
+  PopLabel,
+  columnHeader,
+  msCell,
+  numberValue,
+  textValue,
+} from '@/components/DataTable'
 import { Badge } from '@/components/ui/badge'
 import { client, unwrapClient } from '@/lib/api'
 import type { components, FiltersPayload, PlotlyLayout, PlotlyTrace } from '@/types/api'
@@ -19,8 +24,27 @@ import { useColumnVisibility } from '@/hooks/useSSE'
 import { useActiveLogFields } from '@/hooks/useBootstrap'
 import { downloadAsCsv, cn, type RangeWireArgs } from '@/lib/utils'
 import { formatCount, formatCompactCount } from '@/lib/format'
-import dynamic from 'next/dynamic'
 import { Skeleton, SkeletonGrid } from '@/components/ui/skeleton'
+import { AnalyticsCard, LazyMount, type AnalyticsCardError } from '@/components/AnalyticsCard'
+import { StatCard } from '@/components/ui/confirm-dialog'
+import { Button } from '@/components/ui/button'
+import {
+  Network as NetworkIcon,
+  AlertCircle,
+  AlertTriangle,
+  ArrowDownUp,
+  Gauge,
+  Globe,
+  Wifi,
+  Zap,
+  Activity,
+  Shield,
+  Download,
+  Info,
+} from 'lucide-react'
+import { ReportLayout, type ReportLayoutRenderProps } from '@/components/ReportLayout'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 
 const PlotlyChart = dynamic(() => import('@/components/PlotlyChart').then(mod => mod.PlotlyChart), {
   ssr: false, loading: () => <Skeleton className="w-full h-[300px]" />,
@@ -31,13 +55,249 @@ const NetworkMap = dynamic(() => import('@/components/Map/NetworkMap').then(mod 
 const ShieldingMap = dynamic(() => import('@/components/Map/ShieldingMap').then(mod => mod.ShieldingMap), {
   ssr: false, loading: () => <Skeleton className="w-full h-[420px] rounded-xl" />,
 })
-import { AnalyticsCard, LazyMount, type AnalyticsCardError } from '@/components/AnalyticsCard'
-import { StatCard } from '@/components/ui/confirm-dialog'
-import { Button } from '@/components/ui/button'
-import { Network as NetworkIcon, AlertCircle, AlertTriangle, ArrowDownUp, Gauge, Globe, Wifi, Zap, Activity, Shield, Download, Info } from 'lucide-react'
-import { ReportLayout, type ReportLayoutRenderProps } from '@/components/ReportLayout'
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
+
+/** A route as the map and table consume it: derived flags may be absent until adjusted. */
+export type ShieldingRowInput = Partial<components['schemas']['ShieldingRow']>
+
+export function adjustShieldingRows(
+  rows: readonly ShieldingRowInput[] | null | undefined,
+  minRequests: number,
+): ShieldingRowInput[] {
+  if (!Array.isArray(rows)) return []
+  return rows.map((row) => {
+    const lowSample = minRequests > 0 && (row.requests ?? 0) < minRequests
+    return {
+      ...row,
+      low_sample: lowSample,
+      anomaly_static: Boolean(row.anomaly_eligible) && !lowSample,
+    }
+  })
+}
+
+export const SHIELDING_MIN_REQUESTS_OPTIONS: ReadonlyArray<{ value: string; label: string }> = [
+  { value: '0', label: 'No minimum' },
+  { value: '10', label: '10' },
+  { value: '30', label: '30' },
+  { value: '50', label: '50' },
+  { value: '100', label: '100' },
+]
+
+export const SHIELDING_MIN_REQUESTS_DEFAULT = 10
+
+function HelpSection({
+  intro,
+  items,
+}: {
+  intro: React.ReactNode
+  items: Array<{ icon: React.ComponentType<{ className?: string }>; color: string; label: string; body: React.ReactNode }>
+}) {
+  return (
+    <div className="space-y-4 text-sm text-muted-foreground">
+      <p>{intro}</p>
+      <ul className="space-y-3 list-none pl-0">
+        {items.map(({ icon: Icon, color, label, body }) => (
+          <li key={label} className="flex gap-3">
+            <Icon className={cn("h-5 w-5 shrink-0 mt-0.5", color)} />
+            <span><strong>{label}:</strong> {body}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+}
+
+export const GlobalHealthHelp = () => (
+  <HelpSection
+    intro={<>A composite <strong>0–100 score</strong> aggregated across your top ASNs, weighted by request volume. 100 = perfect conditions, 0 = severe degradation.</>}
+    items={[
+      { icon: Activity, color: 'text-blue-500', label: "How it's calculated", body: <>Combines TCP RTT, packet loss (<code>ploss</code>), and RTT variance (jitter) into a single normalized score for each ASN, then takes a traffic-weighted average.</> },
+      { icon: AlertCircle, color: 'text-yellow-500', label: 'When to act', body: 'A score below 80 warrants investigation. A sustained drop often precedes visible user complaints or error-rate spikes by several minutes — making this a leading indicator.' },
+    ]}
+  />
+)
+
+export const AvgRttHelp = () => (
+  <HelpSection
+    intro={<>Mean <strong>TCP Round Trip Time</strong> in milliseconds across all logged requests in the selected time window.</>}
+    items={[
+      { icon: Zap, color: 'text-blue-500', label: 'Healthy baselines', body: '10–50ms for regional users, 100–200ms for international. Values above 300ms typically result in noticeable UX degradation.' },
+      { icon: AlertCircle, color: 'text-yellow-500', label: 'Sudden increases', body: 'A 2× or greater spike often indicates ISP congestion, a Fastly routing change, or a DDoS volumetric attack saturating a link. Cross-reference with the ASN Leaderboard to isolate the source.' },
+    ]}
+  />
+)
+
+export const WorstAsnHelp = () => (
+  <HelpSection
+    intro={<>The <strong>Internet Service Provider or network</strong> (identified by Autonomous System Number) with the lowest composite health score during the selected window.</>}
+    items={[
+      { icon: NetworkIcon, color: 'text-blue-500', label: 'What causes this', body: "High RTT + packet loss from a specific ASN typically indicates a peering issue between that ISP and Fastly's edge nodes, or congestion on a transit link." },
+      { icon: Activity, color: 'text-yellow-500', label: 'How to act', body: "Check the ASN Leaderboard to see how many requests this affects and whether the trend is degrading. If it's a large ISP with a worsening trend, Fastly support can investigate peering." },
+    ]}
+  />
+)
+
+export const WorstRegionHelp = () => (
+  <HelpSection
+    intro={<>The <strong>country experiencing the lowest composite network health score</strong>, based on TCP metrics from users in that geography.</>}
+    items={[
+      { icon: Globe, color: 'text-blue-500', label: 'ISP vs. regional', body: "If the same country appears in both this card and the Worst ASN, the issue is likely a single dominant ISP. If the ASN is healthy but the country isn't, a regional routing or infrastructure problem is more likely." },
+      { icon: Activity, color: 'text-yellow-500', label: 'Follow-up', body: 'Use the Metro Leaderboard to narrow down to a specific city. A single underperforming city within an otherwise healthy country usually points to a specific datacenter or peering point.' },
+    ]}
+  />
+)
+
+export const HeatmapHelp = () => (
+  <HelpSection
+    intro={<>A grid where each <strong>row is an ISP (ASN)</strong>, each <strong>column is a time bucket</strong>, and the color represents the composite health score — red (0) to green (100).</>}
+    items={[
+      { icon: Activity, color: 'text-blue-500', label: 'Reading it', body: 'A row that turns red at a specific column pinpoints exactly when degradation started for a given ISP. Persistent red rows indicate long-standing peering or routing problems that predate your current time window.' },
+      { icon: AlertCircle, color: 'text-yellow-500', label: 'Shared incidents', body: 'Multiple rows going red simultaneously suggests a widespread event — a major transit outage, a volumetric attack, or a Fastly-side issue rather than an ISP-specific problem.' },
+    ]}
+  />
+)
+
+export const AsnLeaderboardHelp = () => (
+  <HelpSection
+    intro={<>Rankings of every observed <strong>Internet Service Provider</strong> by composite health score, with tail-latency breakdowns and change signals.</>}
+    items={[
+      { icon: Zap, color: 'text-blue-500', label: 'P95 / P99 RTT', body: 'Tail latency — the slowest 5% and 1% of TCP handshakes for users on this network. High P99 with a healthy P95 means most users are fine but a small percentage are experiencing severe problems.' },
+      { icon: Activity, color: 'text-yellow-500', label: '1h Change', body: 'Real-time signal — a negative value in red means the score is actively declining, often indicating an in-progress incident. A negative value in a currently-healthy ASN is worth watching.' },
+      { icon: AlertCircle, color: 'text-red-500', label: 'Trend', body: 'Based on a longer trajectory than 1h Change. An ASN showing "DEGRADING" trend but a high current score may be slowly sliding toward a threshold breach.' },
+    ]}
+  />
+)
+
+export const MetroLeaderboardHelp = () => (
+  <HelpSection
+    intro={<>Health rankings segmented by <strong>city or metro area</strong> rather than ISP — useful when a carrier performs well nationally but has localized issues.</>}
+    items={[
+      { icon: Globe, color: 'text-blue-500', label: 'ISP vs. city', body: 'A low-scoring city with an otherwise-healthy ASN usually points to a specific datacenter, peering point, or submarine cable serving that metro. Large ISPs like Comcast or AT&T can have poor performance in one city while fine everywhere else.' },
+      { icon: Activity, color: 'text-yellow-500', label: 'Requires metro logging', body: <>This panel only appears when <code>req.http.Fastly-Metro</code> or equivalent metro-level fields are present in your logs. If you don&apos;t see it, check your log field configuration.</> },
+    ]}
+  />
+)
+
+export const ShieldingHelp = () => (
+  <div className="space-y-4 text-sm text-muted-foreground">
+    <p>Edge-to-Shield round-trip latency, isolated by subtracting the Shield-to-Origin fetch time from the Edge&apos;s total upstream wait. Requests are correlated via the <code>rid</code>/<code>prid</code> fields.</p>
+
+    <div className="space-y-2 border-t pt-4">
+      <h4 className="font-semibold text-foreground text-xs uppercase tracking-wider">Efficiency Legend</h4>
+      <ul className="space-y-2 list-none pl-0">
+        {[
+          { cls: 'bg-[#22c55e]', title: '< 1.5× (Excellent):', text: 'Near-optimal transit performance.' },
+          { cls: 'bg-[#eab308]', title: '1.5–3× (Moderate):', text: 'Acceptable but has room for improvement.' },
+          { cls: 'bg-[#ef4444]', title: '> 3× (Investigate):', text: 'Significant latency overhead; check for suboptimal peering.' },
+          { cls: 'bg-[#94a3b8]', title: 'Grey (Low sample):', text: 'Fewer than 30 requests — too few samples for the median/percentiles to be reliable. Shown for visibility but never colour-graded or flagged.' },
+        ].map(({ cls, title, text }) => (
+          <li key={title} className="flex items-center gap-2">
+            <span className={cn("w-3 h-1 rounded-full", cls)} />
+            <span><strong>{title}</strong> {text}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+
+    <div className="space-y-2 border-t pt-4">
+      <h4 className="font-semibold text-foreground text-xs uppercase tracking-wider">Map Markers & Arcs</h4>
+      <ul className="space-y-2 list-none pl-0">
+        <li className="flex items-center gap-2"><span className="w-2.5 h-2.5 rounded-full bg-[#3b82f6]" /><span><strong>Blue Dot:</strong> Edge POP (first arrival).</span></li>
+        <li className="flex items-center gap-2"><span className="w-2.5 h-2.5 rounded-full bg-[#a855f7]" /><span><strong>Purple Dot:</strong> Shield POP.</span></li>
+        <li className="flex items-center gap-2"><span><strong>Arc Width:</strong> Proportional to request volume.</span></li>
+        <li className="flex items-center gap-2"><span className="w-4 border-t-2 border-dashed border-[#ef4444]" /><span><strong>Dashed Red Arc:</strong> Flagged route — efficiency &gt; 3× <em>and</em> &ge; 20ms overhead above the light-speed floor, <em>and</em> at least 30 requests. Worth investigating for suboptimal peering.</span></li>
+        <li className="flex items-center gap-2"><span className="w-4 border-t-2 border-solid border-[#94a3b8]" /><span><strong>Grey Arc:</strong> Low-sample route (&lt; 30 requests) — drawn for visibility but not colour-graded or flagged.</span></li>
+      </ul>
+    </div>
+  </div>
+)
+
+export const NetworkQualityHelp = () => (
+  <HelpSection
+    intro={<>Breaks down <strong>average TCP Round Trip Time</strong> (<code>tcp_rtt</code>) by country, ASN, region, and Fastly POP so you can localise where latency is concentrated, plus an RTT-vs-TTFB sample to separate network latency from origin/edge processing time.</>}
+    items={[
+      { icon: NetworkIcon, color: 'text-blue-500', label: 'Bars (by country / ASN / region / POP)', body: 'mean RTT in ms for the busiest groups in the window. The region breakdown is scoped to the selected country.' },
+      { icon: Zap, color: 'text-blue-500', label: 'RTT vs TTFB scatter', body: 'points far above the diagonal mean time-to-first-byte is dominated by something other than network RTT (origin or edge work); points hugging it are network-bound.' },
+      { icon: AlertCircle, color: 'text-yellow-500', label: 'Requires Network Quality (Group F) fields', body: <><code>tcp_rtt</code> must be enabled in Fastly logging, with <code>ttfb</code> for the scatter. The cards hide when those fields aren&apos;t present.</> },
+    ]}
+  />
+)
+
+export function HealthBadge({ score }: { score: number | null }) {
+  if (score == null) return <span className="text-muted-foreground">—</span>
+  const variant = score >= 80 ? 'outline' : score >= 50 ? 'secondary' : 'destructive'
+  const color = score >= 80 ? 'text-green-600 dark:text-green-400' : score >= 50 ? 'text-yellow-600 dark:text-yellow-400' : ''
+  return (
+    <Badge variant={variant} className={cn("text-[10px]", color)}>
+      {score.toFixed(0)}/100
+    </Badge>
+  )
+}
+
+export const SHIELDING_COLUMNS: ColumnDef<ShieldingRowInput>[] = [
+  {
+    accessorKey: 'edge_pop',
+    id: 'edge_pop', meta: { label: 'Edge POP' }, header: columnHeader('Edge POP'),
+    cell: (info) => (
+      <FilterValueCell
+        filters={[{ column: 'pop', value: textValue(info.getValue()) }]}
+        display={<PopLabel code={textValue(info.getValue())} />}
+        className={cn('font-bold', info.row.original.anomaly_static ? 'text-destructive' : '')}
+      />
+    ),
+  },
+  {
+    accessorKey: 'shield_pop',
+    id: 'shield_pop', meta: { label: 'Shield POP' }, header: columnHeader('Shield POP'),
+    cell: (info) => (
+      <FilterValueCell
+        filters={[{ column: 'shield_pop', value: textValue(info.getValue()) }]}
+        display={<PopLabel code={textValue(info.getValue())} />}
+        className="font-bold text-purple-500"
+      />
+    ),
+  },
+  {
+    accessorKey: 'requests', id: 'requests', meta: { label: 'Requests' }, header: columnHeader('Reqs'),
+    cell: (info) => {
+      const lowSample = info.row.original.low_sample
+      return (
+        <span
+          className={cn('tabular-nums', lowSample ? 'text-muted-foreground' : '')}
+          title={lowSample ? 'Fewer than 30 requests — percentiles unreliable, route not flagged' : undefined}
+        >
+          {formatCount(numberValue(info.getValue()) ?? 0)}
+        </span>
+      )
+    },
+  },
+  { accessorKey: 'p50_ms', id: 'p50_ms', meta: { label: 'Median (P50)' }, header: columnHeader('P50 (E→S)'), cell: (info) => msCell(info.getValue()) },
+  { accessorKey: 'p95_ms', id: 'p95_ms', meta: { label: 'P95 Latency' }, header: columnHeader('P95 (E→S)'), cell: (info) => msCell(info.getValue()) },
+  { accessorKey: 'p99_ms', id: 'p99_ms', meta: { label: 'P99 Latency' }, header: columnHeader('P99 (E→S)'), cell: (info) => msCell(info.getValue()) },
+  {
+    accessorKey: 'light_speed_rtt_ms', id: 'light_speed_rtt_ms', meta: { label: 'Light-Speed Floor' }, header: columnHeader('Light Floor'),
+    cell: (info) => {
+      const floor = numberValue(info.getValue())
+      return floor != null ? <span className="text-muted-foreground">{floor.toFixed(1)}ms</span> : <span className="text-muted-foreground">—</span>
+    },
+  },
+  {
+    accessorKey: 'efficiency_ratio', id: 'efficiency_ratio', meta: { label: 'Efficiency' }, header: columnHeader('Efficiency'),
+    cell: (info) => {
+      const ratio = numberValue(info.getValue())
+      if (ratio == null) return <span className="text-muted-foreground">—</span>
+      const lowSample = info.row.original.low_sample
+      const cls = lowSample || ratio < 0 ? 'bg-muted text-muted-foreground' : ratio < 1.5 ? 'bg-green-500/10 text-green-600 dark:text-green-400' : ratio < 3 ? 'bg-yellow-500/10 text-yellow-600 dark:text-yellow-400' : 'bg-destructive/10 text-destructive'
+      return <span title={lowSample ? 'Fewer than 30 requests — too few samples to grade; not flagged' : undefined} className={cn("inline-flex items-center rounded-full px-1.5 py-0.5 text-[10px] font-bold tabular-nums", cls)}>{ratio.toFixed(1)}×</span>
+    },
+  },
+]
+
+const SHIELDING_LABELS: Record<string, string> = {
+  edge_pop: 'Edge POP', shield_pop: 'Shield POP', requests: 'Requests',
+  p50_ms: 'Median (P50)', p95_ms: 'P95 Latency', p99_ms: 'P99 Latency',
+  light_speed_rtt_ms: 'Light-Speed Floor', efficiency_ratio: 'Efficiency',
+}
+export const getShieldingLabels = (ids: string[]) => ids.map(id => ({ id, label: SHIELDING_LABELS[id] || id }))
 
 const PROTOCOL_COLORS = ['bg-emerald-500', 'bg-sky-500', 'bg-amber-500', 'bg-purple-500', 'bg-rose-500'] as const
 
@@ -526,7 +786,6 @@ function NetworkBody({
           </div>
         </div>
       )}
-      {/* ── Map ── */}
       <NetworkMap
         data={mapData} isLoading={isMapLoadingInitial}
         error={mapAsn === 'all' ? coreQuery.error : mapQuery.error}
@@ -535,7 +794,6 @@ function NetworkBody({
         mapAsn={mapAsn} onAsnChange={setMapAsn} asnOptions={asnOptions}
       />
 
-      {/* ── Summary cards ── */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 [contain-intrinsic-size:120px] [content-visibility:auto]">
         <StatCard
           title="Global Health" icon={Activity} loading={isCoreLoadingInitial} loadingMessage="Compiling ASN health matrix..."
@@ -561,14 +819,12 @@ function NetworkBody({
         />
       </div>
 
-      {/* ── Edge Transport & TCP Performance ── */}
       <TransportSection activeServiceId={activeServiceId} startTime={startTime} endTime={endTime} filterPayload={filterPayload} />
 
       <div className="my-6 [contain-intrinsic-size:280px] [content-visibility:auto]">
         {activeServiceId && <PopHealthHeatmap serviceId={activeServiceId} startTime={startTime} endTime={endTime} />}
       </div>
 
-      {/* ── Heatmap ── */}
       {heatmapData && (
         <AnalyticsCard
           title="ASN Health Score over Time" helpTitle="ASN Health Score over Time" helpContent={<HeatmapHelp />}
@@ -579,7 +835,6 @@ function NetworkBody({
         </AnalyticsCard>
       )}
 
-      {/* ── Edge → Shield POP Map ── */}
       {(shieldingData || isShieldingLoadingInitial || shieldingQuery.error) && (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 [contain-intrinsic-size:460px] [content-visibility:auto]">
           <AnalyticsCard
@@ -676,7 +931,6 @@ function NetworkBody({
       )}
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 [contain-intrinsic-size:420px] [content-visibility:auto]">
-        {/* ── ASN Leaderboard ── */}
         <AnalyticsCard
           title="ASN Performance Leaderboard" className="flex flex-col [contain-intrinsic-size:420px] [content-visibility:auto]"
           contentClassName="p-0 flex-1" helpTitle="ASN Performance Leaderboard" helpContent={<AsnLeaderboardHelp />}
@@ -691,7 +945,6 @@ function NetworkBody({
           </LeaderboardStatusBody>
         </AnalyticsCard>
 
-        {/* ── Metro Leaderboard ── */}
         {data?.has_metro && (
           <AnalyticsCard
             title="Metro / Region Leaderboard" className="flex flex-col [contain-intrinsic-size:420px] [content-visibility:auto]"
@@ -709,7 +962,6 @@ function NetworkBody({
         )}
       </div>
 
-      {/* ── Network Quality (TCP RTT breakdowns + RTT-vs-TTFB scatter) ── */}
       {(isQualityLoadingInitial || qualityData?.available || qualityQuery.error) && (
         <div className="space-y-4 [contain-intrinsic-size:400px] [content-visibility:auto]">
           <h2 className="text-sm font-semibold text-muted-foreground uppercase tracking-wide">Network Quality</h2>

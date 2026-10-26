@@ -3,7 +3,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { QueryClient, QueryObserver } from '@tanstack/react-query'
-import { applyShare, applySyncStatus, applySystemMetrics, makeCronRunsApplier } from '@/lib/admin-stream-apply'
+import { applyShare, applySyncStatus, applySystemMetrics, makeCronRunsApplier } from '@/hooks/useSSE'
 import { buildFiltersPayload } from '@/types/api'
 import type { FilterPill } from '@/types/api'
 

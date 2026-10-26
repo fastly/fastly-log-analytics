@@ -5,12 +5,6 @@ import json
 from unittest.mock import MagicMock, patch
 
 import pytest
-from fastapi.testclient import TestClient
-
-from backend import config as svcconfig
-from backend.core import metadata as metadata_db
-from backend.main import app
-from backend.provision.declarative import reconciler
 from backend.provision.declarative.diff import (
     Backend,
     DiffResult,
@@ -25,8 +19,14 @@ from backend.provision.declarative.iac_reconciler import (
     reconcile_infrastructure,
     verify_compute_scorer_readiness,
 )
+from fastapi.testclient import TestClient
+
+from backend import config as svcconfig
+from backend.core import metadata as metadata_db
+from backend.main import app
+from backend.provision.declarative import reconciler
 from backend.provision.declarative.reconciler import VclValidationError, _record_reconcile_audit, reconcile_vcl_state
-from backend.provision.declarative.state import config_changed, migrate_config
+from backend.provision.declarative.state import FeatureState, config_changed, migrate_config
 from backend.provision.session_scoring_orchestrator import _SCORING_FIELD_NAMES
 
 # ── From test_config_migration.py ──
@@ -1001,3 +1001,293 @@ def test_update_local_config_skips_a_read_only_volume(monkeypatch):
 
     monkeypatch.setattr(svcconfig, "mutate_config", boom)
     reconciler._update_local_config("svc-x", lambda c: None)  # must not raise
+
+
+# ── Merged from tests/provision/declarative/test_state.py ──
+
+
+class TestFeatureStateValidation:
+    def test_featurestate_validates_log_period_range(self):
+        with pytest.raises(ValueError, match="log_period.*1.*3600"):
+            FeatureState.from_config({"service_id": "srv_test", "log_period": 0, "sample_rate": 100})
+
+    def test_featurestate_allows_low_log_period_for_high_rps_services(self):
+        for period in (1, 5, 10, 20):
+            state = FeatureState.from_config({"service_id": "srv_test", "log_period": period, "sample_rate": 100})
+            assert state.log_period == period
+
+    def test_featurestate_validates_rum_log_period_range(self):
+        for bad_period in (0, 4000):
+            with pytest.raises(ValueError, match="rum_log_period.*1.*3600"):
+                FeatureState.from_config(
+                    {"service_id": "srv_test", "log_period": 60, "sample_rate": 100, "rum_log_period": bad_period}
+                )
+
+    def test_featurestate_validates_sample_rate_range(self):
+        with pytest.raises(ValueError, match="sample_rate.*1.*100"):
+            FeatureState.from_config({"service_id": "srv_test", "log_period": 60, "sample_rate": 150})
+
+    def test_featurestate_rejects_scoring_without_domain(self):
+        with pytest.raises(ValueError, match="scoring.enabled.*scoring.domain"):
+            FeatureState.from_config(
+                {
+                    "service_id": "srv_test",
+                    "log_period": 60,
+                    "sample_rate": 100,
+                    "scoring_enabled": True,
+                    "scoring_domain": "",
+                }
+            )
+
+    def test_featurestate_validates_custom_field_names(self):
+        with pytest.raises(ValueError, match="Custom field name"):
+            FeatureState.from_config(
+                {
+                    "service_id": "srv_test",
+                    "log_period": 60,
+                    "sample_rate": 100,
+                    "log_fields": {"custom_fields": [{"name": "invalid-field", "expression": "..."}]},
+                }
+            )
+
+
+class TestFeatureStateDependencyInjection:
+    def test_featurestate_from_config_injects_rum_cid(self):
+        state = FeatureState.from_config(
+            {
+                "service_id": "srv_test",
+                "log_period": 60,
+                "sample_rate": 100,
+                "rum_enabled": True,
+                "log_fields": {"custom_fields": [{"name": "custom_field_1", "expression": "..."}]},
+            }
+        )
+        assert any(f["name"] == "rum_cid" for f in state.log_fields.custom_fields)
+        assert state.log_fields.custom_fields[0]["name"] == "custom_field_1"
+
+    def test_featurestate_from_config_injects_edge_score_when_scoring_enabled(self):
+        state = FeatureState.from_config(
+            {
+                "service_id": "srv_test",
+                "log_period": 60,
+                "sample_rate": 100,
+                "scoring_enabled": True,
+                "scoring_domain": "scorer.example.com",
+                "log_fields": {"custom_fields": []},
+            }
+        )
+        for name in ("edge_score", "edge_score_l1", "edge_score_l2"):
+            assert any(f["name"] == name for f in state.log_fields.custom_fields)
+
+    def test_featurestate_from_config_injects_cmcd_fields(self):
+        state = FeatureState.from_config(
+            {
+                "service_id": "srv_test",
+                "log_period": 60,
+                "sample_rate": 100,
+                "cmcd_enabled": True,
+                "log_fields": {"custom_fields": []},
+            }
+        )
+        cmcd_fields = {f["name"]: f for f in state.log_fields.custom_fields if "cmcd" in f["name"]}
+        assert len(cmcd_fields) == 14
+        for name in ("cmcd_sid", "cmcd_cid", "cmcd_ot", "cmcd_sf", "cmcd_st"):
+            assert cmcd_fields[name]["value_type"] == "string" and cmcd_fields[name]["duckdb_type"] == "VARCHAR"
+        for name in ("cmcd_br", "cmcd_bl", "cmcd_d", "cmcd_dl", "cmcd_mtp", "cmcd_tb", "cmcd_rtp"):
+            assert cmcd_fields[name]["value_type"] == "numeric" and cmcd_fields[name]["duckdb_type"] == "INTEGER"
+        for name in ("cmcd_bs", "cmcd_su"):
+            assert cmcd_fields[name]["value_type"] == "boolean" and cmcd_fields[name]["duckdb_type"] == "BOOLEAN"
+
+    def test_featurestate_from_config_does_not_duplicate_injected_fields(self):
+        state = FeatureState.from_config(
+            {
+                "service_id": "srv_test",
+                "log_period": 60,
+                "sample_rate": 100,
+                "rum_enabled": True,
+                "log_fields": {"custom_fields": [{"name": "rum_cid", "expression": "req.http.x-rum-cid"}]},
+            }
+        )
+        assert sum(1 for f in state.log_fields.custom_fields if f["name"] == "rum_cid") == 1
+
+
+class TestFeatureStateImmutability:
+    def test_featurestate_frozen_prevents_mutation(self):
+        state = FeatureState.from_config({"service_id": "srv_test", "log_period": 60, "sample_rate": 100})
+        with pytest.raises(Exception):
+            state.rum_enabled = False
+
+
+class TestFeatureStateSerialization:
+    def test_featurestate_to_dict_includes_all_fields(self):
+        d = FeatureState.from_config(
+            {
+                "service_id": "srv_test",
+                "log_period": 60,
+                "sample_rate": 100,
+                "rum_enabled": True,
+                "scoring_enabled": True,
+                "scoring_domain": "scorer.example.com",
+                "logging_enabled": False,
+            }
+        ).to_dict()
+        assert d["service_id"] == "srv_test" and d["log_period"] == 60 and d["logging_enabled"] is False
+        assert d["rum_enabled"] is True and d["scoring_enabled"] is True
+
+    def test_featurestate_to_dict_defaults_logging_enabled(self):
+        d = FeatureState.from_config({"service_id": "srv_test", "log_period": 60, "sample_rate": 100}).to_dict()
+        assert d["logging_enabled"] is True
+
+
+class TestFeatureStateDualFormatBackwardCompat:
+    def test_featurestate_accepts_flat_cmcd_format(self):
+        state = FeatureState.from_config(
+            {
+                "service_id": "srv_test",
+                "log_period": 60,
+                "sample_rate": 100,
+                "cmcd_enabled": True,
+                "cmcd_mode": "headers",
+                "cmcd_version": 2,
+                "log_fields": {"custom_fields": []},
+            }
+        )
+        assert state.cmcd.enabled is True and state.cmcd.mode == "headers" and state.cmcd.version == 2
+
+    def test_featurestate_accepts_nested_cmcd_format(self):
+        state = FeatureState.from_config(
+            {
+                "service_id": "srv_test",
+                "log_period": 60,
+                "sample_rate": 100,
+                "cmcd": {"enabled": True, "mode": "headers", "version": 2},
+                "log_fields": {"custom_fields": []},
+            }
+        )
+        assert state.cmcd.enabled is True and state.cmcd.mode == "headers" and state.cmcd.version == 2
+
+    def test_featurestate_flat_and_nested_cmcd_produce_same_result(self):
+        state_flat = FeatureState.from_config(
+            {
+                "service_id": "srv_test",
+                "log_period": 60,
+                "sample_rate": 100,
+                "cmcd_enabled": True,
+                "cmcd_mode": "headers",
+                "log_fields": {"custom_fields": []},
+            }
+        )
+        state_nested = FeatureState.from_config(
+            {
+                "service_id": "srv_test",
+                "log_period": 60,
+                "sample_rate": 100,
+                "cmcd": {"enabled": True, "mode": "headers"},
+                "log_fields": {"custom_fields": []},
+            }
+        )
+        assert state_flat.cmcd == state_nested.cmcd
+
+    def test_featurestate_accepts_flat_scoring_format(self):
+        state = FeatureState.from_config(
+            {
+                "service_id": "srv_test",
+                "log_period": 60,
+                "sample_rate": 100,
+                "scoring_enabled": True,
+                "scoring_domain": "scorer.example.com",
+                "scoring_request_secret": "secret123",
+                "scoring_enforce_status_code": 429,
+                "log_fields": {"custom_fields": []},
+            }
+        )
+        assert state.scoring.enabled is True and state.scoring.domain == "scorer.example.com"
+        assert state.scoring.request_secret == "secret123" and state.scoring.enforce_status_code == 429
+
+    def test_featurestate_accepts_nested_scoring_format(self):
+        state = FeatureState.from_config(
+            {
+                "service_id": "srv_test",
+                "log_period": 60,
+                "sample_rate": 100,
+                "scoring": {
+                    "enabled": True,
+                    "domain": "scorer.example.com",
+                    "request_secret": "secret123",
+                    "enforce_status_code": 429,
+                },
+                "log_fields": {"custom_fields": []},
+            }
+        )
+        assert state.scoring.enabled is True and state.scoring.domain == "scorer.example.com"
+        assert state.scoring.request_secret == "secret123" and state.scoring.enforce_status_code == 429
+
+    def test_featurestate_flat_and_nested_scoring_produce_same_result(self):
+        state_flat = FeatureState.from_config(
+            {
+                "service_id": "srv_test",
+                "log_period": 60,
+                "sample_rate": 100,
+                "scoring_enabled": True,
+                "scoring_domain": "scorer.example.com",
+                "log_fields": {"custom_fields": []},
+            }
+        )
+        state_nested = FeatureState.from_config(
+            {
+                "service_id": "srv_test",
+                "log_period": 60,
+                "sample_rate": 100,
+                "scoring": {"enabled": True, "domain": "scorer.example.com"},
+                "log_fields": {"custom_fields": []},
+            }
+        )
+        assert state_flat.scoring.enabled == state_nested.scoring.enabled
+        assert state_flat.scoring.domain == state_nested.scoring.domain
+
+    def test_featurestate_to_dict_outputs_flat_format(self):
+        d = FeatureState.from_config(
+            {
+                "service_id": "srv_test",
+                "log_period": 60,
+                "sample_rate": 100,
+                "cmcd_enabled": True,
+                "cmcd_mode": "headers",
+                "scoring_enabled": True,
+                "scoring_domain": "scorer.example.com",
+                "log_fields": {
+                    "groups": ["test_group"],
+                    "custom_fields": [{"name": "custom_1", "expression": "..."}],
+                },
+            }
+        ).to_dict()
+        assert d["cmcd_enabled"] is True and d["cmcd_mode"] == "headers"
+        assert d["scoring_enabled"] is True and d["scoring_domain"] == "scorer.example.com"
+        assert d["log_groups"] == ["test_group"] and len(d["custom_fields"]) >= 1
+
+    def test_featurestate_flat_override_beats_nested(self):
+        state = FeatureState.from_config(
+            {
+                "service_id": "srv_test",
+                "log_period": 60,
+                "sample_rate": 100,
+                "cmcd_enabled": True,
+                "cmcd": {"enabled": False},
+                "log_fields": {"custom_fields": []},
+            }
+        )
+        assert state.cmcd.enabled is True
+
+    def test_featurestate_extracts_rum_log_period(self):
+        state_nested = FeatureState.from_config(
+            {"service_id": "srv_test", "log_period": 60, "rum": {"enabled": True, "log_period": 300}}
+        )
+        assert state_nested.rum_log_period == 300
+        state_flat = FeatureState.from_config(
+            {"service_id": "srv_test", "log_period": 60, "rum_enabled": True, "rum_log_period": 600}
+        )
+        assert state_flat.rum_log_period == 600
+
+    def test_featurestate_to_dict_includes_rum_log_period(self):
+        d = FeatureState.from_config({"service_id": "srv_test", "log_period": 60, "rum_log_period": 300}).to_dict()
+        assert d["rum_log_period"] == 300

@@ -2,7 +2,9 @@ import { HydrationBoundary } from '@tanstack/react-query'
 
 import { fetchAlertsServerSide } from '@/lib/ssr/upstream'
 import { resolvePageServiceId, seedDehydratedState } from '@/lib/ssr/upstream'
-import AlertsClient from './_sections/AlertsClient'
+import AlertsClient, { AlertsList, ALERTS_AVAILABLE_COLUMNS } from './_sections/AlertsClient'
+
+export { AlertsList, ALERTS_AVAILABLE_COLUMNS }
 
 // Per-request RSC shell. We fetch the alerts list server-side and
 // dehydrate it into a HydrationBoundary so AlertsClient's useQuery

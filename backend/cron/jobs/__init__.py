@@ -16,6 +16,8 @@ if _backend_pkg is not None and hasattr(_backend_pkg, "_MODULE_ALIASES"):
             "backend.cron.jobs.duckdb_recycle": "backend.cron.jobs.metadata",
             "backend.core.metadata.slow_queries": "backend.core.metadata.usage_log",
             "backend.cron.decorators": "backend.cron.scheduler",
+            "backend.cron.lifecycle": "backend.cron.scheduler",
+            "backend.cron.jobs.insights_prewarmer": "backend.cron.jobs.metadata",
             "backend.cron.jobs.rum_commit": "backend.cron.jobs.rum_sync",
         }
     )

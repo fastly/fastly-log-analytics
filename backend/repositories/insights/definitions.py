@@ -1366,22 +1366,7 @@ COALESCED_CITY_AGGREGATES = """
 # ONE pass over the temp table that computes the superset for the URL-keyed
 # insights.
 
-COALESCED_URL_AGGREGATES = """
-    WITH base AS (
-        SELECT
-            "url",
-            status,
-            cache,
-            elapsed,
-            (timestamp < CAST(? AS TIMESTAMPTZ)) AS is_b,
-            (timestamp >= CAST(? AS TIMESTAMPTZ)) AS is_w
-        FROM {table_name}
-        WHERE "url" IS NOT NULL
-    )
-    SELECT
-        "url",
-        -- Common counts
-        COUNT(*) FILTER (WHERE is_w) AS w_total,
+_COALESCED_URL_CORE_COLS = """COUNT(*) FILTER (WHERE is_w) AS w_total,
         COUNT(*) FILTER (WHERE is_b) AS b_total,
         -- error_spikes: 5xx counters
         SUM(CASE WHEN status >= 500 THEN 1 ELSE 0 END) FILTER (WHERE is_w) AS w_5xx,
@@ -1408,18 +1393,26 @@ COALESCED_URL_AGGREGATES = """
         ROUND(PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY elapsed)
               FILTER (WHERE is_w AND elapsed IS NOT NULL) / 1000.0, 0) AS w_p99,
         ROUND(PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY elapsed)
-              FILTER (WHERE is_w AND elapsed IS NOT NULL) / 1000.0, 0) AS w_p50
-    FROM base
-    GROUP BY "url"
-    HAVING COUNT(*) FILTER (WHERE is_w) >= 3
+              FILTER (WHERE is_w AND elapsed IS NOT NULL) / 1000.0, 0) AS w_p50"""
+
+COALESCED_URL_AGGREGATES = f"""
+    WITH base AS (
+        SELECT "url", status, cache, elapsed,
+            (timestamp < CAST(? AS TIMESTAMPTZ)) AS is_b,
+            (timestamp >= CAST(? AS TIMESTAMPTZ)) AS is_w
+        FROM {{table_name}} WHERE "url" IS NOT NULL
+    )
+    SELECT "url",
+        -- Common counts
+        {_COALESCED_URL_CORE_COLS}
+    FROM base GROUP BY "url" HAVING COUNT(*) FILTER (WHERE is_w) >= 3
     """
 
 COALESCED_URL_EXTENDED_AGGREGATES = f"""
     WITH url_flags AS (
         SELECT "url", is_probe, is_comp, is_img
         FROM (
-            SELECT
-                "url",
+            SELECT "url",
                 regexp_matches("url", '{NEW_PROBE_REGEX}', 'i') AS is_probe,
                 regexp_matches("url", '{COMPRESSIBLE_REGEX}', 'i') AS is_comp,
                 (("url" ILIKE '%.jpg%' OR "url" ILIKE '%.jpeg%' OR "url" ILIKE '%.png%' OR "url" ILIKE '%.gif%')
@@ -1430,18 +1423,10 @@ COALESCED_URL_EXTENDED_AGGREGATES = f"""
         WHERE is_probe OR is_comp OR is_img
     ),
     base AS (
-        SELECT
-            t."url" AS url,
-            t.status,
-            t.cache,
-            t.elapsed,
-            {{resp_bytes_sel}} AS resp_bytes,
-            {{uncompressed_sel}} AS uncompressed,
-            {{is_mobile_sel}} AS is_mobile,
-            {{ttl_sel}} AS ttl,
-            {{hits_sel}} AS hits,
-            {{age_sel}} AS age,
-            {{oretries_sel}} AS oretries,
+        SELECT t."url" AS url, t.status, t.cache, t.elapsed,
+            {{resp_bytes_sel}} AS resp_bytes, {{uncompressed_sel}} AS uncompressed,
+            {{is_mobile_sel}} AS is_mobile, {{ttl_sel}} AS ttl, {{hits_sel}} AS hits,
+            {{age_sel}} AS age, {{oretries_sel}} AS oretries,
             {coalesce("u.is_probe", "FALSE")} AS is_probe,
             {coalesce("u.is_comp", "FALSE")} AS is_comp,
             {coalesce("u.is_img", "FALSE")} AS is_img,
@@ -1451,28 +1436,8 @@ COALESCED_URL_EXTENDED_AGGREGATES = f"""
         LEFT JOIN url_flags u ON t."url" = u."url"
         WHERE t."url" IS NOT NULL
     )
-    SELECT
-        url,
-        COUNT(*) FILTER (WHERE is_w) AS w_total,
-        COUNT(*) FILTER (WHERE is_b) AS b_total,
-        SUM(CASE WHEN status >= 500 THEN 1 ELSE 0 END) FILTER (WHERE is_w) AS w_5xx,
-        SUM(CASE WHEN status >= 500 THEN 1 ELSE 0 END) FILTER (WHERE is_b) AS b_5xx,
-        SUM(CASE WHEN starts_with(cache, 'HIT') THEN 1 ELSE 0 END) FILTER (WHERE is_w) AS w_hits,
-        SUM(CASE WHEN starts_with(cache, 'HIT') THEN 1 ELSE 0 END) FILTER (WHERE is_b) AS b_hits,
-        SUM(CASE WHEN starts_with(cache, 'MISS') THEN 1 ELSE 0 END) FILTER (WHERE is_w) AS w_miss,
-        SUM(CASE WHEN starts_with(cache, 'MISS') THEN 1 ELSE 0 END) FILTER (WHERE is_b) AS b_miss,
-        SUM(CASE WHEN starts_with(cache, 'PASS') THEN 1 ELSE 0 END) FILTER (WHERE is_w) AS w_pass,
-        SUM(CASE WHEN starts_with(cache, 'PASS') THEN 1 ELSE 0 END) FILTER (WHERE is_b) AS b_pass,
-        COUNT(*) FILTER (WHERE is_w AND elapsed IS NOT NULL) AS w_lat_total,
-        COUNT(*) FILTER (WHERE is_b AND elapsed IS NOT NULL) AS b_lat_total,
-        PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY elapsed)
-            FILTER (WHERE is_w AND elapsed IS NOT NULL) / 1000.0 AS w_p95,
-        PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY elapsed)
-            FILTER (WHERE is_b AND elapsed IS NOT NULL) / 1000.0 AS b_p95,
-        ROUND(PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY elapsed)
-              FILTER (WHERE is_w AND elapsed IS NOT NULL) / 1000.0, 0) AS w_p99,
-        ROUND(PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY elapsed)
-              FILTER (WHERE is_w AND elapsed IS NOT NULL) / 1000.0, 0) AS w_p50,
+    SELECT url,
+        {_COALESCED_URL_CORE_COLS},
         -- new_probe_urls
         BOOL_OR(is_probe) AS is_probe,
         SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END) FILTER (WHERE is_w) AS w_4xx,
@@ -1531,12 +1496,29 @@ COALESCED_URL_EXTENDED_AGGREGATES = f"""
 # hydration. The outer HAVING pre-filters to IPs touching at least one signal so
 # the returned set stays small; the caller further bounds memory with per-insight
 # top-K heaps.
+def _ip_sec_core_cols(ug: str = "") -> str:
+    return f"""-- low_and_slow: probe paths over the WHOLE span (no window split)
+        COUNT(*) FILTER (WHERE {ug}is_sensitive) AS ls_hits,
+        COUNT(DISTINCT url) FILTER (WHERE {ug}is_sensitive) AS ls_distinct,
+        MIN(sec) FILTER (WHERE {ug}is_sensitive) AS ls_min_sec,
+        MAX(sec) FILTER (WHERE {ug}is_sensitive) AS ls_max_sec,
+        -- credential_enumeration: auth paths, window/baseline 401/403
+        COUNT(*) FILTER (WHERE {ug}is_auth AND is_w AND status IN (401, 403)) AS ce_w_denied,
+        COUNT(*) FILTER (WHERE {ug}is_auth AND is_w) AS ce_w_attempts,
+        COUNT(DISTINCT url) FILTER (WHERE {ug}is_auth AND is_w) AS ce_w_paths,
+        COUNT(*) FILTER (WHERE {ug}is_auth AND is_b AND status IN (401, 403)) AS ce_b_denied,
+        -- content_discovery: all URLs, window/baseline 404s
+        COUNT(*) FILTER (WHERE {ug}is_w AND status = 404) AS cd_w_404,
+        COUNT(*) FILTER (WHERE {ug}is_w) AS cd_w_total,
+        COUNT(DISTINCT url) FILTER (WHERE {ug}is_w AND status = 404) AS cd_distinct_404,
+        COUNT(*) FILTER (WHERE {ug}is_b AND status = 404) AS cd_b_404"""
+
+
 COALESCED_IP_SECURITY_AGGREGATES = f"""
     WITH url_flags AS (
         SELECT "url", is_sensitive, is_auth
         FROM (
-            SELECT
-                "url",
+            SELECT "url",
                 regexp_matches("url", '{NEW_PROBE_REGEX}', 'i') AS is_sensitive,
                 regexp_matches("url", '{AUTH_PATHS_REGEX}', 'i') AS is_auth
             FROM (SELECT DISTINCT "url" FROM {{table_name}} WHERE "url" IS NOT NULL)
@@ -1544,37 +1526,17 @@ COALESCED_IP_SECURITY_AGGREGATES = f"""
         WHERE is_sensitive OR is_auth
     ),
     base AS (
-        SELECT
-            t."ip" AS ip,
-            t."url" AS url,
-            t.status,
-            epoch(t."timestamp")::BIGINT AS sec,
+        SELECT t."ip" AS ip, t."url" AS url, t.status, epoch(t."timestamp")::BIGINT AS sec,
             {coalesce("u.is_sensitive", "FALSE")} AS is_sensitive,
             {coalesce("u.is_auth", "FALSE")} AS is_auth,
             (t.timestamp < CAST(? AS TIMESTAMPTZ)) AS is_b,
             (t.timestamp >= CAST(? AS TIMESTAMPTZ)) AS is_w
         FROM {{table_name}} t
         LEFT JOIN url_flags u ON t."url" = u."url"
-        WHERE t."ip" IS NOT NULL AND t."ip" <> ''
-          AND t."url" IS NOT NULL
+        WHERE t."ip" IS NOT NULL AND t."ip" <> '' AND t."url" IS NOT NULL
     )
-    SELECT
-        ip,
-        -- low_and_slow: probe paths over the WHOLE span (no window split)
-        COUNT(*) FILTER (WHERE is_sensitive) AS ls_hits,
-        COUNT(DISTINCT url) FILTER (WHERE is_sensitive) AS ls_distinct,
-        MIN(sec) FILTER (WHERE is_sensitive) AS ls_min_sec,
-        MAX(sec) FILTER (WHERE is_sensitive) AS ls_max_sec,
-        -- credential_enumeration: auth paths, window/baseline 401/403
-        COUNT(*) FILTER (WHERE is_auth AND is_w AND status IN (401, 403)) AS ce_w_denied,
-        COUNT(*) FILTER (WHERE is_auth AND is_w) AS ce_w_attempts,
-        COUNT(DISTINCT url) FILTER (WHERE is_auth AND is_w) AS ce_w_paths,
-        COUNT(*) FILTER (WHERE is_auth AND is_b AND status IN (401, 403)) AS ce_b_denied,
-        -- content_discovery: all URLs, window/baseline 404s
-        COUNT(*) FILTER (WHERE is_w AND status = 404) AS cd_w_404,
-        COUNT(*) FILTER (WHERE is_w) AS cd_w_total,
-        COUNT(DISTINCT url) FILTER (WHERE is_w AND status = 404) AS cd_distinct_404,
-        COUNT(*) FILTER (WHERE is_b AND status = 404) AS cd_b_404
+    SELECT ip,
+        {_ip_sec_core_cols()}
     FROM base
     WHERE is_w OR is_sensitive OR status = 404 OR (is_auth AND status IN (401, 403))
     GROUP BY ip
@@ -1587,8 +1549,7 @@ COALESCED_IP_EXTENDED_AGGREGATES = f"""
     WITH url_flags AS (
         SELECT "url", is_sensitive, is_auth, is_deep
         FROM (
-            SELECT
-                "url",
+            SELECT "url",
                 regexp_matches("url", '{NEW_PROBE_REGEX}', 'i') AS is_sensitive,
                 regexp_matches("url", '{AUTH_PATHS_REGEX}', 'i') AS is_auth,
                 ("url" LIKE '/%/%/%' AND "url" NOT LIKE '%.%') AS is_deep
@@ -1597,15 +1558,9 @@ COALESCED_IP_EXTENDED_AGGREGATES = f"""
         WHERE is_sensitive OR is_auth OR is_deep
     ),
     base AS (
-        SELECT
-            t."ip" AS ip,
-            t."url" AS url,
-            t.status,
-            epoch(t."timestamp")::BIGINT AS sec,
-            {{no_referer_sel}} AS no_referer,
-            {{cs_sel}} AS cs,
-            {{req_header_bytes_sel}} AS req_header_bytes,
-            {{conn_requests_sel}} AS conn_requests,
+        SELECT t."ip" AS ip, t."url" AS url, t.status, epoch(t."timestamp")::BIGINT AS sec,
+            {{no_referer_sel}} AS no_referer, {{cs_sel}} AS cs,
+            {{req_header_bytes_sel}} AS req_header_bytes, {{conn_requests_sel}} AS conn_requests,
             {coalesce("u.is_sensitive", "FALSE")} AS is_sensitive,
             {coalesce("u.is_auth", "FALSE")} AS is_auth,
             {coalesce("u.is_deep", "FALSE")} AS is_deep,
@@ -1615,23 +1570,8 @@ COALESCED_IP_EXTENDED_AGGREGATES = f"""
         LEFT JOIN url_flags u ON t."url" = u."url"
         WHERE t."ip" IS NOT NULL AND t."ip" <> ''
     )
-    SELECT
-        ip,
-        -- low_and_slow: probe paths over the WHOLE span (no window split)
-        COUNT(*) FILTER (WHERE url IS NOT NULL AND is_sensitive) AS ls_hits,
-        COUNT(DISTINCT url) FILTER (WHERE url IS NOT NULL AND is_sensitive) AS ls_distinct,
-        MIN(sec) FILTER (WHERE url IS NOT NULL AND is_sensitive) AS ls_min_sec,
-        MAX(sec) FILTER (WHERE url IS NOT NULL AND is_sensitive) AS ls_max_sec,
-        -- credential_enumeration: auth paths, window/baseline 401/403
-        COUNT(*) FILTER (WHERE url IS NOT NULL AND is_auth AND is_w AND status IN (401, 403)) AS ce_w_denied,
-        COUNT(*) FILTER (WHERE url IS NOT NULL AND is_auth AND is_w) AS ce_w_attempts,
-        COUNT(DISTINCT url) FILTER (WHERE url IS NOT NULL AND is_auth AND is_w) AS ce_w_paths,
-        COUNT(*) FILTER (WHERE url IS NOT NULL AND is_auth AND is_b AND status IN (401, 403)) AS ce_b_denied,
-        -- content_discovery: all URLs, window/baseline 404s
-        COUNT(*) FILTER (WHERE url IS NOT NULL AND is_w AND status = 404) AS cd_w_404,
-        COUNT(*) FILTER (WHERE url IS NOT NULL AND is_w) AS cd_w_total,
-        COUNT(DISTINCT url) FILTER (WHERE url IS NOT NULL AND is_w AND status = 404) AS cd_distinct_404,
-        COUNT(*) FILTER (WHERE url IS NOT NULL AND is_b AND status = 404) AS cd_b_404,
+    SELECT ip,
+        {_ip_sec_core_cols("url IS NOT NULL AND ")},
         -- orphaned_deep_crawl
         COUNT(*) FILTER (WHERE url IS NOT NULL AND is_deep AND no_referer AND is_w) AS odc_w_reqs,
         COUNT(DISTINCT url) FILTER (WHERE url IS NOT NULL AND is_deep AND no_referer AND is_w) AS odc_w_urls,
@@ -2241,13 +2181,7 @@ def _item(
 
 
 def _p95_latency_item(
-    label: str,
-    w_p95: Any,
-    b_p95: Any,
-    reqs: Any,
-    filters: dict[str, Any],
-    *,
-    reqs_key: str = "window_requests",
+    label: str, w_p95: Any, b_p95: Any, reqs: Any, filters: dict[str, Any], *, reqs_key: str = "window_requests"
 ) -> dict[str, Any]:
     w_f, b_f = float(w_p95 or 0), float(b_p95 or 0)
     return _item(
@@ -2261,19 +2195,11 @@ def _p95_latency_item(
 
 
 def _traffic_share_rates(w_cnt: Any, w_total: Any, b_cnt: Any, b_total: Any) -> tuple[float, float]:
-    w_rate = float(w_cnt * 100.0 / w_total) if w_total else 0.0
-    b_rate = float(b_cnt * 100.0 / b_total) if b_total else 0.0
-    return w_rate, b_rate
+    return (float(w_cnt * 100.0 / w_total) if w_total else 0.0), (float(b_cnt * 100.0 / b_total) if b_total else 0.0)
 
 
 def _error_rate_spike_item(
-    label: str,
-    w_rate: Any,
-    b_rate: Any,
-    w_errors: Any,
-    w_total: Any,
-    unit: str,
-    filters: dict[str, Any],
+    label: str, w_rate: Any, b_rate: Any, w_errors: Any, w_total: Any, unit: str, filters: dict[str, Any]
 ) -> dict[str, Any]:
     return _item(
         label,
@@ -2310,13 +2236,7 @@ def _url_rate_regression_processor(row: tuple, unit: str, *, is_critical: bool) 
 
 
 def _ip_max_vs_p95_processor(
-    row: tuple,
-    context: dict,
-    *,
-    unit: str,
-    max_key: str,
-    avg_key: str,
-    crit_thresh: int,
+    row: tuple, context: dict, *, unit: str, max_key: str, avg_key: str, crit_thresh: int
 ) -> dict:
     ip = _mask_ip_if_needed(row[0], context)
     max_val, avg_val, b_p95 = int(row[1] or 0), int(row[2] or 0), int(row[4] or 0)
@@ -2360,11 +2280,11 @@ def botnet_grouping_processor(row: tuple, definition: InsightDefinition, context
     return _item(
         row[0],
         row[1],
-        row[3],  # Raw baseline IPS
+        row[3],
         "distinct IPs",
         {"requests": row[2], "ip_ratio": round(float(row[4]), 1), "filters": {fp_col: row[0]}},
         "critical" if row[1] >= 50 else "warning",
-    )
+    )  # Raw baseline IPS
 
 
 _reg(
@@ -2546,18 +2466,18 @@ def waf_signal_spikes_processor(row: tuple, definition: InsightDefinition, conte
     )
 
 
+# Reads from {waf_table} — the insights repo materialises a
+# second TEMP TABLE that pre-unnests "waf_sig" once per request
+# (trimmed, non-empty, excluding BOT-ANALYSIS). When the parent
+# temp table didn't get created or "waf_sig" isn't in schema,
+# {waf_table} substitutes back to the main {table_name} and the
+# inline COALESCE branch below picks up the slack via the legacy
+# all_signals CTE shape.
 _reg(
     id="waf_signal_spikes",
     category=InsightCategory.security,
     title="WAF Signal Spikes",
-    description=("Security signals from the Next-Gen WAF showing unusual activity"),
-    # Reads from {waf_table} — the insights repo materialises a
-    # second TEMP TABLE that pre-unnests "waf_sig" once per request
-    # (trimmed, non-empty, excluding BOT-ANALYSIS). When the parent
-    # temp table didn't get created or "waf_sig" isn't in schema,
-    # {waf_table} substitutes back to the main {table_name} and the
-    # inline COALESCE branch below picks up the slack via the legacy
-    # all_signals CTE shape.
+    description="Security signals from the Next-Gen WAF showing unusual activity",
     sql_template=SQL.WAF_SIGNAL_SPIKES,
     required_fields=["waf_sig", "timestamp"],
     row_processor=waf_signal_spikes_processor,
@@ -2672,7 +2592,6 @@ _reg(
     row_processor=cache_collapse_processor,
 )
 
-
 # ── 15b. Cacheability Regression ──────────────────────────────────────────
 
 
@@ -2719,25 +2638,26 @@ _reg(
 def impossible_distance_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
     # row schema: [fp, hits, worst_excess_km, max_dist_km, min_allowed_km, pop, sample_ip, client_lat, client_lon, pop_lat, pop_lon, tcp_rtt, country, city]
     sample_ip = _mask_ip_if_needed(row[6], context)
+    meta = {
+        "hits": row[1],
+        "excess_km": round(float(row[2]), 0),
+        "pop": row[5],
+        "sample_ip": sample_ip,
+        "client_lat": row[7],
+        "client_lon": row[8],
+        "pop_lat": row[9],
+        "pop_lon": row[10],
+        "tcp_rtt": row[11],
+        "country": row[12],
+        "city": row[13],
+        "filters": {context.get("fp_col", "ja3"): row[0]},
+    }
     return _item(
         row[0],
         round(float(row[3]), 0),
         round(float(row[4]), 0),
         "km",
-        {
-            "hits": row[1],
-            "excess_km": round(float(row[2]), 0),
-            "pop": row[5],
-            "sample_ip": sample_ip,
-            "client_lat": row[7],
-            "client_lon": row[8],
-            "pop_lat": row[9],
-            "pop_lon": row[10],
-            "tcp_rtt": row[11],
-            "country": row[12],
-            "city": row[13],
-            "filters": {context.get("fp_col", "ja3"): row[0]},
-        },
+        meta,
         "critical" if float(row[2]) > 5000 else "warning",
         baseline_label="max allowed",
     )
@@ -2942,7 +2862,7 @@ _reg(
 
 def origin_latency_spike_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
     # row schema: [url, p95_ms, w_p95, b_p95, requests]
-    url, p95_ms, w_p95, b_p95, requests = row
+    url, p95_ms, _w_p95, b_p95, requests = row
     return _item(
         url or "(unknown)",
         float(p95_ms),
@@ -2968,15 +2888,14 @@ _reg(
 
 def origin_error_rate_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
     # row schema: [status, w_cnt, w_total, b_total, w_5xx, b_5xx]
-    status, w_cnt, w_total, b_total, w_5xx, b_5xx = row
-    w_rate = w_5xx * 100.0 / w_total
+    status, w_cnt, w_total, _b_total, w_5xx, _b_5xx = row
     return _item(
         f"HTTP {status}",
         round(w_cnt * 100.0 / w_total, 1),
         None,
         "%",
         {"filters": {"ost": status}},
-        "critical" if w_rate > 5 else "warning",
+        "critical" if (w_5xx * 100.0 / w_total) > 5 else "warning",
     )
 
 
@@ -3091,27 +3010,22 @@ def _process_repeated_patterns(
     # Soft framing: this is a security *accusation* surfaced to a user, so prefer
     # false negatives. critical only when dense AND near-perfectly regular.
     severity = "critical" if (score >= 90 and n_events >= 30) else ("warning" if score >= 70 else "info")
+    meta = {
+        "score": score,
+        "cv": cv,
+        "modal_frac": modal_frac,
+        "mean_interval_s": mean_interval,
+        "stddev_s": stddev,
+        "mode_gap_s": mode_gap,
+        "n_gaps": n_gaps,
+        "n_events": n_events,
+        "span_s": span_s,
+        "rps": rps,
+        diversity_key: diversity_val,
+        "filters": {key_field: entity},
+    }
     return _item(
-        entity or "(unknown)",
-        mean_interval,
-        stddev,
-        "s interval",
-        {
-            "score": score,
-            "cv": cv,
-            "modal_frac": modal_frac,
-            "mean_interval_s": mean_interval,
-            "stddev_s": stddev,
-            "mode_gap_s": mode_gap,
-            "n_gaps": n_gaps,
-            "n_events": n_events,
-            "span_s": span_s,
-            "rps": rps,
-            diversity_key: diversity_val,
-            "filters": {key_field: entity},
-        },
-        severity,
-        baseline_label="jitter (σ)",
+        entity or "(unknown)", mean_interval, stddev, "s interval", meta, severity, baseline_label="jitter (σ)"
     )
 
 
@@ -3133,10 +3047,7 @@ _reg(
     id="repeated_patterns",
     category=InsightCategory.security,
     title="Scripted Traffic Patterns",
-    description=(
-        "IPs sending requests on a highly regular cadence — automated scrapers, "
-        "pollers, or cron-scheduled scripts that evade volumetric rate limits"
-    ),
+    description="IPs sending requests on a highly regular cadence — automated scrapers, pollers, or cron-scheduled scripts that evade volumetric rate limits",
     sql_template=SQL.REPEATED_PATTERNS,
     required_fields=["ip", "timestamp"],
     row_processor=repeated_patterns_processor,
@@ -3149,9 +3060,8 @@ _reg(
 def repeated_patterns_fp_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
     # row schema: [entity, n_gaps, n_events, avg_interval, stddev_interval,
     #              cv_corr, modal_frac, distinct_ip, span_s, mode_gap]
-    fp_col = context.get("fp_col", "ja4")
     return _process_repeated_patterns(
-        row, key_field=fp_col, diversity_key="distinct_ip", mask_key=False, context=context
+        row, key_field=context.get("fp_col", "ja4"), diversity_key="distinct_ip", mask_key=False, context=context
     )
 
 
@@ -3159,11 +3069,7 @@ _reg(
     id="repeated_patterns_fp",
     category=InsightCategory.security,
     title="Scripted Traffic Patterns (by TLS Fingerprint)",
-    description=(
-        "TLS fingerprints sending requests on a highly regular cadence — catches "
-        "IP-rotating scrapers, pollers, or cron-scheduled scripts that share a "
-        "stable TLS stack across many source addresses"
-    ),
+    description="TLS fingerprints sending requests on a highly regular cadence — catches IP-rotating scrapers, pollers, or cron-scheduled scripts that share a stable TLS stack across many source addresses",
     sql_template=SQL.REPEATED_PATTERNS_FP,
     required_fields=["ip", "timestamp"],
     row_processor=repeated_patterns_fp_processor,
@@ -3192,10 +3098,7 @@ _reg(
     id="low_and_slow",
     category=InsightCategory.security,
     title="Low and Slow Scans",
-    description=(
-        "IPs probing many sensitive / vulnerability paths at a deliberately low "
-        "request rate spread over a long span — designed to evade rate limits"
-    ),
+    description="IPs probing many sensitive / vulnerability paths at a deliberately low request rate spread over a long span — designed to evade rate limits",
     sql_template=SQL.LOW_AND_SLOW,
     required_fields=["ip", "url"],
     row_processor=low_and_slow_processor,
@@ -3230,10 +3133,7 @@ _reg(
     id="credential_enumeration",
     category=InsightCategory.security,
     title="Credential Enumeration / Brute Force",
-    description=(
-        "IPs generating a spike of 401/403 responses on authentication paths "
-        "(login, auth, OAuth, password reset) — credential stuffing or brute force"
-    ),
+    description="IPs generating a spike of 401/403 responses on authentication paths (login, auth, OAuth, password reset) — credential stuffing or brute force",
     sql_template=SQL.CREDENTIAL_ENUMERATION,
     required_fields=["ip", "url", "status"],
     row_processor=credential_enumeration_processor,
@@ -3245,27 +3145,31 @@ _reg(
 
 def network_asn_health_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
     # row schema: [asn, w_ploss, b_ploss, w_jitter, b_jitter, w_retrans, b_retrans, w_total, b_total]
-    asn = row[0]
-    w_ploss, b_ploss = float(row[1] or 0), float(row[2] or 0)
-    w_jitter, b_jitter = float(row[3] or 0), float(row[4] or 0)
-    w_retrans, b_retrans = float(row[5] or 0), float(row[6] or 0)
-    w_total = int(row[7] or 0)
+    asn, w_ploss, b_ploss = row[0], float(row[1] or 0), float(row[2] or 0)
+    w_jitter, b_jitter, w_retrans, b_retrans, w_total = (
+        float(row[3] or 0),
+        float(row[4] or 0),
+        float(row[5] or 0),
+        float(row[6] or 0),
+        int(row[7] or 0),
+    )
+    meta = {
+        "window_packet_loss_pct": round(w_ploss * 100, 2),
+        "baseline_packet_loss_pct": round(b_ploss * 100, 2),
+        "window_jitter_ms": round(w_jitter / 1000.0, 1),
+        "baseline_jitter_ms": round(b_jitter / 1000.0, 1),
+        "window_retrans_avg": round(w_retrans, 2),
+        "baseline_retrans_avg": round(b_retrans, 2),
+        "requests": w_total,
+        "asn": asn,
+        "filters": {"asn": asn},
+    }
     return _item(
         _fmt_asn_label(asn, context),
         round(w_ploss * 100, 2),
         round(b_ploss * 100, 2),
         "% packet loss",
-        {
-            "window_packet_loss_pct": round(w_ploss * 100, 2),
-            "baseline_packet_loss_pct": round(b_ploss * 100, 2),
-            "window_jitter_ms": round(w_jitter / 1000.0, 1),
-            "baseline_jitter_ms": round(b_jitter / 1000.0, 1),
-            "window_retrans_avg": round(w_retrans, 2),
-            "baseline_retrans_avg": round(b_retrans, 2),
-            "requests": w_total,
-            "asn": asn,
-            "filters": {"asn": asn},
-        },
+        meta,
         "critical" if w_ploss >= 0.05 else "warning",
     )
 
@@ -3310,10 +3214,7 @@ _reg(
     id="content_discovery",
     category=InsightCategory.security,
     title="Content-Discovery Scanning",
-    description=(
-        "IPs generating a burst of 404s across many distinct URLs — directory / "
-        "endpoint enumeration probing for hidden or vulnerable paths"
-    ),
+    description="IPs generating a burst of 404s across many distinct URLs — directory / endpoint enumeration probing for hidden or vulnerable paths",
     sql_template=SQL.CONTENT_DISCOVERY,
     required_fields=["ip", "url", "status"],
     row_processor=content_discovery_processor,
@@ -3428,8 +3329,7 @@ def metro_delivery_degradation_processor(row: tuple, definition: InsightDefiniti
     # row schema: [metro, w_med, b_med, w_total, b_total]
     metro = row[0]
     # delivery_rate is bytes/sec; present as Mbps (×8 / 1e6).
-    w_mbps = round(float(row[1] or 0) * 8 / 1e6, 1)
-    b_mbps = round(float(row[2] or 0) * 8 / 1e6, 1)
+    w_mbps, b_mbps = round(float(row[1] or 0) * 8 / 1e6, 1), round(float(row[2] or 0) * 8 / 1e6, 1)
     return _item(
         _fmt_metro_label(metro, context),
         w_mbps,
@@ -3504,8 +3404,10 @@ _reg(
 def http3_fallback_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
     # row schema: [w_quic, w_total, b_quic, b_total]
     w_quic, w_total, b_quic, b_total = row
-    w_share = round(w_quic * 100.0 / w_total, 1) if w_total else 0.0
-    b_share = round(b_quic * 100.0 / b_total, 1) if b_total else 0.0
+    w_share, b_share = (
+        (round(w_quic * 100.0 / w_total, 1) if w_total else 0.0),
+        (round(b_quic * 100.0 / b_total, 1) if b_total else 0.0),
+    )
     return _item(
         "HTTP/3 (QUIC) adoption",
         w_share,
@@ -3539,8 +3441,10 @@ _reg(
 def cache_hit_cliff_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
     # row schema: [w_hits, w_cacheable, b_hits, b_cacheable]
     w_hits, w_cacheable, b_hits, b_cacheable = row
-    w_rate = round(w_hits * 100.0 / w_cacheable, 1) if w_cacheable else 0.0
-    b_rate = round(b_hits * 100.0 / b_cacheable, 1) if b_cacheable else 0.0
+    w_rate, b_rate = (
+        (round(w_hits * 100.0 / w_cacheable, 1) if w_cacheable else 0.0),
+        (round(b_hits * 100.0 / b_cacheable, 1) if b_cacheable else 0.0),
+    )
     return _item(
         "Service-wide cache HIT ratio",
         w_rate,
@@ -3635,20 +3539,16 @@ def timeout_split_processor(row: tuple, definition: InsightDefinition, context: 
         phase, cur, base = "connect", round(w_conn, 1), round(b_conn, 1)
     else:
         phase, cur, base = "read", round(w_read, 1), round(b_read, 1)
+    meta = {
+        "phase": phase,
+        "connect_p95_ms": round(w_conn, 1),
+        "baseline_connect_p95_ms": round(b_conn, 1),
+        "read_p95_ms": round(w_read, 1),
+        "baseline_read_p95_ms": round(b_read, 1),
+        "window_requests": int(row[4] or 0),
+    }
     return _item(
-        f"Origin {phase} P95",
-        cur,
-        base,
-        "ms (P95)",
-        {
-            "phase": phase,
-            "connect_p95_ms": round(w_conn, 1),
-            "baseline_connect_p95_ms": round(b_conn, 1),
-            "read_p95_ms": round(w_read, 1),
-            "baseline_read_p95_ms": round(b_read, 1),
-            "window_requests": int(row[4] or 0),
-        },
-        "critical" if base > 0 and cur >= base * 3 else "warning",
+        f"Origin {phase} P95", cur, base, "ms (P95)", meta, "critical" if base > 0 and cur >= base * 3 else "warning"
     )
 
 
@@ -3682,23 +3582,17 @@ def crawler_disparity_processor(row: tuple, definition: InsightDefinition, conte
         w_bytes, c_per_r, b_c_per_r = 0, float(row[3] or 0), float(row[4] or 0)
         bytes_per_r = b_bytes_per_r = bw_pct = 0.0
     is_crit = c_per_r >= 5000 or w_bytes >= 500_000_000 or (bw_pct >= 10.0 and w_referrals == 0)
-    return _item(
-        brand,
-        c_per_r,
-        b_c_per_r,
-        "crawls/referral",
-        {
-            "crawls": w_crawls,
-            "referrals": w_referrals,
-            "w_bytes": w_bytes,
-            "bandwidth_share_pct": bw_pct,
-            "crawls_per_referral": c_per_r,
-            "baseline_crawls_per_referral": b_c_per_r,
-            "bytes_per_referral": bytes_per_r,
-            "baseline_bytes_per_referral": b_bytes_per_r,
-        },
-        "critical" if is_crit else "warning",
-    )
+    meta = {
+        "crawls": w_crawls,
+        "referrals": w_referrals,
+        "w_bytes": w_bytes,
+        "bandwidth_share_pct": bw_pct,
+        "crawls_per_referral": c_per_r,
+        "baseline_crawls_per_referral": b_c_per_r,
+        "bytes_per_referral": bytes_per_r,
+        "baseline_bytes_per_referral": b_bytes_per_r,
+    }
+    return _item(brand, c_per_r, b_c_per_r, "crawls/referral", meta, "critical" if is_crit else "warning")
 
 
 _reg(
@@ -3746,8 +3640,13 @@ _reg(
 def orphaned_deep_crawl_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
     # row schema: [ip, w_reqs, w_distinct_urls, b_reqs, requests_per_url, surge_ratio]
     ip = _mask_ip_if_needed(row[0], context)
-    w_reqs, w_distinct, b_reqs = int(row[1] or 0), int(row[2] or 0), int(row[3] or 0)
-    reqs_per_url, surge = float(row[4] or 0), float(row[5] or 0)
+    w_reqs, w_distinct, b_reqs, reqs_per_url, surge = (
+        int(row[1] or 0),
+        int(row[2] or 0),
+        int(row[3] or 0),
+        float(row[4] or 0),
+        float(row[5] or 0),
+    )
     return _item(
         ip or "(unknown)",
         w_reqs,
@@ -3780,9 +3679,14 @@ _reg(
 
 def residential_fingerprint_dispersion_processor(row: tuple, definition: InsightDefinition, context: dict) -> dict:
     # row schema: [ja4, w_ips, w_asns, w_requests, b_ips, asn_expansion_ratio]
-    ja4 = row[0] or "(empty)"
-    w_ips, w_asns, w_requests = int(row[1] or 0), int(row[2] or 0), int(row[3] or 0)
-    b_ips, asn_expansion = int(row[4] or 0), float(row[5] or 0)
+    ja4, w_ips, w_asns, w_requests, b_ips, asn_expansion = (
+        row[0] or "(empty)",
+        int(row[1] or 0),
+        int(row[2] or 0),
+        int(row[3] or 0),
+        int(row[4] or 0),
+        float(row[5] or 0),
+    )
     return _item(
         ja4,
         w_asns,

@@ -5,36 +5,37 @@
  * statement, with attribution, caller frame, pool slot, and a kind-aware
  * kill button. Admin-only (the route lives under /api/admin/* so
  * RemoteAccessMiddleware structurally blocks analyst sessions).
- *
- * This file is the orchestrator: data wiring + layout. Derived state
- * (filtered/promoted/slow row sets) lives in `_hooks/useFilteredActive`;
- * URL sync in `_hooks/useQueryMonitorUrlState`; layout details in
- * `_sections/`; shared types/helpers in `_types.ts` / `_helpers.ts`.
- *
- * Tables render through the project-standard `<DataTable>` (column
- * reorder, hide/show, resize, sort). Row click opens `RowDetailDialog`
- * for the full SQL + attribution. The prior custom HTML tables and
- * inline expand drawer were retired in favour of consistency with every
- * other admin table on the dashboard.
  */
 
 import * as React from 'react'
 import { formatCount } from '@/lib/format'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { adminJson, adminJsonResult, extractApiError } from '@/lib/api'
-import { AlertTriangle, Check, Copy, Group, Keyboard, Pause, Play, RefreshCw, Search } from 'lucide-react'
+import { AlertTriangle, Check, Copy, Group, Keyboard, Pause, Play, RefreshCw, Search, X } from 'lucide-react'
 
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { BackToAdminLink } from '@/components/ReportLayout'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import { ConfirmDialog, PageHeader } from '@/components/ui/confirm-dialog'
+import { ConfirmDialog, CopyButton, HelpDialog, PageHeader } from '@/components/ui/confirm-dialog'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 
 import {
+  durationColor,
+  formatDurationMs,
+  formatMemoryMb,
+  kindBadgeVariant,
   matchesQueryRowFilters,
   useDocumentVisible,
   useFilteredActive,
@@ -50,18 +51,272 @@ import {
   type ShortcutBinding,
   type SlowQueriesResult,
   type SnapshotResponse,
+  type SummaryResponse,
   type ViewMode,
 } from './_hooks/useFilteredActive'
 import { ActiveTable, CompletedTable } from './_sections/queryColumns'
-import {
-  FilterChipRow,
-  PollingIndicator,
-  RowDetailDialog,
-  ShortcutsHelp,
-  SummaryStrip,
-} from './_sections/RowDetailDialog'
-import { useCopyToClipboard } from '@/hooks/useAdminEventStream'
+import { useCopyToClipboard } from '@/hooks/useSSE'
 import { queryKeys } from '@/lib/query-keys'
+
+type AnyRow = ActiveOrPromotedRow | CompletedRow
+
+const isCompleted = (row: AnyRow): row is CompletedRow => 'outcome' in row
+const isActivePromoted = (row: AnyRow): row is ActiveOrPromotedRow => 'cancellable' in row
+
+export function RowDetailDialog({
+  row,
+  onClose,
+  onKill,
+  cancellingQid,
+}: {
+  row: AnyRow | null
+  onClose: () => void
+  onKill?: (row: ActiveRow) => void
+  cancellingQid?: number | null
+}) {
+  const isLive = row !== null && isActivePromoted(row) && !row._completed
+  const { data: fullRow } = useQuery<AnyRow>({
+    queryKey: queryKeys.admin.queryMonitorDetail(row?.query_id ?? null),
+    queryFn: async ({ signal }) =>
+      adminJson<'/api/admin/queries/{qid}', ActiveRow>(
+        '/api/admin/queries/{qid}',
+        `/api/admin/queries/${row!.query_id}`,
+        { signal },
+      ),
+    enabled: row !== null && isLive,
+    refetchInterval: 2000,
+    refetchIntervalInBackground: false,
+  })
+
+  if (!row) return null
+  const display = (fullRow ?? row) as AnyRow
+  const sql = display.sql ?? row.sql_preview
+  const attr = display.attribution
+  const completed = isCompleted(display) ? display : null
+  const ap = isActivePromoted(display) ? display : null
+  const cancelling = ap !== null && cancellingQid !== undefined && cancellingQid === ap.query_id
+  const canKill = ap !== null && ap.cancellable && ap.cancelled_at === null && onKill !== undefined
+
+  return (
+    <Dialog open={row !== null} onOpenChange={(open) => !open && onClose()}>
+      <DialogContent className="max-w-4xl">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2 text-base">
+            <Badge variant={kindBadgeVariant(attr.kind)} className="capitalize">
+              {attr.kind}
+            </Badge>
+            <span className="truncate">{attr.label}</span>
+            {completed && (
+              <Badge
+                variant={
+                  completed.outcome === 'ok'
+                    ? 'outline'
+                    : completed.outcome === 'cancelled'
+                      ? 'secondary'
+                      : 'destructive'
+                }
+                className="capitalize ml-2"
+              >
+                {completed.outcome}
+                {completed.error_type && `: ${completed.error_type}`}
+              </Badge>
+            )}
+          </DialogTitle>
+          <DialogDescription className="sr-only">Query {display.query_id} details</DialogDescription>
+        </DialogHeader>
+
+        <div className="grid grid-cols-2 gap-3 text-xs">
+          <div>
+            <span className="text-muted-foreground">Caller:</span>{' '}
+            <span className="font-mono">
+              {attr.caller_qualname} <span className="opacity-60">({attr.caller_file})</span>
+            </span>
+          </div>
+          <div>
+            <span className="text-muted-foreground">DB:</span> {display.db_type}
+          </div>
+          <div>
+            <span className="text-muted-foreground">Service:</span>{' '}
+            <span className="font-mono">{display.service_id ?? '—'}</span>
+          </div>
+          <div>
+            <span className="text-muted-foreground">Pool slot:</span>{' '}
+            <span className="font-mono">{attr.pool_slot ?? '—'}</span>
+          </div>
+          <div>
+            <span className="text-muted-foreground">Request:</span>{' '}
+            {attr.request_path || '—'}
+            {attr.request_id && <span className="opacity-60"> · {attr.request_id.slice(0, 8)}</span>}
+          </div>
+          <div>
+            <span className="text-muted-foreground">Duration:</span>{' '}
+            <span className={`font-mono ${durationColor(display.duration_ms)}`}>
+              {formatDurationMs(display.duration_ms)}
+            </span>
+          </div>
+          {attr.cron_job && (
+            <div>
+              <span className="text-muted-foreground">Cron:</span> {attr.cron_job}
+              {attr.cron_run_id && ` (run ${attr.cron_run_id})`}
+            </div>
+          )}
+          {completed?.peak_memory_mb != null && (
+            <div>
+              <span className="text-muted-foreground">Peak memory:</span>{' '}
+              <span className="font-mono">{formatMemoryMb(completed.peak_memory_mb)}</span>
+            </div>
+          )}
+          {completed?.error_message && (
+            <div className="col-span-2">
+              <span className="text-muted-foreground">Error:</span>{' '}
+              <span className="font-mono text-red-600">{completed.error_message}</span>
+            </div>
+          )}
+        </div>
+
+        <div className="relative">
+          <CopyButton
+            text={sql}
+            label="Copy"
+            copiedLabel="Copied"
+            variant="outline"
+            size="sm"
+            className="absolute top-1.5 right-1.5 h-7 px-2 text-xs"
+            title="Copy SQL to clipboard"
+            timeoutMs={1500}
+          />
+          <pre className="bg-muted/50 border rounded p-3 pr-12 text-xs overflow-auto whitespace-pre-wrap font-mono max-h-96">
+            {sql}
+          </pre>
+        </div>
+        {row.sql_len > 200 && !fullRow && isLive && (
+          <div className="text-xs text-muted-foreground">Loading full SQL ({row.sql_len} chars)…</div>
+        )}
+
+        <DialogFooter>
+          {canKill && (
+            <Button variant="destructive" size="sm" disabled={cancelling} onClick={() => onKill!(ap!)}>
+              {cancelling ? 'Cancelling…' : (<><X className="h-3 w-3 mr-1" /> Kill</>)}
+            </Button>
+          )}
+          <Button variant="outline" size="sm" onClick={onClose}>
+            Close
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+export function FilterChipRow<T extends string>({
+  value,
+  onChange,
+  options,
+}: {
+  value: T
+  onChange: (v: T) => void
+  options: { value: T; label: string }[]
+}) {
+  return (
+    <div className="flex items-center gap-1">
+      {options.map((o) => (
+        <Button
+          key={o.value}
+          variant={value === o.value ? 'default' : 'outline'}
+          size="sm"
+          className="h-7 px-2 text-xs capitalize"
+          onClick={() => onChange(o.value)}
+        >
+          {o.label}
+        </Button>
+      ))}
+    </div>
+  )
+}
+
+export function PollingIndicator({
+  visible,
+  isFetching,
+  isError,
+  paused = false,
+}: {
+  visible: boolean
+  isFetching: boolean
+  isError: boolean
+  paused?: boolean
+}) {
+  if (isError) return <span className="text-xs text-red-500 ml-2">Error — retrying</span>
+  if (paused) return <span className="text-xs text-amber-600 ml-2 font-medium">Paused</span>
+  if (!visible) return <span className="text-xs text-muted-foreground ml-2">Paused (tab hidden)</span>
+  return (
+    <span className="flex items-center gap-1 text-xs text-muted-foreground ml-2">
+      <RefreshCw className={`h-3 w-3 ${isFetching ? 'animate-spin' : 'opacity-50'}`} />
+      Live
+    </span>
+  )
+}
+
+export function ShortcutsHelp({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
+  return (
+    <HelpDialog open={open} onOpenChange={onOpenChange} title="Keyboard shortcuts" icon={<Keyboard className="h-4 w-4" />}>
+      <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm text-foreground">
+        {[
+          ['/', 'Focus the search field'],
+          ['.', 'Pause / resume the snapshot poll (stops rows from shifting under you)'],
+          ['Esc', 'Close the row detail dialog, kill confirm, or this help overlay'],
+          ['?', 'Show this help overlay'],
+        ].map(([k, desc]) => (
+          <React.Fragment key={k}>
+            <dt className="self-center">
+              <kbd className="inline-flex items-center justify-center min-w-[1.5rem] h-6 px-1.5 rounded border border-border bg-muted/50 text-xs font-mono">
+                {k}
+              </kbd>
+            </dt>
+            <dd>{desc}</dd>
+          </React.Fragment>
+        ))}
+      </dl>
+      <p className="mt-4 text-xs text-muted-foreground">
+        Shortcuts are disabled while typing in the search box (except <kbd>Esc</kbd>, which always works).
+      </p>
+    </HelpDialog>
+  )
+}
+
+export function SummaryStrip({ snapshot }: { snapshot: SnapshotResponse | undefined }) {
+  const data = React.useMemo<SummaryResponse | null>(() => {
+    if (!snapshot) return null
+    const by_db_type: Record<string, number> = {}
+    let longest_ms = 0
+    for (const row of snapshot.active) {
+      by_db_type[row.db_type] = (by_db_type[row.db_type] ?? 0) + 1
+      if (row.duration_ms > longest_ms) longest_ms = row.duration_ms
+    }
+    return { active_total: snapshot.active.length, by_db_type, longest_ms }
+  }, [snapshot])
+
+  if (!data) return null
+  return (
+    <div className="flex items-center gap-3 text-sm">
+      <Badge variant={data.active_total > 0 ? 'default' : 'outline'} className="gap-1">
+        <span className="font-medium">{data.active_total}</span> active
+      </Badge>
+      {Object.entries(data.by_db_type).map(([db, n]) => (
+        <Badge key={db} variant="outline" className="gap-1">
+          {db} <span className="font-medium">{n}</span>
+        </Badge>
+      ))}
+      {data.longest_ms > 0 && (
+        <span className={`text-xs ${durationColor(data.longest_ms)}`}>
+          longest: {formatDurationMs(data.longest_ms)}
+        </span>
+      )}
+      <div role="status" aria-live="polite" className="sr-only">
+        {data.active_total} active {data.active_total === 1 ? 'query' : 'queries'}
+      </div>
+    </div>
+  )
+}
 
 const DEFAULT_SLOW_THRESHOLD_MS = 500
 const formatThresholdMs = (ms: number, space = false) =>
@@ -81,52 +336,15 @@ const SLOW_HISTORY_META: Record<
   SlowHistoryMode,
   { hours: number; buttonLabel: string; title: string; emptyWindow: string; reportLabel: string }
 > = {
-  recent: {
-    hours: 24,
-    buttonLabel: 'Recent',
-    title: 'Live in-memory ring (~10–30 min window, clears on restart)',
-    emptyWindow: '',
-    reportLabel: 'Recent In-Memory Ring',
-  },
-  past_1h: {
-    hours: 1,
-    buttonLabel: '1 h',
-    title: 'Persistent history — last 1 h',
-    emptyWindow: '1 hour',
-    reportLabel: 'Past 1h',
-  },
-  past_6h: {
-    hours: 6,
-    buttonLabel: '6 h',
-    title: 'Persistent history — last 6 h',
-    emptyWindow: '6 hours',
-    reportLabel: 'Past 6h',
-  },
-  past_12h: {
-    hours: 12,
-    buttonLabel: '12 h',
-    title: 'Persistent history — last 12 h',
-    emptyWindow: '12 hours',
-    reportLabel: 'Past 12h',
-  },
-  past_24h: {
-    hours: 24,
-    buttonLabel: '24 h',
-    title: 'Persistent history — last 24 h',
-    emptyWindow: '24 hours',
-    reportLabel: 'Past 24h',
-  },
-  past_7d: {
-    hours: 168,
-    buttonLabel: '7 d',
-    title: 'Persistent history — last 7 d',
-    emptyWindow: '7 days',
-    reportLabel: 'Past 7d',
-  },
+  recent: { hours: 24, buttonLabel: 'Recent', title: 'Live in-memory ring (~10–30 min window, clears on restart)', emptyWindow: '', reportLabel: 'Recent In-Memory Ring' },
+  past_1h: { hours: 1, buttonLabel: '1 h', title: 'Persistent history — last 1 h', emptyWindow: '1 hour', reportLabel: 'Past 1h' },
+  past_6h: { hours: 6, buttonLabel: '6 h', title: 'Persistent history — last 6 h', emptyWindow: '6 hours', reportLabel: 'Past 6h' },
+  past_12h: { hours: 12, buttonLabel: '12 h', title: 'Persistent history — last 12 h', emptyWindow: '12 hours', reportLabel: 'Past 12h' },
+  past_24h: { hours: 24, buttonLabel: '24 h', title: 'Persistent history — last 24 h', emptyWindow: '24 hours', reportLabel: 'Past 24h' },
+  past_7d: { hours: 168, buttonLabel: '7 d', title: 'Persistent history — last 7 d', emptyWindow: '7 days', reportLabel: 'Past 7d' },
 }
 const SLOW_HISTORY_MODES = Object.keys(SLOW_HISTORY_META) as SlowHistoryMode[]
-
-type DetailRow = ActiveOrPromotedRow | CompletedRow
+const COMPLETED_BUFFER_CAP = 500
 
 export default function QueryMonitorPage() {
   const queryClient = useQueryClient()
@@ -147,31 +365,9 @@ export default function QueryMonitorPage() {
   } = useQueryMonitorUrlState(DEFAULT_SLOW_THRESHOLD_MS)
   const [confirmKill, setConfirmKill] = React.useState<ActiveRow | null>(null)
   const [actionError, setActionError] = React.useState<string>('')
-  // 'recent' = the in-memory ring buffer (400 entries — _HISTORY_CAP in
-  // backend/core/query_registry.py; only a few minutes on a busy service
-  // where SQLite cron noise churns it, cleared on restart). 'past_24h' /
-  // 'past_7d' = the
-  // persistent slow_queries SQLite table. Default to 'recent' because
-  // it's the fastest path and what the operator usually wants ("what
-  // just happened"); historical view is a deeper-dive toggle.
-  const [slowHistoryMode, setSlowHistoryMode] = React.useState<
-    'recent' | 'past_1h' | 'past_6h' | 'past_12h' | 'past_24h' | 'past_7d'
-  >('recent')
-  // Cron-grouping collapses rows from the same cron run into a single
-  // representative row with a ×N badge — default on because a single tick
-  // can spawn dozens of identical queries that otherwise drown out the
-  // user's own activity.
-  // Manual pause stops the 300ms snapshot poll so an admin can read a row
-  // mid-incident without it shifting under them. Distinct from the
-  // tab-visibility auto-pause; this one survives focus changes.
+  const [slowHistoryMode, setSlowHistoryMode] = React.useState<SlowHistoryMode>('recent')
   const [paused, setPaused] = React.useState(false)
-  // Per-run expansion state for cron-grouping. Transient (no URL persist) —
-  // the expanded set should reset on hard navigation since the rows it
-  // points at won't exist anyway. Stable identity via useCallback so the
-  // column builder's useMemo doesn't churn each render.
-  const [expandedRunIds, setExpandedRunIds] = React.useState<ReadonlySet<string>>(
-    () => new Set(),
-  )
+  const [expandedRunIds, setExpandedRunIds] = React.useState<ReadonlySet<string>>(() => new Set())
   const toggleGroup = React.useCallback((runId: string) => {
     setExpandedRunIds((prev) => {
       const next = new Set(prev)
@@ -181,46 +377,18 @@ export default function QueryMonitorPage() {
     })
   }, [])
   const [shortcutsOpen, setShortcutsOpen] = React.useState(false)
-  const [detailRow, setDetailRow] = React.useState<DetailRow | null>(null)
+  const [detailRow, setDetailRow] = React.useState<AnyRow | null>(null)
   const searchInputRef = React.useRef<HTMLInputElement>(null)
 
   const { data: cfg } = useQuery<MonitorConfig>({
     queryKey: queryKeys.admin.queryMonitorConfig(),
-    queryFn: async ({ signal }) => {
-      return adminJson('/api/admin/app-config/query-monitor', '/api/admin/app-config/query-monitor', { signal })
-    },
+    queryFn: ({ signal }) => adminJson('/api/admin/app-config/query-monitor', '/api/admin/app-config/query-monitor', { signal }),
     staleTime: 60_000,
   })
 
   const enabled = cfg?.enabled !== false
-
-  // Adaptive poll cadence: 300 ms while there's any active query (so the
-  // Active list updates in near-real-time during bursts), 1500 ms when
-  // idle (which is the steady state for most of the day — a 5× wire-byte
-  // and per-load hits reduction). Returning a function from
-  // refetchInterval is React Query's supported way to drive cadence off
-  // the current data without flipping queryKeys.
-  // Live-only view only renders ``filteredActive``; the Completed and
-  // Slow-Queries sections are hidden (viewMode !== 'live' gates below).
-  // Dropping the heavy ``completed`` array from the snapshot when the
-  // user isn't looking at it shrinks the per-poll wire payload ~90 %.
-  // The just-finished promotion in ``filteredActive`` loses its 10 s
-  // window in this mode (no completed → no justFinished), which is the
-  // explicit tradeoff for Live-only.
   const includeCompleted = viewMode !== 'live'
 
-  // Incremental ``since_seq`` polling — the backend returns the full active
-  // list every poll (so a long-running query never disappears) but only
-  // streams completed rows newer than ``lastSeqRef``. The queryFn accumulates
-  // the delta into ``completedRef`` (capped at 500 rows, FIFO eviction by
-  // query_id) and returns the merged snapshot, so steady-state wire bytes drop
-  // from ~320 MB/min to ~2 MB/min on a busy admin tab. Two reset paths keep the
-  // buffer honest (an effect flags ``resetPendingRef`` and invalidates; the next
-  // fetch starts from scratch):
-  //   1. viewMode toggle (live↔all↔past) — completed-list shape changes
-  //   2. tab-visibility hidden→visible — operator returning from another tab
-  //   (pause→resume already invalidates on the Resume click)
-  const COMPLETED_BUFFER_CAP = 500
   const lastSeqRef = React.useRef(0)
   const completedRef = React.useRef<Map<number, CompletedRow>>(new Map())
   const resetPendingRef = React.useRef(false)
@@ -238,11 +406,6 @@ export default function QueryMonitorPage() {
       if (lastSeqRef.current > 0) {
         params.set('since_seq', String(lastSeqRef.current))
       } else if (includeCompleted) {
-        // Cold mount: cap the completed-history tail at 50 rows. Full
-        // 400-row dump was ~290 KB of JSON per request — the UI
-        // virtualises and only paints a few dozen rows at once, so the
-        // overflow was pure browser-parse waste. Subsequent delta polls
-        // (since_seq > 0) return everything newer regardless of cap.
         params.set('cold_limit', '50')
       }
       const qs = params.toString()
@@ -251,15 +414,9 @@ export default function QueryMonitorPage() {
         `/api/admin/queries${qs ? '?' + qs : ''}`,
         { signal },
       )
-      if (delta.last_seq > lastSeqRef.current) {
-        lastSeqRef.current = delta.last_seq
-      }
+      if (delta.last_seq > lastSeqRef.current) lastSeqRef.current = delta.last_seq
       const buffer = completedRef.current
-      for (const row of delta.completed ?? []) {
-        buffer.set(row.query_id, row)
-      }
-      // FIFO eviction by query_id (lowest id = oldest insert). For a
-      // 500-row cap and ~1-2 new completions per tick, this runs rarely.
+      for (const row of delta.completed ?? []) buffer.set(row.query_id, row)
       if (buffer.size > COMPLETED_BUFFER_CAP) {
         const sortedIds = [...buffer.keys()].sort((a, b) => a - b)
         const toRemove = sortedIds.length - COMPLETED_BUFFER_CAP
@@ -270,22 +427,16 @@ export default function QueryMonitorPage() {
     enabled: visible && enabled && !paused,
     refetchInterval: (query) => {
       const d = query.state.data as SnapshotResponse | undefined
-      return (d?.active && d.active.length > 0) ? 300 : 1500
+      return d?.active && d.active.length > 0 ? 300 : 1500
     },
     refetchIntervalInBackground: false,
   })
 
-  // viewMode change — the completed-list shape changes between live/all/past
-  // (live drops completed entirely), so the buffer's prior contents become
-  // semantically wrong. Reset everything and force a fresh full pull.
   React.useEffect(() => {
     resetPendingRef.current = true
     queryClient.invalidateQueries({ queryKey: queryKeys.admin.queryMonitorSnapshotAll() })
   }, [viewMode, queryClient])
 
-  // Tab-visibility restore — the operator may have been away long enough
-  // for the in-memory ring buffer (deque maxlen=400 on the backend) to
-  // evict everything we held since_seq for. Reset + force fresh pull.
   const wasVisibleRef = React.useRef(visible)
   React.useEffect(() => {
     if (visible && !wasVisibleRef.current) {
@@ -295,8 +446,7 @@ export default function QueryMonitorPage() {
     wasVisibleRef.current = visible
   }, [visible, queryClient])
 
-  // The query already returns active (full list each poll) + the accumulated completed rows.
-  const bufferedSnapshot: SnapshotResponse | undefined = snapshotQuery.data
+  const bufferedSnapshot = snapshotQuery.data
 
   const cancelMutation = useMutation({
     mutationFn: async (qid: number): Promise<CancelResponse> => {
@@ -311,11 +461,6 @@ export default function QueryMonitorPage() {
     onSuccess: (res) => {
       setActionError('')
       queryClient.invalidateQueries({ queryKey: queryKeys.admin.queryMonitorSnapshotAll() })
-      // SRE-17: plain-English result for the non-cancelled terminal states
-      // instead of a raw enum dump ("Cancel returned: connection_gone"). The
-      // row state-machine already gives the positive confirmation for a real
-      // cancel; this only fires for the "already gone" cases, where the right
-      // message reassures the operator the query is no longer running.
       if (res.state === 'connection_gone') {
         setActionError('That query already finished — its connection is gone, so there was nothing left to interrupt.')
       } else if (res.state === 'not_found') {
@@ -327,20 +472,14 @@ export default function QueryMonitorPage() {
     onError: (err: Error) => setActionError(extractApiError(err)),
   })
 
-  // Historical slow queries — only fetches when toggled away from
-  // 'recent'. Background polling stays off (this isn't a live view);
-  // staleTime is 30s so toggling between 24h / 7d back-to-back doesn't
-  // re-hit SQLite if the data was just fetched.
   const historicalQuery = useQuery<SlowQueriesResult>({
     queryKey: queryKeys.admin.queryMonitorSlowHistory(slowHistoryMode, slowThresholdMs),
-    queryFn: async ({ signal }) => {
-      const sinceHours = SLOW_HISTORY_META[slowHistoryMode].hours
-      return adminJson<'/api/admin/slow-queries', SlowQueriesResult>(
+    queryFn: ({ signal }) =>
+      adminJson<'/api/admin/slow-queries', SlowQueriesResult>(
         '/api/admin/slow-queries',
-        `/api/admin/slow-queries?since_hours=${sinceHours}&threshold_ms=${slowThresholdMs}&sort=duration&limit=200`,
+        `/api/admin/slow-queries?since_hours=${SLOW_HISTORY_META[slowHistoryMode].hours}&threshold_ms=${slowThresholdMs}&sort=duration&limit=200`,
         { signal },
-      )
-    },
+      ),
     enabled: slowHistoryMode !== 'recent' && enabled,
     staleTime: 30_000,
   })
@@ -364,58 +503,41 @@ export default function QueryMonitorPage() {
   const { copied: copiedQueries, copy: copyText } = useCopyToClipboard(1500)
 
   const handleCopyQueries = React.useCallback(async () => {
-    const queries = slowHistoryMode === 'recent'
-      ? slowQueries
-      : filteredHistoricalRows
-
+    const queries = slowHistoryMode === 'recent' ? slowQueries : filteredHistoricalRows
     if (queries.length === 0) return
 
-    const modeText = SLOW_HISTORY_META[slowHistoryMode].reportLabel
+    const toIso = (ts?: number | null) =>
+      ts ? new Date(ts < 10_000_000_000 ? ts * 1000 : ts).toISOString() : '—'
 
-    let text = `==================================================\n`
-    text += `NOTABLE SLOW QUERIES REPORT\n`
-    text += `==================================================\n`
-    text += `Time Window:    ${modeText}\n`
-    text += `Threshold:      ≥ ${slowThresholdMs} ms\n`
-    text += `Total Queries:  ${queries.length}\n`
-    text += `Exported At:    ${new Date().toISOString()}\n\n`
+    const lines = [
+      '==================================================',
+      'NOTABLE SLOW QUERIES REPORT',
+      '==================================================',
+      `Time Window:    ${SLOW_HISTORY_META[slowHistoryMode].reportLabel}`,
+      `Threshold:      ≥ ${slowThresholdMs} ms`,
+      `Total Queries:  ${queries.length}`,
+      `Exported At:    ${new Date().toISOString()}`,
+      '',
+    ]
 
     queries.forEach((row, i) => {
-      text += `--------------------------------------------------\n`
-      text += `[Query #${i + 1}] ID: ${row.query_id} | DB: ${row.db_type} | Duration: ${formatCount(row.duration_ms)} ms | Outcome: ${row.outcome}\n`
-
-      const started = row.started_at_utc
-        ? new Date(row.started_at_utc < 10000000000 ? row.started_at_utc * 1000 : row.started_at_utc).toISOString()
-        : '—'
-      const ended = row.ended_at_utc
-        ? new Date(row.ended_at_utc < 10000000000 ? row.ended_at_utc * 1000 : row.ended_at_utc).toISOString()
-        : '—'
-      text += `Timestamp:      Started ${started} · Ended ${ended}\n`
-
       const attr = row.attribution
-      text += `Attribution:    Kind: ${attr.kind} · Caller: ${attr.caller_qualname} (${attr.caller_file})\n`
-      if (attr.cron_job) {
-        text += `Cron:           ${attr.cron_job}${attr.cron_run_id ? ` (Run: ${attr.cron_run_id})` : ''}\n`
-      }
-      if (attr.request_path) {
-        text += `HTTP Request:   ${attr.request_path}${attr.request_id ? ` (ID: ${attr.request_id})` : ''}\n`
-      }
-      if (row.service_id) {
-        text += `Service:        ${row.service_id}\n`
-      }
-      if (row.peak_memory_mb != null) {
-        text += `Peak Memory:    ${row.peak_memory_mb.toFixed(1)} MB\n`
-      }
-      if (row.error_message) {
-        text += `Error:          ${row.error_message}\n`
-      }
-
-      text += `\nSQL:\n${row.sql || row.sql_preview}\n\n`
+      lines.push(
+        '--------------------------------------------------',
+        `[Query #${i + 1}] ID: ${row.query_id} | DB: ${row.db_type} | Duration: ${formatCount(row.duration_ms)} ms | Outcome: ${row.outcome}`,
+        `Timestamp:      Started ${toIso(row.started_at_utc)} · Ended ${toIso(row.ended_at_utc)}`,
+        `Attribution:    Kind: ${attr.kind} · Caller: ${attr.caller_qualname} (${attr.caller_file})`,
+      )
+      if (attr.cron_job) lines.push(`Cron:           ${attr.cron_job}${attr.cron_run_id ? ` (Run: ${attr.cron_run_id})` : ''}`)
+      if (attr.request_path) lines.push(`HTTP Request:   ${attr.request_path}${attr.request_id ? ` (ID: ${attr.request_id})` : ''}`)
+      if (row.service_id) lines.push(`Service:        ${row.service_id}`)
+      if (row.peak_memory_mb != null) lines.push(`Peak Memory:    ${row.peak_memory_mb.toFixed(1)} MB`)
+      if (row.error_message) lines.push(`Error:          ${row.error_message}`)
+      lines.push('', 'SQL:', row.sql || row.sql_preview, '')
     })
+    lines.push('==================================================', '')
 
-    text += `==================================================\n`
-
-    await copyText(text)
+    await copyText(lines.join('\n'))
   }, [slowHistoryMode, slowQueries, filteredHistoricalRows, slowThresholdMs, copyText])
 
   const requestKill = React.useCallback(
@@ -430,9 +552,6 @@ export default function QueryMonitorPage() {
     [cancelMutation],
   )
 
-  // Row-level shortcuts (j/k/Enter/x) lived with the prior custom table
-  // and didn't survive the move to <DataTable>. The remaining shortcuts
-  // are page-level (search focus, dialog open/close, help).
   const shortcuts = React.useMemo<ShortcutBinding[]>(
     () => [
       {
@@ -465,21 +584,10 @@ export default function QueryMonitorPage() {
         description: 'Close dialog / overlay',
         allowInForms: true,
         handler: () => {
-          if (shortcutsOpen) {
-            setShortcutsOpen(false)
-            return
-          }
-          if (detailRow) {
-            setDetailRow(null)
-            return
-          }
-          if (confirmKill) {
-            setConfirmKill(null)
-            return
-          }
-          if (document.activeElement === searchInputRef.current) {
-            searchInputRef.current?.blur()
-          }
+          if (shortcutsOpen) return setShortcutsOpen(false)
+          if (detailRow) return setDetailRow(null)
+          if (confirmKill) return setConfirmKill(null)
+          if (document.activeElement === searchInputRef.current) searchInputRef.current?.blur()
         },
       },
     ],
@@ -491,14 +599,10 @@ export default function QueryMonitorPage() {
   const handleManualRefresh = React.useCallback(() => {
     setIsManualRefreshing(true)
     resetPendingRef.current = true
-    // The refresh is over when every refetch it started has settled — tracked on the promises
-    // instead of mirroring the queries' isFetching flags into state from an effect.
     const pending: Promise<unknown>[] = [
       queryClient.invalidateQueries({ queryKey: queryKeys.admin.queryMonitorSnapshotAll() }),
     ]
-    if (slowHistoryMode !== 'recent') {
-      pending.push(historicalQuery.refetch())
-    }
+    if (slowHistoryMode !== 'recent') pending.push(historicalQuery.refetch())
     void Promise.allSettled(pending).then(() => setIsManualRefreshing(false))
   }, [queryClient, slowHistoryMode, historicalQuery])
 
@@ -509,6 +613,7 @@ export default function QueryMonitorPage() {
   const isRefreshingSlow =
     (isManualRefreshing && (snapshotQuery.isFetching || historicalQuery.isFetching)) ||
     (slowHistoryMode !== 'recent' && historicalQuery.isFetching && !!historicalQuery.data)
+  const slowRows = slowHistoryMode === 'recent' ? slowQueries : filteredHistoricalRows
 
   return (
     <div className="space-y-6" data-testid="admin-queries-root">
@@ -546,9 +651,7 @@ export default function QueryMonitorPage() {
                 disabled={snapshotQuery.isFetching}
                 title="Refresh query snapshot"
               >
-                <RefreshCw
-                  className={`h-3 w-3 mr-1 ${isRefreshingActive ? 'animate-spin' : ''}`}
-                />
+                <RefreshCw className={`h-3 w-3 mr-1 ${isRefreshingActive ? 'animate-spin' : ''}`} />
                 Refresh
               </Button>
               <Button
@@ -589,11 +692,6 @@ export default function QueryMonitorPage() {
                   <CardTitle className="text-base flex items-center gap-2 whitespace-nowrap shrink-0">
                     Active &amp; Just-Finished
                     <Badge variant="secondary" className="whitespace-nowrap">
-                      {/* Count the rows the user can actually see (post-filter),
-                         not the unfiltered totals. The prior version showed
-                         totals and produced a confusing "44 just-finished but
-                         empty table" mismatch when a filter (db / kind) was
-                         hiding everything. */}
                       {filteredActive.filter((r) => !r._completed).length} active
                       {filteredActive.some((r) => r._completed) &&
                         ` + ${filteredActive.filter((r) => r._completed).length} just-finished`}
@@ -612,27 +710,15 @@ export default function QueryMonitorPage() {
                       className="h-7 px-2 text-xs"
                       onClick={() => {
                         if (paused) {
-                          // Resume → immediately fetch so the user gets fresh
-                          // data on the click rather than waiting up to 300ms.
                           setPaused(false)
-                          queryClient.invalidateQueries({
-                            queryKey: queryKeys.admin.queryMonitorSnapshotAll(),
-                          })
+                          queryClient.invalidateQueries({ queryKey: queryKeys.admin.queryMonitorSnapshotAll() })
                         } else {
                           setPaused(true)
                         }
                       }}
                       title={paused ? 'Resume polling (.)' : 'Pause polling (.)'}
                     >
-                      {paused ? (
-                        <>
-                          <Play className="h-3 w-3 mr-1" /> Resume
-                        </>
-                      ) : (
-                        <>
-                          <Pause className="h-3 w-3 mr-1" /> Pause
-                        </>
-                      )}
+                      {paused ? <><Play className="h-3 w-3 mr-1" /> Resume</> : <><Pause className="h-3 w-3 mr-1" /> Pause</>}
                     </Button>
                     <FilterChipRow value={dbFilter} onChange={setDbFilter} options={DB_FILTER_OPTIONS} />
                     <FilterChipRow value={kindFilter} onChange={setKindFilter} options={KIND_FILTER_OPTIONS} />
@@ -697,26 +783,15 @@ export default function QueryMonitorPage() {
                 <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-3">
                   <CardTitle className="text-base flex items-center gap-2">
                     Notable Slow Queries
-                    <Badge variant="outline">
-                      {slowHistoryMode === 'recent'
-                        ? slowQueries.length
-                        : filteredHistoricalRows.length}
-                    </Badge>
+                    <Badge variant="outline">{slowRows.length}</Badge>
                     <span className="text-xs text-muted-foreground font-normal">
-                      ≥ {formatThresholdMs(slowThresholdMs, slowThresholdMs < 1000)},
-                      sorted slowest first
+                      ≥ {formatThresholdMs(slowThresholdMs, slowThresholdMs < 1000)}, sorted slowest first
                     </span>
                     {slowHistoryMode !== 'recent' && historicalQuery.isFetching && (
-                      <span className="text-xs text-muted-foreground italic">
-                        Loading query telemetry...
-                      </span>
+                      <span className="text-xs text-muted-foreground italic">Loading query telemetry...</span>
                     )}
                   </CardTitle>
                   <div className="flex items-center gap-1">
-                    {/* History-window toggle. 'recent' is the in-memory
-                        ring buffer (no fetch — what the page already had);
-                        the other options query the persistent slow_queries
-                        PostgreSQL table (METADATA_DSN) via /api/admin/slow-queries. */}
                     <div className="flex items-center gap-1 mr-2">
                       {SLOW_HISTORY_MODES.map((m) => (
                         <Button
@@ -746,12 +821,7 @@ export default function QueryMonitorPage() {
                       variant="outline"
                       size="sm"
                       className="h-7 px-2 text-xs ml-2 font-medium shrink-0"
-                      disabled={
-                        (slowHistoryMode === 'recent'
-                          ? slowQueries
-                          : filteredHistoricalRows
-                        ).length === 0
-                      }
+                      disabled={slowRows.length === 0}
                       onClick={handleCopyQueries}
                       title="Copy slow queries report to clipboard"
                     >
@@ -783,11 +853,7 @@ export default function QueryMonitorPage() {
                     </div>
                   ) : (
                     <CompletedTable
-                      rows={
-                        slowHistoryMode === 'recent'
-                          ? slowQueries
-                          : filteredHistoricalRows
-                      }
+                      rows={slowRows}
                       onRowClick={(row) => setDetailRow(row)}
                       emptyMessage={
                         slowHistoryMode === 'recent'
@@ -850,11 +916,6 @@ export default function QueryMonitorPage() {
           onOpenChange={(open) => !open && setConfirmKill(null)}
           title={`Cancel ${confirmKill.attribution.kind} query?`}
           description={
-            // SRE-19: spell out that Kill is a one-shot interrupt of the
-            // CURRENT statement — a retrying / multi-statement caller will
-            // spawn a fresh query (with a new id) that the operator must
-            // re-target. The new query is visible in the table; this is
-            // honesty-of-copy, not a hidden state.
             (confirmKill.attribution.kind === 'cron'
               ? `This is a background ${confirmKill.attribution.cron_job || 'cron'} job. Cancelling may leave its work partial; the next tick will reconcile.`
               : `This is a system query (${confirmKill.attribution.caller_qualname}). Cancelling is rarely the right action.`)

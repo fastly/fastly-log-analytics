@@ -9,7 +9,9 @@ import type { Schema } from '@/types/api'
 import type { components } from '@/types/api.generated'
 import { quantizeAnchor } from '@/lib/utils'
 
-import { classifySsrRequest, parseSsrJson, ssrUpstreamGet } from './_transport'
+import { classifySsrRequest, parseSsrJson, registerSsrHeaders, ssrUpstreamGet } from '@/lib/api'
+
+registerSsrHeaders({ cookies, headers })
 
 export function shouldLoadRumScript({
   host,

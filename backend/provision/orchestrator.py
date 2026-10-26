@@ -1,33 +1,399 @@
+from __future__ import annotations
+
 import json
 import logging
 import os
 import shutil
+import sys
 import time
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
-from backend.core import field_registry as lf
-from backend.core.duckdb import rum_duckdb_path
-from backend.core.faro_versions import DEFAULT_FARO_VERSION
-from backend.core.fastly.client import fastly, is_mock_mode
-from backend.core.fastly.utils import (
-    region_endpoint,
-)
-from backend.provision.declarative.reconciler import reconcile_vcl_state
-from backend.provision.declarative.state import FeatureState
-from backend.provision.fastly_api import (
+# ── CMCD custom field definitions & VCL helpers (folded from cmcd_fields.py) ──
+
+_CMCD_CUSTOM_FIELDS: list[dict[str, Any]] = [
+    {
+        "name": "cmcd_sid",
+        "label": "CMCD Session ID",
+        "vcl_log_expression": "req.http.x-cmcd:sid",
+        "collection_stage": "edge",
+        "duckdb_type": "VARCHAR",
+        "value_type": "string",
+        "bytes_estimate": 40,
+        "byte_limit": 288,
+        "enabled": True,
+    },
+    {
+        "name": "cmcd_cid",
+        "label": "CMCD Content ID",
+        "vcl_log_expression": "req.http.x-cmcd:cid",
+        "collection_stage": "edge",
+        "duckdb_type": "VARCHAR",
+        "value_type": "string",
+        "bytes_estimate": 30,
+        "byte_limit": 288,
+        "enabled": True,
+    },
+    {
+        "name": "cmcd_br",
+        "label": "Encoded Bitrate (kbps)",
+        "vcl_log_expression": "req.http.x-cmcd:br",
+        "collection_stage": "edge",
+        "duckdb_type": "INTEGER",
+        "value_type": "numeric",
+        "bytes_estimate": 5,
+        "enabled": True,
+    },
+    {
+        "name": "cmcd_bl",
+        "label": "Buffer Length (ms)",
+        "vcl_log_expression": "req.http.x-cmcd:bl",
+        "collection_stage": "edge",
+        "duckdb_type": "INTEGER",
+        "value_type": "numeric",
+        "bytes_estimate": 5,
+        "enabled": True,
+    },
+    {
+        "name": "cmcd_bs",
+        "label": "Buffer Starvation",
+        "vcl_log_expression": "req.http.x-cmcd:bs",
+        "collection_stage": "edge",
+        "duckdb_type": "BOOLEAN",
+        "value_type": "boolean",
+        "bytes_estimate": 1,
+        "enabled": True,
+    },
+    {
+        "name": "cmcd_d",
+        "label": "Object Duration (ms)",
+        "vcl_log_expression": "req.http.x-cmcd:d",
+        "collection_stage": "edge",
+        "duckdb_type": "INTEGER",
+        "value_type": "numeric",
+        "bytes_estimate": 5,
+        "enabled": True,
+    },
+    {
+        "name": "cmcd_dl",
+        "label": "Deadline (ms)",
+        "vcl_log_expression": "req.http.x-cmcd:dl",
+        "vcl_log_expression_note": "ms",
+        "collection_stage": "edge",
+        "duckdb_type": "INTEGER",
+        "value_type": "numeric",
+        "bytes_estimate": 5,
+        "enabled": True,
+    },
+    {
+        "name": "cmcd_mtp",
+        "label": "Measured Throughput (kbps)",
+        "vcl_log_expression": "req.http.x-cmcd:mtp",
+        "collection_stage": "edge",
+        "duckdb_type": "INTEGER",
+        "value_type": "numeric",
+        "bytes_estimate": 5,
+        "enabled": True,
+    },
+    {
+        "name": "cmcd_ot",
+        "label": "Object Type",
+        "vcl_log_expression": "req.http.x-cmcd:ot",
+        "collection_stage": "edge",
+        "duckdb_type": "VARCHAR",
+        "value_type": "string",
+        "bytes_estimate": 2,
+        "enabled": True,
+    },
+    {
+        "name": "cmcd_sf",
+        "label": "Streaming Format",
+        "vcl_log_expression": "req.http.x-cmcd:sf",
+        "collection_stage": "edge",
+        "duckdb_type": "VARCHAR",
+        "value_type": "string",
+        "bytes_estimate": 2,
+        "enabled": True,
+    },
+    {
+        "name": "cmcd_st",
+        "label": "Stream Type",
+        "vcl_log_expression": "req.http.x-cmcd:st",
+        "collection_stage": "edge",
+        "duckdb_type": "VARCHAR",
+        "value_type": "string",
+        "bytes_estimate": 2,
+        "enabled": True,
+    },
+    {
+        "name": "cmcd_su",
+        "label": "Startup",
+        "vcl_log_expression": "req.http.x-cmcd:su",
+        "collection_stage": "edge",
+        "duckdb_type": "BOOLEAN",
+        "value_type": "boolean",
+        "bytes_estimate": 1,
+        "enabled": True,
+    },
+    {
+        "name": "cmcd_tb",
+        "label": "Top Bitrate (kbps)",
+        "vcl_log_expression": "req.http.x-cmcd:tb",
+        "collection_stage": "edge",
+        "duckdb_type": "INTEGER",
+        "value_type": "numeric",
+        "bytes_estimate": 5,
+        "enabled": True,
+    },
+    {
+        "name": "cmcd_rtp",
+        "label": "Requested Max Throughput (kbps)",
+        "vcl_log_expression": "req.http.x-cmcd:rtp",
+        "collection_stage": "edge",
+        "duckdb_type": "INTEGER",
+        "value_type": "numeric",
+        "bytes_estimate": 5,
+        "enabled": True,
+    },
+]
+# Ensure exact schema match (strip temporary note if any)
+for _cf in _CMCD_CUSTOM_FIELDS:
+    _cf.pop("vcl_log_expression_note", None)
+
+_CMCD_FIELD_NAMES = {cf["name"] for cf in _CMCD_CUSTOM_FIELDS}
+
+
+def get_cmcd_fields(enabled: bool) -> list[dict]:
+    """Return CMCD custom fields if enabled, else empty list."""
+    if enabled:
+        return [dict(cf) for cf in _CMCD_CUSTOM_FIELDS]
+    return []
+
+
+def reconcile_cmcd_custom_fields(custom_fields: list[dict] | None, *, enabled: bool) -> list[dict]:
+    """Return ``custom_fields`` with the canonical CMCD fields applied or stripped."""
+    kept = [cf for cf in (custom_fields or []) if cf.get("name") not in _CMCD_FIELD_NAMES]
+    return kept + get_cmcd_fields(enabled)
+
+
+def _remove_cmcd_custom_fields(cfg: dict) -> None:
+    lf_dict = cfg.get("log_fields") or {}
+    cfs = lf_dict.get("custom_fields")
+    if cfs:
+        lf_dict["custom_fields"] = [cf for cf in cfs if cf.get("name") not in _CMCD_FIELD_NAMES]
+
+
+CMCD_SNIPPET_NAME = "CMCD Extraction"
+
+
+def _bool_v1(padded_source: str, key: str) -> str:
+    """v1 bare-key-presence: match ``,key,`` against a pre-padded source var."""
+    return f'if({padded_source} ~ ",{key},", "1", "")'
+
+
+def _bool_v2(source: str, key: str) -> str:
+    """v2 RFC 8941 boolean: ``subfield()`` returns ``?1``."""
+    return f'if(subfield({source}, "{key}", ",") == "?1", "1", "")'
+
+
+def _cmcd_field_assignments_vcl(
+    obj_src: str,
+    req_src: str,
+    sess_src: str,
+    status_src: str,
+    su_expr: str,
+    bs_expr: str,
+) -> str:
+    return f"""\
+  # CMCD-Object fields
+  set req.http.x-cmcd:br = subfield({obj_src}, "br", ",");
+  set req.http.x-cmcd:d = subfield({obj_src}, "d", ",");
+  set req.http.x-cmcd:ot = subfield({obj_src}, "ot", ",");
+  set req.http.x-cmcd:tb = subfield({obj_src}, "tb", ",");
+
+  # CMCD-Request fields
+  set req.http.x-cmcd:bl = subfield({req_src}, "bl", ",");
+  set req.http.x-cmcd:dl = subfield({req_src}, "dl", ",");
+  set req.http.x-cmcd:mtp = subfield({req_src}, "mtp", ",");
+  set req.http.x-cmcd:su = {su_expr};
+
+  # CMCD-Session fields — strip quotes from string values.
+  set req.http.x-cmcd:sid = regsuball(subfield({sess_src}, "sid", ","), {{"^"|"$"}}, "");
+  set req.http.x-cmcd:cid = regsuball(subfield({sess_src}, "cid", ","), {{"^"|"$"}}, "");
+  set req.http.x-cmcd:sf = subfield({sess_src}, "sf", ",");
+  set req.http.x-cmcd:st = subfield({sess_src}, "st", ",");
+
+  # CMCD-Status fields
+  set req.http.x-cmcd:bs = {bs_expr};
+  set req.http.x-cmcd:rtp = subfield({status_src}, "rtp", ",");"""
+
+
+def _header_mode_vcl(version: int) -> str:
+    bf = _bool_v1 if version == 1 else _bool_v2
+    tag = f"v{version}"
+
+    if version == 1:
+        su = bf("var.cmcd_req_pad", "su")
+        bs = bf("var.cmcd_status_pad", "bs")
+        pad_decl = """\
+
+  # Pad header values with commas for bare-key boolean matching.
+  declare local var.cmcd_req_pad STRING;
+  set var.cmcd_req_pad = "," req.http.CMCD-Request ",";
+  declare local var.cmcd_status_pad STRING;
+  set var.cmcd_status_pad = "," req.http.CMCD-Status ",";
+"""
+    else:
+        su = bf("req.http.CMCD-Request", "su")
+        bs = bf("req.http.CMCD-Status", "bs")
+        pad_decl = ""
+
+    assignments = _cmcd_field_assignments_vcl(
+        "req.http.CMCD-Object",
+        "req.http.CMCD-Request",
+        "req.http.CMCD-Session",
+        "req.http.CMCD-Status",
+        su,
+        bs,
+    )
+    return f"""\
+# CMCD {tag} header-mode extraction.
+if (req.http.CMCD-Object != "" || req.http.CMCD-Request != "" || req.http.CMCD-Session != "" || req.http.CMCD-Status != "") {{
+{pad_decl}
+{assignments}
+
+  # Strip CMCD headers before forwarding to origin.
+  unset req.http.CMCD-Object;
+  unset req.http.CMCD-Request;
+  unset req.http.CMCD-Session;
+  unset req.http.CMCD-Status;
+}}"""
+
+
+def _query_string_mode_vcl(version: int) -> str:
+    bf = _bool_v1 if version == 1 else _bool_v2
+    tag = f"v{version}"
+
+    if version == 1:
+        su = bf("var.cmcd_pad", "su")
+        bs = bf("var.cmcd_pad", "bs")
+    else:
+        su = bf("var.cmcd", "su")
+        bs = bf("var.cmcd", "bs")
+
+    pad_block = (
+        """
+  declare local var.cmcd_pad STRING;
+  set var.cmcd_pad = "," var.cmcd ",";
+"""
+        if version == 1
+        else ""
+    )
+
+    assignments = _cmcd_field_assignments_vcl(
+        "var.cmcd",
+        "var.cmcd",
+        "var.cmcd",
+        "var.cmcd",
+        su,
+        bs,
+    )
+    return f"""\
+# CMCD {tag} query-string-mode extraction.
+declare local var.cmcd STRING;
+set var.cmcd = urldecode(querystring.get(req.url, "CMCD"));
+
+if (var.cmcd != "") {{
+{pad_block}
+{assignments}
+
+  # Strip CMCD from URL to prevent cache key pollution.
+  set req.url = querystring.filter(req.url, "CMCD");
+}}"""
+
+
+def generate_cmcd_vcl(mode: str = "query_string", version: int = 1) -> dict[str, str]:
+    """Return ``{CMCD_SNIPPET_NAME: vcl_body}`` for the configured mode + version."""
+    if version not in (1, 2):
+        raise ValueError(f"Unknown CMCD version: {version!r} (expected 1 or 2)")
+    if mode == "headers":
+        body = _header_mode_vcl(version)
+    elif mode == "query_string":
+        body = _query_string_mode_vcl(version)
+    else:
+        raise ValueError(f"Unknown CMCD mode: {mode!r} (expected 'headers' or 'query_string')")
+    return {CMCD_SNIPPET_NAME: body}
+
+
+def cmcd_snippet_names() -> list[str]:
+    """Names of the CMCD snippets we install."""
+    return [CMCD_SNIPPET_NAME]
+
+
+def system_feature_flags(cfg: dict[str, Any]) -> tuple[bool, bool]:
+    """Return ``(scoring_enabled, cmcd_enabled)`` for a service config."""
+    scoring_enabled = bool((cfg.get("scoring") or {}).get("enabled"))
+    cmcd_enabled = bool((cfg.get("cmcd") or {}).get("enabled"))
+    return scoring_enabled, cmcd_enabled
+
+
+def reconcile_system_custom_fields(
+    custom_fields: list[dict] | None,
+    *,
+    scoring_enabled: bool,
+    cmcd_enabled: bool,
+) -> list[dict]:
+    """Return ``custom_fields`` with system-managed entries re-asserted."""
+    from backend.provision.session_scoring_orchestrator import (
+        _SCORING_CUSTOM_FIELDS,
+        _SCORING_FIELD_NAMES,
+    )
+
+    out = [cf for cf in (custom_fields or []) if cf.get("name") not in _SCORING_FIELD_NAMES]
+    if scoring_enabled:
+        out.extend(dict(cf) for cf in _SCORING_CUSTOM_FIELDS)
+    return reconcile_cmcd_custom_fields(out, enabled=cmcd_enabled)
+
+
+def reconcile_cfg_system_custom_fields(cfg: dict[str, Any]) -> list[dict]:
+    """Re-assert system fields on ``cfg['log_fields']['custom_fields']`` in place."""
+    scoring_enabled, cmcd_enabled = system_feature_flags(cfg)
+    lf_dict = cfg.get("log_fields")
+    if not isinstance(lf_dict, dict):
+        lf_dict = {"schema_version": 2, "custom_fields": []}
+        cfg["log_fields"] = lf_dict
+    reconciled = reconcile_system_custom_fields(
+        lf_dict.get("custom_fields"),
+        scoring_enabled=scoring_enabled,
+        cmcd_enabled=cmcd_enabled,
+    )
+    lf_dict["custom_fields"] = reconciled
+    return reconciled
+
+
+# Register cmcd_fields alias BEFORE importing sibling modules
+sys.modules["backend.provision.cmcd_fields"] = sys.modules[__name__]
+
+from backend.core import field_registry as lf  # noqa: E402
+from backend.core.duckdb import rum_duckdb_path  # noqa: E402
+from backend.core.faro_versions import DEFAULT_FARO_VERSION  # noqa: E402
+from backend.core.fastly.client import fastly, is_mock_mode, region_endpoint  # noqa: E402
+from backend.provision.cli import ok, run_with_events, step, warn  # noqa: E402
+from backend.provision.declarative.reconciler import reconcile_vcl_state  # noqa: E402
+from backend.provision.declarative.state import FeatureState  # noqa: E402
+from backend.provision.fastly_api import (  # noqa: E402
     delete_cdn_service,
     ensure_cdn_service,
     remove_logging_endpoint,
     validate_log_format,
 )
-from backend.provision.fos_setup import (
+from backend.provision.fos_setup import (  # noqa: E402
     delete_fos_access_key,
     delete_fos_bucket,
     ensure_fos_access_key,
     ensure_fos_bucket,
 )
-from backend.provision.utils import ok, run_with_events, step, warn
 
 
 def _sync_crontab():
@@ -41,9 +407,7 @@ def _sync_crontab():
 
 
 def _upload_faro_bundle_sync(service_id: str, version: str, token: str, *, status_cb=None):
-    """Sync wrapper around the async ``download_and_upload_faro`` for use with
-    ``run_with_events`` (which calls its target as a plain sync callable with
-    a ``status_cb`` kwarg, same pattern as every other provisioning step)."""
+    """Sync wrapper around the async ``download_and_upload_faro`` for use with ``run_with_events``."""
     import asyncio
 
     from backend.provision.rum_assets import download_and_upload_faro
@@ -52,16 +416,7 @@ def _upload_faro_bundle_sync(service_id: str, version: str, token: str, *, statu
 
 
 def _reject_unsafe_fos_component(field: str, value: str, *, allow_slash: bool) -> None:
-    """Reject path-traversal tokens in an FOS path component before persisting.
-
-    L8: ``fos_bucket`` composes into the local cache path (``cache/<bucket>``),
-    so a value like ``../../tmp`` would escape the cache root when DuckDB / the
-    teardown path later joins it. The ``/execute`` + teardown paths already
-    reject these tokens; the persist path (ingest / register_existing →
-    write_service_config) did not. Buckets never contain ``/``; ``fos_prefix``
-    is an S3 key prefix that legitimately may, so ``/`` is allowed there while
-    ``..`` / backslash / NUL are rejected everywhere.
-    """
+    """Reject path-traversal tokens in an FOS path component before persisting."""
     if not value:
         return
     bad = ("\\", "..", "\x00") if allow_slash else ("/", "\\", "..", "\x00")
@@ -71,18 +426,7 @@ def _reject_unsafe_fos_component(field: str, value: str, *, allow_slash: bool) -
 
 
 def write_service_config(state: dict):
-    """Write a service config JSON file to configs/{service_id}.json.
-
-    PRESERVE-ON-RE-RUN: this function is called from /api/provision/ingest
-    (analyst-join, wizard re-run, key rotation). The ``state`` dict is the
-    request body — it has no awareness of code-managed keys that
-    ``enable_scoring`` / ``ngwaf_workspace_id`` PATCH / log_fields PATCH
-    may have injected into the existing config. Without preserving those
-    keys, re-running the wizard silently strips ``cfg["scoring"]``,
-    ``cfg["log_fields"]["custom_fields"]``, and ``cfg["ngwaf_workspace_id"]``
-    — same bug class as the 2026-06-02 state_sync incident, just with the
-    request body as the stale-overwriter instead of FOS admin_state.json.
-    """
+    """Write a service config JSON file to configs/{service_id}.json."""
     from backend import config as svcconfig
 
     service_id = state.get("logging_service_id") or state.get("service_id")
@@ -91,32 +435,20 @@ def write_service_config(state: dict):
     db_path = svcconfig.duckdb_path(service_id)
 
     def _build_cfg(existing_cfg: dict) -> dict:
-        # ``existing_cfg`` is the stored config at write time; code-managed keys the request
-        # body does not carry are re-adopted from it below.
-
         fos_key = state.get("fos_access_key_id") or state.get("fos_access_key", "")
         fos_secret = state.get("fos_secret_access_key") or state.get("fos_secret_key", "")
         bucket = state.get("fos_bucket") or state.get("fos_bucket_name", "")
         fos_prefix = ""
-        # The v3 bucket is dedicated to this service; raw objects always start at
-        # the fixed request/RUM roots.
         _reject_unsafe_fos_component("fos_bucket", bucket, allow_slash=False)
         region = state.get("fos_region", "us-east-1")
         cdn_url = state.get("cdn_url", "")
 
-        # Build log_fields: prefer the request body, but if the request body
-        # omits custom_fields (or sends an empty list) AND we have existing
-        # custom_fields on disk, preserve them. System fields (CMCD, Scoring)
-        # are generated on-demand by FeatureState.from_config() and are NOT
-        # persisted in the config file.
         incoming_lf = dict(state.get("log_fields") or {})
         incoming_custom = incoming_lf.get("custom_fields")
         existing_custom = list((existing_cfg.get("log_fields") or {}).get("custom_fields") or [])
         if not incoming_custom and existing_custom:
-            # Filter out system fields from existing custom_fields
             incoming_lf["custom_fields"] = lf._filter_user_custom_fields(existing_custom)
         else:
-            # Filter out system fields from incoming custom_fields
             incoming_lf["custom_fields"] = lf._filter_user_custom_fields(incoming_lf.get("custom_fields", []))
 
         import datetime as _dt
@@ -145,17 +477,12 @@ def write_service_config(state: dict):
             "log_fields": incoming_lf,
         }
 
-        # Preserve code-managed top-level keys that the request body doesn't
-        # carry — primarily ``scoring`` (set by enable_scoring) and
-        # ``ngwaf_workspace_id`` (set by the NGWAF-config PATCH). Anything else
-        # the existing cfg has that the wizard body lacks survives the rewrite.
         for preserved_key in ("scoring", "cmcd", "ngwaf_workspace_id", "rum"):
             if preserved_key not in state and preserved_key in existing_cfg:
                 cfg[preserved_key] = existing_cfg[preserved_key]
             elif preserved_key in state:
                 cfg[preserved_key] = state[preserved_key]
 
-        # Resolve features selection (logging_enabled, rum_enabled)
         logging_enabled = state.get("logging_enabled")
         if logging_enabled is None:
             logging_enabled = existing_cfg.get("logging_enabled", True)
@@ -180,20 +507,10 @@ def write_service_config(state: dict):
         elif "log_period" in state.get("provisioning", {}):
             cfg["log_period"] = state["provisioning"]["log_period"]
 
-        # Honor the operator's chosen log_period as the sync cadence, with a hard
-        # 5s floor — matching the scheduler's own ``max(5, …)`` clamp and the
-        # settings-PATCH writer (which never applied a 30s floor). Picking a sub-30s
-        # period is an explicit operator choice trading extra FOS LIST/GET cost for
-        # dashboard freshness; it is no longer silently rounded up to 30s.
         log_period_secs = int(cfg.get("log_period", 120))
         sync_interval_seconds = max(5, log_period_secs)
         commit_interval_mins = max(max(1, sync_interval_seconds // 60), int(state.get("commit_interval_mins", 5)))
 
-        # Account-level edge rate-limiting entitlement (set by ensure_cdn_service's
-        # proactive probe). Prefer the freshly-detected state, then the carried-over
-        # request provisioning block, then the on-disk value, defaulting True so the
-        # cli.py:handle_update_cdn reader and reactive fallback behave as before when
-        # never detected.
         _rate_limiting = state.get("rate_limiting")
         if _rate_limiting is None:
             _rate_limiting = state.get("provisioning", {}).get("rate_limiting")
@@ -201,68 +518,45 @@ def write_service_config(state: dict):
             _rate_limiting = (existing_cfg.get("provisioning") or {}).get("rate_limiting")
         rate_limiting_val = True if _rate_limiting is None else bool(_rate_limiting)
 
+        prov_in = state.get("provisioning", {})
+        cron_sync_in = prov_in.get("cron_sync", {})
+        cron_compact_in = prov_in.get("cron_compact", {})
+
+        def _int_opt(key: str, default: int, *, sub: dict = cron_sync_in) -> int:
+            return int(state.get(key, sub.get(key, default)))
+
         cfg["provisioning"] = {
-            "endpoint_name": state.get("provisioning", {}).get("endpoint_name", "Fastly Object Storage Logs"),
-            "cdn_service_id": state.get("cdn_service_id", state.get("provisioning", {}).get("cdn_service_id", "")),
+            "endpoint_name": prov_in.get("endpoint_name", "Fastly Object Storage Logs"),
+            "cdn_service_id": state.get("cdn_service_id", prov_in.get("cdn_service_id", "")),
             "cdn_url": cdn_url,
-            "cdn_shield": state.get("cdn_shield", state.get("provisioning", {}).get("cdn_shield", "")),
-            "sample_rate": state.get("sample_rate", state.get("provisioning", {}).get("sample_rate", "100")),
-            "edge_only": state.get("edge_only", state.get("provisioning", {}).get("edge_only", True)),
-            "custom_condition": state.get(
-                "custom_condition", state.get("provisioning", {}).get("custom_condition", "")
-            ),
+            "cdn_shield": state.get("cdn_shield", prov_in.get("cdn_shield", "")),
+            "sample_rate": state.get("sample_rate", prov_in.get("sample_rate", "100")),
+            "edge_only": state.get("edge_only", prov_in.get("edge_only", True)),
+            "custom_condition": state.get("custom_condition", prov_in.get("custom_condition", "")),
             "rate_limiting": rate_limiting_val,
             "cron_sync": {
-                "enabled": state.get(
-                    "enable_cron_sync", state.get("provisioning", {}).get("cron_sync", {}).get("enabled", True)
-                ),
-                "delete_after": state.get(
-                    "delete_after", state.get("provisioning", {}).get("cron_sync", {}).get("delete_after", True)
-                ),
+                "enabled": state.get("enable_cron_sync", cron_sync_in.get("enabled", True)),
+                "delete_after": state.get("delete_after", cron_sync_in.get("delete_after", True)),
                 "interval_seconds": sync_interval_seconds,
                 "commit_interval_mins": commit_interval_mins,
                 "log_enabled": True,
                 "log_retention_days": int(state.get("log_retention_days", 30)),
-                "data_retention_days": int(
-                    state.get(
-                        "data_retention_days",
-                        state.get("provisioning", {}).get("cron_sync", {}).get("data_retention_days", 30),
-                    )
-                ),
-                "rum_retention_days": int(
-                    state.get(
-                        "rum_retention_days",
-                        state.get("provisioning", {}).get("cron_sync", {}).get("rum_retention_days", 30),
-                    )
-                ),
-                "cache_retention_days": int(
-                    state.get(
-                        "cache_retention_days",
-                        state.get("provisioning", {}).get("cron_sync", {}).get("cache_retention_days", 90),
-                    )
-                ),
-                "rollup_retention_months": int(
-                    state.get(
-                        "rollup_retention_months",
-                        state.get("provisioning", {}).get("cron_sync", {}).get("rollup_retention_months", 12),
-                    )
-                ),
+                "data_retention_days": _int_opt("data_retention_days", 30),
+                "rum_retention_days": _int_opt("rum_retention_days", 30),
+                "cache_retention_days": _int_opt("cache_retention_days", 90),
+                "rollup_retention_months": _int_opt("rollup_retention_months", 12),
             },
             "cron_compact": {
-                "enabled": state.get(
-                    "enable_cron_compact", state.get("provisioning", {}).get("cron_compact", {}).get("enabled", True)
-                ),
+                "enabled": state.get("enable_cron_compact", cron_compact_in.get("enabled", True)),
                 "interval_mins": 1440,
                 "log_enabled": True,
                 "log_retention_days": int(state.get("log_retention_days", 30)),
             },
-            "temp_admin_key_id": state.get("temp_admin_key_id", state.get("provisioning", {}).get("temp_admin_key_id")),
+            "temp_admin_key_id": state.get("temp_admin_key_id", prov_in.get("temp_admin_key_id")),
         }
         return cfg
 
     def _apply(target: dict) -> None:
-        # Merge, don't replace: stored keys the wizard does not own (status, fos_proxy,
-        # last_activated_version, rum_vcl_sha, ...) survive a re-run.
         target.update(_build_cfg(target))
 
     with svcconfig.config_lock(service_id):
@@ -278,14 +572,7 @@ class _PreflightError(Exception):
 
 
 def _state_file_path() -> str:
-    """Absolute path to the provisioning resume-state file.
-
-    Resolved from ``backend.config.SYSTEM_DATA_DIR`` at call time so tests
-    that monkeypatch ``SYSTEM_DATA_DIR`` (see ``isolate_metadata_db``)
-    redirect transparently. Historically this was a CWD-relative
-    ``setup-state.json`` which leaked into whichever directory the wizard
-    happened to be invoked from (notably ``frontend/`` under Playwright).
-    """
+    """Absolute path to the provisioning resume-state file."""
     from backend import config as svcconfig
 
     svcconfig._ensure_dirs()
@@ -312,24 +599,9 @@ def load_state() -> dict:
 
 
 def ensure_logging_via_reconciler(state: dict, token: str, status_cb=None) -> int:
-    """Apply logging and VCL configuration via declarative reconciliation.
-
-    Replaces the imperative ensure_logging_endpoint by using reconcile_vcl_state
-    to handle all VCL snippets, logging endpoints, backends, and custom fields.
-
-    Args:
-        state: Provisioning state dict containing config and credentials.
-        token: Fastly API token.
-        status_cb: Optional callback for status updates.
-
-    Returns:
-        Activated version number.
-
-    Raises:
-        RuntimeError: if reconciliation fails.
-    """
+    """Apply logging and VCL configuration via declarative reconciliation."""
     from backend.core.fastly.client import get_active_version
-    from backend.provision.utils import info, ok
+    from backend.provision.cli import info, ok
 
     service_id = state.get("logging_service_id")
     if not service_id:
@@ -339,26 +611,20 @@ def ensure_logging_via_reconciler(state: dict, token: str, status_cb=None) -> in
     if status_cb:
         status_cb(f"🔄 Reconciling VCL state for {service_id}...")
 
-    # Normalize state dict: FeatureState.from_config() expects 'service_id' key,
-    # but provisioning state uses 'logging_service_id'. Add both for compatibility.
     state_for_feature = dict(state)
     state_for_feature["service_id"] = service_id
 
-    # Verify FeatureState can be built from config (validates all required fields)
     try:
-        feature_state = FeatureState.from_config(state_for_feature)
+        FeatureState.from_config(state_for_feature)
     except (KeyError, ValueError) as e:
         raise RuntimeError(f"Invalid feature state configuration: {e}") from e
 
-    # Call reconciler to apply desired state
-    # The reconciler reads from configs/{service_id}.json which was already written
     try:
         result = reconcile_vcl_state(service_id, token, dry_run=False, status_cb=status_cb)
     except Exception as e:
         raise RuntimeError(f"VCL reconciliation failed: {e}") from e
 
     if result.activated_version is None:
-        # No changes were needed (already in desired state)
         active_version = get_active_version(service_id, token)
         if active_version is None:
             raise RuntimeError(f"Service {service_id} has no active version")
@@ -452,25 +718,10 @@ def provision(cfg: dict, _resume_from_state: bool = False):
         state["fos_key_description"] = key_desc
         save_state(state)
 
-        # Persist a readable service config NOW — the moment permanent FOS
-        # creds + bucket exist — BEFORE the fallible CDN/logging steps and
-        # the finalize write at step 8. The config write used to run ONLY as
-        # the last step, and it sits AFTER a `yield` in this SSE-streamed
-        # generator: if the wizard's stream was interrupted (client
-        # disconnect, or the backend torn down mid-provision) any time after
-        # the bucket was created, the generator was closed at that yield and
-        # the config never landed — orphaning the FOS bucket with no config
-        # the backend could read (telemetry-proxy "no config for service_id"
-        # → FOS 403 → empty/"internally inconsistent" dashboard). Writing it
-        # here makes the service readable as soon as FOS is set up; the
-        # finalize write below remains the authoritative, rollback-gated
-        # write that fills in cdn_service_id + the activated logging version.
-        # Best-effort: a failure here must NOT abort the flow — the finalize
-        # write is the real gate (and on a real error it triggers teardown).
         try:
             write_service_config(state)
             ok("Service config persisted early (FOS ready) — survives stream interruption")
-        except Exception as early_cfg_exc:  # noqa: BLE001 — best-effort; finalize write is authoritative
+        except Exception as early_cfg_exc:  # noqa: BLE001
             warn(f"Early service-config write failed (non-fatal, retried at finalize): {early_cfg_exc}")
 
         yield {"type": "progress", "current": 4, "total": total}
@@ -493,11 +744,6 @@ def provision(cfg: dict, _resume_from_state: bool = False):
         step(6, total, "Creating Fastly CDN service to front Fastly Object Storage")
 
         def _record_cdn_service_id(svc_id):
-            # Persist the CDN service id the moment it's created so a failure
-            # later inside ensure_cdn_service (e.g. VCL validation) still leaves
-            # it in state for perform_teardown to delete — no orphan service.
-            # Runs on the worker thread while this generator is parked in
-            # run_with_events; the queue + join there synchronise the write.
             state["cdn_service_id"] = svc_id
             save_state(state)
 
@@ -510,9 +756,6 @@ def provision(cfg: dict, _resume_from_state: bool = False):
             on_created=_record_cdn_service_id,
         )
         state["cdn_service_id"] = cdn_svc["id"]
-        # Persist the proactively-detected account rate-limiting entitlement only
-        # when conclusive; a None (unknown) leaves the default-True read path +
-        # reactive validate fallback intact.
         if cdn_svc.get("rate_limiting") is not None:
             state["rate_limiting"] = cdn_svc["rate_limiting"]
         save_state(state)
@@ -521,21 +764,9 @@ def provision(cfg: dict, _resume_from_state: bool = False):
         yield {"type": "status", "message": "📡 Step 7/8: Reconciling logging configuration via declarative model..."}
         step(7, total, "Reconciling logging configuration")
 
-        # Write config early so reconciler can read it from configs/{service_id}.json
         write_service_config(state)
         ok("Service config written (for reconciler)")
 
-        # RUM: upload the pinned Faro Web SDK bundle to FOS BEFORE the
-        # reconciler below activates VCL that routes /js/faro-sdk.js to it
-        # (F-2 audit finding). Without this, a fresh service provisioned
-        # with rum_enabled + a pinned faro_version (the wizard always pins
-        # one — see routers/provision.py) went live with VCL routing to an
-        # object that was never uploaded: the tracker requests
-        # /js/faro-sdk.js and gets a 404 forever, since there is no CDN
-        # fallback. Mirrors the upload-before-reconcile ordering in
-        # rum_orchestrator_v2.enable_rum. Resolves DEFAULT_FARO_VERSION here
-        # too, defensively, in case a caller invokes provision() directly
-        # with rum_enabled but no faro_version ever resolved upstream.
         if state.get("rum_enabled"):
             rum_state_raw = state.get("rum")
             rum_state_cfg = rum_state_raw if isinstance(rum_state_raw, dict) else {}
@@ -545,21 +776,7 @@ def provision(cfg: dict, _resume_from_state: bool = False):
                 yield from run_with_events(
                     _upload_faro_bundle_sync, state["logging_service_id"], resolved_faro_version, token
                 )
-            except Exception as faro_exc:  # noqa: BLE001 — deliberately non-fatal, see below
-                # Non-fatal (#3 audit finding): this upload used to sit
-                # inside provision()'s try block, so an unpkg outage or a
-                # transient FOS error here fell into the except below and
-                # ran perform_teardown with remove_logging/remove_cdn/
-                # remove_bucket/remove_fos_tokens all True — a third-party
-                # CDN hiccup deleting the just-created CDN service, FOS
-                # bucket, and FOS access keys. faro_version is already
-                # pinned in config (write_service_config above, BEFORE this
-                # upload), which is exactly the "pinned, bundle missing"
-                # state the RUM sync cron's self-heal restore branch
-                # (backend/cron/jobs/rum_sync.py::_reconcile_faro_bundle)
-                # already converges on its next tick — so warning and
-                # continuing is strictly safer than tearing down
-                # freshly-provisioned infrastructure over it.
+            except Exception as faro_exc:  # noqa: BLE001
                 logger.warning(
                     "[provision] Faro bundle upload failed for %s (non-fatal — "
                     "the RUM sync cron self-heals it on its next tick): %s",
@@ -576,17 +793,6 @@ def provision(cfg: dict, _resume_from_state: bool = False):
                     ),
                 }
             else:
-                # download_and_upload_faro already persisted faro_version +
-                # faro_content_hash + faro_fos_etag_md5 into
-                # configs/{service_id}.json itself (its own save_config
-                # call in rum_assets.py). Re-read that rather than writing
-                # back the pre-upload `rum_state_cfg` snapshot (#1 audit
-                # finding) — the snapshot predates the upload and would
-                # clobber the hashes it just wrote with a bare
-                # {"faro_version": ...}, leaving the cron's cheap FOS
-                # integrity check (_faro_bundle_intact) with no stored ETag
-                # to compare against, forcing a redundant unpkg
-                # download + FOS PUT + purge on the very next tick.
                 from backend import config as svcconfig
 
                 refreshed_cfg = svcconfig.load_config(state["logging_service_id"]) or {}
@@ -609,10 +815,6 @@ def provision(cfg: dict, _resume_from_state: bool = False):
         step(8, total, "Finalizing configuration")
         write_service_config(state)
 
-        # FASTLY_MOCK_MODE provides mock Fastly/FOS control-plane calls for
-        # browser journeys, but it does not provide a real object-storage
-        # catalog for DuckDB/PyIceberg initialization. Avoid entering that
-        # network-backed path in mock runs so the SSE stream can terminate.
         if is_mock_mode():
             yield {"type": "status", "message": "⚠ Skipping Iceberg initialization in mock mode."}
             yield {"type": "progress", "current": 8, "total": total}
@@ -625,11 +827,6 @@ def provision(cfg: dict, _resume_from_state: bool = False):
 
             src = db.get_source_for_service(state["logging_service_id"])
             if not src:
-                # No source config resolved (config race / missing fields). The
-                # table can't be created here, but commit_buffer self-heals it on
-                # the first commit. Surface it instead of skipping silently — a
-                # swallowed failure here is exactly what shipped a fresh service
-                # with no Iceberg table and a commit cron crashing every cycle.
                 logger.warning(
                     "[provision] %s: no source resolved after config write — "
                     "Iceberg table will be created lazily on the first commit",
@@ -643,16 +840,6 @@ def provision(cfg: dict, _resume_from_state: bool = False):
                 }
             else:
                 yield {"type": "status", "message": "🧊 Initializing Iceberg table in Fastly Object Storage..."}
-                # FOS occasionally returns a transient 5xx (observed: HTTP 500 →
-                # OSError(121)) on the metadata HEAD that pyiceberg runs before
-                # writing a new table's metadata.json. s3fs does NOT retry
-                # generic 5xx, so a single blip would otherwise punt table
-                # creation onto the first-commit fallback below. init_iceberg_
-                # table is idempotent (per-service lock + load-or-create), so
-                # retry a few times with a short backoff first — a momentary FOS
-                # hiccup shouldn't surface during provisioning. Only I/O errors
-                # (OSError: FOS 5xx / timeout / reset) are retried; a config or
-                # programming error falls straight through to the fallback.
                 from tenacity import Retrying, retry_if_exception_type, stop_after_attempt
 
                 _ICE_INIT_ATTEMPTS = 3
@@ -681,10 +868,6 @@ def provision(cfg: dict, _resume_from_state: bool = False):
                     ok("Iceberg table ready")
                     yield {"type": "status", "message": "✓ Iceberg table ready."}
                 else:
-                    # Best-effort: do NOT abort the wizard (commit_buffer creates
-                    # the table on the first commit). But never swallow it
-                    # silently — log with traceback + surface in the wizard so a
-                    # broken fresh install is visible at provision time.
                     logger.error(
                         "[provision] Iceberg table init failed after %d attempt(s) (deferred to first commit)",
                         _ICE_INIT_ATTEMPTS,
@@ -711,8 +894,6 @@ def provision(cfg: dict, _resume_from_state: bool = False):
                     metadata_db.record_audit(src["name"], "log_format_change", details, actor="provisioning")
                 c.close()
         except Exception:
-            # Non-fatal (the service is already provisioned); but log it so a
-            # post-provision audit/connection failure isn't invisible.
             logger.exception("[provision] post-provision Iceberg/audit step failed (non-fatal)")
 
         yield {"type": "progress", "current": 8, "total": total}
@@ -747,27 +928,6 @@ def perform_teardown(state: dict, token: str, opts: dict | None = None):
         }
 
     total_steps = 5
-    # ── TEARDOWN ORDER: DEREFERENCE, THEN DELETE. ────────────────────────────
-    # Every step that removes VCL from the CUSTOMER's live service must complete
-    # before any step that deletes a service that VCL points at. Otherwise the
-    # customer's active version is left routing to a deleted host — its own
-    # traffic breaks, and the failure is ours, not theirs.
-    #
-    #   1. scoring VCL strip + Compute delete  (strip is fatal-on-failure, so
-    #      the Compute service is never deleted while still referenced)
-    #   2. logging endpoint + ALL analytics-owned snippets/conditions/
-    #      dictionaries/backends off the customer service
-    #   3. FOS access keys
-    #   4. FOS bucket
-    #   5. analytics-owned log-fronting CDN service (last: the logging endpoint
-    #      removed in step 2 is what referenced it)
-    #
-    # Step 1 stays ahead of step 2 because both clone+activate the customer
-    # service, and the scoring strip is the one with a live-traffic dependency.
-    # Gated on opts.get(..., True) so the internal provision()-failure rollback
-    # (no opts) still tears scoring down. The scoring ids ride in
-    # state['scoring'] (the cfg['scoring'] block); disable_scoring can't be used
-    # here because the config file is already gone.
     yield {"type": "progress", "current": 1, "total": total_steps}
     scoring_meta = state.get("scoring") or {}
     do_scoring = opts.get("remove_scoring", True) and (
@@ -787,10 +947,6 @@ def perform_teardown(state: dict, token: str, opts: dict | None = None):
                     "message": f"Warning: scoring {label} store {store_id} not deleted — remove it manually.",
                 }
         except Exception as exc:
-            # teardown_scoring_resources aborts (raises) rather than delete the
-            # Compute service while the customer's active version may still
-            # route to it. Surface that loudly — it is an action item, not a
-            # cosmetic warning, and the operator must re-run teardown.
             yield {
                 "type": "status",
                 "message": (
@@ -901,21 +1057,18 @@ def cleanup_local_data(service_id: str, bucket: str = None, remove_data: bool = 
     """Remove local config files, database, and cache associated with a service."""
     from backend import config as svcconfig
 
-    # Remove service config
     if service_id:
         cfg_path = svcconfig.config_path(service_id)
         if os.path.exists(cfg_path):
             os.remove(cfg_path)
             ok(f"Removed service config: {cfg_path}")
 
-    # Remove local database and cache if requested
     if remove_data:
         db_path = (
             svcconfig.duckdb_path(service_id)
             if service_id
             else os.path.join(os.path.dirname(__file__), "..", "data", "logs.duckdb")
         )
-        # Delete main and RUM DuckDB files (+ WALs) if they exist
         rum_db_path = rum_duckdb_path(db_path)
         for target_db, label in ((db_path, "local database"), (rum_db_path, "local RUM database")):
             if os.path.exists(target_db):
@@ -935,24 +1088,12 @@ def cleanup_local_data(service_id: str, bucket: str = None, remove_data: bool = 
                 pass
 
         if bucket:
-            # Security: ``bucket`` is supplied via the provisioning
-            # API and historically had no path-shape validation. A payload
-            # like ``../../../tmp/anything`` would compose with
-            # os.path.join to produce a path outside the cache root and
-            # shutil.rmtree would happily wipe whatever lived there.
-            # Reject any separator/traversal token up front, then
-            # additionally verify the resolved path stays under the
-            # resolved cache root (defense in depth — catches edge cases
-            # like symlink escapes from inside an attacker-writable
-            # parent dir).
             if any(c in bucket for c in ("/", "\\", "..", "\x00")):
                 logger.warning("[teardown] refusing to remove cache for bucket=%r with path-shape characters", bucket)
             else:
                 for base in [os.getcwd(), os.path.join(os.path.dirname(__file__), "..", "..")]:
                     cache_root = os.path.realpath(os.path.join(base, "cache"))
                     svc_cache_dir = os.path.realpath(os.path.join(cache_root, bucket))
-                    # Reject anything that resolved outside the cache root —
-                    # belt-and-suspenders for symlinks pointing elsewhere.
                     try:
                         common = os.path.commonpath([cache_root, svc_cache_dir])
                     except ValueError:
@@ -975,8 +1116,6 @@ def analyst_path_a_supported(source: dict | None = None) -> bool:
     """Return whether independent FOS-only analyst invites are usable."""
     from backend import config as svcconfig
 
-    # In high-scale mode, analytical data resides in ClickHouse and is not
-    # present in the FOS-only payload consumed by an independent copy.
     return not svcconfig.is_high_scale_mode(source)
 
 
@@ -995,11 +1134,6 @@ def generate_analyst_invite(service_id: str) -> dict:
             "Use live shared-instance analyst access (Path B) instead."
         )
     api_token = cfg.get("fastly_api_key", "").strip()
-    # Fail fast when the stored token is missing. Without this, the Fastly
-    # API call below would go out with token="" and either time out or
-    # return an error envelope; either way the downstream key["access_key"]
-    # would raise an unhelpful KeyError instead of a clean 400-style message.
-    # Caller (route handler) wraps RuntimeError → HTTPException(400).
     if not api_token:
         raise RuntimeError(
             f"Service {service_id} has no stored fastly_api_key. Rotate the credential before generating a viewer key."
@@ -1016,15 +1150,11 @@ def generate_analyst_invite(service_id: str) -> dict:
         },
         token=api_token,
     )
-    # Defensive: a malformed Fastly response shouldn't bubble up as a raw
-    # KeyError on access_key / secret_key — surface a clear error instead.
     if not isinstance(key, dict) or "access_key" not in key or "secret_key" not in key:
         raise RuntimeError(
             f"Fastly access-key API returned unexpected shape (keys={list(key.keys()) if isinstance(key, dict) else type(key).__name__}); "
             "cannot generate analyst invite."
         )
-
-    iceberg_metadata_location = None
 
     return {
         "name": cfg.get("name", service_id),
@@ -1035,7 +1165,7 @@ def generate_analyst_invite(service_id: str) -> dict:
         "fos_prefix": cfg.get("fos_prefix", ""),
         "access_key_id": key["access_key"],
         "secret_key": key["secret_key"],
-        "iceberg_metadata_location": iceberg_metadata_location,
+        "iceberg_metadata_location": None,
         "cdn_url": cfg.get("cdn_url", ""),
         "cdn_service_id": cfg.get("cdn_service_id") or "",
         "cdn_secret": cfg.get("cdn_secret") or "",
@@ -1054,13 +1184,6 @@ def _build_log_fields_config(args) -> dict:
     for g in getattr(args, "disable_group", None) or []:
         if g in groups:
             groups.remove(g)
-    # Seed from the preset's own field_overrides so preset-level opt-ins/outs
-    # apply (e.g. security → ``tls_ciphers_sha: True``). Without this a preset's
-    # declared overrides were silently dropped, and — post default_off — an
-    # opt-in field a preset wanted on could never be turned on through a preset.
-    # CLI --enable-field / --disable-field then layer on top (disable last so it
-    # wins). This is also the path that turns a ``default_off`` field (e.g.
-    # cookie_session) ON: ``--enable-field cookie_session``.
     field_overrides = dict(preset.get("field_overrides") or {})
     field_overrides.update({fid: True for fid in (getattr(args, "enable_field", None) or [])})
     field_overrides.update({fid: False for fid in (getattr(args, "disable_field", None) or [])})

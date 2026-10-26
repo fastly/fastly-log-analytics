@@ -1,28 +1,26 @@
 import { clsx, type ClassValue } from "clsx"
 import { twMerge } from "tailwind-merge"
+import { subHours } from 'date-fns'
 import { ShieldAlert, ServerCrash, Zap, Network, Globe, LayoutGrid, type LucideIcon } from 'lucide-react'
 import { formatDate, toUTCDate } from '@/lib/format'
-import { CHART_COLORS, densifyBarSeries, type BarSeriesPoint } from '@/lib/chart-helpers'
+import { CHART_COLORS, CHART_LAYOUT_DEFAULTS, densifyBarSeries, type BarSeriesPoint } from '@/lib/chart-helpers'
 import { useFilterStore } from '@/stores/filterStore'
 import type { components } from '@/types/api.generated'
 import type { FiltersPayload, PlotlyTrace } from '@/types/api'
 
+export { CHART_LAYOUT_DEFAULTS }
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
 }
 
 export function formatDateTime(isoString: string | null | undefined, timeZone?: string): string {
-  if (!isoString) return 'Unknown'
-  return formatDate(isoString, timeZone || 'UTC', 'MMM d, yyyy h:mm:ss a')
+  return isoString ? formatDate(isoString, timeZone || 'UTC', 'MMM d, yyyy h:mm:ss a') : 'Unknown'
 }
 
 export function downloadBlob(blob: Blob, filename: string) {
   const url = window.URL.createObjectURL(blob)
-  const a = Object.assign(document.createElement('a'), {
-    href: url,
-    download: filename,
-  })
+  const a = Object.assign(document.createElement('a'), { href: url, download: filename })
   document.body.appendChild(a)
   a.click()
   document.body.removeChild(a)
@@ -37,15 +35,11 @@ export function downloadAsCsv(rows: Record<string, unknown>[], columns: string[]
   }
   const csv = [
     columns.map(escape).join(','),
-    ...rows.map(r => columns.map(c => escape(r[c])).join(',')),
+    ...rows.map((r) => columns.map((c) => escape(r[c])).join(',')),
   ].join('\n')
   downloadBlob(new Blob([csv], { type: 'text/csv;charset=utf-8;' }), filename)
 }
 
-/**
- * Copy text to the system clipboard, returning true on success and false on
- * failure (e.g. non-secure context or permission denied).
- */
 export async function copyToClipboard(text: string): Promise<boolean> {
   try {
     await navigator.clipboard.writeText(text)
@@ -55,11 +49,6 @@ export async function copyToClipboard(text: string): Promise<boolean> {
   }
 }
 
-/**
- * Pair each item with a React key built from its own label plus the number of earlier items
- * that share it. For positional data with no natural id (table cells, repeated labels) this
- * keeps keys stable and unique without keying on the array index.
- */
 export function keyByOccurrence<T>(items: readonly T[], label: (item: T) => string): { key: string; item: T }[] {
   const seen = new Map<string, number>()
   return items.map((item) => {
@@ -70,75 +59,37 @@ export function keyByOccurrence<T>(items: readonly T[], label: (item: T) => stri
   })
 }
 
-// Runtime guards for admin payloads whose generated schema is a free dict.
-// Callers narrow to a local shape only after the top-level container checks
-// out, so a malformed body degrades to the caller's fallback instead of
-// throwing deep inside render.
-
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return typeof v === 'object' && v !== null && !Array.isArray(v)
-}
-
 export function recordOrNull<T extends object>(v: T | null | undefined): T | null {
-  return isRecord(v) ? (v as T) : null
+  return typeof v === 'object' && v !== null && !Array.isArray(v) ? (v as T) : null
 }
 
 export function arrayOrEmpty<T>(v: readonly T[] | null | undefined): T[] {
   return Array.isArray(v) ? [...v] : []
 }
 
-/** Narrow a plain string (e.g. a Select's value) to one member of a generated string-enum union. */
 export function oneOf<T extends string>(allowed: readonly T[], value: string | null | undefined): T | undefined {
   return allowed.find((a) => a === value)
 }
 
-/**
- * Client-IP-family filter columns.
- *
- * When PII masking is enabled for an analyst (invite `pii_policy.mask_ips`),
- * these columns are non-filterable: display masking is response-side only, so
- * letting an analyst filter by an exact IP would be a presence oracle (and a
- * dead-end on the masked value anyway). The frontend hides the drill-down
- * affordances for these; the real guarantee is the server-side lock in
- * `backend/utils/remote_access.py` (`_PII_FORBIDDEN_FILTER_COLS`), which 403s
- * any such filter. Keep this list in sync with that set.
- *
- * `oip` (origin / CDN shield IP) is intentionally NOT here — it's operator
- * infra, not end-user PII, and the Origin IP-Health card depends on filtering
- * by it.
- */
 export const IP_FAMILY_FIELDS = ['ip', 'client_ip', 'ip_address', 'remote_addr'] as const
 
-/** True when `column` is a client-IP-family field that masking analysts may not filter on. */
 export function isIpFamilyField(column: string): boolean {
   return (IP_FAMILY_FIELDS as readonly string[]).includes(column)
 }
 
-// Cookie names and helpers shared between SSR Server Components and client stores.
-// No 'use client' directive — imported by both Server Components (app/layout.tsx)
-// and Client Components (AppLayout.tsx, StoreHydrator.tsx, DebugPanel.tsx).
-// Adding 'use client' here would wrap string constants in Next's client-reference
-// proxy so they evaluate to `undefined` inside Server Components.
-
 export const ACTIVE_SERVICE_COOKIE = 'fla.activeServiceId'
+export const DEBUG_RESPONSES_COOKIE = 'fla.debugResponses'
+export const SIDEBAR_COLLAPSED_COOKIE = 'fla.sidebarCollapsed'
 
 export function setActiveServiceCookie(serviceId: string | null) {
   if (typeof document === 'undefined') return
-  if (serviceId && /^[A-Za-z0-9]{10,30}$/.test(serviceId)) {
-    document.cookie = `${ACTIVE_SERVICE_COOKIE}=${serviceId}; path=/; max-age=31536000; samesite=lax`
-  } else {
-    document.cookie = `${ACTIVE_SERVICE_COOKIE}=; path=/; max-age=0; samesite=lax`
-  }
+  const valid = serviceId && /^[A-Za-z0-9]{10,30}$/.test(serviceId)
+  document.cookie = `${ACTIVE_SERVICE_COOKIE}=${valid ? serviceId : ''}; path=/; max-age=${valid ? 31536000 : 0}; samesite=lax`
 }
-
-export const DEBUG_RESPONSES_COOKIE = 'fla.debugResponses'
-
-export const SIDEBAR_COLLAPSED_COOKIE = 'fla.sidebarCollapsed'
 
 export function buildServiceHref(path: string, serviceId: string | null | undefined): string {
   if (!serviceId) return path
-  const sep = path.includes('?') ? '&' : '?'
-  return `${path}${sep}service=${encodeURIComponent(serviceId)}`
+  return `${path}${path.includes('?') ? '&' : '?'}service=${encodeURIComponent(serviceId)}`
 }
 
 export function buildStreamDetailUrl(token: string, serviceId?: string | null): string {
@@ -161,43 +112,10 @@ export function buildSessionDashboardUrl(
   return `/dashboard?${params.toString()}`
 }
 
-/**
- * Shared className strings for the "panel" dialog pattern used across
- * the app's larger modals (CronSettingsModal, InviteAnalystDialog,
- * PopLocationsModal, TeardownDialog, SyncFromCloudModal,
- * CreateInviteDialog, LogSettingsModal, ProvisionWizard, SSEModal).
- *
- * Pattern: fixed-max-height panel with flex column layout, scrollable
- * body sandwiched between a sticky header (border-b) and footer
- * (border-t bg-muted/10). The body itself is left to each caller since
- * padding / scroll behavior varies (some use ScrollArea, some plain
- * overflow-y-auto, some inline form layouts).
- *
- * Headers come in two flavors:
- *  - `panelDialogHeaderSolid` (bg-background): used when the header has
- *    busy UI (badges, step indicators) and needs more visual weight.
- *  - `panelDialogHeaderMuted` (bg-muted/10): the default for simpler
- *    headers — pairs visually with the matching footer background.
- *
- * Compose with `cn()` so callers can append width / showCloseButton /
- * conditional classes without fighting tailwind-merge ordering.
- */
-
-export const panelDialogContent =
-  "max-h-[90vh] flex flex-col p-0 overflow-hidden"
-
-export const panelDialogHeaderMuted =
-  "px-6 pt-6 pb-4 border-b bg-muted/10 shrink-0"
-
-export const panelDialogHeaderSolid =
-  "px-6 pt-6 pb-4 border-b bg-background shrink-0"
-
-export const panelDialogFooter =
-  "px-6 py-4 border-t bg-muted/10 shrink-0"
-
-// ---------------------------------------------------------------------------
-// User activity tracking (folded from userActivity.ts)
-// ---------------------------------------------------------------------------
+export const panelDialogContent = 'max-h-[90vh] flex flex-col p-0 overflow-hidden'
+export const panelDialogHeaderMuted = 'px-6 pt-6 pb-4 border-b bg-muted/10 shrink-0'
+export const panelDialogHeaderSolid = 'px-6 pt-6 pb-4 border-b bg-background shrink-0'
+export const panelDialogFooter = 'px-6 py-4 border-t bg-muted/10 shrink-0'
 
 export const ACTIVE_WINDOW_MS = 120_000
 const MOUSE_THROTTLE_MS = 1_000
@@ -246,10 +164,6 @@ export function __resetForTests(at: number = 0): void {
   lastThrottledBump = 0
 }
 
-// ---------------------------------------------------------------------------
-// Shared constants (folded from constants.ts)
-// ---------------------------------------------------------------------------
-
 export const INTERVALS = [
   { label: '1s', value: '1 second' },
   { label: '1m', value: '1 minute' },
@@ -269,51 +183,34 @@ export const TRENDS = [
   { label: '1h', value: '1h' }, { label: '1d', value: '1d' },
 ]
 
-export const CHART_LAYOUT_DEFAULTS = {
-  tickformatstops: [
-    { dtickrange: [0, 1000], value: "%H:%M:%S.%f" },
-    { dtickrange: [1000, 60000], value: "%H:%M:%S" },
-    { dtickrange: [60000, 3600000], value: "%H:%M" },
-    { dtickrange: [3600000, 86400000], value: "%H:%M<br>%b %d" },
-    { dtickrange: [86400000, 604800000], value: "%b %d" },
-    { dtickrange: [604800000, "M1"], value: "%b %d" },
-    { dtickrange: ["M1", "M12"], value: "%b %Y" },
-    { dtickrange: ["M12", null], value: "%Y" }
-  ]
-}
-
 export const SHIELD_MAP: Record<string, string> = {
   "us-east-1": "iad-va-us", "us-west": "bfi-wa-us", "us-central-1": "chi-il-us",
   "eu-central-1": "frankfurt-de", "eu-south-1": "mxp-milan-it", "eu-west-1": "mxp-paris-fr",
   "uk-east-1": "london-uk", "jp-central-1": "nrt-tokyo-jp", "au-east-1": "sydney-au",
-};
+}
 
 export const REGION_LABELS: Record<string, string> = {
   "us-east-1": "US East (Ashburn)", "us-west": "US West (Seattle)", "us-central-1": "US Central (Chicago)",
   "eu-central-1": "EU Central (Frankfurt)", "eu-south-1": "EU South (Milan)", "eu-west-1": "EU West (Paris)",
   "uk-east-1": "UK East (London)", "jp-central-1": "JP Central (Tokyo)", "au-east-1": "AU East (Sydney)",
-};
+}
 
 export const SHIELD_LABELS: Record<string, string> = {
   none: "None", "iad-va-us": "IAD (Ashburn)", "bfi-wa-us": "BFI (Seattle)", "chi-il-us": "CHI (Chicago)",
   "frankfurt-de": "FRA (Frankfurt)", "mxp-milan-it": "MXP (Milan)", "mxp-paris-fr": "MXP (Paris)",
   "london-uk": "LHR (London)", "nrt-tokyo-jp": "NRT (Tokyo)", "sydney-au": "SYD (Sydney)",
-};
+}
 
 export const PERIOD_LABELS: Record<string, string> = {
   "1": "1 second", "5": "5 seconds", "10": "10 seconds", "20": "20 seconds", "30": "30 seconds",
   "60": "1 minute", "120": "2 minutes", "300": "5 minutes", "600": "10 minutes", "900": "15 minutes",
-};
+}
 
 export const RETENTION_OPTIONS = [
   { value: "1", label: "1 day" }, { value: "3", label: "3 days" }, { value: "7", label: "7 days" },
   { value: "14", label: "14 days" }, { value: "30", label: "30 days" }, { value: "90", label: "90 days" },
   { value: "180", label: "180 days" }, { value: "365", label: "365 days" }, { value: "0", label: "Forever" },
-] as const;
-
-// ---------------------------------------------------------------------------
-// Dependency-free DOM toast helper (folded from toast.ts)
-// ---------------------------------------------------------------------------
+] as const
 
 type ToastKind = 'info' | 'success' | 'error' | 'warn'
 interface ToastOptions { durationMs?: number }
@@ -355,9 +252,10 @@ function mountToastNode(
   const root = ensureContainer()
   if (!root) return
   const palette = PALETTE[kind]
+  const isAlert = kind === 'error' || kind === 'warn'
   const node = document.createElement('div')
-  node.setAttribute('role', kind === 'error' || kind === 'warn' ? 'alert' : 'status')
-  node.setAttribute('aria-live', kind === 'error' || kind === 'warn' ? 'assertive' : 'polite')
+  node.setAttribute('role', isAlert ? 'alert' : 'status')
+  node.setAttribute('aria-live', isAlert ? 'assertive' : 'polite')
   node.style.cssText = [
     `background:${palette.bg}`, `color:${palette.fg}`, `border:1px solid ${palette.border}`,
     'padding:10px 14px', 'border-radius:8px', 'font:13px/1.45 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif',
@@ -400,8 +298,7 @@ export function showToast(message: string, kind: ToastKind = 'info', opts: Toast
       if (now - t > RECENT_DEDUP_MS * 4) recentMessages.delete(k)
     }
   }
-  const duration = opts.durationMs ?? (kind === 'error' ? 5500 : 3500)
-  mountToastNode(kind, duration, [], (node, dismiss) => {
+  mountToastNode(kind, opts.durationMs ?? (kind === 'error' ? 5500 : 3500), [], (node, dismiss) => {
     node.textContent = message
     node.addEventListener('click', dismiss)
   })
@@ -436,10 +333,6 @@ export function showToastWithAction(message: string, opts: ToastActionOptions): 
     node.appendChild(button)
   })
 }
-
-// ---------------------------------------------------------------------------
-// Time-range wire contract & anchor quantization (folded from range-wire.ts)
-// ---------------------------------------------------------------------------
 
 export const DEFAULT_RANGE_TOKEN = '24h'
 
@@ -477,20 +370,12 @@ export function resolveRangeWire({ relativeRange, isAutoRange, startTime, endTim
 
 export const ANCHOR_QUANTUM_SECONDS = 60
 
-function isoZ(ms: number): string {
-  return new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z')
-}
-
 export function quantizeAnchor(iso?: string | null, now: Date = new Date()): string {
   const parsed = iso ? Date.parse(iso) : NaN
   const ms = Number.isFinite(parsed) ? parsed : now.getTime()
   const epoch = Math.floor(ms / 1000)
-  return isoZ((epoch - (epoch % ANCHOR_QUANTUM_SECONDS)) * 1000)
+  return new Date((epoch - (epoch % ANCHOR_QUANTUM_SECONDS)) * 1000).toISOString().replace(/\.\d{3}Z$/, 'Z')
 }
-
-// ---------------------------------------------------------------------------
-// URL Filter Hydration (folded from urlFilterHydration.ts)
-// ---------------------------------------------------------------------------
 
 let hydrated = false
 
@@ -517,7 +402,7 @@ export function hydrateFilterStoreFromUrl(): void {
   let touchedRange = false
   if (qsRange && rangeHours !== null) {
     const now = new Date()
-    store.setRelativeRange(qsRange, new Date(now.getTime() - rangeHours * 3600 * 1000).toISOString(), now.toISOString())
+    store.setRelativeRange(qsRange, subHours(now, rangeHours).toISOString(), now.toISOString())
     touchedRange = true
   } else if (qsStart && qsEnd) {
     store.setRange(qsStart, qsEnd)
@@ -538,7 +423,7 @@ export function hydrateFilterStoreFromUrl(): void {
         }
       }
     } catch {
-      // Malformed ?filters= — ignore silently rather than break the page.
+      // Malformed ?filters= — ignore silently
     }
   }
 
@@ -569,12 +454,7 @@ export function _resetUrlHydrationFlag(): void {
   hydrated = false
 }
 
-// ---------------------------------------------------------------------------
-// Anomaly Detection (/insights) thematic sectioning (folded from insight-sections.ts)
-// ---------------------------------------------------------------------------
-
 interface InsightSection {
-  /** Stable machine key. Matches the backend `category` enum value. */
   key: string
   label: string
   description: string
@@ -683,10 +563,6 @@ export function groupInsightsBySection<T extends SectionableInsight>(
   return groups
 }
 
-// ---------------------------------------------------------------------------
-// Traffic Chart Trace Builder (folded from traffic-chart.ts)
-// ---------------------------------------------------------------------------
-
 type Aggregates = Partial<Pick<components['schemas']['AggregatesResponse'], 'metric' | 'interval' | 'time_series'>>
 type Catalog = {
   fields?: Pick<components['schemas']['LogFieldCatalogEntry'], 'id' | 'label' | 'unit' | 'precision'>[] | null
@@ -735,11 +611,8 @@ export function buildTrafficData({
   const unit = metricField?.unit || ''
   const precision = metricField?.precision ?? (actualMetric === 'requests' ? 0 : 1)
 
-  const getHoverTemplate = (_m: string, label?: string) => {
-    const pre = label ? `${label}: ` : ''
-    const format = precision > 0 ? `.${precision}f` : ','
-    return `${pre}%{y:${format}}${unit}<extra></extra>`
-  }
+  const getHoverTemplate = (_m: string, label?: string) =>
+    `${label ? `${label}: ` : ''}%{y:${precision > 0 ? `.${precision}f` : ','}}${unit}<extra></extra>`
 
   const hasCategories = time_series.some((d) => d.category != null)
   const actualInterval = aggregates?.interval || effectiveInterval
@@ -753,7 +626,7 @@ export function buildTrafficData({
 
   let traces: PlotlyTrace[] = []
   if (hasCategories) {
-    const catMap: Record<string, { x: string[], y: number[] }> = {}
+    const catMap: Record<string, { x: string[]; y: number[] }> = {}
     barSeries.forEach((d) => {
       const cat = d.category || 'Other'
       ;(catMap[cat] ??= { x: [], y: [] }).x.push(formatDate(d.time, timezone, "yyyy-MM-dd HH:mm:ss"))
@@ -761,13 +634,13 @@ export function buildTrafficData({
     })
     const colorMap: Record<string, string> = {
       '400': '#fbbf24', '401': CHART_COLORS.warning, '403': '#d97706', '404': '#b45309',
-      '500': CHART_COLORS.danger, '502': '#dc2626', '503': '#b91c1c', '504': '#991b1b'
+      '500': CHART_COLORS.danger, '502': '#dc2626', '503': '#b91c1c', '504': '#991b1b',
     }
     traces = Object.entries(catMap).map(([cat, data], i) => ({
       x: data.x, y: data.y, type: 'bar', width: intervalSeconds ? intervalSeconds * 1000 * 0.9 : undefined,
       name: cat, showlegend: false, visible: hiddenCategories.has(cat) ? 'legendonly' : true,
       hovertemplate: `Status ${cat}: %{y:,}<extra></extra>`,
-      marker: { color: colorMap[cat] || `hsl(${(i * 50) % 360}, 70%, 50%)` }
+      marker: { color: colorMap[cat] || `hsl(${(i * 50) % 360}, 70%, 50%)` },
     }))
   } else {
     const xValues = barSeries === time_series ? getTsXValues() : barSeries.map((d) => formatDate(d.time, timezone, "yyyy-MM-dd HH:mm:ss"))
@@ -778,7 +651,7 @@ export function buildTrafficData({
       name: compareMode ? 'Primary Range' : (metricField?.label || actualMetric),
       showlegend: compareMode,
       hovertemplate: getHoverTemplate(actualMetric, compareMode ? 'Primary' : undefined),
-      marker: { color: CHART_COLORS.info }
+      marker: { color: CHART_COLORS.info },
     }]
   }
 
@@ -789,7 +662,7 @@ export function buildTrafficData({
       y: compareAggregates.time_series.map((d) => d.value),
       type: 'scatter', mode: 'lines', name: 'Comparison Range',
       line: { color: '#f97316', dash: 'dash', width: 2 },
-      hovertemplate: getHoverTemplate(actualMetric, 'Comparison')
+      hovertemplate: getHoverTemplate(actualMetric, 'Comparison'),
     })
   }
 
@@ -798,7 +671,7 @@ export function buildTrafficData({
       x: getTsXValues(), y: time_series.map((d) => d.baseline),
       type: 'scatter', mode: 'lines', name: 'Baseline (7d prior)',
       hovertemplate: getHoverTemplate(actualMetric, 'Baseline'),
-      line: { color: '#a1a1aa', dash: 'dot', width: 2 }
+      line: { color: '#a1a1aa', dash: 'dot', width: 2 },
     })
   }
 
@@ -806,14 +679,10 @@ export function buildTrafficData({
     const xValues = getTsXValues()
     const yValues = time_series.map((d) => d.value)
     const n = yValues.length
-    let windowSize = 0
-    if (trend === 'auto') {
-      windowSize = Math.floor(n / (n > 1000 ? 20 : n > 100 ? 10 : 5))
-    } else {
-      const trendMap: Record<string, number> = { '1m': 60, '5m': 300, '1h': 3600, '1d': 86400 }
-      const sec = getIntervalSeconds(actualInterval) ?? 60
-      windowSize = Math.floor((trendMap[trend] ?? 0) / sec)
-    }
+    const trendMap: Record<string, number> = { '1m': 60, '5m': 300, '1h': 3600, '1d': 86400 }
+    const windowSize = trend === 'auto'
+      ? Math.floor(n / (n > 1000 ? 20 : n > 100 ? 10 : 5))
+      : Math.floor((trendMap[trend] ?? 0) / (getIntervalSeconds(actualInterval) ?? 60))
     if (windowSize > 1) {
       const trendY: (number | null)[] = new Array(n).fill(null)
       if (n >= windowSize) {
@@ -832,7 +701,7 @@ export function buildTrafficData({
         x: xValues, y: trendY, type: 'scatter', mode: 'lines',
         name: `${trend === 'auto' ? 'Auto ' : ''}Trend`,
         hovertemplate: getHoverTemplate(actualMetric),
-        line: { color: '#f97316', width: 3 }
+        line: { color: '#f97316', width: 3 },
       })
     }
   }

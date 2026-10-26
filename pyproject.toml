@@ -378,16 +378,13 @@ module = [
     "backend.core.metadata.reconciliation",
     "backend.cron.jobs.compaction",
     "backend.repositories.session_scoring",
-    "backend.routers.admin_queries",
     # v2.0 final wave (2026-06-12): post-split modules with fresh test
     # coverage. Each verified clean under the strict flags below before
     # opt-in; new files in these packages inherit the stricter checks
     # automatically.
     "backend.core.rollups._common",
     "backend.core.rollups.sessions",
-    "backend.core.rollups.time_series",
     "backend.core.rollups.day_bundles",
-    "backend.core.rollups.hour_bundles",
     "backend.core.rollups.recompute",
     "backend.core.rollups.wellknown_bots",
     "backend.routers.admin.ingest",
@@ -461,9 +458,6 @@ ignore_imports = [
     # Direct admin re-exports — bootstrap surfaces an admin helper via
     # the bootstrap route.
     "backend.routers.bootstrap -> backend.routers.admin",
-    # Session scoring's admin variant + user variant share helpers.
-    "backend.routers.session_scoring -> backend.routers.session_scoring_admin",
-    "backend.routers.session_scoring_admin -> backend.routers.session_scoring",
     # backend.cron.jobs.sync's gap-heal detector reuses the admin router's
     # compute_log_accounting (sync.py `from backend.routers.admin import
     # compute_log_accounting`). Extracting log accounting out of the router
@@ -471,11 +465,6 @@ ignore_imports = [
     # sync-status snapshot edge that used to sit beside it moved to
     # backend/sync_status_snapshot.py and needs no allowance.)
     "backend.cron.jobs.sync -> backend.routers.admin",
-    # The system-metrics sampler reuses admin_queries' _ensure_enabled()
-    # feature gate (health.py, lazy imports). The sampler is a backend-only
-    # collector inside the admin health module; the resulting edge is
-    # admin.health → admin_queries.
-    "backend.routers.admin.health -> backend.routers.admin_queries",
 ]
 
 [[tool.importlinter.contracts]]

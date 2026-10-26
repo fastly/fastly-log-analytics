@@ -2,18 +2,19 @@
 
 import React, { useEffect, useEffectEvent, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient, type QueryClient } from "@tanstack/react-query";
+import { z } from "zod";
 import { client, extractApiError, unwrapClient } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
 import { useServiceStore, useTimezoneStore } from "@/stores/filterStore";
 import { useSSE } from "@/hooks/useSSE";
-import { SHIELD_MAP, showToast } from '@/lib/utils';
+import { SHIELD_MAP, showToast } from "@/lib/utils";
 import type { Schema } from "@/types/api";
 import {
   INITIAL_CONFIG, WIZARD_DRAFT_VERSION, ANALYST_PATH_A_UNSUPPORTED_REASON, getStepsForMode,
   type DomainStatus, type FosStatus, type JoinPhase, type LakeInfo, type PersistedConfig,
   type ProvisionConfig, type ProvisionService, type Step, type TokenInfo, type WizardDraft,
   type WizardMode, type WizardState,
-} from "./types";
+} from "./ProvisionWizard";
 import type { components } from "@/types/api.generated";
 import {
   buildHandleModalClose, runAdminIngest, runDeploy, runExportTerraform, runFetchTerraformPreview, runJoin,
@@ -21,7 +22,9 @@ import {
 import {
   estimateLogFieldBytesPerLine, isLogFieldPresetActive, toggleLogFieldGroup,
   toggleLogFieldOverride, toggleLogFieldPreset, updateLogFieldLimit,
-} from '@/lib/query-keys';
+} from "@/lib/query-keys";
+
+export type { WizardState } from "./ProvisionWizard";
 
 interface WizardEffectsArgs {
   open: boolean; step: Step; config: ProvisionConfig;
@@ -149,7 +152,6 @@ export function useJoinCompletionEffect(args: JoinCompletionEffectArgs) {
 
 type ValidateResponse = components["schemas"]["ProvisionValidateResponse"];
 
-// ── validate mutation factory ──
 interface ValidateMutationDeps {
   token: string;
   setTokenInfo: (info: { id: string; name: string; type: "user" | "automation" }) => void;
@@ -186,7 +188,6 @@ export function buildValidateOnSuccess(deps: ValidateMutationDeps) {
   };
 }
 
-// ── handleCheckConfig ──
 interface CheckConfigArgs {
   token: string; selectedService: ProvisionService | null; selectedCdnService: ProvisionService | null;
   config: ProvisionConfig; setIsCheckingConfig: (b: boolean) => void;
@@ -211,7 +212,6 @@ export async function runCheckConfig(args: CheckConfigArgs) {
   }
 }
 
-// ── handleCheckFos ──
 interface CheckFosArgs {
   vals?: { bucket?: string; region?: string; access_key?: string; secret_key?: string };
   config: ProvisionConfig; setFosStatus: (s: FosStatus) => void; setFosError: (s: string) => void;
@@ -237,7 +237,6 @@ export async function runCheckFos(args: CheckFosArgs) {
   }
 }
 
-// ── checkDomain ──
 interface CheckDomainArgs {
   prefix: string;
   setDomainStatus: (s: "idle" | "checking" | "available" | "taken" | "error") => void;
@@ -260,7 +259,6 @@ export async function runCheckDomain(args: CheckDomainArgs) {
   }
 }
 
-// ── handleAnalyzeLake ──
 interface AnalyzeLakeArgs {
   config: ProvisionConfig; icebergMetadataLocation: string; setIsAnalyzing: (b: boolean) => void;
   setLakeInfo: (l: LakeInfo) => void; setImportRange: (r: { start: string; end: string }) => void;
@@ -294,24 +292,17 @@ export async function runAnalyzeLake(args: AnalyzeLakeArgs) {
   }
 }
 
-// Re-export so consumers (step components) can import WizardState from this hook module
-export type { WizardState } from "./types";
-
 export const WIZARD_DRAFT_KEY = "provision-wizard-draft-v1";
 
 const SECRET_KEYS = ["fos_access_key", "fos_secret_key", "cdn_secret"] as const;
 
 export function stripSecretsFromConfig(config: ProvisionConfig): PersistedConfig {
   const out: Partial<ProvisionConfig> = { ...config };
-  for (const key of SECRET_KEYS) {
-    delete out[key];
-  }
+  for (const key of SECRET_KEYS) delete out[key];
   return out as PersistedConfig;
 }
 
-export function mergePersistedConfig(
-  persisted: PersistedConfig,
-): ProvisionConfig {
+export function mergePersistedConfig(persisted: PersistedConfig): ProvisionConfig {
   return {
     ...INITIAL_CONFIG,
     ...persisted,
@@ -323,12 +314,17 @@ export function mergePersistedConfig(
 
 function safeLocalStorage(): Storage | null {
   try {
-    if (typeof window === "undefined") return null;
-    return window.localStorage;
+    return typeof window === "undefined" ? null : window.localStorage;
   } catch {
     return null;
   }
 }
+
+const WizardDraftHeaderSchema = z.object({
+  version: z.number(),
+  mode: z.enum(["provision", "join", "ingest"]),
+  step: z.string(),
+});
 
 export function loadDraft(): WizardDraft | null {
   const ls = safeLocalStorage();
@@ -339,14 +335,11 @@ export function loadDraft(): WizardDraft | null {
     const parsed = JSON.parse(raw) as WizardDraft;
     if (!parsed || typeof parsed !== "object") return null;
     if (parsed.version !== WIZARD_DRAFT_VERSION) {
-      try {
-        ls.removeItem(WIZARD_DRAFT_KEY);
-      } catch {
-        /* ignore */
-      }
+      try { ls.removeItem(WIZARD_DRAFT_KEY); } catch { /* ignore */ }
       return null;
     }
-    if (!parsed.mode || parsed.step === "mode") return null;
+    const check = WizardDraftHeaderSchema.safeParse(parsed);
+    if (!check.success || parsed.step === "mode") return null;
     return parsed;
   } catch {
     return null;
@@ -359,10 +352,7 @@ export function saveDraft(draft: WizardDraft): void {
   try {
     const sanitized: WizardDraft = {
       ...draft,
-      config: stripSecretsFromConfig({
-        ...INITIAL_CONFIG,
-        ...(draft.config as ProvisionConfig),
-      }),
+      config: stripSecretsFromConfig({ ...INITIAL_CONFIG, ...(draft.config as ProvisionConfig) }),
     };
     ls.setItem(WIZARD_DRAFT_KEY, JSON.stringify(sanitized));
   } catch {
@@ -373,11 +363,7 @@ export function saveDraft(draft: WizardDraft): void {
 export function clearDraft(): void {
   const ls = safeLocalStorage();
   if (!ls) return;
-  try {
-    ls.removeItem(WIZARD_DRAFT_KEY);
-  } catch {
-    /* ignore */
-  }
+  try { ls.removeItem(WIZARD_DRAFT_KEY); } catch { /* ignore */ }
 }
 
 export function subscribeDraft(cb: (next: WizardDraft | null) => void): () => void {
@@ -390,11 +376,7 @@ export function subscribeDraft(cb: (next: WizardDraft | null) => void): () => vo
     }
     try {
       const parsed = JSON.parse(e.newValue) as WizardDraft;
-      if (parsed && parsed.version === WIZARD_DRAFT_VERSION) {
-        cb(parsed);
-      } else {
-        cb(null);
-      }
+      cb(parsed && parsed.version === WIZARD_DRAFT_VERSION ? parsed : null);
     } catch {
       cb(null);
     }
@@ -414,10 +396,10 @@ export function useWizardState(
   open: boolean,
   onOpenChange: (open: boolean) => void,
 ): WizardState {
-  const setActiveServiceId = useServiceStore(s => s.setActiveServiceId)
-  const activeServiceId = useServiceStore(s => s.activeServiceId)
-  const setServices = useServiceStore(s => s.setServices)
-  const services = useServiceStore(s => s.services);
+  const setActiveServiceId = useServiceStore((s) => s.setActiveServiceId);
+  const activeServiceId = useServiceStore((s) => s.activeServiceId);
+  const setServices = useServiceStore((s) => s.setServices);
+  const services = useServiceStore((s) => s.services);
   const { timezone } = useTimezoneStore();
   const queryClient = useQueryClient();
   const [step, setStep] = useState<Step>("mode");
@@ -425,108 +407,59 @@ export function useWizardState(
   const [token, setToken] = useState("");
   const [submittedToken, setSubmittedToken] = useState("");
 
-  // Clear the submitted token when the wizard closes. Derived during render
-  // (rather than in a useEffect) to avoid the extra setState-in-effect render
-  // pass — see https://react.dev/learn/you-might-not-need-an-effect.
   const [prevOpenForToken, setPrevOpenForToken] = useState(open);
   if (open !== prevOpenForToken) {
     setPrevOpenForToken(open);
-    if (!open) {
-      setSubmittedToken("");
-    }
+    if (!open) setSubmittedToken("");
   }
 
   const [tokenInfo, setTokenInfo] = useState<TokenInfo | null>(null);
   const [search, setSearch] = useState("");
-  const [selectedService, setSelectedService] =
-    useState<ProvisionService | null>(null);
+  const [selectedService, setSelectedService] = useState<ProvisionService | null>(null);
   const [isDeploying, setIsDeploying] = useState(false);
   const [fosStatus, setFosStatus] = useState<FosStatus>("idle");
   const [fosError, setFosError] = useState("");
-  const [terraformFiles, setTerraformFiles] = useState<Record<string, string>>(
-    {},
-  );
-  const [selectedTfFile, setSelectedTfFile] = useState<string>(
-    "logging_service.tf",
-  );
+  const [terraformFiles, setTerraformFiles] = useState<Record<string, string>>({});
+  const [selectedTfFile, setSelectedTfFile] = useState<string>("logging_service.tf");
   const [isFetchingTerraform, setIsFetchingTerraform] = useState(false);
-  const [selectedCdnService, setSelectedCdnService] =
-    useState<ProvisionService | null>(null);
-  const [configStatus, setConfigStatus] =
-    useState<Schema<"ProvisionCheckConfigResponse"> | null>(null);
+  const [selectedCdnService, setSelectedCdnService] = useState<ProvisionService | null>(null);
+  const [configStatus, setConfigStatus] = useState<Schema<"ProvisionCheckConfigResponse"> | null>(null);
   const [isCheckingConfig, setIsCheckingConfig] = useState(false);
-
   const [config, setConfig] = useState<ProvisionConfig>(INITIAL_CONFIG);
 
-  // NGWAF step state
-  const [ngwafWorkspaces, setNgwafWorkspaces] = useState<
-    { id: string; name: string }[]
-  >([]);
+  const [ngwafWorkspaces, setNgwafWorkspaces] = useState<{ id: string; name: string }[]>([]);
   const [ngwafFetching, setNgwafFetching] = useState(false);
   const [ngwafFetchError, setNgwafFetchError] = useState("");
   const [ngwafDebugRaw, setNgwafDebugRaw] = useState("");
 
-  // Analyst Flow state
   const [lakeInfo, setLakeInfo] = useState<LakeInfo | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [importMode, setImportMode] = useState<"all" | "range">("all");
-  const [importRange, setImportRange] = useState<{
-    start: string;
-    end: string;
-  }>({ start: "", end: "" });
+  const [importRange, setImportRange] = useState<{ start: string; end: string }>({ start: "", end: "" });
   const [syncEnabled, setSyncEnabled] = useState(true);
+
   const capabilityService = React.useMemo(() => {
     if (!services.length) return null;
     if (!activeServiceId) return services[0] ?? null;
     return services.find((service) => service.id === activeServiceId) ?? null;
   }, [activeServiceId, services]);
-  const analystPathASupported =
-    capabilityService?.analystPathASupported ?? true;
-  const analystPathAReason =
-    analystPathASupported
-      ? null
-      : capabilityService?.analystPathAReason ??
-        ANALYST_PATH_A_UNSUPPORTED_REASON;
+  const analystPathASupported = capabilityService?.analystPathASupported ?? true;
+  const analystPathAReason = analystPathASupported
+    ? null
+    : capabilityService?.analystPathAReason ?? ANALYST_PATH_A_UNSUPPORTED_REASON;
 
-  const [pendingDraft, setPendingDraft] = useState<WizardDraft | null>(() =>
-    open ? loadDraft() : null,
-  );
+  const [pendingDraft, setPendingDraft] = useState<WizardDraft | null>(() => (open ? loadDraft() : null));
   const draftIdRef = useRef<string | null>(null);
   const draftCreatedAtRef = useRef<string | null>(null);
 
-  const {
-    lines,
-    status,
-    isDone,
-    error: sseError,
-    start,
-    stop,
-    reset,
-  } = useSSE();
+  const { lines, status, isDone, error: sseError, start, stop, reset } = useSSE();
 
   const handleModalClose = buildHandleModalClose({
-    status,
-    isDone,
-    onOpenChange,
-    selectedService,
-    setActiveServiceId,
-    queryClient,
-    setStep,
-    setMode,
-    setSearch,
-    setSelectedService,
-    setIsDeploying,
-    setFosStatus,
-    setFosError,
-    setLakeInfo,
-    setIsAnalyzing,
-    setImportMode,
-    setSyncEnabled,
-    reset,
+    status, isDone, onOpenChange, selectedService, setActiveServiceId, queryClient,
+    setStep, setMode, setSearch, setSelectedService, setIsDeploying, setFosStatus,
+    setFosError, setLakeInfo, setIsAnalyzing, setImportMode, setSyncEnabled, reset,
     resetConfig: () => setConfig({ ...INITIAL_CONFIG }),
-    setNgwafWorkspaces,
-    setNgwafFetching,
-    setNgwafFetchError,
+    setNgwafWorkspaces, setNgwafFetching, setNgwafFetchError,
   });
 
   const [domainStatus, setDomainStatus] = useState<DomainStatus>("idle");
@@ -543,11 +476,6 @@ export function useWizardState(
       const { data, error } = await client.GET("/api/provision/services", {
         params: { query: { token: submittedToken } },
       });
-      // Surface backend errors (e.g. object_storage_not_enabled, invalid token)
-      // as the query error so TokenStep renders the actionable message instead
-      // of silently returning undefined and stalling on "Fetch Services".
-      // Preserve the machine-readable code so the UI can render a richer message
-      // (e.g. an "Enable Object Storage" link) for specific cases.
       if (error) {
         const err = new Error(extractApiError(error)) as Error & { code?: string };
         err.code = (error as { detail?: { error?: string } })?.detail?.error;
@@ -559,9 +487,6 @@ export function useWizardState(
     retry: false,
   });
 
-  // Advance to the service step once services arrive. Derived during render
-  // (rather than in a useEffect) to avoid the setState-in-effect cascade —
-  // see https://react.dev/learn/you-might-not-need-an-effect.
   const [prevServicesData, setPrevServicesData] = useState(servicesData);
   if (servicesData !== prevServicesData) {
     setPrevServicesData(servicesData);
@@ -570,16 +495,12 @@ export function useWizardState(
     }
   }
 
-  // ── Step 4: Catalog ──
   const { data: catalog, isLoading: isLoadingCatalog } = useQuery({
     queryKey: ["services", "catalog"],
-    queryFn: async () => {
-      return await unwrapClient(client.GET("/api/log-fields/catalog"));
-    },
+    queryFn: async () => unwrapClient(client.GET("/api/log-fields/catalog")),
     enabled: step === "fields",
   });
 
-  // ── Field handlers ──
   const toggleGroup = (groupId: string, checked: boolean) => {
     setConfig((prev) => ({
       ...prev,
@@ -587,19 +508,10 @@ export function useWizardState(
     }));
   };
 
-  const toggleField = (
-    fieldId: string,
-    checked: boolean,
-    defaultEnabledByGroup: boolean,
-  ) => {
+  const toggleField = (fieldId: string, checked: boolean, defaultEnabledByGroup: boolean) => {
     setConfig((prev) => ({
       ...prev,
-      log_fields: toggleLogFieldOverride(
-        prev.log_fields,
-        fieldId,
-        checked,
-        defaultEnabledByGroup,
-      ),
+      log_fields: toggleLogFieldOverride(prev.log_fields, fieldId, checked, defaultEnabledByGroup),
     }));
   };
 
@@ -610,18 +522,12 @@ export function useWizardState(
     }));
   };
 
-  const isPresetActive = (groups: string[]) =>
-    isLogFieldPresetActive(config.log_fields, groups);
+  const isPresetActive = (groups: string[]) => isLogFieldPresetActive(config.log_fields, groups);
 
   const togglePreset = (presetGroups: string[]) => {
     setConfig((prev) => ({
       ...prev,
-      log_fields: toggleLogFieldPreset(
-        prev.log_fields,
-        catalog,
-        presetGroups,
-        isPresetActive,
-      ),
+      log_fields: toggleLogFieldPreset(prev.log_fields, catalog, presetGroups, isPresetActive),
     }));
   };
 
@@ -631,21 +537,12 @@ export function useWizardState(
   );
 
   const handleTokenSubmit = async () => {
-    if (token) {
-      setSubmittedToken(token);
-    }
+    if (token) setSubmittedToken(token);
   };
 
-  // ── Step 2: Service ──
   const validateMutation = useMutation({
     mutationFn: validateMutationFn(token),
-    onSuccess: buildValidateOnSuccess({
-      token,
-      setTokenInfo,
-      setConfig,
-      setStep,
-      mode,
-    }),
+    onSuccess: buildValidateOnSuccess({ token, setTokenInfo, setConfig, setStep, mode }),
   });
 
   const handleServiceSelect = (service: ProvisionService) => {
@@ -655,32 +552,13 @@ export function useWizardState(
   };
 
   const handleCheckConfig = () =>
-    runCheckConfig({
-      token,
-      selectedService,
-      selectedCdnService,
-      config,
-      setIsCheckingConfig,
-      setConfigStatus,
-    });
+    runCheckConfig({ token, selectedService, selectedCdnService, config, setIsCheckingConfig, setConfigStatus });
 
-  const handleCheckFos = (vals?: {
-    bucket?: string;
-    region?: string;
-    access_key?: string;
-    secret_key?: string;
-  }) =>
-    runCheckFos({
-      vals,
-      config,
-      setFosStatus,
-      setFosError,
-    });
+  const handleCheckFos = (vals?: { bucket?: string; region?: string; access_key?: string; secret_key?: string }) =>
+    runCheckFos({ vals, config, setFosStatus, setFosError });
 
-  const checkDomain = (prefix: string) =>
-    runCheckDomain({ prefix, setDomainStatus, setDomainMessage });
+  const checkDomain = (prefix: string) => runCheckDomain({ prefix, setDomainStatus, setDomainMessage });
 
-  // join flow phases: form → connecting (SSE) → importing (SSE) → done
   const [joinPhase, setJoinPhase] = useState<JoinPhase>("form");
   const [joinedServiceId, setJoinedServiceId] = useState("");
   const [syncIntervalMins, setSyncIntervalMins] = useState("2");
@@ -688,27 +566,16 @@ export function useWizardState(
 
   const resumeDraft = () => {
     if (!pendingDraft) return;
-    const merged = mergePersistedConfig(pendingDraft.config);
     setMode(pendingDraft.mode);
-    setConfig(merged);
+    setConfig(mergePersistedConfig(pendingDraft.config));
     setSelectedService(
       pendingDraft.selectedServiceId
-        ? ({
-            id: pendingDraft.selectedServiceId,
-            name:
-              pendingDraft.selectedServiceName ||
-              pendingDraft.selectedServiceId,
-          } as ProvisionService)
+        ? ({ id: pendingDraft.selectedServiceId, name: pendingDraft.selectedServiceName || pendingDraft.selectedServiceId } as ProvisionService)
         : null,
     );
     setSelectedCdnService(
       pendingDraft.selectedCdnServiceId
-        ? ({
-            id: pendingDraft.selectedCdnServiceId,
-            name:
-              pendingDraft.selectedCdnServiceName ||
-              pendingDraft.selectedCdnServiceId,
-          } as ProvisionService)
+        ? ({ id: pendingDraft.selectedCdnServiceId, name: pendingDraft.selectedCdnServiceName || pendingDraft.selectedCdnServiceId } as ProvisionService)
         : null,
     );
     setImportMode(pendingDraft.importMode);
@@ -717,18 +584,9 @@ export function useWizardState(
     setSyncIntervalMins(pendingDraft.syncIntervalMins);
     setIcebergMetadataLocation(pendingDraft.icebergMetadataLocation);
 
-    let next: Step = pendingDraft.currentStep;
-    if (next === "execute") next = "fields";
-    const tokenGatedSteps: Step[] = [
-      "service",
-      "storage",
-      "ngwaf",
-      "fields",
-      "execute",
-    ];
-    if (tokenGatedSteps.includes(next)) {
-      next = "token";
-    }
+    let next: Step = pendingDraft.currentStep === "execute" ? "fields" : pendingDraft.currentStep;
+    const tokenGatedSteps: Step[] = ["service", "storage", "ngwaf", "fields", "execute"];
+    if (tokenGatedSteps.includes(next)) next = "token";
     setStep(next);
     draftIdRef.current = pendingDraft.draftId;
     draftCreatedAtRef.current = pendingDraft.createdAt;
@@ -745,62 +603,30 @@ export function useWizardState(
   const estimatedImportSize = React.useMemo(() => {
     if (!lakeInfo?.calendar) return 0;
     let total = 0;
-    const start = importRange.start;
-    const end = importRange.end;
-
+    const { start, end } = importRange;
     for (const [dateStr, stats] of Object.entries(lakeInfo.calendar)) {
       if (dateStr === "unknown") continue;
-
       if (importMode === "range") {
         if (start && dateStr < start.split("T")[0]) continue;
         if (end && dateStr > end.split("T")[0]) continue;
       }
-
       total += stats.size_bytes;
     }
     return total;
   }, [lakeInfo, importMode, importRange]);
 
   const handleAnalyzeLake = () =>
-    runAnalyzeLake({
-      config,
-      icebergMetadataLocation,
-      setIsAnalyzing,
-      setLakeInfo,
-      setImportRange,
-      setStep,
-      setFosStatus,
-      setFosError,
-    });
+    runAnalyzeLake({ config, icebergMetadataLocation, setIsAnalyzing, setLakeInfo, setImportRange, setStep, setFosStatus, setFosError });
 
   const handleJoin = () =>
     runJoin({
-      config,
-      analystPathASupported,
-      syncIntervalMins,
-      syncEnabled,
-      icebergMetadataLocation,
-      importMode,
-      importRange,
-      setIsDeploying,
-      setJoinPhase,
-      setStep,
-      reset,
-      start,
+      config, analystPathASupported, syncIntervalMins, syncEnabled, icebergMetadataLocation,
+      importMode, importRange, setIsDeploying, setJoinPhase, setStep, reset, start,
     });
 
   useJoinCompletionEffect({
-    joinPhase,
-    status,
-    config,
-    setIsDeploying,
-    setJoinedServiceId,
-    setActiveServiceId,
-    services,
-    setServices,
-    queryClient,
-    setJoinPhase,
-    reset,
+    joinPhase, status, config, setIsDeploying, setJoinedServiceId,
+    setActiveServiceId, services, setServices, queryClient, setJoinPhase, reset,
   });
 
   const handleFinishJoin = () => {
@@ -827,8 +653,6 @@ export function useWizardState(
       setJoinedServiceId, setActiveServiceId, setServices, queryClient, setJoinPhase, setStep,
     });
 
-  // The saved draft is loaded when the wizard opens and dropped when it closes (adjusted during
-  // render, keyed on `open`).
   const [draftOpen, setDraftOpen] = useState(false);
   if (open !== draftOpen) {
     setDraftOpen(open);

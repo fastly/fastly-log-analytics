@@ -433,43 +433,23 @@ def _shape_summary(
         None,
     )
 
-    # ``ottfb_p50_ms`` being NULL is the canonical "no data" signal — it's
-    # MEDIAN(lat_val), so it can only be non-NULL if at least one row
-    # matched ``lat_val IS NOT NULL``.
+    _summary_keys = (
+        "total_misses",
+        "total_passes",
+        "ottfb_p50_ms",
+        "ottfb_p75_ms",
+        "ottfb_p95_ms",
+        "ottfb_p99_ms",
+        "ottlb_p50_ms",
+        "ottlb_p95_ms",
+        "cdn_overhead_p50_ms",
+        "origin_error_rate",
+        "obytes_p50",
+    )
     has_data = rollup_row is not None and rollup_row["ottfb_p50_ms"] is not None
-
-    if not has_data:
-        return {
-            "has_data": False,
-            "total_misses": None,
-            "total_passes": None,
-            "ottfb_p50_ms": None,
-            "ottfb_p75_ms": None,
-            "ottfb_p95_ms": None,
-            "ottfb_p99_ms": None,
-            "ottlb_p50_ms": None,
-            "ottlb_p95_ms": None,
-            "cdn_overhead_p50_ms": None,
-            "origin_error_rate": None,
-            "obytes_p50": None,
-        }
-
-    if rollup_row is None:  # the has_data check above guarantees a row
-        raise RuntimeError("origin summary rollup row missing after has_data")
-    return {
-        "has_data": True,
-        "total_misses": rollup_row["total_misses"],
-        "total_passes": rollup_row["total_passes"],
-        "ottfb_p50_ms": rollup_row["ottfb_p50_ms"],
-        "ottfb_p75_ms": rollup_row["ottfb_p75_ms"],
-        "ottfb_p95_ms": rollup_row["ottfb_p95_ms"],
-        "ottfb_p99_ms": rollup_row["ottfb_p99_ms"],
-        "ottlb_p50_ms": rollup_row["ottlb_p50_ms"],
-        "ottlb_p95_ms": rollup_row["ottlb_p95_ms"],
-        "cdn_overhead_p50_ms": rollup_row["cdn_overhead_p50_ms"],
-        "origin_error_rate": rollup_row["origin_error_rate"],
-        "obytes_p50": rollup_row["obytes_p50"],
-    }
+    if not has_data or rollup_row is None:
+        return {"has_data": False, **{k: None for k in _summary_keys}}
+    return {"has_data": True, **{k: rollup_row[k] for k in _summary_keys}}
 
 
 def get_summary(
@@ -1116,6 +1096,28 @@ def _origin_timeseries_from_temp(
     )
 
 
+def _run_temp_origin_card(
+    runner: QueryRunner,
+    temp_table: str,
+    actual_cols: set[str] | list[str],
+    sql_template: str,
+    shaper: Any,
+    *,
+    required_cols: tuple[str, ...] = (),
+    empty_extra: dict[str, Any] | None = None,
+    use_lat_val: bool = True,
+    params: list[Any] | None = None,
+) -> dict:
+    cols = set(actual_cols)
+    if any(c not in cols for c in required_cols):
+        return {"has_data": False, **(empty_extra or {}), "rows": []}
+    fmt_kwargs: dict[str, Any] = {"table": temp_table, "where": "1=1"}
+    if use_lat_val:
+        fmt_kwargs["lat_val"] = "lat_us"
+    rows = runner.execute(sql_template.format(**fmt_kwargs), params).fetchall()
+    return shaper(rows)
+
+
 def _origin_slow_urls_from_temp(
     runner: QueryRunner,
     temp_table: str,
@@ -1123,14 +1125,15 @@ def _origin_slow_urls_from_temp(
     min_requests: int,
     limit: int,
 ) -> dict:
-    if "url" not in set(actual_cols):
-        return {"has_data": False, "rows": []}
-
-    rows = runner.execute(
-        SQL.SLOW_URLS.format(lat_val="lat_us", table=temp_table, where="1=1"),
-        [min_requests, limit],
-    ).fetchall()
-    return _shape_slow_url_rows(rows)
+    return _run_temp_origin_card(
+        runner,
+        temp_table,
+        actual_cols,
+        SQL.SLOW_URLS,
+        _shape_slow_url_rows,
+        required_cols=("url",),
+        params=[min_requests, limit],
+    )
 
 
 def _origin_status_codes_from_temp(
@@ -1138,11 +1141,15 @@ def _origin_status_codes_from_temp(
     temp_table: str,
     actual_cols: set[str] | list[str],
 ) -> dict:
-    if "ost" not in set(actual_cols):
-        return {"has_data": False, "rows": []}
-
-    rows = runner.execute(SQL.STATUS_CODES.format(table=temp_table, where="1=1")).fetchall()
-    return _shape_status_code_rows(rows)
+    return _run_temp_origin_card(
+        runner,
+        temp_table,
+        actual_cols,
+        SQL.STATUS_CODES,
+        _shape_status_code_rows,
+        required_cols=("ost",),
+        use_lat_val=False,
+    )
 
 
 def _origin_path_breakdown_from_temp(
@@ -1150,11 +1157,15 @@ def _origin_path_breakdown_from_temp(
     temp_table: str,
     actual_cols: set[str] | list[str],
 ) -> dict:
-    if "edge" not in set(actual_cols):
-        return {"has_data": False, "shielding_detected": False, "rows": []}
-
-    rows = runner.execute(SQL.PATH_BREAKDOWN.format(lat_val="lat_us", table=temp_table, where="1=1")).fetchall()
-    return _shape_path_breakdown_rows(rows)
+    return _run_temp_origin_card(
+        runner,
+        temp_table,
+        actual_cols,
+        SQL.PATH_BREAKDOWN,
+        _shape_path_breakdown_rows,
+        required_cols=("edge",),
+        empty_extra={"shielding_detected": False},
+    )
 
 
 def _origin_pop_latency_from_temp(
@@ -1163,14 +1174,16 @@ def _origin_pop_latency_from_temp(
     actual_cols: set[str] | list[str],
     limit: int,
 ) -> dict:
-    if "pop" not in set(actual_cols):
-        return {"has_data": False, "requires_group_c": True, "rows": []}
-
-    rows = runner.execute(
-        SQL.POP_LATENCY.format(lat_val="lat_us", table=temp_table, where="1=1"),
-        [limit],
-    ).fetchall()
-    return _shape_pop_latency_rows(rows)
+    return _run_temp_origin_card(
+        runner,
+        temp_table,
+        actual_cols,
+        SQL.POP_LATENCY,
+        _shape_pop_latency_rows,
+        required_cols=("pop",),
+        empty_extra={"requires_group_c": True},
+        params=[limit],
+    )
 
 
 def _origin_ip_health_from_temp(
@@ -1179,15 +1192,15 @@ def _origin_ip_health_from_temp(
     actual_cols: set[str] | list[str],
     limit: int,
 ) -> dict:
-    actual_cols_set = set(actual_cols)
-    if "oip" not in actual_cols_set or "ost" not in actual_cols_set:
-        return {"has_data": False, "rows": []}
-
-    rows = runner.execute(
-        SQL.IP_HEALTH.format(lat_val="lat_us", table=temp_table, where="1=1"),
-        [limit],
-    ).fetchall()
-    return _shape_ip_health_rows(rows)
+    return _run_temp_origin_card(
+        runner,
+        temp_table,
+        actual_cols,
+        SQL.IP_HEALTH,
+        _shape_ip_health_rows,
+        required_cols=("oip", "ost"),
+        params=[limit],
+    )
 
 
 async def get_aggregates(
@@ -1403,95 +1416,14 @@ async def get_aggregates(
         return {**empty_payload, **runner.telemetry()}
     timer.mark("temp_table_create", _t, source="live", activity="compute", current_execution=True, outcome="served")
 
-    # Per-branch helpers — each runs on its own runner so they can fan
-    # out across connections via ``asyncio.to_thread``. ``SectionTimer``'s
-    # entries list is just a ``list.append`` from each thread which is
-    # atomic in CPython, so the timings interleave safely.
-    #
-    # Each helper returns a dict keyed by section name; the caller merges
-    # those into the outer response. When the selector excludes a section,
-    # both its read and its timer mark are suppressed — perf-harness
-    # attribution would treat phantom zero-time marks as real reads.
     # A section runs its live from_temp helper only when it was REQUESTED and
     # MISSED the hoisted rollup phase. Rollup hits are already in ``merged``.
-    def _run(name: str) -> bool:
-        return _want(name) and name in missed
-
-    def _branch_summary(r: QueryRunner) -> dict:
-        if not _run("summary"):
-            return {}
+    def _run_live(name: str, reader) -> None:
+        if not (_want(name) and name in missed):
+            return
         _ts = _time.perf_counter()
-        result = _origin_summary_from_temp(r, temp_table, actual_set)
-        timer.mark("summary", _ts, source="live", activity="compute", current_execution=True, outcome="served")
-        return {"summary": result}
-
-    def _branch_slow_urls(r: QueryRunner) -> dict:
-        if not _run("slow_urls"):
-            return {}
-        _ts = _time.perf_counter()
-        result = _origin_slow_urls_from_temp(
-            r,
-            temp_table,
-            actual_set,
-            slow_urls_min_requests,
-            slow_urls_limit,
-        )
-        timer.mark("slow_urls", _ts, source="live", activity="compute", current_execution=True, outcome="served")
-        return {"slow_urls": result}
-
-    def _branch_ts_status_path(r: QueryRunner) -> dict:
-        out: dict[str, Any] = {}
-        if _run("timeseries"):
-            _ts = _time.perf_counter()
-            out["timeseries"] = _origin_timeseries_from_temp(
-                r,
-                temp_table,
-                actual_set,
-                bucket_minutes,
-                split_by_leg,
-                timeseries_metric,
-                timeseries_percentile,
-            )
-            timer.mark("timeseries", _ts, source="live", activity="compute", current_execution=True, outcome="served")
-        if _run("status_codes"):
-            _ts = _time.perf_counter()
-            out["status_codes"] = _origin_status_codes_from_temp(r, temp_table, actual_set)
-            timer.mark("status_codes", _ts, source="live", activity="compute", current_execution=True, outcome="served")
-        if _run("path_breakdown"):
-            _ts = _time.perf_counter()
-            out["path_breakdown"] = _origin_path_breakdown_from_temp(r, temp_table, actual_set)
-            timer.mark(
-                "path_breakdown", _ts, source="live", activity="compute", current_execution=True, outcome="served"
-            )
-        return out
-
-    def _branch_pop_ip(r: QueryRunner) -> dict:
-        out: dict[str, Any] = {}
-        if _run("pop_latency"):
-            _ts = _time.perf_counter()
-            out["pop_latency"] = _origin_pop_latency_from_temp(
-                r,
-                temp_table,
-                actual_set,
-                pop_latency_limit,
-            )
-            timer.mark("pop_latency", _ts, source="live", activity="compute", current_execution=True, outcome="served")
-        if _run("ip_health"):
-            _ts = _time.perf_counter()
-            out["ip_health"] = _origin_ip_health_from_temp(
-                r,
-                temp_table,
-                actual_set,
-                ip_health_limit,
-            )
-            timer.mark("ip_health", _ts, source="live", activity="compute", current_execution=True, outcome="served")
-        return out
-
-    # Per-branch occupancy — a branch runs only when it owns at least one
-    # MISSED requested section. Rollup-hit sections are already merged.
-    branch_slow_active = _run("slow_urls")
-    branch_ts_active = bool(_run("timeseries") or _run("status_codes") or _run("path_breakdown"))
-    branch_pop_active = bool(_run("pop_latency") or _run("ip_health"))
+        merged[name] = reader()
+        timer.mark(name, _ts, source="live", activity="compute", current_execution=True, outcome="served")
 
     try:
         # Since all branch queries read from the temporary table (which is connection-scoped
@@ -1500,13 +1432,35 @@ async def get_aggregates(
         # out separate connections would raise CatalogException.
         # Note: serial execution is also extremely fast because the temp table is already
         # pre-filtered and localized in-memory.
-        merged.update(_branch_summary(runner))
-        if branch_slow_active:
-            merged.update(_branch_slow_urls(runner))
-        if branch_ts_active:
-            merged.update(_branch_ts_status_path(runner))
-        if branch_pop_active:
-            merged.update(_branch_pop_ip(runner))
+        _run_live("summary", lambda: _origin_summary_from_temp(runner, temp_table, actual_set))
+        _run_live(
+            "slow_urls",
+            lambda: _origin_slow_urls_from_temp(
+                runner, temp_table, actual_set, slow_urls_min_requests, slow_urls_limit
+            ),
+        )
+        _run_live(
+            "timeseries",
+            lambda: _origin_timeseries_from_temp(
+                runner,
+                temp_table,
+                actual_set,
+                bucket_minutes,
+                split_by_leg,
+                timeseries_metric,
+                timeseries_percentile,
+            ),
+        )
+        _run_live("status_codes", lambda: _origin_status_codes_from_temp(runner, temp_table, actual_set))
+        _run_live("path_breakdown", lambda: _origin_path_breakdown_from_temp(runner, temp_table, actual_set))
+        _run_live(
+            "pop_latency",
+            lambda: _origin_pop_latency_from_temp(runner, temp_table, actual_set, pop_latency_limit),
+        )
+        _run_live(
+            "ip_health",
+            lambda: _origin_ip_health_from_temp(runner, temp_table, actual_set, ip_health_limit),
+        )
 
         summary_card = merged.get("summary") or {}
         return {

@@ -23,12 +23,21 @@ import {
 } from '@/components/ui/select'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import { ComplianceChart, ScoreDistChart } from '@/components/SessionScoring/ScorerSeriesCard'
-import { ExcludeRegexCard } from '@/components/SessionScoring/ExcludeRegexCard'
-import { AuditLogTab, MatrixVersionsCard } from '@/components/SessionScoring/MatrixVersionsCard'
-import { RetrainButton, RotateKeyButton } from '@/components/SessionScoring/RetrainButton'
-import { ScorerLatencyChart, ScorerErrorsChart } from '@/components/SessionScoring/ScorerSeriesCard'
-import { ScorerFailOpenBreakdownCard, ScoringHealthCard } from '@/components/SessionScoring/ScoringHealthCard'
+import {
+  ComplianceChart,
+  ScoreDistChart,
+  ScorerLatencyChart,
+  ScorerErrorsChart,
+} from '@/components/SessionScoring/ScorerSeriesCard'
+import {
+  AuditLogTab,
+  ExcludeRegexCard,
+  MatrixVersionsCard,
+  RetrainButton,
+  RotateKeyButton,
+  ScorerFailOpenBreakdownCard,
+  ScoringHealthCard,
+} from '@/components/SessionScoring/ScoringAdminPanels'
 import { StatusPanel, L2EnforcementCard, PerReasonAucCard, RocPrCurves } from '@/components/SessionScoring/StatusPanel'
 import { ThresholdSlider } from '@/components/SessionScoring/ThresholdSlider'
 import { TopFlaggedTable } from '@/components/SessionScoring/TopFlaggedTable'
@@ -86,7 +95,7 @@ export function SinceHoursPicker({ value, onChange, compact = false }: SinceHour
 // Popover/Dialog/Table dependencies). `ssr: false` because the tab uses
 // client-only React Query hooks and there's no SEO value to pre-rendering.
 const LabelsTab = dynamic(
-  () => import('@/components/SessionScoring/LabelsTab').then((m) => ({ default: m.LabelsTab })),
+  () => import('@/components/SessionScoring/ScoringAdminPanels').then((m) => ({ default: m.LabelsTab })),
   {
     ssr: false,
     loading: () => (

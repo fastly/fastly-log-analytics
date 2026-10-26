@@ -170,7 +170,7 @@ def _run_rollup_hour_heal(
     from backend import config as svcconfig
     from backend.core.duckdb import get_source_for_service
     from backend.core.rollups import backfill_missing_hour_bundles
-    from backend.cron.lifecycle import cron_run, record_skip_row
+    from backend.cron.scheduler import cron_run, record_skip_row
     from backend.utils.active_requests import should_defer_cron
 
     # The heal's view scan + per-field COPY are CPU-bound; defer when API
@@ -341,7 +341,7 @@ def _run_rollup_compact_daily(
     from backend.core.rollups._common import _day_bundled_root
     from backend.core.rollups.recompute import DAY_COMPACTORS, cleanup_old_rollups
     from backend.cron.jobs.sync import has_sufficient_disk_space
-    from backend.cron.lifecycle import cron_run, record_skip_row
+    from backend.cron.scheduler import cron_run, record_skip_row
     from backend.utils.active_requests import should_defer_cron
 
     if not manual and should_defer_cron("rollup_compact", service_id):

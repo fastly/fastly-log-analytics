@@ -1,6 +1,7 @@
 import concurrent.futures
 import gzip
 import hashlib
+import itertools
 import json
 import logging
 import math
@@ -216,31 +217,9 @@ def _corrupt_gzip_error(local_file: str) -> BaseException | None:
     return None
 
 
-# When delete_after is on, files seen in the LIST that are already in the dedup
-# ledger are strands: ingested but never deleted (a restart landed between the
-# ledger write and the FOS delete). We re-delete them to make deletion
-# self-healing. Cap how many we collect per run so a large backlog can't balloon
-# memory; whatever exceeds the cap is reclaimed on subsequent ticks/full_syncs.
 _STRANDED_DELETE_CAP = 10_000
-
-# Throttle the strand reconcile on the incremental cron path so a strand whose
-# delete keeps FAILING (e.g. a FOS permissions outage) can't drive a delete API
-# call every tick (the real-time tier fires every ~5s). The happy path clears a
-# strand in one successful delete, so this only bounds the pathological loop.
-# full_sync (incremental_only=False) ignores this and always reconciles — it is
-# the backstop for old/over-cap strands. In-process state, so a restart re-arms
-# at most one extra attempt; that is fine.
 _RECONCILE_MIN_INTERVAL_S = 300.0
 _reconcile_last_attempt: dict[str, float] = {}
-
-# Durability epoch for the strand reconcile. Ledger rows written BEFORE this fix
-# shipped can carry a NON-zero row_count for a file with NO durable data (the
-# pre-fix code stored the PRE-filter count for fully-filtered / all-corrupt files),
-# so row_count is not a trustworthy "is this durable?" signal for them. The
-# reconcile therefore only deletes strands ingested at/after this boundary, where
-# the new code guarantees a no-data file is recorded with row_count 0. Pre-epoch
-# strands drain via the existing 1-day ledger trim instead. Format matches the
-# SQLite ``ingested_at`` column (``datetime('now')``: "YYYY-MM-DD HH:MM:SS", UTC).
 _RECONCILE_LEDGER_EPOCH = "2026-06-21 00:00:00"
 _INGEST_EXCLUDED_GROUPS = ("METRICS", "VIRTUAL", "INTERNAL")
 
@@ -274,9 +253,6 @@ def get_ingest_columns_sql(log_fields_config: dict | None = None) -> str:
     return "{" + ", ".join(f"'{escape_sql_literal(k)}': '{escape_sql_literal(v)}'" for k, v in hints.items()) + "}"
 
 
-# Pre-built SQL CASE expressions that decode single-char field codes back to
-# human-readable values. Handles both new logs (encoded) and old logs (full
-# strings) transparently. Unknown values pass through via ELSE.
 _DECODE_EXPRS: dict[str, str] = {
     "c_speed": fc.duckdb_decode_case("c_speed", fc.CONN_SPEED_ENCODE),
     "p_type": fc.duckdb_decode_case("p_type", fc.PROXY_TYPE_ENCODE),
@@ -290,13 +266,7 @@ def _build_column_select_exprs(
     *,
     source_file_expr: str | None = None,
 ) -> list[str]:
-    """Build the canonical column SELECT expression list for raw-JSON ingest.
-
-    Decodes single-char field codes (``c_speed``, ``p_type``, ``p_desc``) and
-    strips the leading ``{service_id}--`` prefix from ``backend`` across both
-    the standard sync path (``ingest``) and the Celery DuckLake convert paths
-    (``convert_object``, ``convert_batch_objects``).
-    """
+    """Build the canonical column SELECT expression list for raw-JSON ingest."""
     catalog_field_ids = get_catalog_field_ids(log_fields_config)
     svc_id = (src or {}).get("logging_service_id") or (src or {}).get("name", "")
     if svc_id:
@@ -310,10 +280,7 @@ def _build_column_select_exprs(
         if fid in ("backend", "_source_file"):
             continue
         safe_fid = fid.replace('"', '""')
-        if fid in _DECODE_EXPRS:
-            field_selects.append(f'{_DECODE_EXPRS[fid]} AS "{safe_fid}"')
-        else:
-            field_selects.append(f'"{safe_fid}"')
+        field_selects.append(f'{_DECODE_EXPRS[fid]} AS "{safe_fid}"' if fid in _DECODE_EXPRS else f'"{safe_fid}"')
     if source_file_expr is not None:
         field_selects.append(f"{source_file_expr} AS _source_file")
     field_selects.append(backend_expr)
@@ -345,10 +312,7 @@ _DASH_KEY_RE = re.compile(r"/raw/(\d{4}-\d{2}-\d{2})/(\d{2})/")
 
 
 def _parse_key_layout_dt(key: str) -> tuple[str, datetime] | None:
-    """Classify a raw-log key's layout and extract its timestamp.
-
-    Returns the recognized layout and timestamp, or None for unrelated keys.
-    """
+    """Classify a raw-log key's layout and extract its UTC timestamp."""
     for layout, pattern in (
         ("v3", _V3_MINUTE_KEY_RE),
         ("minute", _MINUTE_KEY_RE),
@@ -367,10 +331,7 @@ def _parse_key_layout_dt(key: str) -> tuple[str, datetime] | None:
         if fname_dt is not None:
             return ("dash", fname_dt)
         try:
-            return (
-                "dash",
-                datetime.fromisoformat(m.group(1)).replace(hour=int(m.group(2)), tzinfo=UTC),
-            )
+            return ("dash", datetime.fromisoformat(m.group(1)).replace(hour=int(m.group(2)), tzinfo=UTC))
         except ValueError:
             return None
     return None
@@ -379,18 +340,7 @@ def _parse_key_layout_dt(key: str) -> tuple[str, datetime] | None:
 def _compute_incremental_start_after(
     already: set[str], lookback_hours: int = 4, prefix_subpath: str = "raw/request/"
 ) -> str | None:
-    """Derive an S3 ``StartAfter`` key from previously-ingested filenames.
-
-    The cron's incremental mode skips most of the bucket by passing a
-    ``StartAfter`` bound derived from the most recent file we already
-    have, minus a small lookback to catch late-arriving POP logs. Without
-    this, every cron run would scan the entire bucket from epoch.
-
-    The bound is formatted in the v3 key layout matching ``prefix_subpath``.
-
-    Returns None when ``already`` is empty or no key matches the layout
-    (the caller then falls back to a full scan).
-    """
+    """Derive an S3 ``StartAfter`` key from previously-ingested filenames."""
     norm_subpath = prefix_subpath.strip("/")
     parsed = [p for f in already if norm_subpath in f and (p := _parse_key_layout_dt(f)) is not None]
     if not parsed:
@@ -529,14 +479,7 @@ def _scan_invalid_gzip_lines(paths: list[str]) -> list[tuple[str, str]]:
 
 
 def _download_chunk_to_local(fos_client, s3_paths: list[str], tmpdir: str) -> tuple[dict[str, str], dict[str, str]]:
-    """Download each ``s3://bucket/key`` once into ``tmpdir``.
-
-    Returns ``(s3_to_local, local_to_s3)``. Paths that fail to download are
-    absent from both dicts; the caller marks them as failed.
-
-    Every GET is tagged ``X-Telemetry-Caller: ingest_download`` via the FOS
-    proxy hook, so it shows up correctly in ``usage_log``.
-    """
+    """Download each ``s3://bucket/key`` once into ``tmpdir``, returning ``(s3_to_local, local_to_s3)``."""
     from backend.utils.telemetry_proxy import _BOTO3_CALLER_HINT
 
     s3_to_local: dict[str, str] = {}
@@ -577,34 +520,14 @@ def _download_chunk_to_local(fos_client, s3_paths: list[str], tmpdir: str) -> tu
 
 
 def _deterministic_buffer_name(chunk: list[str]) -> str:
-    """Return ``batch_{sha256(sorted_chunk)[:16]}.parquet``.
-
-    The hash is stable across runs of the same input set, so a crash between
-    ``write_to_buffer`` and ``insert_ingested_files`` cannot produce two
-    differently-named buffers for the same files (which the commit cron
-    would otherwise both push to Iceberg, double-committing rows).
-    """
+    """Return ``batch_{sha256(sorted_chunk)[:16]}.parquet``."""
     payload = "\n".join(sorted(chunk)).encode("utf-8")
     digest = hashlib.sha256(payload).hexdigest()[:16]
     return f"batch_{digest}.parquet"
 
 
 def _recover_in_flight(source: dict, table_name: str = "logs") -> dict:
-    """Reconcile ``ingest_in_flight`` rows with on-disk buffer state.
-
-    Called at the start of every ingest tick. For each in_flight row:
-      * If the buffer Parquet exists, the crash happened AFTER
-        write_to_buffer succeeded but BEFORE insert_ingested_files. Promote
-        the files into ``ingested_files`` and drop the in_flight row — the
-        commit cron will pick up the buffer in its next run.
-      * If the buffer Parquet is missing, the crash happened DURING or
-        BEFORE write_to_buffer. Drop the in_flight row without touching
-        ``ingested_files`` — those files will be re-LISTed on the next tick
-        and re-ingested cleanly.
-
-    Returns a summary dict ``{promoted, dropped, rows_recovered}`` for the
-    cron logger.
-    """
+    """Reconcile ``ingest_in_flight`` rows with on-disk buffer state."""
     source_name = source["name"]
     pending = metadata_db.list_in_flight(source_name, table_name=table_name)
     if not pending:
@@ -647,26 +570,12 @@ def list_fos_files(
     delete_after: bool = False,
     fos_client=None,
 ):
-    """List and discover new files in Fastly Object Storage.
-
-    Yields progress dicts with format {"type": "status", "message": msg}
-    or {"type": "error", "message": msg}.
-
-    Returns a dict with:
-    {
-        "new_files": list[str],
-        "file_sizes": dict[str, int],
-        "skipped_already": int,
-        "stranded_already": list[str]
-    }
-    """
+    """List and discover new files in Fastly Object Storage."""
     if elapsed_fn is None:
         elapsed_fn = lambda: ""  # noqa: E731
 
     st_dt, et_dt = _parse_time_bounds(start_time, end_time)
     already = already_ingested or set()
-
-    # Determine StartAfter marker for incremental discovery to avoid scanning the entire bucket.
     start_after_key = None
 
     def _resolve_start_after_key() -> str | None:
@@ -674,10 +583,6 @@ def list_fos_files(
         if start_after_key is not None:
             return start_after_key
         if st_dt and not already:
-            # Use the configured start to bound the FOS list only on the very first import
-            # (no previously ingested files). On subsequent cron runs `already` is non-empty,
-            # so we fall through to the incremental lookback — scanning only the last 4 hours
-            # instead of the entire bucket from the original import start date.
             norm_subpath = prefix_subpath.strip("/")
             start_after_key = st_dt.strftime(f"{norm_subpath}/year=%Y/month=%m/day=%d/hour=%H/minute=%M/")
             logger.info(
@@ -709,12 +614,6 @@ def list_fos_files(
 
         yield {"type": "status", "message": f"{elapsed_fn()} Discovering new files in Fastly Object Storage..."}
 
-        # Option B (Minute-Prefix Listing for Standard Incremental Mode):
-        # On the hot incremental path (incremental_only=True, no explicit st_dt/et_dt, v3 prefix),
-        # query the recent minute-prefixes (last 5 minutes) first.
-        # This matches High-Scale's sub-300ms discovery and avoids scanning 4 hours of StartAfter objects.
-        # If the minute prefixes yield 0 total objects (e.g. non-v3 layout or legacy tests),
-        # fall back to the standard Prefix + StartAfter pagination.
         from backend.provision.log_paths import minute_list_prefix, rum_minute_list_prefix
 
         now_utc = datetime.now(UTC)
@@ -814,15 +713,7 @@ def ingest(
     end_time: str | None = None,
     incremental_only: bool = False,
 ):
-    """Ingest new raw log files from FOS into the local Iceberg buffer.
-
-    Downloads .gz request log files from the raw/request/ prefix, parses JSON, casts types,
-    and writes each batch as a Parquet file to the local buffer directory.
-    The scheduler's commit_buffer job flushes the buffer to the Iceberg table
-    every few minutes.
-
-    Yields progress dicts for SSE streaming.
-    """
+    """Ingest new raw log files from FOS into the local Parquet buffer."""
     start_time_exec = time.time()
 
     def elapsed() -> str:
@@ -858,23 +749,12 @@ def ingest(
     except Exception as e:
         logger.warning("[ingest] %s: in_flight recovery sweep failed: %s", display_name, e)
 
-    # Normalize input range to UTC datetimes
     _parse_time_bounds(start_time, end_time)
-
-    # Fetch already ingested files first.
-    # ``incremental_only=True`` is the cron hot path: LIST is bounded by
-    # ``StartAfter`` (or, for delete_after=True, the bucket itself only holds
-    # un-ingested files) so dedup membership only needs the most recent rows.
-    # Capping the fetch to 20k rows turns this from a ~4 s full-table
-    # fetchall into ~80 ms on services with >1 M ingested_files. Full sweeps
-    # (incremental_only=False) keep the unbounded load because they LIST the
-    # entire bucket and may match arbitrarily old files.
     yield {"type": "status", "message": f"{elapsed()} Fetching ingestion history..."}
 
     dedup_limit: int | None = 20_000 if incremental_only else None
     already = metadata_db.get_ingested_filenames(source_name, limit=dedup_limit)
 
-    # Use list_fos_files generator
     list_res = yield from list_fos_files(
         src=src,
         prefix_subpath="raw/request/",
@@ -890,23 +770,10 @@ def ingest(
 
     new_files, file_sizes = list_res["new_files"], list_res["file_sizes"]
     skipped_already, stranded_already = list_res["skipped_already"], list_res["stranded_already"]
-
     outcome_counters = _new_object_outcome(processed=0)
 
-    # Reconcile interrupted deletes. Any file we LISTed that is already in the
-    # ledger is, by the delete_after contract, one we ingested but never finished
-    # deleting (a restart hit between the ledger write and the FOS delete). Re-issue
-    # the delete now. This makes deletion self-healing: every sync re-derives the
-    # strand from (bucket LIST ∩ ledger), so a delete interrupted at any point is
-    # retried on the next tick — idempotently (deleting an absent key is a no-op),
-    # with no schema, no extra LIST, and no wait for the 1-day ledger trim.
-    # full_sync LISTs the whole bucket so it catches strands of any age; the
-    # incremental sync's 4h lookback catches recent ones within a tick.
     reclaimed = 0
     if delete_after and stranded_already:
-        # Throttle the high-frequency incremental path so a persistently-failing
-        # delete can't hammer FOS every tick; full_sync always runs (it is the
-        # backstop for old/over-cap strands).
         throttled = False
         if incremental_only:
             now = time.time()
@@ -917,18 +784,11 @@ def ingest(
                 _reconcile_last_attempt[source_name] = now
 
         if not throttled:
-            # Default-deny: only delete strands we can POSITIVELY prove are safe —
-            # durable data (row_count>0) AND ingested at/after the durability epoch
-            # (so row_count is trustworthy). This excludes both no-data markers
-            # (row_count==0; their raw .gz may be the only copy) and pre-fix ledger
-            # rows whose row_count can't be trusted. Anything not proven safe is
-            # left for the normal 1-day ledger trim.
             try:
                 deletable = metadata_db.get_reclaimable_strand_filenames(
                     source_name, set(stranded_already), _RECONCILE_LEDGER_EPOCH
                 )
             except Exception as classify_err:
-                # Fail SAFE: if we can't classify, reclaim nothing this run.
                 logger.warning(
                     "[ingest] %s: could not classify reclaimable strands (%s) — skipping reclaim this run",
                     display_name,
@@ -984,7 +844,6 @@ def ingest(
     touched_hours: set[str] = set()
 
     mem_con = None
-    # Increase parallelism for S3 deletions
     _delete_executor = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="ingest_delete")
     _pending_deletes: list[tuple[concurrent.futures.Future, set[str]]] = []
 
@@ -1002,26 +861,14 @@ def ingest(
 
     cfg = svcconfig.load_config(source.get("service_id") or source.get("name")) if source else None
     log_fields_config = cfg.get("log_fields", {}) if cfg else None
-
     columns_sql = get_ingest_columns_sql(log_fields_config)
 
     try:
         from backend.core.duckdb import get_memory_connection
 
         mem_con = get_memory_connection(src)
-
-        # Increase parallelism for DuckDB reads
         _cpus = os.cpu_count() or 4
         mem_con.execute(f"SET threads = {_cpus};")
-
-        # Skip per-file HEAD-before-GET probes on .log.gz reads. DuckDB's default
-        # httpfs path issues HEAD to plan ranged GETs, but gzip isn't seekable
-        # so we always read the whole file anyway — the HEAD adds a round trip
-        # with zero benefit. force_download=true tells httpfs to stream the
-        # whole compressed object into a temp file in one GET. Files are
-        # ~1–10 MB compressed, well within memory/disk headroom.
-        # Scoped to mem_con (ingest-only); other connections still use ranged
-        # reads where they matter (e.g., parquet column pruning).
         try:
             mem_con.execute("SET force_download = true;")
         except Exception as _fd_err:
@@ -1029,15 +876,7 @@ def ingest(
 
         failed_paths = set()
         for chunk_start in range(0, len(new_files), chunk_size):
-            # Cooperative yield: if API requests came in mid-ingest, pause
-            # briefly so the dashboard query gets CPU before the next chunk's
-            # CREATE TEMP TABLE + Arrow export burns it. The 30s starvation
-            # guard at the top-of-tick gate is the backstop for sustained
-            # API load — this helper just smooths the per-chunk contention.
             yield_to_api()
-            # An expensive incremental LIST can consume the entire tick budget
-            # before processing starts. Always attempt the first bounded chunk
-            # so a backlog advances instead of remaining permanently wedged.
             if chunk_start > 0 and max_seconds and (time.time() - start_time_exec) > max_seconds:
                 yield {
                     "type": "status",
@@ -1053,16 +892,6 @@ def ingest(
             yield {"type": "status", "message": msg}
 
             count_map: dict[str, int] = {}
-
-            # Download once, ingest from local paths. The previous version
-            # passed s3:// URLs directly to DuckDB and relied on
-            # `force_download=true` to stream each file into a per-query
-            # tempfile. That fast path was fine — but the isolation retry
-            # then refetched every file, and the corruption-repair branch's
-            # `read_csv(sep='')` triggered DuckDB's sniffer for ~5 extra GETs
-            # per file. Pre-downloading via boto3 (tagged
-            # X-Telemetry-Caller=ingest_download in usage_log) bounds per-
-            # file GETs at exactly 1 regardless of which branches run.
             chunk_tmpdir_obj = tempfile.TemporaryDirectory(prefix="ingest_chunk_")
             try:
                 s3_to_local, local_to_s3 = _download_chunk_to_local(fos_client, list(chunk), chunk_tmpdir_obj.name)
@@ -1076,11 +905,6 @@ def ingest(
                 read_paths = [s3_to_local[p] for p in read_paths_s3]
 
                 mem_con.execute("DROP TABLE IF EXISTS _ingest_staging")
-                # Security: escape single quotes in each local path before
-                # interpolating into the SQL literal. The local paths inherit
-                # their basename from the attacker-controllable S3 object key,
-                # so a key like ``raw/'); ATTACH '...; --`` would otherwise
-                # break out of the literal and execute arbitrary DuckDB SQL.
                 paths_sql = ", ".join(f"'{escape_sql_literal(p)}'" for p in read_paths)
 
                 try:
@@ -1095,7 +919,6 @@ def ingest(
                     valid_paths = []
                     for i, read_path in enumerate(read_paths):
                         try:
-                            # Security: per-file isolation read also needs escaping.
                             safe_read_path = escape_sql_literal(read_path)
                             _execute_query_with_retry(
                                 mem_con,
@@ -1106,7 +929,6 @@ def ingest(
                         except Exception as file_err:
                             f_name = read_paths_s3[i].split("/")[-1]
                             err_msg = str(file_err)
-
                             logger.error(f"Ingest isolation failed for {f_name}: {err_msg}")
                             err_msg = err_msg.split(":", 1)[-1].strip()
 
@@ -1143,12 +965,7 @@ def ingest(
                         yield {"type": "status", "message": f"Retry failed: {retry_err}"}
                         continue
 
-                # Translate filename column from local→s3 so downstream
-                # count_map / _source_file / file_sizes all key on s3://.
                 if local_to_s3:
-                    # Security: same escaping treatment for the
-                    # local→s3 mapping table — both halves originate from
-                    # attacker-controllable object keys.
                     path_map_rows = ", ".join(
                         f"('{escape_sql_literal(local)}', '{escape_sql_literal(s3)}')"
                         for local, s3 in local_to_s3.items()
@@ -1170,8 +987,6 @@ def ingest(
                 ).fetchall():
                     count_map[fpath] = rcount
 
-                # ── Transform: backend prefix strip + single-char field decode ──
-                # Types are already correct from columns= above — no TRY_CAST needed.
                 field_selects = _build_column_select_exprs(src, log_fields_config, source_file_expr='"filename"')
 
                 where_clauses = []
@@ -1183,9 +998,7 @@ def ingest(
                     where_clauses.append("timestamp <= ?::TIMESTAMPTZ")
                     where_params.append(end_time)
 
-                where_sql = ""
-                if where_clauses:
-                    where_sql = f" WHERE {' AND '.join(where_clauses)}"
+                where_sql = f" WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
 
                 mem_con.execute(
                     f"CREATE TEMP TABLE _ingest_typed AS SELECT {', '.join(field_selects)} FROM _ingest_staging{where_sql}",
@@ -1221,15 +1034,10 @@ def ingest(
                 _chunk_truly_corrupt: list = []
                 if corrupt_in_batch > 0:
                     try:
-                        # Identify the affected files from the raw diagnostic
-                        # scan itself; typed staging counts can omit malformed
-                        # rows or change after timestamp filtering.
                         corrupt_read_paths = read_paths
                         corrupt_s3_paths = read_paths_s3
 
                         if corrupt_read_paths:
-                            # Security: corrupt-file diagnostic path
-                            # also needs escaping. Same vector as above.
                             paths_sql_str = ", ".join(f"'{escape_sql_literal(p)}'" for p in corrupt_read_paths)
                             q = f"""
                                 SELECT filename, column0 FROM read_csv([{paths_sql_str}], header=false, sep='', quote='', escape='', columns={{'column0': 'VARCHAR'}}, filename=true)
@@ -1249,8 +1057,6 @@ def ingest(
                             repaired_by_fname: dict[str, list] = {}
                             truly_corrupt: list[tuple[str, str, str]] = []
                             for fname, raw_line in bad_rows:
-                                # DuckDB filenames here are local paths; translate
-                                # back so all downstream attribution stays s3://.
                                 fname = local_to_s3.get(fname, fname)
                                 if raw_line is None:
                                     continue
@@ -1277,10 +1083,6 @@ def ingest(
                                         tmp_path = tmp.name
                                         tmp.close()
 
-                                        # Apply the same transformation (decoding, filename
-                                        # normalization) and inject the original s3:// fname
-                                        # so attribution stays consistent. Security:
-                                        # escape via the shared helper.
                                         safe_fname = escape_sql_literal(fname)
                                         mem_con.execute(
                                             f"INSERT INTO _ingest_staging BY NAME SELECT {', '.join(field_selects)} "
@@ -1305,10 +1107,6 @@ def ingest(
                             _chunk_truly_corrupt = truly_corrupt
                     except Exception as e:
                         err_str = str(e)
-                        # Network/disk failures here mean the local re-read failed —
-                        # the main batch ingest already succeeded, but if we continue
-                        # we will have partially ingested files. Roll back data for
-                        # these files to allow them to be fully retried later.
                         if any(
                             kw in err_str.lower()
                             for kw in (
@@ -1333,7 +1131,6 @@ def ingest(
                                 for p in corrupt_s3_paths:
                                     failed_paths.add(p)
 
-                                # Force re-calculation of counts and re-fetch of arrow_table
                                 repairs_made = True
                                 _valid_row = mem_con.execute(
                                     "SELECT count(*) FROM _ingest_staging WHERE timestamp IS NOT NULL"
@@ -1359,12 +1156,7 @@ def ingest(
                     corrupt_read_expr = _read_json_auto_sql(f"'{safe_local}'", columns_sql)
                     try:
                         quarantine_result = _quarantine_convert_corrupt_lines(
-                            mem_con,
-                            fos_client,
-                            src,
-                            corrupt_read_expr,
-                            local_file,
-                            object_key,
+                            mem_con, fos_client, src, corrupt_read_expr, local_file, object_key
                         )
                     except Exception:
                         logger.exception("[ingest] %s: exact-byte quarantine failed for %s", source_name, object_key)
@@ -1387,18 +1179,6 @@ def ingest(
                 chunk_tmpdir_obj.cleanup()
 
             good_files = [f for f in chunk if f not in failed_paths]
-            # Files that actually contributed DURABLE rows (survived the time-range
-            # WHERE filter and have a non-null timestamp = rows really written to the
-            # buffer/Iceberg). A file with zero durable rows produced NO stored data;
-            # we still ledger it to suppress re-LIST, but record row_count 0 so the
-            # later strand RECONCILE can tell it apart from a genuine interrupted
-            # delete and skip it (its raw .gz may be the only copy). Note this guards
-            # only the reconcile: on THIS run the per-chunk delete below still removes
-            # the raw under delete_after=True — that is the configured "delete after
-            # processing" contract for out-of-range / corrupt files, unchanged here.
-            # Per-file: a buffered chunk can still hold a file whose own rows were all
-            # filtered out, and count_map holds PRE-filter counts, so durability can't
-            # be inferred from count_map alone.
             try:
                 durable_files = {
                     r[0]
@@ -1408,11 +1188,6 @@ def ingest(
                     if r[0] is not None
                 }
             except Exception:
-                # Staging table unavailable (chunk errored earlier). Fail toward NO
-                # DATA LOSS: treat every file as a zero-row marker so the reconcile
-                # will never delete its raw .gz. Worst case is a benign raw-file leak
-                # (and a small summary under-count) on a path that, in practice, never
-                # fires once a chunk has been processed — never an erroneous delete.
                 durable_files = set()
             rows_to_track = [
                 (f, count_map.get(f, 0) if f in durable_files else 0, file_sizes.get(f)) for f in good_files
@@ -1421,12 +1196,6 @@ def ingest(
             if valid_rows > 0:
                 if repairs_made:
                     arrow_table = _export_staging_arrow(mem_con)
-                # Deterministic name + mark-before-write: the in_flight row
-                # lands BEFORE the Parquet so a crash leaves the file rows
-                # discoverable via list_in_flight() on next startup. The
-                # buffer filename is hashed from the chunk's sorted source
-                # filenames so a re-ingest of the same chunk overwrites the
-                # same buffer file — Iceberg can't double-commit it.
                 buf_filename = _deterministic_buffer_name(good_files)
                 if rows_to_track:
                     metadata_db.record_in_flight(source_name, buf_filename, rows_to_track)
@@ -1435,19 +1204,10 @@ def ingest(
                     metadata_db.insert_ingested_files(source_name, rows_to_track)
                     metadata_db.clear_in_flight(source_name, buf_filename)
             elif rows_to_track:
-                # No buffer produced (all rows outside the timestamp filter),
-                # but we still need to mark these files ingested so we don't
-                # re-LIST them every tick.
                 metadata_db.insert_ingested_files(source_name, rows_to_track)
             successfully_processed_files.extend(good_files)
 
-            # Per-file ingest downloads are captured by the telemetry proxy on
-            # every duckdb.httpfs GET/HEAD; recording them again here would
-            # double-count CDN GETs in the usage log. The cron's
-            # process_context tags this work as `cron:sync:*`.
-
             if delete_after:
-                # Clean up completed futures to avoid unbounded list growth
                 remaining_deletes = []
                 for future, keys in _pending_deletes:
                     if future.done():
@@ -1463,11 +1223,6 @@ def ingest(
                 ]
 
                 if chunk_keys:
-                    # delete_objects batches 500 keys per API call. The telemetry
-                    # proxy records the actual POST per batch (function_name=
-                    # boto3.deleteobjects), so we don't fire a manual record_call
-                    # here — doing so produced a 1:1 duplicate row per batch.
-
                     try:
                         future = _delete_executor.submit(
                             _delete_objects_robust_with_failures, fos_client, src["bucket"], chunk_keys
@@ -1478,23 +1233,6 @@ def ingest(
                             "message": f"{elapsed()} Batch {chunk_num}: Submitted deletion of {len(chunk_keys)} raw files (async)...",
                         }
                     except RuntimeError as submit_err:
-                        # Python's concurrent.futures.thread module-global
-                        # ``_shutdown`` flag has been flipped (its atexit
-                        # cleanup fires once and is process-wide), so every
-                        # subsequent ``.submit()`` raises "cannot schedule
-                        # new futures after interpreter shutdown" — even on
-                        # a fresh ThreadPoolExecutor. The cause has been
-                        # observed under uvicorn worker recycling and some
-                        # multiprocessing-using libraries.
-                        #
-                        # Without this fallback the ingest loop crashes here
-                        # AFTER the chunk's rows are already written to the
-                        # buffer + recorded in ``ingested_files``, so the
-                        # .gz files stay in FOS forever as orphans (the dedup
-                        # check makes them invisible to every future sync —
-                        # 2026-06-16 incident: 167 orphans across 4 hours).
-                        # Fall back to a synchronous inline delete: slower
-                        # per chunk, but no orphans leaked.
                         logger.warning(
                             "[ingest] %s: delete executor submit failed (%s) — falling back to inline delete",
                             source_name,
@@ -1539,7 +1277,6 @@ def ingest(
                 }
 
     finally:
-        # Wait for all in-flight S3 deletions
         pending_by_future = {future: keys for future, keys in _pending_deletes}
         try:
             for f in concurrent.futures.as_completed(pending_by_future, timeout=300):
@@ -1604,60 +1341,27 @@ def ingest(
 
 
 # ─── Celery ingest data plane (v3) ────────────────────────────────────────────
-# Discovery (cron, inline on a worker) LISTs recent minute prefixes and inserts
-# new object keys into the per-service ``ingest_ledger``
-# (discovered → claimed → committed | quarantined), then fans out
-# ``convert_batch_files`` tasks of LEDGER_CONVERT_BATCH_SIZE keys each — one
-# DuckLake catalog commit per BATCH, since the catalog transaction (one
-# snapshot row per commit), not celery dispatch, is what limits throughput.
-# ``convert``/``convert_batch_files`` are idempotent (delete-then-insert
-# keyed on ``_source_file`` inside one DuckLake transaction), so at-least-once
-# delivery (acks_late) and sweeper reclaims are safe. ``sweep_ledger`` is the
-# crash net: reclaims stale claims, re-dispatches stuck rows, and diffs a
-# lookback LIST against the ledger.
 
 from backend.celery_app import app
 
-# A claim older than this is presumed dead and reclaimed by the sweeper.
-# Must exceed celery's task_time_limit so a still-running convert isn't
-# reclaimed mid-flight (see backend/celery_app.py).
 LEDGER_RECLAIM_AFTER_S = 20 * 60
-# Rows still 'discovered' after this long had their convert message lost
-# (broker restart, dispatch-before-crash) — re-dispatch them.
 LEDGER_REDISPATCH_AFTER_S = 10 * 60
-# Give up on a file after this many failed convert attempts.
 LEDGER_MAX_ATTEMPTS = 5
 LEDGER_RETRY_BASE_S = 30
 LEDGER_RETRY_MAX_S = 60 * 60
 LEDGER_RETRY_JITTER_RATIO = 0.25
-# Files per ``convert_batch_files`` task. The DuckLake catalog commit — one
-# Postgres transaction and one snapshot ROW per commit — is the ingest
-# bottleneck, not celery dispatch: a live test service showed 27,613
-# committed files (avg 665 bytes, ~7 log lines each) against 27,615
-# snapshots, i.e. exactly one snapshot per file, growing the snapshot table
-# linearly with file count forever. Batching the DELETE+INSERT for N files
-# into ONE transaction collapses that to one snapshot per batch. 50 matches
-# the sync path's chunk precedent and lands near one minute of arrivals at
-# the measured ~44 files/min per service.
 LEDGER_CONVERT_BATCH_SIZE = int(os.getenv("LEDGER_CONVERT_BATCH_SIZE", "50"))
-# Bound parameters per claim/commit statement. SQLite caps them per
-# statement (999 on older builds), so a caller handing in more keys than one
-# batch is sliced rather than raising.
 _LEDGER_KEY_SLICE = 400
 
 
 def _iter_key_slices(keys: list[str]):
     """Yield ``(key_slice, placeholders)`` in ``_LEDGER_KEY_SLICE``-sized chunks."""
-    for i in range(0, len(keys), _LEDGER_KEY_SLICE):
-        key_slice = keys[i : i + _LEDGER_KEY_SLICE]
-        yield key_slice, ",".join("?" * len(key_slice))
+    for key_slice in itertools.batched(keys, _LEDGER_KEY_SLICE):
+        yield list(key_slice), ",".join("?" * len(key_slice))
 
 
 def _celery_ingest_scope(kind: str, service_id: str):
-    """Telemetry envelope for ledger tasks: process-context tagging + FOS
-    call tracking + usage-log flush — the same accounting the ``@cron_task``
-    decorator gives scheduler jobs. Without it every LIST/GET these tasks
-    perform is invisible to the Class A/B cost accounting."""
+    """Telemetry envelope for ledger tasks: process-context tagging, FOS call tracking, and usage-log flush."""
     from contextlib import contextmanager
 
     from backend.utils.telemetry import flush_usage_log, process_context_scope, start_call_tracking
@@ -1712,8 +1416,7 @@ def _discover_prefix_common(
     file_sizes = fos_result.get("file_sizes", {})
     now_ts = time.time()
     orig_task = originating_task if run_id is not None else None
-    for i in range(0, len(new_files), _LEDGER_KEY_SLICE):
-        chunk_files = new_files[i : i + _LEDGER_KEY_SLICE]
+    for chunk_files in itertools.batched(new_files, _LEDGER_KEY_SLICE):
         values_sql = ", ".join(["(?, ?, ?, 'discovered', ?, ?, ?)"] * len(chunk_files))
         params: list[Any] = []
         for f_path in chunk_files:
@@ -1730,8 +1433,8 @@ def _discover_prefix_common(
     con.commit()
 
     batches = 0
-    for i in range(0, len(newly_discovered), LEDGER_CONVERT_BATCH_SIZE):
-        dispatch_fn(service_id, newly_discovered[i : i + LEDGER_CONVERT_BATCH_SIZE])
+    for batch in itertools.batched(newly_discovered, LEDGER_CONVERT_BATCH_SIZE):
+        dispatch_fn(service_id, list(batch))
         batches += 1
     if newly_discovered:
         logger.info(
@@ -1751,15 +1454,7 @@ def discover_prefix(
     run_id: int | None = None,
     originating_task: str = "log_discovery",
 ) -> int:
-    """LIST one FOS prefix (or a start_time-bounded range), insert unseen keys
-    into ``ingest_ledger`` as ``discovered``, and dispatch the new keys in
-    ``LEDGER_CONVERT_BATCH_SIZE``-sized ``convert_batch_files`` batches (one
-    DuckLake catalog commit each). Returns the number of newly discovered files.
-
-    The ledger insert is committed BEFORE any dispatch so a worker's claim
-    UPDATE can never race an uncommitted row (claim matches 0 rows → the file
-    would strand in 'discovered' with its message already consumed).
-    """
+    """Discover new request-log keys in FOS, insert into ``ingest_ledger``, and dispatch convert batches."""
     list_kwargs: dict[str, Any] = {"start_time": start_time}
     if prefix_subpath is not None:
         list_kwargs["prefix_subpath"] = prefix_subpath
@@ -1783,11 +1478,8 @@ def _ledger_record_failure(
     *,
     commit: bool = True,
 ) -> str:
-    """Record a convert failure: bump attempts, keep the error, and either
-    requeue ('discovered') or give up ('quarantined') after LEDGER_MAX_ATTEMPTS.
-    Returns the new status."""
+    """Record a convert failure and either requeue ('discovered') or quarantine after LEDGER_MAX_ATTEMPTS."""
     cur = con.cursor()
-    generation_clause = ""
     row = con.execute(
         "SELECT attempts, status, lease_generation FROM ingest_ledger WHERE service_id=? AND object_key=?",
         (service_id, object_key),
@@ -1894,15 +1586,7 @@ def _ledger_mark_dead_letter_missing(
 
 
 def _ledger_claim_batch(con, service_id: str, object_keys: list[str], worker_id: str) -> dict[str, int]:
-    """Claim every still-``discovered`` key in ``object_keys`` with one
-    UPDATE per ``_LEDGER_KEY_SLICE`` slice, returning the keys actually won.
-
-    Keys NOT returned were claimed by another worker or already committed —
-    the batch's equivalent of ``convert_object``'s ``"not_claimed"``. The
-    claim is committed before the caller downloads anything, same rationale
-    as the single-key claim: a worker's claim must never race an
-    uncommitted row.
-    """
+    """Claim every still-``discovered`` key in ``object_keys`` and return ``{key: lease_generation}``."""
     cur = con.cursor()
     now = time.time()
     won: dict[str, int] = {}
@@ -2136,47 +1820,20 @@ def _run_batch_convert_common(
 
 
 def convert_batch_objects(service_id: str, object_keys: list[str], worker_id: str) -> dict:
-    """Batched sibling of ``convert_object``: claim N ledger rows, download
-    them all, and land every row in ONE DuckLake transaction — one catalog
-    snapshot for the whole batch instead of one per file.
-
-    Per-row ``_source_file`` attribution is preserved (idempotency's
-    DELETE-by-``_source_file`` and the ledger both depend on it) by reading
-    the whole batch through a single ``read_json_auto([...], filename=true)``
-    and joining that ``filename`` against a per-connection TEMP table
-    mapping local temp path -> ``s3://`` key.
-
-    Failure isolation is per file where it can be: a key that is gone from
-    FOS is dead-lettered and DROPPED from the batch so it cannot strand its
-    healthy siblings. A failure of the shared transaction, by contrast,
-    routes EVERY still-claimed key through ``_ledger_record_failure`` so
-    none is left stranded in ``claimed``.
-
-    Returns a summary dict of per-outcome counts.
-    """
+    """Claim N ledger rows, download them, and land every row in one DuckLake transaction."""
     from backend import config as svcconfig
     from backend.core.iceberg._ducklake import ducklake_table_name
 
     def _process_request_batch(*, src, fos, duckdb_con, files, outcomes, enter_write_admission) -> None:
         table = ducklake_table_name(src)
-        # Acquire the per-service write lock only now — for the DuckLake
-        # attach + INSERT below, never across the FOS download above
-        # (which touches no catalog state). Holding it across network I/O
-        # made batches exceed the admission timeout and starve concurrent
-        # converts (test_convert_batch_downloads_outside_admission_lock).
         enter_write_admission()
 
         log_fields_config = (svcconfig.load_config(service_id) or {}).get("log_fields")
         columns_sql = get_ingest_columns_sql(log_fields_config)
         local_files = [lf for lf, _s3, _k in files]
         file_list_sql = "[" + ", ".join(f"'{escape_sql_literal(lf)}'" for lf in local_files) + "]"
-        # filename=true is the linchpin: it gives per-ROW source
-        # attribution from a single statement over the whole file list,
-        # which is what makes one transaction for N files possible.
         read_expr = _read_json_auto_sql(file_list_sql, columns_sql, filename=True)
 
-        # TEMP tables are per-connection so this cannot collide across
-        # workers, but a reused connection could still carry a stale one.
         duckdb_con.execute("DROP TABLE IF EXISTS temp.srcmap")
         duckdb_con.execute("CREATE TEMP TABLE srcmap(local VARCHAR, s3 VARCHAR)")
         duckdb_con.execute(
@@ -2184,12 +1841,6 @@ def convert_batch_objects(service_id: str, object_keys: list[str], worker_id: st
             + ", ".join(f"('{escape_sql_literal(lf)}', '{escape_sql_literal(s3)}')" for lf, s3, _k in files)
         )
 
-        # Per-file valid/corrupt counts, computed BEFORE the transaction
-        # so the same numbers drive both the ingested_files bookkeeping
-        # (which must be per file, not the batch total, or log-line
-        # accounting reconciliation goes wrong) and the per-file
-        # quarantine pass. Reading the same immutable local files twice
-        # yields the same answer.
         stats = duckdb_con.execute(
             "SELECT filename, count(*) FILTER (timestamp IS NOT NULL), count(*) FILTER (timestamp IS NULL) "
             f"FROM {read_expr} GROUP BY filename"
@@ -2198,15 +1849,8 @@ def convert_batch_objects(service_id: str, object_keys: list[str], worker_id: st
         corrupt_by_local = {r[0]: r[2] for r in stats}
         unmapped = set(valid_by_local) - set(local_files)
         if unmapped:
-            # DuckDB attributed rows to a path absent from srcmap, so
-            # the JOIN below would silently drop them while their ledger
-            # rows went 'committed'. Fail the batch instead of losing
-            # rows without a trace.
             raise RuntimeError(f"read_json_auto returned unmapped filename(s): {sorted(unmapped)[:3]}")
 
-        # WHERE timestamp IS NOT NULL: ignore_errors=true does NOT drop a
-        # malformed line, it inserts a row with every field NULL, and
-        # that garbage would land straight in the queryable lake table.
         clean_batch_expr = (
             f"(SELECT {', '.join(_build_column_select_exprs(src, log_fields_config))}, filename "
             f"FROM {read_expr} WHERE timestamp IS NOT NULL)"
@@ -2220,21 +1864,17 @@ def convert_batch_objects(service_id: str, object_keys: list[str], worker_id: st
         if not _ducklake_table_exists(duckdb_con, table):
             try:
                 duckdb_con.execute(f"CREATE TABLE lake.{table} AS {select_sql}")
-                needs_insert = False  # created + inserted in one step
+                needs_insert = False
             except Exception as e:
                 if "already exists" not in str(e):
                     raise
-                # Lost a create race — fall through to the insert path.
 
         if needs_insert:
-            # Widen the table for any new (custom-field) columns first,
-            # over the UNION of columns across the WHOLE batch so a
-            # custom field present in only one file still widens.
             try:
                 existing_cols = {r[0] for r in duckdb_con.execute(f"DESCRIBE lake.{table}").fetchall()}
                 for p_col, p_type, *_ in duckdb_con.execute(f"DESCRIBE SELECT * FROM {read_expr} LIMIT 0").fetchall():
                     if p_col == "filename" or p_col in existing_cols:
-                        continue  # filename is synthetic — never a lake column
+                        continue
                     safe_col = p_col.replace('"', '""')
                     duckdb_con.execute(f'ALTER TABLE lake.{table} ADD COLUMN "{safe_col}" {p_type}')
             except Exception as e:
@@ -2375,11 +2015,7 @@ def _quarantine_convert_corrupt_lines(
 
     for result in evidence_results:
         if int(result.get("quarantine_capture_failures", 0)):
-            logger.error(
-                "[ledger] %s: request quarantine capture failed for %s",
-                service_id,
-                object_key,
-            )
+            logger.error("[ledger] %s: request quarantine capture failed for %s", service_id, object_key)
     return {
         "valid_records": int(valid_count or 0),
         "malformed_records": len(evidence_results),
@@ -2409,24 +2045,7 @@ def _redispatch_pending(
     label: str,
     queue_depths_fn: Callable[[], tuple[dict[str, int], bool]] | None = None,
 ) -> tuple[int, bool]:
-    """Re-dispatch reclaimed + stuck ledger keys in batches. Returns ``(redispatched, broker_ok)``.
-
-    LOST-MESSAGE guard: re-dispatch exists for messages that vanished
-    (broker restart, crash before enqueue). If the ingest queue already
-    holds at least as many messages as the pending backlog, nothing is
-    lost — the workers just haven't gotten there yet. Re-dispatching
-    anyway multiplies duplicate messages every sweep during a long drain
-    (observed live: 5k pending → 25k queued after a few sweeps). Converts
-    are idempotent so duplicates are safe, but the queue bloat wastes
-    worker throughput and makes depth metrics meaningless. Dead-worker
-    redelivery is separately covered by acks_late + visibility_timeout.
-
-    Batched like discovery: the sweeper can re-dispatch up to 5000 keys, and
-    one convert per key would mean 5000 DuckLake catalog snapshots during a
-    drain. Callers filter ``raw/rum/`` keys in their queries, so batching the
-    dispatch cannot leak a RUM key into the wrong parser. ``label`` is ``""``
-    or ``"RUM "`` and only affects log lines.
-    """
+    """Re-dispatch reclaimed + stuck ledger keys in batches when queue depth indicates lost messages."""
     pending = len(stuck) + len(reclaimed)
     if not pending:
         return 0, True
@@ -2466,9 +2085,8 @@ def _redispatch_pending(
             queue_depth,
         )
         return 0, True
-    pending_keys = reclaimed + stuck
-    for i in range(0, pending, LEDGER_CONVERT_BATCH_SIZE):
-        dispatch_fn(service_id, pending_keys[i : i + LEDGER_CONVERT_BATCH_SIZE])
+    for batch in itertools.batched(reclaimed + stuck, LEDGER_CONVERT_BATCH_SIZE):
+        dispatch_fn(service_id, list(batch))
     logger.info(
         "[ledger] %s: %ssweeper re-dispatched %d pending row(s) (batches=%d, reclaimed=%d, queue_depth=%d)",
         service_id,
@@ -2555,39 +2173,11 @@ def _sweep_ledger_common(
 
 
 def sweep_ledger_once(service_id: str, lookback_hours: int = 4, run_id: int | None = None) -> dict:
-    """Crash net for the ledger pipeline. Returns a summary dict.
-
-    1. Reclaims rows stuck in 'claimed' past LEDGER_RECLAIM_AFTER_S (dead
-       worker) back to 'discovered' — committed BEFORE re-dispatch so the
-       worker's claim can't race the uncommitted reset.
-    2. Re-dispatches rows stuck in 'discovered' past LEDGER_REDISPATCH_AFTER_S
-       (their convert message was lost — broker restart, crash after insert).
-    3. Diffs a lookback-window FOS LIST against the ledger for files discovery
-       never saw.
-
-    Excludes ``raw/rum/`` object keys — those are ``sweep_rum_ledger_once``'s
-    job.
-    """
+    """Reclaim stale claims, re-dispatch stuck request-log keys, and run lookback discovery."""
     return _sweep_ledger_common(service_id, lookback_hours, run_id, is_rum=False)
 
 
 # ── RUM ledger pipeline ──────────────────────────────────────────────────────
-#
-# RUM beacon counterpart of the regular-log ledger pipeline above. Reuses the
-# SAME ``ingest_ledger`` table — RUM object keys live under ``raw/rum/...``
-# and regular-log keys under ``raw/request/...`` (see backend/core/rum_ingest.py's
-# ``ingest_rum_logs``, which LISTs ``prefix_subpath="raw/rum/"``), so the two
-# keyspaces can never collide and no schema change is needed.
-#
-# Kept as standalone twins of discover_prefix/convert_object/sweep_ledger_once
-# rather than parameters on them: those are the hottest path in the system
-# (every regular-log file goes through them) and must not carry RUM
-# branching. The v2 (non-celery) RUM path — backend/core/rum_ingest.py,
-# backend/cron/jobs/rum_commit.py, and the rum_sync_{id}/rum_commit_{id}
-# APScheduler jobs — is untouched and keeps working unchanged for
-# non-celery deployments; this section only reuses its already-public pure
-# helpers (extract_metrics_from_faro_payload, safe_int, safe_float) to avoid
-# duplicating the Faro-payload extraction logic.
 
 
 def discover_rum_prefix(
@@ -2597,16 +2187,7 @@ def discover_rum_prefix(
     run_id: int | None = None,
     originating_task: str = "rum_discovery",
 ) -> int:
-    """RUM counterpart of ``discover_prefix``: LIST one ``raw/rum/`` prefix
-    (or a caller-supplied minute-scoped subpath under it), insert unseen keys
-    into ``ingest_ledger`` as ``discovered``, and dispatch one ``convert_rum``
-    per NEW row.
-
-    ``prefix_subpath`` defaults to the RUM root (``raw/rum/``) rather than
-    relying on ``list_fos_files``'s own default (``raw/request/``, the regular-log
-    root) — a caller must never accidentally fall through to scanning the
-    regular-log tree.
-    """
+    """RUM counterpart of ``discover_prefix``, scoped to ``raw/rum/``."""
     return _discover_prefix_common(
         service_id,
         list_kwargs={"start_time": start_time, "prefix_subpath": prefix_subpath or "raw/rum/"},
@@ -2619,27 +2200,13 @@ def discover_rum_prefix(
 
 
 def _parse_rum_line(log_data: dict, service_id: str) -> tuple[list[dict], list[dict]] | None:
-    """Parse one decoded RUM beacon JSON object into ``(vitals_rows, errors_rows)``.
-
-    Returns ``None`` when the line belongs to a different service (a
-    multi-tenant bucket) — not corruption, just routing, so the caller must
-    not count it as either a valid or a corrupt row.
-
-    A close copy of the per-line body in ``ingest_rum_logs``
-    (backend/core/rum_ingest.py) — kept independent rather than extracted
-    into a shared helper per the "don't touch the v2 RUM path" constraint.
-    Reuses that module's already-public pure helpers
-    (``extract_metrics_from_faro_payload``, ``safe_int``, ``safe_float``)
-    to avoid duplicating the Faro-payload extraction logic itself.
-    """
+    """Parse one decoded RUM beacon JSON object into ``(vitals_rows, errors_rows)``."""
     from backend.core.rum_ingest import extract_metrics_from_faro_payload, safe_float, safe_int
 
-    # Multi-tenant routing: not corruption, so caller must not count as valid or corrupt
     log_service_id = log_data.get("service_id") or log_data.get("rum_service_id")
     if log_service_id and log_service_id != service_id:
         return None
 
-    # Legitimate non-beacon skips: CORS preflight, health checks, /ping, /favicon.ico
     if (
         log_data.get("method") == "OPTIONS"
         or log_data.get("is_healthcheck")
@@ -2809,15 +2376,7 @@ def _parse_rum_line(log_data: dict, service_id: str) -> tuple[list[dict], list[d
 
 
 def _parse_rum_beacon_file(local_path: str, service_id: str) -> tuple[list[dict], list[dict], list[tuple[str, str]]]:
-    """Decode+parse one ``raw/rum/*.gz`` beacon file.
-
-    Returns ``(vitals_rows, errors_rows, corrupt_lines)`` where
-    ``corrupt_lines`` is a list of ``(raw_line, reason)`` for lines that
-    failed to parse. The caller (``convert_rum_object``) quarantines these
-    via the same sidecar format ``_quarantine_convert_corrupt_lines`` uses
-    for the regular-log path, instead of the v2 path's silent log-and-skip
-    (``ingest_rum_logs``'s per-line ``except Exception: continue``).
-    """
+    """Decode and parse one ``raw/rum/*.gz`` beacon file into ``(vitals_rows, errors_rows, corrupt_lines)``."""
     vitals_rows: list[dict] = []
     errors_rows: list[dict] = []
     corrupt_lines: list[tuple[str, str]] = []
@@ -2954,11 +2513,7 @@ def _write_rum_arrow_table_batch(
 
 
 def convert_batch_rum_objects(service_id: str, object_keys: list[str], worker_id: str) -> dict:
-    """Batched sibling of ``convert_rum_object``: claim N ledger rows,
-    download them all, and land every row in ONE DuckLake transaction per
-    table (``client_vitals``, ``client_errors``) instead of one ATTACH +
-    commit per file.
-    """
+    """Claim N RUM ledger rows, download them, and land every row in one DuckLake transaction per table."""
     from backend.core.iceberg._core import CLIENT_ERRORS_ARROW_SCHEMA, CLIENT_VITALS_ARROW_SCHEMA
     from backend.core.iceberg._ducklake import ducklake_table_name
 
@@ -3003,7 +2558,6 @@ def convert_batch_rum_objects(service_id: str, object_keys: list[str], worker_id
             outcomes[object_key] = _finalize_object_outcome(outcome)
 
         source_files_sql = ", ".join(f"'{escape_sql_literal(s)}'" for s in source_files)
-
         enter_write_admission()
 
         _write_rum_arrow_table_batch(
@@ -3059,8 +2613,6 @@ def convert_batch_rum_files(self, service_id: str, object_keys: list[str]):
         return convert_batch_rum_objects(service_id, object_keys, self.request.id or "rum-worker")
 
 
-# Only delete a raw file once its rows have been durably committed for this
-# long — protects any reader still holding the pre-commit view of that file.
 RAW_DELETE_GRACE_S = 10 * 60
 RAW_DELETE_CLAIM_LEASE_S = 15 * 60
 
@@ -3085,16 +2637,7 @@ def _mark_ledger_published(service_id: str, *, rum: bool = False) -> int:
 
 
 def finalize_committed_raw(service_id: str, batch_size: int = 10_000) -> dict:
-    """Delete raw .gz files whose rows are durably committed to the lake.
-
-    Celery-mode counterpart of the sync path's ``delete_after`` handling —
-    without it, FOS raw storage grows without bound. Honors the service's
-    ``provisioning.cron_sync.delete_after`` (default True), and stands down
-    unconditionally when ``provisioning.cron_sync.high_scale_shared_source``
-    is set — see ``backend.config.resolve_raw_delete_after``. Idempotent:
-    each ledger row is stamped ``raw_deleted_at`` on successful delete.
-    Returns ``{"deleted": n, "eligible": m, "delete_after": bool}``.
-    """
+    """Delete raw .gz files whose rows are durably committed to the lake."""
     from backend import config as svcconfig
     from backend.core.duckdb import get_source_for_service
     from backend.core.metadata.base import get_con
@@ -3142,8 +2685,8 @@ def finalize_committed_raw(service_id: str, batch_size: int = 10_000) -> dict:
     bucket = src.get("bucket", "")
 
     deleted = 0
-    for i in range(0, len(eligible), 1000):
-        chunk = eligible[i : i + 1000]
+    for chunk_tuple in itertools.batched(eligible, 1000):
+        chunk = list(chunk_tuple)
         try:
             resp = fos.delete_objects(
                 Bucket=bucket,
@@ -3182,37 +2725,15 @@ def finalize_committed_raw(service_id: str, batch_size: int = 10_000) -> dict:
 
 
 def merge_lake_files(service_id: str) -> None:
-    """Flush inlined rows to parquet, then compact adjacent small DuckLake
-    data files for one service. Raises on failure — callers record the
-    outcome in cron_runs.
-
-    The flush is load-bearing for DURABILITY, not just for file layout.
-    DuckLake "inlines" small inserts directly into the metadata catalog
-    (Postgres, or the .ducklake file) instead of writing parquet, and
-    NEITHER ``ducklake_merge_adjacent_files`` nor
-    ``ducklake_rewrite_data_files`` promotes inlined rows — both operate on
-    already-materialized files, so a table whose every commit was inlined
-    stays at ``file_count = 0`` forever no matter how often compaction
-    runs (verified empirically). Since ``finalize_committed_raw`` deletes
-    the raw .gz once its ledger row has been committed for
-    RAW_DELETE_GRACE_S, an unflushed catalog means the ONLY copy of the
-    data is the catalog itself — no FOS parquet, no raw file to re-ingest.
-    ``ducklake_flush_inlined_data`` is the only primitive that promotes
-    them, and it must run BEFORE the merge (the merge needs real files to
-    have anything to compact) and before raw deletion in the same tick —
-    which is the order ``cron/jobs/commit.py`` calls them in.
-    """
+    """Flush inlined rows to parquet and compact adjacent small DuckLake data files for one service."""
     import duckdb as _duckdb
 
-    from backend.core.duckdb import get_source_for_service
+    from backend.core.duckdb import get_memory_connection, get_source_for_service
     from backend.core.iceberg._ducklake import _ducklake_attach, ducklake_write_admission
 
     src = get_source_for_service(service_id)
     if src is None:
         raise RuntimeError(f"no source registered for {service_id}")
-    # In-memory connection: same single-writer-file-lock rationale as
-    # convert_object — never open the per-service .duckdb from a worker.
-    from backend.core.duckdb import get_memory_connection
 
     con = get_memory_connection(src)
     try:

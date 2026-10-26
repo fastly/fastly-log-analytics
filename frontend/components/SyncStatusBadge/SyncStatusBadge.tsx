@@ -29,9 +29,18 @@ import {
 } from '@/components/ui/popover'
 import { useServiceStore, useTimezoneStore } from '@/stores/filterStore'
 import { useIsAnalyst, useBootstrap, useMounted } from '@/hooks/useBootstrap'
-import { useSyncStatus, useLastSync, useSeededReady } from '@/hooks/useEventStream'
-import { useAdminEventStream, useHeaderBadgeStream, type AdminEventChannel } from '@/hooks/useAdminEventStream'
-import { useElapsedTime, useLocalStorageString, useNowMs, useOpenGeneration } from '@/hooks/useSSE'
+import {
+  useAdminEventStream,
+  useElapsedTime,
+  useHeaderBadgeStream,
+  useLastSync,
+  useLocalStorageString,
+  useNowMs,
+  useOpenGeneration,
+  useSeededReady,
+  useSyncStatus,
+  type AdminEventChannel,
+} from '@/hooks/useSSE'
 import { formatBytes, formatCompactDuration, formatCount, formatForInput, formatTimeAgo, parseFromInput, toUTCDate } from '@/lib/format'
 import { cn, formatDateTime, panelDialogContent, panelDialogHeaderMuted } from '@/lib/utils'
 import { adminJsonResult } from '@/lib/api'

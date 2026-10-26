@@ -1,24 +1,34 @@
 'use client'
 
-import { useState, useEffect, useMemo, useCallback } from 'react'
-import { Radio, ArrowRight, AlertTriangle, BarChart3, Gauge, HardDrive, Shield, Network, Settings, HelpCircle } from 'lucide-react'
+import React, { useState, useEffect, useMemo, useCallback } from 'react'
+import {
+  Radio, ArrowRight, AlertTriangle, BarChart3, Gauge, HardDrive, Shield, Network, Settings, HelpCircle,
+  Download, FileWarning, Loader2, Trash2, Bot, RefreshCw, Wifi, ExternalLink, CloudDownload,
+} from 'lucide-react'
 import Link from 'next/link'
 import { ReportShell } from '@/components/ReportLayout'
+import { CardErrorState } from '@/components/AnalyticsCard'
 import type { components } from '@/types/api'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { Label } from '@/components/ui/label'
 import { Alert, AlertDescription } from '@/components/ui/alert'
-import { HelpDialog } from '@/components/ui/confirm-dialog'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
+import { ConfirmDialog, HelpDialog } from '@/components/ui/confirm-dialog'
+import { NextRunCountdown } from '@/components/SyncStatusBadge/SyncStatusBadge'
+import type { ColumnDef } from '@tanstack/react-table'
+import { DataTableReadonly } from '@/components/DataTable'
 import { PlotlyChart } from '@/components/PlotlyChart'
-import { useSSE, useTimezone, useNowMs, type SSELine } from '@/hooks/useSSE'
-import { adminJson, adminJsonResult, getPageLoadId } from '@/lib/api'
-import { keepPreviousData, useQuery } from '@tanstack/react-query'
+import { useSSE, useTimezone, useNowMs, useDateFormat, type SSELine } from '@/hooks/useSSE'
+import { adminFetch, adminJson, adminJsonResult, client, extractApiError, getPageLoadId, unwrapClient } from '@/lib/api'
+import { queryKeys } from '@/lib/query-keys'
+import { keepPreviousData, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useServiceStore } from '@/stores/filterStore'
-import { useIsAnalyst } from '@/hooks/useBootstrap'
-import { formatDate, formatCount } from '@/lib/format'
-import { buildServiceHref, cn } from '@/lib/utils'
+import { useIsAnalyst, useMounted } from '@/hooks/useBootstrap'
+import { ELAPSED_RELATIVE_AGO_JUST_NOW, formatBytesTiered, formatCount, formatDate, formatElapsed, formatLocalDateTime } from '@/lib/format'
+import { buildServiceHref, cn, downloadBlob } from '@/lib/utils'
 import dynamic from 'next/dynamic'
 import { CHART_COLORS } from '@/lib/chart-helpers'
 
@@ -217,10 +227,6 @@ export function RealtimeChart({ title, traces, height = 180, className, stacked,
 
 const PopTrafficMap = dynamic(() => import('@/components/Map/PopTrafficMap').then((m) => m.PopTrafficMap), { ssr: false })
 
-// ---------------------------------------------------------------------------
-// Tab definitions
-// ---------------------------------------------------------------------------
-
 const TABS = [
   { id: 'overview', label: 'Summary', icon: BarChart3, historicalHref: '/dashboard' },
   { id: 'origin', label: 'CDN & Caching', icon: HardDrive, historicalHref: '/origin' },
@@ -231,10 +237,6 @@ const TABS = [
 ] as const
 
 type TabId = (typeof TABS)[number]['id']
-
-// ---------------------------------------------------------------------------
-// useRealtimeStream - wraps useSSE for the realtime endpoint
-// ---------------------------------------------------------------------------
 
 interface RealtimeStreamState {
   connected: boolean; lastTickTime: Date | null; latestTick: MetricsTick | null; allTicks: MetricsTick[]; rtDown: boolean
@@ -355,10 +357,6 @@ function useRealtimeStream(): RealtimeStreamState {
   return { connected: status === 'streaming', lastTickTime, latestTick, allTicks, rtDown: latestTick?.status === 'rt_down' }
 }
 
-// ---------------------------------------------------------------------------
-// Freshness helpers & Status indicators
-// ---------------------------------------------------------------------------
-
 type FreshnessLevel = 'fresh' | 'stale' | 'expired'
 
 function getFreshnessLevel(lastTick: Date | null): FreshnessLevel {
@@ -397,10 +395,6 @@ function RtDownBanner() {
     </Alert>
   )
 }
-
-// ---------------------------------------------------------------------------
-// Correlator Leaderboard - auto-refresh Top-N from /correlate endpoint
-// ---------------------------------------------------------------------------
 
 type CorrelatorResult = components['schemas']['CorrelateResponse']
 
@@ -475,10 +469,6 @@ export function CorrelatorLeaderboard({
     </div>
   )
 }
-
-// ---------------------------------------------------------------------------
-// Overview tab (live data)
-// ---------------------------------------------------------------------------
 
 type RollingAvgFn = (extractor: (d: MetricsData) => number, windowSize: number) => number
 type SeriesFn = (extractor: (d: MetricsData) => number) => number[]
@@ -630,35 +620,10 @@ function OverviewTab({
         rollingAvg={rollingAvg}
         rtDown={rtDown}
         items={[
-          {
-            title: 'Requests/s',
-            suffix: ' req/s',
-            rateFn: (d) => d.requests_per_second,
-            helpText: 'Total HTTP requests per second across all Fastly edge PoPs. Rolling averages smooth out per-second spikes — the 60s average is most representative of sustained load.',
-          },
-          {
-            title: 'Error Rate',
-            decimals: 2,
-            suffix: '%',
-            rateFn: (d) => d.error_rate * 100,
-            thresholds: { warn: 1, critical: 5, direction: 'above' },
-            helpText: 'Percentage of responses with 4xx or 5xx status codes. Card turns amber above 1% and red above 5%.',
-          },
-          {
-            title: 'Cache Hit Ratio',
-            decimals: 1,
-            suffix: '%',
-            rateFn: (d) => d.cache_hit_ratio * 100,
-            thresholds: { warn: 90, critical: 50, direction: 'below' },
-            helpText: "Percentage of requests served from Fastly's edge cache without reaching your origin. Higher is better — below 90% warns, below 50% is critical. Drops may indicate cache-busting query strings, low TTLs, or new uncacheable content.",
-          },
-          {
-            title: 'Bandwidth',
-            decimals: 2,
-            suffix: ' Mbps',
-            rateFn: (d) => d.bandwidth_mbps,
-            helpText: 'Total bandwidth delivered across all PoPs in megabits per second, including both cached and origin-fetched content.',
-          },
+          { title: 'Requests/s', suffix: ' req/s', rateFn: (d) => d.requests_per_second, helpText: 'Total HTTP requests per second across all Fastly edge PoPs. Rolling averages smooth out per-second spikes — the 60s average is most representative of sustained load.', },
+          { title: 'Error Rate', decimals: 2, suffix: '%', rateFn: (d) => d.error_rate * 100, thresholds: { warn: 1, critical: 5, direction: 'above' }, helpText: 'Percentage of responses with 4xx or 5xx status codes. Card turns amber above 1% and red above 5%.', },
+          { title: 'Cache Hit Ratio', decimals: 1, suffix: '%', rateFn: (d) => d.cache_hit_ratio * 100, thresholds: { warn: 90, critical: 50, direction: 'below' }, helpText: "Percentage of requests served from Fastly's edge cache without reaching your origin. Higher is better — below 90% warns, below 50% is critical. Drops may indicate cache-busting query strings, low TTLs, or new uncacheable content.", },
+          { title: 'Bandwidth', decimals: 2, suffix: ' Mbps', rateFn: (d) => d.bandwidth_mbps, helpText: 'Total bandwidth delivered across all PoPs in megabits per second, including both cached and origin-fetched content.', },
         ]}
       />
 
@@ -846,10 +811,6 @@ function RecentErrorsCard({
   )
 }
 
-// ---------------------------------------------------------------------------
-// Performance tab
-// ---------------------------------------------------------------------------
-
 function PerformanceTab({ tick, rtDown, historicalHref, series, rollingAvg }: TabCommonProps) {
   const data = tick?.data
   return (
@@ -859,34 +820,10 @@ function PerformanceTab({ tick, rtDown, historicalHref, series, rollingAvg }: Ta
         rollingAvg={rollingAvg}
         rtDown={rtDown}
         items={[
-          {
-            title: 'Cache Hit Ratio',
-            decimals: 1,
-            suffix: '%',
-            rateFn: (d) => d.cache_hit_ratio * 100,
-            thresholds: { warn: 90, critical: 50, direction: 'below' },
-            helpText: 'Percentage of requests served from edge cache. Below 90% warns, below 50% is critical. Drops may indicate cache-busting query strings, low TTLs, or new uncacheable content.',
-          },
-          {
-            title: 'Origin Requests/s',
-            suffix: ' req/s',
-            rateFn: (d) => d.origin_requests_per_second ?? 0,
-            helpText: "Requests that reached your origin server per second. Lower is better — it means more traffic is being served from Fastly's edge cache.",
-          },
-          {
-            title: 'Bandwidth Offload',
-            decimals: 1,
-            suffix: '%',
-            thresholds: { warn: 80, critical: 50, direction: 'below' },
-            rateFn: (d) => (d.origin_offload ?? 0) * 100,
-            helpText: 'Percentage of total bandwidth served from cache vs. origin. Higher means less origin load and lower egress costs.',
-          },
-          {
-            title: 'Pass-through',
-            suffix: ' req',
-            rateFn: (d) => d.pass_requests ?? 0,
-            helpText: 'Requests that bypassed cache entirely — either uncacheable content types or explicit VCL pass rules. Every pass request hits your origin.',
-          },
+          { title: 'Cache Hit Ratio', decimals: 1, suffix: '%', rateFn: (d) => d.cache_hit_ratio * 100, thresholds: { warn: 90, critical: 50, direction: 'below' }, helpText: 'Percentage of requests served from edge cache. Below 90% warns, below 50% is critical. Drops may indicate cache-busting query strings, low TTLs, or new uncacheable content.', },
+          { title: 'Origin Requests/s', suffix: ' req/s', rateFn: (d) => d.origin_requests_per_second ?? 0, helpText: "Requests that reached your origin server per second. Lower is better — it means more traffic is being served from Fastly's edge cache.", },
+          { title: 'Bandwidth Offload', decimals: 1, suffix: '%', thresholds: { warn: 80, critical: 50, direction: 'below' }, rateFn: (d) => (d.origin_offload ?? 0) * 100, helpText: 'Percentage of total bandwidth served from cache vs. origin. Higher means less origin load and lower egress costs.', },
+          { title: 'Pass-through', suffix: ' req', rateFn: (d) => d.pass_requests ?? 0, helpText: 'Requests that bypassed cache entirely — either uncacheable content types or explicit VCL pass rules. Every pass request hits your origin.', },
         ]}
       />
       <MetricCardGrid
@@ -894,30 +831,10 @@ function PerformanceTab({ tick, rtDown, historicalHref, series, rollingAvg }: Ta
         rollingAvg={rollingAvg}
         rtDown={rtDown}
         items={[
-          {
-            title: 'Collapse Usable',
-            suffix: ' req',
-            rateFn: (d) => d.request_collapse_usable ?? 0,
-            helpText: 'Requests eligible for request collapsing — multiple identical requests are collapsed into a single origin fetch. Higher counts mean more origin load reduction.',
-          },
-          {
-            title: 'Collapse Unusable',
-            suffix: ' req',
-            rateFn: (d) => d.request_collapse_unusable ?? 0,
-            helpText: 'Requests that could not be collapsed (e.g., different Vary headers, POST requests). High unusable counts may indicate opportunities to improve cache key design.',
-          },
-          {
-            title: 'Segment Origin Fetches',
-            suffix: ' req',
-            rateFn: (d) => d.segblock_origin_fetches ?? 0,
-            helpText: 'Segment block fetches to origin for large objects. Fastly breaks large files into segments cached independently, enabling range requests and parallel fetching.',
-          },
-          {
-            title: 'Segment Shield Fetches',
-            suffix: ' req',
-            rateFn: (d) => d.segblock_shield_fetches ?? 0,
-            helpText: 'Segment block fetches handled at the shield PoP. When these are high relative to origin fetches, segmented caching is working well.',
-          },
+          { title: 'Collapse Usable', suffix: ' req', rateFn: (d) => d.request_collapse_usable ?? 0, helpText: 'Requests eligible for request collapsing — multiple identical requests are collapsed into a single origin fetch. Higher counts mean more origin load reduction.', },
+          { title: 'Collapse Unusable', suffix: ' req', rateFn: (d) => d.request_collapse_unusable ?? 0, helpText: 'Requests that could not be collapsed (e.g., different Vary headers, POST requests). High unusable counts may indicate opportunities to improve cache key design.', },
+          { title: 'Segment Origin Fetches', suffix: ' req', rateFn: (d) => d.segblock_origin_fetches ?? 0, helpText: 'Segment block fetches to origin for large objects. Fastly breaks large files into segments cached independently, enabling range requests and parallel fetching.', },
+          { title: 'Segment Shield Fetches', suffix: ' req', rateFn: (d) => d.segblock_shield_fetches ?? 0, helpText: 'Segment block fetches handled at the shield PoP. When these are high relative to origin fetches, segmented caching is working well.', },
         ]}
       />
       <div className="grid gap-6 md:grid-cols-2">
@@ -1003,10 +920,6 @@ function PerformanceTab({ tick, rtDown, historicalHref, series, rollingAvg }: Ta
   )
 }
 
-// ---------------------------------------------------------------------------
-// Origin tab
-// ---------------------------------------------------------------------------
-
 function OriginTab({ tick, rtDown, historicalHref, series, rollingAvg }: TabCommonProps) {
   const data = tick?.data
   return (
@@ -1016,50 +929,13 @@ function OriginTab({ tick, rtDown, historicalHref, series, rollingAvg }: TabComm
         rollingAvg={rollingAvg}
         dimmed={rtDown}
         cards={[
-          {
-            title: 'Origin Requests/s',
-            suffix: ' req/s',
-            rateFn: (d) => d.origin_requests_per_second ?? 0,
-            helpText: 'Requests per second reaching your origin server. Lower is better — cache and shield should absorb most traffic before it gets here.',
-          },
-          {
-            title: 'Origin Bandwidth',
-            decimals: 2,
-            suffix: ' Mbps',
-            rateFn: (d) => d.origin_bandwidth_mbps ?? 0,
-            helpText: 'Bandwidth transferred from your origin server to Fastly. This is your origin egress — lower means better cache offload.',
-          },
-          {
-            title: 'Shield Requests',
-            suffix: ' req',
-            rateFn: (d) => d.shield_requests ?? 0,
-            helpText: 'Requests routed through the shield PoP — a mid-tier cache between edge PoPs and your origin. The shield absorbs duplicate misses from multiple edge PoPs.',
-          },
-          {
-            title: 'Shield Hit Ratio',
-            decimals: 1,
-            suffix: '%',
-            rateFn: (d) => (d.shield_hit_ratio ?? 0) * 100,
-            helpText: 'Percentage of shield requests served from the shield cache. Higher means fewer requests reach your origin.',
-          },
-          {
-            title: 'Origin Fetches',
-            suffix: ' req',
-            rateFn: (d) => d.origin_fetches ?? 0,
-            helpText: 'Total fetch requests sent from Fastly to your origin. Includes full fetches, revalidations, and cache-eligible fetches. This is the broadest measure of origin load.',
-          },
-          {
-            title: 'Revalidations',
-            suffix: ' req',
-            rateFn: (d) => d.origin_revalidations ?? 0,
-            helpText: 'Conditional requests (If-Modified-Since/If-None-Match) sent to your origin. When the origin returns 304 Not Modified, Fastly reuses the cached copy — cheaper than a full fetch.',
-          },
-          {
-            title: 'Cache Fetches',
-            suffix: ' req',
-            rateFn: (d) => d.origin_cache_fetches ?? 0,
-            helpText: 'Origin fetches that returned a cacheable response (the response will be stored and served to future requests). A low ratio of cache fetches to total fetches may indicate your origin is sending too many no-cache/private headers.',
-          },
+          { title: 'Origin Requests/s', suffix: ' req/s', rateFn: (d) => d.origin_requests_per_second ?? 0, helpText: 'Requests per second reaching your origin server. Lower is better — cache and shield should absorb most traffic before it gets here.', },
+          { title: 'Origin Bandwidth', decimals: 2, suffix: ' Mbps', rateFn: (d) => d.origin_bandwidth_mbps ?? 0, helpText: 'Bandwidth transferred from your origin server to Fastly. This is your origin egress — lower means better cache offload.', },
+          { title: 'Shield Requests', suffix: ' req', rateFn: (d) => d.shield_requests ?? 0, helpText: 'Requests routed through the shield PoP — a mid-tier cache between edge PoPs and your origin. The shield absorbs duplicate misses from multiple edge PoPs.', },
+          { title: 'Shield Hit Ratio', decimals: 1, suffix: '%', rateFn: (d) => (d.shield_hit_ratio ?? 0) * 100, helpText: 'Percentage of shield requests served from the shield cache. Higher means fewer requests reach your origin.', },
+          { title: 'Origin Fetches', suffix: ' req', rateFn: (d) => d.origin_fetches ?? 0, helpText: 'Total fetch requests sent from Fastly to your origin. Includes full fetches, revalidations, and cache-eligible fetches. This is the broadest measure of origin load.', },
+          { title: 'Revalidations', suffix: ' req', rateFn: (d) => d.origin_revalidations ?? 0, helpText: 'Conditional requests (If-Modified-Since/If-None-Match) sent to your origin. When the origin returns 304 Not Modified, Fastly reuses the cached copy — cheaper than a full fetch.', },
+          { title: 'Cache Fetches', suffix: ' req', rateFn: (d) => d.origin_cache_fetches ?? 0, helpText: 'Origin fetches that returned a cacheable response (the response will be stored and served to future requests). A low ratio of cache fetches to total fetches may indicate your origin is sending too many no-cache/private headers.', },
         ]}
       />
       <RealtimeChart
@@ -1090,28 +966,10 @@ function OriginTab({ tick, rtDown, historicalHref, series, rollingAvg }: TabComm
         rollingAvg={rollingAvg}
         dimmed={rtDown}
         cards={[
-          {
-            title: 'Shield Hits',
-            rateFn: (d) => d.shield_hit_requests ?? 0,
-            helpText: "Requests served from the shield PoP's cache, preventing duplicate origin fetches from multiple edge PoPs.",
-          },
-          {
-            title: 'Shield Misses',
-            rateFn: (d) => d.shield_miss_requests ?? 0,
-            helpText: 'Requests that missed the shield cache and were forwarded to your origin. Every shield miss becomes an origin fetch.',
-          },
-          {
-            title: 'Shield Revalidations',
-            rateFn: (d) => d.shield_revalidations ?? 0,
-            helpText: 'Conditional requests at the shield tier — the shield checks with origin whether stale content is still valid. A 304 response avoids transferring the full object.',
-          },
-          {
-            title: 'Shield Fetch Bytes',
-            decimals: 2,
-            suffix: ' MB',
-            rateFn: (d) => (d.shield_fetch_body_bytes ?? 0) / 1_000_000,
-            helpText: 'Total bytes fetched through the shield tier from origin. This represents the bandwidth your origin actually serves — compare against total edge bandwidth to measure offload efficiency.',
-          },
+          { title: 'Shield Hits', rateFn: (d) => d.shield_hit_requests ?? 0, helpText: "Requests served from the shield PoP's cache, preventing duplicate origin fetches from multiple edge PoPs.", },
+          { title: 'Shield Misses', rateFn: (d) => d.shield_miss_requests ?? 0, helpText: 'Requests that missed the shield cache and were forwarded to your origin. Every shield miss becomes an origin fetch.', },
+          { title: 'Shield Revalidations', rateFn: (d) => d.shield_revalidations ?? 0, helpText: 'Conditional requests at the shield tier — the shield checks with origin whether stale content is still valid. A 304 response avoids transferring the full object.', },
+          { title: 'Shield Fetch Bytes', decimals: 2, suffix: ' MB', rateFn: (d) => (d.shield_fetch_body_bytes ?? 0) / 1_000_000, helpText: 'Total bytes fetched through the shield tier from origin. This represents the bandwidth your origin actually serves — compare against total edge bandwidth to measure offload efficiency.', },
         ]}
       />
       <RealtimeChart
@@ -1128,10 +986,6 @@ function OriginTab({ tick, rtDown, historicalHref, series, rollingAvg }: TabComm
     </TabPanelShell>
   )
 }
-
-// ---------------------------------------------------------------------------
-// Security tab
-// ---------------------------------------------------------------------------
 
 function SecurityTab({ tick, rtDown, historicalHref, series, rollingAvg }: TabCommonProps) {
   const data = tick?.data
@@ -1230,10 +1084,6 @@ function SecurityTab({ tick, rtDown, historicalHref, series, rollingAvg }: TabCo
     </TabPanelShell>
   )
 }
-
-// ---------------------------------------------------------------------------
-// Network tab & Admin Health tab
-// ---------------------------------------------------------------------------
 
 function NetworkTab({ tick, rtDown, historicalHref, series, rollingAvg }: TabCommonProps) {
   const data = tick?.data
@@ -1509,5 +1359,613 @@ export default function ControlRoomClient() {
         </Tabs>
       </div>
     </ReportShell>
+  )
+}
+
+type QuarantineSummary = components['schemas']['QuarantineSummary']
+type QuarantineListResponse = components['schemas']['QuarantineListResponse']
+type QuarantineItem = components['schemas']['QuarantineEvidenceItem']
+
+const PAGE_SIZE = 20
+
+export function QuarantineSection() {
+  const mounted = useMounted()
+  const storeServiceId = useServiceStore(s => s.activeServiceId)
+  const activeServiceId = mounted ? storeServiceId : null
+  const queryClient = useQueryClient()
+  const [showDetails, setShowDetails] = React.useState(false)
+  const [errorCategory, setErrorCategory] = React.useState('')
+  const [offset, setOffset] = React.useState(0)
+  const [workingItemId, setWorkingItemId] = React.useState<number | null>(null)
+  const [purgingAll, setPurgingAll] = React.useState(false)
+  const [actionError, setActionError] = React.useState<string | null>(null)
+
+  const summaryQuery = useQuery<QuarantineSummary>({
+    queryKey: queryKeys.admin.quarantineSummary(activeServiceId),
+    queryFn: async ({ signal }) => {
+      return adminJson(
+        '/api/admin/quarantine/summary',
+        '/api/admin/quarantine/summary',
+        { signal },
+        (status) => `Unable to load quarantine summary (HTTP ${status})`,
+      )
+    },
+    enabled: !!activeServiceId,
+    staleTime: 30_000,
+    refetchInterval: 60_000,
+    refetchIntervalInBackground: false,
+  })
+
+  const listQuery = useQuery<QuarantineListResponse>({
+    queryKey: queryKeys.admin.quarantineList(activeServiceId, errorCategory, offset),
+    queryFn: async ({ signal }) => {
+      const params = new URLSearchParams({ limit: String(PAGE_SIZE), offset: String(offset) })
+      if (errorCategory) params.set('error_category', errorCategory)
+      return adminJson(
+        '/api/admin/quarantine',
+        `/api/admin/quarantine?${params}`,
+        { signal },
+        (status) => `Unable to load quarantine items (HTTP ${status})`,
+      )
+    },
+    enabled: !!activeServiceId && showDetails,
+    staleTime: 30_000,
+    refetchInterval: 60_000,
+    refetchIntervalInBackground: false,
+  })
+
+  if (!activeServiceId) return null
+
+  if (summaryQuery.isError) {
+    return (
+      <Card>
+        <CardContent className="pt-4">
+          <CardErrorState
+            title="Quarantine unavailable"
+            message={summaryQuery.error.message}
+            onRetry={() => void summaryQuery.refetch()}
+          />
+        </CardContent>
+      </Card>
+    )
+  }
+
+  const summary = summaryQuery.data
+  const totalItems = summary?.total_items ?? 0
+  if (!summaryQuery.isPending && totalItems === 0 && !showDetails) return null
+
+  const invalidateQuarantine = async () => {
+    await queryClient.invalidateQueries({ queryKey: queryKeys.admin.quarantineAll() })
+  }
+
+  const handleDownload = async (item: QuarantineItem) => {
+    setWorkingItemId(item.id)
+    setActionError(null)
+    try {
+      const response = await adminFetch(`/api/admin/quarantine/download/${item.id}`)
+      if (!response.ok) throw new Error(`Unable to download evidence (HTTP ${response.status})`)
+      downloadBlob(await response.blob(), `quarantine-item-${item.id}.dat`)
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : 'Unable to download evidence.')
+    } finally {
+      setWorkingItemId(null)
+    }
+  }
+
+  const handlePurge = async (itemId?: number) => {
+    setPurgingAll(itemId === undefined)
+    setWorkingItemId(itemId ?? null)
+    setActionError(null)
+    try {
+      const query = itemId === undefined ? '' : `?item_id=${itemId}`
+      const response = await adminFetch(`/api/admin/quarantine/purge${query}`, { method: 'POST' })
+      if (!response.ok) throw new Error(`Unable to purge quarantine evidence (HTTP ${response.status})`)
+      await invalidateQuarantine()
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : 'Unable to purge quarantine evidence.')
+    } finally {
+      setPurgingAll(false)
+      setWorkingItemId(null)
+    }
+  }
+
+  const categories = Object.keys(summary?.category_counts ?? {}).sort()
+  const listedItems = listQuery.data?.items ?? []
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <CardTitle className="flex items-center gap-2 text-base">
+            {totalItems > 0 ? (
+              <AlertTriangle className="h-4 w-4 text-amber-500" />
+            ) : (
+              <FileWarning className="h-4 w-4 text-muted-foreground" />
+            )}
+            Ingest Quarantine
+            <Badge variant="outline" className="text-xs text-amber-700 dark:text-amber-400 border-amber-500/40">
+              {totalItems} item{totalItems !== 1 ? 's' : ''}
+            </Badge>
+          </CardTitle>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="text-xs"
+              onClick={() => setShowDetails(prev => !prev)}
+            >
+              {showDetails ? 'Hide details' : 'Details'}
+            </Button>
+            {totalItems > 0 && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="text-xs"
+                onClick={() => void handlePurge()}
+                disabled={purgingAll}
+              >
+                {purgingAll && <Loader2 className="h-3 w-3 mr-1 animate-spin" />}
+                {!purgingAll && <Trash2 className="h-3 w-3 mr-1" />}
+                {purgingAll ? 'Purging…' : 'Purge all'}
+              </Button>
+            )}
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-3 pt-0">
+        {summaryQuery.isPending ? (
+          <p className="text-sm text-muted-foreground">Loading quarantine summary…</p>
+        ) : (
+          <>
+            <div className="flex flex-wrap gap-x-6 gap-y-1 text-sm">
+              <div>
+                <span className="text-muted-foreground">Stored size: </span>
+                <span className="font-medium tabular-nums">{formatBytesTiered(summary?.total_bytes ?? 0)}</span>
+              </div>
+              <div>
+                <span className="text-muted-foreground">Request / RUM: </span>
+                <span className="font-medium tabular-nums">
+                  {summary?.request_items ?? 0} / {summary?.rum_items ?? 0}
+                </span>
+              </div>
+              {summary?.oldest_at && (
+                <div>
+                  <span className="text-muted-foreground">Oldest: </span>
+                  <span className="font-medium">{formatLocalDateTime(summary.oldest_at)}</span>
+                </div>
+              )}
+            </div>
+            {showDetails && (
+              <>
+                <div className="flex flex-wrap items-center gap-3">
+                  <label htmlFor="quarantine-category" className="text-sm font-medium">Error category</label>
+                  <select
+                    id="quarantine-category"
+                    className="h-9 rounded-md border bg-background px-3 text-sm"
+                    value={errorCategory}
+                    onChange={event => {
+                      setErrorCategory(event.target.value)
+                      setOffset(0)
+                    }}
+                  >
+                    <option value="">All categories</option>
+                    {categories.map(category => <option key={category} value={category}>{category}</option>)}
+                  </select>
+                </div>
+                {actionError && <p role="alert" className="text-sm text-destructive">{actionError}</p>}
+                {listQuery.isError ? (
+                  <CardErrorState
+                    title="Quarantine items unavailable"
+                    message={listQuery.error.message}
+                    onRetry={() => void listQuery.refetch()}
+                  />
+                ) : listQuery.isPending ? (
+                  <p className="text-sm text-muted-foreground">Loading quarantine items…</p>
+                ) : listedItems.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">No matching quarantine items.</p>
+                ) : (
+                  <div className="space-y-2">
+                    {listedItems.map(item => (
+                      <QuarantineItemRow
+                        key={item.id}
+                        item={item}
+                        working={workingItemId === item.id}
+                        onDownload={() => void handleDownload(item)}
+                        onPurge={() => void handlePurge(item.id)}
+                      />
+                    ))}
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs text-muted-foreground">
+                        {offset + 1}–{offset + listedItems.length} of {listQuery.data?.total ?? 0}
+                      </span>
+                      <div className="flex gap-2">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          disabled={offset === 0 || listQuery.isFetching}
+                          onClick={() => setOffset(current => Math.max(0, current - PAGE_SIZE))}
+                        >
+                          Previous
+                        </Button>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          disabled={offset + PAGE_SIZE >= (listQuery.data?.total ?? 0) || listQuery.isFetching}
+                          onClick={() => setOffset(current => current + PAGE_SIZE)}
+                        >
+                          Next
+                        </Button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
+          </>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
+function QuarantineItemRow({
+  item,
+  working,
+  onDownload,
+  onPurge,
+}: {
+  item: QuarantineItem
+  working: boolean
+  onDownload: () => void
+  onPurge: () => void
+}) {
+  return (
+    <div className="rounded-md border p-3">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0 space-y-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge variant="outline">{item.source_type}</Badge>
+            <Badge variant="secondary">{item.error_category}</Badge>
+            <span className="text-xs text-muted-foreground">#{item.id} · {formatBytesTiered(item.byte_length)}</span>
+          </div>
+          <p className="break-all font-mono text-xs">{item.original_key}</p>
+          <p className="text-xs text-muted-foreground">
+            {item.line_ordinal === null ? 'Container' : `Line ${item.line_ordinal}`}
+            {item.byte_offset !== null && ` · byte ${item.byte_offset}`}
+            {' · '}{formatLocalDateTime(item.quarantined_at)}
+          </p>
+          <p className="break-words text-sm">{item.error_text}</p>
+          <p className="break-all font-mono text-[11px] text-muted-foreground">SHA-256: {item.sha256}</p>
+        </div>
+        <div className="flex shrink-0 gap-2">
+          <Button variant="outline" size="sm" onClick={onDownload} disabled={working}>
+            {working ? <Loader2 className="h-3 w-3 mr-1 animate-spin" /> : <Download className="h-3 w-3 mr-1" />}
+            {working ? 'Working…' : 'Download'}
+          </Button>
+          <Button variant="ghost" size="sm" onClick={onPurge} disabled={working}>
+            <Trash2 className="h-3 w-3 mr-1" />
+            Remove
+          </Button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+type BotSourceList = components['schemas']['BotSourcesResponse']
+type BotSource = components['schemas']['BotSourceMeta']
+
+function SystemJobBox({ job }: { job: components['schemas']['SystemJobStatus'] }) {
+  const { timeAgo, full, abbr } = useDateFormat()
+
+  const lastRunText = job.last_run_at ? timeAgo(job.last_run_at) : 'Never'
+
+  const isError = job.status === 'error'
+  const borderColor = isError ? 'border-destructive/50' : 'border-muted'
+  const bgColor = isError ? 'bg-destructive/10' : 'bg-muted/20'
+
+  return (
+    <div className={`relative flex flex-col justify-center border rounded-md px-2.5 h-8 shrink-0 ${bgColor} ${borderColor} min-w-[250px] max-w-[320px] flex-1`}>
+      <div className="flex items-center gap-2 w-full">
+        <TooltipProvider delay={200}>
+          <Tooltip>
+            <TooltipTrigger render={<span className={`text-[9px] font-bold uppercase tracking-wider shrink-0 truncate max-w-[120px] ${isError ? 'text-destructive' : 'text-muted-foreground'}`} />}>
+              {job.name}
+            </TooltipTrigger>
+            <TooltipContent side="top" className="max-w-[250px] text-xs">
+              {job.detail || job.name}
+            </TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
+        <div className="w-px h-4 bg-border shrink-0" />
+        <div className={`flex-1 min-w-0 flex items-center justify-between text-[9px] whitespace-nowrap ${isError ? 'text-destructive/80' : 'text-muted-foreground'}`}>
+          <TooltipProvider delay={200}>
+            <Tooltip>
+              <TooltipTrigger render={<span className="truncate pr-2 " />}>
+                Last: {lastRunText}
+              </TooltipTrigger>
+              <TooltipContent className="text-xs">
+                {job.last_run_at ? `${full(job.last_run_at)} ${abbr()}` : 'Never'}
+              </TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
+          <TooltipProvider delay={200}>
+            <Tooltip>
+              <TooltipTrigger render={<span className="truncate " />}>
+                Next: <NextRunCountdown when={job.next_run_at} />
+              </TooltipTrigger>
+              <TooltipContent className="text-xs">
+                {job.next_run_at ? `${full(job.next_run_at)} ${abbr()}` : 'Disabled'}
+              </TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+export function SystemJobsStrip() {
+  const mounted = useMounted()
+
+  const { data: systemJobsData } = useQuery({
+    queryKey: queryKeys.systemJobs(),
+    queryFn: async ({ signal }) => {
+      return unwrapClient(client.GET("/api/admin/system-jobs", { signal }))
+    },
+    staleTime: 30_000,
+    refetchInterval: 5 * 60_000,
+    refetchIntervalInBackground: false,
+  })
+
+  const ready = mounted && systemJobsData
+
+  return (
+    <div className="space-y-3 pt-2">
+      <Label className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Background Jobs</Label>
+      <div className="flex flex-wrap gap-2">
+        {ready ? (
+          systemJobsData.jobs.map((job) => (
+            <SystemJobBox key={job.id} job={job} />
+          ))
+        ) : (
+          <div className="text-xs text-muted-foreground italic px-1 py-1">Loading background jobs...</div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function RebuildLocalViewButton() {
+  const [busy, setBusy] = useState(false)
+  const [confirmOpen, setConfirmOpen] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  async function rebuild() {
+    setBusy(true)
+    setError(null)
+    try {
+      const { error: apiError } = await client.POST('/api/admin/rebuild-local-view', {})
+      if (apiError) throw new Error(extractApiError(apiError))
+      setConfirmOpen(false)
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'rebuild failed')
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <>
+      <Button variant="outline" size="sm" onClick={() => setConfirmOpen(true)}>
+        <CloudDownload className="h-3 w-3 mr-1.5" />
+        Rebuild Local View
+      </Button>
+      <ConfirmDialog
+        open={confirmOpen}
+        onOpenChange={setConfirmOpen}
+        title="Rebuild local view from cloud?"
+        description={
+          <>
+            Clears local Iceberg caches and re-pulls metadata + parquet from FOS via CDN.
+            Un-committed buffer data is preserved. This can take a minute on large tables.
+            {error && <span className="block mt-2 text-xs text-red-500">{error}</span>}
+          </>
+        }
+        confirmLabel="Rebuild"
+        isPending={busy}
+        onConfirm={rebuild}
+      />
+    </>
+  )
+}
+
+function fmtRelative(iso: string | null | undefined): string {
+  if (!iso) return '—'
+  return formatElapsed(Math.floor((Date.now() - new Date(iso).getTime()) / 1000), ELAPSED_RELATIVE_AGO_JUST_NOW)
+}
+
+export function BotSourcesPanel() {
+  const mounted = useMounted()
+  const [refreshingSource, setRefreshingSource] = useState<string | null>(null)
+  const [enriching, setEnriching] = useState(false)
+  const [enrichError, setEnrichError] = useState<string | null>(null)
+
+  const { data: queryBotSourcesData, refetch: refetchBotSources } = useQuery({
+    queryKey: ['bot-sources'],
+    queryFn: async ({ signal }) => {
+      const data = await unwrapClient(client.GET("/api/admin/bot-sources", { signal }))
+      return data as BotSourceList
+    },
+    staleTime: 60_000,
+  })
+  const botSourcesData = mounted ? queryBotSourcesData : undefined
+
+  async function handleRefreshBotSource(sourceId: string) {
+    setRefreshingSource(sourceId)
+    try {
+      await unwrapClient(client.POST("/api/admin/bot-sources/{source_id}/refresh", {
+        params: { path: { source_id: sourceId } }
+      }))
+      await refetchBotSources()
+    } finally {
+      setRefreshingSource(null)
+    }
+  }
+
+  async function handleEnrichRdns() {
+    setEnriching(true)
+    setEnrichError(null)
+    try {
+      const { error: apiError } = await client.POST('/api/admin/rdns/enrich', {})
+      if (apiError) throw new Error(extractApiError(apiError))
+      await refetchBotSources()
+    } catch (e) {
+      setEnrichError(e instanceof Error ? e.message : 'rDNS enrichment failed')
+    } finally {
+      setEnriching(false)
+    }
+  }
+
+  const sourceColumns: ColumnDef<BotSource>[] = [
+    {
+      id: 'source',
+      header: 'Source',
+      accessorFn: (src) => src.name,
+      size: 260,
+      enableSorting: false,
+      cell: ({ row }) => {
+        const src = row.original
+        return (
+          <div className="text-sm">
+            <div className="flex items-center gap-1.5">
+              <span className="font-medium">{src.name}</span>
+              {src.url && (
+                <a href={src.url} target="_blank" rel="noreferrer" className="text-muted-foreground hover:text-foreground opacity-50 hover:opacity-100 transition-opacity" title={`View source: ${src.url}`}>
+                  <ExternalLink className="h-3 w-3" />
+                </a>
+              )}
+            </div>
+            {!src.last_updated && (
+              <span className="text-xs text-amber-500 block mt-0.5">not cached</span>
+            )}
+          </div>
+        )
+      },
+    },
+    {
+      id: 'entries',
+      header: 'Entries',
+      accessorFn: (src) => src.entry_count ?? -1,
+      size: 110,
+      enableSorting: false,
+      cell: ({ row }) => (
+        <span className="block text-right text-sm tabular-nums text-muted-foreground">
+          {row.original.entry_count != null ? formatCount(row.original.entry_count) : '—'}
+        </span>
+      ),
+    },
+    {
+      id: 'last_updated',
+      header: 'Last Updated',
+      accessorFn: (src) => src.last_updated ?? '',
+      size: 140,
+      enableSorting: false,
+      cell: ({ row }) => (
+        <span className="block text-right text-sm text-muted-foreground">
+          {fmtRelative(row.original.last_updated)}
+        </span>
+      ),
+    },
+    {
+      id: 'actions',
+      header: () => <span className="sr-only">Actions</span>,
+      size: 130,
+      enableSorting: false,
+      cell: ({ row }) => (
+        <div className="text-right">
+          <Button
+            variant="outline" size="sm"
+            disabled={refreshingSource === row.original.id}
+            onClick={() => handleRefreshBotSource(row.original.id)}
+          >
+            <RefreshCw className={`h-3 w-3 mr-1.5 ${refreshingSource === row.original.id ? 'animate-spin' : ''}`} />
+            Refresh
+          </Button>
+        </div>
+      ),
+    },
+  ]
+
+  return (
+    <div className="p-4 border rounded-lg space-y-4">
+      <div className="flex items-center gap-2">
+        <Bot className="h-4 w-4 text-muted-foreground" />
+        <Label className="text-sm font-medium">Bot Intelligence Sources</Label>
+      </div>
+      <p className="text-xs text-muted-foreground -mt-2">
+        Known bot registries used to identify and verify bots in log traffic via UA matching and FCrDNS validation.
+      </p>
+
+      <DataTableReadonly
+        columns={sourceColumns}
+        data={botSourcesData?.sources ?? []}
+        isLoading={!botSourcesData}
+        hideToolbar
+        showPagination={false}
+        tableCaption="Bot intelligence sources"
+      />
+
+      {enrichError && <div className="text-xs text-red-500" role="alert">{enrichError}</div>}
+
+      <div className="flex items-center justify-between text-sm">
+        <div className="flex items-center gap-4 text-muted-foreground text-xs">
+          <span className="flex items-center gap-1.5">
+            <Wifi className="h-3.5 w-3.5" />
+            rDNS cache: <strong className="text-foreground">{botSourcesData?.rdns.total != null ? formatCount(botSourcesData.rdns.total) : '—'}</strong> IPs
+          </span>
+          <span>
+            Pending: <strong className="text-foreground">{botSourcesData?.rdns.pending != null ? formatCount(botSourcesData.rdns.pending) : '—'}</strong>
+          </span>
+          <span>Last enrichment: {fmtRelative(botSourcesData?.rdns.last_enrichment_at ?? null)}</span>
+        </div>
+        <div className="flex gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              void adminFetch('/api/admin/rdns/export').then(async (res) => {
+                if (res.ok) downloadBlob(await res.blob(), 'rdns_cache.csv')
+              })
+            }}
+            title="Download rDNS Cache as CSV"
+          >
+            <Download className="h-3 w-3 mr-1.5" />
+            Export CSV
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleEnrichRdns}
+            disabled={enriching}
+            title="Resolve pending IPs now (runs one enrichment batch)"
+          >
+            <RefreshCw className={`h-3 w-3 mr-1.5 ${enriching ? 'animate-spin' : ''}`} />
+            {enriching ? 'Enriching…' : 'Enrich Now'}
+          </Button>
+        </div>
+
+      </div>
+
+      <div className="space-y-3 pt-2">
+        <Label className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Maintenance</Label>
+        <div className="flex flex-wrap gap-2">
+          <RebuildLocalViewButton />
+        </div>
+        <p className="text-[11px] text-muted-foreground">
+          Drops local caches and re-pulls Iceberg metadata + parquet from FOS via CDN. The local buffer (un-committed data) is left alone.
+        </p>
+      </div>
+
+      <SystemJobsStrip />
+    </div>
   )
 }

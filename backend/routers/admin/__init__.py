@@ -41,7 +41,6 @@ from backend.utils.dir_size import _DIR_SIZE_CACHE, _get_dir_size  # noqa: F401
 # routes onto the shared router instance.
 from . import (  # noqa: F401
     compaction,
-    downloads,
     health,
     high_scale,
     ingest,
@@ -68,9 +67,11 @@ _router = high_scale
 clickhouse = high_scale
 events = high_scale
 sync_status = health
+admin_queries = health
 bot_sources = compaction
 iceberg = compaction
 quarantine = ingest
+downloads = ingest
 _sys.modules.setdefault(f"{__name__}._helpers", high_scale)
 _sys.modules.setdefault(f"{__name__}._router", high_scale)
 _sys.modules.setdefault(f"{__name__}.clickhouse", high_scale)
@@ -79,8 +80,12 @@ _sys.modules.setdefault(f"{__name__}.sync_status", health)
 _sys.modules.setdefault(f"{__name__}.bot_sources", compaction)
 _sys.modules.setdefault(f"{__name__}.iceberg", compaction)
 _sys.modules.setdefault(f"{__name__}.quarantine", ingest)
+_sys.modules.setdefault(f"{__name__}.downloads", ingest)
 _sys.modules.setdefault("backend.routers.admin_usage", log_accounting)
+_sys.modules.setdefault("backend.routers.admin_queries", health)
 _sys.modules.setdefault("backend.system_metrics_sampler", health)
+if "backend.routers" in _sys.modules:
+    setattr(_sys.modules["backend.routers"], "admin_queries", health)
 
 
 __all__ = [

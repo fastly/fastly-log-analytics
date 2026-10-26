@@ -1,63 +1,275 @@
-"""Provision CLI — typer subcommands that wrap the original
-``handle_*`` / ``wizard`` functions.
+"""Provision CLI and print/prompt/lifecycle helpers.
 
-Phase 10.5 adopts typer for arg parsing and rich for output. The
-handler functions below keep their original signature
-(``def handle_foo(args) -> ...``) because:
-
-  - tests/test_provision_cli_handlers.py drives them by constructing
-    ``SimpleNamespace`` instances and calling the handler directly;
-  - patches like ``patch("backend.provision.cli.perform_teardown")``
-    rely on the handler doing its real work in this module's
-    namespace.
-
-Typer commands at the bottom build a ``SimpleNamespace`` from their
-typed options and call the corresponding handler, so
-``python -m backend.provision.cli teardown --bucket foo`` works
-end-to-end while the handler logic stays unit-testable.
+Consolidates ``backend.provision.utils`` (plus ``log_paths`` and ``draft_version``)
+and ``backend.provision.cli`` into a single module.
 """
 
+from __future__ import annotations
+
 import datetime
+import logging
 import os
+import queue
 import re
 import secrets
 import sys
+import threading
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
+from datetime import datetime as _datetime
 from types import SimpleNamespace
+from typing import Any
 
 import typer
+from rich.console import Console
 
-from backend.core.fastly.client import fastly, find_service_by_name
-from backend.core.fastly.utils import SHIELD_MAP, parse_period
-from backend.provision.fastly_api import (
+# ── Rich Consoles & ANSI colour helpers (folded from utils.py) ───────────────
+_stdout = Console(highlight=False, markup=False, soft_wrap=True)
+_stderr = Console(stderr=True, highlight=False, markup=False, soft_wrap=True)
+
+BOLD = "\033[1m"
+DIM = "\033[2m"
+RED = "\033[91m"
+GRN = "\033[92m"
+YLW = "\033[93m"
+BLU = "\033[94m"
+MAG = "\033[95m"
+CYN = "\033[96m"
+RST = "\033[0m"
+
+
+def _c(color, text):
+    return f"{color}{text}{RST}"
+
+
+def _highlight(msg):
+    if "\033" in msg:
+        return msg
+    return re.sub(r"'([^']+)'", rf"'{_c(MAG, r'\1')}'", msg)
+
+
+def _emit(console: Console, line: str) -> None:
+    """Single write path through rich."""
+    console.print(line, end="\n", soft_wrap=True)
+
+
+def ok(msg):
+    _emit(_stdout, f"  {_c(GRN + BOLD, '✓')}  {_highlight(msg)}")
+
+
+def fail(msg):
+    _emit(_stderr, f"  {_c(RED + BOLD, '✗')}  {_c(RED, msg)}")
+
+
+def info(msg):
+    _emit(_stdout, f"  {_c(BLU + BOLD, '→')}  {_highlight(msg)}")
+
+
+def warn(msg):
+    _emit(_stdout, f"  {_c(YLW + BOLD, '⚠')}  {_c(YLW, msg)}")
+
+
+def blank():
+    sys.stdout.write("\n")
+
+
+def step(n, total, title):
+    blank()
+    _emit(_stdout, f"{_c(BOLD + MAG, f'[{n}/{total}]')} {_c(BOLD + CYN, title)}")
+
+
+def banner(title):
+    bar = "━" * 64
+    blank()
+    _emit(_stdout, _c(MAG + BOLD, bar))
+    _emit(_stdout, _c(CYN + BOLD, f"  {title}"))
+    _emit(_stdout, _c(MAG + BOLD, bar))
+
+
+def ask(question, default=None):
+    suffix = f" {_c(DIM, f'[{default}]')}" if default is not None else ""
+    prompt_str = f"  {_c(CYN, '?')}  {question}{suffix}: "
+    raw = input(prompt_str).strip()
+    return raw if raw else (default if default is not None else "")
+
+
+def ask_yes(question, default=True):
+    hint = _c(DIM, "Y/n" if default else "y/N")
+    raw = input(f"  {_c(CYN, '?')}  {question} [{hint}]: ").strip().lower()
+    if not raw:
+        return default
+    return raw.startswith("y")
+
+
+def ask_int(question, default, min_val=None, max_val=None):
+    while True:
+        raw = ask(question, default)
+        try:
+            val = int(raw)
+            if min_val is not None and val < min_val:
+                warn(f"Value must be at least {min_val}")
+                continue
+            if max_val is not None and val > max_val:
+                warn(f"Value must be at most {max_val}")
+                continue
+            return val
+        except ValueError:
+            warn("Please enter a valid integer.")
+
+
+def run_with_events(func, *args, raise_on_error: bool = True, **kwargs):
+    q: queue.Queue[str | None] = queue.Queue()
+    kwargs["status_cb"] = q.put
+    res = []
+    err = []
+
+    def worker():
+        try:
+            res.append(func(*args, **kwargs))
+        except Exception as e:
+            err.append(e)
+        finally:
+            q.put(None)
+
+    t = threading.Thread(target=worker)
+    t.start()
+
+    while True:
+        msg = q.get()
+        if msg is None:
+            break
+        yield {"type": "status", "message": msg}
+
+    t.join()
+    if err:
+        if raise_on_error:
+            raise err[0]
+        yield {"type": "error", "message": str(err[0])}
+        return None
+    return res[0]
+
+
+class VclBuilder:
+    """Line- and section-joining helpers for VCL generators."""
+
+    @staticmethod
+    def join_lines(items: Iterable[str]) -> str:
+        """``"\\n"``-join an iterable of already-rendered lines."""
+        return "\n".join(items)
+
+    @staticmethod
+    def join_sections(sections: Iterable[str]) -> str:
+        """``"\\n\\n"``-join sections, dropping blank/whitespace-only ones."""
+        return "\n\n".join(s for s in sections if s.strip())
+
+
+# ── Canonical FOS log object path templates (merged from log_paths.py) ────────
+
+ANALYTICS_LOG_LAYOUT = "raw/request/year=%Y/month=%m/day=%d/hour=%H/minute=%M/"
+RUM_LOG_LAYOUT = "raw/rum/year=%Y/month=%m/day=%d/hour=%H/minute=%M/"
+
+
+def analytics_log_path() -> str:
+    """Logging-endpoint ``path`` for the main analytics log stream."""
+    return ANALYTICS_LOG_LAYOUT
+
+
+def rum_log_path() -> str:
+    """Logging-endpoint ``path`` for the RUM beacon log stream."""
+    return RUM_LOG_LAYOUT
+
+
+def minute_list_prefix(dt: _datetime) -> str:
+    """S3 LIST ``Prefix`` bounding exactly one closed minute of analytics logs."""
+    return dt.strftime("raw/request/year=%Y/month=%m/day=%d/hour=%H/minute=%M/")
+
+
+def rum_minute_list_prefix(dt: _datetime) -> str:
+    """S3 LIST ``Prefix`` bounding exactly one closed minute of RUM beacon logs."""
+    return dt.strftime("raw/rum/year=%Y/month=%m/day=%d/hour=%H/minute=%M/")
+
+
+# ── Fastly service version lifecycle (merged from draft_version.py) ───────────
+
+_draft_logger = logging.getLogger("backend.provision.draft_version")
+
+
+def rollback_to_version(service_id: str, token: str, base_version: int, *, call: Callable[..., Any]) -> None:
+    """Re-activate ``base_version``. A failed rollback is logged at WARNING, never raised."""
+    try:
+        call("PUT", f"/service/{service_id}/version/{base_version}/activate", token=token)
+    except RuntimeError:
+        _draft_logger.warning(
+            "rollback activation of version %s failed for %s", base_version, service_id, exc_info=True
+        )
+
+
+@contextmanager
+def draft_version(
+    service_id: str,
+    token: str,
+    *,
+    base_version: int,
+    call: Callable[..., Any],
+    comment: str | None = None,
+    comment_before_activate: bool = False,
+    status_cb: Callable[[str], None] | None = None,
+    validate: bool = True,
+    validate_msg: str = "Validating draft version {ver}...",
+    activate_msg: str = "Activating version {ver}...",
+    expect_empty_activate: bool = False,
+    rollback: bool = True,
+    on_failure: Callable[[Exception], None] | None = None,
+) -> Iterator[int]:
+    """Yield the new draft version number; validate + activate it when the body completes."""
+    clone = call("PUT", f"/service/{service_id}/version/{base_version}/clone", token=token)
+    new_ver = int(clone["number"])
+    if comment is not None and not comment_before_activate:
+        call("PUT", f"/service/{service_id}/version/{new_ver}", {"comment": comment}, token=token)
+
+    try:
+        yield new_ver
+
+        if validate:
+            if status_cb:
+                status_cb(validate_msg.format(ver=new_ver))
+            result = call("GET", f"/service/{service_id}/version/{new_ver}/validate", token=token)
+            if result.get("status") != "ok":
+                raise RuntimeError(f"Validation failed: {result.get('errors') or result}")
+
+        if comment is not None and comment_before_activate:
+            call("PUT", f"/service/{service_id}/version/{new_ver}", {"comment": comment}, token=token)
+
+        if status_cb:
+            status_cb(activate_msg.format(ver=new_ver))
+        activate_kwargs: dict[str, Any] = {"expect_empty": True} if expect_empty_activate else {}
+        call("PUT", f"/service/{service_id}/version/{new_ver}/activate", token=token, **activate_kwargs)
+    except Exception as exc:
+        if on_failure is not None:
+            on_failure(exc)
+        if rollback:
+            rollback_to_version(service_id, token, base_version, call=call)
+        raise
+
+
+# Register module aliases BEFORE importing sibling provision modules that depend on utils
+sys.modules["backend.provision.utils"] = sys.modules[__name__]
+sys.modules["backend.provision.log_paths"] = sys.modules[__name__]
+sys.modules["backend.provision.draft_version"] = sys.modules[__name__]
+
+from backend.core.fastly.client import SHIELD_MAP, fastly, find_service_by_name, parse_period  # noqa: E402
+from backend.provision.fastly_api import (  # noqa: E402
     account_has_rate_limiting,
     redeploy_cdn_vcl,
     update_logging_endpoint,
     validate_log_format,
 )
-from backend.provision.orchestrator import (
+from backend.provision.orchestrator import (  # noqa: E402
     _build_log_fields_config,
     cleanup_local_data,
     generate_analyst_invite,
     perform_teardown,
     write_service_config,
-)
-from backend.provision.utils import (
-    BLU,
-    BOLD,
-    CYN,
-    DIM,
-    MAG,
-    YLW,
-    _c,
-    ask,
-    ask_int,
-    ask_yes,
-    banner,
-    blank,
-    fail,
-    info,
-    ok,
-    warn,
 )
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -75,8 +287,6 @@ def wizard(args) -> dict:
     _preflight_lf = _build_log_fields_config(args)
     fmt_errors = validate_log_format(_preflight_lf)
     if fmt_errors:
-        from backend.provision.utils import RED
-
         for err in fmt_errors:
             print(f"  {_c(RED, 'ERROR:')} {err}")
         sys.exit(1)
@@ -192,8 +402,6 @@ def handle_teardown(args):
                 "cdn_url": prov_cfg.get("cdn_url", ""),
                 "cdn_secret": svc_cfg.get("cdn_secret", ""),
                 "admin_token": svc_cfg.get("fastly_api_key", ""),
-                # Carry the scoring block so perform_teardown can tear down the
-                # Compute scorer service + its stores (mirrors the HTTP route).
                 "scoring": svc_cfg.get("scoring") or {},
             }
 
@@ -367,7 +575,7 @@ def _resolve_cli_service_and_token(args, *, require_token: bool = True) -> tuple
 
 def handle_update_logs(args):
     banner("Fastly Log Analysis — Update Logs")
-    from backend.provision.cmcd_fields import (
+    from backend.provision.orchestrator import (
         reconcile_system_custom_fields,
         system_feature_flags,
     )
@@ -382,15 +590,6 @@ def handle_update_logs(args):
         else (cfg.get("log_fields") or _build_log_fields_config(args))
     )
 
-    # MERGE GUARD (sibling of state_sync.import_admin_state fix from
-    # 2026-06-02 incident): _build_log_fields_config(args) returns
-    # {schema_version, preset, groups, field_overrides} — it has NO
-    # custom_fields key. Assigning the result wholesale to
-    # cfg["log_fields"] would strip the scoring/CMCD custom_fields the
-    # orchestrators injected, the user's own custom_fields, and any
-    # format_hash/updated_at metadata. Preserve custom_fields from the
-    # on-disk cfg, then re-inject the canonical system entries from code
-    # for whichever features are enabled — code is the source of truth.
     existing_lf = cfg.get("log_fields") or {}
     existing_custom = list(existing_lf.get("custom_fields") or [])
     scoring_enabled, cmcd_enabled = system_feature_flags(cfg)
@@ -452,12 +651,6 @@ def handle_update_cdn(args):
         sys.exit(1)
 
     try:
-        # Re-probe the account's edge rate-limiting entitlement so a customer who
-        # enabled it after provisioning gets the ratecounter VCL on this redeploy
-        # (and one who lost it gets a clean deploy). Probe the CDN service itself
-        # and the logging service — either reflects the account-level pragma. Fall
-        # back to the persisted flag (default True) when detection is inconclusive;
-        # the reactive validate fallback still backstops a wrong guess.
         persisted = cfg.get("provisioning", {}).get("rate_limiting", True)
         detected = account_has_rate_limiting(token, cdn_service_id, service_id)
         rate_limiting = detected if detected is not None else persisted
@@ -480,15 +673,7 @@ def handle_update_cdn(args):
 
 
 def handle_enable_scoring(args):
-    """Enable — or redeploy — session scoring on a logging service.
-
-    Wraps ``session_scoring_orchestrator.enable_scoring``, which is the same
-    end-to-end flow the admin UI's Enable/Redeploy button runs: provision (or
-    reuse) the scorer Compute service, upload the committed Wasm + seed the
-    matrix KV, then clone + activate the logging VCL. Idempotent — re-running
-    on an enabled service is the supported redeploy path. The orchestrator
-    emits its own per-stage console lines (the two-phase Compute/Logging
-    progress), so the CLI only adds the final summary."""
+    """Enable — or redeploy — session scoring on a logging service."""
     banner("Fastly Log Analysis — Enable Session Scoring")
     service_id, _cfg, token = _resolve_cli_service_and_token(args)
 
@@ -505,12 +690,7 @@ def handle_enable_scoring(args):
 
 
 def handle_disable_scoring(args):
-    """Disable session scoring on a logging service.
-
-    Wraps ``session_scoring_orchestrator.disable_scoring``: strips the scoring
-    VCL snippets + custom_fields, re-activates the logging service without
-    them, then tears down the scorer Compute service + ConfigStores. Prompts
-    for confirmation unless ``--yes`` is passed."""
+    """Disable session scoring on a logging service."""
     banner("Fastly Log Analysis — Disable Session Scoring")
     service_id, _cfg, token = _resolve_cli_service_and_token(args)
 
@@ -542,7 +722,7 @@ def handle_list_groups(args):
     )
     enabled_groups = set(existing_cfg.get("groups", lf.PRESETS["standard"]["groups"]))
     print(f"\n  {'Group':<7} {'Enabled':<9} {'Bytes':>6}    Fields")
-    for gid, info_dict in lf.GROUP_INFO.items():
+    for gid, _info_dict in lf.GROUP_INFO.items():
         fields = [f for f in lf.LOG_FIELD_CATALOG if f["group"] == gid]
         print(
             f"  {('(core)' if gid is None else gid):<7} {('yes' if (gid is None or gid in enabled_groups) else 'no'):<9} {sum(f['typical_bytes'] for f in fields):>6}    {', '.join(f['id'] for f in fields)}"
@@ -623,8 +803,6 @@ def cmd_provision(
         disable_field=disable_field,
     )
     cfg = wizard(args)
-    import sys
-
     from backend.provision.orchestrator import provision
 
     try:

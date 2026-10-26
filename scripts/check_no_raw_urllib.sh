@@ -23,18 +23,20 @@ source "$SCRIPT_DIR/lib/ratchet_common.sh"
 #   - core/fastly/client.py          the central client itself (the sanctioned urllib user)
 #   - routers/provision.py           SSRF-safe domain probe only (Fastly-host calls go through fastly())
 #   - routers/admin/high_scale.py    pinned CDN download helper
-#   - routers/admin/downloads.py     streaming CDN log download (not a Fastly API call)
+#   - routers/admin/ingest.py        streaming CDN log download (not a Fastly API call)
 #   - core/iceberg/lake_info.py      pinned FOS/CDN fetch
 #   - core/iceberg/sync.py           pinned FOS/CDN fetch
 #   - core/iceberg/_core.py          pinned FOS/CDN metadata fetch
+#   - core/metadata/state.py         pinned FOS/CDN admin state fetch (folded from state_sync.py)
 ALLOWLIST=(
   "backend/core/fastly/client.py"
   "backend/routers/provision.py"
   "backend/routers/admin/high_scale.py"
-  "backend/routers/admin/downloads.py"
+  "backend/routers/admin/ingest.py"
   "backend/core/iceberg/lake_info.py"
   "backend/core/iceberg/sync.py"
   "backend/core/iceberg/_core.py"
+  "backend/core/metadata/state.py"
 )
 
 # Match an import of urllib.request or a bare urlopen( call in backend app code.

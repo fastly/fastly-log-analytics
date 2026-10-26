@@ -13,14 +13,13 @@ import duckdb
 from backend.core.share_db.validation import IP_FAMILY_KEYS, SESSION_ID_KEYS, mask_ip_values
 from backend.repositories._base import SectionTimer, _compact_sql_for_debug, _safe_table, record_duckdb_query
 from backend.utils.date_utils import parse_iso_utc
-from backend.utils.router_utils import register_salt
 from backend.utils.sql_validator import (
     SQLValidationError,
     apply_user_query_limits,
     is_simple_select_statement,
     validate_user_sql,
 )
-from backend.utils.telemetry import get_tracked_calls, log_once_per
+from backend.utils.telemetry import get_tracked_calls, log_once_per, register_salt
 
 logger = logging.getLogger(__name__)
 

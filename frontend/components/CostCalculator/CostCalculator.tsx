@@ -3,7 +3,7 @@
 import React, { useEffect, useMemo, useReducer } from 'react'
 import { useRouter } from 'next/navigation'
 import { cn, buildServiceHref } from '@/lib/utils'
-import { formatBytes, formatUSD } from '@/lib/format'
+import { formatAbbreviatedCount, formatBytes, formatUSD } from '@/lib/format'
 import { useServiceStore } from '@/stores/filterStore'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -15,17 +15,269 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
-import {
-  reducer,
-  DEFAULTS,
-  calculate,
-  fmtN,
-  BILLING_ZONE_RATES,
-  BILLING_ZONE_DESCRIPTIONS,
-} from './calc'
-import type { CalcState, CalcResults, PrefillResponse, BillingZone } from './calc'
+import type { components } from '@/types/api.generated'
 
-// ─── Shared Parts ────────────────────────────────────────────────────────────
+export type PrefillResponse = components['schemas']['PrefillResponse']
+export type BillingZone = 'MBZ100' | 'MBZ200' | 'Global'
+
+export const BILLING_ZONE_RATES: Record<BillingZone, number> = {
+  MBZ100: 0.08,
+  MBZ200: 0.12,
+  Global: 0.18,
+}
+
+export const BILLING_ZONE_DESCRIPTIONS: Record<BillingZone, string> = {
+  MBZ100: 'This zone includes North America, Hawaii and European POPs only. They have the lowest egress charges ($0.08/GB).',
+  MBZ200: 'All Fastly POPs except Africa, India, and South Korea where egress charges are highest ($0.12/GB standard default).',
+  Global: "All POPs throughout Fastly's entire global network ($0.18/GB).",
+}
+
+export interface CalcState {
+  reqDay: number
+  sampleRate: number
+  edgeOnly: boolean
+  edgeReqDay: number
+  rumBeaconsDay: number
+  logPeriod: number
+  commitMins: number
+  bytesPerLine: number
+  parquetMB: number
+  logNodes: number
+  userEditedNodes: boolean
+  cacheEnabled: boolean
+  queriesDay: number
+  logsChecksPerDay: number
+  cdnEnabled: boolean
+  retentionDays: number
+  deleteLogs: boolean
+  icebergOptimizeEnabled: boolean
+  activeAnalysts: number
+  analystFullSyncsPerMonth: number
+  rateA: number
+  rateB: number
+  rateStorage: number
+  rateEgress: number
+  minDays: number
+  billingZone: BillingZone
+}
+
+type CalcAction =
+  | { type: 'SET'; key: keyof CalcState; value: number | boolean | BillingZone }
+  | { type: 'SET_ZONE'; zone: BillingZone }
+  | { type: 'PREFILL'; prefill: PrefillResponse }
+  | { type: 'AUTO_NODES' }
+
+export const DEFAULTS: CalcState = {
+  reqDay: 1_000_000, sampleRate: 100, edgeOnly: true, edgeReqDay: 800_000, rumBeaconsDay: 0,
+  logPeriod: 60, commitMins: 5, bytesPerLine: 500, parquetMB: 20,
+  logNodes: 1, userEditedNodes: false,
+  cacheEnabled: true, queriesDay: 50, logsChecksPerDay: 2,
+  cdnEnabled: true, retentionDays: 90, deleteLogs: true,
+  icebergOptimizeEnabled: true,
+  activeAnalysts: 2, analystFullSyncsPerMonth: 1,
+  rateA: 0.005, rateB: 0.001, rateStorage: 0.02, rateEgress: 0.12, minDays: 30,
+  billingZone: 'MBZ200',
+}
+
+function suggestNodes(reqDay: number) {
+  return Math.min(120, Math.max(1, Math.ceil(reqDay / 8_000)))
+}
+
+export function reducer(state: CalcState, action: CalcAction): CalcState {
+  switch (action.type) {
+    case 'SET': {
+      const next = { ...state, [action.key]: action.value }
+      if (action.key === 'reqDay' && !state.userEditedNodes) next.logNodes = suggestNodes(action.value as number)
+      if (action.key === 'logNodes') next.userEditedNodes = true
+      if (action.key === 'billingZone') {
+        const zone = action.value as BillingZone
+        if (BILLING_ZONE_RATES[zone] !== undefined) next.rateEgress = BILLING_ZONE_RATES[zone]
+      }
+      return next
+    }
+    case 'SET_ZONE':
+      return {
+        ...state,
+        billingZone: action.zone,
+        rateEgress: BILLING_ZONE_RATES[action.zone] ?? state.rateEgress,
+      }
+    case 'PREFILL': {
+      const p = action.prefill
+      const req = p.requests_per_day ?? state.reqDay
+      const edgeReq = p.edge_requests_per_day ?? state.edgeReqDay
+      const lp = p.log_period_seconds ?? state.logPeriod
+
+      let bpl = state.bytesPerLine
+      if (p.avg_log_file_size_kb != null && req > 0) {
+        const filesPerDay = (86400 / lp) * suggestNodes(req)
+        bpl = (p.avg_log_file_size_kb * 1024 * 10 * filesPerDay) / req
+      } else if (p.estimated_bytes_per_line != null) {
+        bpl = p.estimated_bytes_per_line
+      }
+
+      const rawZone = p.billing_zone
+      const resolvedZone: BillingZone = rawZone && rawZone in BILLING_ZONE_RATES ? (rawZone as BillingZone) : state.billingZone
+      const resolvedEgress = p.cdn_egress_rate_per_gb ?? BILLING_ZONE_RATES[resolvedZone] ?? state.rateEgress
+
+      return {
+        ...state,
+        ...(p.sample_rate != null && { sampleRate: p.sample_rate }),
+        reqDay: req,
+        edgeReqDay: edgeReq,
+        logPeriod: lp,
+        bytesPerLine: Math.max(10, Math.round(bpl)),
+        rumBeaconsDay: p.rum_beacons_per_day ?? state.rumBeaconsDay,
+        ...(p.commit_interval_mins != null && { commitMins: p.commit_interval_mins }),
+        ...(p.edge_only != null && { edgeOnly: p.edge_only }),
+        ...(p.delete_after != null && { deleteLogs: p.delete_after }),
+        ...(p.log_retention_days != null && { retentionDays: p.log_retention_days }),
+        ...(p.compaction_enabled != null && { icebergOptimizeEnabled: p.compaction_enabled }),
+        ...(p.class_a_rate_per_1k != null && { rateA: p.class_a_rate_per_1k }),
+        ...(p.class_b_rate_per_10k != null && { rateB: p.class_b_rate_per_10k / 10 }),
+        rateEgress: resolvedEgress,
+        billingZone: resolvedZone,
+        ...(p.storage_rate_per_gb_month != null && { rateStorage: p.storage_rate_per_gb_month }),
+        ...(p.min_billed_days != null && { minDays: p.min_billed_days }),
+        logNodes: p.avg_nodes_per_flush ?? suggestNodes(req),
+        userEditedNodes: false,
+      }
+    }
+    case 'AUTO_NODES':
+      return !state.userEditedNodes ? { ...state, logNodes: suggestNodes(state.reqDay) } : state
+    default:
+      return state
+  }
+}
+
+export interface CalcResults {
+  classAPerMonth: number
+  classBPerMonth: number
+  totalGBStored: number
+  cdnEgressGB: number
+  costA: number
+  costB: number
+  costStorage: number
+  costEgress: number
+  totalCost: number
+  logFilesPerMonth: number
+  parquetFilesPerMonth: number
+  syncsPerMonth: number
+  logFilesPerSync: number
+  reqDayEffective: number
+  objectsPerDay: number
+  objectsBilled: number
+  classALogsPage: number
+  storageTiers: { label: string; gbMonths: number; flagged: boolean }[]
+  totalBytesPerMonth: number
+  totalGzBytesPerMonth: number
+  rumBeaconsMonth: number
+  rumParquetGBMonths: number
+  costRum: number
+}
+
+export function calculate(s: CalcState): CalcResults {
+  const baseReqs = s.edgeOnly ? s.edgeReqDay : s.reqDay
+  const reqDayEffective = baseReqs * (s.sampleRate / 100)
+
+  const logFilesPerDay = (86400 / s.logPeriod) * s.logNodes
+  const logFilesPerMonth = logFilesPerDay * 30
+
+  const totalBytesPerDay = reqDayEffective * s.bytesPerLine
+  const totalBytesPerMonth = totalBytesPerDay * 30
+  const totalGzBytesPerDay = totalBytesPerDay / 10
+  const totalGzBytesPerMonth = totalGzBytesPerDay * 30
+  const logSizeKB = (totalGzBytesPerDay / logFilesPerDay) / 1024
+
+  const syncsPerDay = (24 * 60) / s.commitMins
+  const syncsPerMonth = syncsPerDay * 30
+  const syncHrs = s.commitMins / 60
+  const logFilesPerSync = logFilesPerDay * (syncHrs / 24)
+
+  const rawBytesPerSync = totalBytesPerDay / syncsPerDay
+  const parquetBytesPerSync = rawBytesPerSync / 4
+  const parquetFilesPerSync = Math.max(1, Math.floor(parquetBytesPerSync / (s.parquetMB * 1024 * 1024)))
+  const parquetFilesPerMonth = parquetFilesPerSync * syncsPerMonth
+  const actualParquetBytesPerFile = parquetBytesPerSync / parquetFilesPerSync
+  const parquetGBPerFile = actualParquetBytesPerFile / (1024 * 1024 * 1024)
+
+  const minChargeHours = s.minDays * 24
+  const rawPqFilesPerDay = parquetFilesPerSync * syncsPerDay
+  const icebergMetadataFilesPerDay = syncsPerDay * 4
+  const objectsPerDay = logFilesPerDay + rawPqFilesPerDay + icebergMetadataFilesPerDay
+
+  const logSteadyStateDays = s.deleteLogs ? syncHrs / 24 : s.retentionDays
+  const billedLogDays = Math.max(logSteadyStateDays, s.minDays)
+  const billedPqDays = Math.max(s.retentionDays, s.minDays)
+  const billedMetadataDays = Math.max(s.retentionDays, s.minDays)
+
+  const objectsBilled = (logFilesPerDay * billedLogDays) + (rawPqFilesPerDay * billedPqDays) + (icebergMetadataFilesPerDay * billedMetadataDays)
+
+  const ingestSeconds = Math.max(10, Math.floor(s.logPeriod / 2))
+  const ingestsPerMonth = ((24 * 60 * 60) / ingestSeconds) * 30
+  const rawFilesStored = s.deleteLogs ? logFilesPerDay / 24 : logFilesPerDay * s.retentionDays
+  const listOpsClassA = Math.max(1, Math.ceil(rawFilesStored / 1000)) * ingestsPerMonth
+  const classALogsPage = s.logsChecksPerDay * 30
+  const stateSyncClassA = syncsPerDay * 30
+  const rumBeaconsMonth = s.rumBeaconsDay * 30
+
+  const classAPerMonth =
+    logFilesPerMonth + parquetFilesPerMonth + listOpsClassA + classALogsPage +
+    stateSyncClassA + rumBeaconsMonth + (s.icebergOptimizeEnabled ? 30 + parquetFilesPerMonth : 0)
+
+  const cdnHitRate = s.cdnEnabled ? 0.8 : 0
+  const cacheHitRate = s.cacheEnabled ? 1.0 : cdnHitRate
+  const parquetFilesForQuery = Math.max(1, Math.round(parquetFilesPerMonth / syncsPerMonth))
+  const analystSyncsPerMonth = s.activeAnalysts * 720 * 30
+  const analystNewParquetDl = s.activeAnalysts * parquetFilesPerMonth * (1 - cdnHitRate)
+  const analystHistoricalDl = s.analystFullSyncsPerMonth * (rawPqFilesPerDay * s.retentionDays) * (1 - cdnHitRate)
+
+  const classBPerMonth =
+    logFilesPerMonth + (s.queriesDay * 30 * parquetFilesForQuery * (1 - cacheHitRate)) +
+    analystSyncsPerMonth + analystNewParquetDl + analystHistoricalDl
+
+  const logGBPerFile = logSizeKB / (1024 * 1024)
+  const logActualH = s.deleteLogs ? Math.max(1, syncHrs) : s.retentionDays * 24
+  const logBilledH = Math.max(logActualH, minChargeHours)
+  const rawLogGBMonths = (logFilesPerMonth * logGBPerFile * logBilledH) / 720
+
+  const pqActualH = s.retentionDays * 24
+  const pqBilledH = Math.max(pqActualH, minChargeHours)
+  const icebergDataGBMonths = (parquetFilesPerMonth * parquetGBPerFile * pqBilledH) / 720
+  const metadataGBMonths = (icebergMetadataFilesPerDay * 30 * (0.1 / 1024) * billedMetadataDays) / 30
+  const rumParquetGBMonths = (s.rumBeaconsDay * 30 * 1024 / 4) / (1024 * 1024 * 1024)
+  const totalGBStored = rawLogGBMonths + icebergDataGBMonths + metadataGBMonths + rumParquetGBMonths
+
+  const storageTiers: CalcResults['storageTiers'] = []
+  if (rawLogGBMonths > 0) storageTiers.push({ label: 'Raw logs', gbMonths: rawLogGBMonths, flagged: logBilledH > logActualH })
+  if (icebergDataGBMonths > 0) storageTiers.push({ label: 'Iceberg data', gbMonths: icebergDataGBMonths, flagged: pqBilledH > pqActualH })
+  if (rumParquetGBMonths > 0) storageTiers.push({ label: 'RUM data', gbMonths: rumParquetGBMonths, flagged: false })
+  if (metadataGBMonths > 0) storageTiers.push({ label: 'Metadata', gbMonths: metadataGBMonths, flagged: false })
+
+  const icebergMetaEgressGB = s.cdnEnabled ? (syncsPerMonth * 4 * 5) / (1024 * 1024) : 0
+  let cdnEgressGB = 0
+  if (s.cdnEnabled) {
+    cdnEgressGB = s.cacheEnabled
+      ? parquetFilesPerMonth * parquetGBPerFile + icebergMetaEgressGB
+      : (s.queriesDay * 30 * parquetFilesForQuery * parquetGBPerFile) + icebergMetaEgressGB
+  }
+
+  const costA = (classAPerMonth / 1000) * s.rateA
+  const costB = (classBPerMonth / 1000) * s.rateB
+  const costStorage = totalGBStored * s.rateStorage
+  const costEgress = cdnEgressGB * s.rateEgress
+  const totalCost = costA + costB + costStorage + costEgress
+  const costRum = (rumBeaconsMonth / 1000) * s.rateA + (rumParquetGBMonths * s.rateStorage)
+
+  return {
+    classAPerMonth, classBPerMonth, totalGBStored, cdnEgressGB,
+    costA, costB, costStorage, costEgress, totalCost,
+    logFilesPerMonth, parquetFilesPerMonth, syncsPerMonth, logFilesPerSync,
+    reqDayEffective, objectsPerDay, objectsBilled, classALogsPage, storageTiers,
+    totalBytesPerMonth, totalGzBytesPerMonth, rumBeaconsMonth, rumParquetGBMonths, costRum,
+  }
+}
+
+export const fmtN = (n: number): string => formatAbbreviatedCount(n, 2)
 
 function hasAccessibleName(el: React.ReactElement): boolean {
   const p = el.props as { 'aria-label'?: unknown; 'aria-labelledby'?: unknown }
@@ -91,8 +343,6 @@ export function ResultRow({ label, detail, cost, highlight }: {
     </div>
   )
 }
-
-// ─── Inputs ──────────────────────────────────────────────────────────────────
 
 interface InputsProps {
   s: CalcState
@@ -167,7 +417,6 @@ export function Inputs({ s, r, set }: InputsProps) {
         </Row>
       </div>
 
-      {/* Minimum billing box */}
       <div className='mt-4 p-3 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 rounded-md space-y-2'>
         <div className='text-xs font-semibold text-amber-700 dark:text-amber-400'>Minimum Charge per Object</div>
         <Row label='Min. days billed per object (even if deleted early)'>
@@ -185,12 +434,59 @@ export function Inputs({ s, r, set }: InputsProps) {
   )
 }
 
-// ─── Pricing ─────────────────────────────────────────────────────────────────
-
 interface PricingProps {
   s: CalcState
   setZone?: (zone: BillingZone) => void
 }
+
+const OPS_SECTIONS = [
+  {
+    title: 'Class A (writes & lists)',
+    cls: 'py-1 font-semibold text-blue-600 dark:text-blue-400',
+    rowCls: 'pl-3 py-0.5',
+    valCls: 'text-right',
+    rows: [
+      ['Fastly writes each log file', '1 op/file'],
+      ['Raw Parquet upload per sync', '1 op/file'],
+      ['List during sync (per 1,000 objects)', '1 op/page'],
+      ['Manual log checks (LIST)', '1 op/check'],
+      ['Admin sync state to FOS', '1 op/sync'],
+    ],
+  },
+  {
+    title: 'Iceberg Maintenance (if enabled)',
+    cls: 'py-1 font-semibold text-blue-500 dark:text-blue-300 italic',
+    rowCls: 'pl-3 py-0.5 text-muted-foreground/70',
+    valCls: 'text-right text-muted-foreground/70',
+    rows: [
+      ['Iceberg commit (append data)', '1 op/sync'],
+      ['Table optimization (rewrite)', '1 op/file'],
+      ['Weekly snapshot expiry', '1 op/week'],
+    ],
+  },
+  {
+    title: 'Class B (reads)',
+    cls: 'py-1 mt-2 font-semibold text-amber-600 dark:text-amber-400',
+    rowCls: 'pl-3 py-0.5',
+    valCls: 'text-right',
+    rows: [
+      ['Read each .gz during ingest', '1 op/file'],
+      ['Analyst metadata pull (cached)', '1 op/min'],
+      ['Query Parquet (no local cache)', '1 op/file/query'],
+      ['CDN-cached reads', '0 ops'],
+    ],
+  },
+  {
+    title: 'Egress (Transfer Out)',
+    cls: 'py-1 mt-2 font-semibold text-orange-600 dark:text-orange-400',
+    rowCls: 'pl-3 py-0.5',
+    valCls: 'text-right',
+    rows: [
+      ['Dashboard queries (uncached)', 'MBs'],
+      ['Analyst metadata sync (cached)', '~10KB/min'],
+    ],
+  },
+] as const
 
 export function Pricing({ s, setZone }: PricingProps) {
   const router = useRouter()
@@ -210,7 +506,6 @@ export function Pricing({ s, setZone }: PricingProps) {
           </Button>
         </div>
 
-        {/* Delivery Billing Zone Selector */}
         <div className="mb-4 space-y-2 p-3 bg-muted/40 rounded-lg border border-border/50">
           <div className="flex items-center justify-between">
             <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">
@@ -256,77 +551,36 @@ export function Pricing({ s, setZone }: PricingProps) {
         </div>
 
         <div className='space-y-0'>
-          <Row label='Class A rate (writes, lists)'>
-            <ReadOnlyValue value={s.rateA} />
-          </Row>
-          <Row label='Class B rate (reads/downloads)'>
-            <ReadOnlyValue value={s.rateB} />
-          </Row>
-          <Row label='Storage rate (per GB/month)'>
-            <ReadOnlyValue value={s.rateStorage} />
-          </Row>
-          <Row label='CDN egress rate (per GB)'>
-            <ReadOnlyValue value={s.rateEgress} />
-          </Row>
+          <Row label='Class A rate (writes, lists)'><ReadOnlyValue value={s.rateA} /></Row>
+          <Row label='Class B rate (reads/downloads)'><ReadOnlyValue value={s.rateB} /></Row>
+          <Row label='Storage rate (per GB/month)'><ReadOnlyValue value={s.rateStorage} /></Row>
+          <Row label='CDN egress rate (per GB)'><ReadOnlyValue value={s.rateEgress} /></Row>
         </div>
         <div className='mt-2 text-[11px] text-muted-foreground'>
           Rates are global defaults. Update them on the <a href={buildServiceHref('/admin', activeServiceId)} className='underline font-medium hover:text-foreground'>admin page</a>.
         </div>
       </section>
 
-      {/* What generates ops reference table */}
       <section>
         <h3 className='text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-3'>What generates operations</h3>
-        {/* M-6 (audit, mobile UX): wrap the ops-reference table so its
-            two-column labels (some long, e.g. "List during sync (per
-            1,000 objects)") scroll horizontally instead of pushing the
-            entire cost-calculator card off-screen on phones. */}
         <div className='overflow-x-auto'>
-        <table className='w-full text-xs text-muted-foreground'>
-          <tbody>
-            <tr><td colSpan={2} className='py-1 font-semibold text-blue-600 dark:text-blue-400'>Class A (writes &amp; lists)</td></tr>
-            {[
-              ['Fastly writes each log file', '1 op/file'],
-              ['Raw Parquet upload per sync', '1 op/file'],
-              ['List during sync (per 1,000 objects)', '1 op/page'],
-              ['Manual log checks (LIST)', '1 op/check'],
-              ['Admin sync state to FOS', '1 op/sync'],
-            ].map(([l, r]) => (
-              <tr key={l}><td className='pl-3 py-0.5'>{l}</td><td className='text-right'>{r}</td></tr>
-            ))}
-            <tr><td colSpan={2} className='py-1 font-semibold text-blue-500 dark:text-blue-300 italic'>Iceberg Maintenance (if enabled)</td></tr>
-            {[
-              ['Iceberg commit (append data)', '1 op/sync'],
-              ['Table optimization (rewrite)', '1 op/file'],
-              ['Weekly snapshot expiry', '1 op/week'],
-            ].map(([l, r]) => (
-              <tr key={l}><td className='pl-3 py-0.5 text-muted-foreground/70'>{l}</td><td className='text-right text-muted-foreground/70'>{r}</td></tr>
-            ))}
-            <tr><td colSpan={2} className='py-1 mt-2 font-semibold text-amber-600 dark:text-amber-400'>Class B (reads)</td></tr>
-            {[
-              ['Read each .gz during ingest', '1 op/file'],
-              ['Analyst metadata pull (cached)', '1 op/min'],
-              ['Query Parquet (no local cache)', '1 op/file/query'],
-              ['CDN-cached reads', '0 ops'],
-            ].map(([l, r]) => (
-              <tr key={l}><td className='pl-3 py-0.5'>{l}</td><td className='text-right'>{r}</td></tr>
-            ))}
-            <tr><td colSpan={2} className='py-1 mt-2 font-semibold text-orange-600 dark:text-orange-400'>Egress (Transfer Out)</td></tr>
-            {[
-              ['Dashboard queries (uncached)', 'MBs'],
-              ['Analyst metadata sync (cached)', '~10KB/min'],
-            ].map(([l, r]) => (
-              <tr key={l}><td className='pl-3 py-0.5'>{l}</td><td className='text-right'>{r}</td></tr>
-            ))}
-          </tbody>
-        </table>
+          <table className='w-full text-xs text-muted-foreground'>
+            <tbody>
+              {OPS_SECTIONS.map((sec) => (
+                <React.Fragment key={sec.title}>
+                  <tr><td colSpan={2} className={sec.cls}>{sec.title}</td></tr>
+                  {sec.rows.map(([l, r]) => (
+                    <tr key={l}><td className={sec.rowCls}>{l}</td><td className={sec.valCls}>{r}</td></tr>
+                  ))}
+                </React.Fragment>
+              ))}
+            </tbody>
+          </table>
         </div>
       </section>
     </>
   )
 }
-
-// ─── Results ─────────────────────────────────────────────────────────────────
 
 interface ResultsProps {
   s: CalcState
@@ -372,7 +626,6 @@ export function Results({ s, r }: ResultsProps) {
         />
       </div>
 
-      {/* Volume estimates */}
       <div className='mt-5 pt-4 border-t border-border/40'>
         <h4 className='text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-3'>Volume Estimates</h4>
         <div className='grid grid-cols-2 gap-x-6 gap-y-1'>
@@ -387,8 +640,8 @@ export function Results({ s, r }: ResultsProps) {
             ['Syncs / month', fmtN(Math.round(r.syncsPerMonth))],
             ...(s.rumBeaconsDay > 0 ? [
               ['RUM beacons / month', fmtN(Math.round(r.rumBeaconsMonth))],
-              ['RUM footprint / month', Math.max(0.001, r.rumParquetGBMonths).toFixed(3) + ' GB-mo']
-            ] : [])
+              ['RUM footprint / month', Math.max(0.001, r.rumParquetGBMonths).toFixed(3) + ' GB-mo'],
+            ] : []),
           ].map(([label, value]) => (
             <div key={label} className='flex justify-between text-xs py-0.5'>
               <span className='text-muted-foreground'>{label}</span>
@@ -401,8 +654,6 @@ export function Results({ s, r }: ResultsProps) {
   )
 }
 
-// ─── Main Component ───────────────────────────────────────────────────────────
-
 interface CostCalculatorProps {
   prefillData?: PrefillResponse
   prefillNote?: string
@@ -412,19 +663,11 @@ export function CostCalculator({ prefillData, prefillNote }: CostCalculatorProps
   const [s, dispatch] = useReducer(reducer, DEFAULTS)
 
   useEffect(() => {
-    if (prefillData) {
-      dispatch({ type: 'PREFILL', prefill: prefillData })
-    }
+    if (prefillData) dispatch({ type: 'PREFILL', prefill: prefillData })
   }, [prefillData])
 
-  const set = (key: keyof CalcState) => (value: number | boolean) => {
-    dispatch({ type: 'SET', key, value })
-  }
-
-  const setZone = (zone: import('./calc').BillingZone) => {
-    dispatch({ type: 'SET_ZONE', zone })
-  }
-
+  const set = (key: keyof CalcState) => (value: number | boolean) => dispatch({ type: 'SET', key, value })
+  const setZone = (zone: BillingZone) => dispatch({ type: 'SET_ZONE', zone })
   const r = useMemo(() => calculate(s), [s])
 
   return (
@@ -436,18 +679,14 @@ export function CostCalculator({ prefillData, prefillNote }: CostCalculatorProps
       )}
 
       <div className='grid grid-cols-1 lg:grid-cols-2 gap-8'>
-        {/* ── Left: Inputs ── */}
         <div className='space-y-6'>
           <Inputs s={s} r={r} set={set} />
         </div>
-
-        {/* ── Right: Pricing + What generates ops ── */}
         <div className='space-y-6'>
           <Pricing s={s} setZone={setZone} />
         </div>
       </div>
 
-      {/* ── Results ── */}
       <Results s={s} r={r} />
 
       <p className='text-xs text-muted-foreground leading-relaxed'>

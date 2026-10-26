@@ -36,7 +36,7 @@ import {
   type LogFieldsCatalog,
   type WizardDraft,
   type WizardState,
-} from '@/components/ProvisionWizard/types'
+} from '@/components/ProvisionWizard/ProvisionWizard'
 import { createTestQueryClient, renderWithQuery } from '../../helpers/page-smoke'
 import { createUseSSEMock } from '../../helpers/page-smoke'
 import { server } from '@/__tests__/helpers/msw/handlers'

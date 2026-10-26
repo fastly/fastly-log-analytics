@@ -640,16 +640,19 @@ def get_top_bots(
     table_name = _safe_table(source_name)
     runner = parent_runner if parent_runner is not None else QueryRunner(con, src)
 
-    _t = _time.perf_counter()
-    actual_cols = runner.get_schema_cols()
-    timer.mark("top_bots:get_schema_cols", _t)
-    if not actual_cols:
+    def _wrap_cache(resp: dict) -> dict:
         return cache_result(
-            empty_schema_response(bots=[], ngwaf_bots=[], **runner.telemetry()),
+            resp,
             state="miss" if cache_key is not None else "bypass",
             ttl_seconds=_dashboard_repo._dashboard_cache.ttl if cache_key is not None else None,
             prewarmer=False,
         )
+
+    _t = _time.perf_counter()
+    actual_cols = runner.get_schema_cols()
+    timer.mark("top_bots:get_schema_cols", _t)
+    if not actual_cols:
+        return _wrap_cache(empty_schema_response(bots=[], ngwaf_bots=[], **runner.telemetry()))
 
     _t = _time.perf_counter()
     params, where_clause = build_where_clause(start_time, end_time, filters, actual_cols, inline_params=True)
@@ -657,6 +660,14 @@ def get_top_bots(
 
     arcjet_bots: list[dict] = []
     ngwaf_bots: list[dict] = []
+
+    def _bots_resp() -> dict:
+        return {
+            "bots": arcjet_bots,
+            "ngwaf_bots": ngwaf_bots,
+            "section_timings": section_timings,
+            **runner.telemetry(),
+        }
 
     # QueryRunner owns the durable-mode coverage gate. Keeping this path
     # enabled lets ready high-scale services avoid a full-range UA scan.
@@ -817,12 +828,7 @@ def get_top_bots(
             with ctx as temp_table:
                 timer.mark("top_bots:temp_table_create", _t)
                 if temp_table is None:
-                    return {
-                        "bots": arcjet_bots,
-                        "ngwaf_bots": ngwaf_bots,
-                        "section_timings": section_timings,
-                        **runner.telemetry(),
-                    }
+                    return _bots_resp()
                 if needs_filtered_ua_scan:
                     try:
                         _t = _time.perf_counter()
@@ -845,20 +851,10 @@ def get_top_bots(
         if use_rollups:
             runner.end_shared_active_hour_temps()
 
-    res_dict = {
-        "bots": arcjet_bots,
-        "ngwaf_bots": ngwaf_bots,
-        "section_timings": section_timings,
-        **runner.telemetry(),
-    }
+    res_dict = _bots_resp()
     if cache_key is not None and (arcjet_bots or ngwaf_bots):
         _dashboard_repo._dashboard_cache[cache_key] = (_time.time(), res_dict.copy())
-    return cache_result(
-        res_dict,
-        state="miss" if cache_key is not None else "bypass",
-        ttl_seconds=_dashboard_repo._dashboard_cache.ttl if cache_key is not None else None,
-        prewarmer=False,
-    )
+    return _wrap_cache(res_dict)
 
 
 def get_security_aggregates(
@@ -997,15 +993,13 @@ def _build_security_response(
         and end_time is not None
         and _window_eligible_for_rollup(start_time, end_time)
     )
-    use_ipv6_rollup = (
-        rollup_eligible and "is_ipv6" in actual_cols and _has_rollup_coverage(src, "is_ipv6", start_time, end_time)
-    )
-    use_proxy_rollup = (
-        rollup_eligible and "p_type" in actual_cols and _has_rollup_coverage(src, "p_type", start_time, end_time)
-    )
-    use_top_bots_rollup = (
-        rollup_eligible and "ua" in actual_cols and _has_rollup_coverage(src, "ua", start_time, end_time)
-    )
+
+    def _can_rollup(col: str) -> bool:
+        return rollup_eligible and col in actual_cols and _has_rollup_coverage(src, col, start_time, end_time)
+
+    use_ipv6_rollup = _can_rollup("is_ipv6")
+    use_proxy_rollup = _can_rollup("p_type")
+    use_top_bots_rollup = _can_rollup("ua")
 
     if not filters:
         runner.begin_shared_active_hour_temps(
@@ -1048,6 +1042,10 @@ def _build_security_response(
             _logger.debug(
                 "_build_security_response: ensure_ngwaf_bots_materialized failed (ignored)", exc_info=True
             )  # materialization failed — fall back gracefully
+
+    def _shape_ngwaf_vb_ts_row(r: Any) -> dict:
+        return {"time": safe_iso(r[0]), "bot_name": r[1], "count": r[2]}
+
     if _ngwaf_attached:
         if _want("ngwaf_verified_bots"):
             _t = _time.perf_counter()
@@ -1067,9 +1065,7 @@ def _build_security_response(
             )
             if rolled_nb_ts is not None:
                 timer.mark("ngwaf_verified_bots_ts_rollup", _t)
-                results["ngwaf_verified_bots_ts"] = [
-                    {"time": safe_iso(r[0]), "bot_name": r[1], "count": r[2]} for r in rolled_nb_ts
-                ]
+                results["ngwaf_verified_bots_ts"] = [_shape_ngwaf_vb_ts_row(r) for r in rolled_nb_ts]
             else:
                 _need("ngwaf_verified_bots_ts", {"timestamp", "waf_req_id"})
     elif _want_ngwaf_bots:
@@ -1465,6 +1461,12 @@ def _build_security_response(
         timer.mark("security:temp_skipped", _time.perf_counter(), activity="skipped", current_execution=True)
 
     # ── Pass 2: live SQL for the missed sections, against the narrowed temp ──
+    def _live_fetch(q: str, mark_label: str, shape: Callable[[Any], dict]) -> list[dict]:
+        _t0 = _time.perf_counter()
+        res = runner.execute(q).fetchall()
+        timer.mark(mark_label, _t0, source="live", activity="compute", current_execution=True)
+        return [shape(r) for r in res]
+
     try:
         if "verified_bots_ts" in live_sections and temp_table:
             _t = _time.perf_counter()
@@ -1500,30 +1502,23 @@ def _build_security_response(
         ):
             try:
                 if "ngwaf_verified_bots" in live_sections:
-                    # Table: group by bot_name + wellknown_bot_name + category
-                    q = SQL.NGWAF_VERIFIED_BOTS.format(temp_table=temp_table)
-                    _t = _time.perf_counter()
-                    res = runner.execute(q).fetchall()
-                    timer.mark("ngwaf_verified_bots", _t, source="live", activity="compute", current_execution=True)
-                    results["ngwaf_verified_bots"] = [
-                        {
+                    results["ngwaf_verified_bots"] = _live_fetch(
+                        SQL.NGWAF_VERIFIED_BOTS.format(temp_table=temp_table),
+                        "ngwaf_verified_bots",
+                        lambda r: {
                             "bot_name": r[0],
                             "wellknown_bot_name": r[1],
                             "category": r[2],
                             "request_count": r[3],
-                        }
-                        for r in res
-                    ]
+                        },
+                    )
 
                 if "ngwaf_verified_bots_ts" in live_sections:
-                    # Time series: bucketed counts by bot_name
-                    q = SQL.NGWAF_VERIFIED_BOTS_TS.format(bucket_seconds=bucket_seconds, temp_table=temp_table)
-                    _t = _time.perf_counter()
-                    res = runner.execute(q).fetchall()
-                    timer.mark("ngwaf_verified_bots_ts", _t, source="live", activity="compute", current_execution=True)
-                    results["ngwaf_verified_bots_ts"] = [
-                        {"time": safe_iso(r[0]), "bot_name": r[1], "count": r[2]} for r in res
-                    ]
+                    results["ngwaf_verified_bots_ts"] = _live_fetch(
+                        SQL.NGWAF_VERIFIED_BOTS_TS.format(bucket_seconds=bucket_seconds, temp_table=temp_table),
+                        "ngwaf_verified_bots_ts",
+                        _shape_ngwaf_vb_ts_row,
+                    )
             except Exception as e:
                 _logger.error("[security] NGWAF bot join failed: %s", e)
                 if "ngwaf_verified_bots" in live_sections:
@@ -1534,16 +1529,14 @@ def _build_security_response(
         # Live FINGERPRINT_TOP_N for any fingerprint col the rollup didn't
         # serve (cols absent from the schema were already defaulted above).
         for col, result_key in _FP_RESULT_KEYS:
-            if result_key not in _wanted_fp_keys:
-                continue
-            if col in rollup_served_fp_cols:
+            if result_key not in _wanted_fp_keys or col in rollup_served_fp_cols:
                 continue
             if temp_table and col in actual_cols and "ip" in actual_cols:
-                q = SQL.FINGERPRINT_TOP_N.format(col=col, temp_table=temp_table)
-                _t = _time.perf_counter()
-                res = runner.execute(q).fetchall()
-                timer.mark(result_key, _t, source="live", activity="compute", current_execution=True)
-                results[result_key] = [{"fingerprint": r[0], "ip_count": r[1], "request_count": r[2]} for r in res]
+                results[result_key] = _live_fetch(
+                    SQL.FINGERPRINT_TOP_N.format(col=col, temp_table=temp_table),
+                    result_key,
+                    lambda r: {"fingerprint": r[0], "ip_count": r[1], "request_count": r[2]},
+                )
 
         # One scan of the temp populates coverage for every fingerprint card
         # that ran live (rollup-served coverage was already set from the
@@ -1612,10 +1605,7 @@ def _build_security_response(
                 ),
             ):
                 if _sec in live_sections:
-                    _t = _time.perf_counter()
-                    res = runner.execute(_sql).fetchall()
-                    timer.mark(_mark, _t, source="live", activity="compute", current_execution=True)
-                    results[_sec] = [_shape(r) for r in res]
+                    results[_sec] = _live_fetch(_sql, _mark, _shape)
 
         # Well-Known Bots (UA matching + FCrDNS verification). Rows come from
         # the rollup (hit) or a live temp scan (miss); the Python enrichment

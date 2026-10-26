@@ -76,7 +76,7 @@ describe('useSyncStatus (MSW)', () => {
         }),
       ),
     )
-    const { useSyncStatus } = await import('@/hooks/useEventStream')
+    const { useSyncStatus } = await import('@/hooks/useSSE')
     const { result } = renderHook(() => useSyncStatus(), { wrapper: wrapper({ staleSeed: true }) })
 
     await waitFor(() => expect(result.current.data?.local_rows).toBe(12345))
@@ -92,7 +92,7 @@ describe('useSyncStatus (MSW)', () => {
         return HttpResponse.json({ latest_log_at: null, local_rows: 0 })
       }),
     )
-    const { useSyncStatus } = await import('@/hooks/useEventStream')
+    const { useSyncStatus } = await import('@/hooks/useSSE')
     renderHook(() => useSyncStatus(), { wrapper: wrapper({ staleSeed: true }) })
 
     await waitFor(() => expect(observedSkipFos).not.toBeNull())
@@ -111,7 +111,7 @@ describe('useSyncStatus (MSW)', () => {
         return HttpResponse.json({ latest_log_at: null, local_rows: 0 })
       }),
     )
-    const { useSyncStatus } = await import('@/hooks/useEventStream')
+    const { useSyncStatus } = await import('@/hooks/useSSE')
     const { result } = renderHook(() => useSyncStatus(), { wrapper: wrapper({ staleSeed: true }) })
 
     await new Promise((r) => setTimeout(r, 50))
@@ -159,7 +159,7 @@ describe('useLastSync (MSW)', () => {
       }),
     )
 
-    const { useLastSync } = await import('@/hooks/useEventStream')
+    const { useLastSync } = await import('@/hooks/useSSE')
     const { result } = renderHook(() => useLastSync(), { wrapper: wrapper({ staleLastSyncSeed: true }) })
 
     await waitFor(() => expect(result.current.data?.started_at).toBe('2026-06-15T23:37:41Z'))
@@ -178,7 +178,7 @@ describe('useLastSync (MSW)', () => {
       ),
     )
 
-    const { useLastSync } = await import('@/hooks/useEventStream')
+    const { useLastSync } = await import('@/hooks/useSSE')
     const { result } = renderHook(() => useLastSync(), { wrapper: wrapper({ staleLastSyncSeed: true }) })
 
     await waitFor(() => expect(result.current.data).toEqual({ started_at: null, status: null, duration_s: null }))
@@ -198,7 +198,7 @@ describe('useLastSync (MSW)', () => {
       }),
     )
 
-    const { useLastSync } = await import('@/hooks/useEventStream')
+    const { useLastSync } = await import('@/hooks/useSSE')
     const { result } = renderHook(() => useLastSync(), { wrapper: wrapper({ staleLastSyncSeed: true }) })
 
     await new Promise(r => setTimeout(r, 50))
@@ -280,7 +280,7 @@ describe('useHeaderBadgeStream', () => {
       makeStreamResponse([`data: ${JSON.stringify(cleared)}\r\n\r\n`]),
     )
     const qc = makeQueryClient(seed)
-    const { useHeaderBadgeStream } = await import('@/hooks/useAdminEventStream')
+    const { useHeaderBadgeStream } = await import('@/hooks/useSSE')
     renderHook(() => useHeaderBadgeStream(true), { wrapper: wrapperWith(qc) })
     await waitFor(() => {
       expect(qc.getQueryData(['bootstrap'])).toEqual({ ...seed, header_badge: cleared })
@@ -302,7 +302,7 @@ describe('useHeaderBadgeStream', () => {
       makeStreamResponse([`data: ${JSON.stringify(payload)}\r\n\r\n`]),
     )
     const qc = makeQueryClient(seed)
-    const { useHeaderBadgeStream } = await import('@/hooks/useAdminEventStream')
+    const { useHeaderBadgeStream } = await import('@/hooks/useSSE')
     renderHook(() => useHeaderBadgeStream(true), { wrapper: wrapperWith(qc) })
     await waitFor(() => {
       expect(qc.getQueryData(['bootstrap'])).toEqual({
@@ -324,7 +324,7 @@ describe('useHeaderBadgeStream', () => {
     )
 
     const qc = makeQueryClient(seed)
-    const { useHeaderBadgeStream } = await import('@/hooks/useAdminEventStream')
+    const { useHeaderBadgeStream } = await import('@/hooks/useSSE')
     renderHook(() => useHeaderBadgeStream(true), { wrapper: wrapperWith(qc) })
 
     await waitFor(() => {
@@ -346,7 +346,7 @@ describe('useHeaderBadgeStream', () => {
     )
 
     const qc = makeQueryClient()
-    const { useHeaderBadgeStream } = await import('@/hooks/useAdminEventStream')
+    const { useHeaderBadgeStream } = await import('@/hooks/useSSE')
     renderHook(() => useHeaderBadgeStream(true), { wrapper: wrapperWith(qc) })
 
     await act(async () => {
@@ -357,7 +357,7 @@ describe('useHeaderBadgeStream', () => {
 
   it('does NOT open a connection when disabled is false', async () => {
     const qc = makeQueryClient({})
-    const { useHeaderBadgeStream } = await import('@/hooks/useAdminEventStream')
+    const { useHeaderBadgeStream } = await import('@/hooks/useSSE')
     renderHook(() => useHeaderBadgeStream(false), { wrapper: wrapperWith(qc) })
     await new Promise(r => setTimeout(r, 30))
     expect(fetch).not.toHaveBeenCalled()
@@ -369,7 +369,7 @@ describe('useHeaderBadgeStream', () => {
     )
 
     const qc = makeQueryClient({})
-    const { useHeaderBadgeStream } = await import('@/hooks/useAdminEventStream')
+    const { useHeaderBadgeStream } = await import('@/hooks/useSSE')
     renderHook(() => useHeaderBadgeStream(true), { wrapper: wrapperWith(qc) })
 
     await waitFor(() => expect(fetch).toHaveBeenCalled())
@@ -386,7 +386,7 @@ describe('useHeaderBadgeStream', () => {
     })
 
     const qc = makeQueryClient({})
-    const { useHeaderBadgeStream } = await import('@/hooks/useAdminEventStream')
+    const { useHeaderBadgeStream } = await import('@/hooks/useSSE')
     const { unmount } = renderHook(() => useHeaderBadgeStream(true), { wrapper: wrapperWith(qc) })
 
     await waitFor(() => expect(fetch).toHaveBeenCalled())

@@ -15,7 +15,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import duckdb
 import pytest
+from backend.high_scale.assets import assets_aggregates
 from backend.models.security import SecurityAggregatesResponse
+from backend.utils.bounded_cache import CacheRegistry
 from fastapi import FastAPI
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
@@ -26,13 +28,8 @@ from backend.core import metadata as metadata_db
 from backend.core.duckdb import _clear_schema_cache
 from backend.core.log_fields import LOG_FIELD_CATALOG
 from backend.core.request_context import build_request_context
-from backend.core.rollups import (
-    NETWORK_SUMMARY_BUNDLE_FILENAME,
-    OVERVIEW_BUNDLE_FILENAME,
-    _hour_bundled_root,
-)
+from backend.core.rollups import NETWORK_SUMMARY_BUNDLE_FILENAME, OVERVIEW_BUNDLE_FILENAME, _hour_bundled_root
 from backend.deps import get_con, get_source
-from backend.high_scale.assets import assets_aggregates
 from backend.main import app
 from backend.models.insights import InsightsRequest
 from backend.models.performance import AssetsRequest
@@ -100,6 +97,8 @@ def _patch_range_token(
 
 
 def _seed_origin_table(con, src) -> None:
+    con.execute(f"DROP VIEW IF EXISTS {_safe_table(src['name'])}")
+    CacheRegistry.clear_all()
     logs = generate_mock_logs(src, num_logs=40, hours_ago=1)
     for i, log in enumerate(logs):
         log.update(
@@ -171,6 +170,15 @@ def _register_high_scale(monkeypatch, test_service_source):
 # ── Insights Router Tests ──
 def _stub_insights() -> dict:
     now = "2026-10-12T00:00:00+00:00"
+    item = {
+        "label": "San Jose, CA, US",
+        "current_val": 120.0,
+        "baseline_val": 20.0,
+        "baseline_label": "baseline",
+        "unit": "req",
+        "severity": "medium",
+        "meta": {"spike_ratio": 6.0, "filters": {}},
+    }
     return {
         "insights": [
             {
@@ -179,17 +187,7 @@ def _stub_insights() -> dict:
                 "description": "Cities with sudden traffic surges",
                 "severity": "medium",
                 "summary": "1 city surging",
-                "items": [
-                    {
-                        "label": "San Jose, CA, US",
-                        "current_val": 120.0,
-                        "baseline_val": 20.0,
-                        "baseline_label": "baseline",
-                        "unit": "req",
-                        "severity": "medium",
-                        "meta": {"spike_ratio": 6.0, "filters": {}},
-                    }
-                ],
+                "items": [item],
                 "category": "traffic",
             }
         ],
@@ -264,17 +262,12 @@ def test_insights_role_clamping_and_force_refresh(client, in_memory_duckdb, test
             headers=_SVC_HEADERS,
             json={"window_size_hrs": 1.0, "baseline_hours": 168.0, "force_refresh": True},
         )
-
     assert resp.status_code == 200, resp.text
     if is_analyst:
-        assert captured["force_refresh"] is False
-        assert captured["mask_ips"] is True
-        assert captured["clamp_end"] == end.isoformat()
-        assert captured["clamp_start"] == start.isoformat()
+        assert (captured["force_refresh"], captured["mask_ips"]) == (False, True)
+        assert (captured["clamp_start"], captured["clamp_end"]) == (start.isoformat(), end.isoformat())
     else:
-        assert captured["force_refresh"] is True
-        assert captured["clamp_start"] is None
-        assert captured["clamp_end"] is None
+        assert (captured["force_refresh"], captured["clamp_start"], captured["clamp_end"]) == (True, None, None)
 
 
 def test_insights_endpoint_stale_view_retry_and_real_execution(client, in_memory_duckdb, test_service_source):
@@ -295,17 +288,14 @@ def test_insights_endpoint_stale_view_retry_and_real_execution(client, in_memory
         resp = client.post(
             "/api/insights", headers=_SVC_HEADERS, json={"window_size_hrs": 24.0, "baseline_hours": 168.0}
         )
-    assert resp.status_code == 200, resp.text
-    assert resp.json()["insights"][0]["id"] == "city_surges"
+    assert resp.status_code == 200 and resp.json()["insights"][0]["id"] == "city_surges"
     assert call_count == 2
     mock_clear.assert_called_once()
     mock_update.assert_called_once()
 
-    # Real DuckDB execution
     _seed_logs(in_memory_duckdb, test_service_source, 50)
     resp_real = client.post("/api/insights", headers=_SVC_HEADERS, json={"window_hours": 1.0, "baseline_hours": 24.0})
-    assert resp_real.status_code == 200
-    assert isinstance(resp_real.json()["insights"], list)
+    assert resp_real.status_code == 200 and isinstance(resp_real.json()["insights"], list)
 
 
 def test_cache_collapse_detail_endpoint_stub_and_real(client, in_memory_duckdb, test_service_source):
@@ -315,11 +305,9 @@ def test_cache_collapse_detail_endpoint_stub_and_real(client, in_memory_duckdb, 
             headers=_SVC_HEADERS,
             json={"url": "/api/v1/heavy", "window_size_hrs": 24.0, "baseline_hours": 168.0},
         )
-    assert resp.status_code == 200, resp.text
+    assert resp.status_code == 200
     data = resp.json()
-    assert data["url"] == "/api/v1/heavy"
-    assert data["baseline_hit_rate"] == 0.95
-    assert data["breakdown"]["hits"] == 10
+    assert (data["url"], data["baseline_hit_rate"], data["breakdown"]["hits"]) == ("/api/v1/heavy", 0.95, 10)
 
     _seed_logs(in_memory_duckdb, test_service_source, 5, url="/test-url-collapse", cache="MISS", ip="1.2.3.4")
     resp_real = client.post(
@@ -337,15 +325,10 @@ def test_cache_collapse_detail_endpoint_stub_and_real(client, in_memory_duckdb, 
     assert all(row["cache"].upper().startswith("MISS") for row in real_data["recent_misses"])
 
 
-# ── Shared Cross-Router Contract Tests (Unknown Section, Range Token, Analyst Clamping, Telemetry) ──
+# ── Shared Cross-Router Contract Tests ──
 @pytest.mark.parametrize(
     "endpoint",
-    [
-        "/api/network-health",
-        "/api/origin/aggregates",
-        "/api/security/aggregates",
-        "/api/performance/aggregates",
-    ],
+    ["/api/network-health", "/api/origin/aggregates", "/api/security/aggregates", "/api/performance/aggregates"],
 )
 def test_aggregates_reject_unknown_section(client, in_memory_duckdb, test_service_source, endpoint):
     _seed_logs(in_memory_duckdb, test_service_source, 5)
@@ -364,16 +347,10 @@ def test_aggregates_reject_unknown_section(client, in_memory_duckdb, test_servic
     ],
 )
 def test_aggregates_range_token_resolution(client, in_memory_duckdb, test_service_source, endpoint, expected_key):
-    in_memory_duckdb.execute(f"DROP VIEW IF EXISTS {_safe_table(test_service_source['name'])}")
-    from backend.utils.bounded_cache import CacheRegistry
-
-    CacheRegistry.clear_all()
     _seed_origin_table(in_memory_duckdb, test_service_source)
     with _patch_range_token():
         resp = client.post(
-            endpoint,
-            headers=_SVC_HEADERS,
-            json={"filters": {}, "range_token": "24h", "anchor": "2026-08-24T13:00:00Z"},
+            endpoint, headers=_SVC_HEADERS, json={"filters": {}, "range_token": "24h", "anchor": "2026-08-24T13:00:00Z"}
         )
     assert resp.status_code == 200, resp.text
     assert expected_key in resp.json()
@@ -421,39 +398,28 @@ def test_analyst_session_clamps_requested_window(
             json={"filters": {}, "start_time": "2026-06-17T00:00:00Z", "end_time": "2026-06-17T23:59:59Z"},
         )
     assert resp.status_code == 200, resp.text
-    assert captured["start_time"] == start.isoformat()
-    assert captured["end_time"] == end.isoformat()
+    assert (captured["start_time"], captured["end_time"]) == (start.isoformat(), end.isoformat())
 
 
 @pytest.mark.parametrize(
     ("endpoint", "seeder"),
-    [
-        ("/api/performance/aggregates", _seed_performance_table),
-        ("/api/security/aggregates", _seed_security_table),
-    ],
+    [("/api/performance/aggregates", _seed_performance_table), ("/api/security/aggregates", _seed_security_table)],
 )
 def test_aggregates_telemetry_attribution(client, in_memory_duckdb, test_service_source, monkeypatch, endpoint, seeder):
     monkeypatch.setenv("DEBUG_RESPONSES", "1")
     seeder(in_memory_duckdb, test_service_source)
-    resp = client.post(
-        endpoint,
-        headers={**_SVC_HEADERS, "X-Page-Load-ID": "test-page-load-42"},
-        json={"filters": {}},
-    )
-    assert resp.status_code == 200
-    assert len(resp.json().get("_debug_queries", [])) > 0
+    resp = client.post(endpoint, headers={**_SVC_HEADERS, "X-Page-Load-ID": "test-page-load-42"}, json={"filters": {}})
+    assert resp.status_code == 200 and len(resp.json().get("_debug_queries", [])) > 0
 
 
 # ── Network Router Tests ──
 def test_network_health_selectors_and_error_sentinel(client, in_memory_duckdb, test_service_source):
     _seed_logs(in_memory_duckdb, test_service_source, 10, tcp_rtt=25_000, asn=7922, country="US")
 
-    # 1. Full response
     full = client.post("/api/network-health", headers=_SVC_HEADERS, json={"filters": {}}).json()
     for k in ("shielding_analysis", "summary", "heatmap", "available"):
         assert k in full
 
-    # 2. Shielding-only skips core temp
     sh_only = client.post(
         "/api/network-health", headers=_SVC_HEADERS, json={"filters": {}, "sections": ["shielding_analysis"]}
     ).json()
@@ -462,7 +428,6 @@ def test_network_health_selectors_and_error_sentinel(client, in_memory_duckdb, t
     for blocked in {"temp_table_create", "heatmap_query", "map_query", "metro_query"}:
         assert blocked not in timings
 
-    # 3. Core + shielding selector
     combo = client.post(
         "/api/network-health",
         headers=_SVC_HEADERS,
@@ -470,7 +435,6 @@ def test_network_health_selectors_and_error_sentinel(client, in_memory_duckdb, t
     ).json()
     assert "leaderboard" in combo and "shielding_analysis" in combo
 
-    # 4. Shielding failure returns error sentinel
     with patch("backend.repositories.origin.get_shielding_analysis", side_effect=RuntimeError("boom")):
         err_resp = client.post(
             "/api/network-health", headers=_SVC_HEADERS, json={"filters": {}, "sections": ["shielding_analysis"]}
@@ -547,7 +511,6 @@ def test_network_bundle_post_get_selective_and_debug(client, in_memory_duckdb, t
     insert_mock_logs(in_memory_duckdb, table, logs)
     st, et = _naive_iso_window(3)
 
-    # Full POST
     resp = client.post(
         "/api/network/bundle",
         headers=_SVC_HEADERS,
@@ -562,8 +525,7 @@ def test_network_bundle_post_get_selective_and_debug(client, in_memory_duckdb, t
     data = resp.json()
     for sec in ("health", "quality", "pop_health", "transport"):
         assert data.get(sec) is not None
-    assert len(data["pop_health"]) == 2
-    assert "_component_observations" not in data
+    assert len(data["pop_health"]) == 2 and "_component_observations" not in data
     t = data["transport"]
     assert (
         t["total_requests"],
@@ -571,49 +533,40 @@ def test_network_bundle_post_get_selective_and_debug(client, in_memory_duckdb, t
         t["retrans_rate_pct"],
         t["packet_loss_pct"],
         t["delivery_rate_mbps"],
-    ) == (
-        10,
-        20.0,
-        1.0,
-        0.5,
-        80.0,
-    )
+    ) == (10, 20.0, 1.0, 0.5, 80.0)
     assert len(t["protocol_distribution"]) > 0
 
-    # Full GET
     get_resp = client.get(f"/api/network/bundle?start_time={st}&end_time={et}", headers=_SVC_HEADERS)
-    assert get_resp.status_code == 200
-    assert "health" in get_resp.json() and "transport" in get_resp.json()
+    assert get_resp.status_code == 200 and "health" in get_resp.json() and "transport" in get_resp.json()
 
-    # Selective POST + debug envelope
+    debug_headers = {**_SVC_HEADERS, "x-debug-responses": "1"}
     sel_resp = client.post(
         "/api/network/bundle",
-        headers={**_SVC_HEADERS, "x-debug-responses": "1"},
+        headers=debug_headers,
         json={"start_time": st, "end_time": et, "sections": ["transport"], "filters": {}},
     )
     assert sel_resp.status_code == 200
     sel_data = sel_resp.json()
-    assert sel_data["transport"] is not None
-    assert (sel_data["health"], sel_data["quality"], sel_data["pop_health"]) == (None, None, None)
-    assert len(sel_data["_debug_queries"]) > 0
-    assert sel_data.get("_component_observations") is None
+    assert sel_data["transport"] is not None and (sel_data["health"], sel_data["quality"], sel_data["pop_health"]) == (
+        None,
+        None,
+        None,
+    )
+    assert len(sel_data["_debug_queries"]) > 0 and sel_data.get("_component_observations") is None
+
     payload = {"start_time": st, "end_time": et, "sections": ["pop_health"], "filters": {}}
-    debug_headers = {**_SVC_HEADERS, "x-debug-responses": "1"}
-    pop_resp = client.post("/api/network/bundle", headers=debug_headers, json=payload)
-    assert pop_resp.status_code == 200
-    pop_data = pop_resp.json()
+    pop_data = client.post("/api/network/bundle", headers=debug_headers, json=payload).json()
     assert len(pop_data["pop_health"]) == 2
     owner = pop_data["_component_observations"]["pop_health"]
-    assert "data" not in owner
-    assert owner["_response_cache"]["state"] == "bypass"
+    assert "data" not in owner and owner["_response_cache"]["state"] == "bypass"
     assert [(row["source"], row.get("outcome")) for row in owner["_section_timings"]] == [
         ("rollup", "fallback"),
         ("live", "served"),
     ]
+
     monkeypatch.setenv("DEBUG_RESPONSES", "0")
     no_debug = client.post("/api/network/bundle", headers=debug_headers, json=payload)
-    assert no_debug.status_code == 200
-    assert "_component_observations" not in no_debug.json()
+    assert no_debug.status_code == 200 and "_component_observations" not in no_debug.json()
     assert any("/api/network/bundle".startswith(prefix) for prefix in _ANALYST_ALLOWED_WRITE_PREFIXES)
 
 
@@ -662,8 +615,7 @@ def test_network_bundle_missing_optional_fields_fallback(client, in_memory_duckd
     )
     assert resp.status_code == 200
     transport = resp.json()["transport"]
-    assert transport["total_requests"] == 5
-    assert transport["has_transport_data"] is False
+    assert (transport["total_requests"], transport["has_transport_data"]) == (5, False)
     assert len(transport["missing_fields"]) == 4 and "tcp_rtt" in transport["missing_fields"]
 
 
@@ -723,10 +675,6 @@ def test_origin_enum_validation_returns_422(client, endpoint, payload):
 def test_origin_kwargs_forwarding_and_limit_clamping(
     client, in_memory_duckdb, test_service_source, endpoint, repo_fn, stub_return, payload, expected_kwargs
 ):
-    in_memory_duckdb.execute(f"DROP VIEW IF EXISTS {_safe_table(test_service_source['name'])}")
-    from backend.utils.bounded_cache import CacheRegistry
-
-    CacheRegistry.clear_all()
     _seed_origin_table(in_memory_duckdb, test_service_source)
     with patch(repo_fn, return_value=stub_return) as mock:
         resp = client.post(endpoint, headers=_SVC_HEADERS, json=payload)
@@ -736,11 +684,7 @@ def test_origin_kwargs_forwarding_and_limit_clamping(
 
 
 @pytest.mark.parametrize(
-    ("exc", "expected_status"),
-    [
-        (ValueError("bad filter"), 400),
-        (KeyError("unknown source"), 404),
-    ],
+    ("exc", "expected_status"), [(ValueError("bad filter"), 400), (KeyError("unknown source"), 404)]
 )
 def test_origin_summary_error_mapping(client, exc, expected_status):
     with patch("backend.repositories.origin.get_summary", side_effect=exc):
@@ -766,10 +710,6 @@ def test_origin_summary_error_mapping(client, exc, expected_status):
 def test_origin_aggregates_section_coupling_and_pruning(
     client, in_memory_duckdb, test_service_source, sections, required_timings, blocked_timings
 ):
-    in_memory_duckdb.execute(f"DROP VIEW IF EXISTS {_safe_table(test_service_source['name'])}")
-    from backend.utils.bounded_cache import CacheRegistry
-
-    CacheRegistry.clear_all()
     _seed_origin_table(in_memory_duckdb, test_service_source)
     resp = client.post("/api/origin/aggregates", headers=_SVC_HEADERS, json={"filters": {}, "sections": sections})
     assert resp.status_code == 200
@@ -816,21 +756,15 @@ def test_origin_drilldown_default_and_empty_table(client, in_memory_duckdb, test
         [],
     )
 
-    in_memory_duckdb.execute(f"DROP VIEW IF EXISTS {_safe_table(test_service_source['name'])}")
-    from backend.utils.bounded_cache import CacheRegistry
-
-    CacheRegistry.clear_all()
     _seed_origin_table(in_memory_duckdb, test_service_source)
     seeded_resp = client.post("/api/origin/drilldown", headers=_SVC_HEADERS, json={"filters": {}})
-    assert seeded_resp.status_code == 200
-    assert seeded_resp.json()["dimension"] == "host"
+    assert seeded_resp.status_code == 200 and seeded_resp.json()["dimension"] == "host"
 
 
 # ── Performance Router Tests ──
 def test_performance_aggregates_section_pruning_and_auto_expand(client, in_memory_duckdb, test_service_source):
     _seed_performance_table(in_memory_duckdb, test_service_source)
 
-    # 1. top_urls auto-expands with top_asns
     resp_top = client.post(
         "/api/performance/aggregates", headers=_SVC_HEADERS, json={"filters": {}, "sections": ["top_urls"]}
     )
@@ -842,7 +776,6 @@ def test_performance_aggregates_section_pruning_and_auto_expand(client, in_memor
     assert "top_urls_query" in top_timings and "top_asns_query" in top_timings
     assert "ttl_dist_query" not in top_timings and "scatter_waterfall_query" not in top_timings
 
-    # 2. waterfall auto-expands with scatter
     resp_wf = client.post(
         "/api/performance/aggregates", headers=_SVC_HEADERS, json={"filters": {}, "sections": ["waterfall"]}
     )
@@ -851,7 +784,6 @@ def test_performance_aggregates_section_pruning_and_auto_expand(client, in_memor
     assert (data_wf["top_urls"], data_wf["top_asns"], data_wf["ttl_dist"]) == ([], [], [])
     assert "avg" in data_wf["waterfall"] and len(data_wf["scatter"]) > 0
 
-    # 3. ttl_dist is independent
     resp_ttl = client.post(
         "/api/performance/aggregates", headers=_SVC_HEADERS, json={"filters": {}, "sections": ["ttl_dist"]}
     )
@@ -868,8 +800,7 @@ def test_performance_aggregates_section_pruning_and_auto_expand(client, in_memor
 def test_performance_aggregates_sort_by_variants(client, in_memory_duckdb, test_service_source, sort_by):
     _seed_performance_table(in_memory_duckdb, test_service_source)
     resp = client.post("/api/performance/aggregates", headers=_SVC_HEADERS, json={"filters": {}, "sort_by": sort_by})
-    assert resp.status_code == 200
-    assert len(resp.json()["top_urls"]) > 0
+    assert resp.status_code == 200 and len(resp.json()["top_urls"]) > 0
 
 
 def test_performance_aggregates_high_scale_dispatch_and_expanded_sections(client, monkeypatch, test_service_source):
@@ -888,8 +819,7 @@ def test_performance_aggregates_high_scale_dispatch_and_expanded_sections(client
             headers=_SVC_HEADERS,
             json={"filters": {}, "sort_by": "avg", "sections": ["scatter", "top_urls"]},
         )
-    assert resp.status_code == 200
-    assert resp.json()["_approx"] is True
+    assert resp.status_code == 200 and resp.json()["_approx"] is True
     assert mock_hs_perf.call_args.kwargs["sections"] == {"scatter", "waterfall", "top_urls", "top_asns"}
     assert mock_hs_perf.call_args.args[1].sort_by == "avg"
 
@@ -898,14 +828,12 @@ def test_performance_aggregates_high_scale_dispatch_and_expanded_sections(client
 def test_security_aggregates_and_bundle_contracts(client, in_memory_duckdb, test_service_source):
     _seed_security_table(in_memory_duckdb, test_service_source)
 
-    # Default aggregates
     resp = client.post("/api/security/aggregates", headers=_SVC_HEADERS, json={"filters": {}})
     assert resp.status_code == 200
     data = resp.json()
     for k in ("tls_fingerprints", "req_size_dist", "ipv6_adoption", "proxy_dist", "conn_reuse_dist", "_debug_queries"):
         assert k in data
 
-    # Bundle POST & GET
     b_post = client.post("/api/security/bundle", headers=_SVC_HEADERS, json={"filters": {}, "bucket_seconds": 300})
     assert b_post.status_code == 200 and "tls_fingerprints" in b_post.json()
     with _patch_range_token():
@@ -914,11 +842,8 @@ def test_security_aggregates_and_bundle_contracts(client, in_memory_duckdb, test
         )
     assert b_get.status_code == 200 and "tls_fingerprints" in b_get.json()
 
-    # Section pruning in SQL execution
     sel_resp = client.post(
-        "/api/security/aggregates",
-        headers=_SVC_HEADERS,
-        json={"filters": {}, "sections": ["conn_reuse_dist"]},
+        "/api/security/aggregates", headers=_SVC_HEADERS, json={"filters": {}, "sections": ["conn_reuse_dist"]}
     )
     assert sel_resp.status_code == 200
     timings_names = {t["section"] for t in sel_resp.json().get("_section_timings", [])}
@@ -926,7 +851,6 @@ def test_security_aggregates_and_bundle_contracts(client, in_memory_duckdb, test
     for blocked in {"ipv6_adoption", "proxy_dist", "verified_bots_ts", "wellknown_bots_query"}:
         assert blocked not in timings_names
 
-    # Implies coupling
     with patch("backend.repositories.security.get_security_aggregates", return_value={}) as mock_repo:
         client.post(
             "/api/security/aggregates", headers=_SVC_HEADERS, json={"filters": {}, "sections": ["tls_fingerprints"]}
@@ -937,8 +861,7 @@ def test_security_aggregates_and_bundle_contracts(client, in_memory_duckdb, test
 
 def test_security_analyst_masking_and_window_clamping(client, in_memory_duckdb, test_service_source):
     _seed_security_table(in_memory_duckdb, test_service_source)
-    earlier = datetime.now(UTC) - timedelta(hours=2)
-    later = datetime.now(UTC)
+    earlier, later = datetime.now(UTC) - timedelta(hours=2), datetime.now(UTC)
     with _with_analyst_ctx(
         test_service_source, in_memory_duckdb, mask_ips=True, time_bounds=TimeBounds(start=earlier, end=later)
     ):
@@ -961,11 +884,7 @@ def test_security_analyst_masking_and_window_clamping(client, in_memory_duckdb, 
 
 @pytest.mark.parametrize(
     ("fmt", "mask_ips", "expected_ct"),
-    [
-        ("fastly-acl", False, "text/csv"),
-        ("plain", False, "text/plain"),
-        ("plain", True, "text/plain"),
-    ],
+    [("fastly-acl", False, "text/csv"), ("plain", False, "text/plain"), ("plain", True, "text/plain")],
 )
 def test_export_proxies_formats_and_masking(client, in_memory_duckdb, test_service_source, fmt, mask_ips, expected_ct):
     _seed_security_table(in_memory_duckdb, test_service_source)
@@ -1032,8 +951,7 @@ def test_security_high_scale_aggregates_threat_intel_and_proxies_export(
     monkeypatch.setattr("backend.high_scale.security.get_security_threat_intel", hs_threat_intel)
     monkeypatch.setattr("backend.high_scale.security.get_proxies_data", hs_proxies)
 
-    ceiling_start = datetime.now(UTC) - timedelta(hours=2)
-    ceiling_end = datetime.now(UTC)
+    ceiling_start, ceiling_end = datetime.now(UTC) - timedelta(hours=2), datetime.now(UTC)
     with _with_analyst_ctx(
         test_service_source,
         in_memory_duckdb,
@@ -1109,8 +1027,6 @@ def test_value_summary_empty_and_missing_network_columns(client, in_memory_duckd
     in_memory_duckdb.execute(f"DROP TABLE IF EXISTS {table_name}")
     in_memory_duckdb.execute(f"CREATE TABLE {table_name} (timestamp TIMESTAMPTZ, req_bytes INT)")
     in_memory_duckdb.execute(f"INSERT INTO {table_name} VALUES (TIMESTAMPTZ '2026-07-23 12:00:00Z', 100)")
-    from backend.utils.bounded_cache import CacheRegistry
-
     CacheRegistry.clear_all()
 
     bundled_root = _hour_bundled_root(test_service_source)
@@ -1135,22 +1051,12 @@ def test_value_summary_empty_and_missing_network_columns(client, in_memory_duckd
 def test_value_summary_tls_and_verified_bots_fallbacks(client, in_memory_duckdb, test_service_source):
     table_name = _safe_table(test_service_source["name"])
     in_memory_duckdb.execute(
-        f"""
-        CREATE TABLE IF NOT EXISTS {table_name} (
-            timestamp TIMESTAMPTZ,
-            tls VARCHAR,
-            waf_sig VARCHAR,
-            _bot_name VARCHAR,
-            resp_bytes INT
-        )
-        """
+        f"CREATE TABLE IF NOT EXISTS {table_name} (timestamp TIMESTAMPTZ, tls VARCHAR, waf_sig VARCHAR, _bot_name VARCHAR, resp_bytes INT)"
     )
     in_memory_duckdb.execute(
-        f"""
-        INSERT INTO {table_name} VALUES
-        (TIMESTAMPTZ '2026-07-23 12:00:00Z', '1.3', 'SHIELD,VERIFIED-BOT.googlebot', 'Googlebot', 100),
-        (TIMESTAMPTZ '2026-07-23 12:05:00Z', '', NULL, '', 200)
-        """
+        f"INSERT INTO {table_name} VALUES "
+        "(TIMESTAMPTZ '2026-07-23 12:00:00Z', '1.3', 'SHIELD,VERIFIED-BOT.googlebot', 'Googlebot', 100), "
+        "(TIMESTAMPTZ '2026-07-23 12:05:00Z', '', NULL, '', 200)"
     )
     resp = client.post(
         "/api/value/summary",
@@ -1164,8 +1070,7 @@ def test_value_summary_tls_and_verified_bots_fallbacks(client, in_memory_duckdb,
     )
     assert resp.status_code == 200, resp.text
     data = resp.json()
-    assert data["network"]["tls_pct"] == 50.0
-    assert data["bots"]["verified_bots"] == 1
+    assert (data["network"]["tls_pct"], data["bots"]["verified_bots"]) == (50.0, 1)
 
 
 def test_value_summary_rollup_crosses_active_hour(client, in_memory_duckdb, test_service_source):
@@ -1174,27 +1079,14 @@ def test_value_summary_rollup_crosses_active_hour(client, in_memory_duckdb, test
     prev_hour = (now - timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
 
     in_memory_duckdb.execute(
-        f"""
-        CREATE TABLE IF NOT EXISTS {table_name} (
-            timestamp TIMESTAMPTZ,
-            cache VARCHAR,
-            resp_bytes BIGINT,
-            is_shield BOOLEAN,
-            waf INT,
-            waf_resp INT,
-            elapsed DOUBLE,
-            protocol VARCHAR,
-            is_ssl BOOLEAN,
-            ipv6 BOOLEAN
-        )
-        """
+        f"CREATE TABLE IF NOT EXISTS {table_name} ("
+        "timestamp TIMESTAMPTZ, cache VARCHAR, resp_bytes BIGINT, is_shield BOOLEAN, "
+        "waf INT, waf_resp INT, elapsed DOUBLE, protocol VARCHAR, is_ssl BOOLEAN, ipv6 BOOLEAN)"
     )
     in_memory_duckdb.execute(
-        f"""
-        INSERT INTO {table_name} VALUES
-        (TIMESTAMPTZ '{iso_z(now)}', 'HIT', 1000, true, 0, 200, 1200.0, 'HTTP/3', true, true),
-        (TIMESTAMPTZ '{iso_z(now)}', 'MISS', 2000, false, 1, 406, 4800.0, 'HTTP/2', true, false)
-        """
+        f"INSERT INTO {table_name} VALUES "
+        f"(TIMESTAMPTZ '{iso_z(now)}', 'HIT', 1000, true, 0, 200, 1200.0, 'HTTP/3', true, true), "
+        f"(TIMESTAMPTZ '{iso_z(now)}', 'MISS', 2000, false, 1, 406, 4800.0, 'HTTP/2', true, false)"
     )
 
     bundled_root = _hour_bundled_root(test_service_source)
@@ -1205,42 +1097,22 @@ def test_value_summary_rollup_crosses_active_hour(client, in_memory_duckdb, test
 
     try:
         in_memory_duckdb.execute(
-            f"""
-            COPY (
-                SELECT
-                    TIMESTAMPTZ '{iso_z(prev_hour)}' AS hour_start,
-                    CAST(10 AS BIGINT) AS requests,
-                    CAST(8 AS BIGINT) AS hit_requests,
-                    CAST(2 AS BIGINT) AS miss_requests,
-                    CAST(0 AS BIGINT) AS pass_requests,
-                    CAST(0 AS BIGINT) AS synth_requests,
-                    CAST(2 AS BIGINT) AS origin_requests,
-                    CAST(8000 AS BIGINT) AS bandwidth_saved_bytes,
-                    CAST(10000 AS BIGINT) AS total_bandwidth_bytes,
-                    CAST(4 AS BIGINT) AS shield_hit_requests,
-                    CAST(5 AS BIGINT) AS shield_total_requests,
-                    CAST(1 AS BIGINT) AS threats_blocked,
-                    CAST(8000.0 AS DOUBLE) AS hit_elapsed_sum,
-                    CAST(8 AS BIGINT) AS hit_elapsed_count,
-                    CAST(8000.0 AS DOUBLE) AS miss_elapsed_sum,
-                    CAST(2 AS BIGINT) AS miss_elapsed_count
-            ) TO '{ov_path}' (FORMAT PARQUET)
-            """
+            f"COPY (SELECT TIMESTAMPTZ '{iso_z(prev_hour)}' AS hour_start, "
+            "CAST(10 AS BIGINT) AS requests, CAST(8 AS BIGINT) AS hit_requests, "
+            "CAST(2 AS BIGINT) AS miss_requests, CAST(0 AS BIGINT) AS pass_requests, "
+            "CAST(0 AS BIGINT) AS synth_requests, CAST(2 AS BIGINT) AS origin_requests, "
+            "CAST(8000 AS BIGINT) AS bandwidth_saved_bytes, CAST(10000 AS BIGINT) AS total_bandwidth_bytes, "
+            "CAST(4 AS BIGINT) AS shield_hit_requests, CAST(5 AS BIGINT) AS shield_total_requests, "
+            "CAST(1 AS BIGINT) AS threats_blocked, CAST(8000.0 AS DOUBLE) AS hit_elapsed_sum, "
+            "CAST(8 AS BIGINT) AS hit_elapsed_count, CAST(8000.0 AS DOUBLE) AS miss_elapsed_sum, "
+            f"CAST(2 AS BIGINT) AS miss_elapsed_count) TO '{ov_path}' (FORMAT PARQUET)"
         )
         in_memory_duckdb.execute(
-            f"""
-            COPY (
-                SELECT
-                    TIMESTAMPTZ '{iso_z(prev_hour)}' AS hour_start,
-                    CAST(10 AS BIGINT) AS requests,
-                    CAST(6 AS BIGINT) AS http3_requests,
-                    CAST(3 AS BIGINT) AS h2_requests,
-                    CAST(1 AS BIGINT) AS h11_requests,
-                    CAST(0 AS BIGINT) AS other_proto_requests,
-                    CAST(10 AS BIGINT) AS tls_requests,
-                    CAST(5 AS BIGINT) AS ipv6_requests
-            ) TO '{net_path}' (FORMAT PARQUET)
-            """
+            f"COPY (SELECT TIMESTAMPTZ '{iso_z(prev_hour)}' AS hour_start, "
+            "CAST(10 AS BIGINT) AS requests, CAST(6 AS BIGINT) AS http3_requests, "
+            "CAST(3 AS BIGINT) AS h2_requests, CAST(1 AS BIGINT) AS h11_requests, "
+            "CAST(0 AS BIGINT) AS other_proto_requests, CAST(10 AS BIGINT) AS tls_requests, "
+            f"CAST(5 AS BIGINT) AS ipv6_requests) TO '{net_path}' (FORMAT PARQUET)"
         )
 
         resp = client.post(
@@ -1256,9 +1128,11 @@ def test_value_summary_rollup_crosses_active_hour(client, in_memory_duckdb, test
         )
         assert resp.status_code == 200, resp.text
         body = resp.json()
-        assert body["overview"]["total_requests"] == 12
-        assert body["caching"]["hit_requests"] == 9
-        assert body["network"]["total_requests"] == 12
+        assert (
+            body["overview"]["total_requests"],
+            body["caching"]["hit_requests"],
+            body["network"]["total_requests"],
+        ) == (12, 9, 12)
         assert len(body["network"]["protocol_time_series"]) > 0
     finally:
         shutil.rmtree(os.path.dirname(bundled_root), ignore_errors=True)
@@ -1285,10 +1159,6 @@ def test_value_summary_rollup_crosses_active_hour(client, in_memory_duckdb, test
 def test_analytics_page_smoke_endpoints(
     client, in_memory_duckdb, test_service_source, method, path, payload, expected_keys
 ):
-    in_memory_duckdb.execute(f"DROP VIEW IF EXISTS {_safe_table(test_service_source['name'])}")
-    from backend.utils.bounded_cache import CacheRegistry
-
-    CacheRegistry.clear_all()
     _seed_origin_table(in_memory_duckdb, test_service_source)
     resp = (
         client.post(path, headers=_SVC_HEADERS, json=payload)
@@ -1315,9 +1185,7 @@ def test_query_and_views_endpoints(client, in_memory_duckdb, test_service_source
 
 def test_log_activity_endpoint_empty_and_seeded(client, test_service_source):
     empty_resp = client.get(
-        "/api/usage/log-activity",
-        headers=_SVC_HEADERS,
-        params={"start": "2026-01-01", "end": "2026-01-02"},
+        "/api/usage/log-activity", headers=_SVC_HEADERS, params={"start": "2026-01-01", "end": "2026-01-02"}
     )
     assert empty_resp.status_code == 200
     assert {"data", "total_rows", "total_bytes"} <= set(empty_resp.json().keys())
@@ -1325,8 +1193,7 @@ def test_log_activity_endpoint_empty_and_seeded(client, test_service_source):
     src_name = test_service_source["name"]
     con = metadata_db.get_con(src_name)
     con.executemany(
-        "INSERT INTO ingested_files (file_name, source_name, row_count, file_size_bytes, ingested_at) "
-        "VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO ingested_files (file_name, source_name, row_count, file_size_bytes, ingested_at) VALUES (?, ?, ?, ?, ?)",
         [
             ("log1.gz", src_name, 100, 5000, "2026-01-01T10:00:00Z"),
             ("log2.gz", src_name, 200, 8000, "2026-01-01T11:00:00Z"),
@@ -1341,8 +1208,7 @@ def test_log_activity_endpoint_empty_and_seeded(client, test_service_source):
     )
     assert resp.status_code == 200, resp.text
     data = resp.json()
-    assert data["granularity"] == "hour"
-    assert (data["total_rows"], data["total_bytes"]) == (300, 13000)
+    assert (data["granularity"], data["total_rows"], data["total_bytes"]) == ("hour", 300, 13000)
     assert {"row_count", "bytes", "time"} <= set(data["data"][0].keys())
     assert "generated" not in data and "processed" not in data
 
@@ -1377,9 +1243,7 @@ def bare_client(monkeypatch):
         from backend.models.provision import NgwafWorkspacesResponse
 
         monkeypatch.setitem(
-            sys.modules,
-            "backend.core.fastly.ngwaf",
-            SimpleNamespace(NgwafWorkspacesResponse=NgwafWorkspacesResponse),
+            sys.modules, "backend.core.fastly.ngwaf", SimpleNamespace(NgwafWorkspacesResponse=NgwafWorkspacesResponse)
         )
     saved = dict(app.dependency_overrides)
     app.dependency_overrides.clear()
@@ -1466,11 +1330,7 @@ _cases: list[tuple[str, str, str]] = [
 ]
 
 
-@pytest.mark.parametrize(
-    "wrong_method,path,registered",
-    _cases,
-    ids=[f"{wrong} {path}" for wrong, path, _ in _cases],
-)
+@pytest.mark.parametrize("wrong_method,path,registered", _cases, ids=[f"{wrong} {path}" for wrong, path, _ in _cases])
 def test_wrong_http_method_returns_405_not_404(wrong_method: str, path: str, registered: str) -> None:
     client = TestClient(_test_app, raise_server_exceptions=False)
     kwargs = {"json": {}} if wrong_method in ("POST", "PUT", "PATCH") else {}
@@ -1535,55 +1395,55 @@ def observation_request(in_memory_duckdb, test_service_source, tmp_path, monkeyp
     ],
 )
 def test_standard_owner_miss_and_router_peek_hit_survive_wire_serialization(
-    client,
-    observation_request: dict,
-    monkeypatch: pytest.MonkeyPatch,
-    path: str,
-    sections: list[str],
+    client, observation_request: dict, monkeypatch: pytest.MonkeyPatch, path: str, sections: list[str]
 ) -> None:
     monkeypatch.setenv("DEBUG_RESPONSES", "0")
     body = {**observation_request, "sections": sections}
     first = client.post(path, json=body, headers=_SVC_HEADERS)
-    assert first.status_code == 200, first.text
-    assert first.json()["_response_cache"]["state"] == "miss"
+    assert first.status_code == 200 and first.json()["_response_cache"]["state"] == "miss"
     second = client.post(path, json=body, headers=_SVC_HEADERS)
-    assert second.status_code == 200, second.text
-    assert second.json()["_response_cache"]["state"] == "hit"
-    assert second.json()["_response_cache"]["prewarmer"] is False
-    assert second.json()["_is_cached"] is True
-    assert "_debug_queries" not in second.json()
+    assert second.status_code == 200
+    s_json = second.json()
+    assert (s_json["_response_cache"]["state"], s_json["_response_cache"]["prewarmer"], s_json["_is_cached"]) == (
+        "hit",
+        False,
+        True,
+    )
+    assert "_debug_queries" not in s_json
 
 
 def test_bundle_and_composite_response_cache_observations(client, observation_request: dict) -> None:
-    # 1. Dashboard bundle components keep independent observations
     first = client.post("/api/dashboard/bundle", json=observation_request, headers=_SVC_HEADERS).json()
     assert first["_response_cache"]["state"] == "bypass"
     assert first["aggregates"]["_response_cache"]["state"] == "miss"
     assert first["top_bots"]["_response_cache"]["state"] == "miss"
-    assert first["top_bots"]["bots"][0]["name"] == "Googlebot"
-    assert first["top_bots"]["bots"][0]["request_count"] == 40
+    assert (first["top_bots"]["bots"][0]["name"], first["top_bots"]["bots"][0]["request_count"]) == ("Googlebot", 40)
     second = client.post("/api/dashboard/bundle", json=observation_request, headers=_SVC_HEADERS).json()
-    assert second["aggregates"]["_response_cache"]["state"] == "hit"
-    assert second["top_bots"]["_response_cache"]["state"] == "hit"
+    assert (second["aggregates"]["_response_cache"]["state"], second["top_bots"]["_response_cache"]["state"]) == (
+        "hit",
+        "hit",
+    )
 
-    # 2. Origin composite is bypass
     for _ in range(2):
         response = client.post(
-            "/api/origin/aggregates",
-            json={**observation_request, "sections": ["summary"]},
-            headers=_SVC_HEADERS,
+            "/api/origin/aggregates", json={**observation_request, "sections": ["summary"]}, headers=_SVC_HEADERS
         )
-        assert response.status_code == 200
-        assert response.json()["_response_cache"] == {"state": "bypass", "prewarmer": False}
+        assert response.status_code == 200 and response.json()["_response_cache"] == {
+            "state": "bypass",
+            "prewarmer": False,
+        }
 
-    # 3. Network bundle does not confuse health with independent shielding
     for expected in ("miss", "hit"):
         body = client.post("/api/network/bundle", json=observation_request, headers=_SVC_HEADERS).json()
         assert body["_response_cache"]["state"] == "bypass"
-        assert body["health"]["_response_cache"]["state"] == expected
-        assert body["health"]["_response_cache"]["scope"] == "self"
-        assert body["quality"]["_response_cache"]["state"] == "bypass"
-        assert body["transport"]["_response_cache"]["state"] == "bypass"
+        assert (body["health"]["_response_cache"]["state"], body["health"]["_response_cache"]["scope"]) == (
+            expected,
+            "self",
+        )
+        assert (body["quality"]["_response_cache"]["state"], body["transport"]["_response_cache"]["state"]) == (
+            "bypass",
+            "bypass",
+        )
         assert body["health"]["shielding_analysis"]["_response_cache"]["state"] in {"miss", "hit"}
 
 
@@ -1647,20 +1507,15 @@ def test_dashboard_custom_fields_appear_in_top10(in_memory_duckdb, test_service_
 def test_assets_aggregates_post_get_and_populated_logs(client, in_memory_duckdb, test_service_source, monkeypatch):
     monkeypatch.setattr(svcconfig, "get_status", lambda sid: {"earliest_log_at": "2026-08-19T00:00:00Z"})
 
-    # Absolute range POST & both GET modes
     for mode_resp in (
         client.post(
             "/api/assets/aggregates",
             headers=_SVC_HEADERS,
             json={"filters": {}, "start_time": "2026-08-19T12:00:00Z", "end_time": "2026-08-19T13:00:00Z"},
         ),
+        client.get("/api/assets/aggregates?range_token=24h&anchor=2026-08-19T12:00:00Z", headers=_SVC_HEADERS),
         client.get(
-            "/api/assets/aggregates?range_token=24h&anchor=2026-08-19T12:00:00Z",
-            headers=_SVC_HEADERS,
-        ),
-        client.get(
-            "/api/assets/aggregates?start_time=2026-08-19T12:00:00Z&end_time=2026-08-19T13:00:00Z",
-            headers=_SVC_HEADERS,
+            "/api/assets/aggregates?start_time=2026-08-19T12:00:00Z&end_time=2026-08-19T13:00:00Z", headers=_SVC_HEADERS
         ),
     ):
         assert mode_resp.status_code == 200
@@ -1668,7 +1523,6 @@ def test_assets_aggregates_post_get_and_populated_logs(client, in_memory_duckdb,
             mode_resp.json().keys()
         )
 
-    # Populated logs with optional fields present
     table = _safe_table(test_service_source["name"])
     logs = generate_mock_logs(test_service_source, num_logs=20)
     for i, log in enumerate(logs):
@@ -1683,11 +1537,7 @@ def test_assets_aggregates_post_get_and_populated_logs(client, in_memory_duckdb,
             )
         elif i % 3 == 1:
             log.update(
-                url="/bundle.js",
-                cache_status="MISS",
-                resp_header_content_encoding="br",
-                ttl=0,
-                resp_body_bytes=120000,
+                url="/bundle.js", cache_status="MISS", resp_header_content_encoding="br", ttl=0, resp_body_bytes=120000
             )
         else:
             log.update(
@@ -1697,7 +1547,6 @@ def test_assets_aggregates_post_get_and_populated_logs(client, in_memory_duckdb,
                 ttl=0,
                 resp_body_bytes=1000,
             )
-    from backend.utils.bounded_cache import CacheRegistry
 
     in_memory_duckdb.execute(f"DROP VIEW IF EXISTS {table}")
     insert_mock_logs(in_memory_duckdb, table, logs)
@@ -1709,10 +1558,8 @@ def test_assets_aggregates_post_get_and_populated_logs(client, in_memory_duckdb,
         json={"filters": {}, "start_time": "2026-08-19T12:00:00Z", "end_time": "2026-08-19T13:00:00Z"},
     )
     assert pop_resp.status_code == 200
-    assert len(pop_resp.json()["asset_type_breakdown"]) > 0
-    assert pop_resp.json()["missing_fields"] == []
+    assert len(pop_resp.json()["asset_type_breakdown"]) > 0 and pop_resp.json()["missing_fields"] == []
 
-    # Missing optional fields detection
     in_memory_duckdb.execute(f"DROP TABLE IF EXISTS {table}")
     in_memory_duckdb.execute(
         f"CREATE TABLE {table} (url VARCHAR, cache VARCHAR, resp_bytes BIGINT, status INTEGER, timestamp TIMESTAMPTZ)"
@@ -1780,11 +1627,9 @@ def test_assets_aggregates_high_scale():
     svc = SimpleNamespace(service_id="hs-svc-1", client=_FakeCHClient())
     req = AssetsRequest(filters={}, start_time="2026-08-19T12:00:00Z", end_time="2026-08-19T13:00:00Z")
     res1 = assets_aggregates(svc, req, "2026-08-19T12:00:00Z", "2026-08-19T13:00:00Z")  # type: ignore[arg-type]
-    assert len(res1.asset_type_breakdown) == 1
-    assert res1.asset_type_breakdown[0].asset_type == "JavaScript/CSS"
+    assert len(res1.asset_type_breakdown) == 1 and res1.asset_type_breakdown[0].asset_type == "JavaScript/CSS"
     assert (res1.asset_type_breakdown[0].cache_hit_ratio, res1.asset_type_breakdown[0].compression_rate) == (0.8, 0.8)
-    assert len(res1.large_uncompressed_assets) == 1 and len(res1.low_ttl_assets) == 1
-    assert len(calls) == 2
+    assert len(res1.large_uncompressed_assets) == 1 and len(res1.low_ttl_assets) == 1 and len(calls) == 2
 
     res2 = assets_aggregates(svc, req, "2026-08-19T12:00:30Z", "2026-08-19T13:00:45Z")  # type: ignore[arg-type]
     assert res2.is_cached is True and len(calls) == 2

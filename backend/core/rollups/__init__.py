@@ -41,9 +41,14 @@ symbol on the right-hand side of an existing
 
 from __future__ import annotations
 
-from . import network, origin_dims, security_dims, time_series
+import sys
+
+from . import day_bundles, network, origin_dims, recompute, security_dims
 
 perf_latency = origin_dims
+hour_bundles = day_bundles
+time_series = recompute
+ngwaf_bots = security_dims
 
 # Re-exports — pull every public symbol up so callers continue to use
 # the flat ``backend.core.rollups.X`` path. Order doesn't matter; no
@@ -92,8 +97,10 @@ from ._common import (
     rollups_present,
 )
 from .day_bundles import (
+    _cleanup_per_field_after_bundle,
     backfill_day_bundles,
     bundle_days,
+    bundle_hours,
     compact_closed_days_to_daily,
     compact_network_quality_closed_days_to_daily,
     compact_network_rtt_closed_days_to_daily,
@@ -113,10 +120,6 @@ from .day_bundles import (
     compact_verified_bots_ts_closed_days_to_daily,
     retire_compacted_hour_bundles,
 )
-from .hour_bundles import (
-    _cleanup_per_field_after_bundle,
-    bundle_hours,
-)
 from .network import (
     backfill_network_geo_bundles,
     backfill_network_heatmap_bundles,
@@ -132,12 +135,6 @@ from .network import (
     build_network_speed_bundles,
     build_network_summary_bundles,
     build_pop_health_bundles,
-)
-from .ngwaf_bots import (
-    backfill_ngwaf_bots_bundles,
-    backfill_ngwaf_bots_ts_bundles,
-    build_ngwaf_bots_bundles,
-    build_ngwaf_bots_ts_bundles,
 )
 from .origin_dims import (
     backfill_origin_dims_bundles,
@@ -162,23 +159,25 @@ from .recompute import (
     _run_per_field_copy,
     backfill_missing_hour_bundles,
     backfill_missing_hour_ip_spread,
+    backfill_overview_bundles,
+    build_overview_bundles,
+    build_session_bundles,
+    build_time_series_bundles,
     cleanup_old_rollups,
     recompute_touched_hours,
 )
 from .rum import backfill_missing_rum_aggregates, recompute_rum_aggregates
 from .security_dims import (
+    backfill_ngwaf_bots_bundles,
+    backfill_ngwaf_bots_ts_bundles,
     backfill_security_dims_bundles,
     backfill_security_proxies_bundles,
     backfill_verified_bots_ts_bundles,
+    build_ngwaf_bots_bundles,
+    build_ngwaf_bots_ts_bundles,
     build_security_dims_bundles,
     build_security_proxies_bundles,
     build_verified_bots_ts_bundles,
-)
-from .time_series import (
-    backfill_overview_bundles,
-    build_overview_bundles,
-    build_session_bundles,
-    build_time_series_bundles,
 )
 from .wellknown_bots import (
     backfill_wellknown_bots_rollup,
@@ -197,11 +196,24 @@ pop_health = network
 origin_summary = origin_dims
 origin_latency_ts = origin_dims
 slow_urls = origin_dims
-overview = time_series
-sessions = time_series
+overview = recompute
+sessions = recompute
 perf_dims = perf_latency
 security_proxies = security_dims
 verified_bots_ts = security_dims
+
+_backend_pkg = sys.modules.get("backend")
+if _backend_pkg is not None and hasattr(_backend_pkg, "_MODULE_ALIASES"):
+    _backend_pkg._MODULE_ALIASES.update(
+        {
+            "backend.utils.ngwaf": "backend.core.rollups.security_dims",
+            "backend.core.rollups.ngwaf_bots": "backend.core.rollups.security_dims",
+            "backend.core.rollups.hour_bundles": "backend.core.rollups.day_bundles",
+            "backend.core.rollups.time_series": "backend.core.rollups.recompute",
+            "backend.core.rollups.overview": "backend.core.rollups.recompute",
+            "backend.core.rollups.sessions": "backend.core.rollups.recompute",
+        }
+    )
 
 __all__ = [
     # Public writers

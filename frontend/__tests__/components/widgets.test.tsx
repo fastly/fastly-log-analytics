@@ -39,7 +39,7 @@ import { ErrorBoundary } from '@/components/AnalyticsCard'
 import { HelpDialog } from '@/components/ui/confirm-dialog'
 import { LazyMount } from '@/components/AnalyticsCard'
 import { ServerFooter } from '@/components/ServerFooter'
-import { Sparkline } from '@/components/Sparkline'
+import { Sparkline } from '@/app/dashboard/_sections/DashboardClient'
 import { TimeAgo } from '@/components/SyncStatusBadge/SyncStatusBadge'
 import {
   GlobalHealthHelp, AvgRttHelp, WorstAsnHelp, WorstRegionHelp, HeatmapHelp,
@@ -48,7 +48,7 @@ import {
   adjustShieldingRows,
   SHIELDING_MIN_REQUESTS_DEFAULT,
   SHIELDING_MIN_REQUESTS_OPTIONS,
-} from '@/app/network/help-content'
+} from '@/app/network/page'
 
 afterEach(() => {
   cleanup()

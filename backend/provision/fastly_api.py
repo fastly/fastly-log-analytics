@@ -8,59 +8,68 @@ from typing import Any
 from backend.core import field_registry as fc
 from backend.core import field_registry as lf
 from backend.core.fastly.client import (
+    _FARO_VERSION_RE,
+    _RUM_PATH_PREDICATE,
+    FASTLY_LOG_FIELDS,
+    RUM_ASSET_FETCH_NAME,
+    RUM_DELIVER_SET_COOKIE_NAME,
+    RUM_FARO_FETCH_NAME,
+    RUM_RECV_NAME,
+    RUM_SIGV4_SIGN_NAME,
+    SHIELD_MAP,
+    _assert_faro_version_safe,
     fastly,
+    generate_rum_asset_fetch_vcl,
+    generate_rum_recv_parts,
+    generate_rum_vcl,
     get_active_version,
     get_generated_vcl,
     list_s3_endpoints,
+    load_vcl,
+    parse_period,
+    region_endpoint,
+    render_vcl_sigv4_signing_block,
+    validate_rum_custom_condition,
 )
-from backend.core.fastly.rum_provisioning import generate_rum_recv_parts
-from backend.provision.utils import BOLD, VclBuilder, _c, draft_version, fail, info, ok, warn
+from backend.provision.cli import BOLD, VclBuilder, _c, draft_version, fail, info, ok, warn
 from backend.utils import vcl_utils
+
+__all__ = [
+    "FASTLY_LOG_FIELDS",
+    "RUM_ASSET_FETCH_NAME",
+    "RUM_DELIVER_SET_COOKIE_NAME",
+    "RUM_FARO_FETCH_NAME",
+    "RUM_RECV_NAME",
+    "RUM_SIGV4_SIGN_NAME",
+    "SHIELD_MAP",
+    "_assert_faro_version_safe",
+    "_FARO_VERSION_RE",
+    "_RUM_PATH_PREDICATE",
+    "generate_rum_asset_fetch_vcl",
+    "generate_rum_recv_parts",
+    "generate_rum_vcl",
+    "load_vcl",
+    "parse_period",
+    "region_endpoint",
+    "render_vcl_sigv4_signing_block",
+    "validate_rum_custom_condition",
+]
 
 # ── VCL Edge Data Mapping ───────────────────────────────────────────────────
 
-# Ordered allowlist of common framework session-cookie names. The edge captures
-# a SHA-256 hash of the FIRST cookie in this list that is actually present on
-# the request (privacy: the raw cookie value never leaves Fastly). There is no
-# single cross-framework session cookie name, so a curated allowlist is the most
-# defensible generic approach. ``subfield()`` does EXACT key matching (and
-# handles dotted names like ``connect.sid``), so it is safe against prefix
-# false-matches that a naive ``Cookie ~ "sid=(...)"`` regex would hit. Ordered
-# by framework popularity — first present wins.
 SESSION_COOKIE_ALLOWLIST: tuple[str, ...] = (
-    "sessionid",  # Django
-    "PHPSESSID",  # PHP
-    "JSESSIONID",  # Java / Spring / Tomcat
-    "ASP.NET_SessionId",  # ASP.NET
-    "connect.sid",  # Express / Node
-    "session",  # Flask (default), generic
-    "sid",  # generic
+    "sessionid",
+    "PHPSESSID",
+    "JSESSIONID",
+    "ASP.NET_SessionId",
+    "connect.sid",
+    "session",
+    "sid",
 )
 
 
 def _session_cookie_hash_vcl() -> str:
-    """Return the VCL expression that hashes the first-present session cookie.
-
-    Builds a right-folded nested ``if()`` over ``SESSION_COOKIE_ALLOWLIST``:
-    each branch tests one cookie and, when present, hashes THAT cookie in the
-    ``if()``'s VALUE (true) position — ``if(<cookie> != "", hash(<cookie>),
-    <next branch>)`` — falling through to ``""`` when none are present.
-
-    The hash MUST live in the value branch, not wrapped around the whole
-    selection. Fastly's VCL compiler rejects an ``if()`` function nested inside
-    another ``if()``'s CONDITION (``if`` is a reserved keyword there — real
-    ``/validate`` errors with "Syntax error in condition"; falco / ``make
-    vcl-test`` are more lenient and do NOT catch it). The old
-    ``if(<nested-if select chain> != "", hash(...), "")`` form did exactly that.
-    Same limitation is documented in ``backend/core/log_fields.py`` for the
-    deliver-stage numeric flattening.
-
-    An empty cookie is never hashed (a per-branch ``!= ""`` guard precedes each
-    hash), so a cookie-less request stays ``""`` rather than collapsing to the
-    constant SHA-256 of "" and poisoning the harvesting insight. The hash is
-    computed at the true edge (the ``x-fos-edge-data`` capture is edge-gated),
-    so the raw cookie is never logged and never forwarded past Fastly.
-    """
+    """Return the VCL expression that hashes the first-present session cookie."""
     sel = '""'
     for name in reversed(SESSION_COOKIE_ALLOWLIST):
         sf = f'subfield(req.http.Cookie, "{name}", ";")'
@@ -68,17 +77,8 @@ def _session_cookie_hash_vcl() -> str:
     return sel
 
 
-# Maps x-fos-edge-data subfield keys to the VCL expressions used to capture them.
-# Only headers present in this mapping will be captured at the edge.
 EDGE_DATA_MAPPING = {
     "host": "req.http.Host",
-    # Prefer an operator-supplied Fastly-Client-IP over the raw socket IP.
-    # When the service sits behind another proxy/CDN, operator VCL higher in
-    # vcl_recv may rewrite req.http.Fastly-Client-IP to the true source IP
-    # (and set client.geo.ip_override accordingly); in that case client.ip is
-    # the intermediary, not the real client. Fall back to the socket IP when
-    # the header is unset/empty. Both if() branches must be STRING, so the
-    # fallback uses "" + client.ip to stringify the IP type.
     "ip": "client.ip",
     "country": "client.geo.country_code",
     "city": "client.geo.city",
@@ -308,7 +308,7 @@ def generate_capture_vcl(
     # That silent ordering inversion is the 2026-08 CMCD-collection outage; it
     # survived a month because nothing errors and the columns exist.
     if cmcd_enabled:
-        from backend.provision.cmcd_fields import generate_cmcd_vcl
+        from backend.provision.orchestrator import generate_cmcd_vcl
 
         cmcd_vcl_dict = generate_cmcd_vcl(mode=cmcd_mode, version=cmcd_version)
         cmcd_body = next(iter(cmcd_vcl_dict.values()))
@@ -979,7 +979,7 @@ def remove_logging_endpoint(
     remove_rum: bool = True,
 ):
     """Safely remove the logging endpoint + all analytics-owned VCL from the active version."""
-    from backend.provision.cmcd_fields import cmcd_snippet_names
+    from backend.provision.orchestrator import cmcd_snippet_names
     from backend.provision.session_scoring_vcl import scoring_snippet_names
 
     info(f"Checking active version of service {_c(BOLD, service_id)}…")
@@ -1169,7 +1169,7 @@ def update_logging_endpoint(cfg: dict, token: str):
     yield {"type": "progress", "current": 0, "total": total_steps}
 
     from backend import config as _svcconfig
-    from backend.provision.cmcd_fields import reconcile_cfg_system_custom_fields
+    from backend.provision.orchestrator import reconcile_cfg_system_custom_fields
 
     try:
         service_cfg = _svcconfig.load_config(service_id)
@@ -1191,7 +1191,7 @@ def update_logging_endpoint(cfg: dict, token: str):
         if cmcd_enabled_req is not None:
             import datetime as _dt
 
-            from backend.provision.cmcd_fields import (
+            from backend.provision.orchestrator import (
                 _remove_cmcd_custom_fields,
                 reconcile_cmcd_custom_fields,
             )
@@ -1280,8 +1280,8 @@ def update_logging_endpoint(cfg: dict, token: str):
     # Yield initial progress
     yield {"type": "progress", "current": 1, "total": total_steps}
 
+    from backend.provision.cli import run_with_events
     from backend.provision.declarative.reconciler import reconcile_vcl_state
-    from backend.provision.utils import run_with_events
 
     yield {"type": "status", "message": f"🔍 Starting declarative reconciliation for service {service_id}..."}
     try:
@@ -1383,16 +1383,7 @@ def _fastly_api_request(
     json_data: Any = None,
     step: str = "",
 ) -> Any:
-    """Perform a request to the Fastly API via the shared client.
-
-    Delegates transport to ``backend.core.fastly.client.fastly`` so this
-    module inherits its retry/backoff, OTel telemetry, and mock-mode support
-    instead of hand-rolling a second ``requests``-based client. ``path`` is a
-    Fastly API path (e.g. ``/service``); the client pins the ``api.fastly.com``
-    base and ``Fastly-Key`` auth. Returns the parsed JSON body (``dict`` or
-    ``list``). Errors are re-raised with the human-readable ``step`` for
-    provisioning diagnostics.
-    """
+    """Perform a request to the Fastly API via the shared client."""
     try:
         return fastly(method, path, body=json_data, token=token)
     except RuntimeError as exc:
@@ -1408,69 +1399,29 @@ def deploy_remote_frontend(
     token: str,
     override_host: str | None = None,
 ) -> dict[str, Any]:
-    """Deploy a remote frontend service to Fastly.
-
-    Coordinates with the Fastly REST API to register a new proxy/reverse-proxy
-    service pointing to our GCE VM origin.
-
-    Steps executed sequentially:
-    1. Create Service: POST https://api.fastly.com/service
-       with JSON {"name": service_name, "type": "vcl"}
-    2. Verify Draft Version: POST https://api.fastly.com/service/{service_id}/version
-       to generate active draft Version 1. Retrieve the version `number`.
-    3. Attach Domain: POST https://api.fastly.com/service/{service_id}/version/{version}/domain
-       with JSON {"name": domain_name}
-    4. Attach Backend Origin: POST https://api.fastly.com/service/{service_id}/version/{version}/backend
-       with JSON payload {"name": "gce_vm_origin", "address": origin_host, "port": origin_port, "use_ssl": use_ssl, "ssl_check_cert": False}
-    5. Activate Version: PUT https://api.fastly.com/service/{service_id}/version/{version}/activate
-
-    Args:
-        service_name: Name of the service to create.
-        domain_name: Domain name to attach.
-        origin_host: Backend host address.
-        origin_port: Backend port.
-        use_ssl: Whether to use SSL for the backend origin.
-        token: Fastly API token.
-        override_host: Optional host header override for the backend origin.
-
-    Returns:
-        dict: A dictionary containing:
-            - service_id: The ID of the created service.
-            - version: The version number.
-            - domain_name: The domain name.
-            - origin_host: The backend origin host.
-
-    Raises:
-        RuntimeError: If any of the Fastly API calls fail.
-    """
-    # Step 1: Create Service
-    step = "Create Service"
-    service_payload = {"name": service_name, "type": "vcl"}
-    service_data = _fastly_api_request("POST", "/service", token=token, json_data=service_payload, step=step)
+    """Deploy a remote frontend service to Fastly."""
+    service_data = _fastly_api_request(
+        "POST", "/service", token=token, json_data={"name": service_name, "type": "vcl"}, step="Create Service"
+    )
     service_id = service_data.get("id")
     if not service_id:
-        raise RuntimeError(f"Failed to retrieve service ID from response during {step}")
+        raise RuntimeError("Failed to retrieve service ID from response during Create Service")
 
-    # Step 2: Verify Draft Version
-    step = "Verify Draft Version"
-    version_data = _fastly_api_request("POST", f"/service/{service_id}/version", token=token, step=step)
+    version_data = _fastly_api_request(
+        "POST", f"/service/{service_id}/version", token=token, step="Verify Draft Version"
+    )
     version = version_data.get("number")
     if version is None:
-        raise RuntimeError(f"Failed to retrieve version number from response during {step}")
+        raise RuntimeError("Failed to retrieve version number from response during Verify Draft Version")
 
-    # Step 3: Attach Domain
-    step = "Attach Domain"
-    domain_payload = {"name": domain_name}
     _fastly_api_request(
         "POST",
         f"/service/{service_id}/version/{version}/domain",
         token=token,
-        json_data=domain_payload,
-        step=step,
+        json_data={"name": domain_name},
+        step="Attach Domain",
     )
 
-    # Step 4: Attach Backend Origin
-    step = "Attach Backend Origin"
     backend_payload: dict[str, Any] = {
         "name": "gce_vm_origin",
         "address": origin_host,
@@ -1489,12 +1440,11 @@ def deploy_remote_frontend(
         f"/service/{service_id}/version/{version}/backend",
         token=token,
         json_data=backend_payload,
-        step=step,
+        step="Attach Backend Origin",
     )
-
-    # Step 5: Activate Version
-    step = "Activate Version"
-    _fastly_api_request("PUT", f"/service/{service_id}/version/{version}/activate", token=token, step=step)
+    _fastly_api_request(
+        "PUT", f"/service/{service_id}/version/{version}/activate", token=token, step="Activate Version"
+    )
 
     return {
         "service_id": service_id,
@@ -1506,7 +1456,6 @@ def deploy_remote_frontend(
 
 def delete_remote_frontend(remote_service_id: str, token: str) -> None:
     """Deactivate and delete the remote frontend service on Fastly."""
-    # Step 1: Get versions of the service to deactivate any active ones
     try:
         versions = _fastly_api_request("GET", f"/service/{remote_service_id}/version", token=token, step="Get Versions")
         for v in versions:
@@ -1522,7 +1471,6 @@ def delete_remote_frontend(remote_service_id: str, token: str) -> None:
         if "404" not in str(exc):
             raise exc
 
-    # Step 2: Delete the service
     try:
         _fastly_api_request("DELETE", f"/service/{remote_service_id}", token=token, step="Delete Service")
     except Exception as exc:

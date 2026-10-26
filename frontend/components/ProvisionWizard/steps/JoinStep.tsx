@@ -4,7 +4,7 @@ import React, { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import { useAutoFlash } from "@/hooks/useAdminEventStream";
+import { useAutoFlash } from "@/hooks/useSSE";
 import {
   Alert,
   AlertDescription,
@@ -31,7 +31,7 @@ import {
 import { cn } from "@/lib/utils";
 import type { WizardState } from "../useWizardState";
 import { REGION_LABELS } from '@/lib/utils';
-import { ANALYST_PATH_A_UNSUPPORTED_REASON } from "../types";
+import { ANALYST_PATH_A_UNSUPPORTED_REASON } from "../ProvisionWizard";
 
 interface JsonImportSectionProps {
   onImport: (parsed: Record<string, string>) => void;

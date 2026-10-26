@@ -29,24 +29,18 @@ const mocks = vi.hoisted(() => ({
 }))
 
 vi.mock('@/components/ui/select', async () => (await import('../helpers/page-smoke')).selectMockFactory())
-vi.mock('@/hooks/useEventStream', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('@/hooks/useEventStream')>()),
-  useSyncStatus: () => mocks.status(),
-  useLastSync: () => mocks.lastSync(),
-}))
 vi.mock('@/hooks/useBootstrap', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/hooks/useBootstrap')>()),
   useIsAnalyst: () => mocks.analyst(),
   useBootstrap: () => mocks.bootstrap(),
   useMounted: () => true,
 }))
-vi.mock('@/hooks/useAdminEventStream', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('@/hooks/useAdminEventStream')>()),
-  useHeaderBadgeStream: () => ({ state: 'idle' }),
-  useAdminEventStream: () => ({ state: 'idle' }),
-}))
 vi.mock('@/hooks/useSSE', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/hooks/useSSE')>()),
+  useSyncStatus: () => mocks.status(),
+  useLastSync: () => mocks.lastSync(),
+  useHeaderBadgeStream: () => ({ state: 'idle' }),
+  useAdminEventStream: () => ({ state: 'idle' }),
   useDateFormat: () => ({ full: 'yyyy-MM-dd', abbr: 'HH:mm' }),
   useNowMs: () => Date.parse('2026-09-08T18:00:00Z'),
 }))

@@ -247,73 +247,48 @@ def test_get_path_breakdown_returns_expected_keys(in_memory_duckdb, test_service
 
 
 def test_haversine_zero_distance_when_coords_equal():
-    """Identical coords → distance 0. Pinned because a non-zero result
-    here would indicate a math.radians regression that would silently
-    inflate every ``efficiency_ratio`` computation."""
+    """Identical coords → distance 0."""
     assert _haversine_km(40.7128, -74.0060, 40.7128, -74.0060) == pytest.approx(0.0)
 
 
 def test_haversine_nyc_to_la_is_approximately_3935km():
-    """NYC ↔ LA is a well-known ~3,935 km great-circle distance.
-    Pinned as a known-good reference value so a refactor (e.g.,
-    swapping the radius constant) is caught."""
-    nyc_lat, nyc_lon = 40.7128, -74.0060
-    la_lat, la_lon = 34.0522, -118.2437
-    dist = _haversine_km(nyc_lat, nyc_lon, la_lat, la_lon)
-    # Real value ~3,935 km; allow ±10 km for rounding
+    """NYC ↔ LA is ~3,935 km great-circle distance."""
+    dist = _haversine_km(40.7128, -74.0060, 34.0522, -118.2437)
     assert 3925 <= dist <= 3945
 
 
 def test_haversine_is_symmetric():
-    """``haversine(a, b)`` must equal ``haversine(b, a)``. Pinned
-    because losing symmetry would mean shield-path arcs would render
-    differently depending on which POP was "first" in the row tuple."""
-    a = (40.0, -74.0)
-    b = (37.0, -122.0)
+    """``haversine(a, b)`` must equal ``haversine(b, a)``."""
+    a, b = (40.0, -74.0), (37.0, -122.0)
     assert _haversine_km(*a, *b) == pytest.approx(_haversine_km(*b, *a))
 
 
-def test_enrich_with_known_pops_computes_distance_and_efficiency():
-    """Two known POPs + a measured p50 → distance, light-speed RTT,
-    and efficiency ratio all populated. Pinned because this is what
-    drives the shield-path map's tooltip values."""
-    fake_pops = {
-        "LAX": (33.9425, -118.4081),
-        "SJC": (37.3639, -121.9289),
-    }
-    row = {"edge_pop": "LAX", "shield_pop": "SJC", "p50_ms": 100.0}
+_LAX_SJC_POPS = {"LAX": (33.9425, -118.4081), "SJC": (37.3639, -121.9289)}
 
-    with patch("backend.utils.pop_utils.get_pop_lat_lon_map", return_value=fake_pops):
+
+def test_enrich_with_known_pops_computes_distance_and_efficiency():
+    """Two known POPs + measured p50 → distance, light-speed RTT, and efficiency ratio populated."""
+    row = {"edge_pop": "LAX", "shield_pop": "SJC", "p50_ms": 100.0}
+    with patch("backend.utils.pop_utils.get_pop_lat_lon_map", return_value=_LAX_SJC_POPS):
         out = _enrich_with_distance(row)
 
-    assert out["distance_km"] is not None
-    assert out["distance_km"] > 0
+    assert out["distance_km"] is not None and out["distance_km"] > 0
     assert out["light_speed_rtt_ms"] is not None
     assert out["edge_lat"] == 33.9425
     assert out["shield_lon"] == -121.9289
-    assert out["efficiency_ratio"] is not None
-    # 100ms is far more than the ~5ms light-speed floor → efficiency >> 1
-    assert out["efficiency_ratio"] > 3.0
+    assert out["efficiency_ratio"] is not None and out["efficiency_ratio"] > 3.0
 
 
 def test_enrich_pop_codes_are_uppercased_for_lookup():
-    """The cache is keyed on uppercase POP codes; the helper must
-    upper-case incoming values. Pinned because Fastly log data
-    sometimes carries lowercase POP codes and a refactor that drops
-    the upper() would silently fail every distance computation."""
-    fake_pops = {"LAX": (33.9425, -118.4081), "SJC": (37.3639, -121.9289)}
+    """The cache is keyed on uppercase POP codes; incoming values are upper-cased."""
     row = {"edge_pop": "lax", "shield_pop": "sjc", "p50_ms": 100.0}
-
-    with patch("backend.utils.pop_utils.get_pop_lat_lon_map", return_value=fake_pops):
+    with patch("backend.utils.pop_utils.get_pop_lat_lon_map", return_value=_LAX_SJC_POPS):
         out = _enrich_with_distance(row)
-
-    assert out["distance_km"] is not None  # Lookup succeeded
+    assert out["distance_km"] is not None
 
 
 def test_enrich_with_unknown_pop_returns_none_for_all_coords():
-    """If either POP isn't in the cache, distance and efficiency are
-    None — but the row still has the keys (so frontend renderers
-    don't crash on missing fields)."""
+    """If either POP isn't in the cache, distance and efficiency are None."""
     with patch("backend.utils.pop_utils.get_pop_lat_lon_map", return_value={"LAX": (33.9425, -118.4081)}):
         out = _enrich_with_distance({"edge_pop": "LAX", "shield_pop": "GHOST", "p50_ms": 50.0})
 
@@ -321,133 +296,71 @@ def test_enrich_with_unknown_pop_returns_none_for_all_coords():
     assert out["light_speed_rtt_ms"] is None
     assert out["efficiency_ratio"] is None
     assert out["anomaly_static"] is False
-    # Known coord still surfaces; unknown is None
     assert out["edge_lat"] == 33.9425
     assert out["shield_lat"] is None
 
 
 def test_enrich_anomaly_only_flags_when_overhead_above_20ms():
-    """``anomaly_static`` requires BOTH efficiency > 3x AND absolute
-    overhead >= 20ms above the theoretical floor. Pinned because
-    short hops with high relative efficiency but tiny absolute
-    overhead shouldn't be flagged — TCP overhead dominates at that
-    scale."""
-    # Two POPs ~250km apart → light_speed_rtt ≈ 2.5ms (>0.5 floor)
-    # so the efficiency math runs. p50=15ms gives ratio 6x but absolute
-    # overhead = 15 - 2.5 = 12.5ms, below the 20ms anomaly threshold.
-    # requests well above the sample floor so the *only* reason it isn't
-    # flagged is the absolute-overhead gate (low-sample gating isolated out).
-    fake_pops = {"SJC": (37.3639, -121.9289), "LAX": (33.9425, -118.4081)}
+    """``anomaly_static`` requires BOTH efficiency > 3x AND absolute overhead >= 20ms."""
     row = {"edge_pop": "SJC", "shield_pop": "LAX", "p50_ms": 15.0, "requests": 500}
-
-    with patch("backend.utils.pop_utils.get_pop_lat_lon_map", return_value=fake_pops):
+    with patch("backend.utils.pop_utils.get_pop_lat_lon_map", return_value=_LAX_SJC_POPS):
         out = _enrich_with_distance(row)
 
-    assert out["efficiency_ratio"] is not None
-    assert out["efficiency_ratio"] > 3.0  # high ratio
-    assert out["low_sample"] is False  # enough samples — not the reason
-    assert out["anomaly_static"] is False  # but still below absolute floor
-
-
-def test_enrich_suppresses_anomaly_below_min_request_floor():
-    """A genuinely high-overhead route (efficiency >> 3x AND overhead >> 20ms)
-    is still NOT flagged when it has too few requests for the median to be
-    trustworthy — it's marked ``low_sample`` instead. The same profile WITH
-    enough requests does flag. Pinned because low-traffic routes were
-    producing false "suboptimal peering" flags (prod 2026-06-30): the median
-    over a handful of requests is noise. (low-sample gating)"""
-    # LAX→SJC ~490km → light floor ≈ 4.9ms; p50=100ms → efficiency ≈ 20x and
-    # overhead ≈ 95ms, comfortably past both anomaly gates.
-    fake_pops = {"LAX": (33.9425, -118.4081), "SJC": (37.3639, -121.9289)}
-
-    with patch("backend.utils.pop_utils.get_pop_lat_lon_map", return_value=fake_pops):
-        thin = _enrich_with_distance({"edge_pop": "LAX", "shield_pop": "SJC", "p50_ms": 100.0, "requests": 5})
-        thick = _enrich_with_distance({"edge_pop": "LAX", "shield_pop": "SJC", "p50_ms": 100.0, "requests": 200})
-
-    # Same latency profile, only the volume differs.
-    assert thin["efficiency_ratio"] == thick["efficiency_ratio"]
-    assert thin["efficiency_ratio"] > 3.0
-
-    # Thin route: shown (fields populated) but low_sample and never flagged.
-    assert thin["low_sample"] is True
-    assert thin["anomaly_static"] is False
-
-    # Well-trafficked route with the same profile: flagged.
-    assert thick["low_sample"] is False
-    assert thick["anomaly_static"] is True
-
-
-def test_enrich_sets_anomaly_eligible_independent_of_sample():
-    """``anomaly_eligible`` is the latency verdict ALONE (efficiency > 3x AND
-    >= 20ms overhead) — it must be True for a high-overhead route whether or
-    not it clears the sample floor. The FE re-derives the flag against a
-    user-chosen min-requests threshold from this field, so it must not bake in
-    the sample gate. ``anomaly_static`` stays = ``eligible and not low_sample``.
-    (user-adjustable min-requests threshold)"""
-    fake_pops = {"LAX": (33.9425, -118.4081), "SJC": (37.3639, -121.9289)}
-
-    with patch("backend.utils.pop_utils.get_pop_lat_lon_map", return_value=fake_pops):
-        thin = _enrich_with_distance({"edge_pop": "LAX", "shield_pop": "SJC", "p50_ms": 100.0, "requests": 5})
-        thick = _enrich_with_distance({"edge_pop": "LAX", "shield_pop": "SJC", "p50_ms": 100.0, "requests": 200})
-
-    # Latency verdict identical regardless of volume…
-    assert thin["anomaly_eligible"] is True
-    assert thick["anomaly_eligible"] is True
-    # …but the realized flag is still sample-gated at the server default.
-    assert thin["anomaly_static"] is False
-    assert thick["anomaly_static"] is True
-
-
-def test_enrich_anomaly_eligible_false_below_overhead_floor():
-    """A short hop under the 20ms absolute-overhead gate isn't eligible at all,
-    so no min-requests threshold the FE picks could ever flag it."""
-    fake_pops = {"SJC": (37.3639, -121.9289), "LAX": (33.9425, -118.4081)}
-    row = {"edge_pop": "SJC", "shield_pop": "LAX", "p50_ms": 15.0, "requests": 500}
-
-    with patch("backend.utils.pop_utils.get_pop_lat_lon_map", return_value=fake_pops):
-        out = _enrich_with_distance(row)
-
+    assert out["efficiency_ratio"] is not None and out["efficiency_ratio"] > 3.0
+    assert out["low_sample"] is False
     assert out["anomaly_eligible"] is False
     assert out["anomaly_static"] is False
 
 
-def test_enrich_with_none_p50_returns_none_efficiency():
-    """p50_ms missing (very-low-traffic POP pair) → efficiency_ratio
-    can't be computed. Pinned to None rather than 0 so the UI
-    distinguishes "no data" from "perfect efficiency"."""
-    fake_pops = {"LAX": (33.9425, -118.4081), "JFK": (40.6398, -73.7789)}
-    row = {"edge_pop": "LAX", "shield_pop": "JFK", "p50_ms": None}
+def test_enrich_suppresses_anomaly_below_min_request_floor():
+    """High-overhead route is marked low_sample (not anomaly_static) below min request floor,
+    while anomaly_eligible reflects the latency verdict independent of sample size."""
+    with patch("backend.utils.pop_utils.get_pop_lat_lon_map", return_value=_LAX_SJC_POPS):
+        thin = _enrich_with_distance({"edge_pop": "LAX", "shield_pop": "SJC", "p50_ms": 100.0, "requests": 5})
+        thick = _enrich_with_distance({"edge_pop": "LAX", "shield_pop": "SJC", "p50_ms": 100.0, "requests": 200})
 
+    assert thin["efficiency_ratio"] == thick["efficiency_ratio"]
+    assert thin["efficiency_ratio"] > 3.0
+    assert thin["anomaly_eligible"] is True and thick["anomaly_eligible"] is True
+    assert thin["low_sample"] is True and thin["anomaly_static"] is False
+    assert thick["low_sample"] is False and thick["anomaly_static"] is True
+
+
+def test_enrich_with_none_p50_returns_none_efficiency():
+    """p50_ms missing → efficiency_ratio is None."""
+    fake_pops = {"LAX": (33.9425, -118.4081), "JFK": (40.6398, -73.7789)}
     with patch("backend.utils.pop_utils.get_pop_lat_lon_map", return_value=fake_pops):
-        out = _enrich_with_distance(row)
+        out = _enrich_with_distance({"edge_pop": "LAX", "shield_pop": "JFK", "p50_ms": None})
 
     assert out["efficiency_ratio"] is None
     assert out["anomaly_static"] is False
 
 
-def test_shielding_analysis_returns_requires_fields_when_columns_missing(in_memory_duckdb, test_service_source):
-    """If the table schema is missing rid/prid/edge/pop/ottfb, return
-    the ``requires_fields`` list so the frontend can show the field-
-    picker hint ("enable these custom fields to see this view")."""
-    in_memory_duckdb.execute(
-        f"CREATE TABLE {_safe_table(test_service_source['name'])} (timestamp TIMESTAMP, dummy VARCHAR)"
-    )
+@pytest.mark.parametrize(
+    "cols_ddl,expected_missing",
+    [
+        ("timestamp TIMESTAMP, dummy VARCHAR", {"rid", "prid", "edge", "pop", "ottfb"}),
+        ('"timestamp" TIMESTAMP, "rid" VARCHAR, "edge" BOOLEAN, "pop" VARCHAR, "ottfb" DOUBLE', {"prid"}),
+    ],
+)
+def test_shielding_analysis_returns_requires_fields_when_columns_missing(
+    in_memory_duckdb, test_service_source, cols_ddl, expected_missing
+):
+    """If the table schema is missing required shielding columns, return requires_fields."""
+    in_memory_duckdb.execute(f"CREATE TABLE {_safe_table(test_service_source['name'])} ({cols_ddl})")
     out = get_shielding_analysis(in_memory_duckdb, test_service_source, None, None, {})
     assert out["has_data"] is False
-    assert "requires_fields" in out
-    assert set(out["requires_fields"]) >= {"rid", "prid", "edge", "pop", "ottfb"}
+    assert set(out.get("requires_fields", [])) >= expected_missing
 
 
 def test_shielding_analysis_returns_edge_only_when_no_shield_rows(in_memory_duckdb, test_service_source):
-    """If only edge logs exist (service has no shielding configured),
-    return ``edge_only: True`` so the UI renders the explanatory
-    "no shield path" state instead of an empty table."""
+    """If only edge logs exist, return edge_only=True."""
     table = _safe_table(test_service_source["name"])
     logs = _origin_logs(test_service_source)
-    for log in logs:
-        log["edge"] = True  # everyone is an edge log
-        log["rid"] = f"r{log.get('rid', '')}"
-        log["prid"] = ""  # no parent rid → not a shield log
+    for i, log in enumerate(logs):
+        log["edge"] = True
+        log["rid"] = f"r{i}"
+        log["prid"] = ""
         log["pop"] = "LAX"
     insert_mock_logs(in_memory_duckdb, table, logs)
 
@@ -458,20 +371,14 @@ def test_shielding_analysis_returns_edge_only_when_no_shield_rows(in_memory_duck
 
 
 def test_get_summary_empty_schema_returns_has_data_false(in_memory_duckdb):
-    """Service with no schema (table doesn't exist) → has_data=False
-    with just the telemetry shape. Pinned because the FE renders
-    "no data" rather than 500 when the table is missing."""
+    """Service with no schema (table doesn't exist) → has_data=False."""
     src = {"name": "nonexistent_origin_svc", "service_id": "x"}
     out = get_summary(in_memory_duckdb, src, start_time=None, end_time=None, filters={})
     assert out["has_data"] is False
 
 
 def test_response_cache_hit_skips_duckdb_on_repeat_call(in_memory_duckdb, test_service_source):
-    """The Origin page fires the same endpoint repeatedly (React Query refetch,
-    nav-back). The first call should hit DuckDB; subsequent calls within the
-    30s TTL must return ``is_cached=True`` (rendered as ``_is_cached`` in JSON
-    via the BaseResponse serialization_alias) without re-executing the
-    aggregate query."""
+    """First call hits DuckDB; repeat call within TTL returns is_cached=True."""
     logs = _origin_logs(test_service_source)
     insert_mock_logs(in_memory_duckdb, _safe_table(test_service_source["name"]), logs)
 
@@ -481,113 +388,58 @@ def test_response_cache_hit_skips_duckdb_on_repeat_call(in_memory_duckdb, test_s
 
     warm = get_summary(in_memory_duckdb, test_service_source, None, None, {})
     assert warm["has_data"] is True
-    # The pydantic field name is `is_cached`; the JSON alias is `_is_cached`.
     assert warm.get("is_cached") is True
-    # Same payload across the cache boundary
     assert warm["ottfb_p50_ms"] == cold["ottfb_p50_ms"]
 
 
 def test_get_summary_uses_ttfb_only_when_ottfb_column_absent(in_memory_duckdb, test_service_source):
-    """When the table has `ttfb` but no `ottfb` column (older log
-    formats), lat_val falls back to `"ttfb" * 1000000.0`. Pinned
-    because the origin dashboard must still work on legacy services
-    that pre-date the ottfb column."""
+    """When ottfb is None, lat_val falls back to ttfb * 1000000.0."""
     logs = generate_mock_logs(test_service_source, num_logs=20, hours_ago=1)
-    # Set ttfb (seconds) and clear ottfb so the fallback path fires
     for i, log in enumerate(logs):
-        log["ttfb"] = 0.05 + i * 0.001  # 50ms ramp
+        log["ttfb"] = 0.05 + i * 0.001
         log["ottfb"] = None
     insert_mock_logs(in_memory_duckdb, _safe_table(test_service_source["name"]), logs)
 
     out = get_summary(in_memory_duckdb, test_service_source, None, None, {})
     assert out["has_data"] is True
-    # p50 should be roughly 60ms (middle of the 50-70ms range)
     assert out["ottfb_p50_ms"] is not None
 
 
 def test_get_timeseries_metric_unavailable_returns_empty(in_memory_duckdb, test_service_source):
-    """Requesting `metric="ttlb"` when ottlb column doesn't exist
-    AND no fallback applies → has_data=False. Pinned because the
-    FE distinguishes "no data" from a hard error."""
-    logs = _origin_logs(test_service_source, num=10)
-    insert_mock_logs(in_memory_duckdb, _safe_table(test_service_source["name"]), logs)
-
-    out = get_timeseries(
-        in_memory_duckdb,
-        test_service_source,
-        None,
-        None,
-        {},
-        metric="ttlb",  # ottlb column absent
-    )
+    """Requesting metric='ttlb' when ottlb column doesn't exist → has_data=False."""
+    insert_mock_logs(in_memory_duckdb, _safe_table(test_service_source["name"]), _origin_logs(test_service_source, 10))
+    out = get_timeseries(in_memory_duckdb, test_service_source, None, None, {}, metric="ttlb")
     assert out["has_data"] is False
 
 
 def test_get_timeseries_sub_minute_bucket_uses_seconds_interval(in_memory_duckdb, test_service_source):
-    """`bucket_minutes < 1` → use INTERVAL 'N' seconds (not 0
-    minutes). Pinned because a 0-minute interval would error in
-    DuckDB; this branch ensures the "second" granularity option
-    works."""
-    logs = _origin_logs(test_service_source, num=20)
-    insert_mock_logs(in_memory_duckdb, _safe_table(test_service_source["name"]), logs)
-
-    out = get_timeseries(
-        in_memory_duckdb,
-        test_service_source,
-        None,
-        None,
-        {},
-        bucket_minutes=0.5,  # 30 seconds
-    )
-    # Doesn't crash with DuckDB interval error
+    """bucket_minutes < 1 uses INTERVAL 'N' seconds."""
+    insert_mock_logs(in_memory_duckdb, _safe_table(test_service_source["name"]), _origin_logs(test_service_source, 20))
+    out = get_timeseries(in_memory_duckdb, test_service_source, None, None, {}, bucket_minutes=0.5)
     assert "series" in out
 
 
 def test_get_timeseries_p50_uses_median_not_approx_quantile(in_memory_duckdb, test_service_source):
-    """For `percentile="p50"`, the SQL uses `MEDIAN(...)` (exact)
-    instead of APPROX_QUANTILE. Pinned because admins use p50 for
-    accurate central-tendency reporting and approximation would
-    create reporting drift."""
-    logs = _origin_logs(test_service_source, num=20)
-    insert_mock_logs(in_memory_duckdb, _safe_table(test_service_source["name"]), logs)
-
-    out = get_timeseries(
-        in_memory_duckdb,
-        test_service_source,
-        None,
-        None,
-        {},
-        percentile="p50",
-    )
+    """For percentile='p50', the SQL uses MEDIAN(...)."""
+    insert_mock_logs(in_memory_duckdb, _safe_table(test_service_source["name"]), _origin_logs(test_service_source, 20))
+    out = get_timeseries(in_memory_duckdb, test_service_source, None, None, {}, percentile="p50")
     assert "series" in out
 
 
 def test_get_timeseries_split_by_leg_includes_edge_in_series(in_memory_duckdb, test_service_source):
-    """`split_by_leg=True` AND `edge` column present → series points
-    include the `edge` key for FE separation of edge vs shield
-    timing curves. Pinned because losing this would collapse them
-    onto one line."""
+    """split_by_leg=True AND edge column present → series points include 'edge' key."""
     logs = _origin_logs(test_service_source, num=20)
     for i, log in enumerate(logs):
-        log["edge"] = i % 2 == 0  # alternate edge/shield
+        log["edge"] = i % 2 == 0
     insert_mock_logs(in_memory_duckdb, _safe_table(test_service_source["name"]), logs)
 
-    out = get_timeseries(
-        in_memory_duckdb,
-        test_service_source,
-        None,
-        None,
-        {},
-        split_by_leg=True,
-    )
-    # At least one series point should include the `edge` key
+    out = get_timeseries(in_memory_duckdb, test_service_source, None, None, {}, split_by_leg=True)
     if out["series"]:
         assert "edge" in out["series"][0]
 
 
 def test_get_status_codes_returns_has_data_false_when_ost_all_null(in_memory_duckdb, test_service_source):
-    """All-null ost column → no rows → has_data=False (not 500).
-    Pinned because the FE renders an empty state, not error toast."""
+    """All-null ost column → no rows → has_data=False."""
     logs = generate_mock_logs(test_service_source, num_logs=10, hours_ago=1)
     for log in logs:
         log["ost"] = None
@@ -597,35 +449,30 @@ def test_get_status_codes_returns_has_data_false_when_ost_all_null(in_memory_duc
     assert out["has_data"] is False
 
 
-def test_get_status_codes_returns_has_data_false_when_ost_column_missing(in_memory_duckdb, test_service_source):
-    """No `ost` column at all → has_data=False. Pinned because
-    services without Group L (origin metrics) don't have ost."""
+@pytest.mark.parametrize(
+    "fn,extra_check",
+    [
+        (get_status_codes, None),
+        (get_pop_latency, ("requires_group_c", True)),
+        (get_ip_health, None),
+    ],
+)
+def test_origin_endpoints_missing_required_cols_return_empty(in_memory_duckdb, test_service_source, fn, extra_check):
+    """Missing required origin columns returns has_data=False (and requires_group_c=True for pop_latency)."""
     in_memory_duckdb.execute(
         f'CREATE TABLE "{_safe_table(test_service_source["name"])}" (timestamp TIMESTAMP, status INTEGER)'
     )
-    out = get_status_codes(in_memory_duckdb, test_service_source, None, None, {})
+    out = fn(in_memory_duckdb, test_service_source, None, None, {})
     assert out["has_data"] is False
-
-
-def test_get_pop_latency_no_pop_col_flags_requires_group_c(in_memory_duckdb, test_service_source):
-    """Missing `pop` column → ``requires_group_c=True`` so the FE
-    can render the "enable Group C" CTA. Pinned because losing this
-    would render a confusing empty pop list."""
-    in_memory_duckdb.execute(
-        f'CREATE TABLE "{_safe_table(test_service_source["name"])}" (timestamp TIMESTAMP, status INTEGER)'
-    )
-    out = get_pop_latency(in_memory_duckdb, test_service_source, None, None, {})
-    assert out["has_data"] is False
-    assert out["requires_group_c"] is True
+    if extra_check:
+        assert out[extra_check[0]] is extra_check[1]
 
 
 def test_get_pop_latency_pop_col_present_but_no_origin_data_flags_no_group_c_message(
     in_memory_duckdb,
     test_service_source,
 ):
-    """Pop column EXISTS but no origin timing data → has_data=False
-    with requires_group_c=False (different CTA: "ingest more
-    data")."""
+    """Pop column EXISTS but no origin timing data → has_data=False, requires_group_c=False."""
     logs = generate_mock_logs(test_service_source, num_logs=10)
     for log in logs:
         log["ottfb"] = None
@@ -637,259 +484,128 @@ def test_get_pop_latency_pop_col_present_but_no_origin_data_flags_no_group_c_mes
     assert out["requires_group_c"] is False
 
 
-def test_get_ip_health_missing_required_cols_returns_empty(in_memory_duckdb, test_service_source):
-    """Without both `oip` AND `ost` columns → has_data=False.
-    Pinned because origin IP health requires both."""
-    in_memory_duckdb.execute(
-        f'CREATE TABLE "{_safe_table(test_service_source["name"])}" (timestamp TIMESTAMP, status INTEGER)'
-    )
-    out = get_ip_health(in_memory_duckdb, test_service_source, None, None, {})
-    assert out["has_data"] is False
-
-
 def test_get_ip_health_returns_empty_when_no_qualifying_ips(in_memory_duckdb, test_service_source):
-    """No IPs hit the 10-request minimum → empty rows + has_data=False.
-    Pinned because the 10-req floor prevents noisy single-shot IPs
-    from cluttering the panel."""
+    """No IPs hit the 10-request minimum → empty rows + has_data=False."""
     logs = generate_mock_logs(test_service_source, num_logs=5, hours_ago=1)
     for log in logs:
-        log["oip"] = "1.1.1.1"  # All same IP, only 5 requests
+        log["oip"] = "1.1.1.1"
         log["ost"] = 200
         log["ottfb"] = 50000
     insert_mock_logs(in_memory_duckdb, _safe_table(test_service_source["name"]), logs)
 
     out = get_ip_health(in_memory_duckdb, test_service_source, None, None, {})
-    # Even though oip + ost present, no IP has >=10 requests
     assert out["has_data"] is False
 
 
 def test_shielding_analysis_returns_empty_when_no_origin_data(in_memory_duckdb, test_service_source):
-    """All required cols exist but no ottfb values are populated →
-    ``has_origin_data`` returns False → no shielding analysis."""
+    """All required cols exist but no ottfb values are populated → has_data=False."""
     table = _safe_table(test_service_source["name"])
     logs = generate_mock_logs(test_service_source, num_logs=10, hours_ago=1)
     for log in logs:
-        log["ottfb"] = None
-        log["ttfb"] = None
-        log["rid"] = "rA"
-        log["prid"] = "rA"
-        log["edge"] = True
-        log["pop"] = "LAX"
+        log.update({"ottfb": None, "ttfb": None, "rid": "rA", "prid": "rA", "edge": True, "pop": "LAX"})
     insert_mock_logs(in_memory_duckdb, table, logs)
 
     out = get_shielding_analysis(in_memory_duckdb, test_service_source, None, None, {})
     assert out["has_data"] is False
 
 
-def test_get_pop_latency_returns_rows_with_median_p95_and_elevated_flag(
-    in_memory_duckdb,
-    test_service_source,
-):
-    """Happy path: returns has_data=True, includes median_p95_ms,
-    and flags rows where p95 > median_p95 * 2 as elevated. Pinned
-    because the FE's POP-latency map renders the elevated chip
-    differently — losing the flag would mask outliers."""
+def test_get_pop_latency_returns_rows_with_median_p95_and_elevated_flag(in_memory_duckdb, test_service_source):
+    """Returns has_data=True, includes median_p95_ms, and flags rows where p95 > median_p95 * 2 as elevated."""
     table = _safe_table(test_service_source["name"])
     logs = generate_mock_logs(test_service_source, num_logs=20, hours_ago=1)
-    # Three POPs: two normal (fast), one outlier (slow)
     for i, log in enumerate(logs):
         if i < 7:
-            log["pop"], log["ottfb"] = "LAX", 50000  # 50ms
+            log["pop"], log["ottfb"] = "LAX", 50000
         elif i < 14:
-            log["pop"], log["ottfb"] = "JFK", 60000  # 60ms
+            log["pop"], log["ottfb"] = "JFK", 60000
         else:
-            log["pop"], log["ottfb"] = "SLOW", 500000  # 500ms — should be elevated
+            log["pop"], log["ottfb"] = "SLOW", 500000
         log["ttfb"] = None
     insert_mock_logs(in_memory_duckdb, table, logs)
 
     out = get_pop_latency(in_memory_duckdb, test_service_source, None, None, {})
-
     assert out["has_data"] is True
     assert "median_p95_ms" in out
     assert out["requires_group_c"] is False
     pops = {r["pop"]: r for r in out["rows"]}
-    assert "LAX" in pops and "JFK" in pops and "SLOW" in pops
-    # SLOW's p95 of ~500ms is >> 2x the median across the three POPs
+    assert {"LAX", "JFK", "SLOW"} <= pops.keys()
     assert pops["SLOW"]["elevated"] is True
     assert pops["LAX"]["elevated"] is False
 
 
-def test_get_pop_latency_uses_ttfb_when_ottfb_column_missing(
-    in_memory_duckdb,
-    test_service_source,
-):
-    """When ottfb isn't in the schema but ttfb is, the latency value
-    is computed as `ttfb * 1000000` (µs). Pinned because losing this
-    fallback would skip POP-latency for services on the basic
-    logging preset."""
+def test_get_pop_latency_uses_ttfb_when_ottfb_column_missing(in_memory_duckdb, test_service_source):
+    """When ottfb isn't in schema, latency is computed from ttfb * 1000000 (µs)."""
     table = _safe_table(test_service_source["name"])
-    # Build table without ottfb column
     in_memory_duckdb.execute(f'CREATE TABLE "{table}" ("timestamp" TIMESTAMP, "pop" VARCHAR, "ttfb" DOUBLE)')
-    from datetime import UTC, datetime, timedelta
-
     base = datetime.now(UTC) - timedelta(hours=1)
-    for i, ttfb_s in enumerate([0.05, 0.06, 0.07, 0.5]):  # 50-500ms
+    for i, ttfb_s in enumerate([0.05, 0.06, 0.07, 0.5]):
         in_memory_duckdb.execute(
             f'INSERT INTO "{table}" VALUES (?, ?, ?)',
             [(base + timedelta(seconds=i * 30)).isoformat(), "LAX", ttfb_s],
         )
 
     out = get_pop_latency(in_memory_duckdb, test_service_source, None, None, {})
-
     assert out["has_data"] is True
     lax_row = next(r for r in out["rows"] if r["pop"] == "LAX")
-    # 95th percentile of 50/60/70/500 ms ≈ 500ms
-    assert lax_row["p95_ms"] is not None
-    assert lax_row["p95_ms"] >= 100  # significantly elevated past the lower three
+    assert lax_row["p95_ms"] is not None and lax_row["p95_ms"] >= 100
 
 
-def test_get_ip_health_returns_rows_ordered_by_error_pct_desc(
-    in_memory_duckdb,
-    test_service_source,
-):
-    """Returns oips with >=10 requests, ranked by error_pct DESC.
-    Pinned because the FE's "Worst origin IPs" panel relies on
-    error-pct ordering — flipping ASC would highlight the best
-    instead of the worst."""
+def test_get_ip_health_returns_rows_ordered_by_error_pct_desc(in_memory_duckdb, test_service_source):
+    """Returns oips with >=10 requests, ranked by error_pct DESC."""
     table = _safe_table(test_service_source["name"])
     logs = generate_mock_logs(test_service_source, num_logs=40, hours_ago=1)
-    # 20 logs for 1.1.1.1 with 50% errors; 20 logs for 2.2.2.2 with 10% errors
     for i, log in enumerate(logs):
-        if i < 20:
-            log["oip"] = "1.1.1.1"
-            log["ost"] = 500 if i < 10 else 200
-        else:
-            log["oip"] = "2.2.2.2"
-            log["ost"] = 500 if i < 22 else 200
+        log["oip"] = "1.1.1.1" if i < 20 else "2.2.2.2"
+        log["ost"] = 500 if (i < 10 or 20 <= i < 22) else 200
         log["ottfb"] = 50000
     insert_mock_logs(in_memory_duckdb, table, logs)
 
     out = get_ip_health(in_memory_duckdb, test_service_source, None, None, {})
-
     assert out["has_data"] is True
     rows = out["rows"]
     assert len(rows) == 2
-    # Highest error_pct first
     assert rows[0]["oip"] == "1.1.1.1"
     assert rows[0]["error_pct"] >= rows[1]["error_pct"]
 
 
-def test_get_shielding_analysis_reports_missing_required_fields(
-    in_memory_duckdb,
-    test_service_source,
-):
-    """Missing one of (rid, prid, edge, pop, ottfb) → ``requires_fields``
-    in response. Pinned because the FE shows a "enable Group L"
-    CTA listing the missing fields by name."""
-    table = _safe_table(test_service_source["name"])
-    # Schema with most-but-not-all required columns (missing `prid`)
-    in_memory_duckdb.execute(
-        f'CREATE TABLE "{table}" ("timestamp" TIMESTAMP, "rid" VARCHAR, "edge" BOOLEAN, "pop" VARCHAR, "ottfb" DOUBLE)'
-    )
-    out = get_shielding_analysis(in_memory_duckdb, test_service_source, None, None, {})
-    assert out["has_data"] is False
-    assert "prid" in out.get("requires_fields", [])
-
-
-def test_get_shielding_analysis_returns_edge_only_when_no_shield_rows(
-    in_memory_duckdb,
-    test_service_source,
-):
-    """All required cols + ottfb populated but no shield rows
-    (edge=false with prid set) → ``edge_only=True``. Pinned because
-    the FE uses this exact key to render the "service has no
-    shielding configured" empty state instead of a generic empty
-    table."""
-    table = _safe_table(test_service_source["name"])
-    logs = generate_mock_logs(test_service_source, num_logs=10, hours_ago=1)
-    for i, log in enumerate(logs):
-        log["edge"] = True  # No shield rows
-        log["rid"] = f"r{i}"
-        log["prid"] = ""
-        log["pop"] = "LAX"
-        log["ottfb"] = 50000
-    insert_mock_logs(in_memory_duckdb, table, logs)
-
-    out = get_shielding_analysis(in_memory_duckdb, test_service_source, None, None, {})
-    assert out["has_data"] is False
-    assert out.get("edge_only") is True
-
-
-def test_get_shielding_analysis_happy_path_returns_edge_to_shield_rows(
-    in_memory_duckdb,
-    test_service_source,
-):
-    """Happy path: edge logs + matching shield logs (via prid=rid) →
-    aggregated rows grouped by (edge_pop, shield_pop) with percentile
-    latencies + distance enrichment. Pinned because losing the join
-    would zero the entire shielding panel for services WITH
-    shielding configured."""
-    table = _safe_table(test_service_source["name"])
-    logs = generate_mock_logs(test_service_source, num_logs=20, hours_ago=1)
-
-    # 10 edge logs at LAX with matching shield logs at IAD (prid = rid)
-    for i, log in enumerate(logs):
-        rid = f"req{i}"
-        if i < 10:
-            log["edge"] = True
-            log["rid"] = rid
-            log["prid"] = ""
-            log["pop"] = "LAX"
-            log["ottfb"] = 100000  # 100ms at edge
-        else:
-            # 10 corresponding shield logs at IAD
-            shield_rid = f"req{i - 10}"
-            log["edge"] = False
-            log["rid"] = f"sr{i}"
-            log["prid"] = shield_rid
-            log["pop"] = "IAD"
-            log["ottfb"] = 30000  # 30ms at shield
-        log["ttfb"] = None
-    insert_mock_logs(in_memory_duckdb, table, logs)
-
-    # `_enrich_with_distance` reads from cache/pop_locations.json (relative
-    # path, populated by a running dev server). A fresh clone has no cache
-    # so the unmocked lookup returns {} and edge_lat/shield_lat are None.
-    fake_pops = {"LAX": (33.9425, -118.4081), "IAD": (38.9445, -77.4558)}
-    with patch("backend.utils.pop_utils.get_pop_lat_lon_map", return_value=fake_pops):
-        out = get_shielding_analysis(in_memory_duckdb, test_service_source, None, None, {})
-
-    # Has at least one row from the LAX→IAD join
-    assert len(out["rows"]) >= 1
-    row = next((r for r in out["rows"] if r["edge_pop"] == "LAX" and r["shield_pop"] == "IAD"), None)
-    assert row is not None
-    assert row["requests"] == 10
-    # p95 of (100ms - 30ms) ≈ 70ms
-    assert row["p95_ms"] is not None
-    # `_enrich_with_distance` added lat/lon for both pops
-    assert row.get("edge_lat") is not None
-    assert row.get("shield_lat") is not None
-
-
 def _shield_pair_logs(src, *, edge_pop, shield_pop, n, edge_us, shield_us, rid_prefix, ttfb=None):
-    """Build ``n`` edge logs at ``edge_pop`` + ``n`` matching shield logs at
-    ``shield_pop`` (joined via prid=rid). ``edge_us``/``shield_us`` are ottfb
-    microseconds (pass ``None`` to leave ottfb NULL and exercise the ttfb
-    fallback)."""
+    """Build ``n`` edge logs at ``edge_pop`` + ``n`` matching shield logs at ``shield_pop`` (joined via prid=rid)."""
     edge_logs = generate_mock_logs(src, num_logs=n, hours_ago=1)
     shield_logs = generate_mock_logs(src, num_logs=n, hours_ago=1)
     for i in range(n):
         rid = f"{rid_prefix}{i}"
-        e = edge_logs[i]
-        e["edge"] = True
-        e["rid"] = rid
-        e["prid"] = ""
-        e["pop"] = edge_pop
-        e["ottfb"] = edge_us
-        e["ttfb"] = ttfb
-        s = shield_logs[i]
-        s["edge"] = False
-        s["rid"] = f"s{rid_prefix}{i}"
-        s["prid"] = rid
-        s["pop"] = shield_pop
-        s["ottfb"] = shield_us
-        s["ttfb"] = None
+        edge_logs[i].update({"edge": True, "rid": rid, "prid": "", "pop": edge_pop, "ottfb": edge_us, "ttfb": ttfb})
+        shield_logs[i].update(
+            {
+                "edge": False,
+                "rid": f"s{rid_prefix}{i}",
+                "prid": rid,
+                "pop": shield_pop,
+                "ottfb": shield_us,
+                "ttfb": None,
+            }
+        )
     return edge_logs + shield_logs
+
+
+def test_get_shielding_analysis_happy_path_returns_edge_to_shield_rows(in_memory_duckdb, test_service_source):
+    """Happy path: edge logs + matching shield logs → aggregated rows grouped by (edge_pop, shield_pop)."""
+    table = _safe_table(test_service_source["name"])
+    logs = _shield_pair_logs(
+        test_service_source, edge_pop="LAX", shield_pop="IAD", n=10, edge_us=100000, shield_us=30000, rid_prefix="req"
+    )
+    insert_mock_logs(in_memory_duckdb, table, logs)
+
+    fake_pops = {"LAX": (33.9425, -118.4081), "IAD": (38.9445, -77.4558)}
+    with patch("backend.utils.pop_utils.get_pop_lat_lon_map", return_value=fake_pops):
+        out = get_shielding_analysis(in_memory_duckdb, test_service_source, None, None, {})
+
+    assert len(out["rows"]) >= 1
+    row = next((r for r in out["rows"] if r["edge_pop"] == "LAX" and r["shield_pop"] == "IAD"), None)
+    assert row is not None
+    assert row["requests"] == 10
+    assert row["p95_ms"] is not None
+    assert row.get("edge_lat") is not None and row.get("shield_lat") is not None
 
 
 def test_shielding_analysis_edge_filter_does_not_strip_shield_leg(
@@ -1039,8 +755,7 @@ def test_shielding_analysis_keeps_low_volume_high_overhead_route(
 # ── Merged from tests/repositories/test_origin_aggregates.py ──
 @pytest.fixture
 def _clear_origin_caches():
-    """Drop the response memo + schema cache between tests so the
-    composite always re-runs end-to-end."""
+    """Drop the response memo + schema cache between tests so the composite always re-runs end-to-end."""
     _clear_schema_cache()
     origin_mod._response_cache.clear()
     yield
@@ -1048,43 +763,26 @@ def _clear_origin_caches():
     origin_mod._response_cache.clear()
 
 
-def _origin_logs_origin_aggregates(src: dict, num: int = 40) -> list[dict]:
-    """Origin-shaped logs: ottfb populated, mixed ostatus codes, mixed oip.
-
-    Mirrors the helper in test_origin.py so the happy path here exercises
-    the same column families the granular endpoints expect.
-    """
-    logs = generate_mock_logs(src, num_logs=num, hours_ago=1)
+def _origin_logs_origin_aggregates(src: dict, num: int = 40, *, pop: str | None = None) -> list[dict]:
+    """Origin-shaped logs: ottfb populated, mixed ostatus codes, mixed oip, url, and edge."""
+    logs = _origin_logs(src, num=num)
     for i, log in enumerate(logs):
-        log["ottfb"] = 50000 + i * 1000  # 50–90ms in microseconds
-        log["ost"] = 200 if i % 5 != 0 else 500
-        log["oip"] = "203.0.113.1" if i < 25 else "203.0.113.2"
         log["url"] = "/api/data" if i % 2 == 0 else "/images/logo.png"
         log["edge"] = True
+        if pop is not None:
+            log["pop"] = pop
     return logs
 
 
 @pytest.mark.usefixtures("_clear_origin_caches")
 @pytest.mark.asyncio
 async def test_get_aggregates_happy_path_returns_all_seven_cards(in_memory_duckdb, test_service_source):
-    """Seeds origin-shaped logs, calls ``get_aggregates`` with the
-    representative ctx, asserts the seven sub-card keys are present and
-    that each card has the expected ``has_data`` / payload shape."""
-    logs = _origin_logs_origin_aggregates(test_service_source, num=40)
-    # All from one POP so pop_latency returns a row; oip mix → ip_health.
-    for log in logs:
-        log["pop"] = "LAX"
+    """Seeds origin-shaped logs, calls ``get_aggregates``, asserts all 7 sub-card keys and shapes."""
+    logs = _origin_logs_origin_aggregates(test_service_source, num=40, pop="LAX")
     insert_mock_logs(in_memory_duckdb, _safe_table(test_service_source["name"]), logs)
 
-    result = await get_aggregates(
-        in_memory_duckdb,
-        test_service_source,
-        None,
-        None,
-        {},
-    )
+    result = await get_aggregates(in_memory_duckdb, test_service_source, None, None, {})
 
-    # The seven cards + the top-level wrapper keys.
     for key in (
         "has_data",
         "summary",
@@ -1098,124 +796,41 @@ async def test_get_aggregates_happy_path_returns_all_seven_cards(in_memory_duckd
     ):
         assert key in result, f"missing top-level key: {key}"
 
-    # Top-level has_data tracks summary.has_data.
     assert result["has_data"] is True
     assert result["summary"]["has_data"] is True
-
-    # Each sub-card is a dict shape.
     assert isinstance(result["timeseries"]["series"], list)
-    assert isinstance(result["slow_urls"]["rows"], list)
-    assert isinstance(result["status_codes"]["rows"], list)
-    assert isinstance(result["path_breakdown"]["rows"], list)
-    assert isinstance(result["pop_latency"]["rows"], list)
-    assert isinstance(result["ip_health"]["rows"], list)
+    for card in ("slow_urls", "status_codes", "path_breakdown", "pop_latency", "ip_health"):
+        assert isinstance(result[card]["rows"], list)
 
 
 @pytest.mark.usefixtures("_clear_origin_caches")
+@pytest.mark.parametrize("schema_cols", [[], ["foo"]])
 @pytest.mark.asyncio
-async def test_get_aggregates_empty_schema_returns_empty_payload(in_memory_duckdb, test_service_source, monkeypatch):
-    """When ``runner.get_schema_cols()`` returns ``[]`` (the in-process
-    iceberg-view self-heal couldn't even reconstruct a default schema),
-    short-circuit to the empty_payload skeleton with ``has_data=False``.
-
-    Note: in tests the QueryRunner's self-heal path synthesises a
-    default-catalog schema even with no source table, so we explicitly
-    force ``get_schema_cols`` to return ``[]`` to exercise the early-
-    exit branch the production code guards against. The seven sub-card
-    keys must still be present so the FE renderer doesn't crash.
-    """
+async def test_get_aggregates_empty_or_disjoint_schema_returns_empty_payload(
+    in_memory_duckdb, test_service_source, monkeypatch, schema_cols
+):
+    """When get_schema_cols() returns [] or no intersecting columns, short-circuit to empty_payload skeleton."""
     from backend.repositories._base import QueryRunner
 
-    monkeypatch.setattr(QueryRunner, "get_schema_cols", lambda self: [])
-
-    result = await get_aggregates(
-        in_memory_duckdb,
-        test_service_source,
-        None,
-        None,
-        {},
-    )
+    monkeypatch.setattr(QueryRunner, "get_schema_cols", lambda self: schema_cols)
+    result = await get_aggregates(in_memory_duckdb, test_service_source, None, None, {})
 
     assert result["has_data"] is False
-    # The empty_payload skeleton: summary stays at the literal empty
-    # dict rather than the per-card "no data" shape that
-    # _shape_summary would produce.
     assert result["summary"] == {}
     assert result["timeseries"] == {"has_data": False, "series": []}
     assert result["slow_urls"] == {"has_data": False, "rows": []}
     assert result["status_codes"] == {"has_data": False, "rows": []}
-    assert result["path_breakdown"] == {
-        "has_data": False,
-        "shielding_detected": False,
-        "rows": [],
-    }
-    assert result["pop_latency"] == {
-        "has_data": False,
-        "requires_group_c": False,
-        "rows": [],
-    }
+    assert result["path_breakdown"] == {"has_data": False, "shielding_detected": False, "rows": []}
+    assert result["pop_latency"] == {"has_data": False, "requires_group_c": False, "rows": []}
     assert result["ip_health"] == {"has_data": False, "rows": []}
-    # No section_timings on the short-circuit branch.
-    assert "section_timings" not in result
-
-
-@pytest.mark.usefixtures("_clear_origin_caches")
-@pytest.mark.asyncio
-async def test_get_aggregates_no_intersecting_cols_returns_empty(in_memory_duckdb, test_service_source, monkeypatch):
-    """When ``get_schema_cols()`` returns a schema with no columns in
-    common with the ``wanted_cols`` list inside ``get_aggregates``
-    (timestamp, cache, edge, url, oip, ost, pop, ottfb, ottlb, ttfb,
-    elapsed, obytes), ``select_cols`` collapses to ``[]`` and the
-    early return fires BEFORE the TEMP TABLE materialisation.
-
-    Force the schema to a single non-matching column so the
-    intersection is provably empty regardless of the QueryRunner's
-    iceberg-view self-heal behaviour in tests.
-    """
-    from backend.repositories._base import QueryRunner
-
-    monkeypatch.setattr(QueryRunner, "get_schema_cols", lambda self: ["foo"])
-
-    result = await get_aggregates(
-        in_memory_duckdb,
-        test_service_source,
-        None,
-        None,
-        {},
-    )
-
-    assert result["has_data"] is False
-    # The empty_payload skeleton — same as the no-schema branch.
-    assert result["summary"] == {}
-    assert result["timeseries"] == {"has_data": False, "series": []}
-    # section_timings is set up AFTER the select_cols check, so the
-    # empty-intersection branch should NOT have it.
     assert "section_timings" not in result
 
 
 @pytest.mark.usefixtures("_clear_origin_caches")
 @pytest.mark.asyncio
 async def test_get_aggregates_serial_fallback_on_pool_busy(in_memory_duckdb, test_service_source, monkeypatch):
-    """Monkeypatch ``backend.core.duckdb_pool.checkout_connection`` to
-    raise ``_PoolBusy`` immediately. ``get_aggregates`` must catch it
-    and run all four branches serially against the primary runner —
-    no asyncio.gather, no extra connections.
-
-    Note: ``get_aggregates`` does ``from backend.core.duckdb_pool import
-    _PoolBusy, checkout_connection`` inside the function body, so we
-    patch the source module (which is what `from X import Y` will
-    resolve on the next call).
-
-    The recon noted the patch must be a real contextmanager factory,
-    not a bare MagicMock — the for-loop in ``get_aggregates`` calls
-    ``checkout_connection(src, max_wait=...)`` (factory) and then
-    ``cm.__enter__()`` on the returned object. A MagicMock factory
-    would happen to work, but a real ``@contextmanager`` matches the
-    production signature and makes the test intent obvious.
-    """
-    logs = _origin_logs_origin_aggregates(test_service_source, num=30)
-    for log in logs:
-        log["pop"] = "LAX"
+    """When checkout_connection raises _PoolBusy, get_aggregates runs all branches serially against primary runner."""
+    logs = _origin_logs_origin_aggregates(test_service_source, num=30, pop="LAX")
     insert_mock_logs(in_memory_duckdb, _safe_table(test_service_source["name"]), logs)
 
     from backend.core import duckdb_pool
@@ -1223,63 +838,31 @@ async def test_get_aggregates_serial_fallback_on_pool_busy(in_memory_duckdb, tes
     @contextlib.contextmanager
     def _always_busy(src, max_wait=10.0):  # noqa: ARG001
         raise duckdb_pool._PoolBusy("test forced saturation")
-        yield  # pragma: no cover — generator suite requires a yield even after raise
+        yield  # pragma: no cover
 
     monkeypatch.setattr(duckdb_pool, "checkout_connection", _always_busy)
 
-    result = await get_aggregates(
-        in_memory_duckdb,
-        test_service_source,
-        None,
-        None,
-        {},
-    )
+    result = await get_aggregates(in_memory_duckdb, test_service_source, None, None, {})
 
-    # The serial fallback ran all four branches against the single
-    # primary runner. has_data + cards still populated, just without
-    # parallelism.
     assert result["has_data"] is True
     assert result["summary"]["has_data"] is True
     assert isinstance(result["timeseries"]["series"], list)
-    assert isinstance(result["status_codes"]["rows"], list)
-    assert isinstance(result["pop_latency"]["rows"], list)
-    assert isinstance(result["ip_health"]["rows"], list)
+    for card in ("status_codes", "pop_latency", "ip_health"):
+        assert isinstance(result[card]["rows"], list)
 
-    # The parallel branch tags a marker; on the serial fallback it
-    # must NOT be present.
     sections = {entry["section"] for entry in result["section_timings"]}
     assert "origin:parallel" not in sections
-    # The per-branch marks fired against the primary runner.
-    assert {
-        "summary",
-        "timeseries",
-        "status_codes",
-        "path_breakdown",
-        "pop_latency",
-        "ip_health",
-        "slow_urls",
-    }.issubset(sections)
+    assert _ALL_ORIGIN_SECTIONS.issubset(sections)
 
 
 @pytest.mark.usefixtures("_clear_origin_caches")
 @pytest.mark.asyncio
 async def test_get_aggregates_drops_temp_table_in_finally(in_memory_duckdb, test_service_source, monkeypatch):
-    """Monkeypatch one of the inner branches (``_origin_summary_from_temp``)
-    to raise. The outer try/finally must STILL issue
-    ``DROP TABLE IF EXISTS "<temp_table>"`` against the primary runner
-    so the per-request scratch table doesn't leak into the connection's
-    catalog.
-
-    We track DROP statements by recording every SQL the in-memory
-    DuckDB sees through a sniffer wrapper on ``con.execute``.
-    """
+    """Outer try/finally must issue DROP TABLE IF EXISTS even when an inner branch raises."""
     logs = _origin_logs_origin_aggregates(test_service_source, num=20)
     insert_mock_logs(in_memory_duckdb, _safe_table(test_service_source["name"]), logs)
 
-    # Sniff every SQL string passed through QueryRunner.execute so we
-    # can assert the DROP fired in the finally clause. We monkeypatch
-    # the QueryRunner method (not the DuckDB connection — its execute
-    # attribute is read-only at the C layer).
+    from backend.core import duckdb_pool
     from backend.repositories._base import QueryRunner
 
     executed_sqls: list[str] = []
@@ -1289,69 +872,36 @@ async def test_get_aggregates_drops_temp_table_in_finally(in_memory_duckdb, test
         executed_sqls.append(q)
         return original_execute(self, q, p)
 
-    monkeypatch.setattr(QueryRunner, "execute", _sniff)
-
-    # Force the summary branch to blow up AFTER temp-table create. Use
-    # the serial fallback path so the exception propagates without
-    # asyncio.gather wrapping (and so we don't need to mock 3 pool
-    # connections too).
-    from backend.core import duckdb_pool
-
     @contextlib.contextmanager
     def _busy(src, max_wait=10.0):  # noqa: ARG001
         raise duckdb_pool._PoolBusy("force serial path")
         yield  # pragma: no cover
 
-    monkeypatch.setattr(duckdb_pool, "checkout_connection", _busy)
-
     def _boom(*args, **kwargs):
         raise RuntimeError("synthetic summary failure")
 
+    monkeypatch.setattr(QueryRunner, "execute", _sniff)
+    monkeypatch.setattr(duckdb_pool, "checkout_connection", _busy)
     monkeypatch.setattr(origin_mod, "_origin_summary_from_temp", _boom)
 
     with pytest.raises(RuntimeError, match="synthetic summary failure"):
-        await get_aggregates(
-            in_memory_duckdb,
-            test_service_source,
-            None,
-            None,
-            {},
-        )
+        await get_aggregates(in_memory_duckdb, test_service_source, None, None, {})
 
-    # The temp table name is randomised (t_origin_<hex>), so look for
-    # the DROP-with-temp-prefix pattern in the recorded SQL trail.
     drop_stmts = [s for s in executed_sqls if "DROP TABLE IF EXISTS" in s and "t_origin_" in s]
-    assert len(drop_stmts) >= 1, (
-        "outer finally must DROP the per-request temp table even when an "
-        f"inner branch raises. Recorded SQLs: {executed_sqls!r}"
-    )
+    assert len(drop_stmts) >= 1, f"outer finally must DROP temp table. Recorded SQLs: {executed_sqls!r}"
 
 
 @pytest.mark.usefixtures("_clear_origin_caches")
 @pytest.mark.asyncio
 async def test_get_aggregates_section_timings_populated(in_memory_duckdb, test_service_source):
-    """``section_timings`` is the perf-harness contract — it must
-    include the ``temp_table_create`` mark plus one entry per branch.
-    Pinned because dashboard.py, network.py, etc. all surface the same
-    shape and the FE Debug Panel reads it directly."""
-    logs = _origin_logs_origin_aggregates(test_service_source, num=25)
-    for log in logs:
-        log["pop"] = "JFK"
+    """section_timings includes temp_table_create plus one entry per branch."""
+    logs = _origin_logs_origin_aggregates(test_service_source, num=25, pop="JFK")
     insert_mock_logs(in_memory_duckdb, _safe_table(test_service_source["name"]), logs)
 
-    result = await get_aggregates(
-        in_memory_duckdb,
-        test_service_source,
-        None,
-        None,
-        {},
-    )
+    result = await get_aggregates(in_memory_duckdb, test_service_source, None, None, {})
 
     timings = result["section_timings"]
-    assert isinstance(timings, list)
-    assert len(timings) >= 2
-
-    # Each entry has the standard SectionTimer shape.
+    assert isinstance(timings, list) and len(timings) >= 2
     for entry in timings:
         assert set(entry.keys()) >= {"section", "time_ms"}
         assert isinstance(entry["section"], str)
@@ -1365,20 +915,8 @@ async def test_get_aggregates_section_timings_populated(in_memory_duckdb, test_s
     ]
 
     sections = {entry["section"] for entry in timings}
-    # temp_table_create always fires when materialisation runs.
     assert "temp_table_create" in sections
-    # The seven per-branch marks (whether parallel or serial both go
-    # through the same _branch_* helpers that mark via SectionTimer).
-    for name in (
-        "summary",
-        "slow_urls",
-        "timeseries",
-        "status_codes",
-        "path_breakdown",
-        "pop_latency",
-        "ip_health",
-    ):
-        assert name in sections, f"missing section: {name}"
+    assert _ALL_ORIGIN_SECTIONS.issubset(sections)
 
 
 _ALL_ORIGIN_SECTIONS = {
@@ -1393,182 +931,88 @@ _ALL_ORIGIN_SECTIONS = {
 
 
 @pytest.mark.usefixtures("_clear_origin_caches")
+@pytest.mark.parametrize(
+    "sections_arg,pop,expected_sections",
+    [
+        (None, "DFW", _ALL_ORIGIN_SECTIONS),
+        ({"summary"}, "MIA", {"summary"}),
+        ({"timeseries", "status_codes", "path_breakdown"}, "ATL", {"timeseries", "status_codes", "path_breakdown"}),
+        ({"pop_latency", "ip_health"}, "SEA", {"pop_latency", "ip_health"}),
+    ],
+)
 @pytest.mark.asyncio
-async def test_get_aggregates_sections_none_preserves_full_response(in_memory_duckdb, test_service_source):
-    """sections=None is the zero-risk default — every section the
-    pre-selector path produced must still land in the response."""
-    logs = _origin_logs_origin_aggregates(test_service_source, num=25)
-    for log in logs:
-        log["pop"] = "DFW"
+async def test_get_aggregates_sections_selector(
+    in_memory_duckdb, test_service_source, sections_arg, pop, expected_sections
+):
+    """sections selector filters both returned card keys and section_timings entries."""
+    logs = _origin_logs_origin_aggregates(test_service_source, num=25, pop=pop)
     insert_mock_logs(in_memory_duckdb, _safe_table(test_service_source["name"]), logs)
 
-    result = await get_aggregates(
-        in_memory_duckdb,
-        test_service_source,
-        None,
-        None,
-        {},
-        sections=None,
-    )
-    assert _ALL_ORIGIN_SECTIONS.issubset(result.keys()), (
-        f"sections=None should return every section; missing: {_ALL_ORIGIN_SECTIONS - result.keys()}"
-    )
-
-
-@pytest.mark.usefixtures("_clear_origin_caches")
-@pytest.mark.asyncio
-async def test_get_aggregates_summary_only_skips_other_branches(in_memory_duckdb, test_service_source):
-    """sections={'summary'} returns only the summary card — proves other
-    branch helpers don't run AND their section_timings entries don't
-    fire. Single-section selectors are the win case the FE will pre-warm
-    with (e.g. dashboard hover surfaces ottfb_p95 from /origin's summary
-    card without the heavy slow_urls branch)."""
-    logs = _origin_logs_origin_aggregates(test_service_source, num=20)
-    for log in logs:
-        log["pop"] = "MIA"
-    insert_mock_logs(in_memory_duckdb, _safe_table(test_service_source["name"]), logs)
-
-    result = await get_aggregates(
-        in_memory_duckdb,
-        test_service_source,
-        None,
-        None,
-        {},
-        sections={"summary"},
-    )
+    result = await get_aggregates(in_memory_duckdb, test_service_source, None, None, {}, sections=sections_arg)
     present = _ALL_ORIGIN_SECTIONS & result.keys()
-    assert present == {"summary"}, f"single-section request leaked extra keys; got {present}"
-    timer_names = {t["section"] for t in result.get("section_timings", [])}
-    # temp_table_create always fires — the shared materialization is the
-    # cost floor regardless of how many sections are requested.
-    assert "temp_table_create" in timer_names
-    assert "summary" in timer_names
-    for blocked in ("slow_urls", "timeseries", "status_codes", "path_breakdown", "pop_latency", "ip_health"):
-        assert blocked not in timer_names, f"selector did not suppress {blocked}; got {timer_names}"
+    assert present == expected_sections
 
-
-@pytest.mark.usefixtures("_clear_origin_caches")
-@pytest.mark.asyncio
-async def test_get_aggregates_ts_status_path_triple_runs_together(in_memory_duckdb, test_service_source):
-    """The {timeseries, status_codes, path_breakdown} triple shares
-    branch 3's pool conn — requesting them as the router would after
-    coupling-expansion proves the branch still runs all three reads
-    sequentially on the same runner (preserving the asyncio.gather
-    partition the selector was designed around)."""
-    logs = _origin_logs_origin_aggregates(test_service_source, num=30)
-    for log in logs:
-        log["pop"] = "ATL"
-    insert_mock_logs(in_memory_duckdb, _safe_table(test_service_source["name"]), logs)
-
-    result = await get_aggregates(
-        in_memory_duckdb,
-        test_service_source,
-        None,
-        None,
-        {},
-        sections={"timeseries", "status_codes", "path_breakdown"},
-    )
-    present = _ALL_ORIGIN_SECTIONS & result.keys()
-    assert present == {"timeseries", "status_codes", "path_breakdown"}, (
-        f"triple selector emitted unexpected sections; got {present}"
-    )
-    timer_names = {t["section"] for t in result.get("section_timings", [])}
-    for need in ("temp_table_create", "timeseries", "status_codes", "path_breakdown"):
-        assert need in timer_names, f"missing required timing entry: {need}"
-    # summary/slow_urls/pop/ip branches sit out — their timings must be absent.
-    for blocked in ("summary", "slow_urls", "pop_latency", "ip_health"):
-        assert blocked not in timer_names, f"selector did not suppress {blocked}; got {timer_names}"
-
-
-@pytest.mark.usefixtures("_clear_origin_caches")
-@pytest.mark.asyncio
-async def test_get_aggregates_pop_ip_pair_runs_together(in_memory_duckdb, test_service_source):
-    """The {pop_latency, ip_health} pair shares branch 4. Asserts both
-    sections land in the response, both timings fire, and the four
-    excluded sections (summary + slow_urls + the branch-3 triple) are
-    suppressed."""
-    logs = _origin_logs_origin_aggregates(test_service_source, num=20)
-    for log in logs:
-        log["pop"] = "SEA"
-    insert_mock_logs(in_memory_duckdb, _safe_table(test_service_source["name"]), logs)
-
-    result = await get_aggregates(
-        in_memory_duckdb,
-        test_service_source,
-        None,
-        None,
-        {},
-        sections={"pop_latency", "ip_health"},
-    )
-    present = _ALL_ORIGIN_SECTIONS & result.keys()
-    assert present == {"pop_latency", "ip_health"}, f"pair selector got {present}"
     timer_names = {t["section"] for t in result.get("section_timings", [])}
     assert "temp_table_create" in timer_names
-    assert "pop_latency" in timer_names
-    assert "ip_health" in timer_names
-    for blocked in ("summary", "slow_urls", "timeseries", "status_codes", "path_breakdown"):
+    assert expected_sections.issubset(timer_names)
+    for blocked in _ALL_ORIGIN_SECTIONS - expected_sections:
         assert blocked not in timer_names, f"selector did not suppress {blocked}; got {timer_names}"
 
 
 @pytest.mark.usefixtures("_clear_origin_caches")
 def test_parallel_gather_uses_return_exceptions_true():
-    """Since all branch queries in ``get_aggregates`` read from the temporary
-    table (which is connection-scoped in DuckDB and cannot be accessed across
-    different pooled connections), parallel execution is disabled and all
-    branches run sequentially on the primary connection's QueryRunner.
-
-    Verify this design invariant by confirming that ``get_aggregates``
-    source does not use ``checkout_connection`` or ``asyncio.gather`` for branch queries,
-    and runs them serially.
-    """
+    """Verify get_aggregates runs branch queries sequentially on the primary connection's runner."""
     import inspect
 
     src = inspect.getsource(get_aggregates)
-    assert "checkout_connection" not in src, (
-        "get_aggregates should not attempt to checkout extra connections "
-        "because temporary tables are connection-scoped."
-    )
-    assert "asyncio.gather(" not in src, (
-        "get_aggregates should execute branch queries sequentially on the primary connection's runner."
-    )
+    assert "checkout_connection" not in src
+    assert "asyncio.gather(" not in src
+
+
+_PARTB_COLS = [
+    "timestamp",
+    "cache",
+    "edge",
+    "url",
+    "oip",
+    "ost",
+    "pop",
+    "ottfb",
+    "ottlb",
+    "ttfb",
+    "elapsed",
+    "obytes",
+]
 
 
 def _rollup_base_table() -> str:
     return "logs_partb_base"
 
 
-def _seed_partb_base(con: duckdb.DuckDBPyConnection, rows: list[dict]) -> None:
-    """Materialize the base view the rollup writers read from. Columns cover
-    every dimension the seven origin rollups touch."""
+def _seed_partb_table(con: duckdb.DuckDBPyConnection, table: str, rows: list[dict]) -> None:
+    """Create a table with the 12 origin rollup columns and insert ``rows``."""
     con.execute(
-        f"CREATE TABLE {_rollup_base_table()} ("
+        f"CREATE TABLE {table} ("
         f"  timestamp TIMESTAMPTZ, cache VARCHAR, edge BOOLEAN, url VARCHAR, "
         f"  oip VARCHAR, ost INTEGER, pop VARCHAR, ottfb DOUBLE, ottlb DOUBLE, "
         f"  ttfb DOUBLE, elapsed DOUBLE, obytes DOUBLE"
         f")"
     )
-    cols = [
-        "timestamp",
-        "cache",
-        "edge",
-        "url",
-        "oip",
-        "ost",
-        "pop",
-        "ottfb",
-        "ottlb",
-        "ttfb",
-        "elapsed",
-        "obytes",
-    ]
-    placeholders = ", ".join("?" for _ in cols)
+    placeholders = ", ".join("?" for _ in _PARTB_COLS)
     for r in rows:
-        con.execute(f"INSERT INTO {_rollup_base_table()} VALUES ({placeholders})", [r.get(c) for c in cols])
+        con.execute(f"INSERT INTO {table} VALUES ({placeholders})", [r.get(c) for c in _PARTB_COLS])
+
+
+def _seed_partb_base(con: duckdb.DuckDBPyConnection, rows: list[dict]) -> None:
+    _seed_partb_table(con, _rollup_base_table(), rows)
+
+
+def _seed_partb_base_into(con: duckdb.DuckDBPyConnection, src: dict, rows: list[dict]) -> None:
+    _seed_partb_table(con, _safe_table(src["name"]), rows)
 
 
 def _write_all_fields_for_status(cache_root: str, hour: str, status_counts: dict[int, int]) -> None:
-    """Write a closed-hour all_fields.parquet (schema: field, value, count)
-    carrying field='ost' rows so try_origin_status_from_rollup is served."""
+    """Write a closed-hour all_fields.parquet carrying field='ost' rows."""
     d = os.path.join(cache_root, "rollups", "hour_bundled", f"hour={hour}")
     os.makedirs(d, exist_ok=True)
     wcon = duckdb.connect()
@@ -1583,16 +1027,7 @@ def _write_all_fields_for_status(cache_root: str, hour: str, status_counts: dict
 
 
 def _seed_full_rollup_coverage(cache_root: str, base_rows: list[dict], hour_tokens: list[str]):
-    """Drive all seven origin rollup writers against ``base_rows`` to lay down
-    the six dedicated bundles (origin_summary / slow_urls / origin_pop /
-    origin_ip / origin_path / origin_latency_ts) plus a per-hour
-    all_fields.parquet for the status reader, under ``cache_root``.
-
-    Returns nothing — writes files. Each writer opens its own fresh in-memory
-    connection seeded with the same base rows (the shared driver closes the
-    connection in its finally, so a reusable connection would be closed after
-    the first writer). ``_safe_table_for`` is patched to the SAME table name
-    ``_fresh_con`` seeds so DESCRIBE resolves."""
+    """Drive all seven origin rollup writers against ``base_rows`` under ``cache_root``."""
     from backend.core import rollups
 
     def _fresh_con():
@@ -1600,36 +1035,30 @@ def _seed_full_rollup_coverage(cache_root: str, base_rows: list[dict], hour_toke
         _seed_partb_base(c, base_rows)
         return c
 
-    patches = (
+    sid = "partb-svc"
+    src = {"name": "partb-svc", "service_id": "partb-svc"}
+    with (
         patch("backend.core.duckdb._cache_dir", return_value=cache_root),
         patch("backend.core.rollups._common._safe_table_for", return_value=_rollup_base_table()),
         patch("backend.core.duckdb.get_connection", side_effect=lambda *a, **k: _fresh_con()),
         patch("backend.core.iceberg.view._get_service_lock", _noop_lock),
         patch("backend.core.iceberg.execute_with_stale_view_retry", side_effect=lambda c, _src, fn: fn(c)),
-    )
-    sid = "partb-svc"
-    src = {"name": "partb-svc", "service_id": "partb-svc"}
-    with patches[0], patches[1], patches[2], patches[3], patches[4]:
+    ):
         rollups.build_origin_summary_bundles(sid, src, hour_tokens)
         rollups.build_slow_urls_bundles(sid, src, hour_tokens)
         rollups.build_origin_dims_bundles(sid, src, hour_tokens)
         rollups.build_origin_latency_ts_bundles(sid, src, hour_tokens)
 
-    # status_codes reads the existing all_fields.parquet bundle — synthesize one
-    # per closed hour with field='ost' rows.
     for h in hour_tokens:
         _write_all_fields_for_status(cache_root, h, {200: 80, 404: 10, 500: 10})
 
 
 def _closed_hours(n: int, *, end_hours_ago: int = 3) -> list[datetime]:
-    """``n`` consecutive closed UTC hours ending ``end_hours_ago`` before now."""
     base = (datetime.now(UTC) - timedelta(hours=end_hours_ago + n)).replace(minute=0, second=0, microsecond=0)
     return [base + timedelta(hours=i) for i in range(n)]
 
 
 def _partb_base_rows(hours: list[datetime]) -> list[dict]:
-    """Origin-shaped rows spread across the given closed hours — every
-    dimension populated so all six dedicated rollups produce data."""
     rows: list[dict] = []
     for hi, hour_dt in enumerate(hours):
         for i in range(20):
@@ -1652,106 +1081,45 @@ def _partb_base_rows(hours: list[datetime]) -> list[dict]:
     return rows
 
 
+@contextlib.contextmanager
+def _partb_rollup_env(con: duckdb.DuckDBPyConnection, src: dict, n_hours: int = 50):
+    """Seed ``con`` and full rollup coverage in a temporary cache directory."""
+    import tempfile
+
+    hours = _closed_hours(n_hours)
+    base_rows = _partb_base_rows(hours)
+    hour_tokens = [h.strftime("%Y-%m-%d-%H") for h in hours]
+    _seed_partb_base_into(con, src, base_rows)
+    st = hours[0].isoformat()
+    et = (hours[-1] + timedelta(hours=1)).isoformat()
+    with tempfile.TemporaryDirectory() as cache_root:
+        _seed_full_rollup_coverage(cache_root, base_rows, hour_tokens)
+        with patch("backend.core.duckdb._cache_dir", return_value=cache_root):
+            yield cache_root, st, et, hour_tokens
+
+
 @pytest.mark.usefixtures("_clear_origin_caches")
 @pytest.mark.asyncio
 async def test_get_aggregates_all_rollups_hit_skips_temp(in_memory_duckdb, test_service_source):
-    """Wide (>=48h) unfiltered request with full closed-hour rollup coverage:
-    every section is served from a rollup, the temp build is skipped, and
-    ``origin:temp_skipped`` is present while ``temp_table_create`` is ABSENT."""
-    hours = _closed_hours(50)
-    base_rows = _partb_base_rows(hours)
-    hour_tokens = [h.strftime("%Y-%m-%d-%H") for h in hours]
+    """Wide (>=48h) unfiltered request with full closed-hour rollup coverage skips temp table build."""
+    with _partb_rollup_env(in_memory_duckdb, test_service_source) as (_cache_root, st, et, _tokens):
+        result = await get_aggregates(in_memory_duckdb, test_service_source, st, et, {})
 
-    # Seed the base view in the request's in-memory con too (so the no-schema /
-    # no-cols guards pass and, if anything missed, the live path would work).
-    _seed_partb_base_into(in_memory_duckdb, test_service_source, base_rows)
-
-    import tempfile
-
-    with tempfile.TemporaryDirectory() as cache_root:
-        _seed_full_rollup_coverage(cache_root, base_rows, hour_tokens)
-
-        st = hours[0].isoformat()
-        et = (hours[-1] + timedelta(hours=1)).isoformat()
-        with patch("backend.core.duckdb._cache_dir", return_value=cache_root):
-            result = await get_aggregates(
-                in_memory_duckdb,
-                test_service_source,
-                st,
-                et,
-                {},
-            )
-
-    sections_present = _ALL_ORIGIN_SECTIONS & result.keys()
-    assert sections_present == _ALL_ORIGIN_SECTIONS, f"missing sections: {_ALL_ORIGIN_SECTIONS - sections_present}"
-
+    assert (_ALL_ORIGIN_SECTIONS & result.keys()) == _ALL_ORIGIN_SECTIONS
     timer_names = {t["section"] for t in result["section_timings"]}
-    assert "temp_table_create" not in timer_names, f"guard did not fire — temp built. timings: {timer_names}"
+    assert "temp_table_create" not in timer_names
     assert "origin:temp_skipped" in timer_names
-
-    # has_data from the summary rollup card.
-    assert result["has_data"] is True
-    assert result["summary"]["has_data"] is True
-    # Approximate sections carry the _approx hint; status_codes is exact.
-    assert result["summary"].get("_approx") is True
-    assert result["timeseries"].get("_approx") is True
-    assert result["slow_urls"].get("_approx") is True
-    assert result["pop_latency"].get("_approx") is True
-    assert result["ip_health"].get("_approx") is True
-    assert result["path_breakdown"].get("_approx") is True
-    assert "_approx" not in result["status_codes"]  # exact SUM of counts
-
-
-def _seed_partb_base_into(con: duckdb.DuckDBPyConnection, src: dict, rows: list[dict]) -> None:
-    """Create the request's base view table (named after the service) and
-    insert the same rows the rollups were built from, so the live fallback is
-    valid if any section misses."""
-    table = _safe_table(src["name"])
-    con.execute(
-        f"CREATE TABLE {table} ("
-        f"  timestamp TIMESTAMPTZ, cache VARCHAR, edge BOOLEAN, url VARCHAR, "
-        f"  oip VARCHAR, ost INTEGER, pop VARCHAR, ottfb DOUBLE, ottlb DOUBLE, "
-        f"  ttfb DOUBLE, elapsed DOUBLE, obytes DOUBLE"
-        f")"
-    )
-    cols = [
-        "timestamp",
-        "cache",
-        "edge",
-        "url",
-        "oip",
-        "ost",
-        "pop",
-        "ottfb",
-        "ottlb",
-        "ttfb",
-        "elapsed",
-        "obytes",
-    ]
-    placeholders = ", ".join("?" for _ in cols)
-    for r in rows:
-        con.execute(f"INSERT INTO {table} VALUES ({placeholders})", [r.get(c) for c in cols])
+    assert result["has_data"] is True and result["summary"]["has_data"] is True
+    for approx_sec in ("summary", "timeseries", "slow_urls", "pop_latency", "ip_health", "path_breakdown"):
+        assert result[approx_sec].get("_approx") is True
+    assert "_approx" not in result["status_codes"]
 
 
 @pytest.mark.usefixtures("_clear_origin_caches")
 @pytest.mark.asyncio
 async def test_get_aggregates_partial_miss_builds_temp_for_missed_only(in_memory_duckdb, test_service_source):
-    """Remove ONE section's rollup coverage (origin_latency_ts) → that section
-    misses, the temp is built, and only the missed section runs live; the other
-    six are still served from their rollups."""
-    hours = _closed_hours(50)
-    base_rows = _partb_base_rows(hours)
-    hour_tokens = [h.strftime("%Y-%m-%d-%H") for h in hours]
-    _seed_partb_base_into(in_memory_duckdb, test_service_source, base_rows)
-
-    import tempfile
-
-    with tempfile.TemporaryDirectory() as cache_root:
-        _seed_full_rollup_coverage(cache_root, base_rows, hour_tokens)
-        # Drop every origin_latency_ts.parquet so the timeseries reader fails
-        # closed (it requires ALL closed hours present). Leave a per-field
-        # marker so collect_hourly_bundle_paths treats the hours as "had data,
-        # missing bundle" → None → missed.
+    """Remove ONE section's rollup coverage (origin_latency_ts) → temp built and only missed section runs live."""
+    with _partb_rollup_env(in_memory_duckdb, test_service_source) as (cache_root, st, et, hour_tokens):
         for h in hour_tokens:
             ts_file = os.path.join(cache_root, "rollups", "hour_bundled", f"hour={h}", "origin_latency_ts.parquet")
             if os.path.exists(ts_file):
@@ -1760,29 +1128,14 @@ async def test_get_aggregates_partial_miss_builds_temp_for_missed_only(in_memory
             os.makedirs(field_dir, exist_ok=True)
             with open(os.path.join(field_dir, "data.parquet"), "wb") as f:
                 f.write(b"x")
-
-        st = hours[0].isoformat()
-        et = (hours[-1] + timedelta(hours=1)).isoformat()
-        with patch("backend.core.duckdb._cache_dir", return_value=cache_root):
-            result = await get_aggregates(
-                in_memory_duckdb,
-                test_service_source,
-                st,
-                et,
-                {},
-            )
+        result = await get_aggregates(in_memory_duckdb, test_service_source, st, et, {})
 
     timer_names = {t["section"] for t in result["section_timings"]}
-    # Temp WAS built (timeseries missed).
     assert "temp_table_create" in timer_names
     assert "origin:temp_skipped" not in timer_names
-    # Only the missed section ran live (its branch helper marked it AFTER the
-    # hoist already marked it — both marks share the name; the live branch ran).
     assert "timeseries" in timer_names
-    # The other six are still served (present in the response).
     assert _ALL_ORIGIN_SECTIONS.issubset(result.keys())
     assert result["timeseries"]["has_data"] is True
-    # The rollup-served sections still carry _approx.
     assert result["summary"].get("_approx") is True
     assert result["slow_urls"].get("_approx") is True
 
@@ -1790,37 +1143,19 @@ async def test_get_aggregates_partial_miss_builds_temp_for_missed_only(in_memory
 @pytest.mark.usefixtures("_clear_origin_caches")
 @pytest.mark.asyncio
 async def test_get_aggregates_filtered_request_builds_temp_all_live(in_memory_duckdb, test_service_source):
-    """A filtered request (has_filters=True) makes every rollup reader return
-    None → all sections land in ``missed`` → temp built and all sections live,
-    byte-identical to pre-B behavior (no _approx anywhere, temp_table_create
-    present, origin:temp_skipped absent)."""
-    from backend.models.common import FilterSpec
-
-    hours = _closed_hours(50)
-    base_rows = _partb_base_rows(hours)
-    hour_tokens = [h.strftime("%Y-%m-%d-%H") for h in hours]
-    _seed_partb_base_into(in_memory_duckdb, test_service_source, base_rows)
-
-    import tempfile
-
-    with tempfile.TemporaryDirectory() as cache_root:
-        # Full coverage exists, but the filter disqualifies every reader.
-        _seed_full_rollup_coverage(cache_root, base_rows, hour_tokens)
-        st = hours[0].isoformat()
-        et = (hours[-1] + timedelta(hours=1)).isoformat()
-        with patch("backend.core.duckdb._cache_dir", return_value=cache_root):
-            result = await get_aggregates(
-                in_memory_duckdb,
-                test_service_source,
-                st,
-                et,
-                {"pop": FilterSpec(mode="include", values=["LAX"])},  # a filter → has_filters True
-            )
+    """A filtered request (has_filters=True) makes every rollup reader return None → temp built, all sections live."""
+    with _partb_rollup_env(in_memory_duckdb, test_service_source) as (_cache_root, st, et, _tokens):
+        result = await get_aggregates(
+            in_memory_duckdb,
+            test_service_source,
+            st,
+            et,
+            {"pop": FilterSpec(mode="include", values=["LAX"])},
+        )
 
     timer_names = {t["section"] for t in result["section_timings"]}
     assert "temp_table_create" in timer_names
     assert "origin:temp_skipped" not in timer_names
-    # Live temp path → no _approx markers anywhere.
     for section in ("summary", "slow_urls", "timeseries", "pop_latency", "ip_health", "path_breakdown"):
         assert "_approx" not in result[section], f"{section} carried _approx on the filtered live path"
 
@@ -1828,38 +1163,18 @@ async def test_get_aggregates_filtered_request_builds_temp_all_live(in_memory_du
 @pytest.mark.usefixtures("_clear_origin_caches")
 @pytest.mark.asyncio
 async def test_get_aggregates_selector_subset_all_hit_skips_temp(in_memory_duckdb, test_service_source):
-    """sections={'summary','status_codes'} with full coverage → only those two
-    are attempted, both hit, temp is skipped, and the other five sections are
-    absent from the response (selector contract preserved)."""
-    hours = _closed_hours(50)
-    base_rows = _partb_base_rows(hours)
-    hour_tokens = [h.strftime("%Y-%m-%d-%H") for h in hours]
-    _seed_partb_base_into(in_memory_duckdb, test_service_source, base_rows)
-
-    import tempfile
-
-    with tempfile.TemporaryDirectory() as cache_root:
-        _seed_full_rollup_coverage(cache_root, base_rows, hour_tokens)
-        st = hours[0].isoformat()
-        et = (hours[-1] + timedelta(hours=1)).isoformat()
-        with patch("backend.core.duckdb._cache_dir", return_value=cache_root):
-            result = await get_aggregates(
-                in_memory_duckdb,
-                test_service_source,
-                st,
-                et,
-                {},
-                sections={"summary", "status_codes"},
-            )
+    """sections={'summary','status_codes'} with full coverage → only those two run, temp is skipped."""
+    with _partb_rollup_env(in_memory_duckdb, test_service_source) as (_cache_root, st, et, _tokens):
+        result = await get_aggregates(
+            in_memory_duckdb, test_service_source, st, et, {}, sections={"summary", "status_codes"}
+        )
 
     present = _ALL_ORIGIN_SECTIONS & result.keys()
-    assert present == {"summary", "status_codes"}, f"selector leaked sections: {present}"
+    assert present == {"summary", "status_codes"}
     timer_names = {t["section"] for t in result["section_timings"]}
     assert "temp_table_create" not in timer_names
     assert "origin:temp_skipped" in timer_names
-    # Only the two requested sections were attempted/timed.
-    assert "summary" in timer_names
-    assert "status_codes" in timer_names
+    assert {"summary", "status_codes"}.issubset(timer_names)
     for blocked in ("slow_urls", "timeseries", "path_breakdown", "pop_latency", "ip_health"):
         assert blocked not in timer_names
 

@@ -49,7 +49,7 @@ import {
 } from 'lucide-react'
 import type { components } from '@/types/api.generated'
 
-import { BotSourcesPanel } from './BotSourcesPanel'
+import { BotSourcesPanel } from '@/app/control-room/_sections/ControlRoomClient'
 
 type PopLocation = components['schemas']['PopLocation']
 

@@ -25,7 +25,7 @@ import { Activity, Database, AlertTriangle, UserPlus, ShieldCheck, TrendingUp, L
 
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
 import { BackToAdminLink } from '@/components/ReportLayout'
-import { Sparkline } from '@/components/Sparkline'
+import { Sparkline } from '@/app/dashboard/_sections/DashboardClient'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button, buttonVariants } from '@/components/ui/button'

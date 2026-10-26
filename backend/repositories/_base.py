@@ -5,7 +5,7 @@ Import from here instead of redefining in each file:
     from backend.repositories._base import _safe_table, _get_schema, safe_iso, QueryRunner
 """
 
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import contextlib
 import hashlib
@@ -73,67 +73,36 @@ from backend.models.dashboard import (
 from backend.repositories import rollup_coverage
 from backend.repositories.rollup_coverage import (
     MISSING_HOUR_HEAL_CAP as _MISSING_HOUR_HEAL_CAP,
-)
-from backend.repositories.rollup_coverage import (
     collect_day_prefer_paths,
     collect_hour_paths_with_floor,
     durable_serving_blocked,
     eligible_window,
+    heal_where_clause as _heal_where_clause,
     plan_hourly_read,
     plan_time_series_rollup_window,
 )
-from backend.repositories.rollup_coverage import (
-    heal_where_clause as _heal_where_clause,
-)
 from backend.repositories.top_n_rollups import (
     SchemaSeeds as _SchemaSeeds,
-)
-from backend.repositories.top_n_rollups import (
     TopNWindow as _TopNWindow,
-)
-from backend.repositories.top_n_rollups import (
     build_ip_spread_sql as _build_ip_spread_sql,
-)
-from backend.repositories.top_n_rollups import (
     build_rolled_sql as _build_rolled_sql,
-)
-from backend.repositories.top_n_rollups import (
     find_unrolled_hours as _find_unrolled_hours,
-)
-from backend.repositories.top_n_rollups import (
     fold_rows as _fold_rows,
-)
-from backend.repositories.top_n_rollups import (
     fold_sketches as _fold_sketches,
-)
-from backend.repositories.top_n_rollups import (
     live_topn_fields as _live_topn_fields,
-)
-from backend.repositories.top_n_rollups import (
     plan_ip_spread_paths as _plan_ip_spread_paths,
-)
-from backend.repositories.top_n_rollups import (
     plan_top_n_paths as _plan_top_n_paths,
-)
-from backend.repositories.top_n_rollups import (
     spread_meta as _spread_meta,
-)
-from backend.repositories.top_n_rollups import (
     truncate_top_n as _truncate_top_n,
 )
 from backend.repositories.utils.filters import filter_spec_attr
 from backend.utils.bounded_cache import BoundedTTLCache, CacheRegistry
-from backend.utils.date_utils import (
-    parse_hour_key_strict,
-    parse_iso_utc,
-    safe_iso,  # noqa: F401 — re-export
-)
+from backend.utils.date_utils import parse_hour_key_strict, parse_iso_utc, safe_iso  # noqa: F401 — re-export
 from backend.utils.sql_validator import escape_sql_literal
 from backend.utils.telemetry import get_queries, get_tracked_calls, log_once_per
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
-
+    from collections.abc import Iterable  # noqa: I001
     from backend.models.common import FiltersDict
 
 _logger = logging.getLogger(__name__)
@@ -142,7 +111,6 @@ _logger = logging.getLogger(__name__)
 
 _CLIENT_TOKEN_COUNTER = itertools.count(1)
 _MEMO_COUNTER = itertools.count(1)
-
 _registry_lock = threading.Lock()
 _registry: dict[str, _InFlight] = {}
 
@@ -161,11 +129,9 @@ def coalesce[T](key: str, build: Callable[[], T]) -> tuple[T, bool]:
     with _registry_lock:
         existing = _registry.get(key)
         if existing is not None:
-            slot = existing
-            is_leader = False
+            slot, is_leader = existing, False
         else:
-            slot = _InFlight()
-            _registry[key] = slot
+            slot = _registry[key] = _InFlight()
             is_leader = True
 
     if not is_leader:
@@ -177,8 +143,7 @@ def coalesce[T](key: str, build: Callable[[], T]) -> tuple[T, bool]:
         return slot.result, False  # type: ignore[return-value]
 
     try:
-        result = build()
-        slot.result = result
+        slot.result = result = build()
         return result, True
     except BaseException as e:
         slot.error = e
@@ -279,17 +244,13 @@ def digest_cache_key(payload: dict, src: dict) -> str:
 
 def bucket_time_to_minute(ts: str | None) -> str | None:
     """Truncate an ISO timestamp to minute precision for cache-key bucketing."""
-    if not ts or len(ts) < 16:
-        return ts
-    return ts[:16]
+    return ts if not ts or len(ts) < 16 else ts[:16]
 
 
 def cache_get(cache: BoundedTTLCache, key: str, *, prewarmer: bool | None = None) -> dict | None:
     """Return a copy of the cached payload with the cache-hit marker stamped, or ``None`` on a miss."""
     cached = cache.get(key)
-    if cached is None:
-        return None
-    return cache_result(cached, state="hit", ttl_seconds=cache.ttl, prewarmer=prewarmer)
+    return None if cached is None else cache_result(cached, state="hit", ttl_seconds=cache.ttl, prewarmer=prewarmer)
 
 
 def cache_put(cache: BoundedTTLCache, key: str, value: dict, *, strip: tuple[str, ...] = ()) -> None:
@@ -323,34 +284,26 @@ class ResponseMemo:
         cached = self.get(key)
         if cached is None:
             return None
-        telem = self._telemetry_cache.get(key)
-        if telem:
+        if telem := self._telemetry_cache.get(key):
             cached["debug_queries"] = [q.copy() if isinstance(q, dict) else q for q in telem.get("debug_queries", [])]
             cached["debug_calls"] = [c.copy() if isinstance(c, dict) else c for c in telem.get("debug_calls", [])]
         return cached
 
     def put(self, key: str, value: dict, *, strip: tuple[str, ...] = ()) -> None:
         cache_put(self.cache, key, value, strip=strip)
-        dq = value.get("debug_queries")
-        dc = value.get("debug_calls")
+        dq, dc = value.get("debug_queries"), value.get("debug_calls")
         if dq is None and dc is None:
-            dq = get_queries()
-            dc = get_tracked_calls()
+            dq, dc = get_queries(), get_tracked_calls()
         if dq or dc:
             cached_queries = [{**q, "is_cached": True} if isinstance(q, dict) else q for q in (dq or [])]
-            self._telemetry_cache[key] = {
-                "debug_queries": cached_queries,
-                "debug_calls": list(dc or []),
-            }
+            self._telemetry_cache[key] = {"debug_queries": cached_queries, "debug_calls": list(dc or [])}
         else:
             self._telemetry_cache.pop(key, None)
 
     def check(self, key: str, runner: QueryRunner) -> dict | None:
         """Cached payload with this request's telemetry merged in, or ``None`` on a miss."""
         cached = self.get(key)
-        if cached is None:
-            return None
-        return {**cached, **runner.telemetry(), "is_cached": True}
+        return None if cached is None else {**cached, **runner.telemetry(), "is_cached": True}
 
     def store(self, key: str, payload: dict, runner: QueryRunner) -> dict:
         """Persist ``payload`` and return it with this request's telemetry merged in."""
@@ -383,14 +336,10 @@ _MISSING_HOUR_HEAL_WARN_TS: dict[str, float] = {}
 
 
 def _should_emit_throttled_warn(
-    table: dict[Any, float],
-    key: Any,
-    interval_s: float = _EMPTY_ROLLUP_WARN_INTERVAL_S,
-    max_entries: int = 256,
+    table: dict[Any, float], key: Any, interval_s: float = _EMPTY_ROLLUP_WARN_INTERVAL_S, max_entries: int = 256
 ) -> bool:
     """Return True and record the current monotonic timestamp when ``key`` is unthrottled."""
-    now = time.monotonic()
-    last = table.get(key)
+    now, last = time.monotonic(), table.get(key)
     if last is not None and now - last < interval_s:
         return False
     if len(table) >= max_entries and key not in table:
@@ -510,11 +459,8 @@ def _schema_cols_cache_key(src: dict) -> tuple[str, str] | None:
     field — fall through to the uncached path rather than risk caching
     under a key we can't invalidate.
     """
-    sid = src.get("service_id") or src.get("name")
-    fmt = (src.get("log_fields") or {}).get("format_hash")
-    if not sid or not fmt:
-        return None
-    return (sid, fmt)
+    sid, fmt = src.get("service_id") or src.get("name"), (src.get("log_fields") or {}).get("format_hash")
+    return (sid, fmt) if sid and fmt else None
 
 
 def _compact_sql_for_debug(sql: str) -> str:
@@ -532,13 +478,8 @@ def _compact_sql_for_debug(sql: str) -> str:
     Compacting cuts the field to ~tens of bytes per query without
     losing the SQL shape an operator cares about for tuning.
     """
-
-    def _replace(m: re.Match) -> str:
-        # Count items by quote pairs — cheap and exact.
-        count = m.group(1).count("'") // 2
-        return f"read_parquet([{count} files]"
-
-    return _PARQUET_LIST_RE.sub(_replace, sql)
+    # Count items by quote pairs — cheap and exact.
+    return _PARQUET_LIST_RE.sub(lambda m: f"read_parquet([{m.group(1).count(chr(39)) // 2} files]", sql)
 
 
 def record_duckdb_query(sql_str: str, elapsed_ms: float, service_id: str | None = None) -> None:
@@ -585,27 +526,22 @@ def ensure_ngwaf_bots_materialized(con: duckdb.DuckDBPyConnection, alias: str) -
     reference to catalog or schema", prod 2026-07-30). A separate catalog
     has no such collision.
     """
-    existing = con.execute(
-        "SELECT 1 FROM duckdb_tables() WHERE table_name = ? AND temporary = true",
-        [f"{alias}_ngwaf_bots"],
-    ).fetchone()
-    if existing:
+    if con.execute(
+        "SELECT 1 FROM duckdb_tables() WHERE table_name = ? AND temporary = true", [f"{alias}_ngwaf_bots"]
+    ).fetchone():
         return True
-
     from backend import config as svcconfig
 
     db_path = svcconfig.ngwaf_sqlite_cache_override()
     rows = []
+    _q = "SELECT waf_req_id, bot_name, category, wellknown_bot_name FROM ngwaf_bots WHERE bot_name IS NOT NULL"
     if db_path and os.path.exists(db_path):
         import sqlite3
 
         try:
             sconn = sqlite3.connect(db_path, timeout=5)
             try:
-                cur = sconn.execute(
-                    "SELECT waf_req_id, bot_name, category, wellknown_bot_name FROM ngwaf_bots WHERE bot_name IS NOT NULL"
-                )
-                rows = cur.fetchall()
+                rows = sconn.execute(_q).fetchall()
             finally:
                 sconn.close()
         except Exception as e:
@@ -619,11 +555,9 @@ def ensure_ngwaf_bots_materialized(con: duckdb.DuckDBPyConnection, alias: str) -
 
             pconn = pg_connection.get_pg_readonly_connection()
             try:
-                cur = pconn.execute(
-                    "SELECT waf_req_id, bot_name, category, wellknown_bot_name FROM ngwaf_bots WHERE bot_name IS NOT NULL"
-                )
                 rows = [
-                    (r["waf_req_id"], r["bot_name"], r["category"], r["wellknown_bot_name"]) for r in cur.fetchall()
+                    (r["waf_req_id"], r["bot_name"], r["category"], r["wellknown_bot_name"])
+                    for r in pconn.execute(_q).fetchall()
                 ]
             finally:
                 pconn.close()
@@ -633,14 +567,8 @@ def ensure_ngwaf_bots_materialized(con: duckdb.DuckDBPyConnection, alias: str) -
 
     import pyarrow as pa
 
-    tbl = pa.table(
-        {
-            "waf_req_id": pa.array([r[0] for r in rows], type=pa.string()),
-            "bot_name": pa.array([r[1] for r in rows], type=pa.string()),
-            "category": pa.array([r[2] for r in rows], type=pa.string()),
-            "wellknown_bot_name": pa.array([r[3] for r in rows], type=pa.string()),
-        }
-    )
+    cols = ("waf_req_id", "bot_name", "category", "wellknown_bot_name")
+    tbl = pa.table({c: pa.array([r[i] for r in rows], type=pa.string()) for i, c in enumerate(cols)})
     try:
         con.register(f"temp_arrow_{alias}", tbl)
         con.execute(f"CREATE OR REPLACE TEMP TABLE {alias}_ngwaf_bots AS SELECT * FROM temp_arrow_{alias}")
@@ -655,10 +583,7 @@ def attach_ngwaf_cache(con: duckdb.DuckDBPyConnection, schema_cols: list[str], a
     """Materialize the NGWAF bot cache as ``{alias}.ngwaf_bots`` on ``con``
     when the schema warrants it. See :func:`ensure_ngwaf_bots_materialized`.
     """
-    if "waf_req_id" not in schema_cols:
-        yield False
-        return
-    yield ensure_ngwaf_bots_materialized(con, alias)
+    yield False if "waf_req_id" not in schema_cols else ensure_ngwaf_bots_materialized(con, alias)
 
 
 def _safe_table(name: str) -> str:
@@ -717,14 +642,16 @@ def _is_stale_view_error(e: Exception) -> bool:
     rebuild).
     """
     msg = str(e)
-    looks_stale = (
-        "No files found" in msg
-        or "Catalog Error: Table with name" in msg
-        or "does not exist" in msg
-        or "No such file or directory" in msg
-        or "Cannot open file" in msg
-    )
-    if not looks_stale:
+    if not any(
+        s in msg
+        for s in (
+            "No files found",
+            "Catalog Error: Table with name",
+            "does not exist",
+            "No such file or directory",
+            "Cannot open file",
+        )
+    ):
         return False
     try:
         import duckdb as _duckdb_mod
@@ -736,6 +663,10 @@ def _is_stale_view_error(e: Exception) -> bool:
     return isinstance(e, (_duckdb_mod.IOException, _duckdb_mod.CatalogException))
 
 
+def _quote_ident(col: str) -> str:
+    return '"{}"'.format(col.replace('"', '""'))
+
+
 def optional_col(col: str, actual_cols, default: str = "NULL") -> str:
     """Return a quoted column reference if the column exists, else a SQL default expression.
 
@@ -744,7 +675,7 @@ def optional_col(col: str, actual_cols, default: str = "NULL") -> str:
     arbitrary characters) cannot break out of the quoted identifier into raw
     SQL. See audit finding 004.
     """
-    return '"{}"'.format(col.replace('"', '""')) if col in actual_cols else default
+    return _quote_ident(col) if col in actual_cols else default
 
 
 VALID_CHART_INTERVALS: frozenset[str] = frozenset({"1 second", "1 minute", "1 hour", "1 day"})
@@ -778,8 +709,7 @@ def time_bucket_select(interval: str, ts_col: str = "timestamp") -> str:
 
     Validates the interval via safe_interval to prevent injection.
     """
-    safe_iv = safe_interval(interval)
-    return f"time_bucket(INTERVAL '{safe_iv}', {ts_col}) AS bucket"
+    return f"time_bucket(INTERVAL '{safe_interval(interval)}', {ts_col}) AS bucket"
 
 
 def percentile_ms_expr(col: str, p: float = 0.95, filter_expr: str = "", *, approx: bool = False) -> str:
@@ -824,11 +754,7 @@ def empty_schema_response(**extra_fields) -> dict:
     return {"has_data": False, "total": 0, **extra_fields}
 
 
-def get_source_extent(
-    runner: QueryRunner,
-    src: dict,
-    orig_table_name: str,
-) -> tuple[int, str | None, str | None]:
+def get_source_extent(runner: QueryRunner, src: dict, orig_table_name: str) -> tuple[int, str | None, str | None]:
     """Return (total_rows, earliest_log_at, latest_log_at) for a source.
 
     Checks the svcconfig status cache first; falls back to a live COUNT query.
@@ -842,19 +768,15 @@ def get_source_extent(
 
         cached = svcconfig.get_status(src["name"])
         if cached:
-            observed.extent_source = "status_cache"
-            observed.extent_rows = cached.get("local_rows")
-            observed.earliest_event_at = cached.get("earliest_log_at")
-            observed.latest_event_at = cached.get("latest_log_at")
-            return (
-                cached.get("local_rows", 0),
+            observed.extent_source, observed.extent_rows = "status_cache", cached.get("local_rows")
+            observed.earliest_event_at, observed.latest_event_at = (
                 cached.get("earliest_log_at"),
                 cached.get("latest_log_at"),
             )
+            return (cached.get("local_rows", 0), cached.get("earliest_log_at"), cached.get("latest_log_at"))
         row = runner.execute(f"SELECT count(*), min(timestamp), max(timestamp) FROM {orig_table_name}").fetchone()
         if row:
-            observed.extent_source = "live_query"
-            observed.extent_rows = row[0]
+            observed.extent_source, observed.extent_rows = "live_query", row[0]
             observed.earliest_event_at, observed.latest_event_at = safe_iso(row[1]), safe_iso(row[2])
             return row[0], safe_iso(row[1]), safe_iso(row[2])
     except Exception:
@@ -870,11 +792,7 @@ def get_source_extent(
     return 0, None, None
 
 
-def _latest_log_in_window(
-    latest_log_at: str | None,
-    start_time: str | None,
-    end_time: str | None,
-) -> bool:
+def _latest_log_in_window(latest_log_at: str | None, start_time: str | None, end_time: str | None) -> bool:
     """Return True when the all-time latest log falls inside ``[start, end]``.
 
     ``start_time`` / ``end_time`` are open bounds when ``None`` (the
@@ -890,37 +808,25 @@ def _latest_log_in_window(
     """
     if not latest_log_at:
         return False
-
     try:
         latest_dt = parse_iso_utc(latest_log_at)
     except Exception:
         return False
     if latest_dt is None:
         return False
-    if start_time:
-        try:
-            st_dt = parse_iso_utc(start_time)
-            if st_dt is not None and latest_dt < st_dt:
-                return False
-        except Exception:
-            _logger.debug("_latest_log_in_window: step failed (ignored)", exc_info=True)
-    if end_time:
-        try:
-            et_dt = parse_iso_utc(end_time)
-            if et_dt is not None and latest_dt > et_dt:
-                return False
-        except Exception:
-            _logger.debug("_latest_log_in_window: step failed (ignored)", exc_info=True)
+    for bound, is_start in ((start_time, True), (end_time, False)):
+        if bound:
+            try:
+                b_dt = parse_iso_utc(bound)
+                if b_dt is not None and (latest_dt < b_dt if is_start else latest_dt > b_dt):
+                    return False
+            except Exception:
+                _logger.debug("_latest_log_in_window: step failed (ignored)", exc_info=True)
     return True
 
 
 def should_self_heal_stale_view(
-    *,
-    windowed_count: int,
-    filters,
-    latest_log_at: str | None,
-    start_time: str | None,
-    end_time: str | None,
+    *, windowed_count: int, filters, latest_log_at: str | None, start_time: str | None, end_time: str | None
 ) -> bool:
     """Decide whether a zero-row window is a STALE VIEW vs a legitimately
     empty window.
@@ -941,9 +847,7 @@ def should_self_heal_stale_view(
     already shows data but the cached view SQL hasn't been rebuilt yet
     (dev runs no crons, so it never self-corrects otherwise).
     """
-    if windowed_count != 0:
-        return False
-    if filters:
+    if windowed_count != 0 or filters:
         return False
     return _latest_log_in_window(latest_log_at, start_time, end_time)
 
@@ -996,7 +900,6 @@ class QueryRunner:
         # File count of the most recent direct active-hour read — telemetry
         # only (surfaced as live_active_hour:n_files).
         self._last_active_direct_n_files: int = 0
-
         from backend.core.iceberg import inject_view_debug
 
         inject_view_debug(self.debug_queries, src)
@@ -1010,11 +913,9 @@ class QueryRunner:
     @con.setter
     def con(self, value: duckdb.DuckDBPyConnection | Callable[[], duckdb.DuckDBPyConnection]) -> None:
         if callable(value) and not hasattr(value, "execute"):
-            self._con = None
-            self._con_factory = value
+            self._con, self._con_factory = None, value
         else:
-            self._con = value  # type: ignore[assignment]
-            self._con_factory = None
+            self._con, self._con_factory = value, None  # type: ignore[assignment]
 
     def begin_shared_active_hour_temps(self, seed_fields: Iterable[str] | None = None) -> None:
         """Enable request-scoped reuse of the direct active-hour temps.
@@ -1032,8 +933,7 @@ class QueryRunner:
         :meth:`release_active_direct_temp` instead of a bare DROP.
         """
         if self._shared_active_temps is None:
-            self._shared_active_temps = []
-            self._shared_active_depth = 1
+            self._shared_active_temps, self._shared_active_depth = [], 1
             self._shared_active_seed_fields = tuple(seed_fields) if seed_fields else ()
         else:
             self._shared_active_depth += 1
@@ -1054,8 +954,7 @@ class QueryRunner:
         if self._shared_active_depth > 1:
             self._shared_active_depth -= 1
             return
-        self._shared_active_depth = 0
-        self._shared_active_seed_fields = ()
+        self._shared_active_depth, self._shared_active_seed_fields = 0, ()
         temps, self._shared_active_temps = self._shared_active_temps, None
         for _cols, _ws, _we, name in temps or []:
             _drop_temp_table(self, name, "end_shared_active_hour_temps")
@@ -1135,21 +1034,12 @@ class QueryRunner:
             res = self.con.execute(q, p if p is not None else [])
         elapsed_ms = round((time.time() - t0) * 1000, 2)
         compact_sql = _compact_sql_for_debug(q.strip())
-        self.debug_queries.append(
-            {
-                "sql": compact_sql,
-                "time_ms": elapsed_ms,
-                "engine": "DuckDB",
-            }
-        )
+        self.debug_queries.append({"sql": compact_sql, "time_ms": elapsed_ms, "engine": "DuckDB"})
         try:
             from backend.utils.telemetry import record_telemetry_query
 
             record_telemetry_query(
-                "duckdb",
-                compact_sql,
-                elapsed_ms,
-                service_id=self.src.get("name") or self.src.get("service_id"),
+                "duckdb", compact_sql, elapsed_ms, service_id=self.src.get("name") or self.src.get("service_id")
             )
         except Exception:
             _logger.debug("QueryRunner.execute: record_telemetry_query failed", exc_info=True)
@@ -1243,8 +1133,7 @@ class QueryRunner:
         Returns the cursor on success, or None on permanent failure after retry.
         Non-stale errors are re-raised immediately.
         """
-        _, cursor = self._run_with_stale_retry(lambda: self.execute(sql, params))
-        return cursor
+        return self._run_with_stale_retry(lambda: self.execute(sql, params))[1]
 
     def create_temp_table(self, sql: str, params: list | None = None) -> bool:
         """Execute a CREATE TEMP TABLE statement with one stale-view retry.
@@ -1257,8 +1146,7 @@ class QueryRunner:
         Returns True on success, False on permanent failure after retry.
         Non-stale errors are re-raised immediately.
         """
-        ok, _ = self._run_with_stale_retry(lambda: self.execute(sql, params))
-        return ok
+        return self._run_with_stale_retry(lambda: self.execute(sql, params))[0]
 
     def telemetry(self) -> dict:
         """Return the standard debug telemetry dict for response construction."""
@@ -1283,23 +1171,17 @@ class QueryRunner:
         """
         # Escape internal double quotes so a hostile column name cannot break
         # out of the quoted identifier (audit finding 004).
-        select_cols = ['"{}"'.format(c.replace('"', '""')) for c in cols if c in actual_cols]
+        select_cols = [_quote_ident(c) for c in cols if c in actual_cols]
         if not select_cols:
             return None
         temp_name = f"t_{_uuid.uuid4().hex}"
         sql = (
             f"CREATE TEMP TABLE {temp_name} AS SELECT {', '.join(select_cols)} FROM {source_table} WHERE {where_clause}"
         )
-        if not self.create_temp_table(sql, params):
-            return None
-        return temp_name
+        return temp_name if self.create_temp_table(sql, params) else None
 
     def _create_active_hour_temp_direct(
-        self,
-        fields: list[str],
-        actual_cols: list[str] | set[str],
-        live_start: Any,
-        live_end: Any,
+        self, fields: list[str], actual_cols: list[str] | set[str], live_start: Any, live_end: Any
     ) -> str | None:
         """Build the active-hour temp by reading buffer + active hourly hive
         partition parquets directly, bypassing the bound iceberg view.
@@ -1401,9 +1283,7 @@ class QueryRunner:
             try:
                 with os.scandir(d) as it:
                     for e in it:
-                        if not e.name.endswith(".parquet") or e.name.startswith(".tmp_"):
-                            continue
-                        if e.path in tombstoned:
+                        if not e.name.endswith(".parquet") or e.name.startswith(".tmp_") or e.path in tombstoned:
                             continue
                         if prune_mtime:
                             try:
@@ -1430,11 +1310,9 @@ class QueryRunner:
             from backend.core.iceberg._ducklake import ducklake_table_name
 
             cand = ducklake_table_name(self.src)
-            row = self.con.execute(
-                "SELECT 1 FROM duckdb_tables() WHERE database_name = 'lake' AND table_name = ? LIMIT 1",
-                [cand],
-            ).fetchone()
-            if row:
+            if self.con.execute(
+                "SELECT 1 FROM duckdb_tables() WHERE database_name = 'lake' AND table_name = ? LIMIT 1", [cand]
+            ).fetchone():
                 lake_table = cand
         except Exception:
             lake_table = None
@@ -1452,31 +1330,26 @@ class QueryRunner:
             return "__empty__"
 
         # Escape internal double quotes (audit finding 004).
-        cols_sql = ", ".join('"{}"'.format(c.replace('"', '""')) for c in projected)
+        cols_sql = ", ".join(_quote_ident(c) for c in projected)
         where = (
             f"timestamp >= TIMESTAMPTZ '{live_start.isoformat()}' AND timestamp < TIMESTAMPTZ '{live_end.isoformat()}'"
         )
 
         def _create_sql(union_by_name: str) -> str:
             branches: list[str] = []
-
             # To get derived fields (c_speed mapped, timestamp_hour, etc.) correctly
             # we must apply the same view derivations to the active-hour raw rows.
             # We select * from the raw sources, union them, wrap with _finalize_view_sql,
             # and finally project just the columns we need.
-
             if buffer_files:
-                paths_sql = quote_path_list(buffer_files)
                 branches.append(
-                    f"SELECT * FROM read_parquet([{paths_sql}], union_by_name={union_by_name}) WHERE {where}"
+                    f"SELECT * FROM read_parquet([{quote_path_list(buffer_files)}], union_by_name={union_by_name}) WHERE {where}"
                 )
             if lake_table:
-                lake_ident = 'lake."{}"'.format(lake_table.replace('"', '""'))
-                branches.append(f"SELECT * FROM {lake_ident} WHERE {where}")
+                branches.append(f"SELECT * FROM lake.{_quote_ident(lake_table)} WHERE {where}")
             if hourly_files:
-                paths_sql = quote_path_list(hourly_files)
                 branches.append(
-                    f"SELECT * FROM read_parquet([{paths_sql}], union_by_name={union_by_name}) WHERE {where}"
+                    f"SELECT * FROM read_parquet([{quote_path_list(hourly_files)}], union_by_name={union_by_name}) WHERE {where}"
                 )
 
             joiner = " UNION ALL BY NAME " if union_by_name == "true" else " UNION ALL "
@@ -1490,7 +1363,6 @@ class QueryRunner:
             # computed/view-only columns like timestamp_hour or dt).
             desc = self.con.execute(f"SELECT * FROM ({union_sql}) LIMIT 0").description or []
             physical_cols = {d[0] for d in desc}
-
             from backend.core.iceberg.view import _finalize_view_sql
 
             target_table = "logs"  # QueryRunner active hour direct is only used for logs path right now
@@ -1503,13 +1375,9 @@ class QueryRunner:
                 dynamic_schema_field_names=set(),
                 existing_cols=physical_cols,
             )
-
             available_cols = physical_cols | {"timestamp_hour", "dt"}
             valid_projected = [c for c in projected if c in available_cols]
-            valid_cols_sql = (
-                ", ".join('"{}"'.format(c.replace('"', '""')) for c in valid_projected) if valid_projected else "*"
-            )
-
+            valid_cols_sql = ", ".join(_quote_ident(c) for c in valid_projected) if valid_projected else "*"
             return f"SELECT {valid_cols_sql} FROM ({finalized})"
 
         temp_name = f"t_active_direct_{_uuid.uuid4().hex}"
@@ -1580,7 +1448,6 @@ class QueryRunner:
 
         watermark_dt = datetime.fromtimestamp(watermark, tz=UTC)
         active_hour_dt = parse_hour_key_strict(active_hour_token)
-
         if naive_live_start > active_hour_dt or window_end < watermark_dt:
             return naive_live_start, [], 0
 
@@ -1625,9 +1492,7 @@ class QueryRunner:
 
         if not partial_rows and partial_total == 0:
             return naive_live_start, [], 0
-
-        adjusted = max(naive_live_start, watermark_dt)
-        return adjusted, partial_rows, partial_total
+        return max(naive_live_start, watermark_dt), partial_rows, partial_total
 
     @contextlib.contextmanager
     def temp_table(
@@ -1738,20 +1603,18 @@ class QueryRunner:
         # Parse bounds
         st_dt = parse_iso_utc(start_time) if start_time else None
         et_dt = parse_iso_utc(end_time) if end_time else None
-
-        observed.window_start = st_dt.isoformat() if st_dt else None
-        observed.window_end = et_dt.isoformat() if et_dt else None
-        observed.eligible, observed.eligibility_reason = True, "eligible"
-        observed.outcome = "unknown"
+        observed.window_start, observed.window_end = (
+            (st_dt.isoformat() if st_dt else None),
+            (et_dt.isoformat() if et_dt else None),
+        )
+        observed.eligible, observed.eligibility_reason, observed.outcome = True, "eligible", "unknown"
         observed.top_n_plan = TopNRollupCoverage()
         win = _TopNWindow.build(st_dt, et_dt, datetime.now(UTC))
         active_dt = win.active_dt
         _t_dir_enum = time.perf_counter()
         plan = _plan_top_n_paths(cache_dir, safe_fields, win, observation=observed.top_n_plan)
-        day_paths = plan.paths.day_paths
-        hour_paths = plan.paths.hour_paths
-        bundled_hour_paths = plan.paths.bundled_hour_paths
-        bundled_day_paths = plan.paths.bundled_day_paths
+        day_paths, hour_paths = plan.paths.day_paths, plan.paths.hour_paths
+        bundled_hour_paths, bundled_day_paths = plan.paths.bundled_hour_paths, plan.paths.bundled_day_paths
 
         _phase("dir_enum", (time.perf_counter() - _t_dir_enum) * 1000)
         _phase("dir_enum:n_day_files", float(len(day_paths)))
@@ -1907,9 +1770,7 @@ class QueryRunner:
         live_start = max(active_dt, st_dt) if st_dt else active_dt
         live_end = min(win.active_dt_end, et_dt) if et_dt else win.active_dt_end
         # We only query the active hour if it overlaps with the requested time window
-        if et_dt and et_dt <= active_dt:
-            return live_res, partial_rows
-        if st_dt and st_dt >= win.active_dt_end:
+        if (et_dt and et_dt <= active_dt) or (st_dt and st_dt >= win.active_dt_end):
             return live_res, partial_rows
 
         try:
@@ -2147,8 +2008,7 @@ class QueryRunner:
             return None
         # parse_iso_utc always returns tz-aware UTC, which is what bundle directory
         # names and active_hour_str comparisons assume (fixes 2026-06-11 CDT tail bug).
-        st = parse_iso_utc(start_time)
-        et = parse_iso_utc(end_time)
+        st, et = parse_iso_utc(start_time), parse_iso_utc(end_time)
         if st is None or et is None or et <= st:
             observed.eligibility_reason = "invalid_window"
             return None
@@ -2159,8 +2019,7 @@ class QueryRunner:
         if (et - st) > timedelta(days=366):
             observed.eligibility_reason = "window_too_long"
             return None
-        observed.eligible, observed.eligibility_reason = True, "eligible"
-        observed.scalar_plan = ScalarRollupCoverage()
+        observed.eligible, observed.eligibility_reason, observed.scalar_plan = True, "eligible", ScalarRollupCoverage()
 
         wplan = plan_time_series_rollup_window(
             self.src,
@@ -2174,8 +2033,7 @@ class QueryRunner:
         if wplan is None:
             observed.outcome = "no_coverage"
             return None
-        observed.outcome = "unknown"
-        observed.live_top_up = "outside_window"
+        observed.outcome, observed.live_top_up = "unknown", "outside_window"
         heal_base_table: str | None = None
         if wplan.missing_hours:
             from backend.core.rollups import _safe_table_for
@@ -2200,16 +2058,14 @@ class QueryRunner:
         unfiltered_window: bool,
         get_direct_tmp: Callable[[datetime, datetime], str | None],
     ) -> tuple[str | None, int, str | None, bool]:
-        live_start = max(st, wplan.active_hour_dt)
-        live_end = et
+        live_start, live_end = max(st, wplan.active_hour_dt), et
         if adjust_partial_hour:
             live_start, _partial_rows, partial_total = self._partial_hour_adjusted_live_start(
                 live_start, wplan.active_hour_str, live_end
             )
         else:
             partial_total = 0
-        live_st_tz = live_start.astimezone(UTC).isoformat()
-        live_et_tz = live_end.astimezone(UTC).isoformat()
+        live_st_tz, live_et_tz = live_start.astimezone(UTC).isoformat(), live_end.astimezone(UTC).isoformat()
         observed.live_start, observed.live_end = live_st_tz, live_et_tz
 
         direct_live_tmp: str | None = None
@@ -2224,8 +2080,7 @@ class QueryRunner:
         elif direct_live_tmp is not None:
             live_source, live_where = direct_live_tmp, "1=1"
         else:
-            live_source, live_where = table_name, where_clause
-            live_needs_params = True
+            live_source, live_where, live_needs_params = table_name, where_clause, True
 
         observed.live_top_up = "empty" if live_source is None else "unverified"
         live_from_where = (
@@ -2312,9 +2167,11 @@ class QueryRunner:
 
             def _make_ts_direct_tmp(l_start: datetime, l_end: datetime) -> str | None:
                 _cols: list[str] = self.get_schema_cols() if live_cols else []
-                if all(c in _cols for c in live_cols):
-                    return self._create_active_hour_temp_direct(list(live_cols), _cols, l_start, l_end)
-                return None
+                return (
+                    self._create_active_hour_temp_direct(list(live_cols), _cols, l_start, l_end)
+                    if all(c in _cols for c in live_cols)
+                    else None
+                )
 
             live_from_where, partial_total, direct_live_tmp, live_needs_params = self._resolve_scalar_live_source(
                 st,
@@ -2430,11 +2287,7 @@ class QueryRunner:
             observed.eligibility_reason = "filtered"
             return None
         planned = self._plan_scalar_rollup_window(
-            start_time,
-            end_time,
-            can_use_overview=True,
-            require_minute_aligned=True,
-            observed=observed,
+            start_time, end_time, can_use_overview=True, require_minute_aligned=True, observed=observed
         )
         if planned is None:
             return None
@@ -2542,13 +2395,7 @@ class QueryRunner:
         )
 
     def try_slow_urls_from_rollup(
-        self,
-        start_time: str | None,
-        end_time: str | None,
-        *,
-        has_filters: bool,
-        min_requests: int,
-        limit: int,
+        self, start_time: str | None, end_time: str | None, *, has_filters: bool, min_requests: int, limit: int
     ) -> dict | None:
         """Serve the /origin slow_urls panel from per-hour rollup parquets
         when eligible, returning ``None`` so the caller falls back to its
@@ -2590,7 +2437,6 @@ class QueryRunner:
         """
         if durable_serving_blocked(self.src):
             return None
-
         win = self._eligible_rollup_window(start_time, end_time, has_filters=has_filters)
         if win is None:
             return None
@@ -2682,34 +2528,20 @@ class QueryRunner:
         """Check rollup window eligibility, collect bundle paths, and return
         the quoted ``read_parquet([...])`` path list string (or ``None``)."""
         win = self._eligible_rollup_window(
-            start_time,
-            end_time,
-            has_filters=has_filters,
-            require_top_asns=require_top_asns,
-            min_hours=min_hours,
+            start_time, end_time, has_filters=has_filters, require_top_asns=require_top_asns, min_hours=min_hours
         )
         if win is None:
             return None
-        st, et = win
         rollup_paths = self._collect_rollup_paths(
-            st,
-            et,
+            win[0],
+            win[1],
             bundle_filename,
             skip_partial_start=skip_partial_start,
             allow_empty_with_done=allow_empty_with_done,
         )
-        if rollup_paths is None:
-            return None
-        return quote_path_list(rollup_paths)
+        return quote_path_list(rollup_paths) if rollup_paths is not None else None
 
-    def _exec_rollup(
-        self,
-        sql: str,
-        params: list[Any] | None = None,
-        *,
-        tag: str,
-        fetchone: bool = False,
-    ) -> Any:
+    def _exec_rollup(self, sql: str, params: list[Any] | None = None, *, tag: str, fetchone: bool = False) -> Any:
         """Execute a rollup query and return ``fetchall()`` (or ``fetchone()``), or ``None`` on DuckDB error."""
         try:
             cur = self.execute(sql, params) if params is not None else self.execute(sql)
@@ -2818,12 +2650,7 @@ class QueryRunner:
         }
 
     def try_origin_pop_latency_from_rollup(
-        self,
-        start_time: str | None,
-        end_time: str | None,
-        *,
-        has_filters: bool,
-        limit: int,
+        self, start_time: str | None, end_time: str | None, *, has_filters: bool, limit: int
     ) -> dict | None:
         """Serve the /api/origin/aggregates ``pop_latency`` panel from the
         per-hour + per-day origin_pop rollup (per-(pop, hour) ``lat_us``
@@ -2875,12 +2702,7 @@ class QueryRunner:
         }
 
     def try_origin_ip_health_from_rollup(
-        self,
-        start_time: str | None,
-        end_time: str | None,
-        *,
-        has_filters: bool,
-        limit: int,
+        self, start_time: str | None, end_time: str | None, *, has_filters: bool, limit: int
     ) -> dict | None:
         """Serve the /api/origin/aggregates ``ip_health`` panel from the
         per-hour + per-day origin_ip rollup (per-(oip, hour) ``lat_us``
@@ -2922,11 +2744,7 @@ class QueryRunner:
         return {"has_data": len(out_rows) > 0, "rows": out_rows, "_approx": True}
 
     def try_origin_path_breakdown_from_rollup(
-        self,
-        start_time: str | None,
-        end_time: str | None,
-        *,
-        has_filters: bool,
+        self, start_time: str | None, end_time: str | None, *, has_filters: bool
     ) -> dict | None:
         """Serve the /api/origin/aggregates ``path_breakdown`` panel from the
         per-hour + per-day origin_path rollup (per-(edge, hour) ``lat_us``
@@ -2950,21 +2768,16 @@ class QueryRunner:
         if not rows:
             return None
 
-        shielding_detected = any(r[0] is False for r in rows)
         out_rows = [self._shape_latency_row("edge", r) for r in rows]
         return {
             "has_data": len(out_rows) > 0,
-            "shielding_detected": shielding_detected,
+            "shielding_detected": any(r[0] is False for r in rows),
             "rows": out_rows,
             "_approx": True,
         }
 
     def try_origin_status_from_rollup(
-        self,
-        start_time: str | None,
-        end_time: str | None,
-        *,
-        has_filters: bool,
+        self, start_time: str | None, end_time: str | None, *, has_filters: bool
     ) -> dict | None:
         """Serve the /api/origin/aggregates ``status_codes`` panel from the
         existing ``all_fields.parquet`` per-field bundle (no dedicated writer —
@@ -3064,11 +2877,7 @@ class QueryRunner:
         ``None`` on any eligibility miss / read error. Percentiles are
         request-weighted approximations across minutes → ``_approx: True``.
         """
-        if split_by_leg:
-            return None
-        if metric not in ("ttfb", "ttlb"):
-            return None
-        if percentile not in ("p50", "p95", "p99"):
+        if split_by_leg or metric not in ("ttfb", "ttlb") or percentile not in ("p50", "p95", "p99"):
             return None
         # Minute-grain rollup: sub-minute buckets have no resolution to give
         # back, and a non-integer-minute bucket can't re-bucket exactly.
@@ -3093,11 +2902,8 @@ class QueryRunner:
             return None
         rollup_paths, crosses_active = plan.paths, plan.crosses_active
 
-        cnt_col = f"{metric}_count"
-        pcol = f"{metric}_{percentile}_us"
-
-        st_tz = st.astimezone(UTC).isoformat()
-        et_tz = et.astimezone(UTC).isoformat()
+        cnt_col, pcol = f"{metric}_count", f"{metric}_{percentile}_us"
+        st_tz, et_tz = st.astimezone(UTC).isoformat(), et.astimezone(UTC).isoformat()
 
         # Each branch emits raw (out_bucket, num, den) per re-bucketed slot; the
         # outer query re-aggregates with SUM(num)/SUM(den) so a coarse bucket
@@ -3122,11 +2928,9 @@ class QueryRunner:
             # re-bucket to the caller's width — matching the rollup branch's
             # weighting so the outer SUM(num)/SUM(den) composes correctly.
             _active_hour_start, live_start, _ = _active_hour_overlap(st, et)
-            live_st_tz = live_start.astimezone(UTC).isoformat()
-            live_et_tz = et.astimezone(UTC).isoformat()
+            live_st_tz, live_et_tz = live_start.astimezone(UTC).isoformat(), et.astimezone(UTC).isoformat()
 
-            cols = self.get_schema_cols()
-            lat = self._origin_ts_live_lat_expr(metric, set(cols))
+            lat = self._origin_ts_live_lat_expr(metric, set(self.get_schema_cols()))
             if lat is None:
                 # The live tail can't be computed (metric column absent); the
                 # rollup-only result would be missing the active hour, so fail
@@ -3168,17 +2972,15 @@ class QueryRunner:
         if rows is None:
             return None
 
-        series: list[dict] = []
-        for r in rows:
-            if r[0] is None:
-                continue
-            series.append(
-                {
-                    "time": safe_iso(r[0]),
-                    "miss_count": int(r[2]) if r[2] is not None else 0,
-                    "value": float(r[1]) if r[1] is not None else None,
-                }
-            )
+        series = [
+            {
+                "time": safe_iso(r[0]),
+                "miss_count": int(r[2]) if r[2] is not None else 0,
+                "value": float(r[1]) if r[1] is not None else None,
+            }
+            for r in rows
+            if r[0] is not None
+        ]
         return {"has_data": len(series) > 0, "series": series, "_approx": True}
 
     @staticmethod
@@ -3191,17 +2993,10 @@ class QueryRunner:
         if metric == "ttfb":
             return metric_expressions.origin_latency_us(cols, absent=None)
         # ttlb
-        if "ottlb" in cols:
-            return '"ottlb"'
-        return None
+        return '"ottlb"' if "ottlb" in cols else None
 
     def try_network_quality_from_rollup(
-        self,
-        start_time: str | None,
-        end_time: str | None,
-        *,
-        has_filters: bool,
-        region_country: str,
+        self, start_time: str | None, end_time: str | None, *, has_filters: bool, region_country: str
     ) -> dict[str, Any] | None:
         win = self._eligible_rollup_window(
             start_time, end_time, has_filters=has_filters, require_top_asns=None, min_hours=24
@@ -3215,7 +3010,6 @@ class QueryRunner:
             if not rollup_paths:
                 return None
             paths_sql = quote_path_list(rollup_paths)
-
             sql = (
                 f"SELECT dim_val as label, "
                 f"       SUM(p50_us * requests) / NULLIF(SUM(requests), 0) / 1000.0 AS rtt_ms, "
@@ -3263,12 +3057,7 @@ class QueryRunner:
             return None
 
     def try_network_rtt_from_rollup(
-        self,
-        start_time: str | None,
-        end_time: str | None,
-        *,
-        top_asns: list[int],
-        has_filters: bool,
+        self, start_time: str | None, end_time: str | None, *, top_asns: list[int], has_filters: bool
     ) -> dict[int, dict[str, float | None]] | None:
         """Serve the /api/network-health ``rtt_percentiles_query`` panel
         from per-hour + per-day network_rtt parquets when eligible.
@@ -3310,14 +3099,13 @@ class QueryRunner:
         if rows is None:
             return None
 
-        out: dict[int, dict[str, float | None]] = {}
-        for row in rows:
-            asn_v = int(row[0])
-            out[asn_v] = {
+        return {
+            int(row[0]): {
                 "p95_rtt_us": round(float(row[1]), 0) if row[1] is not None else None,
                 "p99_rtt_us": round(float(row[2]), 0) if row[2] is not None else None,
             }
-        return out
+            for row in rows
+        }
 
     def _rollup_window_and_paths_with_active_hour(
         self,
@@ -3348,12 +3136,7 @@ class QueryRunner:
         return st, et, quote_path_list(rollup_paths), active_hour_start, _safe_table_for(self.src)
 
     def try_network_speed_from_rollup(
-        self,
-        start_time: str | None,
-        end_time: str | None,
-        *,
-        top_asns: list[int],
-        has_filters: bool,
+        self, start_time: str | None, end_time: str | None, *, top_asns: list[int], has_filters: bool
     ) -> list[tuple[int, str, int]] | None:
         """Serve the /api/network-health ``speed_distribution_query``
         panel from per-hour + per-day network_speed parquets.
@@ -3368,11 +3151,7 @@ class QueryRunner:
         dict keyed by asn. Returns ``None`` on any eligibility miss.
         """
         resolved = self._rollup_window_and_paths_with_active_hour(
-            start_time,
-            end_time,
-            NETWORK_SPEED_BUNDLE_FILENAME,
-            has_filters=has_filters,
-            require_top_asns=top_asns,
+            start_time, end_time, NETWORK_SPEED_BUNDLE_FILENAME, has_filters=has_filters, require_top_asns=top_asns
         )
         if resolved is None:
             return None
@@ -3380,8 +3159,7 @@ class QueryRunner:
         asn_placeholders = ", ".join(["?"] * len(top_asns))
 
         if et > active_hour_start:
-            ah_iso = active_hour_start.isoformat()
-            et_iso = et.isoformat()
+            ah_iso, et_iso = active_hour_start.isoformat(), et.isoformat()
             sql = (
                 f"SELECT asn, c_speed, CAST(SUM(cnt) AS BIGINT) AS cnt FROM ("
                 f"  SELECT asn, c_speed, count AS cnt "
@@ -3407,17 +3185,10 @@ class QueryRunner:
                 f"ORDER BY asn, cnt DESC"
             )
         rows = self._exec_rollup(sql, top_asns, tag="network_speed_rollup")
-        if rows is None:
-            return None
-        return [(int(r[0]), str(r[1]), int(r[2])) for r in rows]
+        return [(int(r[0]), str(r[1]), int(r[2])) for r in rows] if rows is not None else None
 
     def try_network_heatmap_from_rollup(
-        self,
-        start_time: str | None,
-        end_time: str | None,
-        *,
-        has_filters: bool,
-        bucket_seconds: int = 3600,
+        self, start_time: str | None, end_time: str | None, *, has_filters: bool, bucket_seconds: int = 3600
     ) -> list | None:
         """Serve the /api/network-health ``heatmap`` section (and the
         derived ``leaderboard`` / ``summary`` / ``buckets`` sections)
@@ -3466,8 +3237,7 @@ class QueryRunner:
         if resolved is None:
             return None
         st, et, paths_sql, active_hour_start, base_table = resolved
-        st_iso = st.isoformat()
-        et_iso = et.isoformat()
+        st_iso, et_iso = st.isoformat(), et.isoformat()
         rtt_min_coal = metric_expressions.coalesce("rtt_min_p50_us", "rtt_p50_us")
 
         if et > active_hour_start:
@@ -3520,9 +3290,7 @@ class QueryRunner:
                 f" FROM read_parquet([{paths_sql}]) WHERE hour_ts >= TIMESTAMPTZ '{st_iso}' AND hour_ts < TIMESTAMPTZ '{et_iso}' ORDER BY reqs DESC"
             )
         rows = self._exec_rollup(sql, tag="network_heatmap_rollup")
-        if not rows:
-            return None
-        return list(rows)
+        return list(rows) if rows else None
 
     def try_network_geo_from_rollup(
         self,
@@ -3547,23 +3315,22 @@ class QueryRunner:
         if resolved is None:
             return None
         st, et, paths_sql, active_hour_start, base_table = resolved
-        st_iso = st.isoformat()
-        et_iso = et.isoformat()
+        st_iso, et_iso = st.isoformat(), et.isoformat()
 
         cols = set(self.get_schema_cols())
         if "country" not in cols:
             return None
-        has_city = "city" in cols
-        has_lat = "lat" in cols and "lon" in cols
-        has_metro = "metro" in cols
+        has_city, has_lat, has_metro = "city" in cols, ("lat" in cols and "lon" in cols), "metro" in cols
         city_col = "city" if has_city else "CAST('' AS VARCHAR)"
         lat_col = "CAST(lat AS DOUBLE)" if has_lat else "CAST(NULL AS DOUBLE)"
         lon_col = "CAST(lon AS DOUBLE)" if has_lat else "CAST(NULL AS DOUBLE)"
         metro_col = "metro" if has_metro else "CAST(NULL AS VARCHAR)"
-        city_grp = "city" if has_city else "''"
-        lat_grp = "lat" if has_lat else "NULL"
-        lon_grp = "lon" if has_lat else "NULL"
-        metro_grp = "metro" if has_metro else "NULL"
+        city_grp, lat_grp, lon_grp, metro_grp = (
+            ("city" if has_city else "''"),
+            ("lat" if has_lat else "NULL"),
+            ("lon" if has_lat else "NULL"),
+            ("metro" if has_metro else "NULL"),
+        )
         ploss_live_expr = "CAST(AVG(ploss) AS DOUBLE)" if "ploss" in cols else "0::DOUBLE"
 
         if et > active_hour_start:
@@ -3625,9 +3392,7 @@ class QueryRunner:
             _logger.debug("[network_geo_rollup] read failed, falling back: %s", e)
             return None
 
-        if not map_rows and not metro_rows:
-            return None
-        return list(map_rows), list(metro_rows)
+        return (list(map_rows), list(metro_rows)) if (map_rows or metro_rows) else None
 
     def _minute_ts_rollup_window_and_paths(
         self,
@@ -3655,9 +3420,7 @@ class QueryRunner:
         # boundary hour is INCLUDED — the WHERE bucket_ts trim below cuts it
         # precisely, and the active hour is filled by the live tail.
         rollup_paths = self._collect_rollup_paths(st, et, bundle_filename, skip_partial_start=False)
-        if rollup_paths is None:
-            return None
-        return n, st, et, quote_path_list(rollup_paths)
+        return (n, st, et, quote_path_list(rollup_paths)) if rollup_paths is not None else None
 
     def try_verified_bots_ts_from_rollup(
         self,
@@ -3700,10 +3463,8 @@ class QueryRunner:
         if resolved is None:
             return None
         n, st, et, paths_sql = resolved
-        active_hour_start = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
-        st_iso = st.isoformat()
-        et_iso = et.isoformat()
-        active_iso = active_hour_start.isoformat()
+        active_iso = datetime.now(UTC).replace(minute=0, second=0, microsecond=0).isoformat()
+        st_iso, et_iso = st.isoformat(), et.isoformat()
         sql = (
             f"SELECT bucket, bot_type, CAST(SUM(count) AS BIGINT) AS count FROM ("
             f"  SELECT time_bucket(INTERVAL '{n} seconds', bucket_ts) AS bucket, "
@@ -3725,9 +3486,7 @@ class QueryRunner:
             f") GROUP BY bucket, bot_type ORDER BY bucket, bot_type"
         )
         rows = self._exec_rollup(sql, tag="verified_bots_ts_rollup")
-        if rows is None:
-            return None
-        return [(r[0], str(r[1]), int(r[2])) for r in rows]
+        return [(r[0], str(r[1]), int(r[2])) for r in rows] if rows is not None else None
 
     def try_perf_latency_from_rollup(
         self,
@@ -3811,16 +3570,10 @@ class QueryRunner:
             f"ORDER BY mv"
         )
         rows = self._exec_rollup(sql, tag=log_tag)
-        if not rows:
-            return None
-        return [{"bucket": r[0], "count": int(r[1] or 0)} for r in rows]
+        return [{"bucket": r[0], "count": int(r[1] or 0)} for r in rows] if rows else None
 
     def try_security_req_size_from_rollup(
-        self,
-        start_time: str | None,
-        end_time: str | None,
-        *,
-        has_filters: bool,
+        self, start_time: str | None, end_time: str | None, *, has_filters: bool
     ) -> list[dict] | None:
         """Serve /api/security/aggregates' ``req_size`` panel from per-hour +
         per-day security_req_size parquets (req_header_bytes histogram buckets).
@@ -3834,11 +3587,7 @@ class QueryRunner:
         )
 
     def try_security_conn_reuse_from_rollup(
-        self,
-        start_time: str | None,
-        end_time: str | None,
-        *,
-        has_filters: bool,
+        self, start_time: str | None, end_time: str | None, *, has_filters: bool
     ) -> list[dict] | None:
         """Serve /api/security/aggregates' ``conn_reuse`` panel from per-hour +
         per-day security_conn_reuse parquets (conn_requests reuse buckets).
@@ -3960,20 +3709,15 @@ class QueryRunner:
             raise RuntimeError("rollup_paths is unexpectedly None")
 
         paths_sql = quote_path_list(rollup_paths)
-        if use_all_fields:
-            sql = (
-                "SELECT value, CAST(SUM(count) AS BIGINT) AS c "
-                f"FROM read_parquet([{paths_sql}], hive_partitioning=0) "
-                "WHERE field = 'conn_requests' GROUP BY value"
-            )
-        else:
-            sql = f"SELECT bucket, CAST(SUM(count) AS BIGINT) AS c FROM read_parquet([{paths_sql}]) GROUP BY bucket"
-        try:
-            rows = self.execute(sql).fetchall()
-        except duckdb.InterruptException:
-            raise
-        except duckdb.Error as e:
-            _logger.debug("[conn_requests_hist_rollup] read failed, falling back: %s", e)
+        sql = (
+            "SELECT value, CAST(SUM(count) AS BIGINT) AS c "
+            f"FROM read_parquet([{paths_sql}], hive_partitioning=0) "
+            "WHERE field = 'conn_requests' GROUP BY value"
+            if use_all_fields
+            else f"SELECT bucket, CAST(SUM(count) AS BIGINT) AS c FROM read_parquet([{paths_sql}]) GROUP BY bucket"
+        )
+        rows = self._exec_rollup(sql, tag="conn_requests_hist_rollup")
+        if rows is None:
             observed.outcome = "read_failed"
             return None
         if not rows:
@@ -4034,8 +3778,7 @@ class QueryRunner:
         if has_filters or not start_time or not end_time:
             return None
 
-        st = parse_iso_utc(start_time)
-        et = parse_iso_utc(end_time)
+        st, et = parse_iso_utc(start_time), parse_iso_utc(end_time)
         if st is None or et is None:
             return None
         paths = self._collect_rollup_paths(st, et, DAY_BUNDLE_FILENAME)
@@ -4199,12 +3942,7 @@ class QueryRunner:
         return counts
 
     def try_ngwaf_top_bots_from_rollup(
-        self,
-        start_time: str | None,
-        end_time: str | None,
-        *,
-        has_filters: bool,
-        n: int,
+        self, start_time: str | None, end_time: str | None, *, has_filters: bool, n: int
     ) -> list[dict] | None:
         """Serve ``get_top_bots``' ``ngwaf_bots`` panel from the per-hour/
         per-day ``ngwaf_bots`` parquets + a live active-hour top-up.
@@ -4246,11 +3984,7 @@ class QueryRunner:
         return [{"name": bn, "category": cat, "request_count": c} for (bn, cat), c in ranked]
 
     def try_ngwaf_verified_bots_from_rollup(
-        self,
-        start_time: str | None,
-        end_time: str | None,
-        *,
-        has_filters: bool,
+        self, start_time: str | None, end_time: str | None, *, has_filters: bool
     ) -> list[dict] | None:
         """Serve ``/api/security/aggregates``' ``ngwaf_verified_bots`` panel
         from per-hour/per-day ``ngwaf_bots.parquet`` files + a live active-hour
@@ -4295,22 +4029,12 @@ class QueryRunner:
         counts = self._accumulate_row_counts(combined, lambda r: (r[0], r[1], r[2]))
         ranked = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)
         return [
-            {
-                "bot_name": bn,
-                "wellknown_bot_name": wk,
-                "category": cat,
-                "request_count": c,
-            }
+            {"bot_name": bn, "wellknown_bot_name": wk, "category": cat, "request_count": c}
             for (bn, wk, cat), c in ranked
         ]
 
     def try_ngwaf_verified_bots_ts_from_rollup(
-        self,
-        start_time: str | None,
-        end_time: str | None,
-        *,
-        bucket_seconds: int,
-        has_filters: bool,
+        self, start_time: str | None, end_time: str | None, *, bucket_seconds: int, has_filters: bool
     ) -> list[tuple] | None:
         """Serve ``/api/security/aggregates``' ``ngwaf_verified_bots_ts`` panel
         from minute-granular ``ngwaf_bots_ts.parquet`` files + a live
@@ -4322,8 +4046,7 @@ class QueryRunner:
         if resolved is None:
             return None
         n, st, et, paths_sql = resolved
-        st_iso = st.isoformat()
-        et_iso = et.isoformat()
+        st_iso, et_iso = st.isoformat(), et.isoformat()
         sql = (
             f"SELECT time_bucket(INTERVAL '{n} seconds', bucket_ts) AS bucket, "
             f"       bot_name, "
@@ -4348,11 +4071,7 @@ class QueryRunner:
         return [(b, bn, c) for (b, bn), c in sorted(counts.items())]
 
     def try_security_top_ips_from_rollup(
-        self,
-        start_time: str | None,
-        end_time: str | None,
-        *,
-        has_filters: bool,
+        self, start_time: str | None, end_time: str | None, *, has_filters: bool
     ) -> list[dict] | None:
         """Serve /api/security/aggregates' top-IPs-by-max-header panel from
         per-hour + per-day security_topips parquets.
@@ -4371,24 +4090,12 @@ class QueryRunner:
         )
         if paths_sql is None:
             return None
-        sql = (
-            f"SELECT ip, CAST(MAX(max_header) AS BIGINT) AS mh "
-            f"FROM read_parquet([{paths_sql}]) "
-            f"GROUP BY ip "
-            f"ORDER BY mh DESC "
-            f"LIMIT 10"
-        )
+        sql = f"SELECT ip, CAST(MAX(max_header) AS BIGINT) AS mh FROM read_parquet([{paths_sql}]) GROUP BY ip ORDER BY mh DESC LIMIT 10"
         rows = self._exec_rollup(sql, tag="security_top_ips_rollup")
-        if not rows:
-            return None
-        return [{"ip": r[0], "max_header": int(r[1] or 0)} for r in rows]
+        return [{"ip": r[0], "max_header": int(r[1] or 0)} for r in rows] if rows else None
 
     def try_security_coverage_from_rollup(
-        self,
-        start_time: str | None,
-        end_time: str | None,
-        *,
-        has_filters: bool,
+        self, start_time: str | None, end_time: str | None, *, has_filters: bool
     ) -> tuple[int, int] | None:
         """Serve /api/security/aggregates' TLS-fingerprint coverage counts from
         per-hour + per-day security_cov parquets.
@@ -4404,18 +4111,17 @@ class QueryRunner:
         paths_sql = self._rollup_paths_sql(start_time, end_time, SECURITY_COV_BUNDLE_FILENAME, has_filters=has_filters)
         if paths_sql is None:
             return None
-        sql = f"SELECT SUM(total_rows), SUM(tls_populated) FROM read_parquet([{paths_sql}])"
-        row = self._exec_rollup(sql, tag="security_coverage_rollup", fetchone=True)
+        row = self._exec_rollup(
+            f"SELECT SUM(total_rows), SUM(tls_populated) FROM read_parquet([{paths_sql}])",
+            tag="security_coverage_rollup",
+            fetchone=True,
+        )
         if row is None or row[0] is None or int(row[0]) == 0:
             return None
         return int(row[0]), int(row[1] or 0)
 
     def try_security_proxies_from_rollup(
-        self,
-        start_time: str | None,
-        end_time: str | None,
-        *,
-        has_filters: bool,
+        self, start_time: str | None, end_time: str | None, *, has_filters: bool
     ) -> dict | None:
         """Serve /api/security/aggregates' ``proxies`` section from per-hour +
         per-day security_proxy_quality / security_proxy_flagged parquets.
@@ -4432,16 +4138,12 @@ class QueryRunner:
         ``get_security_proxies`` already consumes, or ``None`` on any
         eligibility miss / read error / empty window.
         """
-        from backend.utils.pop_utils import (
-            build_pop_lat_case_sql,
-            build_pop_lon_case_sql,
-        )
+        from backend.utils.pop_utils import build_pop_lat_case_sql, build_pop_lon_case_sql
 
         win = self._eligible_rollup_window(start_time, end_time, has_filters=has_filters)
         if win is None:
             return None
         st, et = win
-
         quality_paths = self._collect_rollup_paths(
             st, et, SECURITY_PROXY_QUALITY_BUNDLE_FILENAME, allow_empty_with_done=True
         )
@@ -4452,40 +4154,26 @@ class QueryRunner:
             return None
 
         prefix = (
-            (
-                f"WITH f AS MATERIALIZED ("
-                f"  SELECT ip, asn, pop, rtt_min, tcp_rtt, lat, lon, country, city, SUM(cnt) AS cnt "
-                f"  FROM read_parquet([{quote_path_list(flagged_paths)}]) "
-                f"  WHERE ip IS NOT NULL AND ip != '' GROUP BY ALL"
-                f"), "
-                f"pops AS MATERIALIZED ("
-                f"  SELECT pop AS p_code, "
-                f"         {build_pop_lat_case_sql()} AS pop_lat, "
-                f"         {build_pop_lon_case_sql()} AS pop_lon "
-                f"  FROM (SELECT DISTINCT pop FROM f)"
-                f"), "
-                f"geo AS MATERIALIZED ("
-                f"  SELECT g.pop AS g_pop, g.lat AS g_lat, g.lon AS g_lon, "
-                f"         6371 * 2 * ASIN(SQRT("
-                f"           POWER(SIN(RADIANS(g.lat - p.pop_lat) / 2), 2) "
-                f"           + COS(RADIANS(p.pop_lat)) * COS(RADIANS(g.lat)) "
-                f"           * POWER(SIN(RADIANS(g.lon - p.pop_lon) / 2), 2)"
-                f"         )) AS distance_km "
-                f"  FROM (SELECT DISTINCT pop, lat, lon FROM f WHERE lat IS NOT NULL AND lon IS NOT NULL) g "
-                f"  LEFT JOIN pops p ON g.pop IS NOT DISTINCT FROM p.p_code"
-                f"), "
-                f"m AS MATERIALIZED ("
-                f"  SELECT f.ip, f.asn, f.pop, f.rtt_min, f.tcp_rtt, f.rtt_min / 1000.0 AS rtt_min_ms, "
-                f"         f.tcp_rtt / 1000.0 AS tcp_rtt_ms, f.lat AS client_lat, f.lon AS client_lon, "
-                f"         p.pop_lat AS pop_lat, p.pop_lon AS pop_lon, "
-                f"         geo.distance_km AS distance_km, f.country, f.city, f.cnt "
-                f"  FROM f "
-                f"  LEFT JOIN pops p ON f.pop IS NOT DISTINCT FROM p.p_code "
-                f"  LEFT JOIN geo ON f.pop IS NOT DISTINCT FROM geo.g_pop "
-                f"               AND f.lat IS NOT DISTINCT FROM geo.g_lat "
-                f"               AND f.lon IS NOT DISTINCT FROM geo.g_lon"
-                f") "
-            )
+            f"WITH f AS MATERIALIZED ("
+            f"  SELECT ip, asn, pop, rtt_min, tcp_rtt, lat, lon, country, city, SUM(cnt) AS cnt "
+            f"  FROM read_parquet([{quote_path_list(flagged_paths)}]) "
+            f"  WHERE ip IS NOT NULL AND ip != '' GROUP BY ALL"
+            f"), pops AS MATERIALIZED ("
+            f"  SELECT pop AS p_code, {build_pop_lat_case_sql()} AS pop_lat, {build_pop_lon_case_sql()} AS pop_lon "
+            f"  FROM (SELECT DISTINCT pop FROM f)"
+            f"), geo AS MATERIALIZED ("
+            f"  SELECT g.pop AS g_pop, g.lat AS g_lat, g.lon AS g_lon, "
+            f"         6371 * 2 * ASIN(SQRT(POWER(SIN(RADIANS(g.lat - p.pop_lat) / 2), 2) "
+            f"           + COS(RADIANS(p.pop_lat)) * COS(RADIANS(g.lat)) * POWER(SIN(RADIANS(g.lon - p.pop_lon) / 2), 2))) AS distance_km "
+            f"  FROM (SELECT DISTINCT pop, lat, lon FROM f WHERE lat IS NOT NULL AND lon IS NOT NULL) g "
+            f"  LEFT JOIN pops p ON g.pop IS NOT DISTINCT FROM p.p_code"
+            f"), m AS MATERIALIZED ("
+            f"  SELECT f.ip, f.asn, f.pop, f.rtt_min, f.tcp_rtt, f.rtt_min / 1000.0 AS rtt_min_ms, "
+            f"         f.tcp_rtt / 1000.0 AS tcp_rtt_ms, f.lat AS client_lat, f.lon AS client_lon, "
+            f"         p.pop_lat AS pop_lat, p.pop_lon AS pop_lon, geo.distance_km AS distance_km, f.country, f.city, f.cnt "
+            f"  FROM f LEFT JOIN pops p ON f.pop IS NOT DISTINCT FROM p.p_code "
+            f"  LEFT JOIN geo ON f.pop IS NOT DISTINCT FROM geo.g_pop AND f.lat IS NOT DISTINCT FROM geo.g_lat AND f.lon IS NOT DISTINCT FROM geo.g_lon"
+            f") "
             if flagged_paths
             else ""
         )
@@ -4493,60 +4181,47 @@ class QueryRunner:
         tunnel_flag = "tcp_rtt > 0 AND (CAST(rtt_min_ms * 1000.0 AS DOUBLE) / tcp_rtt) < 0.1"
         try:
             quality_rows = self.execute(
-                f"SELECT type, CAST(SUM(count) AS BIGINT) AS c "
-                f"FROM read_parquet([{quote_path_list(quality_paths)}]) GROUP BY type ORDER BY c DESC"
+                f"SELECT type, CAST(SUM(count) AS BIGINT) AS c FROM read_parquet([{quote_path_list(quality_paths)}]) GROUP BY type ORDER BY c DESC"
             ).fetchall()
             if not quality_rows:
                 return None
             stats_row = (0, 0, 0)
-            isp_rows = []
-            client_rows = []
+            isp_rows: list[tuple] = []
+            client_rows: list[tuple] = []
             if flagged_paths:
                 combined_rows = self.execute(
                     prefix + f"SELECT 'stats' AS _sec, "
                     f"  COUNT(DISTINCT CASE WHEN {dist_flag} THEN ip WHEN {tunnel_flag} THEN ip ELSE NULL END) AS c1, "
-                    f"  CAST({metric_expressions.sum_or_zero(f'CASE WHEN {dist_flag} THEN cnt WHEN {tunnel_flag} THEN cnt ELSE NULL END')} "
-                    f"       AS BIGINT) AS c2, "
+                    f"  CAST({metric_expressions.sum_or_zero(f'CASE WHEN {dist_flag} THEN cnt WHEN {tunnel_flag} THEN cnt ELSE NULL END')} AS BIGINT) AS c2, "
                     f"  COUNT(DISTINCT CASE WHEN {dist_flag} THEN ip ELSE NULL END) AS c3, "
                     f"  NULL::VARCHAR AS ip, NULL::BIGINT AS asn, NULL::DOUBLE AS rtt_min_ms, "
                     f"  NULL::DOUBLE AS tcp_rtt_ms, NULL::DOUBLE AS distance_km, NULL::VARCHAR AS pop, "
                     f"  NULL::DOUBLE AS client_lat, NULL::DOUBLE AS client_lon, NULL::DOUBLE AS pop_lat, "
                     f"  NULL::DOUBLE AS pop_lon, NULL::BOOLEAN AS impossible_distance, "
                     f"  NULL::VARCHAR AS risk_level, NULL::VARCHAR AS country, NULL::VARCHAR AS city "
-                    f"FROM m "
-                    f"UNION ALL "
-                    f"SELECT * FROM ("
+                    f"FROM m UNION ALL SELECT * FROM ("
                     f"  SELECT 'isp' AS _sec, NULL::BIGINT, CAST(SUM(cnt) AS BIGINT) AS c2, NULL::BIGINT, "
                     f"    NULL::VARCHAR, asn, NULL::DOUBLE, NULL::DOUBLE, NULL::DOUBLE, NULL::VARCHAR, "
                     f"    NULL::DOUBLE, NULL::DOUBLE, NULL::DOUBLE, NULL::DOUBLE, NULL::BOOLEAN, "
-                    f"    NULL::VARCHAR, NULL::VARCHAR, NULL::VARCHAR "
-                    f"  FROM m "
-                    f"  WHERE tcp_rtt > 0 AND (CAST(rtt_min AS DOUBLE) / tcp_rtt) < 0.1 "
-                    f"  GROUP BY asn ORDER BY c2 DESC LIMIT 10"
-                    f") "
-                    f"UNION ALL "
-                    f"SELECT * FROM ("
+                    f"    NULL::VARCHAR, NULL::VARCHAR, NULL::VARCHAR FROM m "
+                    f"  WHERE tcp_rtt > 0 AND (CAST(rtt_min AS DOUBLE) / tcp_rtt) < 0.1 GROUP BY asn ORDER BY c2 DESC LIMIT 10"
+                    f") UNION ALL SELECT * FROM ("
                     f"  SELECT 'client' AS _sec, NULL::BIGINT, NULL::BIGINT, NULL::BIGINT, "
                     f"    ip, asn, ROUND(rtt_min_ms, 2), ROUND(tcp_rtt_ms, 2), ROUND(distance_km, 1), pop, "
                     f"    ROUND(client_lat, 4), ROUND(client_lon, 4), CAST(pop_lat AS DOUBLE), CAST(pop_lon AS DOUBLE), "
                     f"    CASE WHEN {dist_flag} THEN true ELSE false END AS impossible_distance, "
-                    f"    CASE WHEN {dist_flag} THEN 'High' "
-                    f"         WHEN tcp_rtt_ms > 0 AND (rtt_min_ms / tcp_rtt_ms) < 0.1 THEN 'High' "
-                    f"         WHEN tcp_rtt_ms > 0 AND (rtt_min_ms / tcp_rtt_ms) < 0.2 THEN 'Medium' "
-                    f"         ELSE 'Low' END AS risk_level, country, city "
-                    f"  FROM m "
-                    f"  WHERE rtt_min_ms IS NOT NULL AND (({dist_flag}) OR (tcp_rtt_ms > 0 AND (rtt_min_ms / tcp_rtt_ms) < 0.2)) "
-                    f"  ORDER BY CASE risk_level WHEN 'High' THEN 3 WHEN 'Medium' THEN 2 ELSE 1 END DESC, distance_km DESC "
-                    f"  LIMIT 100"
+                    f"    CASE WHEN {dist_flag} THEN 'High' WHEN tcp_rtt_ms > 0 AND (rtt_min_ms / tcp_rtt_ms) < 0.1 THEN 'High' "
+                    f"         WHEN tcp_rtt_ms > 0 AND (rtt_min_ms / tcp_rtt_ms) < 0.2 THEN 'Medium' ELSE 'Low' END AS risk_level, country, city "
+                    f"  FROM m WHERE rtt_min_ms IS NOT NULL AND (({dist_flag}) OR (tcp_rtt_ms > 0 AND (rtt_min_ms / tcp_rtt_ms) < 0.2)) "
+                    f"  ORDER BY CASE risk_level WHEN 'High' THEN 3 WHEN 'Medium' THEN 2 ELSE 1 END DESC, distance_km DESC LIMIT 100"
                     f")"
                 ).fetchall()
                 for r in combined_rows:
-                    sec = r[0]
-                    if sec == "stats":
+                    if r[0] == "stats":
                         stats_row = (r[1], r[2], r[3])
-                    elif sec == "isp":
+                    elif r[0] == "isp":
                         isp_rows.append((r[5], r[2]))
-                    elif sec == "client":
+                    elif r[0] == "client":
                         client_rows.append(r[4:])
         except duckdb.InterruptException:
             raise
@@ -4554,6 +4229,22 @@ class QueryRunner:
             _logger.debug("[security_proxies_rollup] read failed, falling back: %s", e)
             return None
 
+        _client_keys = (
+            "ip",
+            "asn",
+            "rtt_min_ms",
+            "tcp_rtt_ms",
+            "distance_km",
+            "pop",
+            "client_lat",
+            "client_lon",
+            "pop_lat",
+            "pop_lon",
+            "impossible_distance",
+            "risk_level",
+            "country",
+            "city",
+        )
         return {
             "stats": {
                 "active_proxies_count": stats_row[0] or 0,
@@ -4562,33 +4253,11 @@ class QueryRunner:
             },
             "quality_rows": [(r[0], r[1]) for r in quality_rows],
             "isps": [{"asn": r[0], "count": r[1]} for r in isp_rows],
-            "clients": [
-                {
-                    "ip": r[0],
-                    "asn": r[1],
-                    "rtt_min_ms": r[2],
-                    "tcp_rtt_ms": r[3],
-                    "distance_km": r[4],
-                    "pop": r[5],
-                    "client_lat": r[6],
-                    "client_lon": r[7],
-                    "pop_lat": r[8],
-                    "pop_lon": r[9],
-                    "impossible_distance": r[10],
-                    "risk_level": r[11],
-                    "country": r[12],
-                    "city": r[13],
-                }
-                for r in client_rows
-            ],
+            "clients": [dict(zip(_client_keys, r, strict=False)) for r in client_rows],
         }
 
     def try_security_bot_efficiency_from_rollup(
-        self,
-        start_time: str | None,
-        end_time: str | None,
-        *,
-        has_filters: bool,
+        self, start_time: str | None, end_time: str | None, *, has_filters: bool
     ) -> list[tuple[str, str, int, int]] | None:
         """Serve /api/security/aggregates' ``bot_efficiency`` section from per-hour
         + per-day security_bot_eff parquets.
@@ -4603,22 +4272,14 @@ class QueryRunner:
         or ``None`` on any eligibility miss / read error / missing site row.
         """
         paths_sql = self._rollup_paths_sql(
-            start_time,
-            end_time,
-            SECURITY_BOT_EFF_BUNDLE_FILENAME,
-            has_filters=has_filters,
-            allow_empty_with_done=True,
+            start_time, end_time, SECURITY_BOT_EFF_BUNDLE_FILENAME, has_filters=has_filters, allow_empty_with_done=True
         )
         if paths_sql is None:
             return None
-
         sql = (
-            f"WITH g AS ("
-            f"  SELECT kind, key, CAST(SUM(cnt) AS BIGINT) AS cnt, CAST(SUM(resp_bytes) AS BIGINT) AS resp_bytes "
-            f"  FROM read_parquet([{paths_sql}]) GROUP BY kind, key"
-            f"), r AS ("
-            f"  SELECT *, ROW_NUMBER() OVER (PARTITION BY kind ORDER BY resp_bytes DESC, cnt DESC) AS rn FROM g"
-            f") "
+            f"WITH g AS (SELECT kind, key, CAST(SUM(cnt) AS BIGINT) AS cnt, CAST(SUM(resp_bytes) AS BIGINT) AS resp_bytes "
+            f"  FROM read_parquet([{paths_sql}]) GROUP BY kind, key), "
+            f"r AS (SELECT *, ROW_NUMBER() OVER (PARTITION BY kind ORDER BY resp_bytes DESC, cnt DESC) AS rn FROM g) "
             f"SELECT kind, key, cnt, resp_bytes FROM r WHERE kind != 'ua' OR rn <= {SECURITY_BOT_EFF_UA_TOP_K}"
         )
         rows = self._exec_rollup(sql, tag="security_bot_efficiency_rollup")
@@ -4627,11 +4288,7 @@ class QueryRunner:
         return [(str(r[0]), str(r[1] or ""), int(r[2] or 0), int(r[3] or 0)) for r in rows]
 
     def try_perf_ttl_dist_from_rollup(
-        self,
-        start_time: str | None,
-        end_time: str | None,
-        *,
-        has_filters: bool,
+        self, start_time: str | None, end_time: str | None, *, has_filters: bool
     ) -> list[dict] | None:
         """Serve /api/performance/aggregates' ``ttl_dist`` histogram panel from
         per-hour + per-day perf_ttl_dist parquets (the ``ttl`` histogram buckets).
@@ -4653,24 +4310,12 @@ class QueryRunner:
         paths_sql = self._rollup_paths_sql(start_time, end_time, PERF_TTL_DIST_BUNDLE_FILENAME, has_filters=has_filters)
         if paths_sql is None:
             return None
-        sql = (
-            f"SELECT bucket, CAST(SUM(count) AS BIGINT) AS count "
-            f"FROM read_parquet([{paths_sql}]) "
-            f"GROUP BY bucket "
-            f"ORDER BY MIN(min_ttl)"
-        )
+        sql = f"SELECT bucket, CAST(SUM(count) AS BIGINT) AS count FROM read_parquet([{paths_sql}]) GROUP BY bucket ORDER BY MIN(min_ttl)"
         rows = self._exec_rollup(sql, tag="perf_ttl_dist_rollup")
-        if rows is None:
-            return None
-        return [{"bucket": r[0], "count": int(r[1])} for r in rows]
+        return [{"bucket": r[0], "count": int(r[1])} for r in rows] if rows is not None else None
 
     def execute_ip_spread_rollups(
-        self,
-        fields: list[str],
-        start_time: str | None,
-        end_time: str | None,
-        *,
-        _phase_log: list[dict] | None = None,
+        self, fields: list[str], start_time: str | None, end_time: str | None, *, _phase_log: list[dict] | None = None
     ) -> tuple[dict[tuple[str, str], int], dict[str, dict]]:
         """Merge HLL IP-spread sketches across the requested window.
 
@@ -4813,55 +4458,43 @@ class QueryRunner:
         # schema_types applied the VARCHAR-only `!= ''` empty guard to an
         # INT32 column, which DuckDB rejects ("Could not convert string '' to
         # INT32"). Prefer the temp's real types; fall back to schema_types.
-        actual_types: dict[str, str] = {}
         try:
-            for r in self.con.execute(f"DESCRIBE SELECT * FROM {table_name} LIMIT 0").fetchall():
-                actual_types[r[0]] = r[1]
+            actual_types = {
+                r[0]: r[1] for r in self.con.execute(f"DESCRIBE SELECT * FROM {table_name} LIMIT 0").fetchall()
+            }
         except Exception:
             actual_types = {}
 
         for field in fields:
             if not _is_safe_ident(field):
                 continue
-            sql_col = field
-            col_type = actual_types.get(sql_col) or schema_types.get(sql_col, "VARCHAR")
+            col_type = actual_types.get(field) or schema_types.get(field, "VARCHAR")
             field_limit = int(_pfl.get(field, limit))
-
             # Escape single quotes defensively on field names
             field_lit = escape_sql_literal(field)
-
             # Simplify projection and filter predicates to allow direct column
             # scan pushdown inside DuckDB, avoiding intermediate subqueries/views.
             if col_type == "VARCHAR":
-                val_expr = f'"{sql_col}"'
-                where_pred = f'"{sql_col}" IS NOT NULL AND "{sql_col}" != \'\''
+                val_expr, where_pred = f'"{field}"', f'"{field}" IS NOT NULL AND "{field}" != \'\''
             elif field in INT_AGGREGATE_FIELDS:
-                val_expr = f'CAST(CAST(ROUND("{sql_col}") AS INTEGER) AS VARCHAR)'
-                where_pred = f'"{sql_col}" IS NOT NULL'
+                val_expr, where_pred = f'CAST(CAST(ROUND("{field}") AS INTEGER) AS VARCHAR)', f'"{field}" IS NOT NULL'
             else:
-                val_expr = f'CAST("{sql_col}" AS VARCHAR)'
-                where_pred = f'"{sql_col}" IS NOT NULL'
+                val_expr, where_pred = f'CAST("{field}" AS VARCHAR)', f'"{field}" IS NOT NULL'
             branches.append(
                 f"(SELECT '{field_lit}' AS field, {val_expr} AS value, count(*) AS c "
-                f"FROM {table_name} "
-                f"WHERE {where_pred} "
-                f"GROUP BY 2 "
+                f"FROM {table_name} WHERE {where_pred} GROUP BY 2 "
                 f"QUALIFY ROW_NUMBER() OVER (ORDER BY c DESC) <= {field_limit})"
             )
             field_order.append(field)
 
         if not branches:
             return [], []
-
-        q = "\n            UNION ALL\n            ".join(branches) + "\n            ORDER BY field, c DESC"
-        return self.execute(q).fetchall(), field_order
+        return self.execute(
+            "\n            UNION ALL\n            ".join(branches) + "\n            ORDER BY field, c DESC"
+        ).fetchall(), field_order
 
     def try_pop_health_from_rollup(
-        self,
-        start_time: str | None,
-        end_time: str | None,
-        *,
-        has_filters: bool,
+        self, start_time: str | None, end_time: str | None, *, has_filters: bool
     ) -> list[tuple] | None:
         """Serve the /api/network/pop-health panel from parquets."""
         resolved = self._rollup_window_and_paths_with_active_hour(
@@ -4872,8 +4505,7 @@ class QueryRunner:
         _st, et, paths_sql, active_hour_start, base_table = resolved
 
         if et > active_hour_start:
-            ah_iso = active_hour_start.isoformat()
-            et_iso = et.isoformat()
+            ah_iso, et_iso = active_hour_start.isoformat(), et.isoformat()
             query = (
                 f"SELECT pop,  CAST(SUM(requests) AS BIGINT),  CAST(SUM(errors) AS BIGINT),  CAST(SUM(cache_hits) AS BIGINT),"
                 f"  CAST(SUM(bandwidth_bytes) AS BIGINT),  CAST(SUM(p50_rtt_us * requests) / NULLIF(SUM(requests), 0) AS DOUBLE),"

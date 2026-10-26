@@ -31,7 +31,7 @@ import { useDateFormat } from '@/hooks/useSSE'
 import { LiveElapsed, NextRunCountdown, TimeAgo } from '@/components/SyncStatusBadge/SyncStatusBadge'
 import { queryKeys } from '@/lib/query-keys'
 import type { WithRequired, components } from '@/types/api'
-import type { SyncStatus } from '@/hooks/useEventStream'
+import type { SyncStatus } from '@/hooks/useSSE'
 import type { CronRun } from '../_state'
 
 export const CRON_EXPLANATIONS: Record<string, string> = {

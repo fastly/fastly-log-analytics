@@ -9,7 +9,7 @@ import {
 } from '@tanstack/react-table'
 import { useVirtualizer, type Virtualizer } from '@tanstack/react-virtual'
 import { ArrowDown, ArrowUp, ArrowUpDown, ChevronDown, Copy, ExternalLink, Filter, GripVertical, Inbox, Settings2 } from 'lucide-react'
-import { DndContext, KeyboardSensor, MouseSensor, TouchSensor, closestCenter, useSensor, useSensors, DragEndEvent } from '@dnd-kit/core'
+import { DndContext, KeyboardSensor, MouseSensor, TouchSensor, closestCenter, useSensor, useSensors, type DragEndEvent } from '@dnd-kit/core'
 import { restrictToHorizontalAxis } from '@dnd-kit/modifiers'
 import { arrayMove, SortableContext, horizontalListSortingStrategy, useSortable } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
@@ -62,11 +62,8 @@ export function useDataTableState<TData, TValue>({
   const columnVisibility = isControlled ? controlledVisibility! : internalVisibility
   const setColumnVisibility = React.useCallback(
     (updater: VisibilityState | ((prev: VisibilityState) => VisibilityState)) => {
-      if (isControlled) {
-        onColumnVisibilityChange?.(typeof updater === 'function' ? updater(controlledVisibility!) : updater)
-      } else {
-        setInternalVisibility(updater)
-      }
+      if (isControlled) onColumnVisibilityChange?.(typeof updater === 'function' ? updater(controlledVisibility!) : updater)
+      else setInternalVisibility(updater)
     },
     [isControlled, controlledVisibility, onColumnVisibilityChange],
   )
@@ -165,18 +162,16 @@ export function formatPopGeo(geo?: PopGeo | null): string {
 
 export function usePopGeo(code?: string | null): string {
   const map = usePopGeoStore((s) => s.map)
-  if (!code || !map) return ''
-  return formatPopGeo(map[String(code).toUpperCase()])
+  return code && map ? formatPopGeo(map[String(code).toUpperCase()]) : ''
 }
 
 export function PopLabel({ code, className }: { code?: string | null; className?: string }) {
   const raw = (code ?? '').toString()
   const geo = usePopGeo(raw)
   if (!raw) return null
-  const display = /^[a-z]{2,4}$/i.test(raw) ? raw.toUpperCase() : raw
   return (
     <span className={className}>
-      {display}
+      {/^[a-z]{2,4}$/i.test(raw) ? raw.toUpperCase() : raw}
       {geo && <span className="ml-1 text-[10px] font-normal text-muted-foreground">({geo})</span>}
     </span>
   )
@@ -203,14 +198,14 @@ function pageLabelFor(pathname: string | null): string {
 }
 
 export function buildDashboardFilterUrl(filters: FilterValueCellFilter[]): string {
-  return `/dashboard?${filters.map(f => `filter_${f.column}=${encodeURIComponent(f.value)}`).join('&')}`
+  return `/dashboard?${filters.map((f) => `filter_${f.column}=${encodeURIComponent(f.value)}`).join('&')}`
 }
 
 export function FilterValueCell({ filters, display, className, containerClassName }: FilterValueCellProps) {
   const pathname = usePathname()
-  const addFilter = useFilterStore(state => state.addFilter)
+  const addFilter = useFilterStore((state) => state.addFilter)
   const maskIps = useMaskIps()
-  const ipFilterBlocked = maskIps && filters.some(f => isIpFamilyField(f.column))
+  const ipFilterBlocked = maskIps && filters.some((f) => isIpFamilyField(f.column))
   const onDashboard = pathname === '/dashboard'
   const pageLabel = pageLabelFor(pathname)
   const shownValue = display ?? filters[0]?.value ?? ''
@@ -312,32 +307,25 @@ export function ColumnVisibilityDropdown<TData = unknown>(props: ColumnVisibilit
   const size = props.size ?? (compact ? 'sm' : 'sm')
 
   const items = props.table
-    ? props.table.getAllColumns().filter((column) => column.getCanHide()).map((column) => ({
-        id: column.id,
-        label: column.columnDef.meta?.label ?? (typeof column.columnDef.header === 'string' ? column.columnDef.header : column.id.replace(/_/g, ' ')),
-        visible: column.getIsVisible(),
-        onToggle: (visible: boolean) => column.toggleVisibility(visible),
+    ? props.table.getAllColumns().filter((c) => c.getCanHide()).map((c) => ({
+        id: c.id,
+        label: c.columnDef.meta?.label ?? (typeof c.columnDef.header === 'string' ? c.columnDef.header : c.id.replace(/_/g, ' ')),
+        visible: c.getIsVisible(),
+        onToggle: (visible: boolean) => c.toggleVisibility(visible),
       }))
-    : props.columns.map((column) => ({
-        id: column.id, label: column.label, visible: props.visibility[column.id] !== false,
-        onToggle: (visible: boolean) => props.onChange(column.id, visible),
+    : props.columns.map((c) => ({
+        id: c.id, label: c.label, visible: props.visibility[c.id] !== false,
+        onToggle: (visible: boolean) => props.onChange(c.id, visible),
       }))
 
   return (
     <DropdownMenu>
-      <DropdownMenuTrigger
-        render={<Button variant="outline" size={size} className={cn('h-8 gap-2 px-2 text-xs font-normal', className)} />}
-      >
+      <DropdownMenuTrigger render={<Button variant="outline" size={size} className={cn('h-8 gap-2 px-2 text-xs font-normal', className)} />}>
         {size === 'icon' ? <Settings2 className="h-4 w-4" /> : <>Columns<ChevronDown className="h-3 w-3 opacity-50" /></>}
       </DropdownMenuTrigger>
       <DropdownMenuContent align={align} className="w-auto min-w-[180px]">
         {items.map((item) => (
-          <DropdownMenuCheckboxItem
-            key={item.id}
-            className="capitalize whitespace-nowrap"
-            checked={item.visible}
-            onCheckedChange={(value) => item.onToggle(!!value)}
-          >
+          <DropdownMenuCheckboxItem key={item.id} className="capitalize whitespace-nowrap" checked={item.visible} onCheckedChange={(v) => item.onToggle(!!v)}>
             {item.label}
           </DropdownMenuCheckboxItem>
         ))}
@@ -373,11 +361,7 @@ function TableRowImpl<TData>({ row, onRowClick, rowClassName }: TableRowProps<TD
       {row.getVisibleCells().map((cell) => {
         const meta = cell.column.columnDef.meta as { cellClassName?: string } | undefined
         return (
-          <TableCell
-            key={cell.id}
-            style={{ width: cell.column.getSize(), maxWidth: cell.column.getSize() }}
-            className={cn('truncate', meta?.cellClassName)}
-          >
+          <TableCell key={cell.id} style={{ width: cell.column.getSize(), maxWidth: cell.column.getSize() }} className={cn('truncate', meta?.cellClassName)}>
             {flexRender(cell.column.columnDef.cell, cell.getContext())}
           </TableCell>
         )
@@ -443,9 +427,7 @@ export function DataTableBody<TData, TValue>({
               <Inbox className="h-7 w-7 opacity-30" aria-hidden="true" />
               <p className="text-sm font-medium">{emptyMessage}</p>
               {emptyHint && <p className="text-xs text-muted-foreground">{emptyHint}</p>}
-              {onClearFilter && (
-                <Button variant="outline" size="sm" className="mt-1" onClick={onClearFilter}>Clear filter</Button>
-              )}
+              {onClearFilter && <Button variant="outline" size="sm" className="mt-1" onClick={onClearFilter}>Clear filter</Button>}
             </div>
           </TableCell>
         </TableRow>
@@ -509,15 +491,13 @@ export const StaticTableHeader = <TData,>({ header }: { header: Header<TData, un
 
 export const DraggableTableHeader = <TData,>({ header }: { header: Header<TData, unknown> }) => {
   const { attributes, isDragging, listeners, setNodeRef, transform, transition } = useSortable({ id: header.column.id })
-  const style: React.CSSProperties = {
-    opacity: isDragging ? 0.8 : 1, position: 'relative', transform: CSS.Translate.toString(transform),
-    transition, whiteSpace: 'nowrap', width: header.column.getSize(), zIndex: isDragging ? 1 : 0,
-  }
-
   return (
     <TableHead
       ref={setNodeRef}
-      style={style}
+      style={{
+        opacity: isDragging ? 0.8 : 1, position: 'relative', transform: CSS.Translate.toString(transform),
+        transition, whiteSpace: 'nowrap', width: header.column.getSize(), zIndex: isDragging ? 1 : 0,
+      }}
       aria-sort={getHeaderAriaSort(header)}
       className={cn('relative group select-none border-r last:border-r-0 px-0', isDragging && 'bg-muted shadow-md z-10')}
     >
@@ -538,9 +518,6 @@ export const DraggableTableHeader = <TData,>({ header }: { header: Header<TData,
 interface DateTimeCellProps { iso: string | null | undefined; className?: string; emptyFallback?: React.ReactNode }
 
 export function DateTimeCell({ iso, className, emptyFallback }: DateTimeCellProps) {
-  // Absolute time (tooltip content) is static; the relative "X ago" trigger
-  // ticks every second via the shared <TimeAgo> so table cells stop looking
-  // frozen between query refetches. Only the inner text node re-renders.
   const { full, abbr } = useDateFormat()
   if (!iso) return <>{emptyFallback ?? <span className="text-muted-foreground/40">—</span>}</>
   return (
@@ -560,12 +537,12 @@ interface DataTableToolbarProps<TData> {
 }
 
 export const DataTableToolbar = <TData,>({ table, title, searchKey, compactToolbar = false, extraToolbarContent }: DataTableToolbarProps<TData>) => (
-  <div className={cn("flex items-center gap-4", compactToolbar ? "mb-2" : "py-4 px-4")}>
+  <div className={cn('flex items-center gap-4', compactToolbar ? 'mb-2' : 'py-4 px-4')}>
     {title && <div className="flex-1">{title}</div>}
     {searchKey && (
       <Input
         placeholder={`Filter ${searchKey}...`}
-        value={(table.getColumn(searchKey)?.getFilterValue() as string) ?? ""}
+        value={(table.getColumn(searchKey)?.getFilterValue() as string) ?? ''}
         onChange={(event) => table.getColumn(searchKey)?.setFilterValue(event.target.value)}
         className="max-w-sm h-8"
       />
@@ -577,11 +554,6 @@ export const DataTableToolbar = <TData,>({ table, title, searchKey, compactToolb
   </div>
 )
 
-/**
- * Pagination footer shared by DataTable + DataTableReadonly.
- * The `>= 19` row-count gate and the [10, 20, 50, 100, 500] page
- * sizes are load-bearing — kept byte-identical to both former inline copies.
- */
 export function DataTablePagination<TData>({ table }: { table: ReactTable<TData> }) {
   if (table.getFilteredRowModel().rows.length < 19) return null
   return (
@@ -589,7 +561,7 @@ export function DataTablePagination<TData>({ table }: { table: ReactTable<TData>
       <div className="flex items-center space-x-6 lg:space-x-8">
         <div className="flex items-center space-x-2">
           <p className="text-sm font-medium">Rows per page</p>
-          <Select value={`${table.getState().pagination.pageSize}`} onValueChange={(value) => table.setPageSize(Number(value))}>
+          <Select value={`${table.getState().pagination.pageSize}`} onValueChange={(v) => table.setPageSize(Number(v))}>
             <SelectTrigger className="h-8 w-[70px]">
               <SelectValue placeholder={table.getState().pagination.pageSize} />
             </SelectTrigger>
@@ -624,14 +596,9 @@ export function reportUxEvent(evt: UxEvent): void {
     const pathname = evt.pathname ?? window.location.pathname
     const body = JSON.stringify({ event: evt.event, pathname, component_id: evt.component_id, details: evt.details ?? {} })
     const url = `${getApiBase()}/api/ux-events`
-    if (typeof navigator !== 'undefined' && 'sendBeacon' in navigator) {
-      const blob = new Blob([body], { type: 'application/json' })
-      if (navigator.sendBeacon(url, blob)) return
-    }
+    if (typeof navigator !== 'undefined' && 'sendBeacon' in navigator && navigator.sendBeacon(url, new Blob([body], { type: 'application/json' }))) return
     void fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body, keepalive: true })
-  } catch {
-    // Swallow — telemetry never breaks the page.
-  }
+  } catch { /* Swallow — telemetry never breaks the page */ }
 }
 
 export interface DataTableProps<TData, TValue> extends DataTableBaseProps<TData, TValue> {
@@ -644,7 +611,7 @@ function DataTableImpl<TData, TValue>({
   showPagination = true, sorting: controlledSorting, onSortingChange, initialSorting = [],
   initialVisibility = {}, initialColumnOrder, enableColumnReorder = true, title, compactToolbar = false,
   extraToolbarContent, renderToolbar, hideToolbar = false, columnVisibility: controlledVisibility,
-  onColumnVisibilityChange, emptyMessage = "No results.", emptyHint, onClearFilter, onRowClick,
+  onColumnVisibilityChange, emptyMessage = 'No results.', emptyHint, onClearFilter, onRowClick,
   getRowClassName, tableCaption,
 }: DataTableProps<TData, TValue>) {
   const {
@@ -680,9 +647,9 @@ function DataTableImpl<TData, TValue>({
       ref={tableContainerRef}
       tabIndex={enableColumnReorder ? undefined : 0}
       className={cn(
-        "rounded-md border overflow-auto w-full",
-        !enableColumnReorder && "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-        tableContainerClassName || "max-h-[min(600px,calc(100dvh-200px))]",
+        'rounded-md border overflow-auto w-full',
+        !enableColumnReorder && 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+        tableContainerClassName || 'max-h-[min(600px,calc(100dvh-200px))]',
       )}
     >
       <Table scrollFocusable={false} className={tableClassName} style={{ tableLayout: 'fixed', width: table.getTotalSize(), minWidth: '100%' }}>
@@ -732,7 +699,7 @@ function DataTableReadonlyImpl<TData, TValue>(props: DataTableReadonlyProps<TDat
 }
 export const DataTableReadonly = React.memo(DataTableReadonlyImpl) as typeof DataTableReadonlyImpl
 
-// ─── Shared Table Column Builders (folded from lib/table-utils.tsx) ──────────
+// ─── Shared Table Column Builders ────────────────────────────────────────────
 
 export const ingestedFilesColumns: ColumnDef<components['schemas']['IngestedFile']>[] = [
   { accessorKey: 'file_name', id: 'file_name', meta: { label: 'File Name' }, header: 'File Name', cell: ({ row }) => <span className="font-mono text-xs">{row.original.file_name}</span> },
@@ -755,7 +722,6 @@ export const columnHeader = (label: string) =>
     return <span className="text-[11px] font-bold uppercase tracking-tight text-muted-foreground">{label}</span>
   }
 
-/** The numeric columns a latency table reads off each row. */
 export interface LatencyRow {
   requests?: number | null; avg?: number | null; p50?: number | null; p95?: number | null; p99?: number | null
 }
@@ -765,10 +731,6 @@ export const numberValue = (v: unknown): number | null | undefined => (typeof v 
 export const msCell = (value: unknown) => <span>{numberValue(value)?.toFixed(1)}ms</span>
 const ms2Cell = (info: { getValue: () => unknown }) => numberValue(info.getValue())?.toFixed(2) ?? '0.00'
 
-/**
- * Creates standard performance/latency columns with a filter-value drill-down
- * cell (filter the current page or open the dashboard in a new tab).
- */
 export const makeLatencyColumns = <TRow extends LatencyRow>(
   labelField: keyof TRow & string,
   labelName: string,
@@ -782,14 +744,7 @@ export const makeLatencyColumns = <TRow extends LatencyRow>(
       const rawDisplay = info.getValue()
       const displayVal = typeof rawDisplay === 'string' || typeof rawDisplay === 'number' ? rawDisplay : null
       if (val == null) return <span className="font-mono text-xs truncate block max-w-[300px]">{displayVal}</span>
-      return (
-        <FilterValueCell
-          filters={[{ column: filterField, value: String(val) }]}
-          display={displayVal}
-          className="font-mono text-xs"
-          containerClassName="max-w-[300px]"
-        />
-      )
+      return <FilterValueCell filters={[{ column: filterField, value: String(val) }]} display={displayVal} className="font-mono text-xs" containerClassName="max-w-[300px]" />
     },
   },
   { accessorKey: 'requests', header: columnHeader('Reqs'), cell: (info) => formatCountMaybe(numberValue(info.getValue())) ?? '0' },

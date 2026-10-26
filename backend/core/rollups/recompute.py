@@ -23,10 +23,14 @@ from datetime import UTC, datetime, timedelta
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from .. import metric_expressions
 from ._common import (
     _VIRTUAL_FIELD_BACKING,
     IP_SAMPLE_CAP,
     IP_SPREAD_BUNDLE_FILENAME,
+    OVERVIEW_BUNDLE_FILENAME,
+    SESSIONS_BUNDLE_FILENAME,
+    TIME_SERIES_BUNDLE_FILENAME,
     _build_copy_query,
     _build_ip_spread_select_query,
     _build_virtual_field_copy_query,
@@ -40,11 +44,14 @@ from ._common import (
     _rollups_root,
     _safe_table_for,
     acquire_rollup_connection_and_cols,
+    backfill_missing_bundles,
+    build_per_hour_bundles,
+    parquet_zstd_target,
     parse_hour_token,
     quote_path_list,
     shared_rollup_session,
 )
-from .hour_bundles import bundle_hours, bundle_hours_ip_spread
+from .day_bundles import bundle_hours, bundle_hours_ip_spread
 
 # Writers dispatched by name from spec.HOUR_WRITERS (resolved against this
 # module at call time, so each name here is also the test patch point).
@@ -57,7 +64,6 @@ from .network import (  # noqa: F401
     build_network_summary_bundles,
     build_pop_health_bundles,
 )
-from .ngwaf_bots import build_ngwaf_bots_bundles, build_ngwaf_bots_ts_bundles  # noqa: F401
 from .origin_dims import (  # noqa: F401
     build_origin_dims_bundles,
     build_origin_latency_ts_bundles,
@@ -67,14 +73,11 @@ from .origin_dims import (  # noqa: F401
     build_slow_urls_bundles,
 )
 from .security_dims import (  # noqa: F401
+    build_ngwaf_bots_bundles,
+    build_ngwaf_bots_ts_bundles,
     build_security_dims_bundles,
     build_security_proxies_bundles,
     build_verified_bots_ts_bundles,
-)
-from .time_series import (  # noqa: F401
-    build_overview_bundles,
-    build_session_bundles,
-    build_time_series_bundles,
 )
 from .wellknown_bots import recompute_wellknown_bots_rollup  # noqa: F401
 
@@ -972,3 +975,315 @@ def _run_ip_spread_per_field(
     finally:
         if owns_con:
             con.close()
+
+
+# ---------------------------------------------------------------------------
+# Per-hour time-series, overview, and session bundle writers
+# (formerly backend.core.rollups.time_series)
+# ---------------------------------------------------------------------------
+
+
+def build_time_series_bundles(
+    service_id: str, source: dict, hours: list[str], *, output_root: str | None = None
+) -> int:
+    """Write a 1-minute time_series rollup for each closed hour in ``hours``."""
+
+    def eligibility(cols: set[str], table_ident: str) -> str | None:
+        if "timestamp" not in cols:
+            logger.warning(
+                "[rollups] %s: no `timestamp` column on %s; skipping time_series bundle",
+                service_id,
+                table_ident,
+            )
+            return None
+
+        select_parts = [
+            "time_bucket(INTERVAL '1 minute', timestamp) AS bucket",
+            "CAST(COUNT(*) AS BIGINT) AS requests",
+        ]
+        if "status" in cols:
+            select_parts.append("CAST(COUNT(*) FILTER (WHERE status BETWEEN 400 AND 499) AS BIGINT) AS status_4xx")
+            select_parts.append("CAST(COUNT(*) FILTER (WHERE status >= 500) AS BIGINT) AS status_5xx")
+        else:
+            select_parts.append("CAST(0 AS BIGINT) AS status_4xx")
+            select_parts.append("CAST(0 AS BIGINT) AS status_5xx")
+
+        if "cache" in cols:
+            select_parts.append("CAST(COUNT(*) FILTER (WHERE cache IN ('HIT', 'HIT-STALE')) AS BIGINT) AS hits")
+            select_parts.append("CAST(COUNT(*) FILTER (WHERE cache IS NOT NULL) AS BIGINT) AS cache_total")
+        else:
+            select_parts.append("CAST(0 AS BIGINT) AS hits")
+            select_parts.append("CAST(0 AS BIGINT) AS cache_total")
+
+        if "resp_bytes" in cols:
+            resp_bytes_expr = metric_expressions.sum_or_zero("resp_bytes")
+            select_parts.append(f"CAST({resp_bytes_expr} AS BIGINT) AS resp_bytes_sum")
+        else:
+            select_parts.append("CAST(0 AS BIGINT) AS resp_bytes_sum")
+
+        if "ttfb" in cols:
+            ttfb_expr = metric_expressions.sum_or_zero("ttfb", zero="0.0")
+            select_parts.append(f"CAST({ttfb_expr} AS DOUBLE) AS ttfb_sum")
+            select_parts.append("CAST(COUNT(*) FILTER (WHERE ttfb IS NOT NULL) AS BIGINT) AS ttfb_count")
+        else:
+            select_parts.append("CAST(0.0 AS DOUBLE) AS ttfb_sum")
+            select_parts.append("CAST(0 AS BIGINT) AS ttfb_count")
+
+        return ",\n               ".join(select_parts)
+
+    def build_copy_sql(select_sql: object, table_ident: str, start_iso: str, end_iso: str, tmp_path: str) -> str:
+        return (
+            f"COPY (SELECT {select_sql} "
+            f"FROM {table_ident} "
+            f"WHERE timestamp >= TIMESTAMPTZ '{start_iso}' "
+            f"AND timestamp < TIMESTAMPTZ '{end_iso}' "
+            f"GROUP BY 1) "
+            f"{parquet_zstd_target(tmp_path)}"
+        )
+
+    return build_per_hour_bundles(
+        service_id,
+        source,
+        hours,
+        bundle_filename=TIME_SERIES_BUNDLE_FILENAME,
+        tmp_prefix=".tmp_ts_",
+        label="time_series",
+        eligibility=eligibility,
+        build_copy_sql=build_copy_sql,
+        logger=logger,
+        output_root=output_root,
+    )
+
+
+_HIT_STATES = "('HIT', 'HIT-STALE', 'HIT-CLUSTER')"
+
+
+def build_overview_bundles(service_id: str, source: dict, hours: list[str]) -> int:
+    """Write an overview rollup for each closed hour in ``hours``."""
+
+    def eligibility(cols: set[str], table_ident: str) -> str | None:
+        if "timestamp" not in cols:
+            logger.warning(
+                "[rollups] %s: no `timestamp` column on %s; skipping overview bundle",
+                service_id,
+                table_ident,
+            )
+            return None
+
+        select_parts: list[str] = [
+            "CAST(COUNT(*) AS BIGINT) AS requests",
+        ]
+
+        has_cache = "cache" in cols
+        if has_cache:
+            select_parts.append(f"CAST(COUNT(*) FILTER (WHERE cache IN {_HIT_STATES}) AS BIGINT) AS hit_requests")
+            select_parts.append("CAST(COUNT(*) FILTER (WHERE cache = 'MISS') AS BIGINT) AS miss_requests")
+            select_parts.append("CAST(COUNT(*) FILTER (WHERE cache = 'PASS') AS BIGINT) AS pass_requests")
+            select_parts.append("CAST(COUNT(*) FILTER (WHERE cache = 'SYNTH') AS BIGINT) AS synth_requests")
+            select_parts.append(
+                "CAST(COUNT(*) FILTER (WHERE cache IN ('MISS', 'PASS', 'SYNTH', 'ERROR')) AS BIGINT) AS origin_requests"
+            )
+        else:
+            select_parts.extend(
+                [
+                    "CAST(0 AS BIGINT) AS hit_requests",
+                    "CAST(0 AS BIGINT) AS miss_requests",
+                    "CAST(0 AS BIGINT) AS pass_requests",
+                    "CAST(0 AS BIGINT) AS synth_requests",
+                    "CAST(0 AS BIGINT) AS origin_requests",
+                ]
+            )
+
+        if "resp_bytes" in cols and has_cache:
+            bw_saved = metric_expressions.sum_or_zero("resp_bytes", where=f"cache IN {_HIT_STATES}")
+            select_parts.append(f"CAST({bw_saved} AS BIGINT) AS bandwidth_saved_bytes")
+        else:
+            select_parts.append("CAST(0 AS BIGINT) AS bandwidth_saved_bytes")
+
+        if "resp_bytes" in cols:
+            total_bw = metric_expressions.sum_or_zero("resp_bytes")
+            select_parts.append(f"CAST({total_bw} AS BIGINT) AS total_bandwidth_bytes")
+        else:
+            select_parts.append("CAST(0 AS BIGINT) AS total_bandwidth_bytes")
+
+        if "is_shield" in cols and has_cache:
+            select_parts.append(
+                f"CAST(COUNT(*) FILTER (WHERE is_shield = true AND cache IN {_HIT_STATES}) AS BIGINT)"
+                " AS shield_hit_requests"
+            )
+            select_parts.append("CAST(COUNT(*) FILTER (WHERE is_shield = true) AS BIGINT) AS shield_total_requests")
+        else:
+            select_parts.extend(
+                [
+                    "CAST(0 AS BIGINT) AS shield_hit_requests",
+                    "CAST(0 AS BIGINT) AS shield_total_requests",
+                ]
+            )
+
+        if "waf" in cols and "waf_resp" in cols:
+            select_parts.append("CAST(COUNT(*) FILTER (WHERE waf = 1 AND waf_resp = 406) AS BIGINT) AS threats_blocked")
+        else:
+            select_parts.append("CAST(0 AS BIGINT) AS threats_blocked")
+
+        if "elapsed" in cols and has_cache:
+            hit_el = metric_expressions.sum_or_zero("elapsed", zero="0.0", where=f"cache IN {_HIT_STATES}")
+            miss_el = metric_expressions.sum_or_zero("elapsed", zero="0.0", where="cache = 'MISS'")
+            select_parts.extend(
+                [
+                    f"CAST({hit_el} AS DOUBLE) AS hit_elapsed_sum",
+                    f"CAST(COUNT(elapsed) FILTER (WHERE cache IN {_HIT_STATES}) AS BIGINT) AS hit_elapsed_count",
+                    f"CAST({miss_el} AS DOUBLE) AS miss_elapsed_sum",
+                    "CAST(COUNT(elapsed) FILTER (WHERE cache = 'MISS') AS BIGINT) AS miss_elapsed_count",
+                ]
+            )
+        else:
+            select_parts.extend(
+                [
+                    "CAST(0.0 AS DOUBLE) AS hit_elapsed_sum",
+                    "CAST(0 AS BIGINT) AS hit_elapsed_count",
+                    "CAST(0.0 AS DOUBLE) AS miss_elapsed_sum",
+                    "CAST(0 AS BIGINT) AS miss_elapsed_count",
+                ]
+            )
+
+        return ",\n               ".join(select_parts)
+
+    def build_copy_sql(select_sql: object, table_ident: str, start_iso: str, end_iso: str, tmp_path: str) -> str:
+        return (
+            f"COPY (SELECT TIMESTAMPTZ '{start_iso}' AS hour_start, {select_sql} "
+            f"FROM {table_ident} "
+            f"WHERE timestamp >= TIMESTAMPTZ '{start_iso}' "
+            f"AND timestamp < TIMESTAMPTZ '{end_iso}') "
+            f"{parquet_zstd_target(tmp_path)}"
+        )
+
+    return build_per_hour_bundles(
+        service_id,
+        source,
+        hours,
+        bundle_filename=OVERVIEW_BUNDLE_FILENAME,
+        tmp_prefix=".tmp_ov_",
+        label="overview",
+        eligibility=eligibility,
+        build_copy_sql=build_copy_sql,
+        logger=logger,
+    )
+
+
+def backfill_overview_bundles(service_id: str, source: dict) -> int:
+    """Build overview.parquet for every closed hour that already has
+    ``all_fields.parquet`` but no ``overview.parquet``."""
+    return backfill_missing_bundles(
+        service_id,
+        source,
+        bundle_filename=OVERVIEW_BUNDLE_FILENAME,
+        label="overview",
+        builder=build_overview_bundles,
+        logger=logger,
+    )
+
+
+def build_session_bundles(service_id: str, source: dict, hours: list[str]) -> int:
+    """Write a per-hour ``sessions.parquet`` rollup for each closed hour in ``hours``."""
+
+    def eligibility(cols: set[str], table_ident: str) -> str | None:
+        if "timestamp" not in cols or "ip" not in cols:
+            logger.info(
+                "[rollups] %s: skipping sessions bundle (timestamp=%s, ip=%s)",
+                service_id,
+                "timestamp" in cols,
+                "ip" in cols,
+            )
+            return None
+
+        ja4_expr = '"ja4"' if "ja4" in cols else "CAST(NULL AS VARCHAR)"
+
+        select_parts = [
+            "time_bucket(INTERVAL '1 hour', timestamp) AS bucket",
+            'CAST("ip" AS VARCHAR) AS ip',
+            f"CAST({ja4_expr} AS VARCHAR) AS ja4",
+            "MIN(timestamp) AS first_ts",
+            "MAX(timestamp) AS last_ts",
+            "CAST(COUNT(*) AS BIGINT) AS req_count",
+        ]
+        if "country" in cols:
+            select_parts.append('CAST(MIN("country") AS VARCHAR) AS country')
+        else:
+            select_parts.append("CAST(NULL AS VARCHAR) AS country")
+        if "asn" in cols:
+            select_parts.append('CAST(MIN("asn") AS INTEGER) AS asn')
+        else:
+            select_parts.append("CAST(NULL AS INTEGER) AS asn")
+        if "status" in cols:
+            select_parts.append(
+                'CAST(SUM(CASE WHEN "status" BETWEEN 400 AND 499 THEN 1 ELSE 0 END) AS BIGINT) AS reqs_4xx'
+            )
+            select_parts.append('CAST(SUM(CASE WHEN "status" >= 500 THEN 1 ELSE 0 END) AS BIGINT) AS reqs_5xx')
+        else:
+            select_parts.append("CAST(0 AS BIGINT) AS reqs_4xx")
+            select_parts.append("CAST(0 AS BIGINT) AS reqs_5xx")
+        if "resp_bytes" in cols:
+            tot_bytes = metric_expressions.sum_or_zero('"resp_bytes"')
+            select_parts.append(f"CAST({tot_bytes} AS BIGINT) AS total_bytes")
+        else:
+            select_parts.append("CAST(0 AS BIGINT) AS total_bytes")
+        if "tcp_rtt" in cols:
+            rtt_s = metric_expressions.sum_or_zero('"tcp_rtt"', zero="0.0")
+            select_parts.append(f"CAST({rtt_s} AS DOUBLE) AS rtt_sum")
+            select_parts.append('CAST(COUNT(*) FILTER (WHERE "tcp_rtt" IS NOT NULL) AS BIGINT) AS rtt_count')
+        else:
+            select_parts.append("CAST(0.0 AS DOUBLE) AS rtt_sum")
+            select_parts.append("CAST(0 AS BIGINT) AS rtt_count")
+        if "edge" in cols:
+            select_parts.append('CAST(SUM(CASE WHEN "edge" = 1 THEN 1 ELSE 0 END) AS BIGINT) AS edge_count')
+            select_parts.append('CAST(SUM(CASE WHEN "edge" = 0 THEN 1 ELSE 0 END) AS BIGINT) AS shield_count')
+        else:
+            select_parts.append("CAST(0 AS BIGINT) AS edge_count")
+            select_parts.append("CAST(0 AS BIGINT) AS shield_count")
+        if "ua" in cols:
+            select_parts.append('CAST(MIN("ua") AS VARCHAR) AS ua_min')
+        else:
+            select_parts.append("CAST(NULL AS VARCHAR) AS ua_min")
+        if "edge_sid" in cols:
+            select_parts.append('CAST(MAX("edge_sid") AS VARCHAR) AS edge_sid_max')
+        else:
+            select_parts.append("CAST(NULL AS VARCHAR) AS edge_sid_max")
+        if "cmcd_sid" in cols:
+            select_parts.append(
+                'CAST(COUNT(*) FILTER (WHERE "cmcd_sid" IS NOT NULL AND "cmcd_sid" != \'\') AS BIGINT) AS cmcd_count'
+            )
+        else:
+            select_parts.append("CAST(0 AS BIGINT) AS cmcd_count")
+
+        return ",\n               ".join(select_parts)
+
+    def build_copy_sql(select_sql: object, table_ident: str, start_iso: str, end_iso: str, tmp_path: str) -> str:
+        return (
+            f"COPY (SELECT {select_sql} "
+            f"FROM {table_ident} "
+            f"WHERE timestamp >= TIMESTAMPTZ '{start_iso}' "
+            f"AND timestamp < TIMESTAMPTZ '{end_iso}' "
+            f'AND "ip" IS NOT NULL '
+            f"GROUP BY 1, 2, 3) "
+            f"{parquet_zstd_target(tmp_path)}"
+        )
+
+    return build_per_hour_bundles(
+        service_id,
+        source,
+        hours,
+        bundle_filename=SESSIONS_BUNDLE_FILENAME,
+        tmp_prefix=".tmp_sess_",
+        label="sessions",
+        eligibility=eligibility,
+        build_copy_sql=build_copy_sql,
+        logger=logger,
+    )
+
+
+for _legacy_mod in (
+    "backend.core.rollups.time_series",
+    "backend.core.rollups.overview",
+    "backend.core.rollups.sessions",
+):
+    sys.modules[_legacy_mod] = sys.modules[__name__]

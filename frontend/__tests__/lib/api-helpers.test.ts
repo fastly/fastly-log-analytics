@@ -18,7 +18,7 @@ import { adminJson, adminJsonResult } from '@/lib/api'
 import { arrayOrEmpty, recordOrNull } from '@/lib/utils'
 import { queryKeys } from '@/lib/query-keys'
 import { keepPreviousWithinService } from '@/hooks/useDashboardCards'
-import { buildStreamRequest } from '@/lib/admin-stream-apply'
+import { buildStreamRequest } from '@/hooks/useSSE'
 import {
   throwIfStaleAggregates,
   isStaleDashboardViewError,

@@ -1,66 +1,555 @@
 "use client";
 
 import React from "react";
+import type { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
-  SectionHeader,
-  ReviewCard,
-  ReviewHeader,
-  ReviewContent,
-  ReviewItem,
+  SectionHeader, ReviewCard, ReviewHeader, ReviewContent, ReviewItem,
 } from "@/components/ui/confirm-dialog";
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { CollapsibleGroup, CmcdConfigSection } from "@/components/LogSettingsModal/FieldGroups";
+import { SSEProgressView } from "@/components/SSEModal";
 import {
-  Activity,
-  AlertCircle,
-  Calendar,
-  CheckCircle2,
-  ChevronRight,
-  Cloud,
-  Copy,
-  Database,
-  Eye,
-  FileJson,
-  FileText,
-  Globe,
-  Info,
-  Layers,
-  Loader2,
-  Lock,
-  Search,
-  Settings,
-  Shield,
-  Sparkles,
-  XCircle,
-  Zap,
+  Activity, AlertCircle, Calendar, CheckCircle2, ChevronRight, Cloud,
+  Copy, Database, Eye, FileJson, FileText, Globe, Info, Layers,
+  Loader2, Lock, Search, Settings, Shield, Sparkles, XCircle, Zap,
 } from "lucide-react";
-import { cn, copyToClipboard, formatDateTime, panelDialogContent } from "@/lib/utils";
+import { cn, copyToClipboard, formatDateTime, panelDialogContent, REGION_LABELS, SHIELD_LABELS } from "@/lib/utils";
 import { formatBytes } from "@/lib/format";
-import { ANALYST_PATH_A_UNSUPPORTED_REASON, type ProvisionWizardProps } from "./types";
-import { useWizardState, type WizardState } from "./useWizardState";
+import { evaluateLogFieldPresetSummary, resolveEnabledGroupsWithDeps } from "@/lib/query-keys";
+import type { Service } from "@/stores/filterStore";
+import type { SSELine, SSEStatus } from "@/hooks/useSSE";
+import type { Schema } from "@/types/api";
+import { useWizardState } from "./useWizardState";
 import { WizardHeader, WizardFooter, ResumeBanner } from "./WizardFooter";
 import { StorageStep, AnalyzeStep } from "./steps/StorageStep";
 import { JoinStep } from "./steps/JoinStep";
-import { ExecuteStep } from "./steps/ExecuteStep";
 
-// Read the machine-readable error code the services query attaches (see
-// useWizardState) without an `any` cast, so we can render a richer message for
-// specific backend errors.
+// ── Types & Constants (folded from types.ts) ──────────────────────────────
+
+export type ProvisionService = Schema<"ProvisionService">;
+export type LakeInfo = Schema<"ProvisionLakeInfoResponse">;
+export type LogFieldsCatalog = Schema<"LogFieldsCatalogResponse">;
+type LogFieldsConfig = Schema<"LogFieldsConfig">;
+type ValidateResponse = Schema<"ProvisionValidateResponse">;
+
+export const WIZARD_DRAFT_VERSION = 1;
+
+export type Step =
+  | "mode" | "token" | "service" | "features" | "storage" | "ngwaf"
+  | "fields" | "execute" | "terraform" | "join" | "analyze" | "settings" | "confirm";
+
+export type WizardMode = "provision" | "join" | "ingest" | null;
+export type FosStatus = "idle" | "checking" | "success" | "error";
+export type DomainStatus = "idle" | "checking" | "available" | "taken" | "error";
+export type JoinPhase = "form" | "connecting" | "importing" | "done";
+
+export const ANALYST_PATH_A_UNSUPPORTED_REASON =
+  "Independent analyst access is unavailable for scalable Celery/DuckLake services. Use live shared-instance analyst access (Path B).";
+
+export interface TokenInfo {
+  id: string;
+  name: string;
+  type: "user" | "automation";
+}
+
+export interface ProvisionConfig {
+  endpoint_name: string;
+  fos_region: string;
+  fos_endpoint: string;
+  fos_bucket_name: string;
+  fos_prefix: string;
+  fos_access_key: string;
+  fos_secret_key: string;
+  sample_rate: number;
+  edge_only: boolean;
+  custom_condition: string;
+  log_period: number;
+  cdn_service_name: string;
+  cdn_prefix: string;
+  cdn_shield: string;
+  cdn_url: string;
+  cdn_secret: string;
+  enable_cron_sync: boolean;
+  delete_after: boolean;
+  commit_interval_mins: number;
+  enable_cron_compact: boolean;
+  log_fields: LogFieldsConfig;
+  ngwaf_workspace_id: string;
+  cmcd_enabled: boolean;
+  cmcd_mode: string;
+  cmcd_version: number;
+  logging_enabled: boolean;
+  rum_enabled: boolean;
+  rum_log_period: number;
+  log_retention_days: number;
+  rum_retention_days: number;
+  cache_retention_days: number;
+  rollup_retention_months: number;
+  rum_custom_condition: string;
+  faro_version: string | null;
+}
+
+export const INITIAL_CONFIG: ProvisionConfig = {
+  endpoint_name: "",
+  fos_region: "us-east-1",
+  fos_endpoint: "",
+  fos_bucket_name: "",
+  fos_prefix: "",
+  fos_access_key: "",
+  fos_secret_key: "",
+  sample_rate: 100,
+  edge_only: true,
+  custom_condition: "",
+  log_period: 60,
+  rum_log_period: 300,
+  cdn_service_name: "",
+  cdn_prefix: "",
+  cdn_shield: "iad-va-us",
+  cdn_url: "",
+  cdn_secret: "",
+  enable_cron_sync: true,
+  delete_after: true,
+  commit_interval_mins: 5,
+  enable_cron_compact: true,
+  log_fields: { groups: [], field_overrides: {} },
+  ngwaf_workspace_id: "",
+  cmcd_enabled: false,
+  cmcd_mode: "query_string",
+  cmcd_version: 1,
+  logging_enabled: true,
+  rum_enabled: false,
+  log_retention_days: 30,
+  rum_retention_days: 30,
+  cache_retention_days: 14,
+  rollup_retention_months: 12,
+  rum_custom_condition: "",
+  faro_version: null,
+};
+
+export type PersistedConfig = Omit<
+  ProvisionConfig,
+  "fos_access_key" | "fos_secret_key" | "cdn_secret"
+>;
+
+export interface WizardDraft {
+  version: number;
+  draftId: string;
+  mode: Exclude<WizardMode, null>;
+  step: Step;
+  currentStep: Step;
+  selectedServiceId: string | null;
+  selectedServiceName: string | null;
+  selectedCdnServiceId: string | null;
+  selectedCdnServiceName: string | null;
+  tokenInfo: TokenInfo | null;
+  config: PersistedConfig;
+  importMode: "all" | "range";
+  importRange: { start: string; end: string };
+  syncEnabled: boolean;
+  syncIntervalMins: string;
+  icebergMetadataLocation: string;
+  updatedAt: string;
+  createdAt: string;
+}
+
+export function getStepsForMode(
+  mode: WizardMode,
+  config?: { logging_enabled?: boolean },
+  step?: Step
+): { id: Step; label: string }[] {
+  if (mode === "join") {
+    return [
+      { id: "mode", label: "Role" },
+      { id: "join", label: "Connect" },
+      { id: "analyze", label: "Analyze" },
+      { id: "settings", label: "Settings" },
+      { id: "confirm", label: "Confirm" },
+    ];
+  }
+  if (mode === "ingest" && step && (step === "join" || step === "analyze" || step === "settings" || step === "confirm")) {
+    return [
+      { id: "mode", label: "Role" },
+      { id: "token", label: "Auth" },
+      { id: "service", label: "Service" },
+      { id: "join", label: "Connect" },
+      { id: "analyze", label: "Analyze" },
+      { id: "settings", label: "Settings" },
+      { id: "confirm", label: "Confirm" },
+    ];
+  }
+  const steps: { id: Step; label: string }[] = [
+    { id: "mode", label: "Role" },
+    { id: "token", label: "Auth" },
+    { id: "service", label: "Service" },
+    { id: "features", label: "Features" },
+    { id: "storage", label: "Storage" },
+  ];
+  if (!config || config.logging_enabled !== false) {
+    steps.push({ id: "ngwaf", label: "NGWAF" }, { id: "fields", label: "Log Fields" });
+  }
+  steps.push({ id: "execute", label: "Review" });
+  return steps;
+}
+
+export interface ProvisionWizardProps {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}
+
+export interface WizardState {
+  setActiveServiceId: (id: string) => void;
+  setServices: (services: Service[]) => void;
+  services: Service[];
+  timezone: string;
+  queryClient: ReturnType<typeof useQueryClient>;
+  step: Step;
+  setStep: (s: Step) => void;
+  mode: WizardMode;
+  setMode: (m: WizardMode) => void;
+  token: string;
+  setToken: (t: string) => void;
+  tokenInfo: TokenInfo | null;
+  search: string;
+  setSearch: (s: string) => void;
+  selectedService: ProvisionService | null;
+  setSelectedService: (s: ProvisionService | null) => void;
+  selectedCdnService: ProvisionService | null;
+  setSelectedCdnService: (s: ProvisionService | null) => void;
+  isDeploying: boolean;
+  fosStatus: FosStatus;
+  fosError: string;
+  terraformFiles: Record<string, string>;
+  selectedTfFile: string;
+  setSelectedTfFile: (f: string) => void;
+  isFetchingTerraform: boolean;
+  configStatus: Schema<"ProvisionCheckConfigResponse"> | null;
+  isCheckingConfig: boolean;
+  handleCheckConfig: () => Promise<void>;
+  ngwafWorkspaces: { id: string; name: string }[];
+  ngwafFetching: boolean;
+  ngwafFetchError: string;
+  ngwafDebugRaw: string;
+  analystPathASupported: boolean;
+  analystPathAReason: string | null;
+  lakeInfo: LakeInfo | null;
+  isAnalyzing: boolean;
+  importMode: "all" | "range";
+  setImportMode: (m: "all" | "range") => void;
+  importRange: { start: string; end: string };
+  setImportRange: React.Dispatch<React.SetStateAction<{ start: string; end: string }>>;
+  syncEnabled: boolean;
+  setSyncEnabled: (b: boolean) => void;
+  lines: SSELine[];
+  status: SSEStatus;
+  isDone: boolean;
+  sseError: string | null;
+  stop: () => void;
+  handleModalClose: (isOpen: boolean) => void;
+  onOpenChange: (open: boolean) => void;
+  config: ProvisionConfig;
+  setConfig: React.Dispatch<React.SetStateAction<ProvisionConfig>>;
+  catalog: LogFieldsCatalog | undefined;
+  isLoadingCatalog: boolean;
+  toggleGroup: (groupId: string, checked: boolean) => void;
+  toggleField: (fieldId: string, checked: boolean, defaultEnabledByGroup: boolean) => void;
+  updateFieldLimit: (fieldId: string, limit?: number) => void;
+  togglePreset: (presetGroups: string[]) => void;
+  isPresetActive: (groups: string[]) => boolean;
+  estimatedBytes: number;
+  servicesData: ProvisionService[] | undefined;
+  servicesError: Error | null;
+  isLoadingServices: boolean;
+  filteredServices: ProvisionService[];
+  handleTokenSubmit: () => Promise<void>;
+  validateMutation: ReturnType<typeof useMutation<ValidateResponse | undefined, Error, string>>;
+  handleServiceSelect: (service: ProvisionService) => void;
+  handleCheckFos: (vals?: { bucket?: string; region?: string; access_key?: string; secret_key?: string }) => Promise<void>;
+  checkDomain: (prefix: string) => Promise<void>;
+  domainStatus: DomainStatus;
+  domainMessage: string;
+  joinPhase: JoinPhase;
+  joinedServiceId: string;
+  syncIntervalMins: string;
+  setSyncIntervalMins: (s: string) => void;
+  icebergMetadataLocation: string;
+  setIcebergMetadataLocation: (s: string) => void;
+  estimatedImportSize: number;
+  handleAnalyzeLake: () => Promise<void>;
+  handleJoin: () => void;
+  handleFinishJoin: () => void;
+  handleDeploy: () => void;
+  fetchTerraformPreview: () => Promise<void>;
+  handleExportTerraform: () => Promise<void>;
+  handleAdminIngest: () => Promise<void>;
+  STEPS: { id: Step; label: string }[];
+  pendingDraft: WizardDraft | null;
+  resumeDraft: () => void;
+  discardDraft: () => void;
+}
+
+// ── Step Components ───────────────────────────────────────────────────────
+
 function errorCode(e: unknown): string | undefined {
   return e && typeof e === "object" && "code" in e ? String((e as Record<string, unknown>).code) : undefined;
+}
+
+function StatusCheckIcon({ enabled }: { enabled: boolean }) {
+  return enabled ? (
+    <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />
+  ) : (
+    <XCircle className="h-3.5 w-3.5 text-muted-foreground/30" />
+  );
+}
+
+export function ExecuteStep({ s }: { s: WizardState }) {
+  const { config, catalog, selectedService } = s;
+  const enabledGroups = React.useMemo(
+    () => resolveEnabledGroupsWithDeps(config.log_fields?.groups, catalog),
+    [config.log_fields?.groups, catalog],
+  );
+  const presetSummary = React.useMemo(
+    () => evaluateLogFieldPresetSummary(config.log_fields, catalog),
+    [config.log_fields, catalog],
+  );
+
+  return (
+    <div className="flex-1 overflow-y-auto min-h-0 flex flex-col p-8 items-center text-left">
+      <div className="w-full max-w-2xl space-y-8">
+        {s.isDeploying ? (
+          <div className="space-y-6 w-full animate-in fade-in slide-in-from-bottom-4 duration-500">
+            <div className="text-center space-y-2">
+              <h3 className="text-2xl font-semibold tracking-tight">Provisioning: {selectedService?.name}</h3>
+              <p className="text-sm text-muted-foreground leading-relaxed">
+                Setting up Fastly Object Storage, logging endpoints, and CDN proxy...
+              </p>
+            </div>
+            <SSEProgressView
+              lines={s.lines}
+              status={s.status}
+              error={s.sseError}
+              className="h-[400px]"
+              progressLabel="Progress"
+              doneMessage="Provisioning completed successfully! You may now close this window."
+            />
+          </div>
+        ) : (
+          <>
+            <div className="text-center space-y-2">
+              <h3 className="text-2xl font-semibold tracking-tight">Review & Deploy</h3>
+              <p className="text-sm text-muted-foreground leading-relaxed">
+                You are about to provision the following resources.
+              </p>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <ReviewCard className="col-span-2 space-y-3">
+                <ReviewHeader icon={Sparkles}>Enabled Features</ReviewHeader>
+                <div className="flex flex-col sm:flex-row gap-3 pt-1">
+                  {config.logging_enabled !== false && (
+                    <div className="flex-1 flex items-center gap-3 border rounded-xl p-3 bg-primary/[0.03] border-primary/10 shadow-sm">
+                      <div className="h-8 w-8 rounded-lg bg-primary/10 flex items-center justify-center text-primary shrink-0">
+                        <Database className="h-4 w-4" />
+                      </div>
+                      <div className="flex flex-col min-w-0">
+                        <span className="text-xs font-semibold text-foreground">Request Logging</span>
+                        <span className="text-[10px] text-muted-foreground leading-snug">In-depth HTTP logs, edge metrics, and WAF protection.</span>
+                      </div>
+                    </div>
+                  )}
+                  {config.rum_enabled && (
+                    <div className="flex-1 flex items-center gap-3 border rounded-xl p-3 bg-primary/[0.03] border-primary/10 shadow-sm">
+                      <div className="h-8 w-8 rounded-lg bg-primary/10 flex items-center justify-center text-primary shrink-0">
+                        <Globe className="h-4 w-4" />
+                      </div>
+                      <div className="flex flex-col min-w-0">
+                        <span className="text-xs font-semibold text-foreground">Real User Monitoring (RUM)</span>
+                        <span className="text-[10px] text-muted-foreground leading-snug">Client-side web vitals, speed insights, and session analytics.</span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </ReviewCard>
+
+              <ReviewCard>
+                <ReviewHeader icon={Cloud}>Target Service</ReviewHeader>
+                <ReviewContent>
+                  <ReviewItem label="Service Name" value={selectedService?.name} />
+                  {config.logging_enabled !== false && (
+                    <>
+                      <ReviewItem label="Log Endpoint" value={config.endpoint_name} />
+                      <ReviewItem label="Sampling Rate / Period" value={`${config.sample_rate}% / ${config.log_period}s`} />
+                    </>
+                  )}
+                  {config.logging_enabled !== false && config.custom_condition && (
+                    <ReviewItem label="Custom Condition" value={config.custom_condition} className="truncate font-mono text-[10px]" />
+                  )}
+                </ReviewContent>
+              </ReviewCard>
+
+              <ReviewCard>
+                <ReviewHeader icon={Globe}>CDN Edge Proxy</ReviewHeader>
+                <ReviewContent>
+                  <ReviewItem label="Domain" value={`${config.cdn_prefix}.global.ssl.fastly.net`} />
+                  <ReviewItem label="Shield POP" value={SHIELD_LABELS[config.cdn_shield] || "None"} />
+                </ReviewContent>
+              </ReviewCard>
+
+              <ReviewCard>
+                <ReviewHeader icon={Database}>Object Storage</ReviewHeader>
+                <ReviewContent>
+                  <ReviewItem label="Bucket" value={config.fos_bucket_name} />
+                  <ReviewItem label="Region" value={REGION_LABELS[config.fos_region]} />
+                  <ReviewItem label="Edge Only" value={config.edge_only ? "Yes" : "No"} />
+                </ReviewContent>
+              </ReviewCard>
+
+              <ReviewCard>
+                <ReviewHeader icon={Settings}>Automation</ReviewHeader>
+                <ReviewContent className="gap-2.5">
+                  <ReviewItem
+                    variant="between"
+                    label={`Sync every ${config.log_period >= 120 ? Math.floor(config.log_period / 120) + "m" : Math.floor(config.log_period / 2) + "s"}`}
+                    className={cn(!config.enable_cron_sync && "text-muted-foreground")}
+                    value={<StatusCheckIcon enabled={config.enable_cron_sync} />}
+                  />
+                  <ReviewItem
+                    variant="between"
+                    label={`Commit to Iceberg every ${config.commit_interval_mins}m`}
+                    className={cn(!config.enable_cron_sync && "text-muted-foreground")}
+                    value={<StatusCheckIcon enabled={config.enable_cron_sync} />}
+                  />
+                  <ReviewItem
+                    variant="between"
+                    label="Auto-delete Raw Logs"
+                    className={cn((!config.delete_after || !config.enable_cron_sync) && "text-muted-foreground")}
+                    value={<StatusCheckIcon enabled={config.delete_after && config.enable_cron_sync} />}
+                  />
+                  <ReviewItem
+                    variant="between"
+                    label="Daily Iceberg Optimization"
+                    className={cn((!config.enable_cron_compact || !config.enable_cron_sync) && "text-muted-foreground")}
+                    value={<StatusCheckIcon enabled={config.enable_cron_compact && config.enable_cron_sync} />}
+                  />
+                  {config.logging_enabled !== false && (
+                    <ReviewItem
+                      variant="between"
+                      label="Log Retention"
+                      className={cn(!config.enable_cron_sync && "text-muted-foreground")}
+                      value={config.log_retention_days === 0 ? "Forever" : `${config.log_retention_days} days`}
+                    />
+                  )}
+                  {config.rum_enabled && (
+                    <ReviewItem
+                      variant="between"
+                      label="RUM Retention"
+                      className={cn(!config.enable_cron_sync && "text-muted-foreground")}
+                      value={config.rum_retention_days === 0 ? "Forever" : `${config.rum_retention_days} days`}
+                    />
+                  )}
+                </ReviewContent>
+              </ReviewCard>
+
+              {config.logging_enabled !== false && (
+                <ReviewCard className="col-span-2 space-y-3">
+                  <div className="flex justify-between items-center">
+                    <ReviewHeader icon={FileJson}>Log Configuration</ReviewHeader>
+                    <span className="font-mono text-[10px] bg-muted px-2 py-0.5 rounded text-muted-foreground border">
+                      ~{formatBytes(s.estimatedBytes)} / line
+                    </span>
+                  </div>
+                  <div className="flex flex-wrap gap-1.5 pt-1">
+                    {presetSummary.bestPresetName ? (
+                      <>
+                        <div className="px-2.5 py-0.5 rounded-full text-[10px] font-semibold bg-primary text-primary-foreground">
+                          {presetSummary.bestPresetName} Preset
+                        </div>
+                        {presetSummary.disabledCount > 0 && (
+                          <div className="px-2.5 py-0.5 rounded-full text-[10px] font-medium bg-muted text-muted-foreground border border-transparent">
+                            +{presetSummary.disabledCount} disabled
+                          </div>
+                        )}
+                      </>
+                    ) : (
+                      <>
+                        <div className="px-2.5 py-0.5 rounded-full text-[10px] font-semibold bg-primary text-primary-foreground">
+                          Custom Configuration
+                        </div>
+                        {catalog?.groups?.map((g) => {
+                          const isEnabled = g.locked || (g.id != null && presetSummary.enabledGroupsSet.has(g.id));
+                          if (!isEnabled) return null;
+                          return (
+                            <div
+                              key={g.id || "core"}
+                              className="px-2.5 py-0.5 rounded-full text-[10px] font-medium bg-primary/10 text-primary border border-primary/20"
+                            >
+                              {g.label}
+                            </div>
+                          );
+                        })}
+                        {presetSummary.disabledCount > 0 && (
+                          <div className="px-2.5 py-0.5 rounded-full text-[10px] font-medium bg-muted text-muted-foreground border border-transparent">
+                            +{presetSummary.disabledCount} disabled
+                          </div>
+                        )}
+                      </>
+                    )}
+                  </div>
+                </ReviewCard>
+              )}
+
+              {config.logging_enabled !== false && (
+                <ReviewCard className="col-span-2 space-y-3">
+                  <div className="flex justify-between items-center">
+                    <ReviewHeader icon={Sparkles}>Automated Insights</ReviewHeader>
+                    <span className="text-[10px] text-muted-foreground">Derived from logs</span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3 pt-1">
+                    {catalog?.insights?.map((insight) => {
+                      const isEnabled = insight.required_groups.every((rg) => enabledGroups.has(rg));
+                      return (
+                        <div
+                          key={insight.id}
+                          className={cn(
+                            "flex items-start gap-3 border rounded-lg p-2.5 bg-background shadow-sm transition-all",
+                            !isEnabled && "opacity-50 grayscale",
+                          )}
+                        >
+                          <div className="mt-0.5 shrink-0">
+                            {isEnabled ? (
+                              <CheckCircle2 className="h-4 w-4 text-emerald-500" />
+                            ) : (
+                              <XCircle className="h-4 w-4 text-muted-foreground" />
+                            )}
+                          </div>
+                          <div className="flex flex-col min-w-0">
+                            <span className={cn("text-xs font-semibold truncate", !isEnabled && "line-through text-muted-foreground")}>
+                              {insight.title}
+                            </span>
+                            <span className="text-[10px] text-muted-foreground line-clamp-2 leading-tight mt-0.5" title={insight.description}>
+                              {insight.description}
+                            </span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </ReviewCard>
+              )}
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
 }
 
 export function TokenStep({ s }: { s: WizardState }) {
@@ -144,9 +633,6 @@ export function ServiceStep({ s }: { s: WizardState }) {
             </div>
           ) : s.filteredServices.length > 0 ? (
             s.filteredServices.map((svc) => (
-              // a11y: was a <div onClick> — keyboard-invisible. Native
-              // button with disabled state on provisioned services and a
-              // descriptive aria-label that includes the service id.
               <button
                 key={svc.id}
                 type="button"
@@ -594,13 +1080,7 @@ export function ConfirmStep({ s }: { s: WizardState }) {
               <ReviewItem
                 variant="between"
                 label="Background Sync"
-                value={
-                  s.syncEnabled ? (
-                    <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />
-                  ) : (
-                    <XCircle className="h-3.5 w-3.5 text-muted-foreground/30" />
-                  )
-                }
+                value={<StatusCheckIcon enabled={s.syncEnabled} />}
               />
               {s.syncEnabled && <ReviewItem label="Sync Interval" value={`Every ${s.syncIntervalMins} minutes`} />}
             </ReviewContent>
@@ -851,11 +1331,6 @@ export function ProvisionWizard({ open, onOpenChange }: ProvisionWizardProps) {
   return (
     <Dialog open={open} onOpenChange={s.handleModalClose}>
       <DialogContent
-        // Pin a DEFINITE height (not just panelDialogContent's max-h-[90vh]) so
-        // the flex-1/min-h-0/overflow chain inside each step actually creates a
-        // scroll boundary: the Terraform/VCL preview's snippet pane scrolls
-        // instead of growing the modal, and the modal stays a constant size
-        // across steps instead of jumping as each step's content height changes.
         className={cn("sm:max-w-5xl h-[85vh]", panelDialogContent)}
         showCloseButton={s.status !== "streaming" && s.joinPhase !== "done"}
       >

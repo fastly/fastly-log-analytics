@@ -26,7 +26,7 @@ vi.mock('@/hooks/useBootstrap', async (importOriginal) => ({
   useBootstrap: () => useBootstrap(),
   useLogFieldsCatalog: () => useLogFieldsCatalog(),
 }))
-vi.mock('@/app/dashboard/_sections/CardGrid', () => ({
+vi.mock('@/app/dashboard/_sections/DashboardClient', () => ({
   CATEGORIZED_CARD_IDS: new Set([
     'status', 'method', '_bot_name', '_ngwaf_bot_name', 'waf_sig_ind',
     'rid', 'prid', 'waf_sig', 'waf_req_id', 'ottfb', 'tcp_rtt'
