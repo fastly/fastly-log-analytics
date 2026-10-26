@@ -510,9 +510,6 @@ def test_first_heal_warning_fires_on_a_freshly_booted_host(tmp_path: Path, monke
 
 # ── IP spread rollups golden + unit tests (merged from test_ip_spread_rollups_golden.py) ──
 
-from backend.utils.hll import HyperLogLog  # noqa: E402
-
-from backend.core.rollups._common import IP_SPREAD_BUNDLE_FILENAME  # noqa: E402
 from backend.repositories.top_n_rollups import (  # noqa: E402
     IpSpreadPlan,
     TopNWindow,
@@ -521,6 +518,9 @@ from backend.repositories.top_n_rollups import (  # noqa: E402
     plan_ip_spread_paths,
     spread_meta,
 )
+from backend.utils.hll import HyperLogLog  # noqa: E402
+
+from backend.core.rollups._common import IP_SPREAD_BUNDLE_FILENAME  # noqa: E402
 
 IP_SPREAD_GOLDEN_PATH = Path(__file__).parent / "golden" / "ip_spread_rollups.json"
 IP_SPREAD_FIELDS = ["country", "ua"]

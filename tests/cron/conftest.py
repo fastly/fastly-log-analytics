@@ -9,8 +9,9 @@ from unittest.mock import MagicMock
 import pytest
 
 try:
-    import backend.cron.scheduler as _sched_mod
     from backend.cron.jobs._common import get_service_display_label as _get_svc_label
+
+    import backend.cron.scheduler as _sched_mod
 
     if not hasattr(_sched_mod, "get_service_display_label"):
         _sched_mod.get_service_display_label = _get_svc_label  # type: ignore[attr-defined]
@@ -132,9 +133,9 @@ def assert_manual_trigger_standard_mode_rejected(
     base_source: dict[str, Any],
 ) -> Any:
     """Assert that a High-Scale-only manual trigger endpoint returns 400 in standard mode."""
+    from backend.deps import get_service_id, get_source
     from starlette.testclient import TestClient
 
-    from backend.deps import get_service_id, get_source
     from backend.main import app
 
     standard_src = {**base_source, "deployment_mode": "standard"}
@@ -159,9 +160,9 @@ def assert_manual_trigger_read_only_rejected(
     base_source: dict[str, Any],
 ) -> Any:
     """Assert that a manual trigger endpoint returns 403 on a read-only service."""
+    from backend.deps import get_service_id, get_source
     from starlette.testclient import TestClient
 
-    from backend.deps import get_service_id, get_source
     from backend.main import app
 
     ro_src = {**base_source, "access_level": "read_only"}
@@ -186,10 +187,10 @@ def assert_manual_trigger_non_admin_rejected(
     base_source: dict[str, Any],
 ) -> Any:
     """Assert that a manual trigger endpoint returns 403 when invoked by a non-admin."""
+    from backend.deps import get_service_id, get_source, require_admin
     from fastapi import HTTPException
     from starlette.testclient import TestClient
 
-    from backend.deps import get_service_id, get_source, require_admin
     from backend.main import app
 
     def reject_analyst() -> None:

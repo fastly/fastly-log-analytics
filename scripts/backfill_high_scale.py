@@ -13,10 +13,8 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any, cast
 
-from backend import config as app_config
 from backend.core.clickhouse_client import ClickHouseClient
 from backend.high_scale.aggregate_batch_adapter import AggregateBatchAdapter
-from backend.high_scale.postgres_control import PostgresControlPlane
 from backend.high_scale.publication import ClickHouseBatchAdapter, ClickHousePublication, PostgresBatchManifestStore
 from backend.high_scale.recovery import (
     RecoveryCapacityMeasurement,
@@ -33,6 +31,9 @@ from backend.high_scale.registry_bootstrap import (
     get_high_scale_service_registry,
     register_high_scale_services_from_environment,
 )
+
+from backend import config as app_config
+from backend.high_scale.postgres_control import PostgresControlPlane
 
 
 def parse_capacity_json(parser: argparse.ArgumentParser, path: Path | None) -> RecoveryCapacityMeasurement | None:

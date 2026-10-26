@@ -7,7 +7,6 @@ import json
 import sys
 from dataclasses import asdict
 
-from backend import config
 from backend.core.clickhouse_client import close_clickhouse_client
 from backend.core.clickhouse_manifest import PgManifest
 from backend.core.clickhouse_publication import (
@@ -18,6 +17,8 @@ from backend.core.clickhouse_publication import (
     replay_unpublished,
     utc,
 )
+
+from backend import config
 from backend.core.metadata import pg_connection
 from backend.core.request_telemetry import force_flush
 from backend.utils.telemetry import flush_usage_log

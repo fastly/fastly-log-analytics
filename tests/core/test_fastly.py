@@ -1091,7 +1091,6 @@ Covers:
 import asyncio
 
 import pytest
-
 from backend.core.realtime.transform import error_tick_payload, gap_tick_payload, transform_rt_response
 
 

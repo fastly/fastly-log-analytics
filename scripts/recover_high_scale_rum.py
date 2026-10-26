@@ -21,19 +21,19 @@ from typing import Any
 def recover(manifest_prefix: str, *, apply: bool, approve_digest: str | None) -> dict[str, Any]:
     started = time.perf_counter()
     import psycopg
-    from backend.high_scale.registry_bootstrap import _default_archive_factory
-    from psycopg.rows import dict_row
-
-    from backend import config
     from backend.core.clickhouse_client import ClickHouseClient
-    from backend.high_scale.postgres_control import PostgresControlPlane, _archive_from_row
     from backend.high_scale.publication import (
         _DOMAIN_COLUMNS,
         _DOMAIN_TABLES,
         ClickHousePublication,
         PostgresBatchManifestStore,
     )
+    from backend.high_scale.registry_bootstrap import _default_archive_factory
     from backend.high_scale.rum_recovery import RumRecoveryBatchAdapter, execute_rum_recovery, plan_rum_recovery
+    from psycopg.rows import dict_row
+
+    from backend import config
+    from backend.high_scale.postgres_control import PostgresControlPlane, _archive_from_row
 
     if not re.fullmatch(r"[0-9a-f]{8,64}", manifest_prefix):
         raise ValueError("manifest prefix must be 8-64 lowercase hexadecimal characters")

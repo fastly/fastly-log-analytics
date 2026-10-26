@@ -191,8 +191,8 @@ from unittest.mock import patch
 
 import duckdb
 import pytest
-
 from backend.core.query_registry import _scrub_secrets
+
 from backend.repositories import query as q
 from backend.utils.router_utils import redact_error_text, register_salt
 from tests.conftest import MOCK_SERVICE_ID
@@ -417,6 +417,7 @@ def test_ducklake_idents_reject_trailing_newline(call):
 
 def test_custom_field_name_regex_rejects_trailing_newline():
     from backend.core.field_registry import VALID_NAME_RE
+
     from backend.core.log_fields import validate_custom_field
 
     field = {
@@ -433,9 +434,8 @@ def test_custom_field_name_regex_rejects_trailing_newline():
 
 
 def test_custom_field_model_rejects_trailing_newline():
-    from pydantic import ValidationError
-
     from backend.models.services import CustomField
+    from pydantic import ValidationError
 
     body_cls = CustomField
     base = {

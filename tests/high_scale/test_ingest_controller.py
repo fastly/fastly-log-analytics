@@ -10,15 +10,15 @@ import pytest
 from backend.high_scale.archive_models import ArchiveState
 from backend.high_scale.archive_publication import ArchivePublication, InMemoryObjectStore
 from backend.high_scale.deletion import DeletionController
-from backend.high_scale.replay import replay_manifest
-from backend.high_scale.source_discovery import SourceObjectDescriptor
-
-from backend.high_scale.ingest_controller import HighScaleIngestController
 from backend.high_scale.publication import (
     ClickHousePublication,
     InMemoryBatchManifestStore,
     InsertReceipt,
 )
+from backend.high_scale.replay import replay_manifest
+from backend.high_scale.source_discovery import SourceObjectDescriptor
+
+from backend.high_scale.ingest_controller import HighScaleIngestController
 from tests.high_scale.conftest import HighScaleLedger, OwnershipStore
 
 
@@ -679,9 +679,8 @@ def test_ingest_publishes_performance_waterfall_and_scatter_projections() -> Non
 from dataclasses import dataclass
 from threading import Event
 
-from backend.high_scale.worker import HighScaleWorkerLoop
-
 from backend.high_scale.orchestration import PageRun
+from backend.high_scale.worker import HighScaleWorkerLoop
 
 
 @dataclass
@@ -1008,6 +1007,12 @@ def test_server_memory_ratio_has_headroom_over_real_usage() -> None:
 
 
 import pytest
+from backend.high_scale.orchestration import HighScaleWorkerCoordinator
+from backend.high_scale.publication import (
+    HighScaleBatch,
+    PublicationResult,
+    PublicationStatus,
+)
 from backend.high_scale.source_discovery import (
     SourceObjectMissingError,
     SourceObjectPage,
@@ -1016,12 +1021,6 @@ from backend.high_scale.source_discovery import (
 from backend.high_scale.ingest_controller import (
     HIGH_SCALE_PAGE_MAX_BYTES,
     BatchIngestResult,
-)
-from backend.high_scale.orchestration import HighScaleWorkerCoordinator
-from backend.high_scale.publication import (
-    HighScaleBatch,
-    PublicationResult,
-    PublicationStatus,
 )
 
 
@@ -1566,9 +1565,9 @@ from typing import Any
 from backend.high_scale.aggregate_batch_adapter import compute_dimension_counts
 from backend.high_scale.origin_projection import build_origin_projection_rows
 from backend.high_scale.performance_projection import build_performance_projection_rows
+from backend.high_scale.security import build_security_projection_rows
 
 from backend.high_scale.network import build_network_projection_rows
-from backend.high_scale.security import build_security_projection_rows
 
 
 class _MockClickHouse:

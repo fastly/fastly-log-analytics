@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 import botocore.exceptions
 import pytest
+from backend.models.services import CronSettingsPartial
 from backend.provision.cmcd_fields import _CMCD_FIELD_NAMES
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
@@ -19,7 +20,6 @@ from backend.core import log_fields as lf_module
 from backend.core import metadata as metadata_db
 from backend.core.metadata.cron_log import CronLeaseHeldError
 from backend.main import app
-from backend.models.services import CronSettingsPartial
 from backend.provision import fastly_api
 from backend.routers.services import core as services_core
 from tests._helpers.config_fakes import mutate_via_save

@@ -188,7 +188,6 @@ def pytest_sessionstart(session):  # noqa: ARG001 — pytest hook signature
 
 import duckdb
 import pytest
-
 from backend.deps import get_con
 
 
@@ -592,10 +591,10 @@ def make_test_request_context(
 
 @pytest.fixture
 def client(in_memory_duckdb, test_service_source):
+    from backend.deps import get_service_id, get_source
     from fastapi.testclient import TestClient
 
     from backend.core.request_context import build_request_context
-    from backend.deps import get_service_id, get_source
     from backend.main import app
 
     app.dependency_overrides[get_con] = lambda: in_memory_duckdb
@@ -732,6 +731,7 @@ def isolated_configs_dir(tmp_path, monkeypatch):
 def override_source():
     """Override ``backend.deps.get_source`` with a default read-write test source."""
     from backend.deps import get_source
+
     from backend.main import app
 
     src = {

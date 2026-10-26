@@ -1758,7 +1758,6 @@ def test_validate_session_propagates_explicit_service_ids_null_revocation(monkey
 from pathlib import Path
 
 import pytest
-
 from backend.utils.tunnel.manager import (
     TunnelState,
     clear_persisted_state,

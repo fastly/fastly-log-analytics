@@ -17,6 +17,7 @@ import httpx
 import pytest
 from backend.core.query_attribution import current_attribution
 from backend.core.query_instrumentation import InstrumentedDuckDBConnection
+from backend.core.query_registry import _HISTORY_CAP, Attribution, QueryRegistry, query_registry
 from backend.cron.decorators import global_job
 from fastapi import FastAPI, HTTPException
 from starlette.requests import Request
@@ -27,7 +28,6 @@ from backend.core import duckdb_pool
 from backend.core import rollups as rr
 from backend.core.duckdb import DBBusyError
 from backend.core.duckdb_pool import _Pool, _PoolBusy
-from backend.core.query_registry import _HISTORY_CAP, Attribution, QueryRegistry, query_registry
 from backend.main import (
     _background_startup,
     _bounded_scheduler_shutdown,
@@ -1511,6 +1511,7 @@ def test_insights_get_insights_contract(seeded_con):
     saw `undefined`. The fix was to add it to the model — this test
     keeps it from regressing."""
     from backend.models.insights import InsightsResponse
+
     from backend.repositories.insights import _insights_cache, get_insights
 
     _insights_cache.clear()
@@ -1552,7 +1553,6 @@ def test_performance_aggregates_contract(seeded_con):
     """`get_performance_aggregates` return keys must match
     `PerformanceAggregatesResponse`."""
     from backend.models.performance import PerformanceAggregatesResponse
-
     from backend.repositories.performance import get_performance_aggregates
 
     result = get_performance_aggregates(seeded_con, _src, None, None, {})
