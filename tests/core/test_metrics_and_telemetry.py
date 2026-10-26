@@ -3,17 +3,23 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import gc
 import json
+import os
 import signal
+import subprocess
+import sys
 import threading
 import uuid
 import weakref
 from datetime import UTC, datetime, timedelta
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import duckdb
+import httpx
 import pytest
 from backend.core._duckdb_status import refresh_config_status
 from backend.core.metric_expressions import METRIC_DEFINITIONS, get_metric_sql
@@ -22,10 +28,14 @@ from backend.utils.time_window import resolve_window
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi import Request as FRequest
 from fastapi.testclient import TestClient
+from google.protobuf.json_format import MessageToDict
 from opentelemetry import metrics as ot_metrics
 from opentelemetry import trace
+from opentelemetry.proto.collector.metrics.v1.metrics_service_pb2 import ExportMetricsServiceRequest
+from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
@@ -61,9 +71,256 @@ from backend.repositories._base import origin_latency_us_expr
 from backend.utils.date_utils import iso_z
 from backend.utils.remote_access import TimeBounds
 from backend.utils.telemetry import get_page_load_id
+from scripts.dev import verify_observability as probe
 from tests.conftest import make_test_request_context
 
 # ── Section 1: Metric Expressions & Null Default Helpers ─────────────────────
+
+
+def _observability_probe_fixture():
+    receipt = probe.ProbeReceipt(
+        probe_id=uuid.uuid4(),
+        service_instance_id=uuid.uuid4(),
+        trace_id="a" * 32,
+        span_id="b" * 16,
+        emitted_at=datetime.now(UTC),
+    )
+    metric = {
+        "status": "success",
+        "data": {
+            "resultType": "vector",
+            "result": [
+                {
+                    "metric": {"job": receipt.service_name, "instance": str(receipt.service_instance_id)},
+                    "value": [receipt.emitted_at.timestamp(), "1"],
+                }
+            ],
+        },
+    }
+    span = {
+        "name": "app.observability.probe",
+        "traceId": receipt.trace_id,
+        "spanId": receipt.span_id,
+        "attributes": [{"key": "fla.probe.id", "value": {"stringValue": str(receipt.probe_id)}}],
+    }
+    trace_data = {
+        "batches": [
+            {
+                "resource": {
+                    "attributes": [
+                        {"key": "service.name", "value": {"stringValue": receipt.service_name}},
+                        {"key": "service.instance.id", "value": {"stringValue": str(receipt.service_instance_id)}},
+                    ]
+                },
+                "scopeSpans": [{"spans": [span]}],
+            }
+        ]
+    }
+    return probe, receipt, metric, trace_data
+
+
+@pytest.mark.parametrize("base64_ids", [False, True])
+def test_observability_probe_requires_both_real_signals(monkeypatch, base64_ids):
+    probe, receipt, metric, trace_data = _observability_probe_fixture()
+    span = trace_data["batches"][0]["scopeSpans"][0]["spans"][0]
+    if base64_ids:
+        span["traceId"] = base64.b64encode(bytes.fromhex(receipt.trace_id)).decode()
+        span["spanId"] = base64.b64encode(bytes.fromhex(receipt.span_id)).decode()
+    requests = []
+
+    def receive(request):
+        requests.append(request)
+        if request.url.path == "/api/v1/query":
+            assert str(receipt.service_instance_id) in request.url.params["query"]
+            return httpx.Response(200, json=metric)
+        assert request.url.path == f"/api/traces/{receipt.trace_id}"
+        return httpx.Response(404) if len(requests) == 2 else httpx.Response(200, json=trace_data)
+
+    monkeypatch.setattr(probe.time, "sleep", lambda _: None)
+    with httpx.Client(transport=httpx.MockTransport(receive)) as client:
+        result = probe.verify_delivery(
+            receipt,
+            client=client,
+            prometheus_url="http://localhost:9090",
+            tempo_url="http://localhost:3200",
+            timeout_seconds=1,
+        )
+    assert result["metric_observed"] is True and result["trace_observed"] is True
+    assert result["scope"] == "container_sdk_delivery"
+    assert len(requests) == 3
+
+
+@pytest.mark.parametrize("missing", ["metric", "stale_metric", "wrong_instance", "trace", "wrong_probe"])
+def test_observability_probe_rejects_missing_stale_or_unrelated_data(missing):
+    probe, receipt, metric, trace_data = _observability_probe_fixture()
+    if missing == "metric":
+        metric["data"]["result"] = []
+    elif missing == "stale_metric":
+        metric["data"]["result"][0]["value"][0] -= 3600
+    elif missing == "wrong_instance":
+        metric["data"]["result"][0]["metric"]["instance"] = str(uuid.uuid4())
+    elif missing == "wrong_probe":
+        trace_data["batches"][0]["scopeSpans"][0]["spans"][0]["attributes"][0]["value"]["stringValue"] = str(
+            uuid.uuid4()
+        )
+
+    def receive(request):
+        if request.url.path == "/api/v1/query":
+            return httpx.Response(200, json=metric)
+        return httpx.Response(404) if missing == "trace" else httpx.Response(200, json=trace_data)
+
+    with httpx.Client(transport=httpx.MockTransport(receive)) as client, pytest.raises(probe.VerificationError):
+        probe.verify_delivery(
+            receipt,
+            client=client,
+            prometheus_url="http://localhost:9090",
+            tempo_url="http://localhost:3200",
+            timeout_seconds=0,
+        )
+
+
+def test_observability_probe_surfaces_receiver_errors_and_refuses_redirects():
+    probe, receipt, _, _ = _observability_probe_fixture()
+    for status in (302, 401, 503):
+        with httpx.Client(transport=httpx.MockTransport(lambda _: httpx.Response(status))) as client:
+            with pytest.raises(probe.VerificationError, match=f"HTTP {status}"):
+                probe.verify_delivery(
+                    receipt,
+                    client=client,
+                    prometheus_url="http://localhost:9090",
+                    tempo_url="http://localhost:3200",
+                    timeout_seconds=0,
+                )
+
+
+def test_observability_probe_emits_using_application_sdk(monkeypatch):
+    probe, _, _, _ = _observability_probe_fixture()
+    instance = str(uuid.uuid4())
+    resource = Resource.create({"service.name": "fastly-log-analytics", "service.instance.id": instance})
+    spans = InMemorySpanExporter()
+    tracer_provider = TracerProvider(resource=resource)
+    tracer_provider.add_span_processor(SimpleSpanProcessor(spans))
+    reader = InMemoryMetricReader()
+    meter_provider = MeterProvider(resource=resource, metric_readers=[reader])
+    monkeypatch.setattr(probe.telemetry, "effective_exporter", lambda: "otlp")
+    monkeypatch.setattr(probe.telemetry, "get_tracer", lambda: tracer_provider.get_tracer("probe"))
+    monkeypatch.setattr(probe.telemetry, "get_meter", lambda: meter_provider.get_meter("probe"))
+    monkeypatch.setattr(probe.trace, "get_tracer_provider", lambda: tracer_provider)
+    monkeypatch.setattr(probe.metrics, "get_meter_provider", lambda: meter_provider)
+    try:
+        probe_id = uuid.uuid4()
+        receipt = probe.emit_probe(probe_id)
+        assert receipt.service_instance_id == uuid.UUID(instance)
+        exported = spans.get_finished_spans()
+        assert len(exported) == 1 and exported[0].attributes["fla.probe.id"] == str(probe_id)
+        metric = reader.get_metrics_data().resource_metrics[0].scope_metrics[0].metrics[0]
+        assert metric.name == "app.observability.probe" and metric.data.data_points[0].value == 1
+    finally:
+        tracer_provider.shutdown()
+        meter_provider.shutdown()
+
+
+def test_observability_probe_writes_private_receipts_without_overwriting(tmp_path):
+    path = tmp_path / "receipt.json"
+    try:
+        probe._write_private(path, {"scope": "container_sdk_delivery"})
+        assert path.stat().st_mode & 0o777 == 0o600
+        with pytest.raises(FileExistsError):
+            probe._write_private(path, {"scope": "incorrect"})
+        assert json.loads(path.read_text())["scope"] == "container_sdk_delivery"
+    finally:
+        path.unlink(missing_ok=True)
+
+
+def test_observability_probe_actual_otlp_transport(tmp_path):
+    received = {}
+
+    class Receiver(BaseHTTPRequestHandler):
+        def do_POST(self):
+            message_type = ExportTraceServiceRequest if self.path == "/v1/traces" else ExportMetricsServiceRequest
+            message = message_type.FromString(self.rfile.read(int(self.headers["Content-Length"])))
+            received[self.path] = MessageToDict(message)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-protobuf")
+            self.end_headers()
+
+        def do_GET(self):
+            if self.path.startswith("/api/v1/query?"):
+                resource_metrics = received["/v1/metrics"]["resourceMetrics"][0]
+                attrs = probe._attributes(resource_metrics["resource"]["attributes"])
+                metric = resource_metrics["scopeMetrics"][0]["metrics"][0]
+                assert metric["name"] == "app.observability.probe"
+                point = metric["sum"]["dataPoints"][0]
+                body = {
+                    "status": "success",
+                    "data": {
+                        "resultType": "vector",
+                        "result": [
+                            {
+                                "metric": {"job": attrs["service.name"], "instance": attrs["service.instance.id"]},
+                                "value": [int(point["timeUnixNano"]) / 1e9, point["asInt"]],
+                            }
+                        ],
+                    },
+                }
+            else:
+                body = received["/v1/traces"]
+            encoded = json.dumps(body).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(encoded)))
+            self.end_headers()
+            self.wfile.write(encoded)
+
+    server = HTTPServer(("127.0.0.1", 0), Receiver)
+    worker = threading.Thread(target=server.serve_forever)
+    worker.start()
+    receipt_path = tmp_path / "sdk-receipt.json"
+    try:
+        origin = f"http://127.0.0.1:{server.server_port}"
+        env = {
+            **os.environ,
+            "OTEL_ENABLED": "1",
+            "OTEL_EXPORTER": "otlp",
+            "OTEL_TRACES_SAMPLER": "always_on",
+            "OTEL_EXPORTER_OTLP_TIMEOUT": "3",
+            "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": f"{origin}/v1/metrics",
+            "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": f"{origin}/v1/traces",
+        }
+        env.pop("PYTEST_CURRENT_TEST", None)
+        child = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "scripts.dev.verify_observability",
+                "emit",
+                "--probe-id",
+                str(uuid.uuid4()),
+                "--output",
+                str(receipt_path),
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=20,
+        )
+        assert json.loads(child.stdout)["completed"] is True
+        receipt = probe.ProbeReceipt.model_validate_json(receipt_path.read_text())
+        with httpx.Client(trust_env=False) as client:
+            result = probe.verify_delivery(
+                receipt,
+                client=client,
+                prometheus_url=origin,
+                tempo_url=origin,
+                timeout_seconds=0,
+            )
+        assert result["metric_observed"] and result["trace_observed"]
+    finally:
+        server.shutdown()
+        worker.join(timeout=5)
+        server.server_close()
+        receipt_path.unlink(missing_ok=True)
 
 
 @pytest.mark.parametrize(
