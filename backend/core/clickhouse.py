@@ -1391,7 +1391,6 @@ def main() -> None:
             pg_connection.get_pg_pool().close()
 
 
-sys.modules["backend.core.clickhouse_schema"] = sys.modules[__name__]
 if "backend.core" in sys.modules:
     setattr(sys.modules["backend.core"], "clickhouse_schema", sys.modules[__name__])
 
@@ -1797,29 +1796,9 @@ def __getattr__(name: str):
     raise AttributeError(name)
 
 
-_this_module = sys.modules[__name__]
-sys.modules["backend.core.clickhouse_schema"] = _this_module
-_core_pkg = sys.modules.get("backend.core")
-if _core_pkg is not None:
-    setattr(_core_pkg, "clickhouse_schema", _this_module)
-
-
-if __name__ == "__main__":
-    main()
-
 _self_mod = sys.modules[__name__]
-for _ch_alias in ("clickhouse_manifest", "clickhouse_publication", "clickhouse_schema"):
-    sys.modules[f"backend.core.{_ch_alias}"] = _self_mod
 _core_pkg = sys.modules.get("backend.core")
-if _core_pkg is not None:
-    for _ch_alias in ("clickhouse_manifest", "clickhouse_publication", "clickhouse_schema"):
-        setattr(_core_pkg, _ch_alias, _self_mod)
 _backend_pkg = sys.modules.get("backend")
-if _backend_pkg is not None and hasattr(_backend_pkg, "_MODULE_ALIASES"):
-    for _ch_alias in ("clickhouse_manifest", "clickhouse_publication", "clickhouse_schema"):
-        _backend_pkg._MODULE_ALIASES[f"backend.core.{_ch_alias}"] = __name__
-
-_self_mod = sys.modules[__name__]
 for _ch_alias in (
     "clickhouse_client",
     "clickhouse_observer",
@@ -1829,28 +1808,13 @@ for _ch_alias in (
     "clickhouse_publication",
     "clickhouse_schema",
 ):
-    sys.modules[f"backend.core.{_ch_alias}"] = _self_mod
-_core_pkg = sys.modules.get("backend.core")
-if _core_pkg is not None:
-    for _ch_alias in (
-        "clickhouse_client",
-        "clickhouse_observer",
-        "clickhouse_metrics",
-        "clickhouse_rows",
-        "clickhouse_manifest",
-        "clickhouse_publication",
-        "clickhouse_schema",
-    ):
+    if _ch_alias != "clickhouse_schema":
+        sys.modules[f"backend.core.{_ch_alias}"] = _self_mod
+    if _core_pkg is not None:
         setattr(_core_pkg, _ch_alias, _self_mod)
-_backend_pkg = sys.modules.get("backend")
-if _backend_pkg is not None and hasattr(_backend_pkg, "_MODULE_ALIASES"):
-    for _ch_alias in (
-        "clickhouse_client",
-        "clickhouse_observer",
-        "clickhouse_metrics",
-        "clickhouse_rows",
-        "clickhouse_manifest",
-        "clickhouse_publication",
-        "clickhouse_schema",
-    ):
+    if _backend_pkg is not None and hasattr(_backend_pkg, "_MODULE_ALIASES"):
         _backend_pkg._MODULE_ALIASES[f"backend.core.{_ch_alias}"] = __name__
+
+
+if __name__ == "__main__":
+    main()

@@ -4012,18 +4012,6 @@ def execute_rum_recovery(
 
 
 _self_mod = sys.modules[__name__]
-for _alias_name in ("rum_recovery", "rum_ingest"):
-    sys.modules[f"backend.high_scale.{_alias_name}"] = _self_mod
-_hs_pkg = sys.modules.get("backend.high_scale")
-if _hs_pkg is not None:
-    for _alias_name in ("rum_recovery", "rum_ingest"):
-        setattr(_hs_pkg, _alias_name, _self_mod)
-_backend_pkg = sys.modules.get("backend")
-if _backend_pkg is not None and hasattr(_backend_pkg, "_MODULE_ALIASES"):
-    for _alias_name in ("rum_recovery", "rum_ingest"):
-        _backend_pkg._MODULE_ALIASES[f"backend.high_scale.{_alias_name}"] = __name__
-
-_self_mod = sys.modules[__name__]
 worker = _self_mod
 recovery = _self_mod
 orchestration = _self_mod
@@ -4044,7 +4032,8 @@ for _alias in (
     "source_discovery",
     "worker",
 ):
-    sys.modules[f"backend.high_scale.{_alias}"] = _self_mod
+    if _alias != "worker":
+        sys.modules[f"backend.high_scale.{_alias}"] = _self_mod
     if _hs_pkg is not None:
         setattr(_hs_pkg, _alias, _self_mod)
 _backend_pkg = sys.modules.get("backend")

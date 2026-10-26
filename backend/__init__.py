@@ -265,6 +265,27 @@ _MODULE_ALIASES: dict[str, str] = {
 
 
 class _AliasLoader(importlib.abc.MetaPathFinder, importlib.abc.ExecutionLoader):
+    def _resolve_origin(self, fullname: str) -> tuple[str, str | None]:
+        target_name = _MODULE_ALIASES.get(fullname, fullname)
+        target_mod = sys.modules.get(target_name)
+        if target_mod is not None:
+            mod_file = getattr(target_mod, "__file__", None)
+            if mod_file:
+                return target_name, mod_file
+        spec = importlib.machinery.PathFinder.find_spec(target_name)
+        if spec is None and "." in target_name:
+            parent_name, _, _ = target_name.rpartition(".")
+            parent_mod = sys.modules.get(parent_name)
+            if parent_mod is None:
+                try:
+                    parent_mod = importlib.import_module(parent_name)
+                except Exception:
+                    parent_mod = None
+            parent_path = getattr(parent_mod, "__path__", None) if parent_mod is not None else None
+            if parent_path:
+                spec = importlib.machinery.PathFinder.find_spec(target_name, parent_path)
+        return target_name, (spec.origin if spec else None)
+
     def find_spec(
         self,
         fullname: str,
@@ -274,9 +295,7 @@ class _AliasLoader(importlib.abc.MetaPathFinder, importlib.abc.ExecutionLoader):
         if fullname == "backend.services":
             return importlib.machinery.ModuleSpec(fullname, self, is_package=True)
         if fullname in _MODULE_ALIASES:
-            target_name = _MODULE_ALIASES[fullname]
-            target_spec = importlib.util.find_spec(target_name)
-            origin = target_spec.origin if target_spec else None
+            _, origin = self._resolve_origin(fullname)
             return importlib.machinery.ModuleSpec(fullname, self, origin=origin)
         return None
 
@@ -284,26 +303,19 @@ class _AliasLoader(importlib.abc.MetaPathFinder, importlib.abc.ExecutionLoader):
         return fullname == "backend.services"
 
     def get_filename(self, fullname: str) -> str:
-        target_name = _MODULE_ALIASES.get(fullname, fullname)
-        spec = importlib.util.find_spec(target_name)
-        return (spec.origin or "") if spec else ""
+        _, origin = self._resolve_origin(fullname)
+        return origin or ""
 
     def get_source(self, fullname: str) -> str | None:
-        if fullname not in _MODULE_ALIASES:
-            return None
-        target_name = _MODULE_ALIASES[fullname]
-        spec = importlib.util.find_spec(target_name)
-        if spec and spec.loader and hasattr(spec.loader, "get_source"):
-            return spec.loader.get_source(target_name)  # type: ignore[no-any-return]
+        target_name, origin = self._resolve_origin(fullname)
+        if origin and origin.endswith(".py"):
+            return importlib.machinery.SourceFileLoader(target_name, origin).get_source(target_name)
         return None
 
     def get_code(self, fullname: str) -> types.CodeType | None:
-        if fullname not in _MODULE_ALIASES:
-            return None
-        target_name = _MODULE_ALIASES[fullname]
-        spec = importlib.util.find_spec(target_name)
-        if spec and spec.loader and hasattr(spec.loader, "get_code"):
-            return spec.loader.get_code(target_name)  # type: ignore[no-any-return]
+        target_name, origin = self._resolve_origin(fullname)
+        if origin and origin.endswith(".py"):
+            return importlib.machinery.SourceFileLoader(target_name, origin).get_code(target_name)
         return None
 
     def create_module(self, spec: importlib.machinery.ModuleSpec) -> types.ModuleType | None:
@@ -333,7 +345,6 @@ class _AliasLoader(importlib.abc.MetaPathFinder, importlib.abc.ExecutionLoader):
             return
         for alias, target_name in _MODULE_ALIASES.items():
             if target_name == module.__name__:
-                sys.modules[alias] = module
                 parent_name, _, child_name = alias.rpartition(".")
                 parent_mod = sys.modules.get(parent_name)
                 if parent_mod is not None:
