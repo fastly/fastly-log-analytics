@@ -42,8 +42,11 @@ of whether a deploy is actively running.
 
 from __future__ import annotations
 
+import argparse
 import json
+import os
 import re
+import secrets
 import sys
 import threading
 import time
@@ -51,7 +54,7 @@ import urllib.error
 import urllib.request
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -245,11 +248,81 @@ class ReportRequestHandler(SimpleHTTPRequestHandler):
         pass  # keep console output quiet, matches prior `http.server` usage here
 
 
+class PrivateReportRequestHandler(ReportRequestHandler):
+    report_root: Path
+    route_prefix: str
+
+    def _allow_request(self) -> bool:
+        host = self.headers.get("Host", "")
+        port = self.server.server_address[1]
+        origin = self.headers.get("Origin")
+        path = urlsplit(self.path).path
+        if (
+            host not in {f"127.0.0.1:{port}", f"localhost:{port}"}
+            or (origin is not None and origin != f"http://{host}")
+            or not path.startswith(self.route_prefix)
+        ):
+            self.send_error(404)
+            return False
+        relative = unquote(path[len(self.route_prefix) :])
+        if not (self.report_root / relative).resolve().is_relative_to(self.report_root):
+            self.send_error(403)
+            return False
+        return True
+
+    def do_GET(self) -> None:  # noqa: N802
+        if not self._allow_request():
+            return
+        if urlsplit(self.path).path.endswith("relics/credentials_status.json"):
+            self._send_json(403, b'{"error":"credential probes disabled for private reports"}')
+            return
+        super().do_GET()
+
+    def do_HEAD(self) -> None:  # noqa: N802
+        if self._allow_request():
+            super().do_HEAD()
+
+    def translate_path(self, path: str) -> str:
+        relative = unquote(urlsplit(path).path[len(self.route_prefix) :])
+        return str(self.report_root / (relative or "index.html"))
+
+    def list_directory(self, path: str) -> None:
+        self.send_error(403)
+
+    def end_headers(self) -> None:
+        self.send_header("Referrer-Policy", "no-referrer")
+        super().end_headers()
+
+
 def main() -> None:
+    global _CURRENT_REPORT_LINK
+    parser = argparse.ArgumentParser()
+    parser.add_argument("port", nargs="?", type=int, default=41705)
+    parser.add_argument("--private-root", type=Path)
+    parser.add_argument("--access-file", type=Path)
+    args = parser.parse_args()
+    handler = ReportRequestHandler
+    if args.private_root is not None:
+        if args.access_file is None:
+            parser.error("--private-root requires --access-file")
+        root = args.private_root.resolve(strict=True)
+        if not root.is_dir():
+            parser.error("--private-root must be a directory")
+        PrivateReportRequestHandler.report_root = root
+        PrivateReportRequestHandler.route_prefix = f"/{secrets.token_urlsafe(24)}/"
+        _CURRENT_REPORT_LINK = root
+        handler = PrivateReportRequestHandler
+    elif args.access_file is not None:
+        parser.error("--access-file requires --private-root")
     validate_admin_tls_config()
-    port = int(sys.argv[1]) if len(sys.argv) > 1 else 41705
-    server = ThreadingHTTPServer(("127.0.0.1", port), ReportRequestHandler)
-    server.serve_forever()
+    with ThreadingHTTPServer(("127.0.0.1", args.port), handler) as server:
+        if args.private_root is not None:
+            port = server.server_address[1]
+            url = f"http://127.0.0.1:{port}{PrivateReportRequestHandler.route_prefix}index.html"
+            fd = os.open(args.access_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "w") as stream:
+                json.dump({"url": url, "pid": os.getpid()}, stream)
+        server.serve_forever()
 
 
 if __name__ == "__main__":

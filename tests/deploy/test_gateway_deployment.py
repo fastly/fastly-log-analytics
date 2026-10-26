@@ -1551,3 +1551,80 @@ def test_report_root_redirect_is_bodyless_and_keeps_connection_usable(report, pa
         follow_up.read()
     finally:
         connection.close()
+
+
+@pytest.fixture
+def private_report(report, tmp_path, monkeypatch):
+    _, requests, origins = report
+    root = (tmp_path / "report").resolve()
+    root.mkdir()
+    (root / "index.html").write_text("live deployment report")
+    (root / "logs").mkdir()
+    (root / "logs" / "deploy.log").write_text("deployment started")
+    (tmp_path / "outside.txt").write_text("not part of the report")
+    (root / "escape").symlink_to(tmp_path / "outside.txt")
+    monkeypatch.setattr(report_server.PrivateReportRequestHandler, "report_root", root, raising=False)
+    monkeypatch.setattr(report_server.PrivateReportRequestHandler, "route_prefix", "/private-test/", raising=False)
+    monkeypatch.setattr(report_server, "_CURRENT_REPORT_LINK", root)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), report_server.PrivateReportRequestHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}/private-test/", requests, origins
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_private_report_serves_live_files_and_head(private_report):
+    origin, _, _ = private_report
+    with urlopen(f"{origin}index.html", timeout=5) as response:
+        assert response.read() == b"live deployment report"
+        assert response.headers["Referrer-Policy"] == "no-referrer"
+    with urlopen(f"{origin}logs/deploy.log", timeout=5) as response:
+        assert response.read() == b"deployment started"
+    request = Request(f"{origin}logs/deploy.log", method="HEAD")
+    with urlopen(request, timeout=5) as response:
+        assert response.status == 200
+        assert response.read() == b""
+
+
+def test_private_report_keeps_same_origin_bootstrap_proxy(private_report):
+    origin, requests, origins = private_report
+    with urlopen(f"{origin}relics/bootstrap_status.json?env=remote-hs", timeout=5) as response:
+        body = json.load(response)
+    assert body["data"] == {"active_service_id": "test-service"}
+    assert origins == ["remote-hs"]
+    assert len(requests) == 1
+
+
+@pytest.mark.parametrize(
+    ("path", "headers", "status"),
+    [
+        ("../outside.txt", {}, 403),
+        ("..%2foutside.txt", {}, 403),
+        ("escape", {}, 403),
+        ("logs/", {}, 403),
+        ("relics/credentials_status.json", {}, 403),
+        ("index.html", {"Origin": "https://foreign.example.com"}, 404),
+        ("index.html", {"Host": "foreign.example.com"}, 404),
+    ],
+)
+def test_private_report_rejects_access_outside_its_scope(private_report, path, headers, status):
+    origin, requests, origins = private_report
+    request = Request(f"{origin}{path}", headers=headers)
+    with pytest.raises(HTTPError) as error:
+        urlopen(request, timeout=5)
+    assert error.value.code == status
+    error.value.close()
+    assert not requests
+    assert not origins
+
+
+def test_private_report_requires_its_private_url_prefix(private_report):
+    origin, _, _ = private_report
+    with pytest.raises(HTTPError) as error:
+        urlopen(f"{origin.removesuffix('/private-test/')}/index.html", timeout=5)
+    assert error.value.code == 404
+    error.value.close()
