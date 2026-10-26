@@ -42,11 +42,6 @@ logger = logging.getLogger(__name__)
 # ── Caches ────────────────────────────────────────────────────────────────────
 
 INSIGHTS_CACHE_TTL = 300  # seconds
-# Bounded + lazy-reaped. Pre-migration this was a plain dict; entries
-# were time-bucketed by ``int(time.time() / TTL)`` so each TTL window
-# minted distinct keys but old buckets were never removed. Across hours
-# of admin use the bucket-count grew linearly. 500 entries × insights
-# payload (~100KB) caps this around ~50MB.
 from backend.utils.bounded_cache import BoundedTTLCache as _BoundedTTLCache
 
 _insights_cache: _BoundedTTLCache = _BoundedTTLCache(maxsize=500, ttl_seconds=INSIGHTS_CACHE_TTL)
@@ -60,20 +55,7 @@ def _execute_on_cursor(
     sql: str,
     params: list | None = None,
 ):
-    """Execute ``sql`` on ``cur`` — a ``runner.con.cursor()`` shadow connection —
-    and append its timing to the REQUEST-scoped ``runner.debug_queries`` under
-    ``debug_lock``.
-
-    Shared by the pre-per-insight coalesced-aggregate parallel dispatch (city/
-    url/ip-security/WAF-unnest, all launched together via a ThreadPoolExecutor
-    in ``get_insights``) and the later per-insight ThreadPoolExecutor dispatch.
-    Cursors returned by ``con.cursor()`` are separate shadow connections on the
-    same parent — thread-safe to call concurrently from different threads,
-    unlike calling ``runner.execute`` (which serialises on the single parent
-    cursor). ``debug_lock`` is the caller's request-scoped lock, NOT a module-
-    global one, so concurrent unrelated requests never contend on each other's
-    append.
-    """
+    """Execute ``sql`` on shadow cursor ``cur`` and record timing under request-scoped ``debug_lock``."""
     t0 = time.time()
     res = cur.execute(sql, params or [])
     elapsed_ms = round((time.time() - t0) * 1000, 2)
@@ -155,27 +137,7 @@ def _coalesced_city_aggregates(
     shadow_cursor: duckdb.DuckDBPyConnection | None = None,
     debug_lock: threading.Lock | None = None,
 ) -> dict[str, list[tuple]]:
-    """Run ONE pass over `table_name` to compute every aggregate the four
-    city-based insights need, then demux into per-insight result lists
-    whose row schemas match each insight's existing row_processor contract.
-
-    The four insights — city_surges, city_error_spikes,
-    city_latency_regressions, new_city_traffic — all GROUP BY
-    (city, region, country) over the same WHERE clause
-    (``"city" IS NOT NULL AND "city" != ''``). Pre-coalesce, they ran as
-    four independent SELECTs and re-read the temp table four times. This
-    coalesces them into a single SELECT that computes the superset of
-    counts/rates/p95s, then applies each insight's HAVING/ORDER/LIMIT in
-    Python.
-
-    Returns ``{insight_id: rows}`` where each rows list matches the per-
-    insight schema the existing processor expects:
-
-    - city_surges:              [label, city, region, country, w_cnt, b_cnt, spike_ratio]
-    - city_error_spikes:        [label, city, region, country, w_rate, b_rate, w_errors, w_total, b_total]
-    - city_latency_regressions: [label, city, region, country, w_p95, b_p95, w_total, b_total]
-    - new_city_traffic:         [label, city, region, country, w_cnt, b_cnt]
-    """
+    """Compute all 4 city-based insights (surges, error_spikes, latency_regressions, new_city_traffic) in one scan."""
     sql = COALESCED_CITY_AGGREGATES.format(
         table_name=table_name, label_expr=label_expr, region_sel=region_sel, country_sel=country_sel
     )
@@ -230,16 +192,7 @@ def _coalesced_url_aggregates(
     shadow_cursor: duckdb.DuckDBPyConnection | None = None,
     debug_lock: threading.Lock | None = None,
 ) -> dict[str, list[tuple]]:
-    """Coalesce URL-keyed insights into ONE pass over ``table_name``.
-
-    When ``actual_cols`` is None, computes the 5 core URL insights
-    (error_spikes, cache_collapse, cacheability_regression,
-    latency_regression, tail_latency) via COALESCED_URL_AGGREGATES.
-    When ``actual_cols`` is provided, uses COALESCED_URL_EXTENDED_AGGREGATES
-    to also compute new_probe_urls, payload_compression_regression,
-    image_optimization_opportunities, cache_ttl_mismatch, and origin_retries
-    in the same single scan.
-    """
+    """Coalesce URL-keyed insights into one pass over ``table_name`` (core 5 or extended 10 when ``actual_cols`` given)."""
     use_extended = actual_cols is not None
     if actual_cols is not None:
         sql = COALESCED_URL_EXTENDED_AGGREGATES.format(
@@ -258,16 +211,16 @@ def _coalesced_url_aggregates(
         )
     else:
         sql = COALESCED_URL_AGGREGATES.format(table_name=table_name)
-    error_spikes_heap: list[tuple] = []
-    cache_collapse_heap: list[tuple] = []
-    cacheability_regression_heap: list[tuple] = []
-    latency_regression_heap: list[tuple] = []
-    tail_latency_heap: list[tuple] = []
-    new_probe_urls_heap: list[tuple] = []
-    payload_comp_heap: list[tuple] = []
-    image_opt_heap: list[tuple] = []
-    cache_ttl_heap: list[tuple] = []
-    origin_retries_heap: list[tuple] = []
+    error_spikes_heap: list[Any] = []
+    cache_collapse_heap: list[Any] = []
+    cacheability_regression_heap: list[Any] = []
+    latency_regression_heap: list[Any] = []
+    tail_latency_heap: list[Any] = []
+    new_probe_urls_heap: list[Any] = []
+    payload_comp_heap: list[Any] = []
+    image_opt_heap: list[Any] = []
+    cache_ttl_heap: list[Any] = []
+    origin_retries_heap: list[Any] = []
 
     ext_cols = actual_cols if use_extended and actual_cols is not None else ()
     has_pcr = {"resp_header_content_encoding", "resp_bytes"}.issubset(ext_cols)
@@ -424,15 +377,7 @@ def _coalesced_ip_security_aggregates(
     shadow_cursor: duckdb.DuckDBPyConnection | None = None,
     debug_lock: threading.Lock | None = None,
 ) -> dict[str, list[tuple]]:
-    """Coalesce the IP-keyed security scans into ONE ``GROUP BY ip`` pass
-    over ``table_name``.
-
-    When ``actual_cols`` is None, computes low_and_slow, credential_enumeration,
-    and content_discovery via COALESCED_IP_SECURITY_AGGREGATES.
-    When ``actual_cols`` is provided, uses COALESCED_IP_EXTENDED_AGGREGATES
-    to also compute orphaned_deep_crawl, session_harvesting, and exact
-    candidate bounds for request_size_anomaly and connection_abuse.
-    """
+    """Coalesce IP-keyed security scans into one ``GROUP BY ip`` pass over ``table_name``."""
     use_extended = actual_cols is not None
     if actual_cols is not None:
         sql = COALESCED_IP_EXTENDED_AGGREGATES.format(
@@ -446,11 +391,11 @@ def _coalesced_ip_security_aggregates(
         )
     else:
         sql = COALESCED_IP_SECURITY_AGGREGATES.format(table_name=table_name)
-    low_and_slow_heap: list[tuple] = []
-    credential_enumeration_heap: list[tuple] = []
-    content_discovery_heap: list[tuple] = []
-    orphaned_deep_crawl_heap: list[tuple] = []
-    session_harvesting_heap: list[tuple] = []
+    low_and_slow_heap: list[Any] = []
+    credential_enumeration_heap: list[Any] = []
+    content_discovery_heap: list[Any] = []
+    orphaned_deep_crawl_heap: list[Any] = []
+    session_harvesting_heap: list[Any] = []
 
     ext_cols = actual_cols if use_extended and actual_cols is not None else ()
     has_odc, has_sh = "referer" in ext_cols, "cookie_session" in ext_cols
@@ -1165,32 +1110,7 @@ def get_insights(
     filters: dict | None = None,
     max_workers: int = 8,
 ) -> dict:
-    """Compute the insight cards for ``src`` over the window/baseline ranges.
-
-    M2: ``clamp_start`` / ``clamp_end`` (ISO-8601) bound the scanned range to
-    the analyst's allowed window — the router derives them via
-    ``get_analyst_time_bounds`` + ``clamp_or_400``. ``None`` for both is the
-    admin / prewarmer path (full range).
-
-    ``clamp_cache_key``: the STABLE cache-key fragment for an analyst clamp
-    shape (``backend.utils.remote_access.analyst_clamp_cache_key`` — keyed on
-    the invite's window params, not the rolling resolved bounds). The router
-    passes it so repeated analyst requests reuse one cache entry instead of
-    recomputing every call. ``None`` keeps the admin key shape (and, for any
-    caller that passes a clamp but no key, falls back to the rolling bounds so
-    the clamped/unclamped isolation guarantee is preserved).
-
-    ``force_refresh``: skip the cache READ and always recompute (the write
-    still happens). The prewarmer uses this so every tick rewrites the entry
-    and resets its TTL — a cache *hit* would not (cachetools' TTL is from
-    insertion), leaving a window each cycle where the entry has expired.
-
-    M3: ``mask_ips`` is passed to the row processors via ``context`` so the
-    IP-keyed insights (request_size_anomaly, connection_abuse) mask the client
-    IP they place in the label / filters / investigate_url. It's also part of
-    the cache key so a masked analyst result and an unmasked one never share an
-    entry.
-    """
+    """Compute the insight cards for ``src`` over the window/baseline ranges."""
     source_name = src["name"]
     table_name = _safe_table(source_name)
     now, now_s, window_start_s, baseline_start_s = _compute_clamped_insight_windows(
@@ -1240,15 +1160,7 @@ def get_insights(
 
     empty_resp = _insights_envelope([])
     if not actual_cols:
-        # Empty actual_cols can mean two things: legitimate "no schema yet,
-        # service was just provisioned" OR a race where a concurrent
-        # commit deleted the buffer file between get_schema_cols's first
-        # call and us reading it. The latter silently shipped an empty
-        # insights payload that the frontend cached. Force-rebuild the
-        # view once and retry — if the schema lookup STILL returns empty,
-        # that's the "legitimate no-data" branch and we ship the empty
-        # response. (force=True bypasses the catalog-refresh fast path so
-        # the retry actually does work.)
+        # Force-rebuild the view once in case a concurrent commit deleted the buffer file.
         try:
             from backend.core import iceberg as db_iceberg
 
@@ -1259,45 +1171,17 @@ def get_insights(
         if not actual_cols:
             return empty_resp
 
-    # ── Materialize relevant window into a per-request scratch table ──────────
-    # This is the single most important optimization: avoid globbing/metadata
-    # parsing 30+ times.
-    #
-    # The materialised window + the unnested WAF stream both live in a
-    # per-request ``ATTACH ':memory:' AS scratch_<uuid>`` database so the
-    # per-insight tasks below can run in parallel: DuckDB Connection objects
-    # are not thread-safe, but ``con.cursor()`` returns shadow connections
-    # that ARE safe across threads and DO see the attached in-memory
-    # database. The first parallelize attempt (3a003de, reverted 7909bcb)
-    # used a regular CREATE TABLE on the default DB to work around the
-    # TEMP-table cross-cursor invisibility, which paid disk I/O on every
-    # cold call. ATTACH ':memory:' fixes both problems — cross-cursor
-    # visibility AND in-memory storage. The scratch is unique per request
-    # so two concurrent requests on the same pool connection don't collide.
+    # Materialize relevant window into a per-request ATTACH ':memory:' scratch DB
+    # so shadow cursors across ThreadPoolExecutor workers see the table in-memory.
     scratch_alias = f"insights_scratch_{uuid.uuid4().hex[:12]}"
     runner.con.execute(f"ATTACH ':memory:' AS {scratch_alias} (READ_ONLY FALSE)")
     scratch_attached = True
     temp_table = f"{scratch_alias}.insights_temp_{uuid.uuid4().hex[:12]}"
 
-    # Derive needed_cols from each ELIGIBLE insight's `required_fields` —
-    # eligibility is the same all-required-fields-present check the per-insight
-    # loop runs below (around line 595). Pre-filtering here drops columns that
-    # only an ineligible insight references, shrinking the temp projection from
-    # ~35 cols to whatever the current service's schema can actually feed. The
-    # safety guarantee we had before still holds: any eligible insight's
-    # required_fields are included, so no SQL template can land on a missing
-    # column.
     needed_cols_set: set[str] = {"timestamp"}
     for d in registry.get_all():
         if all(col in actual_cols for col in d.required_fields):
             needed_cols_set.update(d.required_fields)
-    # Support cols processors read from context but no insight lists in
-    # required_fields (ja3/ja4 fingerprint selection in botnet_grouping; geo
-    # columns referenced via build_geo_select_clause). When ja4 is present in
-    # the service schema, fp_col resolves to ja4 and ja3 is never read by any
-    # insight, so skip materializing 30 days of ja3 strings into the scratch
-    # table. Filtered by actual_cols in the cols_sql line below so missing
-    # columns don't break the projection.
     fp_support_col = "ja4" if "ja4" in actual_cols else "ja3"
     needed_cols_set.update({fp_support_col, "region", "resp_bytes"})
     cols_sql = ", ".join(f'"{c}"' for c in sorted(needed_cols_set) if c in actual_cols)
@@ -1306,10 +1190,6 @@ def get_insights(
     elif "resp_bytes" not in actual_cols:
         cols_sql += ', 0::BIGINT AS "resp_bytes"'
 
-    # CREATE TABLE (not TEMP) inside the scratch :memory: DB — TEMP tables
-    # are connection-scoped and invisible to ``con.cursor()`` shadow
-    # connections; tables in an ATTACH'd :memory: DB are visible to every
-    # cursor on the parent connection.
     extra_filter_sql = ""
     if filters:
         from backend.repositories.utils.filters import build_where_clause
@@ -1325,10 +1205,6 @@ def get_insights(
     temp_created = runner.create_temp_table(create_q, [])
     if not temp_created:
         temp_table = table_name  # Fallback to the iceberg view directly
-
-    # WAF unnest temp creation moved into the parallel coalesced-aggregates
-    # dispatch below (``_task_waf``) — it runs concurrently with the city/url/
-    # ip-security aggregate scans instead of sequentially before them.
 
     try:
         # Available history + window total in a single scan over the scratch table
@@ -1346,12 +1222,6 @@ def get_insights(
 
                     earliest_ts = parse_iso_utc(earliest_ts) or earliest_ts
                 elif hasattr(earliest_ts, "tzinfo"):
-                    # DuckDB returns TIMESTAMPTZ in the *server's* local zone, not UTC.
-                    # `.replace(tzinfo=UTC)` would re-label the local wall clock as
-                    # UTC and shift the instant by the local offset — turning a
-                    # 23h-old row into a 29h-old one on MDT, or vice versa. Use
-                    # astimezone so the instant is preserved across zones (and
-                    # handle the rare naive case by assuming UTC).
                     earliest_ts = (
                         earliest_ts.replace(tzinfo=UTC) if earliest_ts.tzinfo is None else earliest_ts.astimezone(UTC)
                     )
@@ -1367,11 +1237,6 @@ def get_insights(
             except Exception:
                 w_total = 0
 
-        # Insight definitions — Phase 7 caller migration. The new
-        # field_registry re-exports INSIGHT_DEFINITIONS verbatim (same list
-        # of dicts) so existing patch contracts and the dict-key access shape
-        # below stay valid. Switching the import lets the registry control
-        # the source-of-truth flip in step 13 without re-editing this file.
         try:
             from backend.core.field_registry import INSIGHT_DEFINITIONS as _defs
 
@@ -1424,27 +1289,11 @@ def get_insights(
             return "/dashboard?" + urllib.parse.urlencode(p)
 
         tasks: list[Callable[[], dict | None]] = []
-
-        # Per-task lock that guards parallel appends to ``runner.debug_queries``.
-        # Every per-insight task below AND the coalesced-aggregates dispatch
-        # above run in their own thread with their own DuckDB cursor (cursors
-        # are separate shadow connections — thread-safe), but the debug-
-        # queries list is the request-scoped one consumed by
-        # ``runner.telemetry()`` at the bottom of this function and ultimately
-        # serialised into the response's debug panel. Without the lock,
-        # concurrent ``list.append`` is technically safe under CPython's GIL
-        # but the SQL/time pairing through ``_compact_sql_for_debug`` is not
-        # — interleaved appends could swap sql with the wrong elapsed_ms.
         _debug_lock = threading.Lock()
 
-        # ── Registered Dynamic Insights ───────────────────────────────────────────
         from backend.repositories.utils.filters import build_geo_select_clause
 
         loc_cols, label_expr, country_sel, region_sel = build_geo_select_clause(actual_cols)
-        # Bare expression (no leading comma, no trailing alias) so templates can
-        # write ``, {ua_mobile_sel} AS mobile_ratio`` consistently. Returning
-        # ``, ... AS mobile_ratio`` here produced ``avg_kb, , ... AS mobile_ratio
-        # AS mobile_ratio`` — a syntax error around the double comma.
         ua_mobile_sel = (
             "SUM(CASE WHEN \"ua\" ILIKE '%Mobi%' OR \"ua\" ILIKE '%Android%' OR \"ua\" ILIKE '%iPhone%' THEN 1 ELSE 0 END) * 1.0 / NULLIF(COUNT(*), 0)"
             if "ua" in actual_cols
@@ -1452,41 +1301,10 @@ def get_insights(
         )
         url_col = '"url"' if "url" in actual_cols else "NULL"
         q_col = '"url"' if "url" in actual_cols else ('"digest"' if "digest" in actual_cols else "'(unknown)'")
-        # repeated_patterns: conditional UA projection (mirrors url_col/q_col) +
-        # the static, ``?``-free bot/monitor allowlist regex. The regex is a
-        # fixed constant, so inlining it leaves the template's single ``?`` (the
-        # window start) intact for the engine's sql.count("?") binder heuristic.
         ua_col = '"ua"' if "ua" in actual_cols else "NULL"
         bot_ua_regex = REPEATED_BOT_UA_REGEX
 
-        # ── Coalesced aggregates + WAF unnest — PARALLEL dispatch ─────────────────
-        # These 4 queries (WAF unnest temp create, city/url/ip-security
-        # coalesced GROUP BYs) used to run sequentially, one after another,
-        # BEFORE the per-insight ThreadPoolExecutor dispatch below. Prod
-        # 2026-08-03 measured city=10.4s + url=6.9s + ip=3.2s + waf=2.7s =
-        # ~23s of pure serialization — each is an independent read (or, for
-        # WAF, a write into a brand-new uniquely-named scratch table) over
-        # the SAME materialized ``temp_table``, so there's no data dependency
-        # between them and they parallelize cleanly.
-        #
-        # Dispatched via the identical ``runner.con.cursor()`` shadow-
-        # connection pattern the per-insight dispatch below already uses
-        # safely: DuckDB releases the GIL during query execution, and cursors
-        # on the same parent connection are thread-safe to use concurrently
-        # from different threads. DuckDB's thread pool is instance-global
-        # (``DUCKDB_THREADS``), so these cursors share it rather than each
-        # spawning their own. The WAF task is the only WRITE (a
-        # CREATE TABLE into the scratch ``:memory:`` DB) among the three
-        # read-only aggregate SELECTs; it writes a brand-new, uniquely-named
-        # catalog object that none of the three reads touch, so there's no
-        # write-write conflict with the concurrent SELECTs (verified locally:
-        # concurrent CREATE TABLE + 3 SELECTs via cursors on one parent
-        # connection completes cleanly with correct, independent results).
-        #
-        # Each task independently gates on its own required columns and
-        # swallows its own exception exactly as the sequential code did —
-        # falling back to ``{}`` / ``None`` never breaks the other 3 tasks or
-        # the page.
+        # Parallel coalesced aggregate dispatch via thread-safe DuckDB shadow cursors.
         _coalesced_specs: list[tuple[str, bool, str, tuple, dict[str, Any]]] = [
             (
                 "city",
@@ -1584,10 +1402,6 @@ def get_insights(
                         if r:
                             return r
 
-                    # O2 / Step 2 bypass: insights pull rows from the precomputed
-                    # coalesced aggregates instead of issuing their own SELECT.
-                    # Row schema is constructed to match each insight's existing
-                    # `# row schema: [...]` processor contract.
                     default_sql = getattr(_insights_sql, d.id.upper(), None)
                     is_default_template = default_sql is None or d.sql_template == default_sql
                     if is_default_template and d.id in precomputed:
@@ -1612,22 +1426,12 @@ def get_insights(
                                 **extra_args,
                             )
                         except KeyError:
-                            # If hydration fails due to missing keys (e.g. pop_values), skip this insight
                             return None
 
                         params = [window_start_s] * sql.count("?")
-
-                        # Per-task cursor: shadow connection on the same
-                        # parent ``runner.con``, thread-safe and able to see
-                        # the parent's ATTACH ':memory:' scratch tables.
-                        # The closure receives the cursor each call so the
-                        # outer ThreadPoolExecutor can run tasks in parallel
-                        # without the implicit single-cursor serialisation
-                        # that ``runner.execute`` enforces.
                         rows = _execute_on_cursor(runner, _debug_lock, runner.con.cursor(), sql, params).fetchall()
                     items = []
                     if d.row_processor:
-                        # Build context for processors
                         context: dict[str, Any] = {
                             "window_hours": window_hours,
                             "baseline_hours": baseline_hours,
@@ -1635,8 +1439,6 @@ def get_insights(
                             "actual_cols": actual_cols,
                             "mask_ips": mask_ips,
                         }
-
-                        # Lazy load maps if needed by processors
                         if any(p in d.id for p in ["asn", "metro"]):
                             from backend.core import duckdb as _db_core
 
@@ -1683,11 +1485,6 @@ def get_insights(
                         items=items,
                     )
 
-                # Tag the closure with the insight id+title so the error-path
-                # below can report which insight failed. Without these, every
-                # task closes over the same `compute_insight` name and the
-                # error path emits duplicate `id="insight"` entries — which
-                # React then warns about as duplicate keys.
                 compute_insight._insight_id = d.id  # type: ignore[attr-defined]
                 compute_insight._insight_title = d.title  # type: ignore[attr-defined]
                 compute_insight._insight_category = str(d.category)  # type: ignore[attr-defined]
@@ -1698,9 +1495,7 @@ def get_insights(
         insights_list: list[dict] = []
 
         def _safe_run(fn: Callable[[], dict | None]) -> dict | None:
-            """Run one insight task and surface its failure as an error
-            card rather than killing the whole batch — same contract the
-            serial path had."""
+            """Run one insight task and surface its failure as an error card."""
             try:
                 return fn()
             except Exception as e:
@@ -1714,10 +1509,6 @@ def get_insights(
                     summary=f"Query failed: {str(e)}",
                 )
 
-        # ThreadPoolExecutor dispatch — DuckDB releases the GIL during
-        # query execution, so the remaining per-insight scans overlap on
-        # the same database. Capping pool_workers at 3 avoids oversubscribing
-        # DuckDB's shared thread pool across too many simultaneous heavy scans.
         if tasks:
             pool_workers = max(1, min(max_workers, 3, len(tasks)))
             ctx_tasks = [(contextvars.copy_context(), t) for t in tasks]
@@ -1732,12 +1523,6 @@ def get_insights(
                 _insights_cache[cache_key] = (now_s, payload)
         return payload
     finally:
-        # Release the entire scratch :memory: DB in one DETACH so neither
-        # the materialised window nor the WAF stream nor the alias itself
-        # leak onto the pooled DuckDB connection (audit finding 009 /
-        # 2026-06-15). Best-effort: a failed DETACH still releases when
-        # the connection is recycled, and the alias includes a fresh UUID
-        # per request so the next call can't collide on the same name.
         if scratch_attached:
             try:
                 runner.con.execute(f"DETACH {scratch_alias}")

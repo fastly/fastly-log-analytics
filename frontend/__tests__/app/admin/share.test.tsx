@@ -46,14 +46,6 @@ vi.mock('next/dynamic', () => ({
   default: () => () => null,
 }))
 
-vi.mock('@/components/SessionScoring/ScorerSeriesCard', () => ({
-  ScoreDistChart: () => null,
-  ComplianceChart: () => null,
-  StackedHourlyBarChart: () => null,
-  ScorerLatencyChart: () => null,
-  ScorerErrorsChart: () => null,
-  ScorerSeriesCard: () => null,
-}))
 vi.mock('@/components/SessionScoring/ScoringAdminPanels', () => ({
   ScoringHealthCard: () => null,
   ScorerFailOpenBreakdownCard: () => null,
@@ -70,6 +62,12 @@ vi.mock('@/components/SessionScoring/StatusPanel', () => ({
   L2EnforcementCard: () => null,
   RocPrCurves: () => null,
   PerReasonAucCard: () => null,
+  ScoreDistChart: () => null,
+  ComplianceChart: () => null,
+  StackedHourlyBarChart: () => null,
+  ScorerLatencyChart: () => null,
+  ScorerErrorsChart: () => null,
+  ScorerSeriesCard: () => null,
 }))
 vi.mock('@/components/SessionScoring/ThresholdSlider', () => ({ ThresholdSlider: () => null }))
 vi.mock('@/components/SessionScoring/TopFlaggedTable', () => ({ TopFlaggedTable: () => null }))

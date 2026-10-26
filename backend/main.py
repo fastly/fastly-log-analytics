@@ -535,7 +535,7 @@ async def _application_lifespan(app: FastAPI):
     # `relation "cron_runs" does not exist`. Idempotent, once per process,
     # cheap no-op when METADATA_DSN is unset, and non-fatal on failure (it
     # logs CRITICAL — see ensure_pg_schema).
-    from backend.core.metadata.pg_schema import ensure_pg_schema
+    from backend.core.metadata.base import ensure_pg_schema
 
     ensure_pg_schema()
 
@@ -1071,7 +1071,6 @@ from backend.routers import (  # noqa: E402
     provision,
     services,
     share_admin,
-    share_oauth,
     usage,
 )
 
@@ -1086,12 +1085,11 @@ app.include_router(provision.router)
 app.include_router(share_admin.sharing_domain_router)
 app.include_router(session_scoring.router)
 app.include_router(bootstrap.debug_router)
-app.include_router(share_oauth.router)
 app.include_router(share_admin.router)
 # E2E/dev-only in-process mock OIDC provider — mounted ONLY when OAUTH_MOCK_IDP=1
 # so it never appears in the OpenAPI schema or in production.
-if share_oauth.mock_idp_enabled():
-    app.include_router(share_oauth.mock_idp_router)
+if share_admin.mock_idp_enabled():
+    app.include_router(share_admin.mock_idp_router)
 
 
 # ── Health check ──────────────────────────────────────────────────────────────

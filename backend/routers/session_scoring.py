@@ -1,22 +1,4 @@
-"""Session-scoring admin router.
-
-Three endpoints (mirroring backend/routers/provision.py conventions):
-
-  POST /api/services/{service_id}/scoring/enable
-       SSE-stream the enable_scoring orchestrator's status events.
-
-  POST /api/services/{service_id}/scoring/disable
-       SSE-stream the disable_scoring orchestrator's status events.
-
-  GET  /api/services/{service_id}/scoring/status
-       Return the customer's current scoring block ({enabled, scoring_service_id,
-       scoring_domain, ...}) or {"enabled": false} if not yet wired.
-
-The actual work lives in
-[backend/provision/session_scoring_orchestrator.py](backend/provision/session_scoring_orchestrator.py);
-this router just wraps it in the existing SSE event-streaming infrastructure
-([backend/provision/orchestrator.py::run_with_events](backend/provision/orchestrator.py#L128))
-so the dashboard can render a progress UI later."""
+"""Session-scoring admin, analytics, and session-detail router."""
 
 from __future__ import annotations
 
@@ -106,10 +88,6 @@ from backend.utils.telemetry import process_context_scope
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/services", tags=["session-scoring"], responses=DEFAULT_ERROR_RESPONSES)
-# Fields in the per-service scoring config that must never reach the UI.
-# AES key is never persisted in config (defensive); request_secret IS in
-# the config so it must be stripped before any response that surfaces the
-# scoring block (status endpoint, enable SSE done event, etc.).
 _SECRET_KEYS = frozenset({"aes_key_hex", "request_secret"})
 
 
@@ -121,62 +99,21 @@ def _enforce_scoring_service_scope(request: Request | None, service_id: str) -> 
             require_service_in_scope(request, service_id)
 
 
-# ── In-process TTL cache for analytics endpoints ─────────────────────────────
-#
-# The 3 summary endpoints (top-flagged, score-distribution, compliance-
-# breakdown) each open a fresh DuckDB connection and pay 30-80ms of
-# `_configure_fos` setup under `_fos_proxy_secret_lock` — and that lock
-# is process-wide, so 3 concurrent requests serialize. Under cron-writer
-# contention the same path can stall up to `max_wait=3` seconds. The
-# admin page re-fires all three on every navigation.
-#
-# A 20-second TTL cache wipes most of that without changing user-facing
-# semantics: refreshAll() invalidates React Query keys; we mirror that
-# by exposing a bust() that the future "Refresh" button can call (the
-# current admin Refresh button only invalidates the client cache, which
-# is harmless overlap with this server cache — the next request just
-# pulls a fresh server snapshot 20s later, which is fine).
 import threading
 import time as _time
 
-_ANALYTICS_TTL_SEC = 20.0
-# Bounded + lazy-reaped. Pre-migration this was a plain dict whose TTL
-# was only checked on hit — entries lingered until /scoring/* was hit
-# again with the same key. Keys are (endpoint, service_id, since_hours,
-# ...) tuples that fan out across the admin UI's 8-card mount + diverse
-# time windows, so the cardinality climbed unboundedly across hours.
-# 1000 entries × ~50KB scoring payloads = ~50MB worst case — well below
-# the dashboard cache but still worth bounding.
 from backend.utils.bounded_cache import BoundedTTLCache as _BoundedTTLCache
 
+_ANALYTICS_TTL_SEC = 20.0
 _analytics_cache: _BoundedTTLCache = _BoundedTTLCache(maxsize=1000, ttl_seconds=_ANALYTICS_TTL_SEC)
-# Live active-version lookups for the scoring Compute service hit the Fastly
-# API; the status panel polls, so cache the result for 60s per service to avoid
-# a Fastly round-trip on every refresh.
 _scoring_svc_version_cache: _BoundedTTLCache = _BoundedTTLCache(maxsize=256, ttl_seconds=60.0)
-# Cache positive (`True`) preflight-pragma checks for 60s per service; `False`
-# is intentionally not cached so clicking "Check Again" in the prerequisite
-# modal immediately re-probes Fastly's generated VCL.
 _scoring_pragma_cache: _BoundedTTLCache = _BoundedTTLCache(maxsize=256, ttl_seconds=60.0)
-# Global lock guards _analytics_cache + _inflight dict mutations only —
-# the actual `producer()` call runs under a PER-KEY lock so concurrent
-# misses on DIFFERENT keys (the dashboard's 8-card mount pattern) run
-# in parallel instead of queueing through one mutex. The cache's own
-# RLock is held INSIDE this outer lock by way of the bounded-cache
-# implementation; RLock re-entry from the same thread is safe.
 _analytics_cache_lock = threading.Lock()
 _inflight: dict[tuple, threading.Lock] = {}
 
 
 def _finalize_cached(value, *, is_cached: bool) -> object:
-    """Return *value* with `_is_cached` set, gating `_debug_*` on
-    `DEBUG_RESPONSES` so production responses don't leak SQL/URLs.
-
-    Mirrors `backend.models.common.BaseResponse._strip_debug_when_disabled`
-    so endpoints that return plain dicts get the same gating as endpoints
-    that return Pydantic responses. `_is_cached` is always included — it
-    isn't sensitive and downstream verification depends on it.
-    """
+    """Return *value* with `_is_cached` set and `_debug_*` gated on `DEBUG_RESPONSES`."""
     from backend.utils.telemetry import debug_envelope
 
     if not isinstance(value, dict):
@@ -185,54 +122,20 @@ def _finalize_cached(value, *, is_cached: bool) -> object:
 
 
 def _cached(key: tuple, producer):
-    """Return cached value if fresh, else produce + store.
-
-    In-flight collapse: concurrent callers on the SAME key serialize
-    through a per-key lock so the underlying query runs once and the
-    rest get the cached value when they acquire the lock. Concurrent
-    callers on DIFFERENT keys (the dashboard mount fires 8 endpoints
-    with 8 different keys) run in parallel — they only contend on the
-    global lock during the brief cache-lookup + per-key-lock-handoff
-    window.
-
-    Telemetry: snapshots the request-scoped `_QUERIES` / `_CALLS`
-    contextvars (from `backend.utils.telemetry`) before producer() and
-    captures the suffix added during producer(). The captured slice is
-    baked into the stored value under `_debug_queries` / `_debug_calls`
-    so cache hits return the same telemetry that populated the cache,
-    paired with `_is_cached: True` to flag the timings as historical.
-    `_query_logs` (and anything called transitively from a producer)
-    appends to the same shared contextvar via `get_queries()`.
-    """
+    """Return cached value if fresh, else produce + store with per-key in-flight collapse."""
     from backend.utils.telemetry import _CALLS as _telemetry_calls
     from backend.utils.telemetry import get_queries
 
     with _analytics_cache_lock:
-        # Capture `now` INSIDE the lock so the freshness check evaluates
-        # against the lock-acquisition timestamp, not a stale value from
-        # before lock contention drained. A hot key under load can have
-        # 10-50ms of lock-wait — using a pre-lock `now` would flag a
-        # still-fresh entry as expired and trigger an extra producer call.
         now = _time.monotonic()
         entry = _analytics_cache.get(key)
         if entry and (now - entry[0]) < _ANALYTICS_TTL_SEC:
             return _finalize_cached(entry[1], is_cached=True)
-        # Miss — claim the per-key lock under the global lock so two
-        # concurrent misses on the same key don't both create new locks.
         key_lock = _inflight.get(key)
         if key_lock is None:
             key_lock = threading.Lock()
             _inflight[key] = key_lock
 
-    # Hold the per-key lock only. The first miss runs producer(); the
-    # second-through-Nth miss waits here, then sees the cached entry on
-    # the re-check inside the lock and returns it without re-running.
-    #
-    # The try/finally wraps BOTH the cache-hit early-return and the
-    # producer path so _inflight is always dropped, not only on actual
-    # misses. Without it, repeated cache hits would leak one stuck Lock
-    # object per distinct key — bounded by key cardinality but still a
-    # slow accumulation across the TTL window.
     with key_lock:
         try:
             with _analytics_cache_lock:
@@ -240,41 +143,20 @@ def _cached(key: tuple, producer):
                 entry = _analytics_cache.get(key)
                 if entry and (now - entry[0]) < _ANALYTICS_TTL_SEC:
                     return _finalize_cached(entry[1], is_cached=True)
-            # Snapshot telemetry length so we can attribute only producer()'s
-            # additions — middleware-level call tracking already populated
-            # the contextvars before we got here, and we don't want to bake
-            # pre-producer entries into the cached value.
             queries = get_queries()
             calls_initial = _telemetry_calls.get() or []
-            q_start = len(queries)
-            c_start = len(calls_initial)
-            # Actual producer call happens OUTSIDE the global lock so other
-            # keys can be served while this one is computing. Wrap with a
-            # SectionTimer entry so /scoring/dashboard's per-sub-handler
-            # breakdown surfaces in _section_timings — the perf harness
-            # previously saw empty section_timings for the composite and
-            # couldn't attribute which of (scoring-health, scoring-curves,
-            # threshold-preview, top-flagged, …) owned the wall.
+            q_start, c_start = len(queries), len(calls_initial)
             _section_t0 = _time.perf_counter()
             value = producer()
             _section_ms = round((_time.perf_counter() - _section_t0) * 1000, 2)
             queries_after = get_queries()
             calls_after = _telemetry_calls.get() or []
-            # Defensive slice: if downstream code reset the contextvar mid-
-            # producer (start_call_tracking, an explicit clear, etc.) the
-            # suffix index could exceed the current length. Fall back to
-            # the full current list rather than crash on a slice error.
             added_queries = list(queries_after[q_start:] if len(queries_after) >= q_start else queries_after)
             added_calls = list(calls_after[c_start:] if len(calls_after) >= c_start else calls_after)
-            # Bake telemetry into the stored value so cache hits surface
-            # the same shape. `_is_cached` is added at return time, not
-            # stored, so the cached dict carries only stable data.
             if isinstance(value, dict):
                 stored = dict(value)
                 stored.setdefault("_debug_queries", added_queries)
                 stored.setdefault("_debug_calls", added_calls)
-                # Append a producer-scoped timing under the first key
-                # element so the perf harness can rank sub-handlers.
                 section_name = str(key[0]) if key else "scoring:unknown"
                 existing_st = list(stored.get("_section_timings") or [])
                 existing_st.append({"section": section_name, "time_ms": _section_ms})
@@ -282,28 +164,15 @@ def _cached(key: tuple, producer):
             else:
                 stored = value
             with _analytics_cache_lock:
-                # Re-capture now after producer() so the TTL clock starts
-                # from when the value was actually computed, not from when
-                # we entered _cached.
                 _analytics_cache[key] = (_time.monotonic(), stored)
             return _finalize_cached(stored, is_cached=False)
         finally:
             with _analytics_cache_lock:
-                # Drop the per-key lock entry — small saving but bounds the
-                # _inflight dict growth across the long-running TTL window.
                 _inflight.pop(key, None)
 
 
 def _bust_analytics_cache(service_id: str | None = None) -> None:
-    """Drop cached entries. Called by mutating endpoints (label flag/
-    delete) so the admin page sees their effects on next fetch.
-
-    Cache keys are tuples like ``(endpoint_name, service_id, since_hours, ...)``
-    so the service_id lives at index 1, not 0. Earlier code compared
-    ``k[0] == service_id`` which is always the endpoint name — the bust
-    was a silent no-op and label mutations only invalidated via the 20s
-    TTL. Match by membership instead of position so the dedup is correct
-    regardless of future key shape changes."""
+    """Drop cached entries matching ``service_id`` (or all entries when ``None``)."""
     with _analytics_cache_lock:
         if service_id is None:
             _analytics_cache.clear()
@@ -332,29 +201,12 @@ def _read_matrix_file(path, label: str) -> dict | None:
 
 
 def _load_matrix(service_id: str) -> dict | None:
-    """Load the trained L2 transition matrix for ``service_id``.
-
-    Resolution order:
-      1. Tenant-scoped ``compute/scorer/matrix_{sid}.json`` on local disk —
-         the path retrain writes (audit-finding-005 fix) so each service
-         has its own matrix and never shadows another.
-      2. FOS-published copy (``iceberg/meta/scoring_matrix.json``) —
-         pulled by enable_scoring and retrain. Lets any backend host see
-         the same matrix the admin host deployed without per-host scp.
-      3. ``compute/scorer/matrix.default.json`` (always shipped in the
-         image) — empty transitions, AUC will read ~0.5 / "BELOW
-         THRESHOLD" so the StatusPanel pushes the operator to train.
-
-    Returns None only when all three sources fail.
-    """
+    """Load the trained L2 transition matrix (tenant local -> FOS -> bundled default)."""
     from backend.provision.session_scoring_orchestrator import _MATRIX_PATH
 
-    # 1. Tenant-scoped local matrix.
     tenant_path = _tenant_matrix_path(service_id)
     if m := _read_matrix_file(tenant_path, f"local {tenant_path.name}"):
         return m
-
-    # 2. FOS-published matrix.
     try:
         from backend.state_sync import fetch_matrix_from_fos
 
@@ -362,8 +214,6 @@ def _load_matrix(service_id: str) -> dict | None:
             return m
     except Exception:
         logger.debug("[_load_matrix] FOS matrix fetch failed", exc_info=True)
-
-    # 3. Default-empty matrix bundled with the image.
     return _read_matrix_file(_MATRIX_PATH.parent / "matrix.default.json", "default matrix.json")
 
 
@@ -371,17 +221,7 @@ from backend.repositories import session_scoring as _scoring_repo
 
 
 def _isoformat_ts(rows: list[dict], *fields: str) -> list[dict]:
-    """Stringify DuckDB datetime columns (``timestamp`` / ``hour``) via
-    ``.isoformat()`` in place so the typed ``response_model`` can declare them
-    as plain ``str``.
-
-    This keeps the wire bytes byte-identical to the pre-typing output: the old
-    untyped dict responses serialized these datetimes through FastAPI's
-    ``jsonable_encoder``, whose datetime encoder is also ``.isoformat()``.
-    Attaching a response_model would otherwise re-serialize tz-aware datetimes
-    through Pydantic and flip the UTC suffix from ``+00:00`` to ``Z`` on
-    UTC-configured hosts. Strings (test fixtures) and None pass through
-    untouched."""
+    """Stringify DuckDB datetime columns in place via ``.isoformat()``."""
     for r in rows:
         for f in fields:
             v = r.get(f)
@@ -394,16 +234,7 @@ _table_columns_cache: _BoundedTTLCache = _BoundedTTLCache(maxsize=128, ttl_secon
 
 
 def _table_columns(service_id: str) -> set[str]:
-    """Column-name set for a service's logs table, or empty set on error.
-
-    Used to gate optional columns (e.g. the scorer-latency fields
-    ``edge_score_rtt_us`` / ``edge_score_exec_us`` added 2026-06-17) so
-    endpoints degrade gracefully on services that haven't been
-    re-provisioned since the column landed — mirrors the
-    ``if "tcp_rtt" not in cols`` guard in core/rollups/network_rtt.py.
-    A missing/not-yet-ready view returns an empty set (→ omit the
-    columns) rather than 500-ing the whole card.
-    """
+    """Column-name set for a service's logs table, or empty set on error."""
     import os as _os
 
     from backend.core.duckdb import _safe_table_name
@@ -425,41 +256,19 @@ def _table_columns(service_id: str) -> set[str]:
     return cols
 
 
-# Synthesize-missing-scoring-columns helper lives in the repository (the
-# canonical home, since this module imports the repo and not vice-versa) so
-# the per-endpoint queries here and the per-sid event hydration in
-# fetch_session_events share ONE definition of the column contract. Aliased
-# back into this module's namespace so the call sites below (and the tests)
-# read as a local helper. See repo docstring for the why.
 _scoring_source = _scoring_repo.scoring_source
-
-
 _RECONSTRUCT_CACHE_TTL = 5.0
 _reconstruct_labeled_sessions_cache: _BoundedTTLCache = _BoundedTTLCache(maxsize=64, ttl_seconds=_RECONSTRUCT_CACHE_TTL)
 
 
 def _labels_fingerprint(labels: list[dict]) -> str:
-    """Stable hash of (label.id, label.label) tuples for cache keying.
-
-    The reconstruct call always receives the FULL label list for a
-    service (every caller pulls it via ``_labels.list_labels(service_id)``
-    first). So a content hash here scopes the cache hit to "same
-    label set" — a mutation that changes either the label values
-    or the underlying label rows busts the cache on the next call.
-    """
+    """Stable hash of (label.id, label.label) tuples for cache keying."""
     pairs = sorted((str(lbl.get("id", "")), str(lbl.get("label", ""))) for lbl in labels)
     return hashlib.sha256(json.dumps(pairs, separators=(",", ":")).encode()).hexdigest()
 
 
 def _reconstruct_labeled_sessions(service_id: str, labels: list[dict]) -> list[tuple[dict, str]]:
-    """Reconstruct labeled-session tuples for ``service_id``.
-
-    Result cached for ``_RECONSTRUCT_CACHE_TTL`` seconds keyed on the
-    label-set fingerprint. The scoring_dashboard composite calls this
-    helper 3-4 times in a single request (one each for evaluation,
-    evaluation_per_reason, scoring_curves) — without the cache those
-    each pay the same ~370-499 ms DuckDB GROUP BY edge_sid scan.
-    """
+    """Reconstruct labeled-session tuples for ``service_id`` (cached by label fingerprint)."""
     fp = _labels_fingerprint(labels)
     cache_key = (service_id, fp)
     cached = _reconstruct_labeled_sessions_cache.get(cache_key)
@@ -629,27 +438,7 @@ def scoring_analytics_composite(
     service_id: str = Path(..., description="Logging service ID"),
     since_hours: int = Query(default=24, ge=1, le=168),
 ) -> dict:
-    """Composite of the analytics endpoints
-    (top-flagged, score-distribution, compliance-breakdown,
-    latency-timeseries, health, evaluation, evaluation/per-reason) into a
-    single round-trip. Each is already individually cached via `_cached` so
-    repeated composite calls within the 20s TTL collapse to dict
-    lookups; the composite primarily saves the per-request HTTP +
-    auth-middleware overhead that the 7-card admin_session_scoring
-    page paid on cold mount.
-
-    Granular endpoints unchanged — frontend swap to use the composite
-    is a separate commit so the per-card endpoints remain a rollback
-    target.
-
-    Analyst-vs-admin gate: the direct ``/evaluation/per-reason`` endpoint
-    is admin-only via ``_ANALYST_BLOCKED_SCORING_SUFFIXES``. The composite
-    therefore mirrors the gate at the data layer — analysts get the four
-    analyst-safe sub-results; admins get all six. Without this, the path-
-    suffix block was bypassable by routing through ``/scoring/analytics``.
-    """
-    # Cast params to plain ints — FastAPI resolves Query() objects when
-    # called via HTTP, but direct Python calls receive the Query wrapper.
+    """Composite of the analytics endpoints into a single round-trip."""
     _enforce_scoring_service_scope(request, service_id)
     sh = int(since_hours)
 
@@ -682,6 +471,19 @@ def scoring_config_composite(
     }
 
 
+def _cached_fastly_probe(cache: _BoundedTTLCache, key: str, fn, log_label: str, *, cache_if=lambda v: v is not None):
+    val = cache.get(key)
+    if val is None:
+        try:
+            val = fn()
+        except Exception:  # pragma: no cover - defensive
+            logger.warning("[scoring-status] %s failed for %s", log_label, key, exc_info=True)
+            val = None
+        if cache_if(val):
+            cache[key] = val
+    return val
+
+
 @router.get(
     "/{service_id}/scoring/status",
     response_model=ScoringStatusResponse,
@@ -691,66 +493,43 @@ def scoring_config_composite(
 def scoring_status(
     service_id: str = Path(..., description="Logging service ID"),
 ) -> dict:
-    """Return the scoring block from the service's config, or
-    {"enabled": false} if scoring was never enabled."""
+    """Return the scoring block from the service's config, or {"enabled": false}."""
     cfg = load_service_config(service_id)
     scoring = cfg.get("scoring")
+    token = stored_fastly_token(cfg)
     if not scoring or not scoring.get("enabled"):
         result: dict = {"enabled": False}
-        token = stored_fastly_token(cfg)
         if token:
-            ready = _scoring_pragma_cache.get(service_id)
-            if ready is None:
-                from backend.provision.fastly_api import service_has_scoring_pragmas
+            from backend.provision.fastly_api import service_has_scoring_pragmas
 
-                try:
-                    ready = service_has_scoring_pragmas(service_id, token)
-                except Exception:  # pragma: no cover - defensive
-                    logger.warning("[scoring-status] pragma check failed for %s", service_id, exc_info=True)
-                    ready = None
-                if ready is True:
-                    _scoring_pragma_cache[service_id] = True
+            ready = _cached_fastly_probe(
+                _scoring_pragma_cache,
+                service_id,
+                lambda: service_has_scoring_pragmas(service_id, token),
+                "pragma check",
+                cache_if=lambda v: v is True,
+            )
             if ready is not None:
                 result["preflight_pragmas_ready"] = ready
         return result
     result = _safe_scoring_dict(scoring)
 
-    # Best-effort: surface the scoring Compute service's LIVE active version +
-    # the time it was activated, so operators can confirm exactly what's
-    # deployed at the edge (the runbook's "redeploy timestamp"). Cached 60s per
-    # service so the polled status panel doesn't hit Fastly every refresh, and
-    # never breaks the status page if the Fastly call fails.
     scoring_svc = scoring.get("scoring_service_id")
-    token = stored_fastly_token(cfg)
     if scoring_svc and token:
-        info = _scoring_svc_version_cache.get(scoring_svc)
-        if info is None:
-            from backend.core.fastly.client import get_active_version_info
+        from backend.core.fastly.client import get_active_version_info
 
-            try:
-                info = get_active_version_info(scoring_svc, token)
-            except Exception:  # pragma: no cover - defensive; helper already swallows RuntimeError
-                logger.warning("[scoring-status] active-version lookup failed for %s", scoring_svc, exc_info=True)
-                info = None
-            if info is not None:
-                _scoring_svc_version_cache[scoring_svc] = info
+        info = _cached_fastly_probe(
+            _scoring_svc_version_cache,
+            scoring_svc,
+            lambda: get_active_version_info(scoring_svc, token),
+            "active-version lookup",
+        )
         if info:
             result["scoring_active_version"] = info.get("number")
             result["scoring_activated_at"] = info.get("updated_at")
 
-    # Edge drift: does the scorer build the backend would deploy *now* differ
-    # from what was last pushed to the edge? Compares the committed Wasm package
-    # sha + VCL generator fingerprint against the stamps written at the last
-    # enable. Local-only (no Fastly call) and best-effort — a hash failure must
-    # never break the status panel. An absent stamp (service enabled before this
-    # shipped) means "unknown" → no drift; the first redeploy stamps it.
     result["scorer_drift"] = False
     result["drift_detail"] = None
-    # drift_known is False when this service was enabled BEFORE drift stamping
-    # shipped (cfg.scoring has no deployed_package_sha / deployed_vcl_sha), so
-    # drift reads as "unknown" rather than a confident "no drift". The UI uses
-    # this to show a soft "redeploy once to baseline drift detection" hint
-    # instead of silently showing nothing. The first redeploy stamps both.
     result["drift_known"] = bool(scoring.get("deployed_package_sha")) and bool(scoring.get("deployed_vcl_sha"))
     try:
         from backend.provision.session_scoring_orchestrator import shipped_scorer_identity
@@ -772,10 +551,6 @@ def scoring_status(
 
 # ── Labels (good / bad / neutral session tags) ──────────────────────────────
 
-# Fields on a scoring-label row that carry per-session PII or operator-only
-# attribution. Analyst responses must NOT include these — labels are designed
-# as ML training metadata, not as an analyst-visible per-session view. The
-# admin path (no analyst_session on request.state) returns the full row.
 _LABEL_PII_FIELDS = frozenset({"notes", "flagged_by", "sample_ip", "sample_ua", "sample_url"})
 
 
@@ -790,16 +565,7 @@ def _is_analyst_request(request: Request) -> bool:
 
 
 def _strip_pii_fields_for_analyst(request: Request, body) -> None:
-    """Neutralize operator-attribution / PII fields on a label write body.
-
-    The read path already projects ``_LABEL_PII_FIELDS`` out of analyst
-    responses, but the WRITE path (create / update) passed analyst-supplied
-    ``notes`` / ``flagged_by`` / ``sample_*`` straight to persistence — so an
-    analyst could spoof attribution or inject PII. For analyst requests we
-    reset each of those fields back to its model default before save, so the
-    operation still succeeds but the restricted fields can't be written.
-    Admin (loopback) requests are unaffected.
-    """
+    """Neutralize operator-attribution / PII fields on a label write body for analysts."""
     if not _is_analyst_request(request):
         return
     fields = type(body).model_fields
@@ -809,26 +575,12 @@ def _strip_pii_fields_for_analyst(request: Request, body) -> None:
 
 
 def _finalize_label_write(request: Request, service_id: str, row: dict) -> dict:
-    # Bust analytics cache so the next /top-flagged shows the new badge.
     _bust_analytics_cache(service_id)
     return _project_label_for_analyst(row) if _is_analyst_request(request) else row
 
 
 def _scoring_time_window(request: Request, since_hours: int) -> tuple[str, str | None]:
-    """SQL timestamp predicate for the ``[now-since_hours, now]`` window,
-    clamped to the analyst's allowed window.
-
-    Returns ``(predicate_sql, cache_discriminator)``:
-
-      * Admin (no analyst session) → relative ``now() - INTERVAL n HOUR``
-        predicate; discriminator ``None`` so the admin/composite shares one
-        cache entry as before.
-      * Analyst → an absolute ``[start, end)`` predicate clamped to the invite
-        window via ``clamp_or_400`` (raises 400 if the request falls entirely
-        outside it), plus a discriminator so a scoped result can never read the
-        admin / wider-window cache entry for the same key. The since_hours
-        ``Query(le=168)`` bound still caps the absolute width.
-    """
+    """SQL timestamp predicate for ``[now-since_hours, now]``, clamped to the analyst's window."""
     since_hours = int(since_hours)
     session = getattr(request.state, "analyst_session", None)
     if session is None:
@@ -877,11 +629,6 @@ def scoring_labels_create(
 
     require_service_in_scope(request, service_id)
     _strip_pii_fields_for_analyst(request, body)
-    # save_label() itself validates sid + label and raises ValueError
-    # with the same messages; the try/except below converts that into
-    # HTTPException(400). Keeping the validation in one place (the
-    # CRUD module) means in-process callers — not just HTTP — get the
-    # same protection.
     try:
         row = _labels.save_label(
             service_id,
@@ -935,30 +682,16 @@ def scoring_labels_delete(
     service_id: str = Path(...),
     label_id: str = Path(...),
 ) -> dict:
-    """Delete a session label.
-
-    Security: gated on the analyst's service-scope set so an analyst
-    invited to ``svc-A`` cannot DELETE ``svc-B``'s labels via the
-    cross-tenant pattern ``DELETE /api/services/svc-B/scoring/labels/...``.
-    Admin (loopback) bypasses the check — ``analyst_allowed_services``
-    returns ``None`` there. This is defense-in-depth for the admin gate
-    documented in the audit (loopback-only, not token-gated).
-    """
+    """Delete a session label (gated on the caller's service scope)."""
     from backend.scoring import labels as _labels
 
     require_service_in_scope(request, service_id)
-
     result = _labels.delete_label(service_id, label_id)
     _bust_analytics_cache(service_id)
     return result
 
 
 # ── Summary queries (top-flagged, distributions) ────────────────────────────
-#
-# SQL execution lives in backend/repositories/session_scoring.py (imported
-# above as _query_logs / _fetch_session_events / _reconstruct_labeled_sessions).
-# Route handlers build SQL strings (table-name validated via
-# _safe_table_name) and delegate execution + telemetry attribution there.
 
 
 def _prepare_scoring_query(
@@ -995,18 +728,8 @@ def scoring_top_flagged(
     since_hours: int = Query(default=24, ge=1, le=168),
     limit: int = Query(default=50, ge=1, le=500),
 ) -> dict:
-    """Recent rows with non-null edge_score, sorted by score DESC. Feeds
-    the admin page's "Top flagged sessions" table.
-
-    Returns up to ``limit`` rows. Each row carries enough context for the
-    admin to label it: sid, ip, ua, url, the three score fields, and
-    cookie_compliance. Joining against the labels table is left to the
-    UI (so it can show "currently labeled X" badges without paying the
-    JOIN cost server-side)."""
+    """Recent rows with non-null edge_score, sorted by score DESC."""
     src, _cols, ts_pred, win_disc = _prepare_scoring_query(request, service_id, since_hours)
-    # ``ip`` is masked for analysts by the response middleware's key-name
-    # pass (the column is literally ``ip``); ``ua`` / ``url`` are left intact
-    # because analysts triage flagged sessions on them.
     return _cached_scoring_rows(
         ("top-flagged", service_id, since_hours, limit, win_disc),
         since_hours,
@@ -1025,9 +748,7 @@ def scoring_score_distribution(
     service_id: str = Path(...),
     since_hours: int = Query(default=24, ge=1, le=168),
 ) -> dict:
-    """Hourly buckets × score buckets (0, 25, 50, 75, 100). Returns a flat
-    list of {hour, bucket, count} rows; the frontend pivots for the
-    histogram."""
+    """Hourly buckets × score buckets (0, 25, 50, 75, 100)."""
     src, _cols, ts_pred, win_disc = _prepare_scoring_query(request, service_id, since_hours)
     return _cached_scoring_rows(
         ("score-distribution", service_id, since_hours, win_disc),
@@ -1046,8 +767,7 @@ def scoring_compliance_breakdown(
     service_id: str = Path(...),
     since_hours: int = Query(default=24, ge=1, le=168),
 ) -> dict:
-    """Hourly count grouped by edge_cookie_compliance (ok / missing /
-    tampered / expired / unknown)."""
+    """Hourly count grouped by edge_cookie_compliance."""
     src, _cols, ts_pred, win_disc = _prepare_scoring_query(request, service_id, since_hours)
     return _cached_scoring_rows(
         ("compliance-breakdown", service_id, since_hours, win_disc),
@@ -1066,33 +786,10 @@ def scoring_latency_timeseries(
     service_id: str = Path(...),
     since_hours: int = Query(default=24, ge=1, le=168),
 ) -> dict:
-    """Time-series of scorer latency + fail-open errors.
-
-    One row per bucket with: ``scored_count``, ``fail_open_count``
-    (compute-unavailable-* — the scorer's 401-unauthorized lands here as
-    compute-unavailable-401 once VCL rewrites the non-200; there is no bare
-    "unauthorized" log reason, EC-05), and — when the latency columns
-    exist — ``rtt_p50/p95/p99_us`` (edge round-trip) and
-    ``exec_p50/p95_us`` (Wasm exec). The fail-open series works on any
-    enabled service; the latency series fills in once the service has been
-    re-provisioned with the latency fields. Powers ScorerLatencyChart +
-    ScorerErrorsChart on the session-scoring admin page. ``has_latency``
-    tells the chart whether to render the latency axis.
-
-    Bucket granularity adapts to the window: a 1-hour window bucketed
-    hourly collapses to a single bar, so short windows (``since_hours <= 1``)
-    bucket by MINUTE; everything wider stays hourly. The bucket column keeps
-    the ``hour`` alias (it's a timestamp the chart plots on a date axis
-    regardless of width), and ``granularity`` ("minute"|"hour") is returned
-    so the UI can label the axis.
-    """
+    """Time-series of scorer latency + fail-open errors (minute buckets for <=1h, hourly otherwise)."""
     src, cols, ts_pred, win_disc = _prepare_scoring_query(request, service_id, since_hours)
     has_rtt = "edge_score_rtt_us" in cols
     has_exec = "edge_score_exec_us" in cols
-
-    # A 1h window at hourly granularity is one bar; drop to minute buckets for
-    # short windows so the chart is actually a time-series. Whitelisted literal
-    # (never interpolated from user input) so it's safe in the f-string SQL.
     bucket = "minute" if int(since_hours) <= 1 else "hour"
 
     return _cached_scoring_rows(
@@ -1110,20 +807,7 @@ def scoring_health(
     service_id: str = Path(...),
     since_hours: int = Query(default=24, ge=1, le=168),
 ) -> dict:
-    """High-level scoring health snapshot for the admin dashboard.
-
-    Returns a single object with the metrics the operator wants at a
-    glance: how often scoring fires vs how much edge traffic flows, what
-    the score distribution looks like as summary stats (mean / p50 / p95),
-    a top-N breakdown of the comma-separated edge_score_reason values
-    (so 'cookie-missing' vs 'impossibly-fast' vs 'rare-transition' is
-    visible without opening the Raw Logs table), and a fail-open error
-    count (rows where the scorer's deliver-stage subfields didn't land —
-    typically a Compute timeout or auth mismatch).
-    """
-    # Scorer-latency columns are optional (present only after a service is
-    # re-provisioned post-2026-06-17). Detect them so the query degrades to
-    # the pre-latency shape on older services instead of a binder error.
+    """High-level scoring health snapshot for the admin dashboard."""
     src, cols, ts_pred, win_disc = _prepare_scoring_query(request, service_id, since_hours)
     has_rtt = "edge_score_rtt_us" in cols
     has_exec = "edge_score_exec_us" in cols
@@ -1137,17 +821,8 @@ def scoring_health(
         l2_evaluated = int(row.get("l2_evaluated") or 0)
         l2_high = int(row.get("l2_high_count") or 0)
         l2_high_pct = (l2_high / l2_evaluated * 100.0) if l2_evaluated else 0.0
-        # Heuristic staleness band: research §7.5 calls it 3× the
-        # baseline. We don't have a stored baseline yet, so flag any
-        # window where MORE THAN 25% of L2-evaluated requests scored
-        # high — that's the "the matrix doesn't know what normal looks
-        # like anymore" threshold. UI surfaces this as a yellow chip
-        # with a "Retrain now?" hint.
         matrix_stale = l2_evaluated >= 100 and l2_high_pct > 25.0
 
-        # Scorer-latency snapshot (µs). Present only when the columns exist
-        # AND at least one row carries a value; ``available=False`` tells
-        # the UI to hide the tile (older service, or no scored traffic yet).
         latency = {
             "available": has_rtt or has_exec,
             **{
@@ -1155,17 +830,7 @@ def scoring_health(
                 for k in ("rtt_p50_us", "rtt_p95_us", "rtt_p99_us", "rtt_max_us", "exec_p50_us", "exec_p95_us")
             },
         }
-
-        # L2-enforcement opt-in + deployment-age readiness gauge. Admin-only —
-        # it reads the scoring_config ConfigStore (and the consuming card is
-        # admin); analysts get None so the analyst-safe health composite stays a
-        # pure DuckDB read. Best-effort + separately cached, so it can never
-        # break this response. "What L2 would flag" is already surfaced above as
-        # matrix_staleness.l2_high_pct — the UI reuses it rather than recomputing.
-        l2_enforce = None
-        if not _is_analyst_request(request):
-            l2_enforce = l2_enforce_readiness_block(service_id)
-
+        l2_enforce = None if _is_analyst_request(request) else l2_enforce_readiness_block(service_id)
         scorer_errors = int(row.get("scorer_errors") or 0)
         return {
             "since_hours": since_hours,
@@ -1178,10 +843,6 @@ def scoring_health(
             "p95_score": float(row.get("p95_score") or 0),
             "max_score": int(row.get("max_score") or 0),
             "scorer_errors": scorer_errors,
-            # SRE-15: traffic-normalized fail-open rate. The bare count above
-            # rises with request volume, so a fixed count threshold cries wolf
-            # under load and stays silent on a low-traffic spike; the rate is
-            # the stable spike-arm the UI tones on.
             "fail_open_rate_pct": round(scorer_errors / total * 100.0, 2) if total else 0.0,
             "top_reasons": row.get("top_reasons") or [],
             "fail_open_breakdown": row.get("fail_open_breakdown") or [],
@@ -1201,11 +862,6 @@ def scoring_health(
 
 # ── Matrix quality (ROC-AUC against accumulated labels) ─────────────────────
 
-
-# Below this many of EACH class (good / bad), AUC is too noisy to be a
-# useful signal — surface a "need more labels" CTA instead so the operator
-# isn't tempted to act on a 0.5 ± wildly-bouncing number from sub-3
-# samples.
 _MIN_LABELS_PER_CLASS = 3
 
 
@@ -1223,31 +879,11 @@ def scoring_evaluation(
     service_id: str = Path(...),
     request: Request = None,  # type: ignore[assignment]
 ) -> dict:
-    """Compute the live matrix's ROC-AUC against the operator's accumulated
-    good/bad labels and return the result for the StatusPanel.
-
-    Below the per-class minimum (3 each) the endpoint reports
-    ``has_min_samples: false`` and the StatusPanel renders a CTA pushing
-    the operator to label a few more sessions — sub-3 AUC bounces between
-    0 and 1 on a single label flip and would erode trust in the metric.
-
-    Wiring:
-      1. Pull all labels for the service from SQLite (cheap; <10k rows).
-      2. Reconstruct each labeled sid's event sequence from DuckDB.
-      3. Load the trained matrix JSON.
-      4. Run evaluate() — AUC via Mann-Whitney U, no scipy dependency.
-
-    Cached for 20s under the existing _cached pattern; the key includes
-    the label count so a fresh label naturally invalidates the cache
-    (also, _bust_analytics_cache fires on label POST/PATCH/DELETE).
-    """
+    """Compute the live matrix's ROC-AUC against accumulated good/bad labels."""
     from backend.scoring import labels as _labels
 
     _enforce_scoring_service_scope(request, service_id)
     n_good, n_bad, n_neutral = _label_counts(service_id)
-
-    # The cache key includes the label count so a new label invalidates
-    # the previous snapshot even if the explicit cache bust were to miss.
     cache_key = ("scoring-evaluation", service_id, n_good, n_bad, n_neutral)
 
     def _produce() -> dict:
@@ -1275,21 +911,10 @@ def scoring_evaluation(
 
         label_rows = _labels.list_labels(service_id)
         labeled_sessions = _reconstruct_labeled_sessions(service_id, label_rows)
-        # If most labeled sids haven't landed in DuckDB yet (fresh label
-        # → ingest lag), evaluate against what we have but flag the gap.
         n_reconstructed = len(labeled_sessions)
         from backend.scoring.evaluate import DEFAULT_MIN_AUC, evaluate_from_persisted_scores
 
-        # Use persisted edge_score (L1+L2+compliance combined, what the
-        # live scorer actually returned) rather than recomputing L2 from
-        # events. Without this, single-URL bot probes ALWAYS score 0
-        # (no transitions), which inverts AUC against any matrix the
-        # bots' cookie-missing flag would have caught at the edge.
         result = evaluate_from_persisted_scores(labeled_sessions)
-        # Prefer the matrix file's own `version` over whatever's in the
-        # cfg — the cfg version tracks what's DEPLOYED to Wasm, the
-        # matrix file tracks what was last trained. AUC is computed
-        # against the trained matrix, so its version is the relevant one.
         effective_version = matrix.get("version") or matrix_version
         return {
             "has_min_samples": True,
@@ -1317,24 +942,7 @@ def scoring_curves(
     service_id: str = Path(...),
     request: Request = None,  # type: ignore[assignment]
 ) -> dict:
-    """ROC + PR curve points for the operator's labeled sessions.
-
-    Walks every integer threshold 0..100 and computes:
-      ROC: (false_positive_rate, true_positive_rate) at that cutoff
-      PR:  (recall, precision) at that cutoff
-
-    Plus the scalar summaries (AUC = area under ROC; AP = average
-    precision = area under PR). Both areas use the trapezoidal rule
-    on the sorted threshold sweep.
-
-    Returns has_min_samples=false when either class has <3 labels —
-    same gate as /scoring/evaluation — so the UI renders the "label
-    more sessions" CTA instead of a noisy curve.
-
-    Cached under the existing ``_cached`` TTL with a label-count-aware
-    key so a fresh label POST invalidates correctly via the regular
-    cache-miss path (n_good/n_bad change → new key).
-    """
+    """ROC + PR curve points for the operator's labeled sessions across thresholds 0..100."""
     from backend.scoring import labels as _labels
 
     _enforce_scoring_service_scope(request, service_id)
@@ -1346,9 +954,6 @@ def scoring_curves(
             return min_check
 
         label_rows = _labels.list_labels(service_id)
-        # Reconstruct labeled sessions and extract their max persisted scores.
-        # Same path the AUC endpoint uses, so the curve is consistent with
-        # the headline AUC number.
         labeled_sessions = _reconstruct_labeled_sessions(service_id, label_rows)
         scored = [
             (int(score), label)
@@ -1370,21 +975,15 @@ def scoring_curves(
 
         roc: list[dict] = []
         pr: list[dict] = []
-        # Walk thresholds from 100 down to 0 so the ROC curve traces from
-        # origin (0,0) toward (1,1) as we lower the cutoff. Each integer
-        # threshold is a separate operating point; sub-integer resolution
-        # isn't useful since the live scorer emits int 0-100.
         for t in range(100, -1, -1):
             tp = sum(1 for s, lbl in scored if lbl == "bad" and s >= t)
             fp = sum(1 for s, lbl in scored if lbl == "good" and s >= t)
             tpr = tp / total_pos if total_pos else 0.0
             fpr = fp / total_neg if total_neg else 0.0
-            precision = (tp / (tp + fp)) if (tp + fp) else 1.0  # convention: empty flagged set → precision 1
+            precision = (tp / (tp + fp)) if (tp + fp) else 1.0
             roc.append({"threshold": t, "fpr": round(fpr, 4), "tpr": round(tpr, 4)})
             pr.append({"threshold": t, "precision": round(precision, 4), "recall": round(tpr, 4)})
 
-        # AUC via trapezoidal integration over the ROC points (sorted by
-        # fpr ascending). AP same idea over PR.
         def _trapz(points: list[tuple[float, float]]) -> float:
             pts = sorted(points, key=lambda p: p[0])
             return sum((pts[i][0] - pts[i - 1][0]) * (pts[i - 1][1] + pts[i][1]) / 2.0 for i in range(1, len(pts)))
@@ -1421,52 +1020,15 @@ def scoring_threshold_preview(
     threshold: int = Query(default=75, ge=0, le=100),
     since_hours: int = Query(default=24, ge=1, le=168),
 ) -> dict:
-    """Preview what happens at a given enforcement threshold.
-
-    For the last ``since_hours`` of edge traffic, count:
-      - total scored requests
-      - how many would be flagged (edge_score >= threshold)
-      - of those, how many are labeled good / bad / unlabeled
-      - same breakdown for the un-flagged tail
-
-    This is the underlying data for the operator-facing slider: drag
-    threshold up → fewer flags but you start missing labeled-bad
-    sessions; drag down → catches more bad but also flags some labeled-
-    good (false positives). The 2x2 confusion matrix readout is enough
-    to eyeball the right cutoff.
-
-    Cached 30s under the existing ``_cached`` pattern; the cache key
-    includes the threshold so dragging the slider re-fetches.
-    """
+    """Preview flagged vs passed confusion counts at a given enforcement threshold."""
     from backend.scoring import labels as _labels
 
     src, _cols, ts_pred, win_disc = _prepare_scoring_query(request, service_id, since_hours)
     threshold_int = int(threshold)
 
     def _produce() -> dict:
-        # Build the label index in Python — small (≤10k labels) and
-        # avoids a JOIN against SQLite (which would need ATTACH overhead).
         label_rows = _labels.list_labels(service_id)
         sid_to_label = {row["sid"]: row["label"] for row in label_rows if row.get("sid")}
-
-        # 009: push the bucketing into SQL so a service with millions of
-        # distinct edge_sids in the window can't OOM the backend. The
-        # old shape materialised one Python dict per sid before doing
-        # any bucketing; for a high-traffic service that's a few
-        # gigabytes of dicts.
-        #
-        # Single CTE pass: sid_scores enumerates one row per edge_sid;
-        # a labels-VALUES clause carries the (sid, label) pairs; a
-        # LEFT JOIN tags scores with their label (NULL when unlabeled).
-        # One SELECT then emits the six bucket counts. The previous
-        # two-query shape scanned the base table twice (once for the
-        # aggregate, once for the labeled-sid filter); a single CTE +
-        # hash-join over the same scan halves the cold per-call wait
-        # (~523 ms p95 → ~280 ms).
-        #
-        # When no labels exist yet, the LEFT JOIN simplifies to a
-        # no-op and the SELECT degenerates to the aggregate-only path
-        # — handled by the separate branch below.
         labeled_pairs = [(s, lbl) for s, lbl in sid_to_label.items() if s]
         counts_row = _scoring_repo.threshold_preview_counts(service_id, src, ts_pred, threshold_int, labeled_pairs)
         total = int(counts_row.get("total") or 0)
@@ -1478,15 +1040,9 @@ def scoring_threshold_preview(
             else (0, 0, 0, 0)
         )
 
-        # Unlabeled buckets fall out by subtraction — every flagged/passed
-        # sid that didn't match a label-row is unlabeled.
         flagged_unlabeled = max(0, flagged_total - (flagged_good + flagged_bad))
         passed_unlabeled = max(0, passed_total - (passed_good + passed_bad))
         flagged = flagged_good + flagged_bad + flagged_unlabeled
-        # Operator-friendly precision/recall against the labels we DO
-        # have. precision = bad-among-flagged / flagged-labeled-total.
-        # recall = bad-flagged / bad-total. Both are None when the
-        # denominator is zero (which happens early in label collection).
         flagged_labeled = flagged_good + flagged_bad
         all_labeled_bad = flagged_bad + passed_bad
         precision = (flagged_bad / flagged_labeled) if flagged_labeled else None
@@ -1502,7 +1058,6 @@ def scoring_threshold_preview(
             "recall": round(recall, 4) if recall is not None else None,
         }
 
-    # Label-count-aware cache key so a new label invalidates correctly.
     n_good, n_bad, _ = _label_counts(service_id)
     return _cached(("threshold-preview", service_id, threshold_int, since_hours, n_good + n_bad, win_disc), _produce)
 
@@ -1512,36 +1067,14 @@ def scoring_threshold_preview(
 _L2_ENABLED_AT_KEY = "l2_enabled_at"
 _L2_ENFORCE_ENABLED_KEY = "l2_enforce_enabled"
 _fetch_session_events = _scoring_repo.fetch_session_events
-
-# ── module-private constants ──────────────────────────────────────────────────
-
 _ENFORCE_THRESHOLD_KEY = "enforce_threshold"
 
-# Process-local TTL cache for the scoring-config ConfigStore reads. The
-# ``/scoring/enforce-threshold`` GET fires on every /admin/session-scoring
-# mount and costs ~200-460 ms per call (Fastly ConfigStore round-trip) per
-# the perf audit. 30 s TTL keeps repeated panel-refreshes / tab-toggles
-# cheap without making the operator wait long after their own PUT — and
-# the PUT counterpart busts the cache anyway so write-then-read is instant.
 from backend.utils.bounded_cache import BoundedTTLCache as _BoundedTTLCache
 
 _ENFORCE_THRESHOLD_CACHE_TTL = 300.0
 _enforce_threshold_cache: _BoundedTTLCache = _BoundedTTLCache(maxsize=512, ttl_seconds=_ENFORCE_THRESHOLD_CACHE_TTL)
-
-# ── L2 enforcement opt-in (mirrors the Rust scorer's scoring_config gate) ─────
-#
-# L2's contribution to the *enforced* combined score is gated by an explicit
-# operator opt-in (l2_enforce_enabled) and fades in over _L2_RAMP_DAYS from the
-# l2_enabled_at anchor — NOT from deployment age. The 7-day deployment age is now
-# only an advisory readiness gauge. These mirror the Rust constants in
-# compute/scorer/src/scorer.rs (L2_RAMP_DAYS) + the day-7 readiness band.
 _L2_RAMP_DAYS = 3.0
 _L2_READINESS_DAYS = 7.0
-# Process-local TTL cache for the L2-enforce ConfigStore reads (same pattern +
-# TTL as the enforce-threshold cache). Shared by the GET endpoint AND the
-# scoring_health readiness block, so a cold admin mount makes at most one Fastly
-# round-trip per TTL regardless of which path warms it; the PUT busts it for an
-# accurate read-after-write.
 _l2_enforce_cache: _BoundedTTLCache = _BoundedTTLCache(maxsize=512, ttl_seconds=_ENFORCE_THRESHOLD_CACHE_TTL)
 
 
@@ -1554,9 +1087,7 @@ def _l2_parse_epoch(raw: str | None) -> int | None:
 
 
 def _l2_enforce_unavailable() -> dict:
-    """The L2-enforce/readiness block when it can't be read (scoring not enabled,
-    no token, or an unreachable ConfigStore). All-off / not-ready so the UI
-    degrades to a safe inert state instead of erroring."""
+    """Inert L2-enforce/readiness block returned when ConfigStore state is unavailable."""
     return {
         "available": False,
         "enabled": False,
@@ -1580,25 +1111,17 @@ def _build_l2_enforce_block(
     l2_enabled_at_raw: str | None,
     now_epoch: int,
 ) -> dict:
-    """Pure builder for the L2-enforce/readiness block from the three raw
-    ConfigStore values + a fixed ``now`` (epoch seconds). Mirrors the Rust
-    scorer's gate: ``enabled`` iff ``l2_enforce_enabled`` trims to "1"; the
-    fade-in age comes from ``l2_enabled_at`` (the opt-in anchor), NOT deployment
-    age; ``scoring_enabled_at`` drives only the advisory readiness gauge. Kept
-    side-effect-free so the ramp math is unit-testable directly."""
+    """Pure builder for the L2-enforce/readiness block from raw ConfigStore values."""
     enabled = (l2_enforce_raw or "").strip() == "1"
     scoring_enabled_at = _l2_parse_epoch(scoring_enabled_at_raw)
     l2_enabled_at = _l2_parse_epoch(l2_enabled_at_raw)
 
-    # Advisory deployment-age readiness gauge (never an actuator).
     deployment_age_days: float | None = None
     ready = False
     if scoring_enabled_at is not None:
         deployment_age_days = max(0.0, (now_epoch - scoring_enabled_at) / 86_400.0)
         ready = deployment_age_days >= _L2_READINESS_DAYS
 
-    # Opt-in fade-in — only meaningful once the anchor exists. A future anchor
-    # (clock skew) clamps to 0.0, mirroring the scorer's load_l2_days_since_optin.
     days_since_optin: float | None = None
     ramp_progress = 0.0
     fully_ramped = False
@@ -1627,9 +1150,7 @@ def _build_l2_enforce_block(
 
 
 def _l2_get_item(config_store_id: str, key: str, token: str) -> str:
-    """GET one scoring_config item value; "" when the key is absent (404).
-    Re-raises any other RuntimeError so a real Fastly outage surfaces (the GET
-    endpoint maps it to 502; the best-effort readiness path swallows it)."""
+    """GET one scoring_config item value; '' when the key is absent (404)."""
     from backend.core.fastly.client import fastly
 
     try:
@@ -1642,9 +1163,7 @@ def _l2_get_item(config_store_id: str, key: str, token: str) -> str:
 
 
 def _read_l2_enforce_state(service_id: str, config_store_id: str, token: str) -> dict:
-    """Cached read+build of the L2-enforce/readiness block (mirrors the
-    enforce-threshold GET cache). Assumes ``config_store_id`` + ``token`` are
-    already resolved. Caches only successful reads under ``(service_id, store)``."""
+    """Cached read+build of the L2-enforce/readiness block under (service_id, store)."""
     import datetime as _dt
 
     cache_key = (service_id, config_store_id)
@@ -1704,10 +1223,7 @@ def _push_matrix_to_kv_if_configured(service_id: str, cfg: dict | None, matrix_d
 
 
 def l2_enforce_readiness_block(service_id: str) -> dict:
-    """Best-effort L2-enforce/readiness block for the scoring_health composite.
-    Degrades to the unavailable block on any missing-config / no-token / Fastly
-    error so it can never break the (DuckDB-driven) health response. Called from
-    ``scoring_health`` for admin requests only."""
+    """Best-effort L2-enforce/readiness block for the scoring_health composite."""
     _cfg, scoring = _load_scoring_cfg(service_id)
     config_store_id = scoring.get("scoring_config_store_id")
     if not config_store_id:
@@ -1732,25 +1248,7 @@ def scoring_retrain(
     since_days: int = Query(default=7, ge=1, le=90, description="Window of DuckDB traffic to train on"),
     version: str | None = Query(default=None, description="Override matrix version label; defaults to today's date"),
 ) -> dict:
-    """Build a fresh transition matrix from the last N days of DuckDB
-    traffic, save it to ``compute/scorer/matrix.json``, publish to FOS,
-    and evaluate AUC against the operator's accumulated labels.
-
-    Synchronous — for a 7-day window with ~10k sessions the whole pipeline
-    runs in <30s. The endpoint returns the new matrix metadata + AUC so
-    the UI can show "matrix moved from 0.62 → 0.91 after retrain". The new
-    matrix is pushed straight into the scoring_matrix KV Store, so the LIVE
-    edge scorer picks it up as Compute instances recycle — no Wasm rebuild
-    (the matrix is read from KV at runtime, not embedded).
-
-    Pipeline:
-      1. extract_traces from DuckDB → in-memory sessions
-      2. build_matrix → TransitionMatrix
-      3. evaluate AUC against labels (if >=3 each class)
-      4. Save matrix.json to disk + publish to FOS
-      4b. Write the matrix to the scoring_matrix KV Store (live scorer)
-      5. Bust the /scoring/evaluation cache
-    """
+    """Build a transition matrix from DuckDB traffic, publish to FOS + KV, and evaluate AUC."""
     import datetime as _dt
 
     from backend import config as svcconfig
@@ -1768,13 +1266,9 @@ def scoring_retrain(
     matrix_version = version or _matrix.default_version()
     start = _dt.datetime.now(_dt.UTC) - _dt.timedelta(days=int(since_days))
 
-    # 1. Extract sessions from DuckDB. The extract function expects a
-    # live connection; reuse the same read-only path the analytics
-    # endpoints use so we never block ingest writers.
     con = get_connection(source=src, max_wait=3, skip_view_update=True, read_only=True)
     try:
         sessions_iter = _fixtures.extract_traces(con, service_id=service_id, start=start)
-        # 2. Build matrix in one streaming pass.
         tmatrix, stats = _matrix.build_matrix(
             (s.to_jsonl_dict() for s in sessions_iter),
         )
@@ -1786,7 +1280,6 @@ def scoring_retrain(
 
     matrix_dict = tmatrix.to_json_dict(version=matrix_version)
 
-    # 3. Evaluate against accumulated labels if we have enough of each.
     auc_result = None
     label_rows = _labels.list_labels(service_id)
     n_good, n_bad, _ = _label_counts(service_id)
@@ -1802,10 +1295,6 @@ def scoring_retrain(
                 "n_bad": er.n_bad,
             }
 
-    # 4. Save matrix.json + publish to FOS. Local save is best-effort —
-    # if the backend container can't write to compute/scorer/ (read-only
-    # image mount), we still succeed by relying on FOS as the durable
-    # store. _load_matrix() will pull from FOS next call.
     try:
         tenant_matrix_path = _tenant_matrix_path(service_id)
         tenant_matrix_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1827,18 +1316,9 @@ def scoring_retrain(
     except Exception as exc:
         logger.warning(f"Could not publish matrix to FOS: {exc}")
 
-    # 4b. Push the matrix into the scoring_matrix KV Store so the LIVE scorer
-    #     picks it up — no Wasm rebuild. Writes the in-memory matrix directly
-    #     (not the best-effort local file, which may have failed on a
-    #     read-only mount). Best-effort: needs a Fastly token + a provisioned
-    #     matrix store. On failure the matrix is still in FOS and a subsequent
-    #     enable re-seeds KV. Takes effect as Compute instances recycle.
     kv_written = _push_matrix_to_kv_if_configured(service_id, cfg, matrix_dict)
-
-    # 5. Bust analytics caches so the next StatusPanel hit sees the new AUC.
     _bust_analytics_cache(service_id)
 
-    # Operator audit: every retrain is attributable + reviewable.
     _record_scoring_audit(
         service_id,
         "matrix_retrained",
@@ -1899,22 +1379,7 @@ def scoring_session_events(
     sid: str = Path(..., description="Edge session id (12-hex chars)"),
     since_days: int = Query(default=30, ge=1, le=90),
 ) -> dict:
-    """Return the event timeline for a single session — the URLs the
-    session hit, in order, with per-request status/score/compliance/reason
-    so the UI can render a 'view this labeled session' popover.
-
-    The data is the same shape ``evaluate()`` consumes for AUC; this
-    endpoint just exposes it through a public route keyed on the sid the
-    operator clicked. Cap is 500 events per sid (any realistic browsing
-    session well under that; the cap is a runaway-loop safety bound).
-
-    Analyst-reachable, so the lookback is clamped to the invite window
-    (since_days expressed as hours). The per-event ``ip`` is masked for
-    analysts by the response middleware's key-name pass; ``ua`` / ``url`` stay
-    intact (analysts triage on them). Admin requests keep the full window.
-    """
-    # Analyst → pass the clamped absolute predicate; admin (disc is None) keeps
-    # the repo's own relative since_days DAY window untouched.
+    """Return the event timeline for a single session (up to 500 events)."""
     ts_pred, disc = _scoring_time_window(request, int(since_days) * 24)
     grouped = _fetch_session_events(
         service_id, [sid], since_days=since_days, ts_predicate=(ts_pred if disc is not None else None)
@@ -1978,13 +1443,7 @@ def scoring_enforce_threshold_get(
     service_id: ServiceId,
     token: str = Header(default=""),
 ) -> dict:
-    """Read the live enforce_threshold value from the scoring_config
-    Compute ConfigStore. None = no enforcement.
-
-    The Rust scorer reads this on every request — when set AND the
-    request's score >= threshold, it emits X-Edge-Score-Enforce: 1,
-    which the SCORING_ENFORCE_NAME VCL snippet turns into a 429.
-    """
+    """Read the live enforce_threshold value from the scoring_config ConfigStore (None = disabled)."""
     _cfg, config_store_id, resolved_token = _require_scoring_config_store(service_id, token)
 
     cache_key = (service_id, config_store_id)
@@ -2025,33 +1484,17 @@ def scoring_enforce_threshold_put(
     token: str = Header(default=""),
     confirm: bool = Query(default=False, description="Set true to actually apply the enforcement change"),
 ) -> dict:
-    """Write the live enforce_threshold to the scoring_config ConfigStore.
-    Pass ``{"threshold": null}`` to clear (disable enforcement).
-
-    Effective at the edge within seconds (next Compute invocation
-    re-reads the ConfigStore). Audited to scoring_audit so the operator
-    can review when enforcement was flipped on/off.
-
-    Gated by ``?confirm=true`` (matches the matrix-restore pattern) so
-    an accidental click can't silently flip enforcement at the edge."""
+    """Write the live enforce_threshold to the scoring_config ConfigStore (null disables enforcement)."""
     _require_confirm(confirm, "Pass ?confirm=true to actually change enforcement. This affects live edge blocking.")
-
     _cfg, config_store_id, resolved_token = _require_scoring_config_store(service_id, token)
-
     threshold = _validate_threshold_0_100(body.threshold)
-
-    # Upsert: PATCH the item, falling back to POST if it doesn't exist
-    # yet (first time enforcement is set for this service).
     value = str(threshold) if threshold is not None else ""
     try:
         _upsert_config_store_item(resolved_token, config_store_id, _ENFORCE_THRESHOLD_KEY, value)
     except Exception as e:
         raise_internal(logger, e, code="scoring_enforce_threshold_put_failed")
 
-    # Drop the cached GET response so the operator's read-after-write is
-    # accurate instead of returning the up-to-30s-old snapshot.
     _enforce_threshold_cache.pop((service_id, config_store_id), None)
-
     _record_scoring_audit(
         service_id,
         "threshold_enforce_disabled" if threshold is None else "threshold_enforced",
@@ -2084,20 +1527,8 @@ def scoring_l2_enforce_get(
     service_id: ServiceId,
     token: str = Header(default=""),
 ) -> dict:
-    """Read the live L2-enforcement opt-in + fade-in state from the scoring_config
-    ConfigStore, plus the advisory deployment-age readiness gauge.
-
-    L2's sub-score is ALWAYS computed + logged at the edge; this endpoint reports
-    only whether (and how strongly) it contributes to the *enforced* combined
-    score. ``enabled`` is the operator's explicit opt-in; ``ramp_progress`` /
-    ``days_since_optin`` / ``warmup_days_remaining`` track the fade-in from the
-    opt-in anchor; ``ready`` / ``deployment_age_days`` are the advisory "enough
-    observed L2 data yet?" gauge (deploy age ≥ 7 days), never an actuator.
-
-    Read+cache pattern mirrors /scoring/enforce-threshold (300s TTL, busted by the
-    PUT). 502 on a non-404 ConfigStore error rather than masking it as off."""
+    """Read the live L2-enforcement opt-in + fade-in state from the scoring_config ConfigStore."""
     _cfg, config_store_id, resolved_token = _require_scoring_config_store(service_id, token)
-
     try:
         return _read_l2_enforce_state(service_id, config_store_id, resolved_token)
     except RuntimeError as exc:
@@ -2116,33 +1547,16 @@ def scoring_l2_enforce_put(
     token: str = Header(default=""),
     confirm: bool = Query(default=False, description="Set true to actually apply the L2-enforcement change"),
 ) -> dict:
-    """Opt edge Layer-2 in/out of the *enforced* combined score by writing the
-    ``l2_enforce_enabled`` flag to the scoring_config ConfigStore.
-
-    Enabling stamps a fresh ``l2_enabled_at`` anchor on the off→on transition (or
-    when none exists yet) so L2 fades in over ~3 days from the moment of consent;
-    re-confirming an already-on service does NOT reset an in-progress fade-in.
-    Disabling writes "0" and leaves the anchor as-is, so a later off→on re-enable
-    overwrites it and restarts the fade-in. L2's sub-score keeps being computed +
-    logged regardless — only its contribution to the enforced score is gated.
-
-    Effective at the edge within seconds (the scorer re-reads the ConfigStore each
-    request). Audited. Gated by ``?confirm=true`` — the same kill switch as
-    enforce-threshold — because it changes live edge blocking."""
+    """Opt edge Layer-2 in/out of the enforced combined score via scoring_config ConfigStore."""
     _require_confirm(confirm, "Pass ?confirm=true to actually change L2 enforcement. This affects live edge blocking.")
-
     import datetime as _dt
 
     _cfg, config_store_id, resolved_token = _require_scoring_config_store(service_id, token)
-
     enabled = bool(body.enabled)
 
     try:
         l2_enabled_at: int | None
         if enabled:
-            # Stamp a fresh fade-in anchor on off→on (or when none exists yet),
-            # but preserve an in-progress ramp when re-confirming an already-on
-            # service. Read both current values first.
             currently_on = _l2_get_item(config_store_id, _L2_ENFORCE_ENABLED_KEY, resolved_token).strip() == "1"
             existing_anchor = _l2_parse_epoch(_l2_get_item(config_store_id, _L2_ENABLED_AT_KEY, resolved_token))
             _upsert_config_store_item(resolved_token, config_store_id, _L2_ENFORCE_ENABLED_KEY, "1")
@@ -2153,16 +1567,12 @@ def scoring_l2_enforce_put(
                 l2_enabled_at = existing_anchor
         else:
             _upsert_config_store_item(resolved_token, config_store_id, _L2_ENFORCE_ENABLED_KEY, "0")
-            # Leave l2_enabled_at as-is; a later off→on re-enable overwrites it.
             l2_enabled_at = _l2_parse_epoch(_l2_get_item(config_store_id, _L2_ENABLED_AT_KEY, resolved_token))
     except Exception as e:
         raise_internal(logger, e, code="scoring_l2_enforce_put_failed")
 
-    # Read-after-write accuracy: drop the cached GET block + bust the analytics
-    # cache (scoring_health's readiness block reuses the same numbers).
     _l2_enforce_cache.pop((service_id, config_store_id), None)
     _bust_analytics_cache(service_id)
-
     _record_scoring_audit(
         service_id,
         "l2_enforce_enabled" if enabled else "l2_enforce_disabled",
@@ -2183,7 +1593,7 @@ def scoring_l2_enforce_put(
     }
 
 
-# ── Recv exclusion regex (URLs that bypass the scorer) ─────────────────────
+# ── Recv exclusion regex & Enforce response status code ──────────────────────
 
 
 @router.get(
@@ -2193,23 +1603,7 @@ def scoring_l2_enforce_put(
     dependencies=[Depends(require_admin)],
 )
 def scoring_exclude_regex_get(service_id: ServiceId) -> dict:
-    """Return the operator-configured URL-exclusion regex for the recv snippet.
-
-    URLs that match this regex are NOT routed to the Compute scorer
-    (saves cost on static assets / health checks / etc.). The default
-    matches common static-asset file extensions; the operator can
-    override it via the PUT endpoint below.
-
-    Response shape:
-      {
-        "current":      str,    # the stored value (literal default after
-                                # first enable_scoring; or operator override)
-        "is_default":   bool,   # true when current is empty OR equals the
-                                # built-in default literal
-        "default":      str,    # the built-in default regex
-        "effective":    str,    # what's actually interpolated into VCL
-      }
-    """
+    """Return the operator-configured URL-exclusion regex for the recv snippet."""
     from backend.provision.session_scoring_vcl import (
         DEFAULT_ASSET_EXT_REGEX,
         resolve_exclude_url_regex,
@@ -2220,11 +1614,6 @@ def scoring_exclude_regex_get(service_id: ServiceId) -> dict:
     effective = resolve_exclude_url_regex(current or None)
     return {
         "current": current,
-        # Empty cfg (legacy services from before enable_scoring populated
-        # the default) AND services whose stored value happens to equal
-        # the bundled default both count as "default" for UI purposes —
-        # the admin shouldn't see "custom override" when nothing's actually
-        # been customised.
         "is_default": (not current) or current == DEFAULT_ASSET_EXT_REGEX,
         "default": DEFAULT_ASSET_EXT_REGEX,
         "effective": effective,
@@ -2252,6 +1641,23 @@ def _validate_service_exclude_regex(service_id: str, raw: str):
     )
 
 
+def _apply_vcl_snippet_update(
+    service_id: str,
+    update_fn,
+    error_code: str,
+    audit_action: str,
+    build_audit_details,
+    build_message,
+    **extra_fields: object,
+) -> dict:
+    try:
+        result = update_fn()
+    except RuntimeError as exc:
+        raise_internal(logger, exc, code=error_code, status=502)
+    _record_scoring_audit(service_id, audit_action, details=build_audit_details(result))
+    return {"ok": True, **result, **extra_fields, "message": build_message(result)}
+
+
 @router.put(
     "/{service_id}/scoring/exclude-regex",
     response_model=ScoringExcludeRegexPutResponse,
@@ -2264,74 +1670,37 @@ def scoring_exclude_regex_put(
     token: str = Header(default=""),
     confirm: bool = Query(default=False, description="Set true to actually apply the change"),
 ) -> dict:
-    """Update the URL-exclusion regex for the scoring recv snippet.
-
-    Validation pipeline (must pass all four to land):
-      1. Input policy (length cap, no quote / control chars, valid regex).
-      2. Falco static analysis on the assembled recv-snippet body.
-      3. Fastly's VCL ``validate`` endpoint on the cloned version.
-      4. ``activate_version`` (Fastly's compiler runs again).
-
-    Re-deploys ONLY the recv snippet — Compute service, Wasm, log
-    format, and the other 5 scoring snippets stay untouched. Takes
-    ~5-10s end-to-end.
-
-    Pass ``{"regex": ""}`` to reset to the built-in default. Body shape:
-        { "regex": str }
-
-    Gated by ``?confirm=true`` because a typo here can disable scoring
-    entirely (regex matches everything) or DoS Compute (regex matches
-    nothing → every request scored). The confirm flag matches the
-    enforce-threshold + matrix-restore precedent.
-    """
+    """Update the URL-exclusion regex for the scoring recv snippet."""
     _require_confirm(
         confirm, "Pass ?confirm=true to actually apply the change. This re-publishes the active VCL version."
     )
-
     from backend.provision.session_scoring_orchestrator import update_recv_exclusion_regex
     from backend.utils.vcl_validator import RegexValidationError
 
     _cfg, _scoring, resolved_token = _require_scoring_enabled_and_token(service_id, token)
-
     try:
         cleaned, lint = _validate_service_exclude_regex(service_id, body.regex)
     except RegexValidationError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail={"error": exc.message, "reason": exc.reason},
-        )
+        raise HTTPException(status_code=400, detail={"error": exc.message, "reason": exc.reason})
 
-    # Layers 3 + 4: clone → swap → validate → activate via the
-    # orchestrator helper.
-    try:
-        result = update_recv_exclusion_regex(service_id, resolved_token, new_regex=cleaned)
-    except RuntimeError as exc:
-        raise_internal(logger, exc, code="exclude_regex_update_failed", status=502)
-
-    _record_scoring_audit(
+    return _apply_vcl_snippet_update(
         service_id,
+        lambda: update_recv_exclusion_regex(service_id, resolved_token, new_regex=cleaned),
+        "exclude_regex_update_failed",
         "scoring_exclude_regex_changed",
-        details={
-            "is_default": result["is_default"],
-            "effective_regex": result["effective_regex"][:200],
-            "logging_service_active_version": result["logging_service_active_version"],
+        lambda r: {
+            "is_default": r["is_default"],
+            "effective_regex": r["effective_regex"][:200],
+            "logging_service_active_version": r["logging_service_active_version"],
             "lint_warnings": lint.warnings[:5],
         },
-    )
-
-    return {
-        "ok": True,
-        **result,
-        "lint_warnings": lint.warnings,
-        "message": (
+        lambda r: (
             "Reset to default URL exclusion regex."
-            if result["is_default"]
+            if r["is_default"]
             else "Custom URL exclusion regex applied. Effective at the edge after Fastly version activation."
         ),
-    }
-
-
-# ── Dry-run validator for the exclude-regex (no persistence, no VCL) ──────
+        lint_warnings=lint.warnings,
+    )
 
 
 @router.post(
@@ -2344,42 +1713,14 @@ def scoring_exclude_regex_validate(
     body: ScoringExcludeRegexBody,
     service_id: ServiceId,
 ) -> dict:
-    """Run the 2-layer pre-publish validator on a candidate regex WITHOUT
-    persisting it or touching Fastly.
-
-    Drives the admin UI's on-blur lint check: the operator types a regex,
-    tabs out of the textarea, and gets immediate feedback on whether the
-    value would pass input policy (length / quote / control-char / Python
-    re.compile) AND falco's static analysis on the assembled snippet,
-    BEFORE they commit to a publish flow.
-
-    Response shape:
-      Success:  {"ok": true,  "lint_warnings": [...]}
-      Failure:  {"ok": false, "error": "...", "reason": "..."}
-
-    The third layer (Fastly's own VCL compiler during version activate)
-    only runs on real publish — we don't burn a clone/activate round-trip
-    for a preview. False-positives between falco and Fastly's compiler are
-    rare; the publish flow still catches them.
-    """
+    """Run the 2-layer pre-publish validator on a candidate regex without persisting it."""
     from backend.utils.vcl_validator import RegexValidationError
 
     try:
         _cleaned, lint = _validate_service_exclude_regex(service_id, body.regex)
     except RegexValidationError as exc:
-        return {
-            "ok": False,
-            "error": exc.message,
-            "reason": exc.reason,
-        }
-
-    return {
-        "ok": True,
-        "lint_warnings": lint.warnings,
-    }
-
-
-# ── Enforce response status code (default 429, operator-overridable) ──────
+        return {"ok": False, "error": exc.message, "reason": exc.reason}
+    return {"ok": True, "lint_warnings": lint.warnings}
 
 
 @router.get(
@@ -2389,22 +1730,7 @@ def scoring_exclude_regex_validate(
     dependencies=[Depends(require_admin)],
 )
 def scoring_enforce_status_code_get(service_id: ServiceId) -> dict:
-    """Return the operator-configured HTTP status code that the enforce
-    snippet returns when the scorer flags a request.
-
-    Defaults to 429 (Too Many Requests). Operators can pick any 4xx/5xx
-    code via the PUT endpoint below.
-
-    Response shape:
-      {
-        "current":     int,    # operator's override, or null when default
-        "default":     int,    # built-in default (429)
-        "effective":   int,    # what's actually baked into the VCL
-        "min":         int,    # min allowed value (400)
-        "max":         int,    # max allowed value (599)
-        "is_default":  bool,
-      }
-    """
+    """Return the operator-configured HTTP status code returned by the enforce snippet."""
     from backend.provision.session_scoring_vcl import (
         _ENFORCE_STATUS_CODE_MAX,
         _ENFORCE_STATUS_CODE_MIN,
@@ -2437,27 +1763,10 @@ def scoring_enforce_status_code_put(
     token: str = Header(default=""),
     confirm: bool = Query(default=False, description="Set true to actually apply the change"),
 ) -> dict:
-    """Update the HTTP status code returned by the enforce snippet.
-
-    Body shape: ``{"status_code": int | null}``. Pass ``null`` (or omit)
-    to reset to the default 429.
-
-    Validation:
-      - Must be int in 400-599 (4xx/5xx HTTP error range).
-      - Anything else → 400 with explanation.
-
-    Re-deploys ONLY the enforce snippet — Compute service, Wasm, log
-    format, and the other 5 scoring snippets stay untouched. Takes
-    ~5-10s end-to-end.
-
-    Gated by ``?confirm=true`` because the change affects live edge
-    response codes seen by real users — same precedent as
-    enforce-threshold and exclude-regex.
-    """
+    """Update the HTTP status code returned by the enforce snippet (400-599 or null for 429)."""
     _require_confirm(
         confirm, "Pass ?confirm=true to actually apply the change. This re-publishes the active VCL version."
     )
-
     from backend.provision.session_scoring_orchestrator import update_enforce_status_code
     from backend.provision.session_scoring_vcl import (
         _ENFORCE_STATUS_CODE_MAX,
@@ -2474,31 +1783,22 @@ def scoring_enforce_status_code_put(
         )
 
     _cfg, _scoring, resolved_token = _require_scoring_enabled_and_token(service_id, token)
-
-    try:
-        result = update_enforce_status_code(service_id, resolved_token, new_status_code=new_code)
-    except RuntimeError as exc:
-        raise_internal(logger, exc, code="enforce_status_code_update_failed", status=502)
-
-    _record_scoring_audit(
+    return _apply_vcl_snippet_update(
         service_id,
+        lambda: update_enforce_status_code(service_id, resolved_token, new_status_code=new_code),
+        "enforce_status_code_update_failed",
         "scoring_enforce_status_code_changed",
-        details={
-            "is_default": result["is_default"],
-            "effective_status_code": result["effective_status_code"],
-            "logging_service_active_version": result["logging_service_active_version"],
+        lambda r: {
+            "is_default": r["is_default"],
+            "effective_status_code": r["effective_status_code"],
+            "logging_service_active_version": r["logging_service_active_version"],
         },
-    )
-
-    return {
-        "ok": True,
-        **result,
-        "message": (
+        lambda r: (
             "Reset to default enforce status code (429)."
-            if result["is_default"]
-            else f"Enforce status code → {result['effective_status_code']}. Effective at the edge after Fastly version activation."
+            if r["is_default"]
+            else f"Enforce status code → {r['effective_status_code']}. Effective at the edge after Fastly version activation."
         ),
-    }
+    )
 
 
 # ── Matrix version history + rollback ──────────────────────────────────────
@@ -2511,19 +1811,13 @@ def scoring_enforce_status_code_put(
     dependencies=[Depends(require_admin)],
 )
 def scoring_matrix_versions_list(service_id: ServiceId) -> dict:
-    """List historical scoring matrices archived in FOS.
-
-    publish_matrix_to_fos snapshots the prior current matrix to
-    ``iceberg/meta/scoring_matrix_history/{version}.json`` before
-    overwriting, so the operator can roll back to any prior trained
-    matrix. Returns most-recent first."""
+    """List historical scoring matrices archived in FOS."""
     from backend.state_sync import list_scoring_matrix_versions
 
     _cfg, scoring = _load_scoring_cfg(service_id)
-    current_version = scoring.get("matrix_version")
     return {
         "versions": list_scoring_matrix_versions(service_id),
-        "current_version": current_version,
+        "current_version": scoring.get("matrix_version"),
     }
 
 
@@ -2543,15 +1837,7 @@ def scoring_matrix_versions_restore(
     ),
     confirm: bool = Query(default=False, description="Set true to actually perform the restore"),
 ) -> dict:
-    """Restore a historical matrix to the current scoring_matrix.json
-    key in FOS. Also deletes the local matrix.json so the next
-    /scoring/evaluation call sees the FOS-restored matrix, and pushes the
-    restored matrix into the scoring_matrix KV Store so the LIVE edge scorer
-    picks it up (as Compute instances recycle) — no redeploy. The
-    /scoring/evaluation AUC reflects the restored matrix immediately.
-
-    Gated by ``?confirm=true`` so an accidental click can't silently
-    rewind the live AUC numbers."""
+    """Restore a historical matrix in FOS, clear the local shadow copy, and push to KV."""
     _require_confirm(confirm, "Pass ?confirm=true to actually restore. This will replace the current matrix.")
 
     from backend import config as svcconfig
@@ -2564,11 +1850,6 @@ def scoring_matrix_versions_restore(
             detail={"error": f"Matrix version {version!r} not found in FOS history"},
         )
 
-    # Drop the tenant-scoped local matrix (matrix_<sid>.json) so
-    # _load_matrix falls through to the FOS-restored version instead of
-    # shadowing it. (_load_matrix's resolution order consults only the
-    # tenant path — the pre-audit-005 shared matrix.json is never read,
-    # and prod was verified clean of it on 2026-07-06.)
     tenant_matrix_path = _tenant_matrix_path(service_id)
     try:
         if tenant_matrix_path.exists():
@@ -2576,18 +1857,11 @@ def scoring_matrix_versions_restore(
     except Exception as exc:
         logger.warning(f"Could not remove local {tenant_matrix_path.name} after restore: {exc}")
 
-    # Update cfg.scoring.matrix_version so /scoring/status reflects the rollback.
     cfg = svcconfig.mutate_config(
         service_id, lambda c: c.setdefault("scoring", {}).__setitem__("matrix_version", version)
     )
-
-    # Push the FOS-restored matrix into the scoring_matrix KV Store so the live
-    # scorer rolls back too. _write_matrix_to_kv resolves via the FOS chain
-    # (the local copy was just deleted). Best-effort — needs a token + store.
     kv_written = _push_matrix_to_kv_if_configured(service_id, cfg)
-
     _bust_analytics_cache(service_id)
-
     _record_scoring_audit(
         service_id,
         "matrix_restored",
@@ -2625,17 +1899,7 @@ def scoring_rotate_key(
     service_id: ServiceId,
     token: str = Header(default=""),
 ) -> dict:
-    """Rotate the AES-GCM cookie-state encryption key.
-
-    Moves the current key to ``previous_key_hex`` (grace window for
-    in-flight cookies still using the old key) and writes a fresh
-    32-byte key as the new ``current_key_hex``. The Rust scorer's
-    cookie codec already tries previous as a fallback so existing
-    sessions keep decoding for one rotation cycle.
-
-    Returns rotation metadata — the new key itself is NOT returned in
-    the response (only stored in the Fastly ConfigStore + audit log).
-    """
+    """Rotate the AES-GCM cookie-state encryption key (preserving previous_key_hex grace slot)."""
     from backend.provision.session_scoring_setup import rotate_aes_key
 
     load_service_config(service_id)
@@ -2651,8 +1915,6 @@ def scoring_rotate_key(
         )
 
     result = rotate_aes_key(scoring_keys_store_id, token=resolved_token)
-
-    # Record the rotation in the audit log (without the key value).
     _record_scoring_audit(
         service_id,
         "key_rotated",
@@ -2661,8 +1923,6 @@ def scoring_rotate_key(
             "previous_key_grace": bool(result.get("previous_key_hex")),
         },
     )
-
-    # Don't echo the key itself.
     return {
         "ok": True,
         "rotated_at": result["rotated_at"],
@@ -2689,23 +1949,10 @@ def scoring_audit_list(
     limit: int = Query(default=100, ge=1, le=1000),
     since: str | None = Query(default=None, description="ISO timestamp lower bound (inclusive)"),
 ) -> dict:
-    """List recent operator actions on this service's scoring config.
-
-    Tracks: scoring_enabled, scoring_disabled, threshold_committed,
-    threshold_cleared, threshold_enforced, threshold_enforce_disabled,
-    matrix_retrained, matrix_restored, key_rotated. Each row has
-    timestamp, action, actor, details (JSON). Used for compliance review
-    + "who broke prod last Tuesday?" triage.
-
-    ``since`` (optional ISO timestamp) filters to rows at or after that
-    instant — handy for the admin UI to poll for new events without
-    re-rendering the entire history."""
+    """List recent operator actions on this service's scoring config."""
     from backend.core import metadata as metadata_db
 
-    # 404 when the service itself isn't known — mirrors /scoring/status so
-    # the UI gets a consistent shape across the audit + status pair.
     load_service_config(service_id)
-
     rows = metadata_db.list_scoring_audit(service_id, limit=limit, since=since)
     return {"audit": rows, "limit": limit}
 
@@ -2720,20 +1967,12 @@ def scoring_audit_list(
     dependencies=[Depends(require_admin)],
 )
 def scoring_threshold_get(service_id: ServiceId) -> dict:
-    """Return the operator's chosen score threshold.
-
-    NOT enforced — the live scorer doesn't read this. It's a persisted
-    operator preference so the threshold slider can remember the
-    'committed' value across sessions, and the StatusPanel can show
-    'committed threshold: X' as a stable reference. Actual enforcement
-    requires a Rust scorer change + Wasm redeploy and is deferred to
-    a future release once the operator is confident in the value.
-    """
+    """Return the operator's chosen preview-only score threshold."""
     _cfg, scoring = _load_scoring_cfg(service_id)
     return {
         "threshold": scoring.get("operator_threshold"),
         "set_at": scoring.get("operator_threshold_set_at"),
-        "enforced": False,  # See docstring — preview-only
+        "enforced": False,
     }
 
 
@@ -2747,15 +1986,12 @@ def scoring_threshold_put(
     body: ScoringThresholdBody,
     service_id: ServiceId,
 ) -> dict:
-    """Persist the operator's chosen threshold (0-100) into the per-service
-    config. Pass ``{"threshold": null}`` to clear. Always returns the
-    new state. Does NOT push to Compute — preview-only."""
+    """Persist the operator's chosen preview-only threshold (0-100 or null) into per-service config."""
     import datetime as _dt
 
     from backend import config as svcconfig
 
     threshold = _validate_threshold_0_100(body.threshold)
-
     cfg = load_service_config(service_id)
     prior_threshold = cfg.get("scoring", {}).get("operator_threshold")
     set_at = _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds")
@@ -2769,7 +2005,6 @@ def scoring_threshold_put(
             scoring["operator_threshold"] = threshold
             scoring["operator_threshold_set_at"] = set_at
 
-    # Operator audit trail — every threshold change is attributable.
     _record_scoring_audit(
         service_id,
         "threshold_committed" if threshold is not None else "threshold_cleared",
@@ -2781,7 +2016,7 @@ def scoring_threshold_put(
         updated_cfg = cfg
     scoring = updated_cfg.get("scoring", {})
 
-    _bust_analytics_cache(service_id)  # so /scoring/status reflects it next fetch
+    _bust_analytics_cache(service_id)
     return {
         "threshold": scoring.get("operator_threshold"),
         "set_at": scoring.get("operator_threshold_set_at"),
@@ -2801,25 +2036,15 @@ def scoring_threshold_put(
 def scoring_evaluation_per_reason(
     service_id: ServiceId,
 ) -> dict:
-    """AUC broken down by L1/L2 rule (cookie-missing, impossibly-fast,
-    robotic-consistency, rare-transition, low-transition-prob).
-
-    Same min-samples gate as /scoring/evaluation but applied per-bucket
-    (so a reason with <3 labels in either class shows a 'need more
-    labels with reason=X' CTA instead of a noisy AUC). The headline
-    /scoring/evaluation gives the combined AUC; this answers 'which
-    rule contributed most to AUC' once enough per-reason labels exist.
-    """
+    """AUC broken down by L1/L2 rule."""
     from backend.scoring import labels as _labels
     from backend.scoring.evaluate import evaluate_per_reason
 
     n_good, n_bad, n_neutral = _label_counts(service_id)
-
     cache_key = ("scoring-evaluation-per-reason", service_id, n_good, n_bad, n_neutral)
 
     def _produce() -> dict:
         if n_good < _MIN_LABELS_PER_CLASS or n_bad < _MIN_LABELS_PER_CLASS:
-            # No point bucketing — the headline AUC isn't even computable.
             return {
                 "has_min_samples_overall": False,
                 "min_per_class": _MIN_LABELS_PER_CLASS,
@@ -2839,17 +2064,6 @@ def scoring_evaluation_per_reason(
 
 
 # ── Composite dashboard endpoint ────────────────────────────────────────────
-#
-# Single round-trip variant of the 8 endpoints the session-scoring admin page
-# mounts (status, evaluation, health, top-flagged, score-distribution,
-# compliance-breakdown, curves, threshold-preview). Opens ONE read-only
-# DuckDB connection, builds ONE filtered temp table, runs each aggregation
-# against it.
-#
-# Wire-compat: this is purely additive — the 8 existing endpoints stay
-# mounted with their current cache-key contracts and TTL behavior. The
-# frontend can opt in by calling /scoring/dashboard instead of the 8
-# individual queries, or keep fanning out for now.
 
 
 def _build_scoring_config_bundle(service_id: str) -> dict:
@@ -2872,33 +2086,10 @@ def scoring_dashboard(
     since_hours: int = Query(default=24, ge=1, le=168),
     threshold: int = Query(default=75, ge=0, le=100, description="Preview cutoff for threshold-preview block"),
 ) -> dict:
-    """One-shot dashboard payload. Returns:
-
-    ```
-    {
-        since_hours, threshold,
-        status: {...},                                  # /scoring/status
-        evaluation: {...},                              # /scoring/evaluation
-        health: {...},                                  # /scoring/health
-        top_flagged: {rows: [...], since_hours},        # /scoring/top-flagged
-        score_distribution: {rows: [...]},              # /scoring/score-distribution
-        compliance_breakdown: {rows: [...]},            # /scoring/compliance-breakdown
-        curves: {...},                                  # /scoring/curves
-        threshold_preview: {...},                       # /scoring/threshold-preview
-    }
-    ```
-
-    Each sub-object is byte-identical to the corresponding individual
-    endpoint's response — the frontend can swap to
-    ``dashboard.top_flagged`` without changing card-level contracts.
-
-    Cache key includes ``since_hours``, ``threshold``, and the per-class
-    label counts so label mutations + slider drags invalidate naturally.
-    """
+    """One-shot composite dashboard payload across status, evaluation, health, charts, and config."""
     from backend import config as svcconfig
 
     n_good, n_bad, n_neutral = _label_counts(service_id)
-
     cache_key = (
         "scoring-dashboard",
         service_id,
@@ -2910,29 +2101,11 @@ def scoring_dashboard(
     )
 
     def _produce() -> dict:
-        # --- /scoring/status (no DuckDB) ---
-        cfg = svcconfig.load_config(service_id)
-        status_block: dict = scoring_status(service_id=service_id) if cfg else {"enabled": False}
-
-        # Build the dashboard in a single payload by delegating to the
-        # existing per-endpoint producers. Each handles its own _query_logs
-        # call — meaning 6 DuckDB connections instead of 1 (the audit's
-        # ideal). The win this iteration captures is the in-flight collapse:
-        # one composite request → one cache key → one set of fetches that
-        # serializes through the per-key lock instead of 8 frontend
-        # requests racing through the proxy + react-query.
-        #
-        # The shared-temp-table optimization stays available for a future
-        # PR — wiring it requires refactoring each per-endpoint producer
-        # to accept an open connection + table name, which touches 5
-        # endpoints worth of test surface. Punting that to v1.2.0 keeps
-        # this change additive + zero-risk.
         import contextvars
         from concurrent.futures import ThreadPoolExecutor
 
-        # Pre-warm _table_columns once so the 5 sub-handlers below share the
-        # cached schema + view binding instead of opening 5 concurrent
-        # DESCRIBE connections on cold cache.
+        cfg = svcconfig.load_config(service_id)
+        status_block: dict = scoring_status(service_id=service_id) if cfg else {"enabled": False}
         _table_columns(service_id)
 
         tasks = {
@@ -2963,19 +2136,7 @@ def scoring_dashboard(
             "since_hours": since_hours,
             "threshold": threshold,
             "status": status_block,
-            "evaluation": results["evaluation"],
-            "evaluation_per_reason": results["evaluation_per_reason"],
-            "health": results["health"],
-            "top_flagged": results["top_flagged"],
-            "score_distribution": results["score_distribution"],
-            "compliance_breakdown": results["compliance_breakdown"],
-            "curves": results["curves"],
-            "threshold_preview": results["threshold_preview"],
-            # `config_threshold` is intentionally distinct from the
-            # top-level `threshold` (which is the per-request slider
-            # cutoff fed into threshold_preview). The config block
-            # mirrors /scoring/config's shape so the frontend can read
-            # the persisted operator preferences off the same payload.
+            **results,
             **{
                 ("config_threshold" if k == "threshold" else k): v
                 for k, v in _build_scoring_config_bundle(service_id).items()
@@ -2985,11 +2146,6 @@ def scoring_dashboard(
     return _cached(cache_key, _produce)
 
 
-# A-3 (CacheRegistry): register the analytics + reconstruct caches.
-# Same leak pattern as the iceberg / dashboard caches the R-1 work
-# uncovered — _reconstruct_labeled_sessions_cache especially is a
-# TTL-cached function that defeats per-test patches on
-# reconstruct_labeled_sessions when a prior test populated it first.
 from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry  # noqa: E402
 
 _CacheRegistry.register("session_scoring._analytics_cache", _analytics_cache)
@@ -3032,10 +2188,6 @@ def sessions_endpoint(
 ):
     with process_context_scope("sessions:list"):
         start_time, end_time = ctx.resolve_window(req)
-
-        # Guard against unbounded scans (14–20s observed) when the frontend hasn't
-        # sent a time range yet. Default to the last 7 days — matches the max
-        # window the repository enforces when a range IS provided.
         if not start_time or not end_time:
             _now = datetime.now(UTC)
             end_time = end_time or _now.isoformat()
@@ -3065,12 +2217,6 @@ def sessions_endpoint(
                 streaming_only=req.streaming_only,
             ),
         )
-
-        # Mint an opaque token per row from the REAL ip/window — before the analyst
-        # masking middleware rewrites ``ip`` on the way out. The detail endpoint
-        # unseals it, so a masking analyst can drill in without the masked `ip`
-        # (which can never match) being used as the lookup key. Uniform for admin +
-        # analyst; the token is opaque ciphertext, so emitting it to everyone is safe.
         _seal_session_rows(result.get("sessions", []), ctx.service_id)
         return SessionsResponse.with_telemetry(**result)
 
@@ -3086,10 +2232,6 @@ def sessions_detail(
         start_raw, end_raw = req.start_time, req.end_time
 
         if req.session_token:
-            # Token is the source of truth: derive the whole tuple from it and
-            # ignore client-supplied ip/window. Prevents a token-pinned-IP +
-            # widened-window mini-oracle, and is the only path open to a masking
-            # analyst (who never holds the real ip).
             try:
                 ip, ja4, start_raw, end_raw = open_session_token(req.session_token, service_id=ctx.service_id)
             except SessionTokenError as e:
@@ -3101,29 +2243,15 @@ def sessions_detail(
                     },
                 ) from e
         elif mask_ips_for(ctx.analyst_session):
-            # No token, but a masking analyst: a raw/masked top-level ``ip`` would
-            # be a presence oracle (the masked value can never match a real IP, and
-            # the PII filter-lock only inspects ``filters``, not this top-level
-            # field). Masking analysts must drill in via the opaque token.
             raise HTTPException(status_code=403, detail={"error": "pii_policy_violation", "field": "ip"})
 
         if not ip or not start_raw or not end_raw:
             raise HTTPException(status_code=400, detail={"error": "ip, session_start, and session_end are required"})
-        # A single-request session has session_start == session_end (a zero-width
-        # window — ~28% of real sessions). ``ctx.clamp`` rejects an empty range, so
-        # such a session would 400 ("time_range_empty") and the detail modal showed
-        # "No results" for every role. Widen a zero/negative window by 1s on each
-        # side: the repo's inclusive ``BETWEEN`` still captures the session's
-        # request(s), and ctx.clamp re-caps the widened window to the analyst's
-        # allowed bounds (so this can't be used to escape a query-window invite).
         s_dt, e_dt = parse_iso_utc(start_raw), parse_iso_utc(end_raw)
         if s_dt is not None and e_dt is not None and e_dt <= s_dt:
             start_raw = (s_dt - timedelta(seconds=1)).isoformat()
             end_raw = (e_dt + timedelta(seconds=1)).isoformat()
         start_time, end_time = ctx.clamp(start_raw, end_raw)
-        # clamp_or_400 returns (None, None) only when both inputs are None AND
-        # there's no analyst session; we already required both inputs above,
-        # so the clamp always returns concrete ISO strings here.
         if start_time is None or end_time is None:
             raise RuntimeError("clamp returned no bounds although both were supplied")
 

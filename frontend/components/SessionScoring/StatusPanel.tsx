@@ -1,9 +1,28 @@
 'use client'
 
 import * as React from 'react'
+import { useState, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { AlertTriangle, Archive, Check, Clock, Database, ExternalLink, FileCode, Info, Layers, LineChart, ListChecks, Loader2, Lock, Pencil, Power, PowerOff, RefreshCw, ShieldAlert, ShieldCheck, ShieldOff, Trash2, TrendingUp, X } from 'lucide-react'
-import { invalidateServiceScoringQueries, PerReasonAucHelp, RocPrCurvesHelp, scoringAnalyticsCompositeKey, scoringConfigCompositeKey, StatusPanelHelp, useScoringQuery } from '@/components/SessionScoring/help-content'
+import {
+  ComplianceHelp,
+  deriveScorerSeries,
+  invalidateServiceScoringQueries,
+  PerReasonAucHelp,
+  RocPrCurvesHelp,
+  ScoreDistHelp,
+  ScorerErrorsHelp,
+  scorerHourlyLayout,
+  ScorerLatencyHelp,
+  scoringAnalyticsCompositeKey,
+  scoringConfigCompositeKey,
+  StatusPanelHelp,
+  useScorerTimeseries,
+  useScoringQuery,
+  usToMs,
+  type LatencyResponse,
+  type LatencyRow,
+} from '@/components/SessionScoring/help-content'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -11,6 +30,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { ConfirmDialog, CopyButton, LabelWithInfo } from '@/components/ui/confirm-dialog'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Switch } from '@/components/ui/switch'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
@@ -20,12 +40,12 @@ import { SSEModal } from '@/components/SSEModal'
 import { useMounted } from '@/hooks/useBootstrap'
 import { useDateFormat } from '@/hooks/useSSE'
 import { client, unwrapClient } from '@/lib/api'
-import { CHART_COLORS } from '@/lib/chart-helpers'
+import { CHART_COLORS, denseBarTrace, denseTimeGrid, lineTrace, withSecondaryAxis } from '@/lib/chart-helpers'
 import { formatBytes, formatBytesTiered, formatCountMaybe, formatLocalDateTime, formatPctValue, formatRelative } from '@/lib/format'
 import { queryKeys } from '@/lib/query-keys'
 import { cn } from '@/lib/utils'
 import { useServiceStore } from '@/stores/filterStore'
-import type { Expect, WireParity } from '@/types/api'
+import type { Expect, PlotlyLayout, PlotlyTrace, WireParity } from '@/types/api'
 import type { components } from '@/types/api.generated'
 
 // =============================================================================
@@ -381,38 +401,35 @@ export function L2EnforcementCard({ serviceId, sinceHours = 24 }: L2EnforcementC
   const l2HighPct = health?.matrix_staleness?.l2_high_pct ?? null
   const rampPct = Math.round((data.ramp_progress ?? 0) * 100)
 
+  const isGreenAlert = enabled || ready
+  const AlertIcon = enabled ? TrendingUp : ready ? ShieldCheck : ShieldAlert
+  const alertTitle = enabled ? 'L2 contributes to enforcement' : ready ? 'Ready to enable' : 'Not yet recommended'
+  const alertDesc = enabled ? (
+    data.fully_ramped ? <>L2 is fully active in the enforced score.</> : (
+      <>Fading in — {rampPct}% of full weight{data.warmup_days_remaining != null && <> (~{fmtDaysFixed(data.warmup_days_remaining)} days to full)</>}. The ramp opens at 0% at opt-in, so there&apos;s no instant block.</>
+    )
+  ) : ready ? (
+    <>
+      {fmtDaysFixed(ageDays)} days of observed L2 data (≥{readinessDays} recommended).
+      {l2HighPct != null && <> About {formatPctValue(l2HighPct, 1)} of recent sessions would be flagged by L2.</>}
+    </>
+  ) : (
+    <>
+      Only {fmtDaysFixed(ageDays)} days of observed L2 data so far (≥{readinessDays} recommended). Enabling blocking now is risky — you haven&apos;t seen enough of how L2 scores real traffic.
+      {l2HighPct != null && <> It would currently flag ~{formatPctValue(l2HighPct, 1)} of sessions.</>}
+    </>
+  )
+
   return (
     <AnalyticsCard title="L2 enforcement" description={L2_DESCRIPTION} icon={<ShieldAlert className="h-4 w-4" />}>
       <div className="space-y-4">
-        {enabled ? (
-          <Alert className="border-green-300 bg-green-50/60 dark:bg-green-950/20">
-            <TrendingUp className="h-4 w-4 text-green-600" />
-            <AlertTitle className="text-green-900 dark:text-green-300">L2 contributes to enforcement</AlertTitle>
-            <AlertDescription className="text-green-800 dark:text-green-400">
-              {data.fully_ramped ? <>L2 is fully active in the enforced score.</> : (
-                <>Fading in — {rampPct}% of full weight{data.warmup_days_remaining != null && <> (~{fmtDaysFixed(data.warmup_days_remaining)} days to full)</>}. The ramp opens at 0% at opt-in, so there&apos;s no instant block.</>
-              )}
-            </AlertDescription>
-          </Alert>
-        ) : ready ? (
-          <Alert className="border-green-300 bg-green-50/60 dark:bg-green-950/20">
-            <ShieldCheck className="h-4 w-4 text-green-600" />
-            <AlertTitle className="text-green-900 dark:text-green-300">Ready to enable</AlertTitle>
-            <AlertDescription className="text-green-800 dark:text-green-400">
-              {fmtDaysFixed(ageDays)} days of observed L2 data (≥{readinessDays} recommended).
-              {l2HighPct != null && <> About {formatPctValue(l2HighPct, 1)} of recent sessions would be flagged by L2.</>}
-            </AlertDescription>
-          </Alert>
-        ) : (
-          <Alert className="border-amber-300 bg-amber-50/60 dark:bg-amber-950/20">
-            <ShieldAlert className="h-4 w-4 text-amber-600" />
-            <AlertTitle className="text-amber-900 dark:text-amber-300">Not yet recommended</AlertTitle>
-            <AlertDescription className="text-amber-800 dark:text-amber-400">
-              Only {fmtDaysFixed(ageDays)} days of observed L2 data so far (≥{readinessDays} recommended). Enabling blocking now is risky — you haven&apos;t seen enough of how L2 scores real traffic.
-              {l2HighPct != null && <> It would currently flag ~{formatPctValue(l2HighPct, 1)} of sessions.</>}
-            </AlertDescription>
-          </Alert>
-        )}
+        <Alert className={isGreenAlert ? 'border-green-300 bg-green-50/60 dark:bg-green-950/20' : 'border-amber-300 bg-amber-50/60 dark:bg-amber-950/20'}>
+          <AlertIcon className={cn('h-4 w-4', isGreenAlert ? 'text-green-600' : 'text-amber-600')} />
+          <AlertTitle className={isGreenAlert ? 'text-green-900 dark:text-green-300' : 'text-amber-900 dark:text-amber-300'}>{alertTitle}</AlertTitle>
+          <AlertDescription className={isGreenAlert ? 'text-green-800 dark:text-green-400' : 'text-amber-800 dark:text-amber-400'}>
+            {alertDesc}
+          </AlertDescription>
+        </Alert>
 
         <div className="flex items-center justify-between gap-4 rounded-md border bg-card p-3">
           <div className="space-y-0.5">
@@ -832,6 +849,14 @@ export function MetadataStorageCard() {
 
   const LOCKED_REASON = 'cron_sync.delete_after=false on this service. Raw .gz files stay in FOS forever, so ingested_files is the only thing stopping the daily full_sync from re-ingesting every aged-out file. Cleanup of this table is force-disabled regardless of the configured retention.'
 
+  const retentionFields = data
+    ? ([
+        { key: 'usage_log_days', label: 'usage_log retention', value: data.retention.usage_log_days },
+        { key: 'ingested_files_days', label: 'ingested_files retention', value: data.retention.ingested_files_days, locked: data.ingested_files_locked, lockedReason: LOCKED_REASON },
+        { key: 'cron_runs_days', label: 'cron_runs retention', value: data.retention.cron_runs_days },
+      ] as const)
+    : []
+
   return (
     <AnalyticsCard
       title="Metadata Storage"
@@ -857,9 +882,18 @@ export function MetadataStorageCard() {
               )}
             </div>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-              <RetentionField label="usage_log retention" editing={editing} value={data.retention.usage_log_days} draft={draft.usage_log_days} onDraftChange={(v) => setDraft((d) => ({ ...d, usage_log_days: v }))} />
-              <RetentionField label="ingested_files retention" editing={editing} value={data.retention.ingested_files_days} draft={draft.ingested_files_days} onDraftChange={(v) => setDraft((d) => ({ ...d, ingested_files_days: v }))} locked={data.ingested_files_locked} lockedReason={LOCKED_REASON} />
-              <RetentionField label="cron_runs retention" editing={editing} value={data.retention.cron_runs_days} draft={draft.cron_runs_days} onDraftChange={(v) => setDraft((d) => ({ ...d, cron_runs_days: v }))} />
+              {retentionFields.map((f) => (
+                <RetentionField
+                  key={f.key}
+                  label={f.label}
+                  editing={editing}
+                  value={f.value}
+                  draft={draft[f.key]}
+                  onDraftChange={(v) => setDraft((d) => ({ ...d, [f.key]: v }))}
+                  locked={'locked' in f ? f.locked : undefined}
+                  lockedReason={'lockedReason' in f ? f.lockedReason : undefined}
+                />
+              ))}
             </div>
             {saveRetention.isError && <div className="text-xs text-destructive pt-1">Save failed: {(saveRetention.error as Error)?.message ?? 'unknown error'}</div>}
             {editing && <div className="text-[11px] sm:text-[10px] text-muted-foreground pt-1">Set a value to 0 to disable cleanup for that table.</div>}
@@ -936,5 +970,360 @@ function RetentionField({ label, editing, value, draft, onDraftChange, locked, l
         </div>
       )}
     </div>
+  )
+}
+
+// =============================================================================
+// 4. Scorer Time-Series & Stacked Hourly Bar Charts (folded from ScorerSeriesCard)
+// =============================================================================
+
+interface HourlyRow {
+  hour: string
+  count: number
+}
+
+interface StackedHourlyBarChartProps<R extends HourlyRow> {
+  title: string
+  description: string
+  isLoading?: boolean
+  isFetching?: boolean
+  isEmpty?: boolean
+  error?: AnalyticsCardError | null
+  rows: R[]
+  categoryKey: keyof R & string
+  colors: Record<string, string>
+  categoryOrder?: readonly string[]
+  helpContent?: React.ReactNode
+  helpTitle?: string
+}
+
+export function StackedHourlyBarChart<R extends HourlyRow>({
+  title,
+  description,
+  isLoading,
+  isFetching,
+  isEmpty,
+  error,
+  rows,
+  categoryKey,
+  colors,
+  categoryOrder,
+  helpContent,
+  helpTitle,
+}: StackedHourlyBarChartProps<R>) {
+  const traces = React.useMemo((): PlotlyTrace[] => {
+    const presentHours = Array.from(new Set(rows.map((r) => r.hour))).sort()
+    const xGrid = denseTimeGrid(presentHours, 3600) ?? presentHours
+    const cats =
+      categoryOrder ??
+      Array.from(new Set(rows.map((r) => String(r[categoryKey]))))
+    return cats.map((cat) =>
+      denseBarTrace({
+        name: cat,
+        rows: rows.filter((r) => String(r[categoryKey]) === cat),
+        getTime: (r) => r.hour,
+        getValue: (r) => r.count,
+        intervalSeconds: 3600,
+        color: colors[cat] ?? '#64748b',
+        grid: xGrid,
+      }),
+    )
+  }, [rows, categoryKey, colors, categoryOrder])
+
+  return (
+    <AnalyticsCard
+      title={title}
+      description={description}
+      isLoading={isLoading}
+      isFetching={isFetching}
+      isEmpty={isEmpty}
+      error={error}
+      className="min-h-[320px]"
+      helpContent={helpContent}
+      helpTitle={helpTitle}
+    >
+      <PlotlyChart
+        data={traces}
+        layout={{
+          barmode: 'stack',
+          showlegend: true,
+          margin: { l: 50, r: 20, t: 10, b: 40 },
+          xaxis: { title: '', type: 'date' },
+          yaxis: { title: 'Requests', separatethousands: true, exponentformat: 'none' },
+        }}
+        height="100%"
+      />
+    </AnalyticsCard>
+  )
+}
+
+interface ComplianceChartProps {
+  serviceId: string
+  sinceHours?: number
+}
+
+type CompRow = components['schemas']['ScoringComplianceRow']
+
+const COMPLIANCE_COLORS: Record<string, string> = {
+  ok: CHART_COLORS.success,
+  missing: CHART_COLORS.neutral,
+  tampered: '#e11d48',
+  expired: CHART_COLORS.warning,
+  unknown: '#7c3aed',
+}
+
+export function ComplianceChart({ serviceId, sinceHours = 24 }: ComplianceChartProps) {
+  const { data, isLoading, isFetching, isError, error } = useScoringQuery(['scoring-compliance', serviceId, sinceHours], () =>
+    client.GET('/api/services/{service_id}/scoring/compliance-breakdown', {
+      params: { path: { service_id: serviceId }, query: { since_hours: sinceHours } },
+    }),
+  )
+
+  return (
+    <StackedHourlyBarChart<CompRow>
+      title={`Cookie compliance — last ${sinceHours}h`}
+      description="Breakdown of edge_cookie_compliance per hour. 'missing' is the canonical bot signal (no cookie at all); 'tampered' is the post-cookie threat (someone modified the payload)."
+      helpContent={<ComplianceHelp />}
+      helpTitle="About Cookie Compliance"
+      isLoading={isLoading}
+      isFetching={isFetching}
+      error={isError ? (error as AnalyticsCardError) : null}
+      rows={data?.rows ?? []}
+      categoryKey="compliance"
+      colors={COMPLIANCE_COLORS}
+    />
+  )
+}
+
+interface ScoreDistChartProps {
+  serviceId: string
+  sinceHours?: number
+}
+
+type DistRow = components['schemas']['ScoringDistributionRow']
+
+const BUCKETS = ['0-25', '25-50', '50-75', '75-100'] as const
+const BUCKET_COLORS: Record<(typeof BUCKETS)[number], string> = {
+  '0-25': CHART_COLORS.neutral,
+  '25-50': '#facc15',
+  '50-75': '#fb923c',
+  '75-100': '#e11d48',
+}
+
+export function ScoreDistChart({ serviceId, sinceHours = 24 }: ScoreDistChartProps) {
+  const { data, isLoading, isFetching, isError, error } = useScoringQuery(['scoring-score-dist', serviceId, sinceHours], () =>
+    client.GET('/api/services/{service_id}/scoring/score-distribution', {
+      params: { path: { service_id: serviceId }, query: { since_hours: sinceHours } },
+    }),
+  )
+
+  return (
+    <StackedHourlyBarChart<DistRow>
+      title={`Score distribution — last ${sinceHours}h`}
+      description="Hourly counts of scored requests, bucketed by edge_score. Heavy red is the alarming bucket — sessions VCL would block under a strict policy."
+      helpContent={<ScoreDistHelp />}
+      helpTitle="About Score Distribution"
+      isLoading={isLoading}
+      isFetching={isFetching}
+      isEmpty={(data?.rows?.length ?? 0) === 0}
+      error={isError ? (error as AnalyticsCardError) : null}
+      rows={data?.rows ?? []}
+      categoryKey="bucket"
+      colors={BUCKET_COLORS}
+      categoryOrder={BUCKETS}
+    />
+  )
+}
+
+type Derived = ReturnType<typeof deriveScorerSeries>
+
+interface ScorerSeriesCardProps {
+  serviceId: string
+  sinceHours: number
+  title: string
+  description: (perMinute: boolean) => string
+  help: ReactNode
+  helpTitle: string
+  a11yTitle: string
+  toggle: { id: string; label: string }
+  build: (series: Derived & { data: LatencyResponse | undefined }, toggleOn: boolean) => {
+    traces: PlotlyTrace[]
+    layout: PlotlyLayout
+  }
+  showToggle?: (series: Derived & { data: LatencyResponse | undefined }) => boolean
+  placeholder?: (series: Derived & { data: LatencyResponse | undefined }) => ReactNode | null
+}
+
+export function ScorerSeriesCard({
+  serviceId,
+  sinceHours,
+  title,
+  description,
+  help,
+  helpTitle,
+  a11yTitle,
+  toggle,
+  build,
+  showToggle,
+  placeholder,
+}: ScorerSeriesCardProps) {
+  const { data, isLoading, isFetching, isError, error } = useScorerTimeseries(serviceId, sinceHours)
+  const [toggleOn, setToggleOn] = useState(true)
+
+  const series = { ...deriveScorerSeries(data), data }
+  const { rows, perMinute } = series
+  const { traces, layout } = build(series, toggleOn)
+  const offerToggle = rows.length > 0 && (showToggle ? showToggle(series) : true)
+  const replacement = placeholder?.(series) ?? null
+
+  return (
+    <AnalyticsCard
+      title={title}
+      description={description(perMinute)}
+      helpContent={help}
+      helpTitle={helpTitle}
+      isLoading={isLoading}
+      isFetching={isFetching}
+      isEmpty={rows.length === 0}
+      error={isError ? (error as AnalyticsCardError) : null}
+      className="min-h-[320px]"
+      headerAction={
+        offerToggle ? (
+          <div className="flex items-center gap-2 mr-1">
+            <Switch id={toggle.id} checked={toggleOn} onCheckedChange={setToggleOn} />
+            <Label htmlFor={toggle.id} className="text-xs font-normal cursor-pointer select-none text-muted-foreground hover:text-foreground">
+              {toggle.label}
+            </Label>
+          </div>
+        ) : undefined
+      }
+    >
+      {replacement ?? <PlotlyChart data={traces} layout={layout} height="100%" a11yTitle={a11yTitle} />}
+    </AnalyticsCard>
+  )
+}
+
+interface ScorerErrorsChartProps {
+  serviceId: string
+  sinceHours?: number
+}
+
+function roundToTwo(num: number): number {
+  return Math.round((num + Number.EPSILON) * 100) / 100
+}
+
+export function ScorerErrorsChart({ serviceId, sinceHours = 24 }: ScorerErrorsChartProps) {
+  return (
+    <ScorerSeriesCard
+      serviceId={serviceId}
+      sinceHours={sinceHours}
+      title={`Scorer errors — last ${sinceHours}h`}
+      description={(perMinute) =>
+        `Fail-open errors — requests that timed out or failed auth and were let through unscored.${perMinute ? ' Bucketed per minute.' : ''}`}
+      help={<ScorerErrorsHelp />}
+      helpTitle="About Scorer Errors"
+      a11yTitle={`Scorer fail-open errors over the last ${sinceHours} hours`}
+      toggle={{ id: 'show-rate', label: 'Show rate (%)' }}
+      build={({ rows, hours, perMinute }, showRate) => {
+        const errorTrace = denseBarTrace({
+          name: 'Fail-opens',
+          rows,
+          getTime: (r) => r.hour,
+          getValue: (r) => r.fail_open_count,
+          intervalSeconds: perMinute ? 60 : 3600,
+          color: 'rgba(225,29,72,0.45)',
+        })
+        const rateTrace = lineTrace({
+          name: 'Error rate (%)',
+          x: hours,
+          y: rows.map((r) => {
+            const total = r.total_count ?? 0
+            return total > 0 ? roundToTwo(((r.fail_open_count ?? 0) / total) * 100) : 0
+          }),
+          color: '#e11d48',
+          yaxis: 'y2',
+        })
+        const base = scorerHourlyLayout(perMinute, 'Fail-opens', showRate)
+        return {
+          traces: [errorTrace, ...(showRate ? [rateTrace] : [])],
+          layout: showRate ? withSecondaryAxis(base, 'Error rate (%)', { ticksuffix: '%' }) : base,
+        }
+      }}
+    />
+  )
+}
+
+interface ScorerLatencyChartProps {
+  serviceId: string
+  sinceHours?: number
+}
+
+const LATENCY_SERIES: {
+  name: string
+  get: (r: LatencyRow) => number | null | undefined
+  color: string
+  dash?: 'dot' | 'dash'
+}[] = [
+  { name: 'p50 rtt', get: (r) => r.rtt_p50_us, color: '#60a5fa' },
+  { name: 'p95 rtt', get: (r) => r.rtt_p95_us, color: CHART_COLORS.info },
+  { name: 'p99 rtt', get: (r) => r.rtt_p99_us, color: '#1d4ed8' },
+  { name: 'p50 exec', get: (r) => r.exec_p50_us, color: '#34d399', dash: 'dot' },
+  { name: 'p95 exec', get: (r) => r.exec_p95_us, color: CHART_COLORS.success, dash: 'dot' },
+]
+
+export function ScorerLatencyChart({ serviceId, sinceHours = 24 }: ScorerLatencyChartProps) {
+  const hasLatency = ({ data, rows }: { data?: { has_latency?: boolean }; rows: LatencyRow[] }) =>
+    (data?.has_latency ?? false) && rows.some((r) => r.rtt_p95_us != null)
+
+  return (
+    <ScorerSeriesCard
+      serviceId={serviceId}
+      sinceHours={sinceHours}
+      title={`Scorer latency — last ${sinceHours}h`}
+      description={(perMinute) =>
+        `Edge round-trip (p50/p95/p99) vs Wasm exec (dashed) for the Compute scorer leg.${perMinute ? ' Bucketed per minute.' : ''}`}
+      help={<ScorerLatencyHelp />}
+      helpTitle="About Scorer Latency"
+      a11yTitle={`Scorer latency percentiles over the last ${sinceHours} hours`}
+      toggle={{ id: 'show-volume', label: 'Show volume' }}
+      showToggle={hasLatency}
+      placeholder={(series) =>
+        series.rows.length > 0 && !hasLatency(series) ? (
+          <div className="flex h-full items-center justify-center p-4 text-center">
+            <p className="max-w-xs text-xs text-muted-foreground">
+              Waiting for traffic logged with the scorer latency fields (
+              <code>edge_score_rtt_us</code> / <code>edge_score_exec_us</code>). These are added to the
+              log format on enable and fill in once scored requests flow through and are ingested.
+            </p>
+          </div>
+        ) : null}
+      build={({ rows, hours, perMinute }, showVolume) => {
+        const volumeTrace = denseBarTrace({
+          name: 'Inspected requests',
+          rows,
+          getTime: (r) => r.hour,
+          getValue: (r) => r.total_count,
+          intervalSeconds: perMinute ? 60 : 3600,
+          color: 'rgba(148, 163, 184, 0.12)',
+          yaxis: 'y2',
+          showlegend: true,
+        })
+        const latencyTraces = LATENCY_SERIES.map((s) =>
+          lineTrace({
+            name: s.name,
+            x: hours,
+            y: rows.map((r) => usToMs(s.get(r))),
+            color: s.color,
+            dash: s.dash,
+            connectgaps: true,
+          }),
+        )
+        const base = scorerHourlyLayout(perMinute, 'Round-trip / exec (ms)', true)
+        return {
+          traces: [...(showVolume ? [volumeTrace] : []), ...latencyTraces],
+          layout: showVolume ? withSecondaryAxis(base, 'Inspected requests') : base,
+        }
+      }}
+    />
   )
 }

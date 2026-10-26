@@ -1,4 +1,6 @@
 import datetime
+import json
+import os
 import re
 import shutil
 import sys
@@ -55,8 +57,6 @@ __all__ = [
     "validate_rum_custom_condition",
 ]
 
-# ── VCL Edge Data Mapping ───────────────────────────────────────────────────
-
 SESSION_COOKIE_ALLOWLIST: tuple[str, ...] = (
     "sessionid",
     "PHPSESSID",
@@ -107,19 +107,42 @@ EDGE_DATA_MAPPING = {
     "q_rtt_var": 'if(transport.type == "quic", "" + quic.rtt.variance, "null")',
     "q_lost": 'if(transport.type == "quic", "" + quic.num_packets.lost, "null")',
     "q_cwnd": 'if(transport.type == "quic", "" + quic.cc.cwnd, "null")',
-    # Group C — Infrastructure (captured at edge for shield-safe accuracy)
     "srv_region": "server.region",
     "is_ipv6": 'if(req.is_ipv6, "1", "0")',
     "conn_reqs": 'if(client.requests > 0, "" + client.requests, "null")',
-    # Group G — Network Quality Deep (socket variables only valid at true edge PoP)
     "del_rate": 'if(client.socket.tcpi_delivery_rate > 0, "" + client.socket.tcpi_delivery_rate, "null")',
     "data_segs": 'if(client.socket.tcpi_data_segs_out > 0, "" + client.socket.tcpi_data_segs_out, "null")',
-    # Group H — Security: TLS Fingerprinting (TLS state only valid at true edge PoP)
     "tls_csha": "tls.client.ciphers_list_sha",
-    # Group H — Security: hashed session-cookie id (PRIVACY: hashed at edge; the
-    # raw cookie value is never logged or forwarded). See SESSION_COOKIE_ALLOWLIST.
     "cookie_session": _session_cookie_hash_vcl(),
 }
+
+_SCRUB_HEADERS = (
+    "x-is-cluster-fetch",
+    "x-fos-edge-data",
+    "x-fos-origin-data",
+    "x-of-start",
+    "x-of-ttfb",
+    "x-of-ttlb",
+    "x-of-connect",
+    "x-of-ost",
+    "x-of-oip",
+    "x-of-oretries",
+    "x-of-status",
+    "x-edge-req-id",
+    "x-fos-io-ifsz",
+    "x-fos-io-ofsz",
+    "x-fos-io-ifmt",
+    "x-fos-io-ofmt",
+    "X-Edge-Scoring-Pass",
+    "x-edge-score",
+    "X-Edge-Score",
+    "X-Edge-Score-Reason",
+    "X-Edge-Score-Enforce",
+    "X-Edge-Sid",
+    "X-Edge-Score-Set-Cookie",
+    "X-Edge-Prev-Anchor",
+    "x-sigsci-skip-inspection-once",
+)
 
 
 def _resolve_enabled_custom_fields(log_fields_config: dict | None) -> list[dict]:
@@ -131,40 +154,11 @@ def _resolve_enabled_custom_fields(log_fields_config: dict | None) -> list[dict]
 
 def get_scrub_vcl_statements(log_fields_config: dict | None) -> list[str]:
     """Generate pure VCL statements to strip client-supplied internal headers."""
-    enabled_custom = _resolve_enabled_custom_fields(log_fields_config)
-    lines = [
-        "unset req.http.x-is-cluster-fetch;",
-        "unset req.http.x-fos-edge-data;",
-        "unset req.http.x-fos-origin-data;",
-        "unset req.http.x-of-start;",
-        "unset req.http.x-of-ttfb;",
-        "unset req.http.x-of-ttlb;",
-        "unset req.http.x-of-connect;",
-        "unset req.http.x-of-ost;",
-        "unset req.http.x-of-oip;",
-        "unset req.http.x-of-oretries;",
-        "unset req.http.x-of-status;",
-        "unset req.http.x-edge-req-id;",
-        "unset req.http.x-fos-io-ifsz;",
-        "unset req.http.x-fos-io-ofsz;",
-        "unset req.http.x-fos-io-ifmt;",
-        "unset req.http.x-fos-io-ofmt;",
-        "unset req.http.X-Edge-Scoring-Pass;",
-        "unset req.http.x-edge-score;",
-        "unset req.http.X-Edge-Score;",
-        "unset req.http.X-Edge-Score-Reason;",
-        "unset req.http.X-Edge-Score-Enforce;",
-        "unset req.http.X-Edge-Sid;",
-        "unset req.http.X-Edge-Score-Set-Cookie;",
-        "unset req.http.X-Edge-Prev-Anchor;",
-        "unset req.http.x-sigsci-skip-inspection-once;",
-    ]
-    if enabled_custom:
-        for cf in enabled_custom:
-            name = cf["name"]
-            lines.append(f"unset req.http.x-fos-edge-data:{name};")
-            lines.append(f"unset req.http.x-fos-origin-data:{name};")
-            lines.append(f"unset req.http.x-edge-score:{name};")
+    lines = [f"unset req.http.{h};" for h in _SCRUB_HEADERS]
+    for cf in _resolve_enabled_custom_fields(log_fields_config):
+        name = cf["name"]
+        for prefix in ("x-fos-edge-data", "x-fos-origin-data", "x-edge-score"):
+            lines.append(f"unset req.http.{prefix}:{name};")
     return lines
 
 
@@ -173,13 +167,12 @@ def get_capture_vcl_statements(log_fields_config: dict | None) -> list[str]:
     log_fields_config = log_fields_config or {}
     from backend.core.log_fields import get_required_edge_headers
 
-    raw_required = get_required_edge_headers(log_fields_config)
-    required = set(raw_required)
-    required.discard("ip")
+    required = set(get_required_edge_headers(log_fields_config)) - {"ip"}
     group_l = "L" in (log_fields_config.get("groups") or [])
     limits = log_fields_config.get("field_limits") or {}
-    enabled_custom = _resolve_enabled_custom_fields(log_fields_config)
-    custom_edge = [cf for cf in enabled_custom if cf.get("collection_stage", "edge") == "edge"]
+    custom_edge = [
+        cf for cf in _resolve_enabled_custom_fields(log_fields_config) if cf.get("collection_stage", "edge") == "edge"
+    ]
 
     lines = [
         "if (req.http.Fastly-Client-IP) {",
@@ -191,17 +184,12 @@ def get_capture_vcl_statements(log_fields_config: dict | None) -> list[str]:
     for key in sorted(required):
         if key in EDGE_DATA_MAPPING:
             expr = EDGE_DATA_MAPPING[key]
-            if key == "ua":
-                limit = limits.get("ua", 1000)
-                expr = f"substr({expr}, 0, {limit})"
-            elif key == "referer":
-                limit = limits.get("referer", 1000)
-                expr = f"substr({expr}, 0, {limit})"
+            if key in ("ua", "referer"):
+                expr = f"substr({expr}, 0, {limits.get(key, 1000)})"
             lines.append(f"set req.http.x-fos-edge-data:{key} = {expr};")
 
-    if custom_edge:
-        for cf in custom_edge:
-            lines.append(f"set req.http.x-fos-edge-data:{cf['name']} = {cf['vcl_log_expression']};")
+    for cf in custom_edge:
+        lines.append(f"set req.http.x-fos-edge-data:{cf['name']} = {cf['vcl_log_expression']};")
 
     if group_l:
         lines.append("set req.http.x-req-id = randomstr(8);")
@@ -218,75 +206,18 @@ def generate_capture_vcl(
     cmcd_mode: str = "query_string",
     cmcd_version: int = 1,
 ) -> dict[str, str]:
-    """Return dict of VCL snippets keyed by subroutine name.
-
-    Always returns "recv", "miss", and "pass". When group L (Origin Metrics)
-    is enabled, also returns "fetch", "error", and "deliver".
-
-    ``log_fields_config`` accepts ``None`` because most callers pass the
-    raw ``cfg.get("log_fields")`` value; coerced to ``{}`` at the top so
-    downstream calls don't have to repeat the None-check.
-    """
+    """Return dict of VCL snippets keyed by subroutine name."""
     log_fields_config = log_fields_config or {}
     raw_required = lf.get_required_edge_headers(log_fields_config)
-    required = set(raw_required)
-    required.discard("ip")
     group_l = "L" in (log_fields_config.get("groups") or [])
     group_m = "M" in (log_fields_config.get("groups") or [])
-    limits = log_fields_config.get("field_limits") or {}
 
     enabled_custom = _resolve_enabled_custom_fields(log_fields_config)
-
-    custom_edge = [cf for cf in enabled_custom if cf.get("collection_stage", "edge") == "edge"]
     custom_origin = [cf for cf in enabled_custom if cf.get("collection_stage", "edge") == "origin"]
-    # "deliver" stage: capture from response headers in vcl_deliver and
-    # promote into req.http.x-fos-edge-data:* so the same log-format
-    # consumer that handles edge-stage fields picks them up. Used by the
-    # session-scoring integration to capture X-Edge-Score* response headers
-    # from the scorer Compute backend.
     custom_deliver = [cf for cf in enabled_custom if cf.get("collection_stage", "edge") == "deliver"]
 
-    # Security: scrub internal-routing headers a client could spoof.
-    # The cluster-fetch / edge-data headers are set by THIS service's own
-    # snippets on the origin-bound bereq (vcl_miss / vcl_pass) and must
-    # never appear on an inbound req. Without this scrub, a client header
-    # like ``x-is-cluster-fetch: 1`` makes the conditional in vcl_deliver
-    # incorrectly classify the response as internal-cluster traffic and
-    # SKIP the "strip internal headers" cleanup — leaking origin-side
-    # metric headers (x-of-oip = origin backend IP, x-of-ttfb, etc.) to
-    # the client. Run BEFORE the edge-capture conditional so even
-    # configurations without any group-L / custom fields get the scrub.
-    # 020: Build scrub as a list so we can append per-custom-field
-    # unsets. ``unset req.http.x-fos-edge-data;`` strips the bare
-    # header but does NOT strip arbitrary subfield variants
-    # (``req.http.x-fos-edge-data:my_field``) on Fastly VCL — those
-    # are independent header slots once the colon-subfield syntax is
-    # in play. A client that knows a custom-field name (and they often
-    # leak through CSP, error pages, or just by being mentioned in
-    # public docs) can pre-set ``x-fos-edge-data:<field>`` and have
-    # the log line read the spoofed value instead of the edge-captured
-    # one. Per-name scrubs close the gap.
-    # Edge-hop detection (restart-invariant). ``fastly.ff.visits_this_service``
-    # is 0 only at the first Fastly POP to handle the request (the true edge);
-    # a client cannot forge it (each Fastly-FF entry is a salted hash only
-    # genuine Fastly hops can produce), so it can't fake having already transited
-    # our edge. Stays correct even when the nearest POP is a shield — that POP is
-    # simply the first hop, so visits_this_service is still 0 there. This mirrors
-    # the CDN fronting service (core/fastly/utils.py) and the scoring VCL.
     edge_detect = "fastly.ff.visits_this_service == 0"
-    # SCRUB runs only on the FIRST edge pass: it strips client-forged headers
-    # before anything trusts them. It must stay req.restarts == 0 so it does not
-    # re-run on the post-scoring-restart pass (where it would risk wiping the
-    # score headers the scoring deliver snippet stashed).
     scrub_guard = f"req.restarts == 0 && {edge_detect}"
-    # CAPTURE must run on the FINAL edge pass. Session scoring restarts the
-    # request (req.restarts 0→1); gating capture on req.restarts == 0 leaves
-    # scored requests with no url/ua/geo and edge != true, and EVERY scoring view
-    # filters WHERE edge = true → Fire Rate 0%. When scoring is enabled, drop the
-    # restarts clause so the post-restart edge pass captures; edge_detect alone
-    # still scopes it to the edge hop, and the first-pass scrub already removed
-    # any client-forged values so capturing on the later pass is safe.
-    capture_guard = edge_detect
 
     scrub_lines = [
         "# [security] strip client-supplied internal-routing headers",
@@ -299,29 +230,17 @@ def generate_capture_vcl(
         scrub_lines.append("  # Mint a per-request ID for RUM beacons on fresh requests")
         scrub_lines.append("  set req.http.x-rum-req-id = randomstr(12);")
 
-    # CMCD extraction MUST be emitted BEFORE the capture statements below.
-    # Capture copies ``req.http.x-cmcd:<key>`` into
-    # ``req.http.x-fos-edge-data:cmcd_<key>`` (that promoted header is what the
-    # log format reads). Extracting afterwards copies EMPTY strings, so every
-    # cmcd_* column logs empty while the extraction itself works perfectly —
-    # provable at the edge, because it still strips ?CMCD= from the cache key.
-    # That silent ordering inversion is the 2026-08 CMCD-collection outage; it
-    # survived a month because nothing errors and the columns exist.
+    # CMCD extraction MUST precede capture statements so x-cmcd:<key> is populated before copy.
     if cmcd_enabled:
         from backend.provision.orchestrator import generate_cmcd_vcl
 
-        cmcd_vcl_dict = generate_cmcd_vcl(mode=cmcd_mode, version=cmcd_version)
-        cmcd_body = next(iter(cmcd_vcl_dict.values()))
-        cmcd_lines = [
-            "  # Section 3: CMCD Extraction (vcl_recv) — must precede field capture",
-        ]
+        cmcd_body = next(iter(generate_cmcd_vcl(mode=cmcd_mode, version=cmcd_version).values()))
+        cmcd_lines = ["  # Section 3: CMCD Extraction (vcl_recv) — must precede field capture"]
         for line in cmcd_body.splitlines():
             if line.strip():
                 cmcd_lines.append(f"  {line}")
-            else:
-                # Avoid consecutive empty lines to keep it clean, but keep a single empty line if there's code above
-                if cmcd_lines and cmcd_lines[-1] != "":
-                    cmcd_lines.append("")
+            elif cmcd_lines and cmcd_lines[-1] != "":
+                cmcd_lines.append("")
         if cmcd_lines and cmcd_lines[-1] == "":
             cmcd_lines.pop()
         scrub_lines.extend(cmcd_lines)
@@ -349,78 +268,66 @@ def generate_capture_vcl(
         from backend.provision.session_scoring_vcl import SCORING_BACKEND_VCL_NAME, resolve_exclude_url_regex
 
         effective_regex = resolve_exclude_url_regex(scoring_exclude_url_regex)
-        routing_lines = [
-            "  # Section 4: Session Scoring (vcl_recv)",
-            "  # Session Scoring: route the first-pass dynamic request to the scorer.",
-            "  # Edge-only — fastly.ff.visits_this_service == 0 is true only at the true",
-            "  # edge; at a shield POP it is > 0, so the shield skips this block and the",
-            "  # real-origin pass is served from the shield normally. Unforgeable, so a",
-            "  # client cannot fake having already transited our edge.",
-            "  #",
-            "  # DDoS bypass (fastly.ddos_detected): when Fastly's L7 DDoS detection",
-            "  # flags this request, do NOT route to Compute. Two reasons:",
-            "  #   1. Cost ceiling — under attack, Compute invocations scale linearly",
-            "  #      with attack volume. Skipping flagged requests caps the blast",
-            "  #      radius while NGWAF / Fastly's mitigation handles the actual block.",
-            "  #   2. Signal quality — the scorer's L2 transition matrix learns from",
-            "  #      benign traffic shapes; feeding attack traffic in pollutes the",
-            "  #      matrix even though those scores wouldn't be acted on.",
-            "  # See: https://www.fastly.com/documentation/reference/vcl/variables/miscellaneous/fastly-ddos-detected/",
-            f'  if (req.http.X-Edge-Scoring-Pass != "1" && !fastly.ddos_detected && std.tolower(req.url) !~ "{effective_regex}") {{',
-            f"    set req.backend = {SCORING_BACKEND_VCL_NAME};",
-            "    # Skip NGWAF inspection on the scoring sub-fetch ONLY. The scorer is",
-            "    # payload-agnostic — it strips the query string and scores the path — so",
-            "    # inspecting this preflight hop is pure cost, and worse: NGWAF 406s attack",
-            "    # URLs here, turning every blocked request into a scorer fail-open",
-            "    # (compute-unavailable-406) even though the scorer never sees the payload.",
-            "    # NGWAF's edge_security (vcl_miss/pass, priority 150) reads this on bereq",
-            "    # AFTER our Session Scoring - Pass (priority 100), skips inspection, and",
-            "    # self-unsets its bereq copy. The real-origin pass after the restart stays",
-            "    # fully inspected — the persisted req.http copy is unset on the restart",
-            "    # path below.",
-            '    set req.http.x-sigsci-skip-inspection-once = "true";',
-            '    set req.http.X-Edge-Scoring-Pass = "1";',
-            "    # Stamp the round-trip start (µs since request receipt) so pass-1 deliver",
-            "    # can compute edge-observed scorer latency (edge_score_rtt_us). Mirrors",
-            "    # the x-of-start TTFB/TTLB idiom in fastly_api.generate_capture_vcl —",
-            "    # that timer deliberately SKIPS the scoring sub-fetch, so this stamp is",
-            "    # the only place the scorer leg is timed.",
-            "    set req.http.x-edge-score-t0 = time.elapsed.usec;",
-            "    # PASS — skip cache for the scoring sub-fetch. On the post-restart",
-            "    # pass the scoring snippet doesn't re-fire because X-Edge-Scoring-Pass",
-            "    # got unset in pass-1 deliver and req.restarts is now 1.",
-            "    return(pass);",
-            "  }",
-        ]
-        scrub_lines.extend(routing_lines)
+        scrub_lines.extend(
+            [
+                "  # Section 4: Session Scoring (vcl_recv)",
+                "  # Session Scoring: route the first-pass dynamic request to the scorer.",
+                "  # Edge-only — fastly.ff.visits_this_service == 0 is true only at the true",
+                "  # edge; at a shield POP it is > 0, so the shield skips this block and the",
+                "  # real-origin pass is served from the shield normally. Unforgeable, so a",
+                "  # client cannot fake having already transited our edge.",
+                "  #",
+                "  # DDoS bypass (fastly.ddos_detected): when Fastly's L7 DDoS detection",
+                "  # flags this request, do NOT route to Compute. Two reasons:",
+                "  #   1. Cost ceiling — under attack, Compute invocations scale linearly",
+                "  #      with attack volume. Skipping flagged requests caps the blast",
+                "  #      radius while NGWAF / Fastly's mitigation handles the actual block.",
+                "  #   2. Signal quality — the scorer's L2 transition matrix learns from",
+                "  #      benign traffic shapes; feeding attack traffic in pollutes the",
+                "  #      matrix even though those scores wouldn't be acted on.",
+                "  # See: https://www.fastly.com/documentation/reference/vcl/variables/miscellaneous/fastly-ddos-detected/",
+                f'  if (req.http.X-Edge-Scoring-Pass != "1" && !fastly.ddos_detected && std.tolower(req.url) !~ "{effective_regex}") {{',
+                f"    set req.backend = {SCORING_BACKEND_VCL_NAME};",
+                "    # Skip NGWAF inspection on the scoring sub-fetch ONLY. The scorer is",
+                "    # payload-agnostic — it strips the query string and scores the path — so",
+                "    # inspecting this preflight hop is pure cost, and worse: NGWAF 406s attack",
+                "    # URLs here, turning every blocked request into a scorer fail-open",
+                "    # (compute-unavailable-406) even though the scorer never sees the payload.",
+                "    # NGWAF's edge_security (vcl_miss/pass, priority 150) reads this on bereq",
+                "    # AFTER our Session Scoring - Pass (priority 100), skips inspection, and",
+                "    # self-unsets its bereq copy. The real-origin pass after the restart stays",
+                "    # fully inspected — the persisted req.http copy is unset on the restart",
+                "    # path below.",
+                '    set req.http.x-sigsci-skip-inspection-once = "true";',
+                '    set req.http.X-Edge-Scoring-Pass = "1";',
+                "    # Stamp the round-trip start (µs since request receipt) so pass-1 deliver",
+                "    # can compute edge-observed scorer latency (edge_score_rtt_us). Mirrors",
+                "    # the x-of-start TTFB/TTLB idiom in fastly_api.generate_capture_vcl —",
+                "    # that timer deliberately SKIPS the scoring sub-fetch, so this stamp is",
+                "    # the only place the scorer leg is timed.",
+                "    set req.http.x-edge-score-t0 = time.elapsed.usec;",
+                "    # PASS — skip cache for the scoring sub-fetch. On the post-restart",
+                "    # pass the scoring snippet doesn't re-fire because X-Edge-Scoring-Pass",
+                "    # got unset in pass-1 deliver and req.restarts is now 1.",
+                "    return(pass);",
+                "  }",
+            ]
+        )
 
     scrub_lines.append("}")
     recv_vcl = VclBuilder.join_lines(scrub_lines)
 
-    # miss and pass: unset edge headers + optional group-L timing
     base_unset_lines = ["if (req.backend.is_origin) {", "  unset bereq.http.x-fos-edge-data;"]
     if scoring_enabled:
-        base_unset_lines.append("  unset bereq.http.x-edge-score;")
-        base_unset_lines.append("  unset bereq.http.X-Edge-Scoring-Pass;")
+        base_unset_lines.extend(["  unset bereq.http.x-edge-score;", "  unset bereq.http.X-Edge-Scoring-Pass;"])
     base_unset_lines.append("}")
     base_unset = VclBuilder.join_lines(base_unset_lines) + "\n"
-
-    # Session-scoring services route the first-pass request to the scorer
-    # Compute backend via `return(pass)` in vcl_recv. That triggers the
-    # PASS subroutine for the scorer fetch, which would otherwise capture
-    # x-of-start AT THE SCORER FETCH TIME — polluting the eventual TTFB/
-    # TTLB numbers with scorer-leg latency. The X-Edge-Scoring-Pass=="1"
-    # marker (set by session_scoring_vcl.recv_snippet just before the
-    # `return(pass)`) is our discriminator. Non-scoring services never set
-    # this header, so the guard is always true and timing fires normally.
-    _scoring_guard_open = 'if (req.http.X-Edge-Scoring-Pass != "1") {\n'
-    _scoring_guard_close = "}\n"
 
     def _group_l_timing(label: str) -> str:
         return (
             f"\n# [group-L] Record timing start for {label} fetch\n"
-            + _scoring_guard_open
-            + "set req.http.x-of-start = time.elapsed.usec;\n"
+            'if (req.http.X-Edge-Scoring-Pass != "1") {\n'
+            "set req.http.x-of-start = time.elapsed.usec;\n"
             "unset bereq.http.x-of-start;\n"
             'set bereq.http.x-is-cluster-fetch = "1";\n'
             "if (req.http.x-edge-req-id) {\n"
@@ -428,29 +335,13 @@ def generate_capture_vcl(
             "} else if (req.http.x-req-id) {\n"
             "  set bereq.http.x-edge-req-id = req.http.x-req-id;\n"
             "}\n"
-            "unset bereq.http.x-req-id;\n" + _scoring_guard_close
+            "unset bereq.http.x-req-id;\n}\n"
         )
 
-    if group_l:
-        miss_vcl = base_unset + _group_l_timing("origin")
-        pass_vcl = base_unset + _group_l_timing("PASS")
-    else:
-        miss_vcl = base_unset
-        pass_vcl = base_unset
-
+    miss_vcl = base_unset + _group_l_timing("origin") if group_l else base_unset
+    pass_vcl = base_unset + _group_l_timing("PASS") if group_l else base_unset
     snippets: dict[str, str] = {"recv": recv_vcl, "miss": miss_vcl, "pass": pass_vcl}
 
-    # Reset any client-supplied Fastly-Client-IP at the true edge so a spoofed
-    # inbound header cannot poison the captured client IP. This is its OWN
-    # snippet installed at priority -100 (see CAPTURE_SNIPPET_PLAN) — ahead of
-    # operator VCL and the priority-1 capture — so operator VCL may rewrite
-    # Fastly-Client-IP to the real source IP *after* this runs (e.g. a service
-    # behind a fronting proxy that carries the origin client in X-Source-Ip).
-    # The "ip" capture expression (EDGE_DATA_MAPPING) then trusts a present
-    # Fastly-Client-IP and falls back to client.ip otherwise. Gated on the same
-    # first-edge-pass guard as the header scrub so it neither runs at a shield
-    # POP (which must keep the forwarded value) nor re-wipes after a
-    # session-scoring restart. Only emitted when the client IP is edge-captured.
     if "ip" in raw_required:
         snippets["recv_reset"] = (
             "# [security] Drop a client-supplied Fastly-Client-IP at the true edge so a\n"
@@ -467,17 +358,11 @@ def generate_capture_vcl(
         if group_l:
             fetch_lines.append(
                 "# [group-L] Record TTFB and capture origin metadata\n"
-                # Skip the scoring sub-fetch — we want TTFB for the real
-                # origin, not the scorer Compute backend.
                 'if (req.http.X-Edge-Scoring-Pass != "1" && req.http.x-of-start != "") {\n'
                 "  declare local var.fetch_ttfb INTEGER;\n"
                 "  set var.fetch_ttfb = std.atoi(time.elapsed.usec);\n"
                 "  set var.fetch_ttfb -= std.atoi(req.http.x-of-start);\n"
                 "  set req.http.x-of-ttfb = var.fetch_ttfb;\n"
-                # Backend connect/handshake latency (TCP+TLS) to origin/shield,
-                # distinct from TTFB. beresp.* is only readable in vcl_fetch, so
-                # this is the one place it can be captured; it stays null on the
-                # error path (vcl_error has no beresp) and on HITs.
                 "  set req.http.x-of-connect  = beresp.handshake_time_to_origin_ms;\n"
                 "  set req.http.x-of-status   = beresp.status;\n"
                 "  set req.http.x-of-oip      = beresp.backend.ip;\n"
@@ -488,29 +373,26 @@ def generate_capture_vcl(
             fetch_lines.append("# --- Custom Origin Fields Start ---")
             fetch_lines.append("if (req.backend.is_origin) {")
             for cf in custom_origin:
-                # Capture into beresp so it gets cached with the object
                 fetch_lines.append(f"  set beresp.http.x-fos-origin-data:{cf['name']} = {cf['vcl_log_expression']};")
             fetch_lines.append("}")
             fetch_lines.append("# --- Custom Origin Fields End ---")
         snippets["fetch"] = VclBuilder.join_lines(fetch_lines)
 
     if group_l:
-        error_lines = [
-            "# [group-L] Capture timing for failed origin fetches\n"
-            # Skip the scoring sub-fetch — a scorer error is fail-open
-            # handled by our session-scoring snippet and shouldn't
-            # pollute the customer's origin-error telemetry.
-            'if (req.http.X-Edge-Scoring-Pass != "1" && req.http.x-of-start != "") {\n'
-            "  declare local var.error_ttfb INTEGER;\n"
-            "  set var.error_ttfb = std.atoi(time.elapsed.usec);\n"
-            "  set var.error_ttfb -= std.atoi(req.http.x-of-start);\n"
-            "  set req.http.x-of-ttfb = var.error_ttfb;\n"
-            "  set req.http.x-of-status   = obj.status;\n"
-            "  set req.http.x-of-oip      = req.backend.ip;\n"
-            "  set req.http.x-of-oretries = req.restarts;\n"
-            "}"
-        ]
-        snippets["error"] = VclBuilder.join_lines(error_lines)
+        snippets["error"] = VclBuilder.join_lines(
+            [
+                "# [group-L] Capture timing for failed origin fetches\n"
+                'if (req.http.X-Edge-Scoring-Pass != "1" && req.http.x-of-start != "") {\n'
+                "  declare local var.error_ttfb INTEGER;\n"
+                "  set var.error_ttfb = std.atoi(time.elapsed.usec);\n"
+                "  set var.error_ttfb -= std.atoi(req.http.x-of-start);\n"
+                "  set req.http.x-of-ttfb = var.error_ttfb;\n"
+                "  set req.http.x-of-status   = obj.status;\n"
+                "  set req.http.x-of-oip      = req.backend.ip;\n"
+                "  set req.http.x-of-oretries = req.restarts;\n"
+                "}"
+            ]
+        )
 
     if group_l or group_m or custom_origin or custom_deliver:
         deliver_lines = []
@@ -532,8 +414,6 @@ def generate_capture_vcl(
             )
             deliver_lines.append(
                 "# [group-L] Record TTLB, capture bytes, strip all internal headers\n"
-                # Skip scoring sub-fetch — don't capture scorer-leg TTLB
-                # into the real-request's telemetry.
                 'if (req.http.X-Edge-Scoring-Pass != "1" && req.http.x-of-start != "") {\n'
                 "  declare local var.ttlb INTEGER;\n"
                 "  set var.ttlb = std.atoi(time.elapsed.usec);\n"
@@ -556,12 +436,7 @@ def generate_capture_vcl(
             )
 
         if group_m:
-            _m_stats = (
-                ("ifsz", "[0-9]+"),
-                ("ofsz", "[0-9]+"),
-                ("ifmt", "[a-zA-Z0-9]+"),
-                ("ofmt", "[a-zA-Z0-9]+"),
-            )
+            _m_stats = (("ifsz", "[0-9]+"), ("ofsz", "[0-9]+"), ("ifmt", "[a-zA-Z0-9]+"), ("ofmt", "[a-zA-Z0-9]+"))
             _m_hdrs = tuple(f"x-fos-io-{s}" for s, _ in _m_stats)
             _m_promote = "\n".join(
                 f'if (req.http.{h} == "" && resp.http.{h} != "") {{ set req.http.{h} = resp.http.{h}; }}'
@@ -594,35 +469,24 @@ def generate_capture_vcl(
             deliver_lines.append("# --- Custom Origin Fields Start ---")
             for cf in custom_origin:
                 name = cf["name"]
-                freq = cf.get("origin_log_frequency", "all")
                 deliver_lines.append(f'if (resp.http.x-fos-origin-data:{name} != "") {{')
-
-                if freq == "miss_pass":
+                if cf.get("origin_log_frequency", "all") == "miss_pass":
                     deliver_lines.append('  if (fastly_info.state !~ "HIT") {')
                     deliver_lines.append(
                         f"    set req.http.x-fos-origin-data:{name} = resp.http.x-fos-origin-data:{name};"
                     )
                     deliver_lines.append("  }")
                 else:
-                    # Promote to req so it's available in vcl_log
                     deliver_lines.append(
                         f"  set req.http.x-fos-origin-data:{name} = resp.http.x-fos-origin-data:{name};"
                     )
-
                 deliver_lines.append("}")
-                # Strip from client responses; keep in cluster responses so the edge node can read and cache it
                 deliver_lines.append('if (req.http.x-is-cluster-fetch != "1") {')
                 deliver_lines.append(f"  unset resp.http.x-fos-origin-data:{name};")
                 deliver_lines.append("}")
             deliver_lines.append("# --- Custom Origin Fields End ---")
 
         if custom_deliver:
-            # Deliver-stage fields read from the RESPONSE headers
-            # (e.g. resp.http.X-Edge-Score after a Compute scorer sub-fetch
-            # returned). The expression in vcl_log_expression points at the
-            # ``req.http.*`` slot the upstream snippet copied it into — same
-            # final namespace as edge fields, just captured a stage later in
-            # the request lifecycle.
             deliver_lines.append("# --- Custom Deliver Fields Start ---")
             for cf in custom_deliver:
                 name = cf["name"]
@@ -637,24 +501,13 @@ def generate_capture_vcl(
 
 
 def load_log_format(log_fields_config: dict = None) -> str:
-    """Return the log format as a single-line string.
-
-    A config that carries custom_fields but no groups/preset MUST still get the
-    standard groups. This happens when scoring is enabled on a service that was
-    provisioned with an empty log_fields (which relied on the standard-preset
-    fallback): adding the scoring custom_fields makes log_fields truthy, so a
-    plain ``log_fields_config or {standard}`` fallback never fires and
-    url/ua/geo/edge silently drop out of the log format (every non-base field
-    vanishes, leaving only base + scoring fields).
-    """
+    """Return the log format as a single-line string, defaulting to standard groups when unset."""
     cfg = dict(log_fields_config or {})
     if not cfg.get("groups") and not cfg.get("preset"):
         cfg["groups"] = lf.PRESETS["standard"]["groups"]
         cfg.setdefault("field_overrides", {})
     return lf.generate_log_format(cfg)
 
-
-import os
 
 FASTLY_LOG_FORMAT_SAFE_MAX = int(os.environ.get("FASTLY_LOG_FORMAT_SAFE_MAX") or "12000")
 
@@ -682,11 +535,8 @@ def validate_log_format(log_fields_config: dict = None) -> list[str]:
         ]
 
     if shutil.which("falco"):
-        vcl_snippets = generate_capture_vcl(log_fields_config)
-        valid, message = vcl_utils.lint_log_format(raw, vcl_snippets)
-        if not valid:
-            return [message]
-        return []
+        valid, message = vcl_utils.lint_log_format(raw, generate_capture_vcl(log_fields_config))
+        return [] if valid else [message]
 
     return _validate_log_format_regex(raw)
 
@@ -694,9 +544,7 @@ def validate_log_format(log_fields_config: dict = None) -> list[str]:
 def _validate_log_format_regex(raw: str) -> list[str]:
     """Regex-based fallback log format checks."""
     errors = []
-    expressions = re.findall(r"%\{(.*?)\}V", raw, re.DOTALL)
-
-    for expr in expressions:
+    for expr in re.findall(r"%\{(.*?)\}V", raw, re.DOTALL):
         bare_cond = re.search(r"\bif\s*\(\s*[><=!]", expr)
         if bare_cond:
             snippet = expr.strip()[:80].replace("\n", " ")
@@ -708,10 +556,8 @@ def _validate_log_format_regex(raw: str) -> list[str]:
             )
 
         for m in re.finditer(r"\bif\s*\(", expr):
-            rest = expr[m.start() :]
-            depth = 0
-            closed = False
-            for ch in rest:
+            depth, closed = 0, False
+            for ch in expr[m.start() :]:
                 if ch == "(":
                     depth += 1
                 elif ch == ")":
@@ -723,16 +569,12 @@ def _validate_log_format_regex(raw: str) -> list[str]:
                 snippet = expr.strip()[:80].replace("\n", " ")
                 errors.append(f"VCL syntax error — unclosed if() parenthesis in: %{{{snippet}}}V")
                 break
-
     return errors
 
 
-# Account-level edge rate-limiting entitlement. Fastly stamps this pragma into
-# the COMPILED (generated) VCL of every VCL service on an entitled account —
-# independent of whether that service's source VCL declares any ratecounters.
-# Matched on the literal `true` value so a `ratelimit_opt_in false` line (or the
-# pragma being absent) reads as "not entitled".
 _RATELIMIT_OPT_IN_RE = re.compile(r"ratelimit_opt_in\s+true\b")
+_FIX_UNSENT_BODY_DRAIN_RE = re.compile(r"fix_unsent_body_drain\s+true\b")
+_NO_BODY_IF_BEREQ_GET_OR_HEAD_RE = re.compile(r"no_body_if_bereq_is_get_or_head\s+true\b")
 
 
 def _fetch_active_generated_vcl(service_id: str, token: str) -> str | None:
@@ -743,60 +585,22 @@ def _fetch_active_generated_vcl(service_id: str, token: str) -> str | None:
         active_ver = get_active_version(service_id, token)
         if active_ver is None:
             return None
-        content = get_generated_vcl(service_id, active_ver, token)
-    except Exception:  # noqa: BLE001 — detection is best-effort; never break a deploy
+        return get_generated_vcl(service_id, active_ver, token) or None
+    except Exception:  # noqa: BLE001
         return None
-    return content or None
 
 
 def account_has_rate_limiting(token: str, *service_ids: str) -> bool | None:
-    """Proactively detect whether the Fastly account has edge rate limiting.
-
-    Edge rate limiting (``ratecounter`` / ``penaltybox``) is an ACCOUNT-level
-    entitlement; Fastly injects ``pragma optional_param ratelimit_opt_in true;``
-    into the generated VCL of every VCL service on an entitled account, so
-    probing any one VCL service the account owns is sufficient. Tries each id in
-    order and returns on the first that yields parseable generated VCL:
-
-    * ``True``  — the pragma is present (account is entitled).
-    * ``False`` — generated VCL was read but the pragma is absent/false.
-    * ``None``  — no probe was conclusive (every id was a Compute/wasm service
-      with no generated VCL, lacked an active version, or errored). Callers
-      treat ``None`` as "unknown — don't disable rate limiting; the reactive
-      :func:`_validate_with_ratelimit_fallback` remains the backstop".
-
-    Pass more than one id (e.g. the CDN service AND the customer's logging
-    service) so a wasm/no-active-version probe falls through to a VCL sibling.
-    Fully best-effort: any unexpected error on a probe drops to the next id.
-    """
+    """Proactively detect whether the Fastly account has edge rate limiting."""
     for service_id in service_ids:
         content = _fetch_active_generated_vcl(service_id, token)
-        if not content:
-            continue
-        return bool(_RATELIMIT_OPT_IN_RE.search(content))
+        if content:
+            return bool(_RATELIMIT_OPT_IN_RE.search(content))
     return None
 
 
-# Service-level VCL pragmas required for Session Scoring's preflight sub-fetch +
-# restart flow so POST/PUT/PATCH request bodies are neither streamed on the
-# GET-rewritten scorer preflight pass nor drained across the restart to origin.
-_FIX_UNSENT_BODY_DRAIN_RE = re.compile(r"fix_unsent_body_drain\s+true\b")
-_NO_BODY_IF_BEREQ_GET_OR_HEAD_RE = re.compile(r"no_body_if_bereq_is_get_or_head\s+true\b")
-
-
 def service_has_scoring_pragmas(service_id: str, token: str) -> bool | None:
-    """Detect whether ``service_id`` has both preflight body preservation
-    pragmas enabled in its compiled VCL.
-
-    Returns:
-    * ``True``  — both ``fix_unsent_body_drain true`` and
-      ``no_body_if_bereq_is_get_or_head true`` are present in the active
-      version's generated VCL.
-    * ``False`` — generated VCL was read, and at least one pragma is absent or
-      ``false``.
-    * ``None``  — inconclusive (missing ``service_id``/``token``, no active
-      version, empty generated VCL, or Fastly API error).
-    """
+    """Detect whether ``service_id`` has both preflight body preservation pragmas enabled."""
     if not service_id or not token:
         return None
     content = _fetch_active_generated_vcl(service_id, token)
@@ -809,8 +613,6 @@ def ensure_cdn_service(
     cfg: dict, fos_access_key: str, fos_secret_key: str, token: str, status_cb=None, on_created=None
 ) -> dict:
     """Create and activate the CDN VCL service fronting FOS via declarative reconciler."""
-    import json
-
     from backend import config as _svcconfig
     from backend.provision.declarative.reconciler import reconcile_cdn_service_state
     from backend.provision.fastly_api import account_has_rate_limiting
@@ -822,29 +624,24 @@ def ensure_cdn_service(
     config_path = _svcconfig.config_path(logging_service_id)
 
     def _merge_inputs(disk_cfg: dict) -> None:
-        # Merge top-level or nested fields from cfg and inputs
-        for k, v in cfg.items():
-            disk_cfg[k] = v
-
+        disk_cfg.update(cfg)
         disk_cfg["fos_access_key_id"] = fos_access_key
         disk_cfg["fos_secret_access_key"] = fos_secret_key
 
-    # Write updated config to disk (under the config lock; a first-time provision has no file yet)
     with _svcconfig.config_lock(logging_service_id):
         if _svcconfig.mutate_config(logging_service_id, _merge_inputs) is None:
             new_cfg: dict = {}
             _merge_inputs(new_cfg)
             _svcconfig.save_config(logging_service_id, new_cfg)
 
-    # Run the declarative reconciler for CDN service
     try:
-        result = reconcile_cdn_service_state(
+        reconcile_cdn_service_state(
             logging_service_id=logging_service_id,
             token=token,
             status_cb=status_cb,
             activate=True,
         )
-    except Exception as e:
+    except Exception:
         if config_path.exists():
             try:
                 updated_cfg = json.loads(config_path.read_text())
@@ -853,77 +650,61 @@ def ensure_cdn_service(
                     on_created(cdn_sid)
             except Exception:
                 pass
-        raise e
+        raise
 
-    # Load updated config from disk to return the expected dict structure
     updated_cfg = json.loads(config_path.read_text())
     cdn_sid = updated_cfg.get("fos_proxy", {}).get("service_id") or updated_cfg.get("cdn_service_id", "")
-
     if on_created and cdn_sid:
         on_created(cdn_sid)
-
-    # Detect rate limiting entitlement
-    detected_rl = account_has_rate_limiting(token, logging_service_id)
 
     return {
         "id": cdn_sid,
         "name": updated_cfg.get("cdn_service_name") or f"Log Analysis CDN Service for {logging_service_id}",
-        "rate_limiting": detected_rl,
+        "rate_limiting": account_has_rate_limiting(token, logging_service_id),
     }
 
 
 def redeploy_cdn_vcl(cdn_service_id: str, token: str, rate_limiting: bool = True, status_cb=None):
     """Clone active version and redeploy the main VCL snippet via declarative reconciler."""
-
     from backend import config as _svcconfig
     from backend.config import list_configs
     from backend.provision.declarative.reconciler import reconcile_cdn_service_state
 
-    logging_service_id = None
-    for c in list_configs():
-        fos_proxy_cfg = c.get("fos_proxy", {})
-        if c.get("cdn_service_id") == cdn_service_id or fos_proxy_cfg.get("service_id") == cdn_service_id:
-            logging_service_id = c["service_id"]
-            break
-
+    logging_service_id = next(
+        (
+            c["service_id"]
+            for c in list_configs()
+            if c.get("cdn_service_id") == cdn_service_id
+            or (c.get("fos_proxy") or {}).get("service_id") == cdn_service_id
+        ),
+        None,
+    )
     if not logging_service_id:
         raise ValueError(f"Could not map cdn_service_id '{cdn_service_id}' to a configured logging_service_id.")
 
-    # We update the rate_limiting_enabled on disk config if different from input rate_limiting
-    def _set_rate_limiting(cfg: dict) -> None:
-        cfg.setdefault("fos_proxy", {})["rate_limiting_enabled"] = rate_limiting
-
-    if _svcconfig.mutate_config(logging_service_id, _set_rate_limiting) is None:
+    if (
+        _svcconfig.mutate_config(
+            logging_service_id,
+            lambda cfg: cfg.setdefault("fos_proxy", {}).__setitem__("rate_limiting_enabled", rate_limiting),
+        )
+        is None
+    ):
         raise FileNotFoundError(_svcconfig.config_path(logging_service_id))
 
     result = reconcile_cdn_service_state(
-        logging_service_id=logging_service_id,
-        token=token,
-        status_cb=status_cb,
-        activate=True,
+        logging_service_id=logging_service_id, token=token, status_cb=status_cb, activate=True
     )
-
     return result.activated_version
 
 
 def delete_cdn_service(service_id: str, name: str, token: str, status_cb=None):
-    """Delete the analytics-owned log-fronting CDN VCL service.
-
-    ``name`` is a caller-supplied label only — the deletion targets
-    ``service_id``. The teardown path used to pass the CUSTOMER's service
-    display name here, so the log read
-    ``Deleting CDN service 'www.drew-michael.com'`` and looked for all the world
-    like the customer's own site was being destroyed (2026-08-13). Callers now
-    pass the analytics naming convention (``Log Analysis CDN Service for <id>``)
-    and every message below carries the id it is actually acting on.
-    """
+    """Delete the analytics-owned log-fronting CDN VCL service."""
     label = f"{name} ({service_id})"
     info(f"Deleting analytics-owned log-fronting CDN service {_c(BOLD, label)}…")
     if status_cb:
         status_cb(f"⏳ Deleting analytics-owned CDN service {label} (not your origin service)...")
     try:
-        versions = fastly("GET", f"/service/{service_id}/version", token=token)
-        for v in versions:
+        for v in fastly("GET", f"/service/{service_id}/version", token=token):
             if v.get("active"):
                 if status_cb:
                     status_cb(f"⏳ Deactivating version {v['number']} of {service_id}...")
@@ -932,7 +713,6 @@ def delete_cdn_service(service_id: str, name: str, token: str, status_cb=None):
         if "404" in str(exc):
             ok("CDN service already deleted")
             return
-        pass
 
     try:
         fastly("DELETE", f"/service/{service_id}", token=token, expect_empty=True)
@@ -947,22 +727,10 @@ def delete_cdn_service(service_id: str, name: str, token: str, status_cb=None):
 
 
 def _log_sampling_edge_clause(scoring_enabled: bool) -> str:
-    """Edge-hop predicate for the 'Log Sampling' response_condition.
-
-    Session scoring restarts the request (req.restarts 0→1) to run the scorer
-    sub-fetch, so the FINAL logged pass (the one carrying the real response +
-    the captured edge_score subfields) runs at req.restarts == 1. ``vcl_log``
-    fires once, at that final pass — so gating the log on ``req.restarts == 0``
-    drops EVERY scored request from the logs (edge_score never reaches the log
-    line → Fire Rate 0%). ``fastly.ff.visits_this_service == 0`` identifies the
-    edge hop restart-invariantly, so the post-restart edge pass still logs.
-    """
+    """Edge-hop predicate for the 'Log Sampling' response_condition."""
     return "fastly.ff.visits_this_service == 0"
 
 
-# Snippet-ownership attribution for teardown. Every name we install is either
-# in the capture family (this prefix, across all naming generations) or comes
-# from a canonical generator list, so teardown can't drift from provisioning.
 _CAPTURE_SNIPPET_PREFIX = "Fastly Log Analytics"
 _RUM_SNIPPET_NAMES = frozenset(
     {"RUM - Recv", "RUM - Set cookies", "RUM - Asset fetch FOS", "RUM - Asset fetch SigV4 signing"}
@@ -979,6 +747,7 @@ def remove_logging_endpoint(
     remove_rum: bool = True,
 ):
     """Safely remove the logging endpoint + all analytics-owned VCL from the active version."""
+    from backend.provision.declarative.reconciler import MANAGED_BACKEND_NAMES, MANAGED_DICTIONARY_NAMES
     from backend.provision.orchestrator import cmcd_snippet_names
     from backend.provision.session_scoring_vcl import scoring_snippet_names
 
@@ -992,34 +761,18 @@ def remove_logging_endpoint(
     ok(f"Active version: {active_ver}")
 
     existing = list_s3_endpoints(service_id, active_ver, token)
-
     eps_list = []
     if remove_logging:
-        eps_list.extend(
-            [
-                "Fastly Log Analytics",
-                "Fastly Object Storage Logs",
-                endpoint_name,
-            ]
-        )
+        eps_list.extend(["Fastly Log Analytics", "Fastly Object Storage Logs", endpoint_name])
     if remove_rum:
-        eps_list.extend(
-            [
-                "Fastly RUM Logs",
-                "Fastly RUM Object Storage Logs",
-            ]
-        )
+        eps_list.extend(["Fastly RUM Logs", "Fastly RUM Object Storage Logs"])
 
     endpoints_to_delete = [ep for ep in dict.fromkeys(eps_list) if ep in existing]
-
     if not endpoints_to_delete:
         ok(f"No matching logging endpoints found on version {active_ver} — checking snippets anyway")
 
     info(f"Cloning version {active_ver} → new draft…")
     ts = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
-
-    def _draft_status(msg: str) -> None:
-        info(msg)
 
     def _log_failure(exc: Exception) -> None:
         fail(str(exc))
@@ -1032,7 +785,7 @@ def remove_logging_endpoint(
         call=fastly,
         comment=f"Deactivating Fastly Object Storage logging at {ts}",
         comment_before_activate=True,
-        status_cb=_draft_status,
+        status_cb=info,
         validate_msg="Validating draft version…",
         activate_msg="Activating version {ver}…",
         on_failure=_log_failure,
@@ -1054,17 +807,8 @@ def remove_logging_endpoint(
                 if "404" not in str(exc):
                     raise exc
 
-        # ENUMERATE, don't guess. This used to blind-DELETE a hardcoded list of
-        # snippet names; every 404 was swallowed, so when the names on the
-        # service didn't match the list it reported success having removed
-        # NOTHING — leaving the full capture VCL live on a service the operator
-        # believed was torn down (observed 2026-08-13: "removed 0 active
-        # snippets" while endpoints/conditions/dictionaries were correctly
-        # removed, because those three already used the list-then-match pattern
-        # below). The list was also missing ``- vcl_pass``, so it stranded a
-        # snippet even on a service whose names DID match.
         info("Removing VCL snippets…")
-        owned_exact = set()
+        owned_exact: set[str] = set()
         if remove_logging:
             owned_exact.update(scoring_snippet_names())
             owned_exact.update(cmcd_snippet_names())
@@ -1080,20 +824,7 @@ def remove_logging_endpoint(
 
         for snip in present:
             s_name = snip.get("name") or ""
-            # Attribution, deliberately narrow. ``Fastly Log Analytics`` covers
-            # every generation of the capture snippets (legacy "… Capture" and
-            # current "… - vcl_recv"). The rest come from the canonical
-            # generators so this can't drift from what provisioning installs.
-            # NOTE: do NOT prefix-match "Session " — a customer's own
-            # "Session Tracking - *" snippets live alongside our
-            # "Session Scoring - *" ones and must never be touched.
-            should_remove = False
-            if remove_logging and s_name.startswith(_CAPTURE_SNIPPET_PREFIX):
-                should_remove = True
-            elif s_name in owned_exact:
-                should_remove = True
-
-            if not should_remove:
+            if not ((remove_logging and s_name.startswith(_CAPTURE_SNIPPET_PREFIX)) or s_name in owned_exact):
                 continue
             info(f"Removing snippet '{_c(BOLD, s_name)}' from draft…")
             try:
@@ -1110,7 +841,6 @@ def remove_logging_endpoint(
                     raise exc
 
         ok(f"VCL snippets removed from draft ({len(removed_names)}): {', '.join(removed_names) or 'none matched'}")
-        # Never let "removed nothing" pass silently again.
         leftovers = [
             s.get("name")
             for s in present
@@ -1125,11 +855,6 @@ def remove_logging_endpoint(
                 "if any of those are ours, teardown left VCL behind."
             )
 
-        from backend.provision.declarative.reconciler import (
-            MANAGED_BACKEND_NAMES,
-            MANAGED_DICTIONARY_NAMES,
-        )
-
         managed_cond_names = {"Log Sampling", "log_analytics_condition", "rum_log_condition"}
         for res_path, plural, label, allowed_names in (
             ("backend", "backends", "backend", MANAGED_BACKEND_NAMES),
@@ -1137,8 +862,7 @@ def remove_logging_endpoint(
             ("condition", "conditions", "condition", managed_cond_names),
         ):
             try:
-                items = fastly("GET", f"/service/{service_id}/version/{new_ver}/{res_path}", token=token)
-                for item in items:
+                for item in fastly("GET", f"/service/{service_id}/version/{new_ver}/{res_path}", token=token):
                     item_name = item.get("name")
                     if item_name in allowed_names:
                         info(f"Removing managed {label} '{item_name}' from draft…")
@@ -1160,11 +884,12 @@ def update_logging_endpoint(cfg: dict, token: str):
     """Safely update the log configuration of an existing FOS endpoint using the declarative reconciler."""
     service_id = cfg["logging_service_id"]
     endpoint_name = cfg.get("provisioning", {}).get("endpoint_name", "Fastly Object Storage Logs")
-    sample_rate = cfg.get("sample_rate")
-    edge_only = cfg.get("edge_only")
-    period = cfg.get("log_period")
-    path = cfg.get("fos_path")
-
+    sample_rate, edge_only, period, path = (
+        cfg.get("sample_rate"),
+        cfg.get("edge_only"),
+        cfg.get("log_period"),
+        cfg.get("fos_path"),
+    )
     total_steps = 5
     yield {"type": "progress", "current": 0, "total": total_steps}
 
@@ -1178,23 +903,18 @@ def update_logging_endpoint(cfg: dict, token: str):
     if service_cfg is None:
         raise RuntimeError(f"Service config for {service_id} is empty or None")
 
-    cmcd_enabled_req = cfg.get("cmcd_enabled")
-    cmcd_mode_req = cfg.get("cmcd_mode")
-    cmcd_version_req = cfg.get("cmcd_version")
+    cmcd_enabled_req, cmcd_mode_req, cmcd_version_req = (
+        cfg.get("cmcd_enabled"),
+        cfg.get("cmcd_mode"),
+        cfg.get("cmcd_version"),
+    )
 
     def _apply_requested_changes(target: dict) -> None:
-        # Runs on the freshly-read config under the config lock, so only the keys this flow
-        # owns are touched and a concurrent writer's changes survive.
         old_cmcd = target.get("cmcd") or {}
         cmcd_was_enabled = bool(old_cmcd.get("enabled"))
 
         if cmcd_enabled_req is not None:
-            import datetime as _dt
-
-            from backend.provision.orchestrator import (
-                _remove_cmcd_custom_fields,
-                reconcile_cmcd_custom_fields,
-            )
+            from backend.provision.orchestrator import _remove_cmcd_custom_fields, reconcile_cmcd_custom_fields
 
             want_enabled = bool(cmcd_enabled_req)
             new_mode = cmcd_mode_req or old_cmcd.get("mode", "query_string")
@@ -1205,7 +925,7 @@ def update_logging_endpoint(cfg: dict, token: str):
                     "enabled": True,
                     "mode": new_mode,
                     "version": new_version,
-                    "enabled_at": _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds"),
+                    "enabled_at": datetime.datetime.now(datetime.UTC).isoformat(timespec="seconds"),
                 }
                 lf_cfg = target.setdefault("log_fields", {})
                 lf_cfg["custom_fields"] = reconcile_cmcd_custom_fields(lf_cfg.get("custom_fields"), enabled=True)
@@ -1214,13 +934,8 @@ def update_logging_endpoint(cfg: dict, token: str):
                 _remove_cmcd_custom_fields(target)
             elif want_enabled and cmcd_was_enabled:
                 if new_mode != old_cmcd.get("mode") or new_version != old_cmcd.get("version"):
-                    target["cmcd"] = {
-                        **old_cmcd,
-                        "mode": new_mode,
-                        "version": new_version,
-                    }
+                    target["cmcd"] = {**old_cmcd, "mode": new_mode, "version": new_version}
 
-        # Update state fields in nested provisioning block
         prov = target.setdefault("provisioning", {})
         if sample_rate is not None:
             prov["sample_rate"] = int(sample_rate)
@@ -1231,14 +946,6 @@ def update_logging_endpoint(cfg: dict, token: str):
         if endpoint_name is not None:
             prov["endpoint_name"] = endpoint_name
         if cfg.get("log_fields") is not None:
-            # MERGE GUARD (sibling of the cli.py + api_service_log_fields_set
-            # guards): callers hand us a log_fields built from groups alone
-            # (_build_log_fields_config returns no custom_fields key), so a
-            # wholesale assign strips the user's custom_fields AND the
-            # system-managed scoring/CMCD entries. reconcile_vcl_state then
-            # regenerates the Fastly log format from this config, so the strip
-            # reaches the edge: the extraction VCL keeps running and nothing
-            # logs its output. Treat "absent OR empty" as "no change".
             incoming_lf = dict(cfg["log_fields"])
             if not incoming_lf.get("custom_fields"):
                 existing_custom = (target.get("log_fields") or {}).get("custom_fields")
@@ -1246,10 +953,6 @@ def update_logging_endpoint(cfg: dict, token: str):
                     incoming_lf["custom_fields"] = list(existing_custom)
             target["log_fields"] = incoming_lf
 
-        # Re-assert the system-managed custom fields against the FINAL feature
-        # state (post-merge above, post-CMCD-request handling earlier). Keyed on
-        # state rather than on a transition so a reconcile that changes nothing
-        # about CMCD still converges, and a disable strips the fields.
         reconcile_cfg_system_custom_fields(target)
         if path is not None:
             target["fos_path"] = path
@@ -1257,27 +960,23 @@ def update_logging_endpoint(cfg: dict, token: str):
     if _svcconfig.mutate_config(service_id, _apply_requested_changes) is None:
         raise RuntimeError(f"Service config for {service_id} is empty or None")
 
-    # Refresh account level rate-limiting best effort (Fastly call: no config lock held)
     try:
         detected_rl = account_has_rate_limiting(token, service_id)
         current_rl = ((_svcconfig.load_config(service_id) or {}).get("provisioning") or {}).get("rate_limiting")
         if detected_rl is not None and current_rl != detected_rl:
-
-            def _set_rate_limiting(target: dict) -> None:
-                target.setdefault("provisioning", {})["rate_limiting"] = detected_rl
-
-            _svcconfig.mutate_config(service_id, _set_rate_limiting)
-            if detected_rl:
-                yield {
-                    "type": "status",
-                    "message": "ℹ️ Edge rate limiting is now available on this account — redeploy the CDN service to enable it.",
-                }
-            else:
-                yield {"type": "status", "message": "ℹ️ Edge rate limiting is not available on this account."}
+            _svcconfig.mutate_config(
+                service_id,
+                lambda target: target.setdefault("provisioning", {}).__setitem__("rate_limiting", detected_rl),
+            )
+            msg = (
+                "ℹ️ Edge rate limiting is now available on this account — redeploy the CDN service to enable it."
+                if detected_rl
+                else "ℹ️ Edge rate limiting is not available on this account."
+            )
+            yield {"type": "status", "message": msg}
     except Exception:
         pass
 
-    # Yield initial progress
     yield {"type": "progress", "current": 1, "total": total_steps}
 
     from backend.provision.cli import run_with_events
@@ -1300,7 +999,7 @@ def update_logging_endpoint(cfg: dict, token: str):
         raise RuntimeError(f"Declarative reconciliation failed: {err}")
 
 
-# ── Iceberg Metadata Snippet ──────────────────────────────────────────────────
+# ── Iceberg Metadata & CDN Snippets ───────────────────────────────────────────
 
 _ICEBERG_METADATA_SNIPPET_NAME = "iceberg-metadata-pointer-ttl"
 _ICEBERG_METADATA_SNIPPET = """\
@@ -1336,13 +1035,6 @@ _CDN_FETCH_GENERATION_SNIPPET = """\
     set beresp.http.X-Edge-Generation = req.vcl.generation;
   }"""
 
-# PyIceberg's commit lifecycle does HEAD-before-PUT on new metadata paths
-# (the CAS atomicity check). That HEAD legitimately 404s. If Fastly caches
-# the 404, the PUT lands in R2 via FOS native but the CDN keeps serving the
-# cached 404 to every subsequent commit's load_table — the cron stays
-# broken until TTL expires. Applies to ALL GET/HEAD 404s on this service,
-# not just iceberg paths, since any read-then-write pattern hits the same
-# trap. Priority 30 so it runs last and wins over any ttl set upstream.
 _CDN_NO_CACHE_404_SNIPPET_NAME = "cdn-no-cache-404"
 _CDN_NO_CACHE_404_SNIPPET = """\
   if ((req.method == "GET" || req.method == "HEAD") && beresp.status == 404) {
@@ -1375,14 +1067,7 @@ _CDN_SNIPPETS = [
 # ── Remote Frontend Sharing Domain (merged from sharing_domain.py) ────────────
 
 
-def _fastly_api_request(
-    method: str,
-    path: str,
-    *,
-    token: str,
-    json_data: Any = None,
-    step: str = "",
-) -> Any:
+def _fastly_api_request(method: str, path: str, *, token: str, json_data: Any = None, step: str = "") -> Any:
     """Perform a request to the Fastly API via the shared client."""
     try:
         return fastly(method, path, body=json_data, token=token)
@@ -1457,8 +1142,7 @@ def deploy_remote_frontend(
 def delete_remote_frontend(remote_service_id: str, token: str) -> None:
     """Deactivate and delete the remote frontend service on Fastly."""
     try:
-        versions = _fastly_api_request("GET", f"/service/{remote_service_id}/version", token=token, step="Get Versions")
-        for v in versions:
+        for v in _fastly_api_request("GET", f"/service/{remote_service_id}/version", token=token, step="Get Versions"):
             if v.get("active"):
                 ver_num = v["number"]
                 _fastly_api_request(

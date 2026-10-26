@@ -403,3 +403,15 @@ class PgManifest:
                 (service_id, generation, limit),
             ).fetchall()
         return [r["batch_id"] for r in rows]
+
+
+import sys as _sys
+
+_self_mod = _sys.modules[__name__]
+_sys.modules["backend.core.clickhouse_manifest"] = _self_mod
+_core_pkg = _sys.modules.get("backend.core")
+if _core_pkg is not None:
+    setattr(_core_pkg, "clickhouse_manifest", _self_mod)
+_backend_pkg = _sys.modules.get("backend")
+if _backend_pkg is not None and hasattr(_backend_pkg, "_MODULE_ALIASES"):
+    _backend_pkg._MODULE_ALIASES.setdefault("backend.core.clickhouse_manifest", __name__)

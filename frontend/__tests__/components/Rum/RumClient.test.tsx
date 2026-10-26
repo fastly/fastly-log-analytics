@@ -30,9 +30,8 @@ import { server } from '@/__tests__/helpers/msw/handlers'
 import { getApiBase } from '@/lib/api'
 import { queryKeys } from '@/lib/query-keys'
 import { useServiceStore } from '@/stores/filterStore'
-import RumPageClient from '@/app/rum/_sections/RumClient'
+import RumPageClient, { RumFaroVersionCard, RumStatusPanel } from '@/app/rum/_sections/RumClient'
 import { RumSettingsDialog } from '@/components/Rum/RumSettingsDialog'
-import { RumFaroVersionCard, RumStatusPanel } from '@/components/Rum/RumStatusPanel'
 
 beforeAll(() => {
   stubResizeObserver()

@@ -1,25 +1,358 @@
 'use client'
 
 import React, { useState, useEffect } from 'react'
-import { useQuery } from '@tanstack/react-query'
-import { useAnalyticsReportQuery, useReportRangeAnchor, useRumStatus } from '@/hooks/useDashboardCards'
-import { AnalyticsCard, TimeSeriesChart } from '@/components/AnalyticsCard'
-import { RumStatusPanel, RumFaroVersionCard } from '@/components/Rum/RumStatusPanel'
-import { ReportLayout, DashboardSkeleton } from '@/components/ReportLayout'
-import { useIsAnalyst } from '@/hooks/useBootstrap'
-import { CopyButton } from '@/components/ui/confirm-dialog'
-import { PlotlyChart } from '@/components/PlotlyChart'
-import { useTimezone } from '@/hooks/useSSE'
-import { formatDate, formatCount } from '@/lib/format'
-import { Terminal, Activity, Monitor, ShieldAlert, Cpu, PieChart, TrendingUp, Eye, Radio, BookOpen } from 'lucide-react'
-import { adminJsonResult } from '@/lib/api'
-import { arrayOrEmpty, recordOrNull, type RangeWireArgs } from '@/lib/utils'
-import type { StripIndex, WithRequired, components, FiltersPayload } from '@/types/api'
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
-import { Button } from '@/components/ui/button'
-import { DataTable, DataTableReadonly } from '@/components/DataTable'
+import { useSearchParams } from 'next/navigation'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { ColumnDef } from '@tanstack/react-table'
+import {
+  Activity,
+  AlertTriangle,
+  BookOpen,
+  Cpu,
+  Eye,
+  Monitor,
+  PieChart,
+  Radio,
+  RefreshCw,
+  ShieldAlert,
+  Terminal,
+  TrendingUp,
+  TriangleAlert,
+} from 'lucide-react'
+import { AnalyticsCard, TimeSeriesChart } from '@/components/AnalyticsCard'
+import { DataTable, DataTableReadonly } from '@/components/DataTable'
+import { PlotlyChart } from '@/components/PlotlyChart'
+import { DashboardSkeleton, ReportLayout } from '@/components/ReportLayout'
+import { DisableRumDialog, EnableRumDialog, RumSettingsDialog } from '@/components/Rum/RumSettingsDialog'
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import { CopyButton } from '@/components/ui/confirm-dialog'
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { Skeleton } from '@/components/ui/skeleton'
+import { useIsAnalyst } from '@/hooks/useBootstrap'
+import { useAnalyticsReportQuery, useReportRangeAnchor, useRumStatus } from '@/hooks/useDashboardCards'
+import { useTimezone } from '@/hooks/useSSE'
+import { adminJsonResult, client, unwrapClient } from '@/lib/api'
 import { CHART_COLORS } from '@/lib/chart-helpers'
+import { formatCount, formatDate, formatLocalDateTime } from '@/lib/format'
+import { queryKeys } from '@/lib/query-keys'
+import { arrayOrEmpty, cn, recordOrNull, type RangeWireArgs } from '@/lib/utils'
+import { useServiceStore } from '@/stores/filterStore'
+import type { FiltersPayload, StripIndex, WithRequired, components } from '@/types/api'
+
+type RumVersionsResponse = components['schemas']['RumVersionsResponse']
+type RumWire = components['schemas']['RumAnalyticsResponse']
+type RumWorstPage = components['schemas']['RumWorstPage']
+type RumJsError = components['schemas']['RumJsError']
+type RumCwvDistribution = components['schemas']['RumCwvDistribution']
+type RumAnalytics = WithRequired<RumWire, 'beacon_count' | 'vitals' | 'worst_pages' | 'errors' | 'trends' | 'environments'>
+
+interface RumFaroVersionCardProps {
+  serviceId: string | null
+}
+
+export function RumFaroVersionCard({ serviceId }: RumFaroVersionCardProps) {
+  const queryClient = useQueryClient()
+  const [isUpgradeOpen, setIsUpgradeOpen] = useState(false)
+  const isAnalyst = useIsAnalyst()
+  const { data: status, isLoading: isStatusLoading } = useRumStatus(serviceId)
+  const rumEnabled = !!status?.enabled
+
+  const { data, isLoading: isVersionsLoading, isError, refetch, isFetching } = useQuery<RumVersionsResponse>({
+    queryKey: queryKeys.rumVersions(serviceId),
+    queryFn: async ({ signal }) =>
+      unwrapClient(
+        client.GET('/api/services/{service_id}/rum/versions', {
+          params: { path: { service_id: serviceId as string } },
+          signal,
+        }),
+      ),
+    enabled: !!serviceId && rumEnabled && !isAnalyst,
+    retry: false,
+  })
+
+  if (isAnalyst) return null
+  if (!serviceId || isStatusLoading || (rumEnabled && isVersionsLoading)) {
+    return (
+      <div className="flex items-center gap-2 shrink-0">
+        <Skeleton className="h-8 w-32" />
+        <Skeleton className="h-8 w-24" />
+      </div>
+    )
+  }
+  if (!rumEnabled) return null
+
+  if (isError) {
+    return (
+      <div className="flex items-center gap-2 text-xs text-destructive bg-destructive/10 px-2.5 py-1 rounded-md border border-destructive/20 shrink-0">
+        <TriangleAlert className="h-3.5 w-3.5 shrink-0" />
+        <span>Versions offline</span>
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={() => refetch()}
+          disabled={isFetching}
+          aria-label="Retry"
+          className="h-5 w-5 hover:bg-destructive/20 hover:text-destructive shrink-0"
+        >
+          <RefreshCw className={cn('h-2.5 w-2.5', isFetching && 'animate-spin')} />
+        </Button>
+      </div>
+    )
+  }
+
+  const available = data?.available ?? []
+  const current = data?.current ?? null
+  const latest = data?.latest ?? null
+  const updateAvailable = data?.update_available ?? false
+
+  const handleComplete = () => {
+    queryClient.invalidateQueries({ queryKey: queryKeys.rumVersions(serviceId) })
+    queryClient.invalidateQueries({ queryKey: queryKeys.rumStatus(serviceId) })
+  }
+
+  return (
+    <>
+      <div className="flex items-center gap-2 shrink-0" data-testid="admin-rum-faro-version-card">
+        <div className="flex items-center gap-1.5 text-xs text-muted-foreground mr-1">
+          <span className="font-semibold uppercase tracking-wider text-[10px]">Faro SDK:</span>
+          <span
+            className="font-mono font-medium text-foreground bg-muted/60 px-1.5 py-0.5 rounded border border-muted-foreground/10"
+            data-testid="admin-rum-faro-version"
+          >
+            {current ?? 'Not pinned'}
+          </span>
+          {updateAvailable && (
+            <Badge variant="warning" className="text-[9px] py-0 px-1.5 h-4.5 font-medium ml-1 shrink-0">
+              Update available
+            </Badge>
+          )}
+        </div>
+
+        <Button
+          onClick={() => setIsUpgradeOpen(true)}
+          variant={updateAvailable ? 'default' : 'outline'}
+          size="sm"
+          className="h-8 text-xs font-semibold px-3"
+          data-testid="admin-rum-settings-btn"
+        >
+          RUM Settings
+        </Button>
+      </div>
+
+      <RumSettingsDialog
+        serviceId={serviceId}
+        open={isUpgradeOpen}
+        onOpenChange={setIsUpgradeOpen}
+        availableVersions={available}
+        currentVersion={current}
+        latestVersion={latest}
+        onComplete={handleComplete}
+      />
+    </>
+  )
+}
+
+export function RumStatusPanel() {
+  const searchParams = useSearchParams()
+  const queryClient = useQueryClient()
+  const queryServiceId = searchParams?.get('service')
+  const storeServiceId = useServiceStore((s) => s.activeServiceId)
+  const setActiveServiceId = useServiceStore((s) => s.setActiveServiceId)
+
+  useEffect(() => {
+    if (queryServiceId && queryServiceId !== storeServiceId) {
+      setActiveServiceId(queryServiceId)
+    }
+  }, [queryServiceId, storeServiceId, setActiveServiceId])
+
+  const { data: services, isLoading: isServicesLoading, refetch: refetchServices } = useQuery({
+    queryKey: queryKeys.services(),
+    queryFn: async () => {
+      const res = await adminJsonResult('/api/services', '/api/services')
+      return res.ok ? res.data : null
+    },
+  })
+
+  const serviceId = queryServiceId || storeServiceId || services?.services?.[0]?.service_id || null
+  const isAnalyst = useIsAnalyst()
+  const [isEnableOpen, setIsEnableOpen] = useState(false)
+  const [isDisableOpen, setIsDisableOpen] = useState(false)
+
+  const {
+    data: status,
+    isLoading: isStatusLoading,
+    isFetching: isStatusFetching,
+    refetch: refetchStatus,
+  } = useRumStatus(serviceId, { refetchInterval: 30_000 })
+
+  const currentService =
+    services?.services?.find((s: components['schemas']['ServiceConfig']) => s.service_id === serviceId) || null
+
+  const isInitialLoading = (!serviceId && isServicesLoading) || (!!serviceId && isStatusLoading && !status)
+  const isRefreshing = isStatusFetching && !isInitialLoading
+
+  const handleManualRefresh = async () => {
+    await Promise.all([
+      refetchStatus(),
+      refetchServices(),
+      serviceId ? queryClient.invalidateQueries({ queryKey: ['rum-versions', serviceId] }) : Promise.resolve(),
+    ])
+  }
+
+  if (isAnalyst && (status?.unauthorized || (!isInitialLoading && !status?.enabled))) {
+    const denied = !!status?.unauthorized
+    return (
+      <AnalyticsCard title="RUM Status">
+        <div className="flex flex-col items-center justify-center gap-4 py-16 text-center">
+          <AlertTriangle className={cn('h-12 w-12', denied ? 'text-destructive' : 'text-muted-foreground')} />
+          <div>
+            <h3 className={cn('text-lg font-medium', denied && 'text-destructive')}>
+              {denied ? 'Access Denied' : 'RUM not enabled'}
+            </h3>
+            <p className="text-sm text-muted-foreground mt-1">
+              {denied
+                ? 'You are not authorized to view RUM data for this service. Please contact your administrator to grant access.'
+                : 'Real User Monitoring is not enabled for this service. Ask an administrator to enable it.'}
+            </p>
+          </div>
+        </div>
+      </AnalyticsCard>
+    )
+  }
+
+  const enabledCollectors = status
+    ? [
+        status.capture_vitals !== false && 'Vitals',
+        status.capture_performance !== false && 'Performance',
+        status.capture_errors !== false && 'Errors',
+        status.capture_events !== false && 'Events',
+      ].filter(Boolean)
+    : []
+
+  return (
+    <div className="space-y-4" data-testid="admin-rum-panel">
+      <div
+        className="flex items-center justify-between gap-3 rounded-lg border bg-card px-4 py-3 h-[56px] min-h-[56px] [contain-intrinsic-size:auto_56px] [content-visibility:auto]"
+        data-testid="admin-rum-toolbar"
+      >
+        <div className="flex items-center gap-3 min-w-0">
+          <Badge
+            variant={isInitialLoading ? 'secondary' : status?.enabled ? 'default' : 'outline'}
+            className="min-w-[152px] justify-center shrink-0"
+            data-testid="admin-rum-status-badge"
+          >
+            {isInitialLoading ? 'Checking...' : status?.enabled ? 'Beacon Pipeline Active' : 'Beacon Pipeline Inactive'}
+          </Badge>
+          <span className="text-xs text-muted-foreground truncate" data-testid="admin-rum-service-label">
+            Service: <strong className="text-foreground">{currentService?.name ?? serviceId ?? 'Loading...'}</strong>
+          </span>
+        </div>
+
+        <div className="flex items-center gap-2 shrink-0">
+          <RumFaroVersionCard serviceId={serviceId} />
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleManualRefresh}
+            disabled={isStatusFetching || !serviceId}
+            data-testid="admin-rum-refresh-btn"
+            className="h-8 text-xs shrink-0"
+          >
+            <RefreshCw className={cn('mr-2 h-3.5 w-3.5', isStatusFetching && 'animate-spin')} />
+            Refresh
+          </Button>
+        </div>
+      </div>
+
+      <div
+        className="min-h-[260px] [contain-intrinsic-size:auto_260px] [content-visibility:auto]"
+        data-testid="admin-rum-status-reservation"
+      >
+        <AnalyticsCard
+          title="RUM Status"
+          className={cn('space-y-4 min-h-[260px]', isRefreshing && 'opacity-40 pointer-events-none transition-opacity')}
+        >
+          <div data-testid="admin-rum-status-card" className="space-y-4">
+            {isInitialLoading ? (
+              <div className="space-y-4" data-testid="admin-rum-status-skeleton">
+                <div className="space-y-2 min-h-[112px]">
+                  <p className="text-xs text-muted-foreground">Inspecting RUM beacon pipeline...</p>
+                  <Skeleton className="h-4 w-48" />
+                  <Skeleton className="h-4 w-64" />
+                  <Skeleton className="h-4 w-40" />
+                </div>
+                <div className="flex gap-2">
+                  <Skeleton className="h-9 w-28" />
+                  <Skeleton className="h-9 w-28" />
+                </div>
+              </div>
+            ) : (
+              <>
+                <div className="space-y-2 min-h-[112px]">
+                  <p className="text-sm" data-testid="admin-rum-status-line">
+                    <strong>Status:</strong> {status?.enabled ? '✅ Enabled' : '❌ Disabled'}
+                  </p>
+                  {status?.enabled && (
+                    <>
+                      <p className="text-sm" data-testid="admin-rum-enabled-at">
+                        <strong>Enabled at:</strong>{' '}
+                        {status.enabled_at ? formatLocalDateTime(status.enabled_at) : 'Unknown'}
+                      </p>
+                      <p className="text-sm" data-testid="admin-rum-vcl-drift">
+                        <strong>VCL Drift:</strong> {status.vcl_drift ? '⚠️ Yes' : '✅ No'}
+                      </p>
+                      {!isAnalyst && (
+                        <p className="text-sm" data-testid="admin-rum-capture-summary">
+                          <strong>Collectors:</strong>{' '}
+                          {enabledCollectors.length > 0 ? enabledCollectors.join(', ') : 'None'}
+                          {status.custom_condition ? ` · VCL Condition: ${status.custom_condition}` : ''}
+                        </p>
+                      )}
+                    </>
+                  )}
+                </div>
+
+                <div className="flex gap-2">
+                  <Button
+                    onClick={() => setIsEnableOpen(true)}
+                    disabled={status?.enabled}
+                    variant={status?.enabled ? 'secondary' : 'default'}
+                    data-testid="admin-rum-enable-btn"
+                  >
+                    Enable RUM
+                  </Button>
+                  <Button
+                    onClick={() => setIsDisableOpen(true)}
+                    disabled={!status?.enabled}
+                    variant="destructive"
+                    data-testid="admin-rum-disable-btn"
+                  >
+                    Disable RUM
+                  </Button>
+                </div>
+              </>
+            )}
+          </div>
+        </AnalyticsCard>
+      </div>
+
+      <EnableRumDialog
+        service={currentService}
+        open={isEnableOpen}
+        onOpenChange={setIsEnableOpen}
+        onComplete={async () => { await refetchStatus() }}
+      />
+
+      <DisableRumDialog
+        service={currentService}
+        open={isDisableOpen}
+        onOpenChange={setIsDisableOpen}
+        onComplete={async () => { await refetchStatus() }}
+      />
+    </div>
+  )
+}
 
 interface RumClientProps extends Pick<RangeWireArgs, 'relativeRange' | 'isAutoRange' | 'anchor'> {
   serviceId: string | null
@@ -33,12 +366,6 @@ interface CwvColors {
   bg: string
   label: string
 }
-
-type RumWire = components['schemas']['RumAnalyticsResponse']
-type RumWorstPage = components['schemas']['RumWorstPage']
-type RumJsError = components['schemas']['RumJsError']
-type RumCwvDistribution = components['schemas']['RumCwvDistribution']
-type RumAnalytics = WithRequired<RumWire, 'beacon_count' | 'vitals' | 'worst_pages' | 'errors' | 'trends' | 'environments'>
 
 interface RumRawLog {
   city?: string
@@ -379,7 +706,6 @@ export function RumClient({
 
   return (
     <div className="space-y-6">
-      {/* Summary KPI Cards Row */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         {[
           { label: 'Total Beacons', value: analytics.beacon_count ?? 0, textClass: 'text-blue-500', bgClass: 'bg-blue-500/10', Icon: Activity },
@@ -399,7 +725,6 @@ export function RumClient({
         ))}
       </div>
 
-      {/* KPI Row */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
         {[
           {
@@ -443,7 +768,6 @@ export function RumClient({
         ))}
       </div>
 
-      {/* Trends Row */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         <AnalyticsCard title="Web Vitals Trend" icon={<TrendingUp />}>
           <TimeSeriesChart data={webVitalsTrendData} layout={TREND_CHART_LAYOUT} startTime={startTime} endTime={endTime} timezone={timezone} height={250} />
@@ -454,7 +778,6 @@ export function RumClient({
         </AnalyticsCard>
       </div>
 
-      {/* Worst Pages & Error tables */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         <AnalyticsCard title="Worst Performing Pages" icon={<Monitor />}>
           <DataTableReadonly
@@ -482,7 +805,6 @@ export function RumClient({
         </AnalyticsCard>
       </div>
 
-      {/* Environment Donuts Row */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
         {[
           { title: 'Browser Distribution', data: browserPieData, a11yTitle: 'Browser Distribution Donut Chart' },
@@ -495,14 +817,12 @@ export function RumClient({
         ))}
       </div>
 
-      {/* Beacons Over Time Row */}
       <div className="mb-6">
         <AnalyticsCard title="Beacons Over Time" icon={<Activity className="text-primary" />}>
           <TimeSeriesChart data={beaconsOverTimeData} layout={STACKED_BAR_LAYOUT} startTime={startTime} endTime={endTime} timezone={timezone} height={250} />
         </AnalyticsCard>
       </div>
 
-      {/* Live Monitor Feed Activity Ticker */}
       <AnalyticsCard title="Live Activity Monitor" icon={<Terminal className="h-4 w-4" />}>
         <div className="w-full">
           <DataTable
@@ -513,7 +833,6 @@ export function RumClient({
         </div>
       </AnalyticsCard>
 
-      {/* Beacon Details Modal */}
       <Dialog open={selectedEvent !== null} onOpenChange={(open) => { if (!open) setSelectedEvent(null) }}>
         <DialogContent className="max-w-2xl">
           <DialogHeader>

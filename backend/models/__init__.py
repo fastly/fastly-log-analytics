@@ -6,6 +6,7 @@ and imports leaf response models near the bottom for ``BootstrapResponse``).
 import sys
 
 from backend.models import _base
+from backend.models import admin as _admin  # noqa: F401
 from backend.models import analytics as _analytics  # noqa: F401
 from backend.models import common as _common  # noqa: F401
 from backend.models import dashboard as _dashboard  # noqa: F401
@@ -16,6 +17,9 @@ sys.modules["backend.models.security"] = _dashboard
 sys.modules["backend.models.admin_actions"] = _analytics
 sys.modules["backend.models.origin"] = _analytics
 sys.modules["backend.models.network"] = _analytics
+sys.modules["backend.models.performance"] = _analytics
+sys.modules["backend.models.rum"] = _analytics
+sys.modules["backend.models.share_admin"] = _admin
 sys.modules["backend.models.provision"] = _services
 sys.modules["backend.models.service"] = _services
 
@@ -28,6 +32,9 @@ if isinstance(_aliases, dict):
             "backend.routers.admin_queries": "backend.routers.admin.health",
             "backend.routers.performance": "backend.routers.dashboard",
             "backend.models.network": "backend.models.analytics",
+            "backend.models.performance": "backend.models.analytics",
+            "backend.models.rum": "backend.models.analytics",
+            "backend.models.share_admin": "backend.models.admin",
             "backend.models.provision": "backend.models.services",
             "backend.models.service": "backend.models.services",
             "backend.provision.utils": "backend.provision.cli",

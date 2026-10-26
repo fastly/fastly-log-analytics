@@ -18,8 +18,8 @@ from sse_starlette.sse import EventSourceResponse
 
 from backend import config
 from backend.core import metadata
+from backend.core.clickhouse import PgManifest
 from backend.core.clickhouse_client import get_clickhouse_client
-from backend.core.clickhouse_manifest import PgManifest
 from backend.core.clickhouse_publication import FosArtifacts, full_rebuild, replay_unpublished
 from backend.core.clickhouse_schema import CLICKHOUSE_SCHEMA_VERSION, target_identity
 from backend.cron_runs_publisher import publisher as cron_runs_publisher

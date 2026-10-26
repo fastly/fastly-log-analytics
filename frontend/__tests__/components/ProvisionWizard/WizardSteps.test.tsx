@@ -17,9 +17,8 @@ import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, test, vi } from 'vitest'
 import { http, HttpResponse } from 'msw'
 
-import { ProvisionWizard, TerraformStep, ModeStep } from '@/components/ProvisionWizard/ProvisionWizard'
+import { ProvisionWizard, TerraformStep, ModeStep, ResumeBanner, WizardFooter } from '@/components/ProvisionWizard/ProvisionWizard'
 import { JoinStep } from '@/components/ProvisionWizard/steps/JoinStep'
-import { ResumeBanner, WizardFooter } from '@/components/ProvisionWizard/WizardFooter'
 import { RumVersionPicker } from '@/components/ProvisionWizard/steps/StorageStep'
 import {
   WIZARD_DRAFT_KEY,

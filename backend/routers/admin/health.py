@@ -18,7 +18,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from sse_starlette.sse import EventSourceResponse
 
-from backend.celery_status import (
+from backend.celery_app import (
     get_celery_status,
     list_ingest_ledger_entries,
     purge_ingest_ledger_entries,

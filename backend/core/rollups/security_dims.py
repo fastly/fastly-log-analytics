@@ -59,6 +59,7 @@ import logging
 import math
 import os
 import sys
+import uuid
 from collections.abc import Generator
 from datetime import UTC, datetime, timedelta
 
@@ -68,7 +69,7 @@ from backend.core.metadata.pg_connection import (
     get_pg_thread_connection,
 )
 from backend.core.metric_expressions import coalesce, sum_or_zero
-from backend.utils.date_utils import iso_z, iso_z_now, parse_iso_utc
+from backend.utils.date_utils import iso_z, iso_z_now, parse_hour_key_strict, parse_iso_utc
 from backend.utils.pop_utils import build_pop_haversine_case_sql
 from backend.utils.sql_validator import escape_sql_literal
 
@@ -88,11 +89,15 @@ from ._common import (
     MultiBundleSpec,
     _day_bundled_root,
     _hour_bundled_root,
+    _safe_table_for,
+    acquire_rollup_connection_and_cols,
     backfill_missing_bundles,
     backfill_multi_spec_bundles,
     build_multi_spec_bundles,
     build_per_hour_bundles,
     parquet_zstd_target,
+    parse_hour_token,
+    quote_path_list,
     unlink_quiet,
 )
 
@@ -932,10 +937,362 @@ def get_cache_stats() -> dict:
         con.close()
 
 
+# ---------------------------------------------------------------------------
+# Wellknown-bots rollup writer + reader (folded from backend.core.rollups.wellknown_bots)
+# ---------------------------------------------------------------------------
+
+
+def _wellknown_bots_root(source: dict) -> str:
+    from backend.core.duckdb import _cache_dir
+
+    return os.path.join(_cache_dir(source), "rollups", "wellknown_bots")
+
+
+def recompute_wellknown_bots_rollup(
+    service_id: str,
+    source: dict,
+    hours: set[str] | list[str],
+) -> int:
+    """Pre-materialise (ua, ip, count) rows for the wellknown_bots
+    request-path query for each touched hour."""
+    if not hours:
+        return 0
+
+    from backend.core.iceberg.view import _get_service_lock
+    from backend.utils.bot_sources import get_bot_regex_pattern, get_pattern_set_version
+
+    version = get_pattern_set_version()
+    if not version:
+        return 0
+    pattern = get_bot_regex_pattern(500)
+    if not pattern:
+        return 0
+
+    active_hour = datetime.now(UTC).strftime("%Y-%m-%d-%H")
+    parsed: list[str] = []
+    for h in hours:
+        if h == active_hour:
+            continue
+        if parse_hour_token(h) is None:
+            continue
+        parsed.append(h)
+    if not parsed:
+        return 0
+
+    table_ident = _safe_table_for(source)
+    if not table_ident:
+        return 0
+
+    bots_root = _wellknown_bots_root(source)
+    lock_key = source.get("name", "default")
+    pattern_sql = escape_sql_literal(pattern)
+    version_sql = escape_sql_literal(version)
+
+    rebuilt = 0
+    con, cols, owns_con = acquire_rollup_connection_and_cols(
+        source, table_ident, logger=logger, log_label="wellknown_bots"
+    )
+    try:
+        if cols is None or "ua" not in cols or "ip" not in cols:
+            return 0
+
+        from backend.core.iceberg import execute_with_stale_view_retry
+
+        os.makedirs(bots_root, exist_ok=True)
+        for hour in parsed:
+            hour_dt = parse_hour_key_strict(hour)
+            start_iso = hour_dt.isoformat()
+            end_iso = (hour_dt + timedelta(hours=1)).isoformat()
+            hour_dir = os.path.join(bots_root, f"hour={hour}")
+            os.makedirs(hour_dir, exist_ok=True)
+            tmp_path = os.path.join(hour_dir, f".tmp_{uuid.uuid4().hex[:12]}.parquet")
+            tmp_path_sql = escape_sql_literal(tmp_path)
+            copy_sql = (
+                f"COPY ("
+                f"  SELECT ua, ip, count(*) AS request_count, "
+                f"         '{version_sql}' AS pattern_set_version "
+                f"  FROM {table_ident} "
+                f"  WHERE timestamp >= TIMESTAMPTZ '{start_iso}' "
+                f"    AND timestamp <  TIMESTAMPTZ '{end_iso}' "
+                f"    AND ua IS NOT NULL AND ip IS NOT NULL "
+                f"    AND regexp_matches(ua, '{pattern_sql}') "
+                f"  GROUP BY ua, ip "
+                f"  ORDER BY request_count DESC "
+                f"  LIMIT 50000"
+                f") {parquet_zstd_target(tmp_path_sql)}"
+            )
+            try:
+                try:
+                    execute_with_stale_view_retry(con, source, lambda c, q=copy_sql: c.execute(q))
+                except Exception as e:  # noqa: BLE001 — DuckDB errors may arrive wrapped by the iceberg retry hop
+                    logger.warning("[rollups] %s: bot-rollup COPY failed for hour=%s: %s", service_id, hour, e)
+                    continue
+
+                with _get_service_lock(lock_key):
+                    try:
+                        for fname in os.listdir(hour_dir):
+                            if fname.endswith(".parquet") and not fname.startswith(".tmp_"):
+                                unlink_quiet(os.path.join(hour_dir, fname))
+                    except OSError:
+                        pass
+                    final_path = os.path.join(hour_dir, f"compacted_{uuid.uuid4().hex[:12]}.parquet")
+                    try:
+                        os.replace(tmp_path, final_path)
+                    except OSError as e:
+                        logger.warning(
+                            "[rollups] %s: bot-rollup publish failed for hour=%s: %s",
+                            service_id,
+                            hour,
+                            e,
+                        )
+                        continue
+                rebuilt += 1
+            finally:
+                if os.path.exists(tmp_path):
+                    unlink_quiet(tmp_path)
+    finally:
+        if owns_con:
+            con.close()
+
+    return rebuilt
+
+
+def backfill_wellknown_bots_rollup(
+    service_id: str,
+    source: dict,
+    *,
+    lookback_days: int | None = None,
+) -> int:
+    """Self-heal the wellknown_bots rollup tree against the CURRENT
+    ``pattern_set_version``: rebuild what it can, drop what it can't."""
+    from backend.core.iceberg.view import _get_service_lock
+    from backend.utils.bot_sources import get_pattern_set_version
+
+    version = get_pattern_set_version()
+    if not version:
+        return 0
+
+    bots_root = _wellknown_bots_root(source)
+    active_hour = datetime.now(UTC).strftime("%Y-%m-%d-%H")
+
+    data_hours: set[str] = set()
+    bundled_root = _hour_bundled_root(source)
+    try:
+        for entry in os.listdir(bundled_root):
+            if not entry.startswith("hour="):
+                continue
+            h = entry[len("hour=") :]
+            if (
+                h < active_hour
+                and parse_hour_token(h) is not None
+                and (
+                    os.path.isfile(os.path.join(bundled_root, entry, "all_fields.parquet"))
+                    or os.path.isfile(os.path.join(bundled_root, entry, "time_series.parquet"))
+                )
+            ):
+                data_hours.add(h)
+    except OSError:
+        data_hours = set()
+
+    hour_paths: dict[str, list[str]] = {}
+    if os.path.isdir(bots_root):
+        try:
+            for entry in os.listdir(bots_root):
+                if not entry.startswith("hour="):
+                    continue
+                hour = entry[len("hour=") :]
+                hd = os.path.join(bots_root, entry)
+                files = [
+                    os.path.join(hd, f) for f in os.listdir(hd) if f.endswith(".parquet") and not f.startswith(".tmp_")
+                ]
+                if files:
+                    hour_paths[hour] = files
+        except OSError:
+            hour_paths = {}
+
+    current_hours: set[str] = set()
+    stale_hours: set[str] = set()
+    if hour_paths:
+        import duckdb
+
+        all_paths = [p for paths in hour_paths.values() for p in paths]
+        from backend.core.duckdb import get_memory_connection
+
+        con = get_memory_connection()
+        try:
+            paths_sql = quote_path_list(all_paths)
+            version_sql = escape_sql_literal(version)
+            rows = con.execute(
+                f"SELECT DISTINCT regexp_extract(filename, 'hour=([0-9-]+)', 1) AS hr, "
+                f"  (pattern_set_version = '{version_sql}') AS is_current "
+                f"FROM read_parquet([{paths_sql}], filename=true)"
+            ).fetchall()
+            for hr, is_current in rows:
+                if not hr:
+                    continue
+                if is_current:
+                    current_hours.add(hr)
+                else:
+                    stale_hours.add(hr)
+            for hr, files in hour_paths.items():
+                if hr not in current_hours and hr not in stale_hours:
+                    try:
+                        import pyarrow.parquet as pq
+
+                        if all(pq.read_metadata(f).num_rows == 0 for f in files):
+                            current_hours.add(hr)
+                    except Exception:
+                        logger.debug("[rollups] metadata check failed for hour=%s", hr, exc_info=True)
+        except duckdb.Error:
+            current_hours = set()
+            stale_hours = set()
+        finally:
+            con.close()
+
+    cutoff_hour = (
+        (datetime.now(UTC) - timedelta(days=lookback_days)).strftime("%Y-%m-%d-%H")
+        if lookback_days is not None
+        else None
+    )
+    missing = sorted(
+        (h for h in data_hours if h not in current_hours and (cutoff_hour is None or h >= cutoff_hour)),
+        reverse=True,
+    )
+    n_written = recompute_wellknown_bots_rollup(service_id, source, missing) if missing else 0
+
+    lock_key = source.get("name", "default")
+    n_deleted = 0
+    for hour in sorted(stale_hours):
+        if hour in current_hours or hour in data_hours or hour >= active_hour:
+            continue
+        with _get_service_lock(lock_key):
+            removed_any = False
+            for p in hour_paths.get(hour, []):
+                try:
+                    os.remove(p)
+                    removed_any = True
+                except OSError:
+                    pass
+            try:
+                os.rmdir(os.path.join(bots_root, f"hour={hour}"))
+            except OSError:
+                pass
+        if removed_any:
+            n_deleted += 1
+    if n_deleted:
+        logger.info(
+            "[rollups] %s: swept %d unrebuildable stale wellknown hour(s) (raw data aged out)",
+            service_id,
+            n_deleted,
+        )
+
+    return n_written
+
+
+def read_wellknown_bots_rollup(
+    source: dict,
+    start_time: str,
+    end_time: str,
+) -> list[tuple[str, str, int]] | None:
+    """Return ``[(ua, ip, request_count), ...]`` for the request window
+    by reading the wellknown_bots rollup parquet partitions."""
+    from backend.utils.bot_sources import get_pattern_set_version
+
+    current_version = get_pattern_set_version()
+    if not current_version:
+        return None
+
+    bots_root = _wellknown_bots_root(source)
+    if not os.path.isdir(bots_root):
+        return None
+
+    try:
+        start_dt = _parse_iso_to_hour(start_time)
+        end_dt = _parse_iso_to_hour(end_time)
+    except Exception:
+        return None
+    if start_dt is None or end_dt is None:
+        return None
+    if end_dt - start_dt > timedelta(days=366):
+        return None
+    if end_dt - start_dt < timedelta(hours=23):
+        return None
+
+    active_hour = datetime.now(UTC).strftime("%Y-%m-%d-%H")
+
+    closed_hours: list[str] = []
+    cur = start_dt
+    while cur <= end_dt:
+        h = cur.strftime("%Y-%m-%d-%H")
+        if h < active_hour:
+            closed_hours.append(h)
+        cur += timedelta(hours=1)
+    if not closed_hours:
+        return None
+
+    paths: list[str] = []
+    covered = 0
+    for h in closed_hours:
+        hour_dir = os.path.join(bots_root, f"hour={h}")
+        if not os.path.isdir(hour_dir):
+            continue
+        files = [f for f in os.listdir(hour_dir) if f.endswith(".parquet") and not f.startswith(".tmp_")]
+        if not files:
+            continue
+        covered += 1
+        paths.extend(os.path.join(hour_dir, f) for f in files)
+    if not paths or covered < (len(closed_hours) + 1) // 2:
+        return None
+
+    import duckdb
+
+    from backend.core.duckdb import get_memory_connection
+
+    con = get_memory_connection()
+    try:
+        paths_sql = quote_path_list(paths)
+        try:
+            rows = con.execute(
+                f"SELECT ua, ip, request_count, "
+                f"MIN(min_row_ver) OVER () AS min_ver, "
+                f"MAX(max_row_ver) OVER () AS max_ver "
+                f"FROM (SELECT ua, ip, SUM(request_count) AS request_count, "
+                f"MIN(pattern_set_version) AS min_row_ver, "
+                f"MAX(pattern_set_version) AS max_row_ver "
+                f"FROM read_parquet([{paths_sql}]) "
+                f"GROUP BY ua, ip) "
+                f"ORDER BY request_count DESC LIMIT 10000"
+            ).fetchall()
+        except duckdb.Error:
+            return None
+        if not rows:
+            return []
+        min_ver, max_ver = rows[0][3], rows[0][4]
+        if min_ver != current_version or max_ver != current_version:
+            return None
+        return [(r[0], r[1], int(r[2])) for r in rows]
+    finally:
+        con.close()
+
+
+def _parse_iso_to_hour(iso: str) -> datetime | None:
+    """Parse an ISO-ish timestamp string into a UTC datetime truncated
+    to the hour."""
+    if not iso:
+        return None
+    try:
+        s = iso.rstrip("Z")
+        dt = datetime.fromisoformat(s).replace(tzinfo=UTC)
+    except ValueError:
+        return None
+    return dt.replace(minute=0, second=0, microsecond=0)
+
+
 for _legacy_mod in (
     "backend.core.rollups.security_proxies",
     "backend.core.rollups.verified_bots_ts",
     "backend.core.rollups.ngwaf_bots",
+    "backend.core.rollups.wellknown_bots",
     "backend.utils.ngwaf",
 ):
     sys.modules[_legacy_mod] = sys.modules[__name__]

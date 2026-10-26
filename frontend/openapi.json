@@ -17697,7 +17697,7 @@
           "services"
         ],
         "summary": "Api Service Clear Time Range",
-        "description": "Remove the persisted time_range filter from a service config.\n\nOnce cleared, the cron will ingest all available data (bounded only by\nlog_retention_days), and the FOS scan will use the incremental lookback\noptimization rather than scanning from the original import start date.",
+        "description": "Remove the persisted time_range filter from a service config.",
         "operationId": "api_service_clear_time_range_api_services__service_id__time_range_delete",
         "parameters": [
           {
@@ -18181,7 +18181,7 @@
           "services"
         ],
         "summary": "Api Service Update Credentials",
-        "description": "Rotate FOS credentials for a service.\n\nTwo modes:\n- api_token (admin read_write only): auto-creates a new FOS key via the Fastly API,\n  deletes the old one, and saves the result.\n- access_key + secret_key (all services): validates the supplied credentials against\n  FOS then saves them using the correct field names for the service's access level.",
+        "description": "Rotate or validate and update FOS credentials for a service.",
         "operationId": "api_service_update_credentials_api_services__service_id__credentials_patch",
         "parameters": [
           {
@@ -40011,7 +40011,7 @@
           "provision"
         ],
         "summary": "Provision Teardown",
-        "description": "Destructive service teardown over SSE.\n\nSwitched from ``GET`` to ``POST`` to defend against CSRF: a GET\nendpoint with side effects can be triggered by any cross-origin\n``<img src=\"\u2026\">``, ``<link>``, or ``<form method=get>``. POST routes\nrequire the caller to send a request that browsers do not emit\ncross-origin without the user explicitly submitting a form, and\n``Content-Type: application/json`` (sent by the dashboard's fetch\nclient) puts the request in the CORS-preflighted bucket so the\nbrowser will block silent invocation entirely.",
+        "description": "Destructive service teardown over SSE.",
         "operationId": "provision_teardown_api_provision_teardown_post",
         "requestBody": {
           "content": {
@@ -40379,7 +40379,7 @@
           "provision"
         ],
         "summary": "Provision Reconcile",
-        "description": "Reconcile VCL state for a service (auto-detects and removes legacy snippets).\n\nStreams SSE events as the reconciliation proceeds through the 8-step control loop.\nThis endpoint is called during UI deployment to ensure clean VCL state and\nautomatic migration from pre-2.2 legacy snippets to consolidated VCL.\n\n``service_id`` and ``token`` arrive in the request body, never the query\nstring \u2014 a Fastly API token in a URL is logged by every hop that sees it.\n\nArgs:\n    body: Fastly service ID + API token.\n\nReturns:\n    SSE stream with reconciliation status events.",
+        "description": "Reconcile VCL state for a service and stream status via SSE.",
         "operationId": "provision_reconcile_api_provision_reconcile_post",
         "requestBody": {
           "content": {
@@ -41020,7 +41020,7 @@
           "provision"
         ],
         "summary": "Provision Ngwaf Workspaces",
-        "description": "List NGWAF workspaces for a service.\n\nSecurity: previously the endpoint would silently fall back to\nthe server-stored ``fastly_api_key`` if the caller didn't pass a\ntoken, letting any local-loopback caller enumerate NGWAF workspaces\nfor any service using the stored credential. Now the caller MUST\npresent a token, and we accept either:\n  - the stored ``fastly_api_key`` for this service (constant-time\n    match \u2014 preserves the existing admin UX where the frontend\n    passes the stored key it just used to fetch workspaces), OR\n  - a token whose /tokens/self response shows access to this service\n    (the strict validation path used for the destructive op).\nEither way an unauthenticated caller can't enumerate workspaces\neven if they reach the loopback admin surface.",
+        "description": "List NGWAF workspaces for a service (requires validated Fastly token).",
         "operationId": "provision_ngwaf_workspaces_api_provision_ngwaf_workspaces_get",
         "parameters": [
           {
@@ -41176,7 +41176,7 @@
           "provision"
         ],
         "summary": "Provision Set Ngwaf Workspace",
-        "description": "Persist the NGWAF workspace ID for a service and reload the scheduler.\n\nSecurity: require the caller to present a Fastly token bound to\nthis service. Two paths are accepted:\n\n  1. The caller passes a token that ``/tokens/self`` confirms has the\n     ``global`` scope and access to ``service_id`` (preferred \u2014 admin\n     can rotate without re-entering the stored key).\n  2. The caller passes a token that constant-time-matches the\n     service's stored ``fastly_api_key`` (the existing admin flow).\n\nEither way an unauthenticated attacker who can reach the endpoint can't\nrebind the workspace because they don't know the token. The middleware\n/api/provision/ block also gates this for analysts.",
+        "description": "Persist the NGWAF workspace ID for a service and reload the scheduler.",
         "operationId": "provision_set_ngwaf_workspace_api_provision_services__service_id__ngwaf_workspace_patch",
         "parameters": [
           {
@@ -41857,7 +41857,7 @@
           "session-scoring"
         ],
         "summary": "Scoring Analytics Composite",
-        "description": "Composite of the analytics endpoints\n(top-flagged, score-distribution, compliance-breakdown,\nlatency-timeseries, health, evaluation, evaluation/per-reason) into a\nsingle round-trip. Each is already individually cached via `_cached` so\nrepeated composite calls within the 20s TTL collapse to dict\nlookups; the composite primarily saves the per-request HTTP +\nauth-middleware overhead that the 7-card admin_session_scoring\npage paid on cold mount.\n\nGranular endpoints unchanged \u2014 frontend swap to use the composite\nis a separate commit so the per-card endpoints remain a rollback\ntarget.\n\nAnalyst-vs-admin gate: the direct ``/evaluation/per-reason`` endpoint\nis admin-only via ``_ANALYST_BLOCKED_SCORING_SUFFIXES``. The composite\ntherefore mirrors the gate at the data layer \u2014 analysts get the four\nanalyst-safe sub-results; admins get all six. Without this, the path-\nsuffix block was bypassable by routing through ``/scoring/analytics``.",
+        "description": "Composite of the analytics endpoints into a single round-trip.",
         "operationId": "scoring_analytics_composite_api_services__service_id__scoring_analytics_get",
         "parameters": [
           {
@@ -42119,7 +42119,7 @@
           "session-scoring"
         ],
         "summary": "Scoring Status",
-        "description": "Return the scoring block from the service's config, or\n{\"enabled\": false} if scoring was never enabled.",
+        "description": "Return the scoring block from the service's config, or {\"enabled\": false}.",
         "operationId": "scoring_status_api_services__service_id__scoring_status_get",
         "parameters": [
           {
@@ -42653,7 +42653,7 @@
           "session-scoring"
         ],
         "summary": "Scoring Labels Delete",
-        "description": "Delete a session label.\n\nSecurity: gated on the analyst's service-scope set so an analyst\ninvited to ``svc-A`` cannot DELETE ``svc-B``'s labels via the\ncross-tenant pattern ``DELETE /api/services/svc-B/scoring/labels/...``.\nAdmin (loopback) bypasses the check \u2014 ``analyst_allowed_services``\nreturns ``None`` there. This is defense-in-depth for the admin gate\ndocumented in the audit (loopback-only, not token-gated).",
+        "description": "Delete a session label (gated on the caller's service scope).",
         "operationId": "scoring_labels_delete_api_services__service_id__scoring_labels__label_id__delete",
         "parameters": [
           {
@@ -42785,7 +42785,7 @@
           "session-scoring"
         ],
         "summary": "Scoring Top Flagged",
-        "description": "Recent rows with non-null edge_score, sorted by score DESC. Feeds\nthe admin page's \"Top flagged sessions\" table.\n\nReturns up to ``limit`` rows. Each row carries enough context for the\nadmin to label it: sid, ip, ua, url, the three score fields, and\ncookie_compliance. Joining against the labels table is left to the\nUI (so it can show \"currently labeled X\" badges without paying the\nJOIN cost server-side).",
+        "description": "Recent rows with non-null edge_score, sorted by score DESC.",
         "operationId": "scoring_top_flagged_api_services__service_id__scoring_top_flagged_get",
         "parameters": [
           {
@@ -42932,7 +42932,7 @@
           "session-scoring"
         ],
         "summary": "Scoring Score Distribution",
-        "description": "Hourly buckets \u00d7 score buckets (0, 25, 50, 75, 100). Returns a flat\nlist of {hour, bucket, count} rows; the frontend pivots for the\nhistogram.",
+        "description": "Hourly buckets \u00d7 score buckets (0, 25, 50, 75, 100).",
         "operationId": "scoring_score_distribution_api_services__service_id__scoring_score_distribution_get",
         "parameters": [
           {
@@ -43067,7 +43067,7 @@
           "session-scoring"
         ],
         "summary": "Scoring Compliance Breakdown",
-        "description": "Hourly count grouped by edge_cookie_compliance (ok / missing /\ntampered / expired / unknown).",
+        "description": "Hourly count grouped by edge_cookie_compliance.",
         "operationId": "scoring_compliance_breakdown_api_services__service_id__scoring_compliance_breakdown_get",
         "parameters": [
           {
@@ -43202,7 +43202,7 @@
           "session-scoring"
         ],
         "summary": "Scoring Latency Timeseries",
-        "description": "Time-series of scorer latency + fail-open errors.\n\nOne row per bucket with: ``scored_count``, ``fail_open_count``\n(compute-unavailable-* \u2014 the scorer's 401-unauthorized lands here as\ncompute-unavailable-401 once VCL rewrites the non-200; there is no bare\n\"unauthorized\" log reason, EC-05), and \u2014 when the latency columns\nexist \u2014 ``rtt_p50/p95/p99_us`` (edge round-trip) and\n``exec_p50/p95_us`` (Wasm exec). The fail-open series works on any\nenabled service; the latency series fills in once the service has been\nre-provisioned with the latency fields. Powers ScorerLatencyChart +\nScorerErrorsChart on the session-scoring admin page. ``has_latency``\ntells the chart whether to render the latency axis.\n\nBucket granularity adapts to the window: a 1-hour window bucketed\nhourly collapses to a single bar, so short windows (``since_hours <= 1``)\nbucket by MINUTE; everything wider stays hourly. The bucket column keeps\nthe ``hour`` alias (it's a timestamp the chart plots on a date axis\nregardless of width), and ``granularity`` (\"minute\"|\"hour\") is returned\nso the UI can label the axis.",
+        "description": "Time-series of scorer latency + fail-open errors (minute buckets for <=1h, hourly otherwise).",
         "operationId": "scoring_latency_timeseries_api_services__service_id__scoring_latency_timeseries_get",
         "parameters": [
           {
@@ -43337,7 +43337,7 @@
           "session-scoring"
         ],
         "summary": "Scoring Health",
-        "description": "High-level scoring health snapshot for the admin dashboard.\n\nReturns a single object with the metrics the operator wants at a\nglance: how often scoring fires vs how much edge traffic flows, what\nthe score distribution looks like as summary stats (mean / p50 / p95),\na top-N breakdown of the comma-separated edge_score_reason values\n(so 'cookie-missing' vs 'impossibly-fast' vs 'rare-transition' is\nvisible without opening the Raw Logs table), and a fail-open error\ncount (rows where the scorer's deliver-stage subfields didn't land \u2014\ntypically a Compute timeout or auth mismatch).",
+        "description": "High-level scoring health snapshot for the admin dashboard.",
         "operationId": "scoring_health_api_services__service_id__scoring_health_get",
         "parameters": [
           {
@@ -43472,7 +43472,7 @@
           "session-scoring"
         ],
         "summary": "Scoring Evaluation",
-        "description": "Compute the live matrix's ROC-AUC against the operator's accumulated\ngood/bad labels and return the result for the StatusPanel.\n\nBelow the per-class minimum (3 each) the endpoint reports\n``has_min_samples: false`` and the StatusPanel renders a CTA pushing\nthe operator to label a few more sessions \u2014 sub-3 AUC bounces between\n0 and 1 on a single label flip and would erode trust in the metric.\n\nWiring:\n  1. Pull all labels for the service from SQLite (cheap; <10k rows).\n  2. Reconstruct each labeled sid's event sequence from DuckDB.\n  3. Load the trained matrix JSON.\n  4. Run evaluate() \u2014 AUC via Mann-Whitney U, no scipy dependency.\n\nCached for 20s under the existing _cached pattern; the key includes\nthe label count so a fresh label naturally invalidates the cache\n(also, _bust_analytics_cache fires on label POST/PATCH/DELETE).",
+        "description": "Compute the live matrix's ROC-AUC against accumulated good/bad labels.",
         "operationId": "scoring_evaluation_api_services__service_id__scoring_evaluation_get",
         "parameters": [
           {
@@ -43595,7 +43595,7 @@
           "session-scoring"
         ],
         "summary": "Scoring Curves",
-        "description": "ROC + PR curve points for the operator's labeled sessions.\n\nWalks every integer threshold 0..100 and computes:\n  ROC: (false_positive_rate, true_positive_rate) at that cutoff\n  PR:  (recall, precision) at that cutoff\n\nPlus the scalar summaries (AUC = area under ROC; AP = average\nprecision = area under PR). Both areas use the trapezoidal rule\non the sorted threshold sweep.\n\nReturns has_min_samples=false when either class has <3 labels \u2014\nsame gate as /scoring/evaluation \u2014 so the UI renders the \"label\nmore sessions\" CTA instead of a noisy curve.\n\nCached under the existing ``_cached`` TTL with a label-count-aware\nkey so a fresh label POST invalidates correctly via the regular\ncache-miss path (n_good/n_bad change \u2192 new key).",
+        "description": "ROC + PR curve points for the operator's labeled sessions across thresholds 0..100.",
         "operationId": "scoring_curves_api_services__service_id__scoring_curves_get",
         "parameters": [
           {
@@ -43718,7 +43718,7 @@
           "session-scoring"
         ],
         "summary": "Scoring Threshold Preview",
-        "description": "Preview what happens at a given enforcement threshold.\n\nFor the last ``since_hours`` of edge traffic, count:\n  - total scored requests\n  - how many would be flagged (edge_score >= threshold)\n  - of those, how many are labeled good / bad / unlabeled\n  - same breakdown for the un-flagged tail\n\nThis is the underlying data for the operator-facing slider: drag\nthreshold up \u2192 fewer flags but you start missing labeled-bad\nsessions; drag down \u2192 catches more bad but also flags some labeled-\ngood (false positives). The 2x2 confusion matrix readout is enough\nto eyeball the right cutoff.\n\nCached 30s under the existing ``_cached`` pattern; the cache key\nincludes the threshold so dragging the slider re-fetches.",
+        "description": "Preview flagged vs passed confusion counts at a given enforcement threshold.",
         "operationId": "scoring_threshold_preview_api_services__service_id__scoring_threshold_preview_get",
         "parameters": [
           {
@@ -43865,7 +43865,7 @@
           "session-scoring"
         ],
         "summary": "Scoring Retrain",
-        "description": "Build a fresh transition matrix from the last N days of DuckDB\ntraffic, save it to ``compute/scorer/matrix.json``, publish to FOS,\nand evaluate AUC against the operator's accumulated labels.\n\nSynchronous \u2014 for a 7-day window with ~10k sessions the whole pipeline\nruns in <30s. The endpoint returns the new matrix metadata + AUC so\nthe UI can show \"matrix moved from 0.62 \u2192 0.91 after retrain\". The new\nmatrix is pushed straight into the scoring_matrix KV Store, so the LIVE\nedge scorer picks it up as Compute instances recycle \u2014 no Wasm rebuild\n(the matrix is read from KV at runtime, not embedded).\n\nPipeline:\n  1. extract_traces from DuckDB \u2192 in-memory sessions\n  2. build_matrix \u2192 TransitionMatrix\n  3. evaluate AUC against labels (if >=3 each class)\n  4. Save matrix.json to disk + publish to FOS\n  4b. Write the matrix to the scoring_matrix KV Store (live scorer)\n  5. Bust the /scoring/evaluation cache",
+        "description": "Build a transition matrix from DuckDB traffic, publish to FOS + KV, and evaluate AUC.",
         "operationId": "scoring_retrain_api_services__service_id__scoring_retrain_post",
         "parameters": [
           {
@@ -44021,7 +44021,7 @@
           "session-scoring"
         ],
         "summary": "Scoring Session Events",
-        "description": "Return the event timeline for a single session \u2014 the URLs the\nsession hit, in order, with per-request status/score/compliance/reason\nso the UI can render a 'view this labeled session' popover.\n\nThe data is the same shape ``evaluate()`` consumes for AUC; this\nendpoint just exposes it through a public route keyed on the sid the\noperator clicked. Cap is 500 events per sid (any realistic browsing\nsession well under that; the cap is a runaway-loop safety bound).\n\nAnalyst-reachable, so the lookback is clamped to the invite window\n(since_days expressed as hours). The per-event ``ip`` is masked for\nanalysts by the response middleware's key-name pass; ``ua`` / ``url`` stay\nintact (analysts triage on them). Admin requests keep the full window.",
+        "description": "Return the event timeline for a single session (up to 500 events).",
         "operationId": "scoring_session_events_api_services__service_id__scoring_sessions__sid__events_get",
         "parameters": [
           {
@@ -44168,7 +44168,7 @@
           "session-scoring"
         ],
         "summary": "Scoring Enforce Threshold Get",
-        "description": "Read the live enforce_threshold value from the scoring_config\nCompute ConfigStore. None = no enforcement.\n\nThe Rust scorer reads this on every request \u2014 when set AND the\nrequest's score >= threshold, it emits X-Edge-Score-Enforce: 1,\nwhich the SCORING_ENFORCE_NAME VCL snippet turns into a 429.",
+        "description": "Read the live enforce_threshold value from the scoring_config ConfigStore (None = disabled).",
         "operationId": "scoring_enforce_threshold_get_api_services__service_id__scoring_enforce_threshold_get",
         "parameters": [
           {
@@ -44300,7 +44300,7 @@
           "session-scoring"
         ],
         "summary": "Scoring Enforce Threshold Put",
-        "description": "Write the live enforce_threshold to the scoring_config ConfigStore.\nPass ``{\"threshold\": null}`` to clear (disable enforcement).\n\nEffective at the edge within seconds (next Compute invocation\nre-reads the ConfigStore). Audited to scoring_audit so the operator\ncan review when enforcement was flipped on/off.\n\nGated by ``?confirm=true`` (matches the matrix-restore pattern) so\nan accidental click can't silently flip enforcement at the edge.",
+        "description": "Write the live enforce_threshold to the scoring_config ConfigStore (null disables enforcement).",
         "operationId": "scoring_enforce_threshold_put_api_services__service_id__scoring_enforce_threshold_put",
         "parameters": [
           {
@@ -44456,7 +44456,7 @@
           "session-scoring"
         ],
         "summary": "Scoring L2 Enforce Get",
-        "description": "Read the live L2-enforcement opt-in + fade-in state from the scoring_config\nConfigStore, plus the advisory deployment-age readiness gauge.\n\nL2's sub-score is ALWAYS computed + logged at the edge; this endpoint reports\nonly whether (and how strongly) it contributes to the *enforced* combined\nscore. ``enabled`` is the operator's explicit opt-in; ``ramp_progress`` /\n``days_since_optin`` / ``warmup_days_remaining`` track the fade-in from the\nopt-in anchor; ``ready`` / ``deployment_age_days`` are the advisory \"enough\nobserved L2 data yet?\" gauge (deploy age \u2265 7 days), never an actuator.\n\nRead+cache pattern mirrors /scoring/enforce-threshold (300s TTL, busted by the\nPUT). 502 on a non-404 ConfigStore error rather than masking it as off.",
+        "description": "Read the live L2-enforcement opt-in + fade-in state from the scoring_config ConfigStore.",
         "operationId": "scoring_l2_enforce_get_api_services__service_id__scoring_l2_enforce_get",
         "parameters": [
           {
@@ -44588,7 +44588,7 @@
           "session-scoring"
         ],
         "summary": "Scoring L2 Enforce Put",
-        "description": "Opt edge Layer-2 in/out of the *enforced* combined score by writing the\n``l2_enforce_enabled`` flag to the scoring_config ConfigStore.\n\nEnabling stamps a fresh ``l2_enabled_at`` anchor on the off\u2192on transition (or\nwhen none exists yet) so L2 fades in over ~3 days from the moment of consent;\nre-confirming an already-on service does NOT reset an in-progress fade-in.\nDisabling writes \"0\" and leaves the anchor as-is, so a later off\u2192on re-enable\noverwrites it and restarts the fade-in. L2's sub-score keeps being computed +\nlogged regardless \u2014 only its contribution to the enforced score is gated.\n\nEffective at the edge within seconds (the scorer re-reads the ConfigStore each\nrequest). Audited. Gated by ``?confirm=true`` \u2014 the same kill switch as\nenforce-threshold \u2014 because it changes live edge blocking.",
+        "description": "Opt edge Layer-2 in/out of the enforced combined score via scoring_config ConfigStore.",
         "operationId": "scoring_l2_enforce_put_api_services__service_id__scoring_l2_enforce_put",
         "parameters": [
           {
@@ -44744,7 +44744,7 @@
           "session-scoring"
         ],
         "summary": "Scoring Exclude Regex Get",
-        "description": "Return the operator-configured URL-exclusion regex for the recv snippet.\n\nURLs that match this regex are NOT routed to the Compute scorer\n(saves cost on static assets / health checks / etc.). The default\nmatches common static-asset file extensions; the operator can\noverride it via the PUT endpoint below.\n\nResponse shape:\n  {\n    \"current\":      str,    # the stored value (literal default after\n                            # first enable_scoring; or operator override)\n    \"is_default\":   bool,   # true when current is empty OR equals the\n                            # built-in default literal\n    \"default\":      str,    # the built-in default regex\n    \"effective\":    str,    # what's actually interpolated into VCL\n  }",
+        "description": "Return the operator-configured URL-exclusion regex for the recv snippet.",
         "operationId": "scoring_exclude_regex_get_api_services__service_id__scoring_exclude_regex_get",
         "parameters": [
           {
@@ -44866,7 +44866,7 @@
           "session-scoring"
         ],
         "summary": "Scoring Exclude Regex Put",
-        "description": "Update the URL-exclusion regex for the scoring recv snippet.\n\nValidation pipeline (must pass all four to land):\n  1. Input policy (length cap, no quote / control chars, valid regex).\n  2. Falco static analysis on the assembled recv-snippet body.\n  3. Fastly's VCL ``validate`` endpoint on the cloned version.\n  4. ``activate_version`` (Fastly's compiler runs again).\n\nRe-deploys ONLY the recv snippet \u2014 Compute service, Wasm, log\nformat, and the other 5 scoring snippets stay untouched. Takes\n~5-10s end-to-end.\n\nPass ``{\"regex\": \"\"}`` to reset to the built-in default. Body shape:\n    { \"regex\": str }\n\nGated by ``?confirm=true`` because a typo here can disable scoring\nentirely (regex matches everything) or DoS Compute (regex matches\nnothing \u2192 every request scored). The confirm flag matches the\nenforce-threshold + matrix-restore precedent.",
+        "description": "Update the URL-exclusion regex for the scoring recv snippet.",
         "operationId": "scoring_exclude_regex_put_api_services__service_id__scoring_exclude_regex_put",
         "parameters": [
           {
@@ -45022,7 +45022,7 @@
           "session-scoring"
         ],
         "summary": "Scoring Exclude Regex Validate",
-        "description": "Run the 2-layer pre-publish validator on a candidate regex WITHOUT\npersisting it or touching Fastly.\n\nDrives the admin UI's on-blur lint check: the operator types a regex,\ntabs out of the textarea, and gets immediate feedback on whether the\nvalue would pass input policy (length / quote / control-char / Python\nre.compile) AND falco's static analysis on the assembled snippet,\nBEFORE they commit to a publish flow.\n\nResponse shape:\n  Success:  {\"ok\": true,  \"lint_warnings\": [...]}\n  Failure:  {\"ok\": false, \"error\": \"...\", \"reason\": \"...\"}\n\nThe third layer (Fastly's own VCL compiler during version activate)\nonly runs on real publish \u2014 we don't burn a clone/activate round-trip\nfor a preview. False-positives between falco and Fastly's compiler are\nrare; the publish flow still catches them.",
+        "description": "Run the 2-layer pre-publish validator on a candidate regex without persisting it.",
         "operationId": "scoring_exclude_regex_validate_api_services__service_id__scoring_exclude_regex_validate_post",
         "parameters": [
           {
@@ -45156,7 +45156,7 @@
           "session-scoring"
         ],
         "summary": "Scoring Enforce Status Code Get",
-        "description": "Return the operator-configured HTTP status code that the enforce\nsnippet returns when the scorer flags a request.\n\nDefaults to 429 (Too Many Requests). Operators can pick any 4xx/5xx\ncode via the PUT endpoint below.\n\nResponse shape:\n  {\n    \"current\":     int,    # operator's override, or null when default\n    \"default\":     int,    # built-in default (429)\n    \"effective\":   int,    # what's actually baked into the VCL\n    \"min\":         int,    # min allowed value (400)\n    \"max\":         int,    # max allowed value (599)\n    \"is_default\":  bool,\n  }",
+        "description": "Return the operator-configured HTTP status code returned by the enforce snippet.",
         "operationId": "scoring_enforce_status_code_get_api_services__service_id__scoring_enforce_status_code_get",
         "parameters": [
           {
@@ -45278,7 +45278,7 @@
           "session-scoring"
         ],
         "summary": "Scoring Enforce Status Code Put",
-        "description": "Update the HTTP status code returned by the enforce snippet.\n\nBody shape: ``{\"status_code\": int | null}``. Pass ``null`` (or omit)\nto reset to the default 429.\n\nValidation:\n  - Must be int in 400-599 (4xx/5xx HTTP error range).\n  - Anything else \u2192 400 with explanation.\n\nRe-deploys ONLY the enforce snippet \u2014 Compute service, Wasm, log\nformat, and the other 5 scoring snippets stay untouched. Takes\n~5-10s end-to-end.\n\nGated by ``?confirm=true`` because the change affects live edge\nresponse codes seen by real users \u2014 same precedent as\nenforce-threshold and exclude-regex.",
+        "description": "Update the HTTP status code returned by the enforce snippet (400-599 or null for 429).",
         "operationId": "scoring_enforce_status_code_put_api_services__service_id__scoring_enforce_status_code_put",
         "parameters": [
           {
@@ -45434,7 +45434,7 @@
           "session-scoring"
         ],
         "summary": "Scoring Matrix Versions List",
-        "description": "List historical scoring matrices archived in FOS.\n\npublish_matrix_to_fos snapshots the prior current matrix to\n``iceberg/meta/scoring_matrix_history/{version}.json`` before\noverwriting, so the operator can roll back to any prior trained\nmatrix. Returns most-recent first.",
+        "description": "List historical scoring matrices archived in FOS.",
         "operationId": "scoring_matrix_versions_list_api_services__service_id__scoring_matrix_versions_get",
         "parameters": [
           {
@@ -45558,7 +45558,7 @@
           "session-scoring"
         ],
         "summary": "Scoring Matrix Versions Restore",
-        "description": "Restore a historical matrix to the current scoring_matrix.json\nkey in FOS. Also deletes the local matrix.json so the next\n/scoring/evaluation call sees the FOS-restored matrix, and pushes the\nrestored matrix into the scoring_matrix KV Store so the LIVE edge scorer\npicks it up (as Compute instances recycle) \u2014 no redeploy. The\n/scoring/evaluation AUC reflects the restored matrix immediately.\n\nGated by ``?confirm=true`` so an accidental click can't silently\nrewind the live AUC numbers.",
+        "description": "Restore a historical matrix in FOS, clear the local shadow copy, and push to KV.",
         "operationId": "scoring_matrix_versions_restore_api_services__service_id__scoring_matrix_versions__version__restore_post",
         "parameters": [
           {
@@ -45707,7 +45707,7 @@
           "session-scoring"
         ],
         "summary": "Scoring Rotate Key",
-        "description": "Rotate the AES-GCM cookie-state encryption key.\n\nMoves the current key to ``previous_key_hex`` (grace window for\nin-flight cookies still using the old key) and writes a fresh\n32-byte key as the new ``current_key_hex``. The Rust scorer's\ncookie codec already tries previous as a fallback so existing\nsessions keep decoding for one rotation cycle.\n\nReturns rotation metadata \u2014 the new key itself is NOT returned in\nthe response (only stored in the Fastly ConfigStore + audit log).",
+        "description": "Rotate the AES-GCM cookie-state encryption key (preserving previous_key_hex grace slot).",
         "operationId": "scoring_rotate_key_api_services__service_id__scoring_rotate_key_post",
         "parameters": [
           {
@@ -45841,7 +45841,7 @@
           "session-scoring"
         ],
         "summary": "Scoring Audit List",
-        "description": "List recent operator actions on this service's scoring config.\n\nTracks: scoring_enabled, scoring_disabled, threshold_committed,\nthreshold_cleared, threshold_enforced, threshold_enforce_disabled,\nmatrix_retrained, matrix_restored, key_rotated. Each row has\ntimestamp, action, actor, details (JSON). Used for compliance review\n+ \"who broke prod last Tuesday?\" triage.\n\n``since`` (optional ISO timestamp) filters to rows at or after that\ninstant \u2014 handy for the admin UI to poll for new events without\nre-rendering the entire history.",
+        "description": "List recent operator actions on this service's scoring config.",
         "operationId": "scoring_audit_list_api_services__service_id__scoring_audit_get",
         "parameters": [
           {
@@ -45995,7 +45995,7 @@
           "session-scoring"
         ],
         "summary": "Scoring Threshold Get",
-        "description": "Return the operator's chosen score threshold.\n\nNOT enforced \u2014 the live scorer doesn't read this. It's a persisted\noperator preference so the threshold slider can remember the\n'committed' value across sessions, and the StatusPanel can show\n'committed threshold: X' as a stable reference. Actual enforcement\nrequires a Rust scorer change + Wasm redeploy and is deferred to\na future release once the operator is confident in the value.",
+        "description": "Return the operator's chosen preview-only score threshold.",
         "operationId": "scoring_threshold_get_api_services__service_id__scoring_threshold_get",
         "parameters": [
           {
@@ -46117,7 +46117,7 @@
           "session-scoring"
         ],
         "summary": "Scoring Threshold Put",
-        "description": "Persist the operator's chosen threshold (0-100) into the per-service\nconfig. Pass ``{\"threshold\": null}`` to clear. Always returns the\nnew state. Does NOT push to Compute \u2014 preview-only.",
+        "description": "Persist the operator's chosen preview-only threshold (0-100 or null) into per-service config.",
         "operationId": "scoring_threshold_put_api_services__service_id__scoring_threshold_put",
         "parameters": [
           {
@@ -46251,7 +46251,7 @@
           "session-scoring"
         ],
         "summary": "Scoring Evaluation Per Reason",
-        "description": "AUC broken down by L1/L2 rule (cookie-missing, impossibly-fast,\nrobotic-consistency, rare-transition, low-transition-prob).\n\nSame min-samples gate as /scoring/evaluation but applied per-bucket\n(so a reason with <3 labels in either class shows a 'need more\nlabels with reason=X' CTA instead of a noisy AUC). The headline\n/scoring/evaluation gives the combined AUC; this answers 'which\nrule contributed most to AUC' once enough per-reason labels exist.",
+        "description": "AUC broken down by L1/L2 rule.",
         "operationId": "scoring_evaluation_per_reason_api_services__service_id__scoring_evaluation_per_reason_get",
         "parameters": [
           {
@@ -46375,7 +46375,7 @@
           "session-scoring"
         ],
         "summary": "Scoring Dashboard",
-        "description": "One-shot dashboard payload. Returns:\n\n```\n{\n    since_hours, threshold,\n    status: {...},                                  # /scoring/status\n    evaluation: {...},                              # /scoring/evaluation\n    health: {...},                                  # /scoring/health\n    top_flagged: {rows: [...], since_hours},        # /scoring/top-flagged\n    score_distribution: {rows: [...]},              # /scoring/score-distribution\n    compliance_breakdown: {rows: [...]},            # /scoring/compliance-breakdown\n    curves: {...},                                  # /scoring/curves\n    threshold_preview: {...},                       # /scoring/threshold-preview\n}\n```\n\nEach sub-object is byte-identical to the corresponding individual\nendpoint's response \u2014 the frontend can swap to\n``dashboard.top_flagged`` without changing card-level contracts.\n\nCache key includes ``since_hours``, ``threshold``, and the per-class\nlabel counts so label mutations + slider drags invalidate naturally.",
+        "description": "One-shot composite dashboard payload across status, evaluation, health, charts, and config.",
         "operationId": "scoring_dashboard_api_services__service_id__scoring_dashboard_get",
         "parameters": [
           {
@@ -47402,295 +47402,6 @@
                 "schema": {
                   "$ref": "#/components/schemas/OkResponse"
                 }
-              }
-            }
-          },
-          "400": {
-            "description": "Bad request",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Unauthenticated",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Forbidden",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation failed",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Rate limited",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Internal error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "502": {
-            "description": "Upstream error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "503": {
-            "description": "Service unavailable",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/share/oauth/authorize": {
-      "get": {
-        "tags": [
-          "share-oauth"
-        ],
-        "summary": "Oauth Authorize",
-        "operationId": "oauth_authorize_api_share_oauth_authorize_get",
-        "parameters": [
-          {
-            "name": "provider",
-            "in": "query",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Provider"
-            }
-          },
-          {
-            "name": "return",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "default": "/dashboard",
-              "title": "Return"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "400": {
-            "description": "Bad request",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Unauthenticated",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Forbidden",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation failed",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Rate limited",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Internal error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "502": {
-            "description": "Upstream error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "503": {
-            "description": "Service unavailable",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/share/oauth/callback": {
-      "get": {
-        "tags": [
-          "share-oauth"
-        ],
-        "summary": "Oauth Callback",
-        "operationId": "oauth_callback_api_share_oauth_callback_get",
-        "parameters": [
-          {
-            "name": "code",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Code"
-            }
-          },
-          {
-            "name": "state",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "State"
-            }
-          },
-          {
-            "name": "error",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Error"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
               }
             }
           },
@@ -52283,6 +51994,295 @@
                 "schema": {
                   "$ref": "#/components/schemas/ShareClaimResponse"
                 }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/share/oauth/authorize": {
+      "get": {
+        "tags": [
+          "share-oauth"
+        ],
+        "summary": "Oauth Authorize",
+        "operationId": "oauth_authorize_api_share_oauth_authorize_get",
+        "parameters": [
+          {
+            "name": "provider",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Provider"
+            }
+          },
+          {
+            "name": "return",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "/dashboard",
+              "title": "Return"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/share/oauth/callback": {
+      "get": {
+        "tags": [
+          "share-oauth"
+        ],
+        "summary": "Oauth Callback",
+        "operationId": "oauth_callback_api_share_oauth_callback_get",
+        "parameters": [
+          {
+            "name": "code",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Code"
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "State"
+            }
+          },
+          {
+            "name": "error",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Error"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
               }
             }
           },

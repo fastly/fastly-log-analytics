@@ -556,3 +556,683 @@ def test_no_dollar_anchored_validator_uses_bare_match():
             ):
                 offenders.append(f"{path}:{node.lineno}")
     assert offenders == []
+
+
+# ── Merged from tests/security/test_live_rbac_probes.py ──
+
+import datetime
+import json
+import os
+import urllib.error
+import urllib.request
+from typing import Any
+
+_BASE_URL_ENV = "FLA_PROBE_BASE_URL"
+_EMAIL_ENV = "FLA_PROBE_EMAIL"
+_PASSCODE_ENV = "FLA_PROBE_PASSCODE"
+
+_STABLE_UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+)
+
+
+def _env(name: str) -> str | None:
+    v = os.getenv(name)
+    return v if v else None
+
+
+@pytest.fixture(scope="session")
+def probe_base_url() -> str:
+    url = _env(_BASE_URL_ENV)
+    if not url:
+        pytest.skip(
+            f"{_BASE_URL_ENV} not set; skipping live RBAC probes. "
+            "Set FLA_PROBE_BASE_URL / FLA_PROBE_EMAIL / FLA_PROBE_PASSCODE to run."
+        )
+    return url.rstrip("/")
+
+
+@pytest.fixture(scope="session")
+def probe_creds() -> tuple[str, str]:
+    email = _env(_EMAIL_ENV)
+    passcode = _env(_PASSCODE_ENV)
+    if not email or not passcode:
+        pytest.skip(f"{_EMAIL_ENV} / {_PASSCODE_ENV} not set; skipping live RBAC probes.")
+    return email, passcode
+
+
+@pytest.fixture(scope="session")
+def probe_session(probe_base_url: str, probe_creds: tuple[str, str]) -> dict[str, Any]:
+    email, passcode = probe_creds
+    req = urllib.request.Request(
+        f"{probe_base_url}/api/share/login",
+        method="POST",
+        data=json.dumps({"email": email, "passcode": passcode}).encode(),
+        headers={
+            "Content-Type": "application/json",
+            "Origin": probe_base_url,
+            "Referer": f"{probe_base_url}/share-login",
+            "X-Remote-Analyst": "1",
+            "User-Agent": _STABLE_UA,
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            cookies = resp.headers.get_all("Set-Cookie") or []
+            body = json.loads(resp.read())
+    except urllib.error.HTTPError as exc:
+        pytest.skip(
+            f"share-login probe failed ({exc.code}); cannot run live RBAC probes. "
+            "Verify FLA_PROBE_EMAIL / FLA_PROBE_PASSCODE against {probe_base_url}/api/share/login."
+        )
+    sid_cookie = next(
+        (c.split(";")[0].split("=", 1)[1] for c in cookies if c.startswith("analyst_session_id=")),
+        None,
+    )
+    if not sid_cookie:
+        pytest.skip("share-login returned no analyst_session_id cookie; cannot run probes.")
+    service_ids = body.get("service_ids") or []
+    if not service_ids:
+        pytest.skip("share-login returned no service_ids; analyst has no service access.")
+    return {
+        "cookie": f"analyst_session_id={sid_cookie}",
+        "service_id": service_ids[0],
+        "base_url": probe_base_url,
+    }
+
+
+def analyst_request(
+    session: dict[str, Any],
+    method: str,
+    path: str,
+    body: dict | None = None,
+    *,
+    timeout: float = 60.0,
+) -> tuple[int, bytes]:
+    headers = {
+        "Cookie": session["cookie"],
+        "Origin": session["base_url"],
+        "Referer": f"{session['base_url']}/dashboard",
+        "User-Agent": _STABLE_UA,
+    }
+    data = None
+    if body is not None:
+        data = json.dumps(body).encode()
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(
+        session["base_url"] + path,
+        data=data,
+        headers=headers,
+        method=method,
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status, resp.read()
+    except urllib.error.HTTPError as exc:
+        raw = exc.read() if hasattr(exc, "read") else b""
+        return exc.code, raw
+
+
+def test_query_response_does_not_leak_debug_queries(probe_session):
+    status, body = analyst_request(
+        probe_session,
+        "POST",
+        "/api/query",
+        {"service_id": probe_session["service_id"], "mode": "raw", "sql": "SELECT 1 AS x"},
+    )
+    assert status == 200, f"SELECT 1 should succeed for analyst, got {status}: {body[:200]!r}"
+    resp = json.loads(body)
+    for key in ("debug_queries", "_debug_queries", "debug_calls", "_debug_calls", "debug_sqlite", "_debug_sqlite"):
+        assert key not in resp, f"{key!r} present in /api/query response — strip helper missed it"
+
+
+def test_dashboard_bundle_does_not_leak_debug_queries(probe_session):
+    now = datetime.datetime.now(datetime.UTC)
+    body = {
+        "service_id": probe_session["service_id"],
+        "start_time": (now - datetime.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+        "end_time": now.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+        "metric": "requests",
+        "interval": "minute",
+    }
+    status, raw = analyst_request(probe_session, "POST", "/api/dashboard/bundle", body)
+    assert status == 200, f"/api/dashboard/bundle failed for analyst: {status} {raw[:200]!r}"
+    resp = json.loads(raw)
+    for key in ("debug_queries", "_debug_queries", "debug_calls", "_debug_calls", "debug_sqlite", "_debug_sqlite"):
+        assert key not in resp, f"{key!r} present in /api/dashboard/bundle response"
+
+
+_LABEL_PII_FIELDS = ("notes", "flagged_by", "sample_ip", "sample_ua", "sample_url")
+
+
+def test_scoring_labels_strips_pii_for_analyst(probe_session):
+    status, raw = analyst_request(
+        probe_session,
+        "GET",
+        f"/api/services/{probe_session['service_id']}/scoring/labels",
+    )
+    if status == 404:
+        pytest.skip("no scoring labels configured on this service — nothing to probe")
+    assert status == 200, f"/scoring/labels failed: {status} {raw[:200]!r}"
+    resp = json.loads(raw)
+    labels = resp.get("labels", [])
+    if not labels:
+        pytest.skip("no scoring labels exist on this service — nothing to probe")
+    for row in labels:
+        for pii_field in _LABEL_PII_FIELDS:
+            assert pii_field not in row, f"PII field {pii_field!r} present in analyst /scoring/labels response: {row!r}"
+
+
+def test_scoring_analytics_composite_omits_evaluation_for_analyst(probe_session):
+    status, raw = analyst_request(
+        probe_session,
+        "GET",
+        f"/api/services/{probe_session['service_id']}/scoring/analytics",
+    )
+    assert status == 200, f"/scoring/analytics failed: {status} {raw[:200]!r}"
+    resp = json.loads(raw)
+    assert "evaluation" not in resp, "composite leaked 'evaluation' to analyst"
+    assert "evaluation_per_reason" not in resp, "composite leaked 'evaluation_per_reason' to analyst"
+    for safe_key in ("top_flagged", "score_distribution", "compliance_breakdown", "health"):
+        assert safe_key in resp, f"analyst-safe composite key {safe_key!r} missing"
+
+
+def test_scoring_evaluation_per_reason_direct_is_403(probe_session):
+    status, _raw = analyst_request(
+        probe_session,
+        "GET",
+        f"/api/services/{probe_session['service_id']}/scoring/evaluation/per-reason",
+    )
+    assert status == 403, f"direct /evaluation/per-reason returned {status}, expected 403"
+
+
+def test_dashboard_aggregates_400s_on_empty_window(probe_session):
+    now = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    status, raw = analyst_request(
+        probe_session,
+        "POST",
+        "/api/dashboard/aggregates",
+        {
+            "service_id": probe_session["service_id"],
+            "start_time": now,
+            "end_time": now,
+            "metric": "requests",
+            "interval": "minute",
+        },
+    )
+    assert status == 400, f"empty-window request should 400, got {status}: {raw[:200]!r}"
+    body = json.loads(raw)
+    detail = body.get("detail") or {}
+    assert detail.get("time_range_empty") is True, f"missing time_range_empty marker in 400 body: {body!r}"
+
+
+def test_dashboard_aggregates_400s_on_inverted_window(probe_session):
+    now = datetime.datetime.now(datetime.UTC)
+    later = now.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    earlier = (now - datetime.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    status, raw = analyst_request(
+        probe_session,
+        "POST",
+        "/api/dashboard/aggregates",
+        {
+            "service_id": probe_session["service_id"],
+            "start_time": later,
+            "end_time": earlier,
+            "metric": "requests",
+            "interval": "minute",
+        },
+    )
+    assert status == 400, f"inverted-window should 400, got {status}: {raw[:200]!r}"
+
+
+def test_query_blocks_show_tables(probe_session):
+    status, raw = analyst_request(
+        probe_session,
+        "POST",
+        "/api/query",
+        {"service_id": probe_session["service_id"], "mode": "raw", "sql": "SHOW TABLES"},
+    )
+    assert status == 403, f"SHOW TABLES should 403, got {status}: {raw[:200]!r}"
+    body = json.loads(raw)
+    assert (
+        "SHOW" in (body.get("detail", {}).get("error") or "").upper()
+        or "DESCRIBE" in (body.get("detail", {}).get("error") or "").upper()
+    )
+
+
+def test_query_blocks_describe(probe_session):
+    status, _raw = analyst_request(
+        probe_session,
+        "POST",
+        "/api/query",
+        {"service_id": probe_session["service_id"], "mode": "raw", "sql": "DESCRIBE logs"},
+    )
+    assert status == 403
+
+
+def test_query_blocks_foreign_table_select(probe_session):
+    status, raw = analyst_request(
+        probe_session,
+        "POST",
+        "/api/query",
+        {
+            "service_id": probe_session["service_id"],
+            "mode": "raw",
+            "sql": "SELECT COUNT(*) FROM logs_some_other_service_that_does_not_exist",
+        },
+    )
+    assert status == 403, f"foreign-table SELECT should 403, got {status}: {raw[:200]!r}"
+    body = json.loads(raw)
+    error_str = (body.get("detail") or {}).get("error", "")
+    assert "not in the allowed set" in error_str, f"expected allowlist rejection, got: {error_str!r}"
+
+
+def test_query_allows_canonical_logs(probe_session):
+    status, raw = analyst_request(
+        probe_session,
+        "POST",
+        "/api/query",
+        {"service_id": probe_session["service_id"], "mode": "raw", "sql": "SELECT COUNT(*) AS n FROM logs"},
+    )
+    assert status == 200, f"canonical /api/query failed post-fix: {status} {raw[:200]!r}"
+    body = json.loads(raw)
+    assert "data" in body and len(body["data"]) == 1
+    assert "n" in body["data"][0]
+
+
+def test_query_allows_recursive_cte(probe_session):
+    sql = "WITH RECURSIVE x(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM x WHERE n<5) SELECT * FROM x"
+    status, raw = analyst_request(
+        probe_session,
+        "POST",
+        "/api/query",
+        {"service_id": probe_session["service_id"], "mode": "raw", "sql": sql},
+    )
+    assert status == 200, f"recursive CTE should pass post-fix: {status} {raw[:200]!r}"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/admin/services",
+        "/api/admin/ingest",
+        "/api/admin/share/invites",
+        "/api/cron-runs",
+        "/api/audit-logs",
+        "/api/alerts",
+        "/api/usage",
+        "/api/provision/services",
+        "/api/debug/state",
+    ],
+)
+def test_admin_paths_blocked_for_analyst(probe_session, path):
+    status, raw = analyst_request(probe_session, "GET", path)
+    assert status == 403, f"{path} should 403 for analyst, got {status}: {raw[:200]!r}"
+
+
+# ── Merged from tests/security/test_adversarial_ast_pii_redaction.py ──
+
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from backend.core import share_db
+from backend.repositories.query import execute_query
+from backend.routers import share_admin, share_auth
+from backend.utils import tunnel
+from backend.utils.remote_access import RemoteAccessMiddleware
+
+RAW_IP = "198.51.100.42"
+RAW_SESSION = "deadbeefcafe1234567890abcdef"
+RAW_URL = "/api/v1/sensitive-resource"
+SOURCE_NAME = "default"
+TIME_FILTER = ("2026-09-19T00:00:00Z", "2026-09-19T23:59:59Z")
+
+
+@pytest.fixture
+def test_db() -> duckdb.DuckDBPyConnection:
+    con = duckdb.connect(":memory:")
+    con.execute(
+        """
+        CREATE TABLE logs (
+            timestamp TIMESTAMPTZ,
+            ip VARCHAR,
+            client_ip VARCHAR,
+            cookie_session VARCHAR,
+            status INTEGER,
+            url VARCHAR
+        );
+        INSERT INTO logs VALUES (
+            '2026-09-19 12:00:00Z'::TIMESTAMPTZ,
+            '198.51.100.42',
+            '198.51.100.42',
+            'deadbeefcafe1234567890abcdef',
+            200,
+            '/api/v1/sensitive-resource'
+        );
+        """
+    )
+    yield con
+    con.close()
+
+
+def test_admin_and_pii_analyst_sees_unmasked_pii(test_db: duckdb.DuckDBPyConnection) -> None:
+    sql = "SELECT ip, client_ip, cookie_session, url FROM logs"
+    res = execute_query(
+        test_db,
+        {"name": SOURCE_NAME},
+        sql,
+        max_rows=10,
+        want_explain=False,
+        mask_ips=False,
+        time_filter=TIME_FILTER,
+    )
+    rows = res["data"]
+    assert len(rows) == 1
+    assert rows[0]["ip"] == RAW_IP
+    assert rows[0]["client_ip"] == RAW_IP
+    assert rows[0]["cookie_session"] == RAW_SESSION
+    assert rows[0]["url"] == RAW_URL
+
+
+def test_no_pii_analyst_direct_projection_redacted(test_db: duckdb.DuckDBPyConnection) -> None:
+    sql = "SELECT ip, client_ip, cookie_session, url FROM logs"
+    res = execute_query(
+        test_db,
+        {"name": SOURCE_NAME},
+        sql,
+        max_rows=10,
+        want_explain=False,
+        mask_ips=True,
+        time_filter=TIME_FILTER,
+    )
+    rows = res["data"]
+    assert len(rows) == 1
+    assert rows[0]["ip"] == "[redacted]"
+    assert rows[0]["client_ip"] == "[redacted]"
+    assert rows[0]["cookie_session"] == "[redacted]"
+    assert rows[0]["url"] == RAW_URL
+
+
+def test_adversarial_ast_string_concatenation(test_db: duckdb.DuckDBPyConnection) -> None:
+    sql = "SELECT 'prefix_' || ip || '_suffix' AS exfil FROM logs"
+    res = execute_query(
+        test_db,
+        {"name": SOURCE_NAME},
+        sql,
+        max_rows=10,
+        want_explain=False,
+        mask_ips=True,
+        time_filter=TIME_FILTER,
+    )
+    rows = res["data"]
+    assert len(rows) == 1
+    assert rows[0]["exfil"] == "prefix_[redacted]_suffix"
+    assert RAW_IP not in rows[0]["exfil"]
+
+
+def test_adversarial_ast_type_cast(test_db: duckdb.DuckDBPyConnection) -> None:
+    sql = "SELECT CAST(ip AS VARCHAR) AS cast_ip, cookie_session::TEXT AS cast_sess FROM logs"
+    res = execute_query(
+        test_db,
+        {"name": SOURCE_NAME},
+        sql,
+        max_rows=10,
+        want_explain=False,
+        mask_ips=True,
+        time_filter=TIME_FILTER,
+    )
+    rows = res["data"]
+    assert len(rows) == 1
+    assert rows[0]["cast_ip"] == "[redacted]"
+    assert rows[0]["cast_sess"] == "[redacted]"
+
+
+def test_adversarial_ast_substring_slicing(test_db: duckdb.DuckDBPyConnection) -> None:
+    sql = "SELECT SUBSTR(ip, 1, 4) AS sub_ip FROM logs"
+    res = execute_query(
+        test_db,
+        {"name": SOURCE_NAME},
+        sql,
+        max_rows=10,
+        want_explain=False,
+        mask_ips=True,
+        time_filter=TIME_FILTER,
+    )
+    rows = res["data"]
+    assert len(rows) == 1
+    assert rows[0]["sub_ip"] == "[red"
+    assert RAW_IP[:4] not in rows[0]["sub_ip"]
+
+
+def test_adversarial_ast_cte_wrapper(test_db: duckdb.DuckDBPyConnection) -> None:
+    sql = """
+    WITH attacker_cte AS (
+        SELECT ip AS aliased_ip, cookie_session AS aliased_sess FROM logs
+    )
+    SELECT aliased_ip, aliased_sess FROM attacker_cte
+    """
+    res = execute_query(
+        test_db,
+        {"name": SOURCE_NAME},
+        sql,
+        max_rows=10,
+        want_explain=False,
+        mask_ips=True,
+        time_filter=TIME_FILTER,
+    )
+    rows = res["data"]
+    assert len(rows) == 1
+    assert rows[0]["aliased_ip"] == "[redacted]"
+    assert rows[0]["aliased_sess"] == "[redacted]"
+
+
+def test_adversarial_ast_subquery_wrapper(test_db: duckdb.DuckDBPyConnection) -> None:
+    sql = "SELECT sub.x, sub.y FROM (SELECT ip AS x, cookie_session AS y FROM logs) AS sub"
+    res = execute_query(
+        test_db,
+        {"name": SOURCE_NAME},
+        sql,
+        max_rows=10,
+        want_explain=False,
+        mask_ips=True,
+        time_filter=TIME_FILTER,
+    )
+    rows = res["data"]
+    assert len(rows) == 1
+    assert rows[0]["x"] == "[redacted]"
+    assert rows[0]["y"] == "[redacted]"
+
+
+def test_adversarial_ast_conditional_oracle(test_db: duckdb.DuckDBPyConnection) -> None:
+    sql = f"""
+    SELECT CASE
+        WHEN ip = '{RAW_IP}' THEN 'leaked_raw_ip'
+        ELSE 'protected_redacted'
+    END AS oracle_probe FROM logs
+    """
+    res = execute_query(
+        test_db,
+        {"name": SOURCE_NAME},
+        sql,
+        max_rows=10,
+        want_explain=False,
+        mask_ips=True,
+        time_filter=TIME_FILTER,
+    )
+    rows = res["data"]
+    assert len(rows) == 1
+    assert rows[0]["oracle_probe"] == "protected_redacted"
+
+
+def test_adversarial_ast_where_filter(test_db: duckdb.DuckDBPyConnection) -> None:
+    sql = f"SELECT url FROM logs WHERE ip = '{RAW_IP}'"
+    res = execute_query(
+        test_db,
+        {"name": SOURCE_NAME},
+        sql,
+        max_rows=10,
+        want_explain=False,
+        mask_ips=True,
+        time_filter=TIME_FILTER,
+    )
+    rows = res["data"]
+    assert len(rows) == 0
+
+
+def test_adversarial_ast_group_by_aggregation(test_db: duckdb.DuckDBPyConnection) -> None:
+    sql = "SELECT ip, COUNT(*) AS count_rows FROM logs GROUP BY ip"
+    res = execute_query(
+        test_db,
+        {"name": SOURCE_NAME},
+        sql,
+        max_rows=10,
+        want_explain=False,
+        mask_ips=True,
+        time_filter=TIME_FILTER,
+    )
+    rows = res["data"]
+    assert len(rows) == 1
+    assert rows[0]["ip"] == "[redacted]"
+    assert rows[0]["count_rows"] == 1
+
+
+@pytest.fixture
+def rbac_app() -> FastAPI:
+    app = FastAPI()
+    app.add_middleware(RemoteAccessMiddleware)
+    app.include_router(share_auth.router)
+    app.include_router(share_admin.router)
+
+    @app.get("/api/dashboard")
+    def _dash():
+        return {"ok": True}
+
+    @app.post("/api/views")
+    def _create_view():
+        return {"ok": True}
+
+    @app.post("/api/dashboard/aggregates")
+    def _aggregates():
+        return {"ok": True}
+
+    return app
+
+
+def test_analyst_rbac_admin_routes_blocked(rbac_app: FastAPI) -> None:
+    tunnel.get_tunnel_manager().start_sharing(public_endpoint="https://testserver")
+    invite = share_db.create_remote_invite(
+        name="RBAC Admin Test",
+        email="rbac-admin-test@example.com",
+        passcode="ocean-breeze-cabin-42",
+        expires_at_utc=None,
+        ip_whitelist=None,
+        service_ids=["svcA"],
+        pii_policy={"mask_ips": True},
+    )
+    tos = share_db.get_latest_tos()
+    if tos:
+        share_db.mark_tos_accepted(invite["id"], tos["version"])
+
+    client = TestClient(rbac_app)
+    r_login = client.post(
+        "/api/share/login",
+        json={"email": "rbac-admin-test@example.com", "passcode": "ocean-breeze-cabin-42"},
+        headers={"X-Remote-Analyst": "1", "Host": "testserver", "Origin": "https://testserver"},
+    )
+    assert r_login.status_code == 200
+
+    for raw in r_login.headers.get_list("set-cookie"):
+        name, _, val = raw.split(";", 1)[0].partition("=")
+        val = val.strip('"')
+        if name == "analyst_session_id" and val:
+            client.cookies.set("analyst_session_id", val)
+
+    r_admin = client.get(
+        "/api/admin/share/status",
+        headers={"X-Remote-Analyst": "1", "Host": "testserver"},
+    )
+    assert r_admin.status_code == 403
+    assert r_admin.json()["error"] == "admin_only"
+
+
+def test_analyst_rbac_mutation_routes_blocked(rbac_app: FastAPI) -> None:
+    tunnel.get_tunnel_manager().start_sharing(public_endpoint="https://testserver")
+    invite = share_db.create_remote_invite(
+        name="RBAC Write Test",
+        email="rbac-write-test@example.com",
+        passcode="ocean-breeze-cabin-42",
+        expires_at_utc=None,
+        ip_whitelist=None,
+        service_ids=["svcA"],
+        pii_policy={"mask_ips": True},
+    )
+    tos = share_db.get_latest_tos()
+    if tos:
+        share_db.mark_tos_accepted(invite["id"], tos["version"])
+
+    client = TestClient(rbac_app)
+    r_login = client.post(
+        "/api/share/login",
+        json={"email": "rbac-write-test@example.com", "passcode": "ocean-breeze-cabin-42"},
+        headers={"X-Remote-Analyst": "1", "Host": "testserver", "Origin": "https://testserver"},
+    )
+    assert r_login.status_code == 200
+
+    for raw in r_login.headers.get_list("set-cookie"):
+        name, _, val = raw.split(";", 1)[0].partition("=")
+        val = val.strip('"')
+        if name == "analyst_session_id" and val:
+            client.cookies.set("analyst_session_id", val)
+
+    r_mut = client.post(
+        "/api/views",
+        headers={"X-Remote-Analyst": "1", "Host": "testserver", "Origin": "https://testserver"},
+    )
+    assert r_mut.status_code == 403
+    assert r_mut.json()["error"] == "read_only"
+
+
+def test_analyst_pii_policy_filter_locking(rbac_app: FastAPI) -> None:
+    tunnel.get_tunnel_manager().start_sharing(public_endpoint="https://testserver")
+    invite = share_db.create_remote_invite(
+        name="RBAC Filter Lock Test",
+        email="rbac-filter-lock@example.com",
+        passcode="ocean-breeze-cabin-42",
+        expires_at_utc=None,
+        ip_whitelist=None,
+        service_ids=["svcA"],
+        pii_policy={"mask_ips": True},
+    )
+    tos = share_db.get_latest_tos()
+    if tos:
+        share_db.mark_tos_accepted(invite["id"], tos["version"])
+
+    client = TestClient(rbac_app)
+    r_login = client.post(
+        "/api/share/login",
+        json={"email": "rbac-filter-lock@example.com", "passcode": "ocean-breeze-cabin-42"},
+        headers={"X-Remote-Analyst": "1", "Host": "testserver", "Origin": "https://testserver"},
+    )
+    assert r_login.status_code == 200
+
+    for raw in r_login.headers.get_list("set-cookie"):
+        name, _, val = raw.split(";", 1)[0].partition("=")
+        val = val.strip('"')
+        if name == "analyst_session_id" and val:
+            client.cookies.set("analyst_session_id", val)
+
+    r_filt = client.post(
+        "/api/dashboard/aggregates?service=svcA",
+        json={"filters": {"ip": "198.51.100.42"}},
+        headers={"X-Remote-Analyst": "1", "Host": "testserver", "Origin": "https://testserver"},
+    )
+    assert r_filt.status_code == 403
+    assert r_filt.json()["error"] == "pii_policy_violation"
+    assert r_filt.json()["field"] == "ip"
+
+    r_ok = client.get(
+        "/api/dashboard?service=svcA",
+        headers={"X-Remote-Analyst": "1", "Host": "testserver"},
+    )
+    assert r_ok.status_code == 200
+    assert r_ok.json()["ok"] is True

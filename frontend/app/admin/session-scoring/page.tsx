@@ -24,11 +24,15 @@ import {
 import { Skeleton } from '@/components/ui/skeleton'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import {
+  StatusPanel,
+  L2EnforcementCard,
+  PerReasonAucCard,
+  RocPrCurves,
   ComplianceChart,
   ScoreDistChart,
   ScorerLatencyChart,
   ScorerErrorsChart,
-} from '@/components/SessionScoring/ScorerSeriesCard'
+} from '@/components/SessionScoring/StatusPanel'
 import {
   AuditLogTab,
   ExcludeRegexCard,
@@ -38,7 +42,6 @@ import {
   ScorerFailOpenBreakdownCard,
   ScoringHealthCard,
 } from '@/components/SessionScoring/ScoringAdminPanels'
-import { StatusPanel, L2EnforcementCard, PerReasonAucCard, RocPrCurves } from '@/components/SessionScoring/StatusPanel'
 import { ThresholdSlider } from '@/components/SessionScoring/ThresholdSlider'
 import { TopFlaggedTable } from '@/components/SessionScoring/TopFlaggedTable'
 import {

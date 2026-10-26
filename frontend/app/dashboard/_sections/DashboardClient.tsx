@@ -501,34 +501,22 @@ export function CardGrid({
         </div>
       )
     }
-    if (card.id === '_bot_name') {
+    if (isBotCard) {
+      const botItems = card.id === '_bot_name' ? (topBotsData?.bots ?? []) : (topBotsData?.ngwaf_bots ?? [])
       return (
         <LazyMount key={card.id} minHeight={300}>
           <TopTenTable
             title={card.label}
-            icon={<Bot className="h-4 w-4" />}
-            field="_bot_name"
+            icon={card.id === '_bot_name' ? <Bot className="h-4 w-4" /> : undefined}
+            field={card.id}
             inActiveFormat={card.inActiveFormat}
             data={{
-              total: topBotsData?.bots?.reduce((acc, b) => acc + b.request_count, 0) || 0,
-              top: (topBotsData?.bots ?? []).map((b) => ({ value: b.id ?? b.name, label: b.name, count: b.request_count })),
-            }}
-            compareData={undefined}
-            onRowClick={onRowClick}
-          />
-        </LazyMount>
-      )
-    }
-    if (card.id === '_ngwaf_bot_name') {
-      return (
-        <LazyMount key={card.id} minHeight={300}>
-          <TopTenTable
-            title={card.label}
-            field="_ngwaf_bot_name"
-            inActiveFormat={card.inActiveFormat}
-            data={{
-              total: (topBotsData?.ngwaf_bots ?? []).reduce((acc, b) => acc + b.request_count, 0),
-              top: (topBotsData?.ngwaf_bots ?? []).map((b) => ({ value: b.name, label: b.name, count: b.request_count })),
+              total: botItems.reduce((acc, b) => acc + b.request_count, 0),
+              top: botItems.map((b) => ({
+                value: card.id === '_bot_name' ? ('id' in b && b.id ? b.id : b.name) : b.name,
+                label: b.name,
+                count: b.request_count,
+              })),
             }}
             compareData={undefined}
             onRowClick={onRowClick}
@@ -719,9 +707,9 @@ export function TrafficChart({
                       Latency ({latLabel}) <ChevronDown className="ml-1 h-3 w-3" />
                     </DropdownMenuTrigger>
                     <DropdownMenuContent align="start">
-                      <DropdownMenuItem onClick={() => setMetric('p50_latency')} className="text-xs">p50 Latency</DropdownMenuItem>
-                      <DropdownMenuItem onClick={() => setMetric('p95_latency')} className="text-xs">p95 Latency</DropdownMenuItem>
-                      <DropdownMenuItem onClick={() => setMetric('p99_latency')} className="text-xs">p99 Latency</DropdownMenuItem>
+                      {(['p50', 'p95', 'p99'] as const).map((p) => (
+                        <DropdownMenuItem key={p} onClick={() => setMetric(`${p}_latency`)} className="text-xs">{p} Latency</DropdownMenuItem>
+                      ))}
                     </DropdownMenuContent>
                   </DropdownMenu>
                 )

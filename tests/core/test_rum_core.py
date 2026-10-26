@@ -15,6 +15,17 @@ from unittest.mock import MagicMock, patch
 
 import duckdb
 import pytest
+from backend.core.fastly.rum_provisioning import (
+    RUM_ASSET_FETCH_NAME,
+    RUM_DELIVER_SET_COOKIE_NAME,
+    RUM_FARO_FETCH_NAME,
+    RUM_RECV_NAME,
+    RUM_SIGV4_SIGN_NAME,
+    _assert_faro_version_safe,
+    generate_rum_asset_fetch_vcl,
+    generate_rum_vcl,
+    validate_rum_custom_condition,
+)
 from backend.core.metadata.quarantine import list_quarantine_evidence
 from backend.core.quarantine import read_evidence
 from backend.utils.vcl_validator import lint_vcl
@@ -29,17 +40,6 @@ from tests._helpers.ledger import (
 
 from backend.core import ingest as ingest_mod
 from backend.core import quarantine
-from backend.core.fastly.rum_provisioning import (
-    RUM_ASSET_FETCH_NAME,
-    RUM_DELIVER_SET_COOKIE_NAME,
-    RUM_FARO_FETCH_NAME,
-    RUM_RECV_NAME,
-    RUM_SIGV4_SIGN_NAME,
-    _assert_faro_version_safe,
-    generate_rum_asset_fetch_vcl,
-    generate_rum_vcl,
-    validate_rum_custom_condition,
-)
 from backend.core.ingest import (
     LEDGER_RECLAIM_AFTER_S,
     _parse_rum_beacon_file,
@@ -1326,3 +1326,392 @@ def test_falco_missing_binary_and_custom_conditions(monkeypatch):
 
     single_q = validate_rum_custom_condition("client.ip != '192.168.1.1'")
     assert single_q is not None and "double quotes" in single_q
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 4. Faro Versions (merged from tests/core/test_faro_versions.py)
+# ═════════════════════════════════════════════════════════════════════════════
+
+import base64
+import hashlib
+import os
+import tarfile
+
+import httpx
+from backend.core.faro_versions import (
+    _BUNDLE_MEMBER_NAME,
+    _is_stable_numeric,
+    fetch_available_faro_versions,
+    fetch_faro_bundle,
+)
+
+from backend.core import faro_versions
+
+TARBALL_URL = "https://registry.npmjs.org/@grafana/faro-web-sdk/-/faro-web-sdk-2.9.0.tgz"
+
+SAMPLE_REGISTRY_RESPONSE = {
+    "name": "@grafana/faro-web-sdk",
+    "versions": {
+        "1.9.0": {"version": "1.9.0"},
+        "2.10.0": {"version": "2.10.0"},
+        "2.9.0": {"version": "2.9.0"},
+        "1.4.5": {"version": "1.4.5"},
+        "2.8.2": {"version": "2.8.2"},
+        "2.9.0-alpha.1": {"version": "2.9.0-alpha.1"},
+        "2.9.0+build.7": {"version": "2.9.0+build.7"},
+    },
+}
+
+SAMPLE_BUNDLE = b"!function(e){var GrafanaFaroWebSdk={initializeFaro:function(){}};e.Faro=GrafanaFaroWebSdk}(window);"
+
+
+def _add_tar_member(tar: tarfile.TarFile, name: str, content: bytes) -> None:
+    info = tarfile.TarInfo(name=name)
+    info.size = len(content)
+    tar.addfile(info, io.BytesIO(content))
+
+
+def _build_fixture_tarball(
+    *,
+    bundle_name: str = _BUNDLE_MEMBER_NAME,
+    bundle_content: bytes = SAMPLE_BUNDLE,
+    include_bundle: bool = True,
+    extra_files: dict[str, bytes] | None = None,
+) -> bytes:
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        _add_tar_member(tar, "package/package.json", b'{"name": "@grafana/faro-web-sdk", "version": "2.9.0"}')
+        _add_tar_member(tar, "package/README.md", b"# Faro Web SDK\n\nMuch longer than the bundle itself.\n" * 20)
+        _add_tar_member(tar, "package/dist/bundle/faro-web-sdk.iife.js.map", b'{"version":3,"sources":[]}')
+        if include_bundle:
+            _add_tar_member(tar, bundle_name, bundle_content)
+        for name, content in (extra_files or {}).items():
+            _add_tar_member(tar, name, content)
+    return buf.getvalue()
+
+
+SAMPLE_TARBALL = _build_fixture_tarball()
+
+
+def _sri_integrity(data: bytes, algo: str = "sha512") -> str:
+    digest = hashlib.new(algo, data).digest()
+    return f"{algo}-{base64.b64encode(digest).decode()}"
+
+
+def _registry_payload_with_dist(version_dist: dict[str, dict]) -> dict:
+    return {
+        "name": "@grafana/faro-web-sdk",
+        "versions": {v: {"version": v, "dist": dist} for v, dist in version_dist.items()},
+    }
+
+
+def _route_by_url(*, registry: httpx.Response | None = None, responses: dict[str, httpx.Response] | None = None):
+    responses = dict(responses or {})
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if url == faro_versions.REGISTRY_URL:
+            assert registry is not None, "unexpected registry metadata request"
+            return registry
+        assert url in responses, f"unexpected request to {url}"
+        return responses[url]
+
+    return handler
+
+
+_REAL_ASYNC_CLIENT = httpx.AsyncClient
+
+
+def _mock_transport(handler):
+    def factory(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return _REAL_ASYNC_CLIENT(*args, **kwargs)
+
+    return factory
+
+
+@pytest.fixture
+def mock_http(monkeypatch):
+    def install(handler):
+        monkeypatch.setattr(faro_versions.httpx, "AsyncClient", _mock_transport(handler))
+
+    return install
+
+
+@pytest.mark.parametrize("version", ["１.２.３", "١.٢.٣", "2.9.٠"])
+def test_is_stable_numeric_rejects_non_ascii_digits(version):
+    assert _is_stable_numeric(version) is False
+
+
+def test_is_stable_numeric_accepts_plain_ascii_version():
+    assert _is_stable_numeric("2.9.0") is True
+
+
+async def test_fetch_available_faro_versions_excludes_non_ascii_digit_keys(mock_http):
+    payload = {
+        "name": "@grafana/faro-web-sdk",
+        "versions": {
+            "2.9.0": {"version": "2.9.0"},
+            "١.٢.٣": {"version": "١.٢.٣"},
+            "１.２.３": {"version": "１.２.３"},
+        },
+    }
+    mock_http(lambda _: httpx.Response(200, content=json.dumps(payload).encode()))
+    assert await fetch_available_faro_versions() == ["2.9.0"]
+
+
+async def test_fetch_available_faro_versions_filters_and_sorts_descending(mock_http):
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert str(request.url) == faro_versions.REGISTRY_URL
+        return httpx.Response(200, content=json.dumps(SAMPLE_REGISTRY_RESPONSE).encode())
+
+    mock_http(handler)
+    versions = await fetch_available_faro_versions()
+    assert versions == ["2.10.0", "2.9.0", "2.8.2", "1.9.0", "1.4.5"]
+    assert all("-" not in v and "+" not in v for v in versions)
+
+
+@pytest.mark.parametrize(
+    "handler,match",
+    [
+        (lambda _: httpx.Response(500, content=b"upstream error"), "500"),
+        (
+            lambda req: (_ for _ in ()).throw(httpx.ConnectError("registry unreachable", request=req)),
+            "Failed to fetch Faro versions",
+        ),
+        (lambda _: httpx.Response(200, content=b"<html>proxy interstitial</html>"), "malformed registry JSON"),
+        (lambda _: httpx.Response(200, content=json.dumps({"name": "x"}).encode()), "no 'versions' map"),
+    ],
+)
+async def test_fetch_available_faro_versions_errors(mock_http, handler, match):
+    mock_http(handler)
+    with pytest.raises(ValueError, match=match):
+        await fetch_available_faro_versions()
+
+
+async def test_fetch_faro_bundle_returns_extracted_bundle_bytes(mock_http):
+    registry_payload = _registry_payload_with_dist(
+        {"2.9.0": {"integrity": _sri_integrity(SAMPLE_TARBALL), "tarball": TARBALL_URL}}
+    )
+    mock_http(
+        _route_by_url(
+            registry=httpx.Response(200, content=json.dumps(registry_payload).encode()),
+            responses={TARBALL_URL: httpx.Response(200, content=SAMPLE_TARBALL)},
+        )
+    )
+    bundle = await fetch_faro_bundle("2.9.0")
+    assert isinstance(bundle, bytes) and bundle == SAMPLE_BUNDLE and b"Faro" in bundle
+
+
+def test_extracted_bundle_bytes_differ_from_tarball_bytes():
+    assert SAMPLE_BUNDLE != SAMPLE_TARBALL
+    assert SAMPLE_BUNDLE not in SAMPLE_TARBALL or len(SAMPLE_BUNDLE) < len(SAMPLE_TARBALL)
+    assert len(SAMPLE_TARBALL) > len(SAMPLE_BUNDLE)
+
+
+async def test_fetch_faro_bundle_verifies_against_shasum_fallback(mock_http):
+    registry_payload = _registry_payload_with_dist(
+        {
+            "2.9.0": {
+                "shasum": hashlib.sha1(SAMPLE_TARBALL, usedforsecurity=False).hexdigest(),
+                "tarball": TARBALL_URL,
+            }
+        }
+    )
+    mock_http(
+        _route_by_url(
+            registry=httpx.Response(200, content=json.dumps(registry_payload).encode()),
+            responses={TARBALL_URL: httpx.Response(200, content=SAMPLE_TARBALL)},
+        )
+    )
+    assert await fetch_faro_bundle("2.9.0") == SAMPLE_BUNDLE
+
+
+async def test_fetch_faro_bundle_raises_on_tarball_hash_mismatch(mock_http):
+    mutated_tarball = _build_fixture_tarball(bundle_content=b"!function(e){/* poisoned */}(window);")
+    registry_payload = _registry_payload_with_dist(
+        {"2.9.0": {"integrity": _sri_integrity(SAMPLE_TARBALL), "tarball": TARBALL_URL}}
+    )
+    mock_http(
+        _route_by_url(
+            registry=httpx.Response(200, content=json.dumps(registry_payload).encode()),
+            responses={TARBALL_URL: httpx.Response(200, content=mutated_tarball)},
+        )
+    )
+    with pytest.raises(ValueError, match="failed integrity verification"):
+        await fetch_faro_bundle("2.9.0")
+
+
+async def test_fetch_faro_bundle_raises_when_member_missing_from_verified_archive(mock_http):
+    tarball_without_bundle = _build_fixture_tarball(include_bundle=False)
+    registry_payload = _registry_payload_with_dist(
+        {"2.9.0": {"integrity": _sri_integrity(tarball_without_bundle), "tarball": TARBALL_URL}}
+    )
+    mock_http(
+        _route_by_url(
+            registry=httpx.Response(200, content=json.dumps(registry_payload).encode()),
+            responses={TARBALL_URL: httpx.Response(200, content=tarball_without_bundle)},
+        )
+    )
+    with pytest.raises(ValueError, match="missing expected member"):
+        await fetch_faro_bundle("2.9.0")
+
+
+@pytest.mark.parametrize("malicious_name", ["/etc/passwd", "../../../etc/passwd", "package/../../../etc/passwd"])
+async def test_fetch_faro_bundle_rejects_malicious_member_name(mock_http, malicious_name):
+    hostile_tarball = _build_fixture_tarball(
+        include_bundle=False,
+        extra_files={malicious_name: b"attacker-controlled bytes"},
+    )
+    registry_payload = _registry_payload_with_dist(
+        {"2.9.0": {"integrity": _sri_integrity(hostile_tarball), "tarball": TARBALL_URL}}
+    )
+    mock_http(
+        _route_by_url(
+            registry=httpx.Response(200, content=json.dumps(registry_payload).encode()),
+            responses={TARBALL_URL: httpx.Response(200, content=hostile_tarball)},
+        )
+    )
+    with pytest.raises(ValueError, match="missing expected member"):
+        await fetch_faro_bundle("2.9.0")
+
+
+async def test_fetch_faro_bundle_raises_when_registry_has_no_dist_for_version(mock_http):
+    registry_payload = _registry_payload_with_dist(
+        {"1.0.0": {"integrity": _sri_integrity(SAMPLE_TARBALL), "tarball": TARBALL_URL}}
+    )
+    mock_http(
+        _route_by_url(
+            registry=httpx.Response(200, content=json.dumps(registry_payload).encode()),
+            responses={TARBALL_URL: httpx.Response(200, content=SAMPLE_TARBALL)},
+        )
+    )
+    with pytest.raises(ValueError, match="no dist metadata"):
+        await fetch_faro_bundle("2.9.0")
+
+
+async def test_fetch_faro_bundle_raises_when_tarball_url_untrusted_host(mock_http):
+    registry_payload = _registry_payload_with_dist(
+        {
+            "2.9.0": {
+                "integrity": _sri_integrity(SAMPLE_TARBALL),
+                "tarball": "https://evil.example/faro-web-sdk-2.9.0.tgz",
+            }
+        }
+    )
+    mock_http(lambda request: httpx.Response(200, content=json.dumps(registry_payload).encode()))
+    with pytest.raises(ValueError, match="untrusted tarball URL host"):
+        await fetch_faro_bundle("2.9.0")
+
+
+async def test_fetch_faro_bundle_raises_on_404_and_server_error(mock_http):
+    registry_404 = _registry_payload_with_dist(
+        {"99.99.99": {"integrity": _sri_integrity(b"irrelevant"), "tarball": TARBALL_URL}}
+    )
+    mock_http(
+        _route_by_url(
+            registry=httpx.Response(200, content=json.dumps(registry_404).encode()),
+            responses={TARBALL_URL: httpx.Response(404, content=b"Cannot find package")},
+        )
+    )
+    with pytest.raises(ValueError, match="404") as exc_info:
+        await fetch_faro_bundle("99.99.99")
+    assert "99.99.99" in str(exc_info.value)
+
+    registry_503 = _registry_payload_with_dist(
+        {"2.9.0": {"integrity": _sri_integrity(SAMPLE_TARBALL), "tarball": TARBALL_URL}}
+    )
+    mock_http(
+        _route_by_url(
+            registry=httpx.Response(200, content=json.dumps(registry_503).encode()),
+            responses={TARBALL_URL: httpx.Response(503, content=b"service unavailable")},
+        )
+    )
+    with pytest.raises(ValueError, match="503") as exc_info_503:
+        await fetch_faro_bundle("2.9.0")
+    assert "404" not in str(exc_info_503.value)
+
+
+async def test_fetch_faro_bundle_raises_on_network_errors(mock_http):
+    registry_payload = _registry_payload_with_dist(
+        {"2.9.0": {"integrity": _sri_integrity(SAMPLE_TARBALL), "tarball": TARBALL_URL}}
+    )
+
+    def tarball_fail(request: httpx.Request) -> httpx.Response:
+        if str(request.url) == faro_versions.REGISTRY_URL:
+            return httpx.Response(200, content=json.dumps(registry_payload).encode())
+        raise httpx.ConnectError("tarball host unreachable", request=request)
+
+    mock_http(tarball_fail)
+    with pytest.raises(ValueError, match="Failed to download Faro tarball"):
+        await fetch_faro_bundle("2.9.0")
+
+    def registry_fail(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("registry unreachable", request=request)
+
+    mock_http(registry_fail)
+    with pytest.raises(ValueError, match="Failed to verify Faro bundle"):
+        await fetch_faro_bundle("2.9.0")
+
+
+async def test_fetch_faro_bundle_raises_when_tarball_exceeds_size_ceiling(mock_http):
+    oversized = b"0" * (faro_versions._TARBALL_MAX_BYTES + 1)
+    registry_payload = _registry_payload_with_dist(
+        {"2.9.0": {"integrity": _sri_integrity(oversized), "tarball": TARBALL_URL}}
+    )
+    mock_http(
+        _route_by_url(
+            registry=httpx.Response(200, content=json.dumps(registry_payload).encode()),
+            responses={TARBALL_URL: httpx.Response(200, content=oversized)},
+        )
+    )
+    with pytest.raises(ValueError, match="exceeds size ceiling"):
+        await fetch_faro_bundle("2.9.0")
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(
+    os.environ.get("FARO_LIVE_REGISTRY_TEST") != "1",
+    reason="opt-in live network test against the real npm registry; set FARO_LIVE_REGISTRY_TEST=1 to run",
+)
+async def test_live_registry_tarball_verifies():
+    bundle = await fetch_faro_bundle(faro_versions.DEFAULT_FARO_VERSION)
+    assert isinstance(bundle, bytes) and len(bundle) > 1000 and (b"Faro" in bundle or b"faro" in bundle)
+
+
+@pytest.fixture(autouse=True)
+def _reset_versions_cache():
+    faro_versions.reset_versions_cache()
+    yield
+    faro_versions.reset_versions_cache()
+
+
+async def test_cached_versions_fetches_once_within_ttl(monkeypatch):
+    calls = {"n": 0}
+
+    async def _fake():
+        calls["n"] += 1
+        return ["2.10.0", "2.9.0"]
+
+    monkeypatch.setattr(faro_versions, "fetch_available_faro_versions", _fake)
+    first = await faro_versions.get_faro_versions_cached()
+    second = await faro_versions.get_faro_versions_cached()
+    assert first == ["2.10.0", "2.9.0"] and second == first and calls["n"] == 1
+
+
+async def test_cached_versions_serves_stale_or_empty_on_error(monkeypatch):
+    async def _boom():
+        raise ValueError("registry down")
+
+    monkeypatch.setattr(faro_versions, "fetch_available_faro_versions", _boom)
+    assert await faro_versions.get_faro_versions_cached() == []
+
+    async def _ok():
+        return ["2.10.0", "2.9.0"]
+
+    monkeypatch.setattr(faro_versions, "fetch_available_faro_versions", _ok)
+    assert await faro_versions.get_faro_versions_cached() == ["2.10.0", "2.9.0"]
+
+    faro_versions._versions_cache = (0.0, ["2.10.0", "2.9.0"])
+    monkeypatch.setattr(faro_versions, "fetch_available_faro_versions", _boom)
+    assert await faro_versions.get_faro_versions_cached() == ["2.10.0", "2.9.0"]

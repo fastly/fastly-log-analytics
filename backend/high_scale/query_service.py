@@ -22,7 +22,7 @@ from backend.core.field_registry import DuckType, try_get
 from backend.core.share_db.validation import IP_FAMILY_KEYS, SESSION_ID_KEYS, mask_ip_values
 from backend.high_scale._common import MAX_PAGE_SIZE, KeysetCursor
 from backend.high_scale._common import range_value as _range_value
-from backend.high_scale.archive_models import ArchiveSourceObject, ServingWatermark
+from backend.high_scale.archive import ArchiveSourceObject, ServingWatermark
 from backend.high_scale.publication import (
     build_event_id,
     build_request_event_id,
@@ -1241,13 +1241,1404 @@ def query_endpoint(
     }
 
 
-for _alias_name in ("query_router", "decoder", "query", "clickhouse"):
+# ---------------------------------------------------------------------------
+# Insights (anomaly detection) for high-scale services (folded from insights.py)
+# ---------------------------------------------------------------------------
+
+import contextvars
+import urllib.parse
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+
+from backend.core.clickhouse_client import ClickHouseError
+from backend.core.share_db.validation import mask_ip
+from backend.high_scale._common import (
+    build_clickhouse_filters,
+    parse_time_window,
+    range_value,
+    request_filter_clauses,
+    resolve_asn_display_labels,
+    visible_fact_clauses,
+    visible_publication_fence_sql,
+)
+from backend.high_scale._common import (
+    format_iso_utc as _iso,
+)
+from backend.high_scale._common import (
+    format_iso_utc_or_empty as _iso_or_empty,
+)
+from backend.high_scale.insight_queries import (
+    AUTH_REGEX,
+    BOT_UA_REGEX,
+    COLUMNS,
+    COMPRESSIBLE_REGEX,
+    DETECTIONS,
+    POP_CODE,
+    PROBE_REGEX,
+    Detection,
+    botnet_grouping,
+    impossible_distance,
+    repeated_patterns_fp,
+)
+from backend.models.dashboard import SessionDetailRequest, SessionsRequest
+from backend.models.insights import CacheCollapseDetailResponse, InsightsResponse
+from backend.repositories.insights import InsightDefinition, registry  # noqa: F401  (registers the detections)
+from backend.repositories.utils.response_cache import (
+    ResponseMemo,
+    bucket_time_to_minute,
+    client_cache_token,
+    digest_cache_key,
+)
+from backend.utils.bounded_cache import BoundedTTLCache
+from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry
+from backend.utils.date_utils import parse_iso_utc
+
+_MAX_WORKERS = 12
+_FIELD_SAMPLE_ROWS = 1000
+_BASE_FIELDS = frozenset({"timestamp", "url", "country", "ip"})
+_ASN_INSIGHT_MARKERS = ("asn", "metro")
+
+_INSIGHTS_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=200, ttl_seconds=300)
+_CacheRegistry.register("high_scale.insights._INSIGHTS_CACHE", _INSIGHTS_CACHE)
+
+
+def _window(
+    window_hours: float, baseline_hours: float, clamp_start: str | None, clamp_end: str | None
+) -> tuple[datetime, datetime, datetime]:
+    """``(baseline_start, window_start, now)``, honouring the analyst clamp exactly like the standard path."""
+    now = datetime.now(UTC)
+    if clamp_end:
+        ceiling = parse_iso_utc(clamp_end)
+        if ceiling and ceiling < now:
+            now = ceiling
+    window_start = now - timedelta(hours=window_hours)
+    baseline_start = now - timedelta(hours=baseline_hours + window_hours)
+    if clamp_start:
+        floor = parse_iso_utc(clamp_start)
+        if floor:
+            baseline_start = max(baseline_start, floor)
+            window_start = max(window_start, floor)
+    return baseline_start, window_start, now
+
+
+def _base_sql(detection: Detection, insight_id: str) -> str:
+    projection = ", ".join(f"{COLUMNS[column]} AS {column}" for column in detection.columns)
+    lower = "{window_start:DateTime64(3)}" if detection.window_only else "{baseline_start:DateTime64(3)}"
+    row_filter = f" AND ({detection.row_filter})" if detection.row_filter else ""
+    scope = " AND ".join(visible_fact_clauses("request"))
+    return (
+        f"/* insight:{insight_id} */ WITH base AS (SELECT {projection}, "
+        "event_timestamp < {window_start:DateTime64(3)} AS is_b, "
+        "event_timestamp >= {window_start:DateTime64(3)} AS is_w "
+        f"FROM request_facts WHERE {scope} AND event_timestamp >= {lower} "
+        f"AND event_timestamp <= {{window_end:DateTime64(3)}}{row_filter}) {detection.sql}"
+    )
+
+
+def _fingerprint_column(present: set[str]) -> str | None:
+    for column in ("ja4", "ja3"):
+        if column in present:
+            return column
+    return None
+
+
+def _detection_for(insight_id: str, present: set[str]) -> Detection | None:
+    """The ClickHouse query for ``insight_id``, or None when this service cannot compute it."""
+    fingerprint = _fingerprint_column(present)
+    if insight_id == "botnet_grouping":
+        return botnet_grouping(fingerprint) if fingerprint else None
+    if insight_id == "repeated_patterns_fp":
+        return repeated_patterns_fp(fingerprint) if fingerprint else None
+    if insight_id == "impossible_distance":
+        from backend.utils.pop_utils import get_pop_lat_lon_map
+
+        pops = {
+            code: (float(lat), float(lon))
+            for code, (lat, lon) in get_pop_lat_lon_map().items()
+            if lat is not None and lon is not None and POP_CODE.fullmatch(code)
+        }
+        if not pops or not fingerprint:
+            return None
+        return impossible_distance(pops, fingerprint, edge_only="edge" in present)
+    return DETECTIONS.get(insight_id)
+
+
+def _make_investigate_url(
+    service_id: str, window_start: datetime, now: datetime
+) -> Callable[[dict[str, Any] | None], str]:
+    def build(filters: dict[str, Any] | None = None) -> str:
+        pairs: list[tuple[str, str]] = [
+            ("service", service_id),
+            ("start", window_start.isoformat()),
+            ("end", now.isoformat()),
+        ]
+        pairs.extend((f"filter_{column}", str(value)) for column, value in (filters or {}).items() if value is not None)
+        return "/dashboard?" + urllib.parse.urlencode(pairs)
+
+    return build
+
+
+def _severity(items: list[dict[str, Any]]) -> str:
+    if not items:
+        return "clean"
+    return "critical" if any(item.get("severity") == "critical" for item in items) else "warning"
+
+
+def _summary(definition: InsightDefinition, items: list[dict[str, Any]]) -> str:
+    if not items:
+        return f"No {definition.title.lower()} detected"
+    if definition.id == "error_spikes":
+        return f"{len(items)} URLs with elevated server error rates"
+    if definition.id == "botnet_grouping":
+        return f"{len(items)} fingerprints with suspicious IP spread"
+    return f"{len(items)} anomalies detected"
+
+
+def _card(definition: InsightDefinition, severity: str, summary: str, items: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "id": definition.id,
+        "title": definition.title,
+        "description": definition.description,
+        "category": str(definition.category),
+        "severity": severity,
+        "summary": summary,
+        "items": items,
+    }
+
+
+def _failure_message(exc: Exception) -> str:
+    return str(exc) if isinstance(exc, ClickHouseError) else type(exc).__name__
+
+
+def _asn_context(service_id: str, rows: list[tuple[Any, ...]], insight_id: str) -> dict[str, Any]:
+    if not rows or not any(marker in insight_id for marker in _ASN_INSIGHT_MARKERS):
+        return {}
+    from backend.core import duckdb as _db
+
+    context: dict[str, Any] = {"asn_names": _db.get_asn_names(service_id, [row[0] for row in rows if row])}
+    if "metro" in insight_id:
+        context["dma_map"] = _db._get_dma_map()
+    return context
+
+
+def insights_endpoint(
+    service: HighScaleService,
+    req: Any,
+    clamp_start: str | None,
+    clamp_end: str | None,
+    mask_ips: bool = False,
+    clamp_cache_key: str | None = None,
+    force_refresh: bool = False,
+) -> InsightsResponse:
+    window_hours = float(req.window_size_hrs)
+    baseline_hours = float(req.baseline_hours)
+    req_filters = getattr(req, "filters", None)
+    filter_clause, filter_params = build_clickhouse_filters(req_filters) if req_filters else ("", {})
+
+    if clamp_cache_key is not None:
+        key_clamp = clamp_cache_key
+    elif clamp_start or clamp_end:
+        key_clamp = f"{bucket_time_to_minute(clamp_start) or ''}:{bucket_time_to_minute(clamp_end) or ''}"
+    else:
+        key_clamp = ""
+    cache_key = (
+        service.service_id,
+        id(service.client),
+        window_hours,
+        baseline_hours,
+        key_clamp,
+        int(mask_ips),
+        filter_clause,
+        tuple(sorted((k, str(v)) for k, v in filter_params.items())),
+    )
+    from backend.high_scale.ingest_controller import HighScaleService
+
+    use_cache = isinstance(service, HighScaleService)
+    if use_cache and not force_refresh:
+        cached = _INSIGHTS_CACHE.get(cache_key)
+        if cached is not None:
+            return InsightsResponse.with_telemetry(**cached, is_cached=True, cache_age_seconds=0)
+
+    baseline_start, window_start, now = _window(window_hours, baseline_hours, clamp_start, clamp_end)
+    scope = " AND ".join(visible_fact_clauses("request"))
+    if filter_clause:
+        scope = f"{scope} AND ({filter_clause})"
+    params: dict[str, Any] = {
+        "service_id": service.service_id,
+        "baseline_start": baseline_start,
+        "window_start": window_start,
+        "window_end": now,
+        "window_hours": window_hours,
+        "baseline_hours": baseline_hours,
+        "probe_regex": PROBE_REGEX,
+        "compress_regex": COMPRESSIBLE_REGEX,
+        "auth_regex": AUTH_REGEX,
+        "bot_ua_regex": BOT_UA_REGEX,
+        **filter_params,
+    }
+    in_range = "event_timestamp >= {baseline_start:DateTime64(3)} AND event_timestamp <= {window_end:DateTime64(3)}"
+
+    history_sql = (
+        "/* insight:history */ SELECT min(event_timestamp) AS earliest, "
+        "countIf(event_timestamp >= {window_start:DateTime64(3)}) AS window_total "
+        f"FROM request_facts WHERE {scope} AND {in_range}"
+    )
+    sample_sql = (
+        "/* insight:fields */ SELECT groupUniqArrayArray(mapKeys(custom_fields)) AS fields FROM ("
+        f"SELECT custom_fields FROM request_facts WHERE {scope} AND {in_range} "
+        f"ORDER BY event_timestamp DESC LIMIT {_FIELD_SAMPLE_ROWS})"
+    )
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="hs-insights-meta") as meta_pool:
+        fut_history = meta_pool.submit(
+            contextvars.copy_context().run, lambda: service.client.execute(history_sql, params)
+        )
+        fut_sample = meta_pool.submit(
+            contextvars.copy_context().run, lambda: service.client.execute(sample_sql, params)
+        )
+        history = fut_history.result()
+        sample = fut_sample.result()
+    earliest = history[0].get("earliest") if history else None
+    window_total = int(history[0].get("window_total") or 0) if history else 0
+    earliest_dt = parse_iso_utc(earliest) if isinstance(earliest, str) else earliest
+    if isinstance(earliest_dt, datetime):
+        earliest_dt = earliest_dt.astimezone(UTC) if earliest_dt.tzinfo else earliest_dt.replace(tzinfo=UTC)
+        history_hours = (now - earliest_dt).total_seconds() / 3600.0
+    else:
+        history_hours = 0.0
+    present = set(_BASE_FIELDS)
+    present.update(sample[0].get("fields") or [] if sample else [])
+    fingerprint = _fingerprint_column(present) or "ja3"
+    make_investigate_url = _make_investigate_url(service.service_id, window_start, now)
+
+    def run(definition: InsightDefinition, detection: Detection) -> dict[str, Any]:
+        if detection.needs_baseline and history_hours < baseline_hours:
+            available = max(0.1, round(history_hours, 1))
+            return _card(
+                definition,
+                "info",
+                f"Requires {int(baseline_hours)}h of historical data (only {available}h available)",
+                [],
+            )
+        try:
+            sql = _base_sql(detection, definition.id)
+            if filter_clause:
+                sql = sql.replace(
+                    "AND event_timestamp <= {window_end:DateTime64(3)}",
+                    f"AND event_timestamp <= {{window_end:DateTime64(3)}} AND ({filter_clause})",
+                )
+            rows = [tuple(row.values()) for row in service.client.execute(sql, params)]
+            context = {
+                "window_hours": window_hours,
+                "baseline_hours": baseline_hours,
+                "fp_col": fingerprint,
+                "actual_cols": sorted(present),
+                "mask_ips": mask_ips,
+                **_asn_context(service.service_id, rows, definition.id),
+            }
+            items: list[dict[str, Any]] = []
+            for row in rows:
+                item = definition.row_processor(row, definition, context) if definition.row_processor else {}
+                if "investigate_url" not in item:
+                    item["investigate_url"] = make_investigate_url(item.get("meta", {}).get("filters"))
+                items.append(item)
+        except Exception as exc:
+            return _card(definition, "error", f"Query failed: {_failure_message(exc)}", [])
+        severity = definition.severity_logic(items) if items and definition.severity_logic else _severity(items)
+        return _card(definition, severity, _summary(definition, items), items)
+
+    candidates: list[tuple[InsightDefinition, Detection]] = []
+    for definition in registry.get_all():
+        detection = _detection_for(definition.id, present)
+        if detection is not None and all(column in present for column in definition.required_fields):
+            candidates.append((definition, detection))
+    with ThreadPoolExecutor(max_workers=_MAX_WORKERS, thread_name_prefix="hs-insights") as pool:
+        # Each task runs in a copy of this request's context so its ClickHouse calls stay attributed to the request.
+        futures = [pool.submit(contextvars.copy_context().run, lambda pair=pair: run(*pair)) for pair in candidates]
+        cards = [future.result() for future in futures]
+
+    computed_at = now.isoformat()
+    payload = {
+        "insights": cards,
+        "window_start": window_start.isoformat(),
+        "window_end": computed_at,
+        "baseline_start": baseline_start.isoformat(),
+        "baseline_end": window_start.isoformat(),
+        "computed_at": computed_at,
+        "window_hours": window_hours,
+        "baseline_hours": baseline_hours,
+        "window_total_requests": window_total,
+    }
+    if use_cache and not any(c.get("severity") == "error" for c in cards):
+        _INSIGHTS_CACHE[cache_key] = payload
+    return InsightsResponse.with_telemetry(**payload)
+
+
+def _bucket_interval(total_hours: float) -> str:
+    if total_hours <= 2:
+        return "INTERVAL 1 MINUTE"
+    if total_hours <= 12:
+        return "INTERVAL 5 MINUTE"
+    if total_hours <= 48:
+        return "INTERVAL 15 MINUTE"
+    if total_hours <= 168:
+        return "INTERVAL 1 HOUR"
+    if total_hours <= 720:
+        return "INTERVAL 4 HOUR"
+    return "INTERVAL 1 DAY"
+
+
+def cache_collapse_detail_endpoint(
+    service: HighScaleService,
+    req: Any,
+    clamp_start: str | None,
+    clamp_end: str | None,
+    mask_ips: bool = False,
+) -> CacheCollapseDetailResponse:
+    """Hit/miss timeline, disposition breakdown and recent misses for one URL, as on the standard path."""
+    window_hours = float(req.window_size_hrs)
+    baseline_hours = float(req.baseline_hours)
+    baseline_start, window_start, now = _window(window_hours, baseline_hours, clamp_start, clamp_end)
+    scope = " AND ".join(
+        [
+            *visible_fact_clauses("request"),
+            "url = {url:String}",
+            "event_timestamp >= {baseline_start:DateTime64(3)}",
+            "event_timestamp <= {window_end:DateTime64(3)}",
+        ]
+    )
+    params: dict[str, Any] = {
+        "service_id": service.service_id,
+        "url": req.url,
+        "baseline_start": baseline_start,
+        "window_start": window_start,
+        "window_end": now,
+    }
+    cache = "custom_fields['cache']"
+    hit, miss, passed = (f"startsWith({cache}, '{kind}')" for kind in ("HIT", "MISS", "PASS"))
+    rates = service.client.execute(
+        "/* insight:cache_collapse_rates */ SELECT "
+        f"countIf(is_w AND {hit}) AS w_hits, countIf(is_w AND {miss}) AS w_miss, "
+        f"countIf(is_w AND {passed}) AS w_pass, countIf(is_w) AS w_total, "
+        f"countIf(is_b AND {hit}) AS b_hits, countIf(is_b AND {miss}) AS b_miss, "
+        f"countIf(is_b AND {passed}) AS b_pass, countIf(is_b) AS b_total "
+        "FROM (SELECT custom_fields, event_timestamp >= {window_start:DateTime64(3)} AS is_w, "
+        "event_timestamp < {window_start:DateTime64(3)} AS is_b "
+        f"FROM request_facts WHERE {scope})",
+        params,
+    )[0]
+    w_hits, w_miss, w_pass, w_total, b_hits, b_miss, b_pass, b_total = (
+        int(rates[key] or 0)
+        for key in ("w_hits", "w_miss", "w_pass", "w_total", "b_hits", "b_miss", "b_pass", "b_total")
+    )
+    w_cacheable, b_cacheable = w_hits + w_miss, b_hits + b_miss
+    w_rate = w_hits / w_cacheable if w_cacheable else 0.0
+    b_rate = b_hits / b_cacheable if b_cacheable else 0.0
+
+    timeline_rows = service.client.execute(
+        "/* insight:cache_collapse_timeline */ SELECT "
+        f"toStartOfInterval(event_timestamp, {_bucket_interval(window_hours + baseline_hours)}) AS bucket, "
+        f"count() AS total_requests, countIf({hit}) AS real_hits, countIf({miss}) AS misses "
+        f"FROM (SELECT event_timestamp, custom_fields FROM request_facts WHERE {scope}) "
+        "GROUP BY bucket ORDER BY bucket ASC",
+        params,
+    )
+    timeline = []
+    for row in timeline_rows:
+        real_hits, misses = int(row["real_hits"] or 0), int(row["misses"] or 0)
+        cacheable = real_hits + misses
+        timeline.append(
+            {
+                "bucket": _iso_or_empty(row["bucket"]),
+                "expected_hits": float(cacheable * b_rate),
+                "real_hits": real_hits,
+                "misses": misses,
+                "total_requests": int(row["total_requests"] or 0),
+                "hit_rate": float(real_hits / cacheable) if cacheable else 0.0,
+            }
+        )
+
+    miss_rows = service.client.execute(
+        "/* insight:cache_collapse_misses */ SELECT event_timestamp AS timestamp, "
+        f"{cache} AS cache, custom_fields['pop'] AS pop, client_ip AS ip, toInt32OrNull(custom_fields['status']) AS status "
+        f"FROM request_facts WHERE {scope} AND {miss} ORDER BY event_timestamp DESC LIMIT 50",
+        params,
+    )
+    recent_misses = [
+        {
+            "timestamp": _iso_or_empty(row["timestamp"]),
+            "cache": row.get("cache") or "UNKNOWN",
+            "pop": row.get("pop") or None,
+            "ip": mask_ip(row["ip"]) if mask_ips and row.get("ip") else row.get("ip"),
+            "status": int(row["status"]) if row.get("status") is not None else None,
+        }
+        for row in miss_rows
+    ]
+    return CacheCollapseDetailResponse.with_telemetry(
+        url=req.url,
+        has_data=bool(w_total + b_total),
+        timeline=timeline,
+        recent_misses=recent_misses,
+        breakdown={
+            "hits": w_hits,
+            "misses": w_miss,
+            "passes": w_pass,
+            "other": max(0, w_total - w_hits - w_miss - w_pass),
+        },
+        baseline_hit_rate=float(b_rate) * 100,
+        window_hit_rate=float(w_rate) * 100,
+        baseline_pass_rate=float(b_pass / b_total) * 100 if b_total else 0.0,
+        window_pass_rate=float(w_pass / w_total) * 100 if w_total else 0.0,
+    )
+
+
+# ---------------------------------------------------------------------------
+# High-scale session stitching over ClickHouse request_facts (folded from sessions.py)
+# ---------------------------------------------------------------------------
+
+_memo = ResponseMemo(ttl=30.0, maxsize=128)
+_CacheRegistry.register("high_scale.sessions._response_cache", _memo.cache)
+
+_DEFAULT_MIN_REQS_FLAG = 1000
+_DEFAULT_MIN_4XX_PCT_FLAG = 20.0
+_SORTABLE = frozenset(
+    {
+        "session_start",
+        "session_end",
+        "req_count",
+        "edge_count",
+        "shield_count",
+        "unique_urls",
+        "median_rtt_ms",
+        "total_bytes",
+    }
+)
+_HELPER_COLUMNS = (
+    "sid",
+    "total_sessions",
+    "any_rtt",
+    "any_ja4",
+    "any_edge",
+    "any_edge_sid",
+    "any_cmcd",
+    "streaming_reqs",
+    "has_rtt_row",
+    "has_edge_sid_row",
+)
+_DETAIL_LIMIT = 500
+_FULL_CTE_SORTS = frozenset({"unique_urls", "median_rtt_ms"})
+
+_SESSIONS_FAST_CTE = """
+    WITH raw_events AS (
+        SELECT
+            client_ip AS ip,
+            custom_fields['ja4'] AS ja4,
+            event_timestamp AS ts,
+            custom_fields['edge'] AS edge,
+            toUInt8(custom_fields['edge_sid'] != '') AS has_edge_sid_ev,
+            toInt32OrZero(custom_fields['status']) AS status,
+            toInt64OrZero(custom_fields['resp_bytes']) AS resp_bytes,
+            toUInt8(toFloat64OrNull(custom_fields['tcp_rtt']) IS NOT NULL) AS has_rtt_ev,
+            cmcd['sid'] AS cmcd_sid
+        FROM request_facts
+        WHERE {where}
+    ),
+    base AS (
+        SELECT
+            ip,
+            ja4,
+            toStartOfMinute(ts) AS bucket_ts,
+            min(ts) AS min_ts,
+            max(ts) AS max_ts,
+            count() AS req_count,
+            sum(if(status >= 400 AND status < 500, 1, 0)) AS reqs_4xx,
+            sum(if(status >= 500, 1, 0)) AS reqs_5xx,
+            sum(resp_bytes) AS total_bytes,
+            sum(if(lower(edge) IN ('1', 'true'), 1, 0)) AS edge_count,
+            sum(if(lower(edge) IN ('0', 'false'), 1, 0)) AS shield_count,
+            max(has_rtt_ev) AS has_rtt_row,
+            max(has_edge_sid_ev) AS has_edge_sid_row,
+            sum(if(cmcd_sid != '', 1, 0)) AS streaming_reqs
+        FROM raw_events
+        GROUP BY ip, ja4, bucket_ts
+    ),
+    gaps AS (
+        SELECT
+            *,
+            dateDiff('second', lagInFrame(max_ts) OVER (PARTITION BY ip, ja4 ORDER BY min_ts), min_ts) AS gap
+        FROM base
+    ),
+    sessions_raw AS (
+        SELECT
+            *,
+            sum(if(gap IS NULL OR gap > 1800, 1, 0)) OVER (
+                PARTITION BY ip, ja4 ORDER BY min_ts
+                ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+            ) AS sid
+        FROM gaps
+    ),
+    sessions_agg AS (
+        SELECT
+            ip,
+            ja4,
+            min(min_ts) AS session_start,
+            max(max_ts) AS session_end,
+            sum(req_count) AS req_count,
+            sum(reqs_4xx) AS reqs_4xx,
+            sum(reqs_5xx) AS reqs_5xx,
+            sum(total_bytes) AS total_bytes,
+            sum(edge_count) AS edge_count,
+            sum(shield_count) AS shield_count,
+            max(has_rtt_row) AS has_rtt_row,
+            max(has_edge_sid_row) AS has_edge_sid_row,
+            sum(streaming_reqs) AS streaming_reqs,
+            sid
+        FROM sessions_raw
+        GROUP BY ip, ja4, sid
+    ),
+    flagged_sessions AS (
+        SELECT
+            *,
+            ((req_count >= {{min_reqs_flag:UInt32}})
+                OR (req_count > 0 AND (reqs_4xx * 100.0 / req_count) >= {{min_4xx_pct_flag:Float64}})) AS flagged,
+            (streaming_reqs > 0) AS is_streaming
+        FROM sessions_agg
+    )
+"""
+
+_SESSIONS_CTE = """
+    WITH raw_events AS (
+        SELECT
+            client_ip AS ip,
+            custom_fields['ja4'] AS ja4,
+            event_timestamp AS ts,
+            country,
+            toInt32OrNull(custom_fields['asn']) AS asn,
+            url,
+            custom_fields['edge'] AS edge,
+            custom_fields['edge_sid'] AS edge_sid,
+            custom_fields['ua'] AS ua,
+            toInt32OrZero(custom_fields['status']) AS status,
+            toInt64OrZero(custom_fields['resp_bytes']) AS resp_bytes,
+            toFloat64OrNull(custom_fields['tcp_rtt']) AS tcp_rtt,
+            cmcd['sid'] AS cmcd_sid
+        FROM request_facts
+        WHERE {where}
+    ),
+    base AS (
+        SELECT
+            ip,
+            ja4,
+            toStartOfMinute(ts) AS bucket_ts,
+            min(ts) AS min_ts,
+            max(ts) AS max_ts,
+            count() AS req_count,
+            min(asn) AS asn,
+            min(country) AS country,
+            uniqState(url) AS url_state,
+            min(ua) AS ua,
+            sum(if(status >= 400 AND status < 500, 1, 0)) AS reqs_4xx,
+            sum(if(status >= 500, 1, 0)) AS reqs_5xx,
+            sum(resp_bytes) AS total_bytes,
+            medianState(tcp_rtt) AS rtt_state,
+            sum(if(lower(edge) IN ('1', 'true'), 1, 0)) AS edge_count,
+            sum(if(lower(edge) IN ('0', 'false'), 1, 0)) AS shield_count,
+            max(edge_sid) AS edge_sid,
+            sum(if(cmcd_sid != '', 1, 0)) AS streaming_reqs
+        FROM raw_events
+        GROUP BY ip, ja4, bucket_ts
+    ),
+    gaps AS (
+        SELECT
+            *,
+            dateDiff('second', lagInFrame(max_ts) OVER (PARTITION BY ip, ja4 ORDER BY min_ts), min_ts) AS gap
+        FROM base
+    ),
+    sessions_raw AS (
+        SELECT
+            *,
+            sum(if(gap IS NULL OR gap > 1800, 1, 0)) OVER (
+                PARTITION BY ip, ja4 ORDER BY min_ts
+                ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+            ) AS sid
+        FROM gaps
+    ),
+    sessions_agg AS (
+        SELECT
+            ip,
+            ja4,
+            min(min_ts) AS session_start,
+            max(max_ts) AS session_end,
+            sum(req_count) AS req_count,
+            min(asn) AS asn,
+            min(country) AS country,
+            uniqMerge(url_state) AS unique_urls,
+            min(ua) AS ua,
+            sum(reqs_4xx) AS reqs_4xx,
+            sum(reqs_5xx) AS reqs_5xx,
+            sum(total_bytes) AS total_bytes,
+            medianMerge(rtt_state) / 1000.0 AS median_rtt_ms,
+            sum(edge_count) AS edge_count,
+            sum(shield_count) AS shield_count,
+            max(edge_sid) AS edge_sid,
+            toUInt8(medianMerge(rtt_state) IS NOT NULL) AS has_rtt_row,
+            toUInt8(max(edge_sid) != '') AS has_edge_sid_row,
+            sum(streaming_reqs) AS streaming_reqs,
+            sid
+        FROM sessions_raw
+        GROUP BY ip, ja4, sid
+    ),
+    flagged_sessions AS (
+        SELECT
+            *,
+            ((req_count >= {{min_reqs_flag:UInt32}})
+                OR (req_count > 0 AND (reqs_4xx * 100.0 / req_count) >= {{min_4xx_pct_flag:Float64}})) AS flagged,
+            (streaming_reqs > 0) AS is_streaming
+        FROM sessions_agg
+    )
+"""
+_FILTERED = """
+    FROM flagged_sessions
+    WHERE (({streaming_only:UInt8} = 0) OR is_streaming = 1)
+      AND (({flagged_only:UInt8} = 0) OR flagged = 1)
+"""
+
+
+_asn_label_map = resolve_asn_display_labels
+
+
+def _as_dt(val: Any) -> datetime | None:
+    if isinstance(val, datetime):
+        return val
+    if isinstance(val, str):
+        return range_value(val) if val else None
+    return None
+
+
+def _enrich_paginated_sessions(
+    service: HighScaleService,
+    rows: list[dict[str, Any]],
+    where: str,
+    params: dict[str, Any],
+) -> None:
+    tuples_sql_parts: list[str] = []
+    enrich_params: dict[str, Any] = dict(params)
+    min_start: datetime | None = None
+    max_end: datetime | None = None
+    unique_ips: list[str] = []
+    seen_ips: set[str] = set()
+
+    for idx, row in enumerate(rows):
+        row.setdefault("asn", None)
+        row.setdefault("country", "")
+        row.setdefault("unique_urls", 0)
+        row.setdefault("ua", "")
+        row.setdefault("median_rtt_ms", None)
+        row.setdefault("edge_sid", "")
+
+        s_dt = _as_dt(row.get("session_start"))
+        e_dt = _as_dt(row.get("session_end"))
+        if s_dt is None or e_dt is None:
+            continue
+        if min_start is None or s_dt < min_start:
+            min_start = s_dt
+        if max_end is None or e_dt > max_end:
+            max_end = e_dt
+        ip_val = str(row.get("ip") or "")
+        ja4_val = str(row.get("ja4") or "")
+        if ip_val not in seen_ips:
+            seen_ips.add(ip_val)
+            unique_ips.append(ip_val)
+        enrich_params[f"en_ip_{idx}"] = ip_val
+        enrich_params[f"en_ja4_{idx}"] = ja4_val
+        enrich_params[f"en_s_{idx}"] = s_dt
+        enrich_params[f"en_e_{idx}"] = e_dt
+        tuples_sql_parts.append(
+            f"tuple(toUInt32({idx}), {{en_ip_{idx}:String}}, {{en_ja4_{idx}:String}}, "
+            f"{{en_s_{idx}:DateTime64(3)}}, {{en_e_{idx}:DateTime64(3)}})"
+        )
+
+    if not tuples_sql_parts or not unique_ips:
+        return
+
+    if min_start is not None:
+        enrich_params["start_time"] = min_start
+    if max_end is not None:
+        enrich_params["end_time"] = max_end
+
+    ip_placeholders: list[str] = []
+    for i, ip_val in enumerate(unique_ips):
+        enrich_params[f"en_uip_{i}"] = ip_val
+        ip_placeholders.append(f"{{en_uip_{i}:String}}")
+
+    enrich_sql = (
+        "/* sessions:enrich */ "
+        "WITH page_keys AS ("
+        "    SELECT t.1 AS pk_idx, t.2 AS pk_ip, t.3 AS pk_ja4, t.4 AS pk_start, t.5 AS pk_end "
+        f"    FROM (SELECT arrayJoin([{', '.join(tuples_sql_parts)}]) AS t)"
+        ") "
+        "SELECT "
+        "    pk.pk_idx AS row_idx, "
+        "    min(toInt32OrNull(custom_fields['asn'])) AS asn, "
+        "    min(country) AS country, "
+        "    uniq(url) AS unique_urls, "
+        "    min(custom_fields['ua']) AS ua, "
+        "    median(toFloat64OrNull(custom_fields['tcp_rtt'])) / 1000.0 AS median_rtt_ms, "
+        "    max(custom_fields['edge_sid']) AS edge_sid "
+        "FROM request_facts "
+        "INNER JOIN page_keys AS pk "
+        "    ON client_ip = pk.pk_ip AND custom_fields['ja4'] = pk.pk_ja4 "
+        f"WHERE {where} "
+        f"  AND client_ip IN ({', '.join(ip_placeholders)}) "
+        "  AND event_timestamp >= pk.pk_start "
+        "  AND event_timestamp <= pk.pk_end "
+        "GROUP BY pk.pk_idx"
+    )
+    enriched_rows = service.client.execute(enrich_sql, enrich_params)
+    for en_row in enriched_rows:
+        idx = int(en_row["row_idx"])
+        if 0 <= idx < len(rows):
+            rows[idx]["asn"] = en_row.get("asn")
+            rows[idx]["country"] = en_row.get("country") or ""
+            rows[idx]["unique_urls"] = int(en_row.get("unique_urls") or 0)
+            rows[idx]["ua"] = en_row.get("ua") or ""
+            rows[idx]["median_rtt_ms"] = en_row.get("median_rtt_ms")
+            rows[idx]["edge_sid"] = en_row.get("edge_sid") or ""
+
+
+def sessions_endpoint(
+    service: HighScaleService, req: SessionsRequest, start_time: str | None, end_time: str | None
+) -> dict[str, Any]:
+    start_dt, end_dt = parse_time_window(start_time, end_time, timedelta(days=7))
+    min_reqs_flag = req.min_reqs_flag if req.min_reqs_flag is not None else _DEFAULT_MIN_REQS_FLAG
+    min_4xx_pct_flag = req.min_4xx_pct_flag if req.min_4xx_pct_flag is not None else _DEFAULT_MIN_4XX_PCT_FLAG
+    filter_clauses, filter_params = request_filter_clauses(req.filters)
+    where = " AND ".join(
+        [
+            *visible_fact_clauses("request"),
+            "event_timestamp >= {start_time:DateTime64(3)}",
+            "event_timestamp <= {end_time:DateTime64(3)}",
+            *filter_clauses,
+        ]
+    )
+    params: dict[str, Any] = {
+        "service_id": service.service_id,
+        "start_time": start_dt,
+        "end_time": end_dt,
+        "min_reqs_flag": min_reqs_flag,
+        "min_4xx_pct_flag": min_4xx_pct_flag,
+        "flagged_only": 1 if req.flagged_only else 0,
+        "streaming_only": 1 if req.streaming_only else 0,
+        **filter_params,
+    }
+    sort_by = req.sort_by if req.sort_by in _SORTABLE else "session_start"
+    sort_dir = "ASC" if str(req.sort_dir).lower() == "asc" else "DESC"
+    fast_cte = _SESSIONS_FAST_CTE.format(where=where)
+    cte = _SESSIONS_CTE.format(where=where) if sort_by in _FULL_CTE_SORTS else fast_cte
+    memo_key = digest_cache_key(
+        {
+            "cid": client_cache_token(service.client),
+            "s": bucket_time_to_minute(start_time) if start_time else start_dt.strftime("%Y-%m-%dT%H:%M"),
+            "e": bucket_time_to_minute(end_time) if end_time else end_dt.strftime("%Y-%m-%dT%H:%M"),
+            "p": req.page,
+            "l": req.limit,
+            "sb": sort_by,
+            "sd": sort_dir,
+            "mr": min_reqs_flag,
+            "m4": min_4xx_pct_flag,
+            "fo": bool(req.flagged_only),
+            "so": bool(req.streaming_only),
+            "fc": list(filter_clauses),
+            "fp": sorted((k, str(v)) for k, v in filter_params.items()),
+        },
+        {"service_id": service.service_id},
+    )
+    cached = _memo.get(memo_key)
+    if cached is not None:
+        return cached
+
+    rows = [
+        dict(r)
+        for r in service.client.execute(
+            "/* sessions:page */ "
+            + cte
+            + """
+    SELECT *,
+           count() OVER () AS total_sessions,
+           max(has_rtt_row) OVER () AS any_rtt,
+           max(ja4 != '') OVER () AS any_ja4,
+           max(edge_count + shield_count > 0) OVER () AS any_edge,
+           max(has_edge_sid_row) OVER () AS any_edge_sid,
+           max(streaming_reqs > 0) OVER () AS any_cmcd
+    FROM flagged_sessions
+    WHERE (({streaming_only:UInt8} = 0) OR is_streaming = 1)
+      AND (({flagged_only:UInt8} = 0) OR flagged = 1)
+    """
+            + f"ORDER BY {sort_by} {sort_dir} LIMIT {{limit:UInt32}} OFFSET {{offset:UInt32}}",
+            {**params, "limit": req.limit, "offset": (req.page - 1) * req.limit},
+        )
+    ]
+
+    if rows and "unique_urls" not in rows[0]:
+        _enrich_paginated_sessions(service, rows, where, params)
+
+    if rows:
+        total = int(rows[0]["total_sessions"])
+    elif req.page > 1:
+        counted = service.client.execute(
+            "/* sessions:count */ " + fast_cte + "SELECT count() AS total_sessions" + _FILTERED, params
+        )
+        total = int(counted[0]["total_sessions"]) if counted else 0
+    else:
+        total = 0
+
+    first = rows[0] if rows else {}
+    sessions: list[dict[str, Any]] = []
+    for row in rows:
+        session = {key: value for key, value in row.items() if key not in _HELPER_COLUMNS}
+        session["session_start"] = _iso(session.get("session_start"))
+        session["session_end"] = _iso(session.get("session_end"))
+        session["flagged"] = bool(session.get("flagged"))
+        session["is_streaming"] = bool(session.get("is_streaming"))
+        sessions.append(session)
+
+    asns = sorted({int(session["asn"]) for session in sessions if session.get("asn") is not None})
+    result = {
+        "sessions": sessions,
+        "asn_names": _asn_label_map(service.service_id, asns) if asns else {},
+        "total": total,
+        "page": req.page,
+        "limit": req.limit,
+        "has_rtt": bool(first.get("any_rtt")),
+        "has_ja4": bool(first.get("any_ja4")),
+        "has_edge": bool(first.get("any_edge")),
+        "has_edge_sid": bool(first.get("any_edge_sid")),
+        "has_cmcd": bool(first.get("any_cmcd")),
+        "min_reqs_flag": min_reqs_flag,
+        "min_4xx_pct_flag": min_4xx_pct_flag,
+    }
+    _memo.put(memo_key, result)
+    return result
+
+
+def sessions_detail(
+    service: HighScaleService,
+    req: SessionDetailRequest,
+    start_time: str | None,
+    end_time: str | None,
+    ip: str,
+    ja4: str | None,
+) -> dict[str, Any]:
+    start_dt, end_dt = parse_time_window(start_time, end_time, timedelta(days=7))
+    clauses = [
+        *visible_fact_clauses("request"),
+        "client_ip = {ip:String}",
+        "event_timestamp >= {start_time:DateTime64(3)}",
+        "event_timestamp <= {end_time:DateTime64(3)}",
+    ]
+    params: dict[str, Any] = {
+        "service_id": service.service_id,
+        "start_time": start_dt,
+        "end_time": end_dt,
+        "ip": ip,
+    }
+    if ja4:
+        clauses.append("custom_fields['ja4'] = {ja4:String}")
+        params["ja4"] = ja4
+    data = service.client.execute(
+        """
+    /* sessions:detail */
+    SELECT
+        client_ip AS ip,
+        custom_fields['ja4'] AS ja4,
+        event_timestamp AS timestamp,
+        country,
+        url,
+        toInt32OrZero(custom_fields['status']) AS status,
+        custom_fields['method'] AS method,
+        custom_fields['protocol'] AS protocol,
+        toInt64OrZero(custom_fields['resp_bytes']) AS resp_bytes,
+        toFloat64OrZero(custom_fields['tcp_rtt']) AS tcp_rtt,
+        custom_fields['edge'] AS edge,
+        custom_fields['edge_sid'] AS edge_sid,
+        custom_fields['ua'] AS ua,
+        toInt32OrNull(custom_fields['asn']) AS asn,
+        nullIf(cmcd['ot'], '') AS cmcd_ot,
+        toInt64OrNull(cmcd['br']) AS cmcd_br,
+        toInt64OrNull(cmcd['bl']) AS cmcd_bl,
+        nullIf(cmcd['sf'], '') AS cmcd_sf,
+        nullIf(cmcd['st'], '') AS cmcd_st,
+        toInt64OrNull(cmcd['d']) AS cmcd_d,
+        toInt64OrNull(cmcd['mtp']) AS cmcd_mtp,
+        toInt64OrNull(cmcd['tb']) AS cmcd_tb,
+        if(cmcd['bs'] = '', NULL, lower(cmcd['bs']) IN ('true', '1')) AS cmcd_bs,
+        if(cmcd['su'] = '', NULL, lower(cmcd['su']) IN ('true', '1')) AS cmcd_su,
+        nullIf(cmcd['cid'], '') AS cmcd_cid,
+        nullIf(cmcd['sid'], '') AS cmcd_sid,
+        toInt32OrNull(cmcd['v']) AS cmcd_v
+    FROM request_facts
+    WHERE """
+        + " AND ".join(clauses)
+        + f" ORDER BY timestamp ASC LIMIT {_DETAIL_LIMIT}",
+        params,
+    )
+    for row in data:
+        if row.get("timestamp"):
+            row["timestamp"] = _iso(row["timestamp"])
+    return {"data": data, "columns": list(data[0].keys()) if data else []}
+
+
+# ---------------------------------------------------------------------------
+# ClickHouse-backed triage aggregate reads (folded from aggregate_query.py)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class AggregateResponse:
+    service_id: str
+    domain: str
+    request_count: int
+    top_values: tuple[tuple[str, int], ...]
+    coverage: float
+    watermark: ServingWatermark
+    freshness_lag_seconds: float
+    exact: bool
+    approximation_error: float | None
+    counters: tuple[tuple[str, int], ...] = ()
+
+
+@dataclass(frozen=True)
+class AggregateRequest:
+    service_id: str
+    domain: str
+    start: datetime | None = None
+    end: datetime | None = None
+    dimension: str | None = None
+
+    def validate(self) -> None:
+        if not self.service_id.strip():
+            raise ValueError("service id is required")
+        if self.domain not in {"request", "rum_vitals", "rum_errors", "cmcd"}:
+            raise ValueError("unsupported aggregate domain")
+        if (self.start is None) != (self.end is None):
+            raise ValueError("aggregate range must include both start and end")
+        if self.start is not None and self.end is not None and self.start > self.end:
+            raise ValueError("aggregate range is inverted")
+
+
+class AggregateQueryClient(Protocol):
+    def execute(self, sql: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]: ...
+
+
+_DOMAIN_TABLES = {
+    "request": ("request_aggregates", "request_count"),
+    "rum_vitals": ("rum_vitals_aggregates", "event_count"),
+    "rum_errors": ("rum_error_aggregates", "error_count"),
+    "cmcd": ("cmcd_aggregates", "event_count"),
+}
+_INTERNAL_IDENTIFIER = re.compile(r"^[a-z_][a-z0-9_]*$")
+DEFAULT_AGGREGATE_DIMENSIONS = {
+    "request": "url",
+    "rum_vitals": "metric_name",
+    "rum_errors": "error_message",
+    "cmcd": "cmcd_session",
+}
+_FACT_TABLES = {
+    "request": "request_facts",
+    "rum_vitals": "rum_vitals_facts",
+    "rum_errors": "rum_error_facts",
+    "cmcd": "cmcd_projection_facts",
+}
+_REQUEST_CUSTOM_FIELD_DIMENSIONS = (
+    "asn",
+    "host",
+    "method",
+    "status",
+    "cache",
+    "proto",
+    "ua",
+    "referer",
+    "cookie_session",
+    "resp_header_content_encoding",
+    "ttl",
+    "age",
+    "hits",
+    "digest",
+    "city",
+    "region",
+    "metro",
+    "transport",
+    "c_speed",
+    "c_type",
+    "pop",
+    "backend",
+    "edge",
+    "server_region",
+    "tls",
+    "is_ipv6",
+    "conn_requests",
+    "waf",
+    "waf_resp",
+    "waf_ms",
+    "p_type",
+    "p_desc",
+    "ja3",
+    "ja4",
+    "tls_ciphers_sha",
+    "io_input_format",
+    "io_output_format",
+)
+_FACT_DIMENSION_EXPRESSIONS = {
+    "request": {
+        "url": "url",
+        "country": "country",
+        "client_ip": "client_ip",
+        **{dimension: f"custom_fields['{dimension}']" for dimension in _REQUEST_CUSTOM_FIELD_DIMENSIONS},
+        "cmcd_session": "cmcd['sid']",
+    },
+    "rum_vitals": {"metric_name": "metric_name"},
+    "rum_errors": {"error_message": "error_message"},
+    "cmcd": {"cmcd_session": "cmcd['sid']"},
+}
+
+
+def _is_partial_minute_window(start: datetime | None, end: datetime | None) -> bool:
+    if start is None or end is None:
+        return False
+    return any(value.astimezone(UTC).second != 0 or value.astimezone(UTC).microsecond != 0 for value in (start, end))
+
+
+def _require_window_bounds(start: datetime | None, end: datetime | None) -> tuple[datetime, datetime]:
+    if start is None or end is None:
+        raise ValueError("aggregate fact query requires both range bounds")
+    return start, end
+
+
+def _query_fact_aggregates(
+    client: AggregateQueryClient,
+    *,
+    service_id: str,
+    domain: str,
+    dimensions: list[str],
+    start: datetime,
+    end: datetime,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    table = _FACT_TABLES[domain]
+    expressions = _FACT_DIMENSION_EXPRESSIONS[domain]
+    if any(dimension not in expressions for dimension in dimensions):
+        raise ValueError("aggregate dimension cannot be read exactly from event-time facts")
+
+    dimension_values: list[str] = []
+    params: dict[str, Any] = {
+        "service_id": service_id,
+        "start": start.astimezone(UTC),
+        "end": end.astimezone(UTC),
+    }
+    for idx, dimension in enumerate(dimensions):
+        key = f"fact_dimension_{idx}"
+        dimension_values.append(f"tuple({{{key}:String}}, toString({expressions[dimension]}))")
+        params[key] = dimension
+
+    end_operator = "<" if domain == "request" else "<="
+    clauses = [
+        "service_id={service_id:String}",
+        "event_timestamp >= {start:DateTime64(3)}",
+        f"event_timestamp {end_operator} {{end:DateTime64(3)}}",
+        visible_publication_fence_sql(domain),
+    ]
+    fact_values = (
+        "SELECT tupleElement(dimension_value, 1) AS dimension, "
+        "tupleElement(dimension_value, 2) AS value "
+        f"FROM {table} ARRAY JOIN [{', '.join(dimension_values)}] AS dimension_value "
+        f"WHERE {' AND '.join(clauses)}"
+    )
+    totals = client.execute(
+        f"SELECT dimension, count() AS total_count FROM ({fact_values}) GROUP BY dimension",
+        params,
+    )
+    rows = client.execute(
+        f"SELECT dimension, value, count() AS aggregate_count FROM ({fact_values}) "
+        "GROUP BY dimension, value "
+        "ORDER BY dimension ASC, aggregate_count DESC, value ASC "
+        "LIMIT 10 BY dimension",
+        params,
+    )
+    return totals, rows
+
+
+def query_clickhouse_aggregate(
+    client: AggregateQueryClient,
+    request: AggregateRequest,
+    *,
+    watermark: ServingWatermark,
+    now: datetime | None = None,
+) -> AggregateResponse:
+    """Read visible aggregate rows while preserving the aggregate contract."""
+
+    request.validate()
+    watermark.validate()
+    if watermark.service_id != request.service_id or watermark.domain != request.domain:
+        raise ValueError("watermark does not belong to this service and domain")
+    table, metric = _DOMAIN_TABLES[request.domain]
+    dimension = request.dimension or DEFAULT_AGGREGATE_DIMENSIONS[request.domain]
+    if not dimension or _INTERNAL_IDENTIFIER.fullmatch(dimension) is None:
+        raise ValueError("aggregate dimension must be an internal identifier")
+
+    clauses = [
+        "service_id={service_id:String}",
+        "dimension={dimension:String}",
+        visible_publication_fence_sql(f"{request.domain}_aggregate"),
+    ]
+    params: dict[str, Any] = {
+        "service_id": request.service_id,
+        "dimension": dimension,
+    }
+    partial_minute_window = _is_partial_minute_window(request.start, request.end)
+    if partial_minute_window:
+        if dimension not in _FACT_DIMENSION_EXPRESSIONS[request.domain]:
+            raise ValueError("aggregate dimension cannot be read exactly from event-time facts")
+    elif request.start is not None and request.end is not None:
+        start = request.start.astimezone(UTC)
+        end = request.end.astimezone(UTC)
+        end_operator = "<" if request.domain == "request" else "<="
+        clauses.extend(["bucket_start >= {start:DateTime64(3)}", f"bucket_start {end_operator} {{end:DateTime64(3)}}"])
+        params.update({"start": start, "end": end})
+
+    try:
+        if partial_minute_window:
+            start, end = _require_window_bounds(request.start, request.end)
+            totals, rows = _query_fact_aggregates(
+                client,
+                service_id=request.service_id,
+                domain=request.domain,
+                dimensions=[dimension],
+                start=start,
+                end=end,
+            )
+        else:
+            totals = client.execute(
+                f"SELECT sum({metric}) AS total_count FROM {table} WHERE {' AND '.join(clauses)}",
+                params,
+            )
+            rows = client.execute(
+                f"SELECT value, sum({metric}) AS aggregate_count "
+                f"FROM {table} WHERE {' AND '.join(clauses)} "
+                "GROUP BY value ORDER BY aggregate_count DESC, value ASC LIMIT 10",
+                params,
+            )
+    except ClickHouseError as e:
+        raise ValueError(f"ClickHouse server query failed (S3/FOS access credentials may be expired): {e}")
+    values = tuple((str(row["value"]), max(0, int(row["aggregate_count"]))) for row in rows)
+    total_row = totals[0] if totals else {}
+    request_count = max(0, int(total_row.get("total_count") or 0))
+    observed = (now or datetime.now(UTC)).astimezone(UTC)
+    freshness = max(0.0, (observed - watermark.coverage_end).total_seconds()) if watermark.coverage_end else 0.0
+    return AggregateResponse(
+        service_id=request.service_id,
+        domain=request.domain,
+        request_count=request_count,
+        top_values=values,
+        coverage=1.0 if values or watermark.coverage_end is not None else 0.0,
+        watermark=watermark,
+        freshness_lag_seconds=freshness,
+        exact=True,
+        approximation_error=None,
+        counters=((f"{request.domain}_events", request_count),),
+    )
+
+
+def query_clickhouse_aggregates_batch(
+    client: AggregateQueryClient,
+    *,
+    service_id: str,
+    domain: str,
+    dimensions: list[str] | tuple[str, ...],
+    start: datetime | None,
+    end: datetime | None,
+    watermark: ServingWatermark,
+    now: datetime | None = None,
+) -> dict[str, AggregateResponse]:
+    """Read visible aggregate rows for multiple dimensions in two batched ClickHouse queries."""
+    unique_dims = list(dict.fromkeys(dimensions))
+    if not unique_dims:
+        return {}
+    if len(unique_dims) == 1:
+        dim = unique_dims[0]
+        return {
+            dim: query_clickhouse_aggregate(
+                client,
+                AggregateRequest(
+                    service_id=service_id,
+                    domain=domain,
+                    start=start,
+                    end=end,
+                    dimension=dim,
+                ),
+                watermark=watermark,
+                now=now,
+            )
+        }
+
+    watermark.validate()
+    if watermark.service_id != service_id or watermark.domain != domain:
+        raise ValueError("watermark does not belong to this service and domain")
+    if domain not in _DOMAIN_TABLES:
+        raise ValueError(f"unsupported aggregate domain: {domain}")
+    table, metric = _DOMAIN_TABLES[domain]
+    partial_minute_window = _is_partial_minute_window(start, end)
+
+    dim_placeholders: list[str] = []
+    params: dict[str, Any] = {"service_id": service_id}
+    for idx, dim in enumerate(unique_dims):
+        if not dim or _INTERNAL_IDENTIFIER.fullmatch(dim) is None:
+            raise ValueError("aggregate dimension must be an internal identifier")
+        key = f"dim_{idx}"
+        dim_placeholders.append(f"{{{key}:String}}")
+        params[key] = dim
+
+    if partial_minute_window:
+        start, end = _require_window_bounds(start, end)
+
+        try:
+            totals_rows, top_rows = _query_fact_aggregates(
+                client,
+                service_id=service_id,
+                domain=domain,
+                dimensions=unique_dims,
+                start=start,
+                end=end,
+            )
+        except ClickHouseError as e:
+            raise ValueError(f"ClickHouse server query failed (S3/FOS access credentials may be expired): {e}")
+
+        fact_totals_by_dim = {
+            str(row.get("dimension") or ""): max(0, int(row.get("total_count") or 0)) for row in totals_rows
+        }
+        fact_tops_by_dim: dict[str, list[tuple[str, int]]] = {dimension: [] for dimension in unique_dims}
+        for row in top_rows:
+            dimension = str(row.get("dimension") or "")
+            if dimension in fact_tops_by_dim and len(fact_tops_by_dim[dimension]) < 10:
+                fact_tops_by_dim[dimension].append((str(row["value"]), max(0, int(row["aggregate_count"]))))
+
+        observed = (now or datetime.now(UTC)).astimezone(UTC)
+        freshness = max(0.0, (observed - watermark.coverage_end).total_seconds()) if watermark.coverage_end else 0.0
+        return {
+            dimension: AggregateResponse(
+                service_id=service_id,
+                domain=domain,
+                request_count=fact_totals_by_dim.get(dimension, 0),
+                top_values=tuple(fact_tops_by_dim.get(dimension, ())),
+                coverage=1.0 if fact_tops_by_dim.get(dimension) or watermark.coverage_end is not None else 0.0,
+                watermark=watermark,
+                freshness_lag_seconds=freshness,
+                exact=True,
+                approximation_error=None,
+                counters=((f"{domain}_events", fact_totals_by_dim.get(dimension, 0)),),
+            )
+            for dimension in unique_dims
+        }
+
+    clauses = [
+        "service_id={service_id:String}",
+        f"dimension IN ({', '.join(dim_placeholders)})",
+        visible_publication_fence_sql(f"{domain}_aggregate"),
+    ]
+    if start is not None and end is not None:
+        start_utc = start.astimezone(UTC)
+        end_utc = end.astimezone(UTC)
+        end_operator = "<" if domain == "request" else "<="
+        clauses.extend(["bucket_start >= {start:DateTime64(3)}", f"bucket_start {end_operator} {{end:DateTime64(3)}}"])
+        params.update({"start": start_utc, "end": end_utc})
+
+    try:
+        totals_rows = client.execute(
+            f"SELECT dimension, sum({metric}) AS total_count "
+            f"FROM {table} WHERE {' AND '.join(clauses)} "
+            "GROUP BY dimension",
+            params,
+        )
+        if totals_rows and "dimension" not in totals_rows[0]:
+            return {
+                dim: query_clickhouse_aggregate(
+                    client,
+                    AggregateRequest(
+                        service_id=service_id,
+                        domain=domain,
+                        start=start,
+                        end=end,
+                        dimension=dim,
+                    ),
+                    watermark=watermark,
+                    now=now,
+                )
+                for dim in unique_dims
+            }
+        top_rows = client.execute(
+            f"SELECT dimension, value, sum({metric}) AS aggregate_count "
+            f"FROM {table} WHERE {' AND '.join(clauses)} "
+            "GROUP BY dimension, value "
+            "ORDER BY dimension ASC, aggregate_count DESC, value ASC "
+            "LIMIT 10 BY dimension",
+            params,
+        )
+        if top_rows and "dimension" not in top_rows[0]:
+            return {
+                dim: query_clickhouse_aggregate(
+                    client,
+                    AggregateRequest(
+                        service_id=service_id,
+                        domain=domain,
+                        start=start,
+                        end=end,
+                        dimension=dim,
+                    ),
+                    watermark=watermark,
+                    now=now,
+                )
+                for dim in unique_dims
+            }
+    except ClickHouseError as e:
+        raise ValueError(f"ClickHouse server query failed (S3/FOS access credentials may be expired): {e}")
+
+    totals_by_dim: dict[str, int] = {}
+    for row in totals_rows:
+        d = str(row.get("dimension") or "")
+        totals_by_dim[d] = max(0, int(row.get("total_count") or 0))
+
+    tops_by_dim: dict[str, list[tuple[str, int]]] = {d: [] for d in unique_dims}
+    for row in top_rows:
+        d = str(row.get("dimension") or "")
+        if d in tops_by_dim and len(tops_by_dim[d]) < 10:
+            tops_by_dim[d].append((str(row["value"]), max(0, int(row["aggregate_count"]))))
+
+    observed = (now or datetime.now(UTC)).astimezone(UTC)
+    freshness = max(0.0, (observed - watermark.coverage_end).total_seconds()) if watermark.coverage_end else 0.0
+
+    out: dict[str, AggregateResponse] = {}
+    for dim in unique_dims:
+        values = tuple(tops_by_dim.get(dim, ()))
+        req_count = totals_by_dim.get(dim, 0)
+        out[dim] = AggregateResponse(
+            service_id=service_id,
+            domain=domain,
+            request_count=req_count,
+            top_values=values,
+            coverage=1.0 if values or watermark.coverage_end is not None else 0.0,
+            watermark=watermark,
+            freshness_lag_seconds=freshness,
+            exact=True,
+            approximation_error=None,
+            counters=((f"{domain}_events", req_count),),
+        )
+    return out
+
+
+for _alias_name in ("query_router", "decoder", "query", "clickhouse", "insights", "sessions", "aggregate_query"):
     sys.modules[f"backend.high_scale.{_alias_name}"] = _self_mod
 _hs_pkg = sys.modules.get("backend.high_scale")
 if _hs_pkg is not None:
-    for _alias_name in ("query_router", "decoder", "query", "clickhouse"):
+    for _alias_name in ("query_router", "decoder", "query", "clickhouse", "insights", "sessions", "aggregate_query"):
         setattr(_hs_pkg, _alias_name, _self_mod)
 _backend_pkg = sys.modules.get("backend")
 if _backend_pkg is not None and hasattr(_backend_pkg, "_MODULE_ALIASES"):
-    for _alias_name in ("query_router", "decoder", "query", "clickhouse"):
+    for _alias_name in ("query_router", "decoder", "query", "clickhouse", "insights", "sessions", "aggregate_query"):
         _backend_pkg._MODULE_ALIASES[f"backend.high_scale.{_alias_name}"] = __name__

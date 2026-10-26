@@ -38,20 +38,27 @@ asn_cache = _state
 views = _state
 usage_log_db = _usage_log
 quarantine = _ingest_log
+pg_schema = _base
+reconciliation = _base
 
 # Base: connection management, schema, dedup cache, parse helpers.
 from backend.core.metadata.base import (
+    _CLEANUP_TABLES,
     _DATA_DIR,
     _FILE_DATE_RE,
     _SCHEMA,
+    _STATS_TABLES,
     _clear_ingested_filenames_cache,
     _ingested_filenames_cache,
     _ingested_filenames_cache_lock,
     _parse_file_date,
+    cleanup_metadata,
     close_all_connections,
     db_path,
     get_con,
     get_con_readonly,
+    get_metadata_storage_stats,
+    is_ingested_files_dedup_active,
     teardown,
 )
 
@@ -96,15 +103,6 @@ from backend.core.metadata.ingest_log import (
     list_unbackfilled_fastly_edge_files,
     recompute_ingested_files_summary,
     record_in_flight,
-)
-
-# Metadata cleanup + storage stats.
-from backend.core.metadata.reconciliation import (
-    _CLEANUP_TABLES,
-    _STATS_TABLES,
-    cleanup_metadata,
-    get_metadata_storage_stats,
-    is_ingested_files_dedup_active,
 )
 
 # Audit log, ASN-name cache, saved-dashboard-view, and alert-rule CRUD.
@@ -189,6 +187,9 @@ for _sub in ("alerts", "asn_cache", "views"):
 for _sub in ("usage_log_db", "slow_queries"):
     setattr(sys.modules[__name__], _sub, _usage_log)
     sys.modules[f"{__name__}.{_sub}"] = _usage_log
+for _sub in ("pg_schema", "reconciliation"):
+    setattr(sys.modules[__name__], _sub, _base)
+    sys.modules[f"{__name__}.{_sub}"] = _base
 setattr(sys.modules[__name__], "quarantine", _ingest_log)
 sys.modules[f"{__name__}.quarantine"] = _ingest_log
 _backend_pkg = sys.modules.get("backend")
@@ -202,6 +203,8 @@ if _backend_pkg is not None and hasattr(_backend_pkg, "_MODULE_ALIASES"):
             "backend.core.duckdb_recycle": "backend.cron.jobs.metadata",
             "backend.cron.jobs.duckdb_recycle": "backend.cron.jobs.metadata",
             "backend.core.metadata.slow_queries": "backend.core.metadata.usage_log",
+            "backend.core.metadata.pg_schema": "backend.core.metadata.base",
+            "backend.core.metadata.reconciliation": "backend.core.metadata.base",
             "backend.cron.decorators": "backend.cron.scheduler",
             "backend.cron.jobs.rum_commit": "backend.cron.jobs.rum_sync",
         }

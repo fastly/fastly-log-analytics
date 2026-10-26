@@ -3,6 +3,7 @@
 import re
 
 import pytest
+from backend.provision.declarative.state import FeatureState
 
 from backend.provision.declarative.generators import (
     desired_backends,
@@ -12,7 +13,6 @@ from backend.provision.declarative.generators import (
     generate_log_format,
     logging_service_snippets,
 )
-from backend.provision.declarative.state import FeatureState
 
 
 class TestGeneratorVCLStructure:
@@ -724,3 +724,362 @@ if (req.url.path == "/js/rum.js") {
             generate_consolidated_snippet(state, "vcl_recv")
         with pytest.raises(ValueError, match="faro_version must be a plain"):
             generate_consolidated_snippet(state, "vcl_miss")
+
+
+# ── Merged from tests/provision/declarative/test_fastly_integration.py ──────
+
+from typing import Any
+from unittest.mock import patch
+
+from backend.provision.declarative.diff import Backend, LoggingEndpoint, ServiceDictionary, VCLSnippet
+
+from backend.provision.declarative import fastly_integration as fi
+
+
+def _fastly_mock(responses: dict[tuple[str, str], Any]) -> Any:
+    def _fake(method, path, body=None, *, token, **kwargs):
+        key = (method, path)
+        if key not in responses:
+            raise AssertionError(f"unexpected fastly() call: {key}")
+        value = responses[key]
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    return _fake
+
+
+@pytest.mark.parametrize(
+    ("responses", "expected"),
+    [
+        ({("GET", "/service/svc1/version/active"): {"active": True, "number": 7}}, 7),
+        (
+            {
+                ("GET", "/service/svc1/version/active"): RuntimeError("HTTP 404"),
+                ("GET", "/service/svc1/version"): [{"number": 1, "active": False}, {"number": 2, "active": True}],
+            },
+            2,
+        ),
+        (
+            {
+                ("GET", "/service/svc1/version/active"): RuntimeError("HTTP 404"),
+                ("GET", "/service/svc1/version"): {"items": [{"number": 3, "active": True}]},
+            },
+            3,
+        ),
+        (
+            {
+                ("GET", "/service/svc1/version/active"): {"active": False},
+                ("GET", "/service/svc1/version"): [{"number": 1, "active": False}],
+            },
+            None,
+        ),
+        (
+            {
+                ("GET", "/service/svc1/version/active"): RuntimeError("HTTP 404"),
+                ("GET", "/service/svc1/version"): RuntimeError("HTTP 500"),
+            },
+            None,
+        ),
+    ],
+)
+def test_fetch_active_version_variants(responses, expected):
+    with patch.object(fi, "fastly", _fastly_mock(responses)):
+        assert fi.fetch_active_version("svc1", "tok") == expected
+
+
+def test_fetch_snippets_logging_backends_and_dictionaries():
+    with patch.object(
+        fi,
+        "fastly",
+        _fastly_mock(
+            {
+                ("GET", "/service/svc1/version/3/snippet"): [
+                    {"name": "recv1", "priority": 50, "snippet": "# vcl", "type": "vcl_recv"}
+                ]
+            }
+        ),
+    ):
+        assert fi.fetch_snippets("svc1", 3, "tok") == [
+            VCLSnippet(name="recv1", priority=50, body="# vcl", subroutine="vcl_recv")
+        ]
+
+    with patch.object(fi, "fastly", _fastly_mock({("GET", "/service/svc1/version/3/snippet"): {"items": [{}]}})):
+        assert fi.fetch_snippets("svc1", 3, "tok") == [
+            VCLSnippet(name="", priority=100, body="", subroutine="vcl_recv")
+        ]
+
+    for bad_snip in (RuntimeError("HTTP 500"), {"not_items": []}):
+        with patch.object(fi, "fastly", _fastly_mock({("GET", "/service/svc1/version/3/snippet"): bad_snip})):
+            assert fi.fetch_snippets("svc1", 3, "tok") == []
+
+    ep_raw = {
+        "name": "ep1",
+        "path": "/raw/",
+        "period": 60,
+        "response_condition": "cond1",
+        "format": "%h",
+        "placement": "none",
+        "response_object_name": "",
+    }
+    with patch.object(fi, "fastly", _fastly_mock({("GET", "/service/svc1/version/3/logging/s3"): [ep_raw]})):
+        assert fi.fetch_logging_endpoints("svc1", 3, "tok") == [
+            LoggingEndpoint(
+                name="ep1",
+                endpoint_type="s3",
+                path="/raw/",
+                period=60,
+                response_condition="cond1",
+                format_string="%h",
+                placement="none",
+                response_object_name="",
+            )
+        ]
+    with patch.object(
+        fi, "fastly", _fastly_mock({("GET", "/service/svc1/version/3/logging/s3"): RuntimeError("boom")})
+    ):
+        assert fi.fetch_logging_endpoints("svc1", 3, "tok") == []
+
+    with patch.object(
+        fi,
+        "fastly",
+        _fastly_mock(
+            {("GET", "/service/svc1/version/3/backend"): [{"name": "origin1", "address": "origin.example.test"}]}
+        ),
+    ):
+        assert fi.fetch_backends("svc1", 3, "tok") == [Backend(name="origin1", address="origin.example.test", port=443)]
+    with patch.object(fi, "fastly", _fastly_mock({("GET", "/service/svc1/version/3/backend"): RuntimeError("boom")})):
+        assert fi.fetch_backends("svc1", 3, "tok") == []
+
+    # Dictionaries
+    with patch.object(
+        fi,
+        "fastly",
+        _fastly_mock(
+            {
+                ("GET", "/service/svc1/version/3/dictionary"): [{"name": "d1", "id": "did1", "write_only": False}],
+                ("GET", "/service/svc1/dictionary/did1/items"): [
+                    {"item_key": "k1", "item_value": "v1"},
+                    {"key": "k2", "value": "v2"},
+                ],
+            }
+        ),
+    ):
+        assert fi.fetch_dictionaries("svc1", 3, "tok") == [
+            ServiceDictionary(name="d1", write_only=False, items={"k1": "v1", "k2": "v2"})
+        ]
+
+    with patch.object(
+        fi,
+        "fastly",
+        _fastly_mock(
+            {
+                ("GET", "/service/svc1/version/3/dictionary"): [{"name": "d1", "id": "did1"}],
+                ("GET", "/service/svc1/dictionary/did1/items"): {"item_key": "solo", "item_value": "only"},
+            }
+        ),
+    ):
+        assert fi.fetch_dictionaries("svc1", 3, "tok")[0].items == {"solo": "only"}
+
+    with patch.object(
+        fi,
+        "fastly",
+        _fastly_mock(
+            {
+                ("GET", "/service/svc1/version/3/dictionary"): [{"name": "d1", "id": "did1"}],
+                ("GET", "/service/svc1/dictionary/did1/items"): RuntimeError("boom"),
+            }
+        ),
+    ):
+        assert fi.fetch_dictionaries("svc1", 3, "tok") == [ServiceDictionary(name="d1", write_only=False, items={})]
+
+    with patch.object(
+        fi, "fastly", _fastly_mock({("GET", "/service/svc1/version/3/dictionary"): [{"name": "d1", "id": ""}]})
+    ):
+        assert fi.fetch_dictionaries("svc1", 3, "tok") == [ServiceDictionary(name="d1", items={})]
+
+    with patch.object(
+        fi, "fastly", _fastly_mock({("GET", "/service/svc1/version/3/dictionary"): RuntimeError("boom")})
+    ):
+        assert fi.fetch_dictionaries("svc1", 3, "tok") == []
+
+
+def test_clone_delete_validate_and_activate_mutations():
+    with patch.object(fi, "fastly", _fastly_mock({("PUT", "/service/svc1/version/3/clone"): {"number": 4}})):
+        assert fi.clone_version("svc1", 3, "tok") == 4
+
+    calls: list[tuple[str, str, Any]] = []
+    with patch.object(
+        fi,
+        "fastly",
+        lambda m, p, b=None, **kw: (calls.append((m, p, b)), {"number": 9} if p.endswith("/clone") else {})[1],
+    ):
+        assert fi.clone_version("svc1", 3, "tok", comment="reconciler pass") == 9
+    assert ("PUT", "/service/svc1/version/9", {"comment": "reconciler pass"}) in calls
+
+    del_calls: list[tuple[str, str, bool]] = []
+    with patch.object(
+        fi,
+        "fastly",
+        lambda m, p, b=None, *, expect_empty=False, **kw: (del_calls.append((m, p, expect_empty)), {})[1],
+    ):
+        fi.delete_snippet("svc1", 3, "weird name/slash", "tok")
+        fi.delete_logging_endpoint("svc1", 3, "My Endpoint", "tok")
+        fi.delete_backend("svc1", 3, "origin/1", "tok")
+        fi.delete_dictionary("svc1", 3, "my dict", "tok")
+    assert del_calls == [
+        ("DELETE", "/service/svc1/version/3/snippet/weird%20name%2Fslash", True),
+        ("DELETE", "/service/svc1/version/3/logging/s3/My%20Endpoint", True),
+        ("DELETE", "/service/svc1/version/3/backend/origin%2F1", True),
+        ("DELETE", "/service/svc1/version/3/dictionary/my%20dict", True),
+    ]
+
+    with patch.object(fi, "fastly", _fastly_mock({("GET", "/service/svc1/version/3/validate"): {"status": "ok"}})):
+        assert fi.validate_version("svc1", 3, "tok") is True
+    with patch.object(fi, "fastly", _fastly_mock({("GET", "/service/svc1/version/3/validate"): {"status": "error"}})):
+        assert fi.validate_version("svc1", 3, "tok") is False
+    with patch.object(
+        fi, "fastly", _fastly_mock({("GET", "/service/svc1/version/3/validate"): RuntimeError("bad VCL")})
+    ):
+        with pytest.raises(RuntimeError, match="VCL validation failed"):
+            fi.validate_version("svc1", 3, "tok")
+
+    act_calls: list[tuple[str, str]] = []
+    with patch.object(fi, "fastly", lambda m, p, **kw: (act_calls.append((m, p)), {})[1]):
+        fi.activate_version("svc1", 3, "tok")
+    assert act_calls == [("PUT", "/service/svc1/version/3/activate")]
+
+
+def test_create_or_update_snippet_logging_backend_and_dictionary():
+    # Snippet update vs create
+    for exists, subr, exp_method, exp_type in (
+        (True, "vcl_recv", "PUT", "recv"),
+        (False, "deliver", "POST", "deliver"),
+    ):
+        calls: list[tuple[str, str, Any]] = []
+
+        def _snip_fake(m, p, b=None, _exists=exists, _calls=calls, **kw):
+            _calls.append((m, p, b))
+            if m == "GET":
+                if not _exists:
+                    raise RuntimeError("HTTP 404")
+                return {"name": "s"}
+            return {}
+
+        with patch.object(fi, "fastly", _snip_fake):
+            fi.create_or_update_snippet(
+                "svc1", 3, VCLSnippet(name="s", priority=50, body="# vcl", subroutine=subr), "tok"
+            )
+        assert [c[0] for c in calls] == ["GET", exp_method] and calls[1][2]["type"] == exp_type
+
+    # Logging endpoint create vs update
+    ep_calls: list[tuple[str, str, Any]] = []
+    with patch.object(
+        fi,
+        "fastly",
+        lambda m, p, b=None, **kw: (
+            ep_calls.append((m, p, b)),
+            (_ for _ in ()).throw(RuntimeError("404")) if m == "GET" else {},
+        )[1],
+    ):
+        fi.create_or_update_logging_endpoint(
+            "svc1",
+            3,
+            LoggingEndpoint("ep1", "s3", "/raw/", 60, "", "%h", "none", ""),
+            "tok",
+            bucket_name="my-bucket",
+            domain="s3.example.test",
+            access_key="AKIA",
+            secret_key="shh",
+        )
+    assert [c[0] for c in ep_calls] == ["GET", "POST"]
+    assert ep_calls[1][2]["bucket_name"] == "my-bucket" and "response_condition" not in ep_calls[1][2]
+
+    ep_upd: list[tuple[str, str, Any]] = []
+    with patch.object(fi, "fastly", lambda m, p, b=None, **kw: (ep_upd.append((m, p, b)), {"name": "ep1"})[1]):
+        fi.create_or_update_logging_endpoint(
+            "svc1", 3, LoggingEndpoint("ep1", "s3", "/raw/", 60, "always_true", "%h", "none", ""), "tok"
+        )
+    assert [c[0] for c in ep_upd] == ["GET", "PUT"] and ep_upd[1][2]["response_condition"] == "always_true"
+
+    # Backend create vs update
+    be_calls: list[tuple[str, str, Any]] = []
+    with patch.object(
+        fi,
+        "fastly",
+        lambda m, p, b=None, **kw: (
+            be_calls.append((m, p, b)),
+            (_ for _ in ()).throw(RuntimeError("404")) if m == "GET" else {},
+        )[1],
+    ):
+        fi.create_or_update_backend(
+            "svc1",
+            3,
+            Backend("origin1", "origin.example.test", 443, override_host="custom.example.test", shield="dca-dc-us"),
+            "tok",
+        )
+    assert [c[0] for c in be_calls] == ["GET", "POST"] and be_calls[1][2]["shield"] == "dca-dc-us"
+
+    be_upd: list[tuple[str, str, Any]] = []
+    with patch.object(fi, "fastly", lambda m, p, b=None, **kw: (be_upd.append((m, p, b)), {"name": "origin1"})[1]):
+        fi.create_or_update_backend("svc1", 3, Backend("origin1", "origin.example.test", 443), "tok")
+    assert [c[0] for c in be_upd] == ["GET", "PUT"] and be_upd[1][2]["shield"] is None
+
+    # Dictionary create + item upsert, update + fallback POST, missing id, empty items
+    d_calls: list[tuple[str, str, Any]] = []
+    with patch.object(
+        fi,
+        "fastly",
+        lambda m, p, b=None, **kw: (
+            d_calls.append((m, p, b)),
+            (_ for _ in ()).throw(RuntimeError("404"))
+            if m == "GET"
+            else ({"id": "dict-id-1"} if p.endswith("/dictionary") else {}),
+        )[1],
+    ):
+        fi.create_or_update_dictionary(
+            "svc1", 3, ServiceDictionary(name="my_dict", write_only=True, items={"key1": "val1"}), "tok"
+        )
+    assert [(c[0], c[1].split("/")[-1]) for c in d_calls] == [
+        ("GET", "my_dict"),
+        ("POST", "dictionary"),
+        ("PUT", "key1"),
+    ]
+
+    d_upd: list[str] = []
+
+    def _dict_fallback(m, p, b=None, **kw):
+        d_upd.append(m)
+        if m == "GET":
+            return {"name": "my_dict"}
+        if m == "PUT" and "/dictionary/my_dict" in p:
+            return {"id": "dict-id-1"}
+        if m == "PUT" and "/item/new_key" in p:
+            raise RuntimeError("HTTP 500")
+        return {}
+
+    with patch.object(fi, "fastly", _dict_fallback):
+        fi.create_or_update_dictionary(
+            "svc1", 3, ServiceDictionary(name="my_dict", items={"new_key": "new_val"}), "tok"
+        )
+    assert d_upd == ["GET", "PUT", "PUT", "POST"]
+
+    with patch.object(
+        fi,
+        "fastly",
+        lambda m, p, *a, **kw: (_ for _ in ()).throw(RuntimeError("404")) if m == "GET" else {},
+    ):
+        with pytest.raises(RuntimeError, match="Failed to get dictionary ID"):
+            fi.create_or_update_dictionary("svc1", 3, ServiceDictionary(name="my_dict", items={"k": "v"}), "tok")
+
+    d_empty: list[tuple[str, str]] = []
+    with patch.object(
+        fi,
+        "fastly",
+        lambda m, p, *a, **kw: (
+            d_empty.append((m, p)),
+            (_ for _ in ()).throw(RuntimeError("404")) if m == "GET" else {"id": "dict-id-1"},
+        )[1],
+    ):
+        fi.create_or_update_dictionary("svc1", 3, ServiceDictionary(name="empty_dict", items={}), "tok")
+    assert [c[0] for c in d_empty] == ["GET", "POST"]

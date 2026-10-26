@@ -18,6 +18,7 @@ if _backend_pkg is not None and hasattr(_backend_pkg, "_MODULE_ALIASES"):
             "backend.cron.decorators": "backend.cron.scheduler",
             "backend.cron.lifecycle": "backend.cron.scheduler",
             "backend.cron.jobs.insights_prewarmer": "backend.cron.jobs.metadata",
+            "backend.cron.jobs.metric_snapshot": "backend.cron.jobs.metadata",
             "backend.cron.jobs.rum_commit": "backend.cron.jobs.rum_sync",
         }
     )

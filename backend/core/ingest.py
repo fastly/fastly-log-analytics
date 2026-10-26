@@ -342,14 +342,12 @@ def _compute_incremental_start_after(
 ) -> str | None:
     """Derive an S3 ``StartAfter`` key from previously-ingested filenames."""
     norm_subpath = prefix_subpath.strip("/")
-    parsed = [p for f in already if norm_subpath in f and (p := _parse_key_layout_dt(f)) is not None]
-    if not parsed:
-        parsed = [p for f in already if "/raw/" in f and (p := _parse_key_layout_dt(f)) is not None]
+    parsed = [p for f in already if norm_subpath in f and (p := _parse_key_layout_dt(f)) is not None] or [
+        p for f in already if "/raw/" in f and (p := _parse_key_layout_dt(f)) is not None
+    ]
     if not parsed:
         return None
-    latest_dt = max(dt for _, dt in parsed)
-    lookback = latest_dt - timedelta(hours=lookback_hours)
-
+    lookback = max(dt for _, dt in parsed) - timedelta(hours=lookback_hours)
     layouts = {layout for layout, _ in parsed}
     if "v3" in layouts:
         return lookback.strftime(f"{norm_subpath}/year=%Y/month=%m/day=%d/hour=%H/minute=%M/")
@@ -367,30 +365,23 @@ def _delete_objects_robust_with_failures(fos_client, bucket: str, keys: list[str
 
     failed_keys: set[str] = set()
     try:
-        # S3 bulk delete limit is 1000, we use 500 for safety with varied implementations
-        batch_size = 500
-        total_deleted = 0
+        batch_size, total_deleted = 500, 0
         for i in range(0, len(keys), batch_size):
             batch = keys[i : i + batch_size]
-            delete_payload = {"Objects": [{"Key": k} for k in batch], "Quiet": True}
-
-            response = fos_client.delete_objects(Bucket=bucket, Delete=delete_payload)
-            # Fastly Object Storage delete_objects returns success but doesn't always
-            # populate the 'Deleted' array in the response like AWS S3 does.
-            # If no errors were returned, assume all were deleted.
+            response = fos_client.delete_objects(
+                Bucket=bucket, Delete={"Objects": [{"Key": k} for k in batch], "Quiet": True}
+            )
             errors = response.get("Errors", [])
-            batch_failures = {error.get("Key") for error in errors if error.get("Key") in batch}
-            if any(error.get("Key") not in batch for error in errors):
+            batch_failures = {err.get("Key") for err in errors if err.get("Key") in batch}
+            if any(err.get("Key") not in batch for err in errors):
                 batch_failures = set(batch)
-            if errors:
-                for error in errors[:1]:  # Log the first error
-                    if _is_permission_error(error.get("Code", "")):
-                        logger.warning(
-                            "Bulk delete skipped due to missing permissions (%s). Disabling further delete attempts for this batch.",
-                            error.get("Code"),
-                        )
-                        total_deleted += len(batch) - len(batch_failures)
-                        return total_deleted, failed_keys | batch_failures | set(keys[i + len(batch) :])
+            if errors and _is_permission_error(errors[0].get("Code", "")):
+                logger.warning(
+                    "Bulk delete skipped due to missing permissions (%s). Disabling further delete attempts for this batch.",
+                    errors[0].get("Code"),
+                )
+                total_deleted += len(batch) - len(batch_failures)
+                return total_deleted, failed_keys | batch_failures | set(keys[i + len(batch) :])
             total_deleted += len(batch) - len(batch_failures)
             failed_keys.update(batch_failures)
         return total_deleted, failed_keys
@@ -400,11 +391,8 @@ def _delete_objects_robust_with_failures(fos_client, bucket: str, keys: list[str
             logger.warning("Delete failed due to missing permissions: %s", err_str.split(":", 1)[-1].strip() or err_str)
             return 0, set(keys)
 
-        # Fallback to individual deletion if bulk is not supported or fails
         logger.warning("Bulk delete failed, falling back to individual", exc_info=True)
-        deleted_count = 0
-        individual_failures: set[str] = set()
-
+        deleted_count, individual_failures = 0, set()
         if len(keys) <= 4:
             for index, k in enumerate(keys):
                 try:
@@ -423,7 +411,6 @@ def _delete_objects_robust_with_failures(fos_client, bucket: str, keys: list[str
                     individual_failures.add(k)
             return deleted_count, individual_failures
 
-        # For larger batches, delete concurrently using ThreadPoolExecutor to prevent WAN timeouts
         access_denied_event = threading.Event()
 
         def _delete_single_key(k: str) -> tuple[str, bool, str | None]:
@@ -438,26 +425,27 @@ def _delete_objects_robust_with_failures(fos_client, bucket: str, keys: list[str
                     access_denied_event.set()
                 return k, False, ind_err_str
 
-        workers = min(32, len(keys))
-        with concurrent.futures.ThreadPoolExecutor(max_workers=workers, thread_name_prefix="fos_del") as del_ex:
-            del_futures = {del_ex.submit(_delete_single_key, k): k for k in keys}
-            for fut in concurrent.futures.as_completed(del_futures):
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=min(32, len(keys)), thread_name_prefix="fos_del"
+        ) as del_ex:
+            for fut in concurrent.futures.as_completed({del_ex.submit(_delete_single_key, k): k for k in keys}):
                 k, ok, err_s = fut.result()
                 if ok:
                     deleted_count += 1
                 else:
-                    if _is_permission_error(err_s):
-                        logger.warning("Individual delete permission error on %s: %s", k, err_s)
-                    else:
-                        logger.warning("Failed to delete object %s: %s", k, err_s)
+                    msg = (
+                        "Individual delete permission error on %s: %s"
+                        if _is_permission_error(err_s)
+                        else "Failed to delete object %s: %s"
+                    )
+                    logger.warning(msg, k, err_s)
                     individual_failures.add(k)
         return deleted_count, individual_failures
 
 
 def _delete_objects_robust(fos_client, bucket: str, keys: list[str]) -> int:
     """Delete multiple objects, retaining the historical deleted-count result."""
-    deleted, _ = _delete_objects_robust_with_failures(fos_client, bucket, keys)
-    return deleted
+    return _delete_objects_robust_with_failures(fos_client, bucket, keys)[0]
 
 
 def _scan_invalid_gzip_lines(paths: list[str]) -> list[tuple[str, str]]:
@@ -486,8 +474,7 @@ def _download_chunk_to_local(fos_client, s3_paths: list[str], tmpdir: str) -> tu
     local_to_s3: dict[str, str] = {}
 
     def _download_one(s3_path: str) -> tuple[str, str]:
-        without_scheme = s3_path[5:] if s3_path.startswith("s3://") else s3_path
-        bucket, key = without_scheme.split("/", 1)
+        bucket, key = s3_path.removeprefix("s3://").split("/", 1)
         local_path = os.path.join(tmpdir, f"{abs(hash(s3_path)):x}_{key.rsplit('/', 1)[-1]}")
         token = _BOTO3_CALLER_HINT.set("ingest_download")
         try:
@@ -498,32 +485,30 @@ def _download_chunk_to_local(fos_client, s3_paths: list[str], tmpdir: str) -> tu
             _BOTO3_CALLER_HINT.reset(token)
         return s3_path, local_path
 
-    workers = min(64, max(16, len(s3_paths)))
-    with concurrent.futures.ThreadPoolExecutor(max_workers=workers, thread_name_prefix="ingest_dl") as ex:
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=min(64, max(16, len(s3_paths))), thread_name_prefix="ingest_dl"
+    ) as ex:
         futures = {ex.submit(_download_one, p): p for p in s3_paths}
         for fut in concurrent.futures.as_completed(futures):
             try:
                 s3, local = fut.result()
-                s3_to_local[s3] = local
-                local_to_s3[local] = s3
+                s3_to_local[s3], local_to_s3[local] = local, s3
             except Exception as e:
                 p, err_str = futures[fut], str(e)
-                log_fn = logger.debug if ("(502)" in err_str or "(503)" in err_str) else logger.warning
-                msg = (
+                is_transient = "(502)" in err_str or "(503)" in err_str
+                (logger.debug if is_transient else logger.warning)(
                     "[ingest] transient FOS error downloading %s: %s"
-                    if log_fn is logger.debug
-                    else "[ingest] failed to download %s: %s"
+                    if is_transient
+                    else "[ingest] failed to download %s: %s",
+                    p,
+                    err_str,
                 )
-                log_fn(msg, p, err_str)
-
     return s3_to_local, local_to_s3
 
 
 def _deterministic_buffer_name(chunk: list[str]) -> str:
     """Return ``batch_{sha256(sorted_chunk)[:16]}.parquet``."""
-    payload = "\n".join(sorted(chunk)).encode("utf-8")
-    digest = hashlib.sha256(payload).hexdigest()[:16]
-    return f"batch_{digest}.parquet"
+    return f"batch_{hashlib.sha256('\n'.join(sorted(chunk)).encode('utf-8')).hexdigest()[:16]}.parquet"
 
 
 def _recover_in_flight(source: dict, table_name: str = "logs") -> dict:
@@ -536,8 +521,7 @@ def _recover_in_flight(source: dict, table_name: str = "logs") -> dict:
     buf_dir = iceberg._buffer_dir(source, table_name=table_name)  # type: ignore[attr-defined]
     promoted = dropped = rows_recovered = 0
     for buffer_filename, file_rows in pending:
-        buf_path = os.path.join(buf_dir, buffer_filename)
-        if os.path.isfile(buf_path) and file_rows:
+        if os.path.isfile(os.path.join(buf_dir, buffer_filename)) and file_rows:
             row_sum = sum(rc for (_, rc, _) in file_rows if rc)
             metadata_db.insert_ingested_files(source_name, file_rows, table_name=table_name)
             metadata_db.clear_in_flight(source_name, buffer_filename, table_name=table_name)
@@ -583,8 +567,7 @@ def list_fos_files(
         if start_after_key is not None:
             return start_after_key
         if st_dt and not already:
-            norm_subpath = prefix_subpath.strip("/")
-            start_after_key = st_dt.strftime(f"{norm_subpath}/year=%Y/month=%m/day=%d/hour=%H/minute=%M/")
+            start_after_key = st_dt.strftime(f"{prefix_subpath.strip('/')}/year=%Y/month=%m/day=%d/hour=%H/minute=%M/")
             logger.info(
                 "[ingest] %s: Using requested start_time to bound FOS scan: %s", src.get("name"), start_after_key
             )
@@ -599,25 +582,21 @@ def list_fos_files(
                 )
         return start_after_key
 
-    if fos_client is None:
-        fos_client = _get_fos_client(src)
+    fos_client = fos_client or _get_fos_client(src)
     file_sizes: dict[str, int] = {}
     new_files: list[str] = []
-    skipped_already = 0
+    skipped_already = total_listed = 0
     stranded_already: list[str] = []
-    total_listed = 0
 
     try:
         prefix_path = src.get("prefix", "").strip("/")
         paginator = fos_client.get_paginator("list_objects_v2", caller_hint="ingest_scan")
         raw_prefix = f"{prefix_path}/{prefix_subpath}" if prefix_path else prefix_subpath
-
         yield {"type": "status", "message": f"{elapsed_fn()} Discovering new files in Fastly Object Storage..."}
 
         from backend.provision.log_paths import minute_list_prefix, rum_minute_list_prefix
 
-        now_utc = datetime.now(UTC)
-        norm_subpath = prefix_subpath.strip("/")
+        now_utc, norm_subpath = datetime.now(UTC), prefix_subpath.strip("/")
         has_v3_files = bool(already) and any("year=" in f for f in already)
         use_minute_prefixes = (
             incremental_only and not st_dt and not et_dt and norm_subpath in ("raw/request", "raw/rum") and has_v3_files
@@ -628,16 +607,15 @@ def list_fos_files(
             prefix_fn = rum_minute_list_prefix if norm_subpath == "raw/rum" else minute_list_prefix
             for i in range(5):
                 min_sub = prefix_fn(now_utc - timedelta(minutes=i))
-                pfx = f"{prefix_path}/{min_sub}" if prefix_path else min_sub
-                scan_batches.append({"Bucket": src["bucket"], "Prefix": pfx})
+                scan_batches.append(
+                    {"Bucket": src["bucket"], "Prefix": f"{prefix_path}/{min_sub}" if prefix_path else min_sub}
+                )
 
         if not scan_batches:
             sak = _resolve_start_after_key()
             kwargs = {"Bucket": src["bucket"], "Prefix": raw_prefix}
             if sak:
-                if prefix_path:
-                    sak = f"{prefix_path}/{sak}"
-                kwargs["StartAfter"] = sak
+                kwargs["StartAfter"] = f"{prefix_path}/{sak}" if prefix_path else sak
             scan_batches.append(kwargs)
 
         seen_keys: set[str] = set()
@@ -659,18 +637,15 @@ def list_fos_files(
                 seen_keys.add(key)
                 if not key.endswith(".gz") or (exclude_prefix and key.startswith(exclude_prefix)):
                     continue
-
                 total_listed += 1
                 if total_listed % 10000 == 0:
                     yield {"type": "status", "message": f"{elapsed_fn()} Discovered {total_listed:,} new files..."}
-
                 if et_bound is not None or st_bound is not None:
                     file_dt = _parse_fastly_filename_dt(key.rsplit("/", 1)[-1])
                     if file_dt is not None and (
                         (et_bound is not None and file_dt > et_bound) or (st_bound is not None and file_dt < st_bound)
                     ):
                         continue
-
                 full_path = f"{s3_bucket_prefix}{key}"
                 if full_path not in already:
                     new_files.append(full_path)
@@ -687,10 +662,8 @@ def list_fos_files(
                     break
             if max_files and len(new_files) >= max_files:
                 break
-
         if max_files and len(new_files) > max_files:
             new_files = new_files[:max_files]
-
     except Exception as e:
         logger.exception("[ingest] Could not list FOS objects: %s", e)
         yield {"type": "error", "message": f"Could not list FOS objects: {e}"}
@@ -724,8 +697,7 @@ def ingest(
     if src.get("access_level") == "read_only":
         yield {"type": "error", "message": "Write operations are disabled in read-only mode."}
         return
-    svc_id = src.get("service_id", "unknown")
-    source_name = src["name"]
+    svc_id, source_name = src.get("service_id", "unknown"), src["name"]
     svc_name = src.get("service_name") or source_name
     display_name = f"{svc_name} ({svc_id})" if svc_name != svc_id else svc_id
     _ensure_source_registered(src)
@@ -735,7 +707,6 @@ def ingest(
         return
 
     fos_client = _get_fos_client(src)
-
     try:
         recovery = _recover_in_flight(src)
         if recovery["promoted"] or recovery["dropped"]:
@@ -751,9 +722,7 @@ def ingest(
 
     _parse_time_bounds(start_time, end_time)
     yield {"type": "status", "message": f"{elapsed()} Fetching ingestion history..."}
-
-    dedup_limit: int | None = 20_000 if incremental_only else None
-    already = metadata_db.get_ingested_filenames(source_name, limit=dedup_limit)
+    already = metadata_db.get_ingested_filenames(source_name, limit=20_000 if incremental_only else None)
 
     list_res = yield from list_fos_files(
         src=src,
@@ -777,8 +746,7 @@ def ingest(
         throttled = False
         if incremental_only:
             now = time.time()
-            last = _reconcile_last_attempt.get(source_name, 0.0)
-            if now - last < _RECONCILE_MIN_INTERVAL_S:
+            if now - _reconcile_last_attempt.get(source_name, 0.0) < _RECONCILE_MIN_INTERVAL_S:
                 throttled = True
             else:
                 _reconcile_last_attempt[source_name] = now
@@ -791,16 +759,12 @@ def ingest(
             except Exception as classify_err:
                 logger.warning(
                     "[ingest] %s: could not classify reclaimable strands (%s) — skipping reclaim this run",
-                    display_name,
-                    classify_err,
-                )
+                    display_name, classify_err,
+                )  # fmt: skip
                 deletable = set()
 
-            stranded_keys = [
-                p[len(f"s3://{src['bucket']}/") :]
-                for p in stranded_already
-                if p in deletable and p.startswith(f"s3://{src['bucket']}/")
-            ]
+            s3_pfx = f"s3://{src['bucket']}/"
+            stranded_keys = [p[len(s3_pfx) :] for p in stranded_already if p in deletable and p.startswith(s3_pfx)]
             if stranded_keys:
                 yield {
                     "type": "status",
@@ -814,14 +778,15 @@ def ingest(
                 except Exception as recl_err:
                     logger.warning(
                         "[ingest] %s: stranded-delete reconcile failed (%s) — will retry next run",
-                        display_name,
-                        recl_err,
-                    )
+                        display_name, recl_err,
+                    )  # fmt: skip
 
     if not new_files:
-        msg = "Already up to date — no new files to ingest."
-        if reclaimed:
-            msg = f"No new files; reclaimed {reclaimed} raw file(s) left by an interrupted prior run."
+        msg = (
+            f"No new files; reclaimed {reclaimed} raw file(s) left by an interrupted prior run."
+            if reclaimed
+            else "Already up to date — no new files to ingest."
+        )
         yield {
             "type": "done",
             "new_files": 0,
@@ -867,14 +832,13 @@ def ingest(
         from backend.core.duckdb import get_memory_connection
 
         mem_con = get_memory_connection(src)
-        _cpus = os.cpu_count() or 4
-        mem_con.execute(f"SET threads = {_cpus};")
+        mem_con.execute(f"SET threads = {os.cpu_count() or 4};")
         try:
             mem_con.execute("SET force_download = true;")
         except Exception as _fd_err:
             logger.debug("force_download not supported on this DuckDB build: %s", _fd_err)
 
-        failed_paths = set()
+        failed_paths: set[str] = set()
         for chunk_start in range(0, len(new_files), chunk_size):
             yield_to_api()
             if chunk_start > 0 and max_seconds and (time.time() - start_time_exec) > max_seconds:
@@ -888,16 +852,16 @@ def ingest(
             outcome_counters["objects_processed"] += len(chunk)
             chunk_num = (chunk_start // chunk_size) + 1
             total_chunks = math.ceil(len(new_files) / chunk_size)
-            msg = f"{elapsed()} Processing {len(chunk)} files in batch {chunk_num}/{total_chunks} ({len(new_files):,} files total)..."
-            yield {"type": "status", "message": msg}
+            yield {
+                "type": "status",
+                "message": f"{elapsed()} Processing {len(chunk)} files in batch {chunk_num}/{total_chunks} ({len(new_files):,} files total)...",
+            }
 
             count_map: dict[str, int] = {}
             chunk_tmpdir_obj = tempfile.TemporaryDirectory(prefix="ingest_chunk_")
             try:
                 s3_to_local, local_to_s3 = _download_chunk_to_local(fos_client, list(chunk), chunk_tmpdir_obj.name)
-                for p in chunk:
-                    if p not in s3_to_local:
-                        failed_paths.add(p)
+                failed_paths.update(p for p in chunk if p not in s3_to_local)
                 read_paths_s3 = [p for p in chunk if p in s3_to_local]
                 if not read_paths_s3:
                     yield {"type": "status", "message": "All files in batch failed to download."}
@@ -931,7 +895,6 @@ def ingest(
                             err_msg = str(file_err)
                             logger.error(f"Ingest isolation failed for {f_name}: {err_msg}")
                             err_msg = err_msg.split(":", 1)[-1].strip()
-
                             failed_paths.add(read_paths_s3[i])
                             failed_gzip = _corrupt_gzip_error(read_path)
                             if failed_gzip is not None:
@@ -954,11 +917,10 @@ def ingest(
                         yield {"type": "status", "message": "All files in batch are unreadable."}
                         continue
 
-                    paths_sql_retry = ", ".join(valid_paths)
                     try:
                         _execute_query_with_retry(
                             mem_con,
-                            f"CREATE TEMP TABLE _ingest_staging AS SELECT * FROM {_read_json_auto_sql(f'[{paths_sql_retry}]', columns_sql, filename=True)}",
+                            f"CREATE TEMP TABLE _ingest_staging AS SELECT * FROM {_read_json_auto_sql(f'[{", ".join(valid_paths)}]', columns_sql, filename=True)}",
                         )
                     except Exception as retry_err:
                         failed_paths.update(read_paths_s3)
@@ -975,11 +937,8 @@ def ingest(
                         f"CREATE TEMP TABLE _ingest_path_map AS SELECT * FROM (VALUES {path_map_rows}) AS t(local, s3)"
                     )
                     mem_con.execute(
-                        "UPDATE _ingest_staging "
-                        "SET filename = COALESCE("
-                        "  (SELECT s3 FROM _ingest_path_map WHERE local = _ingest_staging.filename), "
-                        "  filename"
-                        ")"
+                        "UPDATE _ingest_staging SET filename = COALESCE("
+                        "(SELECT s3 FROM _ingest_path_map WHERE local = _ingest_staging.filename), filename)"
                     )
 
                 for fpath, rcount in mem_con.execute(
@@ -988,16 +947,13 @@ def ingest(
                     count_map[fpath] = rcount
 
                 field_selects = _build_column_select_exprs(src, log_fields_config, source_file_expr='"filename"')
-
-                where_clauses = []
-                where_params = []
+                where_clauses, where_params = [], []
                 if start_time:
                     where_clauses.append("timestamp >= ?::TIMESTAMPTZ")
                     where_params.append(start_time)
                 if end_time:
                     where_clauses.append("timestamp <= ?::TIMESTAMPTZ")
                     where_params.append(end_time)
-
                 where_sql = f" WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
 
                 mem_con.execute(
@@ -1014,16 +970,14 @@ def ingest(
 
                 arrow_table = _export_staging_arrow(mem_con)
                 valid_rows = len(arrow_table)
-
                 if valid_rows > 0:
-                    chunk_hours = {
+                    touched_hours.update(
                         r[0]
                         for r in mem_con.execute(
                             "SELECT DISTINCT strftime(timestamp, '%Y-%m-%d-%H') FROM _ingest_staging WHERE timestamp IS NOT NULL"
                         ).fetchall()
                         if r[0] is not None
-                    }
-                    touched_hours.update(chunk_hours)
+                    )
 
                 _row = mem_con.execute("SELECT count(*) FROM _ingest_staging").fetchone()
                 total_rows_batch = _row[0] if _row else 0
@@ -1034,24 +988,21 @@ def ingest(
                 _chunk_truly_corrupt: list = []
                 if corrupt_in_batch > 0:
                     try:
-                        corrupt_read_paths = read_paths
-                        corrupt_s3_paths = read_paths_s3
-
+                        corrupt_read_paths, corrupt_s3_paths = read_paths, read_paths_s3
                         if corrupt_read_paths:
                             paths_sql_str = ", ".join(f"'{escape_sql_literal(p)}'" for p in corrupt_read_paths)
-                            q = f"""
-                                SELECT filename, column0 FROM read_csv([{paths_sql_str}], header=false, sep='', quote='', escape='', columns={{'column0': 'VARCHAR'}}, filename=true)
-                                WHERE NOT json_valid(column0) OR json_extract(column0, '$.timestamp') IS NULL
-                            """
+                            q = (
+                                f"SELECT filename, column0 FROM read_csv([{paths_sql_str}], header=false, sep='', "
+                                "quote='', escape='', columns={'column0': 'VARCHAR'}, filename=true) "
+                                "WHERE NOT json_valid(column0) OR json_extract(column0, '$.timestamp') IS NULL"
+                            )
                             try:
                                 bad_rows = _execute_query_with_retry(mem_con, q).fetchall()
                             except Exception as diagnostic_error:
                                 logger.warning(
-                                    "[sync] %s: DuckDB corrupt-line scan failed; scanning downloaded gzip files "
-                                    "directly: %s",
-                                    source_name,
-                                    diagnostic_error,
-                                )
+                                    "[sync] %s: DuckDB corrupt-line scan failed; scanning downloaded gzip files directly: %s",
+                                    source_name, diagnostic_error,
+                                )  # fmt: skip
                                 bad_rows = _scan_invalid_gzip_lines(corrupt_read_paths)
 
                             repaired_by_fname: dict[str, list] = {}
@@ -1071,7 +1022,6 @@ def ingest(
                                     truly_corrupt.append((fname, raw_line, "invalid_json"))
 
                             partial_paths.update(fname for fname, _raw_line, _reason in truly_corrupt)
-
                             if repaired_by_fname:
                                 repairs_made = True
                                 for fname, lines in repaired_by_fname.items():
@@ -1082,7 +1032,6 @@ def ingest(
                                         tmp.flush()
                                         tmp_path = tmp.name
                                         tmp.close()
-
                                         safe_fname = escape_sql_literal(fname)
                                         mem_con.execute(
                                             f"INSERT INTO _ingest_staging BY NAME SELECT {', '.join(field_selects)} "
@@ -1102,9 +1051,7 @@ def ingest(
                                 for fname, raw_line, _reason in truly_corrupt[: 100 - len(total_corrupt_details)]:
                                     short_name = fname.split("?")[0].split("/")[-1]
                                     total_corrupt_details.append(f"[{short_name}] {raw_line.strip()[:2000]}")
-
-                            _chunk_corrupt_s3_paths = corrupt_s3_paths
-                            _chunk_truly_corrupt = truly_corrupt
+                            _chunk_corrupt_s3_paths, _chunk_truly_corrupt = corrupt_s3_paths, truly_corrupt
                     except Exception as e:
                         err_str = str(e)
                         if any(
@@ -1119,18 +1066,15 @@ def ingest(
                         ):
                             logger.warning(
                                 "[sync] Local re-read failed during corrupt-line extraction. Rolling back partial data for %d files to allow retry: %s",
-                                len(corrupt_s3_paths),
-                                err_str,
-                            )
+                                len(corrupt_s3_paths), err_str,
+                            )  # fmt: skip
                             if corrupt_s3_paths:
                                 placeholders = ", ".join("?" * len(corrupt_s3_paths))
                                 mem_con.execute(
                                     f"DELETE FROM _ingest_staging WHERE _source_file IN ({placeholders})",
                                     corrupt_s3_paths,
                                 )
-                                for p in corrupt_s3_paths:
-                                    failed_paths.add(p)
-
+                                failed_paths.update(corrupt_s3_paths)
                                 repairs_made = True
                                 _valid_row = mem_con.execute(
                                     "SELECT count(*) FROM _ingest_staging WHERE timestamp IS NOT NULL"
@@ -1152,8 +1096,7 @@ def ingest(
                         capture_failed_paths.add(corrupt_path)
                         continue
                     object_key = corrupt_path.removeprefix(f"s3://{src['bucket']}/")
-                    safe_local = escape_sql_literal(local_file)
-                    corrupt_read_expr = _read_json_auto_sql(f"'{safe_local}'", columns_sql)
+                    corrupt_read_expr = _read_json_auto_sql(f"'{escape_sql_literal(local_file)}'", columns_sql)
                     try:
                         quarantine_result = _quarantine_convert_corrupt_lines(
                             mem_con, fos_client, src, corrupt_read_expr, local_file, object_key
@@ -1216,12 +1159,8 @@ def ingest(
                         remaining_deletes.append((future, keys))
                 _pending_deletes = remaining_deletes
 
-                chunk_keys = [
-                    f[len(f"s3://{src['bucket']}/") :]
-                    for f in chunk
-                    if f.startswith(f"s3://{src['bucket']}/") and f not in failed_paths
-                ]
-
+                s3_pfx = f"s3://{src['bucket']}/"
+                chunk_keys = [f[len(s3_pfx) :] for f in chunk if f.startswith(s3_pfx) and f not in failed_paths]
                 if chunk_keys:
                     try:
                         future = _delete_executor.submit(
@@ -1235,35 +1174,30 @@ def ingest(
                     except RuntimeError as submit_err:
                         logger.warning(
                             "[ingest] %s: delete executor submit failed (%s) — falling back to inline delete",
-                            source_name,
-                            submit_err,
-                        )
+                            source_name, submit_err,
+                        )  # fmt: skip
                         try:
                             inline_deleted, inline_failures = _delete_objects_robust_with_failures(
                                 fos_client, src["bucket"], chunk_keys
                             )
                             deleted += inline_deleted
-                            delete_failed_paths.update(f"s3://{src['bucket']}/{key}" for key in inline_failures)
+                            delete_failed_paths.update(f"{s3_pfx}{key}" for key in inline_failures)
                             yield {
                                 "type": "status",
                                 "message": f"{elapsed()} Batch {chunk_num}: Deleted {inline_deleted} raw files inline (executor unavailable).",
                             }
                         except Exception as inline_err:
-                            delete_failed_paths.update(f"s3://{src['bucket']}/{key}" for key in chunk_keys)
+                            delete_failed_paths.update(f"{s3_pfx}{key}" for key in chunk_keys)
                             logger.error(
                                 "[ingest] %s: inline delete also failed for batch %d (%d files): %s",
-                                source_name,
-                                chunk_num,
-                                len(chunk_keys),
-                                inline_err,
-                            )
+                                source_name, chunk_num, len(chunk_keys), inline_err,
+                            )  # fmt: skip
                             yield {
                                 "type": "status",
                                 "message": f"{elapsed()} Batch {chunk_num}: WARN — failed to delete {len(chunk_keys)} raw files: {inline_err}",
                             }
 
             total_inserted += valid_rows
-
             for file_path in chunk:
                 processed_count += 1
                 yield {
@@ -1275,7 +1209,6 @@ def ingest(
                     "total_inserted": total_inserted,
                     "total_corrupt": total_corrupt,
                 }
-
     finally:
         pending_by_future = {future: keys for future, keys in _pending_deletes}
         try:
@@ -1420,9 +1353,8 @@ def _discover_prefix_common(
         values_sql = ", ".join(["(?, ?, ?, 'discovered', ?, ?, ?)"] * len(chunk_files))
         params: list[Any] = []
         for f_path in chunk_files:
-            f_size = file_sizes.get(f_path, 0)
             object_key = f_path[len(s3_prefix) :] if f_path.startswith(s3_prefix) else f_path
-            params.extend((service_id, object_key, f_size, now_ts, orig_task, run_id))
+            params.extend((service_id, object_key, file_sizes.get(f_path, 0), now_ts, orig_task, run_id))
         cur.execute(
             "INSERT INTO ingest_ledger "
             "(service_id, object_key, size_bytes, status, discovered_at, originating_task, originating_run_id) "
@@ -1486,34 +1418,29 @@ def _ledger_record_failure(
     ).fetchone()
     if row is None:
         return "unknown"
-    attempts = int(row[0] or 0)
     if expected_generation is not None and int(row[2] or 0) != expected_generation:
         return "stale"
-    next_attempts = attempts + 1
+    next_attempts = int(row[0] or 0) + 1
     terminal = next_attempts >= LEDGER_MAX_ATTEMPTS
     next_attempt_at = None
     if not terminal:
         delay = min(LEDGER_RETRY_MAX_S, LEDGER_RETRY_BASE_S * (2 ** max(0, next_attempts - 1)))
-        jitter = random.uniform(0, delay * LEDGER_RETRY_JITTER_RATIO)
-        next_attempt_at = time.time() + delay + jitter
-    generation_clause = ""
+        next_attempt_at = time.time() + delay + random.uniform(0, delay * LEDGER_RETRY_JITTER_RATIO)
+    generation_clause = " AND status = 'claimed' AND lease_generation = ?" if expected_generation is not None else ""
     params: tuple = (error[:500], error_kind, next_attempt_at, LEDGER_MAX_ATTEMPTS, service_id, object_key)
     if expected_generation is not None:
-        generation_clause = " AND status = 'claimed' AND lease_generation = ?"
         params += (expected_generation,)
     cur.execute(
         "UPDATE ingest_ledger SET attempts = attempts + 1, last_error = ?, error_kind=?, next_attempt_at=?, "
         "status = CASE WHEN attempts + 1 >= ? THEN 'quarantined' ELSE 'discovered' END, "
-        "claimed_by = NULL, claimed_at = NULL "
-        "WHERE service_id = ? AND object_key = ?" + generation_clause,
+        "claimed_by = NULL, claimed_at = NULL WHERE service_id = ? AND object_key = ?" + generation_clause,
         params,
     )
     if cur.rowcount == 0 and expected_generation is not None:
         return "stale"
     if commit:
         con.commit()
-    status = "quarantined" if terminal else "discovered"
-    if status == "quarantined":
+    if terminal:
         logger.error(
             "[ledger] %s: %s QUARANTINED after %s failed convert attempts: %s",
             service_id,
@@ -1521,16 +1448,16 @@ def _ledger_record_failure(
             next_attempts,
             error,
         )
-    else:
-        logger.warning(
-            "[ledger] %s: convert failed for %s (attempt %s; retry at %.3f): %s",
-            service_id,
-            object_key,
-            next_attempts,
-            next_attempt_at or 0,
-            error,
-        )
-    return status
+        return "quarantined"
+    logger.warning(
+        "[ledger] %s: convert failed for %s (attempt %s; retry at %.3f): %s",
+        service_id,
+        object_key,
+        next_attempts,
+        next_attempt_at or 0,
+        error,
+    )
+    return "discovered"
 
 
 def _ledger_mark_committed_batch(
@@ -1577,8 +1504,7 @@ def _ledger_mark_dead_letter_missing(
         "UPDATE ingest_ledger SET status='dead_letter', "
         "last_error='object missing from FOS (already ingested+deleted, or expired)', "
         "error_kind='object_missing', next_attempt_at=NULL "
-        "WHERE service_id=? AND object_key=? AND status='claimed' "
-        "AND lease_generation=?",
+        "WHERE service_id=? AND object_key=? AND status='claimed' AND lease_generation=?",
         (service_id, object_key, lease_generation),
     )
     con_meta.commit()
@@ -1620,7 +1546,6 @@ def _claim_and_resolve_batch_source(
     }
     if not object_keys:
         return summary, None, None, {}, []
-
     con_meta = get_con(service_id)
     claimed_generations = _ledger_claim_batch(con_meta, service_id, object_keys, worker_id)
     claimed_keys = list(claimed_generations)
@@ -1633,15 +1558,10 @@ def _claim_and_resolve_batch_source(
     if src is None:
         for object_key in claimed_keys:
             _ledger_record_failure(
-                con_meta,
-                service_id,
-                object_key,
-                "no source registered for service",
-                claimed_generations[object_key],
+                con_meta, service_id, object_key, "no source registered for service", claimed_generations[object_key]
             )
         summary["failed"] = len(claimed_keys)
         return summary, con_meta, None, claimed_generations, []
-
     return summary, con_meta, src, claimed_generations, claimed_keys
 
 
@@ -1782,7 +1702,6 @@ def _run_batch_convert_common(
     try:
         fos = boto3_client_hot() if svcconfig.HOT_S3_ENDPOINT else _get_fos_client(src)
         duckdb_con = get_memory_connection(src)
-
         with tempfile.TemporaryDirectory() as tmpdir:
             files = _download_and_classify_batch_files(
                 fos,
@@ -1800,7 +1719,6 @@ def _run_batch_convert_common(
             if not files:
                 _record_ledger_batch_outcomes(service_id, batch_outcomes)
                 return summary
-
             process_batch_fn(
                 src=src,
                 fos=fos,
@@ -1827,7 +1745,6 @@ def convert_batch_objects(service_id: str, object_keys: list[str], worker_id: st
     def _process_request_batch(*, src, fos, duckdb_con, files, outcomes, enter_write_admission) -> None:
         table = ducklake_table_name(src)
         enter_write_admission()
-
         log_fields_config = (svcconfig.load_config(service_id) or {}).get("log_fields")
         columns_sql = get_ingest_columns_sql(log_fields_config)
         local_files = [lf for lf, _s3, _k in files]
@@ -1873,13 +1790,12 @@ def convert_batch_objects(service_id: str, object_keys: list[str], worker_id: st
             try:
                 existing_cols = {r[0] for r in duckdb_con.execute(f"DESCRIBE lake.{table}").fetchall()}
                 for p_col, p_type, *_ in duckdb_con.execute(f"DESCRIBE SELECT * FROM {read_expr} LIMIT 0").fetchall():
-                    if p_col == "filename" or p_col in existing_cols:
-                        continue
-                    safe_col = p_col.replace('"', '""')
-                    duckdb_con.execute(f'ALTER TABLE lake.{table} ADD COLUMN "{safe_col}" {p_type}')
+                    if p_col != "filename" and p_col not in existing_cols:
+                        duckdb_con.execute(
+                            f'ALTER TABLE lake.{table} ADD COLUMN "{p_col.replace(chr(34), chr(34) * 2)}" {p_type}'
+                        )
             except Exception as e:
                 logger.warning("[ledger] %s: batch schema sync failed (%d file(s)): %s", service_id, len(files), e)
-
             _ducklake_replace_source_rows(
                 duckdb_con, table, "SELECT s3 FROM temp.srcmap", select_sql, "convert_batch_objects"
             )
@@ -1950,9 +1866,7 @@ def _quarantine_convert_corrupt_lines(
     raw_prefix = f"{prefix_path}/raw/request/" if prefix_path else "raw/request/"
     if not object_key.startswith(raw_prefix):
         logger.warning(
-            "[ledger] %s: refusing request quarantine for key outside raw prefix: %s",
-            service_id,
-            object_key,
+            "[ledger] %s: refusing request quarantine for key outside raw prefix: %s", service_id, object_key
         )
         return {
             "valid_records": int(valid_count or 0),
@@ -1977,11 +1891,9 @@ def _quarantine_convert_corrupt_lines(
                 try:
                     parsed = json.loads(stripped)
                     if not isinstance(parsed, dict) or not parsed.get("timestamp"):
-                        category = "missing_timestamp"
-                        error_text = "record has no timestamp"
+                        category, error_text = "missing_timestamp", "record has no timestamp"
                 except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
-                    category = "invalid_json"
-                    error_text = str(exc)[:2000]
+                    category, error_text = "invalid_json", str(exc)[:2000]
                 if category is not None:
                     evidence_results.append(
                         capture_evidence(
@@ -2144,12 +2056,8 @@ def _sweep_ledger_common(
 
     st = (datetime.now(UTC) - timedelta(hours=lookback_hours)).isoformat()
     discover_fn = discover_rum_prefix if is_rum else discover_prefix
-    orig_task = "ledger_rum_sweep" if is_rum else "ledger_sweep"
     discovered = discover_fn(
-        service_id,
-        start_time=st,
-        run_id=run_id,
-        originating_task=orig_task,
+        service_id, start_time=st, run_id=run_id, originating_task="ledger_rum_sweep" if is_rum else "ledger_sweep"
     )
 
     dead_letter_count = 0
@@ -2206,7 +2114,6 @@ def _parse_rum_line(log_data: dict, service_id: str) -> tuple[list[dict], list[d
     log_service_id = log_data.get("service_id") or log_data.get("rum_service_id")
     if log_service_id and log_service_id != service_id:
         return None
-
     if (
         log_data.get("method") == "OPTIONS"
         or log_data.get("is_healthcheck")
@@ -2297,14 +2204,14 @@ def _parse_rum_line(log_data: dict, service_id: str) -> tuple[list[dict], list[d
 
     if extracted_metrics:
         for metric in extracted_metrics:
-            browser_val = metric.get("browser") or log_data.get("browser") or "Chrome"
-            os_val = metric.get("os") or log_data.get("os") or "macOS"
-            device_val = metric.get("device") or log_data.get("device") or "Desktop"
-            cid_val = metric.get("cid") or log_data.get("rum_cid") or log_data.get("cid") or ""
-            req_id_val = log_data.get("fastly_req_id") or ""
-            pathname_val = metric.get("pathname") or "/"
-            common = _common(pathname_val, browser_val, os_val, device_val, cid_val, req_id_val)
-
+            common = _common(
+                metric.get("pathname") or "/",
+                metric.get("browser") or log_data.get("browser") or "Chrome",
+                metric.get("os") or log_data.get("os") or "macOS",
+                metric.get("device") or log_data.get("device") or "Desktop",
+                metric.get("cid") or log_data.get("rum_cid") or log_data.get("cid") or "",
+                log_data.get("fastly_req_id") or "",
+            )
             _append_rum_row(
                 is_error=bool((metric.get("metric_name") == "exception") or metric.get("error_message")),
                 err_msg=metric.get("error_message"),
@@ -2337,10 +2244,9 @@ def _parse_rum_line(log_data: dict, service_id: str) -> tuple[list[dict], list[d
                 if log_once_per("_parse_rum_line: step failed (ignored)", 60):
                     logger.debug("_parse_rum_line: step failed (ignored)", exc_info=True)
 
-        if metric_value is not None:
+        if metric_value is not None and isinstance(metric_value, str):
             try:
-                if isinstance(metric_value, str):
-                    metric_value = float(metric_value) if "." in metric_value else int(metric_value)
+                metric_value = float(metric_value) if "." in metric_value else int(metric_value)
             except ValueError:
                 pass
 
@@ -2350,16 +2256,16 @@ def _parse_rum_line(log_data: dict, service_id: str) -> tuple[list[dict], list[d
             except Exception:
                 if log_once_per("_parse_rum_line: urlparse failed (ignored)", 60):
                     logger.debug("_parse_rum_line: urlparse failed (ignored)", exc_info=True)
-        if not pathname_val:
-            pathname_val = "/"
-        pathname_val = pathname_val.replace("//", "/")
+        pathname_val = (pathname_val or "/").replace("//", "/")
 
-        browser_val = log_data.get("browser") or "Chrome"
-        os_val = log_data.get("os") or "macOS"
-        device_val = log_data.get("device") or "Desktop"
-        req_id_val = log_data.get("fastly_req_id") or ""
-        common = _common(pathname_val, browser_val, os_val, device_val, cid_val, req_id_val)
-
+        common = _common(
+            pathname_val,
+            log_data.get("browser") or "Chrome",
+            log_data.get("os") or "macOS",
+            log_data.get("device") or "Desktop",
+            cid_val,
+            log_data.get("fastly_req_id") or "",
+        )
         _append_rum_row(
             is_error=bool(log_data.get("rum_error_message")),
             err_msg=log_data.get("rum_error_message"),
@@ -2475,11 +2381,7 @@ def _quarantine_rum_corrupt_lines(
             object_key,
             counts["quarantine_capture_failures"],
         )
-    return {
-        "valid_records": valid_count,
-        "malformed_records": len(corrupt_lines),
-        **counts,
-    }
+    return {"valid_records": valid_count, "malformed_records": len(corrupt_lines), **counts}
 
 
 def _write_rum_arrow_table_batch(
@@ -2495,8 +2397,9 @@ def _write_rum_arrow_table_batch(
         return
     import pyarrow as pa
 
-    arrow_tbl = pa.Table.from_pylist(rows, schema=schema)
-    arrow_tbl = arrow_tbl.append_column("_source_file", pa.array(sources, type=pa.string()))
+    arrow_tbl = pa.Table.from_pylist(rows, schema=schema).append_column(
+        "_source_file", pa.array(sources, type=pa.string())
+    )
     duckdb_con.register("_rum_stage", arrow_tbl)
     try:
         if not _ducklake_table_exists(duckdb_con, table_name):
@@ -2559,7 +2462,6 @@ def convert_batch_rum_objects(service_id: str, object_keys: list[str], worker_id
 
         source_files_sql = ", ".join(f"'{escape_sql_literal(s)}'" for s in source_files)
         enter_write_admission()
-
         _write_rum_arrow_table_batch(
             duckdb_con, vitals_table, all_vitals, vitals_sources, source_files_sql, CLIENT_VITALS_ARROW_SCHEMA
         )
@@ -2622,10 +2524,11 @@ def _mark_ledger_published(service_id: str, *, rum: bool = False) -> int:
     from backend.core.metadata.base import get_con
 
     con = get_con(service_id)
-    if rum:
-        prefix_clause = "(object_key LIKE ? OR object_key LIKE ? OR object_key LIKE ?)"
-    else:
-        prefix_clause = "(object_key NOT LIKE ? AND object_key NOT LIKE ? AND object_key NOT LIKE ?)"
+    prefix_clause = (
+        "(object_key LIKE ? OR object_key LIKE ? OR object_key LIKE ?)"
+        if rum
+        else "(object_key NOT LIKE ? AND object_key NOT LIKE ? AND object_key NOT LIKE ?)"
+    )
     cur = con.cursor()
     cur.execute(
         "UPDATE ingest_ledger SET published_at=? "
@@ -2647,14 +2550,17 @@ def finalize_committed_raw(service_id: str, batch_size: int = 10_000) -> dict:
 
     con = get_con(service_id)
     cutoff = time.time() - RAW_DELETE_GRACE_S
-    eligible_query = (
-        "SELECT object_key FROM ingest_ledger "
-        "WHERE service_id = ? AND status = 'committed' AND published_at IS NOT NULL "
-        "AND raw_deleted_at IS NULL AND committed_at < ? "
-        "AND (raw_delete_claim_token IS NULL OR raw_delete_claimed_at < ?) LIMIT ?"
-    )
     claim_expired = time.time() - RAW_DELETE_CLAIM_LEASE_S
-    eligible = [r[0] for r in con.execute(eligible_query, (service_id, cutoff, claim_expired, batch_size)).fetchall()]
+    eligible = [
+        r[0]
+        for r in con.execute(
+            "SELECT object_key FROM ingest_ledger "
+            "WHERE service_id = ? AND status = 'committed' AND published_at IS NOT NULL "
+            "AND raw_deleted_at IS NULL AND committed_at < ? "
+            "AND (raw_delete_claim_token IS NULL OR raw_delete_claimed_at < ?) LIMIT ?",
+            (service_id, cutoff, claim_expired, batch_size),
+        ).fetchall()
+    ]
     if not delete_after or not eligible:
         return {"deleted": 0, "eligible": len(eligible), "delete_after": bool(delete_after)}
 
@@ -2666,10 +2572,8 @@ def finalize_committed_raw(service_id: str, batch_size: int = 10_000) -> dict:
         cur.execute(
             "UPDATE ingest_ledger SET raw_delete_claim_token=?, raw_delete_claimed_at=? "
             f"WHERE service_id=? AND object_key IN ({placeholders}) AND status='committed' "
-            "AND published_at IS NOT NULL AND raw_deleted_at IS NULL "
-            "AND committed_at < ? "
-            "AND (raw_delete_claim_token IS NULL OR raw_delete_claimed_at < ?) "
-            "RETURNING object_key",
+            "AND published_at IS NOT NULL AND raw_deleted_at IS NULL AND committed_at < ? "
+            "AND (raw_delete_claim_token IS NULL OR raw_delete_claimed_at < ?) RETURNING object_key",
             (claim_token, claimed_at, service_id, *key_slice, cutoff, claim_expired),
         )
         claimed.extend(r[0] for r in cur.fetchall())
@@ -2688,10 +2592,7 @@ def finalize_committed_raw(service_id: str, batch_size: int = 10_000) -> dict:
     for chunk_tuple in itertools.batched(eligible, 1000):
         chunk = list(chunk_tuple)
         try:
-            resp = fos.delete_objects(
-                Bucket=bucket,
-                Delete={"Objects": [{"Key": k} for k in chunk], "Quiet": True},
-            )
+            resp = fos.delete_objects(Bucket=bucket, Delete={"Objects": [{"Key": k} for k in chunk], "Quiet": True})
         except Exception as e:
             logger.warning("[ledger] %s: raw-file batch delete failed: %s", service_id, e)
             for key in chunk:
@@ -2710,8 +2611,7 @@ def finalize_committed_raw(service_id: str, batch_size: int = 10_000) -> dict:
             )
         for s_slice, placeholders in _iter_key_slices(succeeded_list):
             cur.execute(
-                "UPDATE ingest_ledger SET raw_deleted_at=?, "
-                "raw_delete_claim_token=NULL, raw_delete_claimed_at=NULL "
+                "UPDATE ingest_ledger SET raw_deleted_at=?, raw_delete_claim_token=NULL, raw_delete_claimed_at=NULL "
                 f"WHERE service_id=? AND object_key IN ({placeholders}) AND raw_delete_claim_token=? AND raw_deleted_at IS NULL",
                 (now, service_id, *s_slice, claim_token),
             )

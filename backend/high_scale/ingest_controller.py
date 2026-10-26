@@ -1,19 +1,28 @@
-"""Fenced source-object controller, aggregate batch adapter, and service registry for high-scale."""
+"""Fenced source-object controller, aggregate batch adapter, worker, recovery, and service registry for high-scale."""
 
 from __future__ import annotations
 
 import inspect
 import logging
 import os
+import random
 import sys
 import tempfile
-from collections import Counter, defaultdict
+import time
+from argparse import ArgumentParser
+from collections import Counter, defaultdict, deque
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from threading import Event, Thread
 from typing import TYPE_CHECKING, Any, Protocol
+from uuid import uuid4
 
+import structlog
+
+from backend import config as app_config
+from backend.core.clickhouse_client import ClickHouseClient
 from backend.high_scale._common import (
     ArchiveManifestCatalog,
     parse_time_window,
@@ -21,26 +30,29 @@ from backend.high_scale._common import (
     visible_fact_clauses,
 )
 from backend.high_scale._common import bucket as _bucket
-from backend.high_scale.archive_models import (
+from backend.high_scale.archive import (
     ArchiveManifest,
+    ArchivePublication,
     ArchiveSourceObject,
     ArchiveState,
+    S3ObjectStore,
     ServingWatermark,
+    from_environment,
+    write_batch_archive_checkpoint,
 )
-from backend.high_scale.archive_publication import ArchivePublication
-from backend.high_scale.archive_writer import write_batch_archive_checkpoint
 from backend.high_scale.publication import (
     BaseClickHouseBatchAdapter,
+    ClickHouseBatchAdapter,
     ClickHousePublication,
     HighScaleBatch,
     InsertReceipt,
+    PostgresBatchManifestStore,
     PublicationResult,
     PublicationStatus,
     _batch_uuid,
     build_batch_id_from_manifest_id,
     row_matches_serving_domain,
 )
-from backend.high_scale.query_service import DecodeResult, QueryClient, decode_source_object
 from backend.models.performance import AssetsAggregatesResponse, AssetsRequest
 from backend.repositories.utils.response_cache import (
     ResponseMemo,
@@ -54,6 +66,8 @@ if TYPE_CHECKING:
     from backend.high_scale.source_discovery import SourceObjectDescriptor
 
 logger = logging.getLogger(__name__)
+_worker_logger = logging.getLogger("backend.high_scale.worker")
+_recovery_logger = structlog.get_logger(__name__)
 
 
 # ── Registry Bootstrap (folded from registry_bootstrap.py) ────────────────────
@@ -250,7 +264,6 @@ def _default_control_factory() -> ArchiveManifestCatalog:
 
 def _default_archive_factory(service_id: str) -> ArchivePublication | None:
     from backend.core.duckdb import _get_fos_client, get_source_for_service
-    from backend.high_scale.archive_publication import S3ObjectStore
 
     source = get_source_for_service(service_id)
     if source is None:
@@ -599,7 +612,8 @@ if _hs_pkg is not None:
 from backend.high_scale.cmcd import project_cmcd  # noqa: E402
 from backend.high_scale.network import build_network_projection_rows  # noqa: E402
 from backend.high_scale.origin import build_origin_projection_rows  # noqa: E402
-from backend.high_scale.performance_projection import build_performance_projection_rows  # noqa: E402
+from backend.high_scale.performance import build_performance_projection_rows  # noqa: E402
+from backend.high_scale.query_service import DecodeResult, QueryClient, decode_source_object  # noqa: E402
 from backend.high_scale.security import build_security_projection_rows  # noqa: E402
 
 # ── Ingest Controller ─────────────────────────────────────────────────────────
@@ -1469,23 +1483,950 @@ def assets_aggregates(
     return AssetsAggregatesResponse.with_telemetry(**payload)
 
 
+# ── Worker Loop (folded from backend.high_scale.worker) ──────────────────────
+
+from backend.high_scale.deletion import (  # noqa: E402
+    DeletionController,
+    HighScaleDeletionSweeper,
+    PostgresDeletionLedger,
+)
+from backend.high_scale.historical_jobs import (  # noqa: E402
+    ProjectionReplayResult,
+    _batch_from_rows,
+    _load_manifest_request_events,
+    replay_cmcd_projections,
+    replay_manifest,
+    replay_origin_projections,
+    replay_performance_projections,
+)
+from backend.high_scale.orchestration import (  # noqa: E402
+    HighScaleWorkerCoordinator,
+    PageRun,
+    S3SourceObjectLister,
+    S3SourceObjectReader,
+)
+from backend.high_scale.postgres_control import PostgresControlPlane  # noqa: E402
+
+
+@dataclass(frozen=True)
+class WorkerPageResult:
+    service_id: str
+    domain: str
+    page: PageRun | None
+    error: Exception | None = None
+
+
+class FairPageSelector:
+    """Chooses which (service, domain) pages run each tick with weighted fairness.
+
+    Without a capacity every page runs every tick, in the original service and
+    domain order, so behavior matches a plain nested loop. With a capacity,
+    undispatched pages stay queued and run on a later tick; each service's head
+    page is served first, so every service keeps minimum progress while heavier
+    ``weights`` let a dominant service borrow idle capacity.
+    """
+
+    def __init__(
+        self,
+        pairs: tuple[tuple[str, str], ...],
+        *,
+        capacity: int | None = None,
+        weights: Mapping[str, int] | None = None,
+    ) -> None:
+        services = {service_id for service_id, _ in pairs}
+        if capacity is not None and capacity < 0:
+            raise ValueError("pages per tick must be non-negative")
+        if capacity and capacity < len(services):
+            raise ValueError("pages per tick must be at least the number of services")
+        self._pairs = pairs
+        self._order = {pair: index for index, pair in enumerate(pairs)}
+        self._capacity = capacity or None
+        self._services = tuple(sorted(services))
+        self._weights: dict[str, int] = {}
+        for service_id in self._services:
+            w = (weights or {}).get(service_id, 1)
+            if w <= 0:
+                raise ValueError("service weight must be positive")
+            self._weights[service_id] = w
+        self._queues: dict[str, deque[str]] = {service_id: deque() for service_id in self._services}
+        self._deficits: dict[str, int] = {service_id: 0 for service_id in self._services}
+        self._queued: set[tuple[str, str]] = set()
+
+    def select(self) -> list[tuple[str, str]]:
+        for pair in self._pairs:
+            if pair not in self._queued:
+                self._queued.add(pair)
+                self._queues[pair[0]].append(pair[1])
+        capacity = self._capacity if self._capacity is not None else len(self._pairs)
+        selected: list[tuple[str, str]] = []
+        for service_id in self._services:
+            if len(selected) >= capacity:
+                break
+            queue = self._queues[service_id]
+            if queue:
+                selected.append((service_id, queue.popleft()))
+                self._deficits[service_id] += self._weights[service_id] - 1
+        while len(selected) < capacity and any(self._queues.values()):
+            progressed = False
+            for service_id in self._services:
+                queue = self._queues[service_id]
+                while queue and self._deficits[service_id] >= 1 and len(selected) < capacity:
+                    selected.append((service_id, queue.popleft()))
+                    self._deficits[service_id] -= 1
+                    progressed = True
+            if not progressed:
+                for service_id, queue in self._queues.items():
+                    if queue:
+                        self._deficits[service_id] += self._weights[service_id]
+        self._queued.difference_update(selected)
+        selected.sort(key=self._order.__getitem__)
+        if self._queued:
+            _worker_logger.info(
+                "high_scale.fair_dispatch",
+                extra={"dispatched": len(selected), "deferred": len(self._queued), "capacity": capacity},
+            )
+        return selected
+
+
+def _weights_from_env() -> dict[str, int]:
+    weights: dict[str, int] = {}
+    for entry in _csv_env("HIGH_SCALE_SERVICE_WEIGHTS"):
+        service_id, sep, raw = entry.partition("=")
+        if not sep or not service_id.strip() or not raw.strip().isdigit() or int(raw) <= 0:
+            raise ValueError("HIGH_SCALE_SERVICE_WEIGHTS entries must look like service=positive_integer")
+        weights[service_id.strip()] = int(raw)
+    return weights
+
+
+class HighScaleWorkerLoop:
+    """Runs bounded source pages without coupling high-scale work to APScheduler."""
+
+    def __init__(
+        self,
+        *,
+        coordinator: HighScaleWorkerCoordinator | None = None,
+        coordinators: tuple[tuple[str, HighScaleWorkerCoordinator], ...] | None = None,
+        service_ids: tuple[str, ...] = (),
+        domains: tuple[str, ...] = ("request", "rum", "cmcd"),
+        interval_seconds: float = 5.0,
+        stop_event: Event | None = None,
+        sleeper: Any = time.sleep,
+        deletion_sweeper: HighScaleDeletionSweeper | None = None,
+        deletion_sweepers: tuple[tuple[str, HighScaleDeletionSweeper | None], ...] | None = None,
+        deletion_sweep_limit: int = 100,
+        pages_per_tick: int | None = None,
+        service_weights: Mapping[str, int] | None = None,
+    ) -> None:
+        if coordinators is not None:
+            resolved_coordinators = coordinators
+            resolved_service_ids = tuple(service_id for service_id, _ in coordinators)
+        else:
+            if not service_ids:
+                raise ValueError("at least one high-scale service is required")
+            if coordinator is None:
+                raise ValueError("coordinator is required")
+            resolved_service_ids = service_ids
+            resolved_coordinators = tuple((service_id, coordinator) for service_id in service_ids)
+        if not resolved_service_ids:
+            raise ValueError("at least one high-scale service is required")
+        if not domains:
+            raise ValueError("at least one high-scale domain is required")
+        if interval_seconds < 0:
+            raise ValueError("worker interval must be non-negative")
+        self._coordinator = coordinator
+        self._coordinators = resolved_coordinators
+        self._service_ids = resolved_service_ids
+        self._domains = domains
+        self._interval_seconds = interval_seconds
+        self._stop_event = stop_event or Event()
+        self._sleeper = sleeper
+        self._deletion_sweeper = deletion_sweeper
+        self._deletion_sweepers = (
+            deletion_sweepers
+            if deletion_sweepers is not None
+            else tuple((service_id, deletion_sweeper) for service_id in resolved_service_ids)
+        )
+        self._deletion_sweep_limit = deletion_sweep_limit
+        self._deletion_thread: Thread | None = None
+        self._last_system_cleanup = 0.0
+        self._selector = FairPageSelector(
+            tuple((service_id, domain) for service_id in resolved_service_ids for domain in domains),
+            capacity=pages_per_tick,
+            weights=service_weights,
+        )
+
+    def run_once(self) -> tuple[WorkerPageResult, ...]:
+        results: list[WorkerPageResult] = []
+        coordinators = dict(self._coordinators)
+        for service_id, domain in self._selector.select():
+            try:
+                page = coordinators[service_id].run_page(service_id=service_id, domain=domain)
+            except Exception as exc:
+                _worker_logger.exception(
+                    "high-scale worker page failed",
+                    extra={"service_id": service_id, "domain": domain},
+                )
+                results.append(WorkerPageResult(service_id, domain, None, exc))
+            else:
+                results.append(WorkerPageResult(service_id, domain, page))
+        self._run_deletion_sweeps()
+        self._run_system_cleanups()
+        return tuple(results)
+
+    def _deletion_targets(self) -> tuple[tuple[str, HighScaleDeletionSweeper], ...]:
+        return tuple((service_id, sweeper) for service_id, sweeper in self._deletion_sweepers if sweeper is not None)
+
+    def _run_deletion_sweeps(self) -> None:
+        # Each deletion re-verifies the archive in FOS (~1s), so a full sweep
+        # takes minutes; running it inline stalled ingest pages and drove
+        # request lag into minutes. Sweep in the background, never overlapping.
+        targets = self._deletion_targets()
+        if not targets:
+            return
+        if self._deletion_thread is not None and self._deletion_thread.is_alive():
+            return
+        self._deletion_thread = Thread(
+            target=self._sweep_targets, args=(targets,), name="high-scale-deletion-sweep", daemon=True
+        )
+        self._deletion_thread.start()
+
+    def _sweep_targets(self, targets: tuple[tuple[str, HighScaleDeletionSweeper], ...]) -> None:
+        for service_id, sweeper in targets:
+            try:
+                sweeper.sweep(service_id=service_id, limit=self._deletion_sweep_limit)
+            except Exception:
+                _worker_logger.exception("high-scale deletion sweep failed", extra={"service_id": service_id})
+
+    def wait_for_deletion_sweep(self, timeout: float | None = None) -> None:
+        if self._deletion_thread is not None:
+            self._deletion_thread.join(timeout)
+
+    def _run_system_cleanups(self) -> None:
+        now = time.time()
+        if now - self._last_system_cleanup < 300:
+            return
+        self._last_system_cleanup = now
+        for service_id, _ in self._coordinators:
+            try:
+                from backend.utils.telemetry import run_usage_log_cleanup
+
+                run_usage_log_cleanup(service_id)
+            except Exception:
+                _worker_logger.debug("periodic usage log cleanup failed", extra={"service_id": service_id})
+
+        try:
+            from backend.core.clickhouse_client import get_clickhouse_client
+            from backend.core.clickhouse_schema import maintain_clickhouse_system_tables
+
+            client = get_clickhouse_client()
+            if client is not None:
+                maintain_clickhouse_system_tables(client)
+        except Exception:
+            _worker_logger.debug("periodic clickhouse system tables maintenance failed")
+
+    def _has_full_page(self, results: tuple[WorkerPageResult, ...]) -> bool:
+        if not self._coordinators:
+            return False
+        coord_map = dict(self._coordinators)
+        for r in results:
+            if r.page is not None:
+                c = coord_map.get(r.service_id)
+                page_size = getattr(c, "_page_size", None) if c else None
+                if page_size is not None and page_size > 0 and r.page.discovered >= page_size:
+                    return True
+        return False
+
+    def run(self, *, max_iterations: int | None = None) -> None:
+        if max_iterations is not None and max_iterations < 0:
+            raise ValueError("max_iterations must be non-negative")
+        iterations = 0
+        while not self._stop_event.is_set():
+            results = self.run_once()
+            iterations += 1
+            if max_iterations is not None and iterations >= max_iterations:
+                self.wait_for_deletion_sweep()
+                return
+            if self._interval_seconds > 0:
+                if not self._has_full_page(results):
+                    sleep_dur = random.uniform(0.5, 1.0) * self._interval_seconds
+                    self._sleeper(sleep_dur)
+
+    def stop(self) -> None:
+        self._stop_event.set()
+
+
+def build_worker_from_environment() -> HighScaleWorkerLoop:
+    """Build the durable FOS → archive → ClickHouse worker from process config."""
+
+    from backend.core.duckdb import _get_fos_client, get_source_for_service
+
+    high_scale_config = from_environment()
+    if not high_scale_config.enabled:
+        raise RuntimeError("high-scale worker requires HIGH_SCALE_ENABLED=1")
+    topology = high_scale_config.topology_profile()
+    _worker_logger.info(
+        "high_scale.topology_profile",
+        extra={
+            "profile": topology.name,
+            "clickhouse_replicas_per_shard": topology.clickhouse_replicas_per_shard,
+            "keeper_members": topology.keeper_members,
+            "production_ha": topology.production_ha,
+            "shard_count": topology.shard_count,
+        },
+    )
+    service_ids = _csv_env("HIGH_SCALE_SERVICE_IDS")
+    if not service_ids:
+        service_ids = tuple(
+            cfg["service_id"] for cfg in app_config.list_configs() if isinstance(cfg, dict) and cfg.get("service_id")
+        )
+    if not service_ids:
+        raise ValueError("HIGH_SCALE_SERVICE_IDS is required (none found in configs/)")
+    worker_id = (
+        os.getenv("HIGH_SCALE_WORKER_ID", "").strip()
+        or os.getenv("POD_NAME", "").strip()
+        or f"high-scale-{os.getpid()}"
+    )
+    page_size = int(os.getenv("HIGH_SCALE_PAGE_SIZE", "100"))
+    lease_seconds = float(os.getenv("HIGH_SCALE_LEASE_SECONDS", "300"))
+    object_concurrency = int(os.getenv("HIGH_SCALE_OBJECT_CONCURRENCY", "4"))
+    interval_seconds = float(os.getenv("HIGH_SCALE_WORKER_INTERVAL_SECONDS", "5"))
+    domains = tuple(_csv_env("HIGH_SCALE_DOMAINS") or ("request", "rum_vitals", "rum_errors"))
+
+    control = PostgresControlPlane()
+    control.create_schema()
+    for service_id in service_ids:
+        control.initialize_owner(
+            service_id,
+            owner="high_scale",
+            source_cursor=os.getenv("HIGH_SCALE_INITIAL_CURSOR", "__initial__"),
+        )
+
+    clickhouse_settings = app_config.load_clickhouse_config()
+    if clickhouse_settings is None:
+        raise RuntimeError("high-scale worker requires CLICKHOUSE_ENABLED=true")
+    clickhouse = ClickHouseClient(clickhouse_settings)
+    serving = ClickHousePublication(PostgresBatchManifestStore(control), ClickHouseBatchAdapter(clickhouse))
+    aggregates_enabled = os.getenv("HIGH_SCALE_AGGREGATES_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}
+    aggregates = (
+        ClickHousePublication(PostgresBatchManifestStore(control), AggregateBatchAdapter(clickhouse))
+        if aggregates_enabled
+        else None
+    )
+
+    deletion_enabled = os.getenv("HIGH_SCALE_DELETION_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}
+    deletion_sweep_limit = int(os.getenv("HIGH_SCALE_DELETION_SWEEP_LIMIT", "100"))
+
+    coordinators: list[HighScaleWorkerCoordinator] = []
+    sweepers: list[HighScaleDeletionSweeper | None] = []
+    for service_id in service_ids:
+        source = get_source_for_service(service_id)
+        if source is None:
+            raise ValueError(f"no configured FOS source for high-scale service {service_id}")
+        fos_client = _get_fos_client(source)
+        bucket = source.get("bucket")
+        if not isinstance(bucket, str) or not bucket:
+            raise ValueError(f"FOS bucket is missing for high-scale service {service_id}")
+        archive_prefix = os.getenv("HIGH_SCALE_ARCHIVE_PREFIX", "high-scale/archive")
+        archive = ArchivePublication(S3ObjectStore(fos_client, bucket=bucket, prefix=archive_prefix))
+        controller = HighScaleIngestController(
+            ownership=control,  # type: ignore[arg-type]
+            ledger=control,  # type: ignore[arg-type]
+            control_plane=control,
+            archive=archive,
+            serving=serving,
+            aggregates=aggregates,
+            worker_id=worker_id,
+            lease_seconds=lease_seconds,
+            deletion_grace_seconds=int(os.getenv("HIGH_SCALE_DELETION_GRACE_SECONDS", "900")),
+        )
+        coordinators.append(
+            HighScaleWorkerCoordinator(
+                lister=S3SourceObjectLister(
+                    fos_client,
+                    bucket=bucket,
+                    prefix=str(source.get("prefix") or ""),
+                ),
+                reader=S3SourceObjectReader(fos_client, bucket=bucket),
+                controller=controller,
+                ownership=control,
+                ledger=control,
+                worker_id=worker_id,
+                control_plane=control,
+                page_size=page_size,
+                lease_seconds=lease_seconds,
+                object_concurrency=object_concurrency,
+            )
+        )
+        if deletion_enabled:
+            # Deliberately a distinct, unprefixed store from the archive one
+            # above: raw source objects live at their natural keys, archive
+            # artifacts live under archive_prefix. Same bucket, same client.
+            raw_store = S3ObjectStore(fos_client, bucket=bucket)
+            deletion_ledger = PostgresDeletionLedger(control)
+            deletion_controller = DeletionController(
+                raw_store,
+                archive,
+                deletion_ledger,
+                ownership=deletion_ledger,
+            )
+            sweepers.append(HighScaleDeletionSweeper(control=control, controller=deletion_controller))
+        else:
+            sweepers.append(None)
+
+    return _MultiServiceWorkerLoop(
+        coordinators=tuple(zip(service_ids, coordinators, strict=True)),
+        deletion_sweepers=tuple(zip(service_ids, sweepers, strict=True)),
+        deletion_sweep_limit=deletion_sweep_limit,
+        domains=domains,
+        interval_seconds=interval_seconds,
+        pages_per_tick=int(os.getenv("HIGH_SCALE_PAGES_PER_TICK", "0") or "0") or None,
+        service_weights=_weights_from_env(),
+    )
+
+
+_MultiServiceWorkerLoop = HighScaleWorkerLoop
+
+
+def _csv_env(name: str) -> tuple[str, ...]:
+    return tuple(value.strip() for value in os.getenv(name, "").split(",") if value.strip())
+
+
+def main() -> None:
+    if os.environ.get("OTEL_EXPORTER") == "prometheus":
+        try:
+            from prometheus_client import start_http_server
+
+            logging.info("Starting Prometheus metrics server on port 8000")
+            start_http_server(8000)
+        except Exception as e:
+            logging.warning(f"Failed to start prometheus_client: {e}")
+
+    parser = ArgumentParser(description="Run the bounded high-scale source worker")
+    parser.add_argument("--once", action="store_true", help="process one bounded page per service and domain")
+    parser.add_argument("--iterations", type=int, default=None)
+    args = parser.parse_args()
+    worker_loop = build_worker_from_environment()
+    worker_loop.run(max_iterations=1 if args.once else args.iterations)
+
+
+# ── FOS-Authoritative Recovery (folded from backend.high_scale.recovery) ─────
+
+
+@dataclass(frozen=True)
+class RecoveryCapacityMeasurement:
+    events_per_second: int
+    recovery_window_seconds: int
+    archive_read_events_per_second: int
+    decode_events_per_second: int
+    aggregate_events_per_second: int
+    clickhouse_insert_events_per_second: int
+    replication_factor: int
+    live_ingest_reservation: float
+
+    def validate(self) -> None:
+        if self.events_per_second <= 0 or self.recovery_window_seconds <= 0:
+            raise ValueError("event rate and recovery window must be positive")
+        if (
+            min(
+                self.archive_read_events_per_second,
+                self.decode_events_per_second,
+                self.aggregate_events_per_second,
+                self.clickhouse_insert_events_per_second,
+            )
+            <= 0
+        ):
+            raise ValueError("all recovery throughput measurements must be positive")
+        if self.replication_factor < 1:
+            raise ValueError("replication factor must be positive")
+        if not 0 <= self.live_ingest_reservation < 1:
+            raise ValueError("live ingest reservation must be in [0, 1)")
+
+
+@dataclass(frozen=True)
+class RecoveryCapacityReport:
+    required_events_per_second: float
+    limiting_stage: str
+    limiting_events_per_second: int
+    replication_adjusted_insert_events_per_second: float
+    feasible: bool
+
+
+def evaluate_recovery_capacity(measurement: RecoveryCapacityMeasurement) -> RecoveryCapacityReport:
+    """Evaluate a measured recovery profile without claiming unmeasured capacity."""
+
+    measurement.validate()
+    required = (
+        measurement.events_per_second
+        * 86_400
+        / measurement.recovery_window_seconds
+        / (1 - measurement.live_ingest_reservation)
+    )
+    stages = {
+        "archive_read": measurement.archive_read_events_per_second,
+        "decode": measurement.decode_events_per_second,
+        "aggregate_rebuild": measurement.aggregate_events_per_second,
+        "clickhouse_insert": measurement.clickhouse_insert_events_per_second // measurement.replication_factor,
+    }
+    limiting_stage, limiting_rate = min(stages.items(), key=lambda item: item[1])
+    replication_adjusted = measurement.clickhouse_insert_events_per_second / measurement.replication_factor
+    feasible = limiting_rate >= required
+    return RecoveryCapacityReport(required, limiting_stage, limiting_rate, replication_adjusted, feasible)
+
+
+@dataclass(frozen=True)
+class RecoveryReport:
+    """Recovery availability is reported per capability, not as one flag.
+
+    A replacement instance can serve recent triage and raw queries while
+    warm history is still replaying — collapsing that into a single
+    "recovered" bit would hide real, actionable partial progress from an
+    operator watching the rebuild.
+    """
+
+    ingest_accepted: bool
+    triage_available: bool
+    raw_query_available: bool
+    warm_history_available: bool
+    full_rebuild_complete: bool
+    manifests_replayed: int
+    rows_replayed: int
+    errors: tuple[str, ...]
+    # Pass back into a resumed call (rebuild_id=report.rebuild_id) to retry
+    # this SAME attempt idempotently; omit to start a genuinely new one.
+    rebuild_id: str
+    # Capacity gate (docs/runbooks/high-scale-capacity-and-recovery.md,
+    # "Recovery qualification"): populated only when the caller supplies a
+    # measured profile. A recovery CLAIM is valid only when the slowest stage
+    # sustains the required replay rate AND the rebuild completed; None means
+    # no measurement was supplied, not "feasible".
+    capacity: RecoveryCapacityReport | None = None
+    recovery_claim_valid: bool | None = None
+
+
+def _evaluate_capacity_gate(
+    measurement: RecoveryCapacityMeasurement | None,
+    *,
+    service_id: str,
+    domain: str,
+    rebuild_id: str,
+) -> RecoveryCapacityReport | None:
+    """Evaluate the measured profile before any replay work starts.
+
+    An invalid measurement raises ``ValueError`` here (operator error, nothing
+    replayed yet). An infeasible one never blocks recovery: restoring data
+    matters more than the claim, so it is logged and carried on the report.
+    """
+
+    if measurement is None:
+        return None
+    report = evaluate_recovery_capacity(measurement)
+    log = _recovery_logger.info if report.feasible else _recovery_logger.warning
+    log(
+        "high_scale.recovery_capacity_gate",
+        service_id=service_id,
+        domain=domain,
+        rebuild_id=rebuild_id,
+        feasible=report.feasible,
+        limiting_stage=report.limiting_stage,
+        limiting_events_per_second=report.limiting_events_per_second,
+        required_events_per_second=report.required_events_per_second,
+    )
+    return report
+
+
+def rebuild_serving_state_from_fos(
+    catalog: ArchiveManifestCatalog,
+    archive: ArchivePublication,
+    publication: ClickHousePublication,
+    *,
+    service_id: str,
+    domain: str,
+    now: datetime | None = None,
+    recent_window: timedelta = timedelta(hours=24),
+    warm_window: timedelta = timedelta(days=30),
+    rebuild_id: str | None = None,
+    capacity: RecoveryCapacityMeasurement | None = None,
+) -> RecoveryReport:
+    if recent_window <= timedelta(0):
+        raise ValueError("recent_window must be positive")
+    if warm_window <= recent_window:
+        raise ValueError("warm_window must exceed recent_window")
+    observed = (now or datetime.now(UTC)).astimezone(UTC)
+    recent_start = observed - recent_window
+    warm_start = observed - warm_window
+    # Every batch id is scoped to a rebuild_id, never to replay's bare
+    # default. The manifest-visibility bookkeeping a replay relies on for
+    # idempotency lives in Postgres and can outlive an independent loss of
+    # the actual ClickHouse data (that is the whole scenario this function
+    # recovers from) — reusing replay's default batch id would let a stale
+    # "already visible" record from an EARLIER, unrelated replay attempt
+    # silently skip re-inserting rows that are no longer actually there
+    # (found in a live recovery drill; see test_recovery.py's
+    # test_recovery_reinserts_rows_whose_manifest_was_already_replayed_once).
+    #
+    # A caller resuming THIS SAME rebuild attempt (e.g. after a crash mid-
+    # rebuild) must pass the SAME rebuild_id back to stay idempotent and
+    # avoid duplicating already-inserted rows — omitting it always starts a
+    # fresh, un-deduplicated rebuild scope, appropriate only for a genuinely
+    # new recovery attempt.
+    resolved_rebuild_id = rebuild_id or uuid4().hex
+    capacity_report = _evaluate_capacity_gate(
+        capacity, service_id=service_id, domain=domain, rebuild_id=resolved_rebuild_id
+    )
+
+    recent_manifests = _sorted(catalog.manifests_covering(service_id, domain, recent_start, observed))
+    warm_manifests = _sorted(catalog.manifests_covering(service_id, domain, warm_start, recent_start))
+
+    recent_rows, recent_replayed, recent_errors = _replay_all(
+        recent_manifests, archive, publication, resolved_rebuild_id
+    )
+    warm_rows, warm_replayed, warm_errors = _replay_all(warm_manifests, archive, publication, resolved_rebuild_id)
+
+    triage_available = not recent_errors
+    warm_available = not warm_errors
+    return RecoveryReport(
+        ingest_accepted=True,
+        triage_available=triage_available,
+        raw_query_available=triage_available,
+        warm_history_available=warm_available,
+        full_rebuild_complete=triage_available and warm_available,
+        manifests_replayed=recent_replayed + warm_replayed,
+        rows_replayed=recent_rows + warm_rows,
+        errors=tuple(recent_errors) + tuple(warm_errors),
+        rebuild_id=resolved_rebuild_id,
+        capacity=capacity_report,
+        recovery_claim_valid=(
+            None if capacity_report is None else capacity_report.feasible and triage_available and warm_available
+        ),
+    )
+
+
+class _SqlClient(Protocol):
+    def execute(self, sql: str, params: dict | None = None) -> list[dict]: ...
+
+
+_ORIGIN_PROJECTION_TABLES = ("origin_minute_summary", "origin_minute_dimensions")
+
+
+def purge_origin_projections(client: _SqlClient, *, service_id: str, since: datetime) -> None:
+    """Delete one service's Origin projection rows from ``since`` onward, synchronously.
+
+    A rebuild publishes under new batch ids, so rebuilding over rows that already exist would
+    count every request twice. Purge first when the existing rows are being replaced (for
+    example after a projection column was added); the archive remains the source for the rebuild.
+    """
+    for table in _ORIGIN_PROJECTION_TABLES:
+        client.execute(
+            f"ALTER TABLE `{table}` DELETE WHERE service_id={{service_id:String}} "
+            "AND bucket_start >= {since:DateTime64(3)} SETTINGS mutations_sync=2",
+            {"service_id": service_id, "since": since},
+        )
+
+
+_RUM_FACT_TABLES = {"rum_vitals": "rum_vitals_facts", "rum_errors": "rum_error_facts"}
+
+
+def purge_rum_facts(client: _SqlClient, *, domain: str, service_id: str, since: datetime) -> None:
+    """Delete one service's RUM fact rows of ``domain`` from ``since`` onward, synchronously.
+
+    Used to replace rows written before a fact column existed: a rebuild publishes under new batch
+    ids, so rebuilding over the old rows would count every beacon twice. The archive is the source.
+    """
+    table = _RUM_FACT_TABLES.get(domain)
+    if table is None:
+        raise ValueError("domain must be rum_vitals or rum_errors")
+    client.execute(
+        f"ALTER TABLE `{table}` DELETE WHERE service_id={{service_id:String}} "
+        "AND event_timestamp >= {since:DateTime64(3)} SETTINGS mutations_sync=2",
+        {"service_id": service_id, "since": since},
+    )
+
+
+def rebuild_rum_facts_from_fos(
+    catalog: ArchiveManifestCatalog,
+    archive: ArchivePublication,
+    publication: ClickHousePublication,
+    *,
+    service_id: str,
+    domain: str,
+    now: datetime | None = None,
+    window: timedelta = timedelta(days=30),
+    rebuild_id: str | None = None,
+    capacity: RecoveryCapacityMeasurement | None = None,
+) -> RecoveryReport:
+    """Replay one RUM domain over ``window`` (newest day first) through the fact writer."""
+    if domain not in _RUM_FACT_TABLES:
+        raise ValueError("domain must be rum_vitals or rum_errors")
+    return rebuild_serving_state_from_fos(
+        catalog,
+        archive,
+        publication,
+        service_id=service_id,
+        domain=domain,
+        now=now,
+        recent_window=min(timedelta(hours=24), window / 2),
+        warm_window=window,
+        rebuild_id=rebuild_id,
+        capacity=capacity,
+    )
+
+
+def purge_cmcd_projections(client: _SqlClient, *, service_id: str, since: datetime) -> None:
+    """Delete one service's CMCD projection rows from ``since`` onward, synchronously.
+
+    Same contract as :func:`purge_origin_projections`: a rebuild publishes under new batch ids, so
+    replacing existing rows (for example to populate the geography columns) must purge them first.
+    """
+    client.execute(
+        "ALTER TABLE `cmcd_projection_facts` DELETE WHERE service_id={service_id:String} "
+        "AND event_timestamp >= {since:DateTime64(3)} SETTINGS mutations_sync=2",
+        {"service_id": service_id, "since": since},
+    )
+
+
+def _rebuild_request_projections_from_fos(
+    catalog: ArchiveManifestCatalog,
+    archive: ArchivePublication,
+    publication: ClickHousePublication,
+    *,
+    service_id: str,
+    projection_label: str,
+    replay_fn: Callable[..., ProjectionReplayResult],
+    now: datetime | None = None,
+    window: timedelta = timedelta(days=30),
+    rebuild_id: str | None = None,
+    capacity: RecoveryCapacityMeasurement | None = None,
+) -> RecoveryReport:
+    if window <= timedelta(0):
+        raise ValueError("window must be positive")
+    observed = (now or datetime.now(UTC)).astimezone(UTC)
+    resolved_rebuild_id = rebuild_id or uuid4().hex
+    capacity_report = _evaluate_capacity_gate(
+        capacity, service_id=service_id, domain="request", rebuild_id=resolved_rebuild_id
+    )
+    manifests = _sorted(catalog.manifests_covering(service_id, "request", observed - window, observed))
+    rows = 0
+    replayed = 0
+    errors: list[str] = []
+    for manifest in manifests:
+        try:
+            result = replay_fn(manifest, archive, publication, rebuild_id=resolved_rebuild_id)
+        except Exception as exc:
+            errors.append(f"manifest {manifest.manifest_id} failed to rebuild {projection_label} projections: {exc}")
+            continue
+        rows += result.rows_published
+        replayed += 1
+    available = not errors
+    return RecoveryReport(
+        ingest_accepted=True,
+        triage_available=available,
+        raw_query_available=True,
+        warm_history_available=available,
+        full_rebuild_complete=available,
+        manifests_replayed=replayed,
+        rows_replayed=rows,
+        errors=tuple(errors),
+        rebuild_id=resolved_rebuild_id,
+        capacity=capacity_report,
+        recovery_claim_valid=None if capacity_report is None else capacity_report.feasible and available,
+    )
+
+
+def rebuild_cmcd_projections_from_fos(
+    catalog: ArchiveManifestCatalog,
+    archive: ArchivePublication,
+    publication: ClickHousePublication,
+    *,
+    service_id: str,
+    now: datetime | None = None,
+    window: timedelta = timedelta(days=30),
+    rebuild_id: str | None = None,
+    capacity: RecoveryCapacityMeasurement | None = None,
+) -> RecoveryReport:
+    return _rebuild_request_projections_from_fos(
+        catalog,
+        archive,
+        publication,
+        service_id=service_id,
+        projection_label="CMCD",
+        replay_fn=replay_cmcd_projections,
+        now=now,
+        window=window,
+        rebuild_id=rebuild_id,
+        capacity=capacity,
+    )
+
+
+def rebuild_origin_projections_from_fos(
+    catalog: ArchiveManifestCatalog,
+    archive: ArchivePublication,
+    publication: ClickHousePublication,
+    *,
+    service_id: str,
+    now: datetime | None = None,
+    window: timedelta = timedelta(days=30),
+    rebuild_id: str | None = None,
+    capacity: RecoveryCapacityMeasurement | None = None,
+) -> RecoveryReport:
+    return _rebuild_request_projections_from_fos(
+        catalog,
+        archive,
+        publication,
+        service_id=service_id,
+        projection_label="Origin",
+        replay_fn=replay_origin_projections,
+        now=now,
+        window=window,
+        rebuild_id=rebuild_id,
+        capacity=capacity,
+    )
+
+
+def rebuild_performance_projections_from_fos(
+    catalog: ArchiveManifestCatalog,
+    archive: ArchivePublication,
+    publication: ClickHousePublication,
+    *,
+    service_id: str,
+    now: datetime | None = None,
+    window: timedelta = timedelta(days=30),
+    rebuild_id: str | None = None,
+    capacity: RecoveryCapacityMeasurement | None = None,
+) -> RecoveryReport:
+    """Populate the Performance waterfall/scatter projections for already-ingested history.
+
+    Pass ``now`` as the moment the projection-writing worker was deployed: manifests
+    ingested after that already published these projections live, and replaying them
+    here would double-count the waterfall sums.
+    """
+    return _rebuild_request_projections_from_fos(
+        catalog,
+        archive,
+        publication,
+        service_id=service_id,
+        projection_label="Performance",
+        replay_fn=replay_performance_projections,
+        now=now,
+        window=window,
+        rebuild_id=rebuild_id,
+        capacity=capacity,
+    )
+
+
+def replay_security_projections(
+    manifest: ArchiveManifest,
+    archive: ArchivePublication,
+    publication: ClickHousePublication,
+    *,
+    rebuild_id: str,
+) -> ProjectionReplayResult:
+    serving_rows = _load_manifest_request_events(manifest, archive, projection_label="Security")
+    _enrich_high_scale_ngwaf_bots(serving_rows)
+    projection = build_security_projection_rows(serving_rows)
+    published = 0
+    if projection.dimension_rows:
+        result = publication.publish(
+            _batch_from_rows(
+                f"rebuild-security:{rebuild_id}:{manifest.manifest_id}:dimensions",
+                manifest,
+                projection.dimension_rows,
+                domain="security_dimensions",
+            )
+        )
+        published = result.rows_visible
+    return ProjectionReplayResult(manifest.manifest_id, len(serving_rows), published)
+
+
+def rebuild_security_projections_from_fos(
+    catalog: ArchiveManifestCatalog,
+    archive: ArchivePublication,
+    publication: ClickHousePublication,
+    *,
+    service_id: str,
+    now: datetime | None = None,
+    window: timedelta = timedelta(days=30),
+    rebuild_id: str | None = None,
+    capacity: RecoveryCapacityMeasurement | None = None,
+) -> RecoveryReport:
+    """Populate ``security_dimensions`` from FOS archive manifests over ``window``."""
+    return _rebuild_request_projections_from_fos(
+        catalog,
+        archive,
+        publication,
+        service_id=service_id,
+        projection_label="Security",
+        replay_fn=replay_security_projections,
+        now=now,
+        window=window,
+        rebuild_id=rebuild_id,
+        capacity=capacity,
+    )
+
+
+def _sorted(manifests: tuple[ArchiveManifest, ...]) -> tuple[ArchiveManifest, ...]:
+    return tuple(sorted(manifests, key=lambda manifest: manifest.coverage_start))
+
+
+def _replay_all(
+    manifests: tuple[ArchiveManifest, ...],
+    archive: ArchivePublication,
+    publication: ClickHousePublication,
+    rebuild_id: str,
+) -> tuple[int, int, list[str]]:
+    rows = 0
+    replayed = 0
+    errors: list[str] = []
+    for manifest in manifests:
+        try:
+            result = replay_manifest(
+                manifest, archive, publication, batch_id=f"rebuild:{rebuild_id}:{manifest.manifest_id}"
+            )
+        except Exception as exc:
+            errors.append(f"manifest {manifest.manifest_id} failed to replay: {exc}")
+            continue
+        rows += result.rows_read
+        replayed += 1
+    return rows, replayed, errors
+
+
 _self_mod = sys.modules[__name__]
+worker = _self_mod
+recovery = _self_mod
 sys.modules["backend.high_scale.assets"] = _self_mod
+sys.modules["backend.high_scale.worker"] = _self_mod
+sys.modules["backend.high_scale.recovery"] = _self_mod
 _hs_pkg = sys.modules.get("backend.high_scale")
 if _hs_pkg is not None:
     setattr(_hs_pkg, "assets", _self_mod)
+    setattr(_hs_pkg, "worker", _self_mod)
+    setattr(_hs_pkg, "recovery", _self_mod)
 _backend_pkg = sys.modules.get("backend")
 if _backend_pkg is not None and hasattr(_backend_pkg, "_MODULE_ALIASES"):
     _backend_pkg._MODULE_ALIASES.update(
         {
             "backend.high_scale.assets": "backend.high_scale.ingest_controller",
+            "backend.high_scale.worker": "backend.high_scale.ingest_controller",
+            "backend.high_scale.recovery": "backend.high_scale.ingest_controller",
             "backend.high_scale.console_access": "backend.high_scale.postgres_control",
             "backend.high_scale.deletion": "backend.high_scale.postgres_control",
             "backend.high_scale.admin_plane": "backend.high_scale.postgres_control",
             "backend.high_scale.decoder": "backend.high_scale.query_service",
             "backend.high_scale.query": "backend.high_scale.query_service",
             "backend.high_scale.clickhouse": "backend.high_scale.query_service",
+            "backend.high_scale.insights": "backend.high_scale.query_service",
+            "backend.high_scale.sessions": "backend.high_scale.query_service",
+            "backend.high_scale.aggregate_query": "backend.high_scale.query_service",
+            "backend.high_scale.archive_publication": "backend.high_scale.archive",
+            "backend.high_scale.archive_models": "backend.high_scale.archive",
+            "backend.high_scale.archive_writer": "backend.high_scale.archive",
+            "backend.high_scale.models": "backend.high_scale.archive",
+            "backend.high_scale.disk_sampler": "backend.high_scale.archive",
+            "backend.high_scale.retention_watermark": "backend.high_scale.archive",
             "backend.high_scale.rum_recovery": "backend.high_scale.rum",
             "backend.high_scale.rum_ingest": "backend.high_scale.rum",
         }
     )
+
+
+if __name__ == "__main__":
+    main()

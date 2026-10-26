@@ -199,9 +199,18 @@ export function LabelsTab({ serviceId }: { serviceId: string }) {
       ),
     },
     { id: 'label', header: 'Label', accessorFn: (r) => r.label, size: 90, enableSorting: false, cell: ({ row }) => labelBadge(row.original.label) },
-    { id: 'notes', header: 'Notes', accessorFn: (r) => r.notes ?? '', size: 260, enableSorting: false, cell: ({ row }) => <span className="text-xs" title={row.original.notes ?? undefined}>{row.original.notes || '—'}</span> },
-    { id: 'sample_url', header: 'Sample URL', accessorFn: (r) => r.sample_url ?? '', size: 260, enableSorting: false, cell: ({ row }) => <span className="text-xs" title={row.original.sample_url ?? undefined}>{row.original.sample_url || '—'}</span> },
-    { id: 'sample_ip', header: 'IP', accessorFn: (r) => r.sample_ip ?? '', size: 140, enableSorting: false, cell: ({ row }) => <span className="text-xs font-mono">{row.original.sample_ip || '—'}</span> },
+    ...([
+      { id: 'notes' as const, header: 'Notes', size: 260, mono: false, title: true },
+      { id: 'sample_url' as const, header: 'Sample URL', size: 260, mono: false, title: true },
+      { id: 'sample_ip' as const, header: 'IP', size: 140, mono: true, title: false },
+    ].map(({ id, header, size, mono, title }): ColumnDef<LabelRow> => ({
+      id, header, accessorFn: (r) => r[id] ?? '', size, enableSorting: false,
+      cell: ({ row }) => (
+        <span className={mono ? 'text-xs font-mono' : 'text-xs'} title={title ? (row.original[id] ?? undefined) : undefined}>
+          {row.original[id] || '—'}
+        </span>
+      ),
+    }))),
     { id: 'updated_at', header: 'Updated', accessorFn: (r) => r.updated_at ?? '', size: 170, enableSorting: false, cell: ({ row }) => <span className="text-xs whitespace-nowrap"><DateTimeCell iso={row.original.updated_at} /></span> },
     { id: 'actions', header: 'Actions', size: 100, enableSorting: false, cell: ({ row }) => <LabelActions row={row.original} onSave={saveEdit} onDelete={requestDelete} /> },
   ], [serviceId, saveEdit, requestDelete])
@@ -276,13 +285,10 @@ function RetrainDialogBody({ serviceId, onClose }: { serviceId: string; onClose:
   const [result, setResult] = React.useState<RetrainResult | null>(null)
 
   const mutation = useMutation({
-    mutationFn: async (): Promise<RetrainResult> => {
-      const { data, error: errBody, response } = await client.POST('/api/services/{service_id}/scoring/retrain', {
+    mutationFn: (): Promise<RetrainResult> =>
+      unwrapClient(client.POST('/api/services/{service_id}/scoring/retrain', {
         params: { path: { service_id: serviceId }, query: { since_days: sinceDays } },
-      })
-      if (!response.ok || !data) throw new Error(errBody ? extractApiError(errBody) : `status ${response.status}`)
-      return data
-    },
+      })),
     onSuccess: (data) => {
       setResult(data)
       invalidateServiceScoringQueries(queryClient, serviceId)
@@ -402,13 +408,10 @@ export function RotateKeyButton({ serviceId }: { serviceId: string }) {
   const { value: status, flash: flashStatus, set: setStatus, clear: clearStatus } = useAutoFlash<{ kind: 'success' | 'error'; message: string }>(4000)
 
   const mutation = useMutation({
-    mutationFn: async (): Promise<RotateKeyResponse> => {
-      const { data, error: errBody, response } = await client.POST('/api/services/{service_id}/scoring/rotate-key', {
+    mutationFn: (): Promise<RotateKeyResponse> =>
+      unwrapClient(client.POST('/api/services/{service_id}/scoring/rotate-key', {
         params: { path: { service_id: serviceId } },
-      })
-      if (!response.ok || !data) throw new Error(errBody ? extractApiError(errBody) : `status ${response.status}`)
-      return data
-    },
+      })),
     onSuccess: () => {
       flashStatus({ kind: 'success', message: 'Key rotated; previous slot updated' })
       setOpen(false)
@@ -695,12 +698,10 @@ export function ExcludeRegexCard({ serviceId }: { serviceId: string }) {
     mutationFn: async (regex: string) => {
       const parsed = excludeRegexFormSchema.safeParse({ regex })
       const validRegex = parsed.success ? parsed.data.regex : regex
-      const { data: resp, error: errBody, response } = await client.PUT('/api/services/{service_id}/scoring/exclude-regex', {
+      return unwrapClient(client.PUT('/api/services/{service_id}/scoring/exclude-regex', {
         params: { path: { service_id: serviceId }, query: { confirm: true } },
         body: { regex: validRegex },
-      })
-      if (!response.ok || !resp) throw new Error(errBody ? extractApiError(errBody) : `HTTP ${response.status}`)
-      return resp
+      }))
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['scoring-exclude-regex', serviceId] })
@@ -893,13 +894,10 @@ export function MatrixVersionsCard({ serviceId }: { serviceId: string }) {
   )
 
   const restore = useMutation({
-    mutationFn: async (version: string): Promise<RestoreResponse> => {
-      const { data, error: errBody, response } = await client.POST('/api/services/{service_id}/scoring/matrix-versions/{version}/restore', {
+    mutationFn: (version: string): Promise<RestoreResponse> =>
+      unwrapClient(client.POST('/api/services/{service_id}/scoring/matrix-versions/{version}/restore', {
         params: { path: { service_id: serviceId, version }, query: { confirm: true } },
-      })
-      if (!response.ok || !data) throw new Error(errBody ? extractApiError(errBody) : `status ${response.status}`)
-      return data
-    },
+      })),
     onSuccess: (res) => {
       setRestoreResult(res)
       setPendingVersion(null)

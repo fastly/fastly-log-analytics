@@ -708,7 +708,7 @@ def record_publication(outcome: str) -> None:
 
 def __getattr__(name: str):
     if name == "PgManifest":
-        from backend.core.clickhouse_manifest import PgManifest
+        from backend.core.clickhouse import PgManifest
 
         return PgManifest
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
@@ -756,7 +756,7 @@ class ClickHouseObserver:
                 except Exception as exc:
                     self._log_error("storage", exc)
                 try:
-                    from backend.core.clickhouse_manifest import PgManifest as _PgManifest
+                    from backend.core.clickhouse import PgManifest as _PgManifest
 
                     manifest_cls = globals().get("PgManifest", _PgManifest)
                     values["lag"] = manifest_cls().publication_lag_seconds()

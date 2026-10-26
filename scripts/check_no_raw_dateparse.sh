@@ -22,11 +22,11 @@ PATTERN='strptime\(|fromisoformat\(|replace\(tzinfo=(UTC|timezone\.utc)'
 BASELINE='
 backend/core/_duckdb_status.py 1
 backend/core/clickhouse_rows.py 1
-backend/core/iceberg/manifest.py 2
+backend/core/iceberg/_core.py 2
 backend/core/ingest.py 3
 backend/core/metadata/usage_log.py 2
 backend/core/rollups/rum.py 1
-backend/core/rollups/wellknown_bots.py 1
+backend/core/rollups/security_dims.py 1
 backend/repositories/alerts.py 1
 backend/repositories/insights/repository.py 1
 '

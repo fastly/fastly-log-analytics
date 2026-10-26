@@ -24,10 +24,14 @@ import {
   STEP_OPTIONS,
   formatMetricValue,
   MapTooltip,
+  MapLayer,
+  getScoreColor,
+  useMapInit,
+  useMapData,
   type CityTooltipData,
   type TooltipInfo,
+  type NetworkMapData,
 } from '@/components/Map/NetworkMap'
-import type { NetworkMapData } from '@/components/Map/NetworkMap/MapLayer'
 
 vi.mock('next-themes', () => ({
   useTheme: () => ({ theme: 'light' }),
@@ -73,18 +77,10 @@ vi.mock('@/components/ui/slider', () => {
 
 const mapDataCalls: Array<{ setTooltip: (t: TooltipInfo | null) => void }> = []
 
-vi.mock('@/components/Map/NetworkMap/MapLayer', () => ({
-  formatBucket: (iso: string) => (iso ? `LBL(${iso})` : ''),
-  useMapInit: () => {},
-  useMapData: ({ setTooltip }: { setTooltip: (t: TooltipInfo | null) => void }) => {
-    mapDataCalls.push({ setTooltip })
-  },
-}))
-
-const actualMapLayer = await vi.importActual<typeof import('@/components/Map/NetworkMap/MapLayer')>(
-  '@/components/Map/NetworkMap/MapLayer',
-)
-const { getScoreColor, useMapInit, useMapData } = actualMapLayer
+MapLayer.useMapInit = (() => ({ current: null })) as typeof useMapInit
+MapLayer.useMapData = (({ setTooltip }: { setTooltip: (t: TooltipInfo | null) => void }) => {
+  mapDataCalls.push({ setTooltip })
+}) as typeof useMapData
 
 function baseProps(overrides: Partial<React.ComponentProps<typeof NetworkMap>> = {}) {
   return {

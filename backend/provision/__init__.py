@@ -1,18 +1,34 @@
 import sys
 
-from backend.core.fastly.client import fastly, parse_period
+import backend as _backend_pkg
 
-from . import cli as _cli_mod
-from . import fastly_api as _fastly_api_mod
-from . import orchestrator as _orchestrator_mod
-from .fastly_api import (
+if hasattr(_backend_pkg, "_MODULE_ALIASES"):
+    _backend_pkg._MODULE_ALIASES.update(
+        {
+            "backend.provision.utils": "backend.provision.cli",
+            "backend.provision.log_paths": "backend.provision.cli",
+            "backend.provision.draft_version": "backend.provision.cli",
+            "backend.provision.cmcd_fields": "backend.provision.orchestrator",
+            "backend.provision.declarative.iac_reconciler": "backend.provision.declarative.reconciler",
+            "backend.provision.session_scoring_vcl": "backend.provision.session_scoring_orchestrator",
+            "backend.provision.declarative.state": "backend.provision.declarative.reconciler",
+            "backend.provision.declarative.config_migration": "backend.provision.declarative.reconciler",
+        }
+    )
+
+from backend.core.fastly.client import fastly, parse_period  # noqa: E402
+
+from . import cli as _cli_mod  # noqa: E402
+from . import fastly_api as _fastly_api_mod  # noqa: E402
+from . import orchestrator as _orchestrator_mod  # noqa: E402
+from .fastly_api import (  # noqa: E402
     generate_capture_vcl,
     load_log_format,
     update_logging_endpoint,
     validate_log_format,
 )
-from .fos_setup import ensure_fos_access_key, find_fos_key
-from .orchestrator import (
+from .fos_setup import ensure_fos_access_key, find_fos_key  # noqa: E402
+from .orchestrator import (  # noqa: E402
     _sync_crontab,
     analyst_path_a_supported,
     generate_analyst_invite,
@@ -32,19 +48,6 @@ sys.modules[f"{__name__}.log_paths"] = _cli_mod
 sys.modules[f"{__name__}.draft_version"] = _cli_mod
 sys.modules[f"{__name__}.cmcd_fields"] = _orchestrator_mod
 sys.modules[f"{__name__}.sharing_domain"] = _fastly_api_mod
-
-import backend as _backend_pkg  # noqa: E402
-
-if hasattr(_backend_pkg, "_MODULE_ALIASES"):
-    _backend_pkg._MODULE_ALIASES.update(
-        {
-            "backend.provision.utils": "backend.provision.cli",
-            "backend.provision.log_paths": "backend.provision.cli",
-            "backend.provision.draft_version": "backend.provision.cli",
-            "backend.provision.cmcd_fields": "backend.provision.orchestrator",
-            "backend.provision.declarative.iac_reconciler": "backend.provision.declarative.reconciler",
-        }
-    )
 
 # Public API of the package — declared explicitly so ruff doesn't flag the
 # re-exports above as "unused imports". Any name that callers import as

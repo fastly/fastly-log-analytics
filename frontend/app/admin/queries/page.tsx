@@ -3,34 +3,41 @@
 /**
  * Live Query Monitor — real-time view of every executing SQLite/DuckDB
  * statement, with attribution, caller frame, pool slot, and a kind-aware
- * kill button. Admin-only (the route lives under /api/admin/* so
- * RemoteAccessMiddleware structurally blocks analyst sessions).
+ * kill button, plus shared TanStack ColumnDef builders for ActiveTable and CompletedTable.
  */
 
 import * as React from 'react'
-import { formatCount } from '@/lib/format'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { adminJson, adminJsonResult, extractApiError } from '@/lib/api'
-import { AlertTriangle, Check, Copy, Group, Keyboard, Pause, Play, RefreshCw, Search, X } from 'lucide-react'
-
-import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
+import type { ColumnDef, Row } from '@tanstack/react-table'
+import {
+  AlertTriangle,
+  Check,
+  ChevronDown,
+  ChevronRight,
+  Copy,
+  Group,
+  Keyboard,
+  Pause,
+  Play,
+  RefreshCw,
+  Search,
+  X,
+} from 'lucide-react'
+import { DataTableReadonly as DataTable } from '@/components/DataTable'
 import { BackToAdminLink } from '@/components/ReportLayout'
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { ConfirmDialog, CopyButton, HelpDialog, PageHeader } from '@/components/ui/confirm-dialog'
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog'
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
-
+import { useCopyToClipboard } from '@/hooks/useSSE'
+import { adminJson, adminJsonResult, extractApiError } from '@/lib/api'
+import { formatCount } from '@/lib/format'
+import { queryKeys } from '@/lib/query-keys'
 import {
   durationColor,
   formatDurationMs,
@@ -47,6 +54,7 @@ import {
   type CancelResponse,
   type CompletedRow,
   type DbFilter,
+  type GroupedCompletedRow,
   type MonitorConfig,
   type ShortcutBinding,
   type SlowQueriesResult,
@@ -54,11 +62,309 @@ import {
   type SummaryResponse,
   type ViewMode,
 } from './_hooks/useFilteredActive'
-import { ActiveTable, CompletedTable } from './_sections/queryColumns'
-import { useCopyToClipboard } from '@/hooks/useSSE'
-import { queryKeys } from '@/lib/query-keys'
 
 type AnyRow = ActiveOrPromotedRow | CompletedRow
+type AttributedRow = Pick<ActiveRow, 'attribution'> &
+  Pick<ActiveOrPromotedRow, '_groupedCount' | '_isGroupHead' | '_expandedChild'> &
+  Pick<ActiveRow, 'db_type' | 'service_id'>
+
+const STUCK_LIVE_MS = 30_000
+const outcomeVariant = (o: string): 'outline' | 'secondary' | 'destructive' =>
+  o === 'ok' ? 'outline' : o === 'cancelled' ? 'secondary' : 'destructive'
+
+function buildSourceCell(onToggleGroup: (runId: string) => void) {
+  return function SourceCell<T extends AttributedRow>({ row }: { row: Row<T> }) {
+    const attr = row.original.attribution
+    const groupCount: number | undefined = row.original._groupedCount
+    const isGroupHead = !!row.original._isGroupHead
+    const isExpandedChild = !!row.original._expandedChild
+    return (
+      <div className={`flex items-center gap-2 min-w-0 ${isExpandedChild ? 'pl-5' : ''}`}>
+        <Badge variant={kindBadgeVariant(attr.kind)} className="capitalize shrink-0">
+          {attr.kind}
+        </Badge>
+        <span className="truncate text-xs" title={attr.label}>
+          {attr.label}
+        </span>
+        {groupCount && groupCount > 1 ? (
+          <button
+            type="button"
+            className="shrink-0 inline-flex items-center gap-0.5 rounded-md border border-input bg-secondary px-1.5 py-0.5 font-mono text-[10px] hover:bg-secondary/80"
+            title={isGroupHead ? `Collapse this cron run (${groupCount} queries)` : `Expand this cron run (${groupCount} queries)`}
+            onClick={(e) => {
+              e.stopPropagation()
+              const runId = row.original.attribution.cron_run_id
+              if (runId) onToggleGroup(runId)
+            }}
+          >
+            {isGroupHead ? <ChevronDown className="h-2.5 w-2.5" /> : <ChevronRight className="h-2.5 w-2.5" />}
+            ×{groupCount}
+          </button>
+        ) : null}
+      </div>
+    )
+  }
+}
+
+function callerCell<T extends AttributedRow>({ row }: { row: Row<T> }) {
+  const attr = row.original.attribution
+  return (
+    <div className="font-mono text-xs text-muted-foreground" title={`${attr.caller_qualname}\n${attr.caller_file}`}>
+      <div className="truncate">{attr.caller_qualname}</div>
+      <div className="truncate text-[10px] opacity-60">{attr.caller_file}</div>
+    </div>
+  )
+}
+
+function buildServiceCol<T extends AttributedRow>(): ColumnDef<T> {
+  return {
+    id: 'service_id',
+    accessorFn: (r) => r.service_id ?? '',
+    header: 'Service',
+    size: 200,
+    cell: ({ row }) => (
+      <span className="text-xs font-mono truncate" title={row.original.service_id ?? ''}>
+        {row.original.service_id ?? '—'}
+      </span>
+    ),
+  }
+}
+
+function buildSharedAttributionColumns<T extends AttributedRow>(onToggleGroup: (runId: string) => void): ColumnDef<T>[] {
+  const sourceCell = buildSourceCell(onToggleGroup)
+  return [
+    { id: 'source', accessorFn: (r) => r.attribution.label, header: 'Source', size: 280, cell: sourceCell },
+    { id: 'caller', accessorFn: (r) => r.attribution.caller_qualname, header: 'Caller', size: 280, cell: callerCell },
+    { id: 'db_type', accessorKey: 'db_type', header: 'DB', size: 80, cell: ({ row }) => <span className="text-xs">{row.original.db_type}</span> },
+  ]
+}
+
+function activeDurationCell({ row }: { row: Row<ActiveOrPromotedRow> }) {
+  const r = row.original
+  const isCancelled = r.cancelled_at !== null
+  const promoted = !!r._completed
+  const stuck = !promoted && !isCancelled && r.duration_ms >= STUCK_LIVE_MS
+  return (
+    <span
+      className={`inline-flex items-center gap-1.5 font-mono ${durationColor(r.duration_ms)} ${promoted ? 'opacity-60' : ''} ${stuck ? 'animate-pulse font-bold' : ''}`}
+      title={stuck ? `Live query running for ${formatDurationMs(r.duration_ms)} — investigate` : undefined}
+    >
+      {!promoted && !isCancelled && (
+        <span className="relative flex h-2 w-2" aria-hidden="true">
+          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-current opacity-75"></span>
+          <span className="relative inline-flex rounded-full h-2 w-2 bg-current"></span>
+        </span>
+      )}
+      {formatDurationMs(r.duration_ms)}
+    </span>
+  )
+}
+
+function buildActionsCell(onKill: (row: ActiveRow) => void, cancellingQid: number | null) {
+  return function ActionsCell({ row }: { row: Row<ActiveOrPromotedRow> }) {
+    const r = row.original
+    const isCancelled = r.cancelled_at !== null
+    const promoted = !!r._completed
+    const cancelling = cancellingQid === r.query_id
+
+    if (promoted) {
+      const outcome = r._completed!.outcome
+      return (
+        <Badge variant={outcomeVariant(outcome)} className="capitalize">
+          {outcome === 'ok' ? '✓ done' : outcome}
+        </Badge>
+      )
+    }
+    if (isCancelled) return <span className="text-xs text-muted-foreground">cancelling…</span>
+    if (!r.cancellable) return <span className="text-xs text-muted-foreground">—</span>
+    return (
+      <Button
+        variant="destructive"
+        size="sm"
+        className="h-7 px-2"
+        disabled={cancelling}
+        title="Interrupt the currently-running statement. A caller that retries will start a new query you may need to cancel again."
+        onClick={(e) => {
+          e.stopPropagation()
+          onKill(r)
+        }}
+      >
+        {cancelling ? 'Cancelling…' : (<><X className="h-3 w-3 mr-1" /> Kill</>)}
+      </Button>
+    )
+  }
+}
+
+export function buildActiveColumns(deps: {
+  onKill: (row: ActiveRow) => void
+  cancellingQid: number | null
+  showService: boolean
+  showPool: boolean
+  onToggleGroup: (runId: string) => void
+}): ColumnDef<ActiveOrPromotedRow>[] {
+  const cols = buildSharedAttributionColumns<ActiveOrPromotedRow>(deps.onToggleGroup)
+  if (deps.showService) cols.push(buildServiceCol())
+  if (deps.showPool) {
+    cols.push({
+      id: 'pool_slot',
+      accessorFn: (r) => r.attribution.pool_slot ?? '',
+      header: 'Pool',
+      size: 200,
+      cell: ({ row }) => <span className="text-xs font-mono">{row.original.attribution.pool_slot ?? '—'}</span>,
+    })
+  }
+  cols.push(
+    { id: 'duration_ms', accessorKey: 'duration_ms', header: 'Duration', size: 120, cell: activeDurationCell },
+    { id: 'actions', header: 'Actions', enableSorting: false, size: 110, cell: buildActionsCell(deps.onKill, deps.cancellingQid) },
+  )
+  return cols
+}
+
+export function buildCompletedColumns(opts: {
+  showMemory: boolean
+  showService: boolean
+  onToggleGroup: (runId: string) => void
+}): ColumnDef<GroupedCompletedRow>[] {
+  const cols: ColumnDef<GroupedCompletedRow>[] = [
+    {
+      id: 'outcome',
+      accessorKey: 'outcome',
+      header: 'Outcome',
+      size: 130,
+      cell: ({ row }) => {
+        const r = row.original
+        return (
+          <div className="flex items-center gap-2">
+            <Badge variant={outcomeVariant(r.outcome)} className="capitalize">
+              {r.outcome}
+            </Badge>
+            {r.error_type && (
+              <span className="text-xs text-red-600 truncate" title={r.error_message ?? ''}>
+                {r.error_type}
+              </span>
+            )}
+          </div>
+        )
+      },
+    },
+    ...buildSharedAttributionColumns<GroupedCompletedRow>(opts.onToggleGroup),
+  ]
+  if (opts.showService) cols.push(buildServiceCol())
+  cols.push({
+    id: 'duration_ms',
+    accessorKey: 'duration_ms',
+    header: 'Duration',
+    size: 110,
+    cell: ({ row }) => (
+      <span className={`font-mono text-xs ${durationColor(row.original.duration_ms)}`}>
+        {formatDurationMs(row.original.duration_ms)}
+      </span>
+    ),
+  })
+  if (opts.showMemory) {
+    cols.push({
+      id: 'peak_memory_mb',
+      accessorKey: 'peak_memory_mb',
+      header: 'Memory',
+      size: 100,
+      cell: ({ row }) => (
+        <span className="font-mono text-xs text-muted-foreground tabular-nums">
+          {formatMemoryMb(row.original.peak_memory_mb) || '—'}
+        </span>
+      ),
+    })
+  }
+  cols.push({
+    id: 'sql',
+    accessorKey: 'sql_preview',
+    header: 'SQL',
+    enableSorting: false,
+    size: 400,
+    cell: ({ row }) => (
+      <span className="font-mono text-xs text-muted-foreground truncate block" title={row.original.sql_preview}>
+        {row.original.sql_preview}
+      </span>
+    ),
+  })
+  return cols
+}
+
+const hasAnyVal = <T,>(rows: T[], pick: (r: T) => unknown) => rows.some((r) => pick(r) !== null && pick(r) !== undefined)
+
+export function ActiveTable({
+  rows,
+  onRowClick,
+  onKill,
+  cancellingQid,
+  onToggleGroup,
+}: {
+  rows: ActiveOrPromotedRow[]
+  onRowClick: (row: ActiveOrPromotedRow) => void
+  onKill: (row: ActiveRow) => void
+  cancellingQid: number | null
+  onToggleGroup: (runId: string) => void
+}) {
+  const showService = hasAnyVal(rows, (r) => r.service_id)
+  const showPool = hasAnyVal(rows, (r) => r.attribution.pool_slot)
+  const columns = React.useMemo(
+    () => buildActiveColumns({ onKill, cancellingQid, showService, showPool, onToggleGroup }),
+    [onKill, cancellingQid, showService, showPool, onToggleGroup],
+  )
+  return (
+    <DataTable<ActiveOrPromotedRow, unknown>
+      columns={columns}
+      data={rows}
+      onRowClick={onRowClick}
+      getRowClassName={(row) =>
+        row._expandedChild
+          ? 'bg-muted/30 border-l-2 border-l-muted-foreground/30'
+          : row._completed
+            ? 'opacity-60'
+            : row.cancelled_at !== null
+              ? 'opacity-50'
+              : 'bg-primary/5 border-l-2 border-l-primary/60'
+      }
+      hideToolbar
+      showPagination={false}
+      emptyMessage="No active queries. Long-running queries will appear here in real time."
+      tableCaption="Active and just-finished queries"
+    />
+  )
+}
+
+export function CompletedTable({
+  rows,
+  onRowClick,
+  emptyMessage = 'No completed queries yet.',
+  initialSorting,
+  onToggleGroup,
+}: {
+  rows: GroupedCompletedRow[]
+  onRowClick: (row: GroupedCompletedRow) => void
+  emptyMessage?: string
+  initialSorting?: { id: string; desc: boolean }[]
+  onToggleGroup: (runId: string) => void
+}) {
+  const showMemory = hasAnyVal(rows, (r) => r.peak_memory_mb)
+  const showService = hasAnyVal(rows, (r) => r.service_id)
+  const columns = React.useMemo(
+    () => buildCompletedColumns({ showMemory, showService, onToggleGroup }),
+    [showMemory, showService, onToggleGroup],
+  )
+  return (
+    <DataTable<GroupedCompletedRow, unknown>
+      columns={columns}
+      data={rows}
+      onRowClick={onRowClick}
+      getRowClassName={(row) => (row._expandedChild ? 'bg-muted/30 border-l-2 border-l-muted-foreground/30' : '')}
+      hideToolbar
+      showPagination={rows.length > 50}
+      emptyMessage={emptyMessage}
+      initialSorting={initialSorting ?? [{ id: 'duration_ms', desc: true }]}
+      tableCaption="Completed queries"
+    />
+  )
+}
 
 const isCompleted = (row: AnyRow): row is CompletedRow => 'outcome' in row
 const isActivePromoted = (row: AnyRow): row is ActiveOrPromotedRow => 'cancellable' in row
@@ -107,16 +413,7 @@ export function RowDetailDialog({
             </Badge>
             <span className="truncate">{attr.label}</span>
             {completed && (
-              <Badge
-                variant={
-                  completed.outcome === 'ok'
-                    ? 'outline'
-                    : completed.outcome === 'cancelled'
-                      ? 'secondary'
-                      : 'destructive'
-                }
-                className="capitalize ml-2"
-              >
+              <Badge variant={outcomeVariant(completed.outcome)} className="capitalize ml-2">
                 {completed.outcome}
                 {completed.error_type && `: ${completed.error_type}`}
               </Badge>
@@ -132,44 +429,26 @@ export function RowDetailDialog({
               {attr.caller_qualname} <span className="opacity-60">({attr.caller_file})</span>
             </span>
           </div>
+          <div><span className="text-muted-foreground">DB:</span> {display.db_type}</div>
+          <div><span className="text-muted-foreground">Service:</span> <span className="font-mono">{display.service_id ?? '—'}</span></div>
+          <div><span className="text-muted-foreground">Pool slot:</span> <span className="font-mono">{attr.pool_slot ?? '—'}</span></div>
           <div>
-            <span className="text-muted-foreground">DB:</span> {display.db_type}
-          </div>
-          <div>
-            <span className="text-muted-foreground">Service:</span>{' '}
-            <span className="font-mono">{display.service_id ?? '—'}</span>
-          </div>
-          <div>
-            <span className="text-muted-foreground">Pool slot:</span>{' '}
-            <span className="font-mono">{attr.pool_slot ?? '—'}</span>
-          </div>
-          <div>
-            <span className="text-muted-foreground">Request:</span>{' '}
-            {attr.request_path || '—'}
+            <span className="text-muted-foreground">Request:</span> {attr.request_path || '—'}
             {attr.request_id && <span className="opacity-60"> · {attr.request_id.slice(0, 8)}</span>}
           </div>
           <div>
             <span className="text-muted-foreground">Duration:</span>{' '}
-            <span className={`font-mono ${durationColor(display.duration_ms)}`}>
-              {formatDurationMs(display.duration_ms)}
-            </span>
+            <span className={`font-mono ${durationColor(display.duration_ms)}`}>{formatDurationMs(display.duration_ms)}</span>
           </div>
           {attr.cron_job && (
-            <div>
-              <span className="text-muted-foreground">Cron:</span> {attr.cron_job}
-              {attr.cron_run_id && ` (run ${attr.cron_run_id})`}
-            </div>
+            <div><span className="text-muted-foreground">Cron:</span> {attr.cron_job}{attr.cron_run_id && ` (run ${attr.cron_run_id})`}</div>
           )}
           {completed?.peak_memory_mb != null && (
-            <div>
-              <span className="text-muted-foreground">Peak memory:</span>{' '}
-              <span className="font-mono">{formatMemoryMb(completed.peak_memory_mb)}</span>
-            </div>
+            <div><span className="text-muted-foreground">Peak memory:</span> <span className="font-mono">{formatMemoryMb(completed.peak_memory_mb)}</span></div>
           )}
           {completed?.error_message && (
             <div className="col-span-2">
-              <span className="text-muted-foreground">Error:</span>{' '}
-              <span className="font-mono text-red-600">{completed.error_message}</span>
+              <span className="text-muted-foreground">Error:</span> <span className="font-mono text-red-600">{completed.error_message}</span>
             </div>
           )}
         </div>
@@ -199,9 +478,7 @@ export function RowDetailDialog({
               {cancelling ? 'Cancelling…' : (<><X className="h-3 w-3 mr-1" /> Kill</>)}
             </Button>
           )}
-          <Button variant="outline" size="sm" onClick={onClose}>
-            Close
-          </Button>
+          <Button variant="outline" size="sm" onClick={onClose}>Close</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

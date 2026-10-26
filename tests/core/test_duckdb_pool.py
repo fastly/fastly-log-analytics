@@ -875,3 +875,254 @@ def test_discard_idle_reset_and_reuse_only():
         ro_sat.acquire(src={"name": "reuse_only_sat", "bucket": "b"}, max_wait=2.0, reuse_only=True)
     assert (time.monotonic() - t0) < 0.5
     assert ro_sat._saturated_rejects_total == 0
+
+
+# ── Merged from tests/perf/test_perf_optimizations.py ──
+
+import multiprocessing
+import os
+
+from backend.utils.hll import HyperLogLog
+
+from backend.core.duckdb import _safe_table_name
+from backend.utils.sql_validator import escape_sql_literal
+
+
+def _fake_src(service_id="svc-perf"):
+    return {
+        "name": service_id,
+        "service_id": service_id,
+        "bucket": "b",
+        "endpoint": "e",
+        "access_key_id": "k",
+        "secret_access_key": "s",
+        "region": "us-east-1",
+    }
+
+
+def _minimal_cfg(service_id="svc-perf", commit_interval_mins=5):
+    return {
+        "service_id": service_id,
+        "log_period": 60,
+        "access_level": "read_write",
+        "commit_interval_mins": commit_interval_mins,
+        "provisioning": {"cron_sync": {"enabled": True}, "cron_compact": {"enabled": False}},
+    }
+
+
+def test_commit_job_misfire_grace_time_equals_interval():
+    from backend.cron.scheduler import Scheduler
+
+    cfg = _minimal_cfg(commit_interval_mins=5)
+    s = Scheduler()
+    with (
+        patch("backend.config.list_configs", return_value=[cfg]),
+        patch("backend.core.duckdb.get_source_for_service", return_value=_fake_src()),
+        patch("backend.core.duckdb.is_configured", return_value=True),
+        patch("backend.config.get_ngwaf_workspace_id", return_value=None),
+        patch("backend.core.metadata.count_alerts", return_value=0),
+    ):
+        s._sync_jobs()
+
+    job = s._sched.get_job("commit_svc-perf")
+    assert job is not None, "commit job must be registered"
+    assert job.misfire_grace_time == 5 * 60
+
+
+def test_commit_job_misfire_grace_time_scales_with_longer_interval():
+    from backend.cron.scheduler import Scheduler
+
+    cfg = _minimal_cfg(service_id="svc-perf-10")
+    cfg["provisioning"]["cron_sync"]["commit_interval_mins"] = 10
+    s = Scheduler()
+    with (
+        patch("backend.config.list_configs", return_value=[cfg]),
+        patch("backend.core.duckdb.get_source_for_service", return_value=_fake_src("svc-perf-10")),
+        patch("backend.core.duckdb.is_configured", return_value=True),
+        patch("backend.config.get_ngwaf_workspace_id", return_value=None),
+        patch("backend.core.metadata.count_alerts", return_value=0),
+    ):
+        s._sync_jobs()
+
+    job = s._sched.get_job("commit_svc-perf-10")
+    assert job is not None
+    assert job.misfire_grace_time == 10 * 60
+
+
+def test_insights_prewarmer_grace_time_exceeds_interval():
+    from backend.cron.scheduler import Scheduler
+
+    cfg = _minimal_cfg(service_id="svc-prewarm")
+    cfg["provisioning"]["cron_compact"] = {"enabled": True}
+    s = Scheduler()
+    with (
+        patch("backend.config.list_configs", return_value=[cfg]),
+        patch("backend.core.duckdb.get_source_for_service", return_value=_fake_src("svc-prewarm")),
+        patch("backend.core.duckdb.is_configured", return_value=True),
+        patch("backend.config.get_ngwaf_workspace_id", return_value=None),
+        patch("backend.core.metadata.count_alerts", return_value=0),
+    ):
+        s._sync_jobs()
+
+    job = s._sched.get_job("insights_prewarmer_svc-prewarm")
+    assert job is not None, "insights_prewarmer job must be registered"
+    assert job.misfire_grace_time > 240
+
+
+def test_duckdb_threads_env_var_respected(monkeypatch):
+    import backend.core.duckdb as duckdb_mod
+
+    monkeypatch.setenv("DUCKDB_THREADS", "2")
+    duckdb_mod._cached_n_threads = None
+    cached = (
+        int(os.environ["DUCKDB_THREADS"]) if os.environ.get("DUCKDB_THREADS") else min(multiprocessing.cpu_count(), 8)
+    )
+    assert cached == 2
+    duckdb_mod._cached_n_threads = None
+
+
+def test_duckdb_threads_falls_back_to_cpu_count_when_unset(monkeypatch):
+    monkeypatch.delenv("DUCKDB_THREADS", raising=False)
+    expected = min(multiprocessing.cpu_count(), 8)
+    actual = (
+        int(os.environ["DUCKDB_THREADS"]) if os.environ.get("DUCKDB_THREADS") else min(multiprocessing.cpu_count(), 8)
+    )
+    assert actual == expected
+
+
+def test_duckdb_threads_capped_at_8(monkeypatch):
+    monkeypatch.delenv("DUCKDB_THREADS", raising=False)
+    with patch("multiprocessing.cpu_count", return_value=32):
+        actual = (
+            int(os.environ["DUCKDB_THREADS"])
+            if os.environ.get("DUCKDB_THREADS")
+            else min(multiprocessing.cpu_count(), 8)
+        )
+    assert actual == 8
+
+
+def _needs_prewarm(pathname: str) -> bool:
+    return (
+        pathname.startswith("/dashboard")
+        or pathname.startswith("/network")
+        or pathname.startswith("/origin")
+        or pathname.startswith("/performance")
+        or pathname.startswith("/security")
+        or pathname.startswith("/charts")
+        or pathname.startswith("/insights")
+        or pathname.startswith("/fastly-value")
+        or pathname.startswith("/usage")
+        or pathname.startswith("/streaming")
+        or pathname.startswith("/control-room")
+        or pathname.startswith("/sessions/stream")
+    )
+
+
+def test_prewarm_covers_usage():
+    assert _needs_prewarm("/usage") is True
+    assert _needs_prewarm("/usage/") is True
+
+
+def test_prewarm_covers_streaming():
+    assert _needs_prewarm("/streaming") is True
+
+
+def test_prewarm_covers_control_room():
+    assert _needs_prewarm("/control-room") is True
+
+
+def test_prewarm_covers_sessions_stream():
+    assert _needs_prewarm("/sessions/stream") is True
+    assert _needs_prewarm("/sessions/stream/abc123") is True
+
+
+def test_prewarm_does_not_fire_for_sessions_list():
+    assert _needs_prewarm("/sessions") is False
+
+
+def test_prewarm_does_not_fire_for_query():
+    assert _needs_prewarm("/query") is False
+
+
+def test_prewarm_fires_for_existing_chart_routes():
+    for route in ["/dashboard", "/network", "/origin", "/performance", "/security", "/insights", "/fastly-value"]:
+        assert _needs_prewarm(route) is True, f"{route} should trigger prewarm"
+
+
+@pytest.mark.benchmark
+def test_bench_hll_add_1k_items(benchmark):
+    items = [f"203.0.113.{i % 256}" for i in range(1000)]
+
+    def _go():
+        sketch = HyperLogLog()
+        for item in items:
+            sketch.add(item)
+        return sketch
+
+    result = benchmark(_go)
+    assert result.count() > 0
+
+
+@pytest.mark.benchmark
+def test_bench_hll_count_after_100k_adds(benchmark):
+    sketch = HyperLogLog()
+    for i in range(100_000):
+        sketch.add(f"203.0.113.{i % 256}.{i // 256}")
+
+    estimate = benchmark(sketch.count)
+    assert estimate > 0
+
+
+@pytest.mark.benchmark
+def test_bench_hll_merge_24_hours(benchmark):
+    sketches = []
+    for hour in range(24):
+        s = HyperLogLog()
+        for i in range(5_000):
+            s.add(f"hour{hour}:198.51.100.{i % 256}.{i // 256}")
+        sketches.append(s)
+
+    def _go():
+        merged = HyperLogLog()
+        for s in sketches:
+            merged.merge(s)
+        return merged
+
+    merged = benchmark(_go)
+    assert merged is not None
+    assert merged.count() > 0
+
+
+@pytest.mark.benchmark
+def test_bench_hll_serialize_roundtrip(benchmark):
+    sketch = HyperLogLog()
+    for i in range(10_000):
+        sketch.add(f"192.0.2.{i % 256}.{i // 256}")
+    blob = sketch.to_bytes()
+
+    def _roundtrip():
+        return HyperLogLog.from_bytes(blob).to_bytes()
+
+    out = benchmark(_roundtrip)
+    assert out == blob
+
+
+@pytest.mark.benchmark
+def test_bench_safe_table_name(benchmark):
+    name = "svc-test-account-name-with-dashes-and-some-numbers-42"
+    result = benchmark(_safe_table_name, name)
+    assert result.startswith("logs_")
+
+
+@pytest.mark.benchmark
+def test_bench_escape_sql_literal_typical(benchmark):
+    key = "raw/2026-05-15/12/2026-05-15T12-34-56.svc-name.gz"
+    result = benchmark(escape_sql_literal, key)
+    assert result == key
+
+
+@pytest.mark.benchmark
+def test_bench_escape_sql_literal_with_quotes(benchmark):
+    bad_key = "raw/2026-05-15/O'Brien's-bucket/file.gz"
+    result = benchmark(escape_sql_literal, bad_key)
+    assert "''" in result

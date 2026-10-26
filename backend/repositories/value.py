@@ -59,29 +59,20 @@ def _fetch_io_stats(
     """Fetch Image Optimizer metrics from the Fastly Historical Stats API."""
     from backend.config import get_fastly_api_key, get_fastly_logging_service_id
     from backend.core.fastly.client import fastly
+    from backend.utils.date_utils import parse_iso_utc
 
     cdn_svc = get_fastly_logging_service_id(service_id)
     api_key = get_fastly_api_key(service_id)
     if not api_key or not cdn_svc:
         return None
 
-    from backend.utils.date_utils import parse_iso_utc
-
     now = datetime.now(UTC)
-    if start_time:
-        start_dt = parse_iso_utc(start_time) or (now - timedelta(days=30))
-    else:
-        start_dt = now - timedelta(days=30)
-    if end_time:
-        end_dt = parse_iso_utc(end_time) or now
-    else:
-        end_dt = now
+    start_dt = (parse_iso_utc(start_time) if start_time else None) or (now - timedelta(days=30))
+    end_dt = (parse_iso_utc(end_time) if end_time else None) or now
 
     start_dt = start_dt.replace(hour=0, minute=0, second=0, microsecond=0)
     end_dt = end_dt.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
-    from_ts = int(start_dt.timestamp())
-    to_ts = int(end_dt.timestamp())
-    path = f"/stats/service/{cdn_svc}?by=day&from={from_ts}&to={to_ts}"
+    path = f"/stats/service/{cdn_svc}?by=day&from={int(start_dt.timestamp())}&to={int(end_dt.timestamp())}"
 
     cached = _IO_STATS_CACHE.get(path)
     if cached is not None:
@@ -300,7 +291,175 @@ def _build_io_per_request_metrics(
     return result
 
 
-# ── Overview rollup reader ──────────────────────────────────────────────
+# ── Rollup & bucket-shaping helpers ─────────────────────────────────────
+
+
+def _collect_value_rollup_paths(
+    runner: QueryRunner,
+    start_time: str | None,
+    end_time: str | None,
+    bundle_filename: str,
+) -> tuple[datetime, datetime, list[str], bool] | None:
+    import os
+
+    from backend.core.rollups import _hour_bundled_root
+
+    if not start_time or not end_time:
+        return None
+    window = parse_window(start_time, end_time)
+    if window is None:
+        return None
+    st, et = window
+    if (et - st) > timedelta(days=366):
+        return None
+    bundled_root = _hour_bundled_root(runner.src)
+    if not os.path.isdir(bundled_root):
+        return None
+    collected = collect_hourly_bundle_paths(runner.src, st, et, bundled_root, bundle_filename)
+    if collected is None:
+        return None
+    rollup_paths, crosses_active = collected
+    if not rollup_paths and not crosses_active:
+        return None
+    return st, et, rollup_paths, crosses_active
+
+
+def _shape_caching_and_overview_buckets(
+    buckets: list[dict[str, Any]],
+    *,
+    include_overview: bool,
+    has_resp_bytes: bool,
+    has_shield: bool,
+    has_waf: bool,
+    has_elapsed: bool,
+) -> dict[str, Any]:
+    _sum = lambda key: sum(b.get(key, 0) or 0 for b in buckets)  # noqa: E731
+    total_requests = _sum("total")
+    total_hits = _sum("hit_cnt")
+    total_misses = _sum("miss_cnt")
+    total_passes = _sum("pass_cnt")
+    total_synths = _sum("synth_cnt")
+
+    shield_eff = None
+    if has_shield:
+        sh_hit = _sum("shield_hit")
+        sh_total = _sum("shield_total")
+        shield_eff = round(sh_hit * 100.0 / sh_total, 1) if sh_total > 0 else None
+
+    offload_pct = round(total_hits * 100.0 / total_requests, 1) if total_requests > 0 else None
+    state_ts: list[dict] = []
+    for b in buckets:
+        t_str = safe_iso(b["bucket"])
+        other = b["total"] - b["hit_cnt"] - b["miss_cnt"] - b["pass_cnt"]
+        state_ts.extend(
+            [
+                {"time": t_str, "value": int(b["hit_cnt"]), "category": "HIT"},
+                {"time": t_str, "value": int(b["miss_cnt"]), "category": "MISS"},
+                {"time": t_str, "value": int(b["pass_cnt"]), "category": "PASS"},
+            ]
+        )
+        if other > 0:
+            state_ts.append({"time": t_str, "value": int(other), "category": "OTHER"})
+
+    caching: dict[str, Any] = {
+        "origin_offload_pct": offload_pct,
+        "bandwidth_saved_bytes": _sum("bandwidth_saved") if has_resp_bytes else None,
+        "shield_effectiveness_pct": shield_eff,
+        "total_requests": total_requests,
+        "hit_requests": total_hits,
+        "miss_requests": total_misses,
+        "pass_requests": total_passes,
+        "synth_requests": total_synths,
+        "offload_time_series": [
+            {
+                "time": safe_iso(b["bucket"]),
+                "value": round(b["hit_cnt"] * 100.0 / b["total"], 1) if b["total"] > 0 else 0,
+            }
+            for b in buckets
+        ],
+        "cache_state_time_series": state_ts,
+    }
+    out: dict[str, Any] = {"caching": caching}
+
+    if include_overview:
+        avg_hit = avg_miss = None
+        if has_elapsed:
+            s_h, c_h = _sum("sum_hit_elapsed"), _sum("cnt_hit_elapsed")
+            s_m, c_m = _sum("sum_miss_elapsed"), _sum("cnt_miss_elapsed")
+            avg_hit = s_h / c_h if c_h > 0 else None
+            avg_miss = s_m / c_m if c_m > 0 else None
+        accel = round(avg_miss / avg_hit, 1) if avg_hit and avg_miss and avg_hit > 0 else None
+        out["overview"] = {
+            "origin_offload_pct": offload_pct,
+            "threats_blocked": _sum("threats_cnt") if has_waf else None,
+            "cache_acceleration_factor": accel,
+            "total_requests": total_requests,
+            "total_bandwidth_bytes": _sum("total_bytes") if has_resp_bytes else None,
+            "edge_hit_requests": total_hits,
+            "origin_requests": _sum("origin_cnt"),
+        }
+    return out
+
+
+def _network_raw_select_parts(actual_cols: set[str], has_protocol: bool, has_ipv6: bool) -> list[str]:
+    parts: list[str] = []
+    if has_protocol:
+        parts.extend(
+            [
+                "COUNT(*) FILTER (WHERE protocol = 'HTTP/3') AS http3_cnt",
+                "COUNT(*) FILTER (WHERE protocol = 'HTTP/2') AS h2_cnt",
+                "COUNT(*) FILTER (WHERE protocol = 'HTTP/1.1') AS h11_cnt",
+                "COUNT(*) FILTER (WHERE protocol NOT IN ('HTTP/3', 'HTTP/2', 'HTTP/1.1')) AS other_proto_cnt",
+            ]
+        )
+    if "is_ssl" in actual_cols:
+        parts.append("COUNT(*) FILTER (WHERE is_ssl = true) AS tls_cnt")
+    elif "tls" in actual_cols:
+        parts.append("COUNT(*) FILTER (WHERE tls IS NOT NULL AND tls != '') AS tls_cnt")
+    if has_ipv6:
+        parts.append("COUNT(*) FILTER (WHERE ipv6 = true) AS ipv6_cnt")
+    return parts
+
+
+def _build_proto_ts(buckets: list[dict[str, Any]], suffix: str = "_cnt") -> list[dict[str, Any]]:
+    proto_ts: list[dict[str, Any]] = []
+    for b in buckets:
+        t_str = safe_iso(b["bucket"])
+        for col_key, proto_label in (
+            (f"h11{suffix}", "HTTP/1.1"),
+            (f"h2{suffix}", "HTTP/2"),
+            (f"http3{suffix}", "HTTP/3"),
+            (f"other_proto{suffix}", "Other"),
+        ):
+            cnt = int(b.get(col_key) or 0)
+            if cnt > 0:
+                proto_ts.append({"time": t_str, "value": cnt, "category": proto_label})
+    return proto_ts
+
+
+def _shape_raw_network_buckets(
+    buckets: list[dict[str, Any]],
+    total_requests: int,
+    *,
+    has_protocol: bool,
+    has_is_ssl: bool,
+    has_ipv6: bool,
+) -> dict[str, Any]:
+    def _pct(key: str) -> float | None:
+        if total_requests <= 0:
+            return None
+        return round(sum(int(b.get(key, 0) or 0) for b in buckets) * 100.0 / total_requests, 1)
+
+    net: dict[str, Any] = {
+        "http3_pct": _pct("http3_cnt") if has_protocol else None,
+        "h2_pct": _pct("h2_cnt") if has_protocol else None,
+        "tls_pct": _pct("tls_cnt") if has_is_ssl else None,
+        "ipv6_pct": _pct("ipv6_cnt") if has_ipv6 else None,
+        "total_requests": total_requests,
+    }
+    if has_protocol:
+        net["protocol_time_series"] = _build_proto_ts(buckets, "_cnt")
+    return net
 
 
 def _try_overview_from_rollup(
@@ -315,45 +474,16 @@ def _try_overview_from_rollup(
     has_waf: bool,
     has_elapsed: bool,
 ) -> dict[str, Any] | None:
-    """Serve the overview+caching sections from pre-rolled hourly parquets.
+    """Serve overview+caching sections from pre-rolled hourly parquets, or None on fallback."""
+    from backend.core.rollups import OVERVIEW_BUNDLE_FILENAME
 
-    Returns ``{"caching": {...}, "overview": {...}}`` when eligible, or
-    ``None`` to fall through to the raw scan.
-    """
-    import os
-
-    from backend.core.rollups import OVERVIEW_BUNDLE_FILENAME, _hour_bundled_root
-
-    if not start_time or not end_time:
-        return None
-    window = parse_window(start_time, end_time)
-    if window is None:
-        return None
-    st, et = window
-    if (et - st) > timedelta(days=366):
-        return None
-
-    bundled_root = _hour_bundled_root(runner.src)
-    if not os.path.isdir(bundled_root):
-        return None
-
-    collected = collect_hourly_bundle_paths(
-        runner.src,
-        st,
-        et,
-        bundled_root,
-        OVERVIEW_BUNDLE_FILENAME,
-    )
+    collected = _collect_value_rollup_paths(runner, start_time, end_time, OVERVIEW_BUNDLE_FILENAME)
     if collected is None:
         return None
-    rollup_paths, crosses_active = collected
-
-    if not rollup_paths and not crosses_active:
-        return None
+    st, et, rollup_paths, crosses_active = collected
 
     interval = safe_interval(chart_interval, "1 day")
     _HIT_STATES = HIT_STATES
-
     select_clauses: list[str] = []
 
     if rollup_paths:
@@ -382,8 +512,7 @@ def _try_overview_from_rollup(
 
     if crosses_active:
         active_hour_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
-        live_start = max(st, active_hour_dt)
-        live_st_tz = live_start.astimezone(UTC).isoformat()
+        live_st_tz = max(st, active_hour_dt).astimezone(UTC).isoformat()
         live_et_tz = et.astimezone(UTC).isoformat()
 
         sum_miss_elapsed = sum_or_zero("elapsed", zero="0.0", where="cache = 'MISS'") if has_elapsed else "0.0"
@@ -442,78 +571,17 @@ def _try_overview_from_rollup(
 
     col_names = [d[0] for d in runner.con.description]
     buckets = [dict(zip(col_names, r)) for r in rows]
-
     if not buckets:
         return None
 
-    _sum = lambda key: sum(b.get(key, 0) or 0 for b in buckets)  # noqa: E731
-    total_requests = _sum("total")
-    total_hits = _sum("hit_cnt")
-    total_misses = _sum("miss_cnt")
-    total_passes = _sum("pass_cnt")
-    total_synths = _sum("synth_cnt")
-
-    shield_eff = None
-    if has_shield:
-        sh_hit = _sum("shield_hit")
-        sh_total = _sum("shield_total")
-        shield_eff = round(sh_hit * 100.0 / sh_total, 1) if sh_total > 0 else None
-
-    caching: dict[str, Any] = {
-        "origin_offload_pct": round(total_hits * 100.0 / total_requests, 1) if total_requests > 0 else None,
-        "bandwidth_saved_bytes": _sum("bandwidth_saved") if has_resp_bytes else None,
-        "shield_effectiveness_pct": shield_eff,
-        "total_requests": total_requests,
-        "hit_requests": total_hits,
-        "miss_requests": total_misses,
-        "pass_requests": total_passes,
-        "synth_requests": total_synths,
-    }
-
-    caching["offload_time_series"] = [
-        {
-            "time": safe_iso(b["bucket"]),
-            "value": round(b["hit_cnt"] * 100.0 / b["total"], 1) if b["total"] > 0 else 0,
-        }
-        for b in buckets
-    ]
-
-    state_ts: list[dict] = []
-    for b in buckets:
-        t_str = safe_iso(b["bucket"])
-        other = b["total"] - b["hit_cnt"] - b["miss_cnt"] - b["pass_cnt"]
-        state_ts.append({"time": t_str, "value": int(b["hit_cnt"]), "category": "HIT"})
-        state_ts.append({"time": t_str, "value": int(b["miss_cnt"]), "category": "MISS"})
-        state_ts.append({"time": t_str, "value": int(b["pass_cnt"]), "category": "PASS"})
-        if other > 0:
-            state_ts.append({"time": t_str, "value": int(other), "category": "OTHER"})
-    caching["cache_state_time_series"] = state_ts
-
-    out: dict[str, Any] = {"caching": caching}
-
-    if include_overview:
-        avg_hit = None
-        avg_miss = None
-        if has_elapsed:
-            s_h = _sum("sum_hit_elapsed")
-            c_h = _sum("cnt_hit_elapsed")
-            s_m = _sum("sum_miss_elapsed")
-            c_m = _sum("cnt_miss_elapsed")
-            avg_hit = s_h / c_h if c_h > 0 else None
-            avg_miss = s_m / c_m if c_m > 0 else None
-        accel = round(avg_miss / avg_hit, 1) if avg_hit and avg_miss and avg_hit > 0 else None
-
-        out["overview"] = {
-            "origin_offload_pct": round(total_hits * 100.0 / total_requests, 1) if total_requests > 0 else None,
-            "threats_blocked": _sum("threats_cnt") if has_waf else None,
-            "cache_acceleration_factor": accel,
-            "total_requests": total_requests,
-            "total_bandwidth_bytes": _sum("total_bytes") if has_resp_bytes else None,
-            "edge_hit_requests": total_hits,
-            "origin_requests": _sum("origin_cnt"),
-        }
-
-    return out
+    return _shape_caching_and_overview_buckets(
+        buckets,
+        include_overview=include_overview,
+        has_resp_bytes=has_resp_bytes,
+        has_shield=has_shield,
+        has_waf=has_waf,
+        has_elapsed=has_elapsed,
+    )
 
 
 def _try_network_from_rollup(
@@ -524,51 +592,21 @@ def _try_network_from_rollup(
     chart_interval: str = "1 day",
     actual_cols: set[str],
 ) -> dict[str, Any] | None:
-    """Serve the network section aggregates and protocol time series from pre-rolled hourly parquets.
+    """Serve network section aggregates and protocol time series from pre-rolled hourly parquets."""
+    from backend.core.rollups import NETWORK_SUMMARY_BUNDLE_FILENAME
 
-    Returns the ``net`` dict with percentage metrics and ``protocol_time_series``
-    when eligible, or ``None`` to fall through to the raw scan.
-    """
-    import os
-
-    from backend.core.rollups import NETWORK_SUMMARY_BUNDLE_FILENAME, _hour_bundled_root
-
-    if not start_time or not end_time:
-        return None
-    window = parse_window(start_time, end_time)
-    if window is None:
-        return None
-    st, et = window
-    if (et - st) > timedelta(days=366):
-        return None
-
-    # network_summary.parquet rolls up `is_ssl`, not the legacy `tls` VARCHAR fallback column
     if "is_ssl" not in actual_cols and "tls" in actual_cols:
         return None
 
-    bundled_root = _hour_bundled_root(runner.src)
-    if not os.path.isdir(bundled_root):
-        return None
-
-    collected = collect_hourly_bundle_paths(
-        runner.src,
-        st,
-        et,
-        bundled_root,
-        NETWORK_SUMMARY_BUNDLE_FILENAME,
-    )
+    collected = _collect_value_rollup_paths(runner, start_time, end_time, NETWORK_SUMMARY_BUNDLE_FILENAME)
     if collected is None:
         return None
-    rollup_paths, crosses_active = collected
-
-    if not rollup_paths and not crosses_active:
-        return None
+    st, et, rollup_paths, crosses_active = collected
 
     interval = safe_interval(chart_interval, "1 day")
     has_protocol = "protocol" in actual_cols
     has_is_ssl = "is_ssl" in actual_cols
     has_ipv6 = "ipv6" in actual_cols
-
     select_clauses: list[str] = []
 
     if rollup_paths:
@@ -584,12 +622,8 @@ def _try_network_from_rollup(
         select_clauses.append(
             f"SELECT time_bucket(INTERVAL '{interval}', hour_start) AS bucket, "
             f"  SUM(requests) AS total_requests, "
-            f"  {http3_r} AS http3, "
-            f"  {h2_r} AS h2, "
-            f"  {h11_r} AS h11, "
-            f"  {other_r} AS other_proto, "
-            f"  {tls_r} AS tls, "
-            f"  {ipv6_r} AS ipv6 "
+            f"  {http3_r} AS http3, {h2_r} AS h2, {h11_r} AS h11, "
+            f"  {other_r} AS other_proto, {tls_r} AS tls, {ipv6_r} AS ipv6 "
             f"FROM read_parquet([{paths_sql}]) "
             f"WHERE hour_start >= TIMESTAMPTZ '{st_tz}' "
             f"  AND hour_start < TIMESTAMPTZ '{et_tz}' "
@@ -598,8 +632,7 @@ def _try_network_from_rollup(
 
     if crosses_active:
         active_hour_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
-        live_start = max(st, active_hour_dt)
-        live_st_tz = live_start.astimezone(UTC).isoformat()
+        live_st_tz = max(st, active_hour_dt).astimezone(UTC).isoformat()
         live_et_tz = et.astimezone(UTC).isoformat()
 
         http3_clause = "COUNT(*) FILTER (WHERE protocol = 'HTTP/3')" if has_protocol else "CAST(NULL AS BIGINT)"
@@ -617,12 +650,8 @@ def _try_network_from_rollup(
         select_clauses.append(
             f"SELECT time_bucket(INTERVAL '{interval}', timestamp) AS bucket, "
             f"  COUNT(*) AS total_requests, "
-            f"  {http3_clause} AS http3, "
-            f"  {h2_clause} AS h2, "
-            f"  {h11_clause} AS h11, "
-            f"  {other_proto_clause} AS other_proto, "
-            f"  {tls_clause} AS tls, "
-            f"  {ipv6_clause} AS ipv6 "
+            f"  {http3_clause} AS http3, {h2_clause} AS h2, {h11_clause} AS h11, "
+            f"  {other_proto_clause} AS other_proto, {tls_clause} AS tls, {ipv6_clause} AS ipv6 "
             f"FROM {table_name} "
             f"WHERE timestamp >= TIMESTAMPTZ '{live_st_tz}' "
             f"  AND timestamp < TIMESTAMPTZ '{live_et_tz}' "
@@ -653,18 +682,14 @@ def _try_network_from_rollup(
 
     def _sum_opt(key: str) -> int | None:
         vals = [int(v) for b in buckets if (v := b.get(key)) is not None]
-        if not vals:
-            return None
-        return sum(vals)
+        return sum(vals) if vals else None
 
     total = _sum_opt("total_requests") or 0
     if total == 0:
         return None
 
     def _pct(val: int | None) -> float | None:
-        if val is None:
-            return None
-        return round(int(val) * 100.0 / total, 1)
+        return round(int(val) * 100.0 / total, 1) if val is not None else None
 
     net_out: dict[str, Any] = {
         "total_requests": total,
@@ -673,22 +698,8 @@ def _try_network_from_rollup(
         "tls_pct": _pct(_sum_opt("tls")) if has_is_ssl else None,
         "ipv6_pct": _pct(_sum_opt("ipv6")) if has_ipv6 else None,
     }
-
     if has_protocol:
-        proto_ts: list[dict[str, Any]] = []
-        for b in buckets:
-            t_str = safe_iso(b["bucket"])
-            for col_key, proto_label in (
-                ("h11", "HTTP/1.1"),
-                ("h2", "HTTP/2"),
-                ("http3", "HTTP/3"),
-                ("other_proto", "Other"),
-            ):
-                cnt = int(b.get(col_key) or 0)
-                if cnt > 0:
-                    proto_ts.append({"time": t_str, "value": cnt, "category": proto_label})
-        net_out["protocol_time_series"] = proto_ts
-
+        net_out["protocol_time_series"] = _build_proto_ts(buckets, "")
     return net_out
 
 
@@ -830,19 +841,7 @@ def get_summary(
                 combined_parts.append("SUM(elapsed) FILTER (WHERE cache = 'MISS') AS sum_miss_elapsed")
                 combined_parts.append("COUNT(elapsed) FILTER (WHERE cache = 'MISS') AS cnt_miss_elapsed")
         if include_network:
-            if has_protocol:
-                combined_parts.append("COUNT(*) FILTER (WHERE protocol = 'HTTP/3') AS http3_cnt")
-                combined_parts.append("COUNT(*) FILTER (WHERE protocol = 'HTTP/2') AS h2_cnt")
-                combined_parts.append("COUNT(*) FILTER (WHERE protocol = 'HTTP/1.1') AS h11_cnt")
-                combined_parts.append(
-                    "COUNT(*) FILTER (WHERE protocol NOT IN ('HTTP/3', 'HTTP/2', 'HTTP/1.1')) AS other_proto_cnt"
-                )
-            if "is_ssl" in actual_cols:
-                combined_parts.append("COUNT(*) FILTER (WHERE is_ssl = true) AS tls_cnt")
-            elif "tls" in actual_cols:
-                combined_parts.append("COUNT(*) FILTER (WHERE tls IS NOT NULL AND tls != '') AS tls_cnt")
-            if has_ipv6:
-                combined_parts.append("COUNT(*) FILTER (WHERE ipv6 = true) AS ipv6_cnt")
+            combined_parts.extend(_network_raw_select_parts(actual_cols, has_protocol, has_ipv6))
 
         combined_sql = (
             f"SELECT {', '.join(combined_parts)} FROM {table_name} WHERE {where_clause} GROUP BY bucket ORDER BY bucket"
@@ -852,103 +851,28 @@ def get_summary(
         buckets = [dict(zip(col_names, r)) for r in rows]
         timer.mark("overview_caching_combined", _t)
 
-        _sum = lambda key: sum(b.get(key, 0) or 0 for b in buckets)  # noqa: E731
-        total_requests = _sum("total")
-        total_hits = _sum("hit_cnt")
-        total_misses = _sum("miss_cnt")
-        total_passes = _sum("pass_cnt")
-        total_synths = _sum("synth_cnt")
-
-        shield_eff = None
-        if has_shield:
-            sh_hit = _sum("shield_hit")
-            sh_total = _sum("shield_total")
-            shield_eff = round(sh_hit * 100.0 / sh_total, 1) if sh_total > 0 else None
-
-        caching: dict[str, Any] = {
-            "origin_offload_pct": round(total_hits * 100.0 / total_requests, 1) if total_requests > 0 else None,
-            "bandwidth_saved_bytes": _sum("bandwidth_saved") if has_resp_bytes else None,
-            "shield_effectiveness_pct": shield_eff,
-            "total_requests": total_requests,
-            "hit_requests": total_hits,
-            "miss_requests": total_misses,
-            "pass_requests": total_passes,
-            "synth_requests": total_synths,
-        }
-
-        caching["offload_time_series"] = [
-            {
-                "time": safe_iso(b["bucket"]),
-                "value": round(b["hit_cnt"] * 100.0 / b["total"], 1) if b["total"] > 0 else 0,
-            }
-            for b in buckets
-        ]
-
-        state_ts: list[dict] = []
-        for b in buckets:
-            t_str = safe_iso(b["bucket"])
-            other = b["total"] - b["hit_cnt"] - b["miss_cnt"] - b["pass_cnt"]
-            state_ts.append({"time": t_str, "value": int(b["hit_cnt"]), "category": "HIT"})
-            state_ts.append({"time": t_str, "value": int(b["miss_cnt"]), "category": "MISS"})
-            state_ts.append({"time": t_str, "value": int(b["pass_cnt"]), "category": "PASS"})
-            if other > 0:
-                state_ts.append({"time": t_str, "value": int(other), "category": "OTHER"})
-        caching["cache_state_time_series"] = state_ts
-
-        result["caching"] = caching
-
-        if include_overview:
-            avg_hit = None
-            avg_miss = None
-            if has_elapsed:
-                s_h = _sum("sum_hit_elapsed")
-                c_h = _sum("cnt_hit_elapsed")
-                s_m = _sum("sum_miss_elapsed")
-                c_m = _sum("cnt_miss_elapsed")
-                avg_hit = s_h / c_h if c_h > 0 else None
-                avg_miss = s_m / c_m if c_m > 0 else None
-            accel = round(avg_miss / avg_hit, 1) if avg_hit and avg_miss and avg_hit > 0 else None
-
-            result["overview"] = {
-                "origin_offload_pct": round(total_hits * 100.0 / total_requests, 1) if total_requests > 0 else None,
-                "threats_blocked": _sum("threats_cnt") if has_waf else None,
-                "cache_acceleration_factor": accel,
-                "total_requests": total_requests,
-                "total_bandwidth_bytes": _sum("total_bytes") if has_resp_bytes else None,
-                "edge_hit_requests": total_hits,
-                "origin_requests": _sum("origin_cnt"),
-            }
+        shaped = _shape_caching_and_overview_buckets(
+            buckets,
+            include_overview=include_overview,
+            has_resp_bytes=has_resp_bytes,
+            has_shield=has_shield,
+            has_waf=has_waf,
+            has_elapsed=has_elapsed,
+        )
+        result["caching"] = shaped["caching"]
+        if include_overview and "overview" in shaped:
+            result["overview"] = shaped["overview"]
             _overview_done = True
 
         if include_network:
-
-            def _comb_pct(key: str) -> float | None:
-                if total_requests <= 0:
-                    return None
-                return round(_sum(key) * 100.0 / total_requests, 1)
-
-            net_combined: dict[str, Any] = {
-                "http3_pct": _comb_pct("http3_cnt") if has_protocol else None,
-                "h2_pct": _comb_pct("h2_cnt") if has_protocol else None,
-                "tls_pct": _comb_pct("tls_cnt") if has_is_ssl else None,
-                "ipv6_pct": _comb_pct("ipv6_cnt") if has_ipv6 else None,
-                "total_requests": total_requests,
-            }
-            if has_protocol:
-                proto_ts: list[dict[str, Any]] = []
-                for b in buckets:
-                    t_str = safe_iso(b["bucket"])
-                    for col_key, proto_label in (
-                        ("h11_cnt", "HTTP/1.1"),
-                        ("h2_cnt", "HTTP/2"),
-                        ("http3_cnt", "HTTP/3"),
-                        ("other_proto_cnt", "Other"),
-                    ):
-                        cnt = int(b.get(col_key) or 0)
-                        if cnt > 0:
-                            proto_ts.append({"time": t_str, "value": cnt, "category": proto_label})
-                net_combined["protocol_time_series"] = proto_ts
-            result["network"] = net_combined
+            total_requests = int(shaped["caching"]["total_requests"])
+            result["network"] = _shape_raw_network_buckets(
+                buckets,
+                total_requests,
+                has_protocol=has_protocol,
+                has_is_ssl=has_is_ssl,
+                has_ipv6=has_ipv6,
+            )
             _network_done = True
 
     # ── Overview (standalone fallback when caching wasn't co-requested) ──
@@ -1191,20 +1115,8 @@ def get_summary(
         net_parts = [
             bucket_select,
             "COUNT(*) AS total_requests",
+            *_network_raw_select_parts(actual_cols, has_protocol, has_ipv6),
         ]
-        if has_protocol:
-            net_parts.append("COUNT(*) FILTER (WHERE protocol = 'HTTP/3') AS http3_cnt")
-            net_parts.append("COUNT(*) FILTER (WHERE protocol = 'HTTP/2') AS h2_cnt")
-            net_parts.append("COUNT(*) FILTER (WHERE protocol = 'HTTP/1.1') AS h11_cnt")
-            net_parts.append(
-                "COUNT(*) FILTER (WHERE protocol NOT IN ('HTTP/3', 'HTTP/2', 'HTTP/1.1')) AS other_proto_cnt"
-            )
-        if "is_ssl" in actual_cols:
-            net_parts.append("COUNT(*) FILTER (WHERE is_ssl = true) AS tls_cnt")
-        elif "tls" in actual_cols:
-            net_parts.append("COUNT(*) FILTER (WHERE tls IS NOT NULL AND tls != '') AS tls_cnt")
-        if has_ipv6:
-            net_parts.append("COUNT(*) FILTER (WHERE ipv6 = true) AS ipv6_cnt")
 
         sql = f"SELECT {', '.join(net_parts)} FROM {table_name} WHERE {where_clause} GROUP BY bucket ORDER BY bucket"
         net_rows = runner.execute(sql, params).fetchall()
@@ -1212,38 +1124,14 @@ def get_summary(
 
         net_cols = [d[0] for d in runner.con.description]
         net_buckets = [dict(zip(net_cols, r)) for r in net_rows]
-        _net_sum = lambda key: sum(int(b.get(key, 0) or 0) for b in net_buckets)  # noqa: E731
-        net_total = _net_sum("total_requests")
-
-        def _net_pct(key: str) -> float | None:
-            if net_total <= 0:
-                return None
-            return round(_net_sum(key) * 100.0 / net_total, 1)
-
-        net: dict[str, Any] = {
-            "http3_pct": _net_pct("http3_cnt") if has_protocol else None,
-            "tls_pct": _net_pct("tls_cnt") if has_is_ssl else None,
-            "ipv6_pct": _net_pct("ipv6_cnt") if has_ipv6 else None,
-            "h2_pct": _net_pct("h2_cnt") if has_protocol else None,
-            "total_requests": net_total,
-        }
-
-        if has_protocol:
-            proto_ts_standalone: list[dict[str, Any]] = []
-            for b in net_buckets:
-                t_str = safe_iso(b["bucket"])
-                for col_key, proto_label in (
-                    ("h11_cnt", "HTTP/1.1"),
-                    ("h2_cnt", "HTTP/2"),
-                    ("http3_cnt", "HTTP/3"),
-                    ("other_proto_cnt", "Other"),
-                ):
-                    cnt = int(b.get(col_key) or 0)
-                    if cnt > 0:
-                        proto_ts_standalone.append({"time": t_str, "value": cnt, "category": proto_label})
-            net["protocol_time_series"] = proto_ts_standalone
-
-        result["network"] = net
+        net_total = sum(int(b.get("total_requests", 0) or 0) for b in net_buckets)
+        result["network"] = _shape_raw_network_buckets(
+            net_buckets,
+            net_total,
+            has_protocol=has_protocol,
+            has_is_ssl=has_is_ssl,
+            has_ipv6=has_ipv6,
+        )
 
     # ── Image Optimizer ─────────────────────────────────────────────────
     if _want("io"):

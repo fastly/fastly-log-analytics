@@ -201,11 +201,18 @@ export const ShieldingHelp = () => (
     <div className="space-y-2 border-t pt-4">
       <h4 className="font-semibold text-foreground text-xs uppercase tracking-wider">Map Markers & Arcs</h4>
       <ul className="space-y-2 list-none pl-0">
-        <li className="flex items-center gap-2"><span className="w-2.5 h-2.5 rounded-full bg-[#3b82f6]" /><span><strong>Blue Dot:</strong> Edge POP (first arrival).</span></li>
-        <li className="flex items-center gap-2"><span className="w-2.5 h-2.5 rounded-full bg-[#a855f7]" /><span><strong>Purple Dot:</strong> Shield POP.</span></li>
-        <li className="flex items-center gap-2"><span><strong>Arc Width:</strong> Proportional to request volume.</span></li>
-        <li className="flex items-center gap-2"><span className="w-4 border-t-2 border-dashed border-[#ef4444]" /><span><strong>Dashed Red Arc:</strong> Flagged route — efficiency &gt; 3× <em>and</em> &ge; 20ms overhead above the light-speed floor, <em>and</em> at least 30 requests. Worth investigating for suboptimal peering.</span></li>
-        <li className="flex items-center gap-2"><span className="w-4 border-t-2 border-solid border-[#94a3b8]" /><span><strong>Grey Arc:</strong> Low-sample route (&lt; 30 requests) — drawn for visibility but not colour-graded or flagged.</span></li>
+        {[
+          { swatch: <span className="w-2.5 h-2.5 rounded-full bg-[#3b82f6]" />, title: 'Blue Dot:', body: 'Edge POP (first arrival).' },
+          { swatch: <span className="w-2.5 h-2.5 rounded-full bg-[#a855f7]" />, title: 'Purple Dot:', body: 'Shield POP.' },
+          { swatch: null, title: 'Arc Width:', body: 'Proportional to request volume.' },
+          { swatch: <span className="w-4 border-t-2 border-dashed border-[#ef4444]" />, title: 'Dashed Red Arc:', body: <>Flagged route — efficiency &gt; 3× <em>and</em> &ge; 20ms overhead above the light-speed floor, <em>and</em> at least 30 requests. Worth investigating for suboptimal peering.</> },
+          { swatch: <span className="w-4 border-t-2 border-solid border-[#94a3b8]" />, title: 'Grey Arc:', body: 'Low-sample route (< 30 requests) — drawn for visibility but not colour-graded or flagged.' },
+        ].map(({ swatch, title, body }) => (
+          <li key={title} className="flex items-center gap-2">
+            {swatch}
+            <span><strong>{title}</strong> {body}</span>
+          </li>
+        ))}
       </ul>
     </div>
   </div>
@@ -270,9 +277,13 @@ export const SHIELDING_COLUMNS: ColumnDef<ShieldingRowInput>[] = [
       )
     },
   },
-  { accessorKey: 'p50_ms', id: 'p50_ms', meta: { label: 'Median (P50)' }, header: columnHeader('P50 (E→S)'), cell: (info) => msCell(info.getValue()) },
-  { accessorKey: 'p95_ms', id: 'p95_ms', meta: { label: 'P95 Latency' }, header: columnHeader('P95 (E→S)'), cell: (info) => msCell(info.getValue()) },
-  { accessorKey: 'p99_ms', id: 'p99_ms', meta: { label: 'P99 Latency' }, header: columnHeader('P99 (E→S)'), cell: (info) => msCell(info.getValue()) },
+  ...([
+    ['p50_ms', 'Median (P50)', 'P50 (E→S)'],
+    ['p95_ms', 'P95 Latency', 'P95 (E→S)'],
+    ['p99_ms', 'P99 Latency', 'P99 (E→S)'],
+  ] as const).map(([key, label, hdr]): ColumnDef<ShieldingRowInput> => ({
+    accessorKey: key, id: key, meta: { label }, header: columnHeader(hdr), cell: (info) => msCell(info.getValue()),
+  })),
   {
     accessorKey: 'light_speed_rtt_ms', id: 'light_speed_rtt_ms', meta: { label: 'Light-Speed Floor' }, header: columnHeader('Light Floor'),
     cell: (info) => {
@@ -292,11 +303,9 @@ export const SHIELDING_COLUMNS: ColumnDef<ShieldingRowInput>[] = [
   },
 ]
 
-const SHIELDING_LABELS: Record<string, string> = {
-  edge_pop: 'Edge POP', shield_pop: 'Shield POP', requests: 'Requests',
-  p50_ms: 'Median (P50)', p95_ms: 'P95 Latency', p99_ms: 'P99 Latency',
-  light_speed_rtt_ms: 'Light-Speed Floor', efficiency_ratio: 'Efficiency',
-}
+const SHIELDING_LABELS: Record<string, string> = Object.fromEntries(
+  SHIELDING_COLUMNS.map((c) => [c.id!, (c.meta as { label: string }).label]),
+)
 export const getShieldingLabels = (ids: string[]) => ids.map(id => ({ id, label: SHIELDING_LABELS[id] || id }))
 
 const PROTOCOL_COLORS = ['bg-emerald-500', 'bg-sky-500', 'bg-amber-500', 'bg-purple-500', 'bg-rose-500'] as const
@@ -361,49 +370,41 @@ export function TransportSection({ activeServiceId, startTime, endTime, filterPa
       )}
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <StatCard
-          title="TCP RTT (p50 / p95)" icon={Activity} loading={isLoading} loadingMessage="Analyzing TCP round-trip times..."
-          value={transport?.tcp_rtt_p50_ms != null ? (
-            <span className="font-mono">
-              {transport.tcp_rtt_p50_ms.toFixed(1)}
-              <span className="text-xs text-muted-foreground font-normal ml-1">
-                / {transport.tcp_rtt_p95_ms != null ? `${transport.tcp_rtt_p95_ms.toFixed(1)}ms` : '—'}
+        {[
+          {
+            title: 'TCP RTT (p50 / p95)', icon: Activity, loadingMessage: 'Analyzing TCP round-trip times...',
+            value: transport?.tcp_rtt_p50_ms != null ? (
+              <span className="font-mono">
+                {transport.tcp_rtt_p50_ms.toFixed(1)}
+                <span className="text-xs text-muted-foreground font-normal ml-1">
+                  / {transport.tcp_rtt_p95_ms != null ? `${transport.tcp_rtt_p95_ms.toFixed(1)}ms` : '—'}
+                </span>
               </span>
-            </span>
-          ) : '—'}
-          sub="Median & tail edge RTT" helpTitle="TCP Round-Trip Time"
-          helpContent="Time taken for a data packet to travel from the Fastly edge node to the client and back."
-        />
-        <StatCard
-          title="TCP Retransmissions" icon={ArrowDownUp} loading={isLoading} loadingMessage="Calculating retransmission rate..."
-          value={transport?.retrans_rate_pct != null ? (
-            <span className="font-mono">
-              {transport.retrans_rate_pct.toFixed(2)}<span className="text-xs text-muted-foreground font-normal ml-0.5">%</span>
-            </span>
-          ) : '—'}
-          sub="Average packet retransmit rate" helpTitle="TCP Retransmission Rate"
-          helpContent="Percentage of TCP segments retransmitted due to network congestion or packet drop."
-        />
-        <StatCard
-          title="Packet Loss" icon={Wifi} loading={isLoading} loadingMessage="Evaluating packet loss..."
-          value={transport?.packet_loss_pct != null ? (
-            <span className="font-mono">
-              {transport.packet_loss_pct.toFixed(2)}<span className="text-xs text-muted-foreground font-normal ml-0.5">%</span>
-            </span>
-          ) : '—'}
-          sub="Edge observed packet loss" helpTitle="Packet Loss Percentage"
-          helpContent="Estimated packet loss between the client and Fastly edge cache nodes."
-        />
-        <StatCard
-          title="Delivery Rate" icon={Gauge} loading={isLoading} loadingMessage="Measuring delivery rate..."
-          value={transport?.delivery_rate_mbps != null ? (
-            <span className="font-mono">
-              {transport.delivery_rate_mbps.toFixed(1)}<span className="text-xs text-muted-foreground font-normal ml-1">Mbps</span>
-            </span>
-          ) : '—'}
-          sub="Estimated client bandwidth" helpTitle="Delivery Throughput"
-          helpContent="Paced delivery throughput achieved during response body transfer."
-        />
+            ) : '—',
+            sub: 'Median & tail edge RTT', helpTitle: 'TCP Round-Trip Time',
+            helpContent: 'Time taken for a data packet to travel from the Fastly edge node to the client and back.',
+          },
+          {
+            title: 'TCP Retransmissions', icon: ArrowDownUp, loadingMessage: 'Calculating retransmission rate...',
+            value: transport?.retrans_rate_pct != null ? <span className="font-mono">{transport.retrans_rate_pct.toFixed(2)}<span className="text-xs text-muted-foreground font-normal ml-0.5">%</span></span> : '—',
+            sub: 'Average packet retransmit rate', helpTitle: 'TCP Retransmission Rate',
+            helpContent: 'Percentage of TCP segments retransmitted due to network congestion or packet drop.',
+          },
+          {
+            title: 'Packet Loss', icon: Wifi, loadingMessage: 'Evaluating packet loss...',
+            value: transport?.packet_loss_pct != null ? <span className="font-mono">{transport.packet_loss_pct.toFixed(2)}<span className="text-xs text-muted-foreground font-normal ml-0.5">%</span></span> : '—',
+            sub: 'Edge observed packet loss', helpTitle: 'Packet Loss Percentage',
+            helpContent: 'Estimated packet loss between the client and Fastly edge cache nodes.',
+          },
+          {
+            title: 'Delivery Rate', icon: Gauge, loadingMessage: 'Measuring delivery rate...',
+            value: transport?.delivery_rate_mbps != null ? <span className="font-mono">{transport.delivery_rate_mbps.toFixed(1)}<span className="text-xs text-muted-foreground font-normal ml-1">Mbps</span></span> : '—',
+            sub: 'Estimated client bandwidth', helpTitle: 'Delivery Throughput',
+            helpContent: 'Paced delivery throughput achieved during response body transfer.',
+          },
+        ].map((card) => (
+          <StatCard key={card.title} {...card} loading={isLoading} />
+        ))}
       </div>
 
       {transport?.protocol_distribution && transport.protocol_distribution.length > 0 && (
@@ -795,28 +796,32 @@ function NetworkBody({
       />
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 [contain-intrinsic-size:120px] [content-visibility:auto]">
-        <StatCard
-          title="Global Health" icon={Activity} loading={isCoreLoadingInitial} loadingMessage="Compiling ASN health matrix..."
-          value={<>{summary?.global_health_score ?? '--'}/100</>} sub="Average across top ASNs"
-          helpTitle="Global Health Score" helpContent={<GlobalHealthHelp />} className="min-h-[110px]"
-        />
-        <StatCard
-          title="Avg RTT" icon={Zap} loading={isCoreLoadingInitial} loadingMessage="Analyzing TCP round-trip times..."
-          value={<>{summary?.avg_rtt_ms ?? '--'}ms</>} sub="Across all regions"
-          helpTitle="Average RTT" helpContent={<AvgRttHelp />} className="min-h-[110px]"
-        />
-        <StatCard
-          title="Worst ASN" icon={AlertCircle} iconClassName="text-red-500" loading={isCoreLoadingInitial} loadingMessage="Scanning ASN degradation..."
-          value={<span className="text-sm truncate block">{summary?.worst_asn?.label ?? '--'}</span>}
-          sub={<span className="text-red-500 font-medium">Score: {summary?.worst_asn?.score ?? '--'}</span>}
-          helpTitle="Worst-Performing ASN" helpContent={<WorstAsnHelp />} className="min-h-[110px]"
-        />
-        <StatCard
-          title="Worst Region" icon={Globe} loading={isCoreLoadingInitial} loadingMessage="Evaluating regional latency..."
-          value={<span className="text-sm truncate block">{summary?.worst_country?.label ?? '--'}</span>}
-          sub={<span className="text-red-500 font-medium">Score: {summary?.worst_country?.score ?? '--'}</span>}
-          helpTitle="Worst-Performing Region" helpContent={<WorstRegionHelp />} className="min-h-[110px]"
-        />
+        {[
+          {
+            title: 'Global Health', icon: Activity, loadingMessage: 'Compiling ASN health matrix...',
+            value: <>{summary?.global_health_score ?? '--'}/100</>, sub: 'Average across top ASNs',
+            helpTitle: 'Global Health Score', helpContent: <GlobalHealthHelp />,
+          },
+          {
+            title: 'Avg RTT', icon: Zap, loadingMessage: 'Analyzing TCP round-trip times...',
+            value: <>{summary?.avg_rtt_ms ?? '--'}ms</>, sub: 'Across all regions',
+            helpTitle: 'Average RTT', helpContent: <AvgRttHelp />,
+          },
+          {
+            title: 'Worst ASN', icon: AlertCircle, iconClassName: 'text-red-500', loadingMessage: 'Scanning ASN degradation...',
+            value: <span className="text-sm truncate block">{summary?.worst_asn?.label ?? '--'}</span>,
+            sub: <span className="text-red-500 font-medium">Score: {summary?.worst_asn?.score ?? '--'}</span>,
+            helpTitle: 'Worst-Performing ASN', helpContent: <WorstAsnHelp />,
+          },
+          {
+            title: 'Worst Region', icon: Globe, loadingMessage: 'Evaluating regional latency...',
+            value: <span className="text-sm truncate block">{summary?.worst_country?.label ?? '--'}</span>,
+            sub: <span className="text-red-500 font-medium">Score: {summary?.worst_country?.score ?? '--'}</span>,
+            helpTitle: 'Worst-Performing Region', helpContent: <WorstRegionHelp />,
+          },
+        ].map((card) => (
+          <StatCard key={card.title} {...card} loading={isCoreLoadingInitial} className="min-h-[110px]" />
+        ))}
       </div>
 
       <TransportSection activeServiceId={activeServiceId} startTime={startTime} endTime={endTime} filterPayload={filterPayload} />

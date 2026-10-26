@@ -1,70 +1,16 @@
 """Per-service DuckDB connection pool.
 
-Each API request previously opened a fresh DuckDB connection, ran ~10 PRAGMAs,
-configured S3 + iceberg, and called ``update_iceberg_view`` to bind the per-
-service view onto the new connection. Steady-state cost was ~50ms of setup
-plus another ~45ms on first-query overhead — paid by every request.
+Caches read-only connections per service in a LIFO pool (bounded by ``max_size``,
+default 12), re-validating view bindings via ``_view_cache`` + buffer mtime on
+checkout. Opt-in via ``DUCKDB_CONNECTION_POOL`` (default on; ``"0"`` disables).
 
-This module caches read-only connections in a per-service pool. A request
-checks out a fully-configured connection, runs its queries, then returns it.
-The view binding is re-validated on checkout via the existing fast-path
-fingerprint (``_view_cache``); a cache hit is a few-µs dict lookup, so the
-hot path checkout is genuinely cheap.
-
-The pool is opt-in via ``DUCKDB_CONNECTION_POOL`` env var (default on); set
-to ``"0"`` to disable and fall back to the always-fresh-connection path.
-Exists primarily so tests and ops have an emergency switch if a pooling
-regression slips through.
-
-Lifecycle:
-  * Pool is created lazily on first checkout for a service.
-  * Idle connections are stored in a LIFO queue (recently-used first, so the
-    OS page cache stays hot on the file descriptors that are currently warm).
-  * Pool size is bounded by ``max_size`` (default 12 per service). When the
-    pool is empty and ``in_use < max_size``, the next checkout creates a new
-    connection. When ``in_use == max_size``, waiters block on a Condition.
-  * If a request returns a connection that errored mid-query, the connection
-    is discarded (closed) rather than returned to the pool — the next
-    checkout creates a fresh one.
-  * On checkin, we DROP any temp tables the request created (sweep against
-    ``information_schema``) so a long-lived pool connection doesn't slowly
-    accumulate state across requests. A leaked temp table from a prior
-    request would otherwise show up as ``CATALOG ENTRY ALREADY EXISTS`` if a
-    later request happened to pick the same uuid (improbable, but
-    deterministic at scale).
-
-Concurrency:
-  * Multiple connections to the same DuckDB file on the same process are safe
-    — they share the in-memory database state. In durable serving mode each
-    pooled connection is instead an independent in-memory DuckDB instance.
-  * File-backed connections open with ``read_only=False`` (``get_connection``
-    forces this) so cron write connections never conflict with pool
-    connections. Durable serving connections never open the native service
-    file and attach DuckLake read-only.
-  * That safety is WITHIN ONE PROCESS only for the file-backed path. DuckDB
-    takes a process-exclusive lock on a read-write single-file database, so a
-    SECOND backend process (e.g. a second pod sharing the PVC) fails every
-    checkout with ``Could not set lock on file``; the retry loop below
-    classifies it transient and surfaces ``DBBusyError`` -> 503 on every data
-    request. Durable serving avoids this file ownership, though pod-local
-    accelerators remain a separate constraint. See
-    docs/adr/18-serving-tier-single-pod.md.
-
-Heavy/light bulkhead:
-  * Aggregate endpoints scan large windows and can hold a connection for
-    seconds; cheap requests (cron-runs, banners, status) need one for
-    milliseconds. With one small shared pool the cheap ones queue behind the
-    heavy ones. Heavy checkouts (``heavy=True``, chosen by route in
-    ``is_heavy_route``) therefore also take a slot from a per-pool semaphore of
-    ``DUCKDB_POOL_HEAVY_MAX`` (default ``max_size - 1``), so at least one
-    connection is always left for light requests. A mixed-workload benchmark
-    (6 heavy + 6 light clients, pool of 4) kept light p99 at 4 ms with a cap of 3
-    and heavy throughput unchanged.
-
-Failure handling:
-  * If view rebind fails on checkout, we discard the connection and try a
-    fresh one. After ``max_retries`` consecutive failures we surface
-    ``DBBusyError`` to the caller (which becomes a 503 in deps.py).
+Notes:
+  * File-backed safety is single-process only (ADR-18); durable serving uses
+    independent in-memory DuckDB instances attached read-only to DuckLake.
+  * Heavy routes (``is_heavy_route``) acquire a ``DUCKDB_POOL_HEAVY_MAX``
+    semaphore slot (default ``max_size - 1``) so light requests never starve.
+  * On checkin, errored or draining connections are discarded; optional temp
+    table sweep (``DUCKDB_POOL_SWEEP``) drops leftover ``temp.main`` tables.
 """
 
 from __future__ import annotations
@@ -84,26 +30,51 @@ from backend.utils.telemetry import log_once_per
 
 logger = logging.getLogger(__name__)
 
+_TRUTHY = ("1", "true", "yes", "on")
+_FALSY = ("0", "false", "no", "off")
+_DEFAULT_HEAVY_ROUTE_SUFFIXES = (
+    "/aggregates",
+    "/bundle",
+    "/network-health",
+    "/insights",
+    "/insights/cache-collapse-detail",
+    "/slow-urls",
+)
+_WAIT_SAMPLES_MAX = 1024  # ~last 17 minutes at 1 req/s; ~3.5 minutes at 5 req/s
+
+
+def _env_int(name: str, default: int, minimum: int = 1) -> int:
+    try:
+        return max(minimum, int(os.getenv(name, str(default))))
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_float(name: str, default: float, scale: float = 1.0) -> float:
+    try:
+        return max(0.0, float(os.getenv(name, str(default))) * scale)
+    except (TypeError, ValueError):
+        return default * scale
+
+
+def _close_quietly(con: duckdb.DuckDBPyConnection, label: str) -> None:
+    try:
+        con.close()
+    except Exception:
+        if log_once_per(label, 60):
+            logger.debug(label, exc_info=True)
+
 
 def _pool_enabled() -> bool:
-    return os.getenv("DUCKDB_CONNECTION_POOL", "1").lower() not in ("0", "false", "no", "off")
+    return os.getenv("DUCKDB_CONNECTION_POOL", "1").lower() not in _FALSY
 
 
 def _pool_max_size() -> int:
-    raw = os.getenv("DUCKDB_POOL_MAX_SIZE", "12")
-    try:
-        return max(1, int(raw))
-    except (TypeError, ValueError):
-        return 12
+    return _env_int("DUCKDB_POOL_MAX_SIZE", 12)
 
 
 def _pool_heavy_cap(max_size: int) -> int:
-    """Max pool slots heavy requests may hold at once (see "Heavy/light bulkhead").
-
-    ``DUCKDB_POOL_HEAVY_MAX`` overrides; the default leaves one connection for
-    light requests. Clamped to ``[1, max_size]``; a pool of one has nothing to
-    reserve, so the cap equals the pool.
-    """
+    """Max pool slots heavy requests may hold at once (clamped to ``[1, max_size]``)."""
     raw = os.getenv("DUCKDB_POOL_HEAVY_MAX")
     if raw:
         try:
@@ -113,20 +84,8 @@ def _pool_heavy_cap(max_size: int) -> int:
     return max(1, max_size - 1)
 
 
-# Route templates ending in one of these scan wide windows and hold a connection
-# for seconds. Override with DUCKDB_POOL_HEAVY_ROUTES (comma-separated suffixes).
-_DEFAULT_HEAVY_ROUTE_SUFFIXES = (
-    "/aggregates",
-    "/bundle",
-    "/network-health",
-    "/insights",
-    "/insights/cache-collapse-detail",
-    "/slow-urls",
-)
-
-
 def is_heavy_route(route_template: str | None) -> bool:
-    """True for routes that should take a heavy slot (see "Heavy/light bulkhead")."""
+    """True for routes that should take a heavy bulkhead slot."""
     if not route_template:
         return False
     raw = os.getenv("DUCKDB_POOL_HEAVY_ROUTES")
@@ -136,130 +95,42 @@ def is_heavy_route(route_template: str | None) -> bool:
 
 def _slow_checkout_ms() -> float:
     """Checkouts that wait at least this long are logged (0 disables; default 500 ms)."""
-    try:
-        return max(0.0, float(os.getenv("DUCKDB_POOL_SLOW_CHECKOUT_MS", "500")))
-    except (TypeError, ValueError):
-        return 500.0
+    return _env_float("DUCKDB_POOL_SLOW_CHECKOUT_MS", 500.0)
 
 
 def _pool_conn_memory_limit() -> str | None:
-    """Optional per-pool-connection memory cap.
-
-    Without this, every pool connection inherits the process-wide DuckDB
-    memory_limit derived from physical RAM (~60%), so 8 concurrent queries
-    against a large dataset can each balloon to multi-GB. Set
-    ``DUCKDB_POOL_CONN_MEMORY_LIMIT`` (e.g. ``256MB`` or ``1GB``) to enforce
-    a per-connection ceiling — DuckDB spills intermediate state to its
-    temp directory when over the limit instead of growing RSS unbounded.
-
-    Returns the env-var value (passed through verbatim — DuckDB accepts
-    ``256MB`` / ``2GB`` / ``104857600`` etc.) or ``None`` to keep the default.
-    """
+    """Optional per-pool-connection memory cap (``DUCKDB_POOL_CONN_MEMORY_LIMIT``)."""
     return os.getenv("DUCKDB_POOL_CONN_MEMORY_LIMIT") or None
 
 
 def _pool_api_rebind_lock_timeout_s() -> float:
-    """Per-service iceberg-view rebind lock timeout for API pool checkouts.
-
-    Per ADR-03 §28 cron and API are meant to be process-isolated; today they
-    share the per-service rebind lock in [iceberg/view.py](iceberg/view.py).
-    When cron exceeds its 300s hard cap and the cron decorator abandons the
-    worker thread ([cron/decorators.py](cron/decorators.py)), Python can't
-    kill the thread — it keeps holding the rebind lock while its slow S3
-    manifest read is in flight. With the lock_timeout default of 5s, every
-    API pool checkout serialises on that lock, the pool's outer 10s wait
-    budget runs out across concurrent waiters, and dashboard endpoints
-    cascade into 503 (DBBusy → _PoolBusy → deps.py raises HTTPException).
-
-    The view-rebind code has a graceful fallback chain on lock timeout
-    (cached SQL → persistent view → continue with last-known view), so a
-    short timeout on the API side just trades freshness for liveness:
-    requests get a possibly-seconds-stale view until cron releases the
-    lock, but never block the pool. Cron's own update_iceberg_view calls
-    continue to use the 5s default — they're the writer, they actually
-    need to win the lock.
-
-    Tuneable via DUCKDB_POOL_API_REBIND_LOCK_TIMEOUT_MS (default 500ms).
-    Set to 0 to restore the old blocking behaviour for emergency rollback.
-    """
-    raw = os.getenv("DUCKDB_POOL_API_REBIND_LOCK_TIMEOUT_MS", "500")
-    try:
-        return max(0.0, float(raw) / 1000.0)
-    except (TypeError, ValueError):
-        return 0.5
+    """Per-service iceberg-view rebind lock timeout for API checkouts (ADR-03 §28, default 0.5s)."""
+    return _env_float("DUCKDB_POOL_API_REBIND_LOCK_TIMEOUT_MS", 500.0, scale=0.001)
 
 
 def _pool_warm_at_boot_enabled() -> bool:
-    """Whether the scheduler pre-acquires pool connections at startup.
-
-    Without warm-up, the first request to each pool burns ~150 ms per
-    fresh-build conn (open DuckDB file, install httpfs, bind iceberg view).
-    For callers that opportunistically acquire extra conns with a short
-    ``max_wait`` (notably /api/origin/aggregates' parallel branches), the
-    first request silently falls back to serial because the cold builds
-    exceed the wait deadline. With warm-up on, startup pays bounded cost
-    (``count`` * ~150 ms per service) so the first request finds warm
-    slots and parallelizes cleanly.
-
-    Disabled by default — same conservative pattern as DUCKDB_POOL_SWEEP.
-    Flip ``DUCKDB_POOL_WARM_AT_BOOT=1`` (or ``true``/``yes``/``on``) to
-    activate.
-    """
-    return os.getenv("DUCKDB_POOL_WARM_AT_BOOT", "0").lower() in ("1", "true", "yes", "on")
+    """Whether the scheduler pre-acquires pool connections at startup."""
+    return os.getenv("DUCKDB_POOL_WARM_AT_BOOT", "0").lower() in _TRUTHY
 
 
 def _pool_warm_at_boot_count() -> int:
-    """How many idle pool conns to pre-acquire per service at startup.
-
-    Default 4 — matches the /api/origin/aggregates composite's footprint
-    (ctx.con + 3 extras). Larger values trade longer startup for warmer
-    pools under heavier concurrent first-request load. Clamped to the
-    pool's ``max_size`` at warm-up time so over-requesting can't deadlock.
-    """
-    raw = os.getenv("DUCKDB_POOL_WARM_AT_BOOT_COUNT", "4")
-    try:
-        return max(1, int(raw))
-    except (TypeError, ValueError):
-        return 4
+    """How many idle pool conns to pre-acquire per service at startup (default 4)."""
+    return _env_int("DUCKDB_POOL_WARM_AT_BOOT_COUNT", 4)
 
 
 def _pool_sweep_enabled() -> bool:
-    """Whether release() drops leftover ``TEMP`` tables on checkin.
-
-    The pool docstring (lines 29-34) promises that a connection
-    returned to the pool doesn't carry per-request state across
-    requests. ``CREATE TEMP TABLE`` callers that don't pair every
-    create with a DROP (request abort, missing try/finally, etc.)
-    would otherwise accumulate TEMP entries on the pool's idle
-    connection over its lifetime. Safe to scope to the conn being
-    released: TEMP tables live in the per-connection ``temp.main``
-    schema, so the sweep can never touch another conn's in-flight
-    tables — including the catalog tables that
-    ``/api/origin/aggregates`` materializes across pool conns.
-
-    Disabled by default so a slow sweep can't show up as a p95
-    regression on rollout; flip ``DUCKDB_POOL_SWEEP=1`` (or
-    ``true``/``yes``/``on``) to activate.
-    """
-    return os.getenv("DUCKDB_POOL_SWEEP", "0").lower() in ("1", "true", "yes", "on")
+    """Whether release() drops leftover ``TEMP`` tables on checkin."""
+    return os.getenv("DUCKDB_POOL_SWEEP", "0").lower() in _TRUTHY
 
 
-# Per-connection state tracking. DuckDB connection objects are slotted
-# C types — they don't accept arbitrary attribute assignment — so we
-# keep our metadata in a module-level dict keyed by id(con). Entries are
-# cleared when the connection is closed/discarded.
-#
-# Fingerprint = the ``_view_cache`` tuple at the time the view
-# was last bound to this connection. The tuple is replaced (not mutated)
-# when the cache rotates, so identity is a sufficient fresh-check.
+# Per-connection metadata keyed by id(con) since DuckDB connections are slotted C types.
 _conn_state: dict[int, dict] = {}
 _conn_state_lock = threading.Lock()
 
 
 def _set_conn_state(con: duckdb.DuckDBPyConnection, **kv) -> None:
     with _conn_state_lock:
-        state = _conn_state.setdefault(id(con), {})
-        state.update(kv)
+        _conn_state.setdefault(id(con), {}).update(kv)
 
 
 def _get_conn_state(con: duckdb.DuckDBPyConnection, key: str, default=None):
@@ -273,13 +144,7 @@ def _forget_conn(con: duckdb.DuckDBPyConnection) -> None:
 
 
 def _safe_buffer_mtime(src: dict | None) -> float | tuple[float | None, ...] | None:
-    """Return mtime of the service's buffer dir, or None if it can't be read.
-
-    Used as part of the pool's checkout fingerprint so that the sync cron
-    removing buffer parquet files (without touching ``_view_cache``) still
-    invalidates pooled connections. Any add/remove inside the dir bumps the
-    dir's own mtime — so a single stat is enough.
-    """
+    """Return mtime of the service's buffer dir(s), or None if unavailable."""
     if src is None:
         return None
     try:
@@ -290,50 +155,34 @@ def _safe_buffer_mtime(src: dict | None) -> float | tuple[float | None, ...] | N
         from backend.core.iceberg._core import _buffer_dir
 
         if src.get("name", "").endswith("::rum"):
-            path_vitals = _buffer_dir(src, table_name="client_vitals")
-            path_errors = _buffer_dir(src, table_name="client_errors")
             mtimes: list[float | None] = []
-            for p in (path_vitals, path_errors):
+            for tbl in ("client_vitals", "client_errors"):
                 try:
-                    mtimes.append(os.path.getmtime(p))
+                    mtimes.append(os.path.getmtime(_buffer_dir(src, table_name=tbl)))
                 except Exception:
                     mtimes.append(None)
                     if log_once_per("_safe_buffer_mtime: mtimes.append failed (ignored)", 60):
                         logger.debug("_safe_buffer_mtime: mtimes.append failed (ignored)", exc_info=True)
             return tuple(mtimes) if any(m is not None for m in mtimes) else None
-
-        path = _buffer_dir(src)
-        return os.path.getmtime(path)
+        return os.path.getmtime(_buffer_dir(src))
     except Exception:
         return None
 
 
-_WAIT_SAMPLES_MAX = 1024  # ~last 17 minutes at 1 req/s; ~3.5 minutes at 5 req/s
-
-
 def _percentile_summary(samples: collections.deque[float], lock: threading.Lock) -> dict:
-    """Nearest-rank percentile snapshot over a bounded sample deque.
-
-    Returns a stable shape (zeros when empty) so admin UI consumers don't
-    have to conditionally render. Cost is a single sort over the snapshot
-    — well under 1ms at the ring buffer's 1024-sample bound.
-    """
+    """Nearest-rank percentile snapshot over a bounded sample deque."""
     with lock:
         snap = list(samples)
     n = len(snap)
     if n == 0:
         return {"count": 0, "p50_ms": 0.0, "p95_ms": 0.0, "p99_ms": 0.0, "max_ms": 0.0, "mean_ms": 0.0}
     snap.sort()
-
-    def _pct(p: float) -> float:
-        idx = min(n - 1, max(0, int(round(p * (n - 1)))))
-        return round(snap[idx], 2)
-
+    pct = lambda p: round(snap[min(n - 1, max(0, int(round(p * (n - 1)))))], 2)  # noqa: E731
     return {
         "count": n,
-        "p50_ms": _pct(0.50),
-        "p95_ms": _pct(0.95),
-        "p99_ms": _pct(0.99),
+        "p50_ms": pct(0.50),
+        "p95_ms": pct(0.95),
+        "p99_ms": pct(0.99),
         "max_ms": round(snap[-1], 2),
         "mean_ms": round(sum(snap) / n, 2),
     }
@@ -345,60 +194,21 @@ class _Pool:
     def __init__(self, service_key: str, max_size: int):
         self.service_key = service_key
         self.max_size = max_size
-        # LIFO so the most-recently-used connection (warmest in any OS / DuckDB
-        # internal caches) is the next checkout.
         self._idle: queue.LifoQueue = queue.LifoQueue(maxsize=max_size)
         self._lock = threading.RLock()
-        # ``in_use`` is the count of connections currently checked out plus
-        # connections idle in the queue. Bounded by ``max_size``.
-        self._in_use = 0
+        self._in_use = 0  # checked out + idle in queue (bounded by max_size)
         self._cond = threading.Condition(self._lock)
-        # Set True while a DuckDB instance recycle is draining this pool: new
-        # acquires are rejected with ``_PoolBusy`` and returned conns are closed
-        # (not idled) so ``_in_use`` can reach 0 and the shared instance frees.
-        # See backend.core.duckdb_recycle.
         self._draining = False
-        # Cumulative counters for diagnostics — exposed via ``stats()``.
         self._created_total = 0
         self._reused_total = 0
         self._discarded_total = 0
-        # SRE-12: distinct reject counters. ``saturated_rejects_total`` counts
-        # acquires that hit the max-size wait deadline and raised _PoolBusy →
-        # 503 to the caller — the user-facing saturation cliff. A partial-
-        # reject burst (<5% of checkouts) can sit below the wait-p95 the
-        # SystemHealthCard tones on, so the p95 alone misses it; this counter
-        # makes the reject rate directly observable. ``drain_rejects_total``
-        # counts the transient rejects during a DuckDB-instance recycle drain
-        # (expected, not saturation) — tracked apart so it can't muddy the
-        # saturation signal.
-        self._saturated_rejects_total = 0
-        self._drain_rejects_total = 0
-        # SRE-16: wall-clock of the last writer-driven view warm (sync/commit
-        # call warm_pool_for_service after mutating the view fingerprint).
-        # ``build_ms`` only said how long a rebuild took, never *when* — so a
-        # rollup-lag / stale-view condition (warming stopped, reads self-heal
-        # via execute_with_stale_view_retry but ingest isn't landing) had no
-        # signal. A stale ``last_warmed_at`` is that signal. None = never warmed.
-        self._last_warmed_at: str | None = None
-        # Phase 6 in-process sampler — last ``_WAIT_SAMPLES_MAX`` checkout
-        # wait times in milliseconds. Companion to the OTel histogram
-        # (``app.thread_wait_ms``) so the admin UI can render p50/p95/p99
-        # without parsing docker logs. Bounded deque so memory stays flat
-        # regardless of throughput.
+        self._saturated_rejects_total = 0  # SRE-12: user-facing saturation rejects (→ 503)
+        self._drain_rejects_total = 0  # SRE-12: transient recycle-drain rejects
+        self._last_warmed_at: str | None = None  # SRE-16: wall-clock of last completed view warm
         self._wait_samples: collections.deque[float] = collections.deque(maxlen=_WAIT_SAMPLES_MAX)
         self._wait_samples_lock = threading.Lock()
-        # Time spent inside ``_prepare_checkout``'s call to
-        # ``update_iceberg_view`` — the per-service rebind RLock that cron's
-        # commit path also acquires. Non-zero samples here are the symptom
-        # of API/cron lock contention (see _pool_api_rebind_lock_timeout_s
-        # for the full story). Tracked separately from _wait_samples so the
-        # operator can attribute pool latency to "waiting for a slot" vs.
-        # "waiting for cron to release the view lock".
         self._rebind_wait_samples: collections.deque[float] = collections.deque(maxlen=_WAIT_SAMPLES_MAX)
         self._rebind_wait_samples_lock = threading.Lock()
-        # Heavy/light bulkhead: heavy checkouts also hold one of ``heavy_cap``
-        # semaphore slots, so light requests always have at least
-        # ``max_size - heavy_cap`` connections to themselves.
         self.heavy_cap = _pool_heavy_cap(max_size)
         self._heavy_sem = threading.BoundedSemaphore(self.heavy_cap)
         self._heavy_in_use = 0
@@ -423,6 +233,19 @@ class _Pool:
             self._heavy_in_use -= 1
         self._heavy_sem.release()
 
+    def _record_wait_telemetry(self, wait_ms: float, outcome: str, waited: bool | None = None) -> None:
+        try:
+            from backend.core.request_telemetry import thread_wait_histogram
+
+            attrs = {"service": self.service_key, "outcome": outcome}
+            if waited is not None:
+                attrs["waited"] = str(waited).lower()
+            thread_wait_histogram().record(wait_ms, attrs)
+        except Exception:
+            if log_once_per("acquire: thread_wait_histogram failed (ignored)", 60):
+                logger.debug("acquire: thread_wait_histogram failed (ignored)", exc_info=True)
+        self._record_wait_sample(wait_ms)
+
     def acquire(
         self,
         src: dict,
@@ -431,41 +254,15 @@ class _Pool:
         skip_view_update: bool = False,
         reuse_only: bool = False,
     ) -> duckdb.DuckDBPyConnection:
-        # Phase 6 telemetry: time how long this checkout spends WAITING for
-        # an idle connection (the saturated path). Both fast-path (idle
-        # ready) and fresh-build paths record ~0 ms here; only contention
-        # with cron / another request shows up as non-zero. ADR-03 reads
-        # the p95 of ``app.thread_wait_ms`` to decide cron isolation
-        # strategy (separate pool vs separate process).
-        #
-        # ``skip_view_update`` is a caller assertion that the per-service
-        # iceberg view is known fresh for the duration of this acquire —
-        # used by in-request "extra" checkouts (e.g. /api/origin/aggregates'
-        # parallel branches) where a sibling conn was just validated by the
-        # same request. When set, the reused-conn branch skips the
-        # fingerprint check + view rebind in ``_prepare_checkout``.
-        # MUST NOT be set for cross-request acquires: misuse will hand out
-        # a possibly-stale view.
         t_acquire_start = time.monotonic()
         deadline = t_acquire_start + max_wait
         reused_con: duckdb.DuckDBPyConnection | None = None
         waited = False
         with self._cond:
             while True:
-                # Recycle drain in progress: WAIT (queue) rather than reject, so
-                # reads don't 503 — they resume against the freshly-rebuilt
-                # instance once the recycle ends (typically 1-3s). A parked
-                # waiter holds no connection, so queueing here does NOT keep
-                # ``_in_use`` above zero — the drain still reaches zero and the
-                # instance is destroyed. end_drain's notify_all wakes us; the
-                # outer ``while`` then re-checks ``_draining`` (now False) and
-                # proceeds to build fresh. Bounded by the caller's ``max_wait``:
-                # if the recycle overruns the checkout budget we fall back to
-                # rejecting (_PoolBusy) so a hung recycle can't strand the request.
+                # Recycle drain: queue waiters (unless reuse_only) until end_drain notifies.
                 if self._draining:
                     if reuse_only:
-                        # Best-effort parallel checkout: never wait out a
-                        # recycle. Fall straight back to serial.
                         raise _PoolBusy(f"pool for {self.service_key} draining for recycle")
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
@@ -474,112 +271,50 @@ class _Pool:
                     self._cond.wait(timeout=remaining)
                     continue
 
-                # Fast path: idle connection available
                 try:
                     reused_con = self._idle.get_nowait()
                     self._reused_total += 1
-                    break  # fall through to UNLOCKED _prepare_checkout
+                    break
                 except queue.Empty:
                     pass
 
-                # Reuse-only (best-effort parallel) checkout: an idle conn was
-                # NOT instantly available, so bail immediately. Building fresh
-                # here is exactly the wedge — a cold build is admitted under
-                # the cap, then stalls in the serialized DuckLake attach while
-                # holding a slot, so concurrent second-checkouts drain the
-                # pool and every request 503s (prod 2026-10-01, Local Std).
-                # Not a real saturation, so don't inflate the reject counter;
-                # the caller (dashboard bundle) just runs serially on ctx.con.
+                # Reuse-only (best-effort parallel): bail immediately if no idle conn is ready.
                 if reuse_only:
                     raise _PoolBusy(f"pool for {self.service_key} has no idle connection (reuse_only)")
 
-                # Capacity available: build a new one outside the lock
                 if self._in_use < self.max_size:
                     self._in_use += 1
                     self._created_total += 1
-                    break  # fall through to the unlocked build path
+                    break
 
-                # Saturated: wait for a return
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    wait_ms = (time.monotonic() - t_acquire_start) * 1000.0
-                    try:
-                        from backend.core.request_telemetry import thread_wait_histogram
-
-                        thread_wait_histogram().record(
-                            wait_ms,
-                            {"service": self.service_key, "outcome": "timeout"},
-                        )
-                    except Exception:
-                        if log_once_per("acquire: thread_wait_histogram failed (ignored)", 60):
-                            logger.debug("acquire: thread_wait_histogram failed (ignored)", exc_info=True)
-                    self._record_wait_sample(wait_ms)
+                    self._record_wait_telemetry((time.monotonic() - t_acquire_start) * 1000.0, "timeout")
                     self._saturated_rejects_total += 1
                     raise _PoolBusy(f"pool for {self.service_key} saturated at {self.max_size}")
                 waited = True
                 self._cond.wait(timeout=remaining)
 
-        # Record the (possibly zero) wait time so Phase 6 has a population
-        # of samples — even fast-path checkouts contribute, so the median
-        # tracks total request-path cost rather than just contention.
-        wait_ms = (time.monotonic() - t_acquire_start) * 1000.0
-        try:
-            from backend.core.request_telemetry import thread_wait_histogram
+        self._record_wait_telemetry(
+            (time.monotonic() - t_acquire_start) * 1000.0,
+            "reused" if reused_con is not None else "created",
+            waited=waited,
+        )
 
-            thread_wait_histogram().record(
-                wait_ms,
-                {
-                    "service": self.service_key,
-                    "outcome": "reused" if reused_con is not None else "created",
-                    "waited": str(waited).lower(),
-                },
-            )
-        except Exception:
-            # OTel SDK not initialised (tests) or histogram creation failed —
-            # never let telemetry instrumentation break a checkout.
-            if log_once_per("acquire: thread_wait_histogram failed (ignored)", 60):
-                logger.debug("acquire: thread_wait_histogram failed (ignored)", exc_info=True)
-        self._record_wait_sample(wait_ms)
-
-        # Outside lock. Both branches can call ``update_iceberg_view`` which
-        # may take seconds when an Iceberg snapshot reload or S3 manifest read
-        # is required; holding the pool's Condition lock across that call
-        # deadlocks every concurrent waiter, the ``max_wait`` cap can't fire
-        # because waiters block on the threading lock (not ``_cond.wait``),
-        # and the FastAPI thread pool then fills with stuck checkouts until
-        # the backend stops accepting new connections.
+        # Outside lock: view rebind / fresh build may take seconds on S3/DuckLake I/O.
         if reused_con is not None:
-            # Verify (or restore, after a file-mode writer's detach) the shared lake attach.
             from backend.core.iceberg._ducklake import _ducklake_attach
 
             if not _ducklake_attach(reused_con, src, read_only=True):
                 self._discard(reused_con)
                 raise RuntimeError("Failed to re-attach DuckLake")
+            return reused_con if skip_view_update else self._prepare_checkout(reused_con, src)
 
-            if skip_view_update:
-                # Caller has guaranteed the view state is fresh for the
-                # duration of this acquire (in-request extras after a
-                # sibling ctx.con was already validated). Skip the
-                # fingerprint check + rebind probe in _prepare_checkout —
-                # the rebind path is ~200-400 ms per extra and that's the
-                # bulk of the work we save. The rare cron-rotation-mid-
-                # request race is caught by QueryRunner.execute's stale-
-                # view retry path (see backend.repositories._base).
-                return reused_con
-            # _prepare_checkout calls _discard on failure (decrements in_use,
-            # notifies waiter) before re-raising — no extra cleanup needed.
-            return self._prepare_checkout(reused_con, src)
-
-        # Build fresh. _in_use was already incremented; if the build raises
-        # we MUST decrement and notify a waiter, hence the try.
         try:
             from backend.core.duckdb import get_connection
 
             con = get_connection(source=src, read_only=True, max_wait=max_wait)
             _set_conn_state(con, service_key=self.service_key)
-            # Apply per-connection overrides once at build time — DuckDB
-            # persists session settings for the connection's lifetime, so
-            # subsequent checkouts of this same connection inherit them.
             mem_limit = _pool_conn_memory_limit()
             if mem_limit:
                 try:
@@ -600,31 +335,13 @@ class _Pool:
             raise
 
     def release(self, con: duckdb.DuckDBPyConnection, *, errored: bool = False) -> None:
-        """Return a connection to the pool. Pass ``errored=True`` to discard
-        instead — the next checkout will build fresh."""
-        # Discard (not idle) on error OR while a recycle is draining this pool —
-        # _discard closes the conn + decrements _in_use + notifies, which is
-        # exactly what drain_and_wait is waiting for. Reading _draining without
-        # the lock is fine (bool read is atomic; a stale False just idles the
-        # conn, which begin_drain's idle-sweep already handled / the next loop
-        # would catch — but to be safe drain_and_wait also closes idles).
+        """Return a connection to the pool, or discard it if ``errored=True`` or draining."""
         if errored or self._draining:
             self._discard(con)
             return
 
-        # Never DETACH lake here: connections to the same service file share one
-        # DuckDB instance, so a release-time detach evicts lake from every sibling
-        # still mid-query (AGENTS.md Trap #35). Writers don't need it — Postgres
-        # mode writes on a separate in-memory connection and file mode detaches
-        # and re-attaches itself in _ducklake_write_connection.
-
-        # Sweep leftover per-conn TEMP tables before returning the conn
-        # so they don't accumulate across requests (see
-        # _pool_sweep_enabled). Runs outside the lock — TEMP tables live
-        # in this connection's private ``temp.main`` schema, so the
-        # sweep can never touch another conn's in-flight state. CREATE
-        # TABLE callers in the persistent catalog (e.g. the composite
-        # origin endpoint) are NOT touched by this sweep.
+        # Never DETACH lake here: file-backed connections share one DuckDB instance,
+        # so detaching evicts lake from sibling connections mid-query (Trap #35).
         if _pool_sweep_enabled():
             try:
                 rows = con.execute(
@@ -632,20 +349,11 @@ class _Pool:
                     "WHERE temporary = true AND table_name LIKE 't\\_%' ESCAPE '\\'"
                 ).fetchall()
                 for (name,) in rows:
-                    # Identifier comes from DuckDB's own catalog so no quoting
-                    # concern; still wrap in a try/except so one stuck table
-                    # doesn't abort the sweep for the rest.
                     try:
                         con.execute(f'DROP TABLE IF EXISTS "{name}"')
                     except Exception as e:
-                        logger.warning(
-                            "[pool] %s: temp sweep failed to drop %s: %s",
-                            self.service_key,
-                            name,
-                            e,
-                        )
+                        logger.warning("[pool] %s: temp sweep failed to drop %s: %s", self.service_key, name, e)
             except Exception as e:
-                # A failed sweep must not block the release — log and move on.
                 logger.warning("[pool] %s: temp sweep query failed: %s", self.service_key, e)
         with self._cond:
             try:
@@ -653,61 +361,43 @@ class _Pool:
                 self._cond.notify()
                 return
             except queue.Full:
-                # Pool already at max idle (shouldn't happen given in_use cap,
-                # but defensive). Close this one and free the slot.
                 pass
-        # Outside lock: close
-        try:
-            con.close()
-        except Exception:
-            if log_once_per("release: con.close failed (ignored)", 60):
-                logger.debug("release: con.close failed (ignored)", exc_info=True)
+        _close_quietly(con, "release: con.close failed (ignored)")
         with self._cond:
             self._in_use -= 1
             self._cond.notify()
 
     def _discard(self, con: duckdb.DuckDBPyConnection) -> None:
         _forget_conn(con)
-        try:
-            con.close()
-        except Exception:
-            if log_once_per("_discard: con.close failed (ignored)", 60):
-                logger.debug("_discard: con.close failed (ignored)", exc_info=True)
+        _close_quietly(con, "_discard: con.close failed (ignored)")
         with self._cond:
             self._in_use -= 1
             self._discarded_total += 1
             self._cond.notify()
 
-    def begin_drain(self) -> None:
-        """Enter draining mode for a DuckDB instance recycle (idempotent).
+    def _drain_idle_locked(self, label: str, decrement_in_use: bool = True) -> int:
+        closed = 0
+        while True:
+            try:
+                con = self._idle.get_nowait()
+            except queue.Empty:
+                break
+            _forget_conn(con)
+            _close_quietly(con, label)
+            if decrement_in_use:
+                self._in_use -= 1
+            closed += 1
+        return closed
 
-        Rejects new acquires (``_PoolBusy``), closes every idle conn now (they
-        are the persistent pinners of the shared instance), and — via the
-        ``_draining`` branch in ``release`` — routes returned in-use conns to
-        close instead of idle. Wakes any parked ``acquire`` waiter so it bails.
-        """
+    def begin_drain(self) -> None:
+        """Enter draining mode for a DuckDB instance recycle (idempotent)."""
         with self._cond:
             self._draining = True
-            while True:
-                try:
-                    con = self._idle.get_nowait()
-                except queue.Empty:
-                    break
-                _forget_conn(con)
-                try:
-                    con.close()
-                except Exception:
-                    if log_once_per("begin_drain: con.close failed (ignored)", 60):
-                        logger.debug("begin_drain: con.close failed (ignored)", exc_info=True)
-                self._in_use -= 1
+            self._drain_idle_locked("begin_drain: con.close failed (ignored)")
             self._cond.notify_all()
 
     def wait_drained(self, timeout: float) -> bool:
-        """Block until ``_in_use == 0`` or ``timeout`` (seconds) elapses.
-
-        Returns True iff the pool fully drained (every checked-out conn was
-        returned and closed). False on timeout — the recycle then aborts safely.
-        """
+        """Block until ``_in_use == 0`` or ``timeout`` (seconds) elapses."""
         deadline = time.monotonic() + timeout
         with self._cond:
             while self._in_use > 0:
@@ -724,33 +414,9 @@ class _Pool:
             self._cond.notify_all()
 
     def discard_idle(self) -> int:
-        """Close every idle connection so the next checkout builds fresh.
-
-        Used on a credential change for this service (see
-        ``reset_pool_for_service``): pool connections bake the S3 ``fos_proxy``
-        SECRET at build time and the checkout rebind path only refreshes the
-        iceberg VIEW, never the SECRET — so an idle conn built with now-stale
-        creds would 401 every read until the process restarts. Unlike
-        ``begin_drain`` this does NOT enter draining mode: concurrent acquires
-        proceed and simply build fresh conns. In-flight checked-out conns are
-        left alone (rare during an admin re-provision; they self-heal on
-        error-discard or next restart). Returns the count closed.
-        """
-        closed = 0
+        """Close every idle connection so the next checkout builds fresh (e.g. on credential rotation)."""
         with self._cond:
-            while True:
-                try:
-                    con = self._idle.get_nowait()
-                except queue.Empty:
-                    break
-                _forget_conn(con)
-                try:
-                    con.close()
-                except Exception:
-                    if log_once_per("discard_idle: con.close failed (ignored)", 60):
-                        logger.debug("discard_idle: con.close failed (ignored)", exc_info=True)
-                self._in_use -= 1
-                closed += 1
+            closed = self._drain_idle_locked("discard_idle: con.close failed (ignored)")
             self._cond.notify_all()
         return closed
 
@@ -770,47 +436,22 @@ class _Pool:
         return self._strip_view_timing(iceberg_view._view_cache.get(self.service_key))
 
     def _prepare_checkout(self, con: duckdb.DuckDBPyConnection, src: dict) -> duckdb.DuckDBPyConnection:
-        """Re-validate the view binding before handing the connection out.
-
-        Two checks make up the fingerprint:
-
-          1. The iceberg ``_view_cache`` tuple for this service.
-             The tuple is replaced (not mutated) when the cache rotates, so
-             identity is a sufficient check that the SQL we'd bind matches
-             what we bound last time.
-
-          2. mtime of the buffer directory. The sync cron's commit step
-             DELETES buffer parquet files without calling update_iceberg_view —
-             so the view-cache tuple keeps looking "fresh" while the files
-             it references are gone. mtime catches that: any add/remove in
-             the dir bumps it. Cost ~1 syscall (~µs).
-
-        If either differs from what we last stamped, rebind. If the rebind
-        fails, discard the connection and let the caller retry.
-        """
+        """Re-validate ``_view_cache`` fingerprint + buffer mtime before handing ``con`` out."""
         try:
             from backend.core.iceberg import view as iceberg_view
 
             current = self._current_view_fp()
-            stamped_view = _get_conn_state(con, "view_fingerprint")
-            stamped_buf = _get_conn_state(con, "buffer_mtime")
-            current_buf = _safe_buffer_mtime(src)
-            if current is not None and current == stamped_view and current_buf == stamped_buf:
-                # View AND underlying buffer set match what we bound last
-                # time — nothing to do.
+            if (
+                current is not None
+                and current == _get_conn_state(con, "view_fingerprint")
+                and _safe_buffer_mtime(src) == _get_conn_state(con, "buffer_mtime")
+            ):
                 return con
-            # Time the rebind call. Non-zero wait here is API/cron lock
-            # contention — see _pool_api_rebind_lock_timeout_s for context.
-            # Pass the short API-side lock_timeout so a long-running cron
-            # rebuild can't cascade pool checkouts into 503s; the view-side
-            # fallback chain (cached SQL / persistent view) handles the
-            # contended case without raising.
             t_rebind_start = time.monotonic()
             try:
                 iceberg_view.update_iceberg_view(con, src, lock_timeout=_pool_api_rebind_lock_timeout_s())
             finally:
-                rebind_ms = (time.monotonic() - t_rebind_start) * 1000.0
-                self._record_rebind_wait_sample(rebind_ms)
+                self._record_rebind_wait_sample((time.monotonic() - t_rebind_start) * 1000.0)
             self._stamp_fingerprint(con, src)
             return con
         except Exception as e:
@@ -819,34 +460,11 @@ class _Pool:
             raise
 
     def warm_idle(self, src: dict) -> None:
-        """Rebind every idle connection to the latest cached view.
-
-        Called by writer-side cron jobs (sync, commit) after they mutate
-        state that invalidates the per-service _view_cache fingerprint.
-        Drains the idle queue under the lock, binds the cached view DDL
-        on each conn via _try_fast_path_view (which handles the CREATE OR
-        REPLACE VIEW → TEMP VIEW translation), re-stamps the fingerprint,
-        then returns every conn to the queue. Sequential because TEMP
-        VIEWs are per-connection in DuckDB and a single connection handle
-        is not safe to call from multiple threads.
-
-        Drain-then-return rather than pop-bind-put-per-conn because _idle
-        is a LIFO queue: pop-then-put returns the same conn on the next
-        pop, so we'd just keep warming one slot.
-
-        Bookkeeping: _in_use is unchanged across drain + return because
-        drained conns are conceptually "held by warm_idle" — same slot
-        in the invariant `_in_use == checked_out + idle_count`. A
-        concurrent acquirer that arrives mid-warm either builds a new
-        conn (if _in_use < max_size) or waits on _cond, identical to
-        today's behavior.
-        """
+        """Rebind every idle connection to the latest cached view (drain-then-requeue on LIFO)."""
         from backend.core.iceberg import view as iceberg_view
 
         drained: list[duckdb.DuckDBPyConnection] = []
         with self._cond:
-            # Never re-populate idle while a recycle is draining this pool —
-            # warm_idle returns conns to the queue, which would defeat the drain.
             if self._draining:
                 return
             while True:
@@ -878,18 +496,9 @@ class _Pool:
                     self._idle.put_nowait(con)
                     self._cond.notify()
                 except queue.Full:
-                    # Should not happen — we drained this same queue under the
-                    # same lock with no intervening puts. Defensive close.
-                    try:
-                        con.close()
-                    except Exception:
-                        if log_once_per("warm_idle: con.close failed (ignored)", 60):
-                            logger.debug("warm_idle: con.close failed (ignored)", exc_info=True)
+                    _close_quietly(con, "warm_idle: con.close failed (ignored)")
                     self._in_use -= 1
                     self._cond.notify()
-        # SRE-16: stamp the wall-clock so the admin surface can show view /
-        # rollup freshness. Done after the rebind+requeue so the timestamp
-        # reflects a completed warm, not an attempt.
         try:
             from backend.utils.date_utils import iso_z_now
 
@@ -900,58 +509,26 @@ class _Pool:
 
     def _stamp_fingerprint(self, con: duckdb.DuckDBPyConnection, src: dict | None = None) -> None:
         try:
-            current = self._current_view_fp()
-            buf_mtime = _safe_buffer_mtime(src) if src is not None else None
             _set_conn_state(
                 con,
-                view_fingerprint=current,
-                buffer_mtime=buf_mtime,
+                view_fingerprint=self._current_view_fp(),
+                buffer_mtime=_safe_buffer_mtime(src) if src is not None else None,
             )
         except Exception:
             _set_conn_state(con, view_fingerprint=None, buffer_mtime=None)
 
     def _record_wait_sample(self, wait_ms: float) -> None:
-        """Append a checkout wait-time sample to the bounded ring buffer.
-
-        Lock-protected so concurrent acquirers don't trample the deque's
-        internal state (CPython's deque IS thread-safe for single ops, but
-        we also read+sort it from ``_wait_stats`` which would race).
-        """
         with self._wait_samples_lock:
             self._wait_samples.append(wait_ms)
 
     def _record_rebind_wait_sample(self, wait_ms: float) -> None:
-        """Append a view-rebind wait-time sample to the bounded ring buffer.
-
-        Mirrors ``_record_wait_sample`` for the iceberg-view RLock wait
-        inside ``_prepare_checkout``. Separate buffer + separate lock so
-        the operator can attribute pool latency to the two distinct
-        contention sources independently.
-        """
         with self._rebind_wait_samples_lock:
             self._rebind_wait_samples.append(wait_ms)
 
     def _wait_stats(self) -> dict:
-        """Return percentile summary over the recent-samples ring buffer.
-
-        Computed on-read (sort a snapshot, no continuous histogram) — at
-        ~1024 samples this is well under 1 ms. Returns zeros when the
-        buffer is empty so the admin UI can render a stable shape from
-        boot (no conditional rendering churn). Counts are emitted so the
-        operator can tell whether a green p95 reflects "no contention"
-        or "no samples yet".
-        """
         return _percentile_summary(self._wait_samples, self._wait_samples_lock)
 
     def _rebind_wait_stats(self) -> dict:
-        """Percentile summary over recent iceberg-view rebind wait times.
-
-        Same shape as ``_wait_stats``. A green p95 here means rebinds
-        finish fast (cron and API aren't contending the lock). A red p95
-        is the signal to investigate cron health — typically a leaked
-        watchdog-abandoned worker still holding the lock during a slow
-        S3 read.
-        """
         return _percentile_summary(self._rebind_wait_samples, self._rebind_wait_samples_lock)
 
     def stats(self) -> dict:
@@ -964,16 +541,10 @@ class _Pool:
                 "created_total": self._created_total,
                 "reused_total": self._reused_total,
                 "discarded_total": self._discarded_total,
-                # SRE-12: user-facing saturation rejects (→ 503) and transient
-                # recycle-drain rejects, kept distinct.
                 "saturated_rejects_total": self._saturated_rejects_total,
                 "drain_rejects_total": self._drain_rejects_total,
-                # SRE-16: wall-clock of the last completed view warm (None = never).
                 "last_warmed_at": self._last_warmed_at,
             }
-        # Wait-stats snapshots OUTSIDE the pool lock — their own locks
-        # guard the sample deques, and the calls would otherwise tie
-        # checkout waiters up behind a sort.
         base["wait"] = self._wait_stats()
         base["rebind_wait"] = self._rebind_wait_stats()
         base["heavy"] = {
@@ -1014,50 +585,18 @@ def checkout_connection(
     heavy: bool = False,
     label: str | None = None,
 ):
-    """Yield a fully-configured DuckDB connection from the per-service pool.
-
-    Falls back to the legacy always-fresh path when ``DUCKDB_CONNECTION_POOL``
-    is disabled. Returns the connection to the pool on clean exit; discards
-    it on any exception so a poisoned connection doesn't get reused.
-
-    ``heavy=True`` marks a request that may hold its connection for seconds
-    (aggregate routes): it must first take a heavy slot so light requests keep
-    capacity. Extra checkouts made inside a request that already holds a heavy
-    slot (``reuse_only`` parallel branches) leave it False.
-
-    The yielded value is an :class:`InstrumentedDuckDBConnection` proxy that
-    records every ``execute()``/``sql()``/``query()`` in the Live Query
-    Monitor registry. The proxy is local to this contextmanager — the raw
-    connection is what flows into/out of the pool — so the pool's
-    ``id(con)``-keyed state ([_conn_state]) and ``pool.release(raw_con, ...)``
-    bookkeeping are untouched.
-
-    ``skip_view_update`` lets an in-request acquire skip the iceberg-view
-    rebind probe on the reused-conn path. Only safe when the caller already
-    holds another fresh pool conn for the same request (e.g. the parallel
-    branch of ``/api/origin/aggregates`` after the primary ctx.con
-    materialized the catalog table). The flag is silently ignored on the
-    fresh-build path (the build itself always binds the view) and on the
-    pool-disabled fallback path (always-fresh).
-    """
+    """Yield an instrumented DuckDB connection from the per-service pool (or fresh if disabled)."""
     if not _pool_enabled():
         from backend.core.duckdb import get_connection
 
         if reuse_only:
-            # No pool ⇒ no idle connection to reuse. The reuse-only contract
-            # is "hand back a spare or bail" — never build on this path — so
-            # the caller falls back to serial execution.
             raise _PoolBusy("pool disabled, no idle connection to reuse (reuse_only)")
         raw_con = get_connection(source=src, read_only=True, max_wait=max_wait)
         wrapped = _instrument(raw_con, service_key=src.get("name") or src.get("service_id"))
         try:
             yield wrapped
         finally:
-            try:
-                raw_con.close()
-            except Exception:
-                if log_once_per("checkout_connection: raw_con.close failed (ignored)", 60):
-                    logger.debug("checkout_connection: raw_con.close failed (ignored)", exc_info=True)
+            _close_quietly(raw_con, "checkout_connection: raw_con.close failed (ignored)")
         return
 
     service_key = src.get("name") or src.get("service_id") or "default"
@@ -1081,8 +620,6 @@ def checkout_connection(
     t_done = time.monotonic()
     threshold = _slow_checkout_ms()
     if threshold and (t_done - t_start) * 1000.0 >= threshold:
-        # Says whether the wait was for a heavy slot or for a pool connection, and
-        # what the pool looked like, so a slow endpoint can be attributed.
         logger.warning(
             "[pool] slow checkout: service=%s route=%s heavy=%s slot_wait_ms=%d pool_wait_ms=%d open=%d idle=%d heavy_in_use=%d/%d",
             service_key,
@@ -1103,8 +640,6 @@ def checkout_connection(
         errored = True
         raise
     finally:
-        # Always release the RAW connection — pool internals key on id(raw)
-        # and _conn_state lookups would miss if we passed the proxy in.
         try:
             pool.release(raw_con, errored=errored)
         finally:
@@ -1113,12 +648,7 @@ def checkout_connection(
 
 
 def _instrument(raw_con, *, service_key: str | None):
-    """Wrap a raw DuckDB connection in the live-query monitor proxy.
-
-    Lazy import so the duckdb_pool module stays importable in tests that
-    don't pull in the registry. Returns the raw connection unchanged if
-    instrumentation construction fails — instrumentation must never block
-    a checkout."""
+    """Wrap a raw DuckDB connection in the live-query monitor proxy (fail-open)."""
     try:
         from backend.core.query_instrumentation import InstrumentedDuckDBConnection
 
@@ -1130,60 +660,24 @@ def _instrument(raw_con, *, service_key: str | None):
 
 
 def warm_pool_for_service(service_key: str, src: dict) -> None:
-    """Warm the per-service pool's idle connections to the latest view.
-
-    Called by writer-side cron jobs (sync, commit) after they mutate state
-    that invalidates _view_cache. No-op if no pool exists yet (no readers
-    have queried this service).
-    """
+    """Warm the per-service pool's idle connections to the latest view (no-op if no pool)."""
     with _pools_lock:
         pool = _pools.get(service_key)
-    if pool is None:
-        return
-    pool.warm_idle(src)
+    if pool is not None:
+        pool.warm_idle(src)
 
 
 def warm_pool_at_startup(service_key: str, src: dict, count: int = 4) -> int:
-    """Pre-acquire ``count`` pool connections at process boot and release
-    them back to the idle queue. Builds the per-service pool if it does not
-    yet exist (most callers haven't fired their first query at boot).
-
-    Without this, the first request per pool burns ~150 ms per fresh-build
-    conn before the iceberg view is bound. For /api/origin/aggregates'
-    parallel branches that acquire extras with ``max_wait=0.2``, that
-    means the first request silently falls back to serial — exactly the
-    cold-pool regression observed in session 6 #63 measurements.
-
-    Acquires sequentially (each build is bounded by the file open +
-    httpfs install + view bind, ~150 ms) and releases each conn back to
-    idle as soon as it is built. Bounded by the pool's ``max_size``
-    so over-requesting can't allocate more slots than the pool allows
-    (excess would only burn build time without freeing into idle).
-
-    Returns the actual number of conns warmed (``<= count``). Logs and
-    swallows per-conn errors so a single failing build doesn't abort
-    startup for the rest of the services.
-    """
+    """Pre-acquire up to ``count`` pool connections at boot and return them to idle."""
     pool = _get_pool(service_key)
     n = min(count, pool.max_size)
     built: list[duckdb.DuckDBPyConnection] = []
     for i in range(n):
         try:
-            # 30s budget is generous — startup is the right time to absorb
-            # whatever the worst-case fresh-build path costs (cold network
-            # for S3 metadata + httpfs install). Beats failing silently
-            # and forcing the first request to pay it.
-            con = pool.acquire(src, max_wait=30.0)
+            built.append(pool.acquire(src, max_wait=30.0))
         except Exception as e:
-            logger.warning(
-                "[pool] %s: warm_pool_at_startup conn %d/%d failed: %s",
-                service_key,
-                i + 1,
-                n,
-                e,
-            )
+            logger.warning("[pool] %s: warm_pool_at_startup conn %d/%d failed: %s", service_key, i + 1, n, e)
             break
-        built.append(con)
     for con in built:
         pool.release(con)
     return len(built)
@@ -1196,48 +690,31 @@ def get_all_stats() -> list[dict]:
 
 
 def begin_drain_pools(service_keys) -> dict[str, _Pool]:
-    """Put every existing pool for ``service_keys`` into draining mode and swap them.
-
-    This implements 'Blue/Green' connection pool swapping: we instantly retire the
-    old ('Blue') pool instance and remove/pop it from the active ``_pools`` mapping, so
-    that any new incoming web requests instantly construct and checkout from a fresh,
-    clean active 'Green' pool instance with 0ms delay and zero blocking.
-
-    The retired pool object continues to gracefully drain and close its active
-    connections in the background, and is safely garbage-collected once in_use reaches 0.
-    """
+    """Blue/Green swap: mark pools for ``service_keys`` draining and pop from ``_pools``."""
     retired = {}
     with _pools_lock:
         for k in service_keys:
-            pool = _pools.get(k)
+            pool = _pools.pop(k, None)
             if pool is not None:
                 pool.begin_drain()
-                retired[k] = pool
-                _retired_pools[k] = pool
-                _pools.pop(k, None)
+                retired[k] = _retired_pools[k] = pool
     return retired
 
 
 def wait_pools_drained(pools_or_keys, timeout: float) -> bool:
-    """Wait (up to ``timeout`` total) for every drained pool to reach in_use==0.
-
-    Returns True iff all pools drained within the shared deadline.
-    """
-    targets: list[_Pool] = []
+    """Wait (up to ``timeout`` total) for every drained pool to reach in_use==0."""
     if isinstance(pools_or_keys, dict):
         targets = list(pools_or_keys.values())
     elif isinstance(pools_or_keys, list) and all(isinstance(p, _Pool) for p in pools_or_keys):
         targets = pools_or_keys
     else:
-        # Fallback to string keys for backward compatibility
         with _pools_lock:
             targets = [p for k in pools_or_keys if (p := (_retired_pools.get(k) or _pools.get(k))) is not None]
 
     deadline = time.monotonic() + timeout
     ok = True
     for pool in targets:
-        remaining = max(0.0, deadline - time.monotonic())
-        if not pool.wait_drained(remaining):
+        if not pool.wait_drained(max(0.0, deadline - time.monotonic())):
             ok = False
     return ok
 
@@ -1248,57 +725,38 @@ def end_drain_pools(pools_or_keys) -> None:
         with _pools_lock:
             for k in pools_or_keys:
                 _retired_pools.pop(k, None)
-        for pool in pools_or_keys.values():
-            pool.end_drain()
-        return
-    if isinstance(pools_or_keys, list) and all(isinstance(p, _Pool) for p in pools_or_keys):
+        targets = list(pools_or_keys.values())
+    elif isinstance(pools_or_keys, list) and all(isinstance(p, _Pool) for p in pools_or_keys):
         with _pools_lock:
             for k, p in list(_retired_pools.items()):
                 if p in pools_or_keys:
                     _retired_pools.pop(k, None)
-        for pool in pools_or_keys:
-            pool.end_drain()
-        return
-    with _pools_lock:
-        for k in pools_or_keys:
-            pool = _retired_pools.pop(k, None) or _pools.get(k)
-            if pool is not None:
-                pool.end_drain()
+        targets = pools_or_keys
+    else:
+        with _pools_lock:
+            targets = [
+                _p
+                for k in pools_or_keys
+                if isinstance(k, str) and (_p := (_retired_pools.pop(k, None) or _pools.get(k))) is not None
+            ]
+    for pool in targets:
+        pool.end_drain()
 
 
 def reset_pool_for_service(service_key: str) -> int:
-    """Close all idle pooled connections for one service so the next checkout
-    rebuilds with freshly-resolved FOS/CDN credentials.
-
-    Call when a service's credentials change (re-provision / analyst re-ingest /
-    teardown). Returns the count of connections closed; ``0`` (no-op) if the
-    service has no pool yet (no reader has queried it). See ``_Pool.discard_idle``.
-    """
+    """Close all idle pooled connections for one service (e.g. on credential change)."""
     with _pools_lock:
         pool = _pools.get(service_key)
-    if pool is None:
-        return 0
-    return pool.discard_idle()
+    return 0 if pool is None else pool.discard_idle()
 
 
 def shutdown_all() -> None:
-    """Close every idle connection across every pool. Called on app shutdown
-    so DuckDB releases its file handles cleanly."""
+    """Close every idle connection across every pool on app shutdown."""
     with _pools_lock:
         pools = list(_pools.values())
         _pools.clear()
     for pool in pools:
-        while True:
-            try:
-                con = pool._idle.get_nowait()
-            except queue.Empty:
-                break
-            _forget_conn(con)
-            try:
-                con.close()
-            except Exception:
-                if log_once_per("shutdown_all: con.close failed (ignored)", 60):
-                    logger.debug("shutdown_all: con.close failed (ignored)", exc_info=True)
+        pool._drain_idle_locked("shutdown_all: con.close failed (ignored)", decrement_in_use=False)
 
 
 close_all_pools = shutdown_all
@@ -1308,31 +766,24 @@ close_all_service_pools = close_all_pools
 def get_pool_status() -> dict[str, Any]:
     """Return status and connection metrics across all active and retired pools."""
     with _pools_lock:
-        pools_info = {}
-        for k, pool in _pools.items():
-            pools_info[k] = {
-                "in_use": pool._in_use,
-                "idle": pool._idle.qsize(),
-                "max_size": pool.max_size,
-                "created_total": pool._created_total,
-                "reused_total": pool._reused_total,
-                "draining": pool._draining,
+        pools_info = {
+            k: {
+                "in_use": p._in_use,
+                "idle": p._idle.qsize(),
+                "max_size": p.max_size,
+                "created_total": p._created_total,
+                "reused_total": p._reused_total,
+                "draining": p._draining,
             }
-        retired_info = {}
-        for k, pool in _retired_pools.items():
-            retired_info[k] = {
-                "in_use": pool._in_use,
-                "idle": pool._idle.qsize(),
-                "draining": pool._draining,
-            }
-    return {
-        "pools": pools_info,
-        "retired_pools": retired_info,
-    }
+            for k, p in _pools.items()
+        }
+        retired_info = {
+            k: {"in_use": p._in_use, "idle": p._idle.qsize(), "draining": p._draining}
+            for k, p in _retired_pools.items()
+        }
+    return {"pools": pools_info, "retired_pools": retired_info}
 
 
-# R-1: drain the per-connection metadata dict between tests so a recycled
-# Python id() doesn't carry an earlier test's pool-slot state forward.
 from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry  # noqa: E402
 
 _CacheRegistry.register("core.duckdb_pool._conn_state", _conn_state)

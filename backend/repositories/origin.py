@@ -199,17 +199,6 @@ SQL: Any = _sys.modules[__name__]
 _sys.modules.setdefault("backend.repositories._sql.origin", _sys.modules[__name__])
 
 # ── Response memo cache ───────────────────────────────────────────────────────
-# Frontend Origin page fires 6 endpoints in parallel; on cold load each one
-# does its own parquet scan (~1-4s). The aggregation predicates differ across
-# endpoints, but for a given (start_time, end_time, filters) tuple the *same*
-# endpoint will be re-hit every nav-back, browser refresh, or React Query
-# refetch tick. Memoizing each endpoint's full response for a short TTL turns
-# all subsequent loads within the window into ~50µs dict lookups.
-#
-# Why: standing rule "i would rather be a little behind the data than read
-# extra from the cloud" — 30s is well below the cron tick + ingest latency,
-# so a cached response is at most ~30s behind ingest, which is a non-issue
-# for an interactive analytics view.
 _RESPONSE_CACHE_TTL = 30.0
 _RESPONSE_CACHE_MAXSIZE = 256
 _memo = ResponseMemo(ttl=_RESPONSE_CACHE_TTL, maxsize=_RESPONSE_CACHE_MAXSIZE, prewarmer=False)
@@ -224,8 +213,6 @@ def _response_cache_key(
     filters: FiltersDict,
     **extra,
 ) -> str:
-    # Key field order is load-bearing (serialized as-is): ep, s, e, f, then the
-    # extras sorted by name. digest_cache_key keeps the emitted bytes stable.
     payload = {
         "ep": endpoint,
         "s": bucket_time_to_minute(start_time),
@@ -245,47 +232,18 @@ def _check_response_cache(
     runner: QueryRunner,
     **extras,
 ) -> tuple[str, dict | None]:
-    """Build the cache key for ``endpoint`` and return ``(key, cached_response)``.
-
-    When the cache hits, ``cached_response`` is the stored payload with
-    fresh telemetry merged in (so the response shape matches what a
-    live miss would have produced). When it misses, ``cached_response``
-    is None — callers compute the payload and finish with
-    :func:`_store_response_cache` to persist + merge telemetry.
-
-    Eight origin endpoints all repeat this same cache-key + get + miss
-    dance; the helper makes the invariant ("cache stores stripped
-    payload, telemetry is per-request") un-skippable.
-    """
+    """Build cache key for ``endpoint`` and return ``(key, cached_response)``."""
     cache_key = _response_cache_key(endpoint, src, start_time, end_time, filters, **extras)
     return cache_key, _memo.check(cache_key, runner)
 
 
 def _store_response_cache(cache_key: str, payload: dict, runner: QueryRunner) -> dict:
-    """Cache the payload under ``cache_key`` and return it with telemetry.
-
-    Pairs with :func:`_check_response_cache` — every miss path ends with
-    ``return _store_response_cache(key, payload, runner)``. Strips
-    telemetry from the stored copy (per :func:`cache_put`) and merges it
-    onto the returned response, so the cache stays per-request-clean while
-    callers see the full shape.
-    """
+    """Cache ``payload`` under ``cache_key`` and return it with telemetry."""
     return _memo.store(cache_key, payload, runner)
 
 
 # ── POP location helpers ──────────────────────────────────────────────────────
 
-
-# Minimum edge→shield request count before a route's transit is trustworthy
-# enough to flag as anomalous. The transit metric keys off the *median*
-# (p50), but a "median" over a handful of requests is noise — a single cold
-# TLS handshake or an ottfb→ttfb fallback row can drag a 1-3 request route
-# past the ratio/overhead gates and paint a false "suboptimal peering" flag.
-# (Observed on prod 2026-06-30: 14 of 15 anomaly flags were on <30-request
-# routes; median requests/flagged-route was 2 vs 147 for non-flagged.)
-# Below this floor we still SHOW the route (operators want low-volume routes
-# visible — that's the M1 intent) but mark it ``low_sample`` and never flag it.
-# Mirrors the ``min_requests`` gate the slow-URLs analysis already applies.
 SHIELDING_ANOMALY_MIN_REQUESTS = 30
 
 
@@ -303,26 +261,16 @@ def _enrich_with_distance(row: dict) -> dict:
     from backend.utils.pop_utils import get_pop_lat_lon_map
 
     pops = get_pop_lat_lon_map()
-    # Normalize POP codes to uppercase for reliable lookup
     e_pop = str(row.get("edge_pop", "")).upper()
     s_pop = str(row.get("shield_pop", "")).upper()
     e_coords = pops.get(e_pop)
     s_coords = pops.get(s_pop)
-    # Too few samples to trust the percentiles — keep the route visible but never
-    # flag it (see SHIELDING_ANOMALY_MIN_REQUESTS). The FE mutes low_sample rows.
     low_sample = (row.get("requests") or 0) < SHIELDING_ANOMALY_MIN_REQUESTS
     if e_coords and s_coords:
         dist = _haversine_km(e_coords[0], e_coords[1], s_coords[0], s_coords[1])
-        # Fiber propagation: ~200,000 km/s; RTT = 2-way trip
         light_rtt_ms = round(2.0 * dist / 200_000.0 * 1000.0, 2)
         p50 = row.get("p50_ms")
-        if light_rtt_ms > 0.5 and p50 is not None:
-            efficiency = round(p50 / light_rtt_ms, 2)
-        else:
-            efficiency = None
-        # The latency verdict, independent of sample size. High ratio alone
-        # isn't meaningful for short hops where TCP overhead dominates; require
-        # ≥20ms absolute overhead above the theoretical floor before flagging.
+        efficiency = round(p50 / light_rtt_ms, 2) if (light_rtt_ms > 0.5 and p50 is not None) else None
         anomaly_eligible = (
             efficiency is not None and efficiency > 3.0 and p50 is not None and p50 - light_rtt_ms >= 20.0
         )
@@ -332,9 +280,6 @@ def _enrich_with_distance(row: dict) -> dict:
             efficiency_ratio=efficiency,
             low_sample=low_sample,
             anomaly_eligible=anomaly_eligible,
-            # Never flag a route with too few requests for its median to mean
-            # anything. The FE can re-derive this against a user-chosen floor
-            # from (anomaly_eligible, requests) without the latency rule above.
             anomaly_static=anomaly_eligible and not low_sample,
             edge_lat=e_coords[0],
             edge_lon=e_coords[1],
@@ -365,30 +310,8 @@ def _shape_summary(
     lat_val: str,
     actual_cols: set[str] | list[str],
 ) -> dict:
-    """Render SUMMARY_GROUPING_SETS against ``table``, return the payload dict.
-
-    Shared between :func:`get_summary` (live path, full base table) and
-    :func:`_origin_summary_from_temp` (per-request TEMP TABLE path,
-    ``table='<temp_table>'``, ``where='1=1'``, ``lat_val='lat_us'``).
-    The two paths used to be byte-identical Python with different SQL
-    templates (TEMP_SUMMARY_ROLLUP + TEMP_SUMMARY_BY_EDGE on the TEMP
-    side); folded to one template + one helper so the column shape can
-    only drift in one place.
-
-    Rows are consumed via ``cursor.description`` dict access rather than
-    positional indices. The previous shape (``row[3]``, ``row[5]``, …)
-    silently shifted every downstream column when SUMMARY_GROUPING_SETS
-    gained a new column without a matching update here — the offset-by-N
-    footgun the b10 audit finding flagged.
-    """
+    """Render SUMMARY_ROLLUP against ``table`` and return the summary payload dict."""
     actual_cols_set = set(actual_cols)
-
-    # N-8: return a ratio (0.0–1.0), NOT a percentage. The frontend at
-    # ``frontend/app/origin/_sections/Aggregates.tsx`` already multiplies
-    # the value by 100 to render; the prior ``* 100.0`` here made the
-    # display show 2181.11% on a real 21.81% error rate. Also clamp the
-    # 5xx filter to (500-599) — counting any "ost >= 500" let buggy
-    # synthetic codes leak in (origin status 829 was observed in prod).
     ost_5xx = (
         'COUNT(*) FILTER (WHERE "ost" >= 500 AND "ost" < 600) * 1.0 / '
         'NULLIF(COUNT(*) FILTER (WHERE "ost" IS NOT NULL), 0)'
@@ -403,15 +326,9 @@ def _shape_summary(
         else "NULL"
     )
     obytes_p50 = 'MEDIAN("obytes")' if "obytes" in actual_cols_set else "NULL"
-
     total_misses = "COUNT(*) FILTER (WHERE starts_with(\"cache\", 'MISS'))" if "cache" in actual_cols_set else "NULL"
     total_passes = "COUNT(*) FILTER (WHERE starts_with(\"cache\", 'PASS'))" if "cache" in actual_cols_set else "NULL"
 
-    # Single () grouping over the requested window. The previous
-    # GROUPING SETS shape returned a per-edge breakdown as ``by_leg``
-    # in the same scan, but no UI surface consumed it (the page
-    # hard-codes ``split_by_leg: false``) — DuckDB was paying the
-    # second hash partition + per-edge percentile sorts for nothing.
     cur = runner.execute(
         SQL.SUMMARY_ROLLUP.format(
             lat_val=lat_val,
@@ -428,10 +345,7 @@ def _shape_summary(
         params,
     )
     cols = [d[0] for d in cur.description]
-    rollup_row = next(
-        (dict(zip(cols, r, strict=False)) for r in cur.fetchall()),
-        None,
-    )
+    rollup_row = next((dict(zip(cols, r, strict=False)) for r in cur.fetchall()), None)
 
     _summary_keys = (
         "total_misses",
@@ -943,7 +857,6 @@ def get_shielding_analysis(
     if not actual_cols:
         return _memo.result(empty_schema_response(has_data=False, rows=[], **runner.telemetry()), state="miss")
 
-    # We need rid, prid, edge, pop, ottfb, ttfb for this analysis
     required = {"rid", "prid", "edge", "pop", "ottfb", "ttfb"}
     missing = required - set(actual_cols)
     if missing:
@@ -953,10 +866,7 @@ def get_shielding_analysis(
         )
 
     params, where = build_where_clause(start_time, end_time, filters, actual_cols)
-
-    # Shield logs must not be restricted by edge-specific filters like "pop = DEN"
-    # otherwise the shield hit at IAD will be filtered out before the join.
-    # We only apply time bounds to the shield CTE.
+    # Apply only time bounds to shield CTE so edge POP filters don't exclude shield hits.
     time_params, time_where = build_where_clause(start_time, end_time, {}, actual_cols)
 
     query = SQL.SHIELDING_ANALYSIS.format(
@@ -965,25 +875,15 @@ def get_shielding_analysis(
         time_where=time_where,
     )
 
-    # The query binds two trailing rank cutoffs (top-by-requests OR
-    # top-by-overhead) — see SHIELDING_ANALYSIS docstring (M1).
     timer = SectionTimer()
     started = time.perf_counter()
     cur = runner.execute(query, params + time_params + [limit, limit])
-    # Consume rows via ``cursor.description`` (dict access) rather than
-    # positional ``r[0..5]``. A column reorder in SHIELDING_ANALYSIS would
-    # otherwise silently misalign every downstream key — the same b10
-    # offset-by-N footgun ``_shape_summary`` was already hardened against.
     col_names = [d[0] for d in cur.description]
     raw_rows = [dict(zip(col_names, r, strict=False)) for r in cur.fetchall()]
     timer.mark(
         "shielding_analysis", started, source="live", activity="compute", current_execution=True, outcome="served"
     )
 
-    # If the join returned zero rows, distinguish "no shield logs at all" (edge_only)
-    # from "shield logs exist but didn't match any edge rid". Old code did a separate
-    # shield-existence probe up-front; we fold that into a single cheap check on the
-    # already-scanned data instead by re-checking the time window for any shield log.
     if not raw_rows:
         started = time.perf_counter()
         shield_exists = runner.execute(
@@ -999,7 +899,6 @@ def get_shielding_analysis(
             payload = {"has_data": False, "rows": [], "section_timings": timer.entries}
         return _store_response_cache(cache_key, payload, runner)
 
-    # ``total_routes`` is a window COUNT(*) OVER () — identical across rows.
     total_routes = raw_rows[0].get("total_routes")
     if total_routes is None:
         total_routes = len(raw_rows)
@@ -1018,16 +917,9 @@ def get_shielding_analysis(
         for r in raw_rows
     ]
 
-    # has_data gates on ROW presence, not coordinate availability (L3). The
-    # table renders POP codes + latencies fine without coords; the MAP
-    # handles the no-coordinate case on its own ("POP coordinates
-    # unavailable"). Gating on coords previously hid the whole table + CSV
-    # export whenever a POP was absent from pop_locations.json.
     payload = {
         "has_data": len(enriched_rows) > 0,
         "rows": enriched_rows,
-        # M1: surface the full route count so the UI can show "Top N of M"
-        # and flag truncation instead of implying the table is complete.
         "total_routes": total_routes,
         "truncated": total_routes > len(enriched_rows),
         "section_timings": timer.entries,
@@ -1036,17 +928,6 @@ def get_shielding_analysis(
 
 
 # ── Composite: get_aggregates ────────────────────────────────────────────────
-#
-# Phase 3 item 9. One CREATE TEMP TABLE filtered to the requested window;
-# every origin card on the /origin page reads from the same materialization
-# instead of issuing its own parquet scan. Shielding analysis stays in its
-# own endpoint (item 13 moves it to /api/network-health) because its
-# self-join semantics don't share the projection cleanly.
-#
-# Granular endpoints (/api/origin/summary etc.) remain alive for one
-# release so the frontend can flip back during a rollback without a
-# backend redeploy. The composite is purely additive — existing per-card
-# endpoints are unaffected.
 
 
 def _origin_summary_from_temp(
@@ -1054,16 +935,7 @@ def _origin_summary_from_temp(
     temp_table: str,
     actual_cols: set[str] | list[str],
 ) -> dict:
-    """get_summary against the per-request TEMP TABLE.
-
-    Uses the pre-computed ``lat_us`` column populated when the TEMP TABLE
-    was created — saves the per-row COALESCE evaluation that turned the
-    composite into a regression on local benchmarks. Otherwise byte-
-    identical to :func:`get_summary`'s SQL via the shared
-    :func:`_shape_summary` helper (the TEMP-specific templates
-    ``TEMP_SUMMARY_ROLLUP`` / ``TEMP_SUMMARY_BY_EDGE`` were folded into
-    ``SUMMARY_GROUPING_SETS`` per the b10 audit finding).
-    """
+    """get_summary against the per-request TEMP TABLE using precomputed ``lat_us``."""
     return _shape_summary(runner, temp_table, "1=1", [], "lat_us", actual_cols)
 
 
@@ -1220,23 +1092,7 @@ async def get_aggregates(
     pop_latency_limit: int = 30,
     sections: set[str] | None = None,
 ) -> dict:
-    """Composite origin endpoint — seven origin cards from one parquet scan.
-
-    Materializes a per-request catalog table once on ``ctx.con`` then
-    runs the seven reads (summary, timeseries, slow_urls, status_codes,
-    path_breakdown, pop_latency, ip_health) across four pool connections
-    via ``asyncio.gather``. Shielding-analysis stays separate
-    (/api/origin/shielding-analysis).
-
-    ``sections`` is the resolved selector set produced by the router's
-    ``_expand_sections`` (coupling rules already applied). ``None``
-    preserves the pre-selector contract — every section computes and is
-    returned. When set, branches whose sections are all excluded are
-    skipped entirely (no pool checkout, no SQL), and within a still-live
-    branch only the requested sections execute. The shared temp
-    materialization always runs because every live branch reads from it
-    — that's the floor cost the composite exists to amortize.
-    """
+    """Composite origin endpoint — seven origin cards from rollups or one parquet scan."""
     import time as _time
     import uuid as _uuid
 
@@ -1264,15 +1120,6 @@ async def get_aggregates(
     params, where_clause = build_where_clause(start_time, end_time, filters, actual_cols, inline_params=True)
     has_filters = bool(filters)
 
-    # Union of columns needed across the seven sub-queries. Filtered to
-    # those the schema actually has before materialization so missing
-    # columns don't break the CREATE. Plus a precomputed `lat_us` column
-    # — the percentile sub-queries all use the same COALESCE("ottfb",
-    # "ttfb"*1000000.0) expression and computing it once at
-    # materialization time lets DuckDB store it in the column-store
-    # layout. Without the precompute, the in-memory table was
-    # SLOWER than per-endpoint parquet scans because the COALESCE
-    # forces per-row evaluation during percentile sort.
     actual_set = set(actual_cols)
     wanted_cols = [
         "timestamp",
@@ -1300,21 +1147,9 @@ async def get_aggregates(
         table=table_name,
         where_clause=where_clause,
     )
-    # Per-phase wall-clock timings surface in the response under
-    # ``section_timings`` so the perf harness can attribute time inside
-    # /api/origin/aggregates without re-running ad-hoc instrumentation —
-    # mirrors the pattern used by dashboard.py, network.py, etc.
     timer = SectionTimer()
     section_timings = timer.entries
 
-    # ── Part B: hoisted rollup phase (BEFORE the temp build) ──────────────
-    #
-    # For each REQUESTED section, attempt its try_*_from_rollup on the primary
-    # runner (cheap parquet reads, no temp). A non-None hit lands in ``merged``
-    # and is timed; a None means the section MISSED the rollup (filtered, <48h,
-    # split_by_leg, sub-minute bucket, or partial coverage) and must be served
-    # live from the temp. The temp_table_create — the dominant cost on the wide
-    # unfiltered path — is built ONLY when at least one section missed.
     merged: dict[str, Any] = {}
     missed: set[str] = set()
 
@@ -1382,28 +1217,17 @@ async def get_aggregates(
             metric=timeseries_metric,
             percentile=timeseries_percentile,
             split_by_leg=split_by_leg,
-            # The reader's active-hour live merge reads the BASE view (not the
-            # temp); pass the base table + the (time-only, since unfiltered)
-            # inlined where_clause + params. Mirrors dashboard.py's
-            # try_time_series_from_rollup call shape.
             table_name=table_name,
             where_clause=where_clause,
             params=params,
         ),
     )
 
-    # All requested sections hit the rollup → skip the temp build entirely.
-    # This is the wide-unfiltered + fully-backfilled win: temp_table_create is
-    # ABSENT from section_timings. ``origin:temp_skipped`` lets the harness
-    # confirm the guard fired. has_data still derives from the summary card.
     if not missed:
         section_timings.append(
             {"section": "origin:temp_skipped", "time_ms": 0.0, "activity": "skipped", "current_execution": True}
         )
         summary_card = merged.get("summary") or {}
-        # Same envelope as the temp-path return below: only requested sections
-        # appear (they're all in ``merged`` here), has_data from the summary
-        # card. No temp_table_create mark — that's the guard's signature.
         return {
             "has_data": summary_card.get("has_data", False),
             "section_timings": section_timings,
@@ -1416,8 +1240,6 @@ async def get_aggregates(
         return {**empty_payload, **runner.telemetry()}
     timer.mark("temp_table_create", _t, source="live", activity="compute", current_execution=True, outcome="served")
 
-    # A section runs its live from_temp helper only when it was REQUESTED and
-    # MISSED the hoisted rollup phase. Rollup hits are already in ``merged``.
     def _run_live(name: str, reader) -> None:
         if not (_want(name) and name in missed):
             return
@@ -1426,12 +1248,6 @@ async def get_aggregates(
         timer.mark(name, _ts, source="live", activity="compute", current_execution=True, outcome="served")
 
     try:
-        # Since all branch queries read from the temporary table (which is connection-scoped
-        # in DuckDB and cannot be accessed across different pooled connections), we MUST execute
-        # them sequentially on the primary runner's connection. Spawning threads or checking
-        # out separate connections would raise CatalogException.
-        # Note: serial execution is also extremely fast because the temp table is already
-        # pre-filtered and localized in-memory.
         _run_live("summary", lambda: _origin_summary_from_temp(runner, temp_table, actual_set))
         _run_live(
             "slow_urls",
@@ -1473,9 +1289,6 @@ async def get_aggregates(
         _drop_temp_table(runner, temp_table, "get_aggregates")
 
 
-# R-1: register the response TTL cache so the autouse fixture in
-# tests/conftest.py drains it via CacheRegistry.clear_all() — twin of
-# network.py's _response_cache registration.
 from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry  # noqa: E402
 
 _CacheRegistry.register("origin._response_cache", _response_cache)

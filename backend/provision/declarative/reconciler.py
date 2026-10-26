@@ -17,13 +17,477 @@ import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from backend.config import is_rum_enabled
 from backend.core.fastly.client import fastly, find_service_by_name
 from backend.core.fastly.client import find_service_by_name as _orig_find_service_by_name
-from backend.provision.declarative.state import _AUTO_INJECTED_NAMES, CmcdConfig, FeatureState, ScoringConfig
+
+# ============================================================================
+# Declarative FeatureState & Config Migration (folded from state.py)
+# ============================================================================
+
+_AUTO_INJECTED_NAMES: set[str] = {
+    # RUM fields
+    "rum_cid",
+    "fastly_req_id",
+    "rum_metric_name",
+    "rum_metric_value",
+    "rum_metric_rating",
+    "rum_error_message",
+    "rum_error_stack",
+    "rum_trace_id",
+    "rum_span_id",
+    "rum_pathname",
+    "rum_connection_speed",
+    "rum_dns_ms",
+    "rum_tcp_ms",
+    "rum_tls_ms",
+    "rum_ttfb_ms",
+    "rum_raw_query",
+    "rum_body",
+    # Scoring fields
+    "edge_score",
+    "edge_score_l1",
+    "edge_score_l2",
+    "edge_cookie_compliance",
+    "edge_score_reason",
+    "edge_sid",
+    "edge_score_rtt_us",
+    "edge_score_exec_us",
+    "edge_matrix_version",
+    # CMCD fields
+    "cmcd_sid",
+    "cmcd_cid",
+    "cmcd_br",
+    "cmcd_bl",
+    "cmcd_bs",
+    "cmcd_d",
+    "cmcd_dl",
+    "cmcd_mtp",
+    "cmcd_ot",
+    "cmcd_sf",
+    "cmcd_st",
+    "cmcd_su",
+    "cmcd_tb",
+    "cmcd_rtp",
+}
+
+
+@dataclass(frozen=True)
+class CmcdConfig:
+    """Immutable CMCD feature configuration."""
+
+    enabled: bool = False
+    mode: Literal["query_string", "headers"] = "query_string"
+    version: Literal[1, 2] = 1
+
+
+@dataclass(frozen=True)
+class ScoringConfig:
+    """Immutable Scoring feature configuration."""
+
+    enabled: bool = False
+    domain: str = ""
+    request_secret: str = ""
+    exclude_url_regex: str = ""
+    enforce_status_code: int = 429
+
+
+@dataclass(frozen=True)
+class LogFieldsConfig:
+    """Immutable log field configuration."""
+
+    groups: list[str] = field(default_factory=list)
+    custom_fields: list[dict[str, Any]] = field(default_factory=list)
+    field_overrides: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class FeatureState:
+    """Immutable representation of the desired configuration of a Fastly service.
+
+    Always construct via from_config() to ensure mandatory custom fields are
+    auto-injected when features are enabled.
+    """
+
+    service_id: str
+
+    # Core Logging Settings
+    log_period: int  # Rotation period in seconds (e.g. 60)
+    sample_rate: int  # Log sampling percentage (1 to 100)
+    edge_only: bool  # Capture logs only at the CDN edge hop
+    custom_condition: str  # Arbitrary operator-defined condition string
+    fos_prefix: str  # Prefix for raw S3 logs
+    fos_endpoint: str  # FOS endpoint hostname for RUM asset-fetch backend
+    logging_enabled: bool = True  # Toggle standard CDN request logging
+    fos_region: str = "us-east-1"
+    cdn_shield: str = ""
+    fos_access_key_id: str = ""
+    fos_secret_access_key: str = ""
+    fos_bucket: str = ""
+    logging_endpoint_name: str = "Fastly Log Analytics"  # Main request logs endpoint name
+    rum_endpoint_name: str = "Fastly RUM Logs"  # RUM beacon logs endpoint name
+
+    # Feature Toggles & Parameter Blocks
+    rum_enabled: bool = False
+    rum_log_period: int | None = None  # Rotation period for RUM logs in seconds (e.g. 300)
+    faro_version: str | None = None  # Pinned self-hosted Faro Web SDK version, from cfg["rum"]["faro_version"]
+    rum_custom_condition: str = ""  # Arbitrary operator-defined condition string for RUM logging
+
+    cmcd: CmcdConfig = field(default_factory=CmcdConfig)
+    scoring: ScoringConfig = field(default_factory=ScoringConfig)
+
+    # Log Field Collections
+    log_fields: LogFieldsConfig = field(default_factory=LogFieldsConfig)
+
+    def __post_init__(self) -> None:
+        """Validate cross-feature dependencies and field constraints.
+
+        Raises:
+            ValueError: if validation fails.
+        """
+        # Validate log_period range. [30, 3600] was this codebase's own
+        # invention, not a Fastly constraint -- confirmed live against the
+        # real API (fastly service logging s3 update --period 1) and
+        # Fastly's own API reference (no min/max documented for this
+        # field): period=1 is accepted and stored as-is. The provisioning
+        # wizard's own dropdown (StorageStep.tsx) already offers 1/5/10/20
+        # second options that this floor was silently rejecting. Applies to
+        # both the request-log and RUM S3 endpoints (desired_logging_
+        # endpoints() shares this one field between them).
+        if not (1 <= self.log_period <= 3600):
+            raise ValueError(f"log_period must be in range [1, 3600], got {self.log_period}")
+
+        if self.rum_log_period is not None and not (1 <= self.rum_log_period <= 3600):
+            raise ValueError(f"rum_log_period must be in range [1, 3600], got {self.rum_log_period}")
+
+        # Validate sample_rate range
+        if not (1 <= self.sample_rate <= 100):
+            raise ValueError(f"sample_rate must be in range [1, 100], got {self.sample_rate}")
+
+        # Validate custom field names
+        for field_dict in self.log_fields.custom_fields:
+            field_name = field_dict.get("name", "")
+            if not re.fullmatch(r"^[a-z_][a-z0-9_]*$", field_name):
+                raise ValueError(f"Custom field name '{field_name}' must be lowercase alphanumeric + underscore")
+
+        # Validate cmcd settings
+        if self.cmcd.enabled and self.cmcd.mode not in ("query_string", "headers"):
+            raise ValueError(f"cmcd.mode must be 'query_string' or 'headers', got {self.cmcd.mode!r}")
+        if self.cmcd.enabled and self.cmcd.version not in (1, 2):
+            raise ValueError(f"cmcd.version must be 1 or 2, got {self.cmcd.version}")
+
+        # Validate scoring settings
+        if self.scoring.enabled and not self.scoring.domain:
+            raise ValueError("scoring.enabled=True requires scoring.domain to be set")
+        if self.scoring.enabled:
+            if not (400 <= self.scoring.enforce_status_code <= 599):
+                raise ValueError(
+                    f"scoring.enforce_status_code must be in range [400, 599], got {self.scoring.enforce_status_code}"
+                )
+
+    @classmethod
+    def from_config(cls, cfg: dict) -> FeatureState:
+        """Parse raw config dict and construct FeatureState with automatic dependency injection.
+
+        Algorithm:
+        1. Parse all core logging settings and feature toggles from cfg.
+        2. Start with user-provided custom_fields list.
+        3. If rum_enabled=True and no field named 'rum_cid' exists, inject it.
+        4. If scoring_enabled=True and no field named 'edge_score' exists, inject it.
+        5. If cmcd_enabled=True and no field named 'cmcd_*' exists, inject all CMCD fields.
+        6. Validate: all required fields for enabled features are present.
+
+        Args:
+            cfg: Raw configuration dictionary.
+
+        Returns:
+            FeatureState instance with auto-injected mandatory fields.
+
+        Raises:
+            KeyError: if required core logging settings are missing.
+            ValueError: if validation fails.
+        """
+        # Extract core logging settings
+        service_id = cfg.get("service_id")
+        if not service_id:
+            raise KeyError("config missing 'service_id'")
+
+        log_period = cfg.get("log_period")
+        if log_period is None:
+            raise KeyError("config missing 'log_period'")
+        log_period = int(log_period)
+
+        # Extract endpoint names and request log settings from provisioning config or top-level (for backwards compatibility)
+        prov_cfg = cfg.get("provisioning", {})
+
+        sample_rate = prov_cfg.get("sample_rate") if "sample_rate" in prov_cfg else cfg.get("sample_rate")
+        if sample_rate is None:
+            sample_rate = 100  # Default fallback for backward compat
+        sample_rate = int(sample_rate)
+
+        edge_only = prov_cfg.get("edge_only") if "edge_only" in prov_cfg else cfg.get("edge_only", False)
+        edge_only = bool(edge_only)
+        custom_condition = (
+            prov_cfg.get("custom_condition") if "custom_condition" in prov_cfg else cfg.get("custom_condition", "")
+        )
+        custom_condition = (custom_condition or "").strip()
+        fos_prefix = cfg.get("fos_prefix", "")
+        fos_endpoint = cfg.get("fos_endpoint", "fos.example.com")
+        logging_enabled = cfg.get("logging_enabled", True)
+        fos_region = cfg.get("fos_region", "us-east-1")
+        cdn_shield = cfg.get("cdn_shield", "")
+        fos_access_key_id = cfg.get("fos_access_key_id", "")
+        fos_secret_access_key = cfg.get("fos_secret_access_key", "")
+        fos_bucket = cfg.get("fos_bucket", "") or cfg.get("fos_bucket_name", "")
+        # Extract endpoint names from provisioning config or top-level (for backwards compatibility)
+        logging_endpoint_name = prov_cfg.get("endpoint_name", "") or cfg.get("endpoint_name", "Fastly Log Analytics")
+        rum_cfg = cfg.get("rum", {})
+        rum_endpoint_name = rum_cfg.get("endpoint_name", "") or cfg.get("rum_endpoint_name", "Fastly RUM Logs")
+        rum_log_period_raw = rum_cfg.get("log_period") if isinstance(rum_cfg, dict) else None
+        if rum_log_period_raw is None:
+            rum_log_period_raw = cfg.get("rum_log_period")
+        rum_log_period = int(rum_log_period_raw) if rum_log_period_raw is not None else None
+        faro_version = rum_cfg.get("faro_version") if isinstance(rum_cfg, dict) else None
+        rum_custom_condition = rum_cfg.get("custom_condition", "").strip() if isinstance(rum_cfg, dict) else ""
+
+        # Extract feature toggles
+        rum_enabled = is_rum_enabled(cfg)
+
+        # Extract and construct CMCD config
+        cmcd_cfg = cfg.get("cmcd", {})
+        if not isinstance(cmcd_cfg, dict):
+            cmcd_cfg = {}
+        # Support backwards compat: flat fields override nested, but normalize to nested
+        cmcd_enabled = cfg.get("cmcd_enabled", cmcd_cfg.get("enabled", False))
+        cmcd_mode = cfg.get("cmcd_mode", cmcd_cfg.get("mode", "query_string"))
+        cmcd_version = cfg.get("cmcd_version", cmcd_cfg.get("version", 1))
+        cmcd_config = CmcdConfig(enabled=cmcd_enabled, mode=cmcd_mode, version=cmcd_version)
+
+        # Extract and construct Scoring config
+        scoring_cfg = cfg.get("scoring", {})
+        if not isinstance(scoring_cfg, dict):
+            scoring_cfg = {}
+        # Support backwards compat: flat fields override nested, but normalize to nested
+        scoring_enabled = cfg.get("scoring_enabled", scoring_cfg.get("enabled", False))
+        scoring_domain = (
+            cfg.get("scoring_domain") or scoring_cfg.get("domain") or scoring_cfg.get("scoring_domain") or ""
+        )
+        scoring_request_secret = cfg.get("scoring_request_secret", scoring_cfg.get("request_secret", ""))
+        scoring_exclude_url_regex = cfg.get("scoring_exclude_url_regex", scoring_cfg.get("exclude_url_regex", ""))
+        scoring_enforce_status_code = cfg.get(
+            "scoring_enforce_status_code", scoring_cfg.get("enforce_status_code", 429)
+        )
+        scoring_config = ScoringConfig(
+            enabled=scoring_enabled,
+            domain=scoring_domain,
+            request_secret=scoring_request_secret,
+            exclude_url_regex=scoring_exclude_url_regex,
+            enforce_status_code=scoring_enforce_status_code,
+        )
+
+        # Extract log field collections (nested format only — Task 9.5 migration handles conversion)
+        log_fields_cfg = cfg.get("log_fields", {})
+        if not isinstance(log_fields_cfg, dict):
+            log_fields_cfg = {}
+
+        log_groups = log_fields_cfg.get("groups") or cfg.get("log_groups") or cfg.get("groups") or []
+        custom_fields = log_fields_cfg.get("custom_fields") or cfg.get("custom_fields") or []
+        field_overrides = log_fields_cfg.get("field_overrides") or cfg.get("field_overrides") or {}
+
+        # Make a mutable copy of custom_fields for injection
+        injected_fields = list(custom_fields) if custom_fields else []
+
+        # Auto-inject mandatory RUM custom fields
+        if rum_enabled:
+            from backend.provision.rum_orchestrator_v2 import _RUM_CUSTOM_FIELDS
+
+            existing_names = {f.get("name") for f in injected_fields}
+            for field in _RUM_CUSTOM_FIELDS:
+                if field["name"] not in existing_names:
+                    injected_fields.append(field)
+
+        # Auto-inject mandatory Scoring custom fields
+        if scoring_enabled:
+            from backend.provision.session_scoring_orchestrator import _SCORING_CUSTOM_FIELDS
+
+            existing_names = {f.get("name") for f in injected_fields}
+            for field in _SCORING_CUSTOM_FIELDS:
+                if field["name"] not in existing_names:
+                    injected_fields.append(dict(field))
+
+        # Auto-inject mandatory CMCD custom fields
+        if cmcd_enabled:
+            from backend.provision.cmcd_fields import _CMCD_CUSTOM_FIELDS
+
+            existing_names = {f.get("name") for f in injected_fields}
+            for field in _CMCD_CUSTOM_FIELDS:
+                if field["name"] not in existing_names:
+                    injected_fields.append(dict(field))
+
+        # Construct nested LogFieldsConfig
+        log_fields_config = LogFieldsConfig(
+            groups=log_groups,
+            custom_fields=injected_fields,
+            field_overrides=field_overrides,
+        )
+
+        # Construct FeatureState; __post_init__ will validate
+        return cls(
+            service_id=service_id,
+            log_period=log_period,
+            sample_rate=sample_rate,
+            edge_only=edge_only,
+            custom_condition=custom_condition,
+            fos_prefix=fos_prefix,
+            fos_endpoint=fos_endpoint,
+            logging_enabled=logging_enabled,
+            fos_region=fos_region,
+            cdn_shield=cdn_shield,
+            fos_access_key_id=fos_access_key_id,
+            fos_secret_access_key=fos_secret_access_key,
+            fos_bucket=fos_bucket,
+            logging_endpoint_name=logging_endpoint_name,
+            rum_endpoint_name=rum_endpoint_name,
+            rum_enabled=rum_enabled,
+            rum_log_period=rum_log_period,
+            faro_version=faro_version,
+            rum_custom_condition=rum_custom_condition,
+            cmcd=cmcd_config,
+            scoring=scoring_config,
+            log_fields=log_fields_config,
+        )
+
+    def to_dict(self) -> dict:
+        """Serialize to a dictionary suitable for JSON storage.
+
+        Returns:
+            Dict with all fields.
+        """
+        return {
+            "service_id": self.service_id,
+            "log_period": self.log_period,
+            "sample_rate": self.sample_rate,
+            "edge_only": self.edge_only,
+            "custom_condition": self.custom_condition,
+            "fos_prefix": self.fos_prefix,
+            "fos_endpoint": self.fos_endpoint,
+            "logging_enabled": self.logging_enabled,
+            "fos_region": self.fos_region,
+            "cdn_shield": self.cdn_shield,
+            "fos_access_key_id": self.fos_access_key_id,
+            "fos_secret_access_key": self.fos_secret_access_key,
+            "fos_bucket": self.fos_bucket,
+            "logging_endpoint_name": self.logging_endpoint_name,
+            "rum_endpoint_name": self.rum_endpoint_name,
+            "rum_enabled": self.rum_enabled,
+            "rum_log_period": self.rum_log_period,
+            "faro_version": self.faro_version,
+            "rum_custom_condition": self.rum_custom_condition,
+            "cmcd_enabled": self.cmcd.enabled,
+            "cmcd_mode": self.cmcd.mode,
+            "cmcd_version": self.cmcd.version,
+            "scoring_enabled": self.scoring.enabled,
+            "scoring_domain": self.scoring.domain,
+            "scoring_request_secret": self.scoring.request_secret,
+            "scoring_exclude_url_regex": self.scoring.exclude_url_regex,
+            "scoring_enforce_status_code": self.scoring.enforce_status_code,
+            "log_groups": self.log_fields.groups,
+            "custom_fields": self.log_fields.custom_fields,
+            "field_overrides": self.log_fields.field_overrides,
+        }
+
+
+def migrate_config(cfg: dict[str, Any]) -> dict[str, Any]:
+    """Migrate flat CMCD/Scoring fields to nested structure.
+
+    Idempotent: calling on already-nested config returns it unchanged.
+    """
+    if not cfg:
+        return cfg
+
+    result = dict(cfg)
+
+    has_flat_cmcd = any(k in result for k in ("cmcd_enabled", "cmcd_mode", "cmcd_version"))
+    has_nested_cmcd = "cmcd" in result and isinstance(result.get("cmcd"), dict)
+
+    if has_flat_cmcd and not has_nested_cmcd:
+        result["cmcd"] = {
+            "enabled": result.pop("cmcd_enabled", False),
+            "mode": result.pop("cmcd_mode", "query_string"),
+            "version": result.pop("cmcd_version", 1),
+        }
+    elif has_flat_cmcd and has_nested_cmcd:
+        result["cmcd"]["enabled"] = result.pop("cmcd_enabled", result["cmcd"].get("enabled", False))
+        result["cmcd"]["mode"] = result.pop("cmcd_mode", result["cmcd"].get("mode", "query_string"))
+        result["cmcd"]["version"] = result.pop("cmcd_version", result["cmcd"].get("version", 1))
+
+    has_flat_scoring = any(
+        k in result
+        for k in (
+            "scoring_enabled",
+            "scoring_domain",
+            "scoring_request_secret",
+            "scoring_exclude_url_regex",
+            "scoring_enforce_status_code",
+        )
+    )
+    has_nested_scoring = "scoring" in result and isinstance(result.get("scoring"), dict)
+
+    if has_flat_scoring and not has_nested_scoring:
+        result["scoring"] = {
+            "enabled": result.pop("scoring_enabled", False),
+            "domain": result.pop("scoring_domain", ""),
+            "request_secret": result.pop("scoring_request_secret", ""),
+            "exclude_url_regex": result.pop("scoring_exclude_url_regex", ""),
+            "enforce_status_code": result.pop("scoring_enforce_status_code", 429),
+        }
+    elif has_flat_scoring and has_nested_scoring:
+        result["scoring"]["enabled"] = result.pop("scoring_enabled", result["scoring"].get("enabled", False))
+        result["scoring"]["domain"] = result.pop("scoring_domain", result["scoring"].get("domain", ""))
+        result["scoring"]["request_secret"] = result.pop(
+            "scoring_request_secret", result["scoring"].get("request_secret", "")
+        )
+        result["scoring"]["exclude_url_regex"] = result.pop(
+            "scoring_exclude_url_regex", result["scoring"].get("exclude_url_regex", "")
+        )
+        result["scoring"]["enforce_status_code"] = result.pop(
+            "scoring_enforce_status_code", result["scoring"].get("enforce_status_code", 429)
+        )
+
+    return result
+
+
+def config_changed(before: dict[str, Any], after: dict[str, Any]) -> bool:
+    """Detect if migration changed the config structure."""
+    flat_fields = {
+        "cmcd_enabled",
+        "cmcd_mode",
+        "cmcd_version",
+        "scoring_enabled",
+        "scoring_domain",
+        "scoring_request_secret",
+        "scoring_exclude_url_regex",
+        "scoring_enforce_status_code",
+    }
+    return any(k in before for k in flat_fields) and before != after
+
+
+_self_state_mod = sys.modules[__name__]
+sys.modules["backend.provision.declarative.state"] = _self_state_mod
+sys.modules["backend.provision.declarative.config_migration"] = _self_state_mod
+_decl_pkg = sys.modules.get("backend.provision.declarative")
+if _decl_pkg is not None:
+    setattr(_decl_pkg, "state", _self_state_mod)
+    setattr(_decl_pkg, "config_migration", _self_state_mod)
+_backend_pkg = sys.modules.get("backend")
+if _backend_pkg is not None and hasattr(_backend_pkg, "_MODULE_ALIASES"):
+    _backend_pkg._MODULE_ALIASES.setdefault("backend.provision.declarative.state", __name__)
+    _backend_pkg._MODULE_ALIASES.setdefault("backend.provision.declarative.config_migration", __name__)
+
 from backend.provision.rum_assets import upload_rum_tracker_js
 
 logger = logging.getLogger(__name__)

@@ -70,47 +70,6 @@ SESSIONS_CTE_PIPELINE = """
         GROUP BY {group_key}, sid
     )
 """
-"""Five-stage CTE pipeline that materialises per-session aggregates.
-
-Inputs (all trusted-identifier substitutions):
-- ``{group_key}`` — quoted partition columns: ``"ip"`` or ``"ip", "ja4"``.
-- ``{ua_proj}`` — empty string or ``, "ua"`` (column projection in ``base``).
-- ``{status_proj}`` — empty string or ``, "status"``.
-- ``{resp_bytes_proj}`` — empty string or ``, "resp_bytes"``.
-- ``{rtt_proj}`` — empty string or ``, "tcp_rtt"``.
-- ``{asn_proj}`` — empty string or ``, "asn"``.
-- ``{country_proj}`` — empty string or ``, "country"``.
-- ``{url_proj}`` — empty string or ``, "url"``.
-- ``{edge_proj}`` — empty string or ``, "edge"``.
-- ``{edge_sid_proj}`` — empty string or ``, "edge_sid"`` (Fastly cookie
-  session id; present only after the session_scoring orchestrator has
-  provisioned the field — see
-  ``backend/provision/session_scoring_orchestrator.py``).
-- ``{cmcd_sid_proj}`` — empty string or ``, "cmcd_sid"`` (CMCD session id;
-  present when CMCD logging is enabled on the service).
-- ``{table_name}`` — output of ``_safe_table(src["name"])``.
-- ``{where_clause}`` — output of ``build_where_clause(...)`` (uses ``?`` for
-  user values; the caller binds those via the ``params`` arg, not here).
-- ``{part_key}`` — same value as ``{group_key}`` (the partition key for the
-  window functions; kept distinct in case callers ever diverge them).
-- ``{extra_aggs}`` — pre-built per-column aggregate clauses (each begins
-  with ``, ``) for the optional columns above.
-
-Output (one row per ``(group_key, sid)``):
-- ``{group_key}`` columns (``ip``, optionally ``ja4``)
-- ``session_start`` (TIMESTAMPTZ)
-- ``session_end`` (TIMESTAMPTZ)
-- ``req_count`` (BIGINT)
-- the columns produced by ``{extra_aggs}`` (asn, country, reqs_4xx,
-  reqs_5xx, total_bytes, median_rtt_ms, ua, unique_urls, edge_count,
-  shield_count — presence depends on table schema)
-- ``sid`` (BIGINT — running session id; the caller does not select it)
-
-This template is intended to be combined with a downstream query
-(``SESSIONS_PAGE_SELECT`` or ``SESSIONS_COUNT_WRAPPER``) via string
-concatenation in the repository — both consumers reference the
-``sessions_agg`` CTE produced here.
-"""
 
 
 SESSIONS_PAGE_SELECT = """
@@ -123,44 +82,12 @@ SESSIONS_PAGE_SELECT = """
     ORDER BY {sort_by} {sort_dir}
     LIMIT {limit} OFFSET {offset}
 """
-"""Page of sessions with the flagged-suspect predicate applied.
-
-Inputs (all trusted-identifier substitutions; user values are bound
-through DuckDB ``?`` params in ``{cte_prefix}``'s WHERE clause):
-- ``{cte_prefix}`` — rendered ``SESSIONS_CTE_PIPELINE``.
-- ``{flag_expr}`` — caller-built boolean (e.g.
-  ``(req_count >= 1000) OR (...)``) — values are inline integer/float
-  literals validated by the repository layer.
-- ``{flagged_filter}`` — empty string or ``WHERE flagged = true``.
-- ``{sort_by}`` — column name from a hard-coded allowlist (validated in
-  the repository).
-- ``{sort_dir}`` — ``ASC`` or ``DESC`` (validated upstream by the router).
-- ``{limit}`` — integer (validated upstream by the router pagination guard).
-- ``{offset}`` — integer (computed by ``calc_offset(page, limit)``).
-
-Output (one row per session): all columns produced by the
-``sessions_agg`` CTE plus a synthesised ``flagged`` BOOLEAN.
-"""
 
 
 SESSIONS_COUNT_WRAPPER = """
     {cte_prefix}
     SELECT COUNT(*) FROM (SELECT *, ({flag_expr}) AS flagged FROM sessions_agg) sub
     {flagged_filter}
-"""
-"""Total session count (with optional flagged-only filter applied).
-
-Used by the repository only when the page request hits past the last
-page (the cheap ``len(rows)`` fast path returns 0; we then need the true
-total to render the paginator).
-
-Inputs:
-- ``{cte_prefix}`` — rendered ``SESSIONS_CTE_PIPELINE``.
-- ``{flag_expr}`` — same flag expression as ``SESSIONS_PAGE_SELECT``.
-- ``{flagged_filter}`` — empty string or ``WHERE flagged = true``.
-
-Output (one row):
-- column 0: BIGINT — total session count after filtering.
 """
 
 SQL: Any = _sys.modules[__name__]
@@ -172,41 +99,13 @@ _CacheRegistry.register("sessions._response_cache", _response_cache)
 
 
 def _collect_sessions_rollup_paths(src: dict, st: datetime, et: datetime) -> tuple[list[str], bool] | None:
-    """Enumerate per-hour sessions.parquet files covering ``[st, et)``.
-
-    Returns ``(paths, crosses_active_hour)`` on success, or ``None``
-    if a closed hour in the window has per-field rollup data but no
-    sessions.parquet (writer is behind — falling back to raw is
-    safer than serving an undercount).
-
-    Empty-hour tolerance (mirrors
-    ``QueryRunner.try_time_series_from_rollup``): if a hour has no
-    sessions.parquet AND no entry in the per-field rollup tree, we
-    treat the hour as having genuinely zero data and skip it. The
-    per-field tree is the same source the sessions backfill walks
-    to decide what to write, so:
-
-      - per-field has hour H + sessions.parquet exists  → use rollup
-      - per-field has hour H + sessions.parquet missing → writer
-        is behind → fall back to raw (don't undercount)
-      - per-field has no hour H                          → hour was
-        empty → skip (contributes zero sessions)
-
-    Failure mode: between Iceberg commit and the per-field rollup
-    writer running, an hour could have data in Iceberg but not in
-    the per-field tree. With the cron running every minute on prod
-    this gap is at most the active hour (already live-queried) +
-    occasionally one hour behind. On local dev with no cron, the
-    gap can span days — local rollup falls back to raw, which is
-    expected/correct.
-    """
+    """Enumerate per-hour sessions.parquet files covering ``[st, et)``."""
     from backend.core.rollups import SESSIONS_BUNDLE_FILENAME, _hour_bundled_root
     from backend.repositories.rollup_coverage import collect_hourly_bundle_paths
 
     bundled_root = _hour_bundled_root(src)
     if not os.path.isdir(bundled_root):
         return None
-
     return collect_hourly_bundle_paths(src, st, et, bundled_root, SESSIONS_BUNDLE_FILENAME)
 
 
@@ -245,15 +144,7 @@ def _build_direct_active_hour_session_sql(
     user_start: datetime,
     user_end: datetime,
 ) -> str | None:
-    """Build an active-hour session aggregation query that reads directly from
-    the DuckLake table and mtime-pruned local buffer parquets (with
-    ``union_by_name=false`` and narrow column projection), bypassing the
-    90-column ``logs_<id>`` view.
-
-    Returns ``None`` when the caller should fall back to
-    :func:`_build_active_hour_session_sql` against ``table_name`` (e.g. in
-    durable serving mode or unit tests backed by an in-memory table).
-    """
+    """Build active-hour session aggregation query directly from DuckLake and mtime-pruned buffer parquets."""
     from backend import config as svcconfig
     from backend.core.duckdb import _cache_dir
 
@@ -409,31 +300,13 @@ def _build_active_hour_session_sql(
 
 
 def _build_rollup_filter_sql(rollup_filters: FiltersDict | None) -> str:
-    """Build a SQL WHERE clause fragment from the subset of filter pills
-    that the sessions rollup can serve (country, asn).
-
-    Values are inlined as SQL literals (with quote-escaping) rather than
-    parameterised because the surrounding rollup query uses inlined
-    file paths too — keeping the inline pattern uniform avoids a separate
-    params list threading through the UNION ALL.
-    """
+    """Build a SQL WHERE clause fragment from rollup-compatible filter pills (country, asn)."""
     if not rollup_filters:
         return ""
     parts: list[str] = []
     for col, spec_raw in rollup_filters.items():
         if col not in ("country", "asn"):
-            # Caller's eligibility gate is supposed to enforce this;
-            # the check here is defense-in-depth.
             return ""
-        # ``spec`` is either a FilterSpec pydantic model OR a plain dict —
-        # the function accepts both shapes historically. Cast away here so
-        # the isinstance branch doesn't trip the type checker.
-        #
-        # ``hasattr(spec, "values")`` is unsafe for the dict branch — dict
-        # has a ``.values`` METHOD, so the hasattr-truthy path would
-        # return the bound method instead of the dict's "values" key.
-        # Branch on isinstance(spec, dict) so the dict path always goes
-        # through spec.get(...).
         spec: Any = spec_raw
         if isinstance(spec, dict):
             values = spec.get("values", [])
@@ -443,8 +316,8 @@ def _build_rollup_filter_sql(rollup_filters: FiltersDict | None) -> str:
             mode = spec.mode
         if not values:
             continue
+        op = "NOT IN" if mode == "exclude" else "IN"
         if col == "asn":
-            # asn is INTEGER in the rollup; cast user-supplied values.
             int_literals: list[str] = []
             for v in values:
                 try:
@@ -453,16 +326,11 @@ def _build_rollup_filter_sql(rollup_filters: FiltersDict | None) -> str:
                     continue
             if not int_literals:
                 continue
-            in_list = ", ".join(int_literals)
-            op = "NOT IN" if mode == "exclude" else "IN"
-            parts.append(f'"asn" {op} ({in_list})')
-        else:  # country: VARCHAR
+            parts.append(f'"asn" {op} ({", ".join(int_literals)})')
+        else:
             country_literals = ", ".join("'" + escape_sql_literal(str(v)) + "'" for v in values)
-            op = "NOT IN" if mode == "exclude" else "IN"
             parts.append(f'"country" {op} ({country_literals})')
-    if not parts:
-        return ""
-    return " AND " + " AND ".join(parts)
+    return (" AND " + " AND ".join(parts)) if parts else ""
 
 
 def _schema_cap_flags(actual_cols: set[str]) -> dict[str, bool]:
@@ -535,17 +403,7 @@ def _sessions_envelope(
 
 
 def _build_asn_label_map(sessions: list[dict], src: dict) -> dict[int, str]:
-    """Return ``{asn_int: 'AS<n> Name'}`` for every ASN that appears in the
-    given sessions.
-
-    Batches the lookup so a 100-row page is one cache+resolve cycle. Cold
-    asn_names cache entries trigger WHOIS resolution and amortise on later
-    requests. Same path used by network/performance/dashboard responses.
-
-    Hoisting the label out of every row (used to be inlined as ``asn_label``)
-    saves ~30 bytes per session on the wire; the frontend resolves the label
-    by ``asn_names[row.asn]`` at render time.
-    """
+    """Return ``{asn_int: 'AS<n> Name'}`` for every ASN appearing in ``sessions``."""
     asn_ints = sorted({int(sess["asn"]) for sess in sessions if sess.get("asn") is not None})
     if not asn_ints:
         return {}
@@ -578,23 +436,7 @@ def _get_sessions_from_rollup(
     section_timings: list,
     rollup_filters: FiltersDict | None = None,
 ) -> dict | None:
-    """Rollup-served version of get_sessions for the unfiltered case.
-
-    Returns the same response shape as get_sessions, or ``None`` if
-    the rollup can't serve this query (writer behind, no bundled
-    root, etc.) — caller falls back to the raw path.
-
-    Single-hour-or-less queries (``end - start <= 1h``) bypass the
-    rollup because the raw scan is fast at that range and the rollup
-    can't deliver ``unique_urls`` for the existing UI. Larger windows
-    drop ``unique_urls`` (set to NULL) and report ``median_rtt_ms`` as
-    the per-row mean (rtt_sum / rtt_count) — labelled the same field
-    name for back-compat. Both caveats are baked into the contract;
-    callers wanting exact median or unique_urls counts should use the
-    raw path explicitly.
-    """
-    # Bail for windows ≤ 1h — raw is fast there and the rollup grain
-    # is hourly so there's no win to chase.
+    """Rollup-served version of get_sessions for windows > 1h, or None on fallback."""
     if (end_dt - start_dt) <= timedelta(hours=1):
         return None
 
@@ -602,12 +444,9 @@ def _get_sessions_from_rollup(
     paths_result = _collect_sessions_rollup_paths(src, start_dt, end_dt)
     section_timings.append({"section": "rollup_paths_collect", "time_ms": round((time.perf_counter() - _t) * 1000, 2)})
     if paths_result is None:
-        # Writer behind for at least one in-window hour with data.
         return None
     rollup_paths, crosses_active = paths_result
     if not rollup_paths and not crosses_active:
-        # No rollup files at all AND not in the active hour — nothing
-        # to serve.
         return None
 
     active_hour_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0) if crosses_active else None
@@ -617,38 +456,18 @@ def _get_sessions_from_rollup(
         direct_live_sql = _build_direct_active_hour_session_sql(con, src, actual_cols, active_hour_dt, start_dt, end_dt)
         fallback_live_sql, _ = _build_active_hour_session_sql(table_name, actual_cols, active_hour_dt, start_dt, end_dt)
 
-    # Sort/filter compatible columns for the final SELECT. The rollup
-    # has session_start/session_end via MIN(first_ts)/MAX(last_ts)
-    # after the stitching aggregation below.
     sort_col_sql = {
         "session_start": "session_start",
         "session_end": "session_end",
         "req_count": "req_count",
         "edge_count": "edge_count",
         "shield_count": "shield_count",
-        "unique_urls": "session_start",  # not tracked at rollup grain; sort by start as a safe fallback
+        "unique_urls": "session_start",
         "median_rtt_ms": "median_rtt_ms",
         "total_bytes": "total_bytes",
     }.get(sort_by, "session_start")
     sort_dir_sql = "DESC" if sort_dir.upper() == "DESC" else "ASC"
     offset = calc_offset(page, limit)
-
-    # Window-function stitching: walk the per-(ip, ja4) rollup rows in
-    # bucket order, start a new session whenever the gap between this
-    # row's first_ts and the previous row's last_ts exceeds 30 minutes.
-    # Then GROUP BY the stitched session id.
-    #
-    # Optimization: >99% of (ip, ja4) pairs appear in only a single hour
-    # bucket across a 24h window. Grouping by (ip, ja4) first (`by_pair`)
-    # lets single-bucket pairs (`row_cnt = 1`) bypass both window sorts,
-    # while late materialization (`top_sessions JOIN filtered`) computes
-    # the 15 payload columns (strings + counters) only for the winning
-    # `LIMIT` rows instead of all ~170k sessions.
-    #
-    # Push filter pills into the rollup CTE so we skip stitching rows
-    # the user filtered out. Country / asn are MIN-aggregated in the
-    # rollup row, so the filter semantics match raw-path for any IP
-    # whose country/asn is stable across the hour (the common case).
     rollup_filter_sql = _build_rollup_filter_sql(rollup_filters)
 
     extra_sort_agg = ""
@@ -874,10 +693,6 @@ def get_sessions(
     if min_4xx_pct_flag is None:
         min_4xx_pct_flag = 20.0
 
-    # Per-phase timings surface in the response under _section_timings
-    # so the perf harness can attribute wall time inside /api/sessions
-    # without re-running ad-hoc instrumentation. Mirrors the pattern in
-    # dashboard.py / bootstrap.py.
     timer = SectionTimer()
     section_timings = timer.entries
 
@@ -885,20 +700,13 @@ def get_sessions(
     table_name = _safe_table(src["name"])
     offset = calc_offset(page, limit)
 
-    # Max 7-day range guard — hoisted above get_schema_cols() so a too-wide
-    # request rejects before paying the schema-fetch + Iceberg view-resolve
-    # cost. Frontend mirrors this guard so the request never fires on the
-    # happy path; this server-side guard backs up direct API callers.
     if start_time and end_time:
-        try:
-            from backend.utils.date_utils import parse_iso_utc
+        from backend.utils.date_utils import parse_iso_utc
 
-            s = parse_iso_utc(str(start_time))
-            e = parse_iso_utc(str(end_time))
-            if s and e and (e - s).days > 7:
-                raise ValueError("Sessions view is limited to 7 days. Please narrow your date range.")
-        except ValueError:
-            raise
+        s = parse_iso_utc(str(start_time))
+        e = parse_iso_utc(str(end_time))
+        if s and e and (e - s).days > 7:
+            raise ValueError("Sessions view is limited to 7 days. Please narrow your date range.")
 
     def _empty_resp(cols: set[str]) -> dict:
         return empty_schema_response(
@@ -956,21 +764,7 @@ def get_sessions(
     has_edge_sid = "edge_sid" in actual_cols
     has_cmcd = "cmcd_sid" in actual_cols
 
-    # Sessions-rollup fast path: serve from per-hour sessions.parquet
-    # rollups (built by backend.core.rollups.build_session_bundles)
-    # instead of the multi-second raw window-function scan.
-    #
-    # Eligibility:
-    #   - Window > 1 h (rollup grain is hourly; raw is fast at <= 1 h).
-    #   - All filter pills are rollup-compatible. The rollup schema has
-    #     ``country`` and ``asn`` as MIN-aggregated columns per
-    #     (ip, ja4, hour). For a given IP the MIN is deterministic and
-    #     matches the raw-path filter value in practice (an IP rarely
-    #     changes country mid-hour). Other filter columns (url, ua,
-    #     custom fields, status) aren't in the rollup → fall back to raw.
-    #
-    # Returns None if the rollup can't serve (writer behind, no bundled
-    # root, active-hour only, etc.); we fall back to the raw path below.
+    # Sessions-rollup fast path for windows > 1h with rollup-compatible filters (country, asn).
     _ROLLUP_FILTERABLE = {"country", "asn"}
     if start_time and end_time and not streaming_only and all(k in _ROLLUP_FILTERABLE for k in filters):
         try:
@@ -1189,16 +983,10 @@ def get_session_detail(
             if s_dt and e_dt:
                 s_utc = s_dt.astimezone(UTC)
                 e_utc = e_dt.astimezone(UTC)
-                if "dt" in actual_cols:
-                    conditions.append('"dt" >= ?')
-                    p.append(s_utc.strftime("%Y-%m-%d"))
-                    conditions.append('"dt" <= ?')
-                    p.append(e_utc.strftime("%Y-%m-%d"))
-                if "timestamp_hour" in actual_cols:
-                    conditions.append('"timestamp_hour" >= ?')
-                    p.append(s_utc.strftime("%Y-%m-%d-%H"))
-                    conditions.append('"timestamp_hour" <= ?')
-                    p.append(e_utc.strftime("%Y-%m-%d-%H"))
+                for col, fmt in (("dt", "%Y-%m-%d"), ("timestamp_hour", "%Y-%m-%d-%H")):
+                    if col in actual_cols:
+                        conditions.extend((f'"{col}" >= ?', f'"{col}" <= ?'))
+                        p.extend((s_utc.strftime(fmt), e_utc.strftime(fmt)))
         except Exception:
             logging.getLogger(__name__).debug(
                 "sessions.get_session_detail: partition bound parse failed", exc_info=True

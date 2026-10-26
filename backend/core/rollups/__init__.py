@@ -47,8 +47,10 @@ from . import day_bundles, network, origin_dims, recompute, security_dims
 
 perf_latency = origin_dims
 hour_bundles = day_bundles
+partial_hour = day_bundles
 time_series = recompute
 ngwaf_bots = security_dims
+wellknown_bots = security_dims
 
 # Re-exports — pull every public symbol up so callers continue to use
 # the flat ``backend.core.rollups.X`` path. Order doesn't matter; no
@@ -173,14 +175,12 @@ from .security_dims import (
     backfill_security_dims_bundles,
     backfill_security_proxies_bundles,
     backfill_verified_bots_ts_bundles,
+    backfill_wellknown_bots_rollup,
     build_ngwaf_bots_bundles,
     build_ngwaf_bots_ts_bundles,
     build_security_dims_bundles,
     build_security_proxies_bundles,
     build_verified_bots_ts_bundles,
-)
-from .wellknown_bots import (
-    backfill_wellknown_bots_rollup,
     read_wellknown_bots_rollup,
     recompute_wellknown_bots_rollup,
 )
@@ -208,7 +208,9 @@ if _backend_pkg is not None and hasattr(_backend_pkg, "_MODULE_ALIASES"):
         {
             "backend.utils.ngwaf": "backend.core.rollups.security_dims",
             "backend.core.rollups.ngwaf_bots": "backend.core.rollups.security_dims",
+            "backend.core.rollups.wellknown_bots": "backend.core.rollups.security_dims",
             "backend.core.rollups.hour_bundles": "backend.core.rollups.day_bundles",
+            "backend.core.rollups.partial_hour": "backend.core.rollups.day_bundles",
             "backend.core.rollups.time_series": "backend.core.rollups.recompute",
             "backend.core.rollups.overview": "backend.core.rollups.recompute",
             "backend.core.rollups.sessions": "backend.core.rollups.recompute",

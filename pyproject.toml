@@ -375,7 +375,6 @@ module = [
     "backend.core.query_registry",
     "backend.core.query_instrumentation",
     "backend.core.query_attribution",
-    "backend.core.metadata.reconciliation",
     "backend.cron.jobs.compaction",
     "backend.repositories.session_scoring",
     # v2.0 final wave (2026-06-12): post-split modules with fresh test
@@ -386,7 +385,6 @@ module = [
     "backend.core.rollups.sessions",
     "backend.core.rollups.day_bundles",
     "backend.core.rollups.recompute",
-    "backend.core.rollups.wellknown_bots",
     "backend.routers.admin.ingest",
     "backend.routers.admin.log_accounting",
     "backend.routers.admin.health",

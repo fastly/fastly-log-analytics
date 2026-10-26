@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import duckdb
 import pytest
 import time_machine
+from backend.utils.time_window import resolve_window
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
@@ -27,7 +28,6 @@ from backend.routers import rum as rum_router
 from backend.routers.rum import router as _rum_api_router
 from backend.utils.date_utils import iso_z, parse_iso_utc
 from backend.utils.remote_access import TimeBounds, _is_blocked_path, get_analyst_time_bounds
-from backend.utils.time_window import resolve_window
 from tests._helpers.config_fakes import mutate_via_save
 from tests._helpers.rum import insert_rum_beacons as _insert_beacons
 from tests._helpers.rum import setup_temp_rum_db
@@ -47,14 +47,11 @@ client = TestClient(app)
 
 
 def _parse_sse(text: str) -> list[dict[str, Any]]:
-    events: list[dict[str, Any]] = []
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
-        if line.startswith("data:"):
-            payload = line[len("data:") :].strip()
-            if payload:
-                events.append(json.loads(payload))
-    return events
+    return [
+        json.loads(line[len("data:") :].strip())
+        for raw_line in text.splitlines()
+        if (line := raw_line.strip()).startswith("data:") and line[len("data:") :].strip()
+    ]
 
 
 def _make_app(*, analyst: bool = False) -> FastAPI:
@@ -74,12 +71,22 @@ def _fake_request(analyst_session: object | None) -> SimpleNamespace:
     return SimpleNamespace(state=SimpleNamespace(analyst_session=analyst_session))
 
 
+def _mock_rum_source(db_path: Any) -> dict[str, str]:
+    return {
+        "name": "test_service",
+        "service_id": "test_service",
+        "duckdb_path": str(db_path).replace(".rum.duckdb", ".duckdb"),
+        "access_level": "read_write",
+        "endpoint": "localhost",
+        "access_key_id": "mock",
+        "secret_access_key": "mock",
+        "region": "mock",
+    }
+
+
 @pytest.fixture
 def skip_view_update(request):
-    if request.node.name in (
-        "test_rum_analytics_cold_start_readonly",
-        "test_rum_live_buffer_unlink_race_self_heals",
-    ):
+    if request.node.name in ("test_rum_analytics_cold_start_readonly", "test_rum_live_buffer_unlink_race_self_heals"):
         yield None
     else:
         with patch("backend.core.iceberg.view.update_iceberg_view") as mock:
@@ -172,24 +179,17 @@ def test_admin_rum_status_variants(cfg, cur_sha, leg_sha, expected_drift, expect
 
     assert res.status_code == 200
     body = res.json()
-    assert body["enabled"] is True
-    assert body["vcl_drift"] is expected_drift
-    assert body["deployed_vcl_sha"] == expected_deployed
-    assert body["current_vcl_sha"] == cur_sha
+    assert body["enabled"] is True and body["vcl_drift"] is expected_drift
+    assert body["deployed_vcl_sha"] == expected_deployed and body["current_vcl_sha"] == cur_sha
     assert mock_save.called is expect_save
     if "custom_condition" in cfg.get("rum", {}):
-        assert body["custom_condition"] == 'req.url.ext != "jpg"'
-        assert body["capture_performance"] is False
+        assert body["custom_condition"] == 'req.url.ext != "jpg"' and body["capture_performance"] is False
 
 
 @pytest.mark.security_regression
 async def test_analyst_status_excludes_vcl_fingerprint_fields(with_config, monkeypatch):
     svc = "svc-rum-status-projection"
-    with_config[svc] = {
-        "rum_enabled": True,
-        "rum_enabled_at": "2026-01-01T00:00:00Z",
-        "rum_vcl_sha": "deadbeef",
-    }
+    with_config[svc] = {"rum_enabled": True, "rum_enabled_at": "2026-01-01T00:00:00Z", "rum_vcl_sha": "deadbeef"}
     monkeypatch.setattr(
         rum_router,
         "rum_vcl_fingerprint",
@@ -208,21 +208,18 @@ async def test_analyst_can_read_enabled_field(with_config):
     with_config[svc] = {"rum_enabled": False}
     sess = SimpleNamespace(session_id="s-test", service_ids=[svc], email="analyst@example.com")
     result = await rum_router.rum_status(_fake_request(sess), service_id=svc)
-    assert result["enabled"] is False
-    assert "enabled_at" in result
+    assert result["enabled"] is False and "enabled_at" in result
 
 
 # ── Section 2: RUM Settings, Versions, Enable/Disable/Upgrade & RBAC ─────────
 
 
-@pytest.mark.parametrize(
-    ("custom_condition", "expect_reconcile"),
-    [
-        ("", False),
-        ('req.url !~ "^/healthz"', True),
-    ],
-)
-def test_update_settings_reconcile_behavior(custom_condition: str, expect_reconcile: bool):
+@pytest.mark.parametrize(("custom_condition", "expect_reconcile"), [("", False), ('req.url !~ "^/healthz"', True)])
+def test_update_settings_reconcile_and_missing(custom_condition: str, expect_reconcile: bool):
+    test_client = TestClient(_make_app(analyst=False))
+    with patch("backend.config.load_config", return_value=None):
+        assert test_client.post(f"/api/services/{SVC}/rum/settings", json={"capture_vitals": True}).status_code == 404
+
     cfg = {
         "fastly_api_key": "tok-stored",
         "rum_enabled": True,
@@ -235,25 +232,21 @@ def test_update_settings_reconcile_behavior(custom_condition: str, expect_reconc
             "custom_condition": "",
         },
     }
-    test_client = TestClient(_make_app(analyst=False))
+    payload = {
+        "capture_vitals": True,
+        "capture_performance": False,
+        "capture_errors": True,
+        "capture_events": False,
+        "custom_condition": custom_condition,
+    }
     with (
         patch("backend.config.load_config", return_value=cfg),
         patch("backend.config.mutate_config", side_effect=mutate_via_save(mock_save := MagicMock())),
         patch("backend.provision.rum_assets.upload_rum_tracker_js", return_value={"skipped": False}) as mock_upload,
         patch("backend.provision.declarative.reconciler.reconcile_vcl_state") as mock_reconcile,
     ):
-        res = test_client.post(
-            f"/api/services/{SVC}/rum/settings",
-            json={
-                "capture_vitals": True,
-                "capture_performance": False,
-                "capture_errors": True,
-                "capture_events": False,
-                "custom_condition": custom_condition,
-            },
-        )
-    assert res.status_code == 200
-    assert res.json()["ok"] is True
+        res = test_client.post(f"/api/services/{SVC}/rum/settings", json=payload)
+    assert res.status_code == 200 and res.json()["ok"] is True
     mock_save.assert_called_once()
     mock_upload.assert_called_once_with(SVC, "tok-stored", overwrite=True)
     assert mock_reconcile.called is expect_reconcile
@@ -273,6 +266,13 @@ def test_update_settings_rolls_back_on_failure(upload_err, reconcile_err, custom
         "rum": {"enabled": True, "capture_vitals": True, "custom_condition": ""},
     }
     test_client = TestClient(_make_app(analyst=False))
+    payload = {
+        "capture_vitals": False,
+        "capture_performance": False,
+        "capture_errors": False,
+        "capture_events": False,
+        "custom_condition": custom_condition,
+    }
     with (
         patch("backend.config.load_config", return_value=cfg),
         patch("backend.config.mutate_config", side_effect=mutate_via_save(mock_save := MagicMock())),
@@ -282,29 +282,11 @@ def test_update_settings_rolls_back_on_failure(upload_err, reconcile_err, custom
         ),
         patch("backend.provision.declarative.reconciler.reconcile_vcl_state", side_effect=reconcile_err),
     ):
-        res = test_client.post(
-            f"/api/services/{SVC}/rum/settings",
-            json={
-                "capture_vitals": False,
-                "capture_performance": False,
-                "capture_errors": False,
-                "capture_events": False,
-                "custom_condition": custom_condition,
-            },
-        )
-    assert res.status_code == 500
-    assert res.json()["detail"]["error"] == expected_error_code
+        res = test_client.post(f"/api/services/{SVC}/rum/settings", json=payload)
+    assert res.status_code == 500 and res.json()["detail"]["error"] == expected_error_code
     assert mock_save.call_count == 2
     rollback_cfg = mock_save.call_args_list[1].args[1]
-    assert rollback_cfg["rum"]["capture_vitals"] is True
-    assert rollback_cfg["rum"]["custom_condition"] == ""
-
-
-def test_update_settings_404_when_service_missing():
-    test_client = TestClient(_make_app(analyst=False))
-    with patch("backend.config.load_config", return_value=None):
-        res = test_client.post(f"/api/services/{SVC}/rum/settings", json={"capture_vitals": True})
-    assert res.status_code == 404
+    assert rollback_cfg["rum"]["capture_vitals"] is True and rollback_cfg["rum"]["custom_condition"] == ""
 
 
 @pytest.mark.usefixtures("_reset_faro_cache")
@@ -350,15 +332,6 @@ def test_rum_versions_variants(with_config, monkeypatch, svc_cfg, fetched, expec
         assert body.get(k) == v
 
 
-@pytest.mark.parametrize("action", ["enable", "disable"])
-def test_enable_disable_missing_config_and_token_errors(with_config, action: str):
-    svc = "TestRumEnableDisableSvc"
-    assert client.post(f"/api/services/{svc}/rum/{action}", json={}).status_code == 404
-    with_config[svc] = {"service_id": svc, "fastly_api_key": ""}
-    r = client.post(f"/api/services/{svc}/rum/{action}", json={})
-    assert r.status_code == 400
-
-
 @pytest.mark.parametrize(
     ("action", "activate", "final_enabled", "expected_msg_substr"),
     [
@@ -383,19 +356,17 @@ def test_enable_disable_sse_modes(
 
     r = client.post(f"/api/services/{svc}/rum/{action}", json={"activate": activate})
     assert r.status_code == 200
-    events = _parse_sse(r.text)
-    done = next(e for e in events if e["type"] == "done")
-    assert done["rum"]["enabled"] is final_enabled
-    assert expected_msg_substr in done["message"]
+    done = next(e for e in _parse_sse(r.text) if e["type"] == "done")
+    assert done["rum"]["enabled"] is final_enabled and expected_msg_substr in done["message"]
 
 
 @pytest.mark.parametrize("action", ["enable", "disable"])
-def test_enable_disable_token_override_error_and_scheduler_resilience(with_config, monkeypatch, action: str):
+def test_enable_disable_errors_and_resilience(with_config, monkeypatch, action: str):
     svc = "TestRumEnableDisableSvc"
-    if action == "enable":
-        with_config[svc] = {"service_id": svc, "fastly_api_key": ""}
+    assert client.post(f"/api/services/{svc}/rum/{action}", json={}).status_code == 404
+    with_config[svc] = {"service_id": svc, "fastly_api_key": ""}
+    assert client.post(f"/api/services/{svc}/rum/{action}", json={}).status_code == 400
 
-    # 1. Supplied token works and persists on enable
     monkeypatch.setattr(
         "backend.routers.rum.run_with_events", lambda f, *a, **kw: iter([{"type": "status", "message": "ok"}])
     )
@@ -403,12 +374,10 @@ def test_enable_disable_token_override_error_and_scheduler_resilience(with_confi
         "backend.cron.scheduler.get_scheduler", lambda: (_ for _ in ()).throw(RuntimeError("scheduler down"))
     )
     r = client.post(f"/api/services/{svc}/rum/{action}", json={"token": "SUPPLIED-TOKEN"})
-    assert r.status_code == 200
-    assert any(e["type"] == "done" for e in _parse_sse(r.text))
+    assert r.status_code == 200 and any(e["type"] == "done" for e in _parse_sse(r.text))
     if action == "enable":
         assert with_config[svc]["fastly_api_key"] == "SUPPLIED-TOKEN"
 
-    # 2. Orchestrator exception streams error event
     with_config[svc] = {"service_id": svc, "fastly_api_key": "TOKEN"}
 
     def _boom_events(func, *args, **kwargs):
@@ -416,8 +385,7 @@ def test_enable_disable_token_override_error_and_scheduler_resilience(with_confi
         raise RuntimeError(f"{action} orchestrator boom")
 
     monkeypatch.setattr("backend.routers.rum.run_with_events", _boom_events)
-    r_err = client.post(f"/api/services/{svc}/rum/{action}", json={})
-    events = _parse_sse(r_err.text)
+    events = _parse_sse(client.post(f"/api/services/{svc}/rum/{action}", json={}).text)
     assert any(e["type"] == "error" and f"{action} orchestrator boom" in e["message"] for e in events)
     assert not any(e["type"] == "done" for e in events)
 
@@ -427,22 +395,17 @@ def test_upgrade_validation_and_sse_lifecycle(with_config, monkeypatch):
     svc = "TestRumVersionsUpgradeSvc"
     monkeypatch.setattr("backend.routers.rum.fetch_available_faro_versions", AsyncMock(return_value=["2.9.0", "2.8.2"]))
 
-    # 1. Missing token -> 400
     with_config[svc] = {"service_id": svc, "fastly_api_key": ""}
     r_notok = client.post(f"/api/services/{svc}/rum/upgrade", json={"version": "2.9.0"})
-    assert r_notok.status_code == 400
-    assert "api key" in r_notok.json()["detail"]["error"].lower()
+    assert r_notok.status_code == 400 and "api key" in r_notok.json()["detail"]["error"].lower()
 
-    # 2. Unknown version -> 400 before orchestration
     with_config[svc] = {"service_id": svc, "fastly_api_key": "TOKEN"}
     mock_run = MagicMock()
     monkeypatch.setattr("backend.routers.rum.run_with_events", mock_run)
     r_unk = client.post(f"/api/services/{svc}/rum/upgrade", json={"version": "9.9.9"})
-    assert r_unk.status_code == 400
-    assert r_unk.json()["detail"]["error"] == "unknown_faro_version"
+    assert r_unk.status_code == 400 and r_unk.json()["detail"]["error"] == "unknown_faro_version"
     mock_run.assert_not_called()
 
-    # 3. Happy path SSE
     captured: dict[str, Any] = {}
 
     def _ok_events(func, *args, **kwargs):
@@ -455,18 +418,15 @@ def test_upgrade_validation_and_sse_lifecycle(with_config, monkeypatch):
     assert r_ok.status_code == 200
     done = next(e for e in _parse_sse(r_ok.text) if e["type"] == "done")
     assert done["rum"]["faro_version"] == "2.9.0"
-    assert captured["func"] is upgrade_faro_version
-    assert captured["args"] == (svc, "2.9.0", "TOKEN")
+    assert captured["func"] is upgrade_faro_version and captured["args"] == (svc, "2.9.0", "TOKEN")
     assert captured["kwargs"]["activate"] is True
 
-    # 4. Orchestrator error SSE
     def _err_events(func, *args, **kwargs):
         yield {"type": "status", "message": "downloading"}
         raise RuntimeError("upload failed: FOS 503")
 
     monkeypatch.setattr("backend.routers.rum.run_with_events", _err_events)
-    r_err = client.post(f"/api/services/{svc}/rum/upgrade", json={"version": "2.9.0"})
-    events = _parse_sse(r_err.text)
+    events = _parse_sse(client.post(f"/api/services/{svc}/rum/upgrade", json={"version": "2.9.0"}).text)
     assert any(e["type"] == "error" and "fos" in e["message"].lower() for e in events)
     assert not any(e["type"] == "done" for e in events)
 
@@ -485,17 +445,13 @@ class TestRumAdminRbacEnforcement:
         ],
     )
     def test_analyst_blocked_at_middleware_and_route_dependency(
-        self,
-        method: str,
-        suffix: str,
-        payload: dict[str, Any] | None,
+        self, method: str, suffix: str, payload: dict[str, Any] | None
     ):
         path = f"/api/services/{SVC}/rum/{suffix}"
         assert _is_blocked_path(path) is True
         test_client = TestClient(_make_app(analyst=True))
         res = test_client.get(path) if method == "GET" else test_client.post(path, json=payload)
-        assert res.status_code == 403
-        assert res.json()["detail"]["error"] == "admin_only"
+        assert res.status_code == 403 and res.json()["detail"]["error"] == "admin_only"
 
 
 # ── Section 3: RUM Analytics, Vitals, Filters, Beacon Health & Goldens ───────
@@ -506,14 +462,10 @@ def test_rum_analytics_fallback_and_live_events(setup_temp_rum_db) -> None:
     response = client.get("/api/services/svc-test-rum-fallback/rum/analytics")
     assert response.status_code == 200
     data = response.json()
-    assert data["is_mock"] is False
-    assert data["no_data"] is True
-    assert data["beacon_count"] == 0
-    assert data["worst_pages"] == []
-    assert data["errors"] == []
-    assert data["trends"]["lcp"] == []
-
+    assert data["is_mock"] is False and data["no_data"] is True and data["beacon_count"] == 0
+    assert data["worst_pages"] == [] and data["errors"] == [] and data["trends"]["lcp"] == []
     assert client.get("/api/services/svc-test-rum-fallback/rum/live-events").json() == []
+
     _insert_beacons(
         setup_temp_rum_db,
         [
@@ -528,116 +480,41 @@ def test_rum_analytics_fallback_and_live_events(setup_temp_rum_db) -> None:
         ],
     )
     events = client.get("/api/services/svc-test-rum-fallback/rum/live-events").json()
-    assert len(events) == 4
-    assert events[0]["path"] == "/live-test"
-    assert events[0]["browser"] == "Chrome"
-    assert events[0]["os"] == "macOS"
+    assert len(events) == 4 and events[0]["path"] == "/live-test"
+    assert events[0]["browser"] == "Chrome" and events[0]["os"] == "macOS"
 
 
 @pytest.mark.usefixtures("skip_view_update")
 def test_rum_analytics_real_data(setup_temp_rum_db) -> None:
     service_id = "test_service_real_data"
+    err_null = [{"value": "TypeError: null is not an object", "filename": "main.js"}]
+    err_ref = [{"value": "ReferenceError: x is not defined", "filename": "checkout.js"}]
+    rows = [
+        ("/pricing", 2.1, 2.3, 0.02, 120, "Chrome", "macOS", "Desktop", err_null, ""),
+        ("/", 1.4, 1.6, 0.01, 80, "Chrome", "macOS", "Desktop", None, None),
+        ("/pricing", 2.5, 2.8, 0.03, 150, "Safari", "iOS", "Mobile", None, None),
+        ("/docs", 1.8, 1.9, 0.05, 90, "Firefox", "Linux", "Desktop", None, None),
+        ("/", 1.2, 1.4, 0.01, 70, "Chrome", "Windows", "Desktop", None, None),
+        ("/checkout", 3.2, 3.5, 0.12, 220, "Chrome", "macOS", "Desktop", err_null, None),
+        ("/pricing", 2.0, 2.2, 0.02, 110, "Chrome", "macOS", "Desktop", None, None),
+        ("/", 1.5, 1.7, 0.02, 85, "Safari", "macOS", "Desktop", None, None),
+        ("/docs", 1.9, 2.1, 0.04, 100, "Chrome", "Android", "Mobile", None, None),
+        ("/", 1.3, 1.5, 0.01, 75, "Edge", "Windows", "Desktop", None, None),
+        ("/pricing", 2.2, 2.4, 0.02, 130, "Chrome", "macOS", "Desktop", None, None),
+        ("/checkout", 3.0, 3.2, 0.10, 200, "Chrome", "macOS", "Desktop", err_ref, None),
+    ]
     test_beacons = [
         {
-            "pathname": "/pricing",
-            "load_time": 2.1,
-            "lcp": 2.3,
-            "cls": 0.02,
-            "inp": 120,
-            "meta": {"browser": "Chrome", "os": "macOS", "device": "Desktop"},
-            "exceptions": [{"value": "TypeError: null is not an object", "filename": "main.js"}],
-            "req_id": "",
-        },
-        {
-            "pathname": "/",
-            "load_time": 1.4,
-            "lcp": 1.6,
-            "cls": 0.01,
-            "inp": 80,
-            "meta": {"browser": "Chrome", "os": "macOS", "device": "Desktop"},
-        },
-        {
-            "pathname": "/pricing",
-            "load_time": 2.5,
-            "lcp": 2.8,
-            "cls": 0.03,
-            "inp": 150,
-            "meta": {"browser": "Safari", "os": "iOS", "device": "Mobile"},
-        },
-        {
-            "pathname": "/docs",
-            "load_time": 1.8,
-            "lcp": 1.9,
-            "cls": 0.05,
-            "inp": 90,
-            "meta": {"browser": "Firefox", "os": "Linux", "device": "Desktop"},
-        },
-        {
-            "pathname": "/",
-            "load_time": 1.2,
-            "lcp": 1.4,
-            "cls": 0.01,
-            "inp": 70,
-            "meta": {"browser": "Chrome", "os": "Windows", "device": "Desktop"},
-        },
-        {
-            "pathname": "/checkout",
-            "load_time": 3.2,
-            "lcp": 3.5,
-            "cls": 0.12,
-            "inp": 220,
-            "meta": {"browser": "Chrome", "os": "macOS", "device": "Desktop"},
-            "exceptions": [{"value": "TypeError: null is not an object", "filename": "main.js"}],
-        },
-        {
-            "pathname": "/pricing",
-            "load_time": 2.0,
-            "lcp": 2.2,
-            "cls": 0.02,
-            "inp": 110,
-            "meta": {"browser": "Chrome", "os": "macOS", "device": "Desktop"},
-        },
-        {
-            "pathname": "/",
-            "load_time": 1.5,
-            "lcp": 1.7,
-            "cls": 0.02,
-            "inp": 85,
-            "meta": {"browser": "Safari", "os": "macOS", "device": "Desktop"},
-        },
-        {
-            "pathname": "/docs",
-            "load_time": 1.9,
-            "lcp": 2.1,
-            "cls": 0.04,
-            "inp": 100,
-            "meta": {"browser": "Chrome", "os": "Android", "device": "Mobile"},
-        },
-        {
-            "pathname": "/",
-            "load_time": 1.3,
-            "lcp": 1.5,
-            "cls": 0.01,
-            "inp": 75,
-            "meta": {"browser": "Edge", "os": "Windows", "device": "Desktop"},
-        },
-        {
-            "pathname": "/pricing",
-            "load_time": 2.2,
-            "lcp": 2.4,
-            "cls": 0.02,
-            "inp": 130,
-            "meta": {"browser": "Chrome", "os": "macOS", "device": "Desktop"},
-        },
-        {
-            "pathname": "/checkout",
-            "load_time": 3.0,
-            "lcp": 3.2,
-            "cls": 0.10,
-            "inp": 200,
-            "meta": {"browser": "Chrome", "os": "macOS", "device": "Desktop"},
-            "exceptions": [{"value": "ReferenceError: x is not defined", "filename": "checkout.js"}],
-        },
+            "pathname": p,
+            "load_time": lt,
+            "lcp": lcp,
+            "cls": cls,
+            "inp": inp,
+            "meta": {"browser": b, "os": o, "device": d},
+            **({"exceptions": exc} if exc is not None else {}),
+            **({"req_id": rid} if rid is not None else {}),
+        }
+        for p, lt, lcp, cls, inp, b, o, d, exc, rid in rows
     ]
     _insert_beacons(setup_temp_rum_db, test_beacons)
 
@@ -645,8 +522,7 @@ def test_rum_analytics_real_data(setup_temp_rum_db) -> None:
     assert response.status_code == 200
     data = response.json()
     assert data["is_mock"] is False
-    assert data["vitals"]["lcp"]["distribution"]["good"] > 0
-    assert data["vitals"]["lcp"]["distribution"]["poor"] == 0
+    assert data["vitals"]["lcp"]["distribution"]["good"] > 0 and data["vitals"]["lcp"]["distribution"]["poor"] == 0
     assert data["environments"]["browsers"].get("Chrome", 0) == 8
     assert data["environments"]["os"].get("macOS", 0) == 7
     assert data["environments"]["devices"].get("Desktop", 0) == 10
@@ -676,8 +552,7 @@ def test_rum_analytics_serves_without_in_request_recompute(setup_temp_rum_db, wi
             for i in range(12)
         ],
     )
-    start = iso_z(now - datetime.timedelta(hours=window_hours))
-    end = iso_z(now)
+    start, end = iso_z(now - datetime.timedelta(hours=window_hours)), iso_z(now)
     real_get_connection = _duckdb_mod.get_connection
     write_conn_calls = []
 
@@ -694,15 +569,13 @@ def test_rum_analytics_serves_without_in_request_recompute(setup_temp_rum_db, wi
 
     assert response.status_code == 200
     data = response.json()
-    assert data["is_mock"] is False
-    assert data["beacon_count"] > 0
+    assert data["is_mock"] is False and data["beacon_count"] > 0
     mock_recompute.assert_not_called()
     assert write_conn_calls == []
 
 
 @pytest.mark.usefixtures("skip_view_update")
 def test_rum_analytics_date_filtering_and_shared_distinct_id(setup_temp_rum_db) -> None:
-    # 1. Date filtering
     service_id = "test_service_date_filter"
     _insert_beacons(
         setup_temp_rum_db,
@@ -720,7 +593,6 @@ def test_rum_analytics_date_filtering_and_shared_distinct_id(setup_temp_rum_db) 
     data_before = client.get(f"/api/services/{service_id}/rum/analytics?end_time=2026-08-05T11:00:00+00:00").json()
     assert all(int(p["path"].split("_")[1]) < 10 for p in data_before["worst_pages"])
 
-    # 2. Shared distinct_id deduplication across vitals + interaction + error
     con = duckdb.connect(str(setup_temp_rum_db), read_only=False)
     try:
         con.execute("DELETE FROM client_vitals; DELETE FROM client_errors;")
@@ -793,9 +665,7 @@ def test_rum_analytics_date_filtering_and_shared_distinct_id(setup_temp_rum_db) 
         con.close()
 
     dedup = client.get("/api/services/test_service_shared_distinct_id/rum/analytics").json()
-    assert dedup["beacon_count"] == 2
-    assert dedup["pageview_count"] == 1
-    assert dedup["error_count"] == 1
+    assert dedup["beacon_count"] == 2 and dedup["pageview_count"] == 1 and dedup["error_count"] == 1
 
 
 @pytest.mark.usefixtures("skip_view_update")
@@ -834,8 +704,7 @@ def test_rum_analytics_with_filters(
     response = client.get(f"/api/services/{service_id}/rum/analytics?filters={filters}")
     assert response.status_code == 200
     data = response.json()
-    assert data["is_mock"] is False
-    assert data["beacon_count"] == expected_count
+    assert data["is_mock"] is False and data["beacon_count"] == expected_count
     if expected_browsers:
         assert data["environments"]["browsers"] == expected_browsers
 
@@ -853,16 +722,7 @@ def test_analyst_request_outside_invite_window_is_clamped(setup_temp_rum_db) -> 
             {"pathname": "/just-now", "load_time": 1.5, "received_at": recent_ts},
         ],
     )
-    src = {
-        "name": "test_service",
-        "service_id": "test_service",
-        "duckdb_path": str(setup_temp_rum_db).replace(".rum.duckdb", ".duckdb"),
-        "access_level": "read_write",
-        "endpoint": "localhost",
-        "access_key_id": "mock",
-        "secret_access_key": "mock",
-        "region": "mock",
-    }
+    src = _mock_rum_source(setup_temp_rum_db)
     analyst_sess = SimpleNamespace(query_window_hours=1, query_start_time=None, query_end_time=None)
     analyst_req = _fake_request(analyst_sess)
     analyst_ctx = make_test_request_context(
@@ -884,11 +744,7 @@ def test_analyst_request_outside_invite_window_is_clamped(setup_temp_rum_db) -> 
     assert "/thirty-days-old" not in [p["path"] for p in result["worst_pages"]]
 
     admin_ctx = make_test_request_context(
-        service_id=service_id,
-        source=src,
-        session=None,
-        read_only=True,
-        time_bounds=TimeBounds(None, None),
+        service_id=service_id, source=src, session=None, read_only=True, time_bounds=TimeBounds(None, None)
     )
     admin_result = asyncio.run(
         rum_router.rum_analytics(
@@ -930,55 +786,41 @@ def test_rum_live_buffer_unlink_race_self_heals(tmp_path, monkeypatch) -> None:
     from backend.repositories import rum as rum_repo
 
     monkeypatch.setattr(db_mod, "_cache_dir", lambda s: str(tmp_path / "cache" / s.get("bucket", "default")))
-    vitals_ddl = """
-        timestamp TIMESTAMPTZ, metric_name VARCHAR, metric_value DOUBLE, metric_rating VARCHAR,
-        pathname VARCHAR, browser VARCHAR, os VARCHAR, device VARCHAR, cid VARCHAR, req_id VARCHAR,
-        city VARCHAR, region VARCHAR, country VARCHAR, pop VARCHAR, tls VARCHAR, ttfb DOUBLE
-    """
-    errors_ddl = """
-        timestamp TIMESTAMPTZ, error_message VARCHAR, error_file VARCHAR, error_line INTEGER,
-        error_col INTEGER, pathname VARCHAR, browser VARCHAR, os VARCHAR, device VARCHAR,
-        cid VARCHAR, req_id VARCHAR, city VARCHAR, region VARCHAR, country VARCHAR,
-        pop VARCHAR, tls VARCHAR, ttfb DOUBLE
-    """
+    vitals_ddl = "timestamp TIMESTAMPTZ, metric_name VARCHAR, metric_value DOUBLE, metric_rating VARCHAR, pathname VARCHAR, browser VARCHAR, os VARCHAR, device VARCHAR, cid VARCHAR, req_id VARCHAR, city VARCHAR, region VARCHAR, country VARCHAR, pop VARCHAR, tls VARCHAR, ttfb DOUBLE"
+    errors_ddl = "timestamp TIMESTAMPTZ, error_message VARCHAR, error_file VARCHAR, error_line INTEGER, error_col INTEGER, pathname VARCHAR, browser VARCHAR, os VARCHAR, device VARCHAR, cid VARCHAR, req_id VARCHAR, city VARCHAR, region VARCHAR, country VARCHAR, pop VARCHAR, tls VARCHAR, ttfb DOUBLE"
     buf_vitals_dir = tmp_path / "cache" / "bucket-race" / "buffer" / "client_vitals"
     buf_errors_dir = tmp_path / "cache" / "bucket-race" / "buffer" / "client_errors"
     buf_vitals_dir.mkdir(parents=True, exist_ok=True)
     buf_errors_dir.mkdir(parents=True, exist_ok=True)
 
     now = datetime.datetime.now(datetime.UTC)
-    ts1 = (now - datetime.timedelta(seconds=20)).isoformat()
-    ts2 = (now - datetime.timedelta(seconds=10)).isoformat()
+    ts1, ts2 = (now - datetime.timedelta(seconds=20)).isoformat(), (now - datetime.timedelta(seconds=10)).isoformat()
     batch1_v, batch2_v = buf_vitals_dir / "batch_001.parquet", buf_vitals_dir / "batch_002.parquet"
     batch1_e, batch2_e = buf_errors_dir / "batch_001.parquet", buf_errors_dir / "batch_002.parquet"
 
     seed_con = duckdb.connect(":memory:")
     try:
-        seed_con.execute(f"CREATE TABLE cv ({vitals_ddl})")
-        seed_con.execute(
-            "INSERT INTO cv VALUES (?, 'lcp', 1.8, 'good', '/surviving', 'Chrome', 'macOS', 'Desktop', 'cid1', 'req1', 'Austin', 'TX', 'US', 'DFW', 'TLSv1.3', 30.0)",
-            [ts1],
-        )
-        seed_con.execute(f"COPY cv TO '{batch1_v}' (FORMAT PARQUET)")
-        seed_con.execute("DELETE FROM cv")
-        seed_con.execute(
-            "INSERT INTO cv VALUES (?, 'lcp', 2.1, 'good', '/unlinked', 'Chrome', 'macOS', 'Desktop', 'cid2', 'req2', 'Austin', 'TX', 'US', 'DFW', 'TLSv1.3', 35.0)",
-            [ts2],
-        )
-        seed_con.execute(f"COPY cv TO '{batch2_v}' (FORMAT PARQUET)")
-
-        seed_con.execute(f"CREATE TABLE ce ({errors_ddl})")
-        seed_con.execute(
-            "INSERT INTO ce VALUES (?, 'ReferenceError: x', 'app.js', 10, 2, '/surviving', 'Chrome', 'macOS', 'Desktop', 'cid3', 'req3', 'Austin', 'TX', 'US', 'DFW', 'TLSv1.3', 30.0)",
-            [ts1],
-        )
-        seed_con.execute(f"COPY ce TO '{batch1_e}' (FORMAT PARQUET)")
-        seed_con.execute("DELETE FROM ce")
-        seed_con.execute(
-            "INSERT INTO ce VALUES (?, 'TypeError: y', 'app.js', 20, 4, '/unlinked', 'Chrome', 'macOS', 'Desktop', 'cid4', 'req4', 'Austin', 'TX', 'US', 'DFW', 'TLSv1.3', 35.0)",
-            [ts2],
-        )
-        seed_con.execute(f"COPY ce TO '{batch2_e}' (FORMAT PARQUET)")
+        seed_con.execute(f"CREATE TABLE cv ({vitals_ddl}); CREATE TABLE ce ({errors_ddl});")
+        for target, val, path, cid, req, ts in [
+            (batch1_v, 1.8, "/surviving", "cid1", "req1", ts1),
+            (batch2_v, 2.1, "/unlinked", "cid2", "req2", ts2),
+        ]:
+            seed_con.execute("DELETE FROM cv")
+            seed_con.execute(
+                "INSERT INTO cv VALUES (?, 'lcp', ?, 'good', ?, 'Chrome', 'macOS', 'Desktop', ?, ?, 'Austin', 'TX', 'US', 'DFW', 'TLSv1.3', 30.0)",
+                [ts, val, path, cid, req],
+            )
+            seed_con.execute(f"COPY cv TO '{target}' (FORMAT PARQUET)")
+        for target, msg, line, col, path, cid, req, ts in [
+            (batch1_e, "ReferenceError: x", 10, 2, "/surviving", "cid3", "req3", ts1),
+            (batch2_e, "TypeError: y", 20, 4, "/unlinked", "cid4", "req4", ts2),
+        ]:
+            seed_con.execute("DELETE FROM ce")
+            seed_con.execute(
+                "INSERT INTO ce VALUES (?, ?, 'app.js', ?, ?, ?, 'Chrome', 'macOS', 'Desktop', ?, ?, 'Austin', 'TX', 'US', 'DFW', 'TLSv1.3', 30.0)",
+                [ts, msg, line, col, path, cid, req],
+            )
+            seed_con.execute(f"COPY ce TO '{target}' (FORMAT PARQUET)")
     finally:
         seed_con.close()
 
@@ -998,13 +840,9 @@ def test_rum_live_buffer_unlink_race_self_heals(tmp_path, monkeypatch) -> None:
         update_iceberg_view(con, source, force=True)
         batch2_v.unlink()
 
-        start_iso = (now - datetime.timedelta(minutes=15)).isoformat()
-        end_iso = now.isoformat()
+        start_iso, end_iso = (now - datetime.timedelta(minutes=15)).isoformat(), now.isoformat()
         events = rum_repo.fetch_rum_live_events(
-            con,
-            where_sql="timestamp >= ? AND timestamp <= ?",
-            params=[start_iso, end_iso],
-            source=source,
+            con, where_sql="timestamp >= ? AND timestamp <= ?", params=[start_iso, end_iso], source=source
         )
         assert "/surviving" in {e[2] for e in events}
 
@@ -1023,14 +861,11 @@ def test_rum_live_buffer_unlink_race_self_heals(tmp_path, monkeypatch) -> None:
             raw_window_max_s=7200,
             source=source,
         )
-        assert analytics["no_data"] is False
-        assert analytics["total_beacons"] == 2
-        assert analytics["errors_count"] == 1
+        assert analytics["no_data"] is False and analytics["total_beacons"] == 2 and analytics["errors_count"] == 1
 
         seed_con2 = duckdb.connect(":memory:")
         try:
-            seed_con2.execute(f"CREATE TABLE cv ({vitals_ddl})")
-            seed_con2.execute(f"COPY cv TO '{batch2_v}' (FORMAT PARQUET)")
+            seed_con2.execute(f"CREATE TABLE cv ({vitals_ddl}); COPY cv TO '{batch2_v}' (FORMAT PARQUET);")
         finally:
             seed_con2.close()
         clear_source_caches("svc_race")
@@ -1038,8 +873,7 @@ def test_rum_live_buffer_unlink_race_self_heals(tmp_path, monkeypatch) -> None:
         batch2_v.unlink()
 
         recent_count, last_dt = rum_repo.get_beacon_health(con)
-        assert recent_count >= 1
-        assert last_dt is not None
+        assert recent_count >= 1 and last_dt is not None
     finally:
         con.close()
 
@@ -1097,11 +931,9 @@ def test_rum_long_window_merges_live_active_hour_tail_without_double_counting(se
     }
     _insert_beacons(setup_temp_rum_db, [live_beacon])
 
-    start_1h = iso_z(now - datetime.timedelta(hours=1))
-    end_iso = iso_z(now)
+    start_1h, end_iso = iso_z(now - datetime.timedelta(hours=1)), iso_z(now)
     data_1h = client.get(f"/api/services/{service_id}/rum/analytics?start_time={start_1h}&end_time={end_iso}").json()
-    assert data_1h["beacon_count"] == 3
-    assert data_1h["error_count"] == 1
+    assert data_1h["beacon_count"] == 3 and data_1h["error_count"] == 1
 
     _insert_beacons(setup_temp_rum_db, [live_beacon])
     for hours in (24, 24 * 30):
@@ -1109,8 +941,7 @@ def test_rum_long_window_merges_live_active_hour_tail_without_double_counting(se
         data_long = client.get(
             f"/api/services/{service_id}/rum/analytics?start_time={start_long}&end_time={end_iso}"
         ).json()
-        assert data_long["beacon_count"] == 13
-        assert data_long["error_count"] == 1
+        assert data_long["beacon_count"] == 13 and data_long["error_count"] == 1
         assert any(p["path"] == "/live-5s-ago" for p in data_long["worst_pages"])
 
 
@@ -1129,31 +960,29 @@ def _faro_beacon(path: str, lcp: float, cls: float, inp: float, load_time: float
 @pytest.mark.usefixtures("skip_view_update")
 @time_machine.travel("2026-09-22 12:30:00+00:00", tick=False)
 def test_faro_shaped_beacons_vitals_exceptions_url_fallback_and_500_masking(setup_temp_rum_db, monkeypatch):
-    # 1. p75 & avg_load_time
     _insert_beacons(
         setup_temp_rum_db, [_faro_beacon("/home", lcp, lcp / 2, lcp * 50, lcp) for lcp in (1.0, 2.0, 3.0, 4.0)]
     )
     data = client.get("/api/services/test_vitals_faro_shape/rum/analytics").json()
-    assert data["vitals"]["lcp"]["p75"] == 3.25
-    assert data["vitals"]["cls"]["p75"] == 1.625
-    assert data["vitals"]["inp"]["p75"] == 162
-    assert data["worst_pages"][0]["avg_load_time"] == 2.5
+    assert data["vitals"]["lcp"]["p75"] == 3.25 and data["vitals"]["cls"]["p75"] == 1.625
+    assert data["vitals"]["inp"]["p75"] == 162 and data["worst_pages"][0]["avg_load_time"] == 2.5
 
-    # 2. Structured stacktrace exception + URL pathname fallback
     con = duckdb.connect(str(setup_temp_rum_db), read_only=False)
     try:
         con.execute("DELETE FROM client_vitals; DELETE FROM client_errors;")
     finally:
         con.close()
 
-    exc_beacon = _faro_beacon("/checkout", 2.0, 0.02, 100, 2.0)
-    exc_beacon["exceptions"] = [
-        {
-            "value": "TypeError: boom",
-            "type": "TypeError",
-            "stacktrace": {"frames": [{"filename": "app.js", "lineno": 42, "colno": 7}]},
-        }
-    ]
+    exc_beacon = {
+        **_faro_beacon("/checkout", 2.0, 0.02, 100, 2.0),
+        "exceptions": [
+            {
+                "value": "TypeError: boom",
+                "type": "TypeError",
+                "stacktrace": {"frames": [{"filename": "app.js", "lineno": 42, "colno": 7}]},
+            }
+        ],
+    }
     url_fallback_beacon = {
         "meta": {
             "page": {"url": "https://example.test/from-url//nested"},
@@ -1166,19 +995,16 @@ def test_faro_shaped_beacons_vitals_exceptions_url_fallback_and_500_masking(setu
     _insert_beacons(setup_temp_rum_db, [exc_beacon] + [url_fallback_beacon for _ in range(10)])
     data2 = client.get("/api/services/test_vitals_faro_exception/rum/analytics").json()
     assert data2["errors"][0]["message"] == "TypeError: boom"
-    assert data2["errors"][0]["file"] == "app.js"
-    assert data2["errors"][0]["line"] == 42
+    assert data2["errors"][0]["file"] == "app.js" and data2["errors"][0]["line"] == 42
     assert "/from-url//nested" in [p["path"] for p in data2["worst_pages"]]
 
-    # 3. 500 error masking on DB corruption
     monkeypatch.setattr(
         rum_router,
         "execute_with_stale_view_retry",
         lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("simulated DB corruption mid-query")),
     )
     r_err = client.get("/api/services/test_vitals_mock_fallback/rum/analytics")
-    assert r_err.status_code == 500
-    assert r_err.json()["detail"]["message"] == "RUM analytics query failed"
+    assert r_err.status_code == 500 and r_err.json()["detail"]["message"] == "RUM analytics query failed"
     assert "simulated DB corruption" not in r_err.text
 
 
@@ -1194,8 +1020,7 @@ def test_get_rum_tracker_and_faro_sdk_js(with_config, monkeypatch):
 
     for url, expected_sid in [("/js/rum.js", svc), ("/js/rum.js?service_id=CustomSvc", svc)]:
         r = client.get(url)
-        assert r.status_code == 200
-        assert r.headers["content-type"].startswith("application/javascript")
+        assert r.status_code == 200 and r.headers["content-type"].startswith("application/javascript")
         assert f"{fake_js} /* {expected_sid} */" in r.text
 
     with_config["CustomSvc"] = {"service_id": "CustomSvc"}
@@ -1206,8 +1031,7 @@ def test_get_rum_tracker_and_faro_sdk_js(with_config, monkeypatch):
 
     monkeypatch.setattr("backend.core.faro_versions.fetch_faro_bundle", mock_fetch)
     r_sdk = client.get("/js/faro-sdk.js")
-    assert r_sdk.status_code == 200
-    assert "console.log('faro bundle version 2.9.0');" in r_sdk.text
+    assert r_sdk.status_code == 200 and "console.log('faro bundle version 2.9.0');" in r_sdk.text
 
 
 @pytest.mark.usefixtures("skip_view_update")
@@ -1220,12 +1044,10 @@ def test_get_rum_tracker_js_error_does_not_leak_exception_text(with_config, monk
         "backend.provision.rum_assets.generate_rum_tracker_js", lambda sid: (_ for _ in ()).throw(RuntimeError(secret))
     )
     r = client.get("/js/rum.js")
-    assert r.status_code == 200
-    assert r.headers["content-type"].startswith("application/javascript")
+    assert r.status_code == 200 and r.headers["content-type"].startswith("application/javascript")
     for forbidden in ("secret-path", "</script>", "alert", "RuntimeError"):
         assert forbidden not in r.text
-    assert "\n" not in r.text.strip()
-    assert r.text.count("*/") == 1
+    assert "\n" not in r.text.strip() and r.text.count("*/") == 1
 
 
 @pytest.mark.usefixtures("skip_view_update")
@@ -1246,27 +1068,15 @@ def test_beacon_health_states(
         "backend.config.load_config", lambda sid: {"service_id": sid, "rum": {"enabled": True}, "rum_enabled": True}
     )
     now = datetime.datetime.now(datetime.UTC)
-    if mode == "recent":
+    if mode in ("recent", "stale"):
+        delta = datetime.timedelta(minutes=5) if mode == "recent" else datetime.timedelta(hours=3)
         _insert_beacons(
             setup_temp_rum_db,
             [
                 {
                     "pathname": "/",
                     "load_time": 1.5,
-                    "received_at": (now - datetime.timedelta(minutes=5)).isoformat(),
-                    "cid": "cid1",
-                    "req_id": "req1",
-                }
-            ],
-        )
-    elif mode == "stale":
-        _insert_beacons(
-            setup_temp_rum_db,
-            [
-                {
-                    "pathname": "/",
-                    "load_time": 1.5,
-                    "received_at": (now - datetime.timedelta(hours=3)).isoformat(),
+                    "received_at": (now - delta).isoformat(),
                     "cid": "cid1",
                     "req_id": "req1",
                 }
@@ -1281,17 +1091,14 @@ def test_beacon_health_states(
     r = client.get(f"/api/services/test_beacon_health_{mode}/rum/beacon-health")
     assert r.status_code == 200
     data = r.json()
-    assert data["enabled"] is True
-    assert data["recent_beacons"] == expected_recent
-    assert data["setup_complete"] is expected_complete
-    assert expected_msg_substr in data["message"]
+    assert data["enabled"] is True and data["recent_beacons"] == expected_recent
+    assert data["setup_complete"] is expected_complete and expected_msg_substr in data["message"]
 
 
 # ── Section 5: Golden Contracts & Token Window Resolution ────────────────────
 
 
 def _beacons() -> list[dict]:
-    out: list[dict] = []
     specs = [
         ("10:05:00", "/home", "Chrome", "macOS", "Desktop", 1.2, 2100.0, 0.05, 150.0, False),
         ("10:20:00", "/home", "Firefox", "Windows", "Desktop", 2.4, 3400.0, 0.15, 320.0, False),
@@ -1300,8 +1107,8 @@ def _beacons() -> list[dict]:
         ("11:50:00", "/search", "Chrome", "Windows", "Desktop", 1.7, 2600.0, 0.11, 210.0, False),
         ("13:30:00", "/home", "Chrome", "macOS", "Desktop", 1.1, 2000.0, 0.04, 120.0, False),
     ]
-    for i, (hms, path, browser, os_, device, load, lcp, cls, inp, err) in enumerate(specs):
-        b = {
+    return [
+        {
             "received_at": f"2026-08-05T{hms}+00:00",
             "pathname": path,
             "meta": {"browser": browser, "os": os_, "device": device},
@@ -1311,12 +1118,10 @@ def _beacons() -> list[dict]:
             "inp": inp,
             "cid": f"cid_{i}",
             "req_id": f"req_{i}",
+            **({"exceptions": [{"value": f"Boom {i}", "filename": "app.js"}] * (2 if i == 2 else 1)} if err else {}),
         }
-        if err:
-            n = 2 if i == 2 else 1
-            b["exceptions"] = [{"value": f"Boom {i}", "filename": "app.js"}] * n
-        out.append(b)
-    return out
+        for i, (hms, path, browser, os_, device, load, lcp, cls, inp, err) in enumerate(specs)
+    ]
 
 
 def _check_golden(name: str, body: Any) -> None:
@@ -1347,20 +1152,27 @@ def test_rum_golden_contracts(setup_temp_rum_db, case: str) -> None:
     import backend.core.duckdb_pool as duckdb_pool
     from backend.core.rollups.rum import recompute_rum_aggregates
 
+    base = f"/api/services/{_GOLDEN_SERVICE_ID}/rum"
     if case == "analytics_empty":
-        _check_golden(case, client.get(f"/api/services/{_GOLDEN_SERVICE_ID}/rum/analytics?{WINDOW}").json())
+        _check_golden(case, client.get(f"{base}/analytics?{WINDOW}").json())
     elif case == "analytics_raw_long":
         _insert_beacons(setup_temp_rum_db, _beacons())
-        _check_golden(case, client.get(f"/api/services/{_GOLDEN_SERVICE_ID}/rum/analytics?{WINDOW}").json())
+        _check_golden(case, client.get(f"{base}/analytics?{WINDOW}").json())
     elif case == "analytics_raw_short":
         _insert_beacons(setup_temp_rum_db, _beacons())
-        url = f"/api/services/{_GOLDEN_SERVICE_ID}/rum/analytics?start_time=2026-08-05T10:00:00Z&end_time=2026-08-05T11:30:00Z"
-        _check_golden(case, client.get(url).json())
+        _check_golden(
+            case, client.get(f"{base}/analytics?start_time=2026-08-05T10:00:00Z&end_time=2026-08-05T11:30:00Z").json()
+        )
     elif case == "analytics_filtered":
         _insert_beacons(setup_temp_rum_db, _beacons())
         flt = json.dumps({"browser": {"mode": "include", "values": ["Chrome"]}})
-        params = {"start_time": "2026-08-05T00:00:00Z", "end_time": "2026-08-05T23:59:59Z", "filters": flt}
-        _check_golden(case, client.get(f"/api/services/{_GOLDEN_SERVICE_ID}/rum/analytics", params=params).json())
+        _check_golden(
+            case,
+            client.get(
+                f"{base}/analytics",
+                params={"start_time": "2026-08-05T00:00:00Z", "end_time": "2026-08-05T23:59:59Z", "filters": flt},
+            ).json(),
+        )
     elif case == "analytics_rollup":
         _insert_beacons(setup_temp_rum_db, _beacons())
         duckdb_pool.shutdown_all()
@@ -1370,26 +1182,24 @@ def test_rum_golden_contracts(setup_temp_rum_db, case: str) -> None:
             assert con.execute("SELECT COUNT(*) FROM rum_vitals_aggregates").fetchone()[0] > 0
         finally:
             con.close()
-        _check_golden(case, client.get(f"/api/services/{_GOLDEN_SERVICE_ID}/rum/analytics?{WINDOW}").json())
+        _check_golden(case, client.get(f"{base}/analytics?{WINDOW}").json())
     elif case == "live_events":
         beacons = []
         for i, b in enumerate(_beacons()):
-            base = {k: b[k] for k in ("pathname", "meta", "cid", "req_id")}
-            beacons.append({**base, "received_at": b["received_at"], "lcp": b["lcp"]})
+            b_meta = {k: b[k] for k in ("pathname", "meta", "cid", "req_id")}
+            beacons.append({**b_meta, "received_at": b["received_at"], "lcp": b["lcp"]})
             if i % 2:
                 beacons.append(
                     {
-                        **base,
+                        **b_meta,
                         "received_at": b["received_at"].replace(":00+", ":30+"),
                         "exceptions": [{"value": f"Err {i}"}],
                     }
                 )
         _insert_beacons(setup_temp_rum_db, beacons)
-        _check_golden(
-            case, {"events": client.get(f"/api/services/{_GOLDEN_SERVICE_ID}/rum/live-events?{WINDOW}").json()}
-        )
+        _check_golden(case, {"events": client.get(f"{base}/live-events?{WINDOW}").json()})
     elif case == "beacon_health_disabled":
-        _check_golden(case, client.get(f"/api/services/{_GOLDEN_SERVICE_ID}/rum/beacon-health").json())
+        _check_golden(case, client.get(f"{base}/beacon-health").json())
 
 
 @pytest.fixture
@@ -1445,24 +1255,11 @@ def test_analyst_token_window_is_clamped_to_invite(setup_temp_rum_db, captured) 
     session = SimpleNamespace(query_window_hours=1, query_start_time=None, query_end_time=None)
     req = _fake_request(session)
     bounds = get_analyst_time_bounds(typing.cast(typing.Any, req))
-    source = {
-        "name": "test_service",
-        "service_id": "test_service",
-        "duckdb_path": str(setup_temp_rum_db).replace(".rum.duckdb", ".duckdb"),
-        "access_level": "read_write",
-        "endpoint": "localhost",
-        "access_key_id": "mock",
-        "secret_access_key": "mock",
-        "region": "mock",
-    }
+    source = _mock_rum_source(setup_temp_rum_db)
 
     def _run(sess, tb, request_obj) -> None:
         ctx: RequestContext = make_test_request_context(
-            service_id=_TOKEN_SERVICE_ID,
-            source=source,
-            session=sess,
-            read_only=True,
-            time_bounds=tb,
+            service_id=_TOKEN_SERVICE_ID, source=source, session=sess, read_only=True, time_bounds=tb
         )
         asyncio.run(
             rum_router.rum_analytics(
@@ -1518,20 +1315,19 @@ def test_web_vitals_payload_validation(payload: dict, expected_status: int):
         assert r.json().get("ok") is True
 
 
-def test_web_vitals_collection_toggle(monkeypatch, tmp_path):
+def test_web_vitals_collection_and_page_telemetry(monkeypatch, tmp_path, caplog):
+    from backend import config as svcconfig
+    from backend.core.metadata import usage_log, usage_log_db
+
     sink = tmp_path / "web_vitals.jsonl"
     monkeypatch.setattr(web_vitals_store, "LOG_PATH", sink)
-
-    # 1. Off by default -> nothing persisted
     monkeypatch.delenv("WEB_VITALS_COLLECT", raising=False)
     r_off = client.post(
         "/api/web-vitals",
         json={"id": "off-1", "name": "LCP", "value": 1200, "rating": "good", "pathname": "/dashboard"},
     )
-    assert r_off.status_code == 200
-    assert not sink.exists()
+    assert r_off.status_code == 200 and not sink.exists()
 
-    # 2. On -> appends JSONL line
     monkeypatch.setenv("WEB_VITALS_COLLECT", "1")
     r_on = client.post(
         "/api/web-vitals",
@@ -1547,23 +1343,14 @@ def test_web_vitals_collection_toggle(monkeypatch, tmp_path):
     )
     assert r_on.status_code == 200
     rec = json.loads(sink.read_text(encoding="utf-8").strip().splitlines()[0])
-    assert rec["name"] == "LCP"
-    assert rec["value"] == 2412.0
-    assert rec["cohort"] == "admin"
-    assert rec["ts"].endswith("Z")
-
-
-def test_page_telemetry_and_ux_events(monkeypatch, tmp_path, caplog):
-    from backend import config as svcconfig
-    from backend.core.metadata import usage_log, usage_log_db
+    assert rec["name"] == "LCP" and rec["value"] == 2412.0 and rec["cohort"] == "admin" and rec["ts"].endswith("Z")
 
     monkeypatch.setattr(usage_log_db, "_DATA_DIR", str(tmp_path))
     monkeypatch.setattr(svcconfig, "get_active_service_id", lambda: "demo_service")
     usage_log.log_telemetry_query("demo_service", "page-456", "req-789", "duckdb", "SELECT 42", 12.3)
 
     res_pt = client.get("/api/debug/page-telemetry?page_load_id=page-456")
-    assert res_pt.status_code == 200
-    assert res_pt.json()["queries"][0]["sql_query"] == "SELECT 42"
+    assert res_pt.status_code == 200 and res_pt.json()["queries"][0]["sql_query"] == "SELECT 42"
 
     for payload, expected_status in [
         (
@@ -1580,13 +1367,14 @@ def test_page_telemetry_and_ux_events(monkeypatch, tmp_path, caplog):
         ({"event": "column_reordered", "typo_field": "ignored"}, 422),
         ({"event": "x" * 81}, 422),
     ]:
-        r = client.post("/api/ux-events", json=payload)
-        assert r.status_code == expected_status
+        assert client.post("/api/ux-events", json=payload).status_code == expected_status
 
     with caplog.at_level(logging.INFO, logger="backend.ux_events"):
         r_log = client.post("/api/ux-events", json={"event": "column_reordered"})
     assert r_log.status_code == 200
-    matched = [rec for rec in caplog.records if rec.message == "ux_event"]
-    assert matched
-    assert getattr(matched[-1], "ux_cohort", None) == "admin"
-    assert getattr(matched[-1], "ux_event", None) == "column_reordered"
+    matched = [r for r in caplog.records if r.message == "ux_event"]
+    assert (
+        matched
+        and getattr(matched[-1], "ux_cohort", None) == "admin"
+        and getattr(matched[-1], "ux_event", None) == "column_reordered"
+    )

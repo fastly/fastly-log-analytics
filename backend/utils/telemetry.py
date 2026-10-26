@@ -1,31 +1,43 @@
 from __future__ import annotations
 
+import asyncio
+import hashlib
+import itertools
+import json
 import logging
+import math
 import os
+import re
+import struct
+import sys
+import tempfile
 import threading
 import time
-from contextlib import contextmanager
+from collections import deque
+from collections.abc import AsyncIterator, Callable, Iterable, Iterator, MutableMapping
+from contextlib import contextmanager, suppress
 from contextvars import ContextVar
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from types import FrameType
+from typing import Any
+
+import cachetools
+import structlog
+from opentelemetry import trace
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
+from starlette.responses import Response
+
+from backend.utils.date_utils import iso_z, parse_iso_utc
 
 logger = logging.getLogger(__name__)
+_os = os
 
-# Global context for tracking API and FOS calls during a request
+# Per-request ContextVars for tracking API/FOS calls and DB queries
 _CALLS: ContextVar[list[dict] | None] = ContextVar("_CALLS", default=None)
 _QUERIES: ContextVar[list[dict] | None] = ContextVar("_QUERIES", default=None)
-# SQLite statements executed while serving the current request. Fed by
-# backend/utils/sqlite_profiler.py (which also keeps its process-global ring
-# buffer — that one exists for cron visibility; THIS one is what makes the
-# Debug Panel's SQLite section page-scoped). None outside a request, so cron
-# statements never accumulate here.
 _SQLITE_QUERIES: ContextVar[list[dict] | None] = ContextVar("_SQLITE_QUERIES", default=None)
-
-# Per-request start time + dedupe flag for the iothread-call augmentation in
-# get_tracked_calls(). ContextVars don't propagate into fsspec's iothread or
-# pyiceberg's pool, so FOS/CDN calls made by those threads never reach
-# `_CALLS` and the Debug Panel sees a hole. At end-of-request we query
-# usage_log for rows tagged with this request's process_context since
-# `_REQUEST_START_TS` and merge them in. `_IOTHREAD_QUERIED` prevents
-# re-querying when get_tracked_calls is called multiple times per request.
 _REQUEST_START_TS: ContextVar[float | None] = ContextVar("_REQUEST_START_TS", default=None)
 _IOTHREAD_QUERIED: ContextVar[bool] = ContextVar("_IOTHREAD_QUERIED", default=False)
 
@@ -34,46 +46,31 @@ _PROCESS_CONTEXT: ContextVar[str | None] = ContextVar("_PROCESS_CONTEXT", defaul
 _PAGE_LOAD_ID: ContextVar[str | None] = ContextVar("_PAGE_LOAD_ID", default=None)
 _RECORDING_TELEMETRY: ContextVar[bool] = ContextVar("_RECORDING_TELEMETRY", default=False)
 
-# Process-global stack of currently-active contexts. ContextVars don't
-# propagate into raw worker threads or asyncio loop threads (fsspec's
-# iothread, pyiceberg's ThreadPoolExecutor), so any code reading the
-# context from such a thread sees None and the X-Telemetry-Context header
-# is omitted — landing the row in usage_log with process_context=NULL.
-# The stack below lets out-of-thread readers (see
-# get_process_context_with_fallback) attribute the row to *some* currently
-# running cron. The stack top is the most recently entered scope; popping
-# on exit restores the prior cron's value rather than nulling it — so a
-# long-running cron A overlapped by a quick cron B keeps its attribution
-# after B exits. _LATEST_PROCESS_CONTEXT mirrors stack top for cheap reads.
+# Process-global stack of active contexts for out-of-thread readers (fsspec iothread, worker pools).
 _ACTIVE_CONTEXTS: list[str] = []
 _LATEST_PROCESS_CONTEXT: str | None = None
 _LATEST_PROCESS_CONTEXT_LOCK = threading.Lock()
 
 
+def _get_ctx_list(var: ContextVar[list[dict] | None]) -> list[dict]:
+    res = var.get()
+    if res is None:
+        res = []
+        var.set(res)
+    return res
+
+
+def _add_span_event(name: str, attributes: dict[str, Any]) -> None:
+    try:
+        span = trace.get_current_span()
+        if span is not None and span.is_recording():
+            span.add_event(name=name, attributes=attributes)
+    except Exception:
+        logger.debug("_add_span_event(%s) failed (ignored)", name, exc_info=True)
+
+
 def _set_process_context_for_tests(ctx: str | None) -> None:
-    """Set the process-context ContextVar AND the active-stack mirror in
-    one shot — WITHOUT the push/pop bookkeeping of ``process_context_scope``.
-
-    **Test-fixture / introspection helper ONLY. NEVER call from production
-    code.** The underscore prefix + name suffix are the contract: the
-    public API is ``process_context_scope`` and only that.
-
-    Why this exists at all: the test suite needs to assert what happens
-    when the ContextVar is set by a code path that doesn't use the
-    context manager (e.g. when validating the fallback's last-writer-wins
-    semantics, or simulating a thread that inherits a partial context).
-    Test code that emulates "a thread that set the context and exited"
-    without doing the work of pushing/popping the active-context stack
-    is exactly the failure mode we want to test, so this helper exists
-    to enable that test, not to be used in real code.
-
-    In production the plain setter loses the stack semantics that keep
-    concurrent cron / request scopes from clobbering each other's mirror
-    on exit: a setter call from one scope's body, followed by that
-    scope's exit, would null the mirror while a concurrent scope's
-    in-flight iothread I/O is still draining → ``untagged:fsspecIO``
-    rows in usage_log.
-    """
+    """Test-fixture helper: set _PROCESS_CONTEXT and the mirror without stack push/pop."""
     global _LATEST_PROCESS_CONTEXT
     _PROCESS_CONTEXT.set(ctx)
     with _LATEST_PROCESS_CONTEXT_LOCK:
@@ -93,12 +90,7 @@ def set_page_load_id(page_load_id: str | None) -> None:
 
 
 def get_process_context_with_fallback() -> str | None:
-    """Return the ContextVar value if set, else the top of the active-context
-    stack (process-global). Use this from threads that may not have
-    inherited the original setter's ContextVar — fsspec's iothread,
-    pyiceberg's ThreadPoolExecutor workers, etc. — where get_process_context()
-    would otherwise return None and the telemetry row would land untagged.
-    """
+    """Return the ContextVar value if set, else the top of the active-context stack."""
     ctx = _PROCESS_CONTEXT.get()
     if ctx is not None:
         return ctx
@@ -108,53 +100,13 @@ def get_process_context_with_fallback() -> str | None:
 
 @contextmanager
 def process_context_scope(name: str):
-    """Set the process context for the lifetime of the block, then pop.
-
-    Pushes *name* onto the active-context stack and sets the ContextVar.
-    On exit: resets the ContextVar (via token) and removes *name* from the
-    stack, restoring the previous stack top as the process-global mirror.
-
-    Why a stack instead of a single mirror with CAS-clear: cron jobs run
-    concurrently in APScheduler worker threads. A long-running cron A
-    (e.g. cron_sync at 500s) overlapped by a short cron B (cron_compact
-    at 15s) shares the fsspec iothread. Without the stack, B's exit would
-    null out the mirror and A's subsequent I/O would land untagged.
-
-    Pre-fix telemetry on 2026-05-20: 86% of pyiceberg.s3fs rows untagged
-    (NULL). First-fix (CAS-clear) telemetry: 80% of pyiceberg.s3fs rows
-    tagged "untagged:fsspecIO" — the iothread reading None between cron
-    overlaps. The stack keeps the mirror non-None as long as ANY cron is
-    active, bounding misattribution to the actual overlap window.
-
-    Residual `untagged:fsspecIO` rows (~30-40 per cron tick, observed
-    2026-05-21 09:20-10:56 MDT: 720 rows over 96 min = ~38/cron at 5-min
-    cadence) come from a different failure mode the stack can't cover:
-    a SOLO cron tick (no concurrent overlap) finishes its
-    process_context_scope while fsspec's iothread still has in-flight
-    GETs draining. The stack pops to empty AND the ContextVar resets, so
-    the in-flight GETs see None on both sources and fall through to
-    `untagged:fsspecIO`. Bounded behavior, not a bug — fixing it would
-    require either (a) blocking scope exit on fsspec drain (deep
-    coupling), or (b) a process-global "last-known-cron" mirror that
-    never clears (loses cross-cron isolation). The current shape — at
-    least labelled `untagged:fsspecIO` rather than NULL — preserves
-    cost attribution to fsspec/manifest reads even when the originating
-    cron is ambiguous.
-    """
+    """Push *name* onto the active-context stack and set the ContextVar for the block."""
     global _LATEST_PROCESS_CONTEXT
     token = _PROCESS_CONTEXT.set(name)
-    # Mirror into the Live Query Monitor attribution ContextVar so cron
-    # queries get a kind="cron" row instead of "system". Use snapshot-and-
-    # restore rather than token-reset because the cron scope can be entered
-    # and exited across context boundaries (asyncio.to_thread, fsspec
-    # iothread) which would make ContextVar.reset() raise.
     prev_attribution = None
     attribution_set = False
     try:
-        from backend.core.query_attribution import (
-            current_attribution,
-            derive_from_process_context,
-        )
+        from backend.core.query_attribution import current_attribution, derive_from_process_context
 
         attribution = derive_from_process_context(name)
         if attribution is not None:
@@ -162,7 +114,6 @@ def process_context_scope(name: str):
             current_attribution.set(attribution)
             attribution_set = True
     except Exception:
-        # Attribution wiring is observability, not control flow.
         attribution_set = False
     with _LATEST_PROCESS_CONTEXT_LOCK:
         _ACTIVE_CONTEXTS.append(name)
@@ -182,15 +133,10 @@ def process_context_scope(name: str):
             except Exception:
                 logger.debug("process_context_scope: current_attribution.set failed (ignored)", exc_info=True)
         with _LATEST_PROCESS_CONTEXT_LOCK:
-            try:
-                # Remove the *last* occurrence so nested scopes with the
-                # same name (rare but possible) pop in LIFO order.
-                for i in range(len(_ACTIVE_CONTEXTS) - 1, -1, -1):
-                    if _ACTIVE_CONTEXTS[i] == name:
-                        del _ACTIVE_CONTEXTS[i]
-                        break
-            except ValueError:
-                pass
+            for i in range(len(_ACTIVE_CONTEXTS) - 1, -1, -1):
+                if _ACTIVE_CONTEXTS[i] == name:
+                    del _ACTIVE_CONTEXTS[i]
+                    break
             _LATEST_PROCESS_CONTEXT = _ACTIVE_CONTEXTS[-1] if _ACTIVE_CONTEXTS else None
 
 
@@ -204,22 +150,8 @@ def start_call_tracking():
 
 
 def get_tracked_calls() -> list[dict]:
-    """Return the list of calls tracked in the current context, augmented
-    with iothread/pool FOS/CDN calls captured via usage_log.
-
-    In-thread calls (Fastly API client, in-handler boto3) hit `record_call`
-    directly. Iothread calls (fsspec httpfs, pyiceberg pool, boto3
-    connection pool) don't propagate the ContextVar so they bypass
-    `record_call` — but they DO pass through telemetry_proxy and land in
-    usage_log tagged with this request's process_context. We pick them up
-    by querying usage_log at end-of-request, gated by usage logging being
-    on (the Debug Panel's source of truth becomes usage_log when enabled).
-    """
-    res = _CALLS.get()
-    if res is None:
-        # Initialise on demand if start_call_tracking wasn't called (e.g. in some tests)
-        res = []
-        _CALLS.set(res)
+    """Return calls tracked in the current context, augmented with iothread calls from usage_log."""
+    res = _get_ctx_list(_CALLS)
     if not _IOTHREAD_QUERIED.get():
         _IOTHREAD_QUERIED.set(True)
         iothread = _query_iothread_calls_from_usage_log()
@@ -230,46 +162,15 @@ def get_tracked_calls() -> list[dict]:
 
 
 def _query_iothread_calls_from_usage_log() -> list[dict]:
-    """Pull rows from usage_log tagged with the current request's
-    process_context since start_call_tracking() ran.
-
-    No-op unless DEBUG_RESPONSES is on (the data is only surfaced via
-    _debug_calls, which BaseResponse strips otherwise) AND usage logging
-    is enabled AND the request was tagged with an "api:..." process_context.
-    Bounded query: capped at 25 rows to keep the response body sub-2KB
-    even under cron contention where /api/sync-status?skip_fos=true would
-    otherwise see 122KB of iothread spam dragging admin nav from <500ms
-    to 5+s (item 23 / commit 5e8b795).
-
-    Visibility lag (item 24 / M5): we DO NOT block on the
-    telemetry_proxy coalescer here. Previously this called
-    `_flush_log_writes_for_tests(timeout=0.25)` to drain pending rows
-    so iothread calls completed mid-request were guaranteed visible
-    in the debug panel. Under cron contention that wait routinely
-    hit the full 250 ms ceiling — the coalescer was busy serialising
-    against cron's own usage_log writes — and a few of those per
-    admin nav stacked to 500 ms - 5 s of extra wall time. Removing
-    the wait trades up to one batch interval (~100 ms,
-    `_LOG_BATCH_MAX_INTERVAL_S`) of visibility for iothread calls
-    that completed in the very last slice of the request: those
-    calls land in usage_log AFTER this SELECT, so they won't
-    appear in this request's debug panel. They are still recorded
-    correctly (tagged with this request's process_context) and
-    surface in the Admin → Usage Log page for post-hoc inspection.
-    """
+    """Pull up to 25 usage_log rows tagged with the current request's process_context."""
     try:
-        # Gate on DEBUG_RESPONSES — when off, BaseResponse strips
-        # _debug_calls anyway, so the SQLite scan is pure overhead.
         from backend.models.common import _debug_responses_enabled
 
         if not _debug_responses_enabled():
             return []
-
         start_ts = _REQUEST_START_TS.get()
-        if start_ts is None:
-            return []
         ctx = get_process_context_with_fallback()
-        if not ctx or not ctx.startswith("api:"):
+        if start_ts is None or not ctx or not ctx.startswith("api:"):
             return []
 
         from backend import config as svcconfig
@@ -280,45 +181,24 @@ def _query_iothread_calls_from_usage_log() -> list[dict]:
         if not sid:
             return []
 
-        from datetime import UTC, datetime
-
         from backend.core.metadata import usage_log_db as _usage_log_db
-        from backend.utils.date_utils import iso_z
 
         start_iso = iso_z(datetime.fromtimestamp(start_ts, UTC))
-        # Raw string compare on timestamp (no datetime() wrapping) so the
-        # composite idx_usage_process_context_ts can be used end-to-end.
-        # Safe because every row written since commit 08a485c uses
-        # iso_z_now() ("YYYY-MM-DDTHH:MM:SSZ"); legacy-format rows would be
-        # months old and can't have a timestamp >= a start_iso captured
-        # seconds ago, so they're correctly excluded by string comparison.
-        # LIMIT 25 caps the response body so an admin nav during a cron
-        # tick doesn't drag in 500 rows of iothread spam (~120KB / 5s).
-        #
-        # Open the usage_log.db in URI mode=ro so this read path cannot
-        # acquire the writer lock under any circumstances — a slow scan
-        # here is guaranteed not to block the cron writer. The
-        # connection is short-lived (closed in the finally below) so
-        # we don't pool it.
         try:
             con = _usage_log_db.open_readonly(sid)
         except Exception:
-            # File doesn't exist yet (writer hasn't run) — nothing to surface.
             return []
         try:
-            cur = con.execute(
+            rows = con.execute(
                 "SELECT operation_type, url, status, duration_ms, function_name, bytes, operation_class "
                 "FROM usage_log "
                 "WHERE service_id = ? AND process_context = ? AND timestamp >= ? "
                 "ORDER BY timestamp ASC LIMIT 25",
                 (sid, ctx, start_iso),
-            )
-            rows = cur.fetchall()
+            ).fetchall()
         finally:
-            try:
+            with suppress(Exception):
                 con.close()
-            except Exception:
-                logger.debug("_query_iothread_calls_from_usage_log: con.close failed (ignored)", exc_info=True)
         return [
             {
                 "service": "CDN" if r[6] == "CDN" else "FOS",
@@ -339,33 +219,16 @@ def _query_iothread_calls_from_usage_log() -> list[dict]:
 
 def get_queries() -> list[dict]:
     """Return the list of queries tracked in the current context."""
-    res = _QUERIES.get()
-    if res is None:
-        res = []
-        _QUERIES.set(res)
-    return res
+    return _get_ctx_list(_QUERIES)
 
 
 def record_sqlite_query(entry: dict) -> None:
-    """Append one profiled SQLite statement to the current request's
-    collector. No-op when no request is being tracked (cron / startup /
-    test paths that never called start_call_tracking) — those statements
-    are still visible in the profiler's process-global ring buffer.
-
-    Works across FastAPI's ``run_in_threadpool`` and ``asyncio.to_thread``
-    because both copy the caller's context: the copied ContextVar still
-    points at the SAME list object, so appends land in the middleware's
-    view. Statements issued from raw worker threads (metadata writer
-    thread, fsspec iothread) don't inherit the context and are skipped —
-    same documented gap as ``_CALLS``.
-    """
+    """Append one profiled SQLite statement to the current request's collector."""
     if _RECORDING_TELEMETRY.get():
         return
-
     entries = _SQLITE_QUERIES.get()
     if entries is not None:
         entries.append(entry)
-
     record_telemetry_query(
         engine="sqlite",
         sql=entry.get("sql", ""),
@@ -375,11 +238,7 @@ def record_sqlite_query(entry: dict) -> None:
 
 def get_sqlite_queries() -> list[dict]:
     """Return the SQLite statements recorded for the current request."""
-    res = _SQLITE_QUERIES.get()
-    if res is None:
-        res = []
-        _SQLITE_QUERIES.set(res)
-    return res
+    return _get_ctx_list(_SQLITE_QUERIES)
 
 
 def record_telemetry_query(
@@ -391,7 +250,7 @@ def record_telemetry_query(
     request_id: str | None = None,
     allow_active_service_fallback: bool = True,
 ) -> None:
-    """Record a DuckDB or ClickHouse query into telemetry_queries when X-Page-Load-ID is active."""
+    """Record a DB query into telemetry_queries when X-Page-Load-ID is active."""
     if _RECORDING_TELEMETRY.get():
         return
     plid = get_page_load_id()
@@ -422,21 +281,7 @@ def record_telemetry_query(
 
 
 def debug_envelope(res: dict, *, gated: bool, is_cached: bool | None = False, inject_calls: bool = False) -> dict:
-    """Attach the ``_debug_*`` / ``_is_cached`` envelope to a plain-dict response.
-
-    Two gating semantics exist on purpose (each caller keeps its own):
-
-    * ``gated=False`` (RUM): ALWAYS inject ``_debug_queries``, ``_debug_sqlite`` and
-      ``_debug_calls`` from the request's collectors, mutating ``res`` in place.
-    * ``gated=True``: returns a copy; ``_is_cached`` is set unless ``is_cached`` is ``None``
-      and, unless ``DEBUG_RESPONSES`` is on, any ``_debug_queries`` / ``_debug_calls`` already
-      present are dropped (mirrors ``BaseResponse._strip_debug_when_disabled``). Session scoring
-      uses this alone: its stored value already carries the envelope. Admin routes that only
-      trace Fastly calls pass ``inject_calls=True`` to also attach ``_debug_calls`` from the
-      request's collector when ``DEBUG_RESPONSES`` is on, so the envelope never goes out
-      with the flag off. The analyst-facing strip in ``RemoteAccessMiddleware`` is a separate,
-      independent guard.
-    """
+    """Attach or strip the ``_debug_*`` / ``_is_cached`` envelope on a plain-dict response."""
     if not gated:
         res["_debug_queries"] = get_queries()
         res["_debug_sqlite"] = list(get_sqlite_queries())
@@ -471,18 +316,9 @@ def record_call(
     caller: str | None = None,
     bytes_count: int | None = None,
 ):
-    """Record a call in the current context."""
+    """Record an external call in the current context and active OTel span."""
     if caller is None:
         try:
-            import sys
-
-            # Walk up past telemetry.py, the TrackedClient/Paginator wrappers in
-            # duckdb.py, and contextlib so we surface the real application caller.
-            # Using sys._getframe() is significantly faster than inspect.stack().
-            # Declared as Optional because `frame.f_back` narrows to None at
-            # the top of the stack and we reassign it back into the same name.
-            from types import FrameType
-
             frame: FrameType | None = sys._getframe(1)
             while frame:
                 code = getattr(frame, "f_code", None)
@@ -495,14 +331,9 @@ def record_call(
                 caller = code.co_name
                 break
         except Exception:
-            logger.debug("record_call: step failed (ignored)", exc_info=True)
+            logger.debug("record_call: caller walk failed (ignored)", exc_info=True)
 
-    # Use the un-augmented view: this is the in-thread append path, and
-    # triggering the iothread/usage_log query here would add a coalescer
-    # flush on every single record_call.
-    calls = _CALLS.get()
-    if calls is None:
-        calls = []
+    calls = _get_ctx_list(_CALLS)
     calls.append(
         {
             "service": service,
@@ -515,38 +346,22 @@ def record_call(
             "bytes": bytes_count,
         }
     )
-    _CALLS.set(calls)
 
-    # Phase 1 telemetry bridge — when we're inside a RequestTelemetry section
-    # span (or any other start_as_current_span block), surface this call as
-    # an OTel span event so the OTel pipeline sees the same external-call
-    # attribution the debug panel renders. No-op when no span is current
-    # (which is the common case for cron-driven boto3/fsspec hooks that run
-    # off the request thread).
-    try:
-        from opentelemetry import trace as _otel_trace
-
-        _span = _otel_trace.get_current_span()
-        if _span is not None and _span.is_recording():
-            attrs: dict = {
-                "app.call.method": method,
-                "app.call.path": path,
-                "app.call.time_ms": float(time_ms),
-                "app.call.service": service,
-            }
-            if status is not None:
-                attrs["app.call.status"] = str(status)
-            if details:
-                attrs["app.call.details"] = details
-            if caller:
-                attrs["app.call.caller"] = caller
-            if bytes_count is not None:
-                attrs["app.call.bytes"] = int(bytes_count)
-            _span.add_event(name="external_call", attributes=attrs)
-    except Exception:
-        # OTel SDK import or recording failure must never fail the caller —
-        # this is best-effort telemetry, not load-bearing.
-        logger.debug("record_call: step failed (ignored)", exc_info=True)
+    attrs: dict[str, Any] = {
+        "app.call.method": method,
+        "app.call.path": path,
+        "app.call.time_ms": float(time_ms),
+        "app.call.service": service,
+    }
+    if status is not None:
+        attrs["app.call.status"] = str(status)
+    if details:
+        attrs["app.call.details"] = details
+    if caller:
+        attrs["app.call.caller"] = caller
+    if bytes_count is not None:
+        attrs["app.call.bytes"] = int(bytes_count)
+    _add_span_event("external_call", attrs)
 
 
 class track_query:
@@ -557,7 +372,7 @@ class track_query:
         self.query = query
         self.params = params
         self.label = label
-        self.t0 = 0
+        self.t0 = 0.0
 
     def __enter__(self):
         self.t0 = time.time()
@@ -565,63 +380,29 @@ class track_query:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         elapsed = round((time.time() - self.t0) * 1000, 2)
-
-        queries = get_queries()
-        queries.append({"sql": self.query.strip(), "time_ms": elapsed, "engine": "DuckDB"})
-        _QUERIES.set(queries)
-
-        # New persistent SQLite recording
-        record_telemetry_query(
-            engine="duckdb",
-            sql=self.query.strip(),
-            duration_ms=elapsed,
+        sql_stripped = self.query.strip()
+        get_queries().append({"sql": sql_stripped, "time_ms": elapsed, "engine": "DuckDB"})
+        record_telemetry_query(engine="duckdb", sql=sql_stripped, duration_ms=elapsed)
+        _add_span_event(
+            "db.query",
+            {
+                "db.statement": sql_stripped[:4000],
+                "db.elapsed_ms": float(elapsed),
+                "db.label": self.label,
+            },
         )
-
-        # Phase 1 telemetry bridge — surface as a span event when inside
-        # an active section span.
-        try:
-            from opentelemetry import trace as _otel_trace
-
-            _span = _otel_trace.get_current_span()
-            if _span is not None and _span.is_recording():
-                _span.add_event(
-                    name="db.query",
-                    attributes={
-                        "db.statement": self.query.strip()[:4000],
-                        "db.elapsed_ms": float(elapsed),
-                        "db.label": self.label,
-                    },
-                )
-        except Exception:
-            logger.debug("__exit__: step failed (ignored)", exc_info=True)
 
 
 def is_full_miss(x_cache: str | None) -> bool:
-    """Return True if every value in an X-Cache header chain is MISS or PASS.
-
-    Fastly returns chains like "HIT, HIT" (edge HIT, shield HIT — no FOS read),
-    "MISS, HIT" (edge MISS but shield served it — no FOS read), "MISS, MISS"
-    (full miss — went to FOS), or "PASS" (uncacheable, also went to FOS).
-    Only count an FOS op when *all* values in the chain are MISS/PASS.
-    """
+    """Return True if every value in an X-Cache header chain is MISS or PASS."""
     if not x_cache:
         return False
     parts = [p.strip().upper() for p in x_cache.split(",") if p.strip()]
-    if not parts:
-        return False
-    return all(p in ("MISS", "PASS") for p in parts)
+    return bool(parts) and all(p in ("MISS", "PASS") for p in parts)
 
 
 def build_cdn_miss_synth_details(bytes_count: int | None) -> str:
-    """Format the ``details`` string for the synthesised FOS GET_OBJECT row
-    written when a CDN read was a full MISS.
-
-    Both consumers (this module's :func:`record_cdn_call` and
-    :mod:`backend.utils.telemetry_proxy`) used to compose this string by
-    hand with drifted prefixes — one prepended bytes via f-string
-    concatenation, the other inlined it into the format. Funnel here so
-    both sides stay aligned.
-    """
+    """Format the ``details`` string for the synthesised FOS GET_OBJECT row on CDN MISS."""
     if bytes_count is not None:
         return f"{bytes_count:,} bytes · Class B · synthesized from CDN MISS"
     return "Class B · synthesized from CDN MISS"
@@ -636,16 +417,8 @@ def record_cdn_call(
     caller: str | None = None,
     status: str | int | None = "OK",
 ):
-    """Record a CDN GET/HEAD and, when X-Cache shows a full MISS, also record the
-    underlying FOS Class B op (GET_OBJECT or HEAD_OBJECT) the CDN had to make.
-
-    `headers` should be a urllib `resp.headers` (or any case-insensitive get())
-    so we can read X-Cache. Pass None when headers aren't available — we'll skip
-    the MISS-derived FOS op rather than guess.
-    """
-    x_cache = None
-    age = None
-    cache_control = None
+    """Record a CDN GET/HEAD and, on full X-Cache MISS, the underlying FOS GET_OBJECT op."""
+    x_cache = age = cache_control = None
     if headers is not None:
         try:
             x_cache = headers.get("X-Cache") or headers.get("x-cache")
@@ -654,13 +427,7 @@ def record_cdn_call(
         except Exception:
             logger.debug("record_cdn_call: headers.get failed (ignored)", exc_info=True)
 
-    detail_parts: list[str] = []
-    if x_cache:
-        detail_parts.append(x_cache)
-    if age:
-        detail_parts.append(f"age={age}s")
-    if cache_control:
-        detail_parts.append(cache_control)
+    detail_parts = [p for p in (x_cache, f"age={age}s" if age else None, cache_control) if p]
     cdn_details = " · ".join(detail_parts) if detail_parts else None
 
     record_call(
@@ -673,16 +440,7 @@ def record_cdn_call(
         caller=caller,
         bytes_count=bytes_count,
     )
-
     if is_full_miss(x_cache):
-        # Fastly's typical behavior on a cache MISS against an object-storage
-        # origin is to issue a GET to the origin (fetching the full body to
-        # populate cache) regardless of whether the client sent HEAD or GET —
-        # so subsequent reads of any method hit cache. The real FOS-side op
-        # is therefore always GET_OBJECT, not HEAD_OBJECT. (Field-confirmed
-        # by tracing single-file ingest paths: client HEAD MISS → CDN GETs
-        # populated cache but never resulted in a paired FOS GET_OBJECT row
-        # because every CDN GET after the HEAD was a HIT.)
         record_call(
             "GET_OBJECT",
             key,
@@ -703,7 +461,7 @@ class tracked_call:
         self.path = path
         self.service = service
         self.details = details
-        self.t0 = 0
+        self.t0 = 0.0
 
     def __enter__(self):
         self.t0 = time.time()
@@ -711,8 +469,14 @@ class tracked_call:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         elapsed = (time.time() - self.t0) * 1000
-        status = "Error" if exc_type else "OK"
-        record_call(self.method, self.path, elapsed, status=status, service=self.service, details=self.details)
+        record_call(
+            self.method,
+            self.path,
+            elapsed,
+            status="Error" if exc_type else "OK",
+            service=self.service,
+            details=self.details,
+        )
 
 
 _MAX_KEYS = 1024
@@ -721,7 +485,7 @@ _log_once_lock = threading.Lock()
 
 
 def log_once_per(key: str, interval_s: float = 60.0) -> bool:
-    """True when ``key`` has not been allowed in the last ``interval_s`` seconds (and records this call)."""
+    """True when ``key`` has not been allowed in the last ``interval_s`` seconds."""
     now = time.monotonic()
     with _log_once_lock:
         prev = _last.get(key)
@@ -737,32 +501,29 @@ def log_once_per(key: str, interval_s: float = 60.0) -> bool:
         return True
 
 
-def flush_usage_log(service_id: str) -> None:
-    """Write the current context's tracked FOS/CDN calls to _usage_log.
+def _load_service_source(service_id: str) -> dict | None:
+    from backend import config as svcconfig
 
-    Safe to call from cron jobs and API middleware — exits silently on any error
-    or when usage logging is disabled globally.
-    """
+    cfg = svcconfig.load_config(service_id)
+    return svcconfig.config_to_source(cfg) if cfg else None
+
+
+def flush_usage_log(service_id: str) -> None:
+    """Write the current context's tracked FOS/CDN calls to _usage_log."""
     try:
         from backend import config as svcconfig
 
         if not svcconfig.is_usage_logging_enabled():
             return
-
         calls = _CALLS.get()
         if not calls:
             return
-
-        cfg = svcconfig.load_config(service_id)
-        if not cfg:
+        source = _load_service_source(service_id)
+        if not source:
             return
-
-        source = svcconfig.config_to_source(cfg)
-        process_context = get_process_context()
-
         from backend.core.duckdb import log_usage_calls
 
-        log_usage_calls(source, calls, process_context=process_context)
+        log_usage_calls(source, calls, process_context=get_process_context())
     except Exception as e:
         logger.warning("[usage_logger] flush failed: %s", e)
 
@@ -770,13 +531,9 @@ def flush_usage_log(service_id: str) -> None:
 def run_usage_log_cleanup(service_id: str) -> None:
     """Purge old rows from _usage_log per the configured retention period."""
     try:
-        from backend import config as svcconfig
-
-        cfg = svcconfig.load_config(service_id)
-        if not cfg:
+        source = _load_service_source(service_id)
+        if not source:
             return
-        source = svcconfig.config_to_source(cfg)
-
         from backend.core.duckdb import purge_usage_log
 
         purge_usage_log(source)
@@ -785,17 +542,8 @@ def run_usage_log_cleanup(service_id: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Always-on SQLite/Postgres query profiler ring buffer
-# (folded from backend.utils.sqlite_profiler)
+# Always-on SQLite/Postgres query profiler ring buffer (sqlite_profiler)
 # ---------------------------------------------------------------------------
-
-import itertools  # noqa: E402
-import sys  # noqa: E402
-from collections import deque  # noqa: E402
-from datetime import UTC, datetime  # noqa: E402
-from typing import Any  # noqa: E402
-
-import structlog  # noqa: E402
 
 _BUFFER_CAP = 1000
 _SQL_TRUNCATE = 4096
@@ -848,8 +596,7 @@ def _live_register(db_type: str, sql: Any, con: Any) -> int:
     try:
         from backend.core.query_registry import query_registry
 
-        service_id = getattr(con, "_service_id", None)
-        qid = query_registry.register(db_type, str(sql), service_id=service_id, con=con)
+        qid = query_registry.register(db_type, str(sql), service_id=getattr(con, "_service_id", None), con=con)
         if qid >= 0:
             structlog.contextvars.bind_contextvars(query_id=qid)
         return qid
@@ -868,17 +615,13 @@ def _live_deregister(qid: int, error: BaseException | None) -> None:
     except Exception:
         logger.debug("live-registry deregister failed", exc_info=True)
     finally:
-        try:
+        with suppress(Exception):
             structlog.contextvars.unbind_contextvars("query_id")
-        except Exception:
-            logger.debug("_live_deregister: structlog.contextvars.unbind_contextvars failed (ignored)", exc_info=True)
 
 
 def get_recent(limit: int = 200, since_seq: int = 0) -> dict[str, Any]:
     """Return up to ``limit`` most-recent profiled statements."""
-    snapshot = list(_buffer)
-    if since_seq > 0:
-        snapshot = [e for e in snapshot if e["seq"] > since_seq]
+    snapshot = [e for e in _buffer if e["seq"] > since_seq] if since_seq > 0 else list(_buffer)
     if limit and len(snapshot) > limit:
         snapshot = snapshot[-limit:]
     return {
@@ -899,11 +642,7 @@ def clear() -> None:
 
 def buffer_stats() -> dict[str, int]:
     """Lightweight stats for telemetry / status pages."""
-    return {
-        "buffer_size": len(_buffer),
-        "buffer_cap": _BUFFER_CAP,
-        "dropped": _dropped,
-    }
+    return {"buffer_size": len(_buffer), "buffer_cap": _BUFFER_CAP, "dropped": _dropped}
 
 
 clear_recent_sqlite_queries = clear
@@ -924,38 +663,20 @@ def get_page_telemetry(page_load_id: str | None = None) -> dict[str, Any]:
 if "pytest" not in sys.modules:
     logger.info("sqlite_profiler active — capturing up to %d recent statements", _BUFFER_CAP)
 
-sys.modules["backend.utils.sqlite_profiler"] = sys.modules[__name__]
-_utils_pkg = sys.modules.get("backend.utils")
-if _utils_pkg is not None:
-    _utils_pkg.sqlite_profiler = sys.modules[__name__]  # type: ignore[attr-defined]
-
 
 # ---------------------------------------------------------------------------
-# Valkey-backed pub/sub for SSE fan-out across pods
-# (folded from backend.utils.valkey_publisher)
+# Valkey-backed pub/sub for SSE fan-out across pods (valkey_publisher)
 # ---------------------------------------------------------------------------
 
-import asyncio  # noqa: E402
-import json  # noqa: E402
-from collections.abc import AsyncIterator  # noqa: E402
-
-# Failure visibility: keyed counters, cheap to read from a health snapshot.
-PUBLISH_STATS: dict[str, int] = {
-    "published": 0,
-    "publish_errors": 0,
-    "decode_errors": 0,
-}
-
+PUBLISH_STATS: dict[str, int] = {"published": 0, "publish_errors": 0, "decode_errors": 0}
 _LOG_EVERY_S = 60.0
+_sync_redis_lock = threading.Lock()
+_sync_redis: Any = None
 
 
 def _log_rate_limited(key: str, msg: str, *args: Any) -> None:
     if log_once_per(key, _LOG_EVERY_S):
         logger.warning(msg, *args)
-
-
-_sync_redis_lock = threading.Lock()
-_sync_redis: Any = None
 
 
 def _get_sync_redis() -> Any:
@@ -967,10 +688,7 @@ def _get_sync_redis() -> Any:
 
             broker_url = os.environ.get("CELERY_BROKER_URL", "redis://localhost:6379/0")
             _sync_redis = SyncRedis.from_url(
-                broker_url,
-                socket_connect_timeout=1.0,
-                socket_timeout=2.0,
-                decode_responses=True,
+                broker_url, socket_connect_timeout=1.0, socket_timeout=2.0, decode_responses=True
             )
         return _sync_redis
 
@@ -980,27 +698,23 @@ class ValkeyPublisher:
         self._channel_prefix = channel_prefix
         self._history_size = history_size
         self._loop: asyncio.AbstractEventLoop | None = None
-        self._redis: Any = None  # async client, bound in bind_loop()
+        self._redis: Any = None
 
     def _channel(self, service_id: str) -> str:
         return f"sse:{self._channel_prefix}:{service_id}"
 
     def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
-        """Bind to the FastAPI asyncio loop and create the async client.
-        Optional — processes without a loop (Celery workers) publish through
-        the shared sync client instead."""
+        """Bind to the FastAPI asyncio loop and create the async client."""
         from redis.asyncio import Redis
 
-        broker_url = os.environ.get("CELERY_BROKER_URL", "redis://localhost:6379/0")
         self._loop = loop
-        self._redis = Redis.from_url(broker_url, decode_responses=True)
-
-    # ── publish ───────────────────────────────────────────────────────────────
+        self._redis = Redis.from_url(
+            os.environ.get("CELERY_BROKER_URL", "redis://localhost:6379/0"), decode_responses=True
+        )
 
     def publish(self, service_id: str, payload: dict[str, Any]) -> None:
         payload_json = json.dumps(payload)
         channel = self._channel(service_id)
-
         if self._loop is not None and self._redis is not None:
             self._publish_async(channel, payload_json)
         else:
@@ -1012,13 +726,15 @@ class ValkeyPublisher:
             pipe.rpush(history_key, payload_json)
             pipe.ltrim(history_key, -self._history_size, -1)
 
+    def _build_publish_pipe(self, client: Any, channel: str, payload_json: str) -> Any:
+        pipe = client.pipeline()
+        pipe.publish(channel, payload_json)
+        self._apply_history(pipe, channel, payload_json)
+        return pipe
+
     def _publish_sync(self, channel: str, payload_json: str) -> None:
         try:
-            r = _get_sync_redis()
-            pipe = r.pipeline()
-            pipe.publish(channel, payload_json)
-            self._apply_history(pipe, channel, payload_json)
-            pipe.execute()
+            self._build_publish_pipe(_get_sync_redis(), channel, payload_json).execute()
             PUBLISH_STATS["published"] += 1
         except Exception as e:
             PUBLISH_STATS["publish_errors"] += 1
@@ -1029,10 +745,7 @@ class ValkeyPublisher:
             try:
                 if self._redis is None:
                     raise RuntimeError("self._redis is unexpectedly None")
-                pipe = self._redis.pipeline()
-                pipe.publish(channel, payload_json)
-                self._apply_history(pipe, channel, payload_json)
-                await pipe.execute()
+                await self._build_publish_pipe(self._redis, channel, payload_json).execute()
                 PUBLISH_STATS["published"] += 1
             except Exception as e:
                 PUBLISH_STATS["publish_errors"] += 1
@@ -1043,16 +756,11 @@ class ValkeyPublisher:
                 raise RuntimeError("self._loop is unexpectedly None")
             self._loop.call_soon_threadsafe(lambda: asyncio.ensure_future(_do()))
         except RuntimeError as e:
-            # Loop shutting down — fall back to the sync client rather than drop.
             _log_rate_limited("loop_closed", "[valkey] loop unavailable (%s); publishing sync", e)
             self._publish_sync(channel, payload_json)
 
-    # ── subscribe ─────────────────────────────────────────────────────────────
-
     async def subscribe(self, service_id: str) -> AsyncIterator[dict[str, Any]]:
-        """Yield published payloads for ``service_id``; reconnects on broker
-        loss. Requires ``bind_loop()`` — subscribing is only meaningful in the
-        SSE-serving (FastAPI) process."""
+        """Yield published payloads for ``service_id``; reconnects on broker loss."""
         if self._redis is None:
             raise RuntimeError(
                 "ValkeyPublisher.subscribe() before bind_loop() — the SSE process "
@@ -1086,11 +794,8 @@ class ValkeyPublisher:
                 except Exception:
                     logger.debug("subscribe: pubsub.close failed (ignored)", exc_info=True)
 
-    # ── seed / introspection (sync callers) ───────────────────────────────────
-
     def get_recent_ticks(self, service_id: str, count: int = 60) -> list[dict[str, Any]]:
-        """Recent history for initial SSE seed. Sync — call via to_thread from
-        async routes."""
+        """Recent history for initial SSE seed. Sync — call via to_thread from async routes."""
         if self._history_size == 0:
             return []
         try:
@@ -1101,8 +806,7 @@ class ValkeyPublisher:
             return []
 
     def subscriber_count(self, service_id: str) -> int:
-        """Subscribers on this channel across all pods. Sync — call via
-        to_thread from async contexts."""
+        """Subscribers on this channel across all pods."""
         try:
             result = _get_sync_redis().pubsub_numsub(self._channel(service_id))
             if result:
@@ -1112,24 +816,14 @@ class ValkeyPublisher:
         return 0
 
 
-sys.modules["backend.utils.valkey_publisher"] = sys.modules[__name__]
-if _utils_pkg is not None:
-    _utils_pkg.valkey_publisher = sys.modules[__name__]  # type: ignore[attr-defined]
-
-
 # ---------------------------------------------------------------------------
-# Minimal HyperLogLog for cross-hour distinct-IP counts in the rollup tree
-# (folded from backend.utils.hll)
+# Minimal HyperLogLog for cross-hour distinct-IP counts (hll)
 # ---------------------------------------------------------------------------
-
-import hashlib  # noqa: E402
-import math  # noqa: E402
-import struct  # noqa: E402
-from collections.abc import Iterable  # noqa: E402
 
 DEFAULT_PRECISION = 8
 SERIALIZATION_VERSION = 1
 _HASH_BITS = 64
+HLL_SKETCH_NAMES: tuple[str, ...] = ("hll_sketch",)
 
 
 def _alpha(m: int) -> float:
@@ -1184,7 +878,6 @@ class HyperLogLog:
         return self._m
 
     def add(self, item: str | bytes) -> None:
-        """Insert one item into the sketch."""
         h = _hash64(item)
         bucket = h >> (_HASH_BITS - self._p)
         observed = h & ((1 << (_HASH_BITS - self._p)) - 1)
@@ -1193,31 +886,24 @@ class HyperLogLog:
             self._buckets[bucket] = rank
 
     def update(self, items: Iterable[str | bytes]) -> None:
-        """Bulk-insert from an iterable."""
         for item in items:
             self.add(item)
 
     def count(self) -> int:
-        """Return the cardinality estimate."""
         m = self._m
-        alpha = _alpha(m)
         raw_sum = sum(2.0**-b for b in self._buckets)
         if raw_sum == 0.0:
             return m
-        estimate = alpha * m * m / raw_sum
-
+        estimate = _alpha(m) * m * m / raw_sum
         if estimate <= 2.5 * m:
             zeros = sum(1 for b in self._buckets if b == 0)
             if zeros > 0:
                 estimate = m * math.log(m / zeros)
-
         if estimate > (1 << 64) / 30.0:
             estimate = -(1 << 64) * math.log(1 - estimate / (1 << 64))
-
         return int(round(estimate))
 
     def merge(self, other: HyperLogLog) -> None:
-        """Union ``other`` into ``self`` in-place."""
         if other._p != self._p:
             raise ValueError(f"merge precision mismatch: self.p={self._p} vs other.p={other._p}")
         for i in range(self._m):
@@ -1225,18 +911,15 @@ class HyperLogLog:
                 self._buckets[i] = other._buckets[i]
 
     def to_bytes(self) -> bytes:
-        """Serialize to a compact ``bytes`` payload."""
         return bytes([SERIALIZATION_VERSION, self._p]) + bytes(self._buckets)
 
     @classmethod
     def from_bytes(cls, blob: bytes | bytearray) -> HyperLogLog:
-        """Deserialize a sketch previously produced by :meth:`to_bytes`."""
         if len(blob) < 2:
             raise ValueError(f"sketch blob too short: {len(blob)} bytes")
-        version = blob[0]
+        version, precision = blob[0], blob[1]
         if version != SERIALIZATION_VERSION:
             raise ValueError(f"unknown HLL serialization version {version}; expected {SERIALIZATION_VERSION}")
-        precision = blob[1]
         if not 4 <= precision <= 16:
             raise ValueError(f"invalid precision in blob: {precision}")
         expected_len = 2 + (1 << precision)
@@ -1251,9 +934,6 @@ class HyperLogLog:
 
     def __repr__(self) -> str:  # pragma: no cover - cosmetic only
         return f"HyperLogLog(p={self._p}, estimate≈{self.count()})"
-
-
-HLL_SKETCH_NAMES: tuple[str, ...] = ("hll_sketch",)
 
 
 def get_hll_sketch(precision: int = DEFAULT_PRECISION) -> HyperLogLog:
@@ -1273,8 +953,8 @@ def merge_hll_sketches(blobs: Iterable[bytes | bytearray], precision: int = DEFA
     return acc.count() if acc is not None else 0
 
 
-def query_hll_distinct(blobs: Iterable[bytes | bytearray]) -> int:
-    return merge_hll_sketches(blobs)
+query_hll_distinct = merge_hll_sketches
+query_hll_distinct_filtered = merge_hll_sketches
 
 
 def query_hll_distinct_by_bucket(rows: Iterable[tuple[Any, bytes | bytearray]]) -> dict[Any, int]:
@@ -1290,25 +970,11 @@ def query_hll_distinct_by_bucket(rows: Iterable[tuple[Any, bytes | bytearray]]) 
     return {k: v.count() for k, v in buckets.items()}
 
 
-def query_hll_distinct_filtered(blobs: Iterable[bytes | bytearray]) -> int:
-    return merge_hll_sketches(blobs)
-
-
-sys.modules["backend.utils.hll"] = sys.modules[__name__]
-if _utils_pkg is not None:
-    _utils_pkg.hll = sys.modules[__name__]  # type: ignore[attr-defined]
-
-
 # ---------------------------------------------------------------------------
-# Relative-range window resolver (folded from backend.utils.time_window)
+# Relative-range window resolver (time_window)
 # ---------------------------------------------------------------------------
-
-from datetime import timedelta  # noqa: E402
-
-from backend.utils.date_utils import iso_z, parse_iso_utc  # noqa: E402
 
 STATIC_DEFAULT: tuple[float, float] = (24.0, 168.0)
-
 _BANDS: tuple[tuple[float, float, float], ...] = (
     (1.0, 0.25, 1.0),
     (4.0, 1.0, 1.0),
@@ -1317,6 +983,18 @@ _BANDS: tuple[tuple[float, float, float], ...] = (
     (168.0, 24.0, 24.0),
     (math.inf, 24.0, 168.0),
 )
+ANCHOR_QUANTUM_SECONDS = 60
+_FIXED_TOKEN_DELTAS: dict[str, timedelta] = {
+    "1h": timedelta(hours=1),
+    "3h": timedelta(hours=3),
+    "6h": timedelta(hours=6),
+    "12h": timedelta(hours=12),
+    "24h": timedelta(hours=24),
+    "3d": timedelta(days=3),
+    "7d": timedelta(days=7),
+    "30d": timedelta(days=30),
+}
+VALID_RANGE_TOKENS: frozenset[str] = frozenset(_FIXED_TOKEN_DELTAS) | {"auto"}
 
 
 def history_hours_from_earliest(earliest: str | None, *, now: datetime | None = None) -> float | None:
@@ -1338,47 +1016,24 @@ def pick_insights_default(history_hours: float | None) -> tuple[float, float]:
     return STATIC_DEFAULT
 
 
-ANCHOR_QUANTUM_SECONDS = 60
-
-_FIXED_TOKEN_DELTAS: dict[str, timedelta] = {
-    "1h": timedelta(hours=1),
-    "3h": timedelta(hours=3),
-    "6h": timedelta(hours=6),
-    "12h": timedelta(hours=12),
-    "24h": timedelta(hours=24),
-    "3d": timedelta(days=3),
-    "7d": timedelta(days=7),
-    "30d": timedelta(days=30),
-}
-
-VALID_RANGE_TOKENS: frozenset[str] = frozenset(_FIXED_TOKEN_DELTAS) | {"auto"}
-
-
 def is_valid_range_token(token: str | None) -> bool:
-    """True when ``token`` is a recognized relative-range token."""
     return token in VALID_RANGE_TOKENS
 
 
 def quantize_anchor(anchor: str | None, *, now: datetime | None = None) -> str:
     """Floor an anchor instant to the ``ANCHOR_QUANTUM_SECONDS`` grid → ISO-Z."""
-    dt = parse_iso_utc(anchor) if anchor else None
-    if dt is None:
-        dt = now if now is not None else datetime.now(UTC)
+    dt = (parse_iso_utc(anchor) if anchor else None) or (now if now is not None else datetime.now(UTC))
     epoch = int(dt.timestamp())
-    floored = epoch - (epoch % ANCHOR_QUANTUM_SECONDS)
-    return iso_z(datetime.fromtimestamp(floored, tz=UTC))
+    return iso_z(datetime.fromtimestamp(epoch - (epoch % ANCHOR_QUANTUM_SECONDS), tz=UTC))
 
 
 def _pick_auto_token(earliest_log_at: str | None, *, now: datetime) -> str:
-    """Resolve ``"auto"`` to a concrete fixed token from the service's history."""
     history_hours = history_hours_from_earliest(earliest_log_at, now=now)
     if history_hours is None:
         return "7d"
     if history_hours < 7 * 24:
         return "24h"
-    if history_hours < 30 * 24:
-        return "7d"
-    return "30d"
+    return "7d" if history_hours < 30 * 24 else "30d"
 
 
 def resolve_window(
@@ -1389,25 +1044,14 @@ def resolve_window(
     now: datetime | None = None,
 ) -> tuple[str, str]:
     """Resolve ``(range_token, anchor) -> (start_iso, end_iso)`` deterministically."""
-    if not is_valid_range_token(range_token):
+    if not is_valid_range_token(range_token) or range_token is None:
         raise ValueError(f"unrecognized range_token: {range_token!r}")
-
     now_dt = now if now is not None else datetime.now(UTC)
-    quantized = quantize_anchor(anchor, now=now_dt)
-    anchor_dt = parse_iso_utc(quantized)
+    anchor_dt = parse_iso_utc(quantize_anchor(anchor, now=now_dt))
     if anchor_dt is None:
         raise RuntimeError("anchor_dt is unexpectedly None")
-
-    if range_token == "auto":
-        token = _pick_auto_token(earliest_log_at, now=now_dt)
-    else:
-        if range_token is None:
-            raise RuntimeError("range_token is unexpectedly None")
-        token = range_token
-
-    delta = _FIXED_TOKEN_DELTAS[token]
-    start_dt = anchor_dt - delta
-    return iso_z(start_dt), iso_z(anchor_dt)
+    token = _pick_auto_token(earliest_log_at, now=now_dt) if range_token == "auto" else range_token
+    return iso_z(anchor_dt - _FIXED_TOKEN_DELTAS[token]), iso_z(anchor_dt)
 
 
 def invite_clamp_fingerprint(analyst_session: object | None) -> str | None:
@@ -1417,17 +1061,12 @@ def invite_clamp_fingerprint(analyst_session: object | None) -> str | None:
     qs = getattr(analyst_session, "query_start_time", None)
     qe = getattr(analyst_session, "query_end_time", None)
     qw = getattr(analyst_session, "query_window_hours", None)
-    raw = f"{qs or ''}|{qe or ''}|{qw or ''}"
-    return hashlib.sha256(raw.encode()).hexdigest()[:16]
+    return hashlib.sha256(f"{qs or ''}|{qe or ''}|{qw or ''}".encode()).hexdigest()[:16]
 
 
 # ---------------------------------------------------------------------------
-# Thread-safe LRU+TTL cache & CacheRegistry (folded from backend.utils.bounded_cache)
+# Thread-safe LRU+TTL cache & CacheRegistry (bounded_cache & cache_registry)
 # ---------------------------------------------------------------------------
-
-from collections.abc import Iterator  # noqa: E402
-
-import cachetools  # noqa: E402
 
 _MISSING = object()
 
@@ -1449,13 +1088,10 @@ class BoundedTTLCache:
         if ttl_seconds <= 0:
             raise ValueError("ttl_seconds must be positive")
         self.maxsize = resolved_max
-        self.ttl = float(ttl_seconds)
-        self.ttl_seconds = float(ttl_seconds)
+        self.ttl = self.ttl_seconds = float(ttl_seconds)
         self.name = name
         self._cache: cachetools.TTLCache = cachetools.TTLCache(
-            maxsize=resolved_max,
-            ttl=float(ttl_seconds),
-            timer=lambda: time.monotonic(),
+            maxsize=resolved_max, ttl=self.ttl, timer=lambda: time.monotonic()
         )
         self.lock = threading.RLock()
 
@@ -1491,9 +1127,7 @@ class BoundedTTLCache:
 
     def pop(self, key: Any, default: Any = _MISSING) -> Any:
         with self.lock:
-            if default is _MISSING:
-                return self._cache.pop(key)
-            return self._cache.pop(key, default)
+            return self._cache.pop(key) if default is _MISSING else self._cache.pop(key, default)
 
     def clear(self) -> None:
         with self.lock:
@@ -1523,6 +1157,17 @@ class BoundedTTLCache:
 BoundedCache = BoundedTTLCache
 
 
+def _try_clear_cache(cache: Any) -> bool:
+    clear_fn = getattr(cache, "clear", None)
+    if not callable(clear_fn):
+        return False
+    try:
+        clear_fn()
+        return True
+    except Exception:  # pragma: no cover — best-effort drain
+        return False
+
+
 class CacheRegistry:
     """Singleton-style registry of module-level caches."""
 
@@ -1537,29 +1182,15 @@ class CacheRegistry:
     @classmethod
     def clear_all(cls) -> None:
         with cls._lock:
-            entries = list(cls._entries.items())
-        for _name, cache in entries:
-            clear_fn = getattr(cache, "clear", None)
-            if callable(clear_fn):
-                try:
-                    clear_fn()
-                except Exception:  # pragma: no cover — best-effort drain
-                    continue
+            caches = list(cls._entries.values())
+        for cache in caches:
+            _try_clear_cache(cache)
 
     @classmethod
     def clear(cls, name: str) -> bool:
         with cls._lock:
             cache = cls._entries.get(name)
-        if cache is None:
-            return False
-        clear_fn = getattr(cache, "clear", None)
-        if not callable(clear_fn):
-            return False
-        try:
-            clear_fn()
-            return True
-        except Exception:  # pragma: no cover — best-effort drain
-            return False
+        return _try_clear_cache(cache) if cache is not None else False
 
     @classmethod
     def names(cls) -> list[str]:
@@ -1574,15 +1205,8 @@ class CacheRegistry:
 
 # ---------------------------------------------------------------------------
 # Backstop telemetry response middleware & active request counter
-# (folded from backend.utils.telemetry_response_middleware & active_requests)
+# (telemetry_response_middleware & active_requests)
 # ---------------------------------------------------------------------------
-
-import os as _os  # noqa: E402
-from collections.abc import Callable  # noqa: E402
-
-from starlette.middleware.base import BaseHTTPMiddleware  # noqa: E402
-from starlette.requests import Request  # noqa: E402
-from starlette.responses import Response  # noqa: E402
 
 _JSON_CONTENT_TYPES: tuple[str, ...] = ("application/json",)
 _STREAMING_CONTENT_TYPES: tuple[str, ...] = (
@@ -1598,7 +1222,6 @@ def _content_type(response: Response) -> str:
 
 
 def _is_json_response(response: Response) -> bool:
-    """True iff the response's Content-Type identifies it as JSON."""
     media = _content_type(response)
     return any(media.startswith(t) for t in _JSON_CONTENT_TYPES)
 
@@ -1613,23 +1236,19 @@ class TelemetryResponseBodyMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next):
         response = await call_next(request)
-
         try:
             from backend.models.common import _DEBUG_ENVELOPE_KEYS, _debug_responses_enabled
         except Exception:
             return response
 
         master_enabled = _debug_responses_enabled()
-
         is_remote = getattr(request.state, "is_remote", False)
         analyst_query_enabled = analyst_api_enabled = False
         if is_remote and master_enabled:
             from backend.utils.remote_access import analyst_debug_visibility
 
             analyst_query_enabled, analyst_api_enabled = analyst_debug_visibility(request)
-        if _is_streaming_content_type(response):
-            return response
-        if not _is_json_response(response):
+        if _is_streaming_content_type(response) or not _is_json_response(response):
             return response
 
         opt_in = master_enabled and (
@@ -1639,10 +1258,7 @@ class TelemetryResponseBodyMiddleware(BaseHTTPMiddleware):
             return response
 
         try:
-            body_chunks: list[bytes] = []
-            async for chunk in response.body_iterator:
-                body_chunks.append(chunk)
-            body = b"".join(body_chunks)
+            body = b"".join([chunk async for chunk in response.body_iterator])
         except Exception as e:
             logger.warning("[telemetry-middleware] failed to read response body: %s", e)
             return response
@@ -1660,20 +1276,15 @@ class TelemetryResponseBodyMiddleware(BaseHTTPMiddleware):
             return _reconstruct(response, body)
 
         if not opt_in:
-            stripped = False
             keys_to_strip = (*_DEBUG_ENVELOPE_KEYS, "_is_cached") if master_enabled else _DEBUG_ENVELOPE_KEYS
-            for k in keys_to_strip:
-                if k in parsed:
-                    parsed.pop(k)
-                    stripped = True
-            if not stripped:
+            stripped = [parsed.pop(k, _MISSING) for k in keys_to_strip]
+            if all(v is _MISSING for v in stripped):
                 return _reconstruct(response, body)
             try:
-                new_body = json.dumps(parsed, default=str).encode("utf-8")
+                return _reconstruct(response, json.dumps(parsed, default=str).encode("utf-8"))
             except Exception as e:
                 logger.warning("[telemetry-middleware] failed to strip telemetry: %s", e)
                 return _reconstruct(response, body)
-            return _reconstruct(response, new_body)
 
         if "_debug_queries" in parsed:
             return _reconstruct(response, body)
@@ -1681,7 +1292,6 @@ class TelemetryResponseBodyMiddleware(BaseHTTPMiddleware):
         try:
             inject_queries = analyst_query_enabled if is_remote else True
             inject_api_calls = analyst_api_enabled if is_remote else True
-
             if inject_queries:
                 parsed["_debug_queries"] = get_queries()
                 pg_queries = list(get_sqlite_queries())
@@ -1689,15 +1299,12 @@ class TelemetryResponseBodyMiddleware(BaseHTTPMiddleware):
                 parsed["_debug_sqlite"] = pg_queries
             if inject_api_calls:
                 parsed["_debug_calls"] = get_tracked_calls()
-
             if not is_remote or inject_queries or inject_api_calls:
                 parsed.setdefault("_is_cached", False)
-            new_body = json.dumps(parsed, default=str).encode("utf-8")
+            return _reconstruct(response, json.dumps(parsed, default=str).encode("utf-8"))
         except Exception as e:
             logger.warning("[telemetry-middleware] failed to inject telemetry: %s", e)
             return _reconstruct(response, body)
-
-        return _reconstruct(response, new_body)
 
 
 def _reconstruct(original: Response, body: bytes) -> Response:
@@ -1707,10 +1314,8 @@ def _reconstruct(original: Response, body: bytes) -> Response:
     if media_type is None:
         for k, v in original.raw_headers:
             if k.lower() == b"content-type":
-                try:
+                with suppress(UnicodeDecodeError):
                     media_type = v.decode("ascii")
-                except UnicodeDecodeError:
-                    pass
                 break
     new = Response(content=body, status_code=original.status_code, media_type=media_type)
     new.raw_headers.extend((k, v) for k, v in original.raw_headers if k.lower() not in drop)
@@ -1718,7 +1323,6 @@ def _reconstruct(original: Response, body: bytes) -> Response:
 
 
 _active_requests_logger = logging.getLogger("backend.utils.active_requests")
-
 _lock = threading.Lock()
 _active_count = 0
 _defer_started_at: dict[tuple[str, str], float] = {}
@@ -1738,7 +1342,6 @@ def decrement_active_requests() -> None:
 
 
 def active_request_count() -> int:
-    """Snapshot read of the in-flight count. Mostly useful for tests."""
     with _lock:
         return _active_count
 
@@ -1789,7 +1392,6 @@ def yield_to_api(
 
 
 def _reset_for_tests() -> None:
-    """Tests: clear counter + defer windows between cases."""
     global _active_count
     with _lock:
         _active_count = 0
@@ -1797,8 +1399,6 @@ def _reset_for_tests() -> None:
 
 
 class _ActiveRequestsResetAdapter:
-    """Exposes ``.clear()`` → ``_reset_for_tests()`` for CacheRegistry."""
-
     @staticmethod
     def clear() -> None:
         _reset_for_tests()
@@ -1809,20 +1409,11 @@ CacheRegistry.register("utils.active_requests", _ActiveRequestsResetAdapter())
 
 # ---------------------------------------------------------------------------
 # structlog configuration, atomic file writes & error redaction
-# (folded from backend.utils.structlog_config, atomic_write, error_redaction)
+# (structlog_config, atomic_write, error_redaction)
 # ---------------------------------------------------------------------------
-
-import re  # noqa: E402
-import tempfile  # noqa: E402
-from collections.abc import MutableMapping  # noqa: E402
-from contextlib import suppress  # noqa: E402
-from pathlib import Path  # noqa: E402
-
-from opentelemetry import trace  # noqa: E402
 
 
 def _add_otel_trace_context(_logger: Any, _method_name: str, event_dict: dict[str, Any]) -> dict[str, Any]:
-    """structlog processor: inject active OTel trace_id + span_id."""
     span = trace.get_current_span()
     if span is not None and span.is_recording():
         ctx = span.get_span_context()
@@ -1835,20 +1426,17 @@ def _add_otel_trace_context(_logger: Any, _method_name: str, event_dict: dict[st
 def _drop_uvicorn_color_message(
     _logger: Any, _method_name: str, event_dict: MutableMapping[str, Any]
 ) -> MutableMapping[str, Any]:
-    """structlog processor: drop uvicorn's internal ``color_message`` extra."""
     event_dict.pop("color_message", None)
     return event_dict
 
 
 def effective_format() -> str:
-    """The renderer that's actually active: ``"json"`` or ``"console"``."""
     return "json" if os.environ.get("STRUCTLOG_FORMAT", "console").lower() == "json" else "console"
 
 
 def configure_structlog() -> None:
     """Configure structlog + bridge stdlib through it. Idempotent."""
-    use_json = os.environ.get("STRUCTLOG_FORMAT", "console").lower() == "json"
-
+    use_json = effective_format() == "json"
     shared_processors: list[Any] = [
         structlog.contextvars.merge_contextvars,
         structlog.processors.add_log_level,
@@ -1856,7 +1444,6 @@ def configure_structlog() -> None:
         _add_otel_trace_context,
         structlog.processors.StackInfoRenderer(),
     ]
-
     renderer: Any = (
         structlog.processors.JSONRenderer()
         if use_json
@@ -1869,7 +1456,6 @@ def configure_structlog() -> None:
             ),
         )
     )
-
     structlog.configure(
         processors=[
             *shared_processors,
@@ -1881,14 +1467,12 @@ def configure_structlog() -> None:
         logger_factory=structlog.stdlib.LoggerFactory(),
         cache_logger_on_first_use=True,
     )
-
     formatter = structlog.stdlib.ProcessorFormatter(
         foreign_pre_chain=[*shared_processors, structlog.stdlib.ExtraAdder(), _drop_uvicorn_color_message],
         processor=renderer,
     )
     handler = logging.StreamHandler(sys.stderr)
     handler.setFormatter(formatter)
-
     root = logging.getLogger()
     root.handlers[:] = [handler]
     root.setLevel(logging.INFO)
@@ -1908,6 +1492,24 @@ def bridge_uvicorn_loggers() -> None:
 audit_log = structlog.get_logger("audit")
 
 
+def _mkstemp_sibling(target: str | Path, prefix: str | None, suffix: str) -> tuple[Path, int, str]:
+    dst = Path(target)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=prefix if prefix is not None else f".{dst.name}.",
+        suffix=suffix,
+        dir=str(dst.parent),
+    )
+    return dst, fd, tmp_name
+
+
+def _write_stream(f: Any, data: bytes, fsync: bool) -> None:
+    f.write(data)
+    if fsync:
+        f.flush()
+        os.fsync(f.fileno())
+
+
 @contextmanager
 def atomic_temp_path(
     target: str | Path,
@@ -1917,13 +1519,7 @@ def atomic_temp_path(
     mode: int | None = None,
 ) -> Iterator[Path]:
     """Yield a sibling temporary file path that is atomically replaced onto ``target`` on exit."""
-    dst = Path(target)
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(
-        prefix=prefix if prefix is not None else f".{dst.name}.",
-        suffix=suffix,
-        dir=str(dst.parent),
-    )
+    dst, fd, tmp_name = _mkstemp_sibling(target, prefix, suffix)
     os.close(fd)
     tmp_path = Path(tmp_name)
     try:
@@ -1949,19 +1545,10 @@ def atomic_write_bytes(
     fallback_in_place_errnos: set[int] | None = None,
 ) -> None:
     """Atomically write ``data`` to ``target`` via a sibling temporary file and ``os.replace``."""
-    dst = Path(target)
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(
-        prefix=prefix if prefix is not None else f".{dst.name}.",
-        suffix=suffix,
-        dir=str(dst.parent),
-    )
+    dst, fd, tmp_name = _mkstemp_sibling(target, prefix, suffix)
     try:
         with os.fdopen(fd, "wb") as f:
-            f.write(data)
-            if fsync:
-                f.flush()
-                os.fsync(f.fileno())
+            _write_stream(f, data, fsync)
         if mode is not None:
             os.chmod(tmp_name, mode)
         os.replace(tmp_name, dst)
@@ -1973,10 +1560,7 @@ def atomic_write_bytes(
             e.errno in fallback_in_place_errnos or "busy" in err_msg or "permission" in err_msg
         ):
             with open(dst, "wb") as f:
-                f.write(data)
-                if fsync:
-                    f.flush()
-                    os.fsync(f.fileno())
+                _write_stream(f, data, fsync)
             return
         raise
     except BaseException:
@@ -1999,13 +1583,9 @@ def atomic_write_json(
     fallback_in_place_errnos: set[int] | None = None,
 ) -> None:
     """Serialize ``data`` as UTF-8 JSON and atomically write it to ``target``."""
-    payload = json.dumps(
-        data,
-        indent=indent,
-        sort_keys=sort_keys,
-        separators=separators,
-        default=default,
-    ).encode("utf-8")
+    payload = json.dumps(data, indent=indent, sort_keys=sort_keys, separators=separators, default=default).encode(
+        "utf-8"
+    )
     atomic_write_bytes(
         target,
         payload,
@@ -2026,7 +1606,6 @@ _salts_lock = threading.Lock()
 
 
 def register_salt(salt: str | None) -> None:
-    """Remember cid salts so their literal values are scrubbed from later text."""
     if isinstance(salt, str) and len(salt) >= _MIN_SALT_LEN:
         with _salts_lock:
             _known_salts.add(salt)
@@ -2041,7 +1620,6 @@ def scrub_secrets(text: str) -> str:
 
 
 def redact_error_text(msg: object) -> str:
-    """Strip absolute server paths and cid-salt material from analyst-visible text."""
     return ABS_PATH_RE.sub("<path>", scrub_secrets(str(msg)))
 
 
@@ -2061,6 +1639,7 @@ _FOLDED_TELEMETRY_SUBMODULES: tuple[str, ...] = (
     "error_redaction",
 )
 _this_telemetry_mod = sys.modules[__name__]
+_utils_pkg = sys.modules.get("backend.utils")
 for _submod_name in _FOLDED_TELEMETRY_SUBMODULES:
     sys.modules[f"backend.utils.{_submod_name}"] = _this_telemetry_mod
     if _utils_pkg is not None:

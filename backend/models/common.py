@@ -592,6 +592,7 @@ class LastSyncInfo(WireSafeModel):
 from backend.models.admin import (  # noqa: E402
     LogAccountingResponse,
     LogExtentsResponse,
+    ShareBannerResponse,
     ShareHeaderBadgeResponse,
     SyncStatusResponse,
 )
@@ -601,7 +602,6 @@ from backend.models.analytics import (  # noqa: E402
 )
 from backend.models.services import CronRunsResponse  # noqa: E402
 from backend.models.session_scoring import ScoringLabelsListResponse  # noqa: E402
-from backend.models.share_admin import ShareBannerResponse  # noqa: E402
 
 
 class SavedView(WireSafeModel):

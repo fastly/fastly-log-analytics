@@ -16,60 +16,9 @@ def _reg(**kwargs: Any) -> None:
     registry.register(InsightDefinition(**kwargs))
 
 
-"""SQL templates for `backend.repositories.insights`.
-
-Phase 5b extraction. 28 per-insight templates registered with the
-``InsightsRegistry`` plus coalesced multi-insight pre-aggregation
-queries used by ``repository.py``.
-
-definitions.py shape decision (Phase 5b §5b.5 open question)
-============================================================
-Chose **(c) stay as code** — no per-section split, no YAML/TOML
-data-driven conversion. The "next contributor adds one new insight"
-lens drove the call:
-
-- Per-insight processors are NOT mechanically identical. Each one
-  unpacks a different row tuple schema, applies custom severity
-  thresholds, and several override ``severity_logic`` or inject
-  meta fields that don't fit a generic shape (e.g. ``NEW_PROBE_REGEX``
-  is an f-string-built regex baked into the template; the impossible-
-  distance processor has a 14-column row; cipher_spread, asn_concentration,
-  region_latency each have bespoke severity rules). A data-driven
-  shape would need a callable indirection per insight anyway, leaving
-  the YAML as a duplicate index of what's already in code.
-- (a) split-by-section would push the contributor to wire up one new
-  file plus an import in ``__init__.py``, for no readability win
-  over the existing ``# ── N. Name ──`` section comments.
-- (c) keeps the contributor's diff to "add ``def foo_processor``,
-  add one ``registry.register(InsightDefinition(...))`` block, add the
-  SQL constant to this module" — three colocated edits, no new files.
-  The ``InsightDefinition`` also requires a ``category=InsightCategory.*``
-  ({security, origin, edge, traffic}) — the field has no default so a
-  forgotten category fails at import; it drives the sectioned /insights
-  page. Mirror the same category in the ``INSIGHT_DEFINITIONS`` dict in
-  ``backend/core/_log_fields_data.py`` (a separate availability catalog).
-
-SQL constants below are grouped by source file (``definitions.py``
-first, ``repository.py`` coalesced pre-aggs last) so a reader who
-opens this module sees the registry-driven templates and the manually-
-invoked coalesced queries in the same order the repository runs them.
-
-All ``{...}`` placeholders are trusted-identifier or trusted-fragment
-substitutions (table names, validated column projections, scalar
-floats/ints from the repository call site). User-supplied window
-bounds are bound through DuckDB ``?`` parameters by the caller; this
-module never interpolates user input.
-
-See ``backend/repositories/_sql/__init__.py`` for the ownership policy.
-"""
-
-
 import re
 
-# ── Probe-URL regex (used by NEW_PROBE_URLS template) ─────────────────────────
-# Plain alternation — no inline ``(?i)`` flag because the literal ``?``
-# breaks the repository's ``sql.count("?")`` placeholder-counting heuristic.
-# Case-insensitivity is supplied via the third ``regexp_matches`` arg below.
+# Plain alternation without inline (?i) so sql.count("?") binder heuristic stays accurate.
 NEW_PROBES = [
     "admin",
     ".env",
@@ -400,19 +349,7 @@ CACHE_COLLAPSE = f"""
         ORDER BY ({coalesce("b_rate", "0")} - w_rate) DESC LIMIT 15
     """
 
-# Cache hit ratio above is HIT/(HIT+MISS) — the conventional Fastly definition.
-# PASS is uncacheable and excluded from both numerator and denominator (a PASS
-# surge is surfaced by CACHEABILITY_REGRESSION below, not as a hit-rate drop).
-# w_total/b_total are the cacheable sample size (HIT+MISS), so the >=5/>=20 gate
-# requires enough *cacheable* traffic to judge a ratio. Keep this in lockstep
-# with the coalesced cache_collapse branch in repository.py.
-
 # ── 15b. Cacheability Regression ──────────────────────────────────────────────
-# Sibling to cache_collapse: detects URLs that flipped from cacheable to mostly
-# PASS (origin started sending Set-Cookie / Cache-Control: private, a varying
-# query param, or a VCL `pass`). pass_rate = PASS / ALL requests. Fires only on
-# a clear cacheable→uncacheable flip with real volume. Keep in lockstep with the
-# coalesced cacheability_regression branch in repository.py.
 
 CACHEABILITY_REGRESSION = f"""
         WITH base AS (
@@ -700,18 +637,6 @@ SHIELD_PATH_DEGRADATION = f"""
 
 
 # ── 30. Scripted Traffic Patterns (repeated_patterns) ─────────────────────────
-# Beaconing / periodic-cadence detection (RITA/Zeek-style) applied to web logs:
-# flag client IPs whose inter-arrival gaps are highly regular (scrapers, pollers,
-# cron jobs). See local-docs/repeated_pattern_detection_FINAL_plan.md.
-#
-# Curated, ``?``-FREE crawler/monitor allowlist (mirrors NEW_PROBE_REGEX above).
-# ``re.escape`` of plain tokens contains no ``?``, so it can't corrupt the
-# repository's ``sql.count("?")`` placeholder-counting heuristic — verified bots
-# (Googlebot/UptimeRobot/Pingdom) are perfectly periodic and would dominate the
-# card, so they're dropped BEFORE scoring. Do NOT inject
-# ``bot_sources.get_bot_regex_pattern()`` here: it begins ``(?i)`` and the ``?``
-# would mis-count the single window-start bind. Case-insensitivity comes from the
-# ``regexp_matches`` 'i' arg, not an inline ``(?i)`` flag.
 _BOT_UA_TOKENS = [
     "googlebot",
     "bingbot",
@@ -739,13 +664,6 @@ _BOT_UA_TOKENS = [
 REPEATED_BOT_UA_REGEX = "|".join(re.escape(t) for t in _BOT_UA_TOKENS)
 
 
-# Timestamps are 1-SECOND granularity (verified: 0/1105 rows carry a sub-second
-# component), so we work in integer seconds. The CV is Sheppard-corrected
-# (rounding to whole seconds adds ≈ 1/12 s² of variance) and gated only above a
-# 5 s mean where it's trustworthy; below 5 s a modal-dominance fast path carries
-# the verdict. ``MODE()`` MUST be aliased (bare ``mode`` is reserved). med/q1/q3
-# are computed for the deferred Bowley confirmation term (plan §2) but not yet
-# surfaced. Exactly ONE ``?`` (the window start) — keep {bot_ua_regex} ?-free.
 def _build_repeated_patterns_sql(
     *,
     key_col: str,
@@ -826,11 +744,6 @@ REPEATED_PATTERNS = _build_repeated_patterns_sql(
 )
 
 # ── 30b. Scripted Traffic Patterns by TLS Fingerprint (repeated_patterns_fp) ──
-# Complementary variant of REPEATED_PATTERNS keyed on the TLS fingerprint
-# (JA3/JA4) instead of client IP. Catches IP-rotating scripts that keep the
-# same TLS stack. Diversity signal flips: distinct IPs per fingerprint (the IP
-# variant counts distinct UAs per IP). Same statistical algorithm, gates, and
-# scoring. Exactly ONE ``?`` (the window start).
 REPEATED_PATTERNS_FP = _build_repeated_patterns_sql(
     key_col="entity",
     key_select=coalesce('"{fp_col}"', "''"),
@@ -842,17 +755,6 @@ REPEATED_PATTERNS_FP = _build_repeated_patterns_sql(
 
 
 # ── 31. Low-and-Slow Scans (low_and_slow) ─────────────────────────────────────
-# Phase-3 promotion of the legacy ``low_and_slow`` stub. Flags a client IP that
-# touches MANY distinct sensitive/vuln paths (reuses the NEW_PROBE_REGEX
-# allow-list) at a DELIBERATELY LOW request rate spread over a long span — the
-# classic rate-limit-evasion signature that volumetric WAF rules miss.
-#
-# Scans the WHOLE retained temp (baseline_start..now), NOT just the window: the
-# defining trait is sustained low-volume probing over hours/days, so there is no
-# window/baseline split and therefore **zero ``?`` binds** (the caller's
-# ``sql.count("?")`` heuristic must see none). The NEW_PROBE_REGEX is f-string-
-# baked at import (a fixed literal, ``?``-free via re.escape) exactly like
-# NEW_PROBE_URLS; ``{{table_name}}`` is escaped for runtime hydration.
 LOW_AND_SLOW = f"""
         WITH base AS (
             SELECT "ip" AS ip, "url" AS url, epoch("timestamp")::BIGINT AS sec
@@ -877,14 +779,6 @@ LOW_AND_SLOW = f"""
     """
 
 # ── 32. Credential Enumeration / Brute Force (credential_enumeration) ──────────
-# 401/403 spike per client IP on authentication paths (login / signin / auth /
-# oauth / token / sso / password reset, etc). Window-vs-baseline: fires when an
-# IP's window denied-count is high, dominates its own auth traffic (mostly
-# failures = guessing, not a logged-in user), AND exceeds its baseline-normalised
-# rate. AUTH_PATHS_REGEX is f-string-baked (``?``-free via re.escape); the two
-# ``?`` binds are BOTH the window start (is_b/is_w split), matching every other
-# baseline/window template. {baseline_hours}/{window_hours} normalise the
-# longer baseline span, mirroring BOTNET_GROUPING / CIPHER_SPREAD.
 _AUTH_PATHS = [
     "login",
     "signin",
@@ -909,9 +803,6 @@ _AUTH_PATHS = [
     "2fa",
     "verify",
 ]
-# Plain alternation — no inline ``(?i)`` flag (the literal ``?`` would corrupt
-# the repository's ``sql.count("?")`` window-bind counting heuristic). Case-
-# insensitivity comes from the ``regexp_matches`` 'i' arg below.
 AUTH_PATHS_REGEX = "|".join(re.escape(p) for p in _AUTH_PATHS)
 
 CREDENTIAL_ENUMERATION = f"""
@@ -939,14 +830,6 @@ CREDENTIAL_ENUMERATION = f"""
     """
 
 # ── 33. Network Path (ASN) Health (network_asn_health) ─────────────────────────
-# Phase-3 promotion of the legacy ``network_asn_health`` stub. Per-ASN TCP
-# connection-quality degradation: window-vs-baseline packet loss (ploss), jitter
-# (rtt_var P95, µs) and retransmissions (retrans avg). Fires when an ASN's window
-# packet loss OR jitter OR retransmit rate is materially worse than its own
-# baseline, with enough samples on both sides to be trustworthy. Two ``?`` binds
-# = the window start (is_b/is_w split). rtt_var is in microseconds; the 20 000 µs
-# floor is 20 ms of added jitter. row[0] is the ASN so the repository's asn_names
-# hydration (triggered by "asn" in the insight id) resolves ISP names.
 NETWORK_ASN_HEALTH = f"""
         WITH base AS (
             SELECT "asn" AS asn, ploss, rtt_var, retrans,
@@ -990,14 +873,6 @@ NETWORK_ASN_HEALTH = f"""
 
 
 # ── 34. 404 Content-Discovery Scanning (content_discovery) ─────────────────────
-# Per client IP: window-vs-baseline 404 enumeration. Fires when an IP's window
-# 404-count is high, its 404s dominate its own traffic (mostly-404 = directory /
-# endpoint brute-forcing, not one broken link), AND it hit MANY distinct 404 URLs
-# (scanning, not a single stale asset). Two ``?`` binds = the window start
-# (is_b/is_w split), matching every other baseline/window template. Row[0] is the
-# client IP so the repository masks it for analysts (mask_ips → mask_ip). The
-# distinct-404-URL gate is the discriminator vs. a legit broken deploy, so no
-# baseline gate is needed; b_404 is carried for display context only.
 CONTENT_DISCOVERY = """
         WITH base AS (
             SELECT "ip" AS ip, "url" AS url, status,
@@ -1024,10 +899,6 @@ CONTENT_DISCOVERY = """
 
 
 # ── 35. Referer Monoculture (referer_monoculture) ─────────────────────────────
-# Track B: a single (usually new/rare) Referer driving an outsized share of
-# window traffic vs baseline — scraper/embed/hotlink campaigns or a spoofed
-# referer flood. Mirrors UA_MONOCULTURE with a 20% share floor. Row:
-# [referer, w_cnt, b_cnt, b_total, w_total]. 4 ``?`` (all window start).
 REFERER_MONOCULTURE = _build_monoculture_sql(
     "referer",
     "0.20",
@@ -1035,10 +906,6 @@ REFERER_MONOCULTURE = _build_monoculture_sql(
 )
 
 # ── 36. HTTP Method Drift (method_drift) ──────────────────────────────────────
-# Track B: a write/verb method (anything but GET/HEAD/OPTIONS) surging to an
-# outsized share of window traffic vs a read-dominated baseline — API abuse,
-# form/credential POST floods, unexpected PUT/DELETE. Row:
-# [method, w_cnt, b_cnt, w_total, b_total]. 4 ``?`` (all window start).
 METHOD_DRIFT = f"""
         WITH grp AS (
             SELECT "method",
@@ -1062,16 +929,9 @@ METHOD_DRIFT = f"""
     """
 
 # ── 37. New ASN Traffic (new_asn_traffic) ─────────────────────────────────────
-# Track B: an ASN (ISP/datacenter) with zero baseline presence now sending
-# meaningful traffic — mirrors new_country_traffic / new_city_traffic. ASN-keyed
-# → network section; row[0] is the ASN so asn_names hydration resolves the ISP
-# label. Row: [asn, w_cnt, b_cnt]. 2 ``?`` (all window start).
 NEW_ASN_TRAFFIC = _build_new_dim_traffic_sql("asn", 20)
 
 # ── 37b. ASN Hosting Shift (asn_hosting_shift) ──────────────────────────────────
-# Track B: per-ASN ratio of p_type='hosting' traffic shifting from consumer to
-# datacenter — bot pools / scrapers spinning up on hosting infra behind that ASN.
-# Row: [asn, w_hosting, w_total, b_hosting, b_total]. 2 ``?`` (window start).
 ASN_HOSTING_SHIFT = """
         SELECT "asn",
             COUNT(*) FILTER (WHERE timestamp >= CAST(? AS TIMESTAMPTZ) AND "p_type" = 'hosting') AS w_hosting,
@@ -1089,10 +949,6 @@ ASN_HOSTING_SHIFT = """
     """
 
 # ── 38. Metro Delivery-Rate Degradation (metro_delivery_degradation) ───────────
-# Track B: per-US-metro (DMA) median kernel TCP delivery rate (bytes/sec) that
-# halved (or worse) window-vs-baseline — a regional last-mile / peering
-# degradation. "metro" in the id triggers the repository's dma_map hydration for
-# labels. Row: [metro, w_med, b_med, w_total, b_total]. 2 ``?`` (window start).
 METRO_DELIVERY_DEGRADATION = """
         WITH base AS (
             SELECT "metro" AS metro, delivery_rate,
@@ -1112,10 +968,6 @@ METRO_DELIVERY_DEGRADATION = """
     """
 
 # ── 39. Connection-Type Mix Shift (connection_type_mix) ───────────────────────
-# Track B: a client connection (c_type / c_speed) combo surging to an outsized,
-# spiking share of typed traffic — e.g. a cellular/datacenter mix swing that
-# signals a bot pool or a routing change. Row:
-# [c_type, c_speed, w_cnt, b_cnt, w_total, b_total]. 2 ``?`` (window start).
 CONNECTION_TYPE_MIX = """
         WITH base AS (
             SELECT "c_type" AS c_type, "c_speed" AS c_speed,
@@ -1147,18 +999,11 @@ CONNECTION_TYPE_MIX = """
     """
 
 # ── 40. PoP Latency Regression (pop_latency_regression) ───────────────────────
-# Track B: per-Fastly-PoP P95 edge latency (elapsed µs → ms) regression vs
-# baseline — finer than region/city, isolates a single datacenter's serving
-# slowdown. Row: [pop, w_p95, b_p95, w_total, b_total]. 2 ``?`` (window start).
 POP_LATENCY_REGRESSION = _build_p95_latency_regression_sql(
     "pop", 20, 50, "1.5", 100, '"pop" IS NOT NULL AND "pop" != \'\''
 )
 
 # ── 41. HTTP/3 → TCP Fallback Spike (http3_fallback) ──────────────────────────
-# Track B: a service-wide drop in QUIC (HTTP/3) share vs a QUIC-healthy baseline
-# — clients failing to sustain QUIC and falling back to TCP (middlebox/UDP
-# throttling, a client-population shift). Single aggregate row when it fires.
-# Row: [w_quic, w_total, b_quic, b_total]. 2 ``?`` (window start).
 HTTP3_FALLBACK = """
         WITH base AS (
             SELECT lower("transport") AS transport,
@@ -1180,10 +1025,6 @@ HTTP3_FALLBACK = """
     """
 
 # ── 42. Cache HIT-Ratio Cliff (cache_hit_cliff) ───────────────────────────────
-# Track B: a service-wide edge cache HIT ratio (HIT/(HIT+MISS), PASS excluded —
-# the conventional Fastly definition, mirroring cache_collapse) that fell off a
-# cliff window-vs-baseline. One headline edge card. Single aggregate row when it
-# fires. Row: [w_hits, w_cacheable, b_hits, b_cacheable]. 2 ``?`` (window start).
 CACHE_HIT_CLIFF = """
         WITH base AS (
             SELECT cache,
@@ -1207,20 +1048,7 @@ CACHE_HIT_CLIFF = """
     """
 
 
-# ════════════════════════════════════════════════════════════════════════════
-# Track C — field-gated insights (require the Phase-4 edge log-field additions:
-# resp_header_content_encoding, cookie_session, oconnect_ms). These stay empty
-# until a service re-provisions to emit the new field AND enough history accrues.
-# ════════════════════════════════════════════════════════════════════════════
-
 # ── 43. Payload Compression Regression (payload_compression_regression) ────────
-# Compressible responses (text/js/css/json/svg/xml by URL extension, 200, big
-# enough to matter) that flipped from compressed (gzip/br/zstd) to served
-# UNCOMPRESSED window-vs-baseline — a broken Accept-Encoding path, a VCL
-# `unset beresp.http.Content-Encoding`, or an origin regression that inflates
-# egress + TTFB. Mirrors CACHEABILITY_REGRESSION's rate-flip shape. Needs the
-# `resp_header_content_encoding` field. COMPRESSIBLE_REGEX is f-string-baked
-# (``?``-free via re.escape). 2 ``?`` (window start).
 _COMPRESSIBLE_EXTS = [".js", ".css", ".html", ".json", ".svg", ".xml", ".txt"]
 COMPRESSIBLE_REGEX = "|".join(re.escape(e) for e in _COMPRESSIBLE_EXTS)
 
@@ -1254,12 +1082,6 @@ PAYLOAD_COMPRESSION_REGRESSION = f"""
     """
 
 # ── 44. Session-ID Harvesting / Rotation (session_harvesting) ──────────────────
-# One client IP presenting MANY distinct (hashed) session cookies in the window
-# — session-token brute forcing, credential stuffing that mints a fresh session
-# per attempt, or cookie replay. Keyed on ip; the cookie_session hash is only
-# ever COUNTED (COUNT DISTINCT), never surfaced, so the insight never emits a
-# session id. The IP is masked for analysts in the processor. Needs the
-# `cookie_session` field. 2 ``?`` (window start).
 SESSION_HARVESTING = f"""
         WITH base AS (
             SELECT "ip" AS ip, "cookie_session" AS cs,
@@ -1287,12 +1109,6 @@ SESSION_HARVESTING = f"""
     """
 
 # ── 45. Origin Connect vs Read Timeout Split (timeout_split) ───────────────────
-# Splits origin slowness into its two phases: CONNECT (TCP+TLS handshake,
-# oconnect_ms) vs READ (time from connect to first byte = ottfb µs → ms minus
-# connect). Fires when either phase's P95 regressed materially window-vs-baseline
-# — slow-connect points at origin TCP/TLS/LB saturation (503-ish), slow-read at
-# origin app/DB processing (504-ish). Single aggregate row when it fires. Needs
-# the `oconnect_ms` field. 2 ``?`` (window start).
 TIMEOUT_SPLIT = """
         WITH base AS (
             SELECT
@@ -1321,16 +1137,7 @@ TIMEOUT_SPLIT = """
     """
 
 
-# ════════════════════════════════════════════════════════════════════════════
-# Templates from ``repository.py`` — multi-insight coalesced pre-aggregations
-# ════════════════════════════════════════════════════════════════════════════
-
 # ── Coalesced city aggregates ────────────────────────────────────────────────
-# ONE pass over the temp table that computes the superset of counts / rates /
-# p95s for the 4 city-keyed insights (city_surges, city_error_spikes,
-# city_latency_regressions, new_city_traffic). The Python caller demuxes the
-# rows into per-insight schemas (see ``_coalesced_city_aggregates`` in
-# repository.py for the row-schema docstring).
 
 COALESCED_CITY_AGGREGATES = """
     WITH base AS (

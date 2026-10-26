@@ -2,9 +2,16 @@
 
 import React from "react";
 import type { useMutation, useQueryClient } from "@tanstack/react-query";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogContent } from "@/components/ui/dialog";
+import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -18,22 +25,21 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { CollapsibleGroup, CmcdConfigSection } from "@/components/LogSettingsModal/FieldGroups";
 import { SSEProgressView } from "@/components/SSEModal";
 import {
-  Activity, AlertCircle, Calendar, CheckCircle2, ChevronRight, Cloud,
+  Activity, AlertCircle, Calendar, CheckCircle2, ChevronLeft, ChevronRight, Cloud,
   Copy, Database, Eye, FileJson, FileText, Globe, Info, Layers,
-  Loader2, Lock, Search, Settings, Shield, Sparkles, XCircle, Zap,
+  Loader2, Lock, Plus, RotateCcw, Search, Settings, Shield, Sparkles, XCircle, Zap,
 } from "lucide-react";
-import { cn, copyToClipboard, formatDateTime, panelDialogContent, REGION_LABELS, SHIELD_LABELS } from "@/lib/utils";
-import { formatBytes } from "@/lib/format";
+import { cn, copyToClipboard, formatDateTime, panelDialogContent, panelDialogFooter, REGION_LABELS, SHIELD_LABELS } from "@/lib/utils";
+import { ELAPSED_RELATIVE_AGO, formatBytes, formatElapsed } from "@/lib/format";
 import { evaluateLogFieldPresetSummary, resolveEnabledGroupsWithDeps } from "@/lib/query-keys";
 import type { Service } from "@/stores/filterStore";
 import type { SSELine, SSEStatus } from "@/hooks/useSSE";
 import type { Schema } from "@/types/api";
 import { useWizardState } from "./useWizardState";
-import { WizardHeader, WizardFooter, ResumeBanner } from "./WizardFooter";
 import { StorageStep, AnalyzeStep } from "./steps/StorageStep";
 import { JoinStep } from "./steps/JoinStep";
 
-// ── Types & Constants (folded from types.ts) ──────────────────────────────
+// ── Types & Constants ─────────────────────────────────────────────────────
 
 export type ProvisionService = Schema<"ProvisionService">;
 export type LakeInfo = Schema<"ProvisionLakeInfoResponse">;
@@ -161,29 +167,27 @@ export interface WizardDraft {
   createdAt: string;
 }
 
+const JOIN_FLOW_STEPS: { id: Step; label: string }[] = [
+  { id: "join", label: "Connect" },
+  { id: "analyze", label: "Analyze" },
+  { id: "settings", label: "Settings" },
+  { id: "confirm", label: "Confirm" },
+];
+
 export function getStepsForMode(
   mode: WizardMode,
   config?: { logging_enabled?: boolean },
   step?: Step
 ): { id: Step; label: string }[] {
   if (mode === "join") {
-    return [
-      { id: "mode", label: "Role" },
-      { id: "join", label: "Connect" },
-      { id: "analyze", label: "Analyze" },
-      { id: "settings", label: "Settings" },
-      { id: "confirm", label: "Confirm" },
-    ];
+    return [{ id: "mode", label: "Role" }, ...JOIN_FLOW_STEPS];
   }
-  if (mode === "ingest" && step && (step === "join" || step === "analyze" || step === "settings" || step === "confirm")) {
+  if (mode === "ingest" && step && JOIN_FLOW_STEPS.some((s) => s.id === step)) {
     return [
       { id: "mode", label: "Role" },
       { id: "token", label: "Auth" },
       { id: "service", label: "Service" },
-      { id: "join", label: "Connect" },
-      { id: "analyze", label: "Analyze" },
-      { id: "settings", label: "Settings" },
-      { id: "confirm", label: "Confirm" },
+      ...JOIN_FLOW_STEPS,
     ];
   }
   const steps: { id: Step; label: string }[] = [
@@ -296,6 +300,256 @@ export interface WizardState {
   discardDraft: () => void;
 }
 
+// ── ResumeBanner, WizardHeader & WizardFooter (folded from WizardFooter.tsx) ──
+
+function relativeTime(iso: string): string {
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return "earlier";
+  return formatElapsed(Math.floor((Date.now() - then) / 1000), ELAPSED_RELATIVE_AGO);
+}
+
+export function ResumeBanner({
+  draft,
+  onResume,
+  onStartFresh,
+}: {
+  draft: WizardDraft;
+  onResume: () => void;
+  onStartFresh: () => void;
+}) {
+  const label = getStepsForMode(draft.mode, draft.config).find((s) => s.id === draft.currentStep)?.label ?? draft.currentStep;
+  const when = relativeTime(draft.updatedAt);
+  return (
+    <div className="px-6 pt-4">
+      <Alert>
+        <RotateCcw className="h-4 w-4" />
+        <AlertTitle>Resume previous wizard?</AlertTitle>
+        <AlertDescription>
+          You left off on the <span className="font-medium">{label}</span> step ({when}). Fastly API token and storage credentials were cleared for safety and will need to be re-entered.
+        </AlertDescription>
+        <div className="mt-3 flex flex-wrap gap-2 group-has-[>svg]/alert:col-start-2">
+          <Button size="sm" onClick={onResume} data-testid="resume-banner-resume">
+            Resume from {label}
+          </Button>
+          <Button size="sm" variant="ghost" onClick={onStartFresh} data-testid="resume-banner-start-fresh">
+            Start fresh
+          </Button>
+        </div>
+      </Alert>
+    </div>
+  );
+}
+
+export function WizardHeader({ s }: { s: WizardState }) {
+  const { step, STEPS } = s;
+  const stepIndex = STEPS.findIndex((x) => x.id === step);
+
+  return (
+    <DialogHeader className="px-6 pt-6 pb-7 border-b">
+      <DialogTitle className="flex items-center gap-2 text-xl font-bold">
+        <Plus className="h-5 w-5 text-primary" />
+        Provision New Service
+      </DialogTitle>
+
+      <div className="flex items-center justify-center w-full mt-6 px-1 sm:px-4 max-w-2xl mx-auto">
+        {STEPS.map((s2, i) => {
+          const isActive = step === s2.id;
+          const isCompleted = stepIndex > i;
+          return (
+            <React.Fragment key={s2.id}>
+              <div className="flex flex-col items-center shrink-0 relative">
+                <div
+                  className={cn(
+                    "w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold transition-all duration-300 border-2",
+                    isActive
+                      ? "bg-primary border-primary text-primary-foreground shadow-md shadow-primary/20 scale-110"
+                      : isCompleted
+                        ? "bg-green-500 border-green-500 text-white"
+                        : "bg-background border-muted text-muted-foreground",
+                  )}
+                  title={s2.label}
+                >
+                  {isCompleted ? <CheckCircle2 className="w-4 h-4" /> : i + 1}
+                </div>
+                <span
+                  className={cn(
+                    "text-[10px] font-semibold mt-1.5 absolute top-7 whitespace-nowrap transition-all duration-300",
+                    isActive ? "text-foreground font-bold opacity-100 scale-100" : "text-muted-foreground opacity-60 hidden md:block",
+                  )}
+                >
+                  {s2.label}
+                </span>
+              </div>
+              {i < STEPS.length - 1 && (
+                <div className="flex-1 min-w-[8px] max-w-[48px] h-[2px] mx-1 sm:mx-2 bg-muted relative">
+                  <div className={cn("absolute inset-0 bg-primary transition-all duration-500 ease-in-out", stepIndex > i ? "w-full" : "w-0")} />
+                </div>
+              )}
+            </React.Fragment>
+          );
+        })}
+      </div>
+
+      <div className="text-center mt-7 text-xs text-muted-foreground font-medium">
+        Step <span className="text-foreground font-semibold">{stepIndex + 1}</span> of {STEPS.length}
+      </div>
+    </DialogHeader>
+  );
+}
+
+export function WizardFooter({ s }: { s: WizardState }) {
+  const {
+    step, setStep, mode, isDeploying, status, isDone, handleModalClose, isAnalyzing,
+    token, isLoadingServices, handleTokenSubmit, selectedService, validateMutation,
+    domainStatus, config, fetchTerraformPreview, handleDeploy, handleAdminIngest,
+    fosStatus, handleAnalyzeLake, importMode, importRange, handleJoin, joinPhase, stop,
+  } = s;
+
+  const handleBack = () => {
+    const baseSteps = getStepsForMode(mode, config, step).map((x) => x.id);
+    const order = baseSteps.includes("execute") ? [...baseSteps, "terraform" as Step] : baseSteps;
+    const idx = order.indexOf(step);
+    if (idx > 0) setStep(order[idx - 1]);
+  };
+
+  return (
+    <DialogFooter className={panelDialogFooter}>
+      {!isDeploying && step !== "mode" && step !== "terraform" && (
+        <Button variant="ghost" className="mr-auto h-9 text-xs" disabled={isAnalyzing} onClick={handleBack}>
+          <ChevronLeft className="h-4 w-4 mr-1" /> Back
+        </Button>
+      )}
+
+      {status !== "streaming" && (
+        <Button variant="outline" className="h-9 text-xs" onClick={() => handleModalClose(false)}>
+          {status === "done" || isDone ? "Close & Reload" : "Cancel"}
+        </Button>
+      )}
+
+      {!isDeploying && (
+        <>
+          {step === "mode" && <Button disabled className="h-9 text-xs">Select a Role</Button>}
+          {step === "token" && (
+            <Button disabled={!token || isLoadingServices} onClick={handleTokenSubmit} className="h-9 text-xs">
+              {isLoadingServices && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+              Fetch Services
+            </Button>
+          )}
+          {step === "service" && (
+            <Button
+              disabled={!selectedService || validateMutation.isPending}
+              onClick={() => selectedService && validateMutation.mutate(selectedService.id)}
+              className="h-9 text-xs"
+            >
+              {validateMutation.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+              Continue
+            </Button>
+          )}
+          {step === "features" && (
+            <Button onClick={() => setStep("storage")} disabled={!config.logging_enabled && !config.rum_enabled} className="h-9 text-xs">
+              Continue
+            </Button>
+          )}
+          {step === "storage" && (
+            <Button
+              onClick={() => setStep(config.logging_enabled ? "ngwaf" : "execute")}
+              disabled={domainStatus === "taken" || domainStatus === "checking"}
+              className="h-9 text-xs"
+            >
+              Continue
+            </Button>
+          )}
+          {step === "ngwaf" && (
+            <Button onClick={() => setStep("fields")} className="h-9 text-xs">
+              {config.ngwaf_workspace_id ? "Continue" : "Skip"}
+            </Button>
+          )}
+          {step === "fields" && (
+            <Button onClick={() => setStep("execute")} className="h-9 text-xs">
+              Review Settings
+            </Button>
+          )}
+          {step === "execute" && (
+            <div className="flex gap-2">
+              <Button
+                variant="secondary"
+                className="h-9 font-bold"
+                onClick={() => {
+                  fetchTerraformPreview();
+                  setStep("terraform");
+                }}
+              >
+                View & Export Terraform
+              </Button>
+              {mode !== "ingest" ? (
+                <Button
+                  size="lg"
+                  disabled={domainStatus === "taken" || !config.fos_bucket_name}
+                  className="h-9 px-6 font-bold"
+                  onClick={handleDeploy}
+                >
+                  Deploy to Fastly
+                </Button>
+              ) : (
+                <Button
+                  size="lg"
+                  disabled={!config.fos_bucket_name}
+                  className="h-9 px-6 font-bold"
+                  onClick={handleAdminIngest}
+                >
+                  Complete Setup
+                </Button>
+              )}
+            </div>
+          )}
+          {step === "terraform" && (
+            <Button size="lg" className="h-9 px-6 font-bold" onClick={() => setStep("execute")}>
+              Back to Review
+            </Button>
+          )}
+          {step === "join" && joinPhase === "form" && (
+            <Button
+              size="lg"
+              disabled={!config.endpoint_name || !config.cdn_service_name || fosStatus !== "success" || isAnalyzing}
+              className="h-9 px-6 font-bold"
+              onClick={handleAnalyzeLake}
+            >
+              {isAnalyzing && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+              Analyze Data Lake
+            </Button>
+          )}
+          {step === "analyze" && (
+            <Button className="h-9 text-xs" onClick={() => setStep("settings")}>
+              Continue
+            </Button>
+          )}
+          {step === "settings" && (
+            <Button className="h-9 text-xs" onClick={() => setStep("confirm")}>
+              Review Summary
+            </Button>
+          )}
+          {step === "confirm" && (
+            <Button
+              size="lg"
+              className="h-9 px-6 font-bold"
+              onClick={handleJoin}
+              disabled={!s.analystPathASupported || (importMode === "range" && (!importRange.start || !importRange.end))}
+            >
+              Confirm & Connect
+            </Button>
+          )}
+        </>
+      )}
+
+      {status === "streaming" && (
+        <Button variant="outline" onClick={stop} className="h-9 text-xs">
+          Stop
+        </Button>
+      )}
+    </DialogFooter>
+  );
+}
+
 // ── Step Components ───────────────────────────────────────────────────────
 
 function errorCode(e: unknown): string | undefined {
@@ -310,6 +564,20 @@ function StatusCheckIcon({ enabled }: { enabled: boolean }) {
   );
 }
 
+function FeatureSummaryBadge({ icon: Icon, title, subtitle }: { icon: React.ComponentType<{ className?: string }>; title: string; subtitle: string }) {
+  return (
+    <div className="flex-1 flex items-center gap-3 border rounded-xl p-3 bg-primary/[0.03] border-primary/10 shadow-sm">
+      <div className="h-8 w-8 rounded-lg bg-primary/10 flex items-center justify-center text-primary shrink-0">
+        <Icon className="h-4 w-4" />
+      </div>
+      <div className="flex flex-col min-w-0">
+        <span className="text-xs font-semibold text-foreground">{title}</span>
+        <span className="text-[10px] text-muted-foreground leading-snug">{subtitle}</span>
+      </div>
+    </div>
+  );
+}
+
 export function ExecuteStep({ s }: { s: WizardState }) {
   const { config, catalog, selectedService } = s;
   const enabledGroups = React.useMemo(
@@ -320,6 +588,25 @@ export function ExecuteStep({ s }: { s: WizardState }) {
     () => evaluateLogFieldPresetSummary(config.log_fields, catalog),
     [config.log_fields, catalog],
   );
+
+  const automationChecks = [
+    {
+      label: `Sync every ${config.log_period >= 120 ? Math.floor(config.log_period / 120) + "m" : Math.floor(config.log_period / 2) + "s"}`,
+      enabled: config.enable_cron_sync,
+    },
+    {
+      label: `Commit to Iceberg every ${config.commit_interval_mins}m`,
+      enabled: config.enable_cron_sync,
+    },
+    {
+      label: "Auto-delete Raw Logs",
+      enabled: config.delete_after && config.enable_cron_sync,
+    },
+    {
+      label: "Daily Iceberg Optimization",
+      enabled: config.enable_cron_compact && config.enable_cron_sync,
+    },
+  ];
 
   return (
     <div className="flex-1 overflow-y-auto min-h-0 flex flex-col p-8 items-center text-left">
@@ -355,26 +642,18 @@ export function ExecuteStep({ s }: { s: WizardState }) {
                 <ReviewHeader icon={Sparkles}>Enabled Features</ReviewHeader>
                 <div className="flex flex-col sm:flex-row gap-3 pt-1">
                   {config.logging_enabled !== false && (
-                    <div className="flex-1 flex items-center gap-3 border rounded-xl p-3 bg-primary/[0.03] border-primary/10 shadow-sm">
-                      <div className="h-8 w-8 rounded-lg bg-primary/10 flex items-center justify-center text-primary shrink-0">
-                        <Database className="h-4 w-4" />
-                      </div>
-                      <div className="flex flex-col min-w-0">
-                        <span className="text-xs font-semibold text-foreground">Request Logging</span>
-                        <span className="text-[10px] text-muted-foreground leading-snug">In-depth HTTP logs, edge metrics, and WAF protection.</span>
-                      </div>
-                    </div>
+                    <FeatureSummaryBadge
+                      icon={Database}
+                      title="Request Logging"
+                      subtitle="In-depth HTTP logs, edge metrics, and WAF protection."
+                    />
                   )}
                   {config.rum_enabled && (
-                    <div className="flex-1 flex items-center gap-3 border rounded-xl p-3 bg-primary/[0.03] border-primary/10 shadow-sm">
-                      <div className="h-8 w-8 rounded-lg bg-primary/10 flex items-center justify-center text-primary shrink-0">
-                        <Globe className="h-4 w-4" />
-                      </div>
-                      <div className="flex flex-col min-w-0">
-                        <span className="text-xs font-semibold text-foreground">Real User Monitoring (RUM)</span>
-                        <span className="text-[10px] text-muted-foreground leading-snug">Client-side web vitals, speed insights, and session analytics.</span>
-                      </div>
-                    </div>
+                    <FeatureSummaryBadge
+                      icon={Globe}
+                      title="Real User Monitoring (RUM)"
+                      subtitle="Client-side web vitals, speed insights, and session analytics."
+                    />
                   )}
                 </div>
               </ReviewCard>
@@ -415,30 +694,15 @@ export function ExecuteStep({ s }: { s: WizardState }) {
               <ReviewCard>
                 <ReviewHeader icon={Settings}>Automation</ReviewHeader>
                 <ReviewContent className="gap-2.5">
-                  <ReviewItem
-                    variant="between"
-                    label={`Sync every ${config.log_period >= 120 ? Math.floor(config.log_period / 120) + "m" : Math.floor(config.log_period / 2) + "s"}`}
-                    className={cn(!config.enable_cron_sync && "text-muted-foreground")}
-                    value={<StatusCheckIcon enabled={config.enable_cron_sync} />}
-                  />
-                  <ReviewItem
-                    variant="between"
-                    label={`Commit to Iceberg every ${config.commit_interval_mins}m`}
-                    className={cn(!config.enable_cron_sync && "text-muted-foreground")}
-                    value={<StatusCheckIcon enabled={config.enable_cron_sync} />}
-                  />
-                  <ReviewItem
-                    variant="between"
-                    label="Auto-delete Raw Logs"
-                    className={cn((!config.delete_after || !config.enable_cron_sync) && "text-muted-foreground")}
-                    value={<StatusCheckIcon enabled={config.delete_after && config.enable_cron_sync} />}
-                  />
-                  <ReviewItem
-                    variant="between"
-                    label="Daily Iceberg Optimization"
-                    className={cn((!config.enable_cron_compact || !config.enable_cron_sync) && "text-muted-foreground")}
-                    value={<StatusCheckIcon enabled={config.enable_cron_compact && config.enable_cron_sync} />}
-                  />
+                  {automationChecks.map(({ label, enabled }) => (
+                    <ReviewItem
+                      key={label}
+                      variant="between"
+                      label={label}
+                      className={cn(!enabled && "text-muted-foreground")}
+                      value={<StatusCheckIcon enabled={enabled} />}
+                    />
+                  ))}
                   {config.logging_enabled !== false && (
                     <ReviewItem
                       variant="between"
@@ -467,40 +731,26 @@ export function ExecuteStep({ s }: { s: WizardState }) {
                     </span>
                   </div>
                   <div className="flex flex-wrap gap-1.5 pt-1">
-                    {presetSummary.bestPresetName ? (
-                      <>
-                        <div className="px-2.5 py-0.5 rounded-full text-[10px] font-semibold bg-primary text-primary-foreground">
-                          {presetSummary.bestPresetName} Preset
-                        </div>
-                        {presetSummary.disabledCount > 0 && (
-                          <div className="px-2.5 py-0.5 rounded-full text-[10px] font-medium bg-muted text-muted-foreground border border-transparent">
-                            +{presetSummary.disabledCount} disabled
+                    <div className="px-2.5 py-0.5 rounded-full text-[10px] font-semibold bg-primary text-primary-foreground">
+                      {presetSummary.bestPresetName ? `${presetSummary.bestPresetName} Preset` : "Custom Configuration"}
+                    </div>
+                    {!presetSummary.bestPresetName &&
+                      catalog?.groups?.map((g) => {
+                        const isEnabled = g.locked || (g.id != null && presetSummary.enabledGroupsSet.has(g.id));
+                        if (!isEnabled) return null;
+                        return (
+                          <div
+                            key={g.id || "core"}
+                            className="px-2.5 py-0.5 rounded-full text-[10px] font-medium bg-primary/10 text-primary border border-primary/20"
+                          >
+                            {g.label}
                           </div>
-                        )}
-                      </>
-                    ) : (
-                      <>
-                        <div className="px-2.5 py-0.5 rounded-full text-[10px] font-semibold bg-primary text-primary-foreground">
-                          Custom Configuration
-                        </div>
-                        {catalog?.groups?.map((g) => {
-                          const isEnabled = g.locked || (g.id != null && presetSummary.enabledGroupsSet.has(g.id));
-                          if (!isEnabled) return null;
-                          return (
-                            <div
-                              key={g.id || "core"}
-                              className="px-2.5 py-0.5 rounded-full text-[10px] font-medium bg-primary/10 text-primary border border-primary/20"
-                            >
-                              {g.label}
-                            </div>
-                          );
-                        })}
-                        {presetSummary.disabledCount > 0 && (
-                          <div className="px-2.5 py-0.5 rounded-full text-[10px] font-medium bg-muted text-muted-foreground border border-transparent">
-                            +{presetSummary.disabledCount} disabled
-                          </div>
-                        )}
-                      </>
+                        );
+                      })}
+                    {presetSummary.disabledCount > 0 && (
+                      <div className="px-2.5 py-0.5 rounded-full text-[10px] font-medium bg-muted text-muted-foreground border border-transparent">
+                        +{presetSummary.disabledCount} disabled
+                      </div>
                     )}
                   </div>
                 </ReviewCard>
@@ -801,12 +1051,6 @@ export function NgwafStep({ s }: { s: WizardState }) {
               <Info className="h-4 w-4 shrink-0" />
               No NGWAF workspaces found in this account.
             </div>
-            {s.ngwafFetchError && (
-              <div className="text-xs text-amber-600 bg-amber-50 dark:bg-amber-950/20 p-3 rounded-lg border border-amber-200 dark:border-amber-900/50 flex gap-2">
-                <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
-                <p className="leading-relaxed font-medium">{s.ngwafFetchError}</p>
-              </div>
-            )}
             {s.ngwafDebugRaw && (
               <details className="text-[10px]">
                 <summary className="cursor-pointer text-muted-foreground uppercase tracking-wider font-bold">

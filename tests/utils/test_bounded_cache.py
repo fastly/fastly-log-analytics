@@ -627,3 +627,301 @@ def test_concurrent_distinct_keys_stay_within_cap():
     for t in threads:
         t.join()
     assert len(lim._events) <= 100
+
+
+# ── Merged from tests/utils/test_date_utils.py ──────────────────────────────
+
+import math
+import re
+from datetime import UTC, datetime, timedelta, timezone
+from pathlib import Path
+
+from backend.utils.time_window import (
+    _BANDS,
+    ANCHOR_QUANTUM_SECONDS,
+    STATIC_DEFAULT,
+    VALID_RANGE_TOKENS,
+    history_hours_from_earliest,
+    invite_clamp_fingerprint,
+    is_valid_range_token,
+    pick_insights_default,
+    quantize_anchor,
+    resolve_window,
+)
+
+from backend.core.rollups._common import parse_hour_token
+from backend.utils.date_utils import (
+    _parse_dt,
+    ensure_utc,
+    iso_z,
+    iso_z_now,
+    parse_date_window,
+    parse_day_key_strict,
+    parse_hour_key,
+    parse_hour_key_strict,
+    parse_iso_utc,
+    parse_relative_time_window,
+    parse_window,
+    parse_window_str_to_dt,
+    safe_iso,
+    window_to_epoch,
+)
+
+_NOW = datetime(2026, 6, 29, 12, 30, 45, tzinfo=UTC)
+_INSIGHTS_NOW = datetime(2026, 7, 7, 12, 0, 0, tzinfo=UTC)
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_TS_SOURCE = _REPO_ROOT / "frontend" / "lib" / "insights-defaults.ts"
+_HOUR_KEYS = ["2026-10-19-00", "2026-10-19-23", "2026-02-28-23", "2024-02-29-12", "2026-1-5-3"]
+_BAD_KEYS = ["", "2026-10-19", "2026-10-19-24", "2026-13-01-00", "garbage", "2026-10-19T05", "2026-10-19-05-00"]
+
+
+def _dt(iso: str) -> datetime:
+    return datetime.fromisoformat(iso.replace("Z", "+00:00"))
+
+
+def test_date_utils_core_parsers():
+    assert parse_iso_utc(None) is None and parse_iso_utc("") is None and parse_iso_utc("invalid-date-string") is None
+    dt1 = parse_iso_utc("2026-08-19T12:00:00Z")
+    assert dt1 is not None and dt1.tzinfo == UTC and dt1.hour == 12
+    dt2 = parse_iso_utc("2026-08-19")
+    assert dt2 is not None and dt2.tzinfo == UTC and dt2.hour == 0 and dt2.day == 19
+
+    assert iso_z(datetime(2026, 8, 19, 12, 34, 56, tzinfo=UTC)) == "2026-08-19T12:34:56Z"
+    now_str = iso_z_now()
+    assert now_str.endswith("Z") and "T" in now_str
+
+    default_val = datetime(2020, 1, 1, tzinfo=UTC)
+    assert _parse_dt("2026-08-19T12:00:00Z", default_val).year == 2026
+    assert _parse_dt("invalid", default_val) == default_val
+
+    assert parse_date_window("2026-08-10", "2026-08-19") == ("2026-08-10T00:00:00Z", "2026-08-19T23:59:59Z")
+    assert parse_date_window("2026-08-10T12:00:00Z", "2026-08-19T12:00:00Z") == (
+        "2026-08-10T12:00:00Z",
+        "2026-08-19T12:00:00Z",
+    )
+
+    assert safe_iso(None) is None and safe_iso("") is None
+    assert safe_iso(datetime(2026, 8, 19, 12, 0, 0)) == "2026-08-19T12:00:00Z"
+    assert safe_iso("2026-08-19") == "2026-08-19"
+    assert safe_iso("2026-08-19 12:00:00") == "2026-08-19T12:00:00Z"
+    assert safe_iso("2026-08-19 12:00:00.123") == "2026-08-19T12:00:00.123Z"
+    assert safe_iso("2026-08-19T12:00:00Z") == "2026-08-19T12:00:00Z"
+    assert safe_iso("2026-08-19T12:00:00+00:00") == "2026-08-19T12:00:00+00:00"
+
+    dt = parse_window_str_to_dt("2026-08-19T12:00:00Z")
+    assert (dt.year, dt.month) == (2026, 8)
+    with pytest.raises(ValueError, match="Invalid date window string"):
+        parse_window_str_to_dt("invalid")
+
+    s, e, from_ts, to_ts = window_to_epoch("2026-08-10T00:00:00Z", "2026-08-19T12:00:00Z")
+    assert (s, e) == ("2026-08-10T00:00:00Z", "2026-08-19T12:00:00Z") and 0 < from_ts < to_ts
+
+
+@pytest.mark.parametrize(
+    ("spec", "expected_sec"),
+    [("", 3600), ("12h", 12 * 3600), ("5d", 5 * 24 * 3600), ("30m", 30 * 60), ("invalid", 3600)],
+)
+def test_parse_relative_time_window(spec, expected_sec):
+    dt = parse_relative_time_window(spec)
+    assert (datetime.now(UTC) - dt).total_seconds() == pytest.approx(expected_sec, abs=10)
+
+
+def test_parse_window_returns_utc_pair_for_a_valid_window():
+    assert parse_window("2026-08-05T10:00:00Z", "2026-08-05T12:30:00+00:00") == (
+        datetime(2026, 8, 5, 10, tzinfo=UTC),
+        datetime(2026, 8, 5, 12, 30, tzinfo=UTC),
+    )
+    assert parse_window("2026-08-05", "2026-08-06") == (
+        datetime(2026, 8, 5, tzinfo=UTC),
+        datetime(2026, 8, 6, tzinfo=UTC),
+    )
+
+
+@pytest.mark.parametrize(
+    ("start", "end"),
+    [
+        (None, "2026-08-05T12:00:00Z"),
+        ("2026-08-05T10:00:00Z", None),
+        ("", ""),
+        ("garbage", "2026-08-05T12:00:00Z"),
+        ("2026-08-05T10:00:00Z", "garbage"),
+        ("2026-08-05T12:00:00Z", "2026-08-05T12:00:00Z"),
+        ("2026-08-05T12:00:00Z", "2026-08-05T10:00:00Z"),
+    ],
+)
+def test_parse_window_is_none_for_missing_unparseable_or_non_positive_windows(start, end):
+    assert parse_window(start, end) is None
+
+
+@pytest.mark.parametrize("key", _HOUR_KEYS)
+def test_parse_hour_key_matches_raw_strptime(key):
+    raw = datetime.strptime(key, "%Y-%m-%d-%H").replace(tzinfo=UTC)
+    assert parse_hour_key(key) == raw == parse_hour_key_strict(key)
+    assert parse_hour_key(key).tzinfo is UTC
+
+
+@pytest.mark.parametrize("key", _BAD_KEYS)
+def test_parse_hour_key_malformed(key):
+    assert parse_hour_key(key) is None and parse_hour_token(key) is None
+    with pytest.raises(ValueError):
+        parse_hour_key_strict(key)
+
+
+@pytest.mark.parametrize("key", ["2026-10-19", "2024-02-29", "2026-1-5"])
+def test_parse_day_key_matches_raw_strptime(key):
+    assert parse_day_key_strict(key) == datetime.strptime(key, "%Y-%m-%d").replace(tzinfo=UTC)
+
+
+@pytest.mark.parametrize("key", ["", "2026-02-30", "2026-10-19-05", "x"])
+def test_parse_day_key_malformed(key):
+    with pytest.raises(ValueError):
+        parse_day_key_strict(key)
+
+
+def test_ensure_utc_naive_and_aware():
+    assert ensure_utc(datetime(2026, 10, 19, 5)) == datetime(2026, 10, 19, 5, tzinfo=UTC)
+    src = datetime(2026, 10, 19, 5, tzinfo=timezone(timedelta(hours=5)))
+    out = ensure_utc(src)
+    assert out == src and out.utcoffset() == timedelta(0) and out.hour == 0
+
+
+def test_valid_and_unknown_range_tokens():
+    for tok in ("24h", "7d", "30d", "auto"):
+        assert is_valid_range_token(tok)
+    assert VALID_RANGE_TOKENS == {"1h", "3h", "6h", "12h", "24h", "3d", "7d", "30d", "auto"}
+    for bad in (None, "", "90d", "nonsense"):
+        assert not is_valid_range_token(bad)
+
+
+def test_filterbar_presets_lockstep_with_token_vocabulary():
+    filterbar = _REPO_ROOT / "frontend" / "components" / "FilterBar" / "FilterBar.tsx"
+    src = filterbar.read_text()
+    presets = re.findall(r"pickRelative\(\s*'([^']+)'\s*,\s*([\d.]+)\s*\)", src)
+    assert presets and len(presets) == src.count("pickRelative(")
+    for label, hours in presets:
+        assert is_valid_range_token(label)
+        start, end = resolve_window(label, _NOW.isoformat(), now=_NOW)
+        assert _dt(end) - _dt(start) == timedelta(hours=float(hours))
+
+
+def test_quantize_anchor_and_quantum():
+    assert ANCHOR_QUANTUM_SECONDS == 60
+    assert quantize_anchor("2026-06-29T12:30:45Z") == "2026-06-29T12:30:00Z"
+    assert quantize_anchor("2026-06-29T12:30:01Z") == quantize_anchor("2026-06-29T12:30:59Z")
+    assert quantize_anchor("2026-06-29T12:30:01Z") != quantize_anchor("2026-06-29T12:31:00Z")
+    assert quantize_anchor(None, now=_NOW) == "2026-06-29T12:30:00Z"
+    assert quantize_anchor("not-a-date", now=_NOW) == "2026-06-29T12:30:00Z"
+
+
+@pytest.mark.parametrize(
+    ("token", "delta"),
+    [
+        ("1h", timedelta(hours=1)),
+        ("3h", timedelta(hours=3)),
+        ("6h", timedelta(hours=6)),
+        ("12h", timedelta(hours=12)),
+        ("24h", timedelta(hours=24)),
+        ("3d", timedelta(days=3)),
+        ("7d", timedelta(days=7)),
+        ("30d", timedelta(days=30)),
+    ],
+)
+def test_fixed_tokens_resolve_to_anchor_minus_delta(token, delta):
+    start, end = resolve_window(token, _NOW.isoformat(), now=_NOW)
+    assert end == "2026-06-29T12:30:00Z" and _dt(end) - _dt(start) == delta
+
+
+def test_resolution_quantization_and_unknown_token():
+    assert resolve_window("7d", "2026-06-29T12:30:05Z", now=_NOW) == resolve_window(
+        "7d", "2026-06-29T12:30:55Z", now=_NOW
+    )
+    with pytest.raises(ValueError):
+        resolve_window("90d", _NOW.isoformat(), now=_NOW)
+
+
+@pytest.mark.parametrize(
+    ("history_hours", "expected"),
+    [(1, "24h"), (6 * 24, "24h"), (7 * 24, "7d"), (10 * 24, "7d"), (29 * 24, "7d"), (45 * 24, "30d")],
+)
+def test_auto_picks_band_from_history(history_hours, expected):
+    earliest = (_NOW - timedelta(hours=history_hours)).isoformat()
+    assert resolve_window("auto", _NOW.isoformat(), earliest_log_at=earliest, now=_NOW) == resolve_window(
+        expected, _NOW.isoformat(), now=_NOW
+    )
+
+
+def test_auto_extents_fallbacks():
+    seven = resolve_window("7d", _NOW.isoformat(), now=_NOW)
+    assert resolve_window("auto", _NOW.isoformat(), earliest_log_at=None, now=_NOW) == seven
+    assert resolve_window("auto", _NOW.isoformat(), earliest_log_at="2026-06-01", now=_NOW) == seven
+
+
+class _Session:
+    def __init__(self, qs=None, qe=None, qw=None):
+        self.query_start_time = qs
+        self.query_end_time = qe
+        self.query_window_hours = qw
+
+
+def test_invite_clamp_fingerprint():
+    assert invite_clamp_fingerprint(None) is None
+    open_fp = invite_clamp_fingerprint(_Session())
+    restricted = invite_clamp_fingerprint(_Session(qs="2026-01-01T00:00:00Z", qe="2026-02-01T00:00:00Z"))
+    windowed = invite_clamp_fingerprint(_Session(qw=24))
+    assert len({open_fp, restricted, windowed}) == 3 and len(restricted) == 16
+    assert invite_clamp_fingerprint(_Session(qw=168)) == invite_clamp_fingerprint(_Session(qw=168))
+
+
+@pytest.mark.parametrize(
+    ("history_hours", "expected"),
+    [
+        (0.0, (0.25, 1.0)),
+        (0.99, (0.25, 1.0)),
+        (1.0, (1.0, 1.0)),
+        (3.9, (1.0, 1.0)),
+        (4.0, (4.0, 1.0)),
+        (23.9, (4.0, 1.0)),
+        (24.0, (4.0, 24.0)),
+        (47.9, (4.0, 24.0)),
+        (48.0, (24.0, 24.0)),
+        (167.9, (24.0, 24.0)),
+        (168.0, (24.0, 168.0)),
+        (719.9, (24.0, 168.0)),
+        (720.0, (24.0, 168.0)),
+        (1270.0, (24.0, 168.0)),
+    ],
+)
+def test_band_table(history_hours: float, expected: tuple[float, float]) -> None:
+    assert pick_insights_default(history_hours) == expected
+
+
+def test_insights_defaults_and_history_hours() -> None:
+    for val in (None, math.nan, math.inf):
+        assert pick_insights_default(val) == STATIC_DEFAULT == (24.0, 168.0)
+    earliest = (_INSIGHTS_NOW - timedelta(hours=53 * 24)).isoformat()
+    assert history_hours_from_earliest(earliest, now=_INSIGHTS_NOW) == pytest.approx(53 * 24)
+    assert history_hours_from_earliest("2026-07-01", now=_INSIGHTS_NOW) == pytest.approx(6 * 24 + 12)
+    assert history_hours_from_earliest((_INSIGHTS_NOW + timedelta(hours=5)).isoformat(), now=_INSIGHTS_NOW) == 0.0
+    for bad in (None, "", "not-a-date"):
+        assert history_hours_from_earliest(bad, now=_INSIGHTS_NOW) is None
+
+
+def test_ts_band_table_and_static_default_match_python_mirror() -> None:
+    src = _TS_SOURCE.read_text()
+    body = src[src.index("export function pickInsightsDefault") :]
+    band_re = re.compile(
+        r"if\s*\(\s*h\s*<\s*([\d.]+)\s*\)\s*return\s*\{\s*window:\s*'([\d.]+)',\s*baseline:\s*'([\d.]+)'\s*\}"
+    )
+    ts_bands = [(float(u), float(w), float(b)) for u, w, b in band_re.findall(body)]
+    assert len(ts_bands) >= 5
+    tails = re.findall(
+        r"^\s*return\s*\{\s*window:\s*'([\d.]+)',\s*baseline:\s*'([\d.]+)'\s*\}",
+        body,
+        re.MULTILINE,
+    )
+    assert len(tails) == 1
+    ts_bands.append((math.inf, float(tails[0][0]), float(tails[0][1])))
+    assert tuple(ts_bands) == _BANDS
+
+    m = re.search(r"STATIC_DEFAULT\s*=\s*\{\s*window:\s*'([\d.]+)',\s*baseline:\s*'([\d.]+)'\s*\}", src)
+    assert m is not None and (float(m.group(1)), float(m.group(2))) == STATIC_DEFAULT

@@ -1,9 +1,4 @@
-"""DuckDB connection management with Fastly Object Storage integration.
-
-Supports multiple log sources — each endpoint/bucket/prefix combo gets its own
-table with an auto-detected schema from the first ingested file. Also houses
-sync-status, schema cache, ASN name resolution, and usage-log helpers.
-"""
+"""DuckDB connection management, FOS integration, sync-status, schema cache, ASN, and usage-log helpers."""
 
 from __future__ import annotations
 
@@ -37,32 +32,18 @@ from backend.utils.telemetry import log_once_per
 
 logger = logging.getLogger(__name__)
 
-# Self-referencing module aliases so callers/tests that patch or import
-# `backend.core.duckdb._db_main` or `backend.core._duckdb_status` work seamlessly.
+# Self-referencing module aliases for legacy callers/tests.
 _db_main = sys.modules[__name__]
 _duckdb_status = sys.modules[__name__]
 sys.modules["backend.core._duckdb_status"] = sys.modules[__name__]
 
-# App-wide settings (not per-service)
 DUCKDB_MEMORY_LIMIT = os.getenv("DUCKDB_MEMORY_LIMIT", "4GB")
 DUCKDB_POOL_CONN_MEMORY_LIMIT = os.getenv("DUCKDB_POOL_CONN_MEMORY_LIMIT", "")
 DUCKDB_THREADS = os.getenv("DUCKDB_THREADS", "")
 INGEST_CHUNK_SIZE = int(os.getenv("INGEST_CHUNK_SIZE", "500"))
-
-# Per-service globals — reflect the currently active service.
 DUCKDB_PATH = "logs.duckdb"
-
-# Status-display busy window (5 min) — intentionally shorter than
-# `backend.core.metadata.base._ORPHAN_THRESHOLD_MINS` (60 min) so the admin UI
-# reflects active work rather than stale runs.
 _STATUS_BUSY_WINDOW_MINS = 5
-
-# Map each cron task to the cfg block whose `log_enabled` flag governs logging.
-# Tasks not in the map always log.
-_TASK_TO_CRON_KEY = {
-    "sync": "cron_sync",
-    "local_compact": "cron_compact",
-}
+_TASK_TO_CRON_KEY = {"sync": "cron_sync", "local_compact": "cron_compact"}
 
 _cached_n_threads: int | None = None
 _cached_mem_limit_gb: int | None = None
@@ -82,9 +63,14 @@ def _is_stale_view_error(err: object) -> bool:
 
 
 def _source_service_id(source: dict | None) -> str:
-    if not source:
-        return ""
-    return str(source.get("name") or source.get("service_id") or "")
+    return str(source.get("name") or source.get("service_id") or "") if source else ""
+
+
+def _exec_quietly(con: duckdb.DuckDBPyConnection, sql: str, msg: str = "con.execute failed (ignored)") -> None:
+    try:
+        con.execute(sql)
+    except Exception:
+        logger.debug(msg, exc_info=True)
 
 
 def _get_dma_map() -> dict[str, str]:
@@ -109,17 +95,14 @@ def _get_dma_map() -> dict[str, str]:
             break
         except Exception:
             logger.warning("Could not load %s", fname, exc_info=True)
-
     return _dma_map_cache
 
 
 def _source_from_config(cfg: dict) -> dict:
-    """Build the internal source dict from a service config dict."""
     return svcconfig.config_to_source(cfg)
 
 
 def _build_default_source() -> dict:
-    """Return the source dict for the first configured service, or empty default dict."""
     cfgs = svcconfig.list_configs()
     if cfgs:
         return _source_from_config(cfgs[0])
@@ -148,12 +131,12 @@ DUCKDB_PATH = _DEFAULT_SOURCE.get("duckdb_path") or DUCKDB_PATH
 def get_source_for_service(service_id: str) -> dict | None:
     """Load the source dict for a specific service ID. Returns None if not found."""
     cfg = svcconfig.load_config(service_id)
-    if cfg is None:
-        for c in svcconfig.list_configs():
-            if c.get("cdn_service_id") == service_id:
-                return _source_from_config(c)
-        return None
-    return _source_from_config(cfg)
+    if cfg is not None:
+        return _source_from_config(cfg)
+    for c in svcconfig.list_configs():
+        if c.get("cdn_service_id") == service_id:
+            return _source_from_config(c)
+    return None
 
 
 def reload_default_source():
@@ -164,13 +147,11 @@ def reload_default_source():
 
 
 def is_configured(source: dict | None = None) -> bool:
-    """Check if the source has the minimum required configuration for FOS access."""
     s = source or _DEFAULT_SOURCE
     return all(s.get(k) for k in ("endpoint", "access_key_id", "secret_access_key", "bucket"))
 
 
 def _safe_table_name(name: str) -> str:
-    """Convert a source name to a valid SQL table identifier."""
     clean = re.sub(r"[^a-zA-Z0-9_]", "_", name).strip("_").lower()
     return f"logs_{clean}" if clean != "default" else "logs"
 
@@ -183,7 +164,6 @@ _fos_secret_fingerprints: weakref.WeakKeyDictionary[duckdb.DuckDBPyConnection, t
 
 
 def _load_httpfs(con: duckdb.DuckDBPyConnection):
-    """Load httpfs under a process-wide lock, installing only if absent from the image cache."""
     with _httpfs_lock:
         try:
             con.execute("LOAD httpfs;")
@@ -197,7 +177,6 @@ def _load_httpfs(con: duckdb.DuckDBPyConnection):
 
 
 def _proxy_target_for(source: dict) -> str:
-    """Return the upstream host (CDN edge when enabled, otherwise native FOS endpoint) for httpfs."""
     cdn_url = (source.get("cdn_url") or "").strip()
     edge_only = source.get("provisioning", {}).get("edge_only")
     if edge_only is None:
@@ -208,9 +187,8 @@ def _proxy_target_for(source: dict) -> str:
 
 
 def _configure_fos(con: duckdb.DuckDBPyConnection, source: dict):
-    """Configure Fastly Object Storage credentials routed through the local telemetry proxy."""
+    """Configure FOS credentials routed through the local telemetry proxy."""
     _load_httpfs(con)
-
     from backend.utils import telemetry_proxy
     from backend.utils.telemetry import get_process_context
 
@@ -228,18 +206,10 @@ def _configure_fos(con: duckdb.DuckDBPyConnection, source: dict):
     if target_host != source.get("fos_native_endpoint") and source.get("cdn_secret"):
         headers["x-fastly-key"] = source["cdn_secret"]
     hdr_map_sql = "MAP {" + ", ".join(f"'{k}': ?" for k in headers) + "}"
-    create_secret_sql = f"""
-        CREATE OR REPLACE SECRET fos_proxy (
-            TYPE S3,
-            KEY_ID ?,
-            SECRET ?,
-            REGION ?,
-            ENDPOINT ?,
-            USE_SSL false,
-            URL_STYLE 'path',
-            EXTRA_HTTP_HEADERS {hdr_map_sql}
-        )
-    """
+    create_secret_sql = (
+        "CREATE OR REPLACE SECRET fos_proxy (TYPE S3, KEY_ID ?, SECRET ?, REGION ?, ENDPOINT ?, "
+        f"USE_SSL false, URL_STYLE 'path', EXTRA_HTTP_HEADERS {hdr_map_sql})"
+    )
     secret_params = [
         source.get("access_key_id") or "",
         source.get("secret_access_key") or "",
@@ -259,17 +229,10 @@ def _configure_fos(con: duckdb.DuckDBPyConnection, source: dict):
                 con.execute(create_secret_sql, secret_params)
                 _fos_secret_fingerprints[con] = fp
 
-            retry_call(
-                _create_secret,
-                retry_on=lambda e: "write-write conflict" in str(e).lower(),
-                attempts=3,
-            )
+            retry_call(_create_secret, retry_on=lambda e: "write-write conflict" in str(e).lower(), attempts=3)
     try:
-        con.execute("SET http_timeout=60;")
-        con.execute("SET http_retries=5;")
-        con.execute("SET httpfs_client_implementation = 'curl';")
-        con.execute("SET custom_user_agent = 'FastlyObjectStorageLogAnalysis/1.0';")
-        con.execute("SET http_keep_alive = true;")
+        con.execute("SET http_timeout=60; SET http_retries=5; SET httpfs_client_implementation = 'curl';")
+        con.execute("SET custom_user_agent = 'FastlyObjectStorageLogAnalysis/1.0'; SET http_keep_alive = true;")
     except Exception:
         con.execute("SET http_keep_alive = false;")
 
@@ -279,8 +242,6 @@ _fos_client_lock = threading.Lock()
 
 
 class _ProxyPaginatorShim:
-    """Paginator wrapper that binds `_BOTO3_CALLER_HINT` for the duration of `paginate()`."""
-
     def __init__(self, paginator, caller_hint: str | None):
         self._paginator = paginator
         self._caller_hint = caller_hint
@@ -307,8 +268,6 @@ class _ProxyPaginatorShim:
 
 
 class _ProxyClientShim:
-    """Boto3 client wrapper accepting `get_paginator(method, caller_hint=...)`."""
-
     def __init__(self, obj):
         self._obj = obj
 
@@ -342,11 +301,7 @@ def _get_fos_client(source: dict):
             s3={"addressing_style": "path"},
             max_pool_connections=128,
         )
-        raw_client = boto3.client(
-            "s3",
-            endpoint_url=telemetry_proxy.proxy_endpoint(),
-            config=proxy_config,
-        )
+        raw_client = boto3.client("s3", endpoint_url=telemetry_proxy.proxy_endpoint(), config=proxy_config)
         telemetry_proxy.install_boto3_proxy_hook(raw_client, source)
         client = _ProxyClientShim(raw_client)
         _fos_client_cache[source_key] = client
@@ -354,11 +309,9 @@ def _get_fos_client(source: dict):
 
 
 def clear_fos_client(source_or_name) -> None:
-    """Drop cached boto3 FOS client(s) for a service so the next call rebuilds with fresh credentials."""
     name = source_or_name.get("name", "default") if isinstance(source_or_name, dict) else source_or_name
     with _fos_client_lock:
-        stale = [k for k in _fos_client_cache if (k[0] if isinstance(k, tuple) else k) == name]
-        for k in stale:
+        for k in [k for k in _fos_client_cache if (k[0] if isinstance(k, tuple) else k) == name]:
             _fos_client_cache.pop(k, None)
 
 
@@ -366,15 +319,13 @@ def fos_reachable(source: dict) -> dict:
     """Best-effort FOS reachability probe for the admin health surface (SRE-13)."""
     try:
         client = _get_fos_client(source)
-        prefix = (source.get("prefix") or "").strip("/")
-        client.list_objects_v2(Bucket=source.get("bucket"), Prefix=prefix, MaxKeys=1)
+        client.list_objects_v2(Bucket=source.get("bucket"), Prefix=(source.get("prefix") or "").strip("/"), MaxKeys=1)
         return {"reachable": True, "error": None}
-    except Exception as e:  # noqa: BLE001 — probe must never raise
+    except Exception as e:  # noqa: BLE001
         return {"reachable": False, "error": str(e)[:200]}
 
 
 def _is_transient_query_error(exc: BaseException) -> bool:
-    """Retry predicate for `_execute_query_with_retry` (never retries auth `RuntimeError`)."""
     if isinstance(exc, RuntimeError):
         return False
     err_lower = str(exc).lower()
@@ -402,53 +353,39 @@ def _execute_query_with_retry(con: duckdb.DuckDBPyConnection, query: str, max_re
             raise
 
     return retry_call(
-        _attempt,
-        retry_on=_is_transient_query_error,
-        attempts=max_retries + 1,
-        base_delay=1.0,
-        multiplier=2.0,
+        _attempt, retry_on=_is_transient_query_error, attempts=max_retries + 1, base_delay=1.0, multiplier=2.0
     )
 
 
 def _cache_dir(source: dict) -> str:
-    """Return the local cache directory for a source, scoped to its bucket name."""
     if "_cache_dir_override" in source:
         return source["_cache_dir_override"]
-    bucket = (source.get("bucket") or source.get("fos_bucket") or "default").strip()
-    return os.path.join("cache", bucket)
+    return os.path.join("cache", (source.get("bucket") or source.get("fos_bucket") or "default").strip())
 
 
 def get_raw_tree_node(source, prefix_filter="", root="raw"):
-    """Return a single level of files in Fastly Object Storage under a root (up to 10,000 objects)."""
+    """Return a single level of files in FOS under a root (up to 10,000 objects)."""
     src = source or _DEFAULT_SOURCE
     if not is_configured(src):
         return {"children": []}
 
     if prefix_filter and not prefix_filter.endswith("/"):
         prefix_filter += "/"
-
     prefix = src["prefix"].strip().rstrip("/")
-    base_path = f"{prefix}/" if prefix else ""
-    target_prefix = f"{base_path}{root}/{prefix_filter}"
+    target_prefix = f"{prefix + '/' if prefix else ''}{root}/{prefix_filter}"
 
     children = []
     try:
-        fos_client = _get_fos_client(src)
-        paginator = fos_client.get_paginator("list_objects_v2")
+        paginator = _get_fos_client(src).get_paginator("list_objects_v2")
         dirs_map: dict[str, dict[str, Any]] = {}
         files = []
         object_count = 0
-        max_objects = 10000
 
         for page in paginator.paginate(Bucket=src["bucket"], Prefix=target_prefix):
-            if "Contents" not in page:
-                continue
-            for obj in page["Contents"]:
+            for obj in page.get("Contents", ()):
                 object_count += 1
                 key = obj["Key"]
-                if key == target_prefix:
-                    continue
-                rel_path = key[len(target_prefix) :]
+                rel_path = key[len(target_prefix) :] if key != target_prefix else ""
                 if not rel_path:
                     continue
                 parts = rel_path.split("/")
@@ -459,23 +396,22 @@ def get_raw_tree_node(source, prefix_filter="", root="raw"):
                             "type": "file",
                             "size": obj["Size"],
                             "mtime": obj["LastModified"].isoformat() if "LastModified" in obj else None,
-                            "key": obj["Key"],
+                            "key": key,
                         }
                     )
                 else:
-                    dir_name = parts[0]
-                    if dir_name not in dirs_map:
-                        dirs_map[dir_name] = {"size": 0, "count": 0, "prefix": f"{prefix_filter}{dir_name}"}
-                    dirs_map[dir_name]["size"] += obj["Size"]
-                    dirs_map[dir_name]["count"] += 1
-            if object_count >= max_objects:
+                    dmeta = dirs_map.setdefault(
+                        parts[0], {"size": 0, "count": 0, "prefix": f"{prefix_filter}{parts[0]}"}
+                    )
+                    dmeta["size"] += obj["Size"]
+                    dmeta["count"] += 1
+            if object_count >= 10000:
                 break
 
         dirs = [
             {"name": dname, "type": "directory", "size": meta["size"], "prefix": meta["prefix"]}
-            for dname, meta in dirs_map.items()
+            for dname, meta in sorted(dirs_map.items())
         ]
-        dirs.sort(key=lambda x: x["name"])
         files.sort(key=lambda x: x["name"])
         children = dirs + files
     except Exception:
@@ -489,13 +425,11 @@ _init_lock = threading.Lock()
 
 
 def clear_initialization_state(db_path: str):
-    """Remove a database path from the initialized cache."""
     with _init_lock:
         _initialized_paths.discard(db_path)
 
 
 def close_all_connections():
-    """Close all per-service DuckDB connection pools."""
     from backend.core.duckdb_pool import close_all_service_pools
 
     close_all_service_pools()
@@ -506,9 +440,7 @@ class DBBusyError(Exception):
 
 
 def _lock_context(source: dict, db_path: str, read_only: bool) -> dict[str, object]:
-    """Return safe topology metadata for a DuckDB file-lock diagnostic."""
     catalog = os.getenv("DUCKLAKE_CATALOG", "")
-    catalog_mode = "postgres" if catalog.startswith(("postgres://", "postgresql://")) else "file"
     return {
         "service_id": source.get("logging_service_id") or source.get("name") or "unknown",
         "pid": os.getpid(),
@@ -516,15 +448,13 @@ def _lock_context(source: dict, db_path: str, read_only: bool) -> dict[str, obje
         "db_path": db_path,
         "read_only": read_only,
         "deployment_mode": os.getenv("DEPLOYMENT_MODE", "standard"),
-        "catalog_mode": catalog_mode,
+        "catalog_mode": "postgres" if catalog.startswith(("postgres://", "postgresql://")) else "file",
     }
 
 
 _LOCK_RETRY_INITIAL_DELAY = 0.05
 _LOCK_RETRY_MAX_DELAY = 0.5
 _LOCK_RETRY_MULTIPLIER = 2.0
-
-# ── DuckDB instance-recycle support ──────────────────────────────────────────
 
 _recycle_barrier_cond = threading.Condition()
 _recycle_barrier_active: set[str] = set()
@@ -533,25 +463,20 @@ _live_conns_lock = threading.Lock()
 
 
 def _recycle_barrier_cap_s() -> float:
-    """Hard cap (seconds) a connection open will wait on the recycle barrier (fail-open)."""
-    raw = os.getenv("DUCKDB_RECYCLE_BARRIER_CAP_MS", "10000")
     try:
-        return max(0.0, float(raw) / 1000.0)
+        return max(0.0, float(os.getenv("DUCKDB_RECYCLE_BARRIER_CAP_MS", "10000")) / 1000.0)
     except (TypeError, ValueError):
         return 10.0
 
 
 def db_path_for_source(src: dict | None) -> str:
-    """Resolve the DuckDB instance key for a source (the recycle unit)."""
     s = src or _DEFAULT_SOURCE
     if svcconfig.is_durable_serving_mode(s):
-        service_id = s.get("service_id") or s.get("name") or "default"
-        return f":memory:{service_id}"
+        return f":memory:{s.get('service_id') or s.get('name') or 'default'}"
     return os.path.abspath(s.get("duckdb_path") or DUCKDB_PATH)
 
 
 def _barrier_wait(db_path: str) -> None:
-    """Block while a recycle barrier is active for `db_path` (fail-open)."""
     deadline = time.monotonic() + _recycle_barrier_cap_s()
     with _recycle_barrier_cond:
         while db_path in _recycle_barrier_active:
@@ -562,7 +487,6 @@ def _barrier_wait(db_path: str) -> None:
 
 
 def set_recycle_barrier(db_path: str, on: bool) -> None:
-    """Raise (`on=True`) or clear the recycle barrier for a db file."""
     with _recycle_barrier_cond:
         if on:
             _recycle_barrier_active.add(db_path)
@@ -572,20 +496,13 @@ def set_recycle_barrier(db_path: str, on: bool) -> None:
 
 
 def is_recycle_barrier_active(db_path: str | None = None) -> bool | set[str]:
-    """Check if the recycle barrier is currently active for `db_path` or return active paths."""
     with _recycle_barrier_cond:
-        if db_path is not None:
-            return db_path in _recycle_barrier_active
-        return set(_recycle_barrier_active)
+        return (db_path in _recycle_barrier_active) if db_path is not None else set(_recycle_barrier_active)
 
 
 def _register_live_connection(con, db_path: str) -> None:
-    """Track a freshly-opened raw connection in the per-db_path liveness set."""
     with _live_conns_lock:
-        s = _live_conns.get(db_path)
-        if s is None:
-            s = weakref.WeakSet()
-            _live_conns[db_path] = s
+        s = _live_conns.setdefault(db_path, weakref.WeakSet())
         try:
             s.add(con)
         except TypeError:
@@ -593,18 +510,15 @@ def _register_live_connection(con, db_path: str) -> None:
 
 
 def live_connection_count(db_path: str) -> int:
-    """Live (open, not yet GC'd) raw connections to `db_path`."""
     with _live_conns_lock:
         s = _live_conns.get(db_path)
         return len(s) if s is not None else 0
 
 
 def current_rss_bytes() -> int | None:
-    """Current process RSS in bytes, or None if it can't be read."""
     try:
         with open("/proc/self/statm") as f:
-            resident_pages = int(f.read().split()[1])
-        return resident_pages * os.sysconf("SC_PAGE_SIZE")
+            return int(f.read().split()[1]) * os.sysconf("SC_PAGE_SIZE")
     except (FileNotFoundError, OSError, ValueError, IndexError):
         try:
             import resource
@@ -629,7 +543,6 @@ _CORRUPTION_MARKERS = (
 
 
 def _duckdb_connect(database: str, **kwargs: Any) -> duckdb.DuckDBPyConnection:
-    """Open DuckDB with the config required by the bundled DuckLake extension."""
     if os.getenv("DUCKLAKE_EXTENSION_PATH"):
         connection_config = dict(kwargs.pop("config", None) or {})
         connection_config["allow_unsigned_extensions"] = "true"
@@ -650,40 +563,26 @@ def get_memory_connection(source: dict | None = None) -> duckdb.DuckDBPyConnecti
     _temp_dir = os.getenv("DUCKDB_TEMP_DIRECTORY", "/tmp/duckdb")
     os.makedirs(_temp_dir, exist_ok=True)
     con.execute(f"SET temp_directory = '{_temp_dir}';")
-
-    try:
-        if DUCKDB_MEMORY_LIMIT:
-            con.execute(f"SET max_memory = '{DUCKDB_MEMORY_LIMIT}';")
-    except Exception:
-        logger.debug("get_memory_connection: step failed (ignored)", exc_info=True)
-
+    if DUCKDB_MEMORY_LIMIT:
+        _exec_quietly(con, f"SET max_memory = '{DUCKDB_MEMORY_LIMIT}';", "get_memory_connection: step failed (ignored)")
     try:
         n_threads = int(DUCKDB_THREADS) if DUCKDB_THREADS else min(multiprocessing.cpu_count(), 8)
         con.execute(f"SET threads = {n_threads};")
     except Exception:
         logger.debug("get_memory_connection: con.execute failed (ignored)", exc_info=True)
-
     con.execute("SET TimeZone='UTC';")
     if source is not None:
         _configure_fos(con, source)
-
-    con.execute("SET enable_http_metadata_cache=true;")
-    con.execute("SET enable_object_cache=true;")
+    con.execute("SET enable_http_metadata_cache=true; SET enable_object_cache=true;")
     return con
 
 
 def open_serving_connection(
     source: dict, mode: str = "read_only", *, max_wait: float = 300.0, skip_view_update: bool = False
 ) -> duckdb.DuckDBPyConnection:
-    """Open a read-only serving connection under the selected topology contract."""
     if mode != "read_only":
         raise ValueError(f"unsupported serving connection mode: {mode!r}")
-    return get_connection(
-        source=source,
-        max_wait=max_wait,
-        skip_view_update=skip_view_update,
-        read_only=True,
-    )
+    return get_connection(source=source, max_wait=max_wait, skip_view_update=skip_view_update, read_only=True)
 
 
 def get_connection(
@@ -697,7 +596,6 @@ def get_connection(
 
     db_path = db_path_for_source(src)
     connect_path = ":memory:" if durable_serving else db_path
-
     con = None
     delay = _LOCK_RETRY_INITIAL_DELAY
     deadline = time.monotonic() + max_wait
@@ -715,8 +613,7 @@ def get_connection(
             break
         except Exception as e:
             err_str = str(e).lower()
-            is_corrupt = any(marker in err_str for marker in _CORRUPTION_MARKERS)
-            if is_corrupt and not read_only and not durable_serving:
+            if any(m in err_str for m in _CORRUPTION_MARKERS) and not read_only and not durable_serving:
                 logger.error(f"[duckdb] Database corruption detected for {db_path}: {e}")
                 logger.info(f"[duckdb] Attempting stateless recovery by deleting corrupted database: {db_path}")
                 for f in (db_path, db_path + ".wal"):
@@ -727,8 +624,7 @@ def get_connection(
                             logger.error(f"[duckdb] Failed to remove corrupted file {f}: {rm_e}")
                 continue
 
-            is_lock = "conflict" in err_str or "locked" in err_str or "different configuration" in err_str
-            if not is_lock:
+            if not ("conflict" in err_str or "locked" in err_str or "different configuration" in err_str):
                 raise e
 
             remaining = deadline - time.monotonic()
@@ -736,28 +632,23 @@ def get_connection(
                 context = _lock_context(src, db_path, read_only)
                 logger.error("duckdb_connection_lock_timeout %s", context, exc_info=True)
                 raise DBBusyError(
-                    "Database is locked by another process "
-                    f"(path={db_path}, pid={os.getpid()}, read_only={read_only}, "
+                    f"Database is locked by another process (path={db_path}, pid={os.getpid()}, read_only={read_only}, "
                     f"deployment_mode={context['deployment_mode']}, catalog_mode={context['catalog_mode']}). "
                     "Try again in a few seconds."
                 ) from e
             time.sleep(min(delay, remaining))
             delay = min(delay * _LOCK_RETRY_MULTIPLIER, _LOCK_RETRY_MAX_DELAY)
 
-    try:
-        limit = (
-            (DUCKDB_POOL_CONN_MEMORY_LIMIT or DUCKDB_MEMORY_LIMIT)
-            if durable_serving
-            else (DUCKDB_MEMORY_LIMIT or DUCKDB_POOL_CONN_MEMORY_LIMIT)
-        )
-        if limit:
-            con.execute(f"SET max_memory = '{limit}';")
-    except Exception:
-        logger.debug("get_connection: step failed (ignored)", exc_info=True)
-    try:
-        con.execute("SET preserve_insertion_order = false;")
-    except Exception:
-        logger.debug("get_connection: preserve_insertion_order failed (ignored)", exc_info=True)
+    limit = (
+        (DUCKDB_POOL_CONN_MEMORY_LIMIT or DUCKDB_MEMORY_LIMIT)
+        if durable_serving
+        else (DUCKDB_MEMORY_LIMIT or DUCKDB_POOL_CONN_MEMORY_LIMIT)
+    )
+    if limit:
+        _exec_quietly(con, f"SET max_memory = '{limit}';", "get_connection: step failed (ignored)")
+    _exec_quietly(
+        con, "SET preserve_insertion_order = false;", "get_connection: preserve_insertion_order failed (ignored)"
+    )
 
     if durable_serving:
         _service_temp_dir = os.getenv("DUCKDB_TEMP_DIRECTORY", "/tmp/duckdb")
@@ -770,8 +661,7 @@ def get_connection(
             os.makedirs(_service_temp_dir, exist_ok=True)
             from backend.utils.sql_validator import escape_sql_literal
 
-            _escaped_dir = escape_sql_literal(_service_temp_dir)
-            con.execute(f"SET temp_directory = '{_escaped_dir}';")
+            con.execute(f"SET temp_directory = '{escape_sql_literal(_service_temp_dir)}';")
         except Exception as e:
             if "cannot switch temporary directory" in str(e).lower():
                 logger.debug(f"[duckdb] Cannot switch temp_directory (already in use by active query): {e}")
@@ -779,8 +669,7 @@ def get_connection(
                 logger.error(f"[duckdb] Failed to configure temp_directory: {e}")
 
     try:
-        _max_temp_size = os.getenv("DUCKDB_MAX_TEMP_DIRECTORY_SIZE", "10GB")
-        con.execute(f"SET max_temp_directory_size = '{_max_temp_size}';")
+        con.execute(f"SET max_temp_directory_size = '{os.getenv('DUCKDB_MAX_TEMP_DIRECTORY_SIZE', '10GB')}';")
     except Exception as e:
         err_lower = str(e).lower()
         if "cannot switch temporary directory" in err_lower or "cannot change" in err_lower:
@@ -789,10 +678,7 @@ def get_connection(
             logger.error(f"[duckdb] Failed to configure max_temp_directory_size: {e}")
 
     for stmt in ("SET hive_partitioning = true;", "SET TimeZone='UTC';"):
-        try:
-            con.execute(stmt)
-        except Exception:
-            logger.debug("get_connection: con.execute failed (ignored)", exc_info=True)
+        _exec_quietly(con, stmt, "get_connection: con.execute failed (ignored)")
 
     _configure_fos(con, src)
 
@@ -811,8 +697,7 @@ def get_connection(
             logger.debug("get_connection: con.close failed (ignored)", exc_info=True)
         raise
 
-    con.execute("SET enable_http_metadata_cache=true;")
-    con.execute("SET enable_object_cache=true;")
+    con.execute("SET enable_http_metadata_cache=true; SET enable_object_cache=true;")
 
     global _cached_n_threads, _cached_mem_limit_gb
     if _cached_n_threads is None:
@@ -848,7 +733,6 @@ def get_connection(
 
 
 def _ensure_source_registered(source: dict) -> str:
-    """Register a source in the per-service metadata store. Returns the table name."""
     from backend.core import metadata as metadata_db
 
     name = source["name"]
@@ -868,7 +752,6 @@ def _ensure_source_registered(source: dict) -> str:
 
 
 def start_cron_run(source: dict, task: str) -> int | None:
-    """Begin a cron run; returns the run id. Raises RuntimeError if already running."""
     from backend.core import metadata as metadata_db
 
     return metadata_db.start_cron_run(source["name"], task)
@@ -892,12 +775,10 @@ def log_cron_run(
     run_id: int | None = None,
     outcome_counters: dict[str, int] | None = None,
 ):
-    """Persist the terminal state of a cron run."""
     from backend.core import metadata as metadata_db
 
     service_id = source["name"]
-    cfg = svcconfig.load_config(service_id) or {}
-    prov = cfg.get("provisioning", {})
+    prov = (svcconfig.load_config(service_id) or {}).get("provisioning", {})
     cron_key = _TASK_TO_CRON_KEY.get(task)
     log_enabled = prov.get(cron_key, {}).get("log_enabled", True) if cron_key else True
 
@@ -944,19 +825,13 @@ def finalize_cron_run_if_running(
     summary: str | None = None,
     error_message: str | None = None,
 ) -> bool:
-    """Backstop for the `start_cron_run` -> `log_cron_run` lifecycle; never raises."""
     if run_id is None:
         return False
     from backend.core import metadata as metadata_db
 
     try:
         return metadata_db.finalize_cron_run_if_running(
-            source["name"],
-            task,
-            run_id,
-            duration_s=duration_s,
-            summary=summary,
-            error_message=error_message,
+            source["name"], task, run_id, duration_s=duration_s, summary=summary, error_message=error_message
         )
     except Exception as e:
         logger.warning("[cron_log] finalize-backstop failed for %s/%s: %s", source.get("name"), task, e)
@@ -967,10 +842,8 @@ def finalize_cron_run_if_running(
 
 _data_stats_cache: dict[str, tuple[tuple, int, Any, Any]] = {}
 _data_stats_cache_lock = threading.Lock()
-
 _top_values_cache: dict[str, tuple] = {}
 _top_values_cache_lock = threading.Lock()
-
 _ducklake_stats_cache: dict[tuple[str, str], tuple[int, int, Any, Any]] = {}
 _ducklake_stats_cache_lock = threading.Lock()
 
@@ -980,8 +853,7 @@ def _data_stats_fingerprint(source: dict) -> tuple | None:
     data_dir = os.path.join(_cache_dir(source), "data")
     if not os.path.isdir(data_dir):
         return None
-    data_sum = 0
-    data_count = 0
+    data_sum = data_count = 0
     try:
         for entry in os.scandir(data_dir):
             try:
@@ -1015,9 +887,8 @@ def clear_ducklake_stats_cache(source_key: str | None = None) -> None:
         if source_key is None:
             _ducklake_stats_cache.clear()
         else:
-            for k in list(_ducklake_stats_cache.keys()):
-                if k[0] == source_key:
-                    _ducklake_stats_cache.pop(k, None)
+            for k in [k for k in _ducklake_stats_cache if k[0] == source_key]:
+                _ducklake_stats_cache.pop(k, None)
     with _data_stats_cache_lock:
         if source_key is None:
             _data_stats_cache.clear()
@@ -1038,16 +909,37 @@ def _query_buffer_stats(con, src) -> tuple[int, Any, Any]:
         "SELECT count(*), min(timestamp), max(timestamp) "
         f"FROM read_parquet([{paths_sql}], union_by_name=true, hive_partitioning=false)"
     ).fetchone()
-    if not row:
-        return (0, None, None)
-    return ((row[0] or 0), row[1], row[2])
+    return ((row[0] or 0), row[1], row[2]) if row else (0, None, None)
+
+
+def _query_or_cache_lake_stats(con, src_name: str, lake_table: str, snap_id: Any) -> tuple[int, Any, Any]:
+    """Fetch `(count, min_ts, max_ts)` for `lake."{lake_table}"`, consulting and populating both caches."""
+    cached = None
+    if snap_id is not None:
+        with _ducklake_stats_cache_lock:
+            cached = _ducklake_stats_cache.get((src_name, lake_table))
+        if (cached is None or cached[0] != snap_id) and lake_table == "logs":
+            with _data_stats_cache_lock:
+                data_cached = _data_stats_cache.get(src_name)
+            if data_cached is not None and data_cached[0] == ("ducklake", snap_id):
+                cached = (snap_id, data_cached[1], data_cached[2], data_cached[3])
+                with _ducklake_stats_cache_lock:
+                    _ducklake_stats_cache[(src_name, lake_table)] = cached
+    if cached is not None and cached[0] == snap_id:
+        return cached[1], cached[2], cached[3]
+    row = con.execute(f'SELECT count(*), min(timestamp), max(timestamp) FROM lake."{lake_table}"').fetchone()
+    c, mn, mx = ((row[0] or 0), row[1], row[2]) if row else (0, None, None)
+    if snap_id is not None:
+        with _ducklake_stats_cache_lock:
+            _ducklake_stats_cache[(src_name, lake_table)] = (snap_id, c, mn, mx)
+        if lake_table == "logs":
+            with _data_stats_cache_lock:
+                _data_stats_cache[src_name] = (("ducklake", snap_id), c, mn, mx)
+    return c, mn, mx
 
 
 def _authoritative_direct_stats(
-    con,
-    src,
-    *,
-    buffer_stats: tuple[int, Any, Any] | None = None,
+    con, src, *, buffer_stats: tuple[int, Any, Any] | None = None
 ) -> tuple[int, Any, Any] | None:
     """Read `(count, min_ts, max_ts)` straight from the committed DuckLake table + live buffer."""
     counts: list[int] = []
@@ -1059,44 +951,12 @@ def _authoritative_direct_stats(
 
         lake_table = ducklake_table_name(src)
         exists = con.execute(
-            "SELECT 1 FROM duckdb_tables() WHERE database_name = 'lake' AND table_name = ? LIMIT 1",
-            [lake_table],
+            "SELECT 1 FROM duckdb_tables() WHERE database_name = 'lake' AND table_name = ? LIMIT 1", [lake_table]
         ).fetchone()
         if exists:
-            snap_id = ducklake_current_snapshot_id(con)
-            cached = None
-            if snap_id is not None:
-                with _ducklake_stats_cache_lock:
-                    cached = _ducklake_stats_cache.get((src_name, lake_table))
-                if (cached is None or cached[0] != snap_id) and lake_table == "logs":
-                    with _data_stats_cache_lock:
-                        data_cached = _data_stats_cache.get(src_name)
-                    if data_cached is not None and data_cached[0] == ("ducklake", snap_id):
-                        cached = (snap_id, data_cached[1], data_cached[2], data_cached[3])
-                        with _ducklake_stats_cache_lock:
-                            _ducklake_stats_cache[(src_name, lake_table)] = cached
-
-            if cached is not None and cached[0] == snap_id:
-                lake_count, lake_min, lake_max = cached[1], cached[2], cached[3]
-            else:
-                row = con.execute(
-                    f'SELECT count(*), min(timestamp), max(timestamp) FROM lake."{lake_table}"'
-                ).fetchone()
-                lake_count = (row[0] or 0) if row else 0
-                lake_min = row[1] if row else None
-                lake_max = row[2] if row else None
-                if snap_id is not None:
-                    with _ducklake_stats_cache_lock:
-                        _ducklake_stats_cache[(src_name, lake_table)] = (snap_id, lake_count, lake_min, lake_max)
-                    if lake_table == "logs":
-                        with _data_stats_cache_lock:
-                            _data_stats_cache[src_name] = (
-                                ("ducklake", snap_id),
-                                lake_count,
-                                lake_min,
-                                lake_max,
-                            )
-
+            lake_count, lake_min, lake_max = _query_or_cache_lake_stats(
+                con, src_name, lake_table, ducklake_current_snapshot_id(con)
+            )
             if lake_count > 0:
                 counts.append(lake_count)
                 if lake_min is not None:
@@ -1117,9 +977,7 @@ def _authoritative_direct_stats(
         logger.debug("[sync-status] direct buffer stats unavailable: %s", e)
 
     total = sum(counts)
-    if total <= 0:
-        return None
-    return (total, min(mins) if mins else None, max(maxs) if maxs else None)
+    return (total, min(mins) if mins else None, max(maxs) if maxs else None) if total > 0 else None
 
 
 def get_sync_status(
@@ -1145,7 +1003,6 @@ def get_sync_status(
         return cached_status
 
     table_name = _safe_table_name(src["name"])
-
     try:
         from backend.core import metadata as metadata_db
 
@@ -1160,23 +1017,18 @@ def get_sync_status(
             "latest_file_name": None,
         }
 
-    file_count = summary["file_count"]
-    local_rows_ingested = summary["total_rows"]
-    last_ingested = summary["last_ingested"]
-    latest_file_name = summary["latest_file_name"]
-    total_bytes = summary["total_bytes"]
-    count_with_bytes = summary["count_with_bytes"]
+    file_count, local_rows_ingested = summary["file_count"], summary["total_rows"]
+    last_ingested, latest_file_name = summary["last_ingested"], summary["latest_file_name"]
+    total_bytes, count_with_bytes = summary["total_bytes"], summary["count_with_bytes"]
     avg_log_size_kb = (total_bytes / count_with_bytes / 1024.0) if count_with_bytes > 0 else None
 
     latest_ingested_file_at = None
     if latest_file_name:
-        fname = latest_file_name.split("/")[-1]
-        m = re.search(r"(\d{4}-\d{2}-\d{2})[T-](\d{2}[:.-]\d{2}[:.-]\d{2})", fname)
+        m = re.search(r"(\d{4}-\d{2}-\d{2})[T-](\d{2}[:.-]\d{2}[:.-]\d{2})", latest_file_name.split("/")[-1])
         if m:
             latest_ingested_file_at = f"{m.group(1)} {m.group(2).replace('-', ':').replace('.', ':')}"
 
-    latest_log_at = None
-    earliest_log_at = None
+    latest_log_at = earliest_log_at = None
     local_rows = local_rows_ingested
 
     try:
@@ -1189,14 +1041,12 @@ def get_sync_status(
 
                 lt = ducklake_table_name(src)
                 exists = con.execute(
-                    "SELECT 1 FROM duckdb_tables() WHERE database_name = 'lake' AND table_name = ? LIMIT 1",
-                    [lt],
+                    "SELECT 1 FROM duckdb_tables() WHERE database_name = 'lake' AND table_name = ? LIMIT 1", [lt]
                 ).fetchone()
                 if exists and exists[0]:
                     snap_id = ducklake_current_snapshot_id(con)
                     if snap_id is not None:
-                        data_fp = ("ducklake", snap_id)
-                        lake_table = lt
+                        data_fp, lake_table = ("ducklake", snap_id), lt
             except Exception:
                 logger.debug("get_sync_status: step failed (ignored)", exc_info=True)
 
@@ -1205,61 +1055,35 @@ def get_sync_status(
         queried_buffer_stats: tuple[int, Any, Any] | None = None
         if data_fp is not None:
             try:
-                with _data_stats_cache_lock:
-                    cached = _data_stats_cache.get(cache_key)
                 if (
-                    (cached is None or cached[0] != data_fp)
-                    and lake_table is not None
+                    lake_table is not None
                     and isinstance(data_fp, tuple)
                     and len(data_fp) == 2
                     and data_fp[0] == "ducklake"
                 ):
-                    with _ducklake_stats_cache_lock:
-                        dl_cached = _ducklake_stats_cache.get((cache_key, lake_table))
-                    if dl_cached is not None and dl_cached[0] == data_fp[1]:
-                        cached = (data_fp, dl_cached[1], dl_cached[2], dl_cached[3])
-                        with _data_stats_cache_lock:
-                            _data_stats_cache[cache_key] = cached
-                if cached is not None and cached[0] == data_fp:
-                    d_count, d_min, d_max = cached[1], cached[2], cached[3]
+                    d_count, d_min, d_max = _query_or_cache_lake_stats(con, cache_key, lake_table, data_fp[1])
                 else:
-                    if lake_table is not None:
-                        d_row = con.execute(
-                            f'SELECT count(*), min(timestamp), max(timestamp) FROM lake."{lake_table}"'
-                        ).fetchone()
+                    with _data_stats_cache_lock:
+                        cached = _data_stats_cache.get(cache_key)
+                    if cached is not None and cached[0] == data_fp:
+                        d_count, d_min, d_max = cached[1], cached[2], cached[3]
                     else:
                         from backend.utils.sql_validator import escape_sql_literal
 
-                        data_glob = os.path.join(_cache_dir(src), "data", "**", "*.parquet")
-                        safe_glob = escape_sql_literal(data_glob)
+                        safe_glob = escape_sql_literal(os.path.join(_cache_dir(src), "data", "**", "*.parquet"))
                         d_row = con.execute(
                             "SELECT count(*), min(timestamp), max(timestamp) "
                             f"FROM read_parquet('{safe_glob}', union_by_name=true, hive_partitioning=false)"
                         ).fetchone()
-                    d_count = (d_row[0] or 0) if d_row else 0
-                    d_min = d_row[1] if d_row else None
-                    d_max = d_row[2] if d_row else None
-                    with _data_stats_cache_lock:
-                        _data_stats_cache[cache_key] = (data_fp, d_count, d_min, d_max)
-                    if (
-                        lake_table is not None
-                        and isinstance(data_fp, tuple)
-                        and len(data_fp) == 2
-                        and data_fp[0] == "ducklake"
-                    ):
-                        with _ducklake_stats_cache_lock:
-                            _ducklake_stats_cache[(cache_key, lake_table)] = (data_fp[1], d_count, d_min, d_max)
+                        d_count, d_min, d_max = ((d_row[0] or 0), d_row[1], d_row[2]) if d_row else (0, None, None)
+                        with _data_stats_cache_lock:
+                            _data_stats_cache[cache_key] = (data_fp, d_count, d_min, d_max)
 
                 b_count, b_min, b_max = _query_buffer_stats(con, src)
                 queried_buffer_stats = (b_count, b_min, b_max)
-
                 mins = [m for m in (d_min, b_min) if m is not None]
                 maxs = [m for m in (d_max, b_max) if m is not None]
-                stats = (
-                    d_count + b_count,
-                    min(mins) if mins else None,
-                    max(maxs) if maxs else None,
-                )
+                stats = (d_count + b_count, min(mins) if mins else None, max(maxs) if maxs else None)
                 if lake_table is not None and stats[0] > 0:
                     direct_stats = stats
             except Exception as split_err:
@@ -1279,9 +1103,7 @@ def get_sync_status(
                 else _authoritative_direct_stats(con, src, buffer_stats=queried_buffer_stats)
             )
             if view_rows > 0:
-                local_rows = view_rows
-                earliest_log_at = stats[1]
-                latest_log_at = stats[2]
+                local_rows, earliest_log_at, latest_log_at = view_rows, stats[1], stats[2]
                 if direct is not None:
                     d_earliest, d_latest = direct[1], direct[2]
                     if d_latest is not None and (latest_log_at is None or d_latest > latest_log_at):
@@ -1302,17 +1124,17 @@ def get_sync_status(
                 iceberg.update_iceberg_view(con, src)
                 stats = con.execute(f"SELECT count(*), min(timestamp), max(timestamp) FROM {table_name}").fetchone()
                 if stats:
-                    local_rows = stats[0] if stats[0] is not None else 0
-                    earliest_log_at = stats[1]
-                    latest_log_at = stats[2]
+                    local_rows, earliest_log_at, latest_log_at = (
+                        stats[0] if stats[0] is not None else 0,
+                        stats[1],
+                        stats[2],
+                    )
             except Exception as retry_e:
                 logger.debug("[sync-status] log stats unavailable mid-rebuild: %s", retry_e)
                 local_rows = local_rows_ingested
         else:
             logger.warning("[sync-status] Failed to get log stats from view: %s", e)
             local_rows = local_rows_ingested
-
-    latest_available_file_at = latest_ingested_file_at
 
     try:
         cron_stats = {}
@@ -1330,15 +1152,14 @@ def get_sync_status(
             if data.get("status") == "running" and st and str(st) > time_cutoff:
                 busy = True
             cron_stats[t] = {
-                "last_run": _safe_iso(data.get("started_at")),
+                "last_run": _safe_iso(st),
                 "duration_s": data.get("duration_s"),
                 "status": data.get("status"),
                 "error_message": data.get("error_message"),
                 "summary": data.get("summary"),
             }
     except Exception:
-        busy = False
-        cron_stats = {}
+        busy, cron_stats = False, {}
 
     return {
         "busy": busy,
@@ -1352,7 +1173,7 @@ def get_sync_status(
         "latest_log_at": _safe_iso(latest_log_at),
         "earliest_log_at": _safe_iso(earliest_log_at),
         "latest_ingested_file_at": latest_ingested_file_at,
-        "latest_available_file_at": latest_available_file_at,
+        "latest_available_file_at": latest_ingested_file_at,
         "access_level": src.get("access_level", "read_write"),
         "configured": is_configured(src),
         "storage_mode": src.get("storage_mode", "cloud"),
@@ -1390,11 +1211,9 @@ def refresh_config_status(service_id: str, include_top_values: bool = True):
         except Exception:
             logger.debug("refresh_config_status: step failed (ignored)", exc_info=True)
 
-    iceberg_bytes = None
-    iceberg_files = None
+    iceberg_bytes = iceberg_files = None
     if not include_top_values and "iceberg_bytes" in cached_status and "iceberg_files" in cached_status:
-        iceberg_bytes = cached_status.get("iceberg_bytes")
-        iceberg_files = cached_status.get("iceberg_files")
+        iceberg_bytes, iceberg_files = cached_status.get("iceberg_bytes"), cached_status.get("iceberg_files")
     else:
         try:
             from backend.core import iceberg as _db_iceberg
@@ -1410,7 +1229,6 @@ def refresh_config_status(service_id: str, include_top_values: bool = True):
     try:
         con = get_connection(source, skip_view_update=not durable_serving, read_only=True)
         status = {} if durable_serving else get_sync_status(con, source, skip_fos=False, force=True)
-
         if buf_bytes is not None:
             status["buffer_size_bytes"] = buf_bytes
         if iceberg_bytes is not None:
@@ -1430,17 +1248,11 @@ def refresh_config_status(service_id: str, include_top_values: bool = True):
                     status["edge_ratio"] = ratio
             except Exception:
                 logger.debug("refresh_config_status: step failed (ignored)", exc_info=True)
-
-        if include_top_values:
             status["schema"] = get_schema(con, source)
 
-        rum_latest = None
+        rum_latest = rum_last_sync = request_last_sync = None
         rum_total = 0
-        rum_last_sync = None
-        request_total = status.get("local_rows", 0)
-        request_latest = status.get("latest_log_at")
-        request_last_sync = None
-
+        request_total, request_latest = status.get("local_rows", 0), status.get("latest_log_at")
         try:
             from backend.core.metadata.cron_log import latest_cron_per_task
 
@@ -1462,24 +1274,18 @@ def refresh_config_status(service_id: str, include_top_values: bool = True):
             except Exception:
                 logger.debug("refresh_config_status: step failed (ignored)", exc_info=True)
 
-        status["rum"] = {
-            "latest_log_at": rum_latest,
-            "total_rows": rum_total,
-            "last_sync_at": rum_last_sync,
-        }
+        status["rum"] = {"latest_log_at": rum_latest, "total_rows": rum_total, "last_sync_at": rum_last_sync}
         if not durable_serving:
             status["request"] = {
                 "latest_log_at": request_latest,
                 "total_rows": request_total,
                 "last_sync_at": request_last_sync,
             }
-
-        if durable_serving:
+            svcconfig.update_status(service_id, status)
+        else:
             from backend.core.request_metrics import refresh_durable_request_metrics
 
             refresh_durable_request_metrics(source, extra_status=status)
-        else:
-            svcconfig.update_status(service_id, status)
 
         if include_top_values:
             logger.info("[refresh_status] %s: Updating top-values cache for filter suggestions...", service_id)
@@ -1492,39 +1298,16 @@ def refresh_config_status(service_id: str, include_top_values: bool = True):
 
 
 _TOP_VALUE_FIELDS = (
-    "ip",
-    "country",
-    "city",
-    "host",
-    "url",
-    "method",
-    "ua",
-    "status",
-    "cache",
-    "waf",
-    "waf_resp",
-    "waf_ms",
-    "waf_sig",
-    "waf_sig_ind",
-    "ja3",
-    "ja4",
-    "asn",
-    "edge",
-    "proto",
-    "tls",
-    "referer",
-    "p_type",
-    "p_desc",
-    "backend",
-    "pop",
-)
+    "ip", "country", "city", "host", "url", "method", "ua", "status", "cache", "waf",
+    "waf_resp", "waf_ms", "waf_sig", "waf_sig_ind", "ja3", "ja4", "asn", "edge",
+    "proto", "tls", "referer", "p_type", "p_desc", "backend", "pop",
+)  # fmt: skip
 
 
 def update_top_values(con: duckdb.DuckDBPyConnection, source: dict):
     """Pre-calculate top values for filter suggestions from a 100k reservoir sample."""
     service_id = source["name"]
     table_name = _safe_table_name(service_id)
-
     cached_top_values_path = os.path.join(_cache_dir(source), "top_values.json")
     data_fp = _top_values_fingerprint(con, source)
     if data_fp is not None and os.path.exists(cached_top_values_path):
@@ -1569,34 +1352,28 @@ def update_top_values(con: duckdb.DuckDBPyConnection, source: dict):
             else:
                 raise
 
-        queries = []
-        field_order = []
+        queries, field_order = [], []
         for f in fields:
             col = "waf_sig" if f == "waf_sig_ind" else f
             if col not in schema_cols:
                 continue
             if f == "waf_sig_ind":
-                queries.append(f"""
-                    (SELECT '{f}' AS _field, trim(signal) AS _value, count(*) AS _cnt
-                     FROM (SELECT unnest(string_split("{col}", ',')) AS signal
-                           FROM {sample_table}
-                           WHERE "{col}" IS NOT NULL AND "{col}" != '')
-                     WHERE trim(signal) != ''
-                     GROUP BY 1,2 ORDER BY 3 DESC LIMIT 200)
-                """)
+                queries.append(
+                    f"(SELECT '{f}' AS _field, trim(signal) AS _value, count(*) AS _cnt "
+                    f"FROM (SELECT unnest(string_split(\"{col}\", ',')) AS signal FROM {sample_table} "
+                    f'WHERE "{col}" IS NOT NULL AND "{col}" != \'\') '
+                    "WHERE trim(signal) != '' GROUP BY 1,2 ORDER BY 3 DESC LIMIT 200)"
+                )
             else:
-                queries.append(f"""
-                    (SELECT '{f}' AS _field, CAST("{col}" AS VARCHAR) AS _value, count(*) AS _cnt
-                     FROM {sample_table}
-                     WHERE "{col}" IS NOT NULL
-                     GROUP BY 1,2 ORDER BY 3 DESC LIMIT 200)
-                """)
+                queries.append(
+                    f"(SELECT '{f}' AS _field, CAST(\"{col}\" AS VARCHAR) AS _value, count(*) AS _cnt "
+                    f'FROM {sample_table} WHERE "{col}" IS NOT NULL GROUP BY 1,2 ORDER BY 3 DESC LIMIT 200)'
+                )
             field_order.append(f)
 
         if queries:
             rows = con.execute(" UNION ALL ".join(queries)).fetchall()
-            for fname in field_order:
-                top_values[fname] = []
+            top_values = {fname: [] for fname in field_order}
             for fname, fval, fcnt in rows:
                 if fname in top_values and len(top_values[fname]) < 200:
                     top_values[fname].append({"value": fval, "count": fcnt})
@@ -1622,10 +1399,9 @@ def update_top_values(con: duckdb.DuckDBPyConnection, source: dict):
 
 def get_ingested_files(con: duckdb.DuckDBPyConnection | None, source: dict | None = None) -> list[dict]:
     """Return list of ingested files for a source from metadata storage."""
-    src = source or _DEFAULT_SOURCE
     from backend.core import metadata as metadata_db
 
-    return metadata_db.list_ingested_files(src["name"])
+    return metadata_db.list_ingested_files((source or _DEFAULT_SOURCE)["name"])
 
 
 _SCHEMA_CACHE_TTL = 300
@@ -1635,23 +1411,17 @@ _schema_cache: BoundedTTLCache = BoundedTTLCache(maxsize=256, ttl_seconds=_SCHEM
 def _clear_schema_cache(source_name: str | None = None):
     """Clear the schema cache globally or for a single `source_name`."""
     if source_name:
-        for k in list(_schema_cache.keys()):
-            if k[0] == source_name:
-                _schema_cache.pop(k, None)
+        for k in [k for k in _schema_cache.keys() if k[0] == source_name]:
+            _schema_cache.pop(k, None)
     else:
         _schema_cache.clear()
 
 
-def get_schema(
-    con: duckdb.DuckDBPyConnection,
-    source: dict | None = None,
-    stats: bool = True,
-) -> list[dict]:
+def get_schema(con: duckdb.DuckDBPyConnection, source: dict | None = None, stats: bool = True) -> list[dict]:
     """Return column names and types (plus optional SUMMARIZE stats) for a source's table."""
     src = source or _DEFAULT_SOURCE
     source_name = src["name"]
     table_name = _safe_table_name(source_name)
-
     cache_key = (source_name, table_name, stats)
     cached = _schema_cache.get(cache_key)
     if cached is not None:
@@ -1659,8 +1429,7 @@ def get_schema(
 
     try:
         row = con.execute(
-            "SELECT count(*) FROM information_schema.tables WHERE table_name = ?",
-            [table_name],
+            "SELECT count(*) FROM information_schema.tables WHERE table_name = ?", [table_name]
         ).fetchone()
         if row is None:
             raise RuntimeError("row is unexpectedly None")
@@ -1670,31 +1439,22 @@ def get_schema(
         if not stats:
             result = con.execute(f"DESCRIBE {table_name}").fetchall()
             schema = [{"name": r[0], "type": r[1]} for r in result]
-            if len(schema) == 1 and schema[0]["name"] == "timestamp":
-                schema = []
-            _schema_cache[cache_key] = schema
-            return schema
-
-        result = con.execute(f"SUMMARIZE SELECT * FROM {table_name} LIMIT 10000").fetchall()
-        schema = []
-        for row in result:
-            count = row[10]
-            null_pct = float(row[11]) if row[11] is not None else (100.0 if count == 0 else 0.0)
-            schema.append(
+        else:
+            result = con.execute(f"SUMMARIZE SELECT * FROM {table_name} LIMIT 10000").fetchall()
+            schema = [
                 {
-                    "name": row[0],
-                    "type": row[1],
-                    "min": str(row[2]) if row[2] is not None else None,
-                    "max": str(row[3]) if row[3] is not None else None,
-                    "approx_unique": row[4],
-                    "null_percentage": null_pct,
-                    "count": count,
+                    "name": r[0],
+                    "type": r[1],
+                    "min": str(r[2]) if r[2] is not None else None,
+                    "max": str(r[3]) if r[3] is not None else None,
+                    "approx_unique": r[4],
+                    "null_percentage": float(r[11]) if r[11] is not None else (100.0 if r[10] == 0 else 0.0),
+                    "count": r[10],
                 }
-            )
-
+                for r in result
+            ]
         if len(schema) == 1 and schema[0]["name"] == "timestamp":
             schema = []
-
         _schema_cache[cache_key] = schema
         return schema
     except Exception:
@@ -1707,10 +1467,6 @@ def get_schema(
             return []
 
 
-# ---------------------------------------------------------------------------
-# ASN name resolution
-# ---------------------------------------------------------------------------
-
 ASN_CACHE_TTL_DAYS = 30
 
 
@@ -1718,7 +1474,6 @@ def get_asn_names(service_id: str, asns: list) -> dict:
     """Return `{asn: name}` for all requested ASNs via metadata cache + Team Cymru WHOIS."""
     if not asns:
         return {}
-
     asns_clean = [int(a) for a in asns if a is not None]
     if not asns_clean or not service_id:
         return {}
@@ -1732,7 +1487,6 @@ def get_asn_names(service_id: str, asns: list) -> dict:
 
     need = [a for a in asns_clean if a not in cached]
     resolved: dict[int, str] = {}
-
     if need:
         try:
             import cymruwhois  # type: ignore
@@ -1742,8 +1496,7 @@ def get_asn_names(service_id: str, asns: list) -> dict:
             if callable(orig_connect):
 
                 def _safe_connect() -> None:
-                    host = getattr(c, "host", None)
-                    port = getattr(c, "port", None)
+                    host, port = getattr(c, "host", None), getattr(c, "port", None)
                     if isinstance(host, str) and isinstance(port, int):
                         sock = socket.create_connection((host, port), timeout=2.0)
                         c.socket = sock
@@ -1767,9 +1520,7 @@ def get_asn_names(service_id: str, asns: list) -> dict:
             logger.warning("ASN resolution failed: %s", type(exc).__name__)
 
         for asn in need:
-            if asn not in resolved:
-                resolved[asn] = f"AS{asn}"
-
+            resolved.setdefault(asn, f"AS{asn}")
         if resolved:
             try:
                 metadata_db.upsert_asn_names(service_id, resolved)
@@ -1778,8 +1529,7 @@ def get_asn_names(service_id: str, asns: list) -> dict:
 
     result = {**cached, **resolved}
     for asn in need:
-        if asn not in result:
-            result[asn] = f"AS{asn}"
+        result.setdefault(asn, f"AS{asn}")
     return result
 
 
@@ -1802,19 +1552,13 @@ def enrich_asn_labels(values: list[dict], service_id: str) -> list[dict]:
     return values
 
 
-def update_cron_duration(
-    source: dict,
-    run_id: int,
-    duration_s: float,
-    log_output: str | None = None,
-):
+def update_cron_duration(source: dict, run_id: int, duration_s: float, log_output: str | None = None):
     """Update the duration (and optional `log_output`) of a specific cron run record."""
     from backend.core import metadata as metadata_db
 
     service_id = _source_service_id(source)
-    if not service_id:
-        return
-    metadata_db.update_cron_duration(service_id, run_id, duration_s, log_output=log_output)
+    if service_id:
+        metadata_db.update_cron_duration(service_id, run_id, duration_s, log_output=log_output)
 
 
 def log_usage_calls(source: dict, calls: list[dict], process_context: str | None = None):
@@ -1822,11 +1566,10 @@ def log_usage_calls(source: dict, calls: list[dict], process_context: str | None
     if not svcconfig.is_usage_logging_enabled():
         return
     service_id = _source_service_id(source)
-    if not service_id:
-        return
-    from backend.core import metadata as metadata_db
+    if service_id:
+        from backend.core import metadata as metadata_db
 
-    metadata_db.log_usage_calls(service_id, calls, process_context=process_context)
+        metadata_db.log_usage_calls(service_id, calls, process_context=process_context)
 
 
 def backfill_fastly_edge_writes(source: dict) -> int:
@@ -1836,7 +1579,6 @@ def backfill_fastly_edge_writes(source: dict) -> int:
     service_id = _source_service_id(source)
     if not service_id:
         return 0
-
     try:
         from backend.core import metadata as metadata_db
 
@@ -1844,13 +1586,11 @@ def backfill_fastly_edge_writes(source: dict) -> int:
         files = metadata_db.list_unbackfilled_fastly_edge_files(service_id, since=since)
         if not files:
             return 0
-
         calls = []
         for f_name, f_ingested, _row_count, f_size in files:
             if f_name == "__seeding_attempted__":
                 continue
             ts_match = re.search(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})", f_name)
-            ts = (ts_match.group(1) + "Z") if ts_match else f_ingested
             calls.append(
                 {
                     "method": "PUT_OBJECT",
@@ -1861,7 +1601,7 @@ def backfill_fastly_edge_writes(source: dict) -> int:
                     "status": "OK",
                     "caller": "fastly.edge",
                     "time_ms": 0,
-                    "_timestamp_override": ts,
+                    "_timestamp_override": (ts_match.group(1) + "Z") if ts_match else f_ingested,
                 }
             )
         return metadata_db.log_synthetic_usage(service_id, calls)
@@ -1874,14 +1614,12 @@ def reconcile_fastly_stats(source: dict, hours_back: int = 12) -> int:
     """Pull Fastly's hourly `/stats/aggregate` counts and write reconciliation rows into `usage_log`."""
     if not svcconfig.is_usage_logging_enabled():
         return 0
-    service_id = _source_service_id(source)
-    logging_svc_id = source.get("logging_service_id", "")
+    service_id, logging_svc_id = _source_service_id(source), source.get("logging_service_id", "")
     if not service_id or not logging_svc_id:
         return 0
     api_key = svcconfig.get_fastly_api_key(logging_svc_id)
     if not api_key:
         return 0
-
     try:
         from backend.core import metadata as metadata_db
         from backend.core.fastly.client import StatsResponse, fastly
@@ -1896,11 +1634,9 @@ def reconcile_fastly_stats(source: dict, hours_back: int = 12) -> int:
         now = now_dt.replace(minute=0, second=0, microsecond=0)
         from_ts = int((now - timedelta(hours=hours_back)).timestamp())
         to_ts = int((now + timedelta(hours=1)).timestamp())
-
         payload = fastly(
             "GET", f"/stats/aggregate?by=hour&from={from_ts}&to={to_ts}", token=api_key, max_retries=0, timeout=30
         )
-
         hourly: list[dict] = []
         for rec in StatsResponse.model_validate(payload).data:
             if rec.start_time is None:
@@ -1908,7 +1644,6 @@ def reconcile_fastly_stats(source: dict, hours_back: int = 12) -> int:
             hour_iso = datetime.fromtimestamp(rec.start_time, tz=UTC).strftime("%Y-%m-%dT%H:00:00Z")
             class_a, class_b = rec.fos_ops()
             hourly.append({"hour_iso": hour_iso, "class_a": class_a, "class_b": class_b})
-
         return metadata_db.reconcile_fastly_stats(service_id, hourly)
     except Exception as e:
         logger.debug("[usage_log] Fastly stats reconciliation failed: %s", e)
@@ -1917,14 +1652,12 @@ def reconcile_fastly_stats(source: dict, hours_back: int = 12) -> int:
 
 def purge_usage_log(source: dict):
     """Delete usage logs older than the retention period via `metadata_db`."""
-    ul_cfg = svcconfig.load_usage_logging_config()
-    retention_days = int(ul_cfg.get("retention_days", 30))
+    retention_days = int(svcconfig.load_usage_logging_config().get("retention_days", 30))
     service_id = _source_service_id(source)
-    if not service_id:
-        return
-    from backend.core import metadata as metadata_db
+    if service_id:
+        from backend.core import metadata as metadata_db
 
-    metadata_db.purge_usage_log(service_id, retention_days)
+        metadata_db.purge_usage_log(service_id, retention_days)
 
 
 _CacheRegistry.register("duckdb._fos_client_cache", _fos_client_cache)
@@ -1947,11 +1680,9 @@ def rum_duckdb_path(path: str) -> str:
 def rum_source_for(source: dict) -> dict:
     """Return a shallow-copied RUM source dict (`name` suffixed with `::rum`, `.rum.duckdb` path)."""
     rum_source = dict(source)
-    base_name = source.get("name") or source.get("service_id") or "default"
-    rum_source["name"] = f"{base_name}::rum"
-    db_path = source.get("duckdb_path")
-    if db_path:
-        rum_source["duckdb_path"] = rum_duckdb_path(db_path)
+    rum_source["name"] = f"{source.get('name') or source.get('service_id') or 'default'}::rum"
+    if source.get("duckdb_path"):
+        rum_source["duckdb_path"] = rum_duckdb_path(source["duckdb_path"])
     return rum_source
 
 
@@ -1971,7 +1702,6 @@ def ensure_cid_salt(rum_cfg: dict) -> str:
 def get_or_generate_cid_salt(service_id: str) -> str:
     """Retrieve or generate a persistent 32-byte hex-encoded salt for `cid` pseudonymous hashing."""
     global _process_cid_salt
-
     from backend.config import load_config, mutate_config
 
     cfg = load_config(service_id)
@@ -1979,8 +1709,7 @@ def get_or_generate_cid_salt(service_id: str) -> str:
         rum_cfg = cfg.get("rum")
         if isinstance(rum_cfg, dict) and rum_cfg.get("cid_salt"):
             return rum_cfg["cid_salt"]
-
-    if not cfg:
+    else:
         with _cid_salt_lock:
             if _process_cid_salt is None:
                 _process_cid_salt = secrets.token_hex(32)
@@ -1999,6 +1728,4 @@ def get_or_generate_cid_salt(service_id: str) -> str:
         c["rum"] = rum
 
     saved = mutate_config(service_id, _set)
-    if saved is None:
-        return get_or_generate_cid_salt(service_id)
-    return saved["rum"]["cid_salt"]
+    return get_or_generate_cid_salt(service_id) if saved is None else saved["rum"]["cid_salt"]

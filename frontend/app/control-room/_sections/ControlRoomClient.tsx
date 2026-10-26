@@ -118,13 +118,23 @@ function formatRate(value: number, suffix?: string): string {
 
 const LEVEL_CLASSES = { ok: '', warn: 'bg-amber-50 dark:bg-amber-950/20', critical: 'bg-red-50 dark:bg-red-950/20' } as const
 
-export function RealtimeMetricCard({ title, value, suffix, rates, thresholds, dimmed, helpText }: RealtimeMetricCardProps) {
+function RealtimeCardShell({
+  title,
+  helpText,
+  className,
+  headerClassName = 'px-4 pt-4 pb-0',
+  children,
+}: {
+  title: string
+  helpText?: string
+  className?: string
+  headerClassName?: string
+  children: React.ReactNode
+}) {
   const [helpOpen, setHelpOpen] = useState(false)
-  const level = getThresholdLevel(value, thresholds)
-
   return (
-    <Card className={cn('relative overflow-hidden transition-colors', LEVEL_CLASSES[level], dimmed && 'border-dashed border-muted-foreground/40 bg-muted/5')}>
-      <CardHeader className="relative px-4 pt-4 pb-0">
+    <Card className={className}>
+      <CardHeader className={headerClassName}>
         <div className="flex items-center justify-between">
           <CardTitle className="text-xs font-medium tracking-wide text-muted-foreground uppercase">{title}</CardTitle>
           {helpText && (
@@ -134,24 +144,37 @@ export function RealtimeMetricCard({ title, value, suffix, rates, thresholds, di
           )}
         </div>
       </CardHeader>
-      <CardContent className="relative px-4 pb-4 pt-0">
-        <div className="flex items-baseline">
-          <span className="text-3xl font-bold tabular-nums">{value}</span>
-          {suffix && <span className="text-lg font-normal text-muted-foreground ml-1">{suffix.trim()}</span>}
-        </div>
-        {rates && rates.length > 0 && (
-          <div className="mt-1 text-xs text-muted-foreground tabular-nums">
-            {rates.map((r, i) => (
-              <span key={r.label}>
-                {i > 0 && <span className="mx-1">&middot;</span>}
-                {r.label}: {formatRate(r.value, suffix)}
-              </span>
-            ))}
-          </div>
-        )}
-      </CardContent>
+      <CardContent className="relative px-4 pb-4 pt-0">{children}</CardContent>
       {helpText && <HelpDialog open={helpOpen} onOpenChange={setHelpOpen} title={title}><p>{helpText}</p></HelpDialog>}
     </Card>
+  )
+}
+
+export function RealtimeMetricCard({ title, value, suffix, rates, thresholds, dimmed, helpText }: RealtimeMetricCardProps) {
+  const level = getThresholdLevel(value, thresholds)
+
+  return (
+    <RealtimeCardShell
+      title={title}
+      helpText={helpText}
+      headerClassName="relative px-4 pt-4 pb-0"
+      className={cn('relative overflow-hidden transition-colors', LEVEL_CLASSES[level], dimmed && 'border-dashed border-muted-foreground/40 bg-muted/5')}
+    >
+      <div className="flex items-baseline">
+        <span className="text-3xl font-bold tabular-nums">{value}</span>
+        {suffix && <span className="text-lg font-normal text-muted-foreground ml-1">{suffix.trim()}</span>}
+      </div>
+      {rates && rates.length > 0 && (
+        <div className="mt-1 text-xs text-muted-foreground tabular-nums">
+          {rates.map((r, i) => (
+            <span key={r.label}>
+              {i > 0 && <span className="mx-1">&middot;</span>}
+              {r.label}: {formatRate(r.value, suffix)}
+            </span>
+          ))}
+        </div>
+      )}
+    </RealtimeCardShell>
   )
 }
 
@@ -179,7 +202,6 @@ function makeTimeLabels(count: number): string[] {
 }
 
 export function RealtimeChart({ title, traces, height = 180, className, stacked, dualYAxis, helpText, yAxisSuffix, y2AxisSuffix }: RealtimeChartProps) {
-  const [helpOpen, setHelpOpen] = useState(false)
   const pointCount = traces[0]?.y.length ?? CHART_WINDOW
   const labels = useMemo(() => makeTimeLabels(pointCount), [traces, pointCount])
   const data = useMemo(() => traces.map((trace) => ({
@@ -206,26 +228,13 @@ export function RealtimeChart({ title, traces, height = 180, className, stacked,
   }, [stacked, dualYAxis, hasLegend, yAxisSuffix, y2AxisSuffix])
 
   return (
-    <Card className={className}>
-      <CardHeader className="px-4 pt-4 pb-0">
-        <div className="flex items-center justify-between">
-          <CardTitle className="text-xs font-medium tracking-wide text-muted-foreground uppercase">{title}</CardTitle>
-          {helpText && (
-            <Button variant="ghost" size="icon" aria-label={`About ${title}`} className="h-6 w-6 text-muted-foreground hover:text-foreground" onClick={() => setHelpOpen(true)}>
-              <HelpCircle className="h-3.5 w-3.5" />
-            </Button>
-          )}
-        </div>
-      </CardHeader>
-      <CardContent className="px-4 pb-4 pt-0">
-        <PlotlyChart data={data} layout={layout} config={STATIC_CONFIG} height={height} a11yTitle={title} />
-      </CardContent>
-      {helpText && <HelpDialog open={helpOpen} onOpenChange={setHelpOpen} title={title}><p>{helpText}</p></HelpDialog>}
-    </Card>
+    <RealtimeCardShell title={title} helpText={helpText} className={className}>
+      <PlotlyChart data={data} layout={layout} config={STATIC_CONFIG} height={height} a11yTitle={title} />
+    </RealtimeCardShell>
   )
 }
 
-const PopTrafficMap = dynamic(() => import('@/components/Map/PopTrafficMap').then((m) => m.PopTrafficMap), { ssr: false })
+const PopTrafficMap = dynamic(() => import('@/components/Map/NetworkMap').then((m) => m.PopTrafficMap), { ssr: false })
 
 const TABS = [
   { id: 'overview', label: 'Summary', icon: BarChart3, historicalHref: '/dashboard' },
@@ -1190,40 +1199,39 @@ function AdminHealthTab({ tick, rtDown, connected, series, rollingAvg }: Omit<Ta
       </div>
 
       <SectionHeading>VCL Execution</SectionHeading>
-      <MetricCardGrid
-        cols={5} data={data} rollingAvg={rollingAvg} dimmed={rtDown}
-        cards={[
-          { title: 'Restarts', suffix: '/s', rateFn: (d) => d.restarts ?? 0, thresholds: { warn: 1, critical: 10, direction: 'above' }, helpText: 'VCL restart count per second. Restarts re-enter vcl_recv with modified state — used for routing fallbacks but expensive. High rates indicate a misconfigured restart loop.' },
-          { title: 'vcl_recv', value: Number((data?.vcl_recv_time_ms ?? 0).toFixed(1)), suffix: ' ms', helpText: 'Time in vcl_recv — request routing, ACL checks, header manipulation. High values may indicate complex routing logic or excessive table lookups.' },
-          { title: 'vcl_fetch', value: Number((data?.vcl_fetch_time_ms ?? 0).toFixed(1)), suffix: ' ms', helpText: 'Time in vcl_fetch — origin response processing, cache TTL setting, header rewriting. Only runs on cache misses.' },
-          { title: 'vcl_deliver', value: Number((data?.vcl_deliver_time_ms ?? 0).toFixed(1)), suffix: ' ms', helpText: 'Time in vcl_deliver — final response modification before sending to the client. Runs on every request (hits and misses).' },
-          { title: 'vcl_error', value: Number((data?.vcl_error_time_ms ?? 0).toFixed(1)), suffix: ' ms', helpText: 'Time in vcl_error — synthetic error response generation. Only runs when VCL explicitly triggers an error or the origin is unreachable.' },
-        ]}
-      />
-      <div className="grid gap-6 md:grid-cols-2">
-        <RealtimeChart
-          title="VCL Subroutine Time (ms)"
-          helpText="Time spent in each VCL subroutine per request. recv = request handling, fetch = origin response processing, deliver = client response, error = error page generation. High recv time may indicate complex routing logic."
-          yAxisSuffix=" ms" stacked
-          traces={seriesTraces(series, [
-            ['recv', CHART_COLORS.info, (d) => d.vcl_recv_time_ms ?? 0],
-            ['fetch', '#f97316', (d) => d.vcl_fetch_time_ms ?? 0],
-            ['deliver', '#22c55e', (d) => d.vcl_deliver_time_ms ?? 0],
-            ['error', CHART_COLORS.danger, (d) => d.vcl_error_time_ms ?? 0],
-          ])}
-        />
-        <RealtimeChart
-          title="VCL Subroutine Calls"
-          helpText="Number of times each VCL subroutine was invoked. Call count × time per call = total VCL overhead. A high error count means many requests are hitting synthetic error responses."
-          yAxisSuffix=" calls/s" stacked
-          traces={seriesTraces(series, [
-            ['recv', CHART_COLORS.info, (d) => d.vcl_recv_count ?? 0],
-            ['fetch', '#f97316', (d) => d.vcl_fetch_count ?? 0],
-            ['deliver', '#22c55e', (d) => d.vcl_deliver_count ?? 0],
-            ['error', CHART_COLORS.danger, (d) => d.vcl_error_count ?? 0],
-          ])}
-        />
-      </div>
+      {(() => {
+        const vclSubs = [
+          { sub: 'recv', color: CHART_COLORS.info, timeMs: data?.vcl_recv_time_ms, timeFn: (d: MetricsData) => d.vcl_recv_time_ms ?? 0, countFn: (d: MetricsData) => d.vcl_recv_count ?? 0, helpText: 'Time in vcl_recv — request routing, ACL checks, header manipulation. High values may indicate complex routing logic or excessive table lookups.' },
+          { sub: 'fetch', color: '#f97316', timeMs: data?.vcl_fetch_time_ms, timeFn: (d: MetricsData) => d.vcl_fetch_time_ms ?? 0, countFn: (d: MetricsData) => d.vcl_fetch_count ?? 0, helpText: 'Time in vcl_fetch — origin response processing, cache TTL setting, header rewriting. Only runs on cache misses.' },
+          { sub: 'deliver', color: '#22c55e', timeMs: data?.vcl_deliver_time_ms, timeFn: (d: MetricsData) => d.vcl_deliver_time_ms ?? 0, countFn: (d: MetricsData) => d.vcl_deliver_count ?? 0, helpText: 'Time in vcl_deliver — final response modification before sending to the client. Runs on every request (hits and misses).' },
+          { sub: 'error', color: CHART_COLORS.danger, timeMs: data?.vcl_error_time_ms, timeFn: (d: MetricsData) => d.vcl_error_time_ms ?? 0, countFn: (d: MetricsData) => d.vcl_error_count ?? 0, helpText: 'Time in vcl_error — synthetic error response generation. Only runs when VCL explicitly triggers an error or the origin is unreachable.' },
+        ]
+        return (
+          <>
+            <MetricCardGrid
+              cols={5} data={data} rollingAvg={rollingAvg} dimmed={rtDown}
+              cards={[
+                { title: 'Restarts', suffix: '/s', rateFn: (d) => d.restarts ?? 0, thresholds: { warn: 1, critical: 10, direction: 'above' }, helpText: 'VCL restart count per second. Restarts re-enter vcl_recv with modified state — used for routing fallbacks but expensive. High rates indicate a misconfigured restart loop.' },
+                ...vclSubs.map((v) => ({ title: `vcl_${v.sub}`, value: Number((v.timeMs ?? 0).toFixed(1)), suffix: ' ms', helpText: v.helpText })),
+              ]}
+            />
+            <div className="grid gap-6 md:grid-cols-2">
+              <RealtimeChart
+                title="VCL Subroutine Time (ms)"
+                helpText="Time spent in each VCL subroutine per request. recv = request handling, fetch = origin response processing, deliver = client response, error = error page generation. High recv time may indicate complex routing logic."
+                yAxisSuffix=" ms" stacked
+                traces={seriesTraces(series, vclSubs.map((v) => [v.sub, v.color, v.timeFn]))}
+              />
+              <RealtimeChart
+                title="VCL Subroutine Calls"
+                helpText="Number of times each VCL subroutine was invoked. Call count × time per call = total VCL overhead. A high error count means many requests are hitting synthetic error responses."
+                yAxisSuffix=" calls/s" stacked
+                traces={seriesTraces(series, vclSubs.map((v) => [v.sub, v.color, v.countFn]))}
+              />
+            </div>
+          </>
+        )
+      })()}
 
       <div className="flex justify-end">
         <Link href={buildServiceHref('/admin/trends', activeServiceId)} prefetch={false}>

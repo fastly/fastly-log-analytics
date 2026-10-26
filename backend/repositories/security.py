@@ -88,21 +88,9 @@ def peek_security_aggregates(
     return dict(cached) if cached is not None else None
 
 
-# Lowered to 24h (86,400s) so 24h windows use closed-hour rollups
-# (wellknown_bots, ipv6_adoption, proxy_dist) and avoid full-window scans.
 _ROLLUP_MIN_WINDOW_SECONDS = 86400
-
-# The maximum number of top distinct User Agents (UAs) retrieved from the database
-# (via rollups or live temp tables) to pass to the regex-based classifier.
-# Lowering this from 50,000 to 2,000 reduces CPU-bound regex evaluation times
-# by up to 25x, preventing Python GIL starvation and drastically speeding up
-# the home dashboard bundle load.
 _BOT_UA_CLASSIFY_LIMIT = int(os.getenv("BOT_UA_CLASSIFY_LIMIT", "2000"))
 
-# Canonical projection order for the catalog temp. The temp materializes
-# ONLY the columns the live (rollup-missed) sections actually touch — see
-# the per-section column-needs in _build_security_response. asn / req_bytes
-# / ja3 / ja4 are never consumed by any section so they never appear.
 _TEMP_COL_ORDER = (
     "timestamp",
     "ip",
@@ -126,9 +114,6 @@ _TEMP_COL_ORDER = (
     "city",
 )
 
-# (section name, is_list) — the empty default each section carries when it
-# was requested but produced no value (e.g. the temp build failed). Lists
-# for table/series sections; dict for fingerprint_coverage.
 _SECTION_DEFAULTS = (
     ("verified_bots_ts", True),
     ("ngwaf_verified_bots", True),
@@ -146,17 +131,7 @@ _SECTION_DEFAULTS = (
 
 
 def _window_eligible_for_rollup(start_time: str | None, end_time: str | None) -> bool:
-    """Return True when the request window is wide enough to make the
-    closed-hour rollup-read cost worth paying.
-
-    Windows narrower than :data:`_ROLLUP_MIN_WINDOW_SECONDS` skip the
-    rollup-served paths in :func:`_build_security_response` and let the
-    live SQL serve those aggregates instead — the live path scans
-    ``is_ipv6`` / ``p_type`` from the already-materialised catalog temp
-    which is cheaper than opening N closed-hour parquet files on small
-    windows. Returns False when bounds are missing or unparseable so
-    open-ended requests fall through to live SQL.
-    """
+    """Return True when the request window is wide enough (>= 24h) for closed-hour rollup reads."""
     if not start_time or not end_time:
         return False
     try:
@@ -170,20 +145,7 @@ def _window_eligible_for_rollup(start_time: str | None, end_time: str | None) ->
 
 
 def _has_rollup_coverage(src: dict, field: str, start_time: str | None, end_time: str | None) -> bool:
-    """Cheap directory-stat check for in-window closed-hour rollup data.
-
-    Returns ``True`` when the per-(field, hour) count rollup has at least
-    one in-window closed-hour parquet on disk for ``field`` — either as a
-    bundled ``all_fields.parquet`` row or as a per-field parquet.
-
-    Used by :func:`get_security_aggregates` to decide BEFORE the catalog
-    temp materializes whether the corresponding column can be dropped
-    from the temp's projection (the rollup-served aggregate won't need
-    it). Pre-checking avoids a re-materialize race: when the temp is
-    built without ``is_ipv6`` / ``p_type``, the live-SQL fallback in
-    ``_build_security_response`` would BinderException — so we MUST
-    only drop the column when the rollup serve is virtually guaranteed.
-    """
+    """Check whether in-window closed-hour rollup data exists on disk for ``field``."""
     from backend.repositories.rollup_coverage import enumerate_closed_hour_field_rollups
 
     w = enumerate_closed_hour_field_rollups(src, field, start_time, end_time, stop_on_first=True)
@@ -198,16 +160,7 @@ def _ipv6_per_hour_from_rollups(
     *,
     actual_cols: list[str] | None = None,
 ) -> list[dict] | None:
-    """Compute the IPv6 adoption time series from per-hour count rollups.
-
-    Returns the same shape as the live ``IPV6_ADOPTION_TS`` query —
-    ``[{"time": iso, "pct": float}, ...]`` sorted by hour ascending.
-    Reads ``(value, count)`` per (is_ipv6, hour) from the bundled +
-    per-field count rollups, then merges the active-hour slice via a
-    direct base-table query so the chart's right edge isn't missing.
-    Returns ``None`` when start/end is missing, no in-window closed-
-    hour rollups exist, or a read raises (caller falls back to live SQL).
-    """
+    """Compute the IPv6 adoption time series from per-hour count rollups plus active-hour slice."""
     from backend.core.rollups._common import _safe_table_for
     from backend.repositories.rollup_coverage import enumerate_closed_hour_field_rollups
 
@@ -219,13 +172,6 @@ def _ipv6_per_hour_from_rollups(
     st_dt, et_dt = w.st_dt, w.et_dt
     active_dt, active_end_dt = w.active_dt, w.active_end_dt
 
-    # hive_partitioning=1 is load-bearing: the bundled all_fields.parquet
-    # body carries only (field, value, count) — `hour` lives ONLY in
-    # the path segment ``hour=YYYY-MM-DD-HH``. With hive_partitioning=0,
-    # selecting `hour` raises BinderException, the try/except swallows
-    # it, and the IPv6 card renders empty on every closed-hour-bundled
-    # service. Caught by session-9 adversarial review and pinned by
-    # ``test_security_aggregates_ipv6_serves_from_bundled_hour_when_per_field_swept``.
     branches = [
         "SELECT hour, value, count FROM read_parquet(["
         + ", ".join("'" + escape_sql_literal(p) + "'" for p in paths)
@@ -240,11 +186,6 @@ def _ipv6_per_hour_from_rollups(
     except Exception:
         return None
 
-    # Per-hour bucketing: writer stores `is_ipv6` cast as VARCHAR, so
-    # values land as 'true' / 'false' (DuckDB's boolean→VARCHAR is
-    # lowercase). NULL is_ipv6 rows land as NULL value and contribute
-    # to the denominator only — matching the live query's
-    # `count(*)`-over-all denominator with `CASE WHEN is_ipv6` numerator.
     per_hour: dict[str, dict[str, int]] = {}
     for hour, value, count in rows:
         b = per_hour.setdefault(hour, {"true": 0, "total": 0})
@@ -255,11 +196,6 @@ def _ipv6_per_hour_from_rollups(
     if not per_hour:
         return None
 
-    # Active-hour slice (closed-hour rollups skip active by contract).
-    # Run a focused base-table query for the in-window active-hour
-    # interval so the chart's right edge isn't blank. Reuse the shared
-    # direct active-hour temp when available so we don't scan the full
-    # bound view a second time.
     if et_dt > active_dt:
         live_start = max(active_dt, st_dt)
         live_end = min(active_end_dt, et_dt)
@@ -294,18 +230,11 @@ def _ipv6_per_hour_from_rollups(
                         b["true"] += int(true_c) if true_c is not None else 0
                         b["total"] += int(total_c) if total_c is not None else 0
                 except Exception:
-                    # Active-hour merge failed — keep rollup data; chart's
-                    # latest point will be missing but closed-hour data is
-                    # still correct. Cheaper than failing the whole card.
                     _logger.debug("[security] ipv6 active-hour merge failed", exc_info=True)
                 finally:
                     if tmp and tmp != "__empty__" and hasattr(runner, "release_active_direct_temp"):
                         runner.release_active_direct_temp(tmp)
 
-    # Match the live IPV6_ADOPTION_TS output format: tz-aware datetime
-    # routed through safe_iso so the `time` field is `+00:00`-suffixed
-    # (not `Z`). The FE date parser distinguishes the two — diverging
-    # would surface as broken sorting or invalid-date toasts.
     result: list[dict] = []
     for hour in sorted(per_hour):
         b = per_hour[hour]
@@ -322,14 +251,7 @@ def _proxy_dist_from_rollups(
     *,
     actual_cols: list[str] | None = None,
 ) -> list[dict] | None:
-    """Compute PROXY_TYPE_DIST totals from the per-hour count rollup.
-
-    ``execute_top_n_rollups`` already merges across closed hours AND
-    queries the live active hour internally, so the totals match what
-    the live SQL would have produced over the temp table. Returns
-    ``None`` when the reader yields no rows for ``p_type`` (cold pool
-    or all rows had empty / __other__ values).
-    """
+    """Compute PROXY_TYPE_DIST totals from the per-hour count rollup."""
     try:
         extra_kwargs: dict[str, Any] = {"actual_cols": actual_cols} if actual_cols is not None else {}
         rolled, _ = runner.execute_top_n_rollups(
@@ -345,9 +267,6 @@ def _proxy_dist_from_rollups(
         return None
     by_val: dict[str, int] = {}
     for _field, value, count in rolled:
-        # Live query filters `p_type != ''` — mirror that, plus skip
-        # __other__ (the synthetic day-bundle catch-all) and any
-        # non-string values (DuckDB NULL surfaces as None here).
         if not isinstance(value, str) or value == "" or value == "__other__":
             continue
         by_val[value] = by_val.get(value, 0) + int(count)
@@ -689,14 +608,6 @@ def get_top_bots(
 
     try:
         # ── Arcjet UA matching ──────────────────────────────────────────
-        # Rollup-served when no filters apply. The hour bundles already
-        # carry top-500 UAs per hour; UNION + GROUP-BY across the window
-        # is sub-second even on 30d (vs ~1.1s for the ua column scan via
-        # the iceberg view on prod). Real bots send enough traffic that
-        # their UAs almost always land in top-500 for at least some hours,
-        # so the rollup gives equivalent arcjet matches to the raw scan.
-        # Filtered requests bypass this path (rollup is filter-free) and
-        # fall through to the temp-scan branch below.
         ua_rollup_rows: list[tuple[str, int]] | None = None
         if use_rollups and "ua" in actual_cols:
             try:
@@ -713,9 +624,6 @@ def get_top_bots(
                 timer.mark("top_bots:ua_rollup_query", _t)
                 ua_rollup_rows = [(v, int(c)) for _f, v, c in rolled if v and v != "__other__"]
                 if not ua_rollup_rows:
-                    # Rollup is empty (cold service, no backfill yet) —
-                    # fall back to the raw temp scan so we still produce
-                    # bot matches on first dashboard load.
                     ua_rollup_rows = None
             except Exception as e:
                 _logger.warning("[security] UA rollup read failed, falling back: %s", e)
@@ -730,18 +638,12 @@ def get_top_bots(
             timer.mark("top_bots:arcjet_match", _t)
 
         # ── NGWAF cache bot names + filtered-UA fallback ────────────────
-        # NGWAF JOIN needs raw waf_req_id (high-cardinality, no rollup),
-        # so it still builds a temp. When the rollup-served UA path
-        # didn't run (filters present, or "ua" not in schema), the temp
-        # also carries `ua` so the filtered-UA branch can scan it.
         ngwaf_attached = False
         if "waf_req_id" in actual_cols:
             try:
                 ngwaf_attached = ensure_ngwaf_bots_materialized(con, "ngwaf_top")
             except Exception:
-                _logger.debug(
-                    "get_top_bots: ensure_ngwaf_bots_materialized failed (ignored)", exc_info=True
-                )  # materialization failed — fall back gracefully
+                _logger.debug("get_top_bots: ensure_ngwaf_bots_materialized failed (ignored)", exc_info=True)
 
         needs_filtered_ua_scan = ua_rollup_rows is None and "ua" in actual_cols
         cols_needed: list[str] = []
@@ -768,17 +670,6 @@ def get_top_bots(
                 )
 
         if cols_needed == ["waf_req_id"]:
-            # The UA branch was rollup-served, so the NGWAF join would be the
-            # temp's ONLY consumer — materializing the window's waf_req_ids
-            # (318ms of the 2026-07-06 24h trace) to probe them once is pure
-            # overhead.
-            #
-            # Rollup fast path first: the per-hour ngwaf_bots parquets carry the
-            # write-time (waf_req_id ⨝ bot cache) aggregation, so eligible
-            # unfiltered windows skip even the single direct join (~115ms on
-            # prod 24h). Falls back to the direct base-table join on any miss —
-            # one scan, no materialization, same result (the IS NOT NULL floor
-            # in the template matches the INNER JOIN semantics).
             rolled_ngwaf: list[dict] | None = None
             if use_rollups:
                 _t = _time.perf_counter()
@@ -797,8 +688,6 @@ def get_top_bots(
                     (row for row in runner.reader_coverage[coverage_start:] if row.reader == "dashboard.ngwaf_bots"),
                     None,
                 )
-                # Reuse the reader's actual decision: an eligibility refusal is
-                # not a parquet read, and a live top-up is not rollup-only work.
                 source = "unknown"
                 if observed is not None:
                     if observed.outcome in {"served", "read_failed"}:
@@ -981,12 +870,6 @@ def _build_security_response(
 
     results = {**runner.telemetry()}
 
-    # ── Rollup eligibility (cheap directory-stat pre-checks; no parquet
-    # reads). is_ipv6 / p_type serve from their count rollups when their
-    # in-window closed-hour data exists, the request is unfiltered, and the
-    # window clears the 3-day break-even. Same invariant as before: a column
-    # is dropped from the temp ONLY when its rollup serve is virtually
-    # guaranteed, so the live fallback never references a missing column. ──
     rollup_eligible = (
         not filters
         and start_time is not None
@@ -1006,11 +889,7 @@ def _build_security_response(
             seed_fields=("tls_ciphers_sha", "p_type", "is_ipv6", "ua", "waf_req_id", "waf_sig")
         )
 
-    # ── Pass 1: serve everything that can come from a parquet rollup WITHOUT
-    # the catalog temp, and record which sections still need a live scan plus
-    # the exact temp columns they touch. The temp is then built for ONLY that
-    # column set (or skipped). This is the per-column form of the
-    # all-or-nothing materialize the origin/aggregates fix removed. ──
+    # ── Pass 1: serve rollup-eligible sections and track live column needs ──
     needed_cols: set[str] = set()
     live_sections: set[str] = set()
 
@@ -1018,9 +897,6 @@ def _build_security_response(
         live_sections.add(section)
         needed_cols.update(cols)
 
-    # Surface whether NGWAF is configured so the frontend can distinguish
-    # "not configured" from "configured but no detections yet". Bundled
-    # with the NGWAF bot section gate.
     _want_ngwaf_bots = _want("ngwaf_verified_bots") or _want("ngwaf_verified_bots_ts")
     if _want_ngwaf_bots:
         try:
@@ -1028,20 +904,12 @@ def _build_security_response(
         except Exception:
             results["ngwaf_configured"] = False
 
-    # Materialize the NGWAF bot cache once per connection if it exists and
-    # waf_req_id is in schema (see ensure_ngwaf_bots_materialized — reuses
-    # an already-materialized alias on this connection, so this is cheap
-    # after the first call). Try the per-hour/per-day NGWAF rollups first
-    # (they only need the materialized cache for the active-hour direct temp
-    # top-up); fall back to the catalog temp scan only when a rollup misses.
     _ngwaf_attached = False
     if _want_ngwaf_bots and "waf_req_id" in actual_cols:
         try:
             _ngwaf_attached = ensure_ngwaf_bots_materialized(runner.con, "ngwaf_cache")
         except Exception:
-            _logger.debug(
-                "_build_security_response: ensure_ngwaf_bots_materialized failed (ignored)", exc_info=True
-            )  # materialization failed — fall back gracefully
+            _logger.debug("_build_security_response: ensure_ngwaf_bots_materialized failed (ignored)", exc_info=True)
 
     def _shape_ngwaf_vb_ts_row(r: Any) -> dict:
         return {"time": safe_iso(r[0]), "bot_name": r[1], "count": r[2]}
@@ -1072,48 +940,19 @@ def _build_security_response(
         results["ngwaf_verified_bots"] = []
         results["ngwaf_verified_bots_ts"] = []
 
-    # Verified bots TS: the rollup reader fills the active hour FROM the temp,
-    # so requesting this section always needs {timestamp, waf_sig} in the
-    # temp (whether the rollup hits or not).
     if _want("verified_bots_ts"):
         if "waf_sig" in actual_cols:
             _need("verified_bots_ts", {"timestamp", "waf_sig"})
         else:
             results["verified_bots_ts"] = []
 
-    # Fingerprint cards: TLS only. Each card returns top-20 + a coverage
-    # fraction (populated rows / total rows) so the FE can render a low-
-    # coverage hint when a leaderboard is legitimately sparse for the current
-    # traffic mix (e.g. TLS fingerprints on a mostly-shielded service).
-    #
-    # The (column → result-key) map below keeps the result keying explicit
-    # (the key isn't derivable from the column name by suffix manipulation)
-    # and leaves room to re-add sibling fingerprint columns under the same
-    # shared top-N template without touching the loop.
     _FP_RESULT_KEYS = (("tls_ciphers_sha", "tls_fingerprints"),)
-    # Per-card opt-in. Coupling at the router boundary forces requesting
-    # any FP card to also enable fingerprint_coverage, so this set drives
-    # both the rollup fast-path eligibility AND the live SQL loop below.
     _wanted_fp_keys: set[str] = {result_key for _col, result_key in _FP_RESULT_KEYS if _want(result_key)}
     coverage_cols: list[str] = []
     schema_eligible_fp_cols = [
         c for c, rk in _FP_RESULT_KEYS if c in actual_cols and "ip" in actual_cols and rk in _wanted_fp_keys
     ]
 
-    # Rollup fast-path (no temp): when no per-request filters apply, the
-    # top-N fingerprints + their cross-window distinct-IP counts can be
-    # served from the per-(field, hour) count rollup + the HLL ip_spread
-    # rollup instead of the live FINGERPRINT_TOP_N scan over the catalog
-    # temp. On 30-day windows this trades a count(DISTINCT ip) full-temp
-    # scan for two parquet reads + an in-Python HLL merge.
-    #
-    # Falls back to the live SQL loop below when:
-    #   * filters are non-empty (rollups don't carry per-request filter
-    #     state — the live path is the only correct one)
-    #   * no fingerprint fields are in the schema OR ip is missing
-    #   * the count rollup returns no rows for any fingerprint field
-    #     (cold pool / writer hasn't run for this service yet)
-    #   * either rollup read raises
     rollup_served_fp_cols: set[str] = set()
     if not filters and schema_eligible_fp_cols == ["tls_ciphers_sha"]:
         try:
@@ -1150,15 +989,9 @@ def _build_security_response(
                 outcome="read",
             )
 
-            # Group top-N by field so we can render per-card lists.
-            # __other__ rows (the day-bundle synthetic catch-all) are
-            # skipped — they're a totals-preserving artefact, not a
-            # real fingerprint value.
             by_field: dict[str, list[tuple[str, int]]] = {}
             for field, value, count in top_n_rows:
-                if value == "__other__":
-                    continue
-                if not isinstance(value, str):
+                if value == "__other__" or not isinstance(value, str):
                     continue
                 by_field.setdefault(field, []).append((value, int(count)))
 
@@ -1181,18 +1014,6 @@ def _build_security_response(
                 for col, result_key in _FP_RESULT_KEYS:
                     if col not in by_field:
                         continue
-                    # Per-(field, value) ip_count comes from the merged
-                    # HLL. If the writer hasn't populated ip_spread for
-                    # THIS field yet (cold pool, backfill in progress,
-                    # this commit shipped before the daily compact's
-                    # self-heal ran), every lookup returns 0 — we MUST
-                    # fall through to the live FINGERPRINT_TOP_N SQL
-                    # so the FE shows real IP counts rather than a sea
-                    # of zeros. Test on "at least one non-zero" rather
-                    # than "non-empty dict" because the merge can
-                    # produce 0 for a (field, value) tuple that isn't
-                    # in the spread tree even when the tree DOES have
-                    # data for other fields in the same call.
                     candidate_rows: list[dict] = []
                     has_nonzero_ip_count = False
                     for value, count in by_field[col]:
@@ -1207,33 +1028,18 @@ def _build_security_response(
                             }
                         )
                     if not has_nonzero_ip_count:
-                        # ip_spread is cold for this field — skip
-                        # marking it served so the live SQL fallback
-                        # below runs. backfill_missing_hour_ip_spread
-                        # on the next daily compact tick will fill the
-                        # spread tree in and let the rollup path take
-                        # over from there.
                         continue
                     results[result_key] = candidate_rows
                     coverage_cols.append(col)
                     rollup_served_fp_cols.add(col)
         except Exception:
-            # Any error in the rollup path → fall through to the live
-            # FINGERPRINT_TOP_N loop below. Logged at debug — the
-            # caller produces a working result either way.
             _logger.debug(
                 "[security] fingerprint rollup path failed; falling back to live SQL",
                 exc_info=True,
             )
 
-    # Fingerprint cols the rollup didn't serve need the live FINGERPRINT_TOP_N
-    # over the temp ({col, ip}). Coverage scans the temp for EVERY fingerprint
-    # col that ran (served OR live), so it pins those cols into the temp even
-    # on a rollup hit.
     for col, result_key in _FP_RESULT_KEYS:
-        if result_key not in _wanted_fp_keys:
-            continue
-        if col in rollup_served_fp_cols:
+        if result_key not in _wanted_fp_keys or col in rollup_served_fp_cols:
             continue
         if col in actual_cols and "ip" in actual_cols:
             _need("tls_fingerprints", {col, "ip"})
@@ -1241,14 +1047,6 @@ def _build_security_response(
         else:
             results[result_key] = []
     if coverage_cols and _want("fingerprint_coverage") and "fingerprint_coverage" not in results:
-        # Coverage scans the temp for every fingerprint col that ran. When a
-        # fingerprint col is ALREADY in the temp for the live FINGERPRINT_TOP_N
-        # (rollup missed), reuse that temp scan. But when every fingerprint
-        # card served from a rollup (no fp col in the temp), serve coverage
-        # from the per-hour security_cov counts so tls_ciphers_sha can drop —
-        # the last column blocking the NGWAF-only temp narrowing. The cov
-        # rollup carries tls_ciphers_sha's populated count specifically, so it
-        # only applies to the single-col tls case.
         fp_cols_in_temp = any(c in needed_cols for c in coverage_cols)
         if not fp_cols_in_temp and coverage_cols == ["tls_ciphers_sha"]:
             _t = _time.perf_counter()

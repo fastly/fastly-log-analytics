@@ -191,16 +191,16 @@ if "backend.core" in sys.modules:
     setattr(sys.modules["backend.core"], "clickhouse_schema", sys.modules[__name__])
 
 try:
-    from backend.core.clickhouse_manifest import Artifact, Dataset, PgManifest  # noqa: E402
+    from backend.core.clickhouse import Artifact, Dataset, PgManifest  # noqa: E402
 except ImportError:
     pass
 
 
 def _ensure_manifest_symbols() -> None:
     if "PgManifest" not in globals():
-        from backend.core.clickhouse_manifest import Artifact as _A
-        from backend.core.clickhouse_manifest import Dataset as _D
-        from backend.core.clickhouse_manifest import PgManifest as _M
+        from backend.core.clickhouse import Artifact as _A
+        from backend.core.clickhouse import Dataset as _D
+        from backend.core.clickhouse import PgManifest as _M
 
         globals()["Artifact"] = _A
         globals()["Dataset"] = _D
