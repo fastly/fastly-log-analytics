@@ -19021,33 +19021,16 @@
    ]
   },
   "partial_start_mid_hour": {
-   "executes": 1,
-   "outcome": [],
-   "params": [
-    null
-   ],
-   "paths": [
-    {
-     "head": [
-      "<R>/rollups/hour_bundled/hour=h-71/pop_health.parquet",
-      "<R>/rollups/hour_bundled/hour=h-70/pop_health.parquet"
-     ],
-     "n": 71,
-     "sha": "2975ede1f0fa",
-     "tail": [
-      "<R>/rollups/hour_bundled/hour=h-2/pop_health.parquet",
-      "<R>/rollups/hour_bundled/hour=h-1/pop_health.parquet"
-     ]
-    }
-   ],
+   "executes": 0,
+   "outcome": null,
+   "params": [],
+   "paths": [],
    "probes": {
     "isdir": 1,
     "isfile": 74
    },
    "raised": null,
-   "sql": [
-    "ddaeb81d5368"
-   ]
+   "sql": []
   },
   "reversed_window": {
    "executes": 0,

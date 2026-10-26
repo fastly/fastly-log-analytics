@@ -32,11 +32,13 @@ from unittest.mock import patch
 
 import duckdb
 import pytest
+from backend.utils.date_utils import parse_iso_utc
 
 from backend.core import rollups as rr
+from backend.core.rollups import _common as rollup_common
 from backend.repositories import rollup_coverage
 from backend.repositories._base import QueryRunner
-from backend.utils.date_utils import parse_iso_utc
+from backend.routers.network import _fetch_pop_health_data
 from tests._helpers.rollups import ALL_FIELDS, build_rollup_golden_layout
 from tests._helpers.rollups import RollupGoldenLayout as Layout
 from tests._helpers.sources import make_source
@@ -783,8 +785,6 @@ from typing import NoReturn
 from unittest.mock import MagicMock
 
 import time_machine
-
-from backend import config as svcconfig
 from backend.models.dashboard import (
     HourlyRollupCoverage,
     ReaderCoverage,
@@ -792,6 +792,8 @@ from backend.models.dashboard import (
     ScalarRollupCoverage,
     TopNRollupCoverage,
 )
+
+from backend import config as svcconfig
 from backend.repositories import rollup_coverage as coverage
 from backend.repositories.rollup_coverage import (
     collect_hourly_bundle_paths,
@@ -952,6 +954,49 @@ def _parquet(root: Path, filename: str, data: dict) -> None:
     path = root / "rollups/hour_bundled/hour=2026-01-01-00" / filename
     path.parent.mkdir(parents=True, exist_ok=True)
     pq.write_table(pa.table(data), path)
+
+
+@pytest.mark.parametrize("start_minute", [0, 56])
+def test_pop_health_24h_window_preserves_leading_slice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, start_minute: int
+) -> None:
+    start = datetime(2026, 1, 1, 3, start_minute, tzinfo=UTC)
+    end = start + timedelta(hours=24)
+    source = make_source(str(tmp_path), name="svc", service_id="svc")
+    with duckdb.connect() as con, time_machine.travel(end + timedelta(minutes=1), tick=False):
+        con.execute(
+            "CREATE TABLE logs_svc (timestamp TIMESTAMPTZ, pop VARCHAR, status INTEGER, cache VARCHAR, "
+            "resp_bytes BIGINT, tcp_rtt DOUBLE, ttfb DOUBLE)"
+        )
+        con.executemany(
+            "INSERT INTO logs_svc VALUES (?, ?, 200, 'HIT', 100, 1000, 0.01)",
+            [
+                (start - timedelta(microseconds=1), "AAA"),
+                (start, "AAA"),
+                (start + timedelta(minutes=1), "AAA"),
+                (start + timedelta(hours=1), "BBB"),
+                (end - timedelta(minutes=1), "BBB"),
+                (end + timedelta(microseconds=1), "BBB"),
+            ],
+        )
+        monkeypatch.setattr(
+            rollup_common,
+            "acquire_rollup_connection_and_cols",
+            lambda *a, **kw: (con, {"pop"}, False),
+        )
+        layout = build_rollup_golden_layout(tmp_path, anchor=start.replace(minute=0))
+        assert rr.build_pop_health_bundles("svc", source, [layout.hkey(k) for k in range(24)]) == 24
+        rollup_coverage._listdir_cache.clear()
+        expected = dict(
+            con.execute(
+                "SELECT pop, COUNT(*) FROM logs_svc WHERE timestamp >= ? AND timestamp <= ? GROUP BY pop",
+                [start, end],
+            ).fetchall()
+        )
+        data, approximate, observation = _fetch_pop_health_data(con, source, start, end)
+        assert {row.pop: row.requests for row in data} == expected == {"AAA": 2, "BBB": 2}
+        assert approximate is (start_minute == 0)
+        assert observation["section_timings"][-1]["source"] == ("rollup" if approximate else "live")
 
 
 def test_histogram_records_both_attempts_and_served_outcome(in_memory_duckdb, tmp_path) -> None:

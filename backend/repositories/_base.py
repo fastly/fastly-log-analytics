@@ -3464,7 +3464,11 @@ class QueryRunner:
         )
         if resolved is None:
             return None
-        _st, et, paths_sql, active_hour_start, base_table = resolved
+        st, et, paths_sql, active_hour_start, base_table = resolved
+        # Whole-hour bundles omit this leading slice; the merge below only restores the live tail.
+        if st != st.replace(minute=0, second=0, microsecond=0):
+            return None
+
         if et > active_hour_start:
             ah_iso, et_iso = active_hour_start.isoformat(), et.isoformat()
             query = (

@@ -1349,6 +1349,15 @@ ClickHouse's block-dedup window. Never substitute a generic rebuild, blind
 replay, cursor reset or source-ledger edit. The recovery runbook documents the
 bounds and the post-deploy procedure.
 
+### 49. PoP health cannot drop a partial leading hour
+
+Standard PoP health's whole-hour rollup collector skips a partial leading hour,
+but its live merge restores only the active-hour tail. A window starting partway
+through an hour must use the existing scoped raw fallback, not serve a truncated
+rollup result. Keep hour-aligned starts eligible. The real-DuckDB regression in
+`tests/repositories/test_rollup_reader_coverage_golden.py` checks both dispatch
+paths against retained events over the same 24-hour bounds.
+
 ### Bounded ClickHouse diagnostic index (ADR-20)
 
 `backend/core/clickhouse_{manifest,publication,rows,export}.py` (`clickhouse_schema` folded into `clickhouse_publication.py`) implements
