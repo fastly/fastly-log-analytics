@@ -391,6 +391,8 @@ stack-health:
 # Mirrors the "Deploy config validation" step in ci.yml.
 deploy-validate:
 	docker compose -f docker-compose.yml -f docker-compose.prod.yml config -q
+	docker compose -f docker-compose.yml -f docker-compose.observability.standard.yml config -q
+	docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.observability.standard.yml -f docker-compose.observability.standard.prod.yml config -q
 	docker compose -f docker-compose.multipod.yml config -q
 	docker compose -f docker-compose.multipod.yml -f docker-compose.observability.yml config -q
 	@if command -v helm >/dev/null 2>&1; then \

@@ -276,6 +276,279 @@ def test_prod_compose_passes_operator_otel_settings_without_defaults() -> None:
     assert backend_env["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"] == traces
 
 
+def _render_standard_observability_compose(
+    prod: bool, otel_values: dict[str, str] | None = None, *, admin: bool = False
+) -> dict:
+    env = os.environ.copy()
+    for name in (*OTEL_ENV, "COMPOSE_FILE", "COMPOSE_PROFILES"):
+        env.pop(name, None)
+    env.update(otel_values or {})
+    files = ["docker-compose.yml"]
+    if prod:
+        files.append("docker-compose.prod.yml")
+    if admin:
+        env.update(
+            ADMIN_GATEWAY_HOST="admin.example.test",
+            ADMIN_GATEWAY_CERT_DIR="/operator/certificates",
+            ADMIN_GATEWAY_REQUIRED="1",
+            ADMIN_GATEWAY_SECRET="test-fixture-not-a-credential",
+            LOCAL_HOSTS="admin.example.test",
+        )
+        files.append("docker-compose.admin-mtls.yml")
+        if prod:
+            files.append("docker-compose.admin-mtls.prod.yml")
+    files.append("docker-compose.observability.standard.yml")
+    if prod:
+        files.append("docker-compose.observability.standard.prod.yml")
+    command = ["docker", "compose", "--env-file", "/dev/null"]
+    for filename in files:
+        command.extend(["-f", filename])
+    result = subprocess.run(
+        [*command, "config", "--format", "json"], cwd=ROOT, env=env, check=True, capture_output=True, text=True
+    )
+    return json.loads(result.stdout)
+
+
+@pytest.mark.parametrize("prod", [False, True])
+def test_standard_observability_is_private_bounded_and_has_no_grafana(prod: bool) -> None:
+    config = _render_standard_observability_compose(prod)
+    services = config["services"]
+    assert set(services) == {"backend", "frontend", "caddy", "postgres", "prometheus", "tempo"}
+    multipod = yaml.safe_load((ROOT / "docker-compose.observability.yml").read_text())
+    for name, target in (("prometheus", "/prometheus"), ("tempo", "/var/tempo")):
+        service = services[name]
+        assert service["image"] == multipod["services"][name]["image"]
+        assert service["network_mode"] == ("host" if prod else "service:backend")
+        assert not service.get("ports") and not service.get("networks")
+        assert int(service["mem_limit"]) == 512 * 1024**2
+        assert service["memswap_limit"] == service["mem_limit"]
+        assert float(service["cpus"]) == 0.5
+        assert service["read_only"] and service["cap_drop"] == ["ALL"]
+        assert service["logging"]["options"] == {"max-size": "10m", "max-file": "3"}
+        volume = next(volume for volume in service["volumes"] if volume["target"] == target)
+        assert volume["type"] == "volume"
+        assert volume["source"] in config["volumes"]
+    backend = services["backend"]
+    # Local has only its existing Caddy listener; prod retains no published ports.
+    assert {port["target"] for port in backend.get("ports", [])} == (set() if prod else {80})
+    assert backend["environment"]["TRUSTED_PROXY_IPS"] == "127.0.0.1"
+    if prod:
+        assert backend["environment"]["REQUIRE_PROXY_HEADERS"] == "1"
+        assert "--forwarded-allow-ips=127.0.0.1" in backend["command"]
+        assert services["caddy"]["image"] == "caddy-ratelimit:2-alpine"
+
+
+@pytest.mark.parametrize("prod", [False, True])
+def test_standard_observability_requires_explicit_exporter_settings(prod: bool) -> None:
+    env = _render_standard_observability_compose(prod)["services"]["backend"]["environment"]
+    assert env["OTEL_EXPORTER"] == "none"
+    assert all(env[name] == "" for name in OTEL_ENV[1:])
+    requested = {
+        "OTEL_EXPORTER": "otlp",
+        "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://127.0.0.1:9090/api/v1/otlp/v1/metrics",
+        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": "http://127.0.0.1:4318/v1/traces",
+    }
+    env = _render_standard_observability_compose(prod, requested)["services"]["backend"]["environment"]
+    assert {name: env[name] for name in OTEL_ENV} == requested
+
+
+@pytest.mark.parametrize("prod", [False, True])
+def test_standard_observability_preserves_required_admin_gateway(prod: bool) -> None:
+    config = _render_standard_observability_compose(prod, admin=True)
+    services = config["services"]
+    for name in ("backend", "frontend"):
+        assert services[name]["environment"]["ADMIN_GATEWAY_REQUIRED"] == "1"
+        assert services[name]["environment"]["ADMIN_GATEWAY_SECRET"] == "test-fixture-not-a-credential"
+    assert services["admin-gateway"]["network_mode"] == ("host" if prod else "service:backend")
+    assert services["admin-gateway"]["read_only"] is True
+    assert not ({9090, 3200, 4318} & {port["target"] for port in services["backend"].get("ports", [])})
+
+
+def test_standard_observability_receivers_bind_only_loopback_with_retention() -> None:
+    prometheus = yaml.safe_load((ROOT / "observability/standard/prometheus.yml").read_text())
+    assert prometheus["scrape_configs"] == []
+    assert "remote_write" not in prometheus
+    overlay = yaml.safe_load((ROOT / "docker-compose.observability.standard.yml").read_text())
+    command = overlay["services"]["prometheus"]["command"]
+    assert "--web.listen-address=127.0.0.1:9090" in command
+    assert "--web.enable-otlp-receiver" in command
+    assert "--storage.tsdb.retention.time=24h" in command
+    assert "--storage.tsdb.retention.size=512MB" in command
+    assert "--web.enable-admin-api" not in command
+    assert "--web.enable-remote-write-receiver" not in command
+    tempo = yaml.safe_load((ROOT / "observability/standard/tempo.yml").read_text())
+    assert tempo["server"]["http_listen_address"] == "127.0.0.1"
+    assert tempo["server"]["grpc_listen_address"] == "127.0.0.1"
+    assert tempo["memberlist"]["bind_addr"] == ["127.0.0.1"]
+    assert tempo["distributor"]["receivers"]["otlp"]["protocols"] == {"http": {"endpoint": "127.0.0.1:4318"}}
+    assert tempo["compactor"]["compaction"]["block_retention"] == "24h"
+    assert tempo["storage"]["trace"]["local"]["path"] == "/var/tempo/blocks"
+    assert tempo["storage"]["trace"]["wal"]["path"] == "/var/tempo/wal"
+    assert tempo["usage_report"]["reporting_enabled"] is False
+    assert "metrics_generator" not in tempo
+
+
+def test_standard_observability_verifier_is_copied_into_runtime_image() -> None:
+    dockerfile = (ROOT / "backend/Dockerfile").read_text().split(" AS runner", 1)[1]
+    assert "COPY --chown=app:app scripts/dev/verify_observability.py scripts/dev/" in dockerfile
+    assert "--create-home" in dockerfile and "USER app" in dockerfile
+
+
+def test_standard_observability_static_gate_is_mirrored_in_make_and_ci() -> None:
+    make = (ROOT / "Makefile").read_text().split("\ndeploy-validate:\n", 1)[1].split("\n\n", 1)[0]
+    workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
+    step = next(
+        step
+        for job in workflow["jobs"].values()
+        for step in job.get("steps", [])
+        if step.get("name") == "Deploy config validation (compose + helm chart)"
+    )
+    for files in (
+        ["docker-compose.yml", "docker-compose.observability.standard.yml"],
+        [
+            "docker-compose.yml",
+            "docker-compose.prod.yml",
+            "docker-compose.observability.standard.yml",
+            "docker-compose.observability.standard.prod.yml",
+        ],
+    ):
+        command = "docker compose " + " ".join("-f " + name for name in files) + " config -q"
+        assert command in make
+        assert command in step["run"].splitlines()
+
+
+def _private_observability_runner_source() -> str:
+    runner = ROOT / "scripts/dev/deploy_test_all.sh"
+    if not runner.exists():
+        pytest.skip("Canonical deployment runner is operator-local and gitignored")
+    return runner.read_text()
+
+
+def _private_observability_python(marker: str) -> str:
+    source = _private_observability_runner_source()
+    return source.split(f"<<'{marker}'\n", 1)[1].split(f"\n{marker}", 1)[0]
+
+
+@pytest.mark.parametrize(
+    "blocked",
+    [
+        "RESUME_VERIFICATION",
+        "RESET_RUNNING",
+        "WATCH_ONLY",
+        "GCE_ADMIN_BOOTSTRAP",
+        "GCE_ADMIN_FIREWALL_APPLY",
+        "IGNORE_LOCAL_STD",
+        "SKIP_GCE",
+        "SKIP_REMOTE_STD",
+    ],
+)
+def test_private_observability_runner_rejects_non_rollout_modes(blocked: str) -> None:
+    source = _private_observability_runner_source()
+    start = source.index("validate_standard_observability_mode() {")
+    end = source.index("\nvalidate_standard_observability_mode || exit 1", start)
+    env = {
+        **os.environ,
+        "LOCAL_STANDARD_OBSERVABILITY": "1",
+        "GCE_STANDARD_OBSERVABILITY": "1",
+        "RESUME_VERIFICATION": "0",
+        "RESET_RUNNING": "0",
+        "WATCH_ONLY": "0",
+        "ADMIN_GATEWAY_PHASE": "",
+        "GCE_ADMIN_BOOTSTRAP": "0",
+        "GCE_ADMIN_FIREWALL_APPLY": "0",
+        "IGNORE_LOCAL_STD": "0",
+        "SKIP_GCE": "0",
+        "SKIP_REMOTE_STD": "0",
+        blocked: "1",
+    }
+    result = subprocess.run(
+        ["bash", "-uc", source[start:end] + "\nvalidate_standard_observability_mode"],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 1
+    # Default mode must leave the legacy resume/watch/bootstrap path alone.
+    env.update(LOCAL_STANDARD_OBSERVABILITY="0", GCE_STANDARD_OBSERVABILITY="0")
+    result = subprocess.run(
+        ["bash", "-uc", source[start:end] + "\nvalidate_standard_observability_mode"],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0
+
+
+def test_private_observability_env_preserves_mtls_and_rejects_conflicting_pipeline(tmp_path, monkeypatch) -> None:
+    program = _private_observability_python("FLA_STANDARD_OBSERVABILITY_ENV")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: subprocess.CompletedProcess(args, 0))
+    path = tmp_path / ".env"
+    original = (
+        "COMPOSE_FILE=docker-compose.yml:docker-compose.prod.yml:"
+        "docker-compose.admin-mtls.yml:docker-compose.admin-mtls.prod.yml\n"
+        "ADMIN_GATEWAY_REQUIRED=1\nUNCHANGED=preserved\n"
+    )
+    path.write_text(original)
+    path.chmod(0o600)
+    exec(compile(program, "<private-observability-env>", "exec"), {})
+    first = path.read_text()
+    assert "ADMIN_GATEWAY_REQUIRED=1\nUNCHANGED=preserved\n" in first
+    assert "admin-mtls.prod.yml:docker-compose.observability.standard.yml:" in first
+    assert "docker-compose.observability.standard.prod.yml" in first
+    assert path.stat().st_mode & 0o777 == 0o600
+    exec(compile(program, "<private-observability-env>", "exec"), {})
+    assert path.read_text() == first  # Repeat opt-in is idempotent.
+    path.write_text(original + "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=https://external.example.test/v1/traces\n")
+    with pytest.raises(SystemExit, match="Conflicting"):
+        exec(compile(program, "<private-observability-env>", "exec"), {})
+    assert "external.example.test" in path.read_text()
+    path.write_text(original)
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: subprocess.CompletedProcess(args, 1))
+    with pytest.raises(SystemExit, match="VM .env unchanged"):
+        exec(compile(program, "<private-observability-env>", "exec"), {})
+    assert path.read_text() == original
+
+
+@pytest.mark.parametrize("failure", [None, "emit", "verify"])
+def test_private_observability_runner_requires_real_verifier_success(tmp_path, monkeypatch, failure, capsys) -> None:
+    program = _private_observability_python("FLA_STANDARD_OBSERVABILITY_VERIFY")
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append(command)
+        # Both local argv and the SSH shell string must contain the real CLI.
+        text = " ".join(command)
+        if failure and f"verify_observability {failure}" in text:
+            raise subprocess.CalledProcessError(1, command)
+        if "read_text()" in text:
+            body = {"metric_observed": True, "trace_observed": True}
+            return subprocess.CompletedProcess(command, 0, stdout=json.dumps(body))
+        return subprocess.CompletedProcess(command, 0, stdout='{"completed": true}')
+
+    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(sys, "argv", ["runner", str(tmp_path), "1", "1", "2", "-p", "source-root-project", "ssh-test"])
+    if failure:
+        with pytest.raises(SystemExit) as caught:
+            exec(compile(program, "<private-observability-verify>", "exec"), {})
+        assert caught.value.code == 1
+        assert "delivery verified" not in capsys.readouterr().out
+    else:
+        exec(compile(program, "<private-observability-verify>", "exec"), {})
+        assert len(calls) == 10
+        assert calls[0][:4] == ["docker", "compose", "-p", "source-root-project"]
+        assert calls[5][:2] == ["ssh-test", "--command"]
+        assert all("scripts.dev.verify_observability" in " ".join(calls[index]) for index in (0, 2, 5, 7))
+        assert len(list(tmp_path.glob("observability-*/*.json"))) == 4
+    for directory in tmp_path.iterdir():
+        assert directory.stat().st_mode & 0o777 == 0o700
+        for path in directory.iterdir():
+            assert path.stat().st_mode & 0o777 == 0o600
+            assert "http" not in path.read_text()
+
+
 # ── Merged from tests/deploy/test_public_gateway_runtime.py ──
 
 

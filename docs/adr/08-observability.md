@@ -7,6 +7,11 @@
 > **Architectural Amendments (v3.0):**
 > - **PostgreSQL 16 Unified Storage ([ADR-22](22-postgres-only-metadata.md)):** Layer 4 (`usage_log`) has migrated from per-service SQLite `metadata.db` to unified PostgreSQL 16 (`usage_log` and `usage_log_hourly_summary`), queryable across all deployment modes via `/api/admin/log-accounting`.
 > - **High-Scale Telemetry ([ADR-21](21-high-scale-serving-architecture.md)):** In `DEPLOYMENT_MODE=high_scale`, ClickHouse and micro-batch worker telemetry are integrated into system vitals and Prometheus/OpenTelemetry metrics.
+> - **Optional Standard Docker receivers (2026-10):** The existing OTLP/HTTP
+>   exporters can send directly to private Prometheus/Tempo receivers through
+>   the opt-in Standard overlays. No Collector or Grafana is required, and the
+>   default remains `none`. See the [deployment guide](../deploy/observability.md)
+>   for resource/retention bounds and the container-SDK delivery probe's limits.
 
 ## 1. Context & Motivation
 
@@ -47,8 +52,14 @@ These are not SLOs (we make no uptime promise). They are the line at which a reg
 `OTEL_EXPORTER` (read in [backend/core/request_telemetry.py](../../backend/core/request_telemetry.py)) is the single switch:
 
 - `none` (default in prod) — SDK uninitialised; spans/metrics record against global no-op providers; zero network/disk cost. Right answer for "we're not running a collector yet."
-- `console` (default in dev) — `ConsoleSpanExporter` + `ConsoleMetricExporter`. Writes to stdout. **Never set in prod** — the 2026-06-10 incident is the load-bearing reason.
-- `otlp` (when a collector is provisioned) — wire in `_setup_sdk` ([backend/core/request_telemetry.py:86](../../backend/core/request_telemetry.py)). Sampling strategy: head-based 10% for spans, 60s metric export interval. Re-evaluate once we have a real exporter target.
+- `console` (explicit development-only choice) — `ConsoleSpanExporter` +
+  `ConsoleMetricExporter`. Writes to stdout. **Never set in prod** — the
+  2026-06-10 incident is the load-bearing reason. Unset still means `none`.
+- `otlp` — the existing `_setup_sdk` in
+  [request_telemetry.py](../../backend/core/request_telemetry.py) uses OTLP/HTTP
+  exporters with both explicit full signal endpoints. It supports direct
+  Prometheus metrics and Tempo traces; a Collector is not required. Metrics
+  export every 15 seconds; span sampling follows the SDK configuration.
 
 The exporter choice is honest about reality: there is no production collector today, so the production default is `none`. The frontend bug-report flow + per-service `usage_log` queries cover the cost-attribution use case that an OTLP backend would otherwise own.
 

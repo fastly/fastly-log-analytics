@@ -165,6 +165,9 @@ COPY --from=builder --chown=app:app /root/.duckdb /home/app/.duckdb
 # Placing these before backend/ preserves Docker layer caching across application code changes.
 COPY --chown=app:app pyproject.toml README.md uv.lock ./
 COPY --chown=app:app scripts/generate_openapi.py scripts/clickhouse_replay.py scripts/
+# The optional delivery probe runs through the real container SDK/environment;
+# production has no ./scripts bind mount. Copy only this public diagnostic CLI.
+COPY --chown=app:app scripts/dev/verify_observability.py scripts/dev/
 COPY --chown=app:app compute/scorer/matrix.default.json ./compute/scorer/matrix.default.json
 COPY --from=scorer-builder --chown=app:app /session-scorer.tar.gz ./compute/scorer/pkg/session-scorer.tar.gz
 

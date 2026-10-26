@@ -789,6 +789,15 @@ uv run python scripts/check_environment_health.py
 
 ### Parallel Multi-Environment Deployment
 
+Optional Standard Docker telemetry uses
+`docker-compose.observability.standard.yml` plus its `.standard.prod.yml`
+host-network overlay, **not** the existing multipod observability overlay.
+It adds only private Prometheus/Tempo receivers. Export settings remain
+operator-owned and default off. See [the deployment guide](docs/deploy/observability.md)
+for the canonical runner's explicit opt-in and public
+`python -m scripts.dev.verify_observability` delivery check. This probe proves
+container SDK delivery only, never running-worker coverage or full qualification.
+
 `scripts/dev/deploy_test_all.sh` is a **local-only** script: it is gitignored (it embeds environment credentials) and is not in the public repo, so a fresh clone will not have it. The rules for using it, and what each run does, live in one place: [Canonical Multi-Tier Deployment Mandate](#canonical-multi-tier-deployment-mandate-never-deploy-or-test-by-hand).
 
 ```bash
