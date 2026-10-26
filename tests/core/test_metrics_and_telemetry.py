@@ -303,7 +303,8 @@ def test_observability_probe_writes_private_receipts_without_overwriting(tmp_pat
         path.unlink(missing_ok=True)
 
 
-def test_observability_probe_actual_otlp_transport(tmp_path):
+@pytest.mark.parametrize("application_request", [False, True])
+def test_observability_probe_actual_otlp_transport(tmp_path, application_request):
     received = {}
 
     class Receiver(BaseHTTPRequestHandler):
@@ -319,17 +320,31 @@ def test_observability_probe_actual_otlp_transport(tmp_path):
             if self.path.startswith("/api/v1/query?"):
                 resource_metrics = received["/v1/metrics"]["resourceMetrics"][0]
                 attrs = probe._attributes(resource_metrics["resource"]["attributes"])
-                metric = resource_metrics["scopeMetrics"][0]["metrics"][0]
-                assert metric["name"] == "app.observability.probe"
-                point = metric["sum"]["dataPoints"][0]
+                metric_name = "http.server.duration" if application_request else "app.observability.probe"
+                metric = next(
+                    metric
+                    for scope in resource_metrics["scopeMetrics"]
+                    for metric in scope["metrics"]
+                    if metric["name"] == metric_name
+                )
+                point = metric["histogram" if application_request else "sum"]["dataPoints"][0]
                 body = {
                     "status": "success",
                     "data": {
                         "resultType": "vector",
                         "result": [
                             {
-                                "metric": {"job": attrs["service.name"], "instance": attrs["service.instance.id"]},
-                                "value": [int(point["timeUnixNano"]) / 1e9, point["asInt"]],
+                                "metric": {
+                                    "job": attrs["service.name"],
+                                    "instance": attrs["service.instance.id"],
+                                    "__name__": "http_server_duration_milliseconds_count"
+                                    if application_request
+                                    else "app_observability_probe_total",
+                                },
+                                "value": [
+                                    int(point["timeUnixNano"]) / 1e9,
+                                    point["count" if application_request else "asInt"],
+                                ],
                             }
                         ],
                     },
@@ -359,17 +374,46 @@ def test_observability_probe_actual_otlp_transport(tmp_path):
             "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": f"{origin}/v1/traces",
         }
         env.pop("PYTEST_CURRENT_TEST", None)
-        child = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "scripts.dev.verify_observability",
-                "emit",
-                "--probe-id",
-                str(uuid.uuid4()),
-                "--output",
+        arguments = [
+            "-m",
+            "scripts.dev.verify_observability",
+            "emit",
+            "--probe-id",
+            str(uuid.uuid4()),
+            "--output",
+            str(receipt_path),
+        ]
+        if application_request:
+            arguments = [
+                "-c",
+                """
+import json, sys, uuid
+from datetime import UTC, datetime
+from pathlib import Path
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from opentelemetry import metrics, trace
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+from scripts.dev import verify_observability as probe
+probe.telemetry.ensure_initialized()
+app = FastAPI()
+@app.get("/api/health")
+def health():
+    return {"status": "ok"}
+FastAPIInstrumentor.instrument_app(app, exclude_spans=["receive", "send"])
+receipt = probe.ApplicationReceipt(trace_id=uuid.uuid4().hex, started_at=datetime.now(UTC), path="/api/health")
+parent = f"00-{receipt.trace_id}-{uuid.uuid4().hex[:16]}-01"
+with TestClient(app) as client:
+    assert client.get(receipt.path, headers={"traceparent": parent}).status_code == 200
+assert trace.get_tracer_provider().force_flush(timeout_millis=5000)
+assert metrics.get_meter_provider().force_flush(timeout_millis=5000)
+probe._write_private(Path(sys.argv[1]), receipt.model_dump(mode="json"))
+print(json.dumps({"completed": True}))
+""",
                 str(receipt_path),
-            ],
+            ]
+        child = subprocess.run(
+            [sys.executable, *arguments],
             env=env,
             capture_output=True,
             text=True,
@@ -377,15 +421,23 @@ def test_observability_probe_actual_otlp_transport(tmp_path):
             timeout=20,
         )
         assert json.loads(child.stdout)["completed"] is True
-        receipt = probe.ProbeReceipt.model_validate_json(receipt_path.read_text())
         with httpx.Client(trust_env=False) as client:
-            result = probe.verify_delivery(
-                receipt,
-                client=client,
-                prometheus_url=origin,
-                tempo_url=origin,
-                timeout_seconds=0,
-            )
+            if application_request:
+                result = probe.verify_application_delivery(
+                    probe.ApplicationReceipt.model_validate_json(receipt_path.read_text()),
+                    client=client,
+                    prometheus_url=origin,
+                    tempo_url=origin,
+                    timeout_seconds=0,
+                )
+            else:
+                result = probe.verify_delivery(
+                    probe.ProbeReceipt.model_validate_json(receipt_path.read_text()),
+                    client=client,
+                    prometheus_url=origin,
+                    tempo_url=origin,
+                    timeout_seconds=0,
+                )
         assert result["metric_observed"] and result["trace_observed"]
     finally:
         server.shutdown()
