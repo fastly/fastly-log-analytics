@@ -47,6 +47,7 @@ import json
 import os
 import re
 import secrets
+import stat
 import sys
 import threading
 import time
@@ -202,10 +203,28 @@ class ReportRequestHandler(SimpleHTTPRequestHandler):
             self._send_json(status, body)
 
     def _serve_live_bootstrap_status(self, env_id: str) -> None:
-        base_url = admin_origin(env_id) if env_id in ENV_BASE_URLS else None
-        base_url = base_url or ENV_BASE_URLS.get(env_id)
-        if not base_url:
+        if env_id not in ENV_BASE_URLS:
             self._send_json(400, json.dumps({"error": f"unknown env '{env_id}'"}).encode("utf-8"))
+            return
+        base_url = admin_origin(env_id)
+        if not base_url:
+            # No admin mTLS endpoint is configured for this env (deploy.env not
+            # loaded by the server process). Do NOT fall back to a plain-HTTP
+            # origin: an unauthenticated /api/bootstrap returns the anonymous
+            # `needs_login` stub (null header_badge, empty services), which the
+            # report would render as misleading empty/zero stats. Surface the
+            # real cause instead of a silent fallback.
+            self._send_json(
+                200,
+                json.dumps(
+                    {
+                        "ok": False,
+                        "status": 0,
+                        "data": None,
+                        "error": f"admin gateway endpoint not configured for '{env_id}'",
+                    }
+                ).encode("utf-8"),
+            )
             return
 
         cached = _BOOTSTRAP_CACHE.get(env_id)
@@ -226,9 +245,25 @@ class ReportRequestHandler(SimpleHTTPRequestHandler):
                 )
                 with admin_urlopen(request, timeout=3) as response:
                     payload = response.read()
-                    body = json.dumps({"ok": True, "status": response.status, "data": json.loads(payload)}).encode(
-                        "utf-8"
-                    )
+                    data = json.loads(payload)
+                    header_badge = data.get("header_badge") if isinstance(data, dict) else None
+                    services = data.get("services") if isinstance(data, dict) else None
+                    if not header_badge or not services:
+                        # Authenticated fetch succeeded but the backend returned
+                        # the anonymous/degraded shape (no header_badge or no
+                        # services). Surface it rather than rendering empty or
+                        # invented-zero stats.
+                        body = json.dumps(
+                            {
+                                "ok": False,
+                                "status": response.status,
+                                "data": data,
+                                "error": "admin bootstrap returned no header_badge/services "
+                                "(admin identity not accepted?)",
+                            }
+                        ).encode("utf-8")
+                    else:
+                        body = json.dumps({"ok": True, "status": response.status, "data": data}).encode("utf-8")
             except urllib.error.HTTPError as exc:
                 reason = getattr(exc, "reason", None)
                 error_text = f"HTTP {exc.code} {reason}".strip() if reason else f"HTTP {exc.code}"
@@ -296,8 +331,127 @@ class PrivateReportRequestHandler(ReportRequestHandler):
         super().end_headers()
 
 
+# Admin mTLS keys the report server will adopt from the operator's gitignored
+# deploy.env when the process was spawned without them. Mirrors the admin subset
+# of deploy_test_all.sh's FLA_ADMIN_PERSIST_KEYS plus the single-identity legacy
+# vars admin_tls._settings() also reads. Only these keys are ever adopted;
+# nothing else in the file is touched, and secrets live inside the file (the
+# path itself is a conventional, non-secret location).
+_ADMIN_ENV_ALLOW_KEYS: frozenset[str] = frozenset(
+    {
+        "ADMIN_GATEWAY_ENDPOINTS",
+        "ADMIN_GATEWAY_HOST",
+        "ADMIN_GATEWAY_CERT_DIR",
+        "ADMIN_GATEWAY_SECRET",
+        "ADMIN_GATEWAY_REQUIRED",
+        "ADMIN_GATEWAY_CALLERS_READY",
+        "ADMIN_GATEWAY_UID",
+        "ADMIN_GATEWAY_GID",
+        "ADMIN_GATEWAY_CLIENT_ORIGIN",
+        "ADMIN_GATEWAY_CLIENT_CERT",
+        "ADMIN_GATEWAY_CLIENT_KEY",
+        "ADMIN_GATEWAY_SERVER_CA",
+        "ADMIN_GATEWAY_ENVIRONMENT",
+        "LOCAL_STANDARD_ADMIN_MTLS",
+        "GCE_ADMIN_MTLS",
+        "ELEVATION_ADMIN_MTLS",
+        "LOCAL_HOSTS",
+        "ELEVATION_ADMIN_GATEWAY_HOST",
+        "ELEVATION_ADMIN_GATEWAY_CERT_DIR",
+        "GCE_ADMIN_BUNDLE_DIR",
+        "NODE_EXTRA_CA_CERTS",
+    }
+)
+
+# If any of these already exist in the environment, the process already carries
+# an admin identity and the fallback is a no-op.
+_ADMIN_ENV_PRIMARY_KEYS: tuple[str, ...] = (
+    "ADMIN_GATEWAY_ENDPOINTS",
+    "ADMIN_GATEWAY_CLIENT_ORIGIN",
+)
+
+
+def _default_admin_deploy_env() -> Path:
+    override = os.environ.get("FLA_ADMIN_DEPLOY_ENV")
+    if override:
+        return Path(override)
+    return Path.home() / ".config" / "fastly-log-analytics" / "admin" / "deploy.env"
+
+
+def _parse_admin_env_file(path: Path) -> dict[str, str]:
+    """Hand-rolled dotenv parse restricted to allow-listed admin keys.
+
+    Returns {} on any read error or when the file fails the regular-file /
+    owner / mode-600 checks. Avoids a python-dotenv dependency so this stays
+    usable in a standalone script.
+    """
+    try:
+        info = path.lstat()
+    except OSError:
+        return {}
+    if not stat.S_ISREG(info.st_mode):
+        return {}
+    if info.st_uid != os.getuid():
+        return {}
+    if info.st_mode & 0o077 != 0:
+        return {}
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    parsed: dict[str, str] = {}
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].lstrip()
+        if "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        if key not in _ADMIN_ENV_ALLOW_KEYS:
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        if "\0" in value:
+            continue
+        parsed[key] = value
+    return parsed
+
+
+def _load_admin_env_fallback(path: Path | None = None, environ: dict[str, str] | None = None) -> bool:
+    """Populate admin mTLS env vars from the operator deploy.env if absent.
+
+    A long-lived report server spawned without the admin gateway environment
+    cannot resolve any admin origin, so every environment's live bootstrap
+    stats panel renders "Stats unavailable". If the process already carries an
+    admin identity (ADMIN_GATEWAY_ENDPOINTS or a single-origin
+    ADMIN_GATEWAY_CLIENT_ORIGIN), this is a no-op. Otherwise it adopts ONLY the
+    allow-listed admin keys from the gitignored deploy.env. Returns True when
+    any key was adopted; silent no-op (returns False) when the file is absent or
+    fails validation.
+    """
+    env = environ if environ is not None else os.environ
+    if any(env.get(key) for key in _ADMIN_ENV_PRIMARY_KEYS):
+        return False
+    env_path = path if path is not None else _default_admin_deploy_env()
+    parsed = _parse_admin_env_file(env_path)
+    if not parsed:
+        return False
+    adopted = False
+    for key, value in parsed.items():
+        if env.get(key):
+            continue
+        env[key] = value
+        adopted = True
+    return adopted
+
+
 def main() -> None:
     global _CURRENT_REPORT_LINK
+    _load_admin_env_fallback()
     parser = argparse.ArgumentParser()
     parser.add_argument("port", nargs="?", type=int, default=41705)
     parser.add_argument("--private-root", type=Path)

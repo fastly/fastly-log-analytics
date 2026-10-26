@@ -1483,6 +1483,27 @@ with patch.dict(sys.modules, {"validate_credentials": Mock(name="operator_creden
     from scripts.dev import report_server
 
 
+# A realistic authenticated /api/bootstrap payload: non-null header_badge with
+# separate request-event and RUM sub-objects, plus a non-empty services list.
+# Synthetic placeholder values only — no real service ids, IPs, or paths.
+_FULL_BOOTSTRAP_PAYLOAD = {
+    "active_service_id": "test-service",
+    "header_badge": {
+        "request": {
+            "total_rows": 217465,
+            "latest_log_at": "2026-10-26T16:00:00Z",
+            "last_sync_at": "2026-10-26T16:05:00Z",
+        },
+        "rum": {
+            "total_rows": 48210,
+            "latest_log_at": "2026-10-26T15:59:30Z",
+            "last_sync_at": "2026-10-26T16:04:45Z",
+        },
+    },
+    "services": [{"service_id": "test-service", "name": "Test Service"}],
+}
+
+
 @pytest.fixture
 def report(monkeypatch):
     # The report server memoizes live bootstrap/error/credential responses at module level;
@@ -1500,7 +1521,7 @@ def report(monkeypatch):
 
     def upstream(request, timeout):
         requests.append((request.full_url, timeout, dict(request.header_items())))
-        response = io.BytesIO(b'{"active_service_id":"test-service"}')
+        response = io.BytesIO(json.dumps(_FULL_BOOTSTRAP_PAYLOAD).encode("utf-8"))
         response.status = 200
         return response
 
@@ -1520,7 +1541,7 @@ def test_report_bootstrap_uses_exact_origin_certificate_transport(report):
     origin, requests, origins = report
     with urlopen(f"{origin}/relics/bootstrap_status.json?env=remote-hs", timeout=5) as response:
         body = json.load(response)
-    assert body == {"ok": True, "status": 200, "data": {"active_service_id": "test-service"}}
+    assert body == {"ok": True, "status": 200, "data": _FULL_BOOTSTRAP_PAYLOAD}
     assert origins == ["remote-hs"]
     assert requests == [("https://admin.example.com:8443/api/bootstrap", 3, {"Accept": "application/json"})]
 
@@ -1572,6 +1593,133 @@ def test_report_bootstrap_surfaces_timeout_in_body(report, monkeypatch):
     assert body["error"]
     assert "timed out" in body["error"]
     assert len(requests) == 1
+
+
+def test_report_bootstrap_surfaces_unconfigured_endpoint_in_body(report, monkeypatch):
+    origin, requests, _origins = report
+    monkeypatch.setattr(report_server, "admin_origin", lambda env: None)
+    with urlopen(f"{origin}/relics/bootstrap_status.json?env=remote-hs", timeout=5) as response:
+        assert response.status == 200
+        body = json.load(response)
+    assert body["ok"] is False
+    assert body["status"] == 0
+    assert body["data"] is None
+    assert "admin gateway endpoint not configured" in body["error"]
+    assert not requests
+
+
+def test_report_bootstrap_surfaces_missing_header_badge_in_body(report, monkeypatch):
+    origin, requests, _origins = report
+
+    def upstream_without_stats(request, timeout):
+        requests.append((request.full_url, timeout, dict(request.header_items())))
+        payload = io.BytesIO(json.dumps({"active_service_id": "test-service"}).encode("utf-8"))
+        payload.status = 200
+        return payload
+
+    monkeypatch.setattr(report_server, "admin_urlopen", upstream_without_stats)
+    with urlopen(f"{origin}/relics/bootstrap_status.json?env=remote-hs", timeout=5) as response:
+        assert response.status == 200
+        body = json.load(response)
+    assert body["ok"] is False
+    assert "no header_badge/services" in body["error"]
+    assert len(requests) == 1
+
+
+def _write_env_file(tmp_path, body, *, mode=0o600):
+    env_path = tmp_path / "deploy.env"
+    env_path.write_text(body, encoding="utf-8")
+    env_path.chmod(mode)
+    return env_path
+
+
+def test_parse_admin_env_file_keeps_only_allow_listed_keys(tmp_path):
+    env_path = _write_env_file(
+        tmp_path,
+        "ADMIN_GATEWAY_ENDPOINTS={}\n"
+        "export ADMIN_GATEWAY_CLIENT_ORIGIN=https://admin.example.com:8443\n"
+        "# a comment line\n"
+        "\n"
+        "EVIL_KEY=should-be-dropped\n",
+    )
+    parsed = report_server._parse_admin_env_file(env_path)
+    assert parsed["ADMIN_GATEWAY_ENDPOINTS"] == "{}"
+    assert parsed["ADMIN_GATEWAY_CLIENT_ORIGIN"] == "https://admin.example.com:8443"
+    assert "EVIL_KEY" not in parsed
+
+
+def test_parse_admin_env_file_strips_matching_quotes(tmp_path):
+    env_path = _write_env_file(
+        tmp_path,
+        "ADMIN_GATEWAY_SECRET=\"quoted-secret\"\nADMIN_GATEWAY_HOST='single-quoted'\n",
+    )
+    parsed = report_server._parse_admin_env_file(env_path)
+    assert parsed["ADMIN_GATEWAY_SECRET"] == "quoted-secret"
+    assert parsed["ADMIN_GATEWAY_HOST"] == "single-quoted"
+
+
+def test_parse_admin_env_file_rejects_group_or_world_readable(tmp_path):
+    env_path = _write_env_file(
+        tmp_path,
+        "ADMIN_GATEWAY_ENDPOINTS={}\n",
+        mode=0o644,
+    )
+    assert report_server._parse_admin_env_file(env_path) == {}
+
+
+def test_parse_admin_env_file_rejects_nul_in_value(tmp_path):
+    env_path = _write_env_file(
+        tmp_path,
+        "ADMIN_GATEWAY_SECRET=bad\x00value\n",
+    )
+    assert report_server._parse_admin_env_file(env_path) == {}
+
+
+def test_parse_admin_env_file_missing_file_returns_empty(tmp_path):
+    assert report_server._parse_admin_env_file(tmp_path / "absent.env") == {}
+
+
+def test_load_admin_env_fallback_no_op_when_primary_key_present(tmp_path):
+    env_path = _write_env_file(tmp_path, "ADMIN_GATEWAY_HOST=from-file\n")
+    environ = {"ADMIN_GATEWAY_ENDPOINTS": "{}"}
+    assert report_server._load_admin_env_fallback(path=env_path, environ=environ) is False
+    assert "ADMIN_GATEWAY_HOST" not in environ
+
+
+def test_load_admin_env_fallback_adopts_allow_listed_keys(tmp_path):
+    env_path = _write_env_file(
+        tmp_path,
+        "ADMIN_GATEWAY_ENDPOINTS={}\nADMIN_GATEWAY_HOST=from-file\nEVIL_KEY=nope\n",
+    )
+    environ = {}
+    assert report_server._load_admin_env_fallback(path=env_path, environ=environ) is True
+    assert environ["ADMIN_GATEWAY_ENDPOINTS"] == "{}"
+    assert environ["ADMIN_GATEWAY_HOST"] == "from-file"
+    assert "EVIL_KEY" not in environ
+
+
+def test_load_admin_env_fallback_does_not_overwrite_existing_non_primary_key(tmp_path):
+    env_path = _write_env_file(
+        tmp_path,
+        "ADMIN_GATEWAY_ENDPOINTS={}\nADMIN_GATEWAY_HOST=from-file\n",
+    )
+    environ = {"ADMIN_GATEWAY_HOST": "already-set"}
+    assert report_server._load_admin_env_fallback(path=env_path, environ=environ) is True
+    assert environ["ADMIN_GATEWAY_HOST"] == "already-set"
+    assert environ["ADMIN_GATEWAY_ENDPOINTS"] == "{}"
+
+
+def test_load_admin_env_fallback_returns_false_on_rejected_file(tmp_path):
+    env_path = _write_env_file(tmp_path, "ADMIN_GATEWAY_ENDPOINTS={}\n", mode=0o644)
+    environ = {}
+    assert report_server._load_admin_env_fallback(path=env_path, environ=environ) is False
+    assert environ == {}
+
+
+def test_default_admin_deploy_env_honors_override(tmp_path, monkeypatch):
+    override = tmp_path / "custom-deploy.env"
+    monkeypatch.setenv("FLA_ADMIN_DEPLOY_ENV", str(override))
+    assert report_server._default_admin_deploy_env() == override
 
 
 @pytest.mark.parametrize("path", ["/", "/reports", "/reports/"])
@@ -1635,7 +1783,7 @@ def test_private_report_keeps_same_origin_bootstrap_proxy(private_report):
     origin, requests, origins = private_report
     with urlopen(f"{origin}relics/bootstrap_status.json?env=remote-hs", timeout=5) as response:
         body = json.load(response)
-    assert body["data"] == {"active_service_id": "test-service"}
+    assert body["data"] == _FULL_BOOTSTRAP_PAYLOAD
     assert origins == ["remote-hs"]
     assert len(requests) == 1
 
