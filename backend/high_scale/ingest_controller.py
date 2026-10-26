@@ -2392,9 +2392,6 @@ def _replay_all(
 _self_mod = sys.modules[__name__]
 worker = _self_mod
 recovery = _self_mod
-sys.modules["backend.high_scale.assets"] = _self_mod
-sys.modules["backend.high_scale.worker"] = _self_mod
-sys.modules["backend.high_scale.recovery"] = _self_mod
 _hs_pkg = sys.modules.get("backend.high_scale")
 if _hs_pkg is not None:
     setattr(_hs_pkg, "assets", _self_mod)

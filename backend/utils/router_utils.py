@@ -846,6 +846,8 @@ def get_enriched_services(active_service_id: str | None = None) -> list[dict[str
     result = []
     for cfg in configs:
         sid = cfg.get("service_id", "")
+        if not sid:
+            continue
         name = name_map.get(sid, sid)
 
         db_path = cfg.get("duckdb_path") or svcconfig.duckdb_path(sid)

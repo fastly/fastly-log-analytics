@@ -11,6 +11,7 @@ from __future__ import annotations
 import importlib
 import importlib.abc
 import importlib.machinery
+import importlib.util
 import sys
 import types
 from collections.abc import Sequence
@@ -202,7 +203,7 @@ _MODULE_ALIASES: dict[str, str] = {
 }
 
 
-class _AliasLoader(importlib.abc.MetaPathFinder, importlib.abc.Loader):
+class _AliasLoader(importlib.abc.MetaPathFinder, importlib.abc.ExecutionLoader):
     def find_spec(
         self,
         fullname: str,
@@ -212,7 +213,35 @@ class _AliasLoader(importlib.abc.MetaPathFinder, importlib.abc.Loader):
         if fullname == "backend.services":
             return importlib.machinery.ModuleSpec(fullname, self, is_package=True)
         if fullname in _MODULE_ALIASES:
-            return importlib.machinery.ModuleSpec(fullname, self)
+            target_spec = importlib.util.find_spec(_MODULE_ALIASES[fullname])
+            origin = target_spec.origin if target_spec else None
+            return importlib.machinery.ModuleSpec(fullname, self, origin=origin)
+        return None
+
+    def is_package(self, fullname: str) -> bool:
+        return fullname == "backend.services"
+
+    def get_filename(self, fullname: str) -> str:
+        target_name = _MODULE_ALIASES.get(fullname, fullname)
+        spec = importlib.util.find_spec(target_name)
+        return (spec.origin or "") if spec else ""
+
+    def get_source(self, fullname: str) -> str | None:
+        target_name = _MODULE_ALIASES.get(fullname)
+        if not target_name:
+            return None
+        spec = importlib.util.find_spec(target_name)
+        if spec and spec.loader and hasattr(spec.loader, "get_source"):
+            return spec.loader.get_source(target_name)  # type: ignore[no-any-return]
+        return None
+
+    def get_code(self, fullname: str) -> types.CodeType | None:
+        target_name = _MODULE_ALIASES.get(fullname)
+        if not target_name:
+            return None
+        spec = importlib.util.find_spec(target_name)
+        if spec and spec.loader and hasattr(spec.loader, "get_code"):
+            return spec.loader.get_code(target_name)  # type: ignore[no-any-return]
         return None
 
     def create_module(self, spec: importlib.machinery.ModuleSpec) -> types.ModuleType | None:

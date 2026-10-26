@@ -25,6 +25,14 @@ from backend.provision.fastly_api import (
 # ── load_log_format: defaults + override ───────────────────────────────────
 
 
+@pytest.fixture(autouse=True)
+def _isolate_configs_dir(tmp_path, monkeypatch):
+    """Redirect svcconfig.CONFIGS_DIR to tmp_path so tests never write into repo configs/."""
+    cfg_dir = tmp_path / "configs"
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(svcconfig, "CONFIGS_DIR", cfg_dir)
+
+
 def test_load_log_format_uses_standard_preset_and_respects_groups():
     """No config supplied uses standard preset; custom groups produce a distinct log format."""
     out = fastly_api.load_log_format(None)
