@@ -148,3 +148,8 @@ configs-hs/
 .tmp/
 .playwright-cli/
 /.streaming-test-artifacts
+
+# pytest-benchmark default output dir
+.benchmarks/
+# stray DuckLake test artifact dir
+catalog_test.db.files/
