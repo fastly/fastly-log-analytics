@@ -1683,3 +1683,54 @@ def test_activate_version_calls_activate_endpoint():
         fi.activate_version("svc1", 3, "tok")
 
     assert calls == [("PUT", "/service/svc1/version/3/activate")]
+
+
+class TestBuildRumLogCondition:
+    """RUM beacon log-emission condition must fire only at the true edge."""
+
+    def test_edge_guards_present_without_custom(self):
+        from backend.provision.declarative.reconciler import build_rum_log_condition
+
+        state = FeatureState.from_config(
+            {
+                "service_id": "srv_test",
+                "log_period": 60,
+                "sample_rate": 100,
+                "rum_enabled": True,
+                "fos_prefix": "raw",
+                "rum": {},
+            }
+        )
+        stmt = build_rum_log_condition(state)
+
+        assert 'req.url.path == "/rum-beacon"' in stmt
+        assert 'req.method == "POST"' in stmt
+        assert "fastly.ff.visits_this_service == 0" in stmt
+        assert "req.restarts == 0" in stmt
+        # Extraneous path negation must not be reintroduced.
+        assert 'req.url.path !~ "^/api/"' not in stmt
+        # No trailing custom group when none is configured.
+        assert not re.search(r" && \((?!req\.restarts == 0)(.+)\)$", stmt)
+
+    def test_custom_condition_appended_and_extractable(self):
+        from backend.provision.declarative.reconciler import build_rum_log_condition
+
+        state = FeatureState.from_config(
+            {
+                "service_id": "srv_test",
+                "log_period": 60,
+                "sample_rate": 100,
+                "rum_enabled": True,
+                "fos_prefix": "raw",
+                "rum": {"custom_condition": 'req.http.host == "example.com"'},
+            }
+        )
+        stmt = build_rum_log_condition(state)
+
+        assert "fastly.ff.visits_this_service == 0" in stmt
+        assert "req.restarts == 0" in stmt
+        assert stmt.endswith('&& (req.http.host == "example.com")')
+        # Mirrors the readback validator in routers/services/core.py.
+        m = re.search(r" && \((?!req\.restarts == 0)(.+)\)$", stmt)
+        assert m is not None
+        assert m.group(1) == 'req.http.host == "example.com"'

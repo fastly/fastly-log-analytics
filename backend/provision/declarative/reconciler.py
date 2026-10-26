@@ -779,6 +779,25 @@ def _format_field_names(endpoints: list[LoggingEndpoint]) -> set[str]:
     return {m for ep in endpoints if ep.format_string for m in _FORMAT_KEY_RE.findall(ep.format_string)}
 
 
+def build_rum_log_condition(desired_state: FeatureState | None) -> str:
+    """Build the VCL statement for the RUM beacon log-emission response condition.
+
+    RUM beacons must produce exactly one log line at the true edge: the base
+    guard matches the beacon POST and excludes shield/intra-POP hops
+    (`fastly.ff.visits_this_service == 0`) and restart passes
+    (`req.restarts == 0`). An optional operator custom condition is appended as a
+    parenthesised group.
+    """
+    statement = (
+        'req.url.path == "/rum-beacon" && req.method == "POST" '
+        "&& fastly.ff.visits_this_service == 0 && req.restarts == 0"
+    )
+    custom = getattr(desired_state, "rum_custom_condition", None)
+    if custom and custom.strip():
+        statement += f" && ({custom.strip()})"
+    return statement
+
+
 def _record_reconcile_audit(
     service_id: str,
     diff: DiffResult,
@@ -2636,14 +2655,7 @@ def _apply_diff(
     if has_rum_cond:
         if status_cb:
             status_cb("➕ Configuring RUM routing condition 'rum_log_condition'...")
-        statement = 'req.url.path == "/rum-beacon" && req.method == "POST"'
-        if (
-            desired_state
-            and getattr(desired_state, "rum_custom_condition", None)
-            and desired_state.rum_custom_condition.strip()
-        ):
-            statement = f"{statement} && ({desired_state.rum_custom_condition.strip()})"
-        _ensure_cond_safe("rum_log_condition", statement)
+        _ensure_cond_safe("rum_log_condition", build_rum_log_condition(desired_state))
     desired_backends_list = desired_backends(desired_state) if desired_state else []
     has_false_cond = any(ep.response_condition == "fastly_log_analytics_false" for ep in desired_endpoints) or any(
         b.request_condition == "fastly_log_analytics_false" for b in desired_backends_list
