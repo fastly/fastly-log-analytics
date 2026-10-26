@@ -1355,7 +1355,7 @@ def test_http_error_responses_are_closed(monkeypatch):
 import http.client
 import io
 from unittest.mock import Mock, patch
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from scripts.lib import admin_tls
@@ -1533,6 +1533,45 @@ def test_report_rejects_unknown_environment_before_certificate_selection(report)
     error.value.close()
     assert not requests
     assert not origins
+
+
+def test_report_bootstrap_surfaces_http_error_in_body(report, monkeypatch):
+    origin, requests, _origins = report
+
+    def fail(request, timeout):
+        requests.append((request.full_url, timeout, dict(request.header_items())))
+        raise HTTPError(request.full_url, 503, "Service Unavailable", {}, None)
+
+    monkeypatch.setattr(report_server, "admin_urlopen", fail)
+    with urlopen(f"{origin}/relics/bootstrap_status.json?env=remote-hs", timeout=5) as response:
+        assert response.status == 200
+        body = json.load(response)
+    assert body == {
+        "ok": False,
+        "status": 503,
+        "data": None,
+        "error": "HTTP 503 Service Unavailable",
+    }
+    assert len(requests) == 1
+
+
+def test_report_bootstrap_surfaces_timeout_in_body(report, monkeypatch):
+    origin, requests, _origins = report
+
+    def fail(request, timeout):
+        requests.append((request.full_url, timeout, dict(request.header_items())))
+        raise URLError("timed out")
+
+    monkeypatch.setattr(report_server, "admin_urlopen", fail)
+    with urlopen(f"{origin}/relics/bootstrap_status.json?env=remote-hs", timeout=5) as response:
+        assert response.status == 200
+        body = json.load(response)
+    assert body["ok"] is False
+    assert body["status"] == 0
+    assert body["data"] is None
+    assert body["error"]
+    assert "timed out" in body["error"]
+    assert len(requests) == 1
 
 
 @pytest.mark.parametrize("path", ["/", "/reports", "/reports/"])

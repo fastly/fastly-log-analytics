@@ -230,7 +230,9 @@ class ReportRequestHandler(SimpleHTTPRequestHandler):
                         "utf-8"
                     )
             except urllib.error.HTTPError as exc:
-                body = json.dumps({"ok": False, "status": exc.code, "data": None}).encode("utf-8")
+                reason = getattr(exc, "reason", None)
+                error_text = f"HTTP {exc.code} {reason}".strip() if reason else f"HTTP {exc.code}"
+                body = json.dumps({"ok": False, "status": exc.code, "data": None, "error": error_text}).encode("utf-8")
             except Exception as exc:  # pragma: no cover - defensive, keep the report alive
                 body = json.dumps({"ok": False, "status": 0, "data": None, "error": str(exc)}).encode("utf-8")
             _BOOTSTRAP_CACHE[env_id] = (time.time(), body)
