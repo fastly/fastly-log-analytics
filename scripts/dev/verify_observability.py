@@ -1,4 +1,4 @@
-"""Verify container SDK delivery, not application coverage or off-host durability."""
+"""Verify OTLP delivery from a container SDK or a correlated application HTTP request."""
 
 from __future__ import annotations
 
@@ -23,6 +23,8 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, ValidationErro
 
 from backend.core import request_telemetry as telemetry
 
+_HTTP_DURATION_COUNTS = ("http_server_duration_milliseconds_count", "http_server_request_duration_seconds_count")
+
 
 class VerificationError(RuntimeError):
     pass
@@ -37,6 +39,14 @@ class ProbeReceipt(BaseModel):
     trace_id: str = Field(pattern=r"^[0-9a-f]{32}$")
     span_id: str = Field(pattern=r"^[0-9a-f]{16}$")
     emitted_at: AwareDatetime
+
+
+class ApplicationReceipt(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    trace_id: str = Field(pattern=r"^[0-9a-f]{32}$")
+    started_at: AwareDatetime
+    path: Literal["/api/health", "/api/bootstrap"]
 
 
 def emit_probe(probe_id: UUID) -> ProbeReceipt:
@@ -123,7 +133,9 @@ def _receiver_json(
     return data
 
 
-def _metric_matches(payload: dict[str, Any], receipt: ProbeReceipt) -> bool:
+def _metric_matches(
+    payload: dict[str, Any], *, job: str, instance: str, emitted_at: datetime, http_only: bool = False
+) -> bool:
     try:
         if payload["status"] != "success" or payload["data"]["resultType"] != "vector":
             raise VerificationError("Prometheus query failed or returned an unexpected result type")
@@ -134,11 +146,12 @@ def _metric_matches(payload: dict[str, Any], receipt: ProbeReceipt) -> bool:
             labels = row["metric"]
             timestamp, value = map(float, row["value"])
             if (
-                labels.get("job") == receipt.service_name
-                and labels.get("instance") == str(receipt.service_instance_id)
+                labels.get("job") == job
+                and labels.get("instance") == instance
                 and math.isfinite(timestamp)
-                and receipt.emitted_at.timestamp() - 2 <= timestamp <= time.time() + 2
-                and value == 1
+                and emitted_at.timestamp() - 2 <= timestamp <= time.time() + 2
+                and math.isfinite(value)
+                and (labels.get("__name__") in _HTTP_DURATION_COUNTS and value >= 1 if http_only else value == 1)
             ):
                 return True
     except (KeyError, TypeError, ValueError, AttributeError) as exc:
@@ -207,7 +220,12 @@ def verify_delivery(
                 client, f"{prometheus_url}/api/v1/query", params={"query": query}, remaining=deadline - time.monotonic()
             )
             if payload is not None:
-                metric_observed = _metric_matches(payload, receipt)
+                metric_observed = _metric_matches(
+                    payload,
+                    job=receipt.service_name,
+                    instance=str(receipt.service_instance_id),
+                    emitted_at=receipt.emitted_at,
+                )
         if not trace_observed:
             payload = _receiver_json(
                 client,
@@ -231,6 +249,89 @@ def verify_delivery(
         time.sleep(min(5.0, remaining))
 
 
+def _application_instance(payload: dict[str, Any], receipt: ApplicationReceipt) -> tuple[str, str] | None:
+    try:
+        batches = payload.get("batches", payload.get("resourceSpans"))
+        if not isinstance(batches, list):
+            raise VerificationError("Tempo returned invalid trace data")
+        for batch in batches:
+            resource = _attributes(batch["resource"]["attributes"])
+            if resource.get("service.name") != "fastly-log-analytics":
+                continue
+            for scope in batch.get("scopeSpans", batch.get("instrumentationLibrarySpans", [])):
+                for span in scope["spans"]:
+                    if (
+                        span["name"] == f"GET {receipt.path}"
+                        and span.get("kind") in (2, "SPAN_KIND_SERVER")
+                        and _id_matches(span["traceId"], receipt.trace_id)
+                        and receipt.started_at.timestamp() - 5
+                        <= int(span["startTimeUnixNano"]) / 1_000_000_000
+                        <= time.time() + 5
+                    ):
+                        namespace = resource.get("service.namespace")
+                        job = f"{namespace}/fastly-log-analytics" if namespace else "fastly-log-analytics"
+                        return job, str(UUID(resource["service.instance.id"]))
+    except (KeyError, TypeError, ValueError, AttributeError) as exc:
+        raise VerificationError("Tempo returned invalid application trace data") from exc
+    return None
+
+
+def verify_application_delivery(
+    receipt: ApplicationReceipt,
+    *,
+    client: httpx.Client,
+    prometheus_url: str,
+    tempo_url: str,
+    timeout_seconds: float = 90,
+) -> dict[str, Any]:
+    if not math.isfinite(timeout_seconds) or not 0 <= timeout_seconds <= 300:
+        raise VerificationError("probe timeout must be between 0 and 300 seconds")
+    if not -5 <= time.time() - receipt.started_at.timestamp() <= 300 or not int(receipt.trace_id, 16):
+        raise VerificationError("application receipt is stale or invalid")
+    prometheus_url, tempo_url = _query_origin(prometheus_url), _query_origin(tempo_url)
+    deadline = time.monotonic() + timeout_seconds
+    instance = None
+    metric_observed = False
+    while True:
+        if instance is None:
+            payload = _receiver_json(
+                client,
+                f"{tempo_url}/api/traces/{receipt.trace_id}",
+                allow_missing=True,
+                remaining=deadline - time.monotonic(),
+            )
+            if payload is not None:
+                instance = _application_instance(payload, receipt)
+        if instance is not None:
+            job, instance_id = instance
+            query = (
+                f'{{__name__=~"{"|".join(_HTTP_DURATION_COUNTS)}",'
+                f"job={json.dumps(job)},instance={json.dumps(instance_id)}}}"
+            )
+            payload = _receiver_json(
+                client, f"{prometheus_url}/api/v1/query", params={"query": query}, remaining=deadline - time.monotonic()
+            )
+            if payload is not None:
+                metric_observed = _metric_matches(
+                    payload, job=job, instance=instance_id, emitted_at=receipt.started_at, http_only=True
+                )
+        if metric_observed:
+            return {
+                "scope": "application_http_delivery",
+                "trace_id": receipt.trace_id,
+                "path": receipt.path,
+                "metric_observed": True,
+                "trace_observed": True,
+                "verified_at": datetime.now(UTC).isoformat(),
+            }
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise VerificationError(
+                f"application delivery not observed: metric={metric_observed}, trace={instance is not None}"
+            )
+        time.sleep(min(5.0, remaining))
+
+
 def _write_private(path: Path, data: dict[str, Any]) -> None:
     encoded = json.dumps(data, indent=2) + "\n"
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -244,26 +345,35 @@ def main() -> int:
     emit = commands.add_parser("emit", help="run inside the deployed backend container")
     emit.add_argument("--probe-id", type=UUID, required=True)
     emit.add_argument("--output", type=Path, required=True)
-    verify = commands.add_parser("verify", help="query private Prometheus and Tempo APIs")
-    verify.add_argument("--receipt", type=Path, required=True)
-    verify.add_argument("--prometheus-url", required=True)
-    verify.add_argument("--tempo-url", required=True)
-    verify.add_argument("--output", type=Path, required=True)
-    verify.add_argument("--timeout-seconds", type=float, default=90)
+    for command in ("verify", "verify-request"):
+        verify = commands.add_parser(command, help="query private Prometheus and Tempo APIs")
+        verify.add_argument("--receipt", type=Path, required=True)
+        verify.add_argument("--prometheus-url", required=True)
+        verify.add_argument("--tempo-url", required=True)
+        verify.add_argument("--output", type=Path, required=True)
+        verify.add_argument("--timeout-seconds", type=float, default=90)
     args = parser.parse_args()
     try:
         if args.command == "emit":
             result = emit_probe(args.probe_id).model_dump(mode="json")
         else:
-            receipt = ProbeReceipt.model_validate_json(args.receipt.read_text())
             with httpx.Client(trust_env=False, follow_redirects=False) as client:
-                result = verify_delivery(
-                    receipt,
-                    client=client,
-                    prometheus_url=args.prometheus_url,
-                    tempo_url=args.tempo_url,
-                    timeout_seconds=args.timeout_seconds,
-                )
+                if args.command == "verify-request":
+                    result = verify_application_delivery(
+                        ApplicationReceipt.model_validate_json(args.receipt.read_text()),
+                        client=client,
+                        prometheus_url=args.prometheus_url,
+                        tempo_url=args.tempo_url,
+                        timeout_seconds=args.timeout_seconds,
+                    )
+                else:
+                    result = verify_delivery(
+                        ProbeReceipt.model_validate_json(args.receipt.read_text()),
+                        client=client,
+                        prometheus_url=args.prometheus_url,
+                        tempo_url=args.tempo_url,
+                        timeout_seconds=args.timeout_seconds,
+                    )
         _write_private(args.output, result)
     except VerificationError as exc:
         print(f"Observability verification failed: {exc}", file=sys.stderr)

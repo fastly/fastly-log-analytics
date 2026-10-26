@@ -193,6 +193,77 @@ def test_observability_probe_surfaces_receiver_errors_and_refuses_redirects():
                 )
 
 
+@pytest.mark.parametrize(
+    "metric_name",
+    ["http_server_duration_milliseconds_count", "http_server_request_duration_seconds_count"],
+)
+@pytest.mark.parametrize(
+    "missing",
+    [
+        None,
+        "wrong_instance",
+        "wrong_trace",
+        "client_span",
+        "stale_span",
+        "missing_metric",
+        "stale_metric",
+        "probe_metric",
+    ],
+)
+def test_observability_application_request_requires_its_server_trace_and_http_metric(metric_name, missing):
+    probe, sdk_receipt, metric, trace_data = _observability_probe_fixture()
+    receipt = probe.ApplicationReceipt(
+        trace_id=sdk_receipt.trace_id, started_at=sdk_receipt.emitted_at, path="/api/health"
+    )
+    span = trace_data["batches"][0]["scopeSpans"][0]["spans"][0]
+    span.update(
+        name="GET /api/health",
+        kind="SPAN_KIND_SERVER",
+        startTimeUnixNano=str(int(receipt.started_at.timestamp() * 1_000_000_000)),
+    )
+    metric_row = metric["data"]["result"][0]
+    metric_row["metric"]["__name__"] = metric_name
+    metric_row["value"][1] = "5"
+    if missing == "wrong_instance":
+        metric_row["metric"]["instance"] = str(uuid.uuid4())
+    elif missing == "wrong_trace":
+        span["traceId"] = "c" * 32
+    elif missing == "client_span":
+        span["kind"] = "SPAN_KIND_CLIENT"
+    elif missing == "stale_span":
+        span["startTimeUnixNano"] = str(int((receipt.started_at.timestamp() - 3600) * 1_000_000_000))
+    elif missing == "missing_metric":
+        metric["data"]["result"] = []
+    elif missing == "stale_metric":
+        metric_row["value"][0] -= 3600
+    elif missing == "probe_metric":
+        metric_row["metric"]["__name__"] = "app_observability_probe_total"
+
+    def receive(request):
+        if request.url.path == "/api/v1/query":
+            assert str(sdk_receipt.service_instance_id) in request.url.params["query"]
+            assert "http_server_" in request.url.params["query"]
+            return httpx.Response(200, json=metric)
+        assert request.url.path == f"/api/traces/{receipt.trace_id}"
+        return httpx.Response(200, json=trace_data)
+
+    with httpx.Client(transport=httpx.MockTransport(receive)) as client:
+        kwargs = {
+            "client": client,
+            "prometheus_url": "http://localhost:9090",
+            "tempo_url": "http://localhost:3200",
+            "timeout_seconds": 0,
+        }
+        if missing is not None:
+            with pytest.raises(probe.VerificationError, match="application delivery not observed"):
+                probe.verify_application_delivery(receipt, **kwargs)
+        else:
+            result = probe.verify_application_delivery(receipt, **kwargs)
+            assert result["scope"] == "application_http_delivery"
+            assert result["metric_observed"] is True and result["trace_observed"] is True
+            assert result["trace_id"] == receipt.trace_id
+
+
 def test_observability_probe_emits_using_application_sdk(monkeypatch):
     probe, _, _, _ = _observability_probe_fixture()
     instance = str(uuid.uuid4())
