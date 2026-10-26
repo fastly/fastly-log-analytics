@@ -1,9 +1,5 @@
 # ruff: noqa: T201
-"""VCL & Multi-Service Declarative Reconciliation Control Loop (Steps 1-8 + IaC Engine).
-
-Consolidates ``backend.provision.declarative.reconciler`` (and ``diff``) with
-``backend.provision.declarative.iac_reconciler``.
-"""
+"""VCL & Multi-Service Declarative Reconciliation Control Loop (Steps 1-8 + IaC Engine)."""
 
 from __future__ import annotations
 
@@ -19,17 +15,13 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, TypeAdapter
 
 from backend.config import is_rum_enabled
 from backend.core.fastly.client import fastly, find_service_by_name
 from backend.core.fastly.client import find_service_by_name as _orig_find_service_by_name
 
-# ============================================================================
-# Declarative FeatureState & Config Migration (folded from state.py)
-# ============================================================================
 _AUTO_INJECTED_NAMES: set[str] = {
-    # RUM fields
     "rum_cid",
     "fastly_req_id",
     "rum_metric_name",
@@ -47,7 +39,6 @@ _AUTO_INJECTED_NAMES: set[str] = {
     "rum_ttfb_ms",
     "rum_raw_query",
     "rum_body",
-    # Scoring fields
     "edge_score",
     "edge_score_l1",
     "edge_score_l2",
@@ -57,7 +48,6 @@ _AUTO_INJECTED_NAMES: set[str] = {
     "edge_score_rtt_us",
     "edge_score_exec_us",
     "edge_matrix_version",
-    # CMCD fields
     "cmcd_sid",
     "cmcd_cid",
     "cmcd_br",
@@ -106,14 +96,9 @@ class LogFieldsConfig:
 
 @dataclass(frozen=True)
 class FeatureState:
-    """Immutable representation of the desired configuration of a Fastly service.
-
-    Always construct via from_config() to ensure mandatory custom fields are
-    auto-injected when features are enabled.
-    """
+    """Immutable representation of the desired configuration of a Fastly service."""
 
     service_id: str
-    # Core Logging Settings
     log_period: int  # Rotation period in seconds (e.g. 60)
     sample_rate: int  # Log sampling percentage (1 to 100)
     edge_only: bool  # Capture logs only at the CDN edge hop
@@ -128,49 +113,30 @@ class FeatureState:
     fos_bucket: str = ""
     logging_endpoint_name: str = "Fastly Log Analytics"  # Main request logs endpoint name
     rum_endpoint_name: str = "Fastly RUM Logs"  # RUM beacon logs endpoint name
-    # Feature Toggles & Parameter Blocks
     rum_enabled: bool = False
     rum_log_period: int | None = None  # Rotation period for RUM logs in seconds (e.g. 300)
     faro_version: str | None = None  # Pinned self-hosted Faro Web SDK version, from cfg["rum"]["faro_version"]
     rum_custom_condition: str = ""  # Arbitrary operator-defined condition string for RUM logging
     cmcd: CmcdConfig = field(default_factory=CmcdConfig)
     scoring: ScoringConfig = field(default_factory=ScoringConfig)
-    # Log Field Collections
     log_fields: LogFieldsConfig = field(default_factory=LogFieldsConfig)
 
     def __post_init__(self) -> None:
-        """Validate cross-feature dependencies and field constraints.
-
-        Raises:
-            ValueError: if validation fails.
-        """
-        # Validate log_period range. [30, 3600] was this codebase's own
-        # invention, not a Fastly constraint -- confirmed live against the
-        # real API (fastly service logging s3 update --period 1) and
-        # Fastly's own API reference (no min/max documented for this
-        # field): period=1 is accepted and stored as-is. The provisioning
-        # wizard's own dropdown (StorageStep.tsx) already offers 1/5/10/20
-        # second options that this floor was silently rejecting. Applies to
-        # both the request-log and RUM S3 endpoints (desired_logging_
-        # endpoints() shares this one field between them).
+        """Validate cross-feature dependencies and field constraints."""
         if not (1 <= self.log_period <= 3600):
             raise ValueError(f"log_period must be in range [1, 3600], got {self.log_period}")
         if self.rum_log_period is not None and not (1 <= self.rum_log_period <= 3600):
             raise ValueError(f"rum_log_period must be in range [1, 3600], got {self.rum_log_period}")
-        # Validate sample_rate range
         if not (1 <= self.sample_rate <= 100):
             raise ValueError(f"sample_rate must be in range [1, 100], got {self.sample_rate}")
-        # Validate custom field names
         for field_dict in self.log_fields.custom_fields:
             field_name = field_dict.get("name", "")
             if not re.fullmatch(r"^[a-z_][a-z0-9_]*$", field_name):
                 raise ValueError(f"Custom field name '{field_name}' must be lowercase alphanumeric + underscore")
-        # Validate cmcd settings
         if self.cmcd.enabled and self.cmcd.mode not in ("query_string", "headers"):
             raise ValueError(f"cmcd.mode must be 'query_string' or 'headers', got {self.cmcd.mode!r}")
         if self.cmcd.enabled and self.cmcd.version not in (1, 2):
             raise ValueError(f"cmcd.version must be 1 or 2, got {self.cmcd.version}")
-        # Validate scoring settings
         if self.scoring.enabled and not self.scoring.domain:
             raise ValueError("scoring.enabled=True requires scoring.domain to be set")
         if self.scoring.enabled:
@@ -181,27 +147,7 @@ class FeatureState:
 
     @classmethod
     def from_config(cls, cfg: dict) -> FeatureState:
-        """Parse raw config dict and construct FeatureState with automatic dependency injection.
-
-        Algorithm:
-        1. Parse all core logging settings and feature toggles from cfg.
-        2. Start with user-provided custom_fields list.
-        3. If rum_enabled=True and no field named 'rum_cid' exists, inject it.
-        4. If scoring_enabled=True and no field named 'edge_score' exists, inject it.
-        5. If cmcd_enabled=True and no field named 'cmcd_*' exists, inject all CMCD fields.
-        6. Validate: all required fields for enabled features are present.
-
-        Args:
-            cfg: Raw configuration dictionary.
-
-        Returns:
-            FeatureState instance with auto-injected mandatory fields.
-
-        Raises:
-            KeyError: if required core logging settings are missing.
-            ValueError: if validation fails.
-        """
-        # Extract core logging settings
+        """Parse raw config dict and construct FeatureState with automatic dependency injection."""
         service_id = cfg.get("service_id")
         if not service_id:
             raise KeyError("config missing 'service_id'")
@@ -209,7 +155,6 @@ class FeatureState:
         if log_period is None:
             raise KeyError("config missing 'log_period'")
         log_period = int(log_period)
-        # Extract endpoint names and request log settings from provisioning config or top-level (for backwards compatibility)
         prov_cfg = cfg.get("provisioning", {})
         sample_rate = prov_cfg.get("sample_rate") if "sample_rate" in prov_cfg else cfg.get("sample_rate")
         if sample_rate is None:
@@ -229,7 +174,6 @@ class FeatureState:
         fos_access_key_id = cfg.get("fos_access_key_id", "")
         fos_secret_access_key = cfg.get("fos_secret_access_key", "")
         fos_bucket = cfg.get("fos_bucket", "") or cfg.get("fos_bucket_name", "")
-        # Extract endpoint names from provisioning config or top-level (for backwards compatibility)
         logging_endpoint_name = prov_cfg.get("endpoint_name", "") or cfg.get("endpoint_name", "Fastly Log Analytics")
         rum_cfg = cfg.get("rum", {})
         rum_endpoint_name = rum_cfg.get("endpoint_name", "") or cfg.get("rum_endpoint_name", "Fastly RUM Logs")
@@ -239,22 +183,17 @@ class FeatureState:
         rum_log_period = int(rum_log_period_raw) if rum_log_period_raw is not None else None
         faro_version = rum_cfg.get("faro_version") if isinstance(rum_cfg, dict) else None
         rum_custom_condition = rum_cfg.get("custom_condition", "").strip() if isinstance(rum_cfg, dict) else ""
-        # Extract feature toggles
         rum_enabled = is_rum_enabled(cfg)
-        # Extract and construct CMCD config
         cmcd_cfg = cfg.get("cmcd", {})
         if not isinstance(cmcd_cfg, dict):
             cmcd_cfg = {}
-        # Support backwards compat: flat fields override nested, but normalize to nested
         cmcd_enabled = cfg.get("cmcd_enabled", cmcd_cfg.get("enabled", False))
         cmcd_mode = cfg.get("cmcd_mode", cmcd_cfg.get("mode", "query_string"))
         cmcd_version = cfg.get("cmcd_version", cmcd_cfg.get("version", 1))
         cmcd_config = CmcdConfig(enabled=cmcd_enabled, mode=cmcd_mode, version=cmcd_version)
-        # Extract and construct Scoring config
         scoring_cfg = cfg.get("scoring", {})
         if not isinstance(scoring_cfg, dict):
             scoring_cfg = {}
-        # Support backwards compat: flat fields override nested, but normalize to nested
         scoring_enabled = cfg.get("scoring_enabled", scoring_cfg.get("enabled", False))
         scoring_domain = (
             cfg.get("scoring_domain") or scoring_cfg.get("domain") or scoring_cfg.get("scoring_domain") or ""
@@ -271,16 +210,13 @@ class FeatureState:
             exclude_url_regex=scoring_exclude_url_regex,
             enforce_status_code=scoring_enforce_status_code,
         )
-        # Extract log field collections (nested format only — Task 9.5 migration handles conversion)
         log_fields_cfg = cfg.get("log_fields", {})
         if not isinstance(log_fields_cfg, dict):
             log_fields_cfg = {}
         log_groups = log_fields_cfg.get("groups") or cfg.get("log_groups") or cfg.get("groups") or []
         custom_fields = log_fields_cfg.get("custom_fields") or cfg.get("custom_fields") or []
         field_overrides = log_fields_cfg.get("field_overrides") or cfg.get("field_overrides") or {}
-        # Make a mutable copy of custom_fields for injection
         injected_fields = list(custom_fields) if custom_fields else []
-        # Auto-inject mandatory RUM custom fields
         if rum_enabled:
             from backend.provision.rum_orchestrator_v2 import _RUM_CUSTOM_FIELDS
 
@@ -288,7 +224,6 @@ class FeatureState:
             for field in _RUM_CUSTOM_FIELDS:
                 if field["name"] not in existing_names:
                     injected_fields.append(field)
-        # Auto-inject mandatory Scoring custom fields
         if scoring_enabled:
             from backend.provision.session_scoring_orchestrator import _SCORING_CUSTOM_FIELDS
 
@@ -296,7 +231,6 @@ class FeatureState:
             for field in _SCORING_CUSTOM_FIELDS:
                 if field["name"] not in existing_names:
                     injected_fields.append(dict(field))
-        # Auto-inject mandatory CMCD custom fields
         if cmcd_enabled:
             from backend.provision.cmcd_fields import _CMCD_CUSTOM_FIELDS
 
@@ -304,13 +238,9 @@ class FeatureState:
             for field in _CMCD_CUSTOM_FIELDS:
                 if field["name"] not in existing_names:
                     injected_fields.append(dict(field))
-        # Construct nested LogFieldsConfig
-        log_fields_config = LogFieldsConfig(
-            groups=log_groups,
-            custom_fields=injected_fields,
-            field_overrides=field_overrides,
+        log_fields_config = TypeAdapter(LogFieldsConfig).validate_python(
+            {"groups": log_groups, "custom_fields": injected_fields, "field_overrides": field_overrides}
         )
-        # Construct FeatureState; __post_init__ will validate
         return cls(
             service_id=service_id,
             log_period=log_period,
@@ -337,31 +267,10 @@ class FeatureState:
         )
 
     def to_dict(self) -> dict:
-        """Serialize to a dictionary suitable for JSON storage.
-
-        Returns:
-            Dict with all fields.
-        """
+        """Serialize to a dictionary suitable for JSON storage."""
+        base = {k: v for k, v in asdict(self).items() if k not in ("cmcd", "scoring", "log_fields")}
         return {
-            "service_id": self.service_id,
-            "log_period": self.log_period,
-            "sample_rate": self.sample_rate,
-            "edge_only": self.edge_only,
-            "custom_condition": self.custom_condition,
-            "fos_prefix": self.fos_prefix,
-            "fos_endpoint": self.fos_endpoint,
-            "logging_enabled": self.logging_enabled,
-            "fos_region": self.fos_region,
-            "cdn_shield": self.cdn_shield,
-            "fos_access_key_id": self.fos_access_key_id,
-            "fos_secret_access_key": self.fos_secret_access_key,
-            "fos_bucket": self.fos_bucket,
-            "logging_endpoint_name": self.logging_endpoint_name,
-            "rum_endpoint_name": self.rum_endpoint_name,
-            "rum_enabled": self.rum_enabled,
-            "rum_log_period": self.rum_log_period,
-            "faro_version": self.faro_version,
-            "rum_custom_condition": self.rum_custom_condition,
+            **base,
             "cmcd_enabled": self.cmcd.enabled,
             "cmcd_mode": self.cmcd.mode,
             "cmcd_version": self.cmcd.version,
@@ -377,10 +286,7 @@ class FeatureState:
 
 
 def migrate_config(cfg: dict[str, Any]) -> dict[str, Any]:
-    """Migrate flat CMCD/Scoring fields to nested structure.
-
-    Idempotent: calling on already-nested config returns it unchanged.
-    """
+    """Migrate flat CMCD/Scoring fields to nested structure."""
     if not cfg:
         return cfg
     result = dict(cfg)
@@ -461,9 +367,6 @@ from backend.provision.rum_assets import upload_rum_tracker_js
 logger = logging.getLogger(__name__)
 
 
-# ============================================================================
-# Diff Data Models & Computation (folded from diff.py)
-# ============================================================================
 @dataclass(unsafe_hash=True)
 class VCLSnippet:
     """A single VCL snippet (name, priority, body, subroutine)."""
@@ -596,9 +499,7 @@ class DiffResult:
 
 
 def _diff_named_resources(
-    current_items: list[Any],
-    desired_items: list[Any],
-    label: str,
+    current_items: list[Any], desired_items: list[Any], label: str
 ) -> tuple[list[Any], list[Any], list[str]]:
     current_by_name = {item.name: item for item in current_items}
     desired_by_name = {item.name: item for item in desired_items}
@@ -649,16 +550,7 @@ def compute_diff(
 
 
 sys.modules["backend.provision.declarative.diff"] = sys.modules[__name__]
-# ============================================================================
-# Constants & Guards
-# ============================================================================
-MANAGED_BACKEND_NAMES = {
-    "session_scorer",
-    "fos_origin",
-    "F_fos_origin",
-    "F_F_fos_origin",
-    "rum_collector",
-}
+MANAGED_BACKEND_NAMES = {"session_scorer", "fos_origin", "F_fos_origin", "F_F_fos_origin", "rum_collector"}
 MANAGED_DICTIONARY_NAMES = {"fos_credentials"}
 
 
@@ -698,9 +590,6 @@ class ReconciliationResult:
             self.changes_applied = {}
 
 
-# ============================================================================
-# Lock Management (Step 1)
-# ============================================================================
 class FileLock:
     """Simple file-based lock for concurrency control."""
 
@@ -747,9 +636,6 @@ def acquire_vcl_lock(service_id: str, timeout_sec: int = 300) -> FileLock:
     raise LockAcquisitionTimeout(service_id, time.time() - start)
 
 
-# ============================================================================
-# Main Reconciliation Control Loop (Steps 2-8)
-# ============================================================================
 def _upload_rum_tracker_best_effort(service_id: str, token: str, status_cb: Callable[[str], None] | None) -> None:
     """Upload the RUM tracker JS, logging (not raising) on failure."""
     if status_cb:
@@ -780,14 +666,7 @@ def _format_field_names(endpoints: list[LoggingEndpoint]) -> set[str]:
 
 
 def build_rum_log_condition(desired_state: FeatureState | None) -> str:
-    """Build the VCL statement for the RUM beacon log-emission response condition.
-
-    RUM beacons must produce exactly one log line at the true edge: the base
-    guard matches the beacon POST and excludes shield/intra-POP hops
-    (`fastly.ff.visits_this_service == 0`) and restart passes
-    (`req.restarts == 0`). An optional operator custom condition is appended as a
-    parenthesised group.
-    """
+    """Build the VCL statement for the RUM beacon log-emission response condition."""
     statement = (
         'req.url.path == "/rum-beacon" && req.method == "POST" '
         "&& fastly.ff.visits_this_service == 0 && req.restarts == 0"
@@ -825,12 +704,7 @@ def _record_reconcile_audit(
         logger.warning("Failed to record reconcile audit for %s", service_id, exc_info=True)
 
 
-def _load_or_bootstrap_feature_state(
-    service_id: str,
-    token: str,
-    *,
-    persist_bootstrap: bool = False,
-) -> FeatureState:
+def _load_or_bootstrap_feature_state(service_id: str, token: str, *, persist_bootstrap: bool = False) -> FeatureState:
     from backend.config import config_path as _config_path
 
     config_path = _config_path(service_id)
@@ -1141,11 +1015,7 @@ def reconcile_cdn_service_state(
                     if fos_access_key
                     else {},
                 ),
-                ServiceDictionary(
-                    name="cdn_auth",
-                    write_only=True,
-                    items={"secret": cdn_secret} if cdn_secret else {},
-                ),
+                ServiceDictionary(name="cdn_auth", write_only=True, items={"secret": cdn_secret} if cdn_secret else {}),
             ]
             diff = compute_diff(
                 current_snippets=current_snippets,
@@ -1241,9 +1111,6 @@ def reconcile_cdn_service_state(
     return result
 
 
-# ============================================================================
-# Helper Functions (Fastly API Integration)
-# ============================================================================
 sys.modules["backend.provision.declarative.generators"] = sys.modules[__name__]
 sys.modules["backend.provision.declarative.fastly_integration"] = sys.modules[__name__]
 fastly_integration = sys.modules[__name__]
@@ -1258,26 +1125,12 @@ from backend.core.fastly.rum_provisioning import (
 )
 from backend.provision import utils as log_paths
 from backend.provision.fastly_api import generate_capture_vcl
-from backend.provision.session_scoring_orchestrator import (
-    SCORING_BACKEND_API_NAME,
-    generate_scoring_vcl,
-)
+from backend.provision.session_scoring_orchestrator import SCORING_BACKEND_API_NAME, generate_scoring_vcl
 from backend.provision.utils import VclBuilder
 
 
 def logging_service_snippets(state: FeatureState) -> list[VCLSnippet]:
-    """Return capture snippets for the logging service.
-
-    The logging service needs capture snippets for all stages (recv, miss, pass,
-    and optionally fetch, deliver, error when Group L is enabled). The recv snippet
-    is the primary one that triggers logging ("Fastly Log Analysis Capture").
-
-    Args:
-        state: Feature state.
-
-    Returns:
-        List of logging-service-specific VCL snippets.
-    """
+    """Return capture snippets for the logging service."""
     if not state.logging_enabled:
         return []
     log_fields_dict = {
@@ -1295,8 +1148,6 @@ def logging_service_snippets(state: FeatureState) -> list[VCLSnippet]:
         cmcd_version=state.cmcd.version,
     )
     snippets: list[VCLSnippet] = []
-    # Map subroutine names to snippet names and priorities
-    # Main capture snippet has priority 1 (higher = earlier); reset is -100
     subroutine_map = {
         "recv": ("Fastly Log Analysis Capture", 1),
         "recv_reset": ("Fastly Log Analysis Reset Client IP", -100),
@@ -1306,10 +1157,8 @@ def logging_service_snippets(state: FeatureState) -> list[VCLSnippet]:
         "deliver": ("Fastly Log Analysis Origin Deliver", 10),
         "error": ("Fastly Log Analysis Origin Error", 10),
     }
-    # Create snippets for all available subroutines
     for subroutine_key, (snippet_name, priority) in subroutine_map.items():
         if subroutine_key in capture_vcl_dict:
-            # Map subroutine keys to vcl_ prefixed names
             if subroutine_key == "recv_reset":
                 vcl_subroutine = "vcl_recv"
             else:
@@ -1326,37 +1175,13 @@ def logging_service_snippets(state: FeatureState) -> list[VCLSnippet]:
 
 
 def desired_snippets(state: FeatureState) -> list[VCLSnippet]:
-    """Return the 5 consolidated snippets (vcl_recv, vcl_miss, vcl_fetch, vcl_deliver, vcl_error).
-
-    Assembles RUM + Scoring + CMCD fragments in deterministic order:
-    Section 1: Variable declarations
-    Section 2: Security header & client IP scrubbing
-    Section 3: Common Media Client Data (CMCD) extraction (if enabled)
-    Section 4: Session Scoring request-restart hook (if enabled)
-    Section 5: RUM beacon interception & asset routing (if enabled)
-
-    Args:
-        state: Feature state (controls which features are enabled).
-
-    Returns:
-        List of 5 consolidated VCL snippets with priority=10.
-
-    Assertions:
-        - No duplicate variable declarations in any subroutine.
-        - All referenced log fields are available.
-    """
+    """Return the 5 consolidated snippets (vcl_recv, vcl_miss, vcl_fetch, vcl_deliver, vcl_error)."""
     subroutines = ["vcl_recv", "vcl_miss", "vcl_pass", "vcl_fetch", "vcl_deliver", "vcl_error"]
     snippets = []
     for subroutine in subroutines:
         body = generate_consolidated_snippet(state, subroutine)
-        snippet = VCLSnippet(
-            name=f"Fastly Log Analytics - {subroutine}",
-            priority=10,
-            body=body,
-            subroutine=subroutine,
-        )
+        snippet = VCLSnippet(name=f"Fastly Log Analytics - {subroutine}", priority=10, body=body, subroutine=subroutine)
         snippets.append(snippet)
-        # Assertion: no duplicate variable declarations
         var_decl_pattern = r"^\s*declare\s+local\s+var\.(\w+)"
         declared_vars = re.findall(var_decl_pattern, body, re.MULTILINE)
         duplicates = [v for v in set(declared_vars) if declared_vars.count(v) > 1]
@@ -1368,12 +1193,9 @@ def desired_snippets(state: FeatureState) -> list[VCLSnippet]:
 def generate_consolidated_snippet(state: FeatureState, subroutine: str) -> str:
     """Generate consolidated VCL for a single subroutine."""
     if subroutine != "vcl_recv":
-        # Keep legacy behavior for other subroutines
         return _legacy_generate_consolidated_snippet(state, subroutine)
     sections: list[str] = []
-    # 1. Zone 1: At the Top at the Edge
     edge_first_hop_statements: list[str] = []
-    # A. Header scrubbing first (Label as Section 6)
     if state.logging_enabled:
         from backend.provision.fastly_api import get_scrub_vcl_statements
 
@@ -1386,12 +1208,9 @@ def generate_consolidated_snippet(state: FeatureState, subroutine: str) -> str:
         edge_first_hop_statements.append("  # [security] strip client-supplied internal-routing headers")
         for scrub in get_scrub_vcl_statements(log_fields_dict):
             edge_first_hop_statements.append(f"  {scrub}")
-    # B. Minting request ID (if RUM enabled)
     if state.rum_enabled:
         edge_first_hop_statements.append("  # Mint a per-request ID for RUM beacons on fresh requests")
         edge_first_hop_statements.append("  set req.http.x-rum-req-id = randomstr(12);")
-    # C. RUM extraction must precede generic capture so dedicated fields are
-    # promoted with the same edge data as every other log field.
     if state.rum_enabled and state.logging_enabled:
         rum_extraction, _ = generate_rum_recv_parts()
         edge_first_hop_statements.append("  # Section 5: RUM field extraction (vcl_recv)")
@@ -1399,8 +1218,6 @@ def generate_consolidated_snippet(state: FeatureState, subroutine: str) -> str:
         for line in rum_extraction.splitlines():
             edge_first_hop_statements.append(f"    {line}")
         edge_first_hop_statements.append("  }")
-    # D. Edge capture only (if logging enabled)
-    # Runs after RUM extraction so the beacon inherits all promoted fields.
     if state.logging_enabled:
         from backend.provision.fastly_api import get_capture_vcl_statements
 
@@ -1410,11 +1227,6 @@ def generate_consolidated_snippet(state: FeatureState, subroutine: str) -> str:
             "field_overrides": state.log_fields.field_overrides,
         }
         edge_first_hop_statements.append("")
-        # CMCD extraction MUST precede the capture statements: capture promotes
-        # req.http.x-cmcd:<key> into req.http.x-fos-edge-data:cmcd_<key>, which
-        # is what the log format reads. Extracting after it copies empty
-        # strings — the 2026-08 CMCD outage, silent because the extraction still
-        # works (it strips ?CMCD= from the cache key) and the columns exist.
         if state.cmcd.enabled:
             from backend.provision.cmcd_fields import generate_cmcd_vcl
 
@@ -1427,8 +1239,6 @@ def generate_consolidated_snippet(state: FeatureState, subroutine: str) -> str:
         edge_first_hop_statements.append("  # Capture edge data for logging before shielding or backend fetch")
         for cap in get_capture_vcl_statements(log_fields_dict):
             edge_first_hop_statements.append(f"  {cap}")
-    # E. Beacon interception POST to /rum-beacon (Section 5 RUM)
-    # The response/termination block runs after standard capture.
     if state.rum_enabled:
         _, rum_response = generate_rum_recv_parts()
         edge_first_hop_statements.append("  # Section 5: RUM (vcl_recv)")
@@ -1436,27 +1246,10 @@ def generate_consolidated_snippet(state: FeatureState, subroutine: str) -> str:
         for line in rum_response.splitlines():
             edge_first_hop_statements.append(f"    {line}")
         edge_first_hop_statements.append("  }")
-    # F. Session Scoring first-pass routing (Section 4 Session Scoring)
-    # Placed at the very end of the consolidated block!
     if state.scoring.enabled:
         from backend.provision.session_scoring_vcl import SCORING_BACKEND_VCL_NAME, resolve_exclude_url_regex
 
         effective_regex = resolve_exclude_url_regex(state.scoring.exclude_url_regex)
-        # The two RUM scripts we host are excluded structurally, not via
-        # exclude_url_regex. DEFAULT_ASSET_EXT_REGEX does already match
-        # ".js", but that default is operator-overridable — a narrower
-        # override would silently start routing our own asset requests
-        # through the scorer. These paths are infrastructure, not scoreable
-        # visitor navigation, so the guard must not depend on operator
-        # config. Exact path equality (not a regex) mirrors how the
-        # asset-fetch routing itself tests these paths, so the two can't
-        # drift apart.
-        #
-        # This is also a correctness fix, not just noise reduction: the
-        # scoring block ends in return(pass), which exits vcl_recv before
-        # the RUM asset routing below it ever runs. Without this guard a
-        # GET /js/rum.js pays a full scorer round-trip and only reaches FOS
-        # on the post-scoring restart.
         rum_asset_guard = ""
         if state.rum_enabled:
             rum_asset_guard = ' && req.url.path != "/js/rum.js" && req.url.path != "/js/faro-sdk.js"'
@@ -1483,22 +1276,15 @@ def generate_consolidated_snippet(state: FeatureState, subroutine: str) -> str:
         edge_first_hop_statements.append("    # PASS — skip cache for the scoring sub-fetch.")
         edge_first_hop_statements.append("    return(pass);")
         edge_first_hop_statements.append("  }")
-    # Now wrap all edge_first_hop_statements in a SINGLE condition block!
     if edge_first_hop_statements:
         body = VclBuilder.join_lines(edge_first_hop_statements)
         sections.append(f"if (req.restarts == 0 && fastly.ff.visits_this_service == 0) {{\n{body}\n}}")
-    # B. RUM Phase 3 Routing (asset GET /js/rum.js [+ /js/faro-sdk.js])
-    # Sourced from backend.core.fastly.rum_provisioning so there is a single
-    # place that defines this routing — see that module's
-    # _generate_asset_fetch_vcl for the shield/backend-selection logic and
-    # the faro_version handling.
     if state.rum_enabled:
         from backend.core.fastly.utils import SHIELD_MAP
 
         shield_pop = state.cdn_shield or SHIELD_MAP.get(state.fos_region, "iad-va-us")
         asset_fetch_dict = generate_rum_asset_fetch_vcl(shield_pop, state.faro_version)
         sections.append(asset_fetch_dict[RUM_ASSET_FETCH_NAME])
-    # C. Session Scoring Enforcement (Section 4)
     if state.scoring.enabled:
         scoring_body = _generate_scoring_section_vcl(state, "vcl_recv")
         sections.append(scoring_body)
@@ -1508,7 +1294,6 @@ def generate_consolidated_snippet(state: FeatureState, subroutine: str) -> str:
 def _legacy_generate_consolidated_snippet(state: FeatureState, subroutine: str) -> str:
     """Generate consolidated VCL for other subroutines using legacy multi-section append logic."""
     sections: list[str] = []
-    # Section 6: Standard & Custom Field Captures (if logging enabled)
     if state.logging_enabled:
         from backend.provision.fastly_api import generate_capture_vcl
 
@@ -1530,15 +1315,12 @@ def _legacy_generate_consolidated_snippet(state: FeatureState, subroutine: str) 
         capture_vcl = capture_snippets.get(sub_key, "")
         if capture_vcl.strip():
             sections.append(f"# Section 6: Log Field Capture ({subroutine})\n{capture_vcl}")
-    # Section 4: Session Scoring (if enabled)
     if state.scoring.enabled:
         scoring_body = _generate_scoring_section_vcl(state, subroutine)
         sections.append(scoring_body)
-    # Section 5: RUM (if enabled)
     if state.rum_enabled:
         rum_body = _generate_rum_section_vcl(state, subroutine)
         sections.append(rum_body)
-    # Join non-empty sections with blank lines
     consolidated = VclBuilder.join_sections(sections)
     return consolidated
 
@@ -1553,7 +1335,6 @@ def _generate_scoring_section_vcl(state: FeatureState, subroutine: str) -> str:
         exclude_url_regex=state.scoring.exclude_url_regex,
         enforce_status_code=state.scoring.enforce_status_code,
     )
-    # Map subroutine names to snippet names from the generator
     snippet_map = {
         "vcl_deliver": "Session Scoring - Deliver",
         "vcl_fetch": "Session Scoring - Fetch",
@@ -1563,11 +1344,9 @@ def _generate_scoring_section_vcl(state: FeatureState, subroutine: str) -> str:
     snippet_name = snippet_map.get(subroutine)
     if snippet_name and snippet_name in scoring_vcl_dict:
         bodies.append(scoring_vcl_dict[snippet_name])
-    # Enforce snippet is also a recv snippet and should run after Recv
     if subroutine == "vcl_recv":
         if "Session Scoring - Enforce" in scoring_vcl_dict:
             bodies.append(scoring_vcl_dict["Session Scoring - Enforce"])
-        # Post-scoring restart logic
         restart_vcl = (
             "# Session Scoring: post-scoring restart shielding & NGWAF restore.\n"
             "if (req.restarts == 1 && req.http.x-edge-score) {\n"
@@ -1596,45 +1375,25 @@ def _generate_rum_section_vcl(state: FeatureState, subroutine: str) -> str:
         shield_pop = SHIELD_MAP.get(state.fos_region, "iad-va-us")
     asset_fetch_dict = generate_rum_asset_fetch_vcl(shield_pop, state.faro_version)
     sections = []
-    # Handle vcl_recv: include asset-fetch logic and RUM-Recv beacon logic
     if subroutine == "vcl_recv":
         if "RUM - Recv" in rum_vcl_dict:
             sections.append(rum_vcl_dict["RUM - Recv"])
         sections.append(asset_fetch_dict["RUM - Asset fetch FOS"])
         body = "\n\n".join(sections)
         return f"# Section 5: RUM ({subroutine})\n{body}"
-    # Handle vcl_deliver: just deliver logic (only relevant if scoring is also enabled to get session ID)
     if subroutine == "vcl_deliver":
         if not state.scoring.enabled:
             return ""
         body = rum_vcl_dict["RUM - Set cookies"]
         return f"# Section 5: RUM ({subroutine})\n{body}"
-    # Handle vcl_miss: include SigV4 signing logic (only needed in vcl_miss, never vcl_pass)
     if subroutine == "vcl_miss":
         body = asset_fetch_dict["RUM - Asset fetch SigV4 signing"]
         return f"# Section 5: RUM ({subroutine})\n{body}"
-    # Handle vcl_error: include error handler for synthetic 611 response
     if subroutine == "vcl_error":
         from backend.core.fastly.rum_provisioning import _generate_vcl_error_handler
 
         body = _generate_vcl_error_handler()
         return f"# Section 5: RUM ({subroutine})\n{body}"
-    # Handle vcl_fetch: long edge TTL, short browser TTL, tagged for purging.
-    #
-    # The ?v= hash in the embed snippet (frontend/app/rum/_sections/
-    # RumPageClient.tsx) is derived from the service id, NOT the tracker
-    # contents, so the URL is stable across tracker updates. The previous
-    # "max-age=86400, public, immutable" therefore meant a browser kept
-    # serving a stale tracker for up to 24h after a reconcile, and no purge
-    # could reach it — purging only clears the edge. Same decoupling as the
-    # Faro bundle: Surrogate-Control (edge-only) long, Cache-Control
-    # (browser-visible) short, no `immutable`.
-    #
-    # Gated on beresp.status == 200 for the same reason /js/faro-sdk.js is
-    # (the F-3 audit finding): without the check, a transient FOS 403/404 —
-    # mid-upload, or a bucket-policy blip — gets cached at the edge for a
-    # full day, so every visitor loads a broken tracker until the TTL
-    # expires or someone notices and purges.
     if subroutine == "vcl_fetch":
         body = """# Cache RUM tracker JS at the edge; browsers get a short TTL so a
 # Surrogate-Key purge of "rum-js" becomes visible to clients quickly.
@@ -1657,24 +1416,10 @@ if (req.url.path == "/js/rum.js") {
 
 
 def generate_log_format(state: FeatureState) -> str:
-    """Generate complete log format VCL expression.
-
-    Includes all standard Fastly fields plus all custom fields from state,
-    excluding RUM-specific fields which are exclusively logged on the secondary RUM endpoint.
-
-    Args:
-        state: Feature state.
-
-    Returns:
-        VCL log format expression.
-
-    Assertions:
-        - All referenced custom fields are defined.
-    """
+    """Generate complete log format VCL expression."""
     from backend.provision.fastly_api import load_log_format
     from backend.provision.rum_orchestrator_v2 import _RUM_FIELD_NAMES
 
-    # Exclude RUM beacon fields from the main requests log format to prevent bloat
     custom_fields = [cf for cf in state.log_fields.custom_fields if cf.get("name") not in _RUM_FIELD_NAMES]
     log_fields_dict = {
         "groups": state.log_fields.groups,
@@ -1685,17 +1430,8 @@ def generate_log_format(state: FeatureState) -> str:
 
 
 def desired_logging_endpoints(state: FeatureState) -> list[LoggingEndpoint]:
-    """Return desired logging endpoints (main S3 + secondary RUM if enabled).
-
-    Args:
-        state: Feature state.
-
-    Returns:
-        List of logging endpoints to deploy.
-    """
+    """Return desired logging endpoints (main S3 + secondary RUM if enabled)."""
     endpoints: list[LoggingEndpoint] = []
-    # Main S3 logging endpoint
-    # Note: response_condition must be "true" or a named condition name, not a VCL expression.
     if state.logging_enabled:
         log_format = generate_log_format(state)
         endpoints.append(
@@ -1710,7 +1446,6 @@ def desired_logging_endpoints(state: FeatureState) -> list[LoggingEndpoint]:
                 response_object_name="",
             )
         )
-    # Secondary RUM endpoint (if RUM enabled)
     if state.rum_enabled:
         from backend.provision.fastly_api import load_log_format
         from backend.provision.rum_orchestrator_v2 import _RUM_FIELD_NAMES
@@ -1734,16 +1469,8 @@ def desired_logging_endpoints(state: FeatureState) -> list[LoggingEndpoint]:
 
 
 def desired_backends(state: FeatureState) -> list[Backend]:
-    """Return desired backends (session_scorer, fos_origin, rum_collector).
-
-    Args:
-        state: Feature state.
-
-    Returns:
-        List of backends to deploy.
-    """
+    """Return desired backends (session_scorer, fos_origin, rum_collector)."""
     backends: list[Backend] = []
-    # Session Scoring backend (if scoring enabled)
     if state.scoring.enabled:
         backends.append(
             Backend(
@@ -1759,7 +1486,6 @@ def desired_backends(state: FeatureState) -> list[Backend]:
                 request_condition="fastly_log_analytics_false",
             )
         )
-    # RUM asset backend (if RUM enabled)
     if state.rum_enabled:
         from backend.core.fastly.utils import SHIELD_MAP
 
@@ -1767,7 +1493,6 @@ def desired_backends(state: FeatureState) -> list[Backend]:
         if not shield_pop:
             shield_pop = SHIELD_MAP.get(state.fos_region, "iad-va-us")
         shield_val = shield_pop if shield_pop.lower() != "none" else ""
-        # fos_origin backend for fetching rum-tracker.js
         backends.append(
             Backend(
                 name="fos_origin",
@@ -1786,18 +1511,7 @@ def desired_backends(state: FeatureState) -> list[Backend]:
 
 
 def desired_dictionaries(state: FeatureState) -> list[ServiceDictionary]:
-    """Return desired Fastly service dictionaries (fos_credentials, etc).
-
-    The fos_credentials dictionary is needed when:
-    - RUM is enabled (for asset-fetch SigV4 signing), OR
-    - Logging is enabled (for origin S3 backend credentials)
-
-    Args:
-        state: Feature state.
-
-    Returns:
-        List of dictionaries to deploy.
-    """
+    """Return desired Fastly service dictionaries (fos_credentials, etc)."""
     dicts: list[ServiceDictionary] = []
     if state.rum_enabled:
         items = {}
@@ -1808,28 +1522,15 @@ def desired_dictionaries(state: FeatureState) -> list[ServiceDictionary]:
                 "bucket": state.fos_bucket,
                 "region": state.fos_region,
             }
-        dicts.append(
-            ServiceDictionary(
-                name="fos_credentials",
-                write_only=True,
-                items=items,
-            )
-        )
+        dicts.append(ServiceDictionary(name="fos_credentials", write_only=True, items=items))
     return dicts
 
 
 import urllib.parse
 
 
-# ============================================================================
-# Fetch Current State (Read-Only)
-# ============================================================================
 def fetch_active_version(service_id: str, token: str) -> int | None:
-    """Fetch the currently active version number.
-
-    Returns:
-        Active version number, or None if no active version exists (new service).
-    """
+    """Fetch the currently active version number."""
     try:
         active = fastly("GET", f"/service/{service_id}/version/active", token=token)
         if isinstance(active, dict) and active.get("active"):
@@ -1838,7 +1539,6 @@ def fetch_active_version(service_id: str, token: str) -> int | None:
         pass
     try:
         resp = fastly("GET", f"/service/{service_id}/version", token=token)
-        # Fastly returns a list or a dictionary; find the active one
         if isinstance(resp, list):
             for item in resp:
                 if isinstance(item, dict) and item.get("active"):
@@ -1860,13 +1560,7 @@ def _unwrap_fastly_list(resp: object) -> list[dict]:
     return []
 
 
-def _delete_version_resource(
-    service_id: str,
-    version: int,
-    resource_path: str,
-    name: str,
-    token: str,
-) -> None:
+def _delete_version_resource(service_id: str, version: int, resource_path: str, name: str, token: str) -> None:
     encoded_name = urllib.parse.quote(name, safe="")
     fastly(
         "DELETE",
@@ -1877,12 +1571,7 @@ def _delete_version_resource(
 
 
 def _upsert_version_resource(
-    service_id: str,
-    version: int,
-    resource_path: str,
-    name: str,
-    body: dict,
-    token: str,
+    service_id: str, version: int, resource_path: str, name: str, body: dict, token: str
 ) -> dict:
     encoded_name = urllib.parse.quote(name, safe="")
     item_url = f"/service/{service_id}/version/{version}/{resource_path}/{encoded_name}"
@@ -1898,23 +1587,10 @@ def _upsert_version_resource(
 
 
 def fetch_snippets(service_id: str, version: int, token: str) -> list[VCLSnippet]:
-    """Fetch all VCL snippets for a service version.
-
-    Args:
-        service_id: Fastly service ID.
-        version: Version number.
-        token: API token.
-
-    Returns:
-        List of VCLSnippet objects.
-    """
+    """Fetch all VCL snippets for a service version."""
     snippets: list[VCLSnippet] = []
     try:
-        resp = fastly(
-            "GET",
-            f"/service/{service_id}/version/{version}/snippet",
-            token=token,
-        )
+        resp = fastly("GET", f"/service/{service_id}/version/{version}/snippet", token=token)
         for item in _unwrap_fastly_list(resp):
             snippet = VCLSnippet(
                 name=item.get("name", ""),
@@ -1929,23 +1605,10 @@ def fetch_snippets(service_id: str, version: int, token: str) -> list[VCLSnippet
 
 
 def fetch_logging_endpoints(service_id: str, version: int, token: str) -> list[LoggingEndpoint]:
-    """Fetch all S3 logging endpoints for a service version.
-
-    Args:
-        service_id: Fastly service ID.
-        version: Version number.
-        token: API token.
-
-    Returns:
-        List of LoggingEndpoint objects.
-    """
+    """Fetch all S3 logging endpoints for a service version."""
     endpoints: list[LoggingEndpoint] = []
     try:
-        resp = fastly(
-            "GET",
-            f"/service/{service_id}/version/{version}/logging/s3",
-            token=token,
-        )
+        resp = fastly("GET", f"/service/{service_id}/version/{version}/logging/s3", token=token)
         for item in _unwrap_fastly_list(resp):
             endpoint = LoggingEndpoint(
                 name=item.get("name", ""),
@@ -1964,23 +1627,10 @@ def fetch_logging_endpoints(service_id: str, version: int, token: str) -> list[L
 
 
 def fetch_backends(service_id: str, version: int, token: str) -> list[Backend]:
-    """Fetch all backends for a service version.
-
-    Args:
-        service_id: Fastly service ID.
-        version: Version number.
-        token: API token.
-
-    Returns:
-        List of Backend objects.
-    """
+    """Fetch all backends for a service version."""
     backends: list[Backend] = []
     try:
-        resp = fastly(
-            "GET",
-            f"/service/{service_id}/version/{version}/backend",
-            token=token,
-        )
+        resp = fastly("GET", f"/service/{service_id}/version/{version}/backend", token=token)
         for item in _unwrap_fastly_list(resp):
             backend = Backend(
                 name=item.get("name", ""),
@@ -2004,23 +1654,10 @@ def fetch_backends(service_id: str, version: int, token: str) -> list[Backend]:
 
 
 def fetch_dictionaries(service_id: str, version: int, token: str) -> list[ServiceDictionary]:
-    """Fetch all service dictionaries (ConfigStore) for a service version.
-
-    Args:
-        service_id: Fastly service ID.
-        version: Version number.
-        token: API token.
-
-    Returns:
-        List of ServiceDictionary objects.
-    """
+    """Fetch all service dictionaries (ConfigStore) for a service version."""
     dicts: list[ServiceDictionary] = []
     try:
-        resp = fastly(
-            "GET",
-            f"/service/{service_id}/version/{version}/dictionary",
-            token=token,
-        )
+        resp = fastly("GET", f"/service/{service_id}/version/{version}/dictionary", token=token)
         for item in _unwrap_fastly_list(resp):
             dict_name = item.get("name", "")
             dict_id = item.get("id", "")
@@ -2028,11 +1665,7 @@ def fetch_dictionaries(service_id: str, version: int, token: str) -> list[Servic
             entries_dict = {}
             if dict_id:
                 try:
-                    items_resp = fastly(
-                        "GET",
-                        f"/service/{service_id}/dictionary/{dict_id}/items",
-                        token=token,
-                    )
+                    items_resp = fastly("GET", f"/service/{service_id}/dictionary/{dict_id}/items", token=token)
                     if isinstance(items_resp, dict) and "items" not in items_resp:
                         items_entries = [items_resp]
                     else:
@@ -2045,78 +1678,28 @@ def fetch_dictionaries(service_id: str, version: int, token: str) -> list[Servic
                                 entries_dict[key] = val
                 except Exception:
                     pass
-            dicts.append(
-                ServiceDictionary(
-                    name=dict_name,
-                    write_only=write_only,
-                    items=entries_dict,
-                )
-            )
+            dicts.append(ServiceDictionary(name=dict_name, write_only=write_only, items=entries_dict))
     except Exception:
         pass
     return dicts
 
 
-# ============================================================================
-# Mutations (Write Operations)
-# ============================================================================
 def clone_version(service_id: str, version: int, token: str, comment: str = "") -> int:
-    """Clone an existing version to create a new draft.
-
-    Args:
-        service_id: Fastly service ID.
-        version: Version number to clone.
-        token: API token.
-        comment: Optional comment for the new version.
-
-    Returns:
-        New draft version number.
-
-    Raises:
-        RuntimeError: if clone fails.
-    """
-    resp = fastly(
-        "PUT",
-        f"/service/{service_id}/version/{version}/clone",
-        token=token,
-    )
+    """Clone an existing version to create a new draft."""
+    resp = fastly("PUT", f"/service/{service_id}/version/{version}/clone", token=token)
     new_version = int(resp["number"])
     if comment:
-        fastly(
-            "PUT",
-            f"/service/{service_id}/version/{new_version}",
-            {"comment": comment},
-            token=token,
-        )
+        fastly("PUT", f"/service/{service_id}/version/{new_version}", {"comment": comment}, token=token)
     return new_version
 
 
 def delete_snippet(service_id: str, version: int, snippet_name: str, token: str) -> None:
-    """Delete a VCL snippet.
-
-    Args:
-        service_id: Fastly service ID.
-        version: Version number.
-        snippet_name: Name of snippet to delete.
-        token: API token.
-    """
+    """Delete a VCL snippet."""
     _delete_version_resource(service_id, version, "snippet", snippet_name, token)
 
 
-def create_or_update_snippet(
-    service_id: str,
-    version: int,
-    snippet: VCLSnippet,
-    token: str,
-) -> None:
-    """Create or update a VCL snippet.
-
-    Args:
-        service_id: Fastly service ID.
-        version: Version number.
-        snippet: VCLSnippet to create/update.
-        token: API token.
-    """
+def create_or_update_snippet(service_id: str, version: int, snippet: VCLSnippet, token: str) -> None:
+    """Create or update a VCL snippet."""
     snippet_type = (
         snippet.subroutine.replace("vcl_", "") if snippet.subroutine.startswith("vcl_") else snippet.subroutine
     )
@@ -2131,14 +1714,7 @@ def create_or_update_snippet(
 
 
 def delete_logging_endpoint(service_id: str, version: int, endpoint_name: str, token: str) -> None:
-    """Delete an S3 logging endpoint.
-
-    Args:
-        service_id: Fastly service ID.
-        version: Version number.
-        endpoint_name: Name of endpoint to delete.
-        token: API token.
-    """
+    """Delete an S3 logging endpoint."""
     _delete_version_resource(service_id, version, "logging/s3", endpoint_name, token)
 
 
@@ -2152,18 +1728,7 @@ def create_or_update_logging_endpoint(
     access_key: str | None = None,
     secret_key: str | None = None,
 ) -> None:
-    """Create or update an S3 logging endpoint.
-
-    Args:
-        service_id: Fastly service ID.
-        version: Version number.
-        endpoint: LoggingEndpoint to create/update.
-        token: API token.
-        bucket_name: Optional S3 bucket name.
-        domain: Optional S3 domain/endpoint.
-        access_key: Optional S3 access key.
-        secret_key: Optional S3 secret key.
-    """
+    """Create or update an S3 logging endpoint."""
     body = {
         "name": endpoint.name,
         "path": endpoint.path,
@@ -2188,26 +1753,12 @@ def create_or_update_logging_endpoint(
 
 
 def delete_backend(service_id: str, version: int, backend_name: str, token: str) -> None:
-    """Delete a backend.
-
-    Args:
-        service_id: Fastly service ID.
-        version: Version number.
-        backend_name: Name of backend to delete.
-        token: API token.
-    """
+    """Delete a backend."""
     _delete_version_resource(service_id, version, "backend", backend_name, token)
 
 
 def create_or_update_backend(service_id: str, version: int, backend: Backend, token: str) -> None:
-    """Create or update a backend.
-
-    Args:
-        service_id: Fastly service ID.
-        version: Version number.
-        backend: Backend to create/update.
-        token: API token.
-    """
+    """Create or update a backend."""
     body = {
         "name": backend.name,
         "address": backend.address,
@@ -2231,40 +1782,18 @@ def create_or_update_backend(service_id: str, version: int, backend: Backend, to
 
 
 def delete_dictionary(service_id: str, version: int, dict_name: str, token: str) -> None:
-    """Delete a service dictionary.
-
-    Args:
-        service_id: Fastly service ID.
-        version: Version number.
-        dict_name: Name of dictionary to delete.
-        token: API token.
-    """
+    """Delete a service dictionary."""
     _delete_version_resource(service_id, version, "dictionary", dict_name, token)
 
 
-def create_or_update_dictionary(
-    service_id: str,
-    version: int,
-    dictionary: ServiceDictionary,
-    token: str,
-) -> None:
-    """Create or update a service dictionary and its items.
-
-    Args:
-        service_id: Fastly service ID.
-        version: Version number.
-        dictionary: ServiceDictionary to create/update.
-        token: API token.
-    """
+def create_or_update_dictionary(service_id: str, version: int, dictionary: ServiceDictionary, token: str) -> None:
+    """Create or update a service dictionary and its items."""
     resp = _upsert_version_resource(
         service_id,
         version,
         "dictionary",
         dictionary.name,
-        {
-            "name": dictionary.name,
-            "write_only": dictionary.write_only,
-        },
+        {"name": dictionary.name, "write_only": dictionary.write_only},
         token,
     )
     dict_id = resp.get("id", "")
@@ -2275,14 +1804,7 @@ def create_or_update_dictionary(
 
 
 def _upsert_dictionary_items(service_id: str, dict_id: str, items: dict[str, str], token: str) -> None:
-    """Upsert items into a service dictionary.
-
-    Args:
-        service_id: Fastly service ID.
-        dict_id: Dictionary ID.
-        items: Dict of key-value pairs to upsert.
-        token: API token.
-    """
+    """Upsert items into a service dictionary."""
     for key, value in items.items():
         encoded_key = urllib.parse.quote(key, safe="")
         try:
@@ -2296,54 +1818,23 @@ def _upsert_dictionary_items(service_id: str, dict_id: str, items: dict[str, str
             fastly(
                 "POST",
                 f"/service/{service_id}/dictionary/{dict_id}/item",
-                {
-                    "item_key": key,
-                    "item_value": value,
-                },
+                {"item_key": key, "item_value": value},
                 token=token,
             )
 
 
 def validate_version(service_id: str, version: int, token: str) -> bool:
-    """Validate a service version.
-
-    Args:
-        service_id: Fastly service ID.
-        version: Version number.
-        token: API token.
-
-    Returns:
-        True if valid, False if invalid.
-
-    Raises:
-        RuntimeError: with validation error details if validation fails.
-    """
+    """Validate a service version."""
     try:
-        resp = fastly(
-            "GET",
-            f"/service/{service_id}/version/{version}/validate",
-            token=token,
-        )
-        # Check if validation result is good
+        resp = fastly("GET", f"/service/{service_id}/version/{version}/validate", token=token)
         return resp.get("status") == "ok"
     except RuntimeError as e:
-        # Fastly returns a 400 on validation failure with error details
         raise RuntimeError(f"VCL validation failed: {e}")
 
 
 def activate_version(service_id: str, version: int, token: str) -> None:
-    """Activate a draft version.
-
-    Args:
-        service_id: Fastly service ID.
-        version: Version number to activate.
-        token: API token.
-    """
-    fastly(
-        "PUT",
-        f"/service/{service_id}/version/{version}/activate",
-        token=token,
-    )
+    """Activate a draft version."""
+    fastly("PUT", f"/service/{service_id}/version/{version}/activate", token=token)
 
 
 def _bootstrap_featurestate_from_fastly(service_id: str, token: str) -> FeatureState:
@@ -2399,10 +1890,7 @@ def _bootstrap_featurestate_from_fastly(service_id: str, token: str) -> FeatureS
         rum_enabled=rum_enabled,
         rum_log_period=rum_log_period,
         cmcd=CmcdConfig(enabled=cmcd_enabled),
-        scoring=ScoringConfig(
-            enabled=scoring_enabled,
-            domain="" if not scoring_enabled else "scorer.example.com",
-        ),
+        scoring=ScoringConfig(enabled=scoring_enabled, domain="" if not scoring_enabled else "scorer.example.com"),
     )
 
 
@@ -2715,20 +2203,12 @@ def _is_managed_snippet(name: str) -> bool:
 def _is_legacy_snippet(name: str) -> bool:
     if name.startswith("Fastly Log Analytics - "):
         return False
-    legacy_prefixes = [
-        "Fastly Log Analysis",
-        "Fastly Log Analytics",
-        "RUM -",
-        "Session Scoring",
-        "CMCD",
-    ]
+    legacy_prefixes = ["Fastly Log Analysis", "Fastly Log Analytics", "RUM -", "Session Scoring", "CMCD"]
     return any(name.startswith(prefix) for prefix in legacy_prefixes)
 
 
 def _detect_and_queue_legacy_cleanup(
-    current_snippets: list[VCLSnippet],
-    diff: DiffResult,
-    status_cb: Callable[[str], None] | None = None,
+    current_snippets: list[VCLSnippet], diff: DiffResult, status_cb: Callable[[str], None] | None = None
 ) -> None:
     legacy = [s for s in current_snippets if _is_legacy_snippet(s.name)]
     if legacy:
@@ -2764,20 +2244,11 @@ def _purge_rum_surrogate_key(service_id: str, token: str) -> None:
     sched_logger = logging.getLogger("backend.scheduler")
     try:
         sched_logger.info(f"Purging RUM surrogate key {RUM_SURROGATE_KEY} on service {service_id}")
-        fastly_client(
-            "POST",
-            f"/service/{service_id}/purge/{RUM_SURROGATE_KEY}",
-            token=token,
-            expect_empty=True,
-        )
+        fastly_client("POST", f"/service/{service_id}/purge/{RUM_SURROGATE_KEY}", token=token, expect_empty=True)
     except Exception as e:
         sched_logger.warning(f"Failed to purge surrogate key {RUM_SURROGATE_KEY} for service {service_id}: {e}")
 
 
-# ============================================================================
-# Unified Multi-Service Declarative IaC Engine (folded from iac_reconciler.py)
-# ============================================================================
-# Register module alias BEFORE importing session_scoring_orchestrator
 sys.modules["backend.provision.declarative.iac_reconciler"] = sys.modules[__name__]
 from backend.provision.session_scoring_orchestrator import (  # noqa: E402
     _SCORER_PACKAGE,
@@ -2850,16 +2321,9 @@ def build_desired_state(logging_service_id: str, token: str) -> UnifiedDesiredSt
             with matrix_path.open() as f:
                 serialized = serialize_kv(json.load(f))
                 keys["matrix"] = serialized.hex()
-        kv_stores[store_name] = DeclarativeKVStore(
-            name=store_name,
-            keys=keys,
-            link_to_services=[compute_scorer.name],
-        )
+        kv_stores[store_name] = DeclarativeKVStore(name=store_name, keys=keys, link_to_services=[compute_scorer.name])
     return UnifiedDesiredState(
-        service_id=logging_service_id,
-        vcl_service=vcl_service,
-        compute_scorer=compute_scorer,
-        kv_stores=kv_stores,
+        service_id=logging_service_id, vcl_service=vcl_service, compute_scorer=compute_scorer, kv_stores=kv_stores
     )
 
 
@@ -2872,16 +2336,11 @@ def discover_current_state(logging_service_id: str, token: str) -> dict[str, Any
         kv_stores[store_name] = store
     compute_name = f"Session Scoring Service for {logging_service_id}"
     compute_service = find_service_by_name(compute_name, token)
-    return {
-        "kv_stores": kv_stores,
-        "compute_scorer": compute_service,
-    }
+    return {"kv_stores": kv_stores, "compute_scorer": compute_service}
 
 
 def verify_compute_scorer_readiness(
-    compute_def: DeclarativeComputeService,
-    token: str,
-    status_cb: Callable[[str], None] | None = None,
+    compute_def: DeclarativeComputeService, token: str, status_cb: Callable[[str], None] | None = None
 ) -> None:
     """Probes the Compute Scorer domain to guarantee DNS and Edge Routing are active."""
     import httpx
@@ -2916,10 +2375,7 @@ def verify_compute_scorer_readiness(
 
 
 def reconcile_infrastructure(
-    logging_service_id: str,
-    token: str,
-    dry_run: bool = False,
-    status_cb: Callable[[str], None] | None = None,
+    logging_service_id: str, token: str, dry_run: bool = False, status_cb: Callable[[str], None] | None = None
 ) -> None:
     """The central unified IaC control loop managing all multi-service resource operations."""
     desired = build_desired_state(logging_service_id, token)
@@ -2971,12 +2427,7 @@ def reconcile_infrastructure(
             scoring_service_id = scoring_meta["scoring_service_id"]
             matrix_store_id = scoring_meta.get("scoring_matrix_store_id", "")
             _write_matrix_to_kv(matrix_store_id, logging_service_id, token, status_cb=status_cb)
-            package_meta = _deploy_wasm_package(
-                scoring_service_id,
-                matrix_store_id,
-                token,
-                status_cb=status_cb,
-            )
+            package_meta = _deploy_wasm_package(scoring_service_id, matrix_store_id, token, status_cb=status_cb)
             resolved_domain = scoring_meta.get("scoring_domain") or (
                 desired.compute_scorer.domains[0] if desired.compute_scorer.domains else ""
             )

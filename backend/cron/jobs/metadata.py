@@ -1,18 +1,3 @@
-"""Metadata-class cron jobs.
-
-Covers everything that isn't ingest/commit/compaction proper:
-
-  * ``_run_metadata_sync`` — analyst pull-to-local refresh + bootstrap
-    helper called by :meth:`Scheduler.start`, scheduled metadata jobs, and
-    the coalesced post-commit dispatcher.
-  * ``_run_ngwaf_bot_sync`` — per-service NGWAF VERIFIED-BOT pull.
-  * ``_run_bot_data_refresh`` — global daily bot-source cache refresh.
-  * ``_run_rdns_enrichment`` — every-5-min rDNS lookup batcher.
-  * ``_run_share_audit_purge`` — daily remote-share audit log purge.
-  * ``_run_service_alerts_evaluation`` — per-service alert evaluation.
-  * ``_run_metadata_cleanup`` — daily PostgreSQL operational metadata retention trim.
-"""
-
 from __future__ import annotations
 
 import logging
@@ -53,7 +38,6 @@ def _post_json(url: str, payload: dict) -> None:
         response.raise_for_status()
 
 
-# Old names kept as aliases: the alerts job and tests patch/import them by name.
 _post_alert_webhook = _post_json
 _post_slack_notification = _post_json
 
@@ -73,15 +57,9 @@ def _post_pagerduty_notification(url: str, alert_name: str, metric: str, msg_val
     _post_json(url, payload)
 
 
-# ── _run_metadata_sync (no @cron_task — also called as a bootstrap helper) ────
 def _run_metadata_sync(
     service_id: str, run_id: int | None = None, start_time: str | None = None, end_time: str | None = None
 ) -> None:
-    """Refresh Iceberg table metadata and DuckDB view for read-only services.
-
-    Called for 'Analyst' users who don't ingest raw logs but need to see
-    new snapshots committed by Admin users.
-    """
     from backend import config as svcconfig
     from backend.core import iceberg as db_iceberg
     from backend.core.duckdb import (
@@ -102,9 +80,6 @@ def _run_metadata_sync(
 
         if should_defer_cron("metadata_sync", service_id):
             return
-    # For manual runs (run_id is not None), we ignore the default limit unless
-    # it was explicitly passed in. If a manual run is triggered without
-    # start_time, it means "Import All", so we should clear any existing limit.
     from backend.cron.jobs.sync import apply_time_range_pinning, get_service_display_label
 
     start_time_exec = time.time()
@@ -133,8 +108,6 @@ def _run_metadata_sync(
             job_name="metadata_sync",
             event={"type": "status", "message": f"{elapsed()} Starting metadata sync..."},
         )
-        # 1. Refresh Iceberg catalog from cloud
-        # In PyIceberg SqlCatalog, load_table() will verify metadata from S3
         _log_and_add_progress(
             run_id,
             service_id,
@@ -150,18 +123,6 @@ def _run_metadata_sync(
                 "message": f"{elapsed()}   ↳ Downloading and parsing the latest catalog metadata (this may take 5-10 seconds)...",
             },
         )
-        # "No data committed yet" is a normal state for a brand-new service and
-        # must be reported as a success, not an error — otherwise the very
-        # first sync writes a misleading failure to the system-jobs panel.
-        #
-        # Under v3 that condition is a FALSE return from
-        # ``ducklake_table_exists``, not an exception: pre-v3 this leaned on
-        # pyiceberg raising ``NoSuchTableError``, which the DuckLake-backed
-        # ``init_iceberg_table`` no longer does (it returns None on an attach
-        # failure and True otherwise), so the graceful branch had gone dead
-        # and a fresh service fell through into the data sync instead. The
-        # string-matching ``except`` is kept as a belt for any caller/patch
-        # that still raises the old shape.
         table_present: bool
         try:
             if db_iceberg.init_iceberg_table(src, create=False) is None:
@@ -182,7 +143,6 @@ def _run_metadata_sync(
             run.success(msg)
             _log_and_add_progress(run_id, service_id, job_name="metadata_sync", event={"type": "done", "message": msg})
             return
-        # 2. Sync data files (Pull-to-Local caching)
         start_time, end_time = apply_time_range_pinning(
             service_id,
             cfg,
@@ -228,26 +188,18 @@ def _run_metadata_sync(
                     "message": f"Synced {files_cached} Iceberg data file(s) to local cache, {rows_cached:,} rows.",
                 },
             )
-        # 3. Update DuckDB view
         _log_and_add_progress(
             run_id,
             service_id,
             job_name="metadata_sync",
             event={"type": "status", "message": "Updating DuckDB views..."},
         )
-        # read_only=False is load-bearing in standard mode: a read-only connection
-        # makes the slow-path rebuild bind a TEMP view that dies with this connection
-        # moments later — the cron would pay the full rebuild cost for a
-        # no-op and the persistent per-service view would never refresh.
-        # In durable serving mode, connections are ephemeral in-memory, so read-only
-        # is required by the durable serving guard.
         durable_serving = svcconfig.is_durable_serving_mode(src)
         con = get_connection(source=src, read_only=durable_serving)
         try:
             db_iceberg.update_iceberg_view(con, src)
         finally:
             con.close()
-        # 4. Import shared history and views/alerts from Admin
         import_error: str | None = None
         try:
             from backend.state_sync import import_admin_state
@@ -256,9 +208,7 @@ def _run_metadata_sync(
         except Exception as e:
             import_error = str(e)
             _log_and_add_progress(run_id, service_id, job_name="metadata_sync", event={"type": "warning", "message": e})
-        # 5. Refresh cached status (row count, etc)
         refresh_config_status(service_id)
-        # ── 6. Invalidate dashboard cache ─────────────────────────────────────
         try:
             from backend.repositories.dashboard import invalidate_service
 
@@ -299,7 +249,6 @@ def _post_commit_metadata_sync_worker(service_id: str) -> None:
 
 
 def dispatch_post_commit_metadata_sync(service_id: str) -> None:
-    """Run metadata sync off the commit path, coalescing requests per service."""
     with _post_commit_metadata_sync_lock:
         if service_id in _post_commit_metadata_sync_rerun:
             _post_commit_metadata_sync_rerun[service_id] = True
@@ -318,14 +267,8 @@ def dispatch_post_commit_metadata_sync(service_id: str) -> None:
             raise
 
 
-# ── _run_ngwaf_bot_sync ──────────────────────────────────────────────────────
 @cron_task("sync_ngwaf_bots", job_name="ngwaf_sync")
 def _run_ngwaf_bot_sync(service_id: str) -> None:
-    """Fetch NGWAF VERIFIED-BOT records and upsert into the PostgreSQL ngwaf_bots table.
-
-    Skips silently if ngwaf_workspace_id is not configured for the service.
-    Resumes from last_timestamp_synced so restarts after a crash don't lose progress.
-    """
     from backend import config as svcconfig
     from backend.core.duckdb import get_source_for_service
     from backend.cron.decorators import dev_mode_no_crons
@@ -370,10 +313,6 @@ def _run_ngwaf_bot_sync(service_id: str) -> None:
             from backend.utils.ngwaf import get_last_timestamp, update_sync_watermark
 
             matcher = build_matcher()
-            # Watermark-only resume path. upsert_bots() advances last_timestamp_synced
-            # after every successful page, so steady state reads from PostgreSQL with
-            # zero cloud I/O. On first-ever sync the watermark is NULL — seed it with
-            # "now" and skip this cycle so the next one starts cleanly from "now".
             from_ts = get_last_timestamp(workspace_id)
             if not from_ts:
                 from backend.utils.date_utils import iso_z_now
@@ -419,9 +358,6 @@ def _run_ngwaf_bot_sync(service_id: str) -> None:
                 summary = f"Synced {total_records} bot record(s), cleaned {deleted} old row(s)."
             run.success(summary, files_downloaded=total_records)
             _log_and_add_progress(run_id, service_id, job_name="ngwaf_sync", event={"type": "done", "message": summary})
-            # Adaptive scheduling under load:
-            # If budget was reached or high bot volume (>= 500 records), tighten interval to 2 minutes
-            # to rapidly catch up. When backlog subsides, restore baseline configured interval (default 5m).
             try:
                 from backend.cron.scheduler import get_scheduler
 
@@ -459,10 +395,8 @@ def _run_ngwaf_bot_sync(service_id: str) -> None:
     logger.info("🏁  \x1b[36m[ngwaf_sync]\x1b[0m %s: NGWAF sync job finished.", svc_display)
 
 
-# ── _run_bot_data_refresh / _run_rdns_enrichment / _run_share_audit_purge ────
 @global_job("bot_data_refresh", color="36", tag="bots", label="Bot data refresh")
 def _run_bot_data_refresh() -> tuple[str, str]:
-    """Fetch and cache all enabled bot sources (nightly 02:00 UTC)."""
     from backend.cron.decorators import dev_mode_no_crons
     from backend.utils.bot_sources import refresh_all_sources
 
@@ -486,9 +420,8 @@ def _run_bot_data_refresh() -> tuple[str, str]:
 
 @global_job("rdns_enrichment", color="34", tag="rdns", label="rDNS enrichment")
 def _run_rdns_enrichment() -> tuple[str, str]:
-    """Resolve pending rDNS lookups and discover new IPs (every 5 min)."""
     from backend.cron.decorators import dev_mode_no_crons
-    from backend.utils.rdns_cache import enrich_batch
+    from backend.utils.bot_sources import enrich_batch
 
     if dev_mode_no_crons():
         logger.info("⏸️  \x1b[34m[rdns]\x1b[0m dev_mode_no_crons active, skipping rDNS enrichment.")
@@ -502,11 +435,6 @@ def _run_rdns_enrichment() -> tuple[str, str]:
 
 @global_job("share_audit_purge", color="35", tag="share_audit_purge", label="Share audit purge")
 def _run_share_audit_purge() -> tuple[str, str]:
-    """Drop remote-share audit rows older than retention, expired invites, tokens, and stale sessions (daily 03:45 UTC).
-
-    Retention is read from the `share_audit_retention_days` setting, defaulting
-    to 90 days. The companion endpoint is `POST /api/admin/share/purge`.
-    """
     from backend.core import share_db
     from backend.cron.decorators import dev_mode_no_crons
 
@@ -536,10 +464,8 @@ def _run_share_audit_purge() -> tuple[str, str]:
     return ("success", detail)
 
 
-# ── _run_service_alerts_evaluation ───────────────────────────────────────────
 @cron_task("evaluate_alerts", job_name="alerts")
 def _run_service_alerts_evaluation(service_id: str) -> None:
-    """Evaluate all enabled alerts for a specific service."""
     from backend.core.duckdb import get_connection, get_source_for_service
     from backend.cron.decorators import dev_mode_no_crons
     from backend.repositories import alerts as alert_repo  # type: ignore[attr-defined]
@@ -558,7 +484,6 @@ def _run_service_alerts_evaluation(service_id: str) -> None:
     task_name = "alerts"
     _display = _display_label(src, service_id)
     logger.info("🏎️  \x1b[93m[alerts]\x1b[0m %s: Alerts evaluation job started.", _display)
-    # Fetch alerts from PostgreSQL metadata (no DuckDB needed).
     alerts = alert_repo.get_alerts(service_id=service_id)
     enabled_alerts = [a for a in alerts if a["enabled"]]
     if not enabled_alerts:
@@ -578,12 +503,10 @@ def _run_service_alerts_evaluation(service_id: str) -> None:
         if not run.ok:
             return
         run_id = run.run_id
-        # DuckDB connection is only needed (and only opened) once the lease is held.
         con_ro = get_connection(src, read_only=True)
         webhook_failures: list[str] = []
         try:
             display_name = _display_label(src, service_id)
-            # (alert, webhook_url, payload, max_ts) for each alert that should fire
             triggered_items: list[tuple[dict, str | None, dict | None, str | None]] = []
             for alert in enabled_alerts:
                 try:
@@ -611,18 +534,13 @@ def _run_service_alerts_evaluation(service_id: str) -> None:
             if con_ro is not None:
                 con_ro.close()
         try:
-            # Second pass: write timestamps first, then dispatch webhooks so a crash
-            # between the two doesn't cause duplicate notifications on the next run.
             if triggered_items:
                 for alert, _, _, max_ts in triggered_items:
                     alert_repo.update_last_triggered(service_id, alert["id"], max_ts)
-                # Export updated state before sending webhooks so the quiet-period
-                # timestamp is durable even if a webhook call hangs or fails.
                 from backend.state_sync import export_admin_state
 
                 export_admin_state(service_id)
                 for alert, webhook_url, payload, _ in triggered_items:
-                    # 1. Post legacy webhook if configured
                     if webhook_url and payload:
                         try:
                             _post_alert_webhook(webhook_url, payload)
@@ -635,7 +553,6 @@ def _run_service_alerts_evaluation(service_id: str) -> None:
                                 alert["id"],
                                 e,
                             )
-                    # 2. Post to modern alert channels if configured
                     channels = alert.get("channels") or []
                     for channel in channels:
                         try:
@@ -715,31 +632,8 @@ def _run_service_alerts_evaluation(service_id: str) -> None:
             run.fail(f"Alerts evaluation failed: {e}", error_message=err_msg, files_downloaded=0, rows_ingested=0)
 
 
-# ── _run_metadata_cleanup ────────────────────────────────────────────────────
 @cron_task("metadata_cleanup", job_name="metadata_cleanup")
 def _run_metadata_cleanup(service_id: str) -> None:
-    """Daily: trim usage_log + ingested_files + cron_runs per service retention cfg.
-
-    Retention defaults to 1 day for usage_log/ingested_files, 7 days for
-    cron_runs (see ``metadata_db.DEFAULT_METADATA_RETENTION``). Override
-    per service via cfg["metadata_retention"]:
-
-        {"metadata_retention": {"usage_log_days": 7, "ingested_files_days": 30,
-                                "cron_runs_days": 30}}
-
-    A value of 0 (or negative) disables cleanup for that table — useful for
-    a long-retention analyst service that wants the full audit trail.
-
-    VACUUM only runs when something was actually deleted. On a healthy
-    daily cadence this means: first run trims everything older than
-    retention, subsequent runs are mostly no-ops (only that day's
-    just-aged rows to trim), and VACUUM happens cheaply on small deltas.
-
-    Writes a row to the cron_runs audit table on completion so the run
-    shows up on the Data Management cron schedule + history grid alongside
-    the other tasks. The cron_runs row itself becomes part of the next
-    cleanup's trimming target (capped at cron_runs_days retention).
-    """
     from backend import config as svcconfig
     from backend.core.duckdb import get_source_for_service
     from backend.core.metadata import cleanup_metadata
@@ -799,19 +693,10 @@ def _run_metadata_cleanup(service_id: str) -> None:
             )
         else:
             logger.info("🏁  %s %s: no rows to trim (took %.2fs)", label, _display, result["duration_s"])
-        # Also trim the global system_metrics.db retention window. Idempotent
-        # across per-service runs (the second call this day deletes 0 rows
-        # because the first one already cleared them), and the DELETE rides
-        # the (metric, ts) index so the cost is microseconds even when there's
-        # nothing to do. 30-day window matches the in-app Trends tab range
-        # (1h / 24h / 7d) plus a buffer.
         try:
             purge_old(retention_days=30)
         except Exception as e:
             logger.debug("[metadata_cleanup] metric_snapshots purge failed: %s", e)
-        # Repurpose the rows_ingested column for the count of rows trimmed —
-        # the schema is shared across all cron tasks, and "rows_ingested" is
-        # the closest semantic fit (each task interprets it by context).
         run.success(summary, rows_ingested=total_deleted)
         _log_and_add_progress(
             run_id,
@@ -821,7 +706,6 @@ def _run_metadata_cleanup(service_id: str) -> None:
         )
 
 
-# ── Metric Snapshots (folded from backend.core.metric_snapshots) ─────────────
 import gc  # noqa: E402
 import os  # noqa: E402
 import signal  # noqa: E402
@@ -841,18 +725,17 @@ _EMPTY = ""
 
 
 def _pg_connection():
-    from backend.core.metadata.pg_connection import get_pg_readonly_connection
+    from backend.core.metadata.base import get_pg_readonly_connection
 
     return get_pg_readonly_connection()
 
 
 def _pg_write_connection():
-    from backend.core.metadata.pg_connection import get_pg_thread_connection
+    from backend.core.metadata.base import get_pg_thread_connection
 
     return get_pg_thread_connection()
 
 
-# ── Write path ───────────────────────────────────────────────────────────────
 def record_snapshot(
     metric: str,
     value: float,
@@ -861,7 +744,6 @@ def record_snapshot(
     task: str | None = None,
     ts: str | None = None,
 ) -> None:
-    """Insert one metric sample. Idempotent on ``(metric, service_id, task, ts)``."""
     if not metric:
         raise ValueError("metric is required")
     ts_str = ts or iso_z_now()
@@ -880,15 +762,7 @@ def record_snapshot(
         logger.warning("[metric_snapshots] Postgres insert failed for %s: %s", metric, e)
 
 
-# ── Read path ────────────────────────────────────────────────────────────────
 def get_batch(*, since: datetime | str) -> dict:
-    """Return every series newer than ``since``, grouped by series key.
-
-    Series key shape: ``"{metric}"`` for global, ``"{metric}|{service_id}"``
-    for per-service, ``"{metric}|{service_id}|{task}"`` for per-task. The
-    admin Trends page does one round-trip; the frontend partitions
-    by metric prefix.
-    """
     if isinstance(since, str):
         since = parse_relative_time_window(since)
     try:
@@ -908,14 +782,7 @@ def get_batch(*, since: datetime | str) -> dict:
         return {}
 
 
-# ── Liveness ─────────────────────────────────────────────────────────────────
 def last_snapshot_age_s() -> float | None:
-    """Seconds since the most recent metric_snapshots row, or ``None`` if empty.
-
-    SRE-06: the minute-cadence sampler (:mod:`backend.cron.jobs.metric_snapshot`)
-    is a *global* APScheduler interval job, so a stale ``max(ts)`` is a direct
-    witness that the scheduler thread has stopped ticking.
-    """
     try:
         with closing(_pg_connection()) as con:
             row = con.execute("SELECT max(ts) AS latest FROM metric_snapshots").fetchone()
@@ -933,9 +800,7 @@ def last_snapshot_age_s() -> float | None:
     return max(0.0, (datetime.now(UTC) - dt).total_seconds())
 
 
-# ── Retention ────────────────────────────────────────────────────────────────
 def purge_old(retention_days: int = 30) -> int:
-    """Delete rows older than ``retention_days``. Returns the row count."""
     if retention_days <= 0:
         return 0
     cutoff = iso_z(datetime.now(UTC) - timedelta(days=retention_days))
@@ -948,9 +813,7 @@ def purge_old(retention_days: int = 30) -> int:
         return 0
 
 
-# ── Test / teardown helpers ──────────────────────────────────────────────────
 def close_all_connections() -> None:
-    """Close any thread-local connection (no-op under Postgres)."""
     pass
 
 
@@ -987,7 +850,6 @@ def _group_batch_rows(rows) -> dict[str, list[dict]]:
 
 
 def teardown() -> None:
-    """Clean up snapshots for test isolation."""
     try:
         con = _pg_write_connection()
         con.execute("TRUNCATE TABLE metric_snapshots")
@@ -995,7 +857,6 @@ def teardown() -> None:
         logger.debug("teardown: con.execute failed (ignored)", exc_info=True)
 
 
-# ── Latest operational samples exported through the configured OTel meter ────
 _lock = threading.Lock()
 _values: dict[str, dict[tuple[tuple[str, str], ...], float]] = {}
 _instruments: dict[str, Any] = {}
@@ -1037,7 +898,6 @@ def _instrument(metric: str) -> Any:
 
 
 def record(metric: str, value: float, **attributes: str) -> None:
-    """Publish the latest value for an operational metric and its labels."""
     if metric not in _METRICS:
         raise ValueError(f"unsupported operational metric: {metric}")
     key = tuple(sorted((name, str(value)) for name, value in attributes.items()))
@@ -1047,16 +907,12 @@ def record(metric: str, value: float, **attributes: str) -> None:
 
 
 def reset_for_tests() -> None:
-    """Clear cached samples and instruments between isolated unit tests."""
     with _lock:
         _values.clear()
         _instruments.clear()
 
 
-# ── DuckDB Recycle (folded from backend.core.duckdb_recycle) ─────────────────
 def recycle_interval_min() -> float:
-    """Interval (minutes) between recycles. 0 = disabled (the scheduler then
-    never registers the job). Default 0."""
     raw = os.getenv("DUCKDB_RECYCLE_INTERVAL_MIN", "0")
     try:
         return max(0.0, float(raw))
@@ -1065,8 +921,6 @@ def recycle_interval_min() -> float:
 
 
 def _recycle_rss_threshold_bytes() -> int:
-    """Only recycle when current RSS exceeds this (MB → bytes); 0 = always
-    recycle on the interval. Lets a quiet process skip needless cache drops."""
     raw = os.getenv("DUCKDB_RECYCLE_RSS_THRESHOLD_MB", "0")
     try:
         return max(0, int(raw)) * 1024 * 1024
@@ -1099,11 +953,6 @@ def _recycle_lock_timeout_s() -> float:
 
 
 def _sources_by_db_path() -> dict[str, list[dict]]:
-    """Group every configured service's source dict by its abspath DuckDB file.
-
-    Services sharing a db file share the DuckDB instance + its object cache, so
-    they must be drained together for the instance to be destroyed.
-    """
     groups: dict[str, list[dict]] = {}
     for cfg in svcconfig.list_configs():
         try:
@@ -1130,12 +979,10 @@ def _service_key(src: dict) -> str:
 
 
 def _lock_key(src: dict) -> str:
-    # Matches iceberg.view._get_service_lock keying (source.get("name", "default")).
     return src.get("name", "default")
 
 
 def _trim_memory() -> None:
-    """Trigger Python GC and C allocator memory trim (glibc malloc_trim) if available."""
     gc.collect()
     try:
         import ctypes
@@ -1146,15 +993,12 @@ def _trim_memory() -> None:
 
 
 def _recycle_db_path(db_path: str, sources: list[dict]) -> dict:
-    """Recycle the DuckDB instance for one db file. Returns a status dict."""
-    from backend.core.iceberg.view import _get_service_lock
+    from backend.core.iceberg._core import _get_service_lock
 
     drain_timeout = _recycle_drain_timeout_s()
     grace = _recycle_grace_s()
     lock_timeout = _recycle_lock_timeout_s()
     service_keys = [_service_key(s) for s in sources]
-    # Acquire write/rebind locks in a deterministic global order (sorted lock
-    # keys) so recycle can never deadlock against a writer holding one of them.
     lock_keys = sorted({_lock_key(s) for s in sources})
     acquired: list = []
     rss_before = _db.current_rss_bytes()
@@ -1169,13 +1013,11 @@ def _recycle_db_path(db_path: str, sources: list[dict]) -> dict:
                 )
                 return {"db_path": db_path, "status": "skipped_locked", "lock": lk}
             acquired.append(lock)
-        # Locks held → raise the barrier so no NEW connection opens for this file.
         _db.set_recycle_barrier(db_path, True)
         retired_pools = {}
         try:
             retired_pools = _pool.begin_drain_pools(service_keys)
             drained = _pool.wait_pools_drained(retired_pools, drain_timeout)
-            # gc so closed-but-not-yet-collected conn wrappers leave the WeakSet.
             _trim_memory()
             deadline = time.monotonic() + grace
             while _db.live_connection_count(db_path) > 0 and time.monotonic() < deadline:
@@ -1217,10 +1059,6 @@ def _recycle_db_path(db_path: str, sources: list[dict]) -> dict:
 
 
 def recycle_once(reason: str = "interval") -> str:
-    """Recycle every distinct DuckDB instance once. Returns a one-line detail.
-
-    Never raises — each db file is recycled independently and abort-safe.
-    """
     groups = _sources_by_db_path()
     if not groups:
         return "no services configured"
@@ -1239,10 +1077,6 @@ def recycle_once(reason: str = "interval") -> str:
 
 
 def graceful_restart_rss_threshold_bytes() -> int:
-    """Restart threshold (``BACKEND_GRACEFUL_RESTART_RSS_MB``, MB→bytes).
-
-    0 (default) disables the guard entirely.
-    """
     raw = os.getenv("BACKEND_GRACEFUL_RESTART_RSS_MB", "0")
     try:
         return max(0, int(raw)) * 1024 * 1024
@@ -1251,11 +1085,6 @@ def graceful_restart_rss_threshold_bytes() -> int:
 
 
 def maybe_graceful_restart() -> bool:
-    """SIGTERM self for a clean docker restart if RSS is at/over the threshold.
-
-    Returns True iff a restart was triggered. Never raises — a guard that
-    crashes the scheduler tick would defeat its purpose.
-    """
     threshold = graceful_restart_rss_threshold_bytes()
     if threshold <= 0:
         return False
@@ -1279,9 +1108,7 @@ def maybe_graceful_restart() -> bool:
     return True
 
 
-# ── run_duckdb_recycle ───────────────────────────────────────────────────────
 def _maybe_adjust_recycle_schedule(*, expedite: bool) -> None:
-    """Dynamically adjust recycle interval under memory pressure (e.g. tighten to 2m, or relax back to baseline)."""
     try:
         from backend.cron.scheduler import get_scheduler
 
@@ -1306,13 +1133,6 @@ def _maybe_adjust_recycle_schedule(*, expedite: bool) -> None:
 
 @global_job("duckdb_recycle", color="35", tag="recycle", label="DuckDB recycle")
 def run_duckdb_recycle() -> str:
-    """Scheduler entry: recycle on the interval, gated by the optional RSS
-    threshold (skip when the process is still small — avoids needless cold
-    caches). Wrapped by ``global_job`` for start/end logging + record_job_run.
-    """
-    # Process-level OOM stopgap FIRST and independent of the recycle threshold:
-    # if RSS is already over the restart threshold, a clean self-restart is the
-    # only thing that reliably reclaims it (recycle frees ~0 of the real leak).
     if maybe_graceful_restart():
         return "graceful restart triggered (RSS over restart threshold)"
     threshold = _recycle_rss_threshold_bytes()
@@ -1325,7 +1145,6 @@ def run_duckdb_recycle() -> str:
                 _maybe_adjust_recycle_schedule(expedite=False)
             return f"skipped: RSS {rss / (1024 * 1024):.0f}MB < threshold {threshold / (1024 * 1024):.0f}MB"
     res = recycle_once(reason="interval")
-    # Evaluate post-recycle memory to adapt schedule for next tick
     rss_after = _db.current_rss_bytes()
     if "incomplete" in res:
         _maybe_adjust_recycle_schedule(expedite=True)
@@ -1339,7 +1158,6 @@ def run_duckdb_recycle() -> str:
     return res
 
 
-# ── Insights prewarmer (folded from backend.cron.jobs.insights_prewarmer) ────
 from backend.utils.bounded_cache import CacheRegistry  # noqa: E402
 
 _MAX_ANALYST_SHAPES = 8
@@ -1352,14 +1170,11 @@ CacheRegistry.register("insights_prewarmer._last_insights_request", _last_insigh
 
 
 def record_insights_request(service_id: str | None) -> None:
-    """Record that ``/api/insights`` was requested for ``service_id`` so the
-    demand-driven prewarmer keeps the cache warm for the configured idle window."""
     if service_id:
         _last_insights_request[service_id] = time.monotonic()
 
 
 def _prewarm_idle_minutes(service_id: str, src: dict | None = None) -> float:
-    """Return the idle timeout in minutes before prewarming pauses for ``service_id``."""
     prov = (src or {}).get("provisioning") if isinstance(src, dict) else None
     if not isinstance(prov, dict):
         from backend import config as svcconfig
@@ -1382,8 +1197,6 @@ def _prewarm_idle_minutes(service_id: str, src: dict | None = None) -> float:
 
 
 def is_insights_active(service_id: str, src: dict | None = None, *, idle_minutes: float | None = None) -> bool:
-    """Return True if ``/api/insights`` was requested for ``service_id`` within
-    ``idle_minutes`` (or if ``idle_minutes <= 0``)."""
     limit_mins = _prewarm_idle_minutes(service_id, src) if idle_minutes is None else float(idle_minutes)
     if limit_mins <= 0:
         return True
@@ -1404,8 +1217,6 @@ def _running_ingest(service_id: str) -> str | None:
 
 
 def _cache_cold(service_id: str) -> bool:
-    """True when the oldest prewarmed entry has reached the cache TTL (or
-    nothing was ever fully warmed here) — the tick must not yield to ingest."""
     from backend.repositories.insights.repository import INSIGHTS_CACHE_TTL
 
     last = _last_full_warm.get(service_id)
@@ -1413,15 +1224,10 @@ def _cache_cold(service_id: str) -> bool:
 
 
 def _analyst_prewarm_enabled() -> bool:
-    """Analyst-shape prewarm is on by default; ``INSIGHTS_PREWARM_ANALYST=0``
-    is a belt-and-braces kill switch (re-read each call so tests can flip it)."""
     return os.environ.get("INSIGHTS_PREWARM_ANALYST", "1").strip().lower() not in ("0", "false", "no", "off")
 
 
 def _active_analyst_shapes(service_id: str) -> list[tuple[str | None, str | None, int | None, bool]]:
-    """Distinct ``(query_start_time, query_end_time, query_window_hours,
-    mask_ips)`` tuples across the service's active (non-revoked, non-expired)
-    analyst invites."""
     from backend.core import share_db
     from backend.utils.date_utils import parse_iso_utc
 
@@ -1461,10 +1267,6 @@ def _active_analyst_shapes(service_id: str) -> list[tuple[str | None, str | None
 
 @cron_task("insights_prewarmer", job_name="insights_prewarmer")
 def _run_insights_prewarmer(service_id: str) -> None:
-    """Warm the default insights selection — the pair the adaptive frontend
-    picker will request for this service's history, for the admin/unclamped
-    entry plus each active analyst clamp shape — so the first user (admin OR
-    analyst) lands on a cache hit instead of the cold path."""
     from backend import config as svcconfig
     from backend.core.duckdb import get_connection, get_source_for_service
     from backend.repositories.insights import get_insights
@@ -1514,10 +1316,6 @@ def _run_insights_prewarmer(service_id: str) -> None:
             history_hours = history_hours_from_earliest(cached_status.get("earliest_log_at"))
             window_hours, baseline_hours = pick_insights_default(history_hours)
             con = get_connection(source=src, max_wait=5, read_only=True, skip_view_update=True)
-            # Serial insight queries leave headroom for foreground requests.
-            # Never change DuckDB thread count or memory_limit here:
-            # both are instance-global, so they'd clobber every concurrent query, and
-            # changing thread count mid-flight deadlocks DuckDB (AGENTS.md Trap #42).
             yield_to_api(max_wait_secs=1.0)
             get_insights(
                 con,
@@ -1602,7 +1400,6 @@ def _run_insights_prewarmer(service_id: str) -> None:
                     pass
 
 
-# ── Minute-cadence operational metric snapshot sampler (folded from metric_snapshot.py) ──
 import os as _os  # noqa: E402
 import shutil as _shutil  # noqa: E402
 
@@ -1617,7 +1414,6 @@ def _safe_record(
     task: str | None = None,
     **attributes: str,
 ) -> bool:
-    """Wrap record_snapshot so one bad metric can't poison the rest of the tick."""
     recorded = False
     try:
         metric_snapshots.record_snapshot(metric, value, service_id=service_id, task=task)
@@ -1766,7 +1562,7 @@ def _sample_ingest_lag() -> int:
 def _sample_active_queries() -> int:
     count = 0
     try:
-        from backend.core.query_registry import query_registry
+        from backend.core.request_telemetry import query_registry
 
         summary = query_registry.summary()
         if _safe_record("active_query_count", float(summary.get("active_total", 0))):
@@ -2003,14 +1799,13 @@ def _sample_high_scale() -> int:
 
 
 def _sample_high_scale_disk() -> int:
-    """Evaluate the serving-volume disk guard (high-scale topology only)."""
     from backend import config as svcconfig
 
     if not svcconfig.is_high_scale_mode():
         return 0
     count = 0
     try:
-        from backend.core.clickhouse_client import get_clickhouse_client
+        from backend.core.clickhouse import get_clickhouse_client
         from backend.high_scale.archive_models import MODE_LEVELS, sample_disk_state
 
         client = get_clickhouse_client()
@@ -2070,7 +1865,6 @@ def _sample_celery_workers() -> int:
 
 @global_job("metric_snapshot", color="32", tag="metric_snapshot", label="Metric snapshot")
 def _run_metric_snapshot() -> str:
-    """Sample every vital once. Designed to finish in <100 ms on a single-service deploy."""
     total = 0
     total += _sample_pool_wait()
     total += _sample_cron_duration()
@@ -2087,6 +1881,601 @@ def _run_metric_snapshot() -> str:
     return f"sampled={total} metrics"
 
 
+"""Local + rollup compaction crons.
+
+* ``_run_local_compact`` — frequent merge of small parquet files in the
+  LOCAL CACHE only (does NOT touch FOS). Free in terms of cloud cost, so
+  we run it on a 2 min interval.
+* ``_run_rollup_hour_heal`` — hourly self-heal that rebuilds hour bundles
+  for closed hours the per-sync recompute missed. The per-sync path only
+  fires when a sync batch ingests rows STAMPED in an already-closed hour
+  (delivery-lag straddling the boundary); on bursty/low-traffic services
+  the burst ends mid-hour, nothing straddles, and the closed hour never
+  gets a rollup — the top-N reader then silently under-counts every
+  window touching that hour until the nightly pass. Hourly cadence caps
+  that staleness at ~1 hour.
+* ``_run_rollup_compact_daily`` — consolidates per-hour rollup parquet
+  into per-day files for closed days, slashing file-open overhead on
+  7-day dashboard queries. Also runs the same self-heal with a 30-day
+  lookback as a deep pass.
+"""
+import logging
+
+logger = logging.getLogger("backend.scheduler")
+
+
+def _ledger_touched_hours(service_id: str, lookback_s: float) -> set[str]:
+    import re
+
+    from backend.core.metadata.base import get_con
+
+    rows = (
+        get_con(service_id)
+        .execute(
+            "SELECT DISTINCT object_key FROM ingest_ledger WHERE service_id = ? AND committed_at >= ?",
+            (service_id, time.time() - lookback_s),
+        )
+        .fetchall()
+    )
+    hours: set[str] = set()
+    for (key,) in rows:
+        m = re.search(r"year=(\d{4})/month=(\d{2})/day=(\d{2})/hour=(\d{2})", key)
+        if m:
+            hours.add(f"{m.group(1)}-{m.group(2)}-{m.group(3)}-{m.group(4)}")
+    return hours
+
+
+@cron_task("local_compact", job_name="local_compact")
+def _run_local_compact(service_id: str) -> None:
+    from backend.core import local_compaction as _lc
+    from backend.core.duckdb import get_source_for_service
+    from backend.cron.lifecycle import cron_run
+    from backend.utils.active_requests import should_defer_cron
+
+    if should_defer_cron("local_compact", service_id):
+        return
+    src = get_source_for_service(service_id)
+    if src is None:
+        return
+    with cron_run(
+        service_id,
+        "local_compact",
+        source=src,
+        skip_log_prefix="local-compact",
+        error_summary="local compaction failed",
+    ) as run:
+        if not run.ok:
+            return
+        _display = _display_label(src, service_id)
+        logger.info("🏎️  \x1b[96m[local-compact]\x1b[0m %s: Local compaction started.", _display)
+        run.log_progress({"type": "status", "message": "Scanning local cache partitions..."})
+        result = _lc.compact_local_partitions(src)
+        errors = result.get("errors") or []
+        merged = result.get("files_merged", 0)
+        removed = result.get("files_removed", 0)
+        partitions = result.get("partitions_compacted", 0)
+        summary = (
+            f"Compacted {partitions} partition(s): merged {merged} small file(s) into "
+            f"{partitions} (removed {removed} originals)"
+        )
+        from backend import config as svcconfig
+
+        if svcconfig.is_high_scale_mode(src):
+            try:
+                rollup_hours = _ledger_touched_hours(service_id, lookback_s=15 * 60)
+                if rollup_hours:
+                    from backend.core.rollups.recompute import recompute_touched_hours
+
+                    recompute_touched_hours(service_id, src, rollup_hours)
+                    summary += f"; rollups recomputed for {len(rollup_hours)} ledger hour(s)"
+            except Exception as e:
+                errors = list(errors) + [f"high-scale rollup recompute failed: {e}"]
+                logger.warning("[local-compact] %s: celery rollup recompute failed: %s", service_id, e)
+        if errors:
+            err_preview = "\n".join(errors[:3])
+            if len(errors) > 3:
+                err_preview += f"\n... ({len(errors) - 3} more)"
+            summary += f" — {len(errors)} partition error(s)"
+            run.warn(summary, error_message=err_preview, files_downloaded=merged)
+        else:
+            run.success(summary, files_downloaded=merged)
+        run.log_progress({"type": "status", "message": summary})
+        logger.info("🏁  \x1b[96m[local-compact]\x1b[0m %s: %s in %.2fs", _display, summary, run.elapsed())
+
+
+@cron_task("rollup_hour_heal", job_name="rollup_hour_heal")
+def _run_rollup_hour_heal(
+    service_id: str,
+    manual: bool = False,
+    run_id: int | None = None,
+) -> dict:
+    from backend import config as svcconfig
+    from backend.core.duckdb import get_source_for_service
+    from backend.core.rollups import backfill_missing_hour_bundles
+    from backend.cron.scheduler import cron_run, record_skip_row
+    from backend.utils.active_requests import should_defer_cron
+
+    if not manual and should_defer_cron("rollup_hour_heal", service_id):
+        logger.info("⏸️  [rollup-heal] %s: deferring due to active user queries", service_id)
+        return {
+            "status": "deferred",
+            "service_id": service_id,
+            "summary": "Deferred due to active queries",
+        }
+    src = get_source_for_service(service_id)
+    if src is None:
+        return {"status": "error", "service_id": service_id, "summary": "Source not found"}
+    from backend.core.rollups._common import _hour_bundled_root
+    from backend.cron.jobs.sync import has_sufficient_disk_space
+
+    hour_root = _hour_bundled_root(src)
+    ok_disk, msg = has_sufficient_disk_space(hour_root, "rollup-heal", service_id)
+    if not ok_disk:
+        record_skip_row(
+            src,
+            "rollup_hour_heal",
+            "Skipped due to low disk space",
+            status="warning",
+            error_message=msg,
+            run_id=run_id,
+        )
+        return {"status": "warning", "service_id": service_id, "summary": msg}
+    _display = _display_label(src, service_id)
+    outcome: dict = {}
+    with cron_run(
+        service_id,
+        "rollup_hour_heal",
+        source=src,
+        run_id=run_id,
+        error_summary="hour-bundle self-heal failed",
+        error_result=lambda exc: {
+            "status": "error",
+            "service_id": service_id,
+            "error_message": str(exc),
+            "summary": "hour-bundle self-heal failed",
+            "duration_s": run.elapsed(),
+            "run_id": run.run_id,
+        },
+        skip_log_prefix="rollup-heal",
+    ) as run:
+        if run.skipped:
+            return {"status": "skipped", "service_id": service_id, "summary": run.skip_reason}
+        if run.aborted:
+            return dict(run.result or {})
+        durable_mode = svcconfig.is_durable_serving_mode(src)
+        if durable_mode:
+            from backend.core.rollups._common import rollup_coverage_ready
+
+            coverage_ready = rollup_coverage_ready(service_id)
+        else:
+            coverage_ready = True
+        lookback_days = 2
+        max_missing_hours = 1 if durable_mode and not coverage_ready else None
+        heal = backfill_missing_hour_bundles(
+            service_id,
+            src,
+            lookback_days=lookback_days,
+            max_missing_hours=max_missing_hours,
+        )
+        if not durable_mode:
+            try:
+                from backend.core.rollups import (
+                    backfill_security_proxies_bundles,
+                    backfill_wellknown_bots_rollup,
+                )
+
+                backfill_wellknown_bots_rollup(service_id, src, lookback_days=lookback_days)
+                backfill_security_proxies_bundles(service_id, src)
+            except Exception as sec_heal_err:
+                logger.warning(
+                    "[rollup-heal] %s: security rollup self-heal skipped/failed: %s", service_id, sec_heal_err
+                )
+        try:
+            cfg = svcconfig.load_config(service_id) or {}
+            if cfg.get("rum", {}).get("enabled") and not durable_mode:
+                from contextlib import closing
+
+                from backend.core.duckdb import get_connection, rum_source_for
+                from backend.core.iceberg import execute_with_stale_view_retry
+                from backend.core.iceberg._ducklake import _ducklake_attach
+                from backend.core.rollups.rum import backfill_missing_rum_aggregates
+
+                rum_src = rum_source_for(src)
+                with closing(get_connection(rum_src, read_only=False)) as rum_con:
+                    try:
+                        _ducklake_attach(rum_con, src, read_only=True)
+                    except Exception:
+                        pass
+                    execute_with_stale_view_retry(
+                        rum_con,
+                        rum_src,
+                        lambda c: backfill_missing_rum_aggregates(c, service_id, lookback_days=30),
+                        table_name="client_vitals",
+                    )
+        except Exception as rum_heal_err:
+            logger.warning("[rollup-heal] %s: RUM aggregate self-heal skipped/failed: %s", service_id, rum_heal_err)
+        if durable_mode and not coverage_ready and heal.get("coverage_verified", False):
+            try:
+                from backend.core.rollups._common import mark_rollup_coverage_ready
+
+                mark_rollup_coverage_ready(service_id)
+            except Exception as e:
+                logger.warning("[rollup-heal] %s: could not mark rollup coverage ready: %s", service_id, e)
+        summary = (
+            f"Healed {heal.get('missing', 0)} missing hour(s): "
+            f"{heal.get('rebuilt_fields', 0)} field rollup(s) rebuilt, "
+            f"{heal.get('bundled', 0)} hour(s) bundled, "
+            f"{heal.get('stamped_empty', 0)} empty hour(s) stamped"
+        )
+        duration = run.elapsed()
+        run.success(summary)
+        if heal.get("missing", 0) or heal.get("stamped_empty", 0):
+            logger.info("🏁  [rollup-heal] %s: %s in %.2fs", _display, summary, duration)
+        outcome = {
+            "status": "success",
+            "service_id": service_id,
+            "missing": heal.get("missing", 0),
+            "rebuilt_fields": heal.get("rebuilt_fields", 0),
+            "bundled": heal.get("bundled", 0),
+            "stamped_empty": heal.get("stamped_empty", 0),
+            "coverage_verified": heal.get("coverage_verified", False),
+            "duration_s": duration,
+            "summary": summary,
+            "run_id": run.run_id,
+        }
+    return run.result if run.result is not None else outcome
+
+
+def _call_with_lookback(fn: Any, *args: Any, lookback_days: int = 30) -> Any:
+    return fn(*args, lookback_days=lookback_days)
+
+
+@cron_task("rollup_compact_daily", job_name="rollup_compact_daily")
+def _run_rollup_compact_daily(
+    service_id: str,
+    manual: bool = False,
+    run_id: int | None = None,
+) -> dict:
+    from backend.core import rollups
+    from backend.core.duckdb import get_source_for_service
+    from backend.core.rollups import (
+        backfill_day_bundles,
+        backfill_missing_hour_bundles,
+        backfill_missing_hour_ip_spread,
+        compact_closed_days_to_daily,
+        retire_compacted_hour_bundles,
+    )
+    from backend.core.rollups._common import _day_bundled_root
+    from backend.core.rollups.recompute import DAY_COMPACTORS, cleanup_old_rollups
+    from backend.cron.jobs.sync import has_sufficient_disk_space
+    from backend.cron.scheduler import cron_run, record_skip_row
+    from backend.utils.active_requests import should_defer_cron
+
+    if not manual and should_defer_cron("rollup_compact", service_id):
+        logger.info("⏸️  [rollup-compact] %s: deferring due to active user queries", service_id)
+        return {"status": "deferred", "service_id": service_id, "summary": "Deferred due to active queries"}
+    src = get_source_for_service(service_id)
+    if src is None:
+        return {"status": "error", "service_id": service_id, "summary": "Source not found"}
+    ok_disk, msg = has_sufficient_disk_space(_day_bundled_root(src), "rollup-compact", service_id)
+    if not ok_disk:
+        record_skip_row(
+            src,
+            "rollup_compact_daily",
+            "Skipped due to low disk space",
+            status="warning",
+            error_message=msg,
+            run_id=run_id,
+        )
+        return {"status": "warning", "service_id": service_id, "summary": msg}
+    _display = _display_label(src, service_id)
+    outcome: dict = {}
+    with cron_run(
+        service_id,
+        "rollup_compact_daily",
+        source=src,
+        run_id=run_id,
+        error_summary="Daily rollup compaction failed",
+        error_result=lambda exc: {
+            "status": "error",
+            "service_id": service_id,
+            "summary": str(exc),
+            "errors": [str(exc)],
+        },
+        include_log_output=False,
+        progress_task="rollup_compact",
+        skip_log_prefix="rollup-compact",
+    ) as run:
+        if run.skipped:
+            return {"status": "skipped", "service_id": service_id, "summary": run.skip_reason}
+        if run.aborted:
+            return dict(run.result) if run.result is not None else outcome
+        logger.info("🏎️  [rollup-compact] %s: Daily rollup compaction started.", _display)
+        subsystem_errors: list[str] = []
+        for label, fn in (
+            ("missing_hour_bundles", backfill_missing_hour_bundles),
+            ("ip_spread", backfill_missing_hour_ip_spread),
+        ):
+            try:
+                _call_with_lookback(fn, service_id, src, lookback_days=30)
+            except Exception as e:
+                subsystem_errors.append(f"{label}: {e}")
+                logger.warning("[rollup-compact] %s: %s self-heal failed: %s", _display, label, e)
+        rebuilt = _call_with_lookback(compact_closed_days_to_daily, service_id, src, lookback_days=30)
+        try:
+            bundled = _call_with_lookback(backfill_day_bundles, service_id, src, lookback_days=30)
+        except Exception as e:
+            subsystem_errors.append(f"day_bundles: {e}")
+            logger.warning("[rollup-compact] %s: day-bundle backfill failed: %s", _display, e)
+            bundled = 0
+        for spec in DAY_COMPACTORS:
+            try:
+                _call_with_lookback(getattr(rollups, spec.compactor), service_id, src, lookback_days=30)
+            except Exception as e:
+                subsystem_errors.append(f"{spec.label}: {e}")
+                logger.warning("[rollup-compact] %s: %s failed: %s", _display, spec.label, e)
+        retired_files, retired_bytes = 0, 0
+        try:
+            retired_files, retired_bytes = _call_with_lookback(
+                retire_compacted_hour_bundles, service_id, src, lookback_days=30
+            )
+        except Exception as e:
+            subsystem_errors.append(f"retirement: {e}")
+            logger.warning("[rollup-compact] %s: retirement failed: %s", _display, e)
+        try:
+            retention_months = int(src.get("rollup_retention_months", 12))
+            max_age_days = int(src.get("rollups_days", retention_months * 30))
+            if max_age_days > 0:
+                cleanup_old_rollups(service_id, src, max_age_days=max_age_days, hour_bundle_max_age_days=14)
+        except Exception as e:
+            logger.warning("[rollup-compact] %s: cleanup pass failed: %s", _display, e)
+        summary = (
+            f"Rebuilt {rebuilt} (field, day) file(s); bundled {bundled} day(s); "
+            f"retired {retired_files} hourly file(s) ({retired_bytes / 1024:.1f}KB)."
+        )
+        status = "warning" if subsystem_errors else "success"
+        err_msg = "; ".join(subsystem_errors) if subsystem_errors else None
+        run.record(status, summary=summary, error_message=err_msg)
+        outcome = {
+            "status": status,
+            "service_id": service_id,
+            "rebuilt": rebuilt,
+            "bundled": bundled,
+            "retired_files": retired_files,
+            "retired_bytes": retired_bytes,
+            "duration_s": round(run.elapsed(), 2),
+            "summary": summary,
+            "errors": subsystem_errors if subsystem_errors else None,
+        }
+    return run.result if run.result is not None else outcome
+
+
+@cron_task("partial_hour_merge", job_name="partial_hour_merge")
+def _run_partial_hour_merge(service_id: str) -> None:
+    from backend.core.duckdb import get_source_for_service
+    from backend.core.log_fields import derived
+    from backend.core.rollups.partial_hour import gc_stale_partial_hours, merge_partial_hour
+    from backend.cron.lifecycle import cron_run
+    from backend.repositories._base import _LIVE_TOPN_SKIP_FIELDS
+    from backend.repositories.dashboard import FIELDS
+    from backend.utils.active_requests import should_defer_cron
+
+    if should_defer_cron("partial_hour_merge", service_id):
+        return
+    src = get_source_for_service(service_id)
+    if src is None:
+        return
+    with cron_run(
+        service_id,
+        "partial_hour_merge",
+        source=src,
+        skip_log_prefix="partial-hour",
+        error_summary="partial-hour merge failed",
+    ) as run:
+        if run.skipped:
+            return
+        logger.info("🕐  [partial-hour] %s: partial-hour merge started.", _display_label(src, service_id))
+        derived_fields = {f.code for f in derived()}
+        merge_fields = [f for f in FIELDS if f not in _LIVE_TOPN_SKIP_FIELDS and f not in derived_fields]
+        stats = merge_partial_hour(service_id, src, merge_fields)
+        removed = gc_stale_partial_hours(src)
+        summary = f"Merged {stats['new_files']} new file(s) into hour={stats['hour']}; GC'd {removed} stale hour(s)"
+        run.success(summary)
+        if stats["new_files"]:
+            run.log_progress({"type": "status", "message": summary})
+
+
+@cron_task("cron:expire_snapshots", job_name="expire_snapshots")
+def _run_expire_snapshots(service_id: str, *, manual: bool = False) -> dict:
+    from backend.core import iceberg as db_iceberg
+    from backend.core.duckdb import get_source_for_service
+    from backend.cron.scheduler import dev_mode_no_crons
+    from backend.utils.active_requests import should_defer_cron
+
+    if dev_mode_no_crons():
+        return {"status": "skipped", "service_id": service_id, "summary": "FLA_DEV_NO_CRONS=1"}
+    if not manual and should_defer_cron("expire_snapshots", service_id):
+        return {"status": "deferred", "service_id": service_id, "summary": "active requests"}
+    src = get_source_for_service(service_id)
+    if src is None:
+        return {"status": "skipped", "service_id": service_id, "summary": "service not found"}
+    if src.get("access_level") == "read_only":
+        return {"status": "skipped", "service_id": service_id, "summary": "read-only services cannot run maintenance"}
+    svc_id = src.get("service_id", "unknown")
+    display_name = _display_label(src, str(svc_id))
+    with cron_run(
+        service_id,
+        "expire_snapshots",
+        source=src,
+        skip_log_prefix="expire",
+        finalize_duration=True,
+        finalize_running_backstop=True,
+        error_summary="Maintenance raised an uncaught exception",
+        error_result=lambda exc: {
+            "status": "error",
+            "service_id": service_id,
+            "error": str(exc),
+            "summary": "Maintenance raised an uncaught exception",
+        },
+    ) as run:
+        if run.skipped:
+            return {"status": "skipped", "service_id": service_id, "summary": run.skip_reason}
+        if run.ok:
+            logger.info("🏎️  \x1b[90m[expire]\x1b[0m %s: Maintenance job started.", display_name)
+            run.log_progress({"type": "status", "message": "Starting snapshot expiry and retention cleanup..."})
+            result = db_iceberg.run_cloud_maintenance(src)
+            if "error" in result:
+                logger.warning(
+                    "%s %s: %s", JOB_COLORS["expire"] + "[expire]" + RESET_COLOR, display_name, result["error"]
+                )
+                run.record(
+                    "error",
+                    error_message=str(result["error"]),
+                    summary="Maintenance failed at catalog load",
+                )
+                run.result = {
+                    **result,
+                    "status": "error",
+                    "service_id": service_id,
+                    "summary": "Maintenance failed at catalog load",
+                }
+                run.log_progress({"type": "error", "message": str(result["error"])})
+            else:
+                result = {
+                    **result,
+                    "retention_deleted_rows": int(
+                        result.get("retention_deleted_rows", 0)
+                        or sum(
+                            int(result.get(key, 0) or 0)
+                            for key in ("data_rows_deleted", "rum_log_rows_deleted", "rum_beacon_rows_deleted")
+                        )
+                    ),
+                    "snapshots_expired": int(
+                        result.get("snapshots_expired", result.get("snapshots_expired_count", 0)) or 0
+                    ),
+                    "files_unlinked": int(result.get("files_unlinked", result.get("data_files_cleaned", 0)) or 0),
+                }
+                summary_parts = []
+                sub_errors = []
+                for k, v in result.items():
+                    if k.endswith("_error"):
+                        sub_errors.append(f"{k}={v}")
+                    else:
+                        summary_parts.append(f"{k}={v}")
+                summary = ", ".join(summary_parts) if summary_parts else "no work to do"
+                status = "warning" if sub_errors else "success"
+                error_message = "; ".join(sub_errors) if sub_errors else None
+                files_unlinked = result["files_unlinked"]
+                logger.info("🗑️ \x1b[90m[expire]\x1b[0m %s: Maintenance completed. %s", display_name, result)
+                run.record(
+                    status,
+                    error_message=error_message,
+                    summary=summary,
+                    files_deleted_fos=files_unlinked,
+                )
+                run.result = {**result, "status": status, "service_id": service_id, "summary": summary}
+                event_type = "done" if status == "success" else status
+                run.log_progress({"type": event_type, "message": summary})
+    logger.info("🏁  \x1b[90m[expire]\x1b[0m %s: Maintenance job finished.", display_name)
+    return dict(run.result) if isinstance(run.result, dict) else {}
+
+
+@cron_task("cron.optimize", job_name="optimize")
+def _run_optimize(service_id: str, manual: bool = False) -> dict | None:
+    from backend.core import iceberg as db_iceberg
+    from backend.core.duckdb import get_source_for_service
+    from backend.cron.decorators import dev_mode_no_crons
+    from backend.utils.active_requests import should_defer_cron
+
+    if not manual and dev_mode_no_crons():
+        logger.warning("🚫 [scheduler] %s: FLA_DEV_NO_CRONS=1 — optimize refused.", service_id)
+        return {"status": "skipped", "service_id": service_id, "summary": "Skipped due to FLA_DEV_NO_CRONS=1"}
+    if not manual and should_defer_cron("optimize", service_id):
+        logger.info("⏸️  [optimize] %s: deferring due to active user queries", service_id)
+        return {"status": "deferred", "service_id": service_id, "summary": "Deferred due to active queries"}
+    src = get_source_for_service(service_id)
+    if src is None:
+        return {"status": "error", "service_id": service_id, "summary": "Source not found"}
+    _display = _display_label(src, service_id)
+    outcome: dict | None = None
+    with cron_run(
+        service_id,
+        "optimize",
+        source=src,
+        error_summary="Iceberg optimize failed",
+        error_result=lambda exc: {
+            "status": "error",
+            "service_id": service_id,
+            "error": str(exc),
+            "files_rewritten": 0,
+            "files_added": 0,
+            "summary": "Iceberg optimize failed",
+        },
+        finalize_duration=True,
+        skip_log_prefix="optimize",
+    ) as run:
+        if run.skipped:
+            return {"status": "skipped", "service_id": service_id, "summary": run.skip_reason}
+        logger.info("🏎️  \x1b[92m[optimize]\x1b[0m %s: Optimize job started.", _display)
+        run.log_progress({"type": "status", "message": "Scanning Iceberg table for small files to compact..."})
+        result = db_iceberg.optimize_table(src, min_files_per_partition=10)
+        if "error" in result:
+            run.fail("Iceberg optimize failed", error_message=result["error"])
+            run.log_progress({"type": "error", "message": result["error"]})
+            run.log_progress({"type": "warning", "message": result["error"]})
+            outcome = {
+                "status": "error",
+                "service_id": service_id,
+                "error": result["error"],
+                "files_rewritten": 0,
+                "files_added": 0,
+                "summary": "Iceberg optimize failed",
+            }
+        else:
+            summary = f"Rewrote {result.get('files_rewritten', 0)} files into {result.get('files_added', 0)} files"
+            partition_errors = result.get("partition_errors") or []
+            if partition_errors:
+                eligible = result.get("eligible_partitions", 0)
+                summary += f" — {len(partition_errors)}/{eligible} partitions failed"
+                err_preview = "\n".join(partition_errors[:3])
+                if len(partition_errors) > 3:
+                    err_preview += f"\n... ({len(partition_errors) - 3} more)"
+                status = "error" if result.get("files_added", 0) == 0 else "warning"
+            else:
+                err_preview = None
+                status = "success"
+            run.record(
+                status,
+                summary=summary,
+                error_message=err_preview,
+                parquet_files_optimized=result.get("files_rewritten", 0),
+                parquet_files_created=result.get("files_added", 0),
+            )
+            event_type = "done" if status == "success" else status
+            run.log_progress({"type": event_type, "message": summary})
+            logger.info(
+                "[scheduler] %s: optimize complete — %s",
+                service_id,
+                summary,
+            )
+            outcome = {
+                "status": status,
+                "service_id": service_id,
+                "files_rewritten": result.get("files_rewritten", 0),
+                "files_added": result.get("files_added", 0),
+                "eligible_partitions": result.get("eligible_partitions", 0),
+                "partition_errors": partition_errors,
+                "summary": summary,
+            }
+    if run.result is not None:
+        outcome = run.result
+    from backend.cron.jobs.sync import publish_sync_status_safe
+
+    publish_sync_status_safe(service_id, "scheduler")
+    logger.info("🏁  \x1b[92m[optimize]\x1b[0m %s: Optimize job finished.", _display)
+    return outcome
+
+
 _self_mod = _sys.modules[__name__]
 for _alias in (
     "backend.core.metric_snapshots",
@@ -2094,6 +2483,10 @@ for _alias in (
     "backend.cron.jobs.duckdb_recycle",
     "backend.cron.jobs.insights_prewarmer",
     "backend.cron.jobs.metric_snapshot",
+    "backend.cron.jobs.compaction",
+    "backend.cron.jobs.maintenance",
+    "backend.cron.jobs.optimize",
+    "backend.cron.jobs.expire",
 ):
     _sys.modules[_alias] = _self_mod
 _core_pkg = _sys.modules.get("backend.core")
@@ -2102,9 +2495,16 @@ if _core_pkg is not None:
     setattr(_core_pkg, "duckdb_recycle", _self_mod)
 _jobs_pkg = _sys.modules.get("backend.cron.jobs")
 if _jobs_pkg is not None:
-    setattr(_jobs_pkg, "duckdb_recycle", _self_mod)
-    setattr(_jobs_pkg, "insights_prewarmer", _self_mod)
-    setattr(_jobs_pkg, "metric_snapshot", _self_mod)
+    for _attr in (
+        "duckdb_recycle",
+        "insights_prewarmer",
+        "metric_snapshot",
+        "compaction",
+        "maintenance",
+        "optimize",
+        "expire",
+    ):
+        setattr(_jobs_pkg, _attr, _self_mod)
 _backend_pkg = _sys.modules.get("backend")
 if _backend_pkg is not None and hasattr(_backend_pkg, "_MODULE_ALIASES"):
     _backend_pkg._MODULE_ALIASES.update(
@@ -2114,5 +2514,9 @@ if _backend_pkg is not None and hasattr(_backend_pkg, "_MODULE_ALIASES"):
             "backend.cron.jobs.duckdb_recycle": "backend.cron.jobs.metadata",
             "backend.cron.jobs.insights_prewarmer": "backend.cron.jobs.metadata",
             "backend.cron.jobs.metric_snapshot": "backend.cron.jobs.metadata",
+            "backend.cron.jobs.compaction": "backend.cron.jobs.metadata",
+            "backend.cron.jobs.maintenance": "backend.cron.jobs.metadata",
+            "backend.cron.jobs.optimize": "backend.cron.jobs.metadata",
+            "backend.cron.jobs.expire": "backend.cron.jobs.metadata",
         }
     )

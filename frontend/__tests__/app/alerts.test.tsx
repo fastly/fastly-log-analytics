@@ -1,29 +1,15 @@
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
-import {
-  createTestQueryClient,
-  renderWithQuery,
-  stubResizeObserver,
-  stubPointerCaptureAndScroll,
-} from '../helpers/page-smoke'
+import { createTestQueryClient, renderWithQuery, stubResizeObserver, stubPointerCaptureAndScroll } from '../helpers/page-smoke'
 import { describe, expect, it, test, vi, beforeAll, beforeEach, afterEach } from 'vitest'
 import React from 'react'
 import type { PlotlyLayout, PlotlyTrace } from '@/types/api'
 import type { components } from '@/types/api.generated'
 import {
-  INSIGHT_SECTIONS,
-  OTHER_SECTION,
-  categoryToSection,
-  sortInsights,
-  groupInsightsBySection,
-  summarizeSeverities,
-  pickInsightsDefault,
-  historyHoursFromExtents,
-  WINDOW_OPTIONS,
-  BASELINE_OPTIONS,
+  INSIGHT_SECTIONS, OTHER_SECTION, categoryToSection, sortInsights, groupInsightsBySection,
+  summarizeSeverities, pickInsightsDefault, historyHoursFromExtents, WINDOW_OPTIONS, BASELINE_OPTIONS,
 } from '@/lib/utils'
-
 import AlertsClient, { AlertPreview, CreateAlertForm } from '@/app/alerts/_sections/AlertsClient'
 import InsightsClient from '@/app/insights/_sections/InsightsClient'
 import { useServiceStore, useFilterStore, useTimezoneStore, useSessionRoleStore } from '@/stores/filterStore'
@@ -55,18 +41,11 @@ vi.mock('@/components/Insights/InsightCard', () => ({
 vi.mock('@/components/ReportLayout', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/components/ReportLayout')>()
   const mockMod = await (await import('../helpers/page-smoke')).reportLayoutModuleMock({
-    activeServiceId: 'test-svc',
-    startTime: null,
-    endTime: null,
-    filterPayload: {},
+    activeServiceId: 'test-svc', startTime: null, endTime: null, filterPayload: {},
   })
   const Wrapped = (props: React.ComponentProps<typeof actual.ReportLayout>) =>
     useMockReportLayout ? mockMod.ReportLayout(props as never) : actual.ReportLayout(props)
-  return {
-    ...actual,
-    default: Wrapped,
-    ReportLayout: Wrapped,
-  }
+  return { ...actual, default: Wrapped, ReportLayout: Wrapped }
 })
 
 vi.mock('@/lib/api', async (importOriginal) => {
@@ -120,54 +99,24 @@ vi.mock('next/navigation', () => ({
 }))
 
 const API_BASE = 'http://127.0.0.1:8000'
-
 const queryClient = createTestQueryClient({ queries: { staleTime: 0 } })
 
 const SAMPLE_ALERTS = [
   {
-    id: 'alert-firing',
-    service_id: 'test-svc',
-    name: 'High 5xx Spike',
-    category: 'reliability',
-    metric: '5xx_rate',
-    evaluation_type: 'absolute',
-    evaluation_scope: 'all',
-    operator: '>',
-    threshold: 5,
-    window_min: 5,
-    enabled: true,
-    last_triggered_at: new Date().toISOString(),
+    id: 'alert-firing', service_id: 'test-svc', name: 'High 5xx Spike', category: 'reliability',
+    metric: '5xx_rate', evaluation_type: 'absolute', evaluation_scope: 'all', operator: '>',
+    threshold: 5, window_min: 5, enabled: true, last_triggered_at: new Date().toISOString(),
     channels: [{ type: 'slack', url: 'https://hooks.slack.com/services/T00/B00/X00' }],
   },
   {
-    id: 'alert-healthy',
-    service_id: 'test-svc',
-    name: 'Origin TTFB Budget',
-    category: 'performance',
-    metric: 'ttfb',
-    evaluation_type: 'absolute',
-    evaluation_scope: 'origin',
-    operator: '>',
-    threshold: 250,
-    window_min: 5,
-    enabled: true,
-    last_triggered_at: null,
-    channels: [],
+    id: 'alert-healthy', service_id: 'test-svc', name: 'Origin TTFB Budget', category: 'performance',
+    metric: 'ttfb', evaluation_type: 'absolute', evaluation_scope: 'origin', operator: '>',
+    threshold: 250, window_min: 5, enabled: true, last_triggered_at: null, channels: [],
   },
   {
-    id: 'alert-muted',
-    service_id: 'test-svc',
-    name: 'Muted Traffic Check',
-    category: 'traffic',
-    metric: 'requests',
-    evaluation_type: 'absolute',
-    evaluation_scope: 'edge',
-    operator: '<',
-    threshold: 10,
-    window_min: 15,
-    enabled: false,
-    last_triggered_at: null,
-    channels: [],
+    id: 'alert-muted', service_id: 'test-svc', name: 'Muted Traffic Check', category: 'traffic',
+    metric: 'requests', evaluation_type: 'absolute', evaluation_scope: 'edge', operator: '<',
+    threshold: 10, window_min: 15, enabled: false, last_triggered_at: null, channels: [],
   },
 ]
 
@@ -176,24 +125,13 @@ function installBaseHandlers(alerts: readonly unknown[] = [], role: 'admin' | 'a
     http.get(`${API_BASE}/api/bootstrap`, () =>
       HttpResponse.json({
         services: [{ id: 'test-svc', name: 'Test Service', access_level: role === 'admin' ? 'read_write' : 'read_only' }],
-        analyst_session:
-          role === 'analyst'
-            ? { session_id: 'sess-1', role: 'analyst', allowed_services: ['test-svc'] }
-            : null,
+        analyst_session: role === 'analyst' ? { session_id: 'sess-1', role: 'analyst', allowed_services: ['test-svc'] } : null,
       }),
     ),
-    http.get(`${API_BASE}/api/services/test-svc/logging-settings`, () =>
-      HttpResponse.json({ period: 60 }),
-    ),
-    http.get(`${API_BASE}/api/alerts/test-svc`, () =>
-      HttpResponse.json({ data: alerts, evaluated_at: new Date().toISOString() }),
-    ),
-    http.get(`${API_BASE}/api/insight-availability`, () =>
-      HttpResponse.json({ unavailable: [] }),
-    ),
-    http.get(`${API_BASE}/api/insight-availability/test-svc`, () =>
-      HttpResponse.json({ unavailable: [] }),
-    ),
+    http.get(`${API_BASE}/api/services/test-svc/logging-settings`, () => HttpResponse.json({ period: 60 })),
+    http.get(`${API_BASE}/api/alerts/test-svc`, () => HttpResponse.json({ data: alerts, evaluated_at: new Date().toISOString() })),
+    http.get(`${API_BASE}/api/insight-availability`, () => HttpResponse.json({ unavailable: [] })),
+    http.get(`${API_BASE}/api/insight-availability/test-svc`, () => HttpResponse.json({ unavailable: [] })),
   )
 }
 
@@ -207,17 +145,12 @@ beforeEach(() => {
     isInitialized: true,
     services: [{ id: 'test-svc', name: 'Test Service', accessLevel: 'read_write' }],
   })
-  useFilterStore.setState({
-    startTime: '2026-01-01T00:00:00Z',
-    endTime: '2026-01-01T01:00:00Z',
-    isAutoRange: false,
-  })
+  useFilterStore.setState({ startTime: '2026-01-01T00:00:00Z', endTime: '2026-01-01T01:00:00Z', isAutoRange: false })
   queryClient.clear()
 })
 
 test('renders alerts page empty state and zero-CLS containers', async () => {
   installBaseHandlers([])
-
   renderWithQuery(<AlertsClient />, { queryClient })
 
   expect(await screen.findByText('Alerts')).toBeInTheDocument()
@@ -229,7 +162,6 @@ test('renders alerts page empty state and zero-CLS containers', async () => {
 
 test('renders configured rules, KPI summary cards, and status filter tabs', async () => {
   installBaseHandlers(SAMPLE_ALERTS)
-
   renderWithQuery(<AlertsClient />, { queryClient })
 
   expect(await screen.findByText('High 5xx Spike')).toBeInTheDocument()
@@ -240,9 +172,7 @@ test('renders configured rules, KPI summary cards, and status filter tabs', asyn
   expect(screen.getByTestId('alerts-count-ok')).toHaveTextContent('1')
   expect(screen.getByTestId('alerts-count-muted')).toHaveTextContent('1')
 
-  const mutedFilterBtn = screen.getByTestId('alerts-filter-muted')
-  fireEvent.click(mutedFilterBtn)
-
+  fireEvent.click(screen.getByTestId('alerts-filter-muted'))
   await waitFor(() => {
     expect(screen.getByText('Muted Traffic Check')).toBeInTheDocument()
     expect(screen.queryByText('High 5xx Spike')).not.toBeInTheDocument()
@@ -258,42 +188,28 @@ test('dispatches PATCH on mute/enable switch toggle and POST on test notificatio
   server.use(
     http.patch(`${API_BASE}/api/alerts/:alertId/enabled`, async ({ params, request }) => {
       patchedAlertId = String(params.alertId)
-      const body = (await request.json()) as { enabled: boolean }
-      patchedEnabled = body.enabled
+      patchedEnabled = ((await request.json()) as { enabled: boolean }).enabled
       return HttpResponse.json({ data: { id: patchedAlertId, status: 'success' } })
     }),
     http.post(`${API_BASE}/api/alerts/:alertId/test`, async ({ params }) => {
       testedAlertId = String(params.alertId)
       return HttpResponse.json({
-        data: {
-          alert_id: testedAlertId,
-          service_id: 'test-svc',
-          status: 'validated',
-          targets_tested: 1,
-          channel_type: 'slack',
-        },
+        data: { alert_id: testedAlertId, service_id: 'test-svc', status: 'validated', targets_tested: 1, channel_type: 'slack' },
       })
     }),
   )
 
   renderWithQuery(<AlertsClient />, { queryClient })
-
   expect(await screen.findByText('High 5xx Spike')).toBeInTheDocument()
 
-  const toggleSwitch = screen.getByTestId('toggle-alert-alert-firing')
-  fireEvent.click(toggleSwitch)
-
+  fireEvent.click(screen.getByTestId('toggle-alert-alert-firing'))
   await waitFor(() => {
     expect(patchedAlertId).toBe('alert-firing')
     expect(patchedEnabled).toBe(false)
   })
 
-  const testBtn = screen.getByTestId('test-alert-alert-firing')
-  fireEvent.click(testBtn)
-
-  await waitFor(() => {
-    expect(testedAlertId).toBe('alert-firing')
-  })
+  fireEvent.click(screen.getByTestId('test-alert-alert-firing'))
+  await waitFor(() => expect(testedAlertId).toBe('alert-firing'))
 })
 
 test('enforces read-only gating for Analyst Path B role', async () => {
@@ -303,33 +219,27 @@ test('enforces read-only gating for Analyst Path B role', async () => {
     isInitialized: true,
     services: [{ id: 'test-svc', name: 'Test Service', accessLevel: 'read_only' }],
   })
-  queryClient.setQueryData(['alerts', 'test-svc'], {
-    data: SAMPLE_ALERTS,
-    evaluated_at: new Date().toISOString(),
-  })
+  queryClient.setQueryData(['alerts', 'test-svc'], { data: SAMPLE_ALERTS, evaluated_at: new Date().toISOString() })
 
   renderWithQuery(<AlertsClient />, { queryClient })
-
   expect(await screen.findByText('High 5xx Spike')).toBeInTheDocument()
 
   await waitFor(() => {
-    expect(screen.queryByTestId('alerts-create-btn')).not.toBeInTheDocument()
-    expect(screen.queryByTestId('alerts-evaluate-btn')).not.toBeInTheDocument()
-    expect(screen.queryByTestId('edit-alert-alert-firing')).not.toBeInTheDocument()
-    expect(screen.queryByTestId('delete-alert-alert-firing')).not.toBeInTheDocument()
-    expect(screen.queryByTestId('test-alert-alert-firing')).not.toBeInTheDocument()
+    for (const id of ['alerts-create-btn', 'alerts-evaluate-btn', 'edit-alert-alert-firing', 'delete-alert-alert-firing', 'test-alert-alert-firing']) {
+      expect(screen.queryByTestId(id)).not.toBeInTheDocument()
+    }
     expect(screen.getByTestId('analyst-alert-enabled-alert-firing')).toHaveTextContent('On')
   })
 })
 
 const basePreviewProps = {
-  previewData: null,
-  isPreviewLoading: false,
-  lookbackHours: 6,
-  setLookbackHours: vi.fn(),
-  metric: 'requests',
-  evalType: 'absolute',
-  threshold: '',
+  previewData: null, isPreviewLoading: false, lookbackHours: 6,
+  setLookbackHours: vi.fn(), metric: 'requests', evalType: 'absolute', threshold: '',
+}
+const samplePreviewData = {
+  times: ['2026-06-15T00:00:00Z', '2026-06-15T01:00:00Z'],
+  values: [10, 20],
+  type: 'absolute' as const,
 }
 
 describe('AlertPreview', () => {
@@ -340,11 +250,8 @@ describe('AlertPreview', () => {
   })
 
   test('shows the loading spinner when isPreviewLoading is true', () => {
-    const { container } = render(
-      <AlertPreview {...basePreviewProps} isPreviewLoading={true} previewData={null} />,
-    )
-    const spinner = container.querySelector('svg.animate-spin')
-    expect(spinner).not.toBeNull()
+    const { container } = render(<AlertPreview {...basePreviewProps} isPreviewLoading={true} previewData={null} />)
+    expect(container.querySelector('svg.animate-spin')).not.toBeNull()
   })
 
   test('highlights the active lookback button (default variant -> bg-primary)', async () => {
@@ -360,7 +267,6 @@ describe('AlertPreview', () => {
 
     const active = screen.getByRole('button', { name: '12h' })
     const inactive = screen.getByRole('button', { name: '1h' })
-
     expect(active.className).toContain('bg-primary')
     expect(inactive.className).not.toContain('bg-primary')
 
@@ -369,51 +275,24 @@ describe('AlertPreview', () => {
   })
 
   test('passes the current xy trace to PlotlyChart (timestamps converted to the selected tz)', () => {
-    const previewData = {
-      times: ['2026-06-15T00:00:00Z', '2026-06-15T01:00:00Z'],
-      values: [10, 20],
-      type: 'absolute' as const,
-    }
-    render(<AlertPreview {...basePreviewProps} previewData={previewData} threshold="" />)
-
+    render(<AlertPreview {...basePreviewProps} previewData={samplePreviewData} threshold="" />)
     expect(plotlyChartCalls.length).toBeGreaterThan(0)
-    const lastCall = plotlyChartCalls[plotlyChartCalls.length - 1]
-    const current = lastCall.data[0]
+    const current = plotlyChartCalls[plotlyChartCalls.length - 1].data[0]
     expect(current.name).toBe('Current')
     expect(current.x).toEqual(['2026-06-15 00:00:00', '2026-06-15 01:00:00'])
-    expect(current.y).toEqual(previewData.values)
+    expect(current.y).toEqual(samplePreviewData.values)
     expect(current.type).toBe('bar')
   })
 
   test('omits the threshold overlay when threshold does not parse to a number', () => {
-    const previewData = {
-      times: ['2026-06-15T00:00:00Z', '2026-06-15T01:00:00Z'],
-      values: [10, 20],
-      type: 'absolute' as const,
-    }
-    render(
-      <AlertPreview
-        {...basePreviewProps}
-        previewData={previewData}
-        threshold=""
-      />,
-    )
-
+    render(<AlertPreview {...basePreviewProps} previewData={samplePreviewData} threshold="" />)
     const lastCall = plotlyChartCalls[plotlyChartCalls.length - 1]
-    const thresholdTrace = lastCall.data.find((t) => t?.name === 'Threshold')
-    expect(thresholdTrace).toBeUndefined()
+    expect(lastCall.data.find((t) => t?.name === 'Threshold')).toBeUndefined()
   })
 
   test('emits a horizontal threshold trace when previewData.type=absolute and threshold parses', () => {
-    const previewData = {
-      times: ['2026-06-15T00:00:00Z', '2026-06-15T01:00:00Z'],
-      values: [10, 20],
-      type: 'absolute' as const,
-    }
-    render(<AlertPreview {...basePreviewProps} previewData={previewData} threshold="42" />)
-
-    const lastCall = plotlyChartCalls[plotlyChartCalls.length - 1]
-    const thresholdTrace = lastCall.data.find((t) => t?.name === 'Threshold')
+    render(<AlertPreview {...basePreviewProps} previewData={samplePreviewData} threshold="42" />)
+    const thresholdTrace = plotlyChartCalls[plotlyChartCalls.length - 1].data.find((t) => t?.name === 'Threshold')
     expect(thresholdTrace).toBeDefined()
     expect(thresholdTrace?.x).toEqual(['2026-06-15 00:00:00', '2026-06-15 01:00:00'])
     expect(thresholdTrace?.y).toEqual([42, 42])
@@ -421,15 +300,8 @@ describe('AlertPreview', () => {
   })
 
   test('locks the x-axis (fixedrange) so the preview has no zoom/pan affordance', () => {
-    const previewData = {
-      times: ['2026-06-15T00:00:00Z', '2026-06-15T01:00:00Z'],
-      values: [10, 20],
-      type: 'absolute' as const,
-    }
-    render(<AlertPreview {...basePreviewProps} previewData={previewData} threshold="" />)
-
-    const lastCall = plotlyChartCalls[plotlyChartCalls.length - 1]
-    expect(lastCall.layout?.xaxis?.fixedrange).toBe(true)
+    render(<AlertPreview {...basePreviewProps} previewData={samplePreviewData} threshold="" />)
+    expect(plotlyChartCalls[plotlyChartCalls.length - 1].layout?.xaxis?.fixedrange).toBe(true)
   })
 
   test('emits both baseline and calculated-threshold traces for relative_increase evalType', () => {
@@ -439,14 +311,7 @@ describe('AlertPreview', () => {
       hist_values: [100, 200],
       type: 'relative' as const,
     }
-    render(
-      <AlertPreview
-        {...basePreviewProps}
-        previewData={previewData}
-        evalType="relative_increase"
-        threshold="10"
-      />,
-    )
+    render(<AlertPreview {...basePreviewProps} previewData={previewData} evalType="relative_increase" threshold="10" />)
 
     const lastCall = plotlyChartCalls[plotlyChartCalls.length - 1]
     const baseline = lastCall.data.find((t) => t?.name === 'Baseline')
@@ -454,7 +319,6 @@ describe('AlertPreview', () => {
 
     expect(baseline).toBeDefined()
     expect(baseline?.y).toEqual(previewData.hist_values)
-
     expect(threshold).toBeDefined()
     expect(threshold?.y).toHaveLength(2)
     expect(threshold?.y?.[0]).toBeCloseTo(110, 5)
@@ -491,9 +355,7 @@ describe('CreateAlertForm', () => {
   })
 
   function renderForm(initialAlert?: Alert | null, onSuccess: () => void = () => {}) {
-    return renderWithQuery(
-      <CreateAlertForm initialAlert={initialAlert} onSuccess={onSuccess} />,
-    )
+    return renderWithQuery(<CreateAlertForm initialAlert={initialAlert} onSuccess={onSuccess} />)
   }
 
   describe('CreateAlertForm validation', () => {
@@ -540,16 +402,9 @@ describe('CreateAlertForm', () => {
       await user.click(screen.getByRole('button', { name: 'Create Alert' }))
       await waitFor(() => expect(posted.length).toBe(1))
       expect(posted[0]).toMatchObject({
-        service_id: FORM_SVC,
-        name: 'Traffic spike',
-        category: 'traffic',
-        metric: 'requests',
-        evaluation_type: 'absolute',
-        evaluation_scope: 'all',
-        operator: '>',
-        threshold: 250.5,
-        window_min: 5,
-        enabled: true,
+        service_id: FORM_SVC, name: 'Traffic spike', category: 'traffic', metric: 'requests',
+        evaluation_type: 'absolute', evaluation_scope: 'all', operator: '>', threshold: 250.5,
+        window_min: 5, enabled: true,
       })
       expect(posted[0].webhook_url).toBeUndefined()
       expect(posted[0].zscore_threshold).toBeUndefined()
@@ -559,19 +414,9 @@ describe('CreateAlertForm', () => {
     it('PUTs an edited alert by id and keeps its enabled flag', async () => {
       const user = userEvent.setup()
       const alert = {
-        id: 'a-1',
-        service_id: FORM_SVC,
-        name: 'Existing',
-        category: 'reliability',
-        metric: '5xx',
-        evaluation_type: 'absolute',
-        evaluation_scope: 'edge',
-        operator: '>=',
-        threshold: 10,
-        window_min: 15,
-        enabled: false,
-        channels: [],
-        webhook_url: 'https://hooks.example.test/x',
+        id: 'a-1', service_id: FORM_SVC, name: 'Existing', category: 'reliability',
+        metric: '5xx', evaluation_type: 'absolute', evaluation_scope: 'edge', operator: '>=',
+        threshold: 10, window_min: 15, enabled: false, channels: [], webhook_url: 'https://hooks.example.test/x',
       } as unknown as Alert
       renderForm(alert)
       const name = screen.getByLabelText('Alert Name') as HTMLInputElement
@@ -581,41 +426,23 @@ describe('CreateAlertForm', () => {
       await waitFor(() => expect(putCalls.length).toBe(1))
       expect(putCalls[0].id).toBe('a-1')
       expect(putCalls[0].body).toMatchObject({
-        name: 'Existing v2',
-        operator: '>=',
-        threshold: 10,
-        window_min: 15,
-        enabled: false,
-        webhook_url: 'https://hooks.example.test/x',
+        name: 'Existing v2', operator: '>=', threshold: 10, window_min: 15,
+        enabled: false, webhook_url: 'https://hooks.example.test/x',
       })
     })
 
     it('z-score alerts send zscore fields and a ">" operator', async () => {
       const user = userEvent.setup()
       const alert = {
-        id: 'a-2',
-        service_id: FORM_SVC,
-        name: 'Anomaly',
-        category: 'traffic',
-        metric: 'requests',
-        evaluation_type: 'anomaly_zscore',
-        evaluation_scope: 'all',
-        operator: '<',
-        threshold: 3,
-        window_min: 5,
-        zscore_threshold: 4.5,
-        baseline_period_days: 14,
-        enabled: true,
-        channels: [],
+        id: 'a-2', service_id: FORM_SVC, name: 'Anomaly', category: 'traffic', metric: 'requests',
+        evaluation_type: 'anomaly_zscore', evaluation_scope: 'all', operator: '<', threshold: 3,
+        window_min: 5, zscore_threshold: 4.5, baseline_period_days: 14, enabled: true, channels: [],
       } as unknown as Alert
       renderForm(alert)
       await user.click(screen.getByRole('button', { name: 'Save Changes' }))
       await waitFor(() => expect(putCalls.length).toBe(1))
       expect(putCalls[0].body).toMatchObject({
-        operator: '>',
-        threshold: 4.5,
-        zscore_threshold: 4.5,
-        baseline_period_days: 14,
+        operator: '>', threshold: 4.5, zscore_threshold: 4.5, baseline_period_days: 14,
       })
     })
 
@@ -630,7 +457,6 @@ describe('CreateAlertForm', () => {
     })
   })
 })
-
 
 describe('InsightsClient', () => {
   beforeEach(() => {
@@ -650,26 +476,16 @@ describe('InsightsClient', () => {
     apiGet.mockResolvedValue({ data: { unavailable: [] } })
     apiPost.mockResolvedValue({
       data: {
-        insights: [
-          {
-            id: 'insight-1',
-            name: 'Global Latency Spike',
-            title: 'Global Latency Spike',
-            description: 'Latency is higher than usual',
-            category: 'edge',
-            severity: 'warning',
-            current_value: 150,
-            baseline_value: 100,
-            delta_percent: 50,
-            unit: 'ms',
-          },
-        ],
+        insights: [{
+          id: 'insight-1', name: 'Global Latency Spike', title: 'Global Latency Spike',
+          description: 'Latency is higher than usual', category: 'edge', severity: 'warning',
+          current_value: 150, baseline_value: 100, delta_percent: 50, unit: 'ms',
+        }],
         computed_at: new Date().toISOString(),
       },
     })
 
     renderWithQuery(<InsightsClient />, { queryClient })
-
     expect(screen.getByText('Anomaly Detection')).toBeInTheDocument()
 
     await waitFor(() => {
@@ -687,18 +503,15 @@ describe('InsightsClient', () => {
               latest_log_at: new Date().toISOString(),
             },
           })
-        : Promise.resolve({ data: { unavailable: [] } }))
-    apiPost.mockResolvedValue({
-      data: { insights: [], computed_at: new Date().toISOString() },
-    })
+        : Promise.resolve({ data: { unavailable: [] } }),
+    )
+    apiPost.mockResolvedValue({ data: { insights: [], computed_at: new Date().toISOString() } })
 
     renderWithQuery(<InsightsClient />, { queryClient })
-
     await waitFor(
       () => {
         const sawAdaptive = apiPost.mock.calls.some(
-          ([, opts]) =>
-            opts?.body?.window_size_hrs === 1 && opts?.body?.baseline_hours === 1,
+          ([, opts]) => opts?.body?.window_size_hrs === 1 && opts?.body?.baseline_hours === 1,
         )
         expect(sawAdaptive).toBe(true)
       },
@@ -714,18 +527,12 @@ describe('InsightsClient', () => {
       latest_log_at: new Date().toISOString(),
     })
     queryClient.setQueryData(['insights', 'test-svc', '4', '24'], {
-      insights: [{
-        id: 'seeded-insight',
-        title: 'Seeded anomaly',
-        category: 'edge',
-        severity: 'warning',
-      }],
+      insights: [{ id: 'seeded-insight', title: 'Seeded anomaly', category: 'edge', severity: 'warning' }],
       computed_at: new Date().toISOString(),
     })
     apiGet.mockResolvedValue({ data: { unavailable: [] } })
 
     renderWithQuery(<InsightsClient />, { queryClient })
-
     expect(screen.getByText('Seeded anomaly')).toBeInTheDocument()
     expect(apiPost).not.toHaveBeenCalled()
   })
@@ -734,28 +541,16 @@ describe('InsightsClient', () => {
     apiGet.mockResolvedValue({ data: { unavailable: [] } })
     apiPost.mockResolvedValue({
       data: {
-        insights: [
-          {
-            id: 'insight-sec-1',
-            name: 'SQL Injection Spike',
-            title: 'SQL Injection Spike',
-            category: 'security',
-            severity: 'critical',
-          },
-        ],
+        insights: [{ id: 'insight-sec-1', name: 'SQL Injection Spike', title: 'SQL Injection Spike', category: 'security', severity: 'critical' }],
         computed_at: new Date().toISOString(),
       },
     })
 
     renderWithQuery(<InsightsClient />, { queryClient })
-
     await waitFor(() => {
-      expect(screen.getByRole('tab', { name: /all categories/i })).toBeInTheDocument()
-      expect(screen.getByRole('tab', { name: /security & threat detection/i })).toBeInTheDocument()
-      expect(screen.getByRole('tab', { name: /origin health & stability/i })).toBeInTheDocument()
-      expect(screen.getByRole('tab', { name: /edge & delivery performance/i })).toBeInTheDocument()
-      expect(screen.getByRole('tab', { name: /network & routing path/i })).toBeInTheDocument()
-      expect(screen.getByRole('tab', { name: /traffic & volumetrics/i })).toBeInTheDocument()
+      for (const tab of [/all categories/i, /security & threat detection/i, /origin health & stability/i, /edge & delivery performance/i, /network & routing path/i, /traffic & volumetrics/i]) {
+        expect(screen.getByRole('tab', { name: tab })).toBeInTheDocument()
+      }
       expect(screen.getByTestId('insights-grid')).toBeInTheDocument()
     })
 
@@ -774,70 +569,45 @@ describe('InsightsClient', () => {
         ],
       },
     })
-    apiPost.mockResolvedValue({
-      data: { insights: [], computed_at: new Date().toISOString() },
-    })
+    apiPost.mockResolvedValue({ data: { insights: [], computed_at: new Date().toISOString() } })
 
     renderWithQuery(<InsightsClient />, { queryClient })
-
     await waitFor(() => {
       expect(screen.getByText(/2 insights are unavailable/i)).toBeInTheDocument()
       expect(screen.getByText(/Configure Service Log Fields/i)).toBeInTheDocument()
     })
-
-    const link = screen.getByRole('link', { name: /configure service log fields/i })
-    expect(link).toHaveAttribute('href', '/service-config?service=test-svc')
+    expect(screen.getByRole('link', { name: /configure service log fields/i })).toHaveAttribute('href', '/service-config?service=test-svc')
   })
 
   test('renders Re-scan button for Admin and handles force_refresh', async () => {
     useSessionRoleStore.setState({ isRemoteAnalyst: false })
     apiGet.mockResolvedValue({ data: { unavailable: [] } })
-    apiPost.mockResolvedValue({
-      data: { insights: [], computed_at: new Date().toISOString() },
-    })
+    apiPost.mockResolvedValue({ data: { insights: [], computed_at: new Date().toISOString() } })
 
     renderWithQuery(<InsightsClient />, { queryClient })
-
-    await waitFor(() => {
-      expect(screen.getByRole('button', { name: /re-scan/i })).toBeInTheDocument()
-    })
-
-    const rescanBtn = screen.getByRole('button', { name: /re-scan/i })
+    const rescanBtn = await screen.findByRole('button', { name: /re-scan/i })
     fireEvent.click(rescanBtn)
 
     await waitFor(() => {
-      const hasForceRefresh = apiPost.mock.calls.some(([, opts]) => opts?.body?.force_refresh === true)
-      expect(hasForceRefresh).toBe(true)
+      expect(apiPost.mock.calls.some(([, opts]) => opts?.body?.force_refresh === true)).toBe(true)
     })
   })
 
   test('hides Re-scan button for Remote Analyst', async () => {
     useSessionRoleStore.setState({ isRemoteAnalyst: true })
     apiGet.mockResolvedValue({ data: { unavailable: [] } })
-    apiPost.mockResolvedValue({
-      data: { insights: [], computed_at: new Date().toISOString() },
-    })
+    apiPost.mockResolvedValue({ data: { insights: [], computed_at: new Date().toISOString() } })
 
     renderWithQuery(<InsightsClient />, { queryClient })
-
-    await waitFor(() => {
-      expect(screen.getByText('Anomaly Detection')).toBeInTheDocument()
-    })
-
+    await waitFor(() => expect(screen.getByText('Anomaly Detection')).toBeInTheDocument())
     expect(screen.queryByRole('button', { name: /re-scan/i })).not.toBeInTheDocument()
   })
 
   test('displays clean pass state when a category has no anomalies', async () => {
     apiGet.mockResolvedValue({ data: { unavailable: [] } })
-    apiPost.mockResolvedValue({
-      data: {
-        insights: [],
-        computed_at: new Date().toISOString(),
-      },
-    })
+    apiPost.mockResolvedValue({ data: { insights: [], computed_at: new Date().toISOString() } })
 
     renderWithQuery(<InsightsClient initialTab="security" />, { queryClient })
-
     await waitFor(() => {
       expect(screen.getByTestId('insights-empty-pass')).toBeInTheDocument()
       expect(screen.getByText(/no anomalies detected in security & threat detection/i)).toBeInTheDocument()
@@ -852,18 +622,15 @@ describe('InsightsClient', () => {
 
 describe('categoryToSection', () => {
   it('maps each known category to its section', () => {
-    expect(categoryToSection('security').key).toBe('security')
-    expect(categoryToSection('origin').key).toBe('origin')
-    expect(categoryToSection('edge').key).toBe('edge')
-    expect(categoryToSection('network').key).toBe('network')
-    expect(categoryToSection('traffic').key).toBe('traffic')
+    for (const k of ['security', 'origin', 'edge', 'network', 'traffic'] as const) {
+      expect(categoryToSection(k).key).toBe(k)
+    }
   })
 
   it('falls back to Other for unknown / missing category', () => {
-    expect(categoryToSection('does_not_exist').key).toBe(OTHER_SECTION.key)
-    expect(categoryToSection('').key).toBe(OTHER_SECTION.key)
-    expect(categoryToSection(null).key).toBe(OTHER_SECTION.key)
-    expect(categoryToSection(undefined).key).toBe(OTHER_SECTION.key)
+    for (const v of ['does_not_exist', '', null, undefined]) {
+      expect(categoryToSection(v).key).toBe(OTHER_SECTION.key)
+    }
   })
 })
 
@@ -877,30 +644,16 @@ describe('sortInsights', () => {
       { title: 'Delta', severity: 'error' },
       { title: 'Epsilon', severity: 'info' },
     ]
-    expect(sortInsights(cards).map((c) => c.title)).toEqual([
-      'Beta',
-      'Delta',
-      'Alpha',
-      'Gamma',
-      'Epsilon',
-      'Zeta',
-    ])
+    expect(sortInsights(cards).map((c) => c.title)).toEqual(['Beta', 'Delta', 'Alpha', 'Gamma', 'Epsilon', 'Zeta'])
   })
 
   it('sorts unknown / missing severities last, then by title', () => {
-    const cards = [
-      { title: 'B', severity: undefined },
-      { title: 'A', severity: 'critical' },
-      { title: 'C', severity: 'mystery' },
-    ]
+    const cards = [{ title: 'B', severity: undefined }, { title: 'A', severity: 'critical' }, { title: 'C', severity: 'mystery' }]
     expect(sortInsights(cards).map((c) => c.title)).toEqual(['A', 'B', 'C'])
   })
 
   it('does not mutate its input', () => {
-    const cards = [
-      { title: 'B', severity: 'clean' },
-      { title: 'A', severity: 'critical' },
-    ]
+    const cards = [{ title: 'B', severity: 'clean' }, { title: 'A', severity: 'critical' }]
     const snapshot = [...cards]
     sortInsights(cards)
     expect(cards).toEqual(snapshot)
@@ -913,8 +666,7 @@ describe('groupInsightsBySection', () => {
       { id: '1', title: 'T', severity: 'info', category: 'traffic' },
       { id: '2', title: 'S', severity: 'critical', category: 'security' },
     ]
-    const groups = groupInsightsBySection(cards)
-    expect(groups.map((g) => g.section.key)).toEqual(['security', 'traffic'])
+    expect(groupInsightsBySection(cards).map((g) => g.section.key)).toEqual(['security', 'traffic'])
   })
 
   it('files each card into its section and sorts within the section', () => {
@@ -924,10 +676,8 @@ describe('groupInsightsBySection', () => {
       { id: '3', title: 'Sec', severity: 'info', category: 'security' },
     ]
     const groups = groupInsightsBySection(cards)
-    const edge = groups.find((g) => g.section.key === 'edge')!
-    expect(edge.cards.map((c) => c.id)).toEqual(['2', '1'])
-    const sec = groups.find((g) => g.section.key === 'security')!
-    expect(sec.cards.map((c) => c.id)).toEqual(['3'])
+    expect(groups.find((g) => g.section.key === 'edge')!.cards.map((c) => c.id)).toEqual(['2', '1'])
+    expect(groups.find((g) => g.section.key === 'security')!.cards.map((c) => c.id)).toEqual(['3'])
   })
 
   it('files network-category cards into the Network section, in fixed order', () => {
@@ -951,15 +701,11 @@ describe('groupInsightsBySection', () => {
     ]
     const groups = groupInsightsBySection(cards)
     expect(groups.map((g) => g.section.key)).toEqual(['security', OTHER_SECTION.key])
-    const other = groups.find((g) => g.section.key === OTHER_SECTION.key)!
-    expect(other.cards.map((c) => c.id).sort()).toEqual(['2', '3'])
+    expect(groups.find((g) => g.section.key === OTHER_SECTION.key)!.cards.map((c) => c.id).sort()).toEqual(['2', '3'])
   })
 
   it('groups skeleton-shaped entries (no severity) by title', () => {
-    const skeletons = [
-      { id: 'b', title: 'Beta', category: 'origin' },
-      { id: 'a', title: 'Alpha', category: 'origin' },
-    ]
+    const skeletons = [{ id: 'b', title: 'Beta', category: 'origin' }, { id: 'a', title: 'Alpha', category: 'origin' }]
     const groups = groupInsightsBySection(skeletons)
     expect(groups).toHaveLength(1)
     expect(groups[0].section.key).toBe('origin')
@@ -976,12 +722,8 @@ describe('groupInsightsBySection', () => {
 describe('summarizeSeverities', () => {
   it('counts per severity, worst-first, omitting zero counts', () => {
     const cards = [
-      { severity: 'warning' },
-      { severity: 'critical' },
-      { severity: 'warning' },
-      { severity: 'warning' },
-      { severity: 'critical' },
-      { severity: 'clean' },
+      { severity: 'warning' }, { severity: 'critical' }, { severity: 'warning' },
+      { severity: 'warning' }, { severity: 'critical' }, { severity: 'clean' },
     ]
     expect(summarizeSeverities(cards)).toEqual([
       { severity: 'critical', count: 2 },
@@ -991,18 +733,8 @@ describe('summarizeSeverities', () => {
   })
 
   it('orders chips by the severity ramp regardless of input order', () => {
-    const cards = [
-      { severity: 'clean' },
-      { severity: 'info' },
-      { severity: 'error' },
-      { severity: 'critical' },
-    ]
-    expect(summarizeSeverities(cards).map((s) => s.severity)).toEqual([
-      'critical',
-      'error',
-      'info',
-      'clean',
-    ])
+    const cards = [{ severity: 'clean' }, { severity: 'info' }, { severity: 'error' }, { severity: 'critical' }]
+    expect(summarizeSeverities(cards).map((s) => s.severity)).toEqual(['critical', 'error', 'info', 'clean'])
   })
 
   it('ignores unknown and missing severities (skeleton entries → [])', () => {
@@ -1016,44 +748,22 @@ describe('summarizeSeverities', () => {
 })
 
 const STATIC_DEFAULT = { window: '24', baseline: '168' } as const
-
 const WIN = new Set(WINDOW_OPTIONS.map((o) => o.value))
 const BASE = new Set(BASELINE_OPTIONS.map((o) => o.value))
 
 describe('pickInsightsDefault', () => {
-  it('returns the static default when history is null', () => {
-    expect(pickInsightsDefault(null)).toEqual({
-      window: STATIC_DEFAULT.window,
-      baseline: STATIC_DEFAULT.baseline,
-    })
+  it('returns the static default when history is null or NaN', () => {
+    expect(pickInsightsDefault(null)).toEqual(STATIC_DEFAULT)
+    expect(pickInsightsDefault(NaN)).toEqual(STATIC_DEFAULT)
   })
 
   it.each([
-    [0.5, '0.25', '1'],
-    [2, '1', '1'],
-    [12, '4', '1'],
-    [36, '4', '24'],
-    [96, '24', '24'],
-    [200, '24', '168'],
-    [800, '24', '168'],
+    [0.5, '0.25', '1'], [2, '1', '1'], [12, '4', '1'], [36, '4', '24'],
+    [96, '24', '24'], [200, '24', '168'], [800, '24', '168'],
+    [0.999, '0.25', '1'], [1, '1', '1'], [3.999, '1', '1'], [4, '4', '1'],
+    [23.999, '4', '1'], [24, '4', '24'], [47.999, '4', '24'], [48, '24', '24'],
+    [167.999, '24', '24'], [168, '24', '168'], [719.999, '24', '168'], [720, '24', '168'],
   ])('history %sh -> window %s / baseline %s', (h, w, b) => {
-    expect(pickInsightsDefault(h)).toEqual({ window: w, baseline: b })
-  })
-
-  it.each([
-    [0.999, '0.25', '1'],
-    [1, '1', '1'],
-    [3.999, '1', '1'],
-    [4, '4', '1'],
-    [23.999, '4', '1'],
-    [24, '4', '24'],
-    [47.999, '4', '24'],
-    [48, '24', '24'],
-    [167.999, '24', '24'],
-    [168, '24', '168'],
-    [719.999, '24', '168'],
-    [720, '24', '168'],
-  ])('boundary %sh -> %s / %s', (h, w, b) => {
     expect(pickInsightsDefault(h)).toEqual({ window: w, baseline: b })
   })
 
@@ -1064,37 +774,20 @@ describe('pickInsightsDefault', () => {
       expect(BASE.has(r.baseline)).toBe(true)
     }
   })
-
-  it('treats NaN as no-data (static default)', () => {
-    expect(pickInsightsDefault(NaN)).toEqual({
-      window: STATIC_DEFAULT.window,
-      baseline: STATIC_DEFAULT.baseline,
-    })
-  })
 })
 
 describe('historyHoursFromExtents', () => {
   const NOW = Date.parse('2026-06-15T12:00:00.000Z')
 
-  it('returns null for null/undefined/empty earliest', () => {
-    expect(historyHoursFromExtents(null, NOW)).toBeNull()
-    expect(historyHoursFromExtents(undefined, NOW)).toBeNull()
-    expect(historyHoursFromExtents('', NOW)).toBeNull()
+  it('returns null for null/undefined/empty/unparseable earliest', () => {
+    for (const v of [null, undefined, '', 'not-a-date'] as const) {
+      expect(historyHoursFromExtents(v, NOW)).toBeNull()
+    }
   })
 
-  it('computes hours from a full ISO earliest', () => {
+  it('computes hours from ISO earliest, widens date-only to UTC start-of-day, and clamps future to 0', () => {
     expect(historyHoursFromExtents('2026-06-15T10:00:00.000Z', NOW)).toBeCloseTo(2, 6)
-  })
-
-  it('widens a date-only earliest to UTC start-of-day', () => {
     expect(historyHoursFromExtents('2026-06-14', NOW)).toBeCloseTo(36, 6)
-  })
-
-  it('returns null for an unparseable earliest', () => {
-    expect(historyHoursFromExtents('not-a-date', NOW)).toBeNull()
-  })
-
-  it('clamps a future earliest to 0 (never negative)', () => {
     expect(historyHoursFromExtents('2026-06-15T13:00:00.000Z', NOW)).toBe(0)
   })
 })

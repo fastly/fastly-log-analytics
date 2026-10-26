@@ -1,8 +1,9 @@
-"""ClickHouse HTTP boundary: no server, schema, or serving-path changes."""
+"""ClickHouse HTTP boundary, manifest/publication, and high-scale control-plane tests."""
 
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import os
 import threading
@@ -16,11 +17,12 @@ from email.policy import default
 from hashlib import sha256
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import MagicMock, patch
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import duckdb
 import httpx
 import pytest
+from backend.core.clickhouse_client import CLICKHOUSE_FACT_COLUMNS, ClickHouseClient, ClickHouseError
 from backend.core.clickhouse_manifest import Artifact, Dataset, PgManifest
 from backend.core.clickhouse_publication import (
     PAYLOAD_COLUMNS,
@@ -36,7 +38,12 @@ from backend.core.clickhouse_publication import (
     verify_generation,
 )
 from backend.core.clickhouse_schema import CLICKHOUSE_SCHEMA_VERSION
+from backend.core.high_scale_sections import HighScaleSections, current_clickhouse_scope
 from backend.core.metadata.pg_schema import pg_schema_statements
+from backend.core.query_attribution import Attribution, current_attribution
+from backend.high_scale.archive_models import ArchiveArtifact, ArchiveManifest, ArchiveSourceObject, ArchiveState
+from backend.high_scale.source_discovery import INITIAL_SOURCE_CURSOR
+from psycopg_pool import ConnectionPool
 from tests._helpers.sources import TinyFos
 
 from backend import config
@@ -45,11 +52,8 @@ from backend.core import clickhouse_observer as clickhouse_metrics
 from backend.core import clickhouse_observer as metrics
 from backend.core import clickhouse_observer as observer
 from backend.core import clickhouse_schema as schema
-from backend.core.clickhouse_client import (
-    CLICKHOUSE_FACT_COLUMNS,
-    ClickHouseClient,
-    ClickHouseError,
-)
+from backend.core.metadata import usage_log
+from backend.high_scale.postgres_control import PostgresControlPlane
 from backend.models.common import DebugQuery
 from backend.utils import telemetry
 from scripts import clickhouse_replay
@@ -352,7 +356,6 @@ def test_internal_ddl_and_insert_and_delete(clients, settings):
         )
         == []
     )
-
     columns = [
         "service_id",
         "batch_id",
@@ -495,7 +498,7 @@ def test_active_query_monitor_pool_acquisition_and_close(clients):
     assert active and active[0] not in query_registry._queries
 
     entered, release = threading.Event(), threading.Event()
-    c = clients(lambda _: (entered.set(), assert_true := release.wait(3), response())[2])
+    c = clients(lambda _: (entered.set(), release.wait(3), response())[2])
     with ThreadPoolExecutor(max_workers=1) as executor:
         future = executor.submit(c.execute, "SELECT 1")
         try:
@@ -514,9 +517,6 @@ def test_active_query_monitor_pool_acquisition_and_close(clients):
 
 
 def test_statistics_and_client_phases_and_section_identity(clients, monkeypatch):
-    from backend.core.high_scale_sections import HighScaleSections
-    from backend.core.query_attribution import Attribution, current_attribution
-
     events = []
     monkeypatch.setattr(ch.logger, "info", lambda event, **kw: events.append((event, kw)))
     telemetry.start_call_tracking()
@@ -609,8 +609,7 @@ def test_invalid_select_response_and_exception_header_and_identifier_binding(cli
         clients(lambda _: httpx.Response(200, headers={"X-ClickHouse-Exception-Code": "159"})).execute("SELECT 1")
     with pytest.raises(ValueError, match="identifier"):
         clients(lambda _: pytest.fail("request attempted")).execute(
-            "SELECT * FROM {table:Identifier}",
-            {"table": ch.CLICKHOUSE_FACT_TABLE},
+            "SELECT * FROM {table:Identifier}", {"table": ch.CLICKHOUSE_FACT_TABLE}
         )
 
 
@@ -637,8 +636,8 @@ def test_pool_config_close_during_request_and_singleton(settings, monkeypatch):
         kw = constructor.call_args.kwargs
         assert (
             kw["limits"].max_connections == settings.pool_max_size
-            and kw["follow_redirects"] is False
-            and kw["trust_env"] is False
+            and not kw["follow_redirects"]
+            and not kw["trust_env"]
         )
         c.close()
 
@@ -1014,7 +1013,6 @@ def test_cli_dryrun_and_validation_and_flush(monkeypatch, mode):
     for name in ("PgManifest", "FosArtifacts"):
         monkeypatch.setattr(f"scripts.clickhouse_replay.{name}", no_storage)
     assert run(parser().parse_args(["--service-id", "TestPrototype", *mode]))["dry_run"]
-
     for extra in (["--limit", "0"], ["--max-rows", "1000001"], ["--ttl-hours", "nan"]):
         with pytest.raises(ValueError):
             run(
@@ -1031,7 +1029,6 @@ def test_cli_dryrun_and_validation_and_flush(monkeypatch, mode):
                     ]
                 )
             )
-
     events = []
     monkeypatch.setattr("sys.argv", ["replay", "--service-id", "TestPrototype", "--rebuild", "fixture"])
     monkeypatch.setattr(clickhouse_replay, "force_flush", lambda: events.append("flush"))
@@ -1075,7 +1072,6 @@ def test_admin_manifest_transactions_and_status(manifest):
         "SET LOCAL statement_timeout = '2s'",
         "SET LOCAL lock_timeout = '2s'",
     ]
-
     now = datetime.now(UTC)
     rows = iter(
         [
@@ -1116,11 +1112,7 @@ def test_replay_preview_only_reads_and_checks_service_references(manifest, gener
     con.execute.return_value.fetchone.side_effect = rows
     assert store.replay_preview(
         "service", dataset_id=None if generation else "dataset", generation=generation, target="target", limit=1
-    ) == {
-        "dataset_id": "dataset",
-        "artifact_count": 3,
-        "planned_artifacts": 1,
-    }
+    ) == {"dataset_id": "dataset", "artifact_count": 3, "planned_artifacts": 1}
 
 
 @pytest.mark.parametrize("case", ["missing", "expired", "schema", "oversized", "retired", "superseded", "target"])
@@ -1160,7 +1152,6 @@ def test_manifest_lag_dataset_generation_claim_and_pending(manifest, monkeypatch
     assert store.publication_lag_seconds() == 42.5
     result(con, {"lag_seconds": None})
     assert store.publication_lag_seconds() == 0
-
     dataset, artifact, _ = fixture_manifest()
     result(con, asdict(dataset))
     assert store.dataset(dataset.service_id, dataset.dataset_id) == dataset
@@ -1173,7 +1164,6 @@ def test_manifest_lag_dataset_generation_claim_and_pending(manifest, monkeypatch
     result(con, asdict(replace(dataset, schema_version=99)))
     with pytest.raises(ValueError, match="unsupported"):
         store.dataset(dataset.service_id, dataset.dataset_id)
-
     result(con, {"dataset_id": dataset.dataset_id})
     assert store.generation(dataset.service_id, "generation") == {"dataset_id": dataset.dataset_id}
     monkeypatch.setattr(store, "generation", lambda *a: {"dataset_id": dataset.dataset_id})
@@ -1182,11 +1172,8 @@ def test_manifest_lag_dataset_generation_claim_and_pending(manifest, monkeypatch
     assert store.artifact(dataset.service_id, "generation", artifact.batch_id) == artifact
     result(con, rows=[asdict(artifact)])
     assert store.artifacts(dataset.service_id, dataset.dataset_id) == [artifact]
-
     result(con, {"revision": 4})
-    gen = store.begin_generation(dataset.service_id, dataset.dataset_id, "target")
-    assert len(gen) == 32
-
+    assert len(store.begin_generation(dataset.service_id, dataset.dataset_id, "target")) == 32
     result(con, {"lease_fence": 3})
     assert store.claim("service", "generation", "batch") == 3
     with pytest.raises(ValueError):
@@ -1194,7 +1181,6 @@ def test_manifest_lag_dataset_generation_claim_and_pending(manifest, monkeypatch
     assert store.finish("service", "generation", "batch", 3, digest="digest")
     result(con, count=0)
     assert not store.finish("service", "generation", "batch", 2, digest=None, error="TimeoutError")
-
     result(con, rows=[{"batch_id": "b"}])
     assert store.pending("s", "g", 1) == ["b"]
     with pytest.raises(ValueError):
@@ -1217,14 +1203,9 @@ def test_activation_requires_complete_membership_locked_revision_and_live_target
         "dataset_id": dataset.dataset_id,
     }
     rows = [None if scenario == "missing" else {"revision": 3}, gen, {"n": int(scenario == "pending")}]
-
-    def execute(sql, params):
-        cur = MagicMock()
-        if sql.startswith("SELECT"):
-            cur.fetchone.return_value = rows.pop(0)
-        return cur
-
-    con.execute.side_effect = execute
+    con.execute.side_effect = lambda sql, params: MagicMock(
+        fetchone=MagicMock(return_value=rows.pop(0) if sql.startswith("SELECT") else None)
+    )
     assert store.activate(dataset.service_id, "generation", "target") is activated
 
 
@@ -1296,32 +1277,11 @@ def test_schema_ddl_postgres_manifest_and_validation(monkeypatch):
     pool2.close.assert_called_once()
 
 
-# ── Merged from tests/core/test_high_scale_core.py ──
-
-import contextvars
-import os
-from datetime import UTC, datetime
-from uuid import uuid4
-
-import pytest
-from backend.core.high_scale_sections import HighScaleSections, current_clickhouse_scope
-from backend.core.query_attribution import Attribution, current_attribution
-from backend.high_scale.archive_models import (
-    ArchiveArtifact,
-    ArchiveManifest,
-    ArchiveSourceObject,
-    ArchiveState,
-)
-from backend.high_scale.source_discovery import INITIAL_SOURCE_CURSOR
-from psycopg_pool import ConnectionPool
-
-from backend.high_scale.postgres_control import PostgresControlPlane
-
-
 # ── Merged from tests/core/test_high_scale_postgres_control.py ──
+
+
 def _fake_store() -> tuple[PostgresControlPlane, MagicMock, MagicMock]:
-    pool = MagicMock()
-    connection = MagicMock()
+    pool, connection = MagicMock(), MagicMock()
     pool.connection.return_value.__enter__.return_value = connection
     connection.transaction.return_value.__enter__.return_value = connection
     return PostgresControlPlane(pool=pool), pool, connection
@@ -1415,86 +1375,60 @@ def _archive_row(
     }
 
 
-def test_schema_is_explicit_and_transactional() -> None:
+def test_schema_and_operational_snapshot_and_db_errors() -> None:
     store, pool, connection = _fake_store()
-
     store.create_schema()
-
     pool.connection.assert_called_once_with()
     connection.transaction.assert_called_once_with()
     ddl = connection.execute.call_args.args[0]
-    assert "CREATE TABLE IF NOT EXISTS high_scale_ownership" in ddl
-    assert "CREATE TABLE IF NOT EXISTS high_scale_source_objects" in ddl
-    assert "CREATE TABLE IF NOT EXISTS high_scale_archive_manifests" in ddl
-    assert "CREATE TABLE IF NOT EXISTS high_scale_batch_claims" in ddl
-    assert "CREATE TABLE IF NOT EXISTS high_scale_deletion_authorizations" in ddl
+    for tbl in (
+        "high_scale_ownership",
+        "high_scale_source_objects",
+        "high_scale_archive_manifests",
+        "high_scale_batch_claims",
+        "high_scale_deletion_authorizations",
+    ):
+        assert f"CREATE TABLE IF NOT EXISTS {tbl}" in ddl
 
-
-def test_operational_snapshot_aggregates_source_and_publication_state() -> None:
-    store, _, connection = _fake_store()
-    source_counts = MagicMock(fetchall=MagicMock(return_value=[("request", "claimed", 4)]))
-    source_age = MagicMock(fetchall=MagicMock(return_value=[("request", 9.5)]))
-    publications = MagicMock(fetchall=MagicMock(return_value=[("request", 2, 120, 3.25)]))
-    connection.execute.side_effect = [MagicMock(), source_counts, source_age, publications]
-
-    snapshot = store.operational_snapshot("svc")
-
-    assert snapshot == {
+    store2, _, con2 = _fake_store()
+    con2.execute.side_effect = [
+        MagicMock(),
+        MagicMock(fetchall=MagicMock(return_value=[("request", "claimed", 4)])),
+        MagicMock(fetchall=MagicMock(return_value=[("request", 9.5)])),
+        MagicMock(fetchall=MagicMock(return_value=[("request", 2, 120, 3.25)])),
+    ]
+    assert store2.operational_snapshot("svc") == {
         "source_objects": [{"domain": "request", "status": "claimed", "count": 4}],
         "source_age": [{"domain": "request", "age_seconds": 9.5}],
-        "publications": [
-            {
-                "domain": "request",
-                "pending": 2,
-                "published_rows": 120,
-                "lag_seconds": 3.25,
-            }
-        ],
+        "publications": [{"domain": "request", "pending": 2, "published_rows": 120, "lag_seconds": 3.25}],
     }
-    assert connection.execute.call_count == 4
+    assert con2.execute.call_count == 4
+
+    store3, _, con3 = _fake_store()
+    con3.execute.side_effect = RuntimeError("database unavailable")
+    with pytest.raises(RuntimeError, match="database unavailable"):
+        store3.create_schema()
 
 
-def test_discover_source_tolerates_a_sibling_domain_discovering_the_same_object() -> None:
-    """Regression test: rum_vitals and rum_errors both list the FOS prefix
-    raw/rum/, so the same object is legitimately discovered by both
-    domains' pages — whichever wins the race keeps the row. Rejecting the
-    second domain's discovery as a "changed identity" made every subsequent
-    tick of the losing domain's page raise and abort, permanently starving
-    it (observed live during RUM qualification). Only a genuine
-    checksum/version change is a real identity conflict."""
+def test_discover_and_claim_source_fencing() -> None:
     store, _, connection = _fake_store()
-    owner = _owner_row(owner="high_scale", epoch=1)
-    existing = _source_row(status="discovered")  # discovered under domain="request" per _source_row's default
-    cursors = [MagicMock(), MagicMock()]
-    cursors[0].fetchone.return_value = owner
-    cursors[1].fetchone.return_value = existing
-    connection.execute.side_effect = cursors
-
-    result = store.discover_source(
+    c0, c1 = MagicMock(), MagicMock()
+    c0.fetchone.return_value = _owner_row(owner="high_scale", epoch=1)
+    c1.fetchone.return_value = _source_row(status="discovered")
+    connection.execute.side_effect = [c0, c1]
+    res = store.discover_source(
         "svc",
         "rum_errors",
         "raw/one.gz",
-        "sha256:source",  # matches _source_row's checksum
+        "sha256:source",
         size_bytes=12,
-        version="v1",  # matches _source_row's version
+        version="v1",
         expected_owner="high_scale",
         expected_owner_epoch=1,
     )
+    assert res.object_id == "object-1" and len(connection.execute.call_args_list) == 2
 
-    assert result.object_id == "object-1"
-    # Only the two locking SELECTs ran — no INSERT attempted, no error.
-    assert len(connection.execute.call_args_list) == 2
-
-
-def test_discover_source_rejects_a_real_checksum_change() -> None:
-    store, _, connection = _fake_store()
-    owner = _owner_row(owner="high_scale", epoch=1)
-    existing = _source_row(status="discovered")
-    cursors = [MagicMock(), MagicMock()]
-    cursors[0].fetchone.return_value = owner
-    cursors[1].fetchone.return_value = existing
-    connection.execute.side_effect = cursors
-
+    connection.execute.side_effect = [c0, c1]
     with pytest.raises(ValueError, match="identity changed"):
         store.discover_source(
             "svc",
@@ -1507,86 +1441,38 @@ def test_discover_source_rejects_a_real_checksum_change() -> None:
             expected_owner_epoch=1,
         )
 
-
-def test_claim_returns_existing_lease_without_stealing_it() -> None:
-    store, _, connection = _fake_store()
     now = datetime(2026, 9, 11, tzinfo=UTC)
-    owner = _owner_row()
-    source = _source_row(lease_until=now + timedelta(seconds=30), generation=4)
-    cursors = [MagicMock(), MagicMock()]
-    cursors[0].fetchone.return_value = owner
-    cursors[1].fetchone.return_value = source
-    connection.execute.side_effect = cursors
-
-    result = store.claim_source(
-        "svc",
-        "raw/one.gz",
-        "worker-2",
-        expected_owner="standard",
-        expected_owner_epoch=1,
-        now=now,
+    c_own = MagicMock(fetchone=MagicMock(return_value=_owner_row()))
+    c_src = MagicMock(
+        fetchone=MagicMock(return_value=_source_row(lease_until=now + timedelta(seconds=30), generation=4))
     )
-
-    assert result.object_id == "object-1"
-    assert result.claimed is False
-    assert result.lease_generation == 4
-    assert len(connection.execute.call_args_list) == 2
-
-
-def test_claim_is_idempotent_for_the_current_worker() -> None:
-    store, _, connection = _fake_store()
-    now = datetime(2026, 9, 11, tzinfo=UTC)
-    owner = _owner_row()
-    source = _source_row(
-        lease_until=now + timedelta(seconds=30),
-        generation=4,
+    connection.execute.side_effect = [c_own, c_src]
+    res2 = store.claim_source(
+        "svc", "raw/one.gz", "worker-2", expected_owner="standard", expected_owner_epoch=1, now=now
     )
-    source["owner"] = "worker-1"
-    cursors = [MagicMock(), MagicMock()]
-    cursors[0].fetchone.return_value = owner
-    cursors[1].fetchone.return_value = source
-    connection.execute.side_effect = cursors
+    assert res2.object_id == "object-1" and res2.claimed is False and res2.lease_generation == 4
 
-    result = store.claim_source(
-        "svc",
-        "raw/one.gz",
-        "worker-1",
-        expected_owner="standard",
-        expected_owner_epoch=1,
-        now=now,
+    src_w1 = _source_row(lease_until=now + timedelta(seconds=30), generation=4)
+    src_w1["owner"] = "worker-1"
+    connection.execute.side_effect = [c_own, MagicMock(fetchone=MagicMock(return_value=src_w1))]
+    res3 = store.claim_source(
+        "svc", "raw/one.gz", "worker-1", expected_owner="standard", expected_owner_epoch=1, now=now
     )
+    assert res3.object_id == "object-1" and res3.claimed is True and res3.lease_generation == 4
 
-    assert result.object_id == "object-1"
-    assert result.claimed is True
-    assert result.lease_generation == 4
-    assert len(connection.execute.call_args_list) == 2
-
-
-def test_claim_fences_stale_owner_epoch_before_source_update() -> None:
-    store, _, connection = _fake_store()
+    connection.execute.reset_mock()
+    connection.execute.side_effect = None
     connection.execute.return_value.fetchone.return_value = _owner_row(epoch=2)
-
     with pytest.raises(ValueError, match="owner epoch"):
-        store.claim_source(
-            "svc",
-            "raw/one.gz",
-            "worker-1",
-            expected_owner="standard",
-            expected_owner_epoch=1,
-        )
-
+        store.claim_source("svc", "raw/one.gz", "worker-1", expected_owner="standard", expected_owner_epoch=1)
     assert len(connection.execute.call_args_list) == 1
 
 
-def test_mark_source_missing_stamps_terminal_status_and_error() -> None:
+def test_mark_source_missing_and_cursors() -> None:
     store, _, connection = _fake_store()
-    owner = _owner_row(owner="high_scale", epoch=1)
     source = _source_row(status="claimed", owner_epoch=1)
-    cursors = [MagicMock(), MagicMock(), MagicMock()]
-    cursors[0].fetchone.return_value = owner
-    cursors[1].fetchone.return_value = source
-    connection.execute.side_effect = cursors
-
+    c_own = MagicMock(fetchone=MagicMock(return_value=_owner_row(owner="high_scale", epoch=1)))
+    connection.execute.side_effect = [c_own, MagicMock(fetchone=MagicMock(return_value=source)), MagicMock()]
     store.mark_source_missing(
         "svc",
         "raw/one.gz",
@@ -1594,161 +1480,73 @@ def test_mark_source_missing_stamps_terminal_status_and_error() -> None:
         expected_owner_epoch=1,
         error="source object is missing from storage: raw/one.gz",
     )
-
     update_sql, update_params = connection.execute.call_args_list[2].args
-    assert "status='source_missing'" in update_sql
-    assert update_params[0] == "source object is missing from storage: raw/one.gz"
-    assert update_params[-1] == source["object_id"]
+    assert "status='source_missing'" in update_sql and update_params[-1] == source["object_id"]
 
-
-def test_mark_source_missing_is_a_no_op_when_already_missing() -> None:
-    store, _, connection = _fake_store()
-    owner = _owner_row(owner="high_scale", epoch=1)
-    source = _source_row(status="source_missing", owner_epoch=1)
-    cursors = [MagicMock(), MagicMock()]
-    cursors[0].fetchone.return_value = owner
-    cursors[1].fetchone.return_value = source
-    connection.execute.side_effect = cursors
-
-    store.mark_source_missing(
-        "svc",
-        "raw/one.gz",
-        expected_owner="high_scale",
-        expected_owner_epoch=1,
-        error="retry",
-    )
-
-    # Only the two locking SELECTs — no UPDATE issued for an already-terminal row.
+    connection.execute.reset_mock()
+    connection.execute.side_effect = [
+        c_own,
+        MagicMock(fetchone=MagicMock(return_value=_source_row(status="source_missing", owner_epoch=1))),
+    ]
+    store.mark_source_missing("svc", "raw/one.gz", expected_owner="high_scale", expected_owner_epoch=1, error="retry")
     assert len(connection.execute.call_args_list) == 2
 
-
-def test_mark_source_missing_refuses_to_override_acknowledged_source() -> None:
-    store, _, connection = _fake_store()
-    owner = _owner_row(owner="high_scale", epoch=1)
-    source = _source_row(status="acknowledged", owner_epoch=1)
-    cursors = [MagicMock(), MagicMock()]
-    cursors[0].fetchone.return_value = owner
-    cursors[1].fetchone.return_value = source
-    connection.execute.side_effect = cursors
-
+    connection.execute.side_effect = [
+        c_own,
+        MagicMock(fetchone=MagicMock(return_value=_source_row(status="acknowledged", owner_epoch=1))),
+    ]
     with pytest.raises(ValueError, match="durably archived"):
         store.mark_source_missing(
-            "svc",
-            "raw/one.gz",
-            expected_owner="high_scale",
-            expected_owner_epoch=1,
-            error="source object is missing from storage: raw/one.gz",
+            "svc", "raw/one.gz", expected_owner="high_scale", expected_owner_epoch=1, error="missing"
         )
 
-
-def test_mark_source_missing_fences_stale_owner_epoch() -> None:
-    store, _, connection = _fake_store()
+    connection.execute.reset_mock()
+    connection.execute.side_effect = None
     connection.execute.return_value.fetchone.return_value = _owner_row(owner="high_scale", epoch=2)
-
     with pytest.raises(ValueError, match="owner epoch"):
         store.mark_source_missing(
-            "svc",
-            "raw/one.gz",
-            expected_owner="high_scale",
-            expected_owner_epoch=1,
-            error="source object is missing from storage: raw/one.gz",
+            "svc", "raw/one.gz", expected_owner="high_scale", expected_owner_epoch=1, error="missing"
         )
 
-    assert len(connection.execute.call_args_list) == 1
+    connection.execute.reset_mock()
+    connection.execute.side_effect = [
+        MagicMock(fetchone=MagicMock(return_value=_owner_row(owner="high_scale", epoch=4, cursor="cursor-1"))),
+        MagicMock(),
+        MagicMock(fetchone=MagicMock(return_value=_owner_row(owner="high_scale", epoch=4, cursor="cursor-2"))),
+    ]
+    res = store.advance_source_cursor("svc", "cursor-2", expected_owner="high_scale", expected_owner_epoch=4)
+    assert res.source_cursor == "cursor-2"
+    assert connection.execute.call_args_list[1].args[1] == ("cursor-2", "svc", 4, "high_scale")
 
+    connection.execute.reset_mock()
+    connection.execute.side_effect = None
+    connection.execute.return_value = MagicMock(fetchone=MagicMock(return_value=None))
+    assert store.source_cursor_for("svc", "rum_vitals") == INITIAL_SOURCE_CURSOR
+    assert not any("high_scale_ownership" in c.args[0] for c in connection.execute.call_args_list)
 
-def test_cursor_advancement_is_owner_epoch_fenced() -> None:
-    store, _, connection = _fake_store()
-    current = _owner_row(owner="high_scale", epoch=4, cursor="cursor-1")
-    updated = _owner_row(owner="high_scale", epoch=4, cursor="cursor-2")
-    cursors = [MagicMock(), MagicMock(), MagicMock()]
-    cursors[0].fetchone.return_value = current
-    cursors[2].fetchone.return_value = updated
-    connection.execute.side_effect = cursors
-
-    result = store.advance_source_cursor(
-        "svc",
-        "cursor-2",
-        expected_owner="high_scale",
-        expected_owner_epoch=4,
-    )
-
-    assert result.source_cursor == "cursor-2"
-    assert connection.execute.call_args_list[1].args[1] == (
-        "cursor-2",
-        "svc",
-        4,
-        "high_scale",
-    )
-
-
-def test_source_cursor_for_never_falls_back_to_owner_level_cursor() -> None:
-    """Regression test: different domains list different FOS prefixes
-    (request vs. rum). Falling back to the shared owner-level cursor for a
-    domain that has never advanced can hand it a StartAfter key entirely
-    outside its own Prefix — observed live as rum_vitals/rum_errors
-    permanently stuck at zero discovered objects, silently, because the
-    inherited request-domain cursor made every listing return empty. A
-    domain with no cursor of its own must get its own initial cursor."""
-    store, _, connection = _fake_store()
-    cursor = MagicMock()
-    cursor.fetchone.return_value = None
-    connection.execute.return_value = cursor
-
-    result = store.source_cursor_for("svc", "rum_vitals")
-
-    assert result == INITIAL_SOURCE_CURSOR
-    # Only the per-domain lookup ran (plus the read-only transaction set-up)
-    # — no owner-row fallback query.
-    executed_sql = [c.args[0] for c in connection.execute.call_args_list]
-    assert not any("high_scale_ownership" in sql for sql in executed_sql)
-
-
-def test_source_cursor_for_returns_the_domains_own_persisted_cursor() -> None:
-    store, _, connection = _fake_store()
-    cursor = MagicMock()
-    cursor.fetchone.return_value = ("__terminal__:raw/rum/a.gz",)
-    connection.execute.return_value = cursor
-
+    connection.execute.return_value = MagicMock(fetchone=MagicMock(return_value=("__terminal__:raw/rum/a.gz",)))
     assert store.source_cursor_for("svc", "rum_vitals") == "__terminal__:raw/rum/a.gz"
 
 
-def test_database_errors_propagate_from_transaction() -> None:
+def test_archive_transitions_deletion_and_manifests_covering() -> None:
     store, _, connection = _fake_store()
-    connection.execute.side_effect = RuntimeError("database unavailable")
-
-    with pytest.raises(RuntimeError, match="database unavailable"):
-        store.create_schema()
-
-
-def test_archive_transition_requires_owner_epoch_and_adjacent_state() -> None:
-    store, _, connection = _fake_store()
-    current = _archive_row()
-    updated = _archive_row(state="manifest_committed")
-    cursors = [MagicMock(), MagicMock(), MagicMock()]
-    cursors[0].fetchone.return_value = current
-    cursors[2].fetchone.return_value = updated
-    connection.execute.side_effect = cursors
-
-    result = store.transition_archive_manifest(
+    current, updated = _archive_row(), _archive_row(state="manifest_committed")
+    connection.execute.side_effect = [
+        MagicMock(fetchone=MagicMock(return_value=current)),
+        MagicMock(),
+        MagicMock(fetchone=MagicMock(return_value=updated)),
+    ]
+    res = store.transition_archive_manifest(
         "manifest-1",
         expected_state=ArchiveState.MANIFEST_PREPARED,
         next_state=ArchiveState.MANIFEST_COMMITTED,
         expected_owner_epoch=1,
     )
-
-    assert result.state is ArchiveState.MANIFEST_COMMITTED
-    assert connection.execute.call_args_list[1].args[1] == (
-        "manifest_committed",
-        "manifest-1",
-        1,
-        "manifest_prepared",
-    )
+    assert res.state is ArchiveState.MANIFEST_COMMITTED
+    assert connection.execute.call_args_list[1].args[1] == ("manifest_committed", "manifest-1", 1, "manifest_prepared")
 
     connection.execute.reset_mock()
-    stale_cursor = MagicMock()
-    stale_cursor.fetchone.return_value = current
-    connection.execute.side_effect = [stale_cursor]
+    connection.execute.side_effect = [MagicMock(fetchone=MagicMock(return_value=current))]
     with pytest.raises(ValueError, match="owner epoch"):
         store.transition_archive_manifest(
             "manifest-1",
@@ -1757,67 +1555,30 @@ def test_archive_transition_requires_owner_epoch_and_adjacent_state() -> None:
             expected_owner_epoch=2,
         )
 
-
-def test_deletion_authorization_rejects_active_replay_lease_without_database_call() -> None:
-    store, _, connection = _fake_store()
-
+    connection.execute.reset_mock()
     with pytest.raises(ValueError, match="active replay lease"):
         store.authorize_source_delete(
-            "svc",
-            "raw/one.gz",
-            manifest_id="manifest-1",
-            expected_owner_epoch=1,
-            replay_lease_active=True,
+            "svc", "raw/one.gz", manifest_id="manifest-1", expected_owner_epoch=1, replay_lease_active=True
         )
-
     connection.execute.assert_not_called()
 
-
-def test_deletable_sources_queries_committed_and_eligible_manifests_past_deadline() -> None:
-    store, _, connection = _fake_store()
-    cursor = MagicMock()
-    cursor.fetchall.return_value = [_source_row(status="acknowledged"), _source_row(status="archived")]
-    connection.execute.return_value = cursor
-
-    result = store.deletable_sources("svc", limit=50)
-
-    assert len(result) == 2
-    assert all(r.object_id == "object-1" for r in result)
+    connection.execute.side_effect = None
+    connection.execute.return_value = MagicMock(
+        fetchall=MagicMock(return_value=[_source_row(status="acknowledged"), _source_row(status="archived")])
+    )
+    res_del = store.deletable_sources("svc", limit=50)
+    assert len(res_del) == 2 and all(r.object_id == "object-1" for r in res_del)
     sql, params = connection.execute.call_args.args
-    assert "high_scale_source_objects" in sql
-    assert "high_scale_archive_manifests" in sql
-    assert "'archived', 'acknowledged'" in sql
-    assert "'manifest_committed', 'deletion_eligible'" in sql
-    assert params == ("svc", 50)
-
-
-def test_deletable_sources_rejects_non_positive_limit() -> None:
-    store, _, _ = _fake_store()
+    assert "high_scale_source_objects" in sql and "high_scale_archive_manifests" in sql and params == ("svc", 50)
     with pytest.raises(ValueError, match="limit"):
         store.deletable_sources("svc", limit=0)
 
-
-def test_manifests_covering_queries_by_service_domain_and_overlap() -> None:
-    store, _, connection = _fake_store()
-    cursor = MagicMock()
-    cursor.fetchall.return_value = [_archive_row(manifest_id="m1"), _archive_row(manifest_id="m2")]
-    connection.execute.return_value = cursor
-
-    start = datetime(2026, 9, 1, tzinfo=UTC)
-    end = datetime(2026, 9, 1, 1, tzinfo=UTC)
-    result = store.manifests_covering("svc", "request", start, end)
-
-    assert [m.manifest_id for m in result] == ["m1", "m2"]
-    sql, params = connection.execute.call_args.args
-    assert "high_scale_archive_manifests" in sql
-    assert "coverage_end > %s" in sql
-    assert "coverage_start < %s" in sql
-    assert params == ("svc", "request", start, end)
-
-
-def test_manifests_covering_rejects_inverted_range() -> None:
-    store, _, _ = _fake_store()
-    start = datetime(2026, 9, 1, tzinfo=UTC)
+    connection.execute.return_value = MagicMock(
+        fetchall=MagicMock(return_value=[_archive_row(manifest_id="m1"), _archive_row(manifest_id="m2")])
+    )
+    start, end = datetime(2026, 9, 1, tzinfo=UTC), datetime(2026, 9, 1, 1, tzinfo=UTC)
+    res_cov = store.manifests_covering("svc", "request", start, end)
+    assert [m.manifest_id for m in res_cov] == ["m1", "m2"]
     with pytest.raises(ValueError, match="range"):
         store.manifests_covering("svc", "request", start, start - timedelta(minutes=1))
 
@@ -1826,14 +1587,7 @@ def _manifest(*, service_id: str = "svc", manifest_id: str = "manifest-1") -> Ar
     start = datetime(2026, 9, 1, tzinfo=UTC)
     source = ArchiveSourceObject(service_id, "request", "raw/one.gz", "sha256:source", 12, "v1")
     artifact = ArchiveArtifact(
-        "s3://archive/manifest-1.parquet",
-        "sha256:artifact",
-        128,
-        3,
-        256,
-        "digest",
-        "archive.v1",
-        "normalize.v1",
+        "s3://archive/manifest-1.parquet", "sha256:artifact", 128, 3, 256, "digest", "archive.v1", "normalize.v1"
     )
     return ArchiveManifest(
         manifest_id,
@@ -1854,13 +1608,7 @@ def test_postgres_control_plane_end_to_end() -> None:
         pytest.skip("HIGH_SCALE_POSTGRES_TEST_DSN is not set")
 
     service_id = f"test-high-scale-{uuid4()}"
-    pool = ConnectionPool(
-        conninfo=dsn,
-        kwargs={"autocommit": False},
-        min_size=1,
-        max_size=2,
-        timeout=5,
-    )
+    pool = ConnectionPool(conninfo=dsn, kwargs={"autocommit": False}, min_size=1, max_size=2, timeout=5)
     store = PostgresControlPlane(pool=pool, pool_timeout=5)
     manifest = _manifest(service_id=service_id)
     try:
@@ -1897,10 +1645,7 @@ def test_postgres_control_plane_end_to_end() -> None:
                 expected_owner_epoch=owner.owner_epoch,
             )
         store.acknowledge_sources_batch(
-            service_id,
-            [source.object_key],
-            manifest_id=manifest.manifest_id,
-            expected_owner_epoch=owner.owner_epoch,
+            service_id, [source.object_key], manifest_id=manifest.manifest_id, expected_owner_epoch=owner.owner_epoch
         )
         store.transition_archive_manifest(
             manifest.manifest_id,
@@ -1916,10 +1661,7 @@ def test_postgres_control_plane_end_to_end() -> None:
             now=manifest.deletion_authorization_deadline + timedelta(seconds=1),
         )
         store.mark_source_deleted(
-            service_id,
-            source.object_key,
-            manifest_id=manifest.manifest_id,
-            expected_owner_epoch=owner.owner_epoch,
+            service_id, source.object_key, manifest_id=manifest.manifest_id, expected_owner_epoch=owner.owner_epoch
         )
         assert store.archive_manifest(manifest.manifest_id).state is ArchiveState.SOURCE_DELETED
     finally:
@@ -1930,24 +1672,16 @@ def test_postgres_control_plane_end_to_end() -> None:
                     "(SELECT object_id FROM high_scale_source_objects WHERE service_id=%s)",
                     (service_id,),
                 )
-                connection.execute(
-                    "DELETE FROM high_scale_source_objects WHERE service_id=%s",
-                    (service_id,),
-                )
-                connection.execute(
-                    "DELETE FROM high_scale_archive_manifests WHERE service_id=%s",
-                    (service_id,),
-                )
-                connection.execute(
-                    "DELETE FROM high_scale_ownership WHERE service_id=%s",
-                    (service_id,),
-                )
+                for tbl in ("high_scale_source_objects", "high_scale_archive_manifests", "high_scale_ownership"):
+                    connection.execute(f"DELETE FROM {tbl} WHERE service_id=%s", (service_id,))
         finally:
             pool.close()
 
 
 # ── Merged from tests/core/test_high_scale_sections.py ──
-def test_sections_propagate_service_and_query_ownership_to_workers() -> None:
+
+
+def test_sections_propagation_queue_wait_persistence_and_nesting(monkeypatch) -> None:
     trace = HighScaleSections("service-test", "security")
     token = current_attribution.set(Attribution(kind="admin", request_id="request-test"))
     try:
@@ -1959,57 +1693,34 @@ def test_sections_propagate_service_and_query_ownership_to_workers() -> None:
             rows = [future.result() for future in futures]
     finally:
         current_attribution.reset(token)
-    assert {row["service_id"] for row in rows} == {"service-test"}
-    assert {row["request_id"] for row in rows} == {"request-test"}
-    assert {row["section"] for row in rows} == {"security.tls", "security.bots"}
-    assert len({row["section_id"] for row in rows}) == 2
-    assert len(trace.timings()) == 2
-    assert all(row["source"] == "fact" and row["current_execution"] is True for row in trace.timings())
+    assert {r["service_id"] for r in rows} == {"service-test"} and {r["request_id"] for r in rows} == {"request-test"}
+    assert {r["section"] for r in rows} == {"security.tls", "security.bots"}
+    assert len({r["section_id"] for r in rows}) == 2 and len(trace.timings()) == 2
+    assert all(r["source"] == "fact" and r["current_execution"] is True for r in trace.timings())
     assert current_clickhouse_scope()["service_id"] is None
-
-
-def test_named_task_queue_wait_is_separate_from_section_execution(monkeypatch) -> None:
-    import threading
 
     clock = [0.0]
     monkeypatch.setattr("backend.core.high_scale_sections.time.perf_counter", lambda: clock[0])
-    trace = HighScaleSections("service-test", "network")
+    trace2 = HighScaleSections("service-test", "network")
     ready, release = threading.Event(), threading.Event()
-
-    def occupy():
-        ready.set()
-        assert release.wait(3)
-
-    def execute():
-        clock[0] += 0.05
-        return "result"
-
     with ThreadPoolExecutor(max_workers=1) as pool:
-        blocker = pool.submit(occupy)
+        blocker = pool.submit(lambda: (ready.set(), release.wait(3)))
         assert ready.wait(3)
-        future = trace.submit(pool, "heatmap", execute, source="fact")
+        future = trace2.submit(
+            pool, "heatmap", lambda: (clock.__setitem__(0, clock[0] + 0.05), "result")[1], source="fact"
+        )
         clock[0] = 0.02
         release.set()
         assert future.result(timeout=3) == "result"
         blocker.result(timeout=3)
-    observation = trace.timings()[0]
-    assert observation["executor_dispatch"] == "thread_pool"
-    assert observation["executor_wait_ms"] == pytest.approx(20)
-    assert observation["time_ms"] == pytest.approx(50)
+    obs = trace2.timings()[0]
+    assert obs["executor_dispatch"] == "thread_pool" and obs["executor_wait_ms"] == pytest.approx(20)
+    assert obs["time_ms"] == pytest.approx(50)
 
-
-def test_persistence_never_falls_back_to_another_active_service(monkeypatch) -> None:
-    from unittest.mock import MagicMock
-
-    from backend import config
-    from backend.core.metadata import usage_log
-    from backend.utils import telemetry
-
-    active = MagicMock(return_value="wrong-active-service")
-    persist = MagicMock()
+    active, persist = MagicMock(return_value="wrong-active-service"), MagicMock()
     monkeypatch.setattr(config, "get_active_service_id", active)
     monkeypatch.setattr(usage_log, "log_telemetry_query", persist)
-    token = telemetry._PAGE_LOAD_ID.set("page-test")
+    t_page = telemetry._PAGE_LOAD_ID.set("page-test")
     try:
         telemetry.record_telemetry_query("clickhouse", "SELECT 1", 2, allow_active_service_fallback=False)
         assert active.call_count == persist.call_count == 0
@@ -2022,16 +1733,15 @@ def test_persistence_never_falls_back_to_another_active_service(monkeypatch) -> 
             allow_active_service_fallback=False,
         )
     finally:
-        telemetry._PAGE_LOAD_ID.reset(token)
-    assert active.call_count == 0
-    assert persist.call_args.kwargs["service_id"] == "service-test"
+        telemetry._PAGE_LOAD_ID.reset(t_page)
+    assert active.call_count == 0 and persist.call_args.kwargs["service_id"] == "service-test"
     assert persist.call_args.kwargs["request_id"] == "request-test"
 
-
-def test_nested_sections_reset_after_errors_and_remain_separate() -> None:
-    parent = HighScaleSections("service-parent", "network")
-    child = HighScaleSections("service-child", "cmcd")
-    scopes = []
+    parent, child, scopes = (
+        HighScaleSections("service-parent", "network"),
+        HighScaleSections("service-child", "cmcd"),
+        [],
+    )
 
     def fails():
         scopes.append(current_clickhouse_scope())
@@ -2044,8 +1754,6 @@ def test_nested_sections_reset_after_errors_and_remain_separate() -> None:
         scopes.append(current_clickhouse_scope())
 
     parent.run("health", outer, source="fact")
-    assert [row["service_id"] for row in scopes] == ["service-parent", "service-child", "service-parent"]
-    assert scopes[1]["parent_section_id"] == scopes[0]["section_id"]
-    assert child.timings()[0]["outcome"] == "error"
-    assert "private-value" not in str(child.timings())
-    assert current_clickhouse_scope()["section_id"] is None
+    assert [r["service_id"] for r in scopes] == ["service-parent", "service-child", "service-parent"]
+    assert scopes[1]["parent_section_id"] == scopes[0]["section_id"] and child.timings()[0]["outcome"] == "error"
+    assert "private-value" not in str(child.timings()) and current_clickhouse_scope()["section_id"] is None

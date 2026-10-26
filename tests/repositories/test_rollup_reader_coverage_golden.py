@@ -792,9 +792,6 @@ from backend.models.dashboard import (
     ScalarRollupCoverage,
     TopNRollupCoverage,
 )
-
-from backend import config as svcconfig
-from backend.repositories import rollup_coverage as coverage
 from backend.repositories.rollup_coverage import (
     collect_hourly_bundle_paths,
     heal_where_clause,
@@ -812,6 +809,9 @@ from backend.repositories.top_n_rollups import (
     qualify_limit_expr,
     truncate_top_n,
 )
+
+from backend import config as svcconfig
+from backend.repositories import rollup_coverage as coverage
 
 START = datetime(2026, 1, 1, tzinfo=UTC)
 

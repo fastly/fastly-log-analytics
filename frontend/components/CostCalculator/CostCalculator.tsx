@@ -2,11 +2,13 @@
 
 import React, { useEffect, useMemo, useReducer } from 'react'
 import { useRouter } from 'next/navigation'
+import { flexRender, getCoreRowModel, useReactTable, type ColumnDef } from '@tanstack/react-table'
 import { cn, buildServiceHref, formatAbbreviatedCount, formatBytes, formatUSD } from "@/lib/utils";
 import { useServiceStore } from '@/stores/filterStore'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
+import { Table, TableBody, TableCell, TableRow } from '@/components/ui/table'
 import { LabelWithInfo } from '@/components/ui/confirm-dialog'
 import {
   Tooltip,
@@ -487,6 +489,54 @@ const OPS_SECTIONS = [
   },
 ] as const
 
+type OpsSectionFlatRow =
+  | { kind: 'header'; key: string; title: string; cls: string }
+  | { kind: 'row'; key: string; label: string; value: string; rowCls: string; valCls: string }
+
+function OpsSectionsTable() {
+  const data = useMemo<OpsSectionFlatRow[]>(() => {
+    const out: OpsSectionFlatRow[] = []
+    for (const sec of OPS_SECTIONS) {
+      out.push({ kind: 'header', key: `hdr-${sec.title}`, title: sec.title, cls: sec.cls })
+      for (const [l, r] of sec.rows) {
+        out.push({ kind: 'row', key: `${sec.title}-${l}`, label: l, value: r, rowCls: sec.rowCls, valCls: sec.valCls })
+      }
+    }
+    return out
+  }, [])
+  const columns = useMemo<ColumnDef<OpsSectionFlatRow>[]>(
+    () => [
+      { id: 'label', cell: ({ row }) => (row.original.kind === 'header' ? row.original.title : row.original.label) },
+      { id: 'value', cell: ({ row }) => (row.original.kind === 'row' ? row.original.value : null) },
+    ],
+    [],
+  )
+  const table = useReactTable({ data, columns, getCoreRowModel: getCoreRowModel() })
+  return (
+    <Table className='w-full text-xs text-muted-foreground'>
+      <TableBody>
+        {table.getRowModel().rows.map((row) => {
+          const item = row.original
+          if (item.kind === 'header') {
+            return (
+              <TableRow key={item.key}>
+                <TableCell colSpan={2} className={item.cls}>{item.title}</TableCell>
+              </TableRow>
+            )
+          }
+          const cells = row.getVisibleCells()
+          return (
+            <TableRow key={item.key}>
+              <TableCell className={item.rowCls}>{flexRender(cells[0].column.columnDef.cell, cells[0].getContext())}</TableCell>
+              <TableCell className={item.valCls}>{flexRender(cells[1].column.columnDef.cell, cells[1].getContext())}</TableCell>
+            </TableRow>
+          )
+        })}
+      </TableBody>
+    </Table>
+  )
+}
+
 export function Pricing({ s, setZone }: PricingProps) {
   const router = useRouter()
   const activeServiceId = useServiceStore((st) => st.activeServiceId)
@@ -563,18 +613,7 @@ export function Pricing({ s, setZone }: PricingProps) {
       <section>
         <h3 className='text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-3'>What generates operations</h3>
         <div className='overflow-x-auto'>
-          <table className='w-full text-xs text-muted-foreground'>
-            <tbody>
-              {OPS_SECTIONS.map((sec) => (
-                <React.Fragment key={sec.title}>
-                  <tr><td colSpan={2} className={sec.cls}>{sec.title}</td></tr>
-                  {sec.rows.map(([l, r]) => (
-                    <tr key={l}><td className={sec.rowCls}>{l}</td><td className={sec.valCls}>{r}</td></tr>
-                  ))}
-                </React.Fragment>
-              ))}
-            </tbody>
-          </table>
+          <OpsSectionsTable />
         </div>
       </section>
     </>

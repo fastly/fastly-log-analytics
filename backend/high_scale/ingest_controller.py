@@ -22,7 +22,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Event, Thread
-from typing import TYPE_CHECKING, Any, Protocol, overload
+from typing import Any, Protocol, overload
 from uuid import uuid4
 
 import pyarrow as pa
@@ -30,7 +30,7 @@ import pyarrow.parquet as pq
 import structlog
 
 from backend import config as app_config
-from backend.core.clickhouse_client import ClickHouseClient
+from backend.core.clickhouse import ClickHouseClient
 from backend.high_scale.archive import (
     ArchiveManifest,
     ArchivePublication,
@@ -201,8 +201,7 @@ def raw_query_producer(
 
     def _produce() -> Iterator[dict[str, Any]]:
         manifests = sorted(
-            catalog.manifests_covering(service_id, domain, start, end),
-            key=lambda manifest: manifest.coverage_start,
+            catalog.manifests_covering(service_id, domain, start, end), key=lambda manifest: manifest.coverage_start
         )
         for manifest in manifests:
             payload = archive.read_artifact(manifest)
@@ -329,13 +328,9 @@ def resolve_asn_display_labels(service_id: str, asns: Iterable[int]) -> dict[int
     return {asn: _db.format_asn_label(asn, names.get(asn, "")) for asn in asn_list}
 
 
-# Real columns on request_facts; every other key lives in the ``custom_fields`` map.
 _COLUMNS = {"client_ip": "client_ip", "ip": "client_ip", "country": "country", "url": "url"}
-# Stored as floats in the map; the standard path filters on the rounded integer.
 _ROUNDED = frozenset({"age", "ttl"})
-# Stored as 'True'/'False' or '1'/'0' strings in custom_fields; normalise both sides to 'true'/'false'.
 _BOOLEAN = frozenset({"edge", "is_ipv6", "waf"})
-# Resolved by the standard path through lookups the fact table has no column for.
 _UNSUPPORTED = frozenset({"_bot_name", "_ngwaf_bot_name", "_tunnel_requests", "waf_sig_ind", "edge_score_reason_ind"})
 
 
@@ -388,7 +383,6 @@ def request_filter_clauses(
         if names:
             parts.append(f"{column} {'IN' if include else 'NOT IN'} ({', '.join(names)})")
         if len(concrete) != len(values):
-            # A null filter value means "the field is absent", which a map lookup reports as ''.
             parts.append(f"{column} {'=' if include else '!='} ''")
         clauses.append(f"({(' OR ' if include else ' AND ').join(parts)})")
     return clauses, params
@@ -403,12 +397,7 @@ def build_clickhouse_filters(
 
 
 def build_published_projection_where(
-    service_id: str,
-    domain: str,
-    start_time: str | None,
-    end_time: str | None,
-    *,
-    dimension: str | None = None,
+    service_id: str, domain: str, start_time: str | None, end_time: str | None, *, dimension: str | None = None
 ) -> tuple[str, dict[str, Any]]:
     """Build ClickHouse WHERE predicate and params for published minute projections."""
     clauses = [
@@ -419,10 +408,7 @@ def build_published_projection_where(
         "WHERE service_id={service_id:String} AND domain={publication_domain:String} "
         "AND publication_state='visible')",
     ]
-    params: dict[str, Any] = {
-        "service_id": service_id,
-        "publication_domain": domain,
-    }
+    params: dict[str, Any] = {"service_id": service_id, "publication_domain": domain}
     start = range_value(start_time)
     end = range_value(end_time)
     if start is not None:
@@ -489,8 +475,6 @@ from backend.repositories.utils.response_cache import (
 )
 from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry
 
-if TYPE_CHECKING:
-    from backend.high_scale.source_discovery import SourceObjectDescriptor
 logger = logging.getLogger(__name__)
 _worker_logger = logging.getLogger("backend.high_scale.worker")
 _recovery_logger = structlog.get_logger(__name__)
@@ -505,10 +489,6 @@ class HighScaleService:
     request_watermark: ServingWatermark | Callable[[], ServingWatermark]
     rum_watermarks: Mapping[str, ServingWatermark | Callable[[], ServingWatermark]] = field(default_factory=dict)
     cmcd_watermark: ServingWatermark | Callable[[], ServingWatermark] | None = None
-    # Cold-tier (beyond ClickHouse warm retention) raw-row queries scan the FOS
-    # archive directly and are opt-in: a service with neither configured simply
-    # cannot serve QueryTier.COLD_JOB, and the /queries endpoint reports that
-    # explicitly rather than silently falling back to an unbounded scan.
     manifest_catalog: ArchiveManifestCatalog | None = None
     archive: ArchivePublication | None = None
 
@@ -602,11 +582,6 @@ def register_high_scale_services(
             return lambda: _watermark(client, bound_service_id, domain, owner_epoch=owner_epoch)
 
         watermarks = {domain: _watermark_for(domain) for domain in _WATERMARK_TABLES}
-        # Cold-tier raw queries require BOTH a manifest catalog and an
-        # archive reader for this specific service; a service missing
-        # either gets neither, so the /queries endpoint reports it as
-        # explicitly unconfigured rather than half-wiring a capability that
-        # can never actually serve a cold-tier plan.
         archive = archive_for(service_id) if archive_for is not None else None
         registry.register(
             HighScaleService(
@@ -614,10 +589,7 @@ def register_high_scale_services(
                 client=client,
                 cursor_secret=cursor_secret,
                 request_watermark=watermarks["request"],
-                rum_watermarks={
-                    "rum_vitals": watermarks["rum_vitals"],
-                    "rum_errors": watermarks["rum_errors"],
-                },
+                rum_watermarks={"rum_vitals": watermarks["rum_vitals"], "rum_errors": watermarks["rum_errors"]},
                 cmcd_watermark=watermarks["cmcd"],
                 manifest_catalog=manifest_catalog if archive is not None else None,
                 archive=archive,
@@ -649,14 +621,6 @@ def register_high_scale_services_from_environment(
     if not service_ids:
         raise ValueError("HIGH_SCALE_SERVICE_IDS must contain at least one service id (none found in configs/)")
     cursor_secret = os.getenv("HIGH_SCALE_CURSOR_SECRET", "").encode("utf-8")
-    # Cold-tier wiring is best-effort: the control plane is the same
-    # Postgres dependency the isolated worker already hard-requires when
-    # HIGH_SCALE_ENABLED=1 (see worker.py's build_worker_from_environment),
-    # so a failure here is as fatal as it already is for the worker. A
-    # per-service archive/FOS lookup failure is NOT fatal — it degrades
-    # that one service to cold-tier-unconfigured (a 404, never a crash of
-    # every other high-scale endpoint) via register_high_scale_services'
-    # archive_for contract.
     manifest_catalog = (control_factory or _default_control_factory)()
 
     def _archive_for(service_id: str) -> ArchivePublication | None:
@@ -698,13 +662,7 @@ def _default_archive_factory(service_id: str) -> ArchivePublication | None:
     return ArchivePublication(S3ObjectStore(fos_client, bucket=bucket, prefix=archive_prefix))
 
 
-def _watermark(
-    client: ServingClient,
-    service_id: str,
-    domain: str,
-    *,
-    owner_epoch: int,
-) -> ServingWatermark:
+def _watermark(client: ServingClient, service_id: str, domain: str, *, owner_epoch: int) -> ServingWatermark:
     table = _WATERMARK_TABLES[domain]
     fence_sql = visible_publication_fence_sql(domain)
     event_id_column = "projection_key" if domain == "cmcd" else "event_id"
@@ -809,16 +767,10 @@ DIMENSIONS_BY_DOMAIN: dict[str, tuple[str, ...]] = {
     "rum_errors": ("error_message",),
     "cmcd": ("cmcd_session",),
 }
-_SOURCE_FIELD_OVERRIDES: dict[str, str] = {
-    "client_ip": "ip",
-    "cmcd_session": "sid",
-}
+_SOURCE_FIELD_OVERRIDES: dict[str, str] = {"client_ip": "ip", "cmcd_session": "sid"}
 
 
-def compute_dimension_counts(
-    domain: str,
-    rows: tuple[Mapping[str, Any], ...],
-) -> tuple[dict[str, Any], ...]:
+def compute_dimension_counts(domain: str, rows: tuple[Mapping[str, Any], ...]) -> tuple[dict[str, Any], ...]:
     """Count occurrences of each configured dimension's value, per minute bucket."""
     if domain not in DIMENSIONS_BY_DOMAIN:
         raise ValueError(f"unsupported aggregate write domain: {domain}")
@@ -915,10 +867,7 @@ _ORIGIN_COLUMNS: dict[str, tuple[str, tuple[str, ...]]] = {
             "client_download_sum_ms",
         ),
     ),
-    "performance_scatter": (
-        "performance_scatter_samples",
-        ("sample_key", "origin_ms", "edge_ms", "cache"),
-    ),
+    "performance_scatter": ("performance_scatter_samples", ("sample_key", "origin_ms", "edge_ms", "cache")),
     "security_dimensions": (
         "security_minute_dimensions",
         (
@@ -955,8 +904,7 @@ _ORIGIN_COLUMNS: dict[str, tuple[str, tuple[str, ...]]] = {
 
 
 def _bucket_start(value: Any) -> datetime:
-    """Batch rows carry bucket_start as an ISO string (HighScaleBatch.digest
-    requires JSON-serializable row values) — parse back for the insert."""
+    """Batch rows carry bucket_start as an ISO string (HighScaleBatch.digest     requires JSON-serializable row values) — parse back for the insert."""
     if isinstance(value, datetime):
         return value
     return datetime.fromisoformat(str(value))
@@ -1010,15 +958,10 @@ class AggregateBatchAdapter(BaseClickHouseBatchAdapter):
                 for row in batch.rows
             ]
         return self._publish_table_rows(
-            table=table,
-            columns=columns,
-            mapped_rows=mapped_rows,
-            batch=batch,
-            batch_uuid=batch_uuid,
+            table=table, columns=columns, mapped_rows=mapped_rows, batch=batch, batch_uuid=batch_uuid
         )
 
 
-# Register sys.modules aliases BEFORE importing projection builders that depend on HighScaleService
 _self_mod = sys.modules[__name__]
 sys.modules["backend.high_scale.registry_bootstrap"] = _self_mod
 sys.modules["backend.high_scale.aggregate_batch_adapter"] = _self_mod
@@ -1074,23 +1017,12 @@ class HighScaleControlPlane(Protocol):
         now: datetime | None,
     ) -> Any: ...
     def record_source_counts(
-        self,
-        service_id: str,
-        object_key: str,
-        *,
-        accepted_rows: int,
-        malformed_rows: int,
-        expected_owner_epoch: int,
+        self, service_id: str, object_key: str, *, accepted_rows: int, malformed_rows: int, expected_owner_epoch: int
     ) -> None: ...
     def register_archive_manifest(self, manifest: ArchiveManifest, *, owner_epoch: int) -> Any: ...
     def archive_manifest(self, manifest_id: str) -> Any: ...
     def transition_archive_manifest(
-        self,
-        manifest_id: str,
-        *,
-        expected_state: ArchiveState,
-        next_state: ArchiveState,
-        expected_owner_epoch: int,
+        self, manifest_id: str, *, expected_state: ArchiveState, next_state: ArchiveState, expected_owner_epoch: int
     ) -> Any: ...
     def claim_sources_batch(
         self,
@@ -1225,10 +1157,7 @@ class HighScaleIngestController:
                 version=descriptor.version,
             )
             decoded = decode_source_object(
-                archive_source,
-                payload,
-                transform_version=self._transform_version,
-                domain=domain,
+                archive_source, payload, transform_version=self._transform_version, domain=domain
             )
             total_accepted += decoded.accepted_rows
             total_quarantined += decoded.quarantined_rows
@@ -1271,9 +1200,6 @@ class HighScaleIngestController:
                 sibling_quarantined += sibling_decoded.quarantined_rows
                 sibling_events.extend(e for e in sibling_decoded.events if row_matches_serving_domain(sibling, e))
         if sibling_quarantined:
-            # The claimed-domain archive retains these original raw_json lines,
-            # including mixed bodies with a valid exception and invalid metric.
-            # Count rejection under the sibling, not as a claimed-domain row.
             logger.warning(
                 "high-scale RUM sibling decode rejected retained source records",
                 extra={"domain": _RUM_SIBLING_DOMAIN[domain], "quarantined_rows": sibling_quarantined},
@@ -1316,10 +1242,7 @@ class HighScaleIngestController:
             artifact = artifact_path.read_bytes()
             manifest = replace(
                 local_manifest,
-                artifact=replace(
-                    local_manifest.artifact,
-                    uri=f"s3://archive/{local_manifest.manifest_id}.parquet",
-                ),
+                artifact=replace(local_manifest.artifact, uri=f"s3://archive/{local_manifest.manifest_id}.parquet"),
             )
             if self._control is not None:
                 try:
@@ -1349,10 +1272,7 @@ class HighScaleIngestController:
             publication = self._serving.publish(batch)
         else:
             publication = PublicationResult(
-                batch_id=batch_id,
-                status=PublicationStatus.VISIBLE,
-                rows_visible=0,
-                duplicate=False,
+                batch_id=batch_id, status=PublicationStatus.VISIBLE, rows_visible=0, duplicate=False
             )
         self._publish_aggregates_batch(service_id, domain, manifest.manifest_id, owner.owner_epoch, all_events)
         if domain == "request":
@@ -1392,11 +1312,7 @@ class HighScaleIngestController:
                 if cur_src is None or cur_src.status != "acknowledged":
                     self._ledger.mark_appended(service_id, desc.object_key, gen)
                     self._ledger.mark_archived(
-                        service_id,
-                        desc.object_key,
-                        gen,
-                        manifest.manifest_id,
-                        owner.owner_epoch,
+                        service_id, desc.object_key, gen, manifest.manifest_id, owner.owner_epoch
                     )
                     self._ledger.acknowledge(service_id, desc.object_key, manifest.manifest_id)
         return BatchIngestResult(
@@ -1408,12 +1324,7 @@ class HighScaleIngestController:
         )
 
     def _publish_aggregates_batch(
-        self,
-        service_id: str,
-        domain: str,
-        manifest_id: str,
-        owner_epoch: int,
-        events: Sequence[dict[str, Any]],
+        self, service_id: str, domain: str, manifest_id: str, owner_epoch: int, events: Sequence[dict[str, Any]]
     ) -> None:
         if self._aggregates is None or not events:
             return
@@ -1461,11 +1372,7 @@ class HighScaleIngestController:
             )
 
     def _publish_cmcd_projection(
-        self,
-        service_id: str,
-        batch_id: str,
-        owner_epoch: int,
-        events: Sequence[dict[str, Any]],
+        self, service_id: str, batch_id: str, owner_epoch: int, events: Sequence[dict[str, Any]]
     ) -> None:
         """Best-effort CMCD projection of request events carrying CMCD fields."""
         try:
@@ -1499,8 +1406,7 @@ class HighScaleIngestController:
             )
         except Exception:
             logger.exception(
-                "high-scale cmcd projection publish failed",
-                extra={"service_id": service_id, "batch_id": batch_id},
+                "high-scale cmcd projection publish failed", extra={"service_id": service_id, "batch_id": batch_id}
             )
 
     def _publish_control_manifest(self, manifest: ArchiveManifest, owner_epoch: int) -> None:
@@ -1513,11 +1419,7 @@ class HighScaleIngestController:
             accepts_state = False
         if accepts_state:
             reg_fn: Any = self._control.register_archive_manifest
-            record = reg_fn(
-                manifest,
-                owner_epoch=owner_epoch,
-                state=ArchiveState.MANIFEST_COMMITTED,
-            )
+            record = reg_fn(manifest, owner_epoch=owner_epoch, state=ArchiveState.MANIFEST_COMMITTED)
         else:
             record = self._control.register_archive_manifest(manifest, owner_epoch=owner_epoch)
         states = (
@@ -1570,8 +1472,6 @@ def _enrich_high_scale_ngwaf_bots(events: tuple[dict[str, Any], ...]) -> None:
                 e["_ngwaf_bot_category"] = bot["cat"]
                 e["_ngwaf_wellknown_bot_name"] = bot["wk"]
                 e["ngwaf_bot_verification_state"] = "verified"
-                # Persisted on the fact row (no underscore) so filtered Security
-                # queries can group by bot without the waf_req_id join.
                 e["ngwaf_bot"] = bot["name"]
                 if bot["cat"]:
                     e["ngwaf_bot_category"] = bot["cat"]
@@ -1580,8 +1480,6 @@ def _enrich_high_scale_ngwaf_bots(events: tuple[dict[str, Any], ...]) -> None:
     except Exception:
         logger.warning("high-scale NGWAF bot enrichment failed", exc_info=True)
 
-
-from backend.high_scale.source_discovery import SourceObjectDescriptor  # noqa: E402, F401
 
 # ── Assets & Shield Performance Aggregates (folded from assets.py) ────────────
 _memo = ResponseMemo(ttl=30.0, maxsize=128)
@@ -1645,31 +1543,18 @@ def compute_summary_from_dims(
         for at in sorted(by_type_reqs.keys(), key=lambda k: (-by_type_reqs[k], k))
     ]
     cache_performance = [
-        {
-            "asset_type": at,
-            "cache_status": cs,
-            "requests": vals[0],
-            "bytes": vals[1],
-        }
+        {"asset_type": at, "cache_status": cs, "requests": vals[0], "bytes": vals[1]}
         for (at, cs), vals in sorted(by_cache.items(), key=lambda item: (item[0][0], -item[1][0], item[0][1]))
     ]
     compression_performance = [
-        {
-            "asset_type": at,
-            "content_encoding": ce,
-            "requests": vals[0],
-            "bytes": vals[1],
-        }
+        {"asset_type": at, "content_encoding": ce, "requests": vals[0], "bytes": vals[1]}
         for (at, ce), vals in sorted(by_comp.items(), key=lambda item: (item[0][0], -item[1][0], item[0][1]))
     ]
     return asset_type_breakdown, cache_performance, compression_performance
 
 
 def assets_aggregates(
-    service: HighScaleService,
-    req: AssetsRequest,
-    start_time: str | None,
-    end_time: str | None,
+    service: HighScaleService, req: AssetsRequest, start_time: str | None, end_time: str | None
 ) -> AssetsAggregatesResponse:
     start_dt, end_dt = parse_time_window(start_time, end_time)
     cache_key = digest_cache_key(
@@ -1853,6 +1738,21 @@ def assets_aggregates(
 
 
 # ── Worker Loop (folded from backend.high_scale.worker) ──────────────────────
+# ── Folded from backend/high_scale/orchestration.py ──────────────────────────
+import logging
+import sys
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+from typing import Protocol
+
+MAX_SOURCE_PAGE_SIZE = 500
+INITIAL_SOURCE_CURSOR = "__initial__"
+TERMINAL_SOURCE_CURSOR_PREFIX = "__terminal__:"
+RUM_REINSPECTION_INTERVAL = 10
+RUM_SOURCE_DOMAINS = frozenset({"rum_vitals", "rum_errors"})
+sys.modules["backend.high_scale.orchestration"] = sys.modules[__name__]
+sys.modules["backend.high_scale.source_discovery"] = sys.modules[__name__]
+
 from backend.high_scale.deletion import (  # noqa: E402
     DeletionController,
     HighScaleDeletionSweeper,
@@ -1867,12 +1767,605 @@ from backend.high_scale.historical_jobs import (  # noqa: E402
     replay_origin_projections,
     replay_performance_projections,
 )
-from backend.high_scale.orchestration import (  # noqa: E402
-    HighScaleWorkerCoordinator,
-    PageRun,
-    S3SourceObjectLister,
-    S3SourceObjectReader,
-)
+
+logger = logging.getLogger(__name__)
+
+
+class SourceObjectMissingError(RuntimeError):
+    """Raised when a claimed source object is confirmed gone from storage."""
+
+
+@dataclass(frozen=True)
+class SourceObjectDescriptor:
+    object_key: str
+    checksum: str
+    size_bytes: int = 0
+    version: str | None = None
+
+
+@dataclass(frozen=True)
+class SourceObjectPage:
+    objects: Sequence[SourceObjectDescriptor]
+    next_cursor: str | None
+    next_reinspection_cursor: str | None = None
+    forward_pages_since_reinspection: int | None = None
+    reinspection_page: bool = False
+
+
+class SourceObjectLister(Protocol):
+    def list_source_objects(
+        self,
+        service_id: str,
+        domain: str,
+        *,
+        page_size: int,
+        cursor: str | None,
+        reinspection_cursor: str | None = None,
+        reinspect: bool = False,
+        forward_pages_since_reinspection: int = 0,
+    ) -> SourceObjectPage: ...
+
+
+class S3SourceObjectLister:
+    """Paginated S3-compatible source listing for the high-scale worker plane."""
+
+    _PREFIXES = {"request": "raw/request/", "rum_vitals": "raw/rum/", "rum_errors": "raw/rum/"}
+
+    def __init__(self, client: Any, *, bucket: str, prefix: str = "") -> None:
+        if not bucket:
+            raise ValueError("bucket is required")
+        self._client = client
+        self._bucket = bucket
+        self._prefix = prefix.strip("/")
+
+    def list_source_objects(
+        self,
+        service_id: str,
+        domain: str,
+        *,
+        page_size: int,
+        cursor: str | None,
+        reinspection_cursor: str | None = None,
+        reinspect: bool = False,
+        forward_pages_since_reinspection: int = 0,
+    ) -> SourceObjectPage:
+        del service_id
+        if page_size <= 0 or page_size > MAX_SOURCE_PAGE_SIZE:
+            raise ValueError(f"page_size must be between 1 and {MAX_SOURCE_PAGE_SIZE}")
+        domain_prefix = self._PREFIXES.get(domain)
+        if domain_prefix is None:
+            raise ValueError(f"unsupported source domain: {domain}")
+        resolved_prefix = self._key(domain_prefix)
+        if reinspect and domain not in RUM_SOURCE_DOMAINS:
+            raise ValueError("only RUM source domains support reinspection")
+        if forward_pages_since_reinspection < 0:
+            raise ValueError("forward_pages_since_reinspection cannot be negative")
+        listing_cursor = (reinspection_cursor or INITIAL_SOURCE_CURSOR) if reinspect else cursor
+        paginator = self._client.get_paginator("list_objects_v2")
+        request: dict[str, Any] = {
+            "Bucket": self._bucket,
+            "Prefix": resolved_prefix,
+            "PaginationConfig": {"PageSize": page_size},
+        }
+        if listing_cursor and listing_cursor != INITIAL_SOURCE_CURSOR:
+            if listing_cursor.startswith(TERMINAL_SOURCE_CURSOR_PREFIX):
+                start_after = listing_cursor.removeprefix(TERMINAL_SOURCE_CURSOR_PREFIX)
+                if start_after.startswith(resolved_prefix):
+                    request["StartAfter"] = start_after
+            else:
+                request["PaginationConfig"]["StartingToken"] = listing_cursor
+        page = next(iter(paginator.paginate(**request)))
+        objects = tuple(
+            SourceObjectDescriptor(
+                object_key=item["Key"],
+                checksum=_source_checksum(item),
+                size_bytes=int(item.get("Size", 0)),
+                version=item.get("VersionId") or item.get("ETag"),
+            )
+            for item in page.get("Contents", [])
+            if isinstance(item.get("Key"), str)
+        )
+        next_cursor = page.get("NextToken")
+        if domain not in RUM_SOURCE_DOMAINS:
+            return SourceObjectPage(objects, next_cursor)
+        if reinspect:
+            has_more = bool(page.get("NextContinuationToken"))
+            next_reinspection_cursor = (
+                f"{TERMINAL_SOURCE_CURSOR_PREFIX}{objects[-1].object_key}"
+                if has_more and objects
+                else INITIAL_SOURCE_CURSOR
+            )
+            return SourceObjectPage(
+                objects,
+                cursor or INITIAL_SOURCE_CURSOR,
+                next_reinspection_cursor=next_reinspection_cursor,
+                forward_pages_since_reinspection=0,
+                reinspection_page=True,
+            )
+        return SourceObjectPage(
+            objects,
+            next_cursor,
+            next_reinspection_cursor=reinspection_cursor or INITIAL_SOURCE_CURSOR,
+            forward_pages_since_reinspection=forward_pages_since_reinspection + 1,
+        )
+
+    def _key(self, key: str) -> str:
+        normalized = key.lstrip("/")
+        return f"{self._prefix}/{normalized}" if self._prefix else normalized
+
+
+class S3SourceObjectReader:
+    """Reads immutable source objects from an S3-compatible bucket."""
+
+    def __init__(self, client: Any, *, bucket: str) -> None:
+        if not bucket:
+            raise ValueError("bucket is required")
+        self._client = client
+        self._bucket = bucket
+
+    def read_source_object(self, service_id: str, domain: str, object_key: str) -> bytes:
+        del service_id, domain
+        try:
+            response = self._client.get_object(Bucket=self._bucket, Key=object_key)
+        except Exception as exc:
+            error_code = _client_error_code(exc)
+            if error_code in {"NoSuchKey", "404"}:
+                raise SourceObjectMissingError(f"source object is missing from storage: {object_key}") from exc
+            raise
+        return response["Body"].read()
+
+
+def _client_error_code(exc: Exception) -> str | None:
+    """Extract the S3/boto3 error code without importing botocore directly."""
+    response = getattr(exc, "response", None)
+    if not isinstance(response, dict):
+        return None
+    error = response.get("Error")
+    if not isinstance(error, dict):
+        return None
+    code = error.get("Code")
+    return code if isinstance(code, str) else None
+
+
+def _source_checksum(item: dict[str, object]) -> str:
+    checksum = item.get("ChecksumSHA256") or item.get("ChecksumSHA1")
+    if isinstance(checksum, str) and checksum:
+        return checksum if ":" in checksum else f"checksum:{checksum}"
+    etag = item.get("ETag")
+    if isinstance(etag, str) and etag:
+        return f"etag:{etag.strip(chr(34))}"
+    raise ValueError("source object listing item has no checksum or ETag")
+
+
+class SourceObjectReader(Protocol):
+    def read_source_object(self, service_id: str, domain: str, object_key: str) -> bytes: ...
+
+
+_self_mod = sys.modules[__name__]
+sys.modules["backend.high_scale.source_discovery"] = _self_mod
+
+
+class SourceControlPlane(Protocol):
+    def owner(self, service_id: str) -> Any: ...
+
+    def source_cursor_for(self, service_id: str, domain: str) -> str: ...
+
+    def source_reinspection_state_for(self, service_id: str, domain: str) -> tuple[str, int]: ...
+
+    def advance_reinspection_state(
+        self,
+        service_id: str,
+        domain: str,
+        reinspection_cursor: str,
+        forward_pages_since_reinspection: int,
+        *,
+        expected_owner: str,
+        expected_owner_epoch: int,
+    ) -> None: ...
+
+    def discover_source(
+        self,
+        service_id: str,
+        domain: str,
+        object_key: str,
+        checksum: str,
+        *,
+        size_bytes: int,
+        version: str | None,
+        expected_owner: str,
+        expected_owner_epoch: int,
+    ) -> Any: ...
+
+    def claim_source(
+        self,
+        service_id: str,
+        object_key: str,
+        worker_id: str,
+        *,
+        expected_owner: str,
+        expected_owner_epoch: int,
+        lease_seconds: float,
+        now: datetime | None = None,
+    ) -> Any: ...
+
+
+@dataclass(frozen=True)
+class PageRun:
+    cursor: str | None
+    next_cursor: str | None
+    discovered: int
+    processed: int
+    duplicates: int
+    failed: int
+    missing: int = 0
+
+
+def _owner_fields(owner: Any) -> tuple[str, int, str | None]:
+    return owner.current_owner, int(owner.owner_epoch), getattr(owner, "source_cursor", None)
+
+
+class HighScaleWorkerCoordinator:
+    """Runs bounded discovery and processing under an owner-epoch fence."""
+
+    def __init__(
+        self,
+        *,
+        lister: SourceObjectLister,
+        reader: SourceObjectReader,
+        controller: HighScaleIngestController,
+        ownership: Any,
+        ledger: Any,
+        worker_id: str,
+        control_plane: SourceControlPlane | None = None,
+        page_size: int = 100,
+        lease_seconds: float = 300.0,
+        object_concurrency: int = 1,
+    ) -> None:
+        if not worker_id:
+            raise ValueError("worker identity is required")
+        if page_size <= 0 or page_size > MAX_SOURCE_PAGE_SIZE:
+            raise ValueError(f"page_size must be between 1 and {MAX_SOURCE_PAGE_SIZE}")
+        if lease_seconds <= 0:
+            raise ValueError("lease_seconds must be positive")
+        if object_concurrency <= 0:
+            raise ValueError("object_concurrency must be positive")
+        self._lister = lister
+        self._reader = reader
+        self._controller = controller
+        self._ownership = ownership
+        self._ledger = ledger
+        self._worker_id = worker_id
+        self._control = control_plane
+        self._page_size = page_size
+        self._lease_seconds = lease_seconds
+        self._object_concurrency = object_concurrency
+
+    def run_page(
+        self, *, service_id: str, domain: str, cursor: str | None = None, now: datetime | None = None
+    ) -> PageRun:
+        owner = self._owner(service_id)
+        current_owner, epoch, persisted_cursor = _owner_fields(owner)
+        self._require_high_scale(current_owner, service_id)
+        if cursor is None:
+            cursor_reader = self._control if self._control is not None else self._ownership
+            if hasattr(cursor_reader, "source_cursor_for"):
+                persisted_cursor = cursor_reader.source_cursor_for(service_id, domain)
+        listing_cursor = persisted_cursor if cursor is None else cursor
+        reinspection_cursor = INITIAL_SOURCE_CURSOR
+        forward_pages_since_reinspection = 0
+        has_reinspection_state = False
+        should_reinspect = False
+        if self._control is not None and domain in RUM_SOURCE_DOMAINS:
+            reinspection_cursor, forward_pages_since_reinspection = self._control.source_reinspection_state_for(
+                service_id, domain
+            )
+            has_reinspection_state = True
+            should_reinspect = forward_pages_since_reinspection >= RUM_REINSPECTION_INTERVAL
+        listing_options: dict[str, Any] = {}
+        if has_reinspection_state:
+            listing_options = {
+                "reinspection_cursor": reinspection_cursor,
+                "reinspect": should_reinspect,
+                "forward_pages_since_reinspection": forward_pages_since_reinspection,
+            }
+        page = self._lister.list_source_objects(
+            service_id, domain, page_size=self._page_size, cursor=listing_cursor, **listing_options
+        )
+        objects = tuple(page.objects)
+        if len(objects) > self._page_size:
+            raise ValueError("source object listing exceeded page_size")
+
+        expired_sources = self._expired_claim_descriptors(service_id, domain)
+        discovered_by_key: dict[str, Any] = {
+            source.object_key: self._discover(service_id, domain, source, current_owner, epoch) for source in objects
+        }
+
+        next_cursor = page.next_cursor
+        if next_cursor is None:
+            if objects:
+                next_cursor = f"{TERMINAL_SOURCE_CURSOR_PREFIX}{objects[-1].object_key}"
+            elif listing_cursor and listing_cursor.startswith(TERMINAL_SOURCE_CURSOR_PREFIX):
+                next_cursor = listing_cursor
+
+        processed = 0
+        duplicates = 0
+        failed = 0
+        missing = 0
+
+        active_sources: list[SourceObjectDescriptor] = list(expired_sources)
+        active_keys = {s.object_key for s in active_sources}
+        for s in objects:
+            if s.object_key in active_keys:
+                continue
+            rec = discovered_by_key.get(s.object_key)
+            rec_status = getattr(rec, "status", None)
+            if isinstance(rec_status, str):
+                is_terminal = rec_status in _TERMINAL_SOURCE_STATES
+            else:
+                is_terminal = self._already_terminal(service_id, s.object_key)
+            if is_terminal:
+                duplicates += 1
+            else:
+                active_sources.append(s)
+                active_keys.add(s.object_key)
+
+        if active_sources:
+            unclaimable_keys: set[str] = set()
+            if self._control is not None and (
+                getattr(type(self._control), "claim_sources_batch", None) is not None
+                or "claim_sources_batch" in vars(self._control)
+                or "claim_sources_batch" in getattr(self._control, "_mock_children", {})
+            ):
+                keys = tuple(s.object_key for s in active_sources)
+                claim_batch_fn = getattr(self._control, "claim_sources_batch")
+                claims = claim_batch_fn(
+                    service_id,
+                    keys,
+                    self._worker_id,
+                    expected_owner=current_owner,
+                    expected_owner_epoch=epoch,
+                    lease_seconds=self._lease_seconds,
+                    now=now,
+                )
+                claimed_keys = {c.object_key for c in claims}
+            elif self._control is not None:
+                claimed_keys = set()
+                for s in active_sources:
+                    try:
+                        c = self._control.claim_source(
+                            service_id,
+                            s.object_key,
+                            self._worker_id,
+                            expected_owner=current_owner,
+                            expected_owner_epoch=epoch,
+                            lease_seconds=self._lease_seconds,
+                            now=now,
+                        )
+                        if c.claimed:
+                            claimed_keys.add(s.object_key)
+                    except ValueError:
+                        if not self._already_terminal(service_id, s.object_key):
+                            failed += 1
+                            unclaimable_keys.add(s.object_key)
+            else:
+                claimed_keys = set()
+                for s in active_sources:
+                    c = self._ledger.claim(service_id, s.object_key, self._worker_id)
+                    if c.claimed:
+                        claimed_keys.add(s.object_key)
+
+            to_read: list[SourceObjectDescriptor] = []
+            for s in active_sources:
+                if s.object_key in claimed_keys:
+                    to_read.append(s)
+                elif s.object_key not in unclaimable_keys:
+                    duplicates += 1
+
+            if to_read:
+
+                def read_one(
+                    src: SourceObjectDescriptor,
+                ) -> tuple[SourceObjectDescriptor, bytes | None, str | None, bool]:
+                    try:
+                        data = self._reader.read_source_object(service_id, domain, src.object_key)
+                        return (src, data, None, False)
+                    except SourceObjectMissingError as exc:
+                        return (src, None, str(exc), True)
+                    except Exception as exc:
+                        return (src, None, str(exc), False)
+
+                workers = min(self._object_concurrency, len(to_read))
+                if workers <= 1:
+                    read_results = [read_one(s) for s in to_read]
+                else:
+                    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="high-scale-batch-reader") as pool:
+                        read_results = list(pool.map(read_one, to_read))
+
+                valid_payloads: list[tuple[SourceObjectDescriptor, bytes]] = []
+                for src, data, err, is_missing in read_results:
+                    if is_missing:
+                        self._mark_missing(
+                            service_id,
+                            object_key=src.object_key,
+                            expected_owner=current_owner,
+                            expected_epoch=epoch,
+                            error=err or "missing",
+                            now=now,
+                        )
+                        missing += 1
+                    elif err is not None:
+                        logger.exception(
+                            "high-scale source read failed",
+                            extra={
+                                "service_id": service_id,
+                                "domain": domain,
+                                "object_key": src.object_key,
+                                "error": err,
+                            },
+                        )
+                        failed += 1
+                    elif data is not None:
+                        valid_payloads.append((src, data))
+
+                if valid_payloads:
+                    try:
+                        batch_next_cursor = None if failed > 0 or page.reinspection_page else next_cursor
+                        batch_res = self._controller.ingest_batch(
+                            service_id=service_id,
+                            domain=domain,
+                            sources_payloads=valid_payloads,
+                            next_cursor=batch_next_cursor,
+                            now=now,
+                        )
+                        processed += batch_res.sources_count
+                    except Exception as exc:
+                        logger.exception(
+                            "high-scale batch ingest failed",
+                            extra={"service_id": service_id, "domain": domain, "count": len(valid_payloads)},
+                        )
+                        if self._control is None and hasattr(self._ledger, "mark_failed"):
+                            for src, _ in valid_payloads:
+                                cur = self._ledger.source(service_id, src.object_key)
+                                if cur is not None:
+                                    self._ledger.mark_failed(service_id, src.object_key, cur.lease_generation, str(exc))
+                        failed += len(valid_payloads)
+
+        if failed == 0:
+            if page.reinspection_page and has_reinspection_state and self._control is not None:
+                self._control.advance_reinspection_state(
+                    service_id,
+                    domain,
+                    page.next_reinspection_cursor or INITIAL_SOURCE_CURSOR,
+                    page.forward_pages_since_reinspection or 0,
+                    expected_owner=current_owner,
+                    expected_owner_epoch=epoch,
+                )
+            else:
+                self._advance_cursor(
+                    service_id,
+                    domain,
+                    next_cursor,
+                    current_owner,
+                    epoch,
+                    reinspection_cursor=page.next_reinspection_cursor if has_reinspection_state else None,
+                    forward_pages_since_reinspection=(
+                        page.forward_pages_since_reinspection if has_reinspection_state else None
+                    ),
+                )
+        return PageRun(listing_cursor, next_cursor, len(objects), processed, duplicates, failed, missing)
+
+    def _expired_claim_descriptors(self, service_id: str, domain: str) -> list[SourceObjectDescriptor]:
+        source_store = self._control if self._control is not None else self._ledger
+        expired_claims = getattr(source_store, "expired_claims", None)
+        if expired_claims is None:
+            return []
+        return [
+            SourceObjectDescriptor(
+                object_key=source.object_key,
+                checksum=source.checksum,
+                size_bytes=source.size_bytes,
+                version=source.version,
+            )
+            for source in expired_claims(service_id, domain, limit=self._page_size)
+        ]
+
+    def _mark_missing(
+        self,
+        service_id: str,
+        *,
+        object_key: str,
+        expected_owner: str,
+        expected_epoch: int,
+        error: str,
+        now: datetime | None,
+    ) -> None:
+        if self._control is not None and hasattr(self._control, "mark_source_missing"):
+            self._control.mark_source_missing(
+                service_id,
+                object_key,
+                expected_owner=expected_owner,
+                expected_owner_epoch=expected_epoch,
+                error=error,
+                now=now,
+            )
+        elif hasattr(self._ledger, "mark_source_missing"):
+            self._ledger.mark_source_missing(service_id, object_key, error=error)
+
+    def _owner(self, service_id: str) -> Any:
+        return self._control.owner(service_id) if self._control is not None else self._ownership.get(service_id)
+
+    def _discover(
+        self, service_id: str, domain: str, source: SourceObjectDescriptor, expected_owner: str, epoch: int
+    ) -> Any:
+        if self._control is not None:
+            return self._control.discover_source(
+                service_id,
+                domain,
+                source.object_key,
+                source.checksum,
+                size_bytes=source.size_bytes,
+                version=source.version,
+                expected_owner=expected_owner,
+                expected_owner_epoch=epoch,
+            )
+        return self._ledger.discover(
+            service_id, domain, source.object_key, source.checksum, size_bytes=source.size_bytes, version=source.version
+        )
+
+    def _advance_cursor(
+        self,
+        service_id: str,
+        domain: str,
+        cursor: str | None,
+        owner: str,
+        epoch: int,
+        *,
+        reinspection_cursor: str | None = None,
+        forward_pages_since_reinspection: int | None = None,
+    ) -> None:
+        if cursor is None:
+            return
+        if self._control is not None and hasattr(self._control, "advance_source_cursor"):
+            state_kwargs: dict[str, Any] = {}
+            if reinspection_cursor is not None and forward_pages_since_reinspection is not None:
+                state_kwargs = {
+                    "reinspection_cursor": reinspection_cursor,
+                    "forward_pages_since_reinspection": forward_pages_since_reinspection,
+                }
+            self._control.advance_source_cursor(
+                service_id, cursor, expected_owner=owner, expected_owner_epoch=epoch, domain=domain, **state_kwargs
+            )
+        elif hasattr(self._ownership, "advance_cursor"):
+            self._ownership.advance_cursor(
+                service_id, cursor, expected_owner=owner, expected_epoch=epoch, domain=domain
+            )
+
+    def _already_terminal(self, service_id: str, object_key: str) -> bool:
+        source = None
+        if self._control is not None and hasattr(self._control, "source"):
+            try:
+                source = self._control.source(service_id, object_key)
+            except KeyError:
+                source = None
+        elif hasattr(self._ledger, "source"):
+            source = self._ledger.source(service_id, object_key)
+        elif hasattr(self._ledger, "get_source"):
+            source = self._ledger.get_source(service_id, object_key)
+        return getattr(source, "status", None) in _TERMINAL_SOURCE_STATES
+
+    @staticmethod
+    def _require_high_scale(owner: str, service_id: str) -> None:
+        if owner != "high_scale":
+            raise RuntimeError(f"high-scale worker is not the owner for {service_id}")
+
+
+_TERMINAL_SOURCE_STATES = frozenset({"appended", "archived", "acknowledged", "source_deleted", "source_missing"})
+
+_self_mod = sys.modules[__name__]
+sys.modules["backend.high_scale.source_discovery"] = _self_mod
+_hs_pkg = sys.modules.get("backend.high_scale")
+if _hs_pkg is not None:
+    setattr(_hs_pkg, "source_discovery", _self_mod)
 from backend.high_scale.postgres_control import PostgresControlPlane  # noqa: E402
 
 
@@ -1885,14 +2378,7 @@ class WorkerPageResult:
 
 
 class FairPageSelector:
-    """Chooses which (service, domain) pages run each tick with weighted fairness.
-
-    Without a capacity every page runs every tick, in the original service and
-    domain order, so behavior matches a plain nested loop. With a capacity,
-    undispatched pages stay queued and run on a later tick; each service's head
-    page is served first, so every service keeps minimum progress while heavier
-    ``weights`` let a dominant service borrow idle capacity.
-    """
+    """Chooses which (service, domain) pages run each tick with weighted fairness."""
 
     def __init__(
         self,
@@ -2031,8 +2517,7 @@ class HighScaleWorkerLoop:
                 page = coordinators[service_id].run_page(service_id=service_id, domain=domain)
             except Exception as exc:
                 _worker_logger.exception(
-                    "high-scale worker page failed",
-                    extra={"service_id": service_id, "domain": domain},
+                    "high-scale worker page failed", extra={"service_id": service_id, "domain": domain}
                 )
                 results.append(WorkerPageResult(service_id, domain, None, exc))
             else:
@@ -2045,9 +2530,6 @@ class HighScaleWorkerLoop:
         return tuple((service_id, sweeper) for service_id, sweeper in self._deletion_sweepers if sweeper is not None)
 
     def _run_deletion_sweeps(self) -> None:
-        # Each deletion re-verifies the archive in FOS (~1s), so a full sweep
-        # takes minutes; running it inline stalled ingest pages and drove
-        # request lag into minutes. Sweep in the background, never overlapping.
         targets = self._deletion_targets()
         if not targets:
             return
@@ -2161,9 +2643,7 @@ def build_worker_from_environment() -> HighScaleWorkerLoop:
     control.create_schema()
     for service_id in service_ids:
         control.initialize_owner(
-            service_id,
-            owner="high_scale",
-            source_cursor=os.getenv("HIGH_SCALE_INITIAL_CURSOR", "__initial__"),
+            service_id, owner="high_scale", source_cursor=os.getenv("HIGH_SCALE_INITIAL_CURSOR", "__initial__")
         )
     clickhouse_settings = app_config.load_clickhouse_config()
     if clickhouse_settings is None:
@@ -2203,11 +2683,7 @@ def build_worker_from_environment() -> HighScaleWorkerLoop:
         )
         coordinators.append(
             HighScaleWorkerCoordinator(
-                lister=S3SourceObjectLister(
-                    fos_client,
-                    bucket=bucket,
-                    prefix=str(source.get("prefix") or ""),
-                ),
+                lister=S3SourceObjectLister(fos_client, bucket=bucket, prefix=str(source.get("prefix") or "")),
                 reader=S3SourceObjectReader(fos_client, bucket=bucket),
                 controller=controller,
                 ownership=control,
@@ -2220,17 +2696,9 @@ def build_worker_from_environment() -> HighScaleWorkerLoop:
             )
         )
         if deletion_enabled:
-            # Deliberately a distinct, unprefixed store from the archive one
-            # above: raw source objects live at their natural keys, archive
-            # artifacts live under archive_prefix. Same bucket, same client.
             raw_store = S3ObjectStore(fos_client, bucket=bucket)
             deletion_ledger = PostgresDeletionLedger(control)
-            deletion_controller = DeletionController(
-                raw_store,
-                archive,
-                deletion_ledger,
-                ownership=deletion_ledger,
-            )
+            deletion_controller = DeletionController(raw_store, archive, deletion_ledger, ownership=deletion_ledger)
             sweepers.append(HighScaleDeletionSweeper(control=control, controller=deletion_controller))
         else:
             sweepers.append(None)
@@ -2332,13 +2800,7 @@ def evaluate_recovery_capacity(measurement: RecoveryCapacityMeasurement) -> Reco
 
 @dataclass(frozen=True)
 class RecoveryReport:
-    """Recovery availability is reported per capability, not as one flag.
-
-    A replacement instance can serve recent triage and raw queries while
-    warm history is still replaying — collapsing that into a single
-    "recovered" bit would hide real, actionable partial progress from an
-    operator watching the rebuild.
-    """
+    """Recovery availability is reported per capability, not as one flag."""
 
     ingest_accepted: bool
     triage_available: bool
@@ -2348,35 +2810,20 @@ class RecoveryReport:
     manifests_replayed: int
     rows_replayed: int
     errors: tuple[str, ...]
-    # Pass back into a resumed call (rebuild_id=report.rebuild_id) to retry
-    # this SAME attempt idempotently; omit to start a genuinely new one.
     rebuild_id: str
-    # Capacity gate (docs/runbooks/high-scale-capacity-and-recovery.md,
-    # "Recovery qualification"): populated only when the caller supplies a
-    # measured profile. A recovery CLAIM is valid only when the slowest stage
-    # sustains the required replay rate AND the rebuild completed; None means
-    # no measurement was supplied, not "feasible".
     capacity: RecoveryCapacityReport | None = None
     recovery_claim_valid: bool | None = None
 
 
 def _evaluate_capacity_gate(
-    measurement: RecoveryCapacityMeasurement | None,
-    *,
-    service_id: str,
-    domain: str,
-    rebuild_id: str,
+    measurement: RecoveryCapacityMeasurement | None, *, service_id: str, domain: str, rebuild_id: str
 ) -> RecoveryCapacityReport | None:
-    """Evaluate the measured profile before any replay work starts.
-
-    An invalid measurement raises ``ValueError`` here (operator error, nothing
-    replayed yet). An infeasible one never blocks recovery: restoring data
-    matters more than the claim, so it is logged and carried on the report.
-    """
+    """Evaluate the measured profile before any replay work starts."""
     if measurement is None:
         return None
     report = evaluate_recovery_capacity(measurement)
-    log = _recovery_logger.info if report.feasible else _recovery_logger.warning
+    rec_logger = structlog.get_logger(__name__)
+    log = rec_logger.info if report.feasible else rec_logger.warning
     log(
         "high_scale.recovery_capacity_gate",
         service_id=service_id,
@@ -2410,21 +2857,6 @@ def rebuild_serving_state_from_fos(
     observed = (now or datetime.now(UTC)).astimezone(UTC)
     recent_start = observed - recent_window
     warm_start = observed - warm_window
-    # Every batch id is scoped to a rebuild_id, never to replay's bare
-    # default. The manifest-visibility bookkeeping a replay relies on for
-    # idempotency lives in Postgres and can outlive an independent loss of
-    # the actual ClickHouse data (that is the whole scenario this function
-    # recovers from) — reusing replay's default batch id would let a stale
-    # "already visible" record from an EARLIER, unrelated replay attempt
-    # silently skip re-inserting rows that are no longer actually there
-    # (found in a live recovery drill; see test_recovery.py's
-    # test_recovery_reinserts_rows_whose_manifest_was_already_replayed_once).
-    #
-    # A caller resuming THIS SAME rebuild attempt (e.g. after a crash mid-
-    # rebuild) must pass the SAME rebuild_id back to stay idempotent and
-    # avoid duplicating already-inserted rows — omitting it always starts a
-    # fresh, un-deduplicated rebuild scope, appropriate only for a genuinely
-    # new recovery attempt.
     resolved_rebuild_id = rebuild_id or uuid4().hex
     capacity_report = _evaluate_capacity_gate(
         capacity, service_id=service_id, domain=domain, rebuild_id=resolved_rebuild_id
@@ -2462,12 +2894,7 @@ _ORIGIN_PROJECTION_TABLES = ("origin_minute_summary", "origin_minute_dimensions"
 
 
 def purge_origin_projections(client: _SqlClient, *, service_id: str, since: datetime) -> None:
-    """Delete one service's Origin projection rows from ``since`` onward, synchronously.
-
-    A rebuild publishes under new batch ids, so rebuilding over rows that already exist would
-    count every request twice. Purge first when the existing rows are being replaced (for
-    example after a projection column was added); the archive remains the source for the rebuild.
-    """
+    """Delete one service's Origin projection rows from ``since`` onward, synchronously."""
     for table in _ORIGIN_PROJECTION_TABLES:
         client.execute(
             f"ALTER TABLE `{table}` DELETE WHERE service_id={{service_id:String}} "
@@ -2480,11 +2907,7 @@ _RUM_FACT_TABLES = {"rum_vitals": "rum_vitals_facts", "rum_errors": "rum_error_f
 
 
 def purge_rum_facts(client: _SqlClient, *, domain: str, service_id: str, since: datetime) -> None:
-    """Delete one service's RUM fact rows of ``domain`` from ``since`` onward, synchronously.
-
-    Used to replace rows written before a fact column existed: a rebuild publishes under new batch
-    ids, so rebuilding over the old rows would count every beacon twice. The archive is the source.
-    """
+    """Delete one service's RUM fact rows of ``domain`` from ``since`` onward, synchronously."""
     table = _RUM_FACT_TABLES.get(domain)
     if table is None:
         raise ValueError("domain must be rum_vitals or rum_errors")
@@ -2525,11 +2948,7 @@ def rebuild_rum_facts_from_fos(
 
 
 def purge_cmcd_projections(client: _SqlClient, *, service_id: str, since: datetime) -> None:
-    """Delete one service's CMCD projection rows from ``since`` onward, synchronously.
-
-    Same contract as :func:`purge_origin_projections`: a rebuild publishes under new batch ids, so
-    replacing existing rows (for example to populate the geography columns) must purge them first.
-    """
+    """Delete one service's CMCD projection rows from ``since`` onward, synchronously."""
     client.execute(
         "ALTER TABLE `cmcd_projection_facts` DELETE WHERE service_id={service_id:String} "
         "AND event_timestamp >= {since:DateTime64(3)} SETTINGS mutations_sync=2",
@@ -2646,12 +3065,7 @@ def rebuild_performance_projections_from_fos(
     rebuild_id: str | None = None,
     capacity: RecoveryCapacityMeasurement | None = None,
 ) -> RecoveryReport:
-    """Populate the Performance waterfall/scatter projections for already-ingested history.
-
-    Pass ``now`` as the moment the projection-writing worker was deployed: manifests
-    ingested after that already published these projections live, and replaying them
-    here would double-count the waterfall sums.
-    """
+    """Populate the Performance waterfall/scatter projections for already-ingested history."""
     return _rebuild_request_projections_from_fos(
         catalog,
         archive,
@@ -2667,11 +3081,7 @@ def rebuild_performance_projections_from_fos(
 
 
 def replay_security_projections(
-    manifest: ArchiveManifest,
-    archive: ArchivePublication,
-    publication: ClickHousePublication,
-    *,
-    rebuild_id: str,
+    manifest: ArchiveManifest, archive: ArchivePublication, publication: ClickHousePublication, *, rebuild_id: str
 ) -> ProjectionReplayResult:
     serving_rows = _load_manifest_request_events(manifest, archive, projection_label="Security")
     _enrich_high_scale_ngwaf_bots(serving_rows)
@@ -2742,38 +3152,918 @@ def _replay_all(
     return rows, replayed, errors
 
 
+# ── Folded from backend/high_scale/rum.py ────────────────────────────────────
+
+import contextvars  # noqa: E402
+
+_iso = format_iso_utc_or_empty
+from backend.high_scale.publication import (  # noqa: E402
+    _DOMAIN_COLUMNS,
+    _DOMAIN_TABLES,
+    PartialInsert,
+    _rows_for_domain,
+)
+from backend.high_scale.replay import _read_manifest_rows  # noqa: E402
+
+_FILTER_COLUMNS = frozenset({"browser", "os", "device", "country", "pathname", "city", "region", "pop", "tls"})
+_BEACON_IDENTITY = """
+        coalesce(nullIf(toString(request_event_id), ''),
+                 concat(client_id, '_', toString(toInt64(round(toUnixTimestamp64Milli(event_timestamp) / 1000.0)))))
+    """
+
+from pydantic import TypeAdapter, ValidationError  # noqa: E402
+
+_RUM_FILTERS_ADAPTER: TypeAdapter[dict[str, Any]] = TypeAdapter(dict[str, Any])
+
+
+def parse_rum_filters(raw: str | None) -> dict[str, Any]:
+    """Decode the ``filters`` query parameter (a JSON object of ``{column: {mode, values}}``)."""
+    if not raw:
+        return {}
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError("filters must be valid JSON") from exc
+    try:
+        return _RUM_FILTERS_ADAPTER.validate_python(payload)
+    except ValidationError as exc:
+        raise ValueError("filters must be a JSON object") from exc
+
+
+def _filter_clauses(filters: Mapping[str, Any] | None) -> tuple[list[str], dict[str, Any]]:
+    clauses: list[str] = []
+    params: dict[str, Any] = {}
+    unsupported: list[str] = []
+    for i, (raw_key, spec) in enumerate((filters or {}).items()):
+        values = [
+            value
+            for value in (filter_spec_attr(spec, "values") or [])
+            if value is not None and not (isinstance(value, str) and value.strip() == "")
+        ]
+        if not values:
+            continue
+        column = normalize_filter_key(raw_key)
+        if column not in _FILTER_COLUMNS:
+            unsupported.append(raw_key)
+            continue
+        names: list[str] = []
+        for j, value in enumerate(values):
+            name = f"flt_{i}_{j}"
+            params[name] = str(value)
+            names.append(f"{{{name}:String}}")
+        operator = "NOT IN" if str(filter_spec_attr(spec, "mode") or "include") == "exclude" else "IN"
+        clauses.append(f"{column} {operator} ({', '.join(names)})")
+    if unsupported:
+        raise ValueError(f"high-scale RUM cannot filter on: {', '.join(sorted(unsupported))}")
+    return clauses, params
+
+
+def rum_beacon_health(service: HighScaleService, *, source: dict[str, Any] | None = None) -> dict[str, Any]:
+    if isinstance(source, dict) and (
+        (isinstance(source.get("rum"), dict) and source["rum"].get("enabled") is False)
+        or source.get("rum_enabled") is False
+    ):
+        return {
+            "enabled": False,
+            "has_data": False,
+            "beacons": 0,
+            "beacon_fire_rate": 0,
+            "recent_beacons": 0,
+            "last_beacon_time": None,
+            "setup_complete": False,
+            "message": "RUM is not enabled for this service.",
+        }
+
+    try:
+        res = service.client.execute(
+            f"SELECT sum(event_count) as c, max(bucket_start) as last_ts FROM rum_vitals_aggregates WHERE service_id = {{service_id:String}} AND dimension = 'metric_name' AND {visible_publication_fence_sql('rum_vitals_aggregate')}",
+            {"service_id": service.service_id},
+        )
+        row = res[0] if res else {}
+        beacons = int(row.get("c") or 0)
+        last_ts = row.get("last_ts") if beacons > 0 else None
+    except Exception:
+        res = service.client.execute(
+            f"SELECT count() as c, max(event_timestamp) as last_ts FROM rum_vitals_facts WHERE service_id = {{service_id:String}} AND {visible_publication_fence_sql('rum_vitals')}",
+            {"service_id": service.service_id},
+        )
+        row = res[0] if res else {}
+        beacons = int(row.get("c") or 0)
+        last_ts = row.get("last_ts") if beacons > 0 else None
+    has_data = beacons > 0
+    last_beacon_time = (_iso(last_ts) or None) if last_ts is not None else None
+    return {
+        "enabled": True,
+        "has_data": has_data,
+        "beacons": beacons,
+        "beacon_fire_rate": beacons,
+        "recent_beacons": beacons,
+        "last_beacon_time": last_beacon_time,
+        "setup_complete": has_data,
+        "message": (
+            f"RUM is working! Received {beacons} beacon(s) in the last 15 minutes."
+            if has_data
+            else "No beacons received in the last 15 minutes. Ensure the RUM script is installed and your site is receiving traffic."
+        ),
+    }
+
+
+def rum_analytics(
+    service: HighScaleService, start_time: str | None, end_time: str | None, filters: Mapping[str, Any] | None = None
+) -> dict[str, Any]:
+    """Serve the standard RUM wire contract from visible, time-filtered facts."""
+    start, end = parse_time_window(start_time, end_time, utc=True, now=datetime.now(UTC))
+    if end < start:
+        raise ValueError("RUM end time precedes start time")
+    filter_clauses, filter_params = _filter_clauses(filters)
+    params = {"service_id": service.service_id, "start": start, "end": end, **filter_params}
+
+    def scope(domain: str) -> str:
+        return " AND ".join(
+            [
+                *visible_fact_clauses(domain),
+                "event_timestamp >= {start:DateTime64(3, 'UTC')}",
+                "event_timestamp <= {end:DateTime64(3, 'UTC')}",
+                *filter_clauses,
+            ]
+        )
+
+    where_vitals = scope("rum_vitals")
+    where_errors = scope("rum_errors")
+    identity = _BEACON_IDENTITY
+    events = f"""
+        WITH events AS (
+            SELECT event_timestamp, {identity} AS beacon_id, 'vitals' AS src,
+                   metric_name, metric_value, pathname
+            FROM rum_vitals_facts WHERE {where_vitals}
+            UNION ALL
+            SELECT event_timestamp, {identity} AS beacon_id, 'errors' AS src,
+                   '' AS metric_name, CAST(NULL AS Nullable(Float64)) AS metric_value, pathname
+            FROM rum_error_facts WHERE {where_errors}
+        )
+    """
+    counts = service.client.execute(
+        events
+        + """
+        /* rum_analytics_counts */
+        SELECT uniqExact(beacon_id) AS beacons,
+               uniqExactIf(beacon_id, src = 'vitals' AND metric_name NOT LIKE 'event_%') AS pageviews,
+               uniqExactIf(beacon_id, src = 'vitals' AND metric_name LIKE 'event_%') AS interactions,
+               uniqExactIf(beacon_id, src = 'errors') AS errors
+        FROM events
+        """,
+        params,
+    )[0]
+    no_data = False
+    if not counts["beacons"]:
+        any_vitals = " AND ".join(visible_fact_clauses("rum_vitals"))
+        any_errors = " AND ".join(visible_fact_clauses("rum_errors"))
+        any_data = service.client.execute(
+            f"""
+            /* rum_analytics_any_data */
+            SELECT count() AS has_data FROM (
+                (SELECT event_id FROM rum_vitals_facts WHERE {any_vitals} LIMIT 1)
+                UNION ALL
+                (SELECT event_id FROM rum_error_facts WHERE {any_errors} LIMIT 1)
+            )
+            """,
+            {"service_id": service.service_id},
+        )
+        no_data = not any_data[0]["has_data"]
+
+    hourly = end - start <= timedelta(hours=48)
+    bucket_sql = "toStartOfHour(event_timestamp, 'UTC')" if hourly else "toStartOfDay(event_timestamp, 'UTC')"
+
+    vitals_sql = f"""
+        /* rum_analytics_vitals */
+        SELECT lower(metric_name) AS metric_name,
+               quantileExactInclusiveOrNull(0.75)(metric_value) as p75,
+               count() as total,
+               countIf(metric_rating = 'good') as good,
+               countIf(metric_rating IN ('needs-improvement', 'needs_improvement')) as ni,
+               countIf(metric_rating = 'poor') as poor
+        FROM rum_vitals_facts
+        WHERE {where_vitals}
+        GROUP BY metric_name
+        """
+    environments_sql = f"""
+        /* rum_analytics_environments */
+        SELECT if(browser = '', 'Unknown', browser) AS env_browser,
+               if(os = '', 'Unknown', os) AS env_os,
+               if(device = '', 'Unknown', device) AS env_device,
+               uniqExact({identity}) AS beacons,
+               grouping(browser) AS g_browser, grouping(os) AS g_os, grouping(device) AS g_device
+        FROM rum_vitals_facts
+        WHERE {where_vitals}
+        GROUP BY GROUPING SETS ((browser), (os), (device))
+        """
+    trends_sql = (
+        events
+        + f"""
+        /* rum_analytics_trends */
+        SELECT {bucket_sql} AS bucket,
+               quantileExactInclusiveOrNullIf(0.75)(metric_value, lower(metric_name) = 'lcp') AS lcp,
+               quantileExactInclusiveOrNullIf(0.75)(metric_value, lower(metric_name) = 'cls') AS cls,
+               uniqExactIf(beacon_id, src = 'vitals') AS views,
+               uniqExactIf(beacon_id, src = 'vitals' AND metric_name NOT LIKE 'event_%') AS pageviews,
+               uniqExactIf(beacon_id, src = 'vitals' AND metric_name LIKE 'event_%') AS interactions,
+               uniqExactIf(beacon_id, src = 'errors') AS errors
+        FROM events GROUP BY bucket ORDER BY bucket
+        """
+    )
+    pages_sql = (
+        events
+        + """
+        /* rum_analytics_pages */
+        SELECT pathname AS path,
+               uniqExactIf(beacon_id, src = 'vitals') AS views,
+               avgOrNullIf(metric_value, metric_name IN
+                   ('duration', 'pageLoadTime', 'load_time', 'pageLoad', 'LCP', 'lcp', 'ttfb', 'TTFB', 'fcp', 'FCP')) AS avg_load,
+               quantileExactInclusiveOrNullIf(0.75)(metric_value, lower(metric_name) = 'lcp') AS lcp,
+               quantileExactInclusiveOrNullIf(0.75)(metric_value, lower(metric_name) = 'cls') AS cls,
+               uniqExactIf(beacon_id, src = 'errors') * 100.0
+                   / nullIf(views + uniqExactIf(beacon_id, src = 'errors'), 0) AS error_rate
+        FROM events GROUP BY pathname HAVING views > 0
+        ORDER BY error_rate DESC, avg_load DESC, path LIMIT 5
+        """
+    )
+    exceptions_sql = f"""
+        /* rum_analytics_exceptions */
+        SELECT error_message, error_file, error_line, error_col, count() AS count
+        FROM rum_error_facts WHERE {where_errors}
+        GROUP BY error_message, error_file, error_line, error_col
+        ORDER BY count DESC, error_message, error_file, error_line, error_col LIMIT 3
+        """
+
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        f_vitals = pool.submit(contextvars.copy_context().run, service.client.execute, vitals_sql, params)
+        f_env = pool.submit(contextvars.copy_context().run, service.client.execute, environments_sql, params)
+        f_trends = pool.submit(contextvars.copy_context().run, service.client.execute, trends_sql, params)
+        f_pages = pool.submit(contextvars.copy_context().run, service.client.execute, pages_sql, params)
+        f_errors = pool.submit(contextvars.copy_context().run, service.client.execute, exceptions_sql, params)
+        rows = f_vitals.result()
+        environment_rows = f_env.result()
+        trend_rows = f_trends.result()
+        page_rows = f_pages.result()
+        error_rows = f_errors.result()
+
+    browsers: dict[str, int] = {}
+    operating_systems: dict[str, int] = {}
+    devices: dict[str, int] = {}
+    for row in environment_rows:
+        if not row["g_browser"]:
+            browsers[row["env_browser"]] = int(row["beacons"])
+        elif not row["g_os"]:
+            operating_systems[row["env_os"]] = int(row["beacons"])
+        elif not row["g_device"]:
+            devices[row["env_device"]] = int(row["beacons"])
+
+    vitals: dict[str, Any] = {
+        "lcp": {"p75": None, "distribution": {"good": 0, "needs_improvement": 0, "poor": 0}},
+        "cls": {"p75": None, "distribution": {"good": 0, "needs_improvement": 0, "poor": 0}},
+        "inp": {"p75": None, "distribution": {"good": 0, "needs_improvement": 0, "poor": 0}},
+        "fid": {"p75": None, "fcp": None, "ttfb": None},
+    }
+
+    def seconds(value: float | None) -> float | None:
+        return round(value / 1000.0 if value > 20 else value, 2) if value is not None else None
+
+    for r in rows:
+        m = r["metric_name"].lower()
+        p75 = r["p75"]
+        if m in ("lcp", "cls", "inp"):
+            vitals[m]["p75"] = (
+                (seconds(p75) if m == "lcp" else (round(p75, 3) if m == "cls" else int(p75)))
+                if p75 is not None
+                else None
+            )
+            t = r["total"]
+            if t:
+                good = int(r["good"] * 100 / t)
+                poor = int(r["poor"] * 100 / t)
+                vitals[m]["distribution"] = {"good": good, "poor": poor, "needs_improvement": max(0, 100 - good - poor)}
+        elif m == "fid":
+            vitals["fid"]["p75"] = round(p75, 1) if p75 is not None else None
+        elif m in ("fcp", "ttfb"):
+            vitals["fid"][m] = seconds(p75)
+
+    trend_by_bucket = {}
+    for row in trend_rows:
+        ts = row["bucket"]
+        dt = ts if isinstance(ts, datetime) else range_value(ts)
+        dt = dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt.astimezone(UTC)
+        trend_by_bucket[dt] = row
+
+    trends: dict[str, list[Any]] = {
+        "timestamps": [],
+        "lcp": [],
+        "cls": [],
+        "error_rate": [],
+        "pageviews": [],
+        "interactions": [],
+        "errors": [],
+    }
+    curr = start.replace(minute=0, second=0, microsecond=0)
+    target = end.replace(minute=0, second=0, microsecond=0)
+    step = timedelta(hours=1) if hourly else timedelta(days=1)
+    if not hourly:
+        curr = curr.replace(hour=0)
+        target = target.replace(hour=0)
+    while not no_data and curr <= target:
+        bucket_row = trend_by_bucket.get(curr)
+        trends["timestamps"].append(curr.isoformat())
+        trends["lcp"].append(seconds(bucket_row["lcp"]) if bucket_row else None)
+        trends["cls"].append(round(bucket_row["cls"], 3) if bucket_row and bucket_row["cls"] is not None else None)
+        denominator = bucket_row["views"] + bucket_row["errors"] if bucket_row else 0
+        trends["error_rate"].append(
+            round(bucket_row["errors"] * 100.0 / denominator, 2) if bucket_row and denominator else None
+        )
+        for metric_key in ("pageviews", "interactions", "errors"):
+            trends[metric_key].append(int(bucket_row[metric_key]) if bucket_row else 0)
+        curr += step
+
+    worst_pages = [
+        {
+            "path": row["path"],
+            "views": row["views"],
+            "avg_load_time": seconds(row["avg_load"] or 0.0),
+            "lcp_p75": seconds(row["lcp"]),
+            "cls_p75": round(row["cls"], 3) if row["cls"] is not None else None,
+            "error_rate": round(row["error_rate"], 2) if row["error_rate"] is not None else 0.0,
+        }
+        for row in page_rows
+    ]
+    result = {
+        "is_mock": False,
+        "no_data": no_data,
+        "beacon_count": int(counts["beacons"]),
+        "pageview_count": int(counts["pageviews"]),
+        "interaction_count": int(counts["interactions"]),
+        "error_count": int(counts["errors"]),
+        "vitals": vitals,
+        "worst_pages": worst_pages,
+        "errors": [
+            {
+                "message": row["error_message"],
+                "file": row["error_file"] or "unknown.js",
+                "line": int(row.get("error_line") or 0),
+                "col": int(row.get("error_col") or 0),
+                "count": row["count"],
+            }
+            for row in error_rows
+        ],
+        "trends": trends,
+        "environments": {"browsers": browsers, "os": operating_systems, "devices": devices},
+    }
+    if no_data:
+        result["message"] = "Waiting for real-time RUM user events..."
+        for metric in ("lcp", "cls", "inp"):
+            vitals[metric]["distribution"] = None
+    return result
+
+
+def _ttfb_ms(value: Any) -> int | None:
+    """Beacons report TTFB in seconds or milliseconds; the live feed always shows whole milliseconds."""
+    if value is None:
+        return None
+    number = float(value)
+    return int(number * 1000) if number < 15 else int(number)
+
+
+def rum_live_events(
+    service: HighScaleService,
+    start_time: str | None,
+    end_time: str | None,
+    limit: int,
+    filters: Mapping[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    start_dt, end_dt = parse_time_window(start_time, end_time, now=datetime.now(UTC))
+    filter_clauses, filter_params = _filter_clauses(filters)
+    window = ["event_timestamp >= {start_time:DateTime64(3)}", "event_timestamp <= {end_time:DateTime64(3)}"]
+
+    def scope(domain: str) -> str:
+        return " AND ".join([*visible_fact_clauses(domain), *window, *filter_clauses])
+
+    query = f"""
+    /* rum_live_events */
+    SELECT * FROM (
+    SELECT * FROM (
+        SELECT
+            event_timestamp AS timestamp,
+            'pageview' AS type,
+            pathname,
+            metric_name,
+            metric_value,
+            metric_rating,
+            browser, os, device,
+            client_id AS cid,
+            toString(request_event_id) AS req_id,
+            '' AS error_message,
+            city, region, country, pop, tls, ttfb
+        FROM rum_vitals_facts
+        WHERE {scope("rum_vitals")}
+        ORDER BY event_timestamp DESC
+        LIMIT {{limit:UInt32}}
+    )
+
+    UNION ALL
+
+    SELECT * FROM (
+        SELECT
+            event_timestamp AS timestamp,
+            'error' AS type,
+            pathname,
+            '' AS metric_name,
+            CAST(NULL AS Nullable(Float64)) AS metric_value,
+            '' AS metric_rating,
+            browser, os, device,
+            client_id AS cid,
+            toString(request_event_id) AS req_id,
+            error_message,
+            city, region, country, pop, tls, ttfb
+        FROM rum_error_facts
+        WHERE {scope("rum_errors")}
+        ORDER BY event_timestamp DESC
+        LIMIT {{limit:UInt32}}
+    )
+    )
+    ORDER BY timestamp DESC
+    LIMIT {{limit:UInt32}}
+    """
+    res = service.client.execute(
+        query,
+        {"service_id": service.service_id, "start_time": start_dt, "end_time": end_dt, "limit": limit, **filter_params},
+    )
+
+    events: list[dict[str, Any]] = []
+    for d in res:
+        etype = d.get("type", "pageview")
+        mname = d.get("metric_name")
+        mrating = d.get("metric_rating")
+        mval = d.get("metric_value")
+        emsg = d.get("error_message")
+        path = d.get("pathname") or "/"
+        browser = d.get("browser") or "Unknown"
+        os_name = d.get("os") or "Unknown"
+        meta = {
+            "browser": {"name": browser},
+            "os": {"name": os_name},
+            "device": {"type": d.get("device") or "Unknown"},
+            "page": {"url": path},
+        }
+        context = {
+            "cid": d.get("cid"),
+            "req_id": d.get("req_id"),
+            "city": d.get("city") or "Unknown",
+            "region": d.get("region") or "Unknown",
+            "country": d.get("country") or "Unknown",
+            "pop": d.get("pop") or "Unknown",
+            "tls": d.get("tls") or "Unknown",
+            "ttfb": _ttfb_ms(d.get("ttfb")),
+        }
+        if etype == "error":
+            desc = emsg or "JS Error"
+            raw_log: dict[str, Any] = {
+                "meta": meta,
+                "measurements": [],
+                "exceptions": [{"type": "Error", "value": desc}],
+                **context,
+            }
+        else:
+            desc = "Page loaded successfully"
+            if mname:
+                desc = f"Metric {mname.upper()}: {float(mval)}" if mval is not None else f"Metric {mname.upper()}"
+                if mrating:
+                    desc += f" ({mrating.upper()})"
+            raw_log = {
+                "meta": meta,
+                "measurements": [
+                    {
+                        "type": "web-vitals",
+                        "values": {mname: mval} if mname else {},
+                        "context": {"rating": mrating or ""},
+                    }
+                ]
+                if mname
+                else [],
+                "exceptions": [],
+                **context,
+            }
+        events.append(
+            {
+                "time": _iso(d.get("timestamp")),
+                "type": etype,
+                "path": path,
+                "desc": desc,
+                "browser": browser,
+                "os": os_name,
+                "raw_log": raw_log,
+            }
+        )
+    return events
+
+
+# ── Bounded RUM Recovery Planning & Execution (folded from rum_recovery.py) ───
+
+_DOMAINS = ("rum_vitals", "rum_errors")
+_IGNORED_CONTENT = {"event_id", "transform_version", "ingest_timestamp", "batch_id", "publication_state"}
+_READ_LIMITS = {
+    "max_rows_to_read": "100000",
+    "read_overflow_mode": "throw",
+    "max_result_rows": "1001",
+    "result_overflow_mode": "throw",
+}
+
+
+class RumRecoveryBatchAdapter(ClickHouseBatchAdapter):
+    """Recovery-only GLOBAL batch verification without one unbounded scan."""
+
+    def _inventory(self, table: str) -> dict[str, int]:
+        rows = self._client.execute(
+            "SELECT partition_id,sum(rows) AS partition_rows FROM system.parts "
+            "WHERE database=currentDatabase() AND table={table:String} AND active "
+            "GROUP BY partition_id LIMIT 33",
+            {"table": table},
+            settings=_READ_LIMITS,
+        )
+        if len(rows) > 32:
+            raise ValueError("RUM repair global partition inventory exceeds bound")
+        result: dict[str, int] = {}
+        for row in rows:
+            key, weight = row["partition_id"], row["partition_rows"]
+            if (
+                not isinstance(key, str)
+                or not key
+                or key in result
+                or not isinstance(weight, int)
+                or isinstance(weight, bool)
+                or not 0 <= weight <= 90_000
+            ):
+                raise ValueError("RUM repair partition cannot be proved under read cap")
+            result[key] = weight
+        return result
+
+    def _count_rows(self, table: str, batch: HighScaleBatch, batch_uuid: str) -> int:
+        if batch.domain not in _DOMAINS or table != _DOMAIN_TABLES[batch.domain] or not 0 < len(batch.rows) <= 1000:
+            raise ValueError("RUM repair batch verification scope is invalid")
+        inventory = self._inventory(table)
+        groups: list[tuple[list[str], int]] = []
+        for key, weight in sorted(inventory.items(), key=lambda item: (-item[1], item[0])):
+            for index, (keys, total) in enumerate(groups):
+                if total + weight <= 90_000:
+                    keys.append(key)
+                    groups[index] = (keys, total + weight)
+                    break
+            else:
+                groups.append(([key], weight))
+        if len(groups) > 6:
+            raise ValueError("RUM repair global partition read groups exceed bound")
+        expected = [
+            dict(zip(_DOMAIN_COLUMNS[batch.domain], values, strict=True))
+            for values in _rows_for_domain(batch, batch_uuid)
+        ]
+        expected_by_id = {str(row["event_id"]): row for row in expected}
+        if len(expected_by_id) != len(expected):
+            raise ValueError("RUM repair batch candidate identities are ambiguous")
+        present: list[dict[str, Any]] = []
+        for keys, _ in groups:
+            placeholders = ",".join("{part" + str(index) + ":String}" for index in range(len(keys)))
+            rows = self._client.execute(
+                f"SELECT {','.join(_DOMAIN_COLUMNS[batch.domain])} FROM {table} "
+                "WHERE service_id={service_id:String} AND batch_id={batch_id:UUID} "
+                "AND _partition_id IN (" + placeholders + ") LIMIT 1001",
+                {
+                    "service_id": batch.service_id,
+                    "batch_id": batch_uuid,
+                    **{f"part{index}": key for index, key in enumerate(keys)},
+                },
+                settings=_READ_LIMITS,
+            )
+            present.extend(rows)
+            if len(present) > 1000:
+                raise ValueError("RUM repair global batch facts exceed row bound")
+        if set(self._inventory(table)) != set(inventory):
+            raise ValueError("RUM repair global partition inventory changed")
+        seen: set[str] = set()
+        for row in present:
+            identity = str(row["event_id"])
+            wanted = expected_by_id.get(identity)
+            if (
+                identity in seen
+                or wanted is None
+                or str(row["batch_id"]) != batch_uuid
+                or _content(row, batch.domain) != _content(wanted, batch.domain)
+                or row["transform_version"] != wanted["transform_version"]
+                or row["publication_state"] != "visible"
+            ):
+                raise ValueError("RUM repair existing batch facts are duplicate, conflicting or out of scope")
+            seen.add(identity)
+        if len(present) not in (0, len(expected)):
+            raise PartialInsert(len(present))
+        return len(present)
+
+    def inspect_batch(self, batch: HighScaleBatch) -> tuple[int, dict[str, Any] | None]:
+        """Read-only preflight: exact global physical proof plus full-key receipt."""
+        batch_uuid = _batch_uuid(batch)
+        count = self._count_rows(_DOMAIN_TABLES[batch.domain], batch, batch_uuid)
+        existing = super()._existing_publication(batch, batch_uuid)
+        if existing is not None:
+            self._validate_publication(existing, batch)
+            if existing["publication_state"] == "visible" and count != len(batch.rows):
+                raise PartialInsert(count)
+        return count, existing
+
+    def _existing_publication(self, batch: HighScaleBatch, batch_uuid: str) -> dict[str, Any] | None:
+        return self.inspect_batch(batch)[1]
+
+
+@dataclass(frozen=True)
+class RumRecoveryPlan:
+    plan_digest: str
+    candidate_counts: dict[str, int]
+    missing_counts: dict[str, int]
+    exact_identity_counts: dict[str, int]
+    equivalent_identity_counts: dict[str, int]
+    batches: tuple[HighScaleBatch, ...]
+    expected_facts: tuple[dict[str, Any], ...]
+    source_count: int
+    raw_line_count: int
+    quarantined_lines: int
+
+    def summary(self) -> dict[str, Any]:
+        """Allowlisted operational evidence: no service/source keys or beacons."""
+        return {
+            "plan_digest": self.plan_digest,
+            "candidate_counts": self.candidate_counts,
+            "missing_counts": self.missing_counts,
+            "exact_identity_counts": self.exact_identity_counts,
+            "equivalent_identity_counts": self.equivalent_identity_counts,
+            "batches": len(self.batches),
+            "sources": self.source_count,
+            "raw_lines": self.raw_line_count,
+            "quarantined_lines": self.quarantined_lines,
+        }
+
+
+def _canonical(value: Any) -> Any:
+    if isinstance(value, datetime):
+        return value.astimezone(UTC).isoformat(timespec="milliseconds")
+    return value
+
+
+def _content(row: Mapping[str, Any], domain: str) -> str:
+    values = {}
+    for name in _DOMAIN_COLUMNS[domain]:
+        if name in _IGNORED_CONTENT:
+            continue
+        value = row.get(name)
+        if name == "event_timestamp" and isinstance(value, str):
+            value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            value = value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+        if name in {"metric_value", "ttfb"} and isinstance(value, (int, float)) and not isinstance(value, bool):
+            value = float(value)
+        values[name] = _canonical(value)
+    return json.dumps(values, sort_keys=True, separators=(",", ":"))
+
+
+def plan_rum_recovery(
+    manifest: ArchiveManifest,
+    archive: ArchivePublication,
+    *,
+    owner_epoch: int,
+    read_facts: Callable[[str, tuple[str, ...]], Sequence[Mapping[str, Any]]],
+    now: datetime | None = None,
+    max_rows: int = 1000,
+) -> RumRecoveryPlan:
+    """Reconstruct each original source line once, preserving ordinals/version."""
+    if manifest.domain not in _DOMAINS or owner_epoch < 1 or not 0 < max_rows <= 1000:
+        raise ValueError("invalid bounded RUM repair scope")
+    sources = manifest.sources
+    if not sources or len(sources) > 100 or len({s.key for s in sources}) != len(sources):
+        raise ValueError("RUM repair requires unique bounded manifest sources")
+    rows = _read_manifest_rows(manifest, archive)
+    if len(rows) > max_rows:
+        raise ValueError("RUM repair archive exceeds row bound")
+    observed = (now or datetime.now(UTC)).astimezone(UTC)
+    candidates: dict[str, list[dict[str, Any]]] = {domain: [] for domain in _DOMAINS}
+    raw_lines = 0
+    quarantined: set[tuple[str, int]] = set()
+    covered_offsets: set[int] = set()
+    for source in sources:
+        end = source.row_start + source.row_count
+        if source.row_start < 0 or end > len(rows):
+            raise ValueError("RUM repair source slice is invalid")
+        offsets = set(range(source.row_start, end))
+        if covered_offsets & offsets:
+            raise ValueError("RUM repair source slices overlap")
+        covered_offsets.update(offsets)
+        lines: dict[int, str] = {}
+        version = source.version or source.checksum
+        for row in rows[source.row_start : end]:
+            if row.get("_record_kind", "event") != "event":
+                raise ValueError("RUM repair requires reviewed event-only source slices")
+            ordinal = row.get("line_ordinal")
+            raw = row.get("raw_json")
+            if (
+                row.get("service_id") != manifest.service_id
+                or row.get("source_object_key") != source.key
+                or row.get("source_object_version") != version
+                or row.get("transform_version") != manifest.artifact.transform_version
+                or not isinstance(ordinal, int)
+                or not 0 <= ordinal < 10000
+                or not isinstance(raw, str)
+                or "\n" in raw
+                or "\r" in raw
+            ):
+                raise ValueError("RUM repair source provenance is invalid")
+            if ordinal in lines and lines[ordinal] != raw:
+                raise ValueError("RUM repair source line is ambiguous")
+            lines[ordinal] = raw
+        raw_lines += len(lines)
+        if not lines:
+            continue
+        payload = "\n".join(lines.get(i, "") for i in range(max(lines) + 1)).encode()
+        descriptor = ArchiveSourceObject(
+            manifest.service_id, manifest.domain, source.key, source.checksum, source.size_bytes, source.version
+        )
+        for domain in _DOMAINS:
+            decoded = decode_source_object(
+                descriptor, payload, domain=domain, transform_version=manifest.artifact.transform_version
+            )
+            quarantined.update((source.key, item.line_ordinal) for item in decoded.dead_letters)
+            for event in decoded.events:
+                if row_matches_serving_domain(domain, event):
+                    candidates[domain].append(event)
+    if covered_offsets != set(range(len(rows))):
+        raise ValueError("RUM repair source slices do not cover archive")
+    if quarantined:
+        raise ValueError("RUM repair found quarantined source lines; review exact archive separately")
+    if sum(map(len, candidates.values())) > max_rows:
+        raise ValueError("RUM repair expansion exceeds row bound")
+
+    expected: list[dict[str, Any]] = []
+    batches: list[HighScaleBatch] = []
+    missing_counts: dict[str, int] = {}
+    exact_counts = {domain: 0 for domain in _DOMAINS}
+    equivalent_counts = {domain: 0 for domain in _DOMAINS}
+    for domain in _DOMAINS:
+        events = candidates[domain]
+        batch = HighScaleBatch("plan", manifest.service_id, domain, str(owner_epoch), tuple(events))
+        mapped = _rows_for_domain(batch, "00000000-0000-0000-0000-000000000000")
+        facts = [dict(zip(_DOMAIN_COLUMNS[domain], row, strict=True), _repair_domain=domain) for row in mapped]
+        ids = [fact["event_id"] for fact in facts]
+        if len(ids) != len(set(ids)):
+            raise ValueError("RUM repair candidate identities are ambiguous")
+        for fact in facts:
+            timestamp = fact["event_timestamp"]
+            if timestamp < observed - timedelta(days=30) or timestamp > observed:
+                raise ValueError("RUM repair event is outside retained fact window")
+        expected.extend(facts)
+        present = [
+            row
+            for row in read_facts(domain, tuple(s.key for s in sources))
+            if row.get("_repair_domain", domain) == domain
+        ]
+        if len(present) > max_rows:
+            raise ValueError("RUM repair existing facts exceed row bound")
+        present_ids = [str(row.get("event_id")) for row in present]
+        if len(present_ids) != len(set(present_ids)):
+            raise ValueError("RUM repair existing identity is ambiguous or unpublished")
+        missing: list[dict[str, Any]] = []
+        for event, fact in zip(events, facts, strict=True):
+            matches = [
+                row
+                for row in present
+                if str(row.get("event_id")) == fact["event_id"] or _content(row, domain) == _content(fact, domain)
+            ]
+            if not matches:
+                missing.append(event)
+            elif (
+                len(matches) != 1
+                or not matches[0].get("repair_visible")
+                or _content(matches[0], domain) != _content(fact, domain)
+            ):
+                raise ValueError("RUM repair existing identity is ambiguous or unpublished")
+            elif str(matches[0]["event_id"]) == fact["event_id"]:
+                exact_counts[domain] += 1
+            else:
+                equivalent_counts[domain] += 1
+        missing_counts[domain] = len(missing)
+        if missing:
+            token = hashlib.sha256("|".join(sorted(event["event_id"] for event in missing)).encode()).hexdigest()
+            batches.append(
+                HighScaleBatch(
+                    f"rum-repair-v1:{manifest.manifest_id}:{domain}:{token}",
+                    manifest.service_id,
+                    domain,
+                    str(owner_epoch),
+                    tuple(missing),
+                )
+            )
+    approval = {
+        "version": "rum-repair-v1",
+        "manifest": manifest.manifest_id,
+        "artifact": manifest.artifact.checksum,
+        "owner_epoch": owner_epoch,
+        "facts": [
+            {
+                **fact,
+                "event_timestamp": _canonical(fact["event_timestamp"]),
+                "ingest_timestamp": _canonical(fact["ingest_timestamp"]),
+            }
+            for fact in expected
+        ],
+    }
+    digest = hashlib.sha256(json.dumps(approval, sort_keys=True, default=str).encode()).hexdigest()
+    return RumRecoveryPlan(
+        digest,
+        {domain: len(candidates[domain]) for domain in _DOMAINS},
+        missing_counts,
+        exact_counts,
+        equivalent_counts,
+        tuple(batches),
+        tuple(expected),
+        len(sources),
+        raw_lines,
+        len(quarantined),
+    )
+
+
+def execute_rum_recovery(
+    make_plan: Callable[[], RumRecoveryPlan],
+    publication: ClickHousePublication,
+    *,
+    apply: bool = False,
+    approve_digest: str | None = None,
+) -> dict[str, Any]:
+    """Caller holds the terminal-source/owner fence for this entire operation."""
+    plan = make_plan()
+    report = {"applied": False, **plan.summary()}
+    if not apply:
+        return report
+    if approve_digest != plan.plan_digest:
+        raise ValueError("RUM repair requires the exact reviewed plan digest")
+    for batch in plan.batches:
+        publication.publish(batch)
+    verified = make_plan()
+    if verified.plan_digest != plan.plan_digest or any(verified.missing_counts.values()):
+        raise ValueError("RUM repair post-apply identity verification failed")
+    return {**report, "applied": True, "remaining_counts": verified.missing_counts}
+
+
+_self_mod = sys.modules[__name__]
+for _alias_name in ("rum_recovery", "rum_ingest"):
+    sys.modules[f"backend.high_scale.{_alias_name}"] = _self_mod
+_hs_pkg = sys.modules.get("backend.high_scale")
+if _hs_pkg is not None:
+    for _alias_name in ("rum_recovery", "rum_ingest"):
+        setattr(_hs_pkg, _alias_name, _self_mod)
+_backend_pkg = sys.modules.get("backend")
+if _backend_pkg is not None and hasattr(_backend_pkg, "_MODULE_ALIASES"):
+    for _alias_name in ("rum_recovery", "rum_ingest"):
+        _backend_pkg._MODULE_ALIASES[f"backend.high_scale.{_alias_name}"] = __name__
+
 _self_mod = sys.modules[__name__]
 worker = _self_mod
 recovery = _self_mod
+orchestration = _self_mod
+rum = _self_mod
 _hs_pkg = sys.modules.get("backend.high_scale")
-if _hs_pkg is not None:
-    setattr(_hs_pkg, "assets", _self_mod)
-    setattr(_hs_pkg, "worker", _self_mod)
-    setattr(_hs_pkg, "recovery", _self_mod)
+for _alias in (
+    "_common",
+    "_filters",
+    "aggregate_batch",
+    "aggregate_batch_adapter",
+    "assets",
+    "orchestration",
+    "recovery",
+    "registry_bootstrap",
+    "rum",
+    "rum_ingest",
+    "rum_recovery",
+    "source_discovery",
+    "worker",
+):
+    sys.modules[f"backend.high_scale.{_alias}"] = _self_mod
+    if _hs_pkg is not None:
+        setattr(_hs_pkg, _alias, _self_mod)
 _backend_pkg = sys.modules.get("backend")
 if _backend_pkg is not None and hasattr(_backend_pkg, "_MODULE_ALIASES"):
     _backend_pkg._MODULE_ALIASES.update(
         {
+            "backend.high_scale._common": "backend.high_scale.ingest_controller",
+            "backend.high_scale._filters": "backend.high_scale.ingest_controller",
+            "backend.high_scale.aggregate_batch": "backend.high_scale.ingest_controller",
+            "backend.high_scale.aggregate_batch_adapter": "backend.high_scale.ingest_controller",
             "backend.high_scale.assets": "backend.high_scale.ingest_controller",
-            "backend.high_scale.worker": "backend.high_scale.ingest_controller",
+            "backend.high_scale.orchestration": "backend.high_scale.ingest_controller",
             "backend.high_scale.recovery": "backend.high_scale.ingest_controller",
-            "backend.high_scale.console_access": "backend.high_scale.postgres_control",
-            "backend.high_scale.deletion": "backend.high_scale.postgres_control",
-            "backend.high_scale.admin_plane": "backend.high_scale.postgres_control",
-            "backend.high_scale.decoder": "backend.high_scale.query_service",
-            "backend.high_scale.query": "backend.high_scale.query_service",
-            "backend.high_scale.clickhouse": "backend.high_scale.query_service",
-            "backend.high_scale.insights": "backend.high_scale.query_service",
-            "backend.high_scale.sessions": "backend.high_scale.query_service",
-            "backend.high_scale.aggregate_query": "backend.high_scale.query_service",
-            "backend.high_scale.archive_publication": "backend.high_scale.archive",
-            "backend.high_scale.archive_models": "backend.high_scale.archive",
-            "backend.high_scale.archive_writer": "backend.high_scale.archive",
-            "backend.high_scale.models": "backend.high_scale.archive",
-            "backend.high_scale.disk_sampler": "backend.high_scale.archive",
-            "backend.high_scale.retention_watermark": "backend.high_scale.archive",
-            "backend.high_scale.rum_recovery": "backend.high_scale.rum",
-            "backend.high_scale.rum_ingest": "backend.high_scale.rum",
+            "backend.high_scale.registry_bootstrap": "backend.high_scale.ingest_controller",
+            "backend.high_scale.rum": "backend.high_scale.ingest_controller",
+            "backend.high_scale.rum_ingest": "backend.high_scale.ingest_controller",
+            "backend.high_scale.rum_recovery": "backend.high_scale.ingest_controller",
+            "backend.high_scale.source_discovery": "backend.high_scale.ingest_controller",
+            "backend.high_scale.worker": "backend.high_scale.ingest_controller",
         }
     )
 if __name__ == "__main__":

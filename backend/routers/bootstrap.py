@@ -18,16 +18,14 @@ from backend.models._base import DEFAULT_ERROR_RESPONSES
 from backend.models.admin_actions import PageTelemetryResponse
 from backend.models.common import (
     BootstrapResponse,
-    LogFieldsCatalogResponse,
-    OkResponse,
-    UxEventPayload,
-    WebVitalsPayload,
-)
-from backend.models.services import (
     ClearSqliteResponse,
     DebugStateResponse,
+    LogFieldsCatalogResponse,
+    OkResponse,
     RecentSqliteResponse,
     SchemaResponse,
+    UxEventPayload,
+    WebVitalsPayload,
 )
 from backend.repositories import assets as service_stats_repo
 from backend.repositories import rum as rum_repo
@@ -617,7 +615,7 @@ def _bootstrap_sync(
         if analyst_session is not None:
             return
         from backend.core import metadata as _meta_mod
-        from backend.core.query_registry import query_registry as _query_registry
+        from backend.core.request_telemetry import query_registry as _query_registry
 
         out: dict = {}
         try:
@@ -896,7 +894,7 @@ def log_fields_catalog(
     return _compute_log_fields_catalog(service_id)
 
 
-from backend.models.insights import InsightsAvailabilityResponse
+from backend.models.analytics import InsightsAvailabilityResponse
 
 
 @router.get("/insight-availability", response_model=InsightsAvailabilityResponse)
@@ -931,7 +929,7 @@ def insight_availability(
         # lookup so first-load isn't a 503 — subsequent calls hit
         # the cron-populated cache.
         actual_cols = {col["name"] for col in get_schema(con, source, stats=False)}
-    from backend.core.field_registry import INSIGHT_DEFINITIONS
+    from backend.core.log_fields import INSIGHT_DEFINITIONS
 
     result = []
     for d in INSIGHT_DEFINITIONS:

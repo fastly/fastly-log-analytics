@@ -1,23 +1,16 @@
 """CMCD streaming row models keep every producer's wire bytes (repository + high-scale)."""
 
-# ruff: noqa: I001
 from __future__ import annotations
 
 import json
+import time
 import typing
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
-from pydantic import AliasChoices
-
-import backend  # noqa: F401 - register module aliases
-from backend.core.duckdb import _clear_schema_cache
-from backend.core.fastly.client import NgwafWorkspacesResponse, StatsRecord, StatsResponse
-from backend.core.log_fields import LOG_FIELD_CATALOG
-from backend.high_scale import network as hs_network, performance as hs_performance
 from backend.high_scale.archive_models import ServingWatermark
 from backend.high_scale.cmcd import cmcd_aggregates as hs_cmcd_aggregates
 from backend.high_scale.insights import insights_endpoint as hs_insights_endpoint
@@ -25,7 +18,6 @@ from backend.high_scale.origin import aggregates as hs_aggregates
 from backend.high_scale.registry_bootstrap import HighScaleService
 from backend.high_scale.security import security_aggregates as hs_security_aggregates
 from backend.high_scale.sessions import sessions_detail as hs_sessions_detail
-from backend.models.common import BaseResponse, DebugCall, DebugQuery
 from backend.models.dashboard import AggregatesResponse, SessionDetailRequest, SessionDetailResponse
 from backend.models.insights import InsightCard, InsightsResponse
 from backend.models.network import NetworkHealthResponse, NetworkQualityResponse
@@ -52,9 +44,22 @@ from backend.models.performance import (
 )
 from backend.models.security import SecurityAggregatesRequest, SecurityAggregatesResponse, SecurityTopBotsResponse
 from backend.provision.cmcd_fields import _CMCD_CUSTOM_FIELDS
+from backend.repositories.cmcd import _response_cache, get_cmcd_aggregates
+from backend.repositories.performance import get_performance_aggregates
+from pydantic import AliasChoices
+from tests._helpers.duckdb_fixtures import generate_mock_logs, insert_mock_logs
+from tests._helpers.wire import assert_rows_wire_identical, assert_sections_wire_identical, wire
+
+import backend  # noqa: F401 - register module aliases
+from backend import config as svcconfig
+from backend.core.duckdb import _clear_schema_cache
+from backend.core.fastly.client import NgwafWorkspacesResponse, StatsRecord, StatsResponse
+from backend.core.log_fields import LOG_FIELD_CATALOG
+from backend.high_scale import network as hs_network
+from backend.high_scale import performance as hs_performance
+from backend.models.common import BaseResponse, DebugCall, DebugQuery
 from backend.repositories import origin as origin_mod
 from backend.repositories._base import _safe_table
-from backend.repositories.cmcd import _response_cache, get_cmcd_aggregates
 from backend.repositories.dashboard import get_aggregates as dash_aggs
 from backend.repositories.insights import _insights_cache, get_insights, registry
 from backend.repositories.network import get_health, get_quality
@@ -68,12 +73,9 @@ from backend.repositories.origin import (
     get_summary,
     get_timeseries,
 )
-from backend.repositories.performance import get_performance_aggregates
 from backend.repositories.security import get_security_aggregates, get_security_proxies, get_top_bots
 from backend.repositories.sessions import get_session_detail
 from backend.repositories.value import get_summary as get_value_summary
-from tests._helpers.duckdb_fixtures import generate_mock_logs, insert_mock_logs
-from tests._helpers.wire import assert_rows_wire_identical, assert_sections_wire_identical, wire
 from tests.repositories.test_insights_golden import (
     _MOCK_POP_MAP,
     _create_impossible_distance_table,
@@ -1365,3 +1367,1279 @@ class TestWireSecurity:
                 "active_clients",
             ),
         )
+
+
+# ── Merged from tests/test_config.py ──
+
+
+@pytest.fixture(autouse=True)
+def _isolate_config_dirs(tmp_path, monkeypatch):
+    """Point CONFIGS_DIR + DATA_DIR at tmp_path for each test.
+
+    All of these are module-level Path constants that production code
+    reads on every call, so monkeypatching them per-test gives total
+    isolation without touching the real configs/ tree.
+    """
+    monkeypatch.setattr(svcconfig, "CONFIGS_DIR", tmp_path / "configs")
+    monkeypatch.setattr(svcconfig, "DATA_DIR", tmp_path / "data")
+    monkeypatch.setattr(svcconfig, "SERVICES_DATA_DIR", tmp_path / "data" / "services")
+    monkeypatch.setattr(svcconfig, "NGWAF_DATA_DIR", tmp_path / "data" / "ngwaf")
+    monkeypatch.setattr(svcconfig, "CACHE_DATA_DIR", tmp_path / "data" / "cache")
+    monkeypatch.setattr(svcconfig, "SYSTEM_DATA_DIR", tmp_path / "data" / "system")
+    monkeypatch.setattr(svcconfig, "_USAGE_LOGGING_CONFIG_PATH", tmp_path / "data" / "system" / "usage_logging.json")
+    # Clear the in-memory caches between tests
+    svcconfig._name_cache.clear()
+    svcconfig._config_cache.clear()
+    svcconfig._invalidate_service_ids_cache()
+    yield
+    svcconfig._name_cache.clear()
+    svcconfig._config_cache.clear()
+    svcconfig._invalidate_service_ids_cache()
+
+
+def _cfg(**overrides) -> dict:
+    base = {
+        "service_id": "svc-1",
+        "name": "My Service",
+        "access_level": "read_write",
+        "fos_endpoint": "us-east-1.object.fastlystorage.app",
+        "fos_access_key_id": "key",
+        "fos_secret_access_key": "secret",
+        "fos_bucket": "bkt",
+        "fos_prefix": "",
+        "fos_region": "us-east-1",
+        "fastly_api_key": "api-key",
+        "cdn_service_id": "cdn-svc-id",
+    }
+    base.update(overrides)
+    return base
+
+
+# ── Path helpers ─────────────────────────────────────────────────────────────
+
+
+def test_config_path_uses_service_id_as_filename(tmp_path):
+    p = svcconfig.config_path("svc-abc")
+    assert p.name == "svc-abc.json"
+    assert p.parent.name == "configs"
+
+
+def test_duckdb_path_lives_in_services_data_dir():
+    p = svcconfig.duckdb_path("svc-abc")
+    assert p.endswith("services/svc-abc.duckdb")
+
+
+def test_ngwaf_db_path_is_shared_across_services():
+    """One ngwaf cache file for the whole install — pinned because a
+    refactor that per-svc'd this would multiply the cron's API hits."""
+    assert svcconfig.ngwaf_db_path().endswith("data/ngwaf_bot_cache.db")
+
+
+def test_ngwaf_sqlite_cache_override_ignores_the_default_path(monkeypatch, tmp_path):
+    """The default ``ngwaf_bot_cache.db`` is a stale pre-Postgres leftover, never a data source;
+    only an explicitly different path (test fixtures) selects SQLite."""
+    assert svcconfig.ngwaf_sqlite_cache_override() is None
+    monkeypatch.setattr(svcconfig, "ngwaf_db_path", lambda: str(tmp_path / "fixture.db"))
+    assert svcconfig.ngwaf_sqlite_cache_override() == str(tmp_path / "fixture.db")
+
+
+# ── load_config / save_config / delete ───────────────────────────────────────
+
+
+def test_load_config_returns_none_for_missing_service():
+    assert svcconfig.load_config("nonexistent") is None
+
+
+def test_save_then_load_roundtrip():
+    cfg = _cfg(service_id="svc-rt")
+    svcconfig.save_config("svc-rt", cfg)
+    loaded = svcconfig.load_config("svc-rt")
+    assert loaded == cfg
+
+
+def test_save_config_writes_atomically(tmp_path):
+    """The implementation writes to ``.tmp`` then ``rename`` — pinned so
+    a refactor that skips the tmp file doesn't reintroduce torn-write
+    risk on power loss."""
+    svcconfig.save_config("svc-x", _cfg(service_id="svc-x"))
+    # After save, the tmp file must not exist (it was renamed)
+    assert not (svcconfig.CONFIGS_DIR / "svc-x.tmp").exists()
+    assert (svcconfig.CONFIGS_DIR / "svc-x.json").exists()
+
+
+def test_save_config_creates_configs_dir_if_missing(tmp_path):
+    """Bootstrap install: configs/ doesn't exist yet. ``save_config``
+    must create it (via ``_ensure_dirs``)."""
+    # conftest's ``isolate_metadata_db`` pre-creates the sandbox tree to
+    # work around _ensure_dirs not using parents=True. This test pins
+    # the bootstrap contract — wipe the dir so we're back to the
+    # first-run shape.
+    import shutil
+
+    shutil.rmtree(svcconfig.CONFIGS_DIR, ignore_errors=True)
+    assert not svcconfig.CONFIGS_DIR.exists()
+    svcconfig.save_config("svc-1", _cfg())
+    assert svcconfig.CONFIGS_DIR.exists()
+
+
+def test_load_config_returns_fresh_dict_each_call():
+    """Cache returns reparsed dict on every call so callers that mutate
+    the result (e.g. update_status appending to status) don't poison
+    subsequent loads. Pinned because returning the cached instance
+    directly would silently break update_status under concurrent calls."""
+    svcconfig.save_config("svc-mut", _cfg(service_id="svc-mut"))
+    a = svcconfig.load_config("svc-mut")
+    b = svcconfig.load_config("svc-mut")
+    assert a is not b
+    a["mutated"] = True  # mutate the first dict
+    c = svcconfig.load_config("svc-mut")
+    assert "mutated" not in c
+
+
+def test_load_config_picks_up_save_via_mtime():
+    """save_config writes via atomic os.replace which bumps st_mtime_ns.
+    The cache uses mtime as its revalidation key, so the next load_config
+    sees the new content without an explicit cache bust. Pinned because
+    a downgrade to st_mtime (float) could lose precision on rapid writes
+    and serve stale configs."""
+    svcconfig.save_config("svc-rev", _cfg(service_id="svc-rev", name="before"))
+    first = svcconfig.load_config("svc-rev")
+    assert first is not None and first["name"] == "before"
+
+    # Ensure clock advances; mtime_ns gives nanosecond granularity so a
+    # short sleep is usually overkill, but a few ms is bulletproof on any
+    # filesystem.
+    time.sleep(0.005)
+    svcconfig.save_config("svc-rev", _cfg(service_id="svc-rev", name="after"))
+    second = svcconfig.load_config("svc-rev")
+    assert second is not None and second["name"] == "after"
+
+
+def test_save_config_invalidates_load_config_cache_for_mtime_collision():
+    """Two rapid save_config calls can produce identical st_mtime_ns on
+    Linux ext4/tmpfs (same-microsecond writes). Without an explicit cache
+    invalidation in save_config, the second load_config returns the
+    pre-write cached bytes — which silently clobbered update_status's
+    merge in CI (KeyError: 'last_sync_at'). Simulate the collision by
+    pinning stat().st_mtime_ns to a constant across writes."""
+    import os as _os
+    from unittest.mock import patch
+
+    svcconfig.save_config("svc-coll", _cfg(service_id="svc-coll", name="first"))
+    svcconfig.load_config("svc-coll")  # prime the cache
+
+    # Freeze mtime_ns: every stat() returns the same value, so the cache's
+    # revalidation key cannot distinguish between writes.
+    real_stat = _os.stat
+    frozen_ns = svcconfig.config_path("svc-coll").stat().st_mtime_ns
+
+    class _FrozenStat:
+        def __init__(self, real):
+            self._real = real
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+        @property
+        def st_mtime_ns(self):
+            return frozen_ns
+
+    def _patched_stat(path, *args, **kwargs):
+        return _FrozenStat(real_stat(path, *args, **kwargs))
+
+    with patch("os.stat", side_effect=_patched_stat):
+        svcconfig.save_config("svc-coll", _cfg(service_id="svc-coll", name="second"))
+        loaded = svcconfig.load_config("svc-coll")
+
+    assert loaded is not None and loaded["name"] == "second", (
+        "save_config must invalidate the load_config cache; otherwise a "
+        "same-nanosecond write collision serves stale bytes"
+    )
+
+
+def test_load_config_avoids_reread_when_mtime_unchanged(monkeypatch):
+    """The cache hit path must NOT re-read the file. Pinned by counting
+    open() calls — if a refactor drops the mtime check, every hot caller
+    (sync-status, cron tick) pays a syscall per load."""
+    svcconfig.save_config("svc-hit", _cfg(service_id="svc-hit"))
+    # Prime the cache
+    svcconfig.load_config("svc-hit")
+
+    open_calls = {"n": 0}
+    real_open = svcconfig.open if hasattr(svcconfig, "open") else open
+
+    def counting_open(*args, **kwargs):
+        open_calls["n"] += 1
+        return real_open(*args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", counting_open)
+    for _ in range(5):
+        svcconfig.load_config("svc-hit")
+    assert open_calls["n"] == 0, "cache hit must skip open()"
+
+
+# ── update_status / get_status ───────────────────────────────────────────────
+
+
+def test_update_status_merges_into_existing_status():
+    """Subsequent calls update fields without clobbering unrelated ones —
+    pinned because the cron writes ``last_sync_at`` and the UI writes
+    ``manual_pause`` independently."""
+    svcconfig.save_config("svc-st", _cfg(service_id="svc-st"))
+    svcconfig.update_status("svc-st", {"last_sync_at": "2026-01-01"})
+    svcconfig.update_status("svc-st", {"manual_pause": True})
+
+    out = svcconfig.get_status("svc-st")
+    assert out["last_sync_at"] == "2026-01-01"
+    assert out["manual_pause"] is True
+    assert "updated_at" in out  # auto-stamped
+
+
+def test_update_status_silently_drops_unknown_service():
+    """No config → no-op (consistent with ``delete_config``)."""
+    svcconfig.update_status("ghost", {"x": 1})  # must not raise
+    assert svcconfig.get_status("ghost") == {}
+
+
+def test_get_status_returns_empty_dict_for_unknown_service():
+    """Pinned: callers iterate over the dict; returning None here
+    would crash every status-render code path."""
+    assert svcconfig.get_status("ghost") == {}
+
+
+def test_update_status_stamps_updated_at_timestamp():
+    svcconfig.save_config("svc-ts", _cfg(service_id="svc-ts"))
+    before = time.time()
+    svcconfig.update_status("svc-ts", {"foo": "bar"})
+    after = time.time()
+
+    status = svcconfig.get_status("svc-ts")
+    assert before <= status["updated_at"] <= after
+
+
+# ── list_service_ids / list_configs ──────────────────────────────────────────
+
+
+def test_list_service_ids_returns_sorted_ids():
+    """The frontend's service switcher renders in this order — sorted
+    is stable across reloads, picking it up from the filename pins the
+    sort key explicitly (no surprises from dict insertion order)."""
+    svcconfig.save_config("zeta", _cfg(service_id="zeta"))
+    svcconfig.save_config("alpha", _cfg(service_id="alpha"))
+    svcconfig.save_config("mu", _cfg(service_id="mu"))
+
+    assert svcconfig.list_service_ids() == ["alpha", "mu", "zeta"]
+
+
+def test_list_service_ids_returns_empty_on_missing_dir():
+    """Fresh install: no configs dir yet → ``[]``."""
+    assert svcconfig.list_service_ids() == []
+
+
+def test_list_service_ids_caches_glob_until_dir_changes(monkeypatch):
+    """The hot per-request path (telemetry_middleware →
+    get_active_service_id → list_service_ids) must not re-glob the configs
+    dir on every call — a synchronous glob on the event loop stalls under
+    shared-host disk contention. Revalidation is by directory mtime, so a
+    save/delete is still reflected immediately."""
+    from pathlib import Path
+
+    svcconfig.save_config("alpha", _cfg(service_id="alpha"))
+
+    real_glob = Path.glob
+    calls = {"n": 0}
+
+    def counting_glob(self, pattern, *a, **k):
+        if pattern == "*.json" and self == svcconfig.CONFIGS_DIR:
+            calls["n"] += 1
+        return real_glob(self, pattern, *a, **k)
+
+    monkeypatch.setattr(Path, "glob", counting_glob)
+
+    assert svcconfig.list_service_ids() == ["alpha"]
+    first = calls["n"]
+    assert first >= 1
+    # Repeated calls with an unchanged dir must NOT re-glob.
+    for _ in range(5):
+        svcconfig.list_service_ids()
+    assert calls["n"] == first
+
+    # A newly saved config appears immediately (dir mtime bump + invalidation).
+    svcconfig.save_config("beta", _cfg(service_id="beta"))
+    assert svcconfig.list_service_ids() == ["alpha", "beta"]
+
+    # A deleted config disappears immediately.
+    svcconfig.config_path("alpha").unlink()
+    svcconfig._invalidate_service_ids_cache()
+    assert svcconfig.list_service_ids() == ["beta"]
+
+
+def test_list_configs_skips_unparseable_files():
+    """If one config file is corrupt JSON the others must still load.
+    Pinned because a single bad write should not brick the bootstrap
+    response for every other service."""
+    svcconfig.save_config("good", _cfg(service_id="good"))
+    # Drop a malformed file
+    svcconfig._ensure_dirs()
+    (svcconfig.CONFIGS_DIR / "bad.json").write_text("{not json")
+
+    # Loading raises; ``list_configs`` should NOT include None for the bad one.
+    # Note: current implementation actually raises on bad JSON. Pinned here
+    # as documenting the behaviour — if we ever wrap load_config in try/except,
+    # this test catches the change and the caller can update strategy.
+    with pytest.raises(json.JSONDecodeError):
+        svcconfig.list_configs()
+
+
+def test_list_configs_returns_full_dicts():
+    svcconfig.save_config("a", _cfg(service_id="a", name="A"))
+    svcconfig.save_config("b", _cfg(service_id="b", name="B"))
+
+    out = svcconfig.list_configs()
+    assert [c["service_id"] for c in out] == ["a", "b"]
+    assert {c["name"] for c in out} == {"A", "B"}
+
+
+# ── get_active_service_id ────────────────────────────────────────────────────
+
+
+def test_active_service_id_returns_first_configured():
+    svcconfig.save_config("zeta", _cfg(service_id="zeta"))
+    svcconfig.save_config("alpha", _cfg(service_id="alpha"))
+
+    assert svcconfig.get_active_service_id() == "alpha"  # sorted, first
+
+
+def test_active_service_id_returns_none_when_no_configs():
+    assert svcconfig.get_active_service_id() is None
+
+
+def test_active_service_id_respects_fallback_flag():
+    """``fallback_to_first=False`` → return None even when configs
+    exist. Pinned because the provision wizard explicitly disables the
+    fallback so it can detect the "fresh install" state."""
+    svcconfig.save_config("a", _cfg(service_id="a"))
+    assert svcconfig.get_active_service_id(fallback_to_first=False) is None
+
+
+# ── config_to_source: CDN-vs-native endpoint selection ──────────────────────
+
+
+def test_config_to_source_uses_cdn_endpoint_when_cdn_url_set():
+    """``cdn_url`` present → DuckDB httpfs reads go through the CDN
+    (cheap egress). Pinned because losing this would invisibly 10x
+    the bandwidth bill."""
+    src = svcconfig.config_to_source(_cfg(cdn_url="https://cdn.example.com/path/extra"))
+    # The CDN URL's host wins, stripping scheme + path
+    assert src["endpoint"] == "cdn.example.com"
+    # ...but the native endpoint is preserved for boto3 writes
+    assert src["fos_native_endpoint"] == "us-east-1.object.fastlystorage.app"
+
+
+def test_config_to_source_falls_back_to_native_endpoint_without_cdn():
+    src = svcconfig.config_to_source(_cfg(cdn_url=None))
+    assert src["endpoint"] == "us-east-1.object.fastlystorage.app"
+
+
+def test_config_to_source_uses_fixed_v3_raw_root():
+    src = svcconfig.config_to_source(_cfg(fos_prefix="customer-prefix"))
+    assert src["prefix"] == ""
+
+
+def test_config_to_source_native_endpoint_derives_from_region_when_missing():
+    """If ``fos_endpoint`` is absent the helper synthesises it from
+    region. Pinned because a typo here would silently point boto3 at
+    the wrong region's FOS shard."""
+    cfg = _cfg(fos_region="eu-west-1")
+    del cfg["fos_endpoint"]
+    src = svcconfig.config_to_source(cfg)
+    assert src["fos_native_endpoint"] == "eu-west-1.object.fastlystorage.app"
+
+
+def test_config_to_source_includes_log_period_as_int():
+    """``log_period`` is sometimes stored as a string (from form input).
+    Pinned to int because the scheduler does arithmetic on it."""
+    src = svcconfig.config_to_source(_cfg(log_period="120"))
+    assert src["log_period"] == 120
+    assert isinstance(src["log_period"], int)
+
+
+def test_config_to_source_defaults_log_period_to_60():
+    cfg = _cfg()
+    # log_period not in cfg
+    src = svcconfig.config_to_source(cfg)
+    assert src["log_period"] == 60
+
+
+def test_config_to_source_passes_through_provisioning_dict():
+    """Teardown reads ``provisioning.fos_key_id`` to know which FOS
+    access key to revoke. Lossy refactor would orphan it in FOS."""
+    src = svcconfig.config_to_source(_cfg(provisioning={"fos_key_id": "key-123", "endpoint_name": "FOS Logs"}))
+    assert src["provisioning"]["fos_key_id"] == "key-123"
+
+
+def test_config_to_source_defaults_access_level_to_read_write():
+    cfg = _cfg()
+    del cfg["access_level"]
+    src = svcconfig.config_to_source(cfg)
+    assert src["access_level"] == "read_write"
+
+
+def test_config_to_source_includes_rum_fields():
+    """Verify config_to_source maps rum_enabled and rum config blocks."""
+    # rum.enabled wins over the legacy root flag (the scheduler's precedence; see is_rum_enabled)
+    cfg = _cfg(rum_enabled=True, rum={"enabled": False})
+    src = svcconfig.config_to_source(cfg)
+    assert src["rum_enabled"] is False
+    assert src["rum"] == {"enabled": False}
+
+    # Root flag applies when the sub-dictionary has no opinion
+    cfg_root = _cfg(rum_enabled=True)
+    assert svcconfig.config_to_source(cfg_root)["rum_enabled"] is True
+
+    # Test with rum enabled on sub-dictionary
+    cfg2 = _cfg(rum_enabled=False, rum={"enabled": True})
+    src2 = svcconfig.config_to_source(cfg2)
+    assert src2["rum_enabled"] is True
+    assert src2["rum"] == {"enabled": True}
+
+    # Test with both disabled / missing
+    cfg3 = _cfg(rum_enabled=False)
+    src3 = svcconfig.config_to_source(cfg3)
+    assert src3["rum_enabled"] is False
+    assert src3["rum"] == {}
+
+
+# ── fetch_service_name ───────────────────────────────────────────────────────
+
+
+def test_fetch_service_name_returns_name_on_success():
+    fake_resp = MagicMock()
+    fake_resp.read.return_value = b'{"name": "Production CDN"}'
+    fake_resp.__enter__ = lambda s: s
+    fake_resp.__exit__ = MagicMock(return_value=False)
+
+    with patch("urllib.request.urlopen", return_value=fake_resp):
+        assert svcconfig.fetch_service_name("svc-1", "key") == "Production CDN"
+
+
+def test_fetch_service_name_returns_none_on_network_error():
+    """Any exception from the API call → return None (caller falls
+    back to the cached or config name)."""
+    with patch("urllib.request.urlopen", side_effect=OSError("DNS")):
+        assert svcconfig.fetch_service_name("svc-1", "key") is None
+
+
+def test_fetch_service_name_returns_none_when_name_missing_from_payload():
+    fake_resp = MagicMock()
+    fake_resp.read.return_value = b'{"other_field": "value"}'
+    fake_resp.__enter__ = lambda s: s
+    fake_resp.__exit__ = MagicMock(return_value=False)
+
+    with patch("urllib.request.urlopen", return_value=fake_resp):
+        assert svcconfig.fetch_service_name("svc-1", "key") is None
+
+
+# ── refresh_service_name: cache + fallback chain ────────────────────────────
+
+
+def test_refresh_service_name_returns_cached_within_ttl():
+    """Cache hit within TTL must NOT trigger an API call — saves
+    Fastly rate-limit and latency on every page load."""
+    svcconfig._name_cache["svc-1"] = {"name": "Cached Name", "fetched_at": time.time()}
+
+    with patch("backend.config.fetch_service_name") as mock_fetch:
+        out = svcconfig.refresh_service_name("svc-1", "key")
+
+    assert out == "Cached Name"
+    mock_fetch.assert_not_called()
+
+
+def test_refresh_service_name_fetches_when_cache_expired():
+    """Cache older than TTL → re-fetch from API."""
+    svcconfig._name_cache["svc-1"] = {
+        "name": "Stale Name",
+        "fetched_at": time.time() - 1000,  # >> TTL (300)
+    }
+    svcconfig.save_config("svc-1", _cfg(service_id="svc-1", name="From Config"))
+
+    with patch("backend.config.fetch_service_name", return_value="Fresh Name") as mock_fetch:
+        out = svcconfig.refresh_service_name("svc-1", "key")
+
+    assert out == "Fresh Name"
+    mock_fetch.assert_called_once_with("svc-1", "key")
+
+
+def test_refresh_service_name_persists_to_config_when_name_changed():
+    """When the API returns a name that differs from what's in the
+    config file, the config gets re-saved with the new name. Pinned
+    because skipping this lets the UI show "service-abc-id" forever
+    even after the Fastly admin renames the service."""
+    svcconfig.save_config("svc-1", _cfg(service_id="svc-1", name="Old Name"))
+
+    with patch("backend.config.fetch_service_name", return_value="New Name"):
+        svcconfig.refresh_service_name("svc-1", "key")
+
+    assert svcconfig.load_config("svc-1")["name"] == "New Name"
+
+
+def test_refresh_service_name_falls_back_to_config_when_api_fails():
+    """API returns None (network down, 403) → use the cached config name."""
+    svcconfig.save_config("svc-1", _cfg(service_id="svc-1", name="Config Name"))
+
+    with patch("backend.config.fetch_service_name", return_value=None):
+        out = svcconfig.refresh_service_name("svc-1", "key")
+
+    assert out == "Config Name"
+
+
+def test_refresh_service_name_falls_back_to_id_when_no_config():
+    """No API, no config → return the service_id itself so the UI
+    always has SOMETHING to display."""
+    with patch("backend.config.fetch_service_name", return_value=None):
+        out = svcconfig.refresh_service_name("unknown-svc", "key")
+
+    assert out == "unknown-svc"
+
+
+def test_refresh_service_name_skips_api_when_no_api_key():
+    """No api_key → don't even try the API. Pinned because attempting
+    with an empty key hits Fastly's 401 path repeatedly, which counts
+    against rate limits."""
+    svcconfig.save_config("svc-1", _cfg(service_id="svc-1", name="Local Name"))
+
+    with patch("backend.config.fetch_service_name") as mock_fetch:
+        out = svcconfig.refresh_service_name("svc-1", api_key=None)
+
+    assert out == "Local Name"
+    mock_fetch.assert_not_called()
+
+
+def test_refresh_service_name_skips_api_when_api_key_whitespace_only():
+    svcconfig.save_config("svc-1", _cfg(service_id="svc-1", name="Local"))
+
+    with patch("backend.config.fetch_service_name") as mock_fetch:
+        svcconfig.refresh_service_name("svc-1", api_key="   ")
+
+    mock_fetch.assert_not_called()
+
+
+def test_refresh_service_name_failure_caches_short_retry():
+    """When the API fails, the cached entry gets stamped with
+    ``fetched_at = now - TTL + 120`` — i.e. the next retry will fire
+    in 120 seconds, not 300. Pinned because a longer back-off would
+    leave a stale name visible for the full TTL after a transient
+    failure."""
+    svcconfig.save_config("svc-1", _cfg(service_id="svc-1", name="Local"))
+
+    before = time.time()
+    with patch("backend.config.fetch_service_name", return_value=None):
+        svcconfig.refresh_service_name("svc-1", "key")
+
+    entry = svcconfig._name_cache["svc-1"]
+    # fetched_at is now - TTL + 120 → next refresh in ~120s
+    age = before - entry["fetched_at"]
+    assert 175 <= age <= 185  # 300 - 120 with small tolerance
+
+
+# ── refresh_all_service_names: parallel ─────────────────────────────────────
+
+
+def test_refresh_all_service_names_returns_map_of_id_to_name():
+    configs = [
+        {"service_id": "a", "fastly_api_key": "k", "name": "A"},
+        {"service_id": "b", "fastly_api_key": "k", "name": "B"},
+    ]
+
+    def _fake_refresh(sid, _key):
+        return f"Name-{sid}"
+
+    with patch("backend.config.refresh_service_name", side_effect=_fake_refresh):
+        out = svcconfig.refresh_all_service_names(configs, _sync=True)
+
+    assert out == {"a": "Name-a", "b": "Name-b"}
+
+
+def test_refresh_all_service_names_falls_back_to_config_name_on_per_service_exception():
+    """If one service's refresh raises, the others still return.
+    Pinned because losing all names because one service has bad creds
+    would break the sidebar entirely."""
+    configs = [
+        {"service_id": "ok", "fastly_api_key": "k", "name": "OK-svc"},
+        {"service_id": "bad", "fastly_api_key": "k", "name": "Bad-svc"},
+    ]
+
+    def _fake_refresh(sid, _key):
+        if sid == "bad":
+            raise RuntimeError("boom")
+        return f"Fresh-{sid}"
+
+    with patch("backend.config.refresh_service_name", side_effect=_fake_refresh):
+        out = svcconfig.refresh_all_service_names(configs, _sync=True)
+
+    assert out["ok"] == "Fresh-ok"
+    assert out["bad"] == "Bad-svc"  # fell back to cfg["name"]
+
+
+# ── Fastly credential helpers ───────────────────────────────────────────────
+
+
+def test_get_fastly_api_key_returns_key_for_given_service():
+    svcconfig.save_config("svc-a", _cfg(service_id="svc-a", fastly_api_key="key-a"))
+    assert svcconfig.get_fastly_api_key("svc-a") == "key-a"
+
+
+def test_get_fastly_api_key_falls_back_to_active_service():
+    svcconfig.save_config("alpha", _cfg(service_id="alpha", fastly_api_key="key-active"))
+    assert svcconfig.get_fastly_api_key(None) == "key-active"  # alpha is first/active
+
+
+def test_get_fastly_api_key_returns_empty_string_when_unconfigured():
+    assert svcconfig.get_fastly_api_key("nonexistent") == ""
+
+
+def test_save_config_handles_read_only_filesystem():
+    """When /app/configs is on a read-only filesystem (e.g. mounted Secret),
+    save_config logs a warning instead of raising an unhandled OSError."""
+    with patch("backend.config._atomic_write_json", side_effect=OSError(30, "Read-only file system")):
+        # Should not raise
+        svcconfig.save_config("svc-ro", _cfg(service_id="svc-ro"))
+
+    assert svcconfig.get_fastly_api_key(None) == ""  # no configs at all
+
+
+def test_get_fastly_service_id_returns_cdn_service_id():
+    """``cdn_service_id`` is the Fastly service that fronts FOS — used
+    by the VCL routes. Distinct from the logging service id."""
+    svcconfig.save_config("svc", _cfg(service_id="svc", cdn_service_id="cdn-123"))
+    assert svcconfig.get_fastly_service_id("svc") == "cdn-123"
+
+
+def test_get_fastly_logging_service_id_returns_service_id_itself():
+    """For the logging service the ``service_id`` IS the logging
+    service id (they're the same Fastly service, just used differently
+    in different contexts)."""
+    svcconfig.save_config("log-svc", _cfg(service_id="log-svc"))
+    assert svcconfig.get_fastly_logging_service_id("log-svc") == "log-svc"
+
+
+# ── get_ngwaf_workspace_id ──────────────────────────────────────────────────
+
+
+def test_get_ngwaf_workspace_id_returns_value_when_set():
+    svcconfig.save_config("svc", _cfg(service_id="svc", ngwaf_workspace_id="ws-1"))
+    assert svcconfig.get_ngwaf_workspace_id("svc") == "ws-1"
+
+
+def test_get_ngwaf_workspace_id_returns_none_when_unset_or_empty():
+    """Both missing key and empty string → None. Pinned because the
+    sync cron uses ``if ws_id:`` to skip services that aren't
+    NGWAF-enabled."""
+    svcconfig.save_config("svc1", _cfg(service_id="svc1"))
+    svcconfig.save_config("svc2", _cfg(service_id="svc2", ngwaf_workspace_id=""))
+
+    assert svcconfig.get_ngwaf_workspace_id("svc1") is None
+    assert svcconfig.get_ngwaf_workspace_id("svc2") is None
+
+
+def test_get_ngwaf_workspace_id_returns_none_for_unknown_service():
+    assert svcconfig.get_ngwaf_workspace_id("ghost") is None
+
+
+# ── Usage logging config ────────────────────────────────────────────────────
+
+
+def test_load_usage_logging_config_returns_defaults_when_file_missing():
+    out = svcconfig.load_usage_logging_config()
+    assert out == svcconfig._USAGE_LOGGING_DEFAULTS
+
+
+def test_load_usage_logging_config_merges_stored_over_defaults():
+    """A partially-saved config (only ``enabled``) must still surface
+    all the other defaults — otherwise a stale config could leave
+    ``retention_days`` missing and crash the prune job."""
+    svcconfig._ensure_dirs()
+    svcconfig._USAGE_LOGGING_CONFIG_PATH.write_text(json.dumps({"enabled": True}))
+
+    out = svcconfig.load_usage_logging_config()
+    assert out["enabled"] is True
+    assert out["retention_days"] == svcconfig._USAGE_LOGGING_DEFAULTS["retention_days"]
+    assert out["track_duckdb_httpfs"] is True  # default preserved
+
+
+def test_load_usage_logging_config_falls_back_to_defaults_on_corrupt_json():
+    """Corrupt JSON → return defaults. Pinned because raising here
+    would break every analytical request (the connection cache calls
+    this on every open)."""
+    svcconfig._ensure_dirs()
+    svcconfig._USAGE_LOGGING_CONFIG_PATH.write_text("{not json")
+
+    out = svcconfig.load_usage_logging_config()
+    assert out == svcconfig._USAGE_LOGGING_DEFAULTS
+
+
+def test_save_usage_logging_config_writes_atomically():
+    svcconfig.save_usage_logging_config({"enabled": True, "retention_days": 60})
+    out = svcconfig.load_usage_logging_config()
+    assert out["enabled"] is True
+    assert out["retention_days"] == 60
+    # Tmp file must be gone
+    assert not svcconfig._USAGE_LOGGING_CONFIG_PATH.with_suffix(".tmp").exists()
+
+
+def test_is_usage_logging_enabled_always_false_under_pytest():
+    """Pinned as the explicit test-only short-circuit — even with the
+    config explicitly enabled, ``pytest`` in ``sys.modules`` returns
+    False. Without this every test would log usage rows and pollute
+    the dev environment."""
+    svcconfig.save_usage_logging_config({"enabled": True, "retention_days": 30})
+    # ``pytest`` is in sys.modules during test runs → always False
+    assert svcconfig.is_usage_logging_enabled() is False
+
+
+def test_is_usage_logging_enabled_returns_config_value_when_not_under_pytest():
+    """Simulate non-test mode by removing pytest from sys.modules
+    temporarily — verifies the production code path returns the
+    config value rather than always False."""
+    import sys
+
+    pytest_module = sys.modules.pop("pytest", None)
+    try:
+        svcconfig.save_usage_logging_config({"enabled": True, "retention_days": 30})
+        assert svcconfig.is_usage_logging_enabled() is True
+
+        svcconfig.save_usage_logging_config({"enabled": False, "retention_days": 30})
+        assert svcconfig.is_usage_logging_enabled() is False
+    finally:
+        if pytest_module is not None:
+            sys.modules["pytest"] = pytest_module
+
+
+# ── _ensure_dirs ─────────────────────────────────────────────────────────────
+
+
+def test_ensure_dirs_creates_full_directory_tree():
+    """First-run bootstrap: nothing exists. ``_ensure_dirs`` must
+    create configs/ AND every data/* sub-dir without raising."""
+    # See sibling test ``test_save_config_creates_configs_dir_if_missing``
+    # — wipe the conftest-pre-created sandbox to test the bootstrap path.
+    import shutil
+
+    shutil.rmtree(svcconfig.CONFIGS_DIR, ignore_errors=True)
+    shutil.rmtree(svcconfig.DATA_DIR, ignore_errors=True)
+    svcconfig._ensured_dirs.clear()
+    assert not svcconfig.CONFIGS_DIR.exists()
+    assert not svcconfig.DATA_DIR.exists()
+
+    svcconfig._ensure_dirs()
+
+    assert svcconfig.CONFIGS_DIR.exists()
+    assert svcconfig.DATA_DIR.exists()
+    assert svcconfig.SERVICES_DATA_DIR.exists()
+    assert svcconfig.NGWAF_DATA_DIR.exists()
+    assert svcconfig.CACHE_DATA_DIR.exists()
+    assert svcconfig.SYSTEM_DATA_DIR.exists()
+
+
+def test_ensure_dirs_is_idempotent():
+    """Repeated calls (every save_config does one) must not raise."""
+    svcconfig._ensure_dirs()
+    svcconfig._ensure_dirs()  # again — must not raise
+
+
+@pytest.fixture
+def clickhouse_env(monkeypatch):
+    import os
+
+    for name in os.environ:
+        if name.startswith("CLICKHOUSE_"):
+            monkeypatch.delenv(name)
+    for key, value in {
+        "ENABLED": "true",
+        "HOST": "localhost",
+        "DATABASE": "analytics",
+        "USER": "default",
+        "SECURE": "false",
+    }.items():
+        monkeypatch.setenv(f"CLICKHOUSE_{key}", value)
+
+
+def test_clickhouse_disabled_by_default(clickhouse_env, monkeypatch):
+    monkeypatch.delenv("CLICKHOUSE_ENABLED")
+    monkeypatch.setenv("CLICKHOUSE_QUERY_TIMEOUT_S", "not-a-timeout")
+    assert svcconfig.load_clickhouse_config() is None
+
+
+@pytest.mark.parametrize("value", ["false", "0", "no", "off", " FALSE "])
+def test_clickhouse_disabled_values(clickhouse_env, monkeypatch, value):
+    monkeypatch.setenv("CLICKHOUSE_ENABLED", value)
+    assert svcconfig.load_clickhouse_config() is None
+
+
+@pytest.mark.parametrize("value", ["true", "1", "yes", "on", " TRUE "])
+def test_clickhouse_enabled_values(clickhouse_env, monkeypatch, value):
+    monkeypatch.setenv("CLICKHOUSE_ENABLED", value)
+    settings = svcconfig.load_clickhouse_config()
+    assert settings.host == "localhost"
+    assert settings.port == 8123
+    assert settings.password == ""
+    assert settings.connect_timeout_s > 0
+    assert settings.query_timeout_s > 0
+
+
+@pytest.mark.parametrize("key", ["ENABLED", "SECURE"])
+@pytest.mark.parametrize("value", ["", "maybe", "2"])
+def test_clickhouse_invalid_boolean(clickhouse_env, monkeypatch, key, value):
+    monkeypatch.setenv(f"CLICKHOUSE_{key}", value)
+    with pytest.raises(ValueError, match=f"CLICKHOUSE_{key}"):
+        svcconfig.load_clickhouse_config()
+
+
+@pytest.mark.parametrize("key", ["HOST", "DATABASE", "USER"])
+@pytest.mark.parametrize("value", [None, "", "  "])
+def test_clickhouse_incomplete_config(clickhouse_env, monkeypatch, key, value):
+    if value is None:
+        monkeypatch.delenv(f"CLICKHOUSE_{key}")
+    else:
+        monkeypatch.setenv(f"CLICKHOUSE_{key}", value)
+    with pytest.raises(ValueError, match=f"CLICKHOUSE_{key}"):
+        svcconfig.load_clickhouse_config()
+
+
+@pytest.mark.parametrize("key", ["CONNECT_TIMEOUT_S", "QUERY_TIMEOUT_S", "INSERT_TIMEOUT_S", "POOL_TIMEOUT_S"])
+@pytest.mark.parametrize("value", ["nan", "inf", "-inf", "0", "-1", "999999", "bad", ""])
+def test_clickhouse_bounded_timeouts(clickhouse_env, monkeypatch, key, value):
+    monkeypatch.setenv(f"CLICKHOUSE_{key}", value)
+    with pytest.raises(ValueError, match=f"CLICKHOUSE_{key}"):
+        svcconfig.load_clickhouse_config()
+
+
+@pytest.mark.parametrize(
+    "key,value",
+    [
+        ("PORT", "0"),
+        ("PORT", "65536"),
+        ("PORT", "1.5"),
+        ("PORT", "bad"),
+        ("POOL_MAX_SIZE", "0"),
+        ("POOL_MAX_SIZE", "65"),
+    ],
+)
+def test_clickhouse_bounded_integers(clickhouse_env, monkeypatch, key, value):
+    monkeypatch.setenv(f"CLICKHOUSE_{key}", value)
+    with pytest.raises(ValueError, match=f"CLICKHOUSE_{key}"):
+        svcconfig.load_clickhouse_config()
+
+
+@pytest.mark.parametrize(
+    "key,value",
+    [
+        ("HOST", "http://user:secret@localhost"),
+        ("HOST", "localhost/path"),
+        ("HOST", "localhost?password=secret"),
+        ("DATABASE", "logs; DROP DATABASE logs"),
+        ("DATABASE", "db.table"),
+        ("USER", "user\nX-Header: secret"),
+    ],
+)
+def test_clickhouse_rejects_unsafe_settings(clickhouse_env, monkeypatch, key, value):
+    monkeypatch.setenv(f"CLICKHOUSE_{key}", value)
+    with pytest.raises(ValueError, match=f"CLICKHOUSE_{key}") as error:
+        svcconfig.load_clickhouse_config()
+    assert value not in str(error.value)
+
+
+def test_clickhouse_remote_requires_password_and_defaults_to_tls(clickhouse_env, monkeypatch):
+    monkeypatch.setenv("CLICKHOUSE_HOST", "clickhouse.example.com")
+    monkeypatch.delenv("CLICKHOUSE_SECURE")
+    with pytest.raises(ValueError, match="CLICKHOUSE_PASSWORD"):
+        svcconfig.load_clickhouse_config()
+    monkeypatch.setenv("CLICKHOUSE_PASSWORD", "FAKE_PASSWORD")
+    settings = svcconfig.load_clickhouse_config()
+    assert settings.secure is True
+    assert settings.port == 8443
+    assert "FAKE_PASSWORD" not in repr(settings)
+
+
+# ── high_scale_shared_source_enabled / resolve_raw_delete_after ─────────────
+#
+# The contract: a service's raw request/RUM stream may be shared with an
+# out-of-band high-scale consumer (provisioning.cron_sync.high_scale_shared_
+# source). While that's set, every legacy raw-deletion path — standard
+# sync's delete_after, celery-mode finalize_committed_raw, RUM cleanup, and
+# the ingested_files dedup-gate safety check — must stand down regardless of
+# its own delete_after setting, because raw-deletion authority for that
+# stream belongs to the high-scale archive deletion controller. This is the
+# fix for legacy cleanup racing a concurrent high-scale worker and deleting
+# raw objects it hasn't archived/published yet.
+
+
+def test_high_scale_shared_source_enabled_defaults_false():
+    assert svcconfig.high_scale_shared_source_enabled(None) is False
+    assert svcconfig.high_scale_shared_source_enabled({}) is False
+    assert svcconfig.high_scale_shared_source_enabled({"provisioning": {"cron_sync": {}}}) is False
+
+
+def test_high_scale_shared_source_enabled_reads_the_configured_flag():
+    cfg = {"provisioning": {"cron_sync": {"high_scale_shared_source": True}}}
+    assert svcconfig.high_scale_shared_source_enabled(cfg) is True
+
+
+def test_resolve_raw_delete_after_defaults_true_when_unconfigured():
+    assert svcconfig.resolve_raw_delete_after(None) is True
+    assert svcconfig.resolve_raw_delete_after({}) is True
+
+
+def test_resolve_raw_delete_after_honors_configured_delete_after():
+    cfg = {"provisioning": {"cron_sync": {"delete_after": False}}}
+    assert svcconfig.resolve_raw_delete_after(cfg) is False
+
+
+def test_resolve_raw_delete_after_honors_explicit_requested_override():
+    cfg = {"provisioning": {"cron_sync": {"delete_after": True}}}
+    assert svcconfig.resolve_raw_delete_after(cfg, requested=False) is False
+    assert svcconfig.resolve_raw_delete_after({}, requested=True) is True
+
+
+def test_resolve_raw_delete_after_forces_false_for_a_high_scale_shared_source():
+    """The core regression case: delete_after=True and an explicit True
+    override must both lose to a high-scale shared source."""
+    cfg = {
+        "provisioning": {
+            "cron_sync": {"delete_after": True, "high_scale_shared_source": True},
+        }
+    }
+    assert svcconfig.resolve_raw_delete_after(cfg) is False
+    assert svcconfig.resolve_raw_delete_after(cfg, requested=True) is False
+
+
+# ── snapshot + concurrent read-modify-write ──────────────────────────────────
+
+
+def test_snapshot_config_reads_persisted_content_or_returns_none():
+    assert svcconfig.snapshot_config("svc-1") is None
+    svcconfig.save_config("svc-1", _cfg())
+    snap = svcconfig.snapshot_config("svc-1")
+    assert snap is not None
+    assert json.loads(snap)["name"] == "My Service"
+
+
+def test_concurrent_mutate_config_writers_do_not_lose_each_others_keys():
+    import threading
+
+    svcconfig.save_config("svc-1", _cfg())
+    rounds = 25
+
+    def writer(prefix: str) -> None:
+        for i in range(rounds):
+            svcconfig.mutate_config("svc-1", lambda c, i=i: c.__setitem__(f"{prefix}{i}", i))
+
+    threads = [threading.Thread(target=writer, args=(p,)) for p in ("a", "b")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    final = svcconfig.load_config("svc-1")
+    for prefix in ("a", "b"):
+        assert all(final[f"{prefix}{i}"] == i for i in range(rounds))
+
+
+def test_clickhouse_provisioner_is_absent_unless_a_user_is_configured(clickhouse_env):
+    assert svcconfig.load_clickhouse_provisioner_config() is None
+
+
+def test_clickhouse_provisioner_reuses_the_connection_settings_with_its_own_credentials(clickhouse_env, monkeypatch):
+    monkeypatch.setenv("CLICKHOUSE_PROVISION_USER", "fla_provisioner")
+    monkeypatch.setenv("CLICKHOUSE_PROVISION_PASSWORD", "provisioner-pw")
+    app = svcconfig.load_clickhouse_config()
+
+    provisioner = svcconfig.load_clickhouse_provisioner_config()
+
+    assert (provisioner.user, provisioner.password) == ("fla_provisioner", "provisioner-pw")
+    assert (provisioner.host, provisioner.port, provisioner.database, provisioner.secure) == (
+        app.host,
+        app.port,
+        app.database,
+        app.secure,
+    )
+
+
+def test_clickhouse_provisioner_needs_a_password_for_a_secure_or_remote_endpoint(clickhouse_env, monkeypatch):
+    monkeypatch.setenv("CLICKHOUSE_PROVISION_USER", "fla_provisioner")
+    monkeypatch.setenv("CLICKHOUSE_SECURE", "true")
+    monkeypatch.setenv("CLICKHOUSE_PASSWORD", "app-pw")
+
+    with pytest.raises(ValueError, match="CLICKHOUSE_PROVISION_PASSWORD"):
+        svcconfig.load_clickhouse_provisioner_config()
+
+
+def test_clickhouse_provisioner_user_must_look_like_a_user_name(clickhouse_env, monkeypatch):
+    monkeypatch.setenv("CLICKHOUSE_PROVISION_USER", "bad user; DROP")
+    monkeypatch.setenv("CLICKHOUSE_PROVISION_PASSWORD", "pw")
+
+    with pytest.raises(ValueError, match="CLICKHOUSE_PROVISION_USER"):
+        svcconfig.load_clickhouse_provisioner_config()
+
+
+def test_clickhouse_provisioner_is_none_when_clickhouse_is_disabled(clickhouse_env, monkeypatch):
+    monkeypatch.setenv("CLICKHOUSE_ENABLED", "false")
+    monkeypatch.setenv("CLICKHOUSE_PROVISION_USER", "fla_provisioner")
+
+    assert svcconfig.load_clickhouse_provisioner_config() is None
+
+
+# ── Merged from test_endpoint_routing.py ──
+
+
+def _routing_cfg(with_cdn: bool) -> dict:
+    base = {
+        "service_id": "svc1",
+        "name": "Test Service",
+        "fos_region": "us-east-1",
+        "fos_endpoint": "us-east-1.object.fastlystorage.app",
+        "fos_access_key_id": "k",
+        "fos_secret_access_key": "s",
+        "fos_bucket": "test-bucket",
+        "fos_prefix": "",
+    }
+    if with_cdn:
+        base["cdn_url"] = "https://cdn.example.com"
+        base["cdn_secret"] = "abc123"
+        base["cdn_service_id"] = "cdn-svc"
+    return base
+
+
+class TestConfigToSource:
+    def test_native_endpoint_always_present(self):
+        src = svcconfig.config_to_source(_routing_cfg(with_cdn=False))
+        assert src["fos_native_endpoint"] == "us-east-1.object.fastlystorage.app"
+        assert src["endpoint"] == "us-east-1.object.fastlystorage.app"
+
+    def test_cdn_routed_endpoint_keeps_native_separate(self):
+        """When a CDN is configured, source['endpoint'] points at the CDN
+        (used by DuckDB httpfs for cached parquet GETs) but
+        source['fos_native_endpoint'] remains the native FOS host so boto3
+        and PyIceberg can do lists/writes/deletes."""
+        src = svcconfig.config_to_source(_routing_cfg(with_cdn=True))
+        assert src["endpoint"] == "cdn.example.com"
+        assert src["fos_native_endpoint"] == "us-east-1.object.fastlystorage.app"
+        assert src["fos_native_endpoint"] != src["endpoint"]
+
+
+# ── Merged from test_config_rum_enabled.py ──
+
+import pytest
+
+from backend.config import is_rum_enabled
+
+
+@pytest.mark.parametrize(
+    "cfg,expected",
+    [
+        (None, False),
+        ({}, False),
+        ({"rum_enabled": True}, True),
+        ({"rum_enabled": False}, False),
+        ({"rum": {"enabled": True}}, True),
+        ({"rum": {"enabled": False}}, False),
+        ({"rum": {"enabled": False}, "rum_enabled": True}, False),
+        ({"rum": {"enabled": True}, "rum_enabled": False}, True),
+        ({"rum": {"enabled": None}, "rum_enabled": True}, True),
+        ({"rum": {}, "rum_enabled": True}, True),
+        ({"rum": "garbage", "rum_enabled": True}, True),
+        ({"rum": None, "rum_enabled": True}, True),
+        ({"rum": {"enabled": 1}}, True),
+        ({"rum": {"enabled": 0}, "rum_enabled": True}, False),
+    ],
+)
+def test_is_rum_enabled_semantics(cfg, expected):
+    assert is_rum_enabled(cfg) is expected
+
+
+def test_rum_status_route_agrees_with_the_scheduler_when_fields_disagree(client, monkeypatch):
+    from backend import config as svcconfig
+    from tests.conftest import MOCK_SERVICE_ID
+
+    disagreeing = {"service_id": MOCK_SERVICE_ID, "rum": {"enabled": False}, "rum_enabled": True}
+    monkeypatch.setattr(svcconfig, "load_config", lambda sid: dict(disagreeing))
+    resp = client.get(f"/api/services/{MOCK_SERVICE_ID}/rum/status")
+    assert resp.status_code == 200
+    assert resp.json()["enabled"] is is_rum_enabled(disagreeing) is False
+
+
+_CASES = [
+    ({"rum": {"enabled": False}, "rum_enabled": True}, False),
+    ({"rum": {"enabled": True}, "rum_enabled": False}, True),
+    ({"rum_enabled": True}, True),
+    ({"rum": {"enabled": True}}, True),
+    ({"rum": {"enabled": None}, "rum_enabled": True}, True),
+    ({}, False),
+]
+
+
+@pytest.mark.parametrize("extra,expected", _CASES)
+def test_feature_state_from_config_uses_the_shared_resolution(extra, expected):
+    from backend.provision.declarative.state import FeatureState
+
+    state = FeatureState.from_config({"service_id": "svc", "log_period": 60, **extra})
+    assert state.rum_enabled is expected is is_rum_enabled(extra)
+
+
+@pytest.mark.parametrize("extra,expected", _CASES)
+def test_terraform_generation_uses_the_shared_resolution(extra, expected, monkeypatch):
+    from backend.provision.declarative.state import FeatureState
+
+    from backend.utils import terraform_gen
+
+    seen: list[dict] = []
+    real = FeatureState.from_config
+
+    def spy(cfg):
+        seen.append(cfg)
+        return real(cfg)
+
+    monkeypatch.setattr(terraform_gen.FeatureState, "from_config", staticmethod(spy))
+    terraform_gen.generate_terraform({"logging_service_id": "svc", "log_period": 60, **extra}, "AK", "SK")
+    assert seen[0]["rum_enabled"] is expected
+
+
+@pytest.mark.parametrize(
+    ("final_cfg", "expected"),
+    [
+        ({"rum": {"enabled": False}, "rum_enabled": True}, False),
+        ({"rum": {"enabled": True}, "rum_enabled": False}, True),
+        ({"rum_enabled": True}, True),
+    ],
+)
+def test_rum_enable_done_event_reports_the_shared_resolution(final_cfg, expected, client, monkeypatch):
+    import json
+
+    from backend import config as svcconfig
+    from tests.conftest import MOCK_SERVICE_ID
+
+    state = {"cfg": {"service_id": MOCK_SERVICE_ID, "fastly_api_key": "TOKEN"}}
+    monkeypatch.setattr(svcconfig, "load_config", lambda sid: dict(state["cfg"]))
+
+    def fake_run_with_events(func, *args, **kwargs):
+        yield {"type": "status", "message": "enabling RUM"}
+        state["cfg"] = {"service_id": MOCK_SERVICE_ID, "fastly_api_key": "TOKEN", **final_cfg}
+
+    monkeypatch.setattr("backend.routers.rum.run_with_events", fake_run_with_events)
+    monkeypatch.setattr("backend.cron.scheduler.get_scheduler", lambda: type("S", (), {"reload": lambda self: None})())
+
+    resp = client.post(f"/api/services/{MOCK_SERVICE_ID}/rum/enable", json={"activate": True})
+    assert resp.status_code == 200
+    events = [json.loads(line[len("data: ") :]) for line in resp.text.splitlines() if line.startswith("data: ")]
+    done = next(e for e in events if e["type"] == "done")
+    assert done["rum"]["enabled"] is expected
+
+
+# ── Merged from test_validate_ingest_mode.py ──
+
+import pytest
+
+_PG = "postgresql://fla:pw@pg:5432/ducklake"
+
+
+@pytest.fixture
+def high_scale_env(monkeypatch):
+    """A fully coherent high_scale configuration."""
+    monkeypatch.setattr(svcconfig, "DEPLOYMENT_MODE", "high_scale")
+    monkeypatch.setattr(svcconfig, "DUCKLAKE_CATALOG", _PG)
+    monkeypatch.setenv("METADATA_DSN", _PG)
+    return monkeypatch
+
+
+def test_sync_mode_requires_postgres_dsns_but_no_broker(monkeypatch):
+    """Standard mode requires Postgres DSNs, but does not require CELERY_BROKER_URL."""
+    monkeypatch.setattr(svcconfig, "DEPLOYMENT_MODE", "standard")
+    monkeypatch.setattr(svcconfig, "CELERY_BROKER_URL", "")
+    monkeypatch.setattr(svcconfig, "DUCKLAKE_CATALOG", _PG)
+    monkeypatch.setenv("METADATA_DSN", _PG)
+
+    assert svcconfig.validate_deployment_mode() is None
+
+
+def test_coherent_high_scale_config_passes(high_scale_env):
+    assert svcconfig.validate_deployment_mode() is None
+
+
+def test_high_throughput_is_rejected(monkeypatch):
+    monkeypatch.setattr(svcconfig, "DEPLOYMENT_MODE", "high_throughput")
+    with pytest.raises(
+        RuntimeError, match="DEPLOYMENT_MODE=high_throughput has been removed; use 'standard' or 'high_scale'"
+    ):
+        svcconfig.validate_deployment_mode()
+
+
+@pytest.mark.parametrize(
+    "catalog",
+    ["", "/app/data/services/svc.ducklake", "svc.ducklake"],
+    ids=["unset", "absolute-file", "relative-file"],
+)
+def test_high_scale_rejects_non_postgres_ducklake_catalog(high_scale_env, catalog):
+    high_scale_env.setattr(svcconfig, "DUCKLAKE_CATALOG", catalog)
+
+    with pytest.raises(RuntimeError, match="requires DUCKLAKE_CATALOG to be a Postgres DSN"):
+        svcconfig.validate_deployment_mode()
+
+
+@pytest.mark.parametrize(
+    "dsn",
+    [None, "", "/app/data/services/svc.metadata.db", "sqlite:///app/data/svc.metadata.db"],
+    ids=["unset", "empty", "sqlite-path", "sqlite-url"],
+)
+def test_high_scale_rejects_non_postgres_metadata_dsn(high_scale_env, dsn):
+    if dsn is None:
+        high_scale_env.delenv("METADATA_DSN", raising=False)
+    else:
+        high_scale_env.setenv("METADATA_DSN", dsn)
+
+    with pytest.raises(RuntimeError, match="requires METADATA_DSN to be a Postgres DSN"):
+        svcconfig.validate_deployment_mode()
+
+
+@pytest.mark.parametrize("scheme", ["postgres", "postgresql"])
+def test_both_postgres_url_schemes_accepted(high_scale_env, scheme):
+    """libpq accepts both spellings; the gate must not reject the short one
+    and send an operator hunting a phantom misconfiguration."""
+    dsn = f"{scheme}://fla:pw@pg:5432/db"
+    high_scale_env.setattr(svcconfig, "DUCKLAKE_CATALOG", dsn)
+    high_scale_env.setenv("METADATA_DSN", dsn)
+
+    assert svcconfig.validate_deployment_mode() is None
+
+
+def test_metadata_dsn_error_names_the_shared_state_at_risk(high_scale_env):
+    """The message must explain WHY, matching the DuckLake error's style —
+    an operator seeing it should not need to read the source to know what
+    breaks."""
+    high_scale_env.delenv("METADATA_DSN", raising=False)
+
+    with pytest.raises(RuntimeError) as exc:
+        svcconfig.validate_deployment_mode()
+
+    msg = str(exc.value)
+    assert "job_runs" in msg
+    assert "ingest ledger" in msg
+    assert "pod-local" in msg
+
+
+def test_unknown_deployment_mode_is_rejected(monkeypatch):
+    monkeypatch.setattr(svcconfig, "DEPLOYMENT_MODE", "unknown")
+
+    with pytest.raises(RuntimeError, match="DEPLOYMENT_MODE"):
+        svcconfig.validate_deployment_mode()
+
+
+@pytest.mark.parametrize("mode", ["standard", "high_scale"])
+def test_config_to_source_emits_deployment_mode(monkeypatch, tmp_path, mode):
+    monkeypatch.setattr(svcconfig, "DEPLOYMENT_MODE", mode)
+    monkeypatch.setattr(svcconfig, "duckdb_path", lambda _service_id: str(tmp_path / "service.duckdb"))
+
+    source = svcconfig.config_to_source({"service_id": "svc", "raw_layout_version": 3})
+
+    assert source["deployment_mode"] == mode
+    assert "ingest_mode" not in source
+    assert "serving_mode" not in source

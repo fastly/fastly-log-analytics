@@ -107,6 +107,9 @@ dependencies = [
     "opentelemetry-exporter-otlp-proto-http>=1.27",
     "opentelemetry-exporter-prometheus>=0.63b1",
     "prometheus-client>=0.26.0",
+    "datasketch>=1.6.5",
+    "pytricia>=1.0.2",
+    "python-statemachine>=2.3.6",
 ]
 
 [dependency-groups]
@@ -372,11 +375,8 @@ ignore_errors = true
 # inherit the stricter checks automatically.
 [[tool.mypy.overrides]]
 module = [
-    "backend.core.query_registry",
     "backend.core.query_instrumentation",
     "backend.core.query_attribution",
-    "backend.cron.jobs.compaction",
-    "backend.repositories.session_scoring",
     # v2.0 final wave (2026-06-12): post-split modules with fresh test
     # coverage. Each verified clean under the strict flags below before
     # opt-in; new files in these packages inherit the stricter checks
@@ -385,7 +385,6 @@ module = [
     "backend.core.rollups.sessions",
     "backend.core.rollups.day_bundles",
     "backend.core.rollups.recompute",
-    "backend.routers.admin.ingest",
     "backend.routers.admin.log_accounting",
     "backend.routers.admin.health",
 ]

@@ -20,7 +20,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from pydantic import AfterValidator, TypeAdapter, ValidationError
 
 import backend as _backend_pkg
-from backend.core.metadata.pg_connection import close_all_pg_connections, get_pg_thread_connection
+from backend.core.metadata.base import close_all_pg_connections, get_pg_thread_connection
 from backend.utils.date_utils import iso_z, iso_z_now
 
 if hasattr(_backend_pkg, "_MODULE_ALIASES"):

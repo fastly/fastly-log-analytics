@@ -1,9 +1,9 @@
-"""Consolidated analytics (Origin) and admin action/status response models."""
-
 from __future__ import annotations
 
 import sys
-from typing import Any, Literal
+
+sys.modules["backend.models.insights"] = sys.modules[__name__]
+from typing import Annotated, Any, Literal
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_serializer, model_validator
 
@@ -17,12 +17,8 @@ from backend.models._base import (
     WireSafeModel,
 )
 
-# ── Admin Action & Status Models (folded from admin_actions.py) ───────────────
-
 
 class QueryAttribution(PassthroughModel):
-    """``attribution`` block from ``_attribution_payload``."""
-
     kind: str | None = None
     label: str | None = None
     principal_id: str | None = None
@@ -36,10 +32,6 @@ class QueryAttribution(PassthroughModel):
 
 
 class ActiveQueryRow(PassthroughModel):
-    """One in-flight query (``_row_for_active``). ``sql`` is only populated
-    when the caller asked for ``full_sql``; ``started_at_utc`` is epoch
-    seconds (``time.time()``)."""
-
     query_id: int | None = None
     db_type: str | None = None
     sql_preview: str | None = None
@@ -54,9 +46,6 @@ class ActiveQueryRow(PassthroughModel):
 
 
 class CompletedQueryRow(PassthroughModel):
-    """One finished query (``_row_for_completed``); also the exact layout
-    the persisted ``/slow-queries`` rows are re-shaped into."""
-
     query_id: int | None = None
     db_type: str | None = None
     sql_preview: str | None = None
@@ -74,71 +63,49 @@ class CompletedQueryRow(PassthroughModel):
 
 
 class SnapshotResponse(BaseModel):
-    """Incremental snapshot of the in-process query registry.
-
-    ``last_seq`` is the high-water mark the client should send back as
-    ``since_seq`` on its next poll so the registry can stream only new rows.
-    """
-
     last_seq: int
     active: list[ActiveQueryRow]
     completed: list[CompletedQueryRow]
 
 
 class SummaryResponse(BaseModel):
-    """Cheap counts that power the live-monitor tab badge."""
-
     active_total: int
     by_db_type: dict[str, int]
     longest_ms: float
 
 
 class CancelResponse(BaseModel):
-    """Outcome of ``POST /api/admin/queries/{qid}/cancel``."""
-
     state: Literal["cancelled", "not_found", "already_finished", "connection_gone"]
     query_id: int
 
 
 class SlowQueriesCountResponse(BaseModel):
-    """Aggregate row-count for the operations-overview card."""
-
     count: int
     since_hours: int
     threshold_ms: float
 
 
 class SlowQueriesResponse(BaseModel):
-    """Persisted slow-SQL history (``GET /api/admin/slow-queries``)."""
-
     rows: list[CompletedQueryRow]
     since_hours: int
     threshold_ms: float
 
 
 class SlowQueriesClearResponse(BaseModel):
-    """Outcome of ``DELETE /api/admin/slow-queries``."""
-
     deleted: int
     service_id: str
 
 
 class QueryMonitorConfigResponse(BaseModel):
-    """Nav-gating flag for the Live Query Monitor tab."""
-
     enabled: bool
 
 
 class BotSourceRefreshResponse(WireSafeModel):
-    """``POST /admin/bot-sources/{source_id}/refresh``."""
-
     ok: bool
     source: JsonDict
 
 
 class BotSourcesRefreshResponse(WireSafeModel):
-    """``POST /admin/bot-sources/refresh`` and ``/admin/bots/refresh``."""
-
     ok: bool
     sources: JsonRows
     updated_count: int
@@ -153,15 +120,11 @@ class RdnsEnrichSummary(WireSafeModel):
 
 
 class RdnsEnrichResponse(WireSafeModel):
-    """``POST /admin/rdns/enrich``."""
-
     ok: bool
     summary: RdnsEnrichSummary
 
 
 class DuckdbRecycleResponse(WireSafeModel):
-    """``POST /admin/duckdb/recycle``: ``skipped`` carries reason/rss_mb/threshold_mb, ``recycled`` the rest."""
-
     ok: bool
     status: str
     reason: str | None = None
@@ -174,8 +137,6 @@ class DuckdbRecycleResponse(WireSafeModel):
 
 
 class NgwafSyncResponse(WireSafeModel):
-    """``POST /admin/ngwaf/sync/{service_id}``."""
-
     ok: bool
     service_id: str
     workspace_id: str
@@ -183,8 +144,6 @@ class NgwafSyncResponse(WireSafeModel):
 
 
 class SharePurgeResponse(WireSafeModel):
-    """``POST /admin/share/purge``: counts from ``share_db.purge_all_share_records``."""
-
     ok: bool
     deleted_audit_logs: int | None = None
     deleted_expired_invites: int | None = None
@@ -200,14 +159,10 @@ class IcebergCalendarDay(WireSafeModel):
 
 
 class IcebergCalendarResponse(WireSafeModel):
-    """``GET /admin/iceberg-calendar``: ISO date -> per-day entry (open-keyed), plus debug envelope keys."""
-
     __pydantic_extra__: dict[str, IcebergCalendarDay | list]  # type: ignore[assignment]
 
 
 class VclHealthResponse(WireSafeModel):
-    """``GET /admin/vcl-health``: ``error`` replaces the snippet fields when the check cannot run."""
-
     service_id: str
     is_clean: bool
     error: str | None = None
@@ -241,16 +196,12 @@ class PageTelemetryCall(WireSafeModel):
 
 
 class PageTelemetryResponse(WireSafeModel):
-    """``GET /debug/page-telemetry``."""
-
     queries: list[PageTelemetryQuery]
     sections: list[PageTelemetrySection]
     calls: list[PageTelemetryCall]
 
 
 class BackfillWindowResponse(WireSafeModel):
-    """``POST /admin/backfill-window``: ``iceberg.sync_data`` counters, or ``error`` + ``files_downloaded=0``."""
-
     error: str | None = None
     files_downloaded: int | None = None
     rows_downloaded: int | None = None
@@ -268,8 +219,6 @@ class HealthServiceState(WireSafeModel):
 
 
 class HealthResponse(WireSafeModel):
-    """``GET /api/health``: liveness payload; ``services`` only for ``?deep=1`` local callers."""
-
     status: str
     version: str
     services: list[HealthServiceState] | None = None
@@ -318,9 +267,6 @@ if isinstance(_aliases, dict):
         }
     )
 
-
-# ── Network & Origin Models (folded from network.py and origin.py) ────────────
-
 from backend.models.common import (  # noqa: E402
     BaseResponse,
     FilteredRequest,
@@ -345,8 +291,6 @@ class NetworkWorstEntry(BaseModel):
 
 
 class ShieldingRow(BaseModel):
-    """One edge→shield POP pair in the transit map / analysis table."""
-
     edge_pop: str | None = None
     shield_pop: str | None = None
     requests: int | None = None
@@ -366,8 +310,6 @@ class ShieldingRow(BaseModel):
 
 
 class ShieldingAnalysis(PassthroughModel):
-    """Typed sub-payload for ``NetworkHealthResponse.shielding_analysis``."""
-
     response_cache: ResponseCacheObservation | None = Field(
         default=None,
         validation_alias=AliasChoices("response_cache", "_response_cache"),
@@ -392,8 +334,6 @@ class ShieldingAnalysis(PassthroughModel):
 
 
 class NetworkHeatmapCell(WireSafeModel):
-    """One (ASN, time bucket) health cell."""
-
     bucket_idx: int
     bucket: str
     throughput_bps: float | None = None
@@ -415,8 +355,6 @@ class NetworkHeatmapRow(WireSafeModel):
 
 
 class NetworkMapCity(WireSafeModel):
-    """One city cell inside a map bucket; ``city_idx`` indexes ``NetworkHealthResponse.cities``."""
-
     country: str | None = None
     city_idx: int
     metro_code: int | None = None
@@ -614,8 +552,6 @@ class OriginSlowUrlRow(WireSafeModel):
 
 
 class OriginStatusCodeRow(WireSafeModel):
-    """``status == -1`` buckets any origin status outside 100-599."""
-
     status: int
     count: int
     pct: float | None = None
@@ -655,8 +591,6 @@ class OriginDrilldownRow(WireSafeModel):
 
 
 class OriginTimeseriesPoint(WireSafeModel):
-    """``edge`` is only present when the series is split by leg."""
-
     time: str
     miss_count: int
     value: float | None = None
@@ -786,8 +720,6 @@ class OriginIpHealthSection(_OriginIpHealthMixin, _HasDataOnlyMixin, WireSafeMod
 
 
 class OriginAggregatesResponse(HasDataMixin, BaseResponse):
-    """Composite of every origin card on the /origin page."""
-
     summary: OriginSummarySection = Field(default_factory=OriginSummarySection)
     timeseries: OriginTimeseriesSection = Field(default_factory=OriginTimeseriesSection)
     slow_urls: OriginSlowUrlsSection = Field(default_factory=OriginSlowUrlsSection)
@@ -853,8 +785,6 @@ class OriginAggregatesRequest(RangeKeyedRequest):
     sections: list[SectionName] | None = None
 
 
-# ── Performance, Assets, CMCD, Value & RUM Models (folded from performance.py) ──
-
 PerformanceSectionName = Literal[
     "waterfall",
     "top_urls",
@@ -879,9 +809,6 @@ class PerformanceUrlRow(WireSafeModel):
 
 
 class PerformanceAsnRow(WireSafeModel):
-    """``asn`` is an int, or the raw dimension string when the value is not numeric; ``label``
-    is the resolved ASN name on every path."""
-
     asn: int | str
     label: str | None = None
     requests: int
@@ -910,8 +837,6 @@ class PerformanceWaterfallAvg(WireSafeModel):
 
 
 class PerformanceWaterfall(WireSafeModel):
-    """Empty (``{}``) when scatter/waterfall were not requested or could not be computed."""
-
     avg: PerformanceWaterfallAvg | None = None
 
 
@@ -923,10 +848,6 @@ class PerformanceAggregatesResponse(BaseResponse):
     ttl_dist: list[PerformanceTtlBucket] = []
     scatter: list[PerformanceScatterPoint] = []
     waterfall: PerformanceWaterfall = Field(default_factory=PerformanceWaterfall)
-    # True when top_urls / top_asns were served from the perf_latency rollup
-    # (>= 48 h unfiltered windows): the cross-hour percentile combine is a
-    # request-weighted average, so the values are approximate. Emitted as
-    # ``_approx`` (same key the origin Aggregates badge reads).
     approx: bool = Field(default=False, alias="_approx")
 
 
@@ -968,8 +889,6 @@ class LowTtlAssetRow(BaseModel):
 
 
 class AssetsAggregatesResponse(BaseResponse):
-    """Composite of assets & shield performance cards."""
-
     asset_type_breakdown: list[AssetTypeBreakdownRow] = []
     cache_performance: list[CachePerformanceRow] = []
     compression_performance: list[CompressionPerformanceRow] = []
@@ -979,10 +898,8 @@ class AssetsAggregatesResponse(BaseResponse):
 
 
 class AssetsRequest(RangeKeyedRequest):
-    """Assets analytics request schema supporting relative-range resolving."""
+    pass
 
-
-# ── CMCD Streaming QoE Models (folded from cmcd.py) ───────────────────────────
 
 CmcdSectionName = Literal[
     "overview",
@@ -1103,8 +1020,6 @@ class CmcdAggregatesResponse(BaseResponse):
     startup_ts: list[CmcdStartupPoint] = []
     session_duration_dist: list[CmcdSessionDurationRow] = []
 
-
-# ── Fastly Value Executive Summary Models (folded from value.py) ──────────────
 
 ValueSectionName = Literal[
     "overview",
@@ -1246,12 +1161,7 @@ class ValueSummaryResponse(BaseResponse):
     io: IOMetrics | None = None
 
 
-# ── RUM Models (folded from rum.py) ───────────────────────────────────────────
-
-
 class RumStatusResponse(WireSafeModel):
-    """``GET /{service_id}/rum/status``. Analyst sessions only get the first two keys."""
-
     enabled: bool | None = None
     enabled_at: str | None = None
     deployed_vcl_sha: str | None = None
@@ -1279,9 +1189,6 @@ class RumBeaconHealthResponse(WireSafeModel):
     message: str | None = None
 
 
-# Numeric fields below are ``int | float`` (not ``float``) so an integer the
-# producer emitted (an INP p75, a whole-number average) stays ``5`` on the wire
-# instead of being coerced to ``5.0``.
 RumNumber = int | float
 
 
@@ -1292,8 +1199,6 @@ class RumCwvDistribution(WireSafeModel):
 
 
 class RumCwvVital(WireSafeModel):
-    """One Core Web Vital. ``distribution`` is ``None`` only on the no-data branch."""
-
     p75: RumNumber | None
     distribution: RumCwvDistribution | None
 
@@ -1329,9 +1234,6 @@ class RumJsError(WireSafeModel):
 
 
 class RumTrends(WireSafeModel):
-    """Parallel per-bucket series. ``pageviews`` / ``interactions`` / ``errors``
-    are absent on the no-data branch."""
-
     timestamps: list[str]
     lcp: list[RumNumber | None]
     cls: list[RumNumber | None]
@@ -1348,8 +1250,6 @@ class RumEnvironments(WireSafeModel):
 
 
 class RumAnalyticsResponse(WireSafeModel):
-    """``GET /{service_id}/rum/analytics`` (data, no-data and failure branches)."""
-
     is_mock: bool | None = None
     no_data: bool | None = None
     beacon_count: int | None = None
@@ -1373,9 +1273,6 @@ class RumLiveEventItem(WireSafeModel):
     browser: str
     os: str
     raw_log: dict[str, Any] = {}
-
-
-# ── Session Scoring Models (folded from session_scoring.py) ───────────────────
 
 
 class ScoringThresholdBody(BaseModel):
@@ -1839,9 +1736,6 @@ class ScoringLabelDeleteResponse(PassthroughModel):
     id: str | None = None
 
 
-# ── Dashboard, Security, Sessions & Query Models (folded from dashboard.py) ───
-
-
 class RollupPathCoverage(BaseModel):
     bundle: Literal["security_conn_reuse", "all_fields", "ngwaf_bots"]
     reason: Literal["unknown", "durable_unready", "no_bundled_root", "no_paths", "below_coverage_floor", "planned"] = (
@@ -2248,7 +2142,737 @@ class FieldValuesResponse(BaseResponse):
     field: str
 
 
-from backend.models.insights import InsightsResponse  # noqa: E402, F401
+Num = int | float
+InsightFilters = dict[str, str | int | float | None]
+
+
+class _FiltersOnlyBaseMeta(WireSafeModel):
+    filters: InsightFilters
+
+
+class _RequestsFiltersBaseMeta(WireSafeModel):
+    requests: Num
+    filters: InsightFilters
+
+
+class _ErrorSpikeBaseMeta(WireSafeModel):
+    requests: Num
+    errors: Num
+    filters: InsightFilters
+
+
+class _SpikeRatioBaseMeta(WireSafeModel):
+    spike_ratio: float
+    filters: InsightFilters
+
+
+class _RegressionRequestsBaseMeta(WireSafeModel):
+    regression_ratio: Num
+    requests: Num
+    filters: InsightFilters
+
+
+class _WindowBaselineRequestsBaseMeta(WireSafeModel):
+    window_requests: Num
+    baseline_requests: Num
+    filters: InsightFilters
+
+
+class _RegressionWindowRequestsBaseMeta(WireSafeModel):
+    regression_ratio: Num
+    window_requests: Num
+    filters: InsightFilters
+
+
+class _RepeatedPatternBaseMeta(WireSafeModel):
+    score: int
+    cv: float
+    modal_frac: float
+    mean_interval_s: float
+    stddev_s: float
+    mode_gap_s: int | None
+    n_gaps: int
+    n_events: int
+    span_s: int
+    rps: float
+
+
+class ErrorSpikesMeta(_ErrorSpikeBaseMeta):
+    pass
+
+
+class BotnetGroupingMeta(WireSafeModel):
+    requests: Num
+    ip_ratio: float
+    filters: InsightFilters
+
+
+class NewCountryTrafficMeta(_FiltersOnlyBaseMeta):
+    pass
+
+
+class CitySurgesMeta(_SpikeRatioBaseMeta):
+    pass
+
+
+class CityErrorSpikesMeta(_ErrorSpikeBaseMeta):
+    pass
+
+
+class CityLatencyRegressionsMeta(_RegressionRequestsBaseMeta):
+    pass
+
+
+class NewCityTrafficMeta(_FiltersOnlyBaseMeta):
+    pass
+
+
+class UaMonocultureMeta(_RequestsFiltersBaseMeta):
+    pass
+
+
+class NewProbeUrlsMeta(WireSafeModel):
+    error_pct: Num
+    filters: InsightFilters
+
+
+class WafSignalSpikesMeta(_SpikeRatioBaseMeta):
+    pass
+
+
+class ProxySurgeMeta(_RequestsFiltersBaseMeta):
+    pass
+
+
+class AsnConcentrationMeta(WireSafeModel):
+    requests: Num
+    asn: int
+    filters: InsightFilters
+
+
+class AsnMetroPerformanceMeta(_RegressionRequestsBaseMeta):
+    pass
+
+
+class CacheCollapseMeta(_WindowBaselineRequestsBaseMeta):
+    pass
+
+
+class CacheabilityRegressionMeta(_WindowBaselineRequestsBaseMeta):
+    pass
+
+
+class LatencyRegressionMeta(_RegressionWindowRequestsBaseMeta):
+    pass
+
+
+class ImpossibleDistanceMeta(WireSafeModel):
+    hits: Num
+    excess_km: float
+    pop: str | None
+    sample_ip: str | None
+    client_lat: Num | None
+    client_lon: Num | None
+    pop_lat: Num
+    pop_lon: Num
+    tcp_rtt: Num | None
+    country: str | None
+    city: str | None
+    filters: InsightFilters
+
+
+class TailLatencyMeta(WireSafeModel):
+    p99_ms: float
+    p50_ms: float
+    ratio: float
+    requests: Num
+    filters: InsightFilters
+
+
+class CipherSpreadMeta(WireSafeModel):
+    requests: Num
+    baseline_total_ips: Num
+    sha: str
+    filters: InsightFilters
+
+
+class RequestSizeAnomalyMeta(WireSafeModel):
+    max_bytes: int
+    avg_bytes: int
+    requests: Num
+    p95_baseline: int
+    filters: InsightFilters
+
+
+class ConnectionAbuseMeta(WireSafeModel):
+    max_conn_reqs: int
+    avg_conn_reqs: int
+    requests: Num
+    p95_baseline: int
+    filters: InsightFilters
+
+
+class RegionLatencyMeta(WireSafeModel):
+    regression_ratio: Num
+    window_requests: Num
+    filters: InsightFilters
+    ottfb_p95_ms: float | None = None
+
+
+class CacheTtlMismatchMeta(WireSafeModel):
+    avg_ttl_s: float
+    avg_hits: float
+    avg_age_s: float
+    samples: Num
+    filters: InsightFilters
+
+
+class ImageOptimizationOpportunitiesMeta(WireSafeModel):
+    requests: Num
+    total_mb: float
+    mobile_ratio: Num
+    filters: InsightFilters
+
+
+class OriginLatencySpikeMeta(_RequestsFiltersBaseMeta):
+    pass
+
+
+class OriginErrorRateMeta(_FiltersOnlyBaseMeta):
+    pass
+
+
+class OriginRetriesMeta(WireSafeModel):
+    max_retries: int
+    filters: InsightFilters
+
+
+class OriginIpFailureMeta(_RequestsFiltersBaseMeta):
+    pass
+
+
+class ShieldPathDegradationMeta(WireSafeModel):
+    ratio: float
+    requests: Num
+
+
+class RepeatedPatternsMeta(_RepeatedPatternBaseMeta):
+    distinct_ua: int
+    filters: InsightFilters
+
+
+class RepeatedPatternsFpMeta(_RepeatedPatternBaseMeta):
+    distinct_ip: int
+    filters: InsightFilters
+
+
+class LowAndSlowMeta(WireSafeModel):
+    hits: int
+    distinct_paths: int
+    span_s: int
+    rps: float
+    filters: InsightFilters
+
+
+class CredentialEnumerationMeta(WireSafeModel):
+    attempts: int
+    denied: int
+    fail_rate_pct: float
+    distinct_paths: int
+    filters: InsightFilters
+
+
+class NetworkAsnHealthMeta(WireSafeModel):
+    window_packet_loss_pct: float
+    baseline_packet_loss_pct: float
+    window_jitter_ms: float
+    baseline_jitter_ms: float
+    window_retrans_avg: float
+    baseline_retrans_avg: float
+    requests: int
+    asn: int
+    filters: InsightFilters
+
+
+class ContentDiscoveryMeta(WireSafeModel):
+    requests: int
+    not_found: int
+    not_found_rate_pct: float
+    distinct_404_urls: int
+    filters: InsightFilters
+
+
+class RefererMonocultureMeta(_RequestsFiltersBaseMeta):
+    pass
+
+
+class MethodDriftMeta(WireSafeModel):
+    requests: Num
+    method: str | None
+    filters: InsightFilters
+
+
+class NewAsnTrafficMeta(AsnConcentrationMeta):
+    pass
+
+
+class AsnHostingShiftMeta(WireSafeModel):
+    window_hosting: Num
+    window_total: Num
+    asn: int
+    filters: InsightFilters
+
+
+class MetroDeliveryDegradationMeta(WireSafeModel):
+    window_requests: Num
+    window_mbps: float
+    baseline_mbps: float
+    filters: InsightFilters
+
+
+class ConnectionTypeMixMeta(WireSafeModel):
+    requests: Num
+    c_type: str | None
+    c_speed: str | None
+    filters: InsightFilters
+
+
+class PopLatencyRegressionMeta(_RegressionWindowRequestsBaseMeta):
+    pass
+
+
+class Http3FallbackMeta(WireSafeModel):
+    window_quic: int
+    window_total: int
+    share_drop_pts: float
+    filters: InsightFilters
+
+
+class CacheHitCliffMeta(WireSafeModel):
+    window_cacheable: int
+    baseline_cacheable: int
+    drop_pts: float
+
+
+class PayloadCompressionRegressionMeta(_WindowBaselineRequestsBaseMeta):
+    pass
+
+
+class SessionHarvestingMeta(WireSafeModel):
+    requests: int
+    distinct_sessions: int
+    baseline_distinct_sessions: int
+    filters: InsightFilters
+
+
+class TimeoutSplitMeta(WireSafeModel):
+    phase: Literal["connect", "read"]
+    connect_p95_ms: float
+    baseline_connect_p95_ms: float
+    read_p95_ms: float
+    baseline_read_p95_ms: float
+    window_requests: int
+
+
+class CrawlerDisparityMeta(WireSafeModel):
+    crawls: int
+    referrals: int
+    w_bytes: int = 0
+    bandwidth_share_pct: float = 0.0
+    crawls_per_referral: float
+    baseline_crawls_per_referral: float
+    bytes_per_referral: float = 0.0
+    baseline_bytes_per_referral: float = 0.0
+
+
+class StaleBrowserVersionMeta(WireSafeModel):
+    requests: int
+    ips: int
+    surge_ratio: float
+
+
+class OrphanedDeepCrawlMeta(WireSafeModel):
+    requests: int
+    distinct_urls: int
+    requests_per_url: float
+    surge_ratio: float
+    filters: InsightFilters
+
+
+class ResidentialFingerprintDispersionMeta(WireSafeModel):
+    ja4: str
+    ips: int
+    asns: int
+    requests: int
+    asn_expansion_ratio: float
+
+
+class HighScale5xxMeta(WireSafeModel):
+    pass
+
+
+class InsightsRequest(FilteredRequest):
+    window_size_hrs: float = Field(default=24.0, gt=0, le=168)
+    baseline_hours: float = Field(default=168.0, gt=0, le=2160)
+    force_refresh: bool = False
+
+
+class InsightItem[MetaT: WireSafeModel](BaseModel):
+    label: str
+    current_val: float | None = None
+    baseline_val: float | None = None
+    baseline_label: str = "baseline"
+    unit: str | None = None
+    severity: str = "clean"
+    meta: MetaT
+    investigate_url: str | None = None
+    tooltip: str | None = None
+
+
+class InsightCardBase[MetaT: WireSafeModel](BaseModel):
+    id: str
+    title: str
+    description: str
+    severity: str
+    summary: str
+    items: list[InsightItem[MetaT]]
+    category: str | None = None
+
+
+class ErrorSpikesInsightCard(InsightCardBase[ErrorSpikesMeta]):
+    id: Literal["error_spikes"]
+
+
+class BotnetGroupingInsightCard(InsightCardBase[BotnetGroupingMeta]):
+    id: Literal["botnet_grouping"]
+
+
+class NewCountryTrafficInsightCard(InsightCardBase[NewCountryTrafficMeta]):
+    id: Literal["new_country_traffic"]
+
+
+class CitySurgesInsightCard(InsightCardBase[CitySurgesMeta]):
+    id: Literal["city_surges"]
+
+
+class CityErrorSpikesInsightCard(InsightCardBase[CityErrorSpikesMeta]):
+    id: Literal["city_error_spikes"]
+
+
+class CityLatencyRegressionsInsightCard(InsightCardBase[CityLatencyRegressionsMeta]):
+    id: Literal["city_latency_regressions"]
+
+
+class NewCityTrafficInsightCard(InsightCardBase[NewCityTrafficMeta]):
+    id: Literal["new_city_traffic"]
+
+
+class UaMonocultureInsightCard(InsightCardBase[UaMonocultureMeta]):
+    id: Literal["ua_monoculture"]
+
+
+class NewProbeUrlsInsightCard(InsightCardBase[NewProbeUrlsMeta]):
+    id: Literal["new_probe_urls"]
+
+
+class WafSignalSpikesInsightCard(InsightCardBase[WafSignalSpikesMeta]):
+    id: Literal["waf_signal_spikes"]
+
+
+class ProxySurgeInsightCard(InsightCardBase[ProxySurgeMeta]):
+    id: Literal["proxy_surge"]
+
+
+class AsnConcentrationInsightCard(InsightCardBase[AsnConcentrationMeta]):
+    id: Literal["asn_concentration"]
+
+
+class AsnMetroPerformanceInsightCard(InsightCardBase[AsnMetroPerformanceMeta]):
+    id: Literal["asn_metro_performance"]
+
+
+class CacheCollapseInsightCard(InsightCardBase[CacheCollapseMeta]):
+    id: Literal["cache_collapse"]
+
+
+class CacheabilityRegressionInsightCard(InsightCardBase[CacheabilityRegressionMeta]):
+    id: Literal["cacheability_regression"]
+
+
+class LatencyRegressionInsightCard(InsightCardBase[LatencyRegressionMeta]):
+    id: Literal["latency_regression"]
+
+
+class ImpossibleDistanceInsightCard(InsightCardBase[ImpossibleDistanceMeta]):
+    id: Literal["impossible_distance"]
+
+
+class TailLatencyInsightCard(InsightCardBase[TailLatencyMeta]):
+    id: Literal["tail_latency"]
+
+
+class CipherSpreadInsightCard(InsightCardBase[CipherSpreadMeta]):
+    id: Literal["cipher_spread"]
+
+
+class RequestSizeAnomalyInsightCard(InsightCardBase[RequestSizeAnomalyMeta]):
+    id: Literal["request_size_anomaly"]
+
+
+class ConnectionAbuseInsightCard(InsightCardBase[ConnectionAbuseMeta]):
+    id: Literal["connection_abuse"]
+
+
+class RegionLatencyInsightCard(InsightCardBase[RegionLatencyMeta]):
+    id: Literal["region_latency"]
+
+
+class CacheTtlMismatchInsightCard(InsightCardBase[CacheTtlMismatchMeta]):
+    id: Literal["cache_ttl_mismatch"]
+
+
+class ImageOptimizationOpportunitiesInsightCard(InsightCardBase[ImageOptimizationOpportunitiesMeta]):
+    id: Literal["image_optimization_opportunities"]
+
+
+class OriginLatencySpikeInsightCard(InsightCardBase[OriginLatencySpikeMeta]):
+    id: Literal["origin_latency_spike"]
+
+
+class OriginErrorRateInsightCard(InsightCardBase[OriginErrorRateMeta]):
+    id: Literal["origin_error_rate"]
+
+
+class OriginRetriesInsightCard(InsightCardBase[OriginRetriesMeta]):
+    id: Literal["origin_retries"]
+
+
+class OriginIpFailureInsightCard(InsightCardBase[OriginIpFailureMeta]):
+    id: Literal["origin_ip_failure"]
+
+
+class ShieldPathDegradationInsightCard(InsightCardBase[ShieldPathDegradationMeta]):
+    id: Literal["shield_path_degradation"]
+
+
+class RepeatedPatternsInsightCard(InsightCardBase[RepeatedPatternsMeta]):
+    id: Literal["repeated_patterns"]
+
+
+class RepeatedPatternsFpInsightCard(InsightCardBase[RepeatedPatternsFpMeta]):
+    id: Literal["repeated_patterns_fp"]
+
+
+class LowAndSlowInsightCard(InsightCardBase[LowAndSlowMeta]):
+    id: Literal["low_and_slow"]
+
+
+class CredentialEnumerationInsightCard(InsightCardBase[CredentialEnumerationMeta]):
+    id: Literal["credential_enumeration"]
+
+
+class NetworkAsnHealthInsightCard(InsightCardBase[NetworkAsnHealthMeta]):
+    id: Literal["network_asn_health"]
+
+
+class ContentDiscoveryInsightCard(InsightCardBase[ContentDiscoveryMeta]):
+    id: Literal["content_discovery"]
+
+
+class RefererMonocultureInsightCard(InsightCardBase[RefererMonocultureMeta]):
+    id: Literal["referer_monoculture"]
+
+
+class MethodDriftInsightCard(InsightCardBase[MethodDriftMeta]):
+    id: Literal["method_drift"]
+
+
+class NewAsnTrafficInsightCard(InsightCardBase[NewAsnTrafficMeta]):
+    id: Literal["new_asn_traffic"]
+
+
+class AsnHostingShiftInsightCard(InsightCardBase[AsnHostingShiftMeta]):
+    id: Literal["asn_hosting_shift"]
+
+
+class MetroDeliveryDegradationInsightCard(InsightCardBase[MetroDeliveryDegradationMeta]):
+    id: Literal["metro_delivery_degradation"]
+
+
+class ConnectionTypeMixInsightCard(InsightCardBase[ConnectionTypeMixMeta]):
+    id: Literal["connection_type_mix"]
+
+
+class PopLatencyRegressionInsightCard(InsightCardBase[PopLatencyRegressionMeta]):
+    id: Literal["pop_latency_regression"]
+
+
+class Http3FallbackInsightCard(InsightCardBase[Http3FallbackMeta]):
+    id: Literal["http3_fallback"]
+
+
+class CacheHitCliffInsightCard(InsightCardBase[CacheHitCliffMeta]):
+    id: Literal["cache_hit_cliff"]
+
+
+class PayloadCompressionRegressionInsightCard(InsightCardBase[PayloadCompressionRegressionMeta]):
+    id: Literal["payload_compression_regression"]
+
+
+class SessionHarvestingInsightCard(InsightCardBase[SessionHarvestingMeta]):
+    id: Literal["session_harvesting"]
+
+
+class TimeoutSplitInsightCard(InsightCardBase[TimeoutSplitMeta]):
+    id: Literal["timeout_split"]
+
+
+class CrawlerDisparityInsightCard(InsightCardBase[CrawlerDisparityMeta]):
+    id: Literal["crawler_disparity"]
+
+
+class StaleBrowserVersionInsightCard(InsightCardBase[StaleBrowserVersionMeta]):
+    id: Literal["stale_browser_version"]
+
+
+class OrphanedDeepCrawlInsightCard(InsightCardBase[OrphanedDeepCrawlMeta]):
+    id: Literal["orphaned_deep_crawl"]
+
+
+class ResidentialFingerprintDispersionInsightCard(InsightCardBase[ResidentialFingerprintDispersionMeta]):
+    id: Literal["residential_fingerprint_dispersion"]
+
+
+class HighScale5xxInsightCard(InsightCardBase[HighScale5xxMeta]):
+    id: Literal["high_scale_5xx"]
+
+
+InsightCard = Annotated[
+    ErrorSpikesInsightCard
+    | BotnetGroupingInsightCard
+    | NewCountryTrafficInsightCard
+    | CitySurgesInsightCard
+    | CityErrorSpikesInsightCard
+    | CityLatencyRegressionsInsightCard
+    | NewCityTrafficInsightCard
+    | UaMonocultureInsightCard
+    | NewProbeUrlsInsightCard
+    | WafSignalSpikesInsightCard
+    | ProxySurgeInsightCard
+    | AsnConcentrationInsightCard
+    | AsnMetroPerformanceInsightCard
+    | CacheCollapseInsightCard
+    | CacheabilityRegressionInsightCard
+    | LatencyRegressionInsightCard
+    | ImpossibleDistanceInsightCard
+    | TailLatencyInsightCard
+    | CipherSpreadInsightCard
+    | RequestSizeAnomalyInsightCard
+    | ConnectionAbuseInsightCard
+    | RegionLatencyInsightCard
+    | CacheTtlMismatchInsightCard
+    | ImageOptimizationOpportunitiesInsightCard
+    | OriginLatencySpikeInsightCard
+    | OriginErrorRateInsightCard
+    | OriginRetriesInsightCard
+    | OriginIpFailureInsightCard
+    | ShieldPathDegradationInsightCard
+    | RepeatedPatternsInsightCard
+    | RepeatedPatternsFpInsightCard
+    | LowAndSlowInsightCard
+    | CredentialEnumerationInsightCard
+    | NetworkAsnHealthInsightCard
+    | ContentDiscoveryInsightCard
+    | RefererMonocultureInsightCard
+    | MethodDriftInsightCard
+    | NewAsnTrafficInsightCard
+    | AsnHostingShiftInsightCard
+    | MetroDeliveryDegradationInsightCard
+    | ConnectionTypeMixInsightCard
+    | PopLatencyRegressionInsightCard
+    | Http3FallbackInsightCard
+    | CacheHitCliffInsightCard
+    | PayloadCompressionRegressionInsightCard
+    | SessionHarvestingInsightCard
+    | TimeoutSplitInsightCard
+    | CrawlerDisparityInsightCard
+    | StaleBrowserVersionInsightCard
+    | OrphanedDeepCrawlInsightCard
+    | ResidentialFingerprintDispersionInsightCard
+    | HighScale5xxInsightCard,
+    Field(discriminator="id"),
+]
+
+
+class InsightsResponse(BaseResponse):
+    insights: list[InsightCard]
+    window_start: str
+    window_end: str
+    baseline_start: str
+    baseline_end: str
+    computed_at: str
+    window_hours: float
+    baseline_hours: float
+
+
+class InsightAvailability(BaseModel):
+    id: str
+    title: str
+    description: str
+    category: str | None = None
+    missing_fields: list[str] | None = None
+    required_fields: list[str] | None = None
+    required_groups: list[str] | None = None
+    available: bool
+
+
+class InsightsAvailabilityResponse(BaseModel):
+    available: bool | list[str]
+    insights: list[InsightAvailability] | None = None
+    unavailable: list[InsightAvailability] | None = None
+
+
+class CacheCollapseDetailRequest(BaseModel):
+    url: str
+    window_size_hrs: float = Field(default=24.0, gt=0, le=168)
+    baseline_hours: float = Field(default=168.0, gt=0, le=2160)
+
+
+class CacheCollapseTimelinePoint(BaseModel):
+    bucket: str
+    expected_hits: float
+    real_hits: int
+    misses: int
+    total_requests: int
+    hit_rate: float
+
+
+class CacheMissPoint(BaseModel):
+    timestamp: str
+    cache: str
+    pop: str | None = None
+    ip: str | None = None
+    status: int | None = None
+
+
+class CacheBreakdown(BaseModel):
+    hits: int = 0
+    misses: int = 0
+    passes: int = 0
+    other: int = 0
+
+
+class CacheCollapseDetailResponse(BaseResponse):
+    url: str = ""
+    timeline: list[CacheCollapseTimelinePoint] = Field(default_factory=list)
+    recent_misses: list[CacheMissPoint] = Field(default_factory=list)
+    breakdown: CacheBreakdown = Field(default_factory=CacheBreakdown)
+    baseline_hit_rate: float = 0.0
+    window_hit_rate: float = 0.0
+    baseline_pass_rate: float = 0.0
+    window_pass_rate: float = 0.0
+    has_data: bool = True
+    clusters: list[Any] = Field(default_factory=list)
 
 
 class SessionsRequest(RangeKeyedRequest, PaginationMixin):

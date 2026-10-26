@@ -52786,8 +52786,7 @@
         },
         "additionalProperties": true,
         "type": "object",
-        "title": "ActiveQueryRow",
-        "description": "One in-flight query (``_row_for_active``). ``sql`` is only populated\nwhen the caller asked for ``full_sql``; ``started_at_utc`` is epoch\nseconds (``time.time()``)."
+        "title": "ActiveQueryRow"
       },
       "AggregatesRequest": {
         "properties": {
@@ -54562,8 +54561,7 @@
           }
         },
         "type": "object",
-        "title": "AssetsAggregatesResponse",
-        "description": "Composite of assets & shield performance cards."
+        "title": "AssetsAggregatesResponse"
       },
       "AssetsRequest": {
         "properties": {
@@ -54621,8 +54619,7 @@
           }
         },
         "type": "object",
-        "title": "AssetsRequest",
-        "description": "Assets analytics request schema supporting relative-range resolving."
+        "title": "AssetsRequest"
       },
       "AuditLogEntry": {
         "properties": {
@@ -55188,8 +55185,7 @@
         },
         "additionalProperties": true,
         "type": "object",
-        "title": "BackfillWindowResponse",
-        "description": "``POST /admin/backfill-window``: ``iceberg.sync_data`` counters, or ``error`` + ``files_downloaded=0``."
+        "title": "BackfillWindowResponse"
       },
       "BackupExportPayload": {
         "properties": {
@@ -56053,8 +56049,7 @@
           "ok",
           "source"
         ],
-        "title": "BotSourceRefreshResponse",
-        "description": "``POST /admin/bot-sources/{source_id}/refresh``."
+        "title": "BotSourceRefreshResponse"
       },
       "BotSourcesRefreshResponse": {
         "properties": {
@@ -56087,8 +56082,7 @@
           "updated_count",
           "failed_count"
         ],
-        "title": "BotSourcesRefreshResponse",
-        "description": "``POST /admin/bot-sources/refresh`` and ``/admin/bots/refresh``."
+        "title": "BotSourcesRefreshResponse"
       },
       "BotSourcesResponse": {
         "properties": {
@@ -57189,8 +57183,7 @@
           "state",
           "query_id"
         ],
-        "title": "CancelResponse",
-        "description": "Outcome of ``POST /api/admin/queries/{qid}/cancel``."
+        "title": "CancelResponse"
       },
       "CeleryActiveTask": {
         "properties": {
@@ -59597,8 +59590,7 @@
         },
         "additionalProperties": true,
         "type": "object",
-        "title": "CompletedQueryRow",
-        "description": "One finished query (``_row_for_completed``); also the exact layout\nthe persisted ``/slow-queries`` rows are re-shaped into."
+        "title": "CompletedQueryRow"
       },
       "CompressionPerformanceRow": {
         "properties": {
@@ -61935,8 +61927,7 @@
           "ok",
           "status"
         ],
-        "title": "DuckdbRecycleResponse",
-        "description": "``POST /admin/duckdb/recycle``: ``skipped`` carries reason/rss_mb/threshold_mb, ``recycled`` the rest."
+        "title": "DuckdbRecycleResponse"
       },
       "DuckdbStatusResponse": {
         "properties": {
@@ -62928,8 +62919,7 @@
           "status",
           "version"
         ],
-        "title": "HealthResponse",
-        "description": "``GET /api/health``: liveness payload; ``services`` only for ``?deep=1`` local callers."
+        "title": "HealthResponse"
       },
       "HealthServiceState": {
         "properties": {
@@ -65241,8 +65231,7 @@
           ]
         },
         "type": "object",
-        "title": "IcebergCalendarResponse",
-        "description": "``GET /admin/iceberg-calendar``: ISO date -> per-day entry (open-keyed), plus debug envelope keys."
+        "title": "IcebergCalendarResponse"
       },
       "IcebergTableInfoResponse": {
         "properties": {
@@ -70635,8 +70624,7 @@
           }
         },
         "type": "object",
-        "title": "InsightsRequest",
-        "description": "Request payload for /api/insights."
+        "title": "InsightsRequest"
       },
       "InsightsResponse": {
         "properties": {
@@ -74588,8 +74576,7 @@
           "health_score",
           "reqs"
         ],
-        "title": "NetworkHeatmapCell",
-        "description": "One (ASN, time bucket) health cell."
+        "title": "NetworkHeatmapCell"
       },
       "NetworkHeatmapRow": {
         "properties": {
@@ -74824,8 +74811,7 @@
           "health_score",
           "reqs"
         ],
-        "title": "NetworkMapCity",
-        "description": "One city cell inside a map bucket; ``city_idx`` indexes ``NetworkHealthResponse.cities``."
+        "title": "NetworkMapCity"
       },
       "NetworkMetrics": {
         "properties": {
@@ -75683,8 +75669,7 @@
           "workspace_id",
           "stats"
         ],
-        "title": "NgwafSyncResponse",
-        "description": "``POST /admin/ngwaf/sync/{service_id}``."
+        "title": "NgwafSyncResponse"
       },
       "NgwafVerifiedBotRow": {
         "properties": {
@@ -76316,8 +76301,7 @@
           }
         },
         "type": "object",
-        "title": "OriginAggregatesResponse",
-        "description": "Composite of every origin card on the /origin page."
+        "title": "OriginAggregatesResponse"
       },
       "OriginDrilldownRequest": {
         "properties": {
@@ -77949,8 +77933,7 @@
           "status",
           "count"
         ],
-        "title": "OriginStatusCodeRow",
-        "description": "``status == -1`` buckets any origin status outside 100-599."
+        "title": "OriginStatusCodeRow"
       },
       "OriginStatusCodesResponse": {
         "properties": {
@@ -78453,8 +78436,7 @@
           "time",
           "miss_count"
         ],
-        "title": "OriginTimeseriesPoint",
-        "description": "``edge`` is only present when the series is split by leg."
+        "title": "OriginTimeseriesPoint"
       },
       "OriginTimeseriesRequest": {
         "properties": {
@@ -78979,8 +78961,7 @@
           "sections",
           "calls"
         ],
-        "title": "PageTelemetryResponse",
-        "description": "``GET /debug/page-telemetry``."
+        "title": "PageTelemetryResponse"
       },
       "PageTelemetrySection": {
         "properties": {
@@ -79508,8 +79489,7 @@
           "asn",
           "requests"
         ],
-        "title": "PerformanceAsnRow",
-        "description": "``asn`` is an int, or the raw dimension string when the value is not numeric; ``label``\nis the resolved ASN name on every path."
+        "title": "PerformanceAsnRow"
       },
       "PerformanceMetrics": {
         "properties": {
@@ -79807,8 +79787,7 @@
         },
         "additionalProperties": true,
         "type": "object",
-        "title": "PerformanceWaterfall",
-        "description": "Empty (``{}``) when scatter/waterfall were not requested or could not be computed."
+        "title": "PerformanceWaterfall"
       },
       "PerformanceWaterfallAvg": {
         "properties": {
@@ -82392,8 +82371,7 @@
         },
         "additionalProperties": true,
         "type": "object",
-        "title": "QueryAttribution",
-        "description": "``attribution`` block from ``_attribution_payload``."
+        "title": "QueryAttribution"
       },
       "QueryMonitorConfigResponse": {
         "properties": {
@@ -82406,8 +82384,7 @@
         "required": [
           "enabled"
         ],
-        "title": "QueryMonitorConfigResponse",
-        "description": "Nav-gating flag for the Live Query Monitor tab."
+        "title": "QueryMonitorConfigResponse"
       },
       "QueryRequest": {
         "properties": {
@@ -82758,8 +82735,7 @@
           "ok",
           "summary"
         ],
-        "title": "RdnsEnrichResponse",
-        "description": "``POST /admin/rdns/enrich``."
+        "title": "RdnsEnrichResponse"
       },
       "RdnsEnrichSummary": {
         "properties": {
@@ -84571,8 +84547,7 @@
         },
         "additionalProperties": true,
         "type": "object",
-        "title": "RumAnalyticsResponse",
-        "description": "``GET /{service_id}/rum/analytics`` (data, no-data and failure branches)."
+        "title": "RumAnalyticsResponse"
       },
       "RumBeaconHealthResponse": {
         "properties": {
@@ -84795,8 +84770,7 @@
           "p75",
           "distribution"
         ],
-        "title": "RumCwvVital",
-        "description": "One Core Web Vital. ``distribution`` is ``None`` only on the no-data branch."
+        "title": "RumCwvVital"
       },
       "RumDisableRequest": {
         "properties": {
@@ -85265,8 +85239,7 @@
         },
         "additionalProperties": true,
         "type": "object",
-        "title": "RumStatusResponse",
-        "description": "``GET /{service_id}/rum/status``. Analyst sessions only get the first two keys."
+        "title": "RumStatusResponse"
       },
       "RumTrends": {
         "properties": {
@@ -85379,8 +85352,7 @@
           "cls",
           "error_rate"
         ],
-        "title": "RumTrends",
-        "description": "Parallel per-bucket series. ``pageviews`` / ``interactions`` / ``errors``\nare absent on the no-data branch."
+        "title": "RumTrends"
       },
       "RumUpgradeRequest": {
         "properties": {
@@ -91830,8 +91802,7 @@
         "required": [
           "ok"
         ],
-        "title": "SharePurgeResponse",
-        "description": "``POST /admin/share/purge``: counts from ``share_db.purge_all_share_records``."
+        "title": "SharePurgeResponse"
       },
       "ShareRateLimitFailure": {
         "properties": {
@@ -92756,8 +92727,7 @@
         },
         "additionalProperties": true,
         "type": "object",
-        "title": "ShieldingAnalysis",
-        "description": "Typed sub-payload for ``NetworkHealthResponse.shielding_analysis``."
+        "title": "ShieldingAnalysis"
       },
       "ShieldingRow": {
         "properties": {
@@ -92921,8 +92891,7 @@
           }
         },
         "type": "object",
-        "title": "ShieldingRow",
-        "description": "One edge\u2192shield POP pair in the transit map / analysis table."
+        "title": "ShieldingRow"
       },
       "SlowQueriesClearResponse": {
         "properties": {
@@ -92940,8 +92909,7 @@
           "deleted",
           "service_id"
         ],
-        "title": "SlowQueriesClearResponse",
-        "description": "Outcome of ``DELETE /api/admin/slow-queries``."
+        "title": "SlowQueriesClearResponse"
       },
       "SlowQueriesCountResponse": {
         "properties": {
@@ -92964,8 +92932,7 @@
           "since_hours",
           "threshold_ms"
         ],
-        "title": "SlowQueriesCountResponse",
-        "description": "Aggregate row-count for the operations-overview card."
+        "title": "SlowQueriesCountResponse"
       },
       "SlowQueriesResponse": {
         "properties": {
@@ -92991,8 +92958,7 @@
           "since_hours",
           "threshold_ms"
         ],
-        "title": "SlowQueriesResponse",
-        "description": "Persisted slow-SQL history (``GET /api/admin/slow-queries``)."
+        "title": "SlowQueriesResponse"
       },
       "SnapshotResponse": {
         "properties": {
@@ -93021,8 +92987,7 @@
           "active",
           "completed"
         ],
-        "title": "SnapshotResponse",
-        "description": "Incremental snapshot of the in-process query registry.\n\n``last_seq`` is the high-water mark the client should send back as\n``since_seq`` on its next poll so the registry can stream only new rows."
+        "title": "SnapshotResponse"
       },
       "SqliteProfilerEntry": {
         "properties": {
@@ -93230,8 +93195,7 @@
           "by_db_type",
           "longest_ms"
         ],
-        "title": "SummaryResponse",
-        "description": "Cheap counts that power the live-monitor tab badge."
+        "title": "SummaryResponse"
       },
       "SuspiciousIspRow": {
         "properties": {
@@ -96182,8 +96146,7 @@
           "service_id",
           "is_clean"
         ],
-        "title": "VclHealthResponse",
-        "description": "``GET /admin/vcl-health``: ``error`` replaces the snippet fields when the check cannot run."
+        "title": "VclHealthResponse"
       },
       "VclLintRequest": {
         "properties": {

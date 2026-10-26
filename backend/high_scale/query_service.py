@@ -33,13 +33,7 @@ from backend.models.dashboard import QueryRequest as DashboardQueryRequest
 from backend.repositories._base import SectionTimer, _compact_sql_for_debug, _safe_table
 from backend.repositories.query import MAX_QUERY_ROWS
 from backend.utils.sql_validator import SAFE_IDENT_RE, SQLValidationError, validate_user_sql
-from backend.utils.telemetry import (
-    _QUERIES,
-    _RECORDING_TELEMETRY,
-    get_page_load_id,
-    get_queries,
-    get_tracked_calls,
-)
+from backend.utils.telemetry import _QUERIES, _RECORDING_TELEMETRY, get_page_load_id, get_queries, get_tracked_calls
 
 if TYPE_CHECKING:
     from backend.high_scale.ingest_controller import HighScaleService
@@ -90,10 +84,7 @@ _RUM_TABLES = {
         "rum_vitals_facts",
         "client_id, request_event_id, metric_name, metric_value, metric_rating, pathname, country",
     ),
-    "rum_errors": (
-        "rum_error_facts",
-        "client_id, request_event_id, error_message, error_file, pathname, country",
-    ),
+    "rum_errors": ("rum_error_facts", "client_id, request_event_id, error_message, error_file, pathname, country"),
 }
 
 
@@ -491,22 +482,11 @@ class QueryRouter:
         if request.end_utc - request.start_utc > self._config.max_cold_range:
             raise ValueError("cold query range exceeds configured bound")
         return self._build(
-            request,
-            QueryTier.COLD_JOB,
-            ("queued_query_job",),
-            True,
-            True,
-            "cold history requires a bounded queued job",
+            request, QueryTier.COLD_JOB, ("queued_query_job",), True, True, "cold history requires a bounded queued job"
         )
 
     def _build(
-        self,
-        request: QueryRequest,
-        tier: QueryTier,
-        sources: tuple[str, ...],
-        queued: bool,
-        bounded: bool,
-        reason: str,
+        self, request: QueryRequest, tier: QueryTier, sources: tuple[str, ...], queued: bool, bounded: bool, reason: str
     ) -> QueryPlan:
         max_rows = min(request.limit, self._config.max_cold_rows) if tier is QueryTier.COLD_JOB else request.limit
         plan = QueryPlan(
@@ -553,11 +533,7 @@ class DecodeResult:
 
 
 def decode_source_object(
-    source: ArchiveSourceObject,
-    payload: bytes,
-    *,
-    transform_version: str,
-    domain: str | None = None,
+    source: ArchiveSourceObject, payload: bytes, *, transform_version: str, domain: str | None = None
 ) -> DecodeResult:
     selected_domain = domain or source.domain
     if selected_domain not in {"request", "rum_vitals", "rum_errors"}:
@@ -933,8 +909,7 @@ def _assert_table_filters_enforced(client: Any) -> None:
     if getattr(client, "_table_filters_verified", False):
         return
     rows = client.execute(
-        "SELECT count() AS n FROM system.one",
-        settings={"additional_table_filters": "{'system.one': 'dummy = 1'}"},
+        "SELECT count() AS n FROM system.one", settings={"additional_table_filters": "{'system.one': 'dummy = 1'}"}
     )
     if not rows or int(rows[0].get("n", 1)) != 0:
         raise RuntimeError("the SQL console is disabled: ClickHouse is not enforcing additional_table_filters")
@@ -1008,15 +983,15 @@ def _reject_ambiguous_syntax(sql: str, table_names: frozenset[str]) -> None:
     code = _STRING_LITERAL.sub(" ", sql)
     if "'" in code:
         raise PermissionError("unterminated string literal")
-    if _COMMENT_OR_ESCAPE.search(code):
-        raise PermissionError("comments, '$' and backticks are not allowed in console queries")
-    if re.search(r"[^\x20-\x7e\n\r\t]", code):
-        raise PermissionError("non-ASCII characters are only allowed inside string literals")
-    if _RESULT_CLAUSES.search(code):
-        raise PermissionError("SETTINGS, FORMAT, INTO OUTFILE and RECURSIVE are not allowed")
     names = "|".join(sorted(re.escape(name) for name in table_names | frozenset(_FACT_DOMAINS)))
-    if re.search(rf"\.\s*(?:{names})\b", code, flags=re.IGNORECASE):
-        raise PermissionError("schema-qualified table names are not allowed")
+    for pat, msg, flags in (
+        (_COMMENT_OR_ESCAPE, "comments, '$' and backticks are not allowed in console queries", 0),
+        (r"[^\x20-\x7e\n\r\t]", "non-ASCII characters are only allowed inside string literals", 0),
+        (_RESULT_CLAUSES, "SETTINGS, FORMAT, INTO OUTFILE and RECURSIVE are not allowed", 0),
+        (rf"\.\s*(?:{names})\b", "schema-qualified table names are not allowed", re.IGNORECASE),
+    ):
+        if re.search(pat, code, flags=flags):
+            raise PermissionError(msg)
 
 
 def _reject_unsafe_functions(sql: str) -> None:
@@ -1068,13 +1043,15 @@ def query_endpoint(
             raise PermissionError(exc.message) from exc
     timer.mark("validate_user_sql", _t_val)
     sql = raw_sql.rstrip().rstrip(";")
-    if svc_table != "logs":
-        sql = re.sub(rf"\b{re.escape(svc_table)}\b", names["request_facts"], sql, flags=re.IGNORECASE)
-    sql = re.sub(r"\blogs\b", names["request_facts"], sql, flags=re.IGNORECASE)
-    sql = re.sub(r"\bclient_vitals\b", names["rum_vitals_facts"], sql, flags=re.IGNORECASE)
-    sql = re.sub(r"\bclient_errors\b", names["rum_error_facts"], sql, flags=re.IGNORECASE)
-    sql = re.sub(r"(?<!AS\s)(?<!')\btimestamp\b(?!')", "event_timestamp", sql, flags=re.IGNORECASE)
-    sql = re.sub(r"(?<!AS\s)(?<!')\bip\b(?!')", "client_ip", sql, flags=re.IGNORECASE)
+    for pat, repl in (
+        *([(rf"\b{re.escape(svc_table)}\b", names["request_facts"])] if svc_table != "logs" else []),
+        (r"\blogs\b", names["request_facts"]),
+        (r"\bclient_vitals\b", names["rum_vitals_facts"]),
+        (r"\bclient_errors\b", names["rum_error_facts"]),
+        (r"(?<!AS\s)(?<!')\btimestamp\b(?!')", "event_timestamp"),
+        (r"(?<!AS\s)(?<!')\bip\b(?!')", "client_ip"),
+    ):
+        sql = re.sub(pat, repl, sql, flags=re.IGNORECASE)
 
     def _normalize_iso_literal(match: re.Match[str]) -> str:
         raw = match.group(1)
@@ -1085,57 +1062,31 @@ def query_endpoint(
             return match.group(0)
 
     sql = re.sub(
-        r"'(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?)'",
-        _normalize_iso_literal,
-        sql,
+        r"'(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?)'", _normalize_iso_literal, sql
     )
-    from backend.high_scale.dashboard import _FIELD_DIMENSIONS
-
     for field in _FIELD_DIMENSIONS.values():
         if field in {"client_ip", "country", "url", "cmcd", "custom_fields"}:
             continue
         sql = re.sub(rf"(?<!')\b{field}\b(?!')", f"custom_fields['{field}']", sql)
     for b_field in ("edge", "is_ipv6", "waf"):
-        sql = re.sub(
-            rf"custom_fields\['{b_field}'\]\s+IN\s*\(\s*'true'\s*\)",
-            f"lower(custom_fields['{b_field}']) IN ('true', '1')",
-            sql,
-            flags=re.IGNORECASE,
-        )
-        sql = re.sub(
-            rf"custom_fields\['{b_field}'\]\s+NOT\s+IN\s*\(\s*'true'\s*\)",
-            f"lower(custom_fields['{b_field}']) NOT IN ('true', '1')",
-            sql,
-            flags=re.IGNORECASE,
-        )
-        sql = re.sub(
-            rf"custom_fields\['{b_field}'\]\s+IN\s*\(\s*'false'\s*\)",
-            f"lower(custom_fields['{b_field}']) IN ('false', '0', '')",
-            sql,
-            flags=re.IGNORECASE,
-        )
-        sql = re.sub(
-            rf"custom_fields\['{b_field}'\]\s*=\s*'true'",
-            f"lower(custom_fields['{b_field}']) IN ('true', '1')",
-            sql,
-            flags=re.IGNORECASE,
-        )
-        sql = re.sub(
-            rf"custom_fields\['{b_field}'\]\s*=\s*'false'",
-            f"lower(custom_fields['{b_field}']) IN ('false', '0', '')",
-            sql,
-            flags=re.IGNORECASE,
-        )
-    sql = re.sub(
-        r"(custom_fields\['[a-zA-Z0-9_]+'\])\s*(=|!=|<>)\s*(-?\d+(?:\.\d+)?)\b",
-        r"\1 \2 '\3'",
-        sql,
-    )
-    sql = re.sub(
-        r"(custom_fields\['[a-zA-Z0-9_]+'\])\s*(<=|>=|<|>)\s*(-?\d+(?:\.\d+)?)\b",
-        r"toFloat64OrZero(\1) \2 \3",
-        sql,
-    )
+        for pat, repl in (
+            (r"IN\s*\(\s*'true'\s*\)", "IN ('true', '1')"),
+            (r"NOT\s+IN\s*\(\s*'true'\s*\)", "NOT IN ('true', '1')"),
+            (r"IN\s*\(\s*'false'\s*\)", "IN ('false', '0', '')"),
+            (r"=\s*'true'", "IN ('true', '1')"),
+            (r"=\s*'false'", "IN ('false', '0', '')"),
+        ):
+            sql = re.sub(
+                rf"custom_fields\['{b_field}'\]\s*{pat}",
+                f"lower(custom_fields['{b_field}']) {repl}",
+                sql,
+                flags=re.IGNORECASE,
+            )
+    for pat, repl in (
+        (r"(custom_fields\['[a-zA-Z0-9_]+'\])\s*(=|!=|<>)\s*(-?\d+(?:\.\d+)?)\b", r"\1 \2 '\3'"),
+        (r"(custom_fields\['[a-zA-Z0-9_]+'\])\s*(<=|>=|<|>)\s*(-?\d+(?:\.\d+)?)\b", r"toFloat64OrZero(\1) \2 \3"),
+    ):
+        sql = re.sub(pat, repl, sql)
     fact_tables = {
         names[canonical]: domain
         for canonical, domain in _FACT_DOMAINS.items()
@@ -1163,13 +1114,7 @@ def query_endpoint(
     timer.mark("execute", t0)
     elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
     compact_sql = _compact_sql_for_debug(sql.strip())
-    _debug_queries = [
-        {
-            "sql": compact_sql,
-            "time_ms": elapsed_ms,
-            "engine": "ClickHouse",
-        }
-    ]
+    _debug_queries = [{"sql": compact_sql, "time_ms": elapsed_ms, "engine": "ClickHouse"}]
     fetched_rows = len(res) if res else 0
     truncated = fetched_rows > max_rows
     if truncated:
@@ -1205,9 +1150,6 @@ def query_endpoint(
     }
 
 
-# ---------------------------------------------------------------------------
-# Insights (anomaly detection) for high-scale services (folded from insights.py)
-# ---------------------------------------------------------------------------
 import contextvars
 import urllib.parse
 from collections.abc import Callable
@@ -1224,12 +1166,8 @@ from backend.high_scale._common import (
     visible_fact_clauses,
     visible_publication_fence_sql,
 )
-from backend.high_scale._common import (
-    format_iso_utc as _iso,
-)
-from backend.high_scale._common import (
-    format_iso_utc_or_empty as _iso_or_empty,
-)
+from backend.high_scale._common import format_iso_utc as _iso
+from backend.high_scale._common import format_iso_utc_or_empty as _iso_or_empty
 from backend.high_scale.insight_queries import (
     AUTH_REGEX,
     BOT_UA_REGEX,
@@ -1511,7 +1449,6 @@ def insights_endpoint(
         if detection is not None and all(column in present for column in definition.required_fields):
             candidates.append((definition, detection))
     with ThreadPoolExecutor(max_workers=_MAX_WORKERS, thread_name_prefix="hs-insights") as pool:
-        # Each task runs in a copy of this request's context so its ClickHouse calls stay attributed to the request.
         futures = [pool.submit(contextvars.copy_context().run, lambda pair=pair: run(*pair)) for pair in candidates]
         cards = [future.result() for future in futures]
     computed_at = now.isoformat()
@@ -1546,11 +1483,7 @@ def _bucket_interval(total_hours: float) -> str:
 
 
 def cache_collapse_detail_endpoint(
-    service: HighScaleService,
-    req: Any,
-    clamp_start: str | None,
-    clamp_end: str | None,
-    mask_ips: bool = False,
+    service: HighScaleService, req: Any, clamp_start: str | None, clamp_end: str | None, mask_ips: bool = False
 ) -> CacheCollapseDetailResponse:
     """Hit/miss timeline, disposition breakdown and recent misses for one URL, as on the standard path."""
     window_hours = float(req.window_size_hrs)
@@ -1647,9 +1580,6 @@ def cache_collapse_detail_endpoint(
     )
 
 
-# ---------------------------------------------------------------------------
-# High-scale session stitching over ClickHouse request_facts (folded from sessions.py)
-# ---------------------------------------------------------------------------
 _sessions_memo = ResponseMemo(ttl=30.0, maxsize=128)
 _CacheRegistry.register("high_scale.sessions._response_cache", _sessions_memo.cache)
 _DEFAULT_MIN_REQS_FLAG = 1000
@@ -1865,10 +1795,7 @@ def _as_dt(val: Any) -> datetime | None:
 
 
 def _enrich_paginated_sessions(
-    service: HighScaleService,
-    rows: list[dict[str, Any]],
-    where: str,
-    params: dict[str, Any],
+    service: HighScaleService, rows: list[dict[str, Any]], where: str, params: dict[str, Any]
 ) -> None:
     tuples_sql_parts: list[str] = []
     enrich_params: dict[str, Any] = dict(params)
@@ -2074,12 +2001,7 @@ def sessions_detail(
         "event_timestamp >= {start_time:DateTime64(3)}",
         "event_timestamp <= {end_time:DateTime64(3)}",
     ]
-    params: dict[str, Any] = {
-        "service_id": service.service_id,
-        "start_time": start_dt,
-        "end_time": end_dt,
-        "ip": ip,
-    }
+    params: dict[str, Any] = {"service_id": service.service_id, "start_time": start_dt, "end_time": end_dt, "ip": ip}
     if ja4:
         clauses.append("custom_fields['ja4'] = {ja4:String}")
         params["ja4"] = ja4
@@ -2126,9 +2048,6 @@ def sessions_detail(
     return {"data": data, "columns": list(data[0].keys()) if data else []}
 
 
-# ---------------------------------------------------------------------------
-# ClickHouse-backed triage aggregate reads (folded from aggregate_query.py)
-# ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class AggregateResponse:
     service_id: str
@@ -2251,24 +2170,14 @@ def _require_window_bounds(start: datetime | None, end: datetime | None) -> tupl
 
 
 def _query_fact_aggregates(
-    client: AggregateQueryClient,
-    *,
-    service_id: str,
-    domain: str,
-    dimensions: list[str],
-    start: datetime,
-    end: datetime,
+    client: AggregateQueryClient, *, service_id: str, domain: str, dimensions: list[str], start: datetime, end: datetime
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     table = _FACT_TABLES[domain]
     expressions = _FACT_DIMENSION_EXPRESSIONS[domain]
     if any(dimension not in expressions for dimension in dimensions):
         raise ValueError("aggregate dimension cannot be read exactly from event-time facts")
     dimension_values: list[str] = []
-    params: dict[str, Any] = {
-        "service_id": service_id,
-        "start": start.astimezone(UTC),
-        "end": end.astimezone(UTC),
-    }
+    params: dict[str, Any] = {"service_id": service_id, "start": start.astimezone(UTC), "end": end.astimezone(UTC)}
     for idx, dimension in enumerate(dimensions):
         key = f"fact_dimension_{idx}"
         dimension_values.append(f"tuple({{{key}:String}}, toString({expressions[dimension]}))")
@@ -2286,10 +2195,7 @@ def _query_fact_aggregates(
         f"FROM {table} ARRAY JOIN [{', '.join(dimension_values)}] AS dimension_value "
         f"WHERE {' AND '.join(clauses)}"
     )
-    totals = client.execute(
-        f"SELECT dimension, count() AS total_count FROM ({fact_values}) GROUP BY dimension",
-        params,
-    )
+    totals = client.execute(f"SELECT dimension, count() AS total_count FROM ({fact_values}) GROUP BY dimension", params)
     rows = client.execute(
         f"SELECT dimension, value, count() AS aggregate_count FROM ({fact_values}) "
         "GROUP BY dimension, value "
@@ -2301,11 +2207,7 @@ def _query_fact_aggregates(
 
 
 def query_clickhouse_aggregate(
-    client: AggregateQueryClient,
-    request: AggregateRequest,
-    *,
-    watermark: ServingWatermark,
-    now: datetime | None = None,
+    client: AggregateQueryClient, request: AggregateRequest, *, watermark: ServingWatermark, now: datetime | None = None
 ) -> AggregateResponse:
     """Read visible aggregate rows while preserving the aggregate contract."""
     request.validate()
@@ -2321,10 +2223,7 @@ def query_clickhouse_aggregate(
         "dimension={dimension:String}",
         visible_publication_fence_sql(f"{request.domain}_aggregate"),
     ]
-    params: dict[str, Any] = {
-        "service_id": request.service_id,
-        "dimension": dimension,
-    }
+    params: dict[str, Any] = {"service_id": request.service_id, "dimension": dimension}
     partial_minute_window = _is_partial_minute_window(request.start, request.end)
     if partial_minute_window:
         if dimension not in _FACT_DIMENSION_EXPRESSIONS[request.domain]:
@@ -2348,8 +2247,7 @@ def query_clickhouse_aggregate(
             )
         else:
             totals = client.execute(
-                f"SELECT sum({metric}) AS total_count FROM {table} WHERE {' AND '.join(clauses)}",
-                params,
+                f"SELECT sum({metric}) AS total_count FROM {table} WHERE {' AND '.join(clauses)}", params
             )
             rows = client.execute(
                 f"SELECT value, sum({metric}) AS aggregate_count "
@@ -2398,13 +2296,7 @@ def query_clickhouse_aggregates_batch(
         return {
             dim: query_clickhouse_aggregate(
                 client,
-                AggregateRequest(
-                    service_id=service_id,
-                    domain=domain,
-                    start=start,
-                    end=end,
-                    dimension=dim,
-                ),
+                AggregateRequest(service_id=service_id, domain=domain, start=start, end=end, dimension=dim),
                 watermark=watermark,
                 now=now,
             )
@@ -2428,12 +2320,7 @@ def query_clickhouse_aggregates_batch(
         start, end = _require_window_bounds(start, end)
         try:
             totals_rows, top_rows = _query_fact_aggregates(
-                client,
-                service_id=service_id,
-                domain=domain,
-                dimensions=unique_dims,
-                start=start,
-                end=end,
+                client, service_id=service_id, domain=domain, dimensions=unique_dims, start=start, end=end
             )
         except ClickHouseError as e:
             raise ValueError(f"ClickHouse server query failed (S3/FOS access credentials may be expired): {e}")
@@ -2484,13 +2371,7 @@ def query_clickhouse_aggregates_batch(
             return {
                 dim: query_clickhouse_aggregate(
                     client,
-                    AggregateRequest(
-                        service_id=service_id,
-                        domain=domain,
-                        start=start,
-                        end=end,
-                        dimension=dim,
-                    ),
+                    AggregateRequest(service_id=service_id, domain=domain, start=start, end=end, dimension=dim),
                     watermark=watermark,
                     now=now,
                 )
@@ -2508,13 +2389,7 @@ def query_clickhouse_aggregates_batch(
             return {
                 dim: query_clickhouse_aggregate(
                     client,
-                    AggregateRequest(
-                        service_id=service_id,
-                        domain=domain,
-                        start=start,
-                        end=end,
-                        dimension=dim,
-                    ),
+                    AggregateRequest(service_id=service_id, domain=domain, start=start, end=end, dimension=dim),
                     watermark=watermark,
                     now=now,
                 )
@@ -2561,38 +2436,17 @@ from dataclasses import dataclass
 from dataclasses import field as _dc_field
 
 from backend.core.request_telemetry import HighScaleSections
-from backend.high_scale._common import (
-    bucket as _bucket,
-)
-from backend.high_scale._common import (
-    build_published_facts_where as _facts_where,
-)
-from backend.high_scale._common import (
-    build_published_projection_where as _where,
-)
-from backend.high_scale._common import (
-    finite_float as _finite_float,
-)
-from backend.high_scale._common import (
-    percentiles as _percentiles,
-)
-from backend.high_scale._common import (
-    resolve_asn_display_labels,
-)
-from backend.high_scale._common import (
-    text as _text,
-)
-from backend.high_scale.dashboard import _FIELD_DIMENSIONS
+from backend.high_scale._common import bucket as _bucket
+from backend.high_scale._common import build_published_facts_where as _facts_where
+from backend.high_scale._common import build_published_projection_where as _where
+from backend.high_scale._common import finite_float as _finite_float
+from backend.high_scale._common import percentiles as _percentiles
+from backend.high_scale._common import resolve_asn_display_labels
+from backend.high_scale._common import text as _text
 from backend.models.performance import PerformanceAggregatesResponse
-from backend.repositories.utils.response_cache import (
-    ResponseMemo,
-    serialize_filters_for_key,
-)
+from backend.repositories.utils.response_cache import ResponseMemo, serialize_filters_for_key
 from backend.utils.time_window import CacheRegistry
 
-# Matches the standard path's ``USING SAMPLE 300``. Each batch keeps its lowest
-# ``sample_key`` rows, so the lowest keys across any union of batches are a
-# uniform sample of the union's rows.
 SCATTER_SAMPLE_SIZE = 300
 
 
@@ -2638,23 +2492,18 @@ def build_performance_projection_rows(rows: tuple[Mapping[str, Any], ...]) -> Pe
             continue
         elapsed = _finite_float(row.get("elapsed"))
         _add_waterfall_and_scatter(row, index, bucket, elapsed, waterfalls, scatter_candidates)
-        # URL dimension
         url = _text(row.get("url"))
         if url:
             acc = dimensions[(bucket, "url", url)]
             acc.requests += 1
             if elapsed is not None:
                 acc.latencies.append(elapsed)
-        # ASN dimension
         asn = _asn_text(row.get("asn"))
         if asn:
             acc = dimensions[(bucket, "asn", asn)]
             acc.requests += 1
             if elapsed is not None:
                 acc.latencies.append(elapsed)
-        # Top Bots? (Wait, user said "bot detection metrics")
-        # NGWAF Bots might use "ngwaf_bot_name"
-        # Let's add ASN and URL for now, maybe bot later or add it now if we need.
         bot = _text(row.get("_ngwaf_bot_name"))
         if bot:
             acc = dimensions[(bucket, "bot", bot)]
@@ -2730,12 +2579,7 @@ def _summary_row(bucket: datetime, sums: _WaterfallSums) -> dict[str, Any]:
     }
 
 
-def _dimension_row(
-    bucket: datetime,
-    dimension: str,
-    value: str,
-    acc: _Accumulator,
-) -> dict[str, Any]:
+def _dimension_row(bucket: datetime, dimension: str, value: str, acc: _Accumulator) -> dict[str, Any]:
     lat_p50, lat_p95, lat_p99 = _percentiles(acc.latencies, (0.50, 0.95, 0.99))
     return {
         "bucket_start": bucket.isoformat(),
@@ -2755,11 +2599,9 @@ _perf_memo = ResponseMemo(ttl=_HS_PERF_CACHE_TTL, maxsize=128, prewarmer=False)
 CacheRegistry.register("hs_performance_aggregates_memo", _perf_memo.cache)
 _ALL_SECTIONS = frozenset({"top_urls", "top_asns", "ttl_dist", "waterfall", "scatter"})
 _SORT_COLUMNS = {"avg": "avg_ms", "p50": "p50_ms", "p95": "p95_ms", "p99": "p99_ms"}
-# Same minimum request counts as the standard path's live queries.
 _MIN_URL_REQUESTS = 5
 _MIN_ASN_REQUESTS = 10
 _TOP_N = 20
-# Upper bound (seconds, inclusive) -> label; identical to the standard ttl_dist CASE.
 _TTL_EDGES = (
     (0, "0s"),
     (10, "<10s"),
@@ -2788,8 +2630,6 @@ def _ttl_bucket_expr(column: str) -> str:
     return _bucket_case(column, _TTL_EDGES, ">1y")
 
 
-# Raw request_facts expressions. Event fields live as strings in custom_fields, in
-# the units the log format emits: elapsed/ottfb/ottlb in microseconds, ttfb in seconds.
 _ELAPSED_MS = "toFloat64OrNull(custom_fields['elapsed']) / 1000.0"
 _TTFB_MS = "toFloat64OrNull(custom_fields['ttfb']) * 1000.0"
 _OTTFB_MS = "coalesce(toFloat64OrNull(custom_fields['ottfb']), 0) / 1000.0"
@@ -2827,15 +2667,8 @@ def _projection_percentile_rows(
     sort_column: str,
     min_requests: int,
 ) -> list[dict[str, Any]]:
-    where, params = _where(
-        service.service_id,
-        "performance_dimensions",
-        start_time,
-        end_time,
-        dimension=dimension,
-    )
+    where, params = _where(service.service_id, "performance_dimensions", start_time, end_time, dimension=dimension)
     params["limit"] = _TOP_N
-    # The stored latency_*_ms columns hold the raw elapsed value, which is microseconds.
     return service.client.execute(
         f"/* perf:{marker} */ SELECT value, "
         "sum(requests) AS req_count, "
@@ -2896,10 +2729,7 @@ def _asn_rows(service: HighScaleService, rows: list[dict[str, Any]]) -> list[dic
 
 
 def _ttl_dist(
-    service: HighScaleService,
-    start_time: str | None,
-    end_time: str | None,
-    filters: Mapping[str, Any],
+    service: HighScaleService, start_time: str | None, end_time: str | None, filters: Mapping[str, Any]
 ) -> list[dict[str, Any]]:
     if filters:
         where, params = _facts_where(service.service_id, start_time, end_time, filters)
@@ -2916,10 +2746,7 @@ def _ttl_dist(
 
 
 def _waterfall(
-    service: HighScaleService,
-    start_time: str | None,
-    end_time: str | None,
-    filters: Mapping[str, Any],
+    service: HighScaleService, start_time: str | None, end_time: str | None, filters: Mapping[str, Any]
 ) -> dict[str, Any]:
     if filters:
         where, params = _facts_where(service.service_id, start_time, end_time, filters)
@@ -2956,10 +2783,7 @@ def _waterfall(
 
 
 def _scatter(
-    service: HighScaleService,
-    start_time: str | None,
-    end_time: str | None,
-    filters: Mapping[str, Any],
+    service: HighScaleService, start_time: str | None, end_time: str | None, filters: Mapping[str, Any]
 ) -> list[dict[str, Any]]:
     if filters:
         where, params = _facts_where(service.service_id, start_time, end_time, filters)
@@ -3018,8 +2842,6 @@ def performance_aggregates(
         cached = _perf_memo.get_with_telemetry(cache_key)
         if cached is not None:
             return PerformanceAggregatesResponse.with_telemetry(**cached)
-    # Pre-validate filter clauses on the caller thread so unsupported filter
-    # fields raise immediately and deterministically.
     facts_where_params: tuple[str, dict[str, Any]] | None = None
     if filters and (wanted & {"top_urls", "top_asns", "ttl_dist", "waterfall", "scatter"}):
         facts_where_params = _facts_where(service.service_id, start_time, end_time, filters)
@@ -3090,8 +2912,6 @@ def performance_aggregates(
         result["top_asns"] = trace.run(
             "asn_labels", lambda: _asn_rows(service, result["top_asns"]), activity="overhead"
         )
-    # Unfiltered top tables request-weight-average per-minute percentiles; filtered ones
-    # are exact ClickHouse quantiles over the matching facts.
     payload = {**result, "_approx": not filters, "section_timings": trace.timings()}
     if cache_key is not None:
         _perf_memo.put(cache_key, payload)
@@ -3104,9 +2924,7 @@ from datetime import timedelta
 
 from backend.high_scale.publication import build_cmcd_projection_key
 from backend.models.performance import CmcdRequest
-from backend.repositories.utils.response_cache import (
-    ResponseMemo,
-)
+from backend.repositories.utils.response_cache import ResponseMemo
 from backend.utils.bounded_cache import CacheRegistry
 
 
@@ -3155,18 +2973,8 @@ _memo = ResponseMemo(ttl=30.0, maxsize=128, prewarmer=False)
 CacheRegistry.register("hs_cmcd_aggregates_memo", _memo.cache)
 _DEFAULT_WINDOW = timedelta(days=1)
 _BUCKET_FORMAT = "%Y-%m-%d %H:%M:%S"
-_DURATION_BUCKETS = {
-    1: "<30s",
-    2: "30s–2m",
-    3: "2–5m",
-    4: "5–10m",
-    5: "10–30m",
-    6: "30m–1h",
-    7: ">1h",
-}
+_DURATION_BUCKETS = {1: "<30s", 2: "30s–2m", 3: "2–5m", 4: "5–10m", 5: "10–30m", 6: "30m–1h", 7: ">1h"}
 _FILTER_COLUMNS = {"country": "country", "asn": "asn"}
-# One row per CMCD event with each key parsed once. Flags are NULL when the key is absent so
-# "never reported" stays distinguishable from "reported false".
 _EVENTS = """
     SELECT event_timestamp AS ts,
            cmcd['sid'] AS sid,
@@ -3236,7 +3044,9 @@ def _filter_clauses(filters: Mapping[str, Any]) -> tuple[list[str], dict[str, An
     return clauses, params
 
 
-def _scope(service: HighScaleService, req: CmcdRequest, start: datetime, end: datetime) -> tuple[str, dict[str, Any]]:
+def _cmcd_scope(
+    service: HighScaleService, req: CmcdRequest, start: datetime, end: datetime
+) -> tuple[str, dict[str, Any]]:
     filter_clauses, filter_params = _filter_clauses(req.filters or {})
     clauses = [
         "service_id={service_id:String}",
@@ -3334,7 +3144,7 @@ def _cmcd_aggregates_compute(
     mask_ips: bool,
 ) -> dict[str, Any]:
     start, end = parse_time_window(start_time, end_time, _DEFAULT_WINDOW, utc=True)
-    where, params = _scope(service, req, start, end)
+    where, params = _cmcd_scope(service, req, start, end)
     events = _EVENTS.format(where=where)
     execute = service.client.execute
 
@@ -3499,10 +3309,7 @@ def _cmcd_aggregates_compute(
                     {"p50": None, "p95": None, "p99": None},
                 )
             if want_ts["startup_ts"]:
-                ts_out["startup_ts"] = padded(
-                    {"startup_ratio": ("startup_ratio", _round)},
-                    {"startup_ratio": None},
-                )
+                ts_out["startup_ts"] = padded({"startup_ratio": ("startup_ratio", _round)}, {"startup_ratio": None})
             return ts_out
 
         tasks.append(("timeseries", _run_timeseries))
@@ -3643,8 +3450,7 @@ def _cmcd_aggregates_compute(
     for d in trace.run_parallel(tasks, source="projected_fact", max_workers=8).values():
         result.update(d)
     if "rebuffer_by_asn" in result:
-        # Metadata lookup/label assembly is overhead, not ClickHouse analytics.
-        # Run after the query tasks so its wall span does not overlap theirs.
+
         def _label_asns() -> None:
             rows = result["rebuffer_by_asn"]
             names = _asn_names(service.service_id, [row["asn"] for row in rows])
@@ -3654,6 +3460,2360 @@ def _cmcd_aggregates_compute(
         trace.run("asn_labels", _label_asns, activity="overhead")
     result["section_timings"] = trace.timings()
     return result
+
+
+# ── Folded from backend/high_scale/dashboard.py ──────────────────────────────
+
+import concurrent.futures
+import os
+from functools import partial
+
+from backend.high_scale._common import _column, inclusive_minute_end
+from backend.models.common import ResponseCacheObservation
+from backend.models.dashboard import (
+    AggregatesRequest,
+    AggregatesResponse,
+    FieldAggregate,
+    FieldTopEntry,
+    FieldValuesRequest,
+    FieldValuesResponse,
+    MapPoint,
+    RawRequest,
+    TimeSeriesPoint,
+)
+from backend.repositories.utils.response_cache import ResponseMemo, cache_result
+from backend.utils.bounded_cache import CacheRegistry
+from backend.utils.date_utils import safe_iso
+
+_HS_DASHBOARD_CACHE_TTL = float(os.getenv("HS_DASHBOARD_CACHE_TTL_SECONDS", "30"))
+_dashboard_memo = ResponseMemo(ttl=_HS_DASHBOARD_CACHE_TTL, maxsize=128, prewarmer=False)
+CacheRegistry.register("hs_dashboard_aggregates_memo", _dashboard_memo.cache)
+
+_FIELD_DIMENSIONS = {
+    "url": "url",
+    "country": "country",
+    "ip": "client_ip",
+    "asn": "asn",
+    "host": "host",
+    "method": "method",
+    "status": "status",
+    "cache": "cache",
+    "proto": "proto",
+    "ua": "ua",
+    "referer": "referer",
+    "cookie_session": "cookie_session",
+    "resp_header_content_encoding": "resp_header_content_encoding",
+    "ttl": "ttl",
+    "age": "age",
+    "hits": "hits",
+    "digest": "digest",
+    "city": "city",
+    "region": "region",
+    "metro": "metro",
+    "transport": "transport",
+    "c_speed": "c_speed",
+    "c_type": "c_type",
+    "pop": "pop",
+    "backend": "backend",
+    "edge": "edge",
+    "server_region": "server_region",
+    "tls": "tls",
+    "is_ipv6": "is_ipv6",
+    "conn_requests": "conn_requests",
+    "waf": "waf",
+    "waf_resp": "waf_resp",
+    "waf_ms": "waf_ms",
+    "p_type": "p_type",
+    "p_desc": "p_desc",
+    "ja3": "ja3",
+    "ja4": "ja4",
+    "tls_ciphers_sha": "tls_ciphers_sha",
+    "io_input_format": "io_input_format",
+    "io_output_format": "io_output_format",
+}
+_HEADER_TABLES = {"request": "request_facts", "rum_vitals": "rum_vitals_facts", "rum_errors": "rum_error_facts"}
+
+
+def _watermark_extent(value: datetime | None) -> str | None:
+    return value.isoformat() if isinstance(value, datetime) else None
+
+
+def _query_source_extents(
+    client: Any,
+    source_id: str,
+    table_name: str,
+    *,
+    domain: str,
+    count_expr: str = "count()",
+    ts_col: str = "event_timestamp",
+) -> tuple[int, str | None, str | None]:
+    rows = client.execute(
+        f"SELECT {count_expr} AS total_rows, min({ts_col}) AS earliest_log_at, max({ts_col}) AS latest_log_at "
+        f"FROM {table_name} "
+        "WHERE service_id={service_id:String} "
+        "AND publication_state = 'visible' "
+        "AND batch_id IN ("
+        "SELECT batch_id FROM high_scale_batch_publications FINAL "
+        "WHERE service_id={service_id:String} AND domain={domain:String} "
+        "AND publication_state = 'visible'"
+        ")",
+        {"service_id": source_id, "domain": domain},
+    )
+    row = rows[0] if rows else {}
+    total_rows = int(row.get("total_rows") or 0)
+    if total_rows == 0:
+        return 0, None, None
+    earliest_value: object = row.get("earliest_log_at")
+    latest_value: object = row.get("latest_log_at")
+    if isinstance(earliest_value, datetime):
+        earliest_value = earliest_value.isoformat()
+    if isinstance(latest_value, datetime):
+        latest_value = latest_value.isoformat()
+    return (
+        total_rows,
+        str(earliest_value) if earliest_value is not None else None,
+        str(latest_value) if latest_value is not None else None,
+    )
+
+
+def header_metrics(service: HighScaleService) -> dict[str, Any]:
+    """Return visible ClickHouse row counts and event-time extents for the header."""
+    totals: dict[str, int] = {}
+    earliest: dict[str, str | None] = {}
+    latest: dict[str, str | None] = {}
+    for domain, table in _HEADER_TABLES.items():
+        totals[domain], earliest[domain], latest[domain] = _query_source_extents(
+            service.client, service.service_id, table, domain=domain
+        )
+
+    if totals.get("rum_errors", 0) == 0:
+        agg_total, agg_earliest, agg_latest = _query_source_extents(
+            service.client,
+            service.service_id,
+            "rum_error_aggregates",
+            domain="rum_errors_aggregate",
+            count_expr="sum(error_count)",
+            ts_col="bucket_start",
+        )
+        if agg_total > 0:
+            totals["rum_errors"] = agg_total
+            earliest["rum_errors"] = agg_earliest
+            latest["rum_errors"] = agg_latest
+
+    rum_total = totals["rum_vitals"] + totals["rum_errors"]
+    rum_earliest_values = [earliest["rum_vitals"], earliest["rum_errors"]]
+    rum_latest_values = [latest["rum_vitals"], latest["rum_errors"]]
+    rum_earliest = min((value for value in rum_earliest_values if value is not None), default=None)
+    rum_latest = max((value for value in rum_latest_values if value is not None), default=None)
+    request_total = totals["request"]
+    request_earliest = earliest["request"]
+    request_latest = latest["request"]
+
+    req_sync: str | None = None
+    rum_sync: str | None = None
+    try:
+        from backend.core.metadata.cron_log import latest_cron_per_task
+
+        latest_crons = latest_cron_per_task(service.service_id)
+        req_sync = max(
+            (
+                str(latest_crons[t]["started_at"])
+                for t in ("log_discovery", "commit", "ledger_sweep")
+                if t in latest_crons and latest_crons[t].get("started_at")
+            ),
+            default=None,
+        )
+        rum_sync = max(
+            (
+                str(latest_crons[t]["started_at"])
+                for t in ("rum_discovery", "rum_sync", "ledger_rum_sweep")
+                if t in latest_crons and latest_crons[t].get("started_at")
+            ),
+            default=None,
+        )
+    except Exception:
+        pass
+
+    return {
+        "request": {
+            "earliest_log_at": request_earliest,
+            "latest_log_at": request_latest,
+            "total_rows": request_total,
+            "last_sync_at": req_sync,
+        },
+        "rum": {
+            "earliest_log_at": rum_earliest,
+            "latest_log_at": rum_latest,
+            "total_rows": rum_total,
+            "last_sync_at": rum_sync,
+        },
+        "earliest_log_at": request_earliest,
+        "latest_log_at": request_latest,
+        "local_rows": request_total + rum_total,
+    }
+
+
+def _aggregate(service: HighScaleService, *, start_time: str | None, end_time: str | None, dimension: str, watermark):
+    start = _range_value(start_time)
+    end = _range_value(end_time)
+    return query_clickhouse_aggregate(
+        service.client,
+        AggregateRequest(service_id=service.service_id, domain="request", start=start, end=end, dimension=dimension),
+        watermark=watermark,
+    )
+
+
+def _normalize_chart_interval(chart_interval: str | None, default: str = "1 minute") -> str:
+    if not chart_interval:
+        return default
+    ci = chart_interval.strip().lower()
+    mapping = {
+        "1 second": "1 second",
+        "1 seconds": "1 second",
+        "1s": "1 second",
+        "second": "1 second",
+        "seconds": "1 second",
+        "1 minute": "1 minute",
+        "1 minutes": "1 minute",
+        "1m": "1 minute",
+        "minute": "1 minute",
+        "minutes": "1 minute",
+        "5 minute": "5 minutes",
+        "5 minutes": "5 minutes",
+        "5m": "5 minutes",
+        "1 hour": "1 hour",
+        "1 hours": "1 hour",
+        "1h": "1 hour",
+        "hour": "1 hour",
+        "hours": "1 hour",
+        "1 day": "1 day",
+        "1 days": "1 day",
+        "1d": "1 day",
+        "day": "1 day",
+        "days": "1 day",
+    }
+    return mapping.get(ci, default)
+
+
+def _time_series(
+    service: HighScaleService, start_time: str | None, end_time: str | None, chart_interval: str
+) -> list[TimeSeriesPoint]:
+    start = _range_value(start_time)
+    end = _range_value(end_time)
+    clauses = [
+        "service_id={service_id:String}",
+        "dimension='url'",
+        "publication_state='visible'",
+        "batch_id IN ("
+        "SELECT batch_id FROM high_scale_batch_publications FINAL "
+        "WHERE service_id={service_id:String} AND domain='request_aggregate' "
+        "AND publication_state='visible')",
+    ]
+    interval_norm = _normalize_chart_interval(chart_interval, default="1 minute")
+    interval_map = {"1 second": 1, "1 minute": 60, "5 minutes": 300, "1 hour": 3600, "1 day": 86400}
+    bucket_seconds = interval_map.get(interval_norm, 60)
+    params: dict[str, Any] = {"service_id": service.service_id, "bucket_seconds": bucket_seconds}
+    if start is not None:
+        clauses.append("bucket_start >= {start:DateTime64(3)}")
+        params["start"] = start
+    if end is not None:
+        clauses.append("bucket_start < {end:DateTime64(3)}")
+        params["end"] = end
+    rows = service.client.execute(
+        "SELECT toStartOfInterval(bucket_start, INTERVAL {bucket_seconds:UInt32} SECOND) AS chart_bucket, "
+        "sum(request_count) AS value "
+        "FROM request_aggregates "
+        f"WHERE {' AND '.join(clauses)} "
+        "GROUP BY chart_bucket ORDER BY chart_bucket",
+        params,
+    )
+    return [
+        TimeSeriesPoint(time=safe_iso(row["chart_bucket"]) or str(row["chart_bucket"]), value=float(row["value"]))
+        for row in rows
+    ]
+
+
+def _panels(req: AggregatesRequest) -> tuple[bool, bool, bool]:
+    """``(time_series, map_data, top_n)`` gates, derived exactly as the standard router derives them."""
+    if req.sections:
+        sections = set(req.sections)
+        return "core" in sections, "core" in sections, "topten" in sections
+    return req.include_time_series is not False, req.include_map_data is not False, True
+
+
+def _field_sql_column(field: str) -> str:
+    col_name = _FIELD_DIMENSIONS[field]
+    if col_name in {"client_ip", "country", "url", "cmcd", "custom_fields"}:
+        return col_name
+    if col_name in {"age", "ttl"}:
+        return f"toString(toInt32(round(toFloat64OrZero(custom_fields['{col_name}']))))"
+    return f"custom_fields['{col_name}']"
+
+
+def _fields_to_fetch(req: AggregatesRequest, want_map: bool, want_top_n: bool) -> tuple[list[str], list[str]]:
+    """``(card_fields, fields_to_query)``; the map is the country card's top values, so it may need an extra field."""
+    card_fields = [field for field in (req.fields or list(_FIELD_DIMENSIONS)) if field in _FIELD_DIMENSIONS]
+    top_fields = card_fields if want_top_n else []
+    to_query = list(top_fields)
+    if want_map and "country" not in to_query:
+        to_query.append("country")
+    return top_fields, to_query
+
+
+def _facts_time_series(
+    service: HighScaleService,
+    start_time: str | None,
+    end_time: str | None,
+    norm_interval: str,
+    metric: str,
+    where_clause: str,
+    params: dict[str, Any],
+) -> list[TimeSeriesPoint]:
+    interval_sql = "toStartOfMinute(event_timestamp)"
+    if norm_interval == "1 second":
+        interval_sql = "toStartOfSecond(event_timestamp)"
+    elif norm_interval == "5 minutes":
+        interval_sql = "toStartOfFiveMinutes(event_timestamp)"
+    elif norm_interval == "1 hour":
+        interval_sql = "toStartOfInterval(event_timestamp, INTERVAL 1 hour)"
+    elif norm_interval == "1 day":
+        interval_sql = "toStartOfDay(event_timestamp)"
+
+    if metric == "5xx":
+        metric_sql = "countIf(custom_fields['status'] >= '500' AND custom_fields['status'] <= '599')"
+    elif metric == "4xx":
+        metric_sql = "countIf(custom_fields['status'] >= '400' AND custom_fields['status'] <= '499')"
+    elif metric == "hit_rate":
+        metric_sql = "round(100.0 * countIf(custom_fields['cache'] IN ('HIT', 'HIT-CLUSTER', 'HIT-STALE')) / nullIf(count(), 0), 2)"
+    else:
+        metric_sql = "count()"
+
+    ts_rows = service.client.execute(
+        f"SELECT {interval_sql} AS bucket_start, {metric_sql} AS value FROM request_facts "
+        f"WHERE {where_clause} GROUP BY bucket_start ORDER BY bucket_start",
+        params,
+    )
+    return [
+        TimeSeriesPoint(time=safe_iso(r["bucket_start"]) or str(r["bucket_start"]), value=float(r["value"]))
+        for r in ts_rows
+    ]
+
+
+def _filtered_aggregates(
+    service: HighScaleService, req: AggregatesRequest, start_time: str | None, end_time: str | None
+):
+    start = _range_value(start_time)
+    end = _range_value(end_time)
+    trace = HighScaleSections(service.service_id, "dashboard")
+    request_watermark = trace.run("watermark", lambda: service.watermark_for("request"), activity="overhead")
+    want_time_series, want_map, want_top_n = _panels(req)
+
+    if not req.filters:
+        filter_dict = {}
+    elif hasattr(req.filters, "model_dump"):
+        filter_dict = req.filters.model_dump()
+    else:
+        filter_dict = req.filters
+    filter_clauses, filter_params = request_filter_clauses(filter_dict)
+
+    clauses = [*visible_fact_clauses("request"), *filter_clauses]
+    params: dict[str, Any] = {"service_id": service.service_id, **filter_params}
+
+    if start is not None and end is not None:
+        end_upper = end
+        clauses.append("event_timestamp >= {start:DateTime64(3)}")
+        clauses.append("event_timestamp < {end_upper:DateTime64(3)}")
+        params.update({"start": start, "end_upper": end_upper})
+
+    where_clause = " AND ".join(clauses)
+
+    top_fields, fields_to_query = _fields_to_fetch(req, want_map, want_top_n)
+
+    def fetch_field(field: str):
+        sql_col = _field_sql_column(field)
+        rows = service.client.execute(
+            f"SELECT {sql_col} AS v, count() AS c FROM request_facts WHERE {where_clause} AND {sql_col} != '' "
+            "GROUP BY v ORDER BY c DESC LIMIT 10",
+            params,
+        )
+        return field, [(str(r["v"]), int(r["c"])) for r in rows]
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
+        futs = [trace.submit(ex, f"top_n.{f}", partial(fetch_field, f), source="fact") for f in fields_to_query]
+        field_results = dict(f.result() for f in futs)
+
+    total_rows_result = trace.run(
+        "count",
+        lambda: service.client.execute(f"SELECT count() AS c FROM request_facts WHERE {where_clause}", params),
+        source="fact",
+    )
+    total_count = int(total_rows_result[0]["c"]) if total_rows_result else 0
+
+    data = {
+        field: FieldAggregate(top=[FieldTopEntry(value=v, count=c) for v, c in field_results[field]], total=total_count)
+        for field in top_fields
+    }
+
+    map_data = [MapPoint(country=v, count=c) for v, c in field_results.get("country", [])] if want_map else []
+
+    norm_interval = _normalize_chart_interval(req.chart_interval)
+    time_series = (
+        trace.run(
+            "time_series",
+            lambda: _facts_time_series(
+                service, start_time, end_time, norm_interval, req.chart_metric or "requests", where_clause, params
+            ),
+            source="fact",
+        )
+        if want_time_series
+        else []
+    )
+
+    return AggregatesResponse.with_telemetry(
+        data=data,
+        time_series=time_series,
+        map_data=map_data,
+        where_clause="high-scale ClickHouse (filtered)",
+        section_timings=trace.timings(),
+        interval=norm_interval,
+        metric=req.chart_metric,
+        total_rows=total_count,
+        total_rows_total=total_count,
+        earliest_log_at=_watermark_extent(request_watermark.coverage_start),
+        latest_log_at=_watermark_extent(request_watermark.coverage_end),
+    )
+
+
+def _aggregates_batch(
+    service: HighScaleService, *, start_time: str | None, end_time: str | None, fields: list[str], watermark
+):
+    start = _range_value(start_time)
+    end = _range_value(end_time)
+    dims = [_FIELD_DIMENSIONS[f] for f in fields]
+    by_dim = query_clickhouse_aggregates_batch(
+        service.client,
+        service_id=service.service_id,
+        domain="request",
+        dimensions=dims,
+        start=start,
+        end=end,
+        watermark=watermark,
+    )
+    return {f: by_dim[_FIELD_DIMENSIONS[f]] for f in fields}
+
+
+def _cache_agg_resp(cache_key: str | None, resp: AggregatesResponse) -> AggregatesResponse:
+    if cache_key is not None:
+        _dashboard_memo.put(
+            cache_key,
+            {
+                "data": resp.data,
+                "time_series": resp.time_series,
+                "map_data": resp.map_data,
+                "where_clause": resp.where_clause,
+                "interval": resp.interval,
+                "metric": resp.metric,
+                "total_rows": resp.total_rows,
+                "total_rows_total": resp.total_rows_total,
+                "earliest_log_at": resp.earliest_log_at,
+                "latest_log_at": resp.latest_log_at,
+                "section_timings": resp.section_timings,
+            },
+        )
+    resp.response_cache = ResponseCacheObservation.model_validate(
+        _dashboard_memo.result({}, state="miss" if cache_key is not None else "bypass")["_response_cache"]
+    )
+    return resp
+
+
+def dashboard_aggregates(
+    service: HighScaleService, req: AggregatesRequest, start_time: str | None, end_time: str | None
+):
+    norm_interval = _normalize_chart_interval(req.chart_interval)
+    start = _range_value(start_time)
+    end = _range_value(end_time)
+    cache_key: str | None = None
+    if _HS_DASHBOARD_CACHE_TTL > 0 and start_time is not None and end_time is not None:
+        raw_filters = (
+            req.filters.model_dump() if req.filters and hasattr(req.filters, "model_dump") else (req.filters or {})
+        )
+        cache_key = digest_cache_key(
+            {
+                "ep": "hs_dashboard_aggregates",
+                "svc": service.service_id,
+                "cid": client_cache_token(service.client),
+                "s": start.isoformat() if start is not None else None,
+                "e": end.isoformat() if end is not None else None,
+                "f": serialize_filters_for_key(raw_filters),
+                "ci": norm_interval,
+                "cm": req.chart_metric,
+                "fl": sorted(req.fields) if req.fields else None,
+                "sec": sorted(req.sections) if req.sections else None,
+                "its": req.include_time_series,
+                "icr": req.include_conn_requests,
+                "imd": req.include_map_data,
+            },
+            {"service_id": service.service_id},
+        )
+        cached = _dashboard_memo.get_with_telemetry(cache_key)
+        if cached is not None:
+            return AggregatesResponse.with_telemetry(**cached)
+
+    partial_minutes = (
+        start is not None
+        and end is not None
+        and any(bound.second != 0 or bound.microsecond != 0 for bound in (start, end))
+    )
+    if req.filters or norm_interval == "1 second" or partial_minutes:
+        resp = _filtered_aggregates(service, req, start_time, end_time)
+        return _cache_agg_resp(cache_key, resp)
+
+    trace = HighScaleSections(service.service_id, "dashboard")
+    want_time_series, want_map, want_top_n = _panels(req)
+    top_fields, fields_to_query = _fields_to_fetch(req, want_map, want_top_n)
+    request_watermark = trace.run("watermark", lambda: service.watermark_for("request"), activity="overhead")
+    all_fields_to_query = list(fields_to_query)
+    if "url" not in all_fields_to_query:
+        all_fields_to_query.append("url")
+    responses = trace.run(
+        "aggregates_batch",
+        lambda: _aggregates_batch(
+            service, start_time=start_time, end_time=end_time, fields=all_fields_to_query, watermark=request_watermark
+        ),
+        source="projection",
+    )
+    total = responses["url"]
+
+    data = {
+        field: FieldAggregate(
+            top=[FieldTopEntry(value=value, count=count) for value, count in responses[field].top_values],
+            total=responses[field].request_count,
+        )
+        for field in top_fields
+    }
+    map_response = responses.get("country")
+    map_data = (
+        [MapPoint(country=value, count=count) for value, count in map_response.top_values]
+        if want_map and map_response is not None
+        else []
+    )
+    if not want_time_series:
+        time_series = []
+    elif req.chart_metric and req.chart_metric != "requests":
+        start = _range_value(start_time)
+        end = _range_value(end_time)
+        clauses = list(visible_fact_clauses("request"))
+        params: dict[str, Any] = {"service_id": service.service_id}
+        if start is not None and end is not None:
+            end_upper = end
+            clauses.append("event_timestamp >= {start:DateTime64(3)}")
+            clauses.append("event_timestamp < {end_upper:DateTime64(3)}")
+            params.update({"start": start, "end_upper": end_upper})
+        time_series = trace.run(
+            "time_series",
+            lambda: _facts_time_series(
+                service, start_time, end_time, norm_interval, req.chart_metric, " AND ".join(clauses), params
+            ),
+            source="fact",
+        )
+    else:
+        time_series = trace.run(
+            "time_series", lambda: _time_series(service, start_time, end_time, norm_interval), source="projection"
+        )
+    resp = AggregatesResponse.with_telemetry(
+        data=data,
+        time_series=time_series,
+        map_data=map_data,
+        where_clause="high-scale ClickHouse",
+        section_timings=trace.timings(),
+        interval=norm_interval,
+        metric=req.chart_metric,
+        total_rows=total.request_count,
+        total_rows_total=total.request_count,
+        earliest_log_at=_watermark_extent(request_watermark.coverage_start),
+        latest_log_at=_watermark_extent(request_watermark.coverage_end),
+    )
+    return _cache_agg_resp(cache_key, resp)
+
+
+def bundle(
+    service: HighScaleService, req: AggregatesRequest, start_time: str | None, end_time: str | None
+) -> dict[str, Any]:
+    from backend.high_scale import security as hs_security
+    from backend.utils.telemetry import get_queries, get_sqlite_queries, get_tracked_calls
+
+    sections = set(req.sections) if req.sections else None
+    want_aggregates = sections is None or bool(sections & {"core", "topten"})
+    want_bots = sections is None or "bots" in sections
+    res_aggregates = aggregates(service, req, start_time, end_time) if want_aggregates else None
+    res_top_bots = hs_security.top_bots(service, req, start_time, end_time) if want_bots else None
+
+    if res_aggregates is not None and hasattr(res_aggregates, "debug_queries"):
+        res_aggregates.debug_queries = []
+        res_aggregates.debug_calls = []
+    if res_top_bots is not None and hasattr(res_top_bots, "debug_queries"):
+        res_top_bots.debug_queries = []
+        res_top_bots.debug_calls = []
+
+    combined_timings = [
+        t for r in (res_aggregates, res_top_bots) if r is not None for t in (getattr(r, "section_timings", None) or [])
+    ]
+    return {
+        **cache_result({}, state="bypass", prewarmer=False),
+        "aggregates": res_aggregates,
+        "top_bots": res_top_bots,
+        "section_timings": combined_timings,
+        "debug_queries": get_queries(),
+        "debug_calls": get_tracked_calls(),
+        "debug_sqlite": list(get_sqlite_queries()),
+    }
+
+
+def field_values(
+    service: HighScaleService, req: FieldValuesRequest, start_time: str | None, end_time: str | None
+) -> FieldValuesResponse:
+    """Return top values for a single field in high-scale ClickHouse mode."""
+    from backend.repositories.utils.filters import normalize_filter_key
+
+    clean_field = "".join(ch for ch in req.field if ch.isalnum() or ch == "_")
+    if not clean_field:
+        raise ValueError("Invalid field name")
+
+    key = normalize_filter_key(clean_field)
+    if not key:
+        raise ValueError("Invalid field name")
+
+    raw_filters = (
+        req.filters.model_dump() if req.filters and hasattr(req.filters, "model_dump") else (req.filters or {})
+    )
+    filters_excl = {k: v for k, v in raw_filters.items() if k != req.field and normalize_filter_key(k) != key}
+    filter_clauses, filter_params = request_filter_clauses(filters_excl)
+
+    limit = max(1, min(int(req.limit or 100), 1000))
+    start = _range_value(start_time)
+    end = _range_value(end_time)
+
+    if not req.search and not filter_clauses and key in _FIELD_DIMENSIONS:
+        agg = _aggregate(
+            service,
+            start_time=start_time,
+            end_time=end_time,
+            dimension=_FIELD_DIMENSIONS[key],
+            watermark=service.watermark_for("request"),
+        )
+        vals: list[dict[str, Any]] = [{"value": str(val), "count": int(cnt)} for val, cnt in agg.top_values[:limit]]
+        if key == "asn" and vals:
+            try:
+                from backend.core.duckdb import enrich_asn_labels
+
+                enrich_asn_labels(vals, service.service_id)
+            except Exception:
+                pass
+        return FieldValuesResponse.with_telemetry(values=[FieldTopEntry(**v) for v in vals], field=req.field)
+
+    if key in {"_bot_name", "_ngwaf_bot_name", "_tunnel_requests", "waf_sig_ind", "edge_score_reason_ind"}:
+        return FieldValuesResponse.with_telemetry(values=[], field=req.field)
+
+    params: dict[str, Any] = {"service_id": service.service_id, "limit": limit, **filter_params}
+    sql_col = _column(key, params, "target_field")
+    clauses = [*visible_fact_clauses("request"), *filter_clauses, f"{sql_col} != ''"]
+
+    if start is not None and end is not None:
+        end_upper = inclusive_minute_end(end)
+        clauses.append("event_timestamp >= {start:DateTime64(3)}")
+        clauses.append("event_timestamp < {end_upper:DateTime64(3)}")
+        params.update({"start": start, "end_upper": end_upper})
+
+    if req.search:
+        params["search_pat"] = f"%{req.search}%"
+        clauses.append(f"{sql_col} ILIKE {{search_pat:String}}")
+
+    where_clause = " AND ".join(clauses)
+    rows = service.client.execute(
+        f"SELECT {sql_col} AS v, count() AS c FROM request_facts "
+        f"WHERE {where_clause} GROUP BY v ORDER BY c DESC LIMIT {{limit:UInt32}}",
+        params,
+    )
+    vals_facts: list[dict[str, Any]] = [{"value": str(r["v"]), "count": int(r["c"])} for r in rows]
+    if key == "asn" and vals_facts:
+        try:
+            from backend.core.duckdb import enrich_asn_labels
+
+            enrich_asn_labels(vals_facts, service.service_id)
+        except Exception:
+            pass
+    return FieldValuesResponse.with_telemetry(values=[FieldTopEntry(**v) for v in vals_facts], field=req.field)
+
+
+def raw_df(
+    service: HighScaleService, req: RawRequest, start_time: str | None, end_time: str | None, *, limit: int = 50000
+):
+    """Fetch raw rows from ClickHouse ``request_facts`` as a pandas DataFrame for CSV export."""
+    import pandas as pd
+
+    from backend.utils.bot_sources import enrich_bot_metadata
+
+    raw_filters = (
+        req.filters.model_dump() if req.filters and hasattr(req.filters, "model_dump") else (req.filters or {})
+    )
+    filter_clauses, filter_params = request_filter_clauses(raw_filters)
+    clauses = [*visible_fact_clauses("request"), *filter_clauses]
+    params: dict[str, Any] = {
+        "service_id": service.service_id,
+        "limit": max(1, min(int(limit), 50000)),
+        **filter_params,
+    }
+
+    start = _range_value(start_time)
+    end = _range_value(end_time)
+    if start is not None and end is not None:
+        end_upper = inclusive_minute_end(end)
+        clauses.append("event_timestamp >= {start:DateTime64(3)}")
+        clauses.append("event_timestamp < {end_upper:DateTime64(3)}")
+        params.update({"start": start, "end_upper": end_upper})
+
+    where_clause = " AND ".join(clauses)
+    rows = service.client.execute(
+        "SELECT event_timestamp AS timestamp, client_ip AS ip, url, country, custom_fields "
+        f"FROM request_facts WHERE {where_clause} "
+        "ORDER BY event_timestamp DESC LIMIT {limit:UInt32}",
+        params,
+    )
+    if not rows:
+        return pd.DataFrame()
+
+    records: list[dict[str, Any]] = []
+    for r in rows:
+        cf = r.get("custom_fields")
+        custom = dict(cf) if isinstance(cf, dict) else {}
+        ts = r.get("timestamp")
+        records.append(
+            {
+                **custom,
+                "timestamp": safe_iso(ts) if isinstance(ts, datetime) else str(ts or ""),
+                "ip": str(r.get("ip") or ""),
+                "url": str(r.get("url") or ""),
+                "country": str(r.get("country") or ""),
+            }
+        )
+
+    df = pd.DataFrame(records)
+    enrich_bot_metadata(df)
+
+    if req.columns:
+        existing_cols = [c for c in req.columns if c in df.columns]
+        if "_bot_name" in req.columns and "_bot_name" not in existing_cols:
+            df["_bot_name"] = "null"
+            existing_cols.append("_bot_name")
+        if "_ngwaf_bot_name" in req.columns and "_ngwaf_bot_name" not in existing_cols:
+            df["_ngwaf_bot_name"] = None
+            existing_cols.append("_ngwaf_bot_name")
+        df = df[existing_cols]
+
+    return df
+
+
+# ── Folded from backend/high_scale/origin.py ─────────────────────────────────
+
+import sys
+from dataclasses import dataclass
+
+from backend.high_scale._common import _TIMESERIES_METRICS, RELATIVE_ERROR, build_published_facts_where
+from backend.high_scale._common import optional_int as _integer
+from backend.high_scale._common import sketch as _sketch
+
+_EMPTY = {
+    "summary": {},
+    "timeseries": {"has_data": False, "series": []},
+    "slow_urls": {"has_data": False, "rows": []},
+    "status_codes": {"has_data": False, "rows": []},
+    "path_breakdown": {"has_data": False, "shielding_detected": False, "rows": []},
+    "pop_latency": {"has_data": False, "requires_group_c": False, "rows": []},
+    "ip_health": {"has_data": False, "rows": []},
+}
+
+_APPROX_NOTE = (
+    "Latency percentiles are merged from per-minute log-histogram sketches "
+    f"(relative error at most {RELATIVE_ERROR:.0%}). Request counts and error rates are exact."
+)
+_APPROX = {"_approx": True, "_approx_note": _APPROX_NOTE}
+_NOT_APPROX = {"_approx": False}
+
+_BASE_COLUMNS = (
+    "event_timestamp, url, "
+    "coalesce(toFloat64OrNull(custom_fields['ottfb']), toFloat64OrNull(custom_fields['ttfb']) * 1000000.0) "
+    "AS latency_us, "
+    "toInt32OrNull(custom_fields['ost']) AS status, "
+    "upper(custom_fields['cache']) AS cache_u, "
+    "toFloat64OrNull(custom_fields['ottlb']) AS ottlb_us, "
+    "toFloat64OrNull(custom_fields['elapsed']) AS elapsed_us, "
+    "toInt64OrNull(custom_fields['obytes']) AS obytes, "
+    "custom_fields['pop'] AS pop, "
+    "multiIf(lower(custom_fields['edge']) IN ('true', '1'), 'true', "
+    "lower(custom_fields['edge']) IN ('false', '0'), 'false', '') AS edge_s, "
+    "custom_fields['oip'] AS oip"
+)
+_ORDER_BY_P95 = "ifNotFinite(latency_q[2], -1.0) DESC"
+_LATENCY_DIMENSIONS = {
+    "edge": ("edge_s", "latency_us IS NOT NULL AND edge_s != ''", 0),
+    "pop": ("pop", "latency_us IS NOT NULL AND pop != ''", 0),
+    "oip": ("oip", "status IS NOT NULL AND oip != ''", 10),
+}
+
+
+@dataclass(frozen=True)
+class FactsScope:
+    base: str
+    params: dict[str, Any]
+
+
+def _facts_scope(
+    service: HighScaleService, start_time: str | None, end_time: str | None, filters: Mapping[str, Any] | None
+) -> FactsScope:
+    where_sql, params = build_published_facts_where(service.service_id, start_time, end_time, filters)
+    return FactsScope(f"(SELECT {_BASE_COLUMNS} FROM request_facts WHERE {where_sql})", params)
+
+
+def _sketch_select(alias: str, column: str, quantiles: tuple[float, ...]) -> str:
+    """Merge the per-minute ``{column}_sk_v/_sk_w`` histograms and read ``quantiles`` from the union."""
+    levels = ", ".join(str(level) for level in quantiles)
+    return (
+        f"quantilesExactWeightedArray({levels})({column}_sk_v, {column}_sk_w) AS {alias}_q, "
+        f"sumArray({column}_sk_w) AS {alias}_n"
+    )
+
+
+def _quantile(row: Mapping[str, Any], alias: str, index: int, count_key: str | None = None) -> float | None:
+    """The ``index``-th requested quantile in milliseconds-ready microseconds; None with no observations."""
+    if int(row.get(count_key or f"{alias}_n") or 0) == 0:
+        return None
+    values = row.get(alias if count_key else f"{alias}_q") or []
+    return _float_or_none(values[index]) if index < len(values) else None
+
+
+def _resolve_timeseries_metric(req: Any) -> tuple[str, str, float]:
+    if req.split_by_leg:
+        raise ValueError("high-scale Origin timeseries does not support split_by_leg")
+    if req.bucket_minutes < 1:
+        raise ValueError("high-scale Origin timeseries requires bucket_minutes of at least 1")
+    metric = _TIMESERIES_METRICS.get((req.timeseries_metric, req.timeseries_percentile))
+    if metric is None:
+        raise ValueError("high-scale Origin timeseries does not support the requested metric and percentile")
+    fact_col, level = metric
+    proj_col = "latency" if fact_col == "latency_us" else "ttlb"
+    return fact_col, proj_col, level
+
+
+def _origin_summary(service: HighScaleService, start_time: str | None, end_time: str | None) -> dict[str, Any]:
+    where, params = _where(service.service_id, "origin_summary", start_time, end_time)
+    rows = service.client.execute(
+        "/* origin:summary */ SELECT "
+        "sum(requests) AS requests, sum(misses) AS misses, sum(passes) AS passes, "
+        "sum(origin_5xx) AS origin_5xx, sum(status_count) AS status_count, "
+        f"{_sketch_select('latency', 'latency', (0.5, 0.75, 0.95, 0.99))}, "
+        f"{_sketch_select('ttlb', 'ttlb', (0.5, 0.95))}, "
+        f"{_sketch_select('overhead', 'overhead', (0.5,))}, "
+        f"{_sketch_select('bytes', 'origin_bytes', (0.5,))} "
+        f"FROM origin_minute_summary WHERE {where}",
+        params,
+    )
+    row = rows[0] if rows else {}
+    requests = int(row.get("requests") or 0)
+    latency_p50 = _quantile(row, "latency", 0)
+    if requests == 0 or latency_p50 is None:
+        return {
+            "has_data": False,
+            "total_misses": None,
+            "total_passes": None,
+            "ottfb_p50_ms": None,
+            "ottfb_p75_ms": None,
+            "ottfb_p95_ms": None,
+            "ottfb_p99_ms": None,
+            "ottlb_p50_ms": None,
+            "ottlb_p95_ms": None,
+            "cdn_overhead_p50_ms": None,
+            "origin_error_rate": None,
+            "obytes_p50": None,
+        }
+    return {
+        "has_data": True,
+        "total_misses": int(row.get("misses") or 0),
+        "total_passes": int(row.get("passes") or 0),
+        "ottfb_p50_ms": _milliseconds(latency_p50),
+        "ottfb_p75_ms": _milliseconds(_quantile(row, "latency", 1)),
+        "ottfb_p95_ms": _milliseconds(_quantile(row, "latency", 2)),
+        "ottfb_p99_ms": _milliseconds(_quantile(row, "latency", 3)),
+        "ottlb_p50_ms": _milliseconds(_quantile(row, "ttlb", 0)),
+        "ottlb_p95_ms": _milliseconds(_quantile(row, "ttlb", 1)),
+        "cdn_overhead_p50_ms": _milliseconds(_quantile(row, "overhead", 0)),
+        "origin_error_rate": (
+            int(row.get("origin_5xx") or 0) / int(row["status_count"])
+            if int(row.get("status_count") or 0) > 0
+            else None
+        ),
+        "obytes_p50": _quantile(row, "bytes", 0),
+        **_APPROX,
+    }
+
+
+def _timeseries(service: HighScaleService, req: Any, start_time: str | None, end_time: str | None) -> dict[str, Any]:
+    _, metric_column, level = _resolve_timeseries_metric(req)
+    where, params = _where(service.service_id, "origin_summary", start_time, end_time)
+    params["bucket_minutes"] = int(req.bucket_minutes)
+    rows = service.client.execute(
+        "/* origin:timeseries */ SELECT "
+        "toStartOfInterval(bucket_start, toIntervalMinute({bucket_minutes:UInt32})) AS time, "
+        "sum(misses) AS miss_count, "
+        f"{_sketch_select('value', metric_column, (level,))} "
+        f"FROM origin_minute_summary WHERE {where} "
+        "GROUP BY time ORDER BY time",
+        params,
+    )
+    return {
+        "has_data": bool(rows),
+        "series": [
+            {
+                "time": safe_iso(row["time"]),
+                "miss_count": int(row.get("miss_count") or 0),
+                "value": _milliseconds(_quantile(row, "value", 0)),
+            }
+            for row in rows
+        ],
+        **_APPROX,
+    }
+
+
+def _facts_summary(service: HighScaleService, facts: FactsScope) -> dict[str, Any]:
+    rows = service.client.execute(
+        "/* origin:facts_summary */ SELECT "
+        "countIf(latency_us IS NOT NULL) AS requests, "
+        "countIf(latency_us IS NOT NULL AND cache_u LIKE 'MISS%') AS misses, "
+        "countIf(latency_us IS NOT NULL AND cache_u LIKE 'PASS%') AS passes, "
+        "countIf(latency_us IS NOT NULL AND status BETWEEN 500 AND 599) AS origin_5xx, "
+        "countIf(latency_us IS NOT NULL AND status IS NOT NULL) AS status_count, "
+        "quantilesExact(0.5, 0.75, 0.95, 0.99)(latency_us) AS latency_q, "
+        "countIf(latency_us IS NOT NULL AND ottlb_us IS NOT NULL) AS ttlb_n, "
+        "quantilesExactIf(0.5, 0.95)(ottlb_us, latency_us IS NOT NULL AND ottlb_us IS NOT NULL) AS ttlb_q, "
+        "countIf(latency_us IS NOT NULL AND ottlb_us IS NOT NULL AND elapsed_us IS NOT NULL) AS overhead_n, "
+        "quantileExactIf(0.5)(elapsed_us - ottlb_us, "
+        "latency_us IS NOT NULL AND ottlb_us IS NOT NULL AND elapsed_us IS NOT NULL) AS overhead_q, "
+        "countIf(latency_us IS NOT NULL AND obytes >= 0) AS bytes_n, "
+        "quantileExactIf(0.5)(toFloat64(obytes), latency_us IS NOT NULL AND obytes >= 0) AS bytes_q "
+        f"FROM {facts.base}",
+        facts.params,
+    )
+    row = rows[0] if rows else {}
+    requests = int(row.get("requests") or 0)
+    if requests == 0:
+        return {
+            "has_data": False,
+            "total_misses": None,
+            "total_passes": None,
+            "ottfb_p50_ms": None,
+            "ottfb_p75_ms": None,
+            "ottfb_p95_ms": None,
+            "ottfb_p99_ms": None,
+            "ottlb_p50_ms": None,
+            "ottlb_p95_ms": None,
+            "cdn_overhead_p50_ms": None,
+            "origin_error_rate": None,
+            "obytes_p50": None,
+            **_NOT_APPROX,
+        }
+    status_count = int(row.get("status_count") or 0)
+    overhead_n = int(row.get("overhead_n") or 0)
+    bytes_n = int(row.get("bytes_n") or 0)
+    return {
+        "has_data": True,
+        "total_misses": int(row.get("misses") or 0),
+        "total_passes": int(row.get("passes") or 0),
+        "ottfb_p50_ms": _milliseconds(_quantile(row, "latency_q", 0, "requests")),
+        "ottfb_p75_ms": _milliseconds(_quantile(row, "latency_q", 1, "requests")),
+        "ottfb_p95_ms": _milliseconds(_quantile(row, "latency_q", 2, "requests")),
+        "ottfb_p99_ms": _milliseconds(_quantile(row, "latency_q", 3, "requests")),
+        "ottlb_p50_ms": _milliseconds(_quantile(row, "ttlb_q", 0, "ttlb_n")),
+        "ottlb_p95_ms": _milliseconds(_quantile(row, "ttlb_q", 1, "ttlb_n")),
+        "cdn_overhead_p50_ms": _milliseconds(float(row["overhead_q"])) if overhead_n else None,
+        "origin_error_rate": int(row.get("origin_5xx") or 0) / status_count if status_count else None,
+        "obytes_p50": float(row["bytes_q"]) if bytes_n else None,
+        **_NOT_APPROX,
+    }
+
+
+def _facts_timeseries(service: HighScaleService, facts: FactsScope, req: Any) -> dict[str, Any]:
+    column, _, level = _resolve_timeseries_metric(req)
+    rows = service.client.execute(
+        "/* origin:facts_timeseries */ SELECT "
+        "toStartOfInterval(event_timestamp, toIntervalMinute({bucket_minutes:UInt32})) AS time, "
+        "countIf(cache_u LIKE 'MISS%') AS miss_count, "
+        f"countIf({column} IS NOT NULL) AS value_n, "
+        f"quantileExact({level})({column}) AS value "
+        f"FROM {facts.base} WHERE latency_us IS NOT NULL GROUP BY time ORDER BY time",
+        {**facts.params, "bucket_minutes": int(req.bucket_minutes)},
+    )
+    return {
+        "has_data": bool(rows),
+        "series": [
+            {
+                "time": safe_iso(row["time"]),
+                "miss_count": int(row.get("miss_count") or 0),
+                "value": _milliseconds(row["value"]) if int(row.get("value_n") or 0) else None,
+            }
+            for row in rows
+        ],
+        **_NOT_APPROX,
+    }
+
+
+def _facts_slow_urls(service: HighScaleService, facts: FactsScope, req: Any) -> dict[str, Any]:
+    rows = service.client.execute(
+        "/* origin:facts_slow_urls */ SELECT url AS value, count() AS requests, "
+        "quantilesExact(0.5, 0.95, 0.99)(latency_us) AS latency_q "
+        f"FROM {facts.base} WHERE latency_us IS NOT NULL AND url != '' GROUP BY url "
+        f"HAVING requests >= {{min_requests:UInt64}} ORDER BY {_ORDER_BY_P95} LIMIT {{limit:UInt32}}",
+        {**facts.params, "min_requests": int(req.slow_urls_min_requests), "limit": int(req.slow_urls_limit)},
+    )
+    return {
+        "has_data": bool(rows),
+        "rows": [
+            {
+                "url": row["value"],
+                "requests": int(row["requests"]),
+                "p50_ms": _milliseconds(_quantile(row, "latency_q", 0, "requests")),
+                "p95_ms": _milliseconds(_quantile(row, "latency_q", 1, "requests")),
+                "p99_ms": _milliseconds(_quantile(row, "latency_q", 2, "requests")),
+            }
+            for row in rows
+        ],
+        **_NOT_APPROX,
+    }
+
+
+def _facts_status_codes(service: HighScaleService, facts: FactsScope) -> dict[str, Any]:
+    rows = service.client.execute(
+        "/* origin:facts_status_codes */ SELECT "
+        "toInt32(multiIf(status BETWEEN 100 AND 599, status, -1)) AS value, count() AS requests "
+        f"FROM {facts.base} WHERE status IS NOT NULL GROUP BY value ORDER BY requests DESC",
+        facts.params,
+    )
+    total = sum(int(row["requests"]) for row in rows)
+    return {
+        "has_data": bool(rows),
+        "rows": [
+            {"status": int(row["value"]), "count": int(row["requests"]), "pct": int(row["requests"]) * 100.0 / total}
+            for row in rows
+            if total > 0
+        ],
+        **_NOT_APPROX,
+    }
+
+
+def _facts_latency_dimension(
+    service: HighScaleService, facts: FactsScope, *, marker: str, dimension: str, limit: int | None = None
+) -> list[dict[str, Any]]:
+    column, predicate, minimum = _LATENCY_DIMENSIONS[dimension]
+    params = dict(facts.params)
+    suffix = f" HAVING requests >= {minimum}" if minimum else ""
+    suffix += f" ORDER BY {_ORDER_BY_P95}"
+    if limit is not None:
+        params["limit"] = int(limit)
+        suffix += " LIMIT {limit:UInt32}"
+    return service.client.execute(
+        f"/* origin:facts_{marker} */ SELECT {column} AS value, count() AS requests, "
+        "countIf(status BETWEEN 500 AND 599) AS origin_5xx, "
+        "countIf(latency_us IS NOT NULL) AS latency_n, "
+        "quantilesExact(0.5, 0.95)(latency_us) AS latency_q "
+        f"FROM {facts.base} WHERE {predicate} GROUP BY {column}{suffix}",
+        params,
+    )
+
+
+def _dimension_rows(
+    service: HighScaleService,
+    *,
+    marker: str,
+    dimension: str,
+    start_time: str | None,
+    end_time: str | None,
+    select: str,
+    order_by: str,
+    limit: int | None = None,
+    having: str | None = None,
+    extra_params: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    where, params = _where(service.service_id, "origin_dimensions", start_time, end_time, dimension=dimension)
+    suffix = f" HAVING {having}" if having else ""
+    params.update(extra_params or {})
+    if limit is not None:
+        params["limit"] = int(limit)
+        suffix += " ORDER BY " + order_by + " LIMIT {limit:UInt32}"
+    else:
+        suffix += " ORDER BY " + order_by
+    return service.client.execute(
+        f"/* origin:{marker} */ SELECT value, {select} "
+        f"FROM origin_minute_dimensions WHERE {where} GROUP BY value{suffix}",
+        params,
+    )
+
+
+def _slow_urls(service: HighScaleService, req: Any, start_time: str | None, end_time: str | None) -> dict[str, Any]:
+    rows = _dimension_rows(
+        service,
+        marker="slow_urls",
+        dimension="url",
+        start_time=start_time,
+        end_time=end_time,
+        select=(
+            "sum(origin_minute_dimensions.requests) AS requests, "
+            f"{_sketch_select('latency', 'latency', (0.5, 0.95, 0.99))}"
+        ),
+        having="sum(origin_minute_dimensions.requests) >= {min_requests:UInt64}",
+        order_by="latency_q[2] DESC",
+        limit=req.slow_urls_limit,
+        extra_params={"min_requests": int(req.slow_urls_min_requests)},
+    )
+    return {
+        "has_data": bool(rows),
+        "rows": [
+            {
+                "url": row["value"],
+                "requests": int(row["requests"]),
+                "p50_ms": _milliseconds(_quantile(row, "latency", 0)),
+                "p95_ms": _milliseconds(_quantile(row, "latency", 1)),
+                "p99_ms": _milliseconds(_quantile(row, "latency", 2)),
+            }
+            for row in rows
+        ],
+        **_APPROX,
+    }
+
+
+def _status_codes(service: HighScaleService, start_time: str | None, end_time: str | None) -> dict[str, Any]:
+    rows = _dimension_rows(
+        service,
+        marker="status_codes",
+        dimension="status",
+        start_time=start_time,
+        end_time=end_time,
+        select=(
+            "sum(origin_minute_dimensions.requests) AS requests, "
+            "sum(sum(origin_minute_dimensions.requests)) OVER () AS total_requests"
+        ),
+        order_by="requests DESC",
+    )
+    return {
+        "has_data": bool(rows),
+        "rows": [
+            {
+                "status": int(row["value"]),
+                "count": int(row["requests"]),
+                "pct": (int(row["requests"]) * 100.0 / int(row["total_requests"])),
+            }
+            for row in rows
+            if int(row.get("total_requests") or 0) > 0
+        ],
+    }
+
+
+def _latency_dimension(
+    service: HighScaleService,
+    *,
+    marker: str,
+    dimension: str,
+    start_time: str | None,
+    end_time: str | None,
+    limit: int | None = None,
+    having: str | None = None,
+) -> list[dict[str, Any]]:
+    return _dimension_rows(
+        service,
+        marker=marker,
+        dimension=dimension,
+        start_time=start_time,
+        end_time=end_time,
+        select=(
+            "sum(origin_minute_dimensions.requests) AS requests, "
+            "sum(origin_5xx) AS origin_5xx, "
+            f"{_sketch_select('latency', 'latency', (0.5, 0.95))}"
+        ),
+        order_by="latency_q[2] DESC",
+        limit=limit,
+        having=having,
+    )
+
+
+def _milliseconds(value: object) -> float | None:
+    parsed = _float_or_none(value)
+    return parsed / 1000.0 if parsed is not None and math.isfinite(parsed) else None
+
+
+def _float_or_none(value: object) -> float | None:
+    return float(str(value)) if value is not None else None
+
+
+def origin_aggregates(
+    service: HighScaleService, req: Any, start_time: str | None, end_time: str | None, *, sections: set[str] | None
+) -> dict[str, Any]:
+    filter_sql, _ = build_clickhouse_filters(req.filters)
+    facts = _facts_scope(service, start_time, end_time, req.filters) if filter_sql != "1=1" else None
+    approx = _APPROX if facts is None else _NOT_APPROX
+
+    def latency_rows(marker: str, dimension: str, limit: int | None = None, having: str | None = None):
+        if facts is not None:
+            return _facts_latency_dimension(service, facts, marker=marker, dimension=dimension, limit=limit)
+        return _latency_dimension(
+            service,
+            marker=marker,
+            dimension=dimension,
+            start_time=start_time,
+            end_time=end_time,
+            limit=limit,
+            having=having,
+        )
+
+    sections = sections or set(_EMPTY)
+
+    def _build_path_breakdown() -> dict[str, Any]:
+        rows = latency_rows("path_breakdown", "edge")
+        return {
+            "has_data": bool(rows),
+            "shielding_detected": any(row["value"] == "false" for row in rows),
+            "rows": [
+                {
+                    "edge": row["value"] == "true",
+                    "requests": int(row["requests"]),
+                    "p50_ms": _milliseconds(_quantile(row, "latency", 0)),
+                    "p95_ms": _milliseconds(_quantile(row, "latency", 1)),
+                }
+                for row in rows
+            ],
+            **approx,
+        }
+
+    def _build_pop_latency() -> dict[str, Any]:
+        rows = latency_rows("pop_latency", "pop", limit=req.pop_latency_limit)
+        p95s = [value for row in rows if (value := _milliseconds(_quantile(row, "latency", 1))) is not None]
+        p95s.sort()
+        median_p95 = p95s[len(p95s) // 2] if p95s else 0
+        return {
+            "has_data": bool(rows),
+            "requires_group_c": False,
+            "median_p95_ms": median_p95,
+            "rows": [
+                {
+                    "pop": row["value"],
+                    "requests": int(row["requests"]),
+                    "p50_ms": _milliseconds(_quantile(row, "latency", 0)),
+                    "p95_ms": _milliseconds(_quantile(row, "latency", 1)),
+                    "elevated": _is_elevated(_quantile(row, "latency", 1), median_p95),
+                }
+                for row in rows
+            ],
+            **approx,
+        }
+
+    def _build_ip_health() -> dict[str, Any]:
+        rows = latency_rows(
+            "ip_health", "oip", limit=req.ip_health_limit, having="sum(origin_minute_dimensions.requests) >= 10"
+        )
+        return {
+            "has_data": bool(rows),
+            "rows": [
+                {
+                    "oip": row["value"],
+                    "requests": int(row["requests"]),
+                    "p50_ms": _milliseconds(_quantile(row, "latency", 0)),
+                    "p95_ms": _milliseconds(_quantile(row, "latency", 1)),
+                    "error_pct": int(row.get("origin_5xx") or 0) * 100.0 / int(row["requests"]),
+                }
+                for row in rows
+                if int(row["requests"]) > 0
+            ],
+            **approx,
+        }
+
+    tasks: list[tuple[str, Any]] = []
+    if "summary" in sections:
+        tasks.append(
+            (
+                "summary",
+                lambda: (
+                    _origin_summary(service, start_time, end_time) if facts is None else _facts_summary(service, facts)
+                ),
+            )
+        )
+    if "timeseries" in sections:
+        tasks.append(
+            (
+                "timeseries",
+                lambda: (
+                    _timeseries(service, req, start_time, end_time)
+                    if facts is None
+                    else _facts_timeseries(service, facts, req)
+                ),
+            )
+        )
+    if "slow_urls" in sections:
+        tasks.append(
+            (
+                "slow_urls",
+                lambda: (
+                    _slow_urls(service, req, start_time, end_time)
+                    if facts is None
+                    else _facts_slow_urls(service, facts, req)
+                ),
+            )
+        )
+    if "status_codes" in sections:
+        tasks.append(
+            (
+                "status_codes",
+                lambda: (
+                    _status_codes(service, start_time, end_time)
+                    if facts is None
+                    else _facts_status_codes(service, facts)
+                ),
+            )
+        )
+    if "path_breakdown" in sections:
+        tasks.append(("path_breakdown", _build_path_breakdown))
+    if "pop_latency" in sections:
+        tasks.append(("pop_latency", _build_pop_latency))
+    if "ip_health" in sections:
+        tasks.append(("ip_health", _build_ip_health))
+
+    trace = HighScaleSections(service.service_id, "origin")
+    result = trace.run_parallel(tasks, source="projection" if facts is None else "fact")
+
+    summary = result.get("summary", _EMPTY["summary"])
+    return {"has_data": bool(summary.get("has_data")), **result, "section_timings": trace.timings()}
+
+
+def _is_elevated(value_us: object, median_p95_ms: float) -> bool:
+    value_ms = _milliseconds(value_us)
+    return value_ms is not None and value_ms > median_p95_ms * 2
+
+
+# ── Pure request-event projection (folded from backend.high_scale.origin_projection) ──
+
+
+@dataclass(frozen=True)
+class OriginProjection:
+    summary_rows: tuple[dict[str, Any], ...]
+    dimension_rows: tuple[dict[str, Any], ...]
+
+
+@dataclass
+class _OriginAccumulator:
+    requests: int = 0
+    misses: int = 0
+    passes: int = 0
+    origin_5xx: int = 0
+    status_count: int = 0
+    origin_bytes: int = 0
+    latencies: list[float] = _dc_field(default_factory=list)
+    ttlb_values: list[float] = _dc_field(default_factory=list)
+    overhead_values: list[float] = _dc_field(default_factory=list)
+    byte_values: list[float] = _dc_field(default_factory=list)
+
+
+def build_origin_projection_rows(rows: tuple[Mapping[str, Any], ...]) -> OriginProjection:
+    summaries: dict[datetime, _OriginAccumulator] = defaultdict(_OriginAccumulator)
+    dimensions: dict[tuple[datetime, str, str], _OriginAccumulator] = defaultdict(_OriginAccumulator)
+
+    for row in rows:
+        bucket = _bucket(row.get("timestamp"))
+        if bucket is None:
+            continue
+        latency = _origin_latency_us(row)
+        status = _integer(row.get("ost"))
+        origin_bytes = _non_negative_integer(row.get("obytes"))
+        if latency is not None:
+            summary = summaries[bucket]
+            _add_latency_metrics(summary, row, latency, status, origin_bytes)
+
+        if status is not None:
+            status_value = str(status if 100 <= status <= 599 else -1)
+            status_acc = dimensions[(bucket, "status", status_value)]
+            status_acc.requests += 1
+            status_acc.origin_5xx += int(500 <= status < 600)
+
+        for dimension, value in _latency_dimensions(row):
+            if latency is None:
+                continue
+            acc = dimensions[(bucket, dimension, value)]
+            acc.requests += 1
+            _add_dimension_metrics(acc, latency, status, origin_bytes)
+
+        origin_ip = _text(row.get("oip"))
+        if origin_ip and status is not None:
+            acc = dimensions[(bucket, "oip", origin_ip)]
+            acc.requests += 1
+            _add_dimension_metrics(acc, latency, status, origin_bytes)
+
+    return OriginProjection(
+        summary_rows=tuple(_origin_summary_row(bucket, acc) for bucket, acc in sorted(summaries.items())),
+        dimension_rows=tuple(
+            _origin_dimension_row(bucket, dimension, value, acc)
+            for (bucket, dimension, value), acc in sorted(dimensions.items())
+        ),
+    )
+
+
+def _add_latency_metrics(
+    acc: _OriginAccumulator, row: Mapping[str, Any], latency: float, status: int | None, origin_bytes: int | None
+) -> None:
+    acc.requests += 1
+    acc.latencies.append(latency)
+    cache = _text(row.get("cache")).upper()
+    acc.misses += int(cache.startswith("MISS"))
+    acc.passes += int(cache.startswith("PASS"))
+    acc.origin_5xx += int(status is not None and 500 <= status < 600)
+    acc.status_count += int(status is not None)
+    if origin_bytes is not None:
+        acc.origin_bytes += origin_bytes
+        acc.byte_values.append(float(origin_bytes))
+    ttlb = _finite_float(row.get("ottlb"))
+    if ttlb is not None:
+        acc.ttlb_values.append(ttlb)
+        elapsed = _finite_float(row.get("elapsed"))
+        if elapsed is not None:
+            acc.overhead_values.append(elapsed - ttlb)
+
+
+def _add_dimension_metrics(
+    acc: _OriginAccumulator, latency: float | None, status: int | None, origin_bytes: int | None
+) -> None:
+    if latency is not None:
+        acc.latencies.append(latency)
+    acc.origin_5xx += int(status is not None and 500 <= status < 600)
+    if origin_bytes is not None:
+        acc.origin_bytes += origin_bytes
+
+
+def _origin_summary_row(bucket: datetime, acc: _OriginAccumulator) -> dict[str, Any]:
+    lat_p50, lat_p75, lat_p95, lat_p99 = _percentiles(acc.latencies, (0.50, 0.75, 0.95, 0.99))
+    ttlb_p50, ttlb_p95 = _percentiles(acc.ttlb_values, (0.50, 0.95))
+    (overhead_p50,) = _percentiles(acc.overhead_values, (0.50,))
+    (bytes_p50,) = _percentiles(acc.byte_values, (0.50,))
+    latency_sk = _sketch(acc.latencies)
+    ttlb_sk = _sketch(acc.ttlb_values)
+    overhead_sk = _sketch(acc.overhead_values)
+    bytes_sk = _sketch(acc.byte_values)
+    return {
+        "bucket_start": bucket.isoformat(),
+        "requests": acc.requests,
+        "misses": acc.misses,
+        "passes": acc.passes,
+        "origin_5xx": acc.origin_5xx,
+        "status_count": acc.status_count,
+        "origin_bytes": acc.origin_bytes,
+        "latency_count": len(acc.latencies),
+        "ttlb_count": len(acc.ttlb_values),
+        "overhead_count": len(acc.overhead_values),
+        "origin_bytes_count": len(acc.byte_values),
+        "latency_p50_us": lat_p50,
+        "latency_p75_us": lat_p75,
+        "latency_p95_us": lat_p95,
+        "latency_p99_us": lat_p99,
+        "ttlb_p50_us": ttlb_p50,
+        "ttlb_p95_us": ttlb_p95,
+        "cdn_overhead_p50_us": overhead_p50,
+        "origin_bytes_p50": bytes_p50,
+        "latency_sk_v": latency_sk[0],
+        "latency_sk_w": latency_sk[1],
+        "ttlb_sk_v": ttlb_sk[0],
+        "ttlb_sk_w": ttlb_sk[1],
+        "overhead_sk_v": overhead_sk[0],
+        "overhead_sk_w": overhead_sk[1],
+        "origin_bytes_sk_v": bytes_sk[0],
+        "origin_bytes_sk_w": bytes_sk[1],
+    }
+
+
+def _origin_dimension_row(bucket: datetime, dimension: str, value: str, acc: _OriginAccumulator) -> dict[str, Any]:
+    lat_p50, lat_p95, lat_p99 = _percentiles(acc.latencies, (0.50, 0.95, 0.99))
+    latency_sk = _sketch(acc.latencies)
+    return {
+        "bucket_start": bucket.isoformat(),
+        "dimension": dimension,
+        "value": value,
+        "requests": acc.requests,
+        "origin_5xx": acc.origin_5xx,
+        "origin_bytes": acc.origin_bytes,
+        "latency_count": len(acc.latencies),
+        "latency_p50_us": lat_p50,
+        "latency_p95_us": lat_p95,
+        "latency_p99_us": lat_p99,
+        "latency_sk_v": latency_sk[0],
+        "latency_sk_w": latency_sk[1],
+    }
+
+
+def _latency_dimensions(row: Mapping[str, Any]) -> tuple[tuple[str, str], ...]:
+    values: list[tuple[str, str]] = []
+    for dimension, source_field in (("url", "url"), ("pop", "pop")):
+        value = _text(row.get(source_field))
+        if value:
+            values.append((dimension, value))
+    edge = row.get("edge")
+    if isinstance(edge, bool):
+        values.append(("edge", "true" if edge else "false"))
+    return tuple(values)
+
+
+def _origin_latency_us(row: Mapping[str, Any]) -> float | None:
+    ottfb = _finite_float(row.get("ottfb"))
+    if ottfb is not None:
+        return ottfb
+    ttfb = _finite_float(row.get("ttfb"))
+    return ttfb * 1_000_000.0 if ttfb is not None else None
+
+
+def _non_negative_integer(value: object) -> int | None:
+    parsed = _integer(value)
+    return parsed if parsed is not None and parsed >= 0 else None
+
+
+# ── Folded from backend/high_scale/security.py ───────────────────────────────
+
+from dataclasses import dataclass
+from typing import Literal
+
+from backend.core.high_scale_sections import clickhouse_source
+from backend.high_scale._common import _bucket_case
+from backend.high_scale._common import build_clickhouse_filters as _build_clickhouse_filters
+from backend.models.dashboard import SecurityAggregatesResponse, SecurityTopBotsResponse
+from backend.repositories.security import _BOT_UA_CLASSIFY_LIMIT, classify_ua_counts, summarize_wellknown_bot_rows
+from backend.repositories.utils.response_cache import ResponseMemo
+from backend.utils.bounded_cache import CacheRegistry
+
+_security_memo = ResponseMemo(ttl=30.0, maxsize=128, prewarmer=False)
+CacheRegistry.register("hs_security_aggregates_memo", _security_memo.cache)
+
+_WHERE = "__WHERE__"
+
+_REQ_HEADER_BUCKETS = (
+    (256, "0-256B"),
+    (512, "256-512B"),
+    (768, "512-768B"),
+    (1024, "768B-1KB"),
+    (1536, "1-1.5KB"),
+    (2048, "1.5-2KB"),
+    (3072, "2-3KB"),
+    (4096, "3-4KB"),
+    (6144, "4-6KB"),
+    (8192, "6-8KB"),
+    (12288, "8-12KB"),
+    (16384, "12-16KB"),
+    (24576, "16-24KB"),
+    (32768, "24-32KB"),
+)
+_REQ_HEADER_LAST = ">32KB"
+_CONN_REUSE_BUCKETS = ((1, "1 (None)"), (5, "2-5"), (20, "6-20"), (100, "21-100"))
+_CONN_REUSE_LAST = ">100"
+
+from backend.utils.pop_utils import _effective_pop_lat_lon_map
+
+_POP_COORDS = tuple((code, lat, lon) for code, (lat, lon) in sorted(_effective_pop_lat_lon_map().items()))
+_POP_DEFAULT = (38.0, -97.0)
+
+_IS_IPV6 = "lower(custom_fields['is_ipv6']) IN ('1', 'true', 't', 'yes')"
+_IS_BOT = "lower(custom_fields['is_bot']) IN ('1', 'true', 't', 'yes')"
+
+
+def _pop_coord(index: int, default: float) -> str:
+    arms = ", ".join(f"pop = '{name}', {(lat, lon)[index]}" for name, lat, lon in _POP_COORDS)
+    return f"multiIf({arms}, {default})"
+
+
+_POP_LAT = _pop_coord(0, _POP_DEFAULT[0])
+_POP_LON = _pop_coord(1, _POP_DEFAULT[1])
+_DISTANCE_KM = (
+    "6371 * 2 * asin(sqrt(pow(sin(radians(lat - pop_lat) / 2), 2) "
+    "+ cos(radians(pop_lat)) * cos(radians(lat)) * pow(sin(radians(lon - pop_lon) / 2), 2)))"
+)
+_IMPOSSIBLE_DISTANCE = (
+    f"multiIf(rtt_min IS NULL OR lat IS NULL OR lon IS NULL, 0, "
+    f"ifNull({_DISTANCE_KM} > (rtt_min / 1000.0 * 100.0 + 150.0), 0))"
+)
+_TUNNEL = "ifNull(tcp_rtt > 0 AND rtt_min / tcp_rtt < 0.1, 0)"
+
+
+@dataclass(frozen=True)
+class _Scope:
+    service_id: str
+    start: datetime
+    end: datetime
+    where: str
+    params: dict[str, Any]
+    filtered: bool
+
+
+def _scope(service: HighScaleService, req: Any, start_time: str | None, end_time: str | None) -> _Scope:
+    start, end = parse_time_window(start_time, end_time)
+    filter_sql, filter_params = _build_clickhouse_filters(getattr(req, "filters", None) or {})
+    where = (
+        f"service_id={{service_id:String}} AND {visible_publication_fence_sql('request')} "
+        "AND event_timestamp >= {start:DateTime64(3)} AND event_timestamp < {end:DateTime64(3)} "
+        f"AND {filter_sql}"
+    )
+    return _Scope(
+        service_id=service.service_id,
+        start=start,
+        end=end,
+        where=where,
+        params={"service_id": service.service_id, "start": start, "end": end, **filter_params},
+        filtered=filter_sql != "1=1",
+    )
+
+
+def _run(service: HighScaleService, scope: _Scope, tag: str, sql: str, **extra: Any) -> list[dict[str, Any]]:
+    source: Literal["fact", "projection"] = (
+        "projection" if tag in {"ngwaf_bots", "ngwaf_verified_bots_ts"} and not scope.filtered else "fact"
+    )
+    with clickhouse_source(source):
+        return service.client.execute(
+            f"/* hs_security:{tag} */ {sql.replace(_WHERE, scope.where)}", {**scope.params, **extra}
+        )
+
+
+def _sec_iso(ts: Any) -> str | None:
+    return safe_iso(datetime.fromtimestamp(int(ts), UTC).replace(tzinfo=None))
+
+
+def _bucket_seconds(req: Any) -> int:
+    return max(1, int(getattr(req, "bucket_seconds", 300) or 300))
+
+
+def _bucket_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [{"bucket": r["bucket"], "count": int(r["count"])} for r in rows]
+
+
+def _tls_fingerprints(service: HighScaleService, scope: _Scope) -> list[dict[str, Any]]:
+    rows = _run(
+        service,
+        scope,
+        "tls_fingerprints",
+        """
+        SELECT custom_fields['tls_ciphers_sha'] AS fingerprint,
+               uniqExact(client_ip) AS ip_count,
+               count() AS request_count
+        FROM request_facts
+        WHERE __WHERE__ AND custom_fields['tls_ciphers_sha'] != ''
+        GROUP BY fingerprint ORDER BY request_count DESC LIMIT 20
+        """,
+    )
+    return [
+        {"fingerprint": r["fingerprint"], "ip_count": int(r["ip_count"]), "request_count": int(r["request_count"])}
+        for r in rows
+    ]
+
+
+def _fingerprint_coverage(service: HighScaleService, scope: _Scope) -> dict[str, float]:
+    rows = _run(
+        service,
+        scope,
+        "fingerprint_coverage",
+        """
+        SELECT count() AS total_rows, countIf(custom_fields['tls_ciphers_sha'] != '') AS populated
+        FROM request_facts WHERE __WHERE__
+        """,
+    )
+    total = int(rows[0]["total_rows"]) if rows else 0
+    populated = int(rows[0]["populated"]) if rows else 0
+    return {"tls_ciphers_sha": populated / total if total > 0 else 0.0}
+
+
+def _req_size_dist(service: HighScaleService, scope: _Scope) -> list[dict[str, Any]]:
+    case = _bucket_case("h", _REQ_HEADER_BUCKETS, _REQ_HEADER_LAST)
+    return _bucket_rows(
+        _run(
+            service,
+            scope,
+            "req_size_dist",
+            f"""
+            SELECT {case} AS bucket, count() AS count, min(h) AS min_val
+            FROM (
+                SELECT toUInt64OrNull(custom_fields['req_header_bytes']) AS h
+                FROM request_facts WHERE __WHERE__
+            )
+            WHERE h IS NOT NULL
+            GROUP BY bucket ORDER BY min_val
+            """,
+        )
+    )
+
+
+def _top_ips_header(service: HighScaleService, scope: _Scope, mask_ips: bool) -> list[dict[str, Any]]:
+    rows = _run(
+        service,
+        scope,
+        "top_ips_header",
+        """
+        SELECT client_ip AS ip, max(h) AS max_header
+        FROM (
+            SELECT client_ip, toUInt64OrNull(custom_fields['req_header_bytes']) AS h
+            FROM request_facts WHERE __WHERE__ AND client_ip != ''
+        )
+        WHERE h IS NOT NULL
+        GROUP BY ip ORDER BY max_header DESC LIMIT 10
+        """,
+    )
+    return [{"ip": _maybe_mask(r["ip"], mask_ips), "max_header": int(r["max_header"])} for r in rows]
+
+
+def _conn_reuse_dist(service: HighScaleService, scope: _Scope) -> list[dict[str, Any]]:
+    case = _bucket_case("c", _CONN_REUSE_BUCKETS, _CONN_REUSE_LAST)
+    return _bucket_rows(
+        _run(
+            service,
+            scope,
+            "conn_reuse_dist",
+            f"""
+            SELECT {case} AS bucket, count() AS count, min(c) AS min_val
+            FROM (
+                SELECT toUInt64OrNull(custom_fields['conn_requests']) AS c
+                FROM request_facts WHERE __WHERE__
+            )
+            WHERE c IS NOT NULL AND c > 0
+            GROUP BY bucket ORDER BY min_val
+            """,
+        )
+    )
+
+
+def _ipv6_adoption(service: HighScaleService, scope: _Scope) -> list[dict[str, Any]]:
+    rows = _run(
+        service,
+        scope,
+        "ipv6_adoption",
+        f"""
+        SELECT toUnixTimestamp(toStartOfHour(event_timestamp)) AS bucket_ts,
+               countIf({_IS_IPV6}) * 100.0 / count() AS pct
+        FROM request_facts WHERE __WHERE__
+        GROUP BY bucket_ts ORDER BY bucket_ts
+        """,
+    )
+    return [{"time": _sec_iso(r["bucket_ts"]), "pct": float(r["pct"])} for r in rows]
+
+
+def _proxy_dist(service: HighScaleService, scope: _Scope) -> list[dict[str, Any]]:
+    rows = _run(
+        service,
+        scope,
+        "proxy_dist",
+        """
+        SELECT custom_fields['p_type'] AS type, count() AS count
+        FROM request_facts WHERE __WHERE__ AND custom_fields['p_type'] != ''
+        GROUP BY type ORDER BY count DESC
+        """,
+    )
+    return [{"type": r["type"], "count": int(r["count"])} for r in rows]
+
+
+def _verified_bots_ts(service: HighScaleService, scope: _Scope, bucket_seconds: int) -> list[dict[str, Any]]:
+    rows = _run(
+        service,
+        scope,
+        "verified_bots_ts",
+        f"""
+        SELECT intDiv(toUnixTimestamp(event_timestamp), {bucket_seconds}) * {bucket_seconds} AS bucket_ts,
+               replaceOne(tag, 'VERIFIED-BOT.', '') AS bot_type,
+               count() AS count
+        FROM request_facts
+        ARRAY JOIN splitByChar(',', custom_fields['waf_sig']) AS tag
+        WHERE __WHERE__
+          AND positionCaseInsensitive(custom_fields['waf_sig'], 'VERIFIED-BOT.') > 0
+          AND startsWith(tag, 'VERIFIED-BOT.')
+        GROUP BY bucket_ts, bot_type ORDER BY bucket_ts, bot_type
+        """,
+    )
+    return [{"time": _sec_iso(r["bucket_ts"]), "bot_type": r["bot_type"], "count": int(r["count"])} for r in rows]
+
+
+_NGWAF_PROJECTION_WHERE = (
+    f"service_id={{service_id:String}} AND {visible_publication_fence_sql('security_dimensions')} AND dimension='ngwaf_bot' "
+    "AND bucket_start >= toStartOfMinute({start:DateTime64(3)}) AND bucket_start < {end:DateTime64(3)}"
+)
+
+
+def _ngwaf_summary(service: HighScaleService, scope: _Scope, limit: int | None = None) -> list[dict[str, Any]]:
+    suffix = f" LIMIT {int(limit)}" if limit is not None else ""
+    if scope.filtered:
+        sql = f"""
+            SELECT custom_fields['ngwaf_bot'] AS bot_name,
+                   anyIf(custom_fields['ngwaf_wellknown_bot'], custom_fields['ngwaf_wellknown_bot'] != '') AS wk_name,
+                   anyIf(custom_fields['ngwaf_bot_category'], custom_fields['ngwaf_bot_category'] != '') AS bot_cat,
+                   count() AS request_count
+            FROM request_facts WHERE __WHERE__ AND custom_fields['ngwaf_bot'] != ''
+            GROUP BY bot_name ORDER BY request_count DESC{suffix}
+            """
+    else:
+        sql = f"""
+            SELECT value AS bot_name,
+                   anyIf(wellknown_bot_name, wellknown_bot_name != '') AS wk_name,
+                   anyIf(bot_category, bot_category != '') AS bot_cat,
+                   sum(requests) AS request_count
+            FROM security_minute_dimensions WHERE {_NGWAF_PROJECTION_WHERE}
+            GROUP BY bot_name ORDER BY request_count DESC{suffix}
+            """
+    return _run(service, scope, "ngwaf_bots", sql)
+
+
+def _ngwaf_verified_bots(service: HighScaleService, scope: _Scope) -> list[dict[str, Any]]:
+    return [
+        {
+            "bot_name": r["bot_name"],
+            "wellknown_bot_name": r["wk_name"] or None,
+            "category": r["bot_cat"] or None,
+            "request_count": int(r["request_count"]),
+        }
+        for r in _ngwaf_summary(service, scope)
+    ]
+
+
+def _ngwaf_verified_bots_ts(service: HighScaleService, scope: _Scope, bucket_seconds: int) -> list[dict[str, Any]]:
+    if scope.filtered:
+        sql = f"""
+            SELECT intDiv(toUnixTimestamp(event_timestamp), {bucket_seconds}) * {bucket_seconds} AS bucket_ts,
+                   custom_fields['ngwaf_bot'] AS bot_name, count() AS count
+            FROM request_facts WHERE __WHERE__ AND custom_fields['ngwaf_bot'] != ''
+            GROUP BY bucket_ts, bot_name ORDER BY bucket_ts, bot_name
+            """
+    else:
+        sql = f"""
+            SELECT intDiv(toUnixTimestamp(bucket_start), {bucket_seconds}) * {bucket_seconds} AS bucket_ts,
+                   value AS bot_name, sum(requests) AS count
+            FROM security_minute_dimensions WHERE {_NGWAF_PROJECTION_WHERE}
+            GROUP BY bucket_ts, bot_name ORDER BY bucket_ts, bot_name
+            """
+    rows = _run(service, scope, "ngwaf_verified_bots_ts", sql)
+    return [{"time": _sec_iso(r["bucket_ts"]), "bot_name": r["bot_name"], "count": int(r["count"])} for r in rows]
+
+
+def _ngwaf_configured(service: HighScaleService) -> bool:
+    try:
+        from backend import config as svcconfig
+
+        return bool(svcconfig.get_ngwaf_workspace_id(service.service_id))
+    except Exception:
+        return False
+
+
+def _wellknown_bots(service: HighScaleService, scope: _Scope) -> list[dict[str, Any]]:
+    from backend.utils.bot_sources import get_bot_regex_pattern
+
+    pattern = get_bot_regex_pattern(500)
+    prefilter = " AND match(custom_fields['ua'], {bot_pattern:String})" if pattern else ""
+    rows = _run(
+        service,
+        scope,
+        "wellknown_bots",
+        f"""
+        SELECT custom_fields['ua'] AS ua, client_ip AS ip, count() AS cnt
+        FROM request_facts
+        WHERE __WHERE__ AND custom_fields['ua'] != '' AND client_ip != ''{prefilter}
+        GROUP BY ua, ip ORDER BY cnt DESC LIMIT 10000
+        """,
+        **({"bot_pattern": pattern} if pattern else {}),
+    )
+    return summarize_wellknown_bot_rows([(r["ua"], r["ip"], int(r["cnt"])) for r in rows])
+
+
+def _bot_efficiency(service: HighScaleService, scope: _Scope) -> list[dict[str, Any]]:
+    from backend.repositories.security import summarize_bot_efficiency_rows
+
+    rows = _run(
+        service,
+        scope,
+        "bot_efficiency",
+        """
+        WITH ua_all AS (
+            SELECT
+                custom_fields['ua'] AS key,
+                count() AS cnt,
+                ifNull(sum(toInt64OrZero(custom_fields['resp_bytes'])), 0) AS resp_bytes,
+                sum(count()) OVER () AS site_cnt,
+                ifNull(sum(sum(toInt64OrZero(custom_fields['resp_bytes']))) OVER (), 0) AS site_resp_bytes
+            FROM request_facts
+            WHERE __WHERE__
+            GROUP BY key
+        ),
+        ua_agg AS (
+            SELECT
+                'ua' AS kind,
+                key,
+                cnt,
+                resp_bytes,
+                site_cnt,
+                site_resp_bytes
+            FROM ua_all
+            WHERE key != ''
+            ORDER BY resp_bytes DESC, cnt DESC
+            LIMIT 2000
+        ),
+        ref_extracted AS (
+            SELECT
+                client_ip AS ip,
+                if(
+                    (
+                        positionCaseInsensitive(custom_fields['ua'], '-user') > 0
+                        OR positionCaseInsensitive(custom_fields['ua'], '-externalfetcher') > 0
+                    ) AND extract(lower(custom_fields['ua']), '([a-z0-9]+)-(?:user|externalfetcher)') != '',
+                    extract(lower(custom_fields['ua']), '([a-z0-9]+)-(?:user|externalfetcher)'),
+                    extract(lower(custom_fields['referer']), 'https?://(?:www\\.)?([^/.:;\\s]+)')
+                ) AS ref_stem
+            FROM request_facts
+            WHERE __WHERE__
+              AND client_ip != ''
+              AND (
+                  (custom_fields['referer'] != '' AND custom_fields['referer'] != '-')
+                  OR positionCaseInsensitive(custom_fields['ua'], '-user') > 0
+                  OR positionCaseInsensitive(custom_fields['ua'], '-externalfetcher') > 0
+              )
+              AND NOT match(lower(custom_fields['ua']), '(bot|crawler|spider|slurp|archiver|scraper|externalagent|extended|headless)')
+        ),
+        ref_agg AS (
+            SELECT
+                'ref' AS kind,
+                ref_stem AS key,
+                uniqExact(ip) AS cnt,
+                toInt64(0) AS resp_bytes,
+                toUInt64(0) AS site_cnt,
+                toInt64(0) AS site_resp_bytes
+            FROM ref_extracted
+            WHERE ref_stem != ''
+            GROUP BY ref_stem
+        )
+        SELECT kind, key, cnt, resp_bytes, site_cnt, site_resp_bytes FROM ua_agg
+        UNION ALL
+        SELECT kind, key, cnt, resp_bytes, site_cnt, site_resp_bytes FROM ref_agg
+        """,
+    )
+    tagged: list[tuple[str, str, int, int]] = []
+    has_site_row = any(str(r.get("kind") or "") == "site" for r in rows)
+    if not has_site_row:
+        for r in rows:
+            if str(r.get("kind") or "") == "ua" and ("site_cnt" in r or "site_resp_bytes" in r):
+                tagged.append(("site", "", int(r.get("site_cnt") or 0), int(r.get("site_resp_bytes") or 0)))
+                break
+    for r in rows:
+        tagged.append((str(r["kind"] or ""), str(r["key"] or ""), int(r["cnt"] or 0), int(r["resp_bytes"] or 0)))
+    return summarize_bot_efficiency_rows(tagged)
+
+
+def _maybe_mask(ip: Any, mask_ips: bool) -> Any:
+    if not mask_ips or not ip:
+        return ip
+    from backend.core.share_db.validation import mask_ip
+
+    return mask_ip(str(ip))
+
+
+def security_aggregates(
+    service: HighScaleService,
+    req: Any,
+    start_time: str | None,
+    end_time: str | None,
+    *,
+    sections: set[str] | None = None,
+    mask_ips: bool = False,
+) -> SecurityAggregatesResponse:
+    bucket_seconds = _bucket_seconds(req)
+    memo_key = digest_cache_key(
+        {
+            "ep": "hs_security_aggregates",
+            "cid": client_cache_token(service.client),
+            "s": bucket_time_to_minute(start_time),
+            "e": bucket_time_to_minute(end_time),
+            "f": serialize_filters_for_key(getattr(req, "filters", None) or {}),
+            "b": int(bucket_seconds),
+            "sec": sorted(sections) if sections is not None else None,
+            "m": bool(mask_ips),
+        },
+        {"name": service.service_id, "service_id": service.service_id},
+    )
+    cached = _security_memo.get_with_telemetry(memo_key)
+    if cached is not None:
+        return SecurityAggregatesResponse.with_telemetry(**cached)
+
+    def _compute() -> dict[str, Any]:
+        cached_inner = _security_memo.get(memo_key)
+        if cached_inner is not None:
+            return cached_inner
+
+        scope = _scope(service, req, start_time, end_time)
+
+        def want(name: str) -> bool:
+            return sections is None or name in sections
+
+        tasks: list[tuple[str, Callable[[], Any]]] = []
+        if want("tls_fingerprints"):
+            tasks.append(("tls_fingerprints", lambda: _tls_fingerprints(service, scope)))
+        if want("fingerprint_coverage"):
+            tasks.append(("fingerprint_coverage", lambda: _fingerprint_coverage(service, scope)))
+        if want("req_size_dist"):
+            tasks.append(("req_size_dist", lambda: _req_size_dist(service, scope)))
+        if want("top_ips_header"):
+            tasks.append(("top_ips_header", lambda: _top_ips_header(service, scope, mask_ips)))
+        if want("ipv6_adoption"):
+            tasks.append(("ipv6_adoption", lambda: _ipv6_adoption(service, scope)))
+        if want("proxy_dist"):
+            tasks.append(("proxy_dist", lambda: _proxy_dist(service, scope)))
+        if want("conn_reuse_dist"):
+            tasks.append(("conn_reuse_dist", lambda: _conn_reuse_dist(service, scope)))
+        if want("verified_bots_ts"):
+            tasks.append(("verified_bots_ts", lambda: _verified_bots_ts(service, scope, bucket_seconds)))
+        if want("ngwaf_verified_bots") or want("ngwaf_verified_bots_ts"):
+            tasks.append(("ngwaf_configured", lambda: _ngwaf_configured(service)))
+            tasks.append(("ngwaf_verified_bots", lambda: _ngwaf_verified_bots(service, scope)))
+            tasks.append(("ngwaf_verified_bots_ts", lambda: _ngwaf_verified_bots_ts(service, scope, bucket_seconds)))
+        if want("wellknown_bots"):
+            tasks.append(("wellknown_bots", lambda: _wellknown_bots(service, scope)))
+        if want("bot_efficiency"):
+            tasks.append(("bot_efficiency", lambda: _bot_efficiency(service, scope)))
+        if want("top_bots"):
+            tasks.append(("_top_bots", lambda: _top_bots(service, scope)))
+        if want("proxies"):
+            tasks.append(("_proxies", lambda: _proxies(service, scope, mask_ips)))
+
+        trace = HighScaleSections(service.service_id, "security")
+
+        def source_for(key: str) -> Literal["fact", "projection", "mixed", "unknown"]:
+            if key == "ngwaf_configured":
+                return "unknown"
+            if key == "_top_bots" and not scope.filtered:
+                return "mixed"
+            return "projection" if key.startswith("ngwaf_") and not scope.filtered else "fact"
+
+        res: dict[str, Any] = {}
+        for k, val in trace.run_parallel(
+            tasks,
+            source=source_for,
+            activity=lambda k: "overhead" if k == "ngwaf_configured" else "compute",
+            max_workers=8,
+            thread_name_prefix="hs-sec",
+        ).items():
+            if k == "_top_bots":
+                res["bots"] = val["bots"]
+                res["ngwaf_bots"] = val["ngwaf_bots"]
+            elif k == "_proxies":
+                res.update(val)
+            else:
+                res[k] = val
+        res["section_timings"] = trace.timings()
+        _security_memo.put(memo_key, dict(res))
+        return res
+
+    res = _security_memo.coalesce(f"hs_security_agg:{memo_key}", _compute)
+    return SecurityAggregatesResponse.with_telemetry(**res)
+
+
+def _top_bots(service: HighScaleService, scope: _Scope, n: int = 10) -> dict[str, list[dict[str, Any]]]:
+    ua_rows = _run(
+        service,
+        scope,
+        "top_bots_ua",
+        """
+        SELECT custom_fields['ua'] AS ua, count() AS cnt
+        FROM request_facts WHERE __WHERE__ AND custom_fields['ua'] != ''
+        GROUP BY ua ORDER BY cnt DESC LIMIT {ua_limit:UInt32}
+        """,
+        ua_limit=_BOT_UA_CLASSIFY_LIMIT,
+    )
+    bots = classify_ua_counts([(r["ua"], int(r["cnt"])) for r in ua_rows], n)
+    ngwaf_bots = [
+        {"name": r["bot_name"], "category": r["bot_cat"] or None, "request_count": int(r["request_count"])}
+        for r in _ngwaf_summary(service, scope, limit=n)
+    ]
+    return {"bots": bots, "ngwaf_bots": ngwaf_bots}
+
+
+def top_bots(
+    service: HighScaleService, req: Any, start_time: str | None, end_time: str | None
+) -> SecurityTopBotsResponse:
+    scope = _scope(service, req, start_time, end_time)
+    trace = HighScaleSections(service.service_id, "security")
+    result = trace.run("top_bots", lambda: _top_bots(service, scope), source="fact" if scope.filtered else "mixed")
+    return SecurityTopBotsResponse.with_telemetry(
+        **cache_result(result, state="bypass", prewarmer=False), section_timings=trace.timings()
+    )
+
+
+_PROXY_SOURCE = f"""
+    FROM (
+        SELECT client_ip AS ip,
+               custom_fields['pop'] AS pop,
+               country,
+               custom_fields['city'] AS city,
+               toFloat64OrNull(custom_fields['rtt_min']) AS rtt_min,
+               toFloat64OrNull(custom_fields['tcp_rtt']) AS tcp_rtt,
+               toFloat64OrNull(custom_fields['lat']) AS lat,
+               toFloat64OrNull(custom_fields['lon']) AS lon,
+               toInt64OrNull(custom_fields['asn']) AS asn,
+               {_POP_LAT} AS pop_lat,
+               {_POP_LON} AS pop_lon
+        FROM request_facts WHERE __WHERE__ AND custom_fields['rtt_min'] != ''
+    )
+"""
+
+
+def _proxies(service: HighScaleService, scope: _Scope, mask_ips: bool) -> dict[str, Any]:
+    def _q_stats():
+        return _run(
+            service,
+            scope,
+            "proxy_stats",
+            f"""
+            SELECT uniqExactIf(ip, {_IMPOSSIBLE_DISTANCE} OR {_TUNNEL}) AS active_proxies_count,
+                   countIf({_IMPOSSIBLE_DISTANCE} OR {_TUNNEL}) AS total_requests_count,
+                   uniqExactIf(ip, {_IMPOSSIBLE_DISTANCE}) AS distance_mismatches_count
+            {_PROXY_SOURCE}
+            """,
+        )
+
+    def _q_quality():
+        return _run(
+            service,
+            scope,
+            "traffic_quality",
+            """
+            SELECT multiIf(
+                       rtt_min IS NULL OR tcp_rtt IS NULL, 'Direct Connection',
+                       tcp_rtt > 0 AND rtt_min / tcp_rtt < 0.1, 'Active Tunnel / Proxy',
+                       tcp_rtt > 0 AND rtt_min / tcp_rtt < 0.7, 'WiFi / Mobile',
+                       'Direct Connection') AS type,
+                   count() AS count
+            FROM (
+                SELECT toFloat64OrNull(custom_fields['rtt_min']) AS rtt_min,
+                       toFloat64OrNull(custom_fields['tcp_rtt']) AS tcp_rtt
+                FROM request_facts WHERE __WHERE__
+            )
+            GROUP BY type ORDER BY count DESC
+            """,
+        )
+
+    def _q_isps():
+        return _run(
+            service,
+            scope,
+            "suspicious_isps",
+            f""" SELECT asn, count() AS count {_PROXY_SOURCE} WHERE {_TUNNEL} GROUP BY asn ORDER BY count DESC LIMIT 10 """,
+        )
+
+    def _q_clients():
+        return _run(
+            service,
+            scope,
+            "active_clients",
+            f"""
+            SELECT ip, asn, rtt_min / 1000.0 AS rtt_min_ms, tcp_rtt / 1000.0 AS tcp_rtt_ms,
+                   {_DISTANCE_KM} AS distance_km, pop,
+                   lat AS client_lat, lon AS client_lon, pop_lat, pop_lon,
+                   {_IMPOSSIBLE_DISTANCE} AS impossible_distance,
+                   multiIf({_IMPOSSIBLE_DISTANCE}, 'High',
+                           {_TUNNEL}, 'High',
+                           ifNull(tcp_rtt > 0 AND rtt_min / tcp_rtt < 0.2, 0), 'Medium',
+                           'Low') AS risk_level,
+                   country, city
+            {_PROXY_SOURCE}
+            WHERE rtt_min IS NOT NULL
+              AND ({_IMPOSSIBLE_DISTANCE} OR ifNull(tcp_rtt > 0 AND rtt_min / tcp_rtt < 0.2, 0))
+            ORDER BY multiIf(risk_level = 'High', 0, risk_level = 'Medium', 1, 2), distance_km DESC LIMIT 100
+            """,
+        )
+
+    with ThreadPoolExecutor(max_workers=4, thread_name_prefix="hs-proxies") as pool:
+        f_stats = pool.submit(contextvars.copy_context().run, _q_stats)
+        f_qual = pool.submit(contextvars.copy_context().run, _q_quality)
+        f_isps = pool.submit(contextvars.copy_context().run, _q_isps)
+        f_cli = pool.submit(contextvars.copy_context().run, _q_clients)
+        stats = f_stats.result()
+        quality_rows = f_qual.result()
+        isp_rows = f_isps.result()
+        client_rows = f_cli.result()
+
+    stat = stats[0] if stats else {}
+    quality_total = sum(int(r["count"]) for r in quality_rows)
+    traffic_quality = (
+        [{"label": str(r["type"]), "value": round(int(r["count"]) / quality_total * 100, 1)} for r in quality_rows]
+        if quality_total > 0
+        else []
+    )
+
+    from backend.core.duckdb import get_asn_names
+
+    asns = {int(r["asn"]) for r in (*isp_rows, *client_rows) if r.get("asn") is not None}
+    asn_names = get_asn_names(scope.service_id, sorted(asns))
+
+    def _asn_name(asn: int | None) -> str:
+        return asn_names.get(asn) or (f"AS{asn}" if asn else "Unknown ISP")
+
+    suspicious_isps = []
+    for r in isp_rows:
+        asn = int(r["asn"]) if r.get("asn") is not None else None
+        suspicious_isps.append({"isp": _asn_name(asn), "asn": asn, "count": int(r["count"])})
+
+    active_clients = []
+    for r in client_rows:
+        asn = int(r["asn"]) if r.get("asn") is not None else None
+        active_clients.append(
+            {
+                "ip": _maybe_mask(r["ip"], mask_ips),
+                "rtt_min_ms": round(float(r["rtt_min_ms"]), 2),
+                "tcp_rtt_ms": round(float(r["tcp_rtt_ms"]), 2) if r["tcp_rtt_ms"] is not None else None,
+                "distance_km": round(float(r["distance_km"]), 1) if r["distance_km"] is not None else None,
+                "pop": r["pop"] or None,
+                "client_lat": round(float(r["client_lat"]), 4) if r["client_lat"] is not None else None,
+                "client_lon": round(float(r["client_lon"]), 4) if r["client_lon"] is not None else None,
+                "pop_lat": float(r["pop_lat"]),
+                "pop_lon": float(r["pop_lon"]),
+                "impossible_distance": bool(int(r["impossible_distance"])),
+                "risk_level": r["risk_level"],
+                "country": r["country"] or None,
+                "city": r["city"] or None,
+                "asn_name": _asn_name(asn),
+            }
+        )
+
+    return {
+        "active_proxies_count": int(stat.get("active_proxies_count", 0)),
+        "tunnel_requests_count": int(stat.get("total_requests_count", 0)),
+        "distance_mismatches_count": int(stat.get("distance_mismatches_count", 0)),
+        "traffic_quality": traffic_quality,
+        "suspicious_isps": suspicious_isps,
+        "active_clients": active_clients,
+    }
+
+
+def get_proxies_data(
+    service: HighScaleService, req: Any, start_time: str | None, end_time: str | None, *, mask_ips: bool = False
+) -> dict[str, Any]:
+    scope = _scope(service, req, start_time, end_time)
+    trace = HighScaleSections(service.service_id, "security")
+    result = trace.run("proxies", lambda: _proxies(service, scope, mask_ips), source="fact")
+    return {**result, "_section_timings": trace.timings()}
+
+
+def get_security_threat_intel(
+    service: HighScaleService, start_time: str | None, end_time: str | None
+) -> dict[str, Any]:
+    scope = _scope(service, None, start_time, end_time)
+    rows = _run(
+        service,
+        scope,
+        "threat_intel",
+        f"""
+        SELECT multiIf(custom_fields['ja3'] != '', custom_fields['ja3'], custom_fields['ja4']) AS tls_fingerprint,
+               count() AS requests,
+               topK(1)(country)[1] AS top_country,
+               countIf(custom_fields['waf_logged_rules'] != '' OR custom_fields['waf_blocked_rules'] != '')
+                   AS matched_waf_rules_count,
+               round(countIf({_IS_BOT}) * 100.0 / count(), 2) AS bot_percentage,
+               max(custom_fields['p_type'] != '') AS is_anonymized_proxy
+        FROM request_facts
+        WHERE __WHERE__ AND tls_fingerprint != ''
+        GROUP BY tls_fingerprint ORDER BY requests DESC LIMIT 50
+        """,
+    )
+    return {
+        "data": [
+            {
+                "tls_fingerprint": r["tls_fingerprint"],
+                "requests": int(r["requests"]),
+                "top_country": r["top_country"] or "Unknown",
+                "matched_waf_rules_count": int(r["matched_waf_rules_count"]),
+                "bot_percentage": float(r["bot_percentage"] or 0.0),
+                "is_anonymized_proxy": bool(int(r["is_anonymized_proxy"])),
+            }
+            for r in rows
+        ]
+    }
+
+
+@dataclass(frozen=True)
+class SecurityProjection:
+    dimension_rows: tuple[dict[str, Any], ...]
+
+
+@dataclass
+class _SecurityAccumulator:
+    requests: int = 0
+    wellknown_bot_name: str = ""
+    bot_category: str = ""
+    verified_count: int = 0
+    impersonator_count: int = 0
+    unverified_count: int = 0
+
+
+def build_security_projection_rows(rows: tuple[Mapping[str, Any], ...]) -> SecurityProjection:
+    dimensions: dict[tuple[datetime, str, str], _SecurityAccumulator] = defaultdict(_SecurityAccumulator)
+
+    for row in rows:
+        bucket = _bucket(row.get("timestamp"))
+        if bucket is None:
+            continue
+
+        ngwaf_bot = _text(row.get("_ngwaf_bot_name"))
+        if ngwaf_bot:
+            state = _text(row.get("ngwaf_bot_verification_state", "unverified"))
+            acc = dimensions[(bucket, "ngwaf_bot", ngwaf_bot)]
+            acc.requests += 1
+            if state == "verified":
+                acc.verified_count += 1
+            elif state == "impersonator":
+                acc.impersonator_count += 1
+            else:
+                acc.unverified_count += 1
+
+            if not acc.wellknown_bot_name:
+                acc.wellknown_bot_name = _text(row.get("_ngwaf_wellknown_bot_name"))
+            if not acc.bot_category:
+                acc.bot_category = _text(row.get("_ngwaf_bot_category"))
+
+    return SecurityProjection(
+        dimension_rows=tuple(
+            _security_dimension_row(bucket, dimension, value, acc)
+            for (bucket, dimension, value), acc in sorted(dimensions.items())
+        )
+    )
+
+
+def _security_dimension_row(bucket: datetime, dimension: str, value: str, acc: _SecurityAccumulator) -> dict[str, Any]:
+    return {
+        "bucket_start": bucket.isoformat(),
+        "dimension": dimension,
+        "value": value,
+        "requests": acc.requests,
+        "wellknown_bot_name": acc.wellknown_bot_name,
+        "bot_category": acc.bot_category,
+        "verified_count": acc.verified_count,
+        "impersonator_count": acc.impersonator_count,
+        "unverified_count": acc.unverified_count,
+    }
+
+
+_AGG_UNSET = object()
+
+
+def aggregates(
+    service: HighScaleService,
+    req: Any,
+    start_time: str | None,
+    end_time: str | None,
+    *,
+    sections: set[str] | None | object = _AGG_UNSET,
+) -> Any:
+    if sections is not _AGG_UNSET or hasattr(req, "pop_latency_limit") or not hasattr(req, "chart_interval"):
+        return origin_aggregates(
+            service,
+            req,
+            start_time,
+            end_time,
+            sections=None if sections is _AGG_UNSET else sections,  # type: ignore[arg-type]
+        )
+    return dashboard_aggregates(service, req, start_time, end_time)
 
 
 _QUERY_SERVICE_ALIASES = (
@@ -3667,6 +5827,10 @@ _QUERY_SERVICE_ALIASES = (
     "performance",
     "performance_projection",
     "cmcd",
+    "dashboard",
+    "origin",
+    "origin_projection",
+    "security",
 )
 for _alias_name in _QUERY_SERVICE_ALIASES:
     sys.modules[f"backend.high_scale.{_alias_name}"] = _self_mod

@@ -19,7 +19,7 @@ import PerformanceClient from '@/app/performance/_sections/PerformanceClient'
 import OriginClient from '@/app/origin/_sections/OriginClient'
 import FastlyValueClient, { IOValueTab } from '@/app/fastly-value/page'
 import type { components } from '@/types/api.generated'
-import UsageLogClient from '@/app/admin/usage-log/_sections/UsageLogClient'
+import { UsageLogClient } from '@/app/admin/usage-log/page'
 import Loading from '@/app/admin/usage-log/loading'
 import UsagePage from '@/app/usage/page'
 import SessionsPage from '@/app/sessions/page'
@@ -28,25 +28,13 @@ import { DEFAULTS, reducer, calculate, type PrefillResponse } from '@/components
 import HighScaleRequestFactsPage from '@/app/high-scale/request-facts/page'
 import HighScaleRequestFactsLoading from '@/app/high-scale/request-facts/loading'
 import { highScaleRequestFactsHooks } from '@/components/high-scale/HighScaleRequestFactsPanel'
-import {
-  CorrelatorLeaderboard,
-  useTickHistory,
-  type MetricsTick as HistoryMetricsTick,
-} from '@/app/control-room/_sections/ControlRoomClient'
+import { CorrelatorLeaderboard, useTickHistory, type MetricsTick as HistoryMetricsTick } from '@/app/control-room/_sections/ControlRoomClient'
 import type { SSELine } from '@/hooks/useSSE'
 import { AnalyticsCard } from '@/components/AnalyticsCard'
-import {
-  ReviewCard, ReviewHeader, ReviewContent, ReviewItem, SectionHeader, StatCard,
-} from '@/components/ui/confirm-dialog'
+import { ReviewCard, ReviewHeader, ReviewContent, ReviewItem, SectionHeader, StatCard } from '@/components/ui/confirm-dialog'
 import { SkeletonGrid } from '@/components/ui/skeleton'
 import { Switch } from '@/components/ui/switch'
-import {
-  densifyBarSeries,
-  buildTrafficData,
-  getIntervalSeconds,
-  _resetUrlHydrationFlag,
-  hydrateFilterStoreFromUrl,
-} from "@/lib/utils";
+import { densifyBarSeries, buildTrafficData, getIntervalSeconds, _resetUrlHydrationFlag, hydrateFilterStoreFromUrl } from '@/lib/utils'
 import { useServiceStore, useFilterStore } from '@/stores/filterStore'
 import { server, CMCD_FIXTURE } from '@/__tests__/helpers/msw/handlers'
 import {
@@ -56,9 +44,7 @@ import {
 import * as apiLib from '@/lib/api'
 import React from 'react'
 
-beforeAll(() => {
-  stubResizeObserver()
-})
+beforeAll(() => { stubResizeObserver() })
 
 vi.mock('../../playwright.config', () => ({ E2E_BACKEND_PORT: 18004, E2E_FRONTEND_PORT: 13004 }))
 vi.mock('@tanstack/react-virtual', async () => (await import('../helpers/page-smoke')).reactVirtualModuleMock())
@@ -72,9 +58,9 @@ vi.mock('next/navigation', () => ({
 }))
 
 vi.mock('@uiw/react-codemirror', async () => {
-  const React = await import('react')
+  const R = await import('react')
   return {
-    default: React.forwardRef(function MockCodeMirror(
+    default: R.forwardRef(function MockCodeMirror(
       { value, onChange }: { value: string; onChange: (v: string) => void },
       ref: React.Ref<HTMLTextAreaElement>,
     ) {
@@ -96,18 +82,14 @@ const { mockGet, mockPost, mockDelete, useFactsMock } = vi.hoisted(() => ({
 
 vi.mock('@/lib/api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/api')>()
+  const wrap = (fn: unknown, mock: (...a: unknown[]) => unknown) =>
+    vi.fn((...args: unknown[]) => (useRealApiClient ? (fn as (...a: unknown[]) => unknown)(...args) : mock(...args)))
   return {
     ...actual,
     client: {
-      GET: vi.fn((...args: unknown[]) =>
-        useRealApiClient ? (actual.client.GET as (...a: unknown[]) => unknown)(...args) : mockGet(...args),
-      ),
-      POST: vi.fn((...args: unknown[]) =>
-        useRealApiClient ? (actual.client.POST as (...a: unknown[]) => unknown)(...args) : mockPost(...args),
-      ),
-      DELETE: vi.fn((...args: unknown[]) =>
-        useRealApiClient ? (actual.client.DELETE as (...a: unknown[]) => unknown)(...args) : mockDelete(...args),
-      ),
+      GET: wrap(actual.client.GET, mockGet),
+      POST: wrap(actual.client.POST, mockPost),
+      DELETE: wrap(actual.client.DELETE, mockDelete),
       use: actual.client.use,
     },
     extractApiError: vi.fn((...args: Parameters<typeof actual.extractApiError>) =>
@@ -132,12 +114,7 @@ vi.mock('@/hooks/useBootstrap', async (importOriginal) => {
     ...actual,
     useActiveLogFields: (...args: Parameters<typeof actual.useActiveLogFields>) =>
       useMockActiveLogFields
-        ? {
-            ready: true,
-            isFieldActive: vi.fn(() => true),
-            isGroupActive: () => true,
-            activeFields: new Set(['ottfb', 'pop', 'oip']),
-          }
+        ? { ready: true, isFieldActive: vi.fn(() => true), isGroupActive: () => true, activeFields: new Set(['ottfb', 'pop', 'oip']) }
         : actual.useActiveLogFields(...args),
     useIsDataReady: (...args: Parameters<typeof actual.useIsDataReady>) =>
       mockIsDataReady !== null ? mockIsDataReady : actual.useIsDataReady(...args),
@@ -181,21 +158,17 @@ function resetDefaultStores() {
 vi.mock('@/components/ReportLayout', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/components/ReportLayout')>()
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const WrappedReportLayout = (props: any) => {
-    if (!reportLayoutChildArgs) return <actual.ReportLayout {...props} />
-    return (
+  const WrappedReportLayout = (props: any) =>
+    !reportLayoutChildArgs ? (
+      <actual.ReportLayout {...props} />
+    ) : (
       <div>
         <h1>{props.title}</h1>
         <div data-testid="header-actions">{props.headerActions}</div>
         {props.children(reportLayoutChildArgs)}
       </div>
     )
-  }
-  return {
-    ...actual,
-    default: WrappedReportLayout,
-    ReportLayout: WrappedReportLayout,
-  }
+  return { ...actual, default: WrappedReportLayout, ReportLayout: WrappedReportLayout }
 })
 
 vi.mock('@/components/DataTable', async (importOriginal) => {
@@ -208,8 +181,7 @@ vi.mock('@/components/DataTable', async (importOriginal) => {
     FilterValueCell: (props: any) =>
       useMockDataTable ? <span>{props.display ?? props.filters?.[0]?.value}</span> : <actual.FilterValueCell {...props} />,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    ColumnVisibilityDropdown: (props: any) =>
-      useMockDataTable ? null : <actual.ColumnVisibilityDropdown {...props} />,
+    ColumnVisibilityDropdown: (props: any) => (useMockDataTable ? null : <actual.ColumnVisibilityDropdown {...props} />),
   }
 })
 
@@ -219,16 +191,16 @@ vi.mock('@/components/AnalyticsCard', async (importOriginal) => {
   return {
     ...actual,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    AnalyticsCard: (props: any) => {
-      if (!useMockAnalyticsCard) return <actual.AnalyticsCard {...props} />
-      return (
+    AnalyticsCard: (props: any) =>
+      !useMockAnalyticsCard ? (
+        <actual.AnalyticsCard {...props} />
+      ) : (
         <div data-testid="analytics-card">
           <h3>{props.title}</h3>
           {props.error ? <div role="alert">card error</div> : null}
           {props.children}
         </div>
-      )
-    },
+      ),
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     LazyMount: (props: any) => (useMockAnalyticsCard ? <>{props.children}</> : <actual.LazyMount {...props} />),
     TimeSeriesChart: () => <div data-testid="timeseries-chart">TimeSeriesChart</div>,
@@ -262,7 +234,6 @@ describe('Dashboard page & chart helpers', () => {
         : getOk({}),
     )
     mockPost.mockResolvedValue(postOk({ summary: { total: 1234 }, time_series: [] }))
-
     const NuqsWrapper = withNuqsTestingAdapter()
     renderWithQuery(<NuqsWrapper><DashboardClient /></NuqsWrapper>, { queryClient })
     expect(screen.getByText('Dashboard')).toBeInTheDocument()
@@ -282,34 +253,21 @@ describe('Dashboard page & chart helpers', () => {
         [{ time: '2026-06-30T09:00:00Z', value: 5 }, { time: '2026-06-30T12:00:00Z', value: 8 }],
         [{ time: '2026-06-30 09:00:00', value: 5 }, { time: '2026-06-30 12:00:00', value: 8 }],
       ]) {
-        const dense = densifyBarSeries(sparse, 3600, false)
-        expect(dense.map((d) => d.value)).toEqual([5, 0, 0, 8])
+        expect(densifyBarSeries(sparse, 3600, false).map((d) => d.value)).toEqual([5, 0, 0, 8])
       }
-
       const sparse = [{ time: '2026-06-30T09:00:00Z', value: 5 }, { time: '2026-06-30T12:00:00Z', value: 8 }]
       expect(densifyBarSeries(sparse, undefined, false)).toBe(sparse)
 
-      const contig = [
-        { time: '2026-06-30T09:00:00Z', value: 1 },
-        { time: '2026-06-30T10:00:00Z', value: 2 },
-        { time: '2026-06-30T11:00:00Z', value: 3 },
-      ]
+      const contig = [{ time: '2026-06-30T09:00:00Z', value: 1 }, { time: '2026-06-30T10:00:00Z', value: 2 }, { time: '2026-06-30T11:00:00Z', value: 3 }]
       expect(densifyBarSeries(contig, 3600, false)).toBe(contig)
 
-      const misaligned = [
-        { time: '2026-06-30T09:00:00Z', value: 5 },
-        { time: '2026-06-30T09:30:00Z', value: 7 },
-        { time: '2026-06-30T12:00:00Z', value: 8 },
-      ]
+      const misaligned = [{ time: '2026-06-30T09:00:00Z', value: 5 }, { time: '2026-06-30T09:30:00Z', value: 7 }, { time: '2026-06-30T12:00:00Z', value: 8 }]
       expect(densifyBarSeries(misaligned, 3600, false)).toBe(misaligned)
 
       const cap = [{ time: '2026-06-30T09:00:00Z', value: 1 }, { time: '2026-06-30T11:00:01Z', value: 1 }]
       expect(densifyBarSeries(cap, 1, false)).toBe(cap)
 
-      const stacked = densifyBarSeries([
-        { time: '2026-06-30T09:00:00Z', value: 2, category: '500' },
-        { time: '2026-06-30T11:00:00Z', value: 3, category: '502' },
-      ], 3600, true)
+      const stacked = densifyBarSeries([{ time: '2026-06-30T09:00:00Z', value: 2, category: '500' }, { time: '2026-06-30T11:00:00Z', value: 3, category: '502' }], 3600, true)
       expect(stacked).toHaveLength(6)
       expect(stacked.filter((d) => d.time === '2026-06-30T10:00:00.000Z').every((d) => d.value === 0)).toBe(true)
     })
@@ -396,12 +354,8 @@ describe('Assets & Shield page', () => {
       { asset_type: 'JavaScript/CSS', content_encoding: 'gzip', requests: 20000, bytes: 40000000 },
       { asset_type: 'JavaScript/CSS', content_encoding: 'br', requests: 7600, bytes: 15200000 },
     ],
-    large_uncompressed_assets: [
-      { url: '/static/bundle-huge.js', requests: 1200, avg_bytes: 3750.0, total_bytes: 4500000, status: 200 },
-    ],
-    low_ttl_assets: [
-      { url: '/feed.json', requests: 3500, avg_ttl: 60.0, asset_type: 'API/Dynamic' },
-    ],
+    large_uncompressed_assets: [{ url: '/static/bundle-huge.js', requests: 1200, avg_bytes: 3750.0, total_bytes: 4500000, status: 200 }],
+    low_ttl_assets: [{ url: '/feed.json', requests: 3500, avg_ttl: 60.0, asset_type: 'API/Dynamic' }],
   }
 
   test('renders zero-CLS loading skeletons, full breakdown data, drill-down links, missing fields banner, and empty state', async () => {
@@ -421,8 +375,7 @@ describe('Assets & Shield page', () => {
     expect(await screen.findByText('/static/bundle-huge.js')).toBeInTheDocument()
     expect(screen.getByText('/feed.json')).toBeInTheDocument()
     expect(within(screen.getByTestId('assets-overview-grid')).getByText('Images')).toBeInTheDocument()
-    const link = screen.getByRole('link', { name: '/static/bundle-huge.js' })
-    expect(link.getAttribute('href')).toContain('filter_url=%2Fstatic%2Fbundle-huge.js')
+    expect(screen.getByRole('link', { name: '/static/bundle-huge.js' }).getAttribute('href')).toContain('filter_url=%2Fstatic%2Fbundle-huge.js')
     for (const name of ['Static Asset URL', 'Requests', 'Avg Size', 'Bandwidth', 'Type', 'Cache Misses', 'Avg TTL']) {
       expect(screen.getAllByRole('columnheader', { name }).length).toBeGreaterThan(0)
     }
@@ -554,13 +507,10 @@ describe('Network & ASN Health page', () => {
             },
             leaderboard: [{
               asn: 7922, label: 'Comcast (7922)', total_reqs: 50000,
-              health_score_now: 88.5, health_score_1h_ago: 87.0,
-              p95_rtt_us: 45000, p99_rtt_us: 75000, trend: 'improving',
+              health_score_now: 88.5, health_score_1h_ago: 87.0, p95_rtt_us: 45000, p99_rtt_us: 75000, trend: 'improving',
             }],
             has_metro: true,
-            metro_leaderboard: [{
-              city: 'San Jose', raw_city: 'San Jose', region: 'CA', country: 'US', total_reqs: 25000, health_score: 95.0,
-            }],
+            metro_leaderboard: [{ city: 'San Jose', raw_city: 'San Jose', region: 'CA', country: 'US', total_reqs: 25000, health_score: 95.0 }],
           },
         }
       }
@@ -579,27 +529,14 @@ describe('Network & ASN Health page', () => {
       return { data: {} }
     })
     mockGet.mockResolvedValue({
-      data: {
-        data: [{
-          pop: 'SJC', requests: 50000, errors: 10, error_rate: 0.02,
-          p50_rtt_us: 15000, p95_ttfb_ms: 45.0, cache_hit_rate: 92.5, bandwidth_bytes: 104857600,
-        }],
-      },
+      data: { data: [{ pop: 'SJC', requests: 50000, errors: 10, error_rate: 0.02, p50_rtt_us: 15000, p95_ttfb_ms: 45.0, cache_hit_rate: 92.5, bandwidth_bytes: 104857600 }] },
     })
 
     const { unmount } = renderWithQuery(<NetworkPage />, { queryClient })
-    expect(await screen.findByText('94.2/100')).toBeInTheDocument()
-    expect(screen.getByText('28.4ms')).toBeInTheDocument()
-    expect(await screen.findByText('Edge Transport & TCP Performance')).toBeInTheDocument()
-    expect(await screen.findByText('24.5')).toBeInTheDocument()
-    expect(screen.getByText('HTTP/3')).toBeInTheDocument()
-    expect(screen.getByText('ASN Performance Leaderboard')).toBeInTheDocument()
-    expect(screen.getByText('IMPROVING')).toBeInTheDocument()
-    expect(screen.getByText('San Jose')).toBeInTheDocument()
-    expect(await screen.findByText('Fastly Edge PoP Health Heatmap')).toBeInTheDocument()
-    expect(screen.getByText('1 Active PoPs')).toBeInTheDocument()
+    for (const txt of ['94.2/100', '28.4ms', 'Edge Transport & TCP Performance', '24.5', 'HTTP/3', 'ASN Performance Leaderboard', 'IMPROVING', 'San Jose', 'Fastly Edge PoP Health Heatmap', '1 Active PoPs', 'tcp_rtt, retrans, ploss']) {
+      expect(await screen.findByText(txt)).toBeInTheDocument()
+    }
     expect(await screen.findByTestId('missing-transport-fields-banner')).toBeInTheDocument()
-    expect(screen.getByText('tcp_rtt, retrans, ploss')).toBeInTheDocument()
     unmount()
   })
 
@@ -616,10 +553,7 @@ describe('Network & ASN Health page', () => {
 
 describe('Query Explorer page', () => {
   const renderWithNuqs = (ui: React.ReactElement, onUrlUpdate?: OnUrlUpdateFunction) =>
-    renderWithQuery(ui, {
-      queryClient,
-      wrapper: withNuqsTestingAdapter({ searchParams: window.location.search, hasMemory: true, onUrlUpdate }),
-    })
+    renderWithQuery(ui, { queryClient, wrapper: withNuqsTestingAdapter({ searchParams: window.location.search, hasMemory: true, onUrlUpdate }) })
 
   beforeEach(() => {
     resetDefaultStores()
@@ -647,18 +581,11 @@ describe('Query Explorer page', () => {
 
     useServiceStore.setState({ activeServiceId: 'test-svc', isInitialized: true })
     const user = userEvent.setup()
-    mockGet.mockImplementation(async (url: string) => {
-      if (url.includes('/api/schema')) {
-        return { data: { schema: [{ name: 'timestamp', type: 'TIMESTAMP' }, { name: 'client_ip', type: 'VARCHAR' }] } }
-      }
-      return { data: { fields: [] } }
-    })
+    mockGet.mockImplementation(async (url: string) =>
+      url.includes('/api/schema') ? { data: { schema: [{ name: 'timestamp', type: 'TIMESTAMP' }, { name: 'client_ip', type: 'VARCHAR' }] } } : { data: { fields: [] } },
+    )
     mockPost.mockResolvedValue({
-      data: {
-        columns: ['url', 'requests'],
-        data: [{ url: '/index.html', requests: 42 }, { url: '/api/v1/items', requests: 19 }],
-        total_rows: 2, elapsed_ms: 8,
-      },
+      data: { columns: ['url', 'requests'], data: [{ url: '/index.html', requests: 42 }, { url: '/api/v1/items', requests: 19 }], total_rows: 2, elapsed_ms: 8 },
     })
 
     renderWithNuqs(<QueryPage />)
@@ -675,16 +602,13 @@ describe('Query Explorer page', () => {
     expect(screen.getByText('timestamp')).toBeInTheDocument()
 
     mockPost.mockResolvedValueOnce({
-      error: JSON.stringify({
-        detail: { error: 'sql_not_permitted', message: 'only SELECT / WITH / UNION statements allowed (got DROP)' },
-      }),
+      error: JSON.stringify({ detail: { error: 'sql_not_permitted', message: 'only SELECT / WITH / UNION statements allowed (got DROP)' } }),
     })
     const editor = screen.getByTestId('mock-editor')
     await user.clear(editor)
     await user.type(editor, 'DROP TABLE logs')
     await user.click(screen.getByRole('button', { name: /run query/i }))
-    const alert = await screen.findByTestId('query-error-alert')
-    expect(alert.textContent).toMatch(/only SELECT \/ WITH \/ UNION statements allowed/i)
+    expect((await screen.findByTestId('query-error-alert')).textContent).toMatch(/only SELECT \/ WITH \/ UNION statements allowed/i)
   })
 
   test('hydrates URL deep links (?q=, ?mode=raw, ?mode=bogus, ?filters=) and syncs filter store mutations', async () => {
@@ -722,15 +646,12 @@ describe('Query Explorer page', () => {
     hydrateFilterStoreFromUrl()
     renderWithNuqs(<QueryPage />)
     await waitFor(() => {
-      const parsed = JSON.parse(new URLSearchParams(window.location.search).get('filters')!)
-      expect(parsed).toMatchObject({ status: { values: ['200'], mode: 'include' } })
+      expect(JSON.parse(new URLSearchParams(window.location.search).get('filters')!)).toMatchObject({ status: { values: ['200'], mode: 'include' } })
     })
     act(() => useFilterStore.getState().addFilter('country', 'US', 'include'))
     await waitFor(() => {
-      const parsed = JSON.parse(new URLSearchParams(window.location.search).get('filters')!)
-      expect(parsed).toMatchObject({
-        status: { values: ['200'], mode: 'include' },
-        country: { values: ['US'], mode: 'include' },
+      expect(JSON.parse(new URLSearchParams(window.location.search).get('filters')!)).toMatchObject({
+        status: { values: ['200'], mode: 'include' }, country: { values: ['US'], mode: 'include' },
       })
     })
   })
@@ -738,25 +659,18 @@ describe('Query Explorer page', () => {
   test('dashboard "See Raw Logs" deep link (?start_time&end_time&filters) hydrates the filter store', async () => {
     mockGet.mockResolvedValue({ data: { fields: [], schema: [] } })
     const filters = { status_2: { values: ['500', '503'], mode: 'exclude' } }
-    window.history.replaceState(
-      {}, '', `/query?start_time=2026-02-01T00:00:00Z&end_time=2026-02-01T06:00:00Z&filters=${encodeURIComponent(JSON.stringify(filters))}`,
-    )
+    window.history.replaceState({}, '', `/query?start_time=2026-02-01T00:00:00Z&end_time=2026-02-01T06:00:00Z&filters=${encodeURIComponent(JSON.stringify(filters))}`)
     renderWithNuqs(<QueryPage />)
     await screen.findByText('Query Explorer')
     const state = useFilterStore.getState()
     expect(state.startTime).toBe('2026-02-01T00:00:00Z')
     expect(state.endTime).toBe('2026-02-01T06:00:00Z')
-    expect(state.filters.map((f) => [f.column, f.value, f.mode])).toEqual([
-      ['status', '500', 'exclude'], ['status', '503', 'exclude'],
-    ])
+    expect(state.filters.map((f) => [f.column, f.value, f.mode])).toEqual([['status', '500', 'exclude'], ['status', '503', 'exclude']])
   })
 })
 
 describe('UI primitives & a11y', () => {
-  beforeEach(() => {
-    resetDefaultStores()
-    useMockAnalyticsCard = false
-  })
+  beforeEach(() => { resetDefaultStores(); useMockAnalyticsCard = false })
 
   it('renders ReviewCard, SectionHeader, SkeletonGrid, StatCard, and Switch variants cleanly', () => {
     const { container: rc } = render(
@@ -773,9 +687,7 @@ describe('UI primitives & a11y', () => {
     expect(rc.querySelector('svg')).toBeInTheDocument()
 
     const { container: sh } = render(
-      <SectionHeader title="Overview" icon={Star} className="custom-class">
-        <span data-testid="action-slot"> · extra</span>
-      </SectionHeader>,
+      <SectionHeader title="Overview" icon={Star} className="custom-class"><span data-testid="action-slot"> · extra</span></SectionHeader>,
     )
     expect(screen.getByRole('heading', { name: /overview/i })).toBeInTheDocument()
     expect(screen.getByTestId('action-slot')).toBeInTheDocument()
@@ -783,8 +695,7 @@ describe('UI primitives & a11y', () => {
 
     expect(render(<SkeletonGrid count={4} />).container.querySelectorAll('[data-slot="skeleton"]')).toHaveLength(4)
     expect(render(<SkeletonGrid count={0} />).container.querySelectorAll('[data-slot="skeleton"]')).toHaveLength(0)
-    const sg = render(<SkeletonGrid count={1} height="200px" />).container.querySelector('[data-slot="skeleton"]') as HTMLElement
-    expect(sg.style.height).toBe('200px')
+    expect((render(<SkeletonGrid count={1} height="200px" />).container.querySelector('[data-slot="skeleton"]') as HTMLElement).style.height).toBe('200px')
 
     const { container: sc } = render(<StatCard title="Requests" value="1,234" sub="last 24h" icon={Activity} tooltip="more info" />)
     expect(screen.getByText('1,234')).toBeInTheDocument()
@@ -793,14 +704,7 @@ describe('UI primitives & a11y', () => {
     expect(screen.queryByText('hidden-value')).not.toBeInTheDocument()
     expect(scl.querySelector('[data-slot="skeleton"]')).toBeInTheDocument()
 
-    render(
-      <>
-        <label htmlFor="edge-only">Edge-only logging</label>
-        <Switch id="edge-only" />
-        <Switch aria-label="Background Sync" />
-        <Switch />
-      </>,
-    )
+    render(<><label htmlFor="edge-only">Edge-only logging</label><Switch id="edge-only" /><Switch aria-label="Background Sync" /><Switch /></>)
     expect(screen.getByRole('switch', { name: 'Edge-only logging' })).toBeInTheDocument()
     expect(screen.getByRole('switch', { name: 'Background Sync' })).toBeInTheDocument()
     expect(screen.queryByRole('switch', { name: 'Toggle' })).not.toBeInTheDocument()
@@ -810,12 +714,9 @@ describe('UI primitives & a11y', () => {
     const user = userEvent.setup()
     const { container, rerender } = render(
       <AnalyticsCard
-        title="Helpful"
-        description="A helpful description"
-        icon={<span data-testid="card-icon">ICON</span>}
+        title="Helpful" description="A helpful description" icon={<span data-testid="card-icon">ICON</span>}
         headerAction={<button data-testid="header-action">Do Thing</button>}
-        footer={<div data-testid="footer-node">Footer Here</div>}
-        helpContent={<p data-testid="help-body">Here is help</p>}
+        footer={<div data-testid="footer-node">Footer Here</div>} helpContent={<p data-testid="help-body">Here is help</p>}
       >
         <div data-testid="test-child">Child Content</div>
       </AnalyticsCard>,
@@ -841,9 +742,7 @@ describe('UI primitives & a11y', () => {
     rerender(<AnalyticsCard title="Refetching Card" isFetching><div data-testid="child">stale data</div></AnalyticsCard>)
     expect(container.querySelector('.opacity-40')).toContainElement(screen.getByTestId('child'))
 
-    const { container: formContainer } = render(
-      <div><label htmlFor="search">Search</label><input id="search" type="search" placeholder="Type to filter…" /></div>,
-    )
+    const { container: formContainer } = render(<div><label htmlFor="search">Search</label><input id="search" type="search" placeholder="Type to filter…" /></div>)
     expect(await axe(formContainer)).toHaveNoViolations()
   })
 })
@@ -851,21 +750,12 @@ describe('UI primitives & a11y', () => {
 const API_BASE = 'http://127.0.0.1:8000'
 
 describe('extractApiError & openapi-fetch error paths', () => {
-  beforeEach(() => {
-    resetDefaultStores()
-    useRealApiClient = true
-    vi.clearAllMocks()
-  })
+  beforeEach(() => { resetDefaultStores(); useRealApiClient = true; vi.clearAllMocks() })
   afterEach(() => { useRealApiClient = false })
 
   it('extracts error strings across all FastAPI / custom shapes', () => {
     expect(apiLib.extractApiError({ detail: 'bucket not found' })).toBe('bucket not found')
-    expect(apiLib.extractApiError({
-      detail: [
-        { loc: ['body', 'name'], msg: 'String must not be empty' },
-        { loc: ['body', 'region'], msg: 'String must match pattern' },
-      ],
-    })).toBe('name: String must not be empty, region: String must match pattern')
+    expect(apiLib.extractApiError({ detail: [{ loc: ['body', 'name'], msg: 'String must not be empty' }, { loc: ['body', 'region'], msg: 'String must match pattern' }] })).toBe('name: String must not be empty, region: String must match pattern')
     expect(apiLib.extractApiError({ detail: { errors: ['e1', 'e2'] } })).toBe('e1, e2')
     expect(apiLib.extractApiError({ detail: { error: 'Token expired' } })).toBe('Token expired')
     expect(apiLib.extractApiError({ error: 'Direct error message' })).toBe('Direct error message')
@@ -886,48 +776,30 @@ describe('extractApiError & openapi-fetch error paths', () => {
 
     const wrapper = makeQueryWrapper(createTestQueryClient({ queries: { gcTime: 0 } }))
     server.use(http.get(`${API_BASE}/api/admin/system-jobs`, () => HttpResponse.json({ detail: 'Unauthorized' }, { status: 401 })))
-    const { result: errRes } = renderHook(
-      () => useQuery({ queryKey: ['system-jobs-401'], queryFn: async () => (await apiLib.client.GET('/api/admin/system-jobs')).data }),
-      { wrapper },
-    )
+    const { result: errRes } = renderHook(() => useQuery({ queryKey: ['system-jobs-401'], queryFn: async () => (await apiLib.client.GET('/api/admin/system-jobs')).data }), { wrapper })
     await waitFor(() => expect(errRes.current.isError).toBe(true))
     expect((errRes.current.error as Error).message).toMatch(/Unauthorized/i)
 
     server.use(http.get(`${API_BASE}/api/admin/system-jobs`, () => HttpResponse.json({ jobs: [] })))
-    const { result: okRes } = renderHook(
-      () => useQuery({ queryKey: ['system-jobs-ok'], queryFn: async () => (await apiLib.client.GET('/api/admin/system-jobs')).data }),
-      { wrapper },
-    )
+    const { result: okRes } = renderHook(() => useQuery({ queryKey: ['system-jobs-ok'], queryFn: async () => (await apiLib.client.GET('/api/admin/system-jobs')).data }), { wrapper })
     await waitFor(() => expect(okRes.current.isSuccess).toBe(true))
     expect(okRes.current.data).toEqual({ jobs: [] })
   })
 })
 
-const rejected = {
-  METADATA_DSN: 'postgresql://example.invalid/operator',
-  DUCKLAKE_CATALOG: 'postgres:example.invalid/operator',
-  DUCKLAKE_DATA_PATH: 's3://operator-placeholder/',
-  CELERY_BROKER_URL: 'redis://example.invalid/0',
-  CELERY_RESULT_BACKEND: 'redis://example.invalid/1',
-  CLICKHOUSE_PASSWORD: 'operator-placeholder',
-  HOT_S3_SECRET: 'operator-placeholder',
-  FASTLY_API_KEY: 'operator-placeholder',
-  AWS_SECRET_ACCESS_KEY: 'operator-placeholder',
-  REMOTE_SHARE_DB_DIR: '/operator-placeholder',
-  OAUTH_PROVIDERS_CONFIG_PATH: '/operator-placeholder/oauth.json',
-  OAUTH_FLOW_STATE_SECRET: 'operator-placeholder',
-  OAUTH_GOOGLE_CLIENT_SECRET: 'operator-placeholder',
-  UV_ENV_FILE: '/operator-placeholder/.env',
-  UV_CONFIG_FILE: '/operator-placeholder/uv.toml',
-  UV_PROJECT_ENVIRONMENT: '/operator-placeholder/venv',
-  PYTHONPATH: '/operator-placeholder',
-  PYTHONSTARTUP: '/operator-placeholder/start.py',
-  NODE_OPTIONS: '--env-file=/operator-placeholder/.env',
-  ENV: '/operator-placeholder/.env',
-  BASH_ENV: '/operator-placeholder/.env',
-  DOTENV_CONFIG_PATH: '/operator-placeholder/.env',
-  HTTP_PROXY: 'http://example.invalid',
-  UNKNOWN_DEPLOYMENT_SECRET: 'operator-placeholder',
+const rejected: Record<string, string> = {
+  METADATA_DSN: 'postgresql://example.invalid/operator', DUCKLAKE_CATALOG: 'postgres:example.invalid/operator',
+  DUCKLAKE_DATA_PATH: 's3://operator-placeholder/', CELERY_BROKER_URL: 'redis://example.invalid/0',
+  CELERY_RESULT_BACKEND: 'redis://example.invalid/1', CLICKHOUSE_PASSWORD: 'operator-placeholder',
+  HOT_S3_SECRET: 'operator-placeholder', FASTLY_API_KEY: 'operator-placeholder',
+  AWS_SECRET_ACCESS_KEY: 'operator-placeholder', REMOTE_SHARE_DB_DIR: '/operator-placeholder',
+  OAUTH_PROVIDERS_CONFIG_PATH: '/operator-placeholder/oauth.json', OAUTH_FLOW_STATE_SECRET: 'operator-placeholder',
+  OAUTH_GOOGLE_CLIENT_SECRET: 'operator-placeholder', UV_ENV_FILE: '/operator-placeholder/.env',
+  UV_CONFIG_FILE: '/operator-placeholder/uv.toml', UV_PROJECT_ENVIRONMENT: '/operator-placeholder/venv',
+  PYTHONPATH: '/operator-placeholder', PYTHONSTARTUP: '/operator-placeholder/start.py',
+  NODE_OPTIONS: '--env-file=/operator-placeholder/.env', ENV: '/operator-placeholder/.env',
+  BASH_ENV: '/operator-placeholder/.env', DOTENV_CONFIG_PATH: '/operator-placeholder/.env',
+  HTTP_PROXY: 'http://example.invalid', UNKNOWN_DEPLOYMENT_SECRET: 'operator-placeholder',
 }
 
 describe('backend harness child isolation', () => {
@@ -968,12 +840,8 @@ describe('backend harness child isolation', () => {
   it.each(['contract', 'e2e'])('%s rejects deployment env before spawning uv', async (harness) => {
     const contract = await import('../helpers/msw/handlers')
     try {
-      if (harness === 'contract') {
-        await contract.startBackend()
-      } else {
-        const { default: globalSetup } = await import('../../e2e/global-setup')
-        await globalSetup()
-      }
+      if (harness === 'contract') await contract.startBackend()
+      else await (await import('../../e2e/global-setup')).default()
       expect(spawnSpy).toHaveBeenCalledOnce()
       const [command, args, options] = spawnSpy.mock.calls[0]
       expect(command).toBe('uv')
@@ -1004,9 +872,6 @@ describe('backend harness child isolation', () => {
   })
 })
 
-
-// ── Performance, Fastly-Value & Origin smoke tests ───────────────────────────
-
 describe('Performance, Fastly-Value & Origin smoke tests', () => {
   beforeEach(() => {
     resetDefaultStores()
@@ -1015,15 +880,10 @@ describe('Performance, Fastly-Value & Origin smoke tests', () => {
     useMockActiveLogFields = true
     mockPathname = '/performance'
     reportLayoutChildArgs = {
-      startTime: '2026-01-01T00:00:00Z',
-      endTime: '2026-01-01T01:00:00Z',
-      activeServiceId: 'test-svc',
-      filterPayload: {},
-      intervalButtons: null,
-      bucketSeconds: 3600,
+      startTime: '2026-01-01T00:00:00Z', endTime: '2026-01-01T01:00:00Z', activeServiceId: 'test-svc',
+      filterPayload: {}, intervalButtons: null, bucketSeconds: 3600,
       config: { effectiveInterval: '1 day', interval: '1 day', validTrends: new Set(['off', 'auto']) },
-      setChartInterval: vi.fn(),
-      timezone: 'UTC',
+      setChartInterval: vi.fn(), timezone: 'UTC',
     }
     queryClient.clear()
     mockPost.mockReset()
@@ -1041,113 +901,58 @@ describe('Performance, Fastly-Value & Origin smoke tests', () => {
   test('performance page mounts and renders title and all 5 card titles with loaded data', async () => {
     mockPost.mockResolvedValue({
       data: {
-        waterfall: {
-          avg: {
-            edge_processing: 10.5,
-            origin_wait: 45.2,
-            origin_download: 15.0,
-            client_download: 8.3,
-          },
-        },
-        top_urls: [
-          { url: '/api/v1/test', requests: 120, avg: 55.4, p50: 42.1, p95: 98.0, p99: 145.2 },
-        ],
-        top_asns: [
-          { asn: 15169, label: 'AS15169 Google', requests: 350, avg: 38.2, p50: 32.0, p95: 65.4, p99: 89.1 },
-        ],
-        ttl_dist: [
-          { bucket: '<1m', count: 45 },
-          { bucket: '<1h', count: 180 },
-        ],
-        scatter: [
-          { origin: 45.2, edge: 12.1, cache: 'HIT' },
-        ],
+        waterfall: { avg: { edge_processing: 10.5, origin_wait: 45.2, origin_download: 15.0, client_download: 8.3 } },
+        top_urls: [{ url: '/api/v1/test', requests: 120, avg: 55.4, p50: 42.1, p95: 98.0, p99: 145.2 }],
+        top_asns: [{ asn: 15169, label: 'AS15169 Google', requests: 350, avg: 38.2, p50: 32.0, p95: 65.4, p99: 89.1 }],
+        ttl_dist: [{ bucket: '<1m', count: 45 }, { bucket: '<1h', count: 180 }],
+        scatter: [{ origin: 45.2, edge: 12.1, cache: 'HIT' }],
         _approx: false,
       },
     })
-
     renderWithQuery(<PerformanceClient />, { queryClient })
-
     expect(screen.getByText('Performance')).toBeInTheDocument()
     expect(await screen.findByText('End-to-End Latency Waterfall (Average)')).toBeInTheDocument()
-    expect(screen.getByText('Slowest URLs')).toBeInTheDocument()
-    expect(screen.getByText('Slowest Networks')).toBeInTheDocument()
-    expect(screen.getByText('Cache TTL Distribution')).toBeInTheDocument()
-    expect(screen.getByText('Origin vs Edge Processing (ms)')).toBeInTheDocument()
+    for (const title of ['Slowest URLs', 'Slowest Networks', 'Cache TTL Distribution', 'Origin vs Edge Processing (ms)']) {
+      expect(screen.getByText(title)).toBeInTheDocument()
+    }
     expect(screen.queryByText('Approximate')).not.toBeInTheDocument()
     expect(errorSpy).not.toHaveBeenCalled()
   })
 
   test('performance page displays contextual loading messages while query is pending', () => {
     mockPost.mockReturnValue(new Promise(() => {}))
-
     renderWithQuery(<PerformanceClient />, { queryClient })
-
-    expect(screen.getByText('Calculating latency percentiles...')).toBeInTheDocument()
-    expect(screen.getByText('Profiling endpoint latency...')).toBeInTheDocument()
-    expect(screen.getByText('Profiling network latency...')).toBeInTheDocument()
-    expect(screen.getByText('Profiling cache TTL distribution...')).toBeInTheDocument()
-    expect(screen.getByText('Profiling origin vs edge latency...')).toBeInTheDocument()
+    for (const msg of [
+      'Calculating latency percentiles...', 'Profiling endpoint latency...', 'Profiling network latency...',
+      'Profiling cache TTL distribution...', 'Profiling origin vs edge latency...',
+    ]) {
+      expect(screen.getByText(msg)).toBeInTheDocument()
+    }
   })
 
   test('performance page displays empty states and approximate badge appropriately', async () => {
-    mockPost.mockResolvedValue({
-      data: {
-        waterfall: {},
-        top_urls: [],
-        top_asns: [],
-        ttl_dist: [],
-        scatter: [],
-        _approx: true,
-      },
-    })
-
+    mockPost.mockResolvedValue({ data: { waterfall: {}, top_urls: [], top_asns: [], ttl_dist: [], scatter: [], _approx: true } })
     renderWithQuery(<PerformanceClient />, { queryClient })
-
-    const emptyBadges = await screen.findAllByText('No data for this filter')
-    expect(emptyBadges.length).toBeGreaterThanOrEqual(1)
+    expect((await screen.findAllByText('No data for this filter')).length).toBeGreaterThanOrEqual(1)
     expect(screen.getByText('Approximate')).toBeInTheDocument()
   })
 
-  class Boundary extends React.Component<
-    { children: React.ReactNode },
-    { error: Error | null }
-  > {
+  class Boundary extends React.Component<{ children: React.ReactNode }, { error: Error | null }> {
     state = { error: null as Error | null }
-    static getDerivedStateFromError(error: Error) {
-      return { error }
-    }
+    static getDerivedStateFromError(error: Error) { return { error } }
     render() {
-      if (this.state.error) {
-        return <div data-testid="route-crashed">{this.state.error.message}</div>
-      }
-      return this.props.children
+      return this.state.error ? <div data-testid="route-crashed">{this.state.error.message}</div> : this.props.children
     }
   }
 
   test('UX-2: /performance survives a dirty scatter row with cache=null', async () => {
     mockPost.mockImplementation(async (_path: string, opts?: unknown) => {
       const sections: string[] = (opts as { body?: { sections?: string[] } })?.body?.sections ?? []
-      if (sections.includes('scatter')) {
-        return {
-          data: {
-            available: true,
-            scatter: [{ cache: null, origin: 10, edge: 5 }],
-            waterfall: { avg: { edge_processing: 1, origin_wait: 2 } },
-            top_urls: [],
-            top_asns: [],
-          },
-        }
-      }
-      return { data: { available: true, ttl_dist: [] } }
+      return sections.includes('scatter')
+        ? { data: { available: true, scatter: [{ cache: null, origin: 10, edge: 5 }], waterfall: { avg: { edge_processing: 1, origin_wait: 2 } }, top_urls: [], top_asns: [] } }
+        : { data: { available: true, ttl_dist: [] } }
     })
-
-    renderWithQuery(
-      <Boundary>
-        <PerformanceClient />
-      </Boundary>,
-      { queryClient },
-    )
+    renderWithQuery(<Boundary><PerformanceClient /></Boundary>, { queryClient })
     await screen.findByText('End-to-End Latency Waterfall (Average)')
     expect(screen.queryByTestId('route-crashed')).toBeNull()
   })
@@ -1155,14 +960,9 @@ describe('Performance, Fastly-Value & Origin smoke tests', () => {
   test('fastly-value page mounts and renders title and tab navigation', () => {
     renderWithQuery(<FastlyValueClient />, { queryClient })
     expect(screen.getByText('Service Summary')).toBeInTheDocument()
-    expect(screen.getByRole('tab', { name: /summary/i })).toBeInTheDocument()
-    expect(screen.getByRole('tab', { name: /cdn & caching/i })).toBeInTheDocument()
-    expect(screen.getByRole('tab', { name: /assets & shield/i })).toBeInTheDocument()
-    expect(screen.getByRole('tab', { name: /security/i })).toBeInTheDocument()
-    expect(screen.getByRole('tab', { name: /bot management/i })).toBeInTheDocument()
-    expect(screen.getByRole('tab', { name: /performance/i })).toBeInTheDocument()
-    expect(screen.getByRole('tab', { name: /network/i })).toBeInTheDocument()
-    expect(screen.getByRole('tab', { name: /image optimizer/i })).toBeInTheDocument()
+    for (const re of [/summary/i, /cdn & caching/i, /assets & shield/i, /security/i, /bot management/i, /performance/i, /network/i, /image optimizer/i]) {
+      expect(screen.getByRole('tab', { name: re })).toBeInTheDocument()
+    }
     expect(errorSpy).not.toHaveBeenCalled()
   })
 
@@ -1171,23 +971,15 @@ describe('Performance, Fastly-Value & Origin smoke tests', () => {
     renderWithQuery(<FastlyValueClient />, { queryClient })
     const anchor = quantizeAnchor('2026-01-01T01:00:00Z')
     const { rangeKey } = resolveRangeWire({
-      relativeRange: null,
-      isAutoRange: false,
-      startTime: '2026-01-01T00:00:00Z',
-      endTime: '2026-01-01T01:00:00Z',
-      anchor,
+      relativeRange: null, isAutoRange: false, startTime: '2026-01-01T00:00:00Z', endTime: '2026-01-01T01:00:00Z', anchor,
     })
     const keys = queryClient.getQueryCache().getAll().map((q) => q.queryKey)
     expect(keys).toContainEqual(['value', 'summary', 'test-svc', rangeKey, anchor, {}, '1 day', 'summary'])
   })
 
   type IOData = components['schemas']['IOMetrics']
-
   const baseIOData = {
-    io_time_series: [],
-    format_distribution: [],
-    io_bandwidth_time_series: [],
-    io_compression_time_series: [],
+    io_time_series: [], format_distribution: [], io_bandwidth_time_series: [], io_compression_time_series: [],
     optimization_opportunities: [
       { url: '/img/hero.png', request_count: 1500, avg_kb: 812.34, total_bytes: 2_000_000 },
       { url: '/img/nokb.png', request_count: 3, avg_kb: null, total_bytes: 100 },
@@ -1208,125 +1000,61 @@ describe('Performance, Fastly-Value & Origin smoke tests', () => {
 
     it('enabled view lists format conversions', () => {
       const data = {
-        ...baseIOData,
-        io_transforms: 10,
+        ...baseIOData, io_transforms: 10,
         io_format_conversion_pairs: [{ input_format: 'png', output_format: 'webp', count: 2500, avg_ratio: 3.2 }],
       } as unknown as IOData
       render(<IOValueTab data={data} />)
       for (const name of ['From', 'To', 'Count', 'Avg Ratio']) {
         expect(screen.getByRole('columnheader', { name })).toBeTruthy()
       }
-      expect(screen.getByText('png')).toBeTruthy()
-      expect(screen.getByText('webp')).toBeTruthy()
-      expect(screen.getByText('3.2x')).toBeTruthy()
+      for (const txt of ['png', 'webp', '3.2x']) expect(screen.getByText(txt)).toBeTruthy()
     })
   })
 
   const MOCK_ORIGIN_DATA = {
     has_data: true,
     summary: {
-      total_misses: 450,
-      total_passes: 50,
-      ottfb_p50_ms: 45.2,
-      ottfb_p75_ms: 60.1,
-      ottfb_p95_ms: 120.5,
-      ottfb_p99_ms: 250.0,
-      ottlb_p50_ms: 65.0,
-      ottlb_p95_ms: 160.0,
-      cdn_overhead_p50_ms: 5.2,
-      origin_error_rate: 0.005,
-      obytes_p50: 1024,
-      _approx: false,
+      total_misses: 450, total_passes: 50, ottfb_p50_ms: 45.2, ottfb_p75_ms: 60.1, ottfb_p95_ms: 120.5, ottfb_p99_ms: 250.0,
+      ottlb_p50_ms: 65.0, ottlb_p95_ms: 160.0, cdn_overhead_p50_ms: 5.2, origin_error_rate: 0.005, obytes_p50: 1024, _approx: false,
     },
-    timeseries: {
-      has_data: true,
-      series: [
-        { time: '2026-01-01T00:00:00Z', value: 45.2 },
-        { time: '2026-01-01T00:05:00Z', value: 48.1 },
-      ],
-      _approx: false,
-    },
-    slow_urls: {
-      has_data: true,
-      rows: [
-        { url: '/api/v1/slow', requests: 120, p50_ms: 150.0, p95_ms: 320.0, p99_ms: 500.0 },
-      ],
-      _approx: false,
-    },
-    status_codes: {
-      has_data: true,
-      rows: [
-        { status: 200, count: 480 },
-        { status: 500, count: 20 },
-      ],
-    },
-    path_breakdown: {
-      has_data: true,
-      shielding_detected: true,
-      rows: [],
-    },
-    pop_latency: {
-      has_data: true,
-      rows: [
-        { pop: 'SJC', requests: 300, p50_ms: 40.0, p95_ms: 110.0, elevated: false },
-      ],
-      _approx: false,
-    },
-    ip_health: {
-      has_data: true,
-      rows: [
-        { oip: '203.0.113.1', requests: 500, p50_ms: 45.0, p95_ms: 120.0, error_pct: 0.5 },
-      ],
-      _approx: false,
-    },
+    timeseries: { has_data: true, series: [{ time: '2026-01-01T00:00:00Z', value: 45.2 }, { time: '2026-01-01T00:05:00Z', value: 48.1 }], _approx: false },
+    slow_urls: { has_data: true, rows: [{ url: '/api/v1/slow', requests: 120, p50_ms: 150.0, p95_ms: 320.0, p99_ms: 500.0 }], _approx: false },
+    status_codes: { has_data: true, rows: [{ status: 200, count: 480 }, { status: 500, count: 20 }] },
+    path_breakdown: { has_data: true, shielding_detected: true, rows: [] },
+    pop_latency: { has_data: true, rows: [{ pop: 'SJC', requests: 300, p50_ms: 40.0, p95_ms: 110.0, elevated: false }], _approx: false },
+    ip_health: { has_data: true, rows: [{ oip: '203.0.113.1', requests: 500, p50_ms: 45.0, p95_ms: 120.0, error_pct: 0.5 }], _approx: false },
   }
 
   test('origin page mounts and renders title and all origin card titles with loaded data', async () => {
     mockPost.mockResolvedValue({ data: MOCK_ORIGIN_DATA })
-
     renderWithQuery(<OriginClient />, { queryClient })
-
     expect(screen.getByText('Origin Performance')).toBeInTheDocument()
     expect(await screen.findByText('Origin TTFB (P50)')).toBeInTheDocument()
-    expect(screen.getByText('Origin TTFB (P95)')).toBeInTheDocument()
-    expect(screen.getByText('Origin Error Rate')).toBeInTheDocument()
-    expect(screen.getByText('Fetch Volume')).toBeInTheDocument()
-    expect(screen.getByText('Origin Latency')).toBeInTheDocument()
-    expect(screen.getByText('Status Code Distribution')).toBeInTheDocument()
-    expect(screen.getByText('Slowest URLs at Origin')).toBeInTheDocument()
-    expect(screen.getByText('Origin Performance by POP')).toBeInTheDocument()
-    expect(screen.getByText('Origin IP Health')).toBeInTheDocument()
-    expect(screen.getByText('Origin Payload Size')).toBeInTheDocument()
+    for (const title of [
+      'Origin TTFB (P95)', 'Origin Error Rate', 'Fetch Volume', 'Origin Latency', 'Status Code Distribution',
+      'Slowest URLs at Origin', 'Origin Performance by POP', 'Origin IP Health', 'Origin Payload Size',
+    ]) {
+      expect(screen.getByText(title)).toBeInTheDocument()
+    }
     expect(errorSpy).not.toHaveBeenCalled()
   })
 
   test('origin page displays contextual loading messages while query is pending', () => {
     mockPost.mockReturnValue(new Promise(() => {}))
-
     renderWithQuery(<OriginClient />, { queryClient })
-
-    expect(screen.getByText('Loading Origin TTFB (P50)...')).toBeInTheDocument()
-    expect(screen.getByText('Loading Origin TTFB (P95)...')).toBeInTheDocument()
-    expect(screen.getByText('Loading Origin Error Rate...')).toBeInTheDocument()
-    expect(screen.getByText('Loading Fetch Volume...')).toBeInTheDocument()
-    expect(screen.getByText('Loading origin latency timeseries...')).toBeInTheDocument()
-    expect(screen.getByText('Loading origin status code breakdown...')).toBeInTheDocument()
-    expect(screen.getByText('Loading slowest URLs at origin...')).toBeInTheDocument()
-    expect(screen.getByText('Loading origin performance by POP...')).toBeInTheDocument()
-    expect(screen.getByText('Loading origin IP health...')).toBeInTheDocument()
-    expect(screen.getByText('Loading origin payload size...')).toBeInTheDocument()
+    for (const msg of [
+      'Loading Origin TTFB (P50)...', 'Loading Origin TTFB (P95)...', 'Loading Origin Error Rate...',
+      'Loading Fetch Volume...', 'Loading origin latency timeseries...', 'Loading origin status code breakdown...',
+      'Loading slowest URLs at origin...', 'Loading origin performance by POP...', 'Loading origin IP health...',
+      'Loading origin payload size...',
+    ]) {
+      expect(screen.getByText(msg)).toBeInTheDocument()
+    }
   })
 
   test('origin page displays empty states when has_data is false', async () => {
-    mockPost.mockResolvedValue({
-      data: {
-        has_data: false,
-        summary: { has_data: false },
-      },
-    })
-
+    mockPost.mockResolvedValue({ data: { has_data: false, summary: { has_data: false } } })
     renderWithQuery(<OriginClient />, { queryClient })
-
     expect(await screen.findByText('No Origin Metrics Yet')).toBeInTheDocument()
   })
 })
@@ -1335,103 +1063,38 @@ describe('Performance, Fastly-Value & Origin smoke tests', () => {
 
 function makePrefill(overrides: Partial<PrefillResponse>): PrefillResponse {
   return {
-    _is_cached: false,
-    data_days: 7,
-    commit_interval_mins: 5,
-    sample_rate: 100,
-    edge_only: false,
-    compaction_enabled: true,
-    delete_after: false,
-    log_retention_days: 90,
-    billing_zone: null,
-    ...overrides,
+    _is_cached: false, data_days: 7, commit_interval_mins: 5, sample_rate: 100, edge_only: false,
+    compaction_enabled: true, delete_after: false, log_retention_days: 90, billing_zone: null, ...overrides,
   }
 }
 
 const SAMPLE_USAGE_LOG = {
-  service_id: 'svc-alpha',
-  total: 2,
+  service_id: 'svc-alpha', total: 2,
   aggregate: {
-    total_class_a: 1200,
-    total_class_b: 45000,
-    total_cdn_downloads: 18,
-    total_cdn_bytes: 1073741824,
-    total_fos_bytes: 5242880,
-    estimated_cost_class_a: 0.006,
-    estimated_cost_class_b: 0.045,
-    estimated_cost_cdn: 0.12,
-    estimated_cost_total: 0.171,
-    class_a_breakdown: { PutObject: 800, ListObjectsV2: 400 },
-    class_b_breakdown: { GetObject: 45000 },
+    total_class_a: 1200, total_class_b: 45000, total_cdn_downloads: 18, total_cdn_bytes: 1073741824,
+    total_fos_bytes: 5242880, estimated_cost_class_a: 0.006, estimated_cost_class_b: 0.045,
+    estimated_cost_cdn: 0.12, estimated_cost_total: 0.171,
+    class_a_breakdown: { PutObject: 800, ListObjectsV2: 400 }, class_b_breakdown: { GetObject: 45000 },
   },
   entries: [
-    {
-      id: 1,
-      timestamp: '2026-06-01T12:00:00Z',
-      operation_class: 'A',
-      operation_type: 'PutObject',
-      url: 's3://fos-bucket/lake/part-001.parquet',
-      bytes: 2048,
-      duration_ms: 14.2,
-      function_name: 'commit_files',
-      process_context: 'cron:commit:svc-alpha',
-      status: 'OK',
-      estimated_cost: 0.000005,
-      count: 1,
-    },
-    {
-      id: 2,
-      timestamp: '2026-06-01T12:01:00Z',
-      operation_class: 'B',
-      operation_type: 'GetObject',
-      url: 's3://fos-bucket/raw/request/batch.gz',
-      bytes: 4096,
-      duration_ms: 9.1,
-      function_name: 'download_batch',
-      process_context: 'cron:sync:svc-alpha',
-      status: 'OK',
-      estimated_cost: 0.000001,
-      count: 1,
-    },
+    { id: 1, timestamp: '2026-06-01T12:00:00Z', operation_class: 'A', operation_type: 'PutObject', url: 's3://fos-bucket/lake/part-001.parquet', bytes: 2048, duration_ms: 14.2, function_name: 'commit_files', process_context: 'cron:commit:svc-alpha', status: 'OK', estimated_cost: 0.000005, count: 1 },
+    { id: 2, timestamp: '2026-06-01T12:01:00Z', operation_class: 'B', operation_type: 'GetObject', url: 's3://fos-bucket/raw/request/batch.gz', bytes: 4096, duration_ms: 9.1, function_name: 'download_batch', process_context: 'cron:sync:svc-alpha', status: 'OK', estimated_cost: 0.000001, count: 1 },
   ],
 }
 
 const SAMPLE_ACCOUNTING = {
-  by: 'hour',
-  from_ts: '2026-05-31T12:00:00Z',
-  to_ts: '2026-06-01T12:00:00Z',
-  buckets: [
-    {
-      ts: '2026-06-01T11:00:00Z',
-      fastly_requests: 5000,
-      our_rows: 5000,
-      file_count: 12,
-      gap: 0,
-      gap_pct: 0,
-    },
-  ],
-  totals: {
-    fastly_requests: 5000,
-    our_rows: 5000,
-    gap: 0,
-    gap_pct: 0,
-    worst_bucket_ts: null,
-    worst_bucket_gap_pct: null,
-  },
+  by: 'hour', from_ts: '2026-05-31T12:00:00Z', to_ts: '2026-06-01T12:00:00Z',
+  buckets: [{ ts: '2026-06-01T11:00:00Z', fastly_requests: 5000, our_rows: 5000, file_count: 12, gap: 0, gap_pct: 0 }],
+  totals: { fastly_requests: 5000, our_rows: 5000, gap: 0, gap_pct: 0, worst_bucket_ts: null, worst_bucket_gap_pct: null },
   sustained_loss: null,
-  catchup: {
-    latest_ingest_ts: '2026-06-01T12:00:00Z',
-    lag_seconds: 12,
-    status: 'caught_up',
-  },
+  catchup: { latest_ingest_ts: '2026-06-01T12:00:00Z', lag_seconds: 12, status: 'caught_up' },
 }
 
 describe('Usage, Sessions, Streaming & CostCalculator', () => {
   beforeEach(() => {
     resetDefaultStores()
     useServiceStore.setState({
-      activeServiceId: 'test-svc',
-      isInitialized: true,
+      activeServiceId: 'test-svc', isInitialized: true,
       services: [{ id: 'test-svc', name: 'Test', accessLevel: 'read_write' }],
     })
     useMockAnalyticsCard = false
@@ -1439,18 +1102,10 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
     mockIsDataReady = true
     mockPathname = '/usage'
     reportLayoutChildArgs = {
-      startTime: '2026-01-01T00:00:00Z',
-      endTime: '2026-01-01T01:00:00Z',
-      activeServiceId: 'test-svc',
-      filterPayload: {},
-      intervalButtons: null,
-      bucketSeconds: 300,
+      startTime: '2026-01-01T00:00:00Z', endTime: '2026-01-01T01:00:00Z', activeServiceId: 'test-svc',
+      filterPayload: {}, intervalButtons: null, bucketSeconds: 300,
       config: { effectiveInterval: '5 minutes', interval: '5 minutes' },
-      setChartInterval: vi.fn(),
-      timezone: 'UTC',
-      data: { rows: [], total: 0 },
-      isLoading: false,
-      isFetching: false,
+      setChartInterval: vi.fn(), timezone: 'UTC', data: { rows: [], total: 0 }, isLoading: false, isFetching: false,
     }
     queryClient.clear()
     mockGet.mockReset()
@@ -1478,11 +1133,8 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
       if (path === '/api/usage/current-storage') throw new Error('storage boom')
       return undefined
     })
-
     renderWithQuery(<UsagePage />, { queryClient })
-    await waitFor(() => {
-      expect(screen.getByText('Failed to load storage usage.')).toBeInTheDocument()
-    })
+    await waitFor(() => expect(screen.getByText('Failed to load storage usage.')).toBeInTheDocument())
     expect(screen.queryByText(/GB-hrs/)).toBeNull()
     expect(screen.getByText(/Partial estimate — storage cost excluded\./)).toBeInTheDocument()
   })
@@ -1496,18 +1148,14 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
   test('requests /api/cmcd/aggregates with the page window and renders the headline cards', async () => {
     mockPost.mockResolvedValue({ data: CMCD_FIXTURE } as never)
     renderWithQuery(<StreamingClient />, { queryClient })
-
     expect(await screen.findByText('Total Sessions')).toBeInTheDocument()
     expect(screen.getByText('Peak Viewers')).toBeInTheDocument()
     expect(screen.getByText('Rebuffer Rate')).toBeInTheDocument()
     await waitFor(() => expect(screen.getByText('1,234')).toBeInTheDocument())
     expect(screen.getByText('4.2%')).toBeInTheDocument()
-
     expect(mockPost).toHaveBeenCalledWith(
       '/api/cmcd/aggregates',
-      expect.objectContaining({
-        body: expect.objectContaining({ bucket_seconds: 300, top_n: 30, filters: {} }),
-      }),
+      expect.objectContaining({ body: expect.objectContaining({ bucket_seconds: 300, top_n: 30, filters: {} }) }),
     )
     expect(errorSpy).not.toHaveBeenCalled()
   })
@@ -1515,7 +1163,6 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
   test('shows the CMCD-not-enabled state when the service has no CMCD data', async () => {
     mockPost.mockResolvedValue({ data: { available: false, has_data: false } } as never)
     renderWithQuery(<StreamingClient />, { queryClient })
-
     expect(await screen.findByText('CMCD data not available')).toBeInTheDocument()
     expect(screen.getByText(/CMCD collection is not enabled for this service/)).toBeInTheDocument()
     expect(screen.queryByText('Total Sessions')).not.toBeInTheDocument()
@@ -1524,7 +1171,6 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
   test('a failed query leaves the page up with em-dash values instead of crashing', async () => {
     mockPost.mockResolvedValue({ error: { detail: 'boom' } } as never)
     renderWithQuery(<StreamingClient />, { queryClient })
-
     expect(await screen.findByText('Total Sessions')).toBeInTheDocument()
     await waitFor(() => expect(mockPost).toHaveBeenCalled())
     expect(screen.getAllByText('—').length).toBeGreaterThan(0)
@@ -1540,16 +1186,10 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
     })
 
     test('correctly calculates RUM beacon costs and storage when rumBeaconsDay is set', () => {
-      const state = {
-        ...DEFAULTS,
-        rumBeaconsDay: 10000,
-      }
-      const results = calculate(state)
-
+      const results = calculate({ ...DEFAULTS, rumBeaconsDay: 10000 })
       expect(results.rumBeaconsMonth).toBe(300000)
       expect(results.rumParquetGBMonths).toBeCloseTo(0.071525, 4)
       expect(results.costRum).toBeCloseTo(1.50143, 4)
-
       const rumTier = results.storageTiers.find(t => t.label === 'RUM data')
       expect(rumTier).toBeDefined()
       expect(rumTier?.gbMonths).toBeCloseTo(0.071525, 4)
@@ -1557,60 +1197,37 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
 
     test('reducer PREFILL handles rum_beacons_per_day correctly', () => {
       const prefill = makePrefill({
-        rum_beacons_per_day: 5000,
-        requests_per_day: 1000000,
-        edge_requests_per_day: 800000,
-        log_period_seconds: 60,
-        commit_interval_mins: 5,
-        sample_rate: 100,
-        edge_only: true,
-        compaction_enabled: true,
-        delete_after: true,
-        log_retention_days: 90,
-        class_a_rate_per_1k: 0.005,
-        class_b_rate_per_10k: 0.01,
-        cdn_egress_rate_per_gb: 0.12,
-        storage_rate_per_gb_month: 0.02,
-        min_billed_days: 30,
-        avg_nodes_per_flush: 1,
+        rum_beacons_per_day: 5000, requests_per_day: 1000000, edge_requests_per_day: 800000,
+        log_period_seconds: 60, commit_interval_mins: 5, sample_rate: 100, edge_only: true,
+        compaction_enabled: true, delete_after: true, log_retention_days: 90,
+        class_a_rate_per_1k: 0.005, class_b_rate_per_10k: 0.01, cdn_egress_rate_per_gb: 0.12,
+        storage_rate_per_gb_month: 0.02, min_billed_days: 30, avg_nodes_per_flush: 1,
       })
-      const nextState = reducer(DEFAULTS, { type: 'PREFILL', prefill })
-      expect(nextState.rumBeaconsDay).toBe(5000)
+      expect(reducer(DEFAULTS, { type: 'PREFILL', prefill }).rumBeaconsDay).toBe(5000)
     })
 
     test('Billing Zones (MBZ100, MBZ200, Global) configure correct rates and calculate egress costs', () => {
       expect(DEFAULTS.billingZone).toBe('MBZ200')
       expect(DEFAULTS.rateEgress).toBe(0.12)
-
       const mbz100State = reducer(DEFAULTS, { type: 'SET_ZONE', zone: 'MBZ100' })
       expect(mbz100State.billingZone).toBe('MBZ100')
       expect(mbz100State.rateEgress).toBe(0.08)
-
       const globalState = reducer(DEFAULTS, { type: 'SET_ZONE', zone: 'Global' })
       expect(globalState.billingZone).toBe('Global')
       expect(globalState.rateEgress).toBe(0.18)
 
-      const resMBZ100 = calculate(mbz100State)
-      const resMBZ200 = calculate(DEFAULTS)
-      const resGlobal = calculate(globalState)
-
+      const [resMBZ100, resMBZ200, resGlobal] = [calculate(mbz100State), calculate(DEFAULTS), calculate(globalState)]
       expect(resMBZ100.cdnEgressGB).toBe(resMBZ200.cdnEgressGB)
       expect(resGlobal.cdnEgressGB).toBe(resMBZ200.cdnEgressGB)
-
       expect(resMBZ100.costEgress).toBeCloseTo(resMBZ100.cdnEgressGB * 0.08, 4)
       expect(resMBZ200.costEgress).toBeCloseTo(resMBZ200.cdnEgressGB * 0.12, 4)
       expect(resGlobal.costEgress).toBeCloseTo(resGlobal.cdnEgressGB * 0.18, 4)
-
       expect(resMBZ100.costEgress).toBeLessThan(resMBZ200.costEgress)
       expect(resMBZ200.costEgress).toBeLessThan(resGlobal.costEgress)
     })
 
     test('PREFILL respects billing_zone and maps corresponding rate', () => {
-      const prefill = makePrefill({
-        billing_zone: 'MBZ100',
-        cdn_egress_rate_per_gb: 0.08,
-      })
-      const state = reducer(DEFAULTS, { type: 'PREFILL', prefill })
+      const state = reducer(DEFAULTS, { type: 'PREFILL', prefill: makePrefill({ billing_zone: 'MBZ100', cdn_egress_rate_per_gb: 0.08 }) })
       expect(state.billingZone).toBe('MBZ100')
       expect(state.rateEgress).toBe(0.08)
     })
@@ -1625,67 +1242,39 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
 
     it('renders loading.tsx with geometry-matched zero-CLS reservation containers', () => {
       render(<Loading />)
-
       expect(screen.getByTestId('admin-usage-log-loading')).toBeInTheDocument()
-      const toolbar = screen.getByTestId('admin-usage-log-toolbar')
-      expect(toolbar.className).toContain('[contain-intrinsic-size:auto_36px]')
-      expect(toolbar.className).toContain('[content-visibility:auto]')
-
-      const kpi = screen.getByTestId('admin-usage-log-kpi-reservation')
-      expect(kpi.className).toContain('[contain-intrinsic-size:auto_164px]')
-      expect(kpi.className).toContain('[content-visibility:auto]')
-
-      const chart = screen.getByTestId('admin-usage-log-chart-reservation')
-      expect(chart.className).toContain('[contain-intrinsic-size:auto_380px]')
-      expect(chart.className).toContain('[content-visibility:auto]')
-
-      const table = screen.getByTestId('admin-usage-log-table-reservation')
-      expect(table.className).toContain('[contain-intrinsic-size:auto_520px]')
-      expect(table.className).toContain('[content-visibility:auto]')
+      for (const [tid, size] of [
+        ['admin-usage-log-toolbar', 'auto_36px'],
+        ['admin-usage-log-kpi-reservation', 'auto_164px'],
+        ['admin-usage-log-chart-reservation', 'auto_380px'],
+        ['admin-usage-log-table-reservation', 'auto_520px'],
+      ]) {
+        const el = screen.getByTestId(tid)
+        expect(el.className).toContain(`[contain-intrinsic-size:${size}]`)
+        expect(el.className).toContain('[content-visibility:auto]')
+      }
       expect(screen.getByText('Loading FOS usage ledger...')).toBeInTheDocument()
     })
 
     it('renders pending skeleton reservations before usage-log data resolves', () => {
       mockGet.mockImplementation(() => new Promise(() => {}))
-
       renderWithQuery(<UsageLogClient initialServiceId="svc-alpha" initialNowMs={1780315200000} />)
-
       expect(screen.getByTestId('admin-usage-log-root')).toBeInTheDocument()
-      expect(screen.getByTestId('admin-usage-log-kpi-reservation').className).toContain(
-        '[contain-intrinsic-size:auto_164px]',
-      )
-      expect(screen.getByTestId('admin-usage-log-chart-reservation').className).toContain(
-        '[contain-intrinsic-size:auto_380px]',
-      )
-      expect(screen.getByTestId('admin-usage-log-table-reservation').className).toContain(
-        '[contain-intrinsic-size:auto_520px]',
-      )
+      expect(screen.getByTestId('admin-usage-log-kpi-reservation').className).toContain('[contain-intrinsic-size:auto_164px]')
+      expect(screen.getByTestId('admin-usage-log-chart-reservation').className).toContain('[contain-intrinsic-size:auto_380px]')
+      expect(screen.getByTestId('admin-usage-log-table-reservation').className).toContain('[contain-intrinsic-size:auto_520px]')
       expect(screen.getByText('Loading log accounting…')).toBeInTheDocument()
     })
 
     it('renders aggregate KPIs, ingest accounting, and usage log rows', async () => {
-      mockGet.mockImplementation((url: string) => {
-        if (url === '/api/admin/usage-log') {
-          return Promise.resolve({
-            data: SAMPLE_USAGE_LOG,
-            response: new Response(null, { status: 200 }),
-          })
-        }
-        if (url === '/api/admin/log-accounting') {
-          return Promise.resolve({
-            data: SAMPLE_ACCOUNTING,
-            response: new Response(null, { status: 200 }),
-          })
-        }
-        return Promise.resolve({ data: {}, response: new Response(null, { status: 200 }) })
-      })
-
+      mockGet.mockImplementation((url: string) =>
+        Promise.resolve({
+          data: url === '/api/admin/usage-log' ? SAMPLE_USAGE_LOG : url === '/api/admin/log-accounting' ? SAMPLE_ACCOUNTING : {},
+          response: new Response(null, { status: 200 }),
+        }),
+      )
       renderWithQuery(<UsageLogClient initialServiceId="svc-alpha" initialNowMs={1780315200000} />)
-
-      await waitFor(() => {
-        expect(screen.getByText('1.2K')).toBeInTheDocument()
-      })
-
+      await waitFor(() => expect(screen.getByText('1.2K')).toBeInTheDocument())
       expect(screen.getByText('45.0K')).toBeInTheDocument()
       expect(screen.getByText('$0.17')).toBeInTheDocument()
       expect(screen.getByText('s3://fos-bucket/lake/part-001.parquet')).toBeInTheDocument()
@@ -1694,90 +1283,53 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
     })
 
     it('switches time-window presets, filters by process/operation, refreshes, and purges logs', async () => {
-      mockGet.mockImplementation((url: string) => {
-        if (url === '/api/admin/usage-log') {
-          return Promise.resolve({
-            data: SAMPLE_USAGE_LOG,
-            response: new Response(null, { status: 200 }),
-          })
-        }
-        return Promise.resolve({
-          data: SAMPLE_ACCOUNTING,
+      mockGet.mockImplementation((url: string) =>
+        Promise.resolve({
+          data: url === '/api/admin/usage-log' ? SAMPLE_USAGE_LOG : SAMPLE_ACCOUNTING,
           response: new Response(null, { status: 200 }),
-        })
-      })
-      mockDelete.mockResolvedValue({
-        data: { ok: true },
-        response: new Response(null, { status: 200 }),
-      })
-
+        }),
+      )
+      mockDelete.mockResolvedValue({ data: { ok: true }, response: new Response(null, { status: 200 }) })
       renderWithQuery(<UsageLogClient initialServiceId="svc-alpha" initialNowMs={1780315200000} />)
-
-      await waitFor(() => {
-        expect(screen.getByText('s3://fos-bucket/lake/part-001.parquet')).toBeInTheDocument()
-      })
+      await waitFor(() => expect(screen.getByText('s3://fos-bucket/lake/part-001.parquet')).toBeInTheDocument())
 
       expect(screen.getByTestId('admin-usage-log-preset-24h')).toHaveAttribute('aria-pressed', 'true')
       fireEvent.click(screen.getByTestId('admin-usage-log-preset-1h'))
       expect(screen.getByTestId('admin-usage-log-preset-1h')).toHaveAttribute('aria-pressed', 'true')
 
-      const procInput = screen.getByTestId('admin-usage-log-process-input')
-      fireEvent.change(procInput, { target: { value: 'cron:commit' } })
-
-      await waitFor(() => {
+      fireEvent.change(screen.getByTestId('admin-usage-log-process-input'), { target: { value: 'cron:commit' } })
+      await waitFor(() =>
         expect(mockGet).toHaveBeenCalledWith(
           '/api/admin/usage-log',
-          expect.objectContaining({
-            params: {
-              query: expect.objectContaining({
-                process_context: 'cron:commit',
-              }),
-            },
-          }),
-        )
-      })
+          expect.objectContaining({ params: { query: expect.objectContaining({ process_context: 'cron:commit' }) } }),
+        ),
+      )
 
-      const opInput = screen.getByTestId('admin-usage-log-operation-input')
-      fireEvent.change(opInput, { target: { value: 'PutObject' } })
-
-      await waitFor(() => {
+      fireEvent.change(screen.getByTestId('admin-usage-log-operation-input'), { target: { value: 'PutObject' } })
+      await waitFor(() =>
         expect(mockGet).toHaveBeenCalledWith(
           '/api/admin/usage-log',
-          expect.objectContaining({
-            params: {
-              query: expect.objectContaining({
-                operation_type: 'PutObject',
-              }),
-            },
-          }),
-        )
-      })
+          expect.objectContaining({ params: { query: expect.objectContaining({ operation_type: 'PutObject' }) } }),
+        ),
+      )
 
       const callsBeforeRefresh = mockGet.mock.calls.length
-      const refreshBtn = screen.getByTestId('admin-usage-log-refresh-btn')
-      fireEvent.click(refreshBtn)
-      await waitFor(() => {
-        expect(mockGet.mock.calls.length).toBeGreaterThan(callsBeforeRefresh)
-      })
+      fireEvent.click(screen.getByTestId('admin-usage-log-refresh-btn'))
+      await waitFor(() => expect(mockGet.mock.calls.length).toBeGreaterThan(callsBeforeRefresh))
 
       const exportBtn = screen.getByTestId('admin-usage-log-export-btn')
       expect(exportBtn.getAttribute('href')).toContain('/api/admin/usage-log/export?')
       expect(exportBtn.getAttribute('href')).toContain('process_context=cron%3Acommit')
 
       fireEvent.click(screen.getByTestId('admin-usage-log-purge-btn'))
-      await waitFor(() => {
-        expect(screen.getByText('Purge all usage logs?')).toBeInTheDocument()
-      })
+      await waitFor(() => expect(screen.getByText('Purge all usage logs?')).toBeInTheDocument())
       fireEvent.click(screen.getByRole('button', { name: /Purge all logs/i }))
-
-      await waitFor(() => {
+      await waitFor(() =>
         expect(mockDelete).toHaveBeenCalledWith(
           '/api/admin/usage-log',
-          expect.objectContaining({
-            params: { query: { service_id: 'svc-alpha' } },
-          }),
-        )
-      })
+          expect.objectContaining({ params: { query: { service_id: 'svc-alpha' } } }),
+        ),
+      )
     })
   })
 })
@@ -1785,25 +1337,20 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
 // ── HighScaleRequestFactsPage & ControlRoomClient tests ─────────────────────
 
 const baseMetadata = {
-  status: 'complete' as const,
-  exact: true,
-  coverage: 1,
-  freshness_lag_seconds: 18,
-  mode: 'clickhouse' as const,
+  status: 'complete' as const, exact: true, coverage: 1, freshness_lag_seconds: 18, mode: 'clickhouse' as const,
   watermark: {
-    service_id: 'service-1',
-    domain: 'request',
-    owner_epoch: 1,
-    coverage_start: '2026-09-10T00:00:00Z',
-    coverage_end: '2026-09-11T01:00:00Z',
-    last_accepted_cursor: null,
-    last_archived_event_id: null,
-    last_visible_event_id: null,
-    exact: true,
+    service_id: 'service-1', domain: 'request', owner_epoch: 1,
+    coverage_start: '2026-09-10T00:00:00Z', coverage_end: '2026-09-11T01:00:00Z',
+    last_accepted_cursor: null, last_archived_event_id: null, last_visible_event_id: null, exact: true,
   },
-  approximation_error: null,
-  error: null,
+  approximation_error: null, error: null,
 }
+
+const mockFactsState = (overrides: Record<string, unknown> = {}) => ({
+  isLoading: false, isError: false, data: undefined, error: null, isFetching: false,
+  pageIndex: 0, canNextPage: false, canPreviousPage: false, nextPage: vi.fn(), previousPage: vi.fn(),
+  ...overrides,
+})
 
 describe('HighScaleRequestFactsPage (/high-scale/request-facts)', () => {
   beforeEach(() => {
@@ -1825,19 +1372,7 @@ describe('HighScaleRequestFactsPage (/high-scale/request-facts)', () => {
   })
 
   it('renders contextual distributed cluster shard skeleton while loading', () => {
-    useFactsMock.mockReturnValue({
-      isLoading: true,
-      isError: false,
-      data: undefined,
-      error: null,
-      isFetching: true,
-      pageIndex: 0,
-      canNextPage: false,
-      canPreviousPage: false,
-      nextPage: vi.fn(),
-      previousPage: vi.fn(),
-    })
-
+    useFactsMock.mockReturnValue(mockFactsState({ isLoading: true, isFetching: true }))
     render(<HighScaleRequestFactsPage />)
     expect(screen.getByText('Loading request facts…')).toBeInTheDocument()
     expect(screen.getByText('Querying distributed cluster shards...')).toBeInTheDocument()
@@ -1845,97 +1380,50 @@ describe('HighScaleRequestFactsPage (/high-scale/request-facts)', () => {
   })
 
   it('renders DuckDB Standard Mode Emulation badge and supports filter controls', () => {
-    useFactsMock.mockReturnValue({
-      isLoading: false,
-      isError: false,
-      data: {
-        rows: [
-          {
-            event_id: 'event-emul-1',
-            timestamp: '2026-09-11T00:00:01Z',
-            service_id: 'service-1',
-            status: 200,
-            host: 'www.example.com',
-            pop: 'IAD',
-            country: 'US',
-            client_ip: '203.0.113.xxx',
-            url: '/healthz',
-          },
-        ],
-        metadata: {
-          ...baseMetadata,
-          mode: 'duckdb_emulation',
+    useFactsMock.mockReturnValue(
+      mockFactsState({
+        data: {
+          rows: [{
+            event_id: 'event-emul-1', timestamp: '2026-09-11T00:00:01Z', service_id: 'service-1',
+            status: 200, host: 'www.example.com', pop: 'IAD', country: 'US', client_ip: '203.0.113.xxx', url: '/healthz',
+          }],
+          metadata: { ...baseMetadata, mode: 'duckdb_emulation' },
+          next_cursor: null, _is_cached: false,
         },
-        next_cursor: null,
-        _is_cached: false,
-      },
-      error: null,
-      isFetching: false,
-      pageIndex: 0,
-      canNextPage: false,
-      canPreviousPage: false,
-      nextPage: vi.fn(),
-      previousPage: vi.fn(),
-    })
-
-    render(<HighScaleRequestFactsPage />)
-
-    expect(screen.getByTestId('high-scale-mode-badge')).toHaveTextContent(
-      'DuckDB Standard Mode Emulation',
+      }),
     )
+    render(<HighScaleRequestFactsPage />)
+    expect(screen.getByTestId('high-scale-mode-badge')).toHaveTextContent('DuckDB Standard Mode Emulation')
     expect(screen.getByText('/healthz')).toBeInTheDocument()
     expect(screen.getByText('IAD')).toBeInTheDocument()
     expect(screen.getByText('203.0.113.xxx')).toBeInTheDocument()
 
-    fireEvent.change(screen.getByTestId('filter-status'), { target: { value: '503' } })
-    fireEvent.change(screen.getByTestId('filter-domain'), { target: { value: 'api.example.com' } })
-    fireEvent.change(screen.getByTestId('filter-pop'), { target: { value: 'LHR' } })
-    fireEvent.change(screen.getByTestId('filter-country'), { target: { value: 'GB' } })
-    fireEvent.change(screen.getByTestId('filter-batch-id'), { target: { value: 'batch-9' } })
-
+    for (const [tid, value] of [
+      ['filter-status', '503'], ['filter-domain', 'api.example.com'], ['filter-pop', 'LHR'],
+      ['filter-country', 'GB'], ['filter-batch-id', 'batch-9'],
+    ]) {
+      fireEvent.change(screen.getByTestId(tid), { target: { value } })
+    }
     expect(useFactsMock).toHaveBeenLastCalledWith(
       expect.objectContaining({
-        serviceId: 'service-1',
-        status: 503,
-        domain: 'api.example.com',
-        pop: 'LHR',
-        country: 'GB',
-        batchId: 'batch-9',
-        emulateStandard: true,
+        serviceId: 'service-1', status: 503, domain: 'api.example.com',
+        pop: 'LHR', country: 'GB', batchId: 'batch-9', emulateStandard: true,
       }),
     )
 
     fireEvent.click(screen.getByTestId('filter-clear'))
     expect(useFactsMock).toHaveBeenLastCalledWith(
-      expect.objectContaining({
-        status: null,
-        domain: null,
-        pop: null,
-        country: null,
-        batchId: null,
-      }),
+      expect.objectContaining({ status: null, domain: null, pop: null, country: null, batchId: null }),
     )
   })
 
   it('applies dimmed opacity-40 transition during background refetch and renders empty state', () => {
-    useFactsMock.mockReturnValue({
-      isLoading: false,
-      isError: false,
-      data: {
-        rows: [],
-        metadata: baseMetadata,
-        next_cursor: null,
-        _is_cached: false,
-      },
-      error: null,
-      isFetching: true,
-      pageIndex: 0,
-      canNextPage: false,
-      canPreviousPage: false,
-      nextPage: vi.fn(),
-      previousPage: vi.fn(),
-    })
-
+    useFactsMock.mockReturnValue(
+      mockFactsState({
+        data: { rows: [], metadata: baseMetadata, next_cursor: null, _is_cached: false },
+        isFetching: true,
+      }),
+    )
     render(<HighScaleRequestFactsPage />)
     expect(screen.getByText('No request facts in this time range.')).toBeInTheDocument()
     expect(screen.getByTestId('high-scale-table-wrapper').className).toContain('opacity-40')
@@ -1943,51 +1431,21 @@ describe('HighScaleRequestFactsPage (/high-scale/request-facts)', () => {
   })
 
   it('renders error alert and server metadata with column headers', () => {
-    useFactsMock.mockReturnValue({
-      isLoading: false,
-      isError: true,
-      data: undefined,
-      error: new Error('high-scale unavailable'),
-      isFetching: false,
-      pageIndex: 0,
-      canNextPage: false,
-      canPreviousPage: false,
-      nextPage: vi.fn(),
-      previousPage: vi.fn(),
-    })
+    useFactsMock.mockReturnValue(mockFactsState({ isError: true, error: new Error('high-scale unavailable') }))
     const errView = render(<HighScaleRequestFactsPage />)
     expect(screen.getByRole('alert')).toHaveTextContent('high-scale unavailable')
     errView.unmount()
 
-    useFactsMock.mockReturnValue({
-      isLoading: false,
-      isError: false,
-      data: {
-        rows: [
-          {
-            event_id: 'event-1',
-            timestamp: '2026-09-11T00:00:01Z',
-            service_id: 'service-1',
-            country: 'US',
-            client_ip: '1.2.3.xxx',
-            url: '/first',
-          },
-        ],
-        metadata: {
-          ...baseMetadata,
-          freshness_lag_seconds: 42,
+    useFactsMock.mockReturnValue(
+      mockFactsState({
+        data: {
+          rows: [{ event_id: 'event-1', timestamp: '2026-09-11T00:00:01Z', service_id: 'service-1', country: 'US', client_ip: '1.2.3.xxx', url: '/first' }],
+          metadata: { ...baseMetadata, freshness_lag_seconds: 42 },
+          next_cursor: 'cursor-1', _is_cached: false,
         },
-        next_cursor: 'cursor-1',
-        _is_cached: false,
-      },
-      error: null,
-      isFetching: false,
-      pageIndex: 0,
-      canNextPage: true,
-      canPreviousPage: false,
-      nextPage: vi.fn(),
-      previousPage: vi.fn(),
-    })
+        canNextPage: true,
+      }),
+    )
     render(<HighScaleRequestFactsPage />)
     expect(screen.getByTestId('high-scale-metadata')).toHaveTextContent('complete')
     expect(screen.getByTestId('high-scale-metadata')).toHaveTextContent('42s lag')
@@ -2016,9 +1474,7 @@ describe('CorrelatorLeaderboard', () => {
       http.post('*/api/services/svc-1/control-room/correlate', async ({ request }) => {
         body = await request.json()
         return HttpResponse.json({
-          dimension: 'waf_sig',
-          top: [{ value: 'sqli', count: 7 }],
-          freshness: { latest_log_at: null, lag_seconds: 0 },
+          dimension: 'waf_sig', top: [{ value: 'sqli', count: 7 }], freshness: { latest_log_at: null, lag_seconds: 0 },
         })
       }),
     )
@@ -2046,16 +1502,8 @@ describe('CorrelatorLeaderboard', () => {
 
 function makeTick(rps: number): HistoryMetricsTick {
   return {
-    event: 'metrics_tick',
-    event_schema_version: 2,
-    timestamp: new Date().toISOString(),
-    status: 'ok',
-    data: {
-      requests_per_second: rps,
-      error_rate: 0.01,
-      cache_hit_ratio: 0.95,
-      bandwidth_mbps: 1.5,
-    },
+    event: 'metrics_tick', event_schema_version: 2, timestamp: new Date().toISOString(), status: 'ok',
+    data: { requests_per_second: rps, error_rate: 0.01, cache_hit_ratio: 0.95, bandwidth_mbps: 1.5 },
   }
 }
 
@@ -2068,8 +1516,7 @@ describe('useTickHistory', () => {
   })
 
   it('pads history to 60 entries with zeros on the left', () => {
-    const ticks = [makeTick(10), makeTick(20)]
-    const { result } = renderHook(() => useTickHistory(ticks))
+    const { result } = renderHook(() => useTickHistory([makeTick(10), makeTick(20)]))
     expect(result.current.history).toHaveLength(60)
     expect(result.current.history[57].data.requests_per_second).toBe(0)
     expect(result.current.history[58].data.requests_per_second).toBe(10)
@@ -2077,25 +1524,20 @@ describe('useTickHistory', () => {
   })
 
   it('tracks prevTick as the tick before the current one', () => {
-    const tick1 = makeTick(10)
-    const tick2 = makeTick(20)
+    const [tick1, tick2] = [makeTick(10), makeTick(20)]
     const { result } = renderHook(() => useTickHistory([tick1, tick2]))
     expect(result.current.prevTick).toBe(tick1)
   })
 
   it('caps history at 60 entries with no padding', () => {
-    const ticks = Array.from({ length: 65 }, (_, i) => makeTick(i))
-    const { result } = renderHook(() => useTickHistory(ticks))
-
+    const { result } = renderHook(() => useTickHistory(Array.from({ length: 65 }, (_, i) => makeTick(i))))
     expect(result.current.history).toHaveLength(60)
     expect(result.current.history[0].data.requests_per_second).toBe(5)
     expect(result.current.history[59].data.requests_per_second).toBe(64)
   })
 
   it('series() extracts values from history including padding', () => {
-    const ticks = [makeTick(10), makeTick(20), makeTick(30)]
-    const { result } = renderHook(() => useTickHistory(ticks))
-
+    const { result } = renderHook(() => useTickHistory([makeTick(10), makeTick(20), makeTick(30)]))
     const rps = result.current.series((d) => d.requests_per_second)
     expect(rps).toHaveLength(60)
     expect(rps.slice(0, 57).every((v) => v === 0)).toBe(true)
@@ -2103,8 +1545,7 @@ describe('useTickHistory', () => {
   })
 
   it('handles replay burst — all items appear right-aligned', () => {
-    const ticks = Array.from({ length: 45 }, (_, i) => makeTick(i))
-    const { result } = renderHook(() => useTickHistory(ticks))
+    const { result } = renderHook(() => useTickHistory(Array.from({ length: 45 }, (_, i) => makeTick(i))))
     expect(result.current.history).toHaveLength(60)
     const rps = result.current.series((d) => d.requests_per_second)
     expect(rps.slice(0, 15).every((v) => v === 0)).toBe(true)
@@ -2144,49 +1585,18 @@ function parseMetricsTick(line: SSELine): MetricsTick | null {
 }
 
 const REALISTIC_SSE_LINE: SSELine = {
-  event: 'metrics_tick',
-  event_schema_version: 2,
-  timestamp: '2026-07-08T15:19:38.466551+00:00',
-  status: 'ok',
+  event: 'metrics_tick', event_schema_version: 2, timestamp: '2026-07-08T15:19:38.466551+00:00', status: 'ok',
   data: {
-    requests_per_second: 42.5,
-    error_rate: 0.01,
-    cache_hit_ratio: 0.95,
-    bandwidth_mbps: 1.5,
-    total_requests: 42,
-    total_hits: 40,
-    total_miss: 2,
-    total_pass: 0,
-    total_errors: 0,
-    status_breakdown: { status_2xx: 100 },
-    estimated_cost_usd: 0.001,
-    origin_requests_per_second: 5.0,
-    origin_bandwidth_mbps: 0.2,
-    shield_requests: 10,
-    shield_hit_ratio: 0.05,
-    pass_requests: 0,
-    synth_requests: 0,
-    waf_blocked: 0,
-    waf_logged: 0,
-    waf_passed: 42,
-    pop_count: 2,
-    degraded_pops: [],
-    origin_offload: 0.85,
-    hit_latency_ms: 1.0,
-    miss_latency_ms: 150.0,
-    pass_latency_ms: 80.0,
-    h2_pct: 60.0,
-    h3_pct: 30.0,
-    ddos_detect: 0,
-    ddos_mitigate: 0,
-    status_detail: { '200': 40, '304': 2 },
-    object_size_distribution: { '1k': 10, '10k': 20, '100k': 12 },
-    origin_fetches: 3,
-    origin_revalidations: 1,
-    shield_hit_requests: 8,
-    shield_miss_requests: 2,
-    request_collapse_usable: 5,
-    request_collapse_unusable: 1,
+    requests_per_second: 42.5, error_rate: 0.01, cache_hit_ratio: 0.95, bandwidth_mbps: 1.5,
+    total_requests: 42, total_hits: 40, total_miss: 2, total_pass: 0, total_errors: 0,
+    status_breakdown: { status_2xx: 100 }, estimated_cost_usd: 0.001,
+    origin_requests_per_second: 5.0, origin_bandwidth_mbps: 0.2, shield_requests: 10, shield_hit_ratio: 0.05,
+    pass_requests: 0, synth_requests: 0, waf_blocked: 0, waf_logged: 0, waf_passed: 42,
+    pop_count: 2, degraded_pops: [], origin_offload: 0.85, hit_latency_ms: 1.0, miss_latency_ms: 150.0, pass_latency_ms: 80.0,
+    h2_pct: 60.0, h3_pct: 30.0, ddos_detect: 0, ddos_mitigate: 0,
+    status_detail: { '200': 40, '304': 2 }, object_size_distribution: { '1k': 10, '10k': 20, '100k': 12 },
+    origin_fetches: 3, origin_revalidations: 1, shield_hit_requests: 8, shield_miss_requests: 2,
+    request_collapse_usable: 5, request_collapse_unusable: 1,
   },
   aggregate_delay: 9,
 }
@@ -2216,12 +1626,10 @@ describe('parseMetricsTick', () => {
   })
 
   it('handles rt_down status', () => {
-    const line: SSELine = {
-      event: 'metrics_tick',
-      status: 'rt_down',
+    const tick = parseMetricsTick({
+      event: 'metrics_tick', status: 'rt_down',
       data: { requests_per_second: 0, error_rate: 0, cache_hit_ratio: 0, bandwidth_mbps: 0 },
-    }
-    const tick = parseMetricsTick(line)
+    })
     expect(tick).not.toBeNull()
     expect(tick!.status).toBe('rt_down')
     expect(tick!.data.requests_per_second).toBe(0)
@@ -2235,11 +1643,10 @@ describe('parseMetricsTick', () => {
   })
 
   it('defaults event_schema_version to 1 when missing', () => {
-    const line: SSELine = {
+    const tick = parseMetricsTick({
       event: 'metrics_tick',
       data: { requests_per_second: 1, error_rate: 0, cache_hit_ratio: 0, bandwidth_mbps: 0 },
-    }
-    const tick = parseMetricsTick(line)
+    })
     expect(tick!.event_schema_version).toBe(1)
   })
 })

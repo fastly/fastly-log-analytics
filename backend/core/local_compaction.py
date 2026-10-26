@@ -50,10 +50,9 @@ from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from backend.core.duckdb import get_memory_connection
+from backend.core.duckdb import escape_sql_literal, get_memory_connection
 from backend.utils.bounded_cache import BoundedTTLCache
 from backend.utils.date_utils import parse_day_key_strict
-from backend.utils.sql_validator import escape_sql_literal
 
 logger = logging.getLogger(__name__)
 
@@ -244,7 +243,7 @@ def compact_local_partitions(
     # phase so concurrent dashboard queries via the view-build path
     # don't race with our delete-then-rename and hit FileNotFoundError /
     # IO Error mid-glob. Architecture-review Finding #3.
-    from backend.core.iceberg.view import _get_service_lock
+    from backend.core.iceberg._core import _get_service_lock
 
     service_key = source.get("name", "default")
     publish_lock = _get_service_lock(service_key)

@@ -200,6 +200,7 @@ origin_latency_ts = origin_dims
 slow_urls = origin_dims
 overview = recompute
 sessions = recompute
+rollup_coverage = recompute
 perf_dims = perf_latency
 security_proxies = security_dims
 verified_bots_ts = security_dims
@@ -216,6 +217,8 @@ if _backend_pkg is not None and hasattr(_backend_pkg, "_MODULE_ALIASES"):
             "backend.core.rollups.time_series": "backend.core.rollups.recompute",
             "backend.core.rollups.overview": "backend.core.rollups.recompute",
             "backend.core.rollups.sessions": "backend.core.rollups.recompute",
+            "backend.repositories.rollup_coverage": "backend.core.rollups.recompute",
+            "backend.repositories._rollup_planner": "backend.core.rollups.recompute",
         }
     )
 

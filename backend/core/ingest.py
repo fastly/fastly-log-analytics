@@ -19,8 +19,8 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 import backend.core as _core_pkg
-from backend.core import field_registry as fc
 from backend.core import iceberg
+from backend.core import log_fields as fc
 from backend.core import metadata as metadata_db
 from backend.core.duckdb import (
     _DEFAULT_SOURCE,
@@ -30,19 +30,17 @@ from backend.core.duckdb import (
     _execute_query_with_retry,
     _get_fos_client,
     _load_httpfs,  # noqa: F401  re-exported for test monkey-patching
+    escape_sql_literal,
 )
-from backend.core.field_registry import LOG_FIELD_CATALOG
+from backend.core.log_fields import LOG_FIELD_CATALOG
 from backend.core.metadata import ingest_log as _quarantine_mod
 from backend.utils.active_requests import yield_to_api
-from backend.utils.sql_validator import escape_sql_literal
 from backend.utils.telemetry import ensure_utc, log_once_per
 
 _core_pkg.quarantine = _quarantine_mod  # type: ignore[attr-defined]
 logger = logging.getLogger(__name__)
-_INGEST_OUTCOME_COUNTER_KEYS = (
-    "valid_records", "malformed_records", "corrupt_containers", "quarantine_capture_failures",
-    "source_delete_failures", "cap_evictions", "objects_processed", "objects_successful",
-    "objects_partial", "objects_failed",
+_INGEST_OUTCOME_COUNTER_KEYS = ( "valid_records", "malformed_records", "corrupt_containers", "quarantine_capture_failures",
+    "source_delete_failures", "cap_evictions", "objects_processed", "objects_successful", "objects_partial", "objects_failed",
 )  # fmt: skip
 
 
@@ -181,8 +179,7 @@ def _capture_corrupt_container(
     try:
         with open(local_file, "rb") as raw:
             payload = raw.read()
-        result = capture_evidence(
-            service_id, source_type, object_key, payload,
+        result = capture_evidence( service_id, source_type, object_key, payload,
             line_ordinal=None, byte_offset=None, error_category="corrupt_container", error_text=str(error)[:2_000],
         )  # fmt: skip
     except OSError:
@@ -513,8 +510,7 @@ def _recover_in_flight(source: dict, table_name: str = "logs") -> dict:
         else:
             metadata_db.clear_in_flight(source_name, buffer_filename, table_name=table_name)
             dropped += 1
-            logger.info(
-                "[ingest] %s: dropped stale in_flight row for missing buffer %s (%s) (%d files will re-ingest)",
+            logger.info( "[ingest] %s: dropped stale in_flight row for missing buffer %s (%s) (%d files will re-ingest)",
                 source_name, buffer_filename, table_name, len(file_rows),
             )  # fmt: skip
     return {"promoted": promoted, "dropped": dropped, "rows_recovered": rows_recovered}

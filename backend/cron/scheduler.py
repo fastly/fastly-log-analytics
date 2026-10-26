@@ -1,13 +1,3 @@
-"""APScheduler lifecycle + cron-job registration.
-
-This is the post-carve home for the ``Scheduler`` class, the
-``get_scheduler`` factory, the global singleton, and the small helpers
-(logger, color/icon tables, throttle dicts, disk/backlog probes) that
-are shared across job modules. (The legacy flat ``backend/scheduler.py``
-compat shim was retired 2026-07-06 — import directly from here or from
-``backend.cron.jobs.*``.)
-"""
-
 from __future__ import annotations
 
 import logging
@@ -19,11 +9,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-# Anchor the logger to the historical ``backend.scheduler`` name so
-# log filters in tests (and downstream parsers) keep working after
-# the carve. Every job module also imports this logger.
 logger = logging.getLogger("backend.scheduler")
-# ── Helpers / shared state & Decorators (folded from backend.cron.decorators) ─
 import concurrent.futures  # noqa: E402
 from functools import wraps  # noqa: E402
 from types import TracebackType  # noqa: E402
@@ -36,14 +22,6 @@ _JOIN_TIMEOUT_S = 1.0
 
 
 class CronHeartbeat:
-    """Refresh ``job_runs.heartbeat_at`` for ``(service_id, job_name)`` while the block runs.
-
-    Only the job's own lease is refreshed: an unscoped refresh would keep every running lease for
-    the service alive, so a wedged job whose own heartbeat died would never be reaped while any
-    healthy job kept ticking (the orphaned-sync-row ingestion stall). With no ``job_name`` the
-    loop refreshes nothing.
-    """
-
     def __init__(self, service_id: str, job_name: str | None, *, interval_s: float | None = None) -> None:
         self._service_id = service_id
         self._job_name = job_name
@@ -84,28 +62,16 @@ class CronHeartbeat:
 
 
 def dev_mode_no_crons() -> bool:
-    """Kill switch for local-dev runs: never schedule or execute cron work.
-
-    Evaluates FLA_DEV_NO_CRONS environment variable.
-    """
     return os.environ.get("FLA_DEV_NO_CRONS", "").lower() in ("1", "true", "yes")
 
 
-# Watchdog threshold for reporting an overlong invocation. The wrapped body is
-# still allowed to finish before the APScheduler worker is released: Python
-# cannot safely kill a thread that owns DuckDB/FOS resources, and abandoning it
-# leaves those resources active while the next tick starts.
 _CRON_HARD_CAP_S = 300
-# Shared watchdog executor (see _watchdog_executor below). Sized >= APScheduler's
-# default pool (10) so concurrent cron bodies never queue behind each other here;
-# each job is max_instances=1 and the global_job crons don't use this path.
 _WATCHDOG_MAX_WORKERS = 12
 _watchdog_lock = threading.Lock()
 _watchdog_executor: concurrent.futures.ThreadPoolExecutor | None = None
 
 
 def _get_watchdog_executor() -> concurrent.futures.ThreadPoolExecutor:
-    """Lazily build the process-shared cron watchdog executor."""
     global _watchdog_executor
     with _watchdog_lock:
         if _watchdog_executor is None:
@@ -116,8 +82,6 @@ def _get_watchdog_executor() -> concurrent.futures.ThreadPoolExecutor:
 
 
 def cron_task(name: str, job_name: str | None = None):
-    """Wraps a cron handler with telemetry + usage-log flush + a hard watchdog."""
-
     def decorator(func):
         @wraps(func)
         def wrapper(service_id: str, *args, **kwargs):
@@ -156,10 +120,6 @@ def cron_task(name: str, job_name: str | None = None):
 
 
 def global_job(job_id: str, *, color: str, tag: str, label: str):
-    """Wrap a global (non-service) cron callable with the start/end-log +
-    record_job_run boilerplate the three util jobs share.
-    """
-
     def decorator(fn):
         @wraps(fn)
         def wrapper() -> None:
@@ -191,7 +151,6 @@ _status: dict[str, dict] = {}
 
 
 def record_job_run(job_id: str, status: str, duration_s: float, detail: str = "") -> None:
-    """Record the outcome of a completed global job run."""
     with _status_lock:
         _status[job_id] = {
             "last_run_at": iso_z_now(),
@@ -202,7 +161,6 @@ def record_job_run(job_id: str, status: str, duration_s: float, detail: str = ""
 
 
 def get_system_job_status() -> dict[str, dict]:
-    """Return a snapshot of all recorded job statuses."""
     with _status_lock:
         return dict(_status)
 
@@ -211,8 +169,6 @@ _CacheRegistry.register("utils.system_jobs._status", _status)
 
 
 class cron_run:  # noqa: N801 — context-manager factory, lowercase by convention
-    """Context manager owning a single cron run's lease/progress/finalize cycle."""
-
     def __init__(
         self,
         service_id: str,
@@ -262,11 +218,9 @@ class cron_run:  # noqa: N801 — context-manager factory, lowercase by conventi
 
     @property
     def ok(self) -> bool:
-        """True when the lease + progress setup succeeded and the body should run."""
         return not self.skipped and not self.aborted
 
     def elapsed(self) -> float:
-        """Seconds since the managed region started (0.0 before start)."""
         return 0.0 if self._start_time is None else time.time() - self._start_time
 
     def __enter__(self) -> cron_run:
@@ -314,7 +268,6 @@ class cron_run:  # noqa: N801 — context-manager factory, lowercase by conventi
         error_message: str | None = None,
         **log_kwargs: Any,
     ) -> None:
-        """Persist the terminal ``cron_runs`` row for this run."""
         from backend.core.duckdb import log_cron_run
 
         if self._source is None:
@@ -343,7 +296,6 @@ class cron_run:  # noqa: N801 — context-manager factory, lowercase by conventi
         self.record("error", summary=summary, error_message=error_message, **log_kwargs)
 
     def log_progress(self, event: dict, *, job_name: str | None = None) -> None:
-        """Emit a progress event through the scheduler helper (best-effort)."""
         _log_and_add_progress(self._run_id, self.service_id, event, job_name=job_name or self.task)
 
     def _log_skip(self, exc: BaseException) -> None:
@@ -405,7 +357,6 @@ def record_skip_row(
     error_message: str | None = None,
     run_id: int | None = None,
 ) -> None:
-    """Persist a terminal ``cron_runs`` row for a tick that never took the lease."""
     from backend.core.duckdb import log_cron_run
 
     log_cron_run(source, task, duration_s, status, summary=summary, error_message=error_message, run_id=run_id)
@@ -440,15 +391,6 @@ def dev_local_crons_enabled() -> bool:
 
 
 def _resolve_rum_sync_interval(rum_cfg: dict[str, Any], cfg: dict[str, Any], default_request_interval: int) -> int:
-    """Resolve the RUM ingest sync/discovery interval in seconds.
-
-    If an operator explicitly configured ``sync_interval_seconds`` in RUM settings,
-    respect it for backwards-compatibility.
-    Otherwise, derive the sync interval from the RUM log rotation period:
-      - If rum_log_period >= 60: max(5, rum_log_period // 2)
-      - If rum_log_period < 60: max(5, rum_log_period)
-    If no RUM log period is configured, fall back to the request log sync interval.
-    """
     if "sync_interval_seconds" in rum_cfg and rum_cfg["sync_interval_seconds"] is not None:
         try:
             return max(5, int(rum_cfg["sync_interval_seconds"]))
@@ -469,40 +411,17 @@ def _resolve_rum_sync_interval(rum_cfg: dict[str, Any], cfg: dict[str, Any], def
 
 
 def _display_label(src: dict, service_id: str) -> str:
-    """``"{display_name} ({service_id})"`` when the friendly name differs from
-    the service id, otherwise just the service id. Delegates to
-    ``get_service_display_label`` in ``backend.cron.jobs.sync`` so the
-    format lives in one place.
-    """
     from backend.cron.jobs.sync import get_service_display_label
 
     return get_service_display_label(service_id, src)
 
 
-# Per-service throttle for the heavy post-ingest refresh work — specifically
-# update_top_values (100k reservoir sample + 24 GROUP BYs that back the filter-
-# picker autocomplete cache) and reconcile_fastly_stats (Fastly /stats/aggregate
-# call with a 26h window that backfills the Usage Log billing reconciliation).
-# At 1s log_period the sync cron fires every 5s; running both phases on every
-# tick was the dominant ~16s floor in cron_runs.duration_s. Cheap status fields
-# (ingested count, latest file, buffer size, iceberg row counts) still refresh
-# every tick so the dashboard header stays current. Filter-picker autocomplete
-# degrades to a live query when the cache is missing or a search string is
-# typed (see get_field_values), and the Usage Log page reads at hourly grain
-# so 60s reconcile lag is invisible.
 _HEAVY_REFRESH_INTERVAL_SEC = 60.0
 _last_heavy_refresh: dict[str, float] = {}
 _last_heavy_refresh_lock = threading.Lock()
 
 
 def _claim_heavy_refresh(service_id: str) -> bool:
-    """Return True iff this caller should run the heavy refresh phases this tick.
-
-    Single-shot claim: the first caller per service per window wins; concurrent
-    callers (e.g. a manual sync overlapping a scheduled tick) see False. We
-    stamp _last_heavy_refresh on claim so a thread that crashes mid-phase
-    can't starve the next tick — the next 60s window simply opens normally.
-    """
     now = time.time()
     with _last_heavy_refresh_lock:
         last = _last_heavy_refresh.get(service_id, 0.0)
@@ -513,18 +432,11 @@ def _claim_heavy_refresh(service_id: str) -> bool:
 
 
 def _elapsed_since(start: float) -> str:
-    """Format seconds elapsed since *start* (time.time()) as a compact string."""
     s = time.time() - start
     return f"{int(s // 60)}m{int(s % 60):02d}s" if s >= 60 else f"{s:.1f}s"
 
 
 def _service_has_alerts(service_id: str) -> bool:
-    """Return True if the service has at least one alert configured.
-
-    Used to gate the alerts evaluation cron — pointless to fire every tick
-    just to log "No alerts configured". On error (e.g. corrupt SQLite),
-    defaults to True so we don't silently disable the cron.
-    """
     from backend.core import metadata as metadata_db
 
     try:
@@ -533,18 +445,12 @@ def _service_has_alerts(service_id: str) -> bool:
         return True
 
 
-# Ensure project root is importable (same as main.py)
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 
 def _extract_log_text(run_id: int | None) -> str:
-    """Return a plain-text log summary for a cron run from the progress store.
-
-    run_id can be None when start_cron_run failed to register the run; in
-    that case the progress store has nothing for it and we return "".
-    """
     from backend.cron_progress import get_progress
 
     if run_id is None:
@@ -559,7 +465,6 @@ def _extract_log_text(run_id: int | None) -> str:
     )
 
 
-# ── Telemetry colors / icons ──────────────────────────────────────────────────
 JOB_COLORS = {
     "sync": "\x1b[94m",  # Bright Blue
     "commit": "\x1b[95m",  # Bright Magenta
@@ -594,11 +499,6 @@ TYPE_ICONS = {
 def _log_and_add_progress(
     run_id: int | None, service_id: str, event: dict, job_name: str = "scheduler", service_name: str | None = None
 ) -> None:
-    """Log a cron event and (best-effort) add it to the progress store.
-
-    run_id can be None when start_cron_run failed to register the run; in
-    that case add_progress no-ops and only the log message is emitted.
-    """
     from backend.cron.jobs.sync import get_service_display_label
     from backend.cron_progress import add_progress
 
@@ -607,17 +507,10 @@ def _log_and_add_progress(
     if msg:
         display = get_service_display_label(service_id)
         t = event.get("type", "info")
-        # type="status" events are per-phase timing messages (e.g.
-        # "1.8s usage_log phase: 43ms"). They power the cron-progress
-        # stream that drives the in-app "Recent Cron Activity" view —
-        # which is the right place for them. Mirroring every one to
-        # stdout floods docker logs with no actionable signal, so the
-        # logger emit is skipped for status. info/warning/error still log.
         if t == "status":
             return
         c = JOB_COLORS.get(job_name, "")
         c_end = RESET_COLOR if c else ""
-        # If type is just 'info', see if the job_name has a specific icon
         if t == "info" and job_name in TYPE_ICONS:
             icon = TYPE_ICONS[job_name]
         else:
@@ -626,8 +519,6 @@ def _log_and_add_progress(
         if display_job_name == "sync":
             display_job_name = "log_discovery"
         prefix = f"{icon}{c}[{display_job_name}]{c_end}"
-        # Read the logger from module globals at call time so tests that
-        # ``patch("backend.cron.scheduler.logger")`` intercept these calls.
         log = logger
         if t == "error":
             log.error("%s %s: %s", prefix, display, msg)
@@ -637,34 +528,16 @@ def _log_and_add_progress(
             log.info("%s %s: %s", prefix, display, msg)
 
 
-# ── Disk + buffer-backlog probes ──────────────────────────────────────────────
-# Hard threshold: below this, ingest will refuse to start. A typical
-# .gz raw log batch can land 50-200 MB on disk before commit drains it,
-# and the iceberg manifest cache adds more. 500 MB is conservative
-# enough to leave room for a single in-flight tick to finish safely.
 _DISK_FREE_HARD_FLOOR_BYTES = 500 * 1024 * 1024
-# Same idea as a percentage, for the (rare) case of a very small disk
-# where 500 MB is most of free. Whichever check trips first wins.
 _DISK_FREE_HARD_FLOOR_PCT = 0.005  # 0.5 %
 
 
 def _check_disk_space(cache_dir: str, service_id: str, job_name: str) -> tuple[bool, str]:
-    """Probe free space at the cache root before any cloud reads/writes.
-
-    Returns (ok, message). ok=False means abort the job — caller MUST
-    log_cron_run(status="error") and return.
-
-    Why: when the cache disk fills, ingest still downloads files (cost!)
-    then fails at pq.write — wasting FOS egress. Pre-checking at the
-    top of the cron is a cheap circuit-breaker that turns "silent
-    cascade of partial writes" into "single explicit error in cron_runs."
-    """
     import shutil
 
     try:
         usage = shutil.disk_usage(cache_dir if os.path.isdir(cache_dir) else ".")
     except OSError as e:
-        # Can't even stat the dir → bail with a clear message rather than crashing
         logger.warning("[scheduler] %s: disk-space probe failed for %s: %s", service_id, cache_dir, e)
         return True, ""  # don't block on probe failure — let the job try and fail naturally
     free_pct = usage.free / usage.total if usage.total else 1.0
@@ -677,26 +550,12 @@ def _check_disk_space(cache_dir: str, service_id: str, job_name: str) -> tuple[b
     return True, ""
 
 
-# Backlog thresholds. file_count is a static line because any single
-# commit cycle that's healthy WILL drain it; >200 leftover files after
-# commit means files arrived faster than commit could append them
-# OR the commit is failing silently.
 _BACKLOG_FILE_COUNT_WARN = 200
-# oldest_age scales with the cron cadence: 3x interval = "the last three
-# commit cycles haven't touched this file." That's the actionable signal.
 _BACKLOG_AGE_MULTIPLIER = 3
-# disk pressure proxy. 1 GiB of un-committed parquet means the buffer is
-# carrying a non-trivial fraction of free disk on a typical 20-40 GiB cache.
 _BACKLOG_BYTES_WARN = 1 * 1024 * 1024 * 1024
 
 
 def _check_buffer_backlog(src: dict, service_id: str, commit_interval_mins: int) -> str:
-    """Inspect the post-commit buffer state and return a suffix string for
-    the cron summary line if the backlog crosses any health threshold.
-
-    Returns "" when healthy. Never raises — backlog probing must not fail
-    the commit, only annotate it.
-    """
     try:
         from backend.core import iceberg as db_iceberg
 
@@ -728,10 +587,7 @@ def _check_buffer_backlog(src: dict, service_id: str, commit_interval_mins: int)
     return f" ⚠ {msg}"
 
 
-# ── Scheduler class + global singleton ────────────────────────────────────────
 class Scheduler:
-    """Thin wrapper around APScheduler's BackgroundScheduler."""
-
     def __init__(self) -> None:
         from apscheduler.executors.pool import ThreadPoolExecutor as APSThreadPoolExecutor
         from apscheduler.schedulers.background import BackgroundScheduler
@@ -742,12 +598,9 @@ class Scheduler:
             "maintenance": APSThreadPoolExecutor(3),
         }
         self._sched = BackgroundScheduler(timezone=UTC, executors=executors)
-        # Track per-service job IDs so we can replace them when settings change.
         self._job_ids: dict[str, str] = {}  # job_id -> job_id
 
-    # ── Lifecycle ─────────────────────────────────────────────────────────────
     def start(self) -> None:
-        """Start the scheduler and register jobs for all configured services."""
         if dev_mode_no_crons():
             logger.warning(
                 "🚫 [scheduler] FLA_DEV_NO_CRONS=1 — skipping all FOS-writing / ingest / outbound crons "
@@ -770,7 +623,6 @@ class Scheduler:
         self._sync_jobs()
         self._sched.start()
         logger.info("🟢 [scheduler] Started (pid: %d). %d job(s) registered.", os.getpid(), len(self._job_ids))
-        # Initial metadata sync for analyst (read_only) services only.
         from backend import config as svcconfig
         from backend.core.duckdb import get_source_for_service, is_configured
         from backend.core.duckdb_pool import (
@@ -787,20 +639,13 @@ class Scheduler:
                 continue
             prov = cfg.get("provisioning", {})
             sync_cfg = prov.get("cron_sync", {})
-            # ONLY trigger initial sync if enabled and it's a read-only analyst service
             if cfg.get("access_level") == "read_only" and sync_cfg.get("enabled", True):
                 try:
-                    # Run in background so we don't block the lifespan startup
                     self._add_job(
                         _run_metadata_sync, args=[service_id], id=f"initial_sync_{service_id}", replace_existing=True
                     )
                 except Exception:
                     pass
-            # Optional: pre-acquire pool connections so the first request
-            # per service finds warm slots. Gated by DUCKDB_POOL_WARM_AT_BOOT
-            # (default off) so a slow cold-build can't show up as an
-            # operator-visible startup delay until it's explicitly opted
-            # into. See _pool_warm_at_boot_enabled for the rationale.
             if warm_enabled:
                 src = get_source_for_service(service_id)
                 if src and is_configured(src):
@@ -820,24 +665,12 @@ class Scheduler:
                         )
 
     def shutdown(self, *, wait: bool = False) -> None:
-        """Stop the scheduler gracefully.
-
-        ``wait`` mirrors APScheduler's ``BackgroundScheduler.shutdown``
-        kwarg and is forwarded as-is. The lifespan-shutdown bounded-wait
-        pattern in ``backend.main._bounded_scheduler_shutdown`` passes
-        ``wait=True`` so any in-flight cron job (sync ticks especially —
-        up to 4 min wall-clock) gets a chance to land before the
-        executor's worker threads die. Default ``wait=False`` for
-        fire-and-forget cleanup at call sites that don't run their own
-        bounded wait.
-        """
         try:
             self._sched.shutdown(wait=wait)
         except Exception:
             pass
         logger.info("[scheduler] Stopped.")
 
-    # ── Job management ────────────────────────────────────────────────────────
     def _register_once_job(
         self,
         job_id: str,
@@ -883,7 +716,6 @@ class Scheduler:
     def _register_alerts_evaluation_job(
         self, service_id: str, seconds: int, seen_ids: set[str], enabled: bool = True
     ) -> None:
-        """Register (or reschedule) the per-service alerts-evaluation cron job."""
         if not enabled or not _service_has_alerts(service_id):
             return
         from backend.cron.jobs.metadata import _run_service_alerts_evaluation
@@ -903,7 +735,6 @@ class Scheduler:
         )
 
     def _register_insights_prewarmer_job(self, service_id: str, seen_ids: set[str], prov: dict) -> None:
-        """Register (or reschedule) the per-service insights cache prewarmer."""
         from backend.cron.jobs.insights_prewarmer import _run_insights_prewarmer
 
         cron_ip = prov.get("cron_insights_prewarmer", {})
@@ -927,7 +758,6 @@ class Scheduler:
         )
 
     def _register_recycle_job(self, seen_ids: set[str] | None = None) -> None:
-        """Register the process-global DuckDB instance recycle job."""
         from backend.core.duckdb_recycle import recycle_interval_min
         from backend.cron.jobs.metadata import run_duckdb_recycle
 
@@ -947,7 +777,6 @@ class Scheduler:
         )
 
     def _register_metric_snapshot_job(self, seen_ids: set[str] | None = None) -> None:
-        """Register the minute-cadence operational-vital snapshot job."""
         from backend.cron.jobs.metric_snapshot import _run_metric_snapshot
 
         self._register_once_job(
@@ -969,8 +798,7 @@ class Scheduler:
         *,
         dev_local: bool = False,
     ) -> None:
-        """Register local-only compaction and rollup jobs for a service."""
-        from backend.cron.jobs.compaction import (
+        from backend.cron.jobs.metadata import (
             _run_local_compact,
             _run_partial_hour_merge,
             _run_rollup_compact_daily,
@@ -1048,9 +876,6 @@ class Scheduler:
             )
 
     def _register_dev_local_safe_jobs(self) -> None:
-        """Register ONLY the local-only compaction crons (plus metric-snapshot & recycle jobs)
-        when ``FLA_DEV_NO_CRONS=1`` and ``FLA_DEV_LOCAL_CRONS=1`` (default).
-        """
         if not dev_local_crons_enabled():
             logger.warning("🚫 [scheduler] FLA_DEV_LOCAL_CRONS=0 — no dev-local-safe jobs registered.")
             return
@@ -1078,20 +903,19 @@ class Scheduler:
         self._register_recycle_job()
 
     def _sync_jobs(self) -> None:
-        """Read all service configs and add/update scheduled jobs."""
         from backend import config as svcconfig
         from backend.core.duckdb import get_source_for_service, is_configured
-        from backend.cron.jobs.compaction import _run_expire_snapshots, _run_optimize
         from backend.cron.jobs.metadata import (
             _run_bot_data_refresh,
+            _run_expire_snapshots,
             _run_metadata_cleanup,
             _run_metadata_sync,
             _run_ngwaf_bot_sync,
+            _run_optimize,
             _run_rdns_enrichment,
             _run_share_audit_purge,
         )
-        from backend.cron.jobs.rum_sync import _run_rum_commit, _run_rum_sync
-        from backend.cron.jobs.sync import _run_commit, _run_full_sweep, _run_gap_heal
+        from backend.cron.jobs.sync import _run_commit, _run_full_sweep, _run_gap_heal, _run_rum_commit, _run_rum_sync
         from backend.cron.jobs.sync import _run_log_discovery_cron as _run_service_cron
 
         configs = svcconfig.list_configs()
@@ -1143,7 +967,6 @@ class Scheduler:
                 self._register_alerts_evaluation_job(service_id, alerts_seconds, seen_ids, enabled=alerts_enabled)
                 self._register_insights_prewarmer_job(service_id, seen_ids, prov)
                 continue
-            # ── Sync job (ingest raw files from FOS → local buffer) ───────────
             job_id = f"log_discovery_{service_id}"
             seen_ids.add(job_id)
             if job_id in self._job_ids:
@@ -1171,7 +994,6 @@ class Scheduler:
                 )
                 self._job_ids[job_id] = job_id
                 logger.info("🔄 [scheduler] Registered log_discovery job %s (every %ds).", job_id, interval_seconds)
-            # ── Commit job (flush local buffer → Iceberg snapshot in FOS) ─────
             commit_job_id = f"commit_{service_id}"
             self._register_reschedulable_job(
                 commit_job_id,
@@ -1186,9 +1008,8 @@ class Scheduler:
                 args=[service_id],
                 misfire_grace_time=commit_interval_mins * 60,
             )
-            # ── Ledger sweep (celery-mode crash net) ───────────────────────────
             if svcconfig.is_high_scale_mode(src):
-                from backend.cron.jobs.rum_sync import _run_ledger_sweep
+                from backend.cron.jobs.sync import _run_ledger_sweep
 
                 sweep_cfg = prov.get("cron_ledger_sweep", {})
                 if sweep_cfg.get("enabled", True):
@@ -1206,12 +1027,11 @@ class Scheduler:
                         args=[service_id],
                         misfire_grace_time=300,
                     )
-            # ── RUM ingest jobs (ingest RUM beacons from FOS) ──────────────────
             rum_cfg = cfg.get("rum")
             rum_cfg = rum_cfg if isinstance(rum_cfg, dict) else {}
             rum_enabled = svcconfig.is_rum_enabled(cfg)
             if rum_enabled and svcconfig.is_high_scale_mode(src):
-                from backend.cron.jobs.rum_sync import _run_rum_discovery_cron, _run_rum_ledger_sweep
+                from backend.cron.jobs.sync import _run_rum_discovery_cron, _run_rum_ledger_sweep
 
                 rum_disc_interval_secs = _resolve_rum_sync_interval(rum_cfg, cfg, interval_seconds)
                 rum_disc_job_id = f"rum_discovery_{service_id}"
@@ -1272,12 +1092,10 @@ class Scheduler:
                     args=[service_id],
                     misfire_grace_time=60,
                 )
-            # ── Alerts evaluation job (Per Service) ───────────────────────────
             alerts_cfg = prov.get("cron_alerts", {})
             alerts_enabled = alerts_cfg.get("enabled", True)
             alerts_seconds = int(alerts_cfg.get("interval_seconds") or log_period)
             self._register_alerts_evaluation_job(service_id, alerts_seconds, seen_ids, enabled=alerts_enabled)
-            # ── Full-LIST sweep (catches late-arriving files, every 6h) ───────
             full_sweep_cfg = prov.get("cron_full_sweep", {})
             if full_sweep_cfg.get("enabled", True):
                 full_job_id = f"full_sync_{service_id}"
@@ -1297,7 +1115,6 @@ class Scheduler:
                     args=[service_id],
                     misfire_grace_time=3600,
                 )
-            # ── Gap-heal evaluator (auto full_sweep on sustained loss) ────────
             heal_cfg = prov.get("cron_gap_heal", {})
             has_logging_svc = bool(cfg.get("logging_service_id") or cfg.get("service_id"))
             if heal_cfg.get("enabled", True) and has_logging_svc:
@@ -1315,7 +1132,6 @@ class Scheduler:
                     args=[service_id],
                     misfire_grace_time=600,
                 )
-            # ── Daily optimize job (Iceberg small-file compaction) ────────────
             compact_cfg = prov.get("cron_compact", {})
             if compact_cfg.get("enabled", True):
                 opt_job_id = f"optimize_{service_id}"
@@ -1331,10 +1147,8 @@ class Scheduler:
                     args=[service_id],
                     misfire_grace_time=3600,
                 )
-            # ── Local-only compaction & rollup jobs + insights prewarmer ─────
             self._sync_local_compaction_jobs(service_id, cfg, seen_ids=seen_ids, dev_local=False)
             self._register_insights_prewarmer_job(service_id, seen_ids, prov)
-            # ── expire-snapshots job (hourly by default) ───────────────────────
             if compact_cfg.get("enabled", True) and not dev_mode_no_crons():
                 exp_job_id = f"expire_{service_id}"
                 seen_ids.add(exp_job_id)
@@ -1368,7 +1182,6 @@ class Scheduler:
                                 exp_job_id,
                                 expire_interval_mins,
                             )
-            # ── NGWAF bot sync job (per-service) ─────────────────────────────
             if svcconfig.get_ngwaf_workspace_id(service_id):
                 ngwaf_interval_mins = max(1, int(prov.get("cron_ngwaf", {}).get("interval_mins", 5)))
                 ngwaf_job_id = f"ngwaf_sync_{service_id}"
@@ -1386,7 +1199,6 @@ class Scheduler:
                     misfire_grace_time=300,
                     executor="maintenance",
                 )
-            # ── Metadata retention cleanup (per service) ──────────────────────
             cleanup_cfg = prov.get("cron_metadata_cleanup", {})
             if cleanup_cfg.get("enabled", True) and not dev_mode_no_crons():
                 cleanup_job_id = f"metadata_cleanup_{service_id}"
@@ -1406,7 +1218,6 @@ class Scheduler:
                     args=[service_id],
                     misfire_grace_time=3600,
                 )
-        # ── Global maintenance jobs ───────────────────────────────────────────
         self._register_once_job(
             "bot_data_refresh",
             _run_bot_data_refresh,
@@ -1439,7 +1250,6 @@ class Scheduler:
         )
         self._register_metric_snapshot_job(seen_ids)
         self._register_recycle_job(seen_ids)
-        # Cleanup: remove jobs from the live APScheduler when their service/config disappears.
         for jid in list(self._job_ids.keys()):
             if jid in seen_ids:
                 continue
@@ -1451,16 +1261,6 @@ class Scheduler:
             del self._job_ids[jid]
 
     def _reschedule_or_add_job(self, func, trigger=None, *, reschedule_kwargs: dict | None = None, **kwargs) -> bool:
-        """Reschedule ``kwargs["id"]`` when it is already tracked, else add it.
-
-        Returns True when the job was newly added (so the caller logs its
-        "Registered ..." line), False when an existing job was rescheduled.
-        A missing/failed reschedule is swallowed: the next ``reload()`` retries.
-        By default only the trigger's own timing kwargs are re-applied
-        (``seconds``/``minutes``/``hours`` for interval, ``hour``/``minute`` for
-        cron); pass ``reschedule_kwargs`` to re-apply a different set. ``jitter``,
-        ``misfire_grace_time`` etc. only take effect when the job is first added.
-        """
         job_id = kwargs["id"]
         if job_id in self._job_ids:
             if reschedule_kwargs is None:
@@ -1509,35 +1309,25 @@ class Scheduler:
         self._job_ids[job_id] = job_id
 
     def reload(self) -> None:
-        """Re-read service configs and update all jobs. Call after adding/removing a service."""
         if dev_mode_no_crons():
-            # Don't re-arm jobs that start() refused to register. A
-            # downstream caller (e.g. a service-config save) would
-            # otherwise sneak crons back in after start() bypassed them.
             logger.warning("🚫 [scheduler] FLA_DEV_NO_CRONS=1 — Scheduler.reload() ignored.")
             return
         self._sync_jobs()
 
     def get_job(self, job_id: str):
-        """Return the APScheduler Job object for a given job ID, or None."""
         return self._sched.get_job(job_id)
 
 
-# Global scheduler instance for process-wide access
 _scheduler: Scheduler | None = None
 
 
 def get_scheduler() -> Scheduler:
-    """Return the global scheduler instance, creating it if necessary."""
     global _scheduler
     if _scheduler is None:
         _scheduler = Scheduler()
     return _scheduler
 
 
-# R-1: drain the heavy-refresh throttle dict between tests so an
-# earlier test's last-tick timestamp doesn't suppress a cron call in
-# the next test that uses the same service_id.
 from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry  # noqa: E402
 
 _CacheRegistry.register("cron.scheduler._last_heavy_refresh", _last_heavy_refresh)
@@ -1566,7 +1356,6 @@ TASK_MAP = {
 
 
 def build_cron_schedule_payload(source: dict) -> dict:
-    """Return ``{"schedules": [...]}`` for the given ``source``."""
     from backend.core import metadata as metadata_db
 
     sched = get_scheduler()
@@ -1584,7 +1373,6 @@ def build_cron_schedule_payload(source: dict) -> dict:
     except Exception:
         pass
     schedules = []
-    # Pod-local APScheduler jobs — the ONLY source of cron jobs.
     for job in sched._sched.get_jobs():
         job_id = getattr(job, "id", "")
         if not job_id.endswith(f"_{service_id}"):
@@ -1621,7 +1409,6 @@ def build_cron_schedule_payload(source: dict) -> dict:
     return {"schedules": schedules}
 
 
-# ── In-memory cron progress tracking, SSE publisher & cached sync status (folded from cron_progress.py) ──
 from backend.celery_app import _InProcessPublisher  # noqa: E402
 from backend.config import SSE_BACKPLANE  # noqa: E402
 from backend.utils.dir_size import _get_dir_size  # noqa: E402
@@ -1653,7 +1440,6 @@ _STALE_AFTER_SECONDS = 300  # 5 min — covers slow syncs, kills zombie entries
 
 
 def list_active_runs() -> list[dict]:
-    """Return metadata for runs that are GENUINELY in flight."""
     now = time.time()
     with _lock:
         candidates = []
@@ -1680,8 +1466,6 @@ def list_active_runs() -> list[dict]:
 
 
 def active_task_for_service(service_id: str, tasks: tuple[str, ...]) -> str | None:
-    """In-memory only: the first of ``tasks`` with a live run for ``service_id``,
-    else None."""
     now = time.time()
     with _lock:
         for run_id, meta in _run_metadata.items():
@@ -1697,8 +1481,6 @@ def active_task_for_service(service_id: str, tasks: tuple[str, ...]) -> str | No
 
 
 def _db_status_is_terminal(service_id: str | None, run_id: int) -> bool:
-    """Return True if the cron_runs row for this run_id has a terminal
-    status ('success' or 'error') in per-service SQLite/PostgreSQL."""
     if not service_id:
         return False
     try:
@@ -1711,7 +1493,6 @@ def _db_status_is_terminal(service_id: str | None, run_id: int) -> bool:
 
 
 def reap_zombie_runs() -> int:
-    """Eagerly evict zombie run metadata from in-memory state."""
     now = time.time()
     evicted = 0
     with _lock:
@@ -1749,7 +1530,6 @@ def get_progress(run_id: int | None, start_idx: int = 0, service_id: str | None 
 
 
 def get_latest_progress_for_service(service_id: str) -> dict | None:
-    """Return the latest progress event for any active run belonging to this service."""
     with _lock:
         active_runs = []
         for run_id, meta in _run_metadata.items():
@@ -1769,7 +1549,6 @@ def get_latest_progress_for_service(service_id: str) -> dict | None:
 
 
 def end_progress(run_id: int | None, final_event: dict | None = None):
-    """Mark a cron run as ended."""
     if run_id is None:
         return
     with _lock:
@@ -1784,7 +1563,6 @@ def end_progress(run_id: int | None, final_event: dict | None = None):
 
 
 def cleanup_progress_and_reap():
-    """Convenience helper that runs cleanup_progress + reap_zombie_runs."""
     cleanup_progress()
     return reap_zombie_runs()
 
@@ -1820,9 +1598,6 @@ else:
 
 
 def compute_sync_status_cached(service_id: str | None) -> dict | None:
-    """Return the cached sync-status payload for ``service_id`` without
-    grabbing a DuckDB connection.
-    """
     from backend import config as svcconfig
     from backend.core import duckdb as _db
 

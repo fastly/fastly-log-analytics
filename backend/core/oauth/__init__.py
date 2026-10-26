@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
+import cachetools
 import httpx
 from authlib.common.security import generate_token
 from authlib.integrations.base_client.errors import OAuthError
@@ -281,8 +282,8 @@ class _JwksCacheEntry:
     last_refetch_at: float
 
 
-_metadata_cache: dict[str, _MetadataCacheEntry] = {}
-_jwks_cache: dict[str, _JwksCacheEntry] = {}
+_metadata_cache: cachetools.LRUCache[str, _MetadataCacheEntry] = cachetools.LRUCache(maxsize=128)
+_jwks_cache: cachetools.LRUCache[str, _JwksCacheEntry] = cachetools.LRUCache(maxsize=128)
 _jwks_locks: dict[str, threading.Lock] = {}
 _cache_lock = threading.Lock()
 _test_transport: httpx.BaseTransport | None = None

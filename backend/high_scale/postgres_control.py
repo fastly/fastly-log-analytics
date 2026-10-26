@@ -22,7 +22,7 @@ from typing import Any, Protocol
 from psycopg_pool import ConnectionPool
 
 from backend import config
-from backend.core.clickhouse_client import ClickHouseClient
+from backend.core.clickhouse import ClickHouseClient
 from backend.core.metadata.pg_connection import get_pg_pool
 from backend.core.share_db.validation import IP_FAMILY_KEYS, SESSION_ID_KEYS
 from backend.high_scale.archive_models import (
@@ -440,7 +440,6 @@ class PostgresControlPlane:
             source = _source_from_row(row)
             if source.checksum != checksum or source.version != version:
                 raise ValueError(f"source identity changed for {object_key}")
-            # Domain is intentionally not compared here because rum_vitals and rum_errors share raw/rum/.
             return source
 
     def claim_source(
@@ -579,13 +578,7 @@ class PostgresControlPlane:
             )
 
     def record_source_counts(
-        self,
-        service_id: str,
-        object_key: str,
-        *,
-        accepted_rows: int,
-        malformed_rows: int,
-        expected_owner_epoch: int,
+        self, service_id: str, object_key: str, *, accepted_rows: int, malformed_rows: int, expected_owner_epoch: int
     ) -> None:
         if min(accepted_rows, malformed_rows) < 0:
             raise ValueError("ledger counts must be non-negative")
@@ -644,11 +637,7 @@ class PostgresControlPlane:
             )
 
     def register_archive_manifest(
-        self,
-        manifest: ArchiveManifest,
-        *,
-        owner_epoch: int,
-        state: ArchiveState = ArchiveState.ARTIFACT_UPLOADING,
+        self, manifest: ArchiveManifest, *, owner_epoch: int, state: ArchiveState = ArchiveState.ARTIFACT_UPLOADING
     ) -> ArchiveManifestRecord:
         manifest.validate()
         if owner_epoch <= 0:
@@ -740,12 +729,7 @@ class PostgresControlPlane:
             return result
 
     def transition_archive_manifest(
-        self,
-        manifest_id: str,
-        *,
-        expected_state: ArchiveState,
-        next_state: ArchiveState,
-        expected_owner_epoch: int,
+        self, manifest_id: str, *, expected_state: ArchiveState, next_state: ArchiveState, expected_owner_epoch: int
     ) -> ArchiveManifestRecord:
         validate_archive_transition(expected_state, next_state)
         with self.transaction() as connection:
@@ -884,12 +868,7 @@ class PostgresControlPlane:
             )
 
     def mark_source_deleted(
-        self,
-        service_id: str,
-        object_key: str,
-        *,
-        manifest_id: str,
-        expected_owner_epoch: int,
+        self, service_id: str, object_key: str, *, manifest_id: str, expected_owner_epoch: int
     ) -> None:
         with self.transaction() as connection:
             self._fenced_owner(connection, service_id, expected_owner_epoch=expected_owner_epoch)
@@ -1076,10 +1055,7 @@ def _parse_iso_or_dt(val: Any, fallback: datetime | None = None) -> Any:
     return datetime.fromisoformat(val) if isinstance(val, str) else val
 
 
-def _archive_from_row(
-    row: Mapping[str, Any] | Any,
-    source_rows: Sequence[Any] | None = None,
-) -> ArchiveManifestRecord:
+def _archive_from_row(row: Mapping[str, Any] | Any, source_rows: Sequence[Any] | None = None) -> ArchiveManifestRecord:
     source = ArchiveSourceObject(
         service_id=str(_row_value(row, "service_id", 1)),
         domain=str(_row_value(row, "domain", 2)),
@@ -1656,12 +1632,7 @@ class PostgresDeletionLedger:
         )
 
     def mark_source_deleted(
-        self,
-        service_id: str,
-        object_key: str,
-        archive_manifest_id: str,
-        *,
-        current_owner_epoch: int | None = None,
+        self, service_id: str, object_key: str, archive_manifest_id: str, *, current_owner_epoch: int | None = None
     ) -> None:
         owner_epoch = (
             current_owner_epoch if current_owner_epoch is not None else self._control.owner(service_id).owner_epoch

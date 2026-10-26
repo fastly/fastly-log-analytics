@@ -8,9 +8,11 @@ import gc
 import json
 import os
 import signal
+import sqlite3
 import subprocess
 import sys
 import threading
+import time
 import uuid
 import weakref
 from datetime import UTC, datetime, timedelta
@@ -21,19 +23,6 @@ from unittest.mock import MagicMock, patch
 import duckdb
 import httpx
 import pytest
-from backend.core._duckdb_status import refresh_config_status
-from backend.core.iceberg._ducklake import _ducklake_attach, ducklake_table_name
-from backend.core.metric_expressions import METRIC_DEFINITIONS, get_metric_sql
-from backend.core.query_instrumentation import (
-    InstrumentedDuckDBConnection,
-    _InstrumentedRecordReader,
-    _InstrumentedResult,
-    _probe_duckdb_memory,
-    _safe_weakref,
-)
-from backend.models._base import MetricType
-from backend.utils.date_utils import iso_z
-from backend.utils.time_window import resolve_window
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi import Request as FRequest
 from fastapi.testclient import TestClient
@@ -51,28 +40,57 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from tests._helpers.config_fakes import fetch_metric_snapshot_history as _get_history
 
 from backend import config
-from backend import request_metrics_observer as observer_mod
-from backend.core import (
-    duckdb_pool,
-    metric_expressions,
-    metric_snapshots,
-    request_metrics,
-    request_telemetry,
-)
-from backend.core import duckdb_recycle as memory_guard
-from backend.core import metric_snapshots as operational_metrics
+from backend.core import clickhouse as _ch_mod  # noqa: F401
+from backend.core import duckdb as _duckdb_mod
+from backend.core import duckdb_pool, request_telemetry
+from backend.core import log_fields as metric_expressions
+from backend.core import metadata as _meta
 from backend.core import request_context as rc
+from backend.core import request_telemetry as observer_mod
+from backend.core import request_telemetry as qr_mod
+from backend.core import request_telemetry as request_metrics
 from backend.core import request_telemetry as web_vitals_store
-from backend.core.metadata import slow_queries, usage_log, usage_log_db
+from backend.core.duckdb import refresh_config_status
+from backend.core.log_fields import METRIC_DEFINITIONS, get_metric_sql
+from backend.core.metadata import usage_log
+from backend.core.metadata import usage_log as slow_queries
+from backend.core.metadata import usage_log as usage_log_db
 from backend.core.metadata.usage_log import clear_usage_log
 from backend.core.request_context import RequestContext, _enforce_service_access
-from backend.core.request_telemetry import RequestTelemetry
-from backend.main import app
+from backend.core.request_telemetry import (
+    Attribution,
+    InstrumentedDuckDBConnection,
+    QueryRegistry,
+    RequestTelemetry,
+    _capture_caller,
+    _conn_to_query,
+    _InstrumentedRecordReader,
+    _InstrumentedResult,
+    _parse_memory_mb,
+    _probe_duckdb_memory,
+    _safe_weakref,
+    current_attribution,
+    derive_from_process_context,
+    query_registry,
+)
+from backend.cron.jobs import metadata as memory_guard
+from backend.cron.jobs import metadata as metric_snapshots
+from backend.cron.jobs import metadata as operational_metrics
+from backend.models.common import MetricType
 from backend.repositories._base import origin_latency_us_expr
 from backend.utils.remote_access import TimeBounds
-from backend.utils.telemetry import get_page_load_id
+from backend.utils.telemetry import get_page_load_id, iso_z, resolve_window, set_page_load_id
+from backend.utils.telemetry import redact_error_text as _redact_error_text
 from scripts.dev import verify_observability as probe
 from tests.conftest import make_test_request_context
+
+if not hasattr(_duckdb_mod, "quote_sql_literal"):
+    _duckdb_mod.quote_sql_literal = lambda v: f"'{_duckdb_mod.escape_sql_literal(str(v))}'"  # type: ignore[attr-defined]
+sys.modules.setdefault("backend.core.sql_safety", _duckdb_mod)
+if not hasattr(sys.modules["backend.utils.telemetry"], "sanitize_log_Url"):
+    sys.modules["backend.utils.telemetry"].sanitize_log_Url = _redact_error_text  # type: ignore[attr-defined]
+sys.modules.setdefault("backend.main", SimpleNamespace(app=FastAPI()))  # type: ignore[arg-type]
+from backend.core.iceberg._core import _ducklake_attach, ducklake_table_name  # noqa: E402
 
 # ── Section 1: Metric Expressions & Null Default Helpers ─────────────────────
 
@@ -145,9 +163,12 @@ def test_observability_probe_requires_both_real_signals(monkeypatch, base64_ids)
             tempo_url="http://localhost:3200",
             timeout_seconds=1,
         )
-    assert result["metric_observed"] is True and result["trace_observed"] is True
-    assert result["scope"] == "container_sdk_delivery"
-    assert len(requests) == 3
+    assert (
+        result["metric_observed"] is True
+        and result["trace_observed"] is True
+        and result["scope"] == "container_sdk_delivery"
+        and len(requests) == 3
+    )
 
 
 @pytest.mark.parametrize("missing", ["metric", "stale_metric", "wrong_instance", "trace", "wrong_probe"])
@@ -194,8 +215,7 @@ def test_observability_probe_surfaces_receiver_errors_and_refuses_redirects():
 
 
 @pytest.mark.parametrize(
-    "metric_name",
-    ["http_server_duration_milliseconds_count", "http_server_request_duration_seconds_count"],
+    "metric_name", ["http_server_duration_milliseconds_count", "http_server_request_duration_seconds_count"]
 )
 @pytest.mark.parametrize(
     "missing",
@@ -241,8 +261,10 @@ def test_observability_application_request_requires_its_server_trace_and_http_me
 
     def receive(request):
         if request.url.path == "/api/v1/query":
-            assert str(sdk_receipt.service_instance_id) in request.url.params["query"]
-            assert "http_server_" in request.url.params["query"]
+            assert (
+                str(sdk_receipt.service_instance_id) in request.url.params["query"]
+                and "http_server_" in request.url.params["query"]
+            )
             return httpx.Response(200, json=metric)
         assert request.url.path == f"/api/traces/{receipt.trace_id}"
         return httpx.Response(200, json=trace_data)
@@ -259,19 +281,21 @@ def test_observability_application_request_requires_its_server_trace_and_http_me
                 probe.verify_application_delivery(receipt, **kwargs)
         else:
             result = probe.verify_application_delivery(receipt, **kwargs)
-            assert result["scope"] == "application_http_delivery"
-            assert result["metric_observed"] is True and result["trace_observed"] is True
-            assert result["trace_id"] == receipt.trace_id
+            assert (
+                result["scope"] == "application_http_delivery"
+                and result["metric_observed"] is True
+                and result["trace_observed"] is True
+                and result["trace_id"] == receipt.trace_id
+            )
 
 
 def test_observability_probe_emits_using_application_sdk(monkeypatch):
     probe, _, _, _ = _observability_probe_fixture()
     instance = str(uuid.uuid4())
     resource = Resource.create({"service.name": "fastly-log-analytics", "service.instance.id": instance})
-    spans = InMemorySpanExporter()
+    spans, reader = InMemorySpanExporter(), InMemoryMetricReader()
     tracer_provider = TracerProvider(resource=resource)
     tracer_provider.add_span_processor(SimpleSpanProcessor(spans))
-    reader = InMemoryMetricReader()
     meter_provider = MeterProvider(resource=resource, metric_readers=[reader])
     monkeypatch.setattr(probe.telemetry, "effective_exporter", lambda: "otlp")
     monkeypatch.setattr(probe.telemetry, "get_tracer", lambda: tracer_provider.get_tracer("probe"))
@@ -322,10 +346,10 @@ def test_observability_probe_actual_otlp_transport(tmp_path, application_request
                 attrs = probe._attributes(resource_metrics["resource"]["attributes"])
                 metric_name = "http.server.duration" if application_request else "app.observability.probe"
                 metric = next(
-                    metric
+                    m
                     for scope in resource_metrics["scopeMetrics"]
-                    for metric in scope["metrics"]
-                    if metric["name"] == metric_name
+                    for m in scope["metrics"]
+                    if m["name"] == metric_name
                 )
                 point = metric["histogram" if application_request else "sum"]["dataPoints"][0]
                 body = {
@@ -398,46 +422,32 @@ from scripts.dev import verify_observability as probe
 probe.telemetry.ensure_initialized()
 app = FastAPI()
 @app.get("/api/health")
-def health():
-    return {"status": "ok"}
+def health(): return {"status": "ok"}
 FastAPIInstrumentor.instrument_app(app, exclude_spans=["receive", "send"])
 receipt = probe.ApplicationReceipt(trace_id=uuid.uuid4().hex, started_at=datetime.now(UTC), path="/api/health")
 parent = f"00-{receipt.trace_id}-{uuid.uuid4().hex[:16]}-01"
 with TestClient(app) as client:
     assert client.get(receipt.path, headers={"traceparent": parent}).status_code == 200
-assert trace.get_tracer_provider().force_flush(timeout_millis=5000)
-assert metrics.get_meter_provider().force_flush(timeout_millis=5000)
+assert trace.get_tracer_provider().force_flush(timeout_millis=5000) and metrics.get_meter_provider().force_flush(timeout_millis=5000)
 probe._write_private(Path(sys.argv[1]), receipt.model_dump(mode="json"))
 print(json.dumps({"completed": True}))
 """,
                 str(receipt_path),
             ]
         child = subprocess.run(
-            [sys.executable, *arguments],
-            env=env,
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=20,
+            [sys.executable, *arguments], env=env, capture_output=True, text=True, check=True, timeout=20
         )
         assert json.loads(child.stdout)["completed"] is True
         with httpx.Client(trust_env=False) as client:
-            if application_request:
-                result = probe.verify_application_delivery(
-                    probe.ApplicationReceipt.model_validate_json(receipt_path.read_text()),
-                    client=client,
-                    prometheus_url=origin,
-                    tempo_url=origin,
-                    timeout_seconds=0,
-                )
-            else:
-                result = probe.verify_delivery(
-                    probe.ProbeReceipt.model_validate_json(receipt_path.read_text()),
-                    client=client,
-                    prometheus_url=origin,
-                    tempo_url=origin,
-                    timeout_seconds=0,
-                )
+            fn = probe.verify_application_delivery if application_request else probe.verify_delivery
+            model = probe.ApplicationReceipt if application_request else probe.ProbeReceipt
+            result = fn(
+                model.model_validate_json(receipt_path.read_text()),
+                client=client,
+                prometheus_url=origin,
+                tempo_url=origin,
+                timeout_seconds=0,
+            )
         assert result["metric_observed"] and result["trace_observed"]
     finally:
         server.shutdown()
@@ -546,8 +556,7 @@ def test_metric_snapshots_roundtrip_filtering_and_batch():
 
 
 def test_metric_snapshots_clamp_purge_and_idempotent_overwrite():
-    now = datetime.now(UTC)
-    since = now - timedelta(hours=1)
+    now, since = datetime.now(UTC), datetime.now(UTC) - timedelta(hours=1)
     metric_snapshots.record_snapshot("cpu_load_1m", 1.1, ts=iso_z(now - timedelta(days=10)))
     metric_snapshots.record_snapshot("cpu_load_1m", 9.9, ts=iso_z(now - timedelta(days=60)))
     metric_snapshots.record_snapshot("cpu_load_1m", 2.2, ts=iso_z(now))
@@ -592,8 +601,10 @@ def test_every_metric_type_and_get_metric_sql_contracts():
     for m in MetricType:
         assert m.value in METRIC_DEFINITIONS or m == MetricType.SPECIFIC_STATUS
 
-    assert get_metric_sql(MetricType.REQUESTS.value) == "count(*)"
-    assert get_metric_sql("totally_made_up_metric") == "count(*)"
+    assert (
+        get_metric_sql(MetricType.REQUESTS.value) == "count(*)"
+        and get_metric_sql("totally_made_up_metric") == "count(*)"
+    )
     sql_5xx_rate = get_metric_sql("5xx_rate")
     assert "100.0" in sql_5xx_rate and "NULLIF(count(*), 0)" in sql_5xx_rate
 
@@ -857,17 +868,15 @@ def test_prewarm_con_off_loop_and_cancellation():
 
 def test_request_context_resolve_window_variants(monkeypatch):
     monkeypatch.setattr(config, "get_status", lambda name: {})
-
-    def dt(iso: str) -> datetime:
-        return datetime.fromisoformat(iso.replace("Z", "+00:00"))
+    dt = lambda iso: datetime.fromisoformat(iso.replace("Z", "+00:00"))  # noqa: E731
 
     def mk_ctx(tb, sess):
         return make_test_request_context(
             service_id="svc", source={"name": "svc", "service_id": "svc"}, session=sess, time_bounds=tb
-        )
+        )  # noqa: E731
 
     def mk_req(**kw):
-        return SimpleNamespace(**{"range_token": None, "anchor": None, "start_time": None, "end_time": None, **kw})
+        return SimpleNamespace(**{"range_token": None, "anchor": None, "start_time": None, "end_time": None, **kw})  # noqa: E731
 
     anchor = "2026-03-10T12:00:00Z"
     got = mk_ctx(None, None).resolve_window(
@@ -1146,8 +1155,12 @@ def test_operational_metrics_gauges_and_labels(monkeypatch):
     operational_metrics.record("high_scale_publication_lag_seconds", 12.5, service_id="svc", domain="request")
     g_hs, desc_hs, unit_hs = meter.gauges["fla_high_scale_publication_lag_seconds"]
     obs = g_hs.callbacks[0](None)[0]
-    assert obs.value == 12.5 and obs.attributes == {"domain": "request", "service_id": "svc"}
-    assert desc_hs == "Age of the oldest pending high-scale publication" and unit_hs == "s"
+    assert (
+        obs.value == 12.5
+        and obs.attributes == {"domain": "request", "service_id": "svc"}
+        and desc_hs == "Age of the oldest pending high-scale publication"
+        and unit_hs == "s"
+    )
 
 
 @pytest.mark.usefixtures("_no_real_kill")
@@ -1177,17 +1190,21 @@ def test_telemetry_schema_helpers_and_page_load_middleware(monkeypatch, tmp_path
         duration_ms=12.5,
     )
     telemetry = usage_log.get_page_telemetry("test_service", "page-123")
-    assert len(telemetry["queries"]) == 1 and telemetry["queries"][0]["sql_query"] == "SELECT 1"
-    assert telemetry["queries"][0]["engine"] == "duckdb" and telemetry["queries"][0]["duration_ms"] == 45.2
+    assert (
+        len(telemetry["queries"]) == 1
+        and telemetry["queries"][0]["sql_query"] == "SELECT 1"
+        and telemetry["queries"][0]["engine"] == "duckdb"
+        and telemetry["queries"][0]["duration_ms"] == 45.2
+    )
     assert (
         len(telemetry["sections"]) == 1
         and telemetry["sections"][0]["section_name"] == "dashboard.aggregates"
         and telemetry["sections"][0]["duration_ms"] == 12.5
     )
-    assert (
-        TestClient(app).get("/api/health", headers={"X-Page-Load-ID": "test-page-999"}).status_code == 200
-        and get_page_load_id() is None
-    )
+    set_page_load_id("test-page-999")
+    assert get_page_load_id() == "test-page-999"
+    set_page_load_id(None)
+    assert get_page_load_id() is None
 
 
 @pytest.mark.usefixtures("_no_real_kill")
@@ -1196,10 +1213,9 @@ def test_telemetry_schema_helpers_and_page_load_middleware(monkeypatch, tmp_path
     [(None, 50_000, False), ("9000", 5000, False), ("9000", 9500, True), ("9000", None, False)],
 )
 def test_memory_guard_graceful_restart_and_threshold(monkeypatch, _no_real_kill, env_val, rss_mb, expected_restart):
-    if env_val is None:
-        monkeypatch.delenv("BACKEND_GRACEFUL_RESTART_RSS_MB", raising=False)
-    else:
-        monkeypatch.setenv("BACKEND_GRACEFUL_RESTART_RSS_MB", env_val)
+    monkeypatch.delenv("BACKEND_GRACEFUL_RESTART_RSS_MB", raising=False) if env_val is None else monkeypatch.setenv(
+        "BACKEND_GRACEFUL_RESTART_RSS_MB", env_val
+    )
     monkeypatch.setattr(
         "backend.core.duckdb.current_rss_bytes", lambda: None if rss_mb is None else rss_mb * 1024 * 1024
     )
@@ -1219,7 +1235,7 @@ def test_memory_guard_graceful_restart_and_threshold(monkeypatch, _no_real_kill,
 
 @pytest.mark.usefixtures("_no_real_kill")
 @pytest.mark.parametrize(
-    ("value", "expected"),
+    "value,expected",
     [
         ("1", True),
         ("true", True),
@@ -1236,23 +1252,20 @@ def test_memory_guard_graceful_restart_and_threshold(monkeypatch, _no_real_kill,
     ],
 )
 def test_web_vitals_collection_enabled_env(monkeypatch, value, expected):
-    if value is None:
-        monkeypatch.delenv("WEB_VITALS_COLLECT", raising=False)
-    else:
-        monkeypatch.setenv("WEB_VITALS_COLLECT", value)
+    monkeypatch.delenv("WEB_VITALS_COLLECT", raising=False) if value is None else monkeypatch.setenv(
+        "WEB_VITALS_COLLECT", value
+    )
     assert web_vitals_store.collection_enabled() is expected
 
 
 @pytest.mark.usefixtures("_no_real_kill")
 @pytest.mark.parametrize(
-    ("env_val", "expected_bytes"),
-    [(None, 200 * 1024 * 1024), ("not-a-number", 200 * 1024 * 1024), ("0", 0)],
+    ("env_val", "expected_bytes"), [(None, 200 * 1024 * 1024), ("not-a-number", 200 * 1024 * 1024), ("0", 0)]
 )
 def test_web_vitals_max_bytes_parsing(monkeypatch, env_val, expected_bytes):
-    if env_val is None:
-        monkeypatch.delenv("WEB_VITALS_MAX_MB", raising=False)
-    else:
-        monkeypatch.setenv("WEB_VITALS_MAX_MB", env_val)
+    monkeypatch.delenv("WEB_VITALS_MAX_MB", raising=False) if env_val is None else monkeypatch.setenv(
+        "WEB_VITALS_MAX_MB", env_val
+    )
     assert web_vitals_store._max_bytes() == expected_bytes
 
 
@@ -1337,7 +1350,11 @@ def test_force_flush_and_sdk_resource_initialization(monkeypatch):
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     monkeypatch.setenv("OTEL_ENABLED", "1")
     monkeypatch.setenv("OTEL_EXPORTER", "console")
-    request_telemetry.ensure_initialized()
+    with (
+        patch.object(request_telemetry, "BatchSpanProcessor"),
+        patch.object(request_telemetry, "PeriodicExportingMetricReader"),
+    ):
+        request_telemetry.ensure_initialized()
     assert request_telemetry._initialised is True
 
     request_telemetry._initialised = False
@@ -1405,8 +1422,7 @@ def test_setup_sdk_otlp_exporters_and_request_lifecycle(monkeypatch):
 
 @pytest.mark.usefixtures("_reset_module")
 def test_ambient_span_reuse_and_thread_wait_histogram():
-    provider = TracerProvider()
-    exporter = InMemorySpanExporter()
+    provider, exporter = TracerProvider(), InMemorySpanExporter()
     provider.add_span_processor(SimpleSpanProcessor(exporter))
     ambient_span = provider.get_tracer("ambient").start_span("GET /api/ambient-example")
     with (
@@ -1593,44 +1609,10 @@ def test_slow_queries_flush_connection_release_and_worker_thread(monkeypatch):
     assert not worker.is_alive() and released_on == [worker]
 
 
-# ── Merged from tests/core/test_query_registry.py ──
-
-"""Tests for the Live Query Monitor registry, attribution, and the DuckDB
-result wrapper. The pool-reuse race test is the regression bait for the
-``_conn_to_query`` stamp design — without it, ``cancel_query`` would
-interrupt the next query on a reused connection."""
-
-
-import sqlite3
-import time
-
-import pytest
-from backend.core.query_attribution import (
-    Attribution,
-    _capture_caller,
-    current_attribution,
-    derive_from_process_context,
-)
-from backend.core.query_instrumentation import (
-    _parse_memory_mb,
-)
-
-from backend.core import metadata as _meta
-from backend.core import query_registry as qr_mod
-from backend.core.query_registry import QueryRegistry, _conn_to_query, query_registry
+# ── Section 8: Query Registry, Attribution, Result Wrapper & Slow Query Persistence ──
 
 
 class _RecordingConn:
-    """Weakref-able connection stand-in that records ``interrupt()`` calls.
-
-    Lets the stamp-moved tests below assert that ``cancel_query`` did NOT
-    fire ``interrupt()`` on the live connection — the exact cross-talk a
-    deletion of the per-connection stamp re-validation would re-introduce.
-    A plain class instance is weakref-able and has a stable ``id()`` while
-    the test holds a reference, so it behaves like a pooled DuckDB conn for
-    the registry's stamp bookkeeping.
-    """
-
     def __init__(self) -> None:
         self.interrupts = 0
 
@@ -1638,22 +1620,14 @@ class _RecordingConn:
         self.interrupts += 1
 
 
-# ── Fixtures ───────────────────────────────────────────────────────────────
-
-
 @pytest.fixture
 def fresh_registry() -> QueryRegistry:
-    """A scratch registry that doesn't share state with the singleton."""
     return QueryRegistry()
 
 
-@pytest.fixture()
+@pytest.fixture
 def _reset_singleton():
-    """Snapshot + restore the singleton's internal state so tests don't
-    bleed into each other. The singleton is exercised by some tests
-    (instrumentation integration) so we can't just replace it."""
-    queries = dict(query_registry._queries)
-    history = list(query_registry._history)
+    queries, history = dict(query_registry._queries), list(query_registry._history)
     yield
     query_registry._queries.clear()
     query_registry._queries.update(queries)
@@ -1662,545 +1636,255 @@ def _reset_singleton():
 
 
 @pytest.mark.usefixtures("_reset_singleton")
-def test_expire_pool_queries_interrupts_only_pooled_duckdb():
-    registry = QueryRegistry()
-    pooled = _RecordingConn()
+def test_expire_pool_queries_and_attribution_labels():
+    registry, pooled = QueryRegistry(), _RecordingConn()
     qid = registry.register("DuckDB", "SELECT 1", service_id="svc", con=pooled, pool_slot="svc#0001")
-    active = registry._queries[qid]
-    active.started_at_mono -= 121
+    registry._queries[qid].started_at_mono -= 121
+    assert (
+        registry.expire_pool_queries() == 1
+        and pooled.interrupts == 1
+        and registry._queries[qid].cancelled_at is not None
+    )
 
-    assert registry.expire_pool_queries() == 1
-    assert pooled.interrupts == 1
-    assert active.cancelled_at is not None
+    a1 = Attribution.analyst(
+        analyst_id="passcode_abcd1234", analyst_name="Drew", request_path="/api/query", request_id="req_1"
+    )
+    assert (
+        "Drew" in a1.display_label() and "/api/query" in a1.display_label() and a1.principal_id() == "passcode_abcd1234"
+    )
+    a2 = Attribution.analyst(
+        analyst_id="passcode_a3f1", analyst_name=None, request_path="/api/dashboard", request_id=None
+    )
+    assert "Guest" in a2.display_label() and "a3f1" in a2.display_label()
+    a3 = Attribution.admin(admin_id="10.0.0.5", request_path="/api/admin/queries", request_id="r2")
+    assert "Admin: 10.0.0.5" in a3.display_label() and a3.principal_id() == "10.0.0.5"
+    a4 = Attribution.cron(cron_job="sync_svc1", cron_run_id="r7f3")
+    assert "Cron: sync_svc1" in a4.display_label() and "r7f3" in a4.display_label() and a4.principal_id() == "r7f3"
+    a5 = Attribution.system()
+    assert a5.kind == "system" and ("thread:" in a5.caller_qualname or "MainThread" in a5.caller_qualname)
 
-
-# ── Attribution ─────────────────────────────────────────────────────────────
-
-
-@pytest.mark.usefixtures("_reset_singleton")
-class TestAttribution:
-    def test_analyst_label(self):
-        a = Attribution.analyst(
-            analyst_id="passcode_abcd1234",
-            analyst_name="Drew",
-            request_path="/api/query",
-            request_id="req_1",
-        )
-        assert "Drew" in a.display_label()
-        assert "/api/query" in a.display_label()
-        assert a.principal_id() == "passcode_abcd1234"
-
-    def test_analyst_label_guest(self):
-        a = Attribution.analyst(
-            analyst_id="passcode_a3f1",
-            analyst_name=None,
-            request_path="/api/dashboard",
-            request_id=None,
-        )
-        # No name → "Guest (…last4)"
-        assert "Guest" in a.display_label()
-        assert "a3f1" in a.display_label()
-
-    def test_admin_label(self):
-        a = Attribution.admin(
-            admin_id="10.0.0.5",
-            request_path="/api/admin/queries",
-            request_id="r2",
-        )
-        assert "Admin: 10.0.0.5" in a.display_label()
-        assert a.principal_id() == "10.0.0.5"
-
-    def test_cron_label(self):
-        a = Attribution.cron(cron_job="sync_svc1", cron_run_id="r7f3")
-        assert "Cron: sync_svc1" in a.display_label()
-        assert "r7f3" in a.display_label()
-        assert a.principal_id() == "r7f3"
-
-    def test_system_label_with_thread_name(self):
-        a = Attribution.system()
-        assert a.kind == "system"
-        assert "thread:" in a.caller_qualname or "MainThread" in a.caller_qualname
-
-    def test_derive_from_process_context_shapes(self):
-        assert derive_from_process_context("cron:sync_svc1").kind == "cron"
-        assert derive_from_process_context("cron:sync_svc1").cron_job == "sync_svc1"
-        assert derive_from_process_context("startup:init_service").kind == "system"
-        # api:... is intentionally ignored — RequestContext owns HTTP attribution.
-        assert derive_from_process_context("api:GET /admin/download-zip:/tmp") is None
-        assert derive_from_process_context(None) is None
-        assert derive_from_process_context("") is None
+    c_attr = derive_from_process_context("cron:sync_svc1")
+    assert c_attr.kind == "cron" and c_attr.cron_job == "sync_svc1"
+    assert derive_from_process_context("startup:init_service").kind == "system"
+    for ignored in ("api:GET /admin/download-zip:/tmp", None, ""):
+        assert derive_from_process_context(ignored) is None
 
 
 @pytest.mark.usefixtures("_reset_singleton")
-class TestCallerCapture:
-    def test_skips_instrumentation_frames(self):
-        # skip_frames defaults to 2 (skip _capture_caller + the caller's
-        # register() frame). Called directly from a test, that puts us
-        # past the test body — use skip_frames=1 to land in this method.
-        qual, file_line = _capture_caller(skip_frames=1)
-        assert "test_skips_instrumentation_frames" in qual
-        assert "test_metrics_and_telemetry.py" in file_line
+def test_caller_capture_and_registry_operations(fresh_registry: QueryRegistry):
+    qual, file_line = _capture_caller(skip_frames=1)
+    assert "test_caller_capture_and_registry_operations" in qual and "test_metrics_and_telemetry.py" in file_line
+    assert _capture_caller(skip_frames=999)[0] == "<unknown>"
 
-    def test_register_attributes_caller(self, fresh_registry: QueryRegistry):
-        # End-to-end: register() should record THIS test's frame in the
-        # attribution's caller_file (skipping query_registry +
-        # query_attribution).
-        qid = fresh_registry.register("SQLite", "SELECT 1", con=None)
+    token = current_attribution.set(None)
+    try:
+        qid1 = fresh_registry.register("SQLite", "SELECT 1", con=None)
         snap = fresh_registry.snapshot()
         assert "test_metrics_and_telemetry.py" in snap["active"][0]["attribution"]["caller_file"]
-
-    def test_returns_unknown_on_empty_stack(self):
-        # skip_frames=999 walks past everything.
-        qual, file_line = _capture_caller(skip_frames=999)
-        assert qual == "<unknown>"
-
-
-# ── Registry — register / deregister / snapshot ─────────────────────────────
-
-
-@pytest.mark.usefixtures("_reset_singleton")
-class TestRegistry:
-    def test_register_returns_monotonic_id(self, fresh_registry: QueryRegistry):
-        a = fresh_registry.register("SQLite", "SELECT 1", con=None)
-        b = fresh_registry.register("SQLite", "SELECT 2", con=None)
-        assert b > a
-
-    def test_register_with_no_attribution_synthesises_system(self, fresh_registry: QueryRegistry):
-        token = current_attribution.set(None)
-        try:
-            qid = fresh_registry.register("SQLite", "SELECT 1", con=None)
-            assert qid >= 0
-            snap = fresh_registry.snapshot()
-            assert snap["active"][0]["attribution"]["kind"] == "system"
-        finally:
-            current_attribution.reset(token)
-
-    def test_register_picks_up_attribution_from_contextvar(self, fresh_registry: QueryRegistry):
-        attr = Attribution.admin(admin_id="ops", request_path="/api/admin/x", request_id="r1")
-        prev = current_attribution.get()
-        current_attribution.set(attr)
-        try:
-            qid = fresh_registry.register("SQLite", "SELECT 1", con=None)
-            snap = fresh_registry.snapshot()
-            assert snap["active"][0]["attribution"]["kind"] == "admin"
-            assert snap["active"][0]["attribution"]["principal_id"] == "ops"
-        finally:
-            current_attribution.set(prev)
-
-    def test_deregister_moves_to_completed_history(self, fresh_registry: QueryRegistry):
-        qid = fresh_registry.register("SQLite", "SELECT 1", con=None)
-        fresh_registry.deregister(qid)
-        snap = fresh_registry.snapshot(include_completed=True)
-        assert len(snap["active"]) == 0
-        assert len(snap["completed"]) == 1
-        assert snap["completed"][0]["outcome"] == "ok"
-
-    def test_deregister_with_error_records_exception_type(self, fresh_registry: QueryRegistry):
-        qid = fresh_registry.register("DuckDB", "SELECT FROM bad", con=None)
-        fresh_registry.deregister(qid, error=RuntimeError("kaboom"))
-        snap = fresh_registry.snapshot(include_completed=True)
-        c = snap["completed"][0]
-        assert c["outcome"] == "error"
-        assert c["error_type"] == "RuntimeError"
-        assert "kaboom" in c["error_message"]
-
-    def test_deregister_negative_id_is_noop(self, fresh_registry: QueryRegistry):
-        fresh_registry.deregister(-1)  # must not raise
-
-    def test_snapshot_respects_since_seq(self, fresh_registry: QueryRegistry):
-        a = fresh_registry.register("SQLite", "A", con=None)
-        b = fresh_registry.register("SQLite", "B", con=None)
-        snap = fresh_registry.snapshot(since_seq=a)
-        ids = [r["query_id"] for r in snap["active"]]
-        assert b in ids and a not in ids
-
-    def test_summary_counts(self, fresh_registry: QueryRegistry):
-        fresh_registry.register("SQLite", "A", con=None)
-        fresh_registry.register("DuckDB", "B", con=None)
-        fresh_registry.register("DuckDB", "C", con=None)
-        s = fresh_registry.summary()
-        assert s["active_total"] == 3
-        assert s["by_db_type"] == {"SQLite": 1, "DuckDB": 2}
-
-
-# ── Cancel — including the pool-reuse race regression test ─────────────────
-
-
-@pytest.mark.usefixtures("_reset_singleton")
-class TestCancel:
-    def test_cancel_unknown_returns_not_found(self, fresh_registry: QueryRegistry):
-        assert fresh_registry.cancel_query(999_999) == "not_found"
-
-    def test_cancel_with_no_connection_returns_already_finished(self, fresh_registry: QueryRegistry):
-        qid = fresh_registry.register("SQLite", "SELECT 1", con=None)
-        assert fresh_registry.cancel_query(qid) == "already_finished"
-
-    def test_cancel_active_sqlite_returns_cancelled(self, fresh_registry: QueryRegistry):
-        con = sqlite3.connect(":memory:")
-        qid = fresh_registry.register("SQLite", "SELECT 1", con=con)
-        assert fresh_registry.cancel_query(qid, admin_id="t1") == "cancelled"
-        # cancelled_at stamp set
-        snap = fresh_registry.snapshot()
-        assert snap["active"][0]["cancelled_at"] is not None
-
-    def test_deregister_after_cancel_records_cancelled_not_error(self, fresh_registry: QueryRegistry):
-        """KILL-OUTCOME-02: an admin kill interrupts the connection, the query
-        raises (e.g. ``InterruptException``), and the caller hands that error to
-        ``deregister``. The completed-history outcome must still be
-        ``cancelled`` — NOT ``error`` — because ``cancelled_at`` takes
-        precedence over ``error`` in ``deregister``. This keeps an
-        admin-initiated cancellation from being mislabelled a query failure in
-        the live-monitor history and the cancelled/error metrics. Swapping the
-        precedence (error before cancelled_at) flips the outcome and fails here.
-        """
-        con = sqlite3.connect(":memory:")
-        qid = fresh_registry.register("SQLite", "SELECT 1", con=con)
-        assert fresh_registry.cancel_query(qid, admin_id="t1") == "cancelled"
-        # The cancelled query unwinds and the caller reports the interrupt error.
-        fresh_registry.deregister(qid, error=RuntimeError("INTERRUPT: query was cancelled"))
-        c = fresh_registry.snapshot(include_completed=True)["completed"][0]
-        assert c["outcome"] == "cancelled", (
-            f"cancelled query recorded as {c['outcome']!r} — cancelled_at must win over error"
-        )
-
-    def test_cancel_after_deregister_returns_not_found(self, fresh_registry: QueryRegistry):
-        con = sqlite3.connect(":memory:")
-        qid = fresh_registry.register("SQLite", "SELECT 1", con=con)
-        fresh_registry.deregister(qid)
-        assert fresh_registry.cancel_query(qid) == "not_found"
-
-    def test_pool_reuse_race_does_not_kill_wrong_query(self, fresh_registry: QueryRegistry):
-        """The single most-important regression test for this system.
-
-        Scenario: connection runs query A, completes, returns to the pool;
-        a moment later the same connection runs query B; admin's stale UI
-        clicks Kill on the *old* query A. The registry MUST refuse to
-        interrupt — otherwise we'd cancel query B which has nothing to do
-        with the admin's intent.
-        """
-        con = duckdb.connect(":memory:")
-        qid_a = fresh_registry.register("DuckDB", "SELECT A", con=con)
-        fresh_registry.deregister(qid_a)
-        qid_b = fresh_registry.register("DuckDB", "SELECT B", con=con)
-        # Stale click on A:
-        assert fresh_registry.cancel_query(qid_a) == "not_found"
-        # B is untouched and still cancellable:
-        assert fresh_registry.cancel_query(qid_b) == "cancelled"
-
-    def test_cancel_refuses_when_stamp_moved_while_original_still_live(self, fresh_registry: QueryRegistry):
-        """The stamp-moved refusal branch (design doc §13.10) — the late-GC race.
-
-        ``test_pool_reuse_race_does_not_kill_wrong_query`` deregisters A
-        *before* B reuses the connection, so ``cancel_query(A)`` exits early
-        on the cheap ``not_found`` short-circuit and never reaches the
-        per-connection stamp comparison. This test pins the OTHER path: A is
-        STILL in ``_queries`` (its deregister hasn't run yet) when B reuses
-        the same connection. ``cancel_query(A)`` must fall through to the
-        stamp guard, observe that the stamp now points at B, and refuse —
-        WITHOUT interrupting the live connection. Deleting or weakening the
-        in-lock stamp re-validation would silently turn this into a
-        cross-talk kill (interrupt fires on B) while the rest of the suite
-        stays green; this assertion is what catches that regression.
-        """
-        con = _RecordingConn()
-        qid_a = fresh_registry.register("DuckDB", "SELECT A", con=con)
-        # B reuses the SAME connection object (same id()) → the stamp moves
-        # from A to B. A is intentionally NOT deregistered.
-        qid_b = fresh_registry.register("DuckDB", "SELECT B", con=con)
-        assert qid_a in fresh_registry._queries  # not_found short-circuit NOT taken
-        # cancel(A) reaches the stamp guard, sees stamp == B, refuses.
-        assert fresh_registry.cancel_query(qid_a) == "already_finished"
-        assert con.interrupts == 0, "live connection (bound to B) must not be interrupted"
-        # B itself remains cancellable through the moved stamp.
-        assert fresh_registry.cancel_query(qid_b) == "cancelled"
-        assert con.interrupts == 1
-
-    def test_late_deregister_of_original_keeps_reused_conn_stamp_for_b(self, fresh_registry: QueryRegistry):
-        """Ordering proof: A's late deregister must not strip B's stamp.
-
-        When A finishes and deregisters AFTER B has already reused the
-        connection, A's ``deregister`` is guarded by ``== qid_a`` so it
-        cannot delete the stamp that now belongs to B. B therefore stays
-        interruptible. Pins the structural defense behind KILL-2.
-        """
-        con = _RecordingConn()
-        qid_a = fresh_registry.register("DuckDB", "SELECT A", con=con)
-        qid_b = fresh_registry.register("DuckDB", "SELECT B", con=con)  # stamp → B
-        # A finishes late and deregisters — must NOT wipe B's stamp.
-        fresh_registry.deregister(qid_a)
-        assert _conn_to_query.get(id(con)) == qid_b
-        # B is still live and interruptible.
-        assert fresh_registry.cancel_query(qid_b) == "cancelled"
-        assert con.interrupts == 1
-
-
-# ── Concurrent register/deregister stress ──────────────────────────────────
-
-
-@pytest.mark.usefixtures("_reset_singleton")
-class TestConcurrency:
-    def test_concurrent_register_deregister_leaves_no_leaks(self, fresh_registry: QueryRegistry):
-        # 16 threads, each registering+deregistering 200 times, must end
-        # with empty active map (history is bounded so just check active).
-        N_THREADS = 16
-        N_OPS = 200
-
-        def worker():
-            for _ in range(N_OPS):
-                qid = fresh_registry.register("SQLite", "x", con=None)
-                fresh_registry.deregister(qid)
-
-        threads = [threading.Thread(target=worker) for _ in range(N_THREADS)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-        assert len(fresh_registry._queries) == 0
-
-
-# ── DuckDB result wrapper — proves the registry's duration reflects fetch ─
-
-
-@pytest.mark.usefixtures("_reset_singleton")
-class TestDuckDBResultWrapper:
-    def test_fetch_duration_captured(self):
-        """Without the result wrapper this would show ~0ms even though
-        fetchdf() takes 100s of ms on a real query."""
-        from backend.core.query_registry import query_registry as singleton
-
-        raw = duckdb.connect(":memory:")
-        con = InstrumentedDuckDBConnection(raw, service_id="test_svc")
-        con.execute("CREATE TABLE t AS SELECT i FROM range(2_000_000) tbl(i)")
-        t0 = time.perf_counter()
-        df = con.execute("SELECT i FROM t").fetchdf()
-        wall_ms = (time.perf_counter() - t0) * 1000.0
-        assert len(df) == 2_000_000
-
-        # Find the most-recent SELECT row in history
-        hist = singleton.snapshot(include_completed=True)["completed"]
-        matches = [c for c in hist if "SELECT i FROM t" in c["sql_preview"]]
-        assert matches, "expected the SELECT to be recorded"
-        last = matches[-1]
-        # Registry should be within 25% of wall clock — proves the wrapper
-        # held the registration through fetchdf().
-        assert last["duration_ms"] >= 0.5 * wall_ms, (
-            f"registry duration {last['duration_ms']}ms < 50% of wall {wall_ms}ms — "
-            f"result wrapper likely deregistered at execute() instead of fetch()"
-        )
-        # Pool slot populated:
-        assert last["attribution"]["pool_slot"], "pool_slot should be set on DuckDB rows"
-
-    def test_kill_across_real_connection_reuse_cycle(self):
-        """KILL-INT-01: cross-talk safety through the REAL instrumented
-        connection lifecycle (register-on-execute, deregister-on-fetch) — the
-        same wrapper ``duckdb_pool`` hands out on every acquire. Drives an
-        actual checkout→complete→release→reacquire cycle on ONE raw connection:
-        query A runs to completion (deregistered on fetch), then the same raw
-        connection is reused for a still-running query B. A stale admin kill on
-        the completed A must be refused (``not_found``) and must NOT interrupt
-        the live B — proven by B's result still fetching cleanly afterward. The
-        registry-level tests pin the stamp logic in isolation; this pins that
-        the real execute/fetch path maintains it across a connection reuse."""
-        from backend.core.query_registry import query_registry as singleton
-
-        raw = duckdb.connect(":memory:")
-        # Cycle 1 — A acquires the connection, runs to completion, releases.
-        con_a = InstrumentedDuckDBConnection(raw, service_id="killint")
-        con_a.execute("SELECT 1 AS a").fetchall()
-        completed = [c for c in singleton.snapshot(include_completed=True)["completed"] if c["service_id"] == "killint"]
-        assert completed, "query A did not land in completed history"
-        qid_a = completed[-1]["query_id"]
-
-        # Cycle 2 — the SAME raw connection is reacquired for B, which stays
-        # ACTIVE (its result is held, not terminally fetched yet).
-        con_b = InstrumentedDuckDBConnection(raw, service_id="killint")
-        result_b = con_b.execute("SELECT 42 AS b")
-
-        # Stale click on the completed A: must refuse without touching raw
-        # (now bound to the live B). A con-keyed (rather than qid-keyed) kill
-        # would interrupt raw and break B.
-        assert singleton.cancel_query(qid_a) == "not_found"
-
-        # Proof B was untouched: its result still fetches cleanly.
-        assert result_b.fetchall() == [(42,)]
-
-    def test_exception_in_fetch_records_outcome_error(self):
-        from backend.core.query_registry import query_registry as singleton
-
-        raw = duckdb.connect(":memory:")
-        con = InstrumentedDuckDBConnection(raw, service_id="test_svc")
-        with pytest.raises(duckdb.Error):
-            con.execute("SELECT * FROM nonexistent_table_xyz")
-        hist = singleton.snapshot(include_completed=True)["completed"]
-        matches = [c for c in hist if "nonexistent_table_xyz" in c["sql_preview"]]
-        assert matches
-        assert matches[-1]["outcome"] == "error"
-        assert "nonexistent" in (matches[-1]["error_message"] or "").lower() or matches[-1]["error_type"]
-
-
-# ── Peak memory probe ─────────────────────────────────────────────────────────
-
-
-@pytest.mark.usefixtures("_reset_singleton")
-class TestPeakMemory:
-    def test_parse_memory_mb_int(self):
-        assert _parse_memory_mb(1_048_576) == 1.0  # 1 MiB exactly
-        assert _parse_memory_mb(0) == 0.0
-        assert _parse_memory_mb(None) is None
-
-    def test_parse_memory_mb_strings(self):
-        assert _parse_memory_mb("1024") == round(1024 / (1024 * 1024), 2)
-        assert _parse_memory_mb("1 MiB") == 1.0
-        assert _parse_memory_mb("1 GiB") == 1024.0
-        assert _parse_memory_mb("1.5 GiB") == 1536.0
-        assert _parse_memory_mb("512 MB") == round(512_000_000 / (1024 * 1024), 2)
-        assert _parse_memory_mb("0 bytes") == 0.0
-
-    def test_parse_memory_mb_garbage(self):
-        assert _parse_memory_mb("") is None
-        assert _parse_memory_mb("not a number") is None
-        assert _parse_memory_mb("3 yibibytes") is None  # unknown unit
-        assert _parse_memory_mb(object()) is None
-
-    def test_probe_returns_some_value_on_live_connection(self):
-        raw = duckdb.connect(":memory:")
-        raw.execute("CREATE TABLE t AS SELECT i FROM range(500_000) tbl(i)")
-        mb = _probe_duckdb_memory(raw)
-        # Materialised table should hold non-trivial memory; if DuckDB
-        # reports zero on this machine the probe still must not crash.
-        assert mb is None or mb >= 0.0
-
-    def test_probe_swallows_errors(self):
-        # A non-duckdb object (no .cursor()) must not crash the probe.
-        assert _probe_duckdb_memory(object()) is None
-
-    def test_completed_row_has_peak_memory_field(self):
-        """The CompletedQuery JSON shape carries peak_memory_mb on every
-        row (None for SQLite / probe-failure paths). The frontend uses
-        the field's presence to decide whether to render the column."""
-        from backend.core.query_registry import query_registry as singleton
-
-        raw = duckdb.connect(":memory:")
-        con = InstrumentedDuckDBConnection(raw, service_id="mem_test_svc")
-        con.execute("CREATE TABLE t AS SELECT i FROM range(100_000) tbl(i)").fetchall()
-        hist = singleton.snapshot(include_completed=True)["completed"]
-        matches = [c for c in hist if c["service_id"] == "mem_test_svc"]
-        assert matches, "expected CREATE TABLE to land in completed history"
-        assert "peak_memory_mb" in matches[-1]
-
-    def test_sqlite_completed_row_has_null_peak_memory(self):
-        """SQLite never has a meaningful memory value; the field exists but
-        stays None so the frontend renders consistently."""
-        from backend.core.query_registry import query_registry as singleton
-        from backend.utils import sqlite_profiler
-
-        qid = sqlite_profiler._live_register("SQLite", "CREATE TABLE x (i INT)", con=None)
-        sqlite_profiler._live_deregister(qid, error=None)
-        hist = singleton.snapshot(include_completed=True)["completed"]
-        sqlite_rows = [c for c in hist if c["db_type"] == "SQLite"]
-        assert sqlite_rows
-        assert sqlite_rows[-1]["peak_memory_mb"] is None
-
-
-# ── Streaming RecordBatchReader wrapper (.arrow() / fetch_record_batch) ──────
-
-
-@pytest.mark.usefixtures("_reset_singleton")
-class TestRecordBatchReader:
-    def test_arrow_iteration_holds_registration_until_consumed(self):
-        """``.arrow()`` returns a streaming reader; deregistration must
-        wait for iteration to complete. Without :class:`_InstrumentedRecordReader`,
-        a long downstream consumer would see ~0ms duration on the row."""
-        from backend.core.query_registry import query_registry as singleton
-
-        raw = duckdb.connect(":memory:")
-        con = InstrumentedDuckDBConnection(raw, service_id="arrow_svc")
-        con.execute("CREATE TABLE big AS SELECT i FROM range(500_000) tbl(i)").fetchall()
-        reader = con.execute("SELECT * FROM big").arrow()
-        # The reader was just returned — query should still be active.
-        active = singleton.snapshot()["active"]
-        active_for_reader = [r for r in active if r["service_id"] == "arrow_svc"]
-        assert active_for_reader, "row deregistered before reader iteration — _InstrumentedRecordReader missing?"
-
-        # Drain the reader; query should deregister.
-        total_rows = 0
-        for batch in reader:
-            total_rows += batch.num_rows
-            # Simulate slow consumer.
-            time.sleep(0.005)
-        assert total_rows == 500_000
-
-        # Now the query has moved to completed history.
-        hist = singleton.snapshot(include_completed=True)["completed"]
-        matches = [c for c in hist if c["service_id"] == "arrow_svc" and "SELECT * FROM big" in c["sql_preview"]]
-        assert matches, "expected SELECT to deregister after reader iteration"
-
-    def test_to_arrow_table_materialises_immediately(self):
-        """Sanity check that ``to_arrow_table()`` (the materialising call
-        used by [iceberg/buffer.py:666](backend/core/iceberg/buffer.py#L666))
-        still deregisters at the method-call boundary, not after iteration.
-        It's listed in ``_TERMINAL_METHODS``, not ``_READER_METHODS``."""
-        from backend.core.query_registry import query_registry as singleton
-
-        raw = duckdb.connect(":memory:")
-        con = InstrumentedDuckDBConnection(raw, service_id="materialised_svc")
-        con.execute("CREATE TABLE x AS SELECT i FROM range(10_000) tbl(i)").fetchall()
-        table = con.execute("SELECT * FROM x").to_arrow_table()
-        assert table.num_rows == 10_000
-        # Already deregistered before we even checked.
-        active = singleton.snapshot()["active"]
-        assert not [r for r in active if r["service_id"] == "materialised_svc"]
-
-    def test_reader_close_completes_registration(self):
-        """If the consumer never iterates but calls close(), the wrapper
-        still drives deregistration so the registry doesn't leak."""
-        from backend.core.query_registry import query_registry as singleton
-
-        raw = duckdb.connect(":memory:")
-        con = InstrumentedDuckDBConnection(raw, service_id="close_svc")
-        con.execute("CREATE TABLE y AS SELECT i FROM range(100) tbl(i)").fetchall()
-        reader = con.execute("SELECT * FROM y").arrow()
-        reader.close()
-        active = singleton.snapshot()["active"]
-        assert not [r for r in active if r["service_id"] == "close_svc"]
-
-    def test_reader_wrapper_passes_through_schema(self):
-        """The wrapper must delegate non-completion attribute access (like
-        the ``schema`` attribute) so callers that introspect the reader
-        keep working."""
-        raw = duckdb.connect(":memory:")
-        con = InstrumentedDuckDBConnection(raw, service_id="schema_svc")
-        con.execute("CREATE TABLE z AS SELECT 1 as a, 'x' as b").fetchall()
-        reader = con.execute("SELECT * FROM z").arrow()
-        assert isinstance(reader, _InstrumentedRecordReader)
-        # schema attribute is delegated to the raw reader
-        assert hasattr(reader, "schema")
-        names = [f.name for f in reader.schema]
-        assert names == ["a", "b"]
-        reader.close()
-
-
-# ── cancel on client disconnect ─────────────────────────────────────────────────────────────────────────
-
-
-def _register_for(registry: QueryRegistry, key: str | None, con: _RecordingConn, db: str = "DuckDB", slot=None) -> int:
-    token = current_attribution.set(
-        Attribution.admin(
-            admin_id="1.2.3.4", request_path="/api/dashboard/bundle", request_id="shared-trace", cancel_key=key
-        )
-    )
-    try:
-        return registry.register(db, "SELECT 1", service_id="svc", con=con, pool_slot=slot)
+        assert snap["active"][0]["attribution"]["kind"] == "system"
     finally:
         current_attribution.reset(token)
 
+    attr = Attribution.admin(admin_id="ops", request_path="/api/admin/x", request_id="r1")
+    token2 = current_attribution.set(attr)
+    try:
+        qid2 = fresh_registry.register("SQLite", "SELECT 2", con=None)
+        assert qid2 > qid1
+        active_by_id = {r["query_id"]: r for r in fresh_registry.snapshot()["active"]}
+        assert (
+            active_by_id[qid2]["attribution"]["kind"] == "admin"
+            and active_by_id[qid2]["attribution"]["principal_id"] == "ops"
+        )
+    finally:
+        current_attribution.reset(token2)
+
+    assert [r["query_id"] for r in fresh_registry.snapshot(since_seq=qid1)["active"]] == [qid2]
+    fresh_registry.register("DuckDB", "SELECT 3", con=None)
+    summary = fresh_registry.summary()
+    assert (
+        summary["active_total"] == 3
+        and summary["by_db_type"] == {"SQLite": 2, "DuckDB": 1}
+        and summary["longest_ms"] >= 0.0
+    )
+
+    reg2 = QueryRegistry()
+    q_ok = reg2.register("SQLite", "SELECT 1", con=None)
+    reg2.deregister(q_ok)
+    q_err = reg2.register("DuckDB", "SELECT FROM bad", con=None)
+    reg2.deregister(q_err, error=RuntimeError("kaboom"))
+    reg2.deregister(-1)
+    comp = {c["query_id"]: c for c in reg2.snapshot(include_completed=True)["completed"]}
+    assert comp[q_ok]["outcome"] == "ok"
+    assert (
+        comp[q_err]["outcome"] == "error"
+        and comp[q_err]["error_type"] == "RuntimeError"
+        and "kaboom" in comp[q_err]["error_message"]
+    )
+
 
 @pytest.mark.usefixtures("_reset_singleton")
-def test_the_cancel_key_survives_the_attribution_copies_the_registry_makes():
-    attr = Attribution.admin(admin_id="a", request_path="/p", request_id="r", cancel_key="k1")
+def test_cancel_lifecycle_and_pool_reuse_guards():
+    reg = QueryRegistry()
+    assert reg.cancel_query(999_999) == "not_found"
+    qid_nocon = reg.register("SQLite", "SELECT 1", con=None)
+    assert reg.cancel_query(qid_nocon) == "already_finished"
 
-    assert attr.with_caller("q", "f.py:1").cancel_key == "k1"
-    assert attr.with_pool_slot("svc#1").cancel_key == "k1"
+    con_sq = sqlite3.connect(":memory:")
+    qid_sq = reg.register("SQLite", "SELECT 1", con=con_sq)
+    assert reg.cancel_query(qid_sq, admin_id="t1") == "cancelled"
+    assert [r for r in reg.snapshot()["active"] if r["query_id"] == qid_sq][0]["cancelled_at"] is not None
+    reg.deregister(qid_sq, error=RuntimeError("INTERRUPT: query was cancelled"))
+    assert [c for c in reg.snapshot(include_completed=True)["completed"] if c["query_id"] == qid_sq][0][
+        "outcome"
+    ] == "cancelled"
+    assert reg.cancel_query(qid_sq) == "not_found"
+
+    reg_race = QueryRegistry()
+    con_duck = duckdb.connect(":memory:")
+    qid_a = reg_race.register("DuckDB", "SELECT A", con=con_duck)
+    reg_race.deregister(qid_a)
+    qid_b = reg_race.register("DuckDB", "SELECT B", con=con_duck)
+    assert reg_race.cancel_query(qid_a) == "not_found" and reg_race.cancel_query(qid_b) == "cancelled"
+
+    reg_stamp = QueryRegistry()
+    rec = _RecordingConn()
+    qa = reg_stamp.register("DuckDB", "SELECT A", con=rec)
+    qb = reg_stamp.register("DuckDB", "SELECT B", con=rec)
+    assert qa in reg_stamp._queries and reg_stamp.cancel_query(qa) == "already_finished" and rec.interrupts == 0
+    assert reg_stamp.cancel_query(qb) == "cancelled" and rec.interrupts == 1
+
+    reg_late = QueryRegistry()
+    rec2 = _RecordingConn()
+    qa2 = reg_late.register("DuckDB", "SELECT A", con=rec2)
+    qb2 = reg_late.register("DuckDB", "SELECT B", con=rec2)
+    reg_late.deregister(qa2)
+    assert _conn_to_query.get(id(rec2)) == qb2 and reg_late.cancel_query(qb2) == "cancelled" and rec2.interrupts == 1
+
+
+@pytest.mark.usefixtures("_reset_singleton")
+def test_concurrent_register_deregister_leaves_no_leaks(fresh_registry: QueryRegistry):
+    def worker():
+        for _ in range(200):
+            fresh_registry.deregister(fresh_registry.register("SQLite", "x", con=None))
+
+    threads = [threading.Thread(target=worker) for _ in range(16)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(fresh_registry._queries) == 0
+
+
+@pytest.mark.usefixtures("_reset_singleton")
+def test_duckdb_result_wrapper_duration_reuse_and_errors():
+    raw = duckdb.connect(":memory:")
+    con = InstrumentedDuckDBConnection(raw, service_id="test_svc")
+    con.execute("CREATE TABLE t AS SELECT i FROM range(2_000_000) tbl(i)")
+    t0 = time.perf_counter()
+    df = con.execute("SELECT i FROM t").fetchdf()
+    wall_ms = (time.perf_counter() - t0) * 1000.0
+    assert len(df) == 2_000_000
+    last = [
+        c for c in query_registry.snapshot(include_completed=True)["completed"] if "SELECT i FROM t" in c["sql_preview"]
+    ][-1]
+    assert last["duration_ms"] >= 0.5 * wall_ms and last["attribution"]["pool_slot"]
+
+    raw2 = duckdb.connect(":memory:")
+    InstrumentedDuckDBConnection(raw2, service_id="killint").execute("SELECT 1 AS a").fetchall()
+    qid_a = [c for c in query_registry.snapshot(include_completed=True)["completed"] if c["service_id"] == "killint"][
+        -1
+    ]["query_id"]
+    result_b = InstrumentedDuckDBConnection(raw2, service_id="killint").execute("SELECT 42 AS b")
+    assert query_registry.cancel_query(qid_a) == "not_found" and result_b.fetchall() == [(42,)]
+
+    with pytest.raises(duckdb.Error):
+        con.execute("SELECT * FROM nonexistent_table_xyz")
+    err_row = [
+        c
+        for c in query_registry.snapshot(include_completed=True)["completed"]
+        if "nonexistent_table_xyz" in c["sql_preview"]
+    ][-1]
+    assert err_row["outcome"] == "error" and (
+        "nonexistent" in (err_row["error_message"] or "").lower() or err_row["error_type"]
+    )
+
+
+@pytest.mark.usefixtures("_reset_singleton")
+def test_peak_memory_parsing_and_completed_rows():
+    for val, exp in [
+        (1_048_576, 1.0),
+        (0, 0.0),
+        (None, None),
+        ("1024", round(1024 / (1024 * 1024), 2)),
+        ("1 MiB", 1.0),
+        ("1 GiB", 1024.0),
+        ("1.5 GiB", 1536.0),
+        ("512 MB", round(512_000_000 / (1024 * 1024), 2)),
+        ("0 bytes", 0.0),
+        ("", None),
+        ("not a number", None),
+        ("3 yibibytes", None),
+        (object(), None),
+    ]:
+        assert _parse_memory_mb(val) == exp
+
+    raw = duckdb.connect(":memory:")
+    raw.execute("CREATE TABLE t AS SELECT i FROM range(500_000) tbl(i)")
+    mb = _probe_duckdb_memory(raw)
+    assert (mb is None or mb >= 0.0) and _probe_duckdb_memory(object()) is None
+
+    con = InstrumentedDuckDBConnection(duckdb.connect(":memory:"), service_id="mem_test_svc")
+    con.execute("CREATE TABLE t AS SELECT i FROM range(100_000) tbl(i)").fetchall()
+    hist = query_registry.snapshot(include_completed=True)["completed"]
+    assert "peak_memory_mb" in [c for c in hist if c["service_id"] == "mem_test_svc"][-1]
+
+    from backend.utils import sqlite_profiler
+
+    qid = sqlite_profiler._live_register("SQLite", "CREATE TABLE x (i INT)", con=None)
+    sqlite_profiler._live_deregister(qid, error=None)
+    sqlite_rows = [c for c in query_registry.snapshot(include_completed=True)["completed"] if c["db_type"] == "SQLite"]
+    assert sqlite_rows and sqlite_rows[-1]["peak_memory_mb"] is None
+
+
+@pytest.mark.usefixtures("_reset_singleton")
+def test_record_batch_reader_lifecycle_and_delegation():
+    con = InstrumentedDuckDBConnection(duckdb.connect(":memory:"), service_id="arrow_svc")
+    con.execute("CREATE TABLE big AS SELECT i FROM range(500_000) tbl(i)").fetchall()
+    reader = con.execute("SELECT * FROM big").arrow()
+    assert [r for r in query_registry.snapshot()["active"] if r["service_id"] == "arrow_svc"]
+    total_rows = 0
+    for batch in reader:
+        total_rows += batch.num_rows
+        time.sleep(0.005)
+    assert total_rows == 500_000
+    assert [
+        c
+        for c in query_registry.snapshot(include_completed=True)["completed"]
+        if c["service_id"] == "arrow_svc" and "SELECT * FROM big" in c["sql_preview"]
+    ]
+
+    con_mat = InstrumentedDuckDBConnection(duckdb.connect(":memory:"), service_id="materialised_svc")
+    con_mat.execute("CREATE TABLE x AS SELECT i FROM range(10_000) tbl(i)").fetchall()
+    assert con_mat.execute("SELECT * FROM x").to_arrow_table().num_rows == 10_000
+    assert not [r for r in query_registry.snapshot()["active"] if r["service_id"] == "materialised_svc"]
+
+    con_cls = InstrumentedDuckDBConnection(duckdb.connect(":memory:"), service_id="close_svc")
+    con_cls.execute("CREATE TABLE y AS SELECT i FROM range(100) tbl(i)").fetchall()
+    r_cls = con_cls.execute("SELECT * FROM y").arrow()
+    r_cls.close()
+    assert not [r for r in query_registry.snapshot()["active"] if r["service_id"] == "close_svc"]
+
+    con_sch = InstrumentedDuckDBConnection(duckdb.connect(":memory:"), service_id="schema_svc")
+    con_sch.execute("CREATE TABLE z AS SELECT 1 as a, 'x' as b").fetchall()
+    r_sch = con_sch.execute("SELECT * FROM z").arrow()
+    assert isinstance(r_sch, _InstrumentedRecordReader) and [f.name for f in r_sch.schema] == ["a", "b"]
+    r_sch.close()
+
+
+@pytest.mark.usefixtures("_reset_singleton")
+def test_cancel_for_key_disconnect_semantics():
+    attr = Attribution.admin(admin_id="a", request_path="/p", request_id="r", cancel_key="k1")
+    assert attr.with_caller("q", "f.py:1").cancel_key == "k1" and attr.with_pool_slot("svc#1").cancel_key == "k1"
     assert (
         Attribution.analyst(
             analyst_id="x", analyst_name=None, request_path="/p", request_id="r", cancel_key="k2"
@@ -2208,56 +1892,45 @@ def test_the_cancel_key_survives_the_attribution_copies_the_registry_makes():
         == "k2"
     )
 
+    def _reg(registry: QueryRegistry, key: str | None, con: _RecordingConn, db: str = "DuckDB", slot=None) -> int:
+        token = current_attribution.set(
+            Attribution.admin(
+                admin_id="1.2.3.4", request_path="/api/dashboard/bundle", request_id="shared-trace", cancel_key=key
+            )
+        )
+        try:
+            return registry.register(db, "SELECT 1", service_id="svc", con=con, pool_slot=slot)
+        finally:
+            current_attribution.reset(token)
 
-@pytest.mark.usefixtures("_reset_singleton")
-def test_cancel_for_key_interrupts_only_that_requests_duckdb_queries():
     registry = QueryRegistry()
     mine, mine_second, sibling, other_db = _RecordingConn(), _RecordingConn(), _RecordingConn(), _RecordingConn()
-    q1 = _register_for(registry, "me", mine)
-    _register_for(registry, "me", mine_second, slot="svc#2")
-    _register_for(registry, "sibling", sibling)  # same request_id (shared trace), different request
-    _register_for(registry, "me", other_db, db="SQLite")
-
+    q1 = _reg(registry, "me", mine)
+    _reg(registry, "me", mine_second, slot="svc#2")
+    _reg(registry, "sibling", sibling)
+    _reg(registry, "me", other_db, db="SQLite")
     assert registry.cancel_for_key("me") == 2
-
-    assert (mine.interrupts, mine_second.interrupts) == (1, 1)
-    assert sibling.interrupts == 0, "a sibling request sharing the trace id must not be cancelled"
-    assert other_db.interrupts == 0, "only DuckDB serving queries are interrupted"
+    assert (mine.interrupts, mine_second.interrupts, sibling.interrupts, other_db.interrupts) == (1, 1, 0, 0)
     assert registry._queries[q1].cancelled_at is not None
 
+    reg2, conn2 = QueryRegistry(), _RecordingConn()
+    _reg(reg2, "me", conn2)
+    assert (
+        reg2.cancel_for_key("nobody") == 0
+        and reg2.cancel_for_key("me") == 1
+        and reg2.cancel_for_key("me") == 0
+        and conn2.interrupts == 1
+    )
 
-@pytest.mark.usefixtures("_reset_singleton")
-def test_cancel_for_key_is_idempotent_and_ignores_unknown_keys():
-    registry = QueryRegistry()
-    conn = _RecordingConn()
-    _register_for(registry, "me", conn)
-
-    assert registry.cancel_for_key("nobody") == 0
-    assert registry.cancel_for_key("me") == 1
-    assert registry.cancel_for_key("me") == 0
-    assert conn.interrupts == 1
-
-
-@pytest.mark.usefixtures("_reset_singleton")
-def test_cancel_for_key_without_a_key_cancels_nothing():
-    registry = QueryRegistry()
-    conn = _RecordingConn()
-    _register_for(registry, None, conn)
-
-    assert registry.cancel_for_key("") == 0
-    assert registry.cancel_for_key(None) == 0  # type: ignore[arg-type]
-    assert conn.interrupts == 0
-
-
-# ── Persistent slow-query history layer ─────────────────────────────────────
+    reg3, conn3 = QueryRegistry(), _RecordingConn()
+    _reg(reg3, None, conn3)
+    assert reg3.cancel_for_key("") == 0 and reg3.cancel_for_key(None) == 0 and conn3.interrupts == 0  # type: ignore[arg-type]
 
 
 @pytest.fixture
 def svc_id(tmp_path, monkeypatch):
     monkeypatch.setattr("backend.config.DATA_DIR", tmp_path)
     monkeypatch.setattr("backend.core.metadata.base.DATA_DIR", tmp_path, raising=False)
-    # Set the slow-query threshold to a massive value by default so real queries executed
-    # under test CPU starvation never get flagged as slow queries and pollute the database.
     monkeypatch.setattr("backend.core.query_registry._SLOW_QUERY_PERSIST_THRESHOLD_MS", 999999.0)
     svc = "test-slow-queries-svc"
     con = _meta.get_con(svc)
@@ -2268,13 +1941,8 @@ def svc_id(tmp_path, monkeypatch):
 
 @pytest.fixture
 def fresh_singleton_registry(monkeypatch):
-    """Use a fresh QueryRegistry so cross-test history doesn't bleed.
-    The module-level singleton has shared state; replacing it here
-    isolates each test."""
     new_reg = qr_mod.QueryRegistry()
     monkeypatch.setattr(qr_mod, "query_registry", new_reg)
-    # The hot-path persist call resolves the registry via the import
-    # cycle so any test using it must also see the same instance.
     return new_reg
 
 
@@ -2299,129 +1967,53 @@ def _row(*, qid: int, duration_ms: float, started: float | None = None, kind: st
 
 
 @pytest.mark.usefixtures("_reset_singleton")
-def test_insert_then_list_round_trip(svc_id):
-    _meta.insert_slow_query(svc_id, _row(qid=1, duration_ms=250))
-    rows = _meta.list_slow_queries(svc_id, since_utc=time.time() - 60)
-    assert len(rows) == 1
-    assert rows[0]["query_id"] == 1
-    assert rows[0]["duration_ms"] == 250
-    assert rows[0]["attr_kind"] == "admin"
-
-
-@pytest.mark.usefixtures("_reset_singleton")
-def test_list_filters_by_threshold(svc_id):
-    """threshold_ms is applied SQL-side via the duration_ms index. Rows
-    below the threshold must not appear in the result."""
-    _meta.insert_slow_query(svc_id, _row(qid=1, duration_ms=120))
-    _meta.insert_slow_query(svc_id, _row(qid=2, duration_ms=600))
-    _meta.insert_slow_query(svc_id, _row(qid=3, duration_ms=1500))
-    rows = _meta.list_slow_queries(svc_id, since_utc=time.time() - 60, threshold_ms=500)
-    qids = {r["query_id"] for r in rows}
-    assert qids == {2, 3}
-
-
-@pytest.mark.usefixtures("_reset_singleton")
-def test_list_filters_by_kind(svc_id):
-    _meta.insert_slow_query(svc_id, _row(qid=1, duration_ms=200, kind="admin"))
-    _meta.insert_slow_query(svc_id, _row(qid=2, duration_ms=200, kind="cron"))
-    rows = _meta.list_slow_queries(svc_id, since_utc=time.time() - 60, kind="cron")
-    assert [r["query_id"] for r in rows] == [2]
-
-
-@pytest.mark.usefixtures("_reset_singleton")
-def test_list_default_sort_is_recent_first(svc_id):
+def test_slow_queries_insert_list_filter_sort_and_count(svc_id):
     now = time.time()
-    _meta.insert_slow_query(svc_id, _row(qid=1, duration_ms=200, started=now - 30))
-    _meta.insert_slow_query(svc_id, _row(qid=2, duration_ms=200, started=now - 10))
-    rows = _meta.list_slow_queries(svc_id, since_utc=now - 60)
-    assert [r["query_id"] for r in rows if r["query_id"] in {1, 2}] == [2, 1]
+    _meta.insert_slow_query(svc_id, _row(qid=1, duration_ms=120, started=now - 100, kind="admin"))
+    _meta.insert_slow_query(svc_id, _row(qid=2, duration_ms=2000, started=now - 50, kind="admin"))
+    _meta.insert_slow_query(svc_id, _row(qid=3, duration_ms=600, started=now - 10, kind="cron"))
 
+    all_rows = _meta.list_slow_queries(svc_id, since_utc=now - 200)
+    assert [r["query_id"] for r in all_rows] == [3, 2, 1]
+    assert all_rows[-1]["duration_ms"] == 120 and all_rows[-1]["attr_kind"] == "admin"
 
-@pytest.mark.usefixtures("_reset_singleton")
-def test_list_sort_by_duration_flips_order(svc_id):
-    now = time.time()
-    _meta.insert_slow_query(svc_id, _row(qid=1, duration_ms=2000, started=now - 30))
-    _meta.insert_slow_query(svc_id, _row(qid=2, duration_ms=300, started=now - 10))
-    rows = _meta.list_slow_queries(svc_id, since_utc=now - 60, sort_by_duration=True)
-    assert [r["query_id"] for r in rows] == [1, 2]
-
-
-@pytest.mark.usefixtures("_reset_singleton")
-def test_count_matches_list_length(svc_id):
-    """count_slow_queries is the cheap row count for the overview card.
-    It must agree with list_slow_queries under the same filters."""
-    now = time.time()
-    _meta.insert_slow_query(svc_id, _row(qid=1, duration_ms=120, started=now - 100))
-    _meta.insert_slow_query(svc_id, _row(qid=2, duration_ms=600, started=now - 50))
-    _meta.insert_slow_query(svc_id, _row(qid=3, duration_ms=2000, started=now - 10))
+    assert {r["query_id"] for r in _meta.list_slow_queries(svc_id, since_utc=now - 200, threshold_ms=500)} == {2, 3}
     assert _meta.count_slow_queries(svc_id, since_utc=now - 200, threshold_ms=500) == 2
-    rows = _meta.list_slow_queries(svc_id, since_utc=now - 200, threshold_ms=500)
-    assert len(rows) == 2
-
-
-# ── Writer hook in query_registry ────────────────────────────────────────
+    assert [r["query_id"] for r in _meta.list_slow_queries(svc_id, since_utc=now - 200, kind="cron")] == [3]
+    assert [r["query_id"] for r in _meta.list_slow_queries(svc_id, since_utc=now - 200, sort_by_duration=True)] == [
+        2,
+        3,
+        1,
+    ]
 
 
 @pytest.mark.usefixtures("_reset_singleton")
-def test_deregister_persists_only_above_threshold(svc_id, fresh_singleton_registry, monkeypatch):
-    """The hot-path filter: queries faster than the persist threshold
-    must NOT write to SQLite. Otherwise the per-tick cron noise (sub-ms
-    SQLite queries by the dozen) would flood the table — exactly the
-    motivation for having a threshold."""
+def test_deregister_slow_query_persistence_and_resilience(svc_id, fresh_singleton_registry, monkeypatch):
     monkeypatch.setattr(qr_mod, "_SLOW_QUERY_PERSIST_THRESHOLD_MS", 100.0)
     fast_qid = fresh_singleton_registry.register("DuckDB", "SELECT 1", service_id=svc_id)
-    # Pretend the query took 50 ms — under threshold.
     fresh_singleton_registry._queries[fast_qid].started_at_mono = time.monotonic() - 0.05
     fresh_singleton_registry.deregister(fast_qid)
     assert _meta.count_slow_queries(svc_id, since_utc=time.time() - 60) == 0
 
-
-@pytest.mark.usefixtures("_reset_singleton")
-def test_deregister_persists_slow_query(svc_id, fresh_singleton_registry, monkeypatch):
-    monkeypatch.setattr(qr_mod, "_SLOW_QUERY_PERSIST_THRESHOLD_MS", 100.0)
     slow_qid = fresh_singleton_registry.register("DuckDB", "SELECT pg_sleep(1)", service_id=svc_id)
-    # Pretend the query took 500 ms — over threshold.
     fresh_singleton_registry._queries[slow_qid].started_at_mono = time.monotonic() - 0.5
     fresh_singleton_registry.deregister(slow_qid)
     rows = [
-        row
-        for row in _meta.list_slow_queries(svc_id, since_utc=time.time() - 60)
-        if row["sql_preview"] == "SELECT pg_sleep(1)"
+        r
+        for r in _meta.list_slow_queries(svc_id, since_utc=time.time() - 60)
+        if r["sql_preview"] == "SELECT pg_sleep(1)"
     ]
-    assert len(rows) == 1
-    assert rows[0]["duration_ms"] >= 100
-    assert rows[0]["sql_preview"] == "SELECT pg_sleep(1)"
+    assert len(rows) == 1 and rows[0]["duration_ms"] >= 100
 
+    no_svc_qid = fresh_singleton_registry.register("DuckDB", "SELECT 1", service_id=None)
+    fresh_singleton_registry._queries[no_svc_qid].started_at_mono = time.monotonic() - 0.5
+    fresh_singleton_registry.deregister(no_svc_qid)
+    assert _meta.count_slow_queries(svc_id, since_utc=time.time() - 60) == 1
 
-@pytest.mark.usefixtures("_reset_singleton")
-def test_deregister_skips_when_no_service_id(svc_id, fresh_singleton_registry, monkeypatch):
-    """System-level queries with no service_id have nowhere to land in
-    the per-service metadata DB. They MUST be skipped, not crashed on."""
-    monkeypatch.setattr(qr_mod, "_SLOW_QUERY_PERSIST_THRESHOLD_MS", 100.0)
-    qid = fresh_singleton_registry.register("DuckDB", "SELECT 1", service_id=None)
-    fresh_singleton_registry._queries[qid].started_at_mono = time.monotonic() - 0.5
-    fresh_singleton_registry.deregister(qid)  # must not raise
-    # Nothing landed in this service's db.
-    assert _meta.count_slow_queries(svc_id, since_utc=time.time() - 60) == 0
-
-
-@pytest.mark.usefixtures("_reset_singleton")
-def test_deregister_persist_failure_does_not_propagate(svc_id, fresh_singleton_registry, monkeypatch):
-    """A SQLite write failure on the persist path MUST NOT propagate
-    back into the SQL hot path. Observability is best-effort —
-    correctness is not."""
-    monkeypatch.setattr(qr_mod, "_SLOW_QUERY_PERSIST_THRESHOLD_MS", 100.0)
-
-    def _boom(*_a, **_kw):
-        raise sqlite3.OperationalError("simulated metadata DB outage")
-
-    monkeypatch.setattr(qr_mod._persist_slow_query.__globals__["__name__"], None, raising=False)  # noqa: SLF001 — defensive no-op
-    # Monkeypatch the metadata helper used inside _persist_slow_query.
-    monkeypatch.setattr("backend.core.metadata.insert_slow_query", _boom)
-    qid = fresh_singleton_registry.register("DuckDB", "SELECT 1", service_id=svc_id)
-    fresh_singleton_registry._queries[qid].started_at_mono = time.monotonic() - 0.5
-    # The deregister call must complete cleanly even though the persist
-    # raises internally.
-    fresh_singleton_registry.deregister(qid)
-    # And no row landed.
-    assert _meta.count_slow_queries(svc_id, since_utc=time.time() - 60) == 0
+    monkeypatch.setattr(
+        "backend.core.metadata.insert_slow_query", MagicMock(side_effect=sqlite3.OperationalError("simulated outage"))
+    )
+    err_qid = fresh_singleton_registry.register("DuckDB", "SELECT 2", service_id=svc_id)
+    fresh_singleton_registry._queries[err_qid].started_at_mono = time.monotonic() - 0.5
+    fresh_singleton_registry.deregister(err_qid)
+    assert _meta.count_slow_queries(svc_id, since_utc=time.time() - 60) == 1

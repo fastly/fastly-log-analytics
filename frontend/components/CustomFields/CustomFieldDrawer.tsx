@@ -1,4 +1,7 @@
 import React, { useState, useEffect } from 'react'
+import { useForm } from 'react-hook-form'
+import { zodResolver } from '@hookform/resolvers/zod'
+import { z } from 'zod'
 import { useDebounce } from '@/hooks/useDashboardCards'
 import { useOpenGeneration } from '@/hooks/useSSE'
 import { downloadBlob, oneOf } from '@/lib/utils'
@@ -221,6 +224,23 @@ type FormState = Omit<CustomField, "created_at" | "updated_at">
 const DUCKDB_TYPES: readonly CustomField['duckdb_type'][] = ['VARCHAR', 'INTEGER', 'BIGINT', 'DOUBLE', 'BOOLEAN']
 const VALUE_TYPES: readonly CustomField['value_type'][] = ['string', 'numeric', 'boolean', 'ip', 'url']
 
+const customFieldFormSchema = z.object({
+  name: z.string().regex(/^[a-z][a-z0-9_]{0,47}$/, 'Invalid snake_case field name'),
+  label: z.string().min(1, 'Label is required'),
+  description: z.string().optional(),
+  vcl_log_expression: z.string().min(1, 'VCL expression is required'),
+  collection_stage: z.enum(['edge', 'origin']),
+  origin_log_frequency: z.enum(['all', 'once']).optional(),
+  duckdb_type: z.enum(['VARCHAR', 'INTEGER', 'BIGINT', 'DOUBLE', 'BOOLEAN']),
+  value_type: z.enum(['string', 'numeric', 'boolean', 'ip', 'url']),
+  bytes_estimate: z.number().int().min(1),
+  nullable: z.boolean(),
+  enabled: z.boolean(),
+  show_in_dashboard: z.boolean(),
+  show_in_logs: z.boolean(),
+  filterable: z.boolean(),
+})
+
 const DEFAULT_FIELD: FormState = {
   name: "",
   label: "",
@@ -245,14 +265,17 @@ export function CustomFieldDrawer(props: CustomFieldDrawerProps) {
 
 function CustomFieldDrawerBody({ serviceId, field, open, onOpenChange, onSave }: CustomFieldDrawerProps) {
   const isEditing = !!field
-  const [formData, setFormData] = useState<FormState>(() =>
-    field
-      ? {
-          ...field,
-          collection_stage: field.collection_stage || 'edge',
-        }
-      : { ...DEFAULT_FIELD },
-  )
+  const initialValues: FormState = field
+    ? {
+        ...field,
+        collection_stage: field.collection_stage || 'edge',
+      }
+    : { ...DEFAULT_FIELD }
+  const form = useForm<z.infer<typeof customFieldFormSchema>>({
+    resolver: zodResolver(customFieldFormSchema),
+    defaultValues: initialValues as z.infer<typeof customFieldFormSchema>,
+  })
+  const [formData, setFormData] = useState<FormState>(() => initialValues)
   const [validationError, setValidationError] = useState<string | null>(null)
   const [lintResult, setLintResult] = useState<VclLintResult | null>(null)
   const [isLinting, setIsLinting] = useState(false)
@@ -333,6 +356,7 @@ function CustomFieldDrawerBody({ serviceId, field, open, onOpenChange, onSave }:
           .replace(/^[^a-z]+/, '')
           .substring(0, 48);
       }
+      form.reset(next as z.infer<typeof customFieldFormSchema>)
       return next;
     })
   }

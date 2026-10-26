@@ -1,13 +1,4 @@
-"""Recompute / backfill / cleanup for per-field per-hour rollups.
-
-Holds the cron-triggered ``recompute_touched_hours`` (called after every
-ingest tick), the one-shot ``backfill_rollups``
-(boot + new-custom-field path), and ``cleanup_old_rollups`` (daily retention
-trim).
-
-The shared write core (``_run_per_field_copy``) lives here too — it's the
-single COPY-PARTITION_BY path both recompute and backfill funnel through.
-"""
+"""Recompute / backfill / cleanup and coverage index for per-field per-hour rollups."""
 
 from __future__ import annotations
 
@@ -16,6 +7,7 @@ import os
 import shutil
 import sys
 import threading
+import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -24,12 +16,18 @@ from typing import Any
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+from cachetools import TTLCache
 
+from backend import config as svcconfig
+from backend.models.dashboard import HourlyRollupCoverage, ReaderCoverage, RollupPathCoverage, ScalarRollupCoverage
+from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry
+from backend.utils.date_utils import parse_hour_key_strict, parse_window
 from backend.utils.telemetry import ensure_utc
 
 from .. import metric_expressions
 from ._common import (
     _VIRTUAL_FIELD_BACKING,
+    DAY_BUNDLE_FILENAME,
     IP_SAMPLE_CAP,
     IP_SPREAD_BUNDLE_FILENAME,
     OVERVIEW_BUNDLE_FILENAME,
@@ -53,13 +51,11 @@ from ._common import (
     parquet_zstd_target,
     parse_hour_token,
     quote_path_list,
+    rollup_coverage_ready,
     shared_rollup_session,
 )
 from .day_bundles import bundle_hours, bundle_hours_ip_spread
-
-# Writers dispatched by name from spec.HOUR_WRITERS (resolved against this
-# module at call time, so each name here is also the test patch point).
-from .origin_dims import (  # noqa: F401  # noqa: F401
+from .origin_dims import (  # noqa: F401
     build_network_geo_bundles,
     build_network_heatmap_bundles,
     build_network_quality_bundles,
@@ -174,18 +170,7 @@ ADMIN_BACKFILLS: tuple[tuple[str, str], ...] = (
 
 
 def recompute_touched_hours(service_id: str, source: dict, hours: set[str]) -> None:
-    """Recompute rollups for all dashboard fields across the given hours.
-
-    Excludes the active (current UTC) hour — the dashboard serves the
-    in-progress hour live off the base table. One COPY query per field
-    handles all touched hours via PARTITION_BY, so the work is O(fields)
-    not O(fields × hours).
-
-    After the per-field rebuild completes, bundles each touched hour's
-    per-field parquets into a single bundled file under
-    ``rollups/hour_bundled/hour=H/all_fields.parquet`` so the dashboard
-    reader can open one file per hour instead of ~40 per-field files.
-    """
+    """Recompute rollups and per-hour bundles for all dashboard fields across *hours*."""
     if not hours:
         return
 
@@ -219,12 +204,6 @@ def recompute_touched_hours(service_id: str, source: dict, hours: set[str]) -> N
     with shared_rollup_session(source):
         _run_per_field_copy(service_id, source, table_ident, where_sql, fields_to_rollup)
 
-        # IP-spread rollup runs alongside the count rollup so the security
-        # fingerprint cards can serve cross-hour distinct-IP estimates from
-        # rollups without an ip column in the per-request temp scan.
-        # Best-effort: a failure here doesn't block the count rollup or
-        # the bundles below; the reader falls back to the live temp scan
-        # when ip_spread.parquet is missing.
         try:
             _run_ip_spread_per_field(service_id, source, table_ident, where_sql, fields_to_rollup)
         except Exception as e:
@@ -234,18 +213,11 @@ def recompute_touched_hours(service_id: str, source: dict, hours: set[str]) -> N
                 e,
             )
 
-        # Bundle the touched hours so the dashboard reader can open one
-        # file per hour instead of N per-field files. Best-effort: if
-        # bundling fails, the per-field files still serve correctly via
-        # the reader's fallback path.
         try:
             bundle_hours(service_id, source, touched_hours)
         except Exception as e:
             logger.warning("[rollups] %s: hour bundling failed (per-field still serves): %s", service_id, e)
 
-        # IP-spread bundle runs alongside the count bundle. Best-effort:
-        # a failure here leaves per-field ip_spread parquets intact and
-        # the reader's per-field path serves until the next bundling tick.
         try:
             bundle_hours_ip_spread(service_id, source, touched_hours)
         except Exception as e:
@@ -255,10 +227,6 @@ def recompute_touched_hours(service_id: str, source: dict, hours: set[str]) -> N
                 e,
             )
 
-        # Per-hour feature rollups (see spec.HOUR_WRITERS). Same best-effort
-        # contract for every writer: a failure is logged and leaves the affected
-        # hours on the spec's fallback path (raw scan / direct join) without
-        # blocking the writers after it.
         for spec in HOUR_WRITERS:
             try:
                 getattr(sys.modules[__name__], spec.builder)(service_id, source, touched_hours)
@@ -297,37 +265,7 @@ def backfill_missing_hour_bundles(
     lookback_days: int = 30,
     max_missing_hours: int | None = None,
 ) -> dict[str, int | bool]:
-    """Self-heal pass: find closed hours where the iceberg view has rows
-    but no ``hour_bundled/`` file exists, then rebuild per-field rollups
-    + bundle for those hours.
-
-    The ``recompute_touched_hours`` hot path is driven by the ingest
-    pipeline's "touched hours" set — if ingest under-reports (sync delay,
-    a retried ingest commit that landed AFTER the recompute fired for
-    that hour, the hour was never seen as touched at all), the per-field
-    rollup never gets written and the hour_bundler then silently skips
-    the hour ("no per-field files exist (nothing to bundle)"). The
-    dashboard's reader has no fallback path — those rows just disappear
-    from top-N panels.
-
-    This driver checks for that gap directly against the iceberg view
-    and runs the rebuild via the same code path the cron tick uses. Safe
-    to call on every daily compaction tick — idempotent (no-op when the
-    bundle tree is complete).
-
-    ``max_missing_hours`` bounds the number of non-empty hours rebuilt in one
-    pass. This lets scheduled durable-serving catch-up make incremental
-    progress without allowing one large DuckDB operation to evict the serving
-    pod. Coverage remains unverified until a later pass confirms the complete
-    lookback.
-
-    Returns a summary dict: ``{"missing": N, "rebuilt_fields": F,
-    "bundled": B, "stamped_empty": E}`` so callers can log a concise
-    progress line. ``stamped_empty`` counts zero-row closed hours that
-    received an empty sentinel bundle (see
-    :func:`~backend.core.rollups.hour_bundles.stamp_empty_hour_sentinels`)
-    so the reader can tell verified-empty apart from writer-gap.
-    """
+    """Self-heal pass: rebuild closed hours where the iceberg view has rows but no bundle exists."""
     import duckdb as _ddb
 
     from backend.core.iceberg import update_iceberg_view
@@ -359,14 +297,10 @@ def backfill_missing_hour_bundles(
                 return False
         return True
 
-    # Discover hours with data via the iceberg view. We use the view (not
-    # the per-service .duckdb file directly) so this runs concurrently
-    # with uvicorn's RW connection on that file — backed by a fresh
-    # in-memory DuckDB connection that holds no persistent state.
     con = _ddb.connect(":memory:")
     try:
         con.execute("SET TimeZone='UTC'")
-        from backend.core.duckdb import _configure_fos
+        from backend.core.duckdb import _configure_fos, _safe_table_name
 
         _configure_fos(con, source)
         update_iceberg_view(con, source)
@@ -380,22 +314,15 @@ def backfill_missing_hour_bundles(
                     service_id,
                 )
                 return {"missing": 0, "rebuilt_fields": 0, "bundled": 0, "coverage_verified": False}
-        # The view's actual SQL identifier is set by update_iceberg_view
-        # — query through ``information_schema`` to find it rather than
-        # guess (the name is derived from source["name"]/svc_name, not
-        # source["service_id"]).
-        from backend.core.duckdb import _safe_table_name
 
         view_name = _safe_table_name(source.get("name") or service_id)
         view_row = con.execute(
             "SELECT table_name FROM information_schema.tables WHERE table_name = ?",
             [view_name],
         ).fetchone()
-        if view_row is None:
+        if view_row is None or not _is_safe_ident(view_row[0]):
             return {"missing": 0, "rebuilt_fields": 0, "bundled": 0, "coverage_verified": False}
         view_name = view_row[0]
-        if not _is_safe_ident(view_name):
-            return {"missing": 0, "rebuilt_fields": 0, "bundled": 0, "coverage_verified": False}
         try:
             rows = con.execute(
                 f"SELECT strftime(timestamp, '%Y-%m-%d-%H') AS h, COUNT(*) AS n "
@@ -407,12 +334,6 @@ def backfill_missing_hour_bundles(
             logger.warning("[rollups] %s: backfill_missing_hour_bundles view query failed: %s", service_id, e)
             return {"missing": 0, "rebuilt_fields": 0, "bundled": 0, "coverage_verified": False}
 
-        # Detect partial/incomplete bundles: if an existing hour bundle is
-        # missing core fields that are present in the view (e.g. ``ip``,
-        # ``status``, ``method``, ``pop`` — which happened when a single-field
-        # per-hour write + bundle pass wiped previously bundled fields), treat
-        # that hour as missing so ``recompute_touched_hours`` rebuilds all
-        # configured fields for it.
         in_window_with_data = {h for h, _ in rows if h < active}
         candidate_existing = sorted(existing & in_window_with_data)
         if candidate_existing:
@@ -476,11 +397,6 @@ def backfill_missing_hour_bundles(
                 raise ValueError("max_missing_hours must be positive")
             missing = missing[:max_missing_hours]
 
-        # Closed hours with genuinely ZERO rows can never acquire coverage
-        # through the data-driven writers (the HAVING n > 0 above never
-        # surfaces them) — stamp those with an empty sentinel bundle so the
-        # reader's missing-hour live heal doesn't classify them as writer
-        # gaps and re-scan them on every request forever.
         with_data = {h for h, _ in rows}
         empty_hours: list[str] = []
         cur = start_dt
@@ -506,11 +422,6 @@ def backfill_missing_hour_bundles(
                 len(missing),
                 missing[:10] + (["…"] if len(missing) > 10 else []),
             )
-
-        # Reuse recompute_touched_hours so the full per-field write +
-        # post-write bundle pipeline runs. recompute_touched_hours
-        # opens its own RO connection on the per-service .duckdb file,
-        # which contends with uvicorn — close ours first.
     finally:
         con.close()
 
@@ -528,11 +439,6 @@ def backfill_missing_hour_bundles(
 
     recompute_touched_hours(service_id, source, set(missing))
 
-    # Verify how many bundles materialised. (recompute_touched_hours
-    # bundles internally, but a per-hour COPY can yield 0 rows for a
-    # field that genuinely has no values in that hour — leaving the
-    # bundle un-written for that hour. The count below is what's on
-    # disk after the call.)
     bundled_now = 0
     missing_set = set(missing)
     if os.path.isdir(bundled_root):
@@ -558,32 +464,9 @@ def backfill_missing_hour_ip_spread(
     source: dict,
     lookback_days: int = 30,
 ) -> dict[str, int]:
-    """Self-heal pass for the IP-spread bundle tree.
-
-    The IP-spread rollup shipped after the count rollup was already
-    backfilled for most services, so a daily-compaction tick on a
-    pre-existing service will discover closed hours where
-    ``rollups/hour_bundled/hour=H/all_fields.parquet`` exists but
-    ``all_fields_ip.parquet`` does NOT. Walks the bundled-hour tree,
-    finds those hours, and re-runs :func:`recompute_touched_hours`
-    against them — which writes per-field ip_spread parquets AND
-    bundles them in one pass.
-
-    Bounded by ``lookback_days`` (default 30) so a one-time backfill
-    can't run away on a long-lived service. Idempotent — already-
-    populated hours are skipped via the ``all_fields_ip.parquet``
-    presence check.
-
-    Returns ``{"missing": N, "rebuilt": M}``. ``rebuilt`` is the
-    count we asked recompute to rebuild; the actual per-hour parquet
-    count depends on which fields had data, which the count rollup
-    already tracks (and which doesn't affect the bundle's existence).
-    """
+    """Self-heal pass for the IP-spread bundle tree."""
     bundled_root = _hour_bundled_root(source)
     if not os.path.isdir(bundled_root):
-        # No bundle tree yet — backfill_missing_hour_bundles will create
-        # the initial bundles + ip_spread on its next pass; nothing to
-        # heal independently here.
         return {"missing": 0, "rebuilt": 0}
 
     end_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
@@ -596,12 +479,9 @@ def backfill_missing_hour_ip_spread(
                 continue
             hour = entry[len("hour=") :]
             parsed = parse_hour_token(hour)
-            if parsed is None:
+            if parsed is None or parsed < start_dt or parsed >= end_dt:
                 continue
-            if parsed < start_dt or parsed >= end_dt:
-                continue
-            ip_bundle = os.path.join(bundled_root, entry, IP_SPREAD_BUNDLE_FILENAME)
-            if not os.path.isfile(ip_bundle):
+            if not os.path.isfile(os.path.join(bundled_root, entry, IP_SPREAD_BUNDLE_FILENAME)):
                 missing.append(hour)
     except OSError:
         return {"missing": 0, "rebuilt": 0}
@@ -615,14 +495,7 @@ def backfill_missing_hour_ip_spread(
         len(missing),
         missing[:10] + (["…"] if len(missing) > 10 else []),
     )
-
-    # Re-trigger the full recompute for these hours. That writes per-
-    # field count + ip_spread, then bundles both — covers both the
-    # case where ip_spread was never built and the case where the
-    # bundle is missing but per-field ip_spread exists (idempotent
-    # re-bundle is cheap).
     recompute_touched_hours(service_id, source, set(missing))
-
     return {"missing": len(missing), "rebuilt": len(missing)}
 
 
@@ -656,45 +529,32 @@ def cleanup_old_rollups(
     *,
     hour_bundle_max_age_days: int | None = None,
 ) -> int:
-    """Delete per-hour and per-day rollup directories older than retention limits.
-
-    ``max_age_days <= 0`` disables cleanup (keep everything). Returns the
-    number of directories deleted. Safe to call concurrently with the
-    writers because we only ever delete hours/days STRICTLY older than the
-    cutoff — current and just-written hours/days are never candidates.
-    """
+    """Delete per-hour and per-day rollup directories older than retention limits."""
     if max_age_days <= 0:
         return 0
 
     cutoff = (datetime.now(UTC) - timedelta(days=max_age_days)).strftime("%Y-%m-%d-%H")
     day_cutoff = cutoff[:10]
-    if hour_bundle_max_age_days and hour_bundle_max_age_days > 0:
-        hour_cutoff = (datetime.now(UTC) - timedelta(days=hour_bundle_max_age_days)).strftime("%Y-%m-%d-%H")
-    else:
-        hour_cutoff = cutoff
+    hour_cutoff = (
+        (datetime.now(UTC) - timedelta(days=hour_bundle_max_age_days)).strftime("%Y-%m-%d-%H")
+        if hour_bundle_max_age_days and hour_bundle_max_age_days > 0
+        else cutoff
+    )
 
     deleted = 0
-
-    # 1 & 2. rollups/hour/field=*/hour=* and rollups/hour_ip_spread/field=*/hour=*
-    for root_dir, walk_label in (
-        (_rollups_root(source), "hour"),
-        (_ip_spread_root(source), "ip_spread"),
-    ):
+    for root_dir, walk_label in ((_rollups_root(source), "hour"), (_ip_spread_root(source), "ip_spread")):
         if not os.path.isdir(root_dir):
             continue
         try:
             for field_entry in os.listdir(root_dir):
-                if not field_entry.startswith("field="):
-                    continue
-                field_dir = os.path.join(root_dir, field_entry)
-                try:
-                    deleted += _prune_partition_dirs(field_dir, hour_cutoff, "hour=")
-                except OSError:
-                    continue
+                if field_entry.startswith("field="):
+                    try:
+                        deleted += _prune_partition_dirs(os.path.join(root_dir, field_entry), hour_cutoff, "hour=")
+                    except OSError:
+                        continue
         except OSError as e:
             logger.warning("[rollups] cleanup walk failed for %s (%s): %s", service_id, walk_label, e)
 
-    # 3. rollups/day_bundled/day=*
     day_bundled_root = _day_bundled_root(source)
     if os.path.isdir(day_bundled_root):
         try:
@@ -702,30 +562,26 @@ def cleanup_old_rollups(
         except OSError as e:
             logger.warning("[rollups] cleanup walk failed for %s (day_bundled): %s", service_id, e)
 
-    # 4. rollups/day/field=*/day=* (per-field day files redundant when day_bundled exists)
     day_root = _day_rollups_root(source)
     if os.path.isdir(day_root):
         try:
             for field_entry in os.listdir(day_root):
-                if not field_entry.startswith("field="):
-                    continue
-                field_dir = os.path.join(day_root, field_entry)
-                try:
-                    deleted += _prune_partition_dirs(
-                        field_dir,
-                        day_cutoff,
-                        "day=",
-                        should_delete=lambda day: (
-                            os.path.isfile(os.path.join(day_bundled_root, f"day={day}", "all_fields.parquet"))
-                            or day < day_cutoff
-                        ),
-                    )
-                except OSError:
-                    continue
+                if field_entry.startswith("field="):
+                    try:
+                        deleted += _prune_partition_dirs(
+                            os.path.join(day_root, field_entry),
+                            day_cutoff,
+                            "day=",
+                            should_delete=lambda day: (
+                                os.path.isfile(os.path.join(day_bundled_root, f"day={day}", "all_fields.parquet"))
+                                or day < day_cutoff
+                            ),
+                        )
+                    except OSError:
+                        continue
         except OSError as e:
             logger.warning("[rollups] cleanup walk failed for %s (day): %s", service_id, e)
 
-    # 5. rollups/hour_bundled/hour=*
     hour_bundled_root = _hour_bundled_root(source)
     if os.path.isdir(hour_bundled_root):
         try:
@@ -754,12 +610,7 @@ def _run_per_field_copy(
     where_sql: str,
     fields: list[str],
 ) -> None:
-    """Shared core of recompute_touched_hours and backfill_rollups.
-
-    One COPY query per field, writing to a per-field temp directory via
-    PARTITION_BY (field, hour), then publishing each hour-dir under the
-    per-service iceberg lock.
-    """
+    """Shared core of recompute_touched_hours and backfill_rollups."""
     from backend.core.duckdb import _cache_dir
     from backend.core.iceberg import execute_with_stale_view_retry
     from backend.core.iceberg.view import _get_service_lock
@@ -781,13 +632,8 @@ def _run_per_field_copy(
 
         for field in fields:
             if not _is_safe_ident(field):
-                # Belt-and-suspenders — _get_fields already filters, but
-                # defend against direct callers passing raw names.
                 logger.warning("[rollups] skipping unsafe field name: %r", field)
                 continue
-            # Virtual fields rollup the unnested CSV column instead of the
-            # column itself — skip-test on the BACKING column, not the
-            # virtual name (which never exists in the table schema).
             backing_col = _VIRTUAL_FIELD_BACKING.get(field)
             if backing_col is not None:
                 if backing_col not in cols or not _is_safe_ident(backing_col):
@@ -799,17 +645,18 @@ def _run_per_field_copy(
             shutil.rmtree(tmp_field_dir, ignore_errors=True)
             os.makedirs(tmp_field_dir, exist_ok=True)
 
-            if backing_col is not None:
-                inner = _build_virtual_field_copy_query(table_ident, field, backing_col, where_sql)
-            else:
-                inner = _build_copy_query(table_ident, field, where_sql)
+            inner = (
+                _build_virtual_field_copy_query(table_ident, field, backing_col, where_sql)
+                if backing_col is not None
+                else _build_copy_query(table_ident, field, where_sql)
+            )
             query = (
                 f"COPY ({inner}) TO '{tmp_field_dir}' "
                 "(FORMAT PARQUET, PARTITION_BY (field, hour), OVERWRITE_OR_IGNORE, COMPRESSION ZSTD)"
             )
             try:
                 execute_with_stale_view_retry(con, source, lambda c: c.execute(query))
-            except Exception as e:  # noqa: BLE001 — DuckDB raises typed errors but iceberg may wrap them
+            except Exception as e:  # noqa: BLE001
                 logger.warning("[rollups] %s: COPY failed for field=%s: %s", service_id, field, e)
                 shutil.rmtree(tmp_field_dir, ignore_errors=True)
                 continue
@@ -829,27 +676,7 @@ def _run_ip_spread_per_field(
     where_sql: str,
     fields: list[str],
 ) -> None:
-    """Build the per-(field, hour, value) HLL IP-spread parquets.
-
-    Parallel writer to :func:`_run_per_field_copy` for the count rollup.
-    Differs in that it can't run as a pure SQL ``COPY`` — DuckDB 1.5.3
-    doesn't expose HyperLogLog sketches as values, so the writer pulls
-    each ``(field, hour, value, ip_sample, ip_count_observed)`` row
-    into Python via Arrow, builds the sketch with
-    :class:`backend.utils.hll.HyperLogLog`, then writes the sketch
-    bytes + observed count + cap flag back out as parquet via
-    pyarrow's ``write_to_dataset``. The output tree mirrors the count
-    rollup's hive layout (``field=X/hour=Y/<file>.parquet``) so the
-    same ``_publish_field_partitions`` helper publishes both atomically
-    under the per-service iceberg lock.
-
-    Skips entirely when the table has no ``ip`` column or the
-    field-list doesn't intersect the schema; virtual fields are
-    skipped here too (the IP-spread question only makes sense for raw
-    indexed columns, not the unnested CSV virtual fields). A failure
-    on one field logs + continues so the rest of the fields still
-    publish on the same cron tick.
-    """
+    """Build the per-(field, hour, value) HLL IP-spread parquets."""
     from backend.core.duckdb import _cache_dir
     from backend.core.iceberg import execute_with_stale_view_retry
     from backend.core.iceberg.view import _get_service_lock
@@ -867,52 +694,23 @@ def _run_ip_spread_per_field(
         log_label="ip_spread describe",
     )
     try:
-        if cols is None:
-            return
-        if "ip" not in cols:
-            # Schema doesn't carry ip — no IP-spread to build. The
-            # security FE handles this case today (the fingerprint
-            # cards return empty when "ip" isn't present); the
-            # rollup writer's silence is the right signal.
+        if cols is None or "ip" not in cols:
             return
 
         for field in fields:
             if not _is_safe_ident(field):
                 logger.warning("[rollups] ip_spread: skipping unsafe field name: %r", field)
                 continue
-            # Virtual fields wouldn't add value here — the unnested
-            # signals (waf_sig elements, etc.) don't have a 1:1 IP
-            # relationship the way raw fingerprint columns do, so
-            # skip them and let the count rollup cover them alone.
-            if field in _VIRTUAL_FIELD_BACKING:
-                continue
-            if field not in cols:
+            if field in _VIRTUAL_FIELD_BACKING or field not in cols:
                 continue
 
             select_sql = _build_ip_spread_select_query(table_ident, field, where_sql)
             try:
-                # ``.to_arrow_table()`` materializes the whole result
-                # set as a pyarrow.Table; ``.arrow()`` returns a
-                # streaming RecordBatchReader (no ``num_rows`` attr).
-                # We need num_rows + column slicing below, so the
-                # eager path is the right pick. ``fetch_arrow_table``
-                # is the legacy alias of the same call and emits a
-                # DeprecationWarning under DuckDB 1.5+.
-                #
-                # Routed through the stale-view self-heal (Trap #35) so a
-                # cold-start DuckLake detach race (``schema "lake" does
-                # not exist``) re-attaches + retries instead of dropping
-                # the field — same hop the describe path already takes.
                 arrow_table = execute_with_stale_view_retry(
                     con, source, lambda c: c.execute(select_sql).to_arrow_table()
                 )
-            except Exception as e:  # noqa: BLE001 — DuckDB raises typed errors but iceberg may wrap them
-                logger.warning(
-                    "[rollups] %s: ip_spread SELECT failed for field=%s: %s",
-                    service_id,
-                    field,
-                    e,
-                )
+            except Exception as e:  # noqa: BLE001
+                logger.warning("[rollups] %s: ip_spread SELECT failed for field=%s: %s", service_id, field, e)
                 continue
 
             if arrow_table.num_rows == 0:
@@ -927,9 +725,6 @@ def _run_ip_spread_per_field(
                 hll = HyperLogLog()
                 if ip_list:
                     for ip in ip_list:
-                        # array_agg(DISTINCT) skips NULLs in DuckDB but
-                        # be defensive — a future ip-normalisation pass
-                        # might leave empty strings or accidental Nones.
                         if ip:
                             hll.add(ip)
                 sketch_blobs.append(hll.to_bytes())
@@ -950,10 +745,6 @@ def _run_ip_spread_per_field(
             shutil.rmtree(tmp_field_dir, ignore_errors=True)
             os.makedirs(tmp_field_dir, exist_ok=True)
             try:
-                # partition_cols drops the (field, hour) values from the
-                # parquet data files — they live in the hive path only,
-                # which matches how the reader will read them via
-                # read_parquet(..., hive_partitioning=1).
                 pq.write_to_dataset(
                     output,
                     root_path=tmp_field_dir,
@@ -962,12 +753,7 @@ def _run_ip_spread_per_field(
                     existing_data_behavior="overwrite_or_ignore",
                 )
             except Exception as e:
-                logger.warning(
-                    "[rollups] %s: ip_spread parquet write failed for field=%s: %s",
-                    service_id,
-                    field,
-                    e,
-                )
+                logger.warning("[rollups] %s: ip_spread parquet write failed for field=%s: %s", service_id, field, e)
                 shutil.rmtree(tmp_field_dir, ignore_errors=True)
                 continue
 
@@ -979,10 +765,7 @@ def _run_ip_spread_per_field(
             con.close()
 
 
-# ---------------------------------------------------------------------------
-# Per-hour time-series, overview, and session bundle writers
-# (formerly backend.core.rollups.time_series)
-# ---------------------------------------------------------------------------
+# ── Per-hour time-series, overview, and session bundle writers ──────────────
 
 
 def build_time_series_bundles(
@@ -993,53 +776,49 @@ def build_time_series_bundles(
     def eligibility(cols: set[str], table_ident: str) -> str | None:
         if "timestamp" not in cols:
             logger.warning(
-                "[rollups] %s: no `timestamp` column on %s; skipping time_series bundle",
-                service_id,
-                table_ident,
+                "[rollups] %s: no `timestamp` column on %s; skipping time_series bundle", service_id, table_ident
             )
             return None
 
         select_parts = [
             "time_bucket(INTERVAL '1 minute', timestamp) AS bucket",
             "CAST(COUNT(*) AS BIGINT) AS requests",
+            *(
+                (
+                    "CAST(COUNT(*) FILTER (WHERE status BETWEEN 400 AND 499) AS BIGINT) AS status_4xx",
+                    "CAST(COUNT(*) FILTER (WHERE status >= 500) AS BIGINT) AS status_5xx",
+                )
+                if "status" in cols
+                else ("CAST(0 AS BIGINT) AS status_4xx", "CAST(0 AS BIGINT) AS status_5xx")
+            ),
+            *(
+                (
+                    "CAST(COUNT(*) FILTER (WHERE cache IN ('HIT', 'HIT-STALE')) AS BIGINT) AS hits",
+                    "CAST(COUNT(*) FILTER (WHERE cache IS NOT NULL) AS BIGINT) AS cache_total",
+                )
+                if "cache" in cols
+                else ("CAST(0 AS BIGINT) AS hits", "CAST(0 AS BIGINT) AS cache_total")
+            ),
+            (
+                f"CAST({metric_expressions.sum_or_zero('resp_bytes')} AS BIGINT) AS resp_bytes_sum"
+                if "resp_bytes" in cols
+                else "CAST(0 AS BIGINT) AS resp_bytes_sum"
+            ),
+            *(
+                (
+                    f"CAST({metric_expressions.sum_or_zero('ttfb', zero='0.0')} AS DOUBLE) AS ttfb_sum",
+                    "CAST(COUNT(*) FILTER (WHERE ttfb IS NOT NULL) AS BIGINT) AS ttfb_count",
+                )
+                if "ttfb" in cols
+                else ("CAST(0.0 AS DOUBLE) AS ttfb_sum", "CAST(0 AS BIGINT) AS ttfb_count")
+            ),
         ]
-        if "status" in cols:
-            select_parts.append("CAST(COUNT(*) FILTER (WHERE status BETWEEN 400 AND 499) AS BIGINT) AS status_4xx")
-            select_parts.append("CAST(COUNT(*) FILTER (WHERE status >= 500) AS BIGINT) AS status_5xx")
-        else:
-            select_parts.append("CAST(0 AS BIGINT) AS status_4xx")
-            select_parts.append("CAST(0 AS BIGINT) AS status_5xx")
-
-        if "cache" in cols:
-            select_parts.append("CAST(COUNT(*) FILTER (WHERE cache IN ('HIT', 'HIT-STALE')) AS BIGINT) AS hits")
-            select_parts.append("CAST(COUNT(*) FILTER (WHERE cache IS NOT NULL) AS BIGINT) AS cache_total")
-        else:
-            select_parts.append("CAST(0 AS BIGINT) AS hits")
-            select_parts.append("CAST(0 AS BIGINT) AS cache_total")
-
-        if "resp_bytes" in cols:
-            resp_bytes_expr = metric_expressions.sum_or_zero("resp_bytes")
-            select_parts.append(f"CAST({resp_bytes_expr} AS BIGINT) AS resp_bytes_sum")
-        else:
-            select_parts.append("CAST(0 AS BIGINT) AS resp_bytes_sum")
-
-        if "ttfb" in cols:
-            ttfb_expr = metric_expressions.sum_or_zero("ttfb", zero="0.0")
-            select_parts.append(f"CAST({ttfb_expr} AS DOUBLE) AS ttfb_sum")
-            select_parts.append("CAST(COUNT(*) FILTER (WHERE ttfb IS NOT NULL) AS BIGINT) AS ttfb_count")
-        else:
-            select_parts.append("CAST(0.0 AS DOUBLE) AS ttfb_sum")
-            select_parts.append("CAST(0 AS BIGINT) AS ttfb_count")
-
         return ",\n               ".join(select_parts)
 
     def build_copy_sql(select_sql: object, table_ident: str, start_iso: str, end_iso: str, tmp_path: str) -> str:
         return (
-            f"COPY (SELECT {select_sql} "
-            f"FROM {table_ident} "
-            f"WHERE timestamp >= TIMESTAMPTZ '{start_iso}' "
-            f"AND timestamp < TIMESTAMPTZ '{end_iso}' "
-            f"GROUP BY 1) "
+            f"COPY (SELECT {select_sql} FROM {table_ident} "
+            f"WHERE timestamp >= TIMESTAMPTZ '{start_iso}' AND timestamp < TIMESTAMPTZ '{end_iso}' GROUP BY 1) "
             f"{parquet_zstd_target(tmp_path)}"
         )
 
@@ -1066,96 +845,77 @@ def build_overview_bundles(service_id: str, source: dict, hours: list[str]) -> i
     def eligibility(cols: set[str], table_ident: str) -> str | None:
         if "timestamp" not in cols:
             logger.warning(
-                "[rollups] %s: no `timestamp` column on %s; skipping overview bundle",
-                service_id,
-                table_ident,
+                "[rollups] %s: no `timestamp` column on %s; skipping overview bundle", service_id, table_ident
             )
             return None
 
+        has_cache = "cache" in cols
         select_parts: list[str] = [
             "CAST(COUNT(*) AS BIGINT) AS requests",
-        ]
-
-        has_cache = "cache" in cols
-        if has_cache:
-            select_parts.append(f"CAST(COUNT(*) FILTER (WHERE cache IN {_HIT_STATES}) AS BIGINT) AS hit_requests")
-            select_parts.append("CAST(COUNT(*) FILTER (WHERE cache = 'MISS') AS BIGINT) AS miss_requests")
-            select_parts.append("CAST(COUNT(*) FILTER (WHERE cache = 'PASS') AS BIGINT) AS pass_requests")
-            select_parts.append("CAST(COUNT(*) FILTER (WHERE cache = 'SYNTH') AS BIGINT) AS synth_requests")
-            select_parts.append(
-                "CAST(COUNT(*) FILTER (WHERE cache IN ('MISS', 'PASS', 'SYNTH', 'ERROR')) AS BIGINT) AS origin_requests"
-            )
-        else:
-            select_parts.extend(
-                [
+            *(
+                (
+                    f"CAST(COUNT(*) FILTER (WHERE cache IN {_HIT_STATES}) AS BIGINT) AS hit_requests",
+                    "CAST(COUNT(*) FILTER (WHERE cache = 'MISS') AS BIGINT) AS miss_requests",
+                    "CAST(COUNT(*) FILTER (WHERE cache = 'PASS') AS BIGINT) AS pass_requests",
+                    "CAST(COUNT(*) FILTER (WHERE cache = 'SYNTH') AS BIGINT) AS synth_requests",
+                    "CAST(COUNT(*) FILTER (WHERE cache IN ('MISS', 'PASS', 'SYNTH', 'ERROR')) AS BIGINT) AS origin_requests",
+                )
+                if has_cache
+                else (
                     "CAST(0 AS BIGINT) AS hit_requests",
                     "CAST(0 AS BIGINT) AS miss_requests",
                     "CAST(0 AS BIGINT) AS pass_requests",
                     "CAST(0 AS BIGINT) AS synth_requests",
                     "CAST(0 AS BIGINT) AS origin_requests",
-                ]
-            )
-
-        if "resp_bytes" in cols and has_cache:
-            bw_saved = metric_expressions.sum_or_zero("resp_bytes", where=f"cache IN {_HIT_STATES}")
-            select_parts.append(f"CAST({bw_saved} AS BIGINT) AS bandwidth_saved_bytes")
-        else:
-            select_parts.append("CAST(0 AS BIGINT) AS bandwidth_saved_bytes")
-
-        if "resp_bytes" in cols:
-            total_bw = metric_expressions.sum_or_zero("resp_bytes")
-            select_parts.append(f"CAST({total_bw} AS BIGINT) AS total_bandwidth_bytes")
-        else:
-            select_parts.append("CAST(0 AS BIGINT) AS total_bandwidth_bytes")
-
-        if "is_shield" in cols and has_cache:
-            select_parts.append(
-                f"CAST(COUNT(*) FILTER (WHERE is_shield = true AND cache IN {_HIT_STATES}) AS BIGINT)"
-                " AS shield_hit_requests"
-            )
-            select_parts.append("CAST(COUNT(*) FILTER (WHERE is_shield = true) AS BIGINT) AS shield_total_requests")
-        else:
-            select_parts.extend(
-                [
-                    "CAST(0 AS BIGINT) AS shield_hit_requests",
-                    "CAST(0 AS BIGINT) AS shield_total_requests",
-                ]
-            )
-
-        if "waf" in cols and "waf_resp" in cols:
-            select_parts.append("CAST(COUNT(*) FILTER (WHERE waf = 1 AND waf_resp = 406) AS BIGINT) AS threats_blocked")
-        else:
-            select_parts.append("CAST(0 AS BIGINT) AS threats_blocked")
-
-        if "elapsed" in cols and has_cache:
-            hit_el = metric_expressions.sum_or_zero("elapsed", zero="0.0", where=f"cache IN {_HIT_STATES}")
-            miss_el = metric_expressions.sum_or_zero("elapsed", zero="0.0", where="cache = 'MISS'")
-            select_parts.extend(
-                [
-                    f"CAST({hit_el} AS DOUBLE) AS hit_elapsed_sum",
+                )
+            ),
+            (
+                f"CAST({metric_expressions.sum_or_zero('resp_bytes', where=f'cache IN {_HIT_STATES}')} AS BIGINT) AS bandwidth_saved_bytes"
+                if "resp_bytes" in cols and has_cache
+                else "CAST(0 AS BIGINT) AS bandwidth_saved_bytes"
+            ),
+            (
+                f"CAST({metric_expressions.sum_or_zero('resp_bytes')} AS BIGINT) AS total_bandwidth_bytes"
+                if "resp_bytes" in cols
+                else "CAST(0 AS BIGINT) AS total_bandwidth_bytes"
+            ),
+            *(
+                (
+                    f"CAST(COUNT(*) FILTER (WHERE is_shield = true AND cache IN {_HIT_STATES}) AS BIGINT) AS shield_hit_requests",
+                    "CAST(COUNT(*) FILTER (WHERE is_shield = true) AS BIGINT) AS shield_total_requests",
+                )
+                if "is_shield" in cols and has_cache
+                else ("CAST(0 AS BIGINT) AS shield_hit_requests", "CAST(0 AS BIGINT) AS shield_total_requests")
+            ),
+            (
+                "CAST(COUNT(*) FILTER (WHERE waf = 1 AND waf_resp = 406) AS BIGINT) AS threats_blocked"
+                if "waf" in cols and "waf_resp" in cols
+                else "CAST(0 AS BIGINT) AS threats_blocked"
+            ),
+            *(
+                (
+                    f"CAST({metric_expressions.sum_or_zero('elapsed', zero='0.0', where=f'cache IN {_HIT_STATES}')} AS DOUBLE) AS hit_elapsed_sum",
                     f"CAST(COUNT(elapsed) FILTER (WHERE cache IN {_HIT_STATES}) AS BIGINT) AS hit_elapsed_count",
-                    f"CAST({miss_el} AS DOUBLE) AS miss_elapsed_sum",
+                    "CAST("
+                    + metric_expressions.sum_or_zero("elapsed", zero="0.0", where="cache = 'MISS'")
+                    + " AS DOUBLE) AS miss_elapsed_sum",
                     "CAST(COUNT(elapsed) FILTER (WHERE cache = 'MISS') AS BIGINT) AS miss_elapsed_count",
-                ]
-            )
-        else:
-            select_parts.extend(
-                [
+                )
+                if "elapsed" in cols and has_cache
+                else (
                     "CAST(0.0 AS DOUBLE) AS hit_elapsed_sum",
                     "CAST(0 AS BIGINT) AS hit_elapsed_count",
                     "CAST(0.0 AS DOUBLE) AS miss_elapsed_sum",
                     "CAST(0 AS BIGINT) AS miss_elapsed_count",
-                ]
-            )
-
+                )
+            ),
+        ]
         return ",\n               ".join(select_parts)
 
     def build_copy_sql(select_sql: object, table_ident: str, start_iso: str, end_iso: str, tmp_path: str) -> str:
         return (
             f"COPY (SELECT TIMESTAMPTZ '{start_iso}' AS hour_start, {select_sql} "
-            f"FROM {table_ident} "
-            f"WHERE timestamp >= TIMESTAMPTZ '{start_iso}' "
-            f"AND timestamp < TIMESTAMPTZ '{end_iso}') "
+            f"FROM {table_ident} WHERE timestamp >= TIMESTAMPTZ '{start_iso}' AND timestamp < TIMESTAMPTZ '{end_iso}') "
             f"{parquet_zstd_target(tmp_path)}"
         )
 
@@ -1173,8 +933,7 @@ def build_overview_bundles(service_id: str, source: dict, hours: list[str]) -> i
 
 
 def backfill_overview_bundles(service_id: str, source: dict) -> int:
-    """Build overview.parquet for every closed hour that already has
-    ``all_fields.parquet`` but no ``overview.parquet``."""
+    """Build overview.parquet for every closed hour that has all_fields.parquet but no overview.parquet."""
     return backfill_missing_bundles(
         service_id,
         source,
@@ -1199,7 +958,6 @@ def build_session_bundles(service_id: str, source: dict, hours: list[str]) -> in
             return None
 
         ja4_expr = '"ja4"' if "ja4" in cols else "CAST(NULL AS VARCHAR)"
-
         select_parts = [
             "time_bucket(INTERVAL '1 hour', timestamp) AS bucket",
             'CAST("ip" AS VARCHAR) AS ip',
@@ -1207,66 +965,54 @@ def build_session_bundles(service_id: str, source: dict, hours: list[str]) -> in
             "MIN(timestamp) AS first_ts",
             "MAX(timestamp) AS last_ts",
             "CAST(COUNT(*) AS BIGINT) AS req_count",
-        ]
-        if "country" in cols:
-            select_parts.append('CAST(MIN("country") AS VARCHAR) AS country')
-        else:
-            select_parts.append("CAST(NULL AS VARCHAR) AS country")
-        if "asn" in cols:
-            select_parts.append('CAST(MIN("asn") AS INTEGER) AS asn')
-        else:
-            select_parts.append("CAST(NULL AS INTEGER) AS asn")
-        if "status" in cols:
-            select_parts.append(
-                'CAST(SUM(CASE WHEN "status" BETWEEN 400 AND 499 THEN 1 ELSE 0 END) AS BIGINT) AS reqs_4xx'
-            )
-            select_parts.append('CAST(SUM(CASE WHEN "status" >= 500 THEN 1 ELSE 0 END) AS BIGINT) AS reqs_5xx')
-        else:
-            select_parts.append("CAST(0 AS BIGINT) AS reqs_4xx")
-            select_parts.append("CAST(0 AS BIGINT) AS reqs_5xx")
-        if "resp_bytes" in cols:
-            tot_bytes = metric_expressions.sum_or_zero('"resp_bytes"')
-            select_parts.append(f"CAST({tot_bytes} AS BIGINT) AS total_bytes")
-        else:
-            select_parts.append("CAST(0 AS BIGINT) AS total_bytes")
-        if "tcp_rtt" in cols:
-            rtt_s = metric_expressions.sum_or_zero('"tcp_rtt"', zero="0.0")
-            select_parts.append(f"CAST({rtt_s} AS DOUBLE) AS rtt_sum")
-            select_parts.append('CAST(COUNT(*) FILTER (WHERE "tcp_rtt" IS NOT NULL) AS BIGINT) AS rtt_count')
-        else:
-            select_parts.append("CAST(0.0 AS DOUBLE) AS rtt_sum")
-            select_parts.append("CAST(0 AS BIGINT) AS rtt_count")
-        if "edge" in cols:
-            select_parts.append('CAST(SUM(CASE WHEN "edge" = 1 THEN 1 ELSE 0 END) AS BIGINT) AS edge_count')
-            select_parts.append('CAST(SUM(CASE WHEN "edge" = 0 THEN 1 ELSE 0 END) AS BIGINT) AS shield_count')
-        else:
-            select_parts.append("CAST(0 AS BIGINT) AS edge_count")
-            select_parts.append("CAST(0 AS BIGINT) AS shield_count")
-        if "ua" in cols:
-            select_parts.append('CAST(MIN("ua") AS VARCHAR) AS ua_min')
-        else:
-            select_parts.append("CAST(NULL AS VARCHAR) AS ua_min")
-        if "edge_sid" in cols:
-            select_parts.append('CAST(MAX("edge_sid") AS VARCHAR) AS edge_sid_max')
-        else:
-            select_parts.append("CAST(NULL AS VARCHAR) AS edge_sid_max")
-        if "cmcd_sid" in cols:
-            select_parts.append(
+            'CAST(MIN("country") AS VARCHAR) AS country' if "country" in cols else "CAST(NULL AS VARCHAR) AS country",
+            'CAST(MIN("asn") AS INTEGER) AS asn' if "asn" in cols else "CAST(NULL AS INTEGER) AS asn",
+            *(
+                (
+                    'CAST(SUM(CASE WHEN "status" BETWEEN 400 AND 499 THEN 1 ELSE 0 END) AS BIGINT) AS reqs_4xx',
+                    'CAST(SUM(CASE WHEN "status" >= 500 THEN 1 ELSE 0 END) AS BIGINT) AS reqs_5xx',
+                )
+                if "status" in cols
+                else ("CAST(0 AS BIGINT) AS reqs_4xx", "CAST(0 AS BIGINT) AS reqs_5xx")
+            ),
+            (
+                f"CAST({metric_expressions.sum_or_zero('"resp_bytes"')} AS BIGINT) AS total_bytes"
+                if "resp_bytes" in cols
+                else "CAST(0 AS BIGINT) AS total_bytes"
+            ),
+            *(
+                (
+                    f"CAST({metric_expressions.sum_or_zero('"tcp_rtt"', zero='0.0')} AS DOUBLE) AS rtt_sum",
+                    'CAST(COUNT(*) FILTER (WHERE "tcp_rtt" IS NOT NULL) AS BIGINT) AS rtt_count',
+                )
+                if "tcp_rtt" in cols
+                else ("CAST(0.0 AS DOUBLE) AS rtt_sum", "CAST(0 AS BIGINT) AS rtt_count")
+            ),
+            *(
+                (
+                    'CAST(SUM(CASE WHEN "edge" = 1 THEN 1 ELSE 0 END) AS BIGINT) AS edge_count',
+                    'CAST(SUM(CASE WHEN "edge" = 0 THEN 1 ELSE 0 END) AS BIGINT) AS shield_count',
+                )
+                if "edge" in cols
+                else ("CAST(0 AS BIGINT) AS edge_count", "CAST(0 AS BIGINT) AS shield_count")
+            ),
+            'CAST(MIN("ua") AS VARCHAR) AS ua_min' if "ua" in cols else "CAST(NULL AS VARCHAR) AS ua_min",
+            'CAST(MAX("edge_sid") AS VARCHAR) AS edge_sid_max'
+            if "edge_sid" in cols
+            else "CAST(NULL AS VARCHAR) AS edge_sid_max",
+            (
                 'CAST(COUNT(*) FILTER (WHERE "cmcd_sid" IS NOT NULL AND "cmcd_sid" != \'\') AS BIGINT) AS cmcd_count'
-            )
-        else:
-            select_parts.append("CAST(0 AS BIGINT) AS cmcd_count")
-
+                if "cmcd_sid" in cols
+                else "CAST(0 AS BIGINT) AS cmcd_count"
+            ),
+        ]
         return ",\n               ".join(select_parts)
 
     def build_copy_sql(select_sql: object, table_ident: str, start_iso: str, end_iso: str, tmp_path: str) -> str:
         return (
-            f"COPY (SELECT {select_sql} "
-            f"FROM {table_ident} "
-            f"WHERE timestamp >= TIMESTAMPTZ '{start_iso}' "
-            f"AND timestamp < TIMESTAMPTZ '{end_iso}' "
-            f'AND "ip" IS NOT NULL '
-            f"GROUP BY 1, 2, 3) "
+            f"COPY (SELECT {select_sql} FROM {table_ident} "
+            f"WHERE timestamp >= TIMESTAMPTZ '{start_iso}' AND timestamp < TIMESTAMPTZ '{end_iso}' "
+            f'AND "ip" IS NOT NULL GROUP BY 1, 2, 3) '
             f"{parquet_zstd_target(tmp_path)}"
         )
 
@@ -1281,14 +1027,6 @@ def build_session_bundles(service_id: str, source: dict, hours: list[str]) -> in
         build_copy_sql=build_copy_sql,
         logger=logger,
     )
-
-
-for _legacy_mod in (
-    "backend.core.rollups.time_series",
-    "backend.core.rollups.overview",
-    "backend.core.rollups.sessions",
-):
-    sys.modules[_legacy_mod] = sys.modules[__name__]
 
 
 # ── RUM rollup writers (folded from backend.core.rollups.rum) ────────────────
@@ -1331,16 +1069,7 @@ def _rum_raw_latest(con: Any) -> Any:
 
 
 def rum_count_and_latest(con: Any) -> tuple[int, Any]:
-    """Return ``(beacon_count, latest_timestamp)`` for the RUM store.
-
-    Freshness (``latest_timestamp``) is ALWAYS the raw beacon event-time
-    MAX(timestamp), mirroring the request side (AGENTS.md Trap #39). The
-    precomputed aggregate tables are only a fast *count* path, and only
-    when they actually hold rows — an existing-but-empty aggregate (rollup
-    lag, a failed recompute tick, or a service whose first rollup hasn't
-    run yet) must fall through to a raw distinct-beacon count so the header
-    never reports "Never" over live, queryable beacons.
-    """
+    """Return ``(beacon_count, latest_timestamp)`` for the RUM store."""
     if table_exists(con, "rum_vitals_aggregates") and table_exists(con, "rum_error_aggregates"):
         try:
             v_res = con.execute(
@@ -1356,8 +1085,6 @@ def rum_count_and_latest(con: Any) -> tuple[int, Any]:
         except Exception:
             logger.debug("rum_count_and_latest: step failed (ignored)", exc_info=True)
 
-    # Raw fallback: aggregates missing, empty, or errored. Count distinct
-    # beacons and read freshness straight from the raw tables.
     distinct_id = "hash(COALESCE(NULLIF(req_id, ''), concat(cid, '_', CAST(epoch(timestamp) AS BIGINT))))"
     cnt = 0
     for tbl in ("client_vitals", "client_errors"):
@@ -1370,11 +1097,7 @@ def rum_count_and_latest(con: Any) -> tuple[int, Any]:
 
 
 def recompute_rum_aggregates(con: Any, service_id: str, hours: list[datetime] | list[str] | None = None) -> None:
-    """Ensure RUM aggregate tables exist, find active hours, and update them idempotently.
-
-    Serialized per service: the delete-then-insert below is not atomic, so two concurrent runs (commit cron, compaction
-    heal, admin recompute) over the same hours each delete nothing and both insert, doubling every beacon count.
-    """
+    """Ensure RUM aggregate tables exist, find active hours, and update them idempotently."""
     with _recompute_lock(service_id):
         _recompute_rum_aggregates_locked(con, service_id, hours)
 
@@ -1383,77 +1106,46 @@ def _recompute_rum_aggregates_locked(con: Any, service_id: str, hours: list[date
     logger.info("[rum_rollups] Ensuring RUM aggregate schemas exist...")
     con.execute("""
         CREATE TABLE IF NOT EXISTS rum_vitals_aggregates (
-            service_id VARCHAR,
-            bucket_start TIMESTAMPTZ,
-            dimension VARCHAR,
-            value VARCHAR,
-            event_count BIGINT,
-            value_sum DOUBLE,
-            good_count BIGINT,
-            ni_count BIGINT,
-            poor_count BIGINT,
-            p50_value DOUBLE,
-            p75_value DOUBLE,
-            p99_value DOUBLE
+            service_id VARCHAR, bucket_start TIMESTAMPTZ, dimension VARCHAR, value VARCHAR,
+            event_count BIGINT, value_sum DOUBLE, good_count BIGINT, ni_count BIGINT,
+            poor_count BIGINT, p50_value DOUBLE, p75_value DOUBLE, p99_value DOUBLE
         )
     """)
     con.execute("""
         CREATE TABLE IF NOT EXISTS rum_error_aggregates (
-            service_id VARCHAR,
-            bucket_start TIMESTAMPTZ,
-            dimension VARCHAR,
-            value VARCHAR,
+            service_id VARCHAR, bucket_start TIMESTAMPTZ, dimension VARCHAR, value VARCHAR,
             error_count BIGINT
         )
     """)
 
     has_vitals = table_exists(con, "client_vitals")
     has_errors = table_exists(con, "client_errors")
-
     if not has_vitals and not has_errors:
         logger.info("[rum_rollups] %s: No client_vitals or client_errors table found. Skipping.", service_id)
         return
 
-    # 2. Identify the hours that have raw data
     hours_set: set[datetime] = set()
     if hours is not None:
         for h in hours:
             if isinstance(h, str):
                 try:
-                    parsed_dt = _normalize_hour_dt(datetime.fromisoformat(h.replace("Z", "+00:00")))
-                    hours_set.add(parsed_dt)
+                    hours_set.add(_normalize_hour_dt(datetime.fromisoformat(h.replace("Z", "+00:00"))))
                 except ValueError:
                     pass
             elif isinstance(h, datetime):
                 hours_set.add(_normalize_hour_dt(h))
     else:
-        if has_vitals:
-            try:
-                res = con.execute(
-                    "SELECT DISTINCT DATE_TRUNC('hour', timestamp) FROM client_vitals WHERE timestamp IS NOT NULL"
-                ).fetchall()
-                for r in res:
-                    if r[0]:
-                        dt_val = r[0]
-                        if isinstance(dt_val, datetime):
-                            dt_val = _normalize_hour_dt(dt_val)
-                        hours_set.add(dt_val)
-            except Exception as e:
-                logger.warning("[rum_rollups] Failed to query active hours from client_vitals: %s", e)
-
-        if has_errors:
-            try:
-                res = con.execute(
-                    "SELECT DISTINCT DATE_TRUNC('hour', timestamp) FROM client_errors WHERE timestamp IS NOT NULL"
-                ).fetchall()
-                for r in res:
-                    if r[0]:
-                        dt_val = r[0]
-                        if isinstance(dt_val, datetime):
-                            dt_val = _normalize_hour_dt(dt_val)
-                        hours_set.add(dt_val)
-            except Exception as e:
-                logger.warning("[rum_rollups] Failed to query active hours from client_errors: %s", e)
+        for tbl, present in (("client_vitals", has_vitals), ("client_errors", has_errors)):
+            if present:
+                try:
+                    res = con.execute(
+                        f"SELECT DISTINCT DATE_TRUNC('hour', timestamp) FROM {tbl} WHERE timestamp IS NOT NULL"
+                    ).fetchall()
+                    for r in res:
+                        if r[0]:
+                            hours_set.add(_normalize_hour_dt(r[0]) if isinstance(r[0], datetime) else r[0])
+                except Exception as e:
+                    logger.warning("[rum_rollups] Failed to query active hours from %s: %s", tbl, e)
 
     if not hours_set:
         logger.info("[rum_rollups] %s: No active RUM data hours found. Skipping.", service_id)
@@ -1462,10 +1154,8 @@ def _recompute_rum_aggregates_locked(con: Any, service_id: str, hours: list[date
     if any(getattr(h, "tzinfo", None) is not None for h in hours_set):
         hours_set = {ensure_utc(h) for h in hours_set}
 
-    # 3. Format hours as SQL TIMESTAMPTZ list
-    hours_list = sorted(list(hours_set))
+    hours_list = sorted(hours_set)
     hours_str = ", ".join(f"TIMESTAMPTZ '{h.isoformat()}'" for h in hours_list)
-
     logger.info(
         "[rum_rollups] %s: Recomputing aggregates for %d hours: %s",
         service_id,
@@ -1473,7 +1163,6 @@ def _recompute_rum_aggregates_locked(con: Any, service_id: str, hours: list[date
         [h.isoformat() for h in hours_list],
     )
 
-    # 4. Delete existing aggregates for these hours
     con.execute(
         f"DELETE FROM rum_vitals_aggregates WHERE service_id = ? AND bucket_start IN ({hours_str})", [service_id]
     )
@@ -1483,286 +1172,130 @@ def _recompute_rum_aggregates_locked(con: Any, service_id: str, hours: list[date
 
     distinct_id = "hash(COALESCE(NULLIF(req_id, ''), concat(cid, '_', CAST(epoch(timestamp) AS BIGINT))))"
 
-    # 5. Populate vitals aggregates
     if has_vitals:
+
+        def _v_dim(
+            dim: str,
+            val_expr: str,
+            evt_expr: str,
+            *,
+            group_col: str,
+            val_sum: str = "0.0",
+            good: str = "0",
+            ni: str = "0",
+            poor: str = "0",
+            p50: str = "0.0",
+            p75: str = "0.0",
+            p99: str = "0.0",
+            extra_where: str = "",
+        ) -> str:
+            return (
+                f"SELECT ? AS service_id, DATE_TRUNC('hour', timestamp) AS bucket_start, "
+                f"'{dim}' AS dimension, {val_expr} AS value, {evt_expr} AS event_count, "
+                f"{val_sum} AS value_sum, {good} AS good_count, {ni} AS ni_count, {poor} AS poor_count, "
+                f"{p50} AS p50_value, {p75} AS p75_value, {p99} AS p99_value "
+                f"FROM client_vitals WHERE DATE_TRUNC('hour', timestamp) IN ({hours_str}){extra_where} "
+                f"GROUP BY bucket_start, {group_col}"
+            )
+
+        p75_expr = "CAST(PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY metric_value) AS DOUBLE)"
+        vitals_selects = [
+            _v_dim(
+                "total",
+                "CASE WHEN metric_name LIKE 'event_%' THEN 'interactions' ELSE 'pageviews' END",
+                f"COUNT(DISTINCT {distinct_id})",
+                group_col="value",
+            ),
+            _v_dim(
+                "metric_name",
+                "metric_name",
+                "COUNT(*)",
+                group_col="metric_name",
+                val_sum="CAST(COALESCE(SUM(metric_value), 0.0) AS DOUBLE)",
+                good="COUNT(*) FILTER (WHERE metric_rating = 'good')",
+                ni="COUNT(*) FILTER (WHERE metric_rating = 'needs_improvement')",
+                poor="COUNT(*) FILTER (WHERE metric_rating = 'poor')",
+                p50="CAST(MEDIAN(metric_value) AS DOUBLE)",
+                p75=p75_expr,
+                p99="CAST(PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY metric_value) AS DOUBLE)",
+            ),
+            _v_dim("browser", "COALESCE(browser, 'Unknown')", f"COUNT(DISTINCT {distinct_id})", group_col="browser"),
+            _v_dim("os", "COALESCE(os, 'Unknown')", f"COUNT(DISTINCT {distinct_id})", group_col="os"),
+            _v_dim("device", "COALESCE(device, 'Unknown')", f"COUNT(DISTINCT {distinct_id})", group_col="device"),
+            _v_dim(
+                "pathname",
+                "pathname",
+                f"COUNT(DISTINCT {distinct_id})",
+                group_col="pathname",
+                extra_where=" AND pathname IS NOT NULL",
+            ),
+            _v_dim(
+                "path_metric_load",
+                "pathname",
+                "COUNT(*)",
+                group_col="pathname",
+                val_sum="CAST(COALESCE(SUM(metric_value), 0.0) AS DOUBLE)",
+                extra_where=" AND pathname IS NOT NULL AND metric_name IN ('duration', 'pageLoadTime', 'load_time', 'pageLoad', 'LCP', 'lcp', 'ttfb', 'TTFB', 'fcp', 'FCP')",
+            ),
+            _v_dim(
+                "path_metric_lcp",
+                "pathname",
+                "COUNT(*)",
+                group_col="pathname",
+                p75=p75_expr,
+                extra_where=" AND pathname IS NOT NULL AND metric_name IN ('LCP', 'lcp')",
+            ),
+            _v_dim(
+                "path_metric_cls",
+                "pathname",
+                "COUNT(*)",
+                group_col="pathname",
+                p75=p75_expr,
+                extra_where=" AND pathname IS NOT NULL AND metric_name IN ('CLS', 'cls')",
+            ),
+        ]
         con.execute(
-            f"""
-            INSERT INTO rum_vitals_aggregates
-            -- Dimension: total
-            SELECT
-                ? AS service_id,
-                DATE_TRUNC('hour', timestamp) AS bucket_start,
-                'total' AS dimension,
-                CASE WHEN metric_name LIKE 'event_%' THEN 'interactions' ELSE 'pageviews' END AS value,
-                COUNT(DISTINCT {distinct_id}) AS event_count,
-                0.0 AS value_sum,
-                0 AS good_count,
-                0 AS ni_count,
-                0 AS poor_count,
-                0.0 AS p50_value,
-                0.0 AS p75_value,
-                0.0 AS p99_value
-            FROM client_vitals
-            WHERE DATE_TRUNC('hour', timestamp) IN ({hours_str})
-            GROUP BY bucket_start, value
-
-            UNION ALL
-
-            -- Dimension: metric_name
-            SELECT
-                ? AS service_id,
-                DATE_TRUNC('hour', timestamp) AS bucket_start,
-                'metric_name' AS dimension,
-                metric_name AS value,
-                COUNT(*) AS event_count,
-                CAST(COALESCE(SUM(metric_value), 0.0) AS DOUBLE) AS value_sum,
-                COUNT(*) FILTER (WHERE metric_rating = 'good') AS good_count,
-                COUNT(*) FILTER (WHERE metric_rating = 'needs_improvement') AS ni_count,
-                COUNT(*) FILTER (WHERE metric_rating = 'poor') AS poor_count,
-                CAST(MEDIAN(metric_value) AS DOUBLE) AS p50_value,
-                CAST(PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY metric_value) AS DOUBLE) AS p75_value,
-                CAST(PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY metric_value) AS DOUBLE) AS p99_value
-            FROM client_vitals
-            WHERE DATE_TRUNC('hour', timestamp) IN ({hours_str})
-            GROUP BY bucket_start, metric_name
-
-            UNION ALL
-
-            -- Dimension: browser
-            SELECT
-                ? AS service_id,
-                DATE_TRUNC('hour', timestamp) AS bucket_start,
-                'browser' AS dimension,
-                COALESCE(browser, 'Unknown') AS value,
-                COUNT(DISTINCT {distinct_id}) AS event_count,
-                0.0 AS value_sum,
-                0 AS good_count,
-                0 AS ni_count,
-                0 AS poor_count,
-                0.0 AS p50_value,
-                0.0 AS p75_value,
-                0.0 AS p99_value
-            FROM client_vitals
-            WHERE DATE_TRUNC('hour', timestamp) IN ({hours_str})
-            GROUP BY bucket_start, browser
-
-            UNION ALL
-
-            -- Dimension: os
-            SELECT
-                ? AS service_id,
-                DATE_TRUNC('hour', timestamp) AS bucket_start,
-                'os' AS dimension,
-                COALESCE(os, 'Unknown') AS value,
-                COUNT(DISTINCT {distinct_id}) AS event_count,
-                0.0 AS value_sum,
-                0 AS good_count,
-                0 AS ni_count,
-                0 AS poor_count,
-                0.0 AS p50_value,
-                0.0 AS p75_value,
-                0.0 AS p99_value
-            FROM client_vitals
-            WHERE DATE_TRUNC('hour', timestamp) IN ({hours_str})
-            GROUP BY bucket_start, os
-
-            UNION ALL
-
-            -- Dimension: device
-            SELECT
-                ? AS service_id,
-                DATE_TRUNC('hour', timestamp) AS bucket_start,
-                'device' AS dimension,
-                COALESCE(device, 'Unknown') AS value,
-                COUNT(DISTINCT {distinct_id}) AS event_count,
-                0.0 AS value_sum,
-                0 AS good_count,
-                0 AS ni_count,
-                0 AS poor_count,
-                0.0 AS p50_value,
-                0.0 AS p75_value,
-                0.0 AS p99_value
-            FROM client_vitals
-            WHERE DATE_TRUNC('hour', timestamp) IN ({hours_str})
-            GROUP BY bucket_start, device
-
-            UNION ALL
-
-            -- Dimension: pathname
-            SELECT
-                ? AS service_id,
-                DATE_TRUNC('hour', timestamp) AS bucket_start,
-                'pathname' AS dimension,
-                pathname AS value,
-                COUNT(DISTINCT {distinct_id}) AS event_count,
-                0.0 AS value_sum,
-                0 AS good_count,
-                0 AS ni_count,
-                0 AS poor_count,
-                0.0 AS p50_value,
-                0.0 AS p75_value,
-                0.0 AS p99_value
-            FROM client_vitals
-            WHERE DATE_TRUNC('hour', timestamp) IN ({hours_str}) AND pathname IS NOT NULL
-            GROUP BY bucket_start, pathname
-
-            UNION ALL
-
-            -- Dimension: path_metric_load
-            SELECT
-                ? AS service_id,
-                DATE_TRUNC('hour', timestamp) AS bucket_start,
-                'path_metric_load' AS dimension,
-                pathname AS value,
-                COUNT(*) AS event_count,
-                CAST(COALESCE(SUM(metric_value), 0.0) AS DOUBLE) AS value_sum,
-                0 AS good_count,
-                0 AS ni_count,
-                0 AS poor_count,
-                0.0 AS p50_value,
-                0.0 AS p75_value,
-                0.0 AS p99_value
-            FROM client_vitals
-            WHERE DATE_TRUNC('hour', timestamp) IN ({hours_str})
-              AND pathname IS NOT NULL
-              AND metric_name IN ('duration', 'pageLoadTime', 'load_time', 'pageLoad', 'LCP', 'lcp', 'ttfb', 'TTFB', 'fcp', 'FCP')
-            GROUP BY bucket_start, pathname
-
-            UNION ALL
-
-            -- Dimension: path_metric_lcp
-            SELECT
-                ? AS service_id,
-                DATE_TRUNC('hour', timestamp) AS bucket_start,
-                'path_metric_lcp' AS dimension,
-                pathname AS value,
-                COUNT(*) AS event_count,
-                0.0 AS value_sum,
-                0 AS good_count,
-                0 AS ni_count,
-                0 AS poor_count,
-                0.0 AS p50_value,
-                CAST(PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY metric_value) AS DOUBLE) AS p75_value,
-                0.0 AS p99_value
-            FROM client_vitals
-            WHERE DATE_TRUNC('hour', timestamp) IN ({hours_str})
-              AND pathname IS NOT NULL
-              AND metric_name IN ('LCP', 'lcp')
-            GROUP BY bucket_start, pathname
-
-            UNION ALL
-
-            -- Dimension: path_metric_cls
-            SELECT
-                ? AS service_id,
-                DATE_TRUNC('hour', timestamp) AS bucket_start,
-                'path_metric_cls' AS dimension,
-                pathname AS value,
-                COUNT(*) AS event_count,
-                0.0 AS value_sum,
-                0 AS good_count,
-                0 AS ni_count,
-                0 AS poor_count,
-                0.0 AS p50_value,
-                CAST(PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY metric_value) AS DOUBLE) AS p75_value,
-                0.0 AS p99_value
-            FROM client_vitals
-            WHERE DATE_TRUNC('hour', timestamp) IN ({hours_str})
-              AND pathname IS NOT NULL
-              AND metric_name IN ('CLS', 'cls')
-            GROUP BY bucket_start, pathname
-        """,
+            "INSERT INTO rum_vitals_aggregates\n" + "\nUNION ALL\n".join(vitals_selects),
             [service_id] * 9,
         )
 
-    # 6. Populate error aggregates
     if has_errors:
         con.execute(
             f"""
             INSERT INTO rum_error_aggregates
-            -- Dimension: total
-            SELECT
-                ? AS service_id,
-                DATE_TRUNC('hour', timestamp) AS bucket_start,
-                'total' AS dimension,
-                'errors' AS value,
-                COUNT(DISTINCT {distinct_id}) AS error_count
-            FROM client_errors
-            WHERE DATE_TRUNC('hour', timestamp) IN ({hours_str})
-            GROUP BY bucket_start
-
+            SELECT ? AS service_id, DATE_TRUNC('hour', timestamp) AS bucket_start, 'total' AS dimension,
+                   'errors' AS value, COUNT(DISTINCT {distinct_id}) AS error_count
+            FROM client_errors WHERE DATE_TRUNC('hour', timestamp) IN ({hours_str}) GROUP BY bucket_start
             UNION ALL
-
-            -- Dimension: pathname
-            SELECT
-                ? AS service_id,
-                DATE_TRUNC('hour', timestamp) AS bucket_start,
-                'pathname' AS dimension,
-                pathname AS value,
-                COUNT(DISTINCT {distinct_id}) AS error_count
-            FROM client_errors
-            WHERE DATE_TRUNC('hour', timestamp) IN ({hours_str}) AND pathname IS NOT NULL
+            SELECT ? AS service_id, DATE_TRUNC('hour', timestamp) AS bucket_start, 'pathname' AS dimension,
+                   pathname AS value, COUNT(DISTINCT {distinct_id}) AS error_count
+            FROM client_errors WHERE DATE_TRUNC('hour', timestamp) IN ({hours_str}) AND pathname IS NOT NULL
             GROUP BY bucket_start, pathname
-
             UNION ALL
-
-            -- Dimension: exception
-            SELECT
-                ? AS service_id,
-                DATE_TRUNC('hour', timestamp) AS bucket_start,
-                'exception' AS dimension,
-                concat(COALESCE(error_message, ''), '|', COALESCE(error_file, ''), '|', CAST(COALESCE(error_line, 0) AS VARCHAR), '|', CAST(COALESCE(error_col, 0) AS VARCHAR)) AS value,
-                COUNT(*) AS error_count
-            FROM client_errors
-            WHERE DATE_TRUNC('hour', timestamp) IN ({hours_str})
-            GROUP BY bucket_start, value
+            SELECT ? AS service_id, DATE_TRUNC('hour', timestamp) AS bucket_start, 'exception' AS dimension,
+                   concat(COALESCE(error_message, ''), '|', COALESCE(error_file, ''), '|', CAST(COALESCE(error_line, 0) AS VARCHAR), '|', CAST(COALESCE(error_col, 0) AS VARCHAR)) AS value,
+                   COUNT(*) AS error_count
+            FROM client_errors WHERE DATE_TRUNC('hour', timestamp) IN ({hours_str}) GROUP BY bucket_start, value
         """,
             [service_id] * 3,
         )
 
-    # 7. Populate a single unified beacon count per hour. This MUST match the
-    # header badge's cross-table COUNT(DISTINCT distinct_id) semantics
-    # (backend/routers/bootstrap.py) — summing the vitals 'pageviews' +
-    # 'interactions' dimension counts (step 5) plus the error 'errors'
-    # dimension count (step 6) double-counts any physical beacon event that
-    # emits more than one row sharing a distinct_id (e.g. a vitals metric AND
-    # an interaction event from the same page load). Computed directly from
-    # a UNION of the raw tables rather than from the per-dimension aggregates
-    # above, since those are already partitioned in a way that loses the
-    # cross-partition distinct_id overlap.
-    union_parts = []
-    if has_vitals:
-        union_parts.append(
-            f"SELECT timestamp, {distinct_id} AS distinct_id FROM client_vitals "
-            f"WHERE DATE_TRUNC('hour', timestamp) IN ({hours_str})"
-        )
-    if has_errors:
-        union_parts.append(
-            f"SELECT timestamp, {distinct_id} AS distinct_id FROM client_errors "
-            f"WHERE DATE_TRUNC('hour', timestamp) IN ({hours_str})"
-        )
+    union_parts = [
+        f"SELECT timestamp, {distinct_id} AS distinct_id FROM {tbl} WHERE DATE_TRUNC('hour', timestamp) IN ({hours_str})"
+        for tbl, present in (("client_vitals", has_vitals), ("client_errors", has_errors))
+        if present
+    ]
     con.execute(
         f"""
         INSERT INTO rum_vitals_aggregates
-        SELECT
-            ? AS service_id,
-            DATE_TRUNC('hour', timestamp) AS bucket_start,
-            'total' AS dimension,
-            'total_beacons' AS value,
-            COUNT(DISTINCT distinct_id) AS event_count,
-            0.0 AS value_sum,
-            0 AS good_count,
-            0 AS ni_count,
-            0 AS poor_count,
-            0.0 AS p50_value,
-            0.0 AS p75_value,
-            0.0 AS p99_value
-        FROM ({" UNION ALL ".join(union_parts)})
-        GROUP BY bucket_start
+        SELECT ? AS service_id, DATE_TRUNC('hour', timestamp) AS bucket_start, 'total' AS dimension,
+               'total_beacons' AS value, COUNT(DISTINCT distinct_id) AS event_count,
+               0.0 AS value_sum, 0 AS good_count, 0 AS ni_count, 0 AS poor_count,
+               0.0 AS p50_value, 0.0 AS p75_value, 0.0 AS p99_value
+        FROM ({" UNION ALL ".join(union_parts)}) GROUP BY bucket_start
         """,
         [service_id],
     )
-
     logger.info("[rum_rollups] %s: RUM aggregates successfully updated for %d hours", service_id, len(hours_list))
 
 
@@ -1771,16 +1304,7 @@ def backfill_missing_rum_aggregates(
     service_id: str,
     lookback_days: int = 30,
 ) -> list[datetime]:
-    """Detect and heal hours in ``client_vitals`` / ``client_errors`` within
-    ``lookback_days`` that are either absent from ``rum_vitals_aggregates`` or
-    lack a ``total_beacons`` aggregate row or carry more than one (a past concurrent recompute).
-
-    Historical hours aggregated before commit ``3fcbcd27`` already have rows in
-    ``rum_vitals_aggregates`` (for ``LCP``/``CLS``/``pageviews``/etc.) and would
-    be skipped by a naive ``NOT EXISTS`` check on ``bucket_start`` alone.
-    Checking specifically for ``value = 'total_beacons'`` ensures those legacy
-    hours are detected and recomputed.
-    """
+    """Detect and heal hours in client_vitals / client_errors lacking a single total_beacons row."""
     has_vitals = table_exists(con, "client_vitals")
     has_errors = table_exists(con, "client_errors")
     if not has_vitals and not has_errors:
@@ -1789,52 +1313,32 @@ def backfill_missing_rum_aggregates(
     cutoff = datetime.now(UTC) - timedelta(days=max(1, int(lookback_days)))
     raw_parts: list[str] = []
     params: list[object] = []
-
-    if has_vitals:
-        raw_parts.append(
-            "SELECT DISTINCT DATE_TRUNC('hour', timestamp) AS bucket_start "
-            "FROM client_vitals WHERE timestamp IS NOT NULL AND timestamp >= ?"
-        )
-        params.append(cutoff)
-    if has_errors:
-        raw_parts.append(
-            "SELECT DISTINCT DATE_TRUNC('hour', timestamp) AS bucket_start "
-            "FROM client_errors WHERE timestamp IS NOT NULL AND timestamp >= ?"
-        )
-        params.append(cutoff)
+    for tbl, present in (("client_vitals", has_vitals), ("client_errors", has_errors)):
+        if present:
+            raw_parts.append(
+                f"SELECT DISTINCT DATE_TRUNC('hour', timestamp) AS bucket_start FROM {tbl} WHERE timestamp IS NOT NULL AND timestamp >= ?"
+            )
+            params.append(cutoff)
 
     raw_union = " UNION ".join(raw_parts)
     if table_exists(con, "rum_vitals_aggregates"):
         sql = f"""
-            SELECT DISTINCT r.bucket_start
-            FROM ({raw_union}) r
+            SELECT DISTINCT r.bucket_start FROM ({raw_union}) r
             WHERE r.bucket_start IS NOT NULL
-              AND (
-                  SELECT COUNT(*)
-                  FROM rum_vitals_aggregates a
-                  WHERE a.service_id = ?
-                    AND a.bucket_start = r.bucket_start
-                    AND a.value = 'total_beacons'
-              ) <> 1
+              AND (SELECT COUNT(*) FROM rum_vitals_aggregates a
+                   WHERE a.service_id = ? AND a.bucket_start = r.bucket_start AND a.value = 'total_beacons') <> 1
             ORDER BY r.bucket_start ASC
         """
         rows = con.execute(sql, [*params, service_id]).fetchall()
     else:
-        sql = f"""
-            SELECT DISTINCT r.bucket_start
-            FROM ({raw_union}) r
-            WHERE r.bucket_start IS NOT NULL
-            ORDER BY r.bucket_start ASC
-        """
+        sql = f"SELECT DISTINCT r.bucket_start FROM ({raw_union}) r WHERE r.bucket_start IS NOT NULL ORDER BY r.bucket_start ASC"
         rows = con.execute(sql, params).fetchall()
 
     missing_hours: list[datetime] = []
     for r in rows:
         if r and r[0] is not None:
             dt_val = r[0]
-            if isinstance(dt_val, datetime):
-                dt_val = _normalize_hour_dt(dt_val)
-            missing_hours.append(dt_val)
+            missing_hours.append(_normalize_hour_dt(dt_val) if isinstance(dt_val, datetime) else dt_val)
 
     if missing_hours:
         logger.info(
@@ -1848,4 +1352,693 @@ def backfill_missing_rum_aggregates(
     return missing_hours
 
 
-sys.modules["backend.core.rollups.rum"] = sys.modules[__name__]
+# ── Rollup partition discovery & coverage index (folded from backend.repositories.rollup_coverage) ──
+
+ALL_FIELDS_FILENAME = "all_fields.parquet"
+MIN_CLOSED_HOUR_COVERAGE = 0.5
+MISSING_HOUR_HEAL_CAP = 48
+
+LISTDIR_CACHE_TTL_S = 60.0
+LISTDIR_CACHE_MAX_ENTRIES = 32768
+_listdir_cache_lock = threading.Lock()
+_listdir_cache: TTLCache[str, list[str]] = TTLCache(
+    maxsize=LISTDIR_CACHE_MAX_ENTRIES, ttl=LISTDIR_CACHE_TTL_S, timer=time.monotonic
+)
+_CacheRegistry.register("repositories.rollup_coverage._listdir_cache", _listdir_cache)
+
+
+def cached_listdir(path: str) -> list[str]:
+    """Return ``os.listdir(path)`` cached for ``LISTDIR_CACHE_TTL_S``."""
+    with _listdir_cache_lock:
+        cached = _listdir_cache.get(path)
+    if cached is not None:
+        return list(cached)
+    try:
+        entries = os.listdir(path)
+    except OSError:
+        entries = []
+    with _listdir_cache_lock:
+        if len(_listdir_cache) >= LISTDIR_CACHE_MAX_ENTRIES:
+            _listdir_cache.clear()
+        _listdir_cache[path] = entries
+    return entries
+
+
+def rc_service_id(src: dict) -> str:
+    """Service key used by the durable-serving readiness flag."""
+    return src.get("service_id") or src.get("name") or ""
+
+
+def durable_serving_blocked(src: dict) -> bool:
+    """True when a durable serving replica must not trust its local rollup tree."""
+    return svcconfig.is_durable_serving_mode(src) and not rollup_coverage_ready(rc_service_id(src))
+
+
+def eligible_window(
+    start_time: str | None,
+    end_time: str | None,
+    *,
+    has_filters: bool,
+    require_top_asns: list[int] | None = None,
+    min_hours: int,
+    observation: ReaderCoverage | None = None,
+) -> tuple[datetime, datetime] | None:
+    """Parse and gate a request window shared by the rollup readers."""
+    if observation is not None:
+        observation.minimum_window_hours = min_hours
+        observation.eligible = False
+    if has_filters:
+        if observation is not None:
+            observation.eligibility_reason = "filtered"
+        return None
+    if not start_time or not end_time:
+        if observation is not None:
+            observation.eligibility_reason = "bounds_missing"
+        return None
+    if require_top_asns is not None and not require_top_asns:
+        if observation is not None:
+            observation.eligibility_reason = "top_asns_empty"
+        return None
+    window = parse_window(start_time, end_time)
+    if window is None:
+        if observation is not None:
+            observation.eligibility_reason = "invalid_window"
+        return None
+    st, et = window
+    if observation is not None:
+        observation.window_start, observation.window_end = st.isoformat(), et.isoformat()
+    if (et - st) < timedelta(hours=min_hours):
+        if observation is not None:
+            observation.eligibility_reason = "window_too_short"
+        return None
+    if (et - st) > timedelta(days=366):
+        if observation is not None:
+            observation.eligibility_reason = "window_too_long"
+        return None
+    if observation is not None:
+        observation.eligible = True
+        observation.eligibility_reason = "eligible"
+    return st, et
+
+
+def meets_coverage_floor(covered_hours: int, total_closed_hours: int) -> bool:
+    """Whether ``covered_hours`` of ``total_closed_hours`` clears the tolerant floor."""
+    return not (total_closed_hours > 0 and (covered_hours / total_closed_hours) < MIN_CLOSED_HOUR_COVERAGE)
+
+
+@dataclass(frozen=True)
+class CoverageIndex:
+    """Closed-hour grid for one ``[st, et)`` window."""
+
+    st: datetime
+    et: datetime
+    active_dt: datetime
+    active_hour_str: str
+    closed_hours: tuple[str, ...]
+    crosses_active: bool
+
+    @classmethod
+    def build(
+        cls,
+        st: datetime,
+        et: datetime,
+        *,
+        skip_partial_start: bool = False,
+        now: datetime | None = None,
+    ) -> CoverageIndex:
+        now = now if now is not None else datetime.now(UTC)
+        active_hour_str = now.strftime("%Y-%m-%d-%H")
+        active_dt = parse_hour_key_strict(active_hour_str)
+        cursor = st.replace(minute=0, second=0, microsecond=0)
+        if skip_partial_start and cursor < st:
+            cursor += timedelta(hours=1)
+        hours: list[str] = []
+        crosses_active = False
+        while cursor < et:
+            key = cursor.strftime("%Y-%m-%d-%H")
+            if key >= active_hour_str:
+                crosses_active = True
+                break
+            hours.append(key)
+            cursor += timedelta(hours=1)
+        return cls(st, et, active_dt, active_hour_str, tuple(hours), crosses_active)
+
+    def by_day(self) -> dict[str, list[str]]:
+        """Closed hours bucketed by their ``YYYY-MM-DD`` day, oldest day first."""
+        days: dict[str, list[str]] = {}
+        for hour in self.closed_hours:
+            days.setdefault(hour[:10], []).append(hour)
+        return days
+
+
+def _empty_parquet(path: str) -> bool:
+    try:
+        return bool(pq.read_metadata(path).num_rows == 0)
+    except Exception:
+        return False
+
+
+class BundleProbe:
+    """Memoized probes against one hour-bundled root, scoped to a single read."""
+
+    __slots__ = ("_empty", "_has", "root")
+
+    def __init__(self, bundled_root: str) -> None:
+        self.root = bundled_root
+        self._has: dict[tuple[str, str], bool] = {}
+        self._empty: dict[tuple[str, str], bool] = {}
+
+    def path(self, hour: str, filename: str) -> str:
+        return os.path.join(self.root, f"hour={hour}", filename)
+
+    def has(self, hour: str, filename: str) -> bool:
+        key = (hour, filename)
+        found = self._has.get(key)
+        if found is None:
+            found = self._has[key] = os.path.isfile(self.path(hour, filename))
+        return found
+
+    def is_empty(self, hour: str, filename: str) -> bool:
+        key = (hour, filename)
+        empty = self._empty.get(key)
+        if empty is None:
+            empty = self._empty[key] = self.has(hour, filename) and _empty_parquet(self.path(hour, filename))
+        return empty
+
+
+def _per_field_hours(src: dict) -> set[str]:
+    """Union of every ``hour=…`` entry across all per-field rollup dirs."""
+    root = _rollups_root(src)
+    hours: set[str] = set()
+    for field_dir in cached_listdir(root):
+        if not field_dir.startswith("field="):
+            continue
+        for entry in cached_listdir(os.path.join(root, field_dir)):
+            if entry.startswith("hour="):
+                hours.add(entry[len("hour=") :])
+    return hours
+
+
+def _walk_hourly_bundles(
+    src: dict,
+    index: CoverageIndex,
+    probe: BundleProbe,
+    bundle_filename: str,
+    allow_all_fields_coverage: bool,
+) -> list[str] | None:
+    paths: list[str] = []
+    per_field_hours: set[str] | None = None
+    for hour in index.closed_hours:
+        if probe.has(hour, bundle_filename):
+            paths.append(probe.path(hour, bundle_filename))
+            continue
+        if allow_all_fields_coverage and probe.has(hour, ALL_FIELDS_FILENAME):
+            continue
+        if per_field_hours is None:
+            per_field_hours = _per_field_hours(src)
+        if hour in per_field_hours:
+            return None
+    return paths
+
+
+def collect_hourly_bundle_paths(
+    src: dict,
+    st: datetime,
+    et: datetime,
+    bundled_root: str,
+    bundle_filename: str,
+    *,
+    allow_all_fields_coverage: bool = False,
+) -> tuple[list[str], bool] | None:
+    """Walk ``[st, et)`` by UTC hour, return ``(paths, crosses_active)``."""
+    if durable_serving_blocked(src):
+        return None
+    index = CoverageIndex.build(st, et)
+    paths = _walk_hourly_bundles(src, index, BundleProbe(bundled_root), bundle_filename, allow_all_fields_coverage)
+    return (paths, index.crosses_active) if paths is not None else None
+
+
+def _missing_hours(
+    index: CoverageIndex,
+    probe: BundleProbe,
+    bundle_filename: str,
+    coverage_bundle_filename: str | None,
+) -> list[str]:
+    return [
+        hour
+        for hour in index.closed_hours
+        if not probe.has(hour, bundle_filename)
+        and (coverage_bundle_filename is None or not probe.is_empty(hour, coverage_bundle_filename))
+    ]
+
+
+def heal_where_clause(missing_hours: list[str], st: datetime | None, et: datetime | None) -> str:
+    """WHERE clause that live-queries exactly ``missing_hours`` from the raw base table."""
+    start = parse_hour_key_strict(missing_hours[0])
+    if st and st > start:
+        start = st
+    end = parse_hour_key_strict(missing_hours[-1]) + timedelta(hours=1)
+    if et and et < end:
+        end = et
+    hours_in_sql = ", ".join(f"'{h}'" for h in missing_hours)
+    return (
+        f"timestamp >= '{start.isoformat()}' "
+        f"AND timestamp < '{end.isoformat()}' "
+        f"AND strftime(timestamp, '%Y-%m-%d-%H') IN ({hours_in_sql})"
+    )
+
+
+@dataclass(frozen=True)
+class HourlyReadPlan:
+    """Fail-closed plan for the minute-grain time-series readers."""
+
+    index: CoverageIndex
+    paths: list[str]
+    missing_hours: list[str]
+
+    @property
+    def crosses_active(self) -> bool:
+        return self.index.crosses_active
+
+    @property
+    def active_hour_str(self) -> str:
+        return self.index.active_hour_str
+
+    @property
+    def active_dt(self) -> datetime:
+        return self.index.active_dt
+
+    def heal_where(self) -> str:
+        return heal_where_clause(self.missing_hours, self.index.st, self.index.et)
+
+
+def plan_hourly_read(
+    src: dict,
+    st: datetime,
+    et: datetime,
+    bundle_filename: str,
+    *,
+    allow_all_fields_coverage: bool = False,
+    heal: bool = False,
+    observation: HourlyRollupCoverage | None = None,
+) -> HourlyReadPlan | None:
+    """Plan a rollup read of ``bundle_filename`` over ``[st, et)``, or ``None``."""
+    if observation is not None:
+        observation.window_start, observation.window_end = st.isoformat(), et.isoformat()
+        observation.heal_horizon_hours = MISSING_HOUR_HEAL_CAP if heal else None
+    bundled_root = _hour_bundled_root(src)
+    if not os.path.isdir(bundled_root):
+        if observation is not None:
+            observation.reason = "no_bundled_root"
+        return None
+    if durable_serving_blocked(src):
+        if observation is not None:
+            observation.reason = "durable_unready"
+        return None
+
+    index = CoverageIndex.build(st, et)
+    if observation is not None:
+        observation.closed_hours = len(index.closed_hours)
+        observation.active_hour_start = index.active_dt.isoformat()
+    probe = BundleProbe(bundled_root)
+    paths = _walk_hourly_bundles(src, index, probe, bundle_filename, allow_all_fields_coverage)
+    if paths is None:
+        if observation is not None:
+            observation.reason = "writer_behind"
+        return None
+    if observation is not None:
+        observation.bundle_hours = len(paths)
+    if not paths and not index.crosses_active:
+        if observation is not None:
+            observation.reason = "no_paths"
+        return None
+    if not heal:
+        if observation is not None:
+            observation.reason = "planned"
+        return HourlyReadPlan(index, paths, [])
+
+    gaps = _missing_hours(index, probe, bundle_filename, ALL_FIELDS_FILENAME)
+    if observation is not None:
+        observation.missing_hours = len(gaps)
+        observation.verified_empty_hours = len(index.closed_hours) - len(paths) - len(gaps)
+        observation.covered_hours = len(index.closed_hours) - len(gaps)
+        observation.coverage_fraction = (
+            observation.covered_hours / len(index.closed_hours) if index.closed_hours else None
+        )
+    heal_floor = max(
+        index.st.replace(minute=0, second=0, microsecond=0), index.active_dt - timedelta(hours=MISSING_HOUR_HEAL_CAP)
+    )
+    heal_floor_key = heal_floor.strftime("%Y-%m-%d-%H")
+    missing = [hour for hour in gaps if hour >= heal_floor_key]
+    if len(missing) < len(gaps):
+        if observation is not None:
+            observation.reason = "old_gaps"
+        return None
+    if observation is not None:
+        observation.reason = "planned"
+    return HourlyReadPlan(index, paths, missing)
+
+
+def _day_bundle_file(day_root: str, day: str, bundle_filename: str) -> str | None:
+    day_file = os.path.join(day_root, f"day={day}", bundle_filename)
+    if os.path.isfile(day_file):
+        return day_file
+    if bundle_filename == DAY_BUNDLE_FILENAME:
+        alt_day_file = os.path.join(day_root, f"day={day}", f"day_bundle_{day}.parquet")
+        flat_day_file = os.path.join(day_root, f"day_bundle_{day}.parquet")
+        if os.path.isfile(alt_day_file):
+            return alt_day_file
+        if os.path.isfile(flat_day_file):
+            return flat_day_file
+    return None
+
+
+def collect_day_prefer_paths(
+    src: dict,
+    st: datetime,
+    et: datetime,
+    bundle_filename: str,
+    *,
+    skip_partial_start: bool = True,
+    allow_empty_with_done: bool = False,
+    observation: RollupPathCoverage | None = None,
+) -> list[str] | None:
+    """Day-prefer / hour-fallback rollup paths for ``[st, et)``, or ``None``."""
+    if observation is not None:
+        observation.minimum_coverage_fraction = MIN_CLOSED_HOUR_COVERAGE
+    if durable_serving_blocked(src):
+        if observation is not None:
+            observation.reason = "durable_unready"
+        return None
+
+    hour_root = _hour_bundled_root(src)
+    day_root = _day_bundled_root(src)
+    if not os.path.isdir(hour_root) and not os.path.isdir(day_root):
+        if observation is not None:
+            observation.reason = "no_bundled_root"
+        return None
+
+    index = CoverageIndex.build(st, et, skip_partial_start=skip_partial_start)
+    paths: list[str] = []
+    covered_hours = 0
+    day_files = hour_files = done_markers = 0
+    for day, hours_in_day in sorted(index.by_day().items()):
+        chosen_day = _day_bundle_file(day_root, day, bundle_filename)
+        if len(hours_in_day) == 24 and chosen_day:
+            paths.append(chosen_day)
+            covered_hours += 24
+            day_files += 1
+        else:
+            for hour in hours_in_day:
+                path = os.path.join(hour_root, f"hour={hour}", bundle_filename)
+                if os.path.isfile(path):
+                    paths.append(path)
+                    covered_hours += 1
+                    hour_files += 1
+                elif allow_empty_with_done and os.path.isfile(f"{path}.done"):
+                    covered_hours += 1
+                    done_markers += 1
+
+    if observation is not None:
+        observation.active_hour_start = index.active_dt.isoformat()
+        observation.closed_hours = len(index.closed_hours)
+        observation.covered_hours = covered_hours
+        observation.coverage_fraction = covered_hours / len(index.closed_hours) if index.closed_hours else None
+        observation.partial_start_skipped = skip_partial_start and st > st.replace(minute=0, second=0, microsecond=0)
+        observation.day_files, observation.hour_files, observation.done_markers = day_files, hour_files, done_markers
+    if not paths and not (allow_empty_with_done and covered_hours > 0):
+        if observation is not None:
+            observation.reason = "no_paths"
+        return None
+    if not meets_coverage_floor(covered_hours, len(index.closed_hours)):
+        if observation is not None:
+            observation.reason = "below_coverage_floor"
+        return None
+    if observation is not None:
+        observation.reason = "planned"
+    return paths
+
+
+def collect_hour_paths_with_floor(
+    src: dict,
+    st: datetime,
+    et: datetime,
+    bundle_filename: str,
+) -> list[str] | None:
+    """Per-hour-only paths for ``[st, et)`` with the tolerant coverage floor."""
+    if durable_serving_blocked(src):
+        return None
+    bundled_root = _hour_bundled_root(src)
+    if not os.path.isdir(bundled_root):
+        return None
+    index = CoverageIndex.build(st, et, skip_partial_start=True)
+    paths = [
+        path
+        for path in (os.path.join(bundled_root, f"hour={hour}", bundle_filename) for hour in index.closed_hours)
+        if os.path.exists(path)
+    ]
+    if not paths or not meets_coverage_floor(len(paths), len(index.closed_hours)):
+        return None
+    return paths
+
+
+@dataclass(frozen=True)
+class TimeSeriesRollupWindowPlan:
+    rollup_paths: list[str]
+    day_ov_paths: list[str]
+    crosses_active: bool
+    active_hour_str: str
+    active_hour_dt: datetime
+    missing_hours: list[str]
+    heal_where_sql: str
+
+
+@dataclass(frozen=True)
+class ClosedHourFieldRollupWindow:
+    bundled_paths: list[str]
+    per_field_paths: list[str]
+    st_dt: datetime
+    et_dt: datetime
+    active_dt: datetime
+    active_end_dt: datetime
+
+
+def _finalize_scalar_coverage(observation: ScalarRollupCoverage) -> None:
+    trailing = observation.trailing
+    if (
+        trailing is not None
+        and trailing.active_hour_start is not None
+        and trailing.active_hour_start != observation.active_hour_start
+    ):
+        observation.reason = "boundary_changed"
+        return
+    trailing_covered = trailing.covered_hours if trailing is not None else 0
+    if trailing_covered is not None:
+        observation.covered_hours = observation.prefix_hours + trailing_covered
+        observation.coverage_fraction = (
+            observation.covered_hours / observation.closed_hours if observation.closed_hours else None
+        )
+
+
+def plan_time_series_rollup_window(
+    src: dict[str, Any],
+    st: datetime,
+    et: datetime,
+    *,
+    can_use_overview: bool = True,
+    coverage_mod: Any = None,
+    plan_hourly_read_fn: Any = None,
+    observation: ScalarRollupCoverage | None = None,
+) -> TimeSeriesRollupWindowPlan | None:
+    """Plan closed-day prefix + trailing hourly bundles for time_series/count rollup reads."""
+    rollup_coverage = coverage_mod if coverage_mod is not None else sys.modules[__name__]
+    plan_hourly_read_impl = plan_hourly_read_fn if plan_hourly_read_fn is not None else plan_hourly_read
+
+    day_ts_paths: list[str] = []
+    day_ov_paths: list[str] = []
+    trailing_st = st
+    cov = rollup_coverage.CoverageIndex.build(st, et)
+    if observation is not None:
+        observation.window_start, observation.window_end = st.isoformat(), et.isoformat()
+        observation.closed_hours = len(cov.closed_hours)
+        observation.active_hour_start = cov.active_dt.isoformat()
+    if timedelta(days=6) < (et - st) <= timedelta(days=90) and not rollup_coverage.durable_serving_blocked(src):
+        day_root = _day_bundled_root(src)
+        covered_until_hour: str | None = None
+        for day, day_hours in sorted(cov.by_day().items()):
+            if day >= cov.active_hour_str[:10]:
+                break
+            day_ts_file = rollup_coverage._day_bundle_file(day_root, day, TIME_SERIES_BUNDLE_FILENAME)
+            day_ov_file = (
+                rollup_coverage._day_bundle_file(day_root, day, OVERVIEW_BUNDLE_FILENAME)
+                if can_use_overview
+                and (len(day_hours) == 24 or (st.minute == 0 and st.second == 0 and st.microsecond == 0))
+                else None
+            )
+            if day_ts_file:
+                day_ts_paths.append(day_ts_file)
+                covered_until_hour = day_hours[-1]
+            elif day_ov_file:
+                day_ov_paths.append(day_ov_file)
+                covered_until_hour = day_hours[-1]
+            else:
+                break
+            if observation is not None:
+                observation.prefix_hours += len(day_hours)
+        if covered_until_hour is not None:
+            trailing_st = parse_hour_key_strict(covered_until_hour) + timedelta(hours=1)
+
+    if observation is not None:
+        observation.trailing_start = trailing_st.isoformat()
+        observation.day_time_series_files = len(day_ts_paths)
+        observation.day_overview_files = len(day_ov_paths)
+    if trailing_st < et:
+        if observation is not None:
+            observation.trailing = HourlyRollupCoverage()
+        plan = plan_hourly_read_impl(
+            src,
+            trailing_st,
+            et,
+            TIME_SERIES_BUNDLE_FILENAME,
+            allow_all_fields_coverage=True,
+            heal=True,
+            **({"observation": observation.trailing} if observation is not None else {}),
+        )
+        if plan is None:
+            if observation is not None:
+                observation.reason = "trailing_unavailable"
+                _finalize_scalar_coverage(observation)
+            return None
+        rollup_paths = day_ts_paths + list(plan.paths)
+        crosses_active = plan.crosses_active
+        active_hour_str, active_hour_dt = plan.active_hour_str, plan.active_dt
+        missing_hours = list(plan.missing_hours)
+        heal_where_sql = plan.heal_where() if plan.missing_hours else ""
+    else:
+        rollup_paths = day_ts_paths
+        crosses_active = False
+        active_hour_str, active_hour_dt = cov.active_hour_str, cov.active_dt
+        missing_hours = []
+        heal_where_sql = ""
+
+    if observation is not None:
+        observation.reason = "planned"
+        _finalize_scalar_coverage(observation)
+    return TimeSeriesRollupWindowPlan(
+        rollup_paths=rollup_paths,
+        day_ov_paths=day_ov_paths,
+        crosses_active=crosses_active,
+        active_hour_str=active_hour_str,
+        active_hour_dt=active_hour_dt,
+        missing_hours=missing_hours,
+        heal_where_sql=heal_where_sql,
+    )
+
+
+def enumerate_closed_hour_field_rollups(
+    src: dict[str, Any],
+    field: str,
+    start_time: str | None,
+    end_time: str | None,
+    *,
+    stop_on_first: bool = False,
+) -> ClosedHourFieldRollupWindow | None:
+    """Enumerate in-window closed-hour bundled (`all_fields.parquet`) and per-field rollup files."""
+    from backend.core.duckdb import _cache_dir
+
+    if svcconfig.is_durable_serving_mode(src) or not _is_safe_ident(field) or not start_time or not end_time:
+        return None
+    try:
+        window = parse_window(start_time, end_time)
+    except Exception:
+        return None
+    if window is None:
+        return None
+    st_dt, et_dt = window
+
+    cache_dir = _cache_dir(src)
+    bundled_root = os.path.join(cache_dir, "rollups", "hour_bundled")
+    per_field_root = os.path.join(cache_dir, "rollups", "hour", f"field={field}")
+
+    active_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+    active_end_dt = active_dt + timedelta(hours=1)
+    active_str = active_dt.strftime("%Y-%m-%d-%H")
+    st_str = st_dt.strftime("%Y-%m-%d-%H")
+    et_inclusive = (et_dt - timedelta(microseconds=1)).strftime("%Y-%m-%d-%H")
+
+    def _in_window(hour: str) -> bool:
+        return st_str <= hour <= et_inclusive and hour < active_str
+
+    bundled_paths: list[str] = []
+    bundled_hours: set[str] = set()
+    if os.path.isdir(bundled_root):
+        try:
+            for entry in os.listdir(bundled_root):
+                if not entry.startswith("hour="):
+                    continue
+                hour = entry[5:]
+                if not _in_window(hour):
+                    continue
+                p = os.path.join(bundled_root, entry, "all_fields.parquet")
+                if os.path.isfile(p):
+                    bundled_paths.append(p)
+                    bundled_hours.add(hour)
+                    if stop_on_first:
+                        return ClosedHourFieldRollupWindow(
+                            bundled_paths=bundled_paths,
+                            per_field_paths=[],
+                            st_dt=st_dt,
+                            et_dt=et_dt,
+                            active_dt=active_dt,
+                            active_end_dt=active_end_dt,
+                        )
+        except OSError:
+            pass
+
+    per_field_paths: list[str] = []
+    if os.path.isdir(per_field_root):
+        try:
+            for entry in os.listdir(per_field_root):
+                if not entry.startswith("hour="):
+                    continue
+                hour = entry[5:]
+                if not _in_window(hour) or hour in bundled_hours:
+                    continue
+                hour_dir = os.path.join(per_field_root, entry)
+                try:
+                    for fname in os.listdir(hour_dir):
+                        if fname.endswith(".parquet") and not fname.startswith(".tmp_"):
+                            per_field_paths.append(os.path.join(hour_dir, fname))
+                            if stop_on_first:
+                                return ClosedHourFieldRollupWindow(
+                                    bundled_paths=bundled_paths,
+                                    per_field_paths=per_field_paths,
+                                    st_dt=st_dt,
+                                    et_dt=et_dt,
+                                    active_dt=active_dt,
+                                    active_end_dt=active_end_dt,
+                                )
+                except OSError:
+                    continue
+        except OSError:
+            pass
+
+    return ClosedHourFieldRollupWindow(
+        bundled_paths=bundled_paths,
+        per_field_paths=per_field_paths,
+        st_dt=st_dt,
+        et_dt=et_dt,
+        active_dt=active_dt,
+        active_end_dt=active_end_dt,
+    )
+
+
+for _legacy_mod in (
+    "backend.core.rollups.time_series",
+    "backend.core.rollups.overview",
+    "backend.core.rollups.sessions",
+    "backend.core.rollups.rum",
+    "backend.repositories.rollup_coverage",
+    "backend.repositories._rollup_planner",
+):
+    sys.modules[_legacy_mod] = sys.modules[__name__]

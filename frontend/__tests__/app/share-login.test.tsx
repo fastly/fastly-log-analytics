@@ -4,14 +4,8 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vite
 import React from 'react'
 import { http, HttpResponse } from 'msw'
 import { server } from '@/__tests__/helpers/msw/handlers'
-import { renderWithQuery as render, stubResizeObserver } from '@/__tests__/helpers/page-smoke'
-import { stubWindowLocationAssign } from '@/__tests__/helpers/page-smoke'
-import ShareLoginPage, {
-  ShareLoginForm,
-  safeReturnTarget,
-  AcknowledgeButton,
-  AcknowledgeFallback,
-} from '@/app/share-login/page'
+import { renderWithQuery as render, stubResizeObserver, stubWindowLocationAssign } from '@/__tests__/helpers/page-smoke'
+import ShareLoginPage, { ShareLoginForm, safeReturnTarget, AcknowledgeButton, AcknowledgeFallback } from '@/app/share-login/page'
 import ShareLoginLoading from '@/app/share-login/loading'
 import { SessionDetail, SessionsTable, ScoringControls } from '@/app/sessions/page'
 import type { components } from '@/types/api.generated'
@@ -37,9 +31,7 @@ vi.mock('@/lib/api', async (importOriginal) => {
     ...actual,
     client: new Proxy(actual.client, {
       get(target, prop, receiver) {
-        if (useMockSessionApi && prop === 'POST') {
-          return (...args: unknown[]) => postMock(...args)
-        }
+        if (useMockSessionApi && prop === 'POST') return (...args: unknown[]) => postMock(...args)
         return Reflect.get(target, prop, receiver)
       },
     }),
@@ -58,9 +50,7 @@ vi.mock('@/components/SessionScoring/TopFlaggedTable', () => ({
   FlagSessionPopover: () => <span data-testid="flag-popover" />,
 }))
 
-beforeAll(() => {
-  stubResizeObserver()
-})
+beforeAll(() => { stubResizeObserver() })
 
 beforeEach(() => {
   pushSpy.mockReset()
@@ -72,15 +62,14 @@ beforeEach(() => {
 
 afterEach(() => vi.restoreAllMocks())
 
-function useAuthConfig(
-  passcode_enabled: boolean,
-  providers: Array<{ id: string; display_name: string }>,
-) {
-  server.use(
-    http.get('/api/share/auth-config', () =>
-      HttpResponse.json({ passcode_enabled, providers }),
-    ),
-  )
+function useAuthConfig(passcode_enabled: boolean, providers: Array<{ id: string; display_name: string }>) {
+  server.use(http.get('/api/share/auth-config', () => HttpResponse.json({ passcode_enabled, providers })))
+}
+
+async function submitLoginForm(user: ReturnType<typeof userEvent.setup>, email = 'jane@example.com', passcode = 'ocean-cabin-42') {
+  await user.type(await screen.findByLabelText('Email'), email)
+  await user.type(screen.getByLabelText('Passcode'), passcode)
+  await user.click(screen.getByRole('button', { name: /sign in/i }))
 }
 
 const TOS_TEXT =
@@ -103,53 +92,33 @@ describe('ShareLoginPage — Zero-CLS Layout Reservations & Loading Skeletons', 
 
   it('renders ShareLoginLoading with zero-CLS reservations and contextual status copy', () => {
     render(<ShareLoginLoading />)
-    expect(
-      screen.getByText(/verifying share session & security policies/i),
-    ).toBeInTheDocument()
+    expect(screen.getByText(/verifying share session & security policies/i)).toBeInTheDocument()
   })
 
   it('shows contextual in-place loading skeleton while auth-config is pending', async () => {
     let resolveConfig!: () => void
     server.use(
       http.get('/api/share/auth-config', async () => {
-        await new Promise<void>((r) => {
-          resolveConfig = r
-        })
-        return HttpResponse.json({
-          passcode_enabled: true,
-          oauth_enabled: false,
-          oauth_provider_label: null,
-        })
+        await new Promise<void>((r) => { resolveConfig = r })
+        return HttpResponse.json({ passcode_enabled: true, oauth_enabled: false, oauth_provider_label: null })
       }),
     )
 
     render(<ShareLoginPage />)
     expect(screen.getByTestId('share-login-loading-skeleton')).toBeInTheDocument()
-    expect(
-      screen.getByText(/verifying share session & security policies/i),
-    ).toBeInTheDocument()
+    expect(screen.getByText(/verifying share session & security policies/i)).toBeInTheDocument()
 
     await waitFor(() => expect(resolveConfig).toBeTypeOf('function'))
     resolveConfig()
-    await waitFor(() =>
-      expect(screen.queryByTestId('share-login-loading-skeleton')).not.toBeInTheDocument(),
-    )
+    await waitFor(() => expect(screen.queryByTestId('share-login-loading-skeleton')).not.toBeInTheDocument())
   })
 
   it('applies dimmed transition (opacity-40 pointer-events-none) while login submission is in-flight', async () => {
     let resolveLogin!: () => void
     server.use(
       http.post('/api/share/login', async () => {
-        await new Promise<void>((r) => {
-          resolveLogin = r
-        })
-        return HttpResponse.json({
-          ok: true,
-          name: 'Jane',
-          email: 'jane@example.com',
-          tos_pending: false,
-          redirect: '/dashboard',
-        })
+        await new Promise<void>((r) => { resolveLogin = r })
+        return HttpResponse.json({ ok: true, name: 'Jane', email: 'jane@example.com', tos_pending: false, redirect: '/dashboard' })
       }),
     )
 
@@ -160,7 +129,6 @@ describe('ShareLoginPage — Zero-CLS Layout Reservations & Loading Skeletons', 
 
     const fieldsContainer = screen.getByTestId('share-login-fields')
     expect(fieldsContainer.className).not.toContain('opacity-40')
-
     await user.click(screen.getByRole('button', { name: /sign in/i }))
 
     await waitFor(() => {
@@ -189,11 +157,8 @@ describe('ShareLoginPage — Invite Token Claim & Credential Validation', () => 
     )
 
     render(<ShareLoginPage />)
-    expect(await screen.findByTestId('share-login-invite-banner')).toHaveTextContent(
-      /invitation verified for analyst bob/i,
-    )
-    const emailInput = screen.getByLabelText('Email') as HTMLInputElement
-    expect(emailInput.value).toBe('bob@example.com')
+    expect(await screen.findByTestId('share-login-invite-banner')).toHaveTextContent(/invitation verified for analyst bob/i)
+    expect((screen.getByLabelText('Email') as HTMLInputElement).value).toBe('bob@example.com')
   })
 
   it.each([404, 410])('shows expired invite error when ?token= returns %s', async (status) => {
@@ -205,9 +170,7 @@ describe('ShareLoginPage — Invite Token Claim & Credential Validation', () => 
     )
 
     render(<ShareLoginPage />)
-    expect(
-      await screen.findByText(/this invitation link has expired or is no longer valid/i),
-    ).toBeInTheDocument()
+    expect(await screen.findByText(/this invitation link has expired or is no longer valid/i)).toBeInTheDocument()
   })
 
   it('clears an expired invitation banner on submission and replaces it with the login error', async () => {
@@ -226,9 +189,7 @@ describe('ShareLoginPage — Invite Token Claim & Credential Validation', () => 
     const user = userEvent.setup()
     render(<ShareLoginPage />)
     const inviteError = await screen.findByText(/this invitation link has expired/i)
-    await user.type(await screen.findByLabelText('Email'), 'you@example.com')
-    await user.type(screen.getByLabelText('Passcode'), 'ocean-cabin-42')
-    await user.click(screen.getByRole('button', { name: /sign in/i }))
+    await submitLoginForm(user, 'you@example.com', 'ocean-cabin-42')
 
     await waitFor(() => expect(resolveLogin).toBeTypeOf('function'))
     expect(inviteError).not.toBeInTheDocument()
@@ -240,21 +201,13 @@ describe('ShareLoginPage — Invite Token Claim & Credential Validation', () => 
 
   it('displays error feedback for 503 capacity cap', async () => {
     const user = userEvent.setup()
-
     server.use(
-      http.post('/api/share/login', () =>
-        HttpResponse.json({ detail: { error: 'capacity_exceeded' } }, { status: 503 }),
-      ),
+      http.post('/api/share/login', () => HttpResponse.json({ detail: { error: 'capacity_exceeded' } }, { status: 503 })),
     )
 
     render(<ShareLoginPage />)
-    await user.type(await screen.findByLabelText('Email'), 'jane@example.com')
-    await user.type(screen.getByLabelText('Passcode'), 'ocean-cabin-42')
-    await user.click(screen.getByRole('button', { name: /sign in/i }))
-
-    expect(
-      await screen.findByText(/the dashboard is at capacity/i),
-    ).toBeInTheDocument()
+    await submitLoginForm(user)
+    expect(await screen.findByText(/the dashboard is at capacity/i)).toBeInTheDocument()
   })
 })
 
@@ -263,58 +216,33 @@ describe('ShareLoginPage — TOS Gate & Safe Redirect Validation', () => {
     mockSearchParams = new URLSearchParams('next=/performance')
     server.use(
       http.post('/api/share/login', () =>
-        HttpResponse.json({
-          ok: true,
-          name: 'Jane',
-          email: 'jane@example.com',
-          tos_pending: true,
-          redirect: '/dashboard',
-        }),
+        HttpResponse.json({ ok: true, name: 'Jane', email: 'jane@example.com', tos_pending: true, redirect: '/dashboard' }),
       ),
     )
 
     const user = userEvent.setup()
     render(<ShareLoginPage />)
-    await user.type(await screen.findByLabelText('Email'), 'jane@example.com')
-    await user.type(screen.getByLabelText('Passcode'), 'ocean-cabin-42')
-    await user.click(screen.getByRole('button', { name: /sign in/i }))
-
-    await waitFor(() =>
-      expect(pushSpy).toHaveBeenCalledWith(
-        '/share-login/acknowledge?return=%2Fperformance',
-      ),
-    )
+    await submitLoginForm(user)
+    await waitFor(() => expect(pushSpy).toHaveBeenCalledWith('/share-login/acknowledge?return=%2Fperformance'))
   })
 
   it('blocks open-redirect targets on ?next= and ?return= via safeReturnTarget', () => {
-    expect(safeReturnTarget('//evil.example/phish')).toBeNull()
-    expect(safeReturnTarget('https://evil.example/phish')).toBeNull()
-    expect(safeReturnTarget('/\t/evil.example')).toBeNull()
-    expect(safeReturnTarget('/\\evil.example')).toBeNull()
-    expect(safeReturnTarget('/share-login/acknowledge')).toBeNull()
+    for (const bad of ['//evil.example/phish', 'https://evil.example/phish', '/\t/evil.example', '/\\evil.example', '/share-login/acknowledge']) {
+      expect(safeReturnTarget(bad)).toBeNull()
+    }
     expect(safeReturnTarget('/query?service=svc-1')).toBe('/query?service=svc-1')
   })
 
   it('acknowledges TOS via AcknowledgeButton with custom safe redirect target and dimmed busy state', async () => {
-    server.use(
-      http.post('/api/share/acknowledge', () => HttpResponse.json({ ok: true })),
-    )
-
+    server.use(http.post('/api/share/acknowledge', () => HttpResponse.json({ ok: true })))
     const user = userEvent.setup()
     render(<AcknowledgeButton version="v1" returnTo="//evil.example" />)
     await user.click(screen.getByTestId('share-acknowledge-submit'))
-
-    // Malicious returnTo is sanitized to /dashboard
     await waitFor(() => expect(locationAssignSpy).toHaveBeenCalledWith('/dashboard'))
   })
 
   it('renders zero-CLS container reservations in AcknowledgeFallback', async () => {
-    server.use(
-      http.get('/api/share/tos', () =>
-        HttpResponse.json({ version: 'v1', text: 'Terms of Service body text' }),
-      ),
-    )
-
+    server.use(http.get('/api/share/tos', () => HttpResponse.json({ version: 'v1', text: 'Terms of Service body text' })))
     render(<AcknowledgeFallback />)
     const container = await screen.findByTestId('share-acknowledge-fallback')
     expect(container.className).toContain('[contain-intrinsic-size:auto_140px]')
@@ -326,84 +254,45 @@ describe('ShareLoginPage', () => {
   it('hard-reloads to /dashboard on successful login when tos already accepted', async () => {
     server.use(
       http.post('/api/share/login', () =>
-        HttpResponse.json({
-          ok: true,
-          session_id: 'sid-1',
-          name: 'Jane',
-          email: 'jane@example.com',
-          tos_pending: false,
-          redirect: '/dashboard',
-        }),
+        HttpResponse.json({ ok: true, session_id: 'sid-1', name: 'Jane', email: 'jane@example.com', tos_pending: false, redirect: '/dashboard' }),
       ),
     )
 
     const user = userEvent.setup()
     render(<ShareLoginPage />)
-    await user.type(await screen.findByLabelText('Email'), 'jane@example.com')
-    await user.type(screen.getByLabelText('Passcode'), 'ocean-cabin-42')
-    await user.click(screen.getByRole('button', { name: /sign in/i }))
-
+    await submitLoginForm(user)
     await waitFor(() => expect(locationAssignSpy).toHaveBeenCalledWith('/dashboard'))
   })
 
   it('routes to acknowledge when tos_pending', async () => {
     server.use(
       http.post('/api/share/login', () =>
-        HttpResponse.json({
-          ok: true,
-          session_id: 'sid-1',
-          name: 'Jane',
-          email: 'jane@example.com',
-          tos_pending: true,
-          redirect: '/dashboard',
-        }),
+        HttpResponse.json({ ok: true, session_id: 'sid-1', name: 'Jane', email: 'jane@example.com', tos_pending: true, redirect: '/dashboard' }),
       ),
     )
 
     const user = userEvent.setup()
     render(<ShareLoginPage />)
-    await user.type(await screen.findByLabelText('Email'), 'jane@example.com')
-    await user.type(screen.getByLabelText('Passcode'), 'ocean-cabin-42')
-    await user.click(screen.getByRole('button', { name: /sign in/i }))
-
-    await waitFor(() =>
-      expect(pushSpy).toHaveBeenCalledWith('/share-login/acknowledge'),
-    )
+    await submitLoginForm(user)
+    await waitFor(() => expect(pushSpy).toHaveBeenCalledWith('/share-login/acknowledge'))
   })
 
   it('shows invalid-credentials on 401', async () => {
-    server.use(
-      http.post('/api/share/login', () =>
-        HttpResponse.json({ detail: { error: 'invalid' } }, { status: 401 }),
-      ),
-    )
-
+    server.use(http.post('/api/share/login', () => HttpResponse.json({ detail: { error: 'invalid' } }, { status: 401 })))
     const user = userEvent.setup()
     render(<ShareLoginPage />)
-    await user.type(await screen.findByLabelText('Email'), 'wrong@example.com')
-    await user.type(screen.getByLabelText('Passcode'), 'nope')
-    await user.click(screen.getByRole('button', { name: /sign in/i }))
-
+    await submitLoginForm(user, 'wrong@example.com', 'nope')
     expect(await screen.findByText(/invalid email or passcode/i)).toBeInTheDocument()
     expect(pushSpy).not.toHaveBeenCalled()
   })
 
   it('shows lockout countdown on 429', async () => {
     server.use(
-      http.post('/api/share/login', () =>
-        HttpResponse.json(
-          { detail: { error: 'locked', retry_after_s: 30 } },
-          { status: 429 },
-        ),
-      ),
+      http.post('/api/share/login', () => HttpResponse.json({ detail: { error: 'locked', retry_after_s: 30 } }, { status: 429 })),
     )
-
     const user = userEvent.setup()
     render(<ShareLoginPage />)
-    await user.type(await screen.findByLabelText('Email'), 'jane@example.com')
-    await user.type(screen.getByLabelText('Passcode'), 'x')
-    await user.click(screen.getByRole('button', { name: /sign in/i }))
-
+    await submitLoginForm(user, 'jane@example.com', 'x')
     expect(await screen.findByText(/locked out/i)).toBeInTheDocument()
     expect(screen.getByText(/retry in 30s/i)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /sign in/i })).toBeDisabled()
@@ -411,23 +300,12 @@ describe('ShareLoginPage', () => {
 
   it('shows ip whitelist message on 403', async () => {
     server.use(
-      http.post('/api/share/login', () =>
-        HttpResponse.json(
-          { detail: { error: 'ip_not_whitelisted' } },
-          { status: 403 },
-        ),
-      ),
+      http.post('/api/share/login', () => HttpResponse.json({ detail: { error: 'ip_not_whitelisted' } }, { status: 403 })),
     )
-
     const user = userEvent.setup()
     render(<ShareLoginPage />)
-    await user.type(await screen.findByLabelText('Email'), 'jane@example.com')
-    await user.type(screen.getByLabelText('Passcode'), 'x')
-    await user.click(screen.getByRole('button', { name: /sign in/i }))
-
-    expect(
-      await screen.findByText(/ip address is not on the approved list/i),
-    ).toBeInTheDocument()
+    await submitLoginForm(user, 'jane@example.com', 'x')
+    expect(await screen.findByText(/ip address is not on the approved list/i)).toBeInTheDocument()
   })
 
   it('toggles passcode visibility', async () => {
@@ -448,20 +326,12 @@ describe('ShareLoginForm submit', () => {
       http.post('/api/share/login', async ({ request }) => {
         body = await request.json()
         contentType = request.headers.get('content-type')
-        return HttpResponse.json({
-          ok: true,
-          name: 'Jane',
-          email: 'jane@example.com',
-          tos_pending: false,
-          redirect: '/dashboard',
-        })
+        return HttpResponse.json({ ok: true, name: 'Jane', email: 'jane@example.com', tos_pending: false, redirect: '/dashboard' })
       }),
     )
     const user = userEvent.setup()
     render(<ShareLoginPage />)
-    await user.type(await screen.findByLabelText('Email'), 'jane@example.com')
-    await user.type(screen.getByLabelText('Passcode'), 'ocean-cabin-42')
-    await user.click(screen.getByRole('button', { name: /sign in/i }))
+    await submitLoginForm(user)
     await waitFor(() => expect(locationAssignSpy).toHaveBeenCalledWith('/dashboard'))
     expect(body).toEqual({ email: 'jane@example.com', passcode: 'ocean-cabin-42' })
     expect(contentType).toContain('application/json')
@@ -469,12 +339,7 @@ describe('ShareLoginForm submit', () => {
 
   it('does not submit a blank form', async () => {
     let calls = 0
-    server.use(
-      http.post('/api/share/login', () => {
-        calls += 1
-        return HttpResponse.json({})
-      }),
-    )
+    server.use(http.post('/api/share/login', () => { calls += 1; return HttpResponse.json({}) }))
     const user = userEvent.setup()
     render(<ShareLoginPage />)
     await user.click(await screen.findByRole('button', { name: /sign in/i }))
@@ -494,16 +359,8 @@ describe('ShareLoginForm submit', () => {
     server.use(
       http.post('/api/share/login', async () => {
         calls += 1
-        await new Promise<void>((r) => {
-          release = r
-        })
-        return HttpResponse.json({
-          ok: true,
-          name: 'J',
-          email: 'j@example.com',
-          tos_pending: false,
-          redirect: '/dashboard',
-        })
+        await new Promise<void>((r) => { release = r })
+        return HttpResponse.json({ ok: true, name: 'J', email: 'j@example.com', tos_pending: false, redirect: '/dashboard' })
       }),
     )
     const user = userEvent.setup()
@@ -524,9 +381,7 @@ describe('ShareLoginForm OAuth', () => {
   it('renders SSO buttons + passcode form when both are enabled', async () => {
     useAuthConfig(true, [{ id: 'google', display_name: 'Google Workspace' }])
     render(<ShareLoginForm />)
-    expect(
-      await screen.findByRole('button', { name: /sign in with google workspace/i }),
-    ).toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: /sign in with google workspace/i })).toBeInTheDocument()
     expect(await screen.findByLabelText('Email')).toBeInTheDocument()
     expect(screen.getByText('OR')).toBeInTheDocument()
   })
@@ -535,12 +390,8 @@ describe('ShareLoginForm OAuth', () => {
     useAuthConfig(false, [{ id: 'google', display_name: 'Google Workspace' }])
     const user = userEvent.setup()
     render(<ShareLoginForm />)
-    await user.click(
-      await screen.findByRole('button', { name: /sign in with google workspace/i }),
-    )
-    expect(locationAssignSpy).toHaveBeenCalledWith(
-      '/api/share/oauth/authorize?provider=google',
-    )
+    await user.click(await screen.findByRole('button', { name: /sign in with google workspace/i }))
+    expect(locationAssignSpy).toHaveBeenCalledWith('/api/share/oauth/authorize?provider=google')
   })
 
   it('SSO-only config hides the passcode form', async () => {
@@ -559,11 +410,7 @@ describe('ShareLoginForm OAuth', () => {
   })
 
   it('fails open to the passcode form when auth-config fetch fails', async () => {
-    server.use(
-      http.get('/api/share/auth-config', () =>
-        HttpResponse.json({ error: 'boom' }, { status: 500 }),
-      ),
-    )
+    server.use(http.get('/api/share/auth-config', () => HttpResponse.json({ error: 'boom' }, { status: 500 })))
     render(<ShareLoginForm />)
     expect(await screen.findByLabelText('Email')).toBeInTheDocument()
   })
@@ -580,21 +427,14 @@ describe('ShareLoginForm OAuth', () => {
     mockSearchParams = new URLSearchParams('oauth_error=some_unknown_code_xyz')
     useAuthConfig(true, [])
     render(<ShareLoginForm />)
-    expect(
-      await screen.findByText(/sign-in failed\. please try again\./i),
-    ).toBeInTheDocument()
+    expect(await screen.findByText(/sign-in failed\. please try again\./i)).toBeInTheDocument()
     expect(screen.queryByText(/some_unknown_code_xyz/)).toBeNull()
   })
 })
 
 describe('AcknowledgeFallback (SSR-failure path)', () => {
   it('redirects to /share-login when tos fetch returns 401', async () => {
-    server.use(
-      http.get('/api/share/tos', () =>
-        HttpResponse.json({ detail: 'unauthenticated' }, { status: 401 }),
-      ),
-    )
-
+    server.use(http.get('/api/share/tos', () => HttpResponse.json({ detail: 'unauthenticated' }, { status: 401 })))
     rtlRender(<AcknowledgeFallback />)
     await waitFor(() => expect(replaceSpy).toHaveBeenCalledWith('/share-login'))
   })
@@ -602,9 +442,7 @@ describe('AcknowledgeFallback (SSR-failure path)', () => {
   it('renders TOS text and acknowledges → hard-reload to /dashboard', async () => {
     const ackBody = vi.fn()
     server.use(
-      http.get('/api/share/tos', () =>
-        HttpResponse.json({ version: 'v1', text: TOS_TEXT }),
-      ),
+      http.get('/api/share/tos', () => HttpResponse.json({ version: 'v1', text: TOS_TEXT })),
       http.post('/api/share/acknowledge', async ({ request }) => {
         ackBody(await request.json())
         return HttpResponse.json({ ok: true })
@@ -613,36 +451,22 @@ describe('AcknowledgeFallback (SSR-failure path)', () => {
 
     const user = userEvent.setup()
     rtlRender(<AcknowledgeFallback />)
-
-    expect(
-      await screen.findByText(/i acknowledge that i am viewing/i),
-    ).toBeInTheDocument()
-
+    expect(await screen.findByText(/i acknowledge that i am viewing/i)).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: /i acknowledge/i }))
-
     await waitFor(() => expect(locationAssignSpy).toHaveBeenCalledWith('/dashboard'))
     expect(ackBody).toHaveBeenCalledWith({ version: 'v1' })
   })
 
   it('shows server error if acknowledge fails', async () => {
     server.use(
-      http.get('/api/share/tos', () =>
-        HttpResponse.json({ version: 'v1', text: TOS_TEXT }),
-      ),
-      http.post('/api/share/acknowledge', () =>
-        HttpResponse.json(
-          { detail: { error: 'invalid_version' } },
-          { status: 400 },
-        ),
-      ),
+      http.get('/api/share/tos', () => HttpResponse.json({ version: 'v1', text: TOS_TEXT })),
+      http.post('/api/share/acknowledge', () => HttpResponse.json({ detail: { error: 'invalid_version' } }, { status: 400 })),
     )
 
     const user = userEvent.setup()
     rtlRender(<AcknowledgeFallback />)
-
     await screen.findByText(/i acknowledge that i am viewing/i)
     await user.click(screen.getByRole('button', { name: /i acknowledge/i }))
-
     expect(await screen.findByText(/invalid_version/i)).toBeInTheDocument()
     expect(replaceSpy).not.toHaveBeenCalledWith('/dashboard')
   })
@@ -660,28 +484,19 @@ describe('AcknowledgeButton (SSR-happy-path island)', () => {
 
     const user = userEvent.setup()
     rtlRender(<AcknowledgeButton version="v2" />)
-
     await user.click(screen.getByRole('button', { name: /i acknowledge/i }))
-
     await waitFor(() => expect(locationAssignSpy).toHaveBeenCalledWith('/dashboard'))
     expect(ackBody).toHaveBeenCalledWith({ version: 'v2' })
   })
 
   it('shows server error if acknowledge fails', async () => {
     server.use(
-      http.post('/api/share/acknowledge', () =>
-        HttpResponse.json(
-          { detail: { error: 'invalid_version' } },
-          { status: 400 },
-        ),
-      ),
+      http.post('/api/share/acknowledge', () => HttpResponse.json({ detail: { error: 'invalid_version' } }, { status: 400 })),
     )
 
     const user = userEvent.setup()
     rtlRender(<AcknowledgeButton version="v2" />)
-
     await user.click(screen.getByRole('button', { name: /i acknowledge/i }))
-
     expect(await screen.findByText(/invalid_version/i)).toBeInTheDocument()
     expect(locationAssignSpy).not.toHaveBeenCalled()
   })
@@ -694,17 +509,15 @@ describe('safeReturnTarget (post-login open-redirect guard, finding 008)', () =>
   })
 
   it('rejects protocol-relative, backslash, and absolute external targets', () => {
-    expect(safeReturnTarget('//evil.com')).toBeNull()
-    expect(safeReturnTarget('/\\evil.com')).toBeNull()
-    expect(safeReturnTarget('https://evil.com')).toBeNull()
-    expect(safeReturnTarget('evil.com')).toBeNull()
+    for (const target of ['//evil.com', '/\\evil.com', 'https://evil.com', 'evil.com']) {
+      expect(safeReturnTarget(target)).toBeNull()
+    }
   })
 
   it('rejects whitespace-smuggled protocol-relative targets (the finding-008 bypass)', () => {
-    expect(safeReturnTarget('/\t/evil.com')).toBeNull()
-    expect(safeReturnTarget('/\n/evil.com')).toBeNull()
-    expect(safeReturnTarget('/ /evil.com')).toBeNull()
-    expect(safeReturnTarget('/\t\\evil.com')).toBeNull()
+    for (const target of ['/\t/evil.com', '/\n/evil.com', '/ /evil.com', '/\t\\evil.com']) {
+      expect(safeReturnTarget(target)).toBeNull()
+    }
   })
 
   it('returns null for empty / nullish input', () => {
@@ -714,27 +527,14 @@ describe('safeReturnTarget (post-login open-redirect guard, finding 008)', () =>
   })
 })
 
-
 function makeRow(overrides: Partial<SessionRow> = {}): SessionRow {
   return {
-    ip: '10.0.0.1',
-    country: 'US',
-    asn: 7922,
-    session_start: '2026-06-15T00:00:00Z',
-    session_end: '2026-06-15T00:30:00Z',
-    req_count: 100,
-    edge_count: 80,
-    shield_count: 20,
-    unique_urls: 12,
-    reqs_4xx: 5,
-    reqs_5xx: 0,
-    total_bytes: 50000,
-    median_rtt_ms: 23.5,
-    ja4: 't13d1715h2_5b57614c22b0_3d5424432f57',
-    ua: 'curl/7.85.0',
-    edge_sid: null,
-    flagged: false,
-    ...overrides,
+    ip: '10.0.0.1', country: 'US', asn: 7922,
+    session_start: '2026-06-15T00:00:00Z', session_end: '2026-06-15T00:30:00Z',
+    req_count: 100, edge_count: 80, shield_count: 20, unique_urls: 12,
+    reqs_4xx: 5, reqs_5xx: 0, total_bytes: 50000, median_rtt_ms: 23.5,
+    ja4: 't13d1715h2_5b57614c22b0_3d5424432f57', ua: 'curl/7.85.0',
+    edge_sid: null, flagged: false, ...overrides,
   }
 }
 
@@ -743,121 +543,67 @@ function makeResponse(
   flags: Partial<Pick<SessionsResponse, 'has_rtt' | 'has_ja4' | 'has_edge' | 'has_edge_sid' | 'has_cmcd'>> = {},
 ): SessionsResponse {
   return {
-    sessions: rows,
-    asn_names: {},
-    total: rows.length,
-    page: 1,
-    limit: 100,
-    has_rtt: false,
-    has_ja4: false,
-    has_edge: false,
-    has_edge_sid: false,
-    has_cmcd: false,
-    min_reqs_flag: 0,
-    min_4xx_pct_flag: 0,
-    _is_cached: false,
-    ...flags,
+    sessions: rows, asn_names: {}, total: rows.length, page: 1, limit: 100,
+    has_rtt: false, has_ja4: false, has_edge: false, has_edge_sid: false, has_cmcd: false,
+    min_reqs_flag: 0, min_4xx_pct_flag: 0, _is_cached: false, ...flags,
   }
 }
 
-function renderSessionDetail(ui: React.ReactElement) {
-  return render(ui, { queryOptions: { queries: { gcTime: 0, staleTime: 0 } } })
+function detailElement(overrides: Partial<React.ComponentProps<typeof SessionDetail>> = {}) {
+  const props: React.ComponentProps<typeof SessionDetail> = {
+    selectedSession: makeRow(),
+    setSelectedSession: vi.fn(),
+    activeServiceId: 'svc-1',
+    data: makeResponse(),
+    labels: [],
+    labelBySid: new Map(),
+    onFlagged: vi.fn(),
+    ...overrides,
+  }
+  return <SessionDetail {...props} />
+}
+
+function renderSessionDetail(overrides: Partial<React.ComponentProps<typeof SessionDetail>> = {}) {
+  return render(detailElement(overrides), { queryOptions: { queries: { gcTime: 0, staleTime: 0 } } })
 }
 
 describe('SessionDetail', () => {
-  beforeEach(() => {
-    useMockSessionApi = true
-    postMock.mockReset()
-  })
-
-  afterEach(() => {
-    useMockSessionApi = false
-    cleanup()
-    postMock.mockReset()
-  })
+  beforeEach(() => { useMockSessionApi = true; postMock.mockReset() })
+  afterEach(() => { useMockSessionApi = false; cleanup(); postMock.mockReset() })
 
   it('does not render the dialog when selectedSession is null', () => {
-    renderSessionDetail(
-      <SessionDetail
-        selectedSession={null}
-        setSelectedSession={vi.fn()}
-        activeServiceId="svc-1"
-        data={makeResponse()}
-        labels={[]}
-        labelBySid={new Map()}
-        onFlagged={vi.fn()}
-      />,
-    )
+    renderSessionDetail({ selectedSession: null })
     expect(screen.queryByText(/^Session:/)).toBeNull()
     expect(postMock).not.toHaveBeenCalled()
   })
 
   it('renders the session header + metadata when a session is selected', () => {
     postMock.mockResolvedValue({ data: { columns: [], data: [], _is_cached: false } })
-    renderSessionDetail(
-      <SessionDetail
-        selectedSession={makeRow({ ip: '10.0.0.42', country: 'CA' })}
-        setSelectedSession={vi.fn()}
-        activeServiceId="svc-1"
-        data={makeResponse()}
-        labels={[]}
-        labelBySid={new Map()}
-        onFlagged={vi.fn()}
-      />,
-    )
+    renderSessionDetail({ selectedSession: makeRow({ ip: '10.0.0.42', country: 'CA' }) })
     expect(screen.getByText(/Session:/)).toBeInTheDocument()
-    expect(screen.getByText('10.0.0.42')).toBeInTheDocument()
-    expect(screen.getByText('CA')).toBeInTheDocument()
-    expect(screen.getByText('AS7922')).toBeInTheDocument()
-    expect(screen.getByText('100')).toBeInTheDocument()
+    for (const txt of ['10.0.0.42', 'CA', 'AS7922', '100']) expect(screen.getByText(txt)).toBeInTheDocument()
   })
 
   it('issues a POST to /api/sessions/detail with the session window', async () => {
     postMock.mockResolvedValue({ data: { columns: [], data: [], _is_cached: false } })
-    const session = makeRow({
-      ip: '10.0.0.50',
-      ja4: 'abc_def_ghi',
-      session_start: '2026-06-15T00:00:00Z',
-      session_end: '2026-06-15T01:00:00Z',
+    const selectedSession = makeRow({
+      ip: '10.0.0.50', ja4: 'abc_def_ghi',
+      session_start: '2026-06-15T00:00:00Z', session_end: '2026-06-15T01:00:00Z',
     })
-    renderSessionDetail(
-      <SessionDetail
-        selectedSession={session}
-        setSelectedSession={vi.fn()}
-        activeServiceId="svc-1"
-        data={makeResponse()}
-        labels={[]}
-        labelBySid={new Map()}
-        onFlagged={vi.fn()}
-      />,
-    )
+    renderSessionDetail({ selectedSession })
     await waitFor(() => expect(postMock).toHaveBeenCalled())
     const [path, opts] = postMock.mock.calls[0]
     expect(path).toBe('/api/sessions/detail')
     expect(opts.body).toMatchObject({
-      ip: '10.0.0.50',
-      ja4: 'abc_def_ghi',
-      start_time: '2026-06-15T00:00:00Z',
-      end_time: '2026-06-15T01:00:00Z',
+      ip: '10.0.0.50', ja4: 'abc_def_ghi',
+      start_time: '2026-06-15T00:00:00Z', end_time: '2026-06-15T01:00:00Z',
     })
   })
 
   it('skips the fetch when activeServiceId is null (useQuery enabled=false)', async () => {
     postMock.mockResolvedValue({ data: { columns: [], data: [], _is_cached: false } })
-    renderSessionDetail(
-      <SessionDetail
-        selectedSession={makeRow()}
-        setSelectedSession={vi.fn()}
-        activeServiceId={null}
-        data={makeResponse()}
-        labels={[]}
-        labelBySid={new Map()}
-        onFlagged={vi.fn()}
-      />,
-    )
-    await act(async () => {
-      await new Promise((r) => setTimeout(r, 30))
-    })
+    renderSessionDetail({ activeServiceId: null })
+    await act(async () => { await new Promise((r) => setTimeout(r, 30)) })
     expect(postMock).not.toHaveBeenCalled()
   })
 
@@ -872,167 +618,81 @@ describe('SessionDetail', () => {
         ],
       },
     })
-    renderSessionDetail(
-      <SessionDetail
-        selectedSession={makeRow()}
-        setSelectedSession={vi.fn()}
-        activeServiceId="svc-1"
-        data={makeResponse()}
-        labels={[]}
-        labelBySid={new Map()}
-        onFlagged={vi.fn()}
-      />,
-    )
+    renderSessionDetail()
     expect(screen.getByText(/Request Timeline/i)).toBeInTheDocument()
     await waitFor(() => expect(screen.getAllByText(/example\.com/).length).toBeGreaterThan(0))
-    expect(screen.getByText('/a')).toBeInTheDocument()
-    expect(screen.getByText('/b')).toBeInTheDocument()
-    expect(screen.getByText('200')).toBeInTheDocument()
-    expect(screen.getByText('404')).toBeInTheDocument()
+    for (const txt of ['/a', '/b', '200', '404']) expect(screen.getByText(txt)).toBeInTheDocument()
   })
 
   it('shows the Edge-only switch only when data.has_edge=true', () => {
     postMock.mockResolvedValue({ data: { columns: [], data: [], _is_cached: false } })
-    const { rerender } = renderSessionDetail(
-      <SessionDetail
-        selectedSession={makeRow()}
-        setSelectedSession={vi.fn()}
-        activeServiceId="svc-1"
-        data={makeResponse([], { has_edge: false })}
-        labels={[]}
-        labelBySid={new Map()}
-        onFlagged={vi.fn()}
-      />,
-    )
+    const { rerender } = renderSessionDetail({ data: makeResponse([], { has_edge: false }) })
     expect(screen.queryByText(/Edge only/i)).toBeNull()
 
-    rerender(
-      <SessionDetail
-        selectedSession={makeRow()}
-        setSelectedSession={vi.fn()}
-        activeServiceId="svc-1"
-        data={makeResponse([], { has_edge: true })}
-        labels={[]}
-        labelBySid={new Map()}
-        onFlagged={vi.fn()}
-      />,
-    )
+    rerender(detailElement({ data: makeResponse([], { has_edge: true }) }))
     expect(screen.getByText(/Edge only/i)).toBeInTheDocument()
   })
 
   it('renders the FlagSessionPopover in the header when edge_sid is present', () => {
     postMock.mockResolvedValue({ data: { columns: [], data: [], _is_cached: false } })
-    renderSessionDetail(
-      <SessionDetail
-        selectedSession={makeRow({ edge_sid: 'sid-abc' })}
-        setSelectedSession={vi.fn()}
-        activeServiceId="svc-1"
-        data={makeResponse()}
-        labels={[]}
-        labelBySid={new Map()}
-        onFlagged={vi.fn()}
-      />,
-    )
+    renderSessionDetail({ selectedSession: makeRow({ edge_sid: 'sid-abc' }) })
     expect(screen.getByTestId('flag-popover')).toBeInTheDocument()
   })
 
   it('UX-5: shows an inline error + Retry (not a bare empty table) when the detail query 5xxs', async () => {
     postMock.mockRejectedValueOnce(new Error('detail boom'))
-    renderSessionDetail(
-      <SessionDetail
-        selectedSession={makeRow({ ip: '1.2.3.4' })}
-        setSelectedSession={vi.fn()}
-        activeServiceId="test-svc"
-        data={undefined}
-        labels={[]}
-        labelBySid={new Map()}
-        onFlagged={vi.fn()}
-      />,
-    )
+    renderSessionDetail({ selectedSession: makeRow({ ip: '1.2.3.4' }), activeServiceId: 'test-svc', data: undefined })
     await waitFor(
-      () => {
-        expect(screen.getByRole('alert')).toHaveTextContent(/failed to load session detail/i)
-      },
+      () => expect(screen.getByRole('alert')).toHaveTextContent(/failed to load session detail/i),
       { timeout: 10000 },
     )
     expect(screen.getByRole('button', { name: /retry/i })).toBeInTheDocument()
   }, 15000)
 })
 
-function baseProps(
-  overrides: Partial<React.ComponentProps<typeof SessionsTable>> = {},
-): React.ComponentProps<typeof SessionsTable> {
+function baseProps(overrides: Partial<React.ComponentProps<typeof SessionsTable>> = {}): React.ComponentProps<typeof SessionsTable> {
   return {
-    data: makeResponse([makeRow()]),
-    activeServiceId: 'svc-1',
-    isLoadingInitial: false,
-    isFetching: false,
-    labels: [],
-    labelBySid: new Map(),
-    idBySid: new Map(),
-    onFlagged: vi.fn(),
-    onRowClick: vi.fn(),
+    data: makeResponse([makeRow()]), activeServiceId: 'svc-1', isLoadingInitial: false, isFetching: false,
+    labels: [], labelBySid: new Map(), idBySid: new Map(), onFlagged: vi.fn(), onRowClick: vi.fn(),
     ...overrides,
   }
 }
 
 describe('SessionsTable', () => {
-  beforeEach(() => {
-    useMockSessionApi = true
-    postMock.mockReset()
-  })
-
-  afterEach(() => {
-    useMockSessionApi = false
-    cleanup()
-    postMock.mockReset()
-  })
+  beforeEach(() => { useMockSessionApi = true; postMock.mockReset() })
+  afterEach(() => { useMockSessionApi = false; cleanup(); postMock.mockReset() })
 
   it('renders the canonical column headers', () => {
     rtlRender(<SessionsTable {...baseProps()} />)
-    expect(screen.getByText('IP Address')).toBeInTheDocument()
-    expect(screen.getByText('Country')).toBeInTheDocument()
-    expect(screen.getByText('Requests')).toBeInTheDocument()
-    expect(screen.getByText('4xx%')).toBeInTheDocument()
-    expect(screen.getByText('User-Agent')).toBeInTheDocument()
+    for (const h of ['IP Address', 'Country', 'Requests', '4xx%', 'User-Agent']) {
+      expect(screen.getByText(h)).toBeInTheDocument()
+    }
   })
 
   it('renders one row per session in data.sessions', () => {
-    const rows = [
-      makeRow({ ip: '10.0.0.1' }),
-      makeRow({ ip: '10.0.0.2', country: 'CA' }),
-      makeRow({ ip: '10.0.0.3', country: 'GB' }),
-    ]
+    const rows = [makeRow({ ip: '10.0.0.1' }), makeRow({ ip: '10.0.0.2', country: 'CA' }), makeRow({ ip: '10.0.0.3', country: 'GB' })]
     rtlRender(<SessionsTable {...baseProps({ data: makeResponse(rows) })} />)
-    expect(screen.getByText('10.0.0.1')).toBeInTheDocument()
-    expect(screen.getByText('10.0.0.2')).toBeInTheDocument()
-    expect(screen.getByText('10.0.0.3')).toBeInTheDocument()
+    for (const ip of ['10.0.0.1', '10.0.0.2', '10.0.0.3']) expect(screen.getByText(ip)).toBeInTheDocument()
   })
 
   it('clicking the row-level Details button opens the detail panel via onRowClick', () => {
     const onRowClick = vi.fn()
     const row = makeRow({ ip: '10.0.0.42' })
     rtlRender(<SessionsTable {...baseProps({ data: makeResponse([row]), onRowClick })} />)
-    const detailsBtn = screen.getByRole('button', { name: /details/i })
-    fireEvent.click(detailsBtn)
+    fireEvent.click(screen.getByRole('button', { name: /details/i }))
     expect(onRowClick).toHaveBeenCalled()
     expect(onRowClick.mock.calls[0][0]).toMatchObject({ ip: '10.0.0.42' })
   })
 
   it('renders the flagged-icon when row.flagged=true', () => {
     const row = makeRow({ ip: '10.0.0.7', flagged: true })
-    const { container } = rtlRender(
-      <SessionsTable {...baseProps({ data: makeResponse([row]) })} />,
-    )
+    const { container } = rtlRender(<SessionsTable {...baseProps({ data: makeResponse([row]) })} />)
     expect(container.querySelector('[title="Flagged Session"]')).toBeInTheDocument()
   })
 
   it('omits RTT / JA4 / Edge columns when their has_* flags are false', () => {
     rtlRender(<SessionsTable {...baseProps()} />)
-    expect(screen.queryByText('Med. RTT')).toBeNull()
-    expect(screen.queryByText('JA4')).toBeNull()
-    expect(screen.queryByText('Edge / Shield')).toBeNull()
-    expect(screen.queryByText('Flag')).toBeNull()
+    for (const h of ['Med. RTT', 'JA4', 'Edge / Shield', 'Flag']) expect(screen.queryByText(h)).toBeNull()
   })
 
   it('adds RTT / JA4 / Edge columns when their has_* flags are true', () => {
@@ -1040,19 +700,11 @@ describe('SessionsTable', () => {
     rtlRender(
       <SessionsTable
         {...baseProps({
-          data: makeResponse([row], {
-            has_rtt: true,
-            has_ja4: true,
-            has_edge: true,
-            has_edge_sid: true,
-          }),
+          data: makeResponse([row], { has_rtt: true, has_ja4: true, has_edge: true, has_edge_sid: true }),
         })}
       />,
     )
-    expect(screen.getByText('Med. RTT')).toBeInTheDocument()
-    expect(screen.getByText('JA4')).toBeInTheDocument()
-    expect(screen.getByText('Edge / Shield')).toBeInTheDocument()
-    expect(screen.getByText('Flag')).toBeInTheDocument()
+    for (const h of ['Med. RTT', 'JA4', 'Edge / Shield', 'Flag']) expect(screen.getByText(h)).toBeInTheDocument()
     expect(screen.getAllByTestId('flag-popover').length).toBeGreaterThan(0)
   })
 
@@ -1069,34 +721,16 @@ describe('SessionsTable', () => {
 
 function controlsBaseProps(overrides: Partial<React.ComponentProps<typeof ScoringControls>> = {}) {
   return {
-    cmcdEnabled: false,
-    flaggedOnly: false,
-    setFlaggedOnly: vi.fn(),
-    streamingOnly: false,
-    setStreamingOnly: vi.fn(),
-    minReqs: '' as number | '',
-    setMinReqs: vi.fn(),
-    min4xxPct: '' as number | '',
-    setMin4xxPct: vi.fn(),
-    data: { min_reqs_flag: 1000, min_4xx_pct_flag: 20 },
-    isFetching: false,
-    isLoadingInitial: false,
-    refetch: vi.fn(),
+    cmcdEnabled: false, flaggedOnly: false, setFlaggedOnly: vi.fn(), streamingOnly: false, setStreamingOnly: vi.fn(),
+    minReqs: '' as number | '', setMinReqs: vi.fn(), min4xxPct: '' as number | '', setMin4xxPct: vi.fn(),
+    data: { min_reqs_flag: 1000, min_4xx_pct_flag: 20 }, isFetching: false, isLoadingInitial: false, refetch: vi.fn(),
     ...overrides,
   }
 }
 
 describe('ScoringControls', () => {
-  beforeEach(() => {
-    useMockSessionApi = true
-    postMock.mockReset()
-  })
-
-  afterEach(() => {
-    useMockSessionApi = false
-    cleanup()
-    postMock.mockReset()
-  })
+  beforeEach(() => { useMockSessionApi = true; postMock.mockReset() })
+  afterEach(() => { useMockSessionApi = false; cleanup(); postMock.mockReset() })
 
   it('renders the flagged-only switch label and the threshold inputs', () => {
     rtlRender(<ScoringControls {...controlsBaseProps()} />)
@@ -1107,11 +741,7 @@ describe('ScoringControls', () => {
   })
 
   it('uses data.min_reqs_flag / data.min_4xx_pct_flag as placeholder hints', () => {
-    rtlRender(
-      <ScoringControls
-        {...controlsBaseProps({ data: { min_reqs_flag: 5000, min_4xx_pct_flag: 35 } })}
-      />,
-    )
+    rtlRender(<ScoringControls {...controlsBaseProps({ data: { min_reqs_flag: 5000, min_4xx_pct_flag: 35 } })} />)
     expect(screen.getByPlaceholderText(/≥\s*5000/)).toBeInTheDocument()
     expect(screen.getByPlaceholderText(/≥\s*35/)).toBeInTheDocument()
   })
@@ -1125,33 +755,28 @@ describe('ScoringControls', () => {
   it('fires setMinReqs with a number when the requests input changes', () => {
     const setMinReqs = vi.fn()
     rtlRender(<ScoringControls {...controlsBaseProps({ setMinReqs })} />)
-    const reqInput = screen.getByPlaceholderText(/≥\s*1000/) as HTMLInputElement
-    fireEvent.change(reqInput, { target: { value: '250' } })
+    fireEvent.change(screen.getByPlaceholderText(/≥\s*1000/), { target: { value: '250' } })
     expect(setMinReqs).toHaveBeenCalledWith(250)
   })
 
   it('fires setMinReqs("") when the requests input is cleared', () => {
     const setMinReqs = vi.fn()
     rtlRender(<ScoringControls {...controlsBaseProps({ setMinReqs, minReqs: 250 })} />)
-    const reqInput = screen.getByPlaceholderText(/≥\s*1000/) as HTMLInputElement
-    fireEvent.change(reqInput, { target: { value: '' } })
+    fireEvent.change(screen.getByPlaceholderText(/≥\s*1000/), { target: { value: '' } })
     expect(setMinReqs).toHaveBeenCalledWith('')
   })
 
   it('fires setMin4xxPct with a number when the 4xx input changes', () => {
     const setMin4xxPct = vi.fn()
     rtlRender(<ScoringControls {...controlsBaseProps({ setMin4xxPct })} />)
-    const pctInput = screen.getByPlaceholderText(/≥\s*20/) as HTMLInputElement
-    fireEvent.change(pctInput, { target: { value: '40' } })
+    fireEvent.change(screen.getByPlaceholderText(/≥\s*20/), { target: { value: '40' } })
     expect(setMin4xxPct).toHaveBeenCalledWith(40)
   })
 
   it('fires setFlaggedOnly when the switch is toggled', async () => {
     const setFlaggedOnly = vi.fn()
     rtlRender(<ScoringControls {...controlsBaseProps({ setFlaggedOnly })} />)
-    const sw = screen.getByRole('switch')
-    const user = userEvent.setup()
-    await user.click(sw)
+    await userEvent.setup().click(screen.getByRole('switch'))
     expect(setFlaggedOnly).toHaveBeenCalledTimes(1)
     expect(setFlaggedOnly.mock.calls[0][0]).toBe(true)
   })
@@ -1168,17 +793,11 @@ describe('ScoringControls', () => {
     rtlRender(
       <ScoringControls
         {...controlsBaseProps({
-          flaggedOnly: true,
-          minReqs: 250,
-          min4xxPct: 40,
-          setFlaggedOnly,
-          setMinReqs,
-          setMin4xxPct,
+          flaggedOnly: true, minReqs: 250, min4xxPct: 40, setFlaggedOnly, setMinReqs, setMin4xxPct,
         })}
       />,
     )
-    const clearBtn = screen.getByRole('button', { name: /clear filters/i })
-    fireEvent.click(clearBtn)
+    fireEvent.click(screen.getByRole('button', { name: /clear filters/i }))
     expect(setFlaggedOnly).toHaveBeenCalledWith(false)
     expect(setMinReqs).toHaveBeenCalledWith('')
     expect(setMin4xxPct).toHaveBeenCalledWith('')
@@ -1197,9 +816,7 @@ describe('ScoringControls', () => {
   })
 
   it('dims the control bar while a background refetch is running', () => {
-    const { container } = rtlRender(
-      <ScoringControls {...controlsBaseProps({ isFetching: true, isLoadingInitial: false })} />,
-    )
+    const { container } = rtlRender(<ScoringControls {...controlsBaseProps({ isFetching: true, isLoadingInitial: false })} />)
     expect(container.querySelector('.opacity-40')).toBeInTheDocument()
   })
 

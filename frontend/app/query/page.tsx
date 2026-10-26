@@ -1,42 +1,618 @@
 'use client'
 
 import React, { Suspense, useState, useEffect, useEffectEvent, useMemo, useCallback } from 'react'
-import { useQueryStates } from 'nuqs'
+import CodeMirror, { type ReactCodeMirrorRef } from '@uiw/react-codemirror'
+import { sql } from '@codemirror/lang-sql'
+import { keymap, EditorView } from '@codemirror/view'
+import { indentWithTab } from '@codemirror/commands'
+import { useTheme } from 'next-themes'
+import { parseAsString, parseAsStringLiteral, useQueryStates } from 'nuqs'
 import { useQuery, useMutation } from '@tanstack/react-query'
 import { useShallow } from 'zustand/react/shallow'
 import type { ColumnDef, SortingState } from '@tanstack/react-table'
-import { client, unwrapClient, queryKeys } from "@/lib/api";
+import { client, unwrapClient, queryKeys } from '@/lib/api'
 import { useFilterStore } from '@/stores/filterStore'
-import { useEffectiveServiceId, useBootstrapResolved } from '@/hooks/useBootstrap'
-import { useDebouncedFilterPayload } from '@/hooks/useDashboardCards'
-import { useFilterUrlWriteback } from '@/hooks/useDashboardCards'
-import { useDateFormat } from '@/hooks/useSSE'
-import { useFieldLabel, useLogFieldsCatalog } from '@/hooks/useBootstrap'
-import { useDerivedState, useLocalStorageString } from '@/hooks/useSSE'
-import { Button } from '@/components/ui/button'
+import {
+  useEffectiveServiceId,
+  useBootstrapResolved,
+  useFieldLabel,
+  useLogFieldsCatalog,
+  useMounted,
+} from '@/hooks/useBootstrap'
+import { useDebouncedFilterPayload, useFilterUrlWriteback } from '@/hooks/useDashboardCards'
+import { useDateFormat, useDerivedState, useLocalStorageString } from '@/hooks/useSSE'
+import { Button, buttonVariants } from '@/components/ui/button'
+import { Label } from '@/components/ui/label'
+import { Switch } from '@/components/ui/switch'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
-import { Play, Search, AlertCircle, Database, Terminal, Activity, Bug } from 'lucide-react'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+  DropdownMenuSeparator,
+  DropdownMenuLabel,
+  DropdownMenuGroup,
+} from '@/components/ui/dropdown-menu'
+import { DataTable } from '@/components/DataTable'
+import {
+  Play,
+  Search,
+  AlertCircle,
+  Database,
+  Terminal,
+  Activity,
+  Bug,
+  History,
+  Bookmark,
+  Download,
+  X,
+  Filter,
+  Code2,
+  Clock,
+  ChevronRight,
+  Columns3,
+} from 'lucide-react'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { NoServiceSelected } from '@/components/ReportLayout'
 import { PageHeader } from '@/components/ui/confirm-dialog'
-import { downloadAsCsv } from '@/lib/utils'
+import { downloadAsCsv, formatCount, cn } from '@/lib/utils'
 import { Skeleton } from '@/components/ui/skeleton'
-import type { FiltersPayload } from '@/types/api'
-import {
-  buildStructuredSql,
-  queryPageUrlParsers,
-  type QueryMode,
-  RawSqlMode,
-  QueryToolbar,
-  ModeToggle,
-  StructuredMode,
-  ResultsTable,
-} from './_sections/QueryToolbar'
+import type { FiltersPayload, Schema } from '@/types/api'
 import type { components } from '@/types/api.generated'
 
 type QueryResponse = components['schemas']['QueryResponse']
+type PresetQuery = components['schemas']['PresetQuery']
 
-// The shapes the backend's error envelope takes (``detail`` is a string or an object).
+export interface CodeEditorHandle {
+  insertAtCursor: (text: string) => void
+}
+
+interface CodeEditorProps {
+  value: string
+  onChange: (value: string) => void
+  schema?: { name: string; type: string }[]
+  tableName?: string
+  className?: string
+  height?: string
+  ariaLabel?: string
+}
+
+export const CodeEditor = React.forwardRef<CodeEditorHandle, CodeEditorProps>(function CodeEditor(
+  {
+    value,
+    onChange,
+    schema,
+    tableName = 'logs',
+    className,
+    height = '300px',
+    ariaLabel = 'SQL query editor',
+  },
+  ref,
+) {
+  const { theme } = useTheme()
+  const isDark = theme === 'dark'
+  const cmRef = React.useRef<ReactCodeMirrorRef | null>(null)
+
+  React.useImperativeHandle(
+    ref,
+    () => ({
+      insertAtCursor: (text: string) => {
+        const view = cmRef.current?.view
+        if (!view) return
+        const { from, to } = view.state.selection.main
+        view.dispatch({
+          changes: { from, to, insert: text },
+          selection: { anchor: from + text.length },
+          scrollIntoView: true,
+        })
+        view.focus()
+      },
+    }),
+    [],
+  )
+
+  const a11yExtensions = React.useMemo(
+    () => [
+      keymap.of([
+        indentWithTab,
+        {
+          key: 'Escape',
+          run: (view) => {
+            view.contentDOM.blur()
+            return true
+          },
+        },
+      ]),
+      EditorView.contentAttributes.of({ 'aria-label': ariaLabel }),
+    ],
+    [ariaLabel],
+  )
+
+  const sqlExtension = React.useMemo(() => {
+    const schemaObj: Record<string, string[]> = {}
+    if (schema) {
+      const cols = schema.map((s) => s.name)
+      schemaObj[tableName] = cols
+      if (tableName !== 'logs') schemaObj['logs'] = cols
+    }
+    return sql({ schema: schemaObj, defaultTable: tableName })
+  }, [schema, tableName])
+
+  return (
+    <div className={className}>
+      <CodeMirror
+        ref={cmRef}
+        value={value}
+        height={height}
+        theme={isDark ? 'dark' : 'light'}
+        extensions={[sqlExtension, ...a11yExtensions]}
+        onChange={onChange}
+        className="border rounded-md overflow-hidden"
+      />
+      <p className="sr-only" id="code-editor-keyboard-hint">
+        Press Escape, then Tab, to move focus out of the editor. Press Control-Space to trigger column autocomplete.
+      </p>
+    </div>
+  )
+})
+
+export const queryPageUrlParsers = {
+  q: parseAsString,
+  mode: parseAsStringLiteral(['raw'] as const),
+  start_time: parseAsString,
+  end_time: parseAsString,
+  filters: parseAsString,
+}
+
+function sqlEscape(v: string): string {
+  return v.replace(/'/g, "''")
+}
+
+const SIMPLE_IDENT_RE = /^[a-zA-Z_][a-zA-Z0-9_]*$/
+
+function quoteIdent(name: string): string {
+  if (SIMPLE_IDENT_RE.test(name)) return name
+  return `"${name.replace(/"/g, '""')}"`
+}
+
+const NUMERIC_DUCKDB_TYPES = new Set([
+  'TINYINT', 'SMALLINT', 'INTEGER', 'BIGINT', 'HUGEINT',
+  'UTINYINT', 'USMALLINT', 'UINTEGER', 'UBIGINT', 'UHUGEINT',
+  'FLOAT', 'DOUBLE', 'REAL', 'DECIMAL',
+])
+
+function isNumericType(t: string | undefined): boolean {
+  if (!t) return false
+  const base = t.toUpperCase().split('(')[0].trim()
+  return NUMERIC_DUCKDB_TYPES.has(base)
+}
+
+const NUMERIC_LITERAL_RE = /^-?\d+(\.\d+)?$/
+
+function toCanonicalSqlTs(ts: string): string {
+  const d = new Date(ts)
+  return isNaN(d.getTime()) ? ts : d.toISOString()
+}
+
+function buildWhereClause(
+  filters: FiltersPayload,
+  startTime: string | null,
+  endTime: string | null,
+  fieldTypes?: Record<string, string>,
+): string {
+  const parts: string[] = []
+
+  if (startTime) parts.push(`timestamp >= '${sqlEscape(toCanonicalSqlTs(startTime))}'`)
+  if (endTime) parts.push(`timestamp <= '${sqlEscape(toCanonicalSqlTs(endTime))}'`)
+
+  for (const [rawCol, spec] of Object.entries(filters)) {
+    if (!spec || !Array.isArray(spec.values) || spec.values.length === 0) continue
+    const col = rawCol.replace(/_\d+$/, '')
+    const ident = quoteIdent(col)
+    const colIsNumeric = isNumericType(fieldTypes?.[col])
+    const literals = spec.values
+      .map((v) => {
+        const s = String(v)
+        if (colIsNumeric && NUMERIC_LITERAL_RE.test(s)) return s
+        return `'${sqlEscape(s)}'`
+      })
+      .join(', ')
+    const op = spec.mode === 'exclude' ? 'NOT IN' : 'IN'
+    parts.push(`${ident} ${op} (${literals})`)
+  }
+
+  return parts.length > 0 ? `WHERE ${parts.join(' AND ')}` : ''
+}
+
+export function buildStructuredSql(
+  filters: FiltersPayload,
+  startTime: string | null,
+  endTime: string | null,
+  sorting: SortingState,
+  maxRows: number,
+  fieldTypes?: Record<string, string>,
+  tableName: string = 'logs',
+): string {
+  const where = buildWhereClause(filters, startTime, endTime, fieldTypes)
+  const sort = sorting[0]
+  const orderBy = sort
+    ? `ORDER BY ${quoteIdent(sort.id)} ${sort.desc ? 'DESC' : 'ASC'}`
+    : 'ORDER BY timestamp DESC'
+  return ['SELECT *', `FROM ${tableName}`, where, orderBy, `LIMIT ${maxRows}`].filter(Boolean).join('\n')
+}
+
+export type QueryMode = 'structured' | 'raw'
+
+type SchemaColumn = {
+  name?: Schema<'SchemaColumn'>['name']
+  column?: string
+  type: Schema<'SchemaColumn'>['type']
+}
+
+interface RawSqlModeProps {
+  rawSql: string
+  onRawSqlChange: (sql: string) => void
+  schema?: SchemaColumn[]
+  tableName?: string
+}
+
+export function RawSqlMode({ rawSql, onRawSqlChange, schema, tableName }: RawSqlModeProps) {
+  const editorRef = React.useRef<CodeEditorHandle>(null)
+  const [browserOpen, setBrowserOpen] = React.useState(true)
+  const resolvedTable = tableName || 'logs'
+
+  const normalizedSchema = React.useMemo(
+    () =>
+      (schema ?? [])
+        .map((col) => ({
+          name: col.name || col.column || '',
+          type: col.type,
+        }))
+        .filter((col) => Boolean(col.name)),
+    [schema],
+  )
+
+  const handleInsert = React.useCallback((col: string) => {
+    editorRef.current?.insertAtCursor(col)
+  }, [])
+
+  return (
+    <div className="grid gap-3 p-3 md:grid-cols-[1fr_240px]">
+      <CodeEditor
+        ref={editorRef}
+        value={rawSql}
+        onChange={onRawSqlChange}
+        schema={normalizedSchema}
+        tableName={tableName}
+        height="400px"
+      />
+      <SchemaBrowser
+        tableName={resolvedTable}
+        schema={normalizedSchema}
+        open={browserOpen}
+        onOpenChange={setBrowserOpen}
+        onInsert={handleInsert}
+      />
+    </div>
+  )
+}
+
+interface SchemaBrowserProps {
+  tableName: string
+  schema?: { name: string; type: string }[]
+  open: boolean
+  onOpenChange: (next: boolean) => void
+  onInsert: (col: string) => void
+}
+
+function SchemaBrowser({ tableName, schema, open, onOpenChange, onInsert }: SchemaBrowserProps) {
+  return (
+    <aside
+      className="rounded-md border bg-muted/20 text-xs flex flex-col min-h-0"
+      aria-label="Schema browser"
+      data-testid="query-schema-sidebar"
+    >
+      <button
+        type="button"
+        onClick={() => onOpenChange(!open)}
+        aria-expanded={open}
+        className="flex items-center gap-2 w-full px-3 py-2 border-b text-left font-medium hover:bg-muted/40 transition-colors"
+      >
+        <ChevronRight className={cn('h-3.5 w-3.5 text-muted-foreground transition-transform', open && 'rotate-90')} />
+        <Columns3 className="h-3.5 w-3.5 text-muted-foreground" />
+        <span className="flex-1 truncate">{tableName}</span>
+        <span className="text-[10px] text-muted-foreground tabular-nums">{schema?.length ?? 0}</span>
+      </button>
+      {open && (
+        <div className="overflow-y-auto" style={{ maxHeight: '360px' }}>
+          {schema && schema.length > 0 ? (
+            <ul className="py-1">
+              {schema.map((col) => (
+                <li key={col.name}>
+                  <button
+                    type="button"
+                    onClick={() => onInsert(col.name)}
+                    title={`Insert ${col.name} at cursor`}
+                    className="flex w-full items-baseline justify-between gap-2 px-3 py-1 text-left font-mono text-[11px] hover:bg-muted/60 focus:bg-muted/60 focus:outline-none"
+                  >
+                    <span className="truncate">{col.name}</span>
+                    <span className="shrink-0 text-[10px] uppercase tracking-wide text-muted-foreground">
+                      {col.type}
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="p-3 italic text-muted-foreground">No columns available.</p>
+          )}
+        </div>
+      )}
+    </aside>
+  )
+}
+
+interface HistoryEntry {
+  sql: string
+  ts: number
+}
+
+interface QueryToolbarProps {
+  presets: PresetQuery[] | undefined
+  history: HistoryEntry[]
+  mode: QueryMode
+  onModeChange: (next: QueryMode) => void
+  onSelectSql: (sql: string) => void
+  onRemoveHistoryItem: (e: React.MouseEvent, index: number) => void
+  explain: boolean
+  onExplainChange: (next: boolean) => void
+  maxRows: number
+  onMaxRowsChange: (next: number) => void
+  canExport: boolean
+  onExportCsv: () => void
+}
+
+export function QueryToolbar({
+  presets,
+  history,
+  mode,
+  onModeChange,
+  onSelectSql,
+  onRemoveHistoryItem,
+  explain,
+  onExplainChange,
+  maxRows,
+  onMaxRowsChange,
+  canExport,
+  onExportCsv,
+}: QueryToolbarProps) {
+  const { timeAgo } = useDateFormat()
+
+  return (
+    <div className="flex items-center justify-between p-2 border-b bg-muted/30 flex-wrap gap-2">
+      <div className="flex items-center gap-2">
+        <DropdownMenu>
+          <DropdownMenuTrigger className={buttonVariants({ variant: 'outline', size: 'sm', className: 'h-8' })}>
+            <span className="flex items-center">
+              <Bookmark className="w-3.5 h-3.5 mr-2 text-muted-foreground" />
+              Presets
+            </span>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start" className="w-[300px]">
+            <DropdownMenuGroup>
+              <DropdownMenuLabel>Recommended Queries</DropdownMenuLabel>
+              <DropdownMenuSeparator />
+              {presets?.length ? (
+                presets.map((p) => (
+                  <DropdownMenuItem
+                    key={p.name}
+                    className="flex-col items-start cursor-pointer py-2"
+                    onClick={() => {
+                      if (mode !== 'raw') onModeChange('raw')
+                      onSelectSql(p.sql)
+                    }}
+                  >
+                    <div className="font-semibold text-sm">{p.name}</div>
+                    <div className="text-xs text-muted-foreground mt-0.5">{p.description}</div>
+                  </DropdownMenuItem>
+                ))
+              ) : (
+                <div className="p-4 text-xs text-muted-foreground text-center italic">No presets available.</div>
+              )}
+            </DropdownMenuGroup>
+          </DropdownMenuContent>
+        </DropdownMenu>
+
+        <DropdownMenu>
+          <DropdownMenuTrigger className={buttonVariants({ variant: 'outline', size: 'sm', className: 'h-8' })}>
+            <span className="flex items-center">
+              <History className="w-3.5 h-3.5 mr-2 text-muted-foreground" />
+              History
+            </span>
+          </DropdownMenuTrigger>
+
+          <DropdownMenuContent align="start" className="w-[400px] max-h-[400px] overflow-y-auto">
+            <DropdownMenuGroup>
+              <DropdownMenuLabel>Recent Queries</DropdownMenuLabel>
+              <DropdownMenuSeparator />
+              {history.length ? (
+                history.map((h, i) => (
+                  <DropdownMenuItem
+                    key={h.ts}
+                    className="flex items-start justify-between cursor-pointer py-2 group"
+                    onClick={() => {
+                      if (mode !== 'raw') onModeChange('raw')
+                      onSelectSql(h.sql)
+                    }}
+                  >
+                    <div className="overflow-hidden flex-1 mr-4">
+                      <div className="text-xs font-mono truncate">{h.sql.replace(/\s+/g, ' ').trim()}</div>
+                      <div className="text-[10px] text-muted-foreground mt-1">{timeAgo(new Date(h.ts))}</div>
+                    </div>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      aria-label="Remove from query history"
+                      className="h-5 w-5 opacity-0 group-hover:opacity-100 shrink-0"
+                      onClick={(e) => onRemoveHistoryItem(e, i)}
+                    >
+                      <X className="h-3 w-3" />
+                    </Button>
+                  </DropdownMenuItem>
+                ))
+              ) : (
+                <div className="p-4 text-xs text-muted-foreground text-center italic">No history found.</div>
+              )}
+            </DropdownMenuGroup>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
+
+      <div className="flex items-center gap-4">
+        <div className="flex items-center space-x-2">
+          <Switch id="explain" checked={explain} onCheckedChange={onExplainChange} />
+          <Label htmlFor="explain" className="text-xs cursor-pointer text-muted-foreground">
+            Plan
+          </Label>
+        </div>
+
+        <Select value={maxRows.toString()} onValueChange={(v) => onMaxRowsChange(Number(v))}>
+          <SelectTrigger className="h-8 w-[140px] text-xs">
+            <SelectValue placeholder="Row limit" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="100">Fetch 100 rows</SelectItem>
+            <SelectItem value="500">Fetch 500 rows</SelectItem>
+            <SelectItem value="1000">Fetch 1,000 rows</SelectItem>
+            <SelectItem value="5000">Fetch 5,000 rows</SelectItem>
+            <SelectItem value="10000">Fetch 10,000 rows</SelectItem>
+          </SelectContent>
+        </Select>
+
+        {canExport && (
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-8"
+            onClick={onExportCsv}
+            data-testid="query-csv-export-btn"
+          >
+            <Download className="w-3.5 h-3.5 mr-2" />
+            Export
+          </Button>
+        )}
+      </div>
+    </div>
+  )
+}
+
+export function ModeToggle({ mode, onModeChange }: { mode: QueryMode; onModeChange: (next: QueryMode) => void }) {
+  return (
+    <Tabs value={mode} onValueChange={(v) => onModeChange(v as QueryMode)}>
+      <TabsList>
+        <TabsTrigger value="structured">
+          <Filter className="h-3.5 w-3.5" />
+          Structured
+        </TabsTrigger>
+        <TabsTrigger value="raw">
+          <Code2 className="h-3.5 w-3.5" />
+          Edit Raw SQL
+        </TabsTrigger>
+      </TabsList>
+    </Tabs>
+  )
+}
+
+export function StructuredMode({ structuredSql }: { structuredSql: string }) {
+  const mounted = useMounted()
+  return (
+    <div className="p-4 bg-muted/10">
+      <div className="text-[10px] uppercase tracking-wider text-muted-foreground mb-2 font-semibold">
+        Generated SQL (sync&apos;d with filter bar)
+      </div>
+      <pre className="text-xs font-mono whitespace-pre-wrap break-words text-foreground/90 bg-background border rounded p-3 overflow-x-auto min-h-[106px]">
+        {mounted
+          ? structuredSql
+          : 'SELECT *\nFROM logs\nWHERE -- building query preview…\nORDER BY timestamp DESC\nLIMIT 100'}
+      </pre>
+      <div className="text-[10px] text-muted-foreground mt-2">
+        Edit the date range or filters in the header bar above to refine.
+        Click column headers below to change sort order — the query re-runs server-side.
+      </div>
+    </div>
+  )
+}
+
+export function ResultsTable({
+  data,
+  isPending,
+  isStructured,
+  columns,
+  structuredSorting,
+  onStructuredSortingChange,
+}: {
+  data: QueryResponse
+  isPending: boolean
+  isStructured: boolean
+  columns: ColumnDef<Record<string, unknown>>[]
+  structuredSorting: SortingState
+  onStructuredSortingChange: (sorting: SortingState) => void
+}) {
+  return (
+    <div
+      className={cn('space-y-4 transition-opacity duration-150', isPending && 'opacity-60')}
+      data-testid="query-results-table"
+    >
+      <div className="flex items-center gap-4 text-xs text-muted-foreground px-1">
+        <span className="flex items-center gap-1">
+          <Database className="h-3 w-3" />
+          {data.data?.length || 0} rows returned
+          {data.truncated && (
+            <span className="text-amber-500 font-semibold ml-1">
+              {data.total_rows && data.total_rows > 0
+                ? `(Truncated to ${data.data?.length} of ${formatCount(data.total_rows)})`
+                : `(Truncated to ${data.data?.length} — more available; add LIMIT to count)`}
+            </span>
+          )}
+        </span>
+        <span className="flex items-center gap-1">
+          <Clock className="h-3 w-3" />
+          {data.elapsed_ms}ms execution time
+        </span>
+      </div>
+
+      <div className="border rounded-lg bg-card overflow-hidden">
+        {isStructured ? (
+          <DataTable
+            tableCaption="Log Explorer Data Results"
+            columns={columns}
+            data={data.data || []}
+            isLoading={isPending}
+            sorting={structuredSorting}
+            onSortingChange={onStructuredSortingChange}
+          />
+        ) : (
+          <DataTable
+            tableCaption="Log Explorer Data Results"
+            columns={columns}
+            data={data.data || []}
+            isLoading={isPending}
+            initialSorting={[{ id: 'timestamp', desc: true }]}
+          />
+        )}
+      </div>
+    </div>
+  )
+}
+
 interface ErrorBody {
   detail?: string | { message?: string; error?: string }
   message?: string
@@ -50,13 +626,7 @@ function errorBodyMessage(body: ErrorBody | null): string | undefined {
 
 const HISTORY_KEY = 'fastly_qe_history'
 
-/**
- * Apply the deep-link params the dashboard's "See Raw Logs" CTA puts on the URL
- * (``?start_time`` + ``?end_time`` and/or ``?filters=<json>``) into the filter store.
- * Returns whether anything was applied — a deep-link landing is an explicit intent to run.
- */
 function applyDeepLinkToFilterStore(qsStart: string | null, qsEnd: string | null, qsFilters: string | null): boolean {
-  // Never touch the (module-level, cross-request) store during SSR.
   if (typeof window === 'undefined') return false
   const { setRange, clearFilters, addFilter } = useFilterStore.getState()
 
@@ -94,103 +664,86 @@ function parseHistory(raw: string | null): { sql: string; ts: number }[] {
     return []
   }
 }
+
 const SKELETON_ROWS = Array.from({ length: 8 }, (_, i) => `query-skel-row-${i}`)
 
 function QueryPageInner() {
   const [urlParams, setUrlParams] = useQueryStates(queryPageUrlParsers, { history: 'replace', shallow: true })
-  // Read via the bootstrap-aware fallback so a cold load (empty
-  // localStorage) doesn't flash NoServiceSelected before useBootstrap
-  // populates the persisted store.
   const activeServiceId = useEffectiveServiceId() ?? null
   const bootstrapResolved = useBootstrapResolved()
   const { full, abbr } = useDateFormat()
   const getFieldLabel = useFieldLabel()
 
-  // Mode comes from ?mode=raw (or ?q=...); defaults to structured. AppLayout's
-  // RawQueryModeProbe reads the same param to toggle the global FilterBar.
   const urlQueryParam = urlParams.q
   const urlMode: QueryMode = urlParams.mode === 'raw' || Boolean(urlQueryParam) ? 'raw' : 'structured'
-  // Local mode follows the URL when it changes underneath us (e.g. back/forward).
   const [mode, setMode] = useDerivedState<QueryMode>(urlMode)
 
-  // One-shot deep-link hydration, applied BEFORE this component reads the filter store below
-  // (a lazy initializer, like QueryProvider's URL hydration). A deep-link landing marks the
-  // first run as wanted.
   const [deepLinked] = useState(() =>
     applyDeepLinkToFilterStore(urlParams.start_time, urlParams.end_time, urlParams.filters),
   )
 
-  // Filter store drives Structured Mode. We pull primitives so we can compose
-  // the generated SQL purely from filter-bar state.
   const { startTime, endTime } = useFilterStore(
-    useShallow(state => ({
+    useShallow((state) => ({
       startTime: state.startTime,
       endTime: state.endTime,
     })),
   )
-  // Pass `true` so the FilterBar's "Edge only" toggle reaches the query
-  // — Structured Mode delegates to the same aggregates path the reports use.
   const filterPayload = useDebouncedFilterPayload(true)
 
-  // Write store → URL on every filter / range mutation so /query becomes
-  // shareable. URL → store hydration is owned at module load by
-  // hydrateFilterStoreFromUrl in QueryProvider; this hook only handles the
-  // write-back loop the audit identified as missing here.
   useFilterUrlWriteback()
 
-  // Gate the Structured-mode auto-run on user intent. A fresh /query
-  // visit (no deep-link params, no Run click) should NOT immediately
-  // fire a backend query — the previous behaviour issued a default
-  // ``SELECT * FROM logs LIMIT 100`` against the cold view on every
-  // navigation. ``hasUserRun`` starts true on a deep-link landing
-  // (See Raw Logs CTA) and becomes true on an explicit Run button click.
   const [hasUserRun, setHasUserRun] = useState(deepLinked)
 
-  // ── SQL editor + run controls ─────────────────────────────────────────────
   type Dataset = components['schemas']['QueryRequest']['dataset']
   const [dataset, setDataset] = useState<Dataset>('logs')
 
-  const RUM_SCHEMAS = useMemo<Record<string, { name: string; type: string }[]>>(() => ({
-    client_vitals: [
-      { name: 'timestamp', type: 'timestamp' },
-      { name: 'metric_name', type: 'string' },
-      { name: 'metric_value', type: 'double' },
-      { name: 'metric_rating', type: 'string' },
-      { name: 'pathname', type: 'string' },
-      { name: 'browser', type: 'string' },
-      { name: 'os', type: 'string' },
-      { name: 'device', type: 'string' },
-      { name: 'cid', type: 'string' },
-      { name: 'req_id', type: 'string' },
-    ],
-    client_errors: [
-      { name: 'timestamp', type: 'timestamp' },
-      { name: 'error_message', type: 'string' },
-      { name: 'error_file', type: 'string' },
-      { name: 'error_line', type: 'integer' },
-      { name: 'error_col', type: 'integer' },
-      { name: 'pathname', type: 'string' },
-      { name: 'browser', type: 'string' },
-      { name: 'os', type: 'string' },
-      { name: 'device', type: 'string' },
-      { name: 'cid', type: 'string' },
-      { name: 'req_id', type: 'string' },
-    ],
-  }), [])
+  const RUM_SCHEMAS = useMemo<Record<string, { name: string; type: string }[]>>(
+    () => ({
+      client_vitals: [
+        { name: 'timestamp', type: 'timestamp' },
+        { name: 'metric_name', type: 'string' },
+        { name: 'metric_value', type: 'double' },
+        { name: 'metric_rating', type: 'string' },
+        { name: 'pathname', type: 'string' },
+        { name: 'browser', type: 'string' },
+        { name: 'os', type: 'string' },
+        { name: 'device', type: 'string' },
+        { name: 'cid', type: 'string' },
+        { name: 'req_id', type: 'string' },
+      ],
+      client_errors: [
+        { name: 'timestamp', type: 'timestamp' },
+        { name: 'error_message', type: 'string' },
+        { name: 'error_file', type: 'string' },
+        { name: 'error_line', type: 'integer' },
+        { name: 'error_col', type: 'integer' },
+        { name: 'pathname', type: 'string' },
+        { name: 'browser', type: 'string' },
+        { name: 'os', type: 'string' },
+        { name: 'device', type: 'string' },
+        { name: 'cid', type: 'string' },
+        { name: 'req_id', type: 'string' },
+      ],
+    }),
+    [],
+  )
 
-  const DEFAULT_LOG_SCHEMA = useMemo<{ name: string; type: string }[]>(() => [
-    { name: 'timestamp', type: 'TIMESTAMPTZ' },
-    { name: 'ip', type: 'VARCHAR' },
-    { name: 'url', type: 'VARCHAR' },
-    { name: 'host', type: 'VARCHAR' },
-    { name: 'method', type: 'VARCHAR' },
-    { name: 'status', type: 'INTEGER' },
-    { name: 'cache', type: 'VARCHAR' },
-    { name: 'country', type: 'VARCHAR' },
-    { name: 'pop', type: 'VARCHAR' },
-    { name: 'asn', type: 'INTEGER' },
-    { name: 'ua', type: 'VARCHAR' },
-  ], [])
+  const DEFAULT_LOG_SCHEMA = useMemo<{ name: string; type: string }[]>(
+    () => [
+      { name: 'timestamp', type: 'TIMESTAMPTZ' },
+      { name: 'ip', type: 'VARCHAR' },
+      { name: 'url', type: 'VARCHAR' },
+      { name: 'host', type: 'VARCHAR' },
+      { name: 'method', type: 'VARCHAR' },
+      { name: 'status', type: 'INTEGER' },
+      { name: 'cache', type: 'VARCHAR' },
+      { name: 'country', type: 'VARCHAR' },
+      { name: 'pop', type: 'VARCHAR' },
+      { name: 'asn', type: 'INTEGER' },
+      { name: 'ua', type: 'VARCHAR' },
+    ],
+    [],
+  )
 
   const [rawSql, setRawSql] = useState(() => urlQueryParam || 'SELECT * FROM logs LIMIT 100')
 
@@ -199,21 +752,11 @@ function QueryPageInner() {
     setRawSql(`SELECT * FROM ${nextDataset} LIMIT 100`)
   }, [])
 
-  // Default maxRows 100, not 10000. The previous default forced the page
-  // to fetch up to 19 MB of JSON on cold load (analyst-30d clocked 17.9 s
-  // p50 + occasional Fastly 503 on the synthesized timeout), and the
-  // overwhelming majority of users never scroll past the first few
-  // rows. Power users can still type 10000 (or higher) in the
-  // SQL Controls input; the DataTable's scroll-fetch (when added) can
-  // also page in more rows on demand.
   const [maxRows, setMaxRows] = useState<number>(100)
   const [explain, setExplain] = useState<boolean>(false)
   const [historyRaw, writeHistoryRaw] = useLocalStorageString(HISTORY_KEY)
   const history = useMemo(() => parseHistory(historyRaw), [historyRaw])
 
-  // Structured-mode sort lives here so the generated SQL can ORDER BY it
-  // server-side. Raw-mode sort is owned uncontrolled by DataTable (client side)
-  // to keep custom SQL queries from being silently rewritten.
   const [structuredSorting, setStructuredSorting] = useState<SortingState>([
     { id: 'timestamp', desc: true },
   ])
@@ -224,16 +767,9 @@ function QueryPageInner() {
       return unwrapClient(client.GET('/api/schema', { signal }))
     },
     enabled: !!activeServiceId,
-    // Schema only changes when admin adds a custom field — never within
-    // an interactive session. 5 min staleTime removes the RTT (and the
-    // 10-s cold-cache tail variance) from every cross-page navigation.
     staleTime: 5 * 60_000,
   })
 
-  // fieldTypes drives unquoted IN-list literals for numeric columns
-  // (so `edge_score IN (50)` instead of `IN ('50')`). Sourced from the
-  // catalog's per-field duckdb_type. Missing catalog → falls back to
-  // all-quoted, which still works via DuckDB's implicit cast.
   const { data: catalog } = useLogFieldsCatalog()
   const activeFieldTypes = useMemo<Record<string, string>>(() => {
     const out: Record<string, string> = {}
@@ -256,11 +792,11 @@ function QueryPageInner() {
     const rawList = schemaData?.schema ?? []
     if (rawList.length > 0) {
       return rawList
-        .map(item => ({
+        .map((item) => ({
           name: item.name || '',
           type: item.type || 'VARCHAR',
         }))
-        .filter(item => Boolean(item.name))
+        .filter((item) => Boolean(item.name))
     }
     if (catalog?.fields?.length) {
       return catalog.fields
@@ -279,8 +815,6 @@ function QueryPageInner() {
     return schemaData?.table_name || 'logs'
   }, [dataset, schemaData])
 
-  // The Structured-mode SQL preview/payload — recomputed whenever filter state
-  // or sort changes. Raw mode ignores this entirely.
   const structuredSql = useMemo(
     () => buildStructuredSql(filterPayload, startTime, endTime, structuredSorting, maxRows, activeFieldTypes, activeTableName),
     [filterPayload, startTime, endTime, structuredSorting, maxRows, activeFieldTypes, activeTableName],
@@ -295,9 +829,6 @@ function QueryPageInner() {
       return data ?? []
     },
     enabled: !!activeServiceId,
-    // Same rationale as schema above — presets list only changes when
-    // someone edits service config. The 45-s analyst-30d outlier this
-    // call has occasionally hit goes away once it's cached past first.
     staleTime: 5 * 60_000,
   })
 
@@ -323,31 +854,25 @@ function QueryPageInner() {
     },
   })
 
-  const pushHistory = useCallback((sqlToRun: string) => {
-    const updated = [
-      { sql: sqlToRun, ts: Date.now() },
-      ...history.filter(h => h.sql !== sqlToRun),
-    ].slice(0, 20)
-    writeHistoryRaw(JSON.stringify(updated))
-  }, [history, writeHistoryRaw])
+  const pushHistory = useCallback(
+    (sqlToRun: string) => {
+      const updated = [
+        { sql: sqlToRun, ts: Date.now() },
+        ...history.filter((h) => h.sql !== sqlToRun),
+      ].slice(0, 20)
+      writeHistoryRaw(JSON.stringify(updated))
+    },
+    [history, writeHistoryRaw],
+  )
 
   const handleRun = useCallback(() => {
     const sqlToRun = effectiveSql.trim()
     if (!sqlToRun) return
-    // Mark first-paint auto-run as wanted — subsequent filter / sort /
-    // range edits become live again once the user has explicitly run
-    // once.
     setHasUserRun(true)
     pushHistory(sqlToRun)
     queryMutation.mutate({ sql: sqlToRun, max_rows: maxRows, explain, dataset })
   }, [effectiveSql, maxRows, explain, dataset, pushHistory, queryMutation])
 
-  // In Structured Mode, re-run whenever the generated SQL changes (filter,
-  // sort, range, row-cap edits) so the result table tracks the FilterBar
-  // live. We deliberately don't auto-run in Raw Mode — the user has typed
-  // a custom query and shouldn't see it re-execute on every keystroke.
-  // We also skip the very first paint unless the user signalled intent
-  // (deep-link via See Raw Logs OR explicit Run click) — see hasUserRun.
   const runStructured = useEffectEvent(() => {
     pushHistory(structuredSql)
     queryMutation.mutate({ sql: structuredSql, max_rows: maxRows, explain, dataset })
@@ -366,25 +891,26 @@ function QueryPageInner() {
     downloadAsCsv(data, cols, 'query_results.csv')
   }, [queryMutation.data])
 
-  const removeHistoryItem = useCallback((e: React.MouseEvent, index: number) => {
-    e.stopPropagation()
-    const updated = [...history]
-    updated.splice(index, 1)
-    writeHistoryRaw(JSON.stringify(updated))
-  }, [history, writeHistoryRaw])
+  const removeHistoryItem = useCallback(
+    (e: React.MouseEvent, index: number) => {
+      e.stopPropagation()
+      const updated = [...history]
+      updated.splice(index, 1)
+      writeHistoryRaw(JSON.stringify(updated))
+    },
+    [history, writeHistoryRaw],
+  )
 
-  // Switching modes is reflected in the URL so AppLayout's filter-bar
-  // visibility (driven by ?mode=raw) stays in sync without a hard reload.
-  const handleModeChange = useCallback((next: QueryMode) => {
-    setMode(next)
-    if (next === 'raw') {
-      // Seed the raw editor with whatever the structured view currently
-      // resolves to, so toggling to "Edit Raw SQL" gives the user a usable
-      // starting point rather than the stale placeholder.
-      setRawSql(prev => (prev === 'SELECT * FROM logs LIMIT 100' ? structuredSql : prev))
-    }
-    void setUrlParams({ mode: next === 'raw' ? 'raw' : null })
-  }, [setUrlParams, structuredSql, setMode])
+  const handleModeChange = useCallback(
+    (next: QueryMode) => {
+      setMode(next)
+      if (next === 'raw') {
+        setRawSql((prev) => (prev === 'SELECT * FROM logs LIMIT 100' ? structuredSql : prev))
+      }
+      void setUrlParams({ mode: next === 'raw' ? 'raw' : null })
+    },
+    [setUrlParams, structuredSql, setMode],
+  )
 
   const resultColumns = queryMutation.data?.columns
   const columns: ColumnDef<Record<string, unknown>>[] = useMemo(() => {
@@ -393,17 +919,16 @@ function QueryPageInner() {
       id: col,
       accessorFn: (row: Record<string, unknown>) => row[col],
       meta: { label: getFieldLabel(col) },
-      // Plain-label header — the DataTable header supplies the sort
-      // button + arrow. Returning a <Button> here nested a button inside
-      // that button: invalid HTML the browser restructures on parse,
-      // breaking hydration (React #418). A <span> keeps the monospace
-      // field-name styling without the interactive nesting.
       header: () => <span className="font-mono text-xs">{getFieldLabel(col)}</span>,
       cell: ({ row }: { row: { original: Record<string, unknown> } }) => {
         const value = row.original[col]
         if ((col === 'timestamp' || col.endsWith('_at')) && value && typeof value === 'string' && value.includes('T')) {
           try {
-            return <span className="text-xs font-mono">{full(value)} {abbr()}</span>
+            return (
+              <span className="text-xs font-mono">
+                {full(value)} {abbr()}
+              </span>
+            )
           } catch {
             // fallback when value is not a valid date string
           }
@@ -417,8 +942,6 @@ function QueryPageInner() {
     return <NoServiceSelected icon={Search} message="Please select a service from the header to run queries." />
   }
   if (!activeServiceId) {
-    // Bootstrap in flight on cold load — render a pre-allocated zero-CLS
-    // skeleton matching the exact header + toggles + editor + results footprint.
     return (
       <div
         className="space-y-6 [contain-intrinsic-size:auto_600px] [content-visibility:auto]"
@@ -521,7 +1044,9 @@ function QueryPageInner() {
 
       {queryMutation.data?.explain_plan && (
         <Alert>
-          <AlertTitle className="text-xs font-bold uppercase tracking-wider text-muted-foreground mb-2">Query Plan</AlertTitle>
+          <AlertTitle className="text-xs font-bold uppercase tracking-wider text-muted-foreground mb-2">
+            Query Plan
+          </AlertTitle>
           <AlertDescription>
             <pre className="text-xs font-mono bg-muted/50 p-4 rounded-md overflow-x-auto">
               {queryMutation.data.explain_plan}
@@ -530,7 +1055,6 @@ function QueryPageInner() {
         </Alert>
       )}
 
-      {/* Empty results initial placeholder */}
       {!queryMutation.data && !queryMutation.isPending && (
         <div
           className="flex flex-col items-center justify-center rounded-lg border border-dashed p-8 text-center min-h-[380px] bg-muted/10 [contain-intrinsic-size:auto_380px] [content-visibility:auto]"
@@ -546,11 +1070,6 @@ function QueryPageInner() {
         </div>
       )}
 
-      {/* First-run loading state: backend returns ``elapsed_ms`` BUT the
-          browser still pays JSON parse + ColumnDef rebuild + first render
-          (perceptible on 10k-row responses). Without this skeleton the
-          results region is empty between the click and the table paint,
-          and the only loading hint is the button's spinner. */}
       {queryMutation.isPending && !queryMutation.data && (
         <div
           className="space-y-3 min-h-[380px] [contain-intrinsic-size:auto_380px] [content-visibility:auto]"
@@ -572,9 +1091,6 @@ function QueryPageInner() {
           className="relative min-h-[380px] [contain-intrinsic-size:auto_380px] [content-visibility:auto]"
           data-testid="query-results-container"
         >
-          {/* Re-run overlay: keeps the prior data visible (preserves scroll
-              + sort context) while indicating that fresh results are on
-              the way. Pointer-events-none so the user can still scroll. */}
           {queryMutation.isPending && (
             <div className="pointer-events-none absolute inset-0 z-10 flex items-start justify-end p-3">
               <div className="flex items-center gap-2 rounded-md border bg-background/90 px-3 py-1.5 text-xs text-muted-foreground shadow-sm backdrop-blur">
@@ -625,9 +1141,6 @@ function DatasetToggle({ dataset, onDatasetChange }: DatasetToggleProps) {
   )
 }
 
-// useSearchParams() requires a Suspense boundary above it in Next.js's
-// static-generation path. Wrapping the inner component lets the rest of
-// the route render eagerly while the search-params subtree streams in.
 export default function QueryPage() {
   return (
     <Suspense

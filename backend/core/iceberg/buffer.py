@@ -40,12 +40,13 @@ logger = logging.getLogger("backend.core.iceberg._core")
 # add the top-level ones here so the bare-name lookup works.
 import pyarrow.parquet as pq
 
+from backend.core.duckdb import require_safe_ident
+
 # Late-bind helpers from the main _core module (it's mid-load when this
 # file imports). __getattr__ catches any bare-name resolution that
 # falls through manifest.py's pattern.
 from backend.core.iceberg import _core as _core_mod
 from backend.core.query_instrumentation import InstrumentedDuckDBConnection
-from backend.utils.sql_validator import require_safe_ident
 
 
 def __getattr__(name: str):
@@ -414,7 +415,7 @@ def commit_buffer(source: dict, progress_callback=None, table_name: str = "logs"
     cleanly — the next commit tick retries, same as any other transient
     commit skip.
     """
-    from backend.core.iceberg.view import _get_service_lock
+    from backend.core.iceberg._core import _get_service_lock
 
     lock = _get_service_lock(source.get("name", "default"))
     if not lock.acquire(timeout=_CLOUD_WRITE_LOCK_TIMEOUT_S):
@@ -492,7 +493,7 @@ def _commit_one_chunk(
     hit "Unique file handle conflict" and exhausted their 20-attempt/30s
     retry budget.
     """
-    from backend.utils.sql_validator import escape_sql_literal
+    from backend.core.duckdb import escape_sql_literal
 
     rows_committed = 0
     committed_paths: list[str] = []
@@ -675,7 +676,7 @@ def optimize_table(
     that against a concurrent ``reset_service_logs`` purge has the same
     dangling-manifest corruption risk.
     """
-    from backend.core.iceberg.view import _get_service_lock
+    from backend.core.iceberg._core import _get_service_lock
 
     lock = _get_service_lock(source.get("name", "default"))
     if not lock.acquire(timeout=_CLOUD_WRITE_LOCK_TIMEOUT_S):
@@ -785,8 +786,8 @@ def run_cloud_maintenance(source: dict) -> dict:
     touching FOS — both the retention delete and expire_snapshots commit
     against the table, with the same reset-race risk.
     """
+    from backend.core.iceberg._core import _get_service_lock
     from backend.core.iceberg._ducklake import ducklake_write_admission
-    from backend.core.iceberg.view import _get_service_lock
 
     sid = source.get("service_id") or source.get("name", "default")
     lock = _get_service_lock(source.get("name", "default"))

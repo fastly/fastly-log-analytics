@@ -34,20 +34,14 @@ from starlette.responses import Response
 
 logger = logging.getLogger(__name__)
 _os = os
-
-# Per-request ContextVars for tracking API/FOS calls and DB queries
 _CALLS: ContextVar[list[dict] | None] = ContextVar("_CALLS", default=None)
 _QUERIES: ContextVar[list[dict] | None] = ContextVar("_QUERIES", default=None)
 _SQLITE_QUERIES: ContextVar[list[dict] | None] = ContextVar("_SQLITE_QUERIES", default=None)
 _REQUEST_START_TS: ContextVar[float | None] = ContextVar("_REQUEST_START_TS", default=None)
 _IOTHREAD_QUERIED: ContextVar[bool] = ContextVar("_IOTHREAD_QUERIED", default=False)
-
-# Process context — identifies what triggered the current work (cron job name, API route, etc.)
 _PROCESS_CONTEXT: ContextVar[str | None] = ContextVar("_PROCESS_CONTEXT", default=None)
 _PAGE_LOAD_ID: ContextVar[str | None] = ContextVar("_PAGE_LOAD_ID", default=None)
 _RECORDING_TELEMETRY: ContextVar[bool] = ContextVar("_RECORDING_TELEMETRY", default=False)
-
-# Process-global stack of active contexts for out-of-thread readers (fsspec iothread, worker pools).
 _ACTIVE_CONTEXTS: list[str] = []
 _LATEST_PROCESS_CONTEXT: str | None = None
 _LATEST_PROCESS_CONTEXT_LOCK = threading.Lock()
@@ -71,7 +65,6 @@ def _add_span_event(name: str, attributes: dict[str, Any]) -> None:
 
 
 def _set_process_context_for_tests(ctx: str | None) -> None:
-    """Test-fixture helper: set _PROCESS_CONTEXT and the mirror without stack push/pop."""
     global _LATEST_PROCESS_CONTEXT
     _PROCESS_CONTEXT.set(ctx)
     with _LATEST_PROCESS_CONTEXT_LOCK:
@@ -91,7 +84,6 @@ def set_page_load_id(page_load_id: str | None) -> None:
 
 
 def get_process_context_with_fallback() -> str | None:
-    """Return the ContextVar value if set, else the top of the active-context stack."""
     ctx = _PROCESS_CONTEXT.get()
     if ctx is not None:
         return ctx
@@ -101,7 +93,6 @@ def get_process_context_with_fallback() -> str | None:
 
 @contextmanager
 def process_context_scope(name: str):
-    """Push *name* onto the active-context stack and set the ContextVar for the block."""
     global _LATEST_PROCESS_CONTEXT
     token = _PROCESS_CONTEXT.set(name)
     prev_attribution = None
@@ -142,7 +133,6 @@ def process_context_scope(name: str):
 
 
 def start_call_tracking():
-    """Initialise call tracking for the current context."""
     _CALLS.set([])
     _QUERIES.set([])
     _SQLITE_QUERIES.set([])
@@ -151,7 +141,6 @@ def start_call_tracking():
 
 
 def get_tracked_calls() -> list[dict]:
-    """Return calls tracked in the current context, augmented with iothread calls from usage_log."""
     res = _get_ctx_list(_CALLS)
     if not _IOTHREAD_QUERIED.get():
         _IOTHREAD_QUERIED.set(True)
@@ -163,7 +152,6 @@ def get_tracked_calls() -> list[dict]:
 
 
 def _query_iothread_calls_from_usage_log() -> list[dict]:
-    """Pull up to 25 usage_log rows tagged with the current request's process_context."""
     try:
         from backend.models.common import _debug_responses_enabled
 
@@ -173,7 +161,6 @@ def _query_iothread_calls_from_usage_log() -> list[dict]:
         ctx = get_process_context_with_fallback()
         if start_ts is None or not ctx or not ctx.startswith("api:"):
             return []
-
         from backend import config as svcconfig
 
         if not svcconfig.is_usage_logging_enabled():
@@ -181,7 +168,6 @@ def _query_iothread_calls_from_usage_log() -> list[dict]:
         sid = svcconfig.get_active_service_id()
         if not sid:
             return []
-
         from backend.core.metadata import usage_log_db as _usage_log_db
 
         start_iso = iso_z(datetime.fromtimestamp(start_ts, UTC))
@@ -219,12 +205,10 @@ def _query_iothread_calls_from_usage_log() -> list[dict]:
 
 
 def get_queries() -> list[dict]:
-    """Return the list of queries tracked in the current context."""
     return _get_ctx_list(_QUERIES)
 
 
 def record_sqlite_query(entry: dict) -> None:
-    """Append one profiled SQLite statement to the current request's collector."""
     if _RECORDING_TELEMETRY.get():
         return
     entries = _SQLITE_QUERIES.get()
@@ -238,7 +222,6 @@ def record_sqlite_query(entry: dict) -> None:
 
 
 def get_sqlite_queries() -> list[dict]:
-    """Return the SQLite statements recorded for the current request."""
     return _get_ctx_list(_SQLITE_QUERIES)
 
 
@@ -251,7 +234,6 @@ def record_telemetry_query(
     request_id: str | None = None,
     allow_active_service_fallback: bool = True,
 ) -> None:
-    """Record a DB query into telemetry_queries when X-Page-Load-ID is active."""
     if _RECORDING_TELEMETRY.get():
         return
     plid = get_page_load_id()
@@ -282,14 +264,12 @@ def record_telemetry_query(
 
 
 def debug_envelope(res: dict, *, gated: bool, is_cached: bool | None = False, inject_calls: bool = False) -> dict:
-    """Attach or strip the ``_debug_*`` / ``_is_cached`` envelope on a plain-dict response."""
     if not gated:
         res["_debug_queries"] = get_queries()
         res["_debug_sqlite"] = list(get_sqlite_queries())
         res["_debug_calls"] = get_tracked_calls()
         res["_is_cached"] = is_cached
         return res
-
     from backend.models.common import _debug_responses_enabled
 
     out = dict(res)
@@ -317,7 +297,6 @@ def record_call(
     caller: str | None = None,
     bytes_count: int | None = None,
 ):
-    """Record an external call in the current context and active OTel span."""
     if caller is None:
         try:
             frame: FrameType | None = sys._getframe(1)
@@ -333,7 +312,6 @@ def record_call(
                 break
         except Exception:
             logger.debug("record_call: caller walk failed (ignored)", exc_info=True)
-
     calls = _get_ctx_list(_CALLS)
     calls.append(
         {
@@ -347,7 +325,6 @@ def record_call(
             "bytes": bytes_count,
         }
     )
-
     attrs: dict[str, Any] = {
         "app.call.method": method,
         "app.call.path": path,
@@ -366,8 +343,6 @@ def record_call(
 
 
 class track_query:
-    """Context manager to execute and time a DuckDB query, yielding the cursor."""
-
     def __init__(self, con, query: str, params: list, label: str = "query"):
         self.con = con
         self.query = query
@@ -395,7 +370,6 @@ class track_query:
 
 
 def is_full_miss(x_cache: str | None) -> bool:
-    """Return True if every value in an X-Cache header chain is MISS or PASS."""
     if not x_cache:
         return False
     parts = [p.strip().upper() for p in x_cache.split(",") if p.strip()]
@@ -403,7 +377,6 @@ def is_full_miss(x_cache: str | None) -> bool:
 
 
 def build_cdn_miss_synth_details(bytes_count: int | None) -> str:
-    """Format the ``details`` string for the synthesised FOS GET_OBJECT row on CDN MISS."""
     if bytes_count is not None:
         return f"{bytes_count:,} bytes · Class B · synthesized from CDN MISS"
     return "Class B · synthesized from CDN MISS"
@@ -418,7 +391,6 @@ def record_cdn_call(
     caller: str | None = None,
     status: str | int | None = "OK",
 ):
-    """Record a CDN GET/HEAD and, on full X-Cache MISS, the underlying FOS GET_OBJECT op."""
     x_cache = age = cache_control = None
     if headers is not None:
         try:
@@ -427,10 +399,8 @@ def record_cdn_call(
             cache_control = headers.get("Cache-Control") or headers.get("cache-control")
         except Exception:
             logger.debug("record_cdn_call: headers.get failed (ignored)", exc_info=True)
-
     detail_parts = [p for p in (x_cache, f"age={age}s" if age else None, cache_control) if p]
     cdn_details = " · ".join(detail_parts) if detail_parts else None
-
     record_call(
         method,
         key,
@@ -455,8 +425,6 @@ def record_cdn_call(
 
 
 class tracked_call:
-    """Context manager to time and record a call."""
-
     def __init__(self, method: str, path: str, service: str = "Fastly API", details: str | None = None):
         self.method = method
         self.path = path
@@ -486,7 +454,6 @@ _log_once_lock = threading.Lock()
 
 
 def log_once_per(key: str, interval_s: float = 60.0) -> bool:
-    """True when ``key`` has not been allowed in the last ``interval_s`` seconds."""
     now = time.monotonic()
     with _log_once_lock:
         prev = _last.get(key)
@@ -510,7 +477,6 @@ def _load_service_source(service_id: str) -> dict | None:
 
 
 def flush_usage_log(service_id: str) -> None:
-    """Write the current context's tracked FOS/CDN calls to _usage_log."""
     try:
         from backend import config as svcconfig
 
@@ -530,7 +496,6 @@ def flush_usage_log(service_id: str) -> None:
 
 
 def run_usage_log_cleanup(service_id: str) -> None:
-    """Purge old rows from _usage_log per the configured retention period."""
     try:
         source = _load_service_source(service_id)
         if not source:
@@ -542,20 +507,14 @@ def run_usage_log_cleanup(service_id: str) -> None:
         logger.warning("[usage_logger] cleanup failed: %s", e)
 
 
-# ---------------------------------------------------------------------------
-# Always-on SQLite/Postgres query profiler ring buffer (sqlite_profiler)
-# ---------------------------------------------------------------------------
-
 _BUFFER_CAP = 1000
 _SQL_TRUNCATE = 4096
-
 _buffer: deque[dict[str, Any]] = deque(maxlen=_BUFFER_CAP)
 _seq = itertools.count(1)
 _dropped = 0
 
 
 def _record(sql: str, params: Any, duration_ms: float, rowcount: int, op: str) -> None:
-    """Append one profiled statement to the ring buffer."""
     global _dropped
     try:
         if _buffer.maxlen and len(_buffer) == _buffer.maxlen:
@@ -595,7 +554,7 @@ def _describe_params(params: Any) -> str:
 
 def _live_register(db_type: str, sql: Any, con: Any) -> int:
     try:
-        from backend.core.query_registry import query_registry
+        from backend.core.request_telemetry import query_registry
 
         qid = query_registry.register(db_type, str(sql), service_id=getattr(con, "_service_id", None), con=con)
         if qid >= 0:
@@ -610,7 +569,7 @@ def _live_deregister(qid: int, error: BaseException | None) -> None:
     if qid < 0:
         return
     try:
-        from backend.core.query_registry import query_registry
+        from backend.core.request_telemetry import query_registry
 
         query_registry.deregister(qid, error=error)
     except Exception:
@@ -621,7 +580,6 @@ def _live_deregister(qid: int, error: BaseException | None) -> None:
 
 
 def get_recent(limit: int = 200, since_seq: int = 0) -> dict[str, Any]:
-    """Return up to ``limit`` most-recent profiled statements."""
     snapshot = [e for e in _buffer if e["seq"] > since_seq] if since_seq > 0 else list(_buffer)
     if limit and len(snapshot) > limit:
         snapshot = snapshot[-limit:]
@@ -635,14 +593,12 @@ def get_recent(limit: int = 200, since_seq: int = 0) -> dict[str, Any]:
 
 
 def clear() -> None:
-    """Drain the buffer."""
     global _dropped
     _buffer.clear()
     _dropped = 0
 
 
 def buffer_stats() -> dict[str, int]:
-    """Lightweight stats for telemetry / status pages."""
     return {"buffer_size": len(_buffer), "buffer_cap": _BUFFER_CAP, "dropped": _dropped}
 
 
@@ -663,12 +619,6 @@ def get_page_telemetry(page_load_id: str | None = None) -> dict[str, Any]:
 
 if "pytest" not in sys.modules:
     logger.info("sqlite_profiler active — capturing up to %d recent statements", _BUFFER_CAP)
-
-
-# ---------------------------------------------------------------------------
-# Valkey-backed pub/sub for SSE fan-out across pods (valkey_publisher)
-# ---------------------------------------------------------------------------
-
 PUBLISH_STATS: dict[str, int] = {"published": 0, "publish_errors": 0, "decode_errors": 0}
 _LOG_EVERY_S = 60.0
 _sync_redis_lock = threading.Lock()
@@ -681,7 +631,6 @@ def _log_rate_limited(key: str, msg: str, *args: Any) -> None:
 
 
 def _get_sync_redis() -> Any:
-    """One shared sync Redis client per process (publishers + seed reads)."""
     global _sync_redis
     with _sync_redis_lock:
         if _sync_redis is None:
@@ -705,7 +654,6 @@ class ValkeyPublisher:
         return f"sse:{self._channel_prefix}:{service_id}"
 
     def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
-        """Bind to the FastAPI asyncio loop and create the async client."""
         from redis.asyncio import Redis
 
         self._loop = loop
@@ -761,7 +709,6 @@ class ValkeyPublisher:
             self._publish_sync(channel, payload_json)
 
     async def subscribe(self, service_id: str) -> AsyncIterator[dict[str, Any]]:
-        """Yield published payloads for ``service_id``; reconnects on broker loss."""
         if self._redis is None:
             raise RuntimeError(
                 "ValkeyPublisher.subscribe() before bind_loop() — the SSE process "
@@ -796,7 +743,6 @@ class ValkeyPublisher:
                     logger.debug("subscribe: pubsub.close failed (ignored)", exc_info=True)
 
     def get_recent_ticks(self, service_id: str, count: int = 60) -> list[dict[str, Any]]:
-        """Recent history for initial SSE seed. Sync — call via to_thread from async routes."""
         if self._history_size == 0:
             return []
         try:
@@ -807,7 +753,6 @@ class ValkeyPublisher:
             return []
 
     def subscriber_count(self, service_id: str) -> int:
-        """Subscribers on this channel across all pods."""
         try:
             result = _get_sync_redis().pubsub_numsub(self._channel(service_id))
             if result:
@@ -817,10 +762,6 @@ class ValkeyPublisher:
         return 0
 
 
-# ---------------------------------------------------------------------------
-# Minimal HyperLogLog for cross-hour distinct-IP counts (hll)
-# ---------------------------------------------------------------------------
-
 DEFAULT_PRECISION = 8
 SERIALIZATION_VERSION = 1
 _HASH_BITS = 64
@@ -828,7 +769,6 @@ HLL_SKETCH_NAMES: tuple[str, ...] = ("hll_sketch",)
 
 
 def _alpha(m: int) -> float:
-    """Bias-correction constant α_m from the Flajolet paper, table 4."""
     if m == 16:
         return 0.673
     if m == 32:
@@ -839,7 +779,6 @@ def _alpha(m: int) -> float:
 
 
 def _hash64(item: str | bytes) -> int:
-    """Stable 64-bit hash of an item."""
     if isinstance(item, str):
         item = item.encode("utf-8")
     digest = hashlib.md5(item, usedforsecurity=False).digest()  # noqa: S324
@@ -847,7 +786,6 @@ def _hash64(item: str | bytes) -> int:
 
 
 def _leading_zero_count(value: int, width_bits: int) -> int:
-    """Return ``min(width_bits, leading_zero_count(value) + 1)``."""
     if value == 0:
         return width_bits
     rank = 1
@@ -859,8 +797,6 @@ def _leading_zero_count(value: int, width_bits: int) -> int:
 
 
 class HyperLogLog:
-    """A small, mergeable HyperLogLog sketch."""
-
     __slots__ = ("_p", "_m", "_buckets")
 
     def __init__(self, precision: int = DEFAULT_PRECISION) -> None:
@@ -971,10 +907,6 @@ def query_hll_distinct_by_bucket(rows: Iterable[tuple[Any, bytes | bytearray]]) 
     return {k: v.count() for k, v in buckets.items()}
 
 
-# ---------------------------------------------------------------------------
-# Relative-range window resolver (time_window)
-# ---------------------------------------------------------------------------
-
 STATIC_DEFAULT: tuple[float, float] = (24.0, 168.0)
 _BANDS: tuple[tuple[float, float, float], ...] = (
     (1.0, 0.25, 1.0),
@@ -999,7 +931,6 @@ VALID_RANGE_TOKENS: frozenset[str] = frozenset(_FIXED_TOKEN_DELTAS) | {"auto"}
 
 
 def history_hours_from_earliest(earliest: str | None, *, now: datetime | None = None) -> float | None:
-    """Hours of history available = ``now − earliest_log_at``, floored at 0."""
     dt = parse_iso_utc(earliest)
     if dt is None:
         return None
@@ -1008,7 +939,6 @@ def history_hours_from_earliest(earliest: str | None, *, now: datetime | None = 
 
 
 def pick_insights_default(history_hours: float | None) -> tuple[float, float]:
-    """Map available history to the default ``(window_hours, baseline_hours)``."""
     if history_hours is None or not math.isfinite(history_hours):
         return STATIC_DEFAULT
     for upper, window, baseline in _BANDS:
@@ -1022,7 +952,6 @@ def is_valid_range_token(token: str | None) -> bool:
 
 
 def quantize_anchor(anchor: str | None, *, now: datetime | None = None) -> str:
-    """Floor an anchor instant to the ``ANCHOR_QUANTUM_SECONDS`` grid → ISO-Z."""
     dt = (parse_iso_utc(anchor) if anchor else None) or (now if now is not None else datetime.now(UTC))
     epoch = int(dt.timestamp())
     return iso_z(datetime.fromtimestamp(epoch - (epoch % ANCHOR_QUANTUM_SECONDS), tz=UTC))
@@ -1044,7 +973,6 @@ def resolve_window(
     earliest_log_at: str | None = None,
     now: datetime | None = None,
 ) -> tuple[str, str]:
-    """Resolve ``(range_token, anchor) -> (start_iso, end_iso)`` deterministically."""
     if not is_valid_range_token(range_token) or range_token is None:
         raise ValueError(f"unrecognized range_token: {range_token!r}")
     now_dt = now if now is not None else datetime.now(UTC)
@@ -1056,7 +984,6 @@ def resolve_window(
 
 
 def invite_clamp_fingerprint(analyst_session: object | None) -> str | None:
-    """Stable cache-key fragment identifying the analyst's invite-clamp shape."""
     if analyst_session is None:
         return None
     qs = getattr(analyst_session, "query_start_time", None)
@@ -1065,16 +992,10 @@ def invite_clamp_fingerprint(analyst_session: object | None) -> str | None:
     return hashlib.sha256(f"{qs or ''}|{qe or ''}|{qw or ''}".encode()).hexdigest()[:16]
 
 
-# ---------------------------------------------------------------------------
-# Thread-safe LRU+TTL cache & CacheRegistry (bounded_cache & cache_registry)
-# ---------------------------------------------------------------------------
-
 _MISSING = object()
 
 
 class BoundedTTLCache:
-    """Thread-safe LRU+TTL cache backed by ``cachetools.TTLCache``."""
-
     def __init__(
         self,
         maxsize: int | None = None,
@@ -1170,8 +1091,6 @@ def _try_clear_cache(cache: Any) -> bool:
 
 
 class CacheRegistry:
-    """Singleton-style registry of module-level caches."""
-
     _entries: dict[str, Any] = {}
     _lock = threading.Lock()
 
@@ -1204,11 +1123,6 @@ class CacheRegistry:
             cls._entries.clear()
 
 
-# ---------------------------------------------------------------------------
-# Backstop telemetry response middleware & active request counter
-# (telemetry_response_middleware & active_requests)
-# ---------------------------------------------------------------------------
-
 _JSON_CONTENT_TYPES: tuple[str, ...] = ("application/json",)
 _STREAMING_CONTENT_TYPES: tuple[str, ...] = (
     "text/event-stream",
@@ -1233,15 +1147,12 @@ def _is_streaming_content_type(response: Response) -> bool:
 
 
 class TelemetryResponseBodyMiddleware(BaseHTTPMiddleware):
-    """Inject telemetry into JSON dict responses that lack it."""
-
     async def dispatch(self, request: Request, call_next):
         response = await call_next(request)
         try:
             from backend.models.common import _DEBUG_ENVELOPE_KEYS, _debug_responses_enabled
         except Exception:
             return response
-
         master_enabled = _debug_responses_enabled()
         is_remote = getattr(request.state, "is_remote", False)
         analyst_query_enabled = analyst_api_enabled = False
@@ -1251,31 +1162,25 @@ class TelemetryResponseBodyMiddleware(BaseHTTPMiddleware):
             analyst_query_enabled, analyst_api_enabled = analyst_debug_visibility(request)
         if _is_streaming_content_type(response) or not _is_json_response(response):
             return response
-
         opt_in = master_enabled and (
             request.headers.get("x-debug-responses") == "1" or _os.getenv("DEBUG_RESPONSES_FORCE_INCLUDE") == "1"
         )
         if is_remote and opt_in and getattr(request.state, "_analyst_envelope_complete", False):
             return response
-
         try:
             body = b"".join([chunk async for chunk in response.body_iterator])
         except Exception as e:
             logger.warning("[telemetry-middleware] failed to read response body: %s", e)
             return response
-
         if not body:
             return _reconstruct(response, body)
-
         try:
             parsed: Any = json.loads(body)
         except (ValueError, json.JSONDecodeError) as e:
             logger.debug("[telemetry-middleware] body not JSON-parseable: %s", e)
             return _reconstruct(response, body)
-
         if not isinstance(parsed, dict):
             return _reconstruct(response, body)
-
         if not opt_in:
             keys_to_strip = (*_DEBUG_ENVELOPE_KEYS, "_is_cached") if master_enabled else _DEBUG_ENVELOPE_KEYS
             stripped = [parsed.pop(k, _MISSING) for k in keys_to_strip]
@@ -1286,10 +1191,8 @@ class TelemetryResponseBodyMiddleware(BaseHTTPMiddleware):
             except Exception as e:
                 logger.warning("[telemetry-middleware] failed to strip telemetry: %s", e)
                 return _reconstruct(response, body)
-
         if "_debug_queries" in parsed:
             return _reconstruct(response, body)
-
         try:
             inject_queries = analyst_query_enabled if is_remote else True
             inject_api_calls = analyst_api_enabled if is_remote else True
@@ -1309,7 +1212,6 @@ class TelemetryResponseBodyMiddleware(BaseHTTPMiddleware):
 
 
 def _reconstruct(original: Response, body: bytes) -> Response:
-    """Build a new ``Response`` from ``body`` with the original's status code, media type, and headers."""
     drop = (b"content-length", b"content-encoding", b"content-type")
     media_type = original.media_type
     if media_type is None:
@@ -1348,7 +1250,6 @@ def active_request_count() -> int:
 
 
 def should_defer_cron(job_name: str, service_id: str, *, max_defer_secs: float = 30.0) -> bool:
-    """Returns True if the cron tick should be SKIPPED for now."""
     key = (job_name, service_id)
     with _lock:
         if _active_count == 0:
@@ -1378,7 +1279,6 @@ def yield_to_api(
     poll_interval: float = 0.1,
     sleep_fn: Callable[[float], None] | None = None,
 ) -> float:
-    """Cooperative yield: if API requests are in flight, sleep briefly to let them make progress."""
     if active_request_count() == 0:
         return 0.0
     sleep = sleep_fn or time.sleep
@@ -1408,12 +1308,6 @@ class _ActiveRequestsResetAdapter:
 CacheRegistry.register("utils.active_requests", _ActiveRequestsResetAdapter())
 
 
-# ---------------------------------------------------------------------------
-# structlog configuration, atomic file writes & error redaction
-# (structlog_config, atomic_write, error_redaction)
-# ---------------------------------------------------------------------------
-
-
 def _add_otel_trace_context(_logger: Any, _method_name: str, event_dict: dict[str, Any]) -> dict[str, Any]:
     span = trace.get_current_span()
     if span is not None and span.is_recording():
@@ -1436,7 +1330,6 @@ def effective_format() -> str:
 
 
 def configure_structlog() -> None:
-    """Configure structlog + bridge stdlib through it. Idempotent."""
     use_json = effective_format() == "json"
     shared_processors: list[Any] = [
         structlog.contextvars.merge_contextvars,
@@ -1483,7 +1376,6 @@ _UVICORN_LOGGERS = ("uvicorn", "uvicorn.error", "uvicorn.access")
 
 
 def bridge_uvicorn_loggers() -> None:
-    """Route uvicorn's loggers through the shared structlog root handler."""
     for name in _UVICORN_LOGGERS:
         uv_logger = logging.getLogger(name)
         uv_logger.handlers = []
@@ -1519,7 +1411,6 @@ def atomic_temp_path(
     suffix: str = ".tmp",
     mode: int | None = None,
 ) -> Iterator[Path]:
-    """Yield a sibling temporary file path that is atomically replaced onto ``target`` on exit."""
     dst, fd, tmp_name = _mkstemp_sibling(target, prefix, suffix)
     os.close(fd)
     tmp_path = Path(tmp_name)
@@ -1545,7 +1436,6 @@ def atomic_write_bytes(
     suffix: str = ".tmp",
     fallback_in_place_errnos: set[int] | None = None,
 ) -> None:
-    """Atomically write ``data`` to ``target`` via a sibling temporary file and ``os.replace``."""
     dst, fd, tmp_name = _mkstemp_sibling(target, prefix, suffix)
     try:
         with os.fdopen(fd, "wb") as f:
@@ -1583,7 +1473,6 @@ def atomic_write_json(
     suffix: str = ".tmp",
     fallback_in_place_errnos: set[int] | None = None,
 ) -> None:
-    """Serialize ``data`` as UTF-8 JSON and atomically write it to ``target``."""
     payload = json.dumps(data, indent=indent, sort_keys=sort_keys, separators=separators, default=default).encode(
         "utf-8"
     )
@@ -1599,7 +1488,6 @@ def atomic_write_json(
 
 ABS_PATH_RE = re.compile(r"(?<![A-Za-z0-9])/(?:srv|var|tmp|data|home|opt|usr|mnt|app)\b(?:/[A-Za-z0-9_./-]*)?")
 CID_SALT_LITERAL_RE = re.compile(r"(sha256\(\s*CONCAT\(\s*')[^']*(')", re.IGNORECASE)
-
 REDACTED = "[redacted]"
 _MIN_SALT_LEN = 8
 _known_salts: set[str] = set()
@@ -1624,20 +1512,10 @@ def redact_error_text(msg: object) -> str:
     return ABS_PATH_RE.sub("<path>", scrub_secrets(str(msg)))
 
 
-# ── Shared HTTP helper (folded from backend.utils.http) ──────────────────────
-
 _DEFAULT_UA = "fastly-log-analysis/1.0"
 
 
 def http_get_text(url: str, *, headers: dict[str, str] | None = None, timeout: float = 30.0) -> str:
-    """GET ``url`` and return the response body decoded as UTF-8 text.
-
-    Follows redirects and raises on a 4xx/5xx status or a network error,
-    matching the previous stdlib URL-open semantics (which raise on a bad
-    status and follow redirects by default). ``.decode()`` is explicit UTF-8
-    to match the old ``resp.read().decode()`` rather than httpx's
-    header-driven charset guessing.
-    """
     hdrs = {"User-Agent": _DEFAULT_UA}
     if headers:
         hdrs.update(headers)
@@ -1653,23 +1531,11 @@ def make_client(
     transport: httpx.BaseTransport | None = None,
     **kwargs: Any,
 ) -> httpx.Client:
-    """Build the shared sync ``httpx.Client`` used by outbound HTTP call sites.
-
-    One construction point so TLS verification (httpx's default certifi bundle
-    unless ``verify`` overrides it) and the default timeout (httpx's 5 s, matching
-    the pre-factory call sites) are uniform.
-    ``transport`` is the injectable test seam. Callers own the lifecycle
-    (use as a context manager). Never put credentials in the client defaults
-    that would be logged; pass auth headers per request or via ``headers=``.
-    """
     if verify is not None:
         kwargs["verify"] = verify
     if transport is not None:
         kwargs["transport"] = transport
     return httpx.Client(timeout=timeout, **kwargs)
-
-
-# ── Shared retry policy (folded from backend.core.retry) ─────────────────────
 
 
 def retry_call[T](
@@ -1685,38 +1551,6 @@ def retry_call[T](
     before_retry: Callable[[BaseException], None] | None = None,
     sleep: Callable[[float], None] = time.sleep,
 ) -> T:
-    """Call ``fn`` with bounded, backed-off retries on retryable failures.
-
-    Args:
-        fn: Zero-arg callable to invoke. Return value is passed through.
-        retry_on: Predicate run against each raised exception. Returns ``True``
-            to allow another attempt, ``False`` to re-raise immediately. The
-            exception is never swallowed — on give-up (budget exhausted) the
-            last exception is re-raised.
-        attempts: Maximum number of calls to ``fn`` (``>= 1``). ``attempts=1``
-            disables retrying (``fn`` is called once; any exception propagates
-            per ``retry_on``).
-        base_delay: Delay (seconds) before the first retry. ``0`` means no
-            wait between attempts.
-        max_delay: Upper clamp on any single backoff delay. ``None`` = no clamp.
-        multiplier: Exponential growth factor applied per retry.
-        jitter: Maximum extra uniform-random seconds added to each delay.
-        max_elapsed: Optional wall-clock budget (seconds). When exceeded, the
-            loop stops and the last exception is re-raised even if ``attempts``
-            remain.
-        before_retry: Optional action invoked with the retryable exception
-            after a failed attempt and before the backoff sleep. Use it for a
-            specialized recovery step (e.g. busting a cache). Exceptions it
-            raises propagate (they are not themselves retried here).
-        sleep: Injectable sleep function (test seam).
-
-    Returns:
-        Whatever ``fn`` returns on its first successful call.
-
-    Raises:
-        The last exception raised by ``fn`` once the budget is exhausted, or
-        immediately when ``retry_on`` returns ``False``.
-    """
     if attempts < 1:
         raise ValueError("attempts must be >= 1")
 
@@ -1739,7 +1573,6 @@ def retry_call[T](
     stop: tenacity.stop.stop_base = tenacity.stop_after_attempt(attempts)
     if max_elapsed is not None:
         stop = stop | tenacity.stop_after_delay(max_elapsed)
-
     retrying = tenacity.Retrying(
         retry=tenacity.retry_if_exception(retry_on),
         stop=stop,
@@ -1751,11 +1584,7 @@ def retry_call[T](
     return retrying(fn)
 
 
-# ── Date & window utilities (folded from backend.utils.date_utils) ───────────
-
-
 def parse_iso_utc(s: str | None) -> datetime | None:
-    """Parse an ISO-8601 or YYYY-MM-DD string to a UTC datetime. Returns None if invalid or None."""
     if not s:
         return None
     try:
@@ -1769,8 +1598,6 @@ def parse_iso_utc(s: str | None) -> datetime | None:
 
 
 def parse_window(start: str | None, end: str | None) -> tuple[datetime, datetime] | None:
-    """Parse a ``(start, end)`` ISO pair to UTC datetimes, or ``None`` when either is missing/unparseable
-    or the window is empty/inverted (``end <= start``)."""
     st = parse_iso_utc(start)
     et = parse_iso_utc(end)
     if st is None or et is None or et <= st:
@@ -1779,16 +1606,10 @@ def parse_window(start: str | None, end: str | None) -> tuple[datetime, datetime
 
 
 def parse_hour_key_strict(s: str) -> datetime:
-    """Parse a ``YYYY-MM-DD-HH`` partition key to a tz-aware UTC datetime.
-
-    Raises ``ValueError`` on malformed input (same contract as the raw
-    ``datetime.strptime`` it replaces).
-    """
     return datetime.strptime(s, "%Y-%m-%d-%H").replace(tzinfo=UTC)
 
 
 def parse_hour_key(s: str) -> datetime | None:
-    """Like :func:`parse_hour_key_strict` but returns ``None`` when malformed."""
     try:
         return parse_hour_key_strict(s)
     except ValueError:
@@ -1796,31 +1617,22 @@ def parse_hour_key(s: str) -> datetime | None:
 
 
 def parse_day_key_strict(s: str) -> datetime:
-    """Parse a ``YYYY-MM-DD`` partition key to midnight UTC (raises ``ValueError``)."""
     return datetime.strptime(s, "%Y-%m-%d").replace(tzinfo=UTC)
 
 
 def ensure_utc(dt: datetime) -> datetime:
-    """Return ``dt`` as an aware UTC datetime.
-
-    Naive values are treated as UTC (DuckDB TIMESTAMP is naive-UTC); aware
-    values are converted with ``astimezone`` so the instant is preserved.
-    """
     return dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt.astimezone(UTC)
 
 
 def iso_z(dt: datetime) -> str:
-    """Format a datetime to ISO 8601 with a Z suffix."""
     return dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def iso_z_now() -> str:
-    """Return the current UTC time as an ISO 8601 string with a Z suffix."""
     return iso_z(datetime.now(UTC))
 
 
 def _parse_dt(s: str, default: datetime) -> datetime:
-    """Parse an ISO-8601 or YYYY-MM-DD string to a UTC datetime, returning default on failure."""
     dt = parse_iso_utc(s)
     return dt if dt is not None else default
 
@@ -1829,20 +1641,12 @@ def parse_date_window(start: str, end: str, default_days: int = 7) -> tuple[str,
     now = datetime.now(UTC)
     start_dt = _parse_dt(start, now - timedelta(days=default_days))
     end_dt = _parse_dt(end, now)
-
     if len(end) <= 10:
         end_dt = end_dt.replace(hour=23, minute=59, second=59)
-
     return iso_z(start_dt), iso_z(end_dt)
 
 
 def safe_iso(dt) -> str | None:
-    """Normalise a datetime or string to an ISO-8601 string ending in Z.
-
-    DuckDB TIMESTAMP is timezone-naive but always represents UTC; appending
-    Z ensures JavaScript parses it as UTC instead of local time. Used by
-    both the duckdb core layer and the repositories layer.
-    """
     if dt is None:
         return None
     if hasattr(dt, "isoformat"):
@@ -1863,13 +1667,6 @@ def safe_iso(dt) -> str | None:
 
 
 def parse_window_str_to_dt(s: str) -> datetime:
-    """Parse a string returned by ``parse_date_window`` back into a UTC datetime.
-
-    ``parse_date_window`` returns ISO-8601 ``"%Y-%m-%dT%H:%M:%SZ"``; callers
-    that need a ``datetime`` for arithmetic (e.g. ``.timestamp()``) should
-    use this helper rather than ``strptime("%Y-%m-%d %H:%M:%S")``, which
-    fails on the T separator and Z suffix.
-    """
     dt = parse_iso_utc(s)
     if dt is None:
         raise ValueError(f"Invalid date window string: {s}")
@@ -1877,26 +1674,11 @@ def parse_window_str_to_dt(s: str) -> datetime:
 
 
 def window_to_epoch(start: str, end: str) -> tuple[str, str, int, int]:
-    """Parse a (start, end) request window into its ISO-Z strings plus the
-    matching epoch-second integers.
-
-    Folds the three-step ``parse_date_window`` → ``parse_window_str_to_dt``
-    → ``int(.timestamp())`` dance that the usage router's Fastly /stats
-    handlers each repeated. Returns ``(start_str, end_str, from_ts, to_ts)``.
-    """
     s, e = parse_date_window(start, end)
     return s, e, int(parse_window_str_to_dt(s).timestamp()), int(parse_window_str_to_dt(e).timestamp())
 
 
 def parse_relative_time_window(since: str, max_lookback_days: int = 30) -> datetime:
-    """Parse a window string like ``"1h"`` / ``"24h"`` / ``"7d"`` / ``"30m"``
-    into a UTC datetime ``now - delta``.
-
-    Capped at ``max_lookback_days`` so an oversized input can't pull data
-    beyond the retention window. Falls back to ``now - 1 hour`` for empty /
-    malformed input — admin UIs that drive this pass a controlled set of
-    values, so silent fallback is preferable to surfacing a 400.
-    """
     now = datetime.now(UTC)
     if not since:
         return now - timedelta(hours=1)
@@ -1939,12 +1721,10 @@ for _submod_name in _FOLDED_TELEMETRY_SUBMODULES:
     sys.modules[f"backend.utils.{_submod_name}"] = _this_telemetry_mod
     if _utils_pkg is not None:
         setattr(_utils_pkg, _submod_name, _this_telemetry_mod)
-
 sys.modules["backend.core.retry"] = _this_telemetry_mod
 _core_pkg = sys.modules.get("backend.core")
 if _core_pkg is not None:
     setattr(_core_pkg, "retry", _this_telemetry_mod)
-
 _backend_pkg = sys.modules.get("backend")
 if _backend_pkg is not None and hasattr(_backend_pkg, "_MODULE_ALIASES"):
     _backend_pkg._MODULE_ALIASES.update(

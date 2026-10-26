@@ -7,24 +7,43 @@ import argparse
 import json
 import math
 import os
-import random
 import sys
-import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from backend.utils.sql_validator import escape_sql_literal  # noqa: E402
+
 from scripts.lib.admin_tls import admin_origin, admin_urlopen, validate_admin_tls_config  # noqa: E402
 from scripts.lib.environments import parse_iso_utc  # noqa: E402
+from scripts.lib.readiness import (  # noqa: E402, F401
+    ActiveTrafficStreamer,
+    _NoProbeRedirect,
+    _normalize_probe_key,
+    _spoof_ip,
+    _urlopen_status,
+    compute_lag_statistics,
+    configured_polling,
+    correlated_vitals_value,
+    cron_completion_time,
+    escape_sql_literal,
+    new_terminal_run,
+    parse_iso,
+    print_active_scorecard,
+    print_burst_scorecard,
+    rum_beacon_count,
+    seconds_between,
+    send_edge_request_probe,
+    send_edge_rum_probe,
+    summarize_correlated,
+)
 from scripts.lib.section_measurements import BUDGETS  # noqa: E402
 
 # fmt: off
@@ -66,74 +85,6 @@ def load_environment_config(env_key: str, environ: dict[str, str] | None = None)
     return settings
 
 
-def configured_polling(settings_response: Any, service_id: str) -> dict[str, Any]:
-    services = settings_response.get("services") if isinstance(settings_response, dict) else None
-    if not isinstance(services, list):
-        raise ValueError("services response is missing its service list")
-    service = next((e for e in services if isinstance(e, dict) and e.get("service_id") == service_id), None)
-    if service is None:
-        raise ValueError("requested service was not returned by the services endpoint")
-    cron_sync = service.get("cron_sync")
-    if cron_sync is None:
-        cron_sync = {}
-    if not isinstance(cron_sync, dict):
-        raise ValueError("service cron_sync settings are invalid")
-    mode = cron_sync.get("polling_mode", "adaptive")
-    if mode not in {"regular", "adaptive"}:
-        raise ValueError("service polling_mode must be regular or adaptive")
-    log_period = int(service.get("log_period") or 60)
-    if interval_mins := cron_sync.get("interval_mins"):
-        interval, interval_source = max(5, int(interval_mins) * 60), "interval_mins"
-    elif interval_seconds := cron_sync.get("interval_seconds"):
-        interval, interval_source = max(5, int(interval_seconds)), "interval_seconds"
-    else:
-        interval, interval_source = max(5, log_period // 2 if log_period >= 60 else log_period), "log_period"
-    return {
-        "mode": mode, "interval_seconds": interval, "interval_source": interval_source,
-        "adaptive_followup_interval_seconds": 3 if mode == "adaptive" else None,
-        "adaptive_max_followups": 2 if mode == "adaptive" else 0,
-    }
-
-
-def cron_completion_time(entry: Any) -> datetime | None:
-    if not isinstance(entry, dict) or (started_at := parse_iso(entry.get("started_at"))) is None:
-        return None
-    try:
-        return started_at + timedelta(seconds=float(entry["duration_s"]))
-    except (KeyError, TypeError, ValueError):
-        return None
-
-
-def new_terminal_run(response: Any, baseline_run_id: int) -> dict[str, Any] | None:
-    entries = response.get("entries") if isinstance(response, dict) else None
-    if not isinstance(entries, list) or not entries or not isinstance(entries[0], dict):
-        return None
-    entry = entries[0]
-    try:
-        run_id = int(entry["id"])
-    except (KeyError, TypeError, ValueError):
-        return None
-    return entry if run_id > baseline_run_id and entry.get("status") in {"success", "warning", "error"} else None
-
-
-def seconds_between(later: datetime | None, earlier: datetime | None) -> float | None:
-    return None if later is None or earlier is None else round((later - earlier).total_seconds(), 1)
-
-
-def rum_beacon_count(response: Any) -> int | None:
-    if not isinstance(response, dict):
-        return None
-    count = response.get("beacons") if response.get("beacons") is not None else response.get("recent_beacons")
-    try:
-        return int(count) if count is not None else None
-    except (TypeError, ValueError):
-        return None
-
-
-def parse_iso(ts_str: str | None) -> datetime | None:
-    return parse_iso_utc(ts_str)
-
-
 def _http_json(url: str, method: str = "GET", body: dict | None = None, headers: dict[str, str] | None = None, timeout: float = 35.0) -> tuple[int, Any]:
     req_headers = {"Accept": "application/json", "User-Agent": "FLA-FreshnessProbe/1.0", **(headers or {})}
     data = None
@@ -161,43 +112,6 @@ def http_post(url: str, body: dict | None = None, headers: dict[str, str] | None
     return _http_json(url, "POST", body, headers, timeout)
 
 
-def _spoof_ip() -> str:
-    return f"{random.randint(12, 223)}.{random.randint(1, 254)}.{random.randint(1, 254)}.{random.randint(1, 254)}"
-
-
-def _urlopen_status(req: urllib.request.Request, timeout: float = 8, opener: Any = None) -> int:
-    try:
-        fn = opener.open if opener else urllib.request.urlopen
-        with fn(req, timeout=timeout) as r:
-            return r.status
-    except urllib.error.HTTPError as e:
-        return e.code
-    except Exception:
-        return 0
-
-
-def send_edge_request_probe(cdn_domain: str, marker: str, idx: int) -> int:
-    url = f"{cdn_domain.rstrip('/')}/test-freshness?probe={marker}&seq={idx}"
-    hdrs = {"User-Agent": f"FLA-Probe-Agent/1.0 ({marker})", "X-Source-Ip": _spoof_ip(), "Fastly-Request-ID": f"req-{marker}-{idx:04d}"}
-    return _urlopen_status(urllib.request.Request(url, headers=hdrs))
-
-
-def send_edge_rum_probe(cdn_domain: str, marker: str, idx: int) -> int:
-    url = f"{cdn_domain.rstrip('/')}/rum-beacon?cid={marker}-{idx}&rum_metric_name=LCP&rum_metric_value=1250&rum_pathname=%2Ftest-freshness"
-    faro_payload = {
-        "meta": {"browser": {"name": "Chrome", "mobile": False}, "os": {"name": "macOS"}, "page": {"url": f"{cdn_domain}/test-freshness"}},
-        "measurements": [{"type": "web-vitals", "values": {"LCP": 1250.0}, "context": {"rating": "good"}}],
-        "events": [{"name": "freshness_test_click", "timestamp": datetime.now(UTC).isoformat(), "attributes": {"probe": marker}}],
-    }
-    hdrs = {"Content-Type": "application/json", "User-Agent": f"FLA-RUM-Probe/1.0 ({marker})", "X-Source-Ip": _spoof_ip()}
-    return _urlopen_status(urllib.request.Request(url, data=json.dumps(faro_payload).encode("utf-8"), headers=hdrs, method="POST"))
-
-
-class _NoProbeRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str) -> None:
-        return None
-
-
 def send_correlated_probe(url: str, stream: str, probe_value: float | str | None = None) -> int:
     body = None
     if stream != "request":
@@ -211,20 +125,6 @@ def send_correlated_probe(url: str, stream: str, probe_value: float | str | None
         headers={"User-Agent": "FLA-FreshnessProbe/1.0", "Content-Type": "application/json"},
     )
     return _urlopen_status(req, timeout=5, opener=urllib.request.build_opener(_NoProbeRedirect()))
-
-
-def _normalize_probe_key(value: Any, stream: str) -> Any:
-    if stream != "vitals" or isinstance(value, bool):
-        return value
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return value
-    return str(int(number)) if number.is_integer() else value
-
-
-def correlated_vitals_value(marker: str, idx: int) -> int:
-    return 10_000_000 + (int(marker[:6], 16) % 1_000_000) * 100 + idx
 
 
 def poll_correlated_stream(backend_url: str, service_id: str, stream: str, probes: list[dict[str, Any]], high_scale: bool = False) -> dict[str, Any]:
@@ -268,47 +168,6 @@ def poll_correlated_stream(backend_url: str, service_id: str, stream: str, probe
             probe["source_timestamp"] = row["timestamp"]
             probe["first_positive_query_started"] = started
     return observation
-
-
-def summarize_correlated(probes: list[dict[str, Any]], ended: float) -> dict[str, Any]:
-    streams = {}
-    floor = BUDGETS["minimum_samples_per_state"]
-    for stream in ("request", "vitals", "errors"):
-        pop = [p for p in probes if p["stream"] == stream]
-        visible = [p for p in pop if p.get("first_visible") is not None and 200 <= p["http_status"] < 300]
-        bounds = sorted(p["first_visible"] - p["sent"] for p in visible)
-        count = len(bounds)
-        complete = bool(pop) and count == len(pop)
-        p95 = bounds[math.ceil(count * 0.95) - 1] if count else None
-        streams[stream] = {
-            "sent": len(pop), "correlated": sum(p.get("first_visible") is not None for p in pop), "observed": count,
-            "right_censored": sum(p.get("first_visible") is None for p in pop),
-            "http_errors": sum(not 200 <= p["http_status"] < 300 for p in pop),
-            "left_censored": sum(p.get("last_absent") is None for p in visible),
-            "complete": complete, "p95_sample_floor": floor, "p95_population_sufficient": complete and count >= floor,
-            "upper_bound_s": {"p95": p95, "p99": bounds[math.ceil(count * 0.99) - 1] if count else None, "max": max(bounds) if count else None},
-            "p99_population_sufficient": complete and count >= 100,
-            "target_assessment": (
-                "within_target_upper_bound"
-                if complete and count >= floor and p95 <= BUDGETS["peak_freshness_p95_ms"] / 1000
-                else "incomplete_not_proven_failure"
-            ),
-            "samples": [
-                {
-                    "http_status": p["http_status"], "send_to_response_s": p["response"] - p["sent"],
-                    "followup_duration_s": ended - p["sent"], "source_timestamp": p.get("source_timestamp"),
-                    "event_to_queryable_upper_bound_s": p["first_visible"] - p["sent"] if p.get("first_visible") is not None else None,
-                    "send_to_queryable_interval_s": [
-                        p["last_absent"] - p["sent"] if p.get("last_absent") is not None else 0,
-                        p["first_visible"] - p["sent"] if p.get("first_visible") is not None else None,
-                    ],
-                    "right_censored": p.get("first_visible") is None,
-                    "left_censored": p.get("first_visible") is not None and p.get("last_absent") is None,
-                }
-                for p in pop
-            ],
-        }
-    return streams
 
 
 def measure_correlated_freshness(
@@ -407,78 +266,6 @@ def measure_correlated_freshness(
         "query_errors": sum(q["error"] is not None for q in queries),
         "queries": [{**q, "started": q["started"] - started, "ended": q["ended"] - started} for q in queries],
         "streams": streams,
-    }
-
-
-class ActiveTrafficStreamer:
-    """Continuously dispatches edge HTTP requests and RUM beacons in parallel."""
-
-    def __init__(self, cdn_domain: str, marker: str, rps: float = 10.0):
-        self.cdn_domain = cdn_domain
-        self.marker = marker
-        self.rps = max(1.0, rps)
-        self.stop_event = threading.Event()
-        self.requests_sent = 0
-        self.rum_sent = 0
-        self.errors = 0
-        self._thread: threading.Thread | None = None
-
-    def start(self) -> None:
-        self._thread = threading.Thread(target=self._run, daemon=True)
-        self._thread.start()
-
-    def stop(self) -> None:
-        self.stop_event.set()
-        if self._thread:
-            self._thread.join(timeout=4.0)
-
-    def _run(self) -> None:
-        interval, seq = 1.0 / self.rps, 0
-        with ThreadPoolExecutor(max_workers=6) as pool:
-            while not self.stop_event.is_set():
-                t0 = time.perf_counter()
-                seq += 1
-                try:
-                    pool.submit(self._send_req, seq)
-                    if seq % 5 == 0:
-                        pool.submit(self._send_rum, seq // 5)
-                except Exception:
-                    self.errors += 1
-                if (sleep_time := interval - (time.perf_counter() - t0)) > 0:
-                    time.sleep(sleep_time)
-
-    def _send_req(self, seq: int) -> None:
-        if send_edge_request_probe(self.cdn_domain, self.marker, seq) in (200, 204, 301, 302):
-            self.requests_sent += 1
-        else:
-            self.errors += 1
-
-    def _send_rum(self, seq: int) -> None:
-        if send_edge_rum_probe(self.cdn_domain, self.marker, seq) in (200, 204):
-            self.rum_sent += 1
-
-
-def compute_lag_statistics(samples: list[dict[str, Any]], baseline_latest_ts: datetime | None = None, min_elapsed_s: float = 6.0) -> dict[str, Any]:
-    """Summarize request-watermark recency, not individual event latency."""
-    active_samples = [s for s in samples if s.get("header_latest_ts") and s["header_latest_ts"] > baseline_latest_ts] if baseline_latest_ts else []
-    if not active_samples:
-        active_samples = [s for s in samples if s.get("elapsed_s", 0) >= min_elapsed_s] or list(samples)
-    head_lags = [s["header_lag_s"] for s in active_samples if s.get("header_lag_s") is not None]
-    dash_lags = [s["dashboard_lag_s"] for s in active_samples if s.get("dashboard_lag_s") is not None]
-
-    def _stats(vals: list[float]) -> dict[str, float | None]:
-        if not vals:
-            return {"min": None, "max": None, "avg": None, "p95": None, "p99": None}
-        s = sorted(vals)
-        return {"min": round(min(vals), 1), "max": round(max(vals), 1), "avg": round(sum(vals) / len(vals), 1), "p95": s[math.ceil(len(s) * 0.95) - 1], "p99": s[math.ceil(len(s) * 0.99) - 1]}
-
-    header, dashboard = _stats(head_lags), _stats(dash_lags)
-    target_p95_s = BUDGETS["peak_freshness_p95_ms"] / 1000
-    header_p95, dashboard_p95 = header["p95"], dashboard["p95"]
-    target_status = "UNMEASURED" if header_p95 is None or dashboard_p95 is None else ("ELEVATED" if max(header_p95, dashboard_p95) > target_p95_s else "WITHIN TARGET")
-    return {
-        "header_lag": header, "dashboard_lag": dashboard, "sample_count": len(active_samples),
-        "total_samples": len(samples), "target_p95_s": target_p95_s, "target_status": target_status,
     }
 
 
@@ -626,44 +413,6 @@ def measure_active_traffic_benchmark(targets: list[str], duration_s: float = 30.
         })
     print_active_scorecard(results)
     return results
-
-
-def print_active_scorecard(results: list[dict[str, Any]]) -> None:
-    print(f"\n{'=' * 110}\n                      REQUEST WATERMARK RECENCY SCORECARD (DIAGNOSTIC ONLY)\n{'=' * 110}", flush=True)
-    print(f"{'Environment':<28} │ {'Mode':<11} │ {'Min Lag':<8} │ {'Max Lag':<8} │ {'Avg Lag':<8} │ {'P95 Lag':<8} │ {'Dash Avg':<9} │ {'Requests':<9} │ {'Target Status':<15}", flush=True)
-    print(f"{'-' * 28}─┼─{'-' * 11}─┼─{'-' * 8}─┼─{'-' * 8}─┼─{'-' * 8}─┼─{'-' * 8}─┼─{'-' * 9}─┼─{'-' * 9}─┼─{'-' * 15}", flush=True)
-    for r in results:
-        if "error" in r:
-            print(f"{r.get('name', r.get('env', 'Unknown')):<28} │ ERROR: {r['error']}", flush=True)
-            continue
-        bench = r.get("active_benchmark", {})
-        hl, dl = bench.get("header_lag", {}), bench.get("dashboard_lag", {})
-        fmt = lambda d, k: f"{d[k]}s" if d.get(k) is not None else "—"  # noqa: E731
-        reqs = f"{bench.get('requests_sent', 0):,}"
-        print(
-            f"{r['name']:<28} │ {r.get('deployment_mode', '—'):<11} │ {fmt(hl, 'min'):>8} │ {fmt(hl, 'max'):>8} │ "
-            f"{fmt(hl, 'avg'):>8} │ {fmt(hl, 'p95'):>8} │ {fmt(dl, 'avg'):>9} │ {reqs:>9} │ {bench.get('target_status', '—'):<15}",
-            flush=True,
-        )
-    print(f"Qualification incomplete: request/RUM event latency and clock uncertainty are unverified.\n{'=' * 110}\n", flush=True)
-
-
-def print_burst_scorecard(results: list[dict[str, Any]]) -> None:
-    print(f"\n{'=' * 96}\n                      END-TO-END FRESHNESS & INGEST LAG SCORECARD (SINGLE BURST)\n{'=' * 96}", flush=True)
-    print(f"{'Environment':<28} │ {'Header Seen':<11} │ {'Cron Ingest':<11} │ {'Dash Seen':<12} │ {'Dashboard Lag':<14} │ {'Header Lag':<11}", flush=True)
-    print(f"{'-' * 28}─┼─{'-' * 11}─┼─{'-' * 11}─┼─{'-' * 12}─┼─{'-' * 14}─┼─{'-' * 11}", flush=True)
-    for r in results:
-        if "error" in r:
-            print(f"{r.get('name', r.get('env', 'Unknown')):<28} │ ERROR: {r['error']}", flush=True)
-            continue
-        delays, matrix = r.get("wall_clock_delays", {}), r.get("page_freshness_matrix", {})
-        dash_lag = matrix.get("Dashboard Bundle", {}).get("freshness_lag_s")
-        head_lag = matrix.get("Header Badge", {}).get("freshness_lag_s")
-        f_del = lambda k: f"{delays[k]}s" if delays.get(k) is not None else "TIMEOUT"  # noqa: E731
-        dash_lag_str = f"{dash_lag:.1f}s ago" if dash_lag is not None else "—"
-        head_lag_str = f"{head_lag:.1f}s ago" if head_lag is not None else "—"
-        print(f"{r['name']:<28} │ {f_del('header_seconds'):<11} │ {f_del('cron_request_seconds'):<11} │ {f_del('dashboard_bundle_seconds'):<12} │ {dash_lag_str:<14} │ {head_lag_str:<11}", flush=True)
-    print(f"{'=' * 96}\n", flush=True)
 
 
 def measure_environment(env_key: str, env_info: dict[str, str], num_requests: int = 10, num_rum: int = 5, max_wait_s: float = 60.0) -> dict[str, Any]:

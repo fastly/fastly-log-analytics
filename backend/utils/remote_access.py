@@ -9,11 +9,12 @@ import secrets
 import sys
 import threading
 import time
-from collections import OrderedDict, deque
+from collections import deque
 from collections.abc import Callable
 from typing import Literal
 from urllib.parse import urlparse, urlsplit
 
+import cachetools
 from fastapi import HTTPException, Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
@@ -27,8 +28,8 @@ class SlidingWindowLimiter:
         self.max_keys = max_keys
         self._clock = clock
         self._lock = threading.Lock()
-        self._events: OrderedDict[str, deque[tuple[float, int]]] = OrderedDict()
-        self._locks: OrderedDict[str, float] = OrderedDict()
+        self._events: cachetools.LRUCache[str, deque[tuple[float, int]]] = cachetools.LRUCache(maxsize=max(1, max_keys))
+        self._locks: cachetools.LRUCache[str, float] = cachetools.LRUCache(maxsize=max(1, max_keys))
 
     @property
     def MAX_TRACKED_IPS(self) -> int:
@@ -37,6 +38,8 @@ class SlidingWindowLimiter:
     @MAX_TRACKED_IPS.setter
     def MAX_TRACKED_IPS(self, value: int) -> None:
         self.max_keys = value
+        self._events._Cache__maxsize = max(1, value)
+        self._locks._Cache__maxsize = max(1, value)
 
     def _now(self) -> float:
         return self._clock() if self._clock is not None else time.time()
@@ -55,15 +58,17 @@ class SlidingWindowLimiter:
         return now, cutoff, self._prune_key(key, cutoff)
 
     def _store(self, key: str, events: deque[tuple[float, int]], cutoff: float) -> None:
+        self._events._Cache__maxsize = max(1, self.max_keys, len(self._events) + 1)
+        self._events.pop(key, None)
         self._events[key] = events
-        self._events.move_to_end(key)
         while self._events:
-            oldest, history = next(iter(self._events.items()))
+            oldest, history = next(iter(self._events._Cache__data.items()))
             if history and history[-1][0] >= cutoff:
                 break
             del self._events[oldest]
         while len(self._events) > self.max_keys:
-            self._events.popitem(last=False)
+            self._events.popitem()
+        self._events._Cache__maxsize = max(1, self.max_keys)
 
     def try_acquire(
         self, key: str, weight: int = 0, *, max_events: int | None = None, max_weight: int | None = None
@@ -83,9 +88,12 @@ class SlidingWindowLimiter:
             events.append((now, 1))
             self._store(key, events, cutoff)
             if len(events) >= threshold and key not in self._locks:
+                cap = max_locks if max_locks is not None else self.max_keys
+                self._locks._Cache__maxsize = max(1, cap, len(self._locks) + 1)
                 self._locks[key] = now + lockout_s
-                while len(self._locks) > (max_locks if max_locks is not None else self.max_keys):
-                    self._locks.popitem(last=False)
+                while len(self._locks) > cap:
+                    self._locks.popitem()
+                self._locks._Cache__maxsize = max(1, cap)
                 return True
             return False
 

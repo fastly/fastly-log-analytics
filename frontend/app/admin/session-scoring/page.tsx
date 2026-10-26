@@ -39,8 +39,8 @@ import {
   RotateKeyButton,
   ScorerFailOpenBreakdownCard,
   ScoringHealthCard,
+  ThresholdSlider,
 } from '@/components/SessionScoring/ScoringAdminPanels'
-import { ThresholdSlider } from '@/components/SessionScoring/ThresholdSlider'
 import { TopFlaggedTable } from '@/components/SessionScoring/TopFlaggedTable'
 import {
   invalidateServiceScoringQueries,

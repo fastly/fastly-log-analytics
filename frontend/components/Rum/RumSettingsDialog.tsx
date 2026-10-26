@@ -1,6 +1,9 @@
 'use client'
 
 import React, { useState, useEffect, useRef, useMemo } from 'react'
+import { useForm } from 'react-hook-form'
+import { zodResolver } from '@hookform/resolvers/zod'
+import { z } from 'zod'
 import { useQueryClient } from '@tanstack/react-query'
 import { formatBytes, cn } from "@/lib/utils";
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
@@ -57,6 +60,14 @@ export function RumSettingsDialog(props: RumSettingsDialogProps) {
   return <RumSettingsDialogBody key={generation} {...props} />
 }
 
+const rumSettingsSchema = z.object({
+  capture_vitals: z.boolean(),
+  capture_performance: z.boolean(),
+  capture_errors: z.boolean(),
+  capture_events: z.boolean(),
+  custom_condition: z.string(),
+})
+
 function RumSettingsDialogBody({
   serviceId,
   open,
@@ -71,13 +82,28 @@ function RumSettingsDialogBody({
   const [selectedVersion, setSelectedVersion] = useDerivedState<string>(
     currentVersion ?? latestVersion ?? availableVersions[0] ?? ''
   )
+  const form = useForm<z.infer<typeof rumSettingsSchema>>({
+    resolver: zodResolver(rumSettingsSchema),
+    defaultValues: {
+      capture_vitals: true,
+      capture_performance: true,
+      capture_errors: true,
+      capture_events: true,
+      custom_condition: '',
+    },
+  })
 
   // Local settings toggles
-  const [captureVitals, setCaptureVitals] = useState(true)
-  const [capturePerformance, setCapturePerformance] = useState(true)
-  const [captureErrors, setCaptureErrors] = useState(true)
-  const [captureEvents, setCaptureEvents] = useState(true)
-  const [customCondition, setCustomCondition] = useState('')
+  const [captureVitals, setCaptureVitalsState] = useState(true)
+  const [capturePerformance, setCapturePerformanceState] = useState(true)
+  const [captureErrors, setCaptureErrorsState] = useState(true)
+  const [captureEvents, setCaptureEventsState] = useState(true)
+  const [customCondition, setCustomConditionState] = useState('')
+  const setCaptureVitals = (v: boolean) => { setCaptureVitalsState(v); form.setValue('capture_vitals', v) }
+  const setCapturePerformance = (v: boolean) => { setCapturePerformanceState(v); form.setValue('capture_performance', v) }
+  const setCaptureErrors = (v: boolean) => { setCaptureErrorsState(v); form.setValue('capture_errors', v) }
+  const setCaptureEvents = (v: boolean) => { setCaptureEventsState(v); form.setValue('capture_events', v) }
+  const setCustomCondition = (v: string) => { setCustomConditionState(v); form.setValue('custom_condition', v) }
 
   // Local log lines to show during synchronous settings saving
   const [localLogs, setLocalLogs] = useState<string[]>([])

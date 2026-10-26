@@ -155,7 +155,6 @@ _CMCD_CUSTOM_FIELDS: list[dict[str, Any]] = [
         "enabled": True,
     },
 ]
-# Ensure exact schema match (strip temporary note if any)
 for _cf in _CMCD_CUSTOM_FIELDS:
     _cf.pop("vcl_log_expression_note", None)
 _CMCD_FIELD_NAMES = {cf["name"] for cf in _CMCD_CUSTOM_FIELDS}
@@ -195,12 +194,7 @@ def _bool_v2(source: str, key: str) -> str:
 
 
 def _cmcd_field_assignments_vcl(
-    obj_src: str,
-    req_src: str,
-    sess_src: str,
-    status_src: str,
-    su_expr: str,
-    bs_expr: str,
+    obj_src: str, req_src: str, sess_src: str, status_src: str, su_expr: str, bs_expr: str
 ) -> str:
     return f"""\
   # CMCD-Object fields
@@ -245,12 +239,7 @@ def _header_mode_vcl(version: int) -> str:
         bs = bf("req.http.CMCD-Status", "bs")
         pad_decl = ""
     assignments = _cmcd_field_assignments_vcl(
-        "req.http.CMCD-Object",
-        "req.http.CMCD-Request",
-        "req.http.CMCD-Session",
-        "req.http.CMCD-Status",
-        su,
-        bs,
+        "req.http.CMCD-Object", "req.http.CMCD-Request", "req.http.CMCD-Session", "req.http.CMCD-Status", su, bs
     )
     return f"""\
 # CMCD {tag} header-mode extraction.
@@ -283,14 +272,7 @@ def _query_string_mode_vcl(version: int) -> str:
         if version == 1
         else ""
     )
-    assignments = _cmcd_field_assignments_vcl(
-        "var.cmcd",
-        "var.cmcd",
-        "var.cmcd",
-        "var.cmcd",
-        su,
-        bs,
-    )
+    assignments = _cmcd_field_assignments_vcl("var.cmcd", "var.cmcd", "var.cmcd", "var.cmcd", su, bs)
     return f"""\
 # CMCD {tag} query-string-mode extraction.
 declare local var.cmcd STRING;
@@ -331,16 +313,10 @@ def system_feature_flags(cfg: dict[str, Any]) -> tuple[bool, bool]:
 
 
 def reconcile_system_custom_fields(
-    custom_fields: list[dict] | None,
-    *,
-    scoring_enabled: bool,
-    cmcd_enabled: bool,
+    custom_fields: list[dict] | None, *, scoring_enabled: bool, cmcd_enabled: bool
 ) -> list[dict]:
     """Return ``custom_fields`` with system-managed entries re-asserted."""
-    from backend.provision.session_scoring_orchestrator import (
-        _SCORING_CUSTOM_FIELDS,
-        _SCORING_FIELD_NAMES,
-    )
+    from backend.provision.session_scoring_orchestrator import _SCORING_CUSTOM_FIELDS, _SCORING_FIELD_NAMES
 
     out = [cf for cf in (custom_fields or []) if cf.get("name") not in _SCORING_FIELD_NAMES]
     if scoring_enabled:
@@ -356,15 +332,12 @@ def reconcile_cfg_system_custom_fields(cfg: dict[str, Any]) -> list[dict]:
         lf_dict = {"schema_version": 2, "custom_fields": []}
         cfg["log_fields"] = lf_dict
     reconciled = reconcile_system_custom_fields(
-        lf_dict.get("custom_fields"),
-        scoring_enabled=scoring_enabled,
-        cmcd_enabled=cmcd_enabled,
+        lf_dict.get("custom_fields"), scoring_enabled=scoring_enabled, cmcd_enabled=cmcd_enabled
     )
     lf_dict["custom_fields"] = reconciled
     return reconciled
 
 
-# Register cmcd_fields alias BEFORE importing sibling modules
 sys.modules["backend.provision.cmcd_fields"] = sys.modules[__name__]
 from backend.core import field_registry as lf  # noqa: E402
 from backend.core.duckdb import rum_duckdb_path  # noqa: E402
@@ -380,12 +353,6 @@ import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError
 
-# Methods we want billed as Class A regardless of name-based auto-classification
-# in metadata_db.log_usage_calls. The auto-classifier only knows about
-# PUT_OBJECT/POST_OBJECT/COPY_OBJECT/LIST_OBJECTS_V2; the rest of the
-# bucket-lifecycle ops fall through to Class B by default, so we tag them
-# explicitly via the "Class A" sentinel in details (which the classifier
-# honors as an override).
 _PROVISION_CLASS_A: set[str] = {
     "CREATE_BUCKET",
     "DELETE_BUCKET",
@@ -397,22 +364,7 @@ _PROVISION_CLASS_A: set[str] = {
 
 
 class _ProvisioningTracker:
-    """Wraps a boto3 S3 client so every call lands in usage_log.
-
-    Why this exists: provisioning runs outside any request handler
-    context, so the ContextVar-backed `record_call` mechanism that
-    powers dashboards drops every op silently — and the local
-    telemetry proxy can't help either, since the service_id config
-    (which carries the SigV4 credentials the proxy needs) does not
-    exist yet when the bucket is being created. We write directly to
-    usage_log via `metadata_db.log_usage_calls`, which is the same
-    persistence layer the proxy writes to — keeping a single source
-    of truth for the Usage Log dashboard.
-
-    Each tracked call accumulates in `_calls`; `flush()` drains them
-    to SQLite. Thread-safe (delete_fos_bucket uses a ThreadPoolExecutor
-    for parallel delete_objects fan-out).
-    """
+    """Wraps a boto3 S3 client so every call lands in usage_log."""
 
     def __init__(self, client, service_id: str, bucket_name: str, context: str):
         self._client = client
@@ -423,9 +375,6 @@ class _ProvisioningTracker:
         self._lock = threading.Lock()
 
     def get_paginator(self, operation_name):
-        # boto3 paginators internally call list_objects_v2 — wrap the page
-        # iterator so we capture each underlying API call, not just the
-        # surface .paginate() invocation.
         return _ProvisioningPaginator(self._client.get_paginator(operation_name), operation_name, self)
 
     def __getattr__(self, name):
@@ -492,7 +441,6 @@ class _ProvisioningTracker:
             metadata_db.log_usage_calls(self._service_id, batch, process_context=self._context)
             return len(batch)
         except Exception:
-            # Provisioning must never fail because telemetry persistence failed.
             return 0
 
 
@@ -512,11 +460,7 @@ class _ProvisioningPaginator:
         path = f"{bucket}/{prefix}" if prefix else bucket
         for page in underlying:
             t0 = time.time()
-            # The actual API call already happened by the time iteration yields
-            # the page; we can't time it precisely. Record it as 0ms — counts
-            # matter more than per-page latency for Class A pagination billing.
             self._tracker._record(op, (), {"Bucket": bucket}, round((time.time() - t0) * 1000, 2), "OK")
-            # Use 0.0 explicitly so totals don't get polluted by tiny iteration overhead.
             if self._tracker._calls and self._tracker._calls[-1]["method"] == op:
                 self._tracker._calls[-1]["time_ms"] = 0.0
                 self._tracker._calls[-1]["path"] = path
@@ -527,11 +471,9 @@ class _MockS3ClientForProvisioning:
     """Mock S3 client used during FASTLY_MOCK_MODE=1 to bypass real FOS network calls."""
 
     def __init__(self):
-        # boto3 clients have a meta property that some listeners might access
         self.meta = type("Meta", (), {"events": type("Events", (), {"register": lambda *a, **kw: None})()})()
 
     def head_bucket(self, Bucket):
-        # Always raise 404 to indicate the bucket doesn't exist yet, forcing the create_bucket flow.
         raise ClientError({"Error": {"Code": "404", "Message": "Not Found"}}, "HeadBucket")
 
     def create_bucket(self, Bucket, CreateBucketConfiguration=None):
@@ -578,13 +520,7 @@ def _get_fos_s3_client(access_key, secret_key, region, *, service_id=None, bucke
 
 
 def ensure_fos_bucket(
-    name: str,
-    region: str,
-    access_key: str,
-    secret_key: str,
-    status_cb=None,
-    *,
-    service_id: str | None = None,
+    name: str, region: str, access_key: str, secret_key: str, status_cb=None, *, service_id: str | None = None
 ) -> bool:
     """Create the bucket via Boto3 (S3 API). Returns True on success."""
     s3 = _get_fos_s3_client(
@@ -628,13 +564,7 @@ def ensure_fos_bucket(
 
 
 def delete_fos_bucket(
-    name: str,
-    region: str,
-    access_key: str,
-    secret_key: str,
-    status_cb=None,
-    *,
-    service_id: str | None = None,
+    name: str, region: str, access_key: str, secret_key: str, status_cb=None, *, service_id: str | None = None
 ):
     """Delete the bucket via Boto3, emptying it first if necessary."""
     s3 = _get_fos_s3_client(
@@ -740,35 +670,16 @@ def delete_fos_bucket(
 
 
 def product_enabled(token: str, product_id: str) -> bool:
-    """Return True if the Fastly account behind ``token`` has ``product_id``
-    enabled, per Fastly's product-enablement endpoint
-    (``GET /enabled-products/v1/{product_id}``).
-
-    Only a subset of Fastly products expose this status endpoint (Object
-    Storage and KV Store are two; Compute and Config Store are NOT — those have
-    to be detected by attempting the create). For the ones that do, we treat:
-
-      * 200            -> True  (enabled)
-      * 4xx            -> False (not enabled for this account)
-      * 5xx / network  -> True  (inconclusive — don't block; the reactive
-                                 create/access failure downstream still guards)
-
-    Callers should validate the token first (e.g. list services) so a 401/403
-    here is only seen for a known-good token and reads as "not enabled".
-    """
+    """Return True if the Fastly account behind ``token`` has ``product_id``     enabled, per Fastly's product-enablement endpoint     (``GET /enabled-products/v1/{product_id}``)."""
     try:
         fastly("GET", f"/enabled-products/v1/{product_id}", token=token)
         return True
     except RuntimeError as exc:
-        # backend.core.fastly.client.fastly raises "HTTP <code> ..." on HTTP
-        # errors; a 4xx means the product isn't enabled for this account.
         return "HTTP 4" not in str(exc)
 
 
 def object_storage_enabled(token: str) -> bool:
-    """Return True if the account has Object Storage enabled. Object Storage is
-    REQUIRED for log storage; see ``product_enabled`` for the 200/4xx/5xx
-    semantics."""
+    """Return True if the account has Object Storage enabled. Object Storage is     REQUIRED for log storage; see ``product_enabled`` for the 200/4xx/5xx     semantics."""
     return product_enabled(token, "object_storage")
 
 
@@ -817,11 +728,7 @@ def ensure_fos_access_key(
     ok(f"FOS access key created  (key: {key['access_key']})")
     if status_cb:
         status_cb("✅ Access key created.")
-    return {
-        "id": key["access_key"],
-        "access_key": key["access_key"],
-        "secret_key": key["secret_key"],
-    }
+    return {"id": key["access_key"], "access_key": key["access_key"], "secret_key": key["secret_key"]}
 
 
 def delete_fos_access_key(key_id: str, token: str, status_cb=None):
@@ -841,13 +748,7 @@ def delete_fos_access_key(key_id: str, token: str, status_cb=None):
 
 
 def delete_fos_tokens_for_service(service_id: str, token: str, status_cb=None):
-    """List all FOS access keys and delete ones matching this service's patterns.
-
-    Searches for keys with descriptions matching:
-    - fos-log-analysis-{service_id}
-    - fos-log-analysis-temp-admin-{service_id}
-    - temp-teardown-{service_id}
-    """
+    """List all FOS access keys and delete ones matching this service's patterns."""
     try:
         resp = fastly("GET", "/resources/object-storage/access-keys", token=token)
         keys = resp.get("data", [])
@@ -1036,10 +937,7 @@ def write_service_config(state: dict):
         if cfg["rum_enabled"] and not cfg.get("rum"):
             import datetime as _dt
 
-            cfg["rum"] = {
-                "enabled": True,
-                "enabled_at": _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds"),
-            }
+            cfg["rum"] = {"enabled": True, "enabled_at": _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds")}
         if "log_period" in state:
             cfg["log_period"] = state["log_period"]
         elif "log_period" in state.get("provisioning", {}):
@@ -1386,10 +1284,7 @@ def provision(cfg: dict, _resume_from_state: bool = False):
                         exc_info=ice_exc,
                     )
                     warn(f"Iceberg table init deferred to first commit: {ice_exc}")
-                    yield {
-                        "type": "status",
-                        "message": f"⚠ Iceberg table init deferred to first commit: {ice_exc}",
-                    }
+                    yield {"type": "status", "message": f"⚠ Iceberg table init deferred to first commit: {ice_exc}"}
                 c = db.get_connection(source=src)
                 initial_lf = state.get("log_fields", {})
                 if initial_lf:
@@ -1698,49 +1593,23 @@ from backend.provision.fastly_api import _CDN_SNIPPETS
 
 
 def _terraform_template_escape(value: object) -> str:
-    """Escape ``${`` / ``%{`` inside a string so Terraform treats them as
-    literal characters rather than template-syntax openers.
-
-    JSON-level escaping (backslashes, quotes, control bytes) is handled by
-    :func:`json.dumps` at serialise time — this function intentionally does
-    NOT touch those characters. The ONLY thing it owns is the Terraform-
-    interpreter-level template prefix that survives JSON encoding."""
+    """Escape ``${`` / ``%{`` inside a string so Terraform treats them as     literal characters rather than template-syntax openers."""
     s = "" if value is None else str(value)
     return s.replace("${", "$${").replace("%{", "%%{")
 
 
 def _dump(obj: dict) -> str:
-    """Canonical .tf.json serialisation: 2-space indent, keys sorted for
-    determinism, trailing newline so ``terraform fmt -check`` is happy.
-
-    Sorted keys are load-bearing for the idempotency contract — Python
-    dict insertion order is preserved but the test suite (and human diffs)
-    are easier to read when keys are in the same order across runs and
-    across machines."""
+    """Canonical .tf.json serialisation: 2-space indent, keys sorted for     determinism, trailing newline so ``terraform fmt -check`` is happy."""
     return json.dumps(obj, indent=2, sort_keys=True) + "\n"
 
 
 def generate_terraform(cfg: dict[str, Any], fos_access_key: str, fos_secret_key: str) -> dict[str, str]:
-    """Generate Terraform .tf.json for the given provisioning configuration.
-
-    Returns a ``{filename: content}`` map. Filenames have ``.tf.json``
-    extensions (Terraform recognises this suffix as JSON config). The VCL
-    snippet files keep their ``.vcl`` extension — they're referenced from
-    the JSON via ``file("${path.module}/X")`` and aren't Terraform config
-    themselves.
-    """
-    # 023: service_id ends up inside a JSON string. JSON encoding handles
-    # quotes/newlines, but the value also appears in the rendered
-    # instructions README (plain markdown) where a stray CR/LF would break
-    # the surrounding sentence. Strip both before any use.
+    """Generate Terraform .tf.json for the given provisioning configuration."""
     service_id = str(cfg.get("logging_service_id", "YOUR_SERVICE_ID")).replace("\r", "").replace("\n", "")
     endpoint_name = cfg.get("provisioning", {}).get("endpoint_name", "fastly_log_analysis")
     region = cfg.get("fos_region", "us-east-1")
     bucket = cfg.get("fos_bucket_name", "your-bucket-name")
     prefix = cfg.get("fos_prefix", "").strip("/")
-    # 022: log_period flows into a numeric position in the JSON. Cast to
-    # int with a safe fallback so attacker-supplied non-numerics can't
-    # smuggle a string where Terraform expects an int.
     try:
         period = int(cfg.get("log_period", 3600))
     except (TypeError, ValueError):
@@ -1755,7 +1624,6 @@ def generate_terraform(cfg: dict[str, Any], fos_access_key: str, fos_secret_key:
     cdn_domain = f"{cdn_prefix}.global.ssl.fastly.net"
     cdn_shield = cfg.get("cdn_shield", "iad-va-us")
     cdn_secret = cfg.get("cdn_secret", "replace-with-secure-secret")
-    # Prefer nested provisioning.* fields, fall back to legacy flat fields for backward compat
     prov = cfg.get("provisioning", {})
     sample_rate = prov.get("sample_rate") if "sample_rate" in prov else cfg.get("sample_rate", 100)
     sample_rate = int(sample_rate) if sample_rate is not None else 100
@@ -1763,10 +1631,8 @@ def generate_terraform(cfg: dict[str, Any], fos_access_key: str, fos_secret_key:
     edge_only = bool(edge_only)
     custom_condition = prov.get("custom_condition") if "custom_condition" in prov else cfg.get("custom_condition", "")
     custom_condition = (custom_condition or "").strip()
-    # Extract nested CMCD and Scoring config
     cmcd_cfg = cfg.get("cmcd", {})
     scoring_cfg = cfg.get("scoring", {})
-    # Construct robust declarative FeatureState to reuse all canonical VCL/endpoint rules
     fs_cfg = {
         "service_id": service_id,
         "log_period": period,
@@ -1792,16 +1658,12 @@ def generate_terraform(cfg: dict[str, Any], fos_access_key: str, fos_secret_key:
         "log_fields": cfg.get("log_fields") or {"schema_version": 2, "custom_fields": []},
     }
     state = FeatureState.from_config(fs_cfg)
-    # Use the same code to generate snippets, endpoints, and formats
     desired_snippets_list = desired_snippets(state)
     desired_endpoints = desired_logging_endpoints(state)
     desired_backends_list = desired_backends(state)
     cdn_vcl = load_vcl(rate_limiting=True)
     cond_parts = ["!segmented_caching.is_inner_req"]
     if edge_only:
-        # Restart-tolerant when scoring is enabled: scoring restarts the request
-        # (req.restarts 0→1), so gating on req.restarts == 0 would drop every
-        # scored request from the logs. Mirrors fastly_api._log_sampling_edge_clause.
         if scoring_cfg.get("enabled", False):
             cond_parts.append("fastly.ff.visits_this_service == 0")
         else:
@@ -1816,10 +1678,6 @@ def generate_terraform(cfg: dict[str, Any], fos_access_key: str, fos_secret_key:
     # ── 1. Companion VCL files (not Terraform config) ──────────────────────────
     files["cdn_proxy.vcl"] = cdn_vcl
     # ── 2. versions.tf.json — provider pinning ─────────────────────────────────
-    # Pin major versions so an upstream bump (Fastly v6, AWS v7) doesn't
-    # silently break customer ``terraform apply``. Pessimistic operator
-    # ``~> X.0`` allows minor/patch upgrades. If you bump these, also update
-    # tests/utils/test_terraform_gen.py.
     files["versions.tf.json"] = _dump(
         {
             "terraform": {
@@ -1833,22 +1691,9 @@ def generate_terraform(cfg: dict[str, Any], fos_access_key: str, fos_secret_key:
     )
     # ── 3. fos.tf.json — Object Storage bucket ─────────────────────────────────
     files["fos.tf.json"] = _dump(
-        {
-            "resource": {
-                "aws_s3_bucket": {
-                    "fos_bucket": {
-                        "bucket": _terraform_template_escape(bucket),
-                    },
-                },
-            },
-        }
+        {"resource": {"aws_s3_bucket": {"fos_bucket": {"bucket": _terraform_template_escape(bucket)}}}}
     )
     # ── 4. cdn_proxy.tf.json — CDN proxy service + dictionaries ────────────────
-    # Multi-occurrence sub-blocks like ``snippet`` must be JSON arrays. The
-    # ``${…}`` patterns inside string values are Terraform references that we
-    # want preserved verbatim — we do NOT pass these through
-    # ``_terraform_template_escape`` because we authored them, they're not
-    # user input. The escape is for fields whose values come from ``cfg``.
     cdn_snippets_blocks: list[dict] = []
     for name, type_, content, priority in _CDN_SNIPPETS:
         snip_filename = f"cdn_snippets/{name.replace('-', '_')}.vcl"
@@ -1877,17 +1722,8 @@ def generate_terraform(cfg: dict[str, Any], fos_access_key: str, fos_secret_key:
                 "between_bytes_timeout": 30000,
             }
         ],
-        "vcl": [
-            {
-                "name": "main",
-                "content": '${file("${path.module}/cdn_proxy.vcl")}',
-                "main": True,
-            }
-        ],
-        "dictionary": [
-            {"name": "fos_credentials", "write_only": True},
-            {"name": "cdn_auth", "write_only": True},
-        ],
+        "vcl": [{"name": "main", "content": '${file("${path.module}/cdn_proxy.vcl")}', "main": True}],
+        "dictionary": [{"name": "fos_credentials", "write_only": True}, {"name": "cdn_auth", "write_only": True}],
         "snippet": cdn_snippets_blocks,
     }
     if cdn_shield and cdn_shield.lower() != "none":
@@ -1917,20 +1753,15 @@ def generate_terraform(cfg: dict[str, Any], fos_access_key: str, fos_secret_key:
         }
     )
     # ── 5. logging_service.tf.json — Logging endpoint on existing service ──────
-    # Use logging-service-specific snippets (capture VCL for all stages)
     logging_service_snips = logging_service_snippets(state)
     logging_snippet_blocks: list[dict] = []
-    # Track which subroutines we've already written to avoid conflicts when
-    # multiple snippets target the same subroutine (e.g., recv + recv_reset)
     seen_filenames: set[str] = set()
     for snippet in logging_service_snips:
         subroutine = snippet.subroutine.replace("vcl_", "")
-        # Handle recv_reset specially (it's a recv snippet but needs a different filename)
         if snippet.name == "Fastly Log Analysis Reset Client IP":
             snip_filename = "capture_snippets/recv_reset.vcl"
         else:
             snip_filename = f"capture_snippets/{subroutine}.vcl"
-        # Avoid duplicate filenames (recv and recv_reset both target recv subroutine)
         if snip_filename not in seen_filenames:
             files[snip_filename] = snippet.body
             seen_filenames.add(snip_filename)
@@ -1948,11 +1779,7 @@ def generate_terraform(cfg: dict[str, Any], fos_access_key: str, fos_secret_key:
         if endpoint.name == "Fastly Log Analytics":
             cond_name = f"Log Sampling - {_terraform_template_escape(endpoint_name)}"
             condition_blocks.append(
-                {
-                    "name": cond_name,
-                    "statement": _terraform_template_escape(cond_stmt),
-                    "type": "RESPONSE",
-                }
+                {"name": cond_name, "statement": _terraform_template_escape(cond_stmt), "type": "RESPONSE"}
             )
             resp_cond = cond_name
             format_filename = "log_format.vcl"
@@ -2007,16 +1834,9 @@ def generate_terraform(cfg: dict[str, Any], fos_access_key: str, fos_secret_key:
     if logging_backends:
         logging_service_block["backend"] = logging_backends
     files["logging_service.tf.json"] = _dump(
-        {
-            "resource": {
-                "fastly_service_vcl": {"logging_service": logging_service_block},
-            },
-        }
+        {"resource": {"fastly_service_vcl": {"logging_service": logging_service_block}}}
     )
     # ── 6. instructions — companion README explaining the layout ──────────────
-    # JSON can't carry comments; the explanatory text that used to live as
-    # HCL banner comments now lives here. Customers read this before
-    # running ``terraform apply``.
     files["instructions"] = f"""\
 # Fastly Log Analysis Terraform Export
 

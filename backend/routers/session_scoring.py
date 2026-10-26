@@ -1,5 +1,3 @@
-"""Session-scoring admin, analytics, and session-detail router."""
-
 from __future__ import annotations
 
 import hashlib
@@ -92,7 +90,6 @@ _SECRET_KEYS = frozenset({"aes_key_hex", "request_secret"})
 
 
 def _enforce_scoring_service_scope(request: Request | None, service_id: str) -> None:
-    """Enforce analyst service-scope tenancy on session-scoring endpoints."""
     if request is not None and hasattr(request, "state"):
         analyst_session = getattr(request.state, "analyst_session", None)
         if analyst_session is None or hasattr(analyst_session, "service_ids"):
@@ -113,7 +110,6 @@ _inflight: dict[tuple, threading.Lock] = {}
 
 
 def _finalize_cached(value, *, is_cached: bool) -> object:
-    """Return *value* with `_is_cached` set and `_debug_*` gated on `DEBUG_RESPONSES`."""
     from backend.utils.telemetry import debug_envelope
 
     if not isinstance(value, dict):
@@ -122,7 +118,6 @@ def _finalize_cached(value, *, is_cached: bool) -> object:
 
 
 def _cached(key: tuple, producer):
-    """Return cached value if fresh, else produce + store with per-key in-flight collapse."""
     from backend.utils.telemetry import _CALLS as _telemetry_calls
     from backend.utils.telemetry import get_queries
 
@@ -171,7 +166,6 @@ def _cached(key: tuple, producer):
 
 
 def _bust_analytics_cache(service_id: str | None = None) -> None:
-    """Drop cached entries matching ``service_id`` (or all entries when ``None``)."""
     with _analytics_cache_lock:
         if service_id is None:
             _analytics_cache.clear()
@@ -200,7 +194,6 @@ def _read_matrix_file(path, label: str) -> dict | None:
 
 
 def _load_matrix(service_id: str) -> dict | None:
-    """Load the trained L2 transition matrix (tenant local -> FOS -> bundled default)."""
     from backend.provision.session_scoring_orchestrator import _MATRIX_PATH
 
     tenant_path = _tenant_matrix_path(service_id)
@@ -220,7 +213,6 @@ from backend.repositories import session_scoring as _scoring_repo
 
 
 def _isoformat_ts(rows: list[dict], *fields: str) -> list[dict]:
-    """Stringify DuckDB datetime columns in place via ``.isoformat()``."""
     for r in rows:
         for f in fields:
             v = r.get(f)
@@ -233,7 +225,6 @@ _table_columns_cache: _BoundedTTLCache = _BoundedTTLCache(maxsize=128, ttl_secon
 
 
 def _table_columns(service_id: str) -> set[str]:
-    """Column-name set for a service's logs table, or empty set on error."""
     import os as _os
 
     from backend.core.duckdb import _safe_table_name
@@ -260,13 +251,11 @@ _reconstruct_labeled_sessions_cache: _BoundedTTLCache = _BoundedTTLCache(maxsize
 
 
 def _labels_fingerprint(labels: list[dict]) -> str:
-    """Stable hash of (label.id, label.label) tuples for cache keying."""
     pairs = sorted((str(lbl.get("id", "")), str(lbl.get("label", ""))) for lbl in labels)
     return hashlib.sha256(json.dumps(pairs, separators=(",", ":")).encode()).hexdigest()
 
 
 def _reconstruct_labeled_sessions(service_id: str, labels: list[dict]) -> list[tuple[dict, str]]:
-    """Reconstruct labeled-session tuples for ``service_id`` (cached by label fingerprint)."""
     fp = _labels_fingerprint(labels)
     cache_key = (service_id, fp)
     cached = _reconstruct_labeled_sessions_cache.get(cache_key)
@@ -539,22 +528,18 @@ def scoring_status(
     return result
 
 
-# ── Labels (good / bad / neutral session tags) ──────────────────────────────
 _LABEL_PII_FIELDS = frozenset({"notes", "flagged_by", "sample_ip", "sample_ua", "sample_url"})
 
 
 def _project_label_for_analyst(label: dict) -> dict:
-    """Strip PII / operator-attribution fields from a scoring-label row."""
     return {k: v for k, v in label.items() if k not in _LABEL_PII_FIELDS}
 
 
 def _is_analyst_request(request: Request) -> bool:
-    """Canonical analyst-vs-admin detection via the middleware-stamped session."""
     return getattr(request.state, "analyst_session", None) is not None
 
 
 def _strip_pii_fields_for_analyst(request: Request, body) -> None:
-    """Neutralize operator-attribution / PII fields on a label write body for analysts."""
     if not _is_analyst_request(request):
         return
     fields = type(body).model_fields
@@ -569,7 +554,6 @@ def _finalize_label_write(request: Request, service_id: str, row: dict) -> dict:
 
 
 def _scoring_time_window(request: Request, since_hours: int) -> tuple[str, str | None]:
-    """SQL timestamp predicate for ``[now-since_hours, now]``, clamped to the analyst's window."""
     since_hours = int(since_hours)
     session = getattr(request.state, "analyst_session", None)
     if session is None:
@@ -680,7 +664,6 @@ def scoring_labels_delete(
     return result
 
 
-# ── Summary queries (top-flagged, distributions) ────────────────────────────
 def _prepare_scoring_query(
     request: Request, service_id: str, since_hours: int
 ) -> tuple[str, set[str], str, str | None]:
@@ -844,7 +827,6 @@ def scoring_health(
     return _cached(("scoring-health", service_id, since_hours, win_disc), _produce)
 
 
-# ── Matrix quality (ROC-AUC against accumulated labels) ─────────────────────
 _MIN_LABELS_PER_CLASS = 3
 
 
@@ -914,7 +896,6 @@ def scoring_evaluation(
     return _cached(cache_key, _produce)
 
 
-# ── ROC + PR curves against accumulated labels ──────────────────────────────
 @router.get("/{service_id}/scoring/curves", response_model=ScoringCurvesResponse, response_model_exclude_unset=True)
 def scoring_curves(
     service_id: str = Path(...),
@@ -979,7 +960,6 @@ def scoring_curves(
     return _cached(("scoring-curves", service_id, n_good, n_bad), _produce)
 
 
-# ── Threshold preview (counterfactual: at threshold X, what flips?) ─────────
 @router.get(
     "/{service_id}/scoring/threshold-preview",
     response_model=ScoringThresholdPreviewResponse,
@@ -1031,7 +1011,6 @@ def scoring_threshold_preview(
     return _cached(("threshold-preview", service_id, threshold_int, since_hours, n_good + n_bad, win_disc), _produce)
 
 
-# ── Admin / training endpoints (folded from session_scoring_admin) ──────────
 _L2_ENABLED_AT_KEY = "l2_enabled_at"
 _L2_ENFORCE_ENABLED_KEY = "l2_enforce_enabled"
 _fetch_session_events = _scoring_repo.fetch_session_events
@@ -1046,7 +1025,6 @@ _l2_enforce_cache: _BoundedTTLCache = _BoundedTTLCache(maxsize=512, ttl_seconds=
 
 
 def _l2_parse_epoch(raw: str | None) -> int | None:
-    """Parse a UNIX-epoch-seconds ConfigStore value; None when absent/non-numeric."""
     if not raw:
         return None
     s = str(raw).strip()
@@ -1054,7 +1032,6 @@ def _l2_parse_epoch(raw: str | None) -> int | None:
 
 
 def _l2_enforce_unavailable() -> dict:
-    """Inert L2-enforce/readiness block returned when ConfigStore state is unavailable."""
     return {
         "available": False,
         "enabled": False,
@@ -1078,7 +1055,6 @@ def _build_l2_enforce_block(
     l2_enabled_at_raw: str | None,
     now_epoch: int,
 ) -> dict:
-    """Pure builder for the L2-enforce/readiness block from raw ConfigStore values."""
     enabled = (l2_enforce_raw or "").strip() == "1"
     scoring_enabled_at = _l2_parse_epoch(scoring_enabled_at_raw)
     l2_enabled_at = _l2_parse_epoch(l2_enabled_at_raw)
@@ -1114,7 +1090,6 @@ def _build_l2_enforce_block(
 
 
 def _l2_get_item(config_store_id: str, key: str, token: str) -> str:
-    """GET one scoring_config item value; '' when the key is absent (404)."""
     from backend.core.fastly.client import fastly
 
     try:
@@ -1127,7 +1102,6 @@ def _l2_get_item(config_store_id: str, key: str, token: str) -> str:
 
 
 def _read_l2_enforce_state(service_id: str, config_store_id: str, token: str) -> dict:
-    """Cached read+build of the L2-enforce/readiness block under (service_id, store)."""
     import datetime as _dt
 
     cache_key = (service_id, config_store_id)
@@ -1187,7 +1161,6 @@ def _push_matrix_to_kv_if_configured(service_id: str, cfg: dict | None, matrix_d
 
 
 def l2_enforce_readiness_block(service_id: str) -> dict:
-    """Best-effort L2-enforce/readiness block for the scoring_health composite."""
     _cfg, scoring = _load_scoring_cfg(service_id)
     config_store_id = scoring.get("scoring_config_store_id")
     if not config_store_id:
@@ -1321,7 +1294,6 @@ def scoring_retrain(
     }
 
 
-# ── Session details (sid → page sequence) ────────────────────────────────────
 @router.get(
     "/{service_id}/scoring/sessions/{sid}/events",
     response_model=ScoringSessionEventsResponse,
@@ -1354,7 +1326,6 @@ def _record_scoring_audit(service_id: str, action: str, details: dict) -> None:
 
 
 def _require_scoring_config_store(service_id: str, token: str = "") -> tuple[dict, str, str]:
-    """Resolve ``(cfg, config_store_id, resolved_token)`` or raise HTTP 400."""
     cfg, scoring = _load_scoring_cfg(service_id)
     config_store_id = scoring.get("scoring_config_store_id")
     if not config_store_id:
@@ -1366,7 +1337,6 @@ def _require_scoring_config_store(service_id: str, token: str = "") -> tuple[dic
 
 
 def _upsert_config_store_item(api_token: str, store_id: str, key: str, value: str) -> None:
-    """Upsert a ConfigStore item via PATCH, falling back to POST on first write."""
     from backend.core.fastly.client import fastly
 
     try:
@@ -1461,7 +1431,6 @@ def scoring_enforce_threshold_put(
     }
 
 
-# ── L2 enforcement opt-in (operator decides when L2 joins the enforced score) ─
 @router.get(
     "/{service_id}/scoring/l2-enforce",
     response_model=ScoringL2EnforceState,
@@ -1535,7 +1504,6 @@ def scoring_l2_enforce_put(
     }
 
 
-# ── Recv exclusion regex & Enforce response status code ──────────────────────
 @router.get(
     "/{service_id}/scoring/exclude-regex",
     response_model=ScoringExcludeRegexState,
@@ -1739,7 +1707,6 @@ def scoring_enforce_status_code_put(
     )
 
 
-# ── Matrix version history + rollback ──────────────────────────────────────
 @router.get(
     "/{service_id}/scoring/matrix-versions",
     response_model=ScoringMatrixVersionsResponse,
@@ -1817,7 +1784,6 @@ def scoring_matrix_versions_restore(
     }
 
 
-# ── AES key rotation ────────────────────────────────────────────────────────
 @router.post(
     "/{service_id}/scoring/rotate-key",
     response_model=ScoringRotateKeyResponse,
@@ -1863,7 +1829,6 @@ def scoring_rotate_key(
     }
 
 
-# ── Operator audit log ──────────────────────────────────────────────────────
 @router.get(
     "/{service_id}/scoring/audit",
     response_model=ScoringAuditListResponse,
@@ -1883,7 +1848,6 @@ def scoring_audit_list(
     return {"audit": rows, "limit": limit}
 
 
-# ── Operator's chosen threshold (persisted, not enforced) ───────────────────
 @router.get(
     "/{service_id}/scoring/threshold",
     response_model=ScoringThresholdState,
@@ -1947,7 +1911,6 @@ def scoring_threshold_put(
     }
 
 
-# ── Per-reason AUC breakdown ────────────────────────────────────────────────
 @router.get(
     "/{service_id}/scoring/evaluation/per-reason",
     response_model=ScoringPerReasonResponse,
@@ -1984,7 +1947,6 @@ def scoring_evaluation_per_reason(
     return _cached(cache_key, _produce)
 
 
-# ── Composite dashboard endpoint ────────────────────────────────────────────
 def _build_scoring_config_bundle(service_id: str) -> dict:
     return {
         "threshold": scoring_threshold_get(service_id),
@@ -2073,7 +2035,6 @@ _CacheRegistry.register("session_scoring._scoring_pragma_cache", _scoring_pragma
 _CacheRegistry.register("session_scoring._scoring_svc_version_cache", _scoring_svc_version_cache)
 _CacheRegistry.register("session_scoring_admin._enforce_threshold_cache", _enforce_threshold_cache)
 _CacheRegistry.register("session_scoring_admin._l2_enforce_cache", _l2_enforce_cache)
-# ── Sessions endpoints (folded from backend.routers.sessions) ───────────────
 sessions_router = APIRouter(prefix="/api/sessions", tags=["sessions"], responses=DEFAULT_ERROR_RESPONSES)
 
 

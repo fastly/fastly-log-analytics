@@ -2,8 +2,10 @@
 
 import * as React from 'react'
 import { useQuery } from '@tanstack/react-query'
+import { flexRender, getCoreRowModel, useReactTable, type ColumnDef } from '@tanstack/react-table'
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
 import { Badge } from '@/components/ui/badge'
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Sparkline } from '@/app/dashboard/_sections/DashboardClient'
 import { ELAPSED_AGE_COMPACT, formatElapsed } from "@/lib/utils"
 import { useMounted } from '@/hooks/useBootstrap'
@@ -399,41 +401,7 @@ export function SystemHealthCard() {
             Per-service pool wait (Phase 6 telemetry)
           </summary>
           <div className="mt-2 overflow-x-auto">
-            <table className="w-full text-xs sm:text-[11px] tabular-nums">
-              <thead className="text-muted-foreground">
-                <tr>
-                  <th className="text-left font-medium pr-3 pb-1">Service</th>
-                  <th className="text-right font-medium px-2 pb-1">In-use</th>
-                  <th className="text-right font-medium px-2 pb-1">Idle</th>
-                  <th className="text-right font-medium px-2 pb-1">Samples</th>
-                  <th className="text-right font-medium px-2 pb-1">p50</th>
-                  <th className="text-right font-medium px-2 pb-1">p95</th>
-                  <th className="text-right font-medium px-2 pb-1">p99</th>
-                  <th className="text-right font-medium px-2 pb-1">max</th>
-                  {/* SRE-12 + SRE-16 */}
-                  <th className="text-right font-medium px-2 pb-1">503s</th>
-                  <th className="text-right font-medium px-2 pb-1">Warmed</th>
-                </tr>
-              </thead>
-              <tbody>
-                {pools.map(p => (
-                  <tr key={p.service} className="border-t border-muted/40">
-                    <td className="pr-3 py-1 font-mono">{p.service.slice(0, 22)}</td>
-                    <td className="text-right px-2 py-1">{p.in_use}/{p.max_size}</td>
-                    <td className="text-right px-2 py-1">{p.idle}</td>
-                    <td className="text-right px-2 py-1">{p.wait?.count ?? 0}</td>
-                    <td className="text-right px-2 py-1">{p.wait?.p50_ms?.toFixed(1) ?? '–'}</td>
-                    <td className="text-right px-2 py-1">{p.wait?.p95_ms?.toFixed(1) ?? '–'}</td>
-                    <td className="text-right px-2 py-1">{p.wait?.p99_ms?.toFixed(1) ?? '–'}</td>
-                    <td className="text-right px-2 py-1">{p.wait?.max_ms?.toFixed(1) ?? '–'}</td>
-                    <td className={`text-right px-2 py-1 ${(p.saturated_rejects_total ?? 0) > 0 ? 'text-amber-700 dark:text-amber-500' : ''}`}>
-                      {p.saturated_rejects_total ?? 0}
-                    </td>
-                    <td className="text-right px-2 py-1">{p.last_warmed_at ? p.last_warmed_at.slice(11, 19) : '–'}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            <PoolWaitTable pools={pools} />
             <p className="mt-1 text-[11px] sm:text-[10px] text-muted-foreground">
               Wait-time samples over the last ~1024 checkouts per service. ADR-03 escalation threshold: p95 &gt; 50ms ⇒ consider separate-process cron isolation.
               503s = pool-saturation rejects (SRE-12); Warmed = last writer-driven view rebuild (SRE-16).
@@ -454,5 +422,50 @@ export function SystemHealthCard() {
         </p>
       )}
     </AnalyticsCard>
+  )
+}
+
+function PoolWaitTable({ pools }: { pools: PoolStats[] }) {
+  const columns = React.useMemo<ColumnDef<PoolStats>[]>(
+    () => [
+      { id: 'service', header: () => <span className="text-left font-medium pr-3 pb-1">Service</span>, cell: ({ row }) => <span className="pr-3 py-1 font-mono">{row.original.service.slice(0, 22)}</span> },
+      { id: 'in_use', header: () => <span className="text-right font-medium px-2 pb-1">In-use</span>, cell: ({ row }) => <span className="text-right px-2 py-1">{row.original.in_use}/{row.original.max_size}</span> },
+      { id: 'idle', header: () => <span className="text-right font-medium px-2 pb-1">Idle</span>, cell: ({ row }) => <span className="text-right px-2 py-1">{row.original.idle}</span> },
+      { id: 'samples', header: () => <span className="text-right font-medium px-2 pb-1">Samples</span>, cell: ({ row }) => <span className="text-right px-2 py-1">{row.original.wait?.count ?? 0}</span> },
+      { id: 'p50', header: () => <span className="text-right font-medium px-2 pb-1">p50</span>, cell: ({ row }) => <span className="text-right px-2 py-1">{row.original.wait?.p50_ms?.toFixed(1) ?? '–'}</span> },
+      { id: 'p95', header: () => <span className="text-right font-medium px-2 pb-1">p95</span>, cell: ({ row }) => <span className="text-right px-2 py-1">{row.original.wait?.p95_ms?.toFixed(1) ?? '–'}</span> },
+      { id: 'p99', header: () => <span className="text-right font-medium px-2 pb-1">p99</span>, cell: ({ row }) => <span className="text-right px-2 py-1">{row.original.wait?.p99_ms?.toFixed(1) ?? '–'}</span> },
+      { id: 'max', header: () => <span className="text-right font-medium px-2 pb-1">max</span>, cell: ({ row }) => <span className="text-right px-2 py-1">{row.original.wait?.max_ms?.toFixed(1) ?? '–'}</span> },
+      { id: '503s', header: () => <span className="text-right font-medium px-2 pb-1">503s</span>, cell: ({ row }) => <span className={`text-right px-2 py-1 ${(row.original.saturated_rejects_total ?? 0) > 0 ? 'text-amber-700 dark:text-amber-500' : ''}`}>{row.original.saturated_rejects_total ?? 0}</span> },
+      { id: 'warmed', header: () => <span className="text-right font-medium px-2 pb-1">Warmed</span>, cell: ({ row }) => <span className="text-right px-2 py-1">{row.original.last_warmed_at ? row.original.last_warmed_at.slice(11, 19) : '–'}</span> },
+    ],
+    [],
+  )
+  const table = useReactTable({ data: pools, columns, getCoreRowModel: getCoreRowModel() })
+  return (
+    <Table className="w-full text-xs sm:text-[11px] tabular-nums">
+      <TableHeader className="text-muted-foreground">
+        {table.getHeaderGroups().map((hg) => (
+          <TableRow key={hg.id}>
+            {hg.headers.map((header) => (
+              <TableHead key={header.id} className={header.column.id === 'service' ? 'text-left font-medium pr-3 pb-1 h-auto' : 'text-right font-medium px-2 pb-1 h-auto'}>
+                {flexRender(header.column.columnDef.header, header.getContext())}
+              </TableHead>
+            ))}
+          </TableRow>
+        ))}
+      </TableHeader>
+      <TableBody>
+        {table.getRowModel().rows.map((row) => (
+          <TableRow key={row.original.service} className="border-t border-muted/40">
+            {row.getVisibleCells().map((cell) => (
+              <TableCell key={cell.id} className={cell.column.id === 'service' ? 'pr-3 py-1 font-mono' : 'text-right px-2 py-1'}>
+                {flexRender(cell.column.columnDef.cell, cell.getContext())}
+              </TableCell>
+            ))}
+          </TableRow>
+        ))}
+      </TableBody>
+    </Table>
   )
 }

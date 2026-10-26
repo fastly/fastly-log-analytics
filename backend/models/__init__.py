@@ -10,7 +10,10 @@ from backend.models import admin as _admin  # noqa: F401
 from backend.models import analytics as _analytics  # noqa: F401
 from backend.models import common as _common  # noqa: F401
 from backend.models import dashboard as _dashboard  # noqa: F401
-from backend.models import services as _services  # noqa: F401
+
+_services = _common
+services = _common
+insights = _analytics
 
 sys.modules["backend.models.errors"] = _base
 sys.modules["backend.models.security"] = _dashboard
@@ -19,6 +22,8 @@ sys.modules["backend.models.origin"] = _analytics
 sys.modules["backend.models.network"] = _analytics
 sys.modules["backend.models.performance"] = _analytics
 sys.modules["backend.models.rum"] = _analytics
+sys.modules["backend.models.insights"] = _analytics
+sys.modules["backend.models.services"] = _common
 sys.modules["backend.models.share_admin"] = _admin
 sys.modules["backend.models.provision"] = _services
 sys.modules["backend.models.service"] = _services
@@ -28,15 +33,17 @@ _aliases = getattr(_backend_pkg, "_MODULE_ALIASES", None)
 if isinstance(_aliases, dict):
     _aliases.update(
         {
-            "backend.routers.admin.downloads": "backend.routers.admin.ingest",
+            "backend.routers.admin.downloads": "backend.routers.admin.compaction",
             "backend.routers.admin_queries": "backend.routers.admin.health",
             "backend.routers.performance": "backend.routers.dashboard",
             "backend.models.network": "backend.models.analytics",
             "backend.models.performance": "backend.models.analytics",
             "backend.models.rum": "backend.models.analytics",
             "backend.models.share_admin": "backend.models.admin",
-            "backend.models.provision": "backend.models.services",
-            "backend.models.service": "backend.models.services",
+            "backend.models.insights": "backend.models.analytics",
+            "backend.models.services": "backend.models.common",
+            "backend.models.provision": "backend.models.common",
+            "backend.models.service": "backend.models.common",
             "backend.provision.utils": "backend.provision.cli",
             "backend.provision.declarative.iac_reconciler": "backend.provision.declarative.reconciler",
             "backend.provision.cmcd_fields": "backend.provision.orchestrator",

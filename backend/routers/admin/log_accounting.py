@@ -37,7 +37,7 @@ from backend.utils.bounded_cache import BoundedTTLCache
 from backend.utils.router_utils import raise_internal
 from backend.utils.telemetry import track_query
 
-from .high_scale import router
+from .health import router
 
 logger = logging.getLogger(__name__)
 
@@ -277,8 +277,8 @@ def _try_row_counts_from_rollup(
         from datetime import timedelta
 
         from backend.core import duckdb as _ddb
+        from backend.core.duckdb import escape_sql_literal
         from backend.core.iceberg.buffer import buffer_files
-        from backend.utils.sql_validator import escape_sql_literal
 
         active_hour_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
         live_start = max(start, active_hour_dt)

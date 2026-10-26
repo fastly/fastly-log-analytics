@@ -40,9 +40,9 @@ from datetime import UTC, datetime, timedelta, timezone
 
 import duckdb
 import pytest
+from tests._helpers.rollups import noop_lock as _noop_lock
 
 from backend.repositories._base import QueryRunner
-from tests._helpers.rollups import noop_lock as _noop_lock
 
 # ── Harness ────────────────────────────────────────────────────────────────
 
@@ -75,6 +75,7 @@ _BASE_COLS_SQL = (
 
 def _seed_base_table(con: duckdb.DuckDBPyConnection, rows: list[dict], table: str = "logs") -> None:
     """Create the base log table the writer + live control both read."""
+    con.execute("SET threads = 1")
     con.execute(f"CREATE TABLE {table} ({_BASE_COLS_SQL})")
     for r in rows:
         con.execute(

@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import collections
+import itertools
 import json
 import logging
 import os
 import sys
 import threading
 import time
+import weakref
 from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import Executor, Future, ThreadPoolExecutor
 from contextlib import contextmanager
@@ -17,6 +20,7 @@ from pathlib import Path
 from typing import Any, Literal, TypeVar
 from uuid import uuid4
 
+import cachetools
 import duckdb
 import structlog
 from opentelemetry import metrics, trace
@@ -916,12 +920,7 @@ class InstrumentedDuckDBConnection:
     # ── internals ───────────────────────────────────────────────────────────
 
     def _invoke(self, method_name: str, query: Any, args: tuple, kwargs: dict) -> Any:
-        from backend.core.query_registry import query_registry
-
         sql_text = str(query)
-        # Per-connection short id so ops can correlate two queries on the
-        # same physical pool slot. id() % 10000 is stable for the
-        # connection's lifetime and never exposed across processes.
         slot = None
         if self._service_id is not None:
             slot = f"{self._service_id}#{id(self._con) % 10000:04d}"
@@ -951,8 +950,6 @@ class InstrumentedDuckDBConnection:
             peak = _probe_duckdb_memory(self._con)
             _deregister(qid, err, peak_memory_mb=peak)
             raise
-        # The result is a relation / cursor — wrap so terminal fetch
-        # methods drive deregistration with the right timing.
         return _InstrumentedResult(result, qid, con_ref)
 
 
@@ -1115,10 +1112,19 @@ class _InstrumentedRecordReader:
             logger.debug("__del__: self._complete failed (ignored)", exc_info=True)
 
 
-def _safe_weakref(con: Any) -> Callable[[], Any] | None:
-    from backend.core.query_registry import _safe_weakref as _qr_safe_weakref
+def _safe_weakref(obj: Any) -> Callable[[], Any] | None:
+    try:
+        return weakref.ref(obj)
+    except TypeError:
+        try:
+            ref = obj
 
-    return _qr_safe_weakref(con)
+            def _strong_ref() -> Any:
+                return ref
+
+            return _strong_ref
+        except Exception:
+            return None
 
 
 def _parse_memory_mb(value: Any) -> float | None:
@@ -1184,8 +1190,6 @@ def _deregister(qid: int, error: BaseException | None, *, peak_memory_mb: float 
     if qid < 0:
         return
     try:
-        from backend.core.query_registry import query_registry
-
         query_registry.deregister(qid, error=error, peak_memory_mb=peak_memory_mb)
     except Exception:
         logger.debug("live-registry deregister failed", exc_info=True)
@@ -1249,12 +1253,505 @@ from backend.utils.telemetry import (  # noqa: E402, F401, I001
     yield_to_api,
 )
 
+
+# ── Query Registry (folded from backend.core.query_registry) ─────────────────
+
+_SQL_TRUNCATE = 4096
+_ERR_TRUNCATE = 512
+_HISTORY_CAP = 400
+_SLOW_QUERY_PERSIST_THRESHOLD_MS = float(os.environ.get("QUERY_REGISTRY_PERSIST_THRESHOLD_MS", "100"))
+_SLOW_QUERY_PERSIST_DISABLED = os.environ.get("QUERY_REGISTRY_PERSIST_DISABLED", "").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+try:
+    _POOL_QUERY_TIMEOUT_S = max(1.0, float(os.environ.get("DUCKDB_POOL_QUERY_TIMEOUT_S", "120")))
+except (TypeError, ValueError):
+    _POOL_QUERY_TIMEOUT_S = 120.0
+_POOL_QUERY_WATCH_INTERVAL_S = 1.0
+_seq = itertools.count(1)
+_REGISTRY_DISABLED = os.environ.get("QUERY_REGISTRY_DISABLED", "").lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+if _REGISTRY_DISABLED:
+    logger.warning(
+        "query_registry hot-path DISABLED via QUERY_REGISTRY_DISABLED env. "
+        "Live Query Monitor will show no queries until you unset it and restart."
+    )
+
+_conn_to_query: dict[int, int] = {}
+_conn_to_query_lock = threading.Lock()
+
+
+@dataclass(slots=True)
+class ActiveQuery:
+    query_id: int
+    db_type: str
+    sql: str
+    attribution: Attribution
+    service_id: str | None
+    started_at_mono: float
+    started_at_utc: float
+    _con_ref: Callable[[], Any] | None = None
+    _con_id: int | None = None
+    cancelled_at: float | None = None
+
+
+@dataclass(slots=True)
+class CompletedQuery:
+    query_id: int
+    db_type: str
+    sql: str
+    attribution: Attribution
+    service_id: str | None
+    started_at_utc: float
+    ended_at_utc: float
+    duration_ms: float
+    outcome: str
+    error_type: str | None = None
+    error_message: str | None = None
+    peak_memory_mb: float | None = None
+
+
+_scrub_secrets = scrub_secrets
+
+
+def _truncate(text: str, cap: int) -> str:
+    if len(text) <= cap:
+        return text
+    return text[:cap] + f"… [+{len(text) - cap} chars]"
+
+
+_metric_lock = threading.Lock()
+_metric_active_count: Any = None
+_metric_duration_ms: Any = None
+_metric_cancelled_total: Any = None
+
+
+def _ensure_metrics() -> None:
+    global _metric_active_count, _metric_duration_ms, _metric_cancelled_total
+    if _metric_active_count is not None:
+        return
+    with _metric_lock:
+        if _metric_active_count is not None:
+            return
+        try:
+            meter = metrics.get_meter("backend.query_registry")
+            _metric_active_count = meter.create_up_down_counter(
+                "app.active_queries.count",
+                description="Currently-executing SQL queries by db/kind.",
+            )
+            _metric_duration_ms = meter.create_histogram(
+                "app.query_duration_ms",
+                unit="ms",
+                description="Wall-clock duration of completed SQL queries.",
+            )
+            _metric_cancelled_total = meter.create_counter(
+                "app.queries_cancelled_total",
+                description="Admin-initiated query cancellations.",
+            )
+        except Exception:
+            logger.debug("OTel meter creation failed; metrics disabled", exc_info=True)
+
+
+def _metric_safe(emit: Callable[[], None]) -> None:
+    try:
+        _ensure_metrics()
+        if _metric_active_count is None:
+            return
+        emit()
+    except Exception:
+        logger.debug("query_registry metric emit failed", exc_info=True)
+
+
+class _CancelledKeyCache(cachetools.LRUCache[str, bool]):
+    """Bounded LRU set/cache of cancelled request keys using cachetools."""
+
+    def append(self, key: str) -> None:
+        self[key] = True
+
+    def extend(self, keys: Any) -> None:
+        for key in keys:
+            self[key] = True
+
+
+class QueryRegistry:
+    def __init__(self) -> None:
+        self._queries: dict[int, ActiveQuery] = {}
+        self._history: collections.deque[CompletedQuery] = collections.deque(maxlen=_HISTORY_CAP)
+        self._cancelled_keys: _CancelledKeyCache = _CancelledKeyCache(maxsize=512)
+
+    def register(
+        self,
+        db_type: str,
+        sql: str,
+        *,
+        service_id: str | None = None,
+        con: Any | None = None,
+        pool_slot: str | None = None,
+    ) -> int:
+        if _REGISTRY_DISABLED:
+            return -1
+        try:
+            qid = next(_seq)
+            qualname, file_line = _capture_caller()
+            base = current_attribution.get() or Attribution.system()
+            attribution = base.with_caller(qualname, file_line).with_pool_slot(pool_slot)
+            con_id = id(con) if con is not None else None
+            sql_str = sql if isinstance(sql, str) else str(sql)
+            active = ActiveQuery(
+                query_id=qid,
+                db_type=db_type,
+                sql=_truncate(_scrub_secrets(sql_str), _SQL_TRUNCATE),
+                attribution=attribution,
+                service_id=service_id,
+                started_at_mono=time.monotonic(),
+                started_at_utc=time.time(),
+                _con_ref=_safe_weakref(con) if con is not None else None,
+                _con_id=con_id,
+            )
+            if (
+                db_type == "DuckDB"
+                and attribution.cancel_key
+                and attribution.cancel_key in self._cancelled_keys
+                and not sql_str.lstrip().upper().startswith("DROP ")
+            ):
+                active.cancelled_at = time.time()
+            self._queries[qid] = active
+            if con_id is not None:
+                with _conn_to_query_lock:
+                    _conn_to_query[con_id] = qid
+            _metric_safe(lambda: _metric_active_count.add(1, {"db": db_type, "kind": attribution.kind}))
+            return qid
+        except Exception:
+            logger.debug("query_registry.register failed", exc_info=True)
+            return -1
+
+    def deregister(
+        self,
+        qid: int,
+        *,
+        error: BaseException | None = None,
+        peak_memory_mb: float | None = None,
+    ) -> None:
+        if qid < 0:
+            return
+        try:
+            active = self._queries.pop(qid, None)
+            if active is None:
+                return
+            if active._con_id is not None:
+                with _conn_to_query_lock:
+                    if _conn_to_query.get(active._con_id) == qid:
+                        del _conn_to_query[active._con_id]
+
+            ended = time.time()
+            duration_ms = round((time.monotonic() - active.started_at_mono) * 1000, 2)
+            if active.cancelled_at is not None:
+                outcome = "cancelled"
+            elif error is not None:
+                outcome = "error"
+            else:
+                outcome = "ok"
+            err_type = type(error).__name__ if error is not None else None
+            err_msg: str | None = None
+            if error is not None:
+                err_msg = _truncate(_scrub_secrets(str(error)), _ERR_TRUNCATE)
+
+            self._history.append(
+                CompletedQuery(
+                    query_id=active.query_id,
+                    db_type=active.db_type,
+                    sql=active.sql,
+                    attribution=active.attribution,
+                    service_id=active.service_id,
+                    started_at_utc=active.started_at_utc,
+                    ended_at_utc=ended,
+                    duration_ms=duration_ms,
+                    outcome=outcome,
+                    error_type=err_type,
+                    error_message=err_msg,
+                    peak_memory_mb=peak_memory_mb,
+                )
+            )
+
+            if (
+                not _SLOW_QUERY_PERSIST_DISABLED
+                and duration_ms >= _SLOW_QUERY_PERSIST_THRESHOLD_MS
+                and active.service_id
+            ):
+                try:
+                    _persist_slow_query(active, ended, duration_ms, outcome, err_type, err_msg, peak_memory_mb)
+                except Exception:
+                    logger.debug("query_registry slow-query persist failed", exc_info=True)
+
+            _metric_safe(lambda: _metric_active_count.add(-1, {"db": active.db_type, "kind": active.attribution.kind}))
+            _metric_safe(
+                lambda: _metric_duration_ms.record(
+                    duration_ms,
+                    {
+                        "db": active.db_type,
+                        "kind": active.attribution.kind,
+                        "outcome": outcome,
+                    },
+                )
+            )
+        except Exception:
+            logger.debug("query_registry.deregister failed", exc_info=True)
+
+    def expire_pool_queries(self, *, now_mono: float | None = None) -> int:
+        now = time.monotonic() if now_mono is None else now_mono
+        now_wall = time.time()
+        for active in tuple(self._queries.values()):
+            if active.cancelled_at is not None and (now_wall - active.cancelled_at) >= 5.0:
+                self.deregister(active.query_id)
+
+        expired = [
+            active.query_id
+            for active in tuple(self._queries.values())
+            if active.db_type == "DuckDB"
+            and active.attribution.pool_slot is not None
+            and active.cancelled_at is None
+            and now - active.started_at_mono >= _POOL_QUERY_TIMEOUT_S
+        ]
+        interrupted = 0
+        for qid in expired:
+            if self.cancel_query(qid, admin_id="pool-timeout") == "cancelled":
+                interrupted += 1
+                logger.warning("interrupting pooled DuckDB query after %.1fs", _POOL_QUERY_TIMEOUT_S)
+        return interrupted
+
+    def cancel_query(
+        self, qid: int, *, admin_id: str | None = None
+    ) -> Literal["cancelled", "not_found", "already_finished", "connection_gone"]:
+        active = self._queries.get(qid)
+        if active is None:
+            return "not_found"
+        if active._con_ref is None:
+            return "already_finished"
+        with _conn_to_query_lock:
+            if active._con_id is None or _conn_to_query.get(active._con_id) != qid:
+                return "already_finished"
+            con = active._con_ref()
+            if con is None:
+                return "connection_gone"
+            try:
+                con.interrupt()
+            except Exception:
+                logger.debug("interrupt() raised", exc_info=True)
+                return "connection_gone"
+            active.cancelled_at = time.time()
+            target_kind = active.attribution.kind
+            target_principal = active.attribution.principal_id()
+            target_caller = active.attribution.caller_file
+            target_service = active.service_id
+            target_db = active.db_type
+            target_duration_ms = round((time.monotonic() - active.started_at_mono) * 1000, 2)
+
+        try:
+            audit_log.warning(
+                "query_cancel",
+                admin_id=admin_id,
+                query_id=qid,
+                target_kind=target_kind,
+                target_principal=target_principal,
+                target_caller=target_caller,
+                target_service=target_service,
+                target_db=target_db,
+                target_duration_ms=target_duration_ms,
+            )
+        except Exception:
+            logger.debug("query_cancel audit log failed", exc_info=True)
+        _metric_safe(lambda: _metric_cancelled_total.add(1, {"db": target_db, "kind": target_kind}))
+        return "cancelled"
+
+    def is_query_cancelled(self, qid: int) -> bool:
+        if qid < 0:
+            return False
+        active = self._queries.get(qid)
+        return bool(active is not None and active.cancelled_at is not None)
+
+    def cancel_for_key(self, cancel_key: str | None, *, admin_id: str = "client-disconnect") -> int:
+        if not cancel_key:
+            return 0
+        self._cancelled_keys[cancel_key] = True
+        interrupted = 0
+        for active in tuple(self._queries.values()):
+            if (
+                active.db_type == "DuckDB"
+                and active.cancelled_at is None
+                and active.attribution.cancel_key == cancel_key
+                and self.cancel_query(active.query_id, admin_id=admin_id) == "cancelled"
+            ):
+                interrupted += 1
+        return interrupted
+
+    def snapshot(
+        self,
+        *,
+        since_seq: int = 0,
+        full_sql: bool = False,
+        include_completed: bool = False,
+        all_active: bool = False,
+        cold_limit: int | None = None,
+    ) -> dict[str, Any]:
+        now_mono = time.monotonic()
+        active_rows: list[dict] = [
+            _row_for_active(q, now_mono, full_sql)
+            for q in list(self._queries.values())
+            if all_active or q.query_id > since_seq
+        ]
+        completed_rows: list[dict] = []
+        if include_completed:
+            completed_rows = [_row_for_completed(c, full_sql) for c in list(self._history) if c.query_id > since_seq]
+            if cold_limit is not None and cold_limit > 0 and since_seq == 0 and len(completed_rows) > cold_limit:
+                completed_rows = completed_rows[-cold_limit:]
+        last_seq_active = max((r["query_id"] for r in active_rows), default=since_seq)
+        last_seq_completed = max((r["query_id"] for r in completed_rows), default=since_seq)
+        return {
+            "last_seq": max(last_seq_active, last_seq_completed, since_seq),
+            "active": active_rows,
+            "completed": completed_rows,
+        }
+
+    def get(self, qid: int) -> ActiveQuery | None:
+        return self._queries.get(qid)
+
+    def summary(self) -> dict[str, Any]:
+        active = list(self._queries.values())
+        by_db: dict[str, int] = collections.Counter(q.db_type for q in active)
+        longest_ms = 0.0
+        if active:
+            now = time.monotonic()
+            longest_ms = round(max((now - q.started_at_mono) * 1000.0 for q in active), 2)
+        return {
+            "active_total": len(active),
+            "by_db_type": dict(by_db),
+            "longest_ms": longest_ms,
+        }
+
+
+def _persist_slow_query(
+    active: ActiveQuery,
+    ended: float,
+    duration_ms: float,
+    outcome: str,
+    err_type: str | None,
+    err_msg: str | None,
+    peak_memory_mb: float | None,
+) -> None:
+    from backend.core import metadata as _meta_mod
+
+    attr = active.attribution
+    _meta_mod.insert_slow_query(
+        active.service_id or "",
+        {
+            "query_id": active.query_id,
+            "db_type": active.db_type,
+            "service_id": active.service_id,
+            "started_at_utc": active.started_at_utc,
+            "ended_at_utc": ended,
+            "duration_ms": duration_ms,
+            "outcome": outcome,
+            "sql_preview": active.sql[:200],
+            "sql_full": active.sql,
+            "sql_len": len(active.sql),
+            "attr_kind": attr.kind,
+            "attr_label": attr.display_label(),
+            "attr_principal_id": attr.principal_id(),
+            "attr_caller_qualname": attr.caller_qualname,
+            "attr_caller_file": attr.caller_file,
+            "attr_request_path": attr.request_path,
+            "attr_request_id": attr.request_id,
+            "attr_cron_job": attr.cron_job,
+            "attr_cron_run_id": attr.cron_run_id,
+            "attr_pool_slot": attr.pool_slot,
+            "error_type": err_type,
+            "error_message": err_msg,
+            "peak_memory_mb": peak_memory_mb,
+        },
+    )
+
+
+def _attribution_payload(attr: Attribution) -> dict[str, Any]:
+    return {
+        "kind": attr.kind,
+        "label": attr.display_label(),
+        "principal_id": attr.principal_id(),
+        "caller_qualname": attr.caller_qualname,
+        "caller_file": attr.caller_file,
+        "request_path": attr.request_path,
+        "request_id": attr.request_id,
+        "cron_job": attr.cron_job,
+        "cron_run_id": attr.cron_run_id,
+        "pool_slot": attr.pool_slot,
+    }
+
+
+def _row_for_active(q: ActiveQuery, now_mono: float, full_sql: bool) -> dict[str, Any]:
+    return {
+        "query_id": q.query_id,
+        "db_type": q.db_type,
+        "sql_preview": q.sql[:200],
+        "sql": q.sql if full_sql else None,
+        "sql_len": len(q.sql),
+        "attribution": _attribution_payload(q.attribution),
+        "service_id": q.service_id,
+        "started_at_utc": q.started_at_utc,
+        "duration_ms": round((now_mono - q.started_at_mono) * 1000, 2),
+        "cancellable": q._con_ref is not None,
+        "cancelled_at": q.cancelled_at,
+    }
+
+
+def _row_for_completed(c: CompletedQuery, full_sql: bool) -> dict[str, Any]:
+    return {
+        "query_id": c.query_id,
+        "db_type": c.db_type,
+        "sql_preview": c.sql[:200],
+        "sql": c.sql if full_sql else None,
+        "sql_len": len(c.sql),
+        "attribution": _attribution_payload(c.attribution),
+        "service_id": c.service_id,
+        "started_at_utc": c.started_at_utc,
+        "ended_at_utc": c.ended_at_utc,
+        "duration_ms": c.duration_ms,
+        "outcome": c.outcome,
+        "error_type": c.error_type,
+        "error_message": c.error_message,
+        "peak_memory_mb": c.peak_memory_mb,
+    }
+
+
+query_registry = QueryRegistry()
+
+
+def _pool_query_watchdog() -> None:
+    while True:
+        try:
+            query_registry.expire_pool_queries()
+        except Exception:
+            logger.debug("pooled-query watchdog failed", exc_info=True)
+        time.sleep(_POOL_QUERY_WATCH_INTERVAL_S)
+
+
+threading.Thread(
+    target=_pool_query_watchdog,
+    name="duckdb-pool-query-watchdog",
+    daemon=True,
+).start()
+
 _this_module = sys.modules[__name__]
 for _alias in (
     "high_scale_sections",
     "query_attribution",
     "request_metrics",
     "query_instrumentation",
+    "query_registry",
 ):
     sys.modules[f"backend.core.{_alias}"] = _this_module
 sys.modules["backend.request_metrics_observer"] = _this_module
@@ -1266,6 +1763,7 @@ if _core_pkg is not None:
         "query_attribution",
         "request_metrics",
         "query_instrumentation",
+        "query_registry",
     ):
         setattr(_core_pkg, _alias, _this_module)
 
@@ -1278,6 +1776,7 @@ if _backend_pkg is not None:
                 "backend.core.query_attribution": "backend.core.request_telemetry",
                 "backend.core.request_metrics": "backend.core.request_telemetry",
                 "backend.core.query_instrumentation": "backend.core.request_telemetry",
+                "backend.core.query_registry": "backend.core.request_telemetry",
                 "backend.request_metrics_observer": "backend.core.request_telemetry",
                 **{
                     f"backend.utils.{_submod_name}": "backend.utils.telemetry"

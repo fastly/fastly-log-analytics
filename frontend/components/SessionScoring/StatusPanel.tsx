@@ -3,6 +3,7 @@
 import * as React from 'react'
 import { useState, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { flexRender, getCoreRowModel, useReactTable, type ColumnDef } from '@tanstack/react-table'
 import { AlertTriangle, Archive, Check, Clock, Database, ExternalLink, FileCode, Info, Layers, LineChart, ListChecks, Loader2, Lock, Pencil, Power, PowerOff, RefreshCw, ShieldAlert, ShieldCheck, ShieldOff, Trash2, TrendingUp, X } from 'lucide-react'
 import { ComplianceHelp, deriveScorerSeries, invalidateServiceScoringQueries, PerReasonAucHelp, RocPrCurvesHelp, ScoreDistHelp, ScorerErrorsHelp, scorerHourlyLayout, ScorerLatencyHelp, scoringAnalyticsCompositeKey, scoringConfigCompositeKey, StatusPanelHelp, useScorerTimeseries, useScoringQuery, usToMs, type LatencyResponse, type LatencyRow } from '@/components/SessionScoring/ScoringAdminPanels'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
@@ -15,6 +16,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Switch } from '@/components/ui/switch'
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { AnalyticsCard, CardErrorState, type AnalyticsCardError } from '@/components/AnalyticsCard'
 import { PlotlyChart } from '@/components/PlotlyChart'
@@ -694,6 +696,124 @@ const TABLE_LABELS: Record<string, { label: string; sub: string }> = {
 const fmtRetentionDays = (n: number): string => (n <= 0 ? 'disabled' : n === 1 ? '1 day' : `${n} days`)
 const LOCKED_REASON = 'cron_sync.delete_after=false on this service. Raw .gz files stay in FOS forever, so ingested_files is the only thing stopping the daily full_sync from re-ingesting every aged-out file. Cleanup of this table is force-disabled regardless of the configured retention.'
 
+type MetadataStorageRow = { name: string; trimmable: boolean; stat: TableStat }
+
+function MetadataStorageTable({
+  rows,
+  retention,
+  dbBytes,
+}: {
+  rows: MetadataStorageRow[]
+  retention: StorageResponse['retention']
+  dbBytes: number | null
+}) {
+  const columns = React.useMemo<ColumnDef<MetadataStorageRow>[]>(
+    () => [
+      {
+        id: 'table',
+        header: 'Table',
+        cell: ({ row }) => {
+          const r = row.original
+          const { label, sub } = TABLE_LABELS[r.name] ?? { label: r.name, sub: '' }
+          return (
+            <>
+              <div className="text-sm font-medium">{label}</div>
+              <div className="text-[11px] sm:text-[10px] text-muted-foreground font-mono">{r.name}</div>
+              {sub && <div className="text-[11px] sm:text-[10px] text-muted-foreground mt-0.5">{sub}</div>}
+            </>
+          )
+        },
+      },
+      {
+        id: 'rows',
+        header: 'Rows',
+        cell: ({ row }) => formatCountMaybe(row.original.stat.rows) ?? '–',
+      },
+      {
+        id: 'size',
+        header: 'Size',
+        cell: ({ row }) => formatBytesTiered(row.original.stat.bytes, { maxUnit: 'GB' }),
+      },
+      {
+        id: 'policy',
+        header: 'Trim policy',
+        cell: ({ row }) => {
+          const r = row.original
+          return r.trimmable ? (
+            <Badge variant="secondary" className="text-[11px] sm:text-[10px]">
+              {fmtRetentionDays(
+                r.name === 'usage_log'
+                  ? retention.usage_log_days
+                  : r.name === 'ingested_files'
+                    ? retention.ingested_files_days
+                    : retention.cron_runs_days,
+              )}
+            </Badge>
+          ) : (
+            <span className="text-xs text-muted-foreground" title="Not subject to retention cleanup — these are user/admin data, not append-only telemetry.">
+              —
+            </span>
+          )
+        },
+      },
+    ],
+    [retention],
+  )
+  const table = useReactTable({ data: rows, columns, getCoreRowModel: getCoreRowModel() })
+  return (
+    <Table className="w-full text-sm">
+      <TableHeader className="bg-muted/50">
+        {table.getHeaderGroups().map((hg) => (
+          <TableRow key={hg.id} className="text-left">
+            {hg.headers.map((header) => (
+              <TableHead
+                key={header.id}
+                className={
+                  header.column.id === 'rows' || header.column.id === 'size'
+                    ? 'px-3 py-2 font-medium text-right'
+                    : header.column.id === 'policy'
+                      ? 'px-3 py-2 font-medium text-center'
+                      : 'px-3 py-2 font-medium'
+                }
+              >
+                {flexRender(header.column.columnDef.header, header.getContext())}
+              </TableHead>
+            ))}
+          </TableRow>
+        ))}
+      </TableHeader>
+      <TableBody>
+        {table.getRowModel().rows.map((row) => (
+          <TableRow key={row.original.name} className="border-t">
+            {row.getVisibleCells().map((cell) => (
+              <TableCell
+                key={cell.id}
+                className={
+                  cell.column.id === 'rows' || cell.column.id === 'size'
+                    ? 'px-3 py-2 text-right tabular-nums align-top'
+                    : cell.column.id === 'policy'
+                      ? 'px-3 py-2 text-center align-top'
+                      : 'px-3 py-2'
+                }
+              >
+                {flexRender(cell.column.columnDef.cell, cell.getContext())}
+              </TableCell>
+            ))}
+          </TableRow>
+        ))}
+      </TableBody>
+      <tfoot className="bg-muted/30 border-t">
+        <TableRow>
+          <TableCell className="px-3 py-2 font-medium text-xs uppercase tracking-wider">Total DB file</TableCell>
+          <TableCell className="px-3 py-2" />
+          <TableCell className="px-3 py-2 text-right font-semibold tabular-nums">{formatBytesTiered(dbBytes, { maxUnit: 'GB' })}</TableCell>
+          <TableCell className="px-3 py-2" />
+        </TableRow>
+      </tfoot>
+    </Table>
+  )
+}
+
 export function MetadataStorageCard() {
   const qc = useQueryClient()
   const mounted = useMounted()
@@ -796,49 +916,7 @@ export function MetadataStorageCard() {
           </div>
 
           <div className="border rounded-lg overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead className="bg-muted/50">
-                <tr className="text-left">
-                  <th className="px-3 py-2 font-medium">Table</th>
-                  <th className="px-3 py-2 font-medium text-right">Rows</th>
-                  <th className="px-3 py-2 font-medium text-right">Size</th>
-                  <th className="px-3 py-2 font-medium text-center">Trim policy</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((r) => {
-                  const { label, sub } = TABLE_LABELS[r.name] ?? { label: r.name, sub: '' }
-                  return (
-                    <tr key={r.name} className="border-t">
-                      <td className="px-3 py-2">
-                        <div className="text-sm font-medium">{label}</div>
-                        <div className="text-[11px] sm:text-[10px] text-muted-foreground font-mono">{r.name}</div>
-                        {sub && <div className="text-[11px] sm:text-[10px] text-muted-foreground mt-0.5">{sub}</div>}
-                      </td>
-                      <td className="px-3 py-2 text-right tabular-nums align-top">{formatCountMaybe(r.stat.rows) ?? '–'}</td>
-                      <td className="px-3 py-2 text-right tabular-nums align-top">{formatBytesTiered(r.stat.bytes, { maxUnit: 'GB' })}</td>
-                      <td className="px-3 py-2 text-center align-top">
-                        {r.trimmable ? (
-                          <Badge variant="secondary" className="text-[11px] sm:text-[10px]">
-                            {fmtRetentionDays(r.name === 'usage_log' ? data.retention.usage_log_days : r.name === 'ingested_files' ? data.retention.ingested_files_days : data.retention.cron_runs_days)}
-                          </Badge>
-                        ) : (
-                          <span className="text-xs text-muted-foreground" title="Not subject to retention cleanup — these are user/admin data, not append-only telemetry.">—</span>
-                        )}
-                      </td>
-                    </tr>
-                  )
-                })}
-              </tbody>
-              <tfoot className="bg-muted/30 border-t">
-                <tr>
-                  <td className="px-3 py-2 font-medium text-xs uppercase tracking-wider">Total DB file</td>
-                  <td className="px-3 py-2" />
-                  <td className="px-3 py-2 text-right font-semibold tabular-nums">{formatBytesTiered(data.db_bytes, { maxUnit: 'GB' })}</td>
-                  <td className="px-3 py-2" />
-                </tr>
-              </tfoot>
-            </table>
+            <MetadataStorageTable rows={rows} retention={data.retention} dbBytes={data.db_bytes} />
           </div>
         </div>
       ) : null}

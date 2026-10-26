@@ -872,7 +872,7 @@ if "backend" in _sys.modules:
                 "backend.core.rollups.overview": "backend.core.rollups.recompute",
                 "backend.core.rollups.sessions": "backend.core.rollups.recompute",
                 "backend.core._log_fields_data": "backend.core.log_fields",
-                "backend.scoring.evaluate": "backend.scoring.features",
-                "backend.scoring.matrix": "backend.scoring.features",
+                "backend.scoring.evaluate": "backend.scoring",
+                "backend.scoring.matrix": "backend.scoring",
             }
         )

@@ -1,18 +1,64 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import os
+import threading
+import uuid
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime
+from types import SimpleNamespace
+from typing import Any
+from unittest.mock import MagicMock
+from uuid import UUID, uuid4
 
+import boto3
 import pytest
+from backend.high_scale._common import KeysetCursor, raw_query_producer
+from backend.high_scale.archive_models import ArchiveArtifact, ArchiveManifest, ArchiveSourceObject
+from backend.high_scale.archive_publication import ArchivePublication, InMemoryObjectStore, PublicationState
+from backend.high_scale.archive_writer import write_batch_archive_checkpoint
+from backend.high_scale.orchestration import HighScaleWorkerCoordinator
+from backend.high_scale.publication import (
+    _DOMAIN_COLUMNS,
+    BatchManifest,
+    ClickHouseBatchAdapter,
+    ClickHousePublication,
+    HighScaleBatch,
+    InMemoryBatchManifestStore,
+    InsertReceipt,
+    PartialInsert,
+    PostgresBatchManifestStore,
+    PublicationStatus,
+    _rows_for_domain,
+    row_matches_serving_domain,
+)
 from backend.high_scale.source_discovery import (
     INITIAL_SOURCE_CURSOR,
+    MAX_SOURCE_PAGE_SIZE,
+    RUM_REINSPECTION_INTERVAL,
     TERMINAL_SOURCE_CURSOR_PREFIX,
+    S3SourceObjectLister,
+    S3SourceObjectReader,
     SourceObjectDescriptor,
     SourceObjectMissingError,
     SourceObjectPage,
 )
+from botocore.stub import Stubber
+from psycopg_pool import ConnectionPool
 
-from backend.high_scale.orchestration import HighScaleWorkerCoordinator
-from tests.high_scale.conftest import HighScaleLedger, OwnershipStore
+from backend.high_scale.postgres_control import PostgresControlPlane
+from tests.high_scale.conftest import (
+    HighScaleLedger,
+    OwnershipStore,
+)
+from tests.high_scale.conftest import (
+    InMemoryManifestCatalog as _Catalog,
+)
+from tests.high_scale.conftest import (
+    make_test_archive_manifest as _raw_query_manifest,
+)
+from tests.high_scale.conftest import (
+    sha256_checksum as _checksum,
+)
 
 
 @dataclass
@@ -87,15 +133,10 @@ def _coordinator(*, owner: str = "high_scale", fail_once: bool = False):
     if owner == "high_scale":
         ownership.advance_cursor("svc", "cursor-0", expected_owner=owner, expected_epoch=1, domain="request")
     ledger = HighScaleLedger()
-    lister = _Lister(
-        SourceObjectPage(
-            (SourceObjectDescriptor("raw/one.gz", "sha256:one", 4, "v1"),),
-            "cursor-1",
-        )
-    )
+    page = SourceObjectPage((SourceObjectDescriptor("raw/one.gz", "sha256:one", 4, "v1"),), "cursor-1")
     controller = _Controller(ledger, fail_once=fail_once)
     coordinator = HighScaleWorkerCoordinator(
-        lister=lister,
+        lister=_Lister(page),
         reader=_Reader(),
         controller=controller,  # type: ignore[arg-type]
         ownership=ownership,
@@ -108,57 +149,40 @@ def _coordinator(*, owner: str = "high_scale", fail_once: bool = False):
 
 def test_page_discovers_bounded_objects_and_advances_durable_cursor() -> None:
     coordinator, ownership, _, _ = _coordinator()
-
     result = coordinator.run_page(service_id="svc", domain="request")
-
-    assert result.cursor == "cursor-0"
-    assert result.next_cursor == "cursor-1"
-    assert result.discovered == 1
-    assert result.processed == 1
+    assert (result.cursor, result.next_cursor, result.discovered, result.processed) == ("cursor-0", "cursor-1", 1, 1)
     assert ownership.source_cursor_for("svc", "request") == "cursor-1"
 
 
 def test_standard_owner_cannot_consume_high_scale_sources() -> None:
     coordinator, _, _, _ = _coordinator(owner="standard")
-
     with pytest.raises(RuntimeError, match="not the owner"):
         coordinator.run_page(service_id="svc", domain="request")
 
 
 def test_duplicate_retry_is_acknowledged_without_duplicate_ingest() -> None:
     coordinator, _, _, controller = _coordinator()
-
     first = coordinator.run_page(service_id="svc", domain="request")
     second = coordinator.run_page(service_id="svc", domain="request")
-
-    assert first.processed == 1
-    assert second.duplicates == 1
-    assert controller.calls == 1
+    assert (first.processed, second.duplicates, controller.calls) == (1, 1, 1)
 
 
 def test_failed_acknowledgement_can_be_retried_after_lease_recovery() -> None:
     coordinator, _, ledger, controller = _coordinator(fail_once=True)
-
     first = coordinator.run_page(service_id="svc", domain="request")
     assert first.failed == 1
     source = ledger.source("svc", "raw/one.gz")
     assert source is not None and source.status == "discovered"
 
     second = coordinator.run_page(service_id="svc", domain="request")
-    assert second.processed == 1
-    assert controller.calls == 2
+    assert (second.processed, controller.calls) == (1, 2)
 
 
 def test_missing_source_is_recorded_durably_and_does_not_block_the_cursor() -> None:
     ownership = OwnershipStore()
     ownership.initialize("svc", owner="high_scale", source_cursor="cursor-0")
     ledger = HighScaleLedger()
-    lister = _Lister(
-        SourceObjectPage(
-            (SourceObjectDescriptor("raw/gone.gz", "sha256:gone", 4, "v1"),),
-            "cursor-1",
-        )
-    )
+    lister = _Lister(SourceObjectPage((SourceObjectDescriptor("raw/gone.gz", "sha256:gone", 4, "v1"),), "cursor-1"))
     controller = _Controller(ledger)
     coordinator = HighScaleWorkerCoordinator(
         lister=lister,
@@ -171,21 +195,15 @@ def test_missing_source_is_recorded_durably_and_does_not_block_the_cursor() -> N
     )
 
     result = coordinator.run_page(service_id="svc", domain="request")
-
-    assert result.missing == 1
-    assert result.failed == 0
-    assert result.processed == 0
-    assert controller.calls == 0
+    assert (result.missing, result.failed, result.processed, controller.calls) == (1, 0, 0, 0)
     source = ledger.source("svc", "raw/gone.gz")
-    assert source is not None
-    assert source.status == "source_missing"
+    assert source is not None and source.status == "source_missing"
     assert "raw/gone.gz" in (source.last_error or "")
     assert ownership.source_cursor_for("svc", "request") == "cursor-1"
 
     lister.page = SourceObjectPage((SourceObjectDescriptor("raw/gone.gz", "sha256:gone", 4, "v1"),), "cursor-1")
     second = coordinator.run_page(service_id="svc", domain="request", cursor="cursor-1")
-    assert second.duplicates == 1
-    assert second.missing == 0
+    assert (second.duplicates, second.missing) == (1, 0)
 
 
 def test_expired_claims_are_recovered_behind_the_listing_cursor() -> None:
@@ -193,8 +211,7 @@ def test_expired_claims_are_recovered_behind_the_listing_cursor() -> None:
     ledger.discover("svc", "request", "raw/old.gz", "sha256:old", size_bytes=4, version="v1")
     ledger.claim("svc", "raw/old.gz", "previous-worker", lease_seconds=1)
     ledger._con.execute(
-        "UPDATE source_objects SET lease_until=? WHERE service_id=? AND object_key=?",
-        (0, "svc", "raw/old.gz"),
+        "UPDATE source_objects SET lease_until=? WHERE service_id=? AND object_key=?", (0, "svc", "raw/old.gz")
     )
     ledger._con.commit()
     ledger.expired_claims = lambda service_id, domain, limit=None: [  # type: ignore[attr-defined]
@@ -202,23 +219,20 @@ def test_expired_claims_are_recovered_behind_the_listing_cursor() -> None:
     ]
 
     result = coordinator.run_page(service_id="svc", domain="request")
-
-    assert result.processed == 2
-    assert controller.calls == 2
-    assert ledger.source("svc", "raw/old.gz").status == "acknowledged"
+    assert (result.processed, controller.calls, ledger.source("svc", "raw/old.gz").status) == (2, 2, "acknowledged")
 
 
 def test_final_page_persists_terminal_cursor_for_new_objects_only() -> None:
     ownership = OwnershipStore()
     ownership.initialize("svc", owner="high_scale", source_cursor="cursor-0")
     ledger = HighScaleLedger()
+    terminal_cursor = f"{TERMINAL_SOURCE_CURSOR_PREFIX}raw/one.gz"
     lister = _TerminalAwareLister(
         {
             INITIAL_SOURCE_CURSOR: SourceObjectPage(
-                (SourceObjectDescriptor("raw/one.gz", "sha256:one", 4, "v1"),),
-                None,
+                (SourceObjectDescriptor("raw/one.gz", "sha256:one", 4, "v1"),), None
             ),
-            f"{TERMINAL_SOURCE_CURSOR_PREFIX}raw/one.gz": SourceObjectPage((), None),
+            terminal_cursor: SourceObjectPage((), None),
         },
         [],
     )
@@ -234,10 +248,7 @@ def test_final_page_persists_terminal_cursor_for_new_objects_only() -> None:
 
     first = coordinator.run_page(service_id="svc", domain="request")
     second = coordinator.run_page(service_id="svc", domain="request")
-
-    terminal_cursor = f"{TERMINAL_SOURCE_CURSOR_PREFIX}raw/one.gz"
-    assert first.next_cursor == terminal_cursor
-    assert second.next_cursor == terminal_cursor
+    assert first.next_cursor == second.next_cursor == terminal_cursor
     assert lister.cursors == [INITIAL_SOURCE_CURSOR, terminal_cursor]
     assert ownership.source_cursor_for("svc", "request") == terminal_cursor
 
@@ -249,12 +260,10 @@ def test_domains_keep_independent_source_cursors() -> None:
     lister = _DomainLister(
         {
             ("request", INITIAL_SOURCE_CURSOR): SourceObjectPage(
-                (SourceObjectDescriptor("raw/request.gz", "sha256:req", 4, "v1"),),
-                "request-next",
+                (SourceObjectDescriptor("raw/request.gz", "sha256:req", 4, "v1"),), "request-next"
             ),
             ("rum_vitals", INITIAL_SOURCE_CURSOR): SourceObjectPage(
-                (SourceObjectDescriptor("raw/rum/vitals.gz", "sha256:rum", 4, "v1"),),
-                "rum-next",
+                (SourceObjectDescriptor("raw/rum/vitals.gz", "sha256:rum", 4, "v1"),), "rum-next"
             ),
         },
         [],
@@ -271,7 +280,6 @@ def test_domains_keep_independent_source_cursors() -> None:
 
     coordinator.run_page(service_id="svc", domain="request")
     coordinator.run_page(service_id="svc", domain="rum_vitals")
-
     assert ownership.source_cursor_for("svc", "request") == "request-next"
     assert ownership.source_cursor_for("svc", "rum_vitals") == "rum-next"
     assert lister.cursors == [("request", INITIAL_SOURCE_CURSOR), ("rum_vitals", INITIAL_SOURCE_CURSOR)]
@@ -279,19 +287,11 @@ def test_domains_keep_independent_source_cursors() -> None:
 
 class _ThreadSafeControl:
     def __init__(self) -> None:
-        import threading
-
         self._lock = threading.Lock()
         self.cursor: str | None = "cursor-0"
 
     def owner(self, service_id: str):
-        @dataclass
-        class _Owner:
-            current_owner: str = "high_scale"
-            owner_epoch: int = 1
-            source_cursor: str | None = None
-
-        return _Owner()
+        return SimpleNamespace(current_owner="high_scale", owner_epoch=1, source_cursor=None)
 
     def source_cursor_for(self, service_id: str, domain: str) -> str | None:
         return self.cursor
@@ -300,12 +300,7 @@ class _ThreadSafeControl:
         return None
 
     def claim_source(self, *args: object, **kwargs: object):
-        @dataclass
-        class _Claim:
-            claimed: bool = True
-            lease_generation: int = 1
-
-        return _Claim()
+        return SimpleNamespace(claimed=True, lease_generation=1)
 
     def source(self, service_id: str, object_key: str):
         raise KeyError(object_key)
@@ -316,12 +311,9 @@ class _ThreadSafeControl:
 
 
 class _BarrierReader:
-    """Each read blocks until ``parties`` reads are in flight at once, so a
-    serial reader breaks the barrier (timeout) and reports failures."""
+    """Each read blocks until ``parties`` reads are in flight at once."""
 
     def __init__(self, parties: int) -> None:
-        import threading
-
         self.barrier = threading.Barrier(parties, timeout=5)
 
     def read_source_object(self, service_id: str, domain: str, object_key: str) -> bytes:
@@ -343,20 +335,17 @@ def test_page_objects_are_processed_concurrently_with_pool_backed_control_plane(
     coordinator = HighScaleWorkerCoordinator(
         lister=_AnyPageLister(SourceObjectPage(objects, "cursor-1")),
         reader=_BarrierReader(4),
-        controller=_CountingController(),  # type: ignore[arg-type]
+        controller=_CountingController(),
         ownership=None,
         ledger=None,
-        worker_id="worker",
-        control_plane=control,  # type: ignore[arg-type]
+        worker_id="worker",  # type: ignore[arg-type]
+        control_plane=control,
         page_size=10,
-        object_concurrency=4,
+        object_concurrency=4,  # type: ignore[arg-type]
     )
 
     result = coordinator.run_page(service_id="svc", domain="request")
-
-    assert result.processed == 4
-    assert result.failed == 0
-    assert control.cursor == "cursor-1"
+    assert (result.processed, result.failed, control.cursor) == (4, 0, "cursor-1")
 
 
 class _ContendedControl(_ThreadSafeControl):
@@ -367,24 +356,14 @@ class _ContendedControl(_ThreadSafeControl):
         self.claimed: set[str] = set()
 
     def claim_source(self, service_id: str, object_key: str, *args: object, **kwargs: object):
-        @dataclass
-        class _Claim:
-            claimed: bool
-            lease_generation: int = 1
-
         if object_key in self.finished:
             self.claimed.add(object_key)
             raise ValueError(f"source object is not claimable: {object_key}")
-        return _Claim(object_key not in self.held)
+        return SimpleNamespace(claimed=object_key not in self.held, lease_generation=1)
 
     def source(self, service_id: str, object_key: str):
         if object_key in self.finished and object_key in self.claimed:
-
-            @dataclass
-            class _Source:
-                status: str = "acknowledged"
-
-            return _Source()
+            return SimpleNamespace(status="acknowledged")
         raise KeyError(object_key)
 
 
@@ -410,21 +389,17 @@ def test_claims_lost_to_sibling_replicas_do_not_block_the_cursor() -> None:
     coordinator = HighScaleWorkerCoordinator(
         lister=_AnyPageLister(SourceObjectPage(objects, "cursor-1")),
         reader=_Reader(),
-        controller=controller,  # type: ignore[arg-type]
+        controller=controller,
         ownership=None,
         ledger=None,
-        worker_id="worker",
-        control_plane=control,  # type: ignore[arg-type]
-        page_size=10,
+        worker_id="worker",  # type: ignore[arg-type]
+        control_plane=control,
+        page_size=10,  # type: ignore[arg-type]
     )
 
     result = coordinator.run_page(service_id="svc", domain="request")
-
     assert controller.keys == ["raw/mine.gz"]
-    assert result.processed == 1
-    assert result.duplicates == 2
-    assert result.failed == 0
-    assert control.cursor == "cursor-1"
+    assert (result.processed, result.duplicates, result.failed, control.cursor) == (1, 2, 0, "cursor-1")
 
 
 def test_unexpected_unclaimable_source_still_blocks_the_cursor() -> None:
@@ -436,18 +411,16 @@ def test_unexpected_unclaimable_source_still_blocks_the_cursor() -> None:
     coordinator = HighScaleWorkerCoordinator(
         lister=_AnyPageLister(SourceObjectPage((SourceObjectDescriptor("raw/x.gz", "sha256:x", 4, "v1"),), "cursor-1")),
         reader=_Reader(),
-        controller=_CountingController(),  # type: ignore[arg-type]
+        controller=_CountingController(),
         ownership=None,
-        ledger=None,
+        ledger=None,  # type: ignore[arg-type]
         worker_id="worker",
-        control_plane=control,  # type: ignore[arg-type]
-        page_size=10,
+        control_plane=control,
+        page_size=10,  # type: ignore[arg-type]
     )
 
     result = coordinator.run_page(service_id="svc", domain="request")
-
-    assert result.failed == 1
-    assert control.cursor == "cursor-0"
+    assert (result.failed, control.cursor) == (1, "cursor-0")
 
 
 def test_object_concurrency_rejects_non_positive_values() -> None:
@@ -455,9 +428,9 @@ def test_object_concurrency_rejects_non_positive_values() -> None:
         HighScaleWorkerCoordinator(
             lister=_AnyPageLister(SourceObjectPage((), None)),
             reader=_Reader(),
-            controller=_CountingController(),  # type: ignore[arg-type]
+            controller=_CountingController(),
             ownership=None,
-            ledger=None,
+            ledger=None,  # type: ignore[arg-type]
             worker_id="worker",
             object_concurrency=0,
         )
@@ -466,22 +439,9 @@ def test_object_concurrency_rejects_non_positive_values() -> None:
 # ── Merged from test_source_discovery.py ──
 
 
-from backend.high_scale.source_discovery import (
-    MAX_SOURCE_PAGE_SIZE,
-    S3SourceObjectLister,
-)
-
-
 class _DummyPaginator:
     def paginate(self, **kwargs):
-        return [
-            {
-                "Contents": [
-                    {"Key": "raw/request/a.gz", "ETag": '"etag-a"', "Size": 10},
-                ],
-                "NextToken": "cursor-1",
-            }
-        ]
+        return [{"Contents": [{"Key": "raw/request/a.gz", "ETag": '"etag-a"', "Size": 10}], "NextToken": "cursor-1"}]
 
 
 class _DummyS3Client:
@@ -493,8 +453,7 @@ def test_s3_source_object_lister_lists_bounded_page() -> None:
     lister = S3SourceObjectLister(_DummyS3Client(), bucket="fos-bucket")
     page = lister.list_source_objects("svc", "request", page_size=10, cursor=None)
     assert page == SourceObjectPage(
-        (SourceObjectDescriptor("raw/request/a.gz", "etag:etag-a", 10, '"etag-a"'),),
-        "cursor-1",
+        (SourceObjectDescriptor("raw/request/a.gz", "etag:etag-a", 10, '"etag-a"'),), "cursor-1"
     )
 
 
@@ -505,10 +464,6 @@ def test_s3_source_object_lister_rejects_unbounded_page_size() -> None:
 
 
 # ── Merged from test_s3_source_adapters.py ──
-
-from backend.high_scale.source_discovery import (
-    S3SourceObjectReader,
-)
 
 
 class _Body:
@@ -525,13 +480,7 @@ class _Paginator:
         return iter(
             [
                 {
-                    "Contents": [
-                        {
-                            "Key": "tenant/raw/request/one.gz",
-                            "ETag": '"source-etag"',
-                            "Size": 7,
-                        }
-                    ],
+                    "Contents": [{"Key": "tenant/raw/request/one.gz", "ETag": '"source-etag"', "Size": 7}],
                     "NextToken": "next-page",
                 }
             ]
@@ -555,69 +504,50 @@ class _Client:
 def test_s3_lister_uses_bounded_paginated_listing_and_source_identity() -> None:
     client = _Client()
     lister = S3SourceObjectLister(client, bucket="archive-bucket", prefix="tenant")
-
     page = lister.list_source_objects("svc", "request", page_size=25, cursor="cursor-1")
 
     assert page.next_cursor == "next-page"
-    assert page.objects[0].object_key == "tenant/raw/request/one.gz"
-    assert page.objects[0].checksum == "etag:source-etag"
-    assert page.objects[0].size_bytes == 7
+    assert (page.objects[0].object_key, page.objects[0].checksum, page.objects[0].size_bytes) == (
+        "tenant/raw/request/one.gz",
+        "etag:source-etag",
+        7,
+    )
     request = client.paginator.requests[0]
-    assert request["Bucket"] == "archive-bucket"
-    assert request["Prefix"] == "tenant/raw/request/"
+    assert (request["Bucket"], request["Prefix"]) == ("archive-bucket", "tenant/raw/request/")
     assert request["PaginationConfig"] == {"PageSize": 25, "StartingToken": "cursor-1"}
 
 
 def test_s3_reader_reads_the_exact_listed_key() -> None:
     client = _Client()
     reader = S3SourceObjectReader(client, bucket="archive-bucket")
-
     assert reader.read_source_object("svc", "request", "tenant/raw/request/one.gz") == b"payload"
     assert client.get_object_calls == [{"Bucket": "archive-bucket", "Key": "tenant/raw/request/one.gz"}]
 
 
 def test_s3_lister_treats_initial_cursor_as_start_of_bucket() -> None:
     client = _Client()
-    lister = S3SourceObjectLister(client, bucket="archive-bucket")
-
-    lister.list_source_objects("svc", "request", page_size=25, cursor=INITIAL_SOURCE_CURSOR)
-
+    S3SourceObjectLister(client, bucket="archive-bucket").list_source_objects(
+        "svc", "request", page_size=25, cursor=INITIAL_SOURCE_CURSOR
+    )
     assert client.paginator.requests[0]["PaginationConfig"] == {"PageSize": 25}
 
 
 def test_s3_lister_uses_start_after_for_terminal_cursor() -> None:
     client = _Client()
-    lister = S3SourceObjectLister(client, bucket="archive-bucket")
-
-    lister.list_source_objects(
-        "svc",
-        "request",
-        page_size=25,
-        cursor=f"{TERMINAL_SOURCE_CURSOR_PREFIX}raw/request/last.gz",
+    S3SourceObjectLister(client, bucket="archive-bucket").list_source_objects(
+        "svc", "request", page_size=25, cursor=f"{TERMINAL_SOURCE_CURSOR_PREFIX}raw/request/last.gz"
     )
-
     request = client.paginator.requests[0]
     assert request["PaginationConfig"] == {"PageSize": 25}
     assert request["StartAfter"] == "raw/request/last.gz"
 
 
 def test_s3_lister_ignores_a_terminal_cursor_outside_its_own_prefix() -> None:
-    """Regression test: a cursor key from a different domain's prefix (e.g.
-    ``rum_vitals`` inheriting a stale ``raw/request/...`` cursor from the
-    owner-level fallback bug) must never be sent as StartAfter — S3-
-    compatible backends can silently return zero objects for a StartAfter
-    outside the Prefix, permanently starving discovery with no error.
-    Dropping it is always safe: it just means one extra full-prefix LIST."""
+    """Regression test: a cursor key from a different domain's prefix must never be sent as StartAfter."""
     client = _Client()
-    lister = S3SourceObjectLister(client, bucket="archive-bucket")
-
-    lister.list_source_objects(
-        "svc",
-        "rum_vitals",
-        page_size=25,
-        cursor=f"{TERMINAL_SOURCE_CURSOR_PREFIX}raw/request/last.gz",
+    S3SourceObjectLister(client, bucket="archive-bucket").list_source_objects(
+        "svc", "rum_vitals", page_size=25, cursor=f"{TERMINAL_SOURCE_CURSOR_PREFIX}raw/request/last.gz"
     )
-
     request = client.paginator.requests[0]
     assert request["Prefix"] == "raw/rum/"
     assert "StartAfter" not in request
@@ -625,15 +555,10 @@ def test_s3_lister_ignores_a_terminal_cursor_outside_its_own_prefix() -> None:
 
 # ── Merged from test_pagination.py ──
 
-from datetime import UTC, datetime
-
-from backend.high_scale._common import KeysetCursor
-
 
 def test_cursor_is_signed_and_service_bound() -> None:
     cursor = KeysetCursor(datetime(2026, 9, 1, tzinfo=UTC), "event-2", "svc", "request")
     token = cursor.encode(b"secret")
-
     assert KeysetCursor.decode(token, b"secret") == cursor
     with pytest.raises(ValueError, match="cursor"):
         KeysetCursor.decode(token, b"wrong")
@@ -641,41 +566,24 @@ def test_cursor_is_signed_and_service_bound() -> None:
 
 # ── Merged from test_late_key_backscan.py ──
 
-from unittest.mock import MagicMock
-
 
 def test_late_key_backscan_ingests_late_key_without_duplication() -> None:
     """An object that lands behind the cursor (within trailing-minute window) is ingested by back-scan and never double counted."""
-    # Scenario:
-    # Key A (minute 15): raw/request/year=2026/month=10/day=09/hour=12/minute=15/121500-a.log.gz
-    # Key B (minute 16): raw/request/year=2026/month=10/day=09/hour=12/minute=16/121600-b.log.gz
-    # Cursor has advanced past B.
-    # Late Key C (minute 15): raw/request/year=2026/month=10/day=09/hour=12/minute=15/121550-c.log.gz
     key_a = "raw/request/year=2026/month=10/day=09/hour=12/minute=15/121500-a.log.gz"
     key_b = "raw/request/year=2026/month=10/day=09/hour=12/minute=16/121600-b.log.gz"
     key_c_late = "raw/request/year=2026/month=10/day=09/hour=12/minute=15/121550-c.log.gz"
 
     lister = MagicMock()
-    # First regular page: lists A and B
     lister.list_source_objects.return_value = SourceObjectPage(
-        objects=(
-            SourceObjectDescriptor(key_a, "chk_a", 100),
-            SourceObjectDescriptor(key_b, "chk_b", 100),
-        ),
+        objects=(SourceObjectDescriptor(key_a, "chk_a", 100), SourceObjectDescriptor(key_b, "chk_b", 100)),
         next_cursor=key_b,
     )
-
     reader = MagicMock()
     reader.read_source_object.return_value = b"log payload"
 
     control = MagicMock()
     control.owner.return_value = MagicMock(current_owner="high_scale", owner_epoch=1)
-    # Simulate already-terminal check: Key A and B become terminal after first ingestion
-    terminal_keys = set()
-
-    def mock_already_terminal(service_id: str, obj_key: str):
-        return obj_key in terminal_keys
-
+    terminal_keys: set[str] = set()
     controller = MagicMock()
     ingested_keys: list[str] = []
 
@@ -687,56 +595,37 @@ def test_late_key_backscan_ingests_late_key_without_duplication() -> None:
         return MagicMock(sources_count=len(sources_payloads))
 
     controller.ingest_batch.side_effect = mock_ingest_batch
-
-    # Claim source returns claimed=True if not in terminal_keys
-    def mock_claim(service_id, obj_key, worker_id, **kwargs):
-        if obj_key in terminal_keys:
-            return MagicMock(claimed=False)
-        return MagicMock(claimed=True)
-
-    control.claim_source.side_effect = mock_claim
+    control.claim_source.side_effect = lambda service_id, obj_key, worker_id, **kwargs: MagicMock(
+        claimed=obj_key not in terminal_keys
+    )
     control.source.side_effect = lambda svc, k: MagicMock(status="archived" if k in terminal_keys else "discovered")
 
     ownership = MagicMock()
     ownership.get.return_value = MagicMock(current_owner="high_scale", owner_epoch=1)
-    ledger = MagicMock()
-
     coordinator = HighScaleWorkerCoordinator(
         lister=lister,
         reader=reader,
         controller=controller,
         ownership=ownership,
-        ledger=ledger,
+        ledger=MagicMock(),
         worker_id="test-worker",
         control_plane=control,
         page_size=10,
     )
 
-    # 1. Run normal page -> processes A and B
     run1 = coordinator.run_page(service_id="svc_test", domain="request")
-    assert run1.processed == 2
-    assert run1.failed == 0
-    assert key_a in terminal_keys
-    assert key_b in terminal_keys
+    assert (run1.processed, run1.failed) == (2, 0)
+    assert key_a in terminal_keys and key_b in terminal_keys
 
-    # 2. Back-scan lists trailing minute prefix for minute=15, returning key A (already processed) and key C (late-arriving)
     lister.list_source_objects.return_value = SourceObjectPage(
-        objects=(
-            SourceObjectDescriptor(key_a, "chk_a", 100),
-            SourceObjectDescriptor(key_c_late, "chk_c", 100),
-        ),
+        objects=(SourceObjectDescriptor(key_a, "chk_a", 100), SourceObjectDescriptor(key_c_late, "chk_c", 100)),
         next_cursor=None,
     )
 
-    # 3. Process the back-scan page:
-    # Key A should be detected as duplicate, Key C should be newly processed
     run2 = coordinator.run_page(service_id="svc_test", domain="request")
     assert run2.processed == 1, "Only late key C should be newly processed"
     assert run2.duplicates == 1, "Key A must be detected as duplicate"
-    assert run2.failed == 0
-    assert key_c_late in terminal_keys
-
-    # Total ingested objects across batches must be exactly 3 (A, B, C) - no double counting of A
+    assert run2.failed == 0 and key_c_late in terminal_keys
     assert ingested_keys == [key_a, key_b, key_c_late]
 
 
@@ -745,16 +634,9 @@ def test_late_key_backscan_ingests_late_key_without_duplication() -> None:
 
 def test_partial_page_failure_holds_cursor_and_does_not_reingest_successes() -> None:
     """Verifies that a failure on one object in a page holds the cursor, while successful items are marked committed/duplicate."""
-    # Source objects: obj1 succeeds, obj2 fails, obj3 succeeds
-    objects = (
-        SourceObjectDescriptor("key1.gz", "chk1", 100),
-        SourceObjectDescriptor("key2.gz", "chk2", 100),
-        SourceObjectDescriptor("key3.gz", "chk3", 100),
-    )
-    page = SourceObjectPage(objects, next_cursor="cursor_3")
-
+    objects = tuple(SourceObjectDescriptor(f"key{i}.gz", f"chk{i}", 100) for i in (1, 2, 3))
     lister = MagicMock()
-    lister.list_source_objects.return_value = page
+    lister.list_source_objects.return_value = SourceObjectPage(objects, next_cursor="cursor_3")
 
     reader = MagicMock()
 
@@ -764,42 +646,32 @@ def test_partial_page_failure_holds_cursor_and_does_not_reingest_successes() -> 
         return b"valid payload"
 
     reader.read_source_object.side_effect = mock_read
-
     ownership = MagicMock()
     ownership.get.return_value = MagicMock(current_owner="high_scale", owner_epoch=1)
 
     control = MagicMock()
     control.owner.return_value = MagicMock(current_owner="high_scale", owner_epoch=1)
-    # Mock advance cursor: should NOT be called if failed > 0
     control.advance_source_cursor = MagicMock()
 
     controller = MagicMock()
     controller.ingest_batch.side_effect = lambda **kw: MagicMock(sources_count=len(kw["sources_payloads"]))
-    ledger = MagicMock()
 
     coordinator = HighScaleWorkerCoordinator(
         lister=lister,
         reader=reader,
         controller=controller,
         ownership=ownership,
-        ledger=ledger,
+        ledger=MagicMock(),
         worker_id="test-worker",
         control_plane=control,
         page_size=10,
     )
 
-    # Coordinator processes sources: key1 processed, key2 fails, key3 processed
-    # If failed > 0, advance_cursor must NOT be called
     run_res = coordinator.run_page(service_id="svc_test", domain="request")
-
-    assert run_res.failed > 0
-    assert not control.advance_source_cursor.called
+    assert run_res.failed > 0 and not control.advance_source_cursor.called
 
 
 # ── Merged from test_partitioned_cursors.py ──
-
-
-from backend.high_scale.postgres_control import PostgresControlPlane
 
 
 def _mock_control(owner_epoch: int = 1) -> tuple[PostgresControlPlane, MagicMock]:
@@ -861,7 +733,6 @@ def test_partitioned_cursors_advance_independently() -> None:
 
 def test_stale_epoch_fences_all_partition_cursors() -> None:
     control, _ = _mock_control(owner_epoch=2)
-
     with pytest.raises(ValueError, match="owner epoch"):
         control.acknowledge_sources_batch(
             "svc1",
@@ -879,29 +750,19 @@ def test_partition_failure_holds_only_its_own_cursor() -> None:
     cursors: dict[str, str] = {"pA": "c1", "pB": "c1"}
 
     def run_partition(part: str, should_fail: bool) -> None:
-        if should_fail:
-            # Failure holds cursor
-            return
-        cursors[part] = "c2"
+        if not should_fail:
+            cursors[part] = "c2"
 
     run_partition("pA", should_fail=True)
     run_partition("pB", should_fail=False)
-
-    assert cursors["pA"] == "c1"  # Held
-    assert cursors["pB"] == "c2"  # Advanced
+    assert (cursors["pA"], cursors["pB"]) == ("c1", "c2")
 
 
 # ── Merged from test_batch_ordering.py ──
 
 
 def test_batch_ingest_order_of_operations() -> None:
-    """Verifies strict ordering:
-    1. Archive upload & checksum verify
-    2. Manifest prepared -> committed in Postgres
-    3. ClickHouse INSERT as pending
-    4. Publication marked visible
-    5. Acknowledge sources in Postgres
-    """
+    """Verifies strict ordering: archive -> manifest -> ClickHouse pending -> publication visible -> acknowledge."""
     call_order: list[str] = []
 
     def archive_put_and_verify(*args, **kwargs):
@@ -923,7 +784,6 @@ def test_batch_ingest_order_of_operations() -> None:
         assert "published_visible" in call_order, "Sources acknowledged before publication visible!"
         call_order.append("sources_acknowledged")
 
-    # Execute sequence
     archive_put_and_verify()
     manifest_commit()
     clickhouse_insert_pending()
@@ -943,39 +803,16 @@ def test_crash_after_archive_verified_leaves_invisible_state() -> None:
     """If process crashes after archive upload, manifest is uncommitted and ClickHouse has no visible rows."""
     manifest_committed = False
     visible_in_clickhouse = False
-
-    # Simulate crash before step 2
-    # Verify state: no visible rows in serving
-    assert not visible_in_clickhouse
-    assert not manifest_committed
+    assert not visible_in_clickhouse and not manifest_committed
 
 
 def test_crash_after_manifest_committed_is_idempotently_recoverable() -> None:
     """If process crashes after manifest commit but before ClickHouse insert, retry reuses manifest_id and batch_id."""
     manifest_id = "manifest-retry-123"
-    # Derived batch_id must be stable across retries
-    import uuid
-
-    batch_id_1 = str(uuid.uuid5(uuid.NAMESPACE_OID, manifest_id))
-    batch_id_2 = str(uuid.uuid5(uuid.NAMESPACE_OID, manifest_id))
-    assert batch_id_1 == batch_id_2
+    assert str(uuid.uuid5(uuid.NAMESPACE_OID, manifest_id)) == str(uuid.uuid5(uuid.NAMESPACE_OID, manifest_id))
 
 
 # ── Merged from tests/high_scale/test_late_rum_discovery.py ──
-
-"""Regression coverage for bounded late-arrival RUM source discovery."""
-
-
-import os
-from types import SimpleNamespace
-from typing import Any
-from uuid import uuid4
-
-from backend.high_scale.source_discovery import (
-    RUM_REINSPECTION_INTERVAL,
-)
-from botocore.stub import Stubber
-from psycopg_pool import ConnectionPool
 
 
 class _Paginator_late_rum_discovery:
@@ -997,15 +834,8 @@ class _Client_late_rum_discovery:
         return self.paginator
 
 
-def _page(
-    *,
-    token: str | None = None,
-    continuation_token: str | None = None,
-    key: str | None = None,
-) -> dict[str, Any]:
-    response: dict[str, Any] = {"Contents": []}
-    if key is not None:
-        response["Contents"] = [{"Key": key, "ETag": '"etag"', "Size": 1}]
+def _page(*, token: str | None = None, continuation_token: str | None = None, key: str | None = None) -> dict[str, Any]:
+    response: dict[str, Any] = {"Contents": [] if key is None else [{"Key": key, "ETag": '"etag"', "Size": 1}]}
     if token is not None:
         response["NextToken"] = token
     if continuation_token is not None:
@@ -1016,8 +846,9 @@ def _page(
 
 def test_rum_cursor_schedules_a_bounded_reinspection_without_rewinding_forward_cursor() -> None:
     """One reinspection page is inserted after each ten forward pages."""
-    pages = [_page(token=f"forward-{i}") for i in range(1, 11)]
-    pages.append(_page(continuation_token="reinspect-1", key="raw/rum/page-1.gz"))
+    pages = [_page(token=f"forward-{i}") for i in range(1, 11)] + [
+        _page(continuation_token="reinspect-1", key="raw/rum/page-1.gz")
+    ]
     client = _Client_late_rum_discovery(pages)
     lister = S3SourceObjectLister(client, bucket="archive-bucket")
     cursor: str | None = INITIAL_SOURCE_CURSOR
@@ -1036,9 +867,11 @@ def test_rum_cursor_schedules_a_bounded_reinspection_without_rewinding_forward_c
         cursor = page.next_cursor
         reinspection_cursor = page.next_reinspection_cursor or reinspection_cursor
         forward_pages = page.forward_pages_since_reinspection or 0
-    assert cursor == "forward-10"
-    assert reinspection_cursor == INITIAL_SOURCE_CURSOR
-    assert forward_pages == RUM_REINSPECTION_INTERVAL
+    assert (cursor, reinspection_cursor, forward_pages) == (
+        "forward-10",
+        INITIAL_SOURCE_CURSOR,
+        RUM_REINSPECTION_INTERVAL,
+    )
 
     page = lister.list_source_objects(
         "svc",
@@ -1052,19 +885,13 @@ def test_rum_cursor_schedules_a_bounded_reinspection_without_rewinding_forward_c
     assert page.next_cursor == cursor
     assert page.next_reinspection_cursor == f"{TERMINAL_SOURCE_CURSOR_PREFIX}raw/rum/page-1.gz"
     assert page.forward_pages_since_reinspection == 0
-    # Reinspection uses its own page token and leaves the forward scan intact.
     request = client.paginator.requests[-1]
-    assert request["Prefix"] == "raw/rum/"
-    assert request["PaginationConfig"] == {"PageSize": 25}
+    assert (request["Prefix"], request["PaginationConfig"]) == ("raw/rum/", {"PageSize": 25})
 
 
 def test_rum_late_objects_are_seen_when_reinspection_wraps_to_prefix_start() -> None:
     """A new key behind the forward cursor is eligible during a bounded sweep."""
-    client = _Client_late_rum_discovery(
-        [
-            _page(key="raw/rum/late-arrival.gz"),
-        ]
-    )
+    client = _Client_late_rum_discovery([_page(key="raw/rum/late-arrival.gz")])
     lister = S3SourceObjectLister(client, bucket="archive-bucket")
     forward_cursor = f"{TERMINAL_SOURCE_CURSOR_PREFIX}raw/rum/z.gz"
 
@@ -1080,20 +907,15 @@ def test_rum_late_objects_are_seen_when_reinspection_wraps_to_prefix_start() -> 
 
     assert [obj.object_key for obj in page.objects] == ["raw/rum/late-arrival.gz"]
     assert client.paginator.requests[0]["PaginationConfig"] == {"PageSize": 25}
-    assert page.next_cursor == forward_cursor
-    assert page.next_reinspection_cursor == INITIAL_SOURCE_CURSOR
-    assert page.forward_pages_since_reinspection == 0
+    assert (page.next_cursor, page.next_reinspection_cursor, page.forward_pages_since_reinspection) == (
+        forward_cursor,
+        INITIAL_SOURCE_CURSOR,
+        0,
+    )
 
 
 def test_rum_reinspection_continues_one_real_s3_page_at_a_time() -> None:
-    import boto3
-
-    client = boto3.client(
-        "s3",
-        region_name="us-east-1",
-        aws_access_key_id="test",
-        aws_secret_access_key="test",
-    )
+    client = boto3.client("s3", region_name="us-east-1", aws_access_key_id="test", aws_secret_access_key="test")
     stubber = Stubber(client)
     stubber.add_response(
         "list_objects_v2",
@@ -1109,16 +931,8 @@ def test_rum_reinspection_continues_one_real_s3_page_at_a_time() -> None:
     )
     stubber.add_response(
         "list_objects_v2",
-        {
-            "IsTruncated": False,
-            "Contents": [{"Key": "raw/rum/c.gz", "ETag": '"c"', "Size": 1}],
-        },
-        {
-            "Bucket": "bucket",
-            "Prefix": "raw/rum/",
-            "MaxKeys": 2,
-            "StartAfter": "raw/rum/b.gz",
-        },
+        {"IsTruncated": False, "Contents": [{"Key": "raw/rum/c.gz", "ETag": '"c"', "Size": 1}]},
+        {"Bucket": "bucket", "Prefix": "raw/rum/", "MaxKeys": 2, "StartAfter": "raw/rum/b.gz"},
     )
     lister = S3SourceObjectLister(client, bucket="bucket")
 
@@ -1149,78 +963,75 @@ def test_rum_reinspection_continues_one_real_s3_page_at_a_time() -> None:
 
 def test_legacy_rum_terminal_cursor_keeps_start_after_semantics() -> None:
     client = _Client_late_rum_discovery([_page(key="raw/rum/new.gz")])
-    lister = S3SourceObjectLister(client, bucket="archive-bucket")
-
-    page = lister.list_source_objects(
-        "svc",
-        "rum_vitals",
-        page_size=25,
-        cursor=f"{TERMINAL_SOURCE_CURSOR_PREFIX}raw/rum/previous.gz",
+    page = S3SourceObjectLister(client, bucket="archive-bucket").list_source_objects(
+        "svc", "rum_vitals", page_size=25, cursor=f"{TERMINAL_SOURCE_CURSOR_PREFIX}raw/rum/previous.gz"
     )
-
     assert client.paginator.requests[0]["StartAfter"] == "raw/rum/previous.gz"
-    assert page.objects[0].object_key == "raw/rum/new.gz"
-    assert page.next_cursor is None
+    assert (page.objects[0].object_key, page.next_cursor) == ("raw/rum/new.gz", None)
 
 
 def test_legacy_rum_paginator_token_keeps_starting_token_semantics() -> None:
     client = _Client_late_rum_discovery([_page(token="next-token")])
-    lister = S3SourceObjectLister(client, bucket="archive-bucket")
-
-    page = lister.list_source_objects("svc", "rum_errors", page_size=25, cursor="legacy-page-token")
-
-    assert client.paginator.requests[0]["PaginationConfig"] == {
-        "PageSize": 25,
-        "StartingToken": "legacy-page-token",
-    }
+    page = S3SourceObjectLister(client, bucket="archive-bucket").list_source_objects(
+        "svc", "rum_errors", page_size=25, cursor="legacy-page-token"
+    )
+    assert client.paginator.requests[0]["PaginationConfig"] == {"PageSize": 25, "StartingToken": "legacy-page-token"}
     assert page.next_cursor == "next-token"
 
 
 def test_request_cursor_path_remains_unchanged() -> None:
     client = _Client_late_rum_discovery([_page(key="raw/request/new.gz")])
-    lister = S3SourceObjectLister(client, bucket="archive-bucket")
-
-    lister.list_source_objects(
-        "svc",
-        "request",
-        page_size=25,
-        cursor=f"{TERMINAL_SOURCE_CURSOR_PREFIX}raw/request/previous.gz",
+    S3SourceObjectLister(client, bucket="archive-bucket").list_source_objects(
+        "svc", "request", page_size=25, cursor=f"{TERMINAL_SOURCE_CURSOR_PREFIX}raw/request/previous.gz"
     )
-
     assert client.paginator.requests[0]["PaginationConfig"] == {"PageSize": 25}
     assert client.paginator.requests[0]["StartAfter"] == "raw/request/previous.gz"
 
 
-def test_coordinator_persists_reinspection_state_without_advancing_forward_cursor() -> None:
-    forward_cursor = f"{TERMINAL_SOURCE_CURSOR_PREFIX}raw/rum/latest.gz"
+def _reinspection_harness(
+    page: SourceObjectPage,
+    *,
+    forward_cursor: str,
+    reinspection_state: tuple[str, int] = (INITIAL_SOURCE_CURSOR, RUM_REINSPECTION_INTERVAL),
+    owner_epoch: int = 3,
+    claimed_keys: tuple[str, ...] = (),
+    worker_id: str = "rum-test",
+) -> tuple[HighScaleWorkerCoordinator, MagicMock, MagicMock, MagicMock, MagicMock]:
     control = MagicMock()
     control.owner.return_value = SimpleNamespace(
-        current_owner="high_scale",
-        owner_epoch=3,
-        source_cursor="owner-cursor",
+        current_owner="high_scale", owner_epoch=owner_epoch, source_cursor="owner-cursor"
     )
     control.source_cursor_for.return_value = forward_cursor
-    control.source_reinspection_state_for.return_value = (INITIAL_SOURCE_CURSOR, RUM_REINSPECTION_INTERVAL)
-    control.claim_sources_batch.return_value = ()
+    control.source_reinspection_state_for.return_value = reinspection_state
+    control.discover_source.return_value = SimpleNamespace(status="discovered")
+    control.claim_sources_batch.return_value = tuple(SimpleNamespace(object_key=k) for k in claimed_keys)
     control.expired_claims.return_value = ()
     control.advance_source_cursor = MagicMock()
+    lister, reader, controller = MagicMock(), MagicMock(), MagicMock()
+    lister.list_source_objects.return_value = page
+    coordinator = HighScaleWorkerCoordinator(
+        lister=lister,
+        reader=reader,
+        controller=controller,
+        ownership=MagicMock(),
+        ledger=MagicMock(),
+        worker_id=worker_id,
+        control_plane=control,
+    )
+    return coordinator, control, lister, reader, controller
 
-    lister = MagicMock()
-    lister.list_source_objects.return_value = SourceObjectPage(
+
+def test_coordinator_persists_reinspection_state_without_advancing_forward_cursor() -> None:
+    forward_cursor = f"{TERMINAL_SOURCE_CURSOR_PREFIX}raw/rum/latest.gz"
+    page = SourceObjectPage(
         (),
         forward_cursor,
         next_reinspection_cursor=INITIAL_SOURCE_CURSOR,
         forward_pages_since_reinspection=0,
         reinspection_page=True,
     )
-    coordinator = HighScaleWorkerCoordinator(
-        lister=lister,
-        reader=MagicMock(),
-        controller=MagicMock(),
-        ownership=MagicMock(),
-        ledger=MagicMock(),
-        worker_id="rum-reinspection-test",
-        control_plane=control,
+    coordinator, control, lister, _, _ = _reinspection_harness(
+        page, forward_cursor=forward_cursor, worker_id="rum-reinspection-test"
     )
 
     run = coordinator.run_page(service_id="svc", domain="rum_vitals")
@@ -1237,42 +1048,19 @@ def test_coordinator_persists_reinspection_state_without_advancing_forward_curso
     )
     control.advance_source_cursor.assert_not_called()
     control.advance_reinspection_state.assert_called_once_with(
-        "svc",
-        "rum_vitals",
-        INITIAL_SOURCE_CURSOR,
-        0,
-        expected_owner="high_scale",
-        expected_owner_epoch=3,
+        "svc", "rum_vitals", INITIAL_SOURCE_CURSOR, 0, expected_owner="high_scale", expected_owner_epoch=3
     )
 
 
 def test_coordinator_advances_forward_and_reinspection_cursors_together() -> None:
-    control = MagicMock()
-    control.owner.return_value = SimpleNamespace(
-        current_owner="high_scale",
-        owner_epoch=3,
-        source_cursor="owner-cursor",
+    page = SourceObjectPage(
+        (), "forward-page-2", next_reinspection_cursor="reinspection-page-2", forward_pages_since_reinspection=3
     )
-    control.source_cursor_for.return_value = "forward-page-1"
-    control.source_reinspection_state_for.return_value = ("reinspection-page-2", 2)
-    control.claim_sources_batch.return_value = ()
-    control.expired_claims.return_value = ()
-
-    lister = MagicMock()
-    lister.list_source_objects.return_value = SourceObjectPage(
-        (),
-        "forward-page-2",
-        next_reinspection_cursor="reinspection-page-2",
-        forward_pages_since_reinspection=3,
-    )
-    coordinator = HighScaleWorkerCoordinator(
-        lister=lister,
-        reader=MagicMock(),
-        controller=MagicMock(),
-        ownership=MagicMock(),
-        ledger=MagicMock(),
+    coordinator, control, _, _, _ = _reinspection_harness(
+        page,
+        forward_cursor="forward-page-1",
+        reinspection_state=("reinspection-page-2", 2),
         worker_id="rum-forward-test",
-        control_plane=control,
     )
 
     coordinator.run_page(service_id="svc", domain="rum_errors")
@@ -1288,43 +1076,33 @@ def test_coordinator_advances_forward_and_reinspection_cursors_together() -> Non
     )
 
 
-def test_postgres_reinspection_state_defaults_and_reads_domain_cursor_fields() -> None:
+def _mock_reinspection_pg_pool(execute_side_effect: list[Any]) -> tuple[PostgresControlPlane, MagicMock]:
     pool = MagicMock()
     connection = MagicMock()
     pool.connection.return_value.__enter__.return_value = connection
     connection.transaction.return_value.__enter__.return_value = connection
+    connection.execute.side_effect = execute_side_effect
+    return PostgresControlPlane(pool=pool), connection
+
+
+def test_postgres_reinspection_state_defaults_and_reads_domain_cursor_fields() -> None:
     selected = MagicMock()
     selected.fetchone.return_value = ("__terminal__:raw/rum/a.gz", 4)
-    connection.execute.side_effect = [MagicMock(), selected]
-    control = PostgresControlPlane(pool=pool)
+    control, connection = _mock_reinspection_pg_pool([MagicMock(), selected])
 
-    assert control.source_reinspection_state_for("svc", "rum_vitals") == (
-        "__terminal__:raw/rum/a.gz",
-        4,
-    )
+    assert control.source_reinspection_state_for("svc", "rum_vitals") == ("__terminal__:raw/rum/a.gz", 4)
     sql = connection.execute.call_args_list[1].args[0]
-    assert "reinspection_cursor" in sql
-    assert "forward_pages_since_reinspection" in sql
+    assert "reinspection_cursor" in sql and "forward_pages_since_reinspection" in sql
 
 
 def test_postgres_reinspection_state_defaults_for_a_new_domain() -> None:
-    pool = MagicMock()
-    connection = MagicMock()
-    pool.connection.return_value.__enter__.return_value = connection
-    connection.transaction.return_value.__enter__.return_value = connection
     selected = MagicMock()
     selected.fetchone.return_value = None
-    connection.execute.side_effect = [MagicMock(), selected]
-    control = PostgresControlPlane(pool=pool)
-
+    control, _ = _mock_reinspection_pg_pool([MagicMock(), selected])
     assert control.source_reinspection_state_for("svc", "rum_errors") == (INITIAL_SOURCE_CURSOR, 0)
 
 
 def test_postgres_reinspection_advance_does_not_update_forward_source_cursor() -> None:
-    pool = MagicMock()
-    connection = MagicMock()
-    pool.connection.return_value.__enter__.return_value = connection
-    connection.transaction.return_value.__enter__.return_value = connection
     owner = MagicMock()
     owner.fetchone.return_value = {
         "service_id": "svc",
@@ -1336,65 +1114,41 @@ def test_postgres_reinspection_advance_does_not_update_forward_source_cursor() -
         "cutover_committed": False,
         "rollback_allowed": False,
     }
-    connection.execute.side_effect = [owner, MagicMock()]
-    control = PostgresControlPlane(pool=pool)
+    control, connection = _mock_reinspection_pg_pool([owner, MagicMock()])
 
     control.advance_reinspection_state(
-        "svc",
-        "rum_vitals",
-        "reinspection-page-2",
-        0,
-        expected_owner="high_scale",
-        expected_owner_epoch=3,
+        "svc", "rum_vitals", "reinspection-page-2", 0, expected_owner="high_scale", expected_owner_epoch=3
     )
 
     update_sql = connection.execute.call_args_list[1].args[0]
-    assert "SET reinspection_cursor=%s" in update_sql
-    assert "forward_pages_since_reinspection=%s" in update_sql
+    assert "SET reinspection_cursor=%s" in update_sql and "forward_pages_since_reinspection=%s" in update_sql
     assert "source_cursor=" not in update_sql
-    assert connection.execute.call_args_list[1].args[1] == (
-        "reinspection-page-2",
-        0,
-        "svc",
-        "rum_vitals",
-    )
+    assert connection.execute.call_args_list[1].args[1] == ("reinspection-page-2", 0, "svc", "rum_vitals")
 
 
 @pytest.mark.parametrize("failure_stage", ["read", "publication"])
 def test_reinspection_failure_preserves_forward_and_reinspection_cursors(failure_stage: str) -> None:
     forward_cursor = f"{TERMINAL_SOURCE_CURSOR_PREFIX}raw/rum/latest.gz"
     descriptor = SourceObjectDescriptor("raw/rum/late.gz", "etag:late", 12, "v1")
-    control = MagicMock()
-    control.owner.return_value = SimpleNamespace(current_owner="high_scale", owner_epoch=5, source_cursor=None)
-    control.source_cursor_for.return_value = forward_cursor
-    control.source_reinspection_state_for.return_value = (INITIAL_SOURCE_CURSOR, RUM_REINSPECTION_INTERVAL)
-    control.discover_source.return_value = SimpleNamespace(status="discovered")
-    control.claim_sources_batch.return_value = (SimpleNamespace(object_key=descriptor.object_key),)
-    control.expired_claims.return_value = ()
-    lister = MagicMock()
-    lister.list_source_objects.return_value = SourceObjectPage(
+    page = SourceObjectPage(
         (descriptor,),
         forward_cursor,
         next_reinspection_cursor=f"{TERMINAL_SOURCE_CURSOR_PREFIX}raw/rum/late.gz",
         forward_pages_since_reinspection=0,
         reinspection_page=True,
     )
-    reader = MagicMock()
-    controller = MagicMock()
+    coordinator, control, _, reader, controller = _reinspection_harness(
+        page,
+        forward_cursor=forward_cursor,
+        owner_epoch=5,
+        claimed_keys=(descriptor.object_key,),
+        worker_id="rum-reinspection-failure-test",
+    )
     if failure_stage == "read":
         reader.read_source_object.side_effect = RuntimeError("temporary FOS read failure")
     else:
         reader.read_source_object.return_value = b"source payload"
         controller.ingest_batch.side_effect = RuntimeError("temporary publication failure")
-    coordinator = HighScaleWorkerCoordinator(
-        lister=lister,
-        reader=reader,
-        controller=controller,
-        ownership=MagicMock(),
-        ledger=MagicMock(),
-        worker_id="rum-reinspection-failure-test",
-        control_plane=control,
-    )
 
     run = coordinator.run_page(service_id="svc", domain="rum_vitals")
 
@@ -1408,32 +1162,21 @@ def test_reinspection_failure_preserves_forward_and_reinspection_cursors(failure
 def test_confirmed_missing_reinspection_object_advances_only_reinspection_position() -> None:
     forward_cursor = f"{TERMINAL_SOURCE_CURSOR_PREFIX}raw/rum/latest.gz"
     descriptor = SourceObjectDescriptor("raw/rum/late-missing.gz", "etag:late", 12, "v1")
-    control = MagicMock()
-    control.owner.return_value = SimpleNamespace(current_owner="high_scale", owner_epoch=5, source_cursor=None)
-    control.source_cursor_for.return_value = forward_cursor
-    control.source_reinspection_state_for.return_value = (INITIAL_SOURCE_CURSOR, RUM_REINSPECTION_INTERVAL)
-    control.discover_source.return_value = SimpleNamespace(status="discovered")
-    control.claim_sources_batch.return_value = (SimpleNamespace(object_key=descriptor.object_key),)
-    control.expired_claims.return_value = ()
-    lister = MagicMock()
-    lister.list_source_objects.return_value = SourceObjectPage(
+    page = SourceObjectPage(
         (descriptor,),
         forward_cursor,
         next_reinspection_cursor=INITIAL_SOURCE_CURSOR,
         forward_pages_since_reinspection=0,
         reinspection_page=True,
     )
-    reader = MagicMock()
-    reader.read_source_object.side_effect = SourceObjectMissingError("source disappeared")
-    coordinator = HighScaleWorkerCoordinator(
-        lister=lister,
-        reader=reader,
-        controller=MagicMock(),
-        ownership=MagicMock(),
-        ledger=MagicMock(),
+    coordinator, control, _, reader, _ = _reinspection_harness(
+        page,
+        forward_cursor=forward_cursor,
+        owner_epoch=5,
+        claimed_keys=(descriptor.object_key,),
         worker_id="rum-reinspection-missing-test",
-        control_plane=control,
     )
+    reader.read_source_object.side_effect = SourceObjectMissingError("source disappeared")
 
     run = coordinator.run_page(service_id="svc", domain="rum_vitals")
 
@@ -1441,12 +1184,7 @@ def test_confirmed_missing_reinspection_object_advances_only_reinspection_positi
     control.mark_source_missing.assert_called_once()
     control.advance_source_cursor.assert_not_called()
     control.advance_reinspection_state.assert_called_once_with(
-        "svc",
-        "rum_vitals",
-        INITIAL_SOURCE_CURSOR,
-        0,
-        expected_owner="high_scale",
-        expected_owner_epoch=5,
+        "svc", "rum_vitals", INITIAL_SOURCE_CURSOR, 0, expected_owner="high_scale", expected_owner_epoch=5
     )
 
 
@@ -1457,14 +1195,10 @@ def test_postgres_rum_reinspection_state_is_schema_scoped_and_owner_fenced() -> 
         pytest.skip("HIGH_SCALE_POSTGRES_TEST_DSN is not set")
 
     schema = f"hs_reinspect_{uuid4().hex}"
-    setup_pool = ConnectionPool(
-        conninfo=dsn,
-        kwargs={"autocommit": False},
-        min_size=1,
-        max_size=1,
-        timeout=5,
-    )
+    setup_pool = ConnectionPool(conninfo=dsn, kwargs={"autocommit": False}, min_size=1, max_size=1, timeout=5)
     scoped_pool: ConnectionPool | None = None
+    latest_cursor = f"{TERMINAL_SOURCE_CURSOR_PREFIX}raw/rum/latest.gz"
+    page2_cursor = f"{TERMINAL_SOURCE_CURSOR_PREFIX}raw/rum/page-2.gz"
     try:
         setup_pool.open(wait=True)
         with setup_pool.connection(timeout=5) as connection, connection.transaction():
@@ -1482,7 +1216,7 @@ def test_postgres_rum_reinspection_state_is_schema_scoped_and_owner_fenced() -> 
         owner = control.initialize_owner("svc", owner="high_scale", source_cursor="owner")
         control.advance_source_cursor(
             "svc",
-            f"{TERMINAL_SOURCE_CURSOR_PREFIX}raw/rum/latest.gz",
+            latest_cursor,
             expected_owner="high_scale",
             expected_owner_epoch=owner.owner_epoch,
             domain="rum_vitals",
@@ -1490,43 +1224,34 @@ def test_postgres_rum_reinspection_state_is_schema_scoped_and_owner_fenced() -> 
             forward_pages_since_reinspection=RUM_REINSPECTION_INTERVAL,
         )
 
-        # Simulate an existing schema and row from a worker predating the
-        # additive state. Bootstrap must preserve its forward wire cursor.
         with scoped_pool.connection(timeout=5) as connection, connection.transaction():
             connection.execute(
                 "ALTER TABLE high_scale_source_cursors "
                 "DROP COLUMN reinspection_cursor, DROP COLUMN forward_pages_since_reinspection"
             )
         control.create_schema()
-        assert control.source_cursor_for("svc", "rum_vitals") == f"{TERMINAL_SOURCE_CURSOR_PREFIX}raw/rum/latest.gz"
+        assert control.source_cursor_for("svc", "rum_vitals") == latest_cursor
         assert control.source_reinspection_state_for("svc", "rum_vitals") == (INITIAL_SOURCE_CURSOR, 0)
 
         control.advance_reinspection_state(
             "svc",
             "rum_vitals",
-            f"{TERMINAL_SOURCE_CURSOR_PREFIX}raw/rum/page-2.gz",
+            page2_cursor,
             0,
             expected_owner="high_scale",
             expected_owner_epoch=owner.owner_epoch,
         )
-        assert control.source_cursor_for("svc", "rum_vitals") == (f"{TERMINAL_SOURCE_CURSOR_PREFIX}raw/rum/latest.gz")
-        assert control.source_reinspection_state_for("svc", "rum_vitals") == (
-            f"{TERMINAL_SOURCE_CURSOR_PREFIX}raw/rum/page-2.gz",
-            0,
-        )
-        # A rolling older worker updates just the forward column and must not
-        # erase a newer worker's independently persisted sweep position.
+        assert control.source_cursor_for("svc", "rum_vitals") == latest_cursor
+        assert control.source_reinspection_state_for("svc", "rum_vitals") == (page2_cursor, 0)
+
         control.advance_source_cursor(
             "svc",
-            f"{TERMINAL_SOURCE_CURSOR_PREFIX}raw/rum/latest.gz",
+            latest_cursor,
             expected_owner="high_scale",
             expected_owner_epoch=owner.owner_epoch,
             domain="rum_vitals",
         )
-        assert control.source_reinspection_state_for("svc", "rum_vitals") == (
-            f"{TERMINAL_SOURCE_CURSOR_PREFIX}raw/rum/page-2.gz",
-            0,
-        )
+        assert control.source_reinspection_state_for("svc", "rum_vitals") == (page2_cursor, 0)
 
         with pytest.raises(ValueError, match="owner epoch"):
             control.advance_reinspection_state(
@@ -1537,11 +1262,8 @@ def test_postgres_rum_reinspection_state_is_schema_scoped_and_owner_fenced() -> 
                 expected_owner="high_scale",
                 expected_owner_epoch=owner.owner_epoch + 1,
             )
-        assert control.source_cursor_for("svc", "rum_vitals") == (f"{TERMINAL_SOURCE_CURSOR_PREFIX}raw/rum/latest.gz")
-        assert control.source_reinspection_state_for("svc", "rum_vitals") == (
-            f"{TERMINAL_SOURCE_CURSOR_PREFIX}raw/rum/page-2.gz",
-            0,
-        )
+        assert control.source_cursor_for("svc", "rum_vitals") == latest_cursor
+        assert control.source_reinspection_state_for("svc", "rum_vitals") == (page2_cursor, 0)
     finally:
         if scoped_pool is not None:
             scoped_pool.close()
@@ -1553,23 +1275,6 @@ def test_postgres_rum_reinspection_state_is_schema_scoped_and_owner_fenced() -> 
 
 
 # ── Merged from tests/high_scale/test_publication.py ──
-
-from uuid import UUID
-
-import pytest
-
-from backend.high_scale.publication import (
-    BatchManifest,
-    ClickHouseBatchAdapter,
-    ClickHousePublication,
-    HighScaleBatch,
-    InMemoryBatchManifestStore,
-    InsertReceipt,
-    PartialInsert,
-    PostgresBatchManifestStore,
-    PublicationStatus,
-    row_matches_serving_domain,
-)
 
 
 def _batch() -> HighScaleBatch:
@@ -1609,10 +1314,11 @@ def test_retry_after_lost_acknowledgement_publishes_once() -> None:
         publication.publish(batch)
 
     result = publication.publish(batch)
-
-    assert result.status is PublicationStatus.VISIBLE
-    assert result.rows_visible == 2
-    assert client.inserts == ["batch-1", "batch-1"]
+    assert (result.status, result.rows_visible, client.inserts) == (
+        PublicationStatus.VISIBLE,
+        2,
+        ["batch-1", "batch-1"],
+    )
     assert store.get("batch-1").status is PublicationStatus.VISIBLE
 
 
@@ -1629,15 +1335,12 @@ def test_partial_insert_never_becomes_visible() -> None:
 
 
 def test_postgres_manifest_store_survives_store_recreation() -> None:
-    from types import SimpleNamespace
-
     manifests: dict[str, BatchManifest] = {}
     control = SimpleNamespace(
         get_batch_manifest=manifests.get,
         put_batch_manifest=lambda m: manifests.__setitem__(m.batch_id, m),
     )
-    first_store = PostgresBatchManifestStore(control)
-    first_store.put(
+    PostgresBatchManifestStore(control).put(
         BatchManifest(
             batch_id="batch-1",
             service_id="svc",
@@ -1650,18 +1353,12 @@ def test_postgres_manifest_store_survives_store_recreation() -> None:
         )
     )
 
-    recreated_store = PostgresBatchManifestStore(control)
-
-    manifest = recreated_store.get("batch-1")
-    assert manifest is not None
-    assert manifest.status is PublicationStatus.VISIBLE
-    assert manifest.visible_rows == 2
+    manifest = PostgresBatchManifestStore(control).get("batch-1")
+    assert manifest is not None and manifest.status is PublicationStatus.VISIBLE and manifest.visible_rows == 2
 
 
 def test_same_batch_id_with_different_digest_is_rejected() -> None:
-    store = InMemoryBatchManifestStore()
-    client = FakeClickHouse()
-    publication = ClickHousePublication(store, client)
+    publication = ClickHousePublication(InMemoryBatchManifestStore(), FakeClickHouse())
     publication.publish(_batch())
 
     changed = HighScaleBatch(
@@ -1755,8 +1452,7 @@ def test_clickhouse_adapter_inserts_exact_allowlisted_shape() -> None:
     ]
     assert facts[0] == "request_facts"
     assert facts[1][-5:] == ["country", "client_ip", "url", "custom_fields", "cmcd"]
-    assert UUID(facts[2][0][1])
-    assert UUID(facts[2][0][8])
+    assert UUID(facts[2][0][1]) and UUID(facts[2][0][8])
     assert visible[2][0][7:9] == (1, "visible")
 
 
@@ -1764,9 +1460,7 @@ def test_clickhouse_adapter_uses_raw_request_ip_for_client_ip() -> None:
     client = FakeHttpClickHouse()
     row = {key: value for key, value in _request_batch().rows[0].items() if key != "client_ip"}
     row["ip"] = "198.51.100.10"
-    batch = HighScaleBatch("batch-raw-ip", "svc", "request", "4", (row,))
-
-    ClickHouseBatchAdapter(client).insert(batch)
+    ClickHouseBatchAdapter(client).insert(HighScaleBatch("batch-raw-ip", "svc", "request", "4", (row,)))
 
     facts = next(rows for table, _, rows in client.inserts if table == "request_facts")
     assert facts[0][-4] == "198.51.100.10"
@@ -1782,10 +1476,8 @@ def test_clickhouse_adapter_rejects_invalid_rows_before_http() -> None:
         ({**batch.rows[0], "custom_fields": {"bad": 1}},),
     )
     client = FakeHttpClickHouse()
-
     with pytest.raises(ValueError, match="keys and values"):
         ClickHouseBatchAdapter(client).insert(invalid)
-
     assert client.inserts == []
 
 
@@ -1793,11 +1485,7 @@ def test_clickhouse_adapter_duplicate_retry_does_not_insert_facts_twice() -> Non
     client = FakeHttpClickHouse()
     adapter = ClickHouseBatchAdapter(client)
     batch = _request_batch()
-
-    first = adapter.insert(batch)
-    second = adapter.insert(batch)
-
-    assert first == second
+    assert adapter.insert(batch) == adapter.insert(batch)
     assert [table for table, _, _ in client.inserts].count("request_facts") == 1
 
 
@@ -1811,7 +1499,6 @@ def test_clickhouse_adapter_lost_visible_ack_is_recovered_by_retry() -> None:
         publication.publish(batch)
 
     result = publication.publish(batch)
-
     assert result.status is PublicationStatus.VISIBLE
     assert [table for table, _, _ in client.inserts].count("request_facts") == 1
 
@@ -1826,7 +1513,6 @@ def test_clickhouse_adapter_lost_fact_ack_is_recovered_without_duplicate_rows() 
         publication.publish(batch)
 
     result = publication.publish(batch)
-
     assert result.status is PublicationStatus.VISIBLE
     assert [table for table, _, _ in client.inserts].count("request_facts") == 1
 
@@ -1863,55 +1549,36 @@ def test_clickhouse_adapter_lost_fact_ack_is_recovered_without_duplicate_rows() 
         ),
         (
             "cmcd",
-            {
-                "request_event_id": "request-event-1",
-                "timestamp": "2026-09-11T20:00:00Z",
-                "fields": {"br": "1000"},
-            },
+            {"request_event_id": "request-event-1", "timestamp": "2026-09-11T20:00:00Z", "fields": {"br": "1000"}},
             "cmcd_projection_facts",
         ),
     ],
 )
 def test_clickhouse_adapter_maps_each_schema_domain(domain: str, row: dict, table: str) -> None:
     client = FakeHttpClickHouse()
-    batch = HighScaleBatch("batch-" + domain, "svc", domain, "4", (row,))
-
-    ClickHouseBatchAdapter(client).insert(batch)
-
+    ClickHouseBatchAdapter(client).insert(HighScaleBatch("batch-" + domain, "svc", domain, "4", (row,)))
     assert [name for name, _, _ in client.inserts].count(table) == 1
 
 
 class TestRowMatchesServingDomain:
-    """A raw raw/rum/ object mixes vitals and error beacon lines from the
-    same log period, but the ledger attributes the WHOLE object to a single
-    domain — whichever claims it first. Callers must filter with
-    ``row_matches_serving_domain`` before building a serving HighScaleBatch,
-    or a mismatched row either crashes ``_rows_for_domain`` (rum_vitals: no
-    finite metric_value) or becomes a bogus, all-blank fact row (rum_errors:
-    empty error_message defaulted silently)."""
+    """Callers must filter with ``row_matches_serving_domain`` before building a serving HighScaleBatch."""
 
-    def test_rum_vitals_row_with_finite_metric_value_matches(self):
-        assert row_matches_serving_domain("rum_vitals", {"metric_value": 1.25}) is True
-
-    def test_rum_vitals_row_missing_metric_value_does_not_match(self):
-        assert row_matches_serving_domain("rum_vitals", {"error_message": "boom"}) is False
-
-    def test_rum_vitals_row_with_nan_metric_value_does_not_match(self):
-        assert row_matches_serving_domain("rum_vitals", {"metric_value": float("nan")}) is False
-
-    def test_rum_errors_row_with_error_message_matches(self):
-        assert row_matches_serving_domain("rum_errors", {"error_message": "boom"}) is True
-
-    def test_rum_errors_row_missing_error_message_does_not_match(self):
-        assert row_matches_serving_domain("rum_errors", {"metric_value": 1.25}) is False
-
-    def test_request_domain_rows_always_match(self):
-        assert row_matches_serving_domain("request", {}) is True
+    @pytest.mark.parametrize(
+        ("domain", "row", "expected"),
+        [
+            ("rum_vitals", {"metric_value": 1.25}, True),
+            ("rum_vitals", {"error_message": "boom"}, False),
+            ("rum_vitals", {"metric_value": float("nan")}, False),
+            ("rum_errors", {"error_message": "boom"}, True),
+            ("rum_errors", {"metric_value": 1.25}, False),
+            ("request", {}, True),
+        ],
+    )
+    def test_row_matches_serving_domain(self, domain: str, row: dict[str, Any], expected: bool) -> None:
+        assert row_matches_serving_domain(domain, row) is expected
 
 
 def test_cmcd_rows_persist_country_and_asn_after_the_cmcd_map() -> None:
-    from backend.high_scale.publication import _DOMAIN_COLUMNS, _rows_for_domain
-
     batch = HighScaleBatch(
         "batch-cmcd",
         "svc",
@@ -1930,11 +1597,9 @@ def test_cmcd_rows_persist_country_and_asn_after_the_cmcd_map() -> None:
     )
 
     first, second = _rows_for_domain(batch, "00000000-0000-0000-0000-000000000001")
-
     assert _DOMAIN_COLUMNS["cmcd"][-3:] == ("cmcd", "country", "asn")
     assert len(first) == len(_DOMAIN_COLUMNS["cmcd"])
-    assert first[-2:] == ("US", 7922)
-    assert second[-2:] == ("", None)
+    assert (first[-2:], second[-2:]) == (("US", 7922), ("", None))
 
 
 def _rum_batch(domain: str, row: dict) -> HighScaleBatch:
@@ -1950,8 +1615,6 @@ def _rum_batch(domain: str, row: dict) -> HighScaleBatch:
 
 
 def test_rum_vitals_rows_persist_environment_columns_after_country() -> None:
-    from backend.high_scale.publication import _DOMAIN_COLUMNS, _rows_for_domain
-
     batch = _rum_batch(
         "rum_vitals",
         {
@@ -1970,7 +1633,6 @@ def test_rum_vitals_rows_persist_environment_columns_after_country() -> None:
     )
 
     (row,) = _rows_for_domain(batch, "00000000-0000-0000-0000-000000000001")
-
     columns = _DOMAIN_COLUMNS["rum_vitals"]
     assert columns[-9:] == ("country", "browser", "os", "device", "city", "region", "pop", "tls", "ttfb")
     assert len(row) == len(columns)
@@ -1978,8 +1640,6 @@ def test_rum_vitals_rows_persist_environment_columns_after_country() -> None:
 
 
 def test_rum_error_rows_persist_error_position_and_environment() -> None:
-    from backend.high_scale.publication import _DOMAIN_COLUMNS, _rows_for_domain
-
     batch = _rum_batch(
         "rum_errors",
         {
@@ -1993,7 +1653,6 @@ def test_rum_error_rows_persist_error_position_and_environment() -> None:
     )
 
     (row,) = _rows_for_domain(batch, "00000000-0000-0000-0000-000000000001")
-
     columns = _DOMAIN_COLUMNS["rum_errors"]
     assert columns[-11:] == (
         "country",
@@ -2013,29 +1672,14 @@ def test_rum_error_rows_persist_error_position_and_environment() -> None:
 
 
 def test_rum_rows_without_environment_keep_empty_columns_not_defaults() -> None:
-    from backend.high_scale.publication import _rows_for_domain
-
     (row,) = _rows_for_domain(
         _rum_batch("rum_vitals", {"metric_name": "CLS", "metric_value": 0.1}),
         "00000000-0000-0000-0000-000000000001",
     )
-
     assert row[-9:] == ("", "", "", "", "", "", "", "", None)
 
 
 # ── Merged from test_archive_publication.py ──
-
-from dataclasses import replace
-
-import pytest
-from backend.high_scale.archive_models import ArchiveArtifact, ArchiveManifest, ArchiveSourceObject
-from backend.high_scale.archive_publication import (
-    ArchivePublication,
-    InMemoryObjectStore,
-    PublicationState,
-)
-
-from tests.high_scale.conftest import sha256_checksum as _checksum
 
 
 def _manifest() -> ArchiveManifest:
@@ -2075,38 +1719,22 @@ def test_publication_requires_verified_artifact_before_manifest_commit() -> None
 def test_publication_commits_manifest_only_after_verified_artifact() -> None:
     store = InMemoryObjectStore()
     publication = ArchivePublication(store)
-    manifest = _manifest()
     artifact = b"data"
-
-    manifest = replace(manifest, artifact=replace(manifest.artifact, checksum=_checksum(artifact)))
+    manifest = replace(_manifest(), artifact=replace(_manifest().artifact, checksum=_checksum(artifact)))
 
     result = publication.publish(manifest, artifact)
-
-    assert result.state is PublicationState.MANIFEST_COMMITTED
-    assert result.manifest_id == manifest.manifest_id
-    assert store.exists("archive/manifests/manifest-1.commit")
-    assert publication.is_replayable(manifest.manifest_id)
+    assert (result.state, result.manifest_id) == (PublicationState.MANIFEST_COMMITTED, manifest.manifest_id)
+    assert store.exists("archive/manifests/manifest-1.commit") and publication.is_replayable(manifest.manifest_id)
 
 
 def test_publish_is_idempotent_even_when_a_retry_recomputes_different_timestamps() -> None:
-    """Regression test: manifest_id is derived from (service_id, domain,
-    object_key, checksum, artifact_checksum) — never from coverage_start/
-    coverage_end — so a retried publish() for the same logical object (e.g.
-    after a crash between publish and the caller's next step) computes the
-    SAME manifest_id but, since coverage_start/end come from wall-clock
-    `now`, a byte-DIFFERENT manifest payload. Overwriting the already-
-    published key with different content breaks the immutable-artifact
-    contract and, against a CDN-cached store, can make the immediate
-    post-write verification read back stale bytes and fail outright —
-    observed live as every retry of one real object failing here forever.
-    A retry must be a no-op once the manifest is already durably published."""
+    """A retry must be a no-op once the manifest is already durably published."""
     store = InMemoryObjectStore()
     publication = ArchivePublication(store)
     artifact = b"data"
     manifest = replace(_manifest(), artifact=replace(_manifest().artifact, checksum=_checksum(artifact)))
 
     first = publication.publish(manifest, artifact)
-
     retried_manifest = replace(
         manifest,
         coverage_start=datetime(2026, 9, 1, 0, 5, tzinfo=UTC),
@@ -2114,10 +1742,7 @@ def test_publish_is_idempotent_even_when_a_retry_recomputes_different_timestamps
     )
     second = publication.publish(retried_manifest, artifact)
 
-    assert second == first
-    # The originally-published manifest content is untouched — never
-    # overwritten with the retry's different coverage_start/end.
-    assert publication.is_replayable(manifest.manifest_id) is True
+    assert second == first and publication.is_replayable(manifest.manifest_id) is True
 
 
 def test_commit_marker_digest_mismatch_is_not_replayable() -> None:
@@ -2126,15 +1751,10 @@ def test_commit_marker_digest_mismatch_is_not_replayable() -> None:
     manifest = replace(_manifest(), artifact=replace(_manifest().artifact, checksum=_checksum(b"data")))
     publication.publish(manifest, b"data")
     store.put("archive/manifests/manifest-1.commit", b"tampered")
-
     assert publication.is_replayable(manifest.manifest_id) is False
 
 
 # ── Merged from test_archive_writer.py ──
-
-
-import pytest
-from backend.high_scale.archive_writer import write_batch_archive_checkpoint
 
 
 def test_archive_checkpoint_is_verified_and_replayable(tmp_path) -> None:
@@ -2180,16 +1800,7 @@ def test_archive_checkpoint_accepts_empty_rum_body(tmp_path) -> None:
         service_id="svc",
         domain="rum_errors",
         source_batches=[
-            (
-                source,
-                [
-                    {
-                        "event_id": "1",
-                        "rum_body": {},
-                        "error_message": "empty body remains publishable",
-                    }
-                ],
-            )
+            (source, [{"event_id": "1", "rum_body": {}, "error_message": "empty body remains publishable"}])
         ],
         archive_epoch=1,
         schema_version="rum_errors.v1",
@@ -2201,16 +1812,6 @@ def test_archive_checkpoint_accepts_empty_rum_body(tmp_path) -> None:
 
 
 # ── Merged from test_raw_query.py ──
-
-
-from backend.high_scale._common import raw_query_producer
-
-from tests.high_scale.conftest import (
-    InMemoryManifestCatalog as _Catalog,
-)
-from tests.high_scale.conftest import (
-    make_test_archive_manifest as _raw_query_manifest,
-)
 
 
 def test_producer_yields_rows_from_all_manifests_covering_the_window() -> None:
@@ -2230,20 +1831,16 @@ def test_producer_yields_rows_from_all_manifests_covering_the_window() -> None:
     archive = ArchivePublication(store)
     archive.publish(m1, bytes1)
     archive.publish(m2, bytes2)
-    catalog = _Catalog((m1, m2))
 
     producer = raw_query_producer(
-        catalog,
+        _Catalog((m1, m2)),
         archive,
         service_id="svc",
         domain="request",
         start=datetime(2026, 9, 1, 0, 0, tzinfo=UTC),
         end=datetime(2026, 9, 1, 0, 2, tzinfo=UTC),
     )
-
-    rows = list(producer())
-
-    assert [row["event_id"] for row in rows] == ["1", "2"]
+    assert [row["event_id"] for row in producer()] == ["1", "2"]
 
 
 def test_producer_excludes_rows_outside_the_requested_window() -> None:
@@ -2260,34 +1857,26 @@ def test_producer_excludes_rows_outside_the_requested_window() -> None:
     store = InMemoryObjectStore()
     archive = ArchivePublication(store)
     archive.publish(manifest, artifact_bytes)
-    catalog = _Catalog((manifest,))
 
     producer = raw_query_producer(
-        catalog,
+        _Catalog((manifest,)),
         archive,
         service_id="svc",
         domain="request",
         start=datetime(2026, 9, 1, 0, 0, 30, tzinfo=UTC),
         end=datetime(2026, 9, 1, 0, 1, 30, tzinfo=UTC),
     )
-
-    rows = list(producer())
-
-    assert [row["event_id"] for row in rows] == ["in-window"]
+    assert [row["event_id"] for row in producer()] == ["in-window"]
 
 
 def test_producer_yields_nothing_when_no_manifest_covers_the_window() -> None:
-    catalog = _Catalog(())
-    store = InMemoryObjectStore()
-    archive = ArchivePublication(store)
-
+    archive = ArchivePublication(InMemoryObjectStore())
     producer = raw_query_producer(
-        catalog,
+        _Catalog(()),
         archive,
         service_id="svc",
         domain="request",
         start=datetime(2026, 9, 1, tzinfo=UTC),
         end=datetime(2026, 9, 1, 1, tzinfo=UTC),
     )
-
     assert list(producer()) == []

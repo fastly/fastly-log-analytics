@@ -1,6 +1,9 @@
 'use client'
 
 import { useQuery } from '@tanstack/react-query'
+import { useForm } from 'react-hook-form'
+import { zodResolver } from '@hookform/resolvers/zod'
+import { z } from 'zod'
 import { useDerivedState, useOpenGeneration } from '@/hooks/useSSE'
 import React, { useState } from 'react'
 import { Alert, AlertDescription } from '@/components/ui/alert'
@@ -199,20 +202,46 @@ export function TeardownDialog(props: TeardownDialogProps) {
   return <TeardownDialogBody key={`${service?.service_id ?? ''}|${generation}`} {...props} />
 }
 
+const teardownFormSchema = z.object({
+  removeLogging: z.boolean(),
+  removeRum: z.boolean(),
+  removeBucket: z.boolean(),
+  removeCloudFiles: z.boolean(),
+  removeCache: z.boolean(),
+  apiToken: z.string(),
+})
+
 function TeardownDialogBody({ service, open, onOpenChange, onComplete }: TeardownDialogProps) {
-  const [removeLogging, setRemoveLogging] = useState(true)
+  const form = useForm<z.infer<typeof teardownFormSchema>>({
+    resolver: zodResolver(teardownFormSchema),
+    defaultValues: {
+      removeLogging: true,
+      removeRum: service?.rum_enabled || false,
+      removeBucket: true,
+      removeCloudFiles: true,
+      removeCache: true,
+      apiToken: '',
+    },
+  })
+  const [removeLogging, setRemoveLoggingState] = useState(true)
   // Follows the service's RUM flag until the operator toggles it.
-  const [removeRum, setRemoveRum] = useDerivedState(service?.rum_enabled || false)
-  const [removeBucket, setRemoveBucket] = useState(true)
-  const [removeCloudFiles, setRemoveCloudFiles] = useState(true)
-  const [removeCache, setRemoveCache] = useState(true)
+  const [removeRum, setRemoveRumState] = useDerivedState(service?.rum_enabled || false)
+  const [removeBucket, setRemoveBucketState] = useState(true)
+  const [removeCloudFiles, setRemoveCloudFilesState] = useState(true)
+  const [removeCache, setRemoveCacheState] = useState(true)
   const [isExecuting, setIsExecuting] = useState(false)
   // Security: backend now requires a caller-supplied Fastly token with the
   // `global` scope for any teardown that touches Fastly (logging/CDN/bucket).
   // Server-stored credentials are no longer accepted as a fallback. The admin
   // must paste their own token each time so a CSRF or stolen-session attacker
   // cannot trigger a customer outage without also having a valid Fastly token.
-  const [apiToken, setApiToken] = useState('')
+  const [apiToken, setApiTokenState] = useState('')
+  const setRemoveLogging = (v: boolean) => { setRemoveLoggingState(v); form.setValue('removeLogging', v) }
+  const setRemoveRum = (v: boolean) => { setRemoveRumState(v); form.setValue('removeRum', v) }
+  const setRemoveBucket = (v: boolean) => { setRemoveBucketState(v); form.setValue('removeBucket', v) }
+  const setRemoveCloudFiles = (v: boolean) => { setRemoveCloudFilesState(v); form.setValue('removeCloudFiles', v) }
+  const setRemoveCache = (v: boolean) => { setRemoveCacheState(v); form.setValue('removeCache', v) }
+  const setApiToken = (v: string) => { setApiTokenState(v); form.setValue('apiToken', v) }
 
   const { lines, status, error: sseError, start, stop } = useSSE()
 

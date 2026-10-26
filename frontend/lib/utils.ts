@@ -1,6 +1,8 @@
-import { useMemo } from 'react'
+import { useMemo, useRef } from 'react'
 import { clsx, type ClassValue } from "clsx"
 import { twMerge } from "tailwind-merge"
+import { usePathname, useRouter, useSearchParams } from 'next/navigation'
+import 'nuqs'
 import { differenceInSeconds, formatDistanceToNow, parseISO, subHours } from 'date-fns'
 import { formatInTimeZone, toDate } from 'date-fns-tz'
 import { ShieldAlert, ServerCrash, Zap, Network, Globe, LayoutGrid, type LucideIcon } from 'lucide-react'
@@ -8,20 +10,48 @@ import { useFilterStore } from '@/stores/filterStore'
 import type { components } from '@/types/api.generated'
 import type { FiltersPayload, PlotlyTrace } from '@/types/api'
 
+export function ensureNuqsAdapter(): void {
+  if (typeof window === 'undefined') return
+  const ctx = (window as unknown as { __NuqsAdapterContext?: { _currentValue?: unknown; _currentValue2?: unknown } }).__NuqsAdapterContext
+  if (!ctx) return
+  const fallback = {
+    useAdapter() {
+      const firstRef = useRef(true)
+      if (firstRef.current) {
+        firstRef.current = false
+        ;(globalThis as Record<symbol, { abort?: () => void }>)[Symbol.for('nuqs.2.10.2.throttle-queue')]?.abort?.()
+      }
+      const router = useRouter()
+      const pathname = usePathname() || '/'
+      const sp = useSearchParams() ?? new URLSearchParams()
+      return {
+        searchParams: sp,
+        getSearchParamsSnapshot: () => new URLSearchParams(sp.toString()),
+        pathname,
+        rateLimitFactor: 0,
+        autoResetQueueOnUpdate: true,
+        updateUrl: (search: URLSearchParams, options: { history?: 'push' | 'replace'; scroll?: boolean; shallow?: boolean }) => {
+          const qs = search.toString()
+          const url = qs ? `${pathname}?${qs}` : pathname
+          if (!options.shallow) (options.history === 'push' ? router?.push : router?.replace)?.(url, { scroll: options.scroll ?? false })
+        },
+      }
+    },
+  }
+  ctx._currentValue = fallback
+  ctx._currentValue2 = fallback
+}
+ensureNuqsAdapter()
+
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
 }
-
-// ── Formatting Helpers ────────────────────────────────────────────────────────
 
 const _numFmtCache = new Map<string, Intl.NumberFormat>()
 function getNumberFormat(locale?: string, options?: Intl.NumberFormatOptions): Intl.NumberFormat {
   const key = `${locale ?? ''}|${options ? JSON.stringify(options) : ''}`
   let fmt = _numFmtCache.get(key)
-  if (!fmt) {
-    fmt = new Intl.NumberFormat(locale, options)
-    _numFmtCache.set(key, fmt)
-  }
+  if (!fmt) _numFmtCache.set(key, (fmt = new Intl.NumberFormat(locale, options)))
   return fmt
 }
 
@@ -29,10 +59,7 @@ const _dtFmtCache = new Map<string, Intl.DateTimeFormat>()
 function getDateTimeFormat(locale: string | undefined, options: Intl.DateTimeFormatOptions): Intl.DateTimeFormat {
   const key = `${locale ?? ''}|${JSON.stringify(options)}`
   let fmt = _dtFmtCache.get(key)
-  if (!fmt) {
-    fmt = new Intl.DateTimeFormat(locale, options)
-    _dtFmtCache.set(key, fmt)
-  }
+  if (!fmt) _dtFmtCache.set(key, (fmt = new Intl.DateTimeFormat(locale, options)))
   return fmt
 }
 
@@ -44,12 +71,8 @@ const BYTE_UNITS = ['B', 'KB', 'MB', 'GB', 'TB'] as const
 
 export function formatBytes(bytes: number): string {
   if (bytes === 0) return '0 B'
-  let value = bytes
-  let i = 0
-  while (value >= 1000 && i < BYTE_UNITS.length - 1) {
-    value /= 1024
-    i++
-  }
+  let value = bytes, i = 0
+  while (value >= 1000 && i < BYTE_UNITS.length - 1) { value /= 1024; i++ }
   return `${parseFloat(value.toFixed(2))} ${BYTE_UNITS[i]}`
 }
 
@@ -78,19 +101,12 @@ interface ElapsedOptions {
 
 export function formatElapsed(seconds: number | null | undefined, options: ElapsedOptions = {}): string {
   const {
-    minutesFrom = 60,
-    hoursFrom = 3600,
-    daysFrom = 86400,
-    rounding = 'floor',
-    fractionDigits = {},
-    justNowBelow,
-    suffix = '',
-    fallback = '—',
+    minutesFrom = 60, hoursFrom = 3600, daysFrom = 86400, rounding = 'floor',
+    fractionDigits = {}, justNowBelow, suffix = '', fallback = '—',
   } = options
   if (seconds == null || Number.isNaN(seconds)) return fallback
   const r = rounding === 'round' ? Math.round : Math.floor
-  const unit = (value: number, digits: number | undefined, label: string) =>
-    `${digits ? value.toFixed(digits) : r(value)}${label}${suffix}`
+  const unit = (v: number, digits: number | undefined, label: string) => `${digits ? v.toFixed(digits) : r(v)}${label}${suffix}`
   if (justNowBelow !== undefined && seconds < justNowBelow) return 'just now'
   if (seconds < minutesFrom) return unit(seconds, fractionDigits.seconds, 's')
   if (seconds < hoursFrom) return unit(seconds / 60, fractionDigits.minutes, 'm')
@@ -101,25 +117,17 @@ export function formatElapsed(seconds: number | null | undefined, options: Elaps
 export const ELAPSED_RELATIVE_AGO_JUST_NOW: ElapsedOptions = { suffix: ' ago', justNowBelow: 120 }
 export const ELAPSED_RELATIVE_AGO: ElapsedOptions = { suffix: ' ago' }
 export const ELAPSED_AGE_COMPACT: ElapsedOptions = {
-  rounding: 'round',
-  minutesFrom: 90,
-  hoursFrom: 5400,
-  daysFrom: 172800,
-  fractionDigits: { hours: 1, days: 1 },
+  rounding: 'round', minutesFrom: 90, hoursFrom: 5400, daysFrom: 172800, fractionDigits: { hours: 1, days: 1 },
 }
 export const ELAPSED_FRESHNESS: ElapsedOptions = {
-  rounding: 'round',
-  daysFrom: Infinity,
-  fractionDigits: { hours: 1 },
+  rounding: 'round', daysFrom: Infinity, fractionDigits: { hours: 1 },
 }
 
 export function resolveCountryName(code: string): string {
   if (!code || code.length !== 2 || typeof Intl === 'undefined') return code
   try {
     return new Intl.DisplayNames(['en'], { type: 'region' }).of(code.toUpperCase()) || code
-  } catch {
-    return code
-  }
+  } catch { return code }
 }
 
 export function formatCompactCount(n: number): string {
@@ -145,9 +153,7 @@ export function formatCountMaybe(n: number | null | undefined, options?: Intl.Nu
 
 export function formatValue(field: string | undefined, value: string | number | null | undefined): string {
   if (value === null || value === undefined) return 'null'
-  if (typeof value === 'number') {
-    return field?.includes('bytes') ? formatBytes(value) : formatCount(value)
-  }
+  if (typeof value === 'number') return field?.includes('bytes') ? formatBytes(value) : formatCount(value)
   const str = String(value)
   if (field === 'country' && str.length === 2) return resolveCountryName(str)
   if (field === 'pop' || field === 'region') return str.toUpperCase()
@@ -178,8 +184,7 @@ export function formatPercent(ratio: number, options?: { decimals?: number }): s
 }
 
 export function formatPctValue(v: number | null | undefined, decimals?: number): string {
-  if (v == null) return '—'
-  return `${decimals != null ? v.toFixed(decimals) : v}%`
+  return v == null ? '—' : `${decimals != null ? v.toFixed(decimals) : v}%`
 }
 
 export function formatMs(v: number | null | undefined, decimals = 1, unit = ' ms'): string {
@@ -218,18 +223,14 @@ export function formatForInput(date: string | Date, tz: string) {
   try {
     const d = toUTCDate(date)
     return isNaN(d.getTime()) ? '' : formatInTimeZone(d, tz, "yyyy-MM-dd'T'HH:mm:ss")
-  } catch {
-    return ''
-  }
+  } catch { return '' }
 }
 
 export function parseFromInput(dateStr: string, tz: string) {
   try {
     const d = toDate(dateStr, { timeZone: tz })
     return isNaN(d.getTime()) ? null : d.toISOString()
-  } catch {
-    return null
-  }
+  } catch { return null }
 }
 
 export function formatDate(date: string | Date, tz: string, pattern: string = 'yyyy-MM-dd h:mm:ss a') {
@@ -246,9 +247,7 @@ export function formatRelative(date: string | Date) {
   try {
     const d = toUTCDate(date)
     return isNaN(d.getTime()) ? 'Invalid Date' : formatDistanceToNow(d, { addSuffix: true })
-  } catch {
-    return 'Invalid Date'
-  }
+  } catch { return 'Invalid Date' }
 }
 
 export function formatTimeAgo(date: string | Date) {
@@ -257,8 +256,7 @@ export function formatTimeAgo(date: string | Date) {
   const diffSec = differenceInSeconds(new Date(), d)
   if (diffSec < 0) return 'just now'
   if (diffSec < 60) return _relFmt ? _relFmt.format(-diffSec, 'second') : `${diffSec}s ago`
-  const s = diffSec % 60
-  const m = Math.floor((diffSec % 3600) / 60)
+  const s = diffSec % 60, m = Math.floor((diffSec % 3600) / 60)
   if (diffSec < 3600) return `${m}m ${s}s ago`
   const h = Math.floor((diffSec % 86400) / 3600)
   if (diffSec < 86400) return `${h}h ${m}m ${s}s ago`
@@ -269,10 +267,7 @@ export function getTimezoneAbbr(date: Date, tz: string) {
   return formatInTimeZone(date, tz, 'zzz')
 }
 
-export function formatLocalDateTime(
-  value: string | number | Date,
-  options?: Intl.DateTimeFormatOptions,
-): string {
+export function formatLocalDateTime(value: string | number | Date, options?: Intl.DateTimeFormatOptions): string {
   const d = value instanceof Date ? value : new Date(value)
   if (isNaN(d.getTime())) return d.toLocaleString(undefined, options)
   return options ? getDateTimeFormat(undefined, options).format(d) : d.toLocaleString()
@@ -286,14 +281,11 @@ export function formatDuration(seconds: number | null | undefined, options?: { r
   if (seconds == null || seconds < 0) return '—'
   const rounded = (options?.round ?? true) ? Math.round(seconds) : seconds
   if (rounded < 60) return `${rounded}s`
-  const m = Math.floor(rounded / 60)
-  const s = rounded % 60
+  const m = Math.floor(rounded / 60), s = rounded % 60
   if (m < 60) return s > 0 ? `${m}m ${s}s` : `${m}m`
-  const h = Math.floor(m / 60)
-  const mRem = m % 60
+  const h = Math.floor(m / 60), mRem = m % 60
   if (h < 24) return mRem > 0 ? `${h}h ${mRem}m` : `${h}h`
-  const d = Math.floor(h / 24)
-  const hRem = h % 24
+  const d = Math.floor(h / 24), hRem = h % 24
   return hRem > 0 ? `${d}d ${hRem}h` : `${d}d`
 }
 
@@ -305,9 +297,7 @@ export function formatDeterministicUTC(iso: string | null | undefined): string {
     const datePart = getDateTimeFormat('en-US', { timeZone: 'UTC', year: 'numeric', month: 'short', day: 'numeric' }).format(d)
     const timePart = getDateTimeFormat('en-US', { timeZone: 'UTC', hour: '2-digit', minute: '2-digit' }).format(d)
     return `${datePart}, ${timePart} UTC`
-  } catch {
-    return iso
-  }
+  } catch { return iso }
 }
 
 export function formatBucket(iso: string, tz: string): string {
@@ -316,21 +306,13 @@ export function formatBucket(iso: string, tz: string): string {
   const d = new Date(utc)
   if (isNaN(d.getTime())) return iso
   return getDateTimeFormat('en-US', {
-    timeZone: tz,
-    month: 'short',
-    day: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: true,
+    timeZone: tz, month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true,
   }).format(d)
 }
 
 export function parseExtentMs(value: unknown, edge: 'earliest' | 'latest'): number | null {
   if (typeof value !== 'string' || value.length === 0) return null
-  const iso = value.length === 10
-    ? `${value}${edge === 'earliest' ? 'T00:00:00.000Z' : 'T23:59:59.999Z'}`
-    : value
+  const iso = value.length === 10 ? `${value}${edge === 'earliest' ? 'T00:00:00.000Z' : 'T23:59:59.999Z'}` : value
   const t = Date.parse(iso)
   return Number.isNaN(t) ? null : t
 }
@@ -342,8 +324,6 @@ export function toQueryDate(d: Date): string {
 export function formatDateTime(isoString: string | null | undefined, timeZone?: string): string {
   return isoString ? formatDate(isoString, timeZone || 'UTC', 'MMM d, yyyy h:mm:ss a') : 'Unknown'
 }
-
-// ── Chart Helpers ─────────────────────────────────────────────────────────────
 
 const CHART_LAYOUT_DEFAULTS = {
   tickformatstops: [
@@ -358,20 +338,13 @@ const CHART_LAYOUT_DEFAULTS = {
   ],
 }
 
-export function makeTimeXAxis(
-  startTime: string | null | undefined,
-  endTime: string | null | undefined,
-  timezone: string,
-) {
+export function makeTimeXAxis(startTime: string | null | undefined, endTime: string | null | undefined, timezone: string) {
   return {
     range: [
       startTime ? formatDate(startTime, timezone, 'yyyy-MM-dd HH:mm:ss.SSS') : '',
       endTime ? formatDate(endTime, timezone, 'yyyy-MM-dd HH:mm:ss.SSS') : '',
     ],
-    nticks: 8,
-    tickangle: -45,
-    automargin: true,
-    type: 'date' as const,
+    nticks: 8, tickangle: -45, automargin: true, type: 'date' as const,
     tickformatstops: CHART_LAYOUT_DEFAULTS.tickformatstops,
   }
 }
@@ -379,25 +352,13 @@ export function makeTimeXAxis(
 export const TIME_HOVER_LAYOUT = {
   hovermode: 'x unified' as const,
   legend: {
-    orientation: 'h' as const,
-    y: 1.05,
-    x: 0.5,
-    xanchor: 'center' as const,
-    yanchor: 'bottom' as const,
-    font: { size: 9.5 },
-    bgcolor: 'transparent',
+    orientation: 'h' as const, y: 1.05, x: 0.5, xanchor: 'center' as const, yanchor: 'bottom' as const,
+    font: { size: 9.5 }, bgcolor: 'transparent',
   },
 }
 
-export function useTimeLayout(
-  startTime: string | null | undefined,
-  endTime: string | null | undefined,
-  timezone: string,
-) {
-  return useMemo(
-    () => ({ ...TIME_HOVER_LAYOUT, xaxis: makeTimeXAxis(startTime, endTime, timezone) }),
-    [startTime, endTime, timezone],
-  )
+export function useTimeLayout(startTime: string | null | undefined, endTime: string | null | undefined, timezone: string) {
+  return useMemo(() => ({ ...TIME_HOVER_LAYOUT, xaxis: makeTimeXAxis(startTime, endTime, timezone) }), [startTime, endTime, timezone])
 }
 
 const MAX_DENSE_BUCKETS = 5000
@@ -418,14 +379,8 @@ export function denseTimeGrid(
 ): string[] | null {
   if (!intervalSeconds || intervalSeconds <= 0) return null
   const stepMs = intervalSeconds * 1000
-
-  const timesMs = [
-    ...new Set(times.map((t) => parseUtcMs(t)).filter((t) => !Number.isNaN(t))),
-  ].sort((a, b) => a - b)
-
-  let first = timesMs[0]
-  let last = timesMs[timesMs.length - 1]
-
+  const timesMs = [...new Set(times.map((t) => parseUtcMs(t)).filter((t) => !Number.isNaN(t)))].sort((a, b) => a - b)
+  let first = timesMs[0], last = timesMs[timesMs.length - 1]
   if (startTime) {
     const sMs = parseUtcMs(startTime)
     if (!Number.isNaN(sMs)) {
@@ -440,22 +395,10 @@ export function denseTimeGrid(
       if (last === undefined || endBucket > last) last = endBucket
     }
   }
-
   if (first === undefined || last === undefined || first > last) return null
-
-  if (
-    !timesMs.every((t) => {
-      const rem = Math.abs((t - first) % stepMs)
-      return rem === 0 || rem < 1000 || Math.abs(rem - stepMs) < 1000
-    })
-  ) {
-    return null
-  }
-
+  if (!timesMs.every((t) => { const rem = Math.abs((t - first) % stepMs); return rem === 0 || rem < 1000 || Math.abs(rem - stepMs) < 1000 })) return null
   const nBuckets = Math.round((last - first) / stepMs) + 1
-  if (nBuckets <= timesMs.length && !startTime && !endTime) return null
-  if (nBuckets > MAX_DENSE_BUCKETS) return null
-
+  if ((nBuckets <= timesMs.length && !startTime && !endTime) || nBuckets > MAX_DENSE_BUCKETS) return null
   const grid: string[] = []
   for (let k = 0; k < nBuckets; k++) grid.push(new Date(first + k * stepMs).toISOString())
   return grid
@@ -474,38 +417,24 @@ export function densifyBarSeries(
   startTime?: string | null,
   endTime?: string | null,
 ): BarSeriesPoint[] {
-  const grid = denseTimeGrid(
-    time_series.map((d) => d.time),
-    intervalSeconds,
-    startTime,
-    endTime,
-  )
+  const grid = denseTimeGrid(time_series.map((d) => d.time), intervalSeconds, startTime, endTime)
   if (!grid) return time_series
-
   if (hasCategories) {
-    const categories: string[] = []
-    const seen = new Set<string>()
-    const byKey = new Map<string, number>()
+    const categories: string[] = [], seen = new Set<string>(), byKey = new Map<string, number>()
     for (const d of time_series) {
       const ms = parseUtcMs(d.time)
       if (Number.isNaN(ms)) continue
       const cat = d.category != null ? String(d.category) : 'Other'
-      if (!seen.has(cat)) {
-        seen.add(cat)
-        categories.push(cat)
-      }
+      if (!seen.has(cat)) { seen.add(cat); categories.push(cat) }
       byKey.set(`${ms}|${cat}`, d.value)
     }
     const out: BarSeriesPoint[] = []
     for (const iso of grid) {
       const ms = parseUtcMs(iso)
-      for (const cat of categories) {
-        out.push({ time: iso, value: byKey.get(`${ms}|${cat}`) ?? 0, category: cat })
-      }
+      for (const cat of categories) out.push({ time: iso, value: byKey.get(`${ms}|${cat}`) ?? 0, category: cat })
     }
     return out
   }
-
   const byMs = new Map<number, number>()
   for (const d of time_series) {
     const ms = parseUtcMs(d.time)
@@ -515,34 +444,19 @@ export function densifyBarSeries(
 }
 
 export const CHART_COLORS = {
-  success: '#10b981',
-  danger: '#ef4444',
-  warning: '#f59e0b',
-  info: '#3b82f6',
-  neutral: '#94a3b8',
+  success: '#10b981', danger: '#ef4444', warning: '#f59e0b', info: '#3b82f6', neutral: '#94a3b8',
 } as const
 
 export function statusHex(code: number): string {
-  if (code >= 500) return CHART_COLORS.danger
-  if (code >= 400) return CHART_COLORS.warning
-  if (code >= 300) return CHART_COLORS.info
-  return CHART_COLORS.success
+  return code >= 500 ? CHART_COLORS.danger : code >= 400 ? CHART_COLORS.warning : code >= 300 ? CHART_COLORS.info : CHART_COLORS.success
 }
 
 export function denseBarTrace<R>(opts: {
-  name: string
-  rows: R[]
-  getTime: (row: R) => string | null | undefined
-  getValue: (row: R) => number | null | undefined
-  intervalSeconds: number
-  color: string
-  yaxis?: 'y2'
-  showlegend?: boolean
-  grid?: string[]
+  name: string; rows: R[]; getTime: (row: R) => string | null | undefined; getValue: (row: R) => number | null | undefined
+  intervalSeconds: number; color: string; yaxis?: 'y2'; showlegend?: boolean; grid?: string[]
 }) {
   const { name, rows, getTime, getValue, intervalSeconds, color, yaxis, showlegend, grid } = opts
-  const present: string[] = []
-  const byMs = new Map<number, number>()
+  const present: string[] = [], byMs = new Map<number, number>()
   for (const r of rows) {
     const t = getTime(r)
     if (t == null) continue
@@ -551,36 +465,19 @@ export function denseBarTrace<R>(opts: {
   }
   const x = grid ?? denseTimeGrid(present, intervalSeconds) ?? present
   return {
-    type: 'bar' as const,
-    name,
-    x,
-    y: x.map((h) => byMs.get(Date.parse(h)) ?? 0),
-    ...(yaxis ? { yaxis } : {}),
-    marker: { color },
-    ...(showlegend !== undefined ? { showlegend } : {}),
+    type: 'bar' as const, name, x, y: x.map((h) => byMs.get(Date.parse(h)) ?? 0),
+    ...(yaxis ? { yaxis } : {}), marker: { color }, ...(showlegend !== undefined ? { showlegend } : {}),
   }
 }
 
 export function lineTrace(opts: {
-  name: string
-  x: Array<string | null | undefined>
-  y: Array<number | null>
-  color: string
-  width?: number
-  dash?: 'dot' | 'dash'
-  yaxis?: 'y2'
-  connectgaps?: boolean
+  name: string; x: Array<string | null | undefined>; y: Array<number | null>; color: string
+  width?: number; dash?: 'dot' | 'dash'; yaxis?: 'y2'; connectgaps?: boolean
 }) {
   const { name, x, y, color, width = 2, dash, yaxis, connectgaps } = opts
   return {
-    type: 'scatter' as const,
-    mode: 'lines' as const,
-    name,
-    x,
-    y,
-    ...(yaxis ? { yaxis } : {}),
-    line: { color, width, dash },
-    ...(connectgaps !== undefined ? { connectgaps } : {}),
+    type: 'scatter' as const, mode: 'lines' as const, name, x, y,
+    ...(yaxis ? { yaxis } : {}), line: { color, width, dash }, ...(connectgaps !== undefined ? { connectgaps } : {}),
   }
 }
 
@@ -588,26 +485,13 @@ export function secondaryYAxis(
   title: string,
   extra: { ticksuffix?: string; rangemode?: 'tozero' | 'normal' | 'nonnegative'; showgrid?: boolean } = {},
 ) {
-  return {
-    title,
-    overlaying: 'y' as const,
-    side: 'right' as const,
-    showgrid: false,
-    rangemode: 'tozero' as const,
-    ...extra,
-  }
+  return { title, overlaying: 'y' as const, side: 'right' as const, showgrid: false, rangemode: 'tozero' as const, ...extra }
 }
 
 export function withSecondaryAxis<L extends { margin?: { r?: number } }>(
-  layout: L,
-  title: string,
-  extra?: Parameters<typeof secondaryYAxis>[1],
+  layout: L, title: string, extra?: Parameters<typeof secondaryYAxis>[1],
 ) {
-  return {
-    ...layout,
-    yaxis2: secondaryYAxis(title, extra),
-    margin: { ...layout.margin, r: 50 },
-  }
+  return { ...layout, yaxis2: secondaryYAxis(title, extra), margin: { ...layout.margin, r: 50 } }
 }
 
 export interface TimeseriesDataPoint {
@@ -631,35 +515,22 @@ export function useTimeseriesToTraces(
 ): PlotlyTrace[] {
   return useMemo((): PlotlyTrace[] => {
     if (!data?.length) return []
-
-    const sortedData = [...data]
-      .filter((d) => d && (d.time || d.ts))
-      .sort((a, b) => (a.time || a.ts || '').localeCompare(b.time || b.ts || ''))
-
+    const sortedData = [...data].filter((d) => d && (d.time || d.ts)).sort((a, b) => (a.time || a.ts || '').localeCompare(b.time || b.ts || ''))
     const xValues = sortedData.map((d) => {
       const t = d.time || d.ts || ''
       return timezone ? formatDate(t, timezone, 'yyyy-MM-dd HH:mm:ss') : t
     })
-
     return configs.map((config) => {
       const yValues = sortedData.map((d) => Number((d as Record<string, unknown>)[config.key]) || 0)
       const isBar = config.type === 'bar'
       return {
-        x: xValues,
-        y: yValues,
-        name: config.name,
-        type: config.type || 'scatter',
-        fill: config.fill || 'tozeroy',
-        ...(isBar
-          ? { marker: { color: config.color } }
-          : { mode: 'lines' as const, line: { width: 1.5, color: config.color } }),
+        x: xValues, y: yValues, name: config.name, type: config.type || 'scatter', fill: config.fill || 'tozeroy',
+        ...(isBar ? { marker: { color: config.color } } : { mode: 'lines' as const, line: { width: 1.5, color: config.color } }),
         ...(config.stackgroup ? { stackgroup: config.stackgroup } : {}),
       }
     })
   }, [data, configs, timezone])
 }
-
-// ── General Utilities & UI Helpers ────────────────────────────────────────────
 
 export function downloadBlob(blob: Blob, filename: string) {
   const url = window.URL.createObjectURL(blob)
@@ -676,27 +547,18 @@ export function downloadAsCsv(rows: Record<string, unknown>[], columns: string[]
     const s = String(v)
     return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
   }
-  const csv = [
-    columns.map(escape).join(','),
-    ...rows.map((r) => columns.map((c) => escape(r[c])).join(',')),
-  ].join('\n')
+  const csv = [columns.map(escape).join(','), ...rows.map((r) => columns.map((c) => escape(r[c])).join(','))].join('\n')
   downloadBlob(new Blob([csv], { type: 'text/csv;charset=utf-8;' }), filename)
 }
 
 export async function copyToClipboard(text: string): Promise<boolean> {
-  try {
-    await navigator.clipboard.writeText(text)
-    return true
-  } catch {
-    return false
-  }
+  try { await navigator.clipboard.writeText(text); return true } catch { return false }
 }
 
 export function keyByOccurrence<T>(items: readonly T[], label: (item: T) => string): { key: string; item: T }[] {
   const seen = new Map<string, number>()
   return items.map((item) => {
-    const base = label(item)
-    const n = seen.get(base) ?? 0
+    const base = label(item), n = seen.get(base) ?? 0
     seen.set(base, n + 1)
     return { key: n === 0 ? base : `${base}#${n}`, item }
   })
@@ -741,11 +603,8 @@ export function buildStreamDetailUrl(token: string, serviceId?: string | null): 
 }
 
 export function buildSessionDashboardUrl(
-  serviceId: string | null | undefined,
-  filterKey: string,
-  filterValue: string | null | undefined,
-  sessionStart: string | null | undefined,
-  sessionEnd: string | null | undefined,
+  serviceId: string | null | undefined, filterKey: string, filterValue: string | null | undefined,
+  sessionStart: string | null | undefined, sessionEnd: string | null | undefined,
 ): string {
   const params = new URLSearchParams()
   if (serviceId != null) params.set('service', serviceId)
@@ -767,10 +626,7 @@ let lastInteractionAt = typeof window !== 'undefined' ? Date.now() : 0
 let lastThrottledBump = 0
 let listenersAttached = false
 
-function bump() {
-  lastInteractionAt = Date.now()
-}
-
+function bump() { lastInteractionAt = Date.now() }
 function bumpThrottled() {
   const now = Date.now()
   if (now - lastThrottledBump < MOUSE_THROTTLE_MS) return
@@ -787,7 +643,6 @@ function ensureListeners() {
   window.addEventListener('pointerdown', bump, { passive: true })
   window.addEventListener('touchstart', bump, { passive: true })
 }
-
 ensureListeners()
 
 export function msSinceLastInteraction(): number {
@@ -808,10 +663,8 @@ export function __resetForTests(at: number = 0): void {
 }
 
 export const INTERVALS = [
-  { label: '1s', value: '1 second' },
-  { label: '1m', value: '1 minute' },
-  { label: '1h', value: '1 hour' },
-  { label: '1d', value: '1 day' },
+  { label: '1s', value: '1 second' }, { label: '1m', value: '1 minute' },
+  { label: '1h', value: '1 hour' }, { label: '1d', value: '1 day' },
 ] as const
 
 export type ChartInterval = typeof INTERVALS[number]['value']
@@ -857,11 +710,7 @@ export const RETENTION_OPTIONS = [
 
 type ToastKind = 'info' | 'success' | 'error' | 'warn'
 interface ToastOptions { durationMs?: number }
-interface ToastActionOptions extends ToastOptions {
-  actionLabel: string
-  onAction: () => void
-  kind?: ToastKind
-}
+interface ToastActionOptions extends ToastOptions { actionLabel: string; onAction: () => void; kind?: ToastKind }
 
 const PALETTE: Record<ToastKind, { bg: string; border: string; fg: string }> = {
   info: { bg: '#0f172a', border: '#1e293b', fg: '#e2e8f0' },
@@ -882,21 +731,13 @@ function ensureContainer(): HTMLDivElement | null {
   el.setAttribute('aria-label', 'Notifications')
   el.style.cssText = 'position:fixed;top:16px;right:16px;z-index:2147483647;display:flex;flex-direction:column;gap:8px;pointer-events:none;max-width:380px'
   document.body.appendChild(el)
-  stackContainer = el
-  return el
+  return (stackContainer = el)
 }
 
-function mountToastNode(
-  kind: ToastKind,
-  durationMs: number,
-  extraCss: string[] = [],
-  setup?: (node: HTMLDivElement, dismiss: () => boolean) => void,
-): void {
+function mountToastNode(kind: ToastKind, durationMs: number, extraCss: string[] = [], setup?: (node: HTMLDivElement, dismiss: () => boolean) => void): void {
   const root = ensureContainer()
   if (!root) return
-  const palette = PALETTE[kind]
-  const isAlert = kind === 'error' || kind === 'warn'
-  const node = document.createElement('div')
+  const palette = PALETTE[kind], isAlert = kind === 'error' || kind === 'warn', node = document.createElement('div')
   node.setAttribute('role', isAlert ? 'alert' : 'status')
   node.setAttribute('aria-live', isAlert ? 'assertive' : 'polite')
   node.style.cssText = [
@@ -905,7 +746,6 @@ function mountToastNode(
     'box-shadow:0 8px 24px rgba(0,0,0,.18)', 'pointer-events:auto', 'transition:opacity .18s ease,transform .18s ease',
     'opacity:0', 'transform:translateY(-4px)', ...extraCss,
   ].join(';')
-
   let dismissed = false
   const dismiss = (): boolean => {
     if (dismissed) return false
@@ -914,20 +754,13 @@ function mountToastNode(
     node.style.transform = 'translateY(-4px)'
     setTimeout(() => {
       node.remove()
-      if (root.childElementCount === 0 && stackContainer) {
-        stackContainer.remove()
-        stackContainer = null
-      }
+      if (root.childElementCount === 0 && stackContainer) { stackContainer.remove(); stackContainer = null }
     }, 200)
     return true
   }
-
   setup?.(node, dismiss)
   root.appendChild(node)
-  requestAnimationFrame(() => {
-    node.style.opacity = '1'
-    node.style.transform = 'translateY(0)'
-  })
+  requestAnimationFrame(() => { node.style.opacity = '1'; node.style.transform = 'translateY(0)' })
   setTimeout(dismiss, durationMs)
 }
 
@@ -937,9 +770,7 @@ export function showToast(message: string, kind: ToastKind = 'info', opts: Toast
   if (now - (recentMessages.get(message) || 0) < RECENT_DEDUP_MS) return
   recentMessages.set(message, now)
   if (recentMessages.size > 32) {
-    for (const [k, t] of recentMessages) {
-      if (now - t > RECENT_DEDUP_MS * 4) recentMessages.delete(k)
-    }
+    for (const [k, t] of recentMessages) if (now - t > RECENT_DEDUP_MS * 4) recentMessages.delete(k)
   }
   mountToastNode(kind, opts.durationMs ?? (kind === 'error' ? 5500 : 3500), [], (node, dismiss) => {
     node.textContent = message
@@ -947,32 +778,22 @@ export function showToast(message: string, kind: ToastKind = 'info', opts: Toast
   })
 }
 
-export function showReadOnlyToast(): void {
-  showToast('Read-only access — that action is unavailable for shared sessions.', 'warn')
-}
-
-export function showBusyToast(): void {
-  showToast('Server busy, retrying…', 'info', { durationMs: 2500 })
-}
+export function showReadOnlyToast(): void { showToast('Read-only access — that action is unavailable for shared sessions.', 'warn') }
+export function showBusyToast(): void { showToast('Server busy, retrying…', 'info', { durationMs: 2500 }) }
 
 export function showToastWithAction(message: string, opts: ToastActionOptions): void {
   if (typeof document === 'undefined') return
-  const kind: ToastKind = opts.kind ?? 'info'
-  const palette = PALETTE[kind]
+  const kind: ToastKind = opts.kind ?? 'info', palette = PALETTE[kind]
   mountToastNode(kind, opts.durationMs ?? 5500, ['display:flex', 'align-items:center', 'gap:12px'], (node, dismiss) => {
     const label = document.createElement('span')
     label.textContent = message
     label.style.cssText = 'flex:1;min-width:0'
     node.appendChild(label)
-
     const button = document.createElement('button')
     button.type = 'button'
     button.textContent = opts.actionLabel
     button.style.cssText = `background:transparent;color:${palette.fg};border:1px solid ${palette.fg};border-radius:6px;padding:4px 10px;font:600 12px/1 inherit;cursor:pointer;flex-shrink:0;opacity:.9`
-    button.addEventListener('click', (e) => {
-      e.stopPropagation()
-      if (dismiss()) opts.onAction()
-    })
+    button.addEventListener('click', (e) => { e.stopPropagation(); if (dismiss()) opts.onAction() })
     node.appendChild(button)
   })
 }
@@ -998,25 +819,16 @@ export interface RangeWire {
 export function resolveRangeWire({ relativeRange, isAutoRange, startTime, endTime, anchor }: RangeWireArgs): RangeWire {
   const rangeToken = relativeRange ?? (isAutoRange ? DEFAULT_RANGE_TOKEN : null)
   if (rangeToken !== null) {
-    return {
-      rangeToken,
-      rangeKey: rangeToken,
-      rangeBody: { range_token: rangeToken, anchor, start_time: startTime, end_time: endTime },
-    }
+    return { rangeToken, rangeKey: rangeToken, rangeBody: { range_token: rangeToken, anchor, start_time: startTime, end_time: endTime } }
   }
-  return {
-    rangeToken: null,
-    rangeKey: `abs:${startTime ?? ''}|${endTime ?? ''}`,
-    rangeBody: { start_time: startTime, end_time: endTime },
-  }
+  return { rangeToken: null, rangeKey: `abs:${startTime ?? ''}|${endTime ?? ''}`, rangeBody: { start_time: startTime, end_time: endTime } }
 }
 
 export const ANCHOR_QUANTUM_SECONDS = 60
 
 export function quantizeAnchor(iso?: string | null, now: Date = new Date()): string {
   const parsed = iso ? Date.parse(iso) : NaN
-  const ms = Number.isFinite(parsed) ? parsed : now.getTime()
-  const epoch = Math.floor(ms / 1000)
+  const epoch = Math.floor((Number.isFinite(parsed) ? parsed : now.getTime()) / 1000)
   return new Date((epoch - (epoch % ANCHOR_QUANTUM_SECONDS)) * 1000).toISOString().replace(/\.\d{3}Z$/, 'Z')
 }
 
@@ -1033,14 +845,9 @@ export function rangeLabelToHours(label: string): number | null {
 export function hydrateFilterStoreFromUrl(): void {
   if (hydrated || typeof window === 'undefined') return
   hydrated = true
-
   const params = new URLSearchParams(window.location.search)
-  const qsRange = params.get('range')
-  const qsStart = params.get('start_time')
-  const qsEnd = params.get('end_time')
-  const qsFilters = params.get('filters')
+  const qsRange = params.get('range'), qsStart = params.get('start_time'), qsEnd = params.get('end_time'), qsFilters = params.get('filters')
   const store = useFilterStore.getState()
-
   const rangeHours = qsRange ? rangeLabelToHours(qsRange) : null
   let touchedRange = false
   if (qsRange && rangeHours !== null) {
@@ -1051,7 +858,6 @@ export function hydrateFilterStoreFromUrl(): void {
     store.setRange(qsStart, qsEnd)
     touchedRange = true
   }
-
   let touchedFilters = false
   if (qsFilters) {
     try {
@@ -1065,50 +871,30 @@ export function hydrateFilterStoreFromUrl(): void {
           for (const v of spec.values) store.addFilter(col, String(v), spec.mode === 'exclude' ? 'exclude' : 'include')
         }
       }
-    } catch {
-      // Malformed ?filters= — ignore silently
-    }
+    } catch { /* ignore */ }
   }
-
   if (!touchedFilters) {
     let cleared = false
     params.forEach((value, key) => {
       if (!key.startsWith('filter_')) return
-      if (!cleared) {
-        store.clearFilters()
-        cleared = true
-        touchedFilters = true
-      }
+      if (!cleared) { store.clearFilters(); cleared = true; touchedFilters = true }
       store.addFilter(key.substring('filter_'.length).replace(/_\d+$/, ''), value, 'include')
     })
   }
-
   if (touchedRange || touchedFilters) {
     const url = new URL(window.location.href)
     for (const k of ['range', 'start_time', 'end_time', 'filters']) url.searchParams.delete(k)
-    Array.from(url.searchParams.keys()).forEach((key) => {
-      if (key.startsWith('filter_')) url.searchParams.delete(key)
-    })
+    Array.from(url.searchParams.keys()).forEach((key) => { if (key.startsWith('filter_')) url.searchParams.delete(key) })
     window.history.replaceState({}, '', url.toString())
   }
 }
 
-export function _resetUrlHydrationFlag(): void {
-  hydrated = false
-}
+export function _resetUrlHydrationFlag(): void { hydrated = false }
 
-interface InsightSection {
-  key: string
-  label: string
-  description: string
-  icon: LucideIcon
-}
+interface InsightSection { key: string; label: string; description: string; icon: LucideIcon }
 
 const ALL_SECTION: InsightSection = {
-  key: 'all',
-  label: 'All Categories',
-  description: 'All automated insights and detected anomalies across every category.',
-  icon: LayoutGrid,
+  key: 'all', label: 'All Categories', description: 'All automated insights and detected anomalies across every category.', icon: LayoutGrid,
 }
 
 export const INSIGHT_SECTIONS: readonly InsightSection[] = [
@@ -1148,24 +934,16 @@ export function categoryToSection(category: string | null | undefined): InsightS
 const SEVERITY_ORDER = ['critical', 'error', 'warning', 'info', 'clean'] as const
 const SEVERITY_RANK: Record<string, number> = Object.fromEntries(SEVERITY_ORDER.map((sev, i) => [sev, i]))
 
-export interface SectionableInsight {
-  category?: string | null
-  severity?: string | null
-  title?: string | null
-}
+export interface SectionableInsight { category?: string | null; severity?: string | null; title?: string | null }
 
 export function sortInsights<T extends SectionableInsight>(cards: readonly T[]): T[] {
   return [...cards].sort((a, b) => {
-    const ra = SEVERITY_RANK[a.severity ?? ''] ?? 99
-    const rb = SEVERITY_RANK[b.severity ?? ''] ?? 99
+    const ra = SEVERITY_RANK[a.severity ?? ''] ?? 99, rb = SEVERITY_RANK[b.severity ?? ''] ?? 99
     return ra !== rb ? ra - rb : (a.title ?? '').localeCompare(b.title ?? '')
   })
 }
 
-export interface SeveritySummary {
-  severity: string
-  count: number
-}
+export interface SeveritySummary { severity: string; count: number }
 
 export function summarizeSeverities(cards: readonly SectionableInsight[]): SeveritySummary[] {
   const counts = new Map<string, number>()
@@ -1178,10 +956,7 @@ export function summarizeSeverities(cards: readonly SectionableInsight[]): Sever
   })
 }
 
-export interface InsightSectionGroup<T> {
-  section: InsightSection
-  cards: T[]
-}
+export interface InsightSectionGroup<T> { section: InsightSection; cards: T[] }
 
 export function groupInsightsBySection<T extends SectionableInsight>(
   cards: readonly T[],
@@ -1194,10 +969,7 @@ export function groupInsightsBySection<T extends SectionableInsight>(
     if (bucket) bucket.push(card)
     else buckets.set(key, [card])
   }
-
-  const groups: InsightSectionGroup<T>[] = options?.includeAll
-    ? [{ section: ALL_SECTION, cards: sortInsights(cards) }]
-    : []
+  const groups: InsightSectionGroup<T>[] = options?.includeAll ? [{ section: ALL_SECTION, cards: sortInsights(cards) }] : []
   for (const section of [...INSIGHT_SECTIONS, OTHER_SECTION]) {
     const bucket = buckets.get(section.key)
     if (bucket?.length) groups.push({ section, cards: sortInsights(bucket) })
@@ -1207,9 +979,7 @@ export function groupInsightsBySection<T extends SectionableInsight>(
 }
 
 type Aggregates = Partial<Pick<components['schemas']['AggregatesResponse'], 'metric' | 'interval' | 'time_series'>>
-type Catalog = {
-  fields?: Pick<components['schemas']['LogFieldCatalogEntry'], 'id' | 'label' | 'unit' | 'precision'>[] | null
-}
+type Catalog = { fields?: Pick<components['schemas']['LogFieldCatalogEntry'], 'id' | 'label' | 'unit' | 'precision'>[] | null }
 
 export interface BuildTrafficDataParams {
   aggregates: Aggregates | null | undefined
@@ -1229,13 +999,10 @@ export interface BuildTrafficDataParams {
 export function getIntervalSeconds(intervalStr?: string | null): number | undefined {
   if (!intervalStr) return undefined
   const str = intervalStr.trim().toLowerCase()
-  if (INTERVAL_SECONDS[str as keyof typeof INTERVAL_SECONDS] !== undefined) {
-    return INTERVAL_SECONDS[str as keyof typeof INTERVAL_SECONDS]
-  }
+  if (INTERVAL_SECONDS[str as keyof typeof INTERVAL_SECONDS] !== undefined) return INTERVAL_SECONDS[str as keyof typeof INTERVAL_SECONDS]
   const match = str.match(/^(?:(\d+)\s*)?(s|sec|second|seconds|m|min|minute|minutes|h|hr|hour|hours|d|day|days)$/)
   if (match) {
-    const num = match[1] ? parseInt(match[1], 10) : 1
-    const u = match[2][0]
+    const num = match[1] ? parseInt(match[1], 10) : 1, u = match[2][0]
     return u === 's' ? num : u === 'm' ? num * 60 : u === 'h' ? num * 3600 : num * 86400
   }
   return undefined
@@ -1247,26 +1014,17 @@ export function buildTrafficData({
 }: BuildTrafficDataParams): PlotlyTrace[] {
   const time_series = aggregates?.time_series
   if (!time_series?.length) return []
-
   const actualMetric = aggregates?.metric || metric
   const isBar = actualMetric === 'requests' || actualMetric === '5xx' || actualMetric === '4xx'
   const metricField = catalog?.fields?.find((f) => f.id === actualMetric)
-  const unit = metricField?.unit || ''
-  const precision = metricField?.precision ?? (actualMetric === 'requests' ? 0 : 1)
-
-  const getHoverTemplate = (_m: string, label?: string) =>
-    `${label ? `${label}: ` : ''}%{y:${precision > 0 ? `.${precision}f` : ','}}${unit}<extra></extra>`
-
+  const unit = metricField?.unit || '', precision = metricField?.precision ?? (actualMetric === 'requests' ? 0 : 1)
+  const getHoverTemplate = (_m: string, label?: string) => `${label ? `${label}: ` : ''}%{y:${precision > 0 ? `.${precision}f` : ','}}${unit}<extra></extra>`
   const hasCategories = time_series.some((d) => d.category != null)
   const actualInterval = aggregates?.interval || effectiveInterval
   const intervalSeconds = getIntervalSeconds(actualInterval)
-  const barSeries: BarSeriesPoint[] = isBar
-    ? densifyBarSeries(time_series, intervalSeconds, hasCategories, startTime, endTime)
-    : time_series
-
+  const barSeries: BarSeriesPoint[] = isBar ? densifyBarSeries(time_series, intervalSeconds, hasCategories, startTime, endTime) : time_series
   let tsXValues: string[] | null = null
   const getTsXValues = (): string[] => (tsXValues ??= time_series.map((d) => formatDate(d.time, timezone, "yyyy-MM-dd HH:mm:ss")))
-
   let traces: PlotlyTrace[] = []
   if (hasCategories) {
     const catMap: Record<string, { x: string[]; y: number[] }> = {}
@@ -1297,7 +1055,6 @@ export function buildTrafficData({
       marker: { color: CHART_COLORS.info },
     }]
   }
-
   if (compareMode && compareAggregates?.time_series?.length && !hasCategories && startTime && compareStartTime) {
     const shift = new Date(startTime).getTime() - new Date(compareStartTime).getTime()
     traces.push({
@@ -1308,7 +1065,6 @@ export function buildTrafficData({
       hovertemplate: getHoverTemplate(actualMetric, 'Comparison'),
     })
   }
-
   if (!hasCategories && time_series.some((d) => d.baseline != null)) {
     traces.push({
       x: getTsXValues(), y: time_series.map((d) => d.baseline),
@@ -1317,11 +1073,8 @@ export function buildTrafficData({
       line: { color: '#a1a1aa', dash: 'dot', width: 2 },
     })
   }
-
   if (!hasCategories && trend !== 'off') {
-    const xValues = getTsXValues()
-    const yValues = time_series.map((d) => d.value)
-    const n = yValues.length
+    const xValues = getTsXValues(), yValues = time_series.map((d) => d.value), n = yValues.length
     const trendMap: Record<string, number> = { '1m': 60, '5m': 300, '1h': 3600, '1d': 86400 }
     const windowSize = trend === 'auto'
       ? Math.floor(n / (n > 1000 ? 20 : n > 100 ? 10 : 5))
@@ -1351,46 +1104,31 @@ export function buildTrafficData({
   return traces
 }
 
-// ── Insights Default Window & Baseline Selection ──────────────────────────────
-
 export const WINDOW_OPTIONS = [
-  { label: 'Last 15 Minutes', value: '0.25' },
-  { label: 'Last 1 Hour', value: '1' },
-  { label: 'Last 4 Hours', value: '4' },
-  { label: 'Last 24 Hours', value: '24' },
+  { label: 'Last 15 Minutes', value: '0.25' }, { label: 'Last 1 Hour', value: '1' },
+  { label: 'Last 4 Hours', value: '4' }, { label: 'Last 24 Hours', value: '24' },
 ]
 
 export const BASELINE_OPTIONS = [
-  { label: 'Previous 1 Hour', value: '1' },
-  { label: 'Last 24 Hours', value: '24' },
-  { label: 'Last 7 Days', value: '168' },
-  { label: 'Last 30 Days', value: '720' },
+  { label: 'Previous 1 Hour', value: '1' }, { label: 'Last 24 Hours', value: '24' },
+  { label: 'Last 7 Days', value: '168' }, { label: 'Last 30 Days', value: '720' },
 ]
 
 const STATIC_DEFAULT = { window: '24', baseline: '168' } as const
 
-export function historyHoursFromExtents(
-  earliest: string | null | undefined,
-  now: number = Date.now(),
-): number | null {
+export function historyHoursFromExtents(earliest: string | null | undefined, now: number = Date.now()): number | null {
   if (!earliest) return null
-  const iso = earliest.length === 10 ? earliest + 'T00:00:00.000Z' : earliest
-  const ms = Date.parse(iso)
-  if (!Number.isFinite(ms)) return null
-  return Math.max(0, (now - ms) / 3_600_000)
+  const ms = Date.parse(earliest.length === 10 ? earliest + 'T00:00:00.000Z' : earliest)
+  return Number.isFinite(ms) ? Math.max(0, (now - ms) / 3_600_000) : null
 }
 
-export function pickInsightsDefault(
-  historyHours: number | null,
-): { window: string; baseline: string } {
-  if (historyHours == null || !Number.isFinite(historyHours)) {
-    return { window: STATIC_DEFAULT.window, baseline: STATIC_DEFAULT.baseline }
-  }
+export function pickInsightsDefault(historyHours: number | null): { window: string; baseline: string } {
+  if (historyHours == null || !Number.isFinite(historyHours)) return { window: STATIC_DEFAULT.window, baseline: STATIC_DEFAULT.baseline }
   const h = historyHours
-  if (h < 1) return { window: '0.25', baseline: '1' } // <1h: smallest pair; cards light up once 1h elapses
-  if (h < 4) return { window: '1', baseline: '1' } //  ~1–4h: this hour vs the previous hour
-  if (h < 24) return { window: '4', baseline: '1' } //  ~4–24h: last 4h vs previous hour
-  if (h < 48) return { window: '4', baseline: '24' } // ~1–2d: last 4h vs previous day
-  if (h < 168) return { window: '24', baseline: '24' } // ~2–7d: day over day
-  return { window: '24', baseline: '168' } //              ≥7d: prior 7 day period (24h vs 7d)
+  if (h < 1) return { window: '0.25', baseline: '1' }
+  if (h < 4) return { window: '1', baseline: '1' }
+  if (h < 24) return { window: '4', baseline: '1' }
+  if (h < 48) return { window: '4', baseline: '24' }
+  if (h < 168) return { window: '24', baseline: '24' }
+  return { window: '24', baseline: '168' }
 }

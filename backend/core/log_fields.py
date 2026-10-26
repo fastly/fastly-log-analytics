@@ -53,10 +53,29 @@ hashing+storing session cookies. The flag is general — add it to any future
 field that should require an explicit operator choice.
 """
 
+from __future__ import annotations
+
 import hashlib
+import json
+import os
 import re
+import shutil
+import subprocess
+import sys
 import sys as _sys
+import tempfile
+from collections.abc import Callable, Collection, Mapping
+from dataclasses import dataclass
+from enum import StrEnum
+from types import MappingProxyType
 from typing import Any
+
+import structlog
+from fastapi import HTTPException
+
+from backend.core.fastly.client import fastly
+
+logger = structlog.get_logger(__name__)
 
 # ---------------------------------------------------------------------------
 # Fastly runtime limits (distinct from the template-size cap enforced at
@@ -88,6 +107,16 @@ _NUMERIC_FIELD_MAX_LEN = 20
 # Custom field validation constants
 
 VALID_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,47}$")
+for _early_mod in (
+    "backend.core._log_fields_data",
+    "backend.core.field_registry",
+    "backend.core.metric_expressions",
+    "backend.utils.vcl_utils",
+    "backend.utils.vcl_validator",
+    "backend.utils.fastly_auth",
+    "backend.utils.vcl_safety",
+):
+    _sys.modules[_early_mod] = _sys.modules[__name__]
 
 _DUCKDB_RESERVED = frozenset(
     {
@@ -960,8 +989,1096 @@ def get_lf_config(cfg: dict) -> dict:
     return cfg.get("log_fields") or _DEFAULT_LF_CONFIG.copy()
 
 
-_sys.modules["backend.core._log_fields_data"] = _sys.modules[__name__]
+# ── Canonical SQL fragment builders (formerly backend.core.metric_expressions) ──
+
+# Cache states that count as an edge hit (SQL ``IN`` tuple literal).
+HIT_STATES = "('HIT', 'HIT-STALE', 'HIT-CLUSTER')"
+
+
+def coalesce(expr: str, default: str) -> str:
+    """Render ``COALESCE(<expr>, <default>)`` byte-for-byte."""
+    return f"COALESCE({expr}, {default})"
+
+
+def sum_or_zero(expr: str, *, zero: str = "0", where: str | None = None) -> str:
+    """Render a NULL-safe sum: ``COALESCE(SUM(<expr>)[ FILTER (WHERE <where>)], <zero>)``."""
+    agg = f"SUM({expr})" if where is None else f"SUM({expr}) FILTER (WHERE {where})"
+    return coalesce(agg, zero)
+
+
+def column_or_default(
+    actual_cols: Collection[str],
+    col: str,
+    default: str,
+    *,
+    cast: str | None = None,
+) -> str:
+    """Return a quoted-column expression with a NULL default, or the bare default."""
+    if col not in actual_cols:
+        return default
+    ref = f'"{col}"' if cast is None else f'CAST("{col}" AS {cast})'
+    return coalesce(ref, default)
+
+
+def origin_latency_us(actual_cols: Collection[str], *, absent: str | None = "NULL") -> str | None:
+    """Return the origin-latency-in-microseconds SQL expression for a schema."""
+    has_ottfb = "ottfb" in actual_cols
+    has_ttfb = "ttfb" in actual_cols
+    if has_ottfb and has_ttfb:
+        return 'COALESCE("ottfb", "ttfb" * 1000000.0)'
+    if has_ottfb:
+        return '"ottfb"'
+    if has_ttfb:
+        return '"ttfb" * 1000000.0'
+    return absent
+
+
+_this_module = sys.modules[__name__]
+sys.modules["backend.core.metric_expressions"] = _this_module
+_core_pkg = sys.modules.get("backend.core")
+if _core_pkg is not None:
+    setattr(_core_pkg, "metric_expressions", _this_module)
+
+# ---------------------------------------------------------------------------
+# Enums (typed counterparts for the stringly-typed columns in the catalog)
+# ---------------------------------------------------------------------------
+
+
+class DuckType(StrEnum):
+    """DuckDB column types in use across the field catalog.
+
+    Values are kept identical to the strings that appear in the catalog's
+    `duckdb_type` key so cross-referencing diffs is trivial.
+    """
+
+    TIMESTAMP = "TIMESTAMP"
+    VARCHAR = "VARCHAR"
+    BOOLEAN = "BOOLEAN"
+    UTINYINT = "UTINYINT"
+    USMALLINT = "USMALLINT"
+    UINTEGER = "UINTEGER"
+    UBIGINT = "UBIGINT"
+    BIGINT = "BIGINT"
+    INTEGER = "INTEGER"
+    FLOAT = "FLOAT"
+    DOUBLE = "DOUBLE"
+
+
+class Group(StrEnum):
+    """Field grouping. Values match the legacy `group` column.
+
+    `CORE` replaces the legacy `None` sentinel for always-on fields so the
+    type can stay `Group` end-to-end instead of `Group | None`. The
+    `from_legacy` classmethod handles the conversion at boundaries.
+    """
+
+    CORE = "CORE"  # legacy None
+    A = "A"
+    B = "B"
+    C = "C"
+    D = "D"
+    E = "E"
+    F = "F"
+    G = "G"
+    H = "H"
+    I = "I"  # noqa: E741 — single-letter group code is the public contract
+    J = "J"
+    K = "K"
+    L = "L"
+    M = "M"
+    METRICS = "METRICS"
+    VIRTUAL = "VIRTUAL"
+    INTERNAL = "INTERNAL"
+
+    @classmethod
+    def from_legacy(cls, raw: str | None) -> Group:
+        """Translate the legacy `None | "A".."M" | "METRICS" | "VIRTUAL" | "INTERNAL"`."""
+        if raw is None:
+            return cls.CORE
+        return cls(raw)
+
+
+# ---------------------------------------------------------------------------
+# LogField dataclass — the row type
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class LogField:
+    """One row of the field catalog.
+
+    Frozen + slotted: mutation throws at runtime, instances are hashable
+    (usable as dict keys), per-instance memory is minimised. Constructed
+    via the catalog adapter at module init time (`_field_from_dict`); the
+    dict-authored catalog is the maintained source, this is the typed read
+    view over it.
+
+    Notes on field semantics that the dataclass shape captures:
+
+    - `vcl=None` means the field is derived (computed by DuckDB SQL) or
+      virtual (synthesised during analysis). `is_derived` is the public
+      accessor.
+    - `substr_cap` is the byte cap currently baked into the VCL literal for
+      url/ua/referer (and any custom fields routed through this registry).
+      `render_vcl(limits)` injects a runtime override without forcing every
+      call site to know which fields have caps.
+    - `required_by` is a tuple of insight IDs that name this field as a
+      hard dependency. The legacy list is mutable; this is intentionally
+      not.
+    """
+
+    code: str
+    label: str
+    group: Group
+    duck_type: DuckType
+
+    # All optional; defaulted for legacy compat with mostly-bare entries.
+    description: str = ""
+    vcl: str | None = None
+    typical_bytes: int = 0
+    required_by: tuple[str, ...] = ()
+    substr_cap: int | None = None
+    individually_toggleable: bool = False
+    # Opt-in field: excluded from ``resolve_enabled_fields`` even when its
+    # group is enabled; emits only when explicitly turned on via
+    # ``field_overrides``. See ``log_fields.DEFAULT_OFF_FIELD_IDS``.
+    default_off: bool = False
+    formatter: str | None = None
+    unit: str | None = None
+    precision: int | None = None
+    note: str | None = None
+
+    # ---- Derived properties (zero LOC at call sites) -----------------------
+
+    @property
+    def is_derived(self) -> bool:
+        """True for metrics/virtual/internal fields (`vcl is None`)."""
+        return self.vcl is None
+
+
+# ---------------------------------------------------------------------------
+# Legacy-dict → LogField construction
+# ---------------------------------------------------------------------------
+
+
+_SUBSTR_RE = re.compile(r"substr\([^,]+,\s*0,\s*(\d+)\)")
+
+
+def _detect_substr_cap(vcl: str | None) -> int | None:
+    """Find the byte cap baked into a `substr(expr, 0, N)` call in VCL.
+
+    Mirrors the legacy code's hard-coded knowledge that url/ua/referer (and
+    any custom field VCL the catalog ships) carry a cap in the literal.
+    Returns None when no substr call is present or the cap can't be parsed.
+    """
+    if vcl is None:
+        return None
+    m = _SUBSTR_RE.search(vcl)
+    if not m:
+        return None
+    try:
+        return int(m.group(1))
+    except ValueError:  # pragma: no cover — regex guarantees digits
+        return None
+
+
+def _field_from_dict(d: Mapping[str, Any]) -> LogField:
+    """Build a `LogField` from a `LOG_FIELD_CATALOG` dict entry.
+
+    Stable adapter — runs once per field at module init time. The dict-
+    literal authoring format and the LogField read view both stay; this
+    function is the single bridge that derives the latter from the former.
+
+    ``d`` is typed ``Mapping[str, Any]`` (not ``Mapping[str, object]``) to
+    match the catalog literal's annotation in _log_fields_data.py — the
+    heterogeneous value types (str / int / bool / list / None) are
+    discriminated per-key here rather than at the type-system level.
+    """
+    code = str(d["id"])
+    raw_group = d.get("group")
+    group = Group.from_legacy(raw_group if raw_group is None else str(raw_group))
+    duck_type = DuckType(str(d["duckdb_type"]))
+    vcl_raw = d.get("vcl")
+    vcl: str | None = None if vcl_raw is None else str(vcl_raw)
+    required_by_raw = d.get("required_by") or ()
+    required_by = tuple(str(x) for x in required_by_raw)
+    return LogField(
+        code=code,
+        label=str(d.get("label", code)),
+        group=group,
+        duck_type=duck_type,
+        description=str(d.get("description", "")),
+        vcl=vcl,
+        typical_bytes=int(d.get("typical_bytes", 0) or 0),
+        required_by=required_by,
+        substr_cap=_detect_substr_cap(vcl),
+        individually_toggleable=bool(d.get("individually_toggleable", False)),
+        default_off=bool(d.get("default_off", False)),
+        formatter=_opt_str(d.get("formatter")),
+        unit=_opt_str(d.get("unit")),
+        precision=_opt_int(d.get("precision")),
+        note=_opt_str(d.get("note")),
+    )
+
+
+def _opt_str(v: object) -> str | None:
+    return None if v is None else str(v)
+
+
+def _opt_int(v: Any) -> int | None:
+    if v is None:
+        return None
+    try:
+        return int(v)
+    except (TypeError, ValueError):  # pragma: no cover — catalog uses ints
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Registry construction
+# ---------------------------------------------------------------------------
+
+# Import the catalog at module init. The dict literals are the authoring
+# format and the LogField tuple is the read view. Both must agree byte-
+# for-byte; the cheapest way to guarantee that is to derive one from the
+# other, with a boot-time test asserting the equivalence.
+_CATALOG = LOG_FIELD_CATALOG
+
+REGISTRY: tuple[LogField, ...] = tuple(_field_from_dict(entry) for entry in _CATALOG)
+"""Tuple of every known log field, in wire order (matches Rust scorer)."""
+
+
+BY_CODE: Mapping[str, LogField] = MappingProxyType({f.code: f for f in REGISTRY})
+"""Code → field lookup, O(1). Read-only view."""
+
+if len(BY_CODE) != len(REGISTRY):  # pragma: no cover — guards a programmer mistake
+    raise RuntimeError("duplicate field codes in REGISTRY — check log_fields.py for collisions")
+
+
+def _group_index() -> Mapping[Group, tuple[LogField, ...]]:
+    """Group → ordered tuple of fields belonging to it."""
+    bucket: dict[Group, list[LogField]] = {g: [] for g in Group}
+    for f in REGISTRY:
+        bucket[f.group].append(f)
+    return MappingProxyType({g: tuple(items) for g, items in bucket.items()})
+
+
+BY_GROUP: Mapping[Group, tuple[LogField, ...]] = _group_index()
+"""Group → ordered tuple of fields. Read-only view."""
+
+
+# ---------------------------------------------------------------------------
+# Lookup helpers (the public API the migration will route callers through)
+# ---------------------------------------------------------------------------
+
+
+def get(code: str) -> LogField:
+    """Return the field with the given code. Raises `KeyError` on miss.
+
+    Use this in router code paths where an unknown code is a programmer
+    bug, not a user-input failure. For user-input validation use `try_get`.
+    """
+    return BY_CODE[code]
+
+
+def try_get(code: str) -> LogField | None:
+    """Return the field with the given code, or None when not present."""
+    return BY_CODE.get(code)
+
+
+def in_group(group: Group) -> tuple[LogField, ...]:
+    """Return all fields belonging to a specific group, in catalog order."""
+    return BY_GROUP[group]
+
+
+def derived() -> tuple[LogField, ...]:
+    """Return all derived fields (`vcl is None` — metrics, virtual, internal)."""
+    return tuple(f for f in REGISTRY if f.is_derived)
+
+
+# ---------------------------------------------------------------------------
+# System-managed field filtering (CMCD, Scoring)
+# ---------------------------------------------------------------------------
+#
+# CMCD and edge-scoring fields are generated on-demand from feature toggles
+# (backend/provision/orchestrator.py's FeatureState) and are never persisted
+# as user-authored custom_fields entries. Both provisioning (writing config)
+# and the custom-fields router (reading config) need to strip them from a
+# raw custom_fields list. The predicate lives here — a layer both callers
+# can import downward from — instead of in either caller's own package.
+# `backend.routers.services.core` re-exports both names for backward
+# compatibility (same-identity re-export; see AGENTS.md's shim convention).
+
+
+def _is_system_field(field_name: str) -> bool:
+    """Return True if field_name is a system-managed field (CMCD or Scoring).
+
+    System fields are generated on-demand from feature toggles and should
+    not be displayed as user-editable custom fields.
+    """
+    return field_name.startswith("cmcd_") or field_name.startswith("edge_")
+
+
+def _filter_user_custom_fields(custom_fields: list[dict]) -> list[dict]:
+    """Filter out system-managed fields from custom_fields list.
+
+    Returns only user-defined custom fields, excluding CMCD and Scoring fields.
+    """
+    return [f for f in custom_fields if not _is_system_field(f.get("name", ""))]
+
+
+# ---------------------------------------------------------------------------
+# Caller-facing API shape helpers + legacy re-exports
+# ---------------------------------------------------------------------------
+#
+# Every helper and constant the migration plan ships on the registry is a
+# direct re-export of the legacy `backend.core.log_fields` symbol — same
+# function/object identity, zero behavior drift. Callers can flip
+# ``from backend.core.log_fields import X`` to
+# ``from backend.core.log_fields import X`` and observe identical
+# behavior (parity guard: ``tests/core/test_field_registry.py``).
+#
+# When a downstream symbol gets re-implemented on top of REGISTRY
+# primitives, replace the re-export with the new function — the parity
+# test will fail loudly until both sides agree.
+
+
+# ── Encode tables (human-readable → single-char code) ─────────────────────────
+# Sources:
+#   client.geo.conn_speed:        https://www.fastly.com/documentation/reference/vcl/variables/geolocation/client-geo-conn-speed/
+#   client.geo.proxy_type:        https://www.fastly.com/documentation/reference/vcl/variables/geolocation/client-geo-proxy-type/
+#   client.geo.proxy_description: https://www.fastly.com/documentation/reference/vcl/variables/geolocation/client-geo-proxy-description/
+
+CONN_SPEED_ENCODE: dict[str, str] = {
+    "broadband": "B",
+    "cable": "C",
+    "dialup": "D",
+    "mobile": "M",
+    "oc12": "2",
+    "oc3": "3",
+    "t1": "1",
+    "t3": "T",
+    "satellite": "S",
+    "wireless": "W",
+    "xdsl": "X",
+}
+
+PROXY_TYPE_ENCODE: dict[str, str] = {
+    "anonymous": "A",
+    "aol": "O",
+    "blackberry": "K",
+    "consumer-privacy": "P",
+    "corporate": "C",
+    "edu": "E",
+    "hosting": "H",
+    "public": "U",
+    "transparent": "T",
+}
+
+PROXY_DESC_ENCODE: dict[str, str] = {
+    "apple": "a",
+    "cloud": "c",
+    "cloud-security": "s",
+    "dns": "d",
+    "google": "g",
+    "tor-exit": "x",
+    "tor-relay": "r",
+    "vpn": "v",
+    "web-browser": "w",
+}
+
+
+def vcl_encode_chain(vcl_var: str, encode: dict[str, str]) -> str:
+    """Return a VCL if/else expression that encodes known values to single chars.
+
+    Structure:
+      1. Fastly's "?" geo sentinel → "" (preserves existing behaviour)
+      2. Known values → their single-char code
+      3. Anything else (future Fastly additions) → vcl_var unchanged
+
+    vcl_var must be a simple VCL variable reference (e.g. client.geo.conn_speed)
+    because it is repeated verbatim as the passthrough terminal.
+    """
+    expr = vcl_var  # terminal: unknown new value passes through as-is
+    for value, code in reversed(list(encode.items())):
+        expr = f'if({vcl_var} == "{value}", "{code}", {expr})'
+    # "?" is Fastly's sentinel for unresolvable geo IPs — always map to ""
+    expr = f'if({vcl_var} == "?", "", {expr})'
+    return expr
+
+
+def duckdb_decode_case(col: str, encode: dict[str, str]) -> str:
+    """Return a SQL CASE expression that maps single-char codes back to full values.
+
+    Covers both sides of the deployment boundary:
+    - New logs (post-VCL-deploy): single-char code → full value
+    - Old logs (pre-VCL-deploy): full string → full string (identity)
+    - Truly unknown values (future additions): pass through via ELSE
+    """
+    decode = {code: value for value, code in encode.items()}
+    clauses = []
+    for code, value in decode.items():
+        clauses.append(f"WHEN \"{col}\" = '{code}' THEN '{value}'")
+    for value in encode:
+        clauses.append(f"WHEN \"{col}\" = '{value}' THEN '{value}'")
+    return f'CASE {" ".join(clauses)} ELSE "{col}" END'
+
+
+from backend.models._base import MetricType  # noqa: E402
+
+METRIC_DEFINITIONS = {
+    MetricType.REQUESTS.value: {"sql": "count(*)", "label": "Requests"},
+    MetricType.ERRORS_5XX.value: {"sql": "sum(CASE WHEN status >= 500 THEN 1 ELSE 0 END)", "label": "5xx Errors"},
+    "5xx_rate": {
+        "sql": "sum(CASE WHEN status >= 500 THEN 1 ELSE 0 END) * 100.0 / NULLIF(count(*), 0)",
+        "label": "5xx Error Rate",
+    },
+    MetricType.ERRORS_4XX.value: {
+        "sql": "sum(CASE WHEN status BETWEEN 400 AND 499 THEN 1 ELSE 0 END)",
+        "label": "4xx Errors",
+    },
+    "4xx_rate": {
+        "sql": "sum(CASE WHEN status BETWEEN 400 AND 499 THEN 1 ELSE 0 END) * 100.0 / NULLIF(count(*), 0)",
+        "label": "4xx Error Rate",
+    },
+    MetricType.LATENCY_P95.value: {
+        "sql": "PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY CAST(elapsed AS DOUBLE)) / 1000.0",
+        "label": "p95 Latency (s)",
+    },
+    MetricType.HIT_RATE.value: {
+        "sql": "SUM(CASE WHEN cache ILIKE 'HIT%' THEN 1 ELSE 0 END) * 100.0 / NULLIF(count(*), 0)",
+        "label": "Cache Hit Rate",
+    },
+    MetricType.THROUGHPUT.value: {"sql": "sum(resp_bytes)", "label": "Bandwidth"},
+    MetricType.TTFB.value: {
+        "sql": "PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY CAST(ottfb AS DOUBLE)) / 1000.0",
+        "label": "p95 TTFB (s)",
+    },
+    MetricType.REQ_SIZE.value: {"sql": "avg(req_bytes + req_header_bytes)", "label": "Request Size (Bytes)"},
+}
+
+
+def get_metric_sql(metric: str, status_codes: list[int] | None = None, table_name: str | None = None) -> str:
+    """Return the SQL aggregation expression or a full SELECT fragment for a metric."""
+    status_clause = ""
+    if status_codes and isinstance(status_codes, list) and len(status_codes) > 0:
+        codes_str = ", ".join(str(c) for c in status_codes if isinstance(c, int))
+        if codes_str:
+            status_clause = f" AND status IN ({codes_str})"
+
+    if metric == MetricType.SPECIFIC_STATUS.value:
+        agg_sql = f"sum(CASE WHEN 1=1 {status_clause} THEN 1 ELSE 0 END)"
+    elif metric == "specific_status_rate":
+        agg_sql = f"sum(CASE WHEN 1=1 {status_clause} THEN 1 ELSE 0 END) * 100.0 / NULLIF(count(*), 0)"
+    else:
+        agg_sql = METRIC_DEFINITIONS.get(metric, {}).get("sql", "count(*)")
+
+    if table_name:
+        if metric in (MetricType.ERRORS_5XX.value, MetricType.ERRORS_4XX.value, MetricType.SPECIFIC_STATUS.value):
+            # Optimization: use WHERE clause instead of sum(CASE WHEN...) for simple counts
+            if metric == MetricType.ERRORS_5XX.value:
+                return f"SELECT count(*) FROM {table_name} WHERE status >= 500"
+            elif metric == MetricType.ERRORS_4XX.value:
+                return f"SELECT count(*) FROM {table_name} WHERE status BETWEEN 400 AND 499"
+            elif metric == MetricType.SPECIFIC_STATUS.value:
+                return f"SELECT count(*) FROM {table_name} WHERE 1=1 {status_clause}"
+        elif metric == MetricType.TTFB.value:
+            return f"SELECT {agg_sql} FROM {table_name} WHERE ottfb IS NOT NULL"
+
+        return f"SELECT {agg_sql} FROM {table_name}"
+
+    return agg_sql
+
+
+# ---------------------------------------------------------------------------
+# Unified VCL safety validation (folded from backend.utils.vcl_safety)
+# ---------------------------------------------------------------------------
+
+
+class VclSafetyError(ValueError):
+    """Raised when a value can't be safely embedded in generated VCL.
+
+    Subclasses :class:`ValueError` so existing ``except ValueError``
+    handlers at legacy call sites keep catching it.
+    """
+
+
+_FORBIDDEN_STRICT = re.compile(r'["\\\x00-\x1f\x7f]')
+_FORBIDDEN_ALLOW_BACKSLASH = re.compile(r'["\x00-\x1f\x7f]')
+
+
+def validate_quoted_literal(value: str, *, allow_backslash: bool = False, field: str = "value") -> str:
+    """Validate a value destined for a VCL double-quoted string literal."""
+    pattern = _FORBIDDEN_ALLOW_BACKSLASH if allow_backslash else _FORBIDDEN_STRICT
+    m = pattern.search(value)
+    if m is not None:
+        raise VclSafetyError(
+            f"{field} contains a character unsafe to embed in a VCL string literal at offset "
+            f"{m.start()} ({value[m.start()]!r}); refusing to generate VCL "
+            "(values are validated upstream + Fastly /validate-gated, so this "
+            "indicates a caller that bypassed those checks)."
+        )
+    return value
+
+
+def validate_log_format_macro(macro: str) -> str:
+    """Validate the inline-VCL payload of a Fastly ``%{...}V`` log macro."""
+    if ";" in macro or "/*" in macro or "//" in macro or re.search(r"(?<!\\)[{}]", macro):
+        raise VclSafetyError("VCL macro contains invalid characters (;, /*, //, unescaped {, unescaped })")
+    return macro
+
+
+@dataclass
+class LintResult:
+    """Outcome of running falco on a VCL document."""
+
+    ok: bool
+    errors: list[str]
+    warnings: list[str]
+    skipped: bool = False
+    skipped_reason: str = ""
+
+
+def _parse_falco_output(returncode: int, out: str, err: str) -> tuple[list[str], list[str], int | None]:
+    """Parse falco ``-v`` output into (errors, warnings, summary_error_count)."""
+    out = out.strip()
+    err = err.strip()
+    combined = "\n".join(filter(None, [out, err]))
+
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    summary_re = re.compile(r"(\d+)\s+errors?\s*,\s*(\d+)\s+warnings?")
+    summary_match = None
+    for line in combined.splitlines():
+        if "errors" in line and "warnings" in line and summary_re.search(line):
+            summary_match = summary_re.search(line)
+            continue
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if "[ERROR]" in stripped or "🔥 [ERROR]" in stripped:
+            errors.append(stripped)
+        elif "[WARNING]" in stripped or "❗ [WARNING]" in stripped:
+            warnings.append(stripped)
+        elif "[INFO]" in stripped or "🔈 [INFO]" in stripped:
+            warnings.append(stripped)
+
+    summary_errors = int(summary_match.group(1)) if summary_match else None
+    return errors, warnings, summary_errors
+
+
+def lint_document(
+    vcl_text: str,
+    *,
+    falco_bin: str | None = None,
+    snippet_name: str = "vcl_document",
+    timeout: int = 10,
+    verbose: bool = True,
+) -> LintResult:
+    """Run ``falco lint`` over a COMPLETE VCL document."""
+    if falco_bin is None:
+        falco_bin = shutil.which("falco")
+    if falco_bin is None:
+        logger.warning(
+            "[vcl_safety] falco binary not on PATH; static analysis skipped for %s "
+            "(production should install falco via the backend Dockerfile)",
+            snippet_name,
+        )
+        return LintResult(ok=True, errors=[], warnings=[], skipped=True, skipped_reason="falco binary not found")
+
+    try:
+        returncode, out, err = _run_falco_lint(falco_bin, vcl_text, timeout=timeout, verbose=verbose)
+    except subprocess.TimeoutExpired:
+        return LintResult(
+            ok=False,
+            errors=[f"falco lint timed out after {timeout}s for {snippet_name!r}"],
+            warnings=[],
+        )
+
+    errors, warnings, summary_errors = _parse_falco_output(returncode, out, err)
+    ok = summary_errors == 0 if summary_errors is not None else (returncode == 0 and not errors)
+
+    if summary_errors and summary_errors > 0 and not errors:
+        errors.append(
+            f"falco reported {summary_errors} error(s) but no parseable diagnostics; stdout={out.strip()[:200]!r}"
+        )
+
+    return LintResult(ok=ok, errors=errors, warnings=warnings)
+
+
+def _run_falco_lint(
+    falco_bin: str,
+    vcl_text: str,
+    *,
+    timeout: int,
+    verbose: bool,
+    redact_path_to: str | None = None,
+) -> tuple[int, str, str]:
+    """Write ``vcl_text`` to a tempfile and run ``falco [-v] lint <file>``.
+
+    Shared subprocess plumbing for the two falco callers in this tree —
+    :func:`lint_log_format` (log-format JSON+VCL check) and
+    :func:`backend.utils.vcl_validator.lint_vcl` (scoring-snippet VCL
+    check). Each caller resolves ``falco_bin`` via its own
+    ``shutil.which("falco")`` (so test patches on the caller's module
+    namespace continue to work) and parses output its own way; this
+    helper only handles tempfile lifecycle + subprocess invocation +
+    optional path redaction.
+
+    ``redact_path_to``: when set, every occurrence of the tempfile path
+    in stdout/stderr is replaced with the given string so error messages
+    don't leak a ``/tmp/<random>.vcl`` filename to the operator.
+
+    Returns ``(returncode, stdout, stderr)``. Propagates
+    :class:`subprocess.TimeoutExpired` for the caller to translate into
+    its own failure shape; the tempfile is removed in either case.
+    """
+    argv = [falco_bin]
+    if verbose:
+        argv.append("-v")
+    # Path appended after tempfile is written.
+    argv.extend(["lint", ""])
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".vcl", delete=False, encoding="utf-8") as tmp:
+        tmp.write(vcl_text)
+        tmp_path = tmp.name
+
+    try:
+        argv[-1] = tmp_path
+        res = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, check=False)
+        stdout = res.stdout or ""
+        stderr = res.stderr or ""
+        if redact_path_to is not None:
+            stdout = stdout.replace(tmp_path, redact_path_to)
+            stderr = stderr.replace(tmp_path, redact_path_to)
+        return res.returncode, stdout, stderr
+    finally:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+
+
+def log_format_to_vcl_log(raw: str) -> str:
+    """Convert a Fastly log format template string to a VCL log concatenation.
+
+    Fastly format templates use %{vcl_expr}V for inline VCL expressions; everything
+    else is literal text. This produces the equivalent VCL log statement body:
+        {"literal"} + vcl_expr + {"literal"} ...
+    which is what Fastly generates internally when it compiles the logging endpoint.
+    """
+    # 1. Split FIRST on the raw template (with \{ / \} escapes intact). We
+    # cannot pre-unescape: macro-content validation below relies on being
+    # able to tell raw `{` / `}` (suspicious; injection vector) from
+    # `\{` / `\}` (legitimate Fastly literal-brace escape, used in patterns
+    # like `strftime(\{"format"\}, time.start)`). See audit finding 008.
+    parts = re.split(r"%\{(.*?)\}V", raw, flags=re.DOTALL)
+    vcl_parts = []
+    for i, part in enumerate(parts):
+        if i % 2 == 0:
+            # Literal text — unescape Fastly's \{ / \} into real braces,
+            # then wrap as a VCL heredoc string literal {"..."}.
+            part = part.replace("\\{", "{").replace("\\}", "}")
+            if part:
+                # We only need to worry if the literal text itself contains the
+                # heredoc closing delimiter "}. This is extremely rare in JSON
+                # (which uses " } or "} followed by more).
+                # For safety, if it exists, we split it into two heredocs.
+                if '"}' in part:
+                    part = part.replace('"}', '"} + {"}')
+                vcl_parts.append(f'{{"{part}"}}')
+        else:
+            # VCL expression — reject macro content containing a raw `;`
+            # OR an unescaped `{` / `}` (a brace not preceded by `\`).
+            # Those are the building blocks of the VCL-injection attack
+            # from audit finding 008: `;` terminates the surrounding log
+            # statement, then `}` closes the vcl_log block, then `{`
+            # opens a new attacker-controlled subroutine. Legitimate
+            # heredoc patterns like `strftime(\{"format"\}, ...)` use
+            # `\{` / `\}` escapes and pass cleanly.
+            # Reject macro content that could inject VCL structure (;, /*,
+            # //, unescaped { / }). Delegated to the unified safety module
+            # (see audit finding 008); VclSafetyError subclasses ValueError
+            # so existing handlers keep catching it.
+            validate_log_format_macro(part)
+            var = part.replace("\\{", "{").replace("\\}", "}").strip().replace('\\"', '"')
+            vcl_parts.append(var)
+
+    # Use + for concatenation to satisfy Falco/modern VCL
+    return " + ".join(vcl_parts)
+
+
+def lint_log_format(format_str: str, snippets: dict[str, str] | None = None) -> tuple[bool, str]:
+    """Validate a log format string for JSON structure and VCL syntax.
+
+    If snippets are provided, they are also linted in their respective subroutines.
+    Returns (is_valid, message).
+    """
+    if not format_str or not format_str.strip():
+        return False, "Format is empty"
+
+    # Check for internal newlines (DuckDB requirement)
+    if "\n" in format_str or "\r" in format_str:
+        return False, "Format contains newlines. It must be a single-line string."
+
+    # 1. Validate JSON structure by masking macros
+    # 0. Strip Fastly VCL escapes like \{ and \} for JSON validation
+    unescaped_str = format_str.replace("\\{", "{").replace("\\}", "}")
+
+    # Mask macros: %{var}V -> "vcl_macro"
+    test_str = re.sub(r'"%\{.*?\}V"', '"vcl_macro"', unescaped_str)
+    test_str = re.sub(r'"%\{.*?\}t"', '"time_macro"', test_str)
+    test_str = re.sub(r"%\{.*?\}V", '"vcl_macro"', test_str)
+    test_str = re.sub(r"%\{.*?\}t", '"time_macro"', test_str)
+
+    try:
+        data = json.loads(test_str)
+        if not isinstance(data, dict):
+            return False, "Format must be a JSON object"
+        if "timestamp" not in data:
+            return False, "Missing required field: 'timestamp'"
+    except json.JSONDecodeError as e:
+        return False, f"Invalid JSON structure: {str(e)}"
+
+    # 2. Deeper VCL validation using falco
+    falco_bin = shutil.which("falco")
+    if not falco_bin:
+        return True, "Valid JSON (falco linter not found in PATH for VCL validation)"
+
+    try:
+        log_body = log_format_to_vcl_log(format_str)
+    except ValueError as e:
+        return False, f"VCL Error: {str(e)}"
+
+    # Minimal Fastly VCL file that exercises the log statement and any snippets.
+    # Includes the subroutines falco expects so it does not complain about missing hooks.
+    snip = snippets or {}
+
+    vcl_src = (
+        f"sub vcl_recv    {{\n  #FASTLY recv\n{snip.get('recv_reset', '')}\n{snip.get('recv', '')}\n}}\n"
+        f"sub vcl_hash    {{\n  #FASTLY hash\n{snip.get('hash', '')}\n}}\n"
+        f"sub vcl_hit     {{\n  #FASTLY hit\n{snip.get('hit', '')}\n}}\n"
+        f"sub vcl_miss    {{\n  #FASTLY miss\n{snip.get('miss', '')}\n}}\n"
+        f"sub vcl_pass    {{\n  #FASTLY pass\n{snip.get('pass', '')}\n}}\n"
+        f"sub vcl_fetch   {{\n  #FASTLY fetch\n{snip.get('fetch', '')}\n}}\n"
+        f"sub vcl_error   {{\n  #FASTLY error\n{snip.get('error', '')}\n}}\n"
+        f"sub vcl_deliver {{\n  #FASTLY deliver\n{snip.get('deliver', '')}\n}}\n"
+        f"sub vcl_log     {{\n  #FASTLY log\n  log {log_body};\n}}\n"
+    )
+
+    try:
+        returncode, stdout, stderr = _run_falco_lint(
+            falco_bin, vcl_src, timeout=15, verbose=False, redact_path_to="vcl-config"
+        )
+    except subprocess.TimeoutExpired:
+        return True, "Valid JSON (falco validation timed out)"
+    except Exception as e:
+        return True, f"Valid JSON (VCL validation skipped: {str(e)})"
+
+    if returncode != 0:
+        # Fail-closed parse: scan BOTH streams. The prior ``msg = stdout or
+        # stderr`` short-circuited the moment falco emitted any non-error
+        # banner to stdout (version line, "linting…", etc.), letting an
+        # exit_code != 0 with errors on stderr silently fall through to the
+        # ``return True`` below — a fail-open VCL validator that accepted
+        # invalid log formats.
+        msg = (stdout or "") + "\n" + (stderr or "")
+        errors = []
+        for raw_line in msg.split("\n"):
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "[ERROR]" in line or "ERROR:" in line or "💥" in line:
+                errors.append(line)
+
+        if errors:
+            return False, "VCL Error: " + errors[0]
+
+        # falco exited non-zero but we couldn't pin a specific error line.
+        # Fail closed anyway — a non-zero exit means falco rejected the VCL,
+        # and falling through to ``return True`` here was a fail-open hole
+        # that accepted invalid VCL whenever falco's output format drifted.
+        return False, "VCL Error: falco rejected the VCL (exit status nonzero)"
+
+    return True, "Valid VCL configuration"
+
+
+# ---------------------------------------------------------------------------
+# VCL static analysis + user-input validation for scoring snippets
+# (folded from backend.utils.vcl_validator)
+# ---------------------------------------------------------------------------
+
+MAX_REGEX_BYTES = 2048
+
+
+class RegexValidationError(ValueError):
+    """Raised when an operator-supplied URL exclusion regex fails policy."""
+
+    def __init__(self, reason: str, message: str) -> None:
+        super().__init__(message)
+        self.reason = reason
+        self.message = message
+
+
+def validate_url_exclusion_regex(value: str) -> str:
+    """Cheap input policing on a user-typed regex before VCL interpolation."""
+    if not isinstance(value, str):
+        raise RegexValidationError("type", f"regex must be a string, got {type(value).__name__}")
+    cleaned = value.strip()
+    if not cleaned:
+        return ""
+    if len(cleaned.encode("utf-8")) > MAX_REGEX_BYTES:
+        raise RegexValidationError(
+            "too_long",
+            f"regex exceeds {MAX_REGEX_BYTES}-byte limit (got {len(cleaned.encode('utf-8'))})",
+        )
+    try:
+        validate_quoted_literal(cleaned, allow_backslash=True, field="regex")
+    except VclSafetyError:
+        m = _FORBIDDEN_ALLOW_BACKSLASH.search(cleaned)
+        ch = m.group(0) if m else "?"
+        raise RegexValidationError(
+            "disallowed_char",
+            f"regex contains disallowed character (codepoint U+{ord(ch):04X}): "
+            "double-quotes and control characters are not permitted because they "
+            "would break the surrounding VCL string literal",
+        )
+    try:
+        re.compile(cleaned)
+    except re.error as exc:
+        raise RegexValidationError(
+            "invalid_regex", f"regex failed to compile: {exc.msg} at position {exc.pos}"
+        ) from exc
+    return cleaned
+
+
+def _falco_binary() -> str | None:
+    """Return the falco binary path, or None if unavailable."""
+    return shutil.which("falco")
+
+
+def lint_vcl(
+    snippet: str,
+    *,
+    snippet_name: str = "scoring_snippet",
+    wrap_subroutine: str | None = "vcl_recv",
+) -> LintResult:
+    """Run ``falco lint`` over a VCL snippet body."""
+    falco_bin = _falco_binary()
+    if falco_bin is None:
+        logger.warning(
+            "[vcl_validator] falco binary not on PATH; static analysis skipped for %s "
+            "(production should install falco via the backend Dockerfile)",
+            snippet_name,
+        )
+        return LintResult(ok=True, errors=[], warnings=[], skipped=True, skipped_reason="falco binary not found")
+
+    if wrap_subroutine:
+        stage = wrap_subroutine.removeprefix("vcl_") if wrap_subroutine.startswith("vcl_") else wrap_subroutine
+        full_vcl = (
+            "backend F_origin_0 {\n"
+            '  .host = "example.com";\n'
+            '  .port = "80";\n'
+            "}\n"
+            "backend F_session_scorer {\n"
+            '  .host = "scorer.edgecompute.app";\n'
+            '  .port = "443";\n'
+            "}\n\n"
+            f"sub {wrap_subroutine} {{\n"
+            f"  #FASTLY {stage}\n"
+            "  declare local var.fastly_req_do_shield BOOL;\n"
+            f"{snippet}\n"
+            '  if (req.http.X-Lint-Sentinel == "lint-only-never-fires") {\n'
+            "    set req.backend = F_origin_0;\n"
+            "    set req.backend = F_session_scorer;\n"
+            "    set var.fastly_req_do_shield = false;\n"
+            "  }\n"
+            "}\n"
+        )
+    else:
+        full_vcl = snippet
+
+    return lint_document(full_vcl, falco_bin=falco_bin, snippet_name=snippet_name, timeout=10, verbose=True)
+
+
+def validate_recv_exclusion_regex_with_lint(
+    user_regex: str,
+    *,
+    build_full_snippet: Callable[[str], str],
+    require_falco: bool = True,
+) -> tuple[str, LintResult]:
+    """One-call validation: input policy → assemble snippet → falco lint."""
+    cleaned = validate_url_exclusion_regex(user_regex)
+    full_snippet = build_full_snippet(cleaned)
+    lint = lint_vcl(full_snippet, snippet_name="scoring_recv")
+    if lint.skipped and require_falco:
+        raise RegexValidationError(
+            "falco_unavailable",
+            f"VCL static-analysis tool unavailable: {lint.skipped_reason}. Refusing to ship unchecked VCL.",
+        )
+    if not lint.ok:
+        joined = "\n".join(lint.errors[:5])
+        raise RegexValidationError("vcl_lint", f"falco lint failed:\n{joined}")
+    return cleaned, lint
+
+
+# ---------------------------------------------------------------------------
+# Caller-supplied Fastly token validation for destructive operations
+# (folded from backend.utils.fastly_auth)
+# ---------------------------------------------------------------------------
+
+_DESTRUCTIVE_SCOPE = "global"
+
+
+def _parse_scopes(raw: Any) -> list[str]:
+    """Normalize the ``scope`` field from /tokens/self into a list of scopes."""
+    if raw is None:
+        return []
+    if isinstance(raw, list):
+        return [str(s).strip() for s in raw if s]
+    if isinstance(raw, str):
+        return [s for s in raw.split() if s]
+    return []
+
+
+def validate_destructive_token(token: str, *, service_id: str) -> dict[str, Any]:
+    """Validate that ``token`` is allowed to perform destructive ops on ``service_id``."""
+    token = (token or "").strip()
+    if not token:
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "error": "token_required",
+                "message": (
+                    "A Fastly API token with the 'global' scope is required "
+                    "for destructive operations. Server-stored credentials are "
+                    "not accepted here."
+                ),
+            },
+        )
+
+    try:
+        token_data = fastly("GET", "/tokens/self", token=token)
+    except Exception as e:
+        logger.warning("[fastly-auth] /tokens/self call failed: %s", e)
+        raise HTTPException(
+            status_code=401,
+            detail={"error": "token_validation_failed", "message": "Could not validate token with Fastly."},
+        )
+
+    if not isinstance(token_data, dict):
+        logger.warning("[fastly-auth] /tokens/self returned non-dict: %r", type(token_data))
+        raise HTTPException(
+            status_code=401,
+            detail={"error": "token_validation_failed", "message": "Unexpected token response shape."},
+        )
+
+    scopes = _parse_scopes(token_data.get("scope"))
+    if _DESTRUCTIVE_SCOPE not in scopes:
+        logger.warning(
+            "[fastly-auth] token (id=%s, user=%s) missing 'global' scope; got=%r",
+            token_data.get("id"),
+            token_data.get("user_id") or "(automation)",
+            scopes,
+        )
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "error": "insufficient_scope",
+                "message": (
+                    "Token does not have the 'global' scope required for destructive operations. "
+                    "Use a Fastly token with full 'global' permissions, not 'global:read', "
+                    "'purge_select', or 'purge_all'."
+                ),
+            },
+        )
+
+    bound_services = token_data.get("services")
+    if isinstance(bound_services, list) and bound_services:
+        if service_id not in bound_services:
+            logger.warning(
+                "[fastly-auth] token (id=%s) bound to %d services but not target service_id=%s",
+                token_data.get("id"),
+                len(bound_services),
+                service_id,
+            )
+            raise HTTPException(
+                status_code=401,
+                detail={
+                    "error": "service_not_authorized",
+                    "message": (
+                        "Token is bound to a service list that does not include the target service. "
+                        "Use a token with global access or with this service in its allow-list."
+                    ),
+                },
+            )
+
+    token_customer = (token_data.get("customer_id") or "").strip()
+    try:
+        service_data = fastly("GET", f"/service/{service_id}", token=token)
+    except Exception as e:
+        logger.warning(
+            "[fastly-auth] /service/%s call failed during tenant verification: %s",
+            service_id,
+            e,
+        )
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "error": "tenant_verification_failed",
+                "message": "Could not verify token tenant against target service.",
+            },
+        )
+
+    service_customer = ""
+    if isinstance(service_data, dict):
+        service_customer = (service_data.get("customer_id") or "").strip()
+
+    if not token_customer or not service_customer or token_customer != service_customer:
+        logger.warning(
+            "[fastly-auth] tenant mismatch: token customer=%r vs service customer=%r (token id=%s, service=%s)",
+            token_customer or "(missing)",
+            service_customer or "(missing)",
+            token_data.get("id"),
+            service_id,
+        )
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "error": "tenant_mismatch",
+                "message": (
+                    "The supplied token is not authorized for the target service's tenant. "
+                    "Use a token issued under the same Fastly account that owns this service."
+                ),
+            },
+        )
+
+    logger.info(
+        "[fastly-auth] destructive op authorized: token id=%s user=%s service=%s",
+        token_data.get("id"),
+        token_data.get("user_id") or "(automation)",
+        service_id,
+    )
+    return token_data
+
+
+_self_mod = _sys.modules[__name__]
+for _alias_mod in (
+    "backend.core._log_fields_data",
+    "backend.core.field_registry",
+    "backend.core.metric_expressions",
+    "backend.utils.vcl_utils",
+    "backend.utils.vcl_validator",
+    "backend.utils.fastly_auth",
+    "backend.utils.vcl_safety",
+):
+    _sys.modules[_alias_mod] = _self_mod
+    if "backend" in _sys.modules and hasattr(_sys.modules["backend"], "_MODULE_ALIASES"):
+        _sys.modules["backend"]._MODULE_ALIASES[_alias_mod] = __name__
 if "backend.core" in _sys.modules:
-    setattr(_sys.modules["backend.core"], "_log_fields_data", _sys.modules[__name__])
-if "backend" in _sys.modules and hasattr(_sys.modules["backend"], "_MODULE_ALIASES"):
-    _sys.modules["backend"]._MODULE_ALIASES["backend.core._log_fields_data"] = __name__
+    for _attr in ("_log_fields_data", "field_registry", "metric_expressions"):
+        setattr(_sys.modules["backend.core"], _attr, _self_mod)
+if "backend.utils" in _sys.modules:
+    for _attr in ("vcl_utils", "vcl_validator", "fastly_auth", "vcl_safety"):
+        setattr(_sys.modules["backend.utils"], _attr, _self_mod)

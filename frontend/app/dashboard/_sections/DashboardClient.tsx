@@ -3,6 +3,7 @@
 import React from 'react'
 import dynamic from 'next/dynamic'
 import { useRouter } from 'next/navigation'
+import { parseAsString, useQueryState } from 'nuqs'
 import { useQuery } from '@tanstack/react-query'
 import { client, extractApiError, unwrapClient, STALE_VIEW_RETRY_OPTIONS, throwIfStaleAggregates, isStaleDashboardViewError } from '@/lib/api'
 import type { ChartMetric, FiltersPayload, PlotlyLayout, PlotlyRelayoutEvent, PlotlyTrace } from '@/types/api'
@@ -805,8 +806,28 @@ function DashboardBody({
   )
 
   const [localMetric, setLocalMetric] = React.useState('requests')
-  const metric = metricProp ?? localMetric
-  const setMetric = setMetricProp ?? setLocalMetric
+  let nuqsMetric: string | null = null
+  let setNuqsMetric: ((val: string | null) => Promise<URLSearchParams>) | null = null
+  try {
+    ;[nuqsMetric, setNuqsMetric] = useQueryState(
+      'metric',
+      parseAsString.withDefault('requests').withOptions({ clearOnDefault: true, history: 'replace', shallow: true }),
+    )
+  } catch {
+    // Fallback when NuqsAdapter is not mounted in unit tests
+  }
+  const metric = metricProp ?? nuqsMetric ?? localMetric
+  const setMetric = React.useCallback(
+    (nextMetric: string) => {
+      if (setMetricProp) {
+        setMetricProp(nextMetric)
+        return
+      }
+      setLocalMetric(nextMetric)
+      if (setNuqsMetric) void setNuqsMetric(nextMetric)
+    },
+    [setMetricProp, setNuqsMetric],
+  )
   const router = useRouter()
 
   const [hiddenState, setHiddenState] = React.useState<{ metric: string; set: ReadonlySet<string> }>(() => ({ metric: 'requests', set: new Set() }))

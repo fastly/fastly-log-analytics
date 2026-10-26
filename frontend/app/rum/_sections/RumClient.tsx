@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect } from 'react'
 import { useSearchParams } from 'next/navigation'
+import { parseAsString, useQueryState } from 'nuqs'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { ColumnDef } from '@tanstack/react-table'
 import {
@@ -98,7 +99,13 @@ export function RumFaroVersionCard({ serviceId }: RumFaroVersionCardProps) {
 export function RumStatusPanel() {
   const searchParams = useSearchParams()
   const queryClient = useQueryClient()
-  const queryServiceId = searchParams?.get('service')
+  let nuqsServiceId: string | null = null
+  try {
+    ;[nuqsServiceId] = useQueryState('service', parseAsString)
+  } catch {
+    // Fallback when NuqsAdapter is not mounted in unit tests
+  }
+  const queryServiceId = nuqsServiceId ?? searchParams?.get('service')
   const storeServiceId = useServiceStore((s) => s.activeServiceId)
   const setActiveServiceId = useServiceStore((s) => s.setActiveServiceId)
 

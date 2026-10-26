@@ -3,6 +3,7 @@
 import React, { Suspense, useMemo } from 'react'
 import Link from 'next/link'
 import { useSearchParams } from 'next/navigation'
+import { parseAsString, useQueryState } from 'nuqs'
 import { useQuery } from '@tanstack/react-query'
 import {
   Film, Clock, Gauge, BarChart3, AlertTriangle, Wifi,
@@ -401,7 +402,13 @@ function StarvationTable({ events }: { events: StarvationEvent[] }) {
 
 function StreamDetailClient() {
   const searchParams = useSearchParams()
-  const token = searchParams.get('token')
+  let nuqsToken: string | null = null
+  try {
+    ;[nuqsToken] = useQueryState('token', parseAsString)
+  } catch {
+    // Fallback when NuqsAdapter is not mounted in unit tests
+  }
+  const token = nuqsToken ?? searchParams.get('token')
   const activeServiceId = useEffectiveServiceId() ?? null
   const bootstrapResolved = useBootstrapResolved()
 

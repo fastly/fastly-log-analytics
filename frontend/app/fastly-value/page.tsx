@@ -1,36 +1,9 @@
 'use client'
-
 import React, { useState } from 'react'
-import {
-  Shield,
-  ShieldAlert,
-  ShieldCheck,
-  AlertTriangle,
-  Network,
-  Globe,
-  Bot,
-  Users,
-  Gauge,
-  HardDrive,
-  ImageIcon,
-  BarChart3,
-  Layers,
-  TrendingUp,
-  TrendingDown,
-  Zap,
-  Timer,
-  ArrowDownToLine,
-  Wifi,
-  Lock,
-  Activity,
-  DollarSign,
-  Sparkles,
-  ArrowRight,
-} from 'lucide-react'
+import { Shield, ShieldAlert, ShieldCheck, AlertTriangle, Network, Globe, Bot, Users, Gauge, HardDrive, ImageIcon, BarChart3, Layers, TrendingUp, TrendingDown, Zap, Timer, ArrowDownToLine, Wifi, Lock, Activity, DollarSign, Sparkles, ArrowRight, } from 'lucide-react'
 import { useAnalyticsReportQuery } from '@/hooks/useDashboardCards'
 import { useReportRangeAnchor } from '@/hooks/useDashboardCards'
-import { client, unwrapClient } from "@/lib/api";
-import { ReportLayout } from '@/components/ReportLayout'
+import { client, unwrapClient } from "@/lib/api"; import { ReportLayout } from '@/components/ReportLayout'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
 import { Skeleton, SkeletonGrid } from '@/components/ui/skeleton'
 import type { ColumnDef } from '@tanstack/react-table'
@@ -42,129 +15,47 @@ import { formatBytes, formatCompactCount, formatCurrency, formatMs, formatPctVal
 import type { components } from '@/types/api.generated'
 import type { FiltersPayload } from '@/types/api'
 import { AssetsReportContent } from '@/app/assets-shield/_sections/AssetsClient'
-
 type ValueData = components['schemas']['ValueSummaryResponse']
 type CachingData = components['schemas']['CachingMetrics']
 type SecurityData = components['schemas']['SecurityMetrics']
 type BotData = components['schemas']['BotMetrics']
 type PerformanceData = components['schemas']['PerformanceMetrics']
 type NetworkData = components['schemas']['NetworkMetrics']
-
-const TABS = [
-  { id: 'summary', label: 'Summary', icon: BarChart3 },
-  { id: 'caching', label: 'CDN & Caching', icon: HardDrive },
-  { id: 'assets', label: 'Assets & Shield', icon: Layers },
-  { id: 'security', label: 'Security', icon: Shield },
-  { id: 'bots', label: 'Bot Management', icon: Bot },
-  { id: 'performance', label: 'Performance', icon: Gauge },
-  { id: 'network', label: 'Network', icon: Network },
-  { id: 'io', label: 'Image Optimizer', icon: ImageIcon },
-] as const
-
+const TABS = [ { id: 'summary', label: 'Summary', icon: BarChart3 }, { id: 'caching', label: 'CDN & Caching', icon: HardDrive },
+  { id: 'assets', label: 'Assets & Shield', icon: Layers }, { id: 'security', label: 'Security', icon: Shield }, { id: 'bots', label: 'Bot Management', icon: Bot },
+  { id: 'performance', label: 'Performance', icon: Gauge }, { id: 'network', label: 'Network', icon: Network },
+  { id: 'io', label: 'Image Optimizer', icon: ImageIcon }, ] as const
 const SUMMARY_SECTIONS = ['overview', 'caching', 'network'] as const
-
 type TabId = (typeof TABS)[number]['id']
-
-function groupCategoryTimeSeries(
-  timeSeries: { time?: string | null; value: number; category?: string | null }[] | null | undefined,
-  defaultCategory: string,
-): Record<string, { x: string[]; y: number[] }> {
-  const grouped: Record<string, { x: string[]; y: number[] }> = {}
+function groupCategoryTimeSeries( timeSeries: { time?: string | null; value: number; category?: string | null }[] | null | undefined, defaultCategory: string,
+): Record<string, { x: string[]; y: number[] }> { const grouped: Record<string, { x: string[]; y: number[] }> = {}
   if (!timeSeries?.length) return grouped
-  for (const p of timeSeries) {
-    const cat = p.category ?? defaultCategory
+  for (const p of timeSeries) { const cat = p.category ?? defaultCategory
     if (!grouped[cat]) grouped[cat] = { x: [], y: [] }
     grouped[cat].x.push(p.time ?? '')
     grouped[cat].y.push(p.value)
   }
   return grouped
 }
-
-const OFFLOAD_LAYOUT = {
-  yaxis: { title: 'Offload %', ticksuffix: '%', range: [0, 100] },
-  xaxis: { type: 'date' as const },
-  margin: { l: 50, r: 20, t: 10, b: 40 },
-}
-
-const CACHE_STATE_LAYOUT = {
-  yaxis: { title: 'Requests' },
-  xaxis: { type: 'date' as const },
-  barmode: 'stack' as const,
-  margin: { l: 60, r: 20, t: 10, b: 40 },
-}
-
-const THREAT_LAYOUT = {
-  yaxis: { title: 'Requests' },
-  xaxis: { type: 'date' as const },
-  barmode: 'stack' as const,
-  margin: { l: 60, r: 20, t: 10, b: 40 },
-}
-
-const SIGNAL_LAYOUT = {
-  yaxis: { title: 'Count' },
-  xaxis: { type: 'category' as const },
-  margin: { l: 60, r: 20, t: 10, b: 80 },
-}
-
-const BOT_DONUT_LAYOUT = {
-  margin: { l: 20, r: 20, t: 10, b: 10 },
-  showlegend: true,
-  legend: { orientation: 'h' as const, y: -0.15 },
-}
-
-const TOP_BOTS_LAYOUT = {
-  yaxis: { title: 'Requests' },
-  xaxis: { type: 'category' as const },
-  margin: { l: 60, r: 20, t: 10, b: 100 },
-}
-
-const LATENCY_LAYOUT = {
-  yaxis: { title: 'Latency (ms)', ticksuffix: 'ms' },
-  xaxis: { type: 'date' as const },
-  margin: { l: 60, r: 20, t: 10, b: 40 },
-}
-
-const PROTOCOL_LAYOUT = {
-  yaxis: { title: 'Requests' },
-  xaxis: { type: 'date' as const },
-  barmode: 'stack' as const,
-  margin: { l: 60, r: 20, t: 10, b: 40 },
-}
-
-export function OffloadAndCacheCharts({ caching }: { caching?: CachingData | null }) {
-  const offloadData = React.useMemo(() => {
+const OFFLOAD_LAYOUT = { yaxis: { title: 'Offload %', ticksuffix: '%', range: [0, 100] }, xaxis: { type: 'date' as const }, margin: { l: 50, r: 20, t: 10, b: 40 }, }
+const CACHE_STATE_LAYOUT = { yaxis: { title: 'Requests' }, xaxis: { type: 'date' as const }, barmode: 'stack' as const, margin: { l: 60, r: 20, t: 10, b: 40 }, }
+const THREAT_LAYOUT = { yaxis: { title: 'Requests' }, xaxis: { type: 'date' as const }, barmode: 'stack' as const, margin: { l: 60, r: 20, t: 10, b: 40 }, }
+const SIGNAL_LAYOUT = { yaxis: { title: 'Count' }, xaxis: { type: 'category' as const }, margin: { l: 60, r: 20, t: 10, b: 80 }, }
+const BOT_DONUT_LAYOUT = { margin: { l: 20, r: 20, t: 10, b: 10 }, showlegend: true, legend: { orientation: 'h' as const, y: -0.15 }, }
+const TOP_BOTS_LAYOUT = { yaxis: { title: 'Requests' }, xaxis: { type: 'category' as const }, margin: { l: 60, r: 20, t: 10, b: 100 }, }
+const LATENCY_LAYOUT = { yaxis: { title: 'Latency (ms)', ticksuffix: 'ms' }, xaxis: { type: 'date' as const }, margin: { l: 60, r: 20, t: 10, b: 40 }, }
+const PROTOCOL_LAYOUT = { yaxis: { title: 'Requests' }, xaxis: { type: 'date' as const }, barmode: 'stack' as const, margin: { l: 60, r: 20, t: 10, b: 40 }, }
+export function OffloadAndCacheCharts({ caching }: { caching?: CachingData | null }) { const offloadData = React.useMemo(() => {
     if (!caching?.offload_time_series?.length) return []
-    return [{
-      x: caching.offload_time_series.map(p => p.time),
-      y: caching.offload_time_series.map(p => p.value),
-      type: 'scatter',
-      mode: 'lines',
-      fill: 'tozeroy',
-      name: 'Offload %',
-      line: { color: CHART_COLORS.success },
-    }]
+    return [{ x: caching.offload_time_series.map(p => p.time), y: caching.offload_time_series.map(p => p.value), type: 'scatter', mode: 'lines', fill: 'tozeroy',
+      name: 'Offload %', line: { color: CHART_COLORS.success }, }]
   }, [caching])
-
-  const cacheStateData = React.useMemo(() => {
-    if (!caching?.cache_state_time_series?.length) return []
+  const cacheStateData = React.useMemo(() => { if (!caching?.cache_state_time_series?.length) return []
     const grouped = groupCategoryTimeSeries(caching.cache_state_time_series, 'OTHER')
-    const colors: Record<string, string> = {
-      HIT: CHART_COLORS.success,
-      MISS: CHART_COLORS.danger,
-      PASS: CHART_COLORS.warning,
-      OTHER: '#6b7280',
-    }
-    return Object.entries(grouped).map(([cat, d]) => ({
-      x: d.x,
-      y: d.y,
-      type: 'bar',
-      name: cat,
-      marker: { color: colors[cat] ?? '#6b7280' },
-    }))
+    const colors: Record<string, string> = { HIT: CHART_COLORS.success, MISS: CHART_COLORS.danger, PASS: CHART_COLORS.warning, OTHER: '#6b7280', }
+    return Object.entries(grouped).map(([cat, d]) => ({ x: d.x, y: d.y, type: 'bar', name: cat, marker: { color: colors[cat] ?? '#6b7280' }, }))
   }, [caching])
-
-  return (
-    <div className="grid gap-4 grid-cols-1 lg:grid-cols-2">
+  return ( <div className="grid gap-4 grid-cols-1 lg:grid-cols-2">
       <AnalyticsCard title="Origin Offload Trend" isEmpty={!offloadData.length}>
         <PlotlyChart data={offloadData} layout={OFFLOAD_LAYOUT} a11yTitle="Origin offload percentage over time" />
       </AnalyticsCard>
@@ -174,77 +65,43 @@ export function OffloadAndCacheCharts({ caching }: { caching?: CachingData | nul
     </div>
   )
 }
-
-function SummaryValueTab({ data, loading }: { data?: ValueData; loading?: boolean }) {
-  const overview = data?.overview
+function SummaryValueTab({ data, loading }: { data?: ValueData; loading?: boolean }) { const overview = data?.overview
   const caching = data?.caching
   const network = data?.network
-
-  return (
-    <div className="space-y-6 pt-4">
+  return ( <div className="space-y-6 pt-4">
       {/* Hero KPIs */}
       <div className="grid gap-4 grid-cols-2 lg:grid-cols-4">
-        <StatCard
-          title="Total Requests"
-          icon={Gauge}
-          loading={loading}
-          value={overview?.total_requests != null ? formatCompactCount(overview.total_requests) : '—'}
+        <StatCard title="Total Requests" icon={Gauge} loading={loading} value={overview?.total_requests != null ? formatCompactCount(overview.total_requests) : '—'}
           sub="processed at the edge"
-          tooltip="Total requests processed by Fastly in the selected time range"
-        />
-        <StatCard
-          title="Bandwidth Delivered"
-          icon={HardDrive}
-          loading={loading}
+          tooltip="Total requests processed by Fastly in the selected time range" />
+        <StatCard title="Bandwidth Delivered" icon={HardDrive} loading={loading}
           value={overview?.total_bandwidth_bytes != null ? formatBytes(overview.total_bandwidth_bytes) : '—'}
           sub={overview?.origin_offload_pct != null ? `${overview.origin_offload_pct}% served from cache` : ''}
-          tooltip="Total bandwidth delivered from edge and origin combined"
-        />
-        <StatCard
-          title="Cache Acceleration"
-          icon={Zap}
-          loading={loading}
+          tooltip="Total bandwidth delivered from edge and origin combined" />
+        <StatCard title="Cache Acceleration" icon={Zap} loading={loading}
           value={overview?.cache_acceleration_factor != null ? `${overview.cache_acceleration_factor}x` : '—'}
           sub="faster than origin"
-          tooltip="How much faster cached responses are compared to origin fetches"
-        />
-        <StatCard
-          title="Threats Blocked"
-          icon={Shield}
-          loading={loading}
+          tooltip="How much faster cached responses are compared to origin fetches" />
+        <StatCard title="Threats Blocked" icon={Shield} loading={loading}
           value={overview?.threats_blocked != null ? formatCompactCount(overview.threats_blocked) : '—'}
           sub="attacks blocked by WAF"
-          tooltip="Total requests blocked by Fastly's WAF and DDoS mitigation"
-        />
+          tooltip="Total requests blocked by Fastly's WAF and DDoS mitigation" />
       </div>
-
       {/* Expanded KPIs */}
       <div className="grid gap-4 grid-cols-2 lg:grid-cols-4">
-        <StatCard
-          title="Origin Offload"
-          icon={ArrowDownToLine}
-          loading={loading}
-          value={formatPctValue(caching?.origin_offload_pct)}
-          sub="requests served from cache"
-        />
-        <StatCard
-          title="Bandwidth Saved"
-          icon={HardDrive}
-          loading={loading}
+        <StatCard title="Origin Offload" icon={ArrowDownToLine} loading={loading} value={formatPctValue(caching?.origin_offload_pct)}
+          sub="requests served from cache" />
+        <StatCard title="Bandwidth Saved" icon={HardDrive} loading={loading}
           value={caching?.bandwidth_saved_bytes != null ? formatBytes(caching.bandwidth_saved_bytes) : '—'}
-          sub="served from edge cache"
-        />
-        {network?.http3_pct != null && (
-          <StatCard
+          sub="served from edge cache" />
+        {network?.http3_pct != null && ( <StatCard
             title="HTTP/3 Adoption"
             icon={Wifi}
             loading={loading}
             value={formatPctValue(network.http3_pct)}
-            sub="of requests using QUIC"
-          />
+            sub="of requests using QUIC" />
         )}
-        {network?.tls_pct != null && (
-          <StatCard
+        {network?.tls_pct != null && ( <StatCard
             title="TLS Encrypted"
             icon={Lock}
             loading={loading}
@@ -253,112 +110,52 @@ function SummaryValueTab({ data, loading }: { data?: ValueData; loading?: boolea
           />
         )}
       </div>
-
       {/* Charts */}
       <OffloadAndCacheCharts caching={caching} />
     </div>
   )
 }
-
-function CachingValueTab({ data }: { data?: CachingData | null }) {
-  if (!data) {
+function CachingValueTab({ data }: { data?: CachingData | null }) { if (!data) {
     return <p className="text-muted-foreground py-8 text-center">No caching data available for this service.</p>
   }
-
-  return (
-    <div className="space-y-6 pt-4">
+  return ( <div className="space-y-6 pt-4">
       <div className="grid gap-4 grid-cols-2 lg:grid-cols-4">
-        <StatCard
-          title="Origin Offload"
-          icon={HardDrive}
+        <StatCard title="Origin Offload" icon={HardDrive}
           value={data.origin_offload_pct != null ? `${data.origin_offload_pct}%` : '—'}
-          sub="requests served from cache"
-        />
-        <StatCard
-          title="Bandwidth Saved"
-          icon={ArrowDownToLine}
-          value={data.bandwidth_saved_bytes != null ? formatBytes(data.bandwidth_saved_bytes) : '—'}
-          sub="served from edge cache"
-        />
-        <StatCard
-          title="Shield Effectiveness"
-          icon={Shield}
+          sub="requests served from cache" />
+        <StatCard title="Bandwidth Saved" icon={ArrowDownToLine} value={data.bandwidth_saved_bytes != null ? formatBytes(data.bandwidth_saved_bytes) : '—'}
+          sub="served from edge cache" />
+        <StatCard title="Shield Effectiveness" icon={Shield}
           value={data.shield_effectiveness_pct != null ? `${data.shield_effectiveness_pct}%` : '—'}
-          sub="shield hit ratio"
-        />
-        <StatCard
-          title="Cache Breakdown"
-          icon={Layers}
-          value={data.hit_requests != null ? formatCompactCount(data.hit_requests) + ' hits' : '—'}
-          sub={[
+          sub="shield hit ratio" />
+        <StatCard title="Cache Breakdown" icon={Layers} value={data.hit_requests != null ? formatCompactCount(data.hit_requests) + ' hits' : '—'} sub={[
             data.miss_requests != null ? `${formatCompactCount(data.miss_requests)} miss` : null,
             data.pass_requests != null ? `${formatCompactCount(data.pass_requests)} pass` : null,
-          ].filter(Boolean).join(' · ')}
-        />
+          ].filter(Boolean).join(' · ')} />
       </div>
-
       <OffloadAndCacheCharts caching={data} />
     </div>
   )
 }
-
-function SecurityValueTab({ data }: { data?: SecurityData | null }) {
-  const threatData = React.useMemo(() => {
-    if (!data?.threat_time_series?.length) return []
+function SecurityValueTab({ data }: { data?: SecurityData | null }) { const threatData = React.useMemo(() => { if (!data?.threat_time_series?.length) return []
     const grouped = groupCategoryTimeSeries(data.threat_time_series, 'blocked')
     const colors: Record<string, string> = { blocked: CHART_COLORS.danger, logged: CHART_COLORS.warning }
-    return Object.entries(grouped).map(([cat, d]) => ({
-      x: d.x,
-      y: d.y,
-      type: 'bar',
-      name: cat.charAt(0).toUpperCase() + cat.slice(1),
-      marker: { color: colors[cat] ?? '#6b7280' },
-    }))
+    return Object.entries(grouped).map(([cat, d]) => ({ x: d.x, y: d.y, type: 'bar', name: cat.charAt(0).toUpperCase() + cat.slice(1),
+      marker: { color: colors[cat] ?? '#6b7280' }, }))
   }, [data])
-
-  const signalData = React.useMemo(() => {
-    if (!data?.top_waf_signals?.length) return []
-    return [{
-      x: data.top_waf_signals.map(s => s.signal),
-      y: data.top_waf_signals.map(s => s.count),
-      type: 'bar',
-      marker: { color: '#6366f1' },
-    }]
+  const signalData = React.useMemo(() => { if (!data?.top_waf_signals?.length) return []
+    return [{ x: data.top_waf_signals.map(s => s.signal), y: data.top_waf_signals.map(s => s.count), type: 'bar', marker: { color: '#6366f1' }, }]
   }, [data])
-
-  if (!data) {
-    return <p className="text-muted-foreground py-8 text-center">No WAF data available. Enable WAF logging to see security metrics.</p>
+  if (!data) { return <p className="text-muted-foreground py-8 text-center">No WAF data available. Enable WAF logging to see security metrics.</p>
   }
-
-  return (
-    <div className="space-y-6 pt-4">
+  return ( <div className="space-y-6 pt-4">
       <div className="grid gap-4 grid-cols-2 lg:grid-cols-4">
-        <StatCard
-          title="Threats Blocked"
-          icon={ShieldAlert}
-          value={data.waf_blocked != null ? formatCompactCount(data.waf_blocked) : '—'}
-          sub="requests blocked by WAF"
-        />
-        <StatCard
-          title="Threats Logged"
-          icon={Shield}
-          value={data.waf_logged != null ? formatCompactCount(data.waf_logged) : '—'}
-          sub="flagged but allowed"
-        />
-        <StatCard
-          title="WAF Passed"
-          icon={ShieldCheck}
-          value={data.waf_passed != null ? formatCompactCount(data.waf_passed) : '—'}
-          sub="clean requests"
-        />
-        <StatCard
-          title="WAF Signals"
-          icon={AlertTriangle}
-          value={data.top_waf_signals?.length ?? 0}
-          sub="distinct signal types detected"
-        />
+        <StatCard title="Threats Blocked" icon={ShieldAlert} value={data.waf_blocked != null ? formatCompactCount(data.waf_blocked) : '—'}
+          sub="requests blocked by WAF" />
+        <StatCard title="Threats Logged" icon={Shield} value={data.waf_logged != null ? formatCompactCount(data.waf_logged) : '—'} sub="flagged but allowed" />
+        <StatCard title="WAF Passed" icon={ShieldCheck} value={data.waf_passed != null ? formatCompactCount(data.waf_passed) : '—'} sub="clean requests" />
+        <StatCard title="WAF Signals" icon={AlertTriangle} value={data.top_waf_signals?.length ?? 0} sub="distinct signal types detected" />
       </div>
-
       <div className="grid gap-4 grid-cols-1 lg:grid-cols-2">
         <AnalyticsCard title="Threat Timeline" isEmpty={!threatData.length}>
           <PlotlyChart data={threatData} layout={THREAT_LAYOUT} a11yTitle="WAF blocked and logged requests over time" />
@@ -370,39 +167,22 @@ function SecurityValueTab({ data }: { data?: SecurityData | null }) {
     </div>
   )
 }
-
-function BotValueTab({ data }: { data?: BotData | null }) {
-  const donutData = React.useMemo(() => {
-    if (!data?.total_requests || !data?.bot_requests) return []
+function BotValueTab({ data }: { data?: BotData | null }) { const donutData = React.useMemo(() => { if (!data?.total_requests || !data?.bot_requests) return []
     const human = data.total_requests - data.bot_requests
-    return [{
-      values: [data.bot_requests, human],
-      labels: ['Bot Traffic', 'Human Traffic'],
-      type: 'pie',
-      hole: 0.5,
-      marker: { colors: [CHART_COLORS.warning, CHART_COLORS.success] },
-      textinfo: 'label+percent',
-    }]
+    return [{ values: [data.bot_requests, human], labels: ['Bot Traffic', 'Human Traffic'], type: 'pie', hole: 0.5,
+      marker: { colors: [CHART_COLORS.warning, CHART_COLORS.success] }, textinfo: 'label+percent', }]
   }, [data])
-
-  const topBotsData = React.useMemo(() => {
-    if (!data?.top_bots?.length) return []
-    return [{
-      x: data.top_bots.map(b => b.name),
-      y: data.top_bots.map(b => b.count),
-      type: 'bar',
+  const topBotsData = React.useMemo(() => { if (!data?.top_bots?.length) return []
+    return [{ x: data.top_bots.map(b => b.name), y: data.top_bots.map(b => b.count), type: 'bar',
       marker: { color: CHART_COLORS.warning },
     }]
   }, [data])
-
   if (!data) {
     return <p className="text-muted-foreground py-8 text-center">No bot data available. Bot detection requires User-Agent logging.</p>
   }
-
   const botPct = data.total_requests && data.bot_requests
     ? ((data.bot_requests / data.total_requests) * 100).toFixed(1)
     : null
-
   return (
     <div className="space-y-6 pt-4">
       <div className="grid gap-4 grid-cols-2 lg:grid-cols-3">
@@ -425,7 +205,6 @@ function BotValueTab({ data }: { data?: BotData | null }) {
           sub="all traffic in range"
         />
       </div>
-
       <div className="grid gap-4 grid-cols-1 lg:grid-cols-2">
         <AnalyticsCard title="Bot vs Human Traffic" isEmpty={!donutData.length}>
           <PlotlyChart data={donutData} layout={BOT_DONUT_LAYOUT} a11yTitle="Bot versus human traffic breakdown" />
@@ -437,7 +216,6 @@ function BotValueTab({ data }: { data?: BotData | null }) {
     </div>
   )
 }
-
 function PerformanceValueTab({ data }: { data?: PerformanceData | null }) {
   const latencyData = React.useMemo(() => {
     if (!data?.latency_time_series?.length) return []
@@ -453,11 +231,9 @@ function PerformanceValueTab({ data }: { data?: PerformanceData | null }) {
       line: { color: colors[cat] ?? '#6b7280' },
     }))
   }, [data])
-
   if (!data) {
     return <p className="text-muted-foreground py-8 text-center">No performance data available for this service.</p>
   }
-
   return (
     <div className="space-y-6 pt-4">
       <div className="grid gap-4 grid-cols-2 lg:grid-cols-4">
@@ -487,7 +263,6 @@ function PerformanceValueTab({ data }: { data?: PerformanceData | null }) {
           sub="99th percentile"
         />
       </div>
-
       <div className="grid gap-4 grid-cols-1">
         <AnalyticsCard title="Hit vs Miss Latency" isEmpty={!latencyData.length}>
           <PlotlyChart data={latencyData} layout={LATENCY_LAYOUT} a11yTitle="Cache hit versus miss latency over time" />
@@ -496,7 +271,6 @@ function PerformanceValueTab({ data }: { data?: PerformanceData | null }) {
     </div>
   )
 }
-
 function NetworkValueTab({ data }: { data?: NetworkData | null }) {
   const protocolData = React.useMemo(() => {
     if (!data?.protocol_time_series?.length) return []
@@ -515,11 +289,9 @@ function NetworkValueTab({ data }: { data?: NetworkData | null }) {
       marker: { color: colors[cat] ?? '#6b7280' },
     }))
   }, [data])
-
   if (!data) {
     return <p className="text-muted-foreground py-8 text-center">No network protocol data available for this service.</p>
   }
-
   return (
     <div className="space-y-6 pt-4">
       <div className="grid gap-4 grid-cols-2 lg:grid-cols-4">
@@ -548,7 +320,6 @@ function NetworkValueTab({ data }: { data?: NetworkData | null }) {
           sub="multiplexed connections"
         />
       </div>
-
       <div className="grid gap-4 grid-cols-1">
         <AnalyticsCard title="Protocol Adoption Trend" isEmpty={!protocolData.length}>
           <PlotlyChart data={protocolData} layout={PROTOCOL_LAYOUT} a11yTitle="HTTP protocol version distribution over time" />
@@ -557,7 +328,6 @@ function NetworkValueTab({ data }: { data?: NetworkData | null }) {
     </div>
   )
 }
-
 interface FastlyValueBodyProps {
   startTime: string | null
   endTime: string | null
@@ -567,7 +337,6 @@ interface FastlyValueBodyProps {
   isAutoRange: boolean
   anchor: string
 }
-
 function FastlyValueBody({
   startTime,
   endTime,
@@ -578,13 +347,11 @@ function FastlyValueBody({
   anchor,
 }: FastlyValueBodyProps) {
   const [activeTab, setActiveTab] = useState<TabId>('summary')
-
   const sections = React.useMemo(() => {
     if (activeTab === 'summary') return [...SUMMARY_SECTIONS]
     if (activeTab === 'assets') return ['overview'] // dummy section, query disabled
     return [activeTab]
   }, [activeTab]) as ("security" | "caching" | "bots" | "performance" | "network" | "io" | "overview")[]
-
   const valueQuery = useAnalyticsReportQuery<ValueData | undefined>({
     namespace: ['value', 'summary'],
     serviceId: activeServiceId,
@@ -606,7 +373,6 @@ function FastlyValueBody({
       enabled: activeTab !== 'assets',
     },
   })
-
   const data = valueQuery.data
   const hasActiveSectionData =
     activeTab === 'summary'
@@ -626,7 +392,6 @@ function FastlyValueBody({
                   : true
   const loading = activeTab !== 'assets' && (valueQuery.isLoading || (valueQuery.isFetching && !hasActiveSectionData))
   const refreshing = activeTab !== 'assets' && valueQuery.isFetching && hasActiveSectionData
-
   return (
     <div className="space-y-6">
       <Tabs
@@ -641,7 +406,6 @@ function FastlyValueBody({
             </TabsTrigger>
           ))}
         </TabsList>
-
         {loading ? (
           <div className="space-y-4 pt-4">
             <div className="grid gap-4 grid-cols-2 lg:grid-cols-4">
@@ -695,10 +459,8 @@ function FastlyValueBody({
     </div>
   )
 }
-
 export function FastlyValueClient() {
   const { relativeRange, isAutoRange, anchor } = useReportRangeAnchor()
-
   return (
     <ReportLayout
       title="Service Summary"
@@ -720,16 +482,10 @@ export function FastlyValueClient() {
     </ReportLayout>
   )
 }
-
 export default FastlyValueClient
-
-
 type IOData = components['schemas']['IOMetrics']
-
 type IOOpportunity = components['schemas']['IOOpportunityRow']
-
 type ConversionPair = NonNullable<IOData['io_format_conversion_pairs']>[number]
-
 const OPPORTUNITY_COLUMNS: ColumnDef<IOOpportunity>[] = [
   {
     id: 'url',
@@ -779,7 +535,6 @@ const OPPORTUNITY_COLUMNS: ColumnDef<IOOpportunity>[] = [
     ),
   },
 ]
-
 const CONVERSION_COLUMNS: ColumnDef<ConversionPair>[] = [
   {
     id: 'input_format',
@@ -825,25 +580,21 @@ const CONVERSION_COLUMNS: ColumnDef<ConversionPair>[] = [
     ),
   },
 ]
-
 const VOLUME_LAYOUT = {
   yaxis: { title: 'IO Transforms', ticksuffix: '' },
   xaxis: { type: 'date' as const },
   margin: { l: 60, r: 20, t: 10, b: 40 },
 }
-
 const SAVINGS_LAYOUT = {
   yaxis: { title: 'Bandwidth Saved', ticksuffix: '' },
   xaxis: { type: 'date' as const },
   margin: { l: 60, r: 20, t: 10, b: 40 },
 }
-
 const DONUT_LAYOUT = {
   margin: { l: 20, r: 20, t: 10, b: 10 },
   showlegend: true,
   legend: { orientation: 'h' as const, y: -0.15 },
 }
-
 const FORMAT_COLORS: Record<string, string> = {
   webp: '#8b5cf6',
   avif: '#06b6d4',
@@ -854,12 +605,10 @@ const FORMAT_COLORS: Record<string, string> = {
   svg: '#6366f1',
   mp4: '#ec4899',
 }
-
 function truncateUrl(url: string, max = 60): string {
   if (url.length <= max) return url
   return url.slice(0, max - 1) + '…'
 }
-
 function OpportunitiesTable({ opps }: { opps: IOOpportunity[] }) {
   if (!opps.length) return null
   return (
@@ -877,10 +626,8 @@ function OpportunitiesTable({ opps }: { opps: IOOpportunity[] }) {
     </AnalyticsCard>
   )
 }
-
 function IOUpsellView({ data }: { data: IOData }) {
   const opps = data.optimization_opportunities ?? []
-
   return (
     <div className="space-y-6 pt-4">
       <div className="rounded-lg border border-purple-500/20 bg-purple-500/5 p-4">
@@ -890,7 +637,6 @@ function IOUpsellView({ data }: { data: IOData }) {
           reducing bandwidth by up to 40%.
         </p>
       </div>
-
       <div className="grid gap-4 grid-cols-2 lg:grid-cols-4">
         <StatCard
           title="Image Requests"
@@ -917,12 +663,10 @@ function IOUpsellView({ data }: { data: IOData }) {
           sub="high-bandwidth image URLs"
         />
       </div>
-
       <OpportunitiesTable opps={opps} />
     </div>
   )
 }
-
 function padSinglePoint(points: { time: string; value: number }[]): { time: string; value: number }[] {
   if (points.length !== 1) return points
   const d = new Date(points[0].time)
@@ -931,7 +675,6 @@ function padSinglePoint(points: { time: string; value: number }[]): { time: stri
   const fmt = (dt: Date) => dt.toISOString().slice(0, 10)
   return [{ time: fmt(prev), value: 0 }, points[0], { time: fmt(next), value: 0 }]
 }
-
 function IOEnabledView({ data }: { data: IOData }) {
   const trendData = React.useMemo(() => {
     const hasTransforms = data.io_time_series?.some(p => p.value > 0)
@@ -961,7 +704,6 @@ function IOEnabledView({ data }: { data: IOData }) {
     }
     return []
   }, [data])
-
   const donutData = React.useMemo(() => {
     if (data.format_distribution?.length) {
       const dist = data.format_distribution
@@ -995,7 +737,6 @@ function IOEnabledView({ data }: { data: IOData }) {
     }
     return []
   }, [data])
-
   const savingsData = React.useMemo(() => {
     if (!data.io_compression_time_series?.length) return []
     const pts = padSinglePoint(data.io_compression_time_series.map(p => ({ time: p.time, value: p.value })))
@@ -1009,9 +750,7 @@ function IOEnabledView({ data }: { data: IOData }) {
       line: { color: CHART_COLORS.success },
     }]
   }, [data])
-
   const opps = data.optimization_opportunities ?? []
-
   return (
     <div className="space-y-6 pt-4">
       <div className="grid gap-4 grid-cols-2 lg:grid-cols-4">
@@ -1040,7 +779,6 @@ function IOEnabledView({ data }: { data: IOData }) {
           sub="WebP + AVIF + JPEGXL"
         />
       </div>
-
       <div className="grid gap-4 grid-cols-1 lg:grid-cols-2">
         <AnalyticsCard title={data.io_time_series?.some(p => p.value > 0) ? 'IO Volume Trend' : 'IO Savings Trend'} isEmpty={!trendData.length}>
           <PlotlyChart
@@ -1061,7 +799,6 @@ function IOEnabledView({ data }: { data: IOData }) {
           </AnalyticsCard>
         )}
       </div>
-
       {data.io_actual_bandwidth_saved_bytes != null && (
         <div className="grid gap-4 grid-cols-1 lg:grid-cols-2">
           <StatCard
@@ -1072,7 +809,6 @@ function IOEnabledView({ data }: { data: IOData }) {
           />
         </div>
       )}
-
       {data.io_format_conversion_pairs?.length ? (
         <AnalyticsCard
           title="Format Conversions"
@@ -1087,18 +823,15 @@ function IOEnabledView({ data }: { data: IOData }) {
           />
         </AnalyticsCard>
       ) : null}
-
       {savingsData.length > 0 && (
         <AnalyticsCard title="Compression Savings Trend" isEmpty={false}>
           <PlotlyChart data={savingsData} layout={SAVINGS_LAYOUT} a11yTitle="IO bandwidth savings over time" />
         </AnalyticsCard>
       )}
-
       <OpportunitiesTable opps={opps} />
     </div>
   )
 }
-
 export function IOValueTab({ data, loading }: { data?: IOData | null; loading?: boolean }) {
   if (loading) {
     return (
@@ -1113,7 +846,6 @@ export function IOValueTab({ data, loading }: { data?: IOData | null; loading?: 
       </div>
     )
   }
-
   if (!data) {
     return (
       <p className="text-muted-foreground py-8 text-center">
@@ -1121,10 +853,8 @@ export function IOValueTab({ data, loading }: { data?: IOData | null; loading?: 
       </p>
     )
   }
-
   if (data.io_transforms != null) {
     return <IOEnabledView data={data} />
   }
-
   return <IOUpsellView data={data} />
 }

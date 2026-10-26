@@ -19,6 +19,14 @@ if _backend_pkg is not None and hasattr(_backend_pkg, "_MODULE_ALIASES"):
             "backend.cron.lifecycle": "backend.cron.scheduler",
             "backend.cron.jobs.insights_prewarmer": "backend.cron.jobs.metadata",
             "backend.cron.jobs.metric_snapshot": "backend.cron.jobs.metadata",
-            "backend.cron.jobs.rum_commit": "backend.cron.jobs.rum_sync",
+            "backend.cron.jobs.compaction": "backend.cron.jobs.metadata",
+            "backend.cron.jobs.maintenance": "backend.cron.jobs.metadata",
+            "backend.cron.jobs.optimize": "backend.cron.jobs.metadata",
+            "backend.cron.jobs.expire": "backend.cron.jobs.metadata",
+            "backend.cron.jobs._common": "backend.cron.jobs.sync",
+            "backend.cron.jobs.commit": "backend.cron.jobs.sync",
+            "backend.cron.jobs.rum_sync": "backend.cron.jobs.sync",
+            "backend.cron.jobs.rum_ledger": "backend.cron.jobs.sync",
+            "backend.cron.jobs.rum_commit": "backend.cron.jobs.sync",
         }
     )

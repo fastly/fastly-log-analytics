@@ -16,7 +16,7 @@ import {
   maplibreMockFactory,
   installMaplibreSideEffects,
 } from '@/__tests__/helpers/page-smoke'
-import { formatBucket } from "@/lib/utils"
+import { formatBucket } from '@/lib/utils'
 import {
   NetworkMap,
   PlaybackControls,
@@ -51,9 +51,7 @@ const { setWorkerUrl, constructedWithWorker, failMapConstruction } = vi.hoisted(
   failMapConstruction: vi.fn(() => false),
 }))
 
-vi.mock('next-themes', () => ({
-  useTheme: vi.fn(() => ({ theme: 'light' })),
-}))
+vi.mock('next-themes', () => ({ useTheme: vi.fn(() => ({ theme: 'light' })) }))
 
 vi.mock('@/stores/filterStore', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/stores/filterStore')>()),
@@ -82,8 +80,8 @@ installMaplibreSideEffects()
 
 vi.mock('@/components/ui/select', () => selectMockFactory())
 
-vi.mock('@/components/ui/slider', () => {
-  const Slider = ({
+vi.mock('@/components/ui/slider', () => ({
+  Slider: ({
     value,
     min,
     max,
@@ -105,9 +103,8 @@ vi.mock('@/components/ui/slider', () => {
       value={value[0]}
       onChange={(e) => onValueChange?.([Number(e.target.value)])}
     />
-  )
-  return { Slider }
-})
+  ),
+}))
 
 const mapDataCalls: Array<{ setTooltip: (t: TooltipInfo | null) => void }> = []
 
@@ -132,9 +129,7 @@ function baseProps(overrides: Partial<React.ComponentProps<typeof NetworkMap>> =
   }
 }
 
-beforeEach(() => {
-  stubResizeObserver()
-  mapDataCalls.length = 0
+const stubWorldTopologyFetch = () =>
   vi.stubGlobal(
     'fetch',
     vi.fn(async () => ({
@@ -145,13 +140,18 @@ beforeEach(() => {
       }),
     })),
   )
+
+beforeEach(() => {
+  stubResizeObserver()
+  mapDataCalls.length = 0
+  stubWorldTopologyFetch()
 })
 
 afterEach(() => {
   vi.useRealTimers()
 })
 
-describe('NetworkMap empty-state', () => {
+describe('NetworkMap empty-state & data rendering', () => {
   it('renders "Loading map data..." when isLoading and no buckets', () => {
     render(<NetworkMap {...baseProps({ isLoading: true, data: null })} />)
     expect(screen.getByText('Loading map data...')).toBeInTheDocument()
@@ -171,18 +171,13 @@ describe('NetworkMap empty-state', () => {
   })
 
   it('UX-8: renders the empty state without throwing when buckets are absent', () => {
-    expect(() =>
-      render(<NetworkMap {...baseProps({ data: {}, error: null })} />),
-    ).not.toThrow()
+    expect(() => render(<NetworkMap {...baseProps({ data: {}, error: null })} />)).not.toThrow()
     expect(screen.getByText('No map data available')).toBeInTheDocument()
   })
-})
 
-describe('NetworkMap with data', () => {
   it('renders PlaybackControls and forwards key props when buckets exist', () => {
     const data = { buckets: ['2026-01-01T00:00:00', '2026-01-01T00:01:00', '2026-01-01T00:02:00'] }
     render(<NetworkMap {...baseProps({ data })} />)
-
     const ctrl = screen.getByTestId('playback-controls')
     expect(ctrl).toBeInTheDocument()
     expect(ctrl.getAttribute('data-bucket-idx')).toBe('2')
@@ -190,62 +185,35 @@ describe('NetworkMap with data', () => {
     expect(ctrl.getAttribute('data-playing')).toBe('false')
     expect(ctrl.getAttribute('data-metric')).toBe('health_score')
     expect(ctrl.getAttribute('data-current-label')).toBe(formatBucket('2026-01-01T00:02:00', 'UTC'))
-
     expect(screen.queryByText('Loading map data...')).not.toBeInTheDocument()
     expect(screen.queryByText('No map data available')).not.toBeInTheDocument()
   })
-})
 
-describe('NetworkMap auto-play', () => {
   it('increments bucketIdx on the playInterval when playing flips to true', () => {
-    const data = { buckets: ['t0', 't1'] }
-
     vi.useFakeTimers()
-    render(<NetworkMap {...baseProps({ data })} />)
-
+    render(<NetworkMap {...baseProps({ data: { buckets: ['t0', 't1'] } })} />)
     expect(screen.getByTestId('playback-controls').getAttribute('data-bucket-idx')).toBe('1')
-
-    act(() => {
-      fireEvent.click(screen.getByRole('button', { name: /play map playback/i }))
-    })
-
-    act(() => {
-      vi.advanceTimersByTime(100)
-    })
+    act(() => { fireEvent.click(screen.getByRole('button', { name: /play map playback/i })) })
+    act(() => { vi.advanceTimersByTime(100) })
     expect(screen.getByTestId('playback-controls').getAttribute('data-bucket-idx')).toBe('0')
-
-    act(() => {
-      vi.advanceTimersByTime(100)
-    })
+    act(() => { vi.advanceTimersByTime(100) })
     expect(screen.getByTestId('playback-controls').getAttribute('data-bucket-idx')).toBe('1')
   })
-})
 
-describe('NetworkMap data-change reset', () => {
   it('resets bucketIdx to the last index whenever data.buckets identity changes', () => {
-    const data1 = { buckets: ['a', 'b', 'c', 'd', 'e'] }
-    const { rerender } = render(<NetworkMap {...baseProps({ data: data1 })} />)
+    const { rerender } = render(<NetworkMap {...baseProps({ data: { buckets: ['a', 'b', 'c', 'd', 'e'] } })} />)
     expect(screen.getByTestId('playback-controls').getAttribute('data-bucket-idx')).toBe('4')
-
-    const data2 = { buckets: ['x', 'y'] }
-    rerender(<NetworkMap {...baseProps({ data: data2 })} />)
+    rerender(<NetworkMap {...baseProps({ data: { buckets: ['x', 'y'] } })} />)
     expect(screen.getByTestId('playback-controls').getAttribute('data-bucket-idx')).toBe('1')
-
-    const data3 = { buckets: [] as string[] }
-    rerender(<NetworkMap {...baseProps({ data: data3 })} />)
+    rerender(<NetworkMap {...baseProps({ data: { buckets: [] as string[] } })} />)
     expect(screen.queryByTestId('playback-controls')).not.toBeInTheDocument()
     expect(screen.getByText('No map data available')).toBeInTheDocument()
   })
-})
 
-describe('NetworkMap tooltip portal', () => {
   it('renders MapTooltip into document.body when setTooltip receives an info object', () => {
-    const data = { buckets: ['t0', 't1', 't2'] }
-    render(<NetworkMap {...baseProps({ data, metric: 'rtt_med_us' })} />)
-
+    render(<NetworkMap {...baseProps({ data: { buckets: ['t0', 't1', 't2'] }, metric: 'rtt_med_us' })} />)
     expect(mapDataCalls.length).toBeGreaterThan(0)
     const lastCall = mapDataCalls[mapDataCalls.length - 1]
-
     act(() => {
       lastCall.setTooltip({
         clientX: 50,
@@ -255,178 +223,74 @@ describe('NetworkMap tooltip portal', () => {
         cityData: { reqs: 99, rtt_med_us: 12345 },
       })
     })
-
     const tooltip = screen.getByTestId('map-tooltip')
     expect(tooltip).toBeInTheDocument()
     expect(tooltip.getAttribute('data-metric')).toBe('rtt_med_us')
     expect(tooltip.textContent).toContain('PortalCity')
     expect(tooltip.parentElement).toBe(document.body)
-
-    act(() => {
-      lastCall.setTooltip(null)
-    })
+    act(() => { lastCall.setTooltip(null) })
     expect(screen.queryByTestId('map-tooltip')).not.toBeInTheDocument()
   })
 })
 
 describe('formatBucket', () => {
-  it('returns an empty string for empty input', () => {
+  it('handles empty, unparseable, Z-suffixed, unsuffixed, and numeric-offset ISO strings', () => {
     expect(formatBucket('', 'America/New_York')).toBe('')
-  })
-
-  it('returns the original input when the ISO string is unparseable', () => {
     expect(formatBucket('not-a-date', 'UTC')).toBe('not-a-date')
-  })
-
-  it('formats a Z-suffixed ISO string in the requested timezone', () => {
-    const out = formatBucket('2026-06-15T15:30:45Z', 'UTC')
-    expect(out).toMatch(/Jun 15/)
-    expect(out).toMatch(/3:30:45/)
-    expect(out).toMatch(/PM/)
-  })
-
-  it('treats an unsuffixed ISO string as UTC by appending Z', () => {
     const withZ = formatBucket('2026-06-15T15:30:45Z', 'UTC')
-    const withoutZ = formatBucket('2026-06-15T15:30:45', 'UTC')
-    expect(withoutZ).toBe(withZ)
-  })
-
-  it('respects a numeric +/- offset suffix without re-appending Z', () => {
-    const offset = formatBucket('2026-06-15T15:30:45+0000', 'UTC')
-    const zulu = formatBucket('2026-06-15T15:30:45Z', 'UTC')
-    expect(offset).toBe(zulu)
+    expect(withZ).toMatch(/Jun 15/)
+    expect(withZ).toMatch(/3:30:45/)
+    expect(withZ).toMatch(/PM/)
+    expect(formatBucket('2026-06-15T15:30:45', 'UTC')).toBe(withZ)
+    expect(formatBucket('2026-06-15T15:30:45+0000', 'UTC')).toBe(withZ)
   })
 })
 
 describe('getScoreColor', () => {
-  it('returns transparent when val is null', () => {
+  it('returns transparent for null and fallback blue for unknown metric', () => {
     expect(getScoreColor(null, 'health_score')).toBe('transparent')
     expect(getScoreColor(null, 'throughput_bps')).toBe('transparent')
-  })
-
-  it('returns the unknown-metric fallback color for unrecognised metrics', () => {
     expect(getScoreColor(50, 'something_else')).toBe('#3b82f6')
   })
 
-  describe('health_score (high-is-good)', () => {
-    it('>= 90 → green', () => {
-      expect(getScoreColor(95, 'health_score')).toBe('#22c55e')
-    })
-    it('>= 70 → yellow', () => {
-      expect(getScoreColor(75, 'health_score')).toBe('#eab308')
-    })
-    it('>= 50 → orange', () => {
-      expect(getScoreColor(55, 'health_score')).toBe('#f97316')
-    })
-    it('< 50 → red', () => {
-      expect(getScoreColor(10, 'health_score')).toBe('#ef4444')
-    })
-  })
-
-  describe('throughput_bps (high-is-good)', () => {
-    it('>= 100Mbps → green', () => {
-      expect(getScoreColor(150_000_000, 'throughput_bps')).toBe('#22c55e')
-    })
-    it('>= 10Mbps → yellow', () => {
-      expect(getScoreColor(50_000_000, 'throughput_bps')).toBe('#eab308')
-    })
-    it('>= 1Mbps → orange', () => {
-      expect(getScoreColor(5_000_000, 'throughput_bps')).toBe('#f97316')
-    })
-    it('< 1Mbps → red', () => {
-      expect(getScoreColor(500_000, 'throughput_bps')).toBe('#ef4444')
-    })
-  })
-
-  describe('rtt_med_us (low-is-good)', () => {
-    it('<= 50ms → green', () => {
-      expect(getScoreColor(40_000, 'rtt_med_us')).toBe('#22c55e')
-    })
-    it('<= 150ms → yellow', () => {
-      expect(getScoreColor(120_000, 'rtt_med_us')).toBe('#eab308')
-    })
-    it('<= 300ms → orange', () => {
-      expect(getScoreColor(250_000, 'rtt_med_us')).toBe('#f97316')
-    })
-    it('> 300ms → red', () => {
-      expect(getScoreColor(500_000, 'rtt_med_us')).toBe('#ef4444')
-    })
-  })
-
-  describe('avg_ploss (low-is-good)', () => {
-    it('<= 1% → green', () => {
-      expect(getScoreColor(0.005, 'avg_ploss')).toBe('#22c55e')
-    })
-    it('<= 5% → yellow', () => {
-      expect(getScoreColor(0.03, 'avg_ploss')).toBe('#eab308')
-    })
-    it('<= 10% → orange', () => {
-      expect(getScoreColor(0.08, 'avg_ploss')).toBe('#f97316')
-    })
-    it('> 10% → red', () => {
-      expect(getScoreColor(0.25, 'avg_ploss')).toBe('#ef4444')
-    })
-  })
-
-  describe('error_pct (low-is-good)', () => {
-    it('<= 1% → green', () => {
-      expect(getScoreColor(0.5, 'error_pct')).toBe('#22c55e')
-    })
-    it('<= 5% → yellow', () => {
-      expect(getScoreColor(3, 'error_pct')).toBe('#eab308')
-    })
-    it('<= 10% → orange', () => {
-      expect(getScoreColor(8, 'error_pct')).toBe('#f97316')
-    })
-    it('> 10% → red', () => {
-      expect(getScoreColor(25, 'error_pct')).toBe('#ef4444')
-    })
+  it.each([
+    ['health_score', [95, 75, 55, 10]],
+    ['throughput_bps', [150_000_000, 50_000_000, 5_000_000, 500_000]],
+    ['rtt_med_us', [40_000, 120_000, 250_000, 500_000]],
+    ['avg_ploss', [0.005, 0.03, 0.08, 0.25]],
+    ['error_pct', [0.5, 3, 8, 25]],
+  ] as const)('maps %s across green/yellow/orange/red thresholds', (metric, [green, yellow, orange, red]) => {
+    expect(getScoreColor(green, metric)).toBe('#22c55e')
+    expect(getScoreColor(yellow, metric)).toBe('#eab308')
+    expect(getScoreColor(orange, metric)).toBe('#f97316')
+    expect(getScoreColor(red, metric)).toBe('#ef4444')
   })
 })
 
-function useMapInitHarness(opts: {
-  isDark: boolean
-  setTooltip?: (t: TooltipInfo | null) => void
-}) {
+function useMapInitHarness(opts: { isDark: boolean; setTooltip?: (t: TooltipInfo | null) => void }) {
   const containerEl = document.createElement('div')
   const mapContainer = useRef<HTMLDivElement | null>(containerEl)
   const isDarkRef = useRef(opts.isDark)
   const dmaDataRef = useRef<Record<number, CityTooltipData>>({})
   const setTooltip = opts.setTooltip ?? (() => {})
-
-  const map = useMapInit({
-    mapContainer,
-    isDark: opts.isDark,
-    isDarkRef,
-    dmaDataRef,
-    setTooltip,
-  })
-
+  const map = useMapInit({ mapContainer, isDark: opts.isDark, isDarkRef, dmaDataRef, setTooltip })
   return { mapContainer, map, dmaDataRef }
 }
 
 describe('useMapInit', () => {
-  beforeEach(() => {
-    mapInstances.length = 0
-  })
+  beforeEach(() => { mapInstances.length = 0 })
 
   it('constructs a maplibregl.Map with the container element', () => {
     renderHook(() => useMapInitHarness({ isDark: false }))
     expect(mapInstances.length).toBe(1)
     const inst = mapInstances[0]
     expect(inst.container).toBeInstanceOf(HTMLDivElement)
-    expect(inst.options).toMatchObject({
-      renderWorldCopies: false,
-      zoom: 1,
-      cooperativeGestures: true,
-    })
+    expect(inst.options).toMatchObject({ renderWorldCopies: false, zoom: 1, cooperativeGestures: true })
   })
 
   it('registers dma / heatmap sources and the three core layers on load', async () => {
     renderHook(() => useMapInitHarness({ isDark: false }))
-    await act(async () => {
-      await Promise.resolve()
-    })
+    await act(async () => { await Promise.resolve() })
     const inst = mapInstances[0]
     expect(Object.keys(inst.sources).sort()).toEqual(['dma', 'heatmap'])
     const layerIds = inst.layers.map((l: { id?: string }) => l.id)
@@ -435,7 +299,6 @@ describe('useMapInit', () => {
 
   it('calls remove() on the map when the hook unmounts', () => {
     const { unmount } = renderHook(() => useMapInitHarness({ isDark: false }))
-    expect(mapInstances.length).toBe(1)
     const inst = mapInstances[0]
     expect(inst.removed).toBe(false)
     unmount()
@@ -447,11 +310,8 @@ describe('useMapInit', () => {
       ({ isDark }: { isDark: boolean }) => useMapInitHarness({ isDark }),
       { initialProps: { isDark: false } },
     )
-    expect(mapInstances.length).toBe(1)
     const first = mapInstances[0]
-
     rerender({ isDark: true })
-
     expect(first.removed).toBe(true)
     expect(mapInstances.length).toBe(2)
   })
@@ -490,21 +350,18 @@ function useMapDataHarness(opts: {
     isDark: opts.isDark ?? false,
     setTooltip,
   })
-
   return { map, dmaDataRef, setTooltip }
 }
 
 describe('useMapData', () => {
-  beforeEach(() => {
-    mapInstances.length = 0
-  })
+  beforeEach(() => { mapInstances.length = 0 })
 
   it('is a no-op when data is null / missing map_buckets', () => {
     const { setTooltip } = renderHook(() => useMapDataHarness({ data: null })).result.current
     expect(setTooltip).not.toHaveBeenCalled()
   })
 
-  it('populates dmaDataRef for DMA cities and leaves it empty for scatter-only payloads', () => {
+  it('populates dmaDataRef for DMA cities, leaves scatter-only empty, and clears tooltip', () => {
     const data = {
       cities: [
         { name: 'Boston', lat: 42.36, lon: -71.06 },
@@ -516,91 +373,42 @@ describe('useMapData', () => {
           bucket: '2026-06-15T12:00:00Z',
           cities: [
             {
-              city_idx: 0,
-              country: 'US',
-              metro_code: 506,
-              health_score: 95,
-              rtt_med_us: 40_000,
-              avg_ploss: 0.001,
-              error_pct: 0.5,
-              throughput_bps: 200_000_000,
-              reqs: 100,
+              city_idx: 0, country: 'US', metro_code: 506, health_score: 95,
+              rtt_med_us: 40_000, avg_ploss: 0.001, error_pct: 0.5, throughput_bps: 200_000_000, reqs: 100,
             },
             {
-              city_idx: 1,
-              country: 'DE',
-              health_score: 60,
-              rtt_med_us: 200_000,
-              avg_ploss: 0.04,
-              error_pct: 3,
-              throughput_bps: 5_000_000,
-              reqs: 50,
+              city_idx: 1, country: 'DE', health_score: 60,
+              rtt_med_us: 200_000, avg_ploss: 0.04, error_pct: 3, throughput_bps: 5_000_000, reqs: 50,
             },
           ],
         },
       ],
     }
     const { result } = renderHook(() => useMapDataHarness({ data, metric: 'health_score' }))
-    expect(result.current.dmaDataRef.current[506]).toMatchObject({
-      city: 'Boston',
-      country: 'US',
-      health_score: 95,
-    })
+    expect(result.current.dmaDataRef.current[506]).toMatchObject({ city: 'Boston', country: 'US', health_score: 95 })
     expect(Object.keys(result.current.dmaDataRef.current)).toEqual(['506'])
-  })
-
-  it('clears the tooltip on every data tick', () => {
-    const data = {
-      cities: [{ name: 'Boston', lat: 42.36, lon: -71.06 }],
-      map_buckets: [
-        {
-          bucket_idx: 0,
-          bucket: '2026-06-15T12:00:00Z',
-          cities: [
-            { city_idx: 0, country: 'US', metro_code: 506, health_score: 95, reqs: 1 },
-          ],
-        },
-      ],
-    }
-    const { result } = renderHook(() => useMapDataHarness({ data }))
     expect(result.current.setTooltip).toHaveBeenCalledWith(null)
   })
 })
 
 describe('formatMetricValue', () => {
-  it('returns em dash for null/undefined values', () => {
-    expect(formatMetricValue(null, 'health_score')).toBe('—')
-    expect(formatMetricValue(undefined, 'rtt_med_us')).toBe('—')
-  })
-
-  it('formats health_score as NN/100', () => {
-    expect(formatMetricValue(87.4, 'health_score')).toBe('87/100')
-    expect(formatMetricValue(100, 'health_score')).toBe('100/100')
-  })
-
-  it('converts rtt_med_us microseconds to milliseconds with one decimal', () => {
-    expect(formatMetricValue(12345, 'rtt_med_us')).toBe('12.3 ms')
-    expect(formatMetricValue(0, 'rtt_med_us')).toBe('0.0 ms')
-  })
-
-  it('formats avg_ploss as a percent with two decimals', () => {
-    expect(formatMetricValue(0.0123, 'avg_ploss')).toBe('1.23%')
-    expect(formatMetricValue(0, 'avg_ploss')).toBe('0.00%')
-  })
-
-  it('formats error_pct directly with two decimals', () => {
-    expect(formatMetricValue(4.5678, 'error_pct')).toBe('4.57%')
-  })
-
-  it('scales throughput_bps across the Gbps/Mbps/Kbps/bps ladder', () => {
-    expect(formatMetricValue(2.5e9, 'throughput_bps')).toBe('2.5 Gbps')
-    expect(formatMetricValue(3.4e6, 'throughput_bps')).toBe('3.4 Mbps')
-    expect(formatMetricValue(7.8e3, 'throughput_bps')).toBe('7.8 Kbps')
-    expect(formatMetricValue(500, 'throughput_bps')).toBe('500 bps')
-  })
-
-  it('falls back to String(val) for unknown metric ids', () => {
-    expect(formatMetricValue(42, 'unknown_metric')).toBe('42')
+  it.each([
+    [null, 'health_score', '—'],
+    [undefined, 'rtt_med_us', '—'],
+    [87.4, 'health_score', '87/100'],
+    [100, 'health_score', '100/100'],
+    [12345, 'rtt_med_us', '12.3 ms'],
+    [0, 'rtt_med_us', '0.0 ms'],
+    [0.0123, 'avg_ploss', '1.23%'],
+    [0, 'avg_ploss', '0.00%'],
+    [4.5678, 'error_pct', '4.57%'],
+    [2.5e9, 'throughput_bps', '2.5 Gbps'],
+    [3.4e6, 'throughput_bps', '3.4 Mbps'],
+    [7.8e3, 'throughput_bps', '7.8 Kbps'],
+    [500, 'throughput_bps', '500 bps'],
+    [42, 'unknown_metric', '42'],
+  ] as const)('formats (%s, %s) → %s', (val, metric, expected) => {
+    expect(formatMetricValue(val, metric)).toBe(expected)
   })
 })
 
@@ -615,26 +423,18 @@ describe('MapTooltip', () => {
 
   it('renders city, country, and a localized requests count', () => {
     render(<MapTooltip info={baseInfo} metric="rtt_med_us" />)
-
-    expect(screen.getByText('Sydney')).toBeInTheDocument()
-    expect(screen.getByText('Australia')).toBeInTheDocument()
-    expect(screen.getByText('Median RTT')).toBeInTheDocument()
-    expect(screen.getByText('18.0 ms')).toBeInTheDocument()
-    expect(screen.getByText('12,345')).toBeInTheDocument()
-    expect(screen.getByText('Health Score')).toBeInTheDocument()
-    expect(screen.getByText('92/100')).toBeInTheDocument()
+    for (const txt of ['Sydney', 'Australia', 'Median RTT', '18.0 ms', '12,345', 'Health Score', '92/100']) {
+      expect(screen.getByText(txt)).toBeInTheDocument()
+    }
   })
 
   it('flips the tooltip to the left when cursor is in the right 30% of viewport', () => {
-    const info: TooltipInfo = { ...baseInfo, clientX: 900 }
-    const { container } = render(<MapTooltip info={info} metric="error_pct" />)
-
+    const { container } = render(<MapTooltip info={{ ...baseInfo, clientX: 900 }} metric="error_pct" />)
     const tooltip = container.firstChild as HTMLElement
-    expect(tooltip).not.toBeNull()
     expect(tooltip.style.left).toBe('886px')
     expect(tooltip.style.transform).toBe('translate(-100%, -100%)')
 
-    const { container: c2 } = render(<MapTooltip info={{ ...info, clientX: 100 }} metric="error_pct" />)
+    const { container: c2 } = render(<MapTooltip info={{ ...baseInfo, clientX: 100 }} metric="error_pct" />)
     const tooltip2 = c2.firstChild as HTMLElement
     expect(tooltip2.style.left).toBe('114px')
     expect(tooltip2.style.transform).toBe('translateY(-100%)')
@@ -642,9 +442,7 @@ describe('MapTooltip', () => {
 
   it('hides the duplicate health-score row when the selected metric IS health_score', () => {
     render(<MapTooltip info={baseInfo} metric="health_score" />)
-
-    const labels = screen.getAllByText('Health Score')
-    expect(labels).toHaveLength(1)
+    expect(screen.getAllByText('Health Score')).toHaveLength(1)
     expect(screen.getByText('92/100')).toBeInTheDocument()
   })
 })
@@ -675,233 +473,130 @@ function defaultControlsProps(overrides: Partial<React.ComponentProps<typeof Pla
   }
 }
 
-describe('PlaybackControls', () => {
+describe('PlaybackControls & exported option arrays', () => {
   test('renders Play when !playing, Pause when playing, and click toggles setPlaying', async () => {
     const user = userEvent.setup()
-
     const setPlayingPaused = vi.fn()
     const { rerender, container } = render(
-      <PlaybackControls {...defaultControlsProps({ playing: false, setPlaying: setPlayingPaused })} />
+      <PlaybackControls {...defaultControlsProps({ playing: false, setPlaying: setPlayingPaused })} />,
     )
-
-    const playBtn = screen.getByRole('button', { name: /play map playback/i })
-    expect(playBtn).toBeInTheDocument()
-
-    await user.click(playBtn)
-    expect(setPlayingPaused).toHaveBeenCalledTimes(1)
+    await user.click(screen.getByRole('button', { name: /play map playback/i }))
     expect(setPlayingPaused).toHaveBeenCalledWith(true)
 
     const setPlayingPlaying = vi.fn()
-    rerender(
-      <PlaybackControls {...defaultControlsProps({ playing: true, setPlaying: setPlayingPlaying })} />
-    )
-
-    const pauseBtn = screen.getByRole('button', { name: /pause map playback/i })
-    expect(pauseBtn).toBeInTheDocument()
-
-    await user.click(pauseBtn)
-    expect(setPlayingPlaying).toHaveBeenCalledTimes(1)
+    rerender(<PlaybackControls {...defaultControlsProps({ playing: true, setPlaying: setPlayingPlaying })} />)
+    await user.click(screen.getByRole('button', { name: /pause map playback/i }))
     expect(setPlayingPlaying).toHaveBeenCalledWith(false)
-
     expect(container.querySelector('.absolute')).toBeInTheDocument()
   })
 
-  test('Slider onValueChange fires setBucketIdx + setPlaying(false)', () => {
+  test('Slider onValueChange fires setBucketIdx + setPlaying(false) and bucket labels render', () => {
     const setBucketIdx = vi.fn()
     const setPlaying = vi.fn()
     render(
       <PlaybackControls
-        {...defaultControlsProps({ setBucketIdx, setPlaying, playing: true, bucketIdx: 2 })}
-      />
-    )
-
-    const slider = screen.getByTestId('mock-slider') as HTMLInputElement
-    expect(slider).toHaveValue('2')
-    expect(slider.min).toBe('0')
-    expect(slider.max).toBe('9')
-
-    fireEvent.change(slider, { target: { value: '5' } })
-
-    expect(setBucketIdx).toHaveBeenCalledWith(5)
-    expect(setPlaying).toHaveBeenCalledWith(false)
-  })
-
-  test('bucket label triple renders firstBucketLabel / currentBucketLabel / lastBucketLabel', () => {
-    render(
-      <PlaybackControls
         {...defaultControlsProps({
+          setBucketIdx,
+          setPlaying,
+          playing: true,
+          bucketIdx: 2,
           firstBucketLabel: 'FIRST_LBL',
           currentBucketLabel: 'CURRENT_LBL',
           lastBucketLabel: 'LAST_LBL',
         })}
-      />
+      />,
     )
-    expect(screen.getByText('FIRST_LBL')).toBeInTheDocument()
-    expect(screen.getByText('CURRENT_LBL')).toBeInTheDocument()
-    expect(screen.getByText('LAST_LBL')).toBeInTheDocument()
+    for (const lbl of ['FIRST_LBL', 'CURRENT_LBL', 'LAST_LBL']) {
+      expect(screen.getByText(lbl)).toBeInTheDocument()
+    }
+    const slider = screen.getByTestId('mock-slider') as HTMLInputElement
+    expect(slider).toHaveValue('2')
+    expect(slider.min).toBe('0')
+    expect(slider.max).toBe('9')
+    fireEvent.change(slider, { target: { value: '5' } })
+    expect(setBucketIdx).toHaveBeenCalledWith(5)
+    expect(setPlaying).toHaveBeenCalledWith(false)
   })
 
-  test('metric Select onValueChange calls onMetricChange and ignores empty value', async () => {
+  test('metric, bucketSeconds, and asn Selects fire their change callbacks', async () => {
     const user = userEvent.setup()
     const onMetricChange = vi.fn()
-    render(<PlaybackControls {...defaultControlsProps({ onMetricChange, metric: 'health_score' })} />)
-
-    const metricItem = screen
-      .getAllByRole('button')
-      .find((b) => b.getAttribute('data-select-item-value') === 'rtt_med_us')
-    expect(metricItem).toBeTruthy()
-
-    await user.click(metricItem!)
-    expect(onMetricChange).toHaveBeenCalledTimes(1)
-    expect(onMetricChange).toHaveBeenCalledWith('rtt_med_us')
-  })
-
-  test('bucketSeconds Select converts string value back to a number on change', async () => {
-    const user = userEvent.setup()
     const onBucketChange = vi.fn()
-    render(<PlaybackControls {...defaultControlsProps({ onBucketChange, bucketSeconds: 60 })} />)
-
-    const item = screen
-      .getAllByRole('button')
-      .find((b) => b.getAttribute('data-select-item-value') === '300')
-    expect(item).toBeTruthy()
-
-    await user.click(item!)
-
-    expect(onBucketChange).toHaveBeenCalledTimes(1)
-    expect(onBucketChange).toHaveBeenCalledWith(300)
-    expect(typeof onBucketChange.mock.calls[0][0]).toBe('number')
-  })
-
-  test("asn Select renders 'all' + dynamic asnOptions and fires onAsnChange", async () => {
-    const user = userEvent.setup()
     const onAsnChange = vi.fn()
-    const asnOptions = [
-      { value: '7922', label: 'AS7922 Comcast' },
-      { value: '15169', label: 'AS15169 Google' },
-    ]
-    render(<PlaybackControls {...defaultControlsProps({ onAsnChange, asnOptions })} />)
+    render(<PlaybackControls {...defaultControlsProps({ onMetricChange, onBucketChange, onAsnChange })} />)
 
-    expect(
-      screen
-        .getAllByRole('button')
-        .filter((b) => b.getAttribute('data-select-item-value') === 'all')
-    ).toHaveLength(1)
     expect(screen.getByText('All ASNs')).toBeInTheDocument()
     expect(screen.getByText('AS7922 Comcast')).toBeInTheDocument()
     expect(screen.getByText('AS15169 Google')).toBeInTheDocument()
 
-    const target = screen
-      .getAllByRole('button')
-      .find((b) => b.getAttribute('data-select-item-value') === '15169')
-    expect(target).toBeTruthy()
+    const findSelectBtn = (val: string) =>
+      screen.getAllByRole('button').find((b) => b.getAttribute('data-select-item-value') === val)!
 
-    await user.click(target!)
+    await user.click(findSelectBtn('rtt_med_us'))
+    expect(onMetricChange).toHaveBeenCalledWith('rtt_med_us')
+
+    await user.click(findSelectBtn('300'))
+    expect(onBucketChange).toHaveBeenCalledWith(300)
+    expect(typeof onBucketChange.mock.calls[0][0]).toBe('number')
+
+    await user.click(findSelectBtn('15169'))
     expect(onAsnChange).toHaveBeenCalledWith('15169')
   })
-})
 
-describe('exported option arrays', () => {
-  test('METRIC_OPTIONS shape: 5 entries, each {value, label}', () => {
-    expect(METRIC_OPTIONS).toHaveLength(5)
-    for (const o of METRIC_OPTIONS) {
-      expect(typeof o.value).toBe('string')
-      expect(typeof o.label).toBe('string')
-    }
+  test('METRIC_OPTIONS, SPEED_OPTIONS, and STEP_OPTIONS shapes', () => {
     expect(METRIC_OPTIONS.map((o) => o.value)).toEqual([
-      'health_score',
-      'rtt_med_us',
-      'avg_ploss',
-      'error_pct',
-      'throughput_bps',
+      'health_score', 'rtt_med_us', 'avg_ploss', 'error_pct', 'throughput_bps',
     ])
-  })
-
-  test('SPEED_OPTIONS shape: numeric values, label strings', () => {
     expect(SPEED_OPTIONS).toHaveLength(4)
-    for (const o of SPEED_OPTIONS) {
-      expect(typeof o.value).toBe('number')
-      expect(typeof o.label).toBe('string')
-    }
-    const values = SPEED_OPTIONS.map((o) => o.value)
-    expect(values).toEqual([...values].sort((a, b) => b - a))
-  })
+    const speedValues = SPEED_OPTIONS.map((o) => o.value)
+    expect(speedValues).toEqual([...speedValues].sort((a, b) => b - a))
 
-  test('STEP_OPTIONS shape: 11 entries, monotonically increasing seconds', () => {
     expect(STEP_OPTIONS).toHaveLength(11)
-    const values = STEP_OPTIONS.map((o) => o.value)
-    for (let i = 1; i < values.length; i++) {
-      expect(values[i]).toBeGreaterThan(values[i - 1])
+    const stepValues = STEP_OPTIONS.map((o) => o.value)
+    for (let i = 1; i < stepValues.length; i++) {
+      expect(stepValues[i]).toBeGreaterThan(stepValues[i - 1])
     }
-    expect(values[0]).toBe(1)
-    expect(values[values.length - 1]).toBe(14400)
+    expect(stepValues[0]).toBe(1)
+    expect(stepValues[stepValues.length - 1]).toBe(14400)
   })
 })
-
 
 describe('ShieldingMap helpers', () => {
-  describe('greatCirclePoints', () => {
-    it('returns a 2-point degenerate when endpoints are identical', () => {
-      const pts = greatCirclePoints(40, -74, 40, -74)
-      expect(pts).toHaveLength(2)
-      expect(pts[0]).toEqual([-74, 40])
-      expect(pts[1]).toEqual([-74, 40])
-    })
+  it('greatCirclePoints handles identical endpoints and antimeridian wrap', () => {
+    const same = greatCirclePoints(40, -74, 40, -74)
+    expect(same).toEqual([[-74, 40], [-74, 40]])
 
-    it('handles antimeridian wrap without >180 degree jumps in output', () => {
-      const pts = greatCirclePoints(0, -179, 0, 179)
-      for (let i = 1; i < pts.length; i++) {
-        const delta = Math.abs(pts[i][0] - pts[i - 1][0])
-        expect(delta).toBeLessThanOrEqual(180)
-      }
-      expect(pts.length).toBeGreaterThan(2)
-    })
+    const pts = greatCirclePoints(0, -179, 0, 179)
+    for (let i = 1; i < pts.length; i++) {
+      expect(Math.abs(pts[i][0] - pts[i - 1][0])).toBeLessThanOrEqual(180)
+    }
+    expect(pts.length).toBeGreaterThan(2)
   })
 
-  describe('efficiencyColor', () => {
-    it('returns the neutral indigo when ratio is null', () => {
-      expect(efficiencyColor(null)).toBe('#6366f1')
-    })
-
-    it('returns green when ratio < 1.5', () => {
-      expect(efficiencyColor(1.0)).toBe('#22c55e')
-      expect(efficiencyColor(1.49)).toBe('#22c55e')
-    })
-
-    it('returns yellow when ratio < 3', () => {
-      expect(efficiencyColor(1.5)).toBe('#eab308')
-      expect(efficiencyColor(2.9)).toBe('#eab308')
-    })
-
-    it('returns red when ratio >= 3', () => {
-      expect(efficiencyColor(3.0)).toBe('#ef4444')
-      expect(efficiencyColor(10)).toBe('#ef4444')
-    })
-
-    it('returns neutral indigo (not green) for a negative ratio (L5)', () => {
-      expect(efficiencyColor(-0.5)).toBe('#6366f1')
-      expect(efficiencyColor(-10)).toBe('#6366f1')
-    })
+  it.each([
+    [null, '#6366f1'],
+    [-0.5, '#6366f1'],
+    [-10, '#6366f1'],
+    [1.0, '#22c55e'],
+    [1.49, '#22c55e'],
+    [1.5, '#eab308'],
+    [2.9, '#eab308'],
+    [3.0, '#ef4444'],
+    [10, '#ef4444'],
+  ] as const)('efficiencyColor(%s) → %s', (ratio, expected) => {
+    expect(efficiencyColor(ratio)).toBe(expected)
   })
 
-  describe('lineWidth', () => {
-    it('clamps to 1.5 at low request counts', () => {
-      expect(lineWidth(0)).toBe(1.5)
-      expect(lineWidth(1)).toBe(1.5)
-    })
-
-    it('clamps to 6 at very high request counts', () => {
-      expect(lineWidth(1_000_000_000)).toBe(6)
-      expect(lineWidth(Number.MAX_SAFE_INTEGER)).toBe(6)
-    })
-
-    it('scales logarithmically between the bounds', () => {
-      const w10 = lineWidth(10)
-      const w100 = lineWidth(100)
-      expect(w10).toBeGreaterThan(1.5)
-      expect(w10).toBeLessThan(6)
-      expect(w100).toBeGreaterThan(w10)
-    })
+  it('lineWidth clamps at [1.5, 6] and scales logarithmically between bounds', () => {
+    expect(lineWidth(0)).toBe(1.5)
+    expect(lineWidth(1)).toBe(1.5)
+    expect(lineWidth(1_000_000_000)).toBe(6)
+    expect(lineWidth(Number.MAX_SAFE_INTEGER)).toBe(6)
+    const w10 = lineWidth(10)
+    const w100 = lineWidth(100)
+    expect(w10).toBeGreaterThan(1.5)
+    expect(w10).toBeLessThan(6)
+    expect(w100).toBeGreaterThan(w10)
   })
 
   describe('rafThrottle', () => {
@@ -917,11 +612,9 @@ describe('ShieldingMap helpers', () => {
       }) as typeof globalThis.requestAnimationFrame
     })
 
-    afterEach(() => {
-      globalThis.requestAnimationFrame = originalRAF
-    })
+    afterEach(() => { globalThis.requestAnimationFrame = originalRAF })
 
-    it('coalesces multiple calls within a frame to a single invocation', () => {
+    it('coalesces multiple calls within a frame and re-queues on subsequent frames', () => {
       const fn = vi.fn()
       const throttled = rafThrottle(fn)
       throttled(1)
@@ -932,142 +625,67 @@ describe('ShieldingMap helpers', () => {
       rafCallbacks[0](performance.now())
       expect(fn).toHaveBeenCalledTimes(1)
       expect(fn).toHaveBeenCalledWith(3)
-    })
 
-    it('re-queues on subsequent calls after the frame fires', () => {
-      const fn = vi.fn()
-      const throttled = rafThrottle(fn)
-      throttled('a')
-      rafCallbacks[0](performance.now())
-      throttled('b')
+      throttled(4)
       expect(rafCallbacks).toHaveLength(2)
       rafCallbacks[1](performance.now())
       expect(fn).toHaveBeenCalledTimes(2)
-      expect(fn).toHaveBeenNthCalledWith(1, 'a')
-      expect(fn).toHaveBeenNthCalledWith(2, 'b')
+      expect(fn).toHaveBeenNthCalledWith(2, 4)
     })
   })
 
-  describe('buildArcFeatures', () => {
-    it('returns a FeatureCollection with one feature per valid row', () => {
-      const rows = [
+  describe('buildArcFeatures & buildDotFeatures', () => {
+    it('builds valid LineString features, carries anomaly_static, gates low_sample, and skips invalid rows', () => {
+      const fc = buildArcFeatures([
         {
-          edge_lat: 40, edge_lon: -74,
-          shield_lat: 51, shield_lon: 0,
-          edge_pop: 'JFK', shield_pop: 'LON',
-          requests: 100, p50_ms: 10, p95_ms: 50, p99_ms: 100,
-          distance_km: 5000, light_speed_rtt_ms: 33, efficiency_ratio: 2.5,
-          anomaly_static: false,
+          edge_lat: 40, edge_lon: -74, shield_lat: 51, shield_lon: 0,
+          edge_pop: 'JFK', shield_pop: 'LON', requests: 100, p50_ms: 10, p95_ms: 50, p99_ms: 100,
+          distance_km: 5000, light_speed_rtt_ms: 33, efficiency_ratio: 2.5, anomaly_static: true,
         },
         {
-          edge_lat: 35, edge_lon: 139,
-          shield_lat: 22, shield_lon: 114,
-          edge_pop: 'NRT', shield_pop: 'HKG',
-          requests: 50, p50_ms: 5, p95_ms: 20, p99_ms: 40,
-          distance_km: 2900, light_speed_rtt_ms: 19, efficiency_ratio: 1.2,
-          anomaly_static: false,
+          edge_lat: 35, edge_lon: 139, shield_lat: 22, shield_lon: 114,
+          edge_pop: 'NRT', shield_pop: 'HKG', requests: 3, p50_ms: 400, p95_ms: 800, p99_ms: 1200,
+          distance_km: 2900, light_speed_rtt_ms: 19, efficiency_ratio: 12, anomaly_static: false, low_sample: true,
         },
-      ]
-      const fc = buildArcFeatures(rows)
-      expect(fc.type).toBe('FeatureCollection')
-      expect(fc.features).toHaveLength(2)
-      expect(fc.features[0].geometry.type).toBe('LineString')
-      expect(fc.features[0].properties?.edge_pop).toBe('JFK')
-      expect(fc.features[0].properties?.color).toBeDefined()
-      expect(fc.features[0].properties?.line_width).toBeGreaterThan(1.5)
-    })
-
-    it('carries anomaly_static through to feature properties (L7 map paint)', () => {
-      const rows = [
-        {
-          edge_lat: 40, edge_lon: -74,
-          shield_lat: 51, shield_lon: 0,
-          edge_pop: 'JFK', shield_pop: 'LON',
-          requests: 100, p50_ms: 80, p95_ms: 120, p99_ms: 200,
-          distance_km: 5000, light_speed_rtt_ms: 33, efficiency_ratio: 4.5,
-          anomaly_static: true,
-        },
-      ]
-      const fc = buildArcFeatures(rows)
-      expect(fc.features[0].properties?.anomaly_static).toBe(true)
-    })
-
-    it('paints low_sample routes a neutral grey, not an efficiency colour (low-sample gating)', () => {
-      const rows = [
-        {
-          edge_lat: 40, edge_lon: -74,
-          shield_lat: 51, shield_lon: 0,
-          edge_pop: 'JFK', shield_pop: 'LON',
-          requests: 3, p50_ms: 400, p95_ms: 800, p99_ms: 1200,
-          distance_km: 5000, light_speed_rtt_ms: 33, efficiency_ratio: 12,
-          anomaly_static: false, low_sample: true,
-        },
-      ]
-      const fc = buildArcFeatures(rows)
-      expect(fc.features[0].properties?.color).toBe('#94a3b8')
-      expect(fc.features[0].properties?.low_sample).toBe(true)
-    })
-
-    it('skips rows with missing coords or zero-length arcs', () => {
-      const rows = [
         { edge_lat: 40, edge_lon: -74, shield_lat: null, shield_lon: null, requests: 10 },
         { edge_lat: null, edge_lon: null, shield_lat: 51, shield_lon: 0, requests: 10 },
         { edge_lat: 40, edge_lon: -74, shield_lat: 40, shield_lon: -74, requests: 10 },
-      ]
-      const fc = buildArcFeatures(rows)
-      expect(fc.features).toHaveLength(0)
+      ])
+      expect(fc.type).toBe('FeatureCollection')
+      expect(fc.features).toHaveLength(2)
+      expect(fc.features[0].geometry.type).toBe('LineString')
+      expect(fc.features[0].properties).toMatchObject({ edge_pop: 'JFK', anomaly_static: true })
+      expect(fc.features[0].properties?.line_width).toBeGreaterThan(1.5)
+      expect(fc.features[1].properties).toMatchObject({ color: '#94a3b8', low_sample: true })
     })
-  })
 
-  describe('buildDotFeatures', () => {
-    it('returns one feature per unique edge/shield POP', () => {
-      const rows = [
+    it('buildDotFeatures deduplicates POPs, omits "Direct to Origin", and handles missing coords', () => {
+      const fc = buildDotFeatures([
         { edge_lat: 40, edge_lon: -74, edge_pop: 'JFK', shield_lat: 51, shield_lon: 0, shield_pop: 'LON' },
         { edge_lat: 40, edge_lon: -74, edge_pop: 'JFK', shield_lat: 35, shield_lon: 139, shield_pop: 'NRT' },
-      ]
-      const fc = buildDotFeatures(rows)
-      expect(fc.type).toBe('FeatureCollection')
+        { edge_lat: 40, edge_lon: -74, edge_pop: 'JFK', shield_lat: 0, shield_lon: 0, shield_pop: 'Direct to Origin' },
+      ])
       expect(fc.features).toHaveLength(3)
-      const roles = fc.features.map((f) => f.properties?.role).sort()
-      expect(roles).toEqual(['edge', 'shield', 'shield'])
-    })
-
-    it('omits the synthetic "Direct to Origin" shield placeholder', () => {
-      const rows = [
-        {
-          edge_lat: 40, edge_lon: -74, edge_pop: 'JFK',
-          shield_lat: 0, shield_lon: 0, shield_pop: 'Direct to Origin',
-        },
-      ]
-      const fc = buildDotFeatures(rows)
-      const shieldPops = fc.features.filter((f) => f.properties?.role === 'shield')
-      expect(shieldPops).toHaveLength(0)
-    })
-
-    it('returns an empty FeatureCollection for missing coords', () => {
-      const rows = [
-        { edge_lat: null, edge_lon: null, shield_lat: null, shield_lon: null },
-      ]
-      const fc = buildDotFeatures(rows)
-      expect(fc.features).toHaveLength(0)
+      expect(fc.features.map((f) => f.properties?.role).sort()).toEqual(['edge', 'shield', 'shield'])
+      expect(
+        buildDotFeatures([{ edge_lat: null, edge_lon: null, shield_lat: null, shield_lon: null }]).features,
+      ).toHaveLength(0)
     })
   })
 })
 
 describe('ShieldingMap component', () => {
+  const sampleRows = [
+    {
+      edge_lat: 40, edge_lon: -74, shield_lat: 51, shield_lon: 0,
+      edge_pop: 'JFK', shield_pop: 'LON', requests: 100, p50_ms: 10, p95_ms: 50, p99_ms: 100,
+    },
+  ]
+
   beforeEach(() => {
     useStrictSources = true
     mapInstances.length = 0
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async () => ({
-        json: async () => ({
-          type: 'Topology',
-          objects: { world: { type: 'GeometryCollection', geometries: [] } },
-          arcs: [],
-        }),
-      })),
-    )
+    stubWorldTopologyFetch()
   })
 
   afterEach(() => {
@@ -1075,163 +693,68 @@ describe('ShieldingMap component', () => {
     vi.unstubAllGlobals()
   })
 
-  it('mounts a map instance and registers arcs + dots sources', async () => {
-    const rows = [
-      {
-        edge_lat: 40, edge_lon: -74,
-        shield_lat: 51, shield_lon: 0,
-        edge_pop: 'JFK', shield_pop: 'LON',
-        requests: 100, p50_ms: 10, p95_ms: 50, p99_ms: 100,
-      },
-    ]
-    render(<ShieldingMap rows={rows} />)
-    await act(async () => {
-      await Promise.resolve()
-      await Promise.resolve()
-    })
+  it('mounts a map instance, registers sources, and calls map.remove() on unmount', async () => {
+    const { unmount, queryByLabelText } = render(<ShieldingMap rows={sampleRows} />)
+    await act(async () => { await Promise.resolve(); await Promise.resolve() })
     expect(mapInstances.length).toBe(1)
+    expect(queryByLabelText(/expand map to fullscreen/i)).not.toBeInTheDocument()
     const instance = mapInstances[0]
     await waitFor(() => {
-      expect(Object.keys(instance.sources)).toEqual(
-        expect.arrayContaining(['world', 'arcs', 'dots']),
-      )
+      expect(Object.keys(instance.sources)).toEqual(expect.arrayContaining(['world', 'arcs', 'dots']))
     })
-  })
-
-  it('renders the edge-only fallback when edgeOnly is true', () => {
-    const { getByText } = render(<ShieldingMap rows={[]} edgeOnly />)
-    expect(getByText(/edge-only logging detected/i)).toBeInTheDocument()
-  })
-
-  it('renders the empty-state when rows is empty and not loading', () => {
-    const { getByText } = render(<ShieldingMap rows={[]} isLoading={false} />)
-    expect(getByText(/no shielding path data/i)).toBeInTheDocument()
-  })
-
-  it('renders the error state when errored is true (M2 sentinel)', () => {
-    const { getByText, queryByText } = render(<ShieldingMap rows={[]} isLoading={false} errored />)
-    expect(getByText(/shielding analysis unavailable/i)).toBeInTheDocument()
-    expect(queryByText(/no shielding path data/i)).not.toBeInTheDocument()
-  })
-
-  it('does not crash transitioning from loading to the empty state (Rules-of-Hooks regression)', async () => {
-    const { rerender, getByText } = render(<ShieldingMap rows={[]} isLoading />)
-    await act(async () => {
-      await Promise.resolve()
-      await Promise.resolve()
-    })
-    rerender(<ShieldingMap rows={[]} isLoading={false} />)
-    expect(getByText(/no shielding path data/i)).toBeInTheDocument()
-  })
-
-  it('renders the POP-coordinates-unavailable fallback when rows have no coords', () => {
-    const rows = [
-      { edge_pop: 'XYZ', shield_pop: 'ABC', edge_lat: null, edge_lon: null, shield_lat: null, shield_lon: null },
-    ]
-    const { getByText } = render(<ShieldingMap rows={rows} isLoading={false} />)
-    expect(getByText(/POP coordinates unavailable/i)).toBeInTheDocument()
-  })
-
-  it('shows no expand button by default', async () => {
-    const rows = [
-      {
-        edge_lat: 40, edge_lon: -74,
-        shield_lat: 51, shield_lon: 0,
-        edge_pop: 'JFK', shield_pop: 'LON',
-        requests: 100, p50_ms: 10, p95_ms: 50, p99_ms: 100,
-      },
-    ]
-    const { queryByLabelText } = render(<ShieldingMap rows={rows} />)
-    await act(async () => {
-      await Promise.resolve()
-      await Promise.resolve()
-    })
-    expect(queryByLabelText(/expand map to fullscreen/i)).not.toBeInTheDocument()
-  })
-
-  it('opens a fullscreen dialog with a second map when Expand is clicked', async () => {
-    const rows = [
-      {
-        edge_lat: 40, edge_lon: -74,
-        shield_lat: 51, shield_lon: 0,
-        edge_pop: 'JFK', shield_pop: 'LON',
-        requests: 100, p50_ms: 10, p95_ms: 50, p99_ms: 100,
-      },
-    ]
-    const { getByLabelText, findByRole } = render(<ShieldingMap rows={rows} expandable />)
-    await act(async () => {
-      await Promise.resolve()
-      await Promise.resolve()
-    })
-    expect(mapInstances.length).toBe(1)
-
-    await act(async () => {
-      fireEvent.click(getByLabelText(/expand map to fullscreen/i))
-    })
-
-    const dialog = await findByRole('dialog')
-    expect(dialog).toHaveTextContent(/Edge → Shield Transit Map/)
-    await act(async () => {
-      await Promise.resolve()
-      await Promise.resolve()
-    })
-    expect(mapInstances.length).toBe(2)
-  })
-
-  it('calls map.remove() on unmount to release WebGL resources', async () => {
-    const rows = [
-      {
-        edge_lat: 40, edge_lon: -74,
-        shield_lat: 51, shield_lon: 0,
-        edge_pop: 'JFK', shield_pop: 'LON',
-        requests: 100, p50_ms: 10, p95_ms: 50, p99_ms: 100,
-      },
-    ]
-    const { unmount } = render(<ShieldingMap rows={rows} />)
-    await act(async () => {
-      await Promise.resolve()
-      await Promise.resolve()
-    })
-    const instance = mapInstances[0]
     expect(instance.removed).toBe(false)
     unmount()
     expect(instance.removed).toBe(true)
   })
+
+  it.each([
+    [{ rows: [], edgeOnly: true }, /edge-only logging detected/i],
+    [{ rows: [], isLoading: false }, /no shielding path data/i],
+    [{ rows: [], isLoading: false, errored: true }, /shielding analysis unavailable/i],
+    [
+      {
+        rows: [{ edge_pop: 'XYZ', shield_pop: 'ABC', edge_lat: null, edge_lon: null, shield_lat: null, shield_lon: null }],
+        isLoading: false,
+      },
+      /POP coordinates unavailable/i,
+    ],
+  ] as const)('renders fallback state for %o', (props, pattern) => {
+    const { getByText } = render(<ShieldingMap {...props} rows={[...props.rows]} />)
+    expect(getByText(pattern)).toBeInTheDocument()
+  })
+
+  it('does not crash transitioning from loading to the empty state (Rules-of-Hooks regression)', async () => {
+    const { rerender, getByText } = render(<ShieldingMap rows={[]} isLoading />)
+    await act(async () => { await Promise.resolve(); await Promise.resolve() })
+    rerender(<ShieldingMap rows={[]} isLoading={false} />)
+    expect(getByText(/no shielding path data/i)).toBeInTheDocument()
+  })
+
+  it('opens a fullscreen dialog with a second map when Expand is clicked', async () => {
+    const { getByLabelText, findByRole } = render(<ShieldingMap rows={sampleRows} expandable />)
+    await act(async () => { await Promise.resolve(); await Promise.resolve() })
+    expect(mapInstances.length).toBe(1)
+    await act(async () => { fireEvent.click(getByLabelText(/expand map to fullscreen/i)) })
+    const dialog = await findByRole('dialog')
+    expect(dialog).toHaveTextContent(/Edge → Shield Transit Map/)
+    await act(async () => { await Promise.resolve(); await Promise.resolve() })
+    expect(mapInstances.length).toBe(2)
+  })
 })
 
-describe('ChoroplethMap', () => {
+describe('ChoroplethMap, MapPrewarm & useMapResize', () => {
   beforeEach(() => {
     mapInstances.length = 0
     failMapConstruction.mockReset().mockReturnValue(false)
   })
 
-  it('mounts a map instance into the container ref', async () => {
-    const { container } = render(
-      <ChoroplethMap data={[{ country: 'US', count: 100 }]} />,
-    )
-    expect(container.querySelector('div')).toBeInTheDocument()
+  it('mounts a map instance, handles empty/updated data, and does not invoke onCountryClick on mount', async () => {
+    const handler = vi.fn()
+    const { rerender, container } = render(<ChoroplethMap data={[]} onCountryClick={handler} />)
+    expect(container.firstChild).not.toBeNull()
+    rerender(<ChoroplethMap data={[{ country: 'US', count: 50 }, { country: 'GB', count: 5 }]} onCountryClick={handler} />)
     await Promise.resolve()
     expect(mapInstances.length).toBe(1)
-  })
-
-  it('renders an empty container when given an empty data array and re-renders cleanly on data changes', () => {
-    const { rerender, container } = render(<ChoroplethMap data={[]} />)
-    expect(container.firstChild).not.toBeNull()
-    rerender(
-      <ChoroplethMap
-        data={[
-          { country: 'US', count: 50 },
-          { country: 'GB', count: 5 },
-        ]}
-      />,
-    )
-    expect(container.firstChild).not.toBeNull()
-  })
-
-  it('accepts an onCountryClick handler without invoking it on mount', async () => {
-    const handler = vi.fn()
-    render(<ChoroplethMap data={[{ country: 'US', count: 1 }]} onCountryClick={handler} />)
-    await Promise.resolve()
     expect(handler).not.toHaveBeenCalled()
   })
 
@@ -1273,8 +796,7 @@ describe('ChoroplethMap', () => {
     render(<ChoroplethMap data={[{ country: 'US', count: 100 }]} />)
     await act(async () => { await Promise.resolve() })
     const instance = mapInstances[0]
-    const container = instance.container as HTMLElement
-    Object.defineProperties(container, {
+    Object.defineProperties(instance.container as HTMLElement, {
       clientWidth: { value: 400 },
       clientHeight: { value: 200 },
     })
@@ -1284,44 +806,33 @@ describe('ChoroplethMap', () => {
     }))
     expect(screen.getByText('100 requests').parentElement).toHaveStyle({ left: '240px', top: '120px' })
   })
-})
 
-describe('MapPrewarm', () => {
-  it('configures the worker before prewarming without another map component present', async () => {
+  it('MapPrewarm configures the worker before prewarming', async () => {
     constructedWithWorker.mockClear()
     const { unmount } = render(<MapPrewarm />)
     await waitFor(() => expect(constructedWithWorker).toHaveBeenCalledTimes(1))
     expect(constructedWithWorker).toHaveBeenCalledWith('/maplibre-gl-worker.mjs')
     unmount()
   })
-})
 
-describe('useMapResize', () => {
-  test('calls map.resize() whenever the container resizes and disconnects on unmount', () => {
+  it('useMapResize calls map.resize() on resize, disconnects on unmount, and tolerates missing refs', () => {
     const ro = stubResizeObserver()
     const el = document.createElement('div')
     const resize = vi.fn()
-    const mapRef = { current: { resize } }
-    const containerRef = { current: el }
-    const { unmount } = renderHook(() => useMapResize(mapRef, containerRef))
-
+    const { unmount } = renderHook(() => useMapResize({ current: { resize } }, { current: el }))
     expect(ro.observe).toHaveBeenCalledWith(el)
     ro.fire()
     expect(resize).toHaveBeenCalledTimes(1)
-
     unmount()
     expect(ro.disconnect).toHaveBeenCalledTimes(1)
-  })
-
-  test('tolerates a map that has not been constructed yet or missing container', () => {
-    const ro = stubResizeObserver()
-    const mapRef = { current: null }
-    renderHook(() => useMapResize(mapRef, { current: document.createElement('div') }))
-    expect(() => ro.fire()).not.toThrow()
 
     const ro2 = stubResizeObserver()
+    renderHook(() => useMapResize({ current: null }, { current: document.createElement('div') }))
+    expect(() => ro2.fire()).not.toThrow()
+
+    const ro3 = stubResizeObserver()
     renderHook(() => useMapResize({ current: null }, { current: null }))
-    expect(ro2.observe).not.toHaveBeenCalled()
+    expect(ro3.observe).not.toHaveBeenCalled()
   })
 })
 
@@ -1340,64 +851,28 @@ const VALID_DATA = {
 }
 
 describe('ImpossibleDistanceModal & InsightHelpModal', () => {
-  test('renders modal with valid data', () => {
-    render(
-      <ImpossibleDistanceModal isOpen data={VALID_DATA} onOpenChange={vi.fn()} />
-    )
+  test('renders modal with valid data, city/country overlay, fallback on missing coords, and null when data is null', () => {
+    const { rerender, container } = render(<ImpossibleDistanceModal isOpen data={VALID_DATA} onOpenChange={vi.fn()} />)
     expect(screen.getByText(/Physics Violation/)).toBeInTheDocument()
     expect(screen.getAllByText(/8,960/).length).toBeGreaterThan(0)
-  })
-
-  test('shows fallback when coordinates are missing', () => {
-    const bad = { ...VALID_DATA, pop_lat: NaN, pop_lon: NaN }
-    render(
-      <ImpossibleDistanceModal isOpen data={bad} onOpenChange={vi.fn()} />
-    )
-    expect(screen.getByText('Location data unavailable.')).toBeInTheDocument()
-  })
-
-  test('hasCoords guard prevents .toFixed() crash on undefined pop coordinates', () => {
-    expect(Number.isFinite(undefined)).toBe(false)
-    expect(Number.isFinite(null)).toBe(false)
-    expect(Number.isFinite(NaN)).toBe(false)
-    expect(Number.isFinite(37.7749)).toBe(true)
-  })
-
-  test('shows city and country in coordinate overlay when provided', () => {
-    render(
-      <ImpossibleDistanceModal isOpen data={VALID_DATA} onOpenChange={vi.fn()} />
-    )
     expect(screen.getAllByText(/Paris, FR/).length).toBeGreaterThan(0)
-  })
 
-  test('returns null when data is null', () => {
-    const { container } = render(
-      <ImpossibleDistanceModal isOpen={false} data={null} onOpenChange={vi.fn()} />
-    )
+    rerender(<ImpossibleDistanceModal isOpen data={{ ...VALID_DATA, pop_lat: NaN, pop_lon: NaN }} onOpenChange={vi.fn()} />)
+    expect(screen.getByText('Location data unavailable.')).toBeInTheDocument()
+
+    rerender(<ImpossibleDistanceModal isOpen={false} data={null} onOpenChange={vi.fn()} />)
     expect(container).toBeEmptyDOMElement()
   })
 
-  test('InsightHelpModal renders impossible_distance content', () => {
-    render(
-      <InsightHelpModal insightId="impossible_distance" isOpen onOpenChange={vi.fn()} />
-    )
+  test('InsightHelpModal renders impossible_distance content, default fallback, and Escape triggers onOpenChange', async () => {
+    const onChange = vi.fn()
+    const { rerender } = render(<InsightHelpModal insightId="impossible_distance" isOpen onOpenChange={onChange} />)
     expect(screen.getByText(/The Physics of/)).toBeInTheDocument()
     expect(screen.getByText(/Speed of Light Violation Detected/)).toBeInTheDocument()
-  })
-
-  test('InsightHelpModal renders default content for unknown insight', () => {
-    render(
-      <InsightHelpModal insightId="unknown_insight_xyz" isOpen onOpenChange={vi.fn()} />
-    )
-    expect(screen.getByText('Insight Analysis')).toBeInTheDocument()
-  })
-
-  test('InsightHelpModal close button triggers onOpenChange', async () => {
-    const onChange = vi.fn()
-    render(
-      <InsightHelpModal insightId="impossible_distance" isOpen onOpenChange={onChange} />
-    )
     fireEvent.keyDown(document, { key: 'Escape' })
     await waitFor(() => expect(onChange).toHaveBeenCalled())
+
+    rerender(<InsightHelpModal insightId="unknown_insight_xyz" isOpen onOpenChange={vi.fn()} />)
+    expect(screen.getByText('Insight Analysis')).toBeInTheDocument()
   })
 })

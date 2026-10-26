@@ -1,59 +1,58 @@
-"""End-to-end-ish tests for provisioning create + teardown SSE routes.
-
-Goals (per Milestone B / TESTING_PLAN.md):
-- ``GET /api/provision/teardown`` against a known service removes the config
-  file and reports a terminal SSE event.
-- The 404 path fires when no service config exists.
-- ``GET /api/provision/execute`` delegates to ``backend.provision.provision``
-  with the params it received.
-
-What's NOT in scope here: end-to-end against a real (or fully mocked)
-Fastly REST API. That blocks on Milestone A's deferred 0.2 (pytest-httpx
-adoption) — production calls go through stdlib ``urllib.request`` in
-``backend.core.fastly.client``, which can't be patched cleanly without
-wrapping every call site or porting to ``httpx``. Until then we stub the
-orchestrator entry points (``provision`` and ``perform_teardown``) at the
-boundary so the route layer is exercised without touching the network.
-"""
+"""End-to-end-ish tests for provisioning create + teardown SSE routes and helper branches."""
 
 from __future__ import annotations
 
+import io
 import json
 import os
-from unittest.mock import patch
+import urllib.error
+import zipfile
+from contextlib import ExitStack, contextmanager
+from io import BytesIO
+from unittest.mock import MagicMock, patch
 
+import botocore.exceptions
 import pytest
+from backend.core.faro_versions import DEFAULT_FARO_VERSION
+from backend.provision.fos_setup import object_storage_enabled, product_enabled
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from starlette.requests import Request
 
+from backend import config
 from backend import config as svcconfig
 from backend.main import app
+from backend.provision import fos_setup
+from backend.provision.fastly_api import _CDN_NO_CACHE_404_SNIPPET_NAME, _CDN_SNIPPETS
+from backend.routers.provision import _check_domain_available
+from backend.utils.router_utils import require_json_content_type as _require_json_content_type
 from tests._helpers.wire import parse_sse_events as _parse_sse_events
 
+_FAKE_CFG = {
+    "service_id": "svc123",
+    "name": "Test Service",
+    "access_level": "read_write",
+    "fos_bucket": "bucket",
+    "fos_region": "us-east-1",
+    "fos_endpoint": "us-east-1.object.fastlystorage.app",
+}
+_VALID_TOKEN = "test-admin-token"
 
-# ── Merged from tests/routers/test_provision_lifecycle.py ──
-def test_teardown_no_service_id_returns_404(isolated_configs_dir):
-    """Calling teardown with a service_id that has no config → 404."""
-    with TestClient(app) as client:
-        r = client.post("/api/provision/teardown", json={"service_id": "nope-not-a-real-svc"})
-    assert r.status_code == 404
+
+def _client() -> TestClient:
+    return TestClient(app)
 
 
-def test_teardown_emits_done_and_removes_config(isolated_configs_dir, tmp_path, monkeypatch):
-    """Happy path: configs/{id}.json exists → teardown route emits a 'done'-style
-    terminal event, removes the config, and propagates the perform_teardown
-    event stream into the SSE response."""
-    sid = "svc-teardown-1"
-
-    # Seed a minimal config so the route picks it up
+def _seed_cfg(sid: str, **overrides) -> dict:
     cfg = {
         "service_id": sid,
         "logging_service_id": sid,
-        "name": "Teardown Test Svc",
-        "fos_bucket": "td-test-bucket",
+        "name": f"Test Svc {sid}",
+        "fos_bucket": f"test-bucket-{sid}",
         "fos_region": "us-east-1",
         "fos_access_key_id": "AKIA",
         "fos_secret_access_key": "SECRET",
-        "fastly_api_key": "fastly-test-token",
+        "fastly_api_key": "server-stored-key-MUST-NOT-BE-USED",
         "cdn_secret": "x",
         "provisioning": {
             "fos_key_id": "fk_1",
@@ -61,154 +60,125 @@ def test_teardown_emits_done_and_removes_config(isolated_configs_dir, tmp_path, 
             "cdn_service_id": "cdn_svc_1",
             "cdn_url": "https://cdn.example/",
         },
+        **overrides,
     }
     svcconfig.save_config(sid, cfg)
-    assert os.path.exists(svcconfig.config_path(sid)), "precondition: config seeded"
+    return cfg
 
-    # Stub the orchestrator so no Fastly / S3 / scheduler calls happen
-    def fake_perform_teardown(state, token, opts=None):
-        yield {"type": "status", "message": "removing logging endpoint"}
-        yield {"type": "status", "message": "removing FOS bucket"}
-        yield {"type": "done", "message": "teardown complete"}
 
+def _fake_perform_teardown(state, token, opts=None):
+    yield {"type": "status", "message": "removing logging endpoint (mock)"}
+    yield {"type": "status", "message": "removing FOS bucket (mock)"}
+    yield {"type": "done", "message": "teardown complete (mock)"}
+
+
+def _auth_fastly_ok(
+    service_id: str = "svc-1",
+    customer_id: str = "cust-T",
+    *,
+    scope="global",
+    services=None,
+    service_customer_id: str | None = None,
+):
+    svcs = [] if services is None else services
+    svc_cid = service_customer_id or customer_id
+    return lambda method, path, *, token, **kw: (
+        {"id": "tok", "user_id": "u", "scope": scope, "services": svcs, "customer_id": customer_id}
+        if path == "/tokens/self"
+        else {"id": path.rsplit("/", 1)[-1] if "/service/" in path else service_id, "customer_id": svc_cid}
+    )
+
+
+@contextmanager
+def _teardown_patches(sid: str = "svc-1", *, teardown_fn=_fake_perform_teardown, fastly_fn=None):
     with (
-        patch("backend.provision.perform_teardown", side_effect=fake_perform_teardown),
+        patch("backend.provision.perform_teardown", side_effect=teardown_fn),
         patch("backend.provision._sync_crontab"),
         patch("backend.cron.scheduler.get_scheduler"),
-        # Security: stub token validation. The auth gate itself is
-        # exercised in test_provision_teardown_auth.py.
-        patch(
-            "backend.utils.fastly_auth.fastly",
-            side_effect=lambda method, path, *, token, **kw: (
-                {"id": "tok", "scope": "global", "services": [], "customer_id": "cust-LF"}
-                if path == "/tokens/self"
-                else {"id": sid, "customer_id": "cust-LF"}
-            ),
-        ),
+        patch("backend.utils.fastly_auth.fastly", side_effect=fastly_fn or _auth_fastly_ok(sid)),
     ):
-        with TestClient(app) as client:
-            r = client.post(
-                "/api/provision/teardown",
-                json={
-                    "service_id": sid,
-                    "token": "test-tok",
-                    "remove_logging": True,
-                    "remove_cdn": True,
-                    "remove_bucket": True,
-                    "remove_cache": False,  # keep so we don't try to delete real DBs
-                    "remove_cron": False,
-                },
-            )
+        yield
+
+
+def _destructive_payload(sid: str, **overrides) -> dict:
+    return {
+        "service_id": sid,
+        "remove_logging": True,
+        "remove_cdn": True,
+        "remove_bucket": True,
+        "remove_cache": False,
+        **overrides,
+    }
+
+
+# ── Merged from tests/routers/test_provision_lifecycle.py ──
+
+
+def test_teardown_no_service_id_returns_404(isolated_configs_dir):
+    with TestClient(app) as client:
+        r = client.post("/api/provision/teardown", json={"service_id": "nope-not-a-real-svc"})
+    assert r.status_code == 404
+
+
+def test_teardown_emits_done_and_removes_config(isolated_configs_dir, tmp_path, monkeypatch):
+    sid = "svc-teardown-1"
+    _seed_cfg(sid, fos_bucket="td-test-bucket", fastly_api_key="fastly-test-token")
+    assert os.path.exists(svcconfig.config_path(sid)), "precondition: config seeded"
+
+    with _teardown_patches(sid), TestClient(app) as client:
+        r = client.post(
+            "/api/provision/teardown",
+            json=_destructive_payload(sid, token="test-tok", remove_cron=False),
+        )
 
     assert r.status_code == 200
     events = _parse_sse_events(r.text)
     assert events, f"expected SSE events, got: {r.text[:300]!r}"
-    types = [e.get("type") for e in events]
-    assert "done" in types, f"expected a terminal 'done' event, got types: {types}"
-
-    # The config file should be gone — that's the user-visible side effect
+    assert "done" in [e.get("type") for e in events]
     assert not os.path.exists(svcconfig.config_path(sid)), "config should have been removed"
 
 
 def test_teardown_remove_cache_clears_service_metadata(isolated_configs_dir):
-    """``remove_cache=True`` must also clear the per-service metadata SQLite
-    (ingested_files, cron_runs, rollups). It lives in the system data dir —
-    OUTSIDE the cache dir the rmtree handles — so without an explicit
-    ``metadata.teardown`` a re-provision inherits the dead service's
-    ingested_files rollup and the usage-log gap panel shows stale "ours"
-    counts."""
     sid = "svc-teardown-meta"
-    cfg = {
-        "service_id": sid,
-        "logging_service_id": sid,
-        "name": "Teardown Meta Svc",
-        "fos_bucket": "td-meta-bucket",
-        "fos_region": "us-east-1",
-        "fos_access_key_id": "AKIA",
-        "fos_secret_access_key": "SECRET",
-        "fastly_api_key": "fastly-test-token",
-        "cdn_secret": "x",
-        "provisioning": {
-            "fos_key_id": "fk",
-            "endpoint_name": "EP",
-            "cdn_service_id": "cdn",
-            "cdn_url": "https://cdn.example/",
-        },
-    }
-    svcconfig.save_config(sid, cfg)
-
-    def fake_perform_teardown(state, token, opts=None):
-        yield {"type": "done", "message": "teardown complete"}
-
+    _seed_cfg(sid, fos_bucket="td-meta-bucket", fastly_api_key="fastly-test-token")
     meta_calls: list[str] = []
 
     with (
-        patch("backend.provision.perform_teardown", side_effect=fake_perform_teardown),
-        patch("backend.provision._sync_crontab"),
-        patch("backend.cron.scheduler.get_scheduler"),
+        _teardown_patches(sid),
         patch("backend.core.metadata.teardown", side_effect=lambda s: meta_calls.append(s)),
-        patch(
-            "backend.utils.fastly_auth.fastly",
-            side_effect=lambda method, path, *, token, **kw: (
-                {"id": "tok", "scope": "global", "services": [], "customer_id": "c"}
-                if path == "/tokens/self"
-                else {"id": sid, "customer_id": "c"}
-            ),
-        ),
+        TestClient(app) as client,
     ):
-        with TestClient(app) as client:
-            r = client.post(
-                "/api/provision/teardown",
-                json={
-                    "service_id": sid,
-                    "token": "test-tok",
-                    "remove_logging": False,
-                    "remove_cdn": False,
-                    "remove_bucket": False,
-                    "remove_cache": True,  # full local wipe → must include metadata
-                    "remove_cron": False,
-                },
-            )
+        r = client.post(
+            "/api/provision/teardown",
+            json=_destructive_payload(
+                sid,
+                token="test-tok",
+                remove_logging=False,
+                remove_cdn=False,
+                remove_bucket=False,
+                remove_cache=True,
+                remove_cron=False,
+            ),
+        )
 
     assert r.status_code == 200
     assert meta_calls == [sid], f"metadata.teardown({sid!r}) must be called on remove_cache; got {meta_calls}"
 
 
 def test_teardown_skips_perform_teardown_when_no_logging_service(isolated_configs_dir):
-    """If the seeded config has no logging_service_id, the route still 200s
-    and removes the config — the orchestrator handles missing fields itself."""
     sid = "svc-teardown-min"
     svcconfig.save_config(sid, {"service_id": sid, "name": "minimal"})
 
-    def fake_perform_teardown(state, token, opts=None):
-        yield {"type": "done", "message": "no-op teardown"}
-
-    with (
-        patch("backend.provision.perform_teardown", side_effect=fake_perform_teardown),
-        patch("backend.provision._sync_crontab"),
-        patch("backend.cron.scheduler.get_scheduler"),
-        patch(
-            "backend.utils.fastly_auth.fastly",
-            side_effect=lambda method, path, *, token, **kw: (
-                {"id": "tok", "scope": "global", "services": [], "customer_id": "cust-MIN"}
-                if path == "/tokens/self"
-                else {"id": sid, "customer_id": "cust-MIN"}
-            ),
-        ),
-    ):
-        with TestClient(app) as client:
-            r = client.post(
-                "/api/provision/teardown",
-                json={"service_id": sid, "token": "test-tok", "remove_cache": False},
-            )
+    with _teardown_patches(sid), TestClient(app) as client:
+        r = client.post(
+            "/api/provision/teardown",
+            json={"service_id": sid, "token": "test-tok", "remove_cache": False},
+        )
     assert r.status_code == 200
     assert not os.path.exists(svcconfig.config_path(sid))
 
 
 def test_execute_delegates_to_provision_with_query_args(isolated_configs_dir):
-    """Verify the route forwards the query params it received into the
-    cfg dict passed to ``backend.provision.provision``. This is the contract
-    test for the create flow until full Fastly mocking lands (Milestone C)."""
     sid = "svc-create-1"
     captured: dict = {}
 
@@ -223,22 +193,22 @@ def test_execute_delegates_to_provision_with_query_args(isolated_configs_dir):
         patch("backend.config.fetch_service_name", return_value="My Service"),
         patch("backend.provision._sync_crontab"),
         patch("backend.cron.scheduler.get_scheduler"),
+        TestClient(app) as client,
     ):
-        with TestClient(app) as client:
-            r = client.post(
-                "/api/provision/execute",
-                json={
-                    "token": "test-token",
-                    "service_id": sid,
-                    "fos_bucket_name": "create-test-bucket",
-                    "fos_region": "us-east-1",
-                    "endpoint_name": "Test Logger",
-                    "edge_only": True,
-                    "log_period": "60",
-                    "enable_cron_sync": True,
-                    "enable_cron_compact": True,
-                },
-            )
+        r = client.post(
+            "/api/provision/execute",
+            json={
+                "token": "test-token",
+                "service_id": sid,
+                "fos_bucket_name": "create-test-bucket",
+                "fos_region": "us-east-1",
+                "endpoint_name": "Test Logger",
+                "edge_only": True,
+                "log_period": "60",
+                "enable_cron_sync": True,
+                "enable_cron_compact": True,
+            },
+        )
 
     assert r.status_code == 200, r.text[:500]
     cfg = captured.get("cfg")
@@ -247,15 +217,10 @@ def test_execute_delegates_to_provision_with_query_args(isolated_configs_dir):
     assert cfg["fos_bucket_name"] == "create-test-bucket"
     assert cfg["endpoint_name"] == "Test Logger"
     assert cfg["fos_region"] == "us-east-1"
-
-    events = _parse_sse_events(r.text)
-    types = [e.get("type") for e in events]
-    assert "done" in types, f"expected a terminal 'done' event, got: {types}"
+    assert "done" in [e.get("type") for e in _parse_sse_events(r.text)]
 
 
 def test_execute_propagates_orchestrator_error_event(isolated_configs_dir):
-    """When provision() yields an error event, it must reach the SSE consumer."""
-
     def fake_provision(cfg, _resume_from_state=False):
         yield {"type": "status", "message": "starting"}
         yield {"type": "error", "message": "Fastly API: 503 Service Unavailable"}
@@ -264,41 +229,19 @@ def test_execute_propagates_orchestrator_error_event(isolated_configs_dir):
         patch("backend.provision.provision", side_effect=fake_provision),
         patch("backend.utils.pop_utils.fetch_pop_locations"),
         patch("backend.config.fetch_service_name", return_value="x"),
+        TestClient(app) as client,
     ):
-        with TestClient(app) as client:
-            r = client.post(
-                "/api/provision/execute",
-                json={
-                    "token": "tok",
-                    "service_id": "svc-create-err",
-                    "fos_bucket_name": "create-err-bucket",  # valid: ≥3 chars
-                },
-            )
+        r = client.post(
+            "/api/provision/execute",
+            json={"token": "tok", "service_id": "svc-create-err", "fos_bucket_name": "create-err-bucket"},
+        )
 
     events = _parse_sse_events(r.text)
     err = next((e for e in events if e.get("type") == "error"), None)
-    assert err is not None, f"expected an error event, got: {events}"
-    assert "503" in err["message"]
+    assert err is not None and "503" in err["message"]
 
 
 # ── Merged from tests/routers/test_provision_teardown_auth.py ──
-def _seed_cfg(sid: str) -> None:
-
-    svcconfig.save_config(
-        sid,
-        {
-            "service_id": sid,
-            "logging_service_id": sid,
-            "name": f"Auth Svc {sid}",
-            "fos_bucket": f"auth-bucket-{sid}",
-            "fos_region": "us-east-1",
-            "fos_access_key_id": "AKIA",
-            "fos_secret_access_key": "SECRET",
-            "fastly_api_key": "server-stored-key-MUST-NOT-BE-USED",
-            "cdn_secret": "x",
-            "provisioning": {"fos_key_id": "fk", "cdn_service_id": "cdn_svc", "cdn_url": "https://x/"},
-        },
-    )
 
 
 @pytest.mark.security_regression
@@ -306,20 +249,9 @@ def test_destructive_teardown_without_token_rejected_401(isolated_configs_dir):
     """No token + destructive flags = 401, no fallback to server creds."""
     sid = "svc-auth-1"
     _seed_cfg(sid)
-
     with TestClient(app) as client:
-        r = client.post(
-            "/api/provision/teardown",
-            json={
-                "service_id": sid,
-                "remove_logging": True,
-                "remove_cdn": True,
-                "remove_bucket": True,
-                "remove_cache": False,
-            },
-        )
-
-    assert r.status_code == 401, f"expected 401, got {r.status_code}: {r.text[:300]}"
+        r = client.post("/api/provision/teardown", json=_destructive_payload(sid))
+    assert r.status_code == 401
     assert r.json()["detail"]["error"] == "token_required"
 
 
@@ -331,23 +263,10 @@ def test_destructive_teardown_with_read_only_scope_rejected(isolated_configs_dir
 
     def _fake_fastly(method, path, *, token, **kw):
         assert path == "/tokens/self"
-        # Read-only token: has global:read but NOT plain global.
         return {"id": "tok_ro", "user_id": "u", "scope": "global:read", "services": []}
 
-    with patch("backend.utils.fastly_auth.fastly", side_effect=_fake_fastly):
-        with TestClient(app) as client:
-            r = client.post(
-                "/api/provision/teardown",
-                json={
-                    "service_id": sid,
-                    "token": "ro-token",
-                    "remove_logging": True,
-                    "remove_cdn": True,
-                    "remove_bucket": True,
-                    "remove_cache": False,
-                },
-            )
-
+    with patch("backend.utils.fastly_auth.fastly", side_effect=_fake_fastly), TestClient(app) as client:
+        r = client.post("/api/provision/teardown", json=_destructive_payload(sid, token="ro-token"))
     assert r.status_code == 401
     assert r.json()["detail"]["error"] == "insufficient_scope"
 
@@ -357,24 +276,9 @@ def test_destructive_teardown_with_purge_scope_rejected(isolated_configs_dir):
     """purge_select / purge_all also reject — only ``global`` qualifies."""
     sid = "svc-auth-3"
     _seed_cfg(sid)
-
-    def _fake_fastly(method, path, *, token, **kw):
-        return {"id": "tok_purge", "scope": "purge_select purge_all", "services": []}
-
-    with patch("backend.utils.fastly_auth.fastly", side_effect=_fake_fastly):
-        with TestClient(app) as client:
-            r = client.post(
-                "/api/provision/teardown",
-                json={
-                    "service_id": sid,
-                    "token": "purge-token",
-                    "remove_logging": True,
-                    "remove_cdn": True,
-                    "remove_bucket": True,
-                    "remove_cache": False,
-                },
-            )
-
+    fastly_fn = _auth_fastly_ok(sid, scope="purge_select purge_all")
+    with patch("backend.utils.fastly_auth.fastly", side_effect=fastly_fn), TestClient(app) as client:
+        r = client.post("/api/provision/teardown", json=_destructive_payload(sid, token="purge-token"))
     assert r.status_code == 401
     assert r.json()["detail"]["error"] == "insufficient_scope"
 
@@ -384,24 +288,9 @@ def test_destructive_teardown_token_bound_to_wrong_service_rejected(isolated_con
     """Token has 'global' but services=[other-id] — must reject (service mismatch)."""
     sid = "svc-auth-4"
     _seed_cfg(sid)
-
-    def _fake_fastly(method, path, *, token, **kw):
-        return {"id": "tok_bound", "scope": "global", "services": ["different-svc"]}
-
-    with patch("backend.utils.fastly_auth.fastly", side_effect=_fake_fastly):
-        with TestClient(app) as client:
-            r = client.post(
-                "/api/provision/teardown",
-                json={
-                    "service_id": sid,
-                    "token": "bound-token",
-                    "remove_logging": True,
-                    "remove_cdn": True,
-                    "remove_bucket": True,
-                    "remove_cache": False,
-                },
-            )
-
+    fastly_fn = _auth_fastly_ok(sid, services=["different-svc"])
+    with patch("backend.utils.fastly_auth.fastly", side_effect=fastly_fn), TestClient(app) as client:
+        r = client.post("/api/provision/teardown", json=_destructive_payload(sid, token="bound-token"))
     assert r.status_code == 401
     assert r.json()["detail"]["error"] == "service_not_authorized"
 
@@ -411,41 +300,8 @@ def test_destructive_teardown_with_global_token_proceeds(isolated_configs_dir):
     """Valid 'global' token + matching/empty services → proceeds (200 SSE)."""
     sid = "svc-auth-5"
     _seed_cfg(sid)
-
-    def _fake_fastly(method, path, *, token, **kw):
-        if path == "/tokens/self":
-            return {
-                "id": "tok_ok",
-                "user_id": "u",
-                "scope": "global",
-                "services": [],
-                "customer_id": "cust-A",
-            }
-        # 035 tenant cross-check: /service/{sid} returns the owning customer.
-        return {"id": sid, "customer_id": "cust-A"}
-
-    def _fake_teardown(state, token, opts=None):
-        yield {"type": "done", "message": "ok"}
-
-    with (
-        patch("backend.utils.fastly_auth.fastly", side_effect=_fake_fastly),
-        patch("backend.provision.perform_teardown", side_effect=_fake_teardown),
-        patch("backend.provision._sync_crontab"),
-        patch("backend.cron.scheduler.get_scheduler"),
-    ):
-        with TestClient(app) as client:
-            r = client.post(
-                "/api/provision/teardown",
-                json={
-                    "service_id": sid,
-                    "token": "valid-global-token",
-                    "remove_logging": True,
-                    "remove_cdn": True,
-                    "remove_bucket": True,
-                    "remove_cache": False,
-                },
-            )
-
+    with _teardown_patches(sid, fastly_fn=_auth_fastly_ok(sid, "cust-A")), TestClient(app) as client:
+        r = client.post("/api/provision/teardown", json=_destructive_payload(sid, token="valid-global-token"))
     assert r.status_code == 200, r.text[:500]
 
 
@@ -454,204 +310,79 @@ def test_destructive_teardown_service_in_bound_list_proceeds(isolated_configs_di
     """Token bound to [sid, other] — matches target → proceeds."""
     sid = "svc-auth-6"
     _seed_cfg(sid)
-
-    def _fake_fastly(method, path, *, token, **kw):
-        if path == "/tokens/self":
-            return {
-                "id": "tok_bound",
-                "scope": "global",
-                "services": [sid, "other-svc"],
-                "customer_id": "cust-B",
-            }
-        return {"id": sid, "customer_id": "cust-B"}
-
-    def _fake_teardown(state, token, opts=None):
-        yield {"type": "done", "message": "ok"}
-
-    with (
-        patch("backend.utils.fastly_auth.fastly", side_effect=_fake_fastly),
-        patch("backend.provision.perform_teardown", side_effect=_fake_teardown),
-        patch("backend.provision._sync_crontab"),
-        patch("backend.cron.scheduler.get_scheduler"),
-    ):
-        with TestClient(app) as client:
-            r = client.post(
-                "/api/provision/teardown",
-                json={
-                    "service_id": sid,
-                    "token": "bound-valid",
-                    "remove_logging": True,
-                    "remove_cdn": True,
-                    "remove_bucket": True,
-                    "remove_cache": False,
-                },
-            )
-
+    fastly_fn = _auth_fastly_ok(sid, "cust-B", services=[sid, "other-svc"])
+    with _teardown_patches(sid, fastly_fn=fastly_fn), TestClient(app) as client:
+        r = client.post("/api/provision/teardown", json=_destructive_payload(sid, token="bound-valid"))
     assert r.status_code == 200
 
 
 @pytest.mark.security_regression
 def test_cache_only_teardown_requires_auth_gate(isolated_configs_dir):
-    """remove_logging=false + remove_cdn=false + remove_bucket=false = cache-only
-    cleanup. Still requires a token to prevent unauthenticated destruction of local state.
-    """
+    """Cache-only cleanup still requires a token to prevent unauthenticated local state destruction."""
     sid = "svc-auth-7"
     _seed_cfg(sid)
-
+    payload = _destructive_payload(
+        sid, remove_logging=False, remove_cdn=False, remove_bucket=False, remove_cache=True, remove_cron=False
+    )
     with TestClient(app) as client:
-        r = client.post(
-            "/api/provision/teardown",
-            json={
-                "service_id": sid,
-                "remove_logging": False,
-                "remove_cdn": False,
-                "remove_bucket": False,
-                "remove_cache": True,
-                "remove_cron": False,
-            },
-        )
-
-    # Cache-only teardown should trigger token_required 401 gate
+        r = client.post("/api/provision/teardown", json=payload)
     assert r.status_code == 401
     assert "token_required" in r.json()["detail"]["error"]
 
 
 @pytest.mark.security_regression
 def test_destructive_teardown_fastly_unreachable_rejects(isolated_configs_dir):
-    """If Fastly's /tokens/self errors out (network, 5xx), we must fail closed
-    rather than fall back to server creds."""
+    """If Fastly's /tokens/self errors out, fail closed rather than falling back to server creds."""
     sid = "svc-auth-8"
     _seed_cfg(sid)
-
-    def _fake_fastly(method, path, *, token, **kw):
-        raise RuntimeError("Network error on GET /tokens/self: unreachable (mock)")
-
-    with patch("backend.utils.fastly_auth.fastly", side_effect=_fake_fastly):
-        with TestClient(app) as client:
-            r = client.post(
-                "/api/provision/teardown",
-                json={
-                    "service_id": sid,
-                    "token": "any",
-                    "remove_logging": True,
-                    "remove_cdn": True,
-                    "remove_bucket": True,
-                    "remove_cache": False,
-                },
-            )
-
+    with (
+        patch("backend.utils.fastly_auth.fastly", side_effect=RuntimeError("Network error on GET /tokens/self")),
+        TestClient(app) as client,
+    ):
+        r = client.post("/api/provision/teardown", json=_destructive_payload(sid, token="any"))
     assert r.status_code == 401
     assert r.json()["detail"]["error"] == "token_validation_failed"
 
 
 @pytest.mark.security_regression
 def test_destructive_teardown_scope_as_list_accepted(isolated_configs_dir):
-    """Some Fastly token responses return scope as a JSON list. The validator
-    must normalize both forms; here we exercise the list-shape branch."""
+    """Some Fastly token responses return scope as a JSON list; validator must normalize both forms."""
     sid = "svc-auth-9"
     _seed_cfg(sid)
-
-    def _fake_fastly(method, path, *, token, **kw):
-        if path == "/tokens/self":
-            return {
-                "id": "tok_list",
-                "scope": ["global", "purge_all"],
-                "services": [],
-                "customer_id": "cust-L",
-            }
-        return {"id": sid, "customer_id": "cust-L"}
-
-    def _fake_teardown(state, token, opts=None):
-        yield {"type": "done", "message": "ok"}
-
-    with (
-        patch("backend.utils.fastly_auth.fastly", side_effect=_fake_fastly),
-        patch("backend.provision.perform_teardown", side_effect=_fake_teardown),
-        patch("backend.provision._sync_crontab"),
-        patch("backend.cron.scheduler.get_scheduler"),
-    ):
-        with TestClient(app) as client:
-            r = client.post(
-                "/api/provision/teardown",
-                json={
-                    "service_id": sid,
-                    "token": "list-scope",
-                    "remove_logging": True,
-                    "remove_cdn": True,
-                    "remove_bucket": True,
-                    "remove_cache": False,
-                },
-            )
-
+    fastly_fn = _auth_fastly_ok(sid, "cust-L", scope=["global", "purge_all"])
+    with _teardown_patches(sid, fastly_fn=fastly_fn), TestClient(app) as client:
+        r = client.post("/api/provision/teardown", json=_destructive_payload(sid, token="list-scope"))
     assert r.status_code == 200
 
 
 @pytest.mark.security_regression
 def test_destructive_teardown_tenant_mismatch_rejected(isolated_configs_dir):
-    """Token has 'global' scope, no services binding, BUT its customer_id
-    differs from the target service's customer_id. This blocks the
-    "use a global token from MY Fastly account against someone else's
-    service" attack."""
+    """Token with 'global' scope under a different customer_id from target service is rejected."""
     sid = "svc-auth-tenant-mismatch"
     _seed_cfg(sid)
-
-    def _fake_fastly(method, path, *, token, **kw):
-        if path == "/tokens/self":
-            # Attacker's token under their own Fastly account.
-            return {"id": "tok_attacker", "scope": "global", "services": [], "customer_id": "cust-ATTACKER"}
-        # Victim's service under a different tenant.
-        return {"id": sid, "customer_id": "cust-VICTIM"}
-
-    with patch("backend.utils.fastly_auth.fastly", side_effect=_fake_fastly):
-        with TestClient(app) as client:
-            r = client.post(
-                "/api/provision/teardown",
-                json={
-                    "service_id": sid,
-                    "token": "cross-tenant-token",
-                    "remove_logging": True,
-                    "remove_cdn": True,
-                    "remove_bucket": True,
-                    "remove_cache": False,
-                },
-            )
-
+    fastly_fn = _auth_fastly_ok(sid, "cust-ATTACKER", service_customer_id="cust-VICTIM")
+    with patch("backend.utils.fastly_auth.fastly", side_effect=fastly_fn), TestClient(app) as client:
+        r = client.post("/api/provision/teardown", json=_destructive_payload(sid, token="cross-tenant-token"))
     assert r.status_code == 401
     assert r.json()["detail"]["error"] == "tenant_mismatch"
 
 
 @pytest.mark.security_regression
 def test_destructive_teardown_get_method_rejected(isolated_configs_dir):
-    """CSRF defense: teardown must not be triggerable via GET. A cross-site
-    ``<img src="/api/provision/teardown?…">`` would fire on any visit to
-    an attacker page; POST + Content-Type: application/json forces the
-    browser to preflight and blocks silent cross-origin invocation."""
+    """CSRF defense: teardown must not be triggerable via GET."""
     sid = "svc-csrf-rejected"
     _seed_cfg(sid)
-
     with TestClient(app) as client:
         r = client.get(
             "/api/provision/teardown",
-            params={
-                "service_id": sid,
-                "token": "anything",
-                "remove_logging": "true",
-            },
+            params={"service_id": sid, "token": "anything", "remove_logging": "true"},
         )
-
-    # FastAPI may surface "no matching route" as 404 rather than 405. Either
-    # is acceptable; both mean the GET-CSRF vector is closed. What MUST NOT
-    # happen is a 200 SSE stream.
     assert r.status_code in (404, 405), f"GET must be rejected; got {r.status_code}: {r.text[:300]}"
 
 
 @pytest.mark.security_regression
 def test_destructive_teardown_text_plain_content_type_rejected(isolated_configs_dir):
-    """Regression for audit finding 012: a malicious HTML form with
-    ``enctype=text/plain`` can POST a JSON-shaped body without triggering a
-    CORS preflight, bypassing the intended same-origin gate. The teardown
-    handler must require ``Content-Type: application/json`` explicitly so
-    the browser is forced to preflight."""
+    """Regression for audit finding 012: text/plain POST must be rejected with 415."""
     sid = "svc-csrf-text-plain"
     _seed_cfg(sid)
     with TestClient(app) as client:
@@ -660,222 +391,103 @@ def test_destructive_teardown_text_plain_content_type_rejected(isolated_configs_
             content='{"service_id":"' + sid + '","remove_logging":true}',
             headers={"Content-Type": "text/plain"},
         )
-    assert r.status_code == 415, f"text/plain must be rejected with 415; got {r.status_code}: {r.text[:300]}"
+    assert r.status_code == 415
 
 
 # ── Merged from tests/routers/test_provision_teardown_idempotency.py ──
-def _seed_minimal_cfg(sid: str) -> None:
-
-    svcconfig.save_config(
-        sid,
-        {
-            "service_id": sid,
-            "logging_service_id": sid,
-            "name": f"Idempotency Svc {sid}",
-            "fos_bucket": f"idem-bucket-{sid}",
-            "fos_region": "us-east-1",
-            "fos_access_key_id": "AKIA",
-            "fos_secret_access_key": "SECRET",
-            "fastly_api_key": "fastly-test-token",
-            "cdn_secret": "x",
-            "provisioning": {
-                "fos_key_id": "fk_1",
-                "endpoint_name": "EP",
-                "cdn_service_id": "cdn_svc_1",
-                "cdn_url": "https://cdn.example/",
-            },
-        },
-    )
-
-
-def _fake_perform_teardown(state, token, opts=None):
-    yield {"type": "status", "message": "removing logging endpoint (mock)"}
-    yield {"type": "status", "message": "removing FOS bucket (mock)"}
-    yield {"type": "done", "message": "teardown complete (mock)"}
-
-
-_VALID_TOKEN = "test-admin-token"
-
-_VALID_TOKEN_SHAPE = {
-    "id": "tok_test",
-    "user_id": "user_test",
-    "scope": "global",
-    "services": [],
-    "customer_id": "cust-IDEM",
-}
-
-
-def _fake_fastly_dual(method, path, *, token, **kw):
-    """Dispatcher that returns ``/tokens/self`` or ``/service/{id}`` payloads
-    for the two-shot pattern introduced by the 035 tenant cross-check."""
-    if path == "/tokens/self":
-        return _VALID_TOKEN_SHAPE
-    # /service/{sid} — must match the token's customer_id
-    return {"id": path.rsplit("/", 1)[-1], "customer_id": _VALID_TOKEN_SHAPE["customer_id"]}
 
 
 def test_teardown_is_idempotent_second_call_is_404(isolated_configs_dir):
     """Two back-to-back teardown calls: first 200 + cleans up, second 404."""
     sid = "svc-idem-1"
-    _seed_minimal_cfg(sid)
+    _seed_cfg(sid)
 
-    with (
-        patch("backend.provision.perform_teardown", side_effect=_fake_perform_teardown),
-        patch("backend.provision._sync_crontab"),
-        patch("backend.cron.scheduler.get_scheduler"),
-        patch("backend.utils.fastly_auth.fastly", side_effect=_fake_fastly_dual),
-    ):
-        with TestClient(app) as client:
-            r1 = client.post(
-                "/api/provision/teardown",
-                json={
-                    "service_id": sid,
-                    "token": _VALID_TOKEN,
-                    "remove_logging": True,
-                    "remove_cdn": True,
-                    "remove_bucket": True,
-                    "remove_cache": False,
-                    "remove_cron": False,
-                },
-            )
-            assert r1.status_code == 200
-            events1 = _parse_sse_events(r1.text)
-            assert any(e.get("type") == "done" for e in events1), (
-                f"first teardown should emit done, got: {[e.get('type') for e in events1]}"
-            )
-            assert not os.path.exists(svcconfig.config_path(sid)), "first teardown should remove the config file"
+    with _teardown_patches(sid, fastly_fn=_auth_fastly_ok(sid, "cust-IDEM")), TestClient(app) as client:
+        r1 = client.post(
+            "/api/provision/teardown",
+            json=_destructive_payload(sid, token=_VALID_TOKEN, remove_cron=False),
+        )
+        assert r1.status_code == 200
+        assert any(e.get("type") == "done" for e in _parse_sse_events(r1.text))
+        assert not os.path.exists(svcconfig.config_path(sid))
 
-            # Second call: config is gone, route should reject with 404 cleanly.
-            # No 500, no stack trace, no partial SSE stream.
-            r2 = client.post(
-                "/api/provision/teardown",
-                json={"service_id": sid, "token": _VALID_TOKEN, "remove_cache": False},
-            )
+        r2 = client.post(
+            "/api/provision/teardown",
+            json={"service_id": sid, "token": _VALID_TOKEN, "remove_cache": False},
+        )
 
-    assert r2.status_code == 404, (
-        f"second teardown after config removed should be 404, got {r2.status_code}: {r2.text[:300]}"
-    )
-    body2 = r2.json()
-    assert "detail" in body2, f"404 should have FastAPI 'detail' shape: {body2}"
+    assert r2.status_code == 404
+    assert "detail" in r2.json()
 
 
 def test_teardown_unknown_service_id_never_provisioned_is_404(isolated_configs_dir):
-    """Teardown on a service that never existed (typo / wrong env) — 404, no crash.
-
-    No token needed because we return 404 before reaching the auth gate (state
-    is None → 404 first). The auth gate only fires once state is loaded.
-    """
     with TestClient(app) as client:
-        r = client.post(
-            "/api/provision/teardown",
-            json={"service_id": "never-existed-svc", "remove_cache": False},
-        )
+        r = client.post("/api/provision/teardown", json={"service_id": "never-existed-svc", "remove_cache": False})
     assert r.status_code == 404
 
 
 def test_teardown_preserves_duckdb_when_remove_cache_false(isolated_configs_dir, tmp_path):
-    """``remove_cache=False`` MUST leave the per-service DuckDB file intact.
-
-    A teardown intent is sometimes "decommission the Fastly resources but
-    keep the local analytics data". This contract pin prevents a future
-    refactor from accidentally wiping the DuckDB regardless of the flag.
-    """
+    """``remove_cache=False`` MUST leave the per-service DuckDB file intact."""
     sid = "svc-idem-keep-cache"
-    _seed_minimal_cfg(sid)
+    _seed_cfg(sid)
 
-    # Simulate an existing DuckDB file on disk (the cron pipeline would
-    # have created this — for the test we just touch a placeholder).
     db_path = svcconfig.duckdb_path(sid)
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
     with open(db_path, "w") as f:
         f.write("placeholder-duckdb-bytes")
-    assert os.path.exists(db_path), "precondition: db placeholder exists"
+    assert os.path.exists(db_path)
 
-    with (
-        patch("backend.provision.perform_teardown", side_effect=_fake_perform_teardown),
-        patch("backend.provision._sync_crontab"),
-        patch("backend.cron.scheduler.get_scheduler"),
-        patch("backend.utils.fastly_auth.fastly", side_effect=_fake_fastly_dual),
-    ):
-        with TestClient(app) as client:
-            r = client.post(
-                "/api/provision/teardown",
-                json={
-                    "service_id": sid,
-                    "token": _VALID_TOKEN,
-                    "remove_cache": False,
-                    "remove_cron": False,
-                },
-            )
+    with _teardown_patches(sid, fastly_fn=_auth_fastly_ok(sid, "cust-IDEM")), TestClient(app) as client:
+        r = client.post(
+            "/api/provision/teardown",
+            json={"service_id": sid, "token": _VALID_TOKEN, "remove_cache": False, "remove_cron": False},
+        )
 
     assert r.status_code == 200
-    # Config removed (always, regardless of remove_cache).
     assert not os.path.exists(svcconfig.config_path(sid))
-    # DuckDB preserved (because remove_cache=False).
-    assert os.path.exists(db_path), f"DuckDB at {db_path} should NOT be removed when remove_cache=false"
+    assert os.path.exists(db_path)
 
 
 def test_teardown_partial_failure_in_perform_teardown_still_succeeds(isolated_configs_dir):
-    """If ``perform_teardown`` raises mid-stream (e.g. Fastly 503 while deleting
-    the logging endpoint), the route MUST still:
-      - emit an error event in the SSE stream
-      - leave the config file removed (it was deleted at the *start* of stream())
-      - return 200 (SSE streams don't change status mid-flight)
-
-    This is the recovery contract: a flaky Fastly API call shouldn't strand
-    the user with a half-torn-down service and a config they can't get rid of.
-    """
+    """If ``perform_teardown`` raises mid-stream, SSE emits error, config is removed, and re-run is 404."""
     sid = "svc-idem-partial-fail"
-    _seed_minimal_cfg(sid)
+    _seed_cfg(sid)
 
     def _boom_teardown(state, token, opts=None):
         yield {"type": "status", "message": "removing logging endpoint (mock)"}
         raise RuntimeError("Fastly API: 503 Service Unavailable (mock)")
 
     with (
-        patch("backend.provision.perform_teardown", side_effect=_boom_teardown),
-        patch("backend.provision._sync_crontab"),
-        patch("backend.cron.scheduler.get_scheduler"),
-        patch("backend.utils.fastly_auth.fastly", side_effect=_fake_fastly_dual),
+        _teardown_patches(sid, teardown_fn=_boom_teardown, fastly_fn=_auth_fastly_ok(sid, "cust-IDEM")),
+        TestClient(app) as client,
     ):
-        with TestClient(app) as client:
-            r = client.post(
-                "/api/provision/teardown",
-                json={"service_id": sid, "token": _VALID_TOKEN, "remove_cache": False},
-            )
+        r = client.post(
+            "/api/provision/teardown",
+            json={"service_id": sid, "token": _VALID_TOKEN, "remove_cache": False},
+        )
 
-    assert r.status_code == 200, r.text[:500]
-    events = _parse_sse_events(r.text)
-    types = [e.get("type") for e in events]
-    assert "error" in types, f"expected error event after teardown raised, got: {types}"
+    assert r.status_code == 200
+    assert "error" in [e.get("type") for e in _parse_sse_events(r.text)]
+    assert not os.path.exists(svcconfig.config_path(sid))
 
-    # Config was removed at the top of stream() (line ~242 in provision.py),
-    # so it should be gone even though the Fastly call failed. Re-firing
-    # teardown should now return 404 — verifying the idempotency contract
-    # composes with the partial-failure path.
-    assert not os.path.exists(svcconfig.config_path(sid)), (
-        "config should have been removed before perform_teardown raised"
-    )
     with TestClient(app) as client:
         r2 = client.post(
             "/api/provision/teardown",
             json={"service_id": sid, "token": _VALID_TOKEN, "remove_cache": False},
         )
-    assert r2.status_code == 404, f"second teardown should be 404, got {r2.status_code}"
+    assert r2.status_code == 404
 
 
 # ── Merged from tests/routers/test_provision_wizard_e2e.py ──
+
+
 def _fake_ensure_fos_access_key(
     description, state, token, *, permission="read-write-objects", buckets=None, status_cb=None
 ):
     if status_cb:
         status_cb(f"⏳ Creating {permission} access key (mock)…")
     suffix = "temp" if "temp-admin" in description else "perm"
-    return {
-        "id": f"AKIA_TEST_{suffix}",
-        "access_key": f"AKIA_TEST_{suffix}",
-        "secret_key": f"SECRET_TEST_{suffix}",
-    }
+    return {"id": f"AKIA_TEST_{suffix}", "access_key": f"AKIA_TEST_{suffix}", "secret_key": f"SECRET_TEST_{suffix}"}
 
 
 def _fake_ensure_fos_bucket(bucket, region, access_key, secret_key, *, service_id=None, status_cb=None):
@@ -887,22 +499,15 @@ def _fake_ensure_fos_bucket(bucket, region, access_key, secret_key, *, service_i
 def _fake_ensure_cdn_service(cfg, fos_access_key, fos_secret_key, token, status_cb=None, on_created=None):
     if status_cb:
         status_cb("🌐 CDN service (mock)…")
-    # Mirror the real ensure_cdn_service: persist the id the moment the
-    # service exists so a failure later in this step still leaves it in
-    # state for perform_teardown to delete (no orphan CDN service).
     if on_created:
         on_created("cdn-svc-mock-123")
-    return {
-        "id": "cdn-svc-mock-123",
-        "name": cfg.get("cdn_service_name") or "Mock CDN Service",
-        "version": 1,
-    }
+    return {"id": "cdn-svc-mock-123", "name": cfg.get("cdn_service_name") or "Mock CDN Service", "version": 1}
 
 
 def _fake_ensure_logging_via_reconciler(state, token, status_cb=None):
     if status_cb:
         status_cb("📡 Logging endpoint (mock)…")
-    return 42  # activated version number
+    return 42
 
 
 def _fake_delete_fos_access_key(key_id, token, status_cb=None):
@@ -910,19 +515,11 @@ def _fake_delete_fos_access_key(key_id, token, status_cb=None):
         status_cb(f"🧹 Deleted {key_id} (mock)…")
 
 
-def test_wizard_execute_runs_orchestrator_and_bootstrap_sees_service(isolated_configs_dir, tmp_path, monkeypatch):
-    """End-to-end: execute → orchestrator yields done → config persists → bootstrap lists svc."""
-    sid = "svc-wizard-e2e-1"
-
-    # Steer DuckDB away from real disk paths — write_service_config calls
-    # svcconfig.duckdb_path() which depends on DATA_DIR.
+@contextmanager
+def _wizard_env(tmp_path, monkeypatch, *, service_name="Wizard E2E Service", extra_patches=()):
     monkeypatch.setattr(svcconfig, "DATA_DIR", tmp_path / "data")
     (tmp_path / "data").mkdir(exist_ok=True)
-
-    # Patch each helper *at the orchestrator's import site* so the
-    # generator-style "yield from run_with_events(helper, ...)" chain
-    # picks up the fake. status_cb shimming keeps the progress yields flowing.
-    with (
+    base_patches = [
         patch("backend.provision.orchestrator.ensure_fos_access_key", side_effect=_fake_ensure_fos_access_key),
         patch("backend.provision.orchestrator.ensure_fos_bucket", side_effect=_fake_ensure_fos_bucket),
         patch("backend.provision.orchestrator.ensure_cdn_service", side_effect=_fake_ensure_cdn_service),
@@ -931,61 +528,59 @@ def test_wizard_execute_runs_orchestrator_and_bootstrap_sees_service(isolated_co
             side_effect=_fake_ensure_logging_via_reconciler,
         ),
         patch("backend.provision.orchestrator.delete_fos_access_key", side_effect=_fake_delete_fos_access_key),
-        # Skip Fastly preflight + scheduler reload; we don't have a real cron.
         patch("backend.utils.pop_utils.fetch_pop_locations", return_value=True),
-        patch("backend.config.fetch_service_name", return_value="Wizard E2E Service"),
+        patch("backend.config.fetch_service_name", return_value=service_name),
         patch("backend.provision._sync_crontab"),
         patch("backend.cron.scheduler.get_scheduler"),
+    ]
+    with ExitStack() as stack:
+        for p in [*base_patches, *extra_patches]:
+            stack.enter_context(p)
+        yield
+
+
+def _wizard_payload(sid: str, bucket: str, **overrides) -> dict:
+    return {
+        "token": "fake-fastly-token",
+        "service_id": sid,
+        "service_name": "Wizard E2E Service",
+        "endpoint_name": "Wizard E2E Logger",
+        "fos_region": "us-east-1",
+        "fos_bucket_name": bucket,
+        "fos_prefix": "logs/",
+        "sample_rate": "100",
+        "edge_only": True,
+        "log_period": "60",
+        "enable_cron_sync": True,
+        "delete_after": True,
+        "commit_interval_mins": 5,
+        "enable_cron_compact": True,
+        "log_retention_days": 30,
+        **overrides,
+    }
+
+
+def test_wizard_execute_runs_orchestrator_and_bootstrap_sees_service(isolated_configs_dir, tmp_path, monkeypatch):
+    """End-to-end: execute → orchestrator yields done → config persists → bootstrap lists svc."""
+    sid = "svc-wizard-e2e-1"
+    extras = [
         patch("backend.cron.jobs.metadata._run_metadata_sync"),
-        # The orchestrator tries to initialize iceberg on commit; let the
-        # try/except swallow our forced failure rather than touching FOS.
         patch("backend.core.iceberg.init_iceberg_table", side_effect=RuntimeError("iceberg init skipped (test)")),
-    ):
-        with TestClient(app) as client:
-            r = client.post(
-                "/api/provision/execute",
-                json={
-                    "token": "fake-fastly-token",
-                    "service_id": sid,
-                    "service_name": "Wizard E2E Service",
-                    "endpoint_name": "Wizard E2E Logger",
-                    "fos_region": "us-east-1",
-                    "fos_bucket_name": "wizard-e2e-bucket",
-                    "fos_prefix": "logs/",
-                    "sample_rate": "100",
-                    "edge_only": True,
-                    "log_period": "60",
-                    "enable_cron_sync": True,
-                    "delete_after": True,
-                    "commit_interval_mins": 5,
-                    "enable_cron_compact": True,
-                    "log_retention_days": 30,
-                },
-            )
+    ]
+    with _wizard_env(tmp_path, monkeypatch, extra_patches=extras), TestClient(app) as client:
+        r = client.post("/api/provision/execute", json=_wizard_payload(sid, "wizard-e2e-bucket"))
 
     assert r.status_code == 200, r.text[:500]
-
-    # 1. SSE stream contract — must yield a terminal "done" event with no
-    #    preceding error. If any orchestrator step raised, the route would
-    #    emit "error" and ABORT the rollback path with another "error"
-    #    event after running perform_teardown.
     events = _parse_sse_events(r.text)
-    assert events, f"expected SSE events, got: {r.text[:500]!r}"
     types = [e.get("type") for e in events]
-    assert "done" in types, f"expected terminal 'done' event, got types: {types}"
-    assert "error" not in types, f"unexpected error event, full stream: {events}"
+    assert "done" in types and "error" not in types
 
-    # 2. Step coverage — confirm every numbered step yielded its banner
-    #    so we know the generator actually walked the full sequence and
-    #    didn't short-circuit on a mocked helper returning early.
     status_msgs = " | ".join(e.get("message", "") for e in events if e.get("type") == "status")
     for n in range(1, 9):
-        assert f"Step {n}/8" in status_msgs, f"missing Step {n}/8 banner in: {status_msgs[:600]}"
+        assert f"Step {n}/8" in status_msgs
 
-    # 3. Config persisted — write_service_config(state) must have written
-    #    configs/{sid}.json with the wizard params propagated.
     cfg_path = svcconfig.config_path(sid)
-    assert os.path.exists(cfg_path), f"expected {cfg_path} to exist after provision"
+    assert os.path.exists(cfg_path)
     written = json.loads(cfg_path.read_text())
     assert written["service_id"] == sid
     assert written["fos_bucket"] == "wizard-e2e-bucket"
@@ -994,193 +589,91 @@ def test_wizard_execute_runs_orchestrator_and_bootstrap_sees_service(isolated_co
     assert written["fos_secret_access_key"] == "SECRET_TEST_perm"
     assert written["fastly_api_key"] == "fake-fastly-token"
     assert written["cdn_service_id"] == "cdn-svc-mock-123"
-    # endpoint_name is read by write_service_config from state["provisioning"]["endpoint_name"];
-    # the wizard's top-level endpoint_name never reaches that nested slot, so the default wins.
-    # That's pre-existing orchestrator behavior — not the contract this test pins. Just assert
-    # the provisioning block is well-formed.
     assert isinstance(written["provisioning"]["endpoint_name"], str) and written["provisioning"]["endpoint_name"]
-    # cdn_secret is generated in the route layer (secrets.token_urlsafe);
-    # don't pin its value, just assert it's a non-empty string.
-    assert isinstance(written["cdn_secret"], str) and written["cdn_secret"], "cdn_secret should be a non-empty string"
+    assert isinstance(written["cdn_secret"], str) and written["cdn_secret"]
 
-    # 4. Bootstrap sees the new service — the service manager reads
-    #    configs/*.json on every call (no module-level cache), so the
-    #    freshly written config must surface in the services list.
     with TestClient(app) as client:
         boot = client.get("/api/bootstrap")
-    assert boot.status_code == 200, boot.text[:500]
-    body = boot.json()
-    assert "services" in body, f"bootstrap missing 'services': {body}"
-    svc_ids = [s.get("service_id") for s in body["services"]]
-    assert sid in svc_ids, f"bootstrap services do not include {sid}: {svc_ids}"
+    assert boot.status_code == 200
+    assert sid in [s.get("service_id") for s in boot.json()["services"]]
 
 
 def test_wizard_execute_e2e_iceberg_init_success(isolated_configs_dir, tmp_path, monkeypatch, s3_mock):
-    """R-15: positive-path variant of the wizard E2E. Lets the real
-    `init_iceberg_table` execute against a per-test moto S3 endpoint
-    instead of mocking it to raise, so the final orchestrator step is
-    actually validated end-to-end and the iceberg table is queryable
-    via DuckDB afterwards.
-
-    The companion test above (`*_runs_orchestrator_*`) explicitly mocks
-    iceberg.init_iceberg_table to raise so its assertions can focus on
-    the orchestrator generator's step sequencing; this one closes the
-    gap by exercising the init for real.
-    """
+    """R-15: positive-path variant exercising real `init_iceberg_table` against moto S3."""
     sid = "svc-wizard-iceberg-success"
-
-    monkeypatch.setattr(svcconfig, "DATA_DIR", tmp_path / "data")
-    (tmp_path / "data").mkdir(exist_ok=True)
-
-    # Point the storage-cache root at tmp so init_iceberg_table can
-    # provision its sqlite catalog under the sandbox.
     monkeypatch.setattr(svcconfig, "CACHE_DATA_DIR", tmp_path / "data" / "cache")
+    extras = [patch("backend.cron.jobs.metadata._run_metadata_sync")]
 
     with (
-        patch("backend.provision.orchestrator.ensure_fos_access_key", side_effect=_fake_ensure_fos_access_key),
-        patch("backend.provision.orchestrator.ensure_fos_bucket", side_effect=_fake_ensure_fos_bucket),
-        patch("backend.provision.orchestrator.ensure_cdn_service", side_effect=_fake_ensure_cdn_service),
-        patch(
-            "backend.provision.orchestrator.ensure_logging_via_reconciler",
-            side_effect=_fake_ensure_logging_via_reconciler,
-        ),
-        patch("backend.provision.orchestrator.delete_fos_access_key", side_effect=_fake_delete_fos_access_key),
-        patch("backend.utils.pop_utils.fetch_pop_locations", return_value=True),
-        patch("backend.config.fetch_service_name", return_value="Wizard Iceberg Success"),
-        patch("backend.provision._sync_crontab"),
-        patch("backend.cron.scheduler.get_scheduler"),
-        patch("backend.cron.jobs.metadata._run_metadata_sync"),
-        # NB: NO patch for init_iceberg_table — it runs for real against
-        # the moto S3 endpoint (s3_mock fixture) the conftest pre-wires
-        # via backend.core.duckdb._get_fos_client.
+        _wizard_env(tmp_path, monkeypatch, service_name="Wizard Iceberg Success", extra_patches=extras),
+        TestClient(app) as client,
     ):
-        with TestClient(app) as client:
-            r = client.post(
-                "/api/provision/execute",
-                json={
-                    "token": "fake-fastly-token",
-                    "service_id": sid,
-                    "service_name": "Wizard Iceberg Success",
-                    "endpoint_name": "Wizard Iceberg Logger",
-                    "fos_region": "us-east-1",
-                    "fos_bucket_name": "test-bucket",  # provisioned by s3_mock
-                    "fos_prefix": "logs/",
-                    "sample_rate": "100",
-                    "edge_only": True,
-                    "log_period": "60",
-                    "enable_cron_sync": True,
-                    "delete_after": True,
-                    "commit_interval_mins": 5,
-                    "enable_cron_compact": True,
-                    "log_retention_days": 30,
-                },
-            )
+        r = client.post(
+            "/api/provision/execute",
+            json=_wizard_payload(
+                sid,
+                "test-bucket",
+                service_name="Wizard Iceberg Success",
+                endpoint_name="Wizard Iceberg Logger",
+            ),
+        )
 
     assert r.status_code == 200, r.text[:500]
     events = _parse_sse_events(r.text)
     types = [e.get("type") for e in events]
-    assert "done" in types, f"expected 'done' event, got types: {types}"
-    assert "error" not in types, f"unexpected error event, full stream: {events}"
+    assert "done" in types and "error" not in types
 
-    # All 8 banners must have emitted (step 8 is the iceberg-init step).
     status_msgs = " | ".join(e.get("message", "") for e in events if e.get("type") == "status")
     for n in range(1, 9):
-        assert f"Step {n}/8" in status_msgs, f"missing Step {n}/8 banner: {status_msgs[:600]}"
+        assert f"Step {n}/8" in status_msgs
+    assert svcconfig.config_path(sid).exists()
 
-    # Config persists.
-    cfg_path = svcconfig.config_path(sid)
-    assert cfg_path.exists(), f"expected {cfg_path}"
-
-    # Bootstrap surfaces the service.
     with TestClient(app) as client:
         boot = client.get("/api/bootstrap")
     assert boot.status_code == 200
-    svc_ids = [s.get("service_id") for s in boot.json()["services"]]
-    assert sid in svc_ids
+    assert sid in [s.get("service_id") for s in boot.json()["services"]]
 
 
 def test_wizard_execute_rolls_back_on_helper_failure(isolated_configs_dir, tmp_path, monkeypatch):
-    """If a mid-pipeline helper raises, the orchestrator must emit an error
-    event AND run perform_teardown (rollback). The config file must NOT
-    persist after a failed provision."""
+    """Mid-pipeline helper failure emits error event, runs rollback, and removes config."""
     sid = "svc-wizard-e2e-fail"
-    monkeypatch.setattr(svcconfig, "DATA_DIR", tmp_path / "data")
-    (tmp_path / "data").mkdir(exist_ok=True)
 
-    # Steps 1-3 succeed; ensure_cdn_service blows up at step 6.
     def _boom_cdn(cfg, fos_access_key, fos_secret_key, token, status_cb=None):
         raise RuntimeError("Fastly API: 500 Internal Server Error (mock)")
 
-    with (
-        patch("backend.provision.orchestrator.ensure_fos_access_key", side_effect=_fake_ensure_fos_access_key),
-        patch("backend.provision.orchestrator.ensure_fos_bucket", side_effect=_fake_ensure_fos_bucket),
+    extras = [
         patch("backend.provision.orchestrator.ensure_cdn_service", side_effect=_boom_cdn),
-        patch(
-            "backend.provision.orchestrator.ensure_logging_via_reconciler",
-            side_effect=_fake_ensure_logging_via_reconciler,
-        ),
-        patch("backend.provision.orchestrator.delete_fos_access_key", side_effect=_fake_delete_fos_access_key),
-        # Swallow side effects from the rollback path.
         patch("backend.provision.orchestrator.remove_logging_endpoint"),
         patch("backend.provision.orchestrator.delete_cdn_service"),
         patch("backend.provision.orchestrator.delete_fos_bucket"),
         patch("backend.core.fastly.client.fastly", return_value={"data": []}),
-        patch("backend.utils.pop_utils.fetch_pop_locations", return_value=True),
-        patch("backend.config.fetch_service_name", return_value="Wizard E2E Service Fail"),
-        patch("backend.provision._sync_crontab"),
-        patch("backend.cron.scheduler.get_scheduler"),
+    ]
+    with (
+        _wizard_env(tmp_path, monkeypatch, service_name="Wizard E2E Service Fail", extra_patches=extras),
+        TestClient(app) as client,
     ):
-        with TestClient(app) as client:
-            r = client.post(
-                "/api/provision/execute",
-                json={
-                    "token": "fake-fastly-token",
-                    "service_id": sid,
-                    "service_name": "Wizard E2E Service Fail",
-                    "endpoint_name": "Wizard E2E Logger Fail",
-                    "fos_region": "us-east-1",
-                    "fos_bucket_name": "wizard-e2e-fail-bucket",
-                    "edge_only": True,
-                    "log_period": "60",
-                },
-            )
+        r = client.post(
+            "/api/provision/execute",
+            json=_wizard_payload(
+                sid,
+                "wizard-e2e-fail-bucket",
+                service_name="Wizard E2E Service Fail",
+                endpoint_name="Wizard E2E Logger Fail",
+            ),
+        )
 
     assert r.status_code == 200, r.text[:500]
     events = _parse_sse_events(r.text)
-    types = [e.get("type") for e in events]
-    assert "error" in types, f"expected error event after helper raised, got: {types}"
+    assert "error" in [e.get("type") for e in events]
 
-    # Step 1-3 ran (preflight, temp admin key, bucket); step 6 was the boom.
     status_msgs = " | ".join(e.get("message", "") for e in events if e.get("type") == "status")
-    assert "Step 3/8" in status_msgs, f"expected at least 3 steps before failure: {status_msgs[:600]}"
-    assert "Step 8/8" not in status_msgs, f"step 8 should not run after step-6 failure: {status_msgs[:600]}"
-
-    # Config file should NOT persist after a failed provision (the
-    # orchestrator's except branch removes it explicitly).
-    assert not os.path.exists(svcconfig.config_path(sid)), f"config {sid}.json should be removed after rollback"
+    assert "Step 3/8" in status_msgs and "Step 8/8" not in status_msgs
+    assert not os.path.exists(svcconfig.config_path(sid))
 
 
 def test_wizard_execute_rollback_actually_invokes_resource_deletion(isolated_configs_dir, tmp_path, monkeypatch):
-    """Mid-pipeline failure → perform_teardown must DELETE the
-    resources that were actually created (CDN service, FOS bucket,
-    FOS access keys, logging endpoint), not just emit an error event
-    and clean up the config file.
-
-    The existing test_wizard_execute_rolls_back_on_helper_failure
-    only asserts the SSE error event + config-file removal. That
-    assertion would still pass if perform_teardown silently swallowed
-    every delete call — which is the exact failure mode that left
-    orphaned Fastly CDN services + temp FOS keys in production.
-
-    Here we force the LOGGING_ENDPOINT step (step 7) to fail AFTER
-    steps 1-6 have created real resources, and we record every
-    delete_* call. Then we assert each created resource was torn
-    down with the matching identifier."""
+    """Mid-pipeline failure at step 7 must invoke resource deletion helpers for steps 1-6."""
     sid = "svc-wizard-teardown-trace"
-    monkeypatch.setattr(svcconfig, "DATA_DIR", tmp_path / "data")
-    (tmp_path / "data").mkdir(exist_ok=True)
-
-    # Record every teardown helper invocation by (function, args).
     teardown_calls: list[tuple[str, dict]] = []
 
     def _track(name):
@@ -1193,131 +686,42 @@ def test_wizard_execute_rollback_actually_invokes_resource_deletion(isolated_con
     def _boom_logging_endpoint(state, token, status_cb=None):
         raise RuntimeError("Fastly API: 502 Bad Gateway on logging endpoint (mock)")
 
-    # The teardown's mid-step "create a temp admin key to delete the
-    # bucket" needs a fake_ensure_fos_access_key that does NOT crash —
-    # use the same shim already in this file.
-    with (
-        patch("backend.provision.orchestrator.ensure_fos_access_key", side_effect=_fake_ensure_fos_access_key),
-        patch("backend.provision.orchestrator.ensure_fos_bucket", side_effect=_fake_ensure_fos_bucket),
-        patch("backend.provision.orchestrator.ensure_cdn_service", side_effect=_fake_ensure_cdn_service),
+    extras = [
         patch("backend.provision.orchestrator.ensure_logging_via_reconciler", side_effect=_boom_logging_endpoint),
         patch("backend.provision.orchestrator.delete_fos_access_key", side_effect=_track("delete_fos_access_key")),
         patch("backend.provision.orchestrator.delete_fos_bucket", side_effect=_track("delete_fos_bucket")),
         patch("backend.provision.orchestrator.delete_cdn_service", side_effect=_track("delete_cdn_service")),
         patch("backend.provision.orchestrator.remove_logging_endpoint", side_effect=_track("remove_logging_endpoint")),
-        # ``fastly()`` is called inside perform_teardown's FOS-key
-        # sweep at the top of step 2 to list keys; return an empty list
-        # so it doesn't try to delete anything via that path.
         patch("backend.core.fastly.client.fastly", return_value={"data": []}),
-        patch("backend.utils.pop_utils.fetch_pop_locations", return_value=True),
-        patch("backend.config.fetch_service_name", return_value="Wizard Teardown Trace"),
-        patch("backend.provision._sync_crontab"),
-        patch("backend.cron.scheduler.get_scheduler"),
+    ]
+    with (
+        _wizard_env(tmp_path, monkeypatch, service_name="Wizard Teardown Trace", extra_patches=extras),
+        TestClient(app) as client,
     ):
-        with TestClient(app) as client:
-            r = client.post(
-                "/api/provision/execute",
-                json={
-                    "token": "fake-fastly-token",
-                    "service_id": sid,
-                    "service_name": "Wizard Teardown Trace",
-                    "endpoint_name": "Wizard Teardown Logger",
-                    "fos_region": "us-east-1",
-                    "fos_bucket_name": "wizard-teardown-bucket",
-                    # cdn_service_name is required for perform_teardown's
-                    # step-4 (delete_cdn_service) branch to actually
-                    # fire — the production wizard ships it; missing it
-                    # would silently leak the CDN service on teardown.
-                    "cdn_service_name": "Wizard Teardown CDN",
-                    "edge_only": True,
-                    "log_period": "60",
-                },
-            )
+        r = client.post(
+            "/api/provision/execute",
+            json=_wizard_payload(
+                sid,
+                "wizard-teardown-bucket",
+                service_name="Wizard Teardown Trace",
+                endpoint_name="Wizard Teardown Logger",
+                cdn_service_name="Wizard Teardown CDN",
+            ),
+        )
 
     assert r.status_code == 200, r.text[:500]
     events = _parse_sse_events(r.text)
-    types = [e.get("type") for e in events]
-    assert "error" in types
-    # We failed AT step 7 — steps 1-6 ran (preflight, temp key, bucket,
-    # perm key, temp-key cleanup, CDN service).
+    assert "error" in [e.get("type") for e in events]
     status_msgs = " | ".join(e.get("message", "") for e in events if e.get("type") == "status")
-    assert "Step 6/8" in status_msgs, f"expected step 6 (CDN service) to have completed: {status_msgs[:600]}"
+    assert "Step 6/8" in status_msgs
 
-    # Resources that were actually created MUST be torn down:
-    # 1. CDN service ID came from _fake_ensure_cdn_service → cdn-svc-mock-123
-    # 2. Logging endpoint name = the one we posted ('Wizard Teardown Logger')
-    # 3. FOS bucket name = 'wizard-teardown-bucket'
-    # 4. The permanent FOS access key id = AKIA_TEST_perm (from the shim)
     called_names = [name for name, _ in teardown_calls]
-    assert "delete_cdn_service" in called_names, (
-        f"perform_teardown never called delete_cdn_service — the CDN service "
-        f"cdn-svc-mock-123 created at step 6 will leak in production. "
-        f"Teardown calls observed: {called_names}"
-    )
-    assert "remove_logging_endpoint" in called_names, (
-        f"perform_teardown never called remove_logging_endpoint — the logging "
-        f"endpoint config would be left orphaned. Teardown calls: {called_names}"
-    )
-    assert "delete_fos_bucket" in called_names, (
-        f"perform_teardown never called delete_fos_bucket — the bucket "
-        f"'wizard-teardown-bucket' would leak. Teardown calls: {called_names}"
-    )
-    # The permanent FOS access key MUST be deleted (it was created at step 4).
-    fos_key_deletes = [c for c in teardown_calls if c[0] == "delete_fos_access_key"]
-    assert fos_key_deletes, (
-        f"perform_teardown never called delete_fos_access_key — at least the "
-        f"permanent key (AKIA_TEST_perm) should be torn down. "
-        f"Teardown calls: {called_names}"
-    )
-
-    # And the wizard's config file should not persist.
+    for expected in ("delete_cdn_service", "remove_logging_endpoint", "delete_fos_bucket", "delete_fos_access_key"):
+        assert expected in called_names, f"expected {expected} in {called_names}"
     assert not os.path.exists(svcconfig.config_path(sid))
 
 
 # ── Merged from tests/routers/test_provision.py ──
-
-"""Tests for backend/routers/provision.py (/api/provision/*) and helper branches."""
-
-
-import io
-import urllib.error
-import zipfile
-from io import BytesIO
-from unittest.mock import MagicMock
-
-import botocore.exceptions
-import pytest
-from backend.core.faro_versions import DEFAULT_FARO_VERSION
-from backend.provision.fos_setup import object_storage_enabled, product_enabled
-from fastapi import HTTPException
-from starlette.requests import Request
-
-from backend import config
-from backend.provision import fos_setup
-from backend.provision.fastly_api import _CDN_NO_CACHE_404_SNIPPET_NAME, _CDN_SNIPPETS
-from backend.routers.provision import _check_domain_available
-from backend.utils.router_utils import require_json_content_type as _require_json_content_type
-
-_FAKE_CFG = {
-    "service_id": "svc123",
-    "name": "Test Service",
-    "access_level": "read_write",
-    "fos_bucket": "bucket",
-    "fos_region": "us-east-1",
-    "fos_endpoint": "us-east-1.object.fastlystorage.app",
-}
-
-
-def _client() -> TestClient:
-    return TestClient(app)
-
-
-def _auth_fastly_ok(service_id: str = "svc-1", customer_id: str = "cust-T"):
-    return lambda method, path, *, token, **kw: (
-        {"id": "tok", "scope": "global", "services": [], "customer_id": customer_id}
-        if path == "/tokens/self"
-        else {"id": service_id, "customer_id": customer_id}
-    )
 
 
 # ─── /api/provision/lake-info ────────────────────────────────────────────────
@@ -1345,43 +749,20 @@ def test_lake_info_modes():
         patch("urllib.request.urlopen", side_effect=Exception("Fast path miss")),
         patch("backend.core.duckdb._get_fos_client", side_effect=Exception("Fast path miss")),
     ):
-        resp = _client().post(
-            "/api/provision/lake-info",
-            json={
-                "bucket": "test-bucket",
-                "region": "us-east-1",
-                "access_key": "ak",
-                "secret_key": "sk",
-                "prefix": "p/",
-            },
-        )
+        base_req = {"bucket": "test-bucket", "region": "us-east-1", "access_key": "ak", "secret_key": "sk"}
+        resp = _client().post("/api/provision/lake-info", json={**base_req, "prefix": "p/"})
         assert resp.status_code == 200
         data = resp.json()
-        assert data["ok"] is True
-        assert data["table_exists"] is True
+        assert data["ok"] is True and data["table_exists"] is True
         assert data["info"]["data_files"] == 10
         assert data["range"]["start"] == "2026-05-01T00:00:00Z"
 
-        # Analyst location forwarded into source
         loc = "s3://test-bucket/iceberg/metadata/v1.metadata.json"
-        _client().post(
-            "/api/provision/lake-info",
-            json={
-                "bucket": "test-bucket",
-                "region": "us-east-1",
-                "access_key": "ak",
-                "secret_key": "sk",
-                "iceberg_metadata_location": loc,
-            },
-        )
+        _client().post("/api/provision/lake-info", json={**base_req, "iceberg_metadata_location": loc})
         assert mock_exists.call_args[0][0]["iceberg_metadata_location"] == loc
 
-        # Table not found
         mock_exists.return_value = False
-        resp_nf = _client().post(
-            "/api/provision/lake-info",
-            json={"bucket": "test-bucket", "region": "us-east-1", "access_key": "ak", "secret_key": "sk"},
-        )
+        resp_nf = _client().post("/api/provision/lake-info", json=base_req)
         assert resp_nf.status_code == 200
         assert resp_nf.json()["table_exists"] is False
         assert "not found" in resp_nf.json()["message"]
@@ -1478,7 +859,6 @@ def test_set_ngwaf_workspace_auth_rejections(query, cfg_key, fastly_effect, expe
 
 
 def test_ngwaf_workspaces_listing_variants():
-    # 1. Read-only stored token rejected with 401
     cfg_ro = dict(_FAKE_CFG, fastly_api_key="stored-read-only-token")
     ro_data = {"id": "tok-id", "scope": "global:read", "services": [], "customer_id": "cust-T"}
     with (
@@ -1492,13 +872,11 @@ def test_ngwaf_workspaces_listing_variants():
         assert r_ro.status_code == 401
         assert r_ro.json()["detail"]["error"] == "insufficient_scope"
 
-    # 2. Missing token -> 401 token_required
     with patch("backend.config.get_fastly_api_key", return_value=""):
         r_no_tok = _client().get("/api/provision/ngwaf-workspaces", params={"service_id": "svc"})
         assert r_no_tok.status_code == 401
         assert r_no_tok.json()["detail"]["error"] == "token_required"
 
-    # 3. Data shape, Authorization header, and workspaces shape
     def _mock_resp(payload: bytes):
         m = MagicMock()
         m.read.return_value = payload
@@ -1539,7 +917,6 @@ def test_ngwaf_workspaces_listing_variants():
         r_old = _client().get("/api/provision/ngwaf-workspaces", params={"service_id": "svc", "token": "tok"})
         assert r_old.json()["workspaces"][0]["name"] == "OldShape"
 
-    # 4. Empty list + automation token -> error_hint
     with (
         patch("backend.config.get_fastly_api_key", return_value="tok"),
         patch("urllib.request.urlopen", return_value=_mock_resp(b'{"data": []}')),
@@ -1550,7 +927,6 @@ def test_ngwaf_workspaces_listing_variants():
         assert r_empty.json()["workspaces"] == []
         assert "automation" in r_empty.json()["error_hint"].lower()
 
-    # 5. Upstream 401 -> 400 ngwaf_token_invalid
     err_401 = urllib.error.HTTPError(
         url="https://api.fastly.com/ngwaf/v1/workspaces",
         code=401,
@@ -1586,13 +962,10 @@ def test_provision_list_services_flows(tmp_path, monkeypatch):
     ):
         resp = _client().get("/api/provision/services?token=tok")
         assert resp.status_code == 200
-        body = resp.json()
-        assert {s["id"]: s["provisioned"] for s in body} == {"svc-existing": True, "svc-new": False}
+        assert {s["id"]: s["provisioned"] for s in resp.json()} == {"svc-existing": True, "svc-new": False}
 
-    # Missing token -> 422
     assert _client().get("/api/provision/services").status_code == 422
 
-    # Object storage disabled -> 400 object_storage_not_enabled
     with (
         patch("backend.core.fastly.client.fastly", return_value=fake_services[:1]),
         patch("backend.provision.fos_setup.object_storage_enabled", return_value=False),
@@ -1602,7 +975,6 @@ def test_provision_list_services_flows(tmp_path, monkeypatch):
         assert r_no_os.status_code == 400
         assert r_no_os.json()["detail"]["error"] == "object_storage_not_enabled"
 
-    # Bad token fails before OS probe
     probe_called: list[bool] = []
     with (
         patch("backend.core.fastly.client.fastly", side_effect=RuntimeError("HTTP 401 GET /service")),
@@ -1618,12 +990,14 @@ def test_provision_list_services_flows(tmp_path, monkeypatch):
 
 
 def test_provision_validate_flows():
-    assert _client().post("/api/provision/validate", json={"service_id": "svc"}).status_code == 400
-    assert _client().post("/api/provision/validate", json={"token": "tok"}).status_code == 400
-    assert _client().post("/api/provision/validate", json={"token": "", "service_id": "svc"}).status_code == 400
-    assert _client().post("/api/provision/validate", json={"token": "tok", "service_id": ""}).status_code == 400
+    for bad_body in (
+        {"service_id": "svc"},
+        {"token": "tok"},
+        {"token": "", "service_id": "svc"},
+        {"token": "tok", "service_id": ""},
+    ):
+        assert _client().post("/api/provision/validate", json=bad_body).status_code == 400
 
-    # User token + sanitised defaults
     with patch(
         "backend.core.fastly.client.fastly",
         side_effect=lambda m, p, **kw: (
@@ -1639,7 +1013,6 @@ def test_provision_validate_flows():
         assert not any(ch in body["defaults"]["fos_bucket_name"] for ch in ("/", ".", "!"))
         assert body["token_info"]["type"] == "user"
 
-    # Automation token (no user_id)
     with patch(
         "backend.core.fastly.client.fastly",
         side_effect=lambda m, p, **kw: {"id": "tok-bot", "name": "Bot Token"} if "/tokens/self" in p else {"name": "X"},
@@ -1647,7 +1020,6 @@ def test_provision_validate_flows():
         resp_bot = _client().post("/api/provision/validate", json={"token": "tok", "service_id": "svc1"})
         assert resp_bot.json()["token_info"]["type"] == "automation"
 
-    # /tokens/self failure swallowed -> empty token_info
     def _fail_tok(m, p, *a, **kw):
         if p == "/tokens/self":
             raise RuntimeError("token endpoint down")
@@ -1695,24 +1067,22 @@ def test_check_domain_available_helper_branches():
         ok, reason = _check_domain_available("test.global.ssl.fastly.net")
         assert ok is False and "in use" in (reason or "").lower()
 
-    err_unprov = urllib.error.HTTPError(
-        url="https://x",
-        code=404,
-        msg="not found",
-        hdrs={},  # type: ignore[arg-type]
-        fp=BytesIO(b"... Please check that this domain has been added to a service. ..."),
-    )
-    with patch("urllib.request.urlopen", side_effect=err_unprov), patch("backend.utils.telemetry.tracked_call"):
+    def _http_404(body: bytes):
+        return urllib.error.HTTPError(url="https://x", code=404, msg="not found", hdrs={}, fp=BytesIO(body))  # type: ignore[arg-type]
+
+    with (
+        patch(
+            "urllib.request.urlopen",
+            side_effect=_http_404(b"... Please check that this domain has been added to a service. ..."),
+        ),
+        patch("backend.utils.telemetry.tracked_call"),
+    ):
         assert _check_domain_available("test.global.ssl.fastly.net") == (True, None)
 
-    err_other = urllib.error.HTTPError(
-        url="https://x",
-        code=404,
-        msg="not found",
-        hdrs={},
-        fp=BytesIO(b"some other body"),  # type: ignore[arg-type]
-    )
-    with patch("urllib.request.urlopen", side_effect=err_other), patch("backend.utils.telemetry.tracked_call"):
+    with (
+        patch("urllib.request.urlopen", side_effect=_http_404(b"some other body")),
+        patch("backend.utils.telemetry.tracked_call"),
+    ):
         ok_o, reason_o = _check_domain_available("test.global.ssl.fastly.net")
         assert ok_o is False and "already registered" in (reason_o or "")
 
@@ -1737,62 +1107,35 @@ def test_check_domain_available_helper_branches():
 def test_check_fos_success_and_sample_get():
     fake_client = MagicMock()
     fake_client.list_objects_v2.side_effect = [{"Contents": []}, {"Contents": []}]
+    fos_req = {"bucket": "b", "region": "us-east-1", "access_key": "ak", "secret_key": "sk"}
     with patch("backend.routers.provision._get_fos_s3_client", return_value=fake_client) as get_client:
-        resp = _client().post(
-            "/api/provision/check-fos",
-            json={"bucket": "b", "region": "us-east-1", "access_key": "ak", "secret_key": "sk"},
-        )
+        resp = _client().post("/api/provision/check-fos", json=fos_req)
     assert resp.status_code == 200 and resp.json()["ok"] is True
     get_client.assert_called_once_with("ak", "sk", "us-east-1", bucket_name="b", context="provision:check-fos")
     assert [c.kwargs["Prefix"] for c in fake_client.list_objects_v2.call_args_list] == ["raw/request/", "raw/rum/"]
 
     fake_client2 = MagicMock()
-    fake_client2.list_objects_v2.return_value = {
-        "Contents": [{"Key": "raw/request/year=2026/month=09/day=22/hour=13/minute=00/object.gz"}]
-    }
+    sample_key = "raw/request/year=2026/month=09/day=22/hour=13/minute=00/object.gz"
+    fake_client2.list_objects_v2.return_value = {"Contents": [{"Key": sample_key}]}
     fake_client2.get_object.return_value = {"Body": MagicMock()}
     with patch("backend.routers.provision._get_fos_s3_client", return_value=fake_client2):
-        resp2 = _client().post(
-            "/api/provision/check-fos",
-            json={"bucket": "b", "region": "us-east-1", "access_key": "ak", "secret_key": "sk"},
-        )
+        resp2 = _client().post("/api/provision/check-fos", json=fos_req)
     assert resp2.status_code == 200 and resp2.json()["ok"] is True
-    fake_client2.get_object.assert_called_once_with(
-        Bucket="b",
-        Key="raw/request/year=2026/month=09/day=22/hour=13/minute=00/object.gz",
-        Range="bytes=0-0",
-    )
+    fake_client2.get_object.assert_called_once_with(Bucket="b", Key=sample_key, Range="bytes=0-0")
+
+
+def _fos_client_err(code: str) -> botocore.exceptions.ClientError:
+    return botocore.exceptions.ClientError({"Error": {"Code": code, "Message": "raw"}}, "ListObjectsV2")
 
 
 @pytest.mark.parametrize(
     ("exc", "expected_in_msg"),
     [
-        (
-            botocore.exceptions.ClientError({"Error": {"Code": "AccessDenied", "Message": "raw"}}, "ListObjectsV2"),
-            "Access Denied",
-        ),
-        (
-            botocore.exceptions.ClientError(
-                {"Error": {"Code": "InvalidAccessKeyId", "Message": "raw"}}, "ListObjectsV2"
-            ),
-            "Access Denied",
-        ),
-        (
-            botocore.exceptions.ClientError(
-                {"Error": {"Code": "SignatureDoesNotMatch", "Message": "raw"}}, "ListObjectsV2"
-            ),
-            "Access Denied",
-        ),
-        (
-            botocore.exceptions.ClientError({"Error": {"Code": "NoSuchBucket", "Message": "raw"}}, "ListObjectsV2"),
-            "Bucket not found",
-        ),
-        (
-            botocore.exceptions.ClientError(
-                {"Error": {"Code": "IllegalLocationConstraintException", "Message": "raw"}}, "ListObjectsV2"
-            ),
-            "Region mismatch",
-        ),
+        (_fos_client_err("AccessDenied"), "Access Denied"),
+        (_fos_client_err("InvalidAccessKeyId"), "Access Denied"),
+        (_fos_client_err("SignatureDoesNotMatch"), "Access Denied"),
+        (_fos_client_err("NoSuchBucket"), "Bucket not found"),
+        (_fos_client_err("IllegalLocationConstraintException"), "Region mismatch"),
         (RuntimeError("EndpointConnectionError: Could not connect to the endpoint URL"), "verify the FOS Region"),
         (RuntimeError("weird unknown error xyz"), "weird unknown error xyz"),
     ],
@@ -1806,8 +1149,7 @@ def test_check_fos_error_mappings(exc, expected_in_msg):
             json={"bucket": "b", "region": "us-east-1", "access_key": "k", "secret_key": "s"},
         )
     body = resp.json()
-    assert body["ok"] is False
-    assert expected_in_msg in body["error"]
+    assert body["ok"] is False and expected_in_msg in body["error"]
 
 
 def test_terraform_preview_and_export():
@@ -1839,10 +1181,8 @@ def test_terraform_preview_and_export():
 def test_ingest_validation_and_key_flows(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path / "cfgs")
 
-    # 1. Missing token -> 400
     assert _client().post("/api/provision/ingest", json={"service_id": "svc"}).status_code == 400
 
-    # 2. Bad log_period -> 400 invalid_log_period
     with (
         patch("backend.utils.pop_utils.fetch_pop_locations"),
         patch("backend.provision.parse_period", side_effect=ValueError("unknown period: fortnight")),
@@ -1855,7 +1195,6 @@ def test_ingest_validation_and_key_flows(tmp_path, monkeypatch):
         assert r_period.status_code == 400
         assert r_period.json()["detail"]["error"] == "invalid_log_period"
 
-    # 3. Creates new FOS key when none provided
     new_key = {"access_key": "AKNEW", "secret_key": "SKNEW", "id": "kid"}
     with (
         patch("backend.utils.pop_utils.fetch_pop_locations"),
@@ -1875,7 +1214,6 @@ def test_ingest_validation_and_key_flows(tmp_path, monkeypatch):
         persisted = mock_write.call_args[0][0]
         assert persisted["fos_access_key_id"] == "AKNEW" and persisted["fos_secret_access_key"] == "SKNEW"
 
-    # 4. ensure_fos_access_key failure -> 400 ensure_access_key_failed
     with (
         patch("backend.utils.pop_utils.fetch_pop_locations"),
         patch("backend.provision.parse_period", side_effect=lambda x: 60),
@@ -1890,7 +1228,6 @@ def test_ingest_validation_and_key_flows(tmp_path, monkeypatch):
         assert r_err.status_code == 400
         assert r_err.json()["detail"]["error"] == "ensure_access_key_failed"
 
-    # 5. Uses provided keys without calling find/create
     with (
         patch("backend.utils.pop_utils.fetch_pop_locations"),
         patch("backend.provision.parse_period", side_effect=lambda x: 60),
@@ -1945,26 +1282,14 @@ def test_ingest_rerun_preserves_faro_pin_and_cdn_secret(tmp_path, monkeypatch):
         patch("backend.provision._sync_crontab"),
         patch("backend.utils.fastly_auth.fastly", side_effect=_auth_fastly_ok("svc-1")),
     ):
-        resp = _client().post(
-            "/api/provision/ingest",
-            json={"token": "t", "service_id": "svc-1", "fos_bucket_name": "b", "rum_enabled": True},
-        )
+        base_req = {"token": "t", "service_id": "svc-1", "fos_bucket_name": "b", "rum_enabled": True}
+        resp = _client().post("/api/provision/ingest", json=base_req)
         assert resp.status_code == 200
         assert captured["state"]["cdn_secret"] == "persisted-cdn-secret"
         assert captured["state"]["rum"]["faro_version"] == "9.9.9"
         assert captured["state"]["rum"]["faro_content_hash"] == "existing-hash"
 
-        # Explicit faro_version overrides on-disk pin
-        resp_override = _client().post(
-            "/api/provision/ingest",
-            json={
-                "token": "t",
-                "service_id": "svc-1",
-                "fos_bucket_name": "b",
-                "rum_enabled": True,
-                "rum": {"faro_version": "1.0.0"},
-            },
-        )
+        resp_override = _client().post("/api/provision/ingest", json={**base_req, "rum": {"faro_version": "1.0.0"}})
         assert resp_override.status_code == 200
         assert captured["state"]["rum"]["faro_version"] == "1.0.0"
 
@@ -2034,24 +1359,15 @@ def test_provision_execute_dns_fallback_and_faro_version_threading():
         patch("backend.core.duckdb.reload_default_source"),
         patch("backend.core.metadata.record_audit"),
     ):
+        base_req = {"token": "tok", "service_id": "svc-1", "fos_bucket_name": "valid-bucket", "rum_enabled": True}
         r1 = _client().post(
             "/api/provision/execute",
-            json={
-                "token": "tok",
-                "service_id": "svc-1",
-                "fos_bucket_name": "valid-bucket",
-                "cdn_url": "https://x.global.ssl.fastly.net",
-                "rum_enabled": True,
-                "faro_version": "1.2.3",
-            },
+            json={**base_req, "cdn_url": "https://x.global.ssl.fastly.net", "faro_version": "1.2.3"},
         )
         assert r1.status_code == 200
         assert captured["cfg"]["rum"]["faro_version"] == "1.2.3"
 
-        r2 = _client().post(
-            "/api/provision/execute",
-            json={"token": "tok", "service_id": "svc-1", "fos_bucket_name": "valid-bucket", "rum_enabled": True},
-        )
+        r2 = _client().post("/api/provision/execute", json=base_req)
         assert r2.status_code == 200
         assert captured["cfg"]["rum"]["faro_version"] == DEFAULT_FARO_VERSION
 
@@ -2106,13 +1422,17 @@ def test_check_config_logging_and_cdn_permutations():
     assert 'req.method == "GET"' in content and 'req.method == "HEAD"' in content
     assert "beresp.status == 404" in content and "set beresp.cacheable = false;" in content
 
+    full_dicts = [{"name": "fos_credentials"}, {"name": "cdn_auth"}]
+    full_backends = [{"address": "x.fastlystorage.app"}]
+    full_cdn_snips = [{"name": s} for s in _REQUIRED_CDN_SNIPPETS]
+
     # 1. No matching logging endpoint
     side_no_ep = _check_config_fastly_router(
         endpoints=[{"name": "other", "bucket_name": "different-bucket"}],
         snippets=[],
-        dicts=[{"name": "fos_credentials"}, {"name": "cdn_auth"}],
-        backends=[{"address": "x.fastlystorage.app"}],
-        cdn_snippets=[{"name": s} for s in _REQUIRED_CDN_SNIPPETS],
+        dicts=full_dicts,
+        backends=full_backends,
+        cdn_snippets=full_cdn_snips,
     )
     with patch("backend.core.fastly.client.fastly", side_effect=side_no_ep):
         body = _client().get("/api/provision/check-config", params=_CHECK_PARAMS).json()
@@ -2123,8 +1443,8 @@ def test_check_config_logging_and_cdn_permutations():
     side_missing_snip = _check_config_fastly_router(
         endpoints=[{"name": "fos-logs", "bucket_name": "b", "response_condition": "fos-sample"}],
         snippets=[{"name": "Fastly Log Analysis Capture"}],
-        dicts=[{"name": "fos_credentials"}, {"name": "cdn_auth"}],
-        backends=[{"address": "x.fastlystorage.app"}],
+        dicts=full_dicts,
+        backends=full_backends,
         cdn_snippets=[{"name": "iceberg-metadata-pointer-ttl"}],
     )
     with patch("backend.core.fastly.client.fastly", side_effect=side_missing_snip):
@@ -2137,9 +1457,9 @@ def test_check_config_logging_and_cdn_permutations():
     side_full = _check_config_fastly_router(
         endpoints=[{"name": "fos-logs", "bucket_name": "b", "response_condition": "fos-sample"}],
         snippets=[{"name": s} for s in _REQUIRED_SNIPPETS + _OPTIONAL_SNIPPETS],
-        dicts=[{"name": "fos_credentials"}, {"name": "cdn_auth"}],
-        backends=[{"address": "x.fastlystorage.app"}],
-        cdn_snippets=[{"name": s} for s in _REQUIRED_CDN_SNIPPETS],
+        dicts=full_dicts,
+        backends=full_backends,
+        cdn_snippets=full_cdn_snips,
     )
     with patch("backend.core.fastly.client.fastly", side_effect=side_full):
         res_full = _client().get("/api/provision/check-config", params=_CHECK_PARAMS).json()
@@ -2208,9 +1528,7 @@ def test_teardown_endpoint_flows():
             json={"service_id": "svc", "token": "test-tok", "remove_cache": False, "remove_cron": True},
         )
         assert resp.status_code == 200
-        assert "removed s3 bucket" in resp.text
-        assert '"type": "done"' in resp.text
-        assert "Cron jobs updated" in resp.text
+        assert "removed s3 bucket" in resp.text and '"type": "done"' in resp.text and "Cron jobs updated" in resp.text
         assert sync_calls == [True]
         fake_scheduler.reload.assert_called_once()
 
@@ -2234,8 +1552,7 @@ def test_teardown_endpoint_flows():
             json={"service_id": "svc", "token": "test-tok", "remove_cache": False, "remove_cron": False},
         )
         assert resp_err.status_code == 200
-        assert '"type": "error"' in resp_err.text
-        assert "Fastly API rate-limited" in resp_err.text
+        assert '"type": "error"' in resp_err.text and "Fastly API rate-limited" in resp_err.text
 
 
 def test_product_and_object_storage_helpers():
@@ -2246,10 +1563,9 @@ def test_product_and_object_storage_helpers():
         side_effect=RuntimeError("HTTP 404 GET /enabled-products/v1/object_storage"),
     ):
         assert object_storage_enabled("tok") is False
-    with patch("backend.provision.fos_setup.fastly", side_effect=RuntimeError("HTTP 503 GET x")):
-        assert object_storage_enabled("tok") is True
-    with patch("backend.provision.fos_setup.fastly", side_effect=RuntimeError("Network error on GET x")):
-        assert object_storage_enabled("tok") is True
+    for err_msg in ("HTTP 503 GET x", "Network error on GET x"):
+        with patch("backend.provision.fos_setup.fastly", side_effect=RuntimeError(err_msg)):
+            assert object_storage_enabled("tok") is True
 
     with patch("backend.provision.fos_setup.fastly", return_value={"product": {"id": "kv_store"}}) as m:
         assert product_enabled("tok", "kv_store") is True

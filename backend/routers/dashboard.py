@@ -19,6 +19,13 @@ from backend.core.request_context import RequestContext, build_request_context
 from backend.cron.jobs.insights_prewarmer import record_insights_request
 from backend.deps import ServiceId, get_service_id
 from backend.models._base import DEFAULT_ERROR_RESPONSES
+from backend.models.analytics import (
+    CacheCollapseDetailRequest,
+    CacheCollapseDetailResponse,
+    InsightsRequest,
+    InsightsResponse,
+)
+from backend.models.common import CmcdDisableBody, CmcdEnableBody, CmcdStatusResponse
 from backend.models.dashboard import (
     AggregatesRequest,
     AggregatesResponse,
@@ -31,12 +38,6 @@ from backend.models.dashboard import (
     QueryResponse,
     QuerySchemaResponse,
     RawRequest,
-)
-from backend.models.insights import (
-    CacheCollapseDetailRequest,
-    CacheCollapseDetailResponse,
-    InsightsRequest,
-    InsightsResponse,
 )
 from backend.models.performance import (
     AssetsAggregatesResponse,
@@ -51,7 +52,6 @@ from backend.models.performance import (
     ValueSummaryRequest,
     ValueSummaryResponse,
 )
-from backend.models.services import CmcdDisableBody, CmcdEnableBody, CmcdStatusResponse
 from backend.repositories import assets as assets_repo
 from backend.repositories import cmcd as cmcd_repo
 from backend.repositories import dashboard as repo

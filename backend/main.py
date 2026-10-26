@@ -1077,7 +1077,7 @@ from backend.routers import (  # noqa: E402
 
 app.include_router(bootstrap.router)
 app.include_router(services.router)
-app.include_router(usage.router)
+app.include_router(usage.usage_router)
 app.include_router(admin.router)
 # Analyst-safe sync-status siblings carry the neutral "meta" tag (not the
 # admin router's "admin" tag) — see backend/routers/admin/health.py.

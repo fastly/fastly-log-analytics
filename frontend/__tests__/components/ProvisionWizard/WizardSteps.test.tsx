@@ -5,58 +5,37 @@
  * topology capability (ModeStep + JoinStep), WizardFooter, RumVersionPicker, and ResumeBanner.
  */
 import * as React from 'react'
-import { FULL_CONFIG, without } from '@/__tests__/helpers/page-smoke'
-import { toggleLogFieldGroup, toggleLogFieldOverride, toggleLogFieldPreset, updateLogFieldLimit, getApiBase } from "@/lib/api";
+import { FULL_CONFIG, without, createTestQueryClient, renderWithQuery, createUseSSEMock } from '@/__tests__/helpers/page-smoke'
+import { toggleLogFieldGroup, toggleLogFieldOverride, toggleLogFieldPreset, updateLogFieldLimit, getApiBase } from '@/lib/api'
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, test, vi } from 'vitest'
 import { http, HttpResponse } from 'msw'
-
-import { ProvisionWizard, TerraformStep, ModeStep, ResumeBanner, WizardFooter } from '@/components/ProvisionWizard/ProvisionWizard'
-import { JoinStep } from '@/components/ProvisionWizard/steps/JoinStep'
+import {
+  ProvisionWizard, TerraformStep, ModeStep, ResumeBanner, WizardFooter,
+  ANALYST_PATH_A_UNSUPPORTED_REASON, INITIAL_CONFIG, WIZARD_DRAFT_VERSION,
+  type LogFieldsCatalog, type WizardDraft, type WizardState,
+  JoinStep,
+} from '@/components/ProvisionWizard/ProvisionWizard'
 import { RumVersionPicker } from '@/components/ProvisionWizard/steps/StorageStep'
 import {
-  WIZARD_DRAFT_KEY,
-  buildHandleModalClose,
-  buildValidateOnSuccess,
-  clearDraft,
-  loadDraft,
-  mergePersistedConfig,
-  runAdminIngest,
-  runAnalyzeLake,
-  runCheckConfig,
-  runCheckDomain,
-  runCheckFos,
-  runDeploy,
-  runFetchTerraformPreview,
-  runJoin,
-  saveDraft,
-  stripSecretsFromConfig,
+  WIZARD_DRAFT_KEY, buildHandleModalClose, buildValidateOnSuccess, clearDraft, loadDraft,
+  mergePersistedConfig, runAdminIngest, runAnalyzeLake, runCheckConfig, runCheckDomain,
+  runCheckFos, runDeploy, runFetchTerraformPreview, runJoin, saveDraft, stripSecretsFromConfig,
   validateMutationFn,
 } from '@/components/ProvisionWizard/useWizardState'
-import {
-  ANALYST_PATH_A_UNSUPPORTED_REASON,
-  INITIAL_CONFIG,
-  WIZARD_DRAFT_VERSION,
-  type LogFieldsCatalog,
-  type WizardDraft,
-  type WizardState,
-} from '@/components/ProvisionWizard/ProvisionWizard'
 import { useServiceStore } from '@/stores/filterStore'
-import { createTestQueryClient, renderWithQuery } from '../../helpers/page-smoke'
-import { createUseSSEMock } from '../../helpers/page-smoke'
 import { server } from '@/__tests__/helpers/msw/handlers'
 
 vi.mock('@/stores/filterStore', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/stores/filterStore')>()),
-  useTimezoneStore: () => ({
-    timezone: 'UTC',
-  }),
+  useTimezoneStore: () => ({ timezone: 'UTC' }),
 }))
 
 const { state: sseState } = createUseSSEMock()
 vi.mock('@/hooks/useSSE', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('@/hooks/useSSE')>()), useSSE: () => sseState }))
+  ...(await importOriginal<typeof import('@/hooks/useSSE')>()), useSSE: () => sseState,
+}))
 
 const API_BASE = getApiBase()
 const SVC = 'svc-new-1'
@@ -68,20 +47,15 @@ afterEach(() => {
 
 describe('TerraformStep', () => {
   const tfState = {
-    terraformFiles: { 'main.tf': 'resource "x" "y" {}' },
-    selectedTfFile: 'main.tf',
-    setSelectedTfFile: vi.fn(),
-    isFetchingTerraform: false,
-    handleExportTerraform: vi.fn(),
+    terraformFiles: { 'main.tf': 'resource "x" "y" {}' }, selectedTfFile: 'main.tf',
+    setSelectedTfFile: vi.fn(), isFetchingTerraform: false, handleExportTerraform: vi.fn(),
   } as unknown as WizardState
 
   test('copy button writes the selected file to the clipboard', async () => {
     const writeText = vi.fn().mockResolvedValue(undefined)
     Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
     render(<TerraformStep s={tfState} />)
-    await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'Copy main.tf to clipboard' }))
-    })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Copy main.tf to clipboard' })) })
     expect(writeText).toHaveBeenCalledWith('resource "x" "y" {}')
   })
 
@@ -89,9 +63,7 @@ describe('TerraformStep', () => {
     const writeText = vi.fn().mockRejectedValue(new Error('denied'))
     Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
     render(<TerraformStep s={tfState} />)
-    await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'Copy main.tf to clipboard' }))
-    })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Copy main.tf to clipboard' })) })
     await new Promise((r) => setTimeout(r, 0))
     expect(writeText).toHaveBeenCalledTimes(1)
   })
@@ -99,30 +71,12 @@ describe('TerraformStep', () => {
 
 function makeTopologyState(overrides: Partial<WizardState> = {}): WizardState {
   return {
-    step: 'mode',
-    setStep: vi.fn(),
-    mode: 'join',
-    setMode: vi.fn(),
-    analystPathASupported: true,
-    analystPathAReason: null,
-    joinPhase: 'form',
-    config: INITIAL_CONFIG,
-    setConfig: vi.fn(),
-    isAnalyzing: false,
-    lines: [],
-    status: 'idle',
-    sseError: null,
-    icebergMetadataLocation: '',
-    setIcebergMetadataLocation: vi.fn(),
-    handleCheckFos: vi.fn(),
-    fosStatus: 'idle',
-    fosError: '',
-    selectedService: null,
-    selectedCdnService: null,
-    servicesData: [],
-    configStatus: null,
-    isCheckingConfig: false,
-    handleCheckConfig: vi.fn(),
+    step: 'mode', setStep: vi.fn(), mode: 'join', setMode: vi.fn(),
+    analystPathASupported: true, analystPathAReason: null, joinPhase: 'form',
+    config: INITIAL_CONFIG, setConfig: vi.fn(), isAnalyzing: false,
+    lines: [], status: 'idle', sseError: null, icebergMetadataLocation: '', setIcebergMetadataLocation: vi.fn(),
+    handleCheckFos: vi.fn(), fosStatus: 'idle', fosError: '', selectedService: null, selectedCdnService: null,
+    servicesData: [], configStatus: null, isCheckingConfig: false, handleCheckConfig: vi.fn(),
     ...overrides,
   } as WizardState
 }
@@ -134,27 +88,13 @@ describe('ProvisionWizard topology capability', () => {
   })
 
   it('disables Analyst: Join for unsupported scalable topology', () => {
-    render(
-      <ModeStep
-        s={makeTopologyState({
-          analystPathASupported: false,
-          analystPathAReason: ANALYST_PATH_A_UNSUPPORTED_REASON,
-        })}
-      />,
-    )
+    render(<ModeStep s={makeTopologyState({ analystPathASupported: false, analystPathAReason: ANALYST_PATH_A_UNSUPPORTED_REASON })} />)
     expect(screen.getByRole('button', { name: /analyst: join/i })).toBeDisabled()
     expect(screen.getByText(ANALYST_PATH_A_UNSUPPORTED_REASON)).toBeVisible()
   })
 
   it('warns when a stale invite or manual entry reaches JoinStep', () => {
-    render(
-      <JoinStep
-        s={makeTopologyState({
-          analystPathASupported: false,
-          analystPathAReason: ANALYST_PATH_A_UNSUPPORTED_REASON,
-        })}
-      />,
-    )
+    render(<JoinStep s={makeTopologyState({ analystPathASupported: false, analystPathAReason: ANALYST_PATH_A_UNSUPPORTED_REASON })} />)
     expect(screen.getByText(/independent analyst join is unavailable/i)).toBeVisible()
     expect(screen.getByText(/old invite or entered credentials manually/i)).toBeVisible()
     expect(screen.getByText(/Path B/i)).toBeVisible()
@@ -163,31 +103,12 @@ describe('ProvisionWizard topology capability', () => {
 
 function makeFooterState(overrides: Partial<WizardState> = {}): WizardState {
   return {
-    step: 'terraform',
-    setStep: vi.fn(),
-    mode: 'provision',
-    isDeploying: false,
-    status: 'idle',
-    isDone: false,
-    handleModalClose: vi.fn(),
-    isAnalyzing: false,
-    token: 'tok',
-    isLoadingServices: false,
-    handleTokenSubmit: vi.fn(),
-    selectedService: { id: 'svc', name: 'Svc' },
-    validateMutation: { isPending: false },
-    domainStatus: 'available',
-    config: { fos_bucket_name: 'bucket', ngwaf_workspace_id: '' },
-    fetchTerraformPreview: vi.fn(),
-    handleDeploy: vi.fn(),
-    handleAdminIngest: vi.fn(),
-    fosStatus: 'idle',
-    handleAnalyzeLake: vi.fn(),
-    importMode: 'all',
-    importRange: { start: '', end: '' },
-    handleJoin: vi.fn(),
-    joinPhase: 'form',
-    stop: vi.fn(),
+    step: 'terraform', setStep: vi.fn(), mode: 'provision', isDeploying: false, status: 'idle', isDone: false,
+    handleModalClose: vi.fn(), isAnalyzing: false, token: 'tok', isLoadingServices: false, handleTokenSubmit: vi.fn(),
+    selectedService: { id: 'svc', name: 'Svc' }, validateMutation: { isPending: false }, domainStatus: 'available',
+    config: { fos_bucket_name: 'bucket', ngwaf_workspace_id: '' }, fetchTerraformPreview: vi.fn(),
+    handleDeploy: vi.fn(), handleAdminIngest: vi.fn(), fosStatus: 'idle', handleAnalyzeLake: vi.fn(),
+    importMode: 'all', importRange: { start: '', end: '' }, handleJoin: vi.fn(), joinPhase: 'form', stop: vi.fn(),
     ...overrides,
   } as WizardState
 }
@@ -195,15 +116,10 @@ function makeFooterState(overrides: Partial<WizardState> = {}): WizardState {
 describe('WizardFooter — terraform (Terraform & VCL preview) step', () => {
   it("provision and ingest modes: 'Back to Review' returns to Review without deploying or ingesting", async () => {
     for (const mode of ['provision', 'ingest'] as const) {
-      const setStep = vi.fn()
-      const handleDeploy = vi.fn()
-      const handleAdminIngest = vi.fn()
-      const s = makeFooterState({ mode, setStep, handleDeploy, handleAdminIngest })
-      const { unmount } = render(<WizardFooter s={s} />)
-
+      const setStep = vi.fn(), handleDeploy = vi.fn(), handleAdminIngest = vi.fn()
+      const { unmount } = render(<WizardFooter s={makeFooterState({ mode, setStep, handleDeploy, handleAdminIngest })} />)
       expect(screen.queryByRole('button', { name: /deploy to fastly/i })).not.toBeInTheDocument()
       expect(screen.queryByRole('button', { name: /complete setup/i })).not.toBeInTheDocument()
-
       await userEvent.click(screen.getByRole('button', { name: /back to review/i }))
       expect(setStep).toHaveBeenCalledWith('execute')
       expect(handleDeploy).not.toHaveBeenCalled()
@@ -213,9 +129,8 @@ describe('WizardFooter — terraform (Terraform & VCL preview) step', () => {
   })
 })
 
-function renderPicker(onChange: (v: string | null) => void, value: string | null = null) {
-  return renderWithQuery(<RumVersionPicker serviceId={SVC} value={value} onChange={onChange} />)
-}
+const renderPicker = (onChange: (v: string | null) => void, value: string | null = null) =>
+  renderWithQuery(<RumVersionPicker serviceId={SVC} value={value} onChange={onChange} />)
 
 describe('RumVersionPicker', () => {
   it('renders the loading state without crashing while the fetch is in flight', () => {
@@ -233,20 +148,13 @@ describe('RumVersionPicker', () => {
   it('lists available versions, marks latest, and reports a selection', async () => {
     server.use(
       http.get(`${API_BASE}/api/services/:service_id/rum/versions`, () =>
-        HttpResponse.json({
-          available: ['1.9.0', '1.8.0', '1.7.0'],
-          current: null,
-          latest: '1.9.0',
-          update_available: false,
-        }),
+        HttpResponse.json({ available: ['1.9.0', '1.8.0', '1.7.0'], current: null, latest: '1.9.0', update_available: false }),
       ),
     )
     const seen: (string | null)[] = []
     const user = userEvent.setup()
     renderPicker((v) => seen.push(v))
-
     await waitFor(() => expect(seen).toContain('1.9.0'))
-
     await user.click(screen.getByRole('combobox', { name: /faro web sdk version/i }))
     await user.click(await screen.findByRole('option', { name: /1\.7\.0/ }))
     expect(seen).toContain('1.7.0')
@@ -255,16 +163,10 @@ describe('RumVersionPicker', () => {
   it('degrades to an inline message + retry on a registry 503 or empty version list', async () => {
     server.use(
       http.get(`${API_BASE}/api/services/:service_id/rum/versions`, () =>
-        HttpResponse.json(
-          { error: 'faro_registry_unavailable', message: 'registry down' },
-          { status: 503 },
-        ),
+        HttpResponse.json({ error: 'faro_registry_unavailable', message: 'registry down' }, { status: 503 }),
       ),
     )
-    const { unmount } = renderPicker(() => {
-      throw new Error('onChange must not fire on a degraded fetch')
-    })
-
+    const { unmount } = renderPicker(() => { throw new Error('onChange must not fire on a degraded fetch') })
     expect(await screen.findByText(/couldn't reach the npm registry/i)).toBeInTheDocument()
     expect(screen.getByText(/default self-hosted version/i)).toBeInTheDocument()
     expect(screen.queryByRole('combobox')).not.toBeInTheDocument()
@@ -276,9 +178,7 @@ describe('RumVersionPicker', () => {
         HttpResponse.json({ available: [], current: null, latest: null, update_available: false }),
       ),
     )
-    renderPicker(() => {
-      throw new Error('onChange must not fire when there is nothing to default to')
-    })
+    renderPicker(() => { throw new Error('onChange must not fire when there is nothing to default to') })
     expect(await screen.findByText(/no versions available/i)).toBeInTheDocument()
     expect(screen.queryByRole('combobox')).not.toBeInTheDocument()
   })
@@ -288,24 +188,15 @@ describe('RumVersionPicker', () => {
     server.use(
       http.get(`${API_BASE}/api/services/:service_id/rum/versions`, () => {
         calls += 1
-        if (calls === 1) {
-          return HttpResponse.json({ error: 'faro_registry_unavailable' }, { status: 503 })
-        }
-        return HttpResponse.json({
-          available: ['2.0.0'],
-          current: null,
-          latest: '2.0.0',
-          update_available: false,
-        })
+        if (calls === 1) return HttpResponse.json({ error: 'faro_registry_unavailable' }, { status: 503 })
+        return HttpResponse.json({ available: ['2.0.0'], current: null, latest: '2.0.0', update_available: false })
       }),
     )
     const seen: (string | null)[] = []
     const user = userEvent.setup()
     renderPicker((v) => seen.push(v))
-
     await screen.findByText(/couldn't reach the npm registry/i)
     await user.click(screen.getByRole('button', { name: /retry/i }))
-
     await waitFor(() => expect(seen).toContain('2.0.0'))
     expect(calls).toBe(2)
   })
@@ -315,60 +206,29 @@ const draftQueryClient = createTestQueryClient()
 
 function makeDraft(overrides: Partial<WizardDraft> = {}): WizardDraft {
   return {
-    version: WIZARD_DRAFT_VERSION,
-    draftId: 'draft-1',
-    mode: 'provision',
-    step: 'fields',
-    currentStep: 'fields',
-    selectedServiceId: 'svc-1',
-    selectedServiceName: 'My Service',
-    selectedCdnServiceId: null,
-    selectedCdnServiceName: null,
+    version: WIZARD_DRAFT_VERSION, draftId: 'draft-1', mode: 'provision', step: 'fields', currentStep: 'fields',
+    selectedServiceId: 'svc-1', selectedServiceName: 'My Service', selectedCdnServiceId: null, selectedCdnServiceName: null,
     tokenInfo: { id: 'tok-1', name: 'tok', type: 'user' },
     config: stripSecretsFromConfig({
-      ...INITIAL_CONFIG,
-      endpoint_name: 'My EP',
-      fos_bucket_name: 'b',
-      fos_access_key: 'AK-LEAK',
-      fos_secret_key: 'SK-LEAK',
-      cdn_secret: 'CDN-LEAK',
+      ...INITIAL_CONFIG, endpoint_name: 'My EP', fos_bucket_name: 'b',
+      fos_access_key: 'AK-LEAK', fos_secret_key: 'SK-LEAK', cdn_secret: 'CDN-LEAK',
     }),
-    importMode: 'all',
-    importRange: { start: '', end: '' },
-    syncEnabled: true,
-    syncIntervalMins: '2',
-    icebergMetadataLocation: '',
-    updatedAt: new Date().toISOString(),
-    createdAt: new Date().toISOString(),
+    importMode: 'all', importRange: { start: '', end: '' }, syncEnabled: true, syncIntervalMins: '2',
+    icebergMetadataLocation: '', updatedAt: new Date().toISOString(), createdAt: new Date().toISOString(),
     ...overrides,
   }
 }
 
 describe('ResumeBanner', () => {
-  beforeEach(() => {
-    window.localStorage.removeItem(WIZARD_DRAFT_KEY)
-  })
-
-  afterEach(() => {
-    window.localStorage.removeItem(WIZARD_DRAFT_KEY)
-  })
+  beforeEach(() => window.localStorage.removeItem(WIZARD_DRAFT_KEY))
+  afterEach(() => window.localStorage.removeItem(WIZARD_DRAFT_KEY))
 
   it('renders the step label from the saved draft and fires the action callbacks', async () => {
     const user = userEvent.setup()
-    const onResume = vi.fn()
-    const onStartFresh = vi.fn()
-    const draft = makeDraft({ currentStep: 'fields' })
-    render(
-      <ResumeBanner
-        draft={draft}
-        onResume={onResume}
-        onStartFresh={onStartFresh}
-      />,
-    )
+    const onResume = vi.fn(), onStartFresh = vi.fn()
+    render(<ResumeBanner draft={makeDraft({ currentStep: 'fields' })} onResume={onResume} onStartFresh={onStartFresh} />)
     expect(screen.getByText(/Resume previous wizard/i)).toBeInTheDocument()
-    expect(
-      screen.getByTestId('resume-banner-resume'),
-    ).toHaveTextContent(/Resume from Log Fields/i)
+    expect(screen.getByTestId('resume-banner-resume')).toHaveTextContent(/Resume from Log Fields/i)
     await user.click(screen.getByTestId('resume-banner-resume'))
     expect(onResume).toHaveBeenCalledOnce()
     await user.click(screen.getByTestId('resume-banner-start-fresh'))
@@ -377,60 +237,31 @@ describe('ResumeBanner', () => {
 
   it('hydrates the saved draft from localStorage when the wizard opens', () => {
     saveDraft(makeDraft({ currentStep: 'fields' }))
-    renderWithQuery(<ProvisionWizard open={true} onOpenChange={vi.fn()} />, {
-      queryClient: draftQueryClient,
-    })
+    renderWithQuery(<ProvisionWizard open={true} onOpenChange={vi.fn()} />, { queryClient: draftQueryClient })
     expect(screen.getByText(/Resume previous wizard/i)).toBeInTheDocument()
   })
 })
 
-
 const buildToggleGroup = (catalog: LogFieldsCatalog | null | undefined) => (
-  prev: typeof INITIAL_CONFIG,
-  groupId: string,
-  checked: boolean,
-) => ({
-  ...prev,
-  log_fields: toggleLogFieldGroup(prev.log_fields, catalog, groupId, checked),
-})
+  prev: typeof INITIAL_CONFIG, groupId: string, checked: boolean,
+) => ({ ...prev, log_fields: toggleLogFieldGroup(prev.log_fields, catalog, groupId, checked) })
 
 const applyToggleField = (
-  prev: typeof INITIAL_CONFIG,
-  fieldId: string,
-  checked: boolean,
-  defaultEnabledByGroup: boolean,
-) => ({
-  ...prev,
-  log_fields: toggleLogFieldOverride(prev.log_fields, fieldId, checked, defaultEnabledByGroup),
-})
+  prev: typeof INITIAL_CONFIG, fieldId: string, checked: boolean, defaultEnabledByGroup: boolean,
+) => ({ ...prev, log_fields: toggleLogFieldOverride(prev.log_fields, fieldId, checked, defaultEnabledByGroup) })
 
 const applyUpdateFieldLimit = (
-  prev: typeof INITIAL_CONFIG,
-  fieldId: string,
-  limit?: number,
-) => ({
-  ...prev,
-  log_fields: updateLogFieldLimit(prev.log_fields, fieldId, limit),
-})
+  prev: typeof INITIAL_CONFIG, fieldId: string, limit?: number,
+) => ({ ...prev, log_fields: updateLogFieldLimit(prev.log_fields, fieldId, limit) })
 
 const buildTogglePreset = (
-  catalog: LogFieldsCatalog | null | undefined,
-  isPresetActive: (groups: string[]) => boolean,
+  catalog: LogFieldsCatalog | null | undefined, isPresetActive: (groups: string[]) => boolean,
 ) => (prev: typeof INITIAL_CONFIG, presetGroups: string[]) => ({
-  ...prev,
-  log_fields: toggleLogFieldPreset(prev.log_fields, catalog, presetGroups, isPresetActive),
+  ...prev, log_fields: toggleLogFieldPreset(prev.log_fields, catalog, presetGroups, isPresetActive),
 })
 
 const group = (id: string, label: string, requires: string | null = null) => ({
-  id,
-  label,
-  description: '',
-  locked: false,
-  requires,
-  note: null,
-  recommended_with: null,
-  total_bytes: 0,
-  fields: [],
+  id, label, description: '', locked: false, requires, note: null, recommended_with: null, total_bytes: 0, fields: [],
 })
 
 const PRESETS = {
@@ -441,32 +272,20 @@ const PRESETS = {
 
 const CATALOG: LogFieldsCatalog = {
   groups: [
-    group('core', 'Core'),
-    group('http', 'HTTP', 'core'),
-    group('tls', 'TLS', 'core'),
-    group('security', 'Security', 'http'),
-    group('detail', 'Detail', 'http'),
+    group('core', 'Core'), group('http', 'HTTP', 'core'), group('tls', 'TLS', 'core'),
+    group('security', 'Security', 'http'), group('detail', 'Detail', 'http'),
   ],
   presets: PRESETS,
 }
 
-function configWithGroups(groups: string[]) {
-  return {
-    ...INITIAL_CONFIG,
-    log_fields: { ...INITIAL_CONFIG.log_fields, groups },
-  }
-}
+const configWithGroups = (groups: string[]) => ({ ...INITIAL_CONFIG, log_fields: { ...INITIAL_CONFIG.log_fields, groups } })
 
 describe('buildToggleGroup', () => {
   it('adds a group with no dependencies and auto-adds required ancestor groups', () => {
     const toggle = buildToggleGroup(CATALOG)
     expect(toggle(configWithGroups([]), 'core', true).log_fields.groups).toEqual(['core'])
-    expect(new Set(toggle(configWithGroups([]), 'security', true).log_fields.groups)).toEqual(
-      new Set(['security', 'http', 'core']),
-    )
-    expect(new Set(toggle(configWithGroups(['http']), 'security', true).log_fields.groups)).toEqual(
-      new Set(['http', 'core', 'security']),
-    )
+    expect(new Set(toggle(configWithGroups([]), 'security', true).log_fields.groups)).toEqual(new Set(['security', 'http', 'core']))
+    expect(new Set(toggle(configWithGroups(['http']), 'security', true).log_fields.groups)).toEqual(new Set(['http', 'core', 'security']))
   })
 
   it('removes a group without touching dependencies of others and is idempotent', () => {
@@ -482,11 +301,9 @@ describe('buildToggleGroup', () => {
     const inputGroupsRef = input.log_fields.groups
     toggle(input, 'http', true)
     expect(input.log_fields.groups).toBe(inputGroupsRef)
-
     expect(buildToggleGroup(null)(configWithGroups([]), 'core', true).log_fields.groups).toEqual(['core'])
     const config: typeof INITIAL_CONFIG = {
-      ...INITIAL_CONFIG,
-      log_fields: without(INITIAL_CONFIG.log_fields, 'groups') as typeof INITIAL_CONFIG.log_fields,
+      ...INITIAL_CONFIG, log_fields: without(INITIAL_CONFIG.log_fields, 'groups') as typeof INITIAL_CONFIG.log_fields,
     }
     expect(toggle(config, 'core', true).log_fields.groups).toEqual(['core'])
   })
@@ -496,13 +313,8 @@ describe('applyToggleField & applyUpdateFieldLimit', () => {
   it('sets or clears field overrides based on group default', () => {
     const c1 = { ...INITIAL_CONFIG, log_fields: { ...INITIAL_CONFIG.log_fields, field_overrides: {} } }
     expect(applyToggleField(c1, 'cookie_id', true, false).log_fields.field_overrides).toEqual({ cookie_id: true })
-
-    const c2 = {
-      ...INITIAL_CONFIG,
-      log_fields: { ...INITIAL_CONFIG.log_fields, field_overrides: { cookie_id: true, ip: false } },
-    }
+    const c2 = { ...INITIAL_CONFIG, log_fields: { ...INITIAL_CONFIG.log_fields, field_overrides: { cookie_id: true, ip: false } } }
     expect(applyToggleField(c2, 'cookie_id', true, true).log_fields.field_overrides).toEqual({ ip: false })
-
     const c3 = { ...INITIAL_CONFIG, log_fields: { ...without(INITIAL_CONFIG.log_fields, 'field_overrides') } }
     expect(applyToggleField(c3, 'cookie_id', false, true).log_fields.field_overrides).toEqual({ cookie_id: false })
   })
@@ -510,31 +322,23 @@ describe('applyToggleField & applyUpdateFieldLimit', () => {
   it('sets, overwrites, and removes numeric field limits', () => {
     const c1 = { ...INITIAL_CONFIG, log_fields: { ...INITIAL_CONFIG.log_fields, field_limits: {} } }
     expect(applyUpdateFieldLimit(c1, 'url', 2048).log_fields.field_limits).toEqual({ url: 2048 })
-
-    const c2 = {
-      ...INITIAL_CONFIG,
-      log_fields: { ...INITIAL_CONFIG.log_fields, field_limits: { url: 2048, ua: 512 } },
-    }
+    const c2 = { ...INITIAL_CONFIG, log_fields: { ...INITIAL_CONFIG.log_fields, field_limits: { url: 2048, ua: 512 } } }
     expect(applyUpdateFieldLimit(c2, 'url', undefined).log_fields.field_limits).toEqual({ ua: 512 })
     expect(applyUpdateFieldLimit(c2, 'url', 1024).log_fields.field_limits).toEqual({ url: 1024, ua: 512 })
-
     const c3 = { ...INITIAL_CONFIG, log_fields: { ...without(INITIAL_CONFIG.log_fields, 'field_limits') } }
     expect(applyUpdateFieldLimit(c3, 'url', 4096).log_fields.field_limits).toEqual({ url: 4096 })
   })
 })
 
 describe('buildTogglePreset', () => {
-  function isPresetActiveFor(groups: string[]) {
+  const isPresetActiveFor = (groups: string[]) => {
     const set = new Set(groups)
     return (presetGroups: string[]) => presetGroups.every((g) => set.has(g))
   }
 
   it('adds preset groups, removes unprotected groups on toggle-off, and cascades dependents', () => {
     const toggle = buildTogglePreset(CATALOG, isPresetActiveFor([]))
-    expect(new Set(toggle(configWithGroups([]), PRESETS.full.groups).log_fields.groups)).toEqual(
-      new Set(['core', 'http', 'tls', 'security']),
-    )
-
+    expect(new Set(toggle(configWithGroups([]), PRESETS.full.groups).log_fields.groups)).toEqual(new Set(['core', 'http', 'tls', 'security']))
     const isolatedCatalog = { ...CATALOG, presets: { standard: PRESETS.standard } }
     const startingGroups = ['core', 'http', 'detail']
     const toggleOff = buildTogglePreset(isolatedCatalog, isPresetActiveFor(startingGroups))
@@ -543,15 +347,10 @@ describe('buildTogglePreset', () => {
 
   it('keeps groups protected by other active presets and tolerates missing/null catalog', () => {
     const startingStd = ['core', 'http']
-    const toggleStd = buildTogglePreset(CATALOG, isPresetActiveFor(startingStd))
-    expect(toggleStd(configWithGroups(startingStd), PRESETS.standard.groups).log_fields.groups).toEqual(['core'])
-
+    expect(buildTogglePreset(CATALOG, isPresetActiveFor(startingStd))(configWithGroups(startingStd), PRESETS.standard.groups).log_fields.groups).toEqual(['core'])
     const startingFull = ['core', 'http', 'tls', 'security']
     const toggleFull = buildTogglePreset(CATALOG, isPresetActiveFor(startingFull))
-    expect(new Set(toggleFull(configWithGroups(startingFull), PRESETS.standard.groups).log_fields.groups)).toEqual(
-      new Set(['core', 'http', 'tls', 'security']),
-    )
-
+    expect(new Set(toggleFull(configWithGroups(startingFull), PRESETS.standard.groups).log_fields.groups)).toEqual(new Set(['core', 'http', 'tls', 'security']))
     expect(buildTogglePreset({ groups: CATALOG.groups }, isPresetActiveFor([]))(configWithGroups([]), ['core']).log_fields.groups).toEqual(['core'])
     expect(buildTogglePreset(null, isPresetActiveFor([]))(configWithGroups([]), ['core']).log_fields.groups).toEqual(['core'])
   })
@@ -563,42 +362,29 @@ describe('wizard-draft persistence', () => {
 
   it('strips secrets and mergePersistedConfig always returns blank secret fields', () => {
     const stripped = stripSecretsFromConfig({
-      ...INITIAL_CONFIG,
-      endpoint_name: 'My EP',
-      sample_rate: 50,
-      fos_access_key: 'AK',
-      fos_secret_key: 'SK',
-      cdn_secret: 'CDN',
+      ...INITIAL_CONFIG, endpoint_name: 'My EP', sample_rate: 50,
+      fos_access_key: 'AK', fos_secret_key: 'SK', cdn_secret: 'CDN',
     })
-    expect(stripped).not.toHaveProperty('fos_access_key')
-    expect(stripped).not.toHaveProperty('fos_secret_key')
-    expect(stripped).not.toHaveProperty('cdn_secret')
+    for (const k of ['fos_access_key', 'fos_secret_key', 'cdn_secret']) expect(stripped).not.toHaveProperty(k)
     expect(stripped).toMatchObject({ endpoint_name: 'My EP', sample_rate: 50 })
 
-    const dirty = {
-      ...stripSecretsFromConfig(INITIAL_CONFIG),
-      fos_access_key: 'LEAK',
-      fos_secret_key: 'LEAK',
-      cdn_secret: 'LEAK',
-    }
-    const merged = mergePersistedConfig(dirty)
+    const leaked = {
+      ...stripSecretsFromConfig(INITIAL_CONFIG), fos_access_key: 'LEAK', fos_secret_key: 'LEAK', cdn_secret: 'LEAK',
+    } as unknown as Parameters<typeof mergePersistedConfig>[0]
+    const merged = mergePersistedConfig(leaked)
     expect(merged.fos_access_key).toBe('')
     expect(merged.fos_secret_key).toBe('')
     expect(merged.cdn_secret).toBe('')
   })
 
   it('roundtrips a non-secret draft with zero secret keys or values in localStorage', () => {
-    const draft = makeDraft()
-    saveDraft(draft)
+    saveDraft(makeDraft())
     const loaded = loadDraft()
     expect(loaded).not.toBeNull()
     expect(loaded!.draftId).toBe('draft-1')
     expect(loaded!.config.endpoint_name).toBe('My EP')
-
     const raw = window.localStorage.getItem(WIZARD_DRAFT_KEY)!
-    expect(raw).not.toContain('AK-LEAK')
-    expect(raw).not.toContain('SK-LEAK')
-    expect(raw).not.toContain('CDN-LEAK')
+    for (const s of ['AK-LEAK', 'SK-LEAK', 'CDN-LEAK']) expect(raw).not.toContain(s)
   })
 
   it('handles version mismatch, mode step, invalid JSON, clearDraft, and broken localStorage', () => {
@@ -617,14 +403,9 @@ describe('wizard-draft persistence', () => {
 
     const origSet = window.localStorage.setItem
     window.localStorage.setItem = () => { throw new Error('quota') }
-    try {
-      expect(() => saveDraft(makeDraft())).not.toThrow()
-    } finally {
-      window.localStorage.setItem = origSet
-    }
+    try { expect(() => saveDraft(makeDraft())).not.toThrow() } finally { window.localStorage.setItem = origSet }
   })
 })
-
 
 describe('validateMutationFn', () => {
   it('POSTs to /api/provision/validate and returns the data body', async () => {
@@ -661,21 +442,14 @@ describe('validateMutationFn', () => {
 })
 
 describe('buildValidateOnSuccess', () => {
-  function makeDeps(mode: 'join' | 'ingest' | 'create' = 'create') {
-    return {
-      token: 'TOK',
-      mode,
-      setTokenInfo: vi.fn(),
-      setConfig: vi.fn(),
-      setStep: vi.fn(),
-    }
-  }
+  const makeDeps = (mode: 'join' | 'ingest' | 'create' = 'create') => ({
+    token: 'TOK', mode, setTokenInfo: vi.fn(), setConfig: vi.fn(), setStep: vi.fn(),
+  })
 
   it('writes token_info via setTokenInfo when present and skips when absent', () => {
     const deps = makeDeps()
     buildValidateOnSuccess(deps)({ token_info: { id: 't1', name: 'me', type: 'user' } })
     expect(deps.setTokenInfo).toHaveBeenCalledWith({ id: 't1', name: 'me', type: 'user' })
-
     const emptyDeps = makeDeps()
     buildValidateOnSuccess(emptyDeps)({})
     expect(emptyDeps.setTokenInfo).not.toHaveBeenCalled()
@@ -685,36 +459,19 @@ describe('buildValidateOnSuccess', () => {
 
   it('applies defaults via setConfig and honours fallback vs explicit values', () => {
     const deps = makeDeps()
-    buildValidateOnSuccess(deps)({
-      service_name: 'my-svc',
-      defaults: { fos_bucket_name: 'MyBucket-Logs-Prod', fos_prefix: 'logs/' },
-    })
-    const nextFallback = deps.setConfig.mock.calls[0][0](INITIAL_CONFIG)
-    expect(nextFallback).toMatchObject({
-      endpoint_name: 'Fastly Object Storage Logs',
-      fos_region: 'us-east-1',
-      fos_bucket_name: 'mybucket-logs-prod',
-      cdn_service_name: 'my-svc (CDN)',
-      cdn_prefix: 'fos-mybucket-logs',
+    buildValidateOnSuccess(deps)({ service_name: 'my-svc', defaults: { fos_bucket_name: 'MyBucket-Logs-Prod', fos_prefix: 'logs/' } })
+    expect(deps.setConfig.mock.calls[0][0](INITIAL_CONFIG)).toMatchObject({
+      endpoint_name: 'Fastly Object Storage Logs', fos_region: 'us-east-1',
+      fos_bucket_name: 'mybucket-logs-prod', cdn_service_name: 'my-svc (CDN)', cdn_prefix: 'fos-mybucket-logs',
     })
 
     const explicitDeps = makeDeps()
     buildValidateOnSuccess(explicitDeps)({
       service_name: 'svc',
-      defaults: {
-        endpoint_name: 'Custom EP',
-        fos_region: 'us-west-2',
-        fos_bucket_name: 'override',
-        cdn_service_name: 'explicit cdn',
-        cdn_prefix: 'EXPLICIT',
-      },
+      defaults: { endpoint_name: 'Custom EP', fos_region: 'us-west-2', fos_bucket_name: 'override', cdn_service_name: 'explicit cdn', cdn_prefix: 'EXPLICIT' },
     })
-    const nextExplicit = explicitDeps.setConfig.mock.calls[0][0](INITIAL_CONFIG)
-    expect(nextExplicit).toMatchObject({
-      endpoint_name: 'Custom EP',
-      fos_region: 'us-west-2',
-      cdn_service_name: 'explicit cdn',
-      cdn_prefix: 'explicit',
+    expect(explicitDeps.setConfig.mock.calls[0][0](INITIAL_CONFIG)).toMatchObject({
+      endpoint_name: 'Custom EP', fos_region: 'us-west-2', cdn_service_name: 'explicit cdn', cdn_prefix: 'explicit',
     })
   })
 
@@ -730,17 +487,11 @@ describe('buildValidateOnSuccess', () => {
 })
 
 describe('runCheckConfig', () => {
-  function makeArgs(overrides: Partial<Parameters<typeof runCheckConfig>[0]> = {}): Parameters<typeof runCheckConfig>[0] {
-    return {
-      token: 'TOK',
-      selectedService: { id: 's1', name: 'svc', provisioned: false },
-      selectedCdnService: { id: 'c1', name: 'cdn', provisioned: false },
-      config: { ...INITIAL_CONFIG, fos_bucket_name: 'b' },
-      setIsCheckingConfig: vi.fn(),
-      setConfigStatus: vi.fn(),
-      ...overrides,
-    }
-  }
+  const makeArgs = (overrides: Partial<Parameters<typeof runCheckConfig>[0]> = {}): Parameters<typeof runCheckConfig>[0] => ({
+    token: 'TOK', selectedService: { id: 's1', name: 'svc', provisioned: false },
+    selectedCdnService: { id: 'c1', name: 'cdn', provisioned: false }, config: { ...INITIAL_CONFIG, fos_bucket_name: 'b' },
+    setIsCheckingConfig: vi.fn(), setConfigStatus: vi.fn(), ...overrides,
+  })
 
   it('returns early when prerequisites are missing, and updates status when present', async () => {
     const missing = makeArgs({ selectedService: null })
@@ -758,15 +509,10 @@ describe('runCheckConfig', () => {
 })
 
 describe('runCheckFos', () => {
-  function makeArgs(overrides: Partial<Parameters<typeof runCheckFos>[0]> = {}): Parameters<typeof runCheckFos>[0] {
-    return {
-      vals: { bucket: 'b', region: 'us-east-1', access_key: 'a', secret_key: 's' },
-      config: INITIAL_CONFIG,
-      setFosStatus: vi.fn(),
-      setFosError: vi.fn(),
-      ...overrides,
-    }
-  }
+  const makeArgs = (overrides: Partial<Parameters<typeof runCheckFos>[0]> = {}): Parameters<typeof runCheckFos>[0] => ({
+    vals: { bucket: 'b', region: 'us-east-1', access_key: 'a', secret_key: 's' },
+    config: INITIAL_CONFIG, setFosStatus: vi.fn(), setFosError: vi.fn(), ...overrides,
+  })
 
   it('does nothing when any credential is missing', async () => {
     const args = makeArgs({ vals: { bucket: 'b' } })
@@ -784,11 +530,8 @@ describe('runCheckFos', () => {
     await runCheckFos(args)
     expect(args.setFosStatus).toHaveBeenCalledWith('checking')
     expect(args.setFosStatus).toHaveBeenLastCalledWith(expectedStatus)
-    if (expectedErr !== null) {
-      expect(args.setFosError).toHaveBeenCalledWith(expectedErr)
-    } else {
-      expect(args.setFosError).toHaveBeenCalled()
-    }
+    if (expectedErr !== null) expect(args.setFosError).toHaveBeenCalledWith(expectedErr)
+    else expect(args.setFosError).toHaveBeenCalled()
   })
 
   it('falls back to config values when vals is not supplied', async () => {
@@ -809,9 +552,9 @@ describe('runCheckFos', () => {
 })
 
 describe('runCheckDomain', () => {
-  function makeArgs(overrides: Partial<Parameters<typeof runCheckDomain>[0]> = {}): Parameters<typeof runCheckDomain>[0] {
-    return { prefix: 'myco', setDomainStatus: vi.fn(), setDomainMessage: vi.fn(), ...overrides }
-  }
+  const makeArgs = (overrides: Partial<Parameters<typeof runCheckDomain>[0]> = {}): Parameters<typeof runCheckDomain>[0] => ({
+    prefix: 'myco', setDomainStatus: vi.fn(), setDomainMessage: vi.fn(), ...overrides,
+  })
 
   it.each(['no', ''])('returns early for short/empty prefix (%j)', async (prefix) => {
     const args = makeArgs({ prefix })
@@ -834,19 +577,12 @@ describe('runCheckDomain', () => {
 })
 
 describe('runAnalyzeLake', () => {
-  function makeArgs(overrides: Partial<Parameters<typeof runAnalyzeLake>[0]> = {}): Parameters<typeof runAnalyzeLake>[0] {
-    return {
-      config: { ...INITIAL_CONFIG, fos_bucket_name: 'b', fos_region: 'us-east-1', fos_access_key: 'ak', fos_secret_key: 'sk', fos_prefix: 'p/' },
-      icebergMetadataLocation: 's3://b/metadata/v1.json',
-      setIsAnalyzing: vi.fn(),
-      setLakeInfo: vi.fn(),
-      setImportRange: vi.fn(),
-      setStep: vi.fn(),
-      setFosStatus: vi.fn(),
-      setFosError: vi.fn(),
-      ...overrides,
-    }
-  }
+  const makeArgs = (overrides: Partial<Parameters<typeof runAnalyzeLake>[0]> = {}): Parameters<typeof runAnalyzeLake>[0] => ({
+    config: { ...INITIAL_CONFIG, fos_bucket_name: 'b', fos_region: 'us-east-1', fos_access_key: 'ak', fos_secret_key: 'sk', fos_prefix: 'p/' },
+    icebergMetadataLocation: 's3://b/metadata/v1.json',
+    setIsAnalyzing: vi.fn(), setLakeInfo: vi.fn(), setImportRange: vi.fn(),
+    setStep: vi.fn(), setFosStatus: vi.fn(), setFosError: vi.fn(), ...overrides,
+  })
 
   it('writes lake info + import range (when present) and advances to analyze step', async () => {
     const body = { ok: true, table_count: 3, range: { start: '2026-01-01', end: '2026-02-01' } }
@@ -882,17 +618,10 @@ describe('runAnalyzeLake', () => {
 })
 
 describe('runFetchTerraformPreview', () => {
-  function makeArgs(overrides: Partial<Parameters<typeof runFetchTerraformPreview>[0]> = {}): Parameters<typeof runFetchTerraformPreview>[0] {
-    return {
-      token: 'TOK',
-      selectedService: { id: 'svc-1', name: 'svc', provisioned: false },
-      config: FULL_CONFIG,
-      setIsFetchingTerraform: vi.fn(),
-      setTerraformFiles: vi.fn(),
-      setSelectedTfFile: vi.fn(),
-      ...overrides,
-    }
-  }
+  const makeArgs = (overrides: Partial<Parameters<typeof runFetchTerraformPreview>[0]> = {}): Parameters<typeof runFetchTerraformPreview>[0] => ({
+    token: 'TOK', selectedService: { id: 'svc-1', name: 'svc', provisioned: false }, config: FULL_CONFIG,
+    setIsFetchingTerraform: vi.fn(), setTerraformFiles: vi.fn(), setSelectedTfFile: vi.fn(), ...overrides,
+  })
 
   it('returns early when no service is selected', async () => {
     const args = makeArgs({ selectedService: null })
@@ -926,39 +655,19 @@ describe('runFetchTerraformPreview', () => {
 })
 
 describe('buildHandleModalClose', () => {
-  function makeDeps(overrides: Partial<Parameters<typeof buildHandleModalClose>[0]> = {}) {
-    return {
-      status: 'idle',
-      isDone: false,
-      onOpenChange: vi.fn(),
-      selectedService: null,
-      setActiveServiceId: vi.fn(),
-      queryClient: { invalidateQueries: vi.fn() },
-      setStep: vi.fn(),
-      setMode: vi.fn(),
-      setSearch: vi.fn(),
-      setSelectedService: vi.fn(),
-      setIsDeploying: vi.fn(),
-      setFosStatus: vi.fn(),
-      setFosError: vi.fn(),
-      setLakeInfo: vi.fn(),
-      setIsAnalyzing: vi.fn(),
-      setImportMode: vi.fn(),
-      setSyncEnabled: vi.fn(),
-      reset: vi.fn(),
-      resetConfig: vi.fn(),
-      setNgwafWorkspaces: vi.fn(),
-      setNgwafFetching: vi.fn(),
-      setNgwafFetchError: vi.fn(),
-      ...overrides,
-    }
-  }
+  const makeDeps = (overrides: Partial<Parameters<typeof buildHandleModalClose>[0]> = {}) => ({
+    status: 'idle', isDone: false, onOpenChange: vi.fn(), selectedService: null, setActiveServiceId: vi.fn(),
+    queryClient: { invalidateQueries: vi.fn() }, setStep: vi.fn(), setMode: vi.fn(), setSearch: vi.fn(),
+    setSelectedService: vi.fn(), setIsDeploying: vi.fn(), setFosStatus: vi.fn(), setFosError: vi.fn(),
+    setLakeInfo: vi.fn(), setIsAnalyzing: vi.fn(), setImportMode: vi.fn(), setSyncEnabled: vi.fn(),
+    reset: vi.fn(), resetConfig: vi.fn(), setNgwafWorkspaces: vi.fn(), setNgwafFetching: vi.fn(), setNgwafFetchError: vi.fn(),
+    ...overrides,
+  })
 
   it('refuses to close while streaming and propagates open=true unchanged', () => {
     const streaming = makeDeps({ status: 'streaming' })
     buildHandleModalClose(streaming)(false)
     expect(streaming.onOpenChange).not.toHaveBeenCalled()
-
     const opening = makeDeps()
     buildHandleModalClose(opening)(true)
     expect(opening.onOpenChange).toHaveBeenCalledWith(true)
@@ -968,10 +677,7 @@ describe('buildHandleModalClose', () => {
   it('on close after done/isDone: switches active service + invalidates bootstrap', () => {
     const reload = vi.fn()
     Object.defineProperty(window, 'location', { configurable: true, value: { reload } })
-    const deps = makeDeps({
-      status: 'done',
-      selectedService: { id: 'svc-new', name: 'new', provisioned: false },
-    })
+    const deps = makeDeps({ status: 'done', selectedService: { id: 'svc-new', name: 'new', provisioned: false } })
     buildHandleModalClose(deps)(false)
     expect(deps.onOpenChange).toHaveBeenCalledWith(false)
     expect(deps.setActiveServiceId).toHaveBeenCalledWith('svc-new')
@@ -994,16 +700,10 @@ describe('buildHandleModalClose', () => {
 })
 
 describe('runDeploy', () => {
-  function makeArgs(overrides: Partial<Parameters<typeof runDeploy>[0]> = {}) {
-    return {
-      token: 'TOK',
-      selectedService: { id: 'svc-1', name: 'svc', provisioned: false },
-      config: FULL_CONFIG,
-      setIsDeploying: vi.fn(),
-      start: vi.fn(),
-      ...overrides,
-    }
-  }
+  const makeArgs = (overrides: Partial<Parameters<typeof runDeploy>[0]> = {}) => ({
+    token: 'TOK', selectedService: { id: 'svc-1', name: 'svc', provisioned: false },
+    config: FULL_CONFIG, setIsDeploying: vi.fn(), start: vi.fn(), ...overrides,
+  })
 
   it('skips when no service is selected', () => {
     const args = makeArgs({ selectedService: null })
@@ -1019,14 +719,8 @@ describe('runDeploy', () => {
     const [path, body] = (args.start as ReturnType<typeof vi.fn>).mock.calls[0]
     expect(path).toBe('/api/provision/execute')
     expect(body).toMatchObject({
-      token: 'TOK',
-      service_id: 'svc-1',
-      service_name: 'svc',
-      endpoint_name: 'My EP',
-      fos_bucket_name: 'my-bucket',
-      sample_rate: '1',
-      log_period: '60',
-      commit_interval_mins: 5,
+      token: 'TOK', service_id: 'svc-1', service_name: 'svc', endpoint_name: 'My EP',
+      fos_bucket_name: 'my-bucket', sample_rate: '1', log_period: '60', commit_interval_mins: 5,
       cdn_url: 'https://mycdn.global.ssl.fastly.net',
     })
 
@@ -1046,23 +740,12 @@ describe('runDeploy', () => {
 })
 
 describe('runJoin', () => {
-  function makeArgs(overrides: Partial<Parameters<typeof runJoin>[0]> = {}) {
-    return {
-      config: FULL_CONFIG,
-      analystPathASupported: true,
-      syncIntervalMins: '15',
-      syncEnabled: true,
-      icebergMetadataLocation: 's3://b/meta.json',
-      importMode: 'all' as 'all' | 'range',
-      importRange: { start: '', end: '' },
-      setIsDeploying: vi.fn(),
-      setJoinPhase: vi.fn(),
-      setStep: vi.fn(),
-      reset: vi.fn(),
-      start: vi.fn(),
-      ...overrides,
-    }
-  }
+  const makeArgs = (overrides: Partial<Parameters<typeof runJoin>[0]> = {}) => ({
+    config: FULL_CONFIG, analystPathASupported: true, syncIntervalMins: '15', syncEnabled: true,
+    icebergMetadataLocation: 's3://b/meta.json', importMode: 'all' as 'all' | 'range',
+    importRange: { start: '', end: '' }, setIsDeploying: vi.fn(), setJoinPhase: vi.fn(),
+    setStep: vi.fn(), reset: vi.fn(), start: vi.fn(), ...overrides,
+  })
 
   it.each([
     ['missing credential', { config: { ...FULL_CONFIG, fos_bucket_name: '' } }],
@@ -1083,10 +766,9 @@ describe('runJoin', () => {
     expect(allArgs.reset).toHaveBeenCalled()
     const [urlAll] = (allArgs.start as ReturnType<typeof vi.fn>).mock.calls[0]
     expect(urlAll).toMatch(/^\/api\/provision\/join\?/)
-    expect(urlAll).toContain('fos_bucket_name=my-bucket')
-    expect(urlAll).toContain('sync_interval_mins=15')
-    expect(urlAll).toContain('sync_enabled=true')
-    expect(urlAll).toContain('iceberg_metadata_location=s3%3A%2F%2Fb%2Fmeta.json')
+    for (const part of ['fos_bucket_name=my-bucket', 'sync_interval_mins=15', 'sync_enabled=true', 'iceberg_metadata_location=s3%3A%2F%2Fb%2Fmeta.json']) {
+      expect(urlAll).toContain(part)
+    }
     expect(urlAll).not.toContain('start_time')
 
     const rangeArgs = makeArgs({ importMode: 'range', importRange: { start: '2026-01-01', end: '2026-02-01' } })
@@ -1103,23 +785,14 @@ describe('runJoin', () => {
 })
 
 describe('runAdminIngest', () => {
-  function makeArgs(overrides: Partial<Parameters<typeof runAdminIngest>[0]> = {}) {
-    return {
-      token: 'TOK',
-      selectedService: { id: 'svc-1', name: 'svc', provisioned: false },
-      selectedCdnService: { id: 'cdn-1', name: 'cdn', provisioned: false },
-      config: FULL_CONFIG,
-      services: [{ id: 'svc-other', name: 'other', accessLevel: 'read_write' as const }],
-      setIsDeploying: vi.fn(),
-      setJoinedServiceId: vi.fn(),
-      setActiveServiceId: vi.fn(),
-      setServices: vi.fn(),
-      queryClient: { invalidateQueries: vi.fn() },
-      setJoinPhase: vi.fn(),
-      setStep: vi.fn(),
-      ...overrides,
-    }
-  }
+  const makeArgs = (overrides: Partial<Parameters<typeof runAdminIngest>[0]> = {}) => ({
+    token: 'TOK', selectedService: { id: 'svc-1', name: 'svc', provisioned: false },
+    selectedCdnService: { id: 'cdn-1', name: 'cdn', provisioned: false }, config: FULL_CONFIG,
+    services: [{ id: 'svc-other', name: 'other', accessLevel: 'read_write' as const }],
+    setIsDeploying: vi.fn(), setJoinedServiceId: vi.fn(), setActiveServiceId: vi.fn(),
+    setServices: vi.fn(), queryClient: { invalidateQueries: vi.fn() },
+    setJoinPhase: vi.fn(), setStep: vi.fn(), ...overrides,
+  })
 
   it('skips when no service is selected', async () => {
     const args = makeArgs({ selectedService: null })

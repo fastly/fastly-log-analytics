@@ -1,7 +1,7 @@
 'use client'
 
 import React from 'react'
-import { useSearchParams } from 'next/navigation'
+import { parseAsStringLiteral, useQueryState } from 'nuqs'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useForm, useWatch } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
@@ -22,34 +22,15 @@ import { Label } from '@/components/ui/label'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
-import {
-  Activity,
-  AlertTriangle,
-  Bell,
-  BellOff,
-  BellPlus,
-  CheckCircle2,
-  Clock,
-  Info,
-  Loader2,
-  Pencil,
-  Play,
-  Plus,
-  Send,
-  Trash2,
-  Zap,
+  Activity, AlertTriangle, Bell, BellOff, BellPlus, CheckCircle2, Clock,
+  Info, Loader2, Pencil, Play, Plus, Send, Trash2, Zap,
 } from 'lucide-react'
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
 import { ConfirmDialog, LabelWithInfo } from '@/components/ui/confirm-dialog'
 import { PlotlyChart } from '@/components/PlotlyChart'
-import { showToast, CHART_COLORS, useTimeLayout, formatDate, keyByOccurrence, oneOf } from '@/lib/utils'
+import { showToast, CHART_COLORS, useTimeLayout, formatDate, keyByOccurrence, oneOf, ensureNuqsAdapter } from '@/lib/utils'
 import { DataTable, ColumnVisibilityDropdown } from '@/components/DataTable'
 import type { ColumnDef, VisibilityState } from '@tanstack/react-table'
 import type { components } from '@/types/api.generated'
@@ -64,8 +45,9 @@ type EvalScope = Alert['evaluation_scope']
 type Operator = Alert['operator']
 type ChannelType = AlertChannel['type']
 
-const alertStatusFilterSchema = z.enum(['all', 'alerting', 'ok', 'muted'])
-type AlertStatusFilter = z.infer<typeof alertStatusFilterSchema>
+const ALERT_STATUS_FILTERS = ['all', 'alerting', 'ok', 'muted'] as const
+type AlertStatusFilter = (typeof ALERT_STATUS_FILTERS)[number]
+const alertStatusParser = parseAsStringLiteral(ALERT_STATUS_FILTERS).withDefault('all')
 
 const ALERTS_AVAILABLE_COLUMNS = [
   { id: 'name', label: 'Alert Name' },
@@ -128,13 +110,9 @@ const alertFormSchema = z
     baselinePeriodDays: z.string(),
   })
   .superRefine((v, ctx) => {
-    if (v.name.trim() === '') {
-      ctx.addIssue({ code: 'custom', path: ['name'], message: 'Name is required.' })
-    }
+    if (v.name.trim() === '') ctx.addIssue({ code: 'custom', path: ['name'], message: 'Name is required.' })
     const thresholdField = v.evalType === 'anomaly_zscore' ? 'zscoreThreshold' : 'threshold'
-    if (v[thresholdField].trim() === '') {
-      ctx.addIssue({ code: 'custom', path: [thresholdField], message: 'Threshold is required.' })
-    }
+    if (v[thresholdField].trim() === '') ctx.addIssue({ code: 'custom', path: [thresholdField], message: 'Threshold is required.' })
   })
 
 type AlertFormValues = z.infer<typeof alertFormSchema>
@@ -150,17 +128,10 @@ interface AlertPreviewProps {
 }
 
 export function AlertPreview({
-  previewData,
-  isPreviewLoading,
-  lookbackHours,
-  setLookbackHours,
-  metric,
-  evalType,
-  threshold,
+  previewData, isPreviewLoading, lookbackHours, setLookbackHours, metric, evalType, threshold,
 }: AlertPreviewProps) {
   const { data: catalog } = useLogFieldsCatalog()
-  const metricField = React.useMemo(() => catalog?.fields?.find(f => f.id === metric), [catalog, metric])
-
+  const metricField = React.useMemo(() => catalog?.fields?.find((f) => f.id === metric), [catalog, metric])
   const { timezone } = useTimezoneStore()
   const startTime = React.useMemo(() => previewData?.times?.[0], [previewData])
   const endTime = React.useMemo(() => previewData?.times?.[previewData?.times?.length - 1], [previewData])
@@ -168,12 +139,12 @@ export function AlertPreview({
 
   const x = React.useMemo(
     () => (previewData?.times || []).map((t: string) => formatDate(t, timezone, 'yyyy-MM-dd HH:mm:ss')),
-    [previewData, timezone]
+    [previewData, timezone],
   )
 
   const getHoverTemplate = React.useCallback((m: string, label?: string) => {
     const pre = label ? `${label}: ` : ''
-    const field = m === metric ? metricField : catalog?.fields?.find(f => f.id === m)
+    const field = m === metric ? metricField : catalog?.fields?.find((f) => f.id === m)
     const unit = field?.unit || ''
     const precision = field?.precision ?? (m === 'requests' ? 0 : 1)
     const format = precision > 0 ? `.${precision}f` : ','
@@ -187,7 +158,7 @@ export function AlertPreview({
       <div className="flex items-center justify-between mb-2">
         <Label>Live Preview</Label>
         <ButtonGroup>
-          {[1, 3, 6, 12, 24].map(h => (
+          {[1, 3, 6, 12, 24].map((h) => (
             <Button
               key={h}
               type="button"
@@ -275,12 +246,7 @@ export function AlertPreview({
                 margin: { t: 10, r: 10, l: 40, b: 30 },
                 paper_bgcolor: 'transparent',
                 plot_bgcolor: 'transparent',
-                xaxis: {
-                  ...timeLayout.xaxis,
-                  showgrid: false,
-                  zeroline: false,
-                  fixedrange: true,
-                },
+                xaxis: { ...timeLayout.xaxis, showgrid: false, zeroline: false, fixedrange: true },
                 yaxis: {
                   title: metricField?.unit || (metric === 'requests' ? 'reqs' : ''),
                   ticksuffix: metricField?.unit || '',
@@ -308,7 +274,7 @@ export function AlertPreview({
 }
 
 export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Alert | null; onSuccess: () => void }) {
-  const activeServiceId = useServiceStore(s => s.activeServiceId)
+  const activeServiceId = useServiceStore((s) => s.activeServiceId)
   const isAnalyst = useIsAnalyst()
   const queryClient = useQueryClient()
 
@@ -348,40 +314,16 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
     setChannels([...channels, { type: newChannelType, url: newChannelUrl.trim() }])
     setNewChannelUrl('')
   }
-  const handleRemoveChannel = (channel: AlertChannel) => {
-    setChannels(channels.filter((c) => c !== channel))
-  }
+  const handleRemoveChannel = (channel: AlertChannel) => setChannels(channels.filter((c) => c !== channel))
 
   const previewParams = React.useMemo(
     () => ({
-      activeServiceId,
-      metric,
-      category,
-      evalType,
-      evalScope,
-      operator,
-      windowMin,
-      compPeriodMin,
-      statusCodesStr,
-      threshold,
-      zscoreThreshold,
-      baselinePeriodDays,
-      lookbackHours,
+      activeServiceId, metric, category, evalType, evalScope, operator,
+      windowMin, compPeriodMin, statusCodesStr, threshold, zscoreThreshold, baselinePeriodDays, lookbackHours,
     }),
     [
-      activeServiceId,
-      metric,
-      category,
-      evalType,
-      evalScope,
-      operator,
-      windowMin,
-      compPeriodMin,
-      statusCodesStr,
-      threshold,
-      zscoreThreshold,
-      baselinePeriodDays,
-      lookbackHours,
+      activeServiceId, metric, category, evalType, evalScope, operator,
+      windowMin, compPeriodMin, statusCodesStr, threshold, zscoreThreshold, baselinePeriodDays, lookbackHours,
     ],
   )
   const debouncedPreviewParams = useDebounce(previewParams, 500)
@@ -393,10 +335,10 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
     queryFn: async () => {
       const p = debouncedPreviewParams
       if (!p.activeServiceId) return null
-      let parsedCodes: number[] | undefined = undefined
-      if ((p.metric === 'specific_status' || p.metric === 'specific_status_rate') && p.statusCodesStr) {
-        parsedCodes = p.statusCodesStr.split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n))
-      }
+      const parsedCodes =
+        (p.metric === 'specific_status' || p.metric === 'specific_status_rate') && p.statusCodesStr
+          ? p.statusCodesStr.split(',').map((s) => parseInt(s.trim())).filter((n) => !isNaN(n))
+          : undefined
 
       const data = await unwrapClient(client.POST('/api/alerts/preview', {
         params: { query: { lookback_hours: p.lookbackHours } },
@@ -434,9 +376,7 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
     const next = val ? oneOf(EVAL_TYPES, val) : undefined
     if (!next) return
     setValue('evalType', next, { shouldValidate: true })
-    if (val === 'anomaly_zscore' || val !== 'absolute') {
-      setValue('operator', '>')
-    }
+    if (val === 'anomaly_zscore' || val !== 'absolute') setValue('operator', '>')
   }
 
   const saveMutation = useMutation({
@@ -447,9 +387,7 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
           body: payload,
         }))
       } else {
-        await unwrapClient(client.POST('/api/alerts/', {
-          body: payload,
-        }))
+        await unwrapClient(client.POST('/api/alerts/', { body: payload }))
       }
     },
     onSuccess: () => {
@@ -465,11 +403,10 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
 
   const handleSave = handleSubmit(async () => {
     if (!activeServiceId) return
-
-    let parsedCodes: number[] | undefined = undefined
-    if ((metric === 'specific_status' || metric === 'specific_status_rate') && statusCodesStr) {
-      parsedCodes = statusCodesStr.split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n))
-    }
+    const parsedCodes =
+      (metric === 'specific_status' || metric === 'specific_status_rate') && statusCodesStr
+        ? statusCodesStr.split(',').map((s) => parseInt(s.trim())).filter((n) => !isNaN(n))
+        : undefined
 
     const payload: Alert = {
       id: initialAlert?.id,
@@ -519,9 +456,7 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
             <div className="grid gap-2">
               <LabelWithInfo label="Category" info="Groups alerts logically. Does not affect evaluation logic." />
               <Select value={category} onValueChange={handleCategoryChange}>
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
+                <SelectTrigger><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="reliability">Reliability (Errors)</SelectItem>
                   <SelectItem value="traffic">Traffic (Requests/BW)</SelectItem>
@@ -533,11 +468,9 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
             <div className="grid gap-2">
               <LabelWithInfo label="Metric" info="The specific data point to measure. Rate metrics represent a percentage of total traffic." />
               <Select value={metric} onValueChange={(v) => { const m = v ? oneOf(ALL_METRICS, v) : undefined; if (m) setValue('metric', m) }}>
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
+                <SelectTrigger><SelectValue /></SelectTrigger>
                 <SelectContent>
-                  {METRICS_BY_CATEGORY[category].map(m => (
+                  {METRICS_BY_CATEGORY[category].map((m) => (
                     <SelectItem key={m.value} value={m.value}>{m.label}</SelectItem>
                   ))}
                 </SelectContent>
@@ -548,12 +481,7 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
           {(metric === 'specific_status' || metric === 'specific_status_rate') && (
             <div className="grid gap-2 p-3 bg-muted/30 rounded-md border border-border/50">
               <LabelWithInfo htmlFor="status-codes" label="HTTP Status Codes" info="Enter one or more HTTP status codes (e.g., 503, 504) to match exactly against the log status field." />
-              <Input
-                id="status-codes"
-                placeholder="e.g. 503, 504"
-                {...register('statusCodesStr')}
-                required
-              />
+              <Input id="status-codes" placeholder="e.g. 503, 504" {...register('statusCodesStr')} required />
               <p className="text-[10px] text-muted-foreground">Comma-separated list of HTTP status codes to track.</p>
             </div>
           )}
@@ -562,9 +490,7 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
             <div className="grid gap-2">
               <LabelWithInfo label="Evaluation Scope" info="Restricts the alert to a specific traffic scope. 'Edge Only' filters for edge responses. 'Origin Only' filters for requests that went to your origin." />
               <Select value={evalScope} onValueChange={(v) => { const sc = v ? oneOf(EVAL_SCOPES, v) : undefined; if (sc) setValue('evalScope', sc) }}>
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
+                <SelectTrigger><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="all">All Requests</SelectItem>
                   <SelectItem value="edge">Edge Only</SelectItem>
@@ -575,9 +501,7 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
             <div className="grid gap-2">
               <LabelWithInfo label="Evaluation Type" info={<><b>Absolute</b> triggers if the value crosses a hard limit.<br /><br /><b>Relative</b> compares the current window to the <i>exact same duration</i> in the past (the baseline).</>} />
               <Select value={evalType} onValueChange={handleEvalTypeChange}>
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
+                <SelectTrigger><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="absolute">Absolute Threshold</SelectItem>
                   <SelectItem value="relative_increase">Relative Increase (%)</SelectItem>
@@ -591,10 +515,8 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
           {(evalType !== 'absolute' && evalType !== 'anomaly_zscore') && (
             <div className="grid gap-2 p-3 bg-muted/30 rounded-md border border-border/50">
               <LabelWithInfo label="Baseline Comparison Period" info="How far back to look for the baseline. If comparing the last 5m to 1 hour ago, it measures against the 5-minute window that ended 60 minutes ago." />
-              <Select value={compPeriodMin} onValueChange={v => v && setValue('compPeriodMin', v)}>
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
+              <Select value={compPeriodMin} onValueChange={(v) => v && setValue('compPeriodMin', v)}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="10">10 minutes ago</SelectItem>
                   <SelectItem value="60">1 hour ago</SelectItem>
@@ -610,22 +532,12 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
             <div className="grid grid-cols-2 gap-4 border-t pt-4">
               <div className="grid gap-2">
                 <LabelWithInfo htmlFor="zscore-threshold" label="Z-Score Threshold" info="How many standard deviations above the rolling hourly baseline the current window must be to trigger. Standard value is 3.0." />
-                <Input
-                  id="zscore-threshold"
-                  type="number"
-                  step="0.1"
-                  min="0"
-                  placeholder="e.g. 3.0"
-                  {...register('zscoreThreshold')}
-                  required
-                />
+                <Input id="zscore-threshold" type="number" step="0.1" min="0" placeholder="e.g. 3.0" {...register('zscoreThreshold')} required />
               </div>
               <div className="grid gap-2">
                 <LabelWithInfo label="Baseline Period (Days)" info="The length of the rolling historical baseline period to compute standard deviation and mean over." />
-                <Select value={baselinePeriodDays} onValueChange={v => v && setValue('baselinePeriodDays', v)}>
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
+                <Select value={baselinePeriodDays} onValueChange={(v) => v && setValue('baselinePeriodDays', v)}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="7">7 Days</SelectItem>
                     <SelectItem value="14">14 Days</SelectItem>
@@ -639,9 +551,7 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
               <div className="grid gap-2">
                 <LabelWithInfo label="Operator" info="The mathematical condition to trigger the alert." />
                 <Select value={operator} onValueChange={(v) => { const op = v ? oneOf(OPERATORS, v) : undefined; if (op) setValue('operator', op) }}>
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value=">">{'>'}</SelectItem>
                     <SelectItem value="<">{'<'}</SelectItem>
@@ -674,9 +584,7 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
           <div className="grid gap-2">
             <LabelWithInfo htmlFor="window" label="Evaluation Window" info="The length of time to aggregate data over before evaluating the threshold. A longer window prevents flapping on brief spikes." />
             <Select value={windowMin} onValueChange={(v) => v && setValue('windowMin', v)}>
-              <SelectTrigger id="window">
-                <SelectValue />
-              </SelectTrigger>
+              <SelectTrigger id="window"><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="0.5">Last 30 seconds</SelectItem>
                 <SelectItem value="1">Last 1 minute</SelectItem>
@@ -689,26 +597,15 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
 
           <div className="grid gap-4 border-t pt-4">
             <LabelWithInfo label="Alert Notification Channels" info="Configure one or more alert delivery channels (e.g. Slack, PagerDuty, generic Webhooks) for this alert." />
-
             {channels.length > 0 ? (
               <div className="space-y-2 max-h-[150px] overflow-y-auto pr-1">
                 {keyByOccurrence(channels, (c) => `${c.type}|${c.url}`).map(({ key, item: chan }) => (
                   <div key={key} className="flex items-center justify-between p-2 bg-muted/50 rounded-md border border-border/50 text-xs">
                     <div className="flex items-center gap-2 overflow-hidden">
-                      <span className="font-semibold capitalize px-1.5 py-0.5 rounded bg-accent/60 text-[10px]">
-                        {chan.type}
-                      </span>
-                      <span className="truncate text-muted-foreground max-w-[200px]" title={chan.url}>
-                        {chan.url}
-                      </span>
+                      <span className="font-semibold capitalize px-1.5 py-0.5 rounded bg-accent/60 text-[10px]">{chan.type}</span>
+                      <span className="truncate text-muted-foreground max-w-[200px]" title={chan.url}>{chan.url}</span>
                     </div>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      className="h-6 w-6 p-0 text-destructive hover:bg-destructive/10"
-                      onClick={() => handleRemoveChannel(chan)}
-                    >
+                    <Button type="button" variant="ghost" size="sm" className="h-6 w-6 p-0 text-destructive hover:bg-destructive/10" onClick={() => handleRemoveChannel(chan)}>
                       ×
                     </Button>
                   </div>
@@ -720,9 +617,7 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
 
             <div className="flex gap-2">
               <Select value={newChannelType} onValueChange={(v) => { const ct = v ? oneOf(CHANNEL_TYPES, v) : undefined; if (ct) setNewChannelType(ct) }}>
-                <SelectTrigger className="w-[110px] text-xs h-8">
-                  <SelectValue />
-                </SelectTrigger>
+                <SelectTrigger className="w-[110px] text-xs h-8"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="slack">Slack</SelectItem>
                   <SelectItem value="pagerduty">PagerDuty</SelectItem>
@@ -730,23 +625,12 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
                 </SelectContent>
               </Select>
               <Input
-                placeholder={
-                  newChannelType === 'slack' ? 'Slack webhook URL...' :
-                  newChannelType === 'pagerduty' ? 'PagerDuty Integration URL...' :
-                  'Generic webhook URL...'
-                }
+                placeholder={newChannelType === 'slack' ? 'Slack webhook URL...' : newChannelType === 'pagerduty' ? 'PagerDuty Integration URL...' : 'Generic webhook URL...'}
                 value={newChannelUrl}
-                onChange={e => setNewChannelUrl(e.target.value)}
+                onChange={(e) => setNewChannelUrl(e.target.value)}
                 className="h-8 text-xs flex-1"
               />
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                className="h-8 text-xs"
-                onClick={handleAddChannel}
-                disabled={!newChannelUrl.trim()}
-              >
+              <Button type="button" variant="outline" size="sm" className="h-8 text-xs" onClick={handleAddChannel} disabled={!newChannelUrl.trim()}>
                 Add
               </Button>
             </div>
@@ -754,11 +638,7 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
 
           <div className="grid gap-2 border-t pt-4">
             <LabelWithInfo htmlFor="webhook" label="Legacy Webhook URL (Optional / Prefer Channels)" info="Legacy single-destination webhook URL. Use Alert Notification Channels above instead for flexible multi-destination routing." />
-            <Input
-              id="webhook"
-              placeholder="https://hooks.slack.com/services/..."
-              {...register('webhookUrl')}
-            />
+            <Input id="webhook" placeholder="https://hooks.slack.com/services/..." {...register('webhookUrl')} />
             <p className="text-[10px] text-muted-foreground italic">
               Legacy fallback endpoint. We recommend using the dedicated notification channels configured above.
             </p>
@@ -778,11 +658,7 @@ export function CreateAlertForm({ initialAlert, onSuccess }: { initialAlert?: Al
 
       <DialogFooter className="pt-4 mt-auto border-t">
         <Button type="button" variant="outline" onClick={onSuccess}>Cancel</Button>
-        <Button
-          type="submit"
-          disabled={isSaving || !isValid}
-          title={!isValid ? 'Fill in Name and Threshold to enable submit.' : undefined}
-        >
+        <Button type="submit" disabled={isSaving || !isValid} title={!isValid ? 'Fill in Name and Threshold to enable submit.' : undefined}>
           {isSaving ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : null}
           {initialAlert ? 'Save Changes' : 'Create Alert'}
         </Button>
@@ -800,26 +676,17 @@ interface AlertsListProps {
   isAnalyst?: boolean
 }
 
-function AlertsList({
-  alerts,
-  columnVisibility,
-  setColumnVisibility,
-  onEdit,
-  onDelete,
-  isAnalyst = false,
-}: AlertsListProps) {
+function AlertsList({ alerts, columnVisibility, setColumnVisibility, onEdit, onDelete, isAnalyst = false }: AlertsListProps) {
   const activeServiceId = useServiceStore((s) => s.activeServiceId)
   const queryClient = useQueryClient()
   const { relative, full, abbr } = useDateFormat()
 
   const toggleMutation = useMutation({
     mutationFn: async ({ alert, newEnabled }: { alert: Alert; newEnabled: boolean }) => {
-      await unwrapClient(
-        client.PATCH('/api/alerts/{alert_id}/enabled', {
-          params: { path: { alert_id: alert.id! } },
-          body: { enabled: newEnabled },
-        }),
-      )
+      await unwrapClient(client.PATCH('/api/alerts/{alert_id}/enabled', {
+        params: { path: { alert_id: alert.id! } },
+        body: { enabled: newEnabled },
+      }))
     },
     onMutate: async ({ alert, newEnabled }) => {
       const queryKey = ['alerts', activeServiceId]
@@ -835,25 +702,16 @@ function AlertsList({
       console.error('Failed to toggle alert', err)
       if (context?.queryKey) queryClient.setQueryData(context.queryKey, context.previous)
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['alerts'] })
-    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['alerts'] }),
   })
   const togglingId = toggleMutation.isPending ? (toggleMutation.variables?.alert.id ?? null) : null
-  const toggleEnabled = React.useCallback(
-    (alert: Alert, newEnabled: boolean) => toggleMutation.mutate({ alert, newEnabled }),
-    [toggleMutation],
-  )
+  const toggleEnabled = React.useCallback((alert: Alert, newEnabled: boolean) => toggleMutation.mutate({ alert, newEnabled }), [toggleMutation])
 
   const testMutation = useMutation({
     mutationFn: async (alert: Alert) => {
       const { data, error } = await client.POST('/api/alerts/{alert_id}/test', {
         params: { path: { alert_id: alert.id! } },
-        body: {
-          service_id: activeServiceId || alert.service_id,
-          channel_type: 'webhook',
-          dry_run: true,
-        },
+        body: { service_id: activeServiceId || alert.service_id, channel_type: 'webhook', dry_run: true },
       })
       if (error) {
         showToast(extractApiError(error) || 'Failed to test alert notification', 'error')
@@ -861,9 +719,7 @@ function AlertsList({
       }
       const dispatched = data?.data?.targets_tested ?? 0
       showToast(
-        dispatched > 0
-          ? `Validated ${dispatched} notification channel${dispatched === 1 ? '' : 's'}`
-          : 'Alert rule validated (no external channels configured)',
+        dispatched > 0 ? `Validated ${dispatched} notification channel${dispatched === 1 ? '' : 's'}` : 'Alert rule validated (no external channels configured)',
         'success',
       )
     },
@@ -873,28 +729,15 @@ function AlertsList({
     },
   })
   const testingId = testMutation.isPending ? (testMutation.variables?.id ?? null) : null
-  const testNotification = React.useCallback(
-    (alert: Alert) => {
-      if (alert.id) testMutation.mutate(alert)
-    },
-    [testMutation],
-  )
+  const testNotification = React.useCallback((alert: Alert) => { if (alert.id) testMutation.mutate(alert) }, [testMutation])
 
   const columns = React.useMemo<ColumnDef<Alert>[]>(
     () => [
-      {
-        accessorKey: 'name',
-        header: 'Alert Name',
-        cell: (info) => <span className="font-medium">{info.row.original.name}</span>,
-      },
+      { accessorKey: 'name', header: 'Alert Name', cell: (info) => <span className="font-medium">{info.row.original.name}</span> },
       {
         accessorKey: 'category',
         header: 'Category',
-        cell: (info) => (
-          <Badge variant="secondary" className="capitalize">
-            {info.row.original.category?.replace('_', ' ') || 'Reliability'}
-          </Badge>
-        ),
+        cell: (info) => <Badge variant="secondary" className="capitalize">{info.row.original.category?.replace('_', ' ') || 'Reliability'}</Badge>,
       },
       {
         accessorKey: 'metric',
@@ -902,24 +745,15 @@ function AlertsList({
         cell: (info) => {
           const { metric: val, status_codes: codes, evaluation_scope: scope } = info.row.original
           const display =
-            val === 'specific_status' && codes
-              ? `Status ${codes.join(', ')}`
-              : val === 'specific_status_rate' && codes
-                ? `Status ${codes.join(', ')} Rate`
-                : val.replace(/_/g, ' ')
+            val === 'specific_status' && codes ? `Status ${codes.join(', ')}`
+            : val === 'specific_status_rate' && codes ? `Status ${codes.join(', ')} Rate`
+            : val.replace(/_/g, ' ')
           return (
             <div className="flex items-center">
               <span className="capitalize text-sm font-medium">{display}</span>
-              {scope === 'edge' && (
-                <Badge variant="outline" className="ml-2 text-[10px] h-4 px-1 py-0 font-normal">
-                  Edge
-                </Badge>
-              )}
+              {scope === 'edge' && <Badge variant="outline" className="ml-2 text-[10px] h-4 px-1 py-0 font-normal">Edge</Badge>}
               {scope === 'origin' && (
-                <Badge
-                  variant="outline"
-                  className="ml-2 text-[10px] h-4 px-1 py-0 font-normal border-orange-500/50 text-orange-600 dark:text-orange-400"
-                >
+                <Badge variant="outline" className="ml-2 text-[10px] h-4 px-1 py-0 font-normal border-orange-500/50 text-orange-600 dark:text-orange-400">
                   Origin
                 </Badge>
               )}
@@ -934,32 +768,21 @@ function AlertsList({
           const a = info.row.original
           const windowStr = a.window_min < 1 ? `${Math.round(a.window_min * 60)}s` : `${a.window_min}m`
           const evalType = a.evaluation_type || 'absolute'
-          if (evalType === 'absolute') {
-            return (
-              <span className="text-sm font-mono">
-                {a.operator} {a.threshold} (last {windowStr})
-              </span>
-            )
-          }
+          if (evalType === 'absolute') return <span className="text-sm font-mono">{a.operator} {a.threshold} (last {windowStr})</span>
           if (evalType === 'anomaly_zscore') {
             const zThresh = a.zscore_threshold !== undefined ? a.zscore_threshold : a.threshold || 3.0
             const baseDays = a.baseline_period_days || 7
             return (
-              <span
-                className="text-sm font-mono flex items-center gap-1"
-                title={`Z-Score > ${zThresh} vs rolling baseline over last ${baseDays} days`}
-              >
+              <span className="text-sm font-mono flex items-center gap-1" title={`Z-Score > ${zThresh} vs rolling baseline over last ${baseDays} days`}>
                 <span className="text-purple-600 dark:text-purple-400 font-bold">Z-Score</span> &gt; {zThresh}
                 <span className="text-muted-foreground text-[10px]">({baseDays}d baseline)</span>
               </span>
             )
           }
           const compStr = a.comparison_period_min
-            ? a.comparison_period_min >= 1440
-              ? `${a.comparison_period_min / 1440}d`
-              : a.comparison_period_min >= 60
-                ? `${a.comparison_period_min / 60}h`
-                : `${a.comparison_period_min}m`
+            ? a.comparison_period_min >= 1440 ? `${a.comparison_period_min / 1440}d`
+            : a.comparison_period_min >= 60 ? `${a.comparison_period_min / 60}h`
+            : `${a.comparison_period_min}m`
             : '?'
           return (
             <span className="text-sm font-mono flex items-center gap-1">
@@ -1005,9 +828,7 @@ function AlertsList({
                       </div>
                     }
                   />
-                  <TooltipContent className="text-xs">
-                    {full(val)} {abbr()}
-                  </TooltipContent>
+                  <TooltipContent className="text-xs">{full(val)} {abbr()}</TooltipContent>
                 </Tooltip>
               </TooltipProvider>
               <a
@@ -1030,11 +851,7 @@ function AlertsList({
           const a = info.row.original
           if (isAnalyst) {
             return (
-              <Badge
-                variant={a.enabled ? 'secondary' : 'outline'}
-                className="text-[10px]"
-                data-testid={`analyst-alert-enabled-${a.id}`}
-              >
+              <Badge variant={a.enabled ? 'secondary' : 'outline'} className="text-[10px]" data-testid={`analyst-alert-enabled-${a.id}`}>
                 {a.enabled ? 'On' : 'Off'}
               </Badge>
             )
@@ -1052,55 +869,26 @@ function AlertsList({
           )
         },
       },
-      ...(isAnalyst
-        ? []
-        : [
-            {
-              id: 'actions',
-              header: '',
-              cell: (info) => {
-                const a = info.row.original
-                return (
-                  <div className="flex items-center gap-1">
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      aria-label="Test alert notification"
-                      data-testid={`test-alert-${a.id}`}
-                      className="h-8 w-8 text-muted-foreground hover:text-primary"
-                      onClick={() => testNotification(a)}
-                      disabled={testingId === a.id}
-                      title="Test alert notification"
-                    >
-                      <Send className="h-4 w-4" />
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      aria-label="Edit alert"
-                      data-testid={`edit-alert-${a.id}`}
-                      className="h-8 w-8 text-muted-foreground hover:text-primary"
-                      onClick={() => onEdit(a)}
-                      title="Edit alert"
-                    >
-                      <Pencil className="h-4 w-4" />
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      aria-label="Delete alert"
-                      data-testid={`delete-alert-${a.id}`}
-                      className="h-8 w-8 text-muted-foreground hover:text-destructive"
-                      onClick={() => a.id && onDelete(a.id)}
-                      title="Delete alert"
-                    >
-                      <Trash2 className="h-4 w-4" />
-                    </Button>
-                  </div>
-                )
-              },
-            } satisfies ColumnDef<Alert>,
-          ]),
+      ...(isAnalyst ? [] : [{
+        id: 'actions',
+        header: '',
+        cell: (info) => {
+          const a = info.row.original
+          return (
+            <div className="flex items-center gap-1">
+              <Button variant="ghost" size="icon" aria-label="Test alert notification" data-testid={`test-alert-${a.id}`} className="h-8 w-8 text-muted-foreground hover:text-primary" onClick={() => testNotification(a)} disabled={testingId === a.id} title="Test alert notification">
+                <Send className="h-4 w-4" />
+              </Button>
+              <Button variant="ghost" size="icon" aria-label="Edit alert" data-testid={`edit-alert-${a.id}`} className="h-8 w-8 text-muted-foreground hover:text-primary" onClick={() => onEdit(a)} title="Edit alert">
+                <Pencil className="h-4 w-4" />
+              </Button>
+              <Button variant="ghost" size="icon" aria-label="Delete alert" data-testid={`delete-alert-${a.id}`} className="h-8 w-8 text-muted-foreground hover:text-destructive" onClick={() => a.id && onDelete(a.id)} title="Delete alert">
+                <Trash2 className="h-4 w-4" />
+              </Button>
+            </div>
+          )
+        },
+      } satisfies ColumnDef<Alert>]),
     ],
     [togglingId, testingId, relative, full, abbr, toggleEnabled, testNotification, onEdit, onDelete, isAnalyst, activeServiceId],
   )
@@ -1117,27 +905,15 @@ function AlertsList({
 }
 
 export default function AlertsClient() {
+  ensureNuqsAdapter()
   const activeServiceId = useEffectiveServiceId() ?? null
   const bootstrapResolved = useBootstrapResolved()
-  const searchParams = useSearchParams()
   const isAnalyst = useIsAnalyst()
   const queryClient = useQueryClient()
   const [isFormOpen, setIsFormOpen] = React.useState(false)
   const [editingAlert, setEditingAlert] = React.useState<Alert | null>(null)
   const [deleteTarget, setDeleteTarget] = React.useState<string | null>(null)
-
-  const initialParsed = alertStatusFilterSchema.safeParse((searchParams?.get('status') || 'all').toLowerCase())
-  const [statusFilter, setStatusFilter] = React.useState<AlertStatusFilter>(
-    initialParsed.success ? initialParsed.data : 'all',
-  )
-
-  const statusParam = (searchParams?.get('status') || '').toLowerCase()
-  const [seenStatusParam, setSeenStatusParam] = React.useState(statusParam)
-  if (statusParam !== seenStatusParam) {
-    setSeenStatusParam(statusParam)
-    const parsed = alertStatusFilterSchema.safeParse(statusParam)
-    if (parsed.success) setStatusFilter(parsed.data)
-  }
+  const [statusFilter, setStatusFilter] = useQueryState('status', alertStatusParser)
 
   const { pendingDeleteIds, scheduleDelete } = useDeferredDeleteWithUndo()
   const [columnVisibility, setColumnVisibility] = React.useState<VisibilityState>({})
@@ -1150,11 +926,7 @@ export default function AlertsClient() {
     const ric = window.requestIdleCallback
     if (typeof ric === 'function') {
       const id = ric(cb)
-      return () => {
-        try {
-          window.cancelIdleCallback?.(id)
-        } catch {}
-      }
+      return () => { try { window.cancelIdleCallback?.(id) } catch {} }
     }
     const id = window.setTimeout(cb, 200)
     return () => window.clearTimeout(id)
@@ -1162,15 +934,10 @@ export default function AlertsClient() {
 
   const { data: loggingSettings } = useQuery({
     queryKey: ['loggingSettings', activeServiceId],
-    queryFn: async ({ signal }) => {
-      if (!activeServiceId) return null
-      return unwrapClient(
-        client.GET('/api/services/{service_id}/logging-settings', {
-          signal,
-          params: { path: { service_id: activeServiceId } },
-        }),
-      )
-    },
+    queryFn: async ({ signal }) =>
+      activeServiceId
+        ? unwrapClient(client.GET('/api/services/{service_id}/logging-settings', { signal, params: { path: { service_id: activeServiceId } } }))
+        : null,
     enabled: !!activeServiceId && !isAnalyst && logSettingsIdle,
     staleTime: 5 * 60_000,
   })
@@ -1196,15 +963,10 @@ export default function AlertsClient() {
   }, [queryClient, activeServiceId])
 
   const allAlerts = alertsRes?.data || []
-  const alerts = React.useMemo(
-    () => allAlerts.filter((a) => !pendingDeleteIds.has(a.id!)),
-    [allAlerts, pendingDeleteIds],
-  )
+  const alerts = React.useMemo(() => allAlerts.filter((a) => !pendingDeleteIds.has(a.id!)), [allAlerts, pendingDeleteIds])
 
   const summaryCounts = React.useMemo(() => {
-    let alerting = 0
-    let ok = 0
-    let muted = 0
+    let alerting = 0, ok = 0, muted = 0
     for (const a of alerts) {
       if (a.enabled === false) muted += 1
       else if (a.last_triggered_at) alerting += 1
@@ -1238,14 +1000,11 @@ export default function AlertsClient() {
     })
   }, [deleteTarget, allAlerts, queryClient, scheduleDelete])
 
-  const handleEdit = React.useCallback(
-    (alert: Alert) => {
-      if (isAnalyst) return
-      setEditingAlert(alert)
-      setIsFormOpen(true)
-    },
-    [isAnalyst],
-  )
+  const handleEdit = React.useCallback((alert: Alert) => {
+    if (isAnalyst) return
+    setEditingAlert(alert)
+    setIsFormOpen(true)
+  }, [isAnalyst])
 
   const handleCreate = React.useCallback(() => {
     if (isAnalyst) return
@@ -1254,17 +1013,14 @@ export default function AlertsClient() {
   }, [isAnalyst])
 
   const evaluateMutation = useMutation({
-    mutationFn: async (serviceId: string) =>
-      unwrapClient(client.POST('/api/alerts/evaluate', { body: { service_id: serviceId } })),
+    mutationFn: async (serviceId: string) => unwrapClient(client.POST('/api/alerts/evaluate', { body: { service_id: serviceId } })),
     onSuccess: async (data) => {
       const evaluated = data?.data?.evaluated ?? 0
       const triggered = data?.data?.triggered ?? 0
       showToast(`Evaluated ${evaluated} rule(s); ${triggered} triggered.`, 'success')
       await queryClient.invalidateQueries({ queryKey: ['alerts'] })
     },
-    onError: (error) => {
-      showToast(extractApiError(error) || 'Failed to evaluate alerts', 'error')
-    },
+    onError: (error) => showToast(extractApiError(error) || 'Failed to evaluate alerts', 'error'),
   })
   const isEvaluating = evaluateMutation.isPending
 
@@ -1289,24 +1045,12 @@ export default function AlertsClient() {
             <span className="truncate">{`Last Checked: ${lastCheckedLabel}`}</span>
           </Badge>
           {!isAnalyst && (
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={handleEvaluateNow}
-              disabled={!activeServiceId || isEvaluating || isFetching || isLoading}
-              data-testid="alerts-evaluate-btn"
-            >
+            <Button variant="outline" size="sm" onClick={handleEvaluateNow} disabled={!activeServiceId || isEvaluating || isFetching || isLoading} data-testid="alerts-evaluate-btn">
               {isEvaluating ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Play className="w-4 h-4 mr-2" />}
               Evaluate Rules
             </Button>
           )}
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => refetch()}
-            disabled={isFetching || isLoading}
-            data-testid="alerts-refresh-btn"
-          >
+          <Button variant="outline" size="sm" onClick={() => refetch()} disabled={isFetching || isLoading} data-testid="alerts-refresh-btn">
             <Loader2 className={`w-4 h-4 mr-2 ${isFetching ? 'animate-spin' : ''}`} />
             Refresh Now
           </Button>
@@ -1363,9 +1107,7 @@ export default function AlertsClient() {
               <CardContent className="px-4 py-0 flex items-center justify-between">
                 <div>
                   <p className="text-xs text-muted-foreground font-medium">{label}</p>
-                  <p className={`text-2xl font-bold tabular-nums ${valColor}`} data-testid={testId}>
-                    {value}
-                  </p>
+                  <p className={`text-2xl font-bold tabular-nums ${valColor}`} data-testid={testId}>{value}</p>
                 </div>
                 <Icon className={`h-5 w-5 ${color}`} />
               </CardContent>
@@ -1380,18 +1122,13 @@ export default function AlertsClient() {
                 {editingAlert ? <Bell className="h-5 w-5 text-primary" /> : <BellPlus className="h-5 w-5 text-primary" />}
                 {editingAlert ? `Edit Alert: ${editingAlert.name}` : 'Create New Alert'}
               </DialogTitle>
-              <DialogDescription>
-                Threshold alerts evaluate logs in real-time every {logPeriodSeconds} seconds.
-              </DialogDescription>
+              <DialogDescription>Threshold alerts evaluate logs in real-time every {logPeriodSeconds} seconds.</DialogDescription>
             </DialogHeader>
             <CreateAlertForm initialAlert={editingAlert} onSuccess={() => setIsFormOpen(false)} />
           </DialogContent>
         </Dialog>
 
-        <div
-          data-testid="alerts-list-card"
-          className="min-h-[350px] [contain-intrinsic-size:350px] [content-visibility:auto]"
-        >
+        <div data-testid="alerts-list-card" className="min-h-[350px] [contain-intrinsic-size:350px] [content-visibility:auto]">
           <AnalyticsCard
             title="Configured Alerts"
             icon={<Bell className="h-4 w-4" />}
@@ -1410,17 +1147,15 @@ export default function AlertsClient() {
                   data-testid="alerts-status-filter"
                   className="inline-flex items-center rounded-md border bg-muted/40 p-0.5 text-xs"
                 >
-                  {(['all', 'alerting', 'ok', 'muted'] as AlertStatusFilter[]).map((st) => (
+                  {ALERT_STATUS_FILTERS.map((st) => (
                     <button
                       key={st}
                       type="button"
                       data-testid={`alerts-filter-${st}`}
                       aria-pressed={statusFilter === st}
-                      onClick={() => setStatusFilter(st)}
+                      onClick={() => void setStatusFilter(st)}
                       className={`px-2.5 py-1 rounded-sm font-medium capitalize transition-colors ${
-                        statusFilter === st
-                          ? 'bg-background text-foreground shadow-xs'
-                          : 'text-muted-foreground hover:text-foreground'
+                        statusFilter === st ? 'bg-background text-foreground shadow-xs' : 'text-muted-foreground hover:text-foreground'
                       }`}
                     >
                       {st === 'ok' ? 'OK' : st}
@@ -1439,10 +1174,7 @@ export default function AlertsClient() {
               {isLoading ? (
                 <div className="min-h-[280px]" />
               ) : filteredAlerts.length === 0 ? (
-                <div
-                  data-testid="alerts-empty-state"
-                  className="flex flex-col items-center justify-center min-h-[280px] py-12 px-4 text-center gap-3"
-                >
+                <div data-testid="alerts-empty-state" className="flex flex-col items-center justify-center min-h-[280px] py-12 px-4 text-center gap-3">
                   <Bell className="h-8 w-8 text-muted-foreground/60" aria-hidden="true" />
                   <div className="space-y-1 max-w-md">
                     <h3 className="text-sm font-semibold">
@@ -1460,12 +1192,7 @@ export default function AlertsClient() {
                       Add Alert
                     </Button>
                   ) : alerts.length > 0 && statusFilter !== 'all' ? (
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={() => setStatusFilter('all')}
-                      data-testid="alerts-clear-filter-btn"
-                    >
+                    <Button size="sm" variant="outline" onClick={() => void setStatusFilter('all')} data-testid="alerts-clear-filter-btn">
                       Show All Rules
                     </Button>
                   ) : null}
@@ -1486,9 +1213,7 @@ export default function AlertsClient() {
 
         <ConfirmDialog
           open={deleteTarget !== null}
-          onOpenChange={(open) => {
-            if (!open) setDeleteTarget(null)
-          }}
+          onOpenChange={(open) => { if (!open) setDeleteTarget(null) }}
           onConfirm={confirmDelete}
           isDangerous
           title="Delete Alert"
@@ -1499,9 +1224,7 @@ export default function AlertsClient() {
         {!activeServiceId && bootstrapResolved && (
           <div className="p-4 rounded-lg bg-yellow-500/10 border border-yellow-500/20 text-yellow-600 dark:text-yellow-400 flex items-center gap-3 mt-6">
             <AlertTriangle className="h-5 w-5" />
-            <p className="text-sm">
-              Showing alerts for <strong>all services</strong>. Select a service to filter.
-            </p>
+            <p className="text-sm">Showing alerts for <strong>all services</strong>. Select a service to filter.</p>
           </div>
         )}
       </div>

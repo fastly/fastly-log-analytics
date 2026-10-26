@@ -6008,12 +6008,7 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
-        /**
-         * ActiveQueryRow
-         * @description One in-flight query (``_row_for_active``). ``sql`` is only populated
-         *     when the caller asked for ``full_sql``; ``started_at_utc`` is epoch
-         *     seconds (``time.time()``).
-         */
+        /** ActiveQueryRow */
         ActiveQueryRow: {
             /** Query Id */
             query_id?: number | null;
@@ -6592,10 +6587,7 @@ export interface components {
             /** Compression Rate */
             compression_rate: number;
         };
-        /**
-         * AssetsAggregatesResponse
-         * @description Composite of assets & shield performance cards.
-         */
+        /** AssetsAggregatesResponse */
         AssetsAggregatesResponse: {
             /** Debug Queries */
             _debug_queries?: components["schemas"]["DebugQuery"][];
@@ -6645,10 +6637,7 @@ export interface components {
             /** Missing Fields */
             missing_fields?: string[];
         };
-        /**
-         * AssetsRequest
-         * @description Assets analytics request schema supporting relative-range resolving.
-         */
+        /** AssetsRequest */
         AssetsRequest: {
             /** Start Time */
             start_time?: string | null;
@@ -6809,10 +6798,7 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
-        /**
-         * BackfillWindowResponse
-         * @description ``POST /admin/backfill-window``: ``iceberg.sync_data`` counters, or ``error`` + ``files_downloaded=0``.
-         */
+        /** BackfillWindowResponse */
         BackfillWindowResponse: {
             /** Error */
             error?: string | null;
@@ -7095,10 +7081,7 @@ export interface components {
             /** Entry Count */
             entry_count?: number | null;
         };
-        /**
-         * BotSourceRefreshResponse
-         * @description ``POST /admin/bot-sources/{source_id}/refresh``.
-         */
+        /** BotSourceRefreshResponse */
         BotSourceRefreshResponse: {
             /** Ok */
             ok: boolean;
@@ -7109,10 +7092,7 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
-        /**
-         * BotSourcesRefreshResponse
-         * @description ``POST /admin/bot-sources/refresh`` and ``/admin/bots/refresh``.
-         */
+        /** BotSourcesRefreshResponse */
         BotSourcesRefreshResponse: {
             /** Ok */
             ok: boolean;
@@ -7522,10 +7502,7 @@ export interface components {
              */
             cache_state_time_series: components["schemas"]["ValueTimeSeriesPoint"][];
         };
-        /**
-         * CancelResponse
-         * @description Outcome of ``POST /api/admin/queries/{qid}/cancel``.
-         */
+        /** CancelResponse */
         CancelResponse: {
             /**
              * State
@@ -8360,11 +8337,7 @@ export interface components {
              */
             avg_files_per_partition: number;
         };
-        /**
-         * CompletedQueryRow
-         * @description One finished query (``_row_for_completed``); also the exact layout
-         *     the persisted ``/slow-queries`` rows are re-shaped into.
-         */
+        /** CompletedQueryRow */
         CompletedQueryRow: {
             /** Query Id */
             query_id?: number | null;
@@ -9234,10 +9207,7 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
-        /**
-         * DuckdbRecycleResponse
-         * @description ``POST /admin/duckdb/recycle``: ``skipped`` carries reason/rss_mb/threshold_mb, ``recycled`` the rest.
-         */
+        /** DuckdbRecycleResponse */
         DuckdbRecycleResponse: {
             /** Ok */
             ok: boolean;
@@ -9639,10 +9609,7 @@ export interface components {
             /** Otel Exporter */
             otel_exporter: string;
         };
-        /**
-         * HealthResponse
-         * @description ``GET /api/health``: liveness payload; ``services`` only for ``?deep=1`` local callers.
-         */
+        /** HealthResponse */
         HealthResponse: {
             /** Status */
             status: string;
@@ -10409,10 +10376,7 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
-        /**
-         * IcebergCalendarResponse
-         * @description ``GET /admin/iceberg-calendar``: ISO date -> per-day entry (open-keyed), plus debug envelope keys.
-         */
+        /** IcebergCalendarResponse */
         IcebergCalendarResponse: {
             [key: string]: components["schemas"]["IcebergCalendarDay"] | unknown[];
         };
@@ -12104,10 +12068,7 @@ export interface components {
             /** Unavailable */
             unavailable?: components["schemas"]["InsightAvailability"][] | null;
         };
-        /**
-         * InsightsRequest
-         * @description Request payload for /api/insights.
-         */
+        /** InsightsRequest */
         InsightsRequest: {
             /** Start Time */
             start_time?: string | null;
@@ -13317,10 +13278,7 @@ export interface components {
             worst_asn?: components["schemas"]["NetworkWorstEntry"] | null;
             worst_country?: components["schemas"]["NetworkWorstEntry"] | null;
         };
-        /**
-         * NetworkHeatmapCell
-         * @description One (ASN, time bucket) health cell.
-         */
+        /** NetworkHeatmapCell */
         NetworkHeatmapCell: {
             /** Bucket Idx */
             bucket_idx: number;
@@ -13410,10 +13368,7 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
-        /**
-         * NetworkMapCity
-         * @description One city cell inside a map bucket; ``city_idx`` indexes ``NetworkHealthResponse.cities``.
-         */
+        /** NetworkMapCity */
         NetworkMapCity: {
             /** Country */
             country?: string | null;
@@ -13727,10 +13682,7 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
-        /**
-         * NgwafSyncResponse
-         * @description ``POST /admin/ngwaf/sync/{service_id}``.
-         */
+        /** NgwafSyncResponse */
         NgwafSyncResponse: {
             /** Ok */
             ok: boolean;
@@ -13951,10 +13903,7 @@ export interface components {
             /** Sections */
             sections?: ("summary" | "timeseries" | "slow_urls" | "status_codes" | "path_breakdown" | "pop_latency" | "ip_health")[] | null;
         };
-        /**
-         * OriginAggregatesResponse
-         * @description Composite of every origin card on the /origin page.
-         */
+        /** OriginAggregatesResponse */
         OriginAggregatesResponse: {
             /** Debug Queries */
             _debug_queries?: components["schemas"]["DebugQuery"][];
@@ -14665,10 +14614,7 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
-        /**
-         * OriginStatusCodeRow
-         * @description ``status == -1`` buckets any origin status outside 100-599.
-         */
+        /** OriginStatusCodeRow */
         OriginStatusCodeRow: {
             /** Status */
             status: number;
@@ -14827,10 +14773,7 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
-        /**
-         * OriginTimeseriesPoint
-         * @description ``edge`` is only present when the series is split by leg.
-         */
+        /** OriginTimeseriesPoint */
         OriginTimeseriesPoint: {
             /** Time */
             time: string;
@@ -15020,10 +14963,7 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
-        /**
-         * PageTelemetryResponse
-         * @description ``GET /debug/page-telemetry``.
-         */
+        /** PageTelemetryResponse */
         PageTelemetryResponse: {
             /** Queries */
             queries: components["schemas"]["PageTelemetryQuery"][];
@@ -15187,11 +15127,7 @@ export interface components {
              */
             _approx: boolean;
         };
-        /**
-         * PerformanceAsnRow
-         * @description ``asn`` is an int, or the raw dimension string when the value is not numeric; ``label``
-         *     is the resolved ASN name on every path.
-         */
+        /** PerformanceAsnRow */
         PerformanceAsnRow: {
             /** Asn */
             asn: number | string;
@@ -15291,10 +15227,7 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
-        /**
-         * PerformanceWaterfall
-         * @description Empty (``{}``) when scatter/waterfall were not requested or could not be computed.
-         */
+        /** PerformanceWaterfall */
         PerformanceWaterfall: {
             avg?: components["schemas"]["PerformanceWaterfallAvg"] | null;
         } & {
@@ -16198,10 +16131,7 @@ export interface components {
                 [key: string]: number;
             };
         };
-        /**
-         * QueryAttribution
-         * @description ``attribution`` block from ``_attribution_payload``.
-         */
+        /** QueryAttribution */
         QueryAttribution: {
             /** Kind */
             kind?: string | null;
@@ -16226,10 +16156,7 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
-        /**
-         * QueryMonitorConfigResponse
-         * @description Nav-gating flag for the Live Query Monitor tab.
-         */
+        /** QueryMonitorConfigResponse */
         QueryMonitorConfigResponse: {
             /** Enabled */
             enabled: boolean;
@@ -16373,10 +16300,7 @@ export interface components {
              */
             columns: string[];
         };
-        /**
-         * RdnsEnrichResponse
-         * @description ``POST /admin/rdns/enrich``.
-         */
+        /** RdnsEnrichResponse */
         RdnsEnrichResponse: {
             /** Ok */
             ok: boolean;
@@ -16927,10 +16851,7 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
-        /**
-         * RumAnalyticsResponse
-         * @description ``GET /{service_id}/rum/analytics`` (data, no-data and failure branches).
-         */
+        /** RumAnalyticsResponse */
         RumAnalyticsResponse: {
             /** Is Mock */
             is_mock?: boolean | null;
@@ -17015,10 +16936,7 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
-        /**
-         * RumCwvVital
-         * @description One Core Web Vital. ``distribution`` is ``None`` only on the no-data branch.
-         */
+        /** RumCwvVital */
         RumCwvVital: {
             /** P75 */
             p75: number | null;
@@ -17198,10 +17116,7 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
-        /**
-         * RumStatusResponse
-         * @description ``GET /{service_id}/rum/status``. Analyst sessions only get the first two keys.
-         */
+        /** RumStatusResponse */
         RumStatusResponse: {
             /** Enabled */
             enabled?: boolean | null;
@@ -17226,11 +17141,7 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
-        /**
-         * RumTrends
-         * @description Parallel per-bucket series. ``pageviews`` / ``interactions`` / ``errors``
-         *     are absent on the no-data branch.
-         */
+        /** RumTrends */
         RumTrends: {
             /** Timestamps */
             timestamps: string[];
@@ -19171,10 +19082,7 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
-        /**
-         * SharePurgeResponse
-         * @description ``POST /admin/share/purge``: counts from ``share_db.purge_all_share_records``.
-         */
+        /** SharePurgeResponse */
         SharePurgeResponse: {
             /** Ok */
             ok: boolean;
@@ -19478,10 +19386,7 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
-        /**
-         * ShieldingAnalysis
-         * @description Typed sub-payload for ``NetworkHealthResponse.shielding_analysis``.
-         */
+        /** ShieldingAnalysis */
         ShieldingAnalysis: {
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /**
@@ -19507,10 +19412,7 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
-        /**
-         * ShieldingRow
-         * @description One edge→shield POP pair in the transit map / analysis table.
-         */
+        /** ShieldingRow */
         ShieldingRow: {
             /** Edge Pop */
             edge_pop?: string | null;
@@ -19554,20 +19456,14 @@ export interface components {
             /** Shield Lon */
             shield_lon?: number | null;
         };
-        /**
-         * SlowQueriesClearResponse
-         * @description Outcome of ``DELETE /api/admin/slow-queries``.
-         */
+        /** SlowQueriesClearResponse */
         SlowQueriesClearResponse: {
             /** Deleted */
             deleted: number;
             /** Service Id */
             service_id: string;
         };
-        /**
-         * SlowQueriesCountResponse
-         * @description Aggregate row-count for the operations-overview card.
-         */
+        /** SlowQueriesCountResponse */
         SlowQueriesCountResponse: {
             /** Count */
             count: number;
@@ -19576,10 +19472,7 @@ export interface components {
             /** Threshold Ms */
             threshold_ms: number;
         };
-        /**
-         * SlowQueriesResponse
-         * @description Persisted slow-SQL history (``GET /api/admin/slow-queries``).
-         */
+        /** SlowQueriesResponse */
         SlowQueriesResponse: {
             /** Rows */
             rows: components["schemas"]["CompletedQueryRow"][];
@@ -19588,13 +19481,7 @@ export interface components {
             /** Threshold Ms */
             threshold_ms: number;
         };
-        /**
-         * SnapshotResponse
-         * @description Incremental snapshot of the in-process query registry.
-         *
-         *     ``last_seq`` is the high-water mark the client should send back as
-         *     ``since_seq`` on its next poll so the registry can stream only new rows.
-         */
+        /** SnapshotResponse */
         SnapshotResponse: {
             /** Last Seq */
             last_seq: number;
@@ -19680,10 +19567,7 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
-        /**
-         * SummaryResponse
-         * @description Cheap counts that power the live-monitor tab badge.
-         */
+        /** SummaryResponse */
         SummaryResponse: {
             /** Active Total */
             active_total: number;
@@ -20665,10 +20549,7 @@ export interface components {
             /** Category */
             category?: string | null;
         };
-        /**
-         * VclHealthResponse
-         * @description ``GET /admin/vcl-health``: ``error`` replaces the snippet fields when the check cannot run.
-         */
+        /** VclHealthResponse */
         VclHealthResponse: {
             /** Service Id */
             service_id: string;
