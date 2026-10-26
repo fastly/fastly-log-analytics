@@ -4,6 +4,10 @@
 # operator-provided Services and Secrets.
 enabled: false
 
+global:
+  privateObservability:
+    enabled: false
+
 image:
   repository: fastly-log-analytics-high-scale
   tag: latest

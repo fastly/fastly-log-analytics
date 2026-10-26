@@ -156,7 +156,7 @@ is used when it is off.
 - name: OTEL_EXPORTER
 {{- if .Values.otel.exporter }}
   value: {{ .Values.otel.exporter | quote }}
-{{- else if .Values.observability.enabled }}
+{{- else if or .Values.observability.enabled .Values.global.privateObservability.enabled }}
   value: "otlp"
 {{- else }}
   value: "prometheus"
@@ -168,7 +168,7 @@ is used when it is off.
 - name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
   value: {{ .Values.otel.tracesEndpoint | quote }}
 {{- end }}
-{{- else if .Values.observability.enabled }}
+{{- else if or .Values.observability.enabled .Values.global.privateObservability.enabled }}
 - name: OTEL_EXPORTER_OTLP_METRICS_ENDPOINT
   value: "http://prometheus:9090/api/v1/otlp/v1/metrics"
 - name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT

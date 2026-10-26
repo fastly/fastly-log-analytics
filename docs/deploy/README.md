@@ -4,9 +4,9 @@ The application runs on **any Linux VM with Docker**. Storage stays on **Fastly 
 
 ## Platform runbooks
 
-- [Optional private Docker telemetry](observability.md) — existing SDK directly
-  to Prometheus and Tempo for Standard Compose, disabled unless selected;
-  private listeners, named volumes and nonce-based delivery verification.
+- [Optional private telemetry](observability.md) — existing SDK directly
+  to Prometheus and Tempo for Standard Compose and the existing Helm receivers;
+  opt-in private listeners/storage, delivery proofs and a private Metrics UI.
 
 - [Optional admin mTLS gateway](../../deploy/chart/admin-gateway/README.md) —
   shared standard Compose/Kubernetes gateway, operator-owned certificates,

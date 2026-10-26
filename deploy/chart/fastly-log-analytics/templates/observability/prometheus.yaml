@@ -1,13 +1,20 @@
-{{- if .Values.observability.enabled }}
+{{- $private := .Values.global.privateObservability.enabled }}
+{{- if or .Values.observability.enabled $private }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: {{ include "fastly-log-analytics.fullname" . }}-prometheus-config
 data:
   prometheus.yml: |-
+{{- if $private }}
+    global:
+      scrape_interval: 15s
+    scrape_configs: []
+{{- else }}
 {{ .Files.Get "files/observability/prometheus.yml" | indent 4 }}
   clickhouse.rules.yml: |-
 {{ .Files.Get "files/observability/clickhouse.rules.yml" | indent 4 }}
+{{- end }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -18,6 +25,10 @@ metadata:
     app.kubernetes.io/instance: {{ .Release.Name }}
 spec:
   replicas: 1
+  {{- if $private }}
+  strategy:
+    type: Recreate
+  {{- end }}
   selector:
     matchLabels:
       app.kubernetes.io/name: {{ include "fastly-log-analytics.name" . }}-prometheus
@@ -25,9 +36,19 @@ spec:
   template:
     metadata:
       labels:
+        {{- if $private }}
+        fla.fastly.com/private-receiver: prometheus
+        {{- end }}
         app.kubernetes.io/name: {{ include "fastly-log-analytics.name" . }}-prometheus
         app.kubernetes.io/instance: {{ .Release.Name }}
     spec:
+      {{- if $private }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+      {{- end }}
       containers:
         - name: prometheus
           image: {{ .Values.observability.prometheus.image | quote }}
@@ -38,7 +59,24 @@ spec:
             # Tempo's span-derived RED metrics -- same flags as the
             # docker-compose observability sidecar.
             - --web.enable-otlp-receiver
+            {{- if $private }}
+            - --storage.tsdb.retention.time=24h
+            - --storage.tsdb.retention.size=512MB
+            - --query.max-concurrency=2
+            - --query.timeout=10s
+            {{- else }}
             - --web.enable-remote-write-receiver
+            {{- end }}
+          {{- if $private }}
+          env:
+            - name: GOMEMLIMIT
+              value: 384MiB
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          {{- end }}
           ports:
             - name: http
               containerPort: 9090
@@ -47,6 +85,10 @@ spec:
               mountPath: /etc/prometheus
             - name: data
               mountPath: /prometheus
+            {{- if $private }}
+            - name: tmp
+              mountPath: /tmp
+            {{- end }}
           resources:
             {{- toYaml .Values.observability.resources | nindent 12 }}
       volumes:
@@ -54,7 +96,15 @@ spec:
           configMap:
             name: {{ include "fastly-log-analytics.fullname" . }}-prometheus-config
         - name: data
+          {{- if $private }}
+          persistentVolumeClaim:
+            claimName: {{ include "fastly-log-analytics.fullname" . }}-telemetry-prometheus
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+          {{- else }}
           emptyDir: {}
+          {{- end }}
 ---
 apiVersion: v1
 kind: Service

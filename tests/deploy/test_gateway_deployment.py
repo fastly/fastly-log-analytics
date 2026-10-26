@@ -415,6 +415,10 @@ def test_standard_observability_static_gate_is_mirrored_in_make_and_ci() -> None
         command = "docker compose " + " ".join("-f " + name for name in files) + " config -q"
         assert command in make
         assert command in step["run"].splitlines()
+    private_helm = (
+        "helm template ci-validate deploy/chart/fastly-log-analytics --set global.privateObservability.enabled=true"
+    )
+    assert private_helm in make and private_helm in step["run"]
 
 
 def _private_observability_runner_source() -> str:
@@ -440,6 +444,7 @@ def _private_observability_python(marker: str) -> str:
         "IGNORE_LOCAL_STD",
         "SKIP_GCE",
         "SKIP_REMOTE_STD",
+        "SKIP_REMOTE_HS",
     ],
 )
 def test_private_observability_runner_rejects_non_rollout_modes(blocked: str) -> None:
@@ -450,6 +455,7 @@ def test_private_observability_runner_rejects_non_rollout_modes(blocked: str) ->
         **os.environ,
         "LOCAL_STANDARD_OBSERVABILITY": "1",
         "GCE_STANDARD_OBSERVABILITY": "1",
+        "HIGH_SCALE_OBSERVABILITY": "1",
         "RESUME_VERIFICATION": "0",
         "RESET_RUNNING": "0",
         "WATCH_ONLY": "0",
@@ -459,6 +465,7 @@ def test_private_observability_runner_rejects_non_rollout_modes(blocked: str) ->
         "IGNORE_LOCAL_STD": "0",
         "SKIP_GCE": "0",
         "SKIP_REMOTE_STD": "0",
+        "SKIP_REMOTE_HS": "0",
         blocked: "1",
     }
     result = subprocess.run(
@@ -470,7 +477,7 @@ def test_private_observability_runner_rejects_non_rollout_modes(blocked: str) ->
     )
     assert result.returncode == 1
     # Default mode must leave the legacy resume/watch/bootstrap path alone.
-    env.update(LOCAL_STANDARD_OBSERVABILITY="0", GCE_STANDARD_OBSERVABILITY="0")
+    env.update(LOCAL_STANDARD_OBSERVABILITY="0", GCE_STANDARD_OBSERVABILITY="0", HIGH_SCALE_OBSERVABILITY="0")
     result = subprocess.run(
         ["bash", "-uc", source[start:end] + "\nvalidate_standard_observability_mode"],
         env=env,
@@ -512,10 +519,35 @@ def test_private_observability_env_preserves_mtls_and_rejects_conflicting_pipeli
     assert path.read_text() == original
 
 
-@pytest.mark.parametrize("failure", [None, "emit", "verify"])
+@pytest.mark.parametrize("failure", [None, "emit", "verify", "verify-request", "incomplete"])
 def test_private_observability_runner_requires_real_verifier_success(tmp_path, monkeypatch, failure, capsys) -> None:
     program = _private_observability_python("FLA_STANDARD_OBSERVABILITY_VERIFY")
     calls = []
+    app_receipt = {}
+    requests = []
+    import shlex
+
+    import httpx
+
+    from scripts.lib import admin_tls
+
+    monkeypatch.setattr(admin_tls, "admin_request_context", lambda request: True)
+
+    class Client:
+        def __init__(self, **kwargs):
+            assert kwargs == {"verify": True, "trust_env": False, "follow_redirects": False, "timeout": 10}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def get(self, url, headers):
+            requests.append((url, headers))
+            return httpx.Response(200)
+
+    monkeypatch.setattr(httpx, "Client", Client)
 
     def run(command, **kwargs):
         calls.append(command)
@@ -523,33 +555,483 @@ def test_private_observability_runner_requires_real_verifier_success(tmp_path, m
         text = " ".join(command)
         if failure and f"verify_observability {failure}" in text:
             raise subprocess.CalledProcessError(1, command)
+        args = shlex.split(command[-1].split(" && ", 1)[1]) if command[0] == "ssh-test" else command
+        if "os.write" in text:
+            app_receipt.update(json.loads(args[-1]))
         if "read_text()" in text:
-            body = {"metric_observed": True, "trace_observed": True}
+            body = {"metric_observed": failure != "incomplete", "trace_observed": True}
+            if "fla-http-delivery" in text:
+                body.update(scope="application_http_delivery", trace_id=app_receipt["trace_id"], path="/api/health")
             return subprocess.CompletedProcess(command, 0, stdout=json.dumps(body))
         return subprocess.CompletedProcess(command, 0, stdout='{"completed": true}')
 
     monkeypatch.setattr(subprocess, "run", run)
-    monkeypatch.setattr(sys, "argv", ["runner", str(tmp_path), "1", "1", "2", "-p", "source-root-project", "ssh-test"])
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "runner",
+            str(tmp_path),
+            "1",
+            "1",
+            "1",
+            "fixture",
+            "http://127.0.0.1",
+            "https://admin.example.test",
+            "https://cluster.example.test",
+            "2",
+            "-p",
+            "source-root-project",
+            "ssh-test",
+        ],
+    )
     if failure:
         with pytest.raises(SystemExit) as caught:
             exec(compile(program, "<private-observability-verify>", "exec"), {})
         assert caught.value.code == 1
-        assert "delivery verified" not in capsys.readouterr().out
+        assert "UNVERIFIED" in capsys.readouterr().err
     else:
         exec(compile(program, "<private-observability-verify>", "exec"), {})
-        assert len(calls) == 10
+        assert len(calls) == 37
         assert calls[0][:4] == ["docker", "compose", "-p", "source-root-project"]
-        assert calls[5][:2] == ["ssh-test", "--command"]
-        assert all("scripts.dev.verify_observability" in " ".join(calls[index]) for index in (0, 2, 5, 7))
-        assert len(list(tmp_path.glob("observability-*/*.json"))) == 4
+        assert calls[9][:2] == ["ssh-test", "--command"]
+        assert any("deployment/high-scale-worker" in command for command in calls)
+        assert any("deployment/worker" in command for command in calls)
+        assert len(list(tmp_path.glob("observability-*/*.json"))) == 16
+        assert len(requests) == 3  # One cheap existing health request per env; no edge traffic.
+        assert all(request[0].endswith("/api/health") for request in requests)
+        assert len({request[1]["traceparent"] for request in requests}) == 3
     for directory in tmp_path.iterdir():
         assert directory.stat().st_mode & 0o777 == 0o700
         for path in directory.iterdir():
             assert path.stat().st_mode & 0o777 == 0o600
-            assert "http" not in path.read_text()
+            assert "http://" not in path.read_text() and "https://" not in path.read_text()
 
 
 # ── Merged from tests/deploy/test_public_gateway_runtime.py ──
+
+
+def _minimal_observability_chart(*extra: str) -> list[dict]:
+    result = subprocess.run(
+        [
+            "helm",
+            "template",
+            "telemetry-test",
+            str(ROOT / "deploy/chart/fastly-log-analytics"),
+            "--set",
+            "global.privateObservability.enabled=true",
+            *extra,
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    return [doc for doc in yaml.safe_load_all(result.stdout) if doc]
+
+
+def test_private_helm_receivers_are_bounded_persistent_and_have_no_grafana() -> None:
+    docs = _minimal_observability_chart()
+    deployments = {doc["metadata"]["name"]: doc for doc in docs if doc["kind"] == "Deployment"}
+    receivers = [doc for name, doc in deployments.items() if name.endswith(("-prometheus", "-tempo"))]
+    assert len(receivers) == 2
+    assert not any(name.endswith(("-grafana", "-exporter")) for name in deployments)
+    assert (
+        len(
+            [doc for doc in docs if doc["kind"] == "PersistentVolumeClaim" and "-telemetry-" in doc["metadata"]["name"]]
+        )
+        == 2
+    )
+    for receiver in receivers:
+        spec = receiver["spec"]
+        assert spec["strategy"]["type"] == "Recreate"
+        pod = spec["template"]["spec"]
+        assert pod["securityContext"]["runAsNonRoot"] is True
+        container = pod["containers"][0]
+        assert container["resources"]["limits"] == {"cpu": "500m", "memory": "512Mi"}
+        assert container["securityContext"]["readOnlyRootFilesystem"] is True
+        assert container["env"] == [{"name": "GOMEMLIMIT", "value": "384MiB"}]
+        assert any("persistentVolumeClaim" in volume for volume in pod["volumes"])
+    prometheus = next(doc for doc in receivers if doc["metadata"]["name"].endswith("-prometheus"))
+    args = prometheus["spec"]["template"]["spec"]["containers"][0]["args"]
+    assert "--storage.tsdb.retention.time=24h" in args
+    assert "--storage.tsdb.retention.size=512MB" in args
+    assert "--web.enable-remote-write-receiver" not in args
+    services = [doc for doc in docs if doc["kind"] == "Service" and doc["metadata"]["name"] in {"prometheus", "tempo"}]
+    assert len(services) == 2
+    assert all(doc["spec"].get("type", "ClusterIP") == "ClusterIP" for doc in services)
+    policies = [doc for doc in docs if doc["kind"] == "NetworkPolicy"]
+    assert any(doc["spec"].get("ingress") for doc in policies)
+    assert all(doc["spec"].get("egress") == [] for doc in policies)
+
+
+def test_private_helm_wires_backend_celery_and_real_high_scale_worker_without_duplicate_env() -> None:
+    docs = _minimal_observability_chart(
+        "--set",
+        "highScale.enabled=true",
+        "--set",
+        "highScale.sharedState.existingClaim=test-app-state",
+        "--set",
+        "config.deploymentMode=high_scale",
+        "--set",
+        "config.ducklakeCatalog=postgresql://fixture/catalog",
+        "--set",
+        "secrets.existingSecret=fixture-secret",
+    )
+    deployments = [doc for doc in docs if doc["kind"] == "Deployment"]
+    selected = [doc for doc in deployments if doc["metadata"]["name"].endswith(("-backend", "-worker", "-ingest"))]
+    assert len(selected) == 3
+    for doc in selected:
+        entries = doc["spec"]["template"]["spec"]["containers"][0]["env"]
+        env = {entry["name"]: entry.get("value") for entry in entries}
+        assert len(env) == len(entries)
+        assert env["OTEL_EXPORTER"] == "otlp"
+        assert env["OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"] == "http://prometheus:9090/api/v1/otlp/v1/metrics"
+        assert env["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"] == "http://tempo:4318/v1/traces"
+    policy = next(doc for doc in docs if doc["kind"] == "NetworkPolicy" and doc["metadata"]["name"].endswith("-ingest"))
+    assert {9090, 4318} <= {port["port"] for rule in policy["spec"]["egress"] for port in rule.get("ports", [])}
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ["--set", "observability.enabled=true"],
+        ["--set", "otel.exporter=none"],
+        [
+            "--set",
+            "highScale.enabled=true",
+            "--set",
+            "highScale.sharedState.existingClaim=fixture",
+            "--set",
+            "highScale.env[0].name=OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
+            "--set",
+            "highScale.env[0].value=https://external.example.test/v1/metrics",
+        ],
+    ],
+)
+def test_private_helm_rejects_mixed_profiles_and_conflicting_sdk_configuration(extra) -> None:
+    with pytest.raises(subprocess.CalledProcessError):
+        _minimal_observability_chart(*extra)
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "http://0.0.0.0:9090",
+        "https://example.test",
+        "http://user:secret@127.0.0.1:9090",
+        "http://127.0.0.1:9090/?token=secret",
+        'http://127.0.0.1:9090/" onload="bad',
+        "http://127.0.0.1:9090#secret",
+        "http://localhost:9090",
+    ],
+)
+def test_metrics_ui_links_reject_non_private_or_credential_bearing_urls(origin) -> None:
+    from scripts.lib.observability_ui import metrics_ui_link
+
+    assert metrics_ui_link(origin, False) == ""
+    with pytest.raises(ValueError):
+        metrics_ui_link(origin, True)
+
+
+def test_metrics_ui_link_requires_real_browser_and_query_editor(monkeypatch) -> None:
+    from scripts.lib import observability_ui as ui
+
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout='{"ui_verified":true}')
+
+    monkeypatch.setattr(subprocess, "run", run)
+    ui.verify_ui("http://127.0.0.1:19090")
+    assert calls[0][:2] == ["node", "-e"]
+    browser = calls[0][2]
+    assert "chromium.launch" in browser and ".cm-editor" in browser
+    assert "name:'Execute'" in browser and "response.status() !== 200" in browser
+    link = ui.metrics_ui_link("http://127.0.0.1:19090", True)
+    assert 'href="http://127.0.0.1:19090/query"' in link and "Metrics UI" in link
+    assert "noopener noreferrer" in link and "expires" in link
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: subprocess.CompletedProcess(a, 0, stdout="{}"))
+    with pytest.raises(ValueError, match="not verified"):
+        ui.verify_ui("http://127.0.0.1:19090")
+
+
+def test_metrics_ui_local_proxy_preserves_path_but_never_forwards_operator_auth(monkeypatch) -> None:
+    import base64
+
+    from scripts.lib import observability_ui as ui
+
+    seen = []
+
+    def run(command, **kwargs):
+        seen.append((command, json.loads(kwargs["input"])))
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=json.dumps({"status": 200, "type": "text/html", "body": base64.b64encode(b"fixture").decode()}),
+        )
+
+    monkeypatch.setattr(subprocess, "run", run)
+    server = ui._proxy_server(0, ["docker", "compose", "exec", "-T", "backend"])
+    thread = threading.Thread(target=server.serve_forever)
+    thread.start()
+    try:
+        connection = HTTPConnection("127.0.0.1", server.server_port, timeout=3)
+        connection.request("GET", "/query", headers={"Authorization": "private", "Cookie": "private"})
+        response = connection.getresponse()
+        assert response.status == 200 and response.read() == b"fixture"
+        assert seen[0][1]["path"] == "/query"
+        assert seen[0][1]["headers"] == {"Content-Type": "application/json"}
+        assert server.server_address[0] == "127.0.0.1"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_private_runner_ui_links_are_opt_in_per_environment_and_fail_closed(tmp_path, monkeypatch, failure) -> None:
+    from scripts.lib import observability_ui as ui
+
+    program = _private_observability_python("FLA_OBSERVABILITY_UI")
+    starts = []
+
+    def start(directory, mode, command, port):
+        starts.append((mode, command))
+        return directory / "private-state.json", f"http://127.0.0.1:{port}"
+
+    def verify(origin, receipt_path):
+        assert receipt_path.is_file()
+        if failure:
+            raise ValueError("Fixture browser did not render Prometheus")
+
+    class Connection:
+        def __enter__(self):
+            pass
+
+        def __exit__(self, *args):
+            pass
+
+    monkeypatch.setattr(ui, "start_access", start)
+    monkeypatch.setattr(ui, "verify_ui", verify)
+    monkeypatch.setattr(ui, "unused_loopback_port", lambda: 19090)
+    monkeypatch.setattr(socket, "create_connection", lambda *a, **kw: Connection())
+    directory = tmp_path / "metrics-ui.fixture"
+    directory.mkdir()
+    receipts = tmp_path / "observability-fixture"
+    receipts.mkdir()
+    for label in ("local-standard", "remote-standard", "remote-high-scale"):
+        (receipts / f"{label}-backend-receipt.json").write_text("{}")
+    args = ["runner", str(directory), "1", "1", "1", "fixture", "2", "-p", "fixture-project", "gcloud"]
+    monkeypatch.setattr(sys, "argv", args)
+    if failure:
+        with pytest.raises(ValueError, match="did not render"):
+            exec(compile(program, "<private-metrics-ui>", "exec"), {})
+        assert not list(directory.glob("*-link.json"))
+    else:
+        exec(compile(program, "<private-metrics-ui>", "exec"), {})
+        assert len(starts) == 3
+        assert starts[0][0] == "proxy"
+        assert starts[0][1] == ["docker", "compose", "-p", "fixture-project", "exec", "-T", "backend"]
+        assert "--ssh-flag=-L127.0.0.1:19090:127.0.0.1:9090" in starts[1][1]
+        assert starts[2][1] == [
+            "kubectl",
+            "port-forward",
+            "-n",
+            "fixture",
+            "--address=127.0.0.1",
+            "service/prometheus",
+            "19090:9090",
+        ]
+        for label in ("local-standard", "remote-standard", "remote-high-scale"):
+            path = directory / f"{label}-link.json"
+            assert json.loads(path.read_text())["ui_verified"] is True
+            assert path.stat().st_mode & 0o777 == 0o600
+    # All defaults off means no access process, browser or report URL.
+    starts.clear()
+    args[2:5] = ["0", "0", "0"]
+    exec(compile(program, "<private-metrics-ui-default>", "exec"), {})
+    assert not starts
+    source = _private_observability_runner_source()
+    for label, variable in (
+        ("local-std", "local_metrics_ui"),
+        ("remote-std", "remote_std_metrics_ui"),
+        ("remote-hs", "remote_hs_metrics_ui"),
+    ):
+        assert f'<div id="{label}-creds"></div>\n              <div>${{{variable}}}</div>' in source
+    assert '"$status" != "SUCCESS" && -n "${OBSERVABILITY_UI_DIRECTORY:-}"' in source
+    assert 'observability_ui stop-directory "$OBSERVABILITY_UI_DIRECTORY"' in source
+
+
+def test_private_runner_hs_reuses_only_existing_receiver_templates_and_preserves_app_ownership(
+    tmp_path, monkeypatch
+) -> None:
+    program = _private_observability_python("FLA_HS_OBSERVABILITY")
+    real_run = subprocess.run
+    commands = []
+    applied = []
+
+    def run(command, **kwargs):
+        commands.append(command)
+        if command[0] == "helm":
+            return real_run(command, cwd=ROOT, **kwargs)
+        if command[1:3] == ["apply", "-f"]:
+            applied.extend(doc for doc in yaml.safe_load_all(kwargs["input"]) if doc)
+        body = ""
+        if command[1] == "get" and command[2].startswith("deployment/"):
+            name = command[2].split("/")[1]
+            body = json.dumps({"spec": {"template": {"spec": {"containers": [{"name": name, "env": []}]}}}})
+        return subprocess.CompletedProcess(command, 0, stdout=body)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(sys, "argv", ["runner", "fixture"])
+    exec(compile(program, "<private-hs-receivers>", "exec"), {})
+    assert applied
+    assert {doc["kind"] for doc in applied} == {
+        "Deployment",
+        "Service",
+        "ConfigMap",
+        "PersistentVolumeClaim",
+        "NetworkPolicy",
+    }
+    assert not any("grafana" in doc["metadata"]["name"] for doc in applied)
+    assert all(doc["metadata"]["namespace"] == "fixture" for doc in applied)
+    changes = [command for command in commands if command[1:3] == ["set", "env"]]
+    assert {command[3] for command in changes} == {
+        "deployment/backend",
+        "deployment/high-scale-worker",
+        "deployment/worker",
+    }
+    assert all("OTEL_EXPORTER=otlp" in command for command in changes)
+    assert not any("upgrade" in command for command in commands)
+
+    def conflicting(command, **kwargs):
+        if command[0] == "kubectl" and command[1] == "get":
+            return subprocess.CompletedProcess(command, 0, stdout='{"metadata":{"labels":{}}}')
+        return run(command, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", conflicting)
+    with pytest.raises(SystemExit, match="independently owned"):
+        exec(compile(program, "<private-hs-collision>", "exec"), {})
+
+
+def test_private_runner_clean_source_export_freezes_invoked_entrypoint() -> None:
+    source = _private_observability_runner_source()
+    snapshot = 'cp -p "$FLA_SELF" "$FLA_EXPORT_DIR/scripts/dev/deploy_test_all.sh"'
+    assert snapshot in source
+    assert source.index("git archive --format=tar HEAD") < source.index(snapshot)
+    assert source.index(snapshot) < source.index('exec bash "$FLA_EXPORT_DIR/scripts/dev/deploy_test_all.sh"')
+
+
+def test_metrics_ui_receiver_mismatch_never_runs_browser_or_publishes_link(tmp_path, monkeypatch) -> None:
+    from datetime import UTC, datetime
+    from uuid import uuid4
+
+    from scripts.dev import verify_observability as verifier
+    from scripts.lib import observability_ui as ui
+
+    receipt = tmp_path / "receipt.json"
+    ui.write_private(
+        receipt,
+        {
+            "probe_id": str(uuid4()),
+            "trace_id": uuid4().hex,
+            "span_id": uuid4().hex[:16],
+            "service_name": "fastly-log-analytics",
+            "service_instance_id": str(uuid4()),
+            "emitted_at": datetime.now(UTC).isoformat(),
+        },
+    )
+    monkeypatch.setattr(verifier, "_receiver_json", lambda *a, **kw: None)
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: pytest.fail("Wrong receiver must not reach browser"))
+    with pytest.raises(ValueError, match="does not reach"):
+        ui.verify_ui("http://127.0.0.1:19090", receipt_path=receipt)
+
+
+def test_metrics_ui_stop_guards_recycled_pids_and_expired_report_links(tmp_path, monkeypatch) -> None:
+    from scripts.lib import observability_ui as ui
+
+    state = tmp_path / "ui-fixture.json"
+    ui.write_private(state, {"token": "fixture-token"})
+    ui.write_private(state.with_suffix(".pid"), {"pid": 12345, "token": "fixture-token"})
+    kills = []
+    monkeypatch.setattr(os, "killpg", lambda *args: kills.append(args))
+    monkeypatch.setattr(
+        subprocess, "run", lambda *a, **kw: subprocess.CompletedProcess(a, 0, stdout="unrelated-process")
+    )
+    ui.stop_access(state)
+    assert not kills
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *a, **kw: subprocess.CompletedProcess(
+            a,
+            0,
+            stdout="python -m scripts.lib.observability_ui serve /private/state fixture-token",
+        ),
+    )
+    ui.stop_access(state)
+    assert kills and kills[0][0] == 12345
+    link = tmp_path / "local-standard-link.json"
+    ui.write_private(link, {"ui_verified": True, "expires_at": 0})
+    assert ui.report_link(link) == ""
+
+
+@pytest.mark.parametrize("assets_available", [True, False])
+def test_metrics_ui_browser_requires_real_asset_render_not_just_http_200(assets_available) -> None:
+    from scripts.lib import observability_ui as ui
+
+    dependency = ROOT / "frontend/node_modules/@playwright/test"
+    if not dependency.exists():
+        pytest.skip("Install frontend Playwright dependencies for the offline UI fixture")
+    installed = subprocess.run(
+        [
+            "node",
+            "-e",
+            "const {chromium}=require('./frontend/node_modules/@playwright/test'); "
+            "process.exit(require('fs').existsSync(chromium.executablePath())?0:1)",
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        timeout=10,
+    )
+    if installed.returncode:
+        pytest.skip("Install Playwright Chromium for the offline UI fixture")
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            if self.path == "/assets/editor.js":
+                if not assets_available:
+                    self.send_error(404)
+                    return
+                body = b"document.body.innerHTML='<div class=\"cm-editor\">fixture</div><button>Execute</button>';"
+                content_type = "application/javascript"
+            else:
+                body = b"<title>Prometheus</title><script defer src='/assets/editor.js'></script><body></body>"
+                content_type = "text/html"
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever)
+    thread.start()
+    try:
+        if assets_available:
+            ui.verify_ui(f"http://127.0.0.1:{server.server_port}")
+        else:
+            with pytest.raises(subprocess.CalledProcessError):
+                ui.verify_ui(f"http://127.0.0.1:{server.server_port}")
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
 
 
 class HeaderEcho(BaseHTTPRequestHandler):

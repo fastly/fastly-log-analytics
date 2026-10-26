@@ -590,6 +590,8 @@ def test_prometheus_chart_copy_matches_canonical_minus_omitted_jobs() -> None:
 CHART_EXEMPT_FILES = {
     "docker_stats_exporter.py": "docker-compose-only sidecar; needs the Docker Engine API",
     "prometheus.yml": "compared structurally by the Prometheus test above (documented transform)",
+    "standard/prometheus.yml": "Standard host/shared-loopback receiver; minimal Helm config is rendered and tested in deploy suite",
+    "standard/tempo.yml": "Standard host/shared-loopback listeners cannot be copied to namespace-private Helm pods",
 }
 
 

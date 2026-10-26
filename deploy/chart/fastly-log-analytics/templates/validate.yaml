@@ -1,6 +1,12 @@
 {{/*
 Template-time coherence gates for the deployment topology.
 */}}
+{{- if and .Values.global.privateObservability.enabled .Values.observability.enabled -}}
+{{- fail "Select either global.privateObservability.enabled or the legacy full observability.enabled stack, not both." -}}
+{{- end -}}
+{{- if and .Values.global.privateObservability.enabled .Values.otel.exporter -}}
+{{- fail "Private receivers require chart-managed OTLP settings; unset explicit otel.exporter." -}}
+{{- end -}}
 {{- $mode := .Values.config.deploymentMode | default "" -}}
 {{- if eq $mode "high_throughput" -}}
 {{- fail "config.deploymentMode=high_throughput has been removed; use \"standard\" or \"high_scale\"." -}}

@@ -397,7 +397,8 @@ deploy-validate:
 	docker compose -f docker-compose.multipod.yml -f docker-compose.observability.yml config -q
 	@if command -v helm >/dev/null 2>&1; then \
 		helm lint deploy/chart/fastly-log-analytics && \
-		helm template ci-validate deploy/chart/fastly-log-analytics >/dev/null; \
+		helm template ci-validate deploy/chart/fastly-log-analytics >/dev/null && \
+		helm template ci-validate deploy/chart/fastly-log-analytics --set global.privateObservability.enabled=true >/dev/null; \
 	else \
 		echo "helm not installed; skipping chart lint/template"; \
 	fi

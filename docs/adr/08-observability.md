@@ -7,11 +7,13 @@
 > **Architectural Amendments (v3.0):**
 > - **PostgreSQL 16 Unified Storage ([ADR-22](22-postgres-only-metadata.md)):** Layer 4 (`usage_log`) has migrated from per-service SQLite `metadata.db` to unified PostgreSQL 16 (`usage_log` and `usage_log_hourly_summary`), queryable across all deployment modes via `/api/admin/log-accounting`.
 > - **High-Scale Telemetry ([ADR-21](21-high-scale-serving-architecture.md)):** In `DEPLOYMENT_MODE=high_scale`, ClickHouse and micro-batch worker telemetry are integrated into system vitals and Prometheus/OpenTelemetry metrics.
-> - **Optional Standard Docker receivers (2026-10):** The existing OTLP/HTTP
+> - **Optional private receivers (2026-10):** The existing OTLP/HTTP
 >   exporters can send directly to private Prometheus/Tempo receivers through
->   the opt-in Standard overlays. No Collector or Grafana is required, and the
->   default remains `none`. See the [deployment guide](../deploy/observability.md)
->   for resource/retention bounds and the container-SDK delivery probe's limits.
+>   the opt-in Standard overlays or the existing Helm chart's separate minimal
+>   profile. No Collector or Grafana is required; existing defaults are unchanged.
+>   See the [deployment guide](../deploy/observability.md) for resource/retention
+>   bounds, private Prometheus UI access, and the distinct container-SDK and
+>   normal-request delivery proofs. Neither proves all-endpoint coverage or durability.
 
 ## 1. Context & Motivation
 

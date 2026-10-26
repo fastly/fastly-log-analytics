@@ -83,8 +83,29 @@ spec:
             {{- toYaml . | nindent 12 }}
           {{- end }}
           env:
-          {{- with $root.Values.env }}
-            {{- toYaml . | nindent 12 }}
+          {{- range $entry := $root.Values.env }}
+          {{- if and $root.Values.global.privateObservability.enabled (has $entry.name (list "OTEL_EXPORTER" "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT" "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")) }}
+          {{- if or $entry.valueFrom (and (eq $entry.name "OTEL_EXPORTER") (not (has $entry.value (list "none" "prometheus" "otlp")))) }}
+          {{- fail "Private receivers cannot silently override a custom high-scale telemetry setting" }}
+          {{- end }}
+          {{- if and (eq $entry.name "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT") (ne $entry.value "http://prometheus:9090/api/v1/otlp/v1/metrics") }}
+          {{- fail "Conflicting high-scale metrics endpoint" }}
+          {{- end }}
+          {{- if and (eq $entry.name "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT") (ne $entry.value "http://tempo:4318/v1/traces") }}
+          {{- fail "Conflicting high-scale traces endpoint" }}
+          {{- end }}
+          {{- end }}
+          {{- if not (and $root.Values.global.privateObservability.enabled (has $entry.name (list "OTEL_EXPORTER" "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT" "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"))) }}
+            {{- toYaml (list $entry) | nindent 12 }}
+          {{- end }}
+          {{- end }}
+          {{- if $root.Values.global.privateObservability.enabled }}
+            - name: OTEL_EXPORTER
+              value: otlp
+            - name: OTEL_EXPORTER_OTLP_METRICS_ENDPOINT
+              value: http://prometheus:9090/api/v1/otlp/v1/metrics
+            - name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+              value: http://tempo:4318/v1/traces
           {{- end }}
             - name: HIGH_SCALE_WORKER_ID
               {{- if $root.Values.workerId }}

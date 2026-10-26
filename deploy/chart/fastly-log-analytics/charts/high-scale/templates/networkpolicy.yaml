@@ -24,6 +24,18 @@ spec:
         {{- toYaml . | nindent 8 }}
   {{- end }}
   egress:
+    {{- if $.Values.global.privateObservability.enabled }}
+    {{- range $name, $port := dict "prometheus" 9090 "tempo" 4318 }}
+    - to:
+        - podSelector:
+            matchLabels:
+              fla.fastly.com/private-receiver: {{ $name }}
+              app.kubernetes.io/instance: {{ $.Release.Name }}
+      ports:
+        - protocol: TCP
+          port: {{ $port }}
+    {{- end }}
+    {{- end }}
     {{- if $.Values.networkPolicy.allowClusterDns }}
     - to:
         - namespaceSelector: {}

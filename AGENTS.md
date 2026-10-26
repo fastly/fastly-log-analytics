@@ -795,8 +795,13 @@ host-network overlay, **not** the existing multipod observability overlay.
 It adds only private Prometheus/Tempo receivers. Export settings remain
 operator-owned and default off. See [the deployment guide](docs/deploy/observability.md)
 for the canonical runner's explicit opt-in and public
-`python -m scripts.dev.verify_observability` delivery check. This probe proves
-container SDK delivery only, never running-worker coverage or full qualification.
+`python -m scripts.dev.verify_observability` delivery checks. The SDK probe proves
+container transport, not running-worker coverage. A separate chosen-traceparent
+health request proves normal HTTP telemetry from the running API instance.
+The minimal Helm profile is `global.privateObservability.enabled=true`, not
+the legacy full `observability.enabled` bundle. Verified private Prometheus
+UI links in the canonical report expire within one hour; Tempo is API-only.
+Neither proof is full qualification, all-endpoint coverage or durability.
 
 `scripts/dev/deploy_test_all.sh` is a **local-only** script: it is gitignored (it embeds environment credentials) and is not in the public repo, so a fresh clone will not have it. The rules for using it, and what each run does, live in one place: [Canonical Multi-Tier Deployment Mandate](#canonical-multi-tier-deployment-mandate-never-deploy-or-test-by-hand).
 

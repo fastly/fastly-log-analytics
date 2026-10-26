@@ -313,6 +313,16 @@ observability:
       # BYO broker URL -- same instance as secrets.celeryBrokerUrl.
       brokerUrl: "redis://valkey-master:6379/0"
 
+# Minimal private SDK receivers, independent of the legacy full observability
+# stack above. Global so the executable high-scale subchart sees the same opt-in.
+# Services remain namespace-private; no Grafana, exporters, Collector or ingress.
+global:
+  privateObservability:
+    enabled: false
+    storageClassName: ""
+    prometheusStorage: 1Gi
+    tempoStorage: 2Gi
+
 # Portable high-scale application plane. Disabled by default so standard and
 # high_scale render exactly their existing workload set. Enabling this
 # local subchart adds the executable high-scale ingest worker and its policies.
