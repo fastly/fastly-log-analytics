@@ -30,7 +30,7 @@ import {
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
 import { ConfirmDialog, LabelWithInfo } from '@/components/ui/confirm-dialog'
 import { PlotlyChart } from '@/components/PlotlyChart'
-import { showToast, CHART_COLORS, useTimeLayout, formatDate, keyByOccurrence, oneOf, ensureNuqsAdapter } from '@/lib/utils'
+import { showToast, CHART_COLORS, useTimeLayout, formatDate, keyByOccurrence, oneOf } from '@/lib/utils'
 import { DataTable, ColumnVisibilityDropdown } from '@/components/DataTable'
 import type { ColumnDef, VisibilityState } from '@tanstack/react-table'
 import type { components } from '@/types/api.generated'
@@ -905,7 +905,6 @@ function AlertsList({ alerts, columnVisibility, setColumnVisibility, onEdit, onD
 }
 
 export default function AlertsClient() {
-  ensureNuqsAdapter()
   const activeServiceId = useEffectiveServiceId() ?? null
   const bootstrapResolved = useBootstrapResolved()
   const isAnalyst = useIsAnalyst()

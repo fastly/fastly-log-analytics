@@ -9,7 +9,7 @@ import { useTimezone, useColumnVisibility } from '@/hooks/useSSE'
 import { useActiveLogFields, useFieldLabel } from '@/hooks/useBootstrap'
 import {
   useTimeLayout, CHART_COLORS, useTimeseriesToTraces, formatDate,
-  formatBytes, formatCount, formatCountMaybe, downloadBlob, ensureNuqsAdapter,
+  formatBytes, formatCount, formatCountMaybe, downloadBlob,
 } from '@/lib/utils'
 import { useAnalyticsReportQuery, useReportRangeAnchor, useServiceQuery } from '@/hooks/useDashboardCards'
 import { ReportLayout } from '@/components/ReportLayout'
@@ -1472,7 +1472,6 @@ function SecurityBody({
   startTime, endTime, activeServiceId, filterPayload, bucketSeconds,
   intervalButtons, timezone, getFieldLabel, relativeRange, isAutoRange, anchor,
 }: SecurityBodyProps) {
-  ensureNuqsAdapter()
   const commonTimeLayout = useTimeLayout(startTime, endTime, timezone)
   const [activeTab, setActiveTab] = useQueryState('tab', securityTabParser)
   const [fingerprintVisibility, setFingerprintVisibility, onFingerprintVisChange] = useColumnVisibility()

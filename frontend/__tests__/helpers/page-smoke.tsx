@@ -9,8 +9,49 @@ import { afterEach, beforeEach, vi, type MockInstance } from 'vitest'
 import React, { type ComponentProps } from 'react'
 import { render, type RenderOptions, type RenderResult } from '@testing-library/react'
 import { QueryClient, QueryClientProvider, type QueryClientConfig } from '@tanstack/react-query'
+import 'nuqs'
 import { NuqsTestingAdapter } from 'nuqs/adapters/testing'
 import type { client } from '@/lib/api'
+
+let navMod: typeof import('next/navigation') | null = null
+
+export function ensureNuqsAdapter(): void {
+  if (typeof window === 'undefined') return
+  const ctx = (window as unknown as { __NuqsAdapterContext?: { _currentValue?: unknown; _currentValue2?: unknown } }).__NuqsAdapterContext
+  if (!ctx) return
+  const fallback = {
+    useAdapter() {
+      const firstRef = React.useRef(true)
+      if (firstRef.current) {
+        firstRef.current = false
+        ;(globalThis as Record<symbol, { abort?: () => void }>)[Symbol.for('nuqs.2.10.2.throttle-queue')]?.abort?.()
+      }
+      const router = navMod?.useRouter()
+      const pathname = navMod?.usePathname() || '/'
+      const sp = navMod?.useSearchParams() ?? new URLSearchParams()
+      return {
+        searchParams: sp,
+        getSearchParamsSnapshot: () => new URLSearchParams(sp.toString()),
+        pathname,
+        rateLimitFactor: 0,
+        autoResetQueueOnUpdate: true,
+        updateUrl: (search: URLSearchParams, options: { history?: 'push' | 'replace'; scroll?: boolean; shallow?: boolean }) => {
+          const qs = search.toString()
+          const url = qs ? `${pathname}?${qs}` : pathname
+          if (!options.shallow) (options.history === 'push' ? router?.push : router?.replace)?.(url, { scroll: options.scroll ?? false })
+        },
+      }
+    },
+  }
+  ctx._currentValue = fallback
+  ctx._currentValue2 = fallback
+}
+
+ensureNuqsAdapter()
+beforeEach(async () => {
+  navMod = await import('next/navigation')
+  ensureNuqsAdapter()
+})
 import type { PlotlyChart } from '@/components/PlotlyChart'
 import type { MapOptions } from 'maplibre-gl'
 import type { ProvisionConfig } from '@/components/ProvisionWizard/ProvisionWizard'

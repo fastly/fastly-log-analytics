@@ -29,7 +29,7 @@ import { useServiceStore } from '@/stores/filterStore'
 import { useIsAnalyst, useMounted } from '@/hooks/useBootstrap'
 import {
   ELAPSED_RELATIVE_AGO_JUST_NOW, formatBytesTiered, formatCount, formatDate, formatElapsed,
-  formatLocalDateTime, buildServiceHref, cn, downloadBlob, CHART_COLORS, ensureNuqsAdapter,
+  formatLocalDateTime, buildServiceHref, cn, downloadBlob, CHART_COLORS,
 } from '@/lib/utils'
 import dynamic from 'next/dynamic'
 
@@ -806,7 +806,6 @@ function MobileOverview({ connected, lastTickTime, timezone, tick, rtDown }: {
 }
 
 export default function ControlRoomClient() {
-  ensureNuqsAdapter()
   const [activeTab, setActiveTab] = useQueryState('tab', parseAsStringLiteral(TAB_IDS).withDefault('overview'))
   const isAnalyst = useIsAnalyst()
   const timezone = useTimezone()

@@ -1,47 +1,12 @@
-import { useMemo, useRef } from 'react'
+import { useMemo } from 'react'
 import { clsx, type ClassValue } from "clsx"
 import { twMerge } from "tailwind-merge"
-import { usePathname, useRouter, useSearchParams } from 'next/navigation'
-import 'nuqs'
 import { differenceInSeconds, formatDistanceToNow, parseISO, subHours } from 'date-fns'
 import { formatInTimeZone, toDate } from 'date-fns-tz'
 import { ShieldAlert, ServerCrash, Zap, Network, Globe, LayoutGrid, type LucideIcon } from 'lucide-react'
 import { useFilterStore } from '@/stores/filterStore'
 import type { components } from '@/types/api.generated'
 import type { FiltersPayload, PlotlyTrace } from '@/types/api'
-
-export function ensureNuqsAdapter(): void {
-  if (typeof window === 'undefined') return
-  const ctx = (window as unknown as { __NuqsAdapterContext?: { _currentValue?: unknown; _currentValue2?: unknown } }).__NuqsAdapterContext
-  if (!ctx) return
-  const fallback = {
-    useAdapter() {
-      const firstRef = useRef(true)
-      if (firstRef.current) {
-        firstRef.current = false
-        ;(globalThis as Record<symbol, { abort?: () => void }>)[Symbol.for('nuqs.2.10.2.throttle-queue')]?.abort?.()
-      }
-      const router = useRouter()
-      const pathname = usePathname() || '/'
-      const sp = useSearchParams() ?? new URLSearchParams()
-      return {
-        searchParams: sp,
-        getSearchParamsSnapshot: () => new URLSearchParams(sp.toString()),
-        pathname,
-        rateLimitFactor: 0,
-        autoResetQueueOnUpdate: true,
-        updateUrl: (search: URLSearchParams, options: { history?: 'push' | 'replace'; scroll?: boolean; shallow?: boolean }) => {
-          const qs = search.toString()
-          const url = qs ? `${pathname}?${qs}` : pathname
-          if (!options.shallow) (options.history === 'push' ? router?.push : router?.replace)?.(url, { scroll: options.scroll ?? false })
-        },
-      }
-    },
-  }
-  ctx._currentValue = fallback
-  ctx._currentValue2 = fallback
-}
-ensureNuqsAdapter()
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
