@@ -1443,3 +1443,52 @@ def test_later_hybrid_measurements_are_explicit(report):
     report["clickhouse_rebuild_seconds"] = float("nan")
     with pytest.raises(ValidationError):
         BenchmarkReport.model_validate(report)
+
+
+def test_section_query_correlation_missing_flags_uncorrelated_current_fact_section() -> None:
+    """A current fact/projection section with no matching current query op is a gap.
+
+    Mirrors the cross-check at scripts/lib/section_measurements.py: a section whose
+    source resolves to fact/projection/projected_fact/mixed AND is the current
+    execution MUST have a correlated current ClickHouse query op whose section_id
+    matches, or the harness cannot attribute the section's work to a real query.
+    """
+    base_payload = {
+        "_response_cache": {"state": "miss"},
+        "_section_timings": [
+            {
+                "section": "cmcd.overview",
+                "section_id": "section-test",
+                "time_ms": 105,
+                "source": "projected_fact",
+                "current_execution": True,
+            }
+        ],
+    }
+
+    # gap PRESENT: no current query op correlates to section-test
+    uncorrelated = describe_response(base_payload)
+    assert "section_query_correlation_missing" in uncorrelated["gaps"]
+
+    # gap ABSENT: a valid strict current ClickHouse op whose section_id matches
+    operation = {
+        "query_id": "query-test",
+        "request_id": "request-test",
+        "service_id": "service-test",
+        "section_id": "section-test",
+        "section": "cmcd.overview",
+        "source": "projected_fact",
+        "outcome": "success",
+        "client_elapsed_ms": 100,
+        "admission_wait_ms": 20,
+        "network_ms": 50,
+        "decode_ms": 30,
+        "server_cpu_ms": None,
+        "sql": "PRIVATE",
+        "url": "PRIVATE",
+    }
+    correlated_payload = deepcopy(base_payload)
+    correlated_payload["_debug_queries"] = [{"sql": "PRIVATE", "clickhouse": operation}]
+    correlated = describe_response(correlated_payload)
+    assert "section_query_correlation_missing" not in correlated["gaps"]
+    assert "PRIVATE" not in json.dumps(correlated)
