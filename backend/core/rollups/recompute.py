@@ -265,7 +265,7 @@ def backfill_missing_hour_bundles(
     lookback_days: int = 30,
     max_missing_hours: int | None = None,
 ) -> dict[str, int | bool]:
-    """Self-heal pass: rebuild closed hours where the iceberg view has rows but no bundle exists."""
+    """Self-heal pass: rebuild closed hours where the lake view has rows but no bundle exists."""
     import duckdb as _ddb
 
     from backend.core.iceberg import update_iceberg_view

@@ -9,6 +9,7 @@ source "$SCRIPT_DIR/lib/ratchet_common.sh"
 ALLOWLIST=(
   "backend/core/fastly/client.py"
   "backend/routers/provision.py"
+  "backend/routers/services/__init__.py"
   "backend/routers/admin/health.py"
   "backend/routers/admin/high_scale.py"
   "backend/routers/admin/compaction.py"
@@ -17,6 +18,7 @@ ALLOWLIST=(
   "backend/core/iceberg/sync.py"
   "backend/core/iceberg/_core.py"
   "backend/core/metadata/state.py"
+  "backend/core/metadata/base.py"
   "backend/utils/http.py"
   "backend/utils/telemetry.py"
 )

@@ -1,7 +1,10 @@
 'use client'
 
-import React, { useState } from 'react'
+import React from 'react'
 import Link from 'next/link'
+import { useForm, useWatch, type PathValue } from 'react-hook-form'
+import { zodResolver } from '@hookform/resolvers/zod'
+import { z } from 'zod'
 import { useQueryClient } from '@tanstack/react-query'
 import { Clock, Loader2, Shield } from 'lucide-react'
 import { SSEActionDialogShell, SSEExecutionSection } from '@/components/SSEModal'
@@ -44,19 +47,10 @@ export const NGWAF_INTERVAL_OPTIONS = [
 ]
 
 function CronLogRetentionControls({
-  switchId,
-  logEnabled,
-  setLogEnabled,
-  retentionId,
-  retention,
-  setRetention,
+  switchId, logEnabled, setLogEnabled, retentionId, retention, setRetention,
 }: {
-  switchId: string
-  logEnabled: boolean
-  setLogEnabled: (v: boolean) => void
-  retentionId: string
-  retention: string
-  setRetention: (v: string) => void
+  switchId: string; logEnabled: boolean; setLogEnabled: (v: boolean) => void
+  retentionId: string; retention: string; setRetention: (v: string) => void
 }) {
   return (
     <>
@@ -76,21 +70,13 @@ function CronLogRetentionControls({
 }
 
 interface AnalystSchedulePanelProps {
-  syncEnabled: boolean
-  setSyncEnabled: (v: boolean) => void
-  syncIntervalMins: string
-  setSyncIntervalMins: (v: string) => void
-  cacheRetention: string
-  setCacheRetention: (v: string) => void
+  syncEnabled: boolean; setSyncEnabled: (v: boolean) => void
+  syncIntervalMins: string; setSyncIntervalMins: (v: string) => void
+  cacheRetention: string; setCacheRetention: (v: string) => void
 }
 
 export function AnalystSchedulePanel({
-  syncEnabled,
-  setSyncEnabled,
-  syncIntervalMins,
-  setSyncIntervalMins,
-  cacheRetention,
-  setCacheRetention,
+  syncEnabled, setSyncEnabled, syncIntervalMins, setSyncIntervalMins, cacheRetention, setCacheRetention,
 }: AnalystSchedulePanelProps) {
   return (
     <div className="p-6 space-y-6 text-sm divide-y">
@@ -162,38 +148,11 @@ interface LogSyncSectionProps {
 }
 
 export function LogSyncSection({
-  syncEnabled,
-  setSyncEnabled,
-  pollingMode,
-  setPollingMode,
-  deleteAfter,
-  setDeleteAfter,
-  dataRetention,
-  setDataRetention,
-  cacheRetention,
-  setCacheRetention,
-  rollupRetention,
-  setRollupRetention,
-  commitInterval,
-  setCommitInterval,
-  syncLogEnabled,
-  setSyncLogEnabled,
-  syncRetention,
-  setSyncRetention,
-  syncFreqLabel,
-  isAnalyst,
-  syncIntervalNum,
-  adminSyncSeconds,
-  rumRetention,
-  setRumRetention,
-  rumEnabled,
-  rumSyncEnabled,
-  setRumSyncEnabled,
-  rumLogPeriod,
-  setRumLogPeriod,
-  rumDeleteAfter,
-  setRumDeleteAfter,
-  serviceId,
+  syncEnabled, setSyncEnabled, pollingMode, setPollingMode, deleteAfter, setDeleteAfter,
+  dataRetention, setDataRetention, cacheRetention, setCacheRetention, rollupRetention, setRollupRetention,
+  commitInterval, setCommitInterval, syncLogEnabled, setSyncLogEnabled, syncRetention, setSyncRetention,
+  syncFreqLabel, isAnalyst, syncIntervalNum, adminSyncSeconds, rumRetention, setRumRetention,
+  rumEnabled, rumSyncEnabled, setRumSyncEnabled, rumLogPeriod, setRumLogPeriod, rumDeleteAfter, setRumDeleteAfter, serviceId,
 }: LogSyncSectionProps) {
   const minCommitMins = isAnalyst ? syncIntervalNum : Math.max(1, Math.ceil(adminSyncSeconds / 60))
   const rumPeriodInt = parseInt(rumLogPeriod)
@@ -503,7 +462,31 @@ interface CronSettingsModalProps {
   onOpenChange: (open: boolean) => void
 }
 
-function initialSettings(service: ServiceConfig | null) {
+const cronSettingsSchema = z.object({
+  syncIntervalMins: z.string(),
+  pollingMode: z.enum(['regular', 'adaptive']),
+  syncEnabled: z.boolean(),
+  deleteAfter: z.boolean(),
+  commitInterval: z.string(),
+  syncLogEnabled: z.boolean(),
+  syncRetention: z.string(),
+  dataRetention: z.string(),
+  rumRetention: z.string(),
+  cacheRetention: z.string(),
+  rollupRetention: z.string(),
+  compactEnabled: z.boolean(),
+  compactLogEnabled: z.boolean(),
+  compactRetention: z.string(),
+  ngwafInterval: z.string(),
+  ngwafLogEnabled: z.boolean(),
+  ngwafRetention: z.string(),
+  rumSyncEnabled: z.boolean(),
+  rumLogPeriod: z.string(),
+  rumDeleteAfter: z.boolean(),
+})
+type CronSettingsFormValues = z.infer<typeof cronSettingsSchema>
+
+function initialSettings(service: ServiceConfig | null): CronSettingsFormValues {
   const rumCfg = service?.rum as Record<string, unknown> | null | undefined
   const rumSyncVal = typeof rumCfg?.enabled === 'boolean' ? rumCfg.enabled : undefined
   const rumPeriodVal = typeof rumCfg?.log_period === 'number' ? rumCfg.log_period : undefined
@@ -543,28 +526,18 @@ export function CronSettingsModal(props: CronSettingsModalProps) {
 function CronSettingsModalBody({ service, open, onOpenChange }: CronSettingsModalProps) {
   const queryClient = useQueryClient()
   const { lines, status, error, start, stop } = useSSE()
-  const init = initialSettings(service)
-
-  const [syncEnabled, setSyncEnabled] = useState(init.syncEnabled)
-  const [deleteAfter, setDeleteAfter] = useState(init.deleteAfter)
-  const [commitInterval, setCommitInterval] = useState(init.commitInterval)
-  const [syncLogEnabled, setSyncLogEnabled] = useState(init.syncLogEnabled)
-  const [syncRetention, setSyncRetention] = useState(init.syncRetention)
-  const [dataRetention, setDataRetention] = useState(init.dataRetention)
-  const [rumRetention, setRumRetention] = useState(init.rumRetention)
-  const [cacheRetention, setCacheRetention] = useState(init.cacheRetention)
-  const [rollupRetention, setRollupRetention] = useState(init.rollupRetention)
-  const [compactEnabled, setCompactEnabled] = useState(init.compactEnabled)
-  const [compactLogEnabled, setCompactLogEnabled] = useState(init.compactLogEnabled)
-  const [compactRetention, setCompactRetention] = useState(init.compactRetention)
-  const [ngwafInterval, setNgwafInterval] = useState(init.ngwafInterval)
-  const [ngwafLogEnabled, setNgwafLogEnabled] = useState(init.ngwafLogEnabled)
-  const [ngwafRetention, setNgwafRetention] = useState(init.ngwafRetention)
-  const [syncIntervalMins, setSyncIntervalMins] = useState(init.syncIntervalMins)
-  const [pollingMode, setPollingMode] = useState<'regular' | 'adaptive'>(init.pollingMode)
-  const [rumSyncEnabled, setRumSyncEnabled] = useState(init.rumSyncEnabled)
-  const [rumLogPeriod, setRumLogPeriod] = useState(init.rumLogPeriod)
-  const [rumDeleteAfter, setRumDeleteAfter] = useState(init.rumDeleteAfter)
+  const { control, setValue } = useForm<CronSettingsFormValues>({
+    resolver: zodResolver(cronSettingsSchema),
+    defaultValues: initialSettings(service),
+  })
+  const {
+    syncEnabled, deleteAfter, commitInterval, syncLogEnabled, syncRetention, dataRetention,
+    rumRetention, cacheRetention, rollupRetention, compactEnabled, compactLogEnabled, compactRetention,
+    ngwafInterval, ngwafLogEnabled, ngwafRetention, syncIntervalMins, pollingMode,
+    rumSyncEnabled, rumLogPeriod, rumDeleteAfter,
+  } = useWatch({ control }) as CronSettingsFormValues
+  const bind = <K extends keyof CronSettingsFormValues>(key: K) => (v: CronSettingsFormValues[K]) =>
+    setValue(key, v as PathValue<CronSettingsFormValues, K>, { shouldDirty: true })
 
   const isAnalyst = service?.access_level === 'read_only'
 
@@ -670,67 +643,67 @@ function CronSettingsModalBody({ service, open, onOpenChange }: CronSettingsModa
       {isAnalyst ? (
         <AnalystSchedulePanel
           syncEnabled={syncEnabled}
-          setSyncEnabled={setSyncEnabled}
+          setSyncEnabled={bind('syncEnabled')}
           syncIntervalMins={syncIntervalMins}
-          setSyncIntervalMins={setSyncIntervalMins}
+          setSyncIntervalMins={bind('syncIntervalMins')}
           cacheRetention={cacheRetention}
-          setCacheRetention={setCacheRetention}
+          setCacheRetention={bind('cacheRetention')}
         />
       ) : (
         <div className="space-y-8 p-6 text-sm">
           <LogSyncSection
             syncEnabled={syncEnabled}
-            setSyncEnabled={setSyncEnabled}
+            setSyncEnabled={bind('syncEnabled')}
             pollingMode={pollingMode}
-            setPollingMode={setPollingMode}
+            setPollingMode={bind('pollingMode')}
             deleteAfter={deleteAfter}
-            setDeleteAfter={setDeleteAfter}
+            setDeleteAfter={bind('deleteAfter')}
             dataRetention={dataRetention}
-            setDataRetention={setDataRetention}
+            setDataRetention={bind('dataRetention')}
             cacheRetention={cacheRetention}
-            setCacheRetention={setCacheRetention}
+            setCacheRetention={bind('cacheRetention')}
             rollupRetention={rollupRetention}
-            setRollupRetention={setRollupRetention}
+            setRollupRetention={bind('rollupRetention')}
             commitInterval={commitInterval}
-            setCommitInterval={setCommitInterval}
+            setCommitInterval={bind('commitInterval')}
             syncLogEnabled={syncLogEnabled}
-            setSyncLogEnabled={setSyncLogEnabled}
+            setSyncLogEnabled={bind('syncLogEnabled')}
             syncRetention={syncRetention}
-            setSyncRetention={setSyncRetention}
+            setSyncRetention={bind('syncRetention')}
             syncFreqLabel={syncFreqLabel}
             isAnalyst={isAnalyst}
             syncIntervalNum={syncIntervalNum}
             adminSyncSeconds={adminSyncSeconds}
             rumRetention={rumRetention}
-            setRumRetention={setRumRetention}
+            setRumRetention={bind('rumRetention')}
             rumEnabled={service.rum_enabled ?? false}
             rumSyncEnabled={rumSyncEnabled}
-            setRumSyncEnabled={setRumSyncEnabled}
+            setRumSyncEnabled={bind('rumSyncEnabled')}
             rumLogPeriod={rumLogPeriod}
-            setRumLogPeriod={setRumLogPeriod}
+            setRumLogPeriod={bind('rumLogPeriod')}
             rumDeleteAfter={rumDeleteAfter}
-            setRumDeleteAfter={setRumDeleteAfter}
+            setRumDeleteAfter={bind('rumDeleteAfter')}
             serviceId={service.service_id}
           />
 
           {service.ngwaf_workspace_id && (
             <NgwafSection
               ngwafInterval={ngwafInterval}
-              setNgwafInterval={setNgwafInterval}
+              setNgwafInterval={bind('ngwafInterval')}
               ngwafLogEnabled={ngwafLogEnabled}
-              setNgwafLogEnabled={setNgwafLogEnabled}
+              setNgwafLogEnabled={bind('ngwafLogEnabled')}
               ngwafRetention={ngwafRetention}
-              setNgwafRetention={setNgwafRetention}
+              setNgwafRetention={bind('ngwafRetention')}
             />
           )}
 
           <IcebergOptimizationSection
             compactEnabled={compactEnabled}
-            setCompactEnabled={setCompactEnabled}
+            setCompactEnabled={bind('compactEnabled')}
             compactLogEnabled={compactLogEnabled}
-            setCompactLogEnabled={setCompactLogEnabled}
+            setCompactLogEnabled={bind('compactLogEnabled')}
             compactRetention={compactRetention}
-            setCompactRetention={setCompactRetention}
+            setCompactRetention={bind('compactRetention')}
           />
         </div>
       )}

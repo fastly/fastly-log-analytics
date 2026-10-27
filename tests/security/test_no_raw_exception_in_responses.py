@@ -35,8 +35,8 @@ _EXC_PARAMS = {"e", "exc", "err", "error", "exception"}
 PARSE = "validation: parse_period ValueError, authored text, admin-only provisioning"
 SHARE = "validation: share_db authored ValueError/typed errors, admin-only share management"
 ALLOWED: dict[tuple[str, str], str] = {
-    ("backend/routers/provision.py", "provision_execute"): PARSE,
-    ("backend/routers/provision.py", "provision_ingest"): PARSE,
+    ("backend/routers/services/__init__.py", "provision_execute"): PARSE,
+    ("backend/routers/services/__init__.py", "provision_ingest"): PARSE,
     (
         "backend/routers/session_scoring.py",
         "scoring_labels_create",
@@ -158,8 +158,9 @@ def test_detector_flags_the_known_bad_shapes_and_accepts_safe_ones():
 def test_analyst_reachable_routes_return_no_raw_exception_text():
     """Route-table tripwire: every non-blocked (analyst-reachable) route handler is clean, and any allow-listed
     handler that analysts can reach must be an authored-validation exception."""
-    from backend.main import app
     from backend.utils.remote_access import _is_blocked_path
+
+    from backend.main import app
 
     reachable: dict[str, set[str]] = {}
     for route in app.routes:
@@ -873,13 +874,13 @@ def test_admin_paths_blocked_for_analyst(probe_session, path):
 # ── Merged from tests/security/test_adversarial_ast_pii_redaction.py ──
 
 from backend.repositories.query import execute_query
+from backend.utils.remote_access import RemoteAccessMiddleware
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from backend.core import share_db
 from backend.routers import share_admin, share_auth
 from backend.utils import tunnel
-from backend.utils.remote_access import RemoteAccessMiddleware
 
 RAW_IP = "198.51.100.42"
 RAW_SESSION = "deadbeefcafe1234567890abcdef"
@@ -1236,3 +1237,157 @@ def test_analyst_pii_policy_filter_locking(rbac_app: FastAPI) -> None:
     )
     assert r_ok.status_code == 200
     assert r_ok.json()["ok"] is True
+
+
+# ── Merged from tests/security/test_no_infra_leak_in_tracked_tree.py ──
+
+import base64
+import subprocess
+from pathlib import Path
+
+import pytest
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+# base64 of deployment-private tokens that must not appear in the tracked tree.
+# Stored encoded so this guard file itself contains no plaintext leak. Each was
+# confirmed real by matching the operator's gitignored production service config
+# (the producer), not guessed. Scan is case-insensitive so the lowercased
+# ``logs_<id>`` table-name form is caught too.
+#   S0xKUFV0SmtDMVpsTFZjalBHVjFqNQ== -> production logging service ID
+#   ZnBSZnlrdTQyNThxdGlmaW9UY2dVbw== -> production CDN service ID
+#   ZHJld19jb3JwLnRlc3Q=             -> production NGWAF workspace ID
+# Additional encoded entries cover deployment service IDs, project/namespace
+# names, an origin address, and a deployment-specific analyst hostname found
+# during the beta3 public-release scrub.
+_NEEDLES_B64 = (
+    "S0xKUFV0SmtDMVpsTFZjalBHVjFqNQ==",
+    "ZnBSZnlrdTQyNThxdGlmaW9UY2dVbw==",
+    "ZHJld19jb3JwLnRlc3Q=",
+    "WlUxNUJ2WTJMWDdXY0VwNDNUOVZ3VQ==",
+    "cUk0RDh5WFhGWU9JcFpFTXJrSnk2NQ==",
+    "Y1ZudTltWUIzQ3Ztb2IzbHNxalFVMw==",
+    "cm1XekNSQTBsa0FPczlHbnh2b2hzNA==",
+    "TXZpQ0w5UGQ1dnhCS1lTeFhFaFFSMQ==",
+    "ZUhEdDM3UUdTRWZpaFpPdVhKT1JFZQ==",
+    "c2UtZGV2ZWxvcG1lbnQtOTU2Ng==",
+    "MzQuMTIzLjMwLjE5NQ==",
+    "c2UtZGVtbw==",
+    "ZmxhLWVsZXZhdGlvbi1hbmFseXN0Lmdsb2JhbC5zc2wuZmFzdGx5Lm5ldA==",
+    "WkVaNG1jQWpvU0ZEVGc3dHBrREtWMg==",
+    "emdKUWRNYXFWbGVUMlZEZTJFTENFTQ==",
+    "ZmFzdGx5LXNlLWRlbW8uZ2xvYmFsLnNzbC5mYXN0bHkubmV0",
+    "ZmxhLWs4cy1zY2FsaW5nLXRlc3QtZWxldmF0aW9uLmdsb2JhbC5zc2wuZmFzdGx5Lm5ldA==",
+    "ZmxhLWxvY2FsLWhpZ2gtc2NhbGUtdGVzdC5nbG9iYWwuc3NsLmZhc3RseS5uZXQ=",
+    "ZmxhLWxvY2FsLXN0YW5kYXJkLXRlc3QuZ2xvYmFsLnNzbC5mYXN0bHkubmV0",
+)
+
+# Suffixes that are binary / generated / lock files where a coincidental match
+# is noise rather than a human-authored leak.
+_SKIP_SUFFIXES = {
+    ".lock",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".ico",
+    ".woff",
+    ".woff2",
+    ".ttf",
+    ".pdf",
+    ".zip",
+    ".gz",
+    ".duckdb",
+    ".db",
+    ".wasm",
+}
+
+
+def _tracked_files() -> list[Path]:
+    out = subprocess.run(
+        ["git", "ls-files", "-z"],
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    return [_REPO_ROOT / p for p in out.split("\0") if p]
+
+
+def test_no_production_service_id_in_tracked_tree() -> None:
+    needles = [base64.b64decode(b).decode().lower() for b in _NEEDLES_B64]
+    self_path = Path(__file__).resolve()
+
+    offenders: list[str] = []
+    for path in _tracked_files():
+        if path.resolve() == self_path:
+            continue  # the guard stores only the base64 form
+        if path.suffix.lower() in _SKIP_SUFFIXES:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore").lower()
+        except (OSError, UnicodeError):
+            continue
+        for needle in needles:
+            if needle in text:
+                rel = path.relative_to(_REPO_ROOT)
+                offenders.append(f"{rel} (contains a deployment-private token)")
+                break
+
+    assert not offenders, (
+        "Deployment-private token(s) found in the tracked, world-readable tree.\n"
+        "Scrub these before merging to main (and rotate/retire the pushed branch "
+        "ref to un-publish them):\n  " + "\n  ".join(sorted(offenders))
+    )
+
+
+def _configured_oauth_secrets() -> list[str]:
+    """Derive OAuth client_id / client_secret / flow-state secret from the
+    gitignored provider registry + env (the PRODUCER), so this guard never
+    hardcodes a secret (per the ``leak-sweep-producer-derived`` pattern). Returns
+    lowercased needles; empty when OAuth is not configured in this environment.
+    """
+    out: list[str] = []
+    try:
+        from backend.core.oauth import registry
+
+        registry.reset_cache_for_tests()
+        for p in registry.get_all_providers():
+            out.extend(v for v in (p.client_id, p.client_secret) if v)
+        fss = registry.flow_state_secret()
+        if fss:
+            out.append(fss)
+    except Exception:
+        return []
+    # Ignore trivially-short values that would produce noisy false positives.
+    return [v.lower() for v in out if len(v) >= 8]
+
+
+def test_no_oauth_client_credentials_in_tracked_tree() -> None:
+    """When OAuth is configured (gitignored registry + env), the real client_id /
+    client_secret / OAUTH_FLOW_STATE_SECRET must never appear in the tracked
+    tree. Dormant (skipped) where OAuth isn't configured, e.g. CI."""
+    needles = _configured_oauth_secrets()
+    if not needles:
+        pytest.skip("OAuth not configured in this environment — no credentials to scan for")
+
+    self_path = Path(__file__).resolve()
+    offenders: list[str] = []
+    for path in _tracked_files():
+        if path.resolve() == self_path:
+            continue
+        if path.suffix.lower() in _SKIP_SUFFIXES:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore").lower()
+        except (OSError, UnicodeError):
+            continue
+        for needle in needles:
+            if needle in text:
+                offenders.append(f"{path.relative_to(_REPO_ROOT)} (contains an OAuth credential)")
+                break
+
+    assert not offenders, (
+        "OAuth client credential(s) found in the tracked, world-readable tree.\n"
+        "Move them to the gitignored registry / env and rotate them:\n  " + "\n  ".join(sorted(offenders))
+    )

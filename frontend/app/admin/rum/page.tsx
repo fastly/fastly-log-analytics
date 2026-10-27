@@ -11,7 +11,7 @@ import { Suspense } from 'react';
 import { Metadata } from 'next';
 import { BackToAdminLink } from '@/components/ReportLayout';
 import { PageHeader } from '@/components/ui/confirm-dialog';
-import { RumStatusPanel } from '@/app/rum/_sections/RumClient';
+import { RumStatusPanel } from '@/app/rum/page';
 import { RumPanelFallback } from './loading';
 
 export const metadata: Metadata = {

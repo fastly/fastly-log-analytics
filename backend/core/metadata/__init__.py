@@ -1,6 +1,6 @@
 """Per-service operational metadata store, backed by Postgres.
 
-DuckDB is reserved for analytical queries over Iceberg log data. Everything
+DuckDB is reserved for analytical queries over DuckLake log data. Everything
 else — alerts, saved views, audit logs, ingested-file dedup tracking, cron run
 history, ASN name cache, source registration, FOS/CDN usage telemetry — lives
 here, in a single shared Postgres database (``METADATA_DSN``), with every
@@ -30,19 +30,20 @@ from types import ModuleType
 
 from backend.core.metadata import base as _base
 from backend.core.metadata import ingest_log as _ingest_log
-from backend.core.metadata import state as _state
 from backend.core.metadata import usage_log as _usage_log
 
-alerts = _state
-asn_cache = _state
-views = _state
+state = _base
+alerts = _base
+asn_cache = _base
+views = _base
+cron_log = _usage_log
 usage_log_db = _usage_log
 quarantine = _ingest_log
 pg_schema = _base
 reconciliation = _base
 pg_connection = _base
 
-# Base: connection management, schema, dedup cache, parse helpers.
+# Base: connection management, schema, dedup cache, parse helpers, state/alerts/views/audit.
 from backend.core.metadata.base import (
     _CLEANUP_TABLES,
     _DATA_DIR,
@@ -53,33 +54,35 @@ from backend.core.metadata.base import (
     _ingested_filenames_cache,
     _ingested_filenames_cache_lock,
     _parse_file_date,
+    asn_ints_for_search,
     cleanup_metadata,
     close_all_connections,
+    count_alerts,
     db_path,
+    delete_alert,
+    delete_view,
+    export_audit,
+    get_audit_logs,
     get_con,
     get_con_readonly,
     get_metadata_storage_stats,
     is_ingested_files_dedup_active,
+    list_alerts,
+    list_alerts_cross_service,
+    list_audit,
+    list_views,
+    lookup_asn_names,
+    merge_audit_for_service,
+    record_audit,
+    replace_audit_for_service,
+    replace_views_for_service,
+    save_alert,
+    save_view,
     teardown,
-)
-
-# Cron run history + scoring audit.
-from backend.core.metadata.cron_log import (
-    adaptive_stale_minutes,
-    cron_busy,
-    delete_cron_run,
-    finalize_cron_run_if_running,
-    get_cron_run_result,
-    get_cron_run_status,
-    get_cron_runs,
-    latest_cron_per_task,
-    list_scoring_audit,
-    log_cron_run,
-    purge_cron_runs,
-    reap_running_cron_runs,
-    record_scoring_audit,
-    start_cron_run,
-    update_cron_duration,
+    toggle_alert,
+    update_alert_last_triggered,
+    upsert_asn_names,
+    upsert_views_for_service,
 )
 
 # Ingested-files tracking + activity reporting + quarantined-file tracking.
@@ -106,48 +109,38 @@ from backend.core.metadata.ingest_log import (
     record_in_flight,
 )
 
-# Audit log, ASN-name cache, saved-dashboard-view, and alert-rule CRUD.
-from backend.core.metadata.state import (
-    asn_ints_for_search,
-    count_alerts,
-    delete_alert,
-    delete_view,
-    export_audit,
-    get_audit_logs,
-    list_alerts,
-    list_alerts_cross_service,
-    list_audit,
-    list_views,
-    lookup_asn_names,
-    merge_audit_for_service,
-    record_audit,
-    replace_audit_for_service,
-    replace_views_for_service,
-    save_alert,
-    save_view,
-    toggle_alert,
-    update_alert_last_triggered,
-    upsert_asn_names,
-    upsert_views_for_service,
-)
-
-# Source registry + usage telemetry + persistent slow-SQL history.
+# Source registry + usage telemetry + persistent slow-SQL history + cron run history.
 from backend.core.metadata.usage_log import (
     DEFAULT_METADATA_RETENTION,
     _query_usage_log_aggregate_rollup,
+    adaptive_stale_minutes,
     clear_slow_queries,
     clear_usage_log,
     count_slow_queries,
+    cron_busy,
+    delete_cron_run,
+    finalize_cron_run_if_running,
     flush_slow_query_buffer,
+    get_cron_run_result,
+    get_cron_run_status,
+    get_cron_runs,
     get_usage_logs,
     insert_slow_query,
     iter_usage_logs_chunks,
+    latest_cron_per_task,
+    list_scoring_audit,
     list_slow_queries,
+    log_cron_run,
     log_synthetic_usage,
     log_usage_calls,
+    purge_cron_runs,
     purge_usage_log,
+    reap_running_cron_runs,
     reconcile_fastly_stats,
+    record_scoring_audit,
     register_source,
+    start_cron_run,
+    update_cron_duration,
 )
 
 
@@ -182,35 +175,41 @@ class _ShimModule(ModuleType):
 
 
 sys.modules[__name__].__class__ = _ShimModule
-for _sub in ("alerts", "asn_cache", "views"):
-    setattr(sys.modules[__name__], _sub, _state)
-    sys.modules[f"{__name__}.{_sub}"] = _state
-for _sub in ("usage_log_db", "slow_queries"):
-    setattr(sys.modules[__name__], _sub, _usage_log)
-    sys.modules[f"{__name__}.{_sub}"] = _usage_log
-for _sub in ("pg_schema", "reconciliation", "pg_connection"):
+for _sub in ("state", "alerts", "asn_cache", "views", "pg_schema", "reconciliation", "pg_connection"):
     setattr(sys.modules[__name__], _sub, _base)
     sys.modules[f"{__name__}.{_sub}"] = _base
+sys.modules["backend.state_sync"] = _base
+for _sub in ("cron_log", "usage_log_db", "slow_queries"):
+    setattr(sys.modules[__name__], _sub, _usage_log)
+    sys.modules[f"{__name__}.{_sub}"] = _usage_log
 setattr(sys.modules[__name__], "quarantine", _ingest_log)
 sys.modules[f"{__name__}.quarantine"] = _ingest_log
 _backend_pkg = sys.modules.get("backend")
-if _backend_pkg is not None and hasattr(_backend_pkg, "_MODULE_ALIASES"):
-    _backend_pkg._MODULE_ALIASES.update(
-        {
-            "backend.core.query_attribution": "backend.core.request_telemetry",
-            "backend.core.request_metrics": "backend.core.request_telemetry",
-            "backend.request_metrics_observer": "backend.core.request_telemetry",
-            "backend.core.metric_snapshots": "backend.cron.jobs.metadata",
-            "backend.core.duckdb_recycle": "backend.cron.jobs.metadata",
-            "backend.cron.jobs.duckdb_recycle": "backend.cron.jobs.metadata",
-            "backend.core.metadata.slow_queries": "backend.core.metadata.usage_log",
-            "backend.core.metadata.pg_schema": "backend.core.metadata.base",
-            "backend.core.metadata.reconciliation": "backend.core.metadata.base",
-            "backend.core.metadata.pg_connection": "backend.core.metadata.base",
-            "backend.cron.decorators": "backend.cron.scheduler",
-            "backend.cron.jobs.rum_commit": "backend.cron.jobs.sync",
-        }
-    )
+if _backend_pkg is not None:
+    setattr(_backend_pkg, "state_sync", _base)
+    if hasattr(_backend_pkg, "_MODULE_ALIASES"):
+        _backend_pkg._MODULE_ALIASES.update(
+            {
+                "backend.core.query_attribution": "backend.core.request_telemetry",
+                "backend.core.request_metrics": "backend.core.request_telemetry",
+                "backend.request_metrics_observer": "backend.core.request_telemetry",
+                "backend.core.metric_snapshots": "backend.cron.jobs.metadata",
+                "backend.core.duckdb_recycle": "backend.cron.jobs.metadata",
+                "backend.cron.jobs.duckdb_recycle": "backend.cron.jobs.metadata",
+                "backend.core.metadata.cron_log": "backend.core.metadata.usage_log",
+                "backend.core.metadata.slow_queries": "backend.core.metadata.usage_log",
+                "backend.core.metadata.state": "backend.core.metadata.base",
+                "backend.core.metadata.alerts": "backend.core.metadata.base",
+                "backend.core.metadata.asn_cache": "backend.core.metadata.base",
+                "backend.core.metadata.views": "backend.core.metadata.base",
+                "backend.state_sync": "backend.core.metadata.base",
+                "backend.core.metadata.pg_schema": "backend.core.metadata.base",
+                "backend.core.metadata.reconciliation": "backend.core.metadata.base",
+                "backend.core.metadata.pg_connection": "backend.core.metadata.base",
+                "backend.cron.decorators": "backend.cron.scheduler",
+                "backend.cron.jobs.rum_commit": "backend.cron.jobs.sync",
+            }
+        )
 
 
 __all__ = [

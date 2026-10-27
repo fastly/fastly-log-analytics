@@ -3,7 +3,6 @@
  * SSR Hydration Smoke, Network, Assets & Shield, Performance, Origin,
  * Insights, and High-Scale Request Facts.
  */
-
 import { expect, test, type Page } from '@playwright/test'
 import type { DebugQuery } from '../../types/api'
 import {
@@ -29,61 +28,78 @@ async function assertColumnVisibilityControl(page: Page, route: string, heading:
   }
 }
 
-test.describe('Dashboard Page Contract (/dashboard)', () => {
-  test('1. Route accessibility & environment indicator', ({ page }) => assertRouteAndFooter(page, '/dashboard', 'Dashboard'))
+type StandardContractOpts = {
+  intrinsicCount?: number; shellTitle?: string; shellCheck?: (page: Page) => Promise<void>
+  dataContract?: { title: string; check: (page: Page) => Promise<void> }; timePresetsTitle?: string
+  zeroErrorTitle?: string; columnControl?: boolean; plotlyAndZeroError?: boolean; perfTitle?: string
+  telemetry?: { url: string; body: Record<string, unknown>; title?: string }
+}
 
-  test('2. Instant shell, pre-allocated layout & in-place loading states', async ({ page }) => {
-    await gotoHeading(page, '/dashboard', 'Dashboard')
-    const chartContainer = page.locator('text=Traffic over Time').or(page.locator('[data-empty-placeholder="true"]'))
-    await expect(chartContainer.first()).toBeVisible({ timeout: 10_000 })
-    const placeholders = page.locator('main [data-empty-placeholder="true"]')
-    if ((await placeholders.count()) > 0) {
-      const texts = await placeholders.allTextContents()
-      expect(texts.some((t) => /Crunching logs|Loading|Initializing|Mapping|No data available/i.test(t))).toBeTruthy()
-    }
+function registerStandardContracts(route: string, heading: string, opts: StandardContractOpts) {
+  test('1. Route accessibility & environment indicator', ({ page }) => assertRouteAndFooter(page, route, heading))
+  if (opts.intrinsicCount !== undefined || opts.shellCheck) {
+    test(opts.shellTitle ?? '2. Instant shell, pre-allocated layout & zero CLS containers', async ({ page }) => {
+      await gotoHeading(page, route, heading)
+      if (opts.intrinsicCount !== undefined) await assertIntrinsicCount(page, opts.intrinsicCount)
+      if (opts.shellCheck) await opts.shellCheck(page)
+    })
+  }
+  if (opts.dataContract) test(opts.dataContract.title, ({ page }) => opts.dataContract!.check(page))
+  if (opts.timePresetsTitle) test(opts.timePresetsTitle, ({ page }) => assertTimePresetsNo500(page, route, heading))
+  if (opts.columnControl) test('6. Column visibility controls on latency tables', ({ page }) => assertColumnVisibilityControl(page, route, heading))
+  if (opts.plotlyAndZeroError) test('7. Non-empty Plotly visualizations and zero error cards', ({ page }) => assertPlotlyAndZeroErrorCards(page, route, heading))
+  if (opts.zeroErrorTitle) test(opts.zeroErrorTitle, ({ page }) => assertZeroErrorCards(page, route, heading))
+  if (opts.perfTitle) test(opts.perfTitle, ({ page }) => assertWarmPerfBudget(page, route))
+  if (opts.telemetry) {
+    test(opts.telemetry.title ?? '8. Telemetry instrumentation & query attribution audit', ({ page }) =>
+      assertPostTelemetry(page, opts.telemetry!.url, opts.telemetry!.body))
+  }
+}
+
+test.describe('Dashboard Page Contract (/dashboard)', () => {
+  registerStandardContracts('/dashboard', 'Dashboard', {
+    plotlyAndZeroError: true,
+    perfTitle: '11. Performance budget: LCP < 1500ms and CLS <= 0.05 on warm load',
   })
 
-  test('3. Single round-trip /api/dashboard/bundle contract', async ({ page }) => {
+  test('2. Instant shell, pre-allocated layout, in-place loading states, and Single round-trip /api/dashboard/bundle contract', async ({ page }) => {
     let bundleCalls = 0
-    page.on('response', (res) => {
-      if (res.url().includes('/api/dashboard/bundle') && res.request().method() === 'POST') bundleCalls++
-    })
+    page.on('response', (res) => { if (res.url().includes('/api/dashboard/bundle') && res.request().method() === 'POST') bundleCalls++ })
     const bundleResponsePromise = page.waitForResponse(
       (res) => res.url().includes('/api/dashboard/bundle') && res.request().method() === 'POST' && res.status() === 200,
       { timeout: 30_000 },
     )
     await gotoHeading(page, '/dashboard', 'Dashboard')
+    await expect(page.locator('text=Traffic over Time').or(page.locator('[data-empty-placeholder="true"]')).first()).toBeVisible({ timeout: 10_000 })
+    const placeholders = page.locator('main [data-empty-placeholder="true"]')
+    if ((await placeholders.count()) > 0) {
+      expect((await placeholders.allTextContents()).some((t) => /Crunching logs|Loading|Initializing|Mapping|No data available/i.test(t))).toBeTruthy()
+    }
     const bundleResponseData = await (await bundleResponsePromise).json()
     expect(bundleCalls).toBe(1)
-    expect(bundleResponseData).toBeTruthy()
     expect(bundleResponseData).toHaveProperty('aggregates.data')
     expect(bundleResponseData).toHaveProperty('top_bots')
   })
 
-  test('4. Metric switching on TrafficChart', async ({ page }) => {
-    await gotoHeading(page, '/dashboard', 'Dashboard')
-    for (const metric of ['Reqs', '5xx', '4xx', 'CHR']) {
-      const btn = page.getByRole('button', { name: new RegExp(`^${metric}$`, 'i') }).first()
-      if (await btn.isVisible()) {
-        await btn.click()
-        await expect(btn).toHaveAttribute('aria-pressed', 'true')
-      }
-    }
-  })
-
-  test('5. Time range presets and adaptive history extents', async ({ page }) => {
+  test('4. Metric switching on TrafficChart, time range presets & Compare mode secondary query', async ({ page }) => {
     await gotoHeading(page, '/dashboard', 'Dashboard')
     await expect(page.getByRole('button', { name: /24h|1h|7d|last/i }).first()).toBeVisible({ timeout: 10_000 })
+    for (const metric of ['Reqs', '5xx', '4xx', 'CHR']) {
+      const btn = page.getByRole('button', { name: new RegExp(`^${metric}$`, 'i') }).first()
+      if (await btn.isVisible()) { await btn.click(); await expect(btn).toHaveAttribute('aria-pressed', 'true') }
+    }
+    const compareSwitch = page.getByRole('switch', { name: /compare/i })
+    await expect(compareSwitch).toBeVisible({ timeout: 15_000 })
+    const compareReq = page.waitForRequest((req) => req.url().includes('/api/dashboard/aggregates') && req.method() === 'POST', { timeout: 15_000 })
+    await compareSwitch.click({ force: true })
+    expect(await compareReq).toBeTruthy()
   })
 
   test('6. Click-to-filter drill-down adds filter chip and refetches', async ({ page }) => {
     await gotoHeading(page, '/dashboard', 'Dashboard')
     const filterBtn = page.locator('button[aria-label^="Filter to "]').first()
     await expect.poll(async () => {
-      if ((await filterBtn.count()) === 0) {
-        await page.mouse.move(700, 500)
-        await page.mouse.wheel(0, 700)
-      }
+      if ((await filterBtn.count()) === 0) { await page.mouse.move(700, 500); await page.mouse.wheel(0, 700) }
       return filterBtn.count()
     }, { timeout: 60_000, intervals: [500, 1000] }).toBeGreaterThan(0)
     await filterBtn.scrollIntoViewIfNeeded()
@@ -116,37 +132,29 @@ test.describe('Dashboard Page Contract (/dashboard)', () => {
     expect(pageErrors).toEqual([])
   })
 
-  test('8. Compare mode triggers secondary aggregates query', async ({ page }) => {
+  test('9. Category collapse state and card customization toggle persist in localStorage across reload', async ({ page }) => {
     await gotoHeading(page, '/dashboard', 'Dashboard')
-    const compareSwitch = page.getByRole('switch', { name: /compare/i })
-    await expect(compareSwitch).toBeVisible({ timeout: 15_000 })
-    const compareReq = page.waitForRequest((req) => req.url().includes('/api/dashboard/aggregates') && req.method() === 'POST', { timeout: 15_000 })
-    await compareSwitch.click({ force: true })
-    expect(await compareReq).toBeTruthy()
-  })
-
-  test('9. Category collapse state persists in localStorage across reloads', async ({ page }) => {
-    await gotoHeading(page, '/dashboard', 'Dashboard')
+    const cardsBtn = page.getByRole('button', { name: /cards/i }).first()
+    await expect(cardsBtn).toBeVisible({ timeout: 15_000 })
+    await cardsBtn.click()
+    await expect(page.getByText(/visible cards/i).first()).toBeVisible({ timeout: 15_000 })
+    const firstChecked = page.locator('input[type="checkbox"][id^="card-"]:checked').first()
+    await expect(firstChecked).toBeVisible({ timeout: 15_000 })
+    const cardId = (await firstChecked.getAttribute('id'))!
+    const cardKey = cardId.replace('card-', '')
+    await page.locator(`label[for="${cardId}"]`).click()
+    await expect(page.locator(`input#${cardId}`)).not.toBeChecked()
+    await page.keyboard.press('Escape')
     const categoryButton = page.locator('section button:has(h3)').first()
     await expect(categoryButton).toBeVisible({ timeout: 15_000 })
     await categoryButton.click()
     await page.reload()
     await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible({ timeout: 30_000 })
     expect(await page.evaluate(() => localStorage.getItem('dashboard_collapsed_sections'))).toBeTruthy()
+    expect((JSON.parse((await page.evaluate(() => localStorage.getItem('dashboard_cards')))!) as string[]).includes(cardKey)).toBe(false)
   })
-
-  test('10. Card customization popover visibility toggle', async ({ page }) => {
-    await gotoHeading(page, '/dashboard', 'Dashboard')
-    const cardsBtn = page.getByRole('button', { name: /cards/i }).first()
-    await expect(cardsBtn).toBeVisible({ timeout: 15_000 })
-    await cardsBtn.click()
-    await expect(page.getByText(/visible cards/i).first()).toBeVisible({ timeout: 15_000 })
-  })
-
-  test('11. Performance budget: LCP < 1500ms and CLS <= 0.05 on warm load', ({ page }) => assertWarmPerfBudget(page, '/dashboard'))
 
   test('12. Telemetry instrumentation & query efficiency audit', async ({ page }) => {
-    let bundleDebugData: DebugResponse | null = null
     await page.setExtraHTTPHeaders({ 'x-debug-responses': '1' })
     const bundleResPromise = page.waitForResponse(
       (res) => res.url().includes('/api/dashboard/bundle') && res.request().method() === 'POST' && res.status() === 200,
@@ -154,14 +162,9 @@ test.describe('Dashboard Page Contract (/dashboard)', () => {
     ).catch(() => null)
     await gotoHeading(page, '/dashboard', 'Dashboard')
     const bundleRes = await bundleResPromise
-    if (bundleRes) {
-      try {
-        const json = await bundleRes.json()
-        if (json._debug_queries || json._debug_sqlite) bundleDebugData = json
-      } catch { /* ignore non-json */ }
-    }
-    if (bundleDebugData) {
-      const queries = bundleDebugData._debug_queries ?? []
+    const json = (await bundleRes?.json().catch(() => null)) as DebugResponse | null
+    if (json?._debug_queries || json?._debug_sqlite) {
+      const queries = json._debug_queries ?? []
       expect(queries.length).toBeGreaterThan(0)
       expect(queries.reduce((acc, q) => acc + (q.time_ms || 0), 0)).toBeLessThan(2500)
       const analyticalQueries = queries.filter((q) => !q.sql?.startsWith('-- DuckDB Iceberg View Resolution'))
@@ -170,13 +173,19 @@ test.describe('Dashboard Page Contract (/dashboard)', () => {
     }
   })
 
-  test('13. Non-empty Plotly visualizations and zero error cards', ({ page }) => assertPlotlyAndZeroErrorCards(page, '/dashboard', 'Dashboard'))
-
-  test('Deep link ?metric= is consumed from the URL while unrelated params survive', async ({ page }) => {
+  test('Deep link ?metric= consumption, URL filter round-trip, and maplibre container mount', async ({ page }) => {
     await page.goto('/dashboard?metric=bandwidth&keep=1')
     await expect(page.locator('main').first()).toBeVisible({ timeout: 30_000 })
     await expect.poll(() => new URL(page.url()).searchParams.get('metric'), { timeout: 15_000 }).toBeNull()
     expect(new URL(page.url()).searchParams.get('keep')).toBe('1')
+    await Promise.any([
+      page.locator('canvas').first().waitFor({ state: 'attached', timeout: 45_000 }),
+      page.getByText(/Interactive map unavailable/i).waitFor({ state: 'visible', timeout: 45_000 }),
+    ])
+    expect((await page.locator('canvas').count()) + (await page.getByText(/Interactive map unavailable/i).count())).toBeGreaterThanOrEqual(1)
+    await gotoHeading(page, '/dashboard?filter_country=US', 'Dashboard')
+    await expect(page.getByText(/country/i).first()).toBeVisible({ timeout: 15_000 })
+    await gotoHeading(page, '/security', 'Security')
   })
 })
 
@@ -198,100 +207,41 @@ test('an unconfigured service never shows NGWAF cards, even with saved selection
   await expect(page.getByRole('heading', { name: /^Fastly Bots/ })).toBeVisible({ timeout: 15_000 })
 })
 
-test('URL filter param round-trips through the filter store', async ({ page }) => {
-  await gotoHeading(page, '/dashboard?filter_country=US', 'Dashboard')
-  await expect(page.getByText(/country/i).first()).toBeVisible({ timeout: 15_000 })
-})
-
-test('navigating between analytics pages preserves the active service id', async ({ page }) => {
-  await gotoHeading(page, '/dashboard', 'Dashboard')
-  await gotoHeading(page, '/security', 'Security')
-})
-
-test('dashboard renders charts without flashing empty state', async ({ page }) => {
-  await gotoHeading(page, '/dashboard', 'Dashboard')
-  await expect(page.getByText('Traffic over Time').first()).toBeVisible({ timeout: 30_000 })
-  await page.locator('.js-plotly-plot, .plotly').first().waitFor({ state: 'visible', timeout: 30_000 })
-  expect(await page.getByText(/no data/i).isVisible().catch(() => false)).toBe(false)
-})
-
-test('dashboard mounts the maplibre container without crashing', async ({ page }) => {
-  const geojsonRequests: string[] = []
-  page.on('request', (req) => {
-    const u = req.url()
-    if (u.endsWith('.geojson') || (u.endsWith('.json') && u.includes('countries'))) geojsonRequests.push(u)
-  })
-  await gotoHeading(page, '/dashboard', 'Dashboard')
-  await Promise.any([
-    page.locator('canvas').first().waitFor({ state: 'attached', timeout: 45_000 }),
-    page.getByText(/Interactive map unavailable/i).waitFor({ state: 'visible', timeout: 45_000 }),
-  ])
-  expect((await page.locator('canvas').count()) + (await page.getByText(/Interactive map unavailable/i).count())).toBeGreaterThanOrEqual(1)
-})
-
-test('dashboard card grid mounts and the Cards toggle is reachable', async ({ page }) => {
-  await gotoHeading(page, '/dashboard', 'Dashboard')
-  await expect(page.getByRole('button', { name: /cards/i }).first()).toBeVisible({ timeout: 15_000 })
-})
-
-test('toggling a card off persists across page reload', async ({ page }) => {
-  await gotoHeading(page, '/dashboard', 'Dashboard')
-  await page.getByRole('button', { name: /cards/i }).first().click()
-  await expect(page.getByText(/visible cards/i).first()).toBeVisible({ timeout: 15_000 })
-  const firstChecked = page.locator('input[type="checkbox"][id^="card-"]:checked').first()
-  await expect(firstChecked).toBeVisible({ timeout: 15_000 })
-  const cardId = await firstChecked.getAttribute('id')
-  expect(cardId).toBeTruthy()
-  const cardKey = cardId!.replace('card-', '')
-  await page.locator(`label[for="${cardId}"]`).click()
-  await expect(page.locator(`input#${cardId}`)).not.toBeChecked()
-  for (const afterReload of [false, true]) {
-    if (afterReload) {
-      await page.reload()
-      await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible({ timeout: 30_000 })
-    }
-    const stored = await page.evaluate(() => localStorage.getItem('dashboard_cards'))
-    expect(stored).toBeTruthy()
-    expect((JSON.parse(stored!) as string[]).includes(cardKey)).toBe(false)
-  }
-})
-
 test.describe('Alerts & Notifications Page Contract (/alerts)', () => {
-  test('1. Route accessibility & environment indicator', ({ page }) => assertRouteAndFooter(page, '/alerts', /Alerts/i))
-
-  test('2. Instant shell, pre-allocated layout & zero CLS containers', async ({ page }) => {
-    await gotoHeading(page, '/alerts', /Alerts/i)
-    for (const id of ['alerts-page-root', 'alerts-summary-grid', 'alerts-list-card']) {
-      await expect(page.locator(`[data-testid="${id}"]`)).toBeVisible({ timeout: 15_000 })
-    }
+  test('1. Route accessibility, environment indicator, zero-CLS containers & warm-load budget', async ({ page }) => {
+    await assertRouteAndFooter(page, '/alerts', /Alerts/i)
+    for (const id of ['alerts-page-root', 'alerts-summary-grid', 'alerts-list-card']) await expect(page.locator(`[data-testid="${id}"]`)).toBeVisible({ timeout: 15_000 })
     await assertIntrinsicCount(page, 2)
+    await assertWarmPerfBudget(page, '/alerts', { settleMs: 800, checkLcp: false })
   })
 
-  test('3. Alerts list contract & status filter controls', async ({ page }) => {
+  test('3. Alerts list contract, status filter controls, role verification & SSRF protection checks', async ({ page }) => {
     const getRes = await page.request.get('/api/alerts/')
-    expect(getRes.ok()).toBeTruthy()
-    expect(Array.isArray((await getRes.json()).data)).toBeTruthy()
+    expect(getRes.ok() && Array.isArray((await getRes.json()).data)).toBeTruthy()
     for (const status of ['all', 'alerting', 'ok', 'muted']) {
       const statusRes = await page.request.get(`/api/alerts/?status=${status}`)
-      expect(statusRes.ok()).toBeTruthy()
-      expect(Array.isArray((await statusRes.json()).data)).toBeTruthy()
+      expect(statusRes.ok() && Array.isArray((await statusRes.json()).data)).toBeTruthy()
     }
+    const serviceId = (await getFirstServiceId(page)) ?? 'default'
+    const ssrfRes = await page.request.post('/api/alerts/', {
+      headers: { 'x-fastly-service-id': serviceId },
+      data: { id: 'ssrf-probe-rule', service_id: serviceId, name: 'SSRF Probe', category: 'reliability', metric: '5xx_rate', operator: '>', threshold: 5, window_min: 5, channels: [{ type: 'webhook', url: 'http://169.254.169.254/latest/meta-data/' }], enabled: true },
+    })
+    expect(ssrfRes.status()).toBe(400)
     await page.goto('/alerts')
+    await expect(page.locator('[data-testid="alerts-page-root"]')).toBeVisible({ timeout: 15_000 })
     const statusFilter = page.locator('[data-testid="alerts-status-filter"]:visible')
     await expect(statusFilter).toHaveCount(1, { timeout: 15_000 })
-    for (const status of ['all', 'alerting', 'ok', 'muted']) {
-      await expect(statusFilter.getByTestId(`alerts-filter-${status}`)).toBeVisible({ timeout: 5_000 })
-    }
+    for (const status of ['all', 'alerting', 'ok', 'muted']) await expect(statusFilter.getByTestId(`alerts-filter-${status}`)).toBeVisible({ timeout: 5_000 })
+    if (/Admin View/i.test(await page.locator('footer').innerText())) await expect(page.locator('[data-testid="alerts-create-btn"]')).toBeVisible({ timeout: 10_000 })
   })
 
-  test('4. Admin rule lifecycle: Create, Update, Toggle, Test Webhook, Evaluate & Delete', async ({ page }) => {
-    const serviceId = (await getFirstServiceId(page)) ?? 'default'
-    const ruleId = `e2e-alert-${Date.now()}`
-    const headers = { 'x-fastly-service-id': serviceId }
+  test('4. Admin rule lifecycle (Create, Update, Toggle, Test Webhook, Evaluate & Delete) and telemetry attribution', async ({ page }) => {
+    const serviceId = (await getFirstServiceId(page)) ?? 'default', ruleId = `e2e-alert-${Date.now()}`, headers = { 'x-fastly-service-id': serviceId }
     const baseRule = {
-      id: ruleId, service_id: serviceId, name: 'E2E Test High 5xx Alert', category: 'reliability',
-      metric: '5xx_rate', evaluation_type: 'absolute', evaluation_scope: 'all', operator: '>',
-      threshold: 5.0, window_min: 5, channels: [{ type: 'webhook', url: 'https://hooks.example.com/e2e-alert-webhook' }], enabled: true,
+      id: ruleId, service_id: serviceId, name: 'E2E Test High 5xx Alert', category: 'reliability', metric: '5xx_rate',
+      evaluation_type: 'absolute', evaluation_scope: 'all', operator: '>', threshold: 5.0, window_min: 5,
+      channels: [{ type: 'webhook', url: 'https://hooks.example.com/e2e-alert-webhook' }], enabled: true,
     }
     try {
       const createRes = await page.request.post('/api/alerts/', { headers, data: baseRule })
@@ -299,112 +249,58 @@ test.describe('Alerts & Notifications Page Contract (/alerts)', () => {
       const createData = await createRes.json()
       expect(['saved', 'success']).toContain(createData.data?.status)
       expect(createData.data?.id).toBe(ruleId)
-      const listRes = await page.request.get(`/api/alerts/${serviceId}`)
-      expect(listRes.ok()).toBeTruthy()
-      expect(((await listRes.json()).data as { id?: string }[]).some((a) => a.id === ruleId)).toBeTruthy()
+      const listRes = await page.request.get(`/api/alerts/${serviceId}`, { headers: { 'x-debug-responses': '1', 'x-page-load-id': `e2e-alerts-${Date.now()}` } })
+      expect(listRes.ok() && ((await listRes.json()).data as { id?: string }[]).some((a) => a.id === ruleId)).toBeTruthy()
       await page.goto(`/alerts?service=${encodeURIComponent(serviceId)}`)
       await expect(page.getByText('E2E Test High 5xx Alert')).toBeVisible({ timeout: 15_000 })
-      const putRes = await page.request.put(`/api/alerts/${ruleId}`, {
-        headers, data: { ...baseRule, name: 'E2E Test High 5xx Alert Updated', threshold: 7.5, window_min: 10 },
-      })
-      expect(putRes.ok()).toBeTruthy()
-      for (const enabled of [false, true]) {
-        expect((await page.request.patch(`/api/alerts/${ruleId}/enabled`, { headers, data: { enabled } })).ok()).toBeTruthy()
-      }
+      expect((await page.request.put(`/api/alerts/${ruleId}`, { headers, data: { ...baseRule, name: 'E2E Test High 5xx Alert Updated', threshold: 7.5, window_min: 10 } })).ok()).toBeTruthy()
+      for (const enabled of [false, true]) expect((await page.request.patch(`/api/alerts/${ruleId}/enabled`, { headers, data: { enabled } })).ok()).toBeTruthy()
       const testWebhookRes = await page.request.post(`/api/alerts/${ruleId}/test`, { headers, data: { service_id: serviceId, dry_run: true } })
       expect(testWebhookRes.ok()).toBeTruthy()
       expect((await testWebhookRes.json()).data).toMatchObject({ status: 'validated', channel_type: 'webhook' })
       const evalRes = await page.request.post('/api/alerts/evaluate', { headers, data: { service_id: serviceId } })
-      expect(evalRes.ok()).toBeTruthy()
-      expect((await evalRes.json()).data?.evaluated).toBeGreaterThanOrEqual(1)
+      expect(evalRes.ok() && (await evalRes.json()).data?.evaluated >= 1).toBeTruthy()
+      await assertPostTelemetry(
+        page, '/api/alerts/preview',
+        { id: 'telemetry-preview', service_id: serviceId, name: 'Telemetry Preview Rule', category: 'reliability', metric: '5xx_rate', evaluation_type: 'absolute', evaluation_scope: 'all', operator: '>', threshold: 5, window_min: 15 },
+        { 'x-fastly-service-id': serviceId, 'x-page-load-id': `e2e-alerts-preview-${Date.now()}` },
+      )
     } finally {
       await page.request.delete(`/api/alerts/${ruleId}`, { headers })
     }
   })
-
-  test('5. Role verification & SSRF protection checks', async ({ page }) => {
-    const serviceId = (await getFirstServiceId(page)) ?? 'default'
-    const ssrfRes = await page.request.post('/api/alerts/', {
-      headers: { 'x-fastly-service-id': serviceId },
-      data: {
-        id: 'ssrf-probe-rule', service_id: serviceId, name: 'SSRF Probe', category: 'reliability',
-        metric: '5xx_rate', operator: '>', threshold: 5, window_min: 5,
-        channels: [{ type: 'webhook', url: 'http://169.254.169.254/latest/meta-data/' }], enabled: true,
-      },
-    })
-    expect(ssrfRes.status()).toBe(400)
-    await page.goto('/alerts')
-    await expect(page.locator('[data-testid="alerts-page-root"]')).toBeVisible({ timeout: 15_000 })
-    if (/Admin View/i.test(await page.locator('footer').innerText())) {
-      await expect(page.locator('[data-testid="alerts-create-btn"]')).toBeVisible({ timeout: 10_000 })
-    }
-  })
-
-  test('6. Performance budget: FCP < 400ms and CLS <= 0.05 on warm load', ({ page }) =>
-    assertWarmPerfBudget(page, '/alerts', { settleMs: 800, checkLcp: false }))
-
-  test('7. Telemetry instrumentation & query attribution audit', async ({ page }) => {
-    const serviceId = (await getFirstServiceId(page)) ?? 'default'
-    const listRes = await page.request.get(`/api/alerts/${serviceId}`, {
-      headers: { 'x-debug-responses': '1', 'x-page-load-id': `e2e-alerts-${Date.now()}` },
-    })
-    expect(listRes.ok()).toBeTruthy()
-    await assertPostTelemetry(
-      page, '/api/alerts/preview',
-      { id: 'telemetry-preview', service_id: serviceId, name: 'Telemetry Preview Rule', category: 'reliability', metric: '5xx_rate', evaluation_type: 'absolute', evaluation_scope: 'all', operator: '>', threshold: 5, window_min: 15 },
-      { 'x-fastly-service-id': serviceId, 'x-page-load-id': `e2e-alerts-preview-${Date.now()}` },
-    )
-  })
 })
 
 test.describe('Usage & Cost Estimator Page Contract (/usage)', () => {
-  test('1. Route accessibility & environment indicator', ({ page }) => assertRouteAndFooter(page, '/usage', 'System Usage'))
-
-  test('2. Instant shell, pre-allocated layout & zero CLS containers', async ({ page }) => {
-    await gotoHeading(page, '/usage', 'System Usage')
-    await assertIntrinsicCount(page, 3)
+  registerStandardContracts('/usage', 'System Usage', {
+    intrinsicCount: 3, zeroErrorTitle: '6. Zero error cards on usage page', perfTitle: '7. Performance budget: LCP < 1500ms and CLS <= 0.05 on warm load',
+    dataContract: {
+      title: '3. Data contract & schema validation on /api/usage endpoints',
+      check: async (page) => {
+        const [storageRes, ratesRes] = await Promise.all([page.request.get('/api/usage/current-storage'), page.request.get('/api/usage/prefill/rates')])
+        expect(storageRes.ok() && ratesRes.ok()).toBeTruthy()
+        expect(await storageRes.json()).toMatchObject({ live_bytes: expect.anything(), total_billed_gb_hours: expect.anything() })
+        const ratesData = await ratesRes.json()
+        expect(ratesData).toHaveProperty('class_a_rate_per_1k')
+        expect(ratesData).toHaveProperty('cdn_egress_rate_per_gb')
+        expect(['MBZ100', 'MBZ200', 'Global']).toContain(ratesData.billing_zone)
+        for (const [url, prop] of [['/api/usage/operations?by=hour', 'total_class_a'], ['/api/usage/bandwidth?by=hour', 'total_bytes'], ['/api/usage/log-activity?by=hour', 'total_rows']] as const) {
+          const res = await page.request.get(url)
+          expect(res.ok()).toBeTruthy()
+          const data = await res.json()
+          expect(data).toHaveProperty(prop)
+          expect(Array.isArray(data.data)).toBeTruthy()
+        }
+      },
+    },
   })
 
-  test('3. Data contract & schema validation on /api/usage endpoints', async ({ page }) => {
-    const storageRes = await page.request.get('/api/usage/current-storage')
-    expect(storageRes.ok()).toBeTruthy()
-    const storageData = await storageRes.json()
-    expect(storageData).toHaveProperty('live_bytes')
-    expect(storageData).toHaveProperty('total_billed_gb_hours')
-    const ratesRes = await page.request.get('/api/usage/prefill/rates')
-    expect(ratesRes.ok()).toBeTruthy()
-    const ratesData = await ratesRes.json()
-    expect(ratesData).toHaveProperty('class_a_rate_per_1k')
-    expect(ratesData).toHaveProperty('cdn_egress_rate_per_gb')
-    expect(['MBZ100', 'MBZ200', 'Global']).toContain(ratesData.billing_zone)
-    for (const [url, prop] of [
-      ['/api/usage/operations?by=hour', 'total_class_a'],
-      ['/api/usage/bandwidth?by=hour', 'total_bytes'],
-      ['/api/usage/log-activity?by=hour', 'total_rows'],
-    ] as const) {
-      const res = await page.request.get(url)
-      expect(res.ok()).toBeTruthy()
-      const data = await res.json()
-      expect(data).toHaveProperty(prop)
-      expect(Array.isArray(data.data)).toBeTruthy()
-    }
-  })
-
-  test('4. Core stat cards, charts, and Cost Estimator mounted', async ({ page }) => {
+  test('4. Core stat cards, charts, Cost Estimator, and Billing Zone switching', async ({ page }) => {
     await gotoHeading(page, '/usage', 'System Usage')
-    for (const label of [
-      'Storage Impact (Period)', 'Class A Ops (period)', 'Class B Ops (period)', 'Estimated Incurred Cost',
-      'FOS Operations', 'CDN Bandwidth', 'Estimated Cost', 'Log Activity (Processed)', 'Cost Estimator',
-    ]) {
+    for (const label of ['Storage Impact (Period)', 'Class A Ops (period)', 'Class B Ops (period)', 'Estimated Incurred Cost', 'FOS Operations', 'CDN Bandwidth', 'Estimated Cost', 'Log Activity (Processed)', 'Cost Estimator']) {
       await expect(page.getByText(label)).toBeVisible({ timeout: 15_000 })
     }
-  })
-
-  test('5. Delivery Billing Zone interactive switching', async ({ page }) => {
-    await gotoHeading(page, '/usage', 'System Usage')
-    const costEstimator = page.getByText('Cost Estimator')
-    await costEstimator.scrollIntoViewIfNeeded()
-    await expect(costEstimator).toBeVisible({ timeout: 15_000 })
+    await page.getByText('Cost Estimator').scrollIntoViewIfNeeded()
     for (const [zone, rate] of [['MBZ100', '$0.08 / GB'], ['Global', '$0.18 / GB'], ['MBZ200', '$0.12 / GB']] as const) {
       const btn = page.getByRole('button', { name: zone })
       await expect(btn).toBeVisible({ timeout: 15_000 })
@@ -412,9 +308,6 @@ test.describe('Usage & Cost Estimator Page Contract (/usage)', () => {
       await expect(page.getByText(rate)).toBeVisible({ timeout: 5_000 })
     }
   })
-
-  test('6. Zero error cards on usage page', ({ page }) => assertZeroErrorCards(page, '/usage', 'System Usage'))
-  test('7. Performance budget: LCP < 1500ms and CLS <= 0.05 on warm load', ({ page }) => assertWarmPerfBudget(page, '/usage'))
 })
 
 const bucket = (minutesAgo: number) => new Date(Date.now() - minutesAgo * 60_000).toISOString()
@@ -439,7 +332,6 @@ function populatedPayload() {
 }
 
 const fixturePath = '/api/__e2e__/streaming-fixture'
-
 async function stubAggregates(page: Page, payload: unknown) {
   expect((await page.request.post(fixturePath, { data: payload })).ok()).toBe(true)
   return {
@@ -456,8 +348,7 @@ test.describe('Streaming (CMCD) Page Contract (/streaming)', () => {
 
   test('1. Route accessibility, environment indicator and request contract', async ({ page }) => {
     const seen = await stubAggregates(page, populatedPayload())
-    const response = await page.goto('/streaming')
-    expect(await response?.text()).toContain('1,234')
+    expect(await (await page.goto('/streaming'))?.text()).toContain('1,234')
     await expect(page.getByRole('heading', { name: 'Streaming' })).toBeVisible({ timeout: 30_000 })
     expect(await page.locator('footer').innerText()).toMatch(/Admin View|Analyst View/i)
     await expect.poll(async () => (await seen.bodies()).length, { timeout: 15_000 }).toBeGreaterThan(0)
@@ -482,18 +373,12 @@ test.describe('Streaming (CMCD) Page Contract (/streaming)', () => {
     await expect(page.getByText('Total Sessions', { exact: true })).toHaveCount(0)
   })
 
-  test('4. No WCAG 2.1 AA violations on the populated page', async ({ page }) => {
+  test('4. No WCAG 2.1 AA violations and layout stability (CLS <= 0.05) on warm reload', async ({ page }) => {
     await stubAggregates(page, populatedPayload())
     await page.goto('/streaming')
     await expect(page.getByText('Total Sessions', { exact: true }).first()).toBeVisible({ timeout: 30_000 })
     await page.waitForTimeout(2_000)
     await assertNoWcagViolations(page)
-  })
-
-  test('5. Layout stability: CLS <= 0.05 on a warm reload', async ({ page }) => {
-    await stubAggregates(page, populatedPayload())
-    await page.goto('/streaming')
-    await expect(page.getByText('Total Sessions', { exact: true }).first()).toBeVisible({ timeout: 30_000 })
     await installClsObserver(page)
     await page.reload()
     await expect(page.getByText('Total Sessions', { exact: true }).first()).toBeVisible({ timeout: 30_000 })
@@ -503,20 +388,16 @@ test.describe('Streaming (CMCD) Page Contract (/streaming)', () => {
   })
 })
 
-const CLEAN_ROUTES = [
-  '/origin', '/performance', '/security', '/query', '/insights', '/sessions', '/network',
-  '/control-room', '/fastly-value', '/streaming', '/admin', '/admin/queries', '/admin/session-scoring',
-  '/admin/share', '/admin/trends', '/admin/usage-log', '/alerts', '/logs', '/usage',
-]
+const CLEAN_ROUTES = ['/origin', '/performance', '/security', '/query', '/insights', '/sessions', '/network', '/control-room', '/fastly-value', '/streaming', '/admin', '/admin/queries', '/admin/session-scoring', '/admin/share', '/admin/trends', '/admin/usage-log', '/alerts', '/logs', '/usage']
+const HYDRATION_ROUTES = ['/admin', '/admin/share', '/admin/session-scoring', '/admin/trends', '/admin/usage-log', '/admin/queries', '/dashboard', '/sessions', '/security', '/network', '/origin', '/performance', '/rum', '/usage', '/alerts', '/logs', '/query', '/insights', '/control-room']
+const SERVICE_ID = 'svc-playwright-e2e'
+const HYDRATION_PATTERNS = [/hydrat/i, /did not match/i, /cannot be a descendant/i, /text content does not match/i, /minified react error #(418|423|425)/i]
+const isHydrationError = (text: string) => HYDRATION_PATTERNS.some((re) => re.test(text))
 
 async function gotoSettled(page: Page, route: string) {
   for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      await page.goto(route)
-      return
-    } catch (e) {
-      const msg = String((e as Error)?.message ?? e)
-      if (attempt === 0 && /ERR_ABORTED|frame was detached|frame got detached|navigation .*interrupted/i.test(msg)) continue
+    try { await page.goto(route); return } catch (e) {
+      if (attempt === 0 && /ERR_ABORTED|frame was detached|frame got detached|navigation .*interrupted/i.test(String((e as Error)?.message ?? e))) continue
       throw e
     }
   }
@@ -531,45 +412,27 @@ for (const route of CLEAN_ROUTES) {
   })
 }
 
-test('Tab navigation moves focus through the sidebar', async ({ page }) => {
+test('Tab navigation moves focus through sidebar and Escape closes open popovers without trapping focus', async ({ page }) => {
   await gotoHeading(page, '/dashboard', 'Dashboard')
   expect(await page.evaluate(() => document.activeElement?.tagName)).toBeTruthy()
   await page.keyboard.press('Tab')
   expect(await page.evaluate(() => document.activeElement?.tagName)).toBeTruthy()
-})
-
-test('Escape closes any open popover without trapping focus', async ({ page }) => {
-  await gotoHeading(page, '/dashboard', 'Dashboard')
   await page.keyboard.press('Escape')
   expect(await page.locator('body').count()).toBe(1)
 })
-
-const HYDRATION_ROUTES = [
-  '/admin', '/admin/share', '/admin/session-scoring', '/admin/trends', '/admin/usage-log', '/admin/queries',
-  '/dashboard', '/sessions', '/security', '/network', '/origin', '/performance', '/rum', '/usage',
-  '/alerts', '/logs', '/query', '/insights', '/control-room',
-]
-const SERVICE_ID = 'svc-playwright-e2e'
-const HYDRATION_PATTERNS = [/hydrat/i, /did not match/i, /cannot be a descendant/i, /text content does not match/i, /minified react error #(418|423|425)/i]
-const isHydrationError = (text: string) => HYDRATION_PATTERNS.some((re) => re.test(text))
 
 test.describe('SSR hydration smoke', () => {
   for (const route of HYDRATION_ROUTES) {
     test(`${route} hydrates without a React hydration error`, async ({ page }) => {
       await page.addInitScript((sid) => {
-        localStorage.setItem('service-storage', JSON.stringify({
-          state: { activeServiceId: sid, services: [{ id: sid, name: 'Playwright E2E Service', accessLevel: 'read_write' }] }, version: 0,
-        }))
+        localStorage.setItem('service-storage', JSON.stringify({ state: { activeServiceId: sid, services: [{ id: sid, name: 'Playwright E2E Service', accessLevel: 'read_write' }] }, version: 0 }))
         localStorage.setItem('timezone-storage', JSON.stringify({ state: { timezone: 'America/New_York' }, version: 0 }))
         localStorage.setItem('fastly-debug-settings', JSON.stringify({ state: { enabled: true, apiCallsEnabled: true }, version: 0 }))
         localStorage.setItem('dashboard_collapsed_sections', JSON.stringify(['request', 'cache']))
       }, SERVICE_ID)
       const hydrationErrors: string[] = []
       page.on('console', (msg) => { if (msg.type() === 'error' && isHydrationError(msg.text())) hydrationErrors.push(msg.text()) })
-      page.on('pageerror', (err) => {
-        const text = `${err.message}\n${err.stack ?? ''}`
-        if (isHydrationError(text)) hydrationErrors.push(text)
-      })
+      page.on('pageerror', (err) => { const text = `${err.message}\n${err.stack ?? ''}`; if (isHydrationError(text)) hydrationErrors.push(text) })
       await page.goto(route, { waitUntil: 'domcontentloaded', timeout: 30_000 })
       await expect(page.locator('main, [role="main"], h1, h2').first()).toBeVisible({ timeout: 15_000 })
       await expect(page.locator('nextjs-portal, [data-nextjs-dialog-overlay], .alert-destructive, [data-testid="error-card"]')).toHaveCount(0)
@@ -580,205 +443,140 @@ test.describe('SSR hydration smoke', () => {
 })
 
 test.describe('Network Page Contract (/network)', () => {
-  test('1. Route accessibility & environment indicator', ({ page }) => assertRouteAndFooter(page, '/network', 'Network & ASN Health'))
-
-  test('2. Instant shell, pre-allocated layout & zero CLS containers', async ({ page }) => {
-    await gotoHeading(page, '/network', 'Network & ASN Health')
-    await assertIntrinsicCount(page, 4)
-  })
-
-  test('3. Data contract & schema validation (/api/network/bundle & /api/network-health)', async ({ page }) => {
-    const bundleRes = await page.request.post('/api/network/bundle', { data: { sections: ['transport'] } })
-    expect(bundleRes.ok()).toBeTruthy()
-    const bundleData = await bundleRes.json()
-    expect(bundleData).toHaveProperty('transport')
-    if (bundleData.transport) {
-      expect(Array.isArray(bundleData.transport.protocol_distribution)).toBeTruthy()
-      expect(Array.isArray(bundleData.transport.missing_fields)).toBeTruthy()
-    }
-    const healthRes = await page.request.post('/api/network-health', {
-      data: { sections: ['summary', 'leaderboard', 'metro_leaderboard'], top_n: 30 },
-    })
-    expect(healthRes.ok()).toBeTruthy()
-    expect(await healthRes.json()).toHaveProperty('available')
-    await gotoHeading(page, '/network', 'Network & ASN Health')
+  registerStandardContracts('/network', 'Network & ASN Health', {
+    intrinsicCount: 4, timePresetsTitle: '5. Time range presets switching cleanly (15m, 24h, 7d)',
+    zeroErrorTitle: '6. Zero error cards on network page', perfTitle: '7. Performance budget: LCP < 1500ms and CLS <= 0.05 on warm load',
+    telemetry: { url: '/api/network/bundle', body: { sections: ['transport'] } },
+    dataContract: {
+      title: '3. Data contract & schema validation (/api/network/bundle & /api/network-health)',
+      check: async (page) => {
+        const [bundleRes, healthRes] = await Promise.all([
+          page.request.post('/api/network/bundle', { data: { sections: ['transport'] } }),
+          page.request.post('/api/network-health', { data: { sections: ['summary', 'leaderboard', 'metro_leaderboard'], top_n: 30 } }),
+        ])
+        expect(bundleRes.ok() && healthRes.ok()).toBeTruthy()
+        const bundleData = await bundleRes.json()
+        expect(bundleData).toHaveProperty('transport')
+        if (bundleData.transport) expect(Array.isArray(bundleData.transport.protocol_distribution) && Array.isArray(bundleData.transport.missing_fields)).toBeTruthy()
+        expect(await healthRes.json()).toHaveProperty('available')
+        await gotoHeading(page, '/network', 'Network & ASN Health')
+      },
+    },
   })
 
   test('4. Core network cards & transport section mounted', async ({ page }) => {
     await gotoHeading(page, '/network', 'Network & ASN Health')
     const unavailableNotice = page.getByText('Network Metrics Unavailable')
     if (!(await unavailableNotice.isVisible().catch(() => false))) {
-      for (const title of ['Global Health', 'Worst ASN']) {
-        await expect(page.locator('#main [data-slot="card-title"]').filter({ hasText: title }).first()).toBeVisible({ timeout: 15_000 })
-      }
+      for (const title of ['Global Health', 'Worst ASN']) await expect(page.locator('#main [data-slot="card-title"]').filter({ hasText: title }).first()).toBeVisible({ timeout: 15_000 })
       await expect(page.getByText('Edge Transport & TCP Performance')).toBeVisible({ timeout: 15_000 })
       await expect(page.getByText('ASN Performance Leaderboard').or(page.getByText('Fastly Edge PoP Health Heatmap')).first()).toBeVisible({ timeout: 15_000 })
     } else {
       await expect(unavailableNotice).toBeVisible()
     }
   })
-
-  test('5. Time range presets switching cleanly (15m, 24h, 7d)', ({ page }) => assertTimePresetsNo500(page, '/network', 'Network & ASN Health'))
-  test('6. Zero error cards on network page', ({ page }) => assertZeroErrorCards(page, '/network', 'Network & ASN Health'))
-  test('7. Performance budget: LCP < 1500ms and CLS <= 0.05 on warm load', ({ page }) => assertWarmPerfBudget(page, '/network'))
-  test('8. Telemetry instrumentation & query attribution audit', ({ page }) => assertPostTelemetry(page, '/api/network/bundle', { sections: ['transport'] }))
 })
 
 test.describe('Assets & Shield Page Contract (/assets-shield)', () => {
-  test('1. Route accessibility & environment indicator', ({ page }) => assertRouteAndFooter(page, '/assets-shield', 'Assets & Shield'))
-
-  test('2. Instant shell, pre-allocated layout & zero CLS containers', async ({ page }) => {
-    await gotoHeading(page, '/assets-shield', 'Assets & Shield')
-    for (const id of ['assets-overview-grid', 'assets-cache-efficiency-card', 'assets-compression-card', 'assets-uncompressed-card', 'assets-low-ttl-card']) {
-      await expect(page.locator(`[data-testid="${id}"]:visible`)).toBeVisible({ timeout: 15_000 })
-    }
-    await assertIntrinsicCount(page, 5)
+  registerStandardContracts('/assets-shield', 'Assets & Shield', {
+    intrinsicCount: 5, shellTitle: '2. Instant shell, pre-allocated layout, zero CLS containers & core headings',
+    shellCheck: async (page) => {
+      for (const id of ['assets-overview-grid', 'assets-cache-efficiency-card', 'assets-compression-card', 'assets-uncompressed-card', 'assets-low-ttl-card']) {
+        await expect(page.locator(`[data-testid="${id}"]:visible`)).toBeVisible({ timeout: 15_000 })
+      }
+      for (const h of ['Cache Efficiency by Asset Type', 'Payload Compression Efficiency', 'Large Uncompressed Assets', 'Low Cache-TTL Hotspots']) {
+        await expect(page.getByRole('heading', { name: h })).toBeVisible({ timeout: 15_000 })
+      }
+    },
+    dataContract: {
+      title: '3. Data contract & schema validation (/api/assets/aggregates)',
+      check: async (page) => {
+        const [postRes, getRes] = await Promise.all([page.request.post('/api/assets/aggregates', { data: { range_token: '24h' } }), page.request.get('/api/assets/aggregates?range_token=24h')])
+        expect(postRes.ok() && getRes.ok()).toBeTruthy()
+        const postData = await postRes.json()
+        for (const key of ['asset_type_breakdown', 'cache_performance', 'compression_performance', 'large_uncompressed_assets', 'low_ttl_assets', 'missing_fields']) expect(Array.isArray(postData[key])).toBeTruthy()
+        expect(await getRes.json()).toMatchObject({ asset_type_breakdown: expect.anything(), missing_fields: expect.anything() })
+        await gotoHeading(page, '/assets-shield', 'Assets & Shield')
+      },
+    },
+    timePresetsTitle: '5. Time range presets switching cleanly (15m, 24h, 7d)',
+    zeroErrorTitle: '6. Zero error cards on assets page', perfTitle: '7. Performance budget: LCP < 1500ms and CLS <= 0.05 on warm load',
+    telemetry: { url: '/api/assets/aggregates', body: { range_token: '24h' } },
   })
-
-  test('3. Data contract & schema validation (/api/assets/aggregates)', async ({ page }) => {
-    const postRes = await page.request.post('/api/assets/aggregates', { data: { range_token: '24h' } })
-    expect(postRes.ok()).toBeTruthy()
-    const postData = await postRes.json()
-    for (const key of ['asset_type_breakdown', 'cache_performance', 'compression_performance', 'large_uncompressed_assets', 'low_ttl_assets', 'missing_fields']) {
-      expect(Array.isArray(postData[key])).toBeTruthy()
-    }
-    const getRes = await page.request.get('/api/assets/aggregates?range_token=24h')
-    expect(getRes.ok()).toBeTruthy()
-    const getData = await getRes.json()
-    expect(getData).toHaveProperty('asset_type_breakdown')
-    expect(getData).toHaveProperty('missing_fields')
-    await gotoHeading(page, '/assets-shield', 'Assets & Shield')
-  })
-
-  test('4. Core asset cards & breakdown sections render properly', async ({ page }) => {
-    await gotoHeading(page, '/assets-shield', 'Assets & Shield')
-    for (const heading of ['Cache Efficiency by Asset Type', 'Payload Compression Efficiency', 'Large Uncompressed Assets', 'Low Cache-TTL Hotspots']) {
-      await expect(page.getByRole('heading', { name: heading })).toBeVisible({ timeout: 15_000 })
-    }
-  })
-
-  test('5. Time range presets switching cleanly (15m, 24h, 7d)', ({ page }) => assertTimePresetsNo500(page, '/assets-shield', 'Assets & Shield'))
-  test('6. Zero error cards on assets page', ({ page }) => assertZeroErrorCards(page, '/assets-shield', 'Assets & Shield'))
-  test('7. Performance budget: LCP < 1500ms and CLS <= 0.05 on warm load', ({ page }) => assertWarmPerfBudget(page, '/assets-shield'))
-  test('8. Telemetry instrumentation & query attribution audit', ({ page }) => assertPostTelemetry(page, '/api/assets/aggregates', { range_token: '24h' }))
 })
 
-// ---------------------------------------------------------------------------
-// Folded from performance.spec.ts
-// ---------------------------------------------------------------------------
-
 test.describe('Performance Page Contract (/performance)', () => {
-  test('1. Route accessibility & environment indicator', ({ page }) => assertRouteAndFooter(page, '/performance', 'Performance'))
-
-  test('2. Instant shell, pre-allocated layout & zero CLS containers', async ({ page }) => {
-    await gotoHeading(page, '/performance', 'Performance')
-    await expect(page.getByText('End-to-End Latency Waterfall (Average)').locator('visible=true')).toBeVisible({ timeout: 15_000 })
-    await assertIntrinsicCount(page, 3)
+  registerStandardContracts('/performance', 'Performance', {
+    intrinsicCount: 3, shellTitle: '2. Instant shell, zero CLS containers, 5 core cards & time presets',
+    shellCheck: async (page) => {
+      await expect(page.getByRole('button', { name: /24h|1h|7d|last/i }).first()).toBeVisible({ timeout: 10_000 })
+      for (const label of ['End-to-End Latency Waterfall (Average)', 'Slowest URLs', 'Slowest Networks', 'Cache TTL Distribution', 'Origin vs Edge Processing (ms)']) {
+        await expect(page.getByText(label).locator('visible=true')).toBeVisible({ timeout: 15_000 })
+      }
+    },
+    dataContract: {
+      title: '3. Data contract & round-trip verification (/api/performance/aggregates)',
+      check: async (page) => {
+        const apiRes = await page.request.post('/api/performance/aggregates', { data: { range_token: '24h', sort_by: 'p99' } })
+        expect(apiRes.ok()).toBeTruthy()
+        const data = await apiRes.json()
+        for (const key of ['waterfall', 'top_urls', 'top_asns', 'ttl_dist', 'scatter']) expect(data).toHaveProperty(key)
+        await gotoHeading(page, '/performance', 'Performance')
+      },
+    },
+    columnControl: true, plotlyAndZeroError: true, perfTitle: '8. Performance budget: LCP < 1500ms and CLS <= 0.05 on warm load',
+    telemetry: { url: '/api/performance/aggregates', body: { range_token: '24h', sort_by: 'p99' }, title: '9. Telemetry instrumentation & query attribution audit' },
   })
-
-  test('3. Data contract & round-trip verification (/api/performance/aggregates)', async ({ page }) => {
-    const apiRes = await page.request.post('/api/performance/aggregates', { data: { range_token: '24h', sort_by: 'p99' } })
-    expect(apiRes.ok()).toBeTruthy()
-    const data = await apiRes.json()
-    for (const key of ['waterfall', 'top_urls', 'top_asns', 'ttl_dist', 'scatter']) expect(data).toHaveProperty(key)
-    await gotoHeading(page, '/performance', 'Performance')
-  })
-
-  test('4. All 5 core performance cards render properly', async ({ page }) => {
-    await gotoHeading(page, '/performance', 'Performance')
-    for (const label of ['End-to-End Latency Waterfall (Average)', 'Slowest URLs', 'Slowest Networks', 'Cache TTL Distribution', 'Origin vs Edge Processing (ms)']) {
-      await expect(page.getByText(label).locator('visible=true')).toBeVisible({ timeout: 15_000 })
-    }
-  })
-
-  test('5. Time range presets and adaptive history extents', async ({ page }) => {
-    await gotoHeading(page, '/performance', 'Performance')
-    await expect(page.getByRole('button', { name: /24h|1h|7d|last/i }).first()).toBeVisible({ timeout: 10_000 })
-  })
-
-  test('6. Column visibility controls on latency tables', ({ page }) => assertColumnVisibilityControl(page, '/performance', 'Performance'))
-  test('7. Non-empty Plotly visualizations and zero error cards', ({ page }) => assertPlotlyAndZeroErrorCards(page, '/performance', 'Performance'))
-  test('8. Performance budget: LCP < 1500ms and CLS <= 0.05 on warm load', ({ page }) => assertWarmPerfBudget(page, '/performance'))
-  test('9. Telemetry instrumentation & query attribution audit', ({ page }) =>
-    assertPostTelemetry(page, '/api/performance/aggregates', { range_token: '24h', sort_by: 'p99' }))
 })
 
 test.describe('Origin Page Contract (/origin)', () => {
-  test('1. Route accessibility & environment indicator', ({ page }) => assertRouteAndFooter(page, '/origin', 'Origin Performance'))
-
-  test('2. Instant shell, pre-allocated layout & zero CLS containers', async ({ page }) => {
-    await gotoHeading(page, '/origin', 'Origin Performance')
-    await expect(page.locator('#main [data-slot="card-title"]').filter({ hasText: 'Origin Latency' }).first()).toBeVisible({ timeout: 15_000 })
-    await assertIntrinsicCount(page, 6)
+  registerStandardContracts('/origin', 'Origin Performance', {
+    intrinsicCount: 6, shellTitle: '2. Instant shell, pre-allocated layout, zero CLS containers & core origin cards',
+    shellCheck: async (page) => {
+      for (const title of ['Origin TTFB (P50)', 'Origin TTFB (P95)', 'Origin Error Rate', 'Fetch Volume', 'Origin Latency', 'Status Code Distribution', 'Slowest URLs at Origin', 'Origin Performance by POP', 'Origin IP Health', 'Origin Payload Size']) {
+        await expect(page.locator('#main [data-slot="card-title"]').filter({ hasText: title }).first()).toBeVisible({ timeout: 15_000 })
+      }
+    },
+    dataContract: {
+      title: '3. Data contract & round-trip verification (/api/origin/aggregates)',
+      check: async (page) => {
+        const apiRes = await page.request.post('/api/origin/aggregates', { data: { range_token: '24h', timeseries_metric: 'ttfb', timeseries_percentile: 'p95' } })
+        expect(apiRes.ok()).toBeTruthy()
+        const data = await apiRes.json()
+        for (const key of ['summary', 'timeseries', 'slow_urls', 'status_codes', 'path_breakdown', 'pop_latency', 'ip_health']) expect(data).toHaveProperty(key)
+        await gotoHeading(page, '/origin', 'Origin Performance')
+      },
+    },
+    timePresetsTitle: '5. Time range presets and adaptive history extents (15m, 24h, 30d)',
+    columnControl: true, plotlyAndZeroError: true, perfTitle: '8. Performance budget: LCP < 1500ms and CLS <= 0.05 on warm load',
+    telemetry: { url: '/api/origin/aggregates', body: { range_token: '24h', timeseries_metric: 'ttfb', timeseries_percentile: 'p95' }, title: '9. Telemetry instrumentation & query attribution audit' },
   })
-
-  test('3. Data contract & round-trip verification (/api/origin/aggregates)', async ({ page }) => {
-    const apiRes = await page.request.post('/api/origin/aggregates', {
-      data: { range_token: '24h', timeseries_metric: 'ttfb', timeseries_percentile: 'p95' },
-    })
-    expect(apiRes.ok()).toBeTruthy()
-    const data = await apiRes.json()
-    for (const key of ['summary', 'timeseries', 'slow_urls', 'status_codes', 'path_breakdown', 'pop_latency', 'ip_health']) {
-      expect(data).toHaveProperty(key)
-    }
-    await gotoHeading(page, '/origin', 'Origin Performance')
-  })
-
-  test('4. All core origin cards render properly', async ({ page }) => {
-    await gotoHeading(page, '/origin', 'Origin Performance')
-    for (const title of [
-      'Origin TTFB (P50)', 'Origin TTFB (P95)', 'Origin Error Rate', 'Fetch Volume', 'Origin Latency',
-      'Status Code Distribution', 'Slowest URLs at Origin', 'Origin Performance by POP', 'Origin IP Health', 'Origin Payload Size',
-    ]) {
-      await expect(page.locator('#main [data-slot="card-title"]').filter({ hasText: title }).first()).toBeVisible({ timeout: 15_000 })
-    }
-  })
-
-  test('5. Time range presets and adaptive history extents (15m, 24h, 30d)', ({ page }) => assertTimePresetsNo500(page, '/origin', 'Origin Performance'))
-  test('6. Column visibility controls on latency tables', ({ page }) => assertColumnVisibilityControl(page, '/origin', 'Origin Performance'))
-  test('7. Non-empty Plotly visualizations and zero error cards', ({ page }) => assertPlotlyAndZeroErrorCards(page, '/origin', 'Origin Performance'))
-  test('8. Performance budget: LCP < 1500ms and CLS <= 0.05 on warm load', ({ page }) => assertWarmPerfBudget(page, '/origin'))
-  test('9. Telemetry instrumentation & query attribution audit', ({ page }) =>
-    assertPostTelemetry(page, '/api/origin/aggregates', { range_token: '24h', timeseries_metric: 'ttfb', timeseries_percentile: 'p95' }))
 })
 
-// ---------------------------------------------------------------------------
-// Folded from insights.spec.ts
-// ---------------------------------------------------------------------------
-
 type RequestFactsDebugResponse = {
-  _debug_queries?: DebugQuery[]
-  rows?: Array<Record<string, unknown>>
+  _debug_queries?: DebugQuery[]; rows?: Array<Record<string, unknown>>; next_cursor?: string | null
   metadata?: { status?: string; exact?: boolean; coverage?: number; freshness_lag_seconds?: number; mode?: string; watermark?: Record<string, unknown> }
-  next_cursor?: string | null
 }
 
 test.describe('Insights Page Contract (/insights)', () => {
-  test('1. Route accessibility & environment indicator', ({ page }) => assertRouteAndFooter(page, '/insights', 'Anomaly Detection'))
-
-  test('2. Instant shell, pre-allocated layout & zero CLS containers', async ({ page }) => {
-    await gotoHeading(page, '/insights', 'Anomaly Detection')
-    await expect(page.locator('[class*="contain-intrinsic-size"]').first()).toBeVisible({ timeout: 15_000 })
-    await assertIntrinsicCount(page, 1)
-    await expect(
-      page.locator('[data-testid="insights-grid"], [data-testid="insights-empty-pass"], [data-testid="insights-grid-loading"]').first(),
-    ).toBeVisible({ timeout: 15_000 })
-  })
-
-  test('3. Data contract & schema validation (/api/insights & /api/insight-availability)', async ({ page }) => {
-    const availRes = await page.request.get('/api/insight-availability')
-    expect(availRes.ok()).toBeTruthy()
-    const availData = await availRes.json()
-    expect(Array.isArray(availData.insights)).toBeTruthy()
-    if (availData.insights.length > 0) {
-      expect(availData.insights[0]).toHaveProperty('id')
-      expect(availData.insights[0]).toHaveProperty('available')
-    }
-    const apiRes = await page.request.post('/api/insights', { data: { window_size_hrs: 1, baseline_hours: 24, filters: {} } })
-    expect(apiRes.ok()).toBeTruthy()
-    const data = await apiRes.json()
-    expect(Array.isArray(data.insights)).toBeTruthy()
-    expect(data).toHaveProperty('computed_at')
+  registerStandardContracts('/insights', 'Anomaly Detection', {
+    intrinsicCount: 1,
+    shellCheck: async (page) => {
+      await expect(page.locator('[class*="contain-intrinsic-size"]').first()).toBeVisible({ timeout: 15_000 })
+      await expect(page.locator('[data-testid="insights-grid"], [data-testid="insights-empty-pass"], [data-testid="insights-grid-loading"]').first()).toBeVisible({ timeout: 15_000 })
+    },
+    dataContract: {
+      title: '3. Data contract & schema validation (/api/insights & /api/insight-availability)',
+      check: async (page) => {
+        const [availRes, apiRes] = await Promise.all([page.request.get('/api/insight-availability'), page.request.post('/api/insights', { data: { window_size_hrs: 1, baseline_hours: 24, filters: {} } })])
+        expect(availRes.ok() && apiRes.ok()).toBeTruthy()
+        const [availData, data] = await Promise.all([availRes.json(), apiRes.json()])
+        expect(Array.isArray(availData.insights) && Array.isArray(data.insights)).toBeTruthy()
+        if (availData.insights.length > 0) expect(availData.insights[0]).toMatchObject({ id: expect.anything(), available: expect.anything() })
+        expect(data).toHaveProperty('computed_at')
+      },
+    },
+    perfTitle: '7. Performance budget: LCP < 1500ms and CLS <= 0.05 on warm load',
   })
 
   test('4. Instant client-side tab switching across all 5 category tabs and All', async ({ page }) => {
@@ -792,83 +590,58 @@ test.describe('Insights Page Contract (/insights)', () => {
     }
   })
 
-  test('5. Plausible detector values or clean normal parameters pass states', async ({ page }) => {
+  test('5. Plausible detector values or clean normal parameters pass states & URL preset transitions', async ({ page }) => {
     await gotoHeading(page, '/insights', 'Anomaly Detection')
-    const emptyPass = page.locator('[data-testid="insights-empty-pass"]').first()
-    const cardsGrid = page.locator('[data-testid="insights-grid"]').first()
+    const emptyPass = page.locator('[data-testid="insights-empty-pass"]').first(), cardsGrid = page.locator('[data-testid="insights-grid"]').first()
     await expect(emptyPass.or(cardsGrid)).toBeVisible({ timeout: 30_000 })
-    const hasEmptyPass = await emptyPass.isVisible()
-    expect(hasEmptyPass || (await cardsGrid.isVisible())).toBeTruthy()
-    if (hasEmptyPass) {
+    if (await emptyPass.isVisible()) {
       await expect(emptyPass).toContainText(/No anomalies detected/i)
       await expect(emptyPass).toContainText(/baseline parameters/i)
     } else {
       await expect(cardsGrid.locator('.rounded-xl, .border').first()).toBeVisible({ timeout: 10_000 })
     }
-  })
-
-  test('6. Time range preset transitions (window vs baseline)', async ({ page }) => {
     await gotoHeading(page, '/insights?window=24&baseline=168&tab=security', 'Anomaly Detection')
     const secTrigger = page.locator('button[data-tab="security"]').first()
     await expect(secTrigger).toBeVisible({ timeout: 10_000 })
     await expect(secTrigger).toHaveAttribute('aria-selected', 'true')
   })
 
-  test('7. Performance budget: LCP < 1500ms and CLS <= 0.05 on warm load', ({ page }) => assertWarmPerfBudget(page, '/insights'))
-
   test('8. Telemetry instrumentation & query attribution audit', async ({ page }) => {
-    const json = await assertPostTelemetry(page, '/api/insights', { window_size_hrs: 1, baseline_hours: 24, filters: {} }, {}, true)
-    expect(json).toHaveProperty('insights')
+    expect(await assertPostTelemetry(page, '/api/insights', { window_size_hrs: 1, baseline_hours: 24, filters: {} }, {}, true)).toHaveProperty('insights')
   })
 })
 
 test.describe('High-Scale Request Facts Page Contract (/high-scale/request-facts)', () => {
-  test('1. Route accessibility & environment indicator', ({ page }) => assertRouteAndFooter(page, '/high-scale/request-facts', 'High-scale request facts'))
-
-  test('2. Instant shell, pre-allocated layout & zero-CLS containers', async ({ page }) => {
-    await gotoHeading(page, '/high-scale/request-facts', 'High-scale request facts')
-    await assertIntrinsicCount(page, 2)
+  registerStandardContracts('/high-scale/request-facts', 'High-scale request facts', {
+    intrinsicCount: 2, perfTitle: '6. Performance budget: FCP < 400ms / LCP < 1500ms and CLS <= 0.05 on warm load',
+    dataContract: {
+      title: '3. Data contract & schema validation (/api/high-scale/request-facts)',
+      check: async (page) => {
+        const serviceId = await getFirstServiceId(page)
+        expect(serviceId).toBeTruthy()
+        const now = new Date(), oneHourAgo = new Date(now.getTime() - 3600 * 1000)
+        const [getRes, postRes] = await Promise.all([
+          page.request.get(`/api/high-scale/request-facts?service_id=${encodeURIComponent(serviceId!)}&start_time=${encodeURIComponent(oneHourAgo.toISOString())}&end_time=${encodeURIComponent(now.toISOString())}&limit=10`),
+          page.request.post(`/api/high-scale/services/${encodeURIComponent(serviceId!)}/request-facts`, { data: { start_time: oneHourAgo.toISOString(), end_time: now.toISOString(), limit: 10, emulate_standard: true } }),
+        ])
+        expect(getRes.ok() && postRes.ok()).toBeTruthy()
+        const [getData, postData] = (await Promise.all([getRes.json(), postRes.json()])) as [RequestFactsDebugResponse, RequestFactsDebugResponse]
+        expect(Array.isArray(getData.rows) && Array.isArray(postData.rows)).toBeTruthy()
+        expect(['complete', 'partial', 'unavailable']).toContain(getData.metadata?.status)
+        expect(['clickhouse', 'duckdb_emulation']).toContain(getData.metadata?.mode)
+        expect(postData.metadata?.watermark?.service_id).toBe(serviceId)
+      },
+    },
   })
 
-  test('3. Data contract & schema validation (/api/high-scale/request-facts)', async ({ page }) => {
-    const serviceId = await getFirstServiceId(page)
-    expect(serviceId).toBeTruthy()
-    const now = new Date()
-    const oneHourAgo = new Date(now.getTime() - 3600 * 1000)
-
-    const getRes = await page.request.get(
-      `/api/high-scale/request-facts?service_id=${encodeURIComponent(serviceId!)}&start_time=${encodeURIComponent(oneHourAgo.toISOString())}&end_time=${encodeURIComponent(now.toISOString())}&limit=10`,
-    )
-    expect(getRes.ok()).toBeTruthy()
-    const getData = (await getRes.json()) as RequestFactsDebugResponse
-    expect(Array.isArray(getData.rows)).toBeTruthy()
-    expect(['complete', 'partial', 'unavailable']).toContain(getData.metadata?.status)
-    expect(['clickhouse', 'duckdb_emulation']).toContain(getData.metadata?.mode)
-
-    const postRes = await page.request.post(`/api/high-scale/services/${encodeURIComponent(serviceId!)}/request-facts`, {
-      data: { start_time: oneHourAgo.toISOString(), end_time: now.toISOString(), limit: 10, emulate_standard: true },
-    })
-    expect(postRes.ok()).toBeTruthy()
-    const postData = (await postRes.json()) as RequestFactsDebugResponse
-    expect(Array.isArray(postData.rows)).toBeTruthy()
-    expect(postData.metadata?.watermark?.service_id).toBe(serviceId)
-  })
-
-  test('4. Metadata bar, mode badge, filter bar, and request facts table render cleanly', async ({ page }) => {
-    await gotoHeading(page, '/high-scale/request-facts', 'High-scale request facts')
-    await expect(page.getByTestId('high-scale-facts-card')).toBeVisible({ timeout: 20_000 })
-    for (const id of ['high-scale-metadata', 'high-scale-mode-badge', 'high-scale-filters', 'high-scale-table-wrapper']) {
-      await expect(page.getByTestId(id)).toBeVisible({ timeout: 15_000 })
-    }
-    expect(await page.getByTestId('high-scale-mode-badge').innerText()).toMatch(/DuckDB Standard Mode Emulation|ClickHouse Distributed Cluster/)
-    await expect(page.locator('[role="alert"].border-destructive')).toHaveCount(0)
-  })
-
-  test('5. Interactive filter controls (status, domain, pop, batch_id) & clear filters', async ({ page }) => {
+  test('4. Metadata bar, mode badge, filter bar, table & interactive filter controls', async ({ page }) => {
     const consoleErrors: string[] = []
     page.on('console', (msg) => { if (msg.type() === 'error') consoleErrors.push(msg.text()) })
-    await page.goto('/high-scale/request-facts')
+    await gotoHeading(page, '/high-scale/request-facts', 'High-scale request facts')
     await expect(page.getByTestId('high-scale-facts-card')).toBeVisible({ timeout: 20_000 })
+    for (const id of ['high-scale-metadata', 'high-scale-mode-badge', 'high-scale-filters', 'high-scale-table-wrapper']) await expect(page.getByTestId(id)).toBeVisible({ timeout: 15_000 })
+    expect(await page.getByTestId('high-scale-mode-badge').innerText()).toMatch(/DuckDB Standard Mode Emulation|ClickHouse Distributed Cluster/)
+    await expect(page.locator('[role="alert"].border-destructive')).toHaveCount(0)
     await page.getByTestId('filter-status').fill('200')
     await page.getByTestId('filter-pop').fill('IAD')
     await expect(page.getByTestId('filter-clear')).toBeVisible()
@@ -878,17 +651,10 @@ test.describe('High-Scale Request Facts Page Contract (/high-scale/request-facts
     expect(consoleErrors.filter((e) => e.includes('500') || e.includes('Internal Server Error'))).toHaveLength(0)
   })
 
-  test('6. Performance budget: FCP < 400ms / LCP < 1500ms and CLS <= 0.05 on warm load', ({ page }) => assertWarmPerfBudget(page, '/high-scale/request-facts'))
-
   test('7. Telemetry instrumentation & query attribution audit', async ({ page }) => {
     const serviceId = await getFirstServiceId(page)
     expect(serviceId).toBeTruthy()
-    const now = new Date()
-    const oneHourAgo = new Date(now.getTime() - 3600 * 1000)
-    await assertPostTelemetry(
-      page, `/api/high-scale/services/${encodeURIComponent(serviceId!)}/request-facts`,
-      { start_time: oneHourAgo.toISOString(), end_time: now.toISOString(), limit: 10, emulate_standard: true },
-      { 'X-Page-Load-ID': `e2e-hs-facts-${Date.now()}` },
-    )
+    const now = new Date(), oneHourAgo = new Date(now.getTime() - 3600 * 1000)
+    await assertPostTelemetry(page, `/api/high-scale/services/${encodeURIComponent(serviceId!)}/request-facts`, { start_time: oneHourAgo.toISOString(), end_time: now.toISOString(), limit: 10, emulate_standard: true }, { 'X-Page-Load-ID': `e2e-hs-facts-${Date.now()}` })
   })
 })

@@ -295,7 +295,9 @@ class ClickHouseClient:
 
     def __init__(self, settings: config.ClickHouseConfig, *, transport: httpx.BaseTransport | None = None):
         self._settings = settings
-        self._slots = threading.BoundedSemaphore(settings.pool_max_size)
+        pool_max_size = int(getattr(settings, "pool_max_size", 24))
+        pool_timeout_s = float(getattr(settings, "pool_timeout_s", 30.0))
+        self._slots = threading.BoundedSemaphore(pool_max_size)
         self._state_lock = threading.Lock()
         self._closed = False
         self._active = 0
@@ -306,12 +308,8 @@ class ClickHouseClient:
                 port=settings.port,
             ),
             auth=httpx.BasicAuth(settings.user, settings.password),
-            limits=httpx.Limits(
-                max_connections=settings.pool_max_size, max_keepalive_connections=settings.pool_max_size
-            ),
-            timeout=httpx.Timeout(
-                settings.query_timeout_s, connect=settings.connect_timeout_s, pool=settings.pool_timeout_s
-            ),
+            limits=httpx.Limits(max_connections=pool_max_size, max_keepalive_connections=pool_max_size),
+            timeout=httpx.Timeout(settings.query_timeout_s, connect=settings.connect_timeout_s, pool=pool_timeout_s),
             transport=transport,
             follow_redirects=False,
             trust_env=False,

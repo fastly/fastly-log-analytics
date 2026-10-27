@@ -23,10 +23,10 @@ os.environ["ARROW_DEFAULT_MEMORY_POOL"] = "system"
 import resource
 
 try:
-    # Increase file descriptor limit for DuckDB and Iceberg operations
+    # Increase file descriptor limit for DuckDB and DuckLake operations
     soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
     # Target 65k or the hard limit, whichever is lower.
-    # 256/1024 is often too low for high-parallelism DuckDB/Iceberg scans.
+    # 256/1024 is often too low for high-parallelism DuckDB/DuckLake scans.
     target = min(hard, 65536)
     if soft < target:
         resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
@@ -105,7 +105,7 @@ def _initialize_service(cfg: dict):
     # ThreadPoolExecutor worker threads don't inherit the parent's
     # ContextVar; process_context_scope sets both the ContextVar and pushes
     # onto the global active-contexts stack so the fsspec iothread fallback
-    # (get_process_context_with_fallback) attributes this worker's iceberg
+    # (get_process_context_with_fallback) attributes this worker's DuckLake
     # I/O correctly. A bare ContextVar setter (no scope) would race with
     # concurrent scheduler ticks: their process_context_scope exit pops the
     # empty stack and nulls the mirror, untagging any I/O still in flight.
@@ -163,7 +163,7 @@ def _initialize_service(cfg: dict):
 
 
 def _ensure_persistent_view(sid: str, src: dict) -> None:
-    """Build the per-service Iceberg view at startup if it's missing from
+    """Build the per-service DuckLake view at startup if it's missing from
     the .duckdb file.
 
     Why this exists: ``refresh_config_status`` opens a read-only connection
@@ -175,9 +175,8 @@ def _ensure_persistent_view(sid: str, src: dict) -> None:
     top-bots, and query page all surface "Catalog Error: Table with name
     logs_xxx does not exist" until the first sync completes.
 
-    Building the view here uses only the locally-cached Iceberg catalog
-    (data/services/<sid>/iceberg_catalog.db) + local parquet/buffer
-    files — no cloud round-trip. When the view already exists, this is
+    Building the view here uses only the DuckLake catalog + local
+    parquet/buffer files — no FOS round-trip. When the view already exists, this is
     a single information_schema lookup and a no-op."""
     if svcconfig.is_durable_serving_mode(src):
         logger.info("[fastapi] Service %s: durable serving uses per-connection views; skipping file pre-warm", sid)
@@ -192,7 +191,7 @@ def _ensure_persistent_view(sid: str, src: dict) -> None:
         # until a sync writer rebuilds it again. The previous "skip if
         # already exists" behaviour kept stale views around when buffer
         # files had been appended since the last writer close.
-        logger.info("[fastapi] Service %s: pre-warming Iceberg view at startup", sid)
+        logger.info("[fastapi] Service %s: pre-warming DuckLake view at startup", sid)
         writer = get_connection(source=src, read_only=False)
         try:
             _ice.update_iceberg_view(writer, src)
@@ -285,7 +284,7 @@ def _background_startup():
         # MUST be process_context_scope (the context manager): the scheduler
         # starts below and its first cron's scope exit would pop the
         # active-contexts stack and null the mirror, untagging any in-flight
-        # iceberg I/O from the init_service workers. The scope keeps "startup" on
+        # DuckLake I/O from the init_service workers. The scope keeps "startup" on
         # the stack as a base so the mirror falls back to "startup" instead of
         # None when nested scopes (cron, init_service) exit.
         from backend.utils.telemetry import process_context_scope
@@ -575,7 +574,7 @@ async def _application_lifespan(app: FastAPI):
         )
 
     # Eagerly start the local telemetry proxy. Idempotent —
-    # boto3/DuckDB/PyIceberg would lazy-start it on first call otherwise; eager
+    # boto3/DuckDB would lazy-start it on first call otherwise; eager
     # start moves the ~hundreds-of-ms port bind out of the first request's
     # latency.
     try:
@@ -586,7 +585,7 @@ async def _application_lifespan(app: FastAPI):
         logging.warning("[fastapi] telemetry proxy failed to start at lifespan boot: %s", e)
 
     # All initialisation (scheduler, DuckDB views, status cache) runs in a
-    # background daemon thread so slow S3/Iceberg calls never block startup.
+    # background daemon thread so slow S3/DuckLake calls never block startup.
     # Skip during testing to avoid background logging after sys.stdout is closed.
     if "pytest" not in sys.modules:
         threading.Thread(target=_background_startup, daemon=True).start()
@@ -775,7 +774,7 @@ async def telemetry_middleware(request: Request, call_next):
 
     Uses process_context_scope (the context manager) so the global
     _LATEST_PROCESS_CONTEXT mirror reverts when the request exits. Otherwise
-    out-of-thread readers — fsspec iothread, pyiceberg pool — keep reading
+    out-of-thread readers — fsspec iothread — keep reading
     the last-completed request's context and attribute cron-driven CDN
     reads to whichever API request happened most recently (observed in
     the 2026-05-24 audit: dashboard's cdn.miss rows landed tagged as
@@ -1047,8 +1046,6 @@ from backend.routers import (
     control_room,
     dashboard,
     high_scale,
-    network,
-    rum,
     session_scoring,
 )
 
@@ -1058,31 +1055,24 @@ app.include_router(dashboard.router)
 app.include_router(high_scale.router)
 app.include_router(dashboard.insights_router)
 app.include_router(session_scoring.sessions_router)
-app.include_router(network.router)
 app.include_router(alerts.views_router)
 app.include_router(alerts.alerts_router)
-app.include_router(network.origin_router)
 app.include_router(control_room.router)
-app.include_router(rum.router)
-app.include_router(rum.asset_router)
 
 from backend.routers import (  # noqa: E402
     admin,
     bootstrap,
-    provision,
     services,
     share_admin,
     usage,
 )
 
-app.include_router(bootstrap.router)
 app.include_router(services.router)
 app.include_router(usage.usage_router)
 app.include_router(admin.router)
 # Analyst-safe sync-status siblings carry the neutral "meta" tag (not the
 # admin router's "admin" tag) — see backend/routers/admin/health.py.
 app.include_router(admin.sync_status.meta_router)
-app.include_router(provision.router)
 app.include_router(share_admin.sharing_domain_router)
 app.include_router(session_scoring.router)
 app.include_router(bootstrap.debug_router)
@@ -1288,7 +1278,7 @@ def health_check(
                     pass
 
             # SRE-05: the probe is otherwise task='sync'-blind. A commit cron
-            # erroring every run (buffer growing, nothing reaching Iceberg) or
+            # erroring every run (buffer growing, nothing reaching DuckLake) or
             # a read_only service's metadata_sync failing (its ONLY ingest
             # path) stays ok. Degrade if the latest terminal run of any
             # critical ingest task errored. Maintenance tasks (optimize /

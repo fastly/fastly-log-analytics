@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import contextvars
 import hashlib
 import hmac
 import inspect
@@ -18,6 +19,7 @@ import time
 from argparse import ArgumentParser
 from collections import Counter, defaultdict, deque
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -28,6 +30,7 @@ from uuid import uuid4
 import pyarrow as pa
 import pyarrow.parquet as pq
 import structlog
+from pydantic import TypeAdapter, ValidationError
 
 from backend import config as app_config
 from backend.core.clickhouse import ClickHouseClient
@@ -52,10 +55,8 @@ _LOG_GAMMA = math.log(GAMMA)
 def _centroid(value: float) -> float:
     if value == 0.0:
         return 0.0
-    magnitude = abs(value)
-    index = math.ceil(math.log(magnitude) / _LOG_GAMMA)
-    centre = 2.0 * GAMMA**index / (GAMMA + 1.0)
-    return math.copysign(centre, value)
+    index = math.ceil(math.log(abs(value)) / _LOG_GAMMA)
+    return math.copysign(2.0 * GAMMA**index / (GAMMA + 1.0), value)
 
 
 def sketch(values: list[float]) -> tuple[list[float], list[int]]:
@@ -71,9 +72,7 @@ def range_value(value: str) -> datetime: ...
 def range_value(value: None) -> None: ...
 def range_value(value: str | None) -> datetime | None:
     """Parse an ISO-8601 bound as-is: ``Z`` becomes ``+00:00``; naive input stays naive."""
-    if value is None:
-        return None
-    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return None if value is None else datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
 def bucket(value: object) -> datetime | None:
@@ -106,9 +105,7 @@ def finite_float(value: object) -> float | None:
 
 def optional_int(value: object) -> int | None:
     parsed = finite_float(value)
-    if parsed is None or not parsed.is_integer():
-        return None
-    return int(parsed)
+    return int(parsed) if parsed is not None and parsed.is_integer() else None
 
 
 def percentiles(values: list[float], qs: tuple[float, ...]) -> list[float | None]:
@@ -118,13 +115,9 @@ def percentiles(values: list[float], qs: tuple[float, ...]) -> list[float | None
     ordered = sorted(values)
     out: list[float | None] = []
     for q in qs:
-        position = (len(ordered) - 1) * q
-        lower = math.floor(position)
-        upper = math.ceil(position)
-        if lower == upper:
-            out.append(ordered[lower])
-        else:
-            out.append(ordered[lower] + (ordered[upper] - ordered[lower]) * (position - lower))
+        pos = (len(ordered) - 1) * q
+        lo, hi = math.floor(pos), math.ceil(pos)
+        out.append(ordered[lo] if lo == hi else ordered[lo] + (ordered[hi] - ordered[lo]) * (pos - lo))
     return out
 
 
@@ -141,18 +134,14 @@ class KeysetCursor:
     def encode(self, secret: bytes) -> str:
         if not secret:
             raise ValueError("cursor signing secret is required")
-        payload = json.dumps(
-            {
-                "timestamp": self.timestamp.astimezone(UTC).isoformat(),
-                "event_id": self.event_id,
-                "service_id": self.service_id,
-                "domain": self.domain,
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode()
-        signature = hmac.new(secret, payload, hashlib.sha256).digest()
-        return f"{_b64(payload)}.{_b64(signature)}"
+        raw = {
+            "timestamp": self.timestamp.astimezone(UTC).isoformat(),
+            "event_id": self.event_id,
+            "service_id": self.service_id,
+            "domain": self.domain,
+        }
+        payload = json.dumps(raw, sort_keys=True, separators=(",", ":")).encode()
+        return f"{_b64(payload)}.{_b64(hmac.new(secret, payload, hashlib.sha256).digest())}"
 
     @classmethod
     def decode(cls, token: str, secret: bytes) -> KeysetCursor:
@@ -160,14 +149,12 @@ class KeysetCursor:
             raise ValueError("cursor signing secret is required")
         try:
             payload_token, signature_token = token.split(".", 1)
-            payload = _unb64(payload_token)
-            signature = _unb64(signature_token)
-            expected = hmac.new(secret, payload, hashlib.sha256).digest()
-            if not hmac.compare_digest(signature, expected):
+            payload, signature = _unb64(payload_token), _unb64(signature_token)
+            if not hmac.compare_digest(signature, hmac.new(secret, payload, hashlib.sha256).digest()):
                 raise ValueError("cursor signature mismatch")
             raw = json.loads(payload)
             timestamp = datetime.fromisoformat(raw["timestamp"]).astimezone(UTC)
-            if not all(isinstance(raw[key], str) and raw[key] for key in ("event_id", "service_id", "domain")):
+            if not all(isinstance(raw[k], str) and raw[k] for k in ("event_id", "service_id", "domain")):
                 raise ValueError("cursor fields are invalid")
             return cls(timestamp, raw["event_id"], raw["service_id"], raw["domain"])
         except (ValueError, KeyError, TypeError, UnicodeError, json.JSONDecodeError) as exc:
@@ -200,17 +187,13 @@ def raw_query_producer(
     """Build a producer scanning archived rows in ``[start, end)``."""
 
     def _produce() -> Iterator[dict[str, Any]]:
-        manifests = sorted(
-            catalog.manifests_covering(service_id, domain, start, end), key=lambda manifest: manifest.coverage_start
-        )
+        manifests = sorted(catalog.manifests_covering(service_id, domain, start, end), key=lambda m: m.coverage_start)
         for manifest in manifests:
-            payload = archive.read_artifact(manifest)
-            table = pq.read_table(pa.BufferReader(payload))
+            table = pq.read_table(pa.BufferReader(archive.read_artifact(manifest)))
             for row in table.to_pylist():
                 timestamp = _row_timestamp(row)
-                if timestamp is not None and (timestamp < start or timestamp >= end):
-                    continue
-                yield row
+                if timestamp is None or (start <= timestamp < end):
+                    yield row
 
     return _produce
 
@@ -219,15 +202,12 @@ def _row_timestamp(row: Mapping[str, Any]) -> datetime | None:
     value = row.get("timestamp")
     if isinstance(value, datetime):
         return value.astimezone(UTC)
-    if isinstance(value, str):
-        return range_value(value).astimezone(UTC)
-    return None
+    return range_value(value).astimezone(UTC) if isinstance(value, str) else None
 
 
 _DOMAIN_IDENT_RE = re.compile(r"^[a-z0-9_]+$")
 VISIBLE_PUBLICATION_FENCE_SQL = (
-    "publication_state='visible' "
-    "AND batch_id IN ("
+    "publication_state='visible' AND batch_id IN ("
     "SELECT batch_id FROM high_scale_batch_publications FINAL "
     "WHERE service_id={service_id:String} AND publication_state='visible')"
 )
@@ -240,11 +220,9 @@ def visible_publication_fence_sql(domain: str | None = None) -> str:
     if not _DOMAIN_IDENT_RE.fullmatch(domain):
         raise ValueError(f"Invalid publication domain identifier: {domain!r}")
     return (
-        "publication_state='visible' "
-        "AND batch_id IN ("
+        "publication_state='visible' AND batch_id IN ("
         "SELECT batch_id FROM high_scale_batch_publications FINAL "
-        f"WHERE service_id={{service_id:String}} AND domain='{domain}' "
-        "AND publication_state='visible')"
+        f"WHERE service_id={{service_id:String}} AND domain='{domain}' AND publication_state='visible')"
     )
 
 
@@ -255,10 +233,8 @@ def visible_fact_clauses(domain: str) -> list[str]:
     return [
         "service_id={service_id:String}",
         "publication_state='visible'",
-        "batch_id IN ("
-        "SELECT batch_id FROM high_scale_batch_publications FINAL "
-        f"WHERE service_id={{service_id:String}} AND domain='{domain}' "
-        "AND publication_state='visible')",
+        "batch_id IN (SELECT batch_id FROM high_scale_batch_publications FINAL "
+        f"WHERE service_id={{service_id:String}} AND domain='{domain}' AND publication_state='visible')",
     ]
 
 
@@ -355,27 +331,20 @@ def request_filter_clauses(
     for i, (raw_key, spec) in enumerate((filters or {}).items()):
         key = normalize_filter_key(raw_key)
         mode = str(filter_spec_attr(spec, "mode") or "include")
-        values = [
-            value
-            for value in (filter_spec_attr(spec, "values") or [])
-            if not (isinstance(value, str) and value.strip() == "")
-        ]
+        values = [v for v in (filter_spec_attr(spec, "values") or []) if not (isinstance(v, str) and v.strip() == "")]
         if not values:
             continue
         if key in _UNSUPPORTED or not key:
             raise ValueError(f"high-scale request readers do not support filtering on {raw_key!r}")
         column = _column(key, params, f"{prefix}_k{i}")
-        concrete = [value for value in values if value is not None]
+        concrete = [v for v in values if v is not None]
         names: list[str] = []
         for j, value in enumerate(concrete):
             name = f"{prefix}_{i}_{j}"
             str_val = str(value)
             if key in _BOOLEAN:
                 lowered = str_val.strip().lower()
-                if lowered in ("true", "1"):
-                    str_val = "true"
-                elif lowered in ("false", "0"):
-                    str_val = "false"
+                str_val = "true" if lowered in ("true", "1") else ("false" if lowered in ("false", "0") else str_val)
             params[name] = str_val
             names.append(f"{{{name}:String}}")
         include = mode != "exclude"
@@ -403,14 +372,11 @@ def build_published_projection_where(
     clauses = [
         "service_id={service_id:String}",
         "publication_state='visible'",
-        "batch_id IN ("
-        "SELECT batch_id FROM high_scale_batch_publications FINAL "
-        "WHERE service_id={service_id:String} AND domain={publication_domain:String} "
-        "AND publication_state='visible')",
+        "batch_id IN (SELECT batch_id FROM high_scale_batch_publications FINAL "
+        "WHERE service_id={service_id:String} AND domain={publication_domain:String} AND publication_state='visible')",
     ]
     params: dict[str, Any] = {"service_id": service_id, "publication_domain": domain}
-    start = range_value(start_time)
-    end = range_value(end_time)
+    start, end = range_value(start_time), range_value(end_time)
     if start is not None:
         clauses.append("bucket_start >= {start:DateTime64(3)}")
         params["start"] = start
@@ -436,24 +402,21 @@ def build_published_facts_where(
     filter_sql, filter_params = build_clickhouse_filters(dict(filters or {}))
     clauses = ["service_id={service_id:String}", visible_publication_fence_sql(domain), filter_sql]
     params: dict[str, Any] = {"service_id": service_id, **filter_params}
-    start = range_value(start_time)
-    end = range_value(end_time)
+    start, end = range_value(start_time), range_value(end_time)
     if start is not None:
         clauses.append("event_timestamp >= {start:DateTime64(3)}")
         params["start"] = start
     if end is not None:
-        op = "<=" if end_inclusive else "<"
-        clauses.append(f"event_timestamp {op} {{end:DateTime64(3)}}")
+        clauses.append(f"event_timestamp {'<=' if end_inclusive else '<'} {{end:DateTime64(3)}}")
         params["end"] = end
     return " AND ".join(clauses), params
 
 
-sys.modules["backend.high_scale._filters"] = sys.modules[__name__]
 _bucket = bucket
 _self_mod = sys.modules[__name__]
 for _early_alias in ("_common", "_filters"):
     sys.modules[f"backend.high_scale.{_early_alias}"] = _self_mod
-from backend.high_scale.publication import (
+from backend.high_scale.publication import (  # noqa: E402
     BaseClickHouseBatchAdapter,
     ClickHouseBatchAdapter,
     ClickHousePublication,
@@ -466,14 +429,14 @@ from backend.high_scale.publication import (
     build_batch_id_from_manifest_id,
     row_matches_serving_domain,
 )
-from backend.models.performance import AssetsAggregatesResponse, AssetsRequest
-from backend.repositories.utils.response_cache import (
+from backend.models.performance import AssetsAggregatesResponse, AssetsRequest  # noqa: E402
+from backend.repositories.utils.response_cache import (  # noqa: E402
     ResponseMemo,
     bucket_time_to_minute,
     digest_cache_key,
     serialize_filters_for_key,
 )
-from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry
+from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry  # noqa: E402
 
 logger = logging.getLogger(__name__)
 _worker_logger = logging.getLogger("backend.high_scale.worker")
@@ -481,6 +444,12 @@ _recovery_logger = structlog.get_logger(__name__)
 
 
 # ── Registry Bootstrap (folded from registry_bootstrap.py) ────────────────────
+def _resolve_watermark(wm: ServingWatermark | Callable[[], ServingWatermark]) -> ServingWatermark:
+    value = wm() if callable(wm) else wm
+    value.validate()
+    return value
+
+
 @dataclass(frozen=True)
 class HighScaleService:
     service_id: str
@@ -493,25 +462,17 @@ class HighScaleService:
     archive: ArchivePublication | None = None
 
     def watermark(self) -> ServingWatermark:
-        value = self.request_watermark() if callable(self.request_watermark) else self.request_watermark
-        value.validate()
-        return value
+        return _resolve_watermark(self.request_watermark)
 
     def watermark_for(self, domain: str) -> ServingWatermark:
         if domain == "request":
             return self.watermark()
-        cmcd_watermark = self.cmcd_watermark
-        if domain == "cmcd" and cmcd_watermark is not None:
-            cmcd_value = cmcd_watermark
-            watermark = cmcd_value() if callable(cmcd_value) else cmcd_value
-            watermark.validate()
-            return watermark
+        if domain == "cmcd" and self.cmcd_watermark is not None:
+            return _resolve_watermark(self.cmcd_watermark)
         value = self.rum_watermarks.get(domain)
         if value is None:
             raise KeyError(domain)
-        watermark = value() if callable(value) else value
-        watermark.validate()
-        return watermark
+        return _resolve_watermark(value)
 
 
 class HighScaleServiceRegistryProtocol(Protocol):
@@ -533,9 +494,7 @@ class HighScaleServiceRegistry:
 
     def resolve(self, service_id: str) -> HighScaleService | None:
         service = self._services.get(service_id)
-        if service is None or service.service_id != service_id:
-            return None
-        return service
+        return service if service is not None and service.service_id == service_id else None
 
 
 _registry = HighScaleServiceRegistry()
@@ -604,14 +563,11 @@ def register_high_scale_services_from_environment(
     control_factory: Callable[[], ArchiveManifestCatalog] | None = None,
     archive_factory: Callable[[str], ArchivePublication | None] | None = None,
 ) -> tuple[str, ...]:
-    enabled = os.getenv("HIGH_SCALE_ENABLED", "").strip().lower() in {"1", "true", "yes", "on"}
-    if not enabled:
+    if os.getenv("HIGH_SCALE_ENABLED", "").strip().lower() not in {"1", "true", "yes", "on"}:
         return ()
     if client is None:
         raise RuntimeError("high-scale mode requires a ClickHouse client")
-    service_ids = tuple(
-        service_id.strip() for service_id in os.getenv("HIGH_SCALE_SERVICE_IDS", "").split(",") if service_id.strip()
-    )
+    service_ids = tuple(s.strip() for s in os.getenv("HIGH_SCALE_SERVICE_IDS", "").split(",") if s.strip())
     if not service_ids:
         from backend import config as app_config
 
@@ -652,14 +608,11 @@ def _default_archive_factory(service_id: str) -> ArchivePublication | None:
     from backend.core.duckdb import _get_fos_client, get_source_for_service
 
     source = get_source_for_service(service_id)
-    if source is None:
+    bucket = source.get("bucket") if source is not None else None
+    if not isinstance(bucket, str) or not bucket or source is None:
         return None
-    bucket = source.get("bucket")
-    if not isinstance(bucket, str) or not bucket:
-        return None
-    fos_client = _get_fos_client(source)
     archive_prefix = os.getenv("HIGH_SCALE_ARCHIVE_PREFIX", "high-scale/archive")
-    return ArchivePublication(S3ObjectStore(fos_client, bucket=bucket, prefix=archive_prefix))
+    return ArchivePublication(S3ObjectStore(_get_fos_client(source), bucket=bucket, prefix=archive_prefix))
 
 
 def _watermark(client: ServingClient, service_id: str, domain: str, *, owner_epoch: int) -> ServingWatermark:
@@ -667,9 +620,7 @@ def _watermark(client: ServingClient, service_id: str, domain: str, *, owner_epo
     fence_sql = visible_publication_fence_sql(domain)
     event_id_column = "projection_key" if domain == "cmcd" else "event_id"
     rows = client.execute(
-        f"SELECT min(event_timestamp) AS coverage_start, "
-        f"max(event_timestamp) AS coverage_end "
-        f"FROM {table} "
+        f"SELECT min(event_timestamp) AS coverage_start, max(event_timestamp) AS coverage_end FROM {table} "
         f"WHERE service_id={{service_id:String}} AND {fence_sql}",
         {"service_id": service_id},
     )
@@ -678,16 +629,12 @@ def _watermark(client: ServingClient, service_id: str, domain: str, *, owner_epo
     last_visible_event_id: str | None = None
     if coverage_end is not None:
         latest_rows = client.execute(
-            f"SELECT toString({event_id_column}) AS last_visible_event_id "
-            f"FROM {table} "
-            "WHERE service_id={service_id:String} "
-            f"AND {fence_sql} "
-            "AND event_timestamp={coverage_end:DateTime64(3)} "
-            f"ORDER BY {event_id_column} DESC LIMIT 1",
+            f"SELECT toString({event_id_column}) AS last_visible_event_id FROM {table} "
+            f"WHERE service_id={{service_id:String}} AND {fence_sql} "
+            f"AND event_timestamp={{coverage_end:DateTime64(3)}} ORDER BY {event_id_column} DESC LIMIT 1",
             {"service_id": service_id, "coverage_end": coverage_end},
         )
-        latest_row = latest_rows[0] if latest_rows else {}
-        last_visible_event_id = _string_or_none(latest_row.get("last_visible_event_id"))
+        last_visible_event_id = _string_or_none((latest_rows[0] if latest_rows else {}).get("last_visible_event_id"))
     return ServingWatermark(
         service_id=service_id,
         domain=domain,
@@ -777,16 +724,14 @@ def compute_dimension_counts(domain: str, rows: tuple[Mapping[str, Any], ...]) -
     dimensions = DIMENSIONS_BY_DOMAIN[domain]
     counts: Counter[tuple[str, str, datetime]] = Counter()
     for row in rows:
-        bucket = _bucket(row.get("timestamp"))
-        if bucket is None:
+        bkt = _bucket(row.get("timestamp"))
+        if bkt is None:
             continue
         for dimension in dimensions:
-            field_name = _SOURCE_FIELD_OVERRIDES.get(dimension, dimension)
-            value = str(row.get(field_name, ""))
-            counts[(dimension, value, bucket)] += 1
+            counts[(dimension, str(row.get(_SOURCE_FIELD_OVERRIDES.get(dimension, dimension), "")), bkt)] += 1
     return tuple(
-        {"dimension": dimension, "value": value, "bucket_start": bucket.isoformat(), "count": count}
-        for (dimension, value, bucket), count in counts.items()
+        {"dimension": dimension, "value": value, "bucket_start": bkt.isoformat(), "count": count}
+        for (dimension, value, bkt), count in counts.items()
     )
 
 
@@ -904,10 +849,8 @@ _ORIGIN_COLUMNS: dict[str, tuple[str, tuple[str, ...]]] = {
 
 
 def _bucket_start(value: Any) -> datetime:
-    """Batch rows carry bucket_start as an ISO string (HighScaleBatch.digest     requires JSON-serializable row values) — parse back for the insert."""
-    if isinstance(value, datetime):
-        return value
-    return datetime.fromisoformat(str(value))
+    """Batch rows carry bucket_start as an ISO string (HighScaleBatch.digest requires JSON-serializable row values)."""
+    return value if isinstance(value, datetime) else datetime.fromisoformat(str(value))
 
 
 class AggregateBatchAdapter(BaseClickHouseBatchAdapter):
@@ -928,23 +871,15 @@ class AggregateBatchAdapter(BaseClickHouseBatchAdapter):
                 (
                     batch.service_id,
                     _bucket_start(row["bucket_start"]),
-                    *(row[column] for column in metric_columns),
+                    *(row[col] for col in metric_columns),
                     batch_uuid,
                     "visible",
                 )
                 for row in batch.rows
             ]
         else:
-            table, metric_column = _AGGREGATE_TABLES[batch.domain]
-            columns = [
-                "service_id",
-                "bucket_start",
-                "dimension",
-                "value",
-                metric_column,
-                "batch_id",
-                "publication_state",
-            ]
+            table, metric_col = _AGGREGATE_TABLES[batch.domain]
+            columns = ["service_id", "bucket_start", "dimension", "value", metric_col, "batch_id", "publication_state"]
             mapped_rows = [
                 (
                     batch.service_id,
@@ -1102,30 +1037,18 @@ class HighScaleIngestController:
         max_dead_letter_ratio: float = HIGH_SCALE_MAX_DEAD_LETTER_RATIO,
     ) -> BatchIngestResult:
         if not sources_payloads:
-            return BatchIngestResult(
-                manifest=None,  # type: ignore[arg-type]
-                publication=PublicationResult(
-                    batch_id=f"{service_id}:{domain}:empty",
-                    status=PublicationStatus.VISIBLE,
-                    rows_visible=0,
-                    duplicate=False,
-                ),
-                total_events=0,
-                quarantined_events=0,
-                sources_count=0,
-            )
+            pub = PublicationResult(f"{service_id}:{domain}:empty", PublicationStatus.VISIBLE, 0, False)
+            return BatchIngestResult(None, pub, 0, 0, 0)  # type: ignore[arg-type]
         total_bytes = sum(len(payload) for _, payload in sources_payloads)
         if total_bytes > HIGH_SCALE_PAGE_MAX_BYTES:
             raise ValueError(f"high-scale page size {total_bytes} exceeds maximum {HIGH_SCALE_PAGE_MAX_BYTES}")
         owner = self._control.owner(service_id) if self._control is not None else self._ownership.get(service_id)
         if owner.current_owner != "high_scale":
             raise RuntimeError(f"high-scale ingest rejected for {service_id}: owner is {owner.current_owner}")
-        decoded_sources: list[tuple[SourceObjectDescriptor, DecodeResult, list[dict[str, Any]]]] = []
+        source_batches: list[tuple[ArchiveSourceObject, list[dict[str, Any]]]] = []
         all_events: list[dict[str, Any]] = []
         sibling_events: list[dict[str, Any]] = []
-        total_accepted = 0
-        total_quarantined = 0
-        sibling_quarantined = 0
+        total_accepted = total_quarantined = sibling_quarantined = 0
         for descriptor, payload in sources_payloads:
             if self._control is None:
                 src_obj = self._ledger.discover(
@@ -1156,7 +1079,7 @@ class HighScaleIngestController:
                 size_bytes=len(payload),
                 version=descriptor.version,
             )
-            decoded = decode_source_object(
+            decoded: DecodeResult = decode_source_object(
                 archive_source, payload, transform_version=self._transform_version, domain=domain
             )
             total_accepted += decoded.accepted_rows
@@ -1187,7 +1110,7 @@ class HighScaleIngestController:
                 }
                 for item in decoded.dead_letters
             )
-            decoded_sources.append((descriptor, decoded, archive_rows))
+            source_batches.append((archive_source, archive_rows))
             all_events.extend(decoded.events)
             sibling = _RUM_SIBLING_DOMAIN.get(domain)
             if sibling is not None:
@@ -1204,26 +1127,16 @@ class HighScaleIngestController:
                 "high-scale RUM sibling decode rejected retained source records",
                 extra={"domain": _RUM_SIBLING_DOMAIN[domain], "quarantined_rows": sibling_quarantined},
             )
+        if domain in _RUM_SIBLING_DOMAIN:
+            source_batches = [(replace(src, domain=domain), rows) for src, rows in source_batches]
+        elif len(source_batches) == 1 and source_batches[0][0].domain != domain:
+            source_batches = [(replace(source_batches[0][0], domain=domain), source_batches[0][1])]
         total_rows = total_accepted + total_quarantined
         if total_rows > 0 and (total_quarantined / total_rows) > max_dead_letter_ratio:
             raise ValueError(
                 f"high-scale dead letter ratio {total_quarantined}/{total_rows} exceeds maximum {max_dead_letter_ratio}"
             )
         observed = (now or datetime.now(UTC)).astimezone(UTC)
-        source_batches = [
-            (
-                ArchiveSourceObject(
-                    service_id=service_id,
-                    domain=domain,
-                    object_key=desc.object_key,
-                    checksum=desc.checksum,
-                    size_bytes=len(payload),
-                    version=desc.version,
-                ),
-                rows,
-            )
-            for (desc, _, rows), (_, payload) in zip(decoded_sources, sources_payloads)
-        ]
         with tempfile.TemporaryDirectory(prefix="high-scale-archive-") as root:
             local_manifest = write_batch_archive_checkpoint(
                 Path(root),
@@ -1238,8 +1151,7 @@ class HighScaleIngestController:
                 retention_seconds=self._retention_seconds,
                 deletion_grace_seconds=self._deletion_grace_seconds,
             )
-            artifact_path = Path(local_manifest.artifact.uri.removeprefix("file://"))
-            artifact = artifact_path.read_bytes()
+            artifact = Path(local_manifest.artifact.uri.removeprefix("file://")).read_bytes()
             manifest = replace(
                 local_manifest,
                 artifact=replace(local_manifest.artifact, uri=f"s3://archive/{local_manifest.manifest_id}.parquet"),
@@ -1262,18 +1174,11 @@ class HighScaleIngestController:
         serving_rows = tuple(e for e in all_events if row_matches_serving_domain(domain, e))
         batch_id = build_batch_id_from_manifest_id(manifest.manifest_id)
         if serving_rows:
-            batch = HighScaleBatch(
-                batch_id=batch_id,
-                service_id=service_id,
-                domain=domain,
-                generation=str(owner.owner_epoch),
-                rows=serving_rows,
+            publication = self._serving.publish(
+                HighScaleBatch(batch_id, service_id, domain, str(owner.owner_epoch), serving_rows)
             )
-            publication = self._serving.publish(batch)
         else:
-            publication = PublicationResult(
-                batch_id=batch_id, status=PublicationStatus.VISIBLE, rows_visible=0, duplicate=False
-            )
+            publication = PublicationResult(batch_id, PublicationStatus.VISIBLE, 0, False)
         self._publish_aggregates_batch(service_id, domain, manifest.manifest_id, owner.owner_epoch, all_events)
         if domain == "request":
             self._publish_cmcd_projection(
@@ -1284,14 +1189,9 @@ class HighScaleIngestController:
             )
         sibling = _RUM_SIBLING_DOMAIN.get(domain)
         if sibling is not None and sibling_events:
+            sibling_batch_id = build_batch_id_from_manifest_id(f"{manifest.manifest_id}:{sibling}")
             self._serving.publish(
-                HighScaleBatch(
-                    batch_id=build_batch_id_from_manifest_id(f"{manifest.manifest_id}:{sibling}"),
-                    service_id=service_id,
-                    domain=sibling,
-                    generation=str(owner.owner_epoch),
-                    rows=tuple(sibling_events),
-                )
+                HighScaleBatch(sibling_batch_id, service_id, sibling, str(owner.owner_epoch), tuple(sibling_events))
             )
             self._publish_aggregates_batch(service_id, sibling, manifest.manifest_id, owner.owner_epoch, sibling_events)
         object_keys = tuple(desc.object_key for desc, _ in sources_payloads)
@@ -1315,13 +1215,7 @@ class HighScaleIngestController:
                         service_id, desc.object_key, gen, manifest.manifest_id, owner.owner_epoch
                     )
                     self._ledger.acknowledge(service_id, desc.object_key, manifest.manifest_id)
-        return BatchIngestResult(
-            manifest=manifest,
-            publication=publication,
-            total_events=total_accepted,
-            quarantined_events=total_quarantined,
-            sources_count=len(sources_payloads),
-        )
+        return BatchIngestResult(manifest, publication, total_accepted, total_quarantined, len(sources_payloads))
 
     def _publish_aggregates_batch(
         self, service_id: str, domain: str, manifest_id: str, owner_epoch: int, events: Sequence[dict[str, Any]]
@@ -1332,14 +1226,10 @@ class HighScaleIngestController:
             event_tuple: tuple[dict[str, Any], ...] = tuple(events)
             counts = compute_dimension_counts(domain, event_tuple)
             if counts:
-                batch = HighScaleBatch(
-                    batch_id=build_batch_id_from_manifest_id(f"{manifest_id}:{domain}_aggregate"),
-                    service_id=service_id,
-                    domain=f"{domain}_aggregate",
-                    generation=str(owner_epoch),
-                    rows=counts,
+                agg_id = build_batch_id_from_manifest_id(f"{manifest_id}:{domain}_aggregate")
+                self._aggregates.publish(
+                    HighScaleBatch(agg_id, service_id, f"{domain}_aggregate", str(owner_epoch), counts)
                 )
-                self._aggregates.publish(batch)
             if domain == "request":
                 origin_proj = build_origin_projection_rows(event_tuple)
                 perf_proj = build_performance_projection_rows(event_tuple)
@@ -1354,17 +1244,9 @@ class HighScaleIngestController:
                     ("security_dimensions", security_proj.dimension_rows),
                     ("network_dimensions", network_proj.dimension_rows),
                 ):
-                    if not rows:
-                        continue
-                    self._aggregates.publish(
-                        HighScaleBatch(
-                            batch_id=build_batch_id_from_manifest_id(f"{manifest_id}:{sub_domain}"),
-                            service_id=service_id,
-                            domain=sub_domain,
-                            generation=str(owner_epoch),
-                            rows=rows,
-                        )
-                    )
+                    if rows:
+                        sub_id = build_batch_id_from_manifest_id(f"{manifest_id}:{sub_domain}")
+                        self._aggregates.publish(HighScaleBatch(sub_id, service_id, sub_domain, str(owner_epoch), rows))
         except Exception:
             logger.exception(
                 "high-scale batch aggregate publish failed",
@@ -1393,17 +1275,8 @@ class HighScaleIngestController:
                     "high-scale cmcd projection skipped malformed events",
                     extra={"service_id": service_id, "skipped": skipped},
                 )
-            if not rows:
-                return
-            self._serving.publish(
-                HighScaleBatch(
-                    batch_id=batch_id,
-                    service_id=service_id,
-                    domain="cmcd",
-                    generation=str(owner_epoch),
-                    rows=tuple(rows),
-                )
-            )
+            if rows:
+                self._serving.publish(HighScaleBatch(batch_id, service_id, "cmcd", str(owner_epoch), tuple(rows)))
         except Exception:
             logger.exception(
                 "high-scale cmcd projection publish failed", extra={"service_id": service_id, "batch_id": batch_id}
@@ -1457,26 +1330,25 @@ def _enrich_high_scale_ngwaf_bots(events: tuple[dict[str, Any], ...]) -> None:
         finally:
             pconn.close()
         bot_map = {
-            (r["waf_req_id"] if isinstance(r, dict) else r[0]): {
-                "name": r["bot_name"] if isinstance(r, dict) else r[1],
-                "cat": r["category"] if isinstance(r, dict) else r[2],
-                "wk": r["wellknown_bot_name"] if isinstance(r, dict) else r[3],
-            }
+            (r["waf_req_id"] if isinstance(r, dict) else r[0]): (
+                r["bot_name"] if isinstance(r, dict) else r[1],
+                r["category"] if isinstance(r, dict) else r[2],
+                r["wellknown_bot_name"] if isinstance(r, dict) else r[3],
+            )
             for r in rows
         }
         for e in events:
             wid = str(e.get("waf_req_id")) if e.get("waf_req_id") else None
             if wid and wid in bot_map:
-                bot = bot_map[wid]
-                e["_ngwaf_bot_name"] = bot["name"]
-                e["_ngwaf_bot_category"] = bot["cat"]
-                e["_ngwaf_wellknown_bot_name"] = bot["wk"]
+                name, cat, wk = bot_map[wid]
+                e["_ngwaf_bot_name"] = e["ngwaf_bot"] = name
+                e["_ngwaf_bot_category"] = cat
+                e["_ngwaf_wellknown_bot_name"] = wk
                 e["ngwaf_bot_verification_state"] = "verified"
-                e["ngwaf_bot"] = bot["name"]
-                if bot["cat"]:
-                    e["ngwaf_bot_category"] = bot["cat"]
-                if bot["wk"]:
-                    e["ngwaf_wellknown_bot"] = bot["wk"]
+                if cat:
+                    e["ngwaf_bot_category"] = cat
+                if wk:
+                    e["ngwaf_wellknown_bot"] = wk
     except Exception:
         logger.warning("high-scale NGWAF bot enrichment failed", exc_info=True)
 
@@ -1485,16 +1357,14 @@ def _enrich_high_scale_ngwaf_bots(events: tuple[dict[str, Any], ...]) -> None:
 _memo = ResponseMemo(ttl=30.0, maxsize=128)
 _response_cache = _memo.cache
 _CacheRegistry.register("high_scale.assets._response_cache", _response_cache)
-_ASSET_TYPE_CASE = """
-    CASE
-        WHEN url_lower LIKE '%.png' OR url_lower LIKE '%.jpg' OR url_lower LIKE '%.jpeg' OR url_lower LIKE '%.gif' OR url_lower LIKE '%.svg' OR url_lower LIKE '%.webp' OR url_lower LIKE '%.ico' THEN 'Images'
-        WHEN url_lower LIKE '%.pdf' OR url_lower LIKE '%.doc' OR url_lower LIKE '%.docx' OR url_lower LIKE '%.xls' OR url_lower LIKE '%.xlsx' OR url_lower LIKE '%.ppt' OR url_lower LIKE '%.pptx' OR url_lower LIKE '%.txt' OR url_lower LIKE '%.csv' OR url_lower LIKE '%.zip' OR url_lower LIKE '%.tar' OR url_lower LIKE '%.gz' OR url_lower LIKE '%.tgz' OR url_lower LIKE '%.rar' OR url_lower LIKE '%.7z' THEN 'Documents'
-        WHEN url_lower LIKE '%.js' OR url_lower LIKE '%.mjs' OR url_lower LIKE '%.css' THEN 'JavaScript/CSS'
-        WHEN url_lower LIKE '%.woff' OR url_lower LIKE '%.woff2' OR url_lower LIKE '%.ttf' OR url_lower LIKE '%.otf' OR url_lower LIKE '%.eot' THEN 'Fonts'
-        WHEN url_lower LIKE '%.m3u8' OR url_lower LIKE '%.ts' OR url_lower LIKE '%.mp4' OR url_lower LIKE '%.m4s' OR url_lower LIKE '%.webm' THEN 'Video'
-        ELSE 'API/Dynamic'
-    END
-"""
+_ASSET_TYPE_CASE = """CASE
+    WHEN url_lower LIKE '%.png' OR url_lower LIKE '%.jpg' OR url_lower LIKE '%.jpeg' OR url_lower LIKE '%.gif' OR url_lower LIKE '%.svg' OR url_lower LIKE '%.webp' OR url_lower LIKE '%.ico' THEN 'Images'
+    WHEN url_lower LIKE '%.pdf' OR url_lower LIKE '%.doc' OR url_lower LIKE '%.docx' OR url_lower LIKE '%.xls' OR url_lower LIKE '%.xlsx' OR url_lower LIKE '%.ppt' OR url_lower LIKE '%.pptx' OR url_lower LIKE '%.txt' OR url_lower LIKE '%.csv' OR url_lower LIKE '%.zip' OR url_lower LIKE '%.tar' OR url_lower LIKE '%.gz' OR url_lower LIKE '%.tgz' OR url_lower LIKE '%.rar' OR url_lower LIKE '%.7z' THEN 'Documents'
+    WHEN url_lower LIKE '%.js' OR url_lower LIKE '%.mjs' OR url_lower LIKE '%.css' THEN 'JavaScript/CSS'
+    WHEN url_lower LIKE '%.woff' OR url_lower LIKE '%.woff2' OR url_lower LIKE '%.ttf' OR url_lower LIKE '%.otf' OR url_lower LIKE '%.eot' THEN 'Fonts'
+    WHEN url_lower LIKE '%.m3u8' OR url_lower LIKE '%.ts' OR url_lower LIKE '%.mp4' OR url_lower LIKE '%.m4s' OR url_lower LIKE '%.webm' THEN 'Video'
+    ELSE 'API/Dynamic'
+END"""
 
 
 def compute_summary_from_dims(
@@ -1510,8 +1380,7 @@ def compute_summary_from_dims(
     by_cache: dict[tuple[str, str], list[int]] = defaultdict(lambda: [0, 0])
     by_comp: dict[tuple[str, str], list[int]] = defaultdict(lambda: [0, 0])
     for asset_type, cache_status, encoding_norm, is_compressed, is_compressible, reqs, sum_bytes in dim_rows:
-        r = int(reqs or 0)
-        b = int(sum_bytes or 0)
+        r, b = int(reqs or 0), int(sum_bytes or 0)
         by_type_reqs[asset_type] += r
         by_type_bytes[asset_type] += b
         if cache_status in ("HIT", "HIT-SYNTHETIC"):
@@ -1522,12 +1391,10 @@ def compute_summary_from_dims(
             by_type_comp_denom[asset_type] += r
             if is_compressed == 1:
                 by_type_comp_num[asset_type] += r
-        cache_pair = by_cache[(asset_type, cache_status)]
-        cache_pair[0] += r
-        cache_pair[1] += b
-        comp_pair = by_comp[(asset_type, encoding_norm)]
-        comp_pair[0] += r
-        comp_pair[1] += b
+        by_cache[(asset_type, cache_status)][0] += r
+        by_cache[(asset_type, cache_status)][1] += b
+        by_comp[(asset_type, encoding_norm)][0] += r
+        by_comp[(asset_type, encoding_norm)][1] += b
     asset_type_breakdown = [
         {
             "asset_type": at,
@@ -1587,63 +1454,35 @@ def assets_aggregates(
     }
     enriched_cte = f"""
         WITH grouped_raw AS (
-            SELECT
-                url,
-                if(custom_fields['cache'] != '', custom_fields['cache'], 'MISS') AS cache,
-                custom_fields['resp_header_content_encoding'] AS content_encoding,
-                if(custom_fields['status'] != '', toInt32OrZero(custom_fields['status']), 200) AS status,
-                count() AS req_cnt,
-                sum(toInt64OrZero(custom_fields['resp_bytes'])) AS sum_bytes,
-                sum(coalesce(toFloat64OrNull(custom_fields['ttl']), 0.0)) AS sum_ttl,
-                countIf(toFloat64OrNull(custom_fields['ttl']) IS NOT NULL) AS cnt_ttl
-            FROM request_facts
-            WHERE {where}
-            GROUP BY url, cache, content_encoding, status
+            SELECT url, if(custom_fields['cache'] != '', custom_fields['cache'], 'MISS') AS cache,
+                   custom_fields['resp_header_content_encoding'] AS content_encoding,
+                   if(custom_fields['status'] != '', toInt32OrZero(custom_fields['status']), 200) AS status,
+                   count() AS req_cnt, sum(toInt64OrZero(custom_fields['resp_bytes'])) AS sum_bytes,
+                   sum(coalesce(toFloat64OrNull(custom_fields['ttl']), 0.0)) AS sum_ttl,
+                   countIf(toFloat64OrNull(custom_fields['ttl']) IS NOT NULL) AS cnt_ttl
+            FROM request_facts WHERE {where} GROUP BY url, cache, content_encoding, status
         ),
         grouped_base AS (
-            SELECT
-                *,
-                lower(url) AS url_lower,
-                lower(content_encoding) AS enc_lower
-            FROM grouped_raw
+            SELECT *, lower(url) AS url_lower, lower(content_encoding) AS enc_lower FROM grouped_raw
         ),
         assets_enriched AS (
-            SELECT
-                url,
-                cache,
-                content_encoding,
-                status,
-                req_cnt,
-                sum_bytes,
-                sum_ttl,
-                cnt_ttl,
-                {_ASSET_TYPE_CASE} AS asset_type,
-                if(enc_lower IN ('gzip', 'br', 'deflate'), 1, 0) AS is_compressed,
-                if(
-                    url_lower LIKE '%.js' OR url_lower LIKE '%.mjs' OR url_lower LIKE '%.css'
-                    OR url_lower LIKE '%.svg' OR url_lower LIKE '%.html' OR url_lower LIKE '%.json',
-                    1,
-                    0
-                ) AS is_compressible
+            SELECT url, cache, content_encoding, status, req_cnt, sum_bytes, sum_ttl, cnt_ttl,
+                   {_ASSET_TYPE_CASE} AS asset_type,
+                   if(enc_lower IN ('gzip', 'br', 'deflate'), 1, 0) AS is_compressed,
+                   if(url_lower LIKE '%.js' OR url_lower LIKE '%.mjs' OR url_lower LIKE '%.css'
+                      OR url_lower LIKE '%.svg' OR url_lower LIKE '%.html' OR url_lower LIKE '%.json', 1, 0) AS is_compressible
             FROM grouped_base
-        )
-    """
+        )"""
     dims_sql = f"""
         /* assets:summary_dims */
         {enriched_cte}
-        SELECT
-            asset_type,
-            cache AS cache_status,
-            CASE
-                WHEN lower(content_encoding) LIKE '%br%' THEN 'br'
-                WHEN lower(content_encoding) LIKE '%gzip%' THEN 'gzip'
-                WHEN content_encoding != '' THEN content_encoding
-                ELSE 'uncompressed'
-            END AS content_encoding_norm,
-            is_compressed,
-            is_compressible,
-            toInt64(sum(req_cnt)) AS requests,
-            toInt64(sum(sum_bytes)) AS bytes
+        SELECT asset_type, cache AS cache_status,
+               CASE WHEN lower(content_encoding) LIKE '%br%' THEN 'br'
+                    WHEN lower(content_encoding) LIKE '%gzip%' THEN 'gzip'
+                    WHEN content_encoding != '' THEN content_encoding
+                    ELSE 'uncompressed' END AS content_encoding_norm,
+               is_compressed, is_compressible,
+               toInt64(sum(req_cnt)) AS requests, toInt64(sum(sum_bytes)) AS bytes
         FROM assets_enriched
         GROUP BY asset_type, cache_status, content_encoding_norm, is_compressed, is_compressible
     """
@@ -1651,45 +1490,27 @@ def assets_aggregates(
         /* assets:hotspots */
         {enriched_cte}
         SELECT * FROM (
-            SELECT
-                'large' AS kind,
-                url,
-                toInt64(sum(req_cnt)) AS requests,
-                toFloat64(sum(sum_bytes)) / nullIf(toFloat64(sum(req_cnt)), 0.0) AS metric_float,
-                toInt64(sum(sum_bytes)) AS total_bytes,
-                toInt32(status) AS status,
-                '' AS asset_type
+            SELECT 'large' AS kind, url, toInt64(sum(req_cnt)) AS requests,
+                   toFloat64(sum(sum_bytes)) / nullIf(toFloat64(sum(req_cnt)), 0.0) AS metric_float,
+                   toInt64(sum(sum_bytes)) AS total_bytes, toInt32(status) AS status, '' AS asset_type
             FROM assets_enriched
             WHERE is_compressed = 0 AND is_compressible = 1 AND status NOT IN (304, 204)
-            GROUP BY url, status
-            ORDER BY total_bytes DESC
-            LIMIT 20
+            GROUP BY url, status ORDER BY total_bytes DESC LIMIT 20
         )
         UNION ALL
         SELECT * FROM (
-            SELECT
-                'low_ttl' AS kind,
-                url,
-                toInt64(sum(req_cnt)) AS requests,
-                toFloat64(sum(sum_ttl)) / nullIf(toFloat64(sum(cnt_ttl)), 0.0) AS metric_float,
-                toInt64(0) AS total_bytes,
-                toInt32(0) AS status,
-                asset_type
+            SELECT 'low_ttl' AS kind, url, toInt64(sum(req_cnt)) AS requests,
+                   toFloat64(sum(sum_ttl)) / nullIf(toFloat64(sum(cnt_ttl)), 0.0) AS metric_float,
+                   toInt64(0) AS total_bytes, toInt32(0) AS status, asset_type
             FROM assets_enriched
             WHERE cache = 'MISS' AND asset_type != 'API/Dynamic'
-            GROUP BY url, asset_type
-            ORDER BY requests DESC
-            LIMIT 20
+            GROUP BY url, asset_type ORDER BY requests DESC LIMIT 20
         )
     """
-    import contextvars
-    from concurrent.futures import ThreadPoolExecutor
-
     with ThreadPoolExecutor(max_workers=2, thread_name_prefix="hs-assets") as pool:
         fut_dims = pool.submit(contextvars.copy_context().run, lambda: service.client.execute(dims_sql, params))
         fut_hotspots = pool.submit(contextvars.copy_context().run, lambda: service.client.execute(hotspots_sql, params))
-        dim_dicts = fut_dims.result()
-        hotspot_dicts = fut_hotspots.result()
+        dim_dicts, hotspot_dicts = fut_dims.result(), fut_hotspots.result()
     dim_tuples = [
         (
             str(d["asset_type"]),
@@ -1737,14 +1558,7 @@ def assets_aggregates(
     return AssetsAggregatesResponse.with_telemetry(**payload)
 
 
-# ── Worker Loop (folded from backend.high_scale.worker) ──────────────────────
-# ── Folded from backend/high_scale/orchestration.py ──────────────────────────
-import logging
-import sys
-from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
-from typing import Protocol
-
+# ── Worker & Orchestration (folded from worker.py & orchestration.py) ─────────
 MAX_SOURCE_PAGE_SIZE = 500
 INITIAL_SOURCE_CURSOR = "__initial__"
 TERMINAL_SOURCE_CURSOR_PREFIX = "__terminal__:"
@@ -1767,8 +1581,6 @@ from backend.high_scale.historical_jobs import (  # noqa: E402
     replay_origin_projections,
     replay_performance_projections,
 )
-
-logger = logging.getLogger(__name__)
 
 
 class SourceObjectMissingError(RuntimeError):
@@ -1835,13 +1647,12 @@ class S3SourceObjectLister:
         domain_prefix = self._PREFIXES.get(domain)
         if domain_prefix is None:
             raise ValueError(f"unsupported source domain: {domain}")
-        resolved_prefix = self._key(domain_prefix)
         if reinspect and domain not in RUM_SOURCE_DOMAINS:
             raise ValueError("only RUM source domains support reinspection")
         if forward_pages_since_reinspection < 0:
             raise ValueError("forward_pages_since_reinspection cannot be negative")
+        resolved_prefix = self._key(domain_prefix)
         listing_cursor = (reinspection_cursor or INITIAL_SOURCE_CURSOR) if reinspect else cursor
-        paginator = self._client.get_paginator("list_objects_v2")
         request: dict[str, Any] = {
             "Bucket": self._bucket,
             "Prefix": resolved_prefix,
@@ -1854,7 +1665,7 @@ class S3SourceObjectLister:
                     request["StartAfter"] = start_after
             else:
                 request["PaginationConfig"]["StartingToken"] = listing_cursor
-        page = next(iter(paginator.paginate(**request)))
+        page = next(iter(self._client.get_paginator("list_objects_v2").paginate(**request)))
         objects = tuple(
             SourceObjectDescriptor(
                 object_key=item["Key"],
@@ -1870,7 +1681,7 @@ class S3SourceObjectLister:
             return SourceObjectPage(objects, next_cursor)
         if reinspect:
             has_more = bool(page.get("NextContinuationToken"))
-            next_reinspection_cursor = (
+            next_reinspection = (
                 f"{TERMINAL_SOURCE_CURSOR_PREFIX}{objects[-1].object_key}"
                 if has_more and objects
                 else INITIAL_SOURCE_CURSOR
@@ -1878,7 +1689,7 @@ class S3SourceObjectLister:
             return SourceObjectPage(
                 objects,
                 cursor or INITIAL_SOURCE_CURSOR,
-                next_reinspection_cursor=next_reinspection_cursor,
+                next_reinspection_cursor=next_reinspection,
                 forward_pages_since_reinspection=0,
                 reinspection_page=True,
             )
@@ -1908,8 +1719,7 @@ class S3SourceObjectReader:
         try:
             response = self._client.get_object(Bucket=self._bucket, Key=object_key)
         except Exception as exc:
-            error_code = _client_error_code(exc)
-            if error_code in {"NoSuchKey", "404"}:
+            if _client_error_code(exc) in {"NoSuchKey", "404"}:
                 raise SourceObjectMissingError(f"source object is missing from storage: {object_key}") from exc
             raise
         return response["Body"].read()
@@ -1918,12 +1728,8 @@ class S3SourceObjectReader:
 def _client_error_code(exc: Exception) -> str | None:
     """Extract the S3/boto3 error code without importing botocore directly."""
     response = getattr(exc, "response", None)
-    if not isinstance(response, dict):
-        return None
-    error = response.get("Error")
-    if not isinstance(error, dict):
-        return None
-    code = error.get("Code")
+    error = response.get("Error") if isinstance(response, dict) else None
+    code = error.get("Code") if isinstance(error, dict) else None
     return code if isinstance(code, str) else None
 
 
@@ -1941,17 +1747,10 @@ class SourceObjectReader(Protocol):
     def read_source_object(self, service_id: str, domain: str, object_key: str) -> bytes: ...
 
 
-_self_mod = sys.modules[__name__]
-sys.modules["backend.high_scale.source_discovery"] = _self_mod
-
-
 class SourceControlPlane(Protocol):
     def owner(self, service_id: str) -> Any: ...
-
     def source_cursor_for(self, service_id: str, domain: str) -> str: ...
-
     def source_reinspection_state_for(self, service_id: str, domain: str) -> tuple[str, int]: ...
-
     def advance_reinspection_state(
         self,
         service_id: str,
@@ -1962,7 +1761,6 @@ class SourceControlPlane(Protocol):
         expected_owner: str,
         expected_owner_epoch: int,
     ) -> None: ...
-
     def discover_source(
         self,
         service_id: str,
@@ -1975,7 +1773,6 @@ class SourceControlPlane(Protocol):
         expected_owner: str,
         expected_owner_epoch: int,
     ) -> Any: ...
-
     def claim_source(
         self,
         service_id: str,
@@ -2043,30 +1840,21 @@ class HighScaleWorkerCoordinator:
     def run_page(
         self, *, service_id: str, domain: str, cursor: str | None = None, now: datetime | None = None
     ) -> PageRun:
-        owner = self._owner(service_id)
-        current_owner, epoch, persisted_cursor = _owner_fields(owner)
+        current_owner, epoch, persisted_cursor = _owner_fields(self._owner(service_id))
         self._require_high_scale(current_owner, service_id)
         if cursor is None:
             cursor_reader = self._control if self._control is not None else self._ownership
             if hasattr(cursor_reader, "source_cursor_for"):
                 persisted_cursor = cursor_reader.source_cursor_for(service_id, domain)
         listing_cursor = persisted_cursor if cursor is None else cursor
-        reinspection_cursor = INITIAL_SOURCE_CURSOR
-        forward_pages_since_reinspection = 0
-        has_reinspection_state = False
-        should_reinspect = False
-        if self._control is not None and domain in RUM_SOURCE_DOMAINS:
-            reinspection_cursor, forward_pages_since_reinspection = self._control.source_reinspection_state_for(
-                service_id, domain
-            )
-            has_reinspection_state = True
-            should_reinspect = forward_pages_since_reinspection >= RUM_REINSPECTION_INTERVAL
+        has_reinspection = self._control is not None and domain in RUM_SOURCE_DOMAINS
         listing_options: dict[str, Any] = {}
-        if has_reinspection_state:
+        if has_reinspection and self._control is not None:
+            reinspection_cursor, fwd_pages = self._control.source_reinspection_state_for(service_id, domain)
             listing_options = {
                 "reinspection_cursor": reinspection_cursor,
-                "reinspect": should_reinspect,
-                "forward_pages_since_reinspection": forward_pages_since_reinspection,
+                "reinspect": fwd_pages >= RUM_REINSPECTION_INTERVAL,
+                "forward_pages_since_reinspection": fwd_pages,
             }
         page = self._lister.list_source_objects(
             service_id, domain, page_size=self._page_size, cursor=listing_cursor, **listing_options
@@ -2076,10 +1864,7 @@ class HighScaleWorkerCoordinator:
             raise ValueError("source object listing exceeded page_size")
 
         expired_sources = self._expired_claim_descriptors(service_id, domain)
-        discovered_by_key: dict[str, Any] = {
-            source.object_key: self._discover(service_id, domain, source, current_owner, epoch) for source in objects
-        }
-
+        discovered_by_key = {s.object_key: self._discover(service_id, domain, s, current_owner, epoch) for s in objects}
         next_cursor = page.next_cursor
         if next_cursor is None:
             if objects:
@@ -2087,22 +1872,18 @@ class HighScaleWorkerCoordinator:
             elif listing_cursor and listing_cursor.startswith(TERMINAL_SOURCE_CURSOR_PREFIX):
                 next_cursor = listing_cursor
 
-        processed = 0
-        duplicates = 0
-        failed = 0
-        missing = 0
-
+        processed = duplicates = failed = missing = 0
         active_sources: list[SourceObjectDescriptor] = list(expired_sources)
         active_keys = {s.object_key for s in active_sources}
         for s in objects:
             if s.object_key in active_keys:
                 continue
-            rec = discovered_by_key.get(s.object_key)
-            rec_status = getattr(rec, "status", None)
-            if isinstance(rec_status, str):
-                is_terminal = rec_status in _TERMINAL_SOURCE_STATES
-            else:
-                is_terminal = self._already_terminal(service_id, s.object_key)
+            rec_status = getattr(discovered_by_key.get(s.object_key), "status", None)
+            is_terminal = (
+                rec_status in _TERMINAL_SOURCE_STATES
+                if isinstance(rec_status, str)
+                else self._already_terminal(service_id, s.object_key)
+            )
             if is_terminal:
                 duplicates += 1
             else:
@@ -2116,11 +1897,9 @@ class HighScaleWorkerCoordinator:
                 or "claim_sources_batch" in vars(self._control)
                 or "claim_sources_batch" in getattr(self._control, "_mock_children", {})
             ):
-                keys = tuple(s.object_key for s in active_sources)
-                claim_batch_fn = getattr(self._control, "claim_sources_batch")
-                claims = claim_batch_fn(
+                claims = getattr(self._control, "claim_sources_batch")(
                     service_id,
-                    keys,
+                    tuple(s.object_key for s in active_sources),
                     self._worker_id,
                     expected_owner=current_owner,
                     expected_owner_epoch=epoch,
@@ -2148,11 +1927,11 @@ class HighScaleWorkerCoordinator:
                             failed += 1
                             unclaimable_keys.add(s.object_key)
             else:
-                claimed_keys = set()
-                for s in active_sources:
-                    c = self._ledger.claim(service_id, s.object_key, self._worker_id)
-                    if c.claimed:
-                        claimed_keys.add(s.object_key)
+                claimed_keys = {
+                    s.object_key
+                    for s in active_sources
+                    if self._ledger.claim(service_id, s.object_key, self._worker_id).claimed
+                }
 
             to_read: list[SourceObjectDescriptor] = []
             for s in active_sources:
@@ -2167,8 +1946,7 @@ class HighScaleWorkerCoordinator:
                     src: SourceObjectDescriptor,
                 ) -> tuple[SourceObjectDescriptor, bytes | None, str | None, bool]:
                     try:
-                        data = self._reader.read_source_object(service_id, domain, src.object_key)
-                        return (src, data, None, False)
+                        return (src, self._reader.read_source_object(service_id, domain, src.object_key), None, False)
                     except SourceObjectMissingError as exc:
                         return (src, None, str(exc), True)
                     except Exception as exc:
@@ -2209,12 +1987,11 @@ class HighScaleWorkerCoordinator:
 
                 if valid_payloads:
                     try:
-                        batch_next_cursor = None if failed > 0 or page.reinspection_page else next_cursor
                         batch_res = self._controller.ingest_batch(
                             service_id=service_id,
                             domain=domain,
                             sources_payloads=valid_payloads,
-                            next_cursor=batch_next_cursor,
+                            next_cursor=None if failed > 0 or page.reinspection_page else next_cursor,
                             now=now,
                         )
                         processed += batch_res.sources_count
@@ -2231,7 +2008,7 @@ class HighScaleWorkerCoordinator:
                         failed += len(valid_payloads)
 
         if failed == 0:
-            if page.reinspection_page and has_reinspection_state and self._control is not None:
+            if page.reinspection_page and has_reinspection and self._control is not None:
                 self._control.advance_reinspection_state(
                     service_id,
                     domain,
@@ -2247,26 +2024,20 @@ class HighScaleWorkerCoordinator:
                     next_cursor,
                     current_owner,
                     epoch,
-                    reinspection_cursor=page.next_reinspection_cursor if has_reinspection_state else None,
+                    reinspection_cursor=page.next_reinspection_cursor if has_reinspection else None,
                     forward_pages_since_reinspection=(
-                        page.forward_pages_since_reinspection if has_reinspection_state else None
+                        page.forward_pages_since_reinspection if has_reinspection else None
                     ),
                 )
         return PageRun(listing_cursor, next_cursor, len(objects), processed, duplicates, failed, missing)
 
     def _expired_claim_descriptors(self, service_id: str, domain: str) -> list[SourceObjectDescriptor]:
-        source_store = self._control if self._control is not None else self._ledger
-        expired_claims = getattr(source_store, "expired_claims", None)
+        expired_claims = getattr(self._control if self._control is not None else self._ledger, "expired_claims", None)
         if expired_claims is None:
             return []
         return [
-            SourceObjectDescriptor(
-                object_key=source.object_key,
-                checksum=source.checksum,
-                size_bytes=source.size_bytes,
-                version=source.version,
-            )
-            for source in expired_claims(service_id, domain, limit=self._page_size)
+            SourceObjectDescriptor(s.object_key, s.checksum, s.size_bytes, s.version)
+            for s in expired_claims(service_id, domain, limit=self._page_size)
         ]
 
     def _mark_missing(
@@ -2309,7 +2080,12 @@ class HighScaleWorkerCoordinator:
                 expected_owner_epoch=epoch,
             )
         return self._ledger.discover(
-            service_id, domain, source.object_key, source.checksum, size_bytes=source.size_bytes, version=source.version
+            service_id,
+            domain,
+            source.object_key,
+            source.checksum,
+            size_bytes=source.size_bytes,
+            version=source.version,
         )
 
     def _advance_cursor(
@@ -2326,12 +2102,14 @@ class HighScaleWorkerCoordinator:
         if cursor is None:
             return
         if self._control is not None and hasattr(self._control, "advance_source_cursor"):
-            state_kwargs: dict[str, Any] = {}
-            if reinspection_cursor is not None and forward_pages_since_reinspection is not None:
-                state_kwargs = {
+            state_kwargs = (
+                {
                     "reinspection_cursor": reinspection_cursor,
                     "forward_pages_since_reinspection": forward_pages_since_reinspection,
                 }
+                if reinspection_cursor is not None and forward_pages_since_reinspection is not None
+                else {}
+            )
             self._control.advance_source_cursor(
                 service_id, cursor, expected_owner=owner, expected_owner_epoch=epoch, domain=domain, **state_kwargs
             )
@@ -2416,9 +2194,8 @@ class FairPageSelector:
         for service_id in self._services:
             if len(selected) >= capacity:
                 break
-            queue = self._queues[service_id]
-            if queue:
-                selected.append((service_id, queue.popleft()))
+            if self._queues[service_id]:
+                selected.append((service_id, self._queues[service_id].popleft()))
                 self._deficits[service_id] += self._weights[service_id] - 1
         while len(selected) < capacity and any(self._queues.values()):
             progressed = False
@@ -2531,9 +2308,7 @@ class HighScaleWorkerLoop:
 
     def _run_deletion_sweeps(self) -> None:
         targets = self._deletion_targets()
-        if not targets:
-            return
-        if self._deletion_thread is not None and self._deletion_thread.is_alive():
+        if not targets or (self._deletion_thread is not None and self._deletion_thread.is_alive()):
             return
         self._deletion_thread = Thread(
             target=self._sweep_targets, args=(targets,), name="high-scale-deletion-sweep", daemon=True
@@ -2579,8 +2354,7 @@ class HighScaleWorkerLoop:
         coord_map = dict(self._coordinators)
         for r in results:
             if r.page is not None:
-                c = coord_map.get(r.service_id)
-                page_size = getattr(c, "_page_size", None) if c else None
+                page_size = getattr(coord_map.get(r.service_id), "_page_size", None)
                 if page_size is not None and page_size > 0 and r.page.discovered >= page_size:
                     return True
         return False
@@ -2595,10 +2369,8 @@ class HighScaleWorkerLoop:
             if max_iterations is not None and iterations >= max_iterations:
                 self.wait_for_deletion_sweep()
                 return
-            if self._interval_seconds > 0:
-                if not self._has_full_page(results):
-                    sleep_dur = random.uniform(0.5, 1.0) * self._interval_seconds
-                    self._sleeper(sleep_dur)
+            if self._interval_seconds > 0 and not self._has_full_page(results):
+                self._sleeper(random.uniform(0.5, 1.0) * self._interval_seconds)
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -2622,11 +2394,9 @@ def build_worker_from_environment() -> HighScaleWorkerLoop:
             "shard_count": topology.shard_count,
         },
     )
-    service_ids = _csv_env("HIGH_SCALE_SERVICE_IDS")
-    if not service_ids:
-        service_ids = tuple(
-            cfg["service_id"] for cfg in app_config.list_configs() if isinstance(cfg, dict) and cfg.get("service_id")
-        )
+    service_ids = _csv_env("HIGH_SCALE_SERVICE_IDS") or tuple(
+        cfg["service_id"] for cfg in app_config.list_configs() if isinstance(cfg, dict) and cfg.get("service_id")
+    )
     if not service_ids:
         raise ValueError("HIGH_SCALE_SERVICE_IDS is required (none found in configs/)")
     worker_id = (
@@ -2641,10 +2411,9 @@ def build_worker_from_environment() -> HighScaleWorkerLoop:
     domains = tuple(_csv_env("HIGH_SCALE_DOMAINS") or ("request", "rum_vitals", "rum_errors"))
     control = PostgresControlPlane()
     control.create_schema()
+    initial_cursor = os.getenv("HIGH_SCALE_INITIAL_CURSOR", "__initial__")
     for service_id in service_ids:
-        control.initialize_owner(
-            service_id, owner="high_scale", source_cursor=os.getenv("HIGH_SCALE_INITIAL_CURSOR", "__initial__")
-        )
+        control.initialize_owner(service_id, owner="high_scale", source_cursor=initial_cursor)
     clickhouse_settings = app_config.load_clickhouse_config()
     if clickhouse_settings is None:
         raise RuntimeError("high-scale worker requires CLICKHOUSE_ENABLED=true")
@@ -2658,6 +2427,8 @@ def build_worker_from_environment() -> HighScaleWorkerLoop:
     )
     deletion_enabled = os.getenv("HIGH_SCALE_DELETION_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}
     deletion_sweep_limit = int(os.getenv("HIGH_SCALE_DELETION_SWEEP_LIMIT", "100"))
+    deletion_grace = int(os.getenv("HIGH_SCALE_DELETION_GRACE_SECONDS", "900"))
+    archive_prefix = os.getenv("HIGH_SCALE_ARCHIVE_PREFIX", "high-scale/archive")
     coordinators: list[HighScaleWorkerCoordinator] = []
     sweepers: list[HighScaleDeletionSweeper | None] = []
     for service_id in service_ids:
@@ -2668,7 +2439,6 @@ def build_worker_from_environment() -> HighScaleWorkerLoop:
         bucket = source.get("bucket")
         if not isinstance(bucket, str) or not bucket:
             raise ValueError(f"FOS bucket is missing for high-scale service {service_id}")
-        archive_prefix = os.getenv("HIGH_SCALE_ARCHIVE_PREFIX", "high-scale/archive")
         archive = ArchivePublication(S3ObjectStore(fos_client, bucket=bucket, prefix=archive_prefix))
         controller = HighScaleIngestController(
             ownership=control,  # type: ignore[arg-type]
@@ -2679,7 +2449,7 @@ def build_worker_from_environment() -> HighScaleWorkerLoop:
             aggregates=aggregates,
             worker_id=worker_id,
             lease_seconds=lease_seconds,
-            deletion_grace_seconds=int(os.getenv("HIGH_SCALE_DELETION_GRACE_SECONDS", "900")),
+            deletion_grace_seconds=deletion_grace,
         )
         coordinators.append(
             HighScaleWorkerCoordinator(
@@ -2696,9 +2466,10 @@ def build_worker_from_environment() -> HighScaleWorkerLoop:
             )
         )
         if deletion_enabled:
-            raw_store = S3ObjectStore(fos_client, bucket=bucket)
             deletion_ledger = PostgresDeletionLedger(control)
-            deletion_controller = DeletionController(raw_store, archive, deletion_ledger, ownership=deletion_ledger)
+            deletion_controller = DeletionController(
+                S3ObjectStore(fos_client, bucket=bucket), archive, deletion_ledger, ownership=deletion_ledger
+            )
             sweepers.append(HighScaleDeletionSweeper(control=control, controller=deletion_controller))
         else:
             sweepers.append(None)
@@ -2733,8 +2504,7 @@ def main() -> None:
     parser.add_argument("--once", action="store_true", help="process one bounded page per service and domain")
     parser.add_argument("--iterations", type=int, default=None)
     args = parser.parse_args()
-    worker_loop = build_worker_from_environment()
-    worker_loop.run(max_iterations=1 if args.once else args.iterations)
+    build_worker_from_environment().run(max_iterations=1 if args.once else args.iterations)
 
 
 # ── FOS-Authoritative Recovery (folded from backend.high_scale.recovery) ─────
@@ -2752,15 +2522,13 @@ class RecoveryCapacityMeasurement:
     def validate(self) -> None:
         if self.events_per_second <= 0 or self.recovery_window_seconds <= 0:
             raise ValueError("event rate and recovery window must be positive")
-        if (
-            min(
-                self.archive_read_events_per_second,
-                self.decode_events_per_second,
-                self.aggregate_events_per_second,
-                self.clickhouse_insert_events_per_second,
-            )
-            <= 0
-        ):
+        rates = (
+            self.archive_read_events_per_second,
+            self.decode_events_per_second,
+            self.aggregate_events_per_second,
+            self.clickhouse_insert_events_per_second,
+        )
+        if min(rates) <= 0:
             raise ValueError("all recovery throughput measurements must be positive")
         if self.replication_factor < 1:
             raise ValueError("replication factor must be positive")
@@ -2794,8 +2562,9 @@ def evaluate_recovery_capacity(measurement: RecoveryCapacityMeasurement) -> Reco
     }
     limiting_stage, limiting_rate = min(stages.items(), key=lambda item: item[1])
     replication_adjusted = measurement.clickhouse_insert_events_per_second / measurement.replication_factor
-    feasible = limiting_rate >= required
-    return RecoveryCapacityReport(required, limiting_stage, limiting_rate, replication_adjusted, feasible)
+    return RecoveryCapacityReport(
+        required, limiting_stage, limiting_rate, replication_adjusted, limiting_rate >= required
+    )
 
 
 @dataclass(frozen=True)
@@ -2855,8 +2624,7 @@ def rebuild_serving_state_from_fos(
     if warm_window <= recent_window:
         raise ValueError("warm_window must exceed recent_window")
     observed = (now or datetime.now(UTC)).astimezone(UTC)
-    recent_start = observed - recent_window
-    warm_start = observed - warm_window
+    recent_start, warm_start = observed - recent_window, observed - warm_window
     resolved_rebuild_id = rebuild_id or uuid4().hex
     capacity_report = _evaluate_capacity_gate(
         capacity, service_id=service_id, domain=domain, rebuild_id=resolved_rebuild_id
@@ -2867,8 +2635,7 @@ def rebuild_serving_state_from_fos(
         recent_manifests, archive, publication, resolved_rebuild_id
     )
     warm_rows, warm_replayed, warm_errors = _replay_all(warm_manifests, archive, publication, resolved_rebuild_id)
-    triage_available = not recent_errors
-    warm_available = not warm_errors
+    triage_available, warm_available = not recent_errors, not warm_errors
     return RecoveryReport(
         ingest_accepted=True,
         triage_available=triage_available,
@@ -2891,19 +2658,21 @@ class _SqlClient(Protocol):
 
 
 _ORIGIN_PROJECTION_TABLES = ("origin_minute_summary", "origin_minute_dimensions")
+_RUM_FACT_TABLES = {"rum_vitals": "rum_vitals_facts", "rum_errors": "rum_error_facts"}
+
+
+def _purge_since(client: _SqlClient, table: str, ts_col: str, service_id: str, since: datetime) -> None:
+    client.execute(
+        f"ALTER TABLE `{table}` DELETE WHERE service_id={{service_id:String}} "
+        f"AND {ts_col} >= {{since:DateTime64(3)}} SETTINGS mutations_sync=2",
+        {"service_id": service_id, "since": since},
+    )
 
 
 def purge_origin_projections(client: _SqlClient, *, service_id: str, since: datetime) -> None:
     """Delete one service's Origin projection rows from ``since`` onward, synchronously."""
     for table in _ORIGIN_PROJECTION_TABLES:
-        client.execute(
-            f"ALTER TABLE `{table}` DELETE WHERE service_id={{service_id:String}} "
-            "AND bucket_start >= {since:DateTime64(3)} SETTINGS mutations_sync=2",
-            {"service_id": service_id, "since": since},
-        )
-
-
-_RUM_FACT_TABLES = {"rum_vitals": "rum_vitals_facts", "rum_errors": "rum_error_facts"}
+        _purge_since(client, table, "bucket_start", service_id, since)
 
 
 def purge_rum_facts(client: _SqlClient, *, domain: str, service_id: str, since: datetime) -> None:
@@ -2911,11 +2680,7 @@ def purge_rum_facts(client: _SqlClient, *, domain: str, service_id: str, since: 
     table = _RUM_FACT_TABLES.get(domain)
     if table is None:
         raise ValueError("domain must be rum_vitals or rum_errors")
-    client.execute(
-        f"ALTER TABLE `{table}` DELETE WHERE service_id={{service_id:String}} "
-        "AND event_timestamp >= {since:DateTime64(3)} SETTINGS mutations_sync=2",
-        {"service_id": service_id, "since": since},
-    )
+    _purge_since(client, table, "event_timestamp", service_id, since)
 
 
 def rebuild_rum_facts_from_fos(
@@ -2949,11 +2714,7 @@ def rebuild_rum_facts_from_fos(
 
 def purge_cmcd_projections(client: _SqlClient, *, service_id: str, since: datetime) -> None:
     """Delete one service's CMCD projection rows from ``since`` onward, synchronously."""
-    client.execute(
-        "ALTER TABLE `cmcd_projection_facts` DELETE WHERE service_id={service_id:String} "
-        "AND event_timestamp >= {since:DateTime64(3)} SETTINGS mutations_sync=2",
-        {"service_id": service_id, "since": since},
-    )
+    _purge_since(client, "cmcd_projection_facts", "event_timestamp", service_id, since)
 
 
 def _rebuild_request_projections_from_fos(
@@ -2977,8 +2738,7 @@ def _rebuild_request_projections_from_fos(
         capacity, service_id=service_id, domain="request", rebuild_id=resolved_rebuild_id
     )
     manifests = _sorted(catalog.manifests_covering(service_id, "request", observed - window, observed))
-    rows = 0
-    replayed = 0
+    rows = replayed = 0
     errors: list[str] = []
     for manifest in manifests:
         try:
@@ -3136,8 +2896,7 @@ def _replay_all(
     publication: ClickHousePublication,
     rebuild_id: str,
 ) -> tuple[int, int, list[str]]:
-    rows = 0
-    replayed = 0
+    rows = replayed = 0
     errors: list[str] = []
     for manifest in manifests:
         try:
@@ -3153,9 +2912,6 @@ def _replay_all(
 
 
 # ── Folded from backend/high_scale/rum.py ────────────────────────────────────
-
-import contextvars  # noqa: E402
-
 _iso = format_iso_utc_or_empty
 from backend.high_scale.publication import (  # noqa: E402
     _DOMAIN_COLUMNS,
@@ -3166,13 +2922,10 @@ from backend.high_scale.publication import (  # noqa: E402
 from backend.high_scale.replay import _read_manifest_rows  # noqa: E402
 
 _FILTER_COLUMNS = frozenset({"browser", "os", "device", "country", "pathname", "city", "region", "pop", "tls"})
-_BEACON_IDENTITY = """
-        coalesce(nullIf(toString(request_event_id), ''),
-                 concat(client_id, '_', toString(toInt64(round(toUnixTimestamp64Milli(event_timestamp) / 1000.0)))))
-    """
-
-from pydantic import TypeAdapter, ValidationError  # noqa: E402
-
+_BEACON_IDENTITY = (
+    "coalesce(nullIf(toString(request_event_id), ''), "
+    "concat(client_id, '_', toString(toInt64(round(toUnixTimestamp64Milli(event_timestamp) / 1000.0)))))"
+)
 _RUM_FILTERS_ADAPTER: TypeAdapter[dict[str, Any]] = TypeAdapter(dict[str, Any])
 
 
@@ -3196,9 +2949,9 @@ def _filter_clauses(filters: Mapping[str, Any] | None) -> tuple[list[str], dict[
     unsupported: list[str] = []
     for i, (raw_key, spec) in enumerate((filters or {}).items()):
         values = [
-            value
-            for value in (filter_spec_attr(spec, "values") or [])
-            if value is not None and not (isinstance(value, str) and value.strip() == "")
+            v
+            for v in (filter_spec_attr(spec, "values") or [])
+            if v is not None and not (isinstance(v, str) and v.strip() == "")
         ]
         if not values:
             continue
@@ -3236,29 +2989,27 @@ def rum_beacon_health(service: HighScaleService, *, source: dict[str, Any] | Non
 
     try:
         res = service.client.execute(
-            f"SELECT sum(event_count) as c, max(bucket_start) as last_ts FROM rum_vitals_aggregates WHERE service_id = {{service_id:String}} AND dimension = 'metric_name' AND {visible_publication_fence_sql('rum_vitals_aggregate')}",
+            "SELECT sum(event_count) as c, max(bucket_start) as last_ts FROM rum_vitals_aggregates "
+            f"WHERE service_id = {{service_id:String}} AND dimension = 'metric_name' AND {visible_publication_fence_sql('rum_vitals_aggregate')}",
             {"service_id": service.service_id},
         )
-        row = res[0] if res else {}
-        beacons = int(row.get("c") or 0)
-        last_ts = row.get("last_ts") if beacons > 0 else None
     except Exception:
         res = service.client.execute(
-            f"SELECT count() as c, max(event_timestamp) as last_ts FROM rum_vitals_facts WHERE service_id = {{service_id:String}} AND {visible_publication_fence_sql('rum_vitals')}",
+            "SELECT count() as c, max(event_timestamp) as last_ts FROM rum_vitals_facts "
+            f"WHERE service_id = {{service_id:String}} AND {visible_publication_fence_sql('rum_vitals')}",
             {"service_id": service.service_id},
         )
-        row = res[0] if res else {}
-        beacons = int(row.get("c") or 0)
-        last_ts = row.get("last_ts") if beacons > 0 else None
+    row = res[0] if res else {}
+    beacons = int(row.get("c") or 0)
+    last_ts = row.get("last_ts") if beacons > 0 else None
     has_data = beacons > 0
-    last_beacon_time = (_iso(last_ts) or None) if last_ts is not None else None
     return {
         "enabled": True,
         "has_data": has_data,
         "beacons": beacons,
         "beacon_fire_rate": beacons,
         "recent_beacons": beacons,
-        "last_beacon_time": last_beacon_time,
+        "last_beacon_time": (_iso(last_ts) or None) if last_ts is not None else None,
         "setup_complete": has_data,
         "message": (
             f"RUM is working! Received {beacons} beacon(s) in the last 15 minutes."
@@ -3288,30 +3039,20 @@ def rum_analytics(
             ]
         )
 
-    where_vitals = scope("rum_vitals")
-    where_errors = scope("rum_errors")
+    where_vitals, where_errors = scope("rum_vitals"), scope("rum_errors")
     identity = _BEACON_IDENTITY
-    events = f"""
-        WITH events AS (
-            SELECT event_timestamp, {identity} AS beacon_id, 'vitals' AS src,
-                   metric_name, metric_value, pathname
-            FROM rum_vitals_facts WHERE {where_vitals}
-            UNION ALL
-            SELECT event_timestamp, {identity} AS beacon_id, 'errors' AS src,
-                   '' AS metric_name, CAST(NULL AS Nullable(Float64)) AS metric_value, pathname
-            FROM rum_error_facts WHERE {where_errors}
-        )
-    """
+    events = (
+        f"WITH events AS ("
+        f"SELECT event_timestamp, {identity} AS beacon_id, 'vitals' AS src, metric_name, metric_value, pathname "
+        f"FROM rum_vitals_facts WHERE {where_vitals} UNION ALL "
+        f"SELECT event_timestamp, {identity} AS beacon_id, 'errors' AS src, '' AS metric_name, "
+        f"CAST(NULL AS Nullable(Float64)) AS metric_value, pathname FROM rum_error_facts WHERE {where_errors}) "
+    )
     counts = service.client.execute(
-        events
-        + """
-        /* rum_analytics_counts */
-        SELECT uniqExact(beacon_id) AS beacons,
-               uniqExactIf(beacon_id, src = 'vitals' AND metric_name NOT LIKE 'event_%') AS pageviews,
-               uniqExactIf(beacon_id, src = 'vitals' AND metric_name LIKE 'event_%') AS interactions,
-               uniqExactIf(beacon_id, src = 'errors') AS errors
-        FROM events
-        """,
+        events + "/* rum_analytics_counts */ SELECT uniqExact(beacon_id) AS beacons, "
+        "uniqExactIf(beacon_id, src = 'vitals' AND metric_name NOT LIKE 'event_%') AS pageviews, "
+        "uniqExactIf(beacon_id, src = 'vitals' AND metric_name LIKE 'event_%') AS interactions, "
+        "uniqExactIf(beacon_id, src = 'errors') AS errors FROM events",
         params,
     )[0]
     no_data = False
@@ -3319,93 +3060,58 @@ def rum_analytics(
         any_vitals = " AND ".join(visible_fact_clauses("rum_vitals"))
         any_errors = " AND ".join(visible_fact_clauses("rum_errors"))
         any_data = service.client.execute(
-            f"""
-            /* rum_analytics_any_data */
-            SELECT count() AS has_data FROM (
-                (SELECT event_id FROM rum_vitals_facts WHERE {any_vitals} LIMIT 1)
-                UNION ALL
-                (SELECT event_id FROM rum_error_facts WHERE {any_errors} LIMIT 1)
-            )
-            """,
+            f"/* rum_analytics_any_data */ SELECT count() AS has_data FROM ("
+            f"(SELECT event_id FROM rum_vitals_facts WHERE {any_vitals} LIMIT 1) UNION ALL "
+            f"(SELECT event_id FROM rum_error_facts WHERE {any_errors} LIMIT 1))",
             {"service_id": service.service_id},
         )
         no_data = not any_data[0]["has_data"]
 
     hourly = end - start <= timedelta(hours=48)
     bucket_sql = "toStartOfHour(event_timestamp, 'UTC')" if hourly else "toStartOfDay(event_timestamp, 'UTC')"
-
-    vitals_sql = f"""
-        /* rum_analytics_vitals */
-        SELECT lower(metric_name) AS metric_name,
-               quantileExactInclusiveOrNull(0.75)(metric_value) as p75,
-               count() as total,
-               countIf(metric_rating = 'good') as good,
-               countIf(metric_rating IN ('needs-improvement', 'needs_improvement')) as ni,
-               countIf(metric_rating = 'poor') as poor
-        FROM rum_vitals_facts
-        WHERE {where_vitals}
-        GROUP BY metric_name
-        """
-    environments_sql = f"""
-        /* rum_analytics_environments */
-        SELECT if(browser = '', 'Unknown', browser) AS env_browser,
-               if(os = '', 'Unknown', os) AS env_os,
-               if(device = '', 'Unknown', device) AS env_device,
-               uniqExact({identity}) AS beacons,
-               grouping(browser) AS g_browser, grouping(os) AS g_os, grouping(device) AS g_device
-        FROM rum_vitals_facts
-        WHERE {where_vitals}
-        GROUP BY GROUPING SETS ((browser), (os), (device))
-        """
+    vitals_sql = (
+        f"/* rum_analytics_vitals */ SELECT lower(metric_name) AS metric_name, "
+        f"quantileExactInclusiveOrNull(0.75)(metric_value) as p75, count() as total, "
+        f"countIf(metric_rating = 'good') as good, "
+        f"countIf(metric_rating IN ('needs-improvement', 'needs_improvement')) as ni, "
+        f"countIf(metric_rating = 'poor') as poor FROM rum_vitals_facts WHERE {where_vitals} GROUP BY metric_name"
+    )
+    environments_sql = (
+        f"/* rum_analytics_environments */ SELECT if(browser = '', 'Unknown', browser) AS env_browser, "
+        f"if(os = '', 'Unknown', os) AS env_os, if(device = '', 'Unknown', device) AS env_device, "
+        f"uniqExact({identity}) AS beacons, grouping(browser) AS g_browser, grouping(os) AS g_os, "
+        f"grouping(device) AS g_device FROM rum_vitals_facts WHERE {where_vitals} "
+        f"GROUP BY GROUPING SETS ((browser), (os), (device))"
+    )
     trends_sql = (
-        events
-        + f"""
-        /* rum_analytics_trends */
-        SELECT {bucket_sql} AS bucket,
-               quantileExactInclusiveOrNullIf(0.75)(metric_value, lower(metric_name) = 'lcp') AS lcp,
-               quantileExactInclusiveOrNullIf(0.75)(metric_value, lower(metric_name) = 'cls') AS cls,
-               uniqExactIf(beacon_id, src = 'vitals') AS views,
-               uniqExactIf(beacon_id, src = 'vitals' AND metric_name NOT LIKE 'event_%') AS pageviews,
-               uniqExactIf(beacon_id, src = 'vitals' AND metric_name LIKE 'event_%') AS interactions,
-               uniqExactIf(beacon_id, src = 'errors') AS errors
-        FROM events GROUP BY bucket ORDER BY bucket
-        """
+        events + f"/* rum_analytics_trends */ SELECT {bucket_sql} AS bucket, "
+        "quantileExactInclusiveOrNullIf(0.75)(metric_value, lower(metric_name) = 'lcp') AS lcp, "
+        "quantileExactInclusiveOrNullIf(0.75)(metric_value, lower(metric_name) = 'cls') AS cls, "
+        "uniqExactIf(beacon_id, src = 'vitals') AS views, "
+        "uniqExactIf(beacon_id, src = 'vitals' AND metric_name NOT LIKE 'event_%') AS pageviews, "
+        "uniqExactIf(beacon_id, src = 'vitals' AND metric_name LIKE 'event_%') AS interactions, "
+        "uniqExactIf(beacon_id, src = 'errors') AS errors FROM events GROUP BY bucket ORDER BY bucket"
     )
     pages_sql = (
-        events
-        + """
-        /* rum_analytics_pages */
-        SELECT pathname AS path,
-               uniqExactIf(beacon_id, src = 'vitals') AS views,
-               avgOrNullIf(metric_value, metric_name IN
-                   ('duration', 'pageLoadTime', 'load_time', 'pageLoad', 'LCP', 'lcp', 'ttfb', 'TTFB', 'fcp', 'FCP')) AS avg_load,
-               quantileExactInclusiveOrNullIf(0.75)(metric_value, lower(metric_name) = 'lcp') AS lcp,
-               quantileExactInclusiveOrNullIf(0.75)(metric_value, lower(metric_name) = 'cls') AS cls,
-               uniqExactIf(beacon_id, src = 'errors') * 100.0
-                   / nullIf(views + uniqExactIf(beacon_id, src = 'errors'), 0) AS error_rate
-        FROM events GROUP BY pathname HAVING views > 0
-        ORDER BY error_rate DESC, avg_load DESC, path LIMIT 5
-        """
+        events + "/* rum_analytics_pages */ SELECT pathname AS path, "
+        "uniqExactIf(beacon_id, src = 'vitals') AS views, "
+        "avgOrNullIf(metric_value, metric_name IN "
+        "('duration', 'pageLoadTime', 'load_time', 'pageLoad', 'LCP', 'lcp', 'ttfb', 'TTFB', 'fcp', 'FCP')) AS avg_load, "
+        "quantileExactInclusiveOrNullIf(0.75)(metric_value, lower(metric_name) = 'lcp') AS lcp, "
+        "quantileExactInclusiveOrNullIf(0.75)(metric_value, lower(metric_name) = 'cls') AS cls, "
+        "uniqExactIf(beacon_id, src = 'errors') * 100.0 / nullIf(views + uniqExactIf(beacon_id, src = 'errors'), 0) AS error_rate "
+        "FROM events GROUP BY pathname HAVING views > 0 ORDER BY error_rate DESC, avg_load DESC, path LIMIT 5"
     )
-    exceptions_sql = f"""
-        /* rum_analytics_exceptions */
-        SELECT error_message, error_file, error_line, error_col, count() AS count
-        FROM rum_error_facts WHERE {where_errors}
-        GROUP BY error_message, error_file, error_line, error_col
-        ORDER BY count DESC, error_message, error_file, error_line, error_col LIMIT 3
-        """
+    exceptions_sql = (
+        f"/* rum_analytics_exceptions */ SELECT error_message, error_file, error_line, error_col, count() AS count "
+        f"FROM rum_error_facts WHERE {where_errors} GROUP BY error_message, error_file, error_line, error_col "
+        f"ORDER BY count DESC, error_message, error_file, error_line, error_col LIMIT 3"
+    )
 
+    queries = (vitals_sql, environments_sql, trends_sql, pages_sql, exceptions_sql)
     with ThreadPoolExecutor(max_workers=5) as pool:
-        f_vitals = pool.submit(contextvars.copy_context().run, service.client.execute, vitals_sql, params)
-        f_env = pool.submit(contextvars.copy_context().run, service.client.execute, environments_sql, params)
-        f_trends = pool.submit(contextvars.copy_context().run, service.client.execute, trends_sql, params)
-        f_pages = pool.submit(contextvars.copy_context().run, service.client.execute, pages_sql, params)
-        f_errors = pool.submit(contextvars.copy_context().run, service.client.execute, exceptions_sql, params)
-        rows = f_vitals.result()
-        environment_rows = f_env.result()
-        trend_rows = f_trends.result()
-        page_rows = f_pages.result()
-        error_rows = f_errors.result()
+        futs = [pool.submit(contextvars.copy_context().run, service.client.execute, q, params) for q in queries]
+        rows, environment_rows, trend_rows, page_rows, error_rows = (f.result() for f in futs)
 
     browsers: dict[str, int] = {}
     operating_systems: dict[str, int] = {}
@@ -3419,28 +3125,23 @@ def rum_analytics(
             devices[row["env_device"]] = int(row["beacons"])
 
     vitals: dict[str, Any] = {
-        "lcp": {"p75": None, "distribution": {"good": 0, "needs_improvement": 0, "poor": 0}},
-        "cls": {"p75": None, "distribution": {"good": 0, "needs_improvement": 0, "poor": 0}},
-        "inp": {"p75": None, "distribution": {"good": 0, "needs_improvement": 0, "poor": 0}},
-        "fid": {"p75": None, "fcp": None, "ttfb": None},
+        m: {"p75": None, "distribution": {"good": 0, "needs_improvement": 0, "poor": 0}} for m in ("lcp", "cls", "inp")
     }
+    vitals["fid"] = {"p75": None, "fcp": None, "ttfb": None}
 
     def seconds(value: float | None) -> float | None:
         return round(value / 1000.0 if value > 20 else value, 2) if value is not None else None
 
     for r in rows:
-        m = r["metric_name"].lower()
-        p75 = r["p75"]
+        m, p75 = r["metric_name"].lower(), r["p75"]
         if m in ("lcp", "cls", "inp"):
             vitals[m]["p75"] = (
                 (seconds(p75) if m == "lcp" else (round(p75, 3) if m == "cls" else int(p75)))
                 if p75 is not None
                 else None
             )
-            t = r["total"]
-            if t:
-                good = int(r["good"] * 100 / t)
-                poor = int(r["poor"] * 100 / t)
+            if t := r["total"]:
+                good, poor = int(r["good"] * 100 / t), int(r["poor"] * 100 / t)
                 vitals[m]["distribution"] = {"good": good, "poor": poor, "needs_improvement": max(0, 100 - good - poor)}
         elif m == "fid":
             vitals["fid"]["p75"] = round(p75, 1) if p75 is not None else None
@@ -3451,33 +3152,23 @@ def rum_analytics(
     for row in trend_rows:
         ts = row["bucket"]
         dt = ts if isinstance(ts, datetime) else range_value(ts)
-        dt = dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt.astimezone(UTC)
-        trend_by_bucket[dt] = row
+        trend_by_bucket[dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt.astimezone(UTC)] = row
 
     trends: dict[str, list[Any]] = {
-        "timestamps": [],
-        "lcp": [],
-        "cls": [],
-        "error_rate": [],
-        "pageviews": [],
-        "interactions": [],
-        "errors": [],
+        k: [] for k in ("timestamps", "lcp", "cls", "error_rate", "pageviews", "interactions", "errors")
     }
     curr = start.replace(minute=0, second=0, microsecond=0)
     target = end.replace(minute=0, second=0, microsecond=0)
     step = timedelta(hours=1) if hourly else timedelta(days=1)
     if not hourly:
-        curr = curr.replace(hour=0)
-        target = target.replace(hour=0)
+        curr, target = curr.replace(hour=0), target.replace(hour=0)
     while not no_data and curr <= target:
         bucket_row = trend_by_bucket.get(curr)
         trends["timestamps"].append(curr.isoformat())
         trends["lcp"].append(seconds(bucket_row["lcp"]) if bucket_row else None)
         trends["cls"].append(round(bucket_row["cls"], 3) if bucket_row and bucket_row["cls"] is not None else None)
-        denominator = bucket_row["views"] + bucket_row["errors"] if bucket_row else 0
-        trends["error_rate"].append(
-            round(bucket_row["errors"] * 100.0 / denominator, 2) if bucket_row and denominator else None
-        )
+        denom = bucket_row["views"] + bucket_row["errors"] if bucket_row else 0
+        trends["error_rate"].append(round(bucket_row["errors"] * 100.0 / denom, 2) if bucket_row and denom else None)
         for metric_key in ("pageviews", "interactions", "errors"):
             trends[metric_key].append(int(bucket_row[metric_key]) if bucket_row else 0)
         curr += step
@@ -3544,52 +3235,18 @@ def rum_live_events(
     def scope(domain: str) -> str:
         return " AND ".join([*visible_fact_clauses(domain), *window, *filter_clauses])
 
-    query = f"""
-    /* rum_live_events */
-    SELECT * FROM (
-    SELECT * FROM (
-        SELECT
-            event_timestamp AS timestamp,
-            'pageview' AS type,
-            pathname,
-            metric_name,
-            metric_value,
-            metric_rating,
-            browser, os, device,
-            client_id AS cid,
-            toString(request_event_id) AS req_id,
-            '' AS error_message,
-            city, region, country, pop, tls, ttfb
-        FROM rum_vitals_facts
-        WHERE {scope("rum_vitals")}
-        ORDER BY event_timestamp DESC
-        LIMIT {{limit:UInt32}}
+    query = (
+        f"/* rum_live_events */ SELECT * FROM ("
+        f"SELECT * FROM (SELECT event_timestamp AS timestamp, 'pageview' AS type, pathname, metric_name, "
+        f"metric_value, metric_rating, browser, os, device, client_id AS cid, toString(request_event_id) AS req_id, "
+        f"'' AS error_message, city, region, country, pop, tls, ttfb FROM rum_vitals_facts WHERE {scope('rum_vitals')} "
+        f"ORDER BY event_timestamp DESC LIMIT {{limit:UInt32}}) UNION ALL "
+        f"SELECT * FROM (SELECT event_timestamp AS timestamp, 'error' AS type, pathname, '' AS metric_name, "
+        f"CAST(NULL AS Nullable(Float64)) AS metric_value, '' AS metric_rating, browser, os, device, "
+        f"client_id AS cid, toString(request_event_id) AS req_id, error_message, city, region, country, pop, tls, ttfb "
+        f"FROM rum_error_facts WHERE {scope('rum_errors')} ORDER BY event_timestamp DESC LIMIT {{limit:UInt32}})"
+        f")\n    ORDER BY timestamp DESC LIMIT {{limit:UInt32}}"
     )
-
-    UNION ALL
-
-    SELECT * FROM (
-        SELECT
-            event_timestamp AS timestamp,
-            'error' AS type,
-            pathname,
-            '' AS metric_name,
-            CAST(NULL AS Nullable(Float64)) AS metric_value,
-            '' AS metric_rating,
-            browser, os, device,
-            client_id AS cid,
-            toString(request_event_id) AS req_id,
-            error_message,
-            city, region, country, pop, tls, ttfb
-        FROM rum_error_facts
-        WHERE {scope("rum_errors")}
-        ORDER BY event_timestamp DESC
-        LIMIT {{limit:UInt32}}
-    )
-    )
-    ORDER BY timestamp DESC
-    LIMIT {{limit:UInt32}}
-    """
     res = service.client.execute(
         query,
         {"service_id": service.service_id, "start_time": start_dt, "end_time": end_dt, "limit": limit, **filter_params},
@@ -3598,13 +3255,9 @@ def rum_live_events(
     events: list[dict[str, Any]] = []
     for d in res:
         etype = d.get("type", "pageview")
-        mname = d.get("metric_name")
-        mrating = d.get("metric_rating")
-        mval = d.get("metric_value")
-        emsg = d.get("error_message")
+        mname, mrating, mval = d.get("metric_name"), d.get("metric_rating"), d.get("metric_value")
         path = d.get("pathname") or "/"
-        browser = d.get("browser") or "Unknown"
-        os_name = d.get("os") or "Unknown"
+        browser, os_name = d.get("browser") or "Unknown", d.get("os") or "Unknown"
         meta = {
             "browser": {"name": browser},
             "os": {"name": os_name},
@@ -3622,7 +3275,7 @@ def rum_live_events(
             "ttfb": _ttfb_ms(d.get("ttfb")),
         }
         if etype == "error":
-            desc = emsg or "JS Error"
+            desc = d.get("error_message") or "JS Error"
             raw_log: dict[str, Any] = {
                 "meta": meta,
                 "measurements": [],
@@ -3635,20 +3288,10 @@ def rum_live_events(
                 desc = f"Metric {mname.upper()}: {float(mval)}" if mval is not None else f"Metric {mname.upper()}"
                 if mrating:
                     desc += f" ({mrating.upper()})"
-            raw_log = {
-                "meta": meta,
-                "measurements": [
-                    {
-                        "type": "web-vitals",
-                        "values": {mname: mval} if mname else {},
-                        "context": {"rating": mrating or ""},
-                    }
-                ]
-                if mname
-                else [],
-                "exceptions": [],
-                **context,
-            }
+            measurements = (
+                [{"type": "web-vitals", "values": {mname: mval}, "context": {"rating": mrating or ""}}] if mname else []
+            )
+            raw_log = {"meta": meta, "measurements": measurements, "exceptions": [], **context}
         events.append(
             {
                 "time": _iso(d.get("timestamp")),
@@ -3664,7 +3307,6 @@ def rum_live_events(
 
 
 # ── Bounded RUM Recovery Planning & Execution (folded from rum_recovery.py) ───
-
 _DOMAINS = ("rum_vitals", "rum_errors")
 _IGNORED_CONTENT = {"event_id", "transform_version", "ingest_timestamp", "batch_id", "publication_state"}
 _READ_LIMITS = {
@@ -3727,16 +3369,12 @@ class RumRecoveryBatchAdapter(ClickHouseBatchAdapter):
             raise ValueError("RUM repair batch candidate identities are ambiguous")
         present: list[dict[str, Any]] = []
         for keys, _ in groups:
-            placeholders = ",".join("{part" + str(index) + ":String}" for index in range(len(keys)))
+            placeholders = ",".join(f"{{part{i}:String}}" for i in range(len(keys)))
             rows = self._client.execute(
                 f"SELECT {','.join(_DOMAIN_COLUMNS[batch.domain])} FROM {table} "
-                "WHERE service_id={service_id:String} AND batch_id={batch_id:UUID} "
-                "AND _partition_id IN (" + placeholders + ") LIMIT 1001",
-                {
-                    "service_id": batch.service_id,
-                    "batch_id": batch_uuid,
-                    **{f"part{index}": key for index, key in enumerate(keys)},
-                },
+                f"WHERE service_id={{service_id:String}} AND batch_id={{batch_id:UUID}} "
+                f"AND _partition_id IN ({placeholders}) LIMIT 1001",
+                {"service_id": batch.service_id, "batch_id": batch_uuid, **{f"part{i}": k for i, k in enumerate(keys)}},
                 settings=_READ_LIMITS,
             )
             present.extend(rows)
@@ -3806,9 +3444,7 @@ class RumRecoveryPlan:
 
 
 def _canonical(value: Any) -> Any:
-    if isinstance(value, datetime):
-        return value.astimezone(UTC).isoformat(timespec="milliseconds")
-    return value
+    return value.astimezone(UTC).isoformat(timespec="milliseconds") if isinstance(value, datetime) else value
 
 
 def _content(row: Mapping[str, Any], domain: str) -> str:
@@ -3862,8 +3498,7 @@ def plan_rum_recovery(
         for row in rows[source.row_start : end]:
             if row.get("_record_kind", "event") != "event":
                 raise ValueError("RUM repair requires reviewed event-only source slices")
-            ordinal = row.get("line_ordinal")
-            raw = row.get("raw_json")
+            ordinal, raw = row.get("line_ordinal"), row.get("raw_json")
             if (
                 row.get("service_id") != manifest.service_id
                 or row.get("source_object_key") != source.key
@@ -3891,9 +3526,7 @@ def plan_rum_recovery(
                 descriptor, payload, domain=domain, transform_version=manifest.artifact.transform_version
             )
             quarantined.update((source.key, item.line_ordinal) for item in decoded.dead_letters)
-            for event in decoded.events:
-                if row_matches_serving_domain(domain, event):
-                    candidates[domain].append(event)
+            candidates[domain].extend(e for e in decoded.events if row_matches_serving_domain(domain, e))
     if covered_offsets != set(range(len(rows))):
         raise ValueError("RUM repair source slices do not cover archive")
     if quarantined:
@@ -3914,15 +3547,11 @@ def plan_rum_recovery(
         ids = [fact["event_id"] for fact in facts]
         if len(ids) != len(set(ids)):
             raise ValueError("RUM repair candidate identities are ambiguous")
-        for fact in facts:
-            timestamp = fact["event_timestamp"]
-            if timestamp < observed - timedelta(days=30) or timestamp > observed:
-                raise ValueError("RUM repair event is outside retained fact window")
+        if any(f["event_timestamp"] < observed - timedelta(days=30) or f["event_timestamp"] > observed for f in facts):
+            raise ValueError("RUM repair event is outside retained fact window")
         expected.extend(facts)
         present = [
-            row
-            for row in read_facts(domain, tuple(s.key for s in sources))
-            if row.get("_repair_domain", domain) == domain
+            r for r in read_facts(domain, tuple(s.key for s in sources)) if r.get("_repair_domain", domain) == domain
         ]
         if len(present) > max_rows:
             raise ValueError("RUM repair existing facts exceed row bound")
@@ -3931,17 +3560,16 @@ def plan_rum_recovery(
             raise ValueError("RUM repair existing identity is ambiguous or unpublished")
         missing: list[dict[str, Any]] = []
         for event, fact in zip(events, facts, strict=True):
+            fact_content = _content(fact, domain)
             matches = [
-                row
-                for row in present
-                if str(row.get("event_id")) == fact["event_id"] or _content(row, domain) == _content(fact, domain)
+                r for r in present if str(r.get("event_id")) == fact["event_id"] or _content(r, domain) == fact_content
             ]
             if not matches:
                 missing.append(event)
             elif (
                 len(matches) != 1
                 or not matches[0].get("repair_visible")
-                or _content(matches[0], domain) != _content(fact, domain)
+                or _content(matches[0], domain) != fact_content
             ):
                 raise ValueError("RUM repair existing identity is ambiguous or unpublished")
             elif str(matches[0]["event_id"]) == fact["event_id"]:
@@ -4012,12 +3640,9 @@ def execute_rum_recovery(
 
 
 _self_mod = sys.modules[__name__]
-worker = _self_mod
-recovery = _self_mod
-orchestration = _self_mod
-rum = _self_mod
+worker = recovery = orchestration = rum = _self_mod
 _hs_pkg = sys.modules.get("backend.high_scale")
-for _alias in (
+_ALIAS_NAMES = (
     "_common",
     "_filters",
     "aggregate_batch",
@@ -4031,29 +3656,14 @@ for _alias in (
     "rum_recovery",
     "source_discovery",
     "worker",
-):
+)
+for _alias in _ALIAS_NAMES:
     if _alias != "worker":
         sys.modules[f"backend.high_scale.{_alias}"] = _self_mod
     if _hs_pkg is not None:
         setattr(_hs_pkg, _alias, _self_mod)
 _backend_pkg = sys.modules.get("backend")
 if _backend_pkg is not None and hasattr(_backend_pkg, "_MODULE_ALIASES"):
-    _backend_pkg._MODULE_ALIASES.update(
-        {
-            "backend.high_scale._common": "backend.high_scale.ingest_controller",
-            "backend.high_scale._filters": "backend.high_scale.ingest_controller",
-            "backend.high_scale.aggregate_batch": "backend.high_scale.ingest_controller",
-            "backend.high_scale.aggregate_batch_adapter": "backend.high_scale.ingest_controller",
-            "backend.high_scale.assets": "backend.high_scale.ingest_controller",
-            "backend.high_scale.orchestration": "backend.high_scale.ingest_controller",
-            "backend.high_scale.recovery": "backend.high_scale.ingest_controller",
-            "backend.high_scale.registry_bootstrap": "backend.high_scale.ingest_controller",
-            "backend.high_scale.rum": "backend.high_scale.ingest_controller",
-            "backend.high_scale.rum_ingest": "backend.high_scale.ingest_controller",
-            "backend.high_scale.rum_recovery": "backend.high_scale.ingest_controller",
-            "backend.high_scale.source_discovery": "backend.high_scale.ingest_controller",
-            "backend.high_scale.worker": "backend.high_scale.ingest_controller",
-        }
-    )
+    _backend_pkg._MODULE_ALIASES.update({f"backend.high_scale.{a}": __name__ for a in _ALIAS_NAMES})
 if __name__ == "__main__":
     main()

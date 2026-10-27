@@ -11,7 +11,7 @@
     "start": "next start",
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
-    "gen:types": "uv run python3 ../scripts/generate_openapi.py openapi.json && node ../scripts/refresh_api_types.js",
+    "gen:types": "uv run python3 ../scripts/generate_openapi.py openapi.json --refresh-ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test --project=chromium",

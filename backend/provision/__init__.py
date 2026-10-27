@@ -10,6 +10,8 @@ if hasattr(_backend_pkg, "_MODULE_ALIASES"):
             "backend.provision.draft_version": "backend.provision.cli",
             "backend.provision.cmcd_fields": "backend.provision.orchestrator",
             "backend.provision.fos_setup": "backend.provision.orchestrator",
+            "backend.provision.rum_orchestrator_v2": "backend.provision.orchestrator",
+            "backend.provision.rum_assets": "backend.provision.orchestrator",
             "backend.utils.terraform_gen": "backend.provision.orchestrator",
             "backend.provision.declarative.iac_reconciler": "backend.provision.declarative.reconciler",
             "backend.provision.declarative.fastly_integration": "backend.provision.declarative.reconciler",

@@ -1,25 +1,29 @@
 from __future__ import annotations  # noqa: I001
 import contextlib
 import hashlib
+import heapq
 import itertools
 import json
 import logging
+import math
 import os
 import re
 import sys as _sys
 import threading
 import time
 import uuid as _uuid
-from collections.abc import Callable
-from dataclasses import dataclass, field as _dc_field
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass, field as _dc_field, field as dc_field
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal
 import duckdb
+from cachetools import LRUCache
 from backend.core import metric_expressions
 from backend.core.field_registry import Group, in_group
 from backend.core.retry import retry_call
 from backend.core.rollups._common import (
     DAY_BUNDLE_FILENAME,
+    IP_SPREAD_BUNDLE_FILENAME,
     NETWORK_GEO_BUNDLE_FILENAME,
     NETWORK_HEATMAP_BUNDLE_FILENAME,
     NETWORK_QUALITY_ASN_FILENAME,
@@ -64,6 +68,8 @@ from backend.models.dashboard import (
 from backend.repositories import rollup_coverage
 from backend.repositories.rollup_coverage import (
     MISSING_HOUR_HEAL_CAP as _MISSING_HOUR_HEAL_CAP,
+    CoverageIndex,
+    cached_listdir,
     collect_day_prefer_paths,
     collect_hour_paths_with_floor,
     durable_serving_blocked,
@@ -72,14 +78,13 @@ from backend.repositories.rollup_coverage import (
     plan_hourly_read,
     plan_time_series_rollup_window,
 )
-from cachetools import LRUCache
-from backend.utils.bounded_cache import BoundedTTLCache, CacheRegistry
-from backend.utils.date_utils import parse_hour_key_strict, parse_iso_utc, safe_iso  # noqa: F401 — re-export
+from backend.utils.bounded_cache import BoundedTTLCache, CacheRegistry, CacheRegistry as _CacheRegistry
+from backend.utils.date_utils import parse_day_key_strict, parse_hour_key_strict, parse_iso_utc, safe_iso  # noqa: F401 — re-export
+from backend.utils.hll import HyperLogLog
 from backend.utils.sql_validator import escape_sql_literal
 from backend.utils.telemetry import get_queries, get_tracked_calls, log_once_per
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable  # noqa: I001
     from backend.models.common import FiltersDict
 _logger = logging.getLogger(__name__)
 _CLIENT_TOKEN_COUNTER = itertools.count(1)
@@ -305,39 +310,25 @@ _SAFE_COL_RE = re.compile(r"[^\w]")
 
 
 def _lookup_ngwaf_waf_req_ids(bot_names: list[str], db_path: str | None = None) -> list[str]:
-    import logging
-    import os
-
     if not bot_names:
         return []
+    q = f"SELECT waf_req_id FROM ngwaf_bots WHERE bot_name IN ({', '.join('?' for _ in bot_names)})"
     if db_path and os.path.exists(db_path):
         import sqlite3
 
         try:
-            con = sqlite3.connect(db_path, timeout=5)
-            try:
-                placeholders = ", ".join("?" for _ in bot_names)
-                rows = con.execute(
-                    f"SELECT waf_req_id FROM ngwaf_bots WHERE bot_name IN ({placeholders})", bot_names
-                ).fetchall()
-            finally:
-                con.close()
-            return [r[0] for r in rows]
+            with contextlib.closing(sqlite3.connect(db_path, timeout=5)) as con:
+                return [r[0] for r in con.execute(q, bot_names).fetchall()]
         except Exception as e:
-            logging.getLogger(__name__).warning("[build_where_clause] ngwaf_bots test cache lookup failed: %s", e)
+            _logger.warning("[build_where_clause] ngwaf_bots test cache lookup failed: %s", e)
             return []
     from backend.core.metadata import pg_connection
 
     try:
-        pconn = pg_connection.get_pg_readonly_connection()
-        try:
-            placeholders = ", ".join("?" for _ in bot_names)
-            cur = pconn.execute(f"SELECT waf_req_id FROM ngwaf_bots WHERE bot_name IN ({placeholders})", bot_names)
-            rows = cur.fetchall()
-        finally:
-            pconn.close()
+        with contextlib.closing(pg_connection.get_pg_readonly_connection()) as pconn:
+            rows = pconn.execute(q, bot_names).fetchall()
     except Exception as e:
-        logging.getLogger(__name__).warning("[build_where_clause] ngwaf_bots cache lookup failed: %s", e)
+        _logger.warning("[build_where_clause] ngwaf_bots cache lookup failed: %s", e)
         return []
     return [r["waf_req_id"] if isinstance(r, dict) else r[0] for r in rows]
 
@@ -352,8 +343,7 @@ def normalize_filter_key(filter_key: str) -> str:
         if col.startswith(prefix):
             col = col[len(prefix) :]
             break
-    col = re.sub(r"_\d+$", "", col)
-    return _SAFE_COL_RE.sub("", col).lower()
+    return _SAFE_COL_RE.sub("", re.sub(r"_\d+$", "", col)).lower()
 
 
 def _get_utc_date_str(iso_str: str) -> str:
@@ -404,12 +394,12 @@ def build_where_clause(
         col = normalize_filter_key(filter_key)
         clean_col = _SAFE_COL_RE.sub("", col)  # strip anything non-word
         is_signals_individual = col == "waf_sig_ind"
-        is_bot_name = col == "_bot_name"
-        is_ngwaf_bot_name = col == "_ngwaf_bot_name"
-        is_tunnel_requests = col == "_tunnel_requests"
-        real_col = "waf_sig" if is_signals_individual else clean_col
-        sql_col = real_col
-        sql_clean_col = clean_col
+        is_bot_name, is_ngwaf_bot_name, is_tunnel_requests = (
+            col == "_bot_name",
+            col == "_ngwaf_bot_name",
+            col == "_tunnel_requests",
+        )
+        sql_col = "waf_sig" if is_signals_individual else clean_col
         mode = filter_spec_attr(spec, "mode") or "include"
         values = filter_spec_attr(spec, "values") or []
         if (
@@ -417,15 +407,8 @@ def build_where_clause(
             and sql_col not in actual_cols
             and not (is_bot_name or is_ngwaf_bot_name or is_tunnel_requests or is_signals_individual)
         ):
-            if sql_col in ("browser", "os", "device"):
+            if sql_col in ("browser", "os", "device") or mode != "exclude":
                 conditions.append("FALSE")
-                continue
-            if mode == "exclude":
-                pass
-            else:
-                conditions.append("FALSE")
-            continue
-        if not values:
             continue
         values = [v for v in values if not (isinstance(v, str) and v.strip() == "")]
         if not values:
@@ -433,6 +416,7 @@ def build_where_clause(
         non_none = [v for v in values if v is not None]
         none_vals = [v for v in values if v is None]
         parts: list[str] = []
+        not_prefix = "NOT " if mode == "exclude" else ""
         if is_bot_name:
             try:
                 from backend.utils.bot_sources import get_bot_by_id
@@ -455,8 +439,7 @@ def build_where_clause(
                         try:
                             net_obj = ipaddress.ip_network(c, strict=False)
                             if isinstance(net_obj, ipaddress.IPv4Network):
-                                lower_int = int(net_obj.network_address)
-                                upper_int = int(net_obj.broadcast_address)
+                                lower_int, upper_int = int(net_obj.network_address), int(net_obj.broadcast_address)
                                 ip_int_sql = (
                                     "(CAST(string_split(ip, '.')[1] AS BIGINT) * 16777216 + "
                                     "CAST(string_split(ip, '.')[2] AS BIGINT) * 65536 + "
@@ -466,65 +449,38 @@ def build_where_clause(
                                 cidr_conditions.append(
                                     f"(NOT (ip LIKE '%:%') AND len(string_split(ip, '.')) = 4 AND {ip_int_sql} >= {lower_int} AND {ip_int_sql} <= {upper_int})"
                                 )
-                            else:
-                                pass
                         except ValueError:
                             continue
                     if cidr_conditions:
-                        combined_cidr_sql = " OR ".join(cidr_conditions)
-                        if mode == "exclude":
-                            parts.append(f"NOT ({combined_cidr_sql})")
-                        else:
-                            parts.append(f"({combined_cidr_sql})")
+                        parts.append(f"{not_prefix}({' OR '.join(cidr_conditions)})")
                 else:
                     if actual_cols is not None and "ua" not in actual_cols:
-                        import logging
-
-                        logging.getLogger(__name__).warning(
-                            "[build_where_clause] _bot_name filter skipped: 'ua' not in schema"
-                        )
+                        _logger.warning("[build_where_clause] _bot_name filter skipped: 'ua' not in schema")
                         continue
                     raw_patterns = bot.get("pattern", {}).get("accepted", [])
                     if not raw_patterns:
                         continue
-                    combined_regex = "|".join(raw_patterns)
-                    safe_regex = escape_sql_literal(combined_regex)
-                    if mode == "exclude":
-                        parts.append(f"NOT regexp_matches(ua, '(?i){safe_regex}')")
-                    else:
-                        parts.append(f"regexp_matches(ua, '(?i){safe_regex}')")
+                    safe_regex = escape_sql_literal("|".join(raw_patterns))
+                    parts.append(f"{not_prefix}regexp_matches(ua, '(?i){safe_regex}')")
         elif is_ngwaf_bot_name:
             if actual_cols is not None and "waf_req_id" not in actual_cols:
-                import logging
-
-                logging.getLogger(__name__).warning(
-                    "[build_where_clause] _ngwaf_bot_name filter skipped: 'waf_req_id' not in schema"
-                )
+                _logger.warning("[build_where_clause] _ngwaf_bot_name filter skipped: 'waf_req_id' not in schema")
                 continue
             bot_names = [str(v) for v in non_none if v]
             if bot_names:
                 from backend import config as svcconfig
 
                 waf_req_ids = _lookup_ngwaf_waf_req_ids(bot_names, db_path=svcconfig.ngwaf_sqlite_cache_override())
-                op = "NOT IN" if mode == "exclude" else "IN"
                 if waf_req_ids:
-                    placeholders = ", ".join(_add_param(v) for v in waf_req_ids)
-                    parts.append(f"waf_req_id {op} ({placeholders})")
+                    parts.append(f"waf_req_id {not_prefix}IN ({', '.join(_add_param(v) for v in waf_req_ids)})")
                 elif mode != "exclude":
                     parts.append("FALSE")
         elif is_tunnel_requests:
             if actual_cols is not None and not all(
                 c in actual_cols for c in ["pop", "lat", "lon", "rtt_min", "tcp_rtt"]
             ):
-                import logging
-
-                logging.getLogger(__name__).warning(
-                    "[build_where_clause] _tunnel_requests filter skipped: required columns not in schema"
-                )
-                if mode == "exclude":
-                    parts.append("TRUE")
-                else:
-                    parts.append("FALSE")
+                _logger.warning("[build_where_clause] _tunnel_requests filter skipped: required columns not in schema")
+                parts.append("TRUE" if mode == "exclude" else "FALSE")
             else:
                 from backend.utils.pop_utils import build_pop_haversine_case_sql
 
@@ -536,78 +492,45 @@ def build_where_clause(
                     (tcp_rtt > 0 AND (CAST(rtt_min AS DOUBLE) / tcp_rtt) < 0.1)
                 )
                 """
-                if mode == "exclude":
-                    parts.append(f"NOT ({cond})")
-                else:
-                    parts.append(cond)
+                parts.append(f"NOT ({cond})" if mode == "exclude" else cond)
         elif is_signals_individual:
             for v in non_none:
-                val_str = str(v).strip()
-                if mode == "exclude":
-                    parts.append(f"NOT list_contains(string_split({sql_col}, ','), {_add_param(val_str)})")
-                else:
-                    parts.append(f"list_contains(string_split({sql_col}, ','), {_add_param(val_str)})")
+                parts.append(f"{not_prefix}list_contains(string_split({sql_col}, ','), {_add_param(str(v).strip())})")
         else:
             if non_none:
-                exact_vals = []
-                wildcard_vals = []
-                for v in non_none:
-                    if isinstance(v, str) and "*" in v:
-                        wildcard_vals.append(v)
-                    else:
-                        exact_vals.append(v)
+                exact_vals = [v for v in non_none if not (isinstance(v, str) and "*" in v)]
+                wildcard_vals = [v for v in non_none if isinstance(v, str) and "*" in v]
                 sub_parts = []
                 from backend.core import field_registry
 
                 field = field_registry.try_get(clean_col)
                 is_varchar = field is not None and field.duck_type == field_registry.DuckType.VARCHAR
+                col_varchar = clean_col if is_varchar else f"CAST({clean_col} AS VARCHAR)"
                 if exact_vals:
-                    str_vals = [str(v) for v in exact_vals]
-                    placeholders = ", ".join(_add_param(v) for v in str_vals)
-                    op = "NOT IN" if mode == "exclude" else "IN"
-                    if is_varchar:
-                        sub_parts.append(f"{sql_clean_col} {op} ({placeholders})")
-                    elif sql_clean_col in ("age", "ttl"):
-                        sub_parts.append(
-                            f"CAST(CAST(ROUND({sql_clean_col}) AS INTEGER) AS VARCHAR) {op} ({placeholders})"
-                        )
-                    else:
-                        sub_parts.append(f"CAST({sql_clean_col} AS VARCHAR) {op} ({placeholders})")
+                    placeholders = ", ".join(_add_param(str(v)) for v in exact_vals)
+                    lhs = (
+                        f"CAST(CAST(ROUND({clean_col}) AS INTEGER) AS VARCHAR)"
+                        if not is_varchar and clean_col in ("age", "ttl")
+                        else col_varchar
+                    )
+                    sub_parts.append(f"{lhs} {not_prefix}IN ({placeholders})")
                 for w in wildcard_vals:
                     w_like = w.replace("*", "%")
                     if inline_params:
                         w_like = "".join(ch for ch in w_like if 0x20 <= ord(ch) < 0x7F)
-                    op = "NOT ILIKE" if mode == "exclude" else "ILIKE"
-                    if is_varchar:
-                        sub_parts.append(f"{sql_clean_col} {op} {_add_param(w_like)}")
-                    else:
-                        sub_parts.append(f"CAST({sql_clean_col} AS VARCHAR) {op} {_add_param(w_like)}")
+                    sub_parts.append(f"{col_varchar} {not_prefix}ILIKE {_add_param(w_like)}")
                 if sub_parts:
-                    if mode == "exclude":
-                        combined = " AND ".join(sub_parts)
-                    else:
-                        combined = " OR ".join(sub_parts)
-                    parts.append(f"({combined})")
+                    parts.append(f"({(' AND ' if mode == 'exclude' else ' OR ').join(sub_parts)})")
             if none_vals:
-                null_op = "IS NOT NULL" if mode == "exclude" else "IS NULL"
-                parts.append(f"{sql_clean_col} {null_op}")
+                parts.append(f"{clean_col} {'IS NOT NULL' if mode == 'exclude' else 'IS NULL'}")
         if parts:
-            if is_signals_individual:
-                joiner = " AND "
-            elif is_bot_name or is_ngwaf_bot_name:
-                joiner = " AND " if mode == "exclude" else " OR "
-            else:
-                joiner = " AND " if mode == "exclude" else " OR "
+            joiner = " AND " if (is_signals_individual or mode == "exclude") else " OR "
             conditions.append(f"({joiner.join(parts)})")
-    where_sql = " AND ".join(conditions) if conditions else "1=1"
-    return params, where_sql
+    return params, (" AND ".join(conditions) if conditions else "1=1")
 
 
 def build_geo_select_clause(actual_cols: list[str]) -> tuple[str, str, str, str]:
-    loc_cols = '"city"'
-    label_expr = '"city"'
-    country_sel, region_sel = "NULL", "NULL"
-    sel_cols = ['"city"']
+    loc_cols, label_expr, country_sel, region_sel, sel_cols = '"city"', '"city"', "NULL", "NULL", ['"city"']
     if actual_cols:
         if "region" in actual_cols:
             sel_cols.append('"region"')
@@ -617,8 +540,7 @@ def build_geo_select_clause(actual_cols: list[str]) -> tuple[str, str, str, str]
             country_sel = '"country"'
     if len(sel_cols) > 1:
         loc_cols = ", ".join(sel_cols)
-        _sep = "', '"
-        label_expr = f"concat({(', ' + _sep + ', ').join(sel_cols)})"
+        label_expr = f"concat({", ', ', ".join(sel_cols)})"
     return loc_cols, label_expr, country_sel, region_sel
 
 
@@ -650,8 +572,6 @@ def _should_emit_throttled_warn(
 
 
 def _active_hour_overlap(st: datetime, et: datetime) -> tuple[datetime, datetime, datetime]:
-    from datetime import UTC, datetime, timedelta
-
     active_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
     return active_dt, max(active_dt, st), min(active_dt + timedelta(hours=1), et)
 
@@ -666,11 +586,11 @@ _LIVE_TOPN_SKIP_FIELDS: frozenset[str] = frozenset(
         "timestamp",  # the time axis, not a top-N facet
         "elapsed",  # raw per-request latency (ms); shown via chart metrics, not a facet
         "ttfb",  # raw per-request time-to-first-byte
-        "req_bytes",  # raw per-request byte counts (served via the chart-metric temp)
+        "req_bytes",
         "req_header_bytes",
-        "resp_bytes",
-        "lat",  # raw coordinates — geo facets are city/region/country/metro
-        "lon",
+        "resp_bytes",  # raw per-request byte counts (served via the chart-metric temp)
+        "lat",
+        "lon",  # raw coordinates — geo facets are city/region/country/metro
         "waf_sig",  # raw col backing the virtual waf_sig_ind card (served via _exploded_top_n)
     }
     | {f.code for f in in_group(Group.METRICS)}
@@ -727,17 +647,13 @@ def ensure_ngwaf_bots_materialized(con: duckdb.DuckDBPyConnection, alias: str) -
     from backend import config as svcconfig
 
     db_path = svcconfig.ngwaf_sqlite_cache_override()
-    rows = []
     _q = "SELECT waf_req_id, bot_name, category, wellknown_bot_name FROM ngwaf_bots WHERE bot_name IS NOT NULL"
     if db_path and os.path.exists(db_path):
         import sqlite3
 
         try:
-            sconn = sqlite3.connect(db_path, timeout=5)
-            try:
+            with contextlib.closing(sqlite3.connect(db_path, timeout=5)) as sconn:
                 rows = sconn.execute(_q).fetchall()
-            finally:
-                sconn.close()
         except Exception as e:
             _logger.warning("[ngwaf_bots] sqlite cache read failed for %s: %s", alias, e)
             return False
@@ -747,14 +663,11 @@ def ensure_ngwaf_bots_materialized(con: duckdb.DuckDBPyConnection, alias: str) -
         try:
             from backend.core.metadata import pg_connection
 
-            pconn = pg_connection.get_pg_readonly_connection()
-            try:
+            with contextlib.closing(pg_connection.get_pg_readonly_connection()) as pconn:
                 rows = [
                     (r["waf_req_id"], r["bot_name"], r["category"], r["wellknown_bot_name"])
                     for r in pconn.execute(_q).fetchall()
                 ]
-            finally:
-                pconn.close()
         except Exception as e:
             _logger.warning("[ngwaf_bots] postgres cache read failed for %s: %s", alias, e)
             return False
@@ -3471,27 +3384,12 @@ class QueryRunner:
         return self.execute(query).fetchall()
 
 
-from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry  # noqa: E402
-
 _CacheRegistry.register("repositories._base._schema_cols_cache", _schema_cols_cache)
 _CacheRegistry.register("repositories._base._EMPTY_ROLLUP_WARN_TS", _EMPTY_ROLLUP_WARN_TS)
 _CacheRegistry.register("repositories._base._MISSING_HOUR_HEAL_WARN_TS", _MISSING_HOUR_HEAL_WARN_TS)
 
 # ── Folded from backend/repositories/top_n_rollups.py ────────────────────────
-
-import heapq
-import math
-from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
-from dataclasses import field as dc_field
-
-from backend.core.rollups._common import IP_SPREAD_BUNDLE_FILENAME
-from backend.repositories.rollup_coverage import CoverageIndex, cached_listdir
-from backend.utils.date_utils import parse_day_key_strict
-from backend.utils.hll import HyperLogLog
-
 TopNRow = tuple[str, Any, int]
-
 _EDGE_PREFIXES = ("cmcd_", "edge_", "rum_")
 
 
@@ -3504,15 +3402,12 @@ def live_topn_fields(
         for cf in (log_fields or {}).get("custom_fields", [])
         if cf.get("enabled", True) and cf.get("show_in_dashboard", True)
     }
-    out: list[str] = []
-    for f in safe_fields:
-        if f in skip_fields:
-            continue
-        if f.startswith(_EDGE_PREFIXES) or f == "fastly_req_id":
-            if f not in custom_fields:
-                continue
-        out.append(f)
-    return out
+    return [
+        f
+        for f in safe_fields
+        if f not in skip_fields
+        and not ((f.startswith(_EDGE_PREFIXES) or f == "fastly_req_id") and f not in custom_fields)
+    ]
 
 
 def fold_rows(*row_sets: Iterable[TopNRow]) -> dict[str, dict[Any, int]]:
@@ -3542,12 +3437,12 @@ def truncate_top_n(
             continue
         field_limit = pfl.get(field, limit)
         items = bucket.items()
-        if field_limit < len(bucket):
-            top_items = heapq.nlargest(field_limit, items, key=lambda x: x[1])
-        else:
-            top_items = sorted(items, key=lambda x: x[1], reverse=True)
-        for val, count in top_items:
-            top_results.append((field, val, count))
+        top_items = (
+            heapq.nlargest(field_limit, items, key=lambda x: x[1])
+            if field_limit < len(bucket)
+            else sorted(items, key=lambda x: x[1], reverse=True)
+        )
+        top_results.extend((field, val, count) for val, count in top_items)
     return top_results, empty
 
 
@@ -3599,21 +3494,19 @@ def build_rolled_sql(
         return None
     field_in_list = ", ".join("'" + escape_sql_literal(f) + "'" for f in safe_fields)
     select = "SELECT field, value, CAST(count AS BIGINT) AS count "
-    branches: list[str] = []
-    for per_field_tree in (paths.day_paths, paths.hour_paths):
-        if per_field_tree:
-            branches.append(f"{select}FROM read_parquet([{quote_path_list(per_field_tree)}], hive_partitioning=1)")
-    for bundles in (paths.bundled_hour_paths, paths.bundled_day_paths):
-        if bundles:
-            branches.append(
-                f"{select}FROM read_parquet([{quote_path_list(bundles)}], hive_partitioning=0) "
-                f"WHERE field IN ({field_in_list})"
-            )
+    branches: list[str] = [
+        f"{select}FROM read_parquet([{quote_path_list(t)}], hive_partitioning=1)"
+        for t in (paths.day_paths, paths.hour_paths)
+        if t
+    ] + [
+        f"{select}FROM read_parquet([{quote_path_list(b)}], hive_partitioning=0) WHERE field IN ({field_in_list})"
+        for b in (paths.bundled_hour_paths, paths.bundled_day_paths)
+        if b
+    ]
     return (
         "SELECT field, value, SUM(count) AS c FROM ("
         + " UNION ALL ".join(branches)
-        + ") GROUP BY field, value QUALIFY ROW_NUMBER() OVER "
-        f"(PARTITION BY field ORDER BY c DESC) <= {qualify_limit_expr(safe_fields, limit, per_field_limits)}"
+        + f") GROUP BY field, value QUALIFY ROW_NUMBER() OVER (PARTITION BY field ORDER BY c DESC) <= {qualify_limit_expr(safe_fields, limit, per_field_limits)}"
     )
 
 
@@ -3648,10 +3541,9 @@ class TopNWindow:
             day_start = parse_day_key_strict(day_str)
         except ValueError:
             return False
-        day_end = day_start + timedelta(days=1)
         if self.st_dt and self.st_dt > day_start:
             return False
-        return not (self.et_dt and self.et_dt < day_end)
+        return not (self.et_dt and self.et_dt < day_start + timedelta(days=1))
 
     def day_in_range(self, day: str) -> bool:
         """Day key is not before the first / after the last window day."""
@@ -3661,9 +3553,7 @@ class TopNWindow:
 
     def hour_in_range(self, hour: str) -> bool:
         """Closed hour key inside ``[st_floor, et_floor]`` (the active hour is excluded)."""
-        if self.st_floor and hour < self.st_floor:
-            return False
-        if self.et_floor and hour > self.et_floor:
+        if (self.st_floor and hour < self.st_floor) or (self.et_floor and hour > self.et_floor):
             return False
         return hour < self.active_str
 
@@ -3702,9 +3592,7 @@ def _day_covered_by_any_field(
             if len(day) != 10:
                 continue
             days_with_day_files_any.add(day)
-            if day in covered or day >= active_day or not win.day_in_range(day):
-                continue
-            if not win.day_fully_in_window(day):
+            if day in covered or day >= active_day or not win.day_in_range(day) or not win.day_fully_in_window(day):
                 continue
             if _has_real_parquet(os.path.join(field_day_dir, day_entry)):
                 covered.add(day)
@@ -3721,8 +3609,7 @@ def _bundled_day_files(
         return paths, days
     active_day = win.active_str[:10]
     for entry in cached_listdir(bundled_day_root):
-        b_day: str | None = None
-        bundle_path: str | None = None
+        b_day, bundle_path = None, None
         if entry.startswith("day="):
             cand_day = entry[len("day=") :]
             if len(cand_day) == 10:
@@ -3741,11 +3628,7 @@ def _bundled_day_files(
         if not b_day or not bundle_path:
             continue
         days_with_day_files_any.add(b_day)
-        if b_day >= active_day or not win.day_in_range(b_day):
-            continue
-        if not win.day_fully_in_window(b_day):
-            continue
-        if b_day in days:
+        if b_day >= active_day or not win.day_in_range(b_day) or not win.day_fully_in_window(b_day) or b_day in days:
             continue
         paths.append(bundle_path)
         days.add(b_day)
@@ -3764,9 +3647,7 @@ def _bundled_hour_files(
         if not hour_entry.startswith("hour="):
             continue
         hour = hour_entry[len("hour=") :]
-        if not win.hour_in_range(hour):
-            continue
-        if hour[:10] in bundled_days or hour[:10] in day_covered_by_any_field:
+        if not win.hour_in_range(hour) or hour[:10] in bundled_days or hour[:10] in day_covered_by_any_field:
             continue
         bundle_path = os.path.join(bundled_hour_root, hour_entry, "all_fields.parquet")
         if os.path.isfile(bundle_path):
@@ -3789,8 +3670,10 @@ def _per_field_files(
     active_str, st_floor, et_floor = win.active_str, win.st_floor, win.et_floor
     hours_seen: set[str] = set()
     for field in safe_fields:
-        field_hour_dir = os.path.join(hour_root, f"field={field}")
-        field_day_dir = os.path.join(day_root, f"field={field}")
+        field_hour_dir, field_day_dir = (
+            os.path.join(hour_root, f"field={field}"),
+            os.path.join(day_root, f"field={field}"),
+        )
         if not os.path.isdir(field_hour_dir):
             continue
         covered_days: set[str] = set(bundled_days)
@@ -3799,11 +3682,13 @@ def _per_field_files(
                 if not day_entry.startswith("day="):
                     continue
                 day = day_entry[len("day=") :]
-                if len(day) != 10:
-                    continue
-                if day in bundled_days or day >= active_day or not win.day_in_range(day):
-                    continue
-                if not win.day_fully_in_window(day):
+                if (
+                    len(day) != 10
+                    or day in bundled_days
+                    or day >= active_day
+                    or not win.day_in_range(day)
+                    or not win.day_fully_in_window(day)
+                ):
                     continue
                 day_dir = os.path.join(field_day_dir, day_entry)
                 for fname in cached_listdir(day_dir):
@@ -3830,11 +3715,10 @@ def _day_has_real_rollup(plan: TopNPlan, safe_fields: list[str], day: str) -> bo
     """Whether ``day`` really was day-compacted (a bundle, or a field day dir holding a parquet)."""
     if os.path.isfile(os.path.join(plan.bundled_day_root, f"day={day}", "all_fields.parquet")):
         return True
-    for field in safe_fields:
-        day_dir = os.path.join(plan.day_root, f"field={field}", f"day={day}")
-        if os.path.isdir(day_dir) and _has_real_parquet(day_dir):
-            return True
-    return False
+    return any(
+        os.path.isdir(d := os.path.join(plan.day_root, f"field={field}", f"day={day}")) and _has_real_parquet(d)
+        for field in safe_fields
+    )
 
 
 def find_unrolled_hours(
@@ -3846,16 +3730,17 @@ def find_unrolled_hours(
     observation: TopNRollupCoverage | None = None,
 ) -> list[str]:
     """Closed in-window hours with no rollup coverage, which the caller live-queries."""
-    floor = win.active_dt - timedelta(hours=heal_cap)
-    if win.st_dt and win.st_dt > floor:
-        floor = win.st_dt
+    floor = (
+        max(win.active_dt - timedelta(hours=heal_cap), win.st_dt)
+        if win.st_dt
+        else win.active_dt - timedelta(hours=heal_cap)
+    )
     candidates = CoverageIndex.build(floor, win.et_dt or win.active_dt, now=win.active_dt).closed_hours
     day_compacted: dict[str, bool] = {}
     missing: list[str] = []
     compacted_skips = 0
     if observation is not None:
-        observation.heal_horizon_hours = heal_cap
-        observation.heal_candidates = len(candidates)
+        observation.heal_horizon_hours, observation.heal_candidates = heal_cap, len(candidates)
         if observation.closed_hours is not None:
             observation.outside_heal_horizon_hours = max(0, observation.closed_hours - len(candidates))
     for hour in candidates:
@@ -3870,8 +3755,7 @@ def find_unrolled_hours(
                 continue
         missing.append(hour)
     if observation is not None:
-        observation.heal_missing_hours = len(missing)
-        observation.compacted_hours_skipped = compacted_skips
+        observation.heal_missing_hours, observation.compacted_hours_skipped = len(missing), compacted_skips
     return missing
 
 
@@ -3880,9 +3764,11 @@ def plan_top_n_paths(
 ) -> TopNPlan:
     """Enumerate the exact parquet files a top-N read needs for ``win``."""
     rollups = os.path.join(cache_dir, "rollups")
-    day_root = os.path.join(rollups, "day")
-    hour_root = os.path.join(rollups, "hour")
-    bundled_day_root = os.path.join(rollups, "day_bundled")
+    day_root, hour_root, bundled_day_root = (
+        os.path.join(rollups, "day"),
+        os.path.join(rollups, "hour"),
+        os.path.join(rollups, "day_bundled"),
+    )
     days_with_day_files_any: set[str] = set()
     covered_by_any_field = _day_covered_by_any_field(day_root, safe_fields, win, days_with_day_files_any)
     bundled_day_paths, bundled_days = _bundled_day_files(bundled_day_root, win, days_with_day_files_any)
@@ -3893,10 +3779,11 @@ def plan_top_n_paths(
     hours_seen = _per_field_files(safe_fields, day_root, hour_root, win, bundled_days, bundled_hours, paths)
     if observation is not None:
         observation.active_hour_start = win.active_dt.isoformat()
-        observation.bundled_day_files = len(paths.bundled_day_paths)
-        observation.bundled_hour_files = len(paths.bundled_hour_paths)
-        observation.per_field_day_files = len(paths.day_paths)
-        observation.per_field_hour_files = len(paths.hour_paths)
+        observation.bundled_day_files, observation.bundled_hour_files = (
+            len(paths.bundled_day_paths),
+            len(paths.bundled_hour_paths),
+        )
+        observation.per_field_day_files, observation.per_field_hour_files = len(paths.day_paths), len(paths.hour_paths)
         selected_days = bundled_days | {
             os.path.basename(os.path.dirname(path)).removeprefix("day=") for path in paths.day_paths
         }
@@ -3905,8 +3792,7 @@ def plan_top_n_paths(
         )
         if win.st_dt is not None and win.et_dt is not None:
             start = win.st_dt.replace(minute=0, second=0, microsecond=0)
-            end = min(win.et_dt, win.active_dt)
-            observation.closed_hours = max(0, math.ceil((end - start).total_seconds() / 3600))
+            observation.closed_hours = max(0, math.ceil((min(win.et_dt, win.active_dt) - start).total_seconds() / 3600))
     return TopNPlan(paths, bundled_hours, bundled_days, days_with_day_files_any, hours_seen, day_root, bundled_day_root)
 
 
@@ -3931,30 +3817,21 @@ def plan_ip_spread_paths(
         return None
     plan = IpSpreadPlan(per_field_hours_by_field={f: set() for f in safe_fields})
     if os.path.isdir(bundled_hour_root):
-        try:
+        with contextlib.suppress(OSError):
             for entry in os.listdir(bundled_hour_root):
-                if not entry.startswith("hour="):
-                    continue
-                hour = entry[len("hour=") :]
-                if not win.hour_in_range(hour):
-                    continue
-                bundle_path = os.path.join(bundled_hour_root, entry, IP_SPREAD_BUNDLE_FILENAME)
-                if os.path.isfile(bundle_path):
-                    plan.bundled_paths.append(bundle_path)
-                    plan.bundled_hours.add(hour)
-        except OSError:
-            pass
+                if entry.startswith("hour=") and win.hour_in_range(hour := entry[len("hour=") :]):
+                    bundle_path = os.path.join(bundled_hour_root, entry, IP_SPREAD_BUNDLE_FILENAME)
+                    if os.path.isfile(bundle_path):
+                        plan.bundled_paths.append(bundle_path)
+                        plan.bundled_hours.add(hour)
     if os.path.isdir(per_field_root):
         wanted = set(safe_fields)
-        try:
+        with contextlib.suppress(OSError):
             for field_entry in os.listdir(per_field_root):
-                if not field_entry.startswith("field="):
-                    continue
-                fld = field_entry[len("field=") :]
-                if fld not in wanted:
+                if not field_entry.startswith("field=") or (fld := field_entry[len("field=") :]) not in wanted:
                     continue
                 field_dir = os.path.join(per_field_root, field_entry)
-                try:
+                with contextlib.suppress(OSError):
                     for hour_entry in os.listdir(field_dir):
                         if not hour_entry.startswith("hour="):
                             continue
@@ -3963,14 +3840,9 @@ def plan_ip_spread_paths(
                             continue
                         hour_dir = os.path.join(field_dir, hour_entry)
                         for fname in os.listdir(hour_dir):
-                            if not fname.endswith(".parquet") or fname.startswith(".tmp_"):
-                                continue
-                            plan.per_field_paths.append(os.path.join(hour_dir, fname))
-                            plan.per_field_hours_by_field[fld].add(hour)
-                except OSError:
-                    continue
-        except OSError:
-            pass
+                            if fname.endswith(".parquet") and not fname.startswith(".tmp_"):
+                                plan.per_field_paths.append(os.path.join(hour_dir, fname))
+                                plan.per_field_hours_by_field[fld].add(hour)
     return plan
 
 
@@ -3978,17 +3850,11 @@ def build_ip_spread_sql(plan: IpSpreadPlan, safe_fields: list[str]) -> str:
     """UNION ALL of at most two SELECT branches, filtered to the requested fields."""
     field_filter = "(" + ", ".join("'" + escape_sql_literal(f) + "'" for f in safe_fields) + ")"
     select = "SELECT field, value, ip_sketch, sample_capped "
-    branches: list[str] = []
-    if plan.bundled_paths:
-        branches.append(
-            f"{select}FROM read_parquet([{quote_path_list(plan.bundled_paths)}], hive_partitioning=0) "
-            f"WHERE field IN {field_filter}"
-        )
-    if plan.per_field_paths:
-        branches.append(
-            f"{select}FROM read_parquet([{quote_path_list(plan.per_field_paths)}], hive_partitioning=1) "
-            f"WHERE field IN {field_filter}"
-        )
+    branches: list[str] = [
+        f"{select}FROM read_parquet([{quote_path_list(paths)}], hive_partitioning={hp}) WHERE field IN {field_filter}"
+        for paths, hp in ((plan.bundled_paths, 0), (plan.per_field_paths, 1))
+        if paths
+    ]
     return " UNION ALL ".join(f"({b})" for b in branches)
 
 
@@ -4011,10 +3877,8 @@ def fold_sketches(
             any_capped[key] = bool(capped)
         else:
             any_capped[key] = any_capped[key] or bool(capped)
-        try:
+        with contextlib.suppress(ValueError):
             merged[key].merge(hll)
-        except ValueError:
-            continue
     return merged, any_capped
 
 
@@ -4032,8 +3896,6 @@ def spread_meta(safe_fields: list[str], plan: IpSpreadPlan, any_capped: dict[tup
         for f in safe_fields
     }
 
-
-import sys as _sys  # noqa: E402
 
 _SchemaSeeds = SchemaSeeds
 _TopNWindow = TopNWindow

@@ -2,6 +2,7 @@
 
 import React from 'react'
 import { useQueryClient } from '@tanstack/react-query'
+import { parseAsInteger, useQueryState } from 'nuqs'
 import { client, unwrapClient } from '@/lib/api'
 import { useServiceQuery, useReportRangeAnchor, usePlotlyRangeZoom } from '@/hooks/useDashboardCards'
 import { useFilterStore } from '@/stores/filterStore'
@@ -200,14 +201,16 @@ function StreamingBody({
   React.useEffect(() => () => { queryClient.cancelQueries({ queryKey: ['cmcd'] }) }, [queryClient])
 
   const handleChartRelayout = usePlotlyRangeZoom(timezone, setRange)
+  const [bucketSeconds] = useQueryState('bucket_seconds', parseAsInteger.withDefault(300))
+  const [topN] = useQueryState('top_n', parseAsInteger.withDefault(30))
 
   const cmcdQuery = useServiceQuery(
-    ['cmcd', 'aggregates', activeServiceId, rangeKey, anchor, filterPayload],
+    ['cmcd', 'aggregates', activeServiceId, rangeKey, anchor, filterPayload, ...(bucketSeconds !== 300 || topN !== 30 ? [bucketSeconds, topN] : [])],
     ({ signal }) =>
       unwrapClient(
         client.POST('/api/cmcd/aggregates', {
           signal,
-          body: { filters: filterPayload, bucket_seconds: 300, top_n: 30, ...rangeBody },
+          body: { filters: filterPayload, bucket_seconds: bucketSeconds, top_n: topN, ...rangeBody },
         }),
       ),
     { staleTime: 30_000, refetchInterval: 30_000 },

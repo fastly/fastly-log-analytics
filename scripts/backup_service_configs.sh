@@ -9,11 +9,8 @@
 # What gets backed up
 # -------------------
 # Per ADR-13 §2.1, service config JSON on the VM is the ONE piece of
-# VM-disk state that's NOT recoverable from FOS. Iceberg data files /
-# manifests / metadata.json all live in the FOS bucket (durable);
-# metadata.db, the DuckDB cache, and the iceberg catalog SQLite are all
-# rebuildable from FOS on a fresh VM. Service configs are not — they
-# contain FOS credentials, CDN secrets, log-field config, and ingest
+# VM-disk state that's NOT recoverable from FOS. It
+# contains FOS credentials, CDN secrets, log-field config, and ingest
 # schedules. Losing them means re-provisioning each service from operator
 # memory.
 #

@@ -1,17 +1,17 @@
 'use client'
-import * as React from 'react'
+
+import React, { useState, type ReactNode } from 'react'
 import { queryOptions, useMutation, useQuery, useQueryClient, type QueryClient, type QueryKey, type UseQueryOptions } from '@tanstack/react-query'
 import { useForm } from 'react-hook-form'
 import { z } from 'zod'
-import { Activity, AlertTriangle, Bookmark, Brain, Check, CheckCircle, CheckCircle2, Clock, Filter, Gauge, History, Info, KeyRound, LineChart, ListChecks, Loader2, Lock, Pencil, RotateCcw, ScrollText, ServerCrash, Shield, ShieldAlert, ShieldCheck, ShieldOff, SlidersHorizontal, Trash2, Users, XCircle } from 'lucide-react'
-import type { ColumnDef } from '@tanstack/react-table'
-import { AnalyticsCard, CardErrorState } from '@/components/AnalyticsCard'
-import { DataTableReadonly, DateTimeCell } from '@/components/DataTable'
-import { SessionEventsDialog } from './TopFlaggedTable'
-import { Alert, AlertDescription } from '@/components/ui/alert'
+import { Activity, AlertTriangle, Bookmark, Brain, Check, CheckCircle, CheckCircle2, Clock, Filter, Gauge, History, Info, KeyRound, LineChart, ListChecks, Loader2, Lock, Pencil, RotateCcw, ScrollText, ServerCrash, Shield, ShieldAlert, ShieldCheck, ShieldOff, SlidersHorizontal, Trash2, Users, XCircle, ChevronRight, Flag, X, Archive, Database, ExternalLink, FileCode, Layers, Power, PowerOff, RefreshCw, TrendingUp } from 'lucide-react'
+import { ColumnDef, flexRender, getCoreRowModel, useReactTable } from '@tanstack/react-table'
+import { AnalyticsCard, CardErrorState, type AnalyticsCardError } from '@/components/AnalyticsCard'
+import { DataTableReadonly, DateTimeCell, DataTable, ColumnVisibilityDropdown, columnIdOf } from '@/components/DataTable'
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { ConfirmDialog, CopyButton } from '@/components/ui/confirm-dialog'
+import { ConfirmDialog, CopyButton, LabelWithInfo } from '@/components/ui/confirm-dialog'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -21,10 +21,19 @@ import { Skeleton, SkeletonGrid } from '@/components/ui/skeleton'
 import { Slider } from '@/components/ui/slider'
 import { useDebounce } from '@/hooks/useDashboardCards'
 import { Textarea } from '@/components/ui/textarea'
-import { useAutoFlash, useDeferredDeleteWithUndo, useDerivedState, useOpenGeneration } from '@/hooks/useSSE'
-import { client, extractApiError, unwrapClient, queryKeys } from "@/lib/api"
-import { formatBytes, formatCount, formatDeterministicUTC, formatPercent, formatTimeAgo, keyByOccurrence } from "@/lib/utils"
-import type { Expect, Simplify, WireParity, WithRequired, WithRequiredNullable, components } from '@/types/api'
+import { useAutoFlash, useDeferredDeleteWithUndo, useDerivedState, useOpenGeneration, useDateFormat } from '@/hooks/useSSE'
+import { client, extractApiError, unwrapClient, queryKeys } from '@/lib/api'
+import { formatBytes, formatCount, formatDeterministicUTC, formatPercent, formatTimeAgo, keyByOccurrence, formatLocalDateTime, CHART_COLORS, denseBarTrace, denseTimeGrid, lineTrace, withSecondaryAxis, formatBytesTiered, formatCountMaybe, formatPctValue, formatRelative, cn } from '@/lib/utils'
+import type { Expect, Simplify, WireParity, WithRequired, WithRequiredNullable, components, PlotlyLayout, PlotlyTrace } from '@/types/api'
+import { Table, TableBody, TableCell, TableRow, TableHead, TableHeader } from '@/components/ui/table'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { Switch } from '@/components/ui/switch'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
+import { PlotlyChart } from '@/components/PlotlyChart'
+import { SSEModal } from '@/components/SSEModal'
+import { useMounted } from '@/hooks/useBootstrap'
+import { useServiceStore } from '@/stores/filterStore'
+
 export const scoringAnalyticsCompositeKey = (serviceId: string | null | undefined) => ['scoring-analytics-composite', serviceId] as const
 export const scoringConfigCompositeKey = (serviceId: string | null | undefined) => ['scoring-config-composite', serviceId] as const
 export const scoringAnalyticsCompositeOptions = (serviceId: string | null | undefined, sinceHours: number) => queryOptions({
@@ -862,211 +871,91 @@ export function AuditLogTab({ serviceId }: { serviceId: string }) { const query 
 type StatusCodeMeta = components['schemas']['ScoringEnforceStatusCodeState']
 type CommittedThreshold = components['schemas']['ScoringThresholdState']
 type EnforceThreshold = components['schemas']['ScoringEnforceThresholdResponse']
-interface ThresholdSliderControlsProps { thresholdRaw: number
-  onThresholdRawChange: (value: number) => void
-  committed: CommittedThreshold | undefined
-  enforce: EnforceThreshold | undefined
-  statusCode: StatusCodeMeta | undefined
-  effectiveStatusCode: number
-  isAlreadyCommitted: boolean
-  isEnforcingThis: boolean
-  commitPending: boolean
-  enforcePending: boolean
-  statusCodePending: boolean
-  codeDraft: string
-  onCodeDraftChange: (value: string) => void
-  codeDraftValid: boolean
-  codeDraftIsDirty: boolean
-  codeDraftNum: number
-  onCommitClick: () => void
-  onEnforceClick: () => void
-  onApplyStatusCode: () => void
-  onResetStatusCode: () => void
+interface ThresholdSliderControlsProps {
+  thresholdRaw: number; onThresholdRawChange: (value: number) => void; committed: CommittedThreshold | undefined
+  enforce: EnforceThreshold | undefined; statusCode: StatusCodeMeta | undefined; effectiveStatusCode: number
+  isAlreadyCommitted: boolean; isEnforcingThis: boolean; commitPending: boolean; enforcePending: boolean; statusCodePending: boolean
+  codeDraft: string; onCodeDraftChange: (value: string) => void; codeDraftValid: boolean; codeDraftIsDirty: boolean; codeDraftNum: number
+  onCommitClick: () => void; onEnforceClick: () => void; onApplyStatusCode: () => void; onResetStatusCode: () => void
 }
-export function ThresholdSliderControls({ thresholdRaw, onThresholdRawChange, committed, enforce, statusCode, effectiveStatusCode, isAlreadyCommitted,
-  isEnforcingThis, commitPending, enforcePending, statusCodePending, codeDraft, onCodeDraftChange, codeDraftValid, codeDraftIsDirty, codeDraftNum, onCommitClick,
-  onEnforceClick, onApplyStatusCode, onResetStatusCode, }: ThresholdSliderControlsProps) { return ( <div className="space-y-2">
+export function ThresholdSliderControls({
+  thresholdRaw, onThresholdRawChange, committed, enforce, statusCode, effectiveStatusCode, isAlreadyCommitted,
+  isEnforcingThis, commitPending, enforcePending, statusCodePending, codeDraft, onCodeDraftChange, codeDraftValid,
+  codeDraftIsDirty, codeDraftNum, onCommitClick, onEnforceClick, onApplyStatusCode, onResetStatusCode,
+}: ThresholdSliderControlsProps) {
+  return (
+    <div className="space-y-2">
       <div className="flex items-baseline justify-between">
         <label className="text-xs font-medium text-muted-foreground">
           Score threshold
-          {committed?.threshold != null && ( <span className="ml-2 text-[10px] text-muted-foreground">
-              · committed: <span className="font-mono">{committed.threshold}</span>
-            </span>
-          )}
+          {committed?.threshold != null && <span className="ml-2 text-[10px] text-muted-foreground">· committed: <span className="font-mono">{committed.threshold}</span></span>}
         </label>
         <div className="flex items-center gap-2">
-          <span className="font-mono text-lg font-semibold tabular-nums">
-            {thresholdRaw}
-          </span>
-          <Button variant={isAlreadyCommitted ? 'outline' : 'default'} size="sm" disabled={commitPending || isAlreadyCommitted} onClick={onCommitClick}
-            className="h-7 text-xs"
-            title="Persist this as your committed threshold (preview only — does NOT push to Compute)" >
-            {commitPending ? ( <Loader2 className="h-3 w-3 animate-spin mr-1" />
-            ) : isAlreadyCommitted ? ( <Check className="h-3 w-3 mr-1" />
-            ) : null}
+          <span className="font-mono text-lg font-semibold tabular-nums">{thresholdRaw}</span>
+          <Button variant={isAlreadyCommitted ? 'outline' : 'default'} size="sm" disabled={commitPending || isAlreadyCommitted} onClick={onCommitClick} className="h-7 text-xs" title="Persist this as your committed threshold (preview only — does NOT push to Compute)">
+            {commitPending ? <Loader2 className="h-3 w-3 animate-spin mr-1" /> : isAlreadyCommitted ? <Check className="h-3 w-3 mr-1" /> : null}
             {isAlreadyCommitted ? 'Committed' : 'Commit'}
           </Button>
-          <Button variant={isEnforcingThis ? 'outline' : 'destructive'} size="sm" disabled={enforcePending} onClick={onEnforceClick} className="h-7 text-xs" title={
-              isEnforcingThis
-                ? 'Currently ENFORCING this threshold. Click to disable enforcement.'
-                : `Push this threshold to Compute. Live requests with score >= threshold will be blocked (HTTP ${effectiveStatusCode}).`
-            } >
-            {enforcePending ? ( <Loader2 className="h-3 w-3 animate-spin mr-1" />
-            ) : isEnforcingThis ? ( <ShieldOff className="h-3 w-3 mr-1" />
-            ) : ( <ShieldCheck className="h-3 w-3 mr-1" />
-            )}
+          <Button variant={isEnforcingThis ? 'outline' : 'destructive'} size="sm" disabled={enforcePending} onClick={onEnforceClick} className="h-7 text-xs" title={isEnforcingThis ? 'Currently ENFORCING this threshold. Click to disable enforcement.' : `Push this threshold to Compute. Live requests with score >= threshold will be blocked (HTTP ${effectiveStatusCode}).`}>
+            {enforcePending ? <Loader2 className="h-3 w-3 animate-spin mr-1" /> : isEnforcingThis ? <ShieldOff className="h-3 w-3 mr-1" /> : <ShieldCheck className="h-3 w-3 mr-1" />}
             {isEnforcingThis ? 'Disable' : 'Enforce'}
           </Button>
         </div>
       </div>
-      {enforce?.enforced && ( <div className="text-[10px] text-destructive">
-          ⚠ LIVE: enforcing at threshold{' '}
-          <span className="font-mono">{enforce.threshold}</span> — requests with score ≥ threshold are returning HTTP{' '}
-          <span className="font-mono">{effectiveStatusCode}</span>.
+      {enforce?.enforced && (
+        <div className="text-[10px] text-destructive">
+          ⚠ LIVE: enforcing at threshold <span className="font-mono">{enforce.threshold}</span> — requests with score ≥ threshold are returning HTTP <span className="font-mono">{effectiveStatusCode}</span>.
         </div>
       )}
       <div className="flex items-center gap-2 flex-wrap text-[11px]">
-        <label className="text-muted-foreground" htmlFor="enforce-status-code">
-          Enforce response code:
-        </label>
-        <input id="enforce-status-code" type="number" min={statusCode?.min ?? 400} max={statusCode?.max ?? 599} step={1} value={codeDraft}
-          onChange={(e) => onCodeDraftChange(e.target.value)}
-          disabled={statusCodePending}
-          className="h-6 w-16 rounded border bg-background px-1.5 text-[11px] font-mono"
-          title="Any HTTP 4xx/5xx code (e.g. 403 Forbidden, 429 Too Many Requests, 451 Legal, 503 Service Unavailable). Reason phrase auto-mapped from the HTTP standard."
-          aria-label="Enforce response code" />
-        <Button size="sm" variant={codeDraftIsDirty ? 'default' : 'outline'} className="h-6 text-[11px]" disabled={!codeDraftIsDirty || statusCodePending}
-          onClick={onApplyStatusCode}
-          title={ codeDraftIsDirty
-              ? `Re-deploy the enforce snippet so flagged requests return HTTP ${codeDraftNum}`
-              : 'No change to publish'
-          } >
-          Apply
-        </Button>
-        {statusCode && !statusCode.is_default && ( <button
-            type="button"
-            disabled={statusCodePending}
-            onClick={onResetStatusCode}
-            className="text-[10px] text-muted-foreground underline hover:text-foreground"
-            title={`Reset to default (${statusCode.default})`}
-          >
-            reset
-          </button>
-        )}
-        {statusCodePending && ( <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />
-        )}
-        {codeDraft !== '' && !codeDraftValid && ( <span className="text-[10px] text-destructive">
-            must be {statusCode?.min ?? 400}–{statusCode?.max ?? 599}
-          </span>
-        )}
+        <label className="text-muted-foreground" htmlFor="enforce-status-code">Enforce response code:</label>
+        <input id="enforce-status-code" type="number" min={statusCode?.min ?? 400} max={statusCode?.max ?? 599} step={1} value={codeDraft} onChange={(e) => onCodeDraftChange(e.target.value)} disabled={statusCodePending} className="h-6 w-16 rounded border bg-background px-1.5 text-[11px] font-mono" title="Any HTTP 4xx/5xx code (e.g. 403 Forbidden, 429 Too Many Requests, 451 Legal, 503 Service Unavailable). Reason phrase auto-mapped from the HTTP standard." aria-label="Enforce response code" />
+        <Button size="sm" variant={codeDraftIsDirty ? 'default' : 'outline'} className="h-6 text-[11px]" disabled={!codeDraftIsDirty || statusCodePending} onClick={onApplyStatusCode} title={codeDraftIsDirty ? `Re-deploy the enforce snippet so flagged requests return HTTP ${codeDraftNum}` : 'No change to publish'}>Apply</Button>
+        {statusCode && !statusCode.is_default && <button type="button" disabled={statusCodePending} onClick={onResetStatusCode} className="text-[10px] text-muted-foreground underline hover:text-foreground" title={`Reset to default (${statusCode.default})`}>reset</button>}
+        {statusCodePending && <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />}
+        {codeDraft !== '' && !codeDraftValid && <span className="text-[10px] text-destructive">must be {statusCode?.min ?? 400}–{statusCode?.max ?? 599}</span>}
       </div>
-      <Slider value={[thresholdRaw]} onValueChange={(v) => onThresholdRawChange(v[0] ?? 75)} min={0} max={100} step={5} className="w-full"
-        aria-label="Score threshold" />
-      <div className="flex justify-between text-[10px] text-muted-foreground tabular-nums">
-        <span>0 (flag everything)</span>
-        <span>50</span>
-        <span>100 (flag nothing)</span>
-      </div>
+      <Slider value={[thresholdRaw]} onValueChange={(v) => onThresholdRawChange(v[0] ?? 75)} min={0} max={100} step={5} className="w-full" aria-label="Score threshold" />
+      <div className="flex justify-between text-[10px] text-muted-foreground tabular-nums"><span>0 (flag everything)</span><span>50</span><span>100 (flag nothing)</span></div>
     </div>
   )
 }
 // ─── ThresholdSlider ─────────────────────────────────────────────────────────
-export type BucketCounts = WithRequired<
-  components['schemas']['ScoringThresholdBucket'], 'total' | 'good' | 'bad' | 'unlabeled' >
+export type BucketCounts = WithRequired<components['schemas']['ScoringThresholdBucket'], 'total' | 'good' | 'bad' | 'unlabeled'>
 type _BucketCountsParity = Expect<WireParity<BucketCounts, components['schemas']['ScoringThresholdBucket']>>
-interface ThresholdMatrixProps {
-  flagged: BucketCounts
-  passed: Omit<BucketCounts, 'total'>
-}
+interface ThresholdMatrixProps { flagged: BucketCounts; passed: Omit<BucketCounts, 'total'> }
 export function ThresholdMatrix({ flagged, passed }: ThresholdMatrixProps) {
   return (
     <div className="grid grid-cols-2 gap-3">
-      <Bucket
-        title="Would FLAG"
-        total={flagged.total}
-        good={flagged.good}
-        bad={flagged.bad}
-        unlabeled={flagged.unlabeled}
-        tone="warn"
-      />
-      <Bucket
-        title="Would PASS"
-        total={passed.good + passed.bad + passed.unlabeled}
-        good={passed.good}
-        bad={passed.bad}
-        unlabeled={passed.unlabeled}
-        tone="good"
-      />
+      <Bucket title="Would FLAG" total={flagged.total} good={flagged.good} bad={flagged.bad} unlabeled={flagged.unlabeled} tone="warn" />
+      <Bucket title="Would PASS" total={passed.good + passed.bad + passed.unlabeled} good={passed.good} bad={passed.bad} unlabeled={passed.unlabeled} tone="good" />
     </div>
   )
 }
-function Bucket({
-  title,
-  total,
-  good,
-  bad,
-  unlabeled,
-  tone,
-}: {
-  title: string
-  total: number
-  good: number
-  bad: number
-  unlabeled: number
-  tone: 'warn' | 'good'
-}) {
+function Bucket({ title, total, good, bad, unlabeled, tone }: { title: string; total: number; good: number; bad: number; unlabeled: number; tone: 'warn' | 'good' }) {
   const tint = tone === 'warn' ? 'border-amber-300 bg-amber-50/50' : 'border-emerald-300 bg-emerald-50/40'
   return (
     <div className={`p-3 border rounded-md ${tint}`}>
       <div className="text-[10px] uppercase tracking-wider text-muted-foreground">{title}</div>
       <div className="text-xl font-mono font-semibold tabular-nums">{formatCount(total)}</div>
       <div className="mt-1 space-y-0.5 text-[11px]">
-        <div className="flex justify-between">
-          <span className="text-emerald-700">good</span>
-          <span className="font-mono tabular-nums">{formatCount(good)}</span>
-        </div>
-        <div className="flex justify-between">
-          <span className="text-destructive">bad</span>
-          <span className="font-mono tabular-nums">{formatCount(bad)}</span>
-        </div>
-        <div className="flex justify-between text-muted-foreground">
-          <span>unlabeled</span>
-          <span className="font-mono tabular-nums">{formatCount(unlabeled)}</span>
-        </div>
+        <div className="flex justify-between"><span className="text-emerald-700">good</span><span className="font-mono tabular-nums">{formatCount(good)}</span></div>
+        <div className="flex justify-between"><span className="text-destructive">bad</span><span className="font-mono tabular-nums">{formatCount(bad)}</span></div>
+        <div className="flex justify-between text-muted-foreground"><span>unlabeled</span><span className="font-mono tabular-nums">{formatCount(unlabeled)}</span></div>
       </div>
     </div>
   )
 }
-interface ThresholdPreviewStatsProps {
-  precision: number | null
-  recall: number | null
-  totalScoredSessions: number
-  sinceHours: number
-}
-export function ThresholdPreviewStats({
-  precision,
-  recall,
-  totalScoredSessions,
-  sinceHours,
-}: ThresholdPreviewStatsProps) {
+interface ThresholdPreviewStatsProps { precision: number | null; recall: number | null; totalScoredSessions: number; sinceHours: number }
+export function ThresholdPreviewStats({ precision, recall, totalScoredSessions, sinceHours }: ThresholdPreviewStatsProps) {
   return (
     <>
       <div className="grid grid-cols-2 gap-3 text-xs">
-        <Stat
-          label="Precision"
-          value={precision != null ? formatPercent(precision, { decimals: 1 }) : '—'}
-          hint="of labeled flagged sessions, how many are bad"
-        />
-        <Stat
-          label="Recall"
-          value={recall != null ? formatPercent(recall, { decimals: 1 }) : '—'}
-          hint="of all labeled-bad sessions, how many got flagged"
-        />
+        <Stat label="Precision" value={precision != null ? formatPercent(precision, { decimals: 1 }) : '—'} hint="of labeled flagged sessions, how many are bad" />
+        <Stat label="Recall" value={recall != null ? formatPercent(recall, { decimals: 1 }) : '—'} hint="of all labeled-bad sessions, how many got flagged" />
       </div>
       <p className="text-[11px] text-muted-foreground italic">
-        {formatCount(totalScoredSessions)} distinct scored sessions in the last{' '}
-        {sinceHours}h. Precision/recall only count sessions you&apos;ve labeled —
-        the &quot;unlabeled&quot; tally is everything else.
+        {formatCount(totalScoredSessions)} distinct scored sessions in the last {sinceHours}h. Precision/recall only count sessions you&apos;ve labeled — the &quot;unlabeled&quot; tally is everything else.
       </p>
     </>
   )
@@ -1081,49 +970,26 @@ function Stat({ label, value, hint }: { label: string; value: string; hint: stri
   )
 }
 type ThresholdPreviewResponse = Simplify<
-  Omit<
-    WithRequiredNullable<
-      WithRequired<
-        components['schemas']['ScoringThresholdPreviewResponse'],
-        'threshold' | 'since_hours' | 'total_scored_sessions'
-      >,
-      'precision' | 'recall'
-    >,
-    'flagged' | 'passed'
-  > & { flagged: BucketCounts; passed: Omit<BucketCounts, 'total'> }
+  Omit<WithRequiredNullable<WithRequired<components['schemas']['ScoringThresholdPreviewResponse'], 'threshold' | 'since_hours' | 'total_scored_sessions'>, 'precision' | 'recall'>, 'flagged' | 'passed'> & {
+    flagged: BucketCounts; passed: Omit<BucketCounts, 'total'>
+  }
 >
 type _ThresholdPreviewParity = Expect<WireParity<ThresholdPreviewResponse, components['schemas']['ScoringThresholdPreviewResponse']>>
-interface ThresholdSliderProps {
-  serviceId: string
-  sinceHours?: number
-}
+interface ThresholdSliderProps { serviceId: string; sinceHours?: number }
 export function ThresholdSlider({ serviceId, sinceHours = 24 }: ThresholdSliderProps) {
   const queryClient = useQueryClient()
   const [thresholdRaw, setThresholdRaw] = React.useState(75)
   const threshold = useDebounce(thresholdRaw, 150)
-  const [pendingAction, setPendingAction] = React.useState<
-    { action: 'commit' | 'enforce' | 'disable'; threshold: number }
-    | { action: 'change-status-code'; statusCode: number }
-    | null
-  >(null)
+  const [pendingAction, setPendingAction] = React.useState<{ action: 'commit' | 'enforce' | 'disable'; threshold: number } | { action: 'change-status-code'; statusCode: number } | null>(null)
   const { data: rawPreviewData, isLoading, error } = useScoringQuery(
     ['scoring-threshold-preview', serviceId, threshold, sinceHours],
-    () =>
-      client.GET('/api/services/{service_id}/scoring/threshold-preview', {
-        params: {
-          path: { service_id: serviceId },
-          query: { threshold, since_hours: sinceHours },
-        },
-      }),
+    () => client.GET('/api/services/{service_id}/scoring/threshold-preview', { params: { path: { service_id: serviceId }, query: { threshold, since_hours: sinceHours } } }),
     { staleTime: 30_000 },
   )
   const data = rawPreviewData as ThresholdPreviewResponse | undefined
   const { data: committed } = useScoringQuery(
     ['scoring-threshold-committed', serviceId],
-    () =>
-      client.GET('/api/services/{service_id}/scoring/threshold', {
-        params: { path: { service_id: serviceId } },
-      }),
+    () => client.GET('/api/services/{service_id}/scoring/threshold', { params: { path: { service_id: serviceId } } }),
     { staleTime: 30_000 },
   )
   const [syncedServiceId, setSyncedServiceId] = React.useState<string | null>(null)
@@ -1131,77 +997,36 @@ export function ThresholdSlider({ serviceId, sinceHours = 24 }: ThresholdSliderP
     setSyncedServiceId(serviceId)
     setThresholdRaw(committed.threshold)
   }
+  const invalidateThresholdKeys = (firstKey: string) => {
+    for (const key of [[firstKey, serviceId], ['scoring-status', serviceId], scoringConfigCompositeKey(serviceId), ['scoring-audit', serviceId]]) {
+      queryClient.invalidateQueries({ queryKey: key })
+    }
+  }
   const commitMutation = useMutation({
     mutationFn: async (newThreshold: number | null) =>
-      unwrapClient(
-        client.PUT(
-          '/api/services/{service_id}/scoring/threshold',
-          {
-            params: { path: { service_id: serviceId } },
-            body: { threshold: newThreshold },
-          },
-        ),
-      ),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['scoring-threshold-committed', serviceId] })
-      queryClient.invalidateQueries({ queryKey: ['scoring-status', serviceId] })
-      queryClient.invalidateQueries({ queryKey: scoringConfigCompositeKey(serviceId) })
-      queryClient.invalidateQueries({ queryKey: ['scoring-audit', serviceId] })
-    },
+      unwrapClient(client.PUT('/api/services/{service_id}/scoring/threshold', { params: { path: { service_id: serviceId } }, body: { threshold: newThreshold } })),
+    onSuccess: () => invalidateThresholdKeys('scoring-threshold-committed'),
   })
   const isAlreadyCommitted = committed?.threshold === thresholdRaw
   const { data: enforce } = useScoringQuery(
     ['scoring-enforce-threshold', serviceId],
-    () =>
-      client.GET('/api/services/{service_id}/scoring/enforce-threshold', {
-        params: { path: { service_id: serviceId } },
-      }),
+    () => client.GET('/api/services/{service_id}/scoring/enforce-threshold', { params: { path: { service_id: serviceId } } }),
     { staleTime: 30_000 },
   )
   const enforceMutation = useMutation({
     mutationFn: async (newThreshold: number | null) =>
-      unwrapClient(
-        client.PUT(
-          '/api/services/{service_id}/scoring/enforce-threshold',
-          {
-            params: {
-              path: { service_id: serviceId },
-              query: { confirm: true },
-            },
-            body: { threshold: newThreshold },
-          },
-        ),
-      ),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['scoring-enforce-threshold', serviceId] })
-      queryClient.invalidateQueries({ queryKey: ['scoring-status', serviceId] })
-      queryClient.invalidateQueries({ queryKey: scoringConfigCompositeKey(serviceId) })
-      queryClient.invalidateQueries({ queryKey: ['scoring-audit', serviceId] })
-    },
+      unwrapClient(client.PUT('/api/services/{service_id}/scoring/enforce-threshold', { params: { path: { service_id: serviceId }, query: { confirm: true } }, body: { threshold: newThreshold } })),
+    onSuccess: () => invalidateThresholdKeys('scoring-enforce-threshold'),
   })
   const isEnforcingThis = enforce?.threshold === thresholdRaw
   const { data: statusCode } = useScoringQuery(
     ['scoring-enforce-status-code', serviceId],
-    () =>
-      client.GET('/api/services/{service_id}/scoring/enforce-status-code', {
-        params: { path: { service_id: serviceId } },
-      }),
+    () => client.GET('/api/services/{service_id}/scoring/enforce-status-code', { params: { path: { service_id: serviceId } } }),
     { staleTime: 30_000 },
   )
   const statusCodeMutation = useMutation({
     mutationFn: async (newCode: number | null) =>
-      unwrapClient(
-        client.PUT(
-          '/api/services/{service_id}/scoring/enforce-status-code',
-          {
-            params: {
-              path: { service_id: serviceId },
-              query: { confirm: true },
-            },
-            body: { status_code: newCode },
-          },
-        ),
-      ),
+      unwrapClient(client.PUT('/api/services/{service_id}/scoring/enforce-status-code', { params: { path: { service_id: serviceId }, query: { confirm: true } }, body: { status_code: newCode } })),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['scoring-enforce-status-code', serviceId] })
       queryClient.invalidateQueries({ queryKey: scoringConfigCompositeKey(serviceId) })
@@ -1211,170 +1036,1402 @@ export function ThresholdSlider({ serviceId, sinceHours = 24 }: ThresholdSliderP
   const effectiveStatusCode = statusCode?.effective ?? 429
   const [codeDraft, setCodeDraft] = useDerivedState(String(effectiveStatusCode))
   const codeDraftNum = Number(codeDraft)
-  const codeDraftValid =
-    codeDraft !== '' &&
-    !Number.isNaN(codeDraftNum) &&
-    Number.isInteger(codeDraftNum) &&
-    codeDraftNum >= (statusCode?.min ?? 400) &&
-    codeDraftNum <= (statusCode?.max ?? 599)
+  const codeDraftValid = codeDraft !== '' && !Number.isNaN(codeDraftNum) && Number.isInteger(codeDraftNum) && codeDraftNum >= (statusCode?.min ?? 400) && codeDraftNum <= (statusCode?.max ?? 599)
   const codeDraftIsDirty = codeDraftValid && codeDraftNum !== effectiveStatusCode
+  const anyMutationPending = commitMutation.isPending || enforceMutation.isPending || statusCodeMutation.isPending
   return (
     <AnalyticsCard
       title="Threshold preview"
       description={`Counterfactual: at threshold X, how many of the last ${sinceHours}h scored sessions would get flagged — and how well does that match your labels?`}
-      icon={<SlidersHorizontal className="h-4 w-4" />}
-      helpContent={<ThresholdSliderHelp />}
-      helpTitle="About Threshold & Enforcement"
+      icon={<SlidersHorizontal className="h-4 w-4" />} helpContent={<ThresholdSliderHelp />} helpTitle="About Threshold & Enforcement"
       error={error as (Error & { status?: number }) | null}
     >
       <div className="space-y-4">
         <ThresholdSliderControls
-          thresholdRaw={thresholdRaw}
-          onThresholdRawChange={setThresholdRaw}
-          committed={committed}
-          enforce={enforce}
-          statusCode={statusCode}
-          effectiveStatusCode={effectiveStatusCode}
-          isAlreadyCommitted={isAlreadyCommitted}
-          isEnforcingThis={isEnforcingThis}
-          commitPending={commitMutation.isPending}
-          enforcePending={enforceMutation.isPending}
-          statusCodePending={statusCodeMutation.isPending}
-          codeDraft={codeDraft}
-          onCodeDraftChange={setCodeDraft}
-          codeDraftValid={codeDraftValid}
-          codeDraftIsDirty={codeDraftIsDirty}
-          codeDraftNum={codeDraftNum}
+          thresholdRaw={thresholdRaw} onThresholdRawChange={setThresholdRaw} committed={committed} enforce={enforce}
+          statusCode={statusCode} effectiveStatusCode={effectiveStatusCode} isAlreadyCommitted={isAlreadyCommitted}
+          isEnforcingThis={isEnforcingThis} commitPending={commitMutation.isPending} enforcePending={enforceMutation.isPending}
+          statusCodePending={statusCodeMutation.isPending} codeDraft={codeDraft} onCodeDraftChange={setCodeDraft}
+          codeDraftValid={codeDraftValid} codeDraftIsDirty={codeDraftIsDirty} codeDraftNum={codeDraftNum}
           onCommitClick={() => setPendingAction({ action: 'commit', threshold: thresholdRaw })}
-          onEnforceClick={() => {
-            setPendingAction(
-              isEnforcingThis
-                ? { action: 'disable', threshold: enforce?.threshold ?? thresholdRaw }
-                : { action: 'enforce', threshold: thresholdRaw },
-            )
-          }}
-          onApplyStatusCode={() =>
-            setPendingAction({ action: 'change-status-code', statusCode: codeDraftNum })
-          }
-          onResetStatusCode={() => {
-            if (statusCode) {
-              setPendingAction({ action: 'change-status-code', statusCode: statusCode.default })
-            }
-          }}
+          onEnforceClick={() => setPendingAction(isEnforcingThis ? { action: 'disable', threshold: enforce?.threshold ?? thresholdRaw } : { action: 'enforce', threshold: thresholdRaw })}
+          onApplyStatusCode={() => setPendingAction({ action: 'change-status-code', statusCode: codeDraftNum })}
+          onResetStatusCode={() => { if (statusCode) setPendingAction({ action: 'change-status-code', statusCode: statusCode.default }) }}
         />
         {isLoading || !data ? (
-          <div className="grid grid-cols-2 gap-3">
-            <Skeleton className="h-20 w-full" />
-            <Skeleton className="h-20 w-full" />
-          </div>
+          <div className="grid grid-cols-2 gap-3"><Skeleton className="h-20 w-full" /><Skeleton className="h-20 w-full" /></div>
         ) : (
           <>
             <ThresholdMatrix flagged={data.flagged} passed={data.passed} />
-            <ThresholdPreviewStats
-              precision={data.precision}
-              recall={data.recall}
-              totalScoredSessions={data.total_scored_sessions}
-              sinceHours={data.since_hours}
-            />
+            <ThresholdPreviewStats precision={data.precision} recall={data.recall} totalScoredSessions={data.total_scored_sessions} sinceHours={data.since_hours} />
           </>
         )}
       </div>
       <ConfirmDialog
         open={pendingAction !== null}
-        onOpenChange={(open) => {
-          if (
-            !open &&
-            !commitMutation.isPending &&
-            !enforceMutation.isPending &&
-            !statusCodeMutation.isPending
-          ) {
-            setPendingAction(null)
-          }
-        }}
-        isPending={
-          commitMutation.isPending || enforceMutation.isPending || statusCodeMutation.isPending
-        }
-        isDangerous={pendingAction?.action !== 'commit'}
-        title={
-          pendingAction?.action === 'commit'
-            ? 'Commit threshold'
-            : pendingAction?.action === 'disable'
-              ? 'Disable enforcement'
-              : pendingAction?.action === 'change-status-code'
-                ? 'Change enforce response code'
-                : 'Enforce threshold (LIVE)'
-        }
+        onOpenChange={(open) => { if (!open && !anyMutationPending) setPendingAction(null) }}
+        isPending={anyMutationPending} isDangerous={pendingAction?.action !== 'commit'}
+        title={pendingAction?.action === 'commit' ? 'Commit threshold' : pendingAction?.action === 'disable' ? 'Disable enforcement' : pendingAction?.action === 'change-status-code' ? 'Change enforce response code' : 'Enforce threshold (LIVE)'}
         description={
           pendingAction?.action === 'commit' ? (
-            <>
-              Persist <span className="font-mono">{pendingAction.threshold}</span> as your committed
-              threshold. This is a remembered preference only — it does NOT push to Compute or
-              block any live requests.
-            </>
+            <>Persist <span className="font-mono">{pendingAction.threshold}</span> as your committed threshold. This is a remembered preference only — it does NOT push to Compute or block any live requests.</>
           ) : pendingAction?.action === 'disable' ? (
-            <>
-              Currently enforcing at threshold{' '}
-              <span className="font-mono">{pendingAction.threshold}</span>. Disable enforcement so
-              the edge stops returning HTTP{' '}
-              <span className="font-mono">{effectiveStatusCode}</span> for high-score sessions.
-              Effective within seconds.
-            </>
+            <>Currently enforcing at threshold <span className="font-mono">{pendingAction.threshold}</span>. Disable enforcement so the edge stops returning HTTP <span className="font-mono">{effectiveStatusCode}</span> for high-score sessions. Effective within seconds.</>
           ) : pendingAction?.action === 'change-status-code' ? (
-            <>
-              Re-deploy the enforce VCL snippet so flagged requests return HTTP{' '}
-              <span className="font-mono">{pendingAction.statusCode}</span> instead of HTTP{' '}
-              <span className="font-mono">{effectiveStatusCode}</span>. Takes ~5-10s (one Fastly
-              version activation). Threshold + enforcement state are untouched.
-            </>
+            <>Re-deploy the enforce VCL snippet so flagged requests return HTTP <span className="font-mono">{pendingAction.statusCode}</span> instead of HTTP <span className="font-mono">{effectiveStatusCode}</span>. Takes ~5-10s (one Fastly version activation). Threshold + enforcement state are untouched.</>
           ) : pendingAction?.action === 'enforce' && enforce?.enforced && enforce.threshold != null && enforce.threshold !== pendingAction.threshold ? (
-            <>
-              Currently enforcing at threshold{' '}
-              <span className="font-mono">{enforce.threshold}</span> (live blocking). Replace with
-              threshold <span className="font-mono">{pendingAction.threshold}</span>? Sessions
-              scoring between <span className="font-mono">{pendingAction.threshold}</span> and{' '}
-              <span className="font-mono">{enforce.threshold}</span> will start getting HTTP{' '}
-              <span className="font-mono">{effectiveStatusCode}</span> within seconds.
-            </>
+            <>Currently enforcing at threshold <span className="font-mono">{enforce.threshold}</span> (live blocking). Replace with threshold <span className="font-mono">{pendingAction.threshold}</span>? Sessions scoring between <span className="font-mono">{pendingAction.threshold}</span> and <span className="font-mono">{enforce.threshold}</span> will start getting HTTP <span className="font-mono">{effectiveStatusCode}</span> within seconds.</>
           ) : pendingAction?.action === 'enforce' ? (
-            <>
-              Enforce threshold <span className="font-mono">{pendingAction.threshold}</span>?
-              Requests with score &ge; <span className="font-mono">{pendingAction.threshold}</span>{' '}
-              will get HTTP <span className="font-mono">{effectiveStatusCode}</span> at the edge.
-              Effective within seconds.
-            </>
+            <>Enforce threshold <span className="font-mono">{pendingAction.threshold}</span>? Requests with score &ge; <span className="font-mono">{pendingAction.threshold}</span> will get HTTP <span className="font-mono">{effectiveStatusCode}</span> at the edge. Effective within seconds.</>
           ) : null
         }
-        confirmLabel={
-          pendingAction?.action === 'commit'
-            ? 'Commit'
-            : pendingAction?.action === 'disable'
-              ? 'Disable'
-              : pendingAction?.action === 'change-status-code'
-                ? 'Re-deploy'
-                : 'Enforce'
-        }
+        confirmLabel={pendingAction?.action === 'commit' ? 'Commit' : pendingAction?.action === 'disable' ? 'Disable' : pendingAction?.action === 'change-status-code' ? 'Re-deploy' : 'Enforce'}
         onConfirm={() => {
           if (!pendingAction) return
-          if (pendingAction.action === 'commit') {
-            commitMutation.mutate(pendingAction.threshold, {
-              onSettled: () => setPendingAction(null),
-            })
-          } else if (pendingAction.action === 'disable') {
-            enforceMutation.mutate(null, {
-              onSettled: () => setPendingAction(null),
-            })
-          } else if (pendingAction.action === 'change-status-code') {
-            const isDefault = statusCode != null && pendingAction.statusCode === statusCode.default
-            statusCodeMutation.mutate(isDefault ? null : pendingAction.statusCode, {
-              onSettled: () => setPendingAction(null),
-            })
-          } else {
-            enforceMutation.mutate(pendingAction.threshold, {
-              onSettled: () => setPendingAction(null),
-            })
-          }
+          const clear = { onSettled: () => setPendingAction(null) }
+          if (pendingAction.action === 'commit') commitMutation.mutate(pendingAction.threshold, clear)
+          else if (pendingAction.action === 'disable') enforceMutation.mutate(null, clear)
+          else if (pendingAction.action === 'change-status-code') statusCodeMutation.mutate(statusCode != null && pendingAction.statusCode === statusCode.default ? null : pendingAction.statusCode, clear)
+          else enforceMutation.mutate(pendingAction.threshold, clear)
         }}
       />
     </AnalyticsCard>
+  )
+}
+
+interface FlagSessionPopoverProps {
+  serviceId: string
+  // ``null`` for a cookieless request — the popover renders disabled.
+  sid: string | null
+  // Optional metadata captured at flag time — denormalized into the label
+  // row so the Labels tab can show "what this session looked like" without
+  // re-querying the logs.
+  sampleIp?: string | null; sampleUa?: string | null; sampleUrl?: string | null
+  // Currently-applied label (from the labels API). Undefined means we
+  // don't know / haven't checked.
+  currentLabel?: LabelValue | null
+  // Id of the currently-applied label row, required to issue the DELETE
+  // that un-flags the session. Optional — when absent the "Clear Label"
+  // affordance is hidden.
+  currentLabelId?: string | null
+  trigger?: React.ReactNode; onFlagged?: () => void
+}
+
+const LABEL_STYLES: Record<LabelValue, string> = {
+  good: 'border-emerald-500 text-emerald-700 hover:bg-emerald-50',
+  bad: 'border-rose-500 text-rose-700 hover:bg-rose-50',
+  neutral: 'border-slate-400 text-slate-700 hover:bg-slate-50',
+}
+
+/**
+ * Reusable popover for labeling a session as good / bad / neutral. Used
+ * from both the SessionScoring admin page's TopFlaggedTable and from the
+ * dashboard raw-logs table's Flag column.
+ *
+ * Always posts to /api/services/{serviceId}/scoring/labels, which upserts
+ * on (service_id, sid), so re-flagging the same session overwrites
+ * cleanly. The `currentLabel` prop is purely cosmetic (visual hint of
+ * existing state) — the upsert semantics on the backend mean we never
+ * need to choose between POST and PATCH from the client.
+ */
+export function FlagSessionPopover({
+  serviceId, sid, sampleIp = '', sampleUa = '', sampleUrl = '', currentLabel, currentLabelId, trigger, onFlagged,
+}: FlagSessionPopoverProps) {
+  const [open, setOpen] = React.useState(false)
+  const [notes, setNotes] = React.useState('')
+  const [error, setError] = React.useState('')
+  const disabled = !sid
+
+  const submitMutation = useMutation({
+    mutationFn: async (label: LabelValue) => {
+      await unwrapClient(
+        client.POST('/api/services/{service_id}/scoring/labels', {
+          params: { path: { service_id: serviceId } },
+          body: { sid: sid!, label, notes, flagged_by: 'admin', sample_ip: sampleIp ?? '', sample_ua: sampleUa ?? '', sample_url: sampleUrl ?? '' },
+        }),
+      )
+    },
+    onMutate: () => setError(''),
+    onSuccess: () => { setOpen(false); setNotes(''); onFlagged?.() },
+    onError: (e) => setError(extractApiError(e) || 'Failed to save label'),
+  })
+  const busy = submitMutation.isPending ? (submitMutation.variables ?? null) : null
+  const submit = (label: LabelValue) => { if (sid) submitMutation.mutate(label) }
+
+  const clearMutation = useMutation({
+    mutationFn: async () => {
+      await unwrapClient(
+        client.DELETE('/api/services/{service_id}/scoring/labels/{label_id}', {
+          params: { path: { service_id: serviceId, label_id: currentLabelId! } },
+        }),
+      )
+    },
+    onMutate: () => setError(''),
+    onSuccess: () => { setOpen(false); onFlagged?.() },
+    onError: (e) => setError(extractApiError(e) || 'Failed to clear label'),
+  })
+  const clearing = clearMutation.isPending
+  const handleClearLabel = () => { if (currentLabelId) clearMutation.mutate() }
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger
+        render={(props: React.ComponentPropsWithRef<'button'>) =>
+          trigger ? (
+            <button {...props}>{trigger}</button>
+          ) : (
+            <Button
+              {...props} variant="ghost" size="icon" className="h-7 w-7" disabled={disabled}
+              aria-label={disabled ? 'No session id (cookieless request)' : 'Flag this session'}
+              title={disabled ? 'No session id (cookieless request)' : 'Flag this session'}
+            >
+              <Flag className={currentLabel === 'bad' ? 'h-3.5 w-3.5 text-rose-600 fill-rose-600' : currentLabel === 'good' ? 'h-3.5 w-3.5 text-emerald-600 fill-emerald-600' : currentLabel === 'neutral' ? 'h-3.5 w-3.5 text-slate-500 fill-slate-500' : 'h-3.5 w-3.5 text-muted-foreground'} />
+            </Button>
+          )
+        }
+      />
+      <PopoverContent className="w-80" align="end">
+        <div className="space-y-3">
+          <div>
+            <p className="text-sm font-medium">Label session</p>
+            <p className="text-xs text-muted-foreground font-mono break-all mt-0.5">sid: {sid || '(none)'}</p>
+            {currentLabel && <p className="text-xs text-muted-foreground mt-1">Currently: <span className="font-medium">{currentLabel}</span> · re-flagging overwrites</p>}
+          </div>
+          <Textarea value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Notes (optional) — why this session?" className="text-xs min-h-[60px]" disabled={!!busy} />
+          {error && <p className="text-xs text-rose-600">{error}</p>}
+          <div className="grid grid-cols-3 gap-2">
+            {(['good', 'neutral', 'bad'] as const).map((lbl) => (
+              <Button key={lbl} variant="outline" size="sm" className={`text-xs ${LABEL_STYLES[lbl]}`} disabled={disabled || !!busy || clearing} onClick={() => submit(lbl)}>
+                {busy === lbl ? <Loader2 className="h-3 w-3 animate-spin" /> : lbl}
+              </Button>
+            ))}
+          </div>
+          {currentLabel && currentLabelId && (
+            <div className="pt-1 border-t">
+              <Button variant="ghost" size="sm" className="w-full text-xs text-rose-600 hover:text-rose-700 hover:bg-rose-50" disabled={!!busy || clearing} onClick={handleClearLabel}>
+                {clearing ? <Loader2 className="h-3 w-3 animate-spin" /> : 'Clear Label (Un-flag)'}
+              </Button>
+            </div>
+          )}
+        </div>
+      </PopoverContent>
+    </Popover>
+  )
+}
+
+type SessionEvent = components['schemas']['ScoringSessionEvent']
+type SessionEventRow = { key: string; event: SessionEvent; index: number; prev: SessionEvent | null }
+
+const EVENT_COLUMNS: ColumnDef<SessionEventRow>[] = [
+  { id: 'index', cell: ({ row }) => <span className="text-muted-foreground font-mono">{row.original.index + 1}.</span> },
+  {
+    id: 'details',
+    cell: ({ row }) => {
+      const { event, prev } = row.original
+      const ts = event.ts ? formatLocalDateTime(event.ts) : '—'
+      return (
+        <div className="space-y-1">
+          <div className="flex items-center gap-2">
+            {prev && <span className="text-muted-foreground inline-flex items-center gap-0.5"><code className="text-[10px] truncate max-w-[200px]">{prev.url}</code><ChevronRight className="h-3 w-3" /></span>}
+            <code className="font-mono text-xs truncate">{event.url}</code>
+          </div>
+          <div className="flex items-center gap-3 text-[10px] text-muted-foreground">
+            <span>{ts}</span>
+            {event.status != null && <span>HTTP {event.status}</span>}
+            {event.edge_cookie_compliance && <span>cookie:{event.edge_cookie_compliance}</span>}
+            {event.edge_score_reason && <span className="text-amber-600">{event.edge_score_reason}</span>}
+          </div>
+        </div>
+      )
+    },
+  },
+  {
+    id: 'score',
+    cell: ({ row }) => {
+      const score = row.original.event.edge_score
+      if (score == null) return null
+      const tone = score >= 75 ? 'text-destructive' : score >= 50 ? 'text-amber-600' : 'text-muted-foreground'
+      return <div className={`text-right font-mono font-semibold ${tone}`}>{score}</div>
+    },
+  },
+]
+
+interface SessionEventsDialogProps { serviceId: string; sid: string; label?: string; trigger?: React.ReactElement }
+
+export function SessionEventsDialog({ serviceId, sid, label, trigger }: SessionEventsDialogProps) {
+  const [open, setOpen] = React.useState(false)
+  const { data, isLoading, isError, error } = useScoringQuery(
+    ['scoring-session-events', serviceId, sid],
+    () => client.GET('/api/services/{service_id}/scoring/sessions/{sid}/events', { params: { path: { service_id: serviceId, sid }, query: { since_days: 30 } } }),
+    { enabled: open, staleTime: 30_000 },
+  )
+  const eventRows = React.useMemo<SessionEventRow[]>(
+    () => keyByOccurrence(data?.events ?? [], (ev) => `${ev.ts ?? ''}|${ev.edge_score ?? ''}`).map(({ key, item: event }, index, arr) => ({ key, event, index, prev: index > 0 ? arr[index - 1].item : null })),
+    [data?.events],
+  )
+  const eventsTable = useReactTable({ data: eventRows, columns: EVENT_COLUMNS, getCoreRowModel: getCoreRowModel() })
+
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger render={trigger ?? <button type="button" className="text-xs text-primary hover:underline inline-flex items-center gap-0.5" title="View session events"><Activity className="h-3 w-3" />events</button>} />
+      <DialogContent className="max-w-3xl max-h-[80vh] overflow-hidden flex flex-col">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Activity className="h-4 w-4" /><span>Session</span><code className="font-mono text-sm">{sid}</code>
+            {label && <Badge variant={label === 'good' ? 'success' : label === 'bad' ? 'destructive' : 'secondary'} className="uppercase text-[10px]">{label}</Badge>}
+          </DialogTitle>
+          <DialogDescription>
+            URL sequence the session walked, oldest first. The L2 scorer evaluates each
+            transition (prev URL → current URL) against the trained matrix — high-score
+            transitions are the ones the matrix flagged as unusual.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="flex-1 overflow-y-auto -mx-6 px-6">
+          {isLoading && <div className="space-y-2" role="status" aria-busy="true"><span className="sr-only">Loading session events</span><SkeletonGrid count={6} height="3rem" className="rounded-md" /></div>}
+          {isError && <div className="text-sm text-destructive p-3 border rounded-md">Failed to load events: {(error as Error)?.message ?? 'unknown'}</div>}
+          {data && data.event_count === 0 && (
+            <div className="text-sm text-muted-foreground p-6 text-center border rounded-md">
+              No events found for this sid in the last {data.since_days} days. The
+              session may have rotated its cookie, or the rows haven&apos;t been
+              ingested yet (cron ticks every ~30s; FOS-to-parquet lag is ~1–2 min).
+            </div>
+          )}
+          {data && (data.event_count ?? 0) > 0 && (
+            <div className="space-y-1">
+              <div className="text-xs text-muted-foreground mb-2">{data.event_count} event{data.event_count === 1 ? '' : 's'} in last {data.since_days}d</div>
+              <Table className="text-xs">
+                <TableBody>
+                  {eventsTable.getRowModel().rows.map((row) => (
+                    <TableRow key={row.original.key} className="align-top">
+                      {row.getVisibleCells().map((cell) => <TableCell key={cell.id} className="py-2">{flexRender(cell.column.columnDef.cell, cell.getContext())}</TableCell>)}
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          )}
+        </div>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+interface TopFlaggedTableProps { serviceId: string; sinceHours?: number }
+type FlaggedRow = components['schemas']['ScoringTopFlaggedRow']
+
+function scoreBadge(score: number) {
+  if (score >= 75) return <Badge className="bg-rose-600 hover:bg-rose-600">{score}</Badge>
+  if (score >= 50) return <Badge className="bg-amber-500 hover:bg-amber-500">{score}</Badge>
+  if (score >= 25) return <Badge className="bg-yellow-400 text-black hover:bg-yellow-400">{score}</Badge>
+  return <Badge variant="secondary">{score}</Badge>
+}
+
+function complianceBadge(c?: string) {
+  if (!c) return null
+  if (c === 'ok') return <Badge variant="secondary" className="text-emerald-700">ok</Badge>
+  return <Badge variant="outline" className="text-rose-700 border-rose-300">{c}</Badge>
+}
+
+const COLUMN_LABELS: Record<string, string> = {
+  timestamp: 'Time', edge_score: 'Score', edge_score_l1: 'L1', edge_score_l2: 'L2',
+  edge_cookie_compliance: 'Cookie', url: 'URL', ip: 'IP', ua: 'UA', edge_sid: 'SID', __flag: 'Flag',
+}
+
+// Hidden by default — UA strings are long + L1/L2 are detail rarely needed.
+// Matches the dashboard's "compact by default, opt-in detail" convention.
+const DEFAULT_HIDDEN: Record<string, boolean> = { edge_score_l1: false, edge_score_l2: false, ua: false }
+
+export function TopFlaggedTable({ serviceId, sinceHours = 24 }: TopFlaggedTableProps) {
+  const qc = useQueryClient()
+  const [complianceFilter, setComplianceFilter] = React.useState<string>('all')
+  const [minScore, setMinScore] = React.useState<string>('0')
+  const [visibility, setVisibility] = React.useState<Record<string, boolean>>(DEFAULT_HIDDEN)
+
+  const flagged = useScoringQuery(['scoring-top-flagged', serviceId, sinceHours], () =>
+    client.GET('/api/services/{service_id}/scoring/top-flagged', { params: { path: { service_id: serviceId }, query: { since_hours: sinceHours, limit: 200 } } }),
+  )
+  const { labelBySid } = useScoringLabels(serviceId)
+  const onFlagged = () => {
+    qc.invalidateQueries({ queryKey: queryKeys.scoringLabels(serviceId) })
+    qc.invalidateQueries({ queryKey: ['scoring-top-flagged', serviceId] })
+  }
+
+  // Distinct compliance values present in the result — populates the
+  // filter dropdown without hardcoding a list that might drift from
+  // what the scorer actually emits.
+  const complianceValues = React.useMemo(() => {
+    const s = new Set<string>()
+    for (const r of flagged.data?.rows ?? []) if (r.edge_cookie_compliance) s.add(r.edge_cookie_compliance)
+    return Array.from(s).sort()
+  }, [flagged.data])
+
+  const filteredData = React.useMemo(() => {
+    const min = parseInt(minScore, 10) || 0
+    return (flagged.data?.rows ?? []).filter((r) => r.edge_score >= min && (complianceFilter === 'all' || r.edge_cookie_compliance === complianceFilter))
+  }, [flagged.data, complianceFilter, minScore])
+
+  const columns = React.useMemo<ColumnDef<FlaggedRow>[]>(() => [
+    { accessorKey: 'timestamp', header: COLUMN_LABELS.timestamp, enableSorting: true, cell: ({ row }) => <DateTimeCell iso={row.original.timestamp} className="text-xs font-mono whitespace-nowrap" /> },
+    { accessorKey: 'edge_score', header: COLUMN_LABELS.edge_score, enableSorting: true, cell: ({ row }) => scoreBadge(row.getValue<number>('edge_score')) },
+    { accessorKey: 'edge_score_l1', header: COLUMN_LABELS.edge_score_l1, enableSorting: true, cell: ({ row }) => <span className="text-xs">{row.getValue<number>('edge_score_l1') ?? '—'}</span> },
+    { accessorKey: 'edge_score_l2', header: COLUMN_LABELS.edge_score_l2, enableSorting: true, cell: ({ row }) => <span className="text-xs">{row.getValue<number>('edge_score_l2') ?? '—'}</span> },
+    { accessorKey: 'edge_cookie_compliance', header: COLUMN_LABELS.edge_cookie_compliance, enableSorting: true, cell: ({ row }) => complianceBadge(row.getValue<string>('edge_cookie_compliance')) },
+    { accessorKey: 'url', header: COLUMN_LABELS.url, enableSorting: true, cell: ({ row }) => { const url = row.getValue<string>('url') ?? ''; return <span className="text-xs max-w-[320px] truncate inline-block" title={url}>{url}</span> } },
+    { accessorKey: 'ip', header: COLUMN_LABELS.ip, enableSorting: true, cell: ({ row }) => <span className="text-xs font-mono">{row.getValue<string>('ip') ?? '—'}</span> },
+    { accessorKey: 'ua', header: COLUMN_LABELS.ua, enableSorting: false, cell: ({ row }) => { const ua = row.getValue<string>('ua') ?? ''; return <span className="text-xs max-w-[260px] truncate inline-block" title={ua}>{ua}</span> } },
+    {
+      accessorKey: 'edge_sid', header: COLUMN_LABELS.edge_sid, enableSorting: true,
+      cell: ({ row }) => {
+        const sid = row.getValue<string>('edge_sid') ?? ''
+        if (!sid) return <span className="text-xs font-mono">—</span>
+        return (
+          <SessionEventsDialog
+            serviceId={serviceId} sid={sid} label={labelBySid.get(sid) ?? undefined}
+            trigger={<button type="button" className="text-xs font-mono hover:underline text-primary" title="View session events">{sid}</button>}
+          />
+        )
+      },
+    },
+    {
+      id: '__flag', header: () => <span className="text-right block">{COLUMN_LABELS.__flag}</span>, enableSorting: false,
+      cell: ({ row }) => {
+        const r = row.original
+        return (
+          <div className="text-right">
+            <FlagSessionPopover serviceId={serviceId} sid={r.edge_sid} sampleIp={r.ip} sampleUa={r.ua} sampleUrl={r.url} currentLabel={r.edge_sid ? (labelBySid.get(r.edge_sid) ?? null) : null} onFlagged={onFlagged} />
+          </div>
+        )
+      },
+    },
+  ], [serviceId, labelBySid])
+
+  const columnIds = React.useMemo(() => columns.map(columnIdOf), [columns])
+  const since = sinceHours >= 24 ? `${sinceHours / 24}d` : `${sinceHours}h`
+
+  return (
+    <AnalyticsCard
+      title={`Top flagged sessions — last ${since}`}
+      description="Sortable + filterable. Use the Flag column to label sessions for matrix evaluation."
+      isLoading={flagged.isLoading} isFetching={flagged.isFetching} error={flagged.error as (Error & { status?: number }) | null}
+      contentClassName="p-0" helpContent={<TopFlaggedHelp />} helpTitle="About Top Flagged Sessions"
+      headerAction={
+        <div className="flex items-center gap-2">
+          <Select value={complianceFilter} onValueChange={(v) => v && setComplianceFilter(v)}>
+            <SelectTrigger className="h-7 text-xs w-32"><SelectValue placeholder="Cookie: any" /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all" className="text-xs">Cookie: any</SelectItem>
+              {complianceValues.map((v) => <SelectItem key={v} value={v} className="text-xs">Cookie: {v}</SelectItem>)}
+            </SelectContent>
+          </Select>
+          <Select value={minScore} onValueChange={(v) => v && setMinScore(v)}>
+            <SelectTrigger className="h-7 text-xs w-28"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="0" className="text-xs">Score: any</SelectItem>
+              <SelectItem value="25" className="text-xs">Score ≥ 25</SelectItem>
+              <SelectItem value="50" className="text-xs">Score ≥ 50</SelectItem>
+              <SelectItem value="75" className="text-xs">Score ≥ 75</SelectItem>
+            </SelectContent>
+          </Select>
+          <ColumnVisibilityDropdown
+            columns={columnIds.filter((id) => id !== '__flag').map((id) => ({ id, label: COLUMN_LABELS[id] ?? id }))}
+            visibility={visibility} onChange={(id, visible) => setVisibility((v) => ({ ...v, [id]: visible }))}
+          />
+        </div>
+      }
+    >
+      <DataTable
+        columns={columns} data={filteredData} searchKey="url" initialSorting={[{ id: 'timestamp', desc: true }]}
+        hideToolbar columnVisibility={visibility} onColumnVisibilityChange={setVisibility}
+        emptyMessage={flagged.isLoading ? '' : `No scored requests match the current filters in the last ${since}.`} showPagination
+      />
+    </AnalyticsCard>
+  )
+}
+
+export interface StatusPanelProps { serviceId: string }
+type ScoringEvaluation = components['schemas']['ScoringEvaluationResponse']
+type CurvePoint = NonNullable<components['schemas']['ScoringCurvePoint']>
+
+const formatActivated = (raw: string): string => {
+  const d = new Date(raw)
+  return isNaN(d.getTime()) ? raw : formatLocalDateTime(d)
+}
+
+function Field({ label, value }: { label: string; value: React.ReactNode }) {
+  return (
+    <div className="flex items-center gap-2">
+      <span className="text-muted-foreground text-xs w-32 shrink-0">{label}:</span>
+      <span className="text-xs">{value}</span>
+    </div>
+  )
+}
+
+function AucField({ evalData }: { evalData: ScoringEvaluation }) {
+  if (!evalData.has_min_samples) {
+    return (
+      <Field
+        label="Matrix Quality"
+        value={<span className="text-xs text-muted-foreground">Need {evalData.min_per_class}+ good / {evalData.min_per_class}+ bad labels<span className="ml-1 text-foreground tabular-nums">(have {evalData.n_good}/{evalData.n_bad})</span></span>}
+      />
+    )
+  }
+  if (evalData.error) return <Field label="Matrix Quality" value={<span className="text-xs text-amber-600">{evalData.error}</span>} />
+  const auc = evalData.auc ?? 0
+  const passed = !!evalData.passed
+  const colorClass = passed ? 'text-emerald-600' : 'text-amber-600'
+  return (
+    <Field
+      label="Matrix Quality (AUC)"
+      value={
+        <span className="text-xs">
+          <span className={`font-mono font-semibold tabular-nums ${colorClass}`}>{auc.toFixed(3)}</span>
+          <span className={`ml-1 font-semibold ${colorClass}`}>— {passed ? 'PASS' : 'BELOW THRESHOLD'}</span>
+          <span className="ml-1 text-muted-foreground">(n={evalData.n_good} good / {evalData.n_bad} bad{evalData.threshold ? `, threshold ${evalData.threshold.toFixed(2)}` : ''})</span>
+        </span>
+      }
+    />
+  )
+}
+
+const REDEPLOY_STEPS = [
+  'Checks the live edge first: re-uploads the Wasm only if the build changed',
+  'Re-activates the logging VCL only if the scoring snippets/backend changed',
+  'Skips no-op version bumps when nothing changed — no scoring gap',
+]
+
+const DISABLE_STEPS = [
+  'Removes the 6 VCL snippets (recv / pass / fetch / deliver / miss / enforce) that route requests through the scorer',
+  'Removes the 6 scoring custom_fields from the log format',
+  'Clones + activates a new VCL version on the customer service',
+  'Deletes the scorer Compute service + its ConfigStores and matrix KV Store (a future Enable re-provisions them from scratch)',
+]
+
+function StepListDescription({ intro, serviceId, steps, header, footer }: { intro: string; serviceId: string; steps: React.ReactNode[]; header?: React.ReactNode; footer?: React.ReactNode }) {
+  return (
+    <div className="space-y-2">
+      {header}
+      <p>{intro} <code className="text-xs bg-muted px-1 rounded">{serviceId}</code>:</p>
+      <ul className="text-sm text-muted-foreground list-disc pl-5 space-y-1">{steps.map((s) => <li key={typeof s === 'string' ? s : String(steps.indexOf(s))}>{s}</li>)}</ul>
+      {footer}
+      <p className="text-xs text-muted-foreground italic">Click <strong>Start</strong> to proceed.</p>
+    </div>
+  )
+}
+
+function CalloutBanner({ tone = 'amber', children, testId }: { tone?: 'amber' | 'sky' | 'muted'; children: React.ReactNode; testId?: string }) {
+  const Icon = tone === 'amber' ? AlertTriangle : Info
+  const cls = tone === 'amber' ? 'border-amber-300 bg-amber-50 text-amber-900' : tone === 'sky' ? 'border-sky-300 bg-sky-50 text-sky-900' : 'bg-muted/40 text-muted-foreground'
+  return (
+    <div className={`flex items-start gap-2 rounded border px-2.5 py-1.5 ${cls}`} data-testid={testId}>
+      <Icon className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+      <div className="text-xs">{children}</div>
+    </div>
+  )
+}
+
+export function StatusPanel({ serviceId }: StatusPanelProps) {
+  const queryClient = useQueryClient()
+  const { data, isLoading, isFetching, error, refetch } = useScoringQuery(
+    ['scoring-status', serviceId],
+    () => client.GET('/api/services/{service_id}/scoring/status', { params: { path: { service_id: serviceId } } }),
+  )
+
+  const enabled = !!data?.enabled
+  const pragmasMissing = !enabled && data?.preflight_pragmas_ready === false
+  const [pragmaModalOpen, setPragmaModalOpen] = React.useState(false)
+  if (data?.preflight_pragmas_ready === true && pragmaModalOpen) setPragmaModalOpen(false)
+
+  const accountTeamMessage = `Hi Fastly team — please enable the preflight request body preservation service pragmas on Fastly service ${serviceId} (preserving unsent request bodies across VCL restarts and omitting request bodies when backend requests are rewritten to GET or HEAD) so we can enable our Session Scoring Compute preflight pass.`
+
+  const refreshScoring = React.useCallback(() => {
+    refetch()
+    invalidateServiceScoringQueries(queryClient, serviceId)
+  }, [queryClient, refetch, serviceId])
+
+  const { data: evalData } = useScoringQuery(
+    ['scoring-evaluation', serviceId],
+    () => client.GET('/api/services/{service_id}/scoring/evaluation', { params: { path: { service_id: serviceId } } }),
+    { enabled, staleTime: 30_000 },
+  )
+
+  const extLinkCls = 'text-muted-foreground hover:text-foreground opacity-50 hover:opacity-100 transition-opacity'
+
+  return (
+    <div data-testid="admin-session-scoring-status-card">
+      <AnalyticsCard
+        title="Session Scoring" icon={enabled ? <ShieldCheck className="h-4 w-4" /> : <ShieldOff className="h-4 w-4" />}
+        description="Edge scorer that classifies sessions in real-time using the cookie-bound state machine and matrix-based L2 evaluation."
+        isLoading={isLoading} isFetching={isFetching} loadingMessage="Loading session scoring status..."
+        error={error as (Error & { status?: number }) | null} helpContent={<StatusPanelHelp />} helpTitle="About Session Scoring" className="min-h-[220px]"
+        headerAction={
+          enabled ? (
+            <div className="flex items-center gap-2">
+              <SSEModal
+                title="Redeploy Scorer" endpoint={`/api/services/${serviceId}/scoring/enable`} body={{}} onClose={refreshScoring}
+                description={<StepListDescription intro="Push the latest scorer build to the edge for" serviceId={serviceId} steps={REDEPLOY_STEPS} />}
+                trigger={<Button variant={data?.scorer_drift ? 'default' : 'outline'} size="sm" data-testid="admin-session-scoring-redeploy-btn"><RefreshCw className="h-3.5 w-3.5 mr-1" /> Redeploy</Button>}
+              />
+              <SSEModal
+                title="Disable Session Scoring" endpoint={`/api/services/${serviceId}/scoring/disable`} body={{}} onClose={refreshScoring}
+                description={<StepListDescription intro="This will disable session scoring on" serviceId={serviceId} steps={DISABLE_STEPS} />}
+                trigger={<Button variant="outline" size="sm" className="text-rose-700 border-rose-300 hover:bg-rose-50" data-testid="admin-session-scoring-disable-btn"><PowerOff className="h-3.5 w-3.5 mr-1" /> Disable</Button>}
+              />
+            </div>
+          ) : pragmasMissing ? (
+            <>
+              <Button variant="default" size="sm" data-testid="admin-session-scoring-enable-btn" onClick={() => setPragmaModalOpen(true)}>
+                <Power className="h-3.5 w-3.5 mr-1" /> Enable
+              </Button>
+              <Dialog open={pragmaModalOpen} onOpenChange={setPragmaModalOpen}>
+                <DialogContent className="sm:max-w-lg" data-testid="admin-session-scoring-pragma-modal">
+                  <DialogHeader>
+                    <DialogTitle>Preflight Request Body Preservation Required</DialogTitle>
+                    <DialogDescription>
+                      Before enabling the Session Scoring Compute scorer on <code className="text-xs bg-muted px-1 rounded">{serviceId}</code>, your Fastly account team must enable preflight request body preservation on this service.
+                    </DialogDescription>
+                  </DialogHeader>
+                  <div className="space-y-3 py-2 text-sm">
+                    <div className="flex items-start gap-2 rounded border border-amber-300 bg-amber-50 px-3 py-2 text-amber-900">
+                      <AlertTriangle className="h-4 w-4 mt-0.5 shrink-0" />
+                      <div className="text-xs space-y-1">
+                        <div className="font-semibold">Why is this required?</div>
+                        <div>Session Scoring routes each request through a lightweight Compute preflight sub-request (rewritten to <code>GET</code>) and then restarts VCL to forward the original request to your origin. Without service-level preflight body preservation enabled, <code>POST</code>/<code>PUT</code>/<code>PATCH</code> request bodies can be drained or stall when forwarding to origin after the restart.</div>
+                      </div>
+                    </div>
+                    <div className="space-y-1.5">
+                      <div className="text-xs font-medium text-muted-foreground">Send this request to your Fastly account team:</div>
+                      <pre className="rounded border bg-muted/60 p-3 text-xs whitespace-pre-wrap break-words font-mono" data-testid="admin-session-scoring-pragma-message">{accountTeamMessage}</pre>
+                    </div>
+                  </div>
+                  <DialogFooter className="gap-2 sm:justify-between">
+                    <CopyButton text={accountTeamMessage} label="Copy Message" copiedLabel="Copied" variant="outline" size="sm" className="" iconClassName="h-3.5 w-3.5" data-testid="admin-session-scoring-pragma-copy-btn" />
+                    <div className="flex items-center gap-2">
+                      <Button type="button" variant="outline" size="sm" onClick={() => refetch()} disabled={isFetching} data-testid="admin-session-scoring-pragma-recheck-btn">
+                        <RefreshCw className={`h-3.5 w-3.5 mr-1 ${isFetching ? 'animate-spin' : ''}`} /> Check Again
+                      </Button>
+                      <Button type="button" variant="default" size="sm" onClick={() => setPragmaModalOpen(false)}>Close</Button>
+                    </div>
+                  </DialogFooter>
+                </DialogContent>
+              </Dialog>
+            </>
+          ) : (
+            <SSEModal
+              title="Enable Session Scoring" endpoint={`/api/services/${serviceId}/scoring/enable`} body={{}} onClose={refreshScoring}
+              description={
+                <StepListDescription
+                  intro="This will enable session scoring on" serviceId={serviceId}
+                  header={
+                    <div className="flex items-start gap-2 rounded border border-amber-300 bg-amber-50 px-3 py-2 text-amber-900">
+                      <AlertTriangle className="h-4 w-4 mt-0.5 shrink-0" />
+                      <div className="text-xs space-y-1">
+                        <div className="font-semibold">Experimental feature</div>
+                        <div>Session scoring has not been validated against production traffic at scale. Run it on a non-critical service first, watch the scorer Compute service&apos;s error rate, and keep the disable path handy.</div>
+                      </div>
+                    </div>
+                  }
+                  steps={[
+                    "Provisions the scorer Compute service if it doesn't exist, deploys the trained Wasm scorer with the latest matrix",
+                    <>Adds the <code>session_scorer</code> backend, 6 VCL snippets, and 9 score fields (<code>edge_score</code>, session id, reason, L1/L2, latency, …) to the customer service</>,
+                    'Clones + activates a new VCL version',
+                    'Every request will be routed through the scorer for an L1+L2 score on the response cookie',
+                  ]}
+                  footer={
+                    <div className="flex items-start gap-2 rounded border border-sky-300 bg-sky-50 px-3 py-2 text-sky-900">
+                      <Info className="h-4 w-4 mt-0.5 shrink-0" />
+                      <div className="text-xs space-y-1">
+                        <div className="font-semibold">Log fields</div>
+                        <div>Scoring also needs the standard request fields for context — <strong>URL, method, user agent, and geo</strong>. Enabling scoring ensures those stay logged (added automatically if this service was set up with a minimal log-field set), so scored sessions show <em>which</em> requests were flagged, not just the score.</div>
+                      </div>
+                    </div>
+                  }
+                />
+              }
+              trigger={<Button variant="default" size="sm" data-testid="admin-session-scoring-enable-btn"><Power className="h-3.5 w-3.5 mr-1" /> Enable</Button>}
+            />
+          )
+        }
+      >
+        <div className="space-y-3 text-sm">
+          <div className="flex items-center gap-2" data-testid="admin-session-scoring-status-line">
+            <span className="text-muted-foreground">Status:</span>
+            {enabled
+              ? <Badge variant="default" className="bg-emerald-600" data-testid="admin-session-scoring-status-badge">Enabled</Badge>
+              : <Badge variant="secondary" data-testid="admin-session-scoring-status-badge">Disabled</Badge>}
+          </div>
+
+          {enabled && (
+            <>
+              {data?.scorer_drift && (
+                <CalloutBanner><span className="font-semibold">Redeploy needed.</span> The edge is running an older scorer build{data.drift_detail ? ` (${data.drift_detail})` : ''} than the one shipped to the backend. Click <strong>Redeploy</strong> above to push the latest.</CalloutBanner>
+              )}
+              {!data?.scorer_drift && data?.drift_known === false && (
+                <CalloutBanner tone="muted"><span className="font-semibold text-foreground">Drift detection not baselined.</span> This service was enabled before edge-drift tracking shipped, so we can&apos;t tell whether the edge is up to date. Click <strong>Redeploy</strong> once to baseline it — after that a banner appears here whenever the edge falls behind.</CalloutBanner>
+              )}
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-x-6 gap-y-2">
+                {data?.scoring_service_id && (
+                  <Field label="Scoring Service ID" value={<div className="flex items-center gap-1.5"><code className="text-xs">{data.scoring_service_id}</code><a href={`https://manage.fastly.com/configure/services/${data.scoring_service_id}`} target="_blank" rel="noreferrer" className={extLinkCls} title="View Service in Fastly"><ExternalLink className="h-3 w-3" /></a></div>} />
+                )}
+                {typeof data?.scoring_active_version === 'number' && (
+                  <Field label="Active Version" value={<div className="flex items-center gap-1.5"><code className="text-xs">v{data.scoring_active_version}</code>{data?.scoring_service_id && <a href={`https://manage.fastly.com/configure/services/${data.scoring_service_id}/versions`} target="_blank" rel="noreferrer" className={extLinkCls} title="View versions in Fastly"><ExternalLink className="h-3 w-3" /></a>}</div>} />
+                )}
+                {data?.scoring_activated_at && <Field label="Activated" value={<span className="text-xs text-muted-foreground" title={data.scoring_activated_at}>{formatActivated(data.scoring_activated_at)}</span>} />}
+                {data?.scoring_service_name && <Field label="Service Name" value={data.scoring_service_name} />}
+                {data?.scoring_domain && <Field label="Domain" value={<a href={`https://${data.scoring_domain}/_status`} target="_blank" rel="noreferrer" className="text-primary hover:underline inline-flex items-center gap-1">{data.scoring_domain} <ExternalLink className="h-3 w-3" /></a>} />}
+                {data?.matrix_version && <Field label="Matrix Version" value={<code className="text-xs">{data.matrix_version}</code>} />}
+                {data?.enabled_at && <Field label="Enabled At" value={<span className="text-xs text-muted-foreground">{data.enabled_at}</span>} />}
+                {evalData && <AucField evalData={evalData} />}
+              </div>
+            </>
+          )}
+
+          {!enabled && !isLoading && (
+            <>
+              {pragmasMissing && (
+                <CalloutBanner testId="admin-session-scoring-pragma-warning"><span className="font-semibold">Prerequisite required.</span> Preflight request body preservation is not yet enabled on this service. Click <strong>Enable</strong> for instructions to share with your Fastly account team.</CalloutBanner>
+              )}
+              <CalloutBanner><span className="font-semibold">Experimental.</span> Not yet validated against production traffic at scale — run on a non-critical service first.</CalloutBanner>
+              <p className="text-xs text-muted-foreground">Session scoring is off. Click <strong>Enable</strong> to provision the scorer Compute service and start scoring every request at the edge.</p>
+            </>
+          )}
+        </div>
+      </AnalyticsCard>
+    </div>
+  )
+}
+
+export interface L2EnforcementCardProps { serviceId: string; sinceHours?: number }
+const L2_DESCRIPTION = 'Decide when edge Layer-2 (route-transition anomaly) joins the enforced score. L2 is always logged; this only gates blocking.'
+const fmtDaysFixed = (n: number | null | undefined) => (n == null ? '—' : n.toFixed(1))
+
+export function L2EnforcementCard({ serviceId, sinceHours = 24 }: L2EnforcementCardProps) {
+  const queryClient = useQueryClient()
+  const [pendingEnable, setPendingEnable] = React.useState<boolean | null>(null)
+
+  const { data, isLoading, isError, error, refetch } = useScoringQuery(
+    ['scoring-l2-enforce', serviceId],
+    () => client.GET('/api/services/{service_id}/scoring/l2-enforce', { params: { path: { service_id: serviceId } } }),
+    { staleTime: 30_000 },
+  )
+
+  const { data: health } = useScoringQuery(
+    ['scoring-health', serviceId, sinceHours],
+    () => client.GET('/api/services/{service_id}/scoring/health', { params: { path: { service_id: serviceId }, query: { since_hours: sinceHours } } }),
+    { staleTime: 30_000 },
+  )
+
+  const mutation = useMutation({
+    mutationFn: async (enabled: boolean) =>
+      unwrapClient(client.PUT('/api/services/{service_id}/scoring/l2-enforce', { params: { path: { service_id: serviceId }, query: { confirm: true } }, body: { enabled } })),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['scoring-l2-enforce', serviceId] })
+      queryClient.invalidateQueries({ queryKey: scoringAnalyticsCompositeKey(serviceId) })
+      queryClient.invalidateQueries({ queryKey: scoringConfigCompositeKey(serviceId) })
+    },
+  })
+
+  if (isError) {
+    const raw = String(error?.message || 'Unknown error')
+    const friendly = /status 400|http 400|config store missing|scoring not enabled/i.test(raw) || (error as { status?: number } | null)?.status === 400
+      ? 'Enable session scoring for this service to manage L2 enforcement.'
+      : raw
+    return (
+      <AnalyticsCard title="L2 enforcement" description={L2_DESCRIPTION}>
+        <CardErrorState icon={<ShieldAlert className="h-4 w-4" />} title="L2 enforcement unavailable" message={friendly} onRetry={() => refetch()} />
+      </AnalyticsCard>
+    )
+  }
+
+  if (isLoading || !data) {
+    return (
+      <AnalyticsCard title="L2 enforcement" description={L2_DESCRIPTION}>
+        <div className="space-y-3" aria-busy="true"><Skeleton className="h-16 w-full" /><Skeleton className="h-12 w-full" /></div>
+      </AnalyticsCard>
+    )
+  }
+
+  const { enabled, ready } = data
+  const ageDays = data.deployment_age_days
+  const readinessDays = data.readiness_days || 7
+  const rampDays = data.ramp_days || 3
+  const l2HighPct = health?.matrix_staleness?.l2_high_pct ?? null
+  const rampPct = Math.round((data.ramp_progress ?? 0) * 100)
+
+  const isGreenAlert = enabled || ready
+  const AlertIcon = enabled ? TrendingUp : ready ? ShieldCheck : ShieldAlert
+  const alertTitle = enabled ? 'L2 contributes to enforcement' : ready ? 'Ready to enable' : 'Not yet recommended'
+  const alertDesc = enabled ? (
+    data.fully_ramped ? <>L2 is fully active in the enforced score.</> : (
+      <>Fading in — {rampPct}% of full weight{data.warmup_days_remaining != null && <> (~{fmtDaysFixed(data.warmup_days_remaining)} days to full)</>}. The ramp opens at 0% at opt-in, so there&apos;s no instant block.</>
+    )
+  ) : ready ? (
+    <>{fmtDaysFixed(ageDays)} days of observed L2 data (≥{readinessDays} recommended).{l2HighPct != null && <> About {formatPctValue(l2HighPct, 1)} of recent sessions would be flagged by L2.</>}</>
+  ) : (
+    <>Only {fmtDaysFixed(ageDays)} days of observed L2 data so far (≥{readinessDays} recommended). Enabling blocking now is risky — you haven&apos;t seen enough of how L2 scores real traffic.{l2HighPct != null && <> It would currently flag ~{formatPctValue(l2HighPct, 1)} of sessions.</>}</>
+  )
+
+  return (
+    <AnalyticsCard title="L2 enforcement" description={L2_DESCRIPTION} icon={<ShieldAlert className="h-4 w-4" />}>
+      <div className="space-y-4">
+        <Alert className={isGreenAlert ? 'border-green-300 bg-green-50/60 dark:bg-green-950/20' : 'border-amber-300 bg-amber-50/60 dark:bg-amber-950/20'}>
+          <AlertIcon className={cn('h-4 w-4', isGreenAlert ? 'text-green-600' : 'text-amber-600')} />
+          <AlertTitle className={isGreenAlert ? 'text-green-900 dark:text-green-300' : 'text-amber-900 dark:text-amber-300'}>{alertTitle}</AlertTitle>
+          <AlertDescription className={isGreenAlert ? 'text-green-800 dark:text-green-400' : 'text-amber-800 dark:text-amber-400'}>{alertDesc}</AlertDescription>
+        </Alert>
+
+        <div className="flex items-center justify-between gap-4 rounded-md border bg-card p-3">
+          <div className="space-y-0.5">
+            <div id="l2-enforce-label" className="text-sm font-medium">Enforce L2 (live edge blocking)</div>
+            <div className="text-xs text-muted-foreground">{enabled ? 'On — L2 contributes to the enforced score.' : 'Off — L2 is observe-only (computed and logged, never blocks).'}</div>
+          </div>
+          <Switch checked={enabled} aria-labelledby="l2-enforce-label" disabled={mutation.isPending} onCheckedChange={(next) => setPendingEnable(next)} />
+        </div>
+      </div>
+
+      <ConfirmDialog
+        open={pendingEnable !== null}
+        onOpenChange={(open) => { if (!open && !mutation.isPending) setPendingEnable(null) }}
+        isPending={mutation.isPending}
+        isDangerous={pendingEnable === true}
+        title={pendingEnable ? 'Enable L2 enforcement (LIVE)' : 'Disable L2 enforcement'}
+        description={
+          pendingEnable ? (
+            !ready ? (
+              <><strong>Heads up:</strong> only {fmtDaysFixed(ageDays)} days of observed L2 data so far (≥{readinessDays} recommended). Enabling now means L2 starts contributing to live edge blocking before you&apos;ve seen how it scores real traffic. It fades in over {rampDays} days from now (starting at 0, so no instant block), but consider waiting until the readiness gauge is green. Enable anyway?</>
+            ) : (
+              <>L2 will join the enforced score, fading in over {rampDays} days from now (starting at 0% weight, so no instant block).{l2HighPct != null && <> About {formatPctValue(l2HighPct, 1)} of recent sessions would be flagged by L2.</>} Effective at the edge within seconds.</>
+            )
+          ) : (
+            <>Disable L2 enforcement. L2 returns to observe-only — still computed and logged, but it stops contributing to the enforced score (no edge blocking from L2). Effective within seconds. Re-enabling later restarts the {rampDays}-day fade-in.</>
+          )
+        }
+        confirmLabel={pendingEnable ? 'Enable' : 'Disable'}
+        onConfirm={() => { if (pendingEnable !== null) mutation.mutate(pendingEnable, { onSettled: () => setPendingEnable(null) }) }}
+      />
+    </AnalyticsCard>
+  )
+}
+
+export interface RocPrCurvesProps { serviceId: string; sinceHours?: number }
+
+const makeCurveTrace = (pts: CurvePoint[] | null | undefined, xK: keyof CurvePoint, yK: keyof CurvePoint, name: string, color: string, xLbl: string, yLbl: string) => ({
+  x: (pts ?? []).map((p) => (p[xK] as number | undefined) ?? 0),
+  y: (pts ?? []).map((p) => (p[yK] as number | undefined) ?? 0),
+  type: 'scatter', mode: 'lines+markers', name, line: { color, width: 2 }, marker: { size: 4 },
+  hovertemplate: `threshold=%{customdata}<br>${xLbl}=%{x:.3f}<br>${yLbl}=%{y:.3f}<extra></extra>`,
+  customdata: (pts ?? []).map((p) => p.threshold),
+})
+
+export function RocPrCurves({ serviceId }: RocPrCurvesProps) {
+  const { data, isLoading, isError, error, refetch } = useScoringQuery(
+    ['scoring-curves', serviceId],
+    () => client.GET('/api/services/{service_id}/scoring/curves', { params: { path: { service_id: serviceId } } }),
+    { staleTime: 30_000 },
+  )
+
+  return (
+    <AnalyticsCard
+      title="ROC + Precision-Recall curves" icon={<LineChart className="h-4 w-4" />} helpContent={<RocPrCurvesHelp />} helpTitle="About ROC & PR Curves"
+      description="Two views of the trade-off between catching bad sessions (true positives) and over-flagging good ones (false positives). Computed against ALL of your accumulated labels."
+    >
+      {isError ? (
+        <CardErrorState icon={<Info className="h-4 w-4" />} title="Failed to load ROC + PR curves" message={error?.message || 'Unknown error'} onRetry={() => refetch()} />
+      ) : isLoading || !data ? (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-3"><Skeleton className="h-64 w-full" /><Skeleton className="h-64 w-full" /></div>
+      ) : !data.has_min_samples ? (
+        <div className="p-6 border border-dashed rounded-md text-center text-sm text-muted-foreground">
+          Need {data.min_per_class}+ good and {data.min_per_class}+ bad labels to plot meaningful curves
+          <span className="ml-1 text-foreground font-mono tabular-nums">(have {data.n_good}/{data.n_bad})</span>
+          {data.note && <div className="mt-2 text-xs"><span className="text-amber-600">{data.note}</span></div>}
+        </div>
+      ) : (
+        <div className="space-y-3">
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+            <CurveChart
+              header={`ROC — AUC ${(data.auc ?? 0).toFixed(3)}`} xTitle="False positive rate" yTitle="True positive rate"
+              traces={[
+                makeCurveTrace(data.roc, 'fpr', 'tpr', 'ROC', '#0ea5e9', 'FPR', 'TPR'),
+                { x: [0, 1], y: [0, 1], type: 'scatter', mode: 'lines', name: 'random', line: { color: CHART_COLORS.neutral, width: 1, dash: 'dash' }, hoverinfo: 'skip' },
+              ]}
+            />
+            <CurveChart
+              header={`Precision-Recall — AP ${(data.average_precision ?? 0).toFixed(3)}`} xTitle="Recall" yTitle="Precision"
+              traces={[makeCurveTrace(data.pr, 'recall', 'precision', 'PR', CHART_COLORS.success, 'recall', 'precision')]}
+            />
+          </div>
+          <p className="text-[11px] text-muted-foreground italic text-center">
+            n={data.n_good} good / {data.n_bad} bad · AUC <span className="font-mono tabular-nums font-semibold">{(data.auc ?? 0).toFixed(3)}</span> · Average precision <span className="font-mono tabular-nums font-semibold">{(data.average_precision ?? 0).toFixed(3)}</span>
+          </p>
+        </div>
+      )}
+    </AnalyticsCard>
+  )
+}
+
+function CurveChart({ header, xTitle, yTitle, traces }: { header: string; xTitle: string; yTitle: string; traces: Record<string, unknown>[] }) {
+  return (
+    <div className="border rounded-md p-2">
+      <div className="text-[10px] uppercase tracking-wider text-muted-foreground px-2 pb-1">{header}</div>
+      <PlotlyChart data={traces} height={240} layout={{ xaxis: { title: xTitle, range: [0, 1] }, yaxis: { title: yTitle, range: [0, 1] }, showlegend: false, margin: { l: 50, r: 10, t: 10, b: 40 } }} />
+    </div>
+  )
+}
+
+export function PerReasonAucCard({ serviceId }: { serviceId: string }) {
+  const { data, isLoading, isError, error, refetch } = useScoringQuery(
+    ['scoring-evaluation-per-reason', serviceId],
+    () => client.GET('/api/services/{service_id}/scoring/evaluation/per-reason', { params: { path: { service_id: serviceId } } }),
+    { staleTime: 30_000 },
+  )
+
+  return (
+    <AnalyticsCard
+      title="AUC by rule" icon={<ListChecks className="h-4 w-4" />} helpContent={<PerReasonAucHelp />} helpTitle="About AUC by Rule"
+      description="Which scoring rule contributes most to matrix-vs-labels separation. Each bucket shows AUC against sessions where that rule fired."
+    >
+      {isError ? (
+        <CardErrorState icon={<Info className="h-4 w-4" />} title="Failed to load per-rule AUC" message={(error as Error | null)?.message || 'Unknown error'} onRetry={() => refetch()} />
+      ) : isLoading || !data ? (
+        <div className="space-y-2">{['r1', 'r2', 'r3', 'r4', 'r5'].map((k) => <Skeleton key={k} className="h-10 w-full" />)}</div>
+      ) : !data.has_min_samples_overall ? (
+        <div className="p-4 border border-dashed rounded-md text-center text-sm text-muted-foreground">
+          Per-rule breakdown unlocks once headline AUC is computable —<span className="ml-1 text-foreground font-mono">need {data.min_per_class}+ good / {data.min_per_class}+ bad labels (have {data.n_good}/{data.n_bad})</span>
+        </div>
+      ) : (
+        <div className="space-y-1.5">{data.buckets.map((b: components['schemas']['ScoringPerReasonBucket']) => <BucketRow key={b.reason} bucket={b} />)}</div>
+      )}
+    </AnalyticsCard>
+  )
+}
+
+function BucketRow({ bucket }: { bucket: components['schemas']['ScoringPerReasonBucket'] }) {
+  if (!bucket.has_min_samples) {
+    return (
+      <div className="flex items-center justify-between gap-3 p-2 rounded-md border bg-muted/20 text-xs">
+        <span className="font-mono">{bucket.reason}</span>
+        <span className="text-muted-foreground">need {bucket.min_per_class}+ good / {bucket.min_per_class}+ bad with this reason<span className="ml-1 text-foreground tabular-nums">(have {bucket.n_good}/{bucket.n_bad})</span></span>
+      </div>
+    )
+  }
+  const passed = !!bucket.passed
+  return (
+    <div className="flex items-center justify-between gap-3 p-2 rounded-md border text-xs">
+      <span className="font-mono">{bucket.reason}</span>
+      <div className="flex items-center gap-2">
+        <span className={`font-mono font-semibold tabular-nums ${passed ? 'text-emerald-600' : 'text-amber-600'}`}>{(bucket.auc ?? 0).toFixed(3)}</span>
+        <Badge variant={passed ? 'success' : 'secondary'} className="text-[10px]">{passed ? 'PASS' : 'BELOW'}</Badge>
+        <span className="text-muted-foreground text-[10px] tabular-nums">n={bucket.n_good}g / {bucket.n_bad}b</span>
+      </div>
+    </div>
+  )
+}
+
+// =============================================================================
+// 2. DuckLake / Iceberg Status & 90-Day Storage Distribution Calendar
+// =============================================================================
+
+export function IcebergStatus({ accessLevel }: { accessLevel?: string }) {
+  const activeServiceId = useServiceStore((s) => s.activeServiceId)
+  const { full, abbr } = useDateFormat()
+  const { data: info, isLoading, error } = useQuery({
+    queryKey: queryKeys.admin.iceberg(activeServiceId),
+    queryFn: async () => unwrapClient(client.GET('/api/admin/iceberg-info')),
+    enabled: !!activeServiceId, staleTime: 60_000, refetchInterval: 5 * 60_000, refetchIntervalInBackground: false,
+  })
+  if (!activeServiceId) return null
+  if (error) return <CardErrorState icon={<Info className="h-4 w-4" />} title="Failed to load DuckLake table info" message={error?.message || 'Unknown error'} />
+
+  const stats = [
+    { label: 'Snapshots', value: info?.snapshots ?? 0, icon: Layers, tooltip: 'Total number of atomic commits in the DuckLake table history.' },
+    { label: 'Data Files', value: info?.data_files ?? 0, icon: FileCode, tooltip: 'Number of Parquet data files currently in the DuckLake table.' },
+    { label: 'Total Size', value: formatBytes(info?.size_bytes ?? 0), icon: Database, tooltip: 'Cumulative size of all data files in the DuckLake table.' },
+    { label: 'Latest Commit', value: info?.latest_snapshot_at ? formatRelative(info.latest_snapshot_at) : 'Never', icon: Clock, tooltip: info?.latest_snapshot_at ? `${full(info.latest_snapshot_at)} ${abbr()}` : 'No snapshots yet.' },
+  ]
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+        {stats.map((stat) => (
+          <Card key={stat.label} className="shadow-none border-muted/60">
+            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+              <CardTitle className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground flex items-center gap-1.5">
+                <LabelWithInfo label={stat.label} info={stat.tooltip} className="gap-1.5" labelClassName="text-[10px] font-bold uppercase tracking-wider text-muted-foreground" />
+              </CardTitle>
+              <stat.icon className="h-3.5 w-3.5 text-muted-foreground/60" />
+            </CardHeader>
+            <CardContent>
+              {isLoading ? <Skeleton className="h-7 w-20" /> : (
+                <TooltipProvider>
+                  <Tooltip>
+                    <TooltipTrigger render={<div className="text-xl font-mono font-bold tracking-tight rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" tabIndex={0} role="button" aria-label={`${stat.label}: ${stat.value}`}>{stat.value}</div>} />
+                    <TooltipContent className="text-xs">{stat.tooltip}</TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
+              )}
+            </CardContent>
+          </Card>
+        ))}
+      </div>
+      {accessLevel !== 'read_only' && (
+        <Card className="shadow-none border-muted/60 bg-muted/5">
+          <CardContent className="p-4 flex flex-col md:flex-row md:items-center justify-between gap-4">
+            <div className="flex items-center gap-3">
+              <div className="p-2 bg-blue-500/10 rounded-full"><Archive className="h-4 w-4 text-blue-500" /></div>
+              <div>
+                <h4 className="text-sm font-semibold">Local Buffer Status</h4>
+                <p className="text-xs text-muted-foreground">Data ingested but not yet committed to the DuckLake table.</p>
+              </div>
+            </div>
+            <div className="flex items-center gap-6">
+              {([['Pending Files', info?.buffer_files ?? 0, 'w-12'], ['Buffer Size', formatBytes(info?.buffer_size_bytes ?? 0), 'w-16']] as const).map(([lbl, val, wCls]) => (
+                <div key={lbl} className="flex flex-col">
+                  <span className="text-[10px] font-bold uppercase text-muted-foreground">{lbl}</span>
+                  {isLoading ? <Skeleton className={`h-5 ${wCls} mt-1`} /> : <span className="text-sm font-mono font-bold">{val}</span>}
+                </div>
+              ))}
+              <div className="flex items-center gap-2 ml-4">
+                {info?.buffer_files && info.buffer_files > 0 ? <Badge variant="outline" className="h-6 px-2 text-[10px] bg-blue-500/10 text-blue-600 border-blue-500/20 animate-pulse shadow-none uppercase font-bold">Pending Commit</Badge> : null}
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+      {info?.table_location && (
+        <div className="px-4 py-2 bg-muted/30 rounded-md border border-dashed flex items-center justify-between">
+          <div className="flex items-center gap-2 overflow-hidden">
+            <Database className="h-3 w-3 text-muted-foreground shrink-0" />
+            <span className="text-[10px] text-muted-foreground font-mono truncate">{info.table_location}</span>
+          </div>
+          <span className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest ml-4 shrink-0">Hadoop Catalog (Fastly Object Storage {info.region ? `- ${info.region}` : ''})</span>
+        </div>
+      )}
+    </div>
+  )
+}
+
+export function IcebergCalendar() {
+  const activeServiceId = useServiceStore((s) => s.activeServiceId)
+  const { data: calendar, isLoading } = useQuery({
+    queryKey: queryKeys.admin.icebergCalendar(activeServiceId),
+    queryFn: async () => unwrapClient(client.GET('/api/admin/iceberg-calendar')),
+    enabled: !!activeServiceId, staleTime: 60_000, refetchInterval: 5 * 60_000, refetchIntervalInBackground: false,
+  })
+  const days = React.useMemo(() => {
+    const today = new Date()
+    today.setHours(0, 0, 0, 0)
+    const pad = (n: number) => n.toString().padStart(2, '0')
+    return Array.from({ length: 90 }, (_, i) => {
+      const d = new Date(today)
+      d.setDate(d.getDate() - i)
+      return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+    }).reverse()
+  }, [])
+  if (!activeServiceId) return null
+
+  return (
+    <Card className="shadow-none border-muted/60">
+      <CardHeader className="pb-2">
+        <CardTitle className="text-sm font-semibold">DuckLake Storage Distribution</CardTitle>
+        <CardDescription className="text-xs">Physical data file counts and sizes partitioned by day.</CardDescription>
+      </CardHeader>
+      <CardContent>
+        {isLoading ? (
+          <div className="flex items-center gap-2 py-6 text-sm text-muted-foreground animate-pulse"><Loader2 className="h-3 w-3 animate-spin" /> Loading distribution data...</div>
+        ) : (
+          <div className="flex flex-wrap gap-1">
+            {days.map((date) => {
+              const entry = calendar?.[date]
+              const dayData = Array.isArray(entry) ? undefined : entry
+              const hasData = !!dayData
+              return (
+                <TooltipProvider key={date}>
+                  <Tooltip>
+                    <TooltipTrigger render={<span className="inline-block rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" tabIndex={0} role="button" aria-label={hasData ? `${date}: ${dayData.data_files} files, ${formatBytes(dayData.size_bytes)}` : `${date}: no data`} />}>
+                      <div className={cn('h-4 w-4 rounded-sm transition-colors border', hasData ? 'bg-blue-500 border-blue-600/20 hover:bg-blue-400' : 'bg-muted/30 border-border/50 hover:bg-muted/50')} />
+                    </TooltipTrigger>
+                    <TooltipContent className="text-xs max-w-[200px] p-2 space-y-1">
+                      <div className="font-bold border-b border-muted/20 pb-1 mb-1">{date}</div>
+                      {hasData ? (
+                        <>
+                          <div className="flex justify-between gap-4"><span className="text-muted-foreground">Files:</span><span className="font-mono">{dayData.data_files}</span></div>
+                          <div className="flex justify-between gap-4"><span className="text-muted-foreground">Size:</span><span className="font-mono">{formatBytes(dayData.size_bytes)}</span></div>
+                        </>
+                      ) : <div className="text-muted-foreground italic">No data files</div>}
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
+              )
+            })}
+          </div>
+        )}
+        <div className="mt-4 flex items-center gap-4 text-[10px] text-muted-foreground uppercase font-bold tracking-wider">
+          <div className="flex items-center gap-1.5"><div className="h-2 w-2 rounded-sm bg-blue-500" /><span>Committed Data</span></div>
+          <div className="flex items-center gap-1.5"><div className="h-2 w-2 rounded-sm bg-muted/30 border" /><span>No Data</span></div>
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
+
+// =============================================================================
+// 3. Metadata Storage Card
+// =============================================================================
+
+type TableStat = { rows: number; bytes: number | null }
+type StorageResponse = {
+  tables: Record<string, TableStat>; db_bytes: number | null; db_path: string
+  retention: { usage_log_days: number; ingested_files_days: number; cron_runs_days: number }; ingested_files_locked?: boolean
+}
+type _TableStatParity = Expect<WireParity<TableStat, components['schemas']['MetadataTableStat']>>
+type _RetentionParity = Expect<WireParity<StorageResponse['retention'], components['schemas']['MetadataRetentionValues']>>
+type _StorageParity = Expect<WireParity<StorageResponse, components['schemas']['MetadataStorageResponse']>>
+
+const TRIMMABLE = ['usage_log', 'ingested_files', 'cron_runs'] as const
+const REFERENCE = ['alerts', 'saved_views', 'audit_log', 'in_flight_buffers', 'locally_compacted_files'] as const
+
+const TABLE_LABELS: Record<string, { label: string; sub: string }> = {
+  usage_log: { label: 'FOS / CDN usage log', sub: 'every Class A/B + CDN read recorded for cost analytics' },
+  ingested_files: { label: 'Ingested files index', sub: 'one row per parsed .gz so we never re-ingest' },
+  cron_runs: { label: 'Cron run history', sub: 'audit trail for sync, optimize, cleanup, etc.' },
+  alerts: { label: 'Saved alerts', sub: 'user-configured alert rules' },
+  saved_views: { label: 'Saved dashboard views', sub: 'user-saved filter combinations' },
+  audit_log: { label: 'Admin audit log', sub: 'admin actions (settings, teardown, share invites)' },
+  in_flight_buffers: { label: 'In-flight ingest buffers', sub: 'pending parquet writes mid-sync' },
+  locally_compacted_files: { label: 'Local-compaction registry', sub: 'tracks compacted source files to block re-download' },
+}
+
+const fmtRetentionDays = (n: number): string => (n <= 0 ? 'disabled' : n === 1 ? '1 day' : `${n} days`)
+const LOCKED_REASON = 'cron_sync.delete_after=false on this service. Raw .gz files stay in FOS forever, so ingested_files is the only thing stopping the daily full_sync from re-ingesting every aged-out file. Cleanup of this table is force-disabled regardless of the configured retention.'
+
+type MetadataStorageRow = { name: string; trimmable: boolean; stat: TableStat }
+
+function MetadataStorageTable({ rows, retention, dbBytes }: { rows: MetadataStorageRow[]; retention: StorageResponse['retention']; dbBytes: number | null }) {
+  const columns = React.useMemo<ColumnDef<MetadataStorageRow>[]>(() => [
+    {
+      id: 'table', header: 'Table',
+      cell: ({ row }) => {
+        const r = row.original
+        const { label, sub } = TABLE_LABELS[r.name] ?? { label: r.name, sub: '' }
+        return (
+          <>
+            <div className="text-sm font-medium">{label}</div>
+            <div className="text-[11px] sm:text-[10px] text-muted-foreground font-mono">{r.name}</div>
+            {sub && <div className="text-[11px] sm:text-[10px] text-muted-foreground mt-0.5">{sub}</div>}
+          </>
+        )
+      },
+    },
+    { id: 'rows', header: 'Rows', cell: ({ row }) => formatCountMaybe(row.original.stat.rows) ?? '–' },
+    { id: 'size', header: 'Size', cell: ({ row }) => formatBytesTiered(row.original.stat.bytes, { maxUnit: 'GB' }) },
+    {
+      id: 'policy', header: 'Trim policy',
+      cell: ({ row }) => {
+        const r = row.original
+        return r.trimmable ? (
+          <Badge variant="secondary" className="text-[11px] sm:text-[10px]">
+            {fmtRetentionDays(r.name === 'usage_log' ? retention.usage_log_days : r.name === 'ingested_files' ? retention.ingested_files_days : retention.cron_runs_days)}
+          </Badge>
+        ) : (
+          <span className="text-xs text-muted-foreground" title="Not subject to retention cleanup — these are user/admin data, not append-only telemetry.">—</span>
+        )
+      },
+    },
+  ], [retention])
+  const table = useReactTable({ data: rows, columns, getCoreRowModel: getCoreRowModel() })
+  return (
+    <Table className="w-full text-sm">
+      <TableHeader className="bg-muted/50">
+        {table.getHeaderGroups().map((hg) => (
+          <TableRow key={hg.id} className="text-left">
+            {hg.headers.map((header) => (
+              <TableHead key={header.id} className={header.column.id === 'rows' || header.column.id === 'size' ? 'px-3 py-2 font-medium text-right' : header.column.id === 'policy' ? 'px-3 py-2 font-medium text-center' : 'px-3 py-2 font-medium'}>
+                {flexRender(header.column.columnDef.header, header.getContext())}
+              </TableHead>
+            ))}
+          </TableRow>
+        ))}
+      </TableHeader>
+      <TableBody>
+        {table.getRowModel().rows.map((row) => (
+          <TableRow key={row.original.name} className="border-t">
+            {row.getVisibleCells().map((cell) => (
+              <TableCell key={cell.id} className={cell.column.id === 'rows' || cell.column.id === 'size' ? 'px-3 py-2 text-right tabular-nums align-top' : cell.column.id === 'policy' ? 'px-3 py-2 text-center align-top' : 'px-3 py-2'}>
+                {flexRender(cell.column.columnDef.cell, cell.getContext())}
+              </TableCell>
+            ))}
+          </TableRow>
+        ))}
+      </TableBody>
+      <tfoot className="bg-muted/30 border-t">
+        <TableRow>
+          <TableCell className="px-3 py-2 font-medium text-xs uppercase tracking-wider">Total DB file</TableCell>
+          <TableCell className="px-3 py-2" />
+          <TableCell className="px-3 py-2 text-right font-semibold tabular-nums">{formatBytesTiered(dbBytes, { maxUnit: 'GB' })}</TableCell>
+          <TableCell className="px-3 py-2" />
+        </TableRow>
+      </tfoot>
+    </Table>
+  )
+}
+
+export function MetadataStorageCard() {
+  const qc = useQueryClient()
+  const mounted = useMounted()
+  const { data, isLoading, isFetching, error } = useQuery<StorageResponse>({
+    queryKey: queryKeys.admin.metadataStorage(),
+    queryFn: async () => (await unwrapClient(client.GET('/api/admin/metadata-storage'))) as StorageResponse,
+    staleTime: 30_000, refetchInterval: 5 * 60_000, refetchIntervalInBackground: false, retry: 1,
+  })
+  const [editing, setEditing] = React.useState(false)
+  const [draft, setDraft] = React.useState({ usage_log_days: '', ingested_files_days: '', cron_runs_days: '' })
+  const beginEdit = () => {
+    if (!data) return
+    setDraft({ usage_log_days: String(data.retention.usage_log_days), ingested_files_days: String(data.retention.ingested_files_days), cron_runs_days: String(data.retention.cron_runs_days) })
+    setEditing(true)
+  }
+  const saveRetention = useMutation({
+    mutationFn: async () =>
+      unwrapClient(client.PATCH('/api/admin/metadata-retention', {
+        body: { usage_log_days: Math.max(0, parseInt(draft.usage_log_days, 10) || 0), ingested_files_days: Math.max(0, parseInt(draft.ingested_files_days, 10) || 0), cron_runs_days: Math.max(0, parseInt(draft.cron_runs_days, 10) || 0) },
+      })),
+    onSuccess: () => { setEditing(false); qc.invalidateQueries({ queryKey: queryKeys.admin.metadataStorage() }) },
+  })
+  const rows = data ? [...TRIMMABLE.map((name) => ({ name, trimmable: true, stat: data.tables[name] })), ...REFERENCE.map((name) => ({ name, trimmable: false, stat: data.tables[name] }))].filter((r) => r.stat) : []
+  const headerAction = data ? (
+    <SSEModal
+      title="Run metadata cleanup now" endpoint="/api/admin/metadata-cleanup" body={{}}
+      onClose={() => qc.invalidateQueries({ queryKey: queryKeys.admin.metadataStorage() })}
+      description={
+        <div className="space-y-2 text-sm">
+          <p>Trims rows from <code className="text-xs">usage_log</code>, <code className="text-xs">ingested_files</code>, and <code className="text-xs">cron_runs</code> older than the active retention windows ({fmtRetentionDays(data.retention.usage_log_days)} / {fmtRetentionDays(data.retention.ingested_files_days)} / {fmtRetentionDays(data.retention.cron_runs_days)}), then VACUUMs the SQLite file so the on-disk size drops to reflect the deletions.</p>
+          <p className="text-muted-foreground">Current file: <span className="tabular-nums font-medium">{formatBytesTiered(data.db_bytes, { maxUnit: 'GB' })}</span>. VACUUM is single-threaded and rewrites the whole file — on a multi-GB DB it can take several minutes. The run is also written to <code className="text-xs">cron_runs</code> and surfaces on the Data Management history grid.</p>
+        </div>
+      }
+      trigger={<Button size="sm" variant="outline"><Trash2 className="h-3.5 w-3.5 mr-1.5" /> Cleanup now</Button>}
+    />
+  ) : undefined
+  const retentionFields = data ? ([
+    { key: 'usage_log_days', label: 'usage_log retention', value: data.retention.usage_log_days },
+    { key: 'ingested_files_days', label: 'ingested_files retention', value: data.retention.ingested_files_days, locked: data.ingested_files_locked, lockedReason: LOCKED_REASON },
+    { key: 'cron_runs_days', label: 'cron_runs retention', value: data.retention.cron_runs_days },
+  ] as const) : []
+
+  return (
+    <AnalyticsCard
+      title="Metadata Storage" icon={<Database className="h-4 w-4" />}
+      description="Per-table row counts + on-disk size for this service's metadata.db. Daily auto-cleanup at 03:15 UTC."
+      isLoading={!mounted || isLoading} isFetching={mounted && isFetching}
+      error={mounted ? (error as AnalyticsCardError | null) : null} headerAction={headerAction}
+    >
+      {mounted && data ? (
+        <div className="space-y-4">
+          <div className="p-3 border rounded-lg bg-muted/30 space-y-2">
+            <div className="flex items-center justify-between">
+              <div className="text-[11px] sm:text-[10px] uppercase tracking-wider text-muted-foreground font-medium">Retention policy</div>
+              {editing ? (
+                <div className="flex items-center gap-1">
+                  <Button size="sm" variant="ghost" className="h-6 px-2 text-xs" onClick={() => saveRetention.mutate()} disabled={saveRetention.isPending}><Check className="h-3 w-3 mr-1" /> {saveRetention.isPending ? 'Saving…' : 'Save'}</Button>
+                  <Button size="sm" variant="ghost" className="h-6 px-2 text-xs" onClick={() => setEditing(false)} disabled={saveRetention.isPending}><X className="h-3 w-3 mr-1" /> Cancel</Button>
+                </div>
+              ) : (
+                <Button size="sm" variant="ghost" className="h-6 px-2 text-xs" onClick={beginEdit}><Pencil className="h-3 w-3 mr-1" /> Edit</Button>
+              )}
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              {retentionFields.map((f) => (
+                <RetentionField key={f.key} label={f.label} editing={editing} value={f.value} draft={draft[f.key]} onDraftChange={(v) => setDraft((d) => ({ ...d, [f.key]: v }))} locked={'locked' in f ? f.locked : undefined} lockedReason={'lockedReason' in f ? f.lockedReason : undefined} />
+              ))}
+            </div>
+            {saveRetention.isError && <div className="text-xs text-destructive pt-1">Save failed: {(saveRetention.error as Error)?.message ?? 'unknown error'}</div>}
+            {editing && <div className="text-[11px] sm:text-[10px] text-muted-foreground pt-1">Set a value to 0 to disable cleanup for that table.</div>}
+          </div>
+          <div className="border rounded-lg overflow-x-auto">
+            <MetadataStorageTable rows={rows} retention={data.retention} dbBytes={data.db_bytes} />
+          </div>
+        </div>
+      ) : null}
+    </AnalyticsCard>
+  )
+}
+
+function RetentionField({ label, editing, value, draft, onDraftChange, locked, lockedReason }: {
+  label: string; editing: boolean; value: number; draft: string; onDraftChange: (v: string) => void; locked?: boolean; lockedReason?: string
+}) {
+  return (
+    <div>
+      <div className="text-[11px] sm:text-[10px] uppercase tracking-wider text-muted-foreground flex items-center gap-1">
+        {label}
+        {locked && <span title={lockedReason} className="inline-flex items-center text-amber-500" aria-label="locked"><Lock className="h-3 w-3" aria-hidden="true" /></span>}
+      </div>
+      {editing ? (
+        <div className="flex items-center gap-1.5 mt-1">
+          <Input type="number" min={0} value={locked ? '0' : draft} onChange={(e) => onDraftChange(e.target.value)} disabled={locked} className="h-7 w-20 text-sm tabular-nums" title={locked ? lockedReason : undefined} aria-label={`${label} retention in days`} />
+          <span className="text-xs text-muted-foreground">days</span>
+        </div>
+      ) : (
+        <div className={`text-sm font-semibold tabular-nums ${locked ? 'text-muted-foreground italic' : ''}`} title={locked ? lockedReason : undefined}>
+          {locked ? 'disabled (delete_after=false)' : fmtRetentionDays(value)}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// =============================================================================
+// 4. Scorer Time-Series & Stacked Hourly Bar Charts (folded from ScorerSeriesCard)
+// =============================================================================
+
+interface HourlyRow { hour: string; count: number }
+
+interface StackedHourlyBarChartProps<R extends HourlyRow> {
+  title: string; description: string; isLoading?: boolean; isFetching?: boolean; isEmpty?: boolean
+  error?: AnalyticsCardError | null; rows: R[]; categoryKey: keyof R & string; colors: Record<string, string>
+  categoryOrder?: readonly string[]; helpContent?: React.ReactNode; helpTitle?: string
+}
+
+export function StackedHourlyBarChart<R extends HourlyRow>({
+  title, description, isLoading, isFetching, isEmpty, error, rows, categoryKey, colors, categoryOrder, helpContent, helpTitle,
+}: StackedHourlyBarChartProps<R>) {
+  const traces = React.useMemo((): PlotlyTrace[] => {
+    const presentHours = Array.from(new Set(rows.map((r) => r.hour))).sort()
+    const xGrid = denseTimeGrid(presentHours, 3600) ?? presentHours
+    const cats = categoryOrder ?? Array.from(new Set(rows.map((r) => String(r[categoryKey]))))
+    return cats.map((cat) =>
+      denseBarTrace({ name: cat, rows: rows.filter((r) => String(r[categoryKey]) === cat), getTime: (r) => r.hour, getValue: (r) => r.count, intervalSeconds: 3600, color: colors[cat] ?? '#64748b', grid: xGrid }),
+    )
+  }, [rows, categoryKey, colors, categoryOrder])
+
+  return (
+    <AnalyticsCard title={title} description={description} isLoading={isLoading} isFetching={isFetching} isEmpty={isEmpty} error={error} className="min-h-[320px]" helpContent={helpContent} helpTitle={helpTitle}>
+      <PlotlyChart data={traces} height="100%" layout={{ barmode: 'stack', showlegend: true, margin: { l: 50, r: 20, t: 10, b: 40 }, xaxis: { title: '', type: 'date' }, yaxis: { title: 'Requests', separatethousands: true, exponentformat: 'none' } }} />
+    </AnalyticsCard>
+  )
+}
+
+type CompRow = components['schemas']['ScoringComplianceRow']
+const COMPLIANCE_COLORS: Record<string, string> = { ok: CHART_COLORS.success, missing: CHART_COLORS.neutral, tampered: '#e11d48', expired: CHART_COLORS.warning, unknown: '#7c3aed' }
+
+export function ComplianceChart({ serviceId, sinceHours = 24 }: { serviceId: string; sinceHours?: number }) {
+  const { data, isLoading, isFetching, isError, error } = useScoringQuery(['scoring-compliance', serviceId, sinceHours], () =>
+    client.GET('/api/services/{service_id}/scoring/compliance-breakdown', { params: { path: { service_id: serviceId }, query: { since_hours: sinceHours } } }),
+  )
+  return (
+    <StackedHourlyBarChart<CompRow>
+      title={`Cookie compliance — last ${sinceHours}h`} helpContent={<ComplianceHelp />} helpTitle="About Cookie Compliance"
+      description="Breakdown of edge_cookie_compliance per hour. 'missing' is the canonical bot signal (no cookie at all); 'tampered' is the post-cookie threat (someone modified the payload)."
+      isLoading={isLoading} isFetching={isFetching} error={isError ? (error as AnalyticsCardError) : null}
+      rows={data?.rows ?? []} categoryKey="compliance" colors={COMPLIANCE_COLORS}
+    />
+  )
+}
+
+type DistRow = components['schemas']['ScoringDistributionRow']
+const BUCKETS = ['0-25', '25-50', '50-75', '75-100'] as const
+const BUCKET_COLORS: Record<(typeof BUCKETS)[number], string> = { '0-25': CHART_COLORS.neutral, '25-50': '#facc15', '50-75': '#fb923c', '75-100': '#e11d48' }
+
+export function ScoreDistChart({ serviceId, sinceHours = 24 }: { serviceId: string; sinceHours?: number }) {
+  const { data, isLoading, isFetching, isError, error } = useScoringQuery(['scoring-score-dist', serviceId, sinceHours], () =>
+    client.GET('/api/services/{service_id}/scoring/score-distribution', { params: { path: { service_id: serviceId }, query: { since_hours: sinceHours } } }),
+  )
+  return (
+    <StackedHourlyBarChart<DistRow>
+      title={`Score distribution — last ${sinceHours}h`} helpContent={<ScoreDistHelp />} helpTitle="About Score Distribution"
+      description="Hourly counts of scored requests, bucketed by edge_score. Heavy red is the alarming bucket — sessions VCL would block under a strict policy."
+      isLoading={isLoading} isFetching={isFetching} isEmpty={(data?.rows?.length ?? 0) === 0} error={isError ? (error as AnalyticsCardError) : null}
+      rows={data?.rows ?? []} categoryKey="bucket" colors={BUCKET_COLORS} categoryOrder={BUCKETS}
+    />
+  )
+}
+
+type Derived = ReturnType<typeof deriveScorerSeries>
+
+interface ScorerSeriesCardProps {
+  serviceId: string; sinceHours: number; title: string; description: (perMinute: boolean) => string
+  help: ReactNode; helpTitle: string; a11yTitle: string; toggle: { id: string; label: string }
+  build: (series: Derived & { data: LatencyResponse | undefined }, toggleOn: boolean) => { traces: PlotlyTrace[]; layout: PlotlyLayout }
+  showToggle?: (series: Derived & { data: LatencyResponse | undefined }) => boolean
+  placeholder?: (series: Derived & { data: LatencyResponse | undefined }) => ReactNode | null
+}
+
+export function ScorerSeriesCard({
+  serviceId, sinceHours, title, description, help, helpTitle, a11yTitle, toggle, build, showToggle, placeholder,
+}: ScorerSeriesCardProps) {
+  const { data, isLoading, isFetching, isError, error } = useScorerTimeseries(serviceId, sinceHours)
+  const [toggleOn, setToggleOn] = useState(true)
+
+  const series = { ...deriveScorerSeries(data), data }
+  const { rows, perMinute } = series
+  const { traces, layout } = build(series, toggleOn)
+  const offerToggle = rows.length > 0 && (showToggle ? showToggle(series) : true)
+  const replacement = placeholder?.(series) ?? null
+
+  return (
+    <AnalyticsCard
+      title={title} description={description(perMinute)} helpContent={help} helpTitle={helpTitle}
+      isLoading={isLoading} isFetching={isFetching} isEmpty={rows.length === 0}
+      error={isError ? (error as AnalyticsCardError) : null} className="min-h-[320px]"
+      headerAction={offerToggle ? (
+        <div className="flex items-center gap-2 mr-1">
+          <Switch id={toggle.id} checked={toggleOn} onCheckedChange={setToggleOn} />
+          <Label htmlFor={toggle.id} className="text-xs font-normal cursor-pointer select-none text-muted-foreground hover:text-foreground">{toggle.label}</Label>
+        </div>
+      ) : undefined}
+    >
+      {replacement ?? <PlotlyChart data={traces} layout={layout} height="100%" a11yTitle={a11yTitle} />}
+    </AnalyticsCard>
+  )
+}
+
+const roundToTwo = (num: number): number => Math.round((num + Number.EPSILON) * 100) / 100
+
+export function ScorerErrorsChart({ serviceId, sinceHours = 24 }: { serviceId: string; sinceHours?: number }) {
+  return (
+    <ScorerSeriesCard
+      serviceId={serviceId} sinceHours={sinceHours} title={`Scorer errors — last ${sinceHours}h`}
+      description={(perMinute) => `Fail-open errors — requests that timed out or failed auth and were let through unscored.${perMinute ? ' Bucketed per minute.' : ''}`}
+      help={<ScorerErrorsHelp />} helpTitle="About Scorer Errors" a11yTitle={`Scorer fail-open errors over the last ${sinceHours} hours`}
+      toggle={{ id: 'show-rate', label: 'Show rate (%)' }}
+      build={({ rows, hours, perMinute }, showRate) => {
+        const errorTrace = denseBarTrace({ name: 'Fail-opens', rows, getTime: (r) => r.hour, getValue: (r) => r.fail_open_count, intervalSeconds: perMinute ? 60 : 3600, color: 'rgba(225,29,72,0.45)' })
+        const rateTrace = lineTrace({ name: 'Error rate (%)', x: hours, y: rows.map((r) => { const total = r.total_count ?? 0; return total > 0 ? roundToTwo(((r.fail_open_count ?? 0) / total) * 100) : 0 }), color: '#e11d48', yaxis: 'y2' })
+        const base = scorerHourlyLayout(perMinute, 'Fail-opens', showRate)
+        return { traces: [errorTrace, ...(showRate ? [rateTrace] : [])], layout: showRate ? withSecondaryAxis(base, 'Error rate (%)', { ticksuffix: '%' }) : base }
+      }}
+    />
+  )
+}
+
+const LATENCY_SERIES: { name: string; get: (r: LatencyRow) => number | null | undefined; color: string; dash?: 'dot' | 'dash' }[] = [
+  { name: 'p50 rtt', get: (r) => r.rtt_p50_us, color: '#60a5fa' },
+  { name: 'p95 rtt', get: (r) => r.rtt_p95_us, color: CHART_COLORS.info },
+  { name: 'p99 rtt', get: (r) => r.rtt_p99_us, color: '#1d4ed8' },
+  { name: 'p50 exec', get: (r) => r.exec_p50_us, color: '#34d399', dash: 'dot' },
+  { name: 'p95 exec', get: (r) => r.exec_p95_us, color: CHART_COLORS.success, dash: 'dot' },
+]
+
+export function ScorerLatencyChart({ serviceId, sinceHours = 24 }: { serviceId: string; sinceHours?: number }) {
+  const hasLatency = ({ data, rows }: { data?: { has_latency?: boolean }; rows: LatencyRow[] }) =>
+    (data?.has_latency ?? false) && rows.some((r) => r.rtt_p95_us != null)
+
+  return (
+    <ScorerSeriesCard
+      serviceId={serviceId} sinceHours={sinceHours} title={`Scorer latency — last ${sinceHours}h`}
+      description={(perMinute) => `Edge round-trip (p50/p95/p99) vs Wasm exec (dashed) for the Compute scorer leg.${perMinute ? ' Bucketed per minute.' : ''}`}
+      help={<ScorerLatencyHelp />} helpTitle="About Scorer Latency" a11yTitle={`Scorer latency percentiles over the last ${sinceHours} hours`}
+      toggle={{ id: 'show-volume', label: 'Show volume' }} showToggle={hasLatency}
+      placeholder={(series) =>
+        series.rows.length > 0 && !hasLatency(series) ? (
+          <div className="flex h-full items-center justify-center p-4 text-center">
+            <p className="max-w-xs text-xs text-muted-foreground">
+              Waiting for traffic logged with the scorer latency fields (<code>edge_score_rtt_us</code> / <code>edge_score_exec_us</code>). These are added to the log format on enable and fill in once scored requests flow through and are ingested.
+            </p>
+          </div>
+        ) : null}
+      build={({ rows, hours, perMinute }, showVolume) => {
+        const volumeTrace = denseBarTrace({ name: 'Inspected requests', rows, getTime: (r) => r.hour, getValue: (r) => r.total_count, intervalSeconds: perMinute ? 60 : 3600, color: 'rgba(148, 163, 184, 0.12)', yaxis: 'y2', showlegend: true })
+        const latencyTraces = LATENCY_SERIES.map((s) => lineTrace({ name: s.name, x: hours, y: rows.map((r) => usToMs(s.get(r))), color: s.color, dash: s.dash, connectgaps: true }))
+        const base = scorerHourlyLayout(perMinute, 'Round-trip / exec (ms)', true)
+        return { traces: [...(showVolume ? [volumeTrace] : []), ...latencyTraces], layout: showVolume ? withSecondaryAxis(base, 'Inspected requests') : base }
+      }}
+    />
   )
 }

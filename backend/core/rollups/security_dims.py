@@ -49,7 +49,7 @@ bundle but still writes the others. The window-predicate + ``table_ident``
 substitution match origin_dims (writers must NOT import ``repositories``;
 import-linter enforces this — the CASE/WHERE bodies are replicated verbatim).
 
-Active-hour skip + atomic tmp+rename + per-service iceberg lock — same
+Active-hour skip + atomic tmp+rename + per-service view lock — same
 convention as :mod:`.origin_dims`.
 """
 
@@ -1024,7 +1024,7 @@ def recompute_wellknown_bots_rollup(
             try:
                 try:
                     execute_with_stale_view_retry(con, source, lambda c, q=copy_sql: c.execute(q))
-                except Exception as e:  # noqa: BLE001 — DuckDB errors may arrive wrapped by the iceberg retry hop
+                except Exception as e:  # noqa: BLE001 — DuckDB errors may arrive wrapped by the stale-view retry hop
                     logger.warning("[rollups] %s: bot-rollup COPY failed for hour=%s: %s", service_id, hour, e)
                     continue
 

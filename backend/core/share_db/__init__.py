@@ -17,7 +17,16 @@ from typing import Annotated, Any
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHash, VerifyMismatchError
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from pydantic import AfterValidator, TypeAdapter, ValidationError
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    StrictStr,
+    TypeAdapter,
+    ValidationError,
+)
 
 import backend as _backend_pkg
 from backend.core.metadata.base import close_all_pg_connections, get_pg_thread_connection
@@ -166,24 +175,36 @@ def delete_session(session_id: str, *, con: Any = None) -> None:
     _exec_rowcount("DELETE FROM remote_sessions WHERE session_id=?", (session_id,), con=con)
 
 
+_JSON_DICT_ADAPTER: TypeAdapter[dict[str, Any]] = TypeAdapter(dict[str, Any])
+
+
+def _parse_json_dict(v: Any, default: dict[str, Any]) -> dict[str, Any]:
+    return (
+        _JSON_DICT_ADAPTER.validate_json(v)
+        if isinstance(v, (str, bytes)) and v
+        else (v if isinstance(v, dict) else dict(default))
+    )
+
+
+class _SessionRowModel(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    pii_policy: Annotated[dict[str, Any], BeforeValidator(lambda v: _parse_json_dict(v, {}))] = Field(
+        default_factory=dict
+    )
+
+
 def get_session(session_id: str, *, con: Any = None) -> dict | None:
     con = con or get_global_share_con()
     row = con.execute("SELECT * FROM remote_sessions WHERE session_id=?", (session_id,)).fetchone()
-    if row is None:
-        return None
-    rec = dict(row)
-    rec["pii_policy"] = json.loads(rec.get("pii_policy") or "{}")
-    return rec
+    return _SessionRowModel.model_validate(dict(row)).model_dump() if row is not None else None
 
 
 def get_all_sessions(*, con: Any = None) -> list[dict]:
     con = con or get_global_share_con()
-    out: list[dict] = []
-    for r in con.execute("SELECT * FROM remote_sessions").fetchall():
-        rec = dict(r)
-        rec["pii_policy"] = json.loads(rec.get("pii_policy") or "{}")
-        out.append(rec)
-    return out
+    return [
+        _SessionRowModel.model_validate(dict(r)).model_dump()
+        for r in con.execute("SELECT * FROM remote_sessions").fetchall()
+    ]
 
 
 # ── Audit log writes + filtered reads ───────────────────────────────────────
@@ -348,23 +369,30 @@ def validate_email(email: str) -> str:
         raise InvalidEmailError(exc.errors()[0].get("msg", "Invalid email").removeprefix("Value error, ")) from exc
 
 
+class _PiiPolicyModel(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    mask_ips: bool = False
+    redact_fields: list[StrictStr] | None = None
+
+
 def validate_pii_policy(policy: dict | None) -> dict:
     if policy is None:
         return {"mask_ips": False}
     if not isinstance(policy, dict):
         raise InvalidPiiPolicyError("pii_policy must be an object")
-    out: dict[str, Any] = {"mask_ips": bool(policy.get("mask_ips", False))}
     for k in ("mask_user_agent", "mask_geo"):
         if policy.get(k):
             raise InvalidPiiPolicyError(f"pii_policy.{k} is not supported yet — it would not be enforced. Remove it.")
-    rf = policy.get("redact_fields")
-    if rf:
-        if not isinstance(rf, list) or not all(isinstance(x, str) for x in rf):
-            raise InvalidPiiPolicyError("redact_fields must be a list of strings")
+    try:
+        m = _PiiPolicyModel.model_validate(policy)
+    except ValidationError as exc:
+        raise InvalidPiiPolicyError("redact_fields must be a list of strings") from exc
+    if m.redact_fields:
         raise InvalidPiiPolicyError(
             "pii_policy.redact_fields is not supported yet — it would not be enforced. Remove it."
         )
-    return out
+    return {"mask_ips": m.mask_ips}
 
 
 def parse_ip_whitelist(s: str | None) -> list[str]:
@@ -574,12 +602,17 @@ def _equalize_passcode_timing(passcode: str) -> None:
     verify_passcode(passcode, _dummy_hash)
 
 
+class _InviteRowModel(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    pii_policy: Annotated[dict[str, Any], BeforeValidator(lambda v: _parse_json_dict(v, {"mask_ips": False}))] = Field(
+        default_factory=lambda: {"mask_ips": False}
+    )
+    allow_concurrent_sessions: bool = False
+    service_ids: list[str] = Field(default_factory=list)
+
+
 def _row_to_invite_dict(row: Any, service_ids: list[str]) -> dict:
-    rec = dict(row)
-    rec["pii_policy"] = json.loads(rec.get("pii_policy") or '{"mask_ips": false}')
-    rec["service_ids"] = service_ids
-    rec["allow_concurrent_sessions"] = bool(rec.get("allow_concurrent_sessions"))
-    return rec
+    return _InviteRowModel.model_validate({**dict(row), "service_ids": service_ids}).model_dump()
 
 
 def create_remote_invite(
@@ -854,6 +887,37 @@ def export_backup(passphrase: str, *, con: Any = None) -> bytes:
     return b"FOSBACKUP\x01" + salt + nonce + ct
 
 
+class _BackupInviteModel(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str = ""
+    name: str = ""
+    email: str = ""
+    passcode: str | None = None
+    expires_at: str | None = None
+    ip_whitelist: str | None = None
+    pii_policy: Annotated[str, BeforeValidator(lambda v: v or '{"mask_ips": false}')] = '{"mask_ips": false}'
+    query_window_hours: int | None = None
+    query_start_time: str | None = None
+    query_end_time: str | None = None
+    created_at: Annotated[str, BeforeValidator(lambda v: v or iso_z_now())] = Field(default_factory=iso_z_now)
+    revoked: Annotated[int, BeforeValidator(lambda v: int(v or 0))] = 0
+    tos_accepted_at: str | None = None
+    tos_version: int | None = None
+    allow_concurrent_sessions: Annotated[int, BeforeValidator(lambda v: int(v or 0))] = 0
+    auth_method: Annotated[str, BeforeValidator(lambda v: v or "passcode")] = "passcode"
+    oauth_provider: str | None = None
+    oauth_subject: str | None = None
+
+
+class _BackupPayloadModel(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    schema_version: int = 0
+    exported_at: str | None = None
+    invites: list[_BackupInviteModel] = Field(default_factory=list)
+    invite_services: list[dict[str, Any]] = Field(default_factory=list)
+    share_settings: list[dict[str, Any]] = Field(default_factory=list)
+
+
 def import_backup(blob: bytes, passphrase: str, *, mode: str = "skip-collisions", con: Any = None) -> dict:
     if not blob.startswith(b"FOSBACKUP\x01"):
         raise ValueError("not a recognised backup envelope")
@@ -865,11 +929,9 @@ def import_backup(blob: bytes, passphrase: str, *, mode: str = "skip-collisions"
         plain = AESGCM(_derive_backup_key(passphrase, salt)).decrypt(nonce, ct, None)
     except Exception as exc:
         raise ValueError(f"failed to decrypt backup (wrong passphrase?): {exc}") from exc
-    payload = json.loads(plain)
-    if int(payload.get("schema_version", 0)) > LATEST_VERSION:
-        raise ValueError(
-            f"backup schema_version {payload['schema_version']} is newer than this build's {LATEST_VERSION}"
-        )
+    payload = _BackupPayloadModel.model_validate_json(plain)
+    if payload.schema_version > LATEST_VERSION:
+        raise ValueError(f"backup schema_version {payload.schema_version} is newer than this build's {LATEST_VERSION}")
     con = con or get_global_share_con()
     existing_by_email = {
         r["email"].lower(): r["id"]
@@ -877,16 +939,15 @@ def import_backup(blob: bytes, passphrase: str, *, mode: str = "skip-collisions"
     }
     inserted = skipped = merged = 0
     with con:
-        for inv in payload.get("invites", []):
-            email_lc = (inv.get("email") or "").lower()
+        for inv in payload.invites:
+            email_lc = inv.email.lower()
             collision_id = existing_by_email.get(email_lc)
             if collision_id is not None:
                 if mode == "abort":
                     raise ValueError(f"email collision on import: {email_lc}")
                 if mode == "merge-services-on-collision":
-                    src_id = inv["id"]
-                    for r in payload.get("invite_services", []):
-                        if r["invite_id"] == src_id:
+                    for r in payload.invite_services:
+                        if r["invite_id"] == inv.id:
                             con.execute(
                                 "INSERT OR IGNORE INTO invite_services(invite_id, service_id) VALUES(?, ?)",
                                 (collision_id, r["service_id"]),
@@ -896,8 +957,8 @@ def import_backup(blob: bytes, passphrase: str, *, mode: str = "skip-collisions"
                     skipped += 1
                 continue
             try:
-                validate_name(inv.get("name", ""))
-                validate_email(inv.get("email", ""))
+                validate_name(inv.name)
+                validate_email(inv.email)
             except (InvalidNameError, InvalidEmailError):
                 skipped += 1
                 continue
@@ -908,35 +969,16 @@ def import_backup(blob: bytes, passphrase: str, *, mode: str = "skip-collisions"
                      revoked, tos_accepted_at, tos_version, allow_concurrent_sessions,
                      auth_method, oauth_provider, oauth_subject)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    inv["id"],
-                    inv["name"],
-                    inv["email"],
-                    inv["passcode"],
-                    inv.get("expires_at"),
-                    inv.get("ip_whitelist"),
-                    inv.get("pii_policy") or '{"mask_ips": false}',
-                    inv.get("query_window_hours"),
-                    inv.get("query_start_time"),
-                    inv.get("query_end_time"),
-                    inv.get("created_at") or iso_z_now(),
-                    int(inv.get("revoked") or 0),
-                    inv.get("tos_accepted_at"),
-                    inv.get("tos_version"),
-                    int(inv.get("allow_concurrent_sessions") or 0),
-                    inv.get("auth_method") or "passcode",
-                    inv.get("oauth_provider"),
-                    inv.get("oauth_subject"),
-                ),
+                tuple(inv.model_dump().values()),
             )
-            for r in payload.get("invite_services", []):
-                if r["invite_id"] == inv["id"]:
+            for r in payload.invite_services:
+                if r["invite_id"] == inv.id:
                     con.execute(
                         "INSERT OR IGNORE INTO invite_services(invite_id, service_id) VALUES(?, ?)",
-                        (inv["id"], r["service_id"]),
+                        (inv.id, r["service_id"]),
                     )
             inserted += 1
-        for s in payload.get("share_settings", []):
+        for s in payload.share_settings:
             con.execute(
                 "INSERT INTO share_settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 (s["key"], s["value"]),

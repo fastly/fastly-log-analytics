@@ -687,7 +687,7 @@ class _HighScaleTestAliasLoader:
     def create_module(cls, spec):
         import importlib
 
-        agg = importlib.import_module("tests.high_scale.test_aggregates")
+        agg = importlib.import_module("tests.high_scale.test_ingest_controller")
         return getattr(agg, cls._TARGETS[spec.name])
 
     @classmethod

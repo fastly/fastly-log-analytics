@@ -1,17 +1,18 @@
-"""Bounded app readiness: frontend HTML + backend health + admin bootstrap.
+"""Bounded app readiness + private Prometheus UI access for the canonical deploy runner."""
 
-Proves the app tier answers on BOTH sides before data checks run. It does not
-prove ingestion or data freshness; those stay with the later health/verify
-gates. Uses ``admin_urlopen`` so a configured mTLS origin presents its client
-identity and every other origin is plain HTTP(S). Output is sanitized: status
-codes, exception type names and shape verdicts only, never response bodies.
-"""
+from __future__ import annotations
 
 import argparse
+import base64
+import html
 import json
 import math
+import os
 import random
 import re
+import signal
+import socket
+import subprocess
 import sys
 import threading
 import time
@@ -22,16 +23,18 @@ from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError
+from urllib.parse import urlsplit
 from urllib.request import Request
+from uuid import uuid4
 
-# Keep direct `python scripts/lib/readiness.py` invocations working.
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from scripts.lib.admin_tls import admin_urlopen, validate_admin_tls_config  # noqa: E402
-from scripts.lib.environments import parse_iso_utc  # noqa: E402
+import scripts  # noqa: E402,F401
+from scripts.lib.environments import admin_urlopen, parse_iso_utc, validate_admin_tls_config  # noqa: E402
 from scripts.lib.section_measurements import BUDGETS  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -40,11 +43,9 @@ _MAX_JSON_BYTES = 32 * 1024 * 1024
 
 
 def normalize_version(version: str) -> str:
-    """Compare PEP 440 and display spellings (3.0.0b3 == 3.0.0-beta3)."""
     value = version.strip().lower().lstrip("v")
-    value = re.sub(r"[-_.]?(alpha|a)[-_.]?(?=\d)", "a", value)
-    value = re.sub(r"[-_.]?(beta|b)[-_.]?(?=\d)", "b", value)
-    value = re.sub(r"[-_.]?(rc|c)[-_.]?(?=\d)", "rc", value)
+    for pat, repl in ((r"(alpha|a)", "a"), (r"(beta|b)", "b"), (r"(rc|c)", "rc")):
+        value = re.sub(rf"[-_.]?{pat}[-_.]?(?=\d)", repl, value)
     return value
 
 
@@ -55,13 +56,6 @@ def pyproject_version(path: Path = ROOT / "pyproject.toml") -> str:
 
 @dataclass(frozen=True)
 class ProbeResult:
-    """Outcome of one bounded HTTP probe; never raises for network failures.
-
-    ``status`` is None only for transport failures; ``error`` is set for every
-    failure (``str(exc)``, including HTTP >= 400, which keeps ``status`` and the
-    bounded error ``body``). ``latency_ms`` is time to response headers.
-    """
-
     status: int | None
     latency_ms: float
     content_type: str = ""
@@ -91,52 +85,45 @@ def probe(
     data: bytes | None = None,
     limit: int = _MAX_JSON_BYTES,
 ) -> ProbeResult:
-    """One request through ``admin_urlopen`` (mTLS only for a configured origin).
-
-    At most ``limit + 1`` body bytes are read so callers can detect oversize.
-    """
-    request = Request(url, data=data, headers=dict(headers or {}), method=method)
-    start = time.perf_counter()
+    request, start = Request(url, data=data, headers=dict(headers or {}), method=method), time.perf_counter()
     try:
-        with admin_urlopen(request, timeout=timeout) as response:
-            latency_ms = (time.perf_counter() - start) * 1000.0
+        with admin_urlopen(request, timeout=timeout) as resp:
             return ProbeResult(
-                status=response.status,
-                latency_ms=latency_ms,
-                content_type=response.headers.get("Content-Type", ""),
-                body=response.read(limit + 1),
+                resp.status,
+                (time.perf_counter() - start) * 1000.0,
+                resp.headers.get("Content-Type", ""),
+                resp.read(limit + 1),
             )
     except HTTPError as exc:
-        latency_ms = (time.perf_counter() - start) * 1000.0
+        ms = (time.perf_counter() - start) * 1000.0
         try:
             try:
                 body = exc.read(limit + 1)
             except OSError:
                 body = b""
-            return ProbeResult(exc.code, latency_ms, body=body, error=str(exc), reason=str(exc.reason), exc=exc)
+            return ProbeResult(exc.code, ms, body=body, error=str(exc), reason=str(exc.reason), exc=exc)
         finally:
             exc.close()
     except Exception as exc:
-        latency_ms = (time.perf_counter() - start) * 1000.0
-        return ProbeResult(None, latency_ms, error=str(exc), exc=exc)
+        return ProbeResult(None, (time.perf_counter() - start) * 1000.0, error=str(exc), exc=exc)
+
+
+if "scripts.lib.environments" in sys.modules:
+    sys.modules["scripts.lib.environments"].probe = probe  # type: ignore[attr-defined]
 
 
 def _get(url: str, timeout: float, limit: int) -> tuple[int, str, bytes]:
-    result = probe(url, timeout=timeout, limit=limit)
-    if result.status is None:
-        assert result.exc is not None
-        raise result.exc
-    if result.http_error:
-        return result.status, "", b""
-    return result.status, result.content_type, result.body
+    res = probe(url, timeout=timeout, limit=limit)
+    if res.status is None:
+        assert res.exc is not None
+        raise res.exc
+    return (res.status, "", b"") if res.http_error else (res.status, res.content_type, res.body)
 
 
 def _safe(value: object, limit: int = 40) -> str:
-    """Bounded, printable rendering of an untrusted response value."""
     if not isinstance(value, str):
         return f"<{type(value).__name__}>"
-    cleaned = "".join(ch if ch.isprintable() else "?" for ch in value[:limit])
-    return cleaned + ("..." if len(value) > limit else "")
+    return "".join(ch if ch.isprintable() else "?" for ch in value[:limit]) + ("..." if len(value) > limit else "")
 
 
 def check_frontend(origin: str, timeout: float) -> str | None:
@@ -147,9 +134,7 @@ def check_frontend(origin: str, timeout: float) -> str | None:
         return "frontend /dashboard is not HTML"
     if len(body) > _MAX_HTML_BYTES:
         return "frontend /dashboard response exceeds size limit"
-    if not body.strip():
-        return "frontend /dashboard returned an empty body"
-    return None
+    return None if body.strip() else "frontend /dashboard returned an empty body"
 
 
 def _json(url: str, timeout: float, label: str) -> tuple[dict | None, str | None]:
@@ -162,9 +147,7 @@ def _json(url: str, timeout: float, label: str) -> tuple[dict | None, str | None
         data = json.loads(body)
     except ValueError:
         return None, f"{label} is not JSON"
-    if not isinstance(data, dict):
-        return None, f"{label} is not a JSON object"
-    return data, None
+    return (data, None) if isinstance(data, dict) else (None, f"{label} is not a JSON object")
 
 
 def check_backend(origin: str, timeout: float, expect_version: str | None) -> str | None:
@@ -193,9 +176,11 @@ def check_admin_bootstrap(origin: str, timeout: float, min_services: int) -> str
     services = data.get("services")
     if not isinstance(services, list):
         return "bootstrap services is not a list"
-    if len(services) < min_services:
-        return f"bootstrap lists {len(services)} services, expected >= {min_services}"
-    return None
+    return (
+        None
+        if len(services) >= min_services
+        else f"bootstrap lists {len(services)} services, expected >= {min_services}"
+    )
 
 
 def wait_ready(
@@ -230,7 +215,7 @@ def wait_ready(
             if error:
                 failures.append(error)
         if not failures:
-            log(f"[{name}] ready on attempt {attempt}/{attempts}: " + ", ".join(phase for phase, _ in checks) + " OK")
+            log(f"[{name}] ready on attempt {attempt}/{attempts}: " + ", ".join(p for p, _ in checks) + " OK")
             return True
         last = failures
         log(f"[{name}] attempt {attempt}/{attempts} not ready: {'; '.join(failures)}")
@@ -240,21 +225,23 @@ def wait_ready(
     return False
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Bounded frontend + backend (+ admin bootstrap) readiness")
-    parser.add_argument("--name", required=True)
-    parser.add_argument("--frontend", required=True, help="Frontend origin; /dashboard is probed")
-    parser.add_argument("--backend", required=True, help="Backend origin; /api/health and /api/bootstrap")
-    parser.add_argument("--attempts", type=int, default=40)
-    parser.add_argument("--interval", type=float, default=3)
-    parser.add_argument("--timeout", type=float, default=5)
-    parser.add_argument("--bootstrap-timeout", type=float, default=20)
-    version = parser.add_mutually_exclusive_group()
-    version.add_argument("--expect-version")
-    version.add_argument("--expect-pyproject-version", action="store_true")
-    parser.add_argument("--no-admin", action="store_true", help="Skip the admin bootstrap check")
-    parser.add_argument("--min-services", type=int, default=1)
-    args = parser.parse_args(argv)
+def readiness_main(argv: list[str] | None = None) -> int:
+    p = argparse.ArgumentParser(description="Bounded frontend + backend (+ admin bootstrap) readiness")
+    for flag in ("--name", "--frontend", "--backend"):
+        p.add_argument(flag, required=True)
+    for flag, tp, df in (
+        ("--attempts", int, 40),
+        ("--interval", float, 3),
+        ("--timeout", float, 5),
+        ("--bootstrap-timeout", float, 20),
+        ("--min-services", int, 1),
+    ):
+        p.add_argument(flag, type=tp, default=df)
+    ver = p.add_mutually_exclusive_group()
+    ver.add_argument("--expect-version")
+    ver.add_argument("--expect-pyproject-version", action="store_true")
+    p.add_argument("--no-admin", action="store_true")
+    args = p.parse_args(argv)
     if (
         args.attempts < 1
         or args.interval < 0
@@ -262,9 +249,7 @@ def main(argv: list[str] | None = None) -> int:
         or args.bootstrap_timeout <= 0
         or args.min_services < 0
     ):
-        parser.error(
-            "attempts >= 1, interval >= 0, timeout > 0, bootstrap-timeout > 0 and min-services >= 0 are required"
-        )
+        p.error("attempts >= 1, interval >= 0, timeout > 0, bootstrap-timeout > 0 and min-services >= 0 are required")
     try:
         validate_admin_tls_config()
         expect = pyproject_version() if args.expect_pyproject_version else args.expect_version
@@ -287,9 +272,6 @@ def main(argv: list[str] | None = None) -> int:
     return 0 if ready else 1
 
 
-# ── Shared E2E Freshness & Watermark Recency Helpers ─────────────────────────────────────────────
-
-
 def configured_polling(settings_response: Any, service_id: str) -> dict[str, Any]:
     services = settings_response.get("services") if isinstance(settings_response, dict) else None
     if not isinstance(services, list):
@@ -297,9 +279,7 @@ def configured_polling(settings_response: Any, service_id: str) -> dict[str, Any
     service = next((e for e in services if isinstance(e, dict) and e.get("service_id") == service_id), None)
     if service is None:
         raise ValueError("requested service was not returned by the services endpoint")
-    cron_sync = service.get("cron_sync")
-    if cron_sync is None:
-        cron_sync = {}
+    cron_sync = {} if (cs := service.get("cron_sync")) is None else cs
     if not isinstance(cron_sync, dict):
         raise ValueError("service cron_sync settings are invalid")
     mode = cron_sync.get("polling_mode", "adaptive")
@@ -307,15 +287,15 @@ def configured_polling(settings_response: Any, service_id: str) -> dict[str, Any
         raise ValueError("service polling_mode must be regular or adaptive")
     log_period = int(service.get("log_period") or 60)
     if interval_mins := cron_sync.get("interval_mins"):
-        interval, interval_source = max(5, int(interval_mins) * 60), "interval_mins"
+        interval, src = max(5, int(interval_mins) * 60), "interval_mins"
     elif interval_seconds := cron_sync.get("interval_seconds"):
-        interval, interval_source = max(5, int(interval_seconds)), "interval_seconds"
+        interval, src = max(5, int(interval_seconds)), "interval_seconds"
     else:
-        interval, interval_source = max(5, log_period // 2 if log_period >= 60 else log_period), "log_period"
+        interval, src = max(5, log_period // 2 if log_period >= 60 else log_period), "log_period"
     return {
         "mode": mode,
         "interval_seconds": interval,
-        "interval_source": interval_source,
+        "interval_source": src,
         "adaptive_followup_interval_seconds": 3 if mode == "adaptive" else None,
         "adaptive_max_followups": 2 if mode == "adaptive" else 0,
     }
@@ -366,8 +346,7 @@ def _spoof_ip() -> str:
 
 def _urlopen_status(req: urllib.request.Request, timeout: float = 8, opener: Any = None) -> int:
     try:
-        fn = opener.open if opener else urllib.request.urlopen
-        with fn(req, timeout=timeout) as r:
+        with (opener.open if opener else urllib.request.urlopen)(req, timeout=timeout) as r:
             return r.status
     except urllib.error.HTTPError as e:
         return e.code
@@ -387,7 +366,7 @@ def send_edge_request_probe(cdn_domain: str, marker: str, idx: int) -> int:
 
 def send_edge_rum_probe(cdn_domain: str, marker: str, idx: int) -> int:
     url = f"{cdn_domain.rstrip('/')}/rum-beacon?cid={marker}-{idx}&rum_metric_name=LCP&rum_metric_value=1250&rum_pathname=%2Ftest-freshness"
-    faro_payload = {
+    payload = {
         "meta": {
             "browser": {"name": "Chrome", "mobile": False},
             "os": {"name": "macOS"},
@@ -408,7 +387,7 @@ def send_edge_rum_probe(cdn_domain: str, marker: str, idx: int) -> int:
         "X-Source-Ip": _spoof_ip(),
     }
     return _urlopen_status(
-        urllib.request.Request(url, data=json.dumps(faro_payload).encode("utf-8"), headers=hdrs, method="POST")
+        urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=hdrs, method="POST")
     )
 
 
@@ -432,14 +411,12 @@ def correlated_vitals_value(marker: str, idx: int) -> int:
 
 
 def summarize_correlated(probes: list[dict[str, Any]], ended: float) -> dict[str, Any]:
-    streams = {}
-    floor = BUDGETS["minimum_samples_per_state"]
+    streams, floor = {}, BUDGETS["minimum_samples_per_state"]
     for stream in ("request", "vitals", "errors"):
         pop = [p for p in probes if p["stream"] == stream]
         visible = [p for p in pop if p.get("first_visible") is not None and 200 <= p["http_status"] < 300]
         bounds = sorted(p["first_visible"] - p["sent"] for p in visible)
-        count = len(bounds)
-        complete = bool(pop) and count == len(pop)
+        count, complete = len(bounds), bool(pop) and len(bounds) == len(pop)
         p95 = bounds[math.ceil(count * 0.95) - 1] if count else None
         streams[stream] = {
             "sent": len(pop),
@@ -457,11 +434,9 @@ def summarize_correlated(probes: list[dict[str, Any]], ended: float) -> dict[str
                 "max": max(bounds) if count else None,
             },
             "p99_population_sufficient": complete and count >= 100,
-            "target_assessment": (
-                "within_target_upper_bound"
-                if complete and count >= floor and p95 <= BUDGETS["peak_freshness_p95_ms"] / 1000
-                else "incomplete_not_proven_failure"
-            ),
+            "target_assessment": "within_target_upper_bound"
+            if complete and count >= floor and p95 <= BUDGETS["peak_freshness_p95_ms"] / 1000
+            else "incomplete_not_proven_failure",
             "samples": [
                 {
                     "http_status": p["http_status"],
@@ -485,17 +460,10 @@ def summarize_correlated(probes: list[dict[str, Any]], ended: float) -> dict[str
 
 
 class ActiveTrafficStreamer:
-    """Continuously dispatches edge HTTP requests and RUM beacons in parallel."""
-
     def __init__(self, cdn_domain: str, marker: str, rps: float = 10.0):
-        self.cdn_domain = cdn_domain
-        self.marker = marker
-        self.rps = max(1.0, rps)
-        self.stop_event = threading.Event()
-        self.requests_sent = 0
-        self.rum_sent = 0
-        self.errors = 0
-        self._thread: threading.Thread | None = None
+        self.cdn_domain, self.marker, self.rps = cdn_domain, marker, max(1.0, rps)
+        self.stop_event, self._thread = threading.Event(), None
+        self.requests_sent = self.rum_sent = self.errors = 0
 
     def start(self) -> None:
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -510,8 +478,7 @@ class ActiveTrafficStreamer:
         interval, seq = 1.0 / self.rps, 0
         with ThreadPoolExecutor(max_workers=6) as pool:
             while not self.stop_event.is_set():
-                t0 = time.perf_counter()
-                seq += 1
+                t0, seq = time.perf_counter(), seq + 1
                 try:
                     pool.submit(self._send_req, seq)
                     if seq % 5 == 0:
@@ -535,16 +502,17 @@ class ActiveTrafficStreamer:
 def compute_lag_statistics(
     samples: list[dict[str, Any]], baseline_latest_ts: datetime | None = None, min_elapsed_s: float = 6.0
 ) -> dict[str, Any]:
-    """Summarize request-watermark recency, not individual event latency."""
-    active_samples = (
-        [s for s in samples if s.get("header_latest_ts") and s["header_latest_ts"] > baseline_latest_ts]
-        if baseline_latest_ts
-        else []
+    active = (
+        (
+            [s for s in samples if s.get("header_latest_ts") and s["header_latest_ts"] > baseline_latest_ts]
+            if baseline_latest_ts
+            else []
+        )
+        or [s for s in samples if s.get("elapsed_s", 0) >= min_elapsed_s]
+        or list(samples)
     )
-    if not active_samples:
-        active_samples = [s for s in samples if s.get("elapsed_s", 0) >= min_elapsed_s] or list(samples)
-    head_lags = [s["header_lag_s"] for s in active_samples if s.get("header_lag_s") is not None]
-    dash_lags = [s["dashboard_lag_s"] for s in active_samples if s.get("dashboard_lag_s") is not None]
+    head_lags = [s["header_lag_s"] for s in active if s.get("header_lag_s") is not None]
+    dash_lags = [s["dashboard_lag_s"] for s in active if s.get("dashboard_lag_s") is not None]
 
     def _stats(vals: list[float]) -> dict[str, float | None]:
         if not vals:
@@ -559,34 +527,23 @@ def compute_lag_statistics(
         }
 
     header, dashboard = _stats(head_lags), _stats(dash_lags)
-    target_p95_s = BUDGETS["peak_freshness_p95_ms"] / 1000
-    header_p95, dashboard_p95 = header["p95"], dashboard["p95"]
-    target_status = (
-        "UNMEASURED"
-        if header_p95 is None or dashboard_p95 is None
-        else ("ELEVATED" if max(header_p95, dashboard_p95) > target_p95_s else "WITHIN TARGET")
+    target_p95_s, hp, dp = BUDGETS["peak_freshness_p95_ms"] / 1000, header["p95"], dashboard["p95"]
+    status = (
+        "UNMEASURED" if hp is None or dp is None else ("ELEVATED" if max(hp, dp) > target_p95_s else "WITHIN TARGET")
     )
     return {
         "header_lag": header,
         "dashboard_lag": dashboard,
-        "sample_count": len(active_samples),
+        "sample_count": len(active),
         "total_samples": len(samples),
         "target_p95_s": target_p95_s,
-        "target_status": target_status,
+        "target_status": status,
     }
 
 
 def print_active_scorecard(results: list[dict[str, Any]]) -> None:
     print(
-        f"\n{'=' * 110}\n                      REQUEST WATERMARK RECENCY SCORECARD (DIAGNOSTIC ONLY)\n{'=' * 110}",
-        flush=True,
-    )
-    print(
-        f"{'Environment':<28} │ {'Mode':<11} │ {'Min Lag':<8} │ {'Max Lag':<8} │ {'Avg Lag':<8} │ {'P95 Lag':<8} │ {'Dash Avg':<9} │ {'Requests':<9} │ {'Target Status':<15}",
-        flush=True,
-    )
-    print(
-        f"{'-' * 28}─┼─{'-' * 11}─┼─{'-' * 8}─┼─{'-' * 8}─┼─{'-' * 8}─┼─{'-' * 8}─┼─{'-' * 9}─┼─{'-' * 9}─┼─{'-' * 15}",
+        f"\n{'=' * 110}\n                      REQUEST WATERMARK RECENCY SCORECARD (DIAGNOSTIC ONLY)\n{'=' * 110}\n{'Environment':<28} │ {'Mode':<11} │ {'Min Lag':<8} │ {'Max Lag':<8} │ {'Avg Lag':<8} │ {'P95 Lag':<8} │ {'Dash Avg':<9} │ {'Requests':<9} │ {'Target Status':<15}\n{'-' * 28}─┼─{'-' * 11}─┼─{'-' * 8}─┼─{'-' * 8}─┼─{'-' * 8}─┼─{'-' * 8}─┼─{'-' * 9}─┼─{'-' * 9}─┼─{'-' * 15}",
         flush=True,
     )
     for r in results:
@@ -596,10 +553,8 @@ def print_active_scorecard(results: list[dict[str, Any]]) -> None:
         bench = r.get("active_benchmark", {})
         hl, dl = bench.get("header_lag", {}), bench.get("dashboard_lag", {})
         fmt = lambda d, k: f"{d[k]}s" if d.get(k) is not None else "—"  # noqa: E731
-        reqs = f"{bench.get('requests_sent', 0):,}"
         print(
-            f"{r['name']:<28} │ {r.get('deployment_mode', '—'):<11} │ {fmt(hl, 'min'):>8} │ {fmt(hl, 'max'):>8} │ "
-            f"{fmt(hl, 'avg'):>8} │ {fmt(hl, 'p95'):>8} │ {fmt(dl, 'avg'):>9} │ {reqs:>9} │ {bench.get('target_status', '—'):<15}",
+            f"{r['name']:<28} │ {r.get('deployment_mode', '—'):<11} │ {fmt(hl, 'min'):>8} │ {fmt(hl, 'max'):>8} │ {fmt(hl, 'avg'):>8} │ {fmt(hl, 'p95'):>8} │ {fmt(dl, 'avg'):>9} │ {bench.get('requests_sent', 0):>9,} │ {bench.get('target_status', '—'):<15}",
             flush=True,
         )
     print(
@@ -610,26 +565,25 @@ def print_active_scorecard(results: list[dict[str, Any]]) -> None:
 
 def print_burst_scorecard(results: list[dict[str, Any]]) -> None:
     print(
-        f"\n{'=' * 96}\n                      END-TO-END FRESHNESS & INGEST LAG SCORECARD (SINGLE BURST)\n{'=' * 96}",
+        f"\n{'=' * 96}\n                      END-TO-END FRESHNESS & INGEST LAG SCORECARD (SINGLE BURST)\n{'=' * 96}\n{'Environment':<28} │ {'Header Seen':<11} │ {'Cron Ingest':<11} │ {'Dash Seen':<12} │ {'Dashboard Lag':<14} │ {'Header Lag':<11}\n{'-' * 28}─┼─{'-' * 11}─┼─{'-' * 11}─┼─{'-' * 12}─┼─{'-' * 14}─┼─{'-' * 11}",
         flush=True,
     )
-    print(
-        f"{'Environment':<28} │ {'Header Seen':<11} │ {'Cron Ingest':<11} │ {'Dash Seen':<12} │ {'Dashboard Lag':<14} │ {'Header Lag':<11}",
-        flush=True,
-    )
-    print(f"{'-' * 28}─┼─{'-' * 11}─┼─{'-' * 11}─┼─{'-' * 12}─┼─{'-' * 14}─┼─{'-' * 11}", flush=True)
     for r in results:
         if "error" in r:
             print(f"{r.get('name', r.get('env', 'Unknown')):<28} │ ERROR: {r['error']}", flush=True)
             continue
         delays, matrix = r.get("wall_clock_delays", {}), r.get("page_freshness_matrix", {})
-        dash_lag = matrix.get("Dashboard Bundle", {}).get("freshness_lag_s")
-        head_lag = matrix.get("Header Badge", {}).get("freshness_lag_s")
+        dash_lag, head_lag = (
+            matrix.get("Dashboard Bundle", {}).get("freshness_lag_s"),
+            matrix.get("Header Badge", {}).get("freshness_lag_s"),
+        )
         f_del = lambda k: f"{delays[k]}s" if delays.get(k) is not None else "TIMEOUT"  # noqa: E731
-        dash_lag_str = f"{dash_lag:.1f}s ago" if dash_lag is not None else "—"
-        head_lag_str = f"{head_lag:.1f}s ago" if head_lag is not None else "—"
+        dash_s, head_s = (
+            (f"{dash_lag:.1f}s ago" if dash_lag is not None else "—"),
+            (f"{head_lag:.1f}s ago" if head_lag is not None else "—"),
+        )
         print(
-            f"{r['name']:<28} │ {f_del('header_seconds'):<11} │ {f_del('cron_request_seconds'):<11} │ {f_del('dashboard_bundle_seconds'):<12} │ {dash_lag_str:<14} │ {head_lag_str:<11}",
+            f"{r['name']:<28} │ {f_del('header_seconds'):<11} │ {f_del('cron_request_seconds'):<11} │ {f_del('dashboard_bundle_seconds'):<12} │ {dash_s:<14} │ {head_s:<11}",
             flush=True,
         )
     print(f"{'=' * 96}\n", flush=True)
@@ -639,6 +593,262 @@ def escape_sql_literal(value: str) -> str:
     if not isinstance(value, str):
         raise TypeError(f"escape_sql_literal expected str, got {type(value).__name__}")
     return value.replace("'", "''")
+
+
+# ── Private Prometheus UI Access (folded from scripts/lib/observability_ui.py) ───────────────────
+
+LIFETIME = 3600
+MAX_BODY = 1024 * 1024
+CONTAINER_REQUEST = """import base64,http.client,json,sys
+r=json.load(sys.stdin); c=http.client.HTTPConnection("127.0.0.1",9090,timeout=10)
+c.request(r["method"],r["path"],body=base64.b64decode(r["body"]),headers=r["headers"]); s=c.getresponse(); b=s.read(16777217)
+if len(b)>16777216: raise ValueError("Prometheus response too large")
+print(json.dumps({"status":s.status,"type":s.getheader("Content-Type","application/octet-stream"),"body":base64.b64encode(b).decode()})); c.close()"""
+BROWSER_CHECK = """const { chromium } = require('./frontend/node_modules/@playwright/test');
+(async () => {
+  const browser = await chromium.launch({headless: true});
+  try {
+    const page = await browser.newPage();
+    await page.route('**/*', route => new URL(route.request().url()).origin === process.argv[1] ? route.continue() : route.abort());
+    const response = await page.goto(process.argv[1] + '/query', {timeout: 30000});
+    if (!response || response.status() !== 200) throw Error('UI document unavailable');
+    if (!(await page.title()).includes('Prometheus')) throw Error('Wrong UI');
+    await page.locator('.cm-editor').first().waitFor({state:'visible', timeout:30000});
+    await page.getByRole('button', {name:'Execute',exact:true}).waitFor({state:'visible',timeout:30000});
+    if (new URL(page.url()).origin !== process.argv[1]) throw Error('UI redirected');
+    console.log(JSON.stringify({ui_verified:true}));
+  } finally { await browser.close(); }
+})().catch(() => { console.error('Prometheus browser verification failed'); process.exit(1); });"""
+
+
+def private_origin(origin: str) -> str:
+    p = urlsplit(origin)
+    if (
+        p.scheme != "http"
+        or p.hostname != "127.0.0.1"
+        or p.username is not None
+        or p.password is not None
+        or p.path
+        or p.query
+        or p.fragment
+        or not p.port
+        or origin != f"http://127.0.0.1:{p.port}"
+    ):
+        raise ValueError("Metrics UI requires a credential-free loopback origin")
+    return origin
+
+
+def metrics_ui_link(origin: str, verified: bool) -> str:
+    if not verified:
+        return ""
+    url = html.escape(private_origin(origin) + "/query", quote=True)
+    return f'<a href="{url}" target="_blank" rel="noopener noreferrer" class="text-sky-400 hover:underline">Metrics UI</a> <span class="text-slate-400 text-[9px]">(private; expires within 1h)</span>'
+
+
+def verify_ui(origin: str, receipt_path: Path | None = None) -> None:
+    private_origin(origin)
+    if receipt_path is not None:
+        import httpx
+
+        from scripts.dev.verify_observability import ProbeReceipt, _metric_matches, _receiver_json
+
+        receipt = ProbeReceipt.model_validate_json(receipt_path.read_text())
+        if not -5 <= time.time() - receipt.emitted_at.timestamp() <= 300:
+            raise ValueError("UI attribution receipt expired")
+        query = (
+            f'app_observability_probe_total{{job="{receipt.service_name}",instance="{receipt.service_instance_id}"}}'
+        )
+        with httpx.Client(verify=True, trust_env=False, follow_redirects=False) as client:
+            payload = _receiver_json(client, origin + "/api/v1/query", params={"query": query}, remaining=10)
+        if payload is None or not _metric_matches(
+            payload, job=receipt.service_name, instance=str(receipt.service_instance_id), emitted_at=receipt.emitted_at
+        ):
+            raise ValueError("Metrics UI forward does not reach the verified receiver")
+    res = subprocess.run(
+        ["node", "-e", BROWSER_CHECK, origin], cwd=ROOT, capture_output=True, text=True, check=True, timeout=75
+    )
+    if json.loads(res.stdout).get("ui_verified") is not True:
+        raise ValueError("Prometheus UI was not verified")
+
+
+def unused_loopback_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def write_private(path: Path, data: dict) -> None:
+    with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as stream:
+        json.dump(data, stream)
+
+
+def start_access(directory: Path, mode: str, command: list[str], port: int) -> tuple[Path, str]:
+    if mode not in {"proxy", "forward"} or not command:
+        raise ValueError("Unknown private UI access mode")
+    token = uuid4().hex
+    state = directory / f"ui-{token}.json"
+    write_private(state, {"token": token, "mode": mode, "command": command, "port": port})
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "scripts.lib.observability_ui", "serve", str(state), token],
+        cwd=ROOT,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    write_private(state.with_suffix(".pid"), {"pid": proc.pid, "token": token})
+    return state, private_origin(f"http://127.0.0.1:{port}")
+
+
+def _owned_supervisor_pid(state: Path) -> int | None:
+    data, pid = json.loads(state.read_text()), int(json.loads(state.with_suffix(".pid").read_text())["pid"])
+    cmd = subprocess.run(
+        ["ps", "-p", str(pid), "-o", "command="], capture_output=True, text=True, check=False, timeout=5
+    ).stdout
+    return pid if "scripts.lib.observability_ui serve" in cmd and data["token"] in cmd else None
+
+
+def stop_access(state: Path) -> None:
+    if (pid := _owned_supervisor_pid(state)) is not None:
+        try:
+            os.killpg(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+
+
+def report_link(path: Path) -> str:
+    if not path.exists():
+        return ""
+    data = json.loads(path.read_text())
+    if (
+        data.get("ui_verified") is not True
+        or data["expires_at"] <= time.time()
+        or _owned_supervisor_pid(Path(data["state"])) is None
+    ):
+        return ""
+    origin = private_origin(data["origin"])
+    with socket.create_connection(("127.0.0.1", urlsplit(origin).port), timeout=1):
+        pass
+    return metrics_ui_link(origin, True)
+
+
+def _proxy_server(port: int, command: list[str]) -> ThreadingHTTPServer:
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            pass
+
+        def do_GET(self):
+            self.relay()
+
+        def do_POST(self):
+            self.relay()
+
+        def relay(self):
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if length < 0 or length > MAX_BODY or self.headers.get("Transfer-Encoding"):
+                    raise ValueError("Unsupported body")
+                if not self.path.startswith("/") or self.path.startswith("//"):
+                    raise ValueError("Origin-form request required")
+                payload = {
+                    "method": self.command,
+                    "path": self.path,
+                    "body": base64.b64encode(self.rfile.read(length)).decode(),
+                    "headers": {"Content-Type": self.headers.get("Content-Type", "application/json")},
+                }
+                res = subprocess.run(
+                    [*command, "python", "-c", CONTAINER_REQUEST],
+                    input=json.dumps(payload),
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                    timeout=15,
+                )
+                data = json.loads(res.stdout)
+                body = base64.b64decode(data["body"], validate=True)
+                self.send_response(int(data["status"]))
+                for k, v in (
+                    ("Content-Type", data["type"]),
+                    ("Content-Length", str(len(body))),
+                    ("X-Content-Type-Options", "nosniff"),
+                ):
+                    self.send_header(k, v)
+                self.end_headers()
+                self.wfile.write(body)
+            except (ValueError, OSError, subprocess.SubprocessError):
+                self.send_error(502, "Private Metrics UI unavailable")
+
+    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    server.daemon_threads = True
+    return server
+
+
+def _serve(state: Path, token: str) -> None:
+    config = json.loads(state.read_text())
+    if config["token"] != token or state.stat().st_mode & 0o077:
+        raise ValueError("Invalid supervisor ownership")
+    child, server, stop = None, None, threading.Event()
+    signal.signal(signal.SIGTERM, lambda *_: stop.set())
+    signal.signal(signal.SIGINT, lambda *_: stop.set())
+    try:
+        if config["mode"] == "proxy":
+            server = _proxy_server(config["port"], config["command"])
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+        else:
+            child = subprocess.Popen(config["command"], stdin=subprocess.DEVNULL)
+        deadline = time.monotonic() + LIFETIME
+        while time.monotonic() < deadline and not stop.wait(1):
+            if child and child.poll() is not None:
+                return
+    finally:
+        if server:
+            server.shutdown()
+            server.server_close()
+        if child and child.poll() is None:
+            child.terminate()
+            try:
+                child.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait(timeout=5)
+
+
+def observability_ui_main(argv: list[str] | None = None) -> None:
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("operation", choices=["serve", "stop", "stop-directory", "link"])
+    p.add_argument("state", type=Path)
+    p.add_argument("token", nargs="?")
+    args = p.parse_args(argv)
+    if args.operation == "link":
+        try:
+            print(report_link(args.state))
+        except (OSError, ValueError, KeyError, subprocess.SubprocessError):
+            print("")
+    elif args.operation == "stop-directory":
+        for path in args.state.glob("*-link.json"):
+            path.unlink()
+        for path in args.state.glob("ui-*.json"):
+            stop_access(path)
+    elif args.operation == "stop":
+        stop_access(args.state)
+    else:
+        _serve(args.state, args.token)
+
+
+def main(argv: list[str] | None = None) -> int:
+    eff_argv = list(sys.argv[1:] if argv is None else argv)
+    prog = Path(sys.argv[0]).name if sys.argv else ""
+    spec_name = (
+        globals().get("__spec__").name if globals().get("__name__") == "__main__" and globals().get("__spec__") else ""
+    )
+    if (
+        spec_name == "scripts.lib.observability_ui"
+        or "observability_ui" in prog
+        or (eff_argv and eff_argv[0] in ("serve", "stop", "stop-directory", "link"))
+    ):
+        observability_ui_main(argv)
+        return 0
+    return readiness_main(argv)
 
 
 if __name__ == "__main__":

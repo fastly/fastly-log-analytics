@@ -53,7 +53,7 @@ _SQL_CALL = re.compile(
     r"\.execute\(|\.executemany\(|\.fetchall\(|\.fetchone\(|track_query\(|\bDESCRIBE\s+\{|"
     r"[\"'`]\s*(SELECT|INSERT INTO|DELETE FROM|UPDATE\s+\w+\s+SET|CREATE\s+(TEMP\s+)?TABLE|WITH\s+\w+\s+AS)\b"
 )
-_INLINE_SQL_EXEMPT_ROUTERS = {"admin/log_accounting.py", "control_room.py", "high_scale.py"}
+_INLINE_SQL_EXEMPT_ROUTERS = {"admin/compaction.py", "admin/health.py", "control_room.py"}
 
 
 def test_no_inline_sql_in_routers() -> None:

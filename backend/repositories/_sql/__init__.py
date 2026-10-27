@@ -13,7 +13,6 @@ from backend.repositories import assets as _assets_repo
 from backend.repositories import dashboard as _dashboard_repo
 from backend.repositories import network as _network_repo
 from backend.repositories import origin as _origin_repo
-from backend.repositories import rum as _rum_repo
 from backend.repositories import security as _security_repo
 from backend.repositories import sessions as _sessions_repo
 from backend.repositories.insights import definitions as _insights_defs
@@ -26,7 +25,7 @@ network = _network_repo
 origin = _origin_repo
 performance = _origin_repo
 query = _dashboard_repo
-rum = _rum_repo
+rum = _origin_repo
 security = _security_repo
 session_scoring = _sessions_repo
 sessions = _sessions_repo
@@ -40,7 +39,7 @@ _sys.modules[f"{__name__}.network"] = _network_repo
 _sys.modules[f"{__name__}.origin"] = _origin_repo
 _sys.modules[f"{__name__}.performance"] = _origin_repo
 _sys.modules[f"{__name__}.query"] = _dashboard_repo
-_sys.modules[f"{__name__}.rum"] = _rum_repo
+_sys.modules[f"{__name__}.rum"] = _origin_repo
 _sys.modules[f"{__name__}.security"] = _security_repo
 _sys.modules[f"{__name__}.session_scoring"] = _sessions_repo
 _sys.modules[f"{__name__}.sessions"] = _sessions_repo

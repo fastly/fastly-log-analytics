@@ -171,7 +171,7 @@ def publish_temp_parquet(
     after_replace_under_lock: Callable[[], None] | None = None,
     before_replace_under_lock: Callable[[], bool] | None = None,
 ) -> bool:
-    """Atomically replace ``tmp_path`` onto ``dst_path`` under the service iceberg lock."""
+    """Atomically replace ``tmp_path`` onto ``dst_path`` under the service view lock."""
     from backend.core.iceberg.view import _get_service_lock
 
     try:
@@ -200,7 +200,7 @@ def _publish_field_partitions(tmp_field_dir: str, dst_root: str, field: str) -> 
     next refresh. Pre-fix, the dashboard could observe ZERO files for the
     hour (undercount), which was indistinguishable from a real traffic dip.
 
-    Caller MUST hold the per-service iceberg lock around the whole call.
+    Caller MUST hold the per-service view lock around the whole call.
     Returns the number of hour-dirs published.
     """
     field_dir = os.path.join(tmp_field_dir, f"field={field}")
@@ -253,7 +253,7 @@ def _ip_spread_root(source: dict) -> str:
 
     Built by :func:`backend.core.rollups.recompute._run_ip_spread_per_field`
     alongside the regular count rollup so both files for a given hour
-    publish atomically under the per-service iceberg lock.
+    publish atomically under the per-service view lock.
     """
     from backend.core.duckdb import _cache_dir
 
@@ -939,7 +939,7 @@ def compact_closed_days(
       - for each closed day, skips when the per-day file is already newer than
         every constituent hour file (mtime gate);
       - otherwise writes ``build_copy_sql(paths_sql, tmp_file)`` to a temp file
-        and atomically renames it into place under the per-service iceberg
+        and atomically renames it into place under the per-service view
         lock, cleaning up the temp file on any failure.
 
     ``build_copy_sql`` receives the SQL-escaped ``read_parquet([...])`` source
@@ -1072,7 +1072,7 @@ def build_per_hour_bundles(
     drop the active hour + malformed tokens, resolve the service view, open a
     read-only connection, describe its columns, then for each closed hour
     write a temp parquet via ``build_copy_sql`` and atomically rename it into
-    ``hour=H/<bundle_filename>`` under the per-service iceberg lock (cleaning
+    ``hour=H/<bundle_filename>`` under the per-service view lock (cleaning
     up the temp file on any failure). ``output_root`` optionally directs all
     outputs to private staging without changing the source or its connection.
 
@@ -1460,7 +1460,7 @@ def describe_columns(
             source,
             lambda c: c.execute(f"DESCRIBE {table_ident}").fetchall(),
         )
-    except Exception as e:  # noqa: BLE001 — DuckDB raises typed errors but iceberg may wrap them
+    except Exception as e:  # noqa: BLE001 — DuckDB raises typed errors but the stale-view retry hop may wrap them
         if logger is not None:
             service_id = source.get("name", "default")
             label = f"{log_label}: " if log_label else ""

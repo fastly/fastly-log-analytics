@@ -8,9 +8,7 @@ import { useFilterStore } from '@/stores/filterStore'
 import type { components } from '@/types/api.generated'
 import type { FiltersPayload, PlotlyTrace } from '@/types/api'
 
-export function cn(...inputs: ClassValue[]) {
-  return twMerge(clsx(inputs))
-}
+export function cn(...inputs: ClassValue[]) { return twMerge(clsx(inputs)) }
 
 const _numFmtCache = new Map<string, Intl.NumberFormat>()
 function getNumberFormat(locale?: string, options?: Intl.NumberFormatOptions): Intl.NumberFormat {
@@ -29,8 +27,7 @@ function getDateTimeFormat(locale: string | undefined, options: Intl.DateTimeFor
 }
 
 const _relFmt = typeof Intl !== 'undefined' && typeof Intl.RelativeTimeFormat === 'function'
-  ? new Intl.RelativeTimeFormat('en', { numeric: 'always', style: 'narrow' })
-  : null
+  ? new Intl.RelativeTimeFormat('en', { numeric: 'always', style: 'narrow' }) : null
 
 const BYTE_UNITS = ['B', 'KB', 'MB', 'GB', 'TB'] as const
 
@@ -41,10 +38,7 @@ export function formatBytes(bytes: number): string {
   return `${parseFloat(value.toFixed(2))} ${BYTE_UNITS[i]}`
 }
 
-export function formatBytesTiered(
-  bytes: number | null | undefined,
-  options: { maxUnit?: 'MB' | 'GB'; nullText?: string } = {},
-): string {
+export function formatBytesTiered(bytes: number | null | undefined, options: { maxUnit?: 'MB' | 'GB'; nullText?: string } = {}): string {
   const { maxUnit = 'MB', nullText = '–' } = options
   if (bytes == null) return nullText
   if (bytes < 1024) return `${bytes} B`
@@ -54,21 +48,13 @@ export function formatBytesTiered(
 }
 
 interface ElapsedOptions {
-  minutesFrom?: number
-  hoursFrom?: number
-  daysFrom?: number
-  rounding?: 'floor' | 'round'
+  minutesFrom?: number; hoursFrom?: number; daysFrom?: number; rounding?: 'floor' | 'round'
   fractionDigits?: { seconds?: number; minutes?: number; hours?: number; days?: number }
-  justNowBelow?: number
-  suffix?: string
-  fallback?: string
+  justNowBelow?: number; suffix?: string; fallback?: string
 }
 
 export function formatElapsed(seconds: number | null | undefined, options: ElapsedOptions = {}): string {
-  const {
-    minutesFrom = 60, hoursFrom = 3600, daysFrom = 86400, rounding = 'floor',
-    fractionDigits = {}, justNowBelow, suffix = '', fallback = '—',
-  } = options
+  const { minutesFrom = 60, hoursFrom = 3600, daysFrom = 86400, rounding = 'floor', fractionDigits = {}, justNowBelow, suffix = '', fallback = '—' } = options
   if (seconds == null || Number.isNaN(seconds)) return fallback
   const r = rounding === 'round' ? Math.round : Math.floor
   const unit = (v: number, digits: number | undefined, label: string) => `${digits ? v.toFixed(digits) : r(v)}${label}${suffix}`
@@ -81,40 +67,27 @@ export function formatElapsed(seconds: number | null | undefined, options: Elaps
 
 export const ELAPSED_RELATIVE_AGO_JUST_NOW: ElapsedOptions = { suffix: ' ago', justNowBelow: 120 }
 export const ELAPSED_RELATIVE_AGO: ElapsedOptions = { suffix: ' ago' }
-export const ELAPSED_AGE_COMPACT: ElapsedOptions = {
-  rounding: 'round', minutesFrom: 90, hoursFrom: 5400, daysFrom: 172800, fractionDigits: { hours: 1, days: 1 },
-}
-export const ELAPSED_FRESHNESS: ElapsedOptions = {
-  rounding: 'round', daysFrom: Infinity, fractionDigits: { hours: 1 },
-}
+export const ELAPSED_AGE_COMPACT: ElapsedOptions = { rounding: 'round', minutesFrom: 90, hoursFrom: 5400, daysFrom: 172800, fractionDigits: { hours: 1, days: 1 } }
+export const ELAPSED_FRESHNESS: ElapsedOptions = { rounding: 'round', daysFrom: Infinity, fractionDigits: { hours: 1 } }
 
 export function resolveCountryName(code: string): string {
   if (!code || code.length !== 2 || typeof Intl === 'undefined') return code
-  try {
-    return new Intl.DisplayNames(['en'], { type: 'region' }).of(code.toUpperCase()) || code
-  } catch { return code }
+  try { return new Intl.DisplayNames(['en'], { type: 'region' }).of(code.toUpperCase()) || code } catch { return code }
 }
 
 export function formatCompactCount(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1).replace(/\.0$/, '')}k`
-  return String(n)
+  return n >= 1_000 ? `${(n / 1_000).toFixed(1).replace(/\.0$/, '')}k` : String(n)
 }
 
 export function formatAbbreviatedCount(n: number, millionDecimals = 1): string {
   if (n >= 1e9) return `${(n / 1e9).toFixed(millionDecimals)}B`
   if (n >= 1e6) return `${(n / 1e6).toFixed(millionDecimals)}M`
-  if (n >= 1e3) return `${(n / 1e3).toFixed(1)}K`
-  return formatCount(n)
+  return n >= 1e3 ? `${(n / 1e3).toFixed(1)}K` : formatCount(n)
 }
 
-export function formatCount(n: number, options?: Intl.NumberFormatOptions): string {
-  return getNumberFormat(undefined, options).format(n)
-}
-
-export function formatCountMaybe(n: number | null | undefined, options?: Intl.NumberFormatOptions): string | undefined {
-  return n == null ? undefined : formatCount(n, options)
-}
+export function formatCount(n: number, options?: Intl.NumberFormatOptions): string { return getNumberFormat(undefined, options).format(n) }
+export function formatCountMaybe(n: number | null | undefined, options?: Intl.NumberFormatOptions): string | undefined { return n == null ? undefined : formatCount(n, options) }
 
 export function formatValue(field: string | undefined, value: string | number | null | undefined): string {
   if (value === null || value === undefined) return 'null'
@@ -131,8 +104,7 @@ export function formatValue(field: string | undefined, value: string | number | 
 }
 
 export function formatCurrency(amount: number): string {
-  if (amount >= 1000) return `$${(amount / 1000).toFixed(1).replace(/\.0$/, '')}k`
-  return `$${amount.toFixed(amount >= 1 ? 2 : 4)}`
+  return amount >= 1000 ? `$${(amount / 1000).toFixed(1).replace(/\.0$/, '')}k` : `$${amount.toFixed(amount >= 1 ? 2 : 4)}`
 }
 
 export function formatUSD(n: number, options?: { subDollarDigits?: number }): string {
@@ -140,40 +112,24 @@ export function formatUSD(n: number, options?: { subDollarDigits?: number }): st
   return `$${n.toFixed(n >= 1 ? 2 : (options?.subDollarDigits ?? 4))}`
 }
 
-export function calculateDelta(current: number, previous: number | undefined): number | null {
-  return previous ? ((current - previous) / previous) * 100 : null
-}
+export function calculateDelta(current: number, previous: number | undefined): number | null { return previous ? ((current - previous) / previous) * 100 : null }
+export function formatPercent(ratio: number, options?: { decimals?: number }): string { return `${(ratio * 100).toFixed(options?.decimals ?? 1)}%` }
+export function formatPctValue(v: number | null | undefined, decimals?: number): string { return v == null ? '—' : `${decimals != null ? v.toFixed(decimals) : v}%` }
+export function formatMs(v: number | null | undefined, decimals = 1, unit = ' ms'): string { return v == null ? '—' : `${v.toFixed(decimals)}${unit}` }
 
-export function formatPercent(ratio: number, options?: { decimals?: number }): string {
-  return `${(ratio * 100).toFixed(options?.decimals ?? 1)}%`
-}
-
-export function formatPctValue(v: number | null | undefined, decimals?: number): string {
-  return v == null ? '—' : `${decimals != null ? v.toFixed(decimals) : v}%`
-}
-
-export function formatMs(v: number | null | undefined, decimals = 1, unit = ' ms'): string {
-  return v == null ? '—' : `${v.toFixed(decimals)}${unit}`
-}
-
-export function statusBadgeClass(
-  status: number | string | null | undefined,
-  variant: 'class' | 'traffic-light' = 'class',
-): string {
+export function statusBadgeClass(status: number | string | null | undefined, variant: 'class' | 'traffic-light' = 'class'): string {
   if (variant === 'traffic-light') {
     const n = typeof status === 'number' ? status : status == null ? 0 : Number(status)
     if (!n) return 'bg-muted text-muted-foreground'
     if (n >= 200 && n < 300) return 'bg-green-500/10 text-green-500 border-green-500/20'
-    if (n >= 300 && n < 400) return 'bg-yellow-500/10 text-yellow-500 border-yellow-500/20'
-    return 'bg-red-500/10 text-red-500 border-red-500/20'
+    return n >= 300 && n < 400 ? 'bg-yellow-500/10 text-yellow-500 border-yellow-500/20' : 'bg-red-500/10 text-red-500 border-red-500/20'
   }
   const code = typeof status === 'number' ? status : parseInt(String(status), 10)
   if (isNaN(code)) return 'bg-muted text-muted-foreground'
   if (code >= 200 && code < 300) return 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border-emerald-500/20'
   if (code >= 300 && code < 400) return 'bg-sky-500/15 text-sky-700 dark:text-sky-400 border-sky-500/20'
   if (code >= 400 && code < 500) return 'bg-amber-500/15 text-amber-800 dark:text-amber-400 border-amber-500/20'
-  if (code >= 500) return 'bg-destructive/15 text-destructive border-destructive/20 font-bold'
-  return 'bg-muted text-muted-foreground'
+  return code >= 500 ? 'bg-destructive/15 text-destructive border-destructive/20 font-bold' : 'bg-muted text-muted-foreground'
 }
 
 export function toUTCDate(date: string | Date): Date {
@@ -185,34 +141,22 @@ export function toUTCDate(date: string | Date): Date {
 }
 
 export function formatForInput(date: string | Date, tz: string) {
-  try {
-    const d = toUTCDate(date)
-    return isNaN(d.getTime()) ? '' : formatInTimeZone(d, tz, "yyyy-MM-dd'T'HH:mm:ss")
-  } catch { return '' }
+  try { const d = toUTCDate(date); return isNaN(d.getTime()) ? '' : formatInTimeZone(d, tz, "yyyy-MM-dd'T'HH:mm:ss") } catch { return '' }
 }
 
 export function parseFromInput(dateStr: string, tz: string) {
-  try {
-    const d = toDate(dateStr, { timeZone: tz })
-    return isNaN(d.getTime()) ? null : d.toISOString()
-  } catch { return null }
+  try { const d = toDate(dateStr, { timeZone: tz }); return isNaN(d.getTime()) ? null : d.toISOString() } catch { return null }
 }
 
 export function formatDate(date: string | Date, tz: string, pattern: string = 'yyyy-MM-dd h:mm:ss a') {
   try {
     const d = toUTCDate(date)
     return isNaN(d.getTime()) ? 'Invalid Date' : formatInTimeZone(d, tz, pattern)
-  } catch (e) {
-    console.error('Error formatting date:', date, e)
-    return 'Invalid Date'
-  }
+  } catch (e) { console.error('Error formatting date:', date, e); return 'Invalid Date' }
 }
 
 export function formatRelative(date: string | Date) {
-  try {
-    const d = toUTCDate(date)
-    return isNaN(d.getTime()) ? 'Invalid Date' : formatDistanceToNow(d, { addSuffix: true })
-  } catch { return 'Invalid Date' }
+  try { const d = toUTCDate(date); return isNaN(d.getTime()) ? 'Invalid Date' : formatDistanceToNow(d, { addSuffix: true }) } catch { return 'Invalid Date' }
 }
 
 export function formatTimeAgo(date: string | Date) {
@@ -224,13 +168,10 @@ export function formatTimeAgo(date: string | Date) {
   const s = diffSec % 60, m = Math.floor((diffSec % 3600) / 60)
   if (diffSec < 3600) return `${m}m ${s}s ago`
   const h = Math.floor((diffSec % 86400) / 3600)
-  if (diffSec < 86400) return `${h}h ${m}m ${s}s ago`
-  return `${Math.floor(diffSec / 86400)}d ${h}h ${m}m ago`
+  return diffSec < 86400 ? `${h}h ${m}m ${s}s ago` : `${Math.floor(diffSec / 86400)}d ${h}h ${m}m ago`
 }
 
-export function getTimezoneAbbr(date: Date, tz: string) {
-  return formatInTimeZone(date, tz, 'zzz')
-}
+export function getTimezoneAbbr(date: Date, tz: string) { return formatInTimeZone(date, tz, 'zzz') }
 
 export function formatLocalDateTime(value: string | number | Date, options?: Intl.DateTimeFormatOptions): string {
   const d = value instanceof Date ? value : new Date(value)
@@ -238,9 +179,7 @@ export function formatLocalDateTime(value: string | number | Date, options?: Int
   return options ? getDateTimeFormat(undefined, options).format(d) : d.toLocaleString()
 }
 
-export function formatCompactDuration(seconds: number): string {
-  return seconds <= 0 ? 'any second' : formatElapsed(seconds)
-}
+export function formatCompactDuration(seconds: number): string { return seconds <= 0 ? 'any second' : formatElapsed(seconds) }
 
 export function formatDuration(seconds: number | null | undefined, options?: { round?: boolean }): string {
   if (seconds == null || seconds < 0) return '—'
@@ -267,59 +206,41 @@ export function formatDeterministicUTC(iso: string | null | undefined): string {
 
 export function formatBucket(iso: string, tz: string): string {
   if (!iso) return ''
-  const utc = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(iso) ? iso : `${iso}Z`
-  const d = new Date(utc)
+  const d = new Date(/(?:Z|[+-]\d{2}:?\d{2})$/i.test(iso) ? iso : `${iso}Z`)
   if (isNaN(d.getTime())) return iso
-  return getDateTimeFormat('en-US', {
-    timeZone: tz, month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true,
-  }).format(d)
+  return getDateTimeFormat('en-US', { timeZone: tz, month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true }).format(d)
 }
 
 export function parseExtentMs(value: unknown, edge: 'earliest' | 'latest'): number | null {
   if (typeof value !== 'string' || value.length === 0) return null
-  const iso = value.length === 10 ? `${value}${edge === 'earliest' ? 'T00:00:00.000Z' : 'T23:59:59.999Z'}` : value
-  const t = Date.parse(iso)
+  const t = Date.parse(value.length === 10 ? `${value}${edge === 'earliest' ? 'T00:00:00.000Z' : 'T23:59:59.999Z'}` : value)
   return Number.isNaN(t) ? null : t
 }
 
-export function toQueryDate(d: Date): string {
-  return `${d.toISOString().slice(0, 19)}Z`
-}
-
+export function toQueryDate(d: Date): string { return `${d.toISOString().slice(0, 19)}Z` }
 export function formatDateTime(isoString: string | null | undefined, timeZone?: string): string {
   return isoString ? formatDate(isoString, timeZone || 'UTC', 'MMM d, yyyy h:mm:ss a') : 'Unknown'
 }
 
 const CHART_LAYOUT_DEFAULTS = {
   tickformatstops: [
-    { dtickrange: [0, 1000], value: '%H:%M:%S.%f' },
-    { dtickrange: [1000, 60000], value: '%H:%M:%S' },
-    { dtickrange: [60000, 3600000], value: '%H:%M' },
-    { dtickrange: [3600000, 86400000], value: '%H:%M<br>%b %d' },
-    { dtickrange: [86400000, 604800000], value: '%b %d' },
-    { dtickrange: [604800000, 'M1'], value: '%b %d' },
-    { dtickrange: ['M1', 'M12'], value: '%b %Y' },
-    { dtickrange: ['M12', null], value: '%Y' },
+    { dtickrange: [0, 1000], value: '%H:%M:%S.%f' }, { dtickrange: [1000, 60000], value: '%H:%M:%S' },
+    { dtickrange: [60000, 3600000], value: '%H:%M' }, { dtickrange: [3600000, 86400000], value: '%H:%M<br>%b %d' },
+    { dtickrange: [86400000, 604800000], value: '%b %d' }, { dtickrange: [604800000, 'M1'], value: '%b %d' },
+    { dtickrange: ['M1', 'M12'], value: '%b %Y' }, { dtickrange: ['M12', null], value: '%Y' },
   ],
 }
 
 export function makeTimeXAxis(startTime: string | null | undefined, endTime: string | null | undefined, timezone: string) {
   return {
-    range: [
-      startTime ? formatDate(startTime, timezone, 'yyyy-MM-dd HH:mm:ss.SSS') : '',
-      endTime ? formatDate(endTime, timezone, 'yyyy-MM-dd HH:mm:ss.SSS') : '',
-    ],
-    nticks: 8, tickangle: -45, automargin: true, type: 'date' as const,
-    tickformatstops: CHART_LAYOUT_DEFAULTS.tickformatstops,
+    range: [startTime ? formatDate(startTime, timezone, 'yyyy-MM-dd HH:mm:ss.SSS') : '', endTime ? formatDate(endTime, timezone, 'yyyy-MM-dd HH:mm:ss.SSS') : ''],
+    nticks: 8, tickangle: -45, automargin: true, type: 'date' as const, tickformatstops: CHART_LAYOUT_DEFAULTS.tickformatstops,
   }
 }
 
 export const TIME_HOVER_LAYOUT = {
   hovermode: 'x unified' as const,
-  legend: {
-    orientation: 'h' as const, y: 1.05, x: 0.5, xanchor: 'center' as const, yanchor: 'bottom' as const,
-    font: { size: 9.5 }, bgcolor: 'transparent',
-  },
+  legend: { orientation: 'h' as const, y: 1.05, x: 0.5, xanchor: 'center' as const, yanchor: 'bottom' as const, font: { size: 9.5 }, bgcolor: 'transparent' },
 }
 
 export function useTimeLayout(startTime: string | null | undefined, endTime: string | null | undefined, timezone: string) {
@@ -331,56 +252,31 @@ const MAX_DENSE_BUCKETS = 5000
 function parseUtcMs(t: string | number | null | undefined): number {
   if (t == null) return NaN
   if (typeof t === 'number') return Math.round(t / 1000) * 1000
-  const parsed = toUTCDate(t).getTime()
-  const raw = Number.isNaN(parsed) ? Date.parse(t) : parsed
+  const parsed = toUTCDate(t).getTime(), raw = Number.isNaN(parsed) ? Date.parse(t) : parsed
   return Number.isNaN(raw) ? NaN : Math.round(raw / 1000) * 1000
 }
 
 export function denseTimeGrid(
-  times: Array<string | number | null | undefined>,
-  intervalSeconds: number | undefined,
-  startTime?: string | null,
-  endTime?: string | null,
+  times: Array<string | number | null | undefined>, intervalSeconds: number | undefined, startTime?: string | null, endTime?: string | null,
 ): string[] | null {
   if (!intervalSeconds || intervalSeconds <= 0) return null
   const stepMs = intervalSeconds * 1000
   const timesMs = [...new Set(times.map((t) => parseUtcMs(t)).filter((t) => !Number.isNaN(t)))].sort((a, b) => a - b)
   let first = timesMs[0], last = timesMs[timesMs.length - 1]
-  if (startTime) {
-    const sMs = parseUtcMs(startTime)
-    if (!Number.isNaN(sMs)) {
-      const startBucket = sMs - (sMs % stepMs)
-      if (first === undefined || startBucket < first) first = startBucket
-    }
-  }
-  if (endTime) {
-    const eMs = parseUtcMs(endTime)
-    if (!Number.isNaN(eMs)) {
-      const endBucket = eMs - (eMs % stepMs)
-      if (last === undefined || endBucket > last) last = endBucket
-    }
-  }
+  const sMs = startTime ? parseUtcMs(startTime) : NaN, eMs = endTime ? parseUtcMs(endTime) : NaN
+  if (!Number.isNaN(sMs)) { const sb = sMs - (sMs % stepMs); if (first === undefined || sb < first) first = sb }
+  if (!Number.isNaN(eMs)) { const eb = eMs - (eMs % stepMs); if (last === undefined || eb > last) last = eb }
   if (first === undefined || last === undefined || first > last) return null
   if (!timesMs.every((t) => { const rem = Math.abs((t - first) % stepMs); return rem === 0 || rem < 1000 || Math.abs(rem - stepMs) < 1000 })) return null
   const nBuckets = Math.round((last - first) / stepMs) + 1
   if ((nBuckets <= timesMs.length && !startTime && !endTime) || nBuckets > MAX_DENSE_BUCKETS) return null
-  const grid: string[] = []
-  for (let k = 0; k < nBuckets; k++) grid.push(new Date(first + k * stepMs).toISOString())
-  return grid
+  return Array.from({ length: nBuckets }, (_, k) => new Date(first + k * stepMs).toISOString())
 }
 
-export interface BarSeriesPoint {
-  time: string
-  value: number
-  category?: string | number | null
-}
+export interface BarSeriesPoint { time: string; value: number; category?: string | number | null }
 
 export function densifyBarSeries(
-  time_series: BarSeriesPoint[],
-  intervalSeconds: number | undefined,
-  hasCategories: boolean,
-  startTime?: string | null,
-  endTime?: string | null,
+  time_series: BarSeriesPoint[], intervalSeconds: number | undefined, hasCategories: boolean, startTime?: string | null, endTime?: string | null,
 ): BarSeriesPoint[] {
   const grid = denseTimeGrid(time_series.map((d) => d.time), intervalSeconds, startTime, endTime)
   if (!grid) return time_series
@@ -393,25 +289,17 @@ export function densifyBarSeries(
       if (!seen.has(cat)) { seen.add(cat); categories.push(cat) }
       byKey.set(`${ms}|${cat}`, d.value)
     }
-    const out: BarSeriesPoint[] = []
-    for (const iso of grid) {
+    return grid.flatMap((iso) => {
       const ms = parseUtcMs(iso)
-      for (const cat of categories) out.push({ time: iso, value: byKey.get(`${ms}|${cat}`) ?? 0, category: cat })
-    }
-    return out
+      return categories.map((cat) => ({ time: iso, value: byKey.get(`${ms}|${cat}`) ?? 0, category: cat }))
+    })
   }
   const byMs = new Map<number, number>()
-  for (const d of time_series) {
-    const ms = parseUtcMs(d.time)
-    if (!Number.isNaN(ms)) byMs.set(ms, d.value)
-  }
+  for (const d of time_series) { const ms = parseUtcMs(d.time); if (!Number.isNaN(ms)) byMs.set(ms, d.value) }
   return grid.map((iso) => ({ time: iso, value: byMs.get(parseUtcMs(iso)) ?? 0 }))
 }
 
-export const CHART_COLORS = {
-  success: '#10b981', danger: '#ef4444', warning: '#f59e0b', info: '#3b82f6', neutral: '#94a3b8',
-} as const
-
+export const CHART_COLORS = { success: '#10b981', danger: '#ef4444', warning: '#f59e0b', info: '#3b82f6', neutral: '#94a3b8' } as const
 export function statusHex(code: number): string {
   return code >= 500 ? CHART_COLORS.danger : code >= 400 ? CHART_COLORS.warning : code >= 300 ? CHART_COLORS.info : CHART_COLORS.success
 }
@@ -424,9 +312,7 @@ export function denseBarTrace<R>(opts: {
   const present: string[] = [], byMs = new Map<number, number>()
   for (const r of rows) {
     const t = getTime(r)
-    if (t == null) continue
-    present.push(t)
-    byMs.set(Date.parse(t), getValue(r) ?? 0)
+    if (t != null) { present.push(t); byMs.set(Date.parse(t), getValue(r) ?? 0) }
   }
   const x = grid ?? denseTimeGrid(present, intervalSeconds) ?? present
   return {
@@ -446,38 +332,21 @@ export function lineTrace(opts: {
   }
 }
 
-export function secondaryYAxis(
-  title: string,
-  extra: { ticksuffix?: string; rangemode?: 'tozero' | 'normal' | 'nonnegative'; showgrid?: boolean } = {},
-) {
+export function secondaryYAxis(title: string, extra: { ticksuffix?: string; rangemode?: 'tozero' | 'normal' | 'nonnegative'; showgrid?: boolean } = {}) {
   return { title, overlaying: 'y' as const, side: 'right' as const, showgrid: false, rangemode: 'tozero' as const, ...extra }
 }
 
-export function withSecondaryAxis<L extends { margin?: { r?: number } }>(
-  layout: L, title: string, extra?: Parameters<typeof secondaryYAxis>[1],
-) {
+export function withSecondaryAxis<L extends { margin?: { r?: number } }>(layout: L, title: string, extra?: Parameters<typeof secondaryYAxis>[1]) {
   return { ...layout, yaxis2: secondaryYAxis(title, extra), margin: { ...layout.margin, r: 50 } }
 }
 
-export interface TimeseriesDataPoint {
-  time?: string | null
-  ts?: string | null
-}
-
+export interface TimeseriesDataPoint { time?: string | null; ts?: string | null }
 interface TraceConfig {
-  key: string
-  name: string
-  color: string
-  stackgroup?: string
-  fill?: 'none' | 'tozeroy' | 'tonexty' | 'toself'
-  type?: 'scatter' | 'bar'
+  key: string; name: string; color: string; stackgroup?: string
+  fill?: 'none' | 'tozeroy' | 'tonexty' | 'toself'; type?: 'scatter' | 'bar'
 }
 
-export function useTimeseriesToTraces(
-  data: readonly TimeseriesDataPoint[] | undefined,
-  configs: TraceConfig[],
-  timezone?: string,
-): PlotlyTrace[] {
+export function useTimeseriesToTraces(data: readonly TimeseriesDataPoint[] | undefined, configs: TraceConfig[], timezone?: string): PlotlyTrace[] {
   return useMemo((): PlotlyTrace[] => {
     if (!data?.length) return []
     const sortedData = [...data].filter((d) => d && (d.time || d.ts)).sort((a, b) => (a.time || a.ts || '').localeCompare(b.time || b.ts || ''))
@@ -486,8 +355,7 @@ export function useTimeseriesToTraces(
       return timezone ? formatDate(t, timezone, 'yyyy-MM-dd HH:mm:ss') : t
     })
     return configs.map((config) => {
-      const yValues = sortedData.map((d) => Number((d as Record<string, unknown>)[config.key]) || 0)
-      const isBar = config.type === 'bar'
+      const yValues = sortedData.map((d) => Number((d as Record<string, unknown>)[config.key]) || 0), isBar = config.type === 'bar'
       return {
         x: xValues, y: yValues, name: config.name, type: config.type || 'scatter', fill: config.fill || 'tozeroy',
         ...(isBar ? { marker: { color: config.color } } : { mode: 'lines' as const, line: { width: 1.5, color: config.color } }),
@@ -498,12 +366,8 @@ export function useTimeseriesToTraces(
 }
 
 export function downloadBlob(blob: Blob, filename: string) {
-  const url = window.URL.createObjectURL(blob)
-  const a = Object.assign(document.createElement('a'), { href: url, download: filename })
-  document.body.appendChild(a)
-  a.click()
-  document.body.removeChild(a)
-  window.URL.revokeObjectURL(url)
+  const url = window.URL.createObjectURL(blob), a = Object.assign(document.createElement('a'), { href: url, download: filename })
+  document.body.appendChild(a); a.click(); document.body.removeChild(a); window.URL.revokeObjectURL(url)
 }
 
 export function downloadAsCsv(rows: Record<string, unknown>[], columns: string[], filename: string) {
@@ -532,20 +396,10 @@ export function keyByOccurrence<T>(items: readonly T[], label: (item: T) => stri
 export function recordOrNull<T extends object>(v: T | null | undefined): T | null {
   return typeof v === 'object' && v !== null && !Array.isArray(v) ? (v as T) : null
 }
-
-export function arrayOrEmpty<T>(v: readonly T[] | null | undefined): T[] {
-  return Array.isArray(v) ? [...v] : []
-}
-
-export function oneOf<T extends string>(allowed: readonly T[], value: string | null | undefined): T | undefined {
-  return allowed.find((a) => a === value)
-}
-
+export function arrayOrEmpty<T>(v: readonly T[] | null | undefined): T[] { return Array.isArray(v) ? [...v] : [] }
+export function oneOf<T extends string>(allowed: readonly T[], value: string | null | undefined): T | undefined { return allowed.find((a) => a === value) }
 export const IP_FAMILY_FIELDS = ['ip', 'client_ip', 'ip_address', 'remote_addr'] as const
-
-export function isIpFamilyField(column: string): boolean {
-  return (IP_FAMILY_FIELDS as readonly string[]).includes(column)
-}
+export function isIpFamilyField(column: string): boolean { return (IP_FAMILY_FIELDS as readonly string[]).includes(column) }
 
 export const ACTIVE_SERVICE_COOKIE = 'fla.activeServiceId'
 export const DEBUG_RESPONSES_COOKIE = 'fla.debugResponses'
@@ -558,8 +412,7 @@ export function setActiveServiceCookie(serviceId: string | null) {
 }
 
 export function buildServiceHref(path: string, serviceId: string | null | undefined): string {
-  if (!serviceId) return path
-  return `${path}${path.includes('?') ? '&' : '?'}service=${encodeURIComponent(serviceId)}`
+  return serviceId ? `${path}${path.includes('?') ? '&' : '?'}service=${encodeURIComponent(serviceId)}` : path
 }
 
 export function buildStreamDetailUrl(token: string, serviceId?: string | null): string {
@@ -586,7 +439,6 @@ export const panelDialogFooter = 'px-6 py-4 border-t bg-muted/10 shrink-0'
 
 export const ACTIVE_WINDOW_MS = 120_000
 const MOUSE_THROTTLE_MS = 1_000
-
 let lastInteractionAt = typeof window !== 'undefined' ? Date.now() : 0
 let lastThrottledBump = 0
 let listenersAttached = false
@@ -595,8 +447,7 @@ function bump() { lastInteractionAt = Date.now() }
 function bumpThrottled() {
   const now = Date.now()
   if (now - lastThrottledBump < MOUSE_THROTTLE_MS) return
-  lastThrottledBump = now
-  lastInteractionAt = now
+  lastThrottledBump = lastInteractionAt = now
 }
 
 function ensureListeners() {
@@ -622,10 +473,7 @@ export function isUserActive(windowMs: number = ACTIVE_WINDOW_MS): boolean {
   return Date.now() - lastInteractionAt < windowMs
 }
 
-export function __resetForTests(at: number = 0): void {
-  lastInteractionAt = at
-  lastThrottledBump = 0
-}
+export function __resetForTests(at: number = 0): void { lastInteractionAt = at; lastThrottledBump = 0 }
 
 export const INTERVALS = [
   { label: '1s', value: '1 second' }, { label: '1m', value: '1 minute' },
@@ -633,40 +481,27 @@ export const INTERVALS = [
 ] as const
 
 export type ChartInterval = typeof INTERVALS[number]['value']
-
-export const INTERVAL_SECONDS: Record<ChartInterval, number> = {
-  '1 second': 1, '1 minute': 60, '1 hour': 3600, '1 day': 86400,
-}
-
+export const INTERVAL_SECONDS: Record<ChartInterval, number> = { '1 second': 1, '1 minute': 60, '1 hour': 3600, '1 day': 86400 }
 export const TRENDS = [
-  { label: 'Off', value: 'off' }, { label: 'Auto', value: 'auto' },
-  { label: '1m', value: '1m' }, { label: '5m', value: '5m' },
-  { label: '1h', value: '1h' }, { label: '1d', value: '1d' },
+  { label: 'Off', value: 'off' }, { label: 'Auto', value: 'auto' }, { label: '1m', value: '1m' },
+  { label: '5m', value: '5m' }, { label: '1h', value: '1h' }, { label: '1d', value: '1d' },
 ]
-
 export const SHIELD_MAP: Record<string, string> = {
-  "us-east-1": "iad-va-us", "us-west": "bfi-wa-us", "us-central-1": "chi-il-us",
-  "eu-central-1": "frankfurt-de", "eu-south-1": "mxp-milan-it", "eu-west-1": "mxp-paris-fr",
-  "uk-east-1": "london-uk", "jp-central-1": "nrt-tokyo-jp", "au-east-1": "sydney-au",
+  "us-east-1": "iad-va-us", "us-west": "bfi-wa-us", "us-central-1": "chi-il-us", "eu-central-1": "frankfurt-de",
+  "eu-south-1": "mxp-milan-it", "eu-west-1": "mxp-paris-fr", "uk-east-1": "london-uk", "jp-central-1": "nrt-tokyo-jp", "au-east-1": "sydney-au",
 }
-
 export const REGION_LABELS: Record<string, string> = {
-  "us-east-1": "US East (Ashburn)", "us-west": "US West (Seattle)", "us-central-1": "US Central (Chicago)",
-  "eu-central-1": "EU Central (Frankfurt)", "eu-south-1": "EU South (Milan)", "eu-west-1": "EU West (Paris)",
-  "uk-east-1": "UK East (London)", "jp-central-1": "JP Central (Tokyo)", "au-east-1": "AU East (Sydney)",
+  "us-east-1": "US East (Ashburn)", "us-west": "US West (Seattle)", "us-central-1": "US Central (Chicago)", "eu-central-1": "EU Central (Frankfurt)",
+  "eu-south-1": "EU South (Milan)", "eu-west-1": "EU West (Paris)", "uk-east-1": "UK East (London)", "jp-central-1": "JP Central (Tokyo)", "au-east-1": "AU East (Sydney)",
 }
-
 export const SHIELD_LABELS: Record<string, string> = {
-  none: "None", "iad-va-us": "IAD (Ashburn)", "bfi-wa-us": "BFI (Seattle)", "chi-il-us": "CHI (Chicago)",
-  "frankfurt-de": "FRA (Frankfurt)", "mxp-milan-it": "MXP (Milan)", "mxp-paris-fr": "MXP (Paris)",
-  "london-uk": "LHR (London)", "nrt-tokyo-jp": "NRT (Tokyo)", "sydney-au": "SYD (Sydney)",
+  none: "None", "iad-va-us": "IAD (Ashburn)", "bfi-wa-us": "BFI (Seattle)", "chi-il-us": "CHI (Chicago)", "frankfurt-de": "FRA (Frankfurt)",
+  "mxp-milan-it": "MXP (Milan)", "mxp-paris-fr": "MXP (Paris)", "london-uk": "LHR (London)", "nrt-tokyo-jp": "NRT (Tokyo)", "sydney-au": "SYD (Sydney)",
 }
-
 export const PERIOD_LABELS: Record<string, string> = {
   "1": "1 second", "5": "5 seconds", "10": "10 seconds", "20": "20 seconds", "30": "30 seconds",
   "60": "1 minute", "120": "2 minutes", "300": "5 minutes", "600": "10 minutes", "900": "15 minutes",
 }
-
 export const RETENTION_OPTIONS = [
   { value: "1", label: "1 day" }, { value: "3", label: "3 days" }, { value: "7", label: "7 days" },
   { value: "14", label: "14 days" }, { value: "30", label: "30 days" }, { value: "90", label: "90 days" },
@@ -706,10 +541,10 @@ function mountToastNode(kind: ToastKind, durationMs: number, extraCss: string[] 
   node.setAttribute('role', isAlert ? 'alert' : 'status')
   node.setAttribute('aria-live', isAlert ? 'assertive' : 'polite')
   node.style.cssText = [
-    `background:${palette.bg}`, `color:${palette.fg}`, `border:1px solid ${palette.border}`,
-    'padding:10px 14px', 'border-radius:8px', 'font:13px/1.45 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif',
-    'box-shadow:0 8px 24px rgba(0,0,0,.18)', 'pointer-events:auto', 'transition:opacity .18s ease,transform .18s ease',
-    'opacity:0', 'transform:translateY(-4px)', ...extraCss,
+    `background:${palette.bg};color:${palette.fg};border:1px solid ${palette.border}`,
+    'padding:10px 14px;border-radius:8px;font:13px/1.45 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif',
+    'box-shadow:0 8px 24px rgba(0,0,0,.18);pointer-events:auto;transition:opacity .18s ease,transform .18s ease;opacity:0;transform:translateY(-4px)',
+    ...extraCss,
   ].join(';')
   let dismissed = false
   const dismiss = (): boolean => {
@@ -749,48 +584,31 @@ export function showBusyToast(): void { showToast('Server busy, retrying…', 'i
 export function showToastWithAction(message: string, opts: ToastActionOptions): void {
   if (typeof document === 'undefined') return
   const kind: ToastKind = opts.kind ?? 'info', palette = PALETTE[kind]
-  mountToastNode(kind, opts.durationMs ?? 5500, ['display:flex', 'align-items:center', 'gap:12px'], (node, dismiss) => {
-    const label = document.createElement('span')
-    label.textContent = message
+  mountToastNode(kind, opts.durationMs ?? 5500, ['display:flex;align-items:center;gap:12px'], (node, dismiss) => {
+    const label = Object.assign(document.createElement('span'), { textContent: message })
     label.style.cssText = 'flex:1;min-width:0'
-    node.appendChild(label)
-    const button = document.createElement('button')
-    button.type = 'button'
-    button.textContent = opts.actionLabel
+    const button = Object.assign(document.createElement('button'), { type: 'button', textContent: opts.actionLabel })
     button.style.cssText = `background:transparent;color:${palette.fg};border:1px solid ${palette.fg};border-radius:6px;padding:4px 10px;font:600 12px/1 inherit;cursor:pointer;flex-shrink:0;opacity:.9`
     button.addEventListener('click', (e) => { e.stopPropagation(); if (dismiss()) opts.onAction() })
-    node.appendChild(button)
+    node.append(label, button)
   })
 }
 
 export const DEFAULT_RANGE_TOKEN = '24h'
-
-export interface RangeWireArgs {
-  relativeRange: string | null
-  isAutoRange: boolean
-  startTime: string | null
-  endTime: string | null
-  anchor: string
-}
-
+export interface RangeWireArgs { relativeRange: string | null; isAutoRange: boolean; startTime: string | null; endTime: string | null; anchor: string }
 export interface RangeWire {
-  rangeToken: string | null
-  rangeKey: string
-  rangeBody:
-    | { range_token: string; anchor: string; start_time: string | null; end_time: string | null }
-    | { start_time: string | null; end_time: string | null }
+  rangeToken: string | null; rangeKey: string
+  rangeBody: { range_token: string; anchor: string; start_time: string | null; end_time: string | null } | { start_time: string | null; end_time: string | null }
 }
 
 export function resolveRangeWire({ relativeRange, isAutoRange, startTime, endTime, anchor }: RangeWireArgs): RangeWire {
   const rangeToken = relativeRange ?? (isAutoRange ? DEFAULT_RANGE_TOKEN : null)
-  if (rangeToken !== null) {
-    return { rangeToken, rangeKey: rangeToken, rangeBody: { range_token: rangeToken, anchor, start_time: startTime, end_time: endTime } }
-  }
-  return { rangeToken: null, rangeKey: `abs:${startTime ?? ''}|${endTime ?? ''}`, rangeBody: { start_time: startTime, end_time: endTime } }
+  return rangeToken !== null
+    ? { rangeToken, rangeKey: rangeToken, rangeBody: { range_token: rangeToken, anchor, start_time: startTime, end_time: endTime } }
+    : { rangeToken: null, rangeKey: `abs:${startTime ?? ''}|${endTime ?? ''}`, rangeBody: { start_time: startTime, end_time: endTime } }
 }
 
 export const ANCHOR_QUANTUM_SECONDS = 60
-
 export function quantizeAnchor(iso?: string | null, now: Date = new Date()): string {
   const parsed = iso ? Date.parse(iso) : NaN
   const epoch = Math.floor((Number.isFinite(parsed) ? parsed : now.getTime()) / 1000)
@@ -803,8 +621,7 @@ export function rangeLabelToHours(label: string): number | null {
   const m = /^(\d+)([mhd])$/.exec(label)
   if (!m) return null
   const n = parseInt(m[1], 10)
-  if (!Number.isFinite(n) || n <= 0) return null
-  return m[2] === 'm' ? n / 60 : m[2] === 'd' ? n * 24 : n
+  return !Number.isFinite(n) || n <= 0 ? null : m[2] === 'm' ? n / 60 : m[2] === 'd' ? n * 24 : n
 }
 
 export function hydrateFilterStoreFromUrl(): void {
@@ -812,24 +629,18 @@ export function hydrateFilterStoreFromUrl(): void {
   hydrated = true
   const params = new URLSearchParams(window.location.search)
   const qsRange = params.get('range'), qsStart = params.get('start_time'), qsEnd = params.get('end_time'), qsFilters = params.get('filters')
-  const store = useFilterStore.getState()
-  const rangeHours = qsRange ? rangeLabelToHours(qsRange) : null
-  let touchedRange = false
+  const store = useFilterStore.getState(), rangeHours = qsRange ? rangeLabelToHours(qsRange) : null
+  let touchedRange = false, touchedFilters = false
   if (qsRange && rangeHours !== null) {
     const now = new Date()
     store.setRelativeRange(qsRange, subHours(now, rangeHours).toISOString(), now.toISOString())
     touchedRange = true
-  } else if (qsStart && qsEnd) {
-    store.setRange(qsStart, qsEnd)
-    touchedRange = true
-  }
-  let touchedFilters = false
+  } else if (qsStart && qsEnd) { store.setRange(qsStart, qsEnd); touchedRange = true }
   if (qsFilters) {
     try {
       const parsed = JSON.parse(qsFilters) as FiltersPayload
       if (parsed && typeof parsed === 'object') {
-        store.clearFilters()
-        touchedFilters = true
+        store.clearFilters(); touchedFilters = true
         for (const [rawCol, spec] of Object.entries(parsed)) {
           if (!spec || !Array.isArray(spec.values)) continue
           const col = rawCol.replace(/_\d+$/, '')
@@ -842,7 +653,7 @@ export function hydrateFilterStoreFromUrl(): void {
     let cleared = false
     params.forEach((value, key) => {
       if (!key.startsWith('filter_')) return
-      if (!cleared) { store.clearFilters(); cleared = true; touchedFilters = true }
+      if (!cleared) { store.clearFilters(); cleared = touchedFilters = true }
       store.addFilter(key.substring('filter_'.length).replace(/_\d+$/, ''), value, 'include')
     })
   }
@@ -857,11 +668,7 @@ export function hydrateFilterStoreFromUrl(): void {
 export function _resetUrlHydrationFlag(): void { hydrated = false }
 
 interface InsightSection { key: string; label: string; description: string; icon: LucideIcon }
-
-const ALL_SECTION: InsightSection = {
-  key: 'all', label: 'All Categories', description: 'All automated insights and detected anomalies across every category.', icon: LayoutGrid,
-}
-
+const ALL_SECTION: InsightSection = { key: 'all', label: 'All Categories', description: 'All automated insights and detected anomalies across every category.', icon: LayoutGrid }
 export const INSIGHT_SECTIONS: readonly InsightSection[] = [
   { key: 'security', label: 'Security & Threat Detection', description: 'Suspicious signatures, scanning, spoofing, proxy/abuse, and WAF activity.', icon: ShieldAlert },
   { key: 'origin', label: 'Origin Health & Stability', description: 'Origin 5xx, latency/timeouts, retries, per-IP failures, and the shield path.', icon: ServerCrash },
@@ -871,12 +678,9 @@ export const INSIGHT_SECTIONS: readonly InsightSection[] = [
 ] as const
 
 export const SECTION_LOADING_MESSAGES: Record<string, string> = {
-  all: 'Evaluating detector baseline comparisons…',
-  security: 'Analyzing security signatures & JA3 patterns…',
-  origin: 'Evaluating origin 5xx errors & latency shifts…',
-  edge: 'Measuring cache collapse & delivery performance…',
-  network: 'Checking ISP latency & routing packet loss…',
-  traffic: 'Scanning traffic surges & botnet clustering…',
+  all: 'Evaluating detector baseline comparisons…', security: 'Analyzing security signatures & JA3 patterns…',
+  origin: 'Evaluating origin 5xx errors & latency shifts…', edge: 'Measuring cache collapse & delivery performance…',
+  network: 'Checking ISP latency & routing packet loss…', traffic: 'Scanning traffic surges & botnet clustering…',
   other: 'Evaluating anomaly detector results…',
 }
 
@@ -886,19 +690,12 @@ export function normalizeTabKey(tab: string | null | undefined): string {
   return lower === 'performance' ? 'edge' : lower === 'routing' ? 'network' : lower
 }
 
-export const OTHER_SECTION: InsightSection = {
-  key: 'other', label: 'Other', description: 'Insights not yet assigned to a section.', icon: LayoutGrid,
-}
-
+export const OTHER_SECTION: InsightSection = { key: 'other', label: 'Other', description: 'Insights not yet assigned to a section.', icon: LayoutGrid }
 const SECTION_BY_KEY = new Map<string, InsightSection>(INSIGHT_SECTIONS.map((s) => [s.key, s]))
-
-export function categoryToSection(category: string | null | undefined): InsightSection {
-  return (category && SECTION_BY_KEY.get(category)) || OTHER_SECTION
-}
+export function categoryToSection(category: string | null | undefined): InsightSection { return (category && SECTION_BY_KEY.get(category)) || OTHER_SECTION }
 
 const SEVERITY_ORDER = ['critical', 'error', 'warning', 'info', 'clean'] as const
 const SEVERITY_RANK: Record<string, number> = Object.fromEntries(SEVERITY_ORDER.map((sev, i) => [sev, i]))
-
 export interface SectionableInsight { category?: string | null; severity?: string | null; title?: string | null }
 
 export function sortInsights<T extends SectionableInsight>(cards: readonly T[]): T[] {
@@ -909,7 +706,6 @@ export function sortInsights<T extends SectionableInsight>(cards: readonly T[]):
 }
 
 export interface SeveritySummary { severity: string; count: number }
-
 export function summarizeSeverities(cards: readonly SectionableInsight[]): SeveritySummary[] {
   const counts = new Map<string, number>()
   for (const card of cards) {
@@ -922,17 +718,13 @@ export function summarizeSeverities(cards: readonly SectionableInsight[]): Sever
 }
 
 export interface InsightSectionGroup<T> { section: InsightSection; cards: T[] }
-
 export function groupInsightsBySection<T extends SectionableInsight>(
-  cards: readonly T[],
-  options?: { includeAll?: boolean; includeEmptySections?: boolean },
+  cards: readonly T[], options?: { includeAll?: boolean; includeEmptySections?: boolean },
 ): InsightSectionGroup<T>[] {
   const buckets = new Map<string, T[]>()
   for (const card of cards) {
-    const key = categoryToSection(card.category).key
-    const bucket = buckets.get(key)
-    if (bucket) bucket.push(card)
-    else buckets.set(key, [card])
+    const key = categoryToSection(card.category).key, bucket = buckets.get(key)
+    if (bucket) bucket.push(card); else buckets.set(key, [card])
   }
   const groups: InsightSectionGroup<T>[] = options?.includeAll ? [{ section: ALL_SECTION, cards: sortInsights(cards) }] : []
   for (const section of [...INSIGHT_SECTIONS, OTHER_SECTION]) {
@@ -947,18 +739,9 @@ type Aggregates = Partial<Pick<components['schemas']['AggregatesResponse'], 'met
 type Catalog = { fields?: Pick<components['schemas']['LogFieldCatalogEntry'], 'id' | 'label' | 'unit' | 'precision'>[] | null }
 
 export interface BuildTrafficDataParams {
-  aggregates: Aggregates | null | undefined
-  compareAggregates: Aggregates | null | undefined
-  compareMode: boolean
-  compareStartTime: string | null | undefined
-  startTime: string | null
-  endTime: string | null
-  trend: string
-  timezone: string
-  metric: string
-  effectiveInterval: string
-  hiddenCategories: ReadonlySet<string>
-  catalog: Catalog | null | undefined
+  aggregates: Aggregates | null | undefined; compareAggregates: Aggregates | null | undefined; compareMode: boolean
+  compareStartTime: string | null | undefined; startTime: string | null; endTime: string | null; trend: string
+  timezone: string; metric: string; effectiveInterval: string; hiddenCategories: ReadonlySet<string>; catalog: Catalog | null | undefined
 }
 
 export function getIntervalSeconds(intervalStr?: string | null): number | undefined {
@@ -966,11 +749,9 @@ export function getIntervalSeconds(intervalStr?: string | null): number | undefi
   const str = intervalStr.trim().toLowerCase()
   if (INTERVAL_SECONDS[str as keyof typeof INTERVAL_SECONDS] !== undefined) return INTERVAL_SECONDS[str as keyof typeof INTERVAL_SECONDS]
   const match = str.match(/^(?:(\d+)\s*)?(s|sec|second|seconds|m|min|minute|minutes|h|hr|hour|hours|d|day|days)$/)
-  if (match) {
-    const num = match[1] ? parseInt(match[1], 10) : 1, u = match[2][0]
-    return u === 's' ? num : u === 'm' ? num * 60 : u === 'h' ? num * 3600 : num * 86400
-  }
-  return undefined
+  if (!match) return undefined
+  const num = match[1] ? parseInt(match[1], 10) : 1, u = match[2][0]
+  return u === 's' ? num : u === 'm' ? num * 60 : u === 'h' ? num * 3600 : num * 86400
 }
 
 export function buildTrafficData({
@@ -979,13 +760,11 @@ export function buildTrafficData({
 }: BuildTrafficDataParams): PlotlyTrace[] {
   const time_series = aggregates?.time_series
   if (!time_series?.length) return []
-  const actualMetric = aggregates?.metric || metric
-  const isBar = actualMetric === 'requests' || actualMetric === '5xx' || actualMetric === '4xx'
+  const actualMetric = aggregates?.metric || metric, isBar = actualMetric === 'requests' || actualMetric === '5xx' || actualMetric === '4xx'
   const metricField = catalog?.fields?.find((f) => f.id === actualMetric)
   const unit = metricField?.unit || '', precision = metricField?.precision ?? (actualMetric === 'requests' ? 0 : 1)
   const getHoverTemplate = (_m: string, label?: string) => `${label ? `${label}: ` : ''}%{y:${precision > 0 ? `.${precision}f` : ','}}${unit}<extra></extra>`
-  const hasCategories = time_series.some((d) => d.category != null)
-  const actualInterval = aggregates?.interval || effectiveInterval
+  const hasCategories = time_series.some((d) => d.category != null), actualInterval = aggregates?.interval || effectiveInterval
   const intervalSeconds = getIntervalSeconds(actualInterval)
   const barSeries: BarSeriesPoint[] = isBar ? densifyBarSeries(time_series, intervalSeconds, hasCategories, startTime, endTime) : time_series
   let tsXValues: string[] | null = null
@@ -1013,10 +792,8 @@ export function buildTrafficData({
     traces = [{
       x: xValues, y: barSeries.map((d) => d.value),
       type: isBar ? 'bar' : 'scatter', width: isBar && intervalSeconds ? intervalSeconds * 1000 * 0.9 : undefined,
-      mode: isBar ? undefined : 'lines+markers',
-      name: compareMode ? 'Primary Range' : (metricField?.label || actualMetric),
-      showlegend: compareMode,
-      hovertemplate: getHoverTemplate(actualMetric, compareMode ? 'Primary' : undefined),
+      mode: isBar ? undefined : 'lines+markers', name: compareMode ? 'Primary Range' : (metricField?.label || actualMetric),
+      showlegend: compareMode, hovertemplate: getHoverTemplate(actualMetric, compareMode ? 'Primary' : undefined),
       marker: { color: CHART_COLORS.info },
     }]
   }
@@ -1024,18 +801,14 @@ export function buildTrafficData({
     const shift = new Date(startTime).getTime() - new Date(compareStartTime).getTime()
     traces.push({
       x: compareAggregates.time_series.map((d) => formatDate(new Date(toUTCDate(d.time).getTime() + shift).toISOString(), timezone, "yyyy-MM-dd HH:mm:ss")),
-      y: compareAggregates.time_series.map((d) => d.value),
-      type: 'scatter', mode: 'lines', name: 'Comparison Range',
-      line: { color: '#f97316', dash: 'dash', width: 2 },
-      hovertemplate: getHoverTemplate(actualMetric, 'Comparison'),
+      y: compareAggregates.time_series.map((d) => d.value), type: 'scatter', mode: 'lines', name: 'Comparison Range',
+      line: { color: '#f97316', dash: 'dash', width: 2 }, hovertemplate: getHoverTemplate(actualMetric, 'Comparison'),
     })
   }
   if (!hasCategories && time_series.some((d) => d.baseline != null)) {
     traces.push({
-      x: getTsXValues(), y: time_series.map((d) => d.baseline),
-      type: 'scatter', mode: 'lines', name: 'Baseline (7d prior)',
-      hovertemplate: getHoverTemplate(actualMetric, 'Baseline'),
-      line: { color: '#a1a1aa', dash: 'dot', width: 2 },
+      x: getTsXValues(), y: time_series.map((d) => d.baseline), type: 'scatter', mode: 'lines', name: 'Baseline (7d prior)',
+      hovertemplate: getHoverTemplate(actualMetric, 'Baseline'), line: { color: '#a1a1aa', dash: 'dot', width: 2 },
     })
   }
   if (!hasCategories && trend !== 'off') {
@@ -1059,10 +832,8 @@ export function buildTrafficData({
         }
       }
       traces.push({
-        x: xValues, y: trendY, type: 'scatter', mode: 'lines',
-        name: `${trend === 'auto' ? 'Auto ' : ''}Trend`,
-        hovertemplate: getHoverTemplate(actualMetric),
-        line: { color: '#f97316', width: 3 },
+        x: xValues, y: trendY, type: 'scatter', mode: 'lines', name: `${trend === 'auto' ? 'Auto ' : ''}Trend`,
+        hovertemplate: getHoverTemplate(actualMetric), line: { color: '#f97316', width: 3 },
       })
     }
   }
@@ -1073,12 +844,10 @@ export const WINDOW_OPTIONS = [
   { label: 'Last 15 Minutes', value: '0.25' }, { label: 'Last 1 Hour', value: '1' },
   { label: 'Last 4 Hours', value: '4' }, { label: 'Last 24 Hours', value: '24' },
 ]
-
 export const BASELINE_OPTIONS = [
   { label: 'Previous 1 Hour', value: '1' }, { label: 'Last 24 Hours', value: '24' },
   { label: 'Last 7 Days', value: '168' }, { label: 'Last 30 Days', value: '720' },
 ]
-
 const STATIC_DEFAULT = { window: '24', baseline: '168' } as const
 
 export function historyHoursFromExtents(earliest: string | null | undefined, now: number = Date.now()): number | null {

@@ -1,448 +1,278 @@
-"""Unit tests for the opaque AES-GCM session-reference token codec.
-
-Pins the seal/open round-trip and — critically — that a tampered, wrong-service,
-or wrong-key token is rejected (raises ``SessionTokenError``) rather than
-silently decoding to attacker-chosen values. The detail endpoint relies on this:
-an opaque token that an analyst can't forge or invert is what lets a PII-masking
-analyst drill into a session without ever holding the real IP.
-"""
+"""Unit tests for core models, session tokens, CID salts, locks, reset, dir stats, custom fields, and VCL."""
 
 from __future__ import annotations
 
 import ast
+import contextlib
 import copy
+import fcntl
 import gzip
 import inspect
 import io
 import json
 import logging
 import os
+import pathlib
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import backend.provision.declarative.generators as gen
+import backend.routers.services.core as sc
+import backend.utils.vcl_safety as vs
 import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from backend.core.fastly.rum_provisioning import RUM_ASSET_FETCH_NAME, generate_rum_asset_fetch_vcl
+from backend.core.field_registry import BY_CODE, BY_GROUP, REGISTRY, LogField
+from backend.core.iceberg.view import _get_service_lock
+from backend.core.reset import _pause_rum_flags, _restore_rum_flags
 from backend.core.session_token import SessionTokenError, open_session_token, seal_session_token
 from backend.models.services import CustomFieldCreate, CustomFieldUpdate
-from backend.provision.cmcd_fields import get_cmcd_fields
+from backend.provision.cmcd_fields import (
+    _CMCD_CUSTOM_FIELDS,
+    _CMCD_FIELD_NAMES,
+    get_cmcd_fields,
+    reconcile_cmcd_custom_fields,
+)
+from backend.provision.declarative.generators import generate_consolidated_snippet
+from backend.provision.declarative.state import CmcdConfig, FeatureState, LogFieldsConfig
+from backend.provision.session_scoring_vcl import DEFAULT_ASSET_EXT_REGEX, recv_snippet, resolve_exclude_url_regex
+from backend.provision.utils import (
+    ANALYTICS_LOG_LAYOUT,
+    VclBuilder,
+    analytics_log_path,
+    draft_version,
+    minute_list_prefix,
+    rollback_to_version,
+    rum_log_path,
+    rum_minute_list_prefix,
+)
 from backend.repositories.utils.filters import build_where_clause
+from backend.services import service_manager as sm
 from backend.utils.bounded_cache import CacheRegistry
+from backend.utils.sql_validator import escape_sql_literal
+from backend.utils.vcl_safety import LintResult, VclSafetyError, validate_log_format_macro, validate_quoted_literal
+from backend.utils.vcl_utils import lint_log_format, log_format_to_vcl_log
+from backend.utils.vcl_validator import (
+    MAX_REGEX_BYTES,
+    RegexValidationError,
+    lint_vcl,
+    validate_recv_exclusion_regex_with_lint,
+    validate_url_exclusion_regex,
+)
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from hypothesis import HealthCheck, assume, given, settings
 from hypothesis import strategies as st
 
+import backend.provision.fastly_api as fa
+from backend import config
 from backend import config as svcconfig
+from backend.config import is_rum_enabled, path_within_dir
 from backend.core import duckdb as _bk_duckdb
-from backend.core import iceberg
+from backend.core import field_registry as fr
+from backend.core import iceberg, quarantine
 from backend.core import ingest as _bk_ingest
+from backend.core import log_fields as lf
+from backend.core import reset as reset_mod
 from backend.core import session_token as _st_mod
+from backend.core.duckdb import ensure_cid_salt, get_or_generate_cid_salt
 from backend.core.iceberg import _core as _iceberg_core
 from backend.core.ingest import get_catalog_field_ids, get_ingest_type_hints
 from backend.core.log_fields import (
     _BUILTIN_FIELD_NAMES,
     _DUCKDB_RESERVED,
+    DEFAULT_OFF_FIELD_IDS,
+    INSIGHT_DEFINITIONS,
+    LOG_FIELD_CATALOG,
+    PRESETS,
     check_log_line_budget,
     estimate_log_line_bytes,
     generate_log_format,
     get_catalog_for_api,
+    get_required_edge_headers,
+    resolve_enabled_fields,
     validate_custom_field,
 )
+from backend.core.metadata.base import get_con
+from backend.core.rollups._common import quote_path_list
+from backend.main import app as _fastapi_app
 from backend.models.common import FilterSpec
+from backend.provision import cmcd_fields as orch
+from backend.provision import generate_capture_vcl
+from backend.provision.fastly_api import (
+    SESSION_COOKIE_ALLOWLIST,
+    _session_cookie_hash_vcl,
+    delete_remote_frontend,
+    deploy_remote_frontend,
+)
 from backend.provision.session_scoring_orchestrator import _SCORING_CUSTOM_FIELDS
 from backend.repositories._base import _safe_table
 from backend.routers import services
 from backend.routers.services import core as services_core_router
+from backend.utils import sql_validator as sql_ident
+from tests.conftest import MOCK_SERVICE_ID
 
 
 # ── Merged from tests/core/test_common_models.py ──
-def test_build_where_clause_basic():
-    """Test basic date range filtering and partition pruning."""
-    start = "2024-01-01T00:00:00Z"
-    end = "2024-01-02T00:00:00Z"
-    filters = {}
+def test_build_where_clause_basic_and_modes():
+    start, end = "2024-01-01T00:00:00Z", "2024-01-02T00:00:00Z"
+    params, sql = build_where_clause(start, end, {}, inline_params=False, partition_pruning=True)
+    assert "timestamp >=" in sql and "timestamp <=" in sql
+    assert len(params) == 6 and params[0] == start and params[3] == end
 
-    params, sql = build_where_clause(start, end, filters, inline_params=False, partition_pruning=True)
-
-    assert "timestamp >=" in sql
-    assert "timestamp <=" in sql
-    # Params now includes original start/end times plus derived `dt` and `hour` partition values for start and end
-    assert len(params) == 6
-    assert params[0] == start
-    assert params[3] == end
-
-
-def test_build_where_clause_filters():
-    """Test include and exclude filters."""
     filters = {
         "status": FilterSpec(mode="include", values=[200, 404]),
         "country": FilterSpec(mode="exclude", values=["US"]),
     }
-
     params, sql = build_where_clause(None, None, filters, inline_params=False)
+    assert "(CAST(status AS VARCHAR) IN (?, ?))" in sql and "(country NOT IN (?))" in sql
+    assert "200" in params and "404" in params and "US" in params
 
-    # IN-clause uses CAST(col AS VARCHAR) + stringified params defensively
-    # so mixed-type filter values don't crash. See
-    # test_aggregates_timeseries_properties for the original property-
-    # test failure that surfaced this.
-    assert "(CAST(status AS VARCHAR) IN (?, ?))" in sql
-    # Numeric params get stringified for the IN-clause comparison
-    assert "200" in params
-    assert "404" in params
+    params_in, sql_in = build_where_clause(None, None, filters, inline_params=True)
+    assert params_in == []
+    assert "(CAST(status AS VARCHAR) IN ('200', '404'))" in sql_in and "(country NOT IN ('US'))" in sql_in
 
-    # Check exclude parameter (country is already VARCHAR in the registry, so CAST is bypassed for performance)
-    assert "(country NOT IN (?))" in sql
-    assert "US" in params
-
-
-def test_build_where_clause_inline():
-    """Test inline parameterization (used for temporary tables)."""
-    filters = {
-        "status": FilterSpec(mode="include", values=[200, 404]),
-        "country": FilterSpec(mode="exclude", values=["US"]),
-    }
-
-    params, sql = build_where_clause(None, None, filters, inline_params=True)
-
-    assert len(params) == 0  # No parameterized query arguments
-    # CAST AS VARCHAR + stringified literals matches the behaviour of
-    # the wildcard branch and makes mixed-type filter values safe.
-    assert "(CAST(status AS VARCHAR) IN ('200', '404'))" in sql
-    assert "(country NOT IN ('US'))" in sql
-
-
-def test_build_where_clause_excludes_rum_beacons():
-    """Test that /rum-beacon is unconditionally excluded when url is present in actual_cols."""
-    params, sql = build_where_clause(None, None, {}, actual_cols=["url"])
-    assert "url != '/rum-beacon' AND url NOT LIKE '/rum-beacon' || chr(63) || '%'" in sql
-
-    # If url is not present, no exclusion should be added
-    params, sql = build_where_clause(None, None, {}, actual_cols=["ip"])
-    assert "url != '/rum-beacon'" not in sql
+    _, sql_url = build_where_clause(None, None, {}, actual_cols=["url"])
+    assert "url != '/rum-beacon' AND url NOT LIKE '/rum-beacon' || chr(63) || '%'" in sql_url
+    _, sql_ip = build_where_clause(None, None, {}, actual_cols=["ip"])
+    assert "url != '/rum-beacon'" not in sql_ip
 
 
 class TestBuildWhereClauseExtended:
-    def test_no_args_returns_passthrough(self):
-        params, sql = build_where_clause(None, None, {})
-        assert sql == "1=1"
-        assert params == []
-
-    def test_filter_prefix_stripped(self):
-        # The frontend sometimes sends "filter_country" or "xfilter_country"
-        filters = {"filter_country": FilterSpec(mode="include", values=["US"])}
-        _, sql = build_where_clause(None, None, filters)
-        assert "country" in sql
-        assert "filter_country" not in sql
-
-    def test_xfilter_prefix_stripped(self):
-        filters = {"xfilter_country": FilterSpec(mode="exclude", values=["US"])}
-        _, sql = build_where_clause(None, None, filters)
-        # Since country is VARCHAR in the registry, it is NOT wrapped in CAST defensively
-        assert "country NOT IN" in sql
-
-    def test_numeric_suffix_stripped(self):
-        # Frontend appends _2, _3 for duplicate filter keys
-        filters = {"country_2": FilterSpec(mode="include", values=["DE"])}
-        _, sql = build_where_clause(None, None, filters)
-        assert "country" in sql
-        assert "country_2" not in sql
-
-    def test_wildcard_include(self):
-        filters = {"url": FilterSpec(mode="include", values=["/api/*"])}
-        _, sql = build_where_clause(None, None, filters, inline_params=True)
-        assert "ILIKE '/api/%'" in sql
-
-    def test_wildcard_exclude(self):
-        filters = {"url": FilterSpec(mode="exclude", values=["/health*"])}
-        _, sql = build_where_clause(None, None, filters, inline_params=True)
-        assert "NOT ILIKE '/health%'" in sql
-
-    def test_mixed_exact_and_wildcard(self):
-        filters = {"url": FilterSpec(mode="include", values=["/api", "/static/*"])}
-        _, sql = build_where_clause(None, None, filters, inline_params=True)
-        assert "IN ('/api')" in sql
-        assert "ILIKE '/static/%'" in sql
-
-    def test_null_value_in_include(self):
-        filters = {"country": FilterSpec(mode="include", values=[None])}
-        _, sql = build_where_clause(None, None, filters)
-        assert "IS NULL" in sql
-
-    def test_null_value_in_exclude(self):
-        filters = {"country": FilterSpec(mode="exclude", values=[None])}
-        _, sql = build_where_clause(None, None, filters)
-        assert "IS NOT NULL" in sql
-
-    def test_null_mixed_with_values(self):
-        filters = {"country": FilterSpec(mode="include", values=["US", None])}
-        _, sql = build_where_clause(None, None, filters)
-        assert "IN" in sql
-        assert "IS NULL" in sql
-
-    def test_empty_values_list_skipped(self):
-        filters = {"country": FilterSpec(mode="include", values=[])}
+    @pytest.mark.parametrize(
+        "filters",
+        [
+            {},
+            {"country": FilterSpec(mode="include", values=[])},
+            {"country": FilterSpec(mode="include", values=["", "   "])},
+        ],
+    )
+    def test_passthrough_cases(self, filters):
         params, sql = build_where_clause(None, None, filters)
-        assert sql == "1=1"
+        assert sql == "1=1" and params == []
 
-    def test_empty_string_values_stripped_defensively(self):
-        """Filter values that are empty / whitespace-only must NOT
-        reach the IN-clause builder. Pinned because losing this
-        produced ``WHERE ("status" IN (''))`` against an INTEGER
-        column and crashed with "Could not convert string '' to
-        INT32" — surfaced by the hypothesis property tests for
-        get_aggregates. The FE drops empty values before POSTing,
-        but a regression on that side would 500 the dashboard."""
-        filters = {"country": FilterSpec(mode="include", values=["", "   ", "US"])}
-        params, sql = build_where_clause(None, None, filters)
-        # Only "US" survives — placeholder count matches param count
-        assert sql.count("?") == len(params) == 1
-        assert "US" in params
+    @pytest.mark.parametrize(
+        ("key", "mode", "values", "inline", "expected_in", "expected_out"),
+        [
+            ("filter_country", "include", ["US"], False, ["country"], ["filter_country"]),
+            ("xfilter_country", "exclude", ["US"], False, ["country NOT IN"], []),
+            ("country_2", "include", ["DE"], False, ["country"], ["country_2"]),
+            ("url", "include", ["/api/*"], True, ["ILIKE '/api/%'"], []),
+            ("url", "exclude", ["/health*"], True, ["NOT ILIKE '/health%'"], []),
+            ("url", "include", ["/api", "/static/*"], True, ["IN ('/api')", "ILIKE '/static/%'"], []),
+            ("country", "include", [None], False, ["IS NULL"], []),
+            ("country", "exclude", [None], False, ["IS NOT NULL"], []),
+            ("country", "include", ["US", None], False, ["IN", "IS NULL"], []),
+            ("waf_sig_ind", "include", ["XSS"], False, ["list_contains", "waf_sig"], []),
+            ("waf_sig_ind", "exclude", ["SQLi"], False, ["NOT list_contains"], []),
+        ],
+    )
+    def test_filter_expressions(self, key, mode, values, inline, expected_in, expected_out):
+        _, sql = build_where_clause(None, None, {key: FilterSpec(mode=mode, values=values)}, inline_params=inline)
+        assert all(sub in sql for sub in expected_in) and all(sub not in sql for sub in expected_out)
 
-    def test_all_empty_string_values_collapse_to_passthrough(self):
-        """When every value in a filter is empty/whitespace, the
-        whole filter is dropped (no IN clause, no syntactic error)."""
-        filters = {"country": FilterSpec(mode="include", values=["", "   "])}
-        params, sql = build_where_clause(None, None, filters)
-        assert sql == "1=1"
-        assert params == []
+    def test_empty_string_and_partition_pruning_and_timezone(self):
+        params, sql = build_where_clause(None, None, {"country": FilterSpec(mode="include", values=["", "   ", "US"])})
+        assert sql.count("?") == len(params) == 1 and "US" in params
 
-    def test_null_filter_still_works_after_empty_string_strip(self):
-        """``values=[None]`` (explicit NULL filter) must NOT be
-        affected by the empty-string strip. Pinned because the FE
-        sends `[None]` to filter "rows where country IS NULL" — if
-        we accidentally dropped None alongside empty strings, that
-        feature would silently break."""
-        filters = {"country": FilterSpec(mode="include", values=[None])}
-        params, sql = build_where_clause(None, None, filters)
-        assert "IS NULL" in sql
-
-    def test_waf_sig_ind_uses_list_contains(self):
-        filters = {"waf_sig_ind": FilterSpec(mode="include", values=["XSS"])}
-        _, sql = build_where_clause(None, None, filters)
-        assert "list_contains" in sql
-        assert "waf_sig" in sql
-
-    def test_waf_sig_ind_exclude(self):
-        filters = {"waf_sig_ind": FilterSpec(mode="exclude", values=["SQLi"])}
-        _, sql = build_where_clause(None, None, filters)
-        assert "NOT list_contains" in sql
-
-    def test_partition_pruning_skipped_when_dt_not_in_actual_cols(self):
-        # When actual_cols is provided and "dt" is absent, no dt condition added.
-        _, sql = build_where_clause(
+        _, sql_no_dt = build_where_clause(
             "2024-01-01T00:00:00Z", "2024-01-02T00:00:00Z", {}, actual_cols=["timestamp"], partition_pruning=True
         )
-        assert "dt >=" not in sql
-        assert "timestamp >=" in sql
-
-    def test_partition_pruning_included_when_dt_present(self):
-        _, sql = build_where_clause(
+        _, sql_dt = build_where_clause(
             "2024-01-01T00:00:00Z", "2024-01-02T00:00:00Z", {}, actual_cols=["timestamp", "dt"], partition_pruning=True
         )
-        assert "dt >=" in sql
-        assert "dt <=" in sql
-
-    def test_timezone_aware_iso_parsed_correctly(self):
-        # A timestamp with explicit +05:30 should be converted to UTC date correctly.
-        _, sql = build_where_clause("2024-06-15T18:30:00+05:30", None, {}, inline_params=True, partition_pruning=True)
-        # 18:30 IST == 13:00 UTC → date is still 2024-06-15
-        assert "dt >= '2024-06-15'" in sql
+        _, sql_tz = build_where_clause(
+            "2024-06-15T18:30:00+05:30", None, {}, inline_params=True, partition_pruning=True
+        )
+        assert "dt >=" not in sql_no_dt and "timestamp >=" in sql_no_dt
+        assert "dt >=" in sql_dt and "dt <=" in sql_dt and "dt >= '2024-06-15'" in sql_tz
 
 
 class TestClampToFloatPreservesSubMinuteValues:
-    def test_clamp_to_float_preserves_one_second_in_minutes(self):
-        """``1/60`` (one second expressed as minutes) must NOT be
-        rounded to 0 or to 1. Pinned because losing this would
-        silently turn a "1s" granularity selector into "1m" — the
-        original bug."""
-        from backend.models.common import _clamp_to_float
-
-        clamp = _clamp_to_float(1440.0)
-        out = clamp(1.0 / 60.0)
-        assert 0 < out < 1, f"Sub-minute value collapsed to {out}"
-        assert abs(out - 1.0 / 60.0) < 1e-9
-
-    def test_clamp_to_float_uses_one_second_lower_bound(self):
-        """Anything below ``1/3600`` (one second in minutes) is clamped
-        UP to that floor — never to 0 (which would crash interval
-        SQL) or to 1m (which would silently disable sub-minute
-        granularity)."""
-        from backend.models.common import _clamp_to_float
-
-        clamp = _clamp_to_float(1440.0)
-        out = clamp(0.0)
-        assert out == pytest.approx(1.0 / 3600.0)
-
-    def test_clamp_to_float_clamps_to_upper_bound(self):
-        from backend.models.common import _clamp_to_float
-
-        clamp = _clamp_to_float(1440.0)
-        assert clamp(99999.0) == 1440.0
-
-    def test_clamp_to_float_returns_value_unchanged_in_range(self):
-        from backend.models.common import _clamp_to_float
-
-        clamp = _clamp_to_float(1440.0)
-        assert clamp(60.0) == 60.0
-        assert clamp(1.5) == 1.5
-
-    def test_limit1440_pydantic_annotation_validates_to_float(self):
-        """The ``Limit1440`` Annotated type must surface as a float in
-        the validated payload. Pinned because reverting to ``int``
-        is exactly the regression we're guarding against — the
-        validator silently coerces 0.0167 → 0 → 1."""
+    def test_clamp_to_float_and_limit1440(self):
         import pydantic
 
-        from backend.models.common import Limit1440
+        from backend.models.common import Limit1440, _clamp_to_float
+
+        clamp = _clamp_to_float(1440.0)
+        assert clamp(1.0 / 60.0) == pytest.approx(1.0 / 60.0) and clamp(0.0) == pytest.approx(1.0 / 3600.0)
+        assert clamp(99999.0) == 1440.0 and clamp(60.0) == 60.0 and clamp(1.5) == 1.5
 
         class _M(pydantic.BaseModel):
             v: Limit1440 = 5.0
 
-        out = _M(v=1.0 / 60.0)
-        assert isinstance(out.v, float)
-        # Crucially, NOT zero (would crash) and NOT 1.0 (the original bug)
-        assert 0 < out.v < 1
-        assert abs(out.v - 1.0 / 60.0) < 1e-9
+        m = _M(v=1.0 / 60.0)
+        assert isinstance(m.v, float) and 0 < m.v < 1 and abs(m.v - 1.0 / 60.0) < 1e-9
 
 
 # ── Merged from tests/core/test_session_token.py ──
+def _run_barrier_threads(n: int, fn):
+    barrier = threading.Barrier(n)
+    threads = [threading.Thread(target=lambda idx=i: (barrier.wait(), fn(idx))) for i in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+
 @pytest.fixture
 def fixed_key(monkeypatch):
-    """Pin a deterministic key (SESSION_TOKEN_SECRET) and reset the module
-    cache so the test controls key material. Resets again on teardown so the
-    cached ephemeral key doesn't leak across tests."""
     monkeypatch.setenv("SESSION_TOKEN_SECRET", "unit-test-secret-A")
     _st_mod._key = None
     yield
     _st_mod._key = None
 
 
-def _rekey(monkeypatch, secret: str) -> None:
-    monkeypatch.setenv("SESSION_TOKEN_SECRET", secret)
-    _st_mod._key = None
+def _seal(ip: str = "203.0.113.7", ja4: str | None = "ja4abc", svc: str = "svcA") -> str:
+    return seal_session_token(ip, ja4, "2026-06-29T00:00:00+00:00", "2026-06-29T00:30:00+00:00", service_id=svc)
 
 
-def test_round_trip(fixed_key):
-    token = seal_session_token(
-        "203.0.113.7", "ja4abc", "2026-06-29T00:00:00+00:00", "2026-06-29T00:30:00+00:00", service_id="svcA"
+def test_session_token_round_trip_and_opacity_and_rejections(fixed_key, monkeypatch):
+    assert open_session_token(_seal(), service_id="svcA") == (
+        "203.0.113.7",
+        "ja4abc",
+        "2026-06-29T00:00:00+00:00",
+        "2026-06-29T00:30:00+00:00",
     )
-    ip, ja4, start, end = open_session_token(token, service_id="svcA")
-    assert ip == "203.0.113.7"
-    assert ja4 == "ja4abc"
-    assert start == "2026-06-29T00:00:00+00:00"
-    assert end == "2026-06-29T00:30:00+00:00"
+    ip, ja4, _, _ = open_session_token(_seal(ja4=None), service_id="svcA")
+    assert ip == "203.0.113.7" and ja4 is None
+    tok = _seal(ip="198.51.100.23")
+    assert "198.51.100.23" not in tok and ".23" not in tok
 
-
-def test_round_trip_null_ja4(fixed_key):
-    """ja4 is often absent — it must round-trip as None, not the string 'None'
-    or '' (the detail SQL treats None as 'don't filter on ja4')."""
-    token = seal_session_token(
-        "203.0.113.7", None, "2026-06-29T00:00:00+00:00", "2026-06-29T00:30:00+00:00", service_id="svcA"
-    )
-    ip, ja4, _start, _end = open_session_token(token, service_id="svcA")
-    assert ip == "203.0.113.7"
-    assert ja4 is None
-
-
-def test_token_is_opaque_not_derivable_from_ip(fixed_key):
-    """The token must not be a plain function of the IP — it must not contain
-    the IP in cleartext (else masking is trivially reversible)."""
-    ip = "198.51.100.23"
-    token = seal_session_token(
-        ip, "ja4abc", "2026-06-29T00:00:00+00:00", "2026-06-29T00:30:00+00:00", service_id="svcA"
-    )
-    assert ip not in token
-    # last octet (the masked part) must not be recoverable from the token text
-    assert ".23" not in token
-
-
-def test_tampered_token_rejected(fixed_key):
-    token = seal_session_token(
-        "203.0.113.7", "ja4abc", "2026-06-29T00:00:00+00:00", "2026-06-29T00:30:00+00:00", service_id="svcA"
-    )
-    # Flip a character in the ciphertext body (last char is inside the GCM tag).
+    token = _seal()
     tampered = token[:-1] + ("A" if token[-1] != "A" else "B")
-    with pytest.raises(SessionTokenError):
-        open_session_token(tampered, service_id="svcA")
+    for bad_tok, svc in ((tampered, "svcA"), (token, "svcB"), ("not-a-valid-token!!!", "svcA"), ("", "svcA")):
+        with pytest.raises(SessionTokenError):
+            open_session_token(bad_tok, service_id=svc)
 
-
-def test_wrong_service_aad_rejected(fixed_key):
-    """A token minted for svcA must not open under svcB (cross-service replay)."""
-    token = seal_session_token(
-        "203.0.113.7", "ja4abc", "2026-06-29T00:00:00+00:00", "2026-06-29T00:30:00+00:00", service_id="svcA"
-    )
-    with pytest.raises(SessionTokenError):
-        open_session_token(token, service_id="svcB")
-
-
-def test_wrong_key_rejected(fixed_key, monkeypatch):
-    """A token sealed under one key (e.g. before a restart) fails to open under
-    a different key — the caller surfaces a 'reload the page' 400."""
-    token = seal_session_token(
-        "203.0.113.7", "ja4abc", "2026-06-29T00:00:00+00:00", "2026-06-29T00:30:00+00:00", service_id="svcA"
-    )
-    _rekey(monkeypatch, "unit-test-secret-B")
+    monkeypatch.setenv("SESSION_TOKEN_SECRET", "unit-test-secret-B")
+    _st_mod._key = None
     with pytest.raises(SessionTokenError):
         open_session_token(token, service_id="svcA")
 
 
-def test_malformed_token_rejected(fixed_key):
-    with pytest.raises(SessionTokenError):
-        open_session_token("not-a-valid-token!!!", service_id="svcA")
-    with pytest.raises(SessionTokenError):
-        open_session_token("", service_id="svcA")
-
-
 def test_concurrent_first_resolve_yields_single_key(monkeypatch):
-    """Under the ephemeral default (no SESSION_TOKEN_SECRET), many threads all
-    hitting the very first key resolution at once must converge on ONE key.
-
-    Without the double-checked lock in ``_resolve_key`` each racing thread could
-    generate its own random key and clobber the module global, so a token sealed
-    by one thread would fail to open in another (a spurious SessionTokenError).
-    We seal in every thread and confirm each token opens under the finally
-    resolved key — i.e. all threads saw the same key.
-    """
-    import threading
-
     monkeypatch.delenv("SESSION_TOKEN_SECRET", raising=False)
     _st_mod._key = None
-
-    barrier = threading.Barrier(16)
     tokens: list[str] = []
     tokens_lock = threading.Lock()
-
-    def _worker() -> None:
-        barrier.wait()  # maximise the odds all threads race the None check together
-        tok = seal_session_token(
-            "203.0.113.7", "ja4abc", "2026-06-29T00:00:00+00:00", "2026-06-29T00:30:00+00:00", service_id="svcA"
-        )
-        with tokens_lock:
-            tokens.append(tok)
-
-    threads = [threading.Thread(target=_worker) for _ in range(16)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-
-    # Every token — regardless of which thread minted it — must open under the
-    # single surviving process key. A torn init would leave some unopenable.
-    assert len(tokens) == 16
-    for tok in tokens:
-        ip, _ja4, _start, _end = open_session_token(tok, service_id="svcA")
-        assert ip == "203.0.113.7"
-
+    _run_barrier_threads(
+        16, lambda _: (tok := _seal(), tokens_lock.acquire(), tokens.append(tok), tokens_lock.release())
+    )
+    assert len(tokens) == 16 and all(open_session_token(t, service_id="svcA")[0] == "203.0.113.7" for t in tokens)
     _st_mod._key = None
 
 
@@ -452,14 +282,11 @@ HEX64 = re.compile(r"[0-9a-f]{64}")
 
 @pytest.fixture
 def fake_store(monkeypatch):
-    """Real config files in the conftest-sandboxed CONFIGS_DIR; ``saves`` records each disk write."""
-    from backend import config as svcconfig
-
     saves: list[str] = []
     real_write = svcconfig._atomic_write_json
 
     def spy(path, data):
-        time.sleep(0.005)  # widen the read-modify-write window so an unguarded race is reproducible
+        time.sleep(0.005)
         saves.append(path.stem)
         real_write(path, data)
 
@@ -482,20 +309,13 @@ def fake_store(monkeypatch):
 
 @pytest.mark.security_regression
 def test_missing_config_never_uses_the_public_hardcoded_salt(fake_store):
-    from backend.core.duckdb import get_or_generate_cid_salt
-
     store, saves = fake_store
     salt = get_or_generate_cid_salt("svc-none")
-    assert "default_test_salt" not in salt
-    assert HEX64.fullmatch(salt)
-    assert saves == []
-    assert not store.exists("svc-none")
+    assert "default_test_salt" not in salt and HEX64.fullmatch(salt) and saves == [] and not store.exists("svc-none")
 
 
 @pytest.mark.security_regression
 def test_missing_config_logs_loudly(fake_store, caplog):
-    from backend.core.duckdb import get_or_generate_cid_salt
-
     with caplog.at_level(logging.WARNING):
         get_or_generate_cid_salt("svc-none")
     assert "cid_salt_no_config" in caplog.text
@@ -503,89 +323,55 @@ def test_missing_config_logs_loudly(fake_store, caplog):
 
 @pytest.mark.security_regression
 def test_missing_config_salt_is_stable_within_the_process(fake_store):
-    from backend.core.duckdb import get_or_generate_cid_salt
-
     assert get_or_generate_cid_salt("svc-a") == get_or_generate_cid_salt("svc-b")
 
 
 @pytest.mark.security_regression
 def test_existing_salt_is_returned_unchanged_and_not_resaved(fake_store, caplog):
-    from backend.core.duckdb import get_or_generate_cid_salt
-
     store, saves = fake_store
     store.put("svc", {"rum": {"cid_salt": "abc123"}})
     with caplog.at_level(logging.WARNING):
         assert get_or_generate_cid_salt("svc") == "abc123"
-    assert saves == []
-    assert "cid_salt_missing" not in caplog.text
+    assert saves == [] and "cid_salt_missing" not in caplog.text
 
 
 @pytest.mark.security_regression
 def test_first_use_generates_once_persists_and_logs(fake_store, caplog):
-    from backend import config as svcconfig
-    from backend.core.duckdb import get_or_generate_cid_salt
-
     store, saves = fake_store
-    # Legacy config written before salts existed (bypasses save_config's first-save generation).
     store.put("svc", {"service_id": "svc", "rum": {}})
     with caplog.at_level(logging.WARNING):
         salt = get_or_generate_cid_salt("svc")
-    assert HEX64.fullmatch(salt)
-    assert store.get("svc")["rum"]["cid_salt"] == salt
-    assert saves == ["svc"]
-    assert "cid_salt_missing" in caplog.text
-    assert svcconfig.load_config("svc")["rum"]["cid_salt"] == salt
+    assert HEX64.fullmatch(salt) and store.get("svc")["rum"]["cid_salt"] == salt and saves == ["svc"]
+    assert "cid_salt_missing" in caplog.text and svcconfig.load_config("svc")["rum"]["cid_salt"] == salt
 
 
 @pytest.mark.security_regression
 def test_lazy_generation_does_not_clobber_other_config_fields(fake_store):
-    from backend.core.duckdb import get_or_generate_cid_salt
-
     store, _ = fake_store
     store.put("svc", {"service_id": "svc", "name": "keep", "rum": {"enabled": True}})
     get_or_generate_cid_salt("svc")
     cfg = store.get("svc")
-    assert cfg["name"] == "keep"
-    assert cfg["rum"]["enabled"] is True
+    assert cfg["name"] == "keep" and cfg["rum"]["enabled"] is True
 
 
 @pytest.mark.security_regression
 def test_concurrent_first_use_agrees_on_a_single_salt(fake_store):
-    from backend.core.duckdb import get_or_generate_cid_salt
-
     store, _ = fake_store
     store.put("svc", {"service_id": "svc", "rum": {}})
-    barrier = threading.Barrier(8)
     results: list[str] = []
-
-    def worker():
-        barrier.wait()
-        results.append(get_or_generate_cid_salt("svc"))
-
-    threads = [threading.Thread(target=worker) for _ in range(8)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-
-    assert len(set(results)) == 1
-    assert store.get("svc")["rum"]["cid_salt"] == results[0]
+    _run_barrier_threads(8, lambda _: results.append(get_or_generate_cid_salt("svc")))
+    assert len(set(results)) == 1 and store.get("svc")["rum"]["cid_salt"] == results[0]
 
 
 _RACER = """
 import sys, time
 from pathlib import Path
-import backend.config as c
+import backend.config as c, backend.core.duckdb as d
 c.CONFIGS_DIR = Path(sys.argv[1])
-import backend.core.duckdb as d
 orig = c._atomic_write_json
-def slow(path, data):
-    time.sleep(0.05)
-    orig(path, data)
-c._atomic_write_json = slow
+c._atomic_write_json = lambda p, data: (time.sleep(0.05), orig(p, data))
 go = Path(sys.argv[2])
-while not go.exists():
-    time.sleep(0.001)
+while not go.exists(): time.sleep(0.001)
 print(d.get_or_generate_cid_salt("svc"))
 """
 
@@ -606,20 +392,17 @@ def test_separate_processes_racing_first_use_agree_on_one_salt(tmp_path):
         )
         for _ in range(4)
     ]
-    time.sleep(4)  # let every child finish importing before releasing them together
+    time.sleep(4)
     go.write_text("")
     outs = [p.communicate(timeout=60) for p in procs]
     for p, (_, err) in zip(procs, outs, strict=True):
         assert p.returncode == 0, err
     salts = {out.strip().splitlines()[-1] for out, _ in outs}
-    assert len(salts) == 1
-    assert json.loads((cfg_dir / "svc.json").read_text())["rum"]["cid_salt"] in salts
+    assert len(salts) == 1 and json.loads((cfg_dir / "svc.json").read_text())["rum"]["cid_salt"] in salts
 
 
 @pytest.mark.security_regression
 def test_new_config_gets_salt_on_first_save(fake_store):
-    from backend import config as svcconfig
-
     store, _ = fake_store
     svcconfig.save_config("fresh", {"service_id": "fresh"})
     assert HEX64.fullmatch(store.get("fresh")["rum"]["cid_salt"])
@@ -627,74 +410,46 @@ def test_new_config_gets_salt_on_first_save(fake_store):
 
 @pytest.mark.security_regression
 def test_save_config_never_rekeys_an_existing_salt(fake_store):
-    from backend import config as svcconfig
-
     store, _ = fake_store
     svcconfig.save_config("svc", {"service_id": "svc", "rum": {"enabled": True}})
     original = store.get("svc")["rum"]["cid_salt"]
-
-    # Stale writers: replace rum wholesale, mint their own salt, or drop rum entirely.
-    svcconfig.save_config("svc", {"service_id": "svc", "rum": {"enabled": False}})
-    assert store.get("svc")["rum"]["cid_salt"] == original
-    svcconfig.save_config("svc", {"service_id": "svc", "rum": {"cid_salt": "f" * 64}})
-    assert store.get("svc")["rum"]["cid_salt"] == original
-    svcconfig.save_config("svc", {"service_id": "svc"})
-    assert store.get("svc")["rum"]["cid_salt"] == original
+    for rum_patch in ({"rum": {"enabled": False}}, {"rum": {"cid_salt": "f" * 64}}, {}):
+        svcconfig.save_config("svc", {"service_id": "svc", **rum_patch})
+        assert store.get("svc")["rum"]["cid_salt"] == original
 
 
 @pytest.mark.security_regression
 def test_mutate_config_serializes_concurrent_partial_edits(fake_store):
-    from backend import config as svcconfig
-
     store, _ = fake_store
     svcconfig.save_config("svc", {"service_id": "svc", "counters": {}})
-    n = 12
-    barrier = threading.Barrier(n)
-
-    def worker(i):
-        barrier.wait()
-        svcconfig.mutate_config("svc", lambda c, i=i: c["counters"].__setitem__(str(i), i))
-
-    threads = [threading.Thread(target=worker, args=(i,)) for i in range(n)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-    assert sorted(store.get("svc")["counters"]) == sorted(str(i) for i in range(n))
+    _run_barrier_threads(
+        12, lambda i: svcconfig.mutate_config("svc", lambda c, i=i: c["counters"].__setitem__(str(i), i))
+    )
+    assert sorted(store.get("svc")["counters"]) == sorted(str(i) for i in range(12))
 
 
 @pytest.mark.security_regression
 def test_mutate_config_missing_service_returns_none(fake_store):
-    from backend import config as svcconfig
-
     assert svcconfig.mutate_config("nope", lambda c: None) is None
 
 
 @pytest.mark.security_regression
 def test_ensure_cid_salt_generates_when_absent_and_keeps_existing():
-    from backend.core.duckdb import ensure_cid_salt
-
     cfg: dict = {}
     first = ensure_cid_salt(cfg)
-    assert HEX64.fullmatch(first)
-    assert cfg["cid_salt"] == first
-    assert ensure_cid_salt(cfg) == first
-    kept = {"cid_salt": "keep-me"}
-    assert ensure_cid_salt(kept) == "keep-me"
+    assert HEX64.fullmatch(first) and cfg["cid_salt"] == first and ensure_cid_salt(cfg) == first
+    assert ensure_cid_salt({"cid_salt": "keep-me"}) == "keep-me"
 
 
 @pytest.mark.security_regression
 def test_services_router_does_not_mint_its_own_salt():
-    from backend.routers.services import core as services_core
-
-    tree = ast.parse(inspect.getsource(services_core))
+    src = inspect.getsource(services_core_router)
     minted = [
         n
-        for n in ast.walk(tree)
+        for n in ast.walk(ast.parse(src))
         if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "token_hex"
     ]
-    assert minted == []
-    assert "ensure_cid_salt" in inspect.getsource(services_core)
+    assert minted == [] and "ensure_cid_salt" in src
 
 
 # ── Merged from tests/core/test_ttl_cache_migration.py ──
@@ -712,37 +467,27 @@ def _describe_con(columns: list[str]) -> MagicMock:
 
 
 @pytest.mark.usefixtures("_drain_caches")
-def test_pii_cols_cached_per_table_and_drained_by_registry():
+def test_pii_cols_cached_and_describe_failure_not_cached():
     from backend.repositories import query
 
     con = _describe_con(["ip", "url", "status"])
     first = query._pii_redact_cols(con, "tbl_pii_a")
-    second = query._pii_redact_cols(con, "tbl_pii_a")
-    assert first == second
-    assert "ip" in first and "url" not in first
+    assert first == query._pii_redact_cols(con, "tbl_pii_a") and "ip" in first and "url" not in first
     assert con.execute.call_count == 1
-
     query._pii_redact_cols(con, "tbl_pii_b")
     assert con.execute.call_count == 2
-
     CacheRegistry.clear("query._PII_COLS_CACHE")
     query._pii_redact_cols(con, "tbl_pii_a")
     assert con.execute.call_count == 3
 
-
-@pytest.mark.usefixtures("_drain_caches")
-def test_pii_cols_describe_failure_is_empty_and_not_cached():
-    from backend.repositories import query
-
-    con = MagicMock()
-    con.execute.side_effect = duckdb.CatalogException("stale")
-    assert query._pii_redact_cols(con, "tbl_pii_c") == frozenset()
-    good = _describe_con(["ip"])
-    assert "ip" in query._pii_redact_cols(good, "tbl_pii_c")
+    bad_con = MagicMock()
+    bad_con.execute.side_effect = duckdb.CatalogException("stale")
+    assert query._pii_redact_cols(bad_con, "tbl_pii_c") == frozenset()
+    assert "ip" in query._pii_redact_cols(_describe_con(["ip"]), "tbl_pii_c")
 
 
 @pytest.mark.usefixtures("_drain_caches")
-def test_compaction_stats_memoised_and_drained(tmp_path):
+def test_compaction_stats_memoised_drained_and_missing_dir(tmp_path):
     from backend.core import local_compaction
 
     root = tmp_path / "cache"
@@ -752,22 +497,15 @@ def test_compaction_stats_memoised_and_drained(tmp_path):
     with patch("backend.core.duckdb._cache_dir", return_value=str(root)):
         first = local_compaction.compaction_stats({"name": "svc"})
         (part / "b.parquet").write_bytes(b"x")
-        second = local_compaction.compaction_stats({"name": "svc"})
-        assert first == second
-        assert first["total_files"] == 1
-
+        assert first == local_compaction.compaction_stats({"name": "svc"}) and first["total_files"] == 1
         CacheRegistry.clear("core.local_compaction._COMPACTION_STATS_CACHE")
         assert local_compaction.compaction_stats({"name": "svc"})["total_files"] == 2
 
-
-@pytest.mark.usefixtures("_drain_caches")
-def test_compaction_stats_missing_dir_is_memoised(tmp_path):
-    from backend.core import local_compaction
-
-    root = tmp_path / "nothing"
-    with patch("backend.core.duckdb._cache_dir", return_value=str(root)):
+    CacheRegistry.clear_all()
+    missing = tmp_path / "nothing"
+    with patch("backend.core.duckdb._cache_dir", return_value=str(missing)):
         assert local_compaction.compaction_stats({"name": "svc"})["total_files"] == 0
-        (root / "data").mkdir(parents=True)
+        (missing / "data").mkdir(parents=True)
         assert local_compaction.compaction_stats({"name": "svc"})["total_files"] == 0
 
 
@@ -782,30 +520,16 @@ def test_storage_stats_cache_hit_force_and_invalidate():
         patch.object(rec, "get_con_readonly", return_value=con) as opener,
         patch.object(rec, "_open_usage_log", return_value=None),
     ):
-        a = rec.get_metadata_storage_stats("svc-ttl")
-        b = rec.get_metadata_storage_stats("svc-ttl")
-        assert a is b
+        assert rec.get_metadata_storage_stats("svc-ttl") is rec.get_metadata_storage_stats("svc-ttl")
         assert opener.call_count == 1
-
         rec.get_metadata_storage_stats("svc-ttl", force=True)
         assert opener.call_count == 2
-
         rec.invalidate_storage_stats_cache("svc-ttl")
         rec.get_metadata_storage_stats("svc-ttl")
         assert opener.call_count == 3
 
 
 # ── Merged from tests/core/test_config_lock_hygiene.py ──
-
-"""config_lock hygiene: loud degradation, bounded wait, re-entrancy, salt safety, audited rotation."""
-
-
-import fcntl
-
-import pytest
-
-# (scoped pytestmark) pytestmark = pytest.mark.security_regression
-
 SID = "svc-lock"
 
 
@@ -821,21 +545,27 @@ def _salt() -> str:
     return json.loads(svcconfig.config_path(SID).read_text())["rum"]["cid_salt"]
 
 
+@contextlib.contextmanager
+def _held_flock():
+    holder = os.open(svcconfig.CONFIGS_DIR / f".{SID}.lock", os.O_CREAT | os.O_RDWR)
+    fcntl.flock(holder, fcntl.LOCK_EX)
+    try:
+        yield
+    finally:
+        fcntl.flock(holder, fcntl.LOCK_UN)
+        os.close(holder)
+
+
 @pytest.mark.security_regression
 @pytest.mark.usefixtures("_reset_lock_state")
 def test_flock_oserror_is_loud_once_and_flags_health(monkeypatch, caplog):
-    def boom(fd, op):
-        raise OSError(30, "Read-only file system")
-
-    monkeypatch.setattr(svcconfig.fcntl, "flock", boom)
+    monkeypatch.setattr(svcconfig.fcntl, "flock", MagicMock(side_effect=OSError(30, "Read-only file system")))
     with caplog.at_level(logging.ERROR, logger="backend.config"):
-        with svcconfig.config_lock(SID):
-            pass
-        with svcconfig.config_lock(SID):
-            pass
+        for _ in range(2):
+            with svcconfig.config_lock(SID):
+                pass
     errors = [r for r in caplog.records if "config_lock_degraded" in r.getMessage() and r.levelno == logging.ERROR]
-    assert len(errors) == 1
-    assert svcconfig.config_lock_degraded() is True
+    assert len(errors) == 1 and svcconfig.config_lock_degraded() is True
 
 
 @pytest.mark.security_regression
@@ -852,17 +582,12 @@ def test_health_snapshot_surfaces_config_lock_degraded(monkeypatch):
 @pytest.mark.usefixtures("_reset_lock_state")
 def test_lock_wait_is_bounded_and_raises_a_clear_timeout(monkeypatch):
     monkeypatch.setattr(svcconfig, "_LOCK_TIMEOUT_S", 0.3)
-    holder = os.open(svcconfig.CONFIGS_DIR / f".{SID}.lock", os.O_CREAT | os.O_RDWR)
-    fcntl.flock(holder, fcntl.LOCK_EX)
-    try:
+    with _held_flock():
         start = time.monotonic()
         with pytest.raises(svcconfig.ConfigLockTimeout, match=SID):
             with svcconfig.config_lock(SID):
                 pass
         assert time.monotonic() - start < 3
-    finally:
-        fcntl.flock(holder, fcntl.LOCK_UN)
-        os.close(holder)
 
 
 @pytest.mark.security_regression
@@ -879,24 +604,18 @@ def test_lock_is_acquired_after_the_holder_releases(monkeypatch):
 @pytest.mark.usefixtures("_reset_lock_state")
 def test_mutate_callback_saving_the_same_service_does_not_self_deadlock(monkeypatch):
     monkeypatch.setattr(svcconfig, "_LOCK_TIMEOUT_S", 1.0)
+    seen: dict = {}
 
-    def _mutate(cfg):
+    def _outer(cfg):
         cfg["a"] = 1
         inner = svcconfig.load_config(SID)
         inner["b"] = 2
         svcconfig.save_config(SID, inner)
         svcconfig.mutate_config(SID, lambda c: c.__setitem__("c", 3))
-
-    seen: dict = {}
-
-    def _outer(cfg):
-        _mutate(cfg)
         seen.update(svcconfig.load_config(SID))
 
     svcconfig.mutate_config(SID, _outer)
-    # nested writes were applied (visible inside the callback); the outer save then lands last
-    assert seen["b"] == 2 and seen["c"] == 3
-    assert svcconfig.load_config(SID)["a"] == 1
+    assert seen["b"] == 2 and seen["c"] == 3 and svcconfig.load_config(SID)["a"] == 1
 
 
 @pytest.mark.security_regression
@@ -924,33 +643,20 @@ def test_reentrancy_is_per_thread(monkeypatch):
 def test_update_status_goes_through_mutate_config(monkeypatch):
     calls = []
     real = svcconfig.mutate_config
-
-    def spy(sid, fn, **kw):
-        calls.append(sid)
-        return real(sid, fn, **kw)
-
-    monkeypatch.setattr(svcconfig, "mutate_config", spy)
+    monkeypatch.setattr(svcconfig, "mutate_config", lambda sid, fn, **kw: (calls.append(sid), real(sid, fn, **kw))[1])
     svcconfig.update_status(SID, {"x": 1})
-    assert calls == [SID]
-    assert svcconfig.get_status(SID)["x"] == 1
+    assert calls == [SID] and svcconfig.get_status(SID)["x"] == 1
 
 
 @pytest.mark.security_regression
 @pytest.mark.usefixtures("_reset_lock_state")
 def test_update_status_does_not_clobber_a_concurrent_writer():
-    def _mutate(cfg):
-        cfg["marker"] = "kept"
-
-    def racing_update():
-        svcconfig.update_status(SID, {"y": 2})
-
-    # A concurrent update_status in another thread blocks on the lock and applies on a fresh read.
     with svcconfig.config_lock(SID):
-        t = threading.Thread(target=racing_update)
+        t = threading.Thread(target=lambda: svcconfig.update_status(SID, {"y": 2}))
         t.start()
         time.sleep(0.05)
         cfg = svcconfig._read_config_fresh(SID)
-        _mutate(cfg)
+        cfg["marker"] = "kept"
         svcconfig._save_config_unlocked(SID, cfg)
     t.join()
     final = svcconfig.load_config(SID)
@@ -961,14 +667,9 @@ def test_update_status_does_not_clobber_a_concurrent_writer():
 @pytest.mark.usefixtures("_reset_lock_state")
 def test_snapshot_config_takes_the_lock(monkeypatch):
     monkeypatch.setattr(svcconfig, "_LOCK_TIMEOUT_S", 0.3)
-    holder = os.open(svcconfig.CONFIGS_DIR / f".{SID}.lock", os.O_CREAT | os.O_RDWR)
-    fcntl.flock(holder, fcntl.LOCK_EX)
-    try:
+    with _held_flock():
         with pytest.raises(svcconfig.ConfigLockTimeout):
             svcconfig.snapshot_config(SID)
-    finally:
-        fcntl.flock(holder, fcntl.LOCK_UN)
-        os.close(holder)
     assert svcconfig.snapshot_config(SID) is not None
 
 
@@ -976,12 +677,8 @@ def test_snapshot_config_takes_the_lock(monkeypatch):
 @pytest.mark.usefixtures("_reset_lock_state")
 def test_transient_read_failure_aborts_the_save_instead_of_minting_a_new_salt(monkeypatch):
     before = _salt()
-
-    def failing_read(sid):
-        raise OSError(5, "Input/output error")
-
     with monkeypatch.context() as m:
-        m.setattr(svcconfig, "_read_config_fresh", failing_read)
+        m.setattr(svcconfig, "_read_config_fresh", MagicMock(side_effect=OSError(5, "Input/output error")))
         with pytest.raises(svcconfig.CidSaltReadError):
             svcconfig.save_config(SID, {"service_id": SID, "rum": {}})
     assert _salt() == before
@@ -1004,31 +701,8 @@ def test_save_config_cannot_rotate_the_salt():
 
 # ── Merged from tests/core/test_reset.py ──
 
-"""Tests for backend.core.reset.reset_service_logs — the Project Log Reset
-("Delete Data") generator.
 
-Focuses on the safety-critical guarantees called out in
-local-docs/log_reset_design_plan.md: config preservation vs. operational
-wipe, the per-service lock exclusion, the cron_busy guard, the
-try/finally scheduler-resume-and-lock-release resilience under a mid-run
-failure, and the iceberg/meta/ + raw/ cloud-purge scoping. Iceberg catalog
-internals (init_iceberg_table / update_iceberg_view) are covered by their
-own test modules, so they're stubbed here to keep this suite focused on
-reset.py's own orchestration.
-"""
-
-
-import pytest
-
-from backend.core import quarantine
-from backend.core import reset as reset_mod
-from backend.core.metadata.base import get_con
-from tests.conftest import MOCK_SERVICE_ID
-
-
-# ── Merged from tests/core/test_reset.py ──
 def _save_config(**cron_sync_overrides):
-    cron_sync = {"enabled": True, **cron_sync_overrides}
     svcconfig.save_config(
         MOCK_SERVICE_ID,
         {
@@ -1040,63 +714,56 @@ def _save_config(**cron_sync_overrides):
             "fos_access_key_id": "test-key",
             "fos_secret_access_key": "test-secret",
             "access_level": "read_write",
-            "provisioning": {"cron_sync": cron_sync},
+            "provisioning": {"cron_sync": {"enabled": True, **cron_sync_overrides}},
         },
     )
 
 
 def _seed_metadata_rows():
-    """Insert one row into every WIPE table and every PRESERVE table."""
     con = get_con(MOCK_SERVICE_ID)
-    con.execute(
-        "INSERT INTO ingested_files (file_name, source_name, row_count, file_size_bytes, file_date) "
-        "VALUES ('a.gz', ?, 10, 100, '2026-01-01')",
-        (MOCK_SERVICE_ID,),
-    )
-    con.execute(
-        "INSERT INTO ingested_files_summary (source_name, file_count, total_rows, total_bytes) VALUES (?, 1, 10, 100)",
-        (MOCK_SERVICE_ID,),
-    )
-    con.execute(
-        "INSERT INTO ingest_in_flight (buffer_filename, source_name, files_json) VALUES ('buf1', ?, '[]')",
-        (MOCK_SERVICE_ID,),
-    )
-    con.execute(
-        "INSERT INTO quarantined_files (file_name, source_name, fos_key, error_key, meta_key) "
-        "VALUES ('bad.gz', ?, 'raw/bad.gz', 'errors/bad.bad.jsonl', 'errors/bad.meta.json')",
-        (MOCK_SERVICE_ID,),
-    )
-
-    con.execute("INSERT INTO sources (name, config, table_name) VALUES (?, '{}', 'logs')", (MOCK_SERVICE_ID,))
-    con.execute(
-        "INSERT INTO views (id, service_id, name, filters_json) VALUES ('v1', ?, 'My View', '{}')",
-        (MOCK_SERVICE_ID,),
-    )
-    con.execute(
-        "INSERT INTO alerts (id, service_id, name, metric, operator, threshold, window_min) "
-        "VALUES ('al1', ?, 'My Alert', 'error_rate', '>', 5.0, 10.0)",
-        (MOCK_SERVICE_ID,),
-    )
-    con.execute(
-        "INSERT INTO scoring_labels (id, service_id, sid, label) VALUES ('sl1', ?, 'session1', 'good')",
-        (MOCK_SERVICE_ID,),
-    )
-    con.execute(
-        "INSERT INTO scoring_audit (service_id, action, actor) VALUES (?, 'relabel', 'ui')",
-        (MOCK_SERVICE_ID,),
-    )
-    con.execute("INSERT INTO asn_names (asn, name) VALUES (12345, 'Test ASN')")
+    for sql, params in [
+        (
+            "INSERT INTO ingested_files (file_name, source_name, row_count, file_size_bytes, file_date) VALUES ('a.gz', ?, 10, 100, '2026-01-01')",
+            (MOCK_SERVICE_ID,),
+        ),
+        (
+            "INSERT INTO ingested_files_summary (source_name, file_count, total_rows, total_bytes) VALUES (?, 1, 10, 100)",
+            (MOCK_SERVICE_ID,),
+        ),
+        (
+            "INSERT INTO ingest_in_flight (buffer_filename, source_name, files_json) VALUES ('buf1', ?, '[]')",
+            (MOCK_SERVICE_ID,),
+        ),
+        (
+            "INSERT INTO quarantined_files (file_name, source_name, fos_key, error_key, meta_key) VALUES ('bad.gz', ?, 'raw/bad.gz', 'errors/bad.bad.jsonl', 'errors/bad.meta.json')",
+            (MOCK_SERVICE_ID,),
+        ),
+        ("INSERT INTO sources (name, config, table_name) VALUES (?, '{}', 'logs')", (MOCK_SERVICE_ID,)),
+        (
+            "INSERT INTO views (id, service_id, name, filters_json) VALUES ('v1', ?, 'My View', '{}')",
+            (MOCK_SERVICE_ID,),
+        ),
+        (
+            "INSERT INTO alerts (id, service_id, name, metric, operator, threshold, window_min) VALUES ('al1', ?, 'My Alert', 'error_rate', '>', 5.0, 10.0)",
+            (MOCK_SERVICE_ID,),
+        ),
+        (
+            "INSERT INTO scoring_labels (id, service_id, sid, label) VALUES ('sl1', ?, 'session1', 'good')",
+            (MOCK_SERVICE_ID,),
+        ),
+        ("INSERT INTO scoring_audit (service_id, action, actor) VALUES (?, 'relabel', 'ui')", (MOCK_SERVICE_ID,)),
+        ("INSERT INTO asn_names (asn, name) VALUES (12345, 'Test ASN')", ()),
+    ]:
+        con.execute(sql, params)
     con.commit()
 
 
 def _table_count(table: str) -> int:
-    con = get_con(MOCK_SERVICE_ID)
-    return con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+    return get_con(MOCK_SERVICE_ID).execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
 
 
 @pytest.fixture
 def _stub_iceberg_catalog(monkeypatch):
-    """Stub the catalog-rebuild steps — exercised by test_iceberg.py, not here."""
     monkeypatch.setattr("backend.core.iceberg._core.init_iceberg_table", MagicMock())
     monkeypatch.setattr("backend.core.iceberg.view.update_iceberg_view", MagicMock())
     monkeypatch.setattr("backend.core.duckdb.get_connection", MagicMock())
@@ -1104,9 +771,6 @@ def _stub_iceberg_catalog(monkeypatch):
 
 @pytest.fixture
 def fake_scheduler():
-    """A stand-in for the ``reload_scheduler`` callback the router/CLI inject
-    (real callers pass ``lambda: get_scheduler().reload()`` — see the
-    layering note on ``reset_service_logs``)."""
     return MagicMock()
 
 
@@ -1126,17 +790,16 @@ def test_wipes_operational_preserves_config_and_meta(s3_mock, fos_source, fake_s
     )
     evidence_path = quarantine._evidence_path(MOCK_SERVICE_ID, int(evidence["id"]))
     assert evidence_path.exists()
-    s3_mock.put_object(Bucket="test-bucket", Key="iceberg/default/logs/data/foo.parquet", Body=b"x")
-    s3_mock.put_object(Bucket="test-bucket", Key="iceberg/meta/admin_state.json", Body=b"{}")
-    s3_mock.put_object(Bucket="test-bucket", Key="errors/bad.bad.jsonl", Body=b"bad")
-    s3_mock.put_object(
-        Bucket="test-bucket",
-        Key="raw/request/year=2026/month=01/day=01/hour=00/minute=00/log.gz",
-        Body=b"raw",
-    )
+    raw_key = "raw/request/year=2026/month=01/day=01/hour=00/minute=00/log.gz"
+    for k, body in [
+        ("iceberg/default/logs/data/foo.parquet", b"x"),
+        ("iceberg/meta/admin_state.json", b"{}"),
+        ("errors/bad.bad.jsonl", b"bad"),
+        (raw_key, b"raw"),
+    ]:
+        s3_mock.put_object(Bucket="test-bucket", Key=k, Body=body)
 
     events = list(reset_mod.reset_service_logs(MOCK_SERVICE_ID, reload_scheduler=fake_scheduler))
-
     assert events[-1]["type"] == "done"
 
     for table in (
@@ -1148,25 +811,14 @@ def test_wipes_operational_preserves_config_and_meta(s3_mock, fos_source, fake_s
     ):
         assert _table_count(table) == 0, f"{table} should be wiped"
     assert not evidence_path.exists()
-
-    for table in ("sources", "views", "alerts", "scoring_labels", "scoring_audit", "asn_names"):
-        assert _table_count(table) == 1, f"{table} should be preserved"
-
-    # record_audit("logs_reset") is written on top of the pre-seeded row.
-    assert _table_count("audit_logs") == 1
+    for table in ("sources", "views", "alerts", "scoring_labels", "scoring_audit", "asn_names", "audit_logs"):
+        assert _table_count(table) == 1, f"{table} should have 1 row"
 
     keys = {o["Key"] for o in s3_mock.list_objects_v2(Bucket="test-bucket").get("Contents", [])}
-    assert "iceberg/default/logs/data/foo.parquet" not in keys
-    assert "iceberg/meta/admin_state.json" in keys, "iceberg/meta/ must survive the purge"
-    assert "errors/bad.bad.jsonl" not in keys
-    assert "raw/request/year=2026/month=01/day=01/hour=00/minute=00/log.gz" in keys, (
-        "raw/ must be left alone when delete_raw_logs=False (default)"
-    )
-
-    # Scheduler paused then resumed, and the config flag restored.
+    assert "iceberg/default/logs/data/foo.parquet" not in keys and "errors/bad.bad.jsonl" not in keys
+    assert "iceberg/meta/admin_state.json" in keys and raw_key in keys
     assert fake_scheduler.call_count >= 2
-    cfg = svcconfig.load_config(MOCK_SERVICE_ID)
-    assert cfg["provisioning"]["cron_sync"]["enabled"] is True
+    assert svcconfig.load_config(MOCK_SERVICE_ID)["provisioning"]["cron_sync"]["enabled"] is True
 
 
 @pytest.mark.usefixtures("_stub_iceberg_catalog")
@@ -1174,25 +826,16 @@ def test_delete_raw_logs_true_purges_raw_prefix(s3_mock, fos_source, fake_schedu
     _save_config()
     raw_key = "raw/request/year=2026/month=01/day=01/hour=00/minute=00/log.gz"
     s3_mock.put_object(Bucket="test-bucket", Key=raw_key, Body=b"raw")
-
     list(reset_mod.reset_service_logs(MOCK_SERVICE_ID, delete_raw_logs=True, reload_scheduler=fake_scheduler))
-
-    keys = {o["Key"] for o in s3_mock.list_objects_v2(Bucket="test-bucket").get("Contents", [])}
-    assert raw_key not in keys
+    assert raw_key not in {o["Key"] for o in s3_mock.list_objects_v2(Bucket="test-bucket").get("Contents", [])}
 
 
 @pytest.mark.usefixtures("_stub_iceberg_catalog")
 def test_cron_busy_blocks_reset(monkeypatch, s3_mock, fos_source, fake_scheduler):
     _save_config()
     monkeypatch.setattr("backend.core.metadata.cron_busy", lambda service_id: True)
-
-    gen = reset_mod.reset_service_logs(MOCK_SERVICE_ID, reload_scheduler=fake_scheduler)
     with pytest.raises(RuntimeError, match="Active sync or commit"):
-        next(gen)
-
-    # The lock must not be left held after the guard raises.
-    from backend.core.iceberg.view import _get_service_lock
-
+        next(reset_mod.reset_service_logs(MOCK_SERVICE_ID, reload_scheduler=fake_scheduler))
     lock = _get_service_lock(MOCK_SERVICE_ID)
     assert lock.acquire(timeout=0.1)
     lock.release()
@@ -1200,19 +843,10 @@ def test_cron_busy_blocks_reset(monkeypatch, s3_mock, fos_source, fake_scheduler
 
 @pytest.mark.usefixtures("_stub_iceberg_catalog")
 def test_concurrent_reset_is_excluded_by_service_lock(monkeypatch, s3_mock, fos_source, fake_scheduler):
-    """RLock is reentrant per-thread, so exclusion only shows up against a
-    genuinely different thread holding the lock — the same-thread case
-    would silently reacquire and defeat the point of this test."""
-    import threading
-
     _save_config()
     monkeypatch.setattr(reset_mod, "_LOCK_TIMEOUT_S", 0.1)
-
-    from backend.core.iceberg.view import _get_service_lock
-
     lock = _get_service_lock(MOCK_SERVICE_ID)
-    held = threading.Event()
-    release = threading.Event()
+    held, release = threading.Event(), threading.Event()
 
     def _hold_lock():
         lock.acquire()
@@ -1224,9 +858,8 @@ def test_concurrent_reset_is_excluded_by_service_lock(monkeypatch, s3_mock, fos_
     holder.start()
     held.wait(timeout=5)
     try:
-        gen = reset_mod.reset_service_logs(MOCK_SERVICE_ID, reload_scheduler=fake_scheduler)
         with pytest.raises(RuntimeError, match="Another operation is in progress"):
-            next(gen)
+            next(reset_mod.reset_service_logs(MOCK_SERVICE_ID, reload_scheduler=fake_scheduler))
     finally:
         release.set()
         holder.join(timeout=5)
@@ -1235,28 +868,16 @@ def test_concurrent_reset_is_excluded_by_service_lock(monkeypatch, s3_mock, fos_
 @pytest.mark.usefixtures("_stub_iceberg_catalog")
 def test_error_mid_reset_still_resumes_scheduler_and_releases_lock(monkeypatch, s3_mock, fos_source, fake_scheduler):
     _save_config()
-    # _purge_prefix only calls the delete_fn for pages that actually list
-    # objects — seed one so the mocked failure is reached (an empty
-    # bucket would otherwise never invoke it).
     s3_mock.put_object(Bucket="test-bucket", Key="iceberg/default/logs/data/foo.parquet", Body=b"x")
     monkeypatch.setattr(
-        "backend.core.ingest._delete_objects_robust",
-        MagicMock(side_effect=RuntimeError("FOS unreachable")),
+        "backend.core.ingest._delete_objects_robust", MagicMock(side_effect=RuntimeError("FOS unreachable"))
     )
-
-    gen = reset_mod.reset_service_logs(MOCK_SERVICE_ID, reload_scheduler=fake_scheduler)
     with pytest.raises(RuntimeError, match="FOS unreachable"):
-        for _ in gen:
-            pass
-
-    cfg = svcconfig.load_config(MOCK_SERVICE_ID)
-    assert cfg["provisioning"]["cron_sync"]["enabled"] is True, "must resume the paused sync even on failure"
+        list(reset_mod.reset_service_logs(MOCK_SERVICE_ID, reload_scheduler=fake_scheduler))
+    assert svcconfig.load_config(MOCK_SERVICE_ID)["provisioning"]["cron_sync"]["enabled"] is True
     assert fake_scheduler.call_count >= 2
-
-    from backend.core.iceberg.view import _get_service_lock
-
     lock = _get_service_lock(MOCK_SERVICE_ID)
-    assert lock.acquire(timeout=0.1), "lock must be released even when the reset raises"
+    assert lock.acquire(timeout=0.1)
     lock.release()
 
 
@@ -1264,65 +885,6 @@ def test_error_mid_reset_still_resumes_scheduler_and_releases_lock(monkeypatch, 
 def test_no_service_raises_value_error(fake_scheduler):
     with pytest.raises(ValueError, match="No service found"):
         next(reset_mod.reset_service_logs("does-not-exist"))
-
-
-@pytest.mark.usefixtures("_stub_iceberg_catalog")
-def test_purge_prefix_reports_progress_per_page_and_returns_total():
-    """A large prefix (thousands of Iceberg data files) should show live
-    progress per listed page instead of going silent until it's all done —
-    the exact gap reported live during a real reset of a 100k+-file
-    service. Uses a fake paginator so this doesn't depend on moto's
-    default 1000-key page size."""
-
-    class _FakePaginator:
-        def paginate(self, **kwargs):
-            yield {"Contents": [{"Key": "iceberg/a.parquet"}, {"Key": "iceberg/b.parquet"}]}
-            yield {"Contents": [{"Key": "iceberg/c.parquet"}]}
-
-    class _FakeFos:
-        def get_paginator(self, name):
-            assert name == "list_objects_v2"
-            return _FakePaginator()
-
-    delete_calls = []
-
-    def _fake_delete(fos_client, bucket, keys):
-        delete_calls.append(list(keys))
-        return len(keys)
-
-    gen = reset_mod._purge_prefix(_FakeFos(), "bucket", "iceberg/", _fake_delete, label="thing(s)")
-    result = _drain(gen)
-
-    assert result["return"] == 3
-    assert delete_calls == [["iceberg/a.parquet", "iceberg/b.parquet"], ["iceberg/c.parquet"]]
-    # One status event per non-empty page, each showing the running total.
-    assert [e["message"] for e in result["yielded"]] == [
-        "Deleted 2 thing(s) so far...",
-        "Deleted 3 thing(s) so far...",
-    ]
-
-
-@pytest.mark.usefixtures("_stub_iceberg_catalog")
-def test_purge_prefix_excludes_prefix_and_skips_empty_pages():
-    class _FakePaginator:
-        def paginate(self, **kwargs):
-            yield {"Contents": [{"Key": "iceberg/meta/admin_state.json"}]}  # excluded, page has no deletable keys
-            yield {"Contents": []}
-            yield {"Contents": [{"Key": "iceberg/data/x.parquet"}]}
-
-    class _FakeFos:
-        def get_paginator(self, name):
-            return _FakePaginator()
-
-    def _fake_delete(fos_client, bucket, keys):
-        return len(keys)
-
-    gen = reset_mod._purge_prefix(
-        _FakeFos(), "bucket", "iceberg/", _fake_delete, exclude_prefix="iceberg/meta/", label="thing(s)"
-    )
-    result = _drain(gen)
-    assert result["return"] == 1
-    assert [e["message"] for e in result["yielded"]] == ["Deleted 1 thing(s) so far..."]
 
 
 def _drain(gen):
@@ -1335,15 +897,54 @@ def _drain(gen):
 
 
 @pytest.mark.usefixtures("_stub_iceberg_catalog")
+@pytest.mark.parametrize(
+    ("pages", "exclude_prefix", "expected_calls", "expected_return", "expected_msgs"),
+    [
+        (
+            [
+                {"Contents": [{"Key": "iceberg/a.parquet"}, {"Key": "iceberg/b.parquet"}]},
+                {"Contents": [{"Key": "iceberg/c.parquet"}]},
+            ],
+            None,
+            [["iceberg/a.parquet", "iceberg/b.parquet"], ["iceberg/c.parquet"]],
+            3,
+            ["Deleted 2 thing(s) so far...", "Deleted 3 thing(s) so far..."],
+        ),
+        (
+            [
+                {"Contents": [{"Key": "iceberg/meta/admin_state.json"}]},
+                {"Contents": []},
+                {"Contents": [{"Key": "iceberg/data/x.parquet"}]},
+            ],
+            "iceberg/meta/",
+            [["iceberg/data/x.parquet"]],
+            1,
+            ["Deleted 1 thing(s) so far..."],
+        ),
+    ],
+)
+def test_purge_prefix_pagination_and_exclusion(pages, exclude_prefix, expected_calls, expected_return, expected_msgs):
+    fos = MagicMock()
+    fos.get_paginator.return_value.paginate.return_value = iter(pages)
+    delete_calls = []
+
+    def _fake_delete(fos_client, bucket, keys):
+        delete_calls.append(list(keys))
+        return len(keys)
+
+    kwargs = {"exclude_prefix": exclude_prefix} if exclude_prefix else {}
+    result = _drain(reset_mod._purge_prefix(fos, "bucket", "iceberg/", _fake_delete, label="thing(s)", **kwargs))
+    assert result["return"] == expected_return
+    assert delete_calls == expected_calls
+    assert [e["message"] for e in result["yielded"]] == expected_msgs
+
+
+@pytest.mark.usefixtures("_stub_iceberg_catalog")
 def test_remove_tree_with_progress_reports_batches_and_removes_everything(tmp_path):
     for i in range(5):
         (tmp_path / f"f{i}.parquet").write_bytes(b"x")
-
-    gen = reset_mod._remove_tree_with_progress(str(tmp_path), batch_size=2)
-    result = _drain(gen)
-
+    result = _drain(reset_mod._remove_tree_with_progress(str(tmp_path), batch_size=2))
     assert result["return"] == 5
-    # One progress event every 2 files removed (5 files -> events at 2 and 4).
     assert [e["message"] for e in result["yielded"]] == [
         "Removed 2 local cache files so far...",
         "Removed 4 local cache files so far...",
@@ -1352,52 +953,29 @@ def test_remove_tree_with_progress_reports_batches_and_removes_everything(tmp_pa
 
 
 @pytest.mark.usefixtures("_stub_iceberg_catalog")
-def test_rum_pause_and_restore_flags_round_trip_without_inventing_rum_enabled():
-    """Restoring after a RUM reset must not create ``rum.enabled=False`` when the key never existed:
-    ``is_rum_enabled`` gives ``rum.enabled`` precedence, so a fabricated False silently disables RUM."""
-    from backend.core.reset import _pause_rum_flags, _restore_rum_flags
-
-    from backend.config import is_rum_enabled
+def test_rum_pause_and_restore_flags():
 
     cfg = {"rum_enabled": True, "rum": {"faro_version": "1.2.3"}}
     assert is_rum_enabled(cfg)
-
     paused = _pause_rum_flags(cfg)
-    assert paused is not None
-    assert not is_rum_enabled(cfg)
-
+    assert paused is not None and not is_rum_enabled(cfg)
     _restore_rum_flags(cfg, paused)
-    assert "enabled" not in cfg["rum"]
-    assert cfg["rum_enabled"] is True
-    assert is_rum_enabled(cfg)
+    assert "enabled" not in cfg["rum"] and cfg["rum_enabled"] is True and is_rum_enabled(cfg)
 
+    cfg2 = {"rum_enabled": False, "rum": {"enabled": True}}
+    paused2 = _pause_rum_flags(cfg2)
+    assert paused2 is not None
+    _restore_rum_flags(cfg2, paused2)
+    assert cfg2["rum"]["enabled"] is True and cfg2["rum_enabled"] is False
 
-@pytest.mark.usefixtures("_stub_iceberg_catalog")
-def test_rum_pause_restore_keeps_an_explicit_rum_enabled_value():
-    from backend.core.reset import _pause_rum_flags, _restore_rum_flags
-
-    cfg = {"rum_enabled": False, "rum": {"enabled": True}}
-    paused = _pause_rum_flags(cfg)
-    assert paused is not None
-    _restore_rum_flags(cfg, paused)
-    assert cfg["rum"]["enabled"] is True
-    assert cfg["rum_enabled"] is False
-
-
-@pytest.mark.usefixtures("_stub_iceberg_catalog")
-def test_rum_pause_is_a_no_op_when_rum_is_not_enabled():
-    from backend.core.reset import _pause_rum_flags
-
-    cfg: dict = {"rum": {}}
-    assert _pause_rum_flags(cfg) is None
-    assert cfg == {"rum": {}}
+    cfg3: dict = {"rum": {}}
+    assert _pause_rum_flags(cfg3) is None and cfg3 == {"rum": {}}
 
 
 # ── Merged from tests/services/test_service_manager.py ──
+
+
 def _wait_for(condition_fn, timeout: float = 2.0, interval: float = 0.01) -> bool:
-    """Spin until condition_fn() returns truthy or timeout. Avoids
-    sleeping for fixed durations in tests that depend on a background
-    thread completing."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if condition_fn():
@@ -1406,168 +984,63 @@ def _wait_for(condition_fn, timeout: float = 2.0, interval: float = 0.01) -> boo
     return False
 
 
-def test_get_dir_stats_returns_zero_for_missing_path(tmp_path, monkeypatch):
-    """Nonexistent paths settle on (0, 0). The cache stores this so we
-    don't re-walk on every subsequent call (a deleted cache dir would
-    otherwise cost a background walk on every TTL expiry)."""
-    from backend.services import service_manager as sm
-
+@pytest.fixture
+def _reset_dir_stats(monkeypatch):
     monkeypatch.setattr(sm, "_dir_stats_cache", {})
     monkeypatch.setattr(sm, "_dir_stats_refresh_in_flight", set())
 
+
+@pytest.mark.usefixtures("_reset_dir_stats")
+def test_get_dir_stats_missing_and_recursive_counts(tmp_path):
     missing = str(tmp_path / "does-not-exist")
-    # Cold call: (0, 0) placeholder immediately, real (missing-path) walk
-    # result lands on the background thread — which also happens to be
-    # (0, 0), so this assertion holds on the very first call too.
     assert sm._get_dir_stats(missing) == (0, 0)
     assert _wait_for(lambda: missing in sm._dir_stats_cache)
-
-
-def test_get_dir_stats_counts_files_recursively(tmp_path, monkeypatch):
-    """Walk visits subdirs and returns (total_bytes, file_count).
-    Pinned because subdirectory recursion is the actual cost driver
-    on cache/ which has 22k+ files across 22k dirs."""
-    from backend.services import service_manager as sm
-
-    monkeypatch.setattr(sm, "_dir_stats_cache", {})
-    monkeypatch.setattr(sm, "_dir_stats_refresh_in_flight", set())
 
     (tmp_path / "a.parquet").write_bytes(b"x" * 100)
     sub = tmp_path / "sub"
     sub.mkdir()
     (sub / "b.parquet").write_bytes(b"y" * 200)
     (sub / "c.parquet").write_bytes(b"z" * 50)
-
-    path = str(tmp_path)
-    # Cold call returns the (0, 0) placeholder immediately; the real
-    # count lands once the background walk finishes.
-    assert _wait_for(lambda: sm._get_dir_stats(path) == (350, 3))
+    assert _wait_for(lambda: sm._get_dir_stats(str(tmp_path)) == (350, 3))
 
 
-def test_get_dir_stats_returns_cached_value_within_ttl(tmp_path, monkeypatch):
-    """Within TTL, cache hit returns the cached value without re-walking.
-    This is the steady-state hot path."""
-    from backend.services import service_manager as sm
-
-    monkeypatch.setattr(sm, "_dir_stats_cache", {})
-    monkeypatch.setattr(sm, "_dir_stats_refresh_in_flight", set())
-
+@pytest.mark.usefixtures("_reset_dir_stats")
+def test_get_dir_stats_returns_cached_value_within_ttl(tmp_path):
     (tmp_path / "a.parquet").write_bytes(b"x" * 100)
     path = str(tmp_path)
-
-    # First call is cold (returns (0, 0) immediately); wait for the
-    # background walk to populate the real value before proceeding.
     sm._get_dir_stats(path)
     assert _wait_for(lambda: sm._get_dir_stats(path) == (100, 1))
-
-    # Add a file AFTER caching. If the cache is used the new file should
-    # NOT appear in the result.
     (tmp_path / "b.parquet").write_bytes(b"y" * 200)
-    size, count = sm._get_dir_stats(path)
-    assert count == 1, "cached value should ignore the newly-added file within TTL"
-    assert size == 100
+    assert sm._get_dir_stats(path) == (100, 1)
 
 
-def test_get_dir_stats_returns_stale_value_and_refreshes_in_background(tmp_path, monkeypatch):
-    """Stale-while-revalidate: when the cache entry is expired but
-    present, return the stale value IMMEDIATELY and kick off a
-    background refresh. The next call (after the bg refresh lands)
-    sees the fresh value.
-
-    This is the key cold-load mitigation. Without SWR the user pays
-    the full ~700ms walk every time the cache expires (every 60s in
-    the old code, every 5 min in the new code)."""
-    from backend.services import service_manager as sm
-
-    monkeypatch.setattr(sm, "_dir_stats_cache", {})
-    monkeypatch.setattr(sm, "_dir_stats_refresh_in_flight", set())
-
+@pytest.mark.usefixtures("_reset_dir_stats")
+def test_get_dir_stats_returns_stale_value_and_refreshes_in_background(tmp_path):
     (tmp_path / "a.parquet").write_bytes(b"x" * 100)
     path = str(tmp_path)
-
-    # Prime the cache with stale data.
     sm._dir_stats_cache[path] = (time.monotonic() - sm._DIR_STATS_TTL_SEC - 10, 999, 999)
-
-    # Add real files post-priming so we can detect when the bg refresh runs.
     (tmp_path / "b.parquet").write_bytes(b"y" * 50)
 
     t0 = time.monotonic()
     size, count = sm._get_dir_stats(path)
-    elapsed = time.monotonic() - t0
-
-    # Critical: the call returned the STALE value (999/999), not the
-    # fresh value (2 files / 150 bytes). The bg thread is still walking.
-    assert (size, count) == (999, 999), (
-        f"SWR must return STALE value on expired cache, not block on walk. Got ({size}, {count})."
-    )
-    # Returned essentially instantly (no walk on the foreground path).
-    assert elapsed < 0.5, f"SWR foreground path must NOT block on the walk; took {elapsed:.3f}s"
-
-    # The background refresh should land within the timeout, updating
-    # the cache with the actual values (2 files / 150 bytes).
-    assert _wait_for(lambda: sm._dir_stats_cache.get(path, (0, 0, 0))[2] == 2, timeout=2.0), (
-        f"background refresh did not land within 2s. Cache state: {sm._dir_stats_cache.get(path)}"
-    )
-
-    # Next call sees the refreshed value.
-    size2, count2 = sm._get_dir_stats(path)
-    assert (size2, count2) == (150, 2), (
-        f"after bg refresh, next call should return fresh value. Got ({size2}, {count2})."
-    )
+    assert (size, count) == (999, 999) and (time.monotonic() - t0) < 0.5
+    assert _wait_for(lambda: sm._dir_stats_cache.get(path, (0, 0, 0))[2] == 2, timeout=2.0)
+    assert sm._get_dir_stats(path) == (150, 2)
 
 
-def test_get_dir_stats_first_ever_call_is_non_blocking(tmp_path, monkeypatch):
-    """No cache entry yet → return the (0, 0) placeholder immediately
-    (never block on the walk) and populate the real value on a
-    background thread.
-
-    This inverts the original contract on purpose: walking synchronously
-    on first call was "fine" for a few thousand files, but for a service
-    with 100k+ cache files it turned the very first post-restart
-    /api/bootstrap or /api/services call into a multi-minute block —
-    see the 2026-08-03 incident where a 162k-file cache dir made
-    /admin unreachable for ~3 minutes after every deploy. The cost is
-    now paid off the request path, every time, including the first."""
-    import time as _time
-
-    from backend.services import service_manager as sm
-
-    monkeypatch.setattr(sm, "_dir_stats_cache", {})
-    monkeypatch.setattr(sm, "_dir_stats_refresh_in_flight", set())
-
+@pytest.mark.usefixtures("_reset_dir_stats")
+def test_get_dir_stats_first_ever_call_is_non_blocking(tmp_path):
     (tmp_path / "a.parquet").write_bytes(b"x" * 42)
     path = str(tmp_path)
-
-    t0 = _time.monotonic()
-    size, count = sm._get_dir_stats(path)
-    elapsed = _time.monotonic() - t0
-
-    assert (size, count) == (0, 0), "first-ever call must return the placeholder, not block on the walk"
-    assert elapsed < 0.5, f"first-ever call must not block on the walk; took {elapsed:.3f}s"
-
-    assert _wait_for(lambda: sm._get_dir_stats(path) == (42, 1)), (
-        "background walk did not populate the real value within the timeout"
-    )
+    t0 = time.monotonic()
+    assert sm._get_dir_stats(path) == (0, 0) and (time.monotonic() - t0) < 0.5
+    assert _wait_for(lambda: sm._get_dir_stats(path) == (42, 1))
 
 
+@pytest.mark.usefixtures("_reset_dir_stats")
 def test_get_dir_stats_coalesces_concurrent_refreshes(tmp_path, monkeypatch):
-    """When two threads both see a stale entry at the same instant,
-    only ONE background refresh should fire — guarded by
-    _dir_stats_refresh_in_flight. Otherwise on a 50-tenant fleet with
-    50 concurrent /api/bootstrap calls we'd spawn 50 walk threads,
-    saturating the filesystem with redundant work."""
-    import threading
-
-    from backend.services import service_manager as sm
-
-    monkeypatch.setattr(sm, "_dir_stats_cache", {})
-    monkeypatch.setattr(sm, "_dir_stats_refresh_in_flight", set())
-
     (tmp_path / "a.parquet").write_bytes(b"x" * 100)
     path = str(tmp_path)
-
-    # Patch the worker to count invocations and block briefly so
-    # concurrent SWR calls overlap with the in-flight marker.
     refresh_count = {"n": 0}
     real_walk = sm._walk_dir_stats
 
@@ -1577,65 +1050,35 @@ def test_get_dir_stats_coalesces_concurrent_refreshes(tmp_path, monkeypatch):
         return real_walk(p)
 
     monkeypatch.setattr(sm, "_walk_dir_stats", _slow_walk)
-
-    # Prime stale entry.
     sm._dir_stats_cache[path] = (time.monotonic() - sm._DIR_STATS_TTL_SEC - 10, 0, 0)
 
-    # Fire 10 concurrent SWR-triggering calls.
     threads = [threading.Thread(target=lambda: sm._get_dir_stats(path)) for _ in range(10)]
     for t in threads:
         t.start()
     for t in threads:
         t.join()
 
-    # Wait for the (single) background refresh to land.
     assert _wait_for(lambda: len(sm._dir_stats_refresh_in_flight) == 0, timeout=2.0)
-
-    assert refresh_count["n"] == 1, (
-        f"coalescing failed: {refresh_count['n']} background walks fired for 10 concurrent calls "
-        f"(expected exactly 1). The _dir_stats_refresh_in_flight guard is broken."
-    )
+    assert refresh_count["n"] == 1
 
 
+@pytest.mark.usefixtures("_reset_dir_stats")
 def test_get_dir_stats_coalesces_cold_first_arrivals(tmp_path, monkeypatch):
-    """When the cache is empty and N threads call _get_dir_stats(path)
-    simultaneously, only ONE background walk should fire — the same
-    `_dir_stats_refresh_in_flight` guard used for stale-refresh
-    coalescing also covers this case, since the cold path no longer has
-    a separate blocking code path of its own.
-
-    Pinned because on a fleet cold-start (backend just rebooted, 50
-    /api/bootstrap calls land in the first second), without this
-    coalescing we'd fire 50 parallel walks for the same dir. Every
-    caller gets the (0, 0) placeholder immediately now (none of them
-    block), so this only asserts the walk count + eventual convergence,
-    not that every caller's return value is already populated."""
-    import threading
-
-    from backend.services import service_manager as sm
-
-    monkeypatch.setattr(sm, "_dir_stats_cache", {})
-    monkeypatch.setattr(sm, "_dir_stats_refresh_in_flight", set())
-
     (tmp_path / "a.parquet").write_bytes(b"x" * 100)
     path = str(tmp_path)
-
     walk_count = {"n": 0}
     real_walk = sm._walk_dir_stats
-
     walk_blocker = threading.Event()
 
     def _slow_walk(p):
         walk_count["n"] += 1
-        walk_blocker.wait(timeout=5.0)  # Wait until all threads have made their call
+        walk_blocker.wait(timeout=5.0)
         return real_walk(p)
 
     monkeypatch.setattr(sm, "_walk_dir_stats", _slow_walk)
-
     results = []
     results_lock = threading.Lock()
-
-    call_barrier = threading.Barrier(11)  # 10 threads + main thread
+    call_barrier = threading.Barrier(11)
 
     def _call():
         call_barrier.wait(timeout=5.0)
@@ -1646,96 +1089,34 @@ def test_get_dir_stats_coalesces_cold_first_arrivals(tmp_path, monkeypatch):
     threads = [threading.Thread(target=_call) for _ in range(10)]
     for t in threads:
         t.start()
-
-    # Wait for all threads to be ready to call
     call_barrier.wait(timeout=5.0)
-
-    # Give them a tiny bit of time to actually make the call and get the placeholder
     time.sleep(0.1)
-
-    # Unblock the background walk
     walk_blocker.set()
-
     for t in threads:
         t.join()
 
-    assert walk_count["n"] == 1, (
-        f"cold-path coalescing failed: {walk_count['n']} walks fired for 10 concurrent first-arrivals "
-        f"(expected exactly 1). The _dir_stats_refresh_in_flight guard is broken."
-    )
-    # None of the concurrent callers blocked, so (0, 0) placeholders are
-    # expected here — the real assertion is that the walk converges.
-    assert all(r == (0, 0) for r in results), f"cold callers must get the placeholder, not block. Got {results}"
-    assert _wait_for(lambda: sm._get_dir_stats(path) == (100, 1)), "background walk never converged on the real value"
+    assert walk_count["n"] == 1
+    assert all(r == (0, 0) for r in results)
+    assert _wait_for(lambda: sm._get_dir_stats(path) == (100, 1))
 
 
-def test_get_dir_stats_recovers_from_thread_start_failure(tmp_path, monkeypatch):
-    """When Thread.start() raises (resource exhaustion, OS thread-limit),
-    the in-flight marker must be released so the next reader can try
-    again. Otherwise the cache becomes permanently stuck serving stale
-    data until process restart — exactly the worst failure mode for a
-    self-healing SWR design."""
-    from backend.services import service_manager as sm
-
-    monkeypatch.setattr(sm, "_dir_stats_cache", {})
-    monkeypatch.setattr(sm, "_dir_stats_refresh_in_flight", set())
-
+@pytest.mark.usefixtures("_reset_dir_stats")
+def test_get_dir_stats_recovers_from_thread_start_failure_and_invariants(tmp_path, monkeypatch):
     path = str(tmp_path / "doesnt-matter")
-    # Seed stale entry so the SWR branch fires.
     sm._dir_stats_cache[path] = (time.monotonic() - sm._DIR_STATS_TTL_SEC - 10, 7, 7)
 
-    # Patch threading.Thread on the service_manager module so .start() raises.
     class _ExplodingThread:
         def __init__(self, *a, **kw):
             pass
 
         def start(self):
-            raise RuntimeError("can't start new thread (simulated resource exhaustion)")
+            raise RuntimeError("can't start new thread")
 
     monkeypatch.setattr(sm.threading, "Thread", _ExplodingThread)
-
-    # First SWR call: returns stale, tries to schedule, fails to start.
-    result = sm._get_dir_stats(path)
-    assert result == (7, 7), "stale value must still be served when thread start fails"
-
-    # The critical invariant: in_flight must NOT contain the path after
-    # the failed start, so the next reader can try again.
-    assert path not in sm._dir_stats_refresh_in_flight, (
-        f"path stuck in _dir_stats_refresh_in_flight after Thread.start() failure — "
-        f"cache is now permanently stuck serving stale. Set state: {sm._dir_stats_refresh_in_flight}"
-    )
-
-
-def test_dir_stats_ttl_is_long_enough_for_tab_idle(tmp_path, monkeypatch):
-    """Pins _DIR_STATS_TTL_SEC ≥ 300 (5 minutes). The whole point of
-    the bump from 60s → 300s is that a typical tab-idle (coffee break)
-    no longer pays the cold-walk cost. Regressing this to 60s would
-    silently undo half the SWR win."""
-    from backend.services import service_manager as sm
-
-    assert sm._DIR_STATS_TTL_SEC >= 300, (
-        f"_DIR_STATS_TTL_SEC must be ≥ 300s so tab-idle doesn't pay the cold walk "
-        f"on the next /api/bootstrap. Got {sm._DIR_STATS_TTL_SEC}s."
-    )
-
-
-def test_bust_dir_stats_cache_is_not_defined(monkeypatch):
-    """The _bust_dir_stats_cache function was dead code (defined, never
-    called). The SWR design makes manual invalidation unnecessary —
-    every read serves stale + schedules a refresh, so the cache is
-    self-healing within one TTL window. Pinned so a future copy-paste
-    that re-introduces _bust_dir_stats_cache also re-introduces a
-    code reviewer prompt to question whether it's actually needed."""
-    from backend.services import service_manager as sm
-
-    assert not hasattr(sm, "_bust_dir_stats_cache"), (
-        "_bust_dir_stats_cache was removed as part of the SWR refactor — "
-        "the cache is self-healing via stale-while-revalidate. If you genuinely "
-        "need manual invalidation (e.g. for an immediate-update UX flow), "
-        "document the use case in a comment AND check that the call site "
-        "actually matters (the previous incarnation had zero callers across "
-        "the entire codebase, including tests)."
-    )
+    assert sm._get_dir_stats(path) == (7, 7)
+    assert path not in sm._dir_stats_refresh_in_flight
+    assert sm._DIR_STATS_TTL_SEC >= 300
+    assert not hasattr(sm, "_bust_dir_stats_cache")
 
 
 # ── Merged from tests/core/test_custom_fields.py ──
@@ -2522,3 +1903,1234 @@ def test_typed_field_with_invalid_string_value_nulls_cell(custom_field_env, ddb_
         [1, bad_value, 2],
     )
     assert by_url["/path/1"] is None, f"contract violation ({description}): got {by_url['/path/1']!r}"
+
+
+# ── Merged from tests/core/test_vcl_semantics.py ──
+
+import re
+
+import pytest
+from backend.provision.cmcd_fields import (
+    get_cmcd_fields,
+)
+from hypothesis import given
+from hypothesis import strategies as st
+
+from backend.provision.session_scoring_orchestrator import _SCORING_CUSTOM_FIELDS
+
+FALCO_INSTALLED = shutil.which("falco") is not None
+FALCO_REQUIRED = os.environ.get("FALCO_REQUIRED") == "1"
+
+if FALCO_REQUIRED and not FALCO_INSTALLED:
+    raise RuntimeError(
+        "FALCO_REQUIRED=1 but the falco binary is not on PATH. Install falco or unset FALCO_REQUIRED to allow skipping."
+    )
+
+_FASTLY_STUBS = Path(__file__).resolve().parent.parent / "fixtures" / "fastly_stubs.vcl"
+FALCO_PATH = shutil.which("falco")
+requires_falco = pytest.mark.skipif(not FALCO_INSTALLED, reason="falco executable not found in PATH")
+
+
+@pytest.fixture
+def run_falco_test():
+    template = _FASTLY_STUBS.read_text()
+
+    def _run(cfg: dict, test_assertions: str) -> subprocess.CompletedProcess:
+        snippets = generate_capture_vcl(cfg)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            main_vcl_path = os.path.join(tmpdir, "main.vcl")
+            test_vcl_path = os.path.join(tmpdir, "suite.test.vcl")
+            with open(main_vcl_path, "w") as f:
+                f.write(
+                    template.replace("//<INJECT_FETCH_SNIPPET>", snippets.get("fetch", "")).replace(
+                        "//<INJECT_DELIVER_SNIPPET>", snippets.get("deliver", "")
+                    )
+                )
+            with open(test_vcl_path, "w") as f:
+                f.write(test_assertions)
+            return subprocess.run(["falco", "test", main_vcl_path], cwd=tmpdir, capture_output=True, text=True)
+
+    return _run
+
+
+@pytest.mark.skipif(not FALCO_INSTALLED, reason="falco executable not found in PATH")
+def test_falco_origin_field_always_log(run_falco_test):
+    cfg = {
+        "groups": ["L"],
+        "custom_fields": [
+            {
+                "name": "x_drew",
+                "vcl_log_expression": "beresp.http.x-drew",
+                "collection_stage": "origin",
+                "origin_log_frequency": "all",
+            }
+        ],
+    }
+    test_code = """
+// @scope: fetch
+sub test_fetch_captures {
+    set beresp.http.x-drew = "hello";
+    testing.call_subroutine("vcl_fetch");
+    assert.equal(beresp.http.x-fos-origin-data:x_drew, "hello");
+}
+// @scope: deliver
+sub test_deliver_promotes_and_cleans {
+    set resp.http.x-fos-origin-data:x_drew = "hello";
+    testing.call_subroutine("vcl_deliver");
+    assert.equal(req.http.x-fos-origin-data:x_drew, "hello");
+    assert.is_notset(resp.http.x-fos-origin-data:x_drew);
+}
+"""
+    result = run_falco_test(cfg, test_code)
+    assert result.returncode == 0, f"Falco test failed:\n{result.stdout}\n{result.stderr}"
+
+
+@pytest.mark.skipif(not FALCO_INSTALLED, reason="falco executable not found in PATH")
+def test_falco_shield_interaction(run_falco_test):
+    cfg = {
+        "groups": ["L"],
+        "custom_fields": [
+            {
+                "name": "x_drew",
+                "vcl_log_expression": "beresp.http.x-drew",
+                "collection_stage": "origin",
+                "origin_log_frequency": "all",
+            }
+        ],
+    }
+    test_code = """
+// @scope: deliver
+sub test_shield_keeps_header_for_edge {
+    set resp.http.x-fos-origin-data:x_drew = "hello";
+    set req.http.x-is-cluster-fetch = "1";
+    testing.call_subroutine("vcl_deliver");
+    assert.equal(req.http.x-fos-origin-data:x_drew, "hello");
+    assert.equal(resp.http.x-fos-origin-data:x_drew, "hello");
+}
+// @scope: deliver
+sub test_edge_strips_header {
+    set resp.http.x-fos-origin-data:x_drew = "hello";
+    unset req.http.x-is-cluster-fetch;
+    testing.call_subroutine("vcl_deliver");
+    assert.equal(req.http.x-fos-origin-data:x_drew, "hello");
+    assert.is_notset(resp.http.x-fos-origin-data:x_drew);
+}
+"""
+    result = run_falco_test(cfg, test_code)
+    assert result.returncode == 0, f"Falco test failed:\n{result.stdout}\n{result.stderr}"
+
+
+@pytest.mark.skipif(not FALCO_INSTALLED, reason="falco executable not found in PATH")
+def test_falco_group_l_telemetry_cleanup(run_falco_test):
+    cfg = {"groups": ["L"], "custom_fields": []}
+    test_code = """
+// @scope: deliver
+sub test_telemetry_headers_stripped {
+    set resp.http.x-of-ttfb = "100";
+    set resp.http.x-of-ttlb = "200";
+    set resp.http.x-of-status = "200";
+    set resp.http.x-of-oip = "1.2.3.4";
+    set resp.http.x-of-oretries = "0";
+    unset req.http.x-is-cluster-fetch;
+    testing.call_subroutine("vcl_deliver");
+    assert.is_notset(resp.http.x-of-ttfb);
+    assert.is_notset(resp.http.x-of-ttlb);
+    assert.is_notset(resp.http.x-of-status);
+    assert.is_notset(resp.http.x-of-oip);
+    assert.is_notset(resp.http.x-of-oretries);
+}
+"""
+    result = run_falco_test(cfg, test_code)
+    assert result.returncode == 0, f"Falco test failed:\n{result.stdout}\n{result.stderr}"
+
+
+@pytest.mark.skipif(not FALCO_INSTALLED, reason="falco executable not found in PATH")
+def test_falco_origin_timing_ttfb_ttlb(run_falco_test):
+    cfg = {"groups": ["L"], "custom_fields": []}
+    test_code = """
+// @scope: fetch
+sub test_fetch_records_ttfb {
+    declare local var.start INTEGER;
+    set var.start = std.atoi(time.elapsed.usec);
+    set var.start -= 500;
+    set req.http.x-of-start = "" + var.start;
+    set beresp.status = 200;
+    testing.call_subroutine("vcl_fetch");
+    assert.true(std.atoi(req.http.x-of-ttfb) >= 500);
+    assert.equal(req.http.x-of-status, "200");
+}
+// @scope: deliver
+sub test_deliver_records_ttlb_and_promotes {
+    declare local var.start INTEGER;
+    set var.start = std.atoi(time.elapsed.usec);
+    set var.start -= 800;
+    set req.http.x-of-start = "" + var.start;
+    set req.http.x-of-ttfb = "500";
+    set req.http.x-of-status = "200";
+    set req.http.x-of-ttlb = "";
+    set req.http.x-is-cluster-fetch = "";
+    testing.call_subroutine("vcl_deliver");
+    assert.true(std.atoi(req.http.x-of-ttlb) >= 800);
+    assert.is_notset(resp.http.x-of-ttfb);
+    assert.is_notset(resp.http.x-of-ttlb);
+}
+"""
+    result = run_falco_test(cfg, test_code)
+    assert result.returncode == 0, f"Falco test failed:\n{result.stdout}\n{result.stderr}"
+
+
+@pytest.mark.skipif(not FALCO_INSTALLED, reason="falco executable not found in PATH")
+def test_falco_shield_to_edge_timing_promotion(run_falco_test):
+    cfg = {"groups": ["L"], "custom_fields": []}
+    test_code = """
+// @scope: deliver
+sub test_edge_promotes_metrics_from_shield_resp {
+    set resp.http.x-of-ttfb = "500";
+    set resp.http.x-of-ttlb = "800";
+    set resp.http.x-of-status = "200";
+    set req.http.x-of-start = "";
+    set req.http.x-of-ttfb = "";
+    set req.http.x-of-ttlb = "";
+    set req.http.x-of-status = "";
+    set req.http.x-is-cluster-fetch = "";
+    testing.call_subroutine("vcl_deliver");
+    assert.equal(req.http.x-of-ttfb, "500");
+    assert.equal(req.http.x-of-ttlb, "800");
+    assert.equal(req.http.x-of-status, "200");
+    assert.is_notset(resp.http.x-of-ttfb);
+    assert.is_notset(resp.http.x-of-ttlb);
+}
+"""
+    result = run_falco_test(cfg, test_code)
+    assert result.returncode == 0, f"Falco test failed:\n{result.stdout}\n{result.stderr}"
+
+
+def test_deliver_stage_emits_capture_and_log_format_and_coexistence():
+    cfg_deliver = {
+        "groups": ["A"],
+        "custom_fields": [
+            {
+                "name": "edge_score",
+                "vcl_log_expression": "resp.http.X-Edge-Score",
+                "collection_stage": "deliver",
+                "value_type": "numeric",
+                "enabled": True,
+            }
+        ],
+    }
+    deliver = generate_capture_vcl(cfg_deliver).get("deliver", "")
+    assert "# --- Custom Deliver Fields Start ---" in deliver
+    assert 'if (resp.http.X-Edge-Score != "") {' in deliver
+    assert "set req.http.x-fos-edge-data:edge_score = resp.http.X-Edge-Score;" in deliver
+
+    cfg_fmt = {
+        "groups": ["A"],
+        "custom_fields": [
+            {
+                "name": "edge_score",
+                "vcl_log_expression": "req.http.x-edge-score",
+                "collection_stage": "deliver",
+                "value_type": "numeric",
+                "enabled": True,
+            },
+            {
+                "name": "edge_cookie_compliance",
+                "vcl_log_expression": "req.http.x-edge-cookie-compliance",
+                "collection_stage": "deliver",
+                "value_type": "string",
+                "enabled": True,
+            },
+        ],
+    }
+    fmt = generate_log_format(cfg_fmt)
+    assert (
+        '"edge_score":%{if(fastly.ff.visits_this_service == 0 && '
+        'substr(req.http.x-edge-score, 0, 20) ~ "^-?[0-9]+(\\\\.[0-9]+)?$"'
+        ', substr(req.http.x-edge-score, 0, 20), "null")}V'
+    ) in fmt
+    assert re.search(
+        r'"edge_cookie_compliance":"%\{json\.escape\('
+        r"if\(fastly\.ff\.visits_this_service == 0, "
+        r'substr\(req\.http\.x-edge-cookie-compliance, 0, \d+\), ""\)\)}V"',
+        fmt,
+    )
+
+    cfg_disabled = {
+        "groups": ["A"],
+        "custom_fields": [
+            {
+                "name": "edge_score",
+                "vcl_log_expression": "resp.http.X-Edge-Score",
+                "collection_stage": "deliver",
+                "enabled": False,
+            }
+        ],
+    }
+    assert "edge_score" not in generate_capture_vcl(cfg_disabled).get("deliver", "")
+
+    cfg_coexist = {
+        "groups": ["L"],
+        "custom_fields": [
+            {
+                "name": "f_edge",
+                "vcl_log_expression": "req.http.X-Custom-Edge",
+                "collection_stage": "edge",
+                "enabled": True,
+            },
+            {
+                "name": "f_origin",
+                "vcl_log_expression": "beresp.http.X-Custom-Origin",
+                "collection_stage": "origin",
+                "origin_log_frequency": "all",
+                "enabled": True,
+            },
+            {
+                "name": "f_deliver",
+                "vcl_log_expression": "resp.http.X-Custom-Deliver",
+                "collection_stage": "deliver",
+                "enabled": True,
+            },
+        ],
+    }
+    snippets = generate_capture_vcl(cfg_coexist)
+    assert "f_edge" in snippets["recv"] and "f_origin" in snippets["fetch"] and "f_deliver" in snippets["deliver"]
+    assert "unset req.http.x-fos-edge-data:f_origin;" in snippets["recv"]
+    assert "unset req.http.x-fos-origin-data:f_origin;" in snippets["recv"]
+    assert "  set req.http.x-fos-edge-data:f_origin" not in snippets["recv"]
+    assert "  set req.http.x-fos-edge-data:f_deliver" not in snippets["fetch"]
+    assert "  set beresp.http.x-fos-origin-data:f_edge" not in snippets["fetch"]
+    assert "f_edge" not in snippets["deliver"]
+
+
+def test_ip_capture_and_recv_reset_and_cookie_session_hash():
+    snippets = generate_capture_vcl({"groups": ["A"]})
+    assert "set req.http.x-fos-edge-data:ip = req.http.Fastly-Client-IP;" in snippets["recv"]
+    assert "set req.http.x-fos-edge-data:ip = client.ip;" in snippets["recv"]
+    reset = snippets["recv_reset"]
+    assert "unset req.http.Fastly-Client-IP;" in reset
+    assert "req.restarts == 0 && fastly.ff.visits_this_service == 0" in reset
+    assert "X-Edge-Shield-Auth" not in reset
+
+    assert "recv_reset" not in generate_capture_vcl({"groups": [], "field_overrides": {"ip": False}})
+
+    snippets_h = generate_capture_vcl({"groups": ["H"]})
+    assert "x-fos-edge-data:cookie_session" not in snippets_h["recv"]
+    assert "digest.hash_sha256" not in snippets_h["recv"]
+
+    snippets_opt_in = generate_capture_vcl({"groups": ["H"], "field_overrides": {"cookie_session": True}})
+    assert "set req.http.x-fos-edge-data:cookie_session = " in snippets_opt_in["recv"]
+    assert "digest.hash_sha256" in snippets_opt_in["recv"]
+
+
+def _if_conditions(expr: str) -> list[str]:
+    conds, i = [], 0
+    while True:
+        j = expr.find("if(", i)
+        if j == -1:
+            break
+        depth, k, start = 1, j + 3, j + 3
+        while k < len(expr) and depth > 0:
+            c = expr[k]
+            if c == "(":
+                depth += 1
+            elif c == ")":
+                depth -= 1
+            elif c == "," and depth == 1:
+                break
+            k += 1
+        conds.append(expr[start:k])
+        i = j + 3
+    return conds
+
+
+def test_cookie_session_hash_has_no_if_nested_in_a_condition():
+    expr = _session_cookie_hash_vcl()
+    for cond in _if_conditions(expr):
+        assert "if(" not in cond, f"if() nested in an if()-condition (Fastly rejects): {cond!r}"
+    assert 'digest.hash_sha256("")' not in expr
+    assert expr.count("digest.hash_sha256") == len(SESSION_COOKIE_ALLOWLIST)
+    first, last = SESSION_COOKIE_ALLOWLIST[0], SESSION_COOKIE_ALLOWLIST[-1]
+    assert expr.index(f'"{first}"') < expr.index(f'"{last}"')
+
+
+# ── Merged from tests/utils/test_vcl_utils.py & tests/provision/test_vcl_builder.py ──
+
+
+def test_log_format_to_vcl_log_variants():
+    assert log_format_to_vcl_log("plain text no braces") == '{"plain text no braces"}'
+    out1 = log_format_to_vcl_log('{"ts": %{time.start}V}')
+    assert "time.start" in out1 and " + " in out1
+    out2 = log_format_to_vcl_log('{"ip":"%{client.ip}V","ua":"%{req.http.User-Agent}V"}')
+    assert "client.ip" in out2 and "req.http.User-Agent" in out2 and " + " in out2
+    out3 = log_format_to_vcl_log('\\{"raw":"x"\\}')
+    assert "\\{" not in out3 and "\\}" not in out3
+    assert '"} + {"' in log_format_to_vcl_log('{"a":"b"}{"c":"d"}')
+
+
+@pytest.mark.parametrize(
+    ("fmt", "substr"),
+    [
+        ("", "empty"),
+        ('{"timestamp":%{time.start}V}\n', "newline"),
+        ('"just a string"', ""),
+        ('{"ip":"%{client.ip}V"}', "timestamp"),
+    ],
+)
+def test_lint_log_format_json_rejections(fmt: str, substr: str):
+    with patch("backend.utils.vcl_utils.shutil.which", return_value=None):
+        ok, msg = lint_log_format(fmt)
+    assert ok is False and (not substr or substr in msg.lower())
+    if FALCO_PATH is not None:
+        assert lint_log_format(fmt)[0] is False
+
+
+def test_lint_log_format_json_and_falco_paths():
+    valid = '{"timestamp":"%{time.start}V","ip":"%{client.ip}V"}'
+    with patch("backend.utils.vcl_utils.shutil.which", return_value=None):
+        ok, msg = lint_log_format(valid)
+        assert ok is True and ("falco" in msg.lower() or "valid" in msg.lower())
+        assert lint_log_format('\\{"timestamp":"%{time.start}V"\\}')[0] is True
+        assert lint_log_format('{"timestamp":"%{this_is_not_valid_vcl}V"}')[0] is True
+
+    if FALCO_PATH is not None:
+        assert lint_log_format(valid)[0] is True
+
+    with (
+        patch("backend.utils.vcl_utils.shutil.which", return_value="/usr/bin/falco"),
+        patch(
+            "backend.utils.vcl_utils._run_falco_lint",
+            return_value=(1, "falco 0.4.2 linting…", "[ERROR] vcl_log syntax invalid at line 9"),
+        ),
+    ):
+        ok_err, msg_err = lint_log_format('{"timestamp":"%{time.start}V"}')
+        assert ok_err is False and "[ERROR]" in msg_err
+
+    with (
+        patch("backend.utils.vcl_utils.shutil.which", return_value="/usr/bin/falco"),
+        patch("backend.utils.vcl_utils._run_falco_lint", return_value=(2, "falco: unexpected token near 'log'", "")),
+    ):
+        assert lint_log_format('{"timestamp":"%{time.start}V"}')[0] is False
+
+
+@pytest.mark.parametrize(
+    "bad", ['has"quote', "back\\slash", "tab\tinside", "newline\ninside", "null\x00byte", "del\x7fchar"]
+)
+def test_validate_quoted_literal_rejects_forbidden(bad: str):
+    with pytest.raises(VclSafetyError):
+        validate_quoted_literal(bad)
+
+
+def test_validate_quoted_literal_and_macro_and_lint_doc(monkeypatch: pytest.MonkeyPatch):
+    assert validate_quoted_literal("hello-world_123") == "hello-world_123"
+    assert validate_quoted_literal("") == ""
+    assert validate_quoted_literal(r"\.js$", allow_backslash=True) == r"\.js$"
+    for bad in ('re"gex', "re\tgex"):
+        with pytest.raises(VclSafetyError):
+            validate_quoted_literal(bad, allow_backslash=True)
+    with pytest.raises(ValueError):
+        validate_quoted_literal('"')
+
+    assert validate_log_format_macro("req.http.Host") == "req.http.Host"
+    assert validate_log_format_macro(r'strftime(\{"%Y"\}, now)') == r'strftime(\{"%Y"\}, now)'
+    for bad_macro in ("a; b", "a /* c */", "a // c", "close}brace", "open{brace"):
+        with pytest.raises(VclSafetyError, match="VCL macro contains invalid characters"):
+            validate_log_format_macro(bad_macro)
+
+    monkeypatch.setattr(vs.shutil, "which", lambda _name: None)
+    res = vs.lint_document("sub vcl_recv { }")
+    assert (
+        isinstance(res, LintResult) and res.ok is True and res.skipped is True and "falco" in res.skipped_reason.lower()
+    )
+
+
+def test_path_within_dir_and_sql_quote_helpers(tmp_path, monkeypatch):
+    base_dir = str(tmp_path)
+    assert path_within_dir(base_dir, str(tmp_path / "subdir" / "file.txt")) is True
+    assert path_within_dir(base_dir, base_dir) is True
+    assert path_within_dir(base_dir, str(tmp_path / ".." / "other_dir")) is False
+
+    monkeypatch.setattr(os.path, "commonpath", lambda _paths: (_ for _ in ()).throw(ValueError("mismatch")))
+    assert path_within_dir("/tmp/base", "/tmp/base/candidate") is False
+
+    assert quote_path_list(["/a/o'brien.parquet", "/b.parquet"]) == "'/a/o''brien.parquet', '/b.parquet'"
+    with pytest.raises(TypeError):
+        escape_sql_literal(5)  # type: ignore[arg-type]
+
+    needle = 'replace("\'", "\'\'")'
+    root = pathlib.Path(__file__).resolve().parents[2] / "backend"
+    offenders = [
+        str(p.relative_to(root))
+        for p in root.rglob("*.py")
+        if needle in p.read_text(encoding="utf-8") and p.name not in {"sql_validator.py", "duckdb.py"}
+    ]
+    assert offenders == []
+
+
+def test_validate_url_exclusion_regex_and_lint_vcl():
+    assert validate_url_exclusion_regex("") == "" and validate_url_exclusion_regex("   \t  ") == ""
+    assert validate_url_exclusion_regex(r"\.(css|js|png)$") == r"\.(css|js|png)$"
+    assert validate_url_exclusion_regex(r"^/healthz") == r"^/healthz"
+    assert validate_url_exclusion_regex("\\.css$\n") == r"\.css$"
+    assert validate_url_exclusion_regex("  \\.css$  ") == r"\.css$"
+
+    for bad_type in (b"bytes", 42):
+        with pytest.raises(RegexValidationError) as exc:
+            validate_url_exclusion_regex(bad_type)  # type: ignore[arg-type]
+        assert exc.value.reason == "type"
+
+    with pytest.raises(RegexValidationError) as exc:
+        validate_url_exclusion_regex("a" * (MAX_REGEX_BYTES + 1))
+    assert exc.value.reason == "too_long"
+
+    for bad_char in ('foo"bar', *(f"foo{c}bar" for c in ("\x00", "\x01", "\x07", "\x1b"))):
+        with pytest.raises(RegexValidationError) as exc:
+            validate_url_exclusion_regex(bad_char)
+        assert exc.value.reason == "disallowed_char"
+
+    for bad_re in (r"(unclosed", r"[unbalanced"):
+        with pytest.raises(RegexValidationError) as exc:
+            validate_url_exclusion_regex(bad_re)
+        assert exc.value.reason == "invalid_regex"
+
+    with patch("backend.utils.vcl_validator.shutil.which", return_value=None):
+        res = lint_vcl("ignore me", snippet_name="test")
+        assert res.skipped is True and res.ok is True and "falco" in res.skipped_reason.lower()
+        with pytest.raises(RegexValidationError) as exc:
+            validate_recv_exclusion_regex_with_lint(
+                r"\.css$", build_full_snippet=lambda _: "irrelevant", require_falco=True
+            )
+        assert exc.value.reason == "falco_unavailable"
+        cleaned, lint_res = validate_recv_exclusion_regex_with_lint(
+            r"\.css$", build_full_snippet=lambda _: "irrelevant", require_falco=False
+        )
+        assert cleaned == r"\.css$" and lint_res.skipped
+
+    for empty_val in (None, "", "   "):
+        assert resolve_exclude_url_regex(empty_val) == DEFAULT_ASSET_EXT_REGEX
+    assert DEFAULT_ASSET_EXT_REGEX in recv_snippet("svc")
+    custom_body = recv_snippet("svc", exclude_url_regex=r"\.(css)$")
+    assert r"\.(css)$" in custom_body and DEFAULT_ASSET_EXT_REGEX not in custom_body
+
+
+@requires_falco
+def test_lint_vcl_and_e2e_recv_exclusion_with_falco():
+    assert lint_vcl(recv_snippet("test_svc"), snippet_name="recv_default").ok
+    assert lint_vcl(recv_snippet("test_svc", exclude_url_regex=r"\.(css|js|png)$")).ok
+    bad_res = lint_vcl('# defective snippet\nif (std.tolower(req.url) !~ "unclosed[") {\n  return(pass);\n}')
+    assert not bad_res.ok and any("regex" in e.lower() for e in bad_res.errors)
+
+    def builder(cleaned: str) -> str:
+        return recv_snippet("svc", exclude_url_regex=cleaned or None)
+
+    cleaned, lint = validate_recv_exclusion_regex_with_lint(
+        r"\.(jpg|png)$", build_full_snippet=builder, require_falco=True
+    )
+    assert cleaned == r"\.(jpg|png)$" and lint.ok
+    with pytest.raises(RegexValidationError) as exc:
+        validate_recv_exclusion_regex_with_lint(r'foo"bar', build_full_snippet=builder, require_falco=True)
+    assert exc.value.reason == "disallowed_char"
+
+
+def test_cmcd_capture_ordering_and_declarative_parity():
+    lf_cfg = {"groups": ["A", "B", "C"], "custom_fields": get_cmcd_fields(True), "field_overrides": {}}
+    recv = generate_capture_vcl(lf_cfg, cmcd_enabled=True, cmcd_mode="query_string", cmcd_version=1)["recv"]
+    for cf in get_cmcd_fields(True):
+        name = cf["name"]
+        key = name[len("cmcd_") :]
+        extract = recv.find(f"set req.http.x-cmcd:{key} ")
+        capture = recv.find(f"set req.http.x-fos-edge-data:{name} ")
+        assert -1 < extract < capture
+
+    off = generate_capture_vcl(lf_cfg, cmcd_enabled=False)["recv"]
+    assert "set req.http.x-cmcd:sid = " not in off and "set req.http.x-cmcd:sid = " in recv
+    assert 0 <= recv.rfind('subfield(var.cmcd, "rtp"') < recv.find('querystring.filter(req.url, "CMCD")')
+
+    state = FeatureState(
+        service_id="svcCMCDORDER",
+        log_period=60,
+        sample_rate=100,
+        edge_only=False,
+        custom_condition="",
+        fos_prefix="",
+        fos_endpoint="fos.example.com",
+        logging_enabled=True,
+        cmcd=CmcdConfig(enabled=True, mode="query_string", version=1),
+        log_fields=LogFieldsConfig(groups=["A", "B", "C"], custom_fields=get_cmcd_fields(True)),
+    )
+    decl_recv = generate_consolidated_snippet(state, "vcl_recv")
+    ext, cap = decl_recv.find("set req.http.x-cmcd:sid "), decl_recv.find("set req.http.x-fos-edge-data:cmcd_sid ")
+    if ext != -1 and cap != -1:
+        assert ext < cap
+
+
+def test_vcl_builder_cmcd_removal_and_log_paths():
+    assert VclBuilder.join_lines(["a", "b", "c"]) == "a\nb\nc"
+    assert VclBuilder.join_sections(["a", "", "  ", "b"]) == "a\n\nb"
+
+    cfg = {"log_fields": {"custom_fields": reconcile_cmcd_custom_fields([{"name": "mine"}], enabled=True)}}
+    assert _CMCD_FIELD_NAMES <= {c["name"] for c in cfg["log_fields"]["custom_fields"]}
+    orch._remove_cmcd_custom_fields(cfg)
+    assert {c["name"] for c in cfg["log_fields"]["custom_fields"]} == {"mine"}
+    for empty_cfg in ({}, {"log_fields": {}}, {"log_fields": {"custom_fields": []}}):
+        orch._remove_cmcd_custom_fields(empty_cfg)
+
+    dt = datetime(2026, 8, 27, 16, 53, tzinfo=UTC)
+    assert analytics_log_path() == ANALYTICS_LOG_LAYOUT == "raw/request/year=%Y/month=%m/day=%d/hour=%H/minute=%M/"
+    assert rum_log_path() == "raw/rum/year=%Y/month=%m/day=%d/hour=%H/minute=%M/"
+    assert minute_list_prefix(dt) == "raw/request/year=2026/month=08/day=27/hour=16/minute=53/"
+    assert rum_minute_list_prefix(dt) == "raw/rum/year=2026/month=08/day=27/hour=16/minute=53/"
+
+    for mod in (gen, fa, sc):
+        assert "raw/%Y-%m-%d" not in inspect.getsource(mod)
+    assert "log_paths" in inspect.getsource(gen)
+
+    for faro_ver in (None, "2.9.0"):
+        st_cfg = FeatureState(
+            service_id="svc_test",
+            log_period=60,
+            sample_rate=100,
+            edge_only=False,
+            custom_condition="",
+            fos_prefix="",
+            fos_endpoint="fos.example.com",
+            logging_enabled=False,
+            rum_enabled=True,
+            faro_version=faro_ver,
+        )
+        shipped = generate_consolidated_snippet(st_cfg, "vcl_recv")
+        shared = (
+            generate_rum_asset_fetch_vcl("iad-va-us", faro_version=faro_ver)[RUM_ASSET_FETCH_NAME]
+            if faro_ver
+            else generate_rum_asset_fetch_vcl("iad-va-us")[RUM_ASSET_FETCH_NAME]
+        )
+        assert shared in shipped
+
+
+class _FastlyDraftFake:
+    def __init__(self, *, validate_ok=True, rollback_raises=False):
+        self.calls: list[tuple[str, str]] = []
+        self.validate_ok = validate_ok
+        self.rollback_raises = rollback_raises
+
+    def __call__(self, method, path, body=None, **kwargs):
+        self.calls.append((method, path))
+        if path.endswith("/clone"):
+            return {"number": 9}
+        if path.endswith("/validate"):
+            return {"status": "ok"} if self.validate_ok else {"status": "error", "errors": ["bad"]}
+        if self.rollback_raises and path == "/service/svc/version/5/activate":
+            raise RuntimeError("rollback failed")
+        return {}
+
+
+def test_draft_version_lifecycle_and_rollback(caplog):
+    fake = _FastlyDraftFake()
+    msgs: list[str] = []
+    with draft_version("svc", "t", base_version=5, call=fake, comment="c", status_cb=msgs.append) as new_ver:
+        assert new_ver == 9
+        fake.calls.append(("BODY", "mutate"))
+    assert fake.calls == [
+        ("PUT", "/service/svc/version/5/clone"),
+        ("PUT", "/service/svc/version/9"),
+        ("BODY", "mutate"),
+        ("GET", "/service/svc/version/9/validate"),
+        ("PUT", "/service/svc/version/9/activate"),
+    ]
+    assert msgs == ["Validating draft version 9...", "Activating version 9..."]
+
+    fake2 = _FastlyDraftFake()
+    with draft_version("svc", "t", base_version=5, call=fake2):
+        pass
+    assert ("PUT", "/service/svc/version/9") not in fake2.calls
+
+    fake3 = _FastlyDraftFake()
+    seen_at: list[int] = []
+    with pytest.raises(ValueError, match="mutation boom"):
+        with draft_version(
+            "svc", "t", base_version=5, call=fake3, on_failure=lambda _: seen_at.append(len(fake3.calls))
+        ):
+            raise ValueError("mutation boom")
+    assert seen_at == [1] and fake3.calls[-1] == ("PUT", "/service/svc/version/5/activate")
+    assert not any(p.endswith("/validate") for _, p in fake3.calls)
+
+    fake4 = _FastlyDraftFake(validate_ok=False)
+    with pytest.raises(RuntimeError, match="Validation failed"):
+        with draft_version("svc", "t", base_version=5, call=fake4):
+            pass
+    assert ("PUT", "/service/svc/version/9/activate") not in fake4.calls
+    assert fake4.calls[-1] == ("PUT", "/service/svc/version/5/activate")
+
+    fake5 = _FastlyDraftFake(validate_ok=False)
+    with pytest.raises(RuntimeError, match="Validation failed"):
+        with draft_version("svc", "t", base_version=5, call=fake5, rollback=False):
+            pass
+    assert ("PUT", "/service/svc/version/5/activate") not in fake5.calls
+
+    fake6 = _FastlyDraftFake()
+    with draft_version("svc", "t", base_version=5, call=fake6, comment="c", comment_before_activate=True):
+        fake6.calls.append(("BODY", "mutate"))
+    assert fake6.calls == [
+        ("PUT", "/service/svc/version/5/clone"),
+        ("BODY", "mutate"),
+        ("GET", "/service/svc/version/9/validate"),
+        ("PUT", "/service/svc/version/9"),
+        ("PUT", "/service/svc/version/9/activate"),
+    ]
+
+    fake7 = _FastlyDraftFake(validate_ok=False)
+    with draft_version("svc", "t", base_version=5, call=fake7, validate=False):
+        pass
+    assert not any(p.endswith("/validate") for _, p in fake7.calls)
+    assert fake7.calls[-1] == ("PUT", "/service/svc/version/9/activate")
+
+    for expect_empty, expected_kw in ((True, {"token": "t", "expect_empty": True}), (False, {"token": "t"})):
+        seen: list[tuple[str, dict]] = []
+
+        def _call(_m, path, _b=None, _seen=seen, **kwargs):
+            _seen.append((path, kwargs))
+            return {"number": 9} if path.endswith("/clone") else {"status": "ok"}
+
+        with draft_version("svc", "t", base_version=5, call=_call, expect_empty_activate=expect_empty):
+            pass
+        assert [kw for p, kw in seen if p.endswith("/version/9/activate")] == [expected_kw]
+
+    custom_msgs: list[str] = []
+    with draft_version(
+        "svc",
+        "t",
+        base_version=5,
+        call=_FastlyDraftFake(),
+        status_cb=custom_msgs.append,
+        validate_msg="V{ver}",
+        activate_msg="A{ver}",
+    ):
+        pass
+    assert custom_msgs == ["V9", "A9"]
+
+    with caplog.at_level(logging.WARNING, logger="backend.provision.draft_version"):
+        with pytest.raises(ValueError, match="original"):
+            with draft_version("svc", "t", base_version=5, call=_FastlyDraftFake(rollback_raises=True)):
+                raise ValueError("original")
+        rollback_to_version("svc", "t", 5, call=_FastlyDraftFake(rollback_raises=True))
+    assert sum("rollback activation of version 5 failed" in r.getMessage() for r in caplog.records) >= 2
+
+
+def test_deploy_and_delete_remote_frontend_variants():
+    responses = [
+        {"id": "service123", "name": "test-service"},
+        {"number": 1, "service_id": "service123"},
+        {"name": "test-domain.global.ssl.fastly.net"},
+        {"name": "gce_vm_origin"},
+        {"number": 1, "active": True},
+    ]
+    calls: list[tuple] = []
+
+    def fake_fastly(method, path, body=None, *, token, **kwargs):
+        assert token == "fake-token"
+        calls.append((method, path, body))
+        return responses.pop(0)
+
+    with patch("backend.provision.fastly_api.fastly", side_effect=fake_fastly):
+        res = deploy_remote_frontend(
+            "test-service", "test-domain.global.ssl.fastly.net", "1.2.3.4", 80, False, "fake-token"
+        )
+    assert res == {
+        "service_id": "service123",
+        "version": 1,
+        "domain_name": "test-domain.global.ssl.fastly.net",
+        "origin_host": "1.2.3.4",
+    }
+    assert len(calls) == 5
+
+    responses_ssl = [{"id": "service123"}, {"number": 1}, {}, {}, {"active": True}]
+    calls_ssl: list[tuple] = []
+    with patch(
+        "backend.provision.fastly_api.fastly",
+        side_effect=lambda m, p, b=None, **kw: (
+            calls_ssl.append((m, p, b if b is not None else kw.get("body"))),
+            responses_ssl.pop(0),
+        )[1],
+    ):
+        deploy_remote_frontend(
+            "test-service",
+            "test-domain.global.ssl.fastly.net",
+            "1.2.3.4",
+            443,
+            True,
+            "fake-token",
+            override_host="my-override.example.com",
+        )
+    backend_payload = next(c[2] for c in calls_ssl if c[1] == "/service/service123/version/1/backend")
+    assert (
+        backend_payload["override_host"]
+        == backend_payload["ssl_sni_hostname"]
+        == backend_payload["ssl_cert_hostname"]
+        == "my-override.example.com"
+    )
+
+    with patch("backend.provision.fastly_api.fastly", return_value={"not_id": "service123"}):
+        with pytest.raises(RuntimeError, match="Failed to retrieve service ID"):
+            deploy_remote_frontend("s", "d", "1.2.3.4", 80, False, "fake-token")
+    seq = [{"id": "service123"}, {"service_id": "service123"}]
+    with patch("backend.provision.fastly_api.fastly", side_effect=lambda *a, **k: seq.pop(0)):
+        with pytest.raises(RuntimeError, match="Failed to retrieve version number"):
+            deploy_remote_frontend("s", "d", "1.2.3.4", 80, False, "fake-token")
+
+    del_seq = [[{"number": 2, "active": True}, {"number": 1, "active": False}], {}, {"status": "ok"}]
+    del_calls: list[tuple] = []
+    with patch(
+        "backend.provision.fastly_api.fastly",
+        side_effect=lambda m, p, *a, **k: (del_calls.append((m, p)), del_seq.pop(0))[1],
+    ):
+        delete_remote_frontend(remote_service_id="remote123", token="fake-token")
+    assert del_calls == [
+        ("GET", "/service/remote123/version"),
+        ("PUT", "/service/remote123/version/2/deactivate"),
+        ("DELETE", "/service/remote123"),
+    ]
+
+    del_seq2 = [[{"number": 1, "active": False}], {"status": "ok"}]
+    del_calls2: list[tuple] = []
+    with patch(
+        "backend.provision.fastly_api.fastly",
+        side_effect=lambda m, p, *a, **k: (del_calls2.append((m, p)), del_seq2.pop(0))[1],
+    ):
+        delete_remote_frontend(remote_service_id="remote123", token="fake-token")
+    assert del_calls2 == [("GET", "/service/remote123/version"), ("DELETE", "/service/remote123")]
+
+    with patch("backend.provision.fastly_api.fastly", side_effect=RuntimeError("HTTP 404 not found")):
+        delete_remote_frontend(remote_service_id="remote123", token="fake-token")
+
+    err_seq = [[], RuntimeError("HTTP 500 DELETE /service/remote123\n    boom")]
+
+    def _raise_or_pop(*a, **k):
+        r = err_seq.pop(0)
+        if isinstance(r, Exception):
+            raise r
+        return r
+
+    with patch("backend.provision.fastly_api.fastly", side_effect=_raise_or_pop):
+        with pytest.raises(RuntimeError, match="500"):
+            delete_remote_frontend(remote_service_id="remote123", token="fake-token")
+
+
+@pytest.mark.parametrize(
+    ("step_fail", "client_err", "expected_step"),
+    [
+        (0, "HTTP 400 POST /service\n    Name already taken", "Create Service"),
+        (1, "HTTP 400 POST /service/service123/version\n    Failed to create version", "Verify Draft Version"),
+        (2, "HTTP 422 POST /service/service123/version/1/domain\n    Invalid domain name", "Attach Domain"),
+        (3, "HTTP 400 POST /service/service123/version/1/backend\n    Invalid backend config", "Attach Backend Origin"),
+        (4, "HTTP 500 PUT /service/service123/version/1/activate\n    Could not activate", "Activate Version"),
+    ],
+)
+def test_deploy_remote_frontend_failures(step_fail, client_err, expected_step):
+    ok_responses = [{"id": "service123"}, {"number": 1}, {}, {}, {"active": True}]
+    state = {"i": 0}
+
+    def fake_fastly(method, path, body=None, *, token, **kwargs):
+        idx = state["i"]
+        state["i"] += 1
+        if idx == step_fail:
+            raise RuntimeError(client_err)
+        return ok_responses[idx]
+
+    with patch("backend.provision.fastly_api.fastly", side_effect=fake_fastly):
+        with pytest.raises(RuntimeError) as exc_info:
+            deploy_remote_frontend(
+                "test-service", "test-domain.global.ssl.fastly.net", "1.2.3.4", 80, False, "fake-token"
+            )
+    assert f"Fastly API error during {expected_step}:" in str(exc_info.value) and client_err in str(exc_info.value)
+
+
+# ── Merged from tests/core/test_log_fields.py ──
+
+
+def test_generate_log_format_and_field_overrides_and_default_off():
+    fmt_minimal = generate_log_format({"groups": PRESETS["minimal"]["groups"], "field_overrides": {}})
+    assert fmt_minimal.startswith("{") and fmt_minimal.endswith("}")
+    assert '"timestamp":' in fmt_minimal and '"ip":' in fmt_minimal and '"url":' not in fmt_minimal
+
+    fmt_standard = generate_log_format({"groups": PRESETS["standard"]["groups"], "field_overrides": {}})
+    assert '"url":' in fmt_standard and '"pop":' in fmt_standard and '"country":' in fmt_standard
+
+    fmt_ovr = generate_log_format({"groups": [], "field_overrides": {"url": True, "country": True}})
+    assert '"url":' in fmt_ovr and '"country":' in fmt_ovr and '"pop":' not in fmt_ovr
+
+    assert "cookie_session" in DEFAULT_OFF_FIELD_IDS
+    enabled = resolve_enabled_fields({"groups": ["H"], "field_overrides": {}})
+    assert "cookie_session" not in enabled and {"ja3", "ja4", "tls_ciphers_sha"} <= set(enabled)
+    for preset_name in ("security", "full"):
+        preset = PRESETS[preset_name]
+        assert "cookie_session" not in resolve_enabled_fields(
+            {"groups": preset["groups"], "field_overrides": preset.get("field_overrides", {})}
+        )
+
+    cfg_opt = {"groups": ["H"], "field_overrides": {"cookie_session": True}}
+    assert "cookie_session" in resolve_enabled_fields(cfg_opt)
+    assert '"cookie_session":' in generate_log_format(cfg_opt)
+    assert "cookie_session" in get_required_edge_headers(cfg_opt)
+    assert "cookie_session" in resolve_enabled_fields({"groups": [], "field_overrides": {"cookie_session": True}})
+    assert "cookie_session" not in resolve_enabled_fields(
+        {"groups": ["H"], "field_overrides": {"cookie_session": False}}
+    )
+
+
+def test_custom_origin_and_edge_fields_and_budget_clamps():
+    cfg_orig = {
+        "groups": ["L"],
+        "custom_fields": [
+            {
+                "name": "bereq_drew",
+                "vcl_log_expression": "beresp.http.x-drew",
+                "collection_stage": "origin",
+                "origin_log_frequency": "all",
+                "enabled": True,
+            }
+        ],
+    }
+    deliver = generate_capture_vcl(cfg_orig)["deliver"]
+    assert 'if (req.http.x-is-cluster-fetch != "1") {\n  unset resp.http.x-fos-origin-data:bereq_drew;\n}' in deliver
+    assert "\nunset resp.http.x-fos-origin-data:bereq_drew;" not in deliver
+
+    snippets_edge = generate_capture_vcl(
+        {
+            "groups": [],
+            "custom_fields": [
+                {
+                    "name": "edge_randomint",
+                    "vcl_log_expression": "randomint(1, 100)",
+                    "collection_stage": "edge",
+                    "enabled": True,
+                }
+            ],
+        }
+    )
+    assert "edge_randomint" in snippets_edge["recv"]
+    assert "edge_randomint" not in snippets_edge.get("deliver", "")
+
+    cfg_num = {
+        "groups": [],
+        "custom_fields": [
+            {
+                "name": f"z_num_{i}",
+                "vcl_log_expression": f"req.http.x-edge-score:n{i}",
+                "collection_stage": "deliver",
+                "value_type": "numeric",
+                "enabled": True,
+            }
+            for i in range(8)
+        ]
+        + [
+            {
+                "name": "zzz_tail",
+                "vcl_log_expression": "req.http.x-edge-score:tail",
+                "collection_stage": "deliver",
+                "value_type": "string",
+                "enabled": True,
+            }
+        ],
+    }
+    fmt_num = generate_log_format(cfg_num)
+    num_lens = [int(m) for m in re.findall(r"x-edge-score:n\d+, 0, (\d+)\)", fmt_num)]
+    assert num_lens and all(n <= 20 for n in num_lens)
+    tail = re.search(r"x-edge-score:tail, 0, (\d+)\)", fmt_num)
+    assert tail and int(tail.group(1)) > 0
+
+    fmt_cmcd = generate_log_format(
+        {
+            "groups": PRESETS["standard"]["groups"],
+            "custom_fields": [dict(cf) for cf in _CMCD_CUSTOM_FIELDS] + [dict(cf) for cf in _SCORING_CUSTOM_FIELDS],
+        }
+    )
+    assert int(re.search(r"x-edge-score:sid, 0, (\d+)\)", fmt_cmcd).group(1)) > 0
+    assert int(re.search(r"x-edge-score:rtt, 0, (\d+)\)", fmt_cmcd).group(1)) > 0
+    assert int(re.search(r"x-fos-edge-data:cmcd_sid, 0, (\d+)\)", fmt_cmcd).group(1)) < 2000
+
+    fmt_ip = generate_log_format({"schema_version": 2, "groups": []})
+    assert (
+        'if(req.http.x-fos-edge-data:ip != "", req.http.x-fos-edge-data:ip, '
+        'if(req.http.Fastly-Client-IP != "", req.http.Fastly-Client-IP, client.ip))' in fmt_ip
+    )
+
+
+def _valid_field(**overrides) -> dict:
+    base = {
+        "name": "my_field",
+        "label": "My Field",
+        "vcl_log_expression": "req.url",
+        "duckdb_type": "VARCHAR",
+        "value_type": "string",
+        "bytes_estimate": 20,
+    }
+    base.update(overrides)
+    return base
+
+
+@pytest.mark.parametrize(
+    ("overrides", "existing", "expected_substr"),
+    [
+        ({"name": "1bad"}, [], "lowercase alphanumeric"),
+        ({"name": "bad-name"}, [], "lowercase alphanumeric"),
+        ({"name": "select"}, [], "reserved word"),
+        ({"name": "timestamp"}, [], "already a built-in"),
+        ({"name": "my_field"}, ["my_field"], "already exists"),
+        ({"label": ""}, [], "label"),
+        ({"label": "x" * 81}, [], "label"),
+        ({"description": "x" * 501}, [], "description"),
+        ({"vcl_log_expression": ""}, [], "empty"),
+        ({"vcl_log_expression": "x" * 513}, [], "512"),
+        ({"vcl_log_expression": "req.url\n"}, [], "newlines"),
+        ({"vcl_log_expression": "req.url; set req.x = 1"}, [], "semicolons"),
+        ({"vcl_log_expression": "req.url // hack"}, [], "comments"),
+        ({"vcl_log_expression": "req.url # hack"}, [], "comments"),
+        ({"duckdb_type": "QUANTUM"}, [], "duckdb_type"),
+        ({"value_type": "unknown"}, [], "value_type"),
+        ({"duckdb_type": "INTEGER", "value_type": "ip"}, [], "not compatible"),
+        ({"bytes_estimate": 0}, [], "bytes_estimate"),
+        ({"bytes_estimate": 2000}, [], "bytes_estimate"),
+        ({"bytes_estimate": "not-a-number"}, [], "bytes_estimate"),
+        ({"collection_stage": "fetch"}, [], "collection_stage"),
+        ({"bytes_estimate": 5}, [], "WARN:"),
+    ],
+)
+def test_validate_custom_field_rules(overrides, existing, expected_substr):
+    assert validate_custom_field(_valid_field(), []) == []
+    missing_errors = validate_custom_field({"name": "x"}, [])
+    assert any("Missing required field" in e for e in missing_errors)
+    assert not any("label" in e and "characters" in e for e in missing_errors)
+
+    errors = validate_custom_field(_valid_field(**overrides), existing)
+    assert any(expected_substr in e for e in errors), f"Expected {expected_substr!r} in {errors}"
+
+
+# ── Merged from tests/core/test_log_line_budget.py ──
+
+
+def _make_custom_fields(count: int, bytes_each: int) -> list[dict]:
+    return [
+        {
+            "name": f"cf{i:03d}",
+            "label": f"cf{i:03d}",
+            "description": "",
+            "vcl_log_expression": "req.http.Host",
+            "collection_stage": "edge",
+            "duckdb_type": "VARCHAR",
+            "value_type": "string",
+            "bytes_estimate": bytes_each,
+            "nullable": True,
+            "enabled": True,
+            "show_in_dashboard": False,
+            "show_in_logs": True,
+            "filterable": True,
+        }
+        for i in range(count)
+    ]
+
+
+def test_log_line_budget_bands_and_clamp():
+    assert lf.FASTLY_LOG_LINE_DELIVER_MAX == 16 * 1024
+    assert 0.40 < lf.FASTLY_LOG_LINE_SAFE_MAX / lf.FASTLY_LOG_LINE_DELIVER_MAX < 0.80
+
+    cfg_small = {"groups": ["A"], "field_overrides": {}}
+    assert lf.estimate_log_line_bytes(cfg_small) < lf.FASTLY_LOG_LINE_SAFE_MAX
+    assert lf.check_log_line_budget(cfg_small) is None
+
+    cfg_warn = {
+        "groups": ["A", "B", "C", "D"],
+        "field_overrides": {},
+        "custom_fields": _make_custom_fields(count=20, bytes_each=500),
+    }
+    est_warn = lf.estimate_log_line_bytes(cfg_warn)
+    assert lf.FASTLY_LOG_LINE_SAFE_MAX <= est_warn < lf.FASTLY_LOG_LINE_DELIVER_MAX
+    w = lf.check_log_line_budget(cfg_warn)
+    assert w is not None and w["code"] == "LOG_LINE_APPROACHING_LIMIT" and w["severity"] == "warn"
+    assert w["estimate_bytes"] == est_warn and str(est_warn) in w["message"] and "16" in w["message"]
+
+    cfg_err = {"groups": [], "field_overrides": {}, "custom_fields": _make_custom_fields(count=20, bytes_each=1024)}
+    est_err = lf.estimate_log_line_bytes(cfg_err)
+    assert est_err >= lf.FASTLY_LOG_LINE_DELIVER_MAX
+    e = lf.check_log_line_budget(cfg_err)
+    assert e is not None and e["code"] == "LOG_LINE_TOO_LARGE" and e["severity"] == "error"
+    assert "truncate" in e["message"].lower() and "16" in e["message"]
+
+    cfg_clamp = {
+        "field_limits": {"url": 4000, "ua": 4000, "referer": 4000},
+        "custom_fields": _make_custom_fields(10, bytes_each=4000),
+        "groups": {"core": True, "a": True},
+    }
+    for cf in cfg_clamp["custom_fields"]:
+        cf["byte_limit"] = 4000
+    fmt = lf.generate_log_format(cfg_clamp)
+    caps = [int(m) for m in re.findall(r"substr\([^)]*, *0, *(\d+)\)", fmt)]
+    assert caps and sum(caps) <= lf.FASTLY_LOG_LINE_DELIVER_MAX
+
+
+def test_log_fields_endpoints_surface_warning_and_noop(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path)
+    client = TestClient(_fastapi_app)
+
+    svc_get = "test_svc_log_budget_get"
+    config.save_config(
+        svc_get,
+        {
+            "service_id": svc_get,
+            "log_fields": {
+                "schema_version": 2,
+                "groups": ["A", "B", "C", "D"],
+                "field_overrides": {},
+                "custom_fields": _make_custom_fields(count=20, bytes_each=500),
+            },
+        },
+    )
+    resp_get = client.get(f"/api/services/{svc_get}/log-fields")
+    assert (
+        resp_get.status_code == 200 and resp_get.json()["line_budget_warning"]["code"] == "LOG_LINE_APPROACHING_LIMIT"
+    )
+
+    svc_post = "test_svc_log_budget_post"
+    config.save_config(svc_post, {"service_id": svc_post, "log_fields": {"schema_version": 2, "groups": ["A"]}})
+    payload = {
+        "log_fields": {
+            "schema_version": 2,
+            "groups": ["A", "B", "C", "D"],
+            "custom_fields": _make_custom_fields(count=20, bytes_each=500),
+        }
+    }
+    with patch("backend.state_sync.export_admin_state", return_value=None):
+        resp_post = client.post(f"/api/services/{svc_post}/log-fields", json=payload)
+    assert (
+        resp_post.status_code == 200 and resp_post.json()["line_budget_warning"]["code"] == "LOG_LINE_APPROACHING_LIMIT"
+    )
+
+    svc_noop = "test_svc_log_budget_noop"
+    config.save_config(svc_noop, {"service_id": svc_noop, "log_fields": {"schema_version": 2, "groups": ["A"]}})
+    cfg = config.load_config(svc_noop)
+    cfg["log_fields"]["format_hash"] = lf.format_hash(cfg["log_fields"])
+    config.save_config(svc_noop, cfg)
+    resp_noop = client.post(f"/api/services/{svc_noop}/log-fields", json={"log_fields": cfg["log_fields"]})
+    assert resp_noop.status_code == 200 and resp_noop.json().get("ok") is True
+
+
+# ── Merged from tests/core/test_field_registry.py ──
+
+
+def test_registry_invariants_and_parity() -> None:
+    assert isinstance(REGISTRY, tuple) and len(REGISTRY) > 0 and all(isinstance(f, LogField) for f in REGISTRY)
+    with pytest.raises((AttributeError, TypeError)):
+        REGISTRY[0].code = "mutated"  # type: ignore[misc]
+    with pytest.raises(TypeError):
+        BY_CODE["bogus"] = REGISTRY[0]  # type: ignore[index]
+
+    for f in REGISTRY:
+        assert fr.get(f.code) is f and fr.try_get(f.code) is f
+        assert f.is_derived is (f.vcl is None)
+        assert isinstance(f.required_by, tuple) and all(isinstance(i, str) and i for i in f.required_by)
+    assert fr.try_get("__not_a_real_code__") is None
+    with pytest.raises(KeyError):
+        fr.get("__not_a_real_code__")
+
+    codes = [f.code for f in REGISTRY]
+    assert len(codes) == len(set(codes))
+    assert {entry["id"] for entry in LOG_FIELD_CATALOG} == set(BY_CODE) == set(_BUILTIN_FIELD_NAMES)
+
+    default_off_codes = {f.code for f in REGISTRY if f.default_off}
+    assert (
+        default_off_codes
+        == {entry["id"] for entry in LOG_FIELD_CATALOG if entry.get("default_off")}
+        == DEFAULT_OFF_FIELD_IDS
+    )
+    assert "cookie_session" in default_off_codes
+
+    seen: set[str] = set()
+    for group, fields in BY_GROUP.items():
+        for f in fields:
+            assert f.group is group and f.code not in seen
+            seen.add(f.code)
+    assert seen == set(BY_CODE)
+
+    for insight in INSIGHT_DEFINITIONS:
+        for code in insight["required_fields"]:
+            assert fr.try_get(code) is not None
+
+
+@pytest.mark.security_regression
+def test_wire_order_matches_legacy_emission_order() -> None:
+    legacy_emission_order = tuple(entry["id"] for entry in LOG_FIELD_CATALOG if entry["vcl"] is not None)
+    assert tuple(f.code for f in REGISTRY if not f.is_derived) == legacy_emission_order
+
+
+@given(code=st.sampled_from(sorted(f.code for f in REGISTRY)))
+def test_hypothesis_every_code_lookup_succeeds(code: str) -> None:
+    f = fr.get(code)
+    assert f.code == code
+    _ = f.is_derived
+
+
+_RE_EXPORTED_NAMES = (
+    "generate_log_format",
+    "format_hash",
+    "get_lf_config",
+    "estimate_log_line_bytes",
+    "resolve_enabled_fields",
+    "check_log_line_budget",
+    "validate_custom_field",
+    "get_required_edge_headers",
+    "get_catalog_for_api",
+    "get_groups_for_api",
+    "LOG_FIELD_CATALOG",
+    "GROUP_INFO",
+    "PRESETS",
+    "INSIGHT_DEFINITIONS",
+    "VALID_NAME_RE",
+)
+
+
+@pytest.mark.parametrize("name", _RE_EXPORTED_NAMES)
+def test_re_exported_symbol_is_same_object_as_log_fields(name: str) -> None:
+    assert getattr(fr, name) is getattr(lf, name)
+
+
+# ── Merged from tests/core/test_sql_ident.py ──
+BACKEND = pathlib.Path(__file__).resolve().parents[2] / "backend"
+
+
+@pytest.mark.parametrize("name", ["lake", "_x", "a1", "Logs_Foo", "client_vitals", "_"])
+def test_accepts_bare_identifiers(name: str) -> None:
+    assert sql_ident.is_safe_ident(name) is True
+    assert sql_ident.require_safe_ident(name, "bad ident") == name
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["", "1abc", "a-b", 'a"b', "a b", "a;DROP", "a\n", "x.y", "é", "lake'--"],
+)
+def test_rejects_everything_else(name: str) -> None:
+    assert sql_ident.is_safe_ident(name) is False
+    with pytest.raises(ValueError, match="bad ident"):
+        sql_ident.require_safe_ident(name, "bad ident")
+
+
+def test_rejects_non_strings_and_error_message_shape() -> None:
+    assert sql_ident.is_safe_ident(None) is False  # type: ignore[arg-type]
+    assert sql_ident.is_safe_ident(5) is False  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        sql_ident.require_safe_ident(None, "bad ident")  # type: ignore[arg-type]
+    with pytest.raises(ValueError) as exc:
+        sql_ident.require_safe_ident("a-b", "invalid ducklake alias")
+    assert str(exc.value) == "invalid ducklake alias: 'a-b'"
+
+
+def test_bare_identifier_regex_has_one_owner() -> None:
+    """No module besides sql_ident may declare the bare-identifier regex literal."""
+    needles = ("[A-Za-z_][A-Za-z0-9_]*",)
+    offenders = []
+    for path in BACKEND.rglob("*.py"):
+        if path.name in {"sql_ident.py", "sql_validator.py", "duckdb.py"}:
+            continue
+        text = path.read_text()
+        if path.name in {"pg_connection.py", "clickhouse_client.py", "base.py", "clickhouse.py"}:
+            continue
+        if any(n in text for n in needles):
+            offenders.append(str(path.relative_to(BACKEND)))
+    assert offenders == [], f"use backend.core.sql_ident instead of a private identifier regex: {offenders}"

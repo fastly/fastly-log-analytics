@@ -16,13 +16,17 @@ from __future__ import annotations
 
 import logging
 import os
+import sys as _sys
 import threading
 import time
 from collections.abc import Callable, Iterator
+from contextlib import closing
 from dataclasses import dataclass
-from datetime import UTC
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from backend import config as svcconfig
+from backend.core.rum_ingest import ingest_rum_logs
 from backend.cron.scheduler import (
     _check_buffer_backlog,
     _check_disk_space,
@@ -33,14 +37,14 @@ from backend.cron.scheduler import (
     _log_and_add_progress,
     cron_run,
     cron_task,
+    dev_mode_no_crons,
 )
+from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry
 
 logger = logging.getLogger("backend.scheduler")
 
 
 def _refuse_if_dev_no_crons(service_id: str, label: str) -> bool:
-    from backend.cron.scheduler import dev_mode_no_crons
-
     if dev_mode_no_crons():
         logger.warning("[scheduler] %s: FLA_DEV_NO_CRONS=1 — %s refused.", service_id, label)
         return True
@@ -48,15 +52,11 @@ def _refuse_if_dev_no_crons(service_id: str, label: str) -> bool:
 
 
 def _spawn_local_compaction(
-    src: dict,
-    service_id: str,
-    *,
-    compact_active_hour: bool = False,
-    refresh_on_merge: bool = False,
+    src: dict, service_id: str, *, compact_active_hour: bool = False, refresh_on_merge: bool = False
 ) -> None:
     def _worker() -> None:
         try:
-            from backend.core import local_compaction as _lc
+            from backend.core import local_compaction as _lc  # type: ignore[attr-defined]
 
             res = (
                 _lc.compact_local_partitions(src, compact_active_hour=True)
@@ -69,11 +69,7 @@ def _spawn_local_compaction(
             logger.warning("[scheduler] %s: post-sync local compaction failed: %s", service_id, e)
 
     try:
-        threading.Thread(
-            target=_worker,
-            name=f"local-compact-on-sync:{service_id}",
-            daemon=True,
-        ).start()
+        threading.Thread(target=_worker, name=f"local-compact-on-sync:{service_id}", daemon=True).start()
     except Exception as e:
         logger.warning("[scheduler] %s: post-sync local compaction failed to launch: %s", service_id, e)
 
@@ -106,12 +102,9 @@ def refresh_view_and_warm_pool(
         from backend.core.duckdb import get_connection as _get_conn
         from backend.core.duckdb_pool import warm_pool_for_service as _warm
 
-        con_v = _get_conn(source=source, read_only=True)
-        try:
+        with closing(_get_conn(source=source, read_only=True)) as con_v:
             _ice.update_iceberg_view(con_v, source, force=True)
             _warm(service_id, source)
-        finally:
-            con_v.close()
         if progress_log is not None:
             progress_log(
                 {"type": "status", "message": f"{log_prefix}View refresh + warm: {int((time.time() - t0) * 1000)}ms"}
@@ -133,9 +126,9 @@ def finalize_cron_duration(
     if run_id is None:
         return
     try:
-        elapsed = clock() - t_start
         from backend.core.duckdb import update_cron_duration
 
+        elapsed = clock() - t_start
         if log_output is not None:
             update_cron_duration(src, run_id, elapsed, log_output=log_output)
         else:
@@ -148,26 +141,19 @@ def finalize_cron_duration(
 def get_service_display_label(service_id: str, cfg: dict | None = None) -> str:
     """Return ``"{name} ({service_id})"`` when the service name differs from ``service_id``."""
     if cfg is None:
-        from backend import config as svcconfig
-
         cfg = svcconfig.load_config(service_id)
     svc_name = (cfg.get("service_name") or cfg.get("name") or service_id) if cfg else service_id
     return f"{svc_name} ({service_id})" if svc_name and svc_name != service_id else service_id
 
 
 def has_sufficient_disk_space(
-    path: str,
-    job_label: str,
-    service_id: str,
-    *,
-    min_free_bytes: int = 50 * 1024 * 1024,
+    path: str, job_label: str, service_id: str, *, min_free_bytes: int = 50 * 1024 * 1024
 ) -> tuple[bool, str]:
     """Return ``(ok, msg)`` checking that ``path`` (or ``.``) has at least ``min_free_bytes`` free."""
     import shutil
 
-    check_dir = path if os.path.isdir(path) else "."
     try:
-        free_bytes = shutil.disk_usage(check_dir).free
+        free_bytes = shutil.disk_usage(path if os.path.isdir(path) else ".").free
         if free_bytes < min_free_bytes:
             msg = f"Disk space critically low (< {min_free_bytes // (1024 * 1024)}MB free: {free_bytes / (1024 * 1024):.1f}MB)"
             logger.warning("⚠️  [%s] %s: %s", job_label, service_id, msg)
@@ -183,8 +169,7 @@ def publish_sync_status_safe(service_id: str, log_label: str = "scheduler") -> N
         from backend.sync_status_publisher import publisher as _sync_status_publisher
         from backend.sync_status_snapshot import compute_sync_status_cached
 
-        snapshot = compute_sync_status_cached(service_id)
-        if snapshot is not None:
+        if (snapshot := compute_sync_status_cached(service_id)) is not None:
             _sync_status_publisher.publish(service_id, snapshot)
     except Exception:
         logger.exception("[%s] %s: sync-status SSE publish failed", log_label, service_id)
@@ -192,11 +177,8 @@ def publish_sync_status_safe(service_id: str, log_label: str = "scheduler") -> N
 
 def _buffer_result_error(result: dict, default_error: str | None = None) -> str | None:
     """Extract combined error and quarantined-file message from a ``commit_buffer`` result dict."""
-    parts: list[str] = []
-    if result.get("error"):
-        parts.append(str(result["error"]))
-    quarantined = int(result.get("quarantined_files", 0) or 0)
-    if quarantined:
+    parts = [str(result["error"])] if result.get("error") else []
+    if quarantined := int(result.get("quarantined_files", 0) or 0):
         parts.append(f"{quarantined} unreadable buffer file(s) quarantined")
     return "; ".join(parts) if parts else default_error
 
@@ -214,8 +196,6 @@ def apply_time_range_pinning(
     get_scheduler_fn: Callable | None = None,
 ) -> tuple[str | None, str | None]:
     """Resolve and persist provisioning ``time_range`` bounds for sync/metadata jobs."""
-    from backend import config as svcconfig
-
     prov = cfg.get("provisioning", {})
     should_pin = False
     if not start_time and not is_manual:
@@ -247,13 +227,12 @@ def apply_time_range_pinning(
         src["time_range"] = cfg["provisioning"]["time_range"]
         if fallback_to_created_at:
             logger.info("[scheduler] %s: Saved service creation time as start_time limit to config.", service_id)
-    elif is_manual and not start_time and not end_time:
-        if "time_range" in prov:
-            del prov["time_range"]
-            cfg["provisioning"] = prov
-            svcconfig.mutate_config(service_id, lambda c: c.get("provisioning", {}).pop("time_range", None))
-            src["time_range"] = None
-            logger.info("[scheduler] %s: Manual sync-all, cleared time_range limit.", service_id)
+    elif is_manual and not start_time and not end_time and "time_range" in prov:
+        del prov["time_range"]
+        cfg["provisioning"] = prov
+        svcconfig.mutate_config(service_id, lambda c: c.get("provisioning", {}).pop("time_range", None))
+        src["time_range"] = None
+        logger.info("[scheduler] %s: Manual sync-all, cleared time_range limit.", service_id)
 
     return start_time, end_time
 
@@ -269,8 +248,7 @@ _INGEST_ERROR_OUTCOME_KEYS = (
 
 def _has_ingest_outcome_errors(outcome_counters: dict | None, corrupt_rows: int = 0) -> bool:
     return bool(
-        corrupt_rows > 0
-        or (outcome_counters and any(outcome_counters.get(key, 0) for key in _INGEST_ERROR_OUTCOME_KEYS))
+        corrupt_rows > 0 or (outcome_counters and any(outcome_counters.get(k, 0) for k in _INGEST_ERROR_OUTCOME_KEYS))
     )
 
 
@@ -314,9 +292,7 @@ def _ingest_with_adaptive_followups(
     from backend.core.ingest import _new_object_outcome
 
     started = time.monotonic()
-    pass_number = 0
-    processed_files = 0
-    pass_rows = 0
+    pass_number = processed_files = pass_rows = pass_new_files = 0
     totals: dict[str, Any] = {
         "new_files": 0,
         "rows_inserted": 0,
@@ -328,7 +304,6 @@ def _ingest_with_adaptive_followups(
         "outcome_counters": _new_object_outcome(processed=0),
     }
     max_files = ingest_kwargs.get("max_files")
-    pass_new_files = 0
     adaptive_deadline_s = float(os.environ.get("INGEST_INCREMENTAL_ADAPTIVE_DEADLINE_S", "5.0"))
 
     while True:
@@ -395,18 +370,17 @@ def _post_ingest_rollup_worker(service_id: str) -> None:
             if not hours or src is None:
                 _rollup_workers.pop(service_id, None)
                 return
-        try:
-            yield_to_api()
-            rollups.recompute_touched_hours(service_id, src, hours)
-        except Exception as e:
-            logger.warning("[scheduler] %s: post-sync rollup recompute failed: %s", service_id, e)
         # Wellknown-bots rollup is best-effort: the security reader has a
         # live-SQL fallback for any hour without one.
-        try:
-            yield_to_api()
-            rollups.recompute_wellknown_bots_rollup(service_id, src, hours)
-        except Exception as e:
-            logger.warning("[scheduler] %s: post-sync bot rollup failed: %s", service_id, e)
+        for fn, label in (
+            (rollups.recompute_touched_hours, "rollup recompute"),
+            (rollups.recompute_wellknown_bots_rollup, "bot rollup"),
+        ):
+            try:
+                yield_to_api()
+                fn(service_id, src, hours)
+            except Exception as e:
+                logger.warning("[scheduler] %s: post-sync %s failed: %s", service_id, label, e)
 
 
 def schedule_post_ingest_rollups(service_id: str, src: dict[str, Any], hours: set[str]) -> None:
@@ -422,10 +396,7 @@ def schedule_post_ingest_rollups(service_id: str, src: dict[str, Any], hours: se
         if service_id in _rollup_workers:
             return
         worker = threading.Thread(
-            target=_post_ingest_rollup_worker,
-            args=(service_id,),
-            name=f"post-ingest-rollups:{service_id}",
-            daemon=True,
+            target=_post_ingest_rollup_worker, args=(service_id,), name=f"post-ingest-rollups:{service_id}", daemon=True
         )
         _rollup_workers[service_id] = worker
     worker.start()
@@ -444,25 +415,21 @@ def _run_log_discovery_cron(
     if _refuse_if_dev_no_crons(service_id, "sync"):
         return
 
-    from backend import config as svcconfig
-    from backend.core.duckdb import get_source_for_service, refresh_config_status
+    from backend.core.duckdb import _cache_dir, get_source_for_service, refresh_config_status
     from backend.core.ingest import _new_object_outcome, ingest
 
     cfg = svcconfig.load_config(service_id)
     if not cfg:
         logger.warning("[scheduler] %s: config not found, skipping.", service_id)
         return
-
     src = get_source_for_service(service_id)
     if src is None:
         logger.warning("[scheduler] %s: source not found, skipping.", service_id)
         return
-
     if src.get("access_level") == "read_only" and not force:
         return
 
-    prov = cfg.get("provisioning", {})
-    sync_cfg = prov.get("cron_sync", {})
+    sync_cfg = cfg.get("provisioning", {}).get("cron_sync", {})
     sync_enabled = sync_cfg.get("enabled", True)
     delete_after = svcconfig.resolve_raw_delete_after(cfg, delete_after)
     _display = get_service_display_label(service_id, cfg)
@@ -471,12 +438,7 @@ def _run_log_discovery_cron(
     if sync_enabled or force:
         is_manual = run_id is not None
         start_time, _ = apply_time_range_pinning(
-            service_id,
-            cfg,
-            src,
-            start_time=start_time,
-            is_manual=is_manual,
-            fallback_to_created_at=True,
+            service_id, cfg, src, start_time=start_time, is_manual=is_manual, fallback_to_created_at=True
         )
 
         with cron_run(
@@ -495,8 +457,6 @@ def _run_log_discovery_cron(
             run_id = run.run_id
 
             if svcconfig.is_high_scale_mode(src):
-                from datetime import datetime, timedelta
-
                 from backend.core.ingest import discover_prefix
                 from backend.provision.log_paths import minute_list_prefix
 
@@ -520,9 +480,7 @@ def _run_log_discovery_cron(
                         now = datetime.now(UTC)
                         pass_discovered = sum(
                             discover_prefix(
-                                service_id,
-                                prefix_subpath=minute_list_prefix(now - timedelta(minutes=i)),
-                                run_id=run_id,
+                                service_id, prefix_subpath=minute_list_prefix(now - timedelta(minutes=i)), run_id=run_id
                             )
                             for i in range(5)
                         )
@@ -539,8 +497,6 @@ def _run_log_discovery_cron(
                     run.fail("Log discovery failed", error_message=str(e))
                     logger.exception("[ledger] %s: log discovery failed: %s", service_id, e)
                 return
-
-            from backend.core.duckdb import _cache_dir
 
             ok, disk_msg = _check_disk_space(_cache_dir(src), service_id, "log_discovery")
             if not ok:
@@ -569,14 +525,10 @@ def _run_log_discovery_cron(
 
             done_event: dict = {}
             ingest_outcomes = _new_object_outcome(processed=0)
-            processed_files = 0
-            inserted_rows = 0
-            corrupt_rows = 0
-
+            processed_files = inserted_rows = corrupt_rows = published_pass_rows = 0
             max_incremental_files = int(os.environ.get("INGEST_INCREMENTAL_MAX_FILES", "250"))
             pass_max_files = max_incremental_files if not is_manual else 5000
             pass_max_seconds = 20 if not is_manual else 240
-            published_pass_rows = 0
 
             def _publish_pass_rows() -> None:
                 nonlocal published_pass_rows
@@ -614,9 +566,11 @@ def _run_log_discovery_cron(
                         done_event = event
                         ingest_outcomes = event.get("outcome_counters", ingest_outcomes)
                     elif ev_type == "error":
-                        summary = "Ingestion failed"
-                        if processed_files > 0:
-                            summary += f" after processing {processed_files} files ({inserted_rows} rows)"
+                        summary = "Ingestion failed" + (
+                            f" after processing {processed_files} files ({inserted_rows} rows)"
+                            if processed_files > 0
+                            else ""
+                        )
                         run.fail(
                             summary,
                             error_message=event.get("message"),
@@ -636,14 +590,12 @@ def _run_log_discovery_cron(
                     if done_event:
                         if done_event.get("new_files", 0) == 0:
                             reclaimed = done_event.get("deleted_files", 0)
-                            if reclaimed:
-                                summary = (
-                                    f"No new files; reclaimed {reclaimed} raw file(s) left by an interrupted prior run"
-                                )
-                                done_msg = f"{elapsed()} {summary}."
-                            else:
-                                summary = "No new log files found in bucket"
-                                done_msg = f"{elapsed()} No new log files found in bucket."
+                            summary = (
+                                f"No new files; reclaimed {reclaimed} raw file(s) left by an interrupted prior run"
+                                if reclaimed
+                                else "No new log files found in bucket"
+                            )
+                            done_msg = f"{elapsed()} {summary}."
                             run.success(
                                 summary,
                                 files_deleted_fos=reclaimed,
@@ -656,10 +608,7 @@ def _run_log_discovery_cron(
                                 event={"type": "done", "message": done_msg},
                             )
                         else:
-                            summary = (
-                                f"Ingested {done_event.get('new_files', 0)} files, "
-                                f"{done_event.get('rows_inserted', 0)} rows."
-                            )
+                            summary = f"Ingested {done_event.get('new_files', 0)} files, {done_event.get('rows_inserted', 0)} rows."
                             if done_event.get("corrupt_rows"):
                                 summary += f" Skipped {done_event.get('corrupt_rows')} corrupted/invalid lines."
                             if done_event.get("quarantined_files"):
@@ -667,21 +616,17 @@ def _run_log_discovery_cron(
                             if done_event.get("deleted_files"):
                                 summary += f" Deleted {done_event.get('deleted_files')} raw files."
                             corrupt_details = done_event.get("corrupt_details", [])
-                            corrupt_message = "\n".join(corrupt_details) if corrupt_details else None
                             outcome_counters = done_event.get("outcome_counters")
-                            has_ingest_errors = _has_ingest_outcome_errors(outcome_counters)
-
                             run.record(
-                                "error" if has_ingest_errors else "success",
+                                "error" if _has_ingest_outcome_errors(outcome_counters) else "success",
                                 summary=summary,
-                                error_message=corrupt_message,
+                                error_message="\n".join(corrupt_details) if corrupt_details else None,
                                 files_downloaded=done_event.get("new_files", 0),
                                 files_deleted_fos=done_event.get("deleted_files", 0),
                                 rows_ingested=done_event.get("rows_inserted", 0),
                                 corrupt_rows=done_event.get("corrupt_rows", 0),
                                 outcome_counters=outcome_counters,
                             )
-
                             already_published = bool(
                                 published_pass_rows > 0 and published_pass_rows == done_event.get("rows_inserted", 0)
                             )
@@ -694,12 +639,10 @@ def _run_log_discovery_cron(
                                     {**done_event, "touched_hours": []},
                                     elapsed,
                                 )
-
                             if done_event.get("new_files", 0) > 1:
                                 _spawn_local_compaction(
                                     src, service_id, compact_active_hour=True, refresh_on_merge=True
                                 )
-
                             if done_event.get("touched_hours"):
                                 _finish_post_ingest_view_and_rollups(
                                     src,
@@ -710,7 +653,6 @@ def _run_log_discovery_cron(
                                     elapsed,
                                     already_published=True,
                                 )
-
             except Exception as e:
                 summary = "Ingestion crashed"
                 if processed_files > 0:
@@ -739,11 +681,11 @@ def _run_log_discovery_cron(
 
     # ── 2. Refresh cached status ──────────────────────────────────────────────
     do_heavy_refresh = _claim_heavy_refresh(service_id) or bool(force)
-    should_refresh_status = bool(done_event.get("rows_inserted", 0) > 0 or do_heavy_refresh or force)
-    if should_refresh_status:
+    if bool(done_event.get("rows_inserted", 0) > 0 or do_heavy_refresh or force):
         if (sync_enabled or force) and run_id is not None:
-            _msg_suffix = "+ filter suggestions" if do_heavy_refresh else "(header only)"
-            _progress_status(f"Refreshing sync status {_msg_suffix}...")
+            _progress_status(
+                f"Refreshing sync status {'+ filter suggestions' if do_heavy_refresh else '(header only)'}..."
+            )
         _t0 = time.time()
         try:
             refresh_config_status(service_id, include_top_values=False)
@@ -766,11 +708,9 @@ def _run_log_discovery_cron(
     _t0 = time.time()
     _invalidated = 0
     try:
-        from backend.repositories.dashboard import DASHBOARD_CACHE_TTL
+        from backend.repositories.dashboard import DASHBOARD_CACHE_TTL, _dashboard_cache, invalidate_service
 
         if DASHBOARD_CACHE_TTL > 0:
-            from backend.repositories.dashboard import _dashboard_cache, invalidate_service
-
             src_name = src.get("name", "")
             _invalidated = sum(1 for k in list(_dashboard_cache) if k.endswith(f":{src_name}"))
             invalidate_service(src_name)
@@ -783,39 +723,38 @@ def _run_log_discovery_cron(
     if (sync_enabled or force) and run_id is not None and do_heavy_refresh:
         _progress_status("Updating usage log (Fastly-edge writes, in-process calls, retention purge)...")
 
-    def _usage_log_phase() -> None:
-        from backend.core.duckdb import backfill_fastly_edge_writes, reconcile_fastly_stats
-        from backend.utils.telemetry import run_usage_log_cleanup
-
-        def _run_usage_step(fn: Callable[[], int], msg_fn: Callable[[int], str], log_label: str) -> None:
-            try:
-                count = fn()
-                if count:
-                    if run_id is not None:
-                        _log_and_add_progress(
-                            run_id, service_id, job_name="usage_log", event={"type": "status", "message": msg_fn(count)}
-                        )
-                    else:
-                        logger.info("[usage_log] %s: %s", service_id, msg_fn(count))
-            except Exception as e:
-                logger.warning("[usage_log] %s failed for %s: %s", log_label, service_id, e)
-
-        _run_usage_step(
-            lambda: backfill_fastly_edge_writes(src),
-            lambda n: f"Backfilled {n} Fastly-edge PUTs to usage log",
-            "backfill",
-        )
-        _run_usage_step(
-            lambda: reconcile_fastly_stats(src, hours_back=26),
-            lambda n: f"Reconciled {n} hourly Fastly stats gap(s)",
-            "Fastly stats reconciliation",
-        )
-        run_usage_log_cleanup(service_id)
-
     if do_heavy_refresh:
         _t0 = time.time()
         try:
-            _usage_log_phase()
+            from backend.core.duckdb import backfill_fastly_edge_writes, reconcile_fastly_stats
+            from backend.utils.telemetry import run_usage_log_cleanup
+
+            for fn, msg_fn, log_label in (
+                (
+                    lambda: backfill_fastly_edge_writes(src),
+                    lambda n: f"Backfilled {n} Fastly-edge PUTs to usage log",
+                    "backfill",
+                ),
+                (
+                    lambda: reconcile_fastly_stats(src, hours_back=26),
+                    lambda n: f"Reconciled {n} hourly Fastly stats gap(s)",
+                    "Fastly stats reconciliation",
+                ),
+            ):
+                try:
+                    if count := fn():
+                        if run_id is not None:
+                            _log_and_add_progress(
+                                run_id,
+                                service_id,
+                                job_name="usage_log",
+                                event={"type": "status", "message": msg_fn(count)},
+                            )
+                        else:
+                            logger.info("[usage_log] %s: %s", service_id, msg_fn(count))
+                except Exception as e:
+                    logger.warning("[usage_log] %s failed for %s: %s", log_label, service_id, e)
+            run_usage_log_cleanup(service_id)
         except Exception as e:
             logger.warning("[scheduler] %s: usage_log phase failed: %s", service_id, e)
         if run_id is not None:
@@ -851,19 +790,18 @@ def _run_full_sweep(
     if _refuse_if_dev_no_crons(service_id, "full_sweep"):
         return
 
-    from backend import config as svcconfig
     from backend.core.duckdb import get_source_for_service
     from backend.core.ingest import ingest
     from backend.utils.active_requests import should_defer_cron
 
     cfg = svcconfig.load_config(service_id) or {}
     delete_after = svcconfig.resolve_raw_delete_after(cfg)
-
     src = get_source_for_service(service_id)
-    if src is None or src.get("access_level") == "read_only":
-        return
-
-    if not force and should_defer_cron("full_sync", service_id):
+    if (
+        src is None
+        or src.get("access_level") == "read_only"
+        or (not force and should_defer_cron("full_sync", service_id))
+    ):
         return
 
     _display = _display_label(src, service_id)
@@ -883,9 +821,7 @@ def _run_full_sweep(
         full_sweep_cfg = cfg.get("provisioning", {}).get("cron_full_sweep", {})
         configured_max_files = full_sweep_cfg.get("max_files")
         configured_max_seconds = full_sweep_cfg.get("max_seconds")
-
-        effective_max_files = max_files
-        effective_max_seconds = max_seconds
+        effective_max_files, effective_max_seconds = max_files, max_seconds
 
         if max_files == _FULL_SWEEP_DEFAULT_MAX_FILES:
             if configured_max_files is not None:
@@ -906,8 +842,7 @@ def _run_full_sweep(
                 try:
                     from backend.core import iceberg as db_iceberg
 
-                    stats = db_iceberg.buffer_backlog_stats(src)
-                    buf_files = int(stats.get("file_count", 0) or 0)
+                    buf_files = int(db_iceberg.buffer_backlog_stats(src).get("file_count", 0) or 0)
                     if buf_files > 2_000:
                         effective_max_files = min(effective_max_files, 5_000)
                         effective_max_seconds = min(effective_max_seconds, 300)
@@ -947,9 +882,7 @@ def _run_full_sweep(
         def elapsed() -> str:
             return f"[{run.elapsed():.1f}s]"
 
-        processed_files = 0
-        inserted_rows = 0
-        corrupt_rows = 0
+        processed_files = inserted_rows = corrupt_rows = 0
         done_event: dict = {}
 
         try:
@@ -982,9 +915,7 @@ def _run_full_sweep(
             rows = done_event.get("rows_inserted", 0)
             corrupt_rows_cnt = done_event.get("corrupt_rows", 0)
             corrupt_details = done_event.get("corrupt_details", [])
-            corrupt_message = "\n".join(corrupt_details) if corrupt_details else None
             outcome_counters = done_event.get("outcome_counters")
-            has_ingest_errors = _has_ingest_outcome_errors(outcome_counters, corrupt_rows_cnt)
             reclaimed = done_event.get("deleted_files", 0)
             summary = (
                 "No late-arriving files found"
@@ -995,11 +926,10 @@ def _run_full_sweep(
                 summary += f"; ⚠ {corrupt_rows_cnt} corrupt row(s) quarantined"
             if reclaimed:
                 summary += f"; reclaimed {reclaimed} raw file(s) left by an interrupted prior run"
-            status = "error" if has_ingest_errors else "success"
             run.record(
-                status,
+                "error" if _has_ingest_outcome_errors(outcome_counters, corrupt_rows_cnt) else "success",
                 summary=summary,
-                error_message=corrupt_message,
+                error_message="\n".join(corrupt_details) if corrupt_details else None,
                 files_downloaded=new_files,
                 files_deleted_fos=reclaimed,
                 rows_ingested=rows,
@@ -1037,37 +967,11 @@ class _GapHealSeverityBand:
 
 
 _GAP_HEAL_SEVERITY_BANDS: tuple[_GapHealSeverityBand, ...] = (
+    _GapHealSeverityBand("critical", 0.80, 500_000, 0.0, 100_000, 1800),
+    _GapHealSeverityBand("severe", 0.50, 100_000, 0.25, 50_000, 1500),
+    _GapHealSeverityBand("elevated", 0.10, 10_000, 2.0, _FULL_SWEEP_DEFAULT_MAX_FILES, _FULL_SWEEP_DEFAULT_MAX_SECONDS),
     _GapHealSeverityBand(
-        name="critical",
-        min_gap_pct=0.80,
-        min_lost_lines=500_000,
-        throttle_hours=0.0,
-        sweep_max_files=100_000,
-        sweep_max_seconds=1800,
-    ),
-    _GapHealSeverityBand(
-        name="severe",
-        min_gap_pct=0.50,
-        min_lost_lines=100_000,
-        throttle_hours=0.25,
-        sweep_max_files=50_000,
-        sweep_max_seconds=1500,
-    ),
-    _GapHealSeverityBand(
-        name="elevated",
-        min_gap_pct=0.10,
-        min_lost_lines=10_000,
-        throttle_hours=2.0,
-        sweep_max_files=_FULL_SWEEP_DEFAULT_MAX_FILES,
-        sweep_max_seconds=_FULL_SWEEP_DEFAULT_MAX_SECONDS,
-    ),
-    _GapHealSeverityBand(
-        name="mild",
-        min_gap_pct=0.0,
-        min_lost_lines=0,
-        throttle_hours=GAP_HEAL_THROTTLE_HOURS,
-        sweep_max_files=_FULL_SWEEP_DEFAULT_MAX_FILES,
-        sweep_max_seconds=_FULL_SWEEP_DEFAULT_MAX_SECONDS,
+        "mild", 0.0, 0, GAP_HEAL_THROTTLE_HOURS, _FULL_SWEEP_DEFAULT_MAX_FILES, _FULL_SWEEP_DEFAULT_MAX_SECONDS
     ),
 )
 
@@ -1092,11 +996,7 @@ def _mark_gap_heal_triggered(service_id: str) -> None:
 
 
 @cron_task("gap_heal", job_name="gap_heal")
-def _run_gap_heal(
-    service_id: str,
-    run_id: int | None = None,
-    force: bool = False,
-) -> None:
+def _run_gap_heal(service_id: str, run_id: int | None = None, force: bool = False) -> None:
     """Periodic gap detector that triggers a full_sweep when sustained loss is observed."""
     if _refuse_if_dev_no_crons(service_id, "gap_heal"):
         return
@@ -1105,14 +1005,14 @@ def _run_gap_heal(
     from backend.utils.active_requests import should_defer_cron
 
     src = get_source_for_service(service_id)
-    if src is None or src.get("access_level") == "read_only":
-        return
-
-    if not force and should_defer_cron("gap_heal", service_id):
+    if (
+        src is None
+        or src.get("access_level") == "read_only"
+        or (not force and should_defer_cron("gap_heal", service_id))
+    ):
         return
 
     _display = _display_label(src, service_id)
-
     with cron_run(
         service_id,
         "gap_heal",
@@ -1137,10 +1037,7 @@ def _run_gap_heal(
                     summary = "Fastly stats unavailable for service (skipped)"
                     run.success(summary)
                     _log_and_add_progress(
-                        run_id,
-                        service_id,
-                        job_name="gap_heal",
-                        event={"type": "done", "message": summary},
+                        run_id, service_id, job_name="gap_heal", event={"type": "done", "message": summary}
                     )
                     logger.info("⏭️  \x1b[95m[gap_heal]\x1b[0m %s: %s", service_id, summary)
                     return
@@ -1186,18 +1083,11 @@ def _run_gap_heal(
             _log_and_add_progress(run_id, service_id, job_name="gap_heal", event={"type": "status", "message": msg})
             run.warn(msg)
             _mark_gap_heal_triggered(service_id)
-            _run_full_sweep(
-                service_id,
-                max_files=band.sweep_max_files,
-                max_seconds=band.sweep_max_seconds,
-                force=force,
-            )
+            _run_full_sweep(service_id, max_files=band.sweep_max_files, max_seconds=band.sweep_max_seconds, force=force)
         except Exception as e:
             run.fail("Gap-heal evaluation crashed", error_message=str(e))
             logger.exception("[gap_heal] %s: unexpected error", service_id)
 
-
-from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry  # noqa: E402
 
 _CacheRegistry.register("cron.jobs.sync._GAP_HEAL_LAST_TRIGGER", _GAP_HEAL_LAST_TRIGGER)
 
@@ -1208,22 +1098,15 @@ _CacheRegistry.register("cron.jobs.sync._GAP_HEAL_LAST_TRIGGER", _GAP_HEAL_LAST_
 @cron_task("cron_commit", job_name="commit")
 def _run_commit(service_id: str, force: bool = False, run_id: int | None = None) -> None:
     """Commit the local buffer to the shared Iceberg table in FOS."""
-    from backend import config as svcconfig
     from backend.core.duckdb import get_source_for_service
 
     cfg = svcconfig.load_config(service_id)
     if not cfg:
         return
-
     src = get_source_for_service(service_id)
-    if src is None:
+    if src is None or (src.get("access_level") == "read_only" and not force):
         return
-
-    if src.get("access_level") == "read_only" and not force:
-        return
-
-    prov = cfg.get("provisioning", {})
-    sync_cfg = prov.get("cron_sync", {})
+    sync_cfg = cfg.get("provisioning", {}).get("cron_sync", {})
     if not sync_cfg.get("enabled", True) and not force:
         return
 
@@ -1243,37 +1126,34 @@ def _run_commit(service_id: str, force: bool = False, run_id: int | None = None)
         if svcconfig.is_high_scale_mode(src):
             from backend.core.ingest import finalize_committed_raw, merge_lake_files
             from backend.core.metadata.base import get_con
+            from backend.utils.date_utils import parse_iso_utc
 
             run.include_log_output = False
             try:
                 merge_lake_files(service_id)
-
                 meta_con = get_con(service_id)
                 prev = meta_con.execute(
                     "SELECT started_at FROM cron_runs WHERE service_id = ? AND task = 'commit' "
                     "AND status != 'running' ORDER BY started_at DESC, id DESC LIMIT 1",
                     (service_id,),
                 ).fetchone()
-                since_epoch = 0.0
-                if prev and prev["started_at"]:
-                    from backend.utils.date_utils import parse_iso_utc
-
-                    prev_dt = parse_iso_utc(prev["started_at"])
-                    if prev_dt is not None:
-                        since_epoch = prev_dt.timestamp()
+                prev_dt = parse_iso_utc(prev["started_at"]) if prev and prev["started_at"] else None
+                since_epoch = prev_dt.timestamp() if prev_dt is not None else 0.0
                 files_ingested = meta_con.execute(
                     "SELECT count(*) FROM ingest_ledger WHERE service_id = ? AND committed_at >= ?",
                     (service_id, since_epoch),
                 ).fetchone()[0]
-
                 raw = finalize_committed_raw(service_id)
-
-                summary = f"Ingested {files_ingested} file(s); merged small lake files"
-                if raw["delete_after"]:
-                    summary += f"; deleted {raw['deleted']} raw file(s)"
-                else:
-                    summary += "; raw deletion disabled (delete_after=false)"
-                run.success(summary, files_downloaded=files_ingested, files_deleted_fos=raw["deleted"])
+                raw_suffix = (
+                    f"; deleted {raw['deleted']} raw file(s)"
+                    if raw["delete_after"]
+                    else "; raw deletion disabled (delete_after=false)"
+                )
+                run.success(
+                    f"Ingested {files_ingested} file(s); merged small lake files{raw_suffix}",
+                    files_downloaded=files_ingested,
+                    files_deleted_fos=raw["deleted"],
+                )
             except Exception as e:
                 run.fail("DuckLake merge / raw finalization failed", error_message=str(e))
                 logger.exception("[ledger] %s: DuckLake merge / raw finalization failed", service_id)
@@ -1298,10 +1178,12 @@ def _run_commit(service_id: str, force: bool = False, run_id: int | None = None)
         try:
             from backend.core import iceberg as db_iceberg
 
-            def _commit_progress(type, msg):
-                _log_and_add_progress(run_id, service_id, job_name="commit", event={"type": type, "message": msg})
-
-            result = db_iceberg.commit_buffer(src, progress_callback=_commit_progress)
+            result = db_iceberg.commit_buffer(
+                src,
+                progress_callback=lambda t, m: _log_and_add_progress(
+                    run_id, service_id, job_name="commit", event={"type": t, "message": m}
+                ),
+            )
             quarantined = int(result.get("quarantined_files", 0) or 0)
             quarantine_suffix = f" ⚠ quarantined {quarantined} unreadable file(s)" if quarantined else ""
             commit_error = _buffer_result_error(result, "") or ""
@@ -1309,32 +1191,35 @@ def _run_commit(service_id: str, force: bool = False, run_id: int | None = None)
             backlog_suffix = _check_buffer_backlog(
                 src, service_id, commit_interval_mins=int(sync_cfg.get("commit_interval_mins", 5))
             )
-            if result.get("files_committed", 0) > 0:
+            files_committed = result.get("files_committed", 0)
+            if files_committed > 0:
                 summary = (
-                    f"Committed {result['files_committed']} buffer file(s) "
+                    f"Committed {files_committed} buffer file(s) "
                     f"({result['rows_committed']} rows) → snapshot {result.get('snapshot_id')}.{quarantine_suffix}"
                     f"{incomplete_suffix}{backlog_suffix}"
                 )
-                run.record(
-                    "error" if commit_error else "success",
-                    summary=summary,
-                    error_message=commit_error or None,
-                    rows_ingested=result["rows_committed"],
-                )
-                _log_and_add_progress(
-                    run_id,
-                    service_id,
-                    job_name="commit",
-                    event={"type": "error" if commit_error else "done", "message": summary},
-                )
+                record_kw = {"rows_ingested": result["rows_committed"]}
+            else:
+                summary_start = "No buffer files committed" if commit_error else "No new data to commit"
+                summary = summary_start + quarantine_suffix + incomplete_suffix + backlog_suffix
+                record_kw = {}
 
+            run.record(
+                "error" if commit_error else "success", summary=summary, error_message=commit_error or None, **record_kw
+            )
+            _log_and_add_progress(
+                run_id,
+                service_id,
+                job_name="commit",
+                event={"type": "error" if commit_error else "done", "message": summary},
+            )
+            if files_committed > 0:
                 refresh_view_and_warm_pool(
                     src,
                     service_id,
                     log_prefix="",
                     progress_log=lambda ev: _log_and_add_progress(run_id, service_id, job_name="commit", event=ev),
                 )
-
                 try:
                     from backend.cron.jobs import metadata as _metadata_jobs
 
@@ -1343,44 +1228,17 @@ def _run_commit(service_id: str, force: bool = False, run_id: int | None = None)
                     _log_and_add_progress(
                         run_id, service_id, job_name="commit", event={"type": "warning", "message": e}
                     )
-
                 _spawn_local_compaction(src, service_id)
-            else:
-                summary_start = "No buffer files committed" if commit_error else "No new data to commit"
-                summary = summary_start + quarantine_suffix + incomplete_suffix + backlog_suffix
-                run.record("error" if commit_error else "success", summary=summary, error_message=commit_error or None)
-                _log_and_add_progress(
-                    run_id,
-                    service_id,
-                    job_name="commit",
-                    event={"type": "error" if commit_error else "done", "message": summary},
-                )
         except Exception as e:
             run.fail("Buffer commit failed", error_message=str(e))
             _log_and_add_progress(run_id, service_id, job_name="commit", event={"type": "error", "message": str(e)})
             logger.exception("[scheduler] %s: buffer commit failed: %s", service_id, e)
 
     publish_sync_status_safe(service_id, "scheduler")
-
     logger.info("🏁  \x1b[95m[commit]\x1b[0m %s: Commit job finished.", _display)
 
 
 # ── RUM Sync, Discovery, Commit & Ledger Sweep (folded from backend.cron.jobs.rum_sync) ──
-
-"""RUM sync cron job — ingest raw beacon logs from FOS.
-
-Registered in scheduler as cron_rum_sync. Runs periodically (configurable interval).
-"""
-
-
-import logging
-import sys as _sys
-import time
-from datetime import datetime, timedelta
-
-from backend.core.rum_ingest import ingest_rum_logs
-
-logger = logging.getLogger(__name__)
 
 
 def _faro_purge_surrogate_key(logging_service_id: str, token: str) -> None:
@@ -1390,12 +1248,9 @@ def _faro_purge_surrogate_key(logging_service_id: str, token: str) -> None:
     log downloads (F-1 audit finding). ``Surrogate-Key: rum-faro-sdk`` is
     set only in the RUM fetch-cache snippet, which is deployed to the
     instrumented *logging* service, never the CDN service — a purge
-    targeting the CDN service can never match anything there. Mirrors the
-    fire-and-forget convention of ``_purge_surrogate_key`` in
-    ``backend.core.iceberg._core`` (which purges a different, unrelated key
-    on the CDN service, where that IS the correct target): a missing
-    service id/token or a purge failure must never surface — the FOS
-    upload it follows already succeeded.
+    targeting the CDN service can never match anything there. Fire-and-forget:
+    a missing service id/token or a purge failure must never surface — the
+    FOS upload it follows already succeeded.
     """
     if not logging_service_id or not token:
         return
@@ -1452,7 +1307,6 @@ def _reconcile_faro_bundle(service_id: str, run_id: int | None) -> bool:
     """
     import asyncio
 
-    from backend import config as svcconfig
     from backend.core.faro_versions import DEFAULT_FARO_VERSION
     from backend.cron_progress import add_progress
     from backend.provision.rum_assets import (
@@ -1466,72 +1320,50 @@ def _reconcile_faro_bundle(service_id: str, run_id: int | None) -> bool:
         if run_id:
             add_progress(run_id, {"type": "status", "message": msg})
 
+    def _upload_and_purge(
+        ver: str, expected_ver: str | None, ok_msg: str, err_label: str, *, check_auth: bool = True
+    ) -> bool:
+        try:
+            asyncio.run(download_and_upload_faro(service_id, ver, token, expected_current_version=expected_ver))
+            _faro_purge_surrogate_key(service_id, token)
+            report(ok_msg)
+            return True
+        except Exception as e:
+            msg = str(e)
+            if check_auth and ("403" in msg or "401" in msg or "unauthorized" in msg.lower()):
+                logger.warning("%s failed for %s (S3/FOS write credentials unauthorized: %s)", err_label, service_id, e)
+            else:
+                logger.warning("%s failed for %s", err_label, service_id, exc_info=True)
+            return False
+
     try:
         cfg = svcconfig.load_config(service_id)
-        if not cfg:
+        if not cfg or not svcconfig.is_rum_enabled(cfg):
             return True
         rum_cfg = cfg.get("rum")
-        rum_cfg = rum_cfg if isinstance(rum_cfg, dict) else {}
-        rum_enabled = svcconfig.is_rum_enabled(cfg)
-        if not rum_enabled:
-            return True
         token = cfg.get("fastly_api_key", "")
-
-        pinned_version = rum_cfg.get("faro_version")
+        pinned_version = (rum_cfg if isinstance(rum_cfg, dict) else {}).get("faro_version")
         if not pinned_version:
-            # Self-heal: a service enabled before every enable path pinned a
-            # version by default. Adopt the default rather than leave
-            # /js/faro-sdk.js 404ing for every visitor.
+            # Self-heal: adopt the default rather than leave /js/faro-sdk.js 404ing.
             report(f"RUM enabled with no pinned Faro version; adopting default v{DEFAULT_FARO_VERSION}")
-            try:
-                asyncio.run(
-                    download_and_upload_faro(service_id, DEFAULT_FARO_VERSION, token, expected_current_version=None)
-                )
-                _faro_purge_surrogate_key(service_id, token)
-                report(f"Faro v{DEFAULT_FARO_VERSION} adopted and uploaded to FOS")
-                pinned_version = DEFAULT_FARO_VERSION
-                # Reload: download_and_upload_faro just persisted
-                # faro_version/faro_content_hash/faro_fos_etag_md5 via its
-                # own save_config call, which the stale in-memory cfg above
-                # wouldn't reflect. Without this, the integrity check right
-                # below would see no stored etag, treat the bundle it just
-                # uploaded as "not intact", and re-upload it a second time
-                # this same tick.
-                cfg = svcconfig.load_config(service_id) or cfg
-            except Exception as e:
-                msg = str(e)
-                if "403" in msg or "401" in msg or "unauthorized" in msg.lower():
-                    logger.warning(
-                        "Faro default-version adoption failed for %s (S3/FOS write credentials unauthorized: %s)",
-                        service_id,
-                        e,
-                    )
-                else:
-                    logger.warning("Faro default-version adoption failed for %s", service_id, exc_info=True)
+            if not _upload_and_purge(
+                DEFAULT_FARO_VERSION,
+                None,
+                f"Faro v{DEFAULT_FARO_VERSION} adopted and uploaded to FOS",
+                "Faro default-version adoption",
+            ):
                 return False
+            pinned_version = DEFAULT_FARO_VERSION
+            # Reload so the integrity check below sees the newly persisted etag/hash.
+            cfg = svcconfig.load_config(service_id) or cfg
 
-            # The bundle now exists in FOS, but the deployed VCL for this
-            # service may still be missing the routes for it entirely (see
-            # the docstring above) — reconcile now so /js/faro-sdk.js
-            # actually resolves. Best-effort: a reconcile failure here must
-            # not abort the bundle-ingest cron tick; the next tick retries
-            # since pinned_version is now set but the live VCL wasn't
-            # reconciled to match, so `rum_vcl_fingerprint`-based drift
-            # detection (/rum/status) will keep reporting drift until an
-            # operator-triggered reconcile (or a future tick, if this is
-            # ever made retryable) succeeds.
+            # Reconcile VCL so /js/faro-sdk.js routes to the newly adopted bundle (best-effort).
             try:
                 from backend.provision.declarative.reconciler import reconcile_vcl_state
                 from backend.provision.rum_orchestrator_v2 import rum_vcl_fingerprint
 
                 reconcile_vcl_state(service_id, token, dry_run=False, activate=True)
                 report(f"VCL reconciled: /js/faro-sdk.js now routes to v{DEFAULT_FARO_VERSION}")
-                # #2 audit finding: refresh the stored fingerprint now that the
-                # live VCL actually matches what the generator produces for
-                # this pin — without this, /rum/status's vcl_drift would keep
-                # reporting drift forever after this self-heal, even though
-                # it just successfully reconciled. Mirrors the refresh
-                # upgrade_faro_version does after its own activation.
                 svcconfig.mutate_config(
                     service_id, lambda c: c.__setitem__("rum_vcl_sha", rum_vcl_fingerprint(service_id, c))
                 )
@@ -1546,27 +1378,16 @@ def _reconcile_faro_bundle(service_id: str, run_id: int | None) -> bool:
         # 1. Cheap integrity check — every tick.
         if not faro_bundle_intact(cfg, pinned_version):
             report(f"Faro bundle v{pinned_version} missing/corrupt in FOS, restoring")
-            try:
-                asyncio.run(
-                    download_and_upload_faro(service_id, pinned_version, token, expected_current_version=pinned_version)
-                )
-                _faro_purge_surrogate_key(service_id, token)
-                report(f"Faro bundle v{pinned_version} restored to FOS")
-            except Exception as e:
-                msg = str(e)
-                if "403" in msg or "401" in msg or "unauthorized" in msg.lower():
-                    logger.warning(
-                        "Faro bundle restore failed for %s (S3/FOS write credentials unauthorized: %s)",
-                        service_id,
-                        e,
-                    )
-                else:
-                    logger.warning("Faro bundle restore failed for %s", service_id, exc_info=True)
+            if not _upload_and_purge(
+                pinned_version,
+                pinned_version,
+                f"Faro bundle v{pinned_version} restored to FOS",
+                "Faro bundle restore",
+            ):
                 return False
 
-        # 2. Throttled upstream drift check. Reload cfg first in case the
-        # restore above just rewrote faro_content_hash, so the timestamp
-        # write below doesn't clobber it with a stale in-memory copy.
+        # 2. Throttled upstream drift check. Reload cfg first so the timestamp write
+        # below doesn't clobber a freshly restored faro_content_hash.
         cfg = svcconfig.load_config(service_id) or cfg
         rum_cfg = dict(cfg.get("rum") or {})
         last_check = rum_cfg.get("faro_last_upstream_check") or 0
@@ -1580,9 +1401,7 @@ def _reconcile_faro_bundle(service_id: str, run_id: int | None) -> bool:
             except Exception:
                 logger.warning("Faro upstream drift check failed for %s", service_id, exc_info=True)
             finally:
-                # Write the attempt timestamp even on failure — otherwise a
-                # persistently failing upstream turns into a per-tick
-                # download storm instead of once per window.
+                # Write attempt timestamp even on failure to avoid per-tick download storms.
                 svcconfig.mutate_config(
                     service_id,
                     lambda c: c.__setitem__("rum", {**(c.get("rum") or {}), "faro_last_upstream_check": now}),
@@ -1590,16 +1409,13 @@ def _reconcile_faro_bundle(service_id: str, run_id: int | None) -> bool:
 
             if drift:
                 report(f"Faro upstream drift detected for v{pinned_version}, re-syncing")
-                try:
-                    asyncio.run(
-                        download_and_upload_faro(
-                            service_id, pinned_version, token, expected_current_version=pinned_version
-                        )
-                    )
-                    _faro_purge_surrogate_key(service_id, token)
-                    report(f"Faro bundle v{pinned_version} re-synced from upstream")
-                except Exception:
-                    logger.warning("Faro upstream re-sync failed for %s", service_id, exc_info=True)
+                if not _upload_and_purge(
+                    pinned_version,
+                    pinned_version,
+                    f"Faro bundle v{pinned_version} re-synced from upstream",
+                    "Faro upstream re-sync",
+                    check_auth=False,
+                ):
                     return False
         return True
     except Exception:
@@ -1616,19 +1432,13 @@ def _run_rum_sync(service_id: str, **kwargs) -> None:
     # No start-of-tick active-request gate here (mirroring 5a7541fd): a deferred
     # tick waits a full interval, and dashboard/SSE polling kept it tripped.
     logger.info(f"RUM sync starting for {service_id}")
-
     is_manual = kwargs.get("is_manual", False) or kwargs.get("run_id") is not None
     pass_max_seconds = 20 if not is_manual else 240
 
     from backend.core import metadata
-    from backend.cron.lifecycle import cron_run
     from backend.cron_progress import add_progress
 
     had_warning = False
-    # The wrapper owns the lease + progress lifecycle; ingest_rum_logs reuses the
-    # leased run_id and still writes its own terminal cron_runs rows.
-    # The backstop flips a row ingest left in ``running`` (e.g. the body raised before
-    # ingest_rum_logs wrote its terminal row) instead of waiting for the next tick's reap.
     with cron_run(
         service_id,
         "rum_sync",
@@ -1641,29 +1451,26 @@ def _run_rum_sync(service_id: str, **kwargs) -> None:
         run_id = run.run_id
         try:
             for event in ingest_rum_logs(service_id, max_seconds=pass_max_seconds, run_id=run_id):
-                if event[0] == "started":
+                kind = event[0]
+                if kind == "started":
                     add_progress(run_id, {"type": "status", "message": f"RUM sync starting for {service_id}"})
                     if not _reconcile_faro_bundle(service_id, run_id):
                         had_warning = True
-                elif event[0] == "file_done":
-                    _, filename, count = event
-                    msg = f"{filename}: {count} rows"
+                elif kind == "file_done":
+                    msg = f"{event[1]}: {event[2]} rows"
                     logger.debug(f"  {msg}")
                     add_progress(run_id, {"type": "status", "message": msg})
-                elif event[0] == "error":
-                    _, location, msg = event
-                    logger.warning(f"  Error in {location}: {msg}")
-                    add_progress(run_id, {"type": "error", "message": f"Error in {location}: {msg}"})
-                elif event[0] == "cleanup_done":
-                    _, cleanup_files, cleanup_bytes = event
-                    msg = f"RUM cleanup deleted {cleanup_files} files, freed {cleanup_bytes / (1024 * 1024):.2f} MB"
+                elif kind == "error":
+                    err_msg = f"Error in {event[1]}: {event[2]}"
+                    logger.warning(f"  {err_msg}")
+                    add_progress(run_id, {"type": "error", "message": err_msg})
+                elif kind == "cleanup_done":
+                    msg = f"RUM cleanup deleted {event[1]} files, freed {event[2] / (1024 * 1024):.2f} MB"
                     logger.info(msg)
                     add_progress(run_id, {"type": "status", "message": msg})
-                elif event[0] == "done":
-                    _, total = event
-                    msg = f"RUM sync complete: {total} total rows"
-                    if had_warning:
-                        msg += " (with warnings)"
+                elif kind == "done":
+                    total = event[1]
+                    msg = f"RUM sync complete: {total} total rows" + (" (with warnings)" if had_warning else "")
                     logger.info(msg)
                     add_progress(run_id, {"type": "status", "message": msg})
                     if had_warning:
@@ -1681,18 +1488,14 @@ def _run_rum_sync(service_id: str, **kwargs) -> None:
                                 extra={"service_id": service_id, "run_id": run_id},
                                 exc_info=True,
                             )
-
                     if total > 0:
                         try:
-                            from backend.cron.jobs.rum_commit import _run_rum_commit
-
                             logger.info(
                                 "⚡ [rum_sync] %s: triggering post-sync RUM commit for %d new rows", service_id, total
                             )
                             _run_rum_commit(service_id)
                         except Exception as commit_err:
                             logger.warning("RUM post-sync commit failed for %s: %s", service_id, commit_err)
-
         except Exception as e:
             logger.error(f"RUM sync failed: {e}", exc_info=True)
             add_progress(run_id, {"type": "error", "message": f"RUM sync failed: {e}"})
@@ -1708,30 +1511,16 @@ def _run_rum_discovery_cron(service_id: str, run_id: int | None = None) -> None:
     cron_runs row carries the real per-tick outcome instead of a fake instant
     success.
     """
-    from backend.cron.scheduler import dev_mode_no_crons
-
-    if dev_mode_no_crons():
-        logger.warning("[scheduler] %s: FLA_DEV_NO_CRONS=1 — RUM discovery refused.", service_id)
+    if _refuse_if_dev_no_crons(service_id, "RUM discovery"):
         return
 
-    from backend import config as svcconfig
     from backend.core.duckdb import get_source_for_service
 
     cfg = svcconfig.load_config(service_id)
-    if not cfg:
+    if not cfg or not svcconfig.is_rum_enabled(cfg):
         return
-    rum_cfg = cfg.get("rum")
-    rum_cfg = rum_cfg if isinstance(rum_cfg, dict) else {}
-    rum_enabled = svcconfig.is_rum_enabled(cfg)
-    if not rum_enabled:
-        return
-
     src = get_source_for_service(service_id)
-    if src is None:
-        return
-    if src.get("access_level") == "read_only":
-        return
-    if not svcconfig.is_high_scale_mode(src):
+    if src is None or src.get("access_level") == "read_only" or not svcconfig.is_high_scale_mode(src):
         return
 
     with cron_run(
@@ -1747,14 +1536,11 @@ def _run_rum_discovery_cron(service_id: str, run_id: int | None = None) -> None:
         if not run.ok:
             return
         run_id = run.run_id
-
-        faro_ok = True
-        faro_err = None
+        faro_ok, faro_err = True, None
         try:
             faro_ok = _reconcile_faro_bundle(service_id, run_id)
         except Exception as fe:
-            faro_ok = False
-            faro_err = str(fe)
+            faro_ok, faro_err = False, str(fe)
             logger.warning(
                 "[rum_discovery] %s: Faro bundle reconcile failed (non-fatal): %s", service_id, fe, exc_info=True
             )
@@ -1770,30 +1556,27 @@ def _run_rum_discovery_cron(service_id: str, run_id: int | None = None) -> None:
         from backend.provision.log_paths import rum_minute_list_prefix
 
         now = datetime.now(UTC)
-        discovered = 0
-        for i in range(5):
-            prefix = rum_minute_list_prefix(now - timedelta(minutes=i))
-            discovered += discover_rum_prefix(service_id, prefix_subpath=prefix, run_id=run_id)
-
+        discovered = sum(
+            discover_rum_prefix(
+                service_id, prefix_subpath=rum_minute_list_prefix(now - timedelta(minutes=i)), run_id=run_id
+            )
+            for i in range(5)
+        )
+        base_summary = (
+            f"Discovered {discovered} new RUM file(s); dispatched to ingest workers"
+            if discovered
+            else "No new RUM files"
+        )
         if not faro_ok:
-            status = "warning"
             warn_msg = f"Faro bundle reconcile issue ({faro_err or 'drift/restore warning'})"
-            summary = (
-                f"Discovered {discovered} new RUM file(s); dispatched to ingest workers ({warn_msg})"
-                if discovered
-                else f"No new RUM files ({warn_msg})"
+            run.record(
+                "warning",
+                summary=f"{base_summary} ({warn_msg})",
+                error_message=faro_err or "Faro bundle reconcile failed",
+                files_downloaded=discovered,
             )
-            error_message = faro_err or "Faro bundle reconcile failed"
         else:
-            status = "success"
-            summary = (
-                f"Discovered {discovered} new RUM file(s); dispatched to ingest workers"
-                if discovered
-                else "No new RUM files"
-            )
-            error_message = None
-
-        run.record(status, summary=summary, error_message=error_message, files_downloaded=discovered)
+            run.record("success", summary=base_summary, error_message=None, files_downloaded=discovered)
 
 
 def _run_ledger_sweep_impl(
@@ -1807,19 +1590,13 @@ def _run_ledger_sweep_impl(
     finalize_running_backstop: bool = False,
     include_warning_error_message: bool = False,
 ) -> None:
-    from backend.cron.scheduler import dev_mode_no_crons
-
-    if dev_mode_no_crons():
-        logger.warning("[scheduler] %s: FLA_DEV_NO_CRONS=1 — %s refused.", service_id, label)
+    if _refuse_if_dev_no_crons(service_id, label):
         return
 
-    from backend import config as svcconfig
     from backend.core.duckdb import get_source_for_service
 
     cfg = svcconfig.load_config(service_id)
-    if not cfg:
-        return
-    if require_rum and not svcconfig.is_rum_enabled(cfg):
+    if not cfg or (require_rum and not svcconfig.is_rum_enabled(cfg)):
         return
     src = get_source_for_service(service_id)
     if src is None or not svcconfig.is_high_scale_mode(src) or src.get("access_level") == "read_only":
@@ -1846,22 +1623,15 @@ def _run_ledger_sweep_impl(
             warnings.append("Celery broker/queue depth probe failed")
         if summary.get("dead_letter", 0) > 0:
             warnings.append(f"{summary['dead_letter']} dead-letter/quarantined {row_prefix}row(s)")
-        run_status = "warning" if warnings else "success"
 
         summary_msg = (
             f"reclaimed={summary.get('reclaimed', 0)} redispatched={summary.get('redispatched', 0)} "
-            f"discovered={summary.get('discovered', 0)}"
+            f"discovered={summary.get('discovered', 0)}" + (f" ({'; '.join(warnings)})" if warnings else "")
         )
-        if warnings:
-            summary_msg += f" ({'; '.join(warnings)})"
-
-        record_kwargs: dict = {
-            "summary": summary_msg,
-            "files_downloaded": summary.get("discovered", 0),
-        }
+        record_kwargs: dict = {"summary": summary_msg, "files_downloaded": summary.get("discovered", 0)}
         if include_warning_error_message:
             record_kwargs["error_message"] = "; ".join(warnings) if warnings else None
-        run.record(run_status, **record_kwargs)
+        run.record("warning" if warnings else "success", **record_kwargs)
         run.log_progress({"type": "done", "message": summary_msg})
 
 
@@ -1872,11 +1642,7 @@ def _run_ledger_sweep(service_id: str, run_id: int | None = None) -> None:
     from backend.core.ingest import sweep_ledger_once
 
     _run_ledger_sweep_impl(
-        service_id,
-        run_id,
-        job_name="ledger_sweep",
-        sweep_fn=sweep_ledger_once,
-        label="ledger sweep",
+        service_id, run_id, job_name="ledger_sweep", sweep_fn=sweep_ledger_once, label="ledger sweep"
     )
 
 
@@ -1903,33 +1669,40 @@ def _run_rum_ledger_sweep(service_id: str, run_id: int | None = None) -> None:
 @cron_task("cron_rum_commit", job_name="rum_commit")
 def _run_rum_commit(service_id: str, force: bool = False, run_id: int | None = None, **kwargs) -> None:
     """Compact RUM tables from DuckDB cache to Iceberg/FOS."""
-    from backend import config as svcconfig
     from backend.core import iceberg as db_iceberg
+    from backend.core.duckdb import _cache_dir as _commit_cache_dir
     from backend.core.duckdb import get_source_for_service
+    from backend.cron.scheduler import _check_disk_space
     from backend.utils.telemetry_proxy import _BOTO3_CALLER_HINT
 
     cfg = svcconfig.load_config(service_id)
     if not cfg:
         return
-
     src = get_source_for_service(service_id)
-    if src is None:
+    if src is None or (src.get("access_level") == "read_only" and not force):
+        return
+    if not cfg.get("provisioning", {}).get("cron_sync", {}).get("enabled", True) and not force:
         return
 
-    if src.get("access_level") == "read_only" and not force:
-        return
-
-    prov = cfg.get("provisioning", {})
-    sync_cfg = prov.get("cron_sync", {})
-    if not sync_cfg.get("enabled", True) and not force:
-        return
+    def _commit_rum_table(table_name: str) -> tuple[dict, int, str | None]:
+        res: dict = {}
+        committed_rows = 0
+        err: str | None = None
+        try:
+            res = db_iceberg.commit_buffer(src, table_name=table_name)
+            err = _buffer_result_error(res)
+            if res.get("files_committed", 0) > 0:
+                committed_rows = res.get("rows_committed", 0)
+                db_iceberg.sync_data(src, table_name=table_name)
+            if err:
+                logger.warning("[rum_commit] %s: %s commit incomplete: %s", service_id, table_name, err)
+        except Exception as e:
+            err = "; ".join(part for part in (err, str(e)) if part)
+            logger.warning("[rum_commit] %s: %s commit failed: %s", service_id, table_name, e)
+        return res, committed_rows, err
 
     # No start-of-tick active-request gate here (mirroring 5a7541fd): a deferred
     # tick waits a full interval, and dashboard/SSE polling kept it tripped.
-    from backend.core.duckdb import _cache_dir as _commit_cache_dir
-    from backend.cron.lifecycle import cron_run
-    from backend.cron.scheduler import _check_disk_space
-
     with cron_run(
         service_id,
         "rum_commit",
@@ -1952,41 +1725,8 @@ def _run_rum_commit(service_id: str, force: bool = False, run_id: int | None = N
         boto3_token = _BOTO3_CALLER_HINT.set("rum_commit")
         try:
             logger.info(f"RUM commit starting for {service_id}")
-
-            total_committed_vitals = 0
-            total_committed_errors = 0
-            vitals_err = None
-            errors_err = None
-            vitals_res = {}
-            errors_res = {}
-
-            # Commit client_vitals
-            try:
-                vitals_res = db_iceberg.commit_buffer(src, table_name="client_vitals")
-                vitals_err = _buffer_result_error(vitals_res)
-                if vitals_res.get("files_committed", 0) > 0:
-                    total_committed_vitals = vitals_res.get("rows_committed", 0)
-                    # Sync client_vitals view/metadata
-                    db_iceberg.sync_data(src, table_name="client_vitals")
-                if vitals_err:
-                    logger.warning("[rum_commit] %s: client_vitals commit incomplete: %s", service_id, vitals_err)
-            except Exception as e:
-                vitals_err = "; ".join(part for part in (vitals_err, str(e)) if part)
-                logger.warning("[rum_commit] %s: client_vitals commit failed: %s", service_id, e)
-
-            # Commit client_errors
-            try:
-                errors_res = db_iceberg.commit_buffer(src, table_name="client_errors")
-                errors_err = _buffer_result_error(errors_res)
-                if errors_res.get("files_committed", 0) > 0:
-                    total_committed_errors = errors_res.get("rows_committed", 0)
-                    # Sync client_errors view/metadata
-                    db_iceberg.sync_data(src, table_name="client_errors")
-                if errors_err:
-                    logger.warning("[rum_commit] %s: client_errors commit incomplete: %s", service_id, errors_err)
-            except Exception as e:
-                errors_err = "; ".join(part for part in (errors_err, str(e)) if part)
-                logger.warning("[rum_commit] %s: client_errors commit failed: %s", service_id, e)
+            vitals_res, total_committed_vitals, vitals_err = _commit_rum_table("client_vitals")
+            errors_res, total_committed_errors, errors_err = _commit_rum_table("client_errors")
 
             # Raw RUM objects may only be deleted after both DuckLake commit paths
             # have completed successfully and their publication is durable.
@@ -1997,20 +1737,17 @@ def _run_rum_commit(service_id: str, force: bool = False, run_id: int | None = N
 
                 # Update/recompute precomputed RUM aggregates
                 try:
-                    from contextlib import closing
-                    from datetime import UTC, datetime, timedelta
-
                     from backend.core.duckdb import get_connection, rum_source_for
                     from backend.core.iceberg import execute_with_stale_view_retry
                     from backend.core.iceberg._ducklake import _ducklake_attach
                     from backend.core.rollups.rum import (
                         backfill_missing_rum_aggregates,
                         recompute_rum_aggregates,
+                        rum_count_and_latest,
                     )
 
                     rum_src = rum_source_for(src)
                     with closing(get_connection(rum_src, read_only=False)) as rum_con:
-                        # Attach standard lake catalog so standard client_vitals / client_errors views can resolve
                         try:
                             _ducklake_attach(rum_con, src, read_only=True)
                         except Exception as attach_err:
@@ -2020,27 +1757,18 @@ def _run_rum_commit(service_id: str, force: bool = False, run_id: int | None = N
                                 attach_err,
                             )
 
-                        # Find hours that had data in the last 2 hours to do a fast incremental recompute
-                        # (48h on every 10s RUM commit caused 48 full client_vitals/client_errors scans per tick).
+                        # Find hours with data in the last 2 hours for fast incremental recompute.
                         recent_hours = []
                         since = datetime.now(UTC) - timedelta(hours=2)
-                        try:
-                            res_v = rum_con.execute(
-                                "SELECT DISTINCT DATE_TRUNC('hour', timestamp) FROM client_vitals WHERE timestamp >= ?",
-                                [since],
-                            ).fetchall()
-                            recent_hours.extend([r[0] for r in res_v if r[0]])
-                        except Exception:
-                            pass
-
-                        try:
-                            res_e = rum_con.execute(
-                                "SELECT DISTINCT DATE_TRUNC('hour', timestamp) FROM client_errors WHERE timestamp >= ?",
-                                [since],
-                            ).fetchall()
-                            recent_hours.extend([r[0] for r in res_e if r[0]])
-                        except Exception:
-                            pass
+                        for tbl in ("client_vitals", "client_errors"):
+                            try:
+                                rows = rum_con.execute(
+                                    f"SELECT DISTINCT DATE_TRUNC('hour', timestamp) FROM {tbl} WHERE timestamp >= ?",
+                                    [since],
+                                ).fetchall()
+                                recent_hours.extend([r[0] for r in rows if r[0]])
+                            except Exception:
+                                pass
 
                         target_hours = list(set(recent_hours)) if recent_hours else None
                         execute_with_stale_view_retry(
@@ -2050,8 +1778,7 @@ def _run_rum_commit(service_id: str, force: bool = False, run_id: int | None = N
                             table_name="client_vitals",
                         )
 
-                        # Also heal any historical hours (up to 30d) missing from rum_vitals_aggregates
-                        # or lacking the synthetic 'total_beacons' row added in 3fcbcd27.
+                        # Heal historical hours (up to 30d) missing from rum_vitals_aggregates.
                         try:
                             execute_with_stale_view_retry(
                                 rum_con,
@@ -2066,12 +1793,8 @@ def _run_rum_commit(service_id: str, force: bool = False, run_id: int | None = N
                                 heal_err,
                             )
 
-                        # Persist RUM freshness/count into the status doc so the
-                        # request-ingest status refresh reads it cheaply instead of
-                        # opening a nested RUM-lake connection (AGENTS.md Trap #39).
+                        # Persist RUM freshness/count into status doc (AGENTS.md Trap #39).
                         try:
-                            from backend.core.rollups.rum import rum_count_and_latest
-
                             rum_cnt, rum_latest = execute_with_stale_view_retry(
                                 rum_con, rum_src, rum_count_and_latest, table_name="client_vitals"
                             )
@@ -2097,22 +1820,16 @@ def _run_rum_commit(service_id: str, force: bool = False, run_id: int | None = N
                         "[rum_commit] %s: RUM aggregates update failed: %s", service_id, agg_err, exc_info=True
                     )
 
-            # Also launch local compaction for BOTH tables with error logging
+            # Launch local compaction for BOTH tables with error logging
             try:
-                import threading as _t
+                from backend.core import local_compaction as _lc  # type: ignore[attr-defined]
 
-                from backend.core import local_compaction as _lc
-
-                _t.Thread(
-                    target=lambda: _lc.compact_local_partitions(src, table_name="client_vitals"),
-                    name=f"local-compact-rum-vitals:{service_id}",
-                    daemon=True,
-                ).start()
-                _t.Thread(
-                    target=lambda: _lc.compact_local_partitions(src, table_name="client_errors"),
-                    name=f"local-compact-rum-errors:{service_id}",
-                    daemon=True,
-                ).start()
+                for short_name, tbl in (("vitals", "client_vitals"), ("errors", "client_errors")):
+                    threading.Thread(
+                        target=lambda t=tbl: _lc.compact_local_partitions(src, table_name=t),
+                        name=f"local-compact-rum-{short_name}:{service_id}",
+                        daemon=True,
+                    ).start()
             except Exception as lc_err:
                 logger.warning("[rum_commit] %s: post-commit local compaction failed to launch: %s", service_id, lc_err)
 
@@ -2141,41 +1858,21 @@ def _run_rum_commit(service_id: str, force: bool = False, run_id: int | None = N
                     f"and {e_files} errors files ({total_committed_errors} rows)"
                 )
 
-            run.record(
-                status,
-                summary=summary,
-                error_message=error_message,
-                rows_ingested=total_rows,
-            )
+            run.record(status, summary=summary, error_message=error_message, rows_ingested=total_rows)
             logger.info("RUM commit complete: %s", summary)
-
             publish_sync_status_safe(service_id, "rum_commit")
-
         finally:
             _BOTO3_CALLER_HINT.reset(boto3_token)
 
 
 _self_mod = _sys.modules[__name__]
-for _alias in (
-    "backend.cron.jobs._common",
-    "backend.cron.jobs.commit",
-    "backend.cron.jobs.rum_sync",
-    "backend.cron.jobs.rum_ledger",
-    "backend.cron.jobs.rum_commit",
-):
-    _sys.modules[_alias] = _self_mod
+_SYNC_ALIASES = ("_common", "commit", "rum_sync", "rum_ledger", "rum_commit")
+for _attr in _SYNC_ALIASES:
+    _sys.modules[f"backend.cron.jobs.{_attr}"] = _self_mod
 _jobs_pkg = _sys.modules.get("backend.cron.jobs")
 if _jobs_pkg is not None:
-    for _attr in ("_common", "commit", "rum_sync", "rum_ledger", "rum_commit"):
+    for _attr in _SYNC_ALIASES:
         setattr(_jobs_pkg, _attr, _self_mod)
 _backend_pkg = _sys.modules.get("backend")
 if _backend_pkg is not None and hasattr(_backend_pkg, "_MODULE_ALIASES"):
-    _backend_pkg._MODULE_ALIASES.update(
-        {
-            "backend.cron.jobs._common": "backend.cron.jobs.sync",
-            "backend.cron.jobs.commit": "backend.cron.jobs.sync",
-            "backend.cron.jobs.rum_sync": "backend.cron.jobs.sync",
-            "backend.cron.jobs.rum_ledger": "backend.cron.jobs.sync",
-            "backend.cron.jobs.rum_commit": "backend.cron.jobs.sync",
-        }
-    )
+    _backend_pkg._MODULE_ALIASES.update({f"backend.cron.jobs.{a}": "backend.cron.jobs.sync" for a in _SYNC_ALIASES})

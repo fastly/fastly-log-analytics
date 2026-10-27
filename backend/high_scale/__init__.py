@@ -32,6 +32,8 @@ if _backend_pkg is not None and hasattr(_backend_pkg, "_MODULE_ALIASES"):
             "backend.high_scale.origin": "backend.high_scale.query_service",
             "backend.high_scale.origin_projection": "backend.high_scale.query_service",
             "backend.high_scale.security": "backend.high_scale.query_service",
+            "backend.high_scale.insight_queries": "backend.high_scale.query_service",
+            "backend.high_scale.network": "backend.high_scale.query_service",
             "backend.high_scale._common": "backend.high_scale.ingest_controller",
             "backend.high_scale._filters": "backend.high_scale.ingest_controller",
             "backend.high_scale.worker": "backend.high_scale.ingest_controller",
@@ -71,7 +73,9 @@ from backend.high_scale import ingest_controller as worker  # noqa: E402
 from backend.high_scale import query_service as aggregate_query  # noqa: E402
 from backend.high_scale import query_service as cmcd  # noqa: E402
 from backend.high_scale import query_service as dashboard  # noqa: E402
+from backend.high_scale import query_service as insight_queries  # noqa: E402
 from backend.high_scale import query_service as insights  # noqa: E402
+from backend.high_scale import query_service as network  # noqa: E402
 from backend.high_scale import query_service as origin  # noqa: E402
 from backend.high_scale import query_service as origin_projection  # noqa: E402
 from backend.high_scale import query_service as performance  # noqa: E402
@@ -128,9 +132,11 @@ __all__ = [
     "get_high_scale_service_registry",
     "historical_jobs",
     "ingest_controller",
+    "insight_queries",
     "insights",
     "install_clickhouse_schema",
     "models",
+    "network",
     "orchestration",
     "origin",
     "origin_projection",

@@ -7,15 +7,25 @@ from typing import Annotated, Any, Literal
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_serializer, model_validator
 
-from backend.models._base import (
-    JsonAny,
-    JsonDict,
-    JsonRows,
-    PassthroughModel,
-    ScalarCell,
-    SchemaColumn,
-    WireSafeModel,
-)
+from backend.models._base import JsonAny, JsonDict, JsonRows, PassthroughModel, ScalarCell, SchemaColumn, WireSafeModel
+
+
+def _aliased_optional_field(name: str) -> Any:
+    return Field(
+        default=None,
+        validation_alias=AliasChoices(name, f"_{name}"),
+        serialization_alias=f"_{name}",
+        exclude_if=lambda value: value is None,
+    )
+
+
+def _move_fields(cls: type[BaseModel], *names: str, after: str | None = None) -> None:
+    keys = list(cls.model_fields)
+    tail = [k for k in keys[keys.index(after) + 1 :] if k not in names] if after in keys else []
+    for k in (*names, *tail):
+        if k in cls.model_fields:
+            cls.model_fields[k] = cls.model_fields.pop(k)
+    cls.model_rebuild(force=True)
 
 
 class QueryAttribution(PassthroughModel):
@@ -31,7 +41,7 @@ class QueryAttribution(PassthroughModel):
     pool_slot: str | None = None
 
 
-class ActiveQueryRow(PassthroughModel):
+class _QueryRowBase(PassthroughModel):
     query_id: int | None = None
     db_type: str | None = None
     sql_preview: str | None = None
@@ -40,20 +50,15 @@ class ActiveQueryRow(PassthroughModel):
     attribution: QueryAttribution | None = None
     service_id: str | None = None
     started_at_utc: float | None = None
+
+
+class ActiveQueryRow(_QueryRowBase):
     duration_ms: float | None = None
     cancellable: bool | None = None
     cancelled_at: float | None = None
 
 
-class CompletedQueryRow(PassthroughModel):
-    query_id: int | None = None
-    db_type: str | None = None
-    sql_preview: str | None = None
-    sql: str | None = None
-    sql_len: int | None = None
-    attribution: QueryAttribution | None = None
-    service_id: str | None = None
-    started_at_utc: float | None = None
+class CompletedQueryRow(_QueryRowBase):
     ended_at_utc: float | None = None
     duration_ms: float | None = None
     outcome: str | None = None
@@ -100,13 +105,15 @@ class QueryMonitorConfigResponse(BaseModel):
     enabled: bool
 
 
-class BotSourceRefreshResponse(WireSafeModel):
+class _OkWireSafeBase(WireSafeModel):
     ok: bool
+
+
+class BotSourceRefreshResponse(_OkWireSafeBase):
     source: JsonDict
 
 
-class BotSourcesRefreshResponse(WireSafeModel):
-    ok: bool
+class BotSourcesRefreshResponse(_OkWireSafeBase):
     sources: JsonRows
     updated_count: int
     failed_count: int
@@ -119,13 +126,11 @@ class RdnsEnrichSummary(WireSafeModel):
     batch_limit: int
 
 
-class RdnsEnrichResponse(WireSafeModel):
-    ok: bool
+class RdnsEnrichResponse(_OkWireSafeBase):
     summary: RdnsEnrichSummary
 
 
-class DuckdbRecycleResponse(WireSafeModel):
-    ok: bool
+class DuckdbRecycleResponse(_OkWireSafeBase):
     status: str
     reason: str | None = None
     rss_mb: float | None = None
@@ -136,15 +141,13 @@ class DuckdbRecycleResponse(WireSafeModel):
     freed_mb: float | None = None
 
 
-class NgwafSyncResponse(WireSafeModel):
-    ok: bool
+class NgwafSyncResponse(_OkWireSafeBase):
     service_id: str
     workspace_id: str
     stats: JsonDict
 
 
-class SharePurgeResponse(WireSafeModel):
-    ok: bool
+class SharePurgeResponse(_OkWireSafeBase):
     deleted_audit_logs: int | None = None
     deleted_expired_invites: int | None = None
     deleted_stale_sessions: int | None = None
@@ -225,26 +228,22 @@ class HealthResponse(WireSafeModel):
 
 
 _self_mod = sys.modules[__name__]
-sys.modules["backend.models.admin_actions"] = _self_mod
-sys.modules["backend.models.origin"] = _self_mod
-sys.modules["backend.models.network"] = _self_mod
-sys.modules["backend.models.performance"] = _self_mod
-sys.modules["backend.models.rum"] = _self_mod
-sys.modules["backend.models.session_scoring"] = _self_mod
-sys.modules["backend.models.dashboard"] = _self_mod
-sys.modules["backend.models.security"] = _self_mod
-sys.modules["backend.models.sessions"] = _self_mod
 _models_pkg = sys.modules.get("backend.models")
-if _models_pkg is not None:
-    setattr(_models_pkg, "admin_actions", _self_mod)
-    setattr(_models_pkg, "origin", _self_mod)
-    setattr(_models_pkg, "network", _self_mod)
-    setattr(_models_pkg, "performance", _self_mod)
-    setattr(_models_pkg, "rum", _self_mod)
-    setattr(_models_pkg, "session_scoring", _self_mod)
-    setattr(_models_pkg, "dashboard", _self_mod)
-    setattr(_models_pkg, "security", _self_mod)
-    setattr(_models_pkg, "sessions", _self_mod)
+for _submod in (
+    "admin_actions",
+    "origin",
+    "network",
+    "performance",
+    "rum",
+    "session_scoring",
+    "dashboard",
+    "security",
+    "sessions",
+):
+    sys.modules[f"backend.models.{_submod}"] = _self_mod
+    if _models_pkg is not None:
+        setattr(_models_pkg, _submod, _self_mod)
+del _submod
 _backend_pkg = sys.modules.get("backend")
 _aliases = getattr(_backend_pkg, "_MODULE_ALIASES", None)
 if isinstance(_aliases, dict):
@@ -310,12 +309,7 @@ class ShieldingRow(BaseModel):
 
 
 class ShieldingAnalysis(PassthroughModel):
-    response_cache: ResponseCacheObservation | None = Field(
-        default=None,
-        validation_alias=AliasChoices("response_cache", "_response_cache"),
-        serialization_alias="_response_cache",
-        exclude_if=lambda value: value is None,
-    )
+    response_cache: ResponseCacheObservation | None = _aliased_optional_field("response_cache")
     has_data: bool = False
     rows: list[ShieldingRow] = []
     edge_only: bool | None = None
@@ -333,9 +327,12 @@ class ShieldingAnalysis(PassthroughModel):
         return data
 
 
-class NetworkHeatmapCell(WireSafeModel):
+class _NetworkBucketBase(WireSafeModel):
     bucket_idx: int
     bucket: str
+
+
+class NetworkHeatmapCell(_NetworkBucketBase):
     throughput_bps: float | None = None
     rtt_med_us: float | None = None
     rtt_baseline_us: float | None = None
@@ -347,9 +344,12 @@ class NetworkHeatmapCell(WireSafeModel):
     reqs: int
 
 
-class NetworkHeatmapRow(WireSafeModel):
+class _NetworkAsnLabelBase(WireSafeModel):
     asn: int
     label: str
+
+
+class NetworkHeatmapRow(_NetworkAsnLabelBase):
     total_reqs: int
     buckets: list[NetworkHeatmapCell] = []
 
@@ -365,15 +365,11 @@ class NetworkMapCity(WireSafeModel):
     reqs: int
 
 
-class NetworkMapBucket(WireSafeModel):
-    bucket_idx: int
-    bucket: str
+class NetworkMapBucket(_NetworkBucketBase):
     cities: list[NetworkMapCity] = []
 
 
-class NetworkLeaderboardRow(WireSafeModel):
-    asn: int
-    label: str
+class NetworkLeaderboardRow(_NetworkAsnLabelBase):
     health_score_now: float | None = None
     health_score_1h_ago: float | None = None
     health_score_1w_ago: float | None = None
@@ -474,16 +470,9 @@ class TransportProtocolShare(BaseModel):
 
 class TransportMetrics(BaseModel):
     section_timings: list[SectionTimingEntry] | None = Field(
-        default=None,
-        serialization_alias="_section_timings",
-        exclude_if=lambda value: value is None,
+        default=None, serialization_alias="_section_timings", exclude_if=lambda value: value is None
     )
-    response_cache: ResponseCacheObservation | None = Field(
-        default=None,
-        validation_alias=AliasChoices("response_cache", "_response_cache"),
-        serialization_alias="_response_cache",
-        exclude_if=lambda value: value is None,
-    )
+    response_cache: ResponseCacheObservation | None = _aliased_optional_field("response_cache")
     has_transport_data: bool = True
     tcp_rtt_p50_ms: float | None = None
     tcp_rtt_p90_ms: float | None = None
@@ -532,8 +521,7 @@ class NetworkBundleRequest(NetworkHealthRequest):
 
 class NetworkBundleResponse(BaseResponse):
     component_observations: dict[str, BaseResponse] | None = Field(
-        default=None,
-        serialization_alias="_component_observations",
+        default=None, serialization_alias="_component_observations"
     )
     available: bool = True
     reason: str | None = None
@@ -543,12 +531,27 @@ class NetworkBundleResponse(BaseResponse):
     transport: TransportMetrics | None = None
 
 
-class OriginSlowUrlRow(WireSafeModel):
-    url: str
-    requests: int
+class _OriginLatencyTailMixin(WireSafeModel):
     p50_ms: float | None = None
     p95_ms: float | None = None
+
+    @classmethod
+    def __pydantic_init_subclass__(cls, **kwargs: Any) -> None:
+        super().__pydantic_init_subclass__(**kwargs)
+        _move_fields(cls, "p50_ms", "p95_ms", "p99_ms", after="requests")
+
+
+class _OriginLatencyP99TailMixin(_OriginLatencyTailMixin):
     p99_ms: float | None = None
+
+
+class _UrlRequestsWireBase(WireSafeModel):
+    url: str
+    requests: int
+
+
+class OriginSlowUrlRow(_UrlRequestsWireBase, _OriginLatencyP99TailMixin):
+    pass
 
 
 class OriginStatusCodeRow(WireSafeModel):
@@ -557,35 +560,26 @@ class OriginStatusCodeRow(WireSafeModel):
     pct: float | None = None
 
 
-class OriginPathRow(WireSafeModel):
+class OriginPathRow(_OriginLatencyTailMixin):
     edge: bool | None = None
     requests: int
-    p50_ms: float | None = None
-    p95_ms: float | None = None
 
 
-class OriginPopLatencyRow(WireSafeModel):
+class OriginPopLatencyRow(_OriginLatencyTailMixin):
     pop: str
     requests: int
-    p50_ms: float | None = None
-    p95_ms: float | None = None
     elevated: bool
 
 
-class OriginIpHealthRow(WireSafeModel):
+class OriginIpHealthRow(_OriginLatencyTailMixin):
     oip: str
     requests: int
-    p50_ms: float | None = None
-    p95_ms: float | None = None
     error_pct: float | None = None
 
 
-class OriginDrilldownRow(WireSafeModel):
+class OriginDrilldownRow(_OriginLatencyP99TailMixin):
     key: str
     requests: int
-    p50_ms: float | None = None
-    p95_ms: float | None = None
-    p99_ms: float | None = None
     error_rate: float
     bytes: int | None = None
 
@@ -684,39 +678,39 @@ class OriginShieldingAnalysisResponse(HasDataMixin, BaseResponse):
     error: bool = False
 
 
-class OriginSummarySection(_OriginSummaryMetricsMixin, _HasDataOnlyMixin, WireSafeModel):
+class _OriginSectionApproxMixin(BaseModel):
     approx: bool | None = Field(default=None, alias="_approx")
     approx_note: str | None = Field(default=None, alias="_approx_note")
 
 
-class OriginTimeseriesSection(_OriginTimeseriesMixin, _HasDataOnlyMixin, WireSafeModel):
-    approx: bool | None = Field(default=None, alias="_approx")
-    approx_note: str | None = Field(default=None, alias="_approx_note")
+class OriginSummarySection(_OriginSectionApproxMixin, _OriginSummaryMetricsMixin, _HasDataOnlyMixin, WireSafeModel):
+    pass
 
 
-class OriginSlowUrlsSection(_OriginSlowUrlsMixin, _HasDataOnlyMixin, WireSafeModel):
-    approx: bool | None = Field(default=None, alias="_approx")
-    approx_note: str | None = Field(default=None, alias="_approx_note")
+class OriginTimeseriesSection(_OriginSectionApproxMixin, _OriginTimeseriesMixin, _HasDataOnlyMixin, WireSafeModel):
+    pass
 
 
-class OriginStatusCodesSection(_OriginStatusCodesMixin, _HasDataOnlyMixin, WireSafeModel):
-    approx: bool | None = Field(default=None, alias="_approx")
-    approx_note: str | None = Field(default=None, alias="_approx_note")
+class OriginSlowUrlsSection(_OriginSectionApproxMixin, _OriginSlowUrlsMixin, _HasDataOnlyMixin, WireSafeModel):
+    pass
 
 
-class OriginPathBreakdownSection(_OriginPathBreakdownMixin, _HasDataOnlyMixin, WireSafeModel):
-    approx: bool | None = Field(default=None, alias="_approx")
-    approx_note: str | None = Field(default=None, alias="_approx_note")
+class OriginStatusCodesSection(_OriginSectionApproxMixin, _OriginStatusCodesMixin, _HasDataOnlyMixin, WireSafeModel):
+    pass
 
 
-class OriginPopLatencySection(_OriginPopLatencyMixin, _HasDataOnlyMixin, WireSafeModel):
-    approx: bool | None = Field(default=None, alias="_approx")
-    approx_note: str | None = Field(default=None, alias="_approx_note")
+class OriginPathBreakdownSection(
+    _OriginSectionApproxMixin, _OriginPathBreakdownMixin, _HasDataOnlyMixin, WireSafeModel
+):
+    pass
 
 
-class OriginIpHealthSection(_OriginIpHealthMixin, _HasDataOnlyMixin, WireSafeModel):
-    approx: bool | None = Field(default=None, alias="_approx")
-    approx_note: str | None = Field(default=None, alias="_approx_note")
+class OriginPopLatencySection(_OriginSectionApproxMixin, _OriginPopLatencyMixin, _HasDataOnlyMixin, WireSafeModel):
+    pass
+
+
+class OriginIpHealthSection(_OriginSectionApproxMixin, _OriginIpHealthMixin, _HasDataOnlyMixin, WireSafeModel):
+    pass
 
 
 class OriginAggregatesResponse(HasDataMixin, BaseResponse):
@@ -730,13 +724,7 @@ class OriginAggregatesResponse(HasDataMixin, BaseResponse):
 
 
 SectionName = Literal[
-    "summary",
-    "timeseries",
-    "slow_urls",
-    "status_codes",
-    "path_breakdown",
-    "pop_latency",
-    "ip_health",
+    "summary", "timeseries", "slow_urls", "status_codes", "path_breakdown", "pop_latency", "ip_health"
 ]
 
 
@@ -744,9 +732,12 @@ class OriginRequest(FilteredRequest):
     pass
 
 
-class OriginTimeseriesRequest(FilteredRequest):
+class _OriginBucketLegMixin(BaseModel):
     bucket_minutes: Limit1440 = 5
     split_by_leg: bool = False
+
+
+class OriginTimeseriesRequest(_OriginBucketLegMixin, FilteredRequest):
     metric: Literal["ttfb", "ttlb"] = "ttfb"
     percentile: Literal["p50", "p95", "p99"] = "p95"
 
@@ -773,9 +764,7 @@ class OriginDrilldownRequest(FilteredRequest):
     limit: Limit100 = 30
 
 
-class OriginAggregatesRequest(RangeKeyedRequest):
-    bucket_minutes: Limit1440 = 5
-    split_by_leg: bool = False
+class OriginAggregatesRequest(_OriginBucketLegMixin, RangeKeyedRequest):
     timeseries_metric: Literal["ttfb", "ttlb"] = "ttfb"
     timeseries_percentile: Literal["p50", "p95", "p99"] = "p95"
     slow_urls_limit: Limit100 = 20
@@ -785,13 +774,7 @@ class OriginAggregatesRequest(RangeKeyedRequest):
     sections: list[SectionName] | None = None
 
 
-PerformanceSectionName = Literal[
-    "waterfall",
-    "top_urls",
-    "top_asns",
-    "ttl_dist",
-    "scatter",
-]
+PerformanceSectionName = Literal["waterfall", "top_urls", "top_asns", "ttl_dist", "scatter"]
 
 
 class PerformanceRequest(RangeKeyedRequest):
@@ -799,23 +782,26 @@ class PerformanceRequest(RangeKeyedRequest):
     sections: list[PerformanceSectionName] | None = None
 
 
-class PerformanceUrlRow(WireSafeModel):
-    url: str
-    requests: int
+class _PerformanceLatencyTailMixin(WireSafeModel):
     avg: float | None = None
     p50: float | None = None
     p95: float | None = None
     p99: float | None = None
 
+    @classmethod
+    def __pydantic_init_subclass__(cls, **kwargs: Any) -> None:
+        super().__pydantic_init_subclass__(**kwargs)
+        _move_fields(cls, "avg", "p50", "p95", "p99")
 
-class PerformanceAsnRow(WireSafeModel):
+
+class PerformanceUrlRow(_UrlRequestsWireBase, _PerformanceLatencyTailMixin):
+    pass
+
+
+class PerformanceAsnRow(_PerformanceLatencyTailMixin):
     asn: int | str
     label: str | None = None
     requests: int
-    avg: float | None = None
-    p50: float | None = None
-    p95: float | None = None
-    p99: float | None = None
 
 
 class PerformanceTtlBucket(WireSafeModel):
@@ -873,17 +859,18 @@ class CompressionPerformanceRow(BaseModel):
     bytes: int
 
 
-class LargeUncompressedAssetRow(BaseModel):
+class _UrlRequestsBase(BaseModel):
     url: str
     requests: int
+
+
+class LargeUncompressedAssetRow(_UrlRequestsBase):
     avg_bytes: float
     total_bytes: int
     status: int
 
 
-class LowTtlAssetRow(BaseModel):
-    url: str
-    requests: int
+class LowTtlAssetRow(_UrlRequestsBase):
     avg_ttl: float
     asset_type: str
 
@@ -933,44 +920,52 @@ class CmcdOverview(WireSafeModel):
     avg_session_duration: int | None = None
 
 
-class CmcdSessionsPoint(WireSafeModel):
+class _CmcdBucketPointBase(WireSafeModel):
     bucket: str
+
+
+class CmcdSessionsPoint(_CmcdBucketPointBase):
     concurrent_sessions: int
     rebuffer_session_pct: float | None = None
     new_sessions: int
 
 
-class CmcdBufferHealthPoint(WireSafeModel):
-    bucket: str
+class CmcdBufferHealthPoint(_CmcdBucketPointBase):
     p50_buffer: float | None = None
     p95_buffer: float | None = None
     starvation_rate: float | None = None
 
 
-class CmcdBitratePoint(WireSafeModel):
-    bucket: str
+class CmcdBitratePoint(_CmcdBucketPointBase):
     avg_bitrate: float | None = None
     utilization_ratio: float | None = None
 
 
-class CmcdThroughputPoint(WireSafeModel):
-    bucket: str
+class CmcdThroughputPoint(_CmcdBucketPointBase):
     p50: float | None = None
     p95: float | None = None
     p99: float | None = None
 
 
-class CmcdStartupPoint(WireSafeModel):
-    bucket: str
+class CmcdStartupPoint(_CmcdBucketPointBase):
     startup_ratio: float | None = None
 
 
-class CmcdTopContentRow(WireSafeModel):
-    content_id: str | None = None
-    session_count: int
+class _CmcdBitrateBufferMixin(WireSafeModel):
     rebuffer_rate: float | None = None
     avg_bitrate: float | None = None
     avg_buffer_length: float | None = None
+
+    @classmethod
+    def __pydantic_init_subclass__(cls, **kwargs: Any) -> None:
+        super().__pydantic_init_subclass__(**kwargs)
+        extra = ("rebuffer_rate", "session_count") if "label" in cls.model_fields else ("rebuffer_rate",)
+        _move_fields(cls, *extra, "avg_bitrate", "avg_buffer_length")
+
+
+class CmcdTopContentRow(_CmcdBitrateBufferMixin):
+    content_id: str | None = None
+    session_count: int
 
 
 class CmcdRebufferByCountryRow(WireSafeModel):
@@ -980,13 +975,10 @@ class CmcdRebufferByCountryRow(WireSafeModel):
     median_throughput: float | None = None
 
 
-class CmcdRebufferByAsnRow(WireSafeModel):
+class CmcdRebufferByAsnRow(_CmcdBitrateBufferMixin):
     asn: int | str
     label: str
-    rebuffer_rate: float | None = None
     session_count: int
-    avg_bitrate: float | None = None
-    avg_buffer_length: float | None = None
 
 
 class CmcdObjectTypeRow(WireSafeModel):
@@ -1021,15 +1013,7 @@ class CmcdAggregatesResponse(BaseResponse):
     session_duration_dist: list[CmcdSessionDurationRow] = []
 
 
-ValueSectionName = Literal[
-    "overview",
-    "caching",
-    "security",
-    "bots",
-    "performance",
-    "network",
-    "io",
-]
+ValueSectionName = Literal["overview", "caching", "security", "bots", "performance", "network", "io"]
 
 
 class ValueSummaryRequest(RangeKeyedRequest):
@@ -1043,21 +1027,23 @@ class ValueTimeSeriesPoint(BaseModel):
     category: str | None = None
 
 
-class OverviewMetrics(BaseModel):
+class _TotalRequestsMetricsBase(BaseModel):
+    total_requests: int | None = None
+
+
+class OverviewMetrics(_TotalRequestsMetricsBase):
     origin_offload_pct: float | None = None
     threats_blocked: int | None = None
     cache_acceleration_factor: float | None = None
-    total_requests: int | None = None
     total_bandwidth_bytes: int | None = None
     edge_hit_requests: int | None = None
     origin_requests: int | None = None
 
 
-class CachingMetrics(BaseModel):
+class CachingMetrics(_TotalRequestsMetricsBase):
     origin_offload_pct: float | None = None
     bandwidth_saved_bytes: int | None = None
     shield_effectiveness_pct: float | None = None
-    total_requests: int | None = None
     hit_requests: int | None = None
     miss_requests: int | None = None
     pass_requests: int | None = None
@@ -1090,37 +1076,33 @@ class IOFormatConversionPair(WireSafeModel):
     avg_ratio: float | None = None
 
 
-class SecurityMetrics(BaseModel):
+class SecurityMetrics(_TotalRequestsMetricsBase):
     waf_blocked: int | None = None
     waf_logged: int | None = None
     waf_passed: int | None = None
-    total_requests: int | None = None
     threat_time_series: list[ValueTimeSeriesPoint] = []
     top_waf_signals: list[WafSignalRow] = []
 
 
-class BotMetrics(BaseModel):
+class BotMetrics(_TotalRequestsMetricsBase):
     bot_requests: int | None = None
     verified_bots: int | None = None
-    total_requests: int | None = None
     top_bots: list[TopBotRow] = []
 
 
-class PerformanceMetrics(BaseModel):
+class PerformanceMetrics(_TotalRequestsMetricsBase):
     cache_accel_factor: float | None = None
     avg_hit_latency_ms: float | None = None
     avg_miss_latency_ms: float | None = None
     p99_latency_ms: float | None = None
-    total_requests: int | None = None
     latency_time_series: list[ValueTimeSeriesPoint] = []
 
 
-class NetworkMetrics(BaseModel):
+class NetworkMetrics(_TotalRequestsMetricsBase):
     http3_pct: float | None = None
     tls_pct: float | None = None
     ipv6_pct: float | None = None
     h2_pct: float | None = None
-    total_requests: int | None = None
     protocol_time_series: list[ValueTimeSeriesPoint] = []
 
 
@@ -1130,11 +1112,10 @@ class IOFormatBreakdown(BaseModel):
     pct: float
 
 
-class IOMetrics(BaseModel):
+class IOMetrics(_TotalRequestsMetricsBase):
     io_transforms: int | None = None
     io_bandwidth_bytes: int | None = None
     io_shield_bandwidth_bytes: int | None = None
-    total_requests: int | None = None
     io_time_series: list[ValueTimeSeriesPoint] = []
     io_pct_of_traffic: float | None = None
     io_estimated_cost_usd: float | None = None
@@ -1174,8 +1155,7 @@ class RumStatusResponse(WireSafeModel):
     custom_condition: str | None = None
 
 
-class RumSettingsUpdateResponse(WireSafeModel):
-    ok: bool
+class RumSettingsUpdateResponse(_OkWireSafeBase):
     message: str | None = None
     skipped: bool | None = None
 
@@ -1310,24 +1290,36 @@ class ScoringLabelUpdate(BaseModel):
     notes: str | None = None
 
 
-class ScoringTopFlaggedRow(PassthroughModel):
-    timestamp: str
-    edge_sid: str | None
-    edge_score: int
-    edge_score_l1: int | None = None
-    edge_score_l2: int | None = None
+class _ScoringEventFieldsBase(PassthroughModel):
     edge_cookie_compliance: str | None = None
     edge_score_reason: str | None = None
     ip: str | None = None
     ua: str | None = None
     url: str | None = None
     status: int | None = None
+
+
+class ScoringTopFlaggedRow(PassthroughModel):
+    timestamp: str
+    edge_sid: str | None
+    edge_score: int
+    edge_score_l1: int | None = None
+    edge_score_l2: int | None = None
+    edge_score_reason: str | None = None
+    edge_cookie_compliance: str | None = None
+    ip: str | None = None
     country: str | None = None
+    ua: str | None = None
+    url: str | None = None
+    status: int | None = None
 
 
-class ScoringTopFlaggedResponse(PassthroughModel):
-    rows: list[ScoringTopFlaggedRow] = []
+class _ScoringSinceHoursBase(PassthroughModel):
     since_hours: int | None = None
+
+
+class ScoringTopFlaggedResponse(_ScoringSinceHoursBase):
+    rows: list[ScoringTopFlaggedRow] = []
 
 
 class ScoringDistributionRow(PassthroughModel):
@@ -1336,9 +1328,8 @@ class ScoringDistributionRow(PassthroughModel):
     count: int
 
 
-class ScoringScoreDistributionResponse(PassthroughModel):
+class ScoringScoreDistributionResponse(_ScoringSinceHoursBase):
     rows: list[ScoringDistributionRow] = []
-    since_hours: int | None = None
 
 
 class ScoringComplianceRow(PassthroughModel):
@@ -1347,16 +1338,11 @@ class ScoringComplianceRow(PassthroughModel):
     count: int
 
 
-class ScoringComplianceBreakdownResponse(PassthroughModel):
+class ScoringComplianceBreakdownResponse(_ScoringSinceHoursBase):
     rows: list[ScoringComplianceRow] = []
-    since_hours: int | None = None
 
 
-class ScoringLatencyRow(PassthroughModel):
-    hour: str | None = None
-    scored_count: int | None = None
-    fail_open_count: int | None = None
-    total_count: int | None = None
+class _ScoringLatencyMetricsBase(PassthroughModel):
     rtt_p50_us: int | None = None
     rtt_p95_us: int | None = None
     rtt_p99_us: int | None = None
@@ -1364,9 +1350,15 @@ class ScoringLatencyRow(PassthroughModel):
     exec_p95_us: int | None = None
 
 
-class ScoringLatencyTimeseriesResponse(PassthroughModel):
+class ScoringLatencyRow(_ScoringLatencyMetricsBase):
+    hour: str | None = None
+    scored_count: int | None = None
+    fail_open_count: int | None = None
+    total_count: int | None = None
+
+
+class ScoringLatencyTimeseriesResponse(_ScoringSinceHoursBase):
     rows: list[ScoringLatencyRow] = []
-    since_hours: int | None = None
     has_latency: bool = False
     granularity: str | None = None
 
@@ -1376,14 +1368,9 @@ class ScoringReasonCount(PassthroughModel):
     count: int | None = None
 
 
-class ScoringLatencySnapshot(PassthroughModel):
+class ScoringLatencySnapshot(_ScoringLatencyMetricsBase):
     available: bool = False
-    rtt_p50_us: int | None = None
-    rtt_p95_us: int | None = None
-    rtt_p99_us: int | None = None
     rtt_max_us: int | None = None
-    exec_p50_us: int | None = None
-    exec_p95_us: int | None = None
 
 
 class ScoringMatrixStaleness(PassthroughModel):
@@ -1409,28 +1396,38 @@ class ScoringL2EnforceState(PassthroughModel):
     readiness_days: float
 
 
-class ScoringPerReasonBucket(PassthroughModel):
-    reason: str | None = None
+class _ScoringGoodBadBase(PassthroughModel):
     n_good: int | None = None
     n_bad: int | None = None
+
+
+class _ScoringClassSamplesBase(_ScoringGoodBadBase):
     min_per_class: int | None = None
     has_min_samples: bool | None = None
+
+
+class _ScoringAucBase(_ScoringGoodBadBase):
     auc: float | None = None
     passed: bool | None = None
     threshold: float | None = None
 
 
-class ScoringPerReasonResponse(PassthroughModel):
+class _ScoringEvalMetricsBase(_ScoringClassSamplesBase, _ScoringAucBase):
+    pass
+
+
+class ScoringPerReasonBucket(_ScoringEvalMetricsBase):
+    reason: str | None = None
+
+
+class ScoringPerReasonResponse(_ScoringGoodBadBase):
     buckets: list[ScoringPerReasonBucket] = []
     min_per_class: int | None = None
     known_reasons: list[str] | None = None
     has_min_samples_overall: bool | None = None
-    n_good: int | None = None
-    n_bad: int | None = None
 
 
-class ScoringHealthResponse(PassthroughModel):
-    since_hours: int | None = None
+class ScoringHealthResponse(_ScoringSinceHoursBase):
     total_edge_rows: int | None = None
     scored_rows: int | None = None
     fire_rate_pct: float | None = None
@@ -1448,19 +1445,12 @@ class ScoringHealthResponse(PassthroughModel):
     l2_enforce: ScoringL2EnforceState | None = None
 
 
-class ScoringEvaluationResponse(PassthroughModel):
-    has_min_samples: bool | None = None
-    min_per_class: int | None = None
-    n_good: int | None = None
-    n_bad: int | None = None
+class ScoringEvaluationResponse(_ScoringEvalMetricsBase):
     n_neutral: int | None = None
     matrix_version: str | None = None
     error: str | None = None
     n_reconstructed: int | None = None
     n_labels_total: int | None = None
-    auc: float | None = None
-    passed: bool | None = None
-    threshold: float | None = None
     default_min_auc: float | None = None
 
 
@@ -1472,11 +1462,7 @@ class ScoringCurvePoint(PassthroughModel):
     recall: float | None = None
 
 
-class ScoringCurvesResponse(PassthroughModel):
-    has_min_samples: bool | None = None
-    min_per_class: int | None = None
-    n_good: int | None = None
-    n_bad: int | None = None
+class ScoringCurvesResponse(_ScoringClassSamplesBase):
     note: str | None = None
     n_labels_total: int | None = None
     auc: float | None = None
@@ -1492,9 +1478,8 @@ class ScoringThresholdBucket(PassthroughModel):
     unlabeled: int | None = None
 
 
-class ScoringThresholdPreviewResponse(PassthroughModel):
+class ScoringThresholdPreviewResponse(_ScoringSinceHoursBase):
     threshold: int | None = None
-    since_hours: int | None = None
     total_scored_sessions: int | None = None
     flagged: ScoringThresholdBucket | None = None
     passed: ScoringThresholdBucket | None = None
@@ -1502,14 +1487,17 @@ class ScoringThresholdPreviewResponse(PassthroughModel):
     recall: float | None = None
 
 
-class ScoringAnalyticsResponse(PassthroughModel):
+class _ScoringCorePanelsBase(PassthroughModel):
     top_flagged: ScoringTopFlaggedResponse | None = None
     score_distribution: ScoringScoreDistributionResponse | None = None
     compliance_breakdown: ScoringComplianceBreakdownResponse | None = None
-    latency_timeseries: ScoringLatencyTimeseriesResponse | None = None
     health: ScoringHealthResponse | None = None
     evaluation: ScoringEvaluationResponse | None = None
     evaluation_per_reason: ScoringPerReasonResponse | None = None
+
+
+class ScoringAnalyticsResponse(_ScoringCorePanelsBase):
+    latency_timeseries: ScoringLatencyTimeseriesResponse | None = None
 
 
 class ScoringLabelRow(WireSafeModel):
@@ -1544,12 +1532,8 @@ class ScoringRetrainRejected(PassthroughModel):
     routes_seen: int | None = None
 
 
-class ScoringAucAgainstLabels(PassthroughModel):
-    auc: float | None = None
-    passed: bool | None = None
-    threshold: float | None = None
-    n_good: int | None = None
-    n_bad: int | None = None
+class ScoringAucAgainstLabels(_ScoringAucBase):
+    pass
 
 
 class ScoringRetrainResponse(PassthroughModel):
@@ -1568,15 +1552,9 @@ class ScoringRetrainResponse(PassthroughModel):
     deploy_hint: str | None = None
 
 
-class ScoringSessionEvent(PassthroughModel):
+class ScoringSessionEvent(_ScoringEventFieldsBase):
     ts: str | None = None
-    url: str | None = None
-    status: int | None = None
-    ip: str | None = None
-    ua: str | None = None
     edge_score: int | None = None
-    edge_cookie_compliance: str | None = None
-    edge_score_reason: str | None = None
 
 
 class ScoringSessionEventsResponse(PassthroughModel):
@@ -1592,18 +1570,19 @@ class ScoringEnforceThresholdResponse(PassthroughModel):
     key: str
 
 
-class ScoringEnforceThresholdPutResponse(PassthroughModel):
+class _ScoringOkMessageBase(PassthroughModel):
     ok: bool | None = None
+    message: str | None = None
+
+
+class ScoringEnforceThresholdPutResponse(_ScoringOkMessageBase):
     threshold: int | None = None
     enforced: bool | None = None
-    message: str | None = None
 
 
-class ScoringL2EnforcePutResponse(PassthroughModel):
-    ok: bool | None = None
+class ScoringL2EnforcePutResponse(_ScoringOkMessageBase):
     enabled: bool | None = None
     l2_enabled_at: int | None = None
-    message: str | None = None
 
 
 class ScoringExcludeRegexState(PassthroughModel):
@@ -1613,13 +1592,14 @@ class ScoringExcludeRegexState(PassthroughModel):
     effective: str
 
 
-class ScoringExcludeRegexPutResponse(PassthroughModel):
-    ok: bool | None = None
-    effective_regex: str | None = None
+class _ScoringVclPutResponseBase(_ScoringOkMessageBase):
     is_default: bool | None = None
     logging_service_active_version: int | None = None
+
+
+class ScoringExcludeRegexPutResponse(_ScoringVclPutResponseBase):
+    effective_regex: str | None = None
     lint_warnings: list[str] | None = None
-    message: str | None = None
 
 
 class ScoringExcludeRegexValidateResponse(PassthroughModel):
@@ -1638,12 +1618,8 @@ class ScoringEnforceStatusCodeState(PassthroughModel):
     is_default: bool
 
 
-class ScoringEnforceStatusCodePutResponse(PassthroughModel):
-    ok: bool | None = None
+class ScoringEnforceStatusCodePutResponse(_ScoringVclPutResponseBase):
     effective_status_code: int | None = None
-    is_default: bool | None = None
-    logging_service_active_version: int | None = None
-    message: str | None = None
 
 
 class ScoringMatrixVersion(PassthroughModel):
@@ -1666,11 +1642,9 @@ class ScoringMatrixRestoreResponse(PassthroughModel):
     deploy_hint: str | None = None
 
 
-class ScoringRotateKeyResponse(PassthroughModel):
-    ok: bool | None = None
+class ScoringRotateKeyResponse(_ScoringOkMessageBase):
     rotated_at: str | None = None
     previous_key_grace: bool | None = None
-    message: str | None = None
 
 
 class ScoringAuditRow(PassthroughModel):
@@ -1707,28 +1681,21 @@ class ScoringStatusResponse(PassthroughModel):
     preflight_pragmas_ready: bool | None = None
 
 
-class ScoringDashboardResponse(PassthroughModel):
-    since_hours: int | None = None
-    threshold: int | None = None
+class _ScoringConfigBase(PassthroughModel):
     status: ScoringStatusResponse | None = None
-    evaluation: ScoringEvaluationResponse | None = None
-    evaluation_per_reason: ScoringPerReasonResponse | None = None
-    health: ScoringHealthResponse | None = None
-    top_flagged: ScoringTopFlaggedResponse | None = None
-    score_distribution: ScoringScoreDistributionResponse | None = None
-    compliance_breakdown: ScoringComplianceBreakdownResponse | None = None
+    exclude_regex: ScoringExcludeRegexState | None = None
+    enforce_status_code: ScoringEnforceStatusCodeState | None = None
+
+
+class ScoringDashboardResponse(_ScoringSinceHoursBase, _ScoringCorePanelsBase, _ScoringConfigBase):
+    threshold: int | None = None
     curves: ScoringCurvesResponse | None = None
     threshold_preview: ScoringThresholdPreviewResponse | None = None
     config_threshold: ScoringThresholdState | None = None
-    exclude_regex: ScoringExcludeRegexState | None = None
-    enforce_status_code: ScoringEnforceStatusCodeState | None = None
 
 
-class ScoringConfigCompositeResponse(PassthroughModel):
-    status: ScoringStatusResponse | None = None
+class ScoringConfigCompositeResponse(_ScoringConfigBase):
     threshold: ScoringThresholdState | None = None
-    exclude_regex: ScoringExcludeRegexState | None = None
-    enforce_status_code: ScoringEnforceStatusCodeState | None = None
 
 
 class ScoringLabelDeleteResponse(PassthroughModel):
@@ -1736,57 +1703,54 @@ class ScoringLabelDeleteResponse(PassthroughModel):
     id: str | None = None
 
 
-class RollupPathCoverage(BaseModel):
+class _RollupActiveClosedBase(BaseModel):
+    active_hour_start: str | None = None
+    closed_hours: int | None = Field(default=None, ge=0)
+
+
+class _RollupCoverageFractionBase(_RollupActiveClosedBase):
+    covered_hours: int | None = Field(default=None, ge=0)
+    coverage_fraction: float | None = Field(default=None, ge=0, le=1)
+
+
+class _RollupWindowCoverageBase(_RollupCoverageFractionBase):
+    window_start: str | None = None
+    window_end: str | None = None
+
+
+class RollupPathCoverage(_RollupCoverageFractionBase):
     bundle: Literal["security_conn_reuse", "all_fields", "ngwaf_bots"]
     reason: Literal["unknown", "durable_unready", "no_bundled_root", "no_paths", "below_coverage_floor", "planned"] = (
         "unknown"
     )
     minimum_coverage_fraction: float = Field(default=0.5, ge=0, le=1)
-    active_hour_start: str | None = None
-    closed_hours: int | None = Field(default=None, ge=0)
-    covered_hours: int | None = Field(default=None, ge=0)
-    coverage_fraction: float | None = Field(default=None, ge=0, le=1)
     partial_start_skipped: bool | None = None
     day_files: int | None = Field(default=None, ge=0)
     hour_files: int | None = Field(default=None, ge=0)
     done_markers: int | None = Field(default=None, ge=0)
 
 
-class HourlyRollupCoverage(BaseModel):
+class HourlyRollupCoverage(_RollupWindowCoverageBase):
     reason: Literal[
         "unknown", "no_bundled_root", "durable_unready", "writer_behind", "no_paths", "old_gaps", "planned"
-    ] = "unknown"
-    window_start: str | None = None
-    window_end: str | None = None
-    active_hour_start: str | None = None
-    closed_hours: int | None = Field(default=None, ge=0)
+    ] = "unknown"  # noqa: E501
     bundle_hours: int | None = Field(default=None, ge=0)
     verified_empty_hours: int | None = Field(default=None, ge=0)
     missing_hours: int | None = Field(default=None, ge=0)
-    covered_hours: int | None = Field(default=None, ge=0)
-    coverage_fraction: float | None = Field(default=None, ge=0, le=1)
     heal_horizon_hours: int | None = Field(default=None, ge=0)
 
 
-class ScalarRollupCoverage(BaseModel):
+class ScalarRollupCoverage(_RollupWindowCoverageBase):
     reason: Literal["unknown", "trailing_unavailable", "boundary_changed", "planned"] = "unknown"
-    window_start: str | None = None
-    window_end: str | None = None
-    active_hour_start: str | None = None
-    closed_hours: int | None = Field(default=None, ge=0)
     prefix_hours: int = Field(default=0, ge=0)
     day_time_series_files: int = Field(default=0, ge=0)
     day_overview_files: int = Field(default=0, ge=0)
     trailing_start: str | None = None
     trailing: HourlyRollupCoverage | None = None
-    covered_hours: int | None = Field(default=None, ge=0)
-    coverage_fraction: float | None = Field(default=None, ge=0, le=1)
 
 
-class TopNRollupCoverage(BaseModel):
+class TopNRollupCoverage(_RollupActiveClosedBase):
     coverage_scope: Literal["any_field_file_presence"] = "any_field_file_presence"
-    active_hour_start: str | None = None
-    closed_hours: int | None = Field(default=None, ge=0)
     any_field_covered_hours: int | None = Field(default=None, ge=0)
     field_complete_hours: int | None = Field(default=None, ge=0)
     bundled_day_files: int = Field(default=0, ge=0)
@@ -1977,7 +1941,12 @@ class SuspiciousIspRow(WireSafeModel):
     count: int
 
 
-class SecurityAggregatesResponse(BaseResponse):
+class _SecurityBotsPairMixin(BaseResponse):
+    bots: list[SecurityBotRow] = []
+    ngwaf_bots: list[SecurityBotRow] = []
+
+
+class SecurityAggregatesResponse(_SecurityBotsPairMixin):
     active_proxies_count: int = 0
     tunnel_requests_count: int = 0
     distance_mismatches_count: int = 0
@@ -1997,19 +1966,10 @@ class SecurityAggregatesResponse(BaseResponse):
     ngwaf_verified_bots_ts: list[NgwafVerifiedBotsTsRow] = []
     wellknown_bots: list[WellknownBotRow] = []
     bot_efficiency: list[BotEfficiencyRow] = []
-    bots: list[SecurityBotRow] = []
-    ngwaf_bots: list[SecurityBotRow] = []
 
 
-class SecurityTopBotsResponse(BaseResponse):
-    reader_coverage: list[ReaderCoverage] | None = Field(
-        default=None,
-        validation_alias=AliasChoices("reader_coverage", "_reader_coverage"),
-        serialization_alias="_reader_coverage",
-        exclude_if=lambda value: value is None,
-    )
-    bots: list[SecurityBotRow] = []
-    ngwaf_bots: list[SecurityBotRow] = []
+class SecurityTopBotsResponse(_SecurityBotsPairMixin):
+    reader_coverage: list[ReaderCoverage] | None = _aliased_optional_field("reader_coverage")
 
 
 SecuritySectionName = Literal[
@@ -2049,18 +2009,8 @@ class ThreatIntelListResponse(BaseResponse):
 
 
 ChartMetric = Literal[
-    "requests",
-    "5xx",
-    "4xx",
-    "hit_rate",
-    "p50_latency",
-    "p95_latency",
-    "p99_latency",
-    "throughput",
-    "req_size",
-    "ttfb",
+    "requests", "5xx", "4xx", "hit_rate", "p50_latency", "p95_latency", "p99_latency", "throughput", "req_size", "ttfb"
 ]
-
 DashboardSectionName = Literal["core", "topten", "bots"]
 
 
@@ -2085,10 +2035,7 @@ class FieldAggregate(BaseModel):
     total: int
 
 
-class TimeSeriesPoint(BaseModel):
-    time: str
-    value: float
-    category: str | None = None
+class TimeSeriesPoint(ValueTimeSeriesPoint):
     baseline: float | None = None
 
 
@@ -2098,18 +2045,8 @@ class MapPoint(BaseModel):
 
 
 class AggregatesResponse(BaseResponse, LogExtentsMixin):
-    history: HistoryObservation | None = Field(
-        default=None,
-        validation_alias=AliasChoices("history", "_history"),
-        serialization_alias="_history",
-        exclude_if=lambda value: value is None,
-    )
-    reader_coverage: list[ReaderCoverage] | None = Field(
-        default=None,
-        validation_alias=AliasChoices("reader_coverage", "_reader_coverage"),
-        serialization_alias="_reader_coverage",
-        exclude_if=lambda value: value is None,
-    )
+    history: HistoryObservation | None = _aliased_optional_field("history")
+    reader_coverage: list[ReaderCoverage] | None = _aliased_optional_field("reader_coverage")
     data: dict[str, FieldAggregate]
     time_series: list[TimeSeriesPoint]
     map_data: list[MapPoint]
@@ -2149,39 +2086,41 @@ InsightFilters = dict[str, str | int | float | None]
 class _FiltersOnlyBaseMeta(WireSafeModel):
     filters: InsightFilters
 
+    @classmethod
+    def __pydantic_init_subclass__(cls, **kwargs: Any) -> None:
+        super().__pydantic_init_subclass__(**kwargs)
+        _move_fields(cls, "filters", "ottfb_p95_ms")
 
-class _RequestsFiltersBaseMeta(WireSafeModel):
+
+class _RequestsFiltersBaseMeta(_FiltersOnlyBaseMeta):
     requests: Num
-    filters: InsightFilters
 
 
-class _ErrorSpikeBaseMeta(WireSafeModel):
-    requests: Num
+class _IntRequestsFiltersBaseMeta(_FiltersOnlyBaseMeta):
+    requests: int
+
+
+class _ErrorSpikeBaseMeta(_RequestsFiltersBaseMeta):
     errors: Num
-    filters: InsightFilters
 
 
-class _SpikeRatioBaseMeta(WireSafeModel):
+class _SpikeRatioBaseMeta(_FiltersOnlyBaseMeta):
     spike_ratio: float
-    filters: InsightFilters
 
 
-class _RegressionRequestsBaseMeta(WireSafeModel):
+class _RegressionRequestsBaseMeta(_FiltersOnlyBaseMeta):
     regression_ratio: Num
     requests: Num
-    filters: InsightFilters
 
 
-class _WindowBaselineRequestsBaseMeta(WireSafeModel):
+class _WindowBaselineRequestsBaseMeta(_FiltersOnlyBaseMeta):
     window_requests: Num
     baseline_requests: Num
-    filters: InsightFilters
 
 
-class _RegressionWindowRequestsBaseMeta(WireSafeModel):
+class _RegressionWindowRequestsBaseMeta(_FiltersOnlyBaseMeta):
     regression_ratio: Num
     window_requests: Num
-    filters: InsightFilters
 
 
 class _RepeatedPatternBaseMeta(WireSafeModel):
@@ -2201,10 +2140,8 @@ class ErrorSpikesMeta(_ErrorSpikeBaseMeta):
     pass
 
 
-class BotnetGroupingMeta(WireSafeModel):
-    requests: Num
+class BotnetGroupingMeta(_RequestsFiltersBaseMeta):
     ip_ratio: float
-    filters: InsightFilters
 
 
 class NewCountryTrafficMeta(_FiltersOnlyBaseMeta):
@@ -2231,9 +2168,8 @@ class UaMonocultureMeta(_RequestsFiltersBaseMeta):
     pass
 
 
-class NewProbeUrlsMeta(WireSafeModel):
+class NewProbeUrlsMeta(_FiltersOnlyBaseMeta):
     error_pct: Num
-    filters: InsightFilters
 
 
 class WafSignalSpikesMeta(_SpikeRatioBaseMeta):
@@ -2244,10 +2180,8 @@ class ProxySurgeMeta(_RequestsFiltersBaseMeta):
     pass
 
 
-class AsnConcentrationMeta(WireSafeModel):
-    requests: Num
+class AsnConcentrationMeta(_RequestsFiltersBaseMeta):
     asn: int
-    filters: InsightFilters
 
 
 class AsnMetroPerformanceMeta(_RegressionRequestsBaseMeta):
@@ -2266,7 +2200,7 @@ class LatencyRegressionMeta(_RegressionWindowRequestsBaseMeta):
     pass
 
 
-class ImpossibleDistanceMeta(WireSafeModel):
+class ImpossibleDistanceMeta(_FiltersOnlyBaseMeta):
     hits: Num
     excess_km: float
     pop: str | None
@@ -2278,60 +2212,48 @@ class ImpossibleDistanceMeta(WireSafeModel):
     tcp_rtt: Num | None
     country: str | None
     city: str | None
-    filters: InsightFilters
 
 
-class TailLatencyMeta(WireSafeModel):
+class TailLatencyMeta(_FiltersOnlyBaseMeta):
     p99_ms: float
     p50_ms: float
     ratio: float
     requests: Num
-    filters: InsightFilters
 
 
-class CipherSpreadMeta(WireSafeModel):
-    requests: Num
+class CipherSpreadMeta(_RequestsFiltersBaseMeta):
     baseline_total_ips: Num
     sha: str
-    filters: InsightFilters
 
 
-class RequestSizeAnomalyMeta(WireSafeModel):
+class RequestSizeAnomalyMeta(_FiltersOnlyBaseMeta):
     max_bytes: int
     avg_bytes: int
     requests: Num
     p95_baseline: int
-    filters: InsightFilters
 
 
-class ConnectionAbuseMeta(WireSafeModel):
+class ConnectionAbuseMeta(_FiltersOnlyBaseMeta):
     max_conn_reqs: int
     avg_conn_reqs: int
     requests: Num
     p95_baseline: int
-    filters: InsightFilters
 
 
-class RegionLatencyMeta(WireSafeModel):
-    regression_ratio: Num
-    window_requests: Num
-    filters: InsightFilters
+class RegionLatencyMeta(_RegressionWindowRequestsBaseMeta):
     ottfb_p95_ms: float | None = None
 
 
-class CacheTtlMismatchMeta(WireSafeModel):
+class CacheTtlMismatchMeta(_FiltersOnlyBaseMeta):
     avg_ttl_s: float
     avg_hits: float
     avg_age_s: float
     samples: Num
-    filters: InsightFilters
 
 
-class ImageOptimizationOpportunitiesMeta(WireSafeModel):
-    requests: Num
+class ImageOptimizationOpportunitiesMeta(_RequestsFiltersBaseMeta):
     total_mb: float
     mobile_ratio: Num
-    filters: InsightFilters
 
 
 class OriginLatencySpikeMeta(_RequestsFiltersBaseMeta):
@@ -2342,9 +2264,8 @@ class OriginErrorRateMeta(_FiltersOnlyBaseMeta):
     pass
 
 
-class OriginRetriesMeta(WireSafeModel):
+class OriginRetriesMeta(_FiltersOnlyBaseMeta):
     max_retries: int
-    filters: InsightFilters
 
 
 class OriginIpFailureMeta(_RequestsFiltersBaseMeta):
@@ -2356,33 +2277,29 @@ class ShieldPathDegradationMeta(WireSafeModel):
     requests: Num
 
 
-class RepeatedPatternsMeta(_RepeatedPatternBaseMeta):
+class RepeatedPatternsMeta(_RepeatedPatternBaseMeta, _FiltersOnlyBaseMeta):
     distinct_ua: int
-    filters: InsightFilters
 
 
-class RepeatedPatternsFpMeta(_RepeatedPatternBaseMeta):
+class RepeatedPatternsFpMeta(_RepeatedPatternBaseMeta, _FiltersOnlyBaseMeta):
     distinct_ip: int
-    filters: InsightFilters
 
 
-class LowAndSlowMeta(WireSafeModel):
+class LowAndSlowMeta(_FiltersOnlyBaseMeta):
     hits: int
     distinct_paths: int
     span_s: int
     rps: float
-    filters: InsightFilters
 
 
-class CredentialEnumerationMeta(WireSafeModel):
+class CredentialEnumerationMeta(_FiltersOnlyBaseMeta):
     attempts: int
     denied: int
     fail_rate_pct: float
     distinct_paths: int
-    filters: InsightFilters
 
 
-class NetworkAsnHealthMeta(WireSafeModel):
+class NetworkAsnHealthMeta(_FiltersOnlyBaseMeta):
     window_packet_loss_pct: float
     baseline_packet_loss_pct: float
     window_jitter_ms: float
@@ -2391,61 +2308,51 @@ class NetworkAsnHealthMeta(WireSafeModel):
     baseline_retrans_avg: float
     requests: int
     asn: int
-    filters: InsightFilters
 
 
-class ContentDiscoveryMeta(WireSafeModel):
-    requests: int
+class ContentDiscoveryMeta(_IntRequestsFiltersBaseMeta):
     not_found: int
     not_found_rate_pct: float
     distinct_404_urls: int
-    filters: InsightFilters
 
 
 class RefererMonocultureMeta(_RequestsFiltersBaseMeta):
     pass
 
 
-class MethodDriftMeta(WireSafeModel):
-    requests: Num
+class MethodDriftMeta(_RequestsFiltersBaseMeta):
     method: str | None
-    filters: InsightFilters
 
 
 class NewAsnTrafficMeta(AsnConcentrationMeta):
     pass
 
 
-class AsnHostingShiftMeta(WireSafeModel):
+class AsnHostingShiftMeta(_FiltersOnlyBaseMeta):
     window_hosting: Num
     window_total: Num
     asn: int
-    filters: InsightFilters
 
 
-class MetroDeliveryDegradationMeta(WireSafeModel):
+class MetroDeliveryDegradationMeta(_FiltersOnlyBaseMeta):
     window_requests: Num
     window_mbps: float
     baseline_mbps: float
-    filters: InsightFilters
 
 
-class ConnectionTypeMixMeta(WireSafeModel):
-    requests: Num
+class ConnectionTypeMixMeta(_RequestsFiltersBaseMeta):
     c_type: str | None
     c_speed: str | None
-    filters: InsightFilters
 
 
 class PopLatencyRegressionMeta(_RegressionWindowRequestsBaseMeta):
     pass
 
 
-class Http3FallbackMeta(WireSafeModel):
+class Http3FallbackMeta(_FiltersOnlyBaseMeta):
     window_quic: int
     window_total: int
     share_drop_pts: float
-    filters: InsightFilters
 
 
 class CacheHitCliffMeta(WireSafeModel):
@@ -2458,11 +2365,9 @@ class PayloadCompressionRegressionMeta(_WindowBaselineRequestsBaseMeta):
     pass
 
 
-class SessionHarvestingMeta(WireSafeModel):
-    requests: int
+class SessionHarvestingMeta(_IntRequestsFiltersBaseMeta):
     distinct_sessions: int
     baseline_distinct_sessions: int
-    filters: InsightFilters
 
 
 class TimeoutSplitMeta(WireSafeModel):
@@ -2491,12 +2396,10 @@ class StaleBrowserVersionMeta(WireSafeModel):
     surge_ratio: float
 
 
-class OrphanedDeepCrawlMeta(WireSafeModel):
-    requests: int
+class OrphanedDeepCrawlMeta(_IntRequestsFiltersBaseMeta):
     distinct_urls: int
     requests_per_url: float
     surge_ratio: float
-    filters: InsightFilters
 
 
 class ResidentialFingerprintDispersionMeta(WireSafeModel):
@@ -2511,9 +2414,12 @@ class HighScale5xxMeta(WireSafeModel):
     pass
 
 
-class InsightsRequest(FilteredRequest):
+class _WindowBaselineHoursMixin(BaseModel):
     window_size_hrs: float = Field(default=24.0, gt=0, le=168)
     baseline_hours: float = Field(default=168.0, gt=0, le=2160)
+
+
+class InsightsRequest(_WindowBaselineHoursMixin, FilteredRequest):
     force_refresh: bool = False
 
 
@@ -2832,10 +2738,8 @@ class InsightsAvailabilityResponse(BaseModel):
     unavailable: list[InsightAvailability] | None = None
 
 
-class CacheCollapseDetailRequest(BaseModel):
+class CacheCollapseDetailRequest(_WindowBaselineHoursMixin):
     url: str
-    window_size_hrs: float = Field(default=24.0, gt=0, le=168)
-    baseline_hours: float = Field(default=168.0, gt=0, le=2160)
 
 
 class CacheCollapseTimelinePoint(BaseModel):
@@ -2972,27 +2876,19 @@ class QuerySchemaResponse(BaseResponse):
     @model_validator(mode="before")
     @classmethod
     def _sync_schema_and_columns(cls, data: Any) -> Any:
-        if isinstance(data, dict):
-            raw_cols = data.get("schema") if "schema" in data else data.get("columns", [])
-            cols = [
-                {
-                    **c,
-                    "column": c.get("column") or c.get("name") or "",
-                    "name": c.get("name") or c.get("column") or "",
-                    "type": c.get("type", ""),
-                    "min": c.get("min"),
-                    "max": c.get("max"),
-                    "approx_unique": c.get("approx_unique"),
-                    "null_percentage": c.get("null_percentage"),
-                    "count": c.get("count"),
-                }
-                if isinstance(c, dict)
-                else c
-                for c in (raw_cols or [])
-            ]
-            return {
-                **data,
-                "schema": cols,
-                "columns": data.get("columns") if "columns" in data else cols,
+        if not isinstance(data, dict):
+            return data
+        raw_cols = data.get("schema") if "schema" in data else data.get("columns", [])
+        cols = [
+            {
+                **c,
+                "column": c.get("column") or c.get("name") or "",
+                "name": c.get("name") or c.get("column") or "",
+                "type": c.get("type", ""),
+                **{k: c.get(k) for k in ("min", "max", "approx_unique", "null_percentage", "count")},
             }
-        return data
+            if isinstance(c, dict)
+            else c
+            for c in (raw_cols or [])
+        ]
+        return {**data, "schema": cols, "columns": data.get("columns") if "columns" in data else cols}

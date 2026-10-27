@@ -104,7 +104,7 @@ def _pool_conn_memory_limit() -> str | None:
 
 
 def _pool_api_rebind_lock_timeout_s() -> float:
-    """Per-service iceberg-view rebind lock timeout for API checkouts (ADR-03 §28, default 0.5s)."""
+    """Per-service lake-view rebind lock timeout for API checkouts (ADR-03 §28, default 0.5s)."""
     return _env_float("DUCKDB_POOL_API_REBIND_LOCK_TIMEOUT_MS", 500.0, scale=0.001)
 
 

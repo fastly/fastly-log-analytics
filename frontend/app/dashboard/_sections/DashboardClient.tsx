@@ -45,32 +45,15 @@ export type DashboardCatalog = {
 export type DashboardAggregates = Partial<Pick<Aggregates, 'data' | 'map_data' | 'time_series' | 'metric' | 'interval'>>
 
 export interface DashboardBodyProps {
-  startTime: string | null
-  endTime: string | null
-  timezone: string
-  activeServiceId: string | null
-  filterPayload: FiltersPayload
-  config: ReportConfiguration
-  metric?: string
-  setMetric?: (metric: string) => void
-  trend: string
-  setTrend: (trend: string) => void
-  intervalButtons: React.ReactNode
-  allCards: DashboardCard[]
-  visibleCards: Set<string>
-  relativeRange: string | null
-  isAutoRange: boolean
-  anchor: string
+  startTime: string | null; endTime: string | null; timezone: string; activeServiceId: string | null
+  filterPayload: FiltersPayload; config: ReportConfiguration; metric?: string; setMetric?: (metric: string) => void
+  trend: string; setTrend: (trend: string) => void; intervalButtons: React.ReactNode
+  allCards: DashboardCard[]; visibleCards: Set<string>; relativeRange: string | null; isAutoRange: boolean; anchor: string
 }
 
 interface BuildChartLayoutParams {
-  trafficData: PlotlyTrace[]
-  aggregates: Pick<DashboardAggregates, 'metric'> | null | undefined
-  metric: string
-  startTime: string | null
-  endTime: string | null
-  timezone: string
-  catalog: DashboardCatalog | null | undefined
+  trafficData: PlotlyTrace[]; aggregates: Pick<DashboardAggregates, 'metric'> | null | undefined
+  metric: string; startTime: string | null; endTime: string | null; timezone: string; catalog: DashboardCatalog | null | undefined
 }
 
 export function buildChartLayout({ trafficData, aggregates, metric, startTime, endTime, timezone, catalog }: BuildChartLayoutParams): PlotlyLayout {
@@ -79,14 +62,11 @@ export function buildChartLayout({ trafficData, aggregates, metric, startTime, e
   return {
     ...TIME_HOVER_LAYOUT,
     barmode: trafficData.length > 1 && trafficData[0]?.type === 'bar' ? 'stack' : undefined,
-    bargap: 0.1,
-    bargroupgap: 0.05,
+    bargap: 0.1, bargroupgap: 0.05,
     showlegend: trafficData.some(t => t.showlegend !== false),
     yaxis: {
       title: metricField?.unit || (actualMetric === 'requests' ? 'reqs' : ''),
-      ticksuffix: metricField?.unit || '',
-      separatethousands: true,
-      exponentformat: 'none',
+      ticksuffix: metricField?.unit || '', separatethousands: true, exponentformat: 'none',
     },
     xaxis: makeTimeXAxis(startTime, endTime, timezone),
   }
@@ -99,14 +79,8 @@ export const COLLAPSED_SECTIONS_KEY = 'dashboard_collapsed_sections'
 type SparklinePoint = { ts: string; value: number }
 
 export type SparklineProps = {
-  points: SparklinePoint[]
-  yDomain?: [number | 'auto', number | 'auto']
-  height?: number
-  stroke?: string
-  formatValue?: (value: number) => string
-  hoverThreshold?: number
-  interactive?: boolean
-  label?: string
+  points: SparklinePoint[]; yDomain?: [number | 'auto', number | 'auto']; height?: number; stroke?: string
+  formatValue?: (value: number) => string; hoverThreshold?: number; interactive?: boolean; label?: string
 }
 
 export function Sparkline({
@@ -178,8 +152,7 @@ function InteractiveSparkline({
     if (!el) return
     const rect = cachedRectRef.current ?? (cachedRectRef.current = el.getBoundingClientRect())
     if (rect.width <= 0) return
-    const ratio = (clientX - rect.left) / rect.width
-    const idx = Math.max(0, Math.min(pts.length - 1, Math.round(ratio * (pts.length - 1))))
+    const idx = Math.max(0, Math.min(pts.length - 1, Math.round(((clientX - rect.left) / rect.width) * (pts.length - 1))))
     setHoverIdx((prev) => (prev === idx ? prev : idx))
   }, [pts.length, setHoverIdx])
 
@@ -206,59 +179,31 @@ function InteractiveSparkline({
   }, [hoverIdx, setHoverIdx])
 
   const hovered = hoverIdx !== null ? pts[hoverIdx] : null
-  const latest = pts[pts.length - 1]
   const fmtVal = (v: number) => (formatValue ? formatValue(v) : v.toFixed(2))
-  const latestText = fmtVal(latest.raw.value)
-
-  const tsPattern = React.useMemo(() => {
-    if (!hovered) return 'HH:mm'
-    return fmt.format(hovered.raw.ts, 'yyyy-MM-dd') === fmt.format(new Date(), 'yyyy-MM-dd') ? 'HH:mm' : 'MMM d, HH:mm'
-  }, [hovered, fmt])
+  const latestText = fmtVal(pts[pts.length - 1].raw.value)
+  const tsPattern = React.useMemo(
+    () => (!hovered || fmt.format(hovered.raw.ts, 'yyyy-MM-dd') === fmt.format(new Date(), 'yyyy-MM-dd') ? 'HH:mm' : 'MMM d, HH:mm'),
+    [hovered, fmt],
+  )
+  const hoverLeft = hovered ? `${(hovered.x / width) * 100}%` : 0
+  const hoverTop = hovered ? `${(hovered.y / height) * 100}%` : 0
 
   return (
     <div className="relative" style={{ width: '100%', height }}>
       <svg
-        ref={svgRef}
-        viewBox={`0 0 ${width} ${height}`}
-        width="100%"
-        height={height}
-        preserveAspectRatio="none"
-        role="img"
-        aria-label={`${label} sparkline, latest ${latestText}, ${pts.length} samples`}
+        ref={svgRef} viewBox={`0 0 ${width} ${height}`} width="100%" height={height} preserveAspectRatio="none"
+        role="img" aria-label={`${label} sparkline, latest ${latestText}, ${pts.length} samples`}
         style={{ display: 'block', touchAction: 'manipulation' }}
-        onPointerEnter={onPointerEnter}
-        onPointerMove={onPointerMove}
-        onPointerDown={onPointerDown}
-        onPointerLeave={onPointerLeave}
-        onPointerCancel={onPointerCancel}
+        onPointerEnter={onPointerEnter} onPointerMove={onPointerMove} onPointerDown={onPointerDown}
+        onPointerLeave={onPointerLeave} onPointerCancel={onPointerCancel}
       >
         <polyline points={polylinePoints} fill="none" stroke={stroke} strokeWidth={1.25} strokeOpacity={0.55} vectorEffect="non-scaling-stroke" />
-        {hovered && (
-          <line x1={hovered.x} x2={hovered.x} y1={0} y2={height} stroke="hsl(var(--muted-foreground))" strokeOpacity={0.55} strokeWidth={0.5} vectorEffect="non-scaling-stroke" />
-        )}
+        {hovered && <line x1={hovered.x} x2={hovered.x} y1={0} y2={height} stroke="hsl(var(--muted-foreground))" strokeOpacity={0.55} strokeWidth={0.5} vectorEffect="non-scaling-stroke" />}
         <rect x={0} y={0} width={width} height={height} fill="transparent" />
       </svg>
-      {hovered && (
-        <span
-          aria-hidden
-          style={{
-            position: 'absolute', left: `${(hovered.x / width) * 100}%`, top: `${(hovered.y / height) * 100}%`,
-            width: 6, height: 6, marginLeft: -3, marginTop: -3, borderRadius: '50%', background: stroke, pointerEvents: 'none',
-          }}
-        />
-      )}
+      {hovered && <span aria-hidden style={{ position: 'absolute', left: hoverLeft, top: hoverTop, width: 6, height: 6, marginLeft: -3, marginTop: -3, borderRadius: '50%', background: stroke, pointerEvents: 'none' }} />}
       <Tooltip open={hovered !== null} onOpenChange={(open) => { if (!open) setHoverIdx(null) }}>
-        <TooltipTrigger
-          render={
-            <span
-              aria-hidden
-              style={{
-                position: 'absolute', left: hovered ? `${(hovered.x / width) * 100}%` : 0, top: hovered ? `${(hovered.y / height) * 100}%` : 0,
-                width: 1, height: 1, pointerEvents: 'none',
-              }}
-            />
-          }
-        />
+        <TooltipTrigger render={<span aria-hidden style={{ position: 'absolute', left: hoverLeft, top: hoverTop, width: 1, height: 1, pointerEvents: 'none' }} />} />
         {hovered && (
           <TooltipContent side="top" sideOffset={8} className="text-xs max-w-[200px] p-2 space-y-1">
             <div className="font-mono tabular-nums">{fmtVal(hovered.raw.value)}</div>
@@ -273,28 +218,17 @@ function InteractiveSparkline({
 // ── CardGrid ─────────────────────────────────────────────────────────────────
 
 interface CardGridProps {
-  visibleCardList: DashboardCard[]
-  isReady: boolean
-  isFetchingAggs: boolean
-  aggregates: DashboardAggregates | null | undefined
-  compareAggregates: DashboardAggregates | null | undefined
-  compareMode: boolean
-  topBotsData: TopBots | null | undefined
-  topBotsError?: unknown
-  onRetryTopBots?: () => void
-  compareError?: unknown
-  onRetryCompare?: () => void
-  collapsedSections: Set<string>
-  toggleSectionCollapsed: (id: string) => void
+  visibleCardList: DashboardCard[]; isReady: boolean; isFetchingAggs: boolean
+  aggregates: DashboardAggregates | null | undefined; compareAggregates: DashboardAggregates | null | undefined
+  compareMode: boolean; topBotsData: TopBots | null | undefined; topBotsError?: unknown; onRetryTopBots?: () => void
+  compareError?: unknown; onRetryCompare?: () => void
+  collapsedSections: Set<string>; toggleSectionCollapsed: (id: string) => void
   onRowClick: (column: string, value: string | number) => void
 }
 
 function CardSkeleton({ isReady }: { isReady: boolean }) {
   return (
-    <div
-      data-empty-placeholder="true"
-      className="border rounded-lg p-4 h-[300px] flex items-center justify-center bg-muted/20 [content-visibility:auto] [contain-intrinsic-size:300px]"
-    >
+    <div data-empty-placeholder="true" className="border rounded-lg p-4 h-[300px] flex items-center justify-center bg-muted/20 [content-visibility:auto] [contain-intrinsic-size:300px]">
       <span className="text-muted-foreground text-xs animate-pulse">{!isReady ? 'Initializing...' : 'Loading...'}</span>
     </div>
   )
@@ -334,48 +268,30 @@ export function CardGrid({
     if (!isReady || !aggregates || (isBotCard && !topBotsData)) {
       return <CardSkeleton key={card.id} isReady={isReady} />
     }
-    if (isBotCard) {
-      const botItems = card.id === '_bot_name' ? (topBotsData?.bots ?? []) : (topBotsData?.ngwaf_bots ?? [])
-      return (
-        <LazyMount key={card.id} minHeight={300}>
-          <TopTenTable
-            title={card.label}
-            icon={card.id === '_bot_name' ? <Bot className="h-4 w-4" /> : undefined}
-            field={card.id}
-            inActiveFormat={card.inActiveFormat}
-            data={{
-              total: botItems.reduce((acc, b) => acc + b.request_count, 0),
-              top: botItems.map((b) => ({
-                value: card.id === '_bot_name' ? ('id' in b && b.id ? b.id : b.name) : b.name,
-                label: b.name,
-                count: b.request_count,
-              })),
-            }}
-            compareData={undefined}
-            onRowClick={onRowClick}
-          />
-        </LazyMount>
-      )
-    }
+    const botItems = isBotCard ? (card.id === '_bot_name' ? (topBotsData?.bots ?? []) : (topBotsData?.ngwaf_bots ?? [])) : null
+    const tableData = botItems
+      ? {
+          total: botItems.reduce((acc, b) => acc + b.request_count, 0),
+          top: botItems.map((b) => ({
+            value: card.id === '_bot_name' ? ('id' in b && b.id ? b.id : b.name) : b.name,
+            label: b.name, count: b.request_count,
+          })),
+        }
+      : aggregates?.data?.[card.id]
+
     return (
       <LazyMount key={card.id} minHeight={300}>
         <TopTenTable
-          title={card.label}
-          field={card.id}
-          inActiveFormat={card.inActiveFormat}
-          data={aggregates?.data?.[card.id]}
-          compareData={compareMode ? compareAggregates?.data?.[card.id] : undefined}
+          title={card.label} icon={card.id === '_bot_name' ? <Bot className="h-4 w-4" /> : undefined}
+          field={card.id} inActiveFormat={card.inActiveFormat} data={tableData}
+          compareData={isBotCard ? undefined : (compareMode ? compareAggregates?.data?.[card.id] : undefined)}
           onRowClick={onRowClick}
         />
       </LazyMount>
     )
   }
 
-  const sections = CARD_CATEGORIES.map(cat => ({
-    ...cat,
-    cards: cat.cardIds.flatMap(id => visibleById.get(id) ?? []),
-  })).filter(s => s.cards.length > 0)
-
+  const sections = CARD_CATEGORIES.map(cat => ({ ...cat, cards: cat.cardIds.flatMap(id => visibleById.get(id) ?? []) })).filter(s => s.cards.length > 0)
   const customCards = visibleCardList.filter((c) => !CATEGORIZED_CARD_IDS.has(c.id))
   if (customCards.length > 0) sections.push({ id: 'custom', label: 'Custom', cardIds: [], cards: customCards, tint: CUSTOM_TINT })
 
@@ -384,11 +300,7 @@ export function CardGrid({
       {compareMode && compareError ? (
         <div role="alert" className="flex items-center justify-between gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
           <span>Failed to load comparison data — cards show the current period only.</span>
-          {onRetryCompare && (
-            <button type="button" onClick={() => onRetryCompare()} className="rounded border border-destructive/40 px-2 py-0.5 hover:bg-destructive/10">
-              Retry
-            </button>
-          )}
+          {onRetryCompare && <button type="button" onClick={() => onRetryCompare()} className="rounded border border-destructive/40 px-2 py-0.5 hover:bg-destructive/10">Retry</button>}
         </div>
       ) : null}
       {sections.map(section => {
@@ -397,17 +309,12 @@ export function CardGrid({
         return (
           <section key={section.id} className={cn('rounded-lg border', section.tint.bg, section.tint.border)}>
             <button
-              type="button"
-              onClick={() => toggleSectionCollapsed(section.id)}
-              aria-expanded={!isCollapsed}
-              aria-controls={`section-${section.id}-cards`}
+              type="button" onClick={() => toggleSectionCollapsed(section.id)} aria-expanded={!isCollapsed} aria-controls={`section-${section.id}-cards`}
               className="w-full flex items-center gap-2 px-4 py-2.5 text-left hover:bg-black/[0.02] dark:hover:bg-white/[0.03] rounded-t-lg transition-colors group"
             >
               <Chevron className="h-3.5 w-3.5 text-muted-foreground group-hover:text-foreground transition-colors" />
               <span className={cn('inline-block w-1.5 h-1.5 rounded-full', section.tint.dot)} />
-              <h3 className="text-[10px] uppercase font-bold tracking-wider text-muted-foreground group-hover:text-foreground transition-colors">
-                {section.label}
-              </h3>
+              <h3 className="text-[10px] uppercase font-bold tracking-wider text-muted-foreground group-hover:text-foreground transition-colors">{section.label}</h3>
               <span className="text-[10px] text-muted-foreground/60 font-mono">{section.cards.length}</span>
             </button>
             {!isCollapsed && (
@@ -425,26 +332,12 @@ export function CardGrid({
 // ── TrafficChart ─────────────────────────────────────────────────────────────
 
 interface TrafficChartProps {
-  catalog: DashboardCatalog | undefined
-  metric: string
-  setMetric: (m: string) => void
-  trend: string
-  setTrend: (t: string) => void
-  config: ReportConfiguration
-  intervalButtons: React.ReactNode
-  trafficData: PlotlyTrace[]
-  chartLayout: PlotlyLayout
-  hiddenCategories: ReadonlySet<string>
-  toggleCategory: (cat: string) => void
-  isReady: boolean
-  isLoadingAggs: boolean
-  isFetchingAggs: boolean
-  transformPending: boolean
-  aggregates: DashboardAggregates | null | undefined
-  onChartRelayout: (event: PlotlyRelayoutEvent) => void
-  startTime: string | null
-  endTime: string | null
-  timezone: string
+  catalog: DashboardCatalog | undefined; metric: string; setMetric: (m: string) => void
+  trend: string; setTrend: (t: string) => void; config: ReportConfiguration; intervalButtons: React.ReactNode
+  trafficData: PlotlyTrace[]; chartLayout: PlotlyLayout; hiddenCategories: ReadonlySet<string>
+  toggleCategory: (cat: string) => void; isReady: boolean; isLoadingAggs: boolean; isFetchingAggs: boolean
+  transformPending: boolean; aggregates: DashboardAggregates | null | undefined
+  onChartRelayout: (event: PlotlyRelayoutEvent) => void; startTime: string | null; endTime: string | null; timezone: string
 }
 
 const SHORT_METRIC_LABELS: Record<string, string> = {
@@ -475,14 +368,7 @@ export function TrafficChart({
       ...otherMetrics.filter((f) => !METRIC_ORDER.includes(f.id)),
     ]
     const elements = orderedMetrics.map(m => (
-      <Button
-        key={m.id}
-        variant={metric === m.id ? 'default' : 'ghost'}
-        size="sm"
-        onClick={() => React.startTransition(() => setMetric(m.id))}
-        aria-pressed={metric === m.id}
-        className={btnCls(metric === m.id)}
-      >
+      <Button key={m.id} variant={metric === m.id ? 'default' : 'ghost'} size="sm" onClick={() => React.startTransition(() => setMetric(m.id))} aria-pressed={metric === m.id} className={btnCls(metric === m.id)}>
         {SHORT_METRIC_LABELS[m.id] || m.label}
       </Button>
     ))
@@ -506,6 +392,13 @@ export function TrafficChart({
     return elements
   })()
 
+  const emptyMessage =
+    metric === 'ttfb_client' && !isFieldActive('ttfb')
+      ? 'Requires Infrastructure (Group C) fields to be enabled in Fastly logging.'
+      : metric === 'req_size' && !isFieldActive('req_bytes')
+        ? 'Requires Request Identity (Group A) fields to be enabled in Fastly logging.'
+        : 'No logs found for this period.'
+
   return (
     <div className="border rounded-lg p-4 flex flex-col relative overflow-hidden">
       <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-3 mb-4 relative z-10">
@@ -519,8 +412,7 @@ export function TrafficChart({
         <div className="flex items-center gap-3">
           {isFetchingAggs && !isLoadingAggs && (
             <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-primary/10 text-primary text-[10px] font-bold uppercase tracking-wider animate-pulse">
-              <span className="w-1.5 h-1.5 rounded-full bg-primary" />
-              Updating
+              <span className="w-1.5 h-1.5 rounded-full bg-primary" />Updating
             </div>
           )}
         </div>
@@ -533,15 +425,8 @@ export function TrafficChart({
               const name = trace.name ?? ''
               const isHidden = hiddenCategories.has(name)
               return (
-                <Button
-                  key={name}
-                  variant={isHidden ? 'ghost' : 'default'}
-                  size="sm"
-                  onClick={() => React.startTransition(() => toggleCategory(name))}
-                  className={btnCls(!isHidden)}
-                >
-                  <span className="w-1.5 h-1.5 rounded-full mr-1.5" style={{ backgroundColor: String(trace.marker?.color ?? '') }} />
-                  {name}
+                <Button key={name} variant={isHidden ? 'ghost' : 'default'} size="sm" onClick={() => React.startTransition(() => toggleCategory(name))} className={btnCls(!isHidden)}>
+                  <span className="w-1.5 h-1.5 rounded-full mr-1.5" style={{ backgroundColor: String(trace.marker?.color ?? '') }} />{name}
                 </Button>
               )
             })}
@@ -558,13 +443,7 @@ export function TrafficChart({
           <div data-empty-placeholder="true" className="h-[300px] flex items-center justify-center bg-muted/10 border border-dashed rounded-md">
             <div className="flex flex-col items-center text-muted-foreground text-center px-4">
               <span className="text-sm font-medium">No data available</span>
-              <span className="text-xs mt-1">
-                {metric === 'ttfb_client' && !isFieldActive('ttfb')
-                  ? 'Requires Infrastructure (Group C) fields to be enabled in Fastly logging.'
-                  : metric === 'req_size' && !isFieldActive('req_bytes')
-                    ? 'Requires Request Identity (Group A) fields to be enabled in Fastly logging.'
-                    : 'No logs found for this period.'}
-              </span>
+              <span className="text-xs mt-1">{emptyMessage}</span>
             </div>
           </div>
         ) : (
@@ -578,15 +457,7 @@ export function TrafficChart({
         <span className="text-[10px] uppercase font-bold text-muted-foreground">Trend:</span>
         <ButtonGroup className="bg-muted/50 p-1">
           {TRENDS.map(t => (
-            <Button
-              key={t.value}
-              variant={trend === t.value ? 'secondary' : 'ghost'}
-              size="sm"
-              onClick={() => React.startTransition(() => setTrend(t.value))}
-              disabled={!config.validTrends.has(t.value)}
-              aria-pressed={trend === t.value}
-              className="h-9 text-xs px-2 shadow-none disabled:opacity-30 sm:h-7 sm:text-[11px]"
-            >
+            <Button key={t.value} variant={trend === t.value ? 'secondary' : 'ghost'} size="sm" onClick={() => React.startTransition(() => setTrend(t.value))} disabled={!config.validTrends.has(t.value)} aria-pressed={trend === t.value} className="h-9 text-xs px-2 shadow-none disabled:opacity-30 sm:h-7 sm:text-[11px]">
               {t.label}
             </Button>
           ))}
@@ -600,17 +471,11 @@ const WORKER_THRESHOLD = 2000
 
 export function buildTrafficDataAsync(params: BuildTrafficDataParams): Promise<PlotlyTrace[]> {
   const n = params.aggregates?.time_series?.length ?? 0
-  if (typeof window === 'undefined' || process.env.NODE_ENV === 'test' || n < WORKER_THRESHOLD) {
-    return Promise.resolve(buildTrafficData(params))
-  }
+  if (typeof window === 'undefined' || process.env.NODE_ENV === 'test' || n < WORKER_THRESHOLD) return Promise.resolve(buildTrafficData(params))
   return new Promise((resolve, reject) => {
     let worker: Worker
-    try {
-      worker = new Worker(new URL('../../../lib/workers/chartDataWorker.ts', import.meta.url))
-    } catch {
-      resolve(buildTrafficData(params))
-      return
-    }
+    try { worker = new Worker(new URL('../../../lib/workers/chartDataWorker.ts', import.meta.url)) }
+    catch { resolve(buildTrafficData(params)); return }
     worker.onmessage = (event) => {
       worker.terminate()
       if (event.data?.success) resolve(event.data.data)
@@ -627,17 +492,8 @@ export function buildTrafficDataAsync(params: BuildTrafficDataParams): Promise<P
 export type DashboardSection = NonNullable<components['schemas']['AggregatesRequest']['sections']>[number]
 
 interface DashboardBundleArgs {
-  startTime: string | null
-  endTime: string | null
-  relativeRange: string | null
-  isAutoRange: boolean
-  anchor: string
-  filterPayload: FiltersPayload
-  metric: string
-  interval: string
-  enabled: boolean
-  fields?: string[]
-  sections?: DashboardSection[]
+  startTime: string | null; endTime: string | null; relativeRange: string | null; isAutoRange: boolean; anchor: string
+  filterPayload: FiltersPayload; metric: string; interval: string; enabled: boolean; fields?: string[]; sections?: DashboardSection[]
 }
 
 export function useDashboardBundle({
@@ -646,21 +502,16 @@ export function useDashboardBundle({
 }: DashboardBundleArgs) {
   const activeServiceId = useServiceStore(s => s.activeServiceId)
   return useAnalyticsReportQuery({
-    namespace: ['dashboard', 'bundle'],
-    serviceId: activeServiceId,
-    filterPayload,
+    namespace: ['dashboard', 'bundle'], serviceId: activeServiceId, filterPayload,
     range: { relativeRange, isAutoRange, startTime, endTime, anchor },
     keyParts: [metric, interval, fields, sections],
     queryFn: async ({ rangeBody, signal }) => {
       const body = await unwrapClient(
         client.POST('/api/dashboard/bundle', {
-          signal,
-          body: { filters: filterPayload, chart_metric: metric as ChartMetric, chart_interval: interval, fields, sections, ...rangeBody },
+          signal, body: { filters: filterPayload, chart_metric: metric as ChartMetric, chart_interval: interval, fields, sections, ...rangeBody },
         }),
       )
-      if (body?.aggregates) {
-        throwIfStaleAggregates(body.aggregates, { startTime, endTime }, Object.keys(filterPayload).length > 0)
-      }
+      if (body?.aggregates) throwIfStaleAggregates(body.aggregates, { startTime, endTime }, Object.keys(filterPayload).length > 0)
       return body
     },
     queryOptions: { enabled, ...STALE_VIEW_RETRY_OPTIONS, refetchIntervalInBackground: false },
@@ -680,11 +531,8 @@ const ChoroplethMap = dynamic(
 )
 
 interface GeoMapProps {
-  isReady: boolean
-  isFetchingAggs: boolean
-  aggregates: DashboardAggregates | null | undefined
-  catalog: DashboardCatalog | undefined
-  onCountryClick: (countryName: string) => void
+  isReady: boolean; isFetchingAggs: boolean; aggregates: DashboardAggregates | null | undefined
+  catalog: DashboardCatalog | undefined; onCountryClick: (countryName: string) => void
 }
 
 export function GeoMap({ isReady, isFetchingAggs, aggregates, catalog, onCountryClick }: GeoMapProps) {
@@ -693,9 +541,7 @@ export function GeoMap({ isReady, isFetchingAggs, aggregates, catalog, onCountry
     if (isFieldActive('country')) return 'No country data in this time range.'
     const countryField = catalog?.fields?.find((f) => f.id === 'country')
     const groupMeta = countryField?.group ? catalog?.groups?.find((g) => g.id === countryField.group) : undefined
-    return groupMeta
-      ? `Requires ${groupMeta.label} fields to be enabled in Fastly logging.`
-      : 'Requires Geolocation fields to be enabled in Fastly logging.'
+    return groupMeta ? `Requires ${groupMeta.label} fields to be enabled in Fastly logging.` : 'Requires Geolocation fields to be enabled in Fastly logging.'
   })()
 
   return (
@@ -720,12 +566,8 @@ export function GeoMap({ isReady, isFetchingAggs, aggregates, catalog, onCountry
 }
 
 interface DashboardHeaderProps {
-  visibleCardsCount: number
-  allCards: Array<{ id: string; label: string; inActiveFormat?: boolean }>
-  visibleCards: Set<string>
-  onToggleCard: (id: string) => void
-  onShowAll: () => void
-  onResetCards: () => void
+  visibleCardsCount: number; allCards: Array<{ id: string; label: string; inActiveFormat?: boolean }>
+  visibleCards: Set<string>; onToggleCard: (id: string) => void; onShowAll: () => void; onResetCards: () => void
 }
 
 export function DashboardHeader({
@@ -750,25 +592,12 @@ export function DashboardHeader({
         <div className="grid grid-cols-2 gap-x-4 gap-y-2">
           {allCards.map(card => (
             <div key={card.id} className="flex items-center gap-2">
-              <Checkbox
-                id={`card-${card.id}`}
-                checked={visibleCards.has(card.id)}
-                onCheckedChange={() => React.startTransition(() => onToggleCard(card.id))}
-              />
+              <Checkbox id={`card-${card.id}`} checked={visibleCards.has(card.id)} onCheckedChange={() => React.startTransition(() => onToggleCard(card.id))} />
               <Label htmlFor={`card-${card.id}`} className="text-xs cursor-pointer leading-tight inline-flex items-center gap-1">
                 {card.label}
                 {card.inActiveFormat === false && (
                   <Tooltip>
-                    <TooltipTrigger
-                      render={
-                        <span
-                          className="inline-flex items-center rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                          tabIndex={0}
-                          role="button"
-                          aria-label="Not in active log format"
-                        />
-                      }
-                    >
+                    <TooltipTrigger render={<span className="inline-flex items-center rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" tabIndex={0} role="button" aria-label="Not in active log format" />}>
                       <EyeOff className="h-3 w-3 text-muted-foreground/70" />
                     </TooltipTrigger>
                     <TooltipContent><p className="text-[10px]">Not in active log format.</p></TooltipContent>
@@ -797,11 +626,8 @@ function DashboardBody({
   const { data: catalog } = useLogFieldsCatalog()
   const { addFilter, setRange, compareMode, compareStartTime, compareEndTime } = useFilterStore(
     useShallow(state => ({
-      addFilter: state.addFilter,
-      setRange: state.setRange,
-      compareMode: state.compareMode,
-      compareStartTime: state.compareStartTime,
-      compareEndTime: state.compareEndTime,
+      addFilter: state.addFilter, setRange: state.setRange, compareMode: state.compareMode,
+      compareStartTime: state.compareStartTime, compareEndTime: state.compareEndTime,
     })),
   )
 
@@ -810,24 +636,15 @@ function DashboardBody({
   let setNuqsMetric: ((val: string | null) => Promise<URLSearchParams>) | null = null
   try {
     ;[nuqsMetric, setNuqsMetric] = useQueryState(
-      'metric',
-      parseAsString.withDefault('requests').withOptions({ clearOnDefault: true, history: 'replace', shallow: true }),
+      'metric', parseAsString.withDefault('requests').withOptions({ clearOnDefault: true, history: 'replace', shallow: true }),
     )
-  } catch {
-    // Fallback when NuqsAdapter is not mounted in unit tests
-  }
+  } catch { /* Fallback when NuqsAdapter is not mounted in unit tests */ }
   const metric = metricProp ?? nuqsMetric ?? localMetric
-  const setMetric = React.useCallback(
-    (nextMetric: string) => {
-      if (setMetricProp) {
-        setMetricProp(nextMetric)
-        return
-      }
-      setLocalMetric(nextMetric)
-      if (setNuqsMetric) void setNuqsMetric(nextMetric)
-    },
-    [setMetricProp, setNuqsMetric],
-  )
+  const setMetric = React.useCallback((nextMetric: string) => {
+    if (setMetricProp) { setMetricProp(nextMetric); return }
+    setLocalMetric(nextMetric)
+    if (setNuqsMetric) void setNuqsMetric(nextMetric)
+  }, [setMetricProp, setNuqsMetric])
   const router = useRouter()
 
   const [hiddenState, setHiddenState] = React.useState<{ metric: string; set: ReadonlySet<string> }>(() => ({ metric: 'requests', set: new Set() }))
@@ -861,8 +678,7 @@ function DashboardBody({
   const isReady = useIsDataReady()
   const bundleQuery = useDashboardBundle({
     startTime, endTime, relativeRange, isAutoRange, anchor,
-    filterPayload, metric, interval: config.effectiveInterval,
-    enabled: isReady, sections: DASHBOARD_SECTIONS,
+    filterPayload, metric, interval: config.effectiveInterval, enabled: isReady, sections: DASHBOARD_SECTIONS,
   })
 
   const aggregates = bundleQuery.data?.aggregates
@@ -874,11 +690,7 @@ function DashboardBody({
     queryKey: ['dashboard', 'aggregates', 'compare', activeServiceId, compareStartTime, compareEndTime, filterPayload, metric, config.effectiveInterval],
     queryFn: async ({ signal }) => {
       const data = await unwrapClient(client.POST('/api/dashboard/aggregates', {
-        signal,
-        body: {
-          start_time: compareStartTime!, end_time: compareEndTime!,
-          filters: filterPayload, chart_metric: metric as ChartMetric, chart_interval: config.effectiveInterval,
-        },
+        signal, body: { start_time: compareStartTime!, end_time: compareEndTime!, filters: filterPayload, chart_metric: metric as ChartMetric, chart_interval: config.effectiveInterval },
       }))
       return throwIfStaleAggregates(data, { startTime: compareStartTime, endTime: compareEndTime }, Object.keys(filterPayload).length > 0)
     },
@@ -886,15 +698,10 @@ function DashboardBody({
     ...STALE_VIEW_RETRY_OPTIONS,
   })
 
-  const topBotsData = bundleQuery.data?.top_bots
-  const topBotsError = bundleQuery.error
-  const refetchTopBots = bundleQuery.refetch
-
   const trafficParams = React.useMemo(
     () => ({
-      aggregates, compareAggregates, compareMode, compareStartTime,
-      startTime, endTime, trend, timezone, metric,
-      effectiveInterval: config.effectiveInterval, hiddenCategories, catalog,
+      aggregates, compareAggregates, compareMode, compareStartTime, startTime, endTime,
+      trend, timezone, metric, effectiveInterval: config.effectiveInterval, hiddenCategories, catalog,
     }),
     [aggregates, compareAggregates, compareMode, compareStartTime, startTime, endTime, trend, timezone, metric, config.effectiveInterval, hiddenCategories, catalog],
   )
@@ -922,12 +729,10 @@ function DashboardBody({
   const handleRowClick = React.useCallback((column: string, value: string | number) => {
     React.startTransition(() => { addFilter(column, String(value), 'include') })
   }, [addFilter])
-
   const handleChartRelayout = usePlotlyRangeZoom(timezone, setRange)
   const handleCountryClick = React.useCallback((countryName: string) => {
     React.startTransition(() => { addFilter('country', countryName, 'include') })
   }, [addFilter])
-
   const visibleCardList = React.useMemo(() => allCards.filter((c) => visibleCards.has(c.id)), [allCards, visibleCards])
 
   return (
@@ -941,9 +746,7 @@ function DashboardBody({
         <div role="alert" className="mb-6 flex flex-col items-start gap-2 rounded-md border border-red-300 bg-red-50 p-4 text-sm text-red-900 dark:border-red-700 dark:bg-red-950 dark:text-red-100">
           <div className="font-semibold">Failed to load dashboard data.</div>
           <div className="font-mono text-xs opacity-80 break-all">{extractApiError(bundleQuery.error)}</div>
-          <button type="button" onClick={() => { void bundleQuery.refetch() }} className="mt-1 rounded border border-red-400 px-2 py-1 text-xs hover:bg-red-100 dark:hover:bg-red-900">
-            Retry
-          </button>
+          <button type="button" onClick={() => { void bundleQuery.refetch() }} className="mt-1 rounded border border-red-400 px-2 py-1 text-xs hover:bg-red-100 dark:hover:bg-red-900">Retry</button>
         </div>
       ) : null}
 
@@ -961,7 +764,7 @@ function DashboardBody({
       <CardGrid
         visibleCardList={visibleCardList} isReady={isReady} isFetchingAggs={isFetchingAggs}
         aggregates={aggregates} compareAggregates={compareAggregates} compareMode={compareMode}
-        topBotsData={topBotsData} topBotsError={topBotsError} onRetryTopBots={() => { void refetchTopBots() }}
+        topBotsData={bundleQuery.data?.top_bots} topBotsError={bundleQuery.error} onRetryTopBots={() => { void bundleQuery.refetch() }}
         compareError={compareError} onRetryCompare={() => { void refetchCompare() }}
         collapsedSections={collapsedSections} toggleSectionCollapsed={toggleSectionCollapsed} onRowClick={handleRowClick}
       />
@@ -969,9 +772,7 @@ function DashboardBody({
       <div className="border rounded-lg bg-card p-6 flex flex-col md:flex-row items-center justify-between gap-4 shadow-sm">
         <div className="space-y-1">
           <h3 className="font-semibold text-sm">Raw Request Log Inspector</h3>
-          <p className="text-xs text-muted-foreground">
-            Inspect detailed parameters, search specific fields, and write advanced analytical queries.
-          </p>
+          <p className="text-xs text-muted-foreground">Inspect detailed parameters, search specific fields, and write advanced analytical queries.</p>
         </div>
         <Button
           variant="outline"
@@ -1002,31 +803,10 @@ export default function DashboardClient({ nowServerStr }: { nowServerStr?: strin
 
   return (
     <ReportLayout
-      title="Dashboard"
-      description="Drill down into traffic details and analyze request trends."
-      icon={LayoutDashboard}
-      defaultInterval="1 hour"
-      headerActions={
-        <DashboardHeader
-          visibleCardsCount={visibleCardsCount}
-          allCards={allCards}
-          visibleCards={visibleCards}
-          onToggleCard={toggleCard}
-          onShowAll={showAll}
-          onResetCards={resetCards}
-        />
-      }
+      title="Dashboard" description="Drill down into traffic details and analyze request trends." icon={LayoutDashboard} defaultInterval="1 hour"
+      headerActions={<DashboardHeader visibleCardsCount={visibleCardsCount} allCards={allCards} visibleCards={visibleCards} onToggleCard={toggleCard} onShowAll={showAll} onResetCards={resetCards} />}
     >
-      {(ctx) => (
-        <DashboardBody
-          {...ctx}
-          allCards={allCards}
-          visibleCards={visibleCards}
-          relativeRange={relativeRange}
-          isAutoRange={isAutoRange}
-          anchor={anchor}
-        />
-      )}
+      {(ctx) => <DashboardBody {...ctx} allCards={allCards} visibleCards={visibleCards} relativeRange={relativeRange} isAutoRange={isAutoRange} anchor={anchor} />}
     </ReportLayout>
   )
 }

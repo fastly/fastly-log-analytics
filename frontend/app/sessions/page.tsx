@@ -3,6 +3,7 @@
 import React, { useState, useEffect } from 'react'
 import Link from 'next/link'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { parseAsBoolean, parseAsInteger, useQueryState } from 'nuqs'
 import { ColumnDef } from '@tanstack/react-table'
 import { AlertTriangle, Clock, ExternalLink, Film, Globe, Shield, Users } from 'lucide-react'
 
@@ -73,7 +74,7 @@ export function SessionDetail({
 }: SessionDetailProps) {
   const { full, relative, abbr } = useDateFormat()
   const getFieldLabel = useFieldLabel()
-  const [detailEdgeOnly, setDetailEdgeOnly] = useState(false)
+  const [detailEdgeOnly, setDetailEdgeOnly] = useQueryState('edge_only', parseAsBoolean.withDefault(false))
 
   const { data: detailData, isLoading: isLoadingDetail, isError: isErrorDetail, error: detailError, refetch: refetchDetail } = useQuery({
     queryKey: ['sessions', 'detail', activeServiceId, selectedSession?.session_token ?? selectedSession?.ip, selectedSession?.ja4, selectedSession?.session_start],
@@ -234,7 +235,7 @@ export function SessionDetail({
                 <h4 className="text-sm font-semibold">Request Timeline</h4>
                 {data?.has_edge && (
                   <div className="flex items-center gap-2">
-                    <Switch id="detail-edge-only" checked={detailEdgeOnly} onCheckedChange={setDetailEdgeOnly} className="scale-75" />
+                    <Switch id="detail-edge-only" checked={detailEdgeOnly} onCheckedChange={(v) => void setDetailEdgeOnly(v)} className="scale-75" />
                     <Label htmlFor="detail-edge-only" className="text-xs font-normal cursor-pointer text-muted-foreground hover:text-foreground transition-colors">
                       Edge only
                     </Label>
@@ -498,10 +499,14 @@ function SessionsBody({
   startTime: string | null; endTime: string | null; activeServiceId: string | null; filterPayload: SessionsFilters
 }) {
   const [selectedSession, setSelectedSession] = useState<Session | null>(null)
-  const [flaggedOnly, setFlaggedOnly] = useState(false)
-  const [streamingOnly, setStreamingOnly] = useState(false)
-  const [minReqs, setMinReqs] = useState<number | ''>('')
-  const [min4xxPct, setMin4xxPct] = useState<number | ''>('')
+  const [flaggedOnly, setFlaggedOnly] = useQueryState('flagged', parseAsBoolean.withDefault(false))
+  const [streamingOnly, setStreamingOnly] = useQueryState('streaming', parseAsBoolean.withDefault(false))
+  const [minReqsParam, setMinReqsParam] = useQueryState('min_reqs', parseAsInteger)
+  const [min4xxPctParam, setMin4xxPctParam] = useQueryState('min_4xx_pct', parseAsInteger)
+  const minReqs: number | '' = minReqsParam ?? ''
+  const min4xxPct: number | '' = min4xxPctParam ?? ''
+  const setMinReqs = React.useCallback((v: number | '') => { void setMinReqsParam(v === '' ? null : v) }, [setMinReqsParam])
+  const setMin4xxPct = React.useCallback((v: number | '') => { void setMin4xxPctParam(v === '' ? null : v) }, [setMin4xxPctParam])
   const isReady = useIsDataReady()
   const cmcdEnabled = useActiveServiceCmcdEnabled(activeServiceId)
   const qc = useQueryClient()
@@ -582,8 +587,8 @@ function SessionsBody({
       ) : null}
 
       <ScoringControls
-        cmcdEnabled={cmcdEnabled} flaggedOnly={flaggedOnly} setFlaggedOnly={setFlaggedOnly}
-        streamingOnly={streamingOnly} setStreamingOnly={setStreamingOnly}
+        cmcdEnabled={cmcdEnabled} flaggedOnly={flaggedOnly} setFlaggedOnly={(v) => void setFlaggedOnly(v)}
+        streamingOnly={streamingOnly} setStreamingOnly={(v) => void setStreamingOnly(v)}
         minReqs={minReqs} setMinReqs={setMinReqs} min4xxPct={min4xxPct} setMin4xxPct={setMin4xxPct}
         data={data} isFetching={isFetching} isLoadingInitial={isLoadingInitial} refetch={refetch}
       />

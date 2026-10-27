@@ -145,7 +145,7 @@ class _ConnectionHolder:
 
     Read-only requests check out a pooled, pre-warmed connection via
     ``duckdb_pool.checkout_connection`` (saves ~50ms per request of
-    pragma / S3 / iceberg-view setup). Write-mode connections still take
+    pragma / S3 / lake-view setup). Write-mode connections still take
     the always-fresh ``get_connection`` path because ingest holds the
     write lock and pooling would defeat its lifecycle.
 

@@ -23,6 +23,7 @@ from unittest.mock import MagicMock, patch
 import duckdb
 import httpx
 import pytest
+from backend.utils.remote_access import TimeBounds
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi import Request as FRequest
 from fastapi.testclient import TestClient
@@ -78,7 +79,6 @@ from backend.cron.jobs import metadata as metric_snapshots
 from backend.cron.jobs import metadata as operational_metrics
 from backend.models.common import MetricType
 from backend.repositories._base import origin_latency_us_expr
-from backend.utils.remote_access import TimeBounds
 from backend.utils.telemetry import get_page_load_id, iso_z, resolve_window, set_page_load_id
 from backend.utils.telemetry import redact_error_text as _redact_error_text
 from scripts.dev import verify_observability as probe

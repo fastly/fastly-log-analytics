@@ -1,6 +1,7 @@
 'use client'
 
 import React from 'react'
+import { parseAsStringLiteral, useQueryState } from 'nuqs'
 import { Server, Activity, MapPin, Globe } from 'lucide-react'
 import type { ColumnDef, VisibilityState } from '@tanstack/react-table'
 import { client, unwrapClient } from '@/lib/api'
@@ -118,8 +119,10 @@ export function Aggregates({ summary }: { summary: SectionQuery<OriginSummary> }
   )
 }
 
-type OriginMetric = 'ttfb' | 'ttlb'
-type OriginPercentile = 'p50' | 'p95' | 'p99'
+const ORIGIN_METRICS = ['ttfb', 'ttlb'] as const
+const ORIGIN_PERCENTILES = ['p50', 'p95', 'p99'] as const
+type OriginMetric = (typeof ORIGIN_METRICS)[number]
+type OriginPercentile = (typeof ORIGIN_PERCENTILES)[number]
 
 interface TimeseriesProps {
   originTs: SectionQuery<OriginTimeseries>
@@ -267,8 +270,8 @@ function OriginReportContent({
   startTime, endTime, timezone, activeServiceId, filterPayload, config,
   trend, setTrend, intervalButtons, relativeRange, isAutoRange, anchor,
 }: OriginReportContentProps) {
-  const [originMetric, setOriginMetric] = React.useState<'ttfb' | 'ttlb'>('ttfb')
-  const [originPercentile, setOriginPercentile] = React.useState<'p50' | 'p95' | 'p99'>('p95')
+  const [originMetric, setOriginMetric] = useQueryState('metric', parseAsStringLiteral(ORIGIN_METRICS).withDefault('ttfb'))
+  const [originPercentile, setOriginPercentile] = useQueryState('percentile', parseAsStringLiteral(ORIGIN_PERCENTILES).withDefault('p95'))
   const { isFieldActive } = useActiveLogFields()
   const [urlVisibility, setUrlVisibility, onUrlVisChange] = useColumnVisibility()
   const [popVisibility, setPopVisibility, onPopVisChange] = useColumnVisibility()

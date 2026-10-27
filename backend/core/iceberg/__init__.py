@@ -37,6 +37,7 @@ class _IcebergPackageProxy(_types.ModuleType):
             "__all__",
             "_core",
             "_ducklake",
+            "buffer",
             "lake_info",
             "manifest",
             "rum_schema",
@@ -113,7 +114,10 @@ _sys.modules[f"{__name__}.lake_info"] = _proxy
 _sys.modules[f"{__name__}.manifest"] = _proxy
 _sys.modules[f"{__name__}.rum_schema"] = _proxy
 _proxy.__dict__["view"] = _proxy
+_proxy.__dict__["buffer"] = _core_module
 _sys.modules[f"{__name__}.sync"] = _proxy
 _sys.modules[f"{__name__}.view"] = _proxy
+_sys.modules[f"{__name__}.buffer"] = _core_module
+_sys.modules["backend.core.local_compaction"] = _core_module
 
 del _self, _proxy

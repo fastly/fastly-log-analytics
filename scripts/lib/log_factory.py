@@ -1,10 +1,4 @@
-"""Canonical synthetic request-log factory.
-
-Single owner of the synthetic request-log record schema, field dimension pools,
-and distributions used across the repo (`generate_synthetic_traffic.py` and
-`scale_harness.py`). NumPy / PyArrow are imported lazily inside the columnar
-helpers so importing this module from the backend test suite stays stdlib-only.
-"""
+"""Canonical synthetic request-log factory (`generate_synthetic_traffic.py` and `scale_harness.py`)."""
 
 from __future__ import annotations
 
@@ -23,11 +17,7 @@ if TYPE_CHECKING:
     import pyarrow as pa
 
 # fmt: off
-
-COUNTRIES = [
-    "US", "GB", "DE", "JP", "BR", "IN", "AU", "FR", "CA", "NL",
-    "SG", "ES", "IT", "SE", "KR", "MX", "ZA", "CH", "PL", "IE",
-]
+COUNTRIES = ["US", "GB", "DE", "JP", "BR", "IN", "AU", "FR", "CA", "NL", "SG", "ES", "IT", "SE", "KR", "MX", "ZA", "CH", "PL", "IE"]
 _CW = [0.35, 0.08, 0.07, 0.06, 0.05, 0.05, 0.04, 0.04, 0.04, 0.03, 0.03, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02, 0.01, 0.01, 0.01]
 COUNTRY_WEIGHTS = [w / sum(_CW) for w in _CW]
 
@@ -91,13 +81,7 @@ URL_PATHS = [
 ]
 
 
-def generate_columns(
-    n: int,
-    start_ms: int,
-    end_ms: int,
-    scenario: str,
-    rng: np.random.Generator,
-) -> dict[str, Any]:
+def generate_columns(n: int, start_ms: int, end_ms: int, scenario: str, rng: np.random.Generator) -> dict[str, Any]:
     """Generate realistic columnar data for n log events."""
     import numpy as np
 
@@ -105,15 +89,12 @@ def generate_columns(
     u = rng.uniform(0, 1, size=n)
     if scenario == "diurnal":
         phase = 2 * math.pi * ((start_ms / 1000 / 3600) % 24 - 6) / 24
-        ts_rel = (u + 0.2 * np.sin(2 * math.pi * u + phase)) % 1.0
-        ts_ms = start_ms + (ts_rel * span_ms).astype(np.int64)
+        ts_ms = start_ms + (((u + 0.2 * np.sin(2 * math.pi * u + phase)) % 1.0) * span_ms).astype(np.int64)
     elif scenario == "ddos-spike":
-        spike_center = start_ms + span_ms // 2
-        spike_radius = min(span_ms // 8, 15 * 60 * 1000)
+        spike_center, spike_radius = start_ms + span_ms // 2, min(span_ms // 8, 15 * 60 * 1000)
         is_spike = rng.random(n) < 0.40
         spike_ts = rng.integers(spike_center - spike_radius, spike_center + spike_radius, size=n, dtype=np.int64)
-        normal_ts = (start_ms + u * span_ms).astype(np.int64)
-        ts_ms = np.where(is_spike, spike_ts, normal_ts)
+        ts_ms = np.where(is_spike, spike_ts, (start_ms + u * span_ms).astype(np.int64))
     elif scenario == "origin-5xx-outage":
         outage_start = start_ms + span_ms // 2
         outage_end = outage_start + min(span_ms // 4, 30 * 60 * 1000)
@@ -131,18 +112,15 @@ def generate_columns(
     city_list, metro_list, lat_list, lon_list, region_list = [], [], [], [], []
     for c in country:
         geo = COUNTRY_GEO_MAP.get(c, {"city": "Unknown", "metro": "000", "lat": 0.0, "lon": 0.0, "region": "XX"})
-        jitter_lat = rng.uniform(-0.15, 0.15)
-        jitter_lon = rng.uniform(-0.15, 0.15)
+        j_lat, j_lon = rng.uniform(-0.15, 0.15), rng.uniform(-0.15, 0.15)
         city_list.append(geo["city"])
         metro_list.append(geo["metro"])
-        lat_list.append(geo["lat"] + jitter_lat)
-        lon_list.append(geo["lon"] + jitter_lon)
+        lat_list.append(geo["lat"] + j_lat)
+        lon_list.append(geo["lon"] + j_lon)
         region_list.append(geo["region"])
 
-    city = np.array(city_list, dtype=object)
-    metro = np.array(metro_list, dtype=object)
-    lat = np.array(lat_list, dtype=np.float64)
-    lon = np.array(lon_list, dtype=np.float64)
+    city, metro = np.array(city_list, dtype=object), np.array(metro_list, dtype=object)
+    lat, lon = np.array(lat_list, dtype=np.float64), np.array(lon_list, dtype=np.float64)
     region = np.array(region_list, dtype=object)
 
     url_idx = rng.integers(0, len(URL_PATHS), size=n)
@@ -252,14 +230,11 @@ def cols_to_arrow_table(cols: dict[str, Any], schema: pa.Schema) -> pa.Table:
     n_rows = len(next(iter(cols.values())))
     arrays = []
     for field in schema:
-        name = field.name
-        if name in cols:
-            arr = pa.array(cols[name], type=None)
-            if arr.type != field.type:
-                arr = arr.cast(field.type, safe=False)
-            arrays.append(arr)
+        if field.name in cols:
+            arr = pa.array(cols[field.name], type=None)
+            arrays.append(arr.cast(field.type, safe=False) if arr.type != field.type else arr)
         elif pa.types.is_string(field.type):
-            arrays.append(pa.array([f"dummy_{name}"] * n_rows, type=field.type))
+            arrays.append(pa.array([f"dummy_{field.name}"] * n_rows, type=field.type))
         elif pa.types.is_integer(field.type) or pa.types.is_timestamp(field.type):
             arrays.append(pa.array([0] * n_rows, type=field.type))
         elif pa.types.is_floating(field.type):
@@ -275,23 +250,18 @@ def cols_to_arrow_table(cols: dict[str, Any], schema: pa.Schema) -> pa.Table:
 # RUM (Faro) synthetic beacons and records — stdlib random, injectable rng
 # ---------------------------------------------------------------------------
 
-_BEACON_TYPES = ["vitals", "interaction", "exception"]
-_BEACON_WEIGHTS = [75, 15, 10]
+_BEACON_TYPES, _BEACON_WEIGHTS = ["vitals", "interaction", "exception"], [75, 15, 10]
 _RUM_METRICS = ["LCP", "CLS", "INP", "FID", "TTFB", "FCP"]
 _RUM_PATHS = ["/", "/dashboard", "/origin", "/security", "/performance"]
-
-
-def rum_hex_id(rng: Any, chars: int = 16) -> str:
-    """Seedable stand-in for ``uuid.uuid4().hex[:chars]``."""
-    return f"{rng.getrandbits(chars * 4):0{chars}x}"
-
-
 _RESERVED_FIRST_OCTETS = frozenset({10, 100, 127, 169, 172, 192, 198, 203})
 _PUBLIC_FIRST_OCTETS = tuple(o for o in range(12, 224) if o not in _RESERVED_FIRST_OCTETS)
 
 
+def rum_hex_id(rng: Any, chars: int = 16) -> str:
+    return f"{rng.getrandbits(chars * 4):0{chars}x}"
+
+
 def random_source_ip(rng: Any = random) -> str:
-    """Public-looking IPv4 used to spoof geography/ASN via ``X-Source-Ip``."""
     first = rng.choice(_PUBLIC_FIRST_OCTETS)
     return f"{first}.{rng.randint(1, 254)}.{rng.randint(1, 254)}.{rng.randint(1, 254)}"
 
@@ -311,9 +281,7 @@ def _draw_file_metric(rng: Any) -> tuple[str, float]:
 
 def _draw_harness_metric(rng: Any) -> tuple[str, float]:
     metric = rng.choice(_RUM_METRICS)
-    if metric == "CLS":
-        return metric, round(rng.uniform(0.01, 0.45), 3)
-    return metric, rng.choice([150, 250, 1200, 2500, 3500])
+    return (metric, round(rng.uniform(0.01, 0.45), 3)) if metric == "CLS" else (metric, rng.choice([150, 250, 1200, 2500, 3500]))
 
 
 @dataclass(frozen=True)
@@ -338,10 +306,7 @@ FILE_RUM_PROFILE = RumProfile(
         "Error: Failed to fetch npm registry assets",
         "DOMException: Playwright auto-navigation aborted",
     ),
-    other_good_max=100,
-    hashed_chunk=True,
-    mobile_browser_hint=True,
-    draw_metric=_draw_file_metric,
+    other_good_max=100, hashed_chunk=True, mobile_browser_hint=True, draw_metric=_draw_file_metric,
 )
 
 HARNESS_RUM_PROFILE = RumProfile(
@@ -353,10 +318,7 @@ HARNESS_RUM_PROFILE = RumProfile(
         "ReferenceError: analytics_tracker is not defined",
         "DOMException: Failed to execute 'appendChild' on 'Node'",
     ),
-    other_good_max=800,
-    hashed_chunk=False,
-    mobile_browser_hint=False,
-    draw_metric=_draw_harness_metric,
+    other_good_max=800, hashed_chunk=False, mobile_browser_hint=False, draw_metric=_draw_harness_metric,
 )
 
 
@@ -383,18 +345,9 @@ def rum_device(browser: str, os_name: str, profile: RumProfile) -> str:
 
 
 def generate_faro_payload(
-    rng: Any,
-    profile: RumProfile,
-    *,
-    beacon_type: str,
-    browser: str,
-    os_name: str,
-    page_url: str,
-    record_dt: datetime,
-    metric: str | None = None,
-    value: float | None = None,
+    rng: Any, profile: RumProfile, *, beacon_type: str, browser: str, os_name: str,
+    page_url: str, record_dt: datetime, metric: str | None = None, value: float | None = None,
 ) -> dict[str, Any]:
-    """Faro payload (``meta`` plus one of measurements/events/exceptions)."""
     payload: dict[str, Any] = {
         "meta": {
             "browser": {"name": browser, "mobile": rum_device(browser, os_name, profile) == "Mobile"},
@@ -405,72 +358,45 @@ def generate_faro_payload(
     if beacon_type == "vitals":
         if metric is None or value is None:
             metric, value = profile.draw_metric(rng)
-        payload["measurements"] = [
-            {"type": "web-vitals", "values": {metric: value}, "context": {"rating": rum_rating(metric, value, profile)}}
-        ]
+        payload["measurements"] = [{"type": "web-vitals", "values": {metric: value}, "context": {"rating": rum_rating(metric, value, profile)}}]
     elif beacon_type == "interaction":
-        payload["events"] = [
-            {"name": rng.choice(profile.events), "timestamp": record_dt.isoformat(), "attributes": {"element_id": f"btn_{rng.randint(100, 999)}"}}
-        ]
+        payload["events"] = [{"name": rng.choice(profile.events), "timestamp": record_dt.isoformat(), "attributes": {"element_id": f"btn_{rng.randint(100, 999)}"}}]
     else:
         message = rng.choice(profile.errors)
         filename = f"static/chunks/main-{rum_hex_id(rng, 8)}.js" if profile.hashed_chunk else "static/chunks/main.js"
-        payload["exceptions"] = [
-            {
-                "type": "error",
-                "value": message,
-                "stacktrace": {"frames": [{"filename": filename, "lineno": rng.randint(10, 500), "colno": rng.randint(1, 120)}]},
-            }
-        ]
+        payload["exceptions"] = [{"type": "error", "value": message, "stacktrace": {"frames": [{"filename": filename, "lineno": rng.randint(10, 500), "colno": rng.randint(1, 120)}]}}]
     return payload
 
 
 def generate_rum_record(service_id: str, record_dt: datetime, rng: Any = random) -> dict[str, Any]:
-    """One raw RUM log line as the edge writes it (FOS ``raw/rum/`` layout)."""
     profile = FILE_RUM_PROFILE
     beacon_type = pick_beacon_type(rng)
-    browser = rng.choice(profile.browsers)
-    os_name = rng.choice(profile.oses)
+    browser, os_name = rng.choice(profile.browsers), rng.choice(profile.oses)
     device = rum_device(browser, os_name, profile)
     city = rng.choice(["Denver", "New York", "San Francisco", "London", "Tokyo", "Paris"])
     region = rng.choice(["CO", "NY", "CA", "ENG", "TKY", "IDF"])
     country = rng.choice(["US", "US", "US", "GB", "JP", "FR"])
     pop = rng.choice(["DEN", "EWR", "SJC", "LCY", "TYO", "CDG"])
     path = rng.choice(["/", "/dashboard", "/origin", "/security", "/performance", "/rum"])
-    cid = f"cid-{rng.randint(10000, 99999)}"
-    req_id = f"req-{rum_hex_id(rng, 16)}"
+    cid, req_id = f"cid-{rng.randint(10000, 99999)}", f"req-{rum_hex_id(rng, 16)}"
     faro_payload = generate_faro_payload(
         rng, profile, beacon_type=beacon_type, browser=browser, os_name=os_name,
         page_url=f"http://localhost{path}", record_dt=record_dt,
     )
     return {
-        "service_id": service_id,
-        "timestamp": record_dt.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
-        "geo_city": city,
-        "geo_region": region,
-        "geo_country_code": country,
-        "server_pop": pop,
-        "browser": browser,
-        "os": os_name,
-        "device": device,
-        "rum_cid": cid,
-        "req_id": req_id,
-        "fastly_req_id": req_id,
-        "request_event_id": req_id,
-        "url": f"http://localhost{path}",
-        "rum_body": json.dumps(faro_payload),
+        "service_id": service_id, "timestamp": record_dt.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
+        "geo_city": city, "geo_region": region, "geo_country_code": country, "server_pop": pop,
+        "browser": browser, "os": os_name, "device": device, "rum_cid": cid,
+        "req_id": req_id, "fastly_req_id": req_id, "request_event_id": req_id,
+        "url": f"http://localhost{path}", "rum_body": json.dumps(faro_payload),
     }
 
 
-def generate_rum_records(
-    service_id: str, n: int, now: datetime, rng: Any = random, step_ms: int = 50
-) -> list[dict[str, Any]]:
-    """``n`` records, newest first, spaced ``step_ms`` apart so timestamps are unique."""
+def generate_rum_records(service_id: str, n: int, now: datetime, rng: Any = random, step_ms: int = 50) -> list[dict[str, Any]]:
     return [generate_rum_record(service_id, now - timedelta(milliseconds=i * step_ms), rng) for i in range(n)]
 
 
 def build_rum_beacon_url(base_url: str, rng: Any = random) -> str:
-    """``/rum-beacon`` URL carrying the identity/metric query the edge VCL reads."""
     metric, value = HARNESS_RUM_PROFILE.draw_metric(rng)
     beacon_id = rum_hex_id(rng, 32)
     cid, req_id, path = f"cid-{beacon_id}", f"req-{beacon_id}", rng.choice(_RUM_PATHS)
@@ -482,7 +408,6 @@ def build_rum_beacon_url(base_url: str, rng: Any = random) -> str:
 
 
 def build_rum_beacon_body(url: str, rng: Any = random, now: datetime | None = None) -> dict[str, Any]:
-    """Faro POST body for a ``/rum-beacon`` URL built by :func:`build_rum_beacon_url`."""
     profile = HARNESS_RUM_PROFILE
     parsed = urlparse(url)
     qs = parse_qs(parsed.query)
@@ -492,8 +417,7 @@ def build_rum_beacon_body(url: str, rng: Any = random, now: datetime | None = No
     except ValueError:
         value = 1200.0
     path = qs.get("rum_pathname", ["/"])[0]
-    browser = rng.choice(profile.browsers)
-    os_name = rng.choice(profile.oses)
+    browser, os_name = rng.choice(profile.browsers), rng.choice(profile.oses)
     return generate_faro_payload(
         rng, profile, beacon_type=pick_beacon_type(rng), browser=browser, os_name=os_name,
         page_url=f"{parsed.scheme}://{parsed.netloc}{path}", record_dt=now or datetime.now(UTC),
@@ -509,16 +433,11 @@ _CMCD_BITRATES_KBPS = [800, 1500, 3000, 6000]
 _CMCD_TOP_BITRATE_KBPS = _CMCD_BITRATES_KBPS[-1]
 _CMCD_TITLES = ["news-live", "sports-live", "movie-001", "movie-002", "series-s1e1", "series-s1e2", "kids-001"]
 _CMCD_OBJECT_TYPES = ["v", "v", "v", "v", "a", "m", "i"]
-_CMCD_REBUFFER_RATE = 0.04
-_CMCD_V2_RATE = 0.1
-_CMCD_SESSION_POOL_SIZE = 300
-_BOT_UA_RATE = 0.15
+_CMCD_REBUFFER_RATE, _CMCD_V2_RATE, _CMCD_SESSION_POOL_SIZE, _BOT_UA_RATE = 0.04, 0.1, 300, 0.15
 
 
 @dataclass
 class CmcdSession:
-    """One synthetic player session; ``started`` flips after the first (startup) request."""
-
     sid: str
     cid: str
     stream_format: str
@@ -545,9 +464,7 @@ def _cmcd_bool(session: CmcdSession, key: str) -> str:
 
 
 def build_cmcd_request(session: CmcdSession, rng: Any = random) -> tuple[str, dict[str, str], str]:
-    """Return ``(path, headers, query_value)`` carrying the same CMCD data both ways."""
-    object_type = rng.choice(_CMCD_OBJECT_TYPES)
-    bitrate = rng.choice(_CMCD_BITRATES_KBPS)
+    object_type, bitrate = rng.choice(_CMCD_OBJECT_TYPES), rng.choice(_CMCD_BITRATES_KBPS)
     object_fields = [f"br={bitrate}", f"d={rng.choice([2000, 4000, 6000])}", f"ot={object_type}", f"tb={_CMCD_TOP_BITRATE_KBPS}"]
     buffer_length = rng.randrange(0, 30000, 100)
     request_fields = [f"bl={buffer_length}", f"dl={rng.randrange(0, 30000, 100)}", f"mtp={rng.randrange(2000, 50000, 100)}"]
@@ -559,10 +476,8 @@ def build_cmcd_request(session: CmcdSession, rng: Any = random) -> tuple[str, di
     if rng.random() < _CMCD_REBUFFER_RATE:
         status_fields.insert(0, _cmcd_bool(session, "bs"))
     headers = {
-        "CMCD-Object": ",".join(object_fields),
-        "CMCD-Request": ",".join(request_fields),
-        "CMCD-Session": ",".join(session_fields),
-        "CMCD-Status": ",".join(status_fields),
+        "CMCD-Object": ",".join(object_fields), "CMCD-Request": ",".join(request_fields),
+        "CMCD-Session": ",".join(session_fields), "CMCD-Status": ",".join(status_fields),
     }
     query_value = ",".join(sorted(object_fields + request_fields + session_fields + status_fields))
     if object_type == "m":
@@ -577,6 +492,5 @@ def build_cmcd_request(session: CmcdSession, rng: Any = random) -> tuple[str, di
 
 
 def pick_user_agent(rng: Any = random) -> str:
-    """Mostly browsers with a bot minority so bot/security panels have data."""
-    pool = BOT_USER_AGENTS if rng.random() < _BOT_UA_RATE else USER_AGENTS
-    return rng.choice(pool)
+    return rng.choice(BOT_USER_AGENTS if rng.random() < _BOT_UA_RATE else USER_AGENTS)
+# fmt: on

@@ -10,6 +10,7 @@ import os
 import re
 import sys
 import time
+import urllib.parse
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -99,24 +100,24 @@ class FeatureState:
     """Immutable representation of the desired configuration of a Fastly service."""
 
     service_id: str
-    log_period: int  # Rotation period in seconds (e.g. 60)
-    sample_rate: int  # Log sampling percentage (1 to 100)
-    edge_only: bool  # Capture logs only at the CDN edge hop
-    custom_condition: str  # Arbitrary operator-defined condition string
-    fos_prefix: str  # Prefix for raw S3 logs
-    fos_endpoint: str  # FOS endpoint hostname for RUM asset-fetch backend
-    logging_enabled: bool = True  # Toggle standard CDN request logging
+    log_period: int
+    sample_rate: int
+    edge_only: bool
+    custom_condition: str
+    fos_prefix: str
+    fos_endpoint: str
+    logging_enabled: bool = True
     fos_region: str = "us-east-1"
     cdn_shield: str = ""
     fos_access_key_id: str = ""
     fos_secret_access_key: str = ""
     fos_bucket: str = ""
-    logging_endpoint_name: str = "Fastly Log Analytics"  # Main request logs endpoint name
-    rum_endpoint_name: str = "Fastly RUM Logs"  # RUM beacon logs endpoint name
+    logging_endpoint_name: str = "Fastly Log Analytics"
+    rum_endpoint_name: str = "Fastly RUM Logs"
     rum_enabled: bool = False
-    rum_log_period: int | None = None  # Rotation period for RUM logs in seconds (e.g. 300)
-    faro_version: str | None = None  # Pinned self-hosted Faro Web SDK version, from cfg["rum"]["faro_version"]
-    rum_custom_condition: str = ""  # Arbitrary operator-defined condition string for RUM logging
+    rum_log_period: int | None = None
+    faro_version: str | None = None
+    rum_custom_condition: str = ""
     cmcd: CmcdConfig = field(default_factory=CmcdConfig)
     scoring: ScoringConfig = field(default_factory=ScoringConfig)
     log_fields: LogFieldsConfig = field(default_factory=LogFieldsConfig)
@@ -139,128 +140,82 @@ class FeatureState:
             raise ValueError(f"cmcd.version must be 1 or 2, got {self.cmcd.version}")
         if self.scoring.enabled and not self.scoring.domain:
             raise ValueError("scoring.enabled=True requires scoring.domain to be set")
-        if self.scoring.enabled:
-            if not (400 <= self.scoring.enforce_status_code <= 599):
-                raise ValueError(
-                    f"scoring.enforce_status_code must be in range [400, 599], got {self.scoring.enforce_status_code}"
-                )
+        if self.scoring.enabled and not (400 <= self.scoring.enforce_status_code <= 599):
+            raise ValueError(
+                f"scoring.enforce_status_code must be in range [400, 599], got {self.scoring.enforce_status_code}"
+            )
 
     @classmethod
     def from_config(cls, cfg: dict) -> FeatureState:
         """Parse raw config dict and construct FeatureState with automatic dependency injection."""
-        service_id = cfg.get("service_id")
-        if not service_id:
+        if not (service_id := cfg.get("service_id")):
             raise KeyError("config missing 'service_id'")
-        log_period = cfg.get("log_period")
-        if log_period is None:
+        if (log_period_raw := cfg.get("log_period")) is None:
             raise KeyError("config missing 'log_period'")
-        log_period = int(log_period)
         prov_cfg = cfg.get("provisioning", {})
-        sample_rate = prov_cfg.get("sample_rate") if "sample_rate" in prov_cfg else cfg.get("sample_rate")
-        if sample_rate is None:
-            sample_rate = 100  # Default fallback for backward compat
-        sample_rate = int(sample_rate)
-        edge_only = prov_cfg.get("edge_only") if "edge_only" in prov_cfg else cfg.get("edge_only", False)
-        edge_only = bool(edge_only)
-        custom_condition = (
+        sample_rate_raw = prov_cfg.get("sample_rate") if "sample_rate" in prov_cfg else cfg.get("sample_rate")
+        edge_only = bool(prov_cfg.get("edge_only") if "edge_only" in prov_cfg else cfg.get("edge_only", False))
+        raw_cond = (
             prov_cfg.get("custom_condition") if "custom_condition" in prov_cfg else cfg.get("custom_condition", "")
         )
-        custom_condition = (custom_condition or "").strip()
-        fos_prefix = cfg.get("fos_prefix", "")
-        fos_endpoint = cfg.get("fos_endpoint", "fos.example.com")
-        logging_enabled = cfg.get("logging_enabled", True)
-        fos_region = cfg.get("fos_region", "us-east-1")
-        cdn_shield = cfg.get("cdn_shield", "")
-        fos_access_key_id = cfg.get("fos_access_key_id", "")
-        fos_secret_access_key = cfg.get("fos_secret_access_key", "")
-        fos_bucket = cfg.get("fos_bucket", "") or cfg.get("fos_bucket_name", "")
-        logging_endpoint_name = prov_cfg.get("endpoint_name", "") or cfg.get("endpoint_name", "Fastly Log Analytics")
         rum_cfg = cfg.get("rum", {})
-        rum_endpoint_name = rum_cfg.get("endpoint_name", "") or cfg.get("rum_endpoint_name", "Fastly RUM Logs")
-        rum_log_period_raw = rum_cfg.get("log_period") if isinstance(rum_cfg, dict) else None
-        if rum_log_period_raw is None:
-            rum_log_period_raw = cfg.get("rum_log_period")
-        rum_log_period = int(rum_log_period_raw) if rum_log_period_raw is not None else None
-        faro_version = rum_cfg.get("faro_version") if isinstance(rum_cfg, dict) else None
-        rum_custom_condition = rum_cfg.get("custom_condition", "").strip() if isinstance(rum_cfg, dict) else ""
+        rum_dict = rum_cfg if isinstance(rum_cfg, dict) else {}
+        rum_lp_raw = rum_dict.get("log_period") if rum_dict.get("log_period") is not None else cfg.get("rum_log_period")
         rum_enabled = is_rum_enabled(cfg)
-        cmcd_cfg = cfg.get("cmcd", {})
-        if not isinstance(cmcd_cfg, dict):
-            cmcd_cfg = {}
+        cmcd_cfg: dict[str, Any] = cfg["cmcd"] if isinstance(cfg.get("cmcd"), dict) else {}
         cmcd_enabled = cfg.get("cmcd_enabled", cmcd_cfg.get("enabled", False))
-        cmcd_mode = cfg.get("cmcd_mode", cmcd_cfg.get("mode", "query_string"))
-        cmcd_version = cfg.get("cmcd_version", cmcd_cfg.get("version", 1))
-        cmcd_config = CmcdConfig(enabled=cmcd_enabled, mode=cmcd_mode, version=cmcd_version)
-        scoring_cfg = cfg.get("scoring", {})
-        if not isinstance(scoring_cfg, dict):
-            scoring_cfg = {}
+        cmcd_config = CmcdConfig(
+            enabled=cmcd_enabled,
+            mode=cfg.get("cmcd_mode", cmcd_cfg.get("mode", "query_string")),
+            version=cfg.get("cmcd_version", cmcd_cfg.get("version", 1)),
+        )
+        scoring_cfg: dict[str, Any] = cfg["scoring"] if isinstance(cfg.get("scoring"), dict) else {}
         scoring_enabled = cfg.get("scoring_enabled", scoring_cfg.get("enabled", False))
-        scoring_domain = (
-            cfg.get("scoring_domain") or scoring_cfg.get("domain") or scoring_cfg.get("scoring_domain") or ""
-        )
-        scoring_request_secret = cfg.get("scoring_request_secret", scoring_cfg.get("request_secret", ""))
-        scoring_exclude_url_regex = cfg.get("scoring_exclude_url_regex", scoring_cfg.get("exclude_url_regex", ""))
-        scoring_enforce_status_code = cfg.get(
-            "scoring_enforce_status_code", scoring_cfg.get("enforce_status_code", 429)
-        )
         scoring_config = ScoringConfig(
             enabled=scoring_enabled,
-            domain=scoring_domain,
-            request_secret=scoring_request_secret,
-            exclude_url_regex=scoring_exclude_url_regex,
-            enforce_status_code=scoring_enforce_status_code,
+            domain=cfg.get("scoring_domain") or scoring_cfg.get("domain") or scoring_cfg.get("scoring_domain") or "",
+            request_secret=cfg.get("scoring_request_secret", scoring_cfg.get("request_secret", "")),
+            exclude_url_regex=cfg.get("scoring_exclude_url_regex", scoring_cfg.get("exclude_url_regex", "")),
+            enforce_status_code=cfg.get("scoring_enforce_status_code", scoring_cfg.get("enforce_status_code", 429)),
         )
-        log_fields_cfg = cfg.get("log_fields", {})
-        if not isinstance(log_fields_cfg, dict):
-            log_fields_cfg = {}
-        log_groups = log_fields_cfg.get("groups") or cfg.get("log_groups") or cfg.get("groups") or []
-        custom_fields = log_fields_cfg.get("custom_fields") or cfg.get("custom_fields") or []
-        field_overrides = log_fields_cfg.get("field_overrides") or cfg.get("field_overrides") or {}
+        lf_cfg: dict[str, Any] = cfg["log_fields"] if isinstance(cfg.get("log_fields"), dict) else {}
+        log_groups = lf_cfg.get("groups") or cfg.get("log_groups") or cfg.get("groups") or []
+        custom_fields = lf_cfg.get("custom_fields") or cfg.get("custom_fields") or []
+        field_overrides = lf_cfg.get("field_overrides") or cfg.get("field_overrides") or {}
         injected_fields = list(custom_fields) if custom_fields else []
-        if rum_enabled:
-            from backend.provision.rum_orchestrator_v2 import _RUM_CUSTOM_FIELDS
-
-            existing_names = {f.get("name") for f in injected_fields}
-            for field in _RUM_CUSTOM_FIELDS:
-                if field["name"] not in existing_names:
-                    injected_fields.append(field)
-        if scoring_enabled:
-            from backend.provision.session_scoring_orchestrator import _SCORING_CUSTOM_FIELDS
-
-            existing_names = {f.get("name") for f in injected_fields}
-            for field in _SCORING_CUSTOM_FIELDS:
-                if field["name"] not in existing_names:
-                    injected_fields.append(dict(field))
-        if cmcd_enabled:
-            from backend.provision.cmcd_fields import _CMCD_CUSTOM_FIELDS
-
-            existing_names = {f.get("name") for f in injected_fields}
-            for field in _CMCD_CUSTOM_FIELDS:
-                if field["name"] not in existing_names:
-                    injected_fields.append(dict(field))
+        for feat_on, mod_path, attr, as_copy in (
+            (rum_enabled, "backend.provision.rum_orchestrator_v2", "_RUM_CUSTOM_FIELDS", False),
+            (scoring_enabled, "backend.provision.session_scoring_orchestrator", "_SCORING_CUSTOM_FIELDS", True),
+            (cmcd_enabled, "backend.provision.cmcd_fields", "_CMCD_CUSTOM_FIELDS", True),
+        ):
+            if feat_on:
+                existing_names = {f.get("name") for f in injected_fields}
+                for f in getattr(__import__(mod_path, fromlist=[attr]), attr):
+                    if f["name"] not in existing_names:
+                        injected_fields.append(dict(f) if as_copy else f)
         log_fields_config = TypeAdapter(LogFieldsConfig).validate_python(
             {"groups": log_groups, "custom_fields": injected_fields, "field_overrides": field_overrides}
         )
         return cls(
             service_id=service_id,
-            log_period=log_period,
-            sample_rate=sample_rate,
+            log_period=int(log_period_raw),
+            sample_rate=int(100 if sample_rate_raw is None else sample_rate_raw),
             edge_only=edge_only,
-            custom_condition=custom_condition,
-            fos_prefix=fos_prefix,
-            fos_endpoint=fos_endpoint,
-            logging_enabled=logging_enabled,
-            fos_region=fos_region,
-            cdn_shield=cdn_shield,
-            fos_access_key_id=fos_access_key_id,
-            fos_secret_access_key=fos_secret_access_key,
-            fos_bucket=fos_bucket,
-            logging_endpoint_name=logging_endpoint_name,
-            rum_endpoint_name=rum_endpoint_name,
+            custom_condition=(raw_cond or "").strip(),
+            fos_prefix=cfg.get("fos_prefix", ""),
+            fos_endpoint=cfg.get("fos_endpoint", "fos.example.com"),
+            logging_enabled=cfg.get("logging_enabled", True),
+            fos_region=cfg.get("fos_region", "us-east-1"),
+            cdn_shield=cfg.get("cdn_shield", ""),
+            fos_access_key_id=cfg.get("fos_access_key_id", ""),
+            fos_secret_access_key=cfg.get("fos_secret_access_key", ""),
+            fos_bucket=cfg.get("fos_bucket", "") or cfg.get("fos_bucket_name", ""),
+            logging_endpoint_name=prov_cfg.get("endpoint_name", "") or cfg.get("endpoint_name", "Fastly Log Analytics"),
+            rum_endpoint_name=rum_cfg.get("endpoint_name", "") or cfg.get("rum_endpoint_name", "Fastly RUM Logs"),
             rum_enabled=rum_enabled,
-            rum_log_period=rum_log_period,
-            faro_version=faro_version,
-            rum_custom_condition=rum_custom_condition,
+            rum_log_period=int(rum_lp_raw) if rum_lp_raw is not None else None,
+            faro_version=rum_dict.get("faro_version"),
+            rum_custom_condition=rum_dict.get("custom_condition", "").strip(),
             cmcd=cmcd_config,
             scoring=scoring_config,
             log_fields=log_fields_config,
@@ -285,84 +240,60 @@ class FeatureState:
         }
 
 
+_MIGRATE_SPECS: tuple[tuple[str, tuple[tuple[str, str, Any], ...]], ...] = (
+    (
+        "cmcd",
+        (("cmcd_enabled", "enabled", False), ("cmcd_mode", "mode", "query_string"), ("cmcd_version", "version", 1)),
+    ),
+    (
+        "scoring",
+        (
+            ("scoring_enabled", "enabled", False),
+            ("scoring_domain", "domain", ""),
+            ("scoring_request_secret", "request_secret", ""),
+            ("scoring_exclude_url_regex", "exclude_url_regex", ""),
+            ("scoring_enforce_status_code", "enforce_status_code", 429),
+        ),
+    ),
+)
+
+
 def migrate_config(cfg: dict[str, Any]) -> dict[str, Any]:
     """Migrate flat CMCD/Scoring fields to nested structure."""
     if not cfg:
         return cfg
     result = dict(cfg)
-    has_flat_cmcd = any(k in result for k in ("cmcd_enabled", "cmcd_mode", "cmcd_version"))
-    has_nested_cmcd = "cmcd" in result and isinstance(result.get("cmcd"), dict)
-    if has_flat_cmcd and not has_nested_cmcd:
-        result["cmcd"] = {
-            "enabled": result.pop("cmcd_enabled", False),
-            "mode": result.pop("cmcd_mode", "query_string"),
-            "version": result.pop("cmcd_version", 1),
-        }
-    elif has_flat_cmcd and has_nested_cmcd:
-        result["cmcd"]["enabled"] = result.pop("cmcd_enabled", result["cmcd"].get("enabled", False))
-        result["cmcd"]["mode"] = result.pop("cmcd_mode", result["cmcd"].get("mode", "query_string"))
-        result["cmcd"]["version"] = result.pop("cmcd_version", result["cmcd"].get("version", 1))
-    has_flat_scoring = any(
-        k in result
-        for k in (
-            "scoring_enabled",
-            "scoring_domain",
-            "scoring_request_secret",
-            "scoring_exclude_url_regex",
-            "scoring_enforce_status_code",
-        )
-    )
-    has_nested_scoring = "scoring" in result and isinstance(result.get("scoring"), dict)
-    if has_flat_scoring and not has_nested_scoring:
-        result["scoring"] = {
-            "enabled": result.pop("scoring_enabled", False),
-            "domain": result.pop("scoring_domain", ""),
-            "request_secret": result.pop("scoring_request_secret", ""),
-            "exclude_url_regex": result.pop("scoring_exclude_url_regex", ""),
-            "enforce_status_code": result.pop("scoring_enforce_status_code", 429),
-        }
-    elif has_flat_scoring and has_nested_scoring:
-        result["scoring"]["enabled"] = result.pop("scoring_enabled", result["scoring"].get("enabled", False))
-        result["scoring"]["domain"] = result.pop("scoring_domain", result["scoring"].get("domain", ""))
-        result["scoring"]["request_secret"] = result.pop(
-            "scoring_request_secret", result["scoring"].get("request_secret", "")
-        )
-        result["scoring"]["exclude_url_regex"] = result.pop(
-            "scoring_exclude_url_regex", result["scoring"].get("exclude_url_regex", "")
-        )
-        result["scoring"]["enforce_status_code"] = result.pop(
-            "scoring_enforce_status_code", result["scoring"].get("enforce_status_code", 429)
-        )
+    for section, fields in _MIGRATE_SPECS:
+        if any(flat_k in result for flat_k, _, _ in fields):
+            nested = result[section] if isinstance(result.get(section), dict) else {}
+            for flat_k, nested_k, default in fields:
+                nested[nested_k] = result.pop(flat_k, nested.get(nested_k, default))
+            result[section] = nested
     return result
 
 
 def config_changed(before: dict[str, Any], after: dict[str, Any]) -> bool:
     """Detect if migration changed the config structure."""
-    flat_fields = {
-        "cmcd_enabled",
-        "cmcd_mode",
-        "cmcd_version",
-        "scoring_enabled",
-        "scoring_domain",
-        "scoring_request_secret",
-        "scoring_exclude_url_regex",
-        "scoring_enforce_status_code",
-    }
-    return any(k in before for k in flat_fields) and before != after
+    return any(fk in before for _, fields in _MIGRATE_SPECS for fk, _, _ in fields) and before != after
 
 
 _self_state_mod = sys.modules[__name__]
-sys.modules["backend.provision.declarative.state"] = _self_state_mod
-sys.modules["backend.provision.declarative.config_migration"] = _self_state_mod
-_decl_pkg = sys.modules.get("backend.provision.declarative")
-if _decl_pkg is not None:
-    setattr(_decl_pkg, "state", _self_state_mod)
-    setattr(_decl_pkg, "config_migration", _self_state_mod)
-_backend_pkg = sys.modules.get("backend")
-if _backend_pkg is not None and hasattr(_backend_pkg, "_MODULE_ALIASES"):
+for _alias in ("state", "config_migration", "diff", "generators", "fastly_integration", "iac_reconciler"):
+    sys.modules[f"backend.provision.declarative.{_alias}"] = _self_state_mod
+if (_decl_pkg := sys.modules.get("backend.provision.declarative")) is not None:
+    for _alias in ("state", "config_migration", "diff", "generators", "fastly_integration", "iac_reconciler"):
+        setattr(_decl_pkg, _alias, _self_state_mod)
+if (_backend_pkg := sys.modules.get("backend")) is not None and hasattr(_backend_pkg, "_MODULE_ALIASES"):
     _backend_pkg._MODULE_ALIASES.setdefault("backend.provision.declarative.state", __name__)
     _backend_pkg._MODULE_ALIASES.setdefault("backend.provision.declarative.config_migration", __name__)
-from backend.provision.rum_assets import upload_rum_tracker_js
+fastly_integration = _self_state_mod
+
+
+def upload_rum_tracker_js(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    from backend.provision import orchestrator as _orch_mod
+
+    return _orch_mod.upload_rum_tracker_js(*args, **kwargs)
+
 
 logger = logging.getLogger(__name__)
 
@@ -385,12 +316,12 @@ class LoggingEndpoint:
     """A single logging endpoint (S3, etc)."""
 
     name: str
-    endpoint_type: str  # "s3"
+    endpoint_type: str
     path: str
     period: int
     response_condition: str
     format_string: str
-    placement: str | None  # "waf_log", "none", etc
+    placement: str | None
     response_object_name: str
 
     def to_dict(self) -> dict[str, Any]:
@@ -446,76 +377,47 @@ class ServiceDictionary:
         return hash((self.name, tuple(sorted(self.items.items()))))
 
 
+_DIFF_KINDS = ("snippets", "endpoints", "backends", "dictionaries")
+
+
 @dataclass
 class DiffResult:
     """Computed diff between current and desired state."""
 
     snippets_to_add: list[VCLSnippet] = field(default_factory=list)
     snippets_to_update: list[VCLSnippet] = field(default_factory=list)
-    snippets_to_remove: list[str] = field(default_factory=list)  # names only
+    snippets_to_remove: list[str] = field(default_factory=list)
     endpoints_to_add: list[LoggingEndpoint] = field(default_factory=list)
     endpoints_to_update: list[LoggingEndpoint] = field(default_factory=list)
-    endpoints_to_remove: list[str] = field(default_factory=list)  # names only
+    endpoints_to_remove: list[str] = field(default_factory=list)
     backends_to_add: list[Backend] = field(default_factory=list)
     backends_to_update: list[Backend] = field(default_factory=list)
-    backends_to_remove: list[str] = field(default_factory=list)  # names only
+    backends_to_remove: list[str] = field(default_factory=list)
     dictionaries_to_add: list[ServiceDictionary] = field(default_factory=list)
     dictionaries_to_update: list[ServiceDictionary] = field(default_factory=list)
-    dictionaries_to_remove: list[str] = field(default_factory=list)  # names only
+    dictionaries_to_remove: list[str] = field(default_factory=list)
 
     def is_empty(self) -> bool:
         """True if no changes needed."""
-        return (
-            not self.snippets_to_add
-            and not self.snippets_to_update
-            and not self.snippets_to_remove
-            and not self.endpoints_to_add
-            and not self.endpoints_to_update
-            and not self.endpoints_to_remove
-            and not self.backends_to_add
-            and not self.backends_to_update
-            and not self.backends_to_remove
-            and not self.dictionaries_to_add
-            and not self.dictionaries_to_update
-            and not self.dictionaries_to_remove
-        )
+        return not any(getattr(self, f"{k}_to_{op}") for k in _DIFF_KINDS for op in ("add", "update", "remove"))
 
     def summary(self) -> dict[str, Any]:
         """Return a summary of changes for logging."""
         return {
-            "snippets_added": len(self.snippets_to_add),
-            "snippets_updated": len(self.snippets_to_update),
-            "snippets_removed": len(self.snippets_to_remove),
-            "endpoints_added": len(self.endpoints_to_add),
-            "endpoints_updated": len(self.endpoints_to_update),
-            "endpoints_removed": len(self.endpoints_to_remove),
-            "backends_added": len(self.backends_to_add),
-            "backends_updated": len(self.backends_to_update),
-            "backends_removed": len(self.backends_to_remove),
-            "dictionaries_added": len(self.dictionaries_to_add),
-            "dictionaries_updated": len(self.dictionaries_to_update),
-            "dictionaries_removed": len(self.dictionaries_to_remove),
+            f"{k}_{op}": len(getattr(self, f"{k}_to_{src}"))
+            for k in _DIFF_KINDS
+            for op, src in (("added", "add"), ("updated", "update"), ("removed", "remove"))
         }
 
 
 def _diff_named_resources(
     current_items: list[Any], desired_items: list[Any], label: str
 ) -> tuple[list[Any], list[Any], list[str]]:
-    current_by_name = {item.name: item for item in current_items}
-    desired_by_name = {item.name: item for item in desired_items}
-    to_add: list[Any] = []
-    to_update: list[Any] = []
-    to_remove: list[str] = []
-    for name, desired_item in desired_by_name.items():
-        if name not in current_by_name:
-            to_add.append(desired_item)
-        elif current_by_name[name] != desired_item:
-            to_update.append(desired_item)
-    for name in current_by_name:
-        if name not in desired_by_name:
-            to_remove.append(name)
-    overlap = {item.name for item in to_add} & {item.name for item in to_update}
-    if overlap:
+    cur, des = {item.name: item for item in current_items}, {item.name: item for item in desired_items}
+    to_add = [item for name, item in des.items() if name not in cur]
+    to_update = [item for name, item in des.items() if name in cur and cur[name] != item]
+    to_remove = [name for name in cur if name not in des]
+    if overlap := ({i.name for i in to_add} & {i.name for i in to_update}):
         raise RuntimeError(f"{label} in both to_add and to_update: {overlap}")
     return to_add, to_update, to_remove
 
@@ -532,24 +434,19 @@ def compute_diff(
 ) -> DiffResult:
     """Compute diff between current and desired state."""
     diff = DiffResult()
-    current_dictionaries = current_dictionaries or []
-    desired_dictionaries = desired_dictionaries or []
-    diff.snippets_to_add, diff.snippets_to_update, diff.snippets_to_remove = _diff_named_resources(
-        current_snippets, desired_snippets, "Snippets"
-    )
-    diff.endpoints_to_add, diff.endpoints_to_update, diff.endpoints_to_remove = _diff_named_resources(
-        current_endpoints, desired_endpoints, "Endpoints"
-    )
-    diff.backends_to_add, diff.backends_to_update, diff.backends_to_remove = _diff_named_resources(
-        current_backends, desired_backends, "Backends"
-    )
-    diff.dictionaries_to_add, diff.dictionaries_to_update, diff.dictionaries_to_remove = _diff_named_resources(
-        current_dictionaries, desired_dictionaries, "Dictionaries"
-    )
+    for attr, cur, des, label in (
+        ("snippets", current_snippets, desired_snippets, "Snippets"),
+        ("endpoints", current_endpoints, desired_endpoints, "Endpoints"),
+        ("backends", current_backends, desired_backends, "Backends"),
+        ("dictionaries", current_dictionaries or [], desired_dictionaries or [], "Dictionaries"),
+    ):
+        add, upd, rem = _diff_named_resources(cur, des, label)
+        setattr(diff, f"{attr}_to_add", add)
+        setattr(diff, f"{attr}_to_update", upd)
+        setattr(diff, f"{attr}_to_remove", rem)
     return diff
 
 
-sys.modules["backend.provision.declarative.diff"] = sys.modules[__name__]
 MANAGED_BACKEND_NAMES = {"session_scorer", "fos_origin", "F_fos_origin", "F_F_fos_origin", "rum_collector"}
 MANAGED_DICTIONARY_NAMES = {"fos_credentials"}
 
@@ -558,9 +455,7 @@ class VclValidationError(Exception):
     """Raised when Fastly VCL validation fails."""
 
     def __init__(self, service_id: str, draft_version: int, errors: str) -> None:
-        self.service_id = service_id
-        self.draft_version = draft_version
-        self.errors = errors
+        self.service_id, self.draft_version, self.errors = service_id, draft_version, errors
         super().__init__(f"VCL validation failed for {service_id} v{draft_version}: {errors}")
 
 
@@ -568,8 +463,7 @@ class LockAcquisitionTimeout(Exception):
     """Raised when VCL lock cannot be acquired within timeout."""
 
     def __init__(self, service_id: str, elapsed_seconds: float) -> None:
-        self.service_id = service_id
-        self.elapsed_seconds = elapsed_seconds
+        self.service_id, self.elapsed_seconds = service_id, elapsed_seconds
         super().__init__(f"Failed to acquire VCL lock for {service_id} after {elapsed_seconds:.1f}s")
 
 
@@ -606,12 +500,12 @@ class FileLock:
 
 def acquire_vcl_lock(service_id: str, timeout_sec: int = 300) -> FileLock:
     """Acquire a file-based lock for reconciliation."""
-    lock_path = Path(f"data/services/{service_id}.vcl.lock")
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
     from contextlib import suppress
 
     from tenacity import Retrying, retry_if_exception_type, wait_exponential
 
+    lock_path = Path(f"data/services/{service_id}.vcl.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
     start = time.time()
     for attempt in Retrying(
         wait=wait_exponential(multiplier=0.1, exp_base=1.5, min=0.1, max=1.0),
@@ -626,8 +520,7 @@ def acquire_vcl_lock(service_id: str, timeout_sec: int = 300) -> FileLock:
                 os.close(fd)
                 return FileLock(lock_path)
             except FileExistsError:
-                elapsed = time.time() - start
-                if elapsed > timeout_sec:
+                if (elapsed := time.time() - start) > timeout_sec:
                     raise LockAcquisitionTimeout(service_id, elapsed)
                 with suppress(FileNotFoundError):
                     if time.time() - lock_path.stat().st_mtime > 300:
@@ -671,8 +564,7 @@ def build_rum_log_condition(desired_state: FeatureState | None) -> str:
         'req.url.path == "/rum-beacon" && req.method == "POST" '
         "&& fastly.ff.visits_this_service == 0 && req.restarts == 0"
     )
-    custom = getattr(desired_state, "rum_custom_condition", None)
-    if custom and custom.strip():
+    if (custom := getattr(desired_state, "rum_custom_condition", None)) and custom.strip():
         statement += f" && ({custom.strip()})"
     return statement
 
@@ -685,8 +577,7 @@ def _record_reconcile_audit(
     version: int,
 ) -> None:
     """Write a ``log_format_change`` audit row for an activated reconcile."""
-    before = _format_field_names(current_endpoints)
-    after = _format_field_names(desired_endpoints)
+    before, after = _format_field_names(current_endpoints), _format_field_names(desired_endpoints)
     details = {
         "source": "reconciler",
         "version": version,
@@ -705,6 +596,7 @@ def _record_reconcile_audit(
 
 
 def _load_or_bootstrap_feature_state(service_id: str, token: str, *, persist_bootstrap: bool = False) -> FeatureState:
+    from backend.config import config_lock, save_config
     from backend.config import config_path as _config_path
 
     config_path = _config_path(service_id)
@@ -712,16 +604,13 @@ def _load_or_bootstrap_feature_state(service_id: str, token: str, *, persist_boo
         state = _bootstrap_featurestate_from_fastly(service_id, token)
         if persist_bootstrap:
             try:
-                from backend.config import config_lock, save_config
-
                 with config_lock(service_id):
                     if not config_path.exists():
                         save_config(service_id, asdict(state))
             except OSError as e:
                 logging.getLogger("backend.scheduler").info(f"Skipped updating read-only config cache: {e}")
         return state
-    cfg = json.loads(config_path.read_text())
-    return FeatureState.from_config(cfg)
+    return FeatureState.from_config(json.loads(config_path.read_text()))
 
 
 def reconcile_vcl_state(
@@ -758,19 +647,19 @@ def reconcile_vcl_state(
                         draft_version=0,
                         errors=(
                             f"LOG_FORMAT_TOO_LONG: Logging endpoint '{ep.name}' format string length is {len(ep.format_string)} characters, "
-                            f"which exceeds Fastly's maximum allowed limit of 12288 characters. "
-                            f"Please disable some unused log field groups or shorten custom field expressions to fit within the limit."
+                            "which exceeds Fastly's maximum allowed limit of 12288 characters. "
+                            "Please disable some unused log field groups or shorten custom field expressions to fit within the limit."
                         ),
                     )
             diff = compute_diff(
-                current_snippets=current_snippets,
-                desired_snippets=desired_snippets_list,
-                current_endpoints=current_endpoints,
-                desired_endpoints=desired_endpoints_list,
-                current_backends=current_backends,
-                desired_backends=desired_backends_list,
-                current_dictionaries=current_dictionaries,
-                desired_dictionaries=desired_dictionaries_list,
+                current_snippets,
+                desired_snippets_list,
+                current_endpoints,
+                desired_endpoints_list,
+                current_backends,
+                desired_backends_list,
+                current_dictionaries,
+                desired_dictionaries_list,
             )
             _detect_and_queue_legacy_cleanup(current_snippets, diff, status_cb)
             diff.snippets_to_remove = [n for n in diff.snippets_to_remove if _is_managed_snippet(n)]
@@ -800,8 +689,7 @@ def reconcile_vcl_state(
                 )
                 if status_cb:
                     status_cb("⏳ Validating draft configuration...")
-                validation_errors = _validate_draft(service_id, token, draft_version)
-                if validation_errors:
+                if validation_errors := _validate_draft(service_id, token, draft_version):
                     raise VclValidationError(service_id, draft_version, validation_errors)
                 result.draft_version = draft_version
                 if activate:
@@ -814,11 +702,10 @@ def reconcile_vcl_state(
                         _upload_rum_tracker_best_effort(service_id, token, status_cb)
                     _purge_rum_surrogate_key(service_id, token)
                     _update_local_config(service_id, lambda c: c.__setitem__("last_activated_version", draft_version))
-                else:
-                    if status_cb:
-                        status_cb(
-                            f"✓ Configuration compiled and validated successfully in draft version {draft_version} (activation bypassed)."
-                        )
+                elif status_cb:
+                    status_cb(
+                        f"✓ Configuration compiled and validated successfully in draft version {draft_version} (activation bypassed)."
+                    )
                 result.changes_applied = diff.summary()
             except Exception as rollback_err:
                 if draft_version is not None:
@@ -863,36 +750,35 @@ def reconcile_cdn_service_state(
     activate: bool = True,
 ) -> ReconciliationResult:
     """Execute the complete reconciliation control loop for the FOS Proxy / CDN service (Steps 1-8)."""
+    from backend.config import config_path as _config_path
     from backend.core.fastly.client import SHIELD_MAP, load_vcl, region_endpoint
     from backend.provision.fastly_api import _CDN_SNIPPETS
 
-    cdn_managed_backend_names = {"fos_origin"}
-    cdn_managed_dictionary_names = {"fos_credentials", "cdn_auth"}
+    cdn_managed_backend_names, cdn_managed_dictionary_names = {"fos_origin"}, {"fos_credentials", "cdn_auth"}
     start_time = time.time()
-    from backend.config import config_path as _config_path
-
     config_path = _config_path(logging_service_id)
     if not config_path.exists():
         raise FileNotFoundError(f"Configuration file {config_path} not found.")
     cfg = json.loads(config_path.read_text())
     fos_proxy_cfg = cfg.get("fos_proxy", {})
     cdn_service_id = fos_proxy_cfg.get("service_id") or cfg.get("cdn_service_id", "")
-    cdn_service_name = fos_proxy_cfg.get("service_name") or cfg.get("cdn_service_name", "")
+    cdn_service_name = (
+        fos_proxy_cfg.get("service_name")
+        or cfg.get("cdn_service_name", "")
+        or f"Log Analysis CDN Service for {logging_service_id}"
+    )
     cdn_url = fos_proxy_cfg.get("domain") or cfg.get("cdn_url", "")
     cdn_shield = fos_proxy_cfg.get("shield") or cfg.get("cdn_shield", "")
     cdn_secret = fos_proxy_cfg.get("secret") or cfg.get("cdn_secret", "")
     rate_limiting_enabled = (
-        fos_proxy_cfg.get("rate_limiting_enabled")
+        fos_proxy_cfg["rate_limiting_enabled"]
         if "rate_limiting_enabled" in fos_proxy_cfg
         else cfg.get("rate_limiting", True)
     )
-    fos_access_key = cfg.get("fos_access_key_id", "")
-    fos_secret_key = cfg.get("fos_secret_access_key", "")
+    fos_access_key, fos_secret_key = cfg.get("fos_access_key_id", ""), cfg.get("fos_secret_access_key", "")
     fos_bucket = cfg.get("fos_bucket", "") or cfg.get("fos_bucket_name", "")
     fos_region = cfg.get("fos_region", "us-east-1")
     fos_host = region_endpoint(fos_region)
-    if not cdn_service_name:
-        cdn_service_name = f"Log Analysis CDN Service for {logging_service_id}"
     if not cdn_url:
         raise ValueError("CDN URL is required to reconcile CDN service state.")
     domain = cdn_url.replace("https://", "").replace("http://", "").split("/")[0]
@@ -911,8 +797,7 @@ def reconcile_cdn_service_state(
             existing = None
             if status_cb:
                 status_cb(
-                    f"⚠️ Ignoring service {logging_service_id} as CDN candidate; "
-                    "the analytics CDN must be a separate service."
+                    f"⚠️ Ignoring service {logging_service_id} as CDN candidate; the analytics CDN must be a separate service."
                 )
         if existing:
             cdn_service_id = existing["id"]
@@ -949,12 +834,15 @@ def reconcile_cdn_service_state(
                 status_cb("✓ Domain added to CDN service")
 
         def _persist_cdn(c: dict[str, Any]) -> None:
-            proxy = c.setdefault("fos_proxy", {})
-            proxy["service_id"] = cdn_service_id
-            proxy["service_name"] = cdn_service_name
-            proxy["domain"] = cdn_url
-            proxy["shield"] = cdn_shield
-            proxy["secret"] = cdn_secret
+            c.setdefault("fos_proxy", {}).update(
+                {
+                    "service_id": cdn_service_id,
+                    "service_name": cdn_service_name,
+                    "domain": cdn_url,
+                    "shield": cdn_shield,
+                    "secret": cdn_secret,
+                }
+            )
             c["cdn_service_id"] = cdn_service_id
 
         _update_local_config(logging_service_id, _persist_cdn)
@@ -1002,30 +890,24 @@ def reconcile_cdn_service_state(
                     between_bytes_timeout=30000,
                 )
             ]
+            fos_items = (
+                {"access_key": fos_access_key, "secret_key": fos_secret_key, "bucket": fos_bucket, "region": fos_region}
+                if fos_access_key
+                else {}
+            )
             desired_dictionaries_list = [
-                ServiceDictionary(
-                    name="fos_credentials",
-                    write_only=True,
-                    items={
-                        "access_key": fos_access_key,
-                        "secret_key": fos_secret_key,
-                        "bucket": fos_bucket,
-                        "region": fos_region,
-                    }
-                    if fos_access_key
-                    else {},
-                ),
+                ServiceDictionary(name="fos_credentials", write_only=True, items=fos_items),
                 ServiceDictionary(name="cdn_auth", write_only=True, items={"secret": cdn_secret} if cdn_secret else {}),
             ]
             diff = compute_diff(
-                current_snippets=current_snippets,
-                desired_snippets=desired_snippets_list,
-                current_endpoints=[],
-                desired_endpoints=[],
-                current_backends=current_backends,
-                desired_backends=desired_backends_list,
-                current_dictionaries=current_dictionaries,
-                desired_dictionaries=desired_dictionaries_list,
+                current_snippets,
+                desired_snippets_list,
+                [],
+                [],
+                current_backends,
+                desired_backends_list,
+                current_dictionaries,
+                desired_dictionaries_list,
             )
             vcl_needs_update = current_vcl_content != desired_vcl_content
             if diff.is_empty() and not vcl_needs_update:
@@ -1035,9 +917,7 @@ def reconcile_cdn_service_state(
                     result, cdn_service_id, token, start_time, active_ver=active_ver, lookup_active=False
                 )
             if dry_run:
-                changes = diff.summary()
-                changes["main_vcl_updated"] = vcl_needs_update
-                result.changes_applied = changes
+                result.changes_applied = {**diff.summary(), "main_vcl_updated": vcl_needs_update}
                 return _finalize_reconcile_early_exit(
                     result, cdn_service_id, token, start_time, active_ver=active_ver, lookup_active=False
                 )
@@ -1077,8 +957,7 @@ def reconcile_cdn_service_state(
                         )
                 if status_cb:
                     status_cb("⏳ Validating draft configuration...")
-                validation_errors = _validate_draft(cdn_service_id, token, draft_version)
-                if validation_errors:
+                if validation_errors := _validate_draft(cdn_service_id, token, draft_version):
                     raise VclValidationError(cdn_service_id, draft_version, validation_errors)
                 result.draft_version = draft_version
                 if activate:
@@ -1092,14 +971,11 @@ def reconcile_cdn_service_state(
                         c["last_activated_version_cdn"] = draft_version
 
                     _update_local_config(logging_service_id, _persist_activation)
-                else:
-                    if status_cb:
-                        status_cb(
-                            f"✓ CDN configuration compiled and validated successfully in draft version {draft_version} (activation bypassed)."
-                        )
-                changes = diff.summary()
-                changes["main_vcl_updated"] = vcl_needs_update
-                result.changes_applied = changes
+                elif status_cb:
+                    status_cb(
+                        f"✓ CDN configuration compiled and validated successfully in draft version {draft_version} (activation bypassed)."
+                    )
+                result.changes_applied = {**diff.summary(), "main_vcl_updated": vcl_needs_update}
             except Exception as rollback_err:
                 if draft_version is not None and status_cb:
                     status_cb(
@@ -1111,35 +987,36 @@ def reconcile_cdn_service_state(
     return result
 
 
-sys.modules["backend.provision.declarative.generators"] = sys.modules[__name__]
-sys.modules["backend.provision.declarative.fastly_integration"] = sys.modules[__name__]
-fastly_integration = sys.modules[__name__]
-import re
-
-from backend.core.fastly.rum_provisioning import (
+from backend.core.fastly.rum_provisioning import (  # noqa: E402
     RUM_ASSET_FETCH_NAME,
     RUM_FARO_FETCH_NAME,
     generate_rum_asset_fetch_vcl,
     generate_rum_recv_parts,
     generate_rum_vcl,
 )
-from backend.provision import utils as log_paths
-from backend.provision.fastly_api import generate_capture_vcl
-from backend.provision.session_scoring_orchestrator import SCORING_BACKEND_API_NAME, generate_scoring_vcl
-from backend.provision.utils import VclBuilder
+from backend.provision import utils as log_paths  # noqa: E402
+from backend.provision.fastly_api import generate_capture_vcl  # noqa: E402
+from backend.provision.session_scoring_orchestrator import (  # noqa: E402
+    SCORING_BACKEND_API_NAME,
+    generate_scoring_vcl,
+)
+from backend.provision.utils import VclBuilder  # noqa: E402
+
+
+def _state_log_fields_dict(state: FeatureState) -> dict[str, Any]:
+    return {
+        "groups": state.log_fields.groups,
+        "custom_fields": state.log_fields.custom_fields,
+        "field_overrides": state.log_fields.field_overrides,
+    }
 
 
 def logging_service_snippets(state: FeatureState) -> list[VCLSnippet]:
     """Return capture snippets for the logging service."""
     if not state.logging_enabled:
         return []
-    log_fields_dict = {
-        "groups": state.log_fields.groups,
-        "custom_fields": state.log_fields.custom_fields,
-        "field_overrides": state.log_fields.field_overrides,
-    }
     capture_vcl_dict = generate_capture_vcl(
-        log_fields_dict,
+        _state_log_fields_dict(state),
         scoring_enabled=state.scoring.enabled,
         rum_enabled=state.rum_enabled,
         scoring_exclude_url_regex=state.scoring.exclude_url_regex,
@@ -1147,7 +1024,6 @@ def logging_service_snippets(state: FeatureState) -> list[VCLSnippet]:
         cmcd_mode=state.cmcd.mode,
         cmcd_version=state.cmcd.version,
     )
-    snippets: list[VCLSnippet] = []
     subroutine_map = {
         "recv": ("Fastly Log Analysis Capture", 1),
         "recv_reset": ("Fastly Log Analysis Reset Client IP", -100),
@@ -1157,33 +1033,27 @@ def logging_service_snippets(state: FeatureState) -> list[VCLSnippet]:
         "deliver": ("Fastly Log Analysis Origin Deliver", 10),
         "error": ("Fastly Log Analysis Origin Error", 10),
     }
-    for subroutine_key, (snippet_name, priority) in subroutine_map.items():
-        if subroutine_key in capture_vcl_dict:
-            if subroutine_key == "recv_reset":
-                vcl_subroutine = "vcl_recv"
-            else:
-                vcl_subroutine = f"vcl_{subroutine_key}"
-            snippets.append(
-                VCLSnippet(
-                    name=snippet_name,
-                    priority=priority,
-                    body=capture_vcl_dict[subroutine_key],
-                    subroutine=vcl_subroutine,
-                )
-            )
-    return snippets
+    return [
+        VCLSnippet(
+            name=snippet_name,
+            priority=priority,
+            body=capture_vcl_dict[subroutine_key],
+            subroutine="vcl_recv" if subroutine_key == "recv_reset" else f"vcl_{subroutine_key}",
+        )
+        for subroutine_key, (snippet_name, priority) in subroutine_map.items()
+        if subroutine_key in capture_vcl_dict
+    ]
 
 
 def desired_snippets(state: FeatureState) -> list[VCLSnippet]:
     """Return the 5 consolidated snippets (vcl_recv, vcl_miss, vcl_fetch, vcl_deliver, vcl_error)."""
-    subroutines = ["vcl_recv", "vcl_miss", "vcl_pass", "vcl_fetch", "vcl_deliver", "vcl_error"]
-    snippets = []
-    for subroutine in subroutines:
+    snippets: list[VCLSnippet] = []
+    for subroutine in ("vcl_recv", "vcl_miss", "vcl_pass", "vcl_fetch", "vcl_deliver", "vcl_error"):
         body = generate_consolidated_snippet(state, subroutine)
-        snippet = VCLSnippet(name=f"Fastly Log Analytics - {subroutine}", priority=10, body=body, subroutine=subroutine)
-        snippets.append(snippet)
-        var_decl_pattern = r"^\s*declare\s+local\s+var\.(\w+)"
-        declared_vars = re.findall(var_decl_pattern, body, re.MULTILINE)
+        snippets.append(
+            VCLSnippet(name=f"Fastly Log Analytics - {subroutine}", priority=10, body=body, subroutine=subroutine)
+        )
+        declared_vars = re.findall(r"^\s*declare\s+local\s+var\.(\w+)", body, re.MULTILINE)
         duplicates = [v for v in set(declared_vars) if declared_vars.count(v) > 1]
         if duplicates:
             raise RuntimeError(f"{subroutine}: duplicate var declarations {duplicates}")
@@ -1196,86 +1066,87 @@ def generate_consolidated_snippet(state: FeatureState, subroutine: str) -> str:
         return _legacy_generate_consolidated_snippet(state, subroutine)
     sections: list[str] = []
     edge_first_hop_statements: list[str] = []
+    log_fields_dict = _state_log_fields_dict(state)
     if state.logging_enabled:
         from backend.provision.fastly_api import get_scrub_vcl_statements
 
-        log_fields_dict = {
-            "groups": state.log_fields.groups,
-            "custom_fields": state.log_fields.custom_fields,
-            "field_overrides": state.log_fields.field_overrides,
-        }
-        edge_first_hop_statements.append("  # Section 6: Log Field Capture (vcl_recv)")
-        edge_first_hop_statements.append("  # [security] strip client-supplied internal-routing headers")
-        for scrub in get_scrub_vcl_statements(log_fields_dict):
-            edge_first_hop_statements.append(f"  {scrub}")
+        edge_first_hop_statements.extend(
+            [
+                "  # Section 6: Log Field Capture (vcl_recv)",
+                "  # [security] strip client-supplied internal-routing headers",
+                *(f"  {scrub}" for scrub in get_scrub_vcl_statements(log_fields_dict)),
+            ]
+        )
     if state.rum_enabled:
-        edge_first_hop_statements.append("  # Mint a per-request ID for RUM beacons on fresh requests")
-        edge_first_hop_statements.append("  set req.http.x-rum-req-id = randomstr(12);")
+        edge_first_hop_statements.extend(
+            [
+                "  # Mint a per-request ID for RUM beacons on fresh requests",
+                "  set req.http.x-rum-req-id = randomstr(12);",
+            ]
+        )
     if state.rum_enabled and state.logging_enabled:
         rum_extraction, _ = generate_rum_recv_parts()
-        edge_first_hop_statements.append("  # Section 5: RUM field extraction (vcl_recv)")
-        edge_first_hop_statements.append('  if (req.url.path == "/rum-beacon") {')
-        for line in rum_extraction.splitlines():
-            edge_first_hop_statements.append(f"    {line}")
-        edge_first_hop_statements.append("  }")
+        edge_first_hop_statements.extend(
+            [
+                "  # Section 5: RUM field extraction (vcl_recv)",
+                '  if (req.url.path == "/rum-beacon") {',
+                *(f"    {line}" for line in rum_extraction.splitlines()),
+                "  }",
+            ]
+        )
     if state.logging_enabled:
         from backend.provision.fastly_api import get_capture_vcl_statements
 
-        log_fields_dict = {
-            "groups": state.log_fields.groups,
-            "custom_fields": state.log_fields.custom_fields,
-            "field_overrides": state.log_fields.field_overrides,
-        }
         edge_first_hop_statements.append("")
         if state.cmcd.enabled:
             from backend.provision.cmcd_fields import generate_cmcd_vcl
 
-            cmcd_vcl_dict = generate_cmcd_vcl(mode=state.cmcd.mode, version=state.cmcd.version)
-            cmcd_body = next(iter(cmcd_vcl_dict.values()))
+            cmcd_body = next(iter(generate_cmcd_vcl(mode=state.cmcd.mode, version=state.cmcd.version).values()))
             edge_first_hop_statements.append("  # Section 3: CMCD Extraction (vcl_recv) — before field capture")
-            for line in cmcd_body.splitlines():
-                if line.strip():
-                    edge_first_hop_statements.append(f"  {line}")
+            edge_first_hop_statements.extend(f"  {line}" for line in cmcd_body.splitlines() if line.strip())
         edge_first_hop_statements.append("  # Capture edge data for logging before shielding or backend fetch")
-        for cap in get_capture_vcl_statements(log_fields_dict):
-            edge_first_hop_statements.append(f"  {cap}")
+        edge_first_hop_statements.extend(f"  {cap}" for cap in get_capture_vcl_statements(log_fields_dict))
     if state.rum_enabled:
         _, rum_response = generate_rum_recv_parts()
-        edge_first_hop_statements.append("  # Section 5: RUM (vcl_recv)")
-        edge_first_hop_statements.append('  if (req.url.path == "/rum-beacon") {')
-        for line in rum_response.splitlines():
-            edge_first_hop_statements.append(f"    {line}")
-        edge_first_hop_statements.append("  }")
+        edge_first_hop_statements.extend(
+            [
+                "  # Section 5: RUM (vcl_recv)",
+                '  if (req.url.path == "/rum-beacon") {',
+                *(f"    {line}" for line in rum_response.splitlines()),
+                "  }",
+            ]
+        )
     if state.scoring.enabled:
         from backend.provision.session_scoring_vcl import SCORING_BACKEND_VCL_NAME, resolve_exclude_url_regex
 
         effective_regex = resolve_exclude_url_regex(state.scoring.exclude_url_regex)
-        rum_asset_guard = ""
-        if state.rum_enabled:
-            rum_asset_guard = ' && req.url.path != "/js/rum.js" && req.url.path != "/js/faro-sdk.js"'
-        edge_first_hop_statements.append("")
-        edge_first_hop_statements.append("  # Section 4: Session Scoring (vcl_recv)")
-        edge_first_hop_statements.append("  # Session Scoring: route the first-pass dynamic request to the scorer.")
-        edge_first_hop_statements.append(
-            "  # Edge-only — fastly.ff.visits_this_service == 0 is true only at the true edge."
+        rum_asset_guard = (
+            ' && req.url.path != "/js/rum.js" && req.url.path != "/js/faro-sdk.js"' if state.rum_enabled else ""
         )
-        if rum_asset_guard:
-            edge_first_hop_statements.append(
-                "  # RUM assets we serve ourselves are never scored — see rum_asset_guard in generators.py."
-            )
-        edge_first_hop_statements.append(
-            f'  if (req.http.X-Edge-Scoring-Pass != "1" && !fastly.ddos_detected{rum_asset_guard}'
-            f' && std.tolower(req.url) !~ "{effective_regex}") {{'
+        edge_first_hop_statements.extend(
+            [
+                "",
+                "  # Section 4: Session Scoring (vcl_recv)",
+                "  # Session Scoring: route the first-pass dynamic request to the scorer.",
+                "  # Edge-only — fastly.ff.visits_this_service == 0 is true only at the true edge.",
+                *(
+                    ["  # RUM assets we serve ourselves are never scored — see rum_asset_guard in generators.py."]
+                    if rum_asset_guard
+                    else []
+                ),
+                f'  if (req.http.X-Edge-Scoring-Pass != "1" && !fastly.ddos_detected{rum_asset_guard}'
+                f' && std.tolower(req.url) !~ "{effective_regex}") {{',
+                f"    set req.backend = {SCORING_BACKEND_VCL_NAME};",
+                "    # Skip NGWAF inspection on the scoring sub-fetch ONLY.",
+                '    set req.http.x-sigsci-skip-inspection-once = "true";',
+                '    set req.http.X-Edge-Scoring-Pass = "1";',
+                "    # Stamp the round-trip start so deliver can compute latency.",
+                "    set req.http.x-edge-score-t0 = time.elapsed.usec;",
+                "    # PASS — skip cache for the scoring sub-fetch.",
+                "    return(pass);",
+                "  }",
+            ]
         )
-        edge_first_hop_statements.append(f"    set req.backend = {SCORING_BACKEND_VCL_NAME};")
-        edge_first_hop_statements.append("    # Skip NGWAF inspection on the scoring sub-fetch ONLY.")
-        edge_first_hop_statements.append('    set req.http.x-sigsci-skip-inspection-once = "true";')
-        edge_first_hop_statements.append('    set req.http.X-Edge-Scoring-Pass = "1";')
-        edge_first_hop_statements.append("    # Stamp the round-trip start so deliver can compute latency.")
-        edge_first_hop_statements.append("    set req.http.x-edge-score-t0 = time.elapsed.usec;")
-        edge_first_hop_statements.append("    # PASS — skip cache for the scoring sub-fetch.")
-        edge_first_hop_statements.append("    return(pass);")
-        edge_first_hop_statements.append("  }")
     if edge_first_hop_statements:
         body = VclBuilder.join_lines(edge_first_hop_statements)
         sections.append(f"if (req.restarts == 0 && fastly.ff.visits_this_service == 0) {{\n{body}\n}}")
@@ -1283,11 +1154,9 @@ def generate_consolidated_snippet(state: FeatureState, subroutine: str) -> str:
         from backend.core.fastly.utils import SHIELD_MAP
 
         shield_pop = state.cdn_shield or SHIELD_MAP.get(state.fos_region, "iad-va-us")
-        asset_fetch_dict = generate_rum_asset_fetch_vcl(shield_pop, state.faro_version)
-        sections.append(asset_fetch_dict[RUM_ASSET_FETCH_NAME])
+        sections.append(generate_rum_asset_fetch_vcl(shield_pop, state.faro_version)[RUM_ASSET_FETCH_NAME])
     if state.scoring.enabled:
-        scoring_body = _generate_scoring_section_vcl(state, "vcl_recv")
-        sections.append(scoring_body)
+        sections.append(_generate_scoring_section_vcl(state, "vcl_recv"))
     return VclBuilder.join_sections(sections)
 
 
@@ -1295,15 +1164,8 @@ def _legacy_generate_consolidated_snippet(state: FeatureState, subroutine: str) 
     """Generate consolidated VCL for other subroutines using legacy multi-section append logic."""
     sections: list[str] = []
     if state.logging_enabled:
-        from backend.provision.fastly_api import generate_capture_vcl
-
-        log_fields_dict = {
-            "groups": state.log_fields.groups,
-            "custom_fields": state.log_fields.custom_fields,
-            "field_overrides": state.log_fields.field_overrides,
-        }
         capture_snippets = generate_capture_vcl(
-            log_fields_dict,
+            _state_log_fields_dict(state),
             scoring_enabled=state.scoring.enabled,
             rum_enabled=state.rum_enabled,
             scoring_exclude_url_regex=state.scoring.exclude_url_regex,
@@ -1311,18 +1173,14 @@ def _legacy_generate_consolidated_snippet(state: FeatureState, subroutine: str) 
             cmcd_mode=state.cmcd.mode,
             cmcd_version=state.cmcd.version,
         )
-        sub_key = subroutine.replace("vcl_", "")
-        capture_vcl = capture_snippets.get(sub_key, "")
+        capture_vcl = capture_snippets.get(subroutine.replace("vcl_", ""), "")
         if capture_vcl.strip():
             sections.append(f"# Section 6: Log Field Capture ({subroutine})\n{capture_vcl}")
     if state.scoring.enabled:
-        scoring_body = _generate_scoring_section_vcl(state, subroutine)
-        sections.append(scoring_body)
+        sections.append(_generate_scoring_section_vcl(state, subroutine))
     if state.rum_enabled:
-        rum_body = _generate_rum_section_vcl(state, subroutine)
-        sections.append(rum_body)
-    consolidated = VclBuilder.join_sections(sections)
-    return consolidated
+        sections.append(_generate_rum_section_vcl(state, subroutine))
+    return VclBuilder.join_sections(sections)
 
 
 def _generate_scoring_section_vcl(state: FeatureState, subroutine: str) -> str:
@@ -1340,14 +1198,11 @@ def _generate_scoring_section_vcl(state: FeatureState, subroutine: str) -> str:
         "vcl_fetch": "Session Scoring - Fetch",
         "vcl_pass": "Session Scoring - Pass",
     }
-    bodies = []
-    snippet_name = snippet_map.get(subroutine)
-    if snippet_name and snippet_name in scoring_vcl_dict:
-        bodies.append(scoring_vcl_dict[snippet_name])
+    bodies = [scoring_vcl_dict[snippet_map[subroutine]]] if snippet_map.get(subroutine) in scoring_vcl_dict else []
     if subroutine == "vcl_recv":
         if "Session Scoring - Enforce" in scoring_vcl_dict:
             bodies.append(scoring_vcl_dict["Session Scoring - Enforce"])
-        restart_vcl = (
+        bodies.append(
             "# Session Scoring: post-scoring restart shielding & NGWAF restore.\n"
             "if (req.restarts == 1 && req.http.x-edge-score) {\n"
             "  set var.fastly_req_do_shield = true;\n"
@@ -1356,44 +1211,31 @@ def _generate_scoring_section_vcl(state: FeatureState, subroutine: str) -> str:
             "  unset req.http.x-sigsci-skip-inspection-once;\n"
             "}"
         )
-        bodies.append(restart_vcl)
-    if bodies:
-        body = "\n\n".join(bodies)
-        return f"# Section 4: Session Scoring ({subroutine})\n{body}"
-    return ""
+    return f"# Section 4: Session Scoring ({subroutine})\n" + "\n\n".join(bodies) if bodies else ""
 
 
 def _generate_rum_section_vcl(state: FeatureState, subroutine: str) -> str:
     """Section 5: RUM (if enabled, includes Phase 1 + Phase 3 asset-fetch)."""
     if not state.rum_enabled:
         return ""
-    rum_vcl_dict = generate_rum_vcl(state.service_id, state.faro_version)
-    shield_pop = state.cdn_shield
-    if not shield_pop:
-        from backend.core.fastly.utils import SHIELD_MAP
+    from backend.core.fastly.utils import SHIELD_MAP
 
-        shield_pop = SHIELD_MAP.get(state.fos_region, "iad-va-us")
+    rum_vcl_dict = generate_rum_vcl(state.service_id, state.faro_version)
+    shield_pop = state.cdn_shield or SHIELD_MAP.get(state.fos_region, "iad-va-us")
     asset_fetch_dict = generate_rum_asset_fetch_vcl(shield_pop, state.faro_version)
-    sections = []
     if subroutine == "vcl_recv":
-        if "RUM - Recv" in rum_vcl_dict:
-            sections.append(rum_vcl_dict["RUM - Recv"])
-        sections.append(asset_fetch_dict["RUM - Asset fetch FOS"])
-        body = "\n\n".join(sections)
-        return f"# Section 5: RUM ({subroutine})\n{body}"
+        sections = ([rum_vcl_dict["RUM - Recv"]] if "RUM - Recv" in rum_vcl_dict else []) + [
+            asset_fetch_dict["RUM - Asset fetch FOS"]
+        ]
+        return f"# Section 5: RUM ({subroutine})\n" + "\n\n".join(sections)
     if subroutine == "vcl_deliver":
-        if not state.scoring.enabled:
-            return ""
-        body = rum_vcl_dict["RUM - Set cookies"]
-        return f"# Section 5: RUM ({subroutine})\n{body}"
+        return f"# Section 5: RUM ({subroutine})\n{rum_vcl_dict['RUM - Set cookies']}" if state.scoring.enabled else ""
     if subroutine == "vcl_miss":
-        body = asset_fetch_dict["RUM - Asset fetch SigV4 signing"]
-        return f"# Section 5: RUM ({subroutine})\n{body}"
+        return f"# Section 5: RUM ({subroutine})\n{asset_fetch_dict['RUM - Asset fetch SigV4 signing']}"
     if subroutine == "vcl_error":
         from backend.core.fastly.rum_provisioning import _generate_vcl_error_handler
 
-        body = _generate_vcl_error_handler()
-        return f"# Section 5: RUM ({subroutine})\n{body}"
+        return f"# Section 5: RUM ({subroutine})\n{_generate_vcl_error_handler()}"
     if subroutine == "vcl_fetch":
         body = """# Cache RUM tracker JS at the edge; browsers get a short TTL so a
 # Surrogate-Key purge of "rum-js" becomes visible to clients quickly.
@@ -1421,19 +1263,19 @@ def generate_log_format(state: FeatureState) -> str:
     from backend.provision.rum_orchestrator_v2 import _RUM_FIELD_NAMES
 
     custom_fields = [cf for cf in state.log_fields.custom_fields if cf.get("name") not in _RUM_FIELD_NAMES]
-    log_fields_dict = {
-        "groups": state.log_fields.groups,
-        "custom_fields": custom_fields,
-        "field_overrides": state.log_fields.field_overrides,
-    }
-    return load_log_format(log_fields_dict)
+    return load_log_format(
+        {
+            "groups": state.log_fields.groups,
+            "custom_fields": custom_fields,
+            "field_overrides": state.log_fields.field_overrides,
+        }
+    )
 
 
 def desired_logging_endpoints(state: FeatureState) -> list[LoggingEndpoint]:
     """Return desired logging endpoints (main S3 + secondary RUM if enabled)."""
     endpoints: list[LoggingEndpoint] = []
     if state.logging_enabled:
-        log_format = generate_log_format(state)
         endpoints.append(
             LoggingEndpoint(
                 name=state.logging_endpoint_name,
@@ -1441,7 +1283,7 @@ def desired_logging_endpoints(state: FeatureState) -> list[LoggingEndpoint]:
                 path=log_paths.analytics_log_path(),
                 period=state.log_period,
                 response_condition="log_analytics_condition",
-                format_string=log_format,
+                format_string=generate_log_format(state),
                 placement=None,
                 response_object_name="",
             )
@@ -1451,8 +1293,6 @@ def desired_logging_endpoints(state: FeatureState) -> list[LoggingEndpoint]:
         from backend.provision.rum_orchestrator_v2 import _RUM_FIELD_NAMES
 
         rum_fields = [f for f in state.log_fields.custom_fields if f.get("name") in _RUM_FIELD_NAMES]
-        rum_log_fields = {"custom_fields": rum_fields}
-        rum_format = load_log_format(rum_log_fields)
         endpoints.append(
             LoggingEndpoint(
                 name=state.rum_endpoint_name,
@@ -1460,7 +1300,7 @@ def desired_logging_endpoints(state: FeatureState) -> list[LoggingEndpoint]:
                 path=log_paths.rum_log_path(),
                 period=state.rum_log_period if state.rum_log_period is not None else state.log_period,
                 response_condition="rum_log_condition",
-                format_string=rum_format,
+                format_string=load_log_format({"custom_fields": rum_fields}),
                 placement=None,
                 response_object_name="",
             )
@@ -1489,10 +1329,7 @@ def desired_backends(state: FeatureState) -> list[Backend]:
     if state.rum_enabled:
         from backend.core.fastly.utils import SHIELD_MAP
 
-        shield_pop = state.cdn_shield
-        if not shield_pop:
-            shield_pop = SHIELD_MAP.get(state.fos_region, "iad-va-us")
-        shield_val = shield_pop if shield_pop.lower() != "none" else ""
+        shield_pop = state.cdn_shield or SHIELD_MAP.get(state.fos_region, "iad-va-us")
         backends.append(
             Backend(
                 name="fos_origin",
@@ -1503,7 +1340,7 @@ def desired_backends(state: FeatureState) -> list[Backend]:
                 use_ssl=True,
                 override_host=state.fos_endpoint,
                 auto_loadbalance=False,
-                shield=shield_val,
+                shield=shield_pop if shield_pop.lower() != "none" else "",
                 request_condition="fastly_log_analytics_false",
             )
         )
@@ -1512,21 +1349,19 @@ def desired_backends(state: FeatureState) -> list[Backend]:
 
 def desired_dictionaries(state: FeatureState) -> list[ServiceDictionary]:
     """Return desired Fastly service dictionaries (fos_credentials, etc)."""
-    dicts: list[ServiceDictionary] = []
-    if state.rum_enabled:
-        items = {}
-        if state.fos_access_key_id:
-            items = {
-                "access_key": state.fos_access_key_id,
-                "secret_key": state.fos_secret_access_key,
-                "bucket": state.fos_bucket,
-                "region": state.fos_region,
-            }
-        dicts.append(ServiceDictionary(name="fos_credentials", write_only=True, items=items))
-    return dicts
-
-
-import urllib.parse
+    if not state.rum_enabled:
+        return []
+    items = (
+        {
+            "access_key": state.fos_access_key_id,
+            "secret_key": state.fos_secret_access_key,
+            "bucket": state.fos_bucket,
+            "region": state.fos_region,
+        }
+        if state.fos_access_key_id
+        else {}
+    )
+    return [ServiceDictionary(name="fos_credentials", write_only=True, items=items)]
 
 
 def fetch_active_version(service_id: str, token: str) -> int | None:
@@ -1539,14 +1374,9 @@ def fetch_active_version(service_id: str, token: str) -> int | None:
         pass
     try:
         resp = fastly("GET", f"/service/{service_id}/version", token=token)
-        if isinstance(resp, list):
-            for item in resp:
-                if isinstance(item, dict) and item.get("active"):
-                    return int(item["number"])
-        elif isinstance(resp, dict) and "items" in resp:
-            for item in resp["items"]:
-                if item.get("active"):
-                    return int(item["number"])
+        for item in _unwrap_fastly_list(resp):
+            if isinstance(item, dict) and item.get("active"):
+                return int(item["number"])
         return None
     except Exception:
         return None
@@ -1555,9 +1385,7 @@ def fetch_active_version(service_id: str, token: str) -> int | None:
 def _unwrap_fastly_list(resp: object) -> list[dict]:
     if isinstance(resp, dict) and "items" in resp:
         return list(resp["items"])
-    if isinstance(resp, list):
-        return resp
-    return []
+    return resp if isinstance(resp, list) else []
 
 
 def _delete_version_resource(service_id: str, version: int, resource_path: str, name: str, token: str) -> None:
@@ -1578,39 +1406,34 @@ def _upsert_version_resource(
     collection_url = f"/service/{service_id}/version/{version}/{resource_path}"
     try:
         fastly("GET", item_url, token=token)
-        exists = True
-    except RuntimeError:
-        exists = False
-    if exists:
         return fastly("PUT", item_url, body, token=token)
-    return fastly("POST", collection_url, body, token=token)
+    except RuntimeError:
+        return fastly("POST", collection_url, body, token=token)
 
 
 def fetch_snippets(service_id: str, version: int, token: str) -> list[VCLSnippet]:
     """Fetch all VCL snippets for a service version."""
-    snippets: list[VCLSnippet] = []
     try:
         resp = fastly("GET", f"/service/{service_id}/version/{version}/snippet", token=token)
-        for item in _unwrap_fastly_list(resp):
-            snippet = VCLSnippet(
+        return [
+            VCLSnippet(
                 name=item.get("name", ""),
                 priority=int(item.get("priority", 100)),
                 body=item.get("snippet", ""),
                 subroutine=item.get("type", "vcl_recv"),
             )
-            snippets.append(snippet)
+            for item in _unwrap_fastly_list(resp)
+        ]
     except Exception:
-        pass
-    return snippets
+        return []
 
 
 def fetch_logging_endpoints(service_id: str, version: int, token: str) -> list[LoggingEndpoint]:
     """Fetch all S3 logging endpoints for a service version."""
-    endpoints: list[LoggingEndpoint] = []
     try:
         resp = fastly("GET", f"/service/{service_id}/version/{version}/logging/s3", token=token)
-        for item in _unwrap_fastly_list(resp):
-            endpoint = LoggingEndpoint(
+        return [
+            LoggingEndpoint(
                 name=item.get("name", ""),
                 endpoint_type="s3",
                 path=item.get("path", ""),
@@ -1620,19 +1443,18 @@ def fetch_logging_endpoints(service_id: str, version: int, token: str) -> list[L
                 placement=item.get("placement", "none"),
                 response_object_name=item.get("response_object_name", ""),
             )
-            endpoints.append(endpoint)
+            for item in _unwrap_fastly_list(resp)
+        ]
     except Exception:
-        pass
-    return endpoints
+        return []
 
 
 def fetch_backends(service_id: str, version: int, token: str) -> list[Backend]:
     """Fetch all backends for a service version."""
-    backends: list[Backend] = []
     try:
         resp = fastly("GET", f"/service/{service_id}/version/{version}/backend", token=token)
-        for item in _unwrap_fastly_list(resp):
-            backend = Backend(
+        return [
+            Backend(
                 name=item.get("name", ""),
                 address=item.get("address", ""),
                 port=int(item.get("port", 443)),
@@ -1647,10 +1469,10 @@ def fetch_backends(service_id: str, version: int, token: str) -> list[Backend]:
                 shield=item.get("shield") or "",
                 request_condition=item.get("request_condition") or "",
             )
-            backends.append(backend)
+            for item in _unwrap_fastly_list(resp)
+        ]
     except Exception:
-        pass
-    return backends
+        return []
 
 
 def fetch_dictionaries(service_id: str, version: int, token: str) -> list[ServiceDictionary]:
@@ -1659,26 +1481,25 @@ def fetch_dictionaries(service_id: str, version: int, token: str) -> list[Servic
     try:
         resp = fastly("GET", f"/service/{service_id}/version/{version}/dictionary", token=token)
         for item in _unwrap_fastly_list(resp):
-            dict_name = item.get("name", "")
-            dict_id = item.get("id", "")
-            write_only = item.get("write_only", False)
-            entries_dict = {}
+            dict_id, entries_dict = item.get("id", ""), {}
             if dict_id:
                 try:
                     items_resp = fastly("GET", f"/service/{service_id}/dictionary/{dict_id}/items", token=token)
-                    if isinstance(items_resp, dict) and "items" not in items_resp:
-                        items_entries = [items_resp]
-                    else:
-                        items_entries = _unwrap_fastly_list(items_resp)
+                    items_entries = (
+                        [items_resp]
+                        if isinstance(items_resp, dict) and "items" not in items_resp
+                        else _unwrap_fastly_list(items_resp)
+                    )
                     for entry in items_entries:
-                        if isinstance(entry, dict):
-                            key = entry.get("item_key", "") or entry.get("key", "")
-                            val = entry.get("item_value", "") or entry.get("value", "")
-                            if key:
-                                entries_dict[key] = val
+                        if isinstance(entry, dict) and (key := entry.get("item_key", "") or entry.get("key", "")):
+                            entries_dict[key] = entry.get("item_value", "") or entry.get("value", "")
                 except Exception:
                     pass
-            dicts.append(ServiceDictionary(name=dict_name, write_only=write_only, items=entries_dict))
+            dicts.append(
+                ServiceDictionary(
+                    name=item.get("name", ""), write_only=item.get("write_only", False), items=entries_dict
+                )
+            )
     except Exception:
         pass
     return dicts
@@ -1686,20 +1507,17 @@ def fetch_dictionaries(service_id: str, version: int, token: str) -> list[Servic
 
 def clone_version(service_id: str, version: int, token: str, comment: str = "") -> int:
     """Clone an existing version to create a new draft."""
-    resp = fastly("PUT", f"/service/{service_id}/version/{version}/clone", token=token)
-    new_version = int(resp["number"])
+    new_version = int(fastly("PUT", f"/service/{service_id}/version/{version}/clone", token=token)["number"])
     if comment:
         fastly("PUT", f"/service/{service_id}/version/{new_version}", {"comment": comment}, token=token)
     return new_version
 
 
 def delete_snippet(service_id: str, version: int, snippet_name: str, token: str) -> None:
-    """Delete a VCL snippet."""
     _delete_version_resource(service_id, version, "snippet", snippet_name, token)
 
 
 def create_or_update_snippet(service_id: str, version: int, snippet: VCLSnippet, token: str) -> None:
-    """Create or update a VCL snippet."""
     snippet_type = (
         snippet.subroutine.replace("vcl_", "") if snippet.subroutine.startswith("vcl_") else snippet.subroutine
     )
@@ -1714,7 +1532,6 @@ def create_or_update_snippet(service_id: str, version: int, snippet: VCLSnippet,
 
 
 def delete_logging_endpoint(service_id: str, version: int, endpoint_name: str, token: str) -> None:
-    """Delete an S3 logging endpoint."""
     _delete_version_resource(service_id, version, "logging/s3", endpoint_name, token)
 
 
@@ -1729,7 +1546,7 @@ def create_or_update_logging_endpoint(
     secret_key: str | None = None,
 ) -> None:
     """Create or update an S3 logging endpoint."""
-    body = {
+    body: dict[str, Any] = {
         "name": endpoint.name,
         "path": endpoint.path,
         "period": endpoint.period,
@@ -1739,27 +1556,25 @@ def create_or_update_logging_endpoint(
         "format_version": 2,
         "gzip_level": 9,
     }
-    if endpoint.response_condition:
-        body["response_condition"] = endpoint.response_condition
-    if bucket_name:
-        body["bucket_name"] = bucket_name
-    if domain:
-        body["domain"] = domain
-    if access_key:
-        body["access_key"] = access_key
-    if secret_key:
-        body["secret_key"] = secret_key
+    for k, v in (
+        ("response_condition", endpoint.response_condition),
+        ("bucket_name", bucket_name),
+        ("domain", domain),
+        ("access_key", access_key),
+        ("secret_key", secret_key),
+    ):
+        if v:
+            body[k] = v
     _upsert_version_resource(service_id, version, "logging/s3", endpoint.name, body, token)
 
 
 def delete_backend(service_id: str, version: int, backend_name: str, token: str) -> None:
-    """Delete a backend."""
     _delete_version_resource(service_id, version, "backend", backend_name, token)
 
 
 def create_or_update_backend(service_id: str, version: int, backend: Backend, token: str) -> None:
     """Create or update a backend."""
-    body = {
+    body: dict[str, Any] = {
         "name": backend.name,
         "address": backend.address,
         "port": backend.port,
@@ -1771,18 +1586,14 @@ def create_or_update_backend(service_id: str, version: int, backend: Backend, to
         "auto_loadbalance": backend.auto_loadbalance,
         "use_ssl": backend.use_ssl,
         "request_condition": backend.request_condition or None,
+        "shield": backend.shield if backend.shield else None,
     }
     if backend.override_host:
         body["override_host"] = backend.override_host
-    if backend.shield:
-        body["shield"] = backend.shield
-    else:
-        body["shield"] = None
     _upsert_version_resource(service_id, version, "backend", backend.name, body, token)
 
 
 def delete_dictionary(service_id: str, version: int, dict_name: str, token: str) -> None:
-    """Delete a service dictionary."""
     _delete_version_resource(service_id, version, "dictionary", dict_name, token)
 
 
@@ -1796,8 +1607,7 @@ def create_or_update_dictionary(service_id: str, version: int, dictionary: Servi
         {"name": dictionary.name, "write_only": dictionary.write_only},
         token,
     )
-    dict_id = resp.get("id", "")
-    if not dict_id:
+    if not (dict_id := resp.get("id", "")):
         raise RuntimeError(f"Failed to get dictionary ID for {dictionary.name}")
     if dictionary.items:
         _upsert_dictionary_items(service_id, dict_id, dictionary.items, token)
@@ -1826,22 +1636,18 @@ def _upsert_dictionary_items(service_id: str, dict_id: str, items: dict[str, str
 def validate_version(service_id: str, version: int, token: str) -> bool:
     """Validate a service version."""
     try:
-        resp = fastly("GET", f"/service/{service_id}/version/{version}/validate", token=token)
-        return resp.get("status") == "ok"
+        return fastly("GET", f"/service/{service_id}/version/{version}/validate", token=token).get("status") == "ok"
     except RuntimeError as e:
         raise RuntimeError(f"VCL validation failed: {e}")
 
 
 def activate_version(service_id: str, version: int, token: str) -> None:
-    """Activate a draft version."""
     fastly("PUT", f"/service/{service_id}/version/{version}/activate", token=token)
 
 
 def _bootstrap_featurestate_from_fastly(service_id: str, token: str) -> FeatureState:
     """Introspect active (or draft) Fastly version and reverse-engineer FeatureState (Gotcha 1)."""
-    source_ver = fastly_integration.fetch_active_version(service_id, token)
-    if source_ver is None:
-        source_ver = _fetch_highest_version(service_id, token)
+    source_ver = fastly_integration.fetch_active_version(service_id, token) or _fetch_highest_version(service_id, token)
     if source_ver is None:
         return FeatureState(
             service_id=service_id,
@@ -1869,9 +1675,7 @@ def _bootstrap_featurestate_from_fastly(service_id: str, token: str) -> FeatureS
                     scoring_enabled = True
         except Exception:
             pass
-    log_period = 60
-    rum_log_period = None
-    sample_rate = 100
+    log_period, rum_log_period = 60, None
     for endpoint in endpoints:
         if (
             "Fastly Log Analytics" in endpoint.name or "Fastly Object Storage Logs" in endpoint.name
@@ -1882,7 +1686,7 @@ def _bootstrap_featurestate_from_fastly(service_id: str, token: str) -> FeatureS
     return FeatureState(
         service_id=service_id,
         log_period=log_period,
-        sample_rate=sample_rate,
+        sample_rate=100,
         edge_only=False,
         custom_condition="",
         fos_prefix="raw",
@@ -1943,8 +1747,7 @@ def _ensure_cdn_domain(
         status_cb(f"⏳ Domain '{domain}' missing from existing CDN service; adding...")
     draft_version = fastly_integration.clone_version(service_id, active_ver, token, f"Add missing domain {domain}")
     fastly("POST", f"/service/{service_id}/version/{draft_version}/domain", {"name": domain}, token=token)
-    error = _validate_draft(service_id, token, draft_version)
-    if error:
+    if error := _validate_draft(service_id, token, draft_version):
         raise RuntimeError(f"Failed to validate CDN domain addition for {service_id}: {error}")
     _activate_draft(service_id, token, draft_version)
     if status_cb:
@@ -1965,33 +1768,31 @@ def _clone_active_version(service_id: str, token: str, desired_state: FeatureSta
     ts = dt.datetime.now(dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     comment = f"Fastly Log Analytics Reconciliation at {ts}"
     if desired_state is not None:
-        enabled_features = []
-        if desired_state.logging_enabled:
-            enabled_features.append("Request Logs")
-        if desired_state.rum_enabled:
-            enabled_features.append("RUM")
-        if desired_state.scoring and desired_state.scoring.enabled:
-            enabled_features.append("Session Scoring")
-        if desired_state.cmcd and desired_state.cmcd.enabled:
-            enabled_features.append("CMCD")
+        enabled_features = [
+            label
+            for flag, label in (
+                (desired_state.logging_enabled, "Request Logs"),
+                (desired_state.rum_enabled, "RUM"),
+                (bool(desired_state.scoring and desired_state.scoring.enabled), "Session Scoring"),
+                (bool(desired_state.cmcd and desired_state.cmcd.enabled), "CMCD"),
+            )
+            if flag
+        ]
         user_custom_fields = (
             [cf for cf in desired_state.log_fields.custom_fields if cf.get("name") not in _AUTO_INJECTED_NAMES]
             if desired_state.log_fields
             else []
         )
-        num_custom_fields = len(user_custom_fields)
-        if num_custom_fields > 0:
-            enabled_features.append(f"{num_custom_fields} Custom Field{'s' if num_custom_fields > 1 else ''}")
-        if enabled_features:
-            comment += f" (Enabled: {', '.join(enabled_features)})"
-        else:
-            comment += " (All Features Disabled / Teardown)"
-    active_ver = fastly_integration.fetch_active_version(service_id, token)
-    if active_ver is not None:
-        return fastly_integration.clone_version(service_id, active_ver, token, comment)
-    highest = _fetch_highest_version(service_id, token, raise_on_error=True)
-    if highest is not None:
-        return fastly_integration.clone_version(service_id, highest, token, comment)
+        if num_cf := len(user_custom_fields):
+            enabled_features.append(f"{num_cf} Custom Field{'s' if num_cf > 1 else ''}")
+        comment += (
+            f" (Enabled: {', '.join(enabled_features)})" if enabled_features else " (All Features Disabled / Teardown)"
+        )
+    ver = fastly_integration.fetch_active_version(service_id, token) or _fetch_highest_version(
+        service_id, token, raise_on_error=True
+    )
+    if ver is not None:
+        return fastly_integration.clone_version(service_id, ver, token, comment)
     raise RuntimeError(f"Cannot determine version to clone for {service_id}")
 
 
@@ -2006,56 +1807,37 @@ def _apply_diff(
     current_snippets: list[VCLSnippet] | None = None,
 ) -> None:
     """Apply diff mutations on the draft version (Step 6)."""
+    from backend.config import config_path as _config_path
+    from backend.core.fastly.client import ensure_condition, region_endpoint
+
     desired_endpoints = desired_endpoints or []
     unmanaged_snippets = [s for s in (current_snippets or []) if not _is_managed_snippet(s.name)]
-    vars_to_deconflict = [
-        "fosAccessKey",
-        "fosSecretKey",
-        "fosBucket",
-        "fosRegion",
-        "fosHost",
-        "canonicalHeaders",
-        "signedHeaders",
-        "canonicalRequest",
-        "canonicalQuery",
-        "stringToSign",
-        "dateStamp",
-        "signature",
-        "scope",
-    ]
+    vars_to_deconflict = (
+        "fosAccessKey", "fosSecretKey", "fosBucket", "fosRegion", "fosHost", "canonicalHeaders",
+        "signedHeaders", "canonicalRequest", "canonicalQuery", "stringToSign", "dateStamp", "signature", "scope",
+    )  # fmt: skip
     for snippet in diff.snippets_to_add + diff.snippets_to_update:
-        body = snippet.body
-        subroutine = snippet.subroutine
+        body, subroutine = snippet.body, snippet.subroutine
         for var_name in vars_to_deconflict:
-            other_declares = any(
+            if any(
                 subroutine == s.subroutine and f"declare local var.{var_name}" in s.body for s in unmanaged_snippets
-            )
-            if other_declares:
-                reason = "unmanaged snippet"
+            ):
                 if status_cb:
                     status_cb(
-                        f"ℹ️  {reason} already declares 'var.{var_name}' in '{subroutine}'. Skipping duplicate declaration."
+                        f"ℹ️  unmanaged snippet already declares 'var.{var_name}' in '{subroutine}'. Skipping duplicate declaration."
                     )
                 body = body.replace(
                     f"declare local var.{var_name} STRING;",
-                    f"# declare local var.{var_name} STRING; (omitted to prevent collision with {reason})",
+                    f"# declare local var.{var_name} STRING; (omitted to prevent collision with unmanaged snippet)",
                 )
         snippet.body = body
-    bucket_name = None
-    domain = None
-    access_key = None
-    secret_key = None
-    from backend.config import config_path as _config_path
-
+    bucket_name = domain = access_key = secret_key = None
     config_path = _config_path(service_id)
     if config_path.exists():
         try:
             cfg = json.loads(config_path.read_text())
             bucket_name = cfg.get("fos_bucket") or cfg.get("fos_bucket_name")
-            region = cfg.get("fos_region") or "us-east-1"
-            from backend.core.fastly.client import region_endpoint
-
-            domain = region_endpoint(region)
+            domain = region_endpoint(cfg.get("fos_region") or "us-east-1")
             access_key = cfg.get("fos_access_key_id") or cfg.get("fos_access_key")
             secret_key = cfg.get("fos_secret_access_key") or cfg.get("fos_secret_key")
         except Exception:
@@ -2105,7 +1887,6 @@ def _apply_diff(
         whitelist=MANAGED_DICTIONARY_NAMES,
         err_label="dictionary",
     )
-    from backend.core.fastly.client import ensure_condition
 
     def _ensure_cond_safe(name: str, statement: str, cond_type: str = "RESPONSE") -> None:
         try:
@@ -2120,35 +1901,30 @@ def _apply_diff(
         except Exception as e:
             logging.warning(f"WARNING: Failed to ensure {name}: {e}")
 
-    has_main_cond = any(ep.response_condition == "log_analytics_condition" for ep in desired_endpoints)
-    if has_main_cond:
+    if any(ep.response_condition == "log_analytics_condition" for ep in desired_endpoints):
         if status_cb:
             status_cb("➕ Configuring log analytics condition 'log_analytics_condition'...")
         cond_parts = ["!segmented_caching.is_inner_req"]
         if desired_state and desired_state.rum_enabled:
             cond_parts.append('req.url.path != "/rum-beacon"')
         if desired_state:
-            scoring_enabled = desired_state.scoring.enabled
             if desired_state.edge_only:
                 from backend.provision.fastly_api import _log_sampling_edge_clause
 
-                cond_parts.append(_log_sampling_edge_clause(scoring_enabled))
+                cond_parts.append(_log_sampling_edge_clause(desired_state.scoring.enabled))
             if desired_state.sample_rate < 100:
                 cond_parts.append(f"randombool({desired_state.sample_rate}, 100)")
             if desired_state.custom_condition and desired_state.custom_condition.strip():
                 cond_parts.append(f"({desired_state.custom_condition.strip()})")
-        statement = " && ".join(cond_parts)
-        _ensure_cond_safe("log_analytics_condition", statement)
-    has_rum_cond = any(ep.response_condition == "rum_log_condition" for ep in desired_endpoints)
-    if has_rum_cond:
+        _ensure_cond_safe("log_analytics_condition", " && ".join(cond_parts))
+    if any(ep.response_condition == "rum_log_condition" for ep in desired_endpoints):
         if status_cb:
             status_cb("➕ Configuring RUM routing condition 'rum_log_condition'...")
         _ensure_cond_safe("rum_log_condition", build_rum_log_condition(desired_state))
     desired_backends_list = desired_backends(desired_state) if desired_state else []
-    has_false_cond = any(ep.response_condition == "fastly_log_analytics_false" for ep in desired_endpoints) or any(
+    if any(ep.response_condition == "fastly_log_analytics_false" for ep in desired_endpoints) or any(
         b.request_condition == "fastly_log_analytics_false" for b in desired_backends_list
-    )
-    if has_false_cond:
+    ):
         if status_cb:
             status_cb("➕ Configuring request condition 'fastly_log_analytics_false'...")
         _ensure_cond_safe("fastly_log_analytics_false", "false", cond_type="REQUEST")
@@ -2195,23 +1971,21 @@ def _apply_diff(
 
 
 def _is_managed_snippet(name: str) -> bool:
-    if name.startswith("Fastly Log Analytics - "):
-        return True
-    return _is_legacy_snippet(name)
+    return name.startswith("Fastly Log Analytics - ") or _is_legacy_snippet(name)
 
 
 def _is_legacy_snippet(name: str) -> bool:
     if name.startswith("Fastly Log Analytics - "):
         return False
-    legacy_prefixes = ["Fastly Log Analysis", "Fastly Log Analytics", "RUM -", "Session Scoring", "CMCD"]
-    return any(name.startswith(prefix) for prefix in legacy_prefixes)
+    return any(
+        name.startswith(p) for p in ("Fastly Log Analysis", "Fastly Log Analytics", "RUM -", "Session Scoring", "CMCD")
+    )
 
 
 def _detect_and_queue_legacy_cleanup(
     current_snippets: list[VCLSnippet], diff: DiffResult, status_cb: Callable[[str], None] | None = None
 ) -> None:
-    legacy = [s for s in current_snippets if _is_legacy_snippet(s.name)]
-    if legacy:
+    if legacy := [s for s in current_snippets if _is_legacy_snippet(s.name)]:
         if status_cb:
             status_cb(
                 f"⏳ Detected {len(legacy)} legacy VCL snippet(s) from prior deployment — will remove during reconciliation…"
@@ -2249,7 +2023,6 @@ def _purge_rum_surrogate_key(service_id: str, token: str) -> None:
         sched_logger.warning(f"Failed to purge surrogate key {RUM_SURROGATE_KEY} for service {service_id}: {e}")
 
 
-sys.modules["backend.provision.declarative.iac_reconciler"] = sys.modules[__name__]
 from backend.provision.session_scoring_orchestrator import (  # noqa: E402
     _SCORER_PACKAGE,
     _SCORING_FIELD_NAMES,
@@ -2305,6 +2078,9 @@ def build_desired_state(logging_service_id: str, token: str) -> UnifiedDesiredSt
     compute_scorer = None
     kv_stores: dict[str, DeclarativeKVStore] = {}
     if state.scoring.enabled:
+        from backend.provision.session_scoring_orchestrator import _resolve_tenant_matrix_for_deploy
+        from backend.scoring.matrix import serialize_kv
+
         store_name = MATRIX_STORE_NAME_TEMPLATE.format(sid=logging_service_id)
         compute_scorer = DeclarativeComputeService(
             name=f"Session Scoring Service for {logging_service_id}",
@@ -2313,14 +2089,9 @@ def build_desired_state(logging_service_id: str, token: str) -> UnifiedDesiredSt
             linked_kv_stores=[store_name],
         )
         keys: dict[str, str] = {}
-        from backend.provision.session_scoring_orchestrator import _resolve_tenant_matrix_for_deploy
-        from backend.scoring.matrix import serialize_kv
-
-        matrix_path = _resolve_tenant_matrix_for_deploy(logging_service_id)
-        if matrix_path and matrix_path.exists():
+        if (matrix_path := _resolve_tenant_matrix_for_deploy(logging_service_id)) and matrix_path.exists():
             with matrix_path.open() as f:
-                serialized = serialize_kv(json.load(f))
-                keys["matrix"] = serialized.hex()
+                keys["matrix"] = serialize_kv(json.load(f)).hex()
         kv_stores[store_name] = DeclarativeKVStore(name=store_name, keys=keys, link_to_services=[compute_scorer.name])
     return UnifiedDesiredState(
         service_id=logging_service_id, vcl_service=vcl_service, compute_scorer=compute_scorer, kv_stores=kv_stores
@@ -2329,14 +2100,12 @@ def build_desired_state(logging_service_id: str, token: str) -> UnifiedDesiredSt
 
 def discover_current_state(logging_service_id: str, token: str) -> dict[str, Any]:
     """Retrieve the active live infrastructure matching names in our scope."""
-    kv_stores: dict[str, Any] = {}
     store_name = MATRIX_STORE_NAME_TEMPLATE.format(sid=logging_service_id)
     store = _find_kv_store(store_name, token)
-    if store:
-        kv_stores[store_name] = store
-    compute_name = f"Session Scoring Service for {logging_service_id}"
-    compute_service = find_service_by_name(compute_name, token)
-    return {"kv_stores": kv_stores, "compute_scorer": compute_service}
+    return {
+        "kv_stores": {store_name: store} if store else {},
+        "compute_scorer": find_service_by_name(f"Session Scoring Service for {logging_service_id}", token),
+    }
 
 
 def verify_compute_scorer_readiness(
@@ -2346,9 +2115,7 @@ def verify_compute_scorer_readiness(
     import httpx
     from tenacity import Retrying, retry_if_exception_type, stop_after_attempt, wait_exponential
 
-    domain = compute_def.domains[0]
-    url = f"https://{domain}/health"
-    max_retries = 10
+    url, max_retries = f"https://{compute_def.domains[0]}/health", 10
     for attempt in Retrying(
         stop=stop_after_attempt(max_retries),
         wait=wait_exponential(multiplier=1.0, exp_base=1.5, min=1.0, max=5.0),
@@ -2388,8 +2155,7 @@ def reconcile_infrastructure(
     from backend.config import mutate_config, snapshot_config
 
     config_path = _config_path(logging_service_id)
-    orig_config_content = snapshot_config(logging_service_id)
-    if orig_config_content is None:
+    if (orig_config_content := snapshot_config(logging_service_id)) is None:
         raise RuntimeError(f"Configuration file {config_path} is required for live deployment.")
     cfg = json.loads(orig_config_content)
     orig_scoring = copy.deepcopy(cfg.get("scoring"))
@@ -2417,15 +2183,16 @@ def reconcile_infrastructure(
             lf["custom_fields"] = [*(lf.get("custom_fields") or []), *copy.deepcopy(orig_scoring_fields)]
 
     try:
-        scoring_meta: dict[str, Any] = {}
         apply_phase3: Callable[[dict[str, Any]], None] | None = None
         if desired.compute_scorer:
             if status_cb:
                 status_cb("⏳ Phase 1: Reconciling edge KV Stores...")
                 status_cb("⏳ Phase 2: Reconciling Compute Scorer Service and uploading WASM package...")
             scoring_meta = ensure_scoring_service(logging_service_id, token, status_cb=status_cb)
-            scoring_service_id = scoring_meta["scoring_service_id"]
-            matrix_store_id = scoring_meta.get("scoring_matrix_store_id", "")
+            scoring_service_id, matrix_store_id = (
+                scoring_meta["scoring_service_id"],
+                scoring_meta.get("scoring_matrix_store_id", ""),
+            )
             _write_matrix_to_kv(matrix_store_id, logging_service_id, token, status_cb=status_cb)
             package_meta = _deploy_wasm_package(scoring_service_id, matrix_store_id, token, status_cb=status_cb)
             resolved_domain = scoring_meta.get("scoring_domain") or (
@@ -2433,16 +2200,22 @@ def reconcile_infrastructure(
             )
             if resolved_domain:
                 desired.compute_scorer.domains = [resolved_domain]
+            cfg_scoring = cfg.get("scoring") or {}
             new_scoring: dict[str, Any] = {
                 "enabled": True,
                 "scoring_service_id": scoring_service_id,
-                "scoring_service_name": scoring_meta.get("scoring_service_name", ""),
-                "scoring_domain": scoring_meta.get("scoring_domain", ""),
-                "scoring_keys_store_id": scoring_meta.get("scoring_keys_store_id", ""),
-                "scoring_config_store_id": scoring_meta.get("scoring_config_store_id", ""),
+                **{
+                    k: scoring_meta.get(k, "")
+                    for k in (
+                        "scoring_service_name",
+                        "scoring_domain",
+                        "scoring_keys_store_id",
+                        "scoring_config_store_id",
+                    )
+                },
                 "scoring_matrix_store_id": matrix_store_id,
-                "request_secret": scoring_meta.get("request_secret", cfg.get("scoring", {}).get("request_secret", "")),
-                "aes_key_hex": scoring_meta.get("aes_key_hex", "") or cfg.get("scoring", {}).get("aes_key_hex", ""),
+                "request_secret": scoring_meta.get("request_secret", cfg_scoring.get("request_secret", "")),
+                "aes_key_hex": scoring_meta.get("aes_key_hex", "") or cfg_scoring.get("aes_key_hex", ""),
                 "deployed_package_sha": package_meta["sha"],
                 "deployed_package_files_hash": package_meta["files_hash"],
                 "deployed_vcl_sha": scorer_vcl_fingerprint(logging_service_id),
@@ -2480,24 +2253,19 @@ def reconcile_infrastructure(
             time.sleep(5.0)
             if status_cb:
                 status_cb("⏳ Deleting serverless Compute Scorer service and resources last...")
-            old_scoring_service_id = current["compute_scorer"].get("id")
             old_matrix_store_id = (
                 current["kv_stores"].get(MATRIX_STORE_NAME_TEMPLATE.format(sid=logging_service_id), {}).get("id", "")
             )
             prior_scoring = json.loads(orig_config_content).get("scoring") or {}
             delete_scoring_service(
-                scoring_service_id=old_scoring_service_id,
+                scoring_service_id=current["compute_scorer"].get("id"),
                 scoring_keys_store_id=prior_scoring.get("scoring_keys_store_id", ""),
                 scoring_config_store_id=prior_scoring.get("scoring_config_store_id", ""),
                 scoring_matrix_store_id=old_matrix_store_id,
                 token=token,
                 status_cb=status_cb,
             )
-
-            def _drop_scoring(disk_cfg: dict[str, Any]) -> None:
-                disk_cfg.pop("scoring", None)
-
-            _persist(_drop_scoring)
+            _persist(lambda disk_cfg: disk_cfg.pop("scoring", None))
         if status_cb:
             status_cb("✅ Infrastructure state reconciliation completed successfully.")
     except Exception as err:
@@ -2507,12 +2275,3 @@ def reconcile_infrastructure(
         if persisted:
             mutate_config(logging_service_id, _rollback_owned_keys)
         raise err
-
-
-_self_mod = sys.modules[__name__]
-for _submod in ("iac_reconciler", "state", "diff", "fastly_integration", "generators"):
-    sys.modules[f"backend.provision.declarative.{_submod}"] = _self_mod
-_decl_pkg = sys.modules.get("backend.provision.declarative")
-if _decl_pkg is not None:
-    for _submod in ("iac_reconciler", "state", "diff", "fastly_integration", "generators"):
-        setattr(_decl_pkg, _submod, _self_mod)

@@ -1168,21 +1168,9 @@ from backend.high_scale._common import (
 )
 from backend.high_scale._common import format_iso_utc as _iso
 from backend.high_scale._common import format_iso_utc_or_empty as _iso_or_empty
-from backend.high_scale.insight_queries import (
-    AUTH_REGEX,
-    BOT_UA_REGEX,
-    COLUMNS,
-    COMPRESSIBLE_REGEX,
-    DETECTIONS,
-    POP_CODE,
-    PROBE_REGEX,
-    Detection,
-    botnet_grouping,
-    impossible_distance,
-    repeated_patterns_fp,
-)
 from backend.models.dashboard import SessionDetailRequest, SessionsRequest
 from backend.models.insights import CacheCollapseDetailResponse, InsightsResponse
+from backend.repositories._sql.insights import NEW_PROBES
 from backend.repositories.insights import InsightDefinition, registry  # noqa: F401  (registers the detections)
 from backend.repositories.utils.response_cache import (
     ResponseMemo,
@@ -1193,6 +1181,1058 @@ from backend.repositories.utils.response_cache import (
 from backend.utils.bounded_cache import BoundedTTLCache
 from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry
 from backend.utils.date_utils import parse_iso_utc
+
+# DuckDB column name -> ClickHouse expression over request_facts.
+COLUMNS: dict[str, str] = {
+    "timestamp": "event_timestamp",
+    "url": "url",
+    "country": "country",
+    "ip": "client_ip",
+    "status": "toInt32OrNull(custom_fields['status'])",
+    "ost": "toInt32OrNull(custom_fields['ost'])",
+    "cache": "custom_fields['cache']",
+    "elapsed": "toFloat64OrNull(custom_fields['elapsed'])",
+    "ottfb": "toFloat64OrNull(custom_fields['ottfb'])",
+    "oconnect_ms": "toFloat64OrNull(custom_fields['oconnect_ms'])",
+    "oretries": "toInt32OrNull(custom_fields['oretries'])",
+    "oip": "custom_fields['oip']",
+    "ua": "custom_fields['ua']",
+    "referer": "custom_fields['referer']",
+    "method": "custom_fields['method']",
+    "p_type": "custom_fields['p_type']",
+    "c_type": "custom_fields['c_type']",
+    "c_speed": "custom_fields['c_speed']",
+    "transport": "custom_fields['transport']",
+    "pop": "custom_fields['pop']",
+    "server_region": "custom_fields['server_region']",
+    "ja3": "custom_fields['ja3']",
+    "ja4": "custom_fields['ja4']",
+    "tls_ciphers_sha": "custom_fields['tls_ciphers_sha']",
+    "cookie_session": "custom_fields['cookie_session']",
+    "resp_header_content_encoding": "custom_fields['resp_header_content_encoding']",
+    "asn": "toInt64OrNull(custom_fields['asn'])",
+    "metro": "custom_fields['metro']",
+    "city": "custom_fields['city']",
+    "region": "custom_fields['region']",
+    "delivery_rate": "toFloat64OrNull(custom_fields['delivery_rate'])",
+    "resp_bytes": "toInt64OrNull(custom_fields['resp_bytes'])",
+    "req_header_bytes": "toInt64OrNull(custom_fields['req_header_bytes'])",
+    "conn_requests": "toInt64OrNull(custom_fields['conn_requests'])",
+    "sec": "toInt64(toUnixTimestamp(event_timestamp))",
+    "rid": "custom_fields['rid']",
+    "prid": "custom_fields['prid']",
+    "edge": "custom_fields['edge']",
+    "ploss": "toFloat64OrNull(custom_fields['ploss'])",
+    "rtt_var": "toFloat64OrNull(custom_fields['rtt_var'])",
+    "retrans": "toFloat64OrNull(custom_fields['retrans'])",
+    "ttl": "toFloat64OrNull(custom_fields['ttl'])",
+    "hits": "toFloat64OrNull(custom_fields['hits'])",
+    "age": "toFloat64OrNull(custom_fields['age'])",
+    "lat": "toFloat64OrNull(custom_fields['lat'])",
+    "lon": "toFloat64OrNull(custom_fields['lon'])",
+    "tcp_rtt": "toFloat64OrNull(custom_fields['tcp_rtt'])",
+    "chrome_version": r"extract(custom_fields['ua'], 'Chrome/([0-9]+)\\.')",
+    "signal": (
+        "arrayJoin(arrayFilter(s -> s != '' AND s != 'BOT-ANALYSIS', "
+        "arrayMap(s -> trim(BOTH ' ' FROM s), splitByChar(',', custom_fields['waf_sig']))))"
+    ),
+}
+
+_COMPRESSIBLE_EXTENSIONS = (".js", ".css", ".html", ".json", ".svg", ".xml", ".txt")
+_AUTH_PATHS = (
+    "login",
+    "signin",
+    "sign-in",
+    "log-in",
+    "auth",
+    "oauth",
+    "openid",
+    "token",
+    "sso",
+    "saml",
+    "session",
+    "account",
+    "password",
+    "passwd",
+    "passwrd",
+    "credential",
+    "wp-login",
+    "xmlrpc",
+    "mfa",
+    "otp",
+    "2fa",
+    "verify",
+)
+_BOT_UA_TOKENS = (
+    "googlebot",
+    "bingbot",
+    "slurp",
+    "duckduckbot",
+    "baiduspider",
+    "yandexbot",
+    "applebot",
+    "uptimerobot",
+    "pingdom",
+    "statuscake",
+    "datadoghq",
+    "newrelic",
+    "ahrefsbot",
+    "semrushbot",
+    "gptbot",
+    "claudebot",
+    "ccbot",
+    "facebookexternalhit",
+    "bot",
+    "crawler",
+    "spider",
+    "monitor",
+)
+PROBE_REGEX = "(?i)" + "|".join(re.escape(path) for path in NEW_PROBES)
+AUTH_REGEX = "(?i)" + "|".join(re.escape(path) for path in _AUTH_PATHS)
+BOT_UA_REGEX = "(?i)" + "|".join(re.escape(token) for token in _BOT_UA_TOKENS)
+COMPRESSIBLE_REGEX = "(?i)" + "|".join(re.escape(ext) for ext in _COMPRESSIBLE_EXTENSIONS)
+
+_HIT = "startsWith(cache, 'HIT')"
+_CACHEABLE = "(startsWith(cache, 'HIT') OR startsWith(cache, 'MISS'))"
+_P95 = "quantileTDigestIf(0.95)"
+
+
+@dataclass(frozen=True)
+class Detection:
+    """One detection: the base columns it reads, a row-level prefilter, and the SQL after the ``base`` CTE."""
+
+    columns: tuple[str, ...]
+    sql: str
+    row_filter: str = ""
+    window_only: bool = False
+    needs_baseline: bool = True
+
+
+@dataclass(frozen=True)
+class _BaseGroupQuerySpec:
+    """Declarative ClickHouse GROUP BY query descriptor over the ``base`` CTE."""
+
+    select_cols: str
+    group_by: str
+    where: str = ""
+    having: str = ""
+    order_by: str = ""
+    limit: int | None = None
+    from_table: str = "base"
+
+    def build_sql(self) -> str:
+        where_clause = f" WHERE {self.where}" if self.where else ""
+        having_clause = f"\n    HAVING {self.having}" if self.having else ""
+        order_clause = f"\n    ORDER BY {self.order_by}" if self.order_by else ""
+        limit_clause = f" LIMIT {self.limit}" if self.limit is not None else ""
+        return (
+            f"\n    SELECT {self.select_cols}\n"
+            f"    FROM {self.from_table}{where_clause} GROUP BY {self.group_by}"
+            f"{having_clause}{order_clause}{limit_clause}\n    "
+        )
+
+
+def _base_group_sql(
+    select_cols: str,
+    group_by: str,
+    *,
+    where: str = "",
+    having: str = "",
+    order_by: str = "",
+    limit: int | None = 15,
+    from_table: str = "base",
+) -> str:
+    return _BaseGroupQuerySpec(
+        select_cols=select_cols,
+        group_by=group_by,
+        where=where,
+        having=having,
+        order_by=order_by,
+        limit=limit,
+        from_table=from_table,
+    ).build_sql()
+
+
+def _share_spike(
+    column: str,
+    share_floor: str,
+    *,
+    extra_row: str = "",
+    min_w_cnt: int = 0,
+    multiplier: int = 3,
+    delta: str = "0.10",
+    limit: int = 10,
+    w_first: bool = False,
+) -> str:
+    """Window traffic share of one value that spiked versus its baseline share."""
+    sel_cols = ", ".join(f"g.{c.strip()}" for c in column.split(","))
+    totals_cols = "t.w_total, t.b_total" if w_first else "t.b_total, t.w_total"
+    cnt_clause = f" AND g.w_cnt >= {min_w_cnt}" if min_w_cnt else ""
+    return f"""
+    , totals AS (SELECT countIf(is_w) AS w_total, countIf(is_b) AS b_total FROM base),
+    grp AS (
+        SELECT {column}, countIf(is_w) AS w_cnt, countIf(is_b) AS b_cnt
+        FROM base {extra_row} GROUP BY {column}
+    )
+    SELECT {sel_cols}, g.w_cnt, g.b_cnt, {totals_cols}
+    FROM grp g CROSS JOIN totals t
+    WHERE t.w_total > 0{cnt_clause} AND g.w_cnt * 1.0 / t.w_total >= {share_floor}
+      AND (t.b_total = 0 OR g.w_cnt * 1.0 / t.w_total >= g.b_cnt * 1.0 / nullIf(t.b_total, 0) * {multiplier} + {delta})
+    ORDER BY g.w_cnt DESC LIMIT {limit}
+    """
+
+
+def _p95_regression(
+    select_col: str,
+    *,
+    group_by: str | None = None,
+    min_w: int = 20,
+    min_b: int = 50,
+    ratio: float = 1.5,
+    min_delta_ms: int = 100,
+    extra_select: str = "",
+) -> str:
+    return _base_group_sql(
+        f"{select_col},\n"
+        f"        {_P95}(elapsed, is_w) / 1000.0 AS w_p95,\n"
+        f"        {_P95}(elapsed, is_b) / 1000.0 AS b_p95,\n"
+        f"        countIf(is_w) AS w_total,\n"
+        f"        countIf(is_b) AS b_total{extra_select}",
+        group_by or select_col,
+        having=f"w_total >= {min_w} AND b_total >= {min_b} AND w_p95 >= b_p95 * {ratio} AND w_p95 - b_p95 >= {min_delta_ms}",
+        order_by="(w_p95 / nullIf(b_p95, 0)) DESC",
+        limit=15,
+    )
+
+
+def _new_traffic(select_col: str, min_w: int, *, where: str = "", group_by: str | None = None) -> str:
+    return _base_group_sql(
+        f"{select_col}, countIf(is_w) AS w_cnt, countIf(is_b) AS b_cnt",
+        group_by or select_col,
+        where=where,
+        having=f"w_cnt >= {min_w} AND b_cnt = 0",
+        order_by="w_cnt DESC",
+        limit=20,
+    )
+
+
+def _error_spike(
+    select_col: str,
+    *,
+    group_by: str | None = None,
+    status_min: int = 500,
+    min_w: int = 3,
+    min_rate: str = "0.05",
+    min_b: int = 10,
+    multiplier: int = 2,
+) -> str:
+    return _base_group_sql(
+        f"{select_col},\n"
+        f"        countIf(is_w AND status >= {status_min}) * 1.0 / nullIf(countIf(is_w), 0) AS w_rate,\n"
+        f"        countIf(is_b AND status >= {status_min}) * 1.0 / nullIf(countIf(is_b), 0) AS b_rate,\n"
+        f"        countIf(is_w AND status >= {status_min}) AS w_errors,\n"
+        f"        countIf(is_w) AS w_total,\n"
+        f"        countIf(is_b) AS b_total",
+        group_by or select_col,
+        having=f"w_total >= {min_w} AND w_rate >= {min_rate} AND (b_total < {min_b} OR w_rate >= b_rate * {multiplier} + 0.05)",
+        order_by="(w_rate - coalesce(b_rate, 0)) DESC",
+        limit=15,
+    )
+
+
+def _rate_regression(
+    cond: str,
+    *,
+    denom_cond: str = "",
+    having: str = "w_total >= 10 AND b_total >= 50 AND b_rate <= 0.20 AND w_rate >= 0.50 AND w_rate >= b_rate + 0.30",
+    order_by: str = "(w_rate - coalesce(b_rate, 0)) DESC",
+    from_table: str = "base",
+) -> str:
+    w_denom = f"is_w AND {denom_cond}" if denom_cond else "is_w"
+    b_denom = f"is_b AND {denom_cond}" if denom_cond else "is_b"
+    return _base_group_sql(
+        f"url,\n"
+        f"        countIf(is_w AND {cond}) * 1.0 / nullIf(countIf({w_denom}), 0) AS w_rate,\n"
+        f"        countIf(is_b AND {cond}) * 1.0 / nullIf(countIf({b_denom}), 0) AS b_rate,\n"
+        f"        countIf({w_denom}) AS w_total,\n"
+        f"        countIf({b_denom}) AS b_total",
+        "url",
+        having=having,
+        order_by=order_by,
+        limit=15,
+        from_table=from_table,
+    )
+
+
+def _fingerprint_spread(column: str, *, with_ratio: bool) -> str:
+    """Distinct client IPs per fingerprint in the window versus the baseline's hourly rate."""
+    ratio = (
+        ", w_ips * 1.0 / greatest(b_ips / greatest({baseline_hours:Float64}, 1.0) * {window_hours:Float64}, 1) AS ip_ratio"
+        if with_ratio
+        else ""
+    )
+    return f"""
+    , win AS (
+        SELECT {column}, uniqExactIf(ip, is_w) AS w_ips, countIf(is_w) AS w_reqs, uniqExactIf(ip, is_b) AS b_ips
+        FROM base WHERE {column} != '' GROUP BY {column} HAVING w_ips >= 5
+    )
+    SELECT {column}, w_ips, w_reqs, b_ips{ratio}
+    FROM win
+    WHERE w_ips > b_ips / greatest({{baseline_hours:Float64}}, 1.0) * {{window_hours:Float64}} * 3
+    ORDER BY w_ips * 1.0 / greatest(b_ips / greatest({{baseline_hours:Float64}}, 1.0) * {{window_hours:Float64}}, 1) DESC
+    LIMIT 10
+    """
+
+
+def _per_ip_outlier(column: str, window_floor: int, extra_having: str, order: str, aliases: tuple[str, str]) -> str:
+    """Per-IP window maximum against that IP's own baseline p95 (request size, connection reuse)."""
+    peak, mean = aliases
+    return f"""
+    , win AS (
+        SELECT ip, max({column}) AS {peak}, avg({column}) AS {mean}, count() AS w_total
+        FROM base WHERE is_w GROUP BY ip HAVING w_total >= {window_floor}{extra_having}
+    ),
+    base_b AS (
+        SELECT ip, quantileExactInclusive(0.95)({column}) AS b_p95
+        FROM base WHERE is_b AND ip IN (SELECT ip FROM win) GROUP BY ip
+    )
+    SELECT w.ip, w.{peak}, w.{mean}, w.w_total, b.b_p95
+    FROM win w INNER JOIN base_b b ON w.ip = b.ip
+    WHERE w.w_total >= {window_floor} AND w.{peak} > b.b_p95 * 3{order}
+    """
+
+
+_CITY_LABEL = "concat(city, ', ', region, ', ', country) AS label, city, region, country"
+
+
+def _beaconing(entity: str, diversity: str) -> str:
+    """Regular-cadence (beaconing) detection per ``entity``: gap statistics over distinct active seconds."""
+    return f"""
+    , meta AS (
+        SELECT {entity}, {diversity} AS diversity, count() AS n_events, (max(sec) - min(sec)) AS span_s
+        FROM base GROUP BY {entity}
+        HAVING n_events >= 13 AND (n_events * 1.0 / nullIf(span_s, 0)) < 2.0
+    ),
+    secs AS (SELECT {entity}, sec FROM base WHERE {entity} IN (SELECT {entity} FROM meta) GROUP BY {entity}, sec),
+    gaps AS (
+        SELECT {entity},
+               sec - lagInFrame(sec) OVER (PARTITION BY {entity} ORDER BY sec
+                                           ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS gap,
+               row_number() OVER (PARTITION BY {entity} ORDER BY sec) AS position
+        FROM secs
+    ),
+    g AS (SELECT {entity}, gap FROM gaps WHERE position > 1),
+    gap_counts AS (SELECT {entity}, gap, count() AS occurrences FROM g GROUP BY {entity}, gap),
+    modes AS (SELECT {entity}, argMax(gap, tuple(occurrences, -gap)) AS mode_gap FROM gap_counts GROUP BY {entity}),
+    agg AS (
+        SELECT g.{entity} AS {entity}, count() AS n_gaps, avg(g.gap) AS mean_gap, varSamp(g.gap) AS var_gap,
+               stddevSamp(g.gap) AS sd_gap, any(m.mode_gap) AS mode_gap,
+               avg(if(abs(g.gap - m.mode_gap) <= 1, 1.0, 0.0)) AS modal_frac
+        FROM g INNER JOIN modes m ON g.{entity} = m.{entity}
+        GROUP BY g.{entity} HAVING n_gaps >= 12
+    )
+    SELECT a.{entity}, a.n_gaps, d.n_events,
+           round(a.mean_gap, 2) AS avg_interval,
+           round(a.sd_gap, 2) AS stddev_interval,
+           round(sqrt(greatest(a.var_gap - 1.0 / 12.0, 0)) / nullIf(a.mean_gap, 0), 3) AS cv_corr,
+           round(a.modal_frac, 3) AS modal_frac,
+           d.diversity, d.span_s, a.mode_gap
+    FROM agg a INNER JOIN meta d ON a.{entity} = d.{entity}
+    WHERE a.n_gaps >= 12
+      AND (d.n_events * 1.0 / nullIf(d.span_s, 0)) < 2.0
+      AND (
+            (a.mean_gap >= 5 AND sqrt(greatest(a.var_gap - 1.0 / 12.0, 0)) / nullIf(a.mean_gap, 0) < 0.3
+                             AND a.modal_frac >= 0.6)
+         OR (a.mean_gap >= 1 AND a.mean_gap < 5 AND a.modal_frac >= 0.85)
+          )
+    ORDER BY a.modal_frac DESC, a.n_gaps DESC
+    LIMIT 15
+    """
+
+
+def repeated_patterns_fp(fingerprint_column: str) -> Detection:
+    """Beaconing keyed on the TLS fingerprint (catches IP-rotating scripts that keep one TLS stack)."""
+    if fingerprint_column not in ("ja4", "ja3"):
+        raise ValueError("fingerprint column must be ja4 or ja3")
+    return Detection(
+        ("sec", "ip", "ua", fingerprint_column),
+        _beaconing(fingerprint_column, "uniqExact(ip)"),
+        row_filter=f"{fingerprint_column} != '' AND NOT (ua != '' AND match(ua, {{bot_ua_regex:String}}))",
+        window_only=True,
+    )
+
+
+POP_CODE = re.compile(r"[A-Za-z0-9]{2,8}")
+
+
+def impossible_distance(
+    pop_coordinates: dict[str, tuple[float, float]], fingerprint_column: str, edge_only: bool
+) -> Detection:
+    """Fingerprints whose client sits farther from the serving POP than the measured RTT physically allows."""
+    if fingerprint_column not in ("ja4", "ja3"):
+        raise ValueError("fingerprint column must be ja4 or ja3")
+    pops = []
+    for code, (lat, lon) in pop_coordinates.items():
+        if not POP_CODE.fullmatch(code):
+            raise ValueError("invalid POP code")
+        pops.append(f"('{code}', {float(lat)!r}, {float(lon)!r})")
+    edge = " AND lower(edge) IN ('1', 'true')" if edge_only else ""
+    columns: tuple[str, ...] = ("ip", "pop", "lat", "lon", "tcp_rtt", "country", "city", fingerprint_column)
+    if edge_only:
+        columns += ("edge",)
+    sql = f"""
+    , pop_coords AS (
+        SELECT t.1 AS pop_code, t.2 AS pop_lat, t.3 AS pop_lon
+        FROM (SELECT arrayJoin([{", ".join(pops)}]) AS t)
+    ),
+    flagged AS (
+        SELECT {fingerprint_column} AS fp, b.ip AS ip, b.pop AS pop, round(b.lat, 3) AS client_lat, round(b.lon, 3) AS client_lon,
+               c.pop_lat AS pop_lat, c.pop_lon AS pop_lon, b.tcp_rtt AS tcp_rtt, b.country AS country, b.city AS city,
+               round(2 * 6371 * asin(sqrt(pow(sin(radians(b.lat - c.pop_lat) / 2), 2)
+                   + cos(radians(b.lat)) * cos(radians(c.pop_lat)) * pow(sin(radians(b.lon - c.pop_lon) / 2), 2))), 1)
+                   AS distance_km,
+               round((b.tcp_rtt / 2.0 / 1e6) * 200000 * 2, 1) AS max_km
+        FROM base b INNER JOIN pop_coords c ON b.pop = c.pop_code
+    )
+    SELECT fp, count() AS hits, max(distance_km - max_km) AS worst_excess_km, max(distance_km) AS max_dist_km,
+           min(max_km) AS min_allowed_km, any(pop) AS pop, any(ip) AS sample_ip, any(client_lat), any(client_lon),
+           any(pop_lat), any(pop_lon), any(tcp_rtt), any(country), any(city)
+    FROM flagged WHERE distance_km > max_km GROUP BY fp HAVING hits >= 2
+    ORDER BY worst_excess_km DESC LIMIT 15
+    """
+    return Detection(
+        columns,
+        sql,
+        row_filter=f"lat IS NOT NULL AND lon IS NOT NULL AND tcp_rtt IS NOT NULL AND tcp_rtt > 0 AND {fingerprint_column} != ''{edge}",
+        window_only=True,
+        needs_baseline=False,
+    )
+
+
+DETECTIONS: dict[str, Detection] = {
+    "error_spikes": Detection(("url", "status"), _error_spike("url")),
+    "new_country_traffic": Detection(("country",), _new_traffic("country", 3, where="country != ''")),
+    "ua_monoculture": Detection(("ua",), _share_spike("ua", "0.25")),
+    "new_probe_urls": Detection(
+        ("url", "status"),
+        _base_group_sql(
+            "url, countIf(is_w) AS w_cnt, countIf(is_b) AS b_cnt,\n"
+            "        avgIf(if(status >= 400, 1.0, 0.0), is_w) * 100 AS w_error_pct",
+            "url",
+            where="url != '' AND match(url, {probe_regex:String})",
+            having="w_cnt > 0 AND b_cnt = 0",
+            order_by="w_cnt DESC",
+            limit=25,
+        ),
+    ),
+    "proxy_surge": Detection(
+        ("p_type",),
+        """
+    , agg AS (
+        SELECT p_type, countIf(is_w) AS w_cnt, countIf(is_b) AS b_cnt
+        FROM base WHERE p_type != '' GROUP BY p_type
+    ),
+    totals AS (SELECT sum(w_cnt) AS w_proxy_total, sum(b_cnt) AS b_proxy_total FROM agg),
+    all_rows AS (SELECT countIf(is_w) AS w_total_all, countIf(is_b) AS b_total_all FROM base)
+    SELECT a.p_type, a.w_cnt, a.b_cnt, r.w_total_all, r.b_total_all
+    FROM agg a CROSS JOIN totals t CROSS JOIN all_rows r
+    WHERE (t.w_proxy_total * 100.0 / nullIf(r.w_total_all, 0)) >= 5
+      AND (t.w_proxy_total * 100.0 / nullIf(r.w_total_all, 0))
+          >= (t.b_proxy_total * 100.0 / nullIf(r.b_total_all, 0)) * 2 + 5
+    """,
+    ),
+    "asn_concentration": Detection(("asn",), _share_spike("asn", "0.20", extra_row="WHERE asn IS NOT NULL")),
+    "cache_collapse": Detection(
+        ("url", "cache"),
+        _rate_regression(
+            _HIT,
+            denom_cond=_CACHEABLE,
+            having="w_total >= 5 AND b_total >= 20 AND b_rate >= 0.40 AND w_rate <= b_rate - 0.20 AND w_rate <= b_rate * 0.6",
+            order_by="(coalesce(b_rate, 0) - w_rate) DESC",
+        ),
+    ),
+    "cacheability_regression": Detection(
+        ("url", "cache"),
+        _rate_regression("startsWith(cache, 'PASS')"),
+    ),
+    "latency_regression": Detection(
+        ("url", "elapsed"),
+        _p95_regression("url", min_w=5, min_b=20, ratio=2.0, min_delta_ms=200),
+        row_filter="elapsed IS NOT NULL",
+    ),
+    "tail_latency": Detection(
+        ("url", "elapsed"),
+        _base_group_sql(
+            "url,\n"
+            "        round(quantileTDigest(0.99)(elapsed) / 1000.0, 0) AS p99_ms,\n"
+            "        round(quantileTDigest(0.50)(elapsed) / 1000.0, 0) AS p50_ms,\n"
+            "        round(quantileTDigest(0.99)(elapsed) / nullIf(quantileTDigest(0.50)(elapsed), 0), 1) AS ratio,\n"
+            "        count() AS total",
+            "url",
+            having="total >= 20 AND ratio > 5",
+            order_by="ratio DESC",
+            limit=15,
+        ),
+        row_filter="elapsed IS NOT NULL",
+        window_only=True,
+    ),
+    "cipher_spread": Detection(("ip", "tls_ciphers_sha"), _fingerprint_spread("tls_ciphers_sha", with_ratio=False)),
+    "request_size_anomaly": Detection(
+        ("ip", "req_header_bytes"),
+        _per_ip_outlier("req_header_bytes", 3, "", " ORDER BY w.max_bytes DESC LIMIT 15", ("max_bytes", "avg_bytes")),
+        row_filter="req_header_bytes > 0",
+    ),
+    "connection_abuse": Detection(
+        ("ip", "conn_requests"),
+        _per_ip_outlier(
+            "conn_requests",
+            5,
+            " AND max_reqs >= 50",
+            " AND w.max_reqs >= 50 ORDER BY w.max_reqs DESC LIMIT 15",
+            ("max_reqs", "avg_reqs"),
+        ),
+        row_filter="conn_requests > 0",
+    ),
+    "region_latency": Detection(
+        ("server_region", "elapsed", "ottfb"),
+        _p95_regression(
+            "server_region",
+            extra_select=(
+                ",\n        if(countIf(is_w AND ottfb IS NOT NULL) >= 20,\n"
+                "           round(quantileTDigestIf(0.95)(ottfb, is_w AND ottfb IS NOT NULL) / 1000.0, 0), NULL) AS ottfb_p95"
+            ),
+        ),
+        row_filter="elapsed IS NOT NULL AND server_region != ''",
+    ),
+    "origin_latency_spike": Detection(
+        ("ottfb", "url"),
+        f"""
+    , overall AS (
+        SELECT {_P95}(ottfb, is_w) / 1000.0 AS w_p95, {_P95}(ottfb, is_b) / 1000.0 AS b_p95 FROM base
+    ),
+    url_stats AS (
+        SELECT url, count() AS requests, round(quantileTDigest(0.95)(ottfb) / 1000.0, 1) AS p95_ms
+        FROM base WHERE is_w GROUP BY url HAVING requests >= 10
+    )
+    SELECT u.url, u.p95_ms, o.w_p95, o.b_p95, u.requests
+    FROM url_stats u CROSS JOIN overall o
+    WHERE o.w_p95 > o.b_p95 * 2
+    ORDER BY u.p95_ms DESC LIMIT 10
+    """,
+        row_filter="ottfb IS NOT NULL",
+    ),
+    "origin_error_rate": Detection(
+        ("ost",),
+        """
+    , totals AS (
+        SELECT countIf(is_w) AS w_total, countIf(is_b) AS b_total,
+               countIf(is_w AND ost >= 500) AS w_5xx, countIf(is_b AND ost >= 500) AS b_5xx
+        FROM base
+    ),
+    by_status AS (SELECT ost AS status, count() AS w_cnt FROM base WHERE is_w AND ost >= 500 GROUP BY ost)
+    SELECT s.status, s.w_cnt, t.w_total, t.b_total, t.w_5xx, t.b_5xx
+    FROM by_status s CROSS JOIN totals t
+    WHERE (t.w_5xx * 100.0 / nullIf(t.w_total, 0)) >= 1.0
+      AND (t.w_5xx * 100.0 / nullIf(t.w_total, 0)) > (t.b_5xx * 100.0 / nullIf(t.b_total, 0)) * 2
+    """,
+        row_filter="ost IS NOT NULL",
+    ),
+    "origin_retries": Detection(
+        ("url", "oretries"),
+        _base_group_sql(
+            "url, count() AS requests, round(avg(oretries), 2) AS avg_retries, max(oretries) AS max_retries",
+            "url",
+            having="requests >= 5",
+            order_by="avg_retries DESC",
+            limit=10,
+        ),
+        row_filter="oretries > 0",
+        window_only=True,
+    ),
+    "origin_ip_failure": Detection(
+        ("oip", "ost"),
+        """
+    , stats AS (
+        SELECT oip, count() AS requests, round(countIf(ost >= 500) * 100.0 / nullIf(count(), 0), 1) AS error_pct
+        FROM base GROUP BY oip HAVING requests >= 10
+    ),
+    med AS (SELECT quantileExactInclusive(0.5)(error_pct) AS median_rate FROM stats)
+    SELECT s.oip, s.requests, s.error_pct, m.median_rate
+    FROM stats s CROSS JOIN med m
+    WHERE s.error_pct > m.median_rate * 3 AND s.error_pct > 5
+    ORDER BY s.error_pct DESC
+    """,
+        row_filter="oip != '' AND ost IS NOT NULL",
+        window_only=True,
+    ),
+    "content_discovery": Detection(
+        ("ip", "url", "status"),
+        _base_group_sql(
+            "ip,\n"
+            "        countIf(is_w AND status = 404) AS w_404,\n"
+            "        countIf(is_w) AS w_total,\n"
+            "        uniqExactIf(url, is_w AND status = 404) AS w_distinct_404,\n"
+            "        countIf(is_b AND status = 404) AS b_404",
+            "ip",
+            having="w_404 >= 20 AND w_404 * 1.0 / nullIf(w_total, 0) >= 0.7 AND w_distinct_404 >= 15",
+            order_by="w_404 DESC",
+            limit=15,
+        ),
+        row_filter="ip != '' AND url != ''",
+    ),
+    "referer_monoculture": Detection(("referer",), _share_spike("referer", "0.20", extra_row="WHERE referer != ''")),
+    "method_drift": Detection(
+        ("method",),
+        _share_spike(
+            "method",
+            "0.10",
+            extra_row="WHERE method != '' AND upper(method) NOT IN ('GET', 'HEAD', 'OPTIONS')",
+            min_w_cnt=20,
+            multiplier=2,
+            delta="0.05",
+            w_first=True,
+        ),
+    ),
+    "new_asn_traffic": Detection(("asn",), _new_traffic("asn", 20, where="asn IS NOT NULL")),
+    "asn_hosting_shift": Detection(
+        ("asn", "p_type"),
+        _base_group_sql(
+            "asn,\n"
+            "        countIf(is_w AND p_type = 'hosting') AS w_hosting,\n"
+            "        countIf(is_w) AS w_total,\n"
+            "        countIf(is_b AND p_type = 'hosting') AS b_hosting,\n"
+            "        countIf(is_b) AS b_total",
+            "asn",
+            having="w_total >= 50 AND (w_hosting * 1.0 / w_total) >= 0.3\n"
+            "       AND (b_total = 0 OR (w_hosting * 1.0 / w_total) >= (b_hosting * 1.0 / nullIf(b_total, 0)) * 3 + 0.10)",
+            order_by="w_hosting DESC",
+            limit=15,
+        ),
+        row_filter="asn IS NOT NULL AND p_type != ''",
+    ),
+    "metro_delivery_degradation": Detection(
+        ("metro", "delivery_rate"),
+        _base_group_sql(
+            "metro,\n"
+            "        quantileTDigestIf(0.5)(delivery_rate, is_w) AS w_med,\n"
+            "        quantileTDigestIf(0.5)(delivery_rate, is_b) AS b_med,\n"
+            "        countIf(is_w) AS w_total,\n"
+            "        countIf(is_b) AS b_total",
+            "metro",
+            having="w_total >= 20 AND b_total >= 50 AND w_med > 0 AND b_med > 0 AND w_med <= b_med * 0.5",
+            order_by="(b_med - w_med) DESC",
+            limit=15,
+        ),
+        row_filter="metro != '' AND delivery_rate > 0",
+    ),
+    "connection_type_mix": Detection(
+        ("c_type", "c_speed"),
+        _share_spike("c_type, c_speed", "0.15", min_w_cnt=20, multiplier=2, delta="0.05", limit=15, w_first=True),
+        row_filter="c_type != ''",
+    ),
+    "pop_latency_regression": Detection(
+        ("pop", "elapsed"),
+        _p95_regression("pop"),
+        row_filter="pop != '' AND elapsed IS NOT NULL",
+    ),
+    "http3_fallback": Detection(
+        ("transport",),
+        """
+    SELECT w_quic, w_total, b_quic, b_total FROM (
+        SELECT countIf(is_w AND lower(transport) = 'quic') AS w_quic, countIf(is_w) AS w_total,
+               countIf(is_b AND lower(transport) = 'quic') AS b_quic, countIf(is_b) AS b_total
+        FROM base
+    )
+    WHERE w_total >= 100 AND b_total >= 100
+      AND b_quic * 1.0 / nullIf(b_total, 0) >= 0.30
+      AND w_quic * 1.0 / nullIf(w_total, 0) <= b_quic * 1.0 / nullIf(b_total, 0) - 0.20
+    """,
+        row_filter="transport != ''",
+    ),
+    "cache_hit_cliff": Detection(
+        ("cache",),
+        f"""
+    SELECT w_hits, w_cacheable, b_hits, b_cacheable FROM (
+        SELECT countIf(is_w AND {_HIT}) AS w_hits, countIf(is_w AND {_CACHEABLE}) AS w_cacheable,
+               countIf(is_b AND {_HIT}) AS b_hits, countIf(is_b AND {_CACHEABLE}) AS b_cacheable
+        FROM base
+    )
+    WHERE w_cacheable >= 100 AND b_cacheable >= 200
+      AND (b_hits * 1.0 / nullIf(b_cacheable, 0)) >= 0.40
+      AND (w_hits * 1.0 / nullIf(w_cacheable, 0)) <= (b_hits * 1.0 / nullIf(b_cacheable, 0)) - 0.15
+    """,
+    ),
+    "payload_compression_regression": Detection(
+        ("url", "status", "resp_bytes", "resp_header_content_encoding"),
+        _rate_regression(
+            "uncompressed",
+            from_table=(
+                "(\n"
+                "        SELECT url, is_w, is_b,\n"
+                "               NOT match(lower(resp_header_content_encoding), 'gzip|br|zstd|deflate') AS uncompressed\n"
+                "        FROM base\n"
+                "    )"
+            ),
+        ),
+        row_filter="status = 200 AND resp_bytes >= 1024 AND url != '' AND match(url, {compress_regex:String})",
+    ),
+    "session_harvesting": Detection(
+        ("ip", "cookie_session"),
+        """
+    , win AS (
+        SELECT ip, uniqExactIf(cookie_session, is_w) AS w_sessions, countIf(is_w) AS w_reqs,
+               uniqExactIf(cookie_session, is_b) AS b_sessions
+        FROM base GROUP BY ip HAVING w_sessions >= 20
+    )
+    SELECT ip, w_sessions, w_reqs, b_sessions FROM win
+    WHERE w_sessions > b_sessions * 2 + 10
+    ORDER BY w_sessions DESC LIMIT 15
+    """,
+        row_filter="ip != '' AND cookie_session != ''",
+    ),
+    "timeout_split": Detection(
+        ("oconnect_ms", "ottfb"),
+        f"""
+    , prepared AS (
+        SELECT oconnect_ms, greatest(ottfb / 1000.0 - oconnect_ms, 0) AS read_ms, is_w, is_b FROM base
+    ),
+    agg AS (
+        SELECT {_P95}(oconnect_ms, is_w) AS w_conn, {_P95}(oconnect_ms, is_b) AS b_conn,
+               {_P95}(read_ms, is_w) AS w_read, {_P95}(read_ms, is_b) AS b_read,
+               countIf(is_w) AS w_total, countIf(is_b) AS b_total
+        FROM prepared
+    )
+    SELECT w_conn, b_conn, w_read, b_read, w_total, b_total FROM agg
+    WHERE w_total >= 50 AND b_total >= 100
+      AND ((w_conn >= b_conn * 2 AND w_conn - b_conn >= 50) OR (w_read >= b_read * 2 AND w_read - b_read >= 100))
+    """,
+        row_filter="oconnect_ms IS NOT NULL AND ottfb IS NOT NULL",
+    ),
+    "waf_signal_spikes": Detection(
+        ("signal",),
+        _base_group_sql(
+            "signal, countIf(is_w) AS w_cnt, countIf(is_b) AS b_cnt,\n"
+            "        w_cnt * 1.0 / greatest(b_cnt * 1.0 / {baseline_hours:Float64} * {window_hours:Float64}, 0.5) AS spike_ratio",
+            "signal",
+            having="w_cnt >= 3 AND w_cnt > b_cnt * 1.0 / {baseline_hours:Float64} * {window_hours:Float64} * 2 + 2",
+            order_by="spike_ratio DESC",
+            limit=15,
+        ),
+        row_filter="custom_fields['waf_sig'] != ''",
+    ),
+    "low_and_slow": Detection(
+        ("ip", "url", "sec"),
+        _base_group_sql(
+            "ip, count() AS hits, uniqExact(url) AS distinct_paths, (max(sec) - min(sec)) AS span_s,\n"
+            "           round(count() * 1.0 / nullIf(max(sec) - min(sec), 0), 5) AS rps",
+            "ip",
+            having="hits >= 5 AND distinct_paths >= 3 AND span_s >= 600\n"
+            "       AND count() * 1.0 / nullIf(max(sec) - min(sec), 0) < 0.2",
+            order_by="distinct_paths DESC, span_s DESC",
+            limit=15,
+        ),
+        row_filter="ip != '' AND url != '' AND match(url, {probe_regex:String})",
+    ),
+    "credential_enumeration": Detection(
+        ("ip", "url", "status"),
+        _base_group_sql(
+            "ip,\n"
+            "        countIf(is_w AND status IN (401, 403)) AS w_denied,\n"
+            "        countIf(is_w) AS w_attempts,\n"
+            "        uniqExactIf(url, is_w) AS w_paths,\n"
+            "        countIf(is_b AND status IN (401, 403)) AS b_denied",
+            "ip",
+            having="w_denied >= 20 AND w_denied * 1.0 / nullIf(w_attempts, 0) >= 0.5\n"
+            "       AND w_denied > b_denied / greatest({baseline_hours:Float64}, 1.0) * {window_hours:Float64} * 3 + 5",
+            order_by="w_denied DESC",
+            limit=15,
+        ),
+        row_filter="ip != '' AND url != '' AND match(url, {auth_regex:String})",
+    ),
+    "network_asn_health": Detection(
+        ("asn", "ploss", "rtt_var", "retrans"),
+        f"""
+    , health AS (
+        SELECT asn,
+            avgIf(ploss, is_w) AS w_ploss, avgIf(ploss, is_b) AS b_ploss,
+            {_P95}(rtt_var, is_w) AS w_jitter, {_P95}(rtt_var, is_b) AS b_jitter,
+            avgIf(retrans, is_w) AS w_retrans, avgIf(retrans, is_b) AS b_retrans,
+            countIf(is_w) AS w_total, countIf(is_b) AS b_total
+        FROM base GROUP BY asn HAVING w_total >= 50 AND b_total >= 100
+    )
+    SELECT asn, w_ploss, b_ploss, w_jitter, b_jitter, w_retrans, b_retrans, w_total, b_total FROM health
+    WHERE (
+            (coalesce(w_ploss, 0) >= 0.02 AND coalesce(w_ploss, 0) >= coalesce(b_ploss, 0) * 2 + 0.005)
+         OR (w_jitter >= b_jitter * 2 AND w_jitter - b_jitter >= 20000)
+         OR (coalesce(w_retrans, 0) >= coalesce(b_retrans, 0) * 2 + 0.5)
+       )
+    ORDER BY coalesce(w_ploss, 0) DESC, w_jitter DESC LIMIT 15
+    """,
+        row_filter="asn IS NOT NULL",
+    ),
+    "city_surges": Detection(
+        ("city", "region", "country"),
+        _base_group_sql(
+            f"{_CITY_LABEL}, countIf(is_w) AS w_cnt, countIf(is_b) AS b_cnt,\n"
+            "        w_cnt * 1.0 / greatest(b_cnt * 1.0 / greatest({baseline_hours:Float64}, 1.0) * {window_hours:Float64}, 1.0)\n"
+            "            AS spike_ratio",
+            "city, region, country",
+            having="w_cnt >= 20 AND w_cnt > b_cnt / greatest({baseline_hours:Float64}, 1.0) * {window_hours:Float64} * 3",
+            order_by="spike_ratio DESC",
+            limit=15,
+        ),
+        row_filter="city != ''",
+    ),
+    "city_error_spikes": Detection(
+        ("city", "region", "country", "status"),
+        _error_spike(
+            _CITY_LABEL,
+            group_by="city, region, country",
+            status_min=400,
+            min_w=10,
+            min_rate="0.10",
+            min_b=50,
+            multiplier=3,
+        ),
+        row_filter="city != ''",
+    ),
+    "city_latency_regressions": Detection(
+        ("city", "region", "country", "elapsed"),
+        _p95_regression(_CITY_LABEL, group_by="city, region, country", min_w=10, min_b=50, ratio=3.0, min_delta_ms=500),
+        row_filter="city != '' AND elapsed IS NOT NULL",
+    ),
+    "new_city_traffic": Detection(
+        ("city", "region", "country"),
+        _new_traffic(_CITY_LABEL, 5, group_by="city, region, country"),
+        row_filter="city != ''",
+    ),
+    "asn_metro_performance": Detection(
+        ("asn", "metro", "tcp_rtt", "country"),
+        _base_group_sql(
+            "asn, metro,\n"
+            "        quantileTDigestIf(0.50)(tcp_rtt, is_w) / 1000.0 AS w_med,\n"
+            "        quantileTDigestIf(0.50)(tcp_rtt, is_b) / 1000.0 AS b_med,\n"
+            "        countIf(is_w) AS w_total, countIf(is_b) AS b_total",
+            "asn, metro",
+            having="w_total >= 20 AND b_total >= 50 AND w_med >= b_med * 1.5 AND w_med - b_med >= 20",
+            order_by="(w_med - b_med) DESC",
+            limit=15,
+        ),
+        row_filter="asn IS NOT NULL AND metro != '' AND tcp_rtt > 0 AND country = 'US'",
+    ),
+    "cache_ttl_mismatch": Detection(
+        ("url", "ttl", "hits", "age"),
+        _base_group_sql(
+            "url AS label, round(avg(ttl), 0) AS avg_ttl, round(avg(hits), 1) AS avg_hits, round(avg(age), 0) AS avg_age,\n"
+            "           count() AS sample_count",
+            "url",
+            having="sample_count >= 10 AND avg(hits) < 2 AND avg(ttl) > 60",
+            order_by="avg(ttl) DESC",
+            limit=20,
+        ),
+        row_filter="ttl > 0 AND hits IS NOT NULL AND age IS NOT NULL",
+        window_only=True,
+    ),
+    "image_optimization_opportunities": Detection(
+        ("url", "status", "resp_bytes", "ua"),
+        _base_group_sql(
+            "url, count() AS request_count, sum(resp_bytes) AS total_bytes, round(avg(resp_bytes) / 1024, 1) AS avg_kb,\n"
+            "           (sum(if(ua ILIKE '%Mobi%' OR ua ILIKE '%Android%' OR ua ILIKE '%iPhone%', 1, 0)) * 1.0\n"
+            "            / nullIf(count(), 0)) AS mobile_ratio",
+            "url",
+            having="total_bytes > 1024 * 512",
+            order_by="total_bytes DESC",
+            limit=15,
+        ),
+        row_filter=(
+            "status = 200 AND (url ILIKE '%.jpg%' OR url ILIKE '%.jpeg%' OR url ILIKE '%.png%' OR url ILIKE '%.gif%') "
+            "AND url NOT ILIKE '%auto=webp%' AND url NOT ILIKE '%format=auto%' "
+            "AND url NOT ILIKE '%format=webp%' AND url NOT ILIKE '%format=avif%'"
+        ),
+        window_only=True,
+    ),
+    "shield_path_degradation": Detection(
+        ("rid", "prid", "pop", "ottfb", "edge"),
+        """
+    , edge_logs AS (SELECT rid, pop, ottfb, is_w, is_b FROM base WHERE lower(edge) IN ('1', 'true')),
+    shield_logs AS (SELECT prid, pop, ottfb FROM base WHERE lower(edge) IN ('0', 'false') AND prid != ''),
+    joined AS (
+        SELECT e.pop AS edge_pop,
+               if(ifNull(s.prid, '') = '', 'Direct to Origin', s.pop) AS shield_pop,
+               (e.ottfb - ifNull(s.ottfb, 0)) / 1000.0 AS transit_ms,
+               e.is_w AS is_w, e.is_b AS is_b
+        FROM edge_logs e LEFT JOIN shield_logs s ON s.prid = e.rid
+    )
+    SELECT edge_pop, shield_pop,
+        quantileTDigestIf(0.50)(transit_ms, is_w) AS w_p50,
+        quantileTDigestIf(0.50)(transit_ms, is_b) AS b_p50,
+        countIf(is_w) AS w_cnt
+    FROM joined GROUP BY edge_pop, shield_pop
+    HAVING w_cnt >= 5 AND w_p50 > b_p50 * 1.5
+    ORDER BY (w_p50 / nullIf(b_p50, 0)) DESC LIMIT 20
+    """,
+        row_filter="ottfb IS NOT NULL",
+    ),
+    "repeated_patterns": Detection(
+        ("sec", "ip", "ua"),
+        _beaconing("ip", "uniqExact(ua)"),
+        row_filter="ip != '' AND NOT (ua != '' AND match(ua, {bot_ua_regex:String}))",
+        window_only=True,
+    ),
+    "stale_browser_version": Detection(
+        ("ip", "ua", "chrome_version"),
+        """
+    , win AS (
+        SELECT chrome_version, countIf(is_w) AS w_reqs, uniqExactIf(ip, is_w) AS w_ips, countIf(is_b) AS b_reqs
+        FROM base GROUP BY chrome_version HAVING w_reqs >= 500
+    )
+    SELECT concat('Chrome ', chrome_version) AS label, w_reqs, w_ips,
+        w_reqs * 1.0 / greatest(b_reqs / greatest({baseline_hours:Float64}, 1.0) * {window_hours:Float64}, 1.0)
+            AS surge_ratio
+    FROM win
+    WHERE w_reqs > b_reqs / greatest({baseline_hours:Float64}, 1.0) * {window_hours:Float64} * 2.5
+    ORDER BY surge_ratio DESC LIMIT 10
+    """,
+        row_filter=(
+            "positionCaseInsensitive(ua, 'chrome') > 0 AND positionCaseInsensitive(ua, 'bot') = 0 "
+            "AND positionCaseInsensitive(ua, 'crawler') = 0 AND positionCaseInsensitive(ua, 'spider') = 0 "
+            "AND chrome_version != '' AND toInt32OrZero(chrome_version) < 131"
+        ),
+    ),
+    "orphaned_deep_crawl": Detection(
+        ("ip", "url", "referer"),
+        """
+    , win AS (
+        SELECT ip, countIf(is_w) AS w_reqs, uniqExactIf(url, is_w) AS w_distinct_urls, countIf(is_b) AS b_reqs
+        FROM base GROUP BY ip HAVING w_reqs >= 50 AND w_distinct_urls >= 10
+    )
+    SELECT ip AS label, w_reqs, w_distinct_urls, b_reqs, w_reqs * 1.0 / greatest(toFloat64(w_distinct_urls), 1.0) AS requests_per_url,
+        w_reqs * 1.0 / greatest(b_reqs / greatest({baseline_hours:Float64}, 1.0) * {window_hours:Float64}, 1.0)
+            AS surge_ratio
+    FROM win ORDER BY w_reqs DESC LIMIT 15
+    """,
+        row_filter="url LIKE '/%/%/%' AND url NOT LIKE '%.%' AND (referer = '' OR referer = '-')",
+    ),
+    "residential_fingerprint_dispersion": Detection(
+        ("ja4", "ip", "asn", "p_type"),
+        _base_group_sql(
+            "ja4 AS label, uniqExactIf(ip, is_w) AS w_ips, uniqExactIf(asn, is_w) AS w_asns, countIf(is_w) AS w_requests,\n"
+            "        uniqExactIf(ip, is_b) AS b_ips,\n"
+            "        w_asns * 1.0 / greatest(toFloat64(uniqExactIf(asn, is_b)), 1.0) AS asn_expansion_ratio",
+            "ja4",
+            having="w_ips >= 30 AND w_asns >= 5",
+            order_by="asn_expansion_ratio DESC",
+            limit=10,
+        ),
+        row_filter="ja4 != '' AND p_type != 'hosting'",
+    ),
+    "crawler_disparity": Detection(
+        ("ua", "referer", "ip", "resp_bytes"),
+        """
+    , tagged AS (
+        SELECT
+            ip,
+            is_w,
+            is_b,
+            coalesce(resp_bytes, 0) AS r_bytes,
+            extract(
+                lower(ua),
+                '([a-z0-9_.-]*(?:bot|crawler|spider|slurp|archiver|scraper|externalagent|extended|other|preview)[a-z0-9_.-]*|headless[a-z0-9_.-]*|python-[a-z0-9_.-]+|go-http-client|curl|wget|scrapy|aiohttp|httpx|okhttp|axios)'
+            ) AS raw_tok,
+            extract(lower(ua), 'https?://(?:www\\.)?([^/.:;\\s)]+)') AS ua_dom,
+            extract(lower(ua), '([a-z0-9]+)-(?:user|externalfetcher)') AS user_fetcher_stem,
+            extract(lower(referer), 'https?://(?:www\\.)?([^/.:;\\s]+)') AS ref_dom
+        FROM base
+    ),
+    classified AS (
+        SELECT
+            ip,
+            is_w,
+            is_b,
+            r_bytes,
+            raw_tok,
+            ua_dom,
+            (raw_tok != '') AS is_crawler,
+            (raw_tok = '') AS is_human,
+            if(
+                replaceRegexpOne(
+                    raw_tok,
+                    '(-searchbot|-assistbot|-externalagent|-extended|-user|searchbot|assistbot|externalagent|extended|crawler|spider|slurp|archiver|scraper|preview|other|bot).*$',
+                    ''
+                ) != '',
+                replaceRegexpOne(
+                    raw_tok,
+                    '(-searchbot|-assistbot|-externalagent|-extended|-user|searchbot|assistbot|externalagent|extended|crawler|spider|slurp|archiver|scraper|preview|other|bot).*$',
+                    ''
+                ),
+                raw_tok
+            ) AS bot_stem,
+            if(user_fetcher_stem != '', user_fetcher_stem, ref_dom) AS ref_stem
+        FROM tagged
+    ),
+    site_win AS (
+        SELECT greatest(sumIf(r_bytes, is_w), 1) AS total_site_bytes FROM classified
+    ),
+    crawler_traffic AS (
+        SELECT
+            bot_stem,
+            min(raw_tok) AS raw_tok,
+            max(ua_dom) AS ua_dom,
+            countIf(is_w) AS w_crawls,
+            countIf(is_b) AS b_crawls,
+            sumIf(r_bytes, is_w) AS w_bytes,
+            sumIf(r_bytes, is_b) AS b_bytes
+        FROM classified
+        WHERE is_crawler AND bot_stem != ''
+        GROUP BY bot_stem
+        HAVING w_crawls >= 50
+    ),
+    human_refs AS (
+        SELECT ip, is_w, is_b, ref_stem
+        FROM classified
+        WHERE is_human AND ip != '' AND ref_stem != ''
+    ),
+    referred AS (
+        SELECT
+            c.bot_stem AS bot_stem,
+            uniqExactIf(h.ip, h.is_w) AS w_referrals,
+            uniqExactIf(h.ip, h.is_b) AS b_referrals
+        FROM crawler_traffic c
+        CROSS JOIN human_refs h
+        WHERE c.bot_stem = h.ref_stem
+           OR (
+               length(replaceRegexpAll(c.bot_stem, '[aeiou]', '')) >= 3
+               AND replaceRegexpAll(c.bot_stem, '[aeiou]', '') = replaceRegexpAll(h.ref_stem, '[aeiou]', '')
+           )
+           OR (
+               length(c.bot_stem) >= 3 AND length(h.ref_stem) >= 3
+               AND (position(h.ref_stem, c.bot_stem) > 0 OR position(c.bot_stem, h.ref_stem) > 0)
+           )
+           OR (c.ua_dom != '' AND c.ua_dom = h.ref_stem)
+        GROUP BY c.bot_stem
+    )
+    SELECT c.raw_tok AS label, c.w_crawls, ifNull(r.w_referrals, 0) AS w_referrals, c.w_bytes,
+        c.w_crawls * 1.0 / greatest(ifNull(r.w_referrals, 0), 1) AS crawls_per_referral,
+        c.b_crawls * 1.0 / greatest(ifNull(r.b_referrals, 0), 1) AS baseline_crawls_per_referral,
+        c.w_bytes * 1.0 / greatest(ifNull(r.w_referrals, 0), 1) AS bytes_per_referral,
+        c.b_bytes * 1.0 / greatest(ifNull(r.b_referrals, 0), 1) AS baseline_bytes_per_referral,
+        round(c.w_bytes * 100.0 / s.total_site_bytes, 2) AS bandwidth_share_pct
+    FROM crawler_traffic c CROSS JOIN site_win s LEFT JOIN referred r ON c.bot_stem = r.bot_stem
+    WHERE c.w_crawls >= 50
+      AND (ifNull(r.w_referrals, 0) = 0 OR c.w_crawls * 1.0 / greatest(ifNull(r.w_referrals, 0), 1) >= 100.0 OR c.w_bytes * 1.0 / greatest(ifNull(r.w_referrals, 0), 1) >= 1048576.0)
+    ORDER BY crawls_per_referral DESC, c.w_bytes DESC LIMIT 10
+    """,
+        row_filter="ua != ''",
+    ),
+}
+
+
+def botnet_grouping(fingerprint_column: str) -> Detection:
+    """Botnet grouping keyed on the JA4 fingerprint when logged, else JA3."""
+    if fingerprint_column not in ("ja4", "ja3"):
+        raise ValueError("fingerprint column must be ja4 or ja3")
+    return Detection(("ip", fingerprint_column), _fingerprint_spread(fingerprint_column, with_ratio=True))
+
 
 _MAX_WORKERS = 12
 _FIELD_SAMPLE_ROWS = 1000
@@ -4993,21 +6033,13 @@ CacheRegistry.register("hs_security_aggregates_memo", _security_memo.cache)
 
 _WHERE = "__WHERE__"
 
-_REQ_HEADER_BUCKETS = (
-    (256, "0-256B"),
-    (512, "256-512B"),
-    (768, "512-768B"),
-    (1024, "768B-1KB"),
-    (1536, "1-1.5KB"),
-    (2048, "1.5-2KB"),
-    (3072, "2-3KB"),
-    (4096, "3-4KB"),
-    (6144, "4-6KB"),
-    (8192, "6-8KB"),
-    (12288, "8-12KB"),
-    (16384, "12-16KB"),
-    (24576, "16-24KB"),
-    (32768, "24-32KB"),
+_REQ_HEADER_BUCKETS = tuple(
+    (int(k), v)
+    for k, v in (
+        s.split(":")
+        for s in "256:0-256B 512:256-512B 768:512-768B 1024:768B-1KB 1536:1-1.5KB 2048:1.5-2KB 3072:2-3KB "
+        "4096:3-4KB 6144:4-6KB 8192:6-8KB 12288:8-12KB 16384:12-16KB 24576:16-24KB 32768:24-32KB".split()
+    )
 )
 _REQ_HEADER_LAST = ">32KB"
 _CONN_REUSE_BUCKETS = ((1, "1 (None)"), (5, "2-5"), (20, "6-20"), (100, "21-100"))
@@ -5017,7 +6049,6 @@ from backend.utils.pop_utils import _effective_pop_lat_lon_map
 
 _POP_COORDS = tuple((code, lat, lon) for code, (lat, lon) in sorted(_effective_pop_lat_lon_map().items()))
 _POP_DEFAULT = (38.0, -97.0)
-
 _IS_IPV6 = "lower(custom_fields['is_ipv6']) IN ('1', 'true', 't', 'yes')"
 _IS_BOT = "lower(custom_fields['is_bot']) IN ('1', 'true', 't', 'yes')"
 
@@ -5095,14 +6126,9 @@ def _tls_fingerprints(service: HighScaleService, scope: _Scope) -> list[dict[str
         service,
         scope,
         "tls_fingerprints",
-        """
-        SELECT custom_fields['tls_ciphers_sha'] AS fingerprint,
-               uniqExact(client_ip) AS ip_count,
-               count() AS request_count
-        FROM request_facts
-        WHERE __WHERE__ AND custom_fields['tls_ciphers_sha'] != ''
-        GROUP BY fingerprint ORDER BY request_count DESC LIMIT 20
-        """,
+        "SELECT custom_fields['tls_ciphers_sha'] AS fingerprint, uniqExact(client_ip) AS ip_count, count() AS request_count "
+        "FROM request_facts WHERE __WHERE__ AND custom_fields['tls_ciphers_sha'] != '' "
+        "GROUP BY fingerprint ORDER BY request_count DESC LIMIT 20",
     )
     return [
         {"fingerprint": r["fingerprint"], "ip_count": int(r["ip_count"]), "request_count": int(r["request_count"])}
@@ -5115,14 +6141,11 @@ def _fingerprint_coverage(service: HighScaleService, scope: _Scope) -> dict[str,
         service,
         scope,
         "fingerprint_coverage",
-        """
-        SELECT count() AS total_rows, countIf(custom_fields['tls_ciphers_sha'] != '') AS populated
-        FROM request_facts WHERE __WHERE__
-        """,
+        "SELECT count() AS total_rows, countIf(custom_fields['tls_ciphers_sha'] != '') AS populated "
+        "FROM request_facts WHERE __WHERE__",
     )
     total = int(rows[0]["total_rows"]) if rows else 0
-    populated = int(rows[0]["populated"]) if rows else 0
-    return {"tls_ciphers_sha": populated / total if total > 0 else 0.0}
+    return {"tls_ciphers_sha": (int(rows[0]["populated"]) / total) if rows and total > 0 else 0.0}
 
 
 def _req_size_dist(service: HighScaleService, scope: _Scope) -> list[dict[str, Any]]:
@@ -5132,15 +6155,9 @@ def _req_size_dist(service: HighScaleService, scope: _Scope) -> list[dict[str, A
             service,
             scope,
             "req_size_dist",
-            f"""
-            SELECT {case} AS bucket, count() AS count, min(h) AS min_val
-            FROM (
-                SELECT toUInt64OrNull(custom_fields['req_header_bytes']) AS h
-                FROM request_facts WHERE __WHERE__
-            )
-            WHERE h IS NOT NULL
-            GROUP BY bucket ORDER BY min_val
-            """,
+            f"SELECT {case} AS bucket, count() AS count, min(h) AS min_val FROM "
+            "(SELECT toUInt64OrNull(custom_fields['req_header_bytes']) AS h FROM request_facts WHERE __WHERE__) "
+            "WHERE h IS NOT NULL GROUP BY bucket ORDER BY min_val",
         )
     )
 
@@ -5150,15 +6167,9 @@ def _top_ips_header(service: HighScaleService, scope: _Scope, mask_ips: bool) ->
         service,
         scope,
         "top_ips_header",
-        """
-        SELECT client_ip AS ip, max(h) AS max_header
-        FROM (
-            SELECT client_ip, toUInt64OrNull(custom_fields['req_header_bytes']) AS h
-            FROM request_facts WHERE __WHERE__ AND client_ip != ''
-        )
-        WHERE h IS NOT NULL
-        GROUP BY ip ORDER BY max_header DESC LIMIT 10
-        """,
+        "SELECT client_ip AS ip, max(h) AS max_header FROM "
+        "(SELECT client_ip, toUInt64OrNull(custom_fields['req_header_bytes']) AS h FROM request_facts "
+        "WHERE __WHERE__ AND client_ip != '') WHERE h IS NOT NULL GROUP BY ip ORDER BY max_header DESC LIMIT 10",
     )
     return [{"ip": _maybe_mask(r["ip"], mask_ips), "max_header": int(r["max_header"])} for r in rows]
 
@@ -5170,15 +6181,9 @@ def _conn_reuse_dist(service: HighScaleService, scope: _Scope) -> list[dict[str,
             service,
             scope,
             "conn_reuse_dist",
-            f"""
-            SELECT {case} AS bucket, count() AS count, min(c) AS min_val
-            FROM (
-                SELECT toUInt64OrNull(custom_fields['conn_requests']) AS c
-                FROM request_facts WHERE __WHERE__
-            )
-            WHERE c IS NOT NULL AND c > 0
-            GROUP BY bucket ORDER BY min_val
-            """,
+            f"SELECT {case} AS bucket, count() AS count, min(c) AS min_val FROM "
+            "(SELECT toUInt64OrNull(custom_fields['conn_requests']) AS c FROM request_facts WHERE __WHERE__) "
+            "WHERE c IS NOT NULL AND c > 0 GROUP BY bucket ORDER BY min_val",
         )
     )
 
@@ -5188,12 +6193,8 @@ def _ipv6_adoption(service: HighScaleService, scope: _Scope) -> list[dict[str, A
         service,
         scope,
         "ipv6_adoption",
-        f"""
-        SELECT toUnixTimestamp(toStartOfHour(event_timestamp)) AS bucket_ts,
-               countIf({_IS_IPV6}) * 100.0 / count() AS pct
-        FROM request_facts WHERE __WHERE__
-        GROUP BY bucket_ts ORDER BY bucket_ts
-        """,
+        f"SELECT toUnixTimestamp(toStartOfHour(event_timestamp)) AS bucket_ts, countIf({_IS_IPV6}) * 100.0 / count() AS pct "
+        "FROM request_facts WHERE __WHERE__ GROUP BY bucket_ts ORDER BY bucket_ts",
     )
     return [{"time": _sec_iso(r["bucket_ts"]), "pct": float(r["pct"])} for r in rows]
 
@@ -5203,11 +6204,8 @@ def _proxy_dist(service: HighScaleService, scope: _Scope) -> list[dict[str, Any]
         service,
         scope,
         "proxy_dist",
-        """
-        SELECT custom_fields['p_type'] AS type, count() AS count
-        FROM request_facts WHERE __WHERE__ AND custom_fields['p_type'] != ''
-        GROUP BY type ORDER BY count DESC
-        """,
+        "SELECT custom_fields['p_type'] AS type, count() AS count FROM request_facts "
+        "WHERE __WHERE__ AND custom_fields['p_type'] != '' GROUP BY type ORDER BY count DESC",
     )
     return [{"type": r["type"], "count": int(r["count"])} for r in rows]
 
@@ -5217,17 +6215,11 @@ def _verified_bots_ts(service: HighScaleService, scope: _Scope, bucket_seconds: 
         service,
         scope,
         "verified_bots_ts",
-        f"""
-        SELECT intDiv(toUnixTimestamp(event_timestamp), {bucket_seconds}) * {bucket_seconds} AS bucket_ts,
-               replaceOne(tag, 'VERIFIED-BOT.', '') AS bot_type,
-               count() AS count
-        FROM request_facts
-        ARRAY JOIN splitByChar(',', custom_fields['waf_sig']) AS tag
-        WHERE __WHERE__
-          AND positionCaseInsensitive(custom_fields['waf_sig'], 'VERIFIED-BOT.') > 0
-          AND startsWith(tag, 'VERIFIED-BOT.')
-        GROUP BY bucket_ts, bot_type ORDER BY bucket_ts, bot_type
-        """,
+        f"SELECT intDiv(toUnixTimestamp(event_timestamp), {bucket_seconds}) * {bucket_seconds} AS bucket_ts, "
+        "replaceOne(tag, 'VERIFIED-BOT.', '') AS bot_type, count() AS count "
+        "FROM request_facts ARRAY JOIN splitByChar(',', custom_fields['waf_sig']) AS tag "
+        "WHERE __WHERE__ AND positionCaseInsensitive(custom_fields['waf_sig'], 'VERIFIED-BOT.') > 0 "
+        "AND startsWith(tag, 'VERIFIED-BOT.') GROUP BY bucket_ts, bot_type ORDER BY bucket_ts, bot_type",
     )
     return [{"time": _sec_iso(r["bucket_ts"]), "bot_type": r["bot_type"], "count": int(r["count"])} for r in rows]
 
@@ -5240,24 +6232,17 @@ _NGWAF_PROJECTION_WHERE = (
 
 def _ngwaf_summary(service: HighScaleService, scope: _Scope, limit: int | None = None) -> list[dict[str, Any]]:
     suffix = f" LIMIT {int(limit)}" if limit is not None else ""
-    if scope.filtered:
-        sql = f"""
-            SELECT custom_fields['ngwaf_bot'] AS bot_name,
-                   anyIf(custom_fields['ngwaf_wellknown_bot'], custom_fields['ngwaf_wellknown_bot'] != '') AS wk_name,
-                   anyIf(custom_fields['ngwaf_bot_category'], custom_fields['ngwaf_bot_category'] != '') AS bot_cat,
-                   count() AS request_count
-            FROM request_facts WHERE __WHERE__ AND custom_fields['ngwaf_bot'] != ''
-            GROUP BY bot_name ORDER BY request_count DESC{suffix}
-            """
-    else:
-        sql = f"""
-            SELECT value AS bot_name,
-                   anyIf(wellknown_bot_name, wellknown_bot_name != '') AS wk_name,
-                   anyIf(bot_category, bot_category != '') AS bot_cat,
-                   sum(requests) AS request_count
-            FROM security_minute_dimensions WHERE {_NGWAF_PROJECTION_WHERE}
-            GROUP BY bot_name ORDER BY request_count DESC{suffix}
-            """
+    sql = (
+        "SELECT custom_fields['ngwaf_bot'] AS bot_name, "
+        "anyIf(custom_fields['ngwaf_wellknown_bot'], custom_fields['ngwaf_wellknown_bot'] != '') AS wk_name, "
+        "anyIf(custom_fields['ngwaf_bot_category'], custom_fields['ngwaf_bot_category'] != '') AS bot_cat, "
+        "count() AS request_count FROM request_facts WHERE __WHERE__ AND custom_fields['ngwaf_bot'] != '' "
+        f"GROUP BY bot_name ORDER BY request_count DESC{suffix}"
+        if scope.filtered
+        else "SELECT value AS bot_name, anyIf(wellknown_bot_name, wellknown_bot_name != '') AS wk_name, "
+        "anyIf(bot_category, bot_category != '') AS bot_cat, sum(requests) AS request_count "
+        f"FROM security_minute_dimensions WHERE {_NGWAF_PROJECTION_WHERE} GROUP BY bot_name ORDER BY request_count DESC{suffix}"
+    )
     return _run(service, scope, "ngwaf_bots", sql)
 
 
@@ -5274,22 +6259,19 @@ def _ngwaf_verified_bots(service: HighScaleService, scope: _Scope) -> list[dict[
 
 
 def _ngwaf_verified_bots_ts(service: HighScaleService, scope: _Scope, bucket_seconds: int) -> list[dict[str, Any]]:
-    if scope.filtered:
-        sql = f"""
-            SELECT intDiv(toUnixTimestamp(event_timestamp), {bucket_seconds}) * {bucket_seconds} AS bucket_ts,
-                   custom_fields['ngwaf_bot'] AS bot_name, count() AS count
-            FROM request_facts WHERE __WHERE__ AND custom_fields['ngwaf_bot'] != ''
-            GROUP BY bucket_ts, bot_name ORDER BY bucket_ts, bot_name
-            """
-    else:
-        sql = f"""
-            SELECT intDiv(toUnixTimestamp(bucket_start), {bucket_seconds}) * {bucket_seconds} AS bucket_ts,
-                   value AS bot_name, sum(requests) AS count
-            FROM security_minute_dimensions WHERE {_NGWAF_PROJECTION_WHERE}
-            GROUP BY bucket_ts, bot_name ORDER BY bucket_ts, bot_name
-            """
-    rows = _run(service, scope, "ngwaf_verified_bots_ts", sql)
-    return [{"time": _sec_iso(r["bucket_ts"]), "bot_name": r["bot_name"], "count": int(r["count"])} for r in rows]
+    sql = (
+        f"SELECT intDiv(toUnixTimestamp(event_timestamp), {bucket_seconds}) * {bucket_seconds} AS bucket_ts, "
+        "custom_fields['ngwaf_bot'] AS bot_name, count() AS count FROM request_facts "
+        "WHERE __WHERE__ AND custom_fields['ngwaf_bot'] != '' GROUP BY bucket_ts, bot_name ORDER BY bucket_ts, bot_name"
+        if scope.filtered
+        else f"SELECT intDiv(toUnixTimestamp(bucket_start), {bucket_seconds}) * {bucket_seconds} AS bucket_ts, "
+        f"value AS bot_name, sum(requests) AS count FROM security_minute_dimensions WHERE {_NGWAF_PROJECTION_WHERE} "
+        "GROUP BY bucket_ts, bot_name ORDER BY bucket_ts, bot_name"
+    )
+    return [
+        {"time": _sec_iso(r["bucket_ts"]), "bot_name": r["bot_name"], "count": int(r["count"])}
+        for r in _run(service, scope, "ngwaf_verified_bots_ts", sql)
+    ]
 
 
 def _ngwaf_configured(service: HighScaleService) -> bool:
@@ -5310,12 +6292,9 @@ def _wellknown_bots(service: HighScaleService, scope: _Scope) -> list[dict[str, 
         service,
         scope,
         "wellknown_bots",
-        f"""
-        SELECT custom_fields['ua'] AS ua, client_ip AS ip, count() AS cnt
-        FROM request_facts
-        WHERE __WHERE__ AND custom_fields['ua'] != '' AND client_ip != ''{prefilter}
-        GROUP BY ua, ip ORDER BY cnt DESC LIMIT 10000
-        """,
+        f"SELECT custom_fields['ua'] AS ua, client_ip AS ip, count() AS cnt FROM request_facts "
+        f"WHERE __WHERE__ AND custom_fields['ua'] != '' AND client_ip != ''{prefilter} "
+        "GROUP BY ua, ip ORDER BY cnt DESC LIMIT 10000",
         **({"bot_pattern": pattern} if pattern else {}),
     )
     return summarize_wellknown_bot_rows([(r["ua"], r["ip"], int(r["cnt"])) for r in rows])
@@ -5330,76 +6309,48 @@ def _bot_efficiency(service: HighScaleService, scope: _Scope) -> list[dict[str, 
         "bot_efficiency",
         """
         WITH ua_all AS (
-            SELECT
-                custom_fields['ua'] AS key,
-                count() AS cnt,
-                ifNull(sum(toInt64OrZero(custom_fields['resp_bytes'])), 0) AS resp_bytes,
-                sum(count()) OVER () AS site_cnt,
-                ifNull(sum(sum(toInt64OrZero(custom_fields['resp_bytes']))) OVER (), 0) AS site_resp_bytes
-            FROM request_facts
-            WHERE __WHERE__
-            GROUP BY key
+            SELECT custom_fields['ua'] AS key, count() AS cnt,
+                   ifNull(sum(toInt64OrZero(custom_fields['resp_bytes'])), 0) AS resp_bytes,
+                   sum(count()) OVER () AS site_cnt,
+                   ifNull(sum(sum(toInt64OrZero(custom_fields['resp_bytes']))) OVER (), 0) AS site_resp_bytes
+            FROM request_facts WHERE __WHERE__ GROUP BY key
         ),
         ua_agg AS (
-            SELECT
-                'ua' AS kind,
-                key,
-                cnt,
-                resp_bytes,
-                site_cnt,
-                site_resp_bytes
-            FROM ua_all
-            WHERE key != ''
-            ORDER BY resp_bytes DESC, cnt DESC
-            LIMIT 2000
+            SELECT 'ua' AS kind, key, cnt, resp_bytes, site_cnt, site_resp_bytes
+            FROM ua_all WHERE key != '' ORDER BY resp_bytes DESC, cnt DESC LIMIT 2000
         ),
         ref_extracted AS (
-            SELECT
-                client_ip AS ip,
-                if(
-                    (
-                        positionCaseInsensitive(custom_fields['ua'], '-user') > 0
-                        OR positionCaseInsensitive(custom_fields['ua'], '-externalfetcher') > 0
-                    ) AND extract(lower(custom_fields['ua']), '([a-z0-9]+)-(?:user|externalfetcher)') != '',
-                    extract(lower(custom_fields['ua']), '([a-z0-9]+)-(?:user|externalfetcher)'),
-                    extract(lower(custom_fields['referer']), 'https?://(?:www\\.)?([^/.:;\\s]+)')
-                ) AS ref_stem
+            SELECT client_ip AS ip,
+                   if((positionCaseInsensitive(custom_fields['ua'], '-user') > 0
+                       OR positionCaseInsensitive(custom_fields['ua'], '-externalfetcher') > 0)
+                      AND extract(lower(custom_fields['ua']), '([a-z0-9]+)-(?:user|externalfetcher)') != '',
+                      extract(lower(custom_fields['ua']), '([a-z0-9]+)-(?:user|externalfetcher)'),
+                      extract(lower(custom_fields['referer']), 'https?://(?:www\\.)?([^/.:;\\s]+)')) AS ref_stem
             FROM request_facts
-            WHERE __WHERE__
-              AND client_ip != ''
-              AND (
-                  (custom_fields['referer'] != '' AND custom_fields['referer'] != '-')
-                  OR positionCaseInsensitive(custom_fields['ua'], '-user') > 0
-                  OR positionCaseInsensitive(custom_fields['ua'], '-externalfetcher') > 0
-              )
+            WHERE __WHERE__ AND client_ip != ''
+              AND ((custom_fields['referer'] != '' AND custom_fields['referer'] != '-')
+                   OR positionCaseInsensitive(custom_fields['ua'], '-user') > 0
+                   OR positionCaseInsensitive(custom_fields['ua'], '-externalfetcher') > 0)
               AND NOT match(lower(custom_fields['ua']), '(bot|crawler|spider|slurp|archiver|scraper|externalagent|extended|headless)')
         ),
         ref_agg AS (
-            SELECT
-                'ref' AS kind,
-                ref_stem AS key,
-                uniqExact(ip) AS cnt,
-                toInt64(0) AS resp_bytes,
-                toUInt64(0) AS site_cnt,
-                toInt64(0) AS site_resp_bytes
-            FROM ref_extracted
-            WHERE ref_stem != ''
-            GROUP BY ref_stem
+            SELECT 'ref' AS kind, ref_stem AS key, uniqExact(ip) AS cnt,
+                   toInt64(0) AS resp_bytes, toUInt64(0) AS site_cnt, toInt64(0) AS site_resp_bytes
+            FROM ref_extracted WHERE ref_stem != '' GROUP BY ref_stem
         )
         SELECT kind, key, cnt, resp_bytes, site_cnt, site_resp_bytes FROM ua_agg
-        UNION ALL
-        SELECT kind, key, cnt, resp_bytes, site_cnt, site_resp_bytes FROM ref_agg
+        UNION ALL SELECT kind, key, cnt, resp_bytes, site_cnt, site_resp_bytes FROM ref_agg
         """,
     )
     tagged: list[tuple[str, str, int, int]] = []
-    has_site_row = any(str(r.get("kind") or "") == "site" for r in rows)
-    if not has_site_row:
+    if not any(str(r.get("kind") or "") == "site" for r in rows):
         for r in rows:
             if str(r.get("kind") or "") == "ua" and ("site_cnt" in r or "site_resp_bytes" in r):
                 tagged.append(("site", "", int(r.get("site_cnt") or 0), int(r.get("site_resp_bytes") or 0)))
                 break
-    for r in rows:
-        tagged.append((str(r["kind"] or ""), str(r["key"] or ""), int(r["cnt"] or 0), int(r["resp_bytes"] or 0)))
+    tagged.extend(
+        (str(r["kind"] or ""), str(r["key"] or ""), int(r["cnt"] or 0), int(r["resp_bytes"] or 0)) for r in rows
+    )
     return summarize_bot_efficiency_rows(tagged)
 
 
@@ -5434,49 +6385,47 @@ def security_aggregates(
         },
         {"name": service.service_id, "service_id": service.service_id},
     )
-    cached = _security_memo.get_with_telemetry(memo_key)
-    if cached is not None:
+    if (cached := _security_memo.get_with_telemetry(memo_key)) is not None:
         return SecurityAggregatesResponse.with_telemetry(**cached)
 
     def _compute() -> dict[str, Any]:
-        cached_inner = _security_memo.get(memo_key)
-        if cached_inner is not None:
+        if (cached_inner := _security_memo.get(memo_key)) is not None:
             return cached_inner
-
         scope = _scope(service, req, start_time, end_time)
 
         def want(name: str) -> bool:
             return sections is None or name in sections
 
-        tasks: list[tuple[str, Callable[[], Any]]] = []
-        if want("tls_fingerprints"):
-            tasks.append(("tls_fingerprints", lambda: _tls_fingerprints(service, scope)))
-        if want("fingerprint_coverage"):
-            tasks.append(("fingerprint_coverage", lambda: _fingerprint_coverage(service, scope)))
-        if want("req_size_dist"):
-            tasks.append(("req_size_dist", lambda: _req_size_dist(service, scope)))
-        if want("top_ips_header"):
-            tasks.append(("top_ips_header", lambda: _top_ips_header(service, scope, mask_ips)))
-        if want("ipv6_adoption"):
-            tasks.append(("ipv6_adoption", lambda: _ipv6_adoption(service, scope)))
-        if want("proxy_dist"):
-            tasks.append(("proxy_dist", lambda: _proxy_dist(service, scope)))
-        if want("conn_reuse_dist"):
-            tasks.append(("conn_reuse_dist", lambda: _conn_reuse_dist(service, scope)))
-        if want("verified_bots_ts"):
-            tasks.append(("verified_bots_ts", lambda: _verified_bots_ts(service, scope, bucket_seconds)))
-        if want("ngwaf_verified_bots") or want("ngwaf_verified_bots_ts"):
-            tasks.append(("ngwaf_configured", lambda: _ngwaf_configured(service)))
-            tasks.append(("ngwaf_verified_bots", lambda: _ngwaf_verified_bots(service, scope)))
-            tasks.append(("ngwaf_verified_bots_ts", lambda: _ngwaf_verified_bots_ts(service, scope, bucket_seconds)))
-        if want("wellknown_bots"):
-            tasks.append(("wellknown_bots", lambda: _wellknown_bots(service, scope)))
-        if want("bot_efficiency"):
-            tasks.append(("bot_efficiency", lambda: _bot_efficiency(service, scope)))
-        if want("top_bots"):
-            tasks.append(("_top_bots", lambda: _top_bots(service, scope)))
-        if want("proxies"):
-            tasks.append(("_proxies", lambda: _proxies(service, scope, mask_ips)))
+        candidates: tuple[tuple[str, bool, Callable[[], Any]], ...] = (
+            ("tls_fingerprints", want("tls_fingerprints"), lambda: _tls_fingerprints(service, scope)),
+            ("fingerprint_coverage", want("fingerprint_coverage"), lambda: _fingerprint_coverage(service, scope)),
+            ("req_size_dist", want("req_size_dist"), lambda: _req_size_dist(service, scope)),
+            ("top_ips_header", want("top_ips_header"), lambda: _top_ips_header(service, scope, mask_ips)),
+            ("ipv6_adoption", want("ipv6_adoption"), lambda: _ipv6_adoption(service, scope)),
+            ("proxy_dist", want("proxy_dist"), lambda: _proxy_dist(service, scope)),
+            ("conn_reuse_dist", want("conn_reuse_dist"), lambda: _conn_reuse_dist(service, scope)),
+            ("verified_bots_ts", want("verified_bots_ts"), lambda: _verified_bots_ts(service, scope, bucket_seconds)),
+            (
+                "ngwaf_configured",
+                want("ngwaf_verified_bots") or want("ngwaf_verified_bots_ts"),
+                lambda: _ngwaf_configured(service),
+            ),
+            (
+                "ngwaf_verified_bots",
+                want("ngwaf_verified_bots") or want("ngwaf_verified_bots_ts"),
+                lambda: _ngwaf_verified_bots(service, scope),
+            ),
+            (
+                "ngwaf_verified_bots_ts",
+                want("ngwaf_verified_bots") or want("ngwaf_verified_bots_ts"),
+                lambda: _ngwaf_verified_bots_ts(service, scope, bucket_seconds),
+            ),
+            ("wellknown_bots", want("wellknown_bots"), lambda: _wellknown_bots(service, scope)),
+            ("bot_efficiency", want("bot_efficiency"), lambda: _bot_efficiency(service, scope)),
+            ("_top_bots", want("top_bots"), lambda: _top_bots(service, scope)),
+            ("_proxies", want("proxies"), lambda: _proxies(service, scope, mask_ips)),
+        )
+        tasks = [(k, fn) for k, w, fn in candidates if w]
 
         trace = HighScaleSections(service.service_id, "security")
 
@@ -5496,8 +6445,7 @@ def security_aggregates(
             thread_name_prefix="hs-sec",
         ).items():
             if k == "_top_bots":
-                res["bots"] = val["bots"]
-                res["ngwaf_bots"] = val["ngwaf_bots"]
+                res.update(bots=val["bots"], ngwaf_bots=val["ngwaf_bots"])
             elif k == "_proxies":
                 res.update(val)
             else:
@@ -5506,8 +6454,7 @@ def security_aggregates(
         _security_memo.put(memo_key, dict(res))
         return res
 
-    res = _security_memo.coalesce(f"hs_security_agg:{memo_key}", _compute)
-    return SecurityAggregatesResponse.with_telemetry(**res)
+    return SecurityAggregatesResponse.with_telemetry(**_security_memo.coalesce(f"hs_security_agg:{memo_key}", _compute))
 
 
 def _top_bots(service: HighScaleService, scope: _Scope, n: int = 10) -> dict[str, list[dict[str, Any]]]:
@@ -5515,19 +6462,17 @@ def _top_bots(service: HighScaleService, scope: _Scope, n: int = 10) -> dict[str
         service,
         scope,
         "top_bots_ua",
-        """
-        SELECT custom_fields['ua'] AS ua, count() AS cnt
-        FROM request_facts WHERE __WHERE__ AND custom_fields['ua'] != ''
-        GROUP BY ua ORDER BY cnt DESC LIMIT {ua_limit:UInt32}
-        """,
+        "SELECT custom_fields['ua'] AS ua, count() AS cnt FROM request_facts "
+        "WHERE __WHERE__ AND custom_fields['ua'] != '' GROUP BY ua ORDER BY cnt DESC LIMIT {ua_limit:UInt32}",
         ua_limit=_BOT_UA_CLASSIFY_LIMIT,
     )
-    bots = classify_ua_counts([(r["ua"], int(r["cnt"])) for r in ua_rows], n)
-    ngwaf_bots = [
-        {"name": r["bot_name"], "category": r["bot_cat"] or None, "request_count": int(r["request_count"])}
-        for r in _ngwaf_summary(service, scope, limit=n)
-    ]
-    return {"bots": bots, "ngwaf_bots": ngwaf_bots}
+    return {
+        "bots": classify_ua_counts([(r["ua"], int(r["cnt"])) for r in ua_rows], n),
+        "ngwaf_bots": [
+            {"name": r["bot_name"], "category": r["bot_cat"] or None, "request_count": int(r["request_count"])}
+            for r in _ngwaf_summary(service, scope, limit=n)
+        ],
+    }
 
 
 def top_bots(
@@ -5541,22 +6486,13 @@ def top_bots(
     )
 
 
-_PROXY_SOURCE = f"""
-    FROM (
-        SELECT client_ip AS ip,
-               custom_fields['pop'] AS pop,
-               country,
-               custom_fields['city'] AS city,
-               toFloat64OrNull(custom_fields['rtt_min']) AS rtt_min,
-               toFloat64OrNull(custom_fields['tcp_rtt']) AS tcp_rtt,
-               toFloat64OrNull(custom_fields['lat']) AS lat,
-               toFloat64OrNull(custom_fields['lon']) AS lon,
-               toInt64OrNull(custom_fields['asn']) AS asn,
-               {_POP_LAT} AS pop_lat,
-               {_POP_LON} AS pop_lon
-        FROM request_facts WHERE __WHERE__ AND custom_fields['rtt_min'] != ''
-    )
-"""
+_PROXY_SOURCE = (
+    "FROM (SELECT client_ip AS ip, custom_fields['pop'] AS pop, country, custom_fields['city'] AS city, "
+    "toFloat64OrNull(custom_fields['rtt_min']) AS rtt_min, toFloat64OrNull(custom_fields['tcp_rtt']) AS tcp_rtt, "
+    "toFloat64OrNull(custom_fields['lat']) AS lat, toFloat64OrNull(custom_fields['lon']) AS lon, "
+    f"toInt64OrNull(custom_fields['asn']) AS asn, {_POP_LAT} AS pop_lat, {_POP_LON} AS pop_lon "
+    "FROM request_facts WHERE __WHERE__ AND custom_fields['rtt_min'] != '')"
+)
 
 
 def _proxies(service: HighScaleService, scope: _Scope, mask_ips: bool) -> dict[str, Any]:
@@ -5565,12 +6501,9 @@ def _proxies(service: HighScaleService, scope: _Scope, mask_ips: bool) -> dict[s
             service,
             scope,
             "proxy_stats",
-            f"""
-            SELECT uniqExactIf(ip, {_IMPOSSIBLE_DISTANCE} OR {_TUNNEL}) AS active_proxies_count,
-                   countIf({_IMPOSSIBLE_DISTANCE} OR {_TUNNEL}) AS total_requests_count,
-                   uniqExactIf(ip, {_IMPOSSIBLE_DISTANCE}) AS distance_mismatches_count
-            {_PROXY_SOURCE}
-            """,
+            f"SELECT uniqExactIf(ip, {_IMPOSSIBLE_DISTANCE} OR {_TUNNEL}) AS active_proxies_count, "
+            f"countIf({_IMPOSSIBLE_DISTANCE} OR {_TUNNEL}) AS total_requests_count, "
+            f"uniqExactIf(ip, {_IMPOSSIBLE_DISTANCE}) AS distance_mismatches_count {_PROXY_SOURCE}",
         )
 
     def _q_quality():
@@ -5578,20 +6511,12 @@ def _proxies(service: HighScaleService, scope: _Scope, mask_ips: bool) -> dict[s
             service,
             scope,
             "traffic_quality",
-            """
-            SELECT multiIf(
-                       rtt_min IS NULL OR tcp_rtt IS NULL, 'Direct Connection',
-                       tcp_rtt > 0 AND rtt_min / tcp_rtt < 0.1, 'Active Tunnel / Proxy',
-                       tcp_rtt > 0 AND rtt_min / tcp_rtt < 0.7, 'WiFi / Mobile',
-                       'Direct Connection') AS type,
-                   count() AS count
-            FROM (
-                SELECT toFloat64OrNull(custom_fields['rtt_min']) AS rtt_min,
-                       toFloat64OrNull(custom_fields['tcp_rtt']) AS tcp_rtt
-                FROM request_facts WHERE __WHERE__
-            )
-            GROUP BY type ORDER BY count DESC
-            """,
+            "SELECT multiIf(rtt_min IS NULL OR tcp_rtt IS NULL, 'Direct Connection', "
+            "tcp_rtt > 0 AND rtt_min / tcp_rtt < 0.1, 'Active Tunnel / Proxy', "
+            "tcp_rtt > 0 AND rtt_min / tcp_rtt < 0.7, 'WiFi / Mobile', 'Direct Connection') AS type, count() AS count "
+            "FROM (SELECT toFloat64OrNull(custom_fields['rtt_min']) AS rtt_min, "
+            "toFloat64OrNull(custom_fields['tcp_rtt']) AS tcp_rtt FROM request_facts WHERE __WHERE__) "
+            "GROUP BY type ORDER BY count DESC",
         )
 
     def _q_isps():
@@ -5599,7 +6524,7 @@ def _proxies(service: HighScaleService, scope: _Scope, mask_ips: bool) -> dict[s
             service,
             scope,
             "suspicious_isps",
-            f""" SELECT asn, count() AS count {_PROXY_SOURCE} WHERE {_TUNNEL} GROUP BY asn ORDER BY count DESC LIMIT 10 """,
+            f"SELECT asn, count() AS count {_PROXY_SOURCE} WHERE {_TUNNEL} GROUP BY asn ORDER BY count DESC LIMIT 10",
         )
 
     def _q_clients():
@@ -5607,32 +6532,21 @@ def _proxies(service: HighScaleService, scope: _Scope, mask_ips: bool) -> dict[s
             service,
             scope,
             "active_clients",
-            f"""
-            SELECT ip, asn, rtt_min / 1000.0 AS rtt_min_ms, tcp_rtt / 1000.0 AS tcp_rtt_ms,
-                   {_DISTANCE_KM} AS distance_km, pop,
-                   lat AS client_lat, lon AS client_lon, pop_lat, pop_lon,
-                   {_IMPOSSIBLE_DISTANCE} AS impossible_distance,
-                   multiIf({_IMPOSSIBLE_DISTANCE}, 'High',
-                           {_TUNNEL}, 'High',
-                           ifNull(tcp_rtt > 0 AND rtt_min / tcp_rtt < 0.2, 0), 'Medium',
-                           'Low') AS risk_level,
-                   country, city
-            {_PROXY_SOURCE}
-            WHERE rtt_min IS NOT NULL
-              AND ({_IMPOSSIBLE_DISTANCE} OR ifNull(tcp_rtt > 0 AND rtt_min / tcp_rtt < 0.2, 0))
-            ORDER BY multiIf(risk_level = 'High', 0, risk_level = 'Medium', 1, 2), distance_km DESC LIMIT 100
-            """,
+            f"SELECT ip, asn, rtt_min / 1000.0 AS rtt_min_ms, tcp_rtt / 1000.0 AS tcp_rtt_ms, {_DISTANCE_KM} AS distance_km, "
+            f"pop, lat AS client_lat, lon AS client_lon, pop_lat, pop_lon, {_IMPOSSIBLE_DISTANCE} AS impossible_distance, "
+            f"multiIf({_IMPOSSIBLE_DISTANCE}, 'High', {_TUNNEL}, 'High', "
+            "ifNull(tcp_rtt > 0 AND rtt_min / tcp_rtt < 0.2, 0), 'Medium', 'Low') AS risk_level, country, city "
+            f"{_PROXY_SOURCE} WHERE rtt_min IS NOT NULL AND ({_IMPOSSIBLE_DISTANCE} OR ifNull(tcp_rtt > 0 AND rtt_min / tcp_rtt < 0.2, 0)) "
+            "ORDER BY multiIf(risk_level = 'High', 0, risk_level = 'Medium', 1, 2), distance_km DESC LIMIT 100",
         )
 
     with ThreadPoolExecutor(max_workers=4, thread_name_prefix="hs-proxies") as pool:
-        f_stats = pool.submit(contextvars.copy_context().run, _q_stats)
-        f_qual = pool.submit(contextvars.copy_context().run, _q_quality)
-        f_isps = pool.submit(contextvars.copy_context().run, _q_isps)
-        f_cli = pool.submit(contextvars.copy_context().run, _q_clients)
-        stats = f_stats.result()
-        quality_rows = f_qual.result()
-        isp_rows = f_isps.result()
-        client_rows = f_cli.result()
+        stats, quality_rows, isp_rows, client_rows = [
+            f.result()
+            for f in (
+                pool.submit(contextvars.copy_context().run, fn) for fn in (_q_stats, _q_quality, _q_isps, _q_clients)
+            )
+        ]
 
     stat = stats[0] if stats else {}
     quality_total = sum(int(r["count"]) for r in quality_rows)
@@ -5650,33 +6564,33 @@ def _proxies(service: HighScaleService, scope: _Scope, mask_ips: bool) -> dict[s
     def _asn_name(asn: int | None) -> str:
         return asn_names.get(asn) or (f"AS{asn}" if asn else "Unknown ISP")
 
-    suspicious_isps = []
-    for r in isp_rows:
-        asn = int(r["asn"]) if r.get("asn") is not None else None
-        suspicious_isps.append({"isp": _asn_name(asn), "asn": asn, "count": int(r["count"])})
-
-    active_clients = []
-    for r in client_rows:
-        asn = int(r["asn"]) if r.get("asn") is not None else None
-        active_clients.append(
-            {
-                "ip": _maybe_mask(r["ip"], mask_ips),
-                "rtt_min_ms": round(float(r["rtt_min_ms"]), 2),
-                "tcp_rtt_ms": round(float(r["tcp_rtt_ms"]), 2) if r["tcp_rtt_ms"] is not None else None,
-                "distance_km": round(float(r["distance_km"]), 1) if r["distance_km"] is not None else None,
-                "pop": r["pop"] or None,
-                "client_lat": round(float(r["client_lat"]), 4) if r["client_lat"] is not None else None,
-                "client_lon": round(float(r["client_lon"]), 4) if r["client_lon"] is not None else None,
-                "pop_lat": float(r["pop_lat"]),
-                "pop_lon": float(r["pop_lon"]),
-                "impossible_distance": bool(int(r["impossible_distance"])),
-                "risk_level": r["risk_level"],
-                "country": r["country"] or None,
-                "city": r["city"] or None,
-                "asn_name": _asn_name(asn),
-            }
-        )
-
+    suspicious_isps = [
+        {
+            "isp": _asn_name(asn := (int(r["asn"]) if r.get("asn") is not None else None)),
+            "asn": asn,
+            "count": int(r["count"]),
+        }
+        for r in isp_rows
+    ]
+    active_clients = [
+        {
+            "ip": _maybe_mask(r["ip"], mask_ips),
+            "rtt_min_ms": round(float(r["rtt_min_ms"]), 2),
+            "tcp_rtt_ms": _flt(r["tcp_rtt_ms"], 2),
+            "distance_km": _flt(r["distance_km"], 1),
+            "pop": r["pop"] or None,
+            "client_lat": _flt(r["client_lat"], 4),
+            "client_lon": _flt(r["client_lon"], 4),
+            "pop_lat": float(r["pop_lat"]),
+            "pop_lon": float(r["pop_lon"]),
+            "impossible_distance": bool(int(r["impossible_distance"])),
+            "risk_level": r["risk_level"],
+            "country": r["country"] or None,
+            "city": r["city"] or None,
+            "asn_name": _asn_name(int(r["asn"]) if r.get("asn") is not None else None),
+        }
+        for r in client_rows
+    ]
     return {
         "active_proxies_count": int(stat.get("active_proxies_count", 0)),
         "tunnel_requests_count": int(stat.get("total_requests_count", 0)),
@@ -5692,30 +6606,25 @@ def get_proxies_data(
 ) -> dict[str, Any]:
     scope = _scope(service, req, start_time, end_time)
     trace = HighScaleSections(service.service_id, "security")
-    result = trace.run("proxies", lambda: _proxies(service, scope, mask_ips), source="fact")
-    return {**result, "_section_timings": trace.timings()}
+    return {
+        **trace.run("proxies", lambda: _proxies(service, scope, mask_ips), source="fact"),
+        "_section_timings": trace.timings(),
+    }
 
 
 def get_security_threat_intel(
     service: HighScaleService, start_time: str | None, end_time: str | None
 ) -> dict[str, Any]:
-    scope = _scope(service, None, start_time, end_time)
     rows = _run(
         service,
-        scope,
+        _scope(service, None, start_time, end_time),
         "threat_intel",
-        f"""
-        SELECT multiIf(custom_fields['ja3'] != '', custom_fields['ja3'], custom_fields['ja4']) AS tls_fingerprint,
-               count() AS requests,
-               topK(1)(country)[1] AS top_country,
-               countIf(custom_fields['waf_logged_rules'] != '' OR custom_fields['waf_blocked_rules'] != '')
-                   AS matched_waf_rules_count,
-               round(countIf({_IS_BOT}) * 100.0 / count(), 2) AS bot_percentage,
-               max(custom_fields['p_type'] != '') AS is_anonymized_proxy
-        FROM request_facts
-        WHERE __WHERE__ AND tls_fingerprint != ''
-        GROUP BY tls_fingerprint ORDER BY requests DESC LIMIT 50
-        """,
+        f"SELECT multiIf(custom_fields['ja3'] != '', custom_fields['ja3'], custom_fields['ja4']) AS tls_fingerprint, "
+        f"count() AS requests, topK(1)(country)[1] AS top_country, "
+        f"countIf(custom_fields['waf_logged_rules'] != '' OR custom_fields['waf_blocked_rules'] != '') AS matched_waf_rules_count, "
+        f"round(countIf({_IS_BOT}) * 100.0 / count(), 2) AS bot_percentage, "
+        "max(custom_fields['p_type'] != '') AS is_anonymized_proxy FROM request_facts "
+        "WHERE __WHERE__ AND tls_fingerprint != '' GROUP BY tls_fingerprint ORDER BY requests DESC LIMIT 50",
     )
     return {
         "data": [
@@ -5749,34 +6658,19 @@ class _SecurityAccumulator:
 
 def build_security_projection_rows(rows: tuple[Mapping[str, Any], ...]) -> SecurityProjection:
     dimensions: dict[tuple[datetime, str, str], _SecurityAccumulator] = defaultdict(_SecurityAccumulator)
-
     for row in rows:
-        bucket = _bucket(row.get("timestamp"))
-        if bucket is None:
+        if (bucket := _bucket(row.get("timestamp"))) is None or not (ngwaf_bot := _text(row.get("_ngwaf_bot_name"))):
             continue
-
-        ngwaf_bot = _text(row.get("_ngwaf_bot_name"))
-        if ngwaf_bot:
-            state = _text(row.get("ngwaf_bot_verification_state", "unverified"))
-            acc = dimensions[(bucket, "ngwaf_bot", ngwaf_bot)]
-            acc.requests += 1
-            if state == "verified":
-                acc.verified_count += 1
-            elif state == "impersonator":
-                acc.impersonator_count += 1
-            else:
-                acc.unverified_count += 1
-
-            if not acc.wellknown_bot_name:
-                acc.wellknown_bot_name = _text(row.get("_ngwaf_wellknown_bot_name"))
-            if not acc.bot_category:
-                acc.bot_category = _text(row.get("_ngwaf_bot_category"))
-
+        state = _text(row.get("ngwaf_bot_verification_state", "unverified"))
+        acc = dimensions[(bucket, "ngwaf_bot", ngwaf_bot)]
+        acc.requests += 1
+        acc.verified_count += int(state == "verified")
+        acc.impersonator_count += int(state == "impersonator")
+        acc.unverified_count += int(state not in ("verified", "impersonator"))
+        acc.wellknown_bot_name = acc.wellknown_bot_name or _text(row.get("_ngwaf_wellknown_bot_name"))
+        acc.bot_category = acc.bot_category or _text(row.get("_ngwaf_bot_category"))
     return SecurityProjection(
-        dimension_rows=tuple(
-            _security_dimension_row(bucket, dimension, value, acc)
-            for (bucket, dimension, value), acc in sorted(dimensions.items())
-        )
+        dimension_rows=tuple(_security_dimension_row(b, d, v, acc) for (b, d, v), acc in sorted(dimensions.items()))
     )
 
 
@@ -5791,6 +6685,865 @@ def _security_dimension_row(bucket: datetime, dimension: str, value: str, acc: _
         "verified_count": acc.verified_count,
         "impersonator_count": acc.impersonator_count,
         "unverified_count": acc.unverified_count,
+    }
+
+
+from backend.high_scale._common import optional_int as _finite_int
+from backend.models.common import SectionTimingEntry
+from backend.models.network import (
+    NetworkBundleRequest,
+    NetworkBundleResponse,
+    NetworkCityEntry,
+    NetworkHealthResponse,
+    NetworkHealthSummary,
+    NetworkQualityRequest,
+    NetworkQualityResponse,
+    NetworkWorstEntry,
+    PopHealthItem,
+    PopHealthListResponse,
+    ShieldingAnalysis,
+    ShieldingRow,
+    TransportMetrics,
+    TransportProtocolShare,
+)
+from backend.models.origin import OriginShieldingAnalysisResponse
+from backend.repositories.network import _avg_hs, _health_score
+from backend.utils.countries import format_city_label
+
+
+def _parse_metro_code(metro_raw: Any) -> int | None:
+    if not metro_raw:
+        return None
+    try:
+        return int(float(metro_raw))
+    except (ValueError, TypeError):
+        return None
+
+
+def _fmt_ts(ts: int) -> str:
+    return datetime.fromtimestamp(ts, tz=UTC).replace(tzinfo=None).isoformat()
+
+
+def _flt(val: Any, ndigits: int | None = None) -> float | None:
+    if val is None:
+        return None
+    return round(float(val), ndigits) if ndigits is not None else float(val)
+
+
+def _ch_bucket_expr(bucket_seconds: int) -> str:
+    return f"intDiv(toUnixTimestamp(event_timestamp), {bucket_seconds}) * {bucket_seconds}"
+
+
+def _ch_fact_query(
+    select_cols: str,
+    where_sql: str,
+    *,
+    group_by: str = "",
+    having: str = "",
+    order_by: str = "",
+    limit: int | None = None,
+) -> str:
+    parts = [f"SELECT {select_cols} FROM request_facts WHERE {where_sql}"]
+    if group_by:
+        parts.append(f"GROUP BY {group_by}")
+    if having:
+        parts.append(f"HAVING {having}")
+    if order_by:
+        parts.append(f"ORDER BY {order_by}")
+    if limit is not None:
+        parts.append(f"LIMIT {limit}")
+    return " ".join(parts)
+
+
+_RTT = "toFloat64OrNull(custom_fields['tcp_rtt'])"
+_RTT_MIN = "toFloat64OrNull(custom_fields['rtt_min'])"
+_RTT_VAR = "toFloat64OrNull(custom_fields['rtt_var'])"
+_PLOSS = "toFloat64OrNull(custom_fields['ploss'])"
+_STATUS = "toInt32OrZero(custom_fields['status'])"
+_ASN = "toInt32OrNull(custom_fields['asn'])"
+_BASE_WHERE = (
+    f"service_id={{service_id:String}} AND {visible_publication_fence_sql('request')} "
+    "AND event_timestamp >= {start:DateTime64(3)} AND event_timestamp < {end:DateTime64(3)}"
+)
+_RTT_FILTER = f"{_BASE_WHERE} AND {_RTT} > 0"
+_TTFB = "toFloat64OrNull(custom_fields['ttfb'])"
+_ELAPSED = "toFloat64OrZero(custom_fields['elapsed'])"
+_RESP_BYTES = "toFloat64OrZero(custom_fields['resp_bytes'])"
+_NET_HIT = "custom_fields['cache'] LIKE '%HIT%'"
+_CORE_SECTIONS = frozenset(
+    {"summary", "heatmap", "buckets", "leaderboard", "metro_leaderboard", "cities", "map_buckets"}
+)
+_SCATTER_SAMPLE = 2000
+_SHIELDING_ROUTE_LIMIT = 50
+_TRANSPORT_FIELDS = ("tcp_rtt", "retrans", "ploss", "delivery_rate")
+_QUALITY_BAR_SPECS: tuple[tuple[str, str, str], ...] = (
+    ("country", "country", ""),
+    ("asn", _ASN, ""),
+    ("region", "custom_fields['region']", " AND country = {region_country:String}"),
+    ("pop", "custom_fields['pop']", ""),
+)
+_TRANSPORT_ROUND_SPECS: tuple[tuple[str, str, int], ...] = (
+    ("tcp_rtt_p50_ms", "rtt_p50", 2),
+    ("tcp_rtt_p90_ms", "rtt_p90", 2),
+    ("tcp_rtt_p95_ms", "rtt_p95", 2),
+    ("tcp_rtt_p99_ms", "rtt_p99", 2),
+    ("retrans_rate_pct", "avg_retrans", 3),
+    ("packet_loss_pct", "avg_ploss_pct", 3),
+    ("delivery_rate_mbps", "avg_del_rate_mbps", 2),
+)
+
+
+def _filter_clause(filters: Any, *, drop_asn: bool = False) -> tuple[str, dict[str, Any]]:
+    spec = dict(filters or {})
+    if drop_asn:
+        spec.pop("asn", None)
+    clause, params = _build_clickhouse_filters(spec)
+    return ("", {}) if clause == "1=1" else (f" AND {clause}", params)
+
+
+def _want_core(sections: Any) -> bool:
+    return not sections or "health" in sections or bool(_CORE_SECTIONS & set(sections))
+
+
+def _want_shielding(sections: Any) -> bool:
+    return not sections or "health" in sections or "shielding_analysis" in sections
+
+
+def _shielding_analysis(service: HighScaleService, start: datetime, end: datetime, filters: Any) -> ShieldingAnalysis:
+    from backend.repositories.origin import _enrich_with_distance
+
+    filter_sql, filter_params = _filter_clause(filters)
+    params = {"service_id": service.service_id, "start": start, "end": end, **filter_params}
+    hop_ms = "coalesce(toFloat64OrNull(custom_fields['ottfb']), toFloat64OrNull(custom_fields['ttfb']) * 1000000.0)"
+    edge_sub = _ch_fact_query(
+        f"custom_fields['rid'] AS rid, custom_fields['pop'] AS edge_pop, {hop_ms} AS hop_us",
+        f"{_BASE_WHERE}{filter_sql} AND lower(custom_fields['edge']) IN ('true', '1')",
+    )
+    shield_where = f"{_BASE_WHERE} AND lower(custom_fields['edge']) IN ('false', '0') AND custom_fields['prid'] != ''"
+    shield_sub = _ch_fact_query(
+        f"custom_fields['prid'] AS prid, custom_fields['pop'] AS shield_pop, {hop_ms} AS hop_us", shield_where
+    )
+    pairs = service.client.execute(
+        "SELECT e.edge_pop AS edge_pop, s.shield_pop AS shield_pop, count() AS requests, "
+        "quantile(0.50)(e.hop_us - s.hop_us) / 1000.0 AS p50_ms, "
+        "quantile(0.95)(e.hop_us - s.hop_us) / 1000.0 AS p95_ms, "
+        "quantile(0.99)(e.hop_us - s.hop_us) / 1000.0 AS p99_ms "
+        f"FROM ({edge_sub}) AS e INNER JOIN ({shield_sub}) AS s ON s.prid = e.rid GROUP BY edge_pop, shield_pop",
+        params,
+    )
+    if not pairs:
+        shield_rows = service.client.execute(
+            f"SELECT count() AS n FROM ({_ch_fact_query('1', shield_where, limit=1)})",
+            {"service_id": service.service_id, "start": start, "end": end},
+        )
+        edge_only = True if (shield_rows and int(shield_rows[0]["n"]) == 0) else None
+        return ShieldingAnalysis(
+            **cache_result({}, state="bypass", prewarmer=False), has_data=False, edge_only=edge_only, rows=[]
+        )
+
+    by_requests = sorted(pairs, key=lambda r: int(r["requests"]), reverse=True)[:_SHIELDING_ROUTE_LIMIT]
+    by_overhead = sorted(
+        pairs, key=lambda r: float(r["p50_ms"]) if r["p50_ms"] is not None else float("-inf"), reverse=True
+    )[:_SHIELDING_ROUTE_LIMIT]
+    kept = {(r["edge_pop"], r["shield_pop"]): r for r in by_requests + by_overhead}
+    rows = [
+        ShieldingRow(
+            **_enrich_with_distance(
+                {
+                    "edge_pop": r["edge_pop"],
+                    "shield_pop": r["shield_pop"],
+                    "requests": int(r["requests"]),
+                    "p50_ms": _flt(r["p50_ms"]),
+                    "p95_ms": _flt(r["p95_ms"]),
+                    "p99_ms": _flt(r["p99_ms"]),
+                }
+            )
+        )
+        for r in sorted(kept.values(), key=lambda r: int(r["requests"]), reverse=True)
+    ]
+    return ShieldingAnalysis(
+        **cache_result({}, state="bypass", prewarmer=False),
+        has_data=True,
+        rows=rows,
+        total_routes=len(pairs),
+        truncated=len(pairs) > len(rows),
+    )
+
+
+def origin_shielding_analysis(
+    service: HighScaleService, req: Any, start_time: str | None, end_time: str | None
+) -> OriginShieldingAnalysisResponse:
+    start, end = parse_time_window(start_time, end_time)
+    trace = HighScaleSections(service.service_id, "origin")
+    analysis = trace.run(
+        "shielding_analysis",
+        lambda: _shielding_analysis(service, start, end, getattr(req, "filters", None)),
+        source="fact",
+    )
+    limit = int(getattr(req, "limit", 50) or 50)
+    rows = analysis.rows[:limit]
+    truncated = (bool(analysis.truncated) or len(analysis.rows) > limit) if analysis.has_data else None
+    return OriginShieldingAnalysisResponse.with_telemetry(
+        **cache_result({}, state="bypass", prewarmer=False),
+        section_timings=trace.timings(),
+        has_data=analysis.has_data,
+        requires_fields=analysis.requires_fields or [],
+        edge_only=bool(analysis.edge_only),
+        rows=rows,
+        total_routes=analysis.total_routes,
+        truncated=truncated,
+        error=False,
+    )
+
+
+def network_health(
+    service: HighScaleService, req: Any, start_time: str | None, end_time: str | None
+) -> NetworkHealthResponse:
+    start, end = parse_time_window(start_time, end_time)
+    bs = int(getattr(req, "bucket_seconds", 300) or 300)
+    top_n = int(getattr(req, "top_n", 30) or 30)
+    map_asn = str(getattr(req, "map_asn", "all") or "all")
+    sections = getattr(req, "sections", None)
+
+    trace = HighScaleSections(service.service_id, "network.health")
+    shielding = (
+        trace.run(
+            "shielding_analysis",
+            lambda: _shielding_analysis(service, start, end, getattr(req, "filters", None)),
+            source="fact",
+        )
+        if _want_shielding(sections)
+        else None
+    )
+    if not _want_core(sections):
+        return NetworkHealthResponse.with_telemetry(
+            **cache_result({}, state="bypass", prewarmer=False),
+            available=True,
+            shielding_analysis=shielding,
+            section_timings=trace.timings(),
+        )
+
+    if start is not None and end is not None:
+        bs = max(bs, int((end - start).total_seconds()) // 8640) or bs
+    filter_sql, filter_params = _filter_clause(getattr(req, "filters", None), drop_asn=map_asn != "all")
+    params = {"service_id": service.service_id, "start": start, "end": end, **filter_params}
+    rtt_where, bucket_expr = f"{_RTT_FILTER}{filter_sql}", _ch_bucket_expr(bs)
+    map_asn_sql = ""
+    if map_asn != "all":
+        map_asn_sql, params["map_asn"] = f" AND {_ASN} = {{map_asn:Int32}}", int(map_asn)
+
+    err_pct_expr = f"countIf({_STATUS} >= 500) * 100.0 / count() AS error_pct"
+    health_queries: tuple[tuple[str, str], ...] = (
+        (
+            "heatmap",
+            _ch_fact_query(
+                f"{_ASN} AS asn, {bucket_expr} AS bucket_ts, count() AS reqs, "
+                f"median(if({_NET_HIT} AND {_ELAPSED} > 0, {_RESP_BYTES} * 1000000.0 / {_ELAPSED}, NULL)) AS throughput_bps, "
+                f"median({_RTT}) AS rtt_med_us, median({_RTT_MIN}) AS rtt_baseline_us, "
+                f"median({_RTT} - {_RTT_MIN}) AS rtt_congestion_us, avg({_PLOSS}) AS avg_ploss, "
+                f"median({_RTT_VAR}) AS rtt_jitter_us, {err_pct_expr}",
+                f"{rtt_where} AND {_ASN} IS NOT NULL",
+                group_by="asn, bucket_ts",
+                order_by="reqs DESC",
+                limit=top_n * 200,
+            ),
+        ),
+        (
+            "map",
+            _ch_fact_query(
+                "country AS country, custom_fields['city'] AS city, "
+                "toFloat64OrNull(custom_fields['lat']) AS lat, toFloat64OrNull(custom_fields['lon']) AS lon, "
+                f"custom_fields['metro'] AS metro, {bucket_expr} AS bucket_ts, "
+                f"median({_RTT}) AS rtt_med_us, avg({_PLOSS}) AS avg_ploss, {err_pct_expr}, count() AS reqs",
+                f"{rtt_where} AND country != ''{map_asn_sql}",
+                group_by="country, city, lat, lon, metro, bucket_ts",
+                order_by="reqs DESC",
+                limit=5000,
+            ),
+        ),
+        (
+            "metro",
+            _ch_fact_query(
+                "country AS country, custom_fields['city'] AS city, custom_fields['region'] AS region, "
+                f"custom_fields['metro'] AS metro, avg({_PLOSS}) AS avg_ploss, {err_pct_expr}, count() AS total_reqs",
+                f"{rtt_where} AND country != ''",
+                group_by="country, city, region, metro",
+                order_by="total_reqs DESC",
+                limit=200,
+            ),
+        ),
+        (
+            "speed",
+            _ch_fact_query(
+                f"{_ASN} AS asn, custom_fields['c_speed'] AS c_speed, count() AS cnt",
+                f"{rtt_where} AND {_ASN} IS NOT NULL AND custom_fields['c_speed'] != ''",
+                group_by="asn, c_speed",
+                order_by="cnt DESC",
+            ),
+        ),
+        (
+            "percentiles",
+            _ch_fact_query(
+                f"{_ASN} AS asn, quantile(0.95)({_RTT}) AS p95, quantile(0.99)({_RTT}) AS p99",
+                f"{rtt_where} AND {_ASN} IS NOT NULL",
+                group_by="asn",
+            ),
+        ),
+    )
+    q_results = trace.run_parallel(
+        [(name, partial(service.client.execute, sql, params)) for name, sql in health_queries],
+        source="fact",
+        max_workers=2,
+        thread_name_prefix="hs-net-health",
+    )
+    heatmap_rows, map_rows, metro_rows, speed_rows, pct_rows = (
+        q_results[k] for k in ("heatmap", "map", "metro", "speed", "percentiles")
+    )
+
+    all_asns_seen: dict[int, int] = {}
+    for r in heatmap_rows:
+        if r["asn"] is not None:
+            all_asns_seen[int(r["asn"])] = all_asns_seen.get(int(r["asn"]), 0) + int(r["reqs"])
+    top_asns = sorted(all_asns_seen, key=lambda a: all_asns_seen[a], reverse=True)[:top_n]
+    top_asn_set, asn_labels = set(top_asns), resolve_asn_display_labels(service.service_id, top_asns)
+
+    all_buckets = (
+        [_fmt_ts(ts) for ts in range((int(start.timestamp()) // bs) * bs, (int(end.timestamp()) // bs) * bs + 1, bs)]
+        if start is not None and end is not None
+        else []
+    )
+    bucket_idx = {b: i for i, b in enumerate(all_buckets)}
+
+    asn_speed_rows: dict[int, list[tuple[str, int]]] = {}
+    for r in speed_rows:
+        if r["asn"] is not None and len(rows_for_asn := asn_speed_rows.setdefault(int(r["asn"]), [])) < 5:
+            rows_for_asn.append((str(r["c_speed"]), int(r["cnt"])))
+    asn_speed_mix = {
+        asn_v: {cs: round(cnt / total, 3) for cs, cnt in rows}
+        for asn_v, rows in asn_speed_rows.items()
+        if (total := sum(cnt for _, cnt in rows)) > 0
+    }
+    asn_rtt_pct = {
+        int(r["asn"]): {"p95_rtt_us": _flt(r["p95"]), "p99_rtt_us": _flt(r["p99"])}
+        for r in pct_rows
+        if r["asn"] is not None
+    }
+
+    asn_bucket_data: dict[int, dict[str, dict]] = {}
+    for r in heatmap_rows:
+        if (
+            r["asn"] is None
+            or (asn := int(r["asn"])) not in top_asn_set
+            or (bucket := _fmt_ts(int(r["bucket_ts"]))) not in bucket_idx
+        ):
+            continue
+        tp, rtt_cong, pkt, jitter, err = (
+            _flt(r.get("throughput_bps")),
+            _flt(r["rtt_congestion_us"]),
+            _flt(r["avg_ploss"]),
+            _flt(r["rtt_jitter_us"]),
+            _flt(r["error_pct"]),
+        )
+        asn_bucket_data.setdefault(asn, {})[bucket] = {
+            "bucket_idx": bucket_idx[bucket],
+            "bucket": bucket,
+            "throughput_bps": _flt(tp, 0),
+            "rtt_med_us": _flt(r["rtt_med_us"], 0),
+            "rtt_baseline_us": _flt(r["rtt_baseline_us"], 0),
+            "rtt_congestion_us": _flt(rtt_cong, 0),
+            "avg_ploss": _flt(pkt, 5),
+            "rtt_jitter_us": _flt(jitter, 0),
+            "error_pct": _flt(err, 2),
+            "health_score": _health_score(tp, rtt_cong, pkt, jitter, err),
+            "reqs": int(r["reqs"]),
+        }
+
+    heatmap = [
+        {
+            "asn": asn,
+            "label": asn_labels.get(asn, f"AS{asn}"),
+            "total_reqs": all_asns_seen.get(asn, 0),
+            "buckets": list(asn_bucket_data.get(asn, {}).values()),
+        }
+        for asn in top_asns
+    ]
+
+    has_metro = any((r.get("metro") or "") for r in (*map_rows, *metro_rows))
+    dma_map: dict = {}
+    if has_metro:
+        try:
+            from backend.core import duckdb as _db
+
+            dma_map = _db._get_dma_map()
+        except Exception:
+            dma_map = {}
+
+    cities_list: list[dict[str, Any]] = []
+    cities_index: dict[tuple[str, float | None, float | None], int] = {}
+
+    def _intern_city(name: str, lat: float | None, lon: float | None) -> int:
+        if (idx := cities_index.get((name, lat, lon))) is None:
+            idx = cities_index[(name, lat, lon)] = len(cities_list)
+            cities_list.append({"name": name, "lat": lat, "lon": lon})
+        return idx
+
+    map_by_bucket: dict[str, list[dict]] = {}
+    countries_set: set[str] = set()
+    for r in map_rows:
+        if ctry := (r["country"] or ""):
+            countries_set.add(ctry)
+        if (bucket := _fmt_ts(int(r["bucket_ts"]))) not in bucket_idx:
+            continue
+        pkt, err, metro_code, city = (
+            _flt(r["avg_ploss"]),
+            _flt(r["error_pct"]),
+            _parse_metro_code(r.get("metro")),
+            r["city"] or "",
+        )
+        display_city = (
+            dma_map.get(str(metro_code), city.title() if city else "")
+            if metro_code is not None
+            else (city.title() if city else "")
+        )
+        map_by_bucket.setdefault(bucket, []).append(
+            {
+                "country": ctry,
+                "city_idx": _intern_city(display_city, _flt(r["lat"]), _flt(r["lon"])),
+                "metro_code": metro_code,
+                "rtt_med_us": _flt(r["rtt_med_us"]),
+                "avg_ploss": pkt,
+                "error_pct": _flt(err, 2),
+                "health_score": _health_score(None, None, pkt, None, err),
+                "reqs": int(r["reqs"]),
+            }
+        )
+
+    map_buckets = (
+        [{"bucket_idx": i, "bucket": b, "cities": map_by_bucket.get(b, [])} for i, b in enumerate(all_buckets)]
+        if map_by_bucket
+        else []
+    )
+
+    seen: dict[str, dict] = {}
+    for r in metro_rows:
+        ctry, city, region = r["country"] or "", r["city"] or "", r["region"] or ""
+        pkt, err = _flt(r["avg_ploss"]), _flt(r["error_pct"])
+        hs, metro_code, reqs = (
+            _health_score(None, None, pkt, None, err),
+            _parse_metro_code(r.get("metro")),
+            int(r["total_reqs"]),
+        )
+        city_name = dma_map[str(metro_code)] if metro_code is not None and str(metro_code) in dma_map else city
+        display = format_city_label(city_name, ctry, region)
+        if prev := seen.get(display):
+            total = prev["total_reqs"] + reqs
+            if prev["health_score"] is not None and hs is not None:
+                prev["health_score"] = round((prev["health_score"] * prev["total_reqs"] + hs * reqs) / total, 1)
+            prev["total_reqs"] = total
+        else:
+            seen[display] = {
+                "country": ctry,
+                "region": region,
+                "raw_city": city,
+                "city": display,
+                "total_reqs": reqs,
+                "health_score": hs,
+            }
+    metro_leaderboard = sorted(seen.values(), key=lambda x: x["total_reqs"], reverse=True)
+
+    leaderboard: list[dict] = []
+    for asn in top_asns:
+        if not (buckets_data := asn_bucket_data.get(asn, {})):
+            continue
+        hs_now = buckets_data[max(buckets_data)].get("health_score")
+        hs_1h = hs_1w = hs_now
+        if len(all_buckets) > 1:
+            n_buckets_1h, sorted_buckets = max(1, 3600 // bs), sorted(buckets_data)
+            hs_1w = _avg_hs(buckets_data, sorted_buckets[: max(1, len(sorted_buckets) // 4)])
+            hs_1h = _avg_hs(buckets_data, sorted_buckets[max(0, len(sorted_buckets) - n_buckets_1h) :])
+        delta = (hs_now - hs_1h) if (hs_now is not None and hs_1h is not None) else 0.0
+        rtt_pct = asn_rtt_pct.get(asn, {})
+        leaderboard.append(
+            {
+                "asn": asn,
+                "label": asn_labels.get(asn, f"AS{asn}"),
+                "health_score_now": hs_now,
+                "health_score_1h_ago": hs_1h,
+                "health_score_1w_ago": hs_1w,
+                "trend": "degrading" if delta < -5 else ("improving" if delta > 5 else "stable"),
+                "total_reqs": all_asns_seen.get(asn, 0),
+                "c_speed_mix": asn_speed_mix.get(asn, {}),
+                "p95_rtt_us": rtt_pct.get("p95_rtt_us"),
+                "p99_rtt_us": rtt_pct.get("p99_rtt_us"),
+            }
+        )
+
+    all_hs = [le["health_score_now"] for le in leaderboard if le["health_score_now"] is not None]
+    global_hs = round(sum(all_hs) / len(all_hs), 1) if all_hs else 0.0
+    all_rtt = [float(r["rtt_med_us"]) for r in heatmap_rows if r["rtt_med_us"] is not None]
+    total_reqs = sum(int(r["reqs"]) for r in heatmap_rows)
+    avg_rtt_ms = round(sum(all_rtt) / len(all_rtt) / 1000.0, 1) if all_rtt else 0.0
+
+    significant = [le for le in leaderboard if le["total_reqs"] > total_reqs * 0.01]
+    worst = (
+        min(significant, key=lambda le: le["health_score_now"] if le["health_score_now"] is not None else 100)
+        if significant
+        else None
+    )
+    worst_asn = NetworkWorstEntry(label=worst["label"], score=worst["health_score_now"]) if worst else None
+
+    worst_country = None
+    for b in reversed(map_buckets):
+        cities_raw = b.get("cities")
+        cities_seq = cities_raw if isinstance(cities_raw, list) else []
+        if sig := [c for c in cities_seq if isinstance(c, dict) and c.get("reqs", 0) >= 1]:
+            wc = min(sig, key=lambda c: c["health_score"] if c["health_score"] is not None else 100)
+            idx = wc.get("city_idx", -1)
+            city_name = cities_list[idx]["name"] if 0 <= idx < len(cities_list) else ""
+            worst_country = NetworkWorstEntry(
+                label=format_city_label(city_name, wc["country"]), score=wc["health_score"]
+            )
+            break
+
+    summary = NetworkHealthSummary(
+        global_health_score=global_hs,
+        avg_rtt_ms=avg_rtt_ms,
+        total_reqs=total_reqs,
+        worst_asn=worst_asn,
+        worst_country=worst_country,
+    )
+    want_map = not sections or bool(set(sections) & {"health", "map_buckets", "cities"})
+    return NetworkHealthResponse.with_telemetry(
+        **cache_result({}, state="bypass", prewarmer=False),
+        available=True,
+        has_data=bool(heatmap_rows),
+        section_timings=trace.timings(),
+        metric="health_score",
+        bucket_seconds=bs,
+        buckets=all_buckets,
+        heatmap=heatmap,
+        map_buckets=map_buckets if want_map else [],
+        cities=[NetworkCityEntry(**c) for c in cities_list] if want_map else [],
+        leaderboard=leaderboard,
+        metro_leaderboard=metro_leaderboard,
+        summary=summary,
+        countries=sorted(countries_set),
+        has_metro=has_metro,
+        shielding_analysis=shielding,
+    )
+
+
+def network_quality(
+    service: HighScaleService, req: Any, start_time: str | None, end_time: str | None
+) -> NetworkQualityResponse:
+    start, end = parse_time_window(start_time, end_time)
+    region_country = getattr(req, "region_country", "US") or "US"
+    filter_sql, filter_params = _filter_clause(getattr(req, "filters", None))
+    params = {
+        "service_id": service.service_id,
+        "start": start,
+        "end": end,
+        "region_country": region_country,
+        **filter_params,
+    }
+    rtt_where = f"{_RTT_FILTER}{filter_sql}"
+
+    def _bar(group_expr: str, extra_where: str = "") -> list[dict]:
+        sql = _ch_fact_query(
+            f"{group_expr} AS label, median({_RTT} / 1000.0) AS rtt_ms, count() AS reqs",
+            f"{rtt_where}{extra_where}",
+            group_by="label",
+            order_by="reqs DESC",
+            limit=25,
+        )
+        return [
+            {
+                "value": str(r["label"]),
+                "label": str(r["label"]),
+                "rtt_ms": _flt(r["rtt_ms"], 2) or 0.0,
+                "reqs": int(r["reqs"]),
+            }
+            for r in service.client.execute(sql, params)
+            if r["label"] is not None and r["label"] != ""
+        ]
+
+    scatter_sql = _ch_fact_query(
+        f"{_RTT} / 1000.0 AS rtt_ms, {_TTFB} * 1000.0 AS ttfb_ms, "
+        "if(custom_fields['cache'] = '', 'UNKNOWN', custom_fields['cache']) AS cache_state",
+        f"{rtt_where} AND {_TTFB} > 0",
+        order_by="cityHash64(event_id)",
+        limit=_SCATTER_SAMPLE,
+    )
+    trace = HighScaleSections(service.service_id, "network.quality")
+    q_tasks: list[tuple[str, Callable[[], list[dict[str, Any]]]]] = [
+        *((name, partial(_bar, expr, extra)) for name, expr, extra in _QUALITY_BAR_SPECS),
+        ("scatter", lambda: service.client.execute(scatter_sql, params)),
+    ]
+    q_res: dict[str, list[dict[str, Any]]] = trace.run_parallel(
+        q_tasks,
+        source="fact",
+        max_workers=2,
+        thread_name_prefix="hs-net-quality",
+    )
+    by_country, by_asn, by_region, by_pop, scatter_rows = (
+        q_res[k] for k in ("country", "asn", "region", "pop", "scatter")
+    )
+    if by_asn:
+        labels = resolve_asn_display_labels(
+            service.service_id, [int(r["value"]) for r in by_asn if r["value"].isdigit()]
+        )
+        for row in by_asn:
+            if row["value"].isdigit():
+                row["label"] = labels[int(row["value"])]
+    return NetworkQualityResponse.with_telemetry(
+        **cache_result({}, state="bypass", prewarmer=False),
+        available=True,
+        section_timings=trace.timings(),
+        by_country=by_country,
+        by_asn=by_asn,
+        by_region=by_region,
+        region_country=region_country,
+        by_pop=by_pop,
+        scatter=[
+            {
+                "rtt_ms": round(float(r["rtt_ms"]), 2),
+                "ttfb_ms": round(float(r["ttfb_ms"]), 2),
+                "cache": str(r["cache_state"]),
+            }
+            for r in scatter_rows
+        ],
+        countries=sorted({row["value"] for row in by_country}),
+    )
+
+
+def get_pop_health(
+    service: HighScaleService, start_time: datetime | None, end_time: datetime | None
+) -> PopHealthListResponse:
+    end = end_time or datetime.now(UTC)
+    start = start_time or (end - timedelta(hours=24))
+    start, end = (dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt for dt in (start, end))
+    trace = HighScaleSections(service.service_id, "network")
+    sql = _ch_fact_query(
+        f"custom_fields['pop'] AS pop, count() AS requests, countIf({_STATUS} >= 400 OR {_STATUS} = 0) AS errors, "
+        f"quantile(0.5)({_RTT}) AS p50_rtt_us, quantile(0.95)({_TTFB}) * 1000.0 AS p95_ttfb_ms, "
+        "countIf(custom_fields['cache'] IN ('HIT', 'HIT-STALE')) AS cache_hits, "
+        "sum(toInt64OrZero(custom_fields['resp_bytes'])) AS bandwidth_bytes",
+        f"{_BASE_WHERE} AND custom_fields['pop'] != ''",
+        group_by="pop",
+        order_by="requests DESC",
+    )
+    rows = trace.run(
+        "pop_health",
+        lambda: service.client.execute(sql, {"service_id": service.service_id, "start": start, "end": end}),
+        source="fact",
+    )
+    data = [
+        PopHealthItem(
+            pop=str(r["pop"]),
+            requests=(requests := int(r["requests"])),
+            errors=(errors := int(r["errors"])),
+            error_rate=round(errors * 100.0 / requests, 2) if requests else 0.0,
+            p50_rtt_us=_flt(r["p50_rtt_us"]),
+            p95_ttfb_ms=_flt(r["p95_ttfb_ms"]),
+            cache_hit_rate=round(int(r["cache_hits"]) * 100.0 / requests, 2) if requests else 0.0,
+            bandwidth_bytes=int(r["bandwidth_bytes"] or 0),
+        )
+        for r in rows
+    ]
+    return PopHealthListResponse.with_telemetry(
+        **cache_result({}, state="bypass", prewarmer=False), data=data, section_timings=trace.timings()
+    )
+
+
+def get_transport_metrics(
+    service: HighScaleService, start_time: str | None, end_time: str | None, filters: Any = None
+) -> TransportMetrics:
+    start, end = parse_time_window(start_time, end_time)
+    filter_sql, filter_params = _filter_clause(filters)
+    params = {"service_id": service.service_id, "start": start, "end": end, **filter_params}
+    base_where = f"{_BASE_WHERE}{filter_sql}"
+    seen_select = ", ".join(f"countIf(custom_fields['{f}'] != '') AS seen_{f}" for f in _TRANSPORT_FIELDS)
+    sql = _ch_fact_query(
+        f"count() AS total_reqs, sum(toInt64OrZero(custom_fields['resp_bytes'])) AS total_bytes, "
+        f"quantile(0.50)({_RTT}) / 1000.0 AS rtt_p50, quantile(0.90)({_RTT}) / 1000.0 AS rtt_p90, "
+        f"quantile(0.95)({_RTT}) / 1000.0 AS rtt_p95, quantile(0.99)({_RTT}) / 1000.0 AS rtt_p99, "
+        f"avg(toFloat64OrNull(custom_fields['retrans'])) AS avg_retrans, avg({_PLOSS}) * 100.0 AS avg_ploss_pct, "
+        f"avg(toFloat64OrNull(custom_fields['delivery_rate'])) * 8.0 / 1e6 AS avg_del_rate_mbps, {seen_select}",
+        base_where,
+    )
+    proto_sql = _ch_fact_query(
+        "caseWithExpression(custom_fields['proto'], '3.0', 'HTTP/3', '3', 'HTTP/3', '2.0', 'HTTP/2', '2', 'HTTP/2', "
+        "'1.1', 'HTTP/1.1', '1.0', 'HTTP/1.0', if(empty(custom_fields['proto']), 'Other', custom_fields['proto'])) AS proto_clean, "
+        "count() AS reqs",
+        base_where,
+        group_by="proto_clean",
+        order_by="reqs DESC",
+    )
+    trace = HighScaleSections(service.service_id, "network.transport")
+    q_res = trace.run_parallel(
+        [
+            ("summary", lambda: service.client.execute(sql, params)),
+            ("protocols", lambda: service.client.execute(proto_sql, params)),
+        ],
+        source="fact",
+        max_workers=2,
+        thread_name_prefix="hs-net-transport",
+    )
+    rows, p_rows = q_res["summary"], q_res["protocols"]
+    r: Mapping[str, Any] = rows[0] if rows else {}
+    total_requests = int(r.get("total_reqs") or 0)
+    missing_fields = [f for f in _TRANSPORT_FIELDS if not int(r.get(f"seen_{f}") or 0)] if total_requests > 0 else []
+    sum_p = sum(pr.get("reqs", 0) for pr in p_rows) or total_requests or 1
+    return TransportMetrics(
+        **cache_result({}, state="bypass", prewarmer=False),
+        section_timings=[SectionTimingEntry.model_validate(t) for t in trace.timings()],
+        has_transport_data=len(missing_fields) < len(_TRANSPORT_FIELDS),
+        **{attr: _flt(r.get(col), nd) for attr, col, nd in _TRANSPORT_ROUND_SPECS},
+        bandwidth_bytes=int(r.get("total_bytes") or 0),
+        total_requests=total_requests,
+        protocol_distribution=[
+            TransportProtocolShare(
+                protocol=str(pr.get("proto_clean", "Other")),
+                requests=(p_cnt := int(pr.get("reqs", 0))),
+                share_pct=round(p_cnt * 100.0 / sum_p, 2),
+            )
+            for pr in p_rows
+        ],
+        missing_fields=missing_fields,
+    )
+
+
+def network_bundle(
+    service: HighScaleService, req: NetworkBundleRequest, start_time: str | None, end_time: str | None
+) -> NetworkBundleResponse:
+    sections = set(req.sections) if req.sections else None
+    q_req = NetworkQualityRequest(
+        region_country=req.region_country, filters=req.filters, start_time=start_time, end_time=end_time
+    )
+    bundle_specs: tuple[tuple[str, bool, Callable[[], Any]], ...] = (
+        (
+            "health",
+            sections is None or "health" in sections or bool(sections & (_CORE_SECTIONS | {"shielding_analysis"})),
+            lambda: network_health(service, req, start_time, end_time),
+        ),
+        (
+            "quality",
+            sections is None or "quality" in sections,
+            lambda: network_quality(service, q_req, start_time, end_time),
+        ),
+        (
+            "pop",
+            sections is None or "pop_health" in sections,
+            lambda: get_pop_health(service, _range_value(start_time), _range_value(end_time)),
+        ),
+        (
+            "transport",
+            sections is None or "transport" in sections,
+            lambda: get_transport_metrics(service, start_time, end_time, req.filters),
+        ),
+    )
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="hs-net-bundle") as pool:
+        futs = [(k, pool.submit(contextvars.copy_context().run, fn)) for k, want, fn in bundle_specs if want]
+        res = {k: fut.result() for k, fut in futs}
+    health_resp, quality_resp, pop_response, transport_resp = (
+        res.get("health"),
+        res.get("quality"),
+        res.get("pop"),
+        res.get("transport"),
+    )
+    combined_timings = [
+        t
+        for r in (health_resp, quality_resp, pop_response, transport_resp)
+        if r is not None
+        for t in (getattr(r, "section_timings", None) or [])
+    ]
+    return NetworkBundleResponse.with_telemetry(
+        **cache_result({}, state="bypass", prewarmer=False),
+        available=True,
+        section_timings=combined_timings,
+        component_observations={"pop_health": pop_response} if pop_response is not None else None,
+        health=health_resp,
+        quality=quality_resp,
+        pop_health=pop_response.data if pop_response is not None else None,
+        transport=transport_resp,
+    )
+
+
+@dataclass(frozen=True)
+class NetworkProjection:
+    dimension_rows: tuple[dict[str, Any], ...]
+
+
+@dataclass
+class _NetworkAccumulator:
+    requests: int = 0
+    errors: int = 0
+    tcp_rtts: list[float] = _dc_field(default_factory=list)
+    ttfbs: list[float] = _dc_field(default_factory=list)
+    ploss_sum: float = 0.0
+    ploss_count: int = 0
+
+
+def build_network_projection_rows(rows: tuple[Mapping[str, Any], ...]) -> NetworkProjection:
+    dimensions: dict[tuple[datetime, str, str, str], _NetworkAccumulator] = defaultdict(_NetworkAccumulator)
+    for row in rows:
+        if (bucket := _bucket(row.get("timestamp"))) is None:
+            continue
+        status = _finite_int(row.get("status"))
+        is_error = status is not None and status >= 500
+        tcp_rtt, ttfb, ploss = (
+            _finite_float(row.get("tcp_rtt")),
+            _finite_float(row.get("ttfb")),
+            _finite_float(row.get("ploss")),
+        )
+        c_speed = _text(row.get("c_speed"))
+        for dim in ("country", "asn", "pop", "region"):
+            if val := _text(row.get(dim)):
+                _network_update(
+                    dimensions[(bucket, dim, val, c_speed if dim == "asn" else "")], is_error, tcp_rtt, ttfb, ploss
+                )
+    return NetworkProjection(
+        dimension_rows=tuple(
+            _network_dimension_row(b, d, v, cs, acc) for (b, d, v, cs), acc in sorted(dimensions.items())
+        )
+    )
+
+
+def _network_update(
+    acc: _NetworkAccumulator, is_error: bool, tcp_rtt: float | None, ttfb: float | None, ploss: float | None
+) -> None:
+    acc.requests += 1
+    acc.errors += int(is_error)
+    if tcp_rtt is not None and tcp_rtt > 0:
+        acc.tcp_rtts.append(tcp_rtt)
+    if ttfb is not None and ttfb > 0:
+        acc.ttfbs.append(ttfb)
+    if ploss is not None:
+        acc.ploss_sum += ploss
+        acc.ploss_count += 1
+
+
+def _network_dimension_row(
+    bucket: datetime, dimension: str, value: str, c_speed: str, acc: _NetworkAccumulator
+) -> dict[str, Any]:
+    rtt_p50, rtt_p95, rtt_p99 = _percentiles(acc.tcp_rtts, (0.50, 0.95, 0.99))
+    ttfb_p50, ttfb_p95 = _percentiles(acc.ttfbs, (0.50, 0.95))
+    return {
+        "bucket_start": bucket.isoformat(),
+        "dimension": dimension,
+        "value": value,
+        "c_speed": c_speed,
+        "requests": acc.requests,
+        "errors": acc.errors,
+        "tcp_rtt_count": len(acc.tcp_rtts),
+        "tcp_rtt_sum": sum(acc.tcp_rtts) if acc.tcp_rtts else None,
+        "tcp_rtt_p50_us": rtt_p50,
+        "tcp_rtt_p95_us": rtt_p95,
+        "tcp_rtt_p99_us": rtt_p99,
+        "ploss_sum": acc.ploss_sum if acc.ploss_count > 0 else None,
+        "ploss_count": acc.ploss_count,
+        "ttfb_p50_us": ttfb_p50,
+        "ttfb_p95_us": ttfb_p95,
     }
 
 
@@ -5816,29 +7569,15 @@ def aggregates(
     return dashboard_aggregates(service, req, start_time, end_time)
 
 
-_QUERY_SERVICE_ALIASES = (
-    "query_router",
-    "decoder",
-    "query",
-    "clickhouse",
-    "insights",
-    "sessions",
-    "aggregate_query",
-    "performance",
-    "performance_projection",
-    "cmcd",
-    "dashboard",
-    "origin",
-    "origin_projection",
-    "security",
+_QUERY_SERVICE_ALIASES = tuple(
+    "query_router decoder query clickhouse insights insight_queries sessions aggregate_query "
+    "performance performance_projection cmcd dashboard origin origin_projection security network".split()
 )
 for _alias_name in _QUERY_SERVICE_ALIASES:
     sys.modules[f"backend.high_scale.{_alias_name}"] = _self_mod
-_hs_pkg = sys.modules.get("backend.high_scale")
-if _hs_pkg is not None:
+if (_hs_pkg := sys.modules.get("backend.high_scale")) is not None:
     for _alias_name in _QUERY_SERVICE_ALIASES:
         setattr(_hs_pkg, _alias_name, _self_mod)
-_backend_pkg = sys.modules.get("backend")
-if _backend_pkg is not None and hasattr(_backend_pkg, "_MODULE_ALIASES"):
+if (_backend_pkg := sys.modules.get("backend")) is not None and hasattr(_backend_pkg, "_MODULE_ALIASES"):
     for _alias_name in _QUERY_SERVICE_ALIASES:
         _backend_pkg._MODULE_ALIASES[f"backend.high_scale.{_alias_name}"] = __name__

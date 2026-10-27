@@ -1,6 +1,7 @@
 'use client'
 
-import React, { useState } from 'react'
+import React, { useMemo, useState } from 'react'
+import { ColumnDef, flexRender, getCoreRowModel, useReactTable } from '@tanstack/react-table'
 import { DashboardTableData } from '@/types/api'
 import { useFilterStore } from '@/stores/filterStore'
 import { Copy, Check, EyeOff, TrendingUp, TrendingDown, Search, Loader2, X } from 'lucide-react'
@@ -15,6 +16,7 @@ import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Skeleton } from '@/components/ui/skeleton'
+import { Table, TableBody, TableCell, TableRow } from '@/components/ui/table'
 import { cn, isIpFamilyField, formatValue, calculateDelta, formatCount, formatCountMaybe } from "@/lib/utils";
 import { PopLabel } from '@/components/DataTable'
 import {
@@ -192,6 +194,8 @@ function NotLoggedIndicator() {
   )
 }
 
+type TopTenItem = DashboardTableData['top'][number]
+
 export const TopTenTable = React.memo(function TopTenTable({ title, icon, field, data, compareData, onRowClick, inActiveFormat = true }: TopTenTableProps) {
   const { copied, copy } = useCopyToClipboard(2000)
   const { data: catalog } = useLogFieldsCatalog()
@@ -200,6 +204,98 @@ export const TopTenTable = React.memo(function TopTenTable({ title, icon, field,
   // hide its value-search dialog. Other cards (incl. `oip`) are unaffected.
   const maskIps = useMaskIps()
   const filterBlocked = maskIps && isIpFamilyField(field ?? '')
+
+  const topItems = useMemo(() => data?.top?.slice(0, 10) ?? [], [data?.top])
+  const maxCount = useMemo(() => (topItems.length > 0 ? Math.max(...topItems.map((i) => i.count)) : 1), [topItems])
+  const compareMap = useMemo(() => new Map(compareData?.top?.map((i) => [i.value, i.count]) || []), [compareData?.top])
+
+  const columns = useMemo<ColumnDef<TopTenItem>[]>(
+    () => [
+      {
+        id: 'row',
+        cell: ({ row: { original: item } }) => {
+          const displayVal = item.label || formatValue(field, item.value as string | number)
+          const compCount = compareMap.get(item.value)
+          const delta = calculateDelta(item.count, compCount)
+
+          // A-5: pair the color signal with a Trending* icon + aria-label so
+          // direction is conveyed without relying on red/green alone (WCAG 1.4.1).
+          const deltaPct = delta !== null ? delta.toFixed(0) : null
+          const deltaAriaLabel = delta === null
+            ? undefined
+            : delta > 0
+              ? `Increased by ${deltaPct}% versus comparison period`
+              : delta < 0
+                ? `Decreased by ${Math.abs(delta).toFixed(0)}% versus comparison period`
+                : 'No change versus comparison period'
+          const DeltaIcon = delta !== null && delta > 0 ? TrendingUp : delta !== null && delta < 0 ? TrendingDown : null
+
+          const rowInner = (
+            <>
+              <div
+                className="absolute inset-y-0 left-0 bg-primary/10 transition-all duration-300"
+                style={{ width: `${(item.count / maxCount) * 100}%` }}
+                aria-hidden="true"
+              />
+              {/* Let the value use all space the count/delta badge doesn't
+                  need (flex-1 + min-w-0 for in-flex truncation) rather than a
+                  fixed 65% cap — short values like IPs then fit fully while
+                  long URLs/UAs still truncate. The badge is shrink-0 so it
+                  always keeps its room. */}
+              <span className={cn("relative z-10 truncate pr-4 min-w-0", "flex-1")}>
+                {field === 'pop' ? <PopLabel code={String(item.value)} /> : displayVal}
+              </span>
+              <div className="relative z-10 flex items-center gap-2 shrink-0">
+                {delta !== null && (
+                  <span
+                    className={cn(
+                      "inline-flex items-center gap-0.5 text-[10px] font-bold tabular-nums",
+                      delta > 0 ? "text-red-500" : delta < 0 ? "text-green-500" : "text-muted-foreground"
+                    )}
+                    aria-label={deltaAriaLabel}
+                  >
+                    {DeltaIcon && <DeltaIcon className="h-3 w-3" aria-hidden="true" />}
+                    <span aria-hidden="true">{delta > 0 ? '+' : ''}{deltaPct}%</span>
+                  </span>
+                )}
+                <span className="text-xs font-mono tabular-nums text-muted-foreground">{formatCount(item.count)}</span>
+              </div>
+            </>
+          )
+
+          // PII: for a masking analyst the `ip` card is read-only — render a
+          // static row (no filter drill-down) instead of the clickable button.
+          if (filterBlocked) {
+            return (
+              <div
+                className="group flex items-center justify-between py-1.5 px-2 -mx-2 rounded-sm text-sm text-left relative overflow-hidden w-full"
+                title={String(displayVal)}
+              >
+                {rowInner}
+              </div>
+            )
+          }
+
+          return (
+            // A-4: native <button> for keyboard reachability + Enter/Space
+            // activation + focus ring for free (WCAG 2.1.1 / 4.1.2). The
+            // visual row layout is preserved via the reset classes.
+            <button
+              type="button"
+              className="group flex items-center justify-between py-1.5 px-2 -mx-2 rounded-sm cursor-pointer hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring text-sm text-left relative overflow-hidden w-full bg-transparent border-0"
+              onClick={() => onRowClick?.(field ?? '', item.value as string | number)}
+              title={String(displayVal)}
+              aria-label={`Filter to ${displayVal}`}
+            >
+              {rowInner}
+            </button>
+          )
+        },
+      },
+    ],
+    [field, compareMap, maxCount, filterBlocked, onRowClick],
+  )
+  const table = useReactTable({ data: topItems, columns, getCoreRowModel: getCoreRowModel() })
 
   if (!data || !data.top || data.top.length === 0) {
     let requiredGroupMessage = ''
@@ -248,10 +344,6 @@ export const TopTenTable = React.memo(function TopTenTable({ title, icon, field,
       </div>
     )
   }
-
-  const topItems = data.top.slice(0, 10)
-  const maxCount = Math.max(...topItems.map(item => item.count))
-  const compareMap = new Map(compareData?.top?.map(item => [item.value, item.count]) || [])
 
   const handleCopyCSV = (e: React.MouseEvent) => {
     e.stopPropagation()
@@ -302,101 +394,19 @@ export const TopTenTable = React.memo(function TopTenTable({ title, icon, field,
           </Tooltip>          {field && !filterBlocked && <FieldSearchDialog field={field} title={title} />}
         </div>
       </div>
-      <div className="flex flex-col gap-[2px] flex-1">
-        {topItems.map((item) => {
-          const displayVal = item.label || formatValue(field, item.value as string | number)
-          const compCount = compareMap.get(item.value)
-          const delta = calculateDelta(item.count, compCount)
-
-          // A-5: pair the color signal with a Trending* icon + aria-label so
-          // direction is conveyed without relying on red/green alone (WCAG 1.4.1).
-          const deltaPct = delta !== null ? delta.toFixed(0) : null
-          const deltaAriaLabel = delta === null
-            ? undefined
-            : delta > 0
-              ? `Increased by ${deltaPct}% versus comparison period`
-              : delta < 0
-                ? `Decreased by ${Math.abs(delta).toFixed(0)}% versus comparison period`
-                : 'No change versus comparison period'
-          const DeltaIcon = delta !== null && delta > 0
-            ? TrendingUp
-            : delta !== null && delta < 0
-              ? TrendingDown
-              : null
-
-          const rowInner = (
-            <>
-              <div
-                className="absolute inset-y-0 left-0 bg-primary/10 transition-all duration-300"
-                style={{ width: `${(item.count / maxCount) * 100}%` }}
-                aria-hidden="true"
-              />
-              {/* Let the value use all space the count/delta badge doesn't
-                  need (flex-1 + min-w-0 for in-flex truncation) rather than a
-                  fixed 65% cap — short values like IPs then fit fully while
-                  long URLs/UAs still truncate. The badge is shrink-0 so it
-                  always keeps its room. */}
-              <span
-                className={cn(
-                  "relative z-10 truncate pr-4 min-w-0",
-                  "flex-1",
-                )}
-              >
-                {field === 'pop' ? <PopLabel code={String(item.value)} /> : displayVal}
-              </span>
-              <div className="relative z-10 flex items-center gap-2 shrink-0">
-                {delta !== null && (
-                  <span
-                    className={cn(
-                      "inline-flex items-center gap-0.5 text-[10px] font-bold tabular-nums",
-                      delta > 0 ? "text-red-500" : delta < 0 ? "text-green-500" : "text-muted-foreground"
-                    )}
-                    aria-label={deltaAriaLabel}
-                  >
-                    {DeltaIcon && <DeltaIcon className="h-3 w-3" aria-hidden="true" />}
-                    <span aria-hidden="true">
-                      {delta > 0 ? '+' : ''}{deltaPct}%
-                    </span>
-                  </span>
-                )}
-                <span className="text-xs font-mono tabular-nums text-muted-foreground">
-                  {formatCount(item.count)}
-                </span>
-              </div>
-            </>
-          )
-
-          // PII: for a masking analyst the `ip` card is read-only — render a
-          // static row (no filter drill-down) instead of the clickable button.
-          if (filterBlocked) {
-            return (
-              <div
-                key={String(item.value)}
-                className="group flex items-center justify-between py-1.5 px-2 -mx-2 rounded-sm text-sm text-left relative overflow-hidden w-full"
-                title={String(displayVal)}
-              >
-                {rowInner}
-              </div>
-            )
-          }
-
-          return (
-            // A-4: native <button> for keyboard reachability + Enter/Space
-            // activation + focus ring for free (WCAG 2.1.1 / 4.1.2). The
-            // visual row layout is preserved via the reset classes.
-            <button
-              key={String(item.value)}
-              type="button"
-              className="group flex items-center justify-between py-1.5 px-2 -mx-2 rounded-sm cursor-pointer hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring text-sm text-left relative overflow-hidden w-full bg-transparent border-0"
-              onClick={() => onRowClick?.(field ?? '', item.value as string | number)}
-              title={String(displayVal)}
-              aria-label={`Filter to ${displayVal}`}
-            >
-              {rowInner}
-            </button>
-          )
-        })}
-      </div>
+      <Table className="flex-1">
+        <TableBody>
+          {table.getRowModel().rows.map((row) => (
+            <TableRow key={String(row.original.value)} className="border-0 hover:bg-transparent">
+              {row.getVisibleCells().map((cell) => (
+                <TableCell key={cell.id} className="p-0 py-[1px]">
+                  {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                </TableCell>
+              ))}
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
     </div>
   )
 })

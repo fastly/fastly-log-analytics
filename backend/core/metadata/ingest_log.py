@@ -81,7 +81,7 @@ def get_reclaimable_strand_filenames(service_id: str, candidates: set[str], min_
     Default-deny — anything not positively proven safe is left alone:
 
       * ``row_count == 0`` → a no-data MARKER (rows all filtered out by a time bound
-        or all corrupt, so NO buffer/Iceberg data was written). Its raw .gz may be
+        or all corrupt, so NO buffer/DuckLake data was written). Its raw .gz may be
         the only surviving copy, so deleting it would be data loss, not a reclaim.
 
       * ``ingested_at < min_ingested_at`` → a row written BEFORE the durability fix

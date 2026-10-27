@@ -1053,7 +1053,7 @@ def get_insights(
     create_q = f"CREATE TABLE {temp_table} AS SELECT {cols_sql} FROM {table_name} WHERE timestamp >= CAST('{baseline_start_s}' AS TIMESTAMPTZ) AND timestamp <= CAST('{now_s}' AS TIMESTAMPTZ){extra_filter_sql}"
     temp_created = runner.create_temp_table(create_q, [])
     if not temp_created:
-        temp_table = table_name  # Fallback to the iceberg view directly
+        temp_table = table_name  # Fallback to the lake view directly
     try:
         w_total = 0
         try:

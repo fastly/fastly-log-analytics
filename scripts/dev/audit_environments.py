@@ -66,8 +66,7 @@ def refresh_environment_origins() -> None:
     for env_name, env_config in ENVIRONMENTS.items():
         spec = ENVIRONMENT_SPECS[env_name]
         if configured_origin := admin_origin(env_name):
-            env_config.backend_url = configured_origin
-            env_config.frontend_url = f"{configured_origin}/dashboard"
+            env_config.backend_url, env_config.frontend_url = configured_origin, f"{configured_origin}/dashboard"
         else:
             env_config.backend_url, env_config.frontend_url = spec.backend_url, spec.frontend_url
 
@@ -170,7 +169,7 @@ def format_duration(seconds: float | None) -> str:
 
 
 def format_bytes(b: int | float | None) -> str:
-    if b is None or b == 0:
+    if not b:
         return "0 B"
     for unit in ["B", "KB", "MB", "GB", "TB"]:
         if abs(b) < 1024.0:
@@ -199,8 +198,7 @@ def audit_target(env: EnvironmentConfig, timeout: float = 5.0) -> AuditResult:
     req_headers: dict[str, str] = {}
     t0 = time.perf_counter()
     status, health_data = http_get_json(f"{env.backend_url}/api/health?deep=1", headers=req_headers, timeout=timeout)
-    res.latency_ms = (time.perf_counter() - t0) * 1000.0
-    res.status_code = status
+    res.latency_ms, res.status_code = (time.perf_counter() - t0) * 1000.0, status
 
     if status != 200 or health_data.get("status") != "ok":
         res.reachable = False
@@ -208,8 +206,7 @@ def audit_target(env: EnvironmentConfig, timeout: float = 5.0) -> AuditResult:
         res.errors.append(f"Backend unhealthy: HTTP {status} (data: {health_data}){hint}")
         return res
 
-    res.reachable = True
-    res.version = health_data.get("version")
+    res.reachable, res.version = True, health_data.get("version")
     active_sid = env.service_id or ((health_data.get("services") or [{}])[0].get("service_id", "") if health_data.get("services") else "")
     res.service_id = active_sid
 
@@ -223,8 +220,7 @@ def audit_target(env: EnvironmentConfig, timeout: float = 5.0) -> AuditResult:
         probes["clickhouse_status"] = (http_get_json, (f"{env.backend_url}/api/admin/clickhouse/status?service_id={active_sid}",), {"headers": req_headers, "timeout": timeout})
 
     with ThreadPoolExecutor(max_workers=len(probes)) as pool:
-        futures = {name: pool.submit(fn, *args, **kwargs) for name, (fn, args, kwargs) in probes.items()}
-        outcomes = {name: fut.result() for name, fut in futures.items()}
+        outcomes = {name: fut.result() for name, fut in {n: pool.submit(fn, *a, **kw) for n, (fn, a, kw) in probes.items()}.items()}
 
     b_status, b_data = outcomes["bootstrap"]
     hs_status, hs_data = outcomes["health_snapshot"]
@@ -242,11 +238,9 @@ def audit_target(env: EnvironmentConfig, timeout: float = 5.0) -> AuditResult:
         res.request_last_sync_at = req_sec.get("last_sync_at")
         res.rum_latest_log_at = rum_sec.get("latest_log_at")
         res.rum_latest_log_age_s = parse_timestamp_age(res.rum_latest_log_at)
-        res.rum_total_rows = rum_sec.get("total_rows")
-        res.rum_last_sync_at = rum_sec.get("last_sync_at")
+        res.rum_total_rows, res.rum_last_sync_at = rum_sec.get("total_rows"), rum_sec.get("last_sync_at")
         res.duckdb_size_bytes = status_sec.get("duckdb_size_bytes") or 0
-        res.iceberg_bytes = status_sec.get("iceberg_bytes") or 0
-        res.iceberg_files = status_sec.get("iceberg_files") or 0
+        res.iceberg_bytes, res.iceberg_files = status_sec.get("iceberg_bytes") or 0, status_sec.get("iceberg_files") or 0
 
     if hs_status == 200 and isinstance(hs_data, dict):
         load = hs_data.get("load") or {}
@@ -262,15 +256,13 @@ def audit_target(env: EnvironmentConfig, timeout: float = 5.0) -> AuditResult:
         elif res.mem_used_pct > 85.0:
             res.warnings.append(f"Elevated memory usage: {res.mem_used_pct:.1f}%")
 
-        dm = hs_data.get("data_mount") or {}
+        dm, rd = hs_data.get("data_mount") or {}, hs_data.get("root_disk") or {}
         res.data_mount_used_pct, res.data_mount_free_gb = float(dm.get("used_pct", 0.0)), float(dm.get("free_gb", 0.0))
+        res.root_disk_used_pct, res.root_disk_free_gb = float(rd.get("used_pct", 0.0)), float(rd.get("free_gb", 0.0))
         if res.data_mount_used_pct > 95.0:
             res.errors.append(f"Data mount nearly full: {res.data_mount_used_pct:.1f}% used ({res.data_mount_free_gb:.1f} GB free)")
         elif res.data_mount_used_pct > 85.0:
             res.warnings.append(f"Data mount high: {res.data_mount_used_pct:.1f}% used ({res.data_mount_free_gb:.1f} GB free)")
-
-        rd = hs_data.get("root_disk") or {}
-        res.root_disk_used_pct, res.root_disk_free_gb = float(rd.get("used_pct", 0.0)), float(rd.get("free_gb", 0.0))
 
         res.scheduler_tick_age_s = hs_data.get("scheduler_last_tick_age_s")
         if res.scheduler_tick_age_s is not None:
@@ -293,11 +285,8 @@ def audit_target(env: EnvironmentConfig, timeout: float = 5.0) -> AuditResult:
                 err_msg = fail.get("error_message") or fail.get("summary") or fail.get("status") or "error"
                 res.warnings.append(f"Cron failure in {fail.get('task')}{age_str}: {err_msg}")
 
-        celery = hs_data.get("celery")
-        if celery and isinstance(celery, dict):
-            res.celery_reachable = celery.get("broker_reachable")
-            res.celery_queue_depth = celery.get("queue_depth")
-            res.celery_workers = celery.get("active_workers")
+        if isinstance(celery := hs_data.get("celery"), dict):
+            res.celery_reachable, res.celery_queue_depth, res.celery_workers = celery.get("broker_reachable"), celery.get("queue_depth"), celery.get("active_workers")
             if res.celery_reachable is False:
                 res.errors.append("Celery broker unreachable!")
             elif (res.celery_workers or 0) == 0:
@@ -305,20 +294,15 @@ def audit_target(env: EnvironmentConfig, timeout: float = 5.0) -> AuditResult:
             elif (res.celery_queue_depth or 0) > 100:
                 res.warnings.append(f"High Celery queue backlog: {res.celery_queue_depth} tasks queued")
 
-        fos = hs_data.get("fos")
-        if fos and isinstance(fos, dict):
+        if isinstance(fos := hs_data.get("fos"), dict):
             svc_fos = fos.get(active_sid) or {}
-            res.fos_reachable = svc_fos.get("reachable", False)
-            res.fos_error = svc_fos.get("error")
+            res.fos_reachable, res.fos_error = svc_fos.get("reachable", False), svc_fos.get("error")
             if not res.fos_reachable and res.fos_error:
                 res.errors.append(f"FOS probe failed: {res.fos_error}")
 
         svc_comp = (hs_data.get("compaction") or {}).get(active_sid) or {}
-        res.compaction_total_files = svc_comp.get("total_files") or 0
-        res.compaction_daily_files = svc_comp.get("daily_files") or 0
-        res.compaction_weekly_files = svc_comp.get("weekly_files") or 0
-        res.compaction_partitions_above_3 = svc_comp.get("partitions_above_3") or 0
-        res.compaction_partitions_above_10 = svc_comp.get("partitions_above_10") or 0
+        res.compaction_total_files, res.compaction_daily_files, res.compaction_weekly_files = svc_comp.get("total_files") or 0, svc_comp.get("daily_files") or 0, svc_comp.get("weekly_files") or 0
+        res.compaction_partitions_above_3, res.compaction_partitions_above_10 = svc_comp.get("partitions_above_3") or 0, svc_comp.get("partitions_above_10") or 0
         if res.compaction_partitions_above_10 > 0:
             res.warnings.append(f"Uncompacted partitions: {res.compaction_partitions_above_10} partitions have >10 files")
 
@@ -387,30 +371,19 @@ def print_audit_report(results: list[AuditResult], clear_screen: bool = False) -
         cpu_color = RED if r.cpu_load_1m > (r.vcpus * 2) else (YELLOW if r.cpu_load_1m > r.vcpus else GREEN)
         mem_color = RED if r.mem_used_pct > 90 else (YELLOW if r.mem_used_pct > 80 else GREEN)
         disk_color = RED if r.data_mount_used_pct > 90 else (YELLOW if r.data_mount_used_pct > 80 else GREEN)
-        print(
-            f"  {BOLD}Resources:{RESET} CPU: {cpu_color}{r.cpu_load_1m:.2f}{RESET}/{r.cpu_load_5m:.2f}/{r.cpu_load_15m:.2f} ({r.vcpus} vCPUs) │ "
-            f"RAM: {mem_color}{r.mem_used_pct:.1f}%{RESET} ({r.mem_available_mb / 1024:.1f}/{r.mem_total_mb / 1024:.1f} GB free) │ "
-            f"Disk: {disk_color}{r.data_mount_used_pct:.1f}%{RESET} ({r.data_mount_free_gb:.1f} GB free)"
-        )
+        print(f"  {BOLD}Resources:{RESET} CPU: {cpu_color}{r.cpu_load_1m:.2f}{RESET}/{r.cpu_load_5m:.2f}/{r.cpu_load_15m:.2f} ({r.vcpus} vCPUs) │ RAM: {mem_color}{r.mem_used_pct:.1f}%{RESET} ({r.mem_available_mb / 1024:.1f}/{r.mem_total_mb / 1024:.1f} GB free) │ Disk: {disk_color}{r.data_mount_used_pct:.1f}%{RESET} ({r.data_mount_free_gb:.1f} GB free)")
 
         ingest_color = GREEN if "STREAMING" in r.ingest_state else (CYAN if "IDLE" in r.ingest_state else YELLOW)
-        print(
-            f"  {BOLD}Ingest:{RESET}    State: {ingest_color}{r.ingest_state}{RESET} │ "
-            f"Request: {r.request_total_rows or 0:,} rows (latest {format_duration(r.request_latest_log_age_s)} ago) │ "
-            f"RUM: {r.rum_total_rows or 0:,} rows (latest {format_duration(r.rum_latest_log_age_s)} ago)"
-        )
+        print(f"  {BOLD}Ingest:{RESET}    State: {ingest_color}{r.ingest_state}{RESET} │ Request: {r.request_total_rows or 0:,} rows (latest {format_duration(r.request_latest_log_age_s)} ago) │ RUM: {r.rum_total_rows or 0:,} rows (latest {format_duration(r.rum_latest_log_age_s)} ago)")
 
-        sched_color = RED if (r.scheduler_tick_age_s or 0) > 45 else GREEN
-        comp_color = YELLOW if (r.compaction_partitions_above_10 or 0) > 0 else GREEN
+        sched_color, comp_color = (RED if (r.scheduler_tick_age_s or 0) > 45 else GREEN), (YELLOW if (r.compaction_partitions_above_10 or 0) > 0 else GREEN)
         sched_str = f"{r.scheduler_tick_age_s:.0f}s ago" if r.scheduler_tick_age_s is not None else "—"
         storage_parts = [f"Scheduler Tick: {sched_color}{sched_str}{RESET}"]
         if (r.duckdb_size_bytes or 0) > 0:
             storage_parts.append(f"DuckDB: {format_bytes(r.duckdb_size_bytes)}")
         if (r.iceberg_files or 0) > 0 or (r.iceberg_bytes or 0) > 0:
             storage_parts.append(f"DuckLake: {format_bytes(r.iceberg_bytes)} ({r.iceberg_files} files)")
-        storage_parts.append(
-            f"Compaction: {comp_color}{r.compaction_total_files or 0} files ({r.compaction_daily_files or 0} daily, {r.compaction_weekly_files or 0} weekly){RESET}"
-        )
+        storage_parts.append(f"Compaction: {comp_color}{r.compaction_total_files or 0} files ({r.compaction_daily_files or 0} daily, {r.compaction_weekly_files or 0} weekly){RESET}")
         storage_line = f"  {BOLD}Pipeline:{RESET}  {' │ '.join(storage_parts)}"
         if (r.compaction_partitions_above_10 or 0) > 0:
             storage_line += f" {YELLOW}[sprawl: {r.compaction_partitions_above_10} dirs >10 files]{RESET}"
@@ -462,20 +435,14 @@ def run_audit(target_names: list[str] | None = None, timeout: float = 5.0) -> li
                 results.append(future.result())
             except Exception as e:
                 env = future_to_env[future]
-                results.append(AuditResult(
-                    target=env.name, architecture=env.architecture, service_id=env.service_id,
-                    backend_url=env.backend_url, errors=[f"Audit execution exception: {e}"],
-                ))
+                results.append(AuditResult(target=env.name, architecture=env.architecture, service_id=env.service_id, backend_url=env.backend_url, errors=[f"Audit execution exception: {e}"]))
     env_order = list(ENVIRONMENTS.keys())
     results.sort(key=lambda r: env_order.index(r.target) if r.target in env_order else 999)
     return results
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(
-        description="Fastly Log Analytics Multi-Environment Diagnostic & Health Audit",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
+    parser = argparse.ArgumentParser(description="Fastly Log Analytics Multi-Environment Diagnostic & Health Audit", formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--env", nargs="+", default=["all"], help=f"Environments to audit (default: all). Choices: {list(ENVIRONMENTS.keys())} or 'all'")
     parser.add_argument("--watch", action="store_true", help="Run continuously in watch monitor mode")
     parser.add_argument("--duration", type=float, default=0.0, help="Duration in minutes to run in watch mode (default: 0 = indefinite until Ctrl+C)")
@@ -489,19 +456,13 @@ def main() -> int:
 
     if not args.watch:
         results = run_audit(target_names=args.env, timeout=args.timeout)
-        if args.json:
-            print(json.dumps([asdict(r) for r in results], indent=2))
-        else:
-            print_audit_report(results, clear_screen=False)
+        print(json.dumps([asdict(r) for r in results], indent=2)) if args.json else print_audit_report(results, clear_screen=False)
         return 1 if any(not r.reachable or len(r.errors) > 0 for r in results) else 0
 
-    start_time = time.time()
-    max_duration_s = args.duration * 60.0 if args.duration > 0 else float("inf")
-    last_results: list[AuditResult] = []
+    start_time, max_duration_s, last_results = time.time(), (args.duration * 60.0 if args.duration > 0 else float("inf")), []
     try:
         while True:
-            elapsed = time.time() - start_time
-            if elapsed >= max_duration_s:
+            if (elapsed := time.time() - start_time) >= max_duration_s:
                 print(f"\n{GREEN}Completed watch duration of {args.duration:.1f} minute(s). Exiting.{RESET}")
                 break
             last_results = run_audit(target_names=args.env, timeout=args.timeout)
@@ -516,6 +477,7 @@ def main() -> int:
         print(f"\n{YELLOW}Audit watch stopped by operator.{RESET}")
 
     return 1 if any(not r.reachable or len(r.errors) > 0 for r in last_results) else 0
+# fmt: on
 
 
 if __name__ == "__main__":

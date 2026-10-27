@@ -33,7 +33,6 @@ from backend.utils.telemetry import safe_iso as _safe_iso
 
 logger = logging.getLogger(__name__)
 
-
 for _mod_alias in ("backend.utils.sql_validator", "backend.utils.sql_ident", "backend.core.sql_safety"):
     sys.modules[_mod_alias] = sys.modules[__name__]
 
@@ -71,11 +70,8 @@ _cached_n_threads: int | None = None
 _cached_mem_limit_gb: int | None = None
 _dma_map_cache: dict[str, str] | None = None
 _STALE_VIEW_ERR_MARKERS = (
-    "No files found",
-    "Catalog Error: Table with name",
-    "does not exist",
-    "No such file or directory",
-)
+    "No files found", "Catalog Error: Table with name", "does not exist", "No such file or directory",
+)  # fmt: skip
 
 
 def _is_stale_view_error(err: object) -> bool:
@@ -107,8 +103,7 @@ def _get_dma_map() -> dict[str, str]:
                 data = json.load(f)
             for feature in data.get("features", []):
                 props = feature.get("properties", {})
-                code = props.get("dma_code")
-                name = props.get("name") or props.get("dma_name") or props.get("dma1")
+                code, name = props.get("dma_code"), props.get("name") or props.get("dma_name") or props.get("dma1")
                 if code is not None and name:
                     _dma_map_cache[str(int(code))] = name
             break
@@ -126,21 +121,10 @@ def _build_default_source() -> dict:
     if cfgs:
         return _source_from_config(cfgs[0])
     return {
-        "name": "default",
-        "endpoint": "",
-        "access_key_id": "",
-        "secret_access_key": "",
-        "bucket": "",
-        "prefix": "",
-        "region": "us-east-1",
-        "cdn_url": "",
-        "cdn_secret": "",
-        "cdn_service_id": "",
-        "logging_service_id": "",
-        "duckdb_path": "logs.duckdb",
-        "access_level": "read_write",
-        "storage_mode": "cloud",
-    }
+        "name": "default", "endpoint": "", "access_key_id": "", "secret_access_key": "", "bucket": "",
+        "prefix": "", "region": "us-east-1", "cdn_url": "", "cdn_secret": "", "cdn_service_id": "",
+        "logging_service_id": "", "duckdb_path": "logs.duckdb", "access_level": "read_write", "storage_mode": "cloud",
+    }  # fmt: skip
 
 
 _DEFAULT_SOURCE = _build_default_source()
@@ -148,13 +132,11 @@ DUCKDB_PATH = _DEFAULT_SOURCE.get("duckdb_path") or DUCKDB_PATH
 
 
 def get_source_for_service(service_id: str) -> dict | None:
-    cfg = svcconfig.load_config(service_id)
-    if cfg is not None:
+    if (cfg := svcconfig.load_config(service_id)) is not None:
         return _source_from_config(cfg)
-    for c in svcconfig.list_configs():
-        if c.get("cdn_service_id") == service_id:
-            return _source_from_config(c)
-    return None
+    return next(
+        (_source_from_config(c) for c in svcconfig.list_configs() if c.get("cdn_service_id") == service_id), None
+    )
 
 
 def reload_default_source():
@@ -211,13 +193,12 @@ def _configure_fos(con: duckdb.DuckDBPyConnection, source: dict):
     telemetry_proxy.start_proxy_server()
     proxy_ep = telemetry_proxy.proxy_endpoint().replace("http://", "")
     target_host = _proxy_target_for(source)
-    ctx = get_process_context() or ""
     headers: dict[str, str] = {
         "X-Fos-Target": target_host,
         "X-Telemetry-Service-Id": source.get("service_id") or source.get("name", "default"),
         "X-Telemetry-Caller": "duckdb.httpfs",
     }
-    if ctx:
+    if ctx := (get_process_context() or ""):
         headers["X-Telemetry-Context"] = ctx
     if target_host != source.get("fos_native_endpoint") and source.get("cdn_secret"):
         headers["x-fastly-key"] = source["cdn_secret"]
@@ -226,14 +207,9 @@ def _configure_fos(con: duckdb.DuckDBPyConnection, source: dict):
         "CREATE OR REPLACE SECRET fos_proxy (TYPE S3, KEY_ID ?, SECRET ?, REGION ?, ENDPOINT ?, "
         f"USE_SSL false, URL_STYLE 'path', EXTRA_HTTP_HEADERS {hdr_map_sql})"
     )
-    secret_params = [
-        source.get("access_key_id") or "",
-        source.get("secret_access_key") or "",
-        source.get("region") or "",
-        proxy_ep,
-        *headers.values(),
-    ]
-    fp = (secret_params[0], secret_params[1], secret_params[2], proxy_ep)
+    ak, sk, reg = source.get("access_key_id") or "", source.get("secret_access_key") or "", source.get("region") or ""
+    secret_params = [ak, sk, reg, proxy_ep, *headers.values()]
+    fp = (ak, sk, reg, proxy_ep)
     with _fos_proxy_secret_lock:
         if _fos_secret_fingerprints.get(con) != fp:
 
@@ -259,8 +235,7 @@ _fos_client_lock = threading.Lock()
 
 class _ProxyPaginatorShim:
     def __init__(self, paginator, caller_hint: str | None):
-        self._paginator = paginator
-        self._caller_hint = caller_hint
+        self._paginator, self._caller_hint = paginator, caller_hint
 
     def _set_caller_hint_context(self):
         from backend.utils.telemetry_proxy import _BOTO3_CALLER_HINT
@@ -324,15 +299,9 @@ class _ProxyClientShim:
             try:
                 result = attr(*args, **kwargs)
             except BaseException as exc:
-                try:
-                    _end_db_span(span, exc)
-                except Exception:
-                    pass
+                _end_db_span(span, exc)
                 raise
-            try:
-                _end_db_span(span, None)
-            except Exception:
-                pass
+            _end_db_span(span, None)
             return result
 
         return _span_wrapped
@@ -340,11 +309,9 @@ class _ProxyClientShim:
 
 def _get_fos_client(source: dict):
     source_key = (
-        source.get("name", "default"),
-        source.get("access_key_id", ""),
-        source.get("cdn_url", ""),
-        source.get("cdn_secret", ""),
-    )
+        source.get("name", "default"), source.get("access_key_id", ""),
+        source.get("cdn_url", ""), source.get("cdn_secret", ""),
+    )  # fmt: skip
     with _fos_client_lock:
         if source_key in _fos_client_cache:
             return _fos_client_cache[source_key]
@@ -352,13 +319,9 @@ def _get_fos_client(source: dict):
 
         telemetry_proxy.start_proxy_server()
         proxy_config = Config(
-            retries={"max_attempts": 3, "mode": "adaptive"},
-            connect_timeout=10,
-            read_timeout=30,
-            signature_version=UNSIGNED,
-            s3={"addressing_style": "path"},
-            max_pool_connections=128,
-        )
+            retries={"max_attempts": 3, "mode": "adaptive"}, connect_timeout=10, read_timeout=30,
+            signature_version=UNSIGNED, s3={"addressing_style": "path"}, max_pool_connections=128,
+        )  # fmt: skip
         raw_client = boto3.client("s3", endpoint_url=telemetry_proxy.proxy_endpoint(), config=proxy_config)
         telemetry_proxy.install_boto3_proxy_hook(raw_client, source)
         client = _ProxyClientShim(raw_client)
@@ -396,8 +359,7 @@ def _execute_query_with_retry(con: duckdb.DuckDBPyConnection, query: str, max_re
         try:
             return con.execute(query)
         except Exception as e:
-            err_msg = str(e)
-            err_lower = err_msg.lower()
+            err_msg, err_lower = str(e), str(e).lower()
             for code in ("401", "403"):
                 if f"http {code}" in err_lower or f"(http {code}" in err_lower:
                     url_match = re.search(r"'(https?://[^']+)'", err_msg)
@@ -441,15 +403,8 @@ def get_raw_tree_node(source: dict | None, prefix_filter: str = "", root: str = 
                     continue
                 parts = rel_path.split("/")
                 if len(parts) == 1:
-                    files.append(
-                        {
-                            "name": parts[0],
-                            "type": "file",
-                            "size": obj["Size"],
-                            "mtime": obj["LastModified"].isoformat() if "LastModified" in obj else None,
-                            "key": key,
-                        }
-                    )
+                    mtime = obj["LastModified"].isoformat() if "LastModified" in obj else None
+                    files.append({"name": parts[0], "type": "file", "size": obj["Size"], "mtime": mtime, "key": key})
                 else:
                     dmeta = dirs_map.setdefault(
                         parts[0], {"size": 0, "count": 0, "prefix": f"{prefix_filter}{parts[0]}"}
@@ -492,13 +447,10 @@ def _lock_context(source: dict, db_path: str, read_only: bool) -> dict[str, obje
     catalog = os.getenv("DUCKLAKE_CATALOG", "")
     return {
         "service_id": source.get("logging_service_id") or source.get("name") or "unknown",
-        "pid": os.getpid(),
-        "hostname": socket.gethostname(),
-        "db_path": db_path,
-        "read_only": read_only,
+        "pid": os.getpid(), "hostname": socket.gethostname(), "db_path": db_path, "read_only": read_only,
         "deployment_mode": os.getenv("DEPLOYMENT_MODE", "standard"),
         "catalog_mode": "postgres" if catalog.startswith(("postgres://", "postgresql://")) else "file",
-    }
+    }  # fmt: skip
 
 
 _LOCK_RETRY_INITIAL_DELAY = 0.05
@@ -528,8 +480,7 @@ def _barrier_wait(db_path: str) -> None:
     deadline = time.monotonic() + _recycle_barrier_cap_s()
     with _recycle_barrier_cond:
         while db_path in _recycle_barrier_active:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
+            if (remaining := deadline - time.monotonic()) <= 0:
                 return
             _recycle_barrier_cond.wait(timeout=remaining)
 
@@ -550,9 +501,8 @@ def is_recycle_barrier_active(db_path: str | None = None) -> bool | set[str]:
 
 def _register_live_connection(con, db_path: str) -> None:
     with _live_conns_lock:
-        s = _live_conns.setdefault(db_path, weakref.WeakSet())
         try:
-            s.add(con)
+            _live_conns.setdefault(db_path, weakref.WeakSet()).add(con)
         except TypeError:
             pass
 
@@ -578,23 +528,15 @@ def current_rss_bytes() -> int | None:
 
 
 _CORRUPTION_MARKERS = (
-    "not a valid duckdb database file",
-    "database file is corrupt",
-    "could not read from file",
-    "failure while replaying wal file",
-    "unrecognized magic bytes",
-    "checksum mismatch",
-    "failed to deserialize",
-    "serialization error",
-    "field id mismatch",
-)
+    "not a valid duckdb database file", "database file is corrupt", "could not read from file",
+    "failure while replaying wal file", "unrecognized magic bytes", "checksum mismatch",
+    "failed to deserialize", "serialization error", "field id mismatch",
+)  # fmt: skip
 
 
 def _duckdb_connect(database: str, **kwargs: Any) -> duckdb.DuckDBPyConnection:
     if os.getenv("DUCKLAKE_EXTENSION_PATH"):
-        connection_config = dict(kwargs.pop("config", None) or {})
-        connection_config["allow_unsigned_extensions"] = "true"
-        kwargs["config"] = connection_config
+        kwargs["config"] = {**(kwargs.pop("config", None) or {}), "allow_unsigned_extensions": "true"}
     return duckdb.connect(database, **kwargs)
 
 
@@ -640,9 +582,7 @@ def get_connection(
         raise RuntimeError("durable serving mode only permits read-only DuckDB connections")
     db_path = db_path_for_source(src)
     connect_path = ":memory:" if durable_serving else db_path
-    con = None
-    delay = _LOCK_RETRY_INITIAL_DELAY
-    deadline = time.monotonic() + max_wait
+    con, delay, deadline = None, _LOCK_RETRY_INITIAL_DELAY, time.monotonic() + max_wait
     _barrier_wait(db_path)
     while True:
         try:
@@ -668,8 +608,7 @@ def get_connection(
                 continue
             if not ("conflict" in err_str or "locked" in err_str or "different configuration" in err_str):
                 raise e
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
+            if (remaining := deadline - time.monotonic()) <= 0:
                 context = _lock_context(src, db_path, read_only)
                 logger.error("duckdb_connection_lock_timeout %s", context, exc_info=True)
                 raise DBBusyError(
@@ -686,34 +625,27 @@ def get_connection(
     )
     if limit:
         _exec_quietly(con, f"SET max_memory = '{limit}';", "get_connection: step failed (ignored)")
-    _exec_quietly(
-        con, "SET preserve_insertion_order = false;", "get_connection: preserve_insertion_order failed (ignored)"
+    _exec_quietly(con, "SET preserve_insertion_order = false;", "get_connection: preserve_insertion_order failed")
+    _service_temp_dir = (
+        os.getenv("DUCKDB_TEMP_DIRECTORY", "/tmp/duckdb")
+        if durable_serving
+        else (
+            os.path.join(os.path.dirname(db_path), ".tmp") if db_path and not db_path.startswith(":memory:") else None
+        )
     )
-    if durable_serving:
-        _service_temp_dir = os.getenv("DUCKDB_TEMP_DIRECTORY", "/tmp/duckdb")
-    elif db_path and db_path != ":memory:" and not db_path.startswith(":memory:"):
-        _service_temp_dir = os.path.join(os.path.dirname(db_path), ".tmp")
-    else:
-        _service_temp_dir = None
     if _service_temp_dir:
         try:
             os.makedirs(_service_temp_dir, exist_ok=True)
-            from backend.core.duckdb import escape_sql_literal
-
             con.execute(f"SET temp_directory = '{escape_sql_literal(_service_temp_dir)}';")
         except Exception as e:
-            if "cannot switch temporary directory" in str(e).lower():
-                logger.debug(f"[duckdb] Cannot switch temp_directory (already in use by active query): {e}")
-            else:
-                logger.error(f"[duckdb] Failed to configure temp_directory: {e}")
+            log_fn = logger.debug if "cannot switch temporary directory" in str(e).lower() else logger.error
+            log_fn(f"[duckdb] Failed to configure temp_directory: {e}")
     try:
         con.execute(f"SET max_temp_directory_size = '{os.getenv('DUCKDB_MAX_TEMP_DIRECTORY_SIZE', '10GB')}';")
     except Exception as e:
         err_lower = str(e).lower()
-        if "cannot switch temporary directory" in err_lower or "cannot change" in err_lower:
-            logger.debug(f"[duckdb] Cannot change max_temp_directory_size (already in use by active query): {e}")
-        else:
-            logger.error(f"[duckdb] Failed to configure max_temp_directory_size: {e}")
+        is_active = "cannot switch temporary directory" in err_lower or "cannot change" in err_lower
+        (logger.debug if is_active else logger.error)(f"[duckdb] Failed to configure max_temp_directory_size: {e}")
     for stmt in ("SET hive_partitioning = true;", "SET TimeZone='UTC';"):
         _exec_quietly(con, stmt, "get_connection: con.execute failed (ignored)")
     _configure_fos(con, src)
@@ -742,8 +674,9 @@ def get_connection(
     if not os.getenv("DUCKDB_MEMORY_LIMIT"):
         if _cached_mem_limit_gb is None:
             try:
-                _total_ram = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
-                _cached_mem_limit_gb = max(1, int(_total_ram * 0.6 / (1024**3)))
+                _cached_mem_limit_gb = max(
+                    1, int(os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") * 0.6 / (1024**3))
+                )
             except (AttributeError, ValueError):
                 _cached_mem_limit_gb = 4
         con.execute(f"SET memory_limit = '{_cached_mem_limit_gb}GB';")
@@ -767,16 +700,10 @@ def _ensure_source_registered(source: dict) -> str:
 
     name = source["name"]
     table_name = _safe_table_name(name)
-    config_json = json.dumps(
-        {
-            "endpoint": source["endpoint"],
-            "bucket": source["bucket"],
-            "prefix": source["prefix"],
-            "region": source["region"],
-            "cdn_url": source.get("cdn_url", ""),
-            "cdn_secret": source.get("cdn_secret", ""),
-        }
-    )
+    config_json = json.dumps({
+        "endpoint": source["endpoint"], "bucket": source["bucket"], "prefix": source["prefix"],
+        "region": source["region"], "cdn_url": source.get("cdn_url", ""), "cdn_secret": source.get("cdn_secret", ""),
+    })  # fmt: skip
     metadata_db.register_source(name, name, config_json, table_name)
     return table_name
 
@@ -788,23 +715,11 @@ def start_cron_run(source: dict, task: str) -> int | None:
 
 
 def log_cron_run(
-    source: dict,
-    task: str,
-    duration_s: float,
-    status: str,
-    error_message: str = None,
-    files_downloaded: int = 0,
-    files_deleted_fos: int = 0,
-    rows_ingested: int = 0,
-    corrupt_rows: int = 0,
-    parquet_files_created: int = 0,
-    parquet_files_optimized: int = 0,
-    parquet_keys: list = None,
-    summary: str = None,
-    log_output: str = None,
-    run_id: int | None = None,
-    outcome_counters: dict[str, int] | None = None,
-):
+    source: dict, task: str, duration_s: float, status: str, error_message: str = None, files_downloaded: int = 0,
+    files_deleted_fos: int = 0, rows_ingested: int = 0, corrupt_rows: int = 0, parquet_files_created: int = 0,
+    parquet_files_optimized: int = 0, parquet_keys: list = None, summary: str = None, log_output: str = None,
+    run_id: int | None = None, outcome_counters: dict[str, int] | None = None,
+):  # fmt: skip
     from backend.core import metadata as metadata_db
 
     service_id = source["name"]
@@ -822,36 +737,21 @@ def log_cron_run(
         return
     try:
         metadata_db.log_cron_run(
-            service_id,
-            task,
-            duration_s,
-            status,
-            error_message=error_message,
-            files_downloaded=files_downloaded or 0,
-            files_deleted_fos=files_deleted_fos or 0,
-            rows_ingested=rows_ingested or 0,
-            corrupt_rows=corrupt_rows or 0,
-            parquet_files_created=parquet_files_created or 0,
-            parquet_files_optimized=parquet_files_optimized or 0,
-            parquet_keys=parquet_keys or [],
-            summary=summary,
-            log_output=log_output,
-            run_id=run_id,
+            service_id, task, duration_s, status, error_message=error_message,
+            files_downloaded=files_downloaded or 0, files_deleted_fos=files_deleted_fos or 0,
+            rows_ingested=rows_ingested or 0, corrupt_rows=corrupt_rows or 0,
+            parquet_files_created=parquet_files_created or 0, parquet_files_optimized=parquet_files_optimized or 0,
+            parquet_keys=parquet_keys or [], summary=summary, log_output=log_output, run_id=run_id,
             outcome_counters=outcome_counters,
-        )
+        )  # fmt: skip
     except Exception as e:
         logger.warning("[cron_log] failed to persist cron run for %s/%s: %s", service_id, task, e)
 
 
 def finalize_cron_run_if_running(
-    source: dict,
-    task: str,
-    run_id: int | None,
-    *,
-    duration_s: float = 0.0,
-    summary: str | None = None,
-    error_message: str | None = None,
-) -> bool:
+    source: dict, task: str, run_id: int | None, *,
+    duration_s: float = 0.0, summary: str | None = None, error_message: str | None = None,
+) -> bool:  # fmt: skip
     if run_id is None:
         return False
     from backend.core import metadata as metadata_db
@@ -891,8 +791,7 @@ def _data_stats_fingerprint(source: dict) -> tuple | None:
 
 
 def _top_values_fingerprint(con: duckdb.DuckDBPyConnection, source: dict) -> tuple | None:
-    fp = _data_stats_fingerprint(source)
-    if fp is not None:
+    if (fp := _data_stats_fingerprint(source)) is not None:
         return fp
     try:
         from backend.core.iceberg._core import ducklake_current_snapshot_id
@@ -912,23 +811,18 @@ def clear_ducklake_stats_cache(source_key: str | None = None) -> None:
             for k in [k for k in _ducklake_stats_cache if k[0] == source_key]:
                 _ducklake_stats_cache.pop(k, None)
     with _data_stats_cache_lock:
-        if source_key is None:
-            _data_stats_cache.clear()
-        else:
-            _data_stats_cache.pop(source_key, None)
+        _data_stats_cache.clear() if source_key is None else _data_stats_cache.pop(source_key, None)
 
 
 def _query_buffer_stats(con, src) -> tuple[int, Any, Any]:
     from backend.core import iceberg as _ice
-    from backend.core.duckdb import escape_sql_literal as _esl
 
     buf_paths = [p for p in _ice.buffer_files(src) if os.path.isfile(p)]
     if not buf_paths:
         return (0, None, None)
-    paths_sql = ", ".join(f"'{_esl(p)}'" for p in buf_paths)
+    paths_sql = ", ".join(f"'{escape_sql_literal(p)}'" for p in buf_paths)
     row = con.execute(
-        "SELECT count(*), min(timestamp), max(timestamp) "
-        f"FROM read_parquet([{paths_sql}], union_by_name=true, hive_partitioning=false)"
+        f"SELECT count(*), min(timestamp), max(timestamp) FROM read_parquet([{paths_sql}], union_by_name=true, hive_partitioning=false)"
     ).fetchone()
     return ((row[0] or 0), row[1], row[2]) if row else (0, None, None)
 
@@ -961,37 +855,28 @@ def _query_or_cache_lake_stats(con, src_name: str, lake_table: str, snap_id: Any
 def _authoritative_direct_stats(
     con, src, *, buffer_stats: tuple[int, Any, Any] | None = None
 ) -> tuple[int, Any, Any] | None:
-    counts: list[int] = []
-    mins: list[Any] = []
-    maxs: list[Any] = []
+    counts, mins, maxs = [], [], []
     src_name = src.get("name", "default")
     try:
         from backend.core.iceberg._core import ducklake_current_snapshot_id, ducklake_table_name
 
         lake_table = ducklake_table_name(src)
-        exists = con.execute(
+        if con.execute(
             "SELECT 1 FROM duckdb_tables() WHERE database_name = 'lake' AND table_name = ? LIMIT 1", [lake_table]
-        ).fetchone()
-        if exists:
-            lake_count, lake_min, lake_max = _query_or_cache_lake_stats(
-                con, src_name, lake_table, ducklake_current_snapshot_id(con)
-            )
-            if lake_count > 0:
-                counts.append(lake_count)
-                if lake_min is not None:
-                    mins.append(lake_min)
-                if lake_max is not None:
-                    maxs.append(lake_max)
+        ).fetchone():
+            lc, lmn, lmx = _query_or_cache_lake_stats(con, src_name, lake_table, ducklake_current_snapshot_id(con))
+            if lc > 0:
+                counts.append(lc)
+                mins.extend([lmn] if lmn is not None else [])
+                maxs.extend([lmx] if lmx is not None else [])
     except Exception as e:
         logger.debug("[sync-status] direct lake stats unavailable: %s", e)
     try:
         b_cnt, b_min, b_max = buffer_stats if buffer_stats is not None else _query_buffer_stats(con, src)
         if b_cnt > 0:
             counts.append(b_cnt)
-        if b_min is not None:
-            mins.append(b_min)
-        if b_max is not None:
-            maxs.append(b_max)
+        mins.extend([b_min] if b_min is not None else [])
+        maxs.extend([b_max] if b_max is not None else [])
     except Exception as e:
         logger.debug("[sync-status] direct buffer stats unavailable: %s", e)
     total = sum(counts)
@@ -1004,18 +889,15 @@ def get_sync_status(
     src = source or _DEFAULT_SOURCE
     if not is_configured(src):
         return {
-            "configured": False,
-            "local_rows": 0,
-            "ingested": 0,
-            "fos_total": 0,
-            "storage_mode": "cloud",
-            "access_level": "read_write",
-        }
+            "configured": False, "local_rows": 0, "ingested": 0, "fos_total": 0,
+            "storage_mode": "cloud", "access_level": "read_write",
+        }  # fmt: skip
     cached_status = svcconfig.get_status(src["name"])
     if cached_status and not force and skip_fos:
-        cached_status["access_level"] = src.get("access_level", "read_write")
-        cached_status["storage_mode"] = src.get("storage_mode", "cloud")
-        cached_status["configured"] = True
+        cached_status.update(
+            access_level=src.get("access_level", "read_write"),
+            storage_mode=src.get("storage_mode", "cloud"), configured=True,
+        )  # fmt: skip
         return cached_status
     table_name = _safe_table_name(src["name"])
     try:
@@ -1024,28 +906,23 @@ def get_sync_status(
         summary = metadata_db.get_ingested_files_status_summary(src["name"])
     except Exception:
         summary = {
-            "file_count": 0,
-            "total_rows": 0,
-            "total_bytes": 0,
-            "count_with_bytes": 0,
-            "last_ingested": None,
-            "latest_file_name": None,
-        }
+            "file_count": 0, "total_rows": 0, "total_bytes": 0, "count_with_bytes": 0,
+            "last_ingested": None, "latest_file_name": None,
+        }  # fmt: skip
     file_count, local_rows_ingested = summary["file_count"], summary["total_rows"]
     last_ingested, latest_file_name = summary["last_ingested"], summary["latest_file_name"]
     total_bytes, count_with_bytes = summary["total_bytes"], summary["count_with_bytes"]
     avg_log_size_kb = (total_bytes / count_with_bytes / 1024.0) if count_with_bytes > 0 else None
-    latest_ingested_file_at = None
-    if latest_file_name:
-        m = re.search(r"(\d{4}-\d{2}-\d{2})[T-](\d{2}[:.-]\d{2}[:.-]\d{2})", latest_file_name.split("/")[-1])
-        if m:
-            latest_ingested_file_at = f"{m.group(1)} {m.group(2).replace('-', ':').replace('.', ':')}"
+    latest_ingested_file_at = (
+        f"{m.group(1)} {m.group(2).replace('-', ':').replace('.', ':')}"
+        if latest_file_name
+        and (m := re.search(r"(\d{4}-\d{2}-\d{2})[T-](\d{2}[:.-]\d{2}[:.-]\d{2})", latest_file_name.split("/")[-1]))
+        else None
+    )
     latest_log_at = earliest_log_at = None
     local_rows = local_rows_ingested
     try:
-        stats = None
-        data_fp = _data_stats_fingerprint(src)
-        lake_table: str | None = None
+        stats, data_fp, lake_table = None, _data_stats_fingerprint(src), None
         if data_fp is None:
             try:
                 from backend.core.iceberg._core import ducklake_current_snapshot_id, ducklake_table_name
@@ -1054,15 +931,11 @@ def get_sync_status(
                 exists = con.execute(
                     "SELECT 1 FROM duckdb_tables() WHERE database_name = 'lake' AND table_name = ? LIMIT 1", [lt]
                 ).fetchone()
-                if exists and exists[0]:
-                    snap_id = ducklake_current_snapshot_id(con)
-                    if snap_id is not None:
-                        data_fp, lake_table = ("ducklake", snap_id), lt
+                if exists and exists[0] and (snap_id := ducklake_current_snapshot_id(con)) is not None:
+                    data_fp, lake_table = ("ducklake", snap_id), lt
             except Exception:
                 logger.debug("get_sync_status: step failed (ignored)", exc_info=True)
-        cache_key = src["name"]
-        direct_stats = None
-        queried_buffer_stats: tuple[int, Any, Any] | None = None
+        cache_key, direct_stats, queried_buffer_stats = src["name"], None, None
         if data_fp is not None:
             try:
                 if (
@@ -1078,20 +951,15 @@ def get_sync_status(
                     if cached is not None and cached[0] == data_fp:
                         d_count, d_min, d_max = cached[1], cached[2], cached[3]
                     else:
-                        from backend.core.duckdb import escape_sql_literal
-
                         safe_glob = escape_sql_literal(os.path.join(_cache_dir(src), "data", "**", "*.parquet"))
                         d_row = con.execute(
-                            "SELECT count(*), min(timestamp), max(timestamp) "
-                            f"FROM read_parquet('{safe_glob}', union_by_name=true, hive_partitioning=false)"
+                            f"SELECT count(*), min(timestamp), max(timestamp) FROM read_parquet('{safe_glob}', union_by_name=true, hive_partitioning=false)"
                         ).fetchone()
                         d_count, d_min, d_max = ((d_row[0] or 0), d_row[1], d_row[2]) if d_row else (0, None, None)
                         with _data_stats_cache_lock:
                             _data_stats_cache[cache_key] = (data_fp, d_count, d_min, d_max)
-                b_count, b_min, b_max = _query_buffer_stats(con, src)
-                queried_buffer_stats = (b_count, b_min, b_max)
-                mins = [m for m in (d_min, b_min) if m is not None]
-                maxs = [m for m in (d_max, b_max) if m is not None]
+                b_count, b_min, b_max = queried_buffer_stats = _query_buffer_stats(con, src)
+                mins, maxs = [m for m in (d_min, b_min) if m is not None], [m for m in (d_max, b_max) if m is not None]
                 stats = (d_count + b_count, min(mins) if mins else None, max(maxs) if maxs else None)
                 if lake_table is not None and stats[0] > 0:
                     direct_stats = stats
@@ -1113,16 +981,18 @@ def get_sync_status(
             if view_rows > 0:
                 local_rows, earliest_log_at, latest_log_at = view_rows, stats[1], stats[2]
                 if direct is not None:
-                    d_earliest, d_latest = direct[1], direct[2]
-                    if d_latest is not None and (latest_log_at is None or d_latest > latest_log_at):
-                        latest_log_at = d_latest
-                    if d_earliest is not None and (earliest_log_at is None or d_earliest < earliest_log_at):
-                        earliest_log_at = d_earliest
+                    if direct[2] is not None and (latest_log_at is None or direct[2] > latest_log_at):
+                        latest_log_at = direct[2]
+                    if direct[1] is not None and (earliest_log_at is None or direct[1] < earliest_log_at):
+                        earliest_log_at = direct[1]
             elif direct is not None:
                 local_rows, earliest_log_at, latest_log_at = direct[0], direct[1], direct[2]
             else:
-                prior_rows = (cached_status or {}).get("local_rows") or 0
-                local_rows = prior_rows if prior_rows > 0 else local_rows_ingested
+                local_rows = (
+                    prior_rows
+                    if (prior_rows := (cached_status or {}).get("local_rows") or 0) > 0
+                    else local_rows_ingested
+                )
     except Exception as e:
         if _is_stale_view_error(e):
             try:
@@ -1130,13 +1000,10 @@ def get_sync_status(
 
                 iceberg.clear_source_caches(src.get("name", "default"), keep_snapshot_cache=True)
                 iceberg.update_iceberg_view(con, src)
-                stats = con.execute(f"SELECT count(*), min(timestamp), max(timestamp) FROM {table_name}").fetchone()
-                if stats:
-                    local_rows, earliest_log_at, latest_log_at = (
-                        stats[0] if stats[0] is not None else 0,
-                        stats[1],
-                        stats[2],
-                    )
+                if stats := con.execute(
+                    f"SELECT count(*), min(timestamp), max(timestamp) FROM {table_name}"
+                ).fetchone():
+                    local_rows, earliest_log_at, latest_log_at = stats[0] or 0, stats[1], stats[2]
             except Exception as retry_e:
                 logger.debug("[sync-status] log stats unavailable mid-rebuild: %s", retry_e)
                 local_rows = local_rows_ingested
@@ -1144,7 +1011,7 @@ def get_sync_status(
             logger.warning("[sync-status] Failed to get log stats from view: %s", e)
             local_rows = local_rows_ingested
     try:
-        cron_stats = {}
+        cron_stats, busy = {}, False
         time_cutoff = (
             (datetime.now(UTC) - timedelta(minutes=_STATUS_BUSY_WINDOW_MINS))
             .isoformat(timespec="seconds")
@@ -1152,46 +1019,30 @@ def get_sync_status(
         )
         from backend.core.metadata.cron_log import latest_cron_per_task
 
-        crons = latest_cron_per_task(_source_service_id(src))
-        busy = False
-        for t, data in crons.items():
+        for t, data in latest_cron_per_task(_source_service_id(src)).items():
             st = data.get("started_at")
             if data.get("status") == "running" and st and str(st) > time_cutoff:
                 busy = True
             cron_stats[t] = {
-                "last_run": _safe_iso(st),
-                "duration_s": data.get("duration_s"),
-                "status": data.get("status"),
-                "error_message": data.get("error_message"),
-                "summary": data.get("summary"),
-            }
+                "last_run": _safe_iso(st), "duration_s": data.get("duration_s"), "status": data.get("status"),
+                "error_message": data.get("error_message"), "summary": data.get("summary"),
+            }  # fmt: skip
     except Exception:
         busy, cron_stats = False, {}
     return {
-        "busy": busy,
-        "fos_total": file_count,
-        "ingested": file_count,
-        "local_rows": local_rows,
-        "ingested_bytes": total_bytes,
-        "avg_log_size_kb": avg_log_size_kb,
-        "table_name": table_name,
-        "last_ingested_at": _safe_iso(last_ingested),
-        "latest_log_at": _safe_iso(latest_log_at),
-        "earliest_log_at": _safe_iso(earliest_log_at),
-        "latest_ingested_file_at": latest_ingested_file_at,
-        "latest_available_file_at": latest_ingested_file_at,
-        "access_level": src.get("access_level", "read_write"),
-        "configured": is_configured(src),
-        "storage_mode": src.get("storage_mode", "cloud"),
-        "logging_service_id": src.get("logging_service_id", ""),
-        "cdn_service_id": src.get("cdn_service_id", ""),
+        "busy": busy, "fos_total": file_count, "ingested": file_count, "local_rows": local_rows,
+        "ingested_bytes": total_bytes, "avg_log_size_kb": avg_log_size_kb, "table_name": table_name,
+        "last_ingested_at": _safe_iso(last_ingested), "latest_log_at": _safe_iso(latest_log_at),
+        "earliest_log_at": _safe_iso(earliest_log_at), "latest_ingested_file_at": latest_ingested_file_at,
+        "latest_available_file_at": latest_ingested_file_at, "access_level": src.get("access_level", "read_write"),
+        "configured": is_configured(src), "storage_mode": src.get("storage_mode", "cloud"),
+        "logging_service_id": src.get("logging_service_id", ""), "cdn_service_id": src.get("cdn_service_id", ""),
         "cron_stats": cron_stats,
-    }
+    }  # fmt: skip
 
 
 def refresh_config_status(service_id: str, include_top_values: bool = True):
-    src = svcconfig.load_config(service_id)
-    if not src:
+    if not (src := svcconfig.load_config(service_id)):
         return
     source = svcconfig.config_to_source(src)
     from backend.high_scale.registry_bootstrap import get_high_scale_service_registry
@@ -1199,17 +1050,17 @@ def refresh_config_status(service_id: str, include_top_values: bool = True):
     if get_high_scale_service_registry().resolve(service_id) is not None:
         logger.info("[refresh_status] %s: high-scale service uses ClickHouse status", service_id)
         return
-    durable_serving = svcconfig.is_durable_serving_mode(source)
-    cached_status = src.get("status") or {}
-    buf_bytes = None
-    if not include_top_values and "buffer_size_bytes" in cached_status:
-        buf_bytes = cached_status.get("buffer_size_bytes")
-    else:
+    durable_serving, cached_status = svcconfig.is_durable_serving_mode(source), src.get("status") or {}
+    buf_bytes = (
+        cached_status.get("buffer_size_bytes")
+        if (not include_top_values and "buffer_size_bytes" in cached_status)
+        else None
+    )
+    if include_top_values or "buffer_size_bytes" not in cached_status:
         try:
             from backend.utils.dir_size import _get_dir_size
 
-            buf_dir = _cache_dir(source)
-            if os.path.isdir(buf_dir):
+            if os.path.isdir(buf_dir := _cache_dir(source)):
                 buf_bytes = _get_dir_size(buf_dir)
         except Exception:
             logger.debug("refresh_config_status: step failed (ignored)", exc_info=True)
@@ -1222,20 +1073,20 @@ def refresh_config_status(service_id: str, include_top_values: bool = True):
 
             info = _db_iceberg.get_table_info(source)
             if not info.get("error"):
-                iceberg_bytes = int(info.get("size_bytes", 0) or 0)
-                iceberg_files = int(info.get("data_files", 0) or 0)
+                iceberg_bytes, iceberg_files = int(info.get("size_bytes", 0) or 0), int(info.get("data_files", 0) or 0)
         except Exception:
             logger.debug("refresh_config_status: step failed (ignored)", exc_info=True)
     con = None
     try:
         con = get_connection(source, skip_view_update=not durable_serving, read_only=True)
         status = {} if durable_serving else get_sync_status(con, source, skip_fos=False, force=True)
-        if buf_bytes is not None:
-            status["buffer_size_bytes"] = buf_bytes
-        if iceberg_bytes is not None:
-            status["iceberg_bytes"] = iceberg_bytes
-        if iceberg_files is not None:
-            status["iceberg_files"] = iceberg_files
+        for k, v in (
+            ("buffer_size_bytes", buf_bytes),
+            ("iceberg_bytes", iceberg_bytes),
+            ("iceberg_files", iceberg_files),
+        ):
+            if v is not None:
+                status[k] = v
         if not include_top_values:
             if "edge_ratio" in cached_status:
                 status["edge_ratio"] = cached_status.get("edge_ratio")
@@ -1243,15 +1094,13 @@ def refresh_config_status(service_id: str, include_top_values: bool = True):
             try:
                 from backend.repositories import assets as _usage_repo
 
-                ratio, _ = _usage_repo.get_edge_ratio(con, source)
-                if ratio is not None:
+                if (ratio := _usage_repo.get_edge_ratio(con, source)[0]) is not None:
                     status["edge_ratio"] = ratio
             except Exception:
                 logger.debug("refresh_config_status: step failed (ignored)", exc_info=True)
             status["schema"] = get_schema(con, source)
         rum_latest = rum_last_sync = request_last_sync = None
-        rum_total = 0
-        request_total, request_latest = status.get("local_rows", 0), status.get("latest_log_at")
+        rum_total, request_total, request_latest = 0, status.get("local_rows", 0), status.get("latest_log_at")
         try:
             from backend.core.metadata.cron_log import latest_cron_per_task
 
@@ -1265,10 +1114,8 @@ def refresh_config_status(service_id: str, include_top_values: bool = True):
         if svcconfig.is_rum_enabled(source):
             try:
                 persisted_rum = (src.get("status") or {}).get("rum") or {}
-                rum_total = persisted_rum.get("total_rows", 0) or 0
-                rum_latest = persisted_rum.get("latest_log_at")
-                if persisted_rum.get("last_sync_at"):
-                    rum_last_sync = persisted_rum.get("last_sync_at")
+                rum_total, rum_latest = persisted_rum.get("total_rows", 0) or 0, persisted_rum.get("latest_log_at")
+                rum_last_sync = persisted_rum.get("last_sync_at") or rum_last_sync
             except Exception:
                 logger.debug("refresh_config_status: step failed (ignored)", exc_info=True)
         status["rum"] = {"latest_log_at": rum_latest, "total_rows": rum_total, "last_sync_at": rum_last_sync}
@@ -1301,29 +1148,31 @@ _TOP_VALUE_FIELDS = (
 
 
 def update_top_values(con: duckdb.DuckDBPyConnection, source: dict):
-    service_id = source["name"]
-    table_name = _safe_table_name(service_id)
+    service_id, table_name = source["name"], _safe_table_name(source["name"])
     cached_top_values_path = os.path.join(_cache_dir(source), "top_values.json")
     data_fp = _top_values_fingerprint(con, source)
     if data_fp is not None and os.path.exists(cached_top_values_path):
         with _top_values_cache_lock:
-            prior_fp = _top_values_cache.get(service_id)
-        if prior_fp == data_fp:
-            return
+            if _top_values_cache.get(service_id) == data_fp:
+                return
     try:
         con.execute(f"SELECT 1 FROM {table_name} LIMIT 1")
     except Exception:
         return
     schema_cols = {f["name"] for f in get_schema(con, source, stats=False)}
-    fields = [f for f in _TOP_VALUE_FIELDS if f in schema_cols or (f == "waf_sig_ind" and "waf_sig" in schema_cols)]
-    if not fields:
+    if not (
+        fields := [
+            f for f in _TOP_VALUE_FIELDS if f in schema_cols or (f == "waf_sig_ind" and "waf_sig" in schema_cols)
+        ]
+    ):
         return
-    select_parts = [
-        f'"{"waf_sig" if f == "waf_sig_ind" else f}"'
-        for f in fields
-        if ("waf_sig" if f == "waf_sig_ind" else f) in schema_cols
-    ]
-    sel = ", ".join(dict.fromkeys(select_parts))
+    sel = ", ".join(
+        dict.fromkeys(
+            f'"{"waf_sig" if f == "waf_sig_ind" else f}"'
+            for f in fields
+            if ("waf_sig" if f == "waf_sig_ind" else f) in schema_cols
+        )
+    )
     sample_table = f"_top_sample_{service_id.replace('-', '_')}"
     top_values: dict = {}
     sample_sql = (
@@ -1334,36 +1183,32 @@ def update_top_values(con: duckdb.DuckDBPyConnection, source: dict):
         try:
             con.execute(sample_sql)
         except Exception as _e:
-            if _is_stale_view_error(_e):
-                from backend.core import iceberg
-
-                iceberg.update_iceberg_view(con, source)
-                con.execute(f'DROP TABLE IF EXISTS "{sample_table}"')
-                con.execute(sample_sql)
-            else:
+            if not _is_stale_view_error(_e):
                 raise
+            from backend.core import iceberg
+
+            iceberg.update_iceberg_view(con, source)
+            con.execute(f'DROP TABLE IF EXISTS "{sample_table}"')
+            con.execute(sample_sql)
         queries, field_order = [], []
         for f in fields:
             col = "waf_sig" if f == "waf_sig_ind" else f
             if col not in schema_cols:
                 continue
-            if f == "waf_sig_ind":
-                queries.append(
-                    f"(SELECT '{f}' AS _field, trim(signal) AS _value, count(*) AS _cnt "
-                    f"FROM (SELECT unnest(string_split(\"{col}\", ',')) AS signal FROM {sample_table} "
-                    f'WHERE "{col}" IS NOT NULL AND "{col}" != \'\') '
-                    "WHERE trim(signal) != '' GROUP BY 1,2 ORDER BY 3 DESC LIMIT 200)"
-                )
-            else:
-                queries.append(
-                    f"(SELECT '{f}' AS _field, CAST(\"{col}\" AS VARCHAR) AS _value, count(*) AS _cnt "
-                    f'FROM {sample_table} WHERE "{col}" IS NOT NULL GROUP BY 1,2 ORDER BY 3 DESC LIMIT 200)'
-                )
+            src_sql = (
+                f"(SELECT unnest(string_split(\"{col}\", ',')) AS signal FROM {sample_table} "
+                f"WHERE \"{col}\" IS NOT NULL AND \"{col}\" != '') WHERE trim(signal) != ''"
+                if f == "waf_sig_ind"
+                else f'{sample_table} WHERE "{col}" IS NOT NULL'
+            )
+            val_expr = "trim(signal)" if f == "waf_sig_ind" else f'CAST("{col}" AS VARCHAR)'
+            queries.append(
+                f"(SELECT '{f}' AS _field, {val_expr} AS _value, count(*) AS _cnt FROM {src_sql} GROUP BY 1,2 ORDER BY 3 DESC LIMIT 200)"
+            )
             field_order.append(f)
         if queries:
-            rows = con.execute(" UNION ALL ".join(queries)).fetchall()
             top_values = {fname: [] for fname in field_order}
-            for fname, fval, fcnt in rows:
+            for fname, fval, fcnt in con.execute(" UNION ALL ".join(queries)).fetchall():
                 if fname in top_values and len(top_values[fname]) < 200:
                     top_values[fname].append({"value": fval, "count": fcnt})
     except Exception:
@@ -1375,12 +1220,10 @@ def update_top_values(con: duckdb.DuckDBPyConnection, source: dict):
             if log_once_per("update_top_values: DROP TABLE failed (ignored)", 60):
                 logger.debug("update_top_values: DROP TABLE failed (ignored)", exc_info=True)
     if top_values:
-        cache_dir = _cache_dir(source)
-        os.makedirs(cache_dir, exist_ok=True)
+        os.makedirs(cache_dir := _cache_dir(source), exist_ok=True)
         with open(os.path.join(cache_dir, "top_values.json"), "w") as fp:
             json.dump(top_values, fp)
-        post_fp = _top_values_fingerprint(con, source)
-        if post_fp is not None:
+        if (post_fp := _top_values_fingerprint(con, source)) is not None:
             with _top_values_cache_lock:
                 _top_values_cache[service_id] = post_fp
 
@@ -1405,11 +1248,9 @@ def _clear_schema_cache(source_name: str | None = None):
 
 def get_schema(con: duckdb.DuckDBPyConnection, source: dict | None = None, stats: bool = True) -> list[dict]:
     src = source or _DEFAULT_SOURCE
-    source_name = src["name"]
-    table_name = _safe_table_name(source_name)
+    source_name, table_name = src["name"], _safe_table_name(src["name"])
     cache_key = (source_name, table_name, stats)
-    cached = _schema_cache.get(cache_key)
-    if cached is not None:
+    if (cached := _schema_cache.get(cache_key)) is not None:
         return cached
     try:
         row = con.execute(
@@ -1420,30 +1261,24 @@ def get_schema(con: duckdb.DuckDBPyConnection, source: dict | None = None, stats
         if row[0] <= 0:
             return []
         if not stats:
-            result = con.execute(f"DESCRIBE {table_name}").fetchall()
-            schema = [{"name": r[0], "type": r[1]} for r in result]
+            schema = [{"name": r[0], "type": r[1]} for r in con.execute(f"DESCRIBE {table_name}").fetchall()]
         else:
-            result = con.execute(f"SUMMARIZE SELECT * FROM {table_name} LIMIT 10000").fetchall()
             schema = [
                 {
-                    "name": r[0],
-                    "type": r[1],
-                    "min": str(r[2]) if r[2] is not None else None,
-                    "max": str(r[3]) if r[3] is not None else None,
-                    "approx_unique": r[4],
+                    "name": r[0], "type": r[1], "min": str(r[2]) if r[2] is not None else None,
+                    "max": str(r[3]) if r[3] is not None else None, "approx_unique": r[4],
                     "null_percentage": float(r[11]) if r[11] is not None else (100.0 if r[10] == 0 else 0.0),
                     "count": r[10],
                 }
-                for r in result
-            ]
+                for r in con.execute(f"SUMMARIZE SELECT * FROM {table_name} LIMIT 10000").fetchall()
+            ]  # fmt: skip
         if len(schema) == 1 and schema[0]["name"] == "timestamp":
             schema = []
         _schema_cache[cache_key] = schema
         return schema
     except Exception:
         try:
-            result = con.execute(f"DESCRIBE {table_name}").fetchall()
-            schema = [{"name": row[0], "type": row[1]} for row in result]
+            schema = [{"name": r[0], "type": r[1]} for r in con.execute(f"DESCRIBE {table_name}").fetchall()]
             _schema_cache[cache_key] = schema
             return schema
         except Exception:
@@ -1454,9 +1289,7 @@ ASN_CACHE_TTL_DAYS = 30
 
 
 def get_asn_names(service_id: str, asns: list) -> dict:
-    if not asns:
-        return {}
-    asns_clean = [int(a) for a in asns if a is not None]
+    asns_clean = [int(a) for a in (asns or ()) if a is not None]
     if not asns_clean or not service_id:
         return {}
     from backend.core import metadata as metadata_db
@@ -1472,29 +1305,26 @@ def get_asn_names(service_id: str, asns: list) -> dict:
             import cymruwhois  # type: ignore
 
             c = cymruwhois.Client()
-            orig_connect = getattr(c, "_connect", None)
-            if callable(orig_connect):
+            if callable(orig_connect := getattr(c, "_connect", None)):
 
                 def _safe_connect() -> None:
                     host, port = getattr(c, "host", None), getattr(c, "port", None)
                     if isinstance(host, str) and isinstance(port, int):
-                        sock = socket.create_connection((host, port), timeout=2.0)
-                        c.socket = sock
+                        c.socket = sock = socket.create_connection((host, port), timeout=2.0)
                         c.file = sock.makefile("r", encoding="utf-8", errors="replace")
                     else:
                         orig_connect()
                         sock_obj = getattr(c, "socket", None)
                         if sock_obj is not None and hasattr(sock_obj, "settimeout"):
                             sock_obj.settimeout(2.0)
-                        reconf = getattr(getattr(c, "file", None), "reconfigure", None)
-                        if callable(reconf):
+                        if callable(reconf := getattr(getattr(c, "file", None), "reconfigure", None)):
                             reconf(encoding="utf-8", errors="replace")
 
                 c._connect = _safe_connect
-            for result in c.lookupmany([f"AS{asn}" for asn in need]):
-                if result and result.asn:
-                    asn_int = int(result.asn)
-                    raw_owner = result.owner or f"AS{asn_int}"
+            for res in c.lookupmany([f"AS{asn}" for asn in need]):
+                if res and res.asn:
+                    asn_int = int(res.asn)
+                    raw_owner = res.owner or f"AS{asn_int}"
                     resolved[asn_int] = raw_owner.split(" - ", 1)[1] if " - " in raw_owner else raw_owner
         except Exception as exc:
             logger.warning("ASN resolution failed: %s", type(exc).__name__)
@@ -1512,9 +1342,7 @@ def get_asn_names(service_id: str, asns: list) -> dict:
 
 
 def format_asn_label(asn: int, name: str) -> str:
-    if not name or (name.startswith("AS") and name[2:].isdigit()):
-        return f"AS{asn}"
-    return f"{name} ({asn})"
+    return f"AS{asn}" if not name or (name.startswith("AS") and name[2:].isdigit()) else f"{name} ({asn})"
 
 
 def enrich_asn_labels(values: list[dict], service_id: str) -> list[dict]:
@@ -1531,26 +1359,19 @@ def enrich_asn_labels(values: list[dict], service_id: str) -> list[dict]:
 def update_cron_duration(source: dict, run_id: int, duration_s: float, log_output: str | None = None):
     from backend.core import metadata as metadata_db
 
-    service_id = _source_service_id(source)
-    if service_id:
+    if service_id := _source_service_id(source):
         metadata_db.update_cron_duration(service_id, run_id, duration_s, log_output=log_output)
 
 
 def log_usage_calls(source: dict, calls: list[dict], process_context: str | None = None):
-    if not svcconfig.is_usage_logging_enabled():
-        return
-    service_id = _source_service_id(source)
-    if service_id:
+    if svcconfig.is_usage_logging_enabled() and (service_id := _source_service_id(source)):
         from backend.core import metadata as metadata_db
 
         metadata_db.log_usage_calls(service_id, calls, process_context=process_context)
 
 
 def backfill_fastly_edge_writes(source: dict) -> int:
-    if not svcconfig.is_usage_logging_enabled():
-        return 0
-    service_id = _source_service_id(source)
-    if not service_id:
+    if not svcconfig.is_usage_logging_enabled() or not (service_id := _source_service_id(source)):
         return 0
     try:
         from backend.core import metadata as metadata_db
@@ -1559,24 +1380,18 @@ def backfill_fastly_edge_writes(source: dict) -> int:
         files = metadata_db.list_unbackfilled_fastly_edge_files(service_id, since=since)
         if not files:
             return 0
-        calls = []
-        for f_name, f_ingested, _row_count, f_size in files:
-            if f_name == "__seeding_attempted__":
-                continue
-            ts_match = re.search(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})", f_name)
-            calls.append(
-                {
-                    "method": "PUT_OBJECT",
-                    "path": f_name,
-                    "service": "FOS",
-                    "details": "Class A · synthesized from ingest",
-                    "bytes": f_size,
-                    "status": "OK",
-                    "caller": "fastly.edge",
-                    "time_ms": 0,
-                    "_timestamp_override": (ts_match.group(1) + "Z") if ts_match else f_ingested,
-                }
-            )
+        calls = [
+            {
+                "method": "PUT_OBJECT", "path": f_name, "service": "FOS",
+                "details": "Class A · synthesized from ingest", "bytes": f_size, "status": "OK",
+                "caller": "fastly.edge", "time_ms": 0,
+                "_timestamp_override": (m.group(1) + "Z")
+                if (m := re.search(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})", f_name))
+                else f_ingested,
+            }
+            for f_name, f_ingested, _row_count, f_size in files
+            if f_name != "__seeding_attempted__"
+        ]  # fmt: skip
         return metadata_db.log_synthetic_usage(service_id, calls)
     except Exception as e:
         logger.debug("[usage_log] Fastly-edge write backfill failed: %s", e)
@@ -1587,34 +1402,33 @@ def reconcile_fastly_stats(source: dict, hours_back: int = 12) -> int:
     if not svcconfig.is_usage_logging_enabled():
         return 0
     service_id, logging_svc_id = _source_service_id(source), source.get("logging_service_id", "")
-    if not service_id or not logging_svc_id:
-        return 0
-    api_key = svcconfig.get_fastly_api_key(logging_svc_id)
-    if not api_key:
+    if not service_id or not logging_svc_id or not (api_key := svcconfig.get_fastly_api_key(logging_svc_id)):
         return 0
     try:
         from backend.core import metadata as metadata_db
         from backend.core.fastly.client import StatsResponse, fastly
 
         now_dt = datetime.now(UTC)
-        latest_recon = metadata_db.get_latest_reconciliation_ts(service_id)
-        if latest_recon:
+        if latest_recon := metadata_db.get_latest_reconciliation_ts(service_id):
             latest_dt = parse_iso_utc(latest_recon) if isinstance(latest_recon, str) else None
             if latest_dt is not None and (now_dt - latest_dt) < timedelta(hours=1):
                 return 0
         now = now_dt.replace(minute=0, second=0, microsecond=0)
-        from_ts = int((now - timedelta(hours=hours_back)).timestamp())
-        to_ts = int((now + timedelta(hours=1)).timestamp())
+        from_ts, to_ts = (
+            int((now - timedelta(hours=hours_back)).timestamp()),
+            int((now + timedelta(hours=1)).timestamp()),
+        )
         payload = fastly(
             "GET", f"/stats/aggregate?by=hour&from={from_ts}&to={to_ts}", token=api_key, max_retries=0, timeout=30
         )
-        hourly: list[dict] = []
-        for rec in StatsResponse.model_validate(payload).data:
-            if rec.start_time is None:
-                continue
-            hour_iso = datetime.fromtimestamp(rec.start_time, tz=UTC).strftime("%Y-%m-%dT%H:00:00Z")
-            class_a, class_b = rec.fos_ops()
-            hourly.append({"hour_iso": hour_iso, "class_a": class_a, "class_b": class_b})
+        hourly = [
+            {
+                "hour_iso": datetime.fromtimestamp(rec.start_time, tz=UTC).strftime("%Y-%m-%dT%H:00:00Z"),
+                "class_a": rec.fos_ops()[0], "class_b": rec.fos_ops()[1],
+            }
+            for rec in StatsResponse.model_validate(payload).data
+            if rec.start_time is not None
+        ]  # fmt: skip
         return metadata_db.reconcile_fastly_stats(service_id, hourly)
     except Exception as e:
         logger.debug("[usage_log] Fastly stats reconciliation failed: %s", e)
@@ -1623,8 +1437,7 @@ def reconcile_fastly_stats(source: dict, hours_back: int = 12) -> int:
 
 def purge_usage_log(source: dict):
     retention_days = int(svcconfig.load_usage_logging_config().get("retention_days", 30))
-    service_id = _source_service_id(source)
-    if service_id:
+    if service_id := _source_service_id(source):
         from backend.core import metadata as metadata_db
 
         metadata_db.purge_usage_log(service_id, retention_days)
@@ -1648,8 +1461,7 @@ def rum_duckdb_path(path: str) -> str:
 
 
 def rum_source_for(source: dict) -> dict:
-    rum_source = dict(source)
-    rum_source["name"] = f"{source.get('name') or source.get('service_id') or 'default'}::rum"
+    rum_source = {**source, "name": f"{source.get('name') or source.get('service_id') or 'default'}::rum"}
     if source.get("duckdb_path"):
         rum_source["duckdb_path"] = rum_duckdb_path(source["duckdb_path"])
     return rum_source
@@ -1660,10 +1472,8 @@ _process_cid_salt: str | None = None
 
 
 def ensure_cid_salt(rum_cfg: dict) -> str:
-    salt = rum_cfg.get("cid_salt")
-    if not salt:
-        salt = secrets.token_hex(32)
-        rum_cfg["cid_salt"] = salt
+    if not (salt := rum_cfg.get("cid_salt")):
+        rum_cfg["cid_salt"] = salt = secrets.token_hex(32)
     return salt
 
 
@@ -1671,10 +1481,8 @@ def get_or_generate_cid_salt(service_id: str) -> str:
     global _process_cid_salt
     from backend.config import load_config, mutate_config
 
-    cfg = load_config(service_id)
-    if cfg:
-        rum_cfg = cfg.get("rum")
-        if isinstance(rum_cfg, dict) and rum_cfg.get("cid_salt"):
+    if cfg := load_config(service_id):
+        if isinstance(rum_cfg := cfg.get("rum"), dict) and rum_cfg.get("cid_salt"):
             return rum_cfg["cid_salt"]
     else:
         with _cid_salt_lock:
@@ -1688,8 +1496,8 @@ def get_or_generate_cid_salt(service_id: str) -> str:
     logger.warning("cid_salt_missing service_id=%s: generating and persisting under cross-process lock", service_id)
 
     def _set(c: dict) -> None:
-        existing = c.get("rum")
-        rum: dict = existing if isinstance(existing, dict) else {}
+        raw_rum = c.get("rum")
+        rum: dict[str, Any] = raw_rum if isinstance(raw_rum, dict) else {}
         ensure_cid_salt(rum)
         c["rum"] = rum
 
@@ -1705,35 +1513,27 @@ _BLOCKED_TABLE_PREFIXES = ("duckdb_", "pg_")
 _BLOCKED_SCHEMA_NAMES = frozenset({"information_schema", "pg_catalog", "system"})
 ALLOWED_CATALOG = "main"
 
-_BLOCKED_FUNCTIONS = frozenset(
-    {
-        "getenv", "current_setting", "duckdb_secrets", "duckdb_settings", "duckdb_variables",
-        "duckdb_extensions", "read_csv", "read_csv_auto", "read_parquet", "read_parquet_metadata",
-        "read_parquet_schema", "read_json", "read_json_auto", "read_json_objects",
-        "read_json_objects_auto", "read_ndjson", "read_ndjson_auto", "read_ndjson_objects",
-        "read_text", "read_text_auto", "read_blob", "read_blob_auto", "read_avro", "iceberg_scan",
-        "iceberg_metadata", "iceberg_snapshots", "parquet_scan", "parquet_metadata",
-        "parquet_schema", "parquet_kv_metadata", "glob", "lsdir", "sqlite_scan", "sqlite_attach",
-        "postgres_scan", "postgres_attach", "postgres_query", "mysql_scan", "mysql_attach",
-        "mysql_query", "query", "query_table",
-    }
-)  # fmt: skip
+_BLOCKED_FUNCTIONS = frozenset({
+    "getenv", "current_setting", "duckdb_secrets", "duckdb_settings", "duckdb_variables", "duckdb_extensions",
+    "read_csv", "read_csv_auto", "read_parquet", "read_parquet_metadata", "read_parquet_schema", "read_json",
+    "read_json_auto", "read_json_objects", "read_json_objects_auto", "read_ndjson", "read_ndjson_auto",
+    "read_ndjson_objects", "read_text", "read_text_auto", "read_blob", "read_blob_auto", "read_avro", "iceberg_scan",
+    "iceberg_metadata", "iceberg_snapshots", "parquet_scan", "parquet_metadata", "parquet_schema",
+    "parquet_kv_metadata", "glob", "lsdir", "sqlite_scan", "sqlite_attach", "postgres_scan", "postgres_attach",
+    "postgres_query", "mysql_scan", "mysql_attach", "mysql_query", "query", "query_table",
+})  # fmt: skip
 _BLOCKED_FUNCTION_PREFIXES = ("read_", "parquet_", "iceberg_", "duckdb_", "sniff_", "glob")
 _ALLOWED_TABLE_FUNCTIONS = frozenset(
     {"generate_series", "range", "repeat", "repeat_row", "unnest", "json_each", "json_tree"}
 )
-_BASELINE_TABLE_FUNCTIONS = frozenset(
-    {
-        "arrow_scan", "arrow_scan_dumb", "checkpoint", "force_checkpoint", "disable_logging",
-        "enable_logging", "disable_profiling", "enable_profiling", "truncate_duckdb_logs",
-        "json_execute_serialized_sql", "pandas_scan", "python_map_function", "seq_scan",
-        "summary", "which_secret", "icu_calendar_names", "pg_timezone_names", "query",
-        "query_table", "sniff_csv", "read_duckdb", "parquet_file_metadata",
-        "parquet_full_metadata", "parquet_bloom_probe", "pragma_collations",
-        "pragma_database_size", "pragma_metadata_info", "pragma_platform", "pragma_show",
-        "pragma_storage_info", "pragma_table_info", "pragma_user_agent", "pragma_version",
-    }
-)  # fmt: skip
+_BASELINE_TABLE_FUNCTIONS = frozenset({
+    "arrow_scan", "arrow_scan_dumb", "checkpoint", "force_checkpoint", "disable_logging", "enable_logging",
+    "disable_profiling", "enable_profiling", "truncate_duckdb_logs", "json_execute_serialized_sql", "pandas_scan",
+    "python_map_function", "seq_scan", "summary", "which_secret", "icu_calendar_names", "pg_timezone_names", "query",
+    "query_table", "sniff_csv", "read_duckdb", "parquet_file_metadata", "parquet_full_metadata", "parquet_bloom_probe",
+    "pragma_collations", "pragma_database_size", "pragma_metadata_info", "pragma_platform", "pragma_show",
+    "pragma_storage_info", "pragma_table_info", "pragma_user_agent", "pragma_version",
+})  # fmt: skip
 
 
 def _enumerate_table_functions() -> frozenset[str]:
@@ -1745,8 +1545,7 @@ def _enumerate_table_functions() -> frozenset[str]:
             ).fetchall()
         finally:
             con.close()
-        names = {r[0].lower() for r in rows if r and isinstance(r[0], str)}
-        if names:
+        if names := {r[0].lower() for r in rows if r and isinstance(r[0], str)}:
             return frozenset(names | _BASELINE_TABLE_FUNCTIONS)
     except Exception:
         logger.exception("[sql_validator] table-function enumeration failed; using baseline set")
@@ -1759,8 +1558,7 @@ _TABLE_FUNCTIONS = _enumerate_table_functions()
 class SQLValidationError(ValueError):
     def __init__(self, reason: str, message: str) -> None:
         super().__init__(message)
-        self.reason = reason
-        self.message = message
+        self.reason, self.message = reason, message
 
 
 @dataclass
@@ -1774,24 +1572,15 @@ def _reject(sql: str, reason: str, message: str, session_id: str | None, service
     query_hash = "sha256:" + hashlib.sha256(sql_str.encode("utf-8", errors="replace")).hexdigest()
     _audit_logger.warning(
         "sql_validator_reject reason=%s session=%s service=%s hash=%s len=%d snippet=%r",
-        reason,
-        session_id or "-",
-        service_id or "-",
-        query_hash,
-        len(sql_str),
-        sql_str[:500],
-    )
+        reason, session_id or "-", service_id or "-", query_hash, len(sql_str), sql_str[:500],
+    )  # fmt: skip
     raise SQLValidationError(reason=reason, message=message)
 
 
 def validate_user_sql(
-    sql: str,
-    *,
-    parser_con: duckdb.DuckDBPyConnection,
-    session_id: str | None = None,
-    service_id: str | None = None,
-    allowed_tables: frozenset[str] | None = None,
-) -> ValidationResult:
+    sql: str, *, parser_con: duckdb.DuckDBPyConnection,
+    session_id: str | None = None, service_id: str | None = None, allowed_tables: frozenset[str] | None = None,
+) -> ValidationResult:  # fmt: skip
     if not isinstance(sql, str):
         _reject(sql, "input_type", "SQL must be a string", session_id, service_id)
     if "\x00" in sql:
@@ -1814,19 +1603,15 @@ def validate_user_sql(
     if elapsed_ms > 50:
         logger.warning(
             "[sql_validator] slow parse+walk: %.1fms for %d-byte input session=%s service=%s",
-            elapsed_ms,
-            len(encoded),
-            session_id,
-            service_id,
-        )
+            elapsed_ms, len(encoded), session_id, service_id,
+        )  # fmt: skip
     return ValidationResult(parse_tree=parsed, elapsed_ms=elapsed_ms)
 
 
 def _check_function_node(
     node: dict[str, Any], original_sql: str, session_id: str | None, service_id: str | None
 ) -> None:
-    fname = node.get("function_name")
-    if not isinstance(fname, str):
+    if not isinstance(fname := node.get("function_name"), str):
         return
     fl = fname.lower()
     if fl in _BLOCKED_FUNCTIONS:
@@ -1856,14 +1641,9 @@ def _check_function_node(
 
 
 def _check_table_reference(
-    node: dict,
-    original_sql: str,
-    session_id: str | None,
-    service_id: str | None,
-    *,
-    allowed_tables: frozenset[str] | None = None,
-    cte_aliases: frozenset[str] = frozenset(),
-) -> None:
+    node: dict, original_sql: str, session_id: str | None, service_id: str | None, *,
+    allowed_tables: frozenset[str] | None = None, cte_aliases: frozenset[str] = frozenset(),
+) -> None:  # fmt: skip
     table_name = (node.get("table_name") or "").strip()
     schema_name = (node.get("schema_name") or "").strip().lower()
     catalog_name = (node.get("catalog_name") or "").strip().lower()
@@ -1916,14 +1696,9 @@ def _check_table_reference(
 
 
 def _walk_and_validate(
-    node: Any,
-    original_sql: str,
-    session_id: str | None,
-    service_id: str | None,
-    *,
-    allowed_tables: frozenset[str] | None = None,
-    cte_aliases: frozenset[str] = frozenset(),
-) -> None:
+    node: Any, original_sql: str, session_id: str | None, service_id: str | None, *,
+    allowed_tables: frozenset[str] | None = None, cte_aliases: frozenset[str] = frozenset(),
+) -> None:  # fmt: skip
     if isinstance(node, dict):
         if allowed_tables is not None and isinstance(cte_map := node.get("cte_map"), dict):
             cte_entries = cte_map.get("map")
@@ -1938,30 +1713,20 @@ def _walk_and_validate(
                 is_recursive = isinstance(n, dict) and n.get("type") == "RECURSIVE_CTE_NODE"
                 if val is not None:
                     _walk_and_validate(
-                        val,
-                        original_sql,
-                        session_id,
-                        service_id,
-                        allowed_tables=allowed_tables,
+                        val, original_sql, session_id, service_id, allowed_tables=allowed_tables,
                         cte_aliases=(cte_aliases | alias_fs) if is_recursive else cte_aliases,
-                    )
+                    )  # fmt: skip
                 cte_aliases = cte_aliases | alias_fs
         if node.get("type") == "BASE_TABLE" or "table_name" in node:
-            _check_table_reference(
-                node, original_sql, session_id, service_id, allowed_tables=allowed_tables, cte_aliases=cte_aliases
-            )
+            _check_table_reference(node, original_sql, session_id, service_id, allowed_tables=allowed_tables, cte_aliases=cte_aliases)  # fmt: skip
         if node.get("class") == "FUNCTION":
             _check_function_node(node, original_sql, session_id, service_id)
         for key, value in node.items():
             if not (key == "cte_map" and allowed_tables is not None):
-                _walk_and_validate(
-                    value, original_sql, session_id, service_id, allowed_tables=allowed_tables, cte_aliases=cte_aliases
-                )
+                _walk_and_validate(value, original_sql, session_id, service_id, allowed_tables=allowed_tables, cte_aliases=cte_aliases)  # fmt: skip
     elif isinstance(node, list):
         for item in node:
-            _walk_and_validate(
-                item, original_sql, session_id, service_id, allowed_tables=allowed_tables, cte_aliases=cte_aliases
-            )
+            _walk_and_validate(item, original_sql, session_id, service_id, allowed_tables=allowed_tables, cte_aliases=cte_aliases)  # fmt: skip
 
 
 def apply_user_query_limits(
@@ -2031,6 +1796,8 @@ from backend.core.metadata.ingest_log import purge_evidence  # noqa: E402
 _LOCK_TIMEOUT_S = 10.0
 _DRAIN_TIMEOUT_S = 5.0
 _DRAIN_GRACE_S = 5.0
+_RUM_TABLES = ("client_vitals", "client_errors")
+_RUM_CH_TABLES = ("rum_vitals_facts", "rum_error_facts", "rum_vitals_aggregates", "rum_error_aggregates")
 
 
 def _purge_prefix(
@@ -2039,12 +1806,11 @@ def _purge_prefix(
     paginator = fos_client.get_paginator("list_objects_v2")
     total_deleted = 0
     for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
-        page_keys = [
+        if page_keys := [
             obj["Key"]
             for obj in page.get("Contents", [])
             if not (exclude_prefix and obj["Key"].startswith(exclude_prefix))
-        ]
-        if page_keys:
+        ]:
             total_deleted += delete_fn(fos_client, bucket, page_keys)
             yield {"type": "status", "message": f"Deleted {total_deleted:,} {label} so far..."}
     return total_deleted
@@ -2073,54 +1839,114 @@ def _remove_tree_with_progress(path: str, *, batch_size: int = 2000) -> Generato
     return removed
 
 
+def _wipe_ducklake_table_dirs(ducklake_root: str, tbl: str) -> Generator[dict]:
+    if not ducklake_root.startswith(("s3://", "http://", "https://")):
+        for sub in (os.path.join(ducklake_root, "main", tbl), os.path.join(ducklake_root, tbl)):
+            if os.path.exists(sub):
+                yield from _remove_tree_with_progress(sub)
+                shutil.rmtree(sub, ignore_errors=True)
+
+
+def _drain_and_wipe_db_files(db_path: str, pool_key: str, wipe_msg: str) -> Generator[dict, None, dict]:
+    from backend.core import duckdb_pool as _pool
+
+    _db = sys.modules[__name__]
+    _db.set_recycle_barrier(db_path, True)
+    retired = _pool.begin_drain_pools([pool_key])
+    _pool.wait_pools_drained(retired, _DRAIN_TIMEOUT_S)
+    gc.collect()
+    deadline = time.monotonic() + _DRAIN_GRACE_S
+    while _db.live_connection_count(db_path) > 0 and time.monotonic() < deadline:
+        time.sleep(0.05)
+        gc.collect()
+    yield {"type": "status", "message": wipe_msg}
+    for f in (db_path, db_path + ".wal", db_path + ".shm"):
+        if os.path.exists(f):
+            os.remove(f)
+    _db.clear_initialization_state(db_path)
+    return retired
+
+
+def _reinit_ducklake_tables(
+    con_source: dict, source: dict, service_id: str, tables: tuple[str | None, ...], fn_label: str
+) -> None:
+    from backend.core import iceberg as iceberg_core
+    from backend.core.iceberg._core import update_iceberg_view
+    from backend.core.iceberg._ducklake import _ducklake_attach, ducklake_table_name
+
+    for t_name in tables:
+        iceberg_core.init_iceberg_table(source, create=True, **({} if t_name is None else {"table_name": t_name}))
+    con2 = sys.modules[__name__].get_connection(con_source)
+    try:
+        try:
+            if _ducklake_attach(con2, source, read_only=False):
+                for t_name in tables:
+                    con2.execute(f'DROP TABLE IF EXISTS lake."{ducklake_table_name(source, t_name or "logs")}"')
+        except Exception as e:
+            logger.debug("%s(%s): DuckLake table drop skipped: %s", fn_label, service_id, e)
+        for t_name in tables:
+            if t_name is None:
+                update_iceberg_view(con2, source, force=True)
+            else:
+                update_iceberg_view(con2, source, force=True, target_table=t_name)
+    finally:
+        con2.close()
+
+
+def _purge_clickhouse_tables_gen(
+    service_id: str, tables_and_clauses: list[tuple[str, str]], start_msg: str, done_prefix: str, err_label: str
+) -> Generator[dict]:
+    try:
+        from backend.core.clickhouse import get_clickhouse_client
+
+        yield {"type": "status", "message": start_msg}
+        if client := get_clickhouse_client():
+            for table, extra in tables_and_clauses:
+                client.execute(
+                    f"ALTER TABLE `{table}` DELETE WHERE service_id={{service_id:String}}{extra} SETTINGS mutations_sync=2",
+                    {"service_id": service_id},
+                )
+            yield {"type": "status", "message": f"{done_prefix} {len(tables_and_clauses)} ClickHouse table(s)."}
+    except Exception as e:
+        logger.error("Failed to purge %s: %s", err_label, e)
+        yield {"type": "status", "message": f"Warning: Failed to purge {err_label}: {e}"}
+
+
 def reset_service_logs(
-    service_id: str,
-    *,
-    delete_raw_logs: bool = False,
-    preserve_usage_history: bool = True,
-    actor: str = "ui",
-    reload_scheduler: Callable[[], None] | None = None,
-) -> Iterator[dict]:
+    service_id: str, *, delete_raw_logs: bool = False, preserve_usage_history: bool = True,
+    actor: str = "ui", reload_scheduler: Callable[[], None] | None = None,
+) -> Iterator[dict]:  # fmt: skip
     from backend.core import duckdb_pool as _pool
     from backend.core import metadata as metadata_db
-    from backend.core.iceberg import _core as iceberg_core
-    from backend.core.iceberg._core import _get_service_lock, clear_source_caches, update_iceberg_view
+    from backend.core.iceberg._core import _get_service_lock, clear_source_caches
+    from backend.core.iceberg._ducklake import _default_data_path, ducklake_table_name
     from backend.core.ingest import _delete_objects_robust
     from backend.core.metadata.reconciliation import is_ingested_files_dedup_active
 
     _db = sys.modules[__name__]
-    source = _db.get_source_for_service(service_id)
-    if not source:
+    if not (source := _db.get_source_for_service(service_id)):
         raise ValueError(f"No service found with id {service_id!r}")
-
     service_key = source.get("name", service_id)
     db_path = os.path.abspath(source.get("duckdb_path") or svcconfig.duckdb_path(service_id))
-
     lock = _get_service_lock(service_key)
     if not lock.acquire(timeout=_LOCK_TIMEOUT_S):
         raise RuntimeError("Another operation is in progress for this service. Please wait and try again.")
-
-    paused_cron = False
-    original_cron_sync_enabled = True
-
+    paused_cron, original_cron_sync_enabled = False, True
     try:
         if metadata_db.cron_busy(service_id):
             raise RuntimeError(
                 "Active sync or commit is currently running. Please wait for it to finish before deleting logs."
             )
-
         yield {"type": "status", "message": "Pausing background sync for this service..."}
         cfg = svcconfig.load_config(service_id) or {}
-        prov = cfg.setdefault("provisioning", {})
-        cron_sync_cfg = prov.setdefault("cron_sync", {})
-        original_cron_sync_enabled = cron_sync_cfg.get("enabled", True)
+        original_cron_sync_enabled = cfg.setdefault("provisioning", {}).setdefault("cron_sync", {}).get("enabled", True)
         if original_cron_sync_enabled:
 
             def _pause_cron_sync(c: dict) -> None:
                 nonlocal original_cron_sync_enabled
-                fresh_cron_sync = c.setdefault("provisioning", {}).setdefault("cron_sync", {})
-                original_cron_sync_enabled = fresh_cron_sync.get("enabled", True)
-                fresh_cron_sync["enabled"] = False
+                fresh = c.setdefault("provisioning", {}).setdefault("cron_sync", {})
+                original_cron_sync_enabled = fresh.get("enabled", True)
+                fresh["enabled"] = False
 
             svcconfig.mutate_config(service_id, _pause_cron_sync)
             paused_cron = True
@@ -2129,7 +1955,6 @@ def reset_service_logs(
                     reload_scheduler()
                 except Exception as e:
                     logger.warning("reset_service_logs(%s): scheduler reload (pause) failed: %s", service_id, e)
-
         if delete_raw_logs and not is_ingested_files_dedup_active(service_id):
             yield {
                 "type": "status",
@@ -2138,79 +1963,55 @@ def reset_service_logs(
                     "Deleting raw cloud logs now means the next full sync has no dedup record "
                     "left and will re-ingest this service's ENTIRE request/RUM history."
                 ),
-            }
-
+            }  # fmt: skip
         yield {"type": "status", "message": "Draining local database connections..."}
-        _db.set_recycle_barrier(db_path, True)
         retired_pools = {}
         try:
-            retired_pools = _pool.begin_drain_pools([service_key])
-            _pool.wait_pools_drained(retired_pools, _DRAIN_TIMEOUT_S)
-            gc.collect()
-            deadline = time.monotonic() + _DRAIN_GRACE_S
-            while _db.live_connection_count(db_path) > 0 and time.monotonic() < deadline:
-                time.sleep(0.05)
-                gc.collect()
-
-            yield {"type": "status", "message": "Wiping local database and cache..."}
-            for f in (db_path, db_path + ".wal", db_path + ".shm"):
-                if os.path.exists(f):
-                    os.remove(f)
-            _db.clear_initialization_state(db_path)
-
-            cache_dir = _db._cache_dir(source)
-            if os.path.exists(cache_dir):
+            retired_pools = yield from _drain_and_wipe_db_files(
+                db_path, service_key, "Wiping local database and cache..."
+            )
+            if os.path.exists(cache_dir := _db._cache_dir(source)):
                 removed = yield from _remove_tree_with_progress(cache_dir)
                 if os.path.exists(cache_dir):
                     shutil.rmtree(cache_dir, ignore_errors=True)
                 yield {"type": "status", "message": f"Removed {removed:,} local cache file(s)."}
-
-            from backend.core.iceberg._ducklake import _default_data_path, _ducklake_attach, ducklake_table_name
-
-            tbl = ducklake_table_name(source, "logs")
-            ducklake_root = svcconfig.DUCKLAKE_DATA_PATH or _default_data_path(source)
-            if not ducklake_root.startswith(("s3://", "http://", "https://")):
-                for sub in (os.path.join(ducklake_root, "main", tbl), os.path.join(ducklake_root, tbl)):
-                    if os.path.exists(sub):
-                        yield from _remove_tree_with_progress(sub)
-                        shutil.rmtree(sub, ignore_errors=True)
+            yield from _wipe_ducklake_table_dirs(
+                svcconfig.DUCKLAKE_DATA_PATH or _default_data_path(source), ducklake_table_name(source, "logs")
+            )
         finally:
             _pool.end_drain_pools(retired_pools or [service_key])
             _db.set_recycle_barrier(db_path, False)
 
         yield {"type": "status", "message": "Purging cloud Iceberg log table..."}
-        fos = _db._get_fos_client(source)
-        bucket = source.get("bucket", "")
-        prefix = source.get("prefix", "")
-        iceberg_prefix = f"{prefix}/iceberg/default/logs/" if prefix else "iceberg/default/logs/"
+        fos, bucket, prefix = _db._get_fos_client(source), source.get("bucket", ""), source.get("prefix", "")
+        pfx = f"{prefix}/" if prefix else ""
         deleted = yield from _purge_prefix(
-            fos, bucket, iceberg_prefix, _delete_objects_robust, label="object(s) under iceberg/default/logs/"
-        )
+            fos, bucket, f"{pfx}iceberg/default/logs/", _delete_objects_robust, label="object(s) under iceberg/default/logs/"
+        )  # fmt: skip
         yield {"type": "status", "message": f"Deleted {deleted:,} object(s) under iceberg/default/logs/."}
-
-        errors_prefix = f"{prefix}/errors/" if prefix else "errors/"
-        deleted_errors = yield from _purge_prefix(
-            fos, bucket, errors_prefix, _delete_objects_robust, label="quarantined object(s) under errors/"
-        )
-        if deleted_errors:
-            yield {"type": "status", "message": f"Deleted {deleted_errors:,} quarantined object(s) under errors/."}
-
-        if delete_raw_logs:
-            raw_prefix = f"{prefix}/raw/request/" if prefix else "raw/request/"
-            deleted_raw = yield from _purge_prefix(
-                fos, bucket, raw_prefix, _delete_objects_robust, label="request raw object(s) under raw/request/"
+        if deleted_errors := (
+            yield from _purge_prefix(
+                fos, bucket, f"{pfx}errors/", _delete_objects_robust, label="quarantined object(s) under errors/"
             )
+        ):
+            yield {"type": "status", "message": f"Deleted {deleted_errors:,} quarantined object(s) under errors/."}
+        if delete_raw_logs:
+            deleted_raw = yield from _purge_prefix(
+                fos, bucket, f"{pfx}raw/request/", _delete_objects_robust, label="request raw object(s) under raw/request/"
+            )  # fmt: skip
             yield {"type": "status", "message": f"Deleted {deleted_raw:,} request raw object(s)."}
 
         yield {"type": "status", "message": "Purging local quarantine evidence..."}
         purge_evidence(service_id)
-
         yield {"type": "status", "message": "Truncating local ingestion indexes..."}
         con = metadata_db.get_con(service_id)
-        con.execute("DELETE FROM ingested_files WHERE source_name = ? AND table_name = 'logs'", (service_id,))
-        con.execute("DELETE FROM ingest_in_flight WHERE source_name = ? AND table_name = 'logs'", (service_id,))
-        con.execute("DELETE FROM quarantined_files WHERE source_name = ?", (service_id,))
-        con.execute("DELETE FROM ingested_files_summary WHERE source_name = ?", (service_id,))
+        for sql in (
+            "DELETE FROM ingested_files WHERE source_name = ? AND table_name = 'logs'",
+            "DELETE FROM ingest_in_flight WHERE source_name = ? AND table_name = 'logs'",
+            "DELETE FROM quarantined_files WHERE source_name = ?",
+            "DELETE FROM ingested_files_summary WHERE source_name = ?",
+        ):
+            con.execute(sql, (service_id,))
         con.execute(
             "DELETE FROM ingest_ledger WHERE service_id = ? AND object_key NOT LIKE ? AND object_key NOT LIKE ? AND object_key NOT LIKE ?",
             (service_id, "%/raw/rum/%", "raw/rum/%", "rum/%"),
@@ -2218,64 +2019,23 @@ def reset_service_logs(
         con.commit()
         if con.execute("SELECT 1 FROM ingested_files WHERE source_name = ? LIMIT 1", (service_id,)).fetchone():
             metadata_db.recompute_ingested_files_summary(con, service_id)
-
         if not preserve_usage_history:
             metadata_db.clear_usage_log(service_id)
             yield {"type": "status", "message": "Cleared usage-log (Class A/B) history."}
-
         svcconfig.update_status(service_id, {"local_rows": 0})
 
         yield {"type": "status", "message": "Re-initializing storage catalog..."}
         clear_source_caches(service_key)
-        iceberg_core.init_iceberg_table(source, create=True)
-        con2 = _db.get_connection(source)
-        try:
-            try:
-                if _ducklake_attach(con2, source, read_only=False):
-                    con2.execute(f'DROP TABLE IF EXISTS lake."{tbl}"')
-            except Exception as e:
-                logger.debug("reset_service_logs(%s): DuckLake table drop skipped: %s", service_id, e)
-            update_iceberg_view(con2, source, force=True)
-        finally:
-            con2.close()
-
+        _reinit_ducklake_tables(source, source, service_id, (None,), "reset_service_logs")
         metadata_db.record_audit(
-            service_id,
-            "logs_reset",
-            {"delete_raw_logs": delete_raw_logs, "preserve_usage_history": preserve_usage_history},
-            actor=actor,
-        )
-
+            service_id, "logs_reset",
+            {"delete_raw_logs": delete_raw_logs, "preserve_usage_history": preserve_usage_history}, actor=actor,
+        )  # fmt: skip
         if svcconfig.is_high_scale_mode(source):
-            try:
-                from backend.core.clickhouse import CLICKHOUSE_HIGH_SCALE_TABLES, get_clickhouse_client
+            from backend.core.clickhouse import CLICKHOUSE_HIGH_SCALE_TABLES
 
-                yield {"type": "status", "message": "Purging ClickHouse high-scale tables..."}
-                client = get_clickhouse_client()
-                if client:
-                    rum_ch_tables = {
-                        "rum_vitals_facts",
-                        "rum_error_facts",
-                        "rum_vitals_aggregates",
-                        "rum_error_aggregates",
-                    }
-                    req_tables = [t for t in CLICKHOUSE_HIGH_SCALE_TABLES if t not in rum_ch_tables]
-                    for table in req_tables:
-                        if table == "high_scale_batch_publications":
-                            client.execute(
-                                f"ALTER TABLE `{table}` DELETE WHERE service_id={{service_id:String}} AND domain != 'rum' SETTINGS mutations_sync=2",
-                                {"service_id": service_id},
-                            )
-                        else:
-                            client.execute(
-                                f"ALTER TABLE `{table}` DELETE WHERE service_id={{service_id:String}} SETTINGS mutations_sync=2",
-                                {"service_id": service_id},
-                            )
-                    yield {"type": "status", "message": f"Cleared data from {len(req_tables)} ClickHouse table(s)."}
-            except Exception as e:
-                logger.error("Failed to purge ClickHouse tables: %s", e)
-                yield {"type": "status", "message": f"Warning: Failed to purge ClickHouse tables: {e}"}
-
+            req_specs = [(t, " AND domain != 'rum'" if t == "high_scale_batch_publications" else "") for t in CLICKHOUSE_HIGH_SCALE_TABLES if t not in _RUM_CH_TABLES]  # fmt: skip
+            yield from _purge_clickhouse_tables_gen(service_id, req_specs, "Purging ClickHouse high-scale tables...", "Cleared data from", "ClickHouse tables")  # fmt: skip
         yield {
             "type": "done",
             "message": "Log history deleted. New logs from the live edge will begin populating immediately.",
@@ -2285,12 +2045,8 @@ def reset_service_logs(
             try:
                 svcconfig.mutate_config(
                     service_id,
-                    lambda c: (
-                        c.setdefault("provisioning", {})
-                        .setdefault("cron_sync", {})
-                        .__setitem__("enabled", original_cron_sync_enabled)
-                    ),
-                )
+                    lambda c: c.setdefault("provisioning", {}).setdefault("cron_sync", {}).__setitem__("enabled", original_cron_sync_enabled),
+                )  # fmt: skip
                 if reload_scheduler:
                     reload_scheduler()
             except Exception as e:
@@ -2303,64 +2059,46 @@ def reset_service_logs(
 
 def _pause_rum_flags(cfg: dict) -> tuple[bool | None, bool] | None:
     rum_cfg = cfg.setdefault("rum", {})
-    original_rum = rum_cfg.get("enabled")
-    original_root = bool(cfg.get("rum_enabled", False))
+    original_rum, original_root = rum_cfg.get("enabled"), bool(cfg.get("rum_enabled", False))
     if not (original_rum or original_root):
         return None
-    rum_cfg["enabled"] = False
-    cfg["rum_enabled"] = False
+    rum_cfg["enabled"] = cfg["rum_enabled"] = False
     return original_rum, original_root
 
 
 def _restore_rum_flags(cfg: dict, paused: tuple[bool | None, bool]) -> None:
     original_rum, original_root = paused
     rum_cfg = cfg.setdefault("rum", {})
-    if original_rum is None:
-        rum_cfg.pop("enabled", None)
-    else:
-        rum_cfg["enabled"] = original_rum
+    rum_cfg.pop("enabled", None) if original_rum is None else rum_cfg.__setitem__("enabled", original_rum)
     cfg["rum_enabled"] = original_root
 
 
 def reset_service_rum(
-    service_id: str,
-    *,
-    delete_raw_logs: bool = False,
-    actor: str = "ui",
+    service_id: str, *, delete_raw_logs: bool = False, actor: str = "ui",
     reload_scheduler: Callable[[], None] | None = None,
-) -> Iterator[dict]:
+) -> Iterator[dict]:  # fmt: skip
     from backend.core import duckdb_pool as _pool
     from backend.core import metadata as metadata_db
-    from backend.core.iceberg import _core as iceberg_core
-    from backend.core.iceberg._core import _get_service_lock, clear_source_caches, update_iceberg_view
+    from backend.core.iceberg._core import _get_service_lock, clear_source_caches
+    from backend.core.iceberg._ducklake import _default_data_path, ducklake_table_name
     from backend.core.ingest import _delete_objects_robust
 
     _db = sys.modules[__name__]
-    source = _db.get_source_for_service(service_id)
-    if not source:
+    if not (source := _db.get_source_for_service(service_id)):
         raise ValueError(f"No service found with id {service_id!r}")
-
-    service_key = source.get("name", service_id)
-    rum_source = _db.rum_source_for(source)
-    rum_db_path = os.path.abspath(rum_source["duckdb_path"])
-    rum_service_key = f"{service_key}::rum"
-
+    service_key, rum_source = source.get("name", service_id), _db.rum_source_for(source)
+    rum_db_path, rum_service_key = os.path.abspath(rum_source["duckdb_path"]), f"{service_key}::rum"
     lock = _get_service_lock(service_key)
     if not lock.acquire(timeout=_LOCK_TIMEOUT_S):
         raise RuntimeError("Another operation is in progress for this service. Please wait and try again.")
-
-    paused_cron = False
-    paused_flags: tuple[bool | None, bool] | None = None
-
+    paused_cron, paused_flags = False, None
     try:
         if metadata_db.cron_busy(service_id):
             raise RuntimeError(
                 "Active RUM sync or commit is currently running. Please wait for it to finish before deleting RUM logs."
             )
-
         yield {"type": "status", "message": "Pausing background RUM sync for this service..."}
-        cfg = svcconfig.load_config(service_id) or {}
-        if _pause_rum_flags(cfg) is not None:
+        if _pause_rum_flags(svcconfig.load_config(service_id) or {}) is not None:
 
             def _pause_rum(c: dict) -> None:
                 nonlocal paused_flags
@@ -2375,150 +2113,69 @@ def reset_service_rum(
                     logger.warning("reset_service_rum(%s): scheduler reload (pause) failed: %s", service_id, e)
 
         yield {"type": "status", "message": "Draining local RUM database connections..."}
-        _db.set_recycle_barrier(rum_db_path, True)
         retired_rum_pools = {}
         try:
-            retired_rum_pools = _pool.begin_drain_pools([rum_service_key])
-            _pool.wait_pools_drained(retired_rum_pools, _DRAIN_TIMEOUT_S)
-            gc.collect()
-            deadline = time.monotonic() + _DRAIN_GRACE_S
-            while _db.live_connection_count(rum_db_path) > 0 and time.monotonic() < deadline:
-                time.sleep(0.05)
-                gc.collect()
-
-            yield {"type": "status", "message": "Wiping local RUM database..."}
-            for f in (rum_db_path, rum_db_path + ".wal", rum_db_path + ".shm"):
-                if os.path.exists(f):
-                    os.remove(f)
-            _db.clear_initialization_state(rum_db_path)
-
+            retired_rum_pools = yield from _drain_and_wipe_db_files(
+                rum_db_path, rum_service_key, "Wiping local RUM database..."
+            )
             yield {"type": "status", "message": "Wiping local RUM cache & buffer..."}
-            from backend.core.iceberg._ducklake import _default_data_path, _ducklake_attach, ducklake_table_name
-
-            rum_cache_dir = _db._cache_dir(source)
-            ducklake_root = svcconfig.DUCKLAKE_DATA_PATH or _default_data_path(source)
-            for t_name in ("client_vitals", "client_errors"):
-                data_dir = os.path.join(rum_cache_dir, f"data_{t_name}")
-                if os.path.exists(data_dir):
+            rum_cache_dir, ducklake_root = (
+                _db._cache_dir(source),
+                svcconfig.DUCKLAKE_DATA_PATH or _default_data_path(source),
+            )
+            for t_name in _RUM_TABLES:
+                if os.path.exists(data_dir := os.path.join(rum_cache_dir, f"data_{t_name}")):
                     removed = yield from _remove_tree_with_progress(data_dir)
                     shutil.rmtree(data_dir, ignore_errors=True)
                     yield {"type": "status", "message": f"Removed {removed:,} local cache file(s) for RUM {t_name}."}
-
-                buf_dir = os.path.join(rum_cache_dir, "buffer", t_name)
-                if os.path.exists(buf_dir):
+                if os.path.exists(buf_dir := os.path.join(rum_cache_dir, "buffer", t_name)):
                     shutil.rmtree(buf_dir, ignore_errors=True)
-
-                if not ducklake_root.startswith(("s3://", "http://", "https://")):
-                    rum_tbl = ducklake_table_name(source, t_name)
-                    for sub in (os.path.join(ducklake_root, "main", rum_tbl), os.path.join(ducklake_root, rum_tbl)):
-                        if os.path.exists(sub):
-                            yield from _remove_tree_with_progress(sub)
-                            shutil.rmtree(sub, ignore_errors=True)
+                yield from _wipe_ducklake_table_dirs(ducklake_root, ducklake_table_name(source, t_name))
         finally:
             _pool.end_drain_pools(retired_rum_pools or [rum_service_key])
             _db.set_recycle_barrier(rum_db_path, False)
 
         yield {"type": "status", "message": "Purging cloud Iceberg RUM tables..."}
-        fos = _db._get_fos_client(source)
-        bucket = source.get("bucket", "")
-        prefix = source.get("prefix", "")
-        for t_name in ("client_vitals", "client_errors"):
-            iceberg_prefix = f"{prefix}/iceberg/default/{t_name}/" if prefix else f"iceberg/default/{t_name}/"
+        fos, bucket, prefix = _db._get_fos_client(source), source.get("bucket", ""), source.get("prefix", "")
+        pfx = f"{prefix}/" if prefix else ""
+        for t_name in _RUM_TABLES:
             deleted = yield from _purge_prefix(
-                fos, bucket, iceberg_prefix, _delete_objects_robust, label=f"object(s) under iceberg/default/{t_name}/"
-            )
+                fos, bucket, f"{pfx}iceberg/default/{t_name}/", _delete_objects_robust,
+                label=f"object(s) under iceberg/default/{t_name}/",
+            )  # fmt: skip
             yield {"type": "status", "message": f"Deleted {deleted:,} cloud object(s) for RUM {t_name}."}
-
         if delete_raw_logs:
-            rum_prefix = f"{prefix}/raw/rum/" if prefix else "raw/rum/"
             deleted_rum = yield from _purge_prefix(
-                fos, bucket, rum_prefix, _delete_objects_robust, label="RUM raw object(s) under raw/rum/"
+                fos, bucket, f"{pfx}raw/rum/", _delete_objects_robust, label="RUM raw object(s) under raw/rum/"
             )
             yield {"type": "status", "message": f"Deleted {deleted_rum:,} RUM raw object(s)."}
 
         yield {"type": "status", "message": "Truncating local ingestion indexes for RUM..."}
         con = metadata_db.get_con(service_id)
-        con.execute(
-            "DELETE FROM ingested_files WHERE source_name = ? AND table_name IN ('client_vitals', 'client_errors')",
-            (service_id,),
-        )
-        con.execute(
-            "DELETE FROM ingest_in_flight WHERE source_name = ? AND table_name IN ('client_vitals', 'client_errors')",
-            (service_id,),
-        )
+        for tbl_name in ("ingested_files", "ingest_in_flight"):
+            con.execute(
+                f"DELETE FROM {tbl_name} WHERE source_name = ? AND table_name IN ('client_vitals', 'client_errors')",
+                (service_id,),
+            )
         con.execute(
             "DELETE FROM ingest_ledger WHERE service_id = ? AND (object_key LIKE ? OR object_key LIKE ? OR object_key LIKE ?)",
             (service_id, "%/raw/rum/%", "raw/rum/%", "rum/%"),
         )
         con.commit()
-
         if con.execute("SELECT 1 FROM ingested_files WHERE source_name = ? LIMIT 1", (service_id,)).fetchone():
             metadata_db.recompute_ingested_files_summary(con, service_id)
         else:
             con.execute("DELETE FROM ingested_files_summary WHERE source_name = ?", (service_id,))
             con.commit()
-
-        svcconfig.update_status(
-            service_id,
-            {"rum_total_events": 0, "rum_vitals_count": 0, "rum_errors_count": 0},
-        )
+        svcconfig.update_status(service_id, {"rum_total_events": 0, "rum_vitals_count": 0, "rum_errors_count": 0})
 
         yield {"type": "status", "message": "Re-initializing RUM storage catalogs..."}
         clear_source_caches(rum_service_key)
-        for t_name in ("client_vitals", "client_errors"):
-            iceberg_core.init_iceberg_table(source, create=True, table_name=t_name)
-
-        con2 = _db.get_connection(rum_source)
-        try:
-            try:
-                if _ducklake_attach(con2, source, read_only=False):
-                    for t_name in ("client_vitals", "client_errors"):
-                        rum_tbl = ducklake_table_name(source, t_name)
-                        con2.execute(f'DROP TABLE IF EXISTS lake."{rum_tbl}"')
-            except Exception as e:
-                logger.debug("reset_service_rum(%s): DuckLake table drop skipped: %s", service_id, e)
-            update_iceberg_view(con2, source, force=True, target_table="client_vitals")
-            update_iceberg_view(con2, source, force=True, target_table="client_errors")
-        finally:
-            con2.close()
-
-        metadata_db.record_audit(
-            service_id,
-            "rum_reset",
-            {"delete_raw_logs": delete_raw_logs},
-            actor=actor,
-        )
-
+        _reinit_ducklake_tables(rum_source, source, service_id, _RUM_TABLES, "reset_service_rum")
+        metadata_db.record_audit(service_id, "rum_reset", {"delete_raw_logs": delete_raw_logs}, actor=actor)
         if svcconfig.is_high_scale_mode(source):
-            try:
-                from backend.core.clickhouse import get_clickhouse_client
-
-                yield {"type": "status", "message": "Purging ClickHouse high-scale RUM tables..."}
-                client = get_clickhouse_client()
-                if client:
-                    rum_ch_tables = (
-                        "rum_vitals_facts",
-                        "rum_error_facts",
-                        "rum_vitals_aggregates",
-                        "rum_error_aggregates",
-                    )
-                    for table in rum_ch_tables:
-                        client.execute(
-                            f"ALTER TABLE `{table}` DELETE WHERE service_id={{service_id:String}} SETTINGS mutations_sync=2",
-                            {"service_id": service_id},
-                        )
-                    client.execute(
-                        "ALTER TABLE `high_scale_batch_publications` DELETE WHERE service_id={service_id:String} AND domain='rum' SETTINGS mutations_sync=2",
-                        {"service_id": service_id},
-                    )
-                    yield {
-                        "type": "status",
-                        "message": f"Cleared RUM data from {len(rum_ch_tables) + 1} ClickHouse table(s).",
-                    }
-            except Exception as e:
-                logger.error("Failed to purge ClickHouse RUM tables: %s", e)
-                yield {"type": "status", "message": f"Warning: Failed to purge ClickHouse RUM tables: {e}"}
-
+            rum_specs = [*((t, "") for t in _RUM_CH_TABLES), ("high_scale_batch_publications", " AND domain='rum'")]
+            yield from _purge_clickhouse_tables_gen(service_id, rum_specs, "Purging ClickHouse high-scale RUM tables...", "Cleared RUM data from", "ClickHouse RUM tables")  # fmt: skip
         yield {
             "type": "done",
             "message": "RUM history deleted. New RUM beacons from the live edge will populate on next sync.",
@@ -2526,12 +2183,7 @@ def reset_service_rum(
     finally:
         if paused_cron:
             try:
-
-                def _resume_rum(c: dict) -> None:
-                    if paused_flags is not None:
-                        _restore_rum_flags(c, paused_flags)
-
-                svcconfig.mutate_config(service_id, _resume_rum)
+                svcconfig.mutate_config(service_id, lambda c: _restore_rum_flags(c, paused_flags) if paused_flags is not None else None)  # fmt: skip
                 if reload_scheduler:
                     reload_scheduler()
             except Exception as e:
@@ -2544,10 +2196,7 @@ def reset_service_rum(
 
 for _mod_alias in ("backend.utils.sql_validator", "backend.utils.sql_ident", "backend.core.reset"):
     sys.modules[_mod_alias] = sys.modules[__name__]
-_utils_pkg = sys.modules.get("backend.utils")
-if _utils_pkg is not None:
-    _utils_pkg.sql_validator = sys.modules[__name__]  # type: ignore[attr-defined]
-    _utils_pkg.sql_ident = sys.modules[__name__]  # type: ignore[attr-defined]
-_core_pkg = sys.modules.get("backend.core")
-if _core_pkg is not None:
+if (_utils_pkg := sys.modules.get("backend.utils")) is not None:
+    _utils_pkg.sql_validator = _utils_pkg.sql_ident = sys.modules[__name__]  # type: ignore[attr-defined]
+if (_core_pkg := sys.modules.get("backend.core")) is not None:
     _core_pkg.reset = sys.modules[__name__]  # type: ignore[attr-defined]

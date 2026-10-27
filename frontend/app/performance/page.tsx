@@ -1,6 +1,7 @@
 'use client'
 
 import React from 'react'
+import { parseAsStringLiteral, useQueryState } from 'nuqs'
 import { client, unwrapClient } from "@/lib/api";
 import type { components } from '@/types/api'
 import { useAnalyticsReportQuery } from '@/hooks/useDashboardCards'
@@ -99,6 +100,7 @@ export const OriginVsEdgeHelp = () => (
 )
 type PerformanceUrlRow = components['schemas']['PerformanceUrlRow']
 type PerformanceAsnRow = components['schemas']['PerformanceAsnRow']
+const PERF_SORT_BY = ['p99', 'p95', 'p50', 'avg'] as const
 const URL_COLUMN_IDS = ['url', 'requests', 'avg', 'p50', 'p95', 'p99']
 const ASN_COLUMN_IDS = ['label', 'requests', 'avg', 'p50', 'p95', 'p99']
 
@@ -179,19 +181,20 @@ function PerformanceBody({
   // rangeKey is "24h". A custom absolute range instead keys on "abs:<start>|<end>"
   // and sends the explicit bounds, so the tables/distributions reflect exactly the
   // selected window. Both queries share one wire so they stay on one cache key.
+  const [sortBy] = useQueryState('sort_by', parseAsStringLiteral(PERF_SORT_BY).withDefault('p99'))
   const performanceQuery = useAnalyticsReportQuery({
     namespace: ['performance', 'aggregates'],
     serviceId: activeServiceId,
     filterPayload,
     range: { relativeRange, isAutoRange, startTime, endTime, anchor },
-    keyParts: ['p99'],
+    keyParts: [sortBy],
     queryFn: async ({ rangeBody, signal }) => {
       return unwrapClient(
         client.POST("/api/performance/aggregates", {
           signal,
           body: {
             filters: filterPayload,
-            sort_by: 'p99',
+            sort_by: sortBy,
             sections: undefined,
             ...rangeBody,
           },

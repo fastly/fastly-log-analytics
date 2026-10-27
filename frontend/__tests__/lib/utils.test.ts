@@ -5,8 +5,17 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { NextResponse, NextRequest } from 'next/server'
-import { describe, it, expect, test, beforeEach, afterEach, vi } from 'vitest'
-import { downloadAsCsv, IP_FAMILY_FIELDS, isIpFamilyField, buildSessionDashboardUrl, buildStreamDetailUrl, isUserActive, msSinceLastInteraction, __resetForTests, ACTIVE_WINDOW_MS, showReadOnlyToast, showToast, resolveRangeWire, DEFAULT_RANGE_TOKEN, ANCHOR_QUANTUM_SECONDS, quantizeAnchor, buildTrafficData, formatBytes, statusBadgeClass, toUTCDate, formatTimeAgo, formatLocalDateTime, formatValue, calculateDelta, formatCount, formatCountMaybe, formatAbbreviatedCount, ELAPSED_AGE_COMPACT, ELAPSED_FRESHNESS, ELAPSED_RELATIVE_AGO, ELAPSED_RELATIVE_AGO_JUST_NOW, formatBytesTiered, formatElapsed, TIME_HOVER_LAYOUT, makeTimeXAxis, denseTimeGrid, denseBarTrace, lineTrace, secondaryYAxis, withSecondaryAxis, type BuildTrafficDataParams } from "@/lib/utils";
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import {
+  downloadAsCsv, IP_FAMILY_FIELDS, isIpFamilyField, buildSessionDashboardUrl, buildStreamDetailUrl,
+  isUserActive, msSinceLastInteraction, __resetForTests, ACTIVE_WINDOW_MS, showReadOnlyToast, showToast,
+  resolveRangeWire, DEFAULT_RANGE_TOKEN, ANCHOR_QUANTUM_SECONDS, quantizeAnchor, buildTrafficData,
+  formatBytes, statusBadgeClass, toUTCDate, formatTimeAgo, formatLocalDateTime, formatValue,
+  calculateDelta, formatCount, formatCountMaybe, formatAbbreviatedCount, ELAPSED_AGE_COMPACT,
+  ELAPSED_FRESHNESS, ELAPSED_RELATIVE_AGO, ELAPSED_RELATIVE_AGO_JUST_NOW, formatBytesTiered,
+  formatElapsed, TIME_HOVER_LAYOUT, makeTimeXAxis, denseTimeGrid, denseBarTrace, lineTrace,
+  secondaryYAxis, withSecondaryAxis, type BuildTrafficDataParams,
+} from '@/lib/utils'
 import { buildTrafficDataAsync } from '@/app/dashboard/_sections/DashboardClient'
 import { formatPopGeo } from '@/components/DataTable'
 import { shouldLoadRumScript } from '@/lib/ssr/upstream'
@@ -19,91 +28,61 @@ import { GET as jsGet } from '@/app/js/[...path]/route'
 
 describe('formatBytes', () => {
   it.each([
-    [0, '0 B'], [1, '1 B'], [500, '500 B'],
-    [1024, '1 KB'], [1536, '1.5 KB'],
-    [1024 * 1024, '1 MB'], [1024 * 1024 * 2.5, '2.5 MB'],
-    [1024 ** 3, '1 GB'], [1024 ** 4, '1 TB'],
-  ] as const)('formats %d -> %s', (n, want) => {
-    expect(formatBytes(n)).toBe(want)
-  })
+    [0, '0 B'], [1, '1 B'], [500, '500 B'], [1024, '1 KB'], [1536, '1.5 KB'],
+    [1024 * 1024, '1 MB'], [1024 * 1024 * 2.5, '2.5 MB'], [1024 ** 3, '1 GB'], [1024 ** 4, '1 TB'],
+  ] as const)('formats %d -> %s', (n, want) => expect(formatBytes(n)).toBe(want))
 })
 
 describe('downloadAsCsv', () => {
   let capturedCsv = ''
-
   beforeEach(() => {
     capturedCsv = ''
-    vi.stubGlobal('Blob', class MockBlob {
-      constructor(parts: BlobPart[]) { capturedCsv = (parts as string[]).join('') }
-    })
+    vi.stubGlobal('Blob', class MockBlob { constructor(parts: BlobPart[]) { capturedCsv = (parts as string[]).join('') } })
     vi.stubGlobal('URL', { createObjectURL: vi.fn(() => 'blob:mock'), revokeObjectURL: vi.fn() })
     vi.spyOn(HTMLElement.prototype, 'click').mockImplementation(() => {})
   })
+  afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks() })
 
-  afterEach(() => {
-    vi.unstubAllGlobals()
-    vi.restoreAllMocks()
-  })
+  const buildCsv = (rows: Record<string, unknown>[], cols: string[]) => (downloadAsCsv(rows, cols, 'test.csv'), capturedCsv)
 
-  function buildCsv(rows: Record<string, unknown>[], cols: string[]): string {
-    downloadAsCsv(rows, cols, 'test.csv')
-    return capturedCsv
-  }
-
-  it('formats headers, rows, quoting, escaping, nulls, and missing keys accurately', () => {
+  it('formats headers, rows, quoting, escaping, nulls, missing keys, and download attribute accurately', () => {
     expect(buildCsv([], ['name', 'count']).split('\n')[0]).toBe('name,count')
-    const lines = buildCsv([{ name: 'alice', count: 5 }, { name: 'bob', count: 3 }], ['name', 'count']).split('\n')
-    expect(lines[1]).toBe('alice,5')
-    expect(lines[2]).toBe('bob,3')
+    expect(buildCsv([{ name: 'alice', count: 5 }, { name: 'bob', count: 3 }], ['name', 'count']).split('\n').slice(1, 3)).toEqual(['alice,5', 'bob,3'])
     expect(buildCsv([{ url: '/a,b', n: 1 }], ['url', 'n'])).toContain('"/a,b"')
     expect(buildCsv([{ label: 'say "hello"', n: 1 }], ['label', 'n'])).toContain('"say ""hello"""')
     expect(buildCsv([{ text: 'line1\nline2', n: 1 }], ['text', 'n'])).toContain('"line1\nline2"')
     expect(buildCsv([{ url: null, count: 5 }], ['url', 'count']).split('\n')[1]).toBe(',5')
     expect(buildCsv([{ count: 5 }], ['url', 'count']).split('\n')[1]).toBe(',5')
     expect(buildCsv([{ a: 1 }, { a: 2 }, { a: 3 }], ['a']).split('\n')).toHaveLength(4)
-  })
 
-  it('sets the download attribute to the given filename', () => {
     const appendSpy = vi.spyOn(document.body, 'appendChild')
     downloadAsCsv([], ['col'], 'my-export.csv')
     expect((appendSpy.mock.calls[0][0] as HTMLAnchorElement).download).toBe('my-export.csv')
   })
 })
 
-describe('isIpFamilyField', () => {
+describe('isIpFamilyField, formatPopGeo & shouldLoadRumScript', () => {
   it('matches client-IP-family columns and rejects non-IP / origin IP columns', () => {
     for (const col of ['ip', 'client_ip', 'ip_address', 'remote_addr']) expect(isIpFamilyField(col)).toBe(true)
     for (const col of ['oip', 'country', 'asn', 'city', 'url', 'ua', '']) expect(isIpFamilyField(col)).toBe(false)
     expect([...IP_FAMILY_FIELDS].sort()).toEqual(['client_ip', 'ip', 'ip_address', 'remote_addr'])
   })
-})
 
-describe('formatPopGeo', () => {
   it.each([
-    [{ city: 'Denver', region: 'co', country: 'us' }, 'Denver, CO - USA'],
-    [{ city: 'Ashburn (Metro)', region: 'va', country: 'us' }, 'Ashburn, VA - USA'],
-    [{ city: 'London', region: '', country: 'uk' }, 'London - UK'],
-    [{ city: 'Frankfurt', region: '', country: 'de' }, 'Frankfurt - DE'],
-    [{ city: 'Hyderabad', region: 'hyderabad', country: 'in' }, 'Hyderabad - IN'],
-    [{ city: 'Sao Paulo', region: 'saopaulo', country: 'br' }, 'Sao Paulo - BR'],
-    [{ city: 'New York City', region: 'ny', country: 'us' }, 'New York City, NY - USA'],
-    [undefined, ''],
-    [null, ''],
-    [{ city: '', region: 'ca', country: 'us' }, ''],
-    [{ city: 'Palo Alto', region: '', country: '' }, 'Palo Alto'],
-  ] as const)('formats %j -> %s', (input, want) => {
-    expect(formatPopGeo(input)).toBe(want)
-  })
-})
+    [{ city: 'Denver', region: 'co', country: 'us' }, 'Denver, CO - USA'], [{ city: 'Ashburn (Metro)', region: 'va', country: 'us' }, 'Ashburn, VA - USA'],
+    [{ city: 'London', region: '', country: 'uk' }, 'London - UK'], [{ city: 'Frankfurt', region: '', country: 'de' }, 'Frankfurt - DE'],
+    [{ city: 'Hyderabad', region: 'hyderabad', country: 'in' }, 'Hyderabad - IN'], [{ city: 'Sao Paulo', region: 'saopaulo', country: 'br' }, 'Sao Paulo - BR'],
+    [{ city: 'New York City', region: 'ny', country: 'us' }, 'New York City, NY - USA'], [undefined, ''], [null, ''],
+    [{ city: '', region: 'ca', country: 'us' }, ''], [{ city: 'Palo Alto', region: '', country: '' }, 'Palo Alto'],
+  ] as const)('formatPopGeo %j -> %s', (input, want) => expect(formatPopGeo(input)).toBe(want))
 
-describe('shouldLoadRumScript', () => {
   it('loads RUM only for an analyst request through the real proxy domain when enabled', () => {
-    expect(shouldLoadRumScript({ host: 'fastly-log-analytics.example.com', proxiedByCaddy: true, rumEnabled: true })).toBe(true)
-    expect(shouldLoadRumScript({ host: 'fastly-log-analytics.example.com', proxiedByCaddy: false, rumEnabled: true })).toBe(false)
-    expect(shouldLoadRumScript({ host: 'fastly-log-analytics.example.com', proxiedByCaddy: true, rumEnabled: false })).toBe(false)
-    for (const host of ['localhost:13002', '127.0.0.1:13002', '[::1]:13002']) {
-      expect(shouldLoadRumScript({ host, proxiedByCaddy: true, rumEnabled: true })).toBe(false)
-    }
+    expect([
+      shouldLoadRumScript({ host: 'fastly-log-analytics.example.com', proxiedByCaddy: true, rumEnabled: true }),
+      shouldLoadRumScript({ host: 'fastly-log-analytics.example.com', proxiedByCaddy: false, rumEnabled: true }),
+      shouldLoadRumScript({ host: 'fastly-log-analytics.example.com', proxiedByCaddy: true, rumEnabled: false }),
+      ...['localhost:13002', '127.0.0.1:13002', '[::1]:13002'].map((host) => shouldLoadRumScript({ host, proxiedByCaddy: true, rumEnabled: true })),
+    ]).toEqual([true, false, false, false, false, false])
   })
 })
 
@@ -111,21 +90,14 @@ describe('buildSessionDashboardUrl & buildStreamDetailUrl', () => {
   const START = '2026-05-10T13:06:52+00:00'
   const END = '2026-05-10T13:07:15+00:00'
 
-  it('builds /dashboard URL with start_time, end_time, service, and filter_<key>', () => {
+  it('builds /dashboard and /sessions/stream URLs with encoded parameters', () => {
     const url = buildSessionDashboardUrl('my-service', 'ip', '1.2.3.4', START, END)
     expect(url.startsWith('/dashboard?')).toBe(true)
     const params = new URLSearchParams(url.split('?')[1])
-    expect(params.get('start_time')).toBe(START)
-    expect(params.get('end_time')).toBe(END)
-    expect(params.has('start')).toBe(false)
-    expect(params.has('end')).toBe(false)
-    expect(params.get('service')).toBe('my-service')
-    expect(params.get('filter_ip')).toBe('1.2.3.4')
+    expect(Object.fromEntries(params)).toEqual({ start_time: START, end_time: END, service: 'my-service', filter_ip: '1.2.3.4' })
     expect(new URLSearchParams(buildSessionDashboardUrl('svc', 'ja4', 'abc123', START, END).split('?')[1]).get('filter_ja4')).toBe('abc123')
     expect(new URLSearchParams(buildSessionDashboardUrl('svc', 'ua', 'Mozilla/5.0', START, END).split('?')[1]).get('filter_ua')).toBe('Mozilla/5.0')
-  })
 
-  it('builds stream detail URL with encoded token and optional serviceId', () => {
     expect(buildStreamDetailUrl('token123')).toBe('/sessions/stream?token=token123')
     expect(buildStreamDetailUrl('token with spaces & symbols')).toBe('/sessions/stream?token=token%20with%20spaces%20%26%20symbols')
     expect(buildStreamDetailUrl('token123', 'svc-abc')).toBe('/sessions/stream?token=token123&service=svc-abc')
@@ -134,34 +106,21 @@ describe('buildSessionDashboardUrl & buildStreamDetailUrl', () => {
 })
 
 describe('statusBadgeClass', () => {
+  const G = 'bg-green-500/10 text-green-500 border-green-500/20', R = 'bg-red-500/10 text-red-500 border-red-500/20', M = 'bg-muted text-muted-foreground'
   it.each([
-    [200, 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border-emerald-500/20'],
-    [302, 'bg-sky-500/15 text-sky-700 dark:text-sky-400 border-sky-500/20'],
-    [404, 'bg-amber-500/15 text-amber-800 dark:text-amber-400 border-amber-500/20'],
-    [503, 'bg-destructive/15 text-destructive border-destructive/20 font-bold'],
-    ['200', 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border-emerald-500/20'],
-    [null, 'bg-muted text-muted-foreground'],
-    ['x', 'bg-muted text-muted-foreground'],
-  ] as const)('default variant %s', (status, want) => {
-    expect(statusBadgeClass(status)).toBe(want)
-  })
-
-  it.each([
-    [200, 'bg-green-500/10 text-green-500 border-green-500/20'],
-    [299, 'bg-green-500/10 text-green-500 border-green-500/20'],
-    [301, 'bg-yellow-500/10 text-yellow-500 border-yellow-500/20'],
-    [404, 'bg-red-500/10 text-red-500 border-red-500/20'],
-    [503, 'bg-red-500/10 text-red-500 border-red-500/20'],
-    [100, 'bg-red-500/10 text-red-500 border-red-500/20'],
-    [0, 'bg-muted text-muted-foreground'],
-    [null, 'bg-muted text-muted-foreground'],
-    [undefined, 'bg-muted text-muted-foreground'],
-  ] as const)('traffic-light variant %s', (status, want) => {
-    expect(statusBadgeClass(status, 'traffic-light')).toBe(want)
-  })
+    [200, undefined, 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border-emerald-500/20'],
+    [302, undefined, 'bg-sky-500/15 text-sky-700 dark:text-sky-400 border-sky-500/20'],
+    [404, undefined, 'bg-amber-500/15 text-amber-800 dark:text-amber-400 border-amber-500/20'],
+    [503, undefined, 'bg-destructive/15 text-destructive border-destructive/20 font-bold'],
+    ['200', undefined, 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border-emerald-500/20'],
+    [null, undefined, M], ['x', undefined, M], [200, 'traffic-light', G], [299, 'traffic-light', G],
+    [301, 'traffic-light', 'bg-yellow-500/10 text-yellow-500 border-yellow-500/20'],
+    [404, 'traffic-light', R], [503, 'traffic-light', R], [100, 'traffic-light', R],
+    [0, 'traffic-light', M], [null, 'traffic-light', M], [undefined, 'traffic-light', M],
+  ] as const)('status=%s variant=%s', (status, variant, want) => expect(statusBadgeClass(status, variant)).toBe(want))
 })
 
-describe('userActivity', () => {
+describe('userActivity & invalidInput', () => {
   beforeEach(() => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-05-27T00:00:00Z'))
@@ -169,28 +128,20 @@ describe('userActivity', () => {
   })
   afterEach(() => vi.useRealTimers())
 
-  it('tracks keydown/pointerdown gestures and honors custom idle windows', () => {
+  it('tracks keydown/pointerdown gestures, honors custom idle windows, and passes invalidInput through', () => {
     expect(isUserActive()).toBe(false)
     expect(msSinceLastInteraction()).toBeGreaterThan(ACTIVE_WINDOW_MS)
-
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'a' }))
     expect(isUserActive()).toBe(true)
     expect(msSinceLastInteraction()).toBeLessThan(1_000)
-
     vi.advanceTimersByTime(ACTIVE_WINDOW_MS + 1)
     expect(isUserActive()).toBe(false)
-
     window.dispatchEvent(new Event('pointerdown'))
     expect(isUserActive()).toBe(true)
-
     vi.advanceTimersByTime(20_000)
     expect(isUserActive(15_000)).toBe(false)
     expect(isUserActive(120_000)).toBe(true)
-  })
-})
 
-describe('invalidInput', () => {
-  it('hands the exact malformed value through to the callee', () => {
     const describeFilters = (filters: string[]): string => typeof filters
     const bad = { not: 'an array' }
     expect(invalidInput(bad)).toBe(bad)
@@ -200,45 +151,27 @@ describe('invalidInput', () => {
 })
 
 describe('showToast & showReadOnlyToast', () => {
-  beforeEach(() => {
-    vi.useFakeTimers()
-    vi.setSystemTime(new Date('2026-06-12T00:00:00Z'))
-  })
-
-  afterEach(() => {
-    vi.useRealTimers()
-    document.body.innerHTML = ''
-  })
+  beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(new Date('2026-06-12T00:00:00Z')) })
+  afterEach(() => { vi.useRealTimers(); document.body.innerHTML = '' })
 
   it.each([
-    [undefined, 'status', 'polite', 'hello world'],
-    ['error', 'alert', 'assertive', 'database is on fire'],
-    ['warn', 'alert', 'assertive', 'careful now'],
-    ['success', 'status', 'polite', 'saved'],
+    [undefined, 'status', 'polite', 'hello world'], ['error', 'alert', 'assertive', 'database is on fire'],
+    ['warn', 'alert', 'assertive', 'careful now'], ['success', 'status', 'polite', 'saved'],
   ] as const)('renders kind=%s with role=%s and aria-live=%s', (kind, role, live, msg) => {
     showToast(msg, kind)
-    const region = document.querySelector('[role="region"][aria-label="Notifications"]')
-    expect(region).not.toBeNull()
-    const toast = region!.querySelector(`[role="${role}"]`)
-    expect(toast?.textContent).toBe(msg)
-    expect(toast?.getAttribute('aria-live')).toBe(live)
+    const toast = document.querySelector(`[role="region"][aria-label="Notifications"] [role="${role}"]`)
+    expect([toast?.textContent, toast?.getAttribute('aria-live')]).toEqual([msg, live])
   })
 
-  it('dedupes identical messages within 1.5s, allows repeats after expiry, and stacks distinct messages', () => {
+  it('dedupes identical messages within 1.5s, auto-removes on timer or click, and handles SSR/readOnly', () => {
     showToast('parallel 403')
     showToast('parallel 403')
     expect(document.querySelectorAll('[role="status"], [role="alert"]')).toHaveLength(1)
-
     vi.advanceTimersByTime(2000)
     showToast('parallel 403')
     showToast('second')
     expect(document.querySelectorAll('[role="status"]')).toHaveLength(3)
-  })
-
-  it('auto-removes after default (3500ms), error (5500ms), or custom durationMs, and cleans up container', () => {
-    showToast('temporary')
-    vi.advanceTimersByTime(3700)
-    expect(document.querySelectorAll('[role="status"]')).toHaveLength(0)
+    vi.advanceTimersByTime(4000)
     expect(document.querySelector('[role="region"]')).toBeNull()
 
     showToast('serious', 'error')
@@ -250,60 +183,41 @@ describe('showToast & showReadOnlyToast', () => {
     showToast('short-lived', 'info', { durationMs: 100 })
     vi.advanceTimersByTime(300)
     expect(document.querySelectorAll('[role="status"]')).toHaveLength(0)
-  })
 
-  it('removes on click and keeps container while stacked', () => {
     showToast('one')
     vi.advanceTimersByTime(50)
     showToast('two')
     expect(document.querySelectorAll('[role="status"]')).toHaveLength(2)
     vi.advanceTimersByTime(3650)
     expect(document.querySelectorAll('[role="status"]')).toHaveLength(1)
-    expect(document.querySelector('[role="region"]')).not.toBeNull()
-
-    const toast = document.querySelector('[role="status"]') as HTMLElement
-    toast.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    ;(document.querySelector('[role="status"]') as HTMLElement).dispatchEvent(new MouseEvent('click', { bubbles: true }))
     vi.advanceTimersByTime(200)
     expect(document.querySelectorAll('[role="status"]')).toHaveLength(0)
-  })
 
-  it('is SSR-safe when document is undefined and renders showReadOnlyToast with warn kind', () => {
     const originalDocument = globalThis.document
     vi.stubGlobal('document', undefined)
-    try {
-      expect(() => showToast('ssr-safe')).not.toThrow()
-    } finally {
-      vi.stubGlobal('document', originalDocument)
-    }
+    try { expect(() => showToast('ssr-safe')).not.toThrow() } finally { vi.stubGlobal('document', originalDocument) }
 
     showReadOnlyToast()
-    const toast = document.querySelector('[role="alert"]')
-    expect(toast?.textContent).toContain('Read-only access')
-    expect(toast?.getAttribute('aria-live')).toBe('assertive')
+    const roToast = document.querySelector('[role="alert"]')
+    expect(roToast?.textContent).toContain('Read-only access')
+    expect(roToast?.getAttribute('aria-live')).toBe('assertive')
   })
 })
 
 describe('toUTCDate, formatTimeAgo & formatLocalDateTime', () => {
   const now = new Date('2024-06-15T12:00:00Z')
-
-  beforeEach(() => {
-    vi.useFakeTimers()
-    vi.setSystemTime(now)
-  })
+  beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(now) })
   afterEach(() => vi.useRealTimers())
 
-  it('parses ISO and space-separated strings in toUTCDate and formats relative time in formatTimeAgo', () => {
+  it('parses UTC dates, formats relative time ago, and formats local date time', () => {
     expect(toUTCDate('2024-01-01T00:00:00Z').toISOString()).toBe('2024-01-01T00:00:00.000Z')
     expect(toUTCDate('2024-01-01 12:00:00').toISOString()).toBe('2024-01-01T12:00:00.000Z')
     expect(formatTimeAgo(new Date(now.getTime() - 5000))).toBe('5s ago')
     expect(formatTimeAgo(new Date(now.getTime() - 75000))).toBe('1m 15s ago')
     expect(formatTimeAgo(new Date(now.getTime() - 3600000 * 2 - 60000))).toBe('2h 1m 0s ago')
-  })
 
-  it('formats ISO strings, epoch ms, Date instances, invalid dates, and options in formatLocalDateTime', () => {
-    const iso = '2026-07-01T12:34:56Z'
-    const ms = 1_750_000_000_000
-    const d = new Date('2026-01-15T00:00:00Z')
+    const iso = '2026-07-01T12:34:56Z', ms = 1_750_000_000_000, d = new Date('2026-01-15T00:00:00Z')
     const opts: Intl.DateTimeFormatOptions = { dateStyle: 'short' }
     expect(formatLocalDateTime(iso)).toBe(new Date(iso).toLocaleString())
     expect(formatLocalDateTime(ms)).toBe(new Date(ms).toLocaleString())
@@ -313,176 +227,101 @@ describe('toUTCDate, formatTimeAgo & formatLocalDateTime', () => {
   })
 })
 
-const ANCHOR = '2026-06-29T12:00:00Z'
-const START = '2026-06-10T00:00:00Z'
-const END = '2026-06-12T00:00:00Z'
-const NOW = new Date('2026-06-29T12:00:00Z')
+const ANCHOR = '2026-06-29T12:00:00Z', START = '2026-06-10T00:00:00Z', END = '2026-06-12T00:00:00Z', NOW = new Date(ANCHOR)
 
 describe('resolveRangeWire & quantizeAnchor', () => {
-  it('resolves cold-load auto default, preset pills, and custom absolute ranges without key collisions', () => {
+  it('resolves cold-load auto default, preset pills, custom ranges, and 60s anchor quantization', () => {
     const auto = resolveRangeWire({ relativeRange: null, isAutoRange: true, startTime: START, endTime: END, anchor: ANCHOR })
-    expect(auto.rangeToken).toBe(DEFAULT_RANGE_TOKEN)
-    expect(auto.rangeKey).toBe('24h')
-    expect(auto.rangeBody).toEqual({ range_token: '24h', anchor: ANCHOR, start_time: START, end_time: END })
-
+    expect(auto).toEqual({
+      rangeToken: DEFAULT_RANGE_TOKEN, rangeKey: '24h',
+      rangeBody: { range_token: '24h', anchor: ANCHOR, start_time: START, end_time: END },
+    })
     for (const preset of ['1h', '3h', '6h', '12h', '24h', '3d', '7d', '30d']) {
-      const w = resolveRangeWire({ relativeRange: preset, isAutoRange: false, startTime: START, endTime: END, anchor: ANCHOR })
-      expect(w).toEqual({
-        rangeToken: preset,
-        rangeKey: preset,
-        rangeBody: { range_token: preset, anchor: ANCHOR, start_time: START, end_time: END },
+      expect(resolveRangeWire({ relativeRange: preset, isAutoRange: false, startTime: START, endTime: END, anchor: ANCHOR })).toEqual({
+        rangeToken: preset, rangeKey: preset, rangeBody: { range_token: preset, anchor: ANCHOR, start_time: START, end_time: END },
       })
     }
-
     const customA = resolveRangeWire({ relativeRange: null, isAutoRange: false, startTime: START, endTime: END, anchor: ANCHOR })
+    const customB = resolveRangeWire({ relativeRange: null, isAutoRange: false, startTime: '2026-05-01T00:00:00Z', endTime: '2026-05-02T00:00:00Z', anchor: ANCHOR })
     expect(customA.rangeToken).toBeNull()
     expect(customA.rangeBody).toEqual({ start_time: START, end_time: END })
-    const customB = resolveRangeWire({ relativeRange: null, isAutoRange: false, startTime: '2026-05-01T00:00:00Z', endTime: '2026-05-02T00:00:00Z', anchor: ANCHOR })
     expect(customA.rangeKey).not.toBe(customB.rangeKey)
-
     expect(resolveRangeWire({ relativeRange: '7d', isAutoRange: true, startTime: START, endTime: END, anchor: ANCHOR }).rangeToken).toBe('7d')
-  })
 
-  test('quantizeAnchor floors to 60s grid and ANCHOR_QUANTUM_SECONDS is 60', () => {
     expect(ANCHOR_QUANTUM_SECONDS).toBe(60)
-    expect(quantizeAnchor('2026-06-29T12:00:59Z', NOW)).toBe('2026-06-29T12:00:00Z')
-    expect(quantizeAnchor('2026-06-29T12:00:00Z', NOW)).toBe('2026-06-29T12:00:00Z')
+    for (const input of ['2026-06-29T12:00:59Z', '2026-06-29T12:00:00Z', undefined, 'not-a-date', '2026-06-29T12:00:30.123Z']) {
+      expect(quantizeAnchor(input, NOW)).toBe('2026-06-29T12:00:00Z')
+    }
     expect(quantizeAnchor('2026-06-29T12:00:01Z', NOW)).toBe(quantizeAnchor('2026-06-29T12:00:58Z', NOW))
-    expect(quantizeAnchor(undefined, NOW)).toBe('2026-06-29T12:00:00Z')
-    expect(quantizeAnchor('not-a-date', NOW)).toBe('2026-06-29T12:00:00Z')
-    expect(quantizeAnchor('2026-06-29T12:00:30.123Z', NOW)).toBe('2026-06-29T12:00:00Z')
   })
 })
 
 describe('formatCount, formatValue, calculateDelta, formatCountMaybe, formatAbbreviatedCount', () => {
-  it('formats counts, deltas, and abbreviated counts accurately', () => {
-    for (const n of [0, 5, 42, 1000, 1234567, -9876, 1234.5, 0.125]) {
-      expect(formatCount(n)).toBe(n.toLocaleString())
-    }
+  it('formats counts, deltas, abbreviated counts, and domain field values accurately', () => {
+    for (const n of [0, 5, 42, 1000, 1234567, -9876, 1234.5, 0.125]) expect(formatCount(n)).toBe(n.toLocaleString())
     expect(formatCount(3.14159, { maximumFractionDigits: 1 })).toBe((3.14159).toLocaleString(undefined, { maximumFractionDigits: 1 }))
+    expect([calculateDelta(110, 100), calculateDelta(90, 100), calculateDelta(100, 0), calculateDelta(100, undefined)]).toEqual([10, -10, null, null])
+    expect([formatCountMaybe(undefined), formatCountMaybe(null), formatCountMaybe(1234567), formatCountMaybe(0)]).toEqual([undefined, undefined, formatCount(1234567), '0'])
+    expect([formatAbbreviatedCount(999), formatAbbreviatedCount(1500), formatAbbreviatedCount(2_345_678), formatAbbreviatedCount(2_345_678, 2), formatAbbreviatedCount(3_210_000_000, 2)]).toEqual(['999', '1.5K', '2.3M', '2.35M', '3.21B'])
 
-    expect(calculateDelta(110, 100)).toBe(10)
-    expect(calculateDelta(90, 100)).toBe(-10)
-    expect(calculateDelta(100, 0)).toBe(null)
-    expect(calculateDelta(100, undefined)).toBe(null)
-
-    expect(formatCountMaybe(undefined)).toBeUndefined()
-    expect(formatCountMaybe(null)).toBeUndefined()
-    expect(formatCountMaybe(1234567)).toBe(formatCount(1234567))
-    expect(formatCountMaybe(0)).toBe('0')
-
-    expect(formatAbbreviatedCount(999)).toBe('999')
-    expect(formatAbbreviatedCount(1500)).toBe('1.5K')
-    expect(formatAbbreviatedCount(2_345_678)).toBe('2.3M')
-    expect(formatAbbreviatedCount(2_345_678, 2)).toBe('2.35M')
-    expect(formatAbbreviatedCount(3_210_000_000, 2)).toBe('3.21B')
-  })
-
-  it('formats field values by domain type and handles Intl.DisplayNames errors', () => {
-    expect(formatValue('any', null)).toBe('null')
-    expect(formatValue('any', undefined)).toBe('null')
-    expect(formatValue('resp_bytes', 1024)).toBe('1 KB')
-    expect(formatValue('req_header_bytes', 500)).toBe('500 B')
-    expect(formatValue('requests', 1000)).toBe('1,000')
-    expect(formatValue('country', 'US')).toBe('United States')
-    expect(formatValue('country', 'GB')).toBe('United Kingdom')
-    expect(formatValue('city', 'new york')).toBe('New York')
-    expect(formatValue('pop', 'jfk')).toBe('JFK')
-    expect(formatValue('region', 'ca')).toBe('CA')
-    expect(formatValue('proto', 3)).toBe('3')
-    expect(formatValue('tls', 1.3)).toBe('1.3')
-    expect(formatValue('proto', '2.0')).toBe('2')
-    expect(formatValue('tls', '1.3')).toBe('1.3')
-    expect(formatValue('proto', 'h2')).toBe('h2')
-    expect(formatValue('tls', 'TLSv1.3')).toBe('TLSv1.3')
-
-    const displayNames = vi.spyOn(Intl, 'DisplayNames').mockImplementation(function () {
-      throw new Error('boom')
-    })
-    try {
-      expect(formatValue('country', 'US')).toBe('US')
-    } finally {
-      displayNames.mockRestore()
+    for (const [col, val, want] of [
+      ['any', null, 'null'], ['any', undefined, 'null'], ['resp_bytes', 1024, '1 KB'], ['req_header_bytes', 500, '500 B'],
+      ['requests', 1000, '1,000'], ['country', 'US', 'United States'], ['country', 'GB', 'United Kingdom'],
+      ['city', 'new york', 'New York'], ['pop', 'jfk', 'JFK'], ['region', 'ca', 'CA'],
+      ['proto', 3, '3'], ['tls', 1.3, '1.3'], ['proto', '2.0', '2'], ['tls', '1.3', '1.3'], ['proto', 'h2', 'h2'], ['tls', 'TLSv1.3', 'TLSv1.3'],
+    ] as const) {
+      expect(formatValue(col, val)).toBe(want)
     }
+    const displayNames = vi.spyOn(Intl, 'DisplayNames').mockImplementation(function () { throw new Error('boom') })
+    try { expect(formatValue('country', 'US')).toBe('US') } finally { displayNames.mockRestore() }
   })
 })
 
 type FormatRow<I> = [I, string]
-
 const METADATA_BYTES: FormatRow<number | null>[] = [
-  [0, '0 B'], [1, '1 B'], [1023, '1023 B'], [1024, '1.0 KB'], [1025, '1.0 KB'],
-  [1536, '1.5 KB'], [1048575, '1024.0 KB'], [1048576, '1.0 MB'], [5366336, '5.1 MB'],
-  [1073741823, '1024.0 MB'], [1073741824, '1.00 GB'], [3271225472, '3.05 GB'],
+  [0, '0 B'], [1, '1 B'], [1023, '1023 B'], [1024, '1.0 KB'], [1025, '1.0 KB'], [1536, '1.5 KB'], [1048575, '1024.0 KB'],
+  [1048576, '1.0 MB'], [5366336, '5.1 MB'], [1073741823, '1024.0 MB'], [1073741824, '1.00 GB'], [3271225472, '3.05 GB'],
   [5497558138880, '5120.00 GB'], [null, '–'],
 ]
-
 const QUARANTINE_BYTES: FormatRow<number>[] = [
-  [0, '0 B'], [1, '1 B'], [1023, '1023 B'], [1024, '1.0 KB'], [1025, '1.0 KB'],
-  [1536, '1.5 KB'], [1048575, '1024.0 KB'], [1048576, '1.0 MB'], [5366336, '5.1 MB'],
-  [1073741823, '1024.0 MB'], [1073741824, '1024.0 MB'], [3271225472, '3119.7 MB'],
+  [0, '0 B'], [1, '1 B'], [1023, '1023 B'], [1024, '1.0 KB'], [1025, '1.0 KB'], [1536, '1.5 KB'], [1048575, '1024.0 KB'],
+  [1048576, '1.0 MB'], [5366336, '5.1 MB'], [1073741823, '1024.0 MB'], [1073741824, '1024.0 MB'], [3271225472, '3119.7 MB'],
   [5497558138880, '5242880.0 MB'],
 ]
-
 const BOT_SOURCES_RELATIVE: FormatRow<number>[] = [
-  [-5000, 'just now'], [0, 'just now'], [1000, 'just now'], [44400, 'just now'],
-  [44500, 'just now'], [45000, 'just now'], [59000, 'just now'], [59500, 'just now'],
-  [60000, 'just now'], [89000, 'just now'], [89400, 'just now'], [89500, 'just now'],
-  [90000, 'just now'], [119000, 'just now'], [120000, '2m ago'], [121000, '2m ago'],
-  [179000, '2m ago'], [3599000, '59m ago'], [3599600, '59m ago'], [3600000, '1h ago'],
-  [5399000, '1h ago'], [5400000, '1h ago'], [7200000, '2h ago'], [86399000, '23h ago'],
-  [86400000, '1d ago'], [90000000, '1d ago'], [172799000, '1d ago'], [172800000, '2d ago'],
-  [259200000, '3d ago'], [400000000, '4d ago'],
+  [-5000, 'just now'], [0, 'just now'], [1000, 'just now'], [44400, 'just now'], [44500, 'just now'], [45000, 'just now'],
+  [59000, 'just now'], [59500, 'just now'], [60000, 'just now'], [89000, 'just now'], [89400, 'just now'], [89500, 'just now'],
+  [90000, 'just now'], [119000, 'just now'], [120000, '2m ago'], [121000, '2m ago'], [179000, '2m ago'], [3599000, '59m ago'],
+  [3599600, '59m ago'], [3600000, '1h ago'], [5399000, '1h ago'], [5400000, '1h ago'], [7200000, '2h ago'], [86399000, '23h ago'],
+  [86400000, '1d ago'], [90000000, '1d ago'], [172799000, '1d ago'], [172800000, '2d ago'], [259200000, '3d ago'], [400000000, '4d ago'],
 ]
-
 const RESUME_BANNER_RELATIVE: FormatRow<number>[] = [
-  [-5000, '-5s ago'], [0, '0s ago'], [1000, '1s ago'], [45000, '45s ago'],
-  [59000, '59s ago'], [60000, '1m ago'], [89000, '1m ago'], [90000, '1m ago'],
-  [119000, '1m ago'], [120000, '2m ago'], [121000, '2m ago'], [179000, '2m ago'],
-  [3599000, '59m ago'], [3600000, '1h ago'], [5399000, '1h ago'], [5400000, '1h ago'],
-  [7200000, '2h ago'], [86399000, '23h ago'], [86400000, '1d ago'], [90000000, '1d ago'],
-  [172799000, '1d ago'], [172800000, '2d ago'], [259200000, '3d ago'], [400000000, '4d ago'],
+  [-5000, '-5s ago'], [0, '0s ago'], [1000, '1s ago'], [45000, '45s ago'], [59000, '59s ago'], [60000, '1m ago'],
+  [89000, '1m ago'], [90000, '1m ago'], [119000, '1m ago'], [120000, '2m ago'], [121000, '2m ago'], [179000, '2m ago'],
+  [3599000, '59m ago'], [3600000, '1h ago'], [5399000, '1h ago'], [5400000, '1h ago'], [7200000, '2h ago'], [86399000, '23h ago'],
+  [86400000, '1d ago'], [90000000, '1d ago'], [172799000, '1d ago'], [172800000, '2d ago'], [259200000, '3d ago'], [400000000, '4d ago'],
 ]
-
 const SYSTEM_HEALTH_AGE: FormatRow<number>[] = [
-  [-5, '-5s'], [0, '0s'], [1, '1s'], [44.4, '44s'], [44.5, '45s'], [45, '45s'],
-  [59, '59s'], [59.5, '60s'], [60, '60s'], [89, '89s'], [89.4, '89s'], [89.5, '90s'],
-  [90, '2m'], [119, '2m'], [120, '2m'], [121, '2m'], [179, '3m'], [3599, '60m'],
-  [3599.6, '60m'], [3600, '60m'], [5399, '90m'], [5400, '1.5h'], [7200, '2.0h'],
-  [86399, '24.0h'], [86400, '24.0h'], [90000, '25.0h'], [172799, '48.0h'],
-  [172800, '2.0d'], [259200, '3.0d'], [400000, '4.6d'],
+  [-5, '-5s'], [0, '0s'], [1, '1s'], [44.4, '44s'], [44.5, '45s'], [45, '45s'], [59, '59s'], [59.5, '60s'], [60, '60s'],
+  [89, '89s'], [89.4, '89s'], [89.5, '90s'], [90, '2m'], [119, '2m'], [120, '2m'], [121, '2m'], [179, '3m'], [3599, '60m'],
+  [3599.6, '60m'], [3600, '60m'], [5399, '90m'], [5400, '1.5h'], [7200, '2.0h'], [86399, '24.0h'], [86400, '24.0h'],
+  [90000, '25.0h'], [172799, '48.0h'], [172800, '2.0d'], [259200, '3.0d'], [400000, '4.6d'],
 ]
-
 const HIGH_SCALE_FRESHNESS: FormatRow<number>[] = [
-  [-5, '-5s'], [0, '0s'], [1, '1s'], [44.4, '44s'], [44.5, '45s'], [45, '45s'],
-  [59, '59s'], [59.5, '60s'], [60, '1m'], [89, '1m'], [89.4, '1m'], [89.5, '1m'],
-  [90, '2m'], [119, '2m'], [120, '2m'], [121, '2m'], [179, '3m'], [3599, '60m'],
-  [3599.6, '60m'], [3600, '1.0h'], [5399, '1.5h'], [5400, '1.5h'], [7200, '2.0h'],
-  [86399, '24.0h'], [86400, '24.0h'], [90000, '25.0h'], [172799, '48.0h'],
-  [172800, '48.0h'], [259200, '72.0h'], [400000, '111.1h'],
+  [-5, '-5s'], [0, '0s'], [1, '1s'], [44.4, '44s'], [44.5, '45s'], [45, '45s'], [59, '59s'], [59.5, '60s'], [60, '1m'],
+  [89, '1m'], [89.4, '1m'], [89.5, '1m'], [90, '2m'], [119, '2m'], [120, '2m'], [121, '2m'], [179, '3m'], [3599, '60m'],
+  [3599.6, '60m'], [3600, '1.0h'], [5399, '1.5h'], [5400, '1.5h'], [7200, '2.0h'], [86399, '24.0h'], [86400, '24.0h'],
+  [90000, '25.0h'], [172799, '48.0h'], [172800, '48.0h'], [259200, '72.0h'], [400000, '111.1h'],
 ]
 
 describe('formatBytesTiered & formatElapsed presets', () => {
-  it.each(METADATA_BYTES)('metadata card (GB cap) %s -> %s', (n, want) => {
-    expect(formatBytesTiered(n, { maxUnit: 'GB' })).toBe(want)
-  })
-  it('renders the metadata card placeholder for undefined', () => {
-    expect(formatBytesTiered(undefined, { maxUnit: 'GB' })).toBe('–')
-  })
-  it.each(QUARANTINE_BYTES)('quarantine (MB cap) %s -> %s', (n, want) => {
-    expect(formatBytesTiered(n)).toBe(want)
-  })
-  it.each(BOT_SOURCES_RELATIVE)('bot sources %s ms -> %s', (ms, want) => {
-    expect(formatElapsed(Math.floor(ms / 1000), ELAPSED_RELATIVE_AGO_JUST_NOW)).toBe(want)
-  })
-  it.each(RESUME_BANNER_RELATIVE)('resume banner %s ms -> %s', (ms, want) => {
-    expect(formatElapsed(Math.floor(ms / 1000), ELAPSED_RELATIVE_AGO)).toBe(want)
-  })
-  it.each(SYSTEM_HEALTH_AGE)('system health age %s s -> %s', (s, want) => {
-    expect(formatElapsed(s, ELAPSED_AGE_COMPACT)).toBe(want)
-  })
-  it.each(HIGH_SCALE_FRESHNESS)('high-scale freshness %s s -> %s', (s, want) => {
-    expect(formatElapsed(s, ELAPSED_FRESHNESS)).toBe(want)
-  })
+  it.each(METADATA_BYTES)('metadata card (GB cap) %s -> %s', (n, want) => expect(formatBytesTiered(n, { maxUnit: 'GB' })).toBe(want))
+  it('renders the metadata card placeholder for undefined', () => expect(formatBytesTiered(undefined, { maxUnit: 'GB' })).toBe('–'))
+  it.each(QUARANTINE_BYTES)('quarantine (MB cap) %s -> %s', (n, want) => expect(formatBytesTiered(n)).toBe(want))
+  it.each(BOT_SOURCES_RELATIVE)('bot sources %s ms -> %s', (ms, want) => expect(formatElapsed(Math.floor(ms / 1000), ELAPSED_RELATIVE_AGO_JUST_NOW)).toBe(want))
+  it.each(RESUME_BANNER_RELATIVE)('resume banner %s ms -> %s', (ms, want) => expect(formatElapsed(Math.floor(ms / 1000), ELAPSED_RELATIVE_AGO)).toBe(want))
+  it.each(SYSTEM_HEALTH_AGE)('system health age %s s -> %s', (s, want) => expect(formatElapsed(s, ELAPSED_AGE_COMPACT)).toBe(want))
+  it.each(HIGH_SCALE_FRESHNESS)('high-scale freshness %s s -> %s', (s, want) => expect(formatElapsed(s, ELAPSED_FRESHNESS)).toBe(want))
 })
 
 describe('chart-helpers: TIME_HOVER_LAYOUT, makeTimeXAxis, denseTimeGrid, denseBarTrace, lineTrace, secondaryYAxis', () => {
@@ -491,12 +330,10 @@ describe('chart-helpers: TIME_HOVER_LAYOUT, makeTimeXAxis, denseTimeGrid, denseB
       hovermode: 'x unified',
       legend: expect.objectContaining({ orientation: 'h', xanchor: 'center', yanchor: 'bottom' }),
     })
-
     const utc = makeTimeXAxis('2026-01-01T12:00:00Z', '2026-01-01T13:00:00Z', 'UTC')
     const ny = makeTimeXAxis('2026-01-01T12:00:00Z', '2026-01-01T13:00:00Z', 'America/New_York')
-    expect(utc.type).toBe('date')
+    expect(utc).toMatchObject({ type: 'date', tickformatstops: expect.anything() })
     expect(utc.range).toHaveLength(2)
-    expect(utc.tickformatstops).toBeDefined()
     expect(utc.range[0]).toContain('12:00:00')
     expect(ny.range[0]).toContain('07:00:00')
     expect(makeTimeXAxis(null, null, 'UTC').range).toEqual(['', ''])
@@ -514,22 +351,18 @@ describe('chart-helpers: TIME_HOVER_LAYOUT, makeTimeXAxis, denseTimeGrid, denseB
     expect(denseTimeGrid(['2026-06-30 09:00:00', '2026-06-30 11:00:00'], 3600)).toHaveLength(3)
     expect(denseTimeGrid(['2026-06-30T09:00:00Z', '2026-06-30T09:03:00Z'], 60)).toHaveLength(4)
 
-    expect(denseTimeGrid(['2026-06-30T09:00:00Z', '2026-06-30T12:00:00Z'], undefined)).toBeNull()
-    expect(denseTimeGrid(['2026-06-30T09:00:00Z', '2026-06-30T12:00:00Z'], 0)).toBeNull()
-    expect(denseTimeGrid(['2026-06-30T09:00:00Z'], 3600)).toBeNull()
-    expect(denseTimeGrid(['2026-06-30T09:00:00Z', '2026-06-30T09:00:00Z'], 3600)).toBeNull()
-    expect(denseTimeGrid(['2026-06-30T09:00:00Z', '2026-06-30T10:00:00Z', '2026-06-30T11:00:00Z'], 3600)).toBeNull()
-    expect(denseTimeGrid(['2026-06-30T09:00:00Z', '2026-06-30T09:30:00Z', '2026-06-30T12:00:00Z'], 3600)).toBeNull()
-    expect(denseTimeGrid(['2026-06-30T09:00:00Z', '2026-06-30T11:00:01Z'], 1)).toBeNull()
+    for (const [times, step] of [
+      [['2026-06-30T09:00:00Z', '2026-06-30T12:00:00Z'], undefined], [['2026-06-30T09:00:00Z', '2026-06-30T12:00:00Z'], 0],
+      [['2026-06-30T09:00:00Z'], 3600], [['2026-06-30T09:00:00Z', '2026-06-30T09:00:00Z'], 3600],
+      [['2026-06-30T09:00:00Z', '2026-06-30T10:00:00Z', '2026-06-30T11:00:00Z'], 3600],
+      [['2026-06-30T09:00:00Z', '2026-06-30T09:30:00Z', '2026-06-30T12:00:00Z'], 3600],
+      [['2026-06-30T09:00:00Z', '2026-06-30T11:00:01Z'], 1],
+    ] as const) expect(denseTimeGrid(times as unknown as string[], step)).toBeNull()
   })
 
   it('builds denseBarTrace, lineTrace, secondaryYAxis, and withSecondaryAxis', () => {
     type TimeRow = { t: string | null; v: number | null }
-    const rows: TimeRow[] = [
-      { t: '2026-10-01T00:00:00+00:00', v: 4 },
-      { t: '2026-10-01T03:00:00+00:00', v: 9 },
-      { t: null, v: 7 },
-    ]
+    const rows: TimeRow[] = [{ t: '2026-10-01T00:00:00+00:00', v: 4 }, { t: '2026-10-01T03:00:00+00:00', v: 9 }, { t: null, v: 7 }]
     const base = { rows, getTime: (r: TimeRow) => r.t, getValue: (r: TimeRow) => r.v, intervalSeconds: 3600, color: '#111' }
 
     const t1 = denseBarTrace({ ...base, name: 'n' })
@@ -538,12 +371,8 @@ describe('chart-helpers: TIME_HOVER_LAYOUT, makeTimeXAxis, denseTimeGrid, denseB
 
     const grid = ['2026-10-01T00:00:00.000Z', '2026-10-01T01:00:00.000Z']
     const t2 = denseBarTrace({ ...base, name: 'n', grid, yaxis: 'y2', showlegend: true })
-    expect(t2.x).toEqual(grid)
-    expect(t2.y).toEqual([4, 0])
-    expect(t2).toMatchObject({ yaxis: 'y2', showlegend: true })
-
-    const t3 = denseBarTrace({ ...base, name: 'n', intervalSeconds: 0 })
-    expect(t3.y).toEqual([4, 9])
+    expect(t2).toMatchObject({ x: grid, y: [4, 0], yaxis: 'y2', showlegend: true })
+    expect(denseBarTrace({ ...base, name: 'n', intervalSeconds: 0 }).y).toEqual([4, 9])
 
     const lt = lineTrace({ name: 'l', x: ['a'], y: [1], color: '#222' })
     expect(lt).toMatchObject({ type: 'scatter', mode: 'lines', line: { color: '#222', width: 2 } })
@@ -561,84 +390,58 @@ describe('chart-helpers: TIME_HOVER_LAYOUT, makeTimeXAxis, denseTimeGrid, denseB
 function makeBaseParams(overrides: Partial<BuildTrafficDataParams> = {}): BuildTrafficDataParams {
   return {
     aggregates: {
-      metric: 'requests',
-      interval: '1 minute',
-      time_series: [
-        { time: '2026-10-20T10:00:00Z', value: 100 }, { time: '2026-10-20T10:01:00Z', value: 200 },
-        { time: '2026-10-20T10:02:00Z', value: 150 }, { time: '2026-10-20T10:03:00Z', value: 250 },
-        { time: '2026-10-20T10:04:00Z', value: 300 }, { time: '2026-10-20T10:05:00Z', value: 400 },
-      ],
+      metric: 'requests', interval: '1 minute',
+      time_series: [100, 200, 150, 250, 300, 400].map((value, i) => ({ time: `2026-10-20T10:0${i}:00Z`, value })),
     },
     compareAggregates: null, compareMode: false, compareStartTime: null,
     startTime: '2026-10-20T10:00:00Z', endTime: '2026-10-20T10:05:00Z',
     trend: 'off', timezone: 'UTC', metric: 'requests', effectiveInterval: '1 minute',
-    hiddenCategories: new Set(), catalog: null,
-    ...overrides,
+    hiddenCategories: new Set(), catalog: null, ...overrides,
   }
 }
 
 describe('buildTrafficData & buildTrafficDataAsync', () => {
   it('builds primary bar trace, baseline trace, sliding-window trend line, and categorized 5xx breakdowns', () => {
     const traces = buildTrafficData(makeBaseParams({
-      trend: '5m',
-      compareMode: true,
-      compareStartTime: '2026-10-19T10:00:00Z',
+      trend: '5m', compareMode: true, compareStartTime: '2026-10-19T10:00:00Z',
       compareAggregates: {
-        metric: 'requests',
-        interval: '1 minute',
-        time_series: [
-          { time: '2026-10-19T10:00:00Z', value: 90 }, { time: '2026-10-19T10:01:00Z', value: 180 },
-          { time: '2026-10-19T10:02:00Z', value: 140 }, { time: '2026-10-19T10:03:00Z', value: 220 },
-          { time: '2026-10-19T10:04:00Z', value: 280 }, { time: '2026-10-19T10:05:00Z', value: 350 },
-        ],
+        metric: 'requests', interval: '1 minute',
+        time_series: [90, 180, 140, 220, 280, 350].map((value, i) => ({ time: `2026-10-19T10:0${i}:00Z`, value })),
       },
     }))
     expect(traces).toHaveLength(3)
-    const [primary, baseline, trend] = traces
-    expect(primary.y).toEqual([100, 200, 150, 250, 300, 400])
-    expect(baseline.y).toEqual([90, 180, 140, 220, 280, 350])
-    expect(trend.y).toEqual([null, null, null, null, 200, 260])
+    expect(traces[0].y).toEqual([100, 200, 150, 250, 300, 400])
+    expect(traces[1].y).toEqual([90, 180, 140, 220, 280, 350])
+    expect(traces[2].y).toEqual([null, null, null, null, 200, 260])
 
     const catTraces = buildTrafficData(makeBaseParams({
       metric: '5xx',
       aggregates: {
         metric: '5xx', interval: '1 minute',
         time_series: [
-          { time: '2026-10-20T10:00:00Z', category: '500', value: 12 },
-          { time: '2026-10-20T10:00:00Z', category: '503', value: 4 },
-          { time: '2026-10-20T10:01:00Z', category: '500', value: 15 },
-          { time: '2026-10-20T10:01:00Z', category: '503', value: 2 },
+          { time: '2026-10-20T10:00:00Z', category: '500', value: 12 }, { time: '2026-10-20T10:00:00Z', category: '503', value: 4 },
+          { time: '2026-10-20T10:01:00Z', category: '500', value: 15 }, { time: '2026-10-20T10:01:00Z', category: '503', value: 2 },
         ],
       },
-      startTime: '2026-10-20T10:00:00Z', endTime: '2026-10-20T10:01:00Z',
-      hiddenCategories: new Set(['503']),
+      startTime: '2026-10-20T10:00:00Z', endTime: '2026-10-20T10:01:00Z', hiddenCategories: new Set(['503']),
     }))
     expect(catTraces).toHaveLength(2)
-    expect(catTraces[0].visible).toBe(true)
-    expect(catTraces[1].visible).toBe('legendonly')
+    expect([catTraces[0].visible, catTraces[1].visible]).toEqual([true, 'legendonly'])
   })
 
   it('resolves buildTrafficDataAsync for small, empty, large, and trend datasets', async () => {
     const makeAggregates = (rowCount: number) => ({
-      time_series: Array.from({ length: rowCount }, (_, i) => ({
-        time: `2026-06-01T${String(i % 24).padStart(2, '0')}:00:00Z`,
-        value: i,
-      })),
-      metric: 'requests',
-      interval: 'hour',
+      time_series: Array.from({ length: rowCount }, (_, i) => ({ time: `2026-06-01T${String(i % 24).padStart(2, '0')}:00:00Z`, value: i })),
+      metric: 'requests', interval: 'hour',
     })
     const defaultAsyncParams = {
-      compareAggregates: null, compareMode: false, compareStartTime: null,
-      startTime: null, endTime: null, trend: 'off', timezone: 'UTC',
-      metric: 'requests', effectiveInterval: 'hour',
+      compareAggregates: null, compareMode: false, compareStartTime: null, startTime: null, endTime: null,
+      trend: 'off', timezone: 'UTC', metric: 'requests', effectiveInterval: 'hour',
       hiddenCategories: new Set<string>(), catalog: { fields: [] },
     }
-
-    const small = await buildTrafficDataAsync({ ...defaultAsyncParams, aggregates: makeAggregates(50) })
-    expect(small[0].x).toHaveLength(50)
+    expect((await buildTrafficDataAsync({ ...defaultAsyncParams, aggregates: makeAggregates(50) }))[0].x).toHaveLength(50)
     expect(await buildTrafficDataAsync({ ...defaultAsyncParams, aggregates: { time_series: [], metric: 'requests' } })).toEqual([])
-    const large = await buildTrafficDataAsync({ ...defaultAsyncParams, aggregates: makeAggregates(2500) })
-    expect(large[0].x).toHaveLength(2500)
+    expect((await buildTrafficDataAsync({ ...defaultAsyncParams, aggregates: makeAggregates(2500) }))[0].x).toHaveLength(2500)
     const withTrend = await buildTrafficDataAsync({ ...defaultAsyncParams, aggregates: makeAggregates(100), trend: 'auto' })
     expect(withTrend).toHaveLength(2)
     expect(withTrend[1].name).toContain('Trend')
@@ -646,66 +449,40 @@ describe('buildTrafficData & buildTrafficDataAsync', () => {
 })
 
 const ALLOWED_GAPS = new Set<string>([
-  'POST /api/services/:service_id/cron-settings', 'DELETE /api/services/:service_id/time-range',
-  'POST /api/services/:service_id/ngwaf-sync', 'PATCH /api/services/:service_id/custom-fields/:field_name',
-  'DELETE /api/cron-runs/:log_id', 'POST /api/assets/aggregates', 'GET /api/assets/aggregates',
-  'POST /api/sharing/deploy-frontend', 'POST /api/sharing/teardown-frontend',
-  'GET /api/high-scale/request-facts', 'POST /api/high-scale/request-facts',
-  'GET /api/network/pop-health', 'GET /api/security/threat-intel',
-  'GET /api/cron-runs/:run_id/stream', 'GET /api/log-extents/stream', 'GET /api/admin/events/stream',
-  'GET /api/usage/operations', 'GET /api/usage/bandwidth', 'GET /api/usage/log-activity',
-  'GET /api/usage/rum-breakdown', 'GET /api/admin/compaction-stats', 'POST /api/admin/consolidate-rollups',
-  'POST /api/admin/compact/:service_id', 'GET /api/admin/compaction-status/:service_id',
-  'GET /api/admin/compaction-status', 'POST /api/admin/rollups/compact/:service_id',
-  'POST /api/admin/rollups/compact', 'POST /api/admin/rollups/heal/:service_id',
-  'POST /api/admin/rollups/heal', 'POST /api/admin/rollup-heal/:service_id', 'POST /api/admin/rollup-heal',
-  'GET /api/admin/rollups/status/:service_id', 'GET /api/admin/rollups/status',
-  'POST /api/admin/rebuild-time-series-rollups', 'POST /api/admin/partial-hour-merge/:service_id',
-  'POST /api/admin/partial-hour-merge', 'GET /api/admin/partial-hour-status/:service_id',
-  'GET /api/admin/partial-hour-status', 'GET /api/admin/metric-history', 'GET /api/admin/iceberg-tree',
-  'GET /api/admin/usage-log/export', 'GET /api/admin/slow-queries/count', 'GET /api/admin/slow-queries',
-  'GET /api/download-folder', 'GET /api/download', 'GET /api/download-all', 'GET /api/admin/vcl-health',
-  'POST /api/provision/reconcile', 'POST /api/admin/optimize-now', 'POST /api/admin/local-compact-now',
-  'POST /api/admin/backfill-window', 'POST /api/admin/backfill-bundle-rollups',
-  'POST /api/admin/usage-logging', 'POST /api/admin/reset-rum', 'POST /api/provision/teardown',
-  'PATCH /api/provision/services/:service_id/ngwaf-workspace', 'POST /api/admin/expire-snapshots/:service_id',
-  'POST /api/admin/metadata-cleanup/:service_id', 'POST /api/admin/sync/:service_id',
-  'POST /api/admin/full-sweep/:service_id', 'POST /api/admin/gap-heal/:service_id',
-  'POST /api/admin/ledger/sweep/:service_id', 'GET /api/admin/ledger/quarantine',
-  'POST /api/admin/rum/sync/:service_id', 'POST /api/admin/rum/discovery/:service_id',
-  'POST /api/services/:service_id/scoring/enable', 'POST /api/services/:service_id/scoring/disable',
-  'GET /api/services/:service_id/scoring/status', 'GET /api/services/:service_id/scoring/labels',
-  'POST /api/services/:service_id/scoring/labels', 'PATCH /api/services/:service_id/scoring/labels/:label_id',
-  'DELETE /api/services/:service_id/scoring/labels/:label_id', 'GET /api/services/:service_id/scoring/top-flagged',
-  'GET /api/services/:service_id/scoring/score-distribution', 'GET /api/services/:service_id/scoring/latency-timeseries',
-  'GET /api/services/:service_id/scoring/compliance-breakdown', 'GET /api/services/:service_id/scoring/evaluation',
-  'GET /api/services/:service_id/scoring/curves', 'GET /api/services/:service_id/scoring/threshold-preview',
-  'POST /api/services/:service_id/scoring/retrain', 'GET /api/services/:service_id/scoring/sessions/:sid/events',
-  'GET /api/services/:service_id/scoring/enforce-threshold', 'PUT /api/services/:service_id/scoring/enforce-threshold',
-  'GET /api/services/:service_id/scoring/exclude-regex', 'PUT /api/services/:service_id/scoring/exclude-regex',
-  'POST /api/services/:service_id/scoring/exclude-regex/validate', 'GET /api/services/:service_id/scoring/enforce-status-code',
-  'PUT /api/services/:service_id/scoring/enforce-status-code', 'PUT /api/services/:service_id/scoring/l2-enforce',
-  'GET /api/services/:service_id/scoring/matrix-versions', 'POST /api/services/:service_id/scoring/matrix-versions/:version/restore',
-  'POST /api/services/:service_id/scoring/rotate-key', 'GET /api/services/:service_id/scoring/audit',
-  'GET /api/services/:service_id/scoring/threshold', 'PUT /api/services/:service_id/scoring/threshold',
-  'GET /api/services/:service_id/scoring/evaluation/per-reason', 'GET /api/services/:service_id/scoring/dashboard',
-  'GET /api/security/proxies/export', 'GET /api/services/:service_id/rum/analytics',
-  'GET /api/services/:service_id/rum/live-events', 'GET /api/services/:service_id/cmcd/status',
-  'POST /api/services/:service_id/cmcd/enable', 'POST /api/services/:service_id/cmcd/disable',
-  'GET /api/services/:service_id/rum/status', 'POST /api/services/:service_id/rum/settings',
-  'POST /api/services/:service_id/rum/enable', 'POST /api/services/:service_id/rum/disable',
-  'GET /api/services/:service_id/rum/beacon-health', 'GET /api/services/:service_id/rum/health',
-  'GET /api/services/:service_id/rum/vitals', 'GET /api/services/:service_id/rum/errors',
-  'POST /api/services/:service_id/rum/upgrade', 'GET /api/services/:service_id/control-room/:tab',
-  'POST /api/services/:service_id/control-room/mitigations', 'POST /api/services/:service_id/control-room/rules',
-  'POST /api/services/:service_id/control-room/allowlist', 'POST /api/services/:service_id/control-room/big-red-button',
-  'POST /api/services/:service_id/control-room/cost-governor', 'GET /api/services/:service_id/control-room/wizard/state',
-  'POST /api/services/:service_id/control-room/wizard/step', 'GET /api/services/:service_id/realtime-stream',
-  'GET /api/services/:service_id/log-field-audit', 'POST /api/services/:service_id/control-room/correlate',
-  'GET /api/services/:service_id/control-room/error-stream', 'GET /api/debug/state',
-  'POST /api/share/logout', 'GET /api/share/heartbeat', 'POST /api/share/claim/:token',
-  'POST /api/admin/share/invites/:invite_id/claim-token', 'POST /api/admin/share/backup/export',
-  'POST /api/admin/share/backup/import', 'POST /api/admin/share/gdpr/erase',
+  'POST /api/services/:service_id/cron-settings', 'DELETE /api/services/:service_id/time-range', 'POST /api/services/:service_id/ngwaf-sync', 'PATCH /api/services/:service_id/custom-fields/:field_name',
+  'DELETE /api/cron-runs/:log_id', 'POST /api/assets/aggregates', 'GET /api/assets/aggregates', 'POST /api/sharing/deploy-frontend', 'POST /api/sharing/teardown-frontend',
+  'GET /api/high-scale/request-facts', 'POST /api/high-scale/request-facts', 'GET /api/network/pop-health', 'GET /api/security/threat-intel', 'GET /api/cron-runs/:run_id/stream',
+  'GET /api/log-extents/stream', 'GET /api/admin/events/stream', 'GET /api/usage/operations', 'GET /api/usage/bandwidth', 'GET /api/usage/log-activity', 'GET /api/usage/rum-breakdown',
+  'GET /api/admin/compaction-stats', 'POST /api/admin/consolidate-rollups', 'POST /api/admin/compact/:service_id', 'GET /api/admin/compaction-status/:service_id', 'GET /api/admin/compaction-status',
+  'POST /api/admin/rollups/compact/:service_id', 'POST /api/admin/rollups/compact', 'POST /api/admin/rollups/heal/:service_id', 'POST /api/admin/rollups/heal',
+  'POST /api/admin/rollup-heal/:service_id', 'POST /api/admin/rollup-heal', 'GET /api/admin/rollups/status/:service_id', 'GET /api/admin/rollups/status',
+  'POST /api/admin/rebuild-time-series-rollups', 'POST /api/admin/partial-hour-merge/:service_id', 'POST /api/admin/partial-hour-merge',
+  'GET /api/admin/partial-hour-status/:service_id', 'GET /api/admin/partial-hour-status', 'GET /api/admin/metric-history', 'GET /api/admin/iceberg-tree',
+  'GET /api/admin/usage-log/export', 'GET /api/admin/slow-queries/count', 'GET /api/admin/slow-queries', 'GET /api/download-folder', 'GET /api/download', 'GET /api/download-all',
+  'GET /api/admin/vcl-health', 'POST /api/provision/reconcile', 'POST /api/admin/optimize-now', 'POST /api/admin/local-compact-now', 'POST /api/admin/backfill-window',
+  'POST /api/admin/backfill-bundle-rollups', 'POST /api/admin/usage-logging', 'POST /api/admin/reset-rum', 'POST /api/provision/teardown',
+  'PATCH /api/provision/services/:service_id/ngwaf-workspace', 'POST /api/admin/expire-snapshots/:service_id', 'POST /api/admin/metadata-cleanup/:service_id',
+  'POST /api/admin/sync/:service_id', 'POST /api/admin/full-sweep/:service_id', 'POST /api/admin/gap-heal/:service_id', 'POST /api/admin/ledger/sweep/:service_id',
+  'GET /api/admin/ledger/quarantine', 'POST /api/admin/rum/sync/:service_id', 'POST /api/admin/rum/discovery/:service_id', 'POST /api/services/:service_id/scoring/enable',
+  'POST /api/services/:service_id/scoring/disable', 'GET /api/services/:service_id/scoring/status', 'GET /api/services/:service_id/scoring/labels', 'POST /api/services/:service_id/scoring/labels',
+  'PATCH /api/services/:service_id/scoring/labels/:label_id', 'DELETE /api/services/:service_id/scoring/labels/:label_id', 'GET /api/services/:service_id/scoring/top-flagged',
+  'GET /api/services/:service_id/scoring/score-distribution', 'GET /api/services/:service_id/scoring/latency-timeseries', 'GET /api/services/:service_id/scoring/compliance-breakdown',
+  'GET /api/services/:service_id/scoring/evaluation', 'GET /api/services/:service_id/scoring/curves', 'GET /api/services/:service_id/scoring/threshold-preview',
+  'POST /api/services/:service_id/scoring/retrain', 'GET /api/services/:service_id/scoring/sessions/:sid/events', 'GET /api/services/:service_id/scoring/enforce-threshold',
+  'PUT /api/services/:service_id/scoring/enforce-threshold', 'GET /api/services/:service_id/scoring/exclude-regex', 'PUT /api/services/:service_id/scoring/exclude-regex',
+  'POST /api/services/:service_id/scoring/exclude-regex/validate', 'GET /api/services/:service_id/scoring/enforce-status-code', 'PUT /api/services/:service_id/scoring/enforce-status-code',
+  'PUT /api/services/:service_id/scoring/l2-enforce', 'GET /api/services/:service_id/scoring/matrix-versions', 'POST /api/services/:service_id/scoring/matrix-versions/:version/restore',
+  'POST /api/services/:service_id/scoring/rotate-key', 'GET /api/services/:service_id/scoring/audit', 'GET /api/services/:service_id/scoring/threshold', 'PUT /api/services/:service_id/scoring/threshold',
+  'GET /api/services/:service_id/scoring/evaluation/per-reason', 'GET /api/services/:service_id/scoring/dashboard', 'GET /api/security/proxies/export',
+  'GET /api/services/:service_id/rum/analytics', 'GET /api/services/:service_id/rum/live-events', 'GET /api/services/:service_id/cmcd/status', 'POST /api/services/:service_id/cmcd/enable',
+  'POST /api/services/:service_id/cmcd/disable', 'GET /api/services/:service_id/rum/status', 'POST /api/services/:service_id/rum/settings', 'POST /api/services/:service_id/rum/enable',
+  'POST /api/services/:service_id/rum/disable', 'GET /api/services/:service_id/rum/beacon-health', 'GET /api/services/:service_id/rum/health', 'GET /api/services/:service_id/rum/vitals',
+  'GET /api/services/:service_id/rum/errors', 'POST /api/services/:service_id/rum/upgrade', 'GET /api/services/:service_id/control-room/:tab', 'POST /api/services/:service_id/control-room/mitigations',
+  'POST /api/services/:service_id/control-room/rules', 'POST /api/services/:service_id/control-room/allowlist', 'POST /api/services/:service_id/control-room/big-red-button',
+  'POST /api/services/:service_id/control-room/cost-governor', 'GET /api/services/:service_id/control-room/wizard/state', 'POST /api/services/:service_id/control-room/wizard/step',
+  'GET /api/services/:service_id/realtime-stream', 'GET /api/services/:service_id/log-field-audit', 'POST /api/services/:service_id/control-room/correlate',
+  'GET /api/services/:service_id/control-room/error-stream', 'GET /api/debug/state', 'POST /api/share/logout', 'GET /api/share/heartbeat', 'POST /api/share/claim/:token',
+  'POST /api/admin/share/invites/:invite_id/claim-token', 'POST /api/admin/share/backup/export', 'POST /api/admin/share/backup/import', 'POST /api/admin/share/gdpr/erase',
   'GET /js/rum.js', 'GET /js/faro-sdk.js', 'GET /rum-beacon', 'POST /rum-beacon', 'GET /api/debug/page-telemetry',
 ])
 
@@ -713,24 +490,17 @@ function describeHandler(h: unknown): { method: string; pathname: string } | nul
   const info = (h as { info?: { method?: string; path?: string } })?.info
   if (!info?.method || typeof info.path !== 'string') return null
   const method = String(info.method).toUpperCase()
-  try {
-    return { method, pathname: new URL(info.path).pathname }
-  } catch {
-    return { method, pathname: info.path }
-  }
+  try { return { method, pathname: new URL(info.path).pathname } } catch { return { method, pathname: info.path } }
 }
 
 describe('MSW handler coverage vs openapi.json', () => {
   it('every documented (path × method) has an MSW handler or ALLOWED_GAPS entry, and ALLOWED_GAPS has no stale entries', () => {
-    const openapiPath = path.resolve(__dirname, '..', '..', 'openapi.json')
-    const spec = JSON.parse(fs.readFileSync(openapiPath, 'utf-8')) as { paths: Record<string, Record<string, unknown>> }
-
+    const spec = JSON.parse(fs.readFileSync(path.resolve(__dirname, '..', '..', 'openapi.json'), 'utf-8')) as { paths: Record<string, Record<string, unknown>> }
     const covered = new Set<string>()
     for (const h of handlers) {
       const d = describeHandler(h)
       if (d) covered.add(`${d.method} ${d.pathname}`)
     }
-
     const documented: string[] = []
     for (const [p, methods] of Object.entries(spec.paths)) {
       for (const m of Object.keys(methods)) {
@@ -738,22 +508,15 @@ describe('MSW handler coverage vs openapi.json', () => {
         if (method !== 'HEAD' && method !== 'OPTIONS') documented.push(`${method} ${p.replace(/\{([^}]+)\}/g, ':$1')}`)
       }
     }
-
-    const missing = documented.filter((entry) => !covered.has(entry) && !ALLOWED_GAPS.has(entry))
-    expect(missing).toEqual([])
-
-    const stale = [...ALLOWED_GAPS].filter((entry) => covered.has(entry))
-    expect(stale).toEqual([])
+    expect(documented.filter((entry) => !covered.has(entry) && !ALLOWED_GAPS.has(entry))).toEqual([])
+    expect([...ALLOWED_GAPS].filter((entry) => covered.has(entry))).toEqual([])
   })
 
   it('models disabled ClickHouse without inventing publication health or replay success', async () => {
     const status = await fetch('http://127.0.0.1:8000/api/admin/clickhouse/status?service_id=svc-test')
-    expect(await status.json()).toMatchObject({
-      service_id: 'svc-test', enabled: false, health: 'disabled', oldest_pending_age_seconds: null,
-    })
+    expect(await status.json()).toMatchObject({ service_id: 'svc-test', enabled: false, health: 'disabled', oldest_pending_age_seconds: null })
     const replay = await fetch('http://127.0.0.1:8000/api/admin/clickhouse/replay', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ service_id: 'svc-test', dataset_id: 'dataset' }),
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ service_id: 'svc-test', dataset_id: 'dataset' }),
     })
     expect(replay.status).toBe(409)
     expect(await replay.json()).toMatchObject({ detail: { error: 'clickhouse_disabled' } })
@@ -762,11 +525,7 @@ describe('MSW handler coverage vs openapi.json', () => {
 
 function makeReq(url: string, headers: Record<string, string> = {}): NextRequest {
   const u = new URL(url)
-  return {
-    nextUrl: { pathname: u.pathname, clone: () => new URL(u.toString()), toString: () => u.toString() },
-    headers: new Headers(headers),
-    url,
-  } as NextRequest
+  return { nextUrl: { pathname: u.pathname, clone: () => new URL(u.toString()), toString: () => u.toString() }, headers: new Headers(headers), url } as NextRequest
 }
 
 describe('middleware /admin gate (security)', () => {
@@ -791,9 +550,9 @@ describe('middleware /admin gate (security)', () => {
     expect(middleware(makeReq('http://localhost/_next/data/build-id/admin.json')).status).toBe(200)
     expect(middleware(makeReq('http://localhost/', { 'x-proxied-by-caddy': 'true', 'next-action': 'some-action-id' })).status).toBe(403)
     expect(middleware(makeReq('http://localhost/', { 'next-action': 'some-action-id' })).status).toBe(200)
-    expect(middleware(makeReq('http://localhost/dashboard', { 'x-proxied-by-caddy': 'true' })).status).toBe(200)
-    expect(middleware(makeReq('http://localhost/logs', { 'x-proxied-by-caddy': 'true' })).status).toBe(200)
-    expect(middleware(makeReq('http://localhost/_next/data/build-id/logs.json', { 'x-proxied-by-caddy': 'true' })).status).toBe(200)
+    for (const p of ['/dashboard', '/logs', '/_next/data/build-id/logs.json']) {
+      expect(middleware(makeReq(`http://localhost${p}`, { 'x-proxied-by-caddy': 'true' })).status).toBe(200)
+    }
 
     const nextSpy = vi.spyOn(NextResponse, 'next')
     middleware(makeReq('http://localhost/dashboard?service=my-service-id'))
@@ -879,9 +638,15 @@ describe('upstream API/JS proxy route handler (ECONNRESET resilience)', () => {
     }
   })
 
-  it('streams SSE responses and suppresses ECONNRESET logs on client abort or upstream disconnect', async () => {
+  it('streams SSE responses and suppresses ECONNRESET logs on client abort or upstream disconnect, and proxies /js/* routes', async () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
     const server = await withUpstreamServer((req, res) => {
+      if (req.url?.startsWith('/js/')) {
+        res.statusCode = 200
+        res.setHeader('Content-Type', 'application/javascript')
+        res.end('window.__RUM__=1;')
+        return
+      }
       res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' })
       res.write('data: {"tick":1}\n\n')
       setTimeout(() => req.socket.destroy(), 20)
@@ -896,23 +661,12 @@ describe('upstream API/JS proxy route handler (ECONNRESET resilience)', () => {
       expect((await reader.read()).done).toBe(true)
       abortController.abort()
       expect(errorSpy).not.toHaveBeenCalled()
+
+      const jsRes = await jsGet(new NextRequest('http://localhost:3002/js/beacon.js'))
+      expect(jsRes.status).toBe(200)
+      expect(await jsRes.text()).toBe('window.__RUM__=1;')
     } finally {
       errorSpy.mockRestore()
-      await server.close()
-    }
-  })
-
-  it('proxies /js/* routes via the JS route handler', async () => {
-    const server = await withUpstreamServer((_req, res) => {
-      res.statusCode = 200
-      res.setHeader('Content-Type', 'application/javascript')
-      res.end('window.__RUM__=1;')
-    })
-    try {
-      const res = await jsGet(new NextRequest('http://localhost:3002/js/beacon.js'))
-      expect(res.status).toBe(200)
-      expect(await res.text()).toBe('window.__RUM__=1;')
-    } finally {
       await server.close()
     }
   })

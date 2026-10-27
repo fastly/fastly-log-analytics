@@ -1646,3 +1646,2293 @@ def test_c_wraps_text_with_colour_and_reset():
     assert wrapped.startswith(pu.GRN)
     assert wrapped.endswith(pu.RST)
     assert "hello" in wrapped
+
+
+# ── Merged from tests/utils/test_bounded_cache.py ──
+
+import ast
+import logging
+import math
+import os
+import re
+import shutil
+import socket
+import threading
+import time
+from datetime import UTC, datetime, timedelta, timezone
+from pathlib import Path
+
+import pytest
+import structlog
+from backend.utils.active_requests import (
+    _reset_for_tests,
+    active_request_count,
+    decrement_active_requests,
+    increment_active_requests,
+    should_defer_cron,
+    yield_to_api,
+)
+from backend.utils.bounded_cache import BoundedTTLCache, CacheRegistry
+from backend.utils.date_utils import (
+    _parse_dt,
+    ensure_utc,
+    iso_z,
+    iso_z_now,
+    parse_date_window,
+    parse_day_key_strict,
+    parse_hour_key,
+    parse_hour_key_strict,
+    parse_iso_utc,
+    parse_relative_time_window,
+    parse_window,
+    parse_window_str_to_dt,
+    safe_iso,
+    window_to_epoch,
+)
+from backend.utils.time_window import (
+    _BANDS,
+    ANCHOR_QUANTUM_SECONDS,
+    STATIC_DEFAULT,
+    VALID_RANGE_TOKENS,
+    history_hours_from_earliest,
+    invite_clamp_fingerprint,
+    is_valid_range_token,
+    pick_insights_default,
+    quantize_anchor,
+    resolve_window,
+)
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+
+from backend.core import query_registry
+from backend.core.metadata import base, pg_connection
+from backend.core.rollups._common import parse_hour_token
+from backend.cron import decorators as system_jobs
+from backend.utils import active_requests, remote_access, sqlite_profiler, structlog_config, tunnel
+from backend.utils import telemetry as log_throttle
+from backend.utils.telemetry import _SQLITE_QUERIES, log_once_per
+from backend.utils.tunnel import manager as _session_mod
+
+ra = remote_access
+
+if hasattr(_session_mod, "MAX_TRACKED_IPS"):
+    login_mod = _session_mod
+else:
+    from backend.utils.tunnel import rate_limiter as login_mod
+
+ROOT = Path(__file__).resolve().parents[2]
+_NOW = datetime(2026, 6, 29, 12, 30, 45, tzinfo=UTC)
+_INSIGHTS_NOW = datetime(2026, 7, 7, 12, 0, 0, tzinfo=UTC)
+_TS_SOURCE = ROOT / "frontend" / "lib" / "utils.ts"
+_HOUR_KEYS = ["2026-10-19-00", "2026-10-19-23", "2026-02-28-23", "2024-02-29-12", "2026-1-5-3"]
+_BAD_KEYS = ["", "2026-10-19", "2026-10-19-24", "2026-13-01-00", "garbage", "2026-10-19T05", "2026-10-19-05-00"]
+_DROP_TABLE_FILES = sorted([*(ROOT / "backend" / "repositories").glob("*.py"), ROOT / "backend" / "core" / "duckdb.py"])
+
+
+@pytest.fixture(autouse=True)
+def _auto_isolate_all(monkeypatch):
+    snapshot_names = CacheRegistry.names()
+    monkeypatch.setattr(log_throttle, "_last", {})
+    _reset_for_tests()
+    sqlite_profiler.clear()
+    structlog.reset_defaults()
+    structlog_config.configure_structlog()
+    with system_jobs._status_lock:
+        system_jobs._status.clear()
+    yield
+    for n in CacheRegistry.names():
+        if n not in snapshot_names:
+            with CacheRegistry._lock:
+                CacheRegistry._entries.pop(n, None)
+    _reset_for_tests()
+    sqlite_profiler.clear()
+    structlog.reset_defaults()
+    structlog_config.configure_structlog()
+
+
+# ── BoundedTTLCache ──────────────────────────────────────────────────────────
+
+
+def test_basic_set_get_and_miss():
+    cache = BoundedTTLCache(maxsize=10, ttl_seconds=60)
+    cache["k1"] = "v1"
+    assert cache["k1"] == "v1" and cache.get("k1") == "v1" and "k1" in cache
+    assert cache.get("missing") is None and cache.get("missing", "sentinel") == "sentinel"
+    assert "missing" not in cache
+    with pytest.raises(KeyError):
+        _ = cache["missing"]
+
+
+def test_ttl_expiry_treats_entry_as_absent():
+    cache = BoundedTTLCache(maxsize=10, ttl_seconds=0.05)
+    cache["k1"] = "v1"
+    assert cache["k1"] == "v1"
+    time.sleep(0.10)
+    assert "k1" not in cache and cache.get("k1") is None
+    with pytest.raises(KeyError):
+        _ = cache["k1"]
+
+
+def test_maxsize_evicts_lru_and_read_promotes():
+    cache = BoundedTTLCache(maxsize=3, ttl_seconds=60)
+    cache["a"], cache["b"], cache["c"] = 1, 2, 3
+    assert cache["a"] == 1
+    cache["d"] = 4
+    assert "b" not in cache and (cache["a"], cache["c"], cache["d"], len(cache)) == (1, 3, 4, 3)
+
+    c2 = BoundedTTLCache(maxsize=2, ttl_seconds=60)
+    c2["warm"], c2["cold"] = "stays", "dies"
+    for _ in range(5):
+        _ = c2["warm"]
+    c2["new"] = "added"
+    assert "cold" not in c2 and c2["warm"] == "stays" and c2["new"] == "added"
+
+
+def test_pop_and_clear():
+    cache = BoundedTTLCache(maxsize=10, ttl_seconds=60)
+    cache["k1"] = "v1"
+    assert cache.pop("k1") == "v1" and "k1" not in cache
+    assert cache.pop("missing", "default") == "default"
+    with pytest.raises(KeyError):
+        cache.pop("missing")
+
+    for i in range(5):
+        cache[f"k{i}"] = i
+    assert len(cache) == 5
+    cache.clear()
+    assert len(cache) == 0 and all(f"k{i}" not in cache for i in range(5))
+
+
+def test_lazy_reap_fires_after_n_writes():
+    cache = BoundedTTLCache(maxsize=10_000, ttl_seconds=0.05)
+    for i in range(50):
+        cache[f"expired_{i}"] = i
+    time.sleep(0.40)
+    for i in range(100):
+        cache[f"fresh_{i}"] = i
+    assert all(f"expired_{i}" not in cache for i in range(50))
+    assert all(cache[f"fresh_{i}"] == i for i in range(100))
+
+
+def test_iteration_snapshot_invalid_args_and_tuple_values():
+    cache = BoundedTTLCache(maxsize=100, ttl_seconds=60)
+    for i in range(20):
+        cache[f"k{i}"] = i
+    keys = list(cache)
+    cache["fresh"] = "added"
+    assert len(keys) == 20 and "fresh" not in keys
+
+    for maxsize, ttl in ((0, 10), (-1, 10), (10, 0), (10, -0.5)):
+        with pytest.raises(ValueError):
+            BoundedTTLCache(maxsize=maxsize, ttl_seconds=ttl)
+
+    payload = (1.23, {"rows": [1, 2, 3], "_meta": "x"})
+    cache["k"] = payload
+    assert cache["k"] == payload and cache["k"] is payload
+
+
+def test_thread_safety_under_concurrent_writes():
+    cache = BoundedTTLCache(maxsize=200, ttl_seconds=60)
+    errors: list[Exception] = []
+
+    def writer(tid: int) -> None:
+        try:
+            for i in range(500):
+                cache[f"t{tid}_k{i}"] = i
+        except Exception as exc:
+            errors.append(exc)
+
+    def reader() -> None:
+        try:
+            for _ in range(500):
+                for k in cache:
+                    _ = cache.get(k)
+        except Exception as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=writer, args=(i,)) for i in range(4)] + [
+        threading.Thread(target=reader) for _ in range(4)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert not errors and len(cache) <= 200
+
+
+# ── CacheRegistry ────────────────────────────────────────────────────────────
+
+
+def test_cache_registry_register_and_clear():
+    d: dict[str, int] = {"x": 1, "y": 2}
+    s: set[str] = {"a", "b"}
+
+    class Box:
+        def __init__(self):
+            self.items = [1, 2, 3]
+            self.cleared = False
+
+        def clear(self):
+            self.items = []
+            self.cleared = True
+
+    b = Box()
+    CacheRegistry.register("test.dict_a", d)
+    CacheRegistry.register("test.set_a", s)
+    CacheRegistry.register("test.box", b)
+    CacheRegistry.register("test.bare_int", 42)
+    CacheRegistry.clear_all()
+    assert d == {} and s == set() and b.cleared is True and b.items == []
+
+
+def test_iceberg_caches_are_registered_at_import():
+    import backend.core.duckdb  # noqa: F401
+    import backend.core.iceberg  # noqa: F401
+    import backend.repositories.dashboard  # noqa: F401
+    import backend.repositories.network  # noqa: F401
+
+    names = set(CacheRegistry.names())
+    for required in (
+        "iceberg._view_cache",
+        "dashboard._dashboard_cache",
+        "network._response_cache",
+        "duckdb._fos_client_cache",
+        "duckdb._initialized_paths",
+        "core._duckdb_status._schema_cache",
+    ):
+        assert required in names, f"missing registration: {required}"
+
+
+# ── Log throttle ─────────────────────────────────────────────────────────────
+
+
+def test_log_throttle_interval_independence_and_bounding(monkeypatch, caplog):
+    t = [100.0]
+    monkeypatch.setattr(log_throttle.time, "monotonic", lambda: t[0])
+    assert log_once_per("k", 60) is True
+    t[0] += 59
+    assert log_once_per("k", 60) is False
+    t[0] += 2
+    assert log_once_per("k", 60) is True
+
+    assert log_once_per("a", 60) is True and log_once_per("b", 60) is True and log_once_per("a", 60) is False
+
+    monkeypatch.setattr(log_throttle, "_MAX_KEYS", 8)
+    for i in range(100):
+        log_once_per(f"k{i}", 3600)
+    assert len(log_throttle._last) <= 8
+
+    logger = logging.getLogger("t")
+    with caplog.at_level(logging.DEBUG, logger="t"):
+        for _ in range(500):
+            try:
+                raise ValueError("bad row")
+            except ValueError:
+                if log_once_per("row-parse", 60):
+                    logger.debug("row parse failed", exc_info=True)
+    assert len([r for r in caplog.records if r.exc_info]) == 1
+
+
+def _unthrottled(path: str, only_funcs: set[str] | None, only_msg: str | None) -> list[str]:
+    tree = ast.parse((ROOT / path).read_text())
+    out: list[str] = []
+
+    def walk(node: ast.AST, guarded: bool, func: str | None) -> None:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            func = node.name
+        if (
+            isinstance(node, ast.If)
+            and isinstance(node.test, ast.Call)
+            and getattr(node.test.func, "id", "") == "log_once_per"
+        ):
+            for child in node.body:
+                walk(child, True, func)
+            for child in node.orelse:
+                walk(child, guarded, func)
+            return
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "debug"
+            and any(k.arg == "exc_info" for k in node.keywords)
+            and not guarded
+        ):
+            msg = node.args[0].value if node.args and isinstance(node.args[0], ast.Constant) else ""
+            if (only_funcs is None or func in only_funcs) and (only_msg is None or only_msg in str(msg)):
+                out.append(f"{path}:{node.lineno}")
+        for child in ast.iter_child_nodes(node):
+            walk(child, guarded, func)
+
+    walk(tree, False, None)
+    return out
+
+
+@pytest.mark.parametrize(
+    ("path", "funcs", "msg"),
+    [
+        ("backend/core/duckdb_pool.py", None, None),
+        ("backend/core/ingest.py", None, "_parse_rum_line"),
+        ("backend/core/ingest.py", {"extract_metrics_from_faro_payload"}, None),
+        ("backend/repositories/dashboard.py", None, "analyst"),
+        *[(p.relative_to(ROOT).as_posix(), None, "DROP TABLE") for p in _DROP_TABLE_FILES],
+    ],
+)
+def test_hot_path_debug_tracebacks_are_throttled(path, funcs, msg):
+    assert _unthrottled(path, funcs, msg) == []
+
+
+# ── Rate limit characterization ──────────────────────────────────────────────
+
+
+class Clock:
+    def __init__(self, start: float = 1_000_000.0) -> None:
+        self.now = start
+
+    def __call__(self) -> float:
+        return self.now
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    c = Clock()
+    monkeypatch.setattr(time, "time", c)
+    return c
+
+
+@pytest.mark.security_regression
+def test_quota_request_boundary_is_exact(clock):
+    lim = ra._StaticAssetLimiter(req_limit=3)
+    assert [lim.check("1.1.1.1", 0) for _ in range(3)] == [True, True, True]
+    assert lim.check("1.1.1.1", 0) is False
+    assert lim.check("1.1.1.1", 0) is False
+    assert lim.check("2.2.2.2", 0) is True
+
+
+@pytest.mark.security_regression
+def test_quota_window_expiry_frees_budget(clock):
+    lim = ra._StaticAssetLimiter(req_limit=2, window_s=60)
+    assert lim.check("ip", 0) and lim.check("ip", 0) and not lim.check("ip", 0)
+    clock.now += 59
+    assert lim.check("ip", 0) is False
+    clock.now += 1
+    assert lim.check("ip", 0) is False
+    clock.now += 1
+    assert lim.check("ip", 0) is True
+
+
+@pytest.mark.security_regression
+def test_quota_byte_boundary_counts_the_request_that_crosses_it(clock):
+    lim = ra._StaticAssetLimiter(req_limit=100, byte_limit=1000)
+    assert lim.check("ip", 1000) is True
+    assert lim.check("ip", 1) is False and lim.check("ip", 0) is False
+    clock.now += 61
+    assert lim.check("ip", 1000) is True
+
+
+@pytest.mark.security_regression
+def test_quota_negative_content_length_counts_as_zero(clock):
+    lim = ra._StaticAssetLimiter(req_limit=100, byte_limit=10)
+    assert all(lim.check("ip", -999) for _ in range(5))
+
+
+@pytest.mark.security_regression
+def test_quota_request_limit_hit_does_not_record_bytes(clock):
+    lim = ra._StaticAssetLimiter(req_limit=1, byte_limit=100)
+    assert lim.check("ip", 100) is True and lim.check("ip", 100_000) is False
+    clock.now += 61
+    assert lim.check("ip", 100) is True
+
+
+def test_quota_defaults_and_stale_key_eviction(clock):
+    lim = ra._StaticAssetLimiter()
+    assert (lim.REQ_LIMIT, lim.BYTE_LIMIT, lim.window_s, lim.MAX_TRACKED_IPS) == (600, 50 * 1024 * 1024, 60, 10_000)
+    assert ra._static_limiter is not ra._analyst_api_limiter
+
+    lim2 = ra._StaticAssetLimiter(max_tracked_ips=5)
+    for i in range(5):
+        lim2.check(f"old-{i}", 1)
+    clock.now += 120
+    for i in range(3):
+        lim2.check(f"new-{i}", 1)
+    assert len(lim2._events) <= 5 and all(lim2.check(f"new-{i}", 1) for i in range(3))
+
+
+@pytest.mark.security_regression
+def test_quota_memory_is_bounded_under_key_flood(clock):
+    lim = ra._StaticAssetLimiter(max_tracked_ips=50)
+    for i in range(5000):
+        lim.check(f"10.0.{i // 256}.{i % 256}", 10)
+    assert len(lim._events) <= 50
+
+
+def test_login_defaults_snapshot_and_lru(monkeypatch, clock):
+    assert (login_mod.LOGIN_FAILURE_WINDOW_S, login_mod.LOGIN_FAILURE_THRESHOLD, login_mod.LOGIN_LOCKOUT_S) == (
+        60,
+        5,
+        300,
+    )
+    assert login_mod.MAX_TRACKED_IPS == 10000
+
+    rl = tunnel._LoginRateLimiter()
+    rl.record_failure("lonely")
+    for _ in range(tunnel.LOGIN_FAILURE_THRESHOLD):
+        rl.record_failure("locked")
+    snap = rl.snapshot()
+    by_ip = {r["ip"]: r for r in snap["failures"]}
+    assert by_ip["lonely"] == {"ip": "lonely", "count": 1, "window_s": tunnel.LOGIN_FAILURE_WINDOW_S}
+    assert by_ip["locked"]["count"] == tunnel.LOGIN_FAILURE_THRESHOLD
+    assert snap["lockouts"] == [{"ip": "locked", "remaining_s": tunnel.LOGIN_LOCKOUT_S}]
+    clock.now += tunnel.LOGIN_LOCKOUT_S + 1
+    assert rl.snapshot() == {"failures": [], "lockouts": []}
+
+    monkeypatch.setattr(login_mod, "MAX_TRACKED_IPS", 3)
+    rl2 = tunnel._LoginRateLimiter()
+    for ip in ("a", "b", "c", "a", "d"):
+        rl2.record_failure(ip)
+    assert {r["ip"] for r in rl2.snapshot()["failures"]} == {"a", "c", "d"}
+
+
+@pytest.mark.security_regression
+def test_login_lockout_triggers_exactly_at_threshold(clock):
+    rl = tunnel._LoginRateLimiter()
+    results = [rl.record_failure("1.2.3.4") for _ in range(tunnel.LOGIN_FAILURE_THRESHOLD)]
+    assert results == [False] * (tunnel.LOGIN_FAILURE_THRESHOLD - 1) + [True]
+    assert rl.record_failure("1.2.3.4") is False
+    locked, remaining = rl.is_locked("1.2.3.4")
+    assert locked and remaining == tunnel.LOGIN_LOCKOUT_S
+
+
+@pytest.mark.security_regression
+def test_login_failures_outside_window_do_not_accumulate(clock):
+    rl = tunnel._LoginRateLimiter()
+    for _ in range(tunnel.LOGIN_FAILURE_THRESHOLD - 1):
+        rl.record_failure("ip")
+        clock.now += tunnel.LOGIN_FAILURE_WINDOW_S + 1
+    assert rl.record_failure("ip") is False and rl.is_locked("ip") == (False, 0)
+
+
+@pytest.mark.security_regression
+def test_login_lockout_expiry_unlocks_and_remaining_counts_down(clock):
+    rl = tunnel._LoginRateLimiter()
+    for _ in range(tunnel.LOGIN_FAILURE_THRESHOLD):
+        rl.record_failure("ip")
+    clock.now += 100
+    locked, remaining = rl.is_locked("ip")
+    assert locked and remaining == tunnel.LOGIN_LOCKOUT_S - 100
+    clock.now += tunnel.LOGIN_LOCKOUT_S
+    assert rl.is_locked("ip") == (False, 0)
+
+
+@pytest.mark.security_regression
+def test_login_keys_are_isolated(clock):
+    rl = tunnel._LoginRateLimiter()
+    for _ in range(tunnel.LOGIN_FAILURE_THRESHOLD):
+        rl.record_failure("a")
+    assert rl.is_locked("a")[0] is True and rl.is_locked("b") == (False, 0)
+
+
+@pytest.mark.security_regression
+def test_login_memory_is_bounded_under_key_flood(monkeypatch, clock):
+    monkeypatch.setattr(login_mod, "MAX_TRACKED_IPS", 20)
+    rl = tunnel._LoginRateLimiter()
+    for i in range(2000):
+        rl.record_failure(f"ip-{i}")
+    assert len(rl.snapshot()["failures"]) <= 20
+
+
+@pytest.mark.security_regression
+def test_quota_never_admits_more_than_limit_under_contention():
+    lim = ra._StaticAssetLimiter(req_limit=100, byte_limit=10**9, window_s=3600)
+    admitted: list[int] = []
+    lock = threading.Lock()
+
+    def worker() -> None:
+        n = sum(1 for _ in range(50) if lim.check("shared", 0))
+        with lock:
+            admitted.append(n)
+
+    threads = [threading.Thread(target=worker) for _ in range(16)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert sum(admitted) == 100
+
+
+@pytest.mark.security_regression
+def test_login_lockout_triggers_exactly_once_under_contention():
+    rl = tunnel._LoginRateLimiter()
+    triggers: list[int] = []
+    lock = threading.Lock()
+
+    def worker() -> None:
+        n = sum(1 for _ in range(20) if rl.record_failure("shared"))
+        with lock:
+            triggers.append(n)
+
+    threads = [threading.Thread(target=worker) for _ in range(16)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert sum(triggers) == 1 and rl.is_locked("shared")[0] is True
+
+
+def test_concurrent_distinct_keys_stay_within_cap():
+    lim = ra._StaticAssetLimiter(max_tracked_ips=100)
+    threads = [threading.Thread(target=lambda b=b: [lim.check(f"k-{b}-{i}", 1) for i in range(500)]) for b in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(lim._events) <= 100
+
+
+# ── Date & time_window utils ─────────────────────────────────────────────────
+
+
+def _dt(iso: str) -> datetime:
+    return datetime.fromisoformat(iso.replace("Z", "+00:00"))
+
+
+def test_date_utils_core_parsers():
+    assert parse_iso_utc(None) is None and parse_iso_utc("") is None and parse_iso_utc("invalid-date-string") is None
+    dt1 = parse_iso_utc("2026-08-19T12:00:00Z")
+    dt2 = parse_iso_utc("2026-08-19")
+    assert dt1 is not None and dt1.tzinfo == UTC and dt1.hour == 12
+    assert dt2 is not None and dt2.tzinfo == UTC and dt2.hour == 0 and dt2.day == 19
+    assert iso_z(datetime(2026, 8, 19, 12, 34, 56, tzinfo=UTC)) == "2026-08-19T12:34:56Z"
+    now_str = iso_z_now()
+    assert now_str.endswith("Z") and "T" in now_str
+
+    default_val = datetime(2020, 1, 1, tzinfo=UTC)
+    assert _parse_dt("2026-08-19T12:00:00Z", default_val).year == 2026
+    assert _parse_dt("invalid", default_val) == default_val
+    assert parse_date_window("2026-08-10", "2026-08-19") == ("2026-08-10T00:00:00Z", "2026-08-19T23:59:59Z")
+    assert parse_date_window("2026-08-10T12:00:00Z", "2026-08-19T12:00:00Z") == (
+        "2026-08-10T12:00:00Z",
+        "2026-08-19T12:00:00Z",
+    )
+
+    assert safe_iso(None) is None and safe_iso("") is None
+    assert safe_iso(datetime(2026, 8, 19, 12, 0, 0)) == "2026-08-19T12:00:00Z"
+    assert safe_iso("2026-08-19") == "2026-08-19"
+    assert safe_iso("2026-08-19 12:00:00") == "2026-08-19T12:00:00Z"
+    assert safe_iso("2026-08-19 12:00:00.123") == "2026-08-19T12:00:00.123Z"
+    assert safe_iso("2026-08-19T12:00:00Z") == "2026-08-19T12:00:00Z"
+    assert safe_iso("2026-08-19T12:00:00+00:00") == "2026-08-19T12:00:00+00:00"
+
+    dt = parse_window_str_to_dt("2026-08-19T12:00:00Z")
+    assert (dt.year, dt.month) == (2026, 8)
+    with pytest.raises(ValueError, match="Invalid date window string"):
+        parse_window_str_to_dt("invalid")
+    s, e, from_ts, to_ts = window_to_epoch("2026-08-10T00:00:00Z", "2026-08-19T12:00:00Z")
+    assert (s, e) == ("2026-08-10T00:00:00Z", "2026-08-19T12:00:00Z") and 0 < from_ts < to_ts
+
+
+@pytest.mark.parametrize(
+    ("spec", "expected_sec"),
+    [("", 3600), ("12h", 12 * 3600), ("5d", 5 * 24 * 3600), ("30m", 30 * 60), ("invalid", 3600)],
+)
+def test_parse_relative_time_window(spec, expected_sec):
+    assert (datetime.now(UTC) - parse_relative_time_window(spec)).total_seconds() == pytest.approx(expected_sec, abs=10)
+
+
+def test_parse_window_valid_and_invalid():
+    assert parse_window("2026-08-05T10:00:00Z", "2026-08-05T12:30:00+00:00") == (
+        datetime(2026, 8, 5, 10, tzinfo=UTC),
+        datetime(2026, 8, 5, 12, 30, tzinfo=UTC),
+    )
+    assert parse_window("2026-08-05", "2026-08-06") == (
+        datetime(2026, 8, 5, tzinfo=UTC),
+        datetime(2026, 8, 6, tzinfo=UTC),
+    )
+    for start, end in (
+        (None, "2026-08-05T12:00:00Z"),
+        ("2026-08-05T10:00:00Z", None),
+        ("", ""),
+        ("garbage", "2026-08-05T12:00:00Z"),
+        ("2026-08-05T10:00:00Z", "garbage"),
+        ("2026-08-05T12:00:00Z", "2026-08-05T12:00:00Z"),
+        ("2026-08-05T12:00:00Z", "2026-08-05T10:00:00Z"),
+    ):
+        assert parse_window(start, end) is None
+
+
+def test_hour_and_day_key_parsers_and_ensure_utc():
+    for key in _HOUR_KEYS:
+        raw = datetime.strptime(key, "%Y-%m-%d-%H").replace(tzinfo=UTC)
+        assert parse_hour_key(key) == raw == parse_hour_key_strict(key) and parse_hour_key(key).tzinfo is UTC
+    for key in _BAD_KEYS:
+        assert parse_hour_key(key) is None and parse_hour_token(key) is None
+        with pytest.raises(ValueError):
+            parse_hour_key_strict(key)
+    for key in ("2026-10-19", "2024-02-29", "2026-1-5"):
+        assert parse_day_key_strict(key) == datetime.strptime(key, "%Y-%m-%d").replace(tzinfo=UTC)
+    for key in ("", "2026-02-30", "2026-10-19-05", "x"):
+        with pytest.raises(ValueError):
+            parse_day_key_strict(key)
+
+    assert ensure_utc(datetime(2026, 10, 19, 5)) == datetime(2026, 10, 19, 5, tzinfo=UTC)
+    src = datetime(2026, 10, 19, 5, tzinfo=timezone(timedelta(hours=5)))
+    out = ensure_utc(src)
+    assert out == src and out.utcoffset() == timedelta(0) and out.hour == 0
+
+
+def test_range_tokens_filterbar_and_quantize_anchor():
+    assert all(is_valid_range_token(t) for t in ("24h", "7d", "30d", "auto"))
+    assert VALID_RANGE_TOKENS == {"1h", "3h", "6h", "12h", "24h", "3d", "7d", "30d", "auto"}
+    assert all(not is_valid_range_token(b) for b in (None, "", "90d", "nonsense"))
+
+    src = (ROOT / "frontend" / "components" / "FilterBar" / "FilterBar.tsx").read_text()
+    presets = re.findall(r"pickRelative\(\s*'([^']+)'\s*,\s*([\d.]+)\s*\)", src)
+    assert presets and len(presets) == src.count("pickRelative(")
+    for label, hours in presets:
+        assert is_valid_range_token(label)
+        start, end = resolve_window(label, _NOW.isoformat(), now=_NOW)
+        assert _dt(end) - _dt(start) == timedelta(hours=float(hours))
+
+    assert ANCHOR_QUANTUM_SECONDS == 60
+    assert quantize_anchor("2026-06-29T12:30:45Z") == "2026-06-29T12:30:00Z"
+    assert quantize_anchor("2026-06-29T12:30:01Z") == quantize_anchor("2026-06-29T12:30:59Z")
+    assert quantize_anchor("2026-06-29T12:30:01Z") != quantize_anchor("2026-06-29T12:31:00Z")
+    assert quantize_anchor(None, now=_NOW) == "2026-06-29T12:30:00Z"
+    assert quantize_anchor("not-a-date", now=_NOW) == "2026-06-29T12:30:00Z"
+
+
+@pytest.mark.parametrize(
+    ("token", "delta"),
+    [
+        ("1h", timedelta(hours=1)),
+        ("3h", timedelta(hours=3)),
+        ("6h", timedelta(hours=6)),
+        ("12h", timedelta(hours=12)),
+        ("24h", timedelta(hours=24)),
+        ("3d", timedelta(days=3)),
+        ("7d", timedelta(days=7)),
+        ("30d", timedelta(days=30)),
+    ],
+)
+def test_fixed_tokens_resolve_to_anchor_minus_delta(token, delta):
+    start, end = resolve_window(token, _NOW.isoformat(), now=_NOW)
+    assert end == "2026-06-29T12:30:00Z" and _dt(end) - _dt(start) == delta
+
+
+def test_resolve_window_auto_and_invite_fingerprint():
+    assert resolve_window("7d", "2026-06-29T12:30:05Z", now=_NOW) == resolve_window(
+        "7d", "2026-06-29T12:30:55Z", now=_NOW
+    )
+    with pytest.raises(ValueError):
+        resolve_window("90d", _NOW.isoformat(), now=_NOW)
+
+    for history_hours, expected in ((1, "24h"), (6 * 24, "24h"), (7 * 24, "7d"), (29 * 24, "7d"), (45 * 24, "30d")):
+        earliest = (_NOW - timedelta(hours=history_hours)).isoformat()
+        assert resolve_window("auto", _NOW.isoformat(), earliest_log_at=earliest, now=_NOW) == resolve_window(
+            expected, _NOW.isoformat(), now=_NOW
+        )
+    seven = resolve_window("7d", _NOW.isoformat(), now=_NOW)
+    assert resolve_window("auto", _NOW.isoformat(), earliest_log_at=None, now=_NOW) == seven
+    assert resolve_window("auto", _NOW.isoformat(), earliest_log_at="2026-06-01", now=_NOW) == seven
+
+    class _Session:
+        def __init__(self, qs=None, qe=None, qw=None):
+            self.query_start_time, self.query_end_time, self.query_window_hours = qs, qe, qw
+
+    assert invite_clamp_fingerprint(None) is None
+    fps = {
+        invite_clamp_fingerprint(_Session()),
+        invite_clamp_fingerprint(_Session(qs="2026-01-01T00:00:00Z", qe="2026-02-01T00:00:00Z")),
+        invite_clamp_fingerprint(_Session(qw=24)),
+    }
+    assert len(fps) == 3 and invite_clamp_fingerprint(_Session(qw=168)) == invite_clamp_fingerprint(_Session(qw=168))
+
+
+@pytest.mark.parametrize(
+    ("history_hours", "expected"),
+    [
+        (0.0, (0.25, 1.0)),
+        (0.99, (0.25, 1.0)),
+        (1.0, (1.0, 1.0)),
+        (3.9, (1.0, 1.0)),
+        (4.0, (4.0, 1.0)),
+        (23.9, (4.0, 1.0)),
+        (24.0, (4.0, 24.0)),
+        (47.9, (4.0, 24.0)),
+        (48.0, (24.0, 24.0)),
+        (167.9, (24.0, 24.0)),
+        (168.0, (24.0, 168.0)),
+        (719.9, (24.0, 168.0)),
+        (720.0, (24.0, 168.0)),
+        (1270.0, (24.0, 168.0)),
+    ],
+)
+def test_band_table(history_hours: float, expected: tuple[float, float]) -> None:
+    assert pick_insights_default(history_hours) == expected
+
+
+def test_insights_defaults_and_ts_band_mirror() -> None:
+    for val in (None, math.nan, math.inf):
+        assert pick_insights_default(val) == STATIC_DEFAULT == (24.0, 168.0)
+    earliest = (_INSIGHTS_NOW - timedelta(hours=53 * 24)).isoformat()
+    assert history_hours_from_earliest(earliest, now=_INSIGHTS_NOW) == pytest.approx(53 * 24)
+    assert history_hours_from_earliest("2026-07-01", now=_INSIGHTS_NOW) == pytest.approx(6 * 24 + 12)
+    assert history_hours_from_earliest((_INSIGHTS_NOW + timedelta(hours=5)).isoformat(), now=_INSIGHTS_NOW) == 0.0
+    for bad in (None, "", "not-a-date"):
+        assert history_hours_from_earliest(bad, now=_INSIGHTS_NOW) is None
+
+    src = _TS_SOURCE.read_text()
+    body = src[src.index("export function pickInsightsDefault") :]
+    band_re = re.compile(
+        r"if\s*\(\s*h\s*<\s*([\d.]+)\s*\)\s*return\s*\{\s*window:\s*'([\d.]+)',\s*baseline:\s*'([\d.]+)'\s*\}"
+    )
+    ts_bands = [(float(u), float(w), float(b)) for u, w, b in band_re.findall(body)]
+    tails = re.findall(r"^\s*return\s*\{\s*window:\s*'([\d.]+)',\s*baseline:\s*'([\d.]+)'\s*\}", body, re.MULTILINE)
+    ts_bands.append((math.inf, float(tails[0][0]), float(tails[0][1])))
+    assert tuple(ts_bands) == _BANDS
+    m = re.search(r"STATIC_DEFAULT\s*=\s*\{\s*window:\s*'([\d.]+)',\s*baseline:\s*'([\d.]+)'\s*\}", src)
+    assert m is not None and (float(m.group(1)), float(m.group(2))) == STATIC_DEFAULT
+
+
+# ── Active requests & cron deferral ──────────────────────────────────────────
+
+
+def test_active_request_counter_primitives_and_reset():
+    _reset_for_tests()
+    assert active_request_count() == 0
+    increment_active_requests()
+    increment_active_requests()
+    assert active_request_count() == 2
+    decrement_active_requests()
+    assert active_request_count() == 1
+    decrement_active_requests()
+    decrement_active_requests()
+    assert active_request_count() == 0
+
+    increment_active_requests()
+    assert should_defer_cron("sync", "svc-A") is True and active_requests._defer_started_at
+    _reset_for_tests()
+    assert active_request_count() == 0 and active_requests._defer_started_at == {}
+
+
+def test_concurrent_increments_and_decrements():
+    _reset_for_tests()
+    b1 = threading.Barrier(50)
+    t1 = [threading.Thread(target=lambda: (b1.wait(), increment_active_requests())) for _ in range(50)]
+    for t in t1:
+        t.start()
+    for t in t1:
+        t.join()
+    assert active_request_count() == 50
+
+    _reset_for_tests()
+    for _ in range(10):
+        increment_active_requests()
+    b2 = threading.Barrier(30)
+    t2 = [threading.Thread(target=lambda: (b2.wait(), decrement_active_requests())) for _ in range(30)]
+    for t in t2:
+        t.start()
+    for t in t2:
+        t.join()
+    assert active_request_count() == 0
+
+
+def test_should_defer_cron_lifecycle_and_starvation(monkeypatch, caplog):
+    _reset_for_tests()
+    assert should_defer_cron("sync", "svc-A") is False
+    increment_active_requests()
+    assert should_defer_cron("sync", "svc-A", max_defer_secs=30.0) is True
+    first_started = active_requests._defer_started_at[("sync", "svc-A")]
+    assert should_defer_cron("sync", "svc-A", max_defer_secs=30.0) is True
+    assert active_requests._defer_started_at[("sync", "svc-A")] == first_started
+
+    assert should_defer_cron("sync", "svc-B") is True
+    assert should_defer_cron("optimize", "svc-A") is True
+    assert len(active_requests._defer_started_at) == 3
+
+    decrement_active_requests()
+    assert should_defer_cron("sync", "svc-A") is False
+    assert ("sync", "svc-A") not in active_requests._defer_started_at
+
+    increment_active_requests()
+    assert should_defer_cron("sync", "svc-A", max_defer_secs=0.01) is True
+    time.sleep(0.02)
+    with caplog.at_level(logging.WARNING, logger="backend.utils.active_requests"):
+        assert should_defer_cron("sync", "svc-A", max_defer_secs=0.01) is False
+    assert ("sync", "svc-A") not in active_requests._defer_started_at
+    assert any("active-request-gate" in r.getMessage() for r in caplog.records)
+
+    fake_now = [1000.0]
+    monkeypatch.setattr(active_requests.time, "monotonic", lambda: fake_now[0])
+    assert should_defer_cron("optimize", "svc-Z", max_defer_secs=30.0) is True
+    fake_now[0] = 1010.0
+    assert should_defer_cron("optimize", "svc-Z", max_defer_secs=30.0) is True
+    fake_now[0] = 1040.0
+    assert should_defer_cron("optimize", "svc-Z", max_defer_secs=30.0) is False
+    _reset_for_tests()
+
+
+def test_yield_to_api_behavior():
+    _reset_for_tests()
+    assert yield_to_api(max_wait_secs=1.0, poll_interval=0.05) == 0.0
+
+    increment_active_requests()
+    t = threading.Thread(target=lambda: (time.sleep(0.1), decrement_active_requests()))
+    t.start()
+    t0 = time.monotonic()
+    slept = yield_to_api(max_wait_secs=2.0, poll_interval=0.05)
+    elapsed = time.monotonic() - t0
+    t.join()
+    assert elapsed < 0.5 and 0.05 <= slept < 0.5
+
+    increment_active_requests()
+    sleep_calls: list[float] = []
+    try:
+        slept2 = yield_to_api(max_wait_secs=0.2, poll_interval=0.05)
+        assert 0.15 <= slept2 <= 0.3 and active_request_count() == 1
+        yield_to_api(max_wait_secs=0.2, poll_interval=0.05, sleep_fn=sleep_calls.append)
+    finally:
+        decrement_active_requests()
+    assert len(sleep_calls) >= 2 and all(s == 0.05 for s in sleep_calls)
+
+
+# ── SQLite / PG profiler ─────────────────────────────────────────────────────
+
+
+@pytest.fixture()
+def _request_collector():
+    token = _SQLITE_QUERIES.set(None)
+    yield
+    _SQLITE_QUERIES.reset(token)
+
+
+def test_sqlite_profiler_recording_and_ring_buffer(monkeypatch):
+    sqlite_profiler._record("CREATE TABLE t (x INTEGER)", None, 0.5, 0, "execute")
+    snap = sqlite_profiler.get_recent()
+    assert snap["buffer_size"] == 1 and snap["queries"][0]["sql"] == "CREATE TABLE t (x INTEGER)"
+
+    sqlite_profiler.clear()
+    sqlite_profiler._record("INSERT INTO t VALUES (?)", [(1,), (2,), (3,)], 1.2, 3, "executemany")
+    assert sqlite_profiler.get_recent()["queries"][0]["params_kind"] == "seq[3]"
+
+    sqlite_profiler.clear()
+    secret = "user-pii-do-not-capture@example.com"
+    sqlite_profiler._record("INSERT INTO t VALUES (?)", (secret,), 0.4, 1, "execute")
+    entry = sqlite_profiler.get_recent()["queries"][0]
+    assert secret not in entry["sql"] and all(secret not in str(v) for v in entry.values())
+
+    sqlite_profiler.clear()
+    for i in range(1, 5):
+        sqlite_profiler._record(f"SELECT {i}", None, 0.1, 1, "execute")
+        if i == 2:
+            midpoint = sqlite_profiler.get_recent()["last_seq"]
+    sqls = [q["sql"] for q in sqlite_profiler.get_recent(since_seq=midpoint)["queries"]]
+    assert sqls == ["SELECT 3", "SELECT 4"]
+
+    sqlite_profiler.clear()
+    for i in range(20):
+        sqlite_profiler._record(f"SELECT {i}", None, 0.1, 1, "execute")
+    assert [q["sql"] for q in sqlite_profiler.get_recent(limit=5)["queries"]] == [f"SELECT {i}" for i in range(15, 20)]
+
+    last_seq_before = sqlite_profiler.get_recent()["last_seq"]
+    sqlite_profiler.clear()
+    assert sqlite_profiler.get_recent()["buffer_size"] == 0
+    sqlite_profiler._record("SELECT 2", None, 0.1, 1, "execute")
+    assert sqlite_profiler.get_recent()["last_seq"] > last_seq_before
+
+    monkeypatch.setattr(sqlite_profiler, "_buffer", type(sqlite_profiler._buffer)(maxlen=10))
+    monkeypatch.setattr(sqlite_profiler, "_dropped", 0)
+    for _ in range(25):
+        sqlite_profiler._record("SELECT 1", None, 0.1, 1, "execute")
+    snap_cap = sqlite_profiler.get_recent()
+    assert snap_cap["buffer_size"] == 10 and snap_cap["dropped"] >= 15
+
+
+def test_sqlite_profiler_helpers_and_con_integration(monkeypatch, _request_collector):
+    con = base.get_con("test-svc-traffic")
+    assert isinstance(con, pg_connection.PgConnectionWrapper)
+    con.execute("SELECT 1")
+    assert any("SELECT 1" in q["sql"] for q in sqlite_profiler.get_recent()["queries"])
+
+    long_sql = "SELECT " + ", ".join(f"col_{i}" for i in range(1000))
+    assert "chars]" in sqlite_profiler._summarize_sql(long_sql)
+    assert "SELECT 1" in sqlite_profiler._summarize_sql(b"SELECT 1") and sqlite_profiler._summarize_sql(42) == "42"
+    assert (
+        sqlite_profiler._describe_params(None) == "none"
+        and sqlite_profiler._describe_params([1, 2, 3]) == "seq[3]"
+        and sqlite_profiler._describe_params((1,)) == "seq[1]"
+        and sqlite_profiler._describe_params({"a": 1, "b": 2}) == "map[2]"
+        and sqlite_profiler._describe_params(42) == "int"
+    )
+
+    sqlite_profiler.clear()
+    sqlite_profiler._record("SELECT 1", None, 0.1, 1, "execute")
+    assert _SQLITE_QUERIES.get() is None
+
+    log_throttle.start_call_tracking()
+    sqlite_profiler._record("CREATE TABLE t (x INTEGER)", None, 0.2, 0, "execute")
+    assert len(log_throttle.get_sqlite_queries()) == 1
+
+    monkeypatch.setattr(
+        log_throttle, "record_sqlite_query", lambda e: (_ for _ in ()).throw(RuntimeError("collector broken"))
+    )
+    sqlite_profiler._record("SELECT 1", None, 0.1, 1, "execute")
+
+    bad = MagicMock()
+    bad.append.side_effect = RuntimeError("buffer borked")
+    monkeypatch.setattr(sqlite_profiler, "_buffer", bad)
+    sqlite_profiler._record("SELECT 1", None, 0.5, 1, "execute")
+
+    monkeypatch.setattr(
+        query_registry.query_registry, "register", lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("down"))
+    )
+    assert sqlite_profiler._live_register("SQLite", "SELECT 1", con=None) == -1
+    sqlite_profiler._live_deregister(-1, error=None)
+    monkeypatch.setattr(query_registry.query_registry, "deregister", MagicMock(side_effect=RuntimeError("dereg fail")))
+    sqlite_profiler._live_deregister(42, error=None)
+
+
+# ── Structlog config ─────────────────────────────────────────────────────────
+
+
+def test_structlog_configuration_and_otel_context(monkeypatch):
+    structlog_config.configure_structlog()
+    structlog_config.configure_structlog()
+    assert structlog.is_configured()
+
+    out = structlog_config._add_otel_trace_context(None, "info", {"event": "test"})
+    assert "trace_id" not in out and "span_id" not in out
+
+    tracer = TracerProvider().get_tracer("test")
+    with patch.object(trace, "get_current_span", wraps=trace.get_current_span):
+        with tracer.start_as_current_span("test-span"):
+            out2 = structlog_config._add_otel_trace_context(None, "info", {"event": "test"})
+    assert len(out2["trace_id"]) == 32 and len(out2["span_id"]) == 16
+    int(out2["trace_id"], 16)
+    int(out2["span_id"], 16)
+
+    structlog.reset_defaults()
+    monkeypatch.setenv("STRUCTLOG_FORMAT", "json")
+    structlog_config.configure_structlog()
+    structlog.get_logger("json-test").info("event", k=1)
+
+
+def test_structlog_uvicorn_bridge_and_extra_fields(monkeypatch, capsys):
+    monkeypatch.setenv("STRUCTLOG_FORMAT", "json")
+    structlog_config.configure_structlog()
+    for name in structlog_config._UVICORN_LOGGERS:
+        lg = logging.getLogger(name)
+        lg.handlers = [logging.NullHandler()]
+        lg.propagate = False
+    structlog_config.bridge_uvicorn_loggers()
+    for name in structlog_config._UVICORN_LOGGERS:
+        lg = logging.getLogger(name)
+        assert lg.handlers == [] and lg.propagate is True
+
+    logging.getLogger("uvicorn.access").info('127.0.0.1 - "GET /x HTTP/1.1" 200')
+    rec1 = json.loads(capsys.readouterr().err.strip().splitlines()[-1])
+    assert rec1["event"] == '127.0.0.1 - "GET /x HTTP/1.1" 200'
+
+    logging.getLogger("backend.web_vitals").info(
+        "web_vitals", extra={"web_vitals_name": "LCP", "web_vitals_rating": "good"}
+    )
+    rec2 = json.loads(capsys.readouterr().err.strip().splitlines()[-1])
+    assert (rec2["event"], rec2["web_vitals_name"], rec2["web_vitals_rating"]) == ("web_vitals", "LCP", "good")
+
+    logging.getLogger("uvicorn.error").info("Uvicorn running", extra={"color_message": "Uvicorn \x1b[1mrunning\x1b[0m"})
+    rec3 = json.loads(capsys.readouterr().err.strip().splitlines()[-1])
+    assert rec3["event"] == "Uvicorn running" and "color_message" not in rec3
+
+
+def test_console_exception_traceback_never_renders_local_secrets(monkeypatch, capsys):
+    monkeypatch.delenv("STRUCTLOG_FORMAT", raising=False)
+    structlog_config.configure_structlog()
+
+    def _load_cfg():
+        return {
+            "fos_access_key_id": "AKIAFAKEEXAMPLE00000",
+            "fos_secret_access_key": "fake-fos-secret-do-not-leak-00000000",
+            "fastly_api_key": "fake-fastly-token-do-not-leak-11111111",
+        }
+
+    def _reconcile(cfg):
+        if not cfg.get("nonexistent_marker"):
+            raise RuntimeError("boom")
+
+    try:
+        _reconcile(_load_cfg())
+    except RuntimeError:
+        logging.getLogger("test.rum_sync").warning("Faro reconcile failed for svc-fake", exc_info=True)
+
+    output = capsys.readouterr().err
+    for secret in (
+        "AKIAFAKEEXAMPLE00000",
+        "fake-fos-secret-do-not-leak-00000000",
+        "fake-fastly-token-do-not-leak-11111111",
+    ):
+        assert secret not in output
+    assert "RuntimeError" in output and "Faro reconcile failed for svc-fake" in output
+
+
+# ── System jobs & testcontainers smoke ───────────────────────────────────────
+
+
+def test_system_jobs_status_recording():
+    assert system_jobs.get_system_job_status() == {}
+    system_jobs.record_job_run("rdns", status="success", duration_s=1.234, detail="processed 12")
+    entry = system_jobs.get_system_job_status()["rdns"]
+    assert (entry["status"], entry["duration_s"], entry["detail"]) == ("success", 1.23, "processed 12")
+    assert entry["last_run_at"].endswith("Z")
+
+    system_jobs.record_job_run("rdns", "error", 2.0, detail="boom")
+    snap = system_jobs.get_system_job_status()
+    assert (snap["rdns"]["status"], snap["rdns"]["duration_s"], snap["rdns"]["detail"]) == ("error", 2.0, "boom")
+    snap.pop("rdns")
+    assert "rdns" in system_jobs.get_system_job_status()
+
+    with patch("backend.cron.decorators.iso_z_now", return_value="2026-05-15T12:30:45Z"):
+        system_jobs.record_job_run("bots", "success", 0.1)
+    assert system_jobs.get_system_job_status()["bots"]["last_run_at"] == "2026-05-15T12:30:45Z"
+
+
+def _docker_available() -> bool:
+    if shutil.which("docker") is None:
+        return False
+    for path in ("/var/run/docker.sock", f"/Users/{os.environ.get('USER') or ''}/.docker/run/docker.sock"):
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+                s.settimeout(0.5)
+                s.connect(path)
+                return True
+        except OSError:
+            continue
+    return False
+
+
+@pytest.mark.skipif(not _docker_available(), reason="testcontainers requires a running Docker daemon")
+def test_can_spawn_a_container_and_read_back_its_id():
+    pytest.importorskip("testcontainers.core.container")
+    from testcontainers.core.container import DockerContainer
+
+    with DockerContainer("alpine:3.20").with_command("sleep 60") as c:
+        assert c.get_wrapped_container().id
+
+
+# ── Merged from tests/utils/test_terraform_gen.py ──
+
+import subprocess
+
+import pytest
+from backend.utils.terraform_gen import generate_terraform
+
+TERRAFORM_INSTALLED = shutil.which("terraform") is not None
+RUN_VALIDATE = os.environ.get("TERRAFORM_VALIDATE") == "1"
+TFLINT_INSTALLED = shutil.which("tflint") is not None
+TFLINT_REQUIRED = os.environ.get("TFLINT_REQUIRED") == "1"
+
+if TFLINT_REQUIRED and not TFLINT_INSTALLED:
+    raise RuntimeError(
+        "TFLINT_REQUIRED=1 but the tflint binary is not on PATH. Install tflint or unset TFLINT_REQUIRED to allow skipping."
+    )
+
+
+# ── Fixtures ──────────────────────────────────────────────────────────────────
+
+
+def _baseline_cfg() -> dict:
+    """Representative cfg covering all rendered branches except custom fields."""
+    return {
+        "logging_service_id": "SU3xxxxxxxxxxxxxx0000",
+        "endpoint_name": "fastly_log_analysis",
+        "fos_region": "us-east-1",
+        "fos_bucket_name": "my-test-bucket",
+        "fos_prefix": "logs",
+        "log_period": 60,
+        "cdn_service_name": "Test CDN Proxy",
+        "cdn_prefix": "my-test-bucket",
+        "cdn_shield": "iad-va-us",
+        "cdn_secret": "test-secret-do-not-use",
+        "sample_rate": 100,
+        "edge_only": False,
+        "custom_condition": "",
+        "log_fields": {
+            "groups": ["A"],
+            "preset": "minimal",
+            "schema_version": 2,
+            "custom_fields": [],
+        },
+    }
+
+
+def _write_files(out: dict[str, str], dest: str | Path) -> None:
+    dest = os.fspath(dest)
+    """Write generator output to ``dest``, mirroring the zip-export layout."""
+    for fname, content in out.items():
+        if fname == "instructions":
+            continue
+        full = os.path.join(dest, fname)
+        os.makedirs(os.path.dirname(full), exist_ok=True) if "/" in fname else None
+        with open(full, "w") as f:
+            f.write(content)
+
+
+# ── Smoke / happy path ───────────────────────────────────────────────────────
+
+
+def test_returns_expected_files():
+    out = generate_terraform(_baseline_cfg(), "AKIATEST", "secrettest")
+    expected = {
+        "cdn_proxy.vcl",
+        "log_format.vcl",
+        "fos.tf.json",
+        "cdn_proxy.tf.json",
+        "logging_service.tf.json",
+        "versions.tf.json",
+        "instructions",
+    }
+    assert expected.issubset(out.keys()), f"Missing files: {expected - set(out.keys())}"
+    # Snippet files prefixed by their phase
+    snippet_files = [f for f in out if f.startswith("capture_snippets/")]
+    assert snippet_files, "Expected at least one capture snippet"
+
+
+def test_every_tf_json_file_parses_as_json():
+    """The generator must emit syntactically valid JSON. Catches accidental
+    f-string holdovers, missing commas, or stray HCL constructs."""
+    out = generate_terraform(_baseline_cfg(), "AKIA", "sec")
+    for fname, content in out.items():
+        if not fname.endswith(".tf.json"):
+            continue
+        try:
+            parsed = json.loads(content)
+        except json.JSONDecodeError as e:
+            pytest.fail(f"{fname} is not valid JSON: {e}\n--- content ---\n{content}")
+        assert isinstance(parsed, dict), f"{fname} top-level must be an object"
+
+
+def test_versions_tf_pins_fastly_and_aws_providers_by_major():
+    """versions.tf.json must pin the Fastly and AWS providers with the
+    pessimistic operator so a major-version bump from either provider
+    (Fastly v6, AWS v7) doesn't silently break customer apply.
+
+    If you intentionally bump the major, update this test deliberately AND
+    the matching scaffold in test_baseline_output_passes_terraform_validate.
+    """
+    out = generate_terraform(_baseline_cfg(), "AKIA", "sec")
+    assert "versions.tf.json" in out
+
+    v = json.loads(out["versions.tf.json"])
+    tf_block = v["terraform"]
+    assert "required_version" in tf_block, "must declare a Terraform CLI floor"
+
+    providers = tf_block["required_providers"]
+    assert providers["aws"]["source"] == "hashicorp/aws"
+    assert providers["fastly"]["source"] == "fastly/fastly"
+    # Pessimistic constraint is the contract. >= or no operator would let a
+    # major bump through. Test both providers explicitly.
+    assert providers["aws"]["version"] == "~> 5.0", (
+        f"expected '~> 5.0' on aws to gate major bumps; got {providers['aws']['version']!r}"
+    )
+    assert providers["fastly"]["version"] == "~> 5.0", (
+        f"expected '~> 5.0' on fastly to gate major bumps; got {providers['fastly']['version']!r}"
+    )
+    # Belt-and-braces: exactly TWO required providers — no accidental third
+    # undeclared source slipping in.
+    assert set(providers.keys()) == {"aws", "fastly"}
+
+
+@pytest.mark.skipif(not TERRAFORM_INSTALLED, reason="terraform binary not on PATH")
+def test_baseline_output_passes_terraform_fmt(tmp_path):
+    out = generate_terraform(_baseline_cfg(), "AKIA", "sec")
+    _write_files(out, str(tmp_path))
+
+    # Terraform fmt understands .tf.json (it normalises trailing newlines /
+    # 2-space indent). Using a relative target sidesteps the macOS
+    # /private/-prefix path confusion documented at the prior HCL revision.
+    r = subprocess.run(
+        ["terraform", "fmt", "-check", "-recursive", "."],
+        cwd=str(tmp_path),
+        capture_output=True,
+        text=True,
+    )
+    assert r.returncode == 0, (
+        f"terraform fmt -check failed.\nrc={r.returncode}\nstdout:\n{r.stdout}\nstderr:\n{r.stderr}"
+    )
+
+
+# Shares the `tf_provider_cache.lock` with the slower resource-graph
+# `terraform test`; under `-n auto` this test can block on that lock long
+# enough to blow the default 60s pytest-timeout (which `os._exit()`s the worker
+# and loses its coverage). Headroom for lock-wait + its own init/validate.
+# Heavyweight real-terraform subprocess: run in the dedicated serial (`-n 0`,
+# un-niced) test-ci step, excluded from the niced `-n auto` pool where its
+# xdist worker hard-crashed (see Makefile/ci.yml split).
+@pytest.mark.terraform_cli
+@pytest.mark.timeout(300)
+@pytest.mark.skipif(
+    not (TERRAFORM_INSTALLED and RUN_VALIDATE), reason="set TERRAFORM_VALIDATE=1 to run validate (needs network)"
+)
+def test_baseline_output_passes_terraform_validate(tmp_path):
+    """Real ``terraform validate``. Requires network for provider download."""
+    out = generate_terraform(_baseline_cfg(), "AKIA", "sec")
+    _write_files(out, str(tmp_path))
+
+    # The generator emits its own versions.tf.json with pinned providers.
+    # Only the provider *configuration* needs stubbing for init/validate.
+    (tmp_path / "_providers.tf").write_text(
+        """
+provider "aws"    { region = "us-east-1" }
+provider "fastly" { api_key = "stub" }
+"""
+    )
+
+    from pathlib import Path
+
+    from filelock import FileLock
+
+    cache_dir = Path(__file__).parents[2] / "cache" / "tf_provider_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    env = os.environ.copy()
+    env["TF_PLUGIN_CACHE_DIR"] = str(cache_dir)
+
+    lock_path = cache_dir.parent / "tf_provider_cache.lock"
+    with FileLock(str(lock_path)):
+        init = subprocess.run(
+            ["terraform", "init", "-backend=false", "-input=false", "-no-color"],
+            cwd=str(tmp_path),
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        assert init.returncode == 0, f"terraform init failed:\n{init.stdout}\n{init.stderr}"
+
+        val = subprocess.run(
+            ["terraform", "validate", "-no-color"],
+            cwd=str(tmp_path),
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        assert val.returncode == 0, f"terraform validate failed:\n{val.stdout}\n{val.stderr}"
+
+
+@pytest.mark.skipif(not TFLINT_INSTALLED, reason="tflint not on PATH")
+def test_baseline_output_passes_tflint(tmp_path):
+    """tflint static analysis on the generated .tf.json bundle.
+
+    ``terraform validate`` catches syntactic and schema-level errors;
+    tflint adds provider-specific best-practice checks (deprecated
+    arguments, unused-decl, mis-typed values) that the official
+    validator misses. Lives behind a binary-presence skip.
+
+    COVHON-01: this is **local-opt-in only** — CI does NOT install tflint, so
+    this test never runs there (unlike the falco VCL tests, which CI installs
+    and gates via FALCO_REQUIRED). The earlier docstring claimed CI ran it;
+    that was false. To actually gate on it, add a tflint install step to
+    .github/workflows/ci.yml (mirror the falco curl-binary step) plus a
+    TFLINT_REQUIRED collection guard — note tflint needs a ``.tflint.hcl``
+    plugin config to load the Fastly provider rules, or it runs core rules only.
+
+    Install locally:
+        curl -sSL https://github.com/terraform-linters/tflint/releases/latest/download/tflint_darwin_arm64.zip \\
+            -o /tmp/tflint.zip && unzip /tmp/tflint.zip -d /usr/local/bin
+    """
+    out = generate_terraform(_baseline_cfg(), "AKIA", "sec")
+    _write_files(out, str(tmp_path))
+
+    init = subprocess.run(
+        ["tflint", "--init"],
+        cwd=str(tmp_path),
+        capture_output=True,
+        text=True,
+    )
+    assert init.returncode == 0, f"tflint --init failed:\n{init.stdout}\n{init.stderr}"
+
+    r = subprocess.run(
+        ["tflint", "--format", "compact"],
+        cwd=str(tmp_path),
+        capture_output=True,
+        text=True,
+    )
+    # tflint returns 0 on no issues, 2 on issues found (per its docs).
+    # rc==1 is "tool error" — treat that as a hard fail too.
+    assert r.returncode == 0, (
+        f"tflint reported issues on generated terraform output:\n"
+        f"rc={r.returncode}\nstdout:\n{r.stdout}\nstderr:\n{r.stderr}"
+    )
+
+
+# ── Idempotency ──────────────────────────────────────────────────────────────
+
+
+def test_output_is_byte_identical_across_calls():
+    """The same cfg must produce the same files. Catches non-deterministic
+    ordering (e.g. set iteration), timestamps, random IDs.
+
+    Exception: ``cdn_proxy.vcl`` embeds a per-load fallback secret
+    generated by ``secrets.token_hex(32)`` inside ``load_vcl``. This is
+    intentional — the fallback only matters when the ``cdn_auth``
+    dictionary is unprovisioned, and a fresh random value per
+    provisioning ensures the unprovisioned state fails closed instead
+    of accepting an attacker-controlled empty key. Mask the 64-hex-char
+    fallback string out of the diff so we still catch every OTHER
+    accidental source of non-determinism.
+    """
+    import re as _re
+
+    out1 = generate_terraform(_baseline_cfg(), "AKIA", "sec")
+    out2 = generate_terraform(_baseline_cfg(), "AKIA", "sec")
+    assert out1.keys() == out2.keys()
+    # 64 lowercase-hex chars = ``secrets.token_hex(32)`` output; replace
+    # both sides with a placeholder before comparing.
+    hex64 = _re.compile(r"\b[0-9a-f]{64}\b")
+    for fname in out1:
+        a = hex64.sub("<HEX64>", out1[fname])
+        b = hex64.sub("<HEX64>", out2[fname])
+        assert a == b, f"File {fname} differs across calls"
+
+
+def test_output_differs_when_cfg_differs():
+    """Sanity that we're not just hashing the same string twice."""
+    cfg1 = _baseline_cfg()
+    cfg2 = _baseline_cfg()
+    cfg2["fos_bucket_name"] = "different-bucket"
+    out1 = generate_terraform(cfg1, "AKIA", "sec")
+    out2 = generate_terraform(cfg2, "AKIA", "sec")
+    assert out1["fos.tf.json"] != out2["fos.tf.json"]
+    parsed = json.loads(out2["fos.tf.json"])
+    assert parsed["resource"]["aws_s3_bucket"]["fos_bucket"]["bucket"] == "different-bucket"
+
+
+# ── Custom field round trip ──────────────────────────────────────────────────
+
+
+def test_custom_field_emits_matching_capture_snippet():
+    cfg = _baseline_cfg()
+    cfg["log_fields"]["custom_fields"] = [
+        {
+            "name": "x_env",
+            "label": "Environment",
+            "vcl_log_expression": "req.http.X-Env",
+            "collection_stage": "edge",
+            "duckdb_type": "VARCHAR",
+            "value_type": "string",
+            "bytes_estimate": 10,
+            "enabled": True,
+        }
+    ]
+    out = generate_terraform(cfg, "AKIA", "sec")
+
+    # The recv snippet should reference the field name (it's the edge stage)
+    recv = out.get("capture_snippets/recv.vcl", "")
+    assert "x_env" in recv, f"Expected 'x_env' in recv snippet, got: {recv[:200]!r}"
+
+    # log_format.vcl should declare it
+    assert '"x_env"' in out["log_format.vcl"]
+
+
+def test_custom_origin_field_emits_in_deliver_phase():
+    cfg = _baseline_cfg()
+    cfg["log_fields"]["custom_fields"] = [
+        {
+            "name": "bereq_x",
+            "label": "Origin Header",
+            "vcl_log_expression": "beresp.http.x-something",
+            "collection_stage": "origin",
+            "origin_log_frequency": "all",
+            "duckdb_type": "VARCHAR",
+            "value_type": "string",
+            "bytes_estimate": 20,
+            "enabled": True,
+        }
+    ]
+    out = generate_terraform(cfg, "AKIA", "sec")
+    # Origin fields land in the fetch (capture) and deliver (promote) snippets
+    assert "bereq_x" in out.get("capture_snippets/fetch.vcl", ""), "origin field missing from fetch snippet"
+    assert "bereq_x" in out.get("capture_snippets/deliver.vcl", ""), "origin field missing from deliver snippet"
+
+
+# ── Injection / escape ──────────────────────────────────────────────────────
+
+
+@pytest.mark.skipif(not TERRAFORM_INSTALLED, reason="terraform binary not on PATH")
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        # Strings the generator splices into JSON string values. JSON encoding
+        # owns quote/backslash/newline; the test confirms the integration
+        # actually parses + that ``terraform fmt`` accepts the result.
+        ("fos_bucket_name", 'b"; rm -rf /; #'),
+        ("endpoint_name", 'name"; resource "extra" "x" {} #'),
+        ("cdn_service_name", 'svc\\name with "quotes"'),
+        ("custom_condition", 'req.url ~ "test\\b"'),
+        ("cdn_secret", 'secret"with"quotes'),
+        ("fos_region", 'r"\nresource "evil" "x" {}'),
+    ],
+)
+def test_injection_does_not_break_terraform_fmt(tmp_path, field, value):
+    """User-supplied strings flow into JSON string values. ``json.dumps``
+    handles every escape it owns (quote, backslash, control bytes) so the
+    file MUST always parse, regardless of what the attacker passes."""
+    cfg = _baseline_cfg()
+    cfg[field] = value
+    out = generate_terraform(cfg, "AKIA", "sec")
+    _write_files(out, str(tmp_path))
+
+    # The .tf.json files must parse as JSON unconditionally.
+    for fname, content in out.items():
+        if fname.endswith(".tf.json"):
+            json.loads(content)  # raises on failure
+
+    # Use `terraform fmt` (not -check) — it parses the file. If the
+    # injection broke JSON syntax it would error with a non-zero rc.
+    r = subprocess.run(
+        ["terraform", "fmt", "-recursive", "."],
+        cwd=str(tmp_path),
+        capture_output=True,
+        text=True,
+    )
+    assert "Error:" not in r.stderr, (
+        f"Injection broke parse for {field}={value!r}:\nstdout: {r.stdout[:400]}\nstderr: {r.stderr[:400]}"
+    )
+
+
+def test_template_prefix_escape_is_applied_to_user_input():
+    """JSON encoding doesn't escape Terraform's ``${`` / ``%{`` template
+    syntax (Terraform interprets these inside string values even in JSON
+    config). The generator must convert them to ``$${`` / ``%%{`` for any
+    user-supplied value so attacker input can't trigger interpolation.
+
+    Replaces the prior HCL-specific test that asserted literal byte
+    sequences from the old escape regex; the JSON path's only remaining
+    template-prefix concern is the ``$``/``%`` doubling."""
+    cfg = _baseline_cfg()
+    # The region flows into multiple files (fos_host derivation in
+    # cdn_proxy.tf.json, dictionary items, etc.). If unescaped, the
+    # ``${file("/etc/passwd")}`` would expand at apply time.
+    cfg["fos_region"] = 'us-east-1${file("/etc/passwd")}%{ if true }x%{ endif }'
+    out = generate_terraform(cfg, "AKIA", "sec")
+
+    # Must appear in the rendered files with the doubled prefixes.
+    cdn = json.loads(out["cdn_proxy.tf.json"])
+    items = cdn["resource"]["fastly_service_dictionary_items"]["fos_credentials"]["items"]
+    assert items["region"].startswith('us-east-1$${file("/etc/passwd")}%%{ if true }x%%{ endif }')
+
+    # And the raw original prefix must NOT appear anywhere in any rendered
+    # .tf.json file (defense in depth — catches a future field that
+    # forgets to call the escape helper). The doubled forms (``$${`` /
+    # ``%%{``) contain the raw forms as substrings, so check that what
+    # appears is ONLY the doubled form (raw count == doubled count).
+    for fname, content in out.items():
+        if not fname.endswith(".tf.json"):
+            continue
+        raw_dollar = content.count("${")
+        doubled_dollar = content.count("$${")
+        # Authored Terraform-interpolation refs in the generator itself
+        # (e.g. ``${aws_s3_bucket.fos_bucket.bucket}``) use raw ``${``
+        # intentionally — those aren't doubled. Count user-input-derived
+        # raw forms by subtracting the doubled count's contribution.
+        unescaped_dollar = raw_dollar - doubled_dollar
+        # All authored refs in cdn_proxy.tf.json + logging_service.tf.json
+        # are accounted for; an attacker-injected ${file()} would push this
+        # over the authored baseline. The strict check: the attacker
+        # payload ``${file("/etc/passwd")}`` must not be present as a
+        # standalone substring (i.e. not immediately preceded by ``$``).
+        assert '$${file("/etc/passwd")}' in content or '${file("/etc/passwd")}' not in content, (
+            f"unescaped ${{file()}} reached {fname} — template-prefix escape missing"
+        )
+        # %{ directives have no authored counterpart in the generator —
+        # any raw ``%{`` is automatically suspect. Count: raw must equal
+        # doubled (every ``%{`` in the file must be part of a ``%%{``).
+        raw_pct = content.count("%{")
+        doubled_pct = content.count("%%{")
+        assert raw_pct == doubled_pct, (
+            f"{fname} has an unescaped %{{}} template-directive prefix "
+            f"(raw=%{{ count {raw_pct}, doubled=%%{{ count {doubled_pct})"
+        )
+
+
+def test_quotes_in_user_input_are_json_escaped():
+    """A bucket name with a double-quote MUST land in the JSON output as
+    ``\\\"`` (JSON escape), not be stripped or corrupted."""
+    cfg = _baseline_cfg()
+    cfg["fos_bucket_name"] = 'bucket"with"quotes'
+    out = generate_terraform(cfg, "AKIA", "sec")
+    parsed = json.loads(out["fos.tf.json"])
+    assert parsed["resource"]["aws_s3_bucket"]["fos_bucket"]["bucket"] == 'bucket"with"quotes'
+
+
+# ── Syrupy snapshot of generated Terraform (audit follow-up) ────────────────
+
+
+def test_baseline_output_matches_snapshot(snapshot):
+    """Snapshot the full set of generated files for the baseline cfg.
+
+    ``terraform fmt`` + ``terraform validate`` already catch syntax
+    breakage; this snapshot catches SEMANTIC drift — a resource name
+    renamed, a label removed, a default region changed. The diff in a
+    snapshot update review is the audit trail for any generator change.
+
+    Refresh with::
+
+        uv run pytest tests/utils/test_fastly_api.py \
+            --snapshot-update
+
+    …then read the diff line-by-line before committing.
+
+    Scrubs the per-load ``secrets.token_hex(32)`` fallback secret
+    embedded in cdn_proxy.vcl (see test_output_is_byte_identical_across_calls
+    for the rationale) so the snapshot stays stable across runs.
+    """
+    import re as _re
+
+    out = generate_terraform(_baseline_cfg(), "AKIATESTSTABLE", "test-secret-stable")
+
+    hex64 = _re.compile(r"\b[0-9a-f]{64}\b")
+    snapshot_view = {fname: hex64.sub("<HEX64>", content) for fname, content in sorted(out.items())}
+    assert snapshot_view == snapshot
+
+
+# ── Merged from test_terraform_resource_graph.py ──────────────────────────────────────────────
+
+import os
+import shutil
+from pathlib import Path
+
+import pytest
+
+TERRAFORM_INSTALLED = shutil.which("terraform") is not None
+RUN_VALIDATE = os.environ.get("TERRAFORM_VALIDATE") == "1"
+
+TFTEST_DIR = Path(__file__).parent / "terraform_tests"
+
+
+# `terraform init` + `terraform test` (plan mode) is ~46s solo; under `make
+# ci`'s `-n auto` it also serializes behind the sibling `terraform validate`
+# test on the shared `tf_provider_cache.lock`, so the lock-wait eats into the
+# default 60s pytest-timeout. The thread-method timeout `os._exit()`s the xdist
+# worker — failing this test *and* discarding the worker's coverage data. Give
+# it generous headroom (the suite-wide 10-min CI timeout is the real backstop).
+# Heavyweight real-terraform subprocess: run in the dedicated serial (`-n 0`,
+# un-niced) test-ci step, excluded from the niced `-n auto` pool where its
+# xdist worker hard-crashed (see Makefile/ci.yml split).
+@pytest.mark.terraform_cli
+@pytest.mark.timeout(300)
+@pytest.mark.skipif(
+    not (TERRAFORM_INSTALLED and RUN_VALIDATE),
+    reason="set TERRAFORM_VALIDATE=1 + install terraform to run resource-graph assertions",
+)
+def test_resource_graph_assertions_via_terraform_test(tmp_path):
+    out = generate_terraform(_baseline_cfg(), "AKIA_TEST_KEY", "secret_test_value")
+    _write_files(out, tmp_path)
+
+    # Stub provider configs — `command = plan` in the .tftest.hcl means no
+    # real API calls happen, but the providers still need to *initialize*.
+    # The skip_* flags neutralize AWS's IMDS/STS auth dance. The Fastly
+    # provider accepts a non-empty api_key for plan-only operations.
+    (tmp_path / "_providers.tf").write_text(
+        """
+provider "aws" {
+  region                      = "us-east-1"
+  access_key                  = "AKIA_TEST_KEY"
+  secret_key                  = "secret_test_value"
+  skip_credentials_validation = true
+  skip_region_validation      = true
+  skip_requesting_account_id  = true
+  skip_metadata_api_check     = true
+}
+
+provider "fastly" {
+  api_key = "fastly-test-key"
+}
+"""
+    )
+
+    # `terraform test` looks for .tftest.hcl in the module root or the
+    # `tests/` subdir. Copy the resource_graph file in so the layout is
+    # what the CLI expects.
+    shutil.copy(TFTEST_DIR / "resource_graph.tftest.hcl", tmp_path / "resource_graph.tftest.hcl")
+
+    from pathlib import Path
+
+    from filelock import FileLock
+
+    cache_dir = Path(__file__).parents[2] / "cache" / "tf_provider_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    env = os.environ.copy()
+    env["TF_PLUGIN_CACHE_DIR"] = str(cache_dir)
+
+    lock_path = cache_dir.parent / "tf_provider_cache.lock"
+    with FileLock(str(lock_path)):
+        init = subprocess.run(
+            ["terraform", "init", "-backend=false", "-input=false", "-no-color"],
+            cwd=str(tmp_path),
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        assert init.returncode == 0, f"terraform init failed:\n{init.stdout}\n{init.stderr}"
+
+        # `terraform test` runs each `run` block and reports per-assertion failures.
+        test = subprocess.run(
+            ["terraform", "test", "-no-color"],
+            cwd=str(tmp_path),
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        assert test.returncode == 0, (
+            f"terraform test failed (resource-graph assertion broke):\n"
+            f"--- stdout ---\n{test.stdout}\n"
+            f"--- stderr ---\n{test.stderr}"
+        )
+
+    # Sanity: every run block should report as `pass`. The stdout has
+    # lines like "  run \"foo\"... pass". If the binary's output format
+    # changes, the rc check above is still the source of truth.
+    assert "fail" not in test.stdout.lower() or "0 failed" in test.stdout.lower(), (
+        f"unexpected failure in terraform test output:\n{test.stdout}"
+    )
+
+
+# ── Merged from tests/utils/test_fos_setup.py ──
+
+"""Tests for ``backend.provision.fos_setup`` — FOS bucket + access-key CRUD.
+
+This module is the provisioning CLI's S3 layer. Its operations are
+hard-to-reverse (creating buckets, generating keys) and rarely run in
+production, so the tests pin happy paths + the idempotency branches
+(already-exists detection) that protect against double-provisioning
+when a user re-runs the wizard.
+
+All boto3 + Fastly API calls are mocked at the client boundary.
+"""
+
+
+import pytest
+from botocore.exceptions import ClientError
+
+from backend.provision import fos_setup
+
+# ── _get_fos_s3_client ─────────────────────────────────────────────────────
+
+
+def test_get_fos_s3_client_returns_raw_boto_when_no_service_id():
+    """Without a service_id (e.g. the standalone CLI before a service
+    is registered), the helper returns the bare boto3 client and
+    skips telemetry. Pinned because wrapping a raw boto3 client in
+    the tracker without a service_id would NPE on flush()."""
+    with patch("boto3.client") as mock_boto:
+        mock_boto.return_value = "raw-client"
+        out = fos_setup._get_fos_s3_client("k", "s", "us-east-1")
+
+    assert out == "raw-client"
+
+
+def test_get_fos_s3_client_wraps_with_tracker_when_service_id_provided():
+    """When a service_id is supplied (e.g. by the orchestrator), the
+    boto3 client is wrapped in _ProvisioningTracker so every call
+    lands in usage_log. Pinned because losing this wrapper was the
+    bug that left provisioning ops invisible to dashboards."""
+    with patch("boto3.client") as mock_boto:
+        mock_boto.return_value = MagicMock()
+        out = fos_setup._get_fos_s3_client("k", "s", "us-east-1", service_id="svc-1", bucket_name="my-bucket")
+
+    assert isinstance(out, fos_setup._ProvisioningTracker)
+    assert out._service_id == "svc-1"
+    assert out._bucket_name == "my-bucket"
+
+
+def test_get_fos_s3_client_uses_region_endpoint():
+    """The endpoint URL is derived from ``region_endpoint(region)``,
+    NOT hardcoded to us-east-1. Pinned because losing this would
+    silently route eu-west-1 traffic to the US shard."""
+    with (
+        patch("boto3.client") as mock_boto,
+        patch("backend.core.fastly.utils.region_endpoint", return_value="eu-west-1.object.fastlystorage.app"),
+    ):
+        fos_setup._get_fos_s3_client("k", "s", "eu-west-1")
+
+    kwargs = mock_boto.call_args.kwargs
+    assert "eu-west-1.object.fastlystorage.app" in kwargs["endpoint_url"]
+    assert kwargs["region_name"] == "eu-west-1"
+
+
+# ── ensure_fos_bucket ──────────────────────────────────────────────────────
+
+
+def test_ensure_fos_bucket_returns_true_when_bucket_exists():
+    """``head_bucket`` succeeds → bucket exists → no create call.
+    Pinned because re-creating would fail with BucketAlreadyExists
+    and break the provisioning wizard on re-runs."""
+    fake_s3 = MagicMock()
+    fake_s3.head_bucket.return_value = {}  # 200 OK
+
+    with patch("backend.provision.fos_setup._get_fos_s3_client", return_value=fake_s3):
+        out = fos_setup.ensure_fos_bucket("my-bucket", "us-east-1", "k", "s")
+
+    assert out is True
+    fake_s3.create_bucket.assert_not_called()
+
+
+def test_ensure_fos_bucket_creates_when_head_raises_404():
+    """``head_bucket`` raises (bucket missing) → call ``create_bucket``.
+    Pinned because a refactor that re-throws on any ClientError would
+    abort first-time provisioning."""
+    fake_s3 = MagicMock()
+    fake_s3.head_bucket.side_effect = ClientError({"Error": {"Code": "404", "Message": "Not Found"}}, "HeadBucket")
+
+    with patch("backend.provision.fos_setup._get_fos_s3_client", return_value=fake_s3):
+        out = fos_setup.ensure_fos_bucket("new-bucket", "us-east-1", "k", "s")
+
+    assert out is True
+    fake_s3.create_bucket.assert_called_once_with(Bucket="new-bucket")
+
+
+def test_ensure_fos_bucket_calls_status_callback_on_create():
+    """When a ``status_cb`` is provided, the wizard surfaces "Creating
+    bucket..." + "Bucket created" to the user. Pinned because losing
+    these would make the provisioning UI silent during a long step."""
+    fake_s3 = MagicMock()
+    fake_s3.head_bucket.side_effect = ClientError({"Error": {"Code": "404", "Message": "x"}}, "HeadBucket")
+
+    statuses: list[str] = []
+    with patch("backend.provision.fos_setup._get_fos_s3_client", return_value=fake_s3):
+        fos_setup.ensure_fos_bucket("b", "us-east-1", "k", "s", status_cb=statuses.append)
+
+    assert any("Creating bucket" in s for s in statuses)
+    assert any("Bucket created" in s for s in statuses)
+
+
+def test_ensure_fos_bucket_raises_runtime_error_on_create_failure():
+    """A ClientError from ``create_bucket`` (perms denied, quota) →
+    RuntimeError with the cause. Pinned because RuntimeError is what
+    the wizard's outer try/except catches to render a clear error."""
+    fake_s3 = MagicMock()
+    fake_s3.head_bucket.side_effect = ClientError({"Error": {"Code": "404", "Message": "x"}}, "HeadBucket")
+    fake_s3.create_bucket.side_effect = ClientError(
+        {"Error": {"Code": "AccessDenied", "Message": "perms"}}, "CreateBucket"
+    )
+
+    with patch("backend.provision.fos_setup._get_fos_s3_client", return_value=fake_s3):
+        with pytest.raises(RuntimeError, match="Could not create FOS bucket"):
+            fos_setup.ensure_fos_bucket("b", "us-east-1", "k", "s")
+
+
+# ── delete_fos_bucket ─────────────────────────────────────────────────────
+
+
+def test_delete_fos_bucket_short_circuits_when_already_deleted():
+    """head_bucket → 404 → no list_objects / delete_bucket calls.
+    Pinned because the teardown is idempotent — running it twice
+    must not error."""
+    fake_s3 = MagicMock()
+    fake_s3.head_bucket.side_effect = ClientError({"Error": {"Code": "404", "Message": "x"}}, "HeadBucket")
+
+    with patch("backend.provision.fos_setup._get_fos_s3_client", return_value=fake_s3):
+        fos_setup.delete_fos_bucket("b", "us-east-1", "k", "s")  # must not raise
+
+    fake_s3.delete_bucket.assert_not_called()
+
+
+def test_delete_fos_bucket_empties_then_deletes_on_happy_path():
+    """Bucket has objects → list_objects + delete_objects + delete_bucket.
+    Pinned because skipping the empty step would surface as a
+    BucketNotEmpty error after a few attempts."""
+    fake_s3 = MagicMock()
+    fake_s3.head_bucket.return_value = {}
+    fake_s3.list_multipart_uploads.return_value = {"Uploads": []}
+
+    fake_paginator = MagicMock()
+    fake_paginator.paginate.return_value = [
+        {"Contents": [{"Key": "obj1.gz"}, {"Key": "obj2.gz"}]},
+    ]
+    fake_s3.get_paginator.return_value = fake_paginator
+    fake_s3.delete_objects.return_value = {"Deleted": [{"Key": "obj1.gz"}, {"Key": "obj2.gz"}]}
+
+    with patch("backend.provision.fos_setup._get_fos_s3_client", return_value=fake_s3):
+        fos_setup.delete_fos_bucket("b", "us-east-1", "k", "s")
+
+    fake_s3.delete_objects.assert_called()
+    fake_s3.delete_bucket.assert_called_with(Bucket="b")
+
+
+def test_delete_fos_bucket_raises_after_max_retries_on_bucket_not_empty():
+    """If ``delete_bucket`` repeatedly returns BucketNotEmpty (which
+    means deleted-and-undeleted by S3 eventual consistency), the
+    helper retries with backoff but eventually raises after 15
+    attempts. Pinned because infinite retries would hang the wizard."""
+    fake_s3 = MagicMock()
+    fake_s3.head_bucket.return_value = {}
+    fake_s3.list_multipart_uploads.return_value = {"Uploads": []}
+    fake_s3.get_paginator.return_value.paginate.return_value = []
+    fake_s3.delete_bucket.side_effect = ClientError(
+        {"Error": {"Code": "BucketNotEmpty", "Message": "x"}}, "DeleteBucket"
+    )
+
+    with (
+        patch("backend.provision.fos_setup._get_fos_s3_client", return_value=fake_s3),
+        patch("time.sleep"),  # skip the retry backoff
+    ):
+        with pytest.raises(RuntimeError, match="Could not delete FOS bucket after 15 attempts"):
+            fos_setup.delete_fos_bucket("b", "us-east-1", "k", "s")
+
+    # All 15 attempts hit the API
+    assert fake_s3.delete_bucket.call_count == 15
+
+
+def test_delete_fos_bucket_raises_on_unexpected_client_error():
+    """Non-BucketNotEmpty ClientError (perms denied) → immediate raise,
+    no retry loop. Pinned because retrying through an AccessDenied is
+    pointless and slows the failure."""
+    fake_s3 = MagicMock()
+    fake_s3.head_bucket.return_value = {}
+    fake_s3.list_multipart_uploads.return_value = {"Uploads": []}
+    fake_s3.get_paginator.return_value.paginate.return_value = []
+    fake_s3.delete_bucket.side_effect = ClientError(
+        {"Error": {"Code": "AccessDenied", "Message": "perms"}}, "DeleteBucket"
+    )
+
+    with patch("backend.provision.fos_setup._get_fos_s3_client", return_value=fake_s3):
+        with pytest.raises(RuntimeError):
+            fos_setup.delete_fos_bucket("b", "us-east-1", "k", "s")
+
+    # Only one attempt, not 15
+    assert fake_s3.delete_bucket.call_count == 1
+
+
+def test_delete_fos_bucket_aborts_multipart_uploads_before_listing_objects():
+    """Multipart uploads must be aborted before object deletion, or
+    they leak forever as zombie partial uploads (and accrue storage
+    charges). Pinned because skipping this is a silent cost leak."""
+    fake_s3 = MagicMock()
+    fake_s3.head_bucket.return_value = {}
+    fake_s3.list_multipart_uploads.return_value = {"Uploads": [{"Key": "partial.gz", "UploadId": "upload-123"}]}
+    fake_s3.get_paginator.return_value.paginate.return_value = []
+
+    with patch("backend.provision.fos_setup._get_fos_s3_client", return_value=fake_s3):
+        fos_setup.delete_fos_bucket("b", "us-east-1", "k", "s")
+
+    fake_s3.abort_multipart_upload.assert_called_once_with(Bucket="b", Key="partial.gz", UploadId="upload-123")
+
+
+def test_delete_fos_bucket_tolerates_multipart_listing_failure():
+    """``list_multipart_uploads`` raises (perms gap) → swallow and
+    continue. Pinned because some FOS keys don't have multipart
+    perms even though they can list/delete objects."""
+    fake_s3 = MagicMock()
+    fake_s3.head_bucket.return_value = {}
+    fake_s3.list_multipart_uploads.side_effect = ClientError(
+        {"Error": {"Code": "AccessDenied", "Message": "x"}}, "ListMultipartUploads"
+    )
+    fake_s3.get_paginator.return_value.paginate.return_value = []
+
+    with patch("backend.provision.fos_setup._get_fos_s3_client", return_value=fake_s3):
+        fos_setup.delete_fos_bucket("b", "us-east-1", "k", "s")  # must not raise
+
+    fake_s3.delete_bucket.assert_called()
+
+
+# ── find_fos_key ──────────────────────────────────────────────────────────
+
+
+def test_find_fos_key_returns_matching_key():
+    fake_keys = {
+        "data": [
+            {"access_key": "AK111", "description": "fos-log-analysis-svc1"},
+            {"access_key": "AK222", "description": "manual-key"},
+        ]
+    }
+    with patch("backend.provision.fos_setup.fastly", return_value=fake_keys):
+        out = fos_setup.find_fos_key("manual-key", token="tkn")
+
+    assert out["access_key"] == "AK222"
+
+
+def test_find_fos_key_returns_none_when_no_match():
+    with patch("backend.provision.fos_setup.fastly", return_value={"data": []}):
+        assert fos_setup.find_fos_key("nonexistent", token="tkn") is None
+
+
+def test_find_fos_key_swallows_runtime_error_from_fastly_api():
+    """A RuntimeError from the Fastly API (rate-limited, 5xx) →
+    return None. Pinned because raising here would crash the
+    ``ensure_fos_access_key`` idempotency check."""
+    with patch("backend.provision.fos_setup.fastly", side_effect=RuntimeError("rate limit")):
+        assert fos_setup.find_fos_key("any", token="tkn") is None
+
+
+# ── ensure_fos_access_key ─────────────────────────────────────────────────
+
+
+def test_ensure_fos_access_key_creates_new_key():
+    """No existing key → POST /access-keys → return id+secret."""
+    fake_resp = {"access_key": "AK999", "secret_key": "SK999"}
+    with (
+        patch("backend.provision.fos_setup.find_fos_key", return_value=None),
+        patch("backend.provision.fos_setup.fastly", return_value=fake_resp) as mock_fastly,
+    ):
+        out = fos_setup.ensure_fos_access_key("fos-log-analysis-test", state={}, token="tkn", buckets=["b1"])
+
+    assert out == {"id": "AK999", "access_key": "AK999", "secret_key": "SK999"}
+    # The POST body must include both permission and buckets
+    args, kwargs = mock_fastly.call_args[:2] if len(mock_fastly.call_args) > 1 else (mock_fastly.call_args[0], {})
+    payload = mock_fastly.call_args[0][2] if len(mock_fastly.call_args[0]) > 2 else {}
+    assert payload.get("permission") == "read-write-objects"
+    assert payload.get("buckets") == ["b1"]
+
+
+def test_ensure_fos_access_key_recreates_managed_key():
+    """An existing key with our ``fos-log-analysis-*`` prefix is a
+    leftover from a prior run → DELETE then re-POST. Pinned because
+    losing this would cause the provisioning to fail on every
+    re-run after a previous partial completion."""
+    existing = {"access_key": "AK_OLD", "description": "fos-log-analysis-svc1"}
+    new_key = {"access_key": "AK_NEW", "secret_key": "SK_NEW"}
+
+    calls: list[tuple] = []
+
+    def _fastly_spy(method, path, payload=None, token=None, **kwargs):
+        calls.append((method, path))
+        if method == "POST":
+            return new_key
+        return {}
+
+    with (
+        patch("backend.provision.fos_setup.find_fos_key", return_value=existing),
+        patch("backend.provision.fos_setup.fastly", side_effect=_fastly_spy),
+    ):
+        out = fos_setup.ensure_fos_access_key("fos-log-analysis-svc1", state={}, token="tkn")
+
+    # DELETE happened first, then POST
+    assert ("DELETE", "/resources/object-storage/access-keys/AK_OLD") in calls
+    assert any(call[0] == "POST" for call in calls)
+    assert out["access_key"] == "AK_NEW"
+
+
+def test_ensure_fos_access_key_raises_on_unmanaged_existing_key():
+    """If an existing key has a description NOT starting with
+    ``fos-log-analysis-``, it was created manually → don't delete it,
+    raise instead. Pinned because clobbering a customer's hand-rolled
+    key would be a data-loss bug."""
+    existing = {"access_key": "AK_MANUAL", "description": "my-prod-key"}
+
+    with patch("backend.provision.fos_setup.find_fos_key", return_value=existing):
+        with pytest.raises(RuntimeError, match="not managed by this tool"):
+            fos_setup.ensure_fos_access_key("my-prod-key", state={}, token="tkn")
+
+
+def test_ensure_fos_access_key_omits_buckets_when_none_supplied():
+    """``buckets=None`` → no ``buckets`` key in the POST payload (so
+    the key gets account-wide perms). Pinned because sending
+    ``"buckets": null`` would trip Fastly's schema validation."""
+    fake_resp = {"access_key": "AK", "secret_key": "SK"}
+    with (
+        patch("backend.provision.fos_setup.find_fos_key", return_value=None),
+        patch("backend.provision.fos_setup.fastly", return_value=fake_resp) as mock_fastly,
+    ):
+        fos_setup.ensure_fos_access_key("d", state={}, token="tkn", buckets=None)
+
+    payload = mock_fastly.call_args[0][2]
+    assert "buckets" not in payload
+
+
+# ── delete_fos_access_key ─────────────────────────────────────────────────
+
+
+def test_delete_fos_access_key_calls_delete_endpoint():
+    with patch("backend.provision.fos_setup.fastly") as mock_fastly:
+        fos_setup.delete_fos_access_key("AK123", token="tkn")
+
+    args, kwargs = mock_fastly.call_args[0], mock_fastly.call_args[1]
+    assert args[0] == "DELETE"
+    assert "AK123" in args[1]
+
+
+def test_delete_fos_access_key_treats_404_as_already_deleted():
+    """404 from the DELETE is idempotency-friendly — treat as success.
+    Pinned because the teardown CLI may run twice (manual retry); the
+    second run must not error on a missing key."""
+    with patch("backend.provision.fos_setup.fastly", side_effect=RuntimeError("404 Not Found")):
+        fos_setup.delete_fos_access_key("AK123", token="tkn")  # must not raise
+
+
+def test_delete_fos_access_key_raises_on_other_errors():
+    """Non-404 RuntimeError → re-raise. Pinned distinct from the
+    404-tolerant path so transient 5xx errors aren't silently
+    swallowed (the teardown would think it succeeded and clean up
+    state pointing to a still-existing key)."""
+    with patch("backend.provision.fos_setup.fastly", side_effect=RuntimeError("500 Internal")):
+        with pytest.raises(RuntimeError):
+            fos_setup.delete_fos_access_key("AK123", token="tkn")
+
+
+def test_ensure_fos_access_key_emits_status_callbacks_on_recreate():
+    """When recreating a managed key, status_cb receives "Recreating
+    existing key..." then "Creating ... access key..." then
+    "Access key created.". Pinned because the SSE wizard renders
+    these as user-visible progress steps — losing them would leave
+    the user staring at a stalled progress bar."""
+    statuses = []
+    fastly_calls = []
+
+    def fake_fastly(method, path, body=None, **kwargs):
+        fastly_calls.append((method, path))
+        if method == "POST" and "/access-keys" in path:
+            return {"access_key": "AKNEW", "secret_key": "SKNEW", "id": "AKNEW"}
+        return {}
+
+    with (
+        patch(
+            "backend.provision.fos_setup.find_fos_key",
+            return_value={"access_key": "AKEXISTING"},
+        ),
+        patch("backend.provision.fos_setup.fastly", side_effect=fake_fastly),
+    ):
+        result = fos_setup.ensure_fos_access_key(
+            "fos-log-analysis-svc-1",
+            state={},
+            token="tok",
+            permission="read-write-objects",
+            buckets=["b"],
+            status_cb=statuses.append,
+        )
+
+    # Status callbacks fired in expected order
+    joined = " ".join(statuses)
+    assert "Recreating" in joined
+    # The existing key was DELETEd then a new POST happened
+    assert any(m == "DELETE" for m, _ in fastly_calls)
+    assert any(m == "POST" for m, _ in fastly_calls)
+    assert result["access_key"] == "AKNEW"
+
+
+# ── provisioning capture (writes to usage_log) ────────────────────────────
+
+
+def test_provisioning_tracker_records_create_bucket_to_usage_log():
+    """The headline pin: when service_id is supplied, every S3 call
+    made during ``ensure_fos_bucket`` lands in usage_log via
+    ``metadata_db.log_usage_calls``. Pinned because provisioning ops
+    were silently dropped pre-fix — the wrapper did not exist, so
+    head_bucket / create_bucket attempts never appeared in any
+    dashboard, hiding a class of cost from the operator."""
+    fake_s3 = MagicMock()
+    fake_s3.head_bucket.side_effect = ClientError({"Error": {"Code": "404", "Message": "x"}}, "HeadBucket")
+    fake_s3.create_bucket.return_value = {"ResponseMetadata": {"HTTPStatusCode": 200}}
+
+    with (
+        patch("boto3.client", return_value=fake_s3),
+        patch("backend.core.metadata.log_usage_calls") as mock_log,
+    ):
+        fos_setup.ensure_fos_bucket("new-bucket", "us-east-1", "k", "s", service_id="svc-x")
+
+    assert mock_log.called, "log_usage_calls must be invoked on flush"
+    args, kwargs = mock_log.call_args
+    assert args[0] == "svc-x"
+    methods = [c["method"] for c in args[1]]
+    # Both the existence probe and the creation land as rows
+    assert "HEAD_BUCKET" in methods
+    assert "CREATE_BUCKET" in methods
+    assert kwargs["process_context"] == "provision:new-bucket"
+
+
+def test_provisioning_tracker_marks_create_bucket_as_class_a_in_details():
+    """``log_usage_calls`` auto-classifies as Class B by default; the
+    "Class A" sentinel in details is the documented escape hatch.
+    Pinned because miss-classifying CreateBucket as Class B would
+    under-count A-class billable ops for every provisioning run."""
+    fake_s3 = MagicMock()
+    fake_s3.head_bucket.side_effect = ClientError({"Error": {"Code": "404", "Message": "x"}}, "HeadBucket")
+    fake_s3.create_bucket.return_value = {}
+
+    captured: list[dict] = []
+
+    def _capture(_sid, calls, **_):
+        captured.extend(calls)
+
+    with (
+        patch("boto3.client", return_value=fake_s3),
+        patch("backend.core.metadata.log_usage_calls", side_effect=_capture),
+    ):
+        fos_setup.ensure_fos_bucket("b", "us-east-1", "k", "s", service_id="svc-x")
+
+    create_row = next(c for c in captured if c["method"] == "CREATE_BUCKET")
+    assert "Class A" in create_row["details"]
+    head_row = next(c for c in captured if c["method"] == "HEAD_BUCKET")
+    assert "Class A" not in head_row["details"]  # HEAD is Class B
+
+
+def test_provisioning_tracker_records_errors_as_rows_too():
+    """A ClientError on create_bucket still results in a usage_log
+    row (status="Error:<code>"). Pinned because failed provisioning
+    attempts also incur API charges — pretending they didn't happen
+    would under-count cost."""
+    fake_s3 = MagicMock()
+    fake_s3.head_bucket.side_effect = ClientError({"Error": {"Code": "404", "Message": "x"}}, "HeadBucket")
+    fake_s3.create_bucket.side_effect = ClientError(
+        {"Error": {"Code": "AccessDenied", "Message": "denied"}}, "CreateBucket"
+    )
+
+    captured: list[dict] = []
+
+    def _capture(_sid, calls, **_):
+        captured.extend(calls)
+
+    with (
+        patch("boto3.client", return_value=fake_s3),
+        patch("backend.core.metadata.log_usage_calls", side_effect=_capture),
+    ):
+        with pytest.raises(RuntimeError):
+            fos_setup.ensure_fos_bucket("b", "us-east-1", "k", "s", service_id="svc-x")
+
+    create_row = next(c for c in captured if c["method"] == "CREATE_BUCKET")
+    assert "Error" in str(create_row["status"])
+    assert "AccessDenied" in str(create_row["status"])
+
+
+def test_provisioning_tracker_tags_teardown_context_separately_from_provision():
+    """delete_fos_bucket flushes with process_context="teardown:<name>"
+    so dashboards can distinguish setup cost from teardown cost.
+    Pinned because mixing the two would hide the teardown-Class-A
+    spike that happens when emptying a large bucket."""
+    fake_s3 = MagicMock()
+    fake_s3.head_bucket.return_value = {}
+    fake_s3.list_multipart_uploads.return_value = {"Uploads": []}
+    fake_s3.get_paginator.return_value.paginate.return_value = []
+    fake_s3.delete_bucket.return_value = {}
+
+    contexts: list[str] = []
+
+    def _capture(_sid, _calls, **kwargs):
+        contexts.append(kwargs.get("process_context"))
+
+    with (
+        patch("boto3.client", return_value=fake_s3),
+        patch("backend.core.metadata.log_usage_calls", side_effect=_capture),
+    ):
+        fos_setup.delete_fos_bucket("doomed-bucket", "us-east-1", "k", "s", service_id="svc-x")
+
+    assert "teardown:doomed-bucket" in contexts
+
+
+def test_provisioning_tracker_skips_logging_when_no_service_id():
+    """Standalone CLI runs without a service_id (e.g. the bootstrap
+    wizard runs ensure_fos_bucket before logging_service_id is even
+    chosen). The wrapper must not be applied and log_usage_calls
+    must not be called. Pinned because a NameError trying to flush
+    to a missing service file would crash the CLI."""
+    fake_s3 = MagicMock()
+    fake_s3.head_bucket.return_value = {}
+
+    with (
+        patch("boto3.client", return_value=fake_s3),
+        patch("backend.core.metadata.log_usage_calls") as mock_log,
+    ):
+        fos_setup.ensure_fos_bucket("b", "us-east-1", "k", "s")  # no service_id
+
+    mock_log.assert_not_called()
+
+
+def test_provisioning_tracker_records_delete_objects_pagination():
+    """delete_fos_bucket calls list_objects_v2 via paginator and
+    delete_objects from a ThreadPoolExecutor. Both must land in
+    usage_log. Pinned because a large-bucket teardown can issue
+    thousands of Class A delete_objects calls — losing them would
+    hide a major cost spike on every teardown."""
+    fake_s3 = MagicMock()
+    fake_s3.head_bucket.return_value = {}
+    fake_s3.list_multipart_uploads.return_value = {"Uploads": []}
+
+    fake_paginator = MagicMock()
+    fake_paginator.paginate.return_value = [
+        {"Contents": [{"Key": "obj1.gz"}, {"Key": "obj2.gz"}]},
+    ]
+    fake_s3.get_paginator.return_value = fake_paginator
+    fake_s3.delete_objects.return_value = {"Deleted": [{"Key": "obj1.gz"}, {"Key": "obj2.gz"}]}
+    fake_s3.delete_bucket.return_value = {}
+
+    captured: list[dict] = []
+
+    def _capture(_sid, calls, **_):
+        captured.extend(calls)
+
+    with (
+        patch("boto3.client", return_value=fake_s3),
+        patch("backend.core.metadata.log_usage_calls", side_effect=_capture),
+    ):
+        fos_setup.delete_fos_bucket("doomed-bucket", "us-east-1", "k", "s", service_id="svc-x")
+
+    methods = [c["method"] for c in captured]
+    assert "LIST_OBJECTS_V2" in methods
+    assert "DELETE_OBJECTS" in methods
+    assert "DELETE_BUCKET" in methods
+
+
+def test_ensure_fos_bucket_calls_status_callback_on_already_exists():
+    """When the bucket already exists (head_bucket succeeds), the
+    status_cb receives an "already exists" message. Pinned because
+    the wizard's idempotent re-run UX depends on this distinction
+    vs the "creating..." message admins see on first run."""
+    fake_s3 = MagicMock()
+    fake_s3.head_bucket.return_value = {}  # success
+
+    statuses = []
+
+    with patch("backend.provision.fos_setup._get_fos_s3_client", return_value=fake_s3):
+        result = fos_setup.ensure_fos_bucket(
+            "my-bucket",
+            "us-east-1",
+            "AK",
+            "SK",
+            status_cb=statuses.append,
+        )
+
+    assert result is True
+    # create_bucket was NOT called (idempotency)
+    fake_s3.create_bucket.assert_not_called()
+    # Status callback got the "already exists" signal
+    assert any("already exists" in s.lower() for s in statuses)
+
+
+def test_delete_fos_prefix_happy_path():
+    fake_s3 = MagicMock()
+    fake_s3.head_bucket.return_value = {}
+
+    fake_paginator = MagicMock()
+    fake_paginator.paginate.return_value = [
+        {"Contents": [{"Key": "raw/log1.gz"}, {"Key": "raw/log2.gz"}]},
+    ]
+    fake_s3.get_paginator.return_value = fake_paginator
+    fake_s3.delete_objects.return_value = {}
+
+    with patch("backend.provision.fos_setup._get_fos_s3_client", return_value=fake_s3):
+        fos_setup.delete_fos_prefix("my-bucket", "us-east-1", "k", "s", "raw/")
+
+    fake_s3.delete_objects.assert_called_once_with(
+        Bucket="my-bucket", Delete={"Objects": [{"Key": "raw/log1.gz"}, {"Key": "raw/log2.gz"}]}
+    )
+
+
+def test_delete_fos_prefix_excludes_matching():
+    fake_s3 = MagicMock()
+    fake_s3.head_bucket.return_value = {}
+
+    fake_paginator = MagicMock()
+    fake_paginator.paginate.return_value = [
+        {
+            "Contents": [
+                {"Key": "raw/log1.gz"},
+                {"Key": "raw/rum/log2.gz"},
+                {"Key": "raw/log3.gz"},
+            ]
+        },
+    ]
+    fake_s3.get_paginator.return_value = fake_paginator
+    fake_s3.delete_objects.return_value = {}
+
+    with patch("backend.provision.fos_setup._get_fos_s3_client", return_value=fake_s3):
+        fos_setup.delete_fos_prefix("my-bucket", "us-east-1", "k", "s", "raw/", exclude_prefix="raw/rum/")
+
+    fake_s3.delete_objects.assert_called_once_with(
+        Bucket="my-bucket", Delete={"Objects": [{"Key": "raw/log1.gz"}, {"Key": "raw/log3.gz"}]}
+    )

@@ -13,9 +13,11 @@ _REPO_ALIASES: dict[str, str] = {
     "backend.repositories.ip_spread_rollups": "backend.repositories._base",
     "backend.repositories.performance": "backend.repositories.origin",
     "backend.repositories.cmcd": "backend.repositories.origin",
+    "backend.repositories.rum": "backend.repositories.origin",
     "backend.repositories.session_scoring": "backend.repositories.sessions",
     "backend.repositories._sql.performance": "backend.repositories.origin",
     "backend.repositories._sql.cmcd": "backend.repositories.origin",
+    "backend.repositories._sql.rum": "backend.repositories.origin",
     "backend.repositories._sql.session_scoring": "backend.repositories.sessions",
 }
 

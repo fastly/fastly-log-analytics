@@ -41,10 +41,12 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from ipaddress import ip_address
 from pathlib import Path
+from typing import Annotated, Any
 
-from cachetools import TTLCache
+from cachetools import LRUCache, TTLCache
 from filelock import FileLock
 from filelock import Timeout as _FileLockTimeout
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_validator
 from tenacity import Retrying, retry_if_exception_type, stop_after_attempt, wait_fixed
 
 from backend.utils.atomic_write import atomic_write_json
@@ -197,7 +199,7 @@ _name_refresh_lock = threading.Lock()
 # produce identical st_mtime_ns for two writes within the same microsecond.
 # Hot paths (sync-status polls, every cron tick, every dashboard request)
 # hit this enough that skipping the open+read on the no-change path adds up.
-_config_cache: dict[str, tuple[int, dict]] = {}
+_config_cache: LRUCache[str, tuple[int, dict]] = LRUCache(maxsize=256)
 _config_cache_lock = threading.Lock()
 
 # Path-keyed memo for _ensure_dirs(). Called from every list_configs /
@@ -306,8 +308,8 @@ def load_config(service_id: str | None) -> dict | None:
     are picked up on the next call without explicit invalidation.
 
     Returns ``None`` (not a raised exception) for invalid service IDs,
-    including ``None`` itself — several call sites in the iceberg/
-    submodules pass ``src.get("name")`` (typed as ``Any | None``) and
+    including ``None`` itself — several call sites in the core/iceberg/
+    package pass ``src.get("name")`` (typed as ``Any | None``) and
     rely on the None response to mean "no config". Security's validation
     in ``config_path`` is still what blocks path-traversal; this just
     makes the helper friendlier at call sites that don't pre-validate.
@@ -606,6 +608,55 @@ def get_active_service_id(fallback_to_first: bool = True) -> str | None:
     return ids[0] if fallback_to_first else None
 
 
+class _SourceConfigModel(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    name: Any = Field("default", validation_alias="service_id")
+    service_id: Any = "default"
+    service_name: Any = Field("", validation_alias="name")
+    endpoint: Any = ""
+    fos_native_endpoint: Any = Field(None, validation_alias="fos_endpoint")
+    access_key_id: Any = Field("", validation_alias="fos_access_key_id")
+    secret_access_key: Any = Field("", validation_alias="fos_secret_access_key")
+    bucket: Any = Field("", validation_alias="fos_bucket")
+    prefix: str = ""
+    region: Any = Field("us-east-1", validation_alias="fos_region")
+    cdn_url: Any = ""
+    cdn_secret: Any = ""
+    cdn_service_id: Any = ""
+    logging_service_id: Any = Field("", validation_alias="service_id")
+    duckdb_path: str = ""
+    deployment_mode: str = DEPLOYMENT_MODE
+    access_level: Any = "read_write"
+    storage_mode: Any = "cloud"
+    log_period: int = 60
+    log_fields: Annotated[dict[str, Any], BeforeValidator(lambda v: dict(v) if v else {})] = Field(default_factory=dict)
+    provisioning: dict[str, Any] = Field(default_factory=dict)
+    rum_enabled: bool = False
+    rum: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _finalize(self) -> "_SourceConfigModel":
+        # Native FOS endpoint — used by boto3 for ListObjectsV2/PutObject/DeleteObject
+        # etc. The CDN VCL only proxies GET/HEAD on object keys, not bucket-listing
+        # requests, so writes and lists must go direct.
+        if "fos_native_endpoint" not in self.model_fields_set:
+            self.fos_native_endpoint = f"{self.region}.object.fastlystorage.app"
+        # Prefer CDN URL as the S3 endpoint for DuckDB httpfs reads (parquet GETs)
+        # so we benefit from caching and free egress.
+        self.endpoint = (
+            self.cdn_url.replace("https://", "").replace("http://", "").split("/")[0]
+            if self.cdn_url
+            else self.fos_native_endpoint
+        )
+        if self.log_fields and "format_hash" not in self.log_fields:
+            with contextlib.suppress(Exception):
+                from backend.core import log_fields as lf_module
+
+                self.log_fields["format_hash"] = lf_module.format_hash(self.log_fields)
+        return self
+
+
 def config_to_source(cfg: dict) -> dict:
     """Convert a service config dict to the db.py 'source' dict format."""
     if is_high_scale_mode() and cfg.get("raw_layout_version") != 3:
@@ -614,59 +665,11 @@ def config_to_source(cfg: dict) -> dict:
             "tear it down and reprovision it for v3 before enabling high-scale deployment"
         )
     actual_db_path = duckdb_path(cfg.get("service_id", "default"))
-
-    region = cfg.get("fos_region", "us-east-1")
-
-    # Native FOS endpoint — used by boto3 for ListObjectsV2/PutObject/DeleteObject
-    # etc. The CDN VCL only proxies GET/HEAD on object keys, not bucket-listing
-    # requests, so writes and lists must go direct.
-    native_endpoint = cfg.get("fos_endpoint", f"{region}.object.fastlystorage.app")
-
-    # Prefer CDN URL as the S3 endpoint for DuckDB httpfs reads (parquet GETs)
-    # so we benefit from caching and free egress.
-    cdn_url = cfg.get("cdn_url")
-    if cdn_url:
-        endpoint = cdn_url.replace("https://", "").replace("http://", "").split("/")[0]
-    else:
-        endpoint = native_endpoint
-
-    prov = cfg.get("provisioning", {})
-
-    log_fields = cfg.get("log_fields") or {}
-    if log_fields and "format_hash" not in log_fields:
-        try:
-            from backend.core import log_fields as lf_module
-
-            log_fields = dict(log_fields)
-            log_fields["format_hash"] = lf_module.format_hash(log_fields)
-        except Exception:
-            pass
-
-    return {
-        "name": cfg.get("service_id", "default"),
-        "service_id": cfg.get("service_id", "default"),
-        "service_name": cfg.get("name", ""),
-        "endpoint": endpoint,
-        "fos_native_endpoint": native_endpoint,
-        "access_key_id": cfg.get("fos_access_key_id", ""),
-        "secret_access_key": cfg.get("fos_secret_access_key", ""),
-        "bucket": cfg.get("fos_bucket", ""),
-        "prefix": "",
-        "region": region,
-        "cdn_url": cfg.get("cdn_url", ""),
-        "cdn_secret": cfg.get("cdn_secret", ""),
-        "cdn_service_id": cfg.get("cdn_service_id", ""),
-        "logging_service_id": cfg.get("service_id", ""),
-        "duckdb_path": actual_db_path,
-        "deployment_mode": DEPLOYMENT_MODE,
-        "access_level": cfg.get("access_level", "read_write"),
-        "storage_mode": cfg.get("storage_mode", "cloud"),
-        "log_period": int(cfg.get("log_period", 60)),
-        "log_fields": log_fields,
-        "provisioning": prov,
-        "rum_enabled": is_rum_enabled(cfg),
-        "rum": cfg.get("rum", {}),
-    }
+    out = _SourceConfigModel.model_validate(cfg).model_dump()
+    out["duckdb_path"] = actual_db_path
+    out["deployment_mode"] = DEPLOYMENT_MODE
+    out["rum_enabled"] = is_rum_enabled(cfg)
+    return out
 
 
 def fetch_service_name(service_id: str, api_key: str) -> str | None:
@@ -886,20 +889,25 @@ def get_ngwaf_workspace_id(service_id: str) -> str | None:
 
 _USAGE_LOGGING_CONFIG_PATH = SYSTEM_DATA_DIR / "usage_logging.json"
 
-_USAGE_LOGGING_DEFAULTS: dict = {
-    "enabled": False,
-    "retention_days": 30,
-    "class_a_rate_per_1k": 0.005,
-    "class_b_rate_per_10k": 0.01,
-    "cdn_egress_rate_per_gb": 0.12,
-    "storage_rate_per_gb_month": 0.02,
-    "min_billed_days": 30,
-    "billing_zone": "MBZ200",
+
+class _UsageLoggingConfigModel(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    enabled: bool = False
+    retention_days: int = 30
+    class_a_rate_per_1k: float = 0.005
+    class_b_rate_per_10k: float = 0.01
+    cdn_egress_rate_per_gb: float = 0.12
+    storage_rate_per_gb_month: float = 0.02
+    min_billed_days: int = 30
+    billing_zone: str = "MBZ200"
     # When true, every DuckDB connection enables HTTP-only structured logging
     # so we can record httpfs FOS GETs (parquet scans) as Class B ops. Adds
     # tiny per-query overhead (one in-memory log scan + truncate at close).
-    "track_duckdb_httpfs": True,
-}
+    track_duckdb_httpfs: bool = True
+
+
+_USAGE_LOGGING_DEFAULTS: dict = _UsageLoggingConfigModel().model_dump()
 
 
 def load_usage_logging_config() -> dict:
@@ -907,9 +915,7 @@ def load_usage_logging_config() -> dict:
     _ensure_dirs()
     if _USAGE_LOGGING_CONFIG_PATH.exists():
         try:
-            with open(_USAGE_LOGGING_CONFIG_PATH) as f:
-                stored = json.load(f)
-            return {**_USAGE_LOGGING_DEFAULTS, **stored}
+            return _UsageLoggingConfigModel.model_validate_json(_USAGE_LOGGING_CONFIG_PATH.read_bytes()).model_dump()
         except Exception:
             pass
     return dict(_USAGE_LOGGING_DEFAULTS)

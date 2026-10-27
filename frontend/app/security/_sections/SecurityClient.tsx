@@ -28,12 +28,12 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { HelpDialog, StatCard } from '@/components/ui/confirm-dialog'
-import type { ImpossibleDistanceData } from '@/components/Insights/InsightCard'
+import type { ImpossibleDistanceData } from '@/components/Insights'
 import type { PlotlyLayout, PlotlyTrace } from '@/types/api'
 import type { components } from '@/types/api.generated'
 
 const ImpossibleDistanceModal = dynamic(
-  () => import('@/components/Insights/InsightDetailModal').then((m) => m.ImpossibleDistanceModal),
+  () => import('@/components/Insights').then((m) => m.ImpossibleDistanceModal),
   { ssr: false },
 )
 
@@ -53,10 +53,7 @@ const FINGERPRINT_COLUMN_IDS = ['fingerprint', 'ip_count', 'request_count']
 const TOP_IP_COLUMN_IDS = ['ip', 'max_header']
 const BOT_COLUMN_IDS = ['name', 'category', 'request_count', 'verified_count', 'impersonator_count', 'unverified_count', 'pending_count']
 const NGWAF_BOT_COLUMN_IDS = ['bot_name', 'category', 'request_count']
-const BOT_EFFICIENCY_COLUMN_IDS = [
-  'bot_name', 'category', 'request_count', 'resp_bytes', 'bandwidth_pct',
-  'referrals', 'requests_per_referral', 'bytes_per_referral',
-]
+const BOT_EFFICIENCY_COLUMN_IDS = ['bot_name', 'category', 'request_count', 'resp_bytes', 'bandwidth_pct', 'referrals', 'requests_per_referral', 'bytes_per_referral']
 
 function InfoBullets({ intro, items }: { intro: string; items: { icon: React.ReactNode; label: string; text: React.ReactNode }[] }) {
   return (
@@ -64,120 +61,50 @@ function InfoBullets({ intro, items }: { intro: string; items: { icon: React.Rea
       <p>{intro}</p>
       <ul className="space-y-3 list-none pl-0">
         {items.map((item) => (
-          <li key={item.label} className="flex gap-3">
-            {item.icon}
-            <span><strong>{item.label}:</strong> {item.text}</span>
-          </li>
+          <li key={item.label} className="flex gap-3">{item.icon}<span><strong>{item.label}:</strong> {item.text}</span></li>
         ))}
       </ul>
     </div>
   )
 }
 
+const makeInfo = (title: string, intro: string, items: [React.ComponentType<{ className?: string }>, string, string, React.ReactNode][]) => ({
+  title,
+  body: <InfoBullets intro={intro} items={items.map(([Icon, cls, label, text]) => ({ icon: <Icon className={`h-5 w-5 shrink-0 ${cls}`} />, label, text }))} />,
+})
+
 const SECURITY_INFO = {
-  wellknown_bots: {
-    title: 'Well-Known Bots',
-    body: (
-      <InfoBullets
-        intro="Detects bot traffic based on a continuously updated database of well-known User-Agent patterns and verifies them using FCrDNS and CIDR matches."
-        items={[
-          { icon: <CheckCircle2 className="h-5 w-5 shrink-0 text-green-500" />, label: 'Verified', text: "The IP address matched the official CIDR block or passed Forward-Confirmed reverse DNS for the bot's known domains." },
-          { icon: <AlertTriangle className="h-5 w-5 shrink-0 text-red-500" />, label: 'Spoofed', text: 'The request claimed to be this bot in the User-Agent, but the IP failed verification. Highly likely to be malicious scrapers or scammers.' },
-          { icon: <HelpCircle className="h-5 w-5 shrink-0 text-muted-foreground" />, label: 'Unverified', text: 'The bot source does not provide official IPs or domains for verification.' },
-          { icon: <Clock className="h-5 w-5 shrink-0 text-yellow-500" />, label: 'Pending', text: 'The reverse DNS lookup is still pending in the background. Check back soon.' },
-        ]}
-      />
-    ),
-  },
-  fingerprints: {
-    title: 'Top TLS Fingerprints',
-    body: (
-      <InfoBullets
-        intro="Identifies groups of traffic sharing the exact same TLS negotiation parameters (cipher suites, extensions), often indicating the same underlying software or script."
-        items={[
-          { icon: <Fingerprint className="h-5 w-5 shrink-0 text-blue-500" />, label: 'Botnet Detection', text: 'IP addresses change frequently, but the custom scripting tools attackers use rarely change their TLS handshakes. A single fingerprint spread across thousands of IPs usually indicates a coordinated botnet.' },
-        ]}
-      />
-    ),
-  },
-  req_size: {
-    title: 'Request Header Size Distribution',
-    body: (
-      <InfoBullets
-        intro="A histogram showing the distribution of HTTP request header sizes across your traffic."
-        items={[
-          { icon: <Scale className="h-5 w-5 shrink-0 text-blue-500" />, label: 'Anomaly Detection', text: 'Normal web requests have header sizes between 500 bytes and 2KB. Spikes in the 8KB+ range can indicate buffer overflow attempts or overly aggressive cookie stuffing.' },
-        ]}
-      />
-    ),
-  },
-  top_ips_header: {
-    title: 'Oversized Request Headers',
-    body: (
-      <InfoBullets
-        intro="Highlights specific IP addresses sending the largest request headers."
-        items={[
-          { icon: <Shield className="h-5 w-5 shrink-0 text-yellow-500" />, label: 'Investigation', text: 'Helps isolate the source of oversized requests seen in the distribution chart. These IPs may be malfunctioning clients or malicious actors probing for vulnerabilities.' },
-        ]}
-      />
-    ),
-  },
-  ipv6: {
-    title: 'IPv6 Adoption over Time',
-    body: (
-      <InfoBullets
-        intro="Tracks the percentage of requests connecting to Fastly via IPv6 vs IPv4."
-        items={[
-          { icon: <Globe className="h-5 w-5 shrink-0 text-blue-500" />, label: 'Infrastructure Readiness', text: 'Sudden drops in IPv6 traffic might indicate an ISP routing failure or a DNS configuration issue dropping AAAA records.' },
-        ]}
-      />
-    ),
-  },
-  proxy: {
-    title: 'Proxy/Anonymizer Breakdown',
-    body: (
-      <InfoBullets
-        intro="Categorizes traffic by the underlying network type, using Fastly's geolocation intelligence."
-        items={[
-          { icon: <Network className="h-5 w-5 shrink-0 text-yellow-500" />, label: 'Traffic Quality', text: "A high percentage of traffic from 'hosting' or 'tor' categories is a strong indicator of non-human traffic, scraping, or evasion attempts." },
-        ]}
-      />
-    ),
-  },
-  conn_reuse: {
-    title: 'Connection Reuse',
-    body: (
-      <InfoBullets
-        intro="Shows how many HTTP requests are made over a single TCP connection."
-        items={[
-          { icon: <Repeat className="h-5 w-5 shrink-0 text-blue-500" />, label: 'Efficiency', text: "High reuse (10+ requests per connection) is highly efficient and typical for browsers loading a webpage. A spike in '1' (no reuse) means connections are constantly being torn down, which is typical of basic scraping tools or misconfigured API clients." },
-        ]}
-      />
-    ),
-  },
-  ngwaf_bots: {
-    title: 'Verified Bots (NGWAF)',
-    body: (
-      <InfoBullets
-        intro="Shows named bots identified by Fastly NGWAF. By definition, all traffic matching these signals has been verified by Fastly's Signal Sciences engine."
-        items={[
-          { icon: <Bot className="h-5 w-5 shrink-0 text-blue-500" />, label: 'Bot Name', text: 'The verified bot name extracted from the NGWAF VERIFIED-BOT signal (e.g. "OpenAI SearchBot").' },
-        ]}
-      />
-    ),
-  },
-  bot_efficiency: {
-    title: 'Bot & Crawler Value vs. Cost',
-    body: (
-      <InfoBullets
-        intro="Compares each bot or crawler's resource footprint (request count and egress bandwidth) against the organic human referral traffic it returns to your site."
-        items={[
-          { icon: <Scale className="h-5 w-5 shrink-0 text-blue-500" />, label: 'Cost-to-Value Ratio', text: <>Search and AI answer crawlers that drive human referrals should show a low <em>Requests / Referral</em> and <em>Bandwidth / Referral</em> ratio.</> },
-          { icon: <AlertTriangle className="h-5 w-5 shrink-0 text-red-500" />, label: 'Zero-Referral Scrapers', text: <>AI training crawlers, SEO scrapers, and headless bots often consume significant bandwidth while returning <code>0</code> referred visitors — prime candidates for edge throttling or blocking.</> },
-        ]}
-      />
-    ),
-  },
+  wellknown_bots: makeInfo('Well-Known Bots', 'Detects bot traffic based on a continuously updated database of well-known User-Agent patterns and verifies them using FCrDNS and CIDR matches.', [
+    [CheckCircle2, 'text-green-500', 'Verified', "The IP address matched the official CIDR block or passed Forward-Confirmed reverse DNS for the bot's known domains."],
+    [AlertTriangle, 'text-red-500', 'Spoofed', 'The request claimed to be this bot in the User-Agent, but the IP failed verification. Highly likely to be malicious scrapers or scammers.'],
+    [HelpCircle, 'text-muted-foreground', 'Unverified', 'The bot source does not provide official IPs or domains for verification.'],
+    [Clock, 'text-yellow-500', 'Pending', 'The reverse DNS lookup is still pending in the background. Check back soon.'],
+  ]),
+  fingerprints: makeInfo('Top TLS Fingerprints', 'Identifies groups of traffic sharing the exact same TLS negotiation parameters (cipher suites, extensions), often indicating the same underlying software or script.', [
+    [Fingerprint, 'text-blue-500', 'Botnet Detection', 'IP addresses change frequently, but the custom scripting tools attackers use rarely change their TLS handshakes. A single fingerprint spread across thousands of IPs usually indicates a coordinated botnet.'],
+  ]),
+  req_size: makeInfo('Request Header Size Distribution', 'A histogram showing the distribution of HTTP request header sizes across your traffic.', [
+    [Scale, 'text-blue-500', 'Anomaly Detection', 'Normal web requests have header sizes between 500 bytes and 2KB. Spikes in the 8KB+ range can indicate buffer overflow attempts or overly aggressive cookie stuffing.'],
+  ]),
+  top_ips_header: makeInfo('Oversized Request Headers', 'Highlights specific IP addresses sending the largest request headers.', [
+    [Shield, 'text-yellow-500', 'Investigation', 'Helps isolate the source of oversized requests seen in the distribution chart. These IPs may be malfunctioning clients or malicious actors probing for vulnerabilities.'],
+  ]),
+  ipv6: makeInfo('IPv6 Adoption over Time', 'Tracks the percentage of requests connecting to Fastly via IPv6 vs IPv4.', [
+    [Globe, 'text-blue-500', 'Infrastructure Readiness', 'Sudden drops in IPv6 traffic might indicate an ISP routing failure or a DNS configuration issue dropping AAAA records.'],
+  ]),
+  proxy: makeInfo('Proxy/Anonymizer Breakdown', "Categorizes traffic by the underlying network type, using Fastly's geolocation intelligence.", [
+    [Network, 'text-yellow-500', 'Traffic Quality', "A high percentage of traffic from 'hosting' or 'tor' categories is a strong indicator of non-human traffic, scraping, or evasion attempts."],
+  ]),
+  conn_reuse: makeInfo('Connection Reuse', 'Shows how many HTTP requests are made over a single TCP connection.', [
+    [Repeat, 'text-blue-500', 'Efficiency', "High reuse (10+ requests per connection) is highly efficient and typical for browsers loading a webpage. A spike in '1' (no reuse) means connections are constantly being torn down, which is typical of basic scraping tools or misconfigured API clients."],
+  ]),
+  ngwaf_bots: makeInfo('Verified Bots (NGWAF)', "Shows named bots identified by Fastly NGWAF. By definition, all traffic matching these signals has been verified by Fastly's Signal Sciences engine.", [
+    [Bot, 'text-blue-500', 'Bot Name', 'The verified bot name extracted from the NGWAF VERIFIED-BOT signal (e.g. "OpenAI SearchBot").'],
+  ]),
+  bot_efficiency: makeInfo('Bot & Crawler Value vs. Cost', "Compares each bot or crawler's resource footprint (request count and egress bandwidth) against the organic human referral traffic it returns to your site.", [
+    [Scale, 'text-blue-500', 'Cost-to-Value Ratio', <>Search and AI answer crawlers that drive human referrals should show a low <em>Requests / Referral</em> and <em>Bandwidth / Referral</em> ratio.</>],
+    [AlertTriangle, 'text-red-500', 'Zero-Referral Scrapers', <>AI training crawlers, SEO scrapers, and headless bots often consume significant bandwidth while returning <code>0</code> referred visitors — prime candidates for edge throttling or blocking.</>],
+  ]),
 }
 
 const LOW_COVERAGE_THRESHOLD = 0.01
@@ -198,27 +125,13 @@ function FingerprintCoverageHint({ coverage, field }: { coverage: number | undef
 }
 
 type BotsSectionProps = {
-  data: SecurityData | undefined
-  isLoading: boolean
-  isFetching: boolean
-  error: Error | null
-  intervalButtons: React.ReactNode
-  bucketSeconds: number
-  timezone: string
-  commonTimeLayout: PlotlyLayout
+  data: SecurityData | undefined; isLoading: boolean; isFetching: boolean; error: Error | null
+  intervalButtons: React.ReactNode; bucketSeconds: number; timezone: string; commonTimeLayout: PlotlyLayout
   getFieldLabel: (id: string) => string
-  ngwafBotVisibility: VisibilityState
-  setNgwafBotVisibility: Dispatch<SetStateAction<VisibilityState>>
-  onNgwafBotVisChange: (id: string, vis: boolean) => void
-  botVisibility: VisibilityState
-  setBotVisibility: Dispatch<SetStateAction<VisibilityState>>
-  onBotVisChange: (id: string, vis: boolean) => void
-  botEfficiencyVisibility?: VisibilityState
-  setBotEfficiencyVisibility?: Dispatch<SetStateAction<VisibilityState>>
-  onBotEfficiencyVisChange?: (id: string, vis: boolean) => void
-  fingerprintVisibility: VisibilityState
-  setFingerprintVisibility: Dispatch<SetStateAction<VisibilityState>>
-  onFingerprintVisChange: (id: string, vis: boolean) => void
+  ngwafBotVisibility: VisibilityState; setNgwafBotVisibility: Dispatch<SetStateAction<VisibilityState>>; onNgwafBotVisChange: (id: string, vis: boolean) => void
+  botVisibility: VisibilityState; setBotVisibility: Dispatch<SetStateAction<VisibilityState>>; onBotVisChange: (id: string, vis: boolean) => void
+  botEfficiencyVisibility?: VisibilityState; setBotEfficiencyVisibility?: Dispatch<SetStateAction<VisibilityState>>; onBotEfficiencyVisChange?: (id: string, vis: boolean) => void
+  fingerprintVisibility: VisibilityState; setFingerprintVisibility: Dispatch<SetStateAction<VisibilityState>>; onFingerprintVisChange: (id: string, vis: boolean) => void
 }
 
 export function BotsSection({
@@ -241,18 +154,12 @@ export function BotsSection({
     const names = Array.from(new Set(timeseries.map((d) => d.bot_name ?? '')))
     for (const n of names) byName[n] = { x: [...allTimes], y: new Array(allTimes.length).fill(0) }
     for (const d of timeseries) {
-      const t = formatDate(d.time, timezone, 'yyyy-MM-dd HH:mm:ss')
-      const idx = allTimes.indexOf(t)
+      const idx = allTimes.indexOf(formatDate(d.time, timezone, 'yyyy-MM-dd HH:mm:ss'))
       if (idx !== -1) byName[d.bot_name ?? ''].y[idx] = d.count
     }
     return Object.entries(byName).map(([name, d], i): PlotlyTrace => ({
-      x: d.x,
-      y: d.y.map((val) => (val === 0 ? null : val)),
-      type: 'bar',
-      name,
-      width: bucketSeconds * 1000,
-      hovertemplate: `${name}: %{y:,}<extra></extra>`,
-      marker: { color: `hsl(${(i * 47 + 210) % 360}, 70%, 50%)` },
+      x: d.x, y: d.y.map((val) => (val === 0 ? null : val)), type: 'bar', name, width: bucketSeconds * 1000,
+      hovertemplate: `${name}: %{y:,}<extra></extra>`, marker: { color: `hsl(${(i * 47 + 210) % 360}, 70%, 50%)` },
     }))
   }, [data, timezone, bucketSeconds])
 
@@ -267,55 +174,23 @@ export function BotsSection({
   }, [data?.bot_efficiency])
 
   const botColumns: ColumnDef<WellknownBot>[] = [
-    {
-      accessorKey: 'name',
-      header: 'Bot',
-      cell: ({ row }) => <FilterValueCell filters={[{ column: '_wellknown_bot_id', value: row.original.id }]} display={row.original.name} className="font-medium" containerClassName="max-w-[200px]" />,
-    },
+    { accessorKey: 'name', header: 'Bot', cell: ({ row }) => <FilterValueCell filters={[{ column: '_wellknown_bot_id', value: row.original.id }]} display={row.original.name} className="font-medium" containerClassName="max-w-[200px]" /> },
     { accessorKey: 'category', header: 'Category', cell: ({ row }) => <span className="capitalize">{row.original.category.replace(/-/g, ' ')}</span> },
     { accessorKey: 'request_count', header: 'Requests', cell: ({ row }) => formatCount(row.original.request_count) },
-    {
-      accessorKey: 'verified_count',
-      header: 'Verified',
-      cell: ({ row }) => row.original.verified_count > 0 ? <span className="flex items-center gap-1 text-green-500"><CheckCircle2 className="h-3 w-3" />{formatCount(row.original.verified_count)}</span> : '—',
-    },
-    {
-      accessorKey: 'impersonator_count',
-      header: 'Spoofed',
-      cell: ({ row }) => row.original.impersonator_count > 0 ? <span className="flex items-center gap-1 text-red-500"><AlertTriangle className="h-3 w-3" />{formatCount(row.original.impersonator_count)}</span> : '—',
-    },
-    {
-      accessorKey: 'unverified_count',
-      header: 'Unverified',
-      cell: ({ row }) => row.original.unverified_count > 0 ? <span className="flex items-center gap-1 text-muted-foreground" title="Unverifiable (no IPs/domains in source)"><HelpCircle className="h-3 w-3" />{formatCount(row.original.unverified_count)}</span> : '—',
-    },
-    {
-      accessorKey: 'pending_count',
-      header: 'Pending',
-      cell: ({ row }) => row.original.pending_count > 0 ? <span className="flex items-center gap-1 text-yellow-500" title="Pending rDNS lookup"><Clock className="h-3 w-3" />{formatCount(row.original.pending_count)}</span> : '—',
-    },
+    { accessorKey: 'verified_count', header: 'Verified', cell: ({ row }) => row.original.verified_count > 0 ? <span className="flex items-center gap-1 text-green-500"><CheckCircle2 className="h-3 w-3" />{formatCount(row.original.verified_count)}</span> : '—' },
+    { accessorKey: 'impersonator_count', header: 'Spoofed', cell: ({ row }) => row.original.impersonator_count > 0 ? <span className="flex items-center gap-1 text-red-500"><AlertTriangle className="h-3 w-3" />{formatCount(row.original.impersonator_count)}</span> : '—' },
+    { accessorKey: 'unverified_count', header: 'Unverified', cell: ({ row }) => row.original.unverified_count > 0 ? <span className="flex items-center gap-1 text-muted-foreground" title="Unverifiable (no IPs/domains in source)"><HelpCircle className="h-3 w-3" />{formatCount(row.original.unverified_count)}</span> : '—' },
+    { accessorKey: 'pending_count', header: 'Pending', cell: ({ row }) => row.original.pending_count > 0 ? <span className="flex items-center gap-1 text-yellow-500" title="Pending rDNS lookup"><Clock className="h-3 w-3" />{formatCount(row.original.pending_count)}</span> : '—' },
   ]
 
   const ngwafBotColumns: ColumnDef<NgwafVerifiedBot>[] = [
-    {
-      accessorKey: 'bot_name',
-      header: 'Bot Name',
-      cell: ({ row }) => <FilterValueCell filters={[{ column: '_ngwaf_bot_name', value: row.original.bot_name || '' }]} display={row.original.bot_name ?? undefined} className="font-medium" containerClassName="max-w-[200px]" />,
-    },
-    {
-      accessorKey: 'category',
-      header: 'Category',
-      cell: ({ row }) => row.original.category ? <span className="capitalize">{row.original.category.replace(/-/g, ' ')}</span> : <span className="text-muted-foreground">—</span>,
-    },
+    { accessorKey: 'bot_name', header: 'Bot Name', cell: ({ row }) => <FilterValueCell filters={[{ column: '_ngwaf_bot_name', value: row.original.bot_name || '' }]} display={row.original.bot_name ?? undefined} className="font-medium" containerClassName="max-w-[200px]" /> },
+    { accessorKey: 'category', header: 'Category', cell: ({ row }) => row.original.category ? <span className="capitalize">{row.original.category.replace(/-/g, ' ')}</span> : <span className="text-muted-foreground">—</span> },
     { accessorKey: 'request_count', header: 'Requests', cell: ({ row }) => formatCount(row.original.request_count) },
   ]
 
   const fingerprintColumns: ColumnDef<TlsFingerprint>[] = [
-    {
-      accessorKey: 'fingerprint',
-      header: 'Cipher Fingerprint (SHA)',
-      cell: ({ row }) => <FilterValueCell filters={[{ column: 'tls_client_hello', value: row.original.fingerprint ?? '' }]} className="font-mono text-[10px]" containerClassName="max-w-[200px]" />,
-    },
+    { accessorKey: 'fingerprint', header: 'Cipher Fingerprint (SHA)', cell: ({ row }) => <FilterValueCell filters={[{ column: 'tls_client_hello', value: row.original.fingerprint ?? '' }]} className="font-mono text-[10px]" containerClassName="max-w-[200px]" /> },
     { accessorKey: 'ip_count', header: 'Unique IPs', cell: ({ row }) => formatCountMaybe(row.original.ip_count) ?? '—' },
     { accessorKey: 'request_count', header: 'Requests', cell: ({ row }) => formatCountMaybe(row.original.request_count) ?? '—' },
   ]
@@ -327,85 +202,54 @@ export function BotsSection({
     { accessorKey: 'resp_bytes', header: 'Bandwidth', cell: ({ row }) => formatBytes(row.original.resp_bytes) },
     { accessorKey: 'bandwidth_pct', header: 'Site BW Share', cell: ({ row }) => `${row.original.bandwidth_pct.toFixed(1)}%` },
     {
-      accessorKey: 'referrals',
-      header: 'Referred Traffic',
-      cell: ({ row }) =>
-        row.original.referrals === 0 ? (
-          <span className="flex items-center gap-1 text-red-500 font-medium" title="Zero human visitors referred">
-            <AlertTriangle className="h-3 w-3" />0
-          </span>
-        ) : (
-          <span className="text-green-600 dark:text-green-400 font-medium">{formatCount(row.original.referrals)}</span>
-        ),
+      accessorKey: 'referrals', header: 'Referred Traffic',
+      cell: ({ row }) => row.original.referrals === 0
+        ? <span className="flex items-center gap-1 text-red-500 font-medium" title="Zero human visitors referred"><AlertTriangle className="h-3 w-3" />0</span>
+        : <span className="text-green-600 dark:text-green-400 font-medium">{formatCount(row.original.referrals)}</span>,
     },
     {
-      accessorKey: 'requests_per_referral',
-      header: 'Requests / Referral',
-      cell: ({ row }) => {
-        const val = row.original.requests_per_referral
-        const isHighCost = row.original.referrals === 0 || val >= 50
-        return <span className={isHighCost ? 'text-red-500 font-semibold' : undefined}>{formatCount(val, { maximumFractionDigits: 1 })}</span>
-      },
+      accessorKey: 'requests_per_referral', header: 'Requests / Referral',
+      cell: ({ row }) => <span className={row.original.referrals === 0 || row.original.requests_per_referral >= 50 ? 'text-red-500 font-semibold' : undefined}>{formatCount(row.original.requests_per_referral, { maximumFractionDigits: 1 })}</span>,
     },
     {
-      accessorKey: 'bytes_per_referral',
-      header: 'Bandwidth / Referral',
+      accessorKey: 'bytes_per_referral', header: 'Bandwidth / Referral',
       cell: ({ row }) => <span className={row.original.referrals === 0 ? 'text-red-500 font-semibold' : undefined}>{formatBytes(row.original.bytes_per_referral)}</span>,
     },
   ]
+
+  const cardErr = error as AnalyticsCardError | null
+  const uaEmptyMsg = isFieldActive('ua') ? 'No bot or crawler traffic detected in this time window.' : 'Requires User-Agent (ua) field to be enabled in Fastly logging.'
 
   return (
     <>
       {data?.ngwaf_configured !== false && (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
           <AnalyticsCard
-            title="Verified Bots (NGWAF)"
-            icon={<Bot className="h-4 w-4" />}
-            headerAction={intervalButtons}
-            isLoading={isLoading}
-            isFetching={isFetching}
-            loadingMessage="Loading NGWAF verified bots..."
-            error={error as AnalyticsCardError | null}
-            className="h-[360px] [contain-intrinsic-size:360px] [content-visibility:auto]"
-            contentClassName="p-2"
-            helpTitle={SECURITY_INFO.ngwaf_bots.title}
-            helpContent={SECURITY_INFO.ngwaf_bots.body}
+            title="Verified Bots (NGWAF)" icon={<Bot className="h-4 w-4" />} headerAction={intervalButtons}
+            isLoading={isLoading} isFetching={isFetching} loadingMessage="Loading NGWAF verified bots..." error={cardErr}
+            className="h-[360px] [contain-intrinsic-size:360px] [content-visibility:auto]" contentClassName="p-2"
+            helpTitle={SECURITY_INFO.ngwaf_bots.title} helpContent={SECURITY_INFO.ngwaf_bots.body}
           >
             {ngwafBotsData.length === 0 && !isLoading ? (
               <div className="flex items-center justify-center h-full text-muted-foreground text-sm text-center px-4">
-                {data?.ngwaf_configured
-                  ? 'No NGWAF bot detections in this time window.'
-                  : <>Set <code className="mx-1 text-xs bg-muted px-1 rounded">ngwaf_workspace_id</code> in service settings to enable NGWAF bot tracking.</>}
+                {data?.ngwaf_configured ? 'No NGWAF bot detections in this time window.' : <>Set <code className="mx-1 text-xs bg-muted px-1 rounded">ngwaf_workspace_id</code> in service settings to enable NGWAF bot tracking.</>}
               </div>
             ) : (
-              <PlotlyChart
-                data={ngwafBotsData}
-                layout={{ ...commonTimeLayout, barmode: 'stack', showlegend: true, yaxis: { title: 'Requests', separatethousands: true, exponentformat: 'none' } }}
-                height="100%"
-              />
+              <PlotlyChart data={ngwafBotsData} layout={{ ...commonTimeLayout, barmode: 'stack', showlegend: true, yaxis: { title: 'Requests', separatethousands: true, exponentformat: 'none' } }} height="100%" />
             )}
           </AnalyticsCard>
 
           <AnalyticsCard
-            title="Verified Bot Names (NGWAF)"
-            icon={<Bot className="h-4 w-4" />}
+            title="Verified Bot Names (NGWAF)" icon={<Bot className="h-4 w-4" />}
             headerAction={<ColumnVisibilityDropdown columns={labeledColumns(NGWAF_BOT_COLUMN_IDS)} visibility={ngwafBotVisibility} onChange={onNgwafBotVisChange} />}
-            isLoading={isLoading}
-            isFetching={isFetching}
-            loadingMessage="Loading NGWAF bot names..."
-            error={error as AnalyticsCardError | null}
-            className="min-h-[360px] [contain-intrinsic-size:360px] [content-visibility:auto]"
-            contentClassName="p-0"
-            helpTitle={SECURITY_INFO.ngwaf_bots.title}
-            helpContent={SECURITY_INFO.ngwaf_bots.body}
+            isLoading={isLoading} isFetching={isFetching} loadingMessage="Loading NGWAF bot names..." error={cardErr}
+            className="min-h-[360px] [contain-intrinsic-size:360px] [content-visibility:auto]" contentClassName="p-0"
+            helpTitle={SECURITY_INFO.ngwaf_bots.title} helpContent={SECURITY_INFO.ngwaf_bots.body}
           >
             <DataTable
-              columns={ngwafBotColumns}
-              data={data?.ngwaf_verified_bots || []}
+              columns={ngwafBotColumns} data={data?.ngwaf_verified_bots || []}
               emptyMessage={isLoading ? '' : (data?.ngwaf_configured ? 'No NGWAF bot detections in this time window.' : 'Set ngwaf_workspace_id in service settings to enable NGWAF bot tracking.')}
-              hideToolbar
-              columnVisibility={ngwafBotVisibility}
-              onColumnVisibilityChange={setNgwafBotVisibility}
+              hideToolbar columnVisibility={ngwafBotVisibility} onColumnVisibilityChange={setNgwafBotVisibility}
             />
           </AnalyticsCard>
         </div>
@@ -413,106 +257,59 @@ export function BotsSection({
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
         <AnalyticsCard
-          title="Well-Known Bots"
-          icon={<Bot className="h-4 w-4" />}
+          title="Well-Known Bots" icon={<Bot className="h-4 w-4" />}
           headerAction={<ColumnVisibilityDropdown columns={labeledColumns(BOT_COLUMN_IDS)} visibility={botVisibility} onChange={onBotVisChange} />}
-          isLoading={isLoading}
-          isFetching={isFetching}
-          loadingMessage="Loading well-known bots..."
-          error={error as AnalyticsCardError | null}
-          className="min-h-[360px] [contain-intrinsic-size:360px] [content-visibility:auto]"
-          contentClassName="p-0"
-          helpTitle={SECURITY_INFO.wellknown_bots.title}
-          helpContent={SECURITY_INFO.wellknown_bots.body}
+          isLoading={isLoading} isFetching={isFetching} loadingMessage="Loading well-known bots..." error={cardErr}
+          className="min-h-[360px] [contain-intrinsic-size:360px] [content-visibility:auto]" contentClassName="p-0"
+          helpTitle={SECURITY_INFO.wellknown_bots.title} helpContent={SECURITY_INFO.wellknown_bots.body}
         >
           <DataTable
-            columns={botColumns}
-            data={data?.wellknown_bots || []}
+            columns={botColumns} data={data?.wellknown_bots || []}
             emptyMessage={isLoading ? '' : 'No known bots detected. Ensure bot sources are cached in Admin settings.'}
-            hideToolbar
-            tableContainerClassName="max-h-[280px]"
-            columnVisibility={botVisibility}
-            onColumnVisibilityChange={setBotVisibility}
+            hideToolbar tableContainerClassName="max-h-[280px]" columnVisibility={botVisibility} onColumnVisibilityChange={setBotVisibility}
           />
         </AnalyticsCard>
 
         <AnalyticsCard
-          title="Top TLS Fingerprints"
-          icon={<Fingerprint className="h-4 w-4" />}
+          title="Top TLS Fingerprints" icon={<Fingerprint className="h-4 w-4" />}
           headerAction={<ColumnVisibilityDropdown columns={labeledColumns(FINGERPRINT_COLUMN_IDS)} visibility={fingerprintVisibility} onChange={onFingerprintVisChange} />}
-          isLoading={isLoading}
-          isFetching={isFetching}
-          loadingMessage="Loading TLS fingerprints..."
-          error={error as AnalyticsCardError | null}
-          className="min-h-[300px] [contain-intrinsic-size:300px] [content-visibility:auto]"
-          contentClassName="p-0"
-          helpTitle={SECURITY_INFO.fingerprints.title}
-          helpContent={SECURITY_INFO.fingerprints.body}
+          isLoading={isLoading} isFetching={isFetching} loadingMessage="Loading TLS fingerprints..." error={cardErr}
+          className="min-h-[300px] [contain-intrinsic-size:300px] [content-visibility:auto]" contentClassName="p-0"
+          helpTitle={SECURITY_INFO.fingerprints.title} helpContent={SECURITY_INFO.fingerprints.body}
         >
           <FingerprintCoverageHint coverage={data?.fingerprint_coverage?.tls_ciphers_sha} field="tls_ciphers_sha" />
           <DataTable
-            columns={fingerprintColumns}
-            data={data?.tls_fingerprints || []}
+            columns={fingerprintColumns} data={data?.tls_fingerprints || []}
             emptyMessage={isLoading ? '' : ((isFieldActive('ja3') || isFieldActive('ja4')) ? 'No TLS fingerprints in this time range.' : 'Requires Security: TLS Fingerprinting (Group H) fields to be enabled in Fastly logging.')}
-            hideToolbar
-            tableContainerClassName="max-h-[280px]"
-            columnVisibility={fingerprintVisibility}
-            onColumnVisibilityChange={setFingerprintVisibility}
+            hideToolbar tableContainerClassName="max-h-[280px]" columnVisibility={fingerprintVisibility} onColumnVisibilityChange={setFingerprintVisibility}
           />
         </AnalyticsCard>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
         <AnalyticsCard
-          title="Bot & Crawler Cost vs. Referrals"
-          icon={<Scale className="h-4 w-4" />}
-          isLoading={isLoading}
-          isFetching={isFetching}
-          loadingMessage="Loading bot cost vs. referrals chart..."
-          error={error as AnalyticsCardError | null}
-          className="h-[360px] [contain-intrinsic-size:360px] [content-visibility:auto]"
-          contentClassName="p-2"
-          helpTitle={SECURITY_INFO.bot_efficiency.title}
-          helpContent={SECURITY_INFO.bot_efficiency.body}
+          title="Bot & Crawler Cost vs. Referrals" icon={<Scale className="h-4 w-4" />}
+          isLoading={isLoading} isFetching={isFetching} loadingMessage="Loading bot cost vs. referrals chart..." error={cardErr}
+          className="h-[360px] [contain-intrinsic-size:360px] [content-visibility:auto]" contentClassName="p-2"
+          helpTitle={SECURITY_INFO.bot_efficiency.title} helpContent={SECURITY_INFO.bot_efficiency.body}
         >
           {botEfficiencyChartData.length === 0 && !isLoading ? (
-            <div className="flex items-center justify-center h-full text-muted-foreground text-sm text-center px-4">
-              {isFieldActive('ua') ? 'No bot or crawler traffic detected in this time window.' : 'Requires User-Agent (ua) field to be enabled in Fastly logging.'}
-            </div>
+            <div className="flex items-center justify-center h-full text-muted-foreground text-sm text-center px-4">{uaEmptyMsg}</div>
           ) : (
-            <PlotlyChart
-              data={botEfficiencyChartData}
-              layout={{ barmode: 'group', showlegend: true, yaxis: { title: 'Count', separatethousands: true, exponentformat: 'none' } }}
-              height="100%"
-            />
+            <PlotlyChart data={botEfficiencyChartData} layout={{ barmode: 'group', showlegend: true, yaxis: { title: 'Count', separatethousands: true, exponentformat: 'none' } }} height="100%" />
           )}
         </AnalyticsCard>
 
         <AnalyticsCard
-          title="Bot & Crawler Value vs. Cost (Bandwidth, Requests & Referrals)"
-          icon={<Scale className="h-4 w-4" />}
-          headerAction={
-            onBotEfficiencyVisChange ? (
-              <ColumnVisibilityDropdown columns={labeledColumns(BOT_EFFICIENCY_COLUMN_IDS)} visibility={botEfficiencyVisibility} onChange={onBotEfficiencyVisChange} />
-            ) : undefined
-          }
-          isLoading={isLoading}
-          isFetching={isFetching}
-          loadingMessage="Loading bot bandwidth & referral efficiency..."
-          error={error as AnalyticsCardError | null}
-          className="min-h-[300px] [contain-intrinsic-size:300px] [content-visibility:auto]"
-          contentClassName="p-0"
-          helpTitle={SECURITY_INFO.bot_efficiency.title}
-          helpContent={SECURITY_INFO.bot_efficiency.body}
+          title="Bot & Crawler Value vs. Cost (Bandwidth, Requests & Referrals)" icon={<Scale className="h-4 w-4" />}
+          headerAction={onBotEfficiencyVisChange ? <ColumnVisibilityDropdown columns={labeledColumns(BOT_EFFICIENCY_COLUMN_IDS)} visibility={botEfficiencyVisibility} onChange={onBotEfficiencyVisChange} /> : undefined}
+          isLoading={isLoading} isFetching={isFetching} loadingMessage="Loading bot bandwidth & referral efficiency..." error={cardErr}
+          className="min-h-[300px] [contain-intrinsic-size:300px] [content-visibility:auto]" contentClassName="p-0"
+          helpTitle={SECURITY_INFO.bot_efficiency.title} helpContent={SECURITY_INFO.bot_efficiency.body}
         >
           <DataTable
-            columns={botEfficiencyColumns}
-            data={data?.bot_efficiency || []}
-            emptyMessage={isLoading ? '' : (isFieldActive('ua') ? 'No bot or crawler traffic detected in this time window.' : 'Requires User-Agent (ua) field to be enabled in Fastly logging.')}
-            hideToolbar
-            tableContainerClassName="max-h-[280px]"
-            columnVisibility={botEfficiencyVisibility}
-            onColumnVisibilityChange={setBotEfficiencyVisibility}
+            columns={botEfficiencyColumns} data={data?.bot_efficiency || []} emptyMessage={isLoading ? '' : uaEmptyMsg}
+            hideToolbar tableContainerClassName="max-h-[280px]" columnVisibility={botEfficiencyVisibility} onColumnVisibilityChange={setBotEfficiencyVisibility}
           />
         </AnalyticsCard>
       </div>
@@ -521,21 +318,13 @@ export function BotsSection({
 }
 
 interface ProxyWatchdogSectionProps {
-  data: SecurityData | undefined
-  isLoading: boolean
-  error?: Error | null
-  startTime?: string | null
-  endTime?: string | null
-  activeServiceId?: string | null
+  data: SecurityData | undefined; isLoading: boolean; error?: Error | null
+  startTime?: string | null; endTime?: string | null; activeServiceId?: string | null
 }
 
 const WATCHDOG_COLUMNS_LIST = [
-  { id: 'ip', label: 'IP Address' },
-  { id: 'asn_name', label: 'ASN / Network' },
-  { id: 'risk_level', label: 'Risk Level' },
-  { id: 'distance_km', label: 'Distance (km)' },
-  { id: 'rtt_min_ms', label: 'RTT Min' },
-  { id: 'tcp_rtt_ms', label: 'TCP RTT' },
+  { id: 'ip', label: 'IP Address' }, { id: 'asn_name', label: 'ASN / Network' }, { id: 'risk_level', label: 'Risk Level' },
+  { id: 'distance_km', label: 'Distance (km)' }, { id: 'rtt_min_ms', label: 'RTT Min' }, { id: 'tcp_rtt_ms', label: 'TCP RTT' },
 ]
 
 const WATCHDOG_HELP_MODAL_CONTENT: Record<'traffic' | 'isp' | 'export' | 'clients', { title: string; body: React.ReactNode }> = {
@@ -611,9 +400,7 @@ const WATCHDOG_HELP_MODAL_CONTENT: Record<'traffic' | 'isp' | 'export' | 'client
   },
 }
 
-export function ProxyWatchdogSection({
-  data, isLoading, error = null, startTime, endTime, activeServiceId,
-}: ProxyWatchdogSectionProps) {
+export function ProxyWatchdogSection({ data, isLoading, error = null, startTime, endTime, activeServiceId }: ProxyWatchdogSectionProps) {
   const [threshold, setThreshold] = useState<'High' | 'Medium' | 'Low'>('High')
   const [format, setFormat] = useState<'fastly-acl' | 'plain'>('fastly-acl')
   const [isExporting, setIsExporting] = useState(false)
@@ -623,26 +410,19 @@ export function ProxyWatchdogSection({
 
   const watchdogColumns = React.useMemo((): ColumnDef<ActiveClientItem>[] => [
     {
-      accessorKey: 'ip',
-      id: 'ip',
-      header: 'IP Address',
+      accessorKey: 'ip', id: 'ip', header: 'IP Address',
       cell: ({ row }) => {
         const ip = row.original.ip
+        const qs = new URLSearchParams({
+          ...(activeServiceId ? { service: activeServiceId } : {}),
+          ...(startTime ? { start_time: startTime } : {}),
+          ...(endTime ? { end_time: endTime } : {}),
+          filter_ip: ip,
+        }).toString()
         return (
           <div className="flex items-center gap-1.5 min-w-0 w-full">
             <FilterValueCell filters={[{ column: 'ip', value: ip }]} display={ip} className="font-mono font-medium" />
-            <a
-              href={`/dashboard?${new URLSearchParams({
-                ...(activeServiceId ? { service: activeServiceId } : {}),
-                ...(startTime ? { start_time: startTime } : {}),
-                ...(endTime ? { end_time: endTime } : {}),
-                filter_ip: ip,
-              }).toString()}`}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-muted-foreground hover:text-rose-500 transition-colors p-0.5 rounded hover:bg-muted/80 shrink-0"
-              title="View IP in Dashboard"
-            >
+            <a href={`/dashboard?${qs}`} target="_blank" rel="noopener noreferrer" className="text-muted-foreground hover:text-rose-500 transition-colors p-0.5 rounded hover:bg-muted/80 shrink-0" title="View IP in Dashboard">
               <ExternalLink className="h-3 w-3" />
             </a>
           </div>
@@ -650,96 +430,52 @@ export function ProxyWatchdogSection({
       },
     },
     {
-      accessorKey: 'asn_name',
-      id: 'asn_name',
-      header: 'ASN / Network',
-      cell: ({ row }) => row.original.asn_name
-        ? <span className="truncate block max-w-[200px]" title={row.original.asn_name}>{row.original.asn_name}</span>
-        : <span className="text-muted-foreground">—</span>,
+      accessorKey: 'asn_name', id: 'asn_name', header: 'ASN / Network',
+      cell: ({ row }) => row.original.asn_name ? <span className="truncate block max-w-[200px]" title={row.original.asn_name}>{row.original.asn_name}</span> : <span className="text-muted-foreground">—</span>,
     },
     {
-      accessorKey: 'risk_level',
-      id: 'risk_level',
-      header: 'Risk Level',
+      accessorKey: 'risk_level', id: 'risk_level', header: 'Risk Level',
       cell: ({ row }) => {
         const val = row.original.risk_level
-        const isHigh = val === 'High'
-        const isMedium = val === 'Medium'
-        return (
-          <Badge
-            variant={isHigh ? 'destructive' : isMedium ? 'default' : 'outline'}
-            className={isMedium ? 'bg-amber-500/10 text-amber-500 border-amber-500/20 hover:bg-amber-500/10' : ''}
-          >
-            {val}
-          </Badge>
-        )
+        return <Badge variant={val === 'High' ? 'destructive' : val === 'Medium' ? 'default' : 'outline'} className={val === 'Medium' ? 'bg-amber-500/10 text-amber-500 border-amber-500/20 hover:bg-amber-500/10' : ''}>{val}</Badge>
       },
     },
     {
-      accessorKey: 'distance_km',
-      id: 'distance_km',
-      header: 'Distance (km)',
-      cell: ({ row: tableRow }) => {
-        const row = tableRow.original
-        return (
-          <div className="flex flex-col items-start w-full">
-            <span className="font-mono">
-              {row.distance_km !== null && row.distance_km !== undefined ? formatCount(row.distance_km, { maximumFractionDigits: 1 }) : '—'}
-            </span>
-            {row.impossible_distance && (
-              <button
-                onClick={(e) => {
-                  e.stopPropagation()
-                  setSelectedMapItem({
-                    label: row.ip,
-                    client_lat: row.client_lat ?? 0,
-                    client_lon: row.client_lon ?? 0,
-                    pop_lat: row.pop_lat ?? 0,
-                    pop_lon: row.pop_lon ?? 0,
-                    pop: row.pop ?? 'Unknown',
-                    tcp_rtt: (row.tcp_rtt_ms ?? 0) * 1000,
-                    distance_km: row.distance_km ?? 0,
-                    max_km: (row.rtt_min_ms ?? 0) * 100.0 + 150.0,
-                    country: row.country || undefined,
-                    city: row.city || undefined,
-                  })
-                }}
-                className="text-[10px] text-rose-500 font-semibold flex items-center gap-1 mt-1 px-1.5 py-0.5 rounded bg-rose-500/10 hover:bg-rose-500/20 active:scale-95 transition-all border border-rose-500/20 shrink-0"
-                title="Visualize geographical physical anomaly on map"
-              >
-                <MapIcon className="h-2.5 w-2.5" /> Impossible
-              </button>
-            )}
-          </div>
-        )
-      },
+      accessorKey: 'distance_km', id: 'distance_km', header: 'Distance (km)',
+      cell: ({ row: { original: row } }) => (
+        <div className="flex flex-col items-start w-full">
+          <span className="font-mono">{row.distance_km !== null && row.distance_km !== undefined ? formatCount(row.distance_km, { maximumFractionDigits: 1 }) : '—'}</span>
+          {row.impossible_distance && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation()
+                setSelectedMapItem({
+                  label: row.ip, client_lat: row.client_lat ?? 0, client_lon: row.client_lon ?? 0,
+                  pop_lat: row.pop_lat ?? 0, pop_lon: row.pop_lon ?? 0, pop: row.pop ?? 'Unknown',
+                  tcp_rtt: (row.tcp_rtt_ms ?? 0) * 1000, distance_km: row.distance_km ?? 0,
+                  max_km: (row.rtt_min_ms ?? 0) * 100.0 + 150.0, country: row.country || undefined, city: row.city || undefined,
+                })
+              }}
+              className="text-[10px] text-rose-500 font-semibold flex items-center gap-1 mt-1 px-1.5 py-0.5 rounded bg-rose-500/10 hover:bg-rose-500/20 active:scale-95 transition-all border border-rose-500/20 shrink-0"
+              title="Visualize geographical physical anomaly on map"
+            >
+              <MapIcon className="h-2.5 w-2.5" /> Impossible
+            </button>
+          )}
+        </div>
+      ),
     },
-    {
-      accessorKey: 'rtt_min_ms',
-      id: 'rtt_min_ms',
-      header: 'RTT Min',
-      cell: ({ row }) => <div className="font-mono">{row.original.rtt_min_ms !== null && row.original.rtt_min_ms !== undefined ? `${row.original.rtt_min_ms.toFixed(1)} ms` : '—'}</div>,
-    },
-    {
-      accessorKey: 'tcp_rtt_ms',
-      id: 'tcp_rtt_ms',
-      header: 'TCP RTT',
-      cell: ({ row }) => <div className="font-mono">{row.original.tcp_rtt_ms !== null && row.original.tcp_rtt_ms !== undefined ? `${row.original.tcp_rtt_ms.toFixed(1)} ms` : '—'}</div>,
-    },
+    { accessorKey: 'rtt_min_ms', id: 'rtt_min_ms', header: 'RTT Min', cell: ({ row }) => <div className="font-mono">{row.original.rtt_min_ms !== null && row.original.rtt_min_ms !== undefined ? `${row.original.rtt_min_ms.toFixed(1)} ms` : '—'}</div> },
+    { accessorKey: 'tcp_rtt_ms', id: 'tcp_rtt_ms', header: 'TCP RTT', cell: ({ row }) => <div className="font-mono">{row.original.tcp_rtt_ms !== null && row.original.tcp_rtt_ms !== undefined ? `${row.original.tcp_rtt_ms.toFixed(1)} ms` : '—'}</div> },
   ], [activeServiceId, startTime, endTime])
 
   const handleExport = async () => {
     setIsExporting(true)
     try {
       const params = new URLSearchParams({ start_time: startTime || '', end_time: endTime || '', threshold, format })
-      const response = await adminFetch(`/api/security/proxies/export?${params.toString()}`, {
-        headers: activeServiceId ? { 'x-fastly-service-id': activeServiceId } : {},
-      })
+      const response = await adminFetch(`/api/security/proxies/export?${params.toString()}`, { headers: activeServiceId ? { 'x-fastly-service-id': activeServiceId } : {} })
       if (!response.ok) throw new Error(`Export failed: ${response.statusText}`)
-      downloadBlob(
-        await response.blob(),
-        format === 'plain' ? `proxies_${threshold.toLowerCase()}.txt` : `proxies_acl_${threshold.toLowerCase()}.csv`,
-      )
+      downloadBlob(await response.blob(), format === 'plain' ? `proxies_${threshold.toLowerCase()}.txt` : `proxies_acl_${threshold.toLowerCase()}.csv`)
     } catch (err) {
       console.error('Export error:', err)
     } finally {
@@ -747,27 +483,17 @@ export function ProxyWatchdogSection({
     }
   }
 
-  const buildFilteredDashboardUrl = React.useCallback(
-    (filtersPayload: Record<string, { mode: string; values: string[] }>) => {
-      const params = new URLSearchParams()
-      if (activeServiceId) params.set('service', activeServiceId)
-      if (startTime) params.set('start_time', startTime)
-      if (endTime) params.set('end_time', endTime)
-      params.set('filters', JSON.stringify(filtersPayload))
-      return `/dashboard?${params.toString()}`
-    },
-    [activeServiceId, startTime, endTime],
-  )
+  const buildFilteredDashboardUrl = React.useCallback((filtersPayload: Record<string, { mode: string; values: string[] }>) => {
+    const params = new URLSearchParams()
+    if (activeServiceId) params.set('service', activeServiceId)
+    if (startTime) params.set('start_time', startTime)
+    if (endTime) params.set('end_time', endTime)
+    params.set('filters', JSON.stringify(filtersPayload))
+    return `/dashboard?${params.toString()}`
+  }, [activeServiceId, startTime, endTime])
 
-  const tunnelDashboardUrl = React.useMemo(
-    () => buildFilteredDashboardUrl({ _tunnel_requests: { mode: 'include', values: ['true'] } }),
-    [buildFilteredDashboardUrl],
-  )
-
-  const getIspDashboardUrl = React.useCallback(
-    (asn: number | string | null | undefined) => (asn ? buildFilteredDashboardUrl({ asn: { mode: 'include', values: [String(asn)] } }) : '#'),
-    [buildFilteredDashboardUrl],
-  )
+  const tunnelDashboardUrl = React.useMemo(() => buildFilteredDashboardUrl({ _tunnel_requests: { mode: 'include', values: ['true'] } }), [buildFilteredDashboardUrl])
+  const getIspDashboardUrl = React.useCallback((asn: number | string | null | undefined) => (asn ? buildFilteredDashboardUrl({ asn: { mode: 'include', values: [String(asn)] } }) : '#'), [buildFilteredDashboardUrl])
 
   if (error) {
     return (
@@ -790,14 +516,9 @@ export function ProxyWatchdogSection({
     <div className="space-y-6">
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6 [contain-intrinsic-size:120px] [content-visibility:auto]">
         <StatCard
-          title="Active VPN & Proxy Users"
-          value={isLoading ? <Skeleton className="h-8 w-16" /> : formatCount(activeProxiesCount)}
-          sub="Unique suspicious IP addresses detected"
-          icon={Globe}
-          iconClassName="text-blue-500"
-          loading={isLoading}
-          className="min-h-[120px] [contain-intrinsic-size:120px] [content-visibility:auto]"
-          helpTitle="Active VPN & Proxy Users Detection"
+          title="Active VPN & Proxy Users" value={isLoading ? <Skeleton className="h-8 w-16" /> : formatCount(activeProxiesCount)}
+          sub="Unique suspicious IP addresses detected" icon={Globe} iconClassName="text-blue-500" loading={isLoading}
+          className="min-h-[120px] [contain-intrinsic-size:120px] [content-visibility:auto]" helpTitle="Active VPN & Proxy Users Detection"
           helpContent={
             <div className="space-y-4 text-xs text-muted-foreground leading-relaxed">
               <p>This metric represents the number of distinct client IP addresses actively routing requests through VPN servers, anonymizing proxies, or Tor exit nodes during the selected time window.</p>
@@ -819,27 +540,15 @@ export function ProxyWatchdogSection({
         <StatCard
           title="Tunnel Requests"
           value={
-            isLoading ? (
-              <Skeleton className="h-8 w-16" />
-            ) : (
-              <a
-                href={tunnelDashboardUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-2xl font-bold text-violet-600 dark:text-violet-400 hover:underline inline-flex items-center gap-1 group/link"
-                title="Open Tunnel Requests on Dashboard"
-              >
+            isLoading ? <Skeleton className="h-8 w-16" /> : (
+              <a href={tunnelDashboardUrl} target="_blank" rel="noopener noreferrer" className="text-2xl font-bold text-violet-600 dark:text-violet-400 hover:underline inline-flex items-center gap-1 group/link" title="Open Tunnel Requests on Dashboard">
                 {formatCount(tunnelRequestsCount)}
                 <ExternalLink className="h-3 w-3 opacity-0 group-hover/link:opacity-100 transition-opacity text-muted-foreground" />
               </a>
             )
           }
-          sub="HTTP requests routed via anonymizers"
-          icon={Activity}
-          iconClassName="text-violet-500"
-          loading={isLoading}
-          className="min-h-[120px] [contain-intrinsic-size:120px] [content-visibility:auto]"
-          helpTitle="Tunnel Requests Volume"
+          sub="HTTP requests routed via anonymizers" icon={Activity} iconClassName="text-violet-500" loading={isLoading}
+          className="min-h-[120px] [contain-intrinsic-size:120px] [content-visibility:auto]" helpTitle="Tunnel Requests Volume"
           helpContent={
             <div className="space-y-4 text-xs text-muted-foreground leading-relaxed">
               <p>This tracks the absolute HTTP request volume routed through VPNs, anonymizing networks, or hosting providers during the selected time period.</p>
@@ -855,14 +564,9 @@ export function ProxyWatchdogSection({
           }
         />
         <StatCard
-          title="Impossible Distance Mismatches"
-          value={isLoading ? <Skeleton className="h-8 w-16" /> : formatCount(distanceMismatchesCount)}
-          sub="IP-to-latency geographical anomalies"
-          icon={AlertTriangle}
-          iconClassName="text-amber-500"
-          loading={isLoading}
-          className="min-h-[120px] [contain-intrinsic-size:120px] [content-visibility:auto]"
-          helpTitle="Impossible Distance Mismatch Auditing"
+          title="Impossible Distance Mismatches" value={isLoading ? <Skeleton className="h-8 w-16" /> : formatCount(distanceMismatchesCount)}
+          sub="IP-to-latency geographical anomalies" icon={AlertTriangle} iconClassName="text-amber-500" loading={isLoading}
+          className="min-h-[120px] [contain-intrinsic-size:120px] [content-visibility:auto]" helpTitle="Impossible Distance Mismatch Auditing"
           helpContent={
             <div className="space-y-4 text-xs text-muted-foreground leading-relaxed">
               <p>Geographical anomalies represent requests where the physical distance between the client&apos;s reported GeoIP location and the landing edge POP is physically incompatible with the recorded network latency.</p>
@@ -886,9 +590,7 @@ export function ProxyWatchdogSection({
           <Card className="min-h-[280px] [contain-intrinsic-size:320px] [content-visibility:auto]">
             <CardHeader className="pb-3 flex flex-row items-start justify-between space-y-0">
               <div>
-                <CardTitle className="text-sm font-semibold flex items-center gap-2">
-                  <Activity className="h-4 w-4 text-violet-500" /> Traffic Quality Breakdown
-                </CardTitle>
+                <CardTitle className="text-sm font-semibold flex items-center gap-2"><Activity className="h-4 w-4 text-violet-500" /> Traffic Quality Breakdown</CardTitle>
                 <CardDescription className="text-xs">Assessed request reliability index</CardDescription>
               </div>
               <Button variant="ghost" size="icon" className="h-6 w-6 text-muted-foreground hover:text-foreground shrink-0" onClick={() => setActiveHelpKey('traffic')} title="About Traffic Quality Breakdown">
@@ -906,10 +608,7 @@ export function ProxyWatchdogSection({
                   const val = Number(item.value || 0)
                   return (
                     <div key={label} className="space-y-1">
-                      <div className="flex justify-between text-xs font-medium">
-                        <span>{label}</span>
-                        <span className="font-mono text-muted-foreground">{val}%</span>
-                      </div>
+                      <div className="flex justify-between text-xs font-medium"><span>{label}</span><span className="font-mono text-muted-foreground">{val}%</span></div>
                       <div className="h-2 w-full bg-muted rounded-full overflow-hidden">
                         <div className={`h-full rounded-full ${label === 'High' ? 'bg-emerald-500' : label === 'Medium' ? 'bg-amber-500' : 'bg-rose-500'}`} style={{ width: `${val}%` }} />
                       </div>
@@ -923,9 +622,7 @@ export function ProxyWatchdogSection({
           <Card className="min-h-[280px] [contain-intrinsic-size:320px] [content-visibility:auto]">
             <CardHeader className="pb-3 flex flex-row items-start justify-between space-y-0">
               <div>
-                <CardTitle className="text-sm font-semibold flex items-center gap-2">
-                  <Server className="h-4 w-4 text-blue-500" /> Suspicious ISPs & Providers
-                </CardTitle>
+                <CardTitle className="text-sm font-semibold flex items-center gap-2"><Server className="h-4 w-4 text-blue-500" /> Suspicious ISPs & Providers</CardTitle>
                 <CardDescription className="text-xs">Leading network providers hosting proxy connections</CardDescription>
               </div>
               <Button variant="ghost" size="icon" className="h-6 w-6 text-muted-foreground hover:text-foreground shrink-0" onClick={() => setActiveHelpKey('isp')} title="About Suspicious ISPs">
@@ -975,9 +672,7 @@ export function ProxyWatchdogSection({
           <Card className="border-primary/20 bg-primary/5 [contain-intrinsic-size:140px] [content-visibility:auto]">
             <CardHeader className="pb-3 flex flex-row items-start justify-between space-y-0">
               <div>
-                <CardTitle className="text-sm font-semibold flex items-center gap-2">
-                  <Download className="h-4 w-4 text-primary" /> VPN/Proxy Export Center
-                </CardTitle>
+                <CardTitle className="text-sm font-semibold flex items-center gap-2"><Download className="h-4 w-4 text-primary" /> VPN/Proxy Export Center</CardTitle>
                 <CardDescription className="text-xs">Export verified anonymizer IP lists for ingestion into Fastly WAF Edge ACLs.</CardDescription>
               </div>
               <Button variant="ghost" size="icon" className="h-6 w-6 text-muted-foreground hover:text-foreground shrink-0" onClick={() => setActiveHelpKey('export')} title="About Export Center">
@@ -987,9 +682,7 @@ export function ProxyWatchdogSection({
             <CardContent>
               <div className="flex flex-wrap gap-4 items-end">
                 <div className="space-y-1.5 shrink-0">
-                  <span className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wider flex items-center gap-1">
-                    <ShieldAlert className="h-3 w-3" /> Risk Threshold
-                  </span>
+                  <span className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wider flex items-center gap-1"><ShieldAlert className="h-3 w-3" /> Risk Threshold</span>
                   <Select value={threshold} onValueChange={(val) => { if (val) setThreshold(val) }}>
                     <SelectTrigger className="w-36 h-9 text-xs bg-background"><SelectValue /></SelectTrigger>
                     <SelectContent>
@@ -1001,9 +694,7 @@ export function ProxyWatchdogSection({
                 </div>
 
                 <div className="space-y-1.5 shrink-0">
-                  <span className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wider flex items-center gap-1">
-                    <Download className="h-3 w-3" /> Target Format
-                  </span>
+                  <span className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wider flex items-center gap-1"><Download className="h-3 w-3" /> Target Format</span>
                   <Select value={format} onValueChange={(val) => { if (val) setFormat(val) }}>
                     <SelectTrigger className="w-48 h-9 text-xs bg-background"><SelectValue /></SelectTrigger>
                     <SelectContent>
@@ -1036,13 +727,9 @@ export function ProxyWatchdogSection({
             </CardHeader>
             <CardContent className="p-0">
               <DataTable
-                columns={watchdogColumns}
-                data={activeClients}
-                isLoading={isLoading}
+                columns={watchdogColumns} data={activeClients} isLoading={isLoading}
                 emptyMessage="No active proxy client sessions observed in this window."
-                hideToolbar
-                columnVisibility={columnVisibility}
-                onColumnVisibilityChange={setColumnVisibility}
+                hideToolbar columnVisibility={columnVisibility} onColumnVisibilityChange={setColumnVisibility}
               />
             </CardContent>
           </Card>
@@ -1051,12 +738,7 @@ export function ProxyWatchdogSection({
 
       <ImpossibleDistanceModal isOpen={!!selectedMapItem} onOpenChange={(open) => !open && setSelectedMapItem(null)} data={selectedMapItem} />
 
-      <HelpDialog
-        open={activeHelpKey !== null}
-        onOpenChange={(open) => !open && setActiveHelpKey(null)}
-        title={activeHelpKey ? WATCHDOG_HELP_MODAL_CONTENT[activeHelpKey].title : ''}
-        size="lg"
-      >
+      <HelpDialog open={activeHelpKey !== null} onOpenChange={(open) => !open && setActiveHelpKey(null)} title={activeHelpKey ? WATCHDOG_HELP_MODAL_CONTENT[activeHelpKey].title : ''} size="lg">
         {activeHelpKey ? WATCHDOG_HELP_MODAL_CONTENT[activeHelpKey].body : null}
       </HelpDialog>
     </div>
@@ -1082,26 +764,19 @@ function ThreatIntelPanel({ serviceId, startTime, endTime }: { serviceId: string
 
   const columns = React.useMemo<ColumnDef<ThreatIntelItem>[]>(() => [
     {
-      accessorKey: 'tls_fingerprint',
-      header: 'TLS Fingerprint (JA3/JA4)',
+      accessorKey: 'tls_fingerprint', header: 'TLS Fingerprint (JA3/JA4)',
       cell: ({ row }) => {
         const val = row.original.tls_fingerprint
-        const filterKey = val.includes('_') ? 'ja4' : 'ja3'
         return (
           <div className="font-mono text-xs font-semibold select-all w-full max-w-[320px] truncate">
-            <FilterValueCell filters={[{ column: filterKey, value: val }]} display={val} />
+            <FilterValueCell filters={[{ column: val.includes('_') ? 'ja4' : 'ja3', value: val }]} display={val} />
           </div>
         )
       },
     },
+    { accessorKey: 'requests', header: 'Requests', cell: ({ row }) => <span className="font-semibold font-mono text-xs text-foreground/80 tabular-nums">{formatCount(row.original.requests)}</span> },
     {
-      accessorKey: 'requests',
-      header: 'Requests',
-      cell: ({ row }) => <span className="font-semibold font-mono text-xs text-foreground/80 tabular-nums">{formatCount(row.original.requests)}</span>,
-    },
-    {
-      accessorKey: 'top_country',
-      header: 'Top Country',
+      accessorKey: 'top_country', header: 'Top Country',
       cell: ({ row }) => {
         const country = row.original.top_country || 'Unknown'
         return (
@@ -1113,47 +788,24 @@ function ThreatIntelPanel({ serviceId, startTime, endTime }: { serviceId: string
       },
     },
     {
-      accessorKey: 'matched_waf_rules_count',
-      header: 'Matched WAF Rules',
-      cell: ({ row }) => {
-        const count = row.original.matched_waf_rules_count
-        return count > 0 ? (
-          <Badge variant="outline" className="font-mono bg-destructive/10 text-destructive border-destructive/20 hover:bg-destructive/15">
-            {formatCount(count)} triggers
-          </Badge>
-        ) : (
-          <span className="text-xs text-muted-foreground font-medium">None</span>
-        )
-      },
+      accessorKey: 'matched_waf_rules_count', header: 'Matched WAF Rules',
+      cell: ({ row }) => row.original.matched_waf_rules_count > 0 ? (
+        <Badge variant="outline" className="font-mono bg-destructive/10 text-destructive border-destructive/20 hover:bg-destructive/15">{formatCount(row.original.matched_waf_rules_count)} triggers</Badge>
+      ) : <span className="text-xs text-muted-foreground font-medium">None</span>,
     },
     {
-      accessorKey: 'bot_percentage',
-      header: 'Bot Percentage',
-      cell: ({ row }) => {
-        const pct = row.original.bot_percentage
-        return pct > 0 ? (
-          <div className="flex items-center gap-1.5">
-            <Cpu className="h-3.5 w-3.5 text-orange-500" />
-            <span className="font-mono font-bold text-xs text-orange-500">{pct.toFixed(1)}%</span>
-          </div>
-        ) : (
-          <span className="text-xs text-muted-foreground font-medium">0.0%</span>
-        )
-      },
+      accessorKey: 'bot_percentage', header: 'Bot Percentage',
+      cell: ({ row }) => row.original.bot_percentage > 0 ? (
+        <div className="flex items-center gap-1.5"><Cpu className="h-3.5 w-3.5 text-orange-500" /><span className="font-mono font-bold text-xs text-orange-500">{row.original.bot_percentage.toFixed(1)}%</span></div>
+      ) : <span className="text-xs text-muted-foreground font-medium">0.0%</span>,
     },
     {
-      accessorKey: 'is_anonymized_proxy',
-      header: 'Anonymity Category',
-      cell: ({ row }) =>
-        row.original.is_anonymized_proxy ? (
-          <Badge variant="outline" className="font-semibold text-[10px] uppercase tracking-wider px-2 py-0.5 bg-red-500/10 text-red-500 border-red-500/20 hover:bg-red-500/15 border shadow-none">
-            VPN / Proxy / Tor
-          </Badge>
-        ) : (
-          <Badge variant="secondary" className="font-semibold text-[10px] uppercase tracking-wider px-2 py-0.5 bg-emerald-500/10 text-emerald-500 border-emerald-500/20 hover:bg-emerald-500/15 border shadow-none">
-            Residential
-          </Badge>
-        ),
+      accessorKey: 'is_anonymized_proxy', header: 'Anonymity Category',
+      cell: ({ row }) => row.original.is_anonymized_proxy ? (
+        <Badge variant="outline" className="font-semibold text-[10px] uppercase tracking-wider px-2 py-0.5 bg-red-500/10 text-red-500 border-red-500/20 hover:bg-red-500/15 border shadow-none">VPN / Proxy / Tor</Badge>
+      ) : (
+        <Badge variant="secondary" className="font-semibold text-[10px] uppercase tracking-wider px-2 py-0.5 bg-emerald-500/10 text-emerald-500 border-emerald-500/20 hover:bg-emerald-500/15 border shadow-none">Residential</Badge>
+      ),
     },
   ], [])
 
@@ -1162,10 +814,7 @@ function ThreatIntelPanel({ serviceId, startTime, endTime }: { serviceId: string
       <Card className="col-span-12 border-muted/50 bg-background/50 backdrop-blur-xs">
         <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-4">
           <div className="space-y-1">
-            <CardTitle className="text-lg font-semibold tracking-tight flex items-center gap-2">
-              <Shield className="h-5 w-5 text-primary animate-pulse" />
-              Client TLS Fingerprints & Threat Intelligence
-            </CardTitle>
+            <CardTitle className="text-lg font-semibold tracking-tight flex items-center gap-2"><Shield className="h-5 w-5 text-primary animate-pulse" />Client TLS Fingerprints & Threat Intelligence</CardTitle>
           </div>
         </CardHeader>
         <CardContent className="h-64 flex flex-col items-center justify-center space-y-4">
@@ -1195,11 +844,7 @@ function ThreatIntelPanel({ serviceId, startTime, endTime }: { serviceId: string
     <>
       <Card className="col-span-12 border-muted/40 shadow-sm bg-card p-0">
         <DataTable
-          columns={columns}
-          data={data || []}
-          isLoading={isLoading}
-          searchKey="tls_fingerprint"
-          initialSorting={[{ id: 'requests', desc: true }]}
+          columns={columns} data={data || []} isLoading={isLoading} searchKey="tls_fingerprint" initialSorting={[{ id: 'requests', desc: true }]}
           title={
             <div className="space-y-1 py-1">
               <div className="flex items-center gap-2">
@@ -1209,9 +854,7 @@ function ThreatIntelPanel({ serviceId, startTime, endTime }: { serviceId: string
                   <HelpCircle className="h-4 w-4" />
                 </Button>
               </div>
-              <p className="text-xs text-muted-foreground font-normal">
-                Correlated TLS fingerprinting (JA3/JA4) with active WAF signals, proxy routes, and automated client behavior.
-              </p>
+              <p className="text-xs text-muted-foreground font-normal">Correlated TLS fingerprinting (JA3/JA4) with active WAF signals, proxy routes, and automated client behavior.</p>
             </div>
           }
         />
@@ -1229,18 +872,14 @@ function ThreatIntelPanel({ serviceId, startTime, endTime }: { serviceId: string
             <h4 className="text-xs font-semibold uppercase tracking-wider text-foreground mb-1">Anonymity Categories</h4>
             <ul className="space-y-3 mt-2">
               <li className="flex gap-2.5 items-start">
-                <Badge variant="outline" className="font-semibold text-[9px] uppercase tracking-wider px-1.5 py-0.5 bg-red-500/10 text-red-500 border-red-500/20 shrink-0 select-none shadow-none mt-0.5">
-                  VPN / Proxy / Tor
-                </Badge>
+                <Badge variant="outline" className="font-semibold text-[9px] uppercase tracking-wider px-1.5 py-0.5 bg-red-500/10 text-red-500 border-red-500/20 shrink-0 select-none shadow-none mt-0.5">VPN / Proxy / Tor</Badge>
                 <div>
                   <strong className="text-foreground font-medium block text-xs">Anonymized / Proxy Traffic</strong>
                   Indicates the connection originates from a commercial VPN provider, public or private proxy, Tor Exit Node, or hosting data center.
                 </div>
               </li>
               <li className="flex gap-2.5 items-start">
-                <Badge variant="secondary" className="font-semibold text-[9px] uppercase tracking-wider px-1.5 py-0.5 bg-emerald-500/10 text-emerald-500 border-emerald-500/20 shrink-0 select-none shadow-none mt-0.5">
-                  Residential
-                </Badge>
+                <Badge variant="secondary" className="font-semibold text-[9px] uppercase tracking-wider px-1.5 py-0.5 bg-emerald-500/10 text-emerald-500 border-emerald-500/20 shrink-0 select-none shadow-none mt-0.5">Residential</Badge>
                 <div>
                   <strong className="text-foreground font-medium block text-xs">Residential Broadband & Mobile</strong>
                   Indicates standard consumer broadband, home Wi-Fi, or cellular networks.
@@ -1255,14 +894,9 @@ function ThreatIntelPanel({ serviceId, startTime, endTime }: { serviceId: string
 }
 
 type HeaderAnomaliesProps = {
-  data: SecurityData | undefined
-  isLoading: boolean
-  isFetching: boolean
-  error: Error | null
+  data: SecurityData | undefined; isLoading: boolean; isFetching: boolean; error: Error | null
   getFieldLabel: (id: string) => string
-  topIpVisibility: VisibilityState
-  setTopIpVisibility: Dispatch<SetStateAction<VisibilityState>>
-  onTopIpVisChange: (id: string, vis: boolean) => void
+  topIpVisibility: VisibilityState; setTopIpVisibility: Dispatch<SetStateAction<VisibilityState>>; onTopIpVisChange: (id: string, vis: boolean) => void
 }
 
 export function HeaderAnomaliesSection({
@@ -1272,36 +906,23 @@ export function HeaderAnomaliesSection({
   const headerSizeData = React.useMemo((): PlotlyTrace[] => {
     const req_size_dist = data?.req_size_dist
     if (!req_size_dist?.length) return []
-    return [{
-      x: req_size_dist.map((d) => d.bucket ?? d.label ?? null),
-      y: req_size_dist.map((d) => d.count),
-      type: 'bar',
-      marker: { color: '#ec4899' },
-    }]
+    return [{ x: req_size_dist.map((d) => d.bucket ?? d.label ?? null), y: req_size_dist.map((d) => d.count), type: 'bar', marker: { color: '#ec4899' } }]
   }, [data])
 
   const topIpHeaderColumns: ColumnDef<TopIpHeader>[] = [
-    {
-      accessorKey: 'ip',
-      header: 'IP Address',
-      cell: ({ row }) => <FilterValueCell filters={[{ column: 'client_ip', value: row.original.ip ?? '' }]} className="font-mono text-xs" />,
-    },
+    { accessorKey: 'ip', header: 'IP Address', cell: ({ row }) => <FilterValueCell filters={[{ column: 'client_ip', value: row.original.ip ?? '' }]} className="font-mono text-xs" /> },
     { accessorKey: 'max_header', header: 'Max Header (Bytes)', cell: ({ row }) => formatCountMaybe(row.original.max_header) ?? '—' },
   ]
+
+  const cardErr = error as AnalyticsCardError | null
 
   return (
     <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
       <AnalyticsCard
-        title="Request Header Size Distribution"
-        icon={<Scale className="h-4 w-4" />}
-        isLoading={isLoading}
-        isFetching={isFetching}
-        loadingMessage="Loading request header size distribution..."
-        error={error as AnalyticsCardError | null}
-        className="h-[360px] [contain-intrinsic-size:360px] [content-visibility:auto]"
-        contentClassName="p-2"
-        helpTitle={SECURITY_INFO.req_size.title}
-        helpContent={SECURITY_INFO.req_size.body}
+        title="Request Header Size Distribution" icon={<Scale className="h-4 w-4" />}
+        isLoading={isLoading} isFetching={isFetching} loadingMessage="Loading request header size distribution..." error={cardErr}
+        className="h-[360px] [contain-intrinsic-size:360px] [content-visibility:auto]" contentClassName="p-2"
+        helpTitle={SECURITY_INFO.req_size.title} helpContent={SECURITY_INFO.req_size.body}
       >
         {headerSizeData.length === 0 && !isLoading ? (
           <ChartEmptyState requires={isFieldActive('req_header_bytes') ? undefined : 'Request Identity (Group A) fields to be enabled in Fastly logging.'} />
@@ -1311,27 +932,16 @@ export function HeaderAnomaliesSection({
       </AnalyticsCard>
 
       <AnalyticsCard
-        title="Oversized Request Headers (by IP)"
-        icon={<Shield className="h-4 w-4" />}
-        headerAction={
-          <ColumnVisibilityDropdown columns={TOP_IP_COLUMN_IDS.map((id) => ({ id, label: getFieldLabel(id) }))} visibility={topIpVisibility} onChange={onTopIpVisChange} />
-        }
-        isLoading={isLoading}
-        isFetching={isFetching}
-        loadingMessage="Loading oversized request headers..."
-        error={error as AnalyticsCardError | null}
-        className="min-h-[300px] [contain-intrinsic-size:300px] [content-visibility:auto]"
-        contentClassName="p-0"
-        helpTitle={SECURITY_INFO.top_ips_header.title}
-        helpContent={SECURITY_INFO.top_ips_header.body}
+        title="Oversized Request Headers (by IP)" icon={<Shield className="h-4 w-4" />}
+        headerAction={<ColumnVisibilityDropdown columns={TOP_IP_COLUMN_IDS.map((id) => ({ id, label: getFieldLabel(id) }))} visibility={topIpVisibility} onChange={onTopIpVisChange} />}
+        isLoading={isLoading} isFetching={isFetching} loadingMessage="Loading oversized request headers..." error={cardErr}
+        className="min-h-[300px] [contain-intrinsic-size:300px] [content-visibility:auto]" contentClassName="p-0"
+        helpTitle={SECURITY_INFO.top_ips_header.title} helpContent={SECURITY_INFO.top_ips_header.body}
       >
         <DataTable
-          columns={topIpHeaderColumns}
-          data={data?.top_ips_header || []}
+          columns={topIpHeaderColumns} data={data?.top_ips_header || []}
           emptyMessage={isLoading ? '' : (isFieldActive('req_header_bytes') ? 'No data in this time range yet.' : 'Requires Request Identity (Group A) log fields to be enabled in Fastly logging.')}
-          hideToolbar
-          columnVisibility={topIpVisibility}
-          onColumnVisibilityChange={setTopIpVisibility}
+          hideToolbar columnVisibility={topIpVisibility} onColumnVisibilityChange={setTopIpVisibility}
         />
       </AnalyticsCard>
     </div>
@@ -1339,30 +949,19 @@ export function HeaderAnomaliesSection({
 }
 
 type NetworkSectionProps = {
-  data: SecurityData | undefined
-  isLoading: boolean
-  isFetching: boolean
-  error: Error | null
-  timezone: string
-  commonTimeLayout: PlotlyLayout
+  data: SecurityData | undefined; isLoading: boolean; isFetching: boolean; error: Error | null
+  timezone: string; commonTimeLayout: PlotlyLayout
 }
 
 export function NetworkSection({ data, isLoading, isFetching, error, timezone, commonTimeLayout }: NetworkSectionProps) {
   const { isFieldActive } = useActiveLogFields()
-  const ipv6Data = useTimeseriesToTraces(
-    data?.ipv6_adoption,
-    [{ key: 'pct', name: 'IPv6 %', color: '#8b5cf6', fill: 'tozeroy' }],
-    timezone,
-  )
+  const ipv6Data = useTimeseriesToTraces(data?.ipv6_adoption, [{ key: 'pct', name: 'IPv6 %', color: '#8b5cf6', fill: 'tozeroy' }], timezone)
 
   const proxyData = React.useMemo((): PlotlyTrace[] => {
     const proxy_dist = data?.proxy_dist
     if (!proxy_dist?.length) return []
     return [{
-      values: proxy_dist.map((d) => d.count),
-      labels: proxy_dist.map((d) => d.type ?? null),
-      type: 'pie',
-      hole: 0.4,
+      values: proxy_dist.map((d) => d.count), labels: proxy_dist.map((d) => d.type ?? null), type: 'pie', hole: 0.4,
       marker: { colors: [CHART_COLORS.info, CHART_COLORS.success, CHART_COLORS.warning, CHART_COLORS.danger, '#8b5cf6'] },
     }]
   }, [data])
@@ -1370,28 +969,19 @@ export function NetworkSection({ data, isLoading, isFetching, error, timezone, c
   const connReuseData = React.useMemo((): PlotlyTrace[] => {
     const conn_reuse_dist = data?.conn_reuse_dist
     if (!conn_reuse_dist?.length) return []
-    return [{
-      x: conn_reuse_dist.map((d) => d.bucket ?? d.label ?? null),
-      y: conn_reuse_dist.map((d) => d.count),
-      type: 'bar',
-      marker: { color: '#06b6d4' },
-    }]
+    return [{ x: conn_reuse_dist.map((d) => d.bucket ?? d.label ?? null), y: conn_reuse_dist.map((d) => d.count), type: 'bar', marker: { color: '#06b6d4' } }]
   }, [data])
+
+  const cardErr = error as AnalyticsCardError | null
 
   return (
     <>
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
         <AnalyticsCard
-          title="IPv6 Adoption over Time"
-          icon={<Globe className="h-4 w-4" />}
-          isLoading={isLoading}
-          isFetching={isFetching}
-          loadingMessage="Loading IPv6 adoption data..."
-          error={error as AnalyticsCardError | null}
-          className="h-[360px] [contain-intrinsic-size:360px] [content-visibility:auto]"
-          contentClassName="p-2"
-          helpTitle={SECURITY_INFO.ipv6.title}
-          helpContent={SECURITY_INFO.ipv6.body}
+          title="IPv6 Adoption over Time" icon={<Globe className="h-4 w-4" />}
+          isLoading={isLoading} isFetching={isFetching} loadingMessage="Loading IPv6 adoption data..." error={cardErr}
+          className="h-[360px] [contain-intrinsic-size:360px] [content-visibility:auto]" contentClassName="p-2"
+          helpTitle={SECURITY_INFO.ipv6.title} helpContent={SECURITY_INFO.ipv6.body}
         >
           {ipv6Data.length === 0 && !isLoading ? (
             <ChartEmptyState requires={isFieldActive('is_ipv6') ? undefined : 'Infrastructure (Group C) fields to be enabled in Fastly logging.'} />
@@ -1401,16 +991,10 @@ export function NetworkSection({ data, isLoading, isFetching, error, timezone, c
         </AnalyticsCard>
 
         <AnalyticsCard
-          title="Proxy/Anonymizer Breakdown"
-          icon={<Network className="h-4 w-4" />}
-          isLoading={isLoading}
-          isFetching={isFetching}
-          loadingMessage="Loading proxy/anonymizer breakdown..."
-          error={error as AnalyticsCardError | null}
-          className="h-[360px] [contain-intrinsic-size:360px] [content-visibility:auto]"
-          contentClassName="p-2"
-          helpTitle={SECURITY_INFO.proxy.title}
-          helpContent={SECURITY_INFO.proxy.body}
+          title="Proxy/Anonymizer Breakdown" icon={<Network className="h-4 w-4" />}
+          isLoading={isLoading} isFetching={isFetching} loadingMessage="Loading proxy/anonymizer breakdown..." error={cardErr}
+          className="h-[360px] [contain-intrinsic-size:360px] [content-visibility:auto]" contentClassName="p-2"
+          helpTitle={SECURITY_INFO.proxy.title} helpContent={SECURITY_INFO.proxy.body}
         >
           {proxyData.length === 0 && !isLoading ? (
             <ChartEmptyState requires={isFieldActive('p_type') ? undefined : 'Security: Proxy & Anonymization (Group I) fields to be enabled in Fastly logging.'} />
@@ -1422,16 +1006,10 @@ export function NetworkSection({ data, isLoading, isFetching, error, timezone, c
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         <AnalyticsCard
-          title="Connection Reuse (Requests per Connection)"
-          icon={<Repeat className="h-4 w-4" />}
-          isLoading={isLoading}
-          isFetching={isFetching}
-          loadingMessage="Loading connection reuse distribution..."
-          error={error as AnalyticsCardError | null}
-          className="h-[360px] [contain-intrinsic-size:360px] [content-visibility:auto]"
-          contentClassName="p-2"
-          helpTitle={SECURITY_INFO.conn_reuse.title}
-          helpContent={SECURITY_INFO.conn_reuse.body}
+          title="Connection Reuse (Requests per Connection)" icon={<Repeat className="h-4 w-4" />}
+          isLoading={isLoading} isFetching={isFetching} loadingMessage="Loading connection reuse distribution..." error={cardErr}
+          className="h-[360px] [contain-intrinsic-size:360px] [content-visibility:auto]" contentClassName="p-2"
+          helpTitle={SECURITY_INFO.conn_reuse.title} helpContent={SECURITY_INFO.conn_reuse.body}
         >
           {connReuseData.length === 0 && !isLoading ? (
             <ChartEmptyState requires={isFieldActive('conn_requests') ? undefined : 'Infrastructure (Group C) fields to be enabled in Fastly logging.'} />
@@ -1455,17 +1033,10 @@ const SECURITY_SECTIONS: SecuritySections = [
 type SecurityFilters = components['schemas']['SecurityAggregatesRequest']['filters']
 
 interface SecurityBodyProps {
-  startTime: string | null
-  endTime: string | null
-  activeServiceId: string | null
-  filterPayload: SecurityFilters
-  bucketSeconds: number
-  intervalButtons: React.ReactNode
-  timezone: string
-  getFieldLabel: (field: string) => string
-  relativeRange: string | null
-  isAutoRange: boolean
-  anchor: string
+  startTime: string | null; endTime: string | null; activeServiceId: string | null
+  filterPayload: SecurityFilters; bucketSeconds: number; intervalButtons: React.ReactNode
+  timezone: string; getFieldLabel: (field: string) => string
+  relativeRange: string | null; isAutoRange: boolean; anchor: string
 }
 
 function SecurityBody({
@@ -1496,6 +1067,8 @@ function SecurityBody({
     },
   })
 
+  const qCommon = { data: securityQuery.data, isLoading: securityQuery.isLoading, isFetching: securityQuery.isFetching, error: securityQuery.error ?? null }
+
   return (
     <Tabs value={activeTab} onValueChange={(v) => void setActiveTab(v as (typeof SECURITY_TABS)[number])} className="space-y-6">
       <TabsList className="grid grid-cols-3 max-w-[600px]">
@@ -1506,46 +1079,14 @@ function SecurityBody({
 
       <TabsContent value="waf-activity" className="space-y-6">
         <BotsSection
-          data={securityQuery.data}
-          isLoading={securityQuery.isLoading}
-          isFetching={securityQuery.isFetching}
-          error={securityQuery.error ?? null}
-          intervalButtons={intervalButtons}
-          bucketSeconds={bucketSeconds}
-          timezone={timezone}
-          commonTimeLayout={commonTimeLayout}
-          getFieldLabel={getFieldLabel}
-          ngwafBotVisibility={ngwafBotVisibility}
-          setNgwafBotVisibility={setNgwafBotVisibility}
-          onNgwafBotVisChange={onNgwafBotVisChange}
-          botVisibility={botVisibility}
-          setBotVisibility={setBotVisibility}
-          onBotVisChange={onBotVisChange}
-          botEfficiencyVisibility={botEfficiencyVisibility}
-          setBotEfficiencyVisibility={setBotEfficiencyVisibility}
-          onBotEfficiencyVisChange={onBotEfficiencyVisChange}
-          fingerprintVisibility={fingerprintVisibility}
-          setFingerprintVisibility={setFingerprintVisibility}
-          onFingerprintVisChange={onFingerprintVisChange}
+          {...qCommon} intervalButtons={intervalButtons} bucketSeconds={bucketSeconds} timezone={timezone} commonTimeLayout={commonTimeLayout} getFieldLabel={getFieldLabel}
+          ngwafBotVisibility={ngwafBotVisibility} setNgwafBotVisibility={setNgwafBotVisibility} onNgwafBotVisChange={onNgwafBotVisChange}
+          botVisibility={botVisibility} setBotVisibility={setBotVisibility} onBotVisChange={onBotVisChange}
+          botEfficiencyVisibility={botEfficiencyVisibility} setBotEfficiencyVisibility={setBotEfficiencyVisibility} onBotEfficiencyVisChange={onBotEfficiencyVisChange}
+          fingerprintVisibility={fingerprintVisibility} setFingerprintVisibility={setFingerprintVisibility} onFingerprintVisChange={onFingerprintVisChange}
         />
-        <HeaderAnomaliesSection
-          data={securityQuery.data}
-          isLoading={securityQuery.isLoading}
-          isFetching={securityQuery.isFetching}
-          error={securityQuery.error ?? null}
-          getFieldLabel={getFieldLabel}
-          topIpVisibility={topIpVisibility}
-          setTopIpVisibility={setTopIpVisibility}
-          onTopIpVisChange={onTopIpVisChange}
-        />
-        <NetworkSection
-          data={securityQuery.data}
-          isLoading={securityQuery.isLoading}
-          isFetching={securityQuery.isFetching}
-          error={securityQuery.error ?? null}
-          timezone={timezone}
-          commonTimeLayout={commonTimeLayout}
-        />
+        <HeaderAnomaliesSection {...qCommon} getFieldLabel={getFieldLabel} topIpVisibility={topIpVisibility} setTopIpVisibility={setTopIpVisibility} onTopIpVisChange={onTopIpVisChange} />
+        <NetworkSection {...qCommon} timezone={timezone} commonTimeLayout={commonTimeLayout} />
       </TabsContent>
 
       <TabsContent value="threat-intel">
@@ -1553,14 +1094,7 @@ function SecurityBody({
       </TabsContent>
 
       <TabsContent value="proxy-watchdog">
-        <ProxyWatchdogSection
-          data={securityQuery.data}
-          isLoading={securityQuery.isLoading}
-          error={securityQuery.error ?? null}
-          startTime={startTime}
-          endTime={endTime}
-          activeServiceId={activeServiceId}
-        />
+        <ProxyWatchdogSection data={securityQuery.data} isLoading={securityQuery.isLoading} error={securityQuery.error ?? null} startTime={startTime} endTime={endTime} activeServiceId={activeServiceId} />
       </TabsContent>
     </Tabs>
   )
@@ -1572,25 +1106,9 @@ export default function SecurityClient({ nowServerStr }: { nowServerStr?: string
   const { relativeRange, isAutoRange, anchor } = useReportRangeAnchor(nowServerStr)
 
   return (
-    <ReportLayout
-      title="Security"
-      description="Monitor TLS health, identify bot fingerprints, and detect request anomalies."
-      icon={Shield}
-    >
-      {({ startTime, endTime, activeServiceId, filterPayload, bucketSeconds, intervalButtons }) => (
-        <SecurityBody
-          startTime={startTime}
-          endTime={endTime}
-          activeServiceId={activeServiceId}
-          filterPayload={filterPayload}
-          bucketSeconds={bucketSeconds}
-          intervalButtons={intervalButtons}
-          timezone={timezone}
-          getFieldLabel={getFieldLabel}
-          relativeRange={relativeRange}
-          isAutoRange={isAutoRange}
-          anchor={anchor}
-        />
+    <ReportLayout title="Security" description="Monitor TLS health, identify bot fingerprints, and detect request anomalies." icon={Shield}>
+      {(props) => (
+        <SecurityBody {...props} timezone={timezone} getFieldLabel={getFieldLabel} relativeRange={relativeRange} isAutoRange={isAutoRange} anchor={anchor} />
       )}
     </ReportLayout>
   )

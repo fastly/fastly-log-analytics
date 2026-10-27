@@ -786,6 +786,7 @@ def _request(method, path, *, data, headers, expect_empty, max_retries, timeout,
                 retry=tenacity.retry_if_exception(_is_retryable_fastly_error),
                 stop=tenacity.stop_after_attempt(max_retries + 1),
                 wait=_wait_strategy(method),
+                sleep=lambda s: time.sleep(s),
                 reraise=True,
             ):
                 with attempt:
@@ -804,8 +805,7 @@ def _request(method, path, *, data, headers, expect_empty, max_retries, timeout,
     if telemetry_context:
         with telemetry_context:
             return _do_call()
-    else:
-        return _do_call()
+    return _do_call()
 
 
 def fastly(method, path, body=None, *, token, expect_empty=False, max_retries=3, timeout=30):
@@ -1045,29 +1045,19 @@ def get_active_version_info(
         extra_kwargs["timeout"] = timeout
     if max_retries is not None:
         extra_kwargs["max_retries"] = max_retries
-    try:
-        v = fastly("GET", f"/service/{service_id}/version/active", token=token, **extra_kwargs)
-        if isinstance(v, dict) and v.get("active"):
-            return {
-                "number": int(v["number"]),
-                "updated_at": v.get("updated_at"),
-                "created_at": v.get("created_at"),
-            }
-    except RuntimeError:
-        pass
-
-    try:
-        versions = fastly("GET", f"/service/{service_id}/version", token=token, **extra_kwargs)
-        if isinstance(versions, list):
-            for v in versions:
-                if v.get("active"):
+    for path in (f"/service/{service_id}/version/active", f"/service/{service_id}/version"):
+        try:
+            res = fastly("GET", path, token=token, **extra_kwargs)
+            candidates = [res] if isinstance(res, dict) else (res if isinstance(res, list) else [])
+            for v in candidates:
+                if isinstance(v, dict) and v.get("active"):
                     return {
                         "number": int(v["number"]),
                         "updated_at": v.get("updated_at"),
                         "created_at": v.get("created_at"),
                     }
-    except RuntimeError:
-        pass
+        except RuntimeError:
+            pass
     return None
 
 
@@ -1083,51 +1073,40 @@ def get_generated_vcl(service_id: str, version: int, token: str) -> str | None:
 
 def find_service_by_name(name: str, token: str) -> dict | None:
     try:
-        services = fastly("GET", "/service", token=token)
-        for s in services:
-            if s.get("name") == name:
-                return s
+        return next((s for s in fastly("GET", "/service", token=token) if s.get("name") == name), None)
     except RuntimeError:
-        pass
-    return None
+        return None
 
 
 def find_condition(name: str, service_id: str, version: int, token: str) -> dict | None:
     try:
         conditions = fastly("GET", f"/service/{service_id}/version/{version}/condition", token=token)
-        for c in conditions:
-            if c.get("name") == name:
-                return c
+        return next((c for c in conditions if c.get("name") == name), None)
     except RuntimeError:
-        pass
-    return None
+        return None
 
 
 def ensure_condition(name: str, statement: str, type: str, service_id: str, version: int, token: str) -> dict:
+    payload = {"name": name, "statement": statement, "type": type}
     existing = find_condition(name, service_id, version, token)
     if existing:
         if existing.get("statement") == statement and existing.get("type") == type:
             return existing
-        payload = {"name": name, "statement": statement, "type": type}
         encoded_name = urllib.parse.quote(name, safe="")
         return fastly("PUT", f"/service/{service_id}/version/{version}/condition/{encoded_name}", payload, token=token)
-
-    payload = {"name": name, "statement": statement, "type": type}
     return fastly("POST", f"/service/{service_id}/version/{version}/condition", payload, token=token)
 
 
 def list_s3_endpoints(service_id: str, version: int, token: str) -> list[str]:
     try:
-        res = fastly("GET", f"/service/{service_id}/version/{version}/logging/s3", token=token)
-        return [r["name"] for r in res]
+        return [r["name"] for r in fastly("GET", f"/service/{service_id}/version/{version}/logging/s3", token=token)]
     except RuntimeError:
         return []
 
 
 def list_vcl_snippets(service_id: str, version: int, token: str) -> list[str]:
     try:
-        res = fastly("GET", f"/service/{service_id}/version/{version}/snippet", token=token)
-        return [r["name"] for r in res]
+        return [r["name"] for r in fastly("GET", f"/service/{service_id}/version/{version}/snippet", token=token)]
     except RuntimeError:
         return []
 
@@ -1135,21 +1114,18 @@ def list_vcl_snippets(service_id: str, version: int, token: str) -> list[str]:
 def ensure_vcl_snippet(
     name: str, type: str, content: str, priority: int, service_id: str, version: int, token: str
 ) -> dict:
+    payload = {"name": name, "type": type, "content": content, "priority": priority, "dynamic": 0}
     try:
-        snippets = fastly("GET", f"/service/{service_id}/version/{version}/snippet", token=token)
-        for s in snippets:
+        for s in fastly("GET", f"/service/{service_id}/version/{version}/snippet", token=token):
             if s.get("name") == name:
                 if s.get("type") == type and s.get("content") == content and int(s.get("priority", 100)) == priority:
                     return s
-                payload = {"name": name, "type": type, "content": content, "priority": priority, "dynamic": 0}
                 encoded_name = urllib.parse.quote(name, safe="")
                 return fastly(
                     "PUT", f"/service/{service_id}/version/{version}/snippet/{encoded_name}", payload, token=token
                 )
     except RuntimeError:
         pass
-
-    payload = {"name": name, "type": type, "content": content, "priority": priority, "dynamic": 0}
     return fastly("POST", f"/service/{service_id}/version/{version}/snippet", payload, token=token)
 
 

@@ -12,9 +12,12 @@ import importlib
 import importlib.abc
 import importlib.machinery
 import importlib.util
+import os
 import sys
 import types
 from collections.abc import Sequence
+
+_BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
 
 _MODULE_ALIASES: dict[str, str] = {
     # Round 15 Group 1 — Backend root publishers & Celery glue
@@ -50,8 +53,8 @@ _MODULE_ALIASES: dict[str, str] = {
     "backend.utils.sse": "backend.utils.router_utils",
     "backend.utils.error_utils": "backend.utils.router_utils",
     "backend.utils.pii_masking": "backend.utils.router_utils",
-    "backend.utils.rate_limit": "backend.utils.remote_access",
-    "backend.utils.auth": "backend.utils.remote_access",
+    "backend.utils.rate_limit": "backend.utils.router_utils",
+    "backend.utils.auth": "backend.utils.router_utils",
     "backend.utils.bounded_cache": "backend.utils.telemetry",
     "backend.utils.cache_registry": "backend.utils.telemetry",
     "backend.utils.atomic_write": "backend.utils.telemetry",
@@ -62,14 +65,14 @@ _MODULE_ALIASES: dict[str, str] = {
     "backend.repositories.audit": "backend.repositories.assets",
     "backend.repositories.insights_helpers": "backend.repositories.insights",
     "backend.routers.audit": "backend.routers.control_room",
-    "backend.routers.debug": "backend.routers.bootstrap",
+    "backend.routers.debug": "backend.routers.services",
     "backend.routers.insights": "backend.routers.dashboard",
     "backend.routers.sessions": "backend.routers.session_scoring",
     "backend.routers.share_sso": "backend.routers.share_admin",
     "backend.routers.share": "backend.routers.share_admin",
-    "backend.routers.system": "backend.routers.bootstrap",
-    "backend.routers.health": "backend.routers.bootstrap",
-    "backend.routers.web_vitals": "backend.routers.rum",
+    "backend.routers.system": "backend.routers.services",
+    "backend.routers.health": "backend.routers.services",
+    "backend.routers.web_vitals": "backend.routers.dashboard",
     # Round 20 — Backend <250-Line Module Consolidation
     "backend.utils.error_redaction": "backend.utils.telemetry",
     "backend.utils.valkey_publisher": "backend.utils.telemetry",
@@ -95,7 +98,7 @@ _MODULE_ALIASES: dict[str, str] = {
     "backend.high_scale.origin_projection": "backend.high_scale.query_service",
     "backend.high_scale.replay": "backend.high_scale.archive",
     "backend.models.security": "backend.models.analytics",
-    "backend.routers.security": "backend.routers.network",
+    "backend.routers.security": "backend.routers.dashboard",
     # Round 25 — Backend <300-Line Module Consolidation
     "backend.core.query_attribution": "backend.core.request_telemetry",
     "backend.core.request_metrics": "backend.core.request_telemetry",
@@ -114,7 +117,7 @@ _MODULE_ALIASES: dict[str, str] = {
     "backend.high_scale.registry_bootstrap": "backend.high_scale.ingest_controller",
     "backend.models.admin_actions": "backend.models.analytics",
     "backend.models.origin": "backend.models.analytics",
-    "backend.routers.origin": "backend.routers.network",
+    "backend.routers.origin": "backend.routers.dashboard",
     "backend.routers.query": "backend.routers.dashboard",
     "backend.repositories.usage": "backend.repositories.assets",
     "backend.repositories.utils.response_cache": "backend.repositories._base",
@@ -138,7 +141,7 @@ _MODULE_ALIASES: dict[str, str] = {
     "backend.core.rollups.overview": "backend.core.rollups.recompute",
     "backend.core.rollups.sessions": "backend.core.rollups.recompute",
     "backend.core._log_fields_data": "backend.core.log_fields",
-    "backend.state_sync": "backend.core.metadata.state",
+    "backend.state_sync": "backend.core.metadata.base",
     "backend.scoring.evaluate": "backend.scoring",
     "backend.high_scale.assets": "backend.high_scale.ingest_controller",
     "backend.high_scale.console_access": "backend.high_scale.postgres_control",
@@ -152,6 +155,9 @@ _MODULE_ALIASES: dict[str, str] = {
     "backend.cron.lifecycle": "backend.cron.scheduler",
     "backend.cron.jobs.insights_prewarmer": "backend.cron.jobs.metadata",
     "backend.routers.admin.downloads": "backend.routers.admin.compaction",
+    "backend.routers.admin.quarantine": "backend.routers.admin.compaction",
+    "backend.routers.admin.bot_sources": "backend.routers.admin.compaction",
+    "backend.routers.admin.iceberg": "backend.routers.admin.compaction",
     "backend.routers.admin_queries": "backend.routers.admin.health",
     "backend.routers.performance": "backend.routers.dashboard",
     "backend.models.network": "backend.models.analytics",
@@ -195,13 +201,13 @@ _MODULE_ALIASES: dict[str, str] = {
     "backend.high_scale.worker": "backend.high_scale.ingest_controller",
     "backend.high_scale.recovery": "backend.high_scale.ingest_controller",
     "backend.high_scale.aggregate_batch": "backend.high_scale.ingest_controller",
-    "backend.core.faro_versions": "backend.core.rum_ingest",
+    "backend.core.faro_versions": "backend.core.ingest",
     "backend.core.clickhouse_manifest": "backend.core.clickhouse",
     "backend.provision.session_scoring_vcl": "backend.provision.session_scoring_orchestrator",
     "backend.provision.declarative.state": "backend.provision.declarative.reconciler",
     "backend.provision.declarative.config_migration": "backend.provision.declarative.reconciler",
     # Round 49 — Backend <650-Line Module Consolidation
-    "backend.repositories._sql.rum": "backend.repositories.rum",
+    "backend.repositories._sql.rum": "backend.repositories.origin",
     "backend.repositories._sql.security": "backend.repositories.security",
     "backend.utils.http": "backend.utils.telemetry",
     "backend.core.retry": "backend.utils.telemetry",
@@ -261,10 +267,32 @@ _MODULE_ALIASES: dict[str, str] = {
     "backend.high_scale.dashboard": "backend.high_scale.query_service",
     "backend.high_scale.origin": "backend.high_scale.query_service",
     "backend.high_scale.security": "backend.high_scale.query_service",
+    # Round 71 — Backend <1,100-Line Module Consolidation (Part A)
+    "backend.provision.rum_orchestrator_v2": "backend.provision.orchestrator",
+    "backend.provision.rum_assets": "backend.provision.orchestrator",
+    "backend.core.metadata.state": "backend.core.metadata.base",
+    "backend.core.metadata.cron_log": "backend.core.metadata.usage_log",
+    "backend.core.local_compaction": "backend.core.iceberg._core",
+    "backend.core.iceberg.buffer": "backend.core.iceberg._core",
+    "backend.utils.telemetry_proxy": "backend.utils.telemetry",
+    "backend.routers.high_scale": "backend.routers.admin.compaction",
+    "backend.routers.admin.log_accounting": "backend.routers.admin.health",
+    "backend.routers.provision": "backend.routers.services",
+    "backend.routers.bootstrap": "backend.routers.services",
+    "backend.core.rum_ingest": "backend.core.ingest",
+    "backend.utils.remote_access": "backend.utils.router_utils",
+    "backend.high_scale.insight_queries": "backend.high_scale.query_service",
+    "backend.high_scale.network": "backend.high_scale.query_service",
+    "backend.repositories.rum": "backend.repositories.origin",
+    "backend.routers.rum": "backend.routers.dashboard",
+    "backend.routers.network": "backend.routers.dashboard",
 }
 
 
 class _AliasLoader(importlib.abc.MetaPathFinder, importlib.abc.ExecutionLoader):
+    def __init__(self) -> None:
+        self._canon_specs: dict[str, tuple[importlib.machinery.ModuleSpec | None, importlib.abc.Loader | None]] = {}
+
     def _resolve_origin(self, fullname: str) -> tuple[str, str | None]:
         target_name = _MODULE_ALIASES.get(fullname, fullname)
         target_mod = sys.modules.get(target_name)
@@ -272,18 +300,15 @@ class _AliasLoader(importlib.abc.MetaPathFinder, importlib.abc.ExecutionLoader):
             mod_file = getattr(target_mod, "__file__", None)
             if mod_file:
                 return target_name, mod_file
+        if target_name.startswith("backend."):
+            rel_parts = target_name.split(".")[1:]
+            candidate_py = os.path.join(_BACKEND_DIR, *rel_parts) + ".py"
+            if os.path.isfile(candidate_py):
+                return target_name, candidate_py
+            candidate_init = os.path.join(_BACKEND_DIR, *rel_parts, "__init__.py")
+            if os.path.isfile(candidate_init):
+                return target_name, candidate_init
         spec = importlib.machinery.PathFinder.find_spec(target_name)
-        if spec is None and "." in target_name:
-            parent_name, _, _ = target_name.rpartition(".")
-            parent_mod = sys.modules.get(parent_name)
-            if parent_mod is None:
-                try:
-                    parent_mod = importlib.import_module(parent_name)
-                except Exception:
-                    parent_mod = None
-            parent_path = getattr(parent_mod, "__path__", None) if parent_mod is not None else None
-            if parent_path:
-                spec = importlib.machinery.PathFinder.find_spec(target_name, parent_path)
         return target_name, (spec.origin if spec else None)
 
     def find_spec(
@@ -325,6 +350,8 @@ class _AliasLoader(importlib.abc.MetaPathFinder, importlib.abc.ExecutionLoader):
             return mod
         target_name = _MODULE_ALIASES[spec.name]
         mod = importlib.import_module(target_name)
+        if target_name not in self._canon_specs and not isinstance(getattr(mod, "__loader__", None), _AliasLoader):
+            self._canon_specs[target_name] = (getattr(mod, "__spec__", None), getattr(mod, "__loader__", None))
         sys.modules[spec.name] = mod
         parent_name, _, child_name = spec.name.rpartition(".")
         parent_mod = sys.modules.get(parent_name)
@@ -343,8 +370,16 @@ class _AliasLoader(importlib.abc.MetaPathFinder, importlib.abc.ExecutionLoader):
             if parent_mod is not None:
                 setattr(parent_mod, "services", module)
             return
+        canon_name = _MODULE_ALIASES.get(module.__name__, module.__name__)
+        module.__name__ = canon_name
+        canon_spec, canon_loader = self._canon_specs.get(canon_name, (None, None))
+        if canon_spec is not None:
+            module.__spec__ = canon_spec
+        if canon_loader is not None:
+            module.__loader__ = canon_loader
         for alias, target_name in _MODULE_ALIASES.items():
-            if target_name == module.__name__:
+            if target_name == canon_name:
+                sys.modules[alias] = module
                 parent_name, _, child_name = alias.rpartition(".")
                 parent_mod = sys.modules.get(parent_name)
                 if parent_mod is not None:

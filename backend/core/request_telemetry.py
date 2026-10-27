@@ -355,7 +355,7 @@ def _end_db_span(span: Span | None, error: BaseException | None = None) -> None:
             span.set_status(Status(StatusCode.ERROR, str(error)))
         span.end()
     except Exception:
-        pass
+        logger.debug("_end_db_span failed (ignored)", exc_info=True)
 
 
 _thread_wait_histogram: Any = None

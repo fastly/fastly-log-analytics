@@ -615,7 +615,6 @@ def ensure_cdn_service(
     """Create and activate the CDN VCL service fronting FOS via declarative reconciler."""
     from backend import config as _svcconfig
     from backend.provision.declarative.reconciler import reconcile_cdn_service_state
-    from backend.provision.fastly_api import account_has_rate_limiting
 
     logging_service_id = cfg.get("logging_service_id") or cfg.get("service_id")
     if not logging_service_id:
@@ -634,6 +633,10 @@ def ensure_cdn_service(
             _merge_inputs(new_cfg)
             _svcconfig.save_config(logging_service_id, new_cfg)
 
+    def _read_cdn_sid() -> tuple[dict, str]:
+        updated = json.loads(config_path.read_text())
+        return updated, updated.get("fos_proxy", {}).get("service_id") or updated.get("cdn_service_id", "")
+
     try:
         reconcile_cdn_service_state(
             logging_service_id=logging_service_id,
@@ -644,16 +647,14 @@ def ensure_cdn_service(
     except Exception:
         if config_path.exists():
             try:
-                updated_cfg = json.loads(config_path.read_text())
-                cdn_sid = updated_cfg.get("fos_proxy", {}).get("service_id") or updated_cfg.get("cdn_service_id", "")
+                _, cdn_sid = _read_cdn_sid()
                 if on_created and cdn_sid:
                     on_created(cdn_sid)
             except Exception:
                 pass
         raise
 
-    updated_cfg = json.loads(config_path.read_text())
-    cdn_sid = updated_cfg.get("fos_proxy", {}).get("service_id") or updated_cfg.get("cdn_service_id", "")
+    updated_cfg, cdn_sid = _read_cdn_sid()
     if on_created and cdn_sid:
         on_created(cdn_sid)
 
@@ -792,20 +793,25 @@ def remove_logging_endpoint(
     ) as new_ver:
         ok(f"Draft version: {new_ver}")
 
-        for ep in endpoints_to_delete:
-            info(f"Removing '{_c(BOLD, ep)}' from draft…")
-            encoded = urllib.parse.quote(ep, safe="")
+        def _delete_draft_resource(res_path: str, name: str) -> bool:
+            encoded = urllib.parse.quote(name, safe="")
             try:
                 fastly(
                     "DELETE",
-                    f"/service/{service_id}/version/{new_ver}/logging/s3/{encoded}",
+                    f"/service/{service_id}/version/{new_ver}/{res_path}/{encoded}",
                     token=token,
                     expect_empty=True,
                 )
-                ok(f"Logging endpoint '{ep}' removed from draft")
+                return True
             except RuntimeError as exc:
                 if "404" not in str(exc):
                     raise exc
+                return False
+
+        for ep in endpoints_to_delete:
+            info(f"Removing '{_c(BOLD, ep)}' from draft…")
+            if _delete_draft_resource("logging/s3", ep):
+                ok(f"Logging endpoint '{ep}' removed from draft")
 
         info("Removing VCL snippets…")
         owned_exact: set[str] = set()
@@ -827,18 +833,8 @@ def remove_logging_endpoint(
             if not ((remove_logging and s_name.startswith(_CAPTURE_SNIPPET_PREFIX)) or s_name in owned_exact):
                 continue
             info(f"Removing snippet '{_c(BOLD, s_name)}' from draft…")
-            try:
-                encoded_s = urllib.parse.quote(s_name, safe="")
-                fastly(
-                    "DELETE",
-                    f"/service/{service_id}/version/{new_ver}/snippet/{encoded_s}",
-                    token=token,
-                    expect_empty=True,
-                )
+            if _delete_draft_resource("snippet", s_name):
                 removed_names.append(s_name)
-            except RuntimeError as exc:
-                if "404" not in str(exc):
-                    raise exc
 
         ok(f"VCL snippets removed from draft ({len(removed_names)}): {', '.join(removed_names) or 'none matched'}")
         leftovers = [

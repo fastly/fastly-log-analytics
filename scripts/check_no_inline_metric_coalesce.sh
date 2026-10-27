@@ -14,7 +14,7 @@ backend/repositories/_base.py 4
 backend/repositories/assets.py 2
 backend/repositories/insights/repository.py 1
 backend/repositories/network.py 3
-backend/repositories/origin.py 1
+backend/repositories/origin.py 24
 backend/repositories/rum.py 28
 backend/repositories/security.py 35
 backend/repositories/sessions.py 1

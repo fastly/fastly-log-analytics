@@ -21,9 +21,10 @@ backend/provision/fos_setup.py 1
 backend/provision/orchestrator.py 2
 backend/routers/admin/health.py 3
 backend/routers/admin/high_scale.py 3
+backend/routers/admin/compaction.py 3
 backend/routers/control_room.py 1
 backend/routers/provision.py 1
-backend/routers/services/__init__.py 1
+backend/routers/services/__init__.py 2
 backend/routers/services/core.py 1
 backend/utils/telemetry.py 1
 '

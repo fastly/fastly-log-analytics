@@ -489,7 +489,7 @@ def _compute_dashboard_aggregates(
         "build_where_clause",
         lambda: build_where_clause(start_time, end_time, filters, actual_cols, inline_params=True),
     )
-    # Iceberg handles partition pruning natively via hidden partitioning — no manual file enumeration needed.
+    # DuckLake handles partition pruning natively — no manual file enumeration needed.
 
     # Build temp table with only needed columns
     needed_cols: set[str] = set()

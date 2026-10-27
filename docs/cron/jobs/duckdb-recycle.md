@@ -42,7 +42,7 @@
 ## 5. Execution Lifecycle & Step-by-Step Logic
 1. **OOM Stopgap Check:** Evaluates `maybe_graceful_restart()` first. If RSS exceeds container limit, initiates graceful restart.
 2. **RSS Gate Check:** Checks `current_rss_bytes()` against `_recycle_rss_threshold_bytes()`. If RSS is below threshold, skips recycle and dynamically evaluates schedule relaxation.
-3. **Write Lock Acquisition:** Acquires per-service iceberg write locks in deterministic sorted order to prevent deadlock with concurrent sync/commit jobs.
+3. **Write Lock Acquisition:** Acquires per-service view write locks in deterministic sorted order to prevent deadlock with concurrent sync/commit jobs.
 4. **Connection Barrier & Drain:**
    - Raises fail-open recycle barrier so new connections pause for the duration of the drain.
    - Retires existing pools and waits up to `DUCKDB_RECYCLE_DRAIN_TIMEOUT_MS` for `in_use == 0`.

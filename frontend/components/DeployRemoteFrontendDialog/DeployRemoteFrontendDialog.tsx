@@ -1,33 +1,19 @@
 'use client'
 
 import * as React from 'react'
+import { useForm, useWatch } from 'react-hook-form'
+import { zodResolver } from '@hookform/resolvers/zod'
+import { z } from 'zod'
 import { useMutation } from '@tanstack/react-query'
 import {
-  Globe,
-  Server,
-  CheckCircle2,
-  AlertCircle,
-  ArrowRight,
-  Loader2,
-  Sparkles,
-  ChevronRight,
-  ChevronLeft,
-  ExternalLink,
-  AlertTriangle
+  Globe, Server, CheckCircle2, AlertCircle, ArrowRight, Loader2,
+  Sparkles, ChevronRight, ChevronLeft, ExternalLink, AlertTriangle,
 } from 'lucide-react'
 
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { CopyButton } from '@/components/ui/confirm-dialog'
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-  DialogTrigger,
-} from '@/components/ui/dialog'
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
@@ -36,6 +22,30 @@ import { cn, panelDialogContent, panelDialogHeaderSolid, panelDialogFooter } fro
 import { useOpenGeneration } from '@/hooks/useSSE'
 import type { Schema } from '@/types/api'
 import { useSearchParams } from 'next/navigation'
+
+const domainStepSchema = z.object({
+  isCustom: z.boolean(),
+  prefix: z.string().min(3),
+})
+
+const originStepSchema = z.object({
+  originHost: z.string().min(1),
+  originPort: z.number().int().min(1).max(65535),
+  useSsl: z.boolean(),
+  overrideHost: z.string(),
+})
+
+const deployRemoteFrontendSchema = domainStepSchema.merge(originStepSchema).extend({
+  serviceNameDraft: z.string(),
+  isServiceNameEdited: z.boolean(),
+  tokenOverride: z.string(),
+})
+type DeployRemoteFrontendValues = z.infer<typeof deployRemoteFrontendSchema>
+
+const teardownRemoteFrontendSchema = z.object({
+  tokenOverride: z.string(),
+})
+type TeardownRemoteFrontendValues = z.infer<typeof teardownRemoteFrontendSchema>
 
 export function DeployRemoteFrontendDialog() {
   const [open, setOpen] = React.useState(false)
@@ -61,68 +71,54 @@ function DeployRemoteFrontendDialogBody({ onClose }: { onClose: () => void }) {
   const serviceId = searchParams?.get('service')
 
   const [step, setStep] = React.useState<1 | 2 | 3 | 'success'>(1)
-
-  // Step 1: Domain Selection State
-  const [isCustom, setIsCustom] = React.useState(false)
-  const [prefix, setPrefix] = React.useState('')
   const [domainCheckResult, setDomainCheckResult] = React.useState<Schema<'ProvisionCheckDomainResponse'> | null>(null)
-
-  // Step 2: Origin Configuration State
-  const [originHost, setOriginHost] = React.useState(
-    typeof window !== 'undefined' ? window.location.hostname : '',
-  )
-  const [originPort, setOriginPort] = React.useState(typeof window !== 'undefined' && window.location.protocol === 'https:' ? 443 : 80)
-  const [useSsl, setUseSsl] = React.useState(typeof window !== 'undefined' && window.location.protocol === 'https:')
-  const [overrideHost, setOverrideHost] = React.useState('')
-
-  // Step 3: Trigger Deployment State
-  const [serviceNameDraft, setServiceName] = React.useState('')
-  const [isServiceNameEdited, setIsServiceNameEdited] = React.useState(false)
-  const [tokenOverride, setTokenOverride] = React.useState('')
   const [deployError, setDeployError] = React.useState('')
   const [deployResult, setDeployResult] = React.useState<Schema<'SharingDeployResponse'> | null>(null)
 
-  // Computed Domain based on step 1 selections
+  const { control, setValue } = useForm<DeployRemoteFrontendValues>({
+    resolver: zodResolver(deployRemoteFrontendSchema),
+    defaultValues: {
+      isCustom: false,
+      prefix: '',
+      originHost: typeof window !== 'undefined' ? window.location.hostname : '',
+      originPort: typeof window !== 'undefined' && window.location.protocol === 'https:' ? 443 : 80,
+      useSsl: typeof window !== 'undefined' && window.location.protocol === 'https:',
+      overrideHost: '',
+      serviceNameDraft: '',
+      isServiceNameEdited: false,
+      tokenOverride: '',
+    },
+  })
+  const {
+    isCustom, prefix, originHost, originPort, useSsl, overrideHost,
+    serviceNameDraft, isServiceNameEdited, tokenOverride,
+  } = useWatch({ control }) as DeployRemoteFrontendValues
+
   const computedDomain = React.useMemo(() => {
     if (!prefix) return ''
     return isCustom ? prefix : `${prefix}.global.ssl.fastly.net`
   }, [prefix, isCustom])
 
-  // The service name follows the domain until the user edits it.
   const serviceName = isServiceNameEdited
     ? serviceNameDraft
     : computedDomain
       ? `Fastly Log Analytics Remote Frontend - ${computedDomain}`
       : ''
 
-  // Handle Domain Verification
   const checkDomainMutation = useMutation({
     mutationFn: async () => {
       const { data, error } = await client.GET('/api/provision/check-domain', {
-        params: {
-          query: {
-            prefix: prefix,
-            is_custom: isCustom,
-          },
-        },
+        params: { query: { prefix, is_custom: isCustom } },
       })
-
-      if (error) {
-        throw new Error(extractApiError(error))
-      }
-
+      if (error) throw new Error(extractApiError(error))
       return {
         available: !!data?.available,
         reason: data?.reason || null,
         note: data?.note || null,
       }
     },
-    onMutate: () => {
-      setDomainCheckResult(null)
-    },
-    onSuccess: (result) => {
-      setDomainCheckResult(result)
-    },
+    onMutate: () => setDomainCheckResult(null),
+    onSuccess: (result) => setDomainCheckResult(result),
     onError: (err) => {
       const errorMsg = err instanceof Error ? err.message : String(err)
       setDomainCheckResult({
@@ -133,11 +129,10 @@ function DeployRemoteFrontendDialogBody({ onClose }: { onClose: () => void }) {
   })
   const checkingDomain = checkDomainMutation.isPending
   const handleCheckDomain = () => {
-    if (!prefix || prefix.length < 3) return
+    if (!domainStepSchema.safeParse({ isCustom, prefix }).success) return
     checkDomainMutation.mutate()
   }
 
-  // Handle Deploy Service Submit
   const deployMutation = useMutation({
     mutationFn: async () => {
       const { data, error } = await client.POST('/api/sharing/deploy-frontend', {
@@ -152,32 +147,21 @@ function DeployRemoteFrontendDialogBody({ onClose }: { onClose: () => void }) {
           service_id: serviceId || null,
         },
       })
-
-      if (error) {
-        throw new Error(extractApiError(error))
-      }
-
+      if (error) throw new Error(extractApiError(error))
       return data
     },
-    onMutate: () => {
-      setDeployError('')
-    },
+    onMutate: () => setDeployError(''),
     onSuccess: (data) => {
       setDeployResult(data ?? null)
       setStep('success')
     },
-    onError: (err) => {
-      setDeployError(extractApiError(err))
-    },
+    onError: (err) => setDeployError(extractApiError(err)),
   })
   const deploying = deployMutation.isPending
-  const handleDeploy = () => {
-    deployMutation.mutate()
-  }
+  const handleDeploy = () => deployMutation.mutate()
 
-  // Validation Rules
-  const canGoToStep2 = domainCheckResult?.available === true && !checkingDomain && prefix.length >= 3
-  const canGoToStep3 = !!originHost && originPort > 0 && originPort < 65536
+  const canGoToStep2 = domainCheckResult?.available === true && !checkingDomain && domainStepSchema.safeParse({ isCustom, prefix }).success
+  const canGoToStep3 = originStepSchema.safeParse({ originHost, originPort, useSsl, overrideHost }).success
   const canDeploy = !deploying && !!serviceName && canGoToStep3 && canGoToStep2
 
   return (
@@ -221,8 +205,8 @@ function DeployRemoteFrontendDialogBody({ onClose }: { onClose: () => void }) {
                     role="radio"
                     aria-checked={!isCustom}
                     onClick={() => {
-                      setIsCustom(false)
-                      setPrefix('')
+                      setValue('isCustom', false)
+                      setValue('prefix', '')
                       setDomainCheckResult(null)
                     }}
                     className={cn(
@@ -243,8 +227,8 @@ function DeployRemoteFrontendDialogBody({ onClose }: { onClose: () => void }) {
                     role="radio"
                     aria-checked={isCustom}
                     onClick={() => {
-                      setIsCustom(true)
-                      setPrefix('')
+                      setValue('isCustom', true)
+                      setValue('prefix', '')
                       setDomainCheckResult(null)
                     }}
                     className={cn(
@@ -264,15 +248,13 @@ function DeployRemoteFrontendDialogBody({ onClose }: { onClose: () => void }) {
 
               {!isCustom ? (
                 <div className="space-y-1.5">
-                  <Label htmlFor="domain-prefix" className="text-xs font-semibold">
-                    Subdomain Prefix
-                  </Label>
+                  <Label htmlFor="domain-prefix" className="text-xs font-semibold">Subdomain Prefix</Label>
                   <div className="flex items-center">
                     <Input
                       id="domain-prefix"
                       value={prefix}
                       onChange={(e) => {
-                        setPrefix(e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ''))
+                        setValue('prefix', e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ''))
                         setDomainCheckResult(null)
                       }}
                       placeholder="my-dashboard-prefix"
@@ -282,20 +264,16 @@ function DeployRemoteFrontendDialogBody({ onClose }: { onClose: () => void }) {
                       .global.ssl.fastly.net
                     </span>
                   </div>
-                  <p className="text-[11px] text-muted-foreground">
-                    Only alphanumeric characters and hyphens allowed.
-                  </p>
+                  <p className="text-[11px] text-muted-foreground">Only alphanumeric characters and hyphens allowed.</p>
                 </div>
               ) : (
                 <div className="space-y-1.5">
-                  <Label htmlFor="custom-domain" className="text-xs font-semibold">
-                    Custom Domain Name
-                  </Label>
+                  <Label htmlFor="custom-domain" className="text-xs font-semibold">Custom Domain Name</Label>
                   <Input
                     id="custom-domain"
                     value={prefix}
                     onChange={(e) => {
-                      setPrefix(e.target.value.toLowerCase().trim())
+                      setValue('prefix', e.target.value.toLowerCase().trim())
                       setDomainCheckResult(null)
                     }}
                     placeholder="dashboard.mycompany.com"
@@ -316,11 +294,7 @@ function DeployRemoteFrontendDialogBody({ onClose }: { onClose: () => void }) {
                   onClick={handleCheckDomain}
                   className="gap-1.5"
                 >
-                  {checkingDomain ? (
-                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                  ) : (
-                    <Globe className="h-3.5 w-3.5" />
-                  )}
+                  {checkingDomain ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Globe className="h-3.5 w-3.5" />}
                   Check Domain Availability
                 </Button>
 
@@ -346,14 +320,12 @@ function DeployRemoteFrontendDialogBody({ onClose }: { onClose: () => void }) {
           {step === 2 && (
             <div className="space-y-4 animate-in fade-in slide-in-from-bottom-2 duration-200">
               <div className="space-y-1.5">
-                <Label htmlFor="origin-host" className="text-xs font-semibold">
-                  Origin Host / VM IP
-                </Label>
+                <Label htmlFor="origin-host" className="text-xs font-semibold">Origin Host / VM IP</Label>
                 <div className="relative">
                   <Input
                     id="origin-host"
                     value={originHost}
-                    onChange={(e) => setOriginHost(e.target.value.trim())}
+                    onChange={(e) => setValue('originHost', e.target.value.trim())}
                     placeholder="e.g. 203.0.113.10"
                     className="h-10 pl-9"
                   />
@@ -366,14 +338,12 @@ function DeployRemoteFrontendDialogBody({ onClose }: { onClose: () => void }) {
 
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-1.5">
-                  <Label htmlFor="origin-port" className="text-xs font-semibold">
-                    Backend Port
-                  </Label>
+                  <Label htmlFor="origin-port" className="text-xs font-semibold">Backend Port</Label>
                   <Input
                     id="origin-port"
                     type="number"
                     value={originPort}
-                    onChange={(e) => setOriginPort(Number(e.target.value))}
+                    onChange={(e) => setValue('originPort', Number(e.target.value))}
                     placeholder="80"
                     className="h-10"
                     min={1}
@@ -384,23 +354,19 @@ function DeployRemoteFrontendDialogBody({ onClose }: { onClose: () => void }) {
                 <div className="flex flex-col justify-end">
                   <div className="flex items-center justify-between border rounded-lg px-3.5 py-2 bg-muted/5 h-10">
                     <div className="space-y-0.5">
-                      <Label htmlFor="use-ssl" className="text-xs font-medium cursor-pointer">
-                        Use SSL / HTTPS
-                      </Label>
+                      <Label htmlFor="use-ssl" className="text-xs font-medium cursor-pointer">Use SSL / HTTPS</Label>
                     </div>
-                    <Switch id="use-ssl" checked={useSsl} onCheckedChange={setUseSsl} />
+                    <Switch id="use-ssl" checked={useSsl} onCheckedChange={(v) => setValue('useSsl', v)} />
                   </div>
                 </div>
               </div>
 
               <div className="space-y-1.5">
-                <Label htmlFor="override-host" className="text-xs font-semibold">
-                  Host Header Override (Optional)
-                </Label>
+                <Label htmlFor="override-host" className="text-xs font-semibold">Host Header Override (Optional)</Label>
                 <Input
                   id="override-host"
                   value={overrideHost}
-                  onChange={(e) => setOverrideHost(e.target.value.trim())}
+                  onChange={(e) => setValue('overrideHost', e.target.value.trim())}
                   placeholder="None - default"
                   className="h-10"
                 />
@@ -422,15 +388,13 @@ function DeployRemoteFrontendDialogBody({ onClose }: { onClose: () => void }) {
               )}
 
               <div className="space-y-1.5">
-                <Label htmlFor="service-name" className="text-xs font-semibold">
-                  Fastly Service Name
-                </Label>
+                <Label htmlFor="service-name" className="text-xs font-semibold">Fastly Service Name</Label>
                 <Input
                   id="service-name"
                   value={serviceName}
                   onChange={(e) => {
-                    setServiceName(e.target.value)
-                    setIsServiceNameEdited(true)
+                    setValue('serviceNameDraft', e.target.value)
+                    setValue('isServiceNameEdited', true)
                   }}
                   placeholder="Fastly Log Analytics Remote Frontend"
                   className="h-10"
@@ -455,7 +419,7 @@ function DeployRemoteFrontendDialogBody({ onClose }: { onClose: () => void }) {
                       id="token-override"
                       type="password"
                       value={tokenOverride}
-                      onChange={(e) => setTokenOverride(e.target.value)}
+                      onChange={(e) => setValue('tokenOverride', e.target.value)}
                       placeholder="fastly_..."
                       className="h-9 text-xs font-mono"
                       disabled={deploying}
@@ -553,9 +517,7 @@ function DeployRemoteFrontendDialogBody({ onClose }: { onClose: () => void }) {
         <DialogFooter className={panelDialogFooter}>
           {step === 1 && (
             <div className="flex justify-between w-full items-center">
-              <Button variant="outline" onClick={onClose}>
-                Close
-              </Button>
+              <Button variant="outline" onClick={onClose}>Close</Button>
               <Button disabled={!canGoToStep2} onClick={() => setStep(2)} className="gap-1.5">
                 Next <ArrowRight className="h-4 w-4" />
               </Button>
@@ -580,13 +542,9 @@ function DeployRemoteFrontendDialogBody({ onClose }: { onClose: () => void }) {
               </Button>
               <Button disabled={!canDeploy} onClick={handleDeploy} className="gap-1.5 min-w-[120px]">
                 {deploying ? (
-                  <>
-                    <Loader2 className="h-4 w-4 animate-spin" /> Deploying...
-                  </>
+                  <><Loader2 className="h-4 w-4 animate-spin" /> Deploying...</>
                 ) : (
-                  <>
-                    <Globe className="h-4 w-4" /> Deploy Service
-                  </>
+                  <><Globe className="h-4 w-4" /> Deploy Service</>
                 )}
               </Button>
             </div>
@@ -594,9 +552,7 @@ function DeployRemoteFrontendDialogBody({ onClose }: { onClose: () => void }) {
 
           {step === 'success' && (
             <div className="flex justify-end w-full">
-              <Button variant="outline" onClick={onClose}>
-                Done
-              </Button>
+              <Button variant="outline" onClick={onClose}>Done</Button>
             </div>
           )}
         </DialogFooter>
@@ -636,7 +592,11 @@ function TeardownRemoteFrontendDialogBody({
   onClose,
 }: TeardownRemoteFrontendDialogProps & { onClose: () => void }) {
   const [error, setError] = React.useState('')
-  const [tokenOverride, setTokenOverride] = React.useState('')
+  const { control, setValue } = useForm<TeardownRemoteFrontendValues>({
+    resolver: zodResolver(teardownRemoteFrontendSchema),
+    defaultValues: { tokenOverride: '' },
+  })
+  const { tokenOverride } = useWatch({ control }) as TeardownRemoteFrontendValues
 
   const teardownMutation = useMutation({
     mutationFn: async () => {
@@ -646,26 +606,17 @@ function TeardownRemoteFrontendDialogBody({
           token_override: tokenOverride || null,
         },
       })
-
-      if (apiError) {
-        throw new Error(extractApiError(apiError))
-      }
+      if (apiError) throw new Error(extractApiError(apiError))
     },
-    onMutate: () => {
-      setError('')
-    },
+    onMutate: () => setError(''),
     onSuccess: () => {
       onClose()
       onSuccess()
     },
-    onError: (err) => {
-      setError(extractApiError(err))
-    },
+    onError: (err) => setError(extractApiError(err)),
   })
   const tearingDown = teardownMutation.isPending
-  const handleTeardown = () => {
-    teardownMutation.mutate()
-  }
+  const handleTeardown = () => teardownMutation.mutate()
 
   return (
       <DialogContent className={cn('sm:max-w-md', panelDialogContent)}>
@@ -702,7 +653,7 @@ function TeardownRemoteFrontendDialogBody({
               type="password"
               placeholder="defaults to service configuration key"
               value={tokenOverride}
-              onChange={(e) => setTokenOverride(e.target.value)}
+              onChange={(e) => setValue('tokenOverride', e.target.value)}
               disabled={tearingDown}
               className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
             />
@@ -716,20 +667,10 @@ function TeardownRemoteFrontendDialogBody({
         </div>
 
         <DialogFooter className={cn('gap-2 border-t pt-4', panelDialogFooter)}>
-          <Button
-            variant="outline"
-            onClick={onClose}
-            disabled={tearingDown}
-            className="w-full sm:w-auto"
-          >
+          <Button variant="outline" onClick={onClose} disabled={tearingDown} className="w-full sm:w-auto">
             Cancel
           </Button>
-          <Button
-            variant="destructive"
-            onClick={handleTeardown}
-            disabled={tearingDown}
-            className="w-full sm:w-auto gap-1.5"
-          >
+          <Button variant="destructive" onClick={handleTeardown} disabled={tearingDown} className="w-full sm:w-auto gap-1.5">
             {tearingDown && <Loader2 className="h-3 w-3 animate-spin" />}
             {tearingDown ? 'Tearing down…' : 'Teardown Remote Service'}
           </Button>

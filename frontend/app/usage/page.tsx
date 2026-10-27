@@ -2,6 +2,7 @@
 
 import type { PlotlyTrace } from '@/types/api'
 import React, { useMemo, useRef } from 'react'
+import { flexRender, getCoreRowModel, useReactTable, type ColumnDef } from '@tanstack/react-table'
 import { useInViewOnce } from '@/components/AnalyticsCard'
 import { useQuery } from '@tanstack/react-query'
 import { client, unwrapClient } from "@/lib/api";
@@ -13,6 +14,7 @@ import { Button } from '@/components/ui/button'
 import { ButtonGroup } from '@/components/ui/button-group'
 import { Skeleton } from '@/components/ui/skeleton'
 import { SkeletonGrid } from '@/components/ui/skeleton'
+import { Table, TableBody, TableCell, TableRow } from '@/components/ui/table'
 import { PlotlyChart } from '@/components/PlotlyChart'
 import { CostCalculator } from '@/components/CostCalculator/CostCalculator'
 import { Database, HardDrive, Zap, DollarSign, Activity as ActivityIcon } from 'lucide-react'
@@ -48,6 +50,32 @@ const FosOperationsHelp = ({ note }: { note?: string }) => (
 
 import { useRouter } from 'next/navigation'
 import { useServiceStore } from '@/stores/filterStore'
+
+type BreakdownRow = { id: string; label: React.ReactNode; value: React.ReactNode; rowClassName?: string }
+
+const BREAKDOWN_COLUMNS: ColumnDef<BreakdownRow>[] = [
+  { id: 'label', cell: ({ row }) => row.original.label },
+  { id: 'value', cell: ({ row }) => <div className="text-right">{row.original.value}</div> },
+]
+
+function BreakdownTable({ rows }: { rows: BreakdownRow[] }) {
+  const table = useReactTable({ data: rows, columns: BREAKDOWN_COLUMNS, getCoreRowModel: getCoreRowModel() })
+  return (
+    <Table className="mt-1 text-[11px] font-normal">
+      <TableBody>
+        {table.getRowModel().rows.map((row) => (
+          <TableRow key={row.original.id} className={cn('border-0 hover:bg-transparent', row.original.rowClassName)}>
+            {row.getVisibleCells().map((cell) => (
+              <TableCell key={cell.id} className="p-0 py-0.5 align-top">
+                {flexRender(cell.column.columnDef.cell, cell.getContext())}
+              </TableCell>
+            ))}
+          </TableRow>
+        ))}
+      </TableBody>
+    </Table>
+  )
+}
 
 export default function UsagePage() {
   return (
@@ -311,6 +339,75 @@ function UsagePageContent({
 
 
 
+  const storageBreakdownRows = useMemo<BreakdownRow[]>(
+    () => [
+      { id: 'live', label: <span>Live Storage:</span>, value: <strong className="text-foreground">{formatBytes(storage?.live_bytes ?? 0)}</strong> },
+      ...((storage?.rum_bytes ?? 0) > 0
+        ? [{ id: 'rum', rowClassName: 'text-blue-700 dark:text-blue-400', label: <span>RUM Logs:</span>, value: <strong>{formatBytes(storage?.rum_bytes ?? 0)}</strong> }]
+        : []),
+      ...((storage?.regular_log_bytes ?? 0) > 0
+        ? [{ id: 'regular', label: <span>Request Logs:</span>, value: <strong className="text-foreground">{formatBytes(storage?.regular_log_bytes ?? 0)}</strong> }]
+        : []),
+      ...((storage?.quarantine_bytes ?? 0) > 0
+        ? [{ id: 'quarantine', label: <span>Quarantine:</span>, value: <strong className="text-foreground">{formatBytes(storage?.quarantine_bytes ?? 0)}</strong> }]
+        : []),
+      {
+        id: 'deleted',
+        rowClassName: 'text-amber-700 dark:text-amber-500',
+        label: (
+          <TooltipProvider>
+            <Tooltip>
+              <TooltipTrigger>
+                <span className=" underline underline-offset-2 decoration-dotted">Deleted (Still Billed):</span>
+              </TooltipTrigger>
+              <TooltipContent side="top" className="max-w-[200px] text-xs">
+                Objects created in this period but deleted early. Billed for minimum 30 days.
+              </TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
+        ),
+        value: <strong>{formatBytes(storage?.deleted_bytes ?? 0)}</strong>,
+      },
+    ],
+    [storage?.live_bytes, storage?.rum_bytes, storage?.regular_log_bytes, storage?.quarantine_bytes, storage?.deleted_bytes],
+  )
+
+  const costBreakdownRows = useMemo<BreakdownRow[]>(
+    () => [
+      {
+        id: 'storage',
+        label: <span>Storage:</span>,
+        value: (
+          <div className="flex flex-col items-end">
+            {errorStorage ? <strong className="text-destructive">n/a</strong> : <strong className="text-foreground">{fmtUSD(roughStorage)}</strong>}
+            <span className="text-[9px] uppercase tracking-tighter text-muted-foreground">Rate: ${rateStorage}/GB</span>
+          </div>
+        ),
+      },
+      {
+        id: 'ops',
+        label: <span>Operations:</span>,
+        value: (
+          <div className="flex flex-col items-end">
+            <strong className="text-foreground">{fmtUSD(roughCostA + roughCostB)}</strong>
+            <span className="text-[9px] uppercase tracking-tighter text-muted-foreground">A: ${rateA}/1K · B: ${prefill?.class_b_rate_per_10k ?? 0.01}/10K</span>
+          </div>
+        ),
+      },
+      {
+        id: 'egress',
+        label: <span>CDN Egress:</span>,
+        value: (
+          <div className="flex flex-col items-end">
+            <strong className="text-foreground">{fmtUSD(roughBandwidth)}</strong>
+            <span className="text-[9px] uppercase tracking-tighter text-muted-foreground">Rate: ${rateEgress}/GB</span>
+          </div>
+        ),
+      },
+    ],
+    [errorStorage, roughStorage, rateStorage, roughCostA, roughCostB, rateA, prefill?.class_b_rate_per_10k, roughBandwidth, rateEgress],
+  )
+
   return (
     <>
       {/* ── Stat cards ─────────────────────────────────────────────────────── */}
@@ -331,43 +428,7 @@ function UsagePageContent({
                 <Skeleton className="h-3 w-full" />
               </div>
             ) : (
-              <div className="flex flex-col gap-0.5 mt-1 text-[11px]">
-                <div className="flex justify-between">
-                  <span>Live Storage:</span>
-                  <strong className="text-foreground">{formatBytes(storage?.live_bytes ?? 0)}</strong>
-                </div>
-                {(storage?.rum_bytes ?? 0) > 0 && (
-                  <div className="flex justify-between text-blue-700 dark:text-blue-400">
-                    <span>RUM Logs:</span>
-                    <strong>{formatBytes(storage?.rum_bytes ?? 0)}</strong>
-                  </div>
-                )}
-                {(storage?.regular_log_bytes ?? 0) > 0 && (
-                  <div className="flex justify-between">
-                    <span>Request Logs:</span>
-                    <strong className="text-foreground">{formatBytes(storage?.regular_log_bytes ?? 0)}</strong>
-                  </div>
-                )}
-                {(storage?.quarantine_bytes ?? 0) > 0 && (
-                  <div className="flex justify-between">
-                    <span>Quarantine:</span>
-                    <strong className="text-foreground">{formatBytes(storage?.quarantine_bytes ?? 0)}</strong>
-                  </div>
-                )}
-                <div className="flex justify-between text-amber-700 dark:text-amber-500">
-                  <TooltipProvider>
-                    <Tooltip>
-                      <TooltipTrigger>
-                        <span className=" underline underline-offset-2 decoration-dotted">Deleted (Still Billed):</span>
-                      </TooltipTrigger>
-                      <TooltipContent side="top" className="max-w-[200px] text-xs">
-                        Objects created in this period but deleted early. Billed for minimum 30 days.
-                      </TooltipContent>
-                    </Tooltip>
-                  </TooltipProvider>
-                  <strong>{formatBytes(storage?.deleted_bytes ?? 0)}</strong>
-                </div>
-              </div>
+              <BreakdownTable rows={storageBreakdownRows} />
             )
           }
           icon={HardDrive}
@@ -417,30 +478,8 @@ function UsagePageContent({
                 <Skeleton className="h-3 w-full" />
               </div>
             ) : (
-              <div className="flex flex-col gap-0.5 mt-1 text-[11px] font-normal">
-                <div className="flex justify-between">
-                  <span>Storage:</span>
-                  <div className="flex flex-col items-end">
-                    {errorStorage
-                      ? <strong className="text-destructive">n/a</strong>
-                      : <strong className="text-foreground">{fmtUSD(roughStorage)}</strong>}
-                    <span className="text-[9px] uppercase tracking-tighter text-muted-foreground">Rate: ${rateStorage}/GB</span>
-                  </div>
-                </div>
-                <div className="flex justify-between">
-                  <span>Operations:</span>
-                  <div className="flex flex-col items-end">
-                    <strong className="text-foreground">{fmtUSD(roughCostA + roughCostB)}</strong>
-                    <span className="text-[9px] uppercase tracking-tighter text-muted-foreground">A: ${rateA}/1K · B: ${prefill?.class_b_rate_per_10k ?? 0.01}/10K</span>
-                  </div>
-                </div>
-                <div className="flex justify-between">
-                  <span>CDN Egress:</span>
-                  <div className="flex flex-col items-end">
-                    <strong className="text-foreground">{fmtUSD(roughBandwidth)}</strong>
-                    <span className="text-[9px] uppercase tracking-tighter text-muted-foreground">Rate: ${rateEgress}/GB</span>
-                  </div>
-                </div>
+              <div>
+                <BreakdownTable rows={costBreakdownRows} />
                 {errorStorage && (
                   <div role="alert" className="text-[10px] text-destructive mt-0.5">Partial estimate — storage cost excluded.</div>
                 )}

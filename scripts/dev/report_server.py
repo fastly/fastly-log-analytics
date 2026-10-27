@@ -60,11 +60,11 @@ from urllib.parse import parse_qs, unquote, urlsplit
 sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 try:
-    import validate_credentials as vc  # noqa: E402
+    from scripts.lib import environments as vc  # noqa: E402
 except ImportError:
     vc = None  # type: ignore[assignment]
 
-from scripts.lib.admin_tls import admin_origin, admin_urlopen, validate_admin_tls_config  # noqa: E402
+from scripts.lib.environments import admin_origin, admin_urlopen, validate_admin_tls_config  # noqa: E402
 
 # Must mirror the `envsMapping` URLs baked into the report's <script> block
 # (deploy_test_all.sh's save_deploy_report) — this is the server-side half of

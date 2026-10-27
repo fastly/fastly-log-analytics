@@ -1,47 +1,39 @@
-# Upgrading to v3.0.0-beta1
+# Upgrading from v2.x to v3.0.0
 
 ## Overview
 
-v3.0.0-beta1 replaces the commit-path storage engine (Apache Iceberg/pyiceberg → DuckDB's **DuckLake**), adds a distributed ingest data plane, and standardizes operational metadata and the DuckLake catalog on **PostgreSQL 16** across all deployment modes (`METADATA_DSN` and `DUCKLAKE_CATALOG`). The design is recorded in [ADR-14](adr/14-ducklake-replacement.md), [ADR-15](adr/15-multi-writer-topology.md), [ADR-16](adr/16-ingest-ledger.md), and [ADR-22](adr/22-postgres-only-metadata.md).
+v3.0.0 replaces the commit-path storage engine (Apache Iceberg/pyiceberg → DuckDB's **DuckLake**), adds a distributed ingest data plane, and standardizes operational metadata and the DuckLake catalog on **PostgreSQL 16** across all deployment modes (`METADATA_DSN` and `DUCKLAKE_CATALOG`). The design is recorded in [ADR-14](adr/14-ducklake-replacement.md), [ADR-15](adr/15-multi-writer-topology.md), [ADR-16](adr/16-ingest-ledger.md), and [ADR-22](adr/22-postgres-only-metadata.md).
 
-**For most operators the upgrade is: pull the new code, restart. The app migrates itself.** There is no export step, no downtime window, and no data copy.
-
-Read [Before you upgrade](#before-you-upgrade) first — it is short, and one item can lose you query history if you skip it.
+**The upgrade is: tear down logging on v2, upgrade the code, and provision each service fresh.** v3 does not read a v2 Iceberg table, a v2 local cache, or a v2 per-service SQLite file, and it does not migrate them. History collected under v2 is not carried into v3; logging resumes from the moment you provision.
 
 ---
 
-## Which path applies to you
+## Which deployment applies to you
 
 | | You are here if | What you do |
 |---|---|---|
-| **Standard** (default) | You run one instance — the v2.x default. `DEPLOYMENT_MODE=standard` (with PostgreSQL 16 included in the compose stack for `METADATA_DSN` and `DUCKLAKE_CATALOG`). | Pull, restart. Nothing else. |
-| **High-scale** (opt-in) | You want ingestion to fan out across many workers with ClickHouse. | Provision external Postgres + valkey + ClickHouse, set env vars, restart. |
-
-Single node remains the default and is fully supported. Scaled ingest is opt-in; you are not required to move to it, and **nothing about your v2.x deployment stops working if you don't**.
+| **Standard** (default) | You run one instance. `DEPLOYMENT_MODE=standard` (with PostgreSQL 16 included in the compose stack for `METADATA_DSN` and `DUCKLAKE_CATALOG`). | Tear down on v2, pull, restart, provision. |
+| **High-scale** (opt-in) | You want ingestion to fan out across many workers with ClickHouse. | The same, plus external Postgres + valkey + ClickHouse and the env vars in Path B below. |
 
 ---
 
 ## Before you upgrade
 
-### 1. Take a backup
+### 1. Decide whether you need the v2 history
 
-Back up `data/` (per-service DuckDB files, legacy v2.x SQLite files, config JSON) and your `configs/` directory. Adoption registers existing parquet **in place** and does not modify or delete your Iceberg data, so a rollback is possible — but take the backup anyway.
+A fresh v3 service starts empty. If you need the v2 data, export what you need while v2 is still running (the Query page, or an extract from your own tooling). v3 offers no import path for it.
 
-### 2. Know what "adoption" will bring across
+### 2. Back up what you want to keep
 
-On first boot, each service's pre-3.0 log history is adopted into DuckLake. The adopter enumerates **the legacy Iceberg table's own data files from object storage** and registers those `s3://` paths directly. Nothing is copied, no egress is incurred, and the operation is idempotent.
+Back up your `configs/` directory if you want a record of per-service settings (log-field choices, schedules). Teardown deletes the service's local config, so you provision each service again and re-enter the settings in the wizard.
 
-It deliberately does **not** union in the local `cache/.../data/` tree: that directory is a byte-for-byte mirror of the same FOS objects the manifests name (`sync_data` writes each one there), so adopting both would double-count every row inside your cache window. Object storage is the source of truth; the local mirror is only a fallback for services whose legacy table is genuinely absent.
+### 3. Tear down each service on v2
 
-### 3. Check your retention settings
-
-No action needed for the vast majority of deployments — this matters only if you changed the defaults.
-
-Adoption reads the Iceberg **table**, so it is not bounded by your local cache. But if you have previously run with `cache_retention_days` shorter than `data_retention_days`, verify your Iceberg table still contains the history you expect before upgrading. Anything already aged out of the table itself cannot be adopted, because it no longer exists.
+Use the Teardown action in the admin UI or the CLI (`uv run python -m backend.provision.cli teardown --service-id <ID> --yes`; see the Teardown section of the README for flags such as `--remove-data`). Teardown removes the Fastly logging endpoint and generated VCL from your service, the analytics-owned CDN service, the FOS access keys, and local state.
 
 ### 4. Note what does not carry forward
 
-- **Analyst "independent instance" (Path A) is unsupported against a v3 service.** The old catalog was reconstructible from bucket contents alone, which is what let an analyst run a self-sufficient copy with only read-only FOS credentials. A DuckLake catalog is not bucket-resident, so an analyst with only bucket read access will see an empty dashboard. See [ADR-17](adr/17-analyst-path-a-ducklake.md). Path B (live shared instance) is unaffected.
+- **Analyst "independent instance" (Path A) is not available on v3.** It depended on rebuilding the old catalog from a read-only bucket key, and a DuckLake catalog is not bucket-resident. Use live shared-instance access (remote sharing) instead. See [ADR-17](adr/17-analyst-path-a-ducklake.md).
 - **The serving tier is single-node.** Ingest scales horizontally; the process that answers API requests does not, because the per-service DuckDB file is process-exclusive. Do not run more than one backend replica. See [ADR-18](adr/18-serving-tier-single-pod.md).
 
 ---
@@ -53,26 +45,9 @@ git pull                      # or pull the new image
 make stack-restart            # or your own restart
 ```
 
-That is the whole upgrade. On startup:
+On startup the PostgreSQL metadata schema applies automatically via `pg_schema.py` upon connecting to `METADATA_DSN`. Then provision each service again from the Provision Wizard (or `python -m backend.provision.cli provision`). A new service creates its DuckLake table during provisioning or on its first commit, with nothing to migrate.
 
-1. **PostgreSQL metadata schema applies automatically** via `pg_schema.py` upon connecting to `METADATA_DSN`.
-2. **Legacy history is adopted into DuckLake**, once per service, in a background thread. It never blocks startup.
-
-### Verifying it worked
-
-Adoption is recorded as a `ducklake_adopt` row in `cron_runs`, visible in the Cron UI. A successful run looks like:
-
-```json
-{"adopted_files": 412, "skipped_files": 0, "rows_adopted": 1840233, "source": "iceberg_table"}
-```
-
-A service created **on** v3 has no legacy data, and correctly reports a clean no-op — this is success, not a failure:
-
-```json
-{"adopted_files": 0, "skipped_files": 0, "rows_adopted": 0}
-```
-
-Then confirm the app is healthy:
+Confirm the app is healthy:
 
 ```bash
 curl -s 'http://localhost/api/health?deep=1'   # expect "status": "ok"
@@ -115,24 +90,16 @@ The Helm chart defaults to `standard` mode. Per [ADR-22](adr/22-postgres-only-me
 
 ## If something goes wrong
 
-**Adoption failed.** The failure is recorded as an `error` `ducklake_adopt` row in `cron_runs` with the message, and startup continues. It is not latched as complete, so the next restart retries. To retry immediately:
-
-```bash
-curl -X POST 'http://localhost/api/admin/ducklake/migrate?service=SERVICE_ID'
-```
-
-**Adoption is safe to re-run.** It dedupes against files already registered, so a second run adopts nothing and leaves your row count unchanged.
-
 **Postgres metadata queries fail with `relation "cron_runs" does not exist`.** The schema was not created. Run `scripts/setup_pg_schema.py` with `METADATA_DSN` set.
 
 **Rolling back to SQLite metadata.** Per ADR-22, v3.0.0 standardizes all metadata and catalogs exclusively on PostgreSQL 16; zero-dependency SQLite is no longer supported in v3. To roll back to SQLite, roll back to v2.x.
 
-**Rolling back to v2.x entirely.** Adoption registers parquet in place and never modifies or deletes the Iceberg table, so your v2 data is intact. Restore your `data/` backup and redeploy the previous version.
+**Rolling back to v2.x entirely.** v3 data is not readable by v2. Tear the service down on v3, redeploy the v2.x release, and provision the service again on v2.
 
 ---
 
 ## What changed that you may notice
 
-- **Two cron jobs were renamed**: `sync_{id}` → `log_discovery_{id}` and `commit_{id}` → `log_ingest_{id}`. Historical `cron_runs` rows under the old names are still read, so your history is not lost.
-- **Committed data now lands as parquet under `s3://{bucket}/{prefix}/ducklake/`.** The old `iceberg/` prefix is left untouched.
-- **Retention and snapshot expiry now operate on DuckLake.** If you run a shared catalog, note that snapshot retention is catalog-global rather than per-service — one service's `keep_snapshot_days` applies to every service sharing that catalog.
+- **A cron job was renamed**: `sync_{id}` → `log_discovery_{id}`. Historical `cron_runs` rows under the old name are still read, so history in the Cron UI is not lost.
+- **Where committed data lives depends on the mode.** In Standard it is local parquet under `data/services/{service_id}/ducklake/`. In High-scale it is parquet under `s3://{bucket}/{prefix}/ducklake/`. FOS no longer holds an Iceberg table.
+- **Retention and snapshot expiry now operate on DuckLake.** If you run a shared catalog, note that snapshot retention is catalog-global rather than per-service: one service's `keep_snapshot_days` applies to every service sharing that catalog.

@@ -1,7 +1,7 @@
 /** @vitest-environment jsdom */
 import {
-  createTestQueryClient, createUseSSEMock, makeQueryWrapper, renderWithQuery, selectMockFactory,
-  setupNextHeadersMock, spyOnConsoleError, stubIntersectionObserver, stubResizeObserver, stubSystemTimeZone,
+  createTestQueryClient, createUseSSEMock, makeQueryWrapper, partial, renderWithQuery, selectMockFactory,
+  setupNextHeadersMock, spyOnConsoleError, stubIntersectionObserver, stubPointerCaptureAndScroll, stubResizeObserver, stubSystemTimeZone,
 } from '@/__tests__/helpers/page-smoke'
 import { render, screen, fireEvent, cleanup, act, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -9,9 +9,28 @@ import { describe, it, test, expect, vi, beforeAll, beforeEach, afterEach } from
 import { http, HttpResponse } from 'msw'
 import { QueryClient, type QueryCacheNotifyEvent } from '@tanstack/react-query'
 import { axe } from 'vitest-axe'
-import React, { type ReactNode } from 'react'
+import React, { type ComponentProps, type ReactNode } from 'react'
 import type { CellContext, ColumnDef } from '@tanstack/react-table'
 import type { components } from '@/types/api.generated'
+import type { PlotlyConfig, PlotlyGraphDiv, PlotlyLayout, PlotlyRelayoutEvent, PlotlyTrace } from '@/types/api'
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type Loose = { [k: string]: any }
+if (typeof Element !== 'undefined') {
+  Element.prototype.getAnimations ??= () => []
+}
+
+type PlotStubProps = {
+  layout?: PlotlyLayout
+  config?: PlotlyConfig
+  onUpdate?: unknown
+  onInitialized: (figure: unknown, graphDiv: PlotlyGraphDiv) => void
+  data?: Array<{ country?: string; name?: string }>
+  onCountryClick?: (c: string) => void
+}
+const plotCalls: PlotStubProps[] = []
+type Captured = { data: PlotlyTrace[]; layout?: PlotlyLayout }
+let captured: Captured | null = null
 
 const { setHeaders } = setupNextHeadersMock()
 const { state: sseState, resetState: resetSSE } = createUseSSEMock()
@@ -19,10 +38,49 @@ const mocks = vi.hoisted(() => ({
   useNowMs: vi.fn(() => 0), status: vi.fn(), lastSync: vi.fn(), analyst: vi.fn(() => false),
   bootstrap: vi.fn((): Record<string, unknown> => ({ data: { debug_state: { debug_responses_enabled: true } } })),
   formatTimeAgo: vi.fn((ts: string) => `ago:${ts}`), showToast: vi.fn(), useRealSelect: false,
+  mockReactQueryForFilterBar: false,
+  capturedPredicate: null as ((q: { queryKey?: readonly unknown[] }) => boolean) | null,
+  logExtentsData: undefined as unknown,
+  maskIps: vi.fn(() => false),
+  fieldValues: undefined as { values: { value: string | null; count: number; label?: string }[] } | undefined,
+  fieldValuesLoading: false,
+  activeFields: new Set<string>(),
+  logFieldsCatalog: vi.fn(() => ({ data: undefined as unknown })),
+  useRealPlotly: false,
+  mockTimeSeriesChart: false,
+  mockTopTenTable: false,
+  timeseries: undefined as unknown,
 }))
 
 vi.mock('next/navigation', async () => (await import('../helpers/page-smoke')).navigationModuleMock('/network'))
 vi.mock('@tanstack/react-virtual', async () => (await import('@/__tests__/helpers/page-smoke')).reactVirtualModuleMock())
+vi.mock('@tanstack/react-query', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@tanstack/react-query')>()
+  return {
+    ...actual,
+    useQuery: (...args: Parameters<typeof actual.useQuery>) =>
+      mocks.timeseries !== undefined
+        ? ({ data: mocks.timeseries, isLoading: false, isFetching: false, isError: false, error: null } as unknown as ReturnType<typeof actual.useQuery>)
+        : mocks.mockReactQueryForFilterBar
+          ? ({ data: mocks.logExtentsData, isLoading: false, error: null } as ReturnType<typeof actual.useQuery>)
+          : actual.useQuery(...args),
+    useMutation: (...args: Parameters<typeof actual.useMutation>) =>
+      mocks.mockReactQueryForFilterBar
+        ? ({ mutate: vi.fn(), isPending: false } as unknown as ReturnType<typeof actual.useMutation>)
+        : actual.useMutation(...args),
+    useQueryClient: (...args: Parameters<typeof actual.useQueryClient>) =>
+      mocks.mockReactQueryForFilterBar
+        ? ({ getQueryState: () => undefined, invalidateQueries: vi.fn() } as unknown as ReturnType<typeof actual.useQueryClient>)
+        : actual.useQueryClient(...args),
+    useIsFetching: (opts?: { predicate?: (q: { queryKey?: readonly unknown[] }) => boolean }) => {
+      if (mocks.mockReactQueryForFilterBar) {
+        if (opts?.predicate) mocks.capturedPredicate = opts.predicate
+        return 0
+      }
+      return actual.useIsFetching(opts as Parameters<typeof actual.useIsFetching>[0])
+    },
+  }
+})
 vi.mock('@/components/ui/select', async (importOriginal) => {
   const real = await importOriginal<typeof import('@/components/ui/select')>()
   const mock = selectMockFactory() as unknown as Record<string, React.ComponentType<Record<string, unknown>>>
@@ -32,17 +90,119 @@ vi.mock('@/components/ui/select', async (importOriginal) => {
   }
   return { ...real, Select: wrap('Select'), SelectTrigger: wrap('SelectTrigger'), SelectValue: wrap('SelectValue'), SelectContent: wrap('SelectContent'), SelectSeparator: wrap('SelectSeparator'), SelectItem: wrap('SelectItem') }
 })
-vi.mock('@/stores/filterStore', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('@/stores/filterStore')>()),
-  useFilterStore: vi.fn((selector?: (s: object) => unknown) => {
-    const state = { filters: [], addFilter: vi.fn(), removeFilter: vi.fn(), clearFilters: vi.fn() }
-    return selector ? selector(state) : state
-  }),
+vi.mock('@/components/ui/scroll-area', () => ({
+  ScrollArea: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
 }))
+vi.mock('@/hooks/useDashboardCards', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/hooks/useDashboardCards')>()),
+  useDebounce: (v: string) => v,
+}))
+vi.mock('next/dynamic', () => ({
+  __esModule: true,
+  default: () => {
+    const Stub = (props: PlotStubProps) => {
+      if ('onCountryClick' in props && typeof props.onCountryClick === 'function') {
+        const onCountryClick = props.onCountryClick
+        return (
+          <div data-testid="choropleth-map">
+            <span data-testid="marker-count">{props.data?.length ?? 0}</span>
+            {(props.data ?? []).map((row) => (
+              <button
+                key={row.country ?? row.name}
+                type="button"
+                data-testid={`country-${row.country ?? row.name}`}
+                onClick={() => onCountryClick(row.country ?? row.name ?? '')}
+              >
+                {row.country ?? row.name}
+              </button>
+            ))}
+          </div>
+        )
+      }
+      plotCalls.push(props)
+      return <div data-testid="plot-stub" />
+    }
+    return Stub
+  },
+}))
+vi.mock('next-themes', () => ({
+  useTheme: () => ({ theme: 'light' }),
+}))
+type PlotlyChartProps = ComponentProps<typeof import('@/components/PlotlyChart').PlotlyChart>
+const plotlyMock = vi.fn<(props: PlotlyChartProps) => void>()
+function renderMockPlotly(props: PlotlyChartProps) {
+  plotlyMock(props)
+  captured = { data: props.data, layout: props.layout }
+  return (
+    <div
+      data-testid="plotly"
+      data-title={(props.layout as Loose | undefined)?.title ?? ''}
+      data-layout={JSON.stringify(props.layout ?? {})}
+      data-traces={JSON.stringify(props.data ?? [])}
+    />
+  )
+}
+vi.mock('@/components/PlotlyChart', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/components/PlotlyChart')>()
+  return {
+    ...actual,
+    PlotlyChart: (props: PlotlyChartProps) =>
+      mocks.useRealPlotly ? <actual.PlotlyChart {...props} /> : renderMockPlotly(props),
+  }
+})
+vi.mock('@/components/AnalyticsCard', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/components/AnalyticsCard')>()
+  return {
+    ...actual,
+    TimeSeriesChart: (props: ComponentProps<typeof actual.TimeSeriesChart>) =>
+      mocks.mockTimeSeriesChart ? (
+        <div data-testid="timeseries-chart">
+          <span data-testid="trace-count">{props.data?.length ?? 0}</span>
+        </div>
+      ) : (
+        <actual.TimeSeriesChart {...props} />
+      ),
+    LazyMount: (props: ComponentProps<typeof actual.LazyMount>) =>
+      mocks.mockTopTenTable ? <>{props.children}</> : <actual.LazyMount {...props} />,
+  }
+})
+vi.mock('@/components/Dashboard/TopTenTable', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/components/Dashboard/TopTenTable')>()
+  return {
+    ...actual,
+    TopTenTable: (props: ComponentProps<typeof actual.TopTenTable>) =>
+      mocks.mockTopTenTable ? (
+        <div data-testid={`card-${props.field ?? props.title}`}>{props.title}</div>
+      ) : (
+        <actual.TopTenTable {...props} />
+      ),
+  }
+})
+vi.mock('@/components/SessionScoring/ScoringAdminPanels', async (orig) => {
+  const actual = await orig<typeof import('@/components/SessionScoring/ScoringAdminPanels')>()
+  return {
+    ...actual,
+    useScorerTimeseries: () => ({
+      data: mocks.timeseries,
+      isLoading: false,
+      isFetching: false,
+      isError: false,
+      error: null,
+    }),
+  }
+})
 vi.mock('@/hooks/useBootstrap', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/hooks/useBootstrap')>()),
   useIsAnalyst: () => mocks.analyst(), useBootstrap: () => mocks.bootstrap(),
-  useMounted: () => true, useMaskIps: () => false, useEnforceMaskedFilters: () => {},
+  useMounted: () => true, useMaskIps: () => mocks.maskIps(), useEnforceMaskedFilters: () => {},
+  useLogFieldsCatalog: () => mocks.logFieldsCatalog(),
+  useFieldLabel: () => (id: string) => id,
+  useFieldValues: () => ({ data: mocks.fieldValues, isLoading: mocks.fieldValuesLoading, isFetching: false }),
+  useActiveLogFields: () => ({
+    ready: true,
+    isFieldActive: (id: string) => mocks.activeFields.has(id),
+    isGroupActive: () => false,
+  }),
 }))
 vi.mock('@/hooks/useSSE', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/hooks/useSSE')>()),
@@ -54,19 +214,24 @@ vi.mock('@/hooks/useSSE', async (importOriginal) => ({
 vi.mock('@/lib/utils', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/utils')>()),
   formatTimeAgo: (ts: string) => mocks.formatTimeAgo(ts), showToast: mocks.showToast,
+  TIME_HOVER_LAYOUT: { hovermode: 'x unified' },
+  makeTimeXAxis: (start: string | null | undefined, end: string | null | undefined) => ({
+    type: 'date',
+    range: [start, end],
+  }),
 }))
 vi.mock('@/components/SSEModal', () => ({ ControlledSSEModal: () => null, SSEModal: () => null, SSEProgressView: () => null, SSEExecutionSection: () => null, SSEDialogFooter: () => null }))
 vi.mock('@/components/SyncStatusBadge/SyncStatusBadge', async (importOriginal) => ({ ...(await importOriginal<typeof import('@/components/SyncStatusBadge/SyncStatusBadge')>()), SyncFromCloudModal: () => null }))
 vi.mock('@/components/ReportLayout', async (importOriginal) => ({ ...(await importOriginal<typeof import('@/components/ReportLayout')>()), NoServiceSelected: () => null }))
 
 import { DeltaIndicator } from '@/components/Insights/InsightCard'
-import { ErrorBoundary, LazyMount } from '@/components/AnalyticsCard'
+import { ErrorBoundary, LazyMount, TimeSeriesChart } from '@/components/AnalyticsCard'
 import { HelpDialog } from '@/components/ui/confirm-dialog'
 import { ServerFooter } from '@/components/ServerFooter'
-import { Sparkline } from '@/app/dashboard/_sections/DashboardClient'
+import { Sparkline, TrafficChart, CardGrid, CARD_CATEGORIES, GeoMap } from '@/app/dashboard/_sections/DashboardClient'
 import { ServiceSwitcher, SyncStatusBadge, TimeAgo } from '@/components/SyncStatusBadge/SyncStatusBadge'
 import { TimezoneSwitcher } from '@/components/AppLayout'
-import { useDebugStore, useServiceStore, useTimezoneStore } from '@/stores/filterStore'
+import { useDebugStore, useFilterStore, usePopGeoStore, useServiceStore, useTimezoneStore } from '@/stores/filterStore'
 import { getTimezoneAbbr, DEBUG_RESPONSES_COOKIE } from '@/lib/utils'
 import { DebugPanel } from '@/components/DebugPanel'
 import { DiagnosticsPanel } from '@/app/admin/_sections/OperationsOverview'
@@ -74,7 +239,7 @@ import { server } from '@/__tests__/helpers/msw/handlers'
 import { client, getApiBase } from '@/lib/api'
 import { LogSyncSection } from '@/components/CronSettingsModal/CronSettingsModal'
 import LogsClient, { CronLiveLog, QuickActionsBar, SchemaTab, CRON_EXPLANATIONS, CRON_DISPLAY_NAMES, CRON_GROUPS } from '@/app/logs/_sections/LogsClient'
-import { DataTable, DataTableReadonly, DateTimeCell, makeLatencyColumns, type LatencyRow } from '@/components/DataTable'
+import { DataTable, DataTableReadonly, DateTimeCell, FilterValueCell, buildDashboardFilterUrl, makeLatencyColumns, type LatencyRow } from '@/components/DataTable'
 import { BotSourcesPanel } from '@/app/control-room/_sections/ControlRoomClient'
 import {
   GlobalHealthHelp, AvgRttHelp, WorstAsnHelp, WorstRegionHelp, HeatmapHelp,
@@ -82,11 +247,30 @@ import {
   HealthBadge, SHIELDING_COLUMNS, getShieldingLabels, adjustShieldingRows,
   SHIELDING_MIN_REQUESTS_DEFAULT, SHIELDING_MIN_REQUESTS_OPTIONS,
 } from '@/app/network/page'
+import { FilterBar, ActiveFiltersBanner, AddFilterDialogContent } from '@/components/FilterBar/FilterBar'
+import { Dialog } from '@/components/ui/dialog'
+import { usePathname } from 'next/navigation'
+import { PlotlyChart, ChartA11yTable, tracesToTable } from '@/components/PlotlyChart'
+import { ScorerLatencyChart, ScorerErrorsChart } from '@/components/SessionScoring/StatusPanel'
+import { TopTenTable, FieldSearchDialog } from '@/components/Dashboard/TopTenTable'
+import type { ReportConfiguration } from '@/hooks/useDashboardCards'
 
-beforeAll(() => { stubResizeObserver() })
+beforeAll(() => {
+  stubResizeObserver()
+  stubPointerCaptureAndScroll()
+})
 beforeEach(() => {
   stubResizeObserver()
   mocks.useRealSelect = false
+  mocks.mockReactQueryForFilterBar = false
+  mocks.useRealPlotly = false
+  mocks.mockTimeSeriesChart = false
+  mocks.mockTopTenTable = false
+  mocks.maskIps.mockReturnValue(false)
+  mocks.logFieldsCatalog.mockReturnValue({ data: undefined })
+  mocks.fieldValues = undefined
+  mocks.fieldValuesLoading = false
+  mocks.activeFields.clear()
   mocks.analyst.mockReturnValue(false)
   mocks.bootstrap.mockReturnValue({ data: { debug_state: { debug_responses_enabled: true } } })
   mocks.formatTimeAgo.mockImplementation((ts: string) => `ago:${ts}`)
@@ -848,5 +1032,1102 @@ describe('SchemaTab & BotSourcesPanel', () => {
     renderWithQuery(<BotSourcesPanel />)
     await user.click(await screen.findByRole('button', { name: /Enrich Now/ }))
     expect(await screen.findByRole('alert')).toBeTruthy()
+  })
+})
+
+describe('FilterBar, ActiveFiltersBanner, AddFilterDialogContent & FilterValueCell', () => {
+  beforeEach(() => {
+    mocks.useRealSelect = true
+    mocks.mockReactQueryForFilterBar = true
+    mocks.logExtentsData = undefined
+    mocks.maskIps.mockReturnValue(false)
+    mocks.fieldValues = { values: [] }
+    vi.mocked(usePathname).mockReturnValue('/dashboard')
+    act(() => {
+      useFilterStore.getState().resetAll()
+      useFilterStore.setState({
+        filters: [],
+        edgeOnly: false,
+        compareMode: false,
+        isAutoRange: true,
+      })
+      useServiceStore.setState({ activeServiceId: 'test-svc' })
+    })
+  })
+
+  describe('FilterBar — filter chip rendering', () => {
+    it('preserves date drafts until the committed range changes', () => {
+      act(() => {
+        useFilterStore.getState().setRange('2026-01-02T01:00:00Z', '2026-01-02T02:00:00Z')
+      })
+      render(<FilterBar />)
+      const start = screen.getByLabelText<HTMLInputElement>('Range start')
+      const initial = start.value
+      fireEvent.change(start, { target: { value: '2026-01-03T03:00' } })
+      act(() => {
+        useFilterStore.getState().toggleEdgeOnly()
+      })
+      expect(start).toHaveValue('2026-01-03T03:00')
+      act(() => {
+        useFilterStore.getState().setRange('2026-01-04T01:00:00Z', '2026-01-04T02:00:00Z')
+      })
+      expect(start).not.toHaveValue('2026-01-03T03:00')
+      expect(start.value).not.toBe(initial)
+    })
+
+    it('keeps switches synchronized with external store resets', async () => {
+      const user = userEvent.setup()
+      render(<FilterBar />)
+      const edge = screen.getByRole('switch', { name: /edge only/i })
+      const compare = screen.getByRole('switch', { name: /compare/i })
+      await user.click(edge)
+      await user.click(compare)
+      expect(edge).toBeChecked()
+      expect(compare).toBeChecked()
+      act(() => {
+        useFilterStore.getState().resetAll()
+      })
+      expect(edge).not.toBeChecked()
+      expect(compare).not.toBeChecked()
+    })
+
+    it('renders no chips when filters is empty', () => {
+      render(<FilterBar />)
+      expect(screen.getByTestId('add-filter-stub')).toBeTruthy()
+      expect(screen.queryByRole('button', { name: /toggle include\/exclude/i })).toBeNull()
+    })
+
+    it('renders one chip per filter with column:value', () => {
+      act(() => {
+        useFilterStore.setState({
+          filters: [
+            { id: 'f1', column: 'country', value: 'US', mode: 'include' },
+            { id: 'f2', column: 'status', value: '500', mode: 'exclude' },
+          ],
+        })
+      })
+      render(<FilterBar />)
+
+      expect(screen.getByText('country:')).toBeTruthy()
+      expect(screen.getByText('status:')).toBeTruthy()
+      expect(screen.getByText('US')).toBeTruthy()
+      expect(screen.getByText('500')).toBeTruthy()
+    })
+
+    it('include filter shows "+" and exclude filter shows "-"', () => {
+      act(() => {
+        useFilterStore.setState({
+          filters: [
+            { id: 'inc', column: 'country', value: 'US', mode: 'include' },
+            { id: 'exc', column: 'country', value: 'CN', mode: 'exclude' },
+          ],
+        })
+      })
+      render(<FilterBar />)
+      const toggles = screen.getAllByRole('button', { name: /(including|excluding) country=.* activate to toggle/i })
+      const glyphs = toggles.map((b) => b.textContent?.trim())
+      expect(glyphs).toContain('+')
+      expect(glyphs).toContain('-')
+    })
+
+    it('_ngwaf_bot_name filter renders "Fastly Verified Bot:" prefix and _bot_name renders "Bot:"', () => {
+      act(() => {
+        useFilterStore.setState({
+          filters: [
+            { id: 'b1', column: '_ngwaf_bot_name', value: 'GoogleBot', mode: 'include' },
+            { id: 'b2', column: '_bot_name', value: 'googlebot', mode: 'include' },
+          ],
+        })
+      })
+      render(<FilterBar />)
+      expect(screen.getByText('Fastly Verified Bot:')).toBeTruthy()
+      expect(screen.getByText('GoogleBot')).toBeTruthy()
+      expect(screen.queryByText('_ngwaf_bot_name:')).toBeNull()
+      expect(screen.getByText('Bot:')).toBeTruthy()
+      expect(screen.queryByText('_bot_name:')).toBeNull()
+    })
+
+    it('clicking the X on a chip removes that filter from the store', async () => {
+      const user = userEvent.setup()
+      act(() => {
+        useFilterStore.setState({
+          filters: [
+            { id: 'f1', column: 'country', value: 'US', mode: 'include' },
+            { id: 'f2', column: 'status', value: '500', mode: 'exclude' },
+          ],
+        })
+      })
+      render(<FilterBar />)
+
+      expect(useFilterStore.getState().filters).toHaveLength(2)
+      const removeUS = screen.getByRole('button', { name: /remove filter country: US/i })
+      await user.click(removeUS)
+      expect(useFilterStore.getState().filters).toHaveLength(1)
+      expect(useFilterStore.getState().filters[0].id).toBe('f2')
+    })
+
+    it('clicking the +/- toggle flips the filter mode in the store', async () => {
+      const user = userEvent.setup()
+      act(() => {
+        useFilterStore.setState({
+          filters: [{ id: 'f1', column: 'country', value: 'US', mode: 'include' }],
+        })
+      })
+      render(<FilterBar />)
+
+      const toggle = screen.getByRole('button', { name: /(including|excluding) country=.* activate to toggle/i })
+      await user.click(toggle)
+      expect(useFilterStore.getState().filters[0].mode).toBe('exclude')
+
+      const toggleAfter = screen.getByRole('button', { name: /(including|excluding) country=.* activate to toggle/i })
+      await user.click(toggleAfter)
+      expect(useFilterStore.getState().filters[0].mode).toBe('include')
+    })
+
+    it('has no axe-detectable a11y violations when chips are present', async () => {
+      act(() => {
+        useFilterStore.setState({
+          filters: [
+            { id: 'f1', column: 'country', value: 'US', mode: 'include' },
+            { id: 'f2', column: 'status', value: '500', mode: 'exclude' },
+          ],
+        })
+      })
+      const { container } = render(<FilterBar />)
+      const results = await axe(container, {
+        rules: { 'color-contrast': { enabled: false } },
+      })
+      expect(results).toHaveNoViolations()
+    })
+
+    it('renders many chips without crashing (no key collisions)', () => {
+      act(() => {
+        useFilterStore.setState({
+          filters: Array.from({ length: 20 }, (_, i) => ({
+            id: `filter-${i}`,
+            column: 'country',
+            value: ['US', 'GB', 'DE'][i % 3],
+            mode: 'include' as const,
+          })),
+        })
+      })
+      render(<FilterBar />)
+      expect(screen.getAllByText('country:')).toHaveLength(20)
+    })
+  })
+
+  describe('FilterBar — pill-flash predicate (time-bound allowlist)', () => {
+    beforeEach(() => {
+      mocks.capturedPredicate = null
+    })
+
+    it('returns true only for queries the date range affects', () => {
+      render(<FilterBar />)
+      expect(mocks.capturedPredicate).not.toBeNull()
+      const p = mocks.capturedPredicate!
+
+      expect(p({ queryKey: ['dashboard', 'aggregates', 'svc'] })).toBe(true)
+      expect(p({ queryKey: ['sessions', 'list', 'svc'] })).toBe(true)
+      expect(p({ queryKey: ['usage', 'bandwidth', 'svc'] })).toBe(true)
+      expect(p({ queryKey: ['insights', 'svc', 24, 24] })).toBe(true)
+      expect(p({ queryKey: ['usage-log', 'head', 'svc'] })).toBe(true)
+    })
+
+    it('returns false for background polls and empty/malformed query keys', () => {
+      render(<FilterBar />)
+      const p = mocks.capturedPredicate!
+
+      expect(p({ queryKey: ['log-extents', 'svc'] })).toBe(false)
+      expect(p({ queryKey: ['bootstrap'] })).toBe(false)
+      expect(p({ queryKey: ['sync-status', 'svc'] })).toBe(false)
+      expect(p({ queryKey: ['last-sync', 'svc'] })).toBe(false)
+      expect(p({ queryKey: ['admin', 'health-snapshot'] })).toBe(false)
+      expect(p({ queryKey: ['admin', 'overview', 'queries-summary'] })).toBe(false)
+      expect(p({ queryKey: ['admin', 'iceberg', 'svc'] })).toBe(false)
+      expect(p({ queryKey: ['admin', 'share', 'live'] })).toBe(false)
+      expect(p({ queryKey: ['system-jobs'] })).toBe(false)
+      expect(p({ queryKey: ['alerts', 'svc'] })).toBe(false)
+      expect(p({ queryKey: undefined })).toBe(false)
+      expect(p({ queryKey: [] })).toBe(false)
+      expect(p({ queryKey: [123] })).toBe(false)
+    })
+  })
+
+  describe('ActiveFiltersBanner', () => {
+    it('renders nothing when no filters and edgeOnly is off', () => {
+      const { container } = render(<ActiveFiltersBanner />)
+      expect(container.firstChild).toBeNull()
+    })
+
+    it('renders a pill for each active filter and has region role', () => {
+      useFilterStore.getState().addFilter('country', 'US', 'include')
+      useFilterStore.getState().addFilter('status', '500', 'exclude')
+
+      render(<ActiveFiltersBanner />)
+      expect(screen.getByText('country:')).toBeInTheDocument()
+      expect(screen.getByText('US')).toBeInTheDocument()
+      expect(screen.getByText('status:')).toBeInTheDocument()
+      expect(screen.getByText('500')).toBeInTheDocument()
+      expect(
+        screen.getByRole('region', { name: /active filters from other pages/i }),
+      ).toBeInTheDocument()
+    })
+
+    it('renders the "Edge only" badge and "Clear all" wipes filters + edgeOnly', () => {
+      useFilterStore.getState().addFilter('country', 'US', 'include')
+      useFilterStore.getState().toggleEdgeOnly()
+
+      render(<ActiveFiltersBanner />)
+      expect(screen.getByText('Edge only')).toBeInTheDocument()
+      fireEvent.click(screen.getByRole('button', { name: /clear all/i }))
+
+      expect(useFilterStore.getState().filters).toHaveLength(0)
+      expect(useFilterStore.getState().edgeOnly).toBe(false)
+    })
+  })
+
+  function renderDialogContent(onClose: () => void = () => {}) {
+    return render(
+      <Dialog open>
+        <AddFilterDialogContent onClose={onClose} />
+      </Dialog>,
+    )
+  }
+
+  describe('AddFilterDialogContent', () => {
+    it('keeps Apply Filter disabled until a value is typed', async () => {
+      const user = userEvent.setup()
+      renderDialogContent()
+      const apply = screen.getByRole('button', { name: /Apply Filter/ }) as HTMLButtonElement
+      expect(apply.disabled).toBe(true)
+      await user.type(screen.getByPlaceholderText('Type a ip value...'), '1.2.3.4')
+      await waitFor(() => expect(apply.disabled).toBe(false))
+    })
+
+    it('adds an include filter for the default field and closes', async () => {
+      const user = userEvent.setup()
+      const onClose = vi.fn()
+      renderDialogContent(onClose)
+      await user.type(screen.getByPlaceholderText('Type a ip value...'), '1.2.3.4')
+      await user.click(screen.getByRole('button', { name: /Apply Filter/ }))
+      await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1))
+      const [filter] = useFilterStore.getState().filters
+      expect(filter).toMatchObject({ column: 'ip', value: '1.2.3.4', mode: 'include' })
+    })
+
+    it('honours the Exclude tab and submits on Enter', async () => {
+      const user = userEvent.setup()
+      const onClose = vi.fn()
+      renderDialogContent(onClose)
+      await user.click(screen.getByRole('tab', { name: /Exclude/ }))
+      await user.type(screen.getByPlaceholderText('Type a ip value...'), 'bad{Enter}')
+      await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1))
+      expect(useFilterStore.getState().filters[0]).toMatchObject({ column: 'ip', value: 'bad', mode: 'exclude' })
+    })
+
+    it('defaults a masking analyst to the url field', async () => {
+      mocks.maskIps.mockReturnValue(true)
+      const user = userEvent.setup()
+      renderDialogContent()
+      await user.type(screen.getByPlaceholderText('Type a url value...'), '/x')
+      await user.click(screen.getByRole('button', { name: /Apply Filter/ }))
+      await waitFor(() => expect(useFilterStore.getState().filters.length).toBe(1))
+      expect(useFilterStore.getState().filters[0]).toMatchObject({ column: 'url', value: '/x' })
+    })
+
+    it('fills the value from a suggestion without submitting', async () => {
+      mocks.fieldValues = { values: [{ value: 'US', label: 'United States', count: 1200 }] }
+      const user = userEvent.setup()
+      const onClose = vi.fn()
+      renderDialogContent(onClose)
+      const input = screen.getByPlaceholderText('Type a ip value...') as HTMLInputElement
+      await user.type(input, 'U')
+      await user.click(await screen.findByRole('button', { name: /United States/ }))
+      expect(input.value).toBe('US')
+      expect(onClose).not.toHaveBeenCalled()
+      expect(useFilterStore.getState().filters.length).toBe(0)
+    })
+  })
+
+  describe('buildDashboardFilterUrl', () => {
+    it('builds a single-filter URL', () => {
+      expect(buildDashboardFilterUrl([{ column: 'url', value: '/api/data' }]))
+        .toBe('/dashboard?filter_url=%2Fapi%2Fdata')
+    })
+
+    it('builds a multi-filter URL with ampersands', () => {
+      expect(buildDashboardFilterUrl([
+        { column: 'city', value: 'London' },
+        { column: 'region', value: 'England' },
+        { column: 'country', value: 'GB' },
+      ])).toBe('/dashboard?filter_city=London&filter_region=England&filter_country=GB')
+    })
+
+    it('escapes the underscore-prefixed bot id columns', () => {
+      expect(buildDashboardFilterUrl([{ column: '_wellknown_bot_id', value: 'bot-1' }]))
+        .toBe('/dashboard?filter__wellknown_bot_id=bot-1')
+    })
+  })
+
+  describe('FilterValueCell', () => {
+    beforeEach(() => {
+      useFilterStore.getState().clearFilters()
+      vi.mocked(usePathname).mockReturnValue('/origin')
+      mocks.maskIps.mockReturnValue(false)
+    })
+
+    afterEach(() => {
+      useFilterStore.getState().clearFilters()
+    })
+
+    it('renders the display value', () => {
+      render(<FilterValueCell filters={[{ column: 'url', value: '/api/data' }]} />)
+      expect(screen.getByText('/api/data')).toBeInTheDocument()
+    })
+
+    it('prefers the explicit display prop over the filter value', () => {
+      render(
+        <FilterValueCell
+          filters={[{ column: '_wellknown_bot_id', value: 'bot-1' }]}
+          display="Googlebot"
+        />,
+      )
+      expect(screen.getByText('Googlebot')).toBeInTheDocument()
+      expect(screen.queryByText('bot-1')).not.toBeInTheDocument()
+    })
+
+    it('"Filter <page>" menu item calls addFilter for every entry', () => {
+      const addFilterSpy = vi.spyOn(useFilterStore.getState(), 'addFilter')
+      render(
+        <FilterValueCell
+          filters={[
+            { column: 'city', value: 'London' },
+            { column: 'country', value: 'GB' },
+          ]}
+          display="London"
+        />,
+      )
+      fireEvent.click(screen.getByRole('button', { name: /Filter actions for London/i }))
+      fireEvent.click(screen.getByText(/Filter origin page/i))
+      expect(addFilterSpy).toHaveBeenCalledWith('city', 'London', 'include')
+      expect(addFilterSpy).toHaveBeenCalledWith('country', 'GB', 'include')
+    })
+
+    it('"Copy value" writes the first filter value to the clipboard', async () => {
+      const writeText = vi.fn().mockResolvedValue(undefined)
+      Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+      render(<FilterValueCell filters={[{ column: 'city', value: 'London' }]} display="London" />)
+      fireEvent.click(screen.getByRole('button', { name: /Filter actions for London/i }))
+      fireEvent.click(screen.getByText(/Copy value/i))
+      await waitFor(() => expect(writeText).toHaveBeenCalledWith('London'))
+    })
+
+    it('hides "Open in dashboard" when already on /dashboard', () => {
+      vi.mocked(usePathname).mockReturnValue('/dashboard')
+      render(<FilterValueCell filters={[{ column: 'country', value: 'US' }]} />)
+      fireEvent.click(screen.getByRole('button', { name: /Filter actions for US/i }))
+      expect(screen.queryByText(/Open in dashboard/i)).not.toBeInTheDocument()
+      expect(screen.getByText(/Filter dashboard page/i)).toBeInTheDocument()
+    })
+
+    it('opens dashboard URL in a new tab via "Open in dashboard"', () => {
+      const openSpy = vi.spyOn(window, 'open').mockImplementation(() => null)
+      render(<FilterValueCell filters={[{ column: 'pop', value: 'JFK' }]} />)
+      fireEvent.click(screen.getByRole('button', { name: /Filter actions for JFK/i }))
+      fireEvent.click(screen.getByText(/Open in dashboard/i))
+      expect(openSpy).toHaveBeenCalledWith(
+        '/dashboard?filter_pop=JFK',
+        '_blank',
+        'noopener,noreferrer',
+      )
+      openSpy.mockRestore()
+    })
+
+    it('renders empty cell (no trigger) when filters list is empty', () => {
+      const { container } = render(<FilterValueCell filters={[]} display="—" />)
+      expect(screen.getByText('—')).toBeInTheDocument()
+      expect(container.querySelector('button')).toBeNull()
+    })
+
+    it('cmd/ctrl-click on the cell bypasses the menu and calls addFilter directly', () => {
+      const addFilterSpy = vi.spyOn(useFilterStore.getState(), 'addFilter')
+      render(<FilterValueCell filters={[{ column: 'pop', value: 'JFK' }]} />)
+      const trigger = screen.getByRole('button', { name: /Filter actions for JFK/i })
+      fireEvent.mouseDown(trigger, { metaKey: true })
+      expect(addFilterSpy).toHaveBeenCalledWith('pop', 'JFK', 'include')
+      expect(screen.queryByText(/Open in dashboard/i)).not.toBeInTheDocument()
+    })
+
+    it('plain click on the cell still opens the menu', () => {
+      render(<FilterValueCell filters={[{ column: 'pop', value: 'JFK' }]} />)
+      const trigger = screen.getByRole('button', { name: /Filter actions for JFK/i })
+      fireEvent.click(trigger)
+      expect(screen.getByText(/Filter origin page/i)).toBeInTheDocument()
+    })
+
+    it('renders an IP-family value as plain text (no filter menu) when masking', () => {
+      mocks.maskIps.mockReturnValue(true)
+      const { container } = render(
+        <FilterValueCell filters={[{ column: 'client_ip', value: '73.217.41.xxx' }]} />,
+      )
+      expect(screen.getByText('73.217.41.xxx')).toBeInTheDocument()
+      expect(container.querySelector('button')).toBeNull()
+    })
+
+    it('still allows filtering by oip (origin IP) when masking', () => {
+      mocks.maskIps.mockReturnValue(true)
+      render(<FilterValueCell filters={[{ column: 'oip', value: '151.101.1.51' }]} />)
+      expect(
+        screen.getByRole('button', { name: /Filter actions for 151.101.1.51/i }),
+      ).toBeInTheDocument()
+    })
+  })
+})
+
+describe('TimeSeriesChart, ScorerSeries, PlotlyChart, TrafficChart, CardGrid, FieldSearchDialog, TopTenTable & GeoMap', () => {
+  let lastIOCallback: ((entries: Array<{ isIntersecting: boolean }>) => void) | null = null
+  let lastIOOptions: IntersectionObserverInit | null = null
+  class MockIntersectionObserver {
+    constructor(cb: (entries: Array<{ isIntersecting: boolean }>) => void, options?: IntersectionObserverInit) {
+      lastIOCallback = cb
+      lastIOOptions = options ?? null
+    }
+    observe() {}
+    disconnect() {}
+    unobserve() {}
+    takeRecords() { return [] }
+    root = null
+    rootMargin = ''
+    thresholds = []
+  }
+
+  beforeEach(() => {
+    mocks.useRealPlotly = false
+    mocks.mockTimeSeriesChart = false
+    mocks.mockTopTenTable = false
+    mocks.timeseries = undefined
+    plotCalls.length = 0
+    lastIOCallback = null
+    lastIOOptions = null
+    vi.stubGlobal('IntersectionObserver', MockIntersectionObserver)
+    stubResizeObserver()
+  })
+
+  describe('TimeSeriesChart', () => {
+    beforeEach(() => {
+      plotlyMock.mockClear()
+    })
+
+    it('passes through data, merges layout (caller wins), and forwards className/height/onRelayout', () => {
+      const traces = [{ x: [1, 2, 3], y: [4, 5, 6] }]
+      const onRelayout = vi.fn()
+      render(
+        <TimeSeriesChart
+          data={traces}
+          startTime="2026-01-01T00:00:00Z"
+          endTime="2026-01-01T01:00:00Z"
+          timezone="UTC"
+          layout={{ hovermode: 'closest', yaxis: { title: 'count' } }}
+          className="border"
+          height={420}
+          onRelayout={onRelayout}
+        />,
+      )
+      const props = plotlyMock.mock.calls[0]![0]
+      expect(props.data).toBe(traces)
+      expect(props.className).toBe('border')
+      expect(props.height).toBe(420)
+      expect(props.onRelayout).toBe(onRelayout)
+      expect(props.layout).toMatchObject({
+        hovermode: 'closest',
+        xaxis: { type: 'date', range: ['2026-01-01T00:00:00Z', '2026-01-01T01:00:00Z'] },
+        yaxis: { title: 'count' },
+      })
+    })
+
+    it('rebuilds the merged layout when the time range or timezone changes', () => {
+      const { rerender } = render(
+        <TimeSeriesChart data={[]} startTime="2026-01-01T00:00:00Z" endTime="2026-01-01T01:00:00Z" timezone="UTC" />,
+      )
+      const firstLayout = plotlyMock.mock.calls[0]![0].layout
+      rerender(
+        <TimeSeriesChart data={[]} startTime="2026-01-01T00:00:00Z" endTime="2026-01-01T02:00:00Z" timezone="UTC" />,
+      )
+      const secondLayout = plotlyMock.mock.calls.at(-1)![0].layout
+      expect(secondLayout).not.toBe(firstLayout)
+      expect(secondLayout?.xaxis?.range?.[1]).toBe('2026-01-01T02:00:00Z')
+    })
+  })
+
+  const T0 = '2026-10-01T00:00:00+00:00'
+  const T2 = '2026-10-01T02:00:00+00:00'
+  function rows() {
+    return [
+      { hour: T0, total_count: 100, fail_open_count: 5, rtt_p50_us: 1000, rtt_p95_us: 2000, rtt_p99_us: 3000, exec_p50_us: 100, exec_p95_us: 200 },
+      { hour: T2, total_count: 0, fail_open_count: 0, rtt_p50_us: null, rtt_p95_us: 4000, rtt_p99_us: null, exec_p50_us: null, exec_p95_us: null },
+    ]
+  }
+
+  describe('ScorerErrorsChart & ScorerLatencyChart', () => {
+    beforeEach(() => {
+      captured = null
+      mocks.timeseries = { has_latency: true, granularity: 'hour', rows: rows() }
+    })
+
+    it('ScorerErrorsChart emits dense fail-open bars + sparse error-rate line on y2 and toggles secondary axis', () => {
+      render(<ScorerErrorsChart serviceId="s" sinceHours={24} />)
+      const [bars, rate] = captured!.data as unknown as Record<string, unknown>[]
+      expect(bars).toMatchObject({
+        type: 'bar',
+        name: 'Fail-opens',
+        x: ['2026-10-01T00:00:00.000Z', '2026-10-01T01:00:00.000Z', '2026-10-01T02:00:00.000Z'],
+        y: [5, 0, 0],
+      })
+      expect(rate).toMatchObject({ type: 'scatter', mode: 'lines', name: 'Error rate (%)', yaxis: 'y2', x: [T0, T2], y: [5, 0] })
+      expect((captured!.layout as Loose).yaxis2).toMatchObject({ overlaying: 'y', side: 'right', ticksuffix: '%' })
+
+      fireEvent.click(screen.getByRole('switch'))
+      expect(captured!.data).toHaveLength(1)
+      expect((captured!.layout as Loose).yaxis2).toBeUndefined()
+    })
+
+    it('ScorerErrorsChart uses per-minute grid and tick format for minute granularity', () => {
+      mocks.timeseries = {
+        has_latency: false,
+        granularity: 'minute',
+        rows: [
+          { hour: '2026-10-01T00:00:00+00:00', total_count: 1, fail_open_count: 1 },
+          { hour: '2026-10-01T00:02:00+00:00', total_count: 1, fail_open_count: 2 },
+        ],
+      }
+      render(<ScorerErrorsChart serviceId="s" sinceHours={1} />)
+      expect((captured!.data[0] as Loose).y).toEqual([1, 0, 2])
+      expect((captured!.layout as Loose).xaxis.tickformat).toBe('%H:%M')
+    })
+
+    it('ScorerLatencyChart emits volume bar on y2 + 5 latency lines, toggles volume bar, and handles missing latency', () => {
+      const { unmount } = render(<ScorerLatencyChart serviceId="s" sinceHours={24} />)
+      const traces = captured!.data as unknown as Loose[]
+      expect(traces.map(t => t.name)).toEqual(['Inspected requests', 'p50 rtt', 'p95 rtt', 'p99 rtt', 'p50 exec', 'p95 exec'])
+      expect(traces[0].y).toEqual([100, 0, 0])
+      expect(traces[1].y).toEqual([1, null])
+      expect(traces[2].y).toEqual([2, 4])
+
+      fireEvent.click(screen.getByRole('switch'))
+      expect((captured!.data as unknown as Loose[]).map(t => t.name)).not.toContain('Inspected requests')
+      expect((captured!.layout as Loose).yaxis2).toBeUndefined()
+      unmount()
+
+      captured = null
+      mocks.timeseries = { has_latency: false, granularity: 'hour', rows: rows() }
+      render(<ScorerLatencyChart serviceId="s" sinceHours={24} />)
+      expect(captured).toBeNull()
+      expect(screen.getByText(/Waiting for traffic logged with the scorer latency fields/)).toBeInTheDocument()
+    })
+  })
+
+  describe('PlotlyChart, ChartA11yTable & tracesToTable', () => {
+    beforeEach(() => {
+      mocks.useRealPlotly = true
+    })
+
+    it('withholds Plot until IntersectionObserver fires, or renders immediately when IO is unavailable', async () => {
+      const { unmount } = render(<PlotlyChart data={[]} a11yTitle="x" />)
+      expect(screen.queryByTestId('plot-stub')).toBeNull()
+      await act(async () => { lastIOCallback!([{ isIntersecting: true }]) })
+      expect(screen.getByTestId('plot-stub')).toBeInTheDocument()
+      unmount()
+
+      vi.stubGlobal('IntersectionObserver', undefined)
+      render(<PlotlyChart data={[]} a11yTitle="x" />)
+      expect(screen.getByTestId('plot-stub')).toBeInTheDocument()
+    })
+
+    it('uses nearest scroll container as root, merges layout/config, renders ChartA11yTable, and forwards onRelayout', async () => {
+      const onRelayout = vi.fn()
+      const onUpdate = vi.fn()
+      const { container } = render(
+        <div style={{ overflowY: 'auto' }}>
+          <PlotlyChart
+            data={[{ x: ['a', 'b'], y: [1, 2], name: 'series' }]}
+            layout={{ legend: { orientation: 'v', x: 0.5 }, xaxis: { type: 'date', range: ['a', 'b'] }, yaxis: { title: 'count' } }}
+            onRelayout={onRelayout}
+            onUpdate={onUpdate}
+            a11yTitle="My A11y Caption"
+          />
+        </div>,
+      )
+      expect(lastIOOptions?.root).toBe(container.firstElementChild)
+      expect(screen.getByRole('table')).toBeInTheDocument()
+      expect(document.querySelector('caption')?.textContent).toBe('My A11y Caption')
+
+      await act(async () => { lastIOCallback!([{ isIntersecting: true }]) })
+      const props = plotCalls.at(-1)!
+      expect(props.layout?.legend).toMatchObject({ orientation: 'v', x: 0.5 })
+      expect(props.layout?.xaxis).toMatchObject({ type: 'date', range: ['a', 'b'] })
+      expect(props.config).toMatchObject({ responsive: true, displayModeBar: false })
+      expect(props.onUpdate).toBe(onUpdate)
+
+      let handler: ((e: PlotlyRelayoutEvent) => void) | undefined
+      const fakeGraphDiv: PlotlyGraphDiv = Object.assign(document.createElement('div'), {
+        on: (name: string, h: (e: PlotlyRelayoutEvent) => void) => { if (name === 'plotly_relayout') handler = h },
+      })
+      await act(async () => { props.onInitialized({}, fakeGraphDiv) })
+      handler!({ 'xaxis.range[0]': 1 })
+      expect(onRelayout).toHaveBeenCalledWith({ 'xaxis.range[0]': 1 })
+    })
+
+    it('ChartA11yTable & tracesToTable handle empty, single/multi-series, pie, heatmap, and >500 row truncation', () => {
+      for (const emptyInput of [null, {}, undefined, []]) {
+        expect(tracesToTable(emptyInput)).toMatchObject({ empty: true, rows: [] })
+      }
+      expect(tracesToTable([], 'My chart').title).toBe('My chart')
+      expect(tracesToTable([{ type: 'heatmap', x: ['t1'], y: ['a'], z: [[1]] }], 'HM').empty).toBe(true)
+
+      const emptyDom = render(<ChartA11yTable shape={tracesToTable([], 'Empty chart')} />)
+      expect(emptyDom.container.querySelector('table')).toBeNull()
+      expect(emptyDom.container.textContent).toContain('no readable data')
+      emptyDom.unmount()
+
+      const multi = tracesToTable([
+        { type: 'scatter', name: 'A', x: ['t1', 't2'], y: [1, null] },
+        { type: 'scatter', name: 'B', x: ['t2', 't3'], y: [5, 6] },
+      ], 'Requests over time')
+      expect(multi.columns).toEqual(['x', 'A', 'B'])
+      expect(multi.rows).toEqual([['t1', 1, ''], ['t2', '', 5], ['t3', '', 6]])
+
+      const { container, unmount } = render(<ChartA11yTable shape={multi} />)
+      expect(container.querySelector('table')?.className).toContain('sr-only')
+      container.querySelectorAll('thead th').forEach(th => expect(th.getAttribute('scope')).toBe('col'))
+      unmount()
+
+      expect(tracesToTable([{ type: 'pie', labels: ['US', 'CN'], values: [100, 50], name: 'Country share' }])).toMatchObject({
+        title: 'Country share',
+        columns: ['Label', 'Value'],
+        rows: [['US', 100], ['CN', 50]],
+      })
+      expect(tracesToTable([{ type: 'bar', x: ['a'], y: [1] }]).columns).toEqual(['x', 'Series 1'])
+
+      const x = Array.from({ length: 1200 }, (_, i) => i)
+      const bigShape = tracesToTable([{ x, y: x, name: 'S' }], 'Big chart')
+      expect(bigShape.rows).toHaveLength(500)
+      expect(bigShape.truncatedFrom).toBe(1200)
+      render(<ChartA11yTable shape={bigShape} />)
+      expect(document.querySelector('caption')?.textContent).toContain('showing first 500 of 1200 rows')
+    })
+  })
+
+  const catalog = {
+    fields: [
+      { id: 'requests', label: 'Requests', group: 'METRICS' },
+      { id: 'hit_rate', label: 'Cache Hit Rate', group: 'METRICS' },
+      { id: '5xx', label: '5xx Errors', group: 'METRICS' },
+      { id: '4xx', label: '4xx Errors', group: 'METRICS' },
+      { id: 'p50_latency', label: 'p50 Latency', group: 'METRICS' },
+      { id: 'p95_latency', label: 'p95 Latency', group: 'METRICS' },
+      { id: 'p99_latency', label: 'p99 Latency', group: 'METRICS' },
+    ],
+  }
+
+  const config = partial<ReportConfiguration>({
+    effectiveInterval: '1 hour',
+    validIntervals: new Set(['1 hour']),
+    validTrends: new Set(['off', 'auto', '1m', '5m', '1h', '1d']),
+  })
+
+  function renderChart(overrides: Partial<React.ComponentProps<typeof TrafficChart>> = {}) {
+    const defaults: React.ComponentProps<typeof TrafficChart> = {
+      catalog,
+      metric: 'requests',
+      setMetric: vi.fn(),
+      trend: 'off',
+      setTrend: vi.fn(),
+      config,
+      intervalButtons: <div data-testid="interval-buttons" />,
+      trafficData: [],
+      chartLayout: {},
+      hiddenCategories: new Set<string>(),
+      toggleCategory: vi.fn(),
+      isReady: true,
+      isLoadingAggs: false,
+      isFetchingAggs: false,
+      transformPending: false,
+      aggregates: { time_series: [] },
+      onChartRelayout: vi.fn(),
+      startTime: '2026-01-01T00:00:00Z',
+      endTime: '2026-01-01T01:00:00Z',
+      timezone: 'UTC',
+    }
+    return render(<TrafficChart {...defaults} {...overrides} />)
+  }
+
+  describe('TrafficChart', () => {
+    beforeEach(() => {
+      vi.clearAllMocks()
+      mocks.mockTimeSeriesChart = true
+      mocks.activeFields.clear()
+    })
+
+    it.each([
+      ['loading skeleton when aggregates undefined', { isReady: false, aggregates: undefined }, 'Initializing...', false],
+      ['worker transform pending skeleton', { aggregates: { time_series: [{ time: '2026-01-01T00:00:00Z', value: 1 }] }, trafficData: [], transformPending: true }, 'Crunching logs...', false],
+      ['empty state when trafficData is empty', { aggregates: { time_series: [] }, trafficData: [] }, 'No logs found for this period.', false],
+      ['Group C hint when ttfb is not active', { metric: 'ttfb_client', aggregates: { time_series: [] }, trafficData: [] }, 'Requires Infrastructure (Group C) fields to be enabled in Fastly logging.', false],
+      ['neutral no-logs copy when ttfb IS active', { metric: 'ttfb_client', aggregates: { time_series: [] }, trafficData: [] }, 'No logs found for this period.', true],
+    ])('renders %s', (_label, overrides, expectedText, activateTtfb) => {
+      if (activateTtfb) mocks.activeFields.add('ttfb')
+      renderChart(overrides)
+      expect(screen.getByText(expectedText)).toBeInTheDocument()
+      expect(screen.queryByTestId('timeseries-chart')).toBeNull()
+    })
+
+    it('mounts TimeSeriesChart with traces and forwards metric, category-legend, and trend clicks', () => {
+      const setMetric = vi.fn()
+      const toggleCategory = vi.fn()
+      const setTrend = vi.fn()
+      const trafficData = [
+        { type: 'bar', name: 'edge', marker: { color: '#aaa' } },
+        { type: 'bar', name: 'origin', marker: { color: '#bbb' } },
+        { type: 'scatter', name: 'cached', x: [], y: [], marker: { color: '#111' } },
+      ]
+      renderChart({ trafficData, setMetric, toggleCategory, setTrend })
+      expect(screen.getByTestId('trace-count').textContent).toBe('3')
+
+      fireEvent.click(screen.getByRole('button', { name: /^5xx$/i }))
+      expect(setMetric).toHaveBeenCalledWith('5xx')
+
+      fireEvent.click(screen.getByRole('button', { name: /edge/i }))
+      expect(toggleCategory).toHaveBeenCalledWith('edge')
+
+      fireEvent.click(screen.getAllByRole('button', { name: /^1m$/ })[0])
+      expect(setTrend).toHaveBeenCalledWith('1m')
+    })
+  })
+
+  const sampleAggregates = {
+    data: {
+      status: { total: 100, top: [{ value: 200, label: '200', count: 90 }] },
+      ip: { total: 100, top: [{ value: '1.1.1.1', label: '1.1.1.1', count: 10 }] },
+    },
+  }
+
+  describe('CardGrid', () => {
+    beforeEach(() => {
+      vi.clearAllMocks()
+      mocks.mockTopTenTable = true
+    })
+
+    it('renders skeleton when visibleCardList is empty, and categorized/custom cards once ready', () => {
+      const { unmount } = render(
+        <CardGrid
+          visibleCardList={[]}
+          isReady={false}
+          isFetchingAggs={false}
+          aggregates={undefined}
+          compareAggregates={undefined}
+          compareMode={false}
+          topBotsData={undefined}
+          collapsedSections={new Set()}
+          toggleSectionCollapsed={vi.fn()}
+          onRowClick={vi.fn()}
+        />,
+      )
+      for (const cat of CARD_CATEGORIES) expect(screen.getByText(cat.label)).toBeInTheDocument()
+      expect(screen.queryByTestId(/^card-/)).toBeNull()
+      unmount()
+
+      const toggle = vi.fn()
+      const { rerender } = render(
+        <CardGrid
+          visibleCardList={[
+            { id: 'ip', label: 'Client IP', inActiveFormat: false },
+            { id: 'status', label: 'HTTP Status', inActiveFormat: false },
+            { id: 'custom_field_42', label: 'My Custom Field', inActiveFormat: false },
+          ]}
+          isReady={true}
+          isFetchingAggs={false}
+          aggregates={{ data: { ...sampleAggregates.data, custom_field_42: { total: 1, top: [] } } }}
+          compareAggregates={undefined}
+          compareMode={false}
+          topBotsData={undefined}
+          collapsedSections={new Set()}
+          toggleSectionCollapsed={toggle}
+          onRowClick={vi.fn()}
+        />,
+      )
+      expect(screen.getByTestId('card-ip')).toBeInTheDocument()
+      expect(screen.getByTestId('card-status')).toBeInTheDocument()
+      expect(screen.getByTestId('card-custom_field_42')).toBeInTheDocument()
+      expect(screen.getByText('Custom')).toBeInTheDocument()
+
+      fireEvent.click(screen.getByRole('button', { name: /request/i }))
+      expect(toggle).toHaveBeenCalledWith('request')
+
+      rerender(
+        <CardGrid
+          visibleCardList={[{ id: 'ip', label: 'Client IP', inActiveFormat: false }]}
+          isReady={true}
+          isFetchingAggs={false}
+          aggregates={sampleAggregates}
+          compareAggregates={undefined}
+          compareMode={false}
+          topBotsData={undefined}
+          collapsedSections={new Set(['request'])}
+          toggleSectionCollapsed={toggle}
+          onRowClick={vi.fn()}
+        />,
+      )
+      expect(screen.queryByTestId('card-ip')).toBeNull()
+    })
+
+    it('renders CardErrorState + Retry for a bot card when top-bots errors', () => {
+      render(
+        <CardGrid
+          visibleCardList={[{ id: '_bot_name', label: 'Top Bots', inActiveFormat: false }]}
+          isReady={true}
+          isFetchingAggs={false}
+          aggregates={{ data: {} }}
+          compareAggregates={undefined}
+          compareMode={false}
+          topBotsData={undefined}
+          topBotsError={new Error('top-bots boom')}
+          onRetryTopBots={vi.fn()}
+          collapsedSections={new Set()}
+          toggleSectionCollapsed={() => {}}
+          onRowClick={() => {}}
+        />,
+      )
+      expect(screen.getByText('Failed to load bot data.')).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: /retry/i })).toBeInTheDocument()
+    })
+  })
+
+  function seedFilters(filters: { column: string; value: string; mode?: 'include' | 'exclude' }[]) {
+    useFilterStore.setState({
+      filters: filters.map((f, i) => ({
+        id: `pill-${i}`,
+        column: f.column,
+        value: f.value,
+        mode: f.mode ?? 'include',
+      })),
+    })
+  }
+
+  describe('FieldSearchDialog', () => {
+    beforeEach(() => {
+      useFilterStore.setState({ filters: [] })
+      usePopGeoStore.setState({ map: {} })
+      mocks.fieldValues = {
+        values: [
+          { value: 'jfk', count: 500 },
+          { value: 'lhr', count: 300 },
+          { value: 'den', count: 200 },
+          { value: 'syd', count: 100 },
+        ],
+      }
+      mocks.fieldValuesLoading = false
+    })
+
+    it('pins selected values for its own field (including unfetched/exclude/geo), filters by search, and removes on click', async () => {
+      usePopGeoStore.setState({ map: { DEN: { city: 'Denver', region: 'CO', country: 'us' } } })
+      seedFilters([
+        { column: 'country', value: 'US' },
+        { column: 'pop', value: 'den' },
+        { column: 'pop', value: 'ams' },
+        { column: 'pop', value: 'lhr', mode: 'exclude' },
+      ])
+      const user = userEvent.setup()
+      render(<FieldSearchDialog field="pop" title="Edge PoP" />)
+      await user.click(screen.getByRole('button', { name: 'Search Edge PoP' }))
+      const dialog = await screen.findByRole('dialog')
+
+      expect(within(dialog).getByText('Selected')).toBeInTheDocument()
+      expect(within(dialog).queryByRole('button', { name: /filter US/ })).not.toBeInTheDocument()
+      expect(within(dialog).getByRole('button', { name: 'Remove include filter ams' })).toBeInTheDocument()
+      expect(within(dialog).getByRole('button', { name: 'Remove exclude filter lhr' })).toBeInTheDocument()
+
+      const pinnedDen = within(dialog).getByRole('button', { name: 'Remove include filter den' })
+      expect(pinnedDen.textContent).toContain('Denver, CO - USA')
+      expect(pinnedDen.textContent).toContain('200')
+
+      await user.type(within(dialog).getByPlaceholderText('Search for a Edge PoP...'), 'de')
+      expect(within(dialog).getByRole('button', { name: 'Remove include filter den' })).toBeInTheDocument()
+      expect(within(dialog).queryByRole('button', { name: 'Remove include filter ams' })).not.toBeInTheDocument()
+
+      await user.clear(within(dialog).getByPlaceholderText('Search for a Edge PoP...'))
+      await user.click(within(dialog).getByRole('button', { name: 'Remove include filter den' }))
+      expect(useFilterStore.getState().filters.map(f => f.value)).not.toContain('den')
+      expect(screen.getByRole('dialog')).toBeInTheDocument()
+    })
+
+    it('clicking an unpinned value adds an include filter and closes', async () => {
+      const user = userEvent.setup()
+      render(<FieldSearchDialog field="pop" title="Edge PoP" />)
+      await user.click(screen.getByRole('button', { name: 'Search Edge PoP' }))
+      const dialog = await screen.findByRole('dialog')
+
+      await user.click(within(dialog).getByRole('button', { name: /JFK/ }))
+      expect(useFilterStore.getState().filters).toEqual([
+        expect.objectContaining({ column: 'pop', value: 'jfk', mode: 'include' }),
+      ])
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    })
+  })
+
+  const SAMPLE_CATALOG = {
+    fields: [
+      { id: 'ngwaf_action', group: 'ngwaf' },
+      { id: 'cache_status', group: 'cache' },
+    ],
+    groups: [
+      { id: 'ngwaf', label: 'NGWAF' },
+      { id: 'cache', label: 'Cache' },
+    ],
+  }
+
+  describe('TopTenTable', () => {
+    beforeEach(() => {
+      mocks.fieldValues = undefined
+      mocks.logFieldsCatalog.mockReset()
+      mocks.logFieldsCatalog.mockReturnValue({ data: undefined })
+      mocks.maskIps.mockReturnValue(false)
+    })
+
+    it.each([
+      ['bare empty state when no field is supplied', undefined, false, null],
+      ['catalog group hint for disabled group', 'ngwaf_action', true, 'Requires NGWAF fields to be enabled in Fastly logging.'],
+      ['virtual NGWAF hint for _ngwaf_bot_name', '_ngwaf_bot_name', true, 'Requires NGWAF fields to be enabled in Fastly logging.'],
+      ['User-Agent hint for _bot_name', '_bot_name', true, 'Requires User-Agent field to be enabled in Fastly logging.'],
+    ])('renders %s', (_label, field, withCatalog, expectedHint) => {
+      if (withCatalog) mocks.logFieldsCatalog.mockReturnValue({ data: SAMPLE_CATALOG })
+      render(<TopTenTable title="Card" field={field} data={{ top: [], total: 0 }} inActiveFormat={false} />)
+      expect(screen.getByText('No data available')).toBeInTheDocument()
+      if (expectedHint) expect(screen.getByText(expectedHint)).toBeInTheDocument()
+      else expect(screen.queryByText(/Requires/i)).toBeNull()
+    })
+
+    it('renders at most 10 populated rows, supports click/keyboard activation, and preserves long URL styling', async () => {
+      const onRowClick = vi.fn()
+      const user = userEvent.setup()
+      const top = Array.from({ length: 12 }, (_, idx) => ({
+        value: `value-${idx + 1}`,
+        label: idx === 0 ? 'Alpha' : undefined,
+        count: 12 - idx,
+      }))
+      const { unmount } = render(<TopTenTable title="Bounded" field="status" data={{ total: 78, top }} onRowClick={onRowClick} />)
+      expect(screen.getAllByRole('button', { name: /filter to/i })).toHaveLength(10)
+      expect(screen.queryByText('value-11')).toBeNull()
+
+      const alphaRow = screen.getByRole('button', { name: /filter to alpha/i })
+      await user.click(alphaRow)
+      expect(onRowClick).toHaveBeenCalledWith('status', 'value-1')
+
+      alphaRow.focus()
+      await user.keyboard('{Enter}')
+      expect(onRowClick).toHaveBeenCalledTimes(2)
+      unmount()
+
+      const longUrl = 'https://example.com/very/long/path/with/query/parameters?session=synthetic&region=us'
+      render(<TopTenTable title="Top URLs" field="url" data={{ total: 1, top: [{ value: longUrl, count: 1 }] }} />)
+      expect(screen.getByText(longUrl).className).toMatch(/flex-1/)
+      expect(screen.getByRole('button', { name: `Filter to ${longUrl}` })).toHaveAttribute('title', longUrl)
+    })
+
+    it('disables drill-down on `ip` when masking while keeping `oip` clickable', () => {
+      mocks.maskIps.mockReturnValue(true)
+      const onRowClick = vi.fn()
+      const { unmount } = render(
+        <TopTenTable title="Top IPs" field="ip" data={{ total: 2, top: [{ value: '73.217.41.xxx', count: 9 }] }} onRowClick={onRowClick} />,
+      )
+      expect(screen.getByText('73.217.41.xxx')).toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: /filter to/i })).toBeNull()
+      unmount()
+
+      render(<TopTenTable title="Top Origin IPs" field="oip" data={{ total: 1, top: [{ value: '151.101.1.51', count: 9 }] }} onRowClick={onRowClick} />)
+      fireEvent.click(screen.getByRole('button', { name: /filter to 151.101.1.51/i }))
+      expect(onRowClick).toHaveBeenCalledWith('oip', '151.101.1.51')
+    })
+
+    it('copies CSV to clipboard, escapes formula-injection payloads, mounts NotLoggedIndicator, and colors deltas', async () => {
+      const writeText = vi.fn().mockResolvedValue(undefined)
+      Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+      mocks.logFieldsCatalog.mockReturnValue({ data: SAMPLE_CATALOG })
+
+      const { container } = render(
+        <TopTenTable
+          title="CSV & Deltas"
+          field="ua"
+          inActiveFormat={false}
+          data={{
+            total: 6,
+            top: [
+              { value: '=1+1', count: 20 },
+              { value: 'a"b', count: 5 },
+              { value: 'flat', label: 'Flat', count: 10 },
+            ],
+          }}
+          compareData={{
+            total: 6,
+            top: [
+              { value: '=1+1', count: 10 },
+              { value: 'a"b', count: 10 },
+              { value: 'flat', label: 'Flat', count: 10 },
+            ],
+          }}
+        />,
+      )
+      expect(container.querySelector('svg.lucide-eye-off')).not.toBeNull()
+
+      fireEvent.click(screen.getByRole('button', { name: /copy table as csv/i }))
+      expect(writeText).toHaveBeenCalledWith('ua,count\n"\'=1+1",20\n"a""b",5\n"Flat",10')
+      expect(await screen.findByRole('button', { name: /copied!/i })).toBeInTheDocument()
+
+      expect(screen.getByLabelText(/increased by 100%/i).className).toMatch(/text-red-500/)
+      expect(screen.getByLabelText(/decreased by 50%/i).className).toMatch(/text-green-500/)
+      expect(screen.getByLabelText(/no change/i).className).toMatch(/text-muted-foreground/)
+      expect(container.querySelector('svg.lucide-trending-up')).not.toBeNull()
+      expect(container.querySelector('svg.lucide-trending-down')).not.toBeNull()
+    })
+  })
+
+  const geoCatalog = {
+    fields: [{ id: 'country', label: 'Country', group: 'GEO' }],
+    groups: [{ id: 'GEO', label: 'Geolocation' }],
+  }
+
+  describe('GeoMap', () => {
+    beforeEach(() => {
+      vi.clearAllMocks()
+      mocks.activeFields.clear()
+    })
+
+    it('renders loading skeleton, empty states (active vs inactive country field), and interactive ChoroplethMap', async () => {
+      const onCountryClick = vi.fn()
+      const { rerender } = render(
+        <GeoMap isReady={false} isFetchingAggs={false} aggregates={undefined} catalog={geoCatalog} onCountryClick={onCountryClick} />,
+      )
+      expect(screen.getByText('Initializing...')).toBeInTheDocument()
+
+      rerender(<GeoMap isReady={true} isFetchingAggs={false} aggregates={{ map_data: [] }} catalog={undefined} onCountryClick={onCountryClick} />)
+      expect(screen.getByText('Requires Geolocation fields to be enabled in Fastly logging.')).toBeInTheDocument()
+
+      mocks.activeFields.add('country')
+      rerender(<GeoMap isReady={true} isFetchingAggs={false} aggregates={{ map_data: [] }} catalog={geoCatalog} onCountryClick={onCountryClick} />)
+      expect(screen.getByText('No country data in this time range.')).toBeInTheDocument()
+
+      rerender(
+        <GeoMap
+          isReady={true}
+          isFetchingAggs={false}
+          aggregates={{ map_data: [{ country: 'US', count: 100 }, { country: 'DE', count: 40 }] }}
+          catalog={geoCatalog}
+          onCountryClick={onCountryClick}
+        />,
+      )
+      await waitFor(() => expect(screen.getByTestId('choropleth-map')).toBeInTheDocument())
+      expect(screen.getByTestId('marker-count').textContent).toBe('2')
+      fireEvent.click(screen.getByTestId('country-US'))
+      expect(onCountryClick).toHaveBeenCalledWith('US')
+    })
   })
 })

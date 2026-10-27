@@ -4,7 +4,8 @@ import { fetchBootstrapServerSide } from '@/lib/ssr/upstream'
 import { fetchInsightsServerSide } from '@/lib/ssr/upstream'
 import { firstParam, resolveServerServiceId, seedDehydratedState } from '@/lib/ssr/upstream'
 import { queryKeys } from "@/lib/api"
-import InsightsClient from './_sections/InsightsClient'
+import { InsightsClient } from '@/components/Insights'
+export { InsightsClient } from '@/components/Insights'
 
 // Per-request RSC shell for /insights. Pre-fetches the DEFAULT insights
 // selection server-side and dehydrates it so the anomaly cards render from

@@ -71,7 +71,7 @@ top-N error leaderboard.
 rather than imported to avoid the import-graph cycle (rollups must NOT import
 ``repositories``; import-linter enforces this).
 
-Active-hour skip + atomic tmp+rename + per-service iceberg lock — same
+Active-hour skip + atomic tmp+rename + per-service view lock — same
 convention as :mod:`.slow_urls`.
 """
 
@@ -397,7 +397,7 @@ def build_origin_latency_ts_bundles(service_id: str, source: dict, hours: list[s
     When ``ottlb`` is absent the ttlb_* columns are written as a constant
     ``count=0`` + ``NULL`` percentile block so the schema stays uniform.
 
-    Idempotent — atomic tmp+rename under the per-service iceberg lock.
+    Idempotent — atomic tmp+rename under the per-service view lock.
     Returns the number of bundles written this call.
     """
 

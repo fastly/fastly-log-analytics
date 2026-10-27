@@ -11,32 +11,9 @@ import { QRCodeCanvas } from "qrcode.react"
 import { useSearchParams } from "next/navigation"
 import { parseAsStringLiteral, useQueryState } from "nuqs"
 import {
-  Activity,
-  AlertTriangle,
-  ArrowDown,
-  ArrowUp,
-  ArrowUpDown,
-  Check,
-  Copy,
-  ExternalLink,
-  Eye,
-  EyeOff,
-  FileJson,
-  History,
-  KeyRound,
-  Loader2,
-  Lock,
-  Pencil,
-  Plus,
-  QrCode,
-  RefreshCw,
-  ShieldAlert,
-  Sparkles,
-  Trash2,
-  UserPlus,
-  Wifi,
-  WifiOff,
-  X,
+  Activity, AlertTriangle, ArrowDown, ArrowUp, ArrowUpDown, Check, Copy, ExternalLink,
+  Eye, EyeOff, FileJson, History, KeyRound, Loader2, Lock, Pencil, Plus, QrCode,
+  RefreshCw, ShieldAlert, Sparkles, Trash2, UserPlus, Wifi, WifiOff, X,
 } from "lucide-react"
 
 import { Alert, AlertDescription } from "@/components/ui/alert"
@@ -45,45 +22,19 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
 import { CopyButton, PageHeader } from "@/components/ui/confirm-dialog"
-import {
-  Dialog,
-  DialogContent,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog"
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { DeployRemoteFrontendDialog, TeardownRemoteFrontendDialog } from "@/components/DeployRemoteFrontendDialog/DeployRemoteFrontendDialog"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Skeleton } from "@/components/ui/skeleton"
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table"
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { useMounted } from "@/hooks/useBootstrap"
 import { useAutoFlash, useCopyToClipboard, useNowMs, useOpenGeneration } from "@/hooks/useSSE"
 import { client, extractApiError, unwrapClient, queryKeys } from "@/lib/api"
-import {
-  cn,
-  formatDeterministicUTC,
-  formatDuration,
-  panelDialogContent,
-  panelDialogFooter,
-  panelDialogHeaderSolid,
-} from "@/lib/utils"
+import { cn, formatDeterministicUTC, formatDuration, panelDialogContent, panelDialogFooter, panelDialogHeaderSolid } from "@/lib/utils"
 import type { ServiceConfig, Simplify, WithRequired, WithRequiredNullable } from "@/types/api"
 import type { components } from "@/types/api.generated"
 import Loading from "./loading"
@@ -112,7 +63,6 @@ type ShareServiceWire = components['schemas']['ShareServiceEntry']
 type ShareStatusWire = components['schemas']['ShareStatusResponse']
 
 export type Invite = WithRequired<InviteWire, 'id' | 'name' | 'email'>
-
 export type ShareSession = components['schemas']['ShareSessionRecord']
 export type AuditLog = components['schemas']['ShareAuditLogRow']
 
@@ -133,9 +83,7 @@ export type ShareStatus = Simplify<
 >
 
 type SortDir = 'asc' | 'desc'
-
 type SortValue = string | number | null | undefined
-
 export type SortAccessors<T> = Record<string, (row: T) => SortValue>
 
 interface TableSort<T> {
@@ -182,10 +130,7 @@ export function useTableSort<T>(
         const bv = accessor(y.row)
         const aMissing = isMissing(av)
         const bMissing = isMissing(bv)
-        if (aMissing || bMissing) {
-          if (aMissing && bMissing) return x.i - y.i
-          return aMissing ? 1 : -1
-        }
+        if (aMissing || bMissing) return aMissing && bMissing ? x.i - y.i : aMissing ? 1 : -1
         const c = compareValues(av, bv)
         return c !== 0 ? c * factor : x.i - y.i
       })
@@ -203,15 +148,7 @@ interface SortableHeadProps extends Omit<React.ComponentProps<'th'>, 'onClick'> 
   onSort: (key: string) => void
 }
 
-export function SortableHead({
-  label,
-  sortKey,
-  activeKey,
-  dir,
-  onSort,
-  className,
-  ...thProps
-}: SortableHeadProps) {
+export function SortableHead({ label, sortKey, activeKey, dir, onSort, className, ...thProps }: SortableHeadProps) {
   const active = activeKey === sortKey
   const ariaSort = active ? (dir === 'asc' ? 'ascending' : 'descending') : 'none'
   return (
@@ -224,11 +161,7 @@ export function SortableHead({
         <span className="truncate">{label}</span>
         <span className="ml-auto flex items-center shrink-0">
           {active ? (
-            dir === 'asc' ? (
-              <ArrowUp className="h-3.5 w-3.5" />
-            ) : (
-              <ArrowDown className="h-3.5 w-3.5" />
-            )
+            dir === 'asc' ? <ArrowUp className="h-3.5 w-3.5" /> : <ArrowDown className="h-3.5 w-3.5" />
           ) : (
             <ArrowUpDown className="h-3.5 w-3.5 opacity-0 group-hover/sort:opacity-50 transition-opacity" />
           )}
@@ -245,24 +178,16 @@ interface SharingControlPanelProps {
 }
 
 type SharingMode = 'hostname' | 'ip'
-
 const IPV4_RE = /^(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?$/
 
 function buildEndpoint(raw: string): string {
   const trimmed = raw.trim()
   if (!trimmed) return ''
-  // If the user already typed a scheme, trust it; otherwise prepend https://.
   return /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`
 }
 
 export function SharingControlPanel({ status, onRefresh, onError }: SharingControlPanelProps) {
   const { busy, run } = useShareMutation(onError, onRefresh)
-  // /admin/share's share_status is dehydrated into the SSR HTML, so any value
-  // that ticks down by the second drifts between the server render and the
-  // (slightly later) first client render → React #418. This gates the two
-  // live counters below — telemetry uptime and the rate-limit lockout
-  // countdown — so server HTML and first client render agree; the live values
-  // fill in right after mount. Sibling to formatDeterministicUTC's fix in lib/date.ts.
   const mounted = useMounted()
   const [mode, setMode] = React.useState<SharingMode>('hostname')
   const [hostnameDraft, setHostnameValue] = React.useState('')
@@ -270,23 +195,17 @@ export function SharingControlPanel({ status, onRefresh, onError }: SharingContr
 
   const searchParams = useSearchParams()
   const activeServiceId = searchParams?.get('service')
-  const activeService = React.useMemo(() => {
-    return status?.services?.find((s) => s.service_id === activeServiceId)
-  }, [status?.services, activeServiceId])
+  const activeService = React.useMemo(
+    () => status?.services?.find((s) => s.service_id === activeServiceId),
+    [status?.services, activeServiceId],
+  )
 
-  // An empty field shows the service's saved sharing domain (derived, not copied into state).
   const hostnameValue = hostnameDraft || activeService?.sharing_domain || ''
-  // Editable copy of the global concurrent-analyst cap. `capDraft` is null
-  // while the input mirrors the server value; once the admin types it holds
-  // their edit. Deriving the displayed value during render (rather than syncing
-  // via an effect) means a refresh that brings a new server value is reflected
-  // automatically whenever the field isn't being edited.
   const [capDraft, setCapDraft] = React.useState<string | null>(null)
   const [capBusy, setCapBusy] = React.useState(false)
   const serverCap = status?.max_concurrent_sessions
   const capValue = capDraft ?? (serverCap != null ? String(serverCap) : '')
   const capDirty = capDraft != null && capDraft !== String(serverCap ?? '')
-
   const sharingActive = !!status?.sharing_active
 
   const handleStart = () => {
@@ -294,37 +213,23 @@ export function SharingControlPanel({ status, onRefresh, onError }: SharingContr
     const raw = mode === 'hostname' ? hostnameValue : ipValue
     const publicEndpoint = buildEndpoint(raw)
     if (!publicEndpoint) {
-      onError(
-        mode === 'hostname'
-          ? 'Enter a hostname (e.g. logs.example.com).'
-          : 'Enter an IP address (e.g. 203.0.113.42:8443).',
-      )
+      onError(mode === 'hostname' ? 'Enter a hostname (e.g. logs.example.com).' : 'Enter an IP address (e.g. 203.0.113.42:8443).')
       return
     }
     if (mode === 'ip' && !IPV4_RE.test(raw.trim())) {
       onError('Expected an IPv4 address, optionally with a port (e.g. 203.0.113.42:8443).')
       return
     }
-    return run(() =>
-      client.POST('/api/admin/share/start', {
-        body: {
-          public_endpoint: publicEndpoint,
-          forward_port: 3000,
-        },
-      }),
-    )
+    return run(() => client.POST('/api/admin/share/start', { body: { public_endpoint: publicEndpoint, forward_port: 3000 } }))
   }
 
   const handleStop = () => run(() => client.POST('/api/admin/share/stop', {}))
-
   const handlePanic = () => {
     if (!confirm('Sever ALL remote access immediately? This boots every analyst and stops sharing.')) return
     run(() => client.POST('/api/admin/share/panic', {}))
   }
-
   const handlePreviewInNewTab = () => {
-    if (!status?.public_url) return
-    window.open(`${status.public_url}/share-login`, '_blank', 'noopener,noreferrer')
+    if (status?.public_url) window.open(`${status.public_url}/share-login`, '_blank', 'noopener,noreferrer')
   }
 
   const handleSaveCap = async () => {
@@ -336,13 +241,8 @@ export function SharingControlPanel({ status, onRefresh, onError }: SharingContr
     }
     setCapBusy(true)
     try {
-      await unwrapClient(
-        client.PATCH('/api/admin/share/settings', {
-          body: { max_concurrent_analyst_sessions: n },
-        }),
-      )
+      await unwrapClient(client.PATCH('/api/admin/share/settings', { body: { max_concurrent_analyst_sessions: n } }))
       await onRefresh()
-      // Drop back to mirroring the (now-updated) server value.
       setCapDraft(null)
     } catch (e) {
       onError(extractApiError(e))
@@ -352,60 +252,29 @@ export function SharingControlPanel({ status, onRefresh, onError }: SharingContr
   }
 
   return (
-    <section
-      className="rounded-lg border bg-card p-4 space-y-3"
-      data-testid="admin-share-control-panel"
-    >
+    <section className="rounded-lg border bg-card p-4 space-y-3" data-testid="admin-share-control-panel">
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2">
-          {sharingActive ? (
-            <Wifi className="h-4 w-4 text-emerald-500" />
-          ) : (
-            <WifiOff className="h-4 w-4 text-muted-foreground" />
-          )}
+          {sharingActive ? <Wifi className="h-4 w-4 text-emerald-500" /> : <WifiOff className="h-4 w-4 text-muted-foreground" />}
           <h3 className="font-semibold text-sm">Sharing</h3>
-          <Badge
-            variant={sharingActive ? 'default' : 'secondary'}
-            data-testid="admin-share-status-badge"
-          >
+          <Badge variant={sharingActive ? 'default' : 'secondary'} data-testid="admin-share-status-badge">
             {sharingActive ? 'ACTIVE' : 'OFF'}
           </Badge>
         </div>
         <div className="flex items-center gap-2">
           {sharingActive ? (
             <>
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={handleStop}
-                disabled={busy}
-                data-testid="admin-share-stop-btn"
-              >
+              <Button size="sm" variant="outline" onClick={handleStop} disabled={busy} data-testid="admin-share-stop-btn">
                 {busy ? <Loader2 className="h-3 w-3 mr-1 animate-spin" /> : null}
                 {busy ? 'Stopping…' : 'Stop'}
               </Button>
-              <Button
-                size="sm"
-                variant="destructive"
-                onClick={handlePanic}
-                disabled={busy}
-                data-testid="admin-share-panic-btn"
-              >
-                {busy ? (
-                  <Loader2 className="h-3 w-3 mr-1 animate-spin" />
-                ) : (
-                  <X className="h-4 w-4 mr-1" />
-                )}
+              <Button size="sm" variant="destructive" onClick={handlePanic} disabled={busy} data-testid="admin-share-panic-btn">
+                {busy ? <Loader2 className="h-3 w-3 mr-1 animate-spin" /> : <X className="h-4 w-4 mr-1" />}
                 {busy ? 'Severing…' : 'Sever All Access'}
               </Button>
             </>
           ) : (
-            <Button
-              size="sm"
-              onClick={handleStart}
-              disabled={busy}
-              data-testid="admin-share-start-btn"
-            >
+            <Button size="sm" onClick={handleStart} disabled={busy} data-testid="admin-share-start-btn">
               {busy && <Loader2 className="h-3 w-3 mr-1 animate-spin" />}
               {busy ? 'Starting…' : 'Start'}
             </Button>
@@ -417,14 +286,7 @@ export function SharingControlPanel({ status, onRefresh, onError }: SharingContr
         <div className="flex items-center gap-2 text-xs text-muted-foreground">
           <span>Public URL:</span>
           <span className="font-mono truncate">{status.public_url}</span>
-          <Button
-            type="button"
-            size="sm"
-            variant="ghost"
-            onClick={handlePreviewInNewTab}
-            title="Open share login in a new incognito-style tab"
-            className="h-6 px-2 gap-1"
-          >
+          <Button type="button" size="sm" variant="ghost" onClick={handlePreviewInNewTab} title="Open share login in a new incognito-style tab" className="h-6 px-2 gap-1">
             <ExternalLink className="h-3 w-3" />
             Preview
           </Button>
@@ -450,20 +312,14 @@ export function SharingControlPanel({ status, onRefresh, onError }: SharingContr
         <div className="flex items-center gap-3 text-[11px] text-muted-foreground border-t pt-2 mt-2">
           <span className="flex items-center gap-1">
             <Activity className="h-3 w-3" />
-            {/* Live seconds counter — placeholder until mounted (see #418 note above). */}
-            Uptime:{' '}
-            <span className="font-mono">
-              {mounted ? formatDuration(status.telemetry.current_uptime_s) : '—'}
-            </span>
+            Uptime: <span className="font-mono">{mounted ? formatDuration(status.telemetry.current_uptime_s) : '—'}</span>
           </span>
           <span>
-            Heartbeat 401s since boot:{' '}
-            <span className="font-mono">{status.telemetry.heartbeat_unauth_count}</span>
+            Heartbeat 401s since boot: <span className="font-mono">{status.telemetry.heartbeat_unauth_count}</span>
           </span>
           {(status.telemetry.tunnel_uptime_history?.length ?? 0) > 0 && (
             <span>
-              Prior sessions:{' '}
-              <span className="font-mono">{status.telemetry.tunnel_uptime_history?.length}</span>
+              Prior sessions: <span className="font-mono">{status.telemetry.tunnel_uptime_history?.length}</span>
             </span>
           )}
         </div>
@@ -475,8 +331,6 @@ export function SharingControlPanel({ status, onRefresh, onError }: SharingContr
             <Lock className="h-3 w-3" />
             Failed login activity
           </div>
-          {/* remaining_s ticks down 1/sec; gate it so SSR HTML == first client
-              render (see #418 note above), then show the live value post-mount. */}
           {status?.rate_limits?.lockouts?.map((l) => (
             <div key={`lo-${l.ip}`} className="font-mono">
               {l.ip} — locked out for {mounted ? l.remaining_s : '—'}s
@@ -494,19 +348,8 @@ export function SharingControlPanel({ status, onRefresh, onError }: SharingContr
         <div className="space-y-3 border-t pt-3 mt-2">
           <fieldset className="space-y-2">
             <legend className="text-sm font-medium">Sharing mode</legend>
-
-            <label
-              htmlFor="mode-hostname"
-              className="flex items-start gap-2 cursor-pointer rounded-md border p-2 hover:bg-muted/50"
-            >
-              <input
-                type="radio"
-                id="mode-hostname"
-                name="sharing-mode"
-                className="mt-1"
-                checked={mode === 'hostname'}
-                onChange={() => setMode('hostname')}
-              />
+            <label htmlFor="mode-hostname" className="flex items-start gap-2 cursor-pointer rounded-md border p-2 hover:bg-muted/50">
+              <input type="radio" id="mode-hostname" name="sharing-mode" className="mt-1" checked={mode === 'hostname'} onChange={() => setMode('hostname')} />
               <div className="flex-1 space-y-1">
                 <div className="text-sm font-medium">Your own hostname</div>
                 <p className="text-xs text-muted-foreground">
@@ -515,29 +358,13 @@ export function SharingControlPanel({ status, onRefresh, onError }: SharingContr
                   forward port reachable from the internet.
                 </p>
                 {mode === 'hostname' && (
-                  <Input
-                    id="hostname-value"
-                    placeholder="logs.example.com"
-                    value={hostnameValue}
-                    onChange={(e) => setHostnameValue(e.target.value)}
-                    className="mt-1"
-                  />
+                  <Input id="hostname-value" placeholder="logs.example.com" value={hostnameValue} onChange={(e) => setHostnameValue(e.target.value)} className="mt-1" />
                 )}
               </div>
             </label>
 
-            <label
-              htmlFor="mode-ip"
-              className="flex items-start gap-2 cursor-pointer rounded-md border p-2 hover:bg-muted/50"
-            >
-              <input
-                type="radio"
-                id="mode-ip"
-                name="sharing-mode"
-                className="mt-1"
-                checked={mode === 'ip'}
-                onChange={() => setMode('ip')}
-              />
+            <label htmlFor="mode-ip" className="flex items-start gap-2 cursor-pointer rounded-md border p-2 hover:bg-muted/50">
+              <input type="radio" id="mode-ip" name="sharing-mode" className="mt-1" checked={mode === 'ip'} onChange={() => setMode('ip')} />
               <div className="flex-1 space-y-1">
                 <div className="text-sm font-medium">Your public IP address</div>
                 <p className="text-xs text-muted-foreground">
@@ -547,13 +374,7 @@ export function SharingControlPanel({ status, onRefresh, onError }: SharingContr
                   or a reverse proxy.
                 </p>
                 {mode === 'ip' && (
-                  <Input
-                    id="ip-value"
-                    placeholder="203.0.113.42:8443"
-                    value={ipValue}
-                    onChange={(e) => setIpValue(e.target.value)}
-                    className="mt-1"
-                  />
+                  <Input id="ip-value" placeholder="203.0.113.42:8443" value={ipValue} onChange={(e) => setIpValue(e.target.value)} className="mt-1" />
                 )}
               </div>
             </label>
@@ -574,14 +395,7 @@ export function SharingControlPanel({ status, onRefresh, onError }: SharingContr
           </p>
         </div>
         <div className="flex items-center gap-2 shrink-0">
-          <Input
-            id="max-concurrent-analysts"
-            type="number"
-            min={1}
-            value={capValue}
-            onChange={(e) => setCapDraft(e.target.value)}
-            className="w-20"
-          />
+          <Input id="max-concurrent-analysts" type="number" min={1} value={capValue} onChange={(e) => setCapDraft(e.target.value)} className="w-20" />
           <Button size="sm" variant="outline" onClick={handleSaveCap} disabled={capBusy || !capDirty}>
             {capBusy ? <Loader2 className="h-3 w-3 mr-1 animate-spin" /> : null}
             {capBusy ? 'Saving…' : 'Save'}
@@ -605,18 +419,13 @@ export function SessionsPanel({ status, onRefresh, onError }: SessionsPanelProps
     () => new Map((status?.rate_limits?.lockouts || []).map((l) => [l.ip, l])),
     [status?.rate_limits?.lockouts],
   )
-
   const failuresByIp = React.useMemo(
     () => new Map((status?.rate_limits?.failures || []).map((f) => [f.ip, f])),
     [status?.rate_limits?.failures],
   )
 
   const handleBootSession = (sid: string) =>
-    run(() =>
-      client.POST('/api/admin/share/sessions/{session_id}/boot', {
-        params: { path: { session_id: sid } },
-      }),
-    )
+    run(() => client.POST('/api/admin/share/sessions/{session_id}/boot', { params: { path: { session_id: sid } } }))
 
   const sessions = status?.sessions || []
 
@@ -675,10 +484,7 @@ export function SessionsPanel({ status, onRefresh, onError }: SessionsPanelProps
                 </Badge>
               )}
               {!lockoutsByIp.has(s.ip_address) && failuresByIp.has(s.ip_address) && (
-                <Badge
-                  variant="outline"
-                  className="text-[10px] text-amber-700 dark:text-amber-400"
-                >
+                <Badge variant="outline" className="text-[10px] text-amber-700 dark:text-amber-400">
                   {failuresByIp.get(s.ip_address)?.count} fail
                 </Badge>
               )}
@@ -686,19 +492,11 @@ export function SessionsPanel({ status, onRefresh, onError }: SessionsPanelProps
           )
         },
       },
-      {
-        id: 'last_active_time',
-        cell: ({ row }) => formatDeterministicUTC(row.original.last_active_time),
-      },
+      { id: 'last_active_time', cell: ({ row }) => formatDeterministicUTC(row.original.last_active_time) },
       {
         id: 'action',
         cell: ({ row }) => (
-          <Button
-            size="sm"
-            variant="ghost"
-            onClick={() => handleBootSession(row.original.session_id)}
-            disabled={busy}
-          >
+          <Button size="sm" variant="ghost" onClick={() => handleBootSession(row.original.session_id)} disabled={busy}>
             Boot
           </Button>
         ),
@@ -708,17 +506,10 @@ export function SessionsPanel({ status, onRefresh, onError }: SessionsPanelProps
     [lockoutsByIp, failuresByIp, busy],
   )
 
-  const table = useReactTable({
-    data: sorted,
-    columns,
-    getCoreRowModel: getCoreRowModel(),
-  })
+  const table = useReactTable({ data: sorted, columns, getCoreRowModel: getCoreRowModel() })
 
   return (
-    <section
-      className="rounded-lg border bg-card p-4 space-y-3"
-      data-testid="admin-share-sessions-panel"
-    >
+    <section className="rounded-lg border bg-card p-4 space-y-3" data-testid="admin-share-sessions-panel">
       <h4 className="text-sm font-semibold">Active sessions</h4>
       <Table>
         <TableHeader>
@@ -736,13 +527,7 @@ export function SessionsPanel({ status, onRefresh, onError }: SessionsPanelProps
               {row.getVisibleCells().map((cell) => (
                 <TableCell
                   key={cell.id}
-                  className={
-                    cell.column.id === 'ip'
-                      ? 'text-xs font-mono'
-                      : cell.column.id === 'action'
-                        ? 'text-right'
-                        : 'text-xs'
-                  }
+                  className={cell.column.id === 'ip' ? 'text-xs font-mono' : cell.column.id === 'action' ? 'text-right' : 'text-xs'}
                 >
                   {flexRender(cell.column.columnDef.cell, cell.getContext())}
                 </TableCell>
@@ -751,9 +536,7 @@ export function SessionsPanel({ status, onRefresh, onError }: SessionsPanelProps
           ))}
           {!sessions.length && (
             <TableRow>
-              <TableCell colSpan={5} className="text-center text-xs text-muted-foreground">
-                No active sessions.
-              </TableCell>
+              <TableCell colSpan={5} className="text-center text-xs text-muted-foreground">No active sessions.</TableCell>
             </TableRow>
           )}
         </TableBody>
@@ -784,8 +567,6 @@ interface CreateInviteDialogProps {
 }
 
 export function CreateInviteDialog(props: CreateInviteDialogProps) {
-  // Parent gates mounting on `open` so each open spins up a fresh form;
-  // returning null when closed avoids setState-in-effect resets.
   if (!props.open) return null
   return <CreateInviteDialogInner {...props} />
 }
@@ -804,26 +585,13 @@ const createInviteSchema = z.object({
   oauthProvider: z.string(),
 })
 
-function CreateInviteDialogInner({
-  open,
-  onOpenChange,
-  services,
-  onCreated,
-}: CreateInviteDialogProps) {
+function CreateInviteDialogInner({ open, onOpenChange, services, onCreated }: CreateInviteDialogProps) {
   const form = useForm<z.infer<typeof createInviteSchema>>({
     resolver: zodResolver(createInviteSchema),
     defaultValues: {
-      name: '',
-      email: '',
-      passcode: '',
-      duration: 24,
-      ipWhitelist: '',
-      maskIps: false,
-      allowConcurrent: false,
-      queryWindow: 0,
-      serviceIds: [],
-      authMode: 'passcode',
-      oauthProvider: '',
+      name: '', email: '', passcode: '', duration: 24, ipWhitelist: '',
+      maskIps: false, allowConcurrent: false, queryWindow: 0, serviceIds: [],
+      authMode: 'passcode', oauthProvider: '',
     },
   })
   const [name, setNameState] = React.useState('')
@@ -857,13 +625,8 @@ function CreateInviteDialogInner({
   }
   const setAuthMode = (v: 'passcode' | 'oauth') => { setAuthModeState(v); form.setValue('authMode', v) }
   const setOauthProvider = (v: string) => { setOauthProviderState(v); form.setValue('oauthProvider', v) }
-  const [providers, setProviders] = React.useState<
-    Array<{ id: string; display_name: string; enabled: boolean }>
-  >([])
+  const [providers, setProviders] = React.useState<Array<{ id: string; display_name: string; enabled: boolean }>>([])
 
-  // Configured OIDC providers for the SSO auth-mode dropdown (admin surface —
-  // may include disabled providers so an admin can pre-create an invite). Empty
-  // unless the feature is configured; the OAuth toggle then stays unsubmittable.
   React.useEffect(() => {
     let cancelled = false
     ;(async () => {
@@ -874,9 +637,7 @@ function CreateInviteDialogInner({
         /* leave empty — OAuth mode just stays disabled */
       }
     })()
-    return () => {
-      cancelled = true
-    }
+    return () => { cancelled = true }
   }, [])
 
   const handleWordphrase = async () => {
@@ -895,10 +656,7 @@ function CreateInviteDialogInner({
       await unwrapClient(
         client.POST('/api/admin/share/invites', {
           body: {
-            name,
-            email,
-            // OAuth invites carry no passcode — the backend synthesizes an
-            // unguessable argon2id placeholder for the NOT NULL column.
+            name, email,
             ...(authMode === 'passcode' ? { passcode } : {}),
             auth_method: authMode,
             ...(authMode === 'oauth' ? { oauth_provider: oauthProvider } : {}),
@@ -920,18 +678,9 @@ function CreateInviteDialogInner({
     }
   }
 
-  // Require at least one authorized service: an invite with no services
-  // strands the analyst on "No service found" (bootstrap returns zero
-  // services), so block creation until one is picked. In OAuth mode the
-  // passcode requirement is dropped and a configured provider is required
-  // instead (design §5.1).
   const canSubmit =
-    !creating &&
-    !!name &&
-    !!email &&
-    serviceIds.length > 0 &&
+    !creating && !!name && !!email && serviceIds.length > 0 &&
     (authMode === 'passcode' ? !!passcode : !!oauthProvider)
-
   const providerLabel = providers.find((p) => p.id === oauthProvider)?.display_name ?? ''
 
   return (
@@ -945,178 +694,122 @@ function CreateInviteDialogInner({
         </DialogHeader>
 
         <div className="flex-1 overflow-y-auto min-h-0 px-6 py-4 space-y-3">
-          {error && (
-            <Alert variant="destructive">
-              <AlertDescription>{error}</AlertDescription>
-            </Alert>
-          )}
+          {error && <Alert variant="destructive"><AlertDescription>{error}</AlertDescription></Alert>}
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
             <div className="space-y-1">
               <Label htmlFor="invite-name" className="text-xs">Name</Label>
-              <Input
-                id="invite-name"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                placeholder="Jane Doe"
-              />
+              <Input id="invite-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="Jane Doe" />
             </div>
             <div className="space-y-1">
               <Label htmlFor="invite-email" className="text-xs">Email</Label>
-              <Input
-                id="invite-email"
-                type="email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                placeholder="jane@example.com"
-              />
+              <Input id="invite-email" type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="jane@example.com" />
               {authMode === 'oauth' && (
                 <p className="text-[11px] text-muted-foreground">
-                  The analyst must sign in with the {providerLabel || 'provider'} account for
-                  this exact address.
+                  The analyst must sign in with the {providerLabel || 'provider'} account for this exact address.
                 </p>
               )}
             </div>
 
-            {/* Auth-mode selector — a11y: fieldset+legend + role=radiogroup with
-                native radios for arrow-key traversal (design §5.4). */}
             <fieldset className="md:col-span-2 space-y-1">
               <legend className="text-xs font-medium">Sign-in method</legend>
               <div className="flex gap-6 pt-1" role="radiogroup" aria-label="Sign-in method">
                 <label className="flex items-center gap-2 text-sm cursor-pointer">
-                  <input
-                    type="radio"
-                    name="invite-auth-mode"
-                    value="passcode"
-                    checked={authMode === 'passcode'}
-                    onChange={() => setAuthMode('passcode')}
-                  />
+                  <input type="radio" name="invite-auth-mode" value="passcode" checked={authMode === 'passcode'} onChange={() => setAuthMode('passcode')} />
                   Passcode (local)
                 </label>
                 <label className="flex items-center gap-2 text-sm cursor-pointer">
-                  <input
-                    type="radio"
-                    name="invite-auth-mode"
-                    value="oauth"
-                    checked={authMode === 'oauth'}
-                    onChange={() => setAuthMode('oauth')}
-                  />
+                  <input type="radio" name="invite-auth-mode" value="oauth" checked={authMode === 'oauth'} onChange={() => setAuthMode('oauth')} />
                   SSO / OIDC
                 </label>
               </div>
             </fieldset>
 
             {authMode === 'passcode' && (
-            <div className="space-y-1 md:col-span-2">
-              <Label htmlFor="invite-passcode" className="text-xs">Passcode</Label>
-              <div className="flex items-center gap-2">
-                <Input
-                  id="invite-passcode"
-                  type={revealPasscode ? 'text' : 'password'}
-                  value={passcode}
-                  onChange={(e) => setPasscode(e.target.value)}
-                  placeholder="ocean-breeze-cabin-42"
-                />
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  aria-label={revealPasscode ? 'Hide passcode' : 'Reveal passcode'}
-                  onClick={() => setRevealPasscode((r) => !r)}
-                  title={revealPasscode ? 'Hide passcode' : 'Reveal passcode'}
-                >
-                  {revealPasscode ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-                </Button>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  onClick={handleWordphrase}
-                  className="gap-1"
-                >
-                  <Sparkles className="h-3 w-3" />
-                  Wordphrase
-                </Button>
+              <div className="space-y-1 md:col-span-2">
+                <Label htmlFor="invite-passcode" className="text-xs">Passcode</Label>
+                <div className="flex items-center gap-2">
+                  <Input
+                    id="invite-passcode"
+                    type={revealPasscode ? 'text' : 'password'}
+                    value={passcode}
+                    onChange={(e) => setPasscode(e.target.value)}
+                    placeholder="ocean-breeze-cabin-42"
+                  />
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    aria-label={revealPasscode ? 'Hide passcode' : 'Reveal passcode'}
+                    onClick={() => setRevealPasscode((r) => !r)}
+                    title={revealPasscode ? 'Hide passcode' : 'Reveal passcode'}
+                  >
+                    {revealPasscode ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                  </Button>
+                  <Button type="button" variant="outline" size="sm" onClick={handleWordphrase} className="gap-1">
+                    <Sparkles className="h-3 w-3" />
+                    Wordphrase
+                  </Button>
+                </div>
               </div>
-            </div>
             )}
 
             {authMode === 'oauth' && (
-            <div className="space-y-1 md:col-span-2">
-              <Label htmlFor="invite-oauth-provider" className="text-xs">Identity provider</Label>
-              {providers.length > 0 ? (
-                <Select value={oauthProvider} onValueChange={(v) => setOauthProvider(v ?? '')}>
-                  <SelectTrigger id="invite-oauth-provider">
-                    <SelectValue placeholder="Select a provider" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {providers.map((p) => (
-                      <SelectItem key={p.id} value={p.id}>
-                        {p.display_name}
-                        {!p.enabled ? ' (disabled)' : ''}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              ) : (
-                <>
-                  <Select disabled>
+              <div className="space-y-1 md:col-span-2">
+                <Label htmlFor="invite-oauth-provider" className="text-xs">Identity provider</Label>
+                {providers.length > 0 ? (
+                  <Select value={oauthProvider} onValueChange={(v) => setOauthProvider(v ?? '')}>
                     <SelectTrigger id="invite-oauth-provider">
-                      <SelectValue placeholder="No identity providers configured" />
+                      <SelectValue placeholder="Select a provider" />
                     </SelectTrigger>
-                    <SelectContent />
+                    <SelectContent>
+                      {providers.map((p) => (
+                        <SelectItem key={p.id} value={p.id}>
+                          {p.display_name}{!p.enabled ? ' (disabled)' : ''}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
                   </Select>
-                  <p className="text-xs text-muted-foreground">
-                    No identity providers configured — add one to the registry first.
-                  </p>
-                </>
-              )}
-            </div>
+                ) : (
+                  <>
+                    <Select disabled>
+                      <SelectTrigger id="invite-oauth-provider">
+                        <SelectValue placeholder="No identity providers configured" />
+                      </SelectTrigger>
+                      <SelectContent />
+                    </Select>
+                    <p className="text-xs text-muted-foreground">
+                      No identity providers configured — add one to the registry first.
+                    </p>
+                  </>
+                )}
+              </div>
             )}
             <div className="space-y-1">
               <Label htmlFor="invite-expiration" className="text-xs">Expiration</Label>
-              <Select
-                value={String(duration)}
-                onValueChange={(v) => setDuration(Number(v))}
-              >
-                <SelectTrigger id="invite-expiration">
-                  <SelectValue />
-                </SelectTrigger>
+              <Select value={String(duration)} onValueChange={(v) => setDuration(Number(v))}>
+                <SelectTrigger id="invite-expiration"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   {DURATION_OPTIONS.map((opt) => (
-                    <SelectItem key={opt.value} value={String(opt.value)}>
-                      {opt.label}
-                    </SelectItem>
+                    <SelectItem key={opt.value} value={String(opt.value)}>{opt.label}</SelectItem>
                   ))}
                 </SelectContent>
               </Select>
             </div>
             <div className="space-y-1">
               <Label htmlFor="invite-query-window" className="text-xs">Query window</Label>
-              <Select
-                value={String(queryWindow)}
-                onValueChange={(v) => setQueryWindow(Number(v))}
-              >
-                <SelectTrigger id="invite-query-window">
-                  <SelectValue />
-                </SelectTrigger>
+              <Select value={String(queryWindow)} onValueChange={(v) => setQueryWindow(Number(v))}>
+                <SelectTrigger id="invite-query-window"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   {QUERY_WINDOW_OPTIONS.map((opt) => (
-                    <SelectItem key={opt.value} value={String(opt.value)}>
-                      {opt.label}
-                    </SelectItem>
+                    <SelectItem key={opt.value} value={String(opt.value)}>{opt.label}</SelectItem>
                   ))}
                 </SelectContent>
               </Select>
             </div>
             <div className="space-y-1 md:col-span-2">
               <Label htmlFor="invite-ipwl" className="text-xs">IP whitelist (optional)</Label>
-              <Input
-                id="invite-ipwl"
-                value={ipWhitelist}
-                onChange={(e) => setIpWhitelist(e.target.value)}
-                placeholder="192.168.1.50, 10.0.0.0/24"
-              />
+              <Input id="invite-ipwl" value={ipWhitelist} onChange={(e) => setIpWhitelist(e.target.value)} placeholder="192.168.1.50, 10.0.0.0/24" />
             </div>
             <div className="md:col-span-2 space-y-2">
               <Label className="text-xs">Authorized services <span className="text-destructive">*</span></Label>
@@ -1124,19 +817,12 @@ function CreateInviteDialogInner({
                 {services.map((svc) => {
                   const checked = serviceIds.includes(svc.service_id)
                   return (
-                    <label
-                      key={svc.service_id}
-                      className="flex items-center gap-2 text-sm cursor-pointer"
-                    >
+                    <label key={svc.service_id} className="flex items-center gap-2 text-sm cursor-pointer">
                       <Checkbox
                         checked={checked}
-                        onCheckedChange={(v) => {
-                          setServiceIds((prev) =>
-                            v
-                              ? [...prev, svc.service_id]
-                              : prev.filter((id) => id !== svc.service_id),
-                          )
-                        }}
+                        onCheckedChange={(v) =>
+                          setServiceIds((prev) => v ? [...prev, svc.service_id] : prev.filter((id) => id !== svc.service_id))
+                        }
                       />
                       <span className="truncate">{svc.name}</span>
                     </label>
@@ -1149,28 +835,16 @@ function CreateInviteDialogInner({
                 )}
               </div>
               {!!services.length && serviceIds.length === 0 && (
-                <p className="text-xs text-muted-foreground">
-                  Select at least one service this analyst can view.
-                </p>
+                <p className="text-xs text-muted-foreground">Select at least one service this analyst can view.</p>
               )}
             </div>
             <div className="md:col-span-2 flex items-center gap-2">
-              <Checkbox
-                id="invite-mask-ips"
-                checked={maskIps}
-                onCheckedChange={(v) => setMaskIps(!!v)}
-              />
-              <Label htmlFor="invite-mask-ips" className="text-xs cursor-pointer">
-                Anonymize client IPs (mask PII)
-              </Label>
+              <Checkbox id="invite-mask-ips" checked={maskIps} onCheckedChange={(v) => setMaskIps(!!v)} />
+              <Label htmlFor="invite-mask-ips" className="text-xs cursor-pointer">Anonymize client IPs (mask PII)</Label>
             </div>
             <div className="md:col-span-2 space-y-1">
               <div className="flex items-center gap-2">
-                <Checkbox
-                  id="invite-allow-concurrent"
-                  checked={allowConcurrent}
-                  onCheckedChange={(v) => setAllowConcurrent(!!v)}
-                />
+                <Checkbox id="invite-allow-concurrent" checked={allowConcurrent} onCheckedChange={(v) => setAllowConcurrent(!!v)} />
                 <Label htmlFor="invite-allow-concurrent" className="text-xs cursor-pointer">
                   Allow multiple people to use this link at the same time
                 </Label>
@@ -1187,9 +861,7 @@ function CreateInviteDialogInner({
         </div>
 
         <DialogFooter className="px-6 py-3 border-t bg-muted/10 shrink-0">
-          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={creating}>
-            Cancel
-          </Button>
+          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={creating}>Cancel</Button>
           <Button onClick={handleSubmit} disabled={!canSubmit}>
             {creating && <Loader2 className="h-3 w-3 mr-1 animate-spin" />}
             Create invite
@@ -1317,14 +989,9 @@ function InviteAnalystDialogBody({ service, open, onOpenChange }: InviteAnalystD
   const handleCopyJson = () => {
     if (!result) return
     const config: Record<string, string> = {
-      name: result.name,
-      service_id: result.service_id,
-      fos_bucket: result.fos_bucket,
-      fos_region: result.fos_region,
-      fos_endpoint: result.fos_endpoint,
-      fos_prefix: result.fos_prefix,
-      access_key_id: result.access_key_id,
-      secret_key: result.secret_key,
+      name: result.name, service_id: result.service_id, fos_bucket: result.fos_bucket,
+      fos_region: result.fos_region, fos_endpoint: result.fos_endpoint, fos_prefix: result.fos_prefix,
+      access_key_id: result.access_key_id, secret_key: result.secret_key,
     }
     if (result.cdn_url) config.cdn_url = result.cdn_url
     if (result.cdn_service_id) config.cdn_service_id = result.cdn_service_id
@@ -1536,16 +1203,13 @@ export function InvitationsPanel({ status, onRefresh, onError, onViewAuditLogs }
     onError('')
     try {
       await unwrapClient(client.PATCH('/api/admin/share/invites/{invite_id}/services', {
-        params: { path: { invite_id: inviteId } },
-        body: { service_ids: editingServicesDraft },
+        params: { path: { invite_id: inviteId } }, body: { service_ids: editingServicesDraft },
       }))
       await unwrapClient(client.PATCH('/api/admin/share/invites/{invite_id}/pii', {
-        params: { path: { invite_id: inviteId } },
-        body: { mask_ips: editingMaskIps },
+        params: { path: { invite_id: inviteId } }, body: { mask_ips: editingMaskIps },
       }))
       await unwrapClient(client.PATCH('/api/admin/share/invites/{invite_id}/sharing', {
-        params: { path: { invite_id: inviteId } },
-        body: { allow_concurrent_sessions: editingAllowConcurrent },
+        params: { path: { invite_id: inviteId } }, body: { allow_concurrent_sessions: editingAllowConcurrent },
       }))
       setEditingServicesFor(null)
       await onRefresh()
@@ -1570,8 +1234,7 @@ export function InvitationsPanel({ status, onRefresh, onError, onViewAuditLogs }
     setPasscodeError(null)
     try {
       await unwrapClient(client.PATCH('/api/admin/share/invites/{invite_id}/passcode', {
-        params: { path: { invite_id: inviteId } },
-        body: { passcode: parsed.data },
+        params: { path: { invite_id: inviteId } }, body: { passcode: parsed.data },
       }))
       setEditingPasscodeFor(null)
       setPasscodeDraft('')
@@ -1600,11 +1263,7 @@ export function InvitationsPanel({ status, onRefresh, onError, onViewAuditLogs }
     ],
     [],
   )
-  const inviteTable = useReactTable({
-    data: sorted,
-    columns: inviteColumns,
-    getCoreRowModel: getCoreRowModel(),
-  })
+  const inviteTable = useReactTable({ data: sorted, columns: inviteColumns, getCoreRowModel: getCoreRowModel() })
 
   return (
     <section className="rounded-lg border bg-card p-4 space-y-3" data-testid="admin-share-invites-panel">
@@ -1778,10 +1437,7 @@ export function InvitationsPanel({ status, onRefresh, onError, onViewAuditLogs }
                             type={passcodeVisible ? 'text' : 'password'}
                             className="flex h-8 w-full rounded border border-input bg-background px-2 py-1 text-xs"
                             value={passcodeDraft}
-                            onChange={(e) => {
-                              setPasscodeDraft(e.target.value)
-                              setPasscodeError(null)
-                            }}
+                            onChange={(e) => { setPasscodeDraft(e.target.value); setPasscodeError(null) }}
                             placeholder="e.g. ocean-breeze-cabin-42"
                             autoFocus
                           />
@@ -1817,9 +1473,7 @@ export function InvitationsPanel({ status, onRefresh, onError, onViewAuditLogs }
           })}
           {!invites.length && (
             <TableRow>
-              <TableCell colSpan={6} className="text-center text-xs text-muted-foreground">
-                No invitations yet.
-              </TableCell>
+              <TableCell colSpan={6} className="text-center text-xs text-muted-foreground">No invitations yet.</TableCell>
             </TableRow>
           )}
         </TableBody>
@@ -1838,40 +1492,15 @@ const shareTabParser = parseAsStringLiteral(SHARE_TABS)
   .withDefault('invites')
   .withOptions({ clearOnDefault: true, history: 'replace', shallow: true })
 
-
 const EVENT_TYPE_FILTER_OPTIONS = [
-  'ALL',
-  'LOGIN_SUCCESS',
-  'LOGIN_FAIL',
-  'LOCKOUT',
-  'INVITE_CREATE',
-  'INVITE_REVOKE',
-  'INVITE_DELETE',
-  'INVITE_CLAIMED',
-  'SESSION_BOOT',
-  'SESSION_TIMEOUT',
-  'TOS_ACCEPTED',
-  'TUNNEL_START',
-  'TUNNEL_RESUMED',
-  'SHARE_START',
-  'SHARE_STOP',
-  'PANIC_TRIGGERED',
-  'BACKUP_EXPORTED',
-  'BACKUP_IMPORTED',
-  'CLAIM_FAIL',
-  'OAUTH_AUTH_INIT',
-  'OAUTH_CALLBACK_FAIL',
-  'OAUTH_VERIFY_FAIL',
-  'OAUTH_INVITE_NOT_FOUND',
-  'LOGIN_SUCCESS_OAUTH',
+  'ALL', 'LOGIN_SUCCESS', 'LOGIN_FAIL', 'LOCKOUT', 'INVITE_CREATE', 'INVITE_REVOKE',
+  'INVITE_DELETE', 'INVITE_CLAIMED', 'SESSION_BOOT', 'SESSION_TIMEOUT', 'TOS_ACCEPTED',
+  'TUNNEL_START', 'TUNNEL_RESUMED', 'SHARE_START', 'SHARE_STOP', 'PANIC_TRIGGERED',
+  'BACKUP_EXPORTED', 'BACKUP_IMPORTED', 'CLAIM_FAIL', 'OAUTH_AUTH_INIT',
+  'OAUTH_CALLBACK_FAIL', 'OAUTH_VERIFY_FAIL', 'OAUTH_INVITE_NOT_FOUND', 'LOGIN_SUCCESS_OAUTH',
 ]
 
-type AuditFilters = {
-  event_type: string
-  email: string
-  since: string
-  until: string
-}
+type AuditFilters = { event_type: string; email: string; since: string; until: string }
 
 interface AuditLogPanelProps {
   status: ShareStatus | null
@@ -1882,26 +1511,17 @@ interface AuditLogPanelProps {
 
 export function AuditLogPanel({ status, onError, initialEmailFilter, onClearInitialFilter }: AuditLogPanelProps) {
   const [filters, setFilters] = React.useState<AuditFilters>({
-    event_type: 'ALL',
-    email: initialEmailFilter || '',
-    since: '',
-    until: '',
+    event_type: 'ALL', email: initialEmailFilter || '', since: '', until: '',
   })
   const [appliedFilters, setAppliedFilters] = React.useState<AuditFilters | null>(() =>
-    initialEmailFilter
-      ? { event_type: 'ALL', email: initialEmailFilter, since: '', until: '' }
-      : null,
+    initialEmailFilter ? { event_type: 'ALL', email: initialEmailFilter, since: '', until: '' } : null,
   )
 
   const [seenInitialEmail, setSeenInitialEmail] = React.useState(initialEmailFilter)
   if (initialEmailFilter !== seenInitialEmail) {
     setSeenInitialEmail(initialEmailFilter)
     setFilters((f) => ({ ...f, email: initialEmailFilter || '' }))
-    setAppliedFilters(
-      initialEmailFilter
-        ? { event_type: 'ALL', email: initialEmailFilter, since: '', until: '' }
-        : null,
-    )
+    setAppliedFilters(initialEmailFilter ? { event_type: 'ALL', email: initialEmailFilter, since: '', until: '' } : null)
   }
 
   const auditQuery = useQuery({
@@ -1912,17 +1532,11 @@ export function AuditLogPanel({ status, onError, initialEmailFilter, onClearInit
       onError('')
       try {
         const params: Record<string, string | number> = { limit: 200 }
-        if (appliedFilters?.event_type && appliedFilters.event_type !== 'ALL') {
-          params.event_type = appliedFilters.event_type
-        }
+        if (appliedFilters?.event_type && appliedFilters.event_type !== 'ALL') params.event_type = appliedFilters.event_type
         if (appliedFilters?.email) params.email = appliedFilters.email
         if (appliedFilters?.since) params.since = appliedFilters.since
         if (appliedFilters?.until) params.until = appliedFilters.until
-        const data = await unwrapClient(
-          client.GET('/api/admin/share/audit-logs', {
-            params: { query: params },
-          }),
-        )
+        const data = await unwrapClient(client.GET('/api/admin/share/audit-logs', { params: { query: params } }))
         return data?.audit_logs || []
       } catch (e) {
         onError(extractApiError(e))
@@ -1971,38 +1585,15 @@ export function AuditLogPanel({ status, onError, initialEmailFilter, onClearInit
 
   const auditColumns = React.useMemo<ColumnDef<AuditLog>[]>(
     () => [
-      {
-        id: 'timestamp',
-        cell: ({ row }) => formatDeterministicUTC(row.original.timestamp),
-      },
-      {
-        id: 'event_type',
-        cell: ({ row }) => (
-          <Badge variant="outline" className="text-[10px]">
-            {row.original.event_type}
-          </Badge>
-        ),
-      },
-      {
-        id: 'email',
-        cell: ({ row }) => row.original.email || '—',
-      },
-      {
-        id: 'ip_address',
-        cell: ({ row }) => row.original.ip_address || '—',
-      },
-      {
-        id: 'details',
-        cell: ({ row }) => row.original.details,
-      },
+      { id: 'timestamp', cell: ({ row }) => formatDeterministicUTC(row.original.timestamp) },
+      { id: 'event_type', cell: ({ row }) => <Badge variant="outline" className="text-[10px]">{row.original.event_type}</Badge> },
+      { id: 'email', cell: ({ row }) => row.original.email || '—' },
+      { id: 'ip_address', cell: ({ row }) => row.original.ip_address || '—' },
+      { id: 'details', cell: ({ row }) => row.original.details },
     ],
     [],
   )
-  const auditTable = useReactTable({
-    data: sorted,
-    columns: auditColumns,
-    getCoreRowModel: getCoreRowModel(),
-  })
+  const auditTable = useReactTable({ data: sorted, columns: auditColumns, getCoreRowModel: getCoreRowModel() })
 
   return (
     <div className="space-y-3" data-testid="admin-share-audit-panel">
@@ -2011,65 +1602,31 @@ export function AuditLogPanel({ status, onError, initialEmailFilter, onClearInit
         <div className="grid grid-cols-1 md:grid-cols-4 gap-2">
           <div className="space-y-1">
             <Label htmlFor="audit-event-type" className="text-[10px]">Event type</Label>
-            <Select
-              value={filters.event_type}
-              onValueChange={(v) => setFilters((f) => ({ ...f, event_type: v ?? 'ALL' }))}
-            >
-              <SelectTrigger id="audit-event-type">
-                <SelectValue />
-              </SelectTrigger>
+            <Select value={filters.event_type} onValueChange={(v) => setFilters((f) => ({ ...f, event_type: v ?? 'ALL' }))}>
+              <SelectTrigger id="audit-event-type"><SelectValue /></SelectTrigger>
               <SelectContent>
                 {EVENT_TYPE_FILTER_OPTIONS.map((opt) => (
-                  <SelectItem key={opt} value={opt}>
-                    {opt}
-                  </SelectItem>
+                  <SelectItem key={opt} value={opt}>{opt}</SelectItem>
                 ))}
               </SelectContent>
             </Select>
           </div>
           <div className="space-y-1">
             <Label htmlFor="audit-email" className="text-[10px]">Email contains</Label>
-            <Input
-              id="audit-email"
-              value={filters.email}
-              onChange={(e) => setFilters((f) => ({ ...f, email: e.target.value }))}
-              placeholder="alice@…"
-            />
+            <Input id="audit-email" value={filters.email} onChange={(e) => setFilters((f) => ({ ...f, email: e.target.value }))} placeholder="alice@…" />
           </div>
           <div className="space-y-1">
             <Label htmlFor="audit-since" className="text-[10px]">Since (ISO-Z)</Label>
-            <Input
-              id="audit-since"
-              value={filters.since}
-              onChange={(e) => setFilters((f) => ({ ...f, since: e.target.value }))}
-              placeholder="2026-05-25T00:00:00Z"
-            />
+            <Input id="audit-since" value={filters.since} onChange={(e) => setFilters((f) => ({ ...f, since: e.target.value }))} placeholder="2026-05-25T00:00:00Z" />
           </div>
           <div className="space-y-1">
             <Label htmlFor="audit-until" className="text-[10px]">Until (ISO-Z)</Label>
-            <Input
-              id="audit-until"
-              value={filters.until}
-              onChange={(e) => setFilters((f) => ({ ...f, until: e.target.value }))}
-              placeholder="2026-05-27T23:59:59Z"
-            />
+            <Input id="audit-until" value={filters.until} onChange={(e) => setFilters((f) => ({ ...f, until: e.target.value }))} placeholder="2026-05-27T23:59:59Z" />
           </div>
         </div>
         <div className="flex justify-end gap-2">
-          <Button
-            size="sm"
-            variant="ghost"
-            onClick={handleClear}
-            data-testid="admin-share-audit-clear-btn"
-          >
-            Clear
-          </Button>
-          <Button
-            size="sm"
-            onClick={applyFilters}
-            disabled={loading}
-            data-testid="admin-share-audit-apply-btn"
-          >
+          <Button size="sm" variant="ghost" onClick={handleClear} data-testid="admin-share-audit-clear-btn">Clear</Button>
+          <Button size="sm" onClick={applyFilters} disabled={loading} data-testid="admin-share-audit-apply-btn">
             {loading && <Loader2 className="h-3 w-3 mr-1 animate-spin" />}
             Apply
           </Button>
@@ -2112,9 +1669,7 @@ export function AuditLogPanel({ status, onError, initialEmailFilter, onClearInit
             ))}
             {!rows.length && (
               <TableRow>
-                <TableCell colSpan={5} className="text-center text-xs text-muted-foreground">
-                  No audit events yet.
-                </TableCell>
+                <TableCell colSpan={5} className="text-center text-xs text-muted-foreground">No audit events yet.</TableCell>
               </TableRow>
             )}
           </TableBody>
@@ -2124,21 +1679,11 @@ export function AuditLogPanel({ status, onError, initialEmailFilter, onClearInit
   )
 }
 
-// Shared query key so the hover-prefetch on the Admin → Share Dashboard
-// link (in /admin/page.tsx) populates the same React Query cache entry
-// the page reads on mount. Resulting UX: by the time the operator
-// clicks Share Dashboard, the status payload is already in cache —
-// page paints real content immediately instead of skeleton-then-swap.
 const SHARE_STATUS_QUERY_KEY = queryKeys.admin.shareStatus()
-// Companion key for the lean /live poll — keeps its own cache slot so
-// the mount-time /status query isn't refetched on the 10-s tick.
 const SHARE_LIVE_QUERY_KEY = queryKeys.admin.shareLive()
 
 type ShareLiveFields = Partial<
-  Pick<
-    ShareStatus,
-    'sharing_active' | 'public_url' | 'active_session_count' | 'rate_limits' | 'telemetry'
-  >
+  Pick<ShareStatus, 'sharing_active' | 'public_url' | 'active_session_count' | 'rate_limits' | 'telemetry'>
 >
 
 function normalizeShareTab(raw: string | null | undefined): ShareTab {
@@ -2155,15 +1700,10 @@ function ShareDashboardPageContent() {
   const [auditEmailFilter, setAuditEmailFilter] = React.useState('')
 
   const handleTabChange = React.useCallback(
-    (nextTab: string) => {
-      void setActiveTab(normalizeShareTab(nextTab))
-    },
+    (nextTab: string) => { void setActiveTab(normalizeShareTab(nextTab)) },
     [setActiveTab],
   )
 
-  // /status carries the full mount-time payload — services, invites,
-  // sessions, audit logs (~11 KB). Mutations refetch this. No
-  // refetchInterval; the 10-s live tick rides on /live below.
   const {
     data: status,
     error: statusError,
@@ -2172,39 +1712,20 @@ function ShareDashboardPageContent() {
     refetch,
   } = useQuery({
     queryKey: SHARE_STATUS_QUERY_KEY,
-    queryFn: async ({ signal }) => {
-      return (await unwrapClient(client.GET('/api/admin/share/status', { signal }))) as ShareStatus
-    },
-    // 30s staleTime so the hover-prefetch from the /admin PageHeader chip
-    // is reused on click even when the user lingers on hover. Mutations
-    // call refresh() to bust this when invites/sessions change.
+    queryFn: async ({ signal }) => (await unwrapClient(client.GET('/api/admin/share/status', { signal }))) as ShareStatus,
     staleTime: 30_000,
   })
 
-  // /live carries only the fields that actually change in real time
-  // (sharing_active, public_url, active_session_count, rate_limits,
-  // telemetry). ~1.5 KB instead of ~11 KB. Freshness via the admin event
-  // stream's `share` channel (see note below); this query is a one-shot
-  // snapshot on mount plus a 5-min safety net for silently-dropped streams.
   const { data: live } = useQuery({
     queryKey: SHARE_LIVE_QUERY_KEY,
-    queryFn: async ({ signal }) => {
-      return (await unwrapClient(client.GET('/api/admin/share/live', { signal }))) as ShareLiveFields
-    },
+    queryFn: async ({ signal }) => (await unwrapClient(client.GET('/api/admin/share/live', { signal }))) as ShareLiveFields,
     staleTime: 10_000,
     refetchInterval: 5 * 60_000,
     refetchIntervalInBackground: false,
   })
 
-  // SSE push of /live changes rides the multiplexed admin event stream's
-  // `share` channel (SyncStatusBadge adds it on /admin/share), which writes
-  // this same ['admin','share','live'] cache key — one shared connection
-  // instead of a second dedicated stream over the H1 admin tunnel. The
-  // useQuery above keeps the one-shot mount snapshot + 5-min safety net.
   const refresh = React.useCallback(async () => {
     await refetch()
-    // Also invalidate /live so the operator sees their just-revoked
-    // session disappear without waiting for the 10-s tick.
     queryClient.invalidateQueries({ queryKey: SHARE_LIVE_QUERY_KEY })
   }, [refetch, queryClient])
 
@@ -2212,16 +1733,9 @@ function ShareDashboardPageContent() {
     ? extractApiError(statusError) || (statusError as Error).message || 'unable to load status'
     : ''
 
-  // Merge /live fields into /status so SharingControlPanel (which reads
-  // active_session_count + rate_limits + telemetry) sees fresh data on
-  // every 10-s tick without us touching the full /status payload.
-  const statusForPanels: ShareStatus | null = status
-    ? { ...status, ...(live ?? {}) }
-    : null
-
+  const statusForPanels: ShareStatus | null = status ? { ...status, ...(live ?? {}) } : null
   const isInitialLoading = statusForPanels === null && !statusErrorMsg && statusLoading
   const isRefreshing = statusFetching && !isInitialLoading
-
   const activeService = status?.services?.find((s) => s.service_id === activeServiceId)
 
   return (
@@ -2240,13 +1754,7 @@ function ShareDashboardPageContent() {
         ) : (
           <DeployRemoteFrontendDialog />
         )}
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={refresh}
-          disabled={isRefreshing}
-          data-testid="admin-share-refresh-btn"
-        >
+        <Button variant="outline" size="sm" onClick={refresh} disabled={isRefreshing} data-testid="admin-share-refresh-btn">
           <RefreshCw className={cn('h-4 w-4 mr-1', isRefreshing && 'animate-spin')} />
           Refresh
         </Button>
@@ -2289,30 +1797,15 @@ function ShareDashboardPageContent() {
             <Skeleton className="h-[220px] w-full rounded-xl" />
           </div>
         ) : (
-          <SharingControlPanel
-            status={statusForPanels}
-            onRefresh={refresh}
-            onError={setActionError}
-          />
+          <SharingControlPanel status={statusForPanels} onRefresh={refresh} onError={setActionError} />
         )}
       </div>
 
-      <Tabs
-        value={activeTab}
-        onValueChange={handleTabChange}
-        className="w-full"
-        data-testid="admin-share-tabs"
-      >
+      <Tabs value={activeTab} onValueChange={handleTabChange} className="w-full" data-testid="admin-share-tabs">
         <TabsList>
-          <TabsTrigger value="invites" data-testid="admin-share-tab-invites">
-            Invitations
-          </TabsTrigger>
-          <TabsTrigger value="sessions" data-testid="admin-share-tab-sessions">
-            Sessions
-          </TabsTrigger>
-          <TabsTrigger value="audit" data-testid="admin-share-tab-audit">
-            Audit
-          </TabsTrigger>
+          <TabsTrigger value="invites" data-testid="admin-share-tab-invites">Invitations</TabsTrigger>
+          <TabsTrigger value="sessions" data-testid="admin-share-tab-sessions">Sessions</TabsTrigger>
+          <TabsTrigger value="audit" data-testid="admin-share-tab-audit">Audit</TabsTrigger>
         </TabsList>
 
         <div
@@ -2344,11 +1837,7 @@ function ShareDashboardPageContent() {
 
               <TabsContent value="sessions" className="pt-4">
                 {activeTab === 'sessions' && (
-                  <SessionsPanel
-                    status={statusForPanels}
-                    onRefresh={refresh}
-                    onError={setActionError}
-                  />
+                  <SessionsPanel status={statusForPanels} onRefresh={refresh} onError={setActionError} />
                 )}
               </TabsContent>
 
