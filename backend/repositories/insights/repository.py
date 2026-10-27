@@ -1,25 +1,37 @@
 from __future__ import annotations  # noqa: I001
 import contextvars
-import heapq
 import logging
 import threading
 import time
-import urllib.parse
 import uuid
 from collections.abc import Callable, Collection
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta  # noqa: F401
 from typing import Any
 import duckdb
 from backend.repositories._base import QueryRunner, _compact_sql_for_debug, _safe_table, record_duckdb_query
 from backend.repositories.insights import registry
+from backend.repositories.insights.shaping import (
+    TOP_K_INSIGHT_ITEMS as _TOP_K,  # noqa: F401
+    build_error_insight_card,
+    build_insight_card as _build_insight_card,  # noqa: F401
+    build_insights_cache_key as _build_insights_cache_key,
+    build_insufficient_baseline_card,
+    compute_available_history_hours,
+    compute_clamped_insight_windows as _compute_clamped_insight_windows,
+    heap_to_sorted_items as _heap_to_sorted_items,
+    iso_or_str as _iso_or_str,
+    make_investigate_url_builder,
+    p95_regressed as _p95_regressed,
+    push_top_k as _push_top_k,
+    shape_cache_collapse_detail,
+    shape_insight_card_from_rows,
+    share_exceeded as _share_exceeded,
+)
 from backend.repositories.utils.response_shaping import (
     INSIGHT_BUCKET_INTERVALS,
-    build_cache_collapse_breakdown,
-    build_insight_asn_context,
     build_insights_envelope,
     select_insight_bucket_interval,
-    shape_cache_collapse_timeline_point,
 )
 from . import (
     definitions as _definitions,  # noqa: F401  side-effect import: registers insight defs with the registry
@@ -84,42 +96,8 @@ def _exec_coalesced(
     return cur.fetchone() if fetch_one else cur.fetchall()
 
 
-_TOP_K = 15
-
-
 def _col_or_null(col: str, actual_cols: Collection[str], null_type: str = "VARCHAR", prefix: str = "") -> str:
     return f'{prefix}"{col}"' if col in actual_cols else f"NULL::{null_type}"
-
-
-def _share_exceeded(
-    wc: int, w_tot: int, bc: int, b_tot: int, min_share: float, mult: float = 2.0, offset: float = 0.05
-) -> bool:
-    return w_tot > 0 and (wc / w_tot) >= min_share and (b_tot == 0 or (wc / w_tot) >= (bc / b_tot) * mult + offset)
-
-
-def _p95_regressed(
-    w_tot: Any, b_tot: Any, w_p95: Any, b_p95: Any, min_w: int, min_b: int, mult: float, min_diff: float
-) -> bool:
-    return (
-        (w_tot or 0) >= min_w
-        and (b_tot or 0) >= min_b
-        and w_p95 is not None
-        and b_p95 is not None
-        and w_p95 >= b_p95 * mult
-        and (w_p95 - b_p95) >= min_diff
-    )
-
-
-def _iso_or_str(val: Any) -> str:
-    return val.isoformat() if hasattr(val, "isoformat") else str(val)
-
-
-def _push_top_k(heap: list[tuple], score: Any, counter: int, item: tuple, k: int = _TOP_K) -> None:
-    (heapq.heappush if len(heap) < k else heapq.heappushpop)(heap, (score, counter, item))
-
-
-def _heap_to_sorted_items(heap: list[tuple]) -> list[tuple]:
-    return [entry[2] for entry in sorted(heap, key=lambda e: e[0], reverse=True)]
 
 
 def _coalesced_city_aggregates(
@@ -877,40 +855,6 @@ def _coalesced_geo_latency_aggregates(
     return res
 
 
-def _build_insights_cache_key(
-    source_name: str,
-    window_hours: float = 24,
-    baseline_hours: float = 168,
-    clamp_start: str | None = None,
-    clamp_end: str | None = None,
-    mask_ips: bool = False,
-    clamp_cache_key: str | None = None,
-    filters: dict | None = None,
-) -> str:
-    from backend.repositories.utils.response_cache import bucket_time_to_minute
-
-    if clamp_cache_key is not None:
-        key_clamp = clamp_cache_key
-    elif clamp_start or clamp_end:
-        key_clamp = f"{bucket_time_to_minute(clamp_start) or ''}:{bucket_time_to_minute(clamp_end) or ''}"
-    else:
-        key_clamp = ""
-    filter_key_part = ""
-    if filters:
-        from backend.repositories.utils.filters import filter_spec_attr
-
-        f_items = []
-        for k in sorted(filters.keys()):
-            spec = filters[k]
-            mode = filter_spec_attr(spec, "mode") or "include"
-            vals = filter_spec_attr(spec, "values") or []
-            if vals:
-                f_items.append(f"{k}:{mode}:{','.join(str(v) for v in vals)}")
-        if f_items:
-            filter_key_part = ":" + "|".join(f_items)
-    return f"{source_name}:{window_hours}:{baseline_hours}:{key_clamp}:{int(mask_ips)}{filter_key_part}"
-
-
 def check_insights_cache(
     src: dict,
     window_hours: float = 24,
@@ -943,25 +887,6 @@ def check_insights_cache(
     return None
 
 
-def _compute_clamped_insight_windows(
-    window_hours: float, baseline_hours: float, clamp_start: str | None = None, clamp_end: str | None = None
-) -> tuple[datetime, str, str, str]:
-    from backend.utils.date_utils import parse_iso_utc
-
-    now = datetime.now(UTC)
-    if clamp_end:
-        ce = parse_iso_utc(clamp_end)
-        if ce and ce < now:
-            now = ce
-    window_start = now - timedelta(hours=window_hours)
-    baseline_start = now - timedelta(hours=baseline_hours + window_hours)
-    if clamp_start:
-        cs = parse_iso_utc(clamp_start)
-        if cs:
-            baseline_start, window_start = max(baseline_start, cs), max(window_start, cs)
-    return now, now.isoformat(), window_start.isoformat(), baseline_start.isoformat()
-
-
 def get_insights(
     con: duckdb.DuckDBPyConnection,
     src: dict,
@@ -979,7 +904,7 @@ def get_insights(
     source_name = src["name"]
     table_name = _safe_table(source_name)
     now, now_s, window_start_s, baseline_start_s = _compute_clamped_insight_windows(
-        window_hours, baseline_hours, clamp_start, clamp_end
+        window_hours, baseline_hours, clamp_start, clamp_end, now=datetime.now(UTC)
     )
     cached = check_insights_cache(
         src,
@@ -1071,18 +996,7 @@ def get_insights(
             ).fetchone()
             earliest_ts: Any = row_stats[0] if row_stats else None
             w_total = int(row_stats[1] or 0) if row_stats else 0
-            if earliest_ts:
-                if isinstance(earliest_ts, str):
-                    from backend.utils.date_utils import parse_iso_utc
-
-                    earliest_ts = parse_iso_utc(earliest_ts) or earliest_ts
-                elif hasattr(earliest_ts, "tzinfo"):
-                    earliest_ts = (
-                        earliest_ts.replace(tzinfo=UTC) if earliest_ts.tzinfo is None else earliest_ts.astimezone(UTC)
-                    )
-                available_history_hours = (now - earliest_ts).total_seconds() / 3600.0
-            else:
-                available_history_hours = 0.0
+            available_history_hours = compute_available_history_hours(now, earliest_ts)
         except Exception:
             available_history_hours = 0.0
             try:
@@ -1098,50 +1012,22 @@ def get_insights(
         except Exception:
             defs_map = {}
 
-        def _build_insight_card(
-            insight_id: str,
-            title: str,
-            description: str,
-            category: str | None,
-            severity: str,
-            summary: str,
-            items: list[dict] | None = None,
-        ) -> dict:
-            return {
-                "id": insight_id,
-                "title": title,
-                "description": description,
-                "category": category,
-                "severity": severity,
-                "summary": summary,
-                "items": items if items is not None else [],
-            }
-
         def check_baseline(insight_id: str) -> dict | None:
             if available_history_hours < baseline_hours:
                 d = defs_map.get(insight_id, {})
                 reg = registry.get(insight_id)
-                avail = max(0.1, round(available_history_hours, 1))
-                return _build_insight_card(
+                return build_insufficient_baseline_card(
                     insight_id=insight_id,
                     title=str(d.get("title", insight_id.replace("_", " ").title())),
                     description=str(d.get("description", "")),
                     category=str(reg.category) if reg else None,
-                    severity="info",
-                    summary=f"Requires {int(baseline_hours)}h of historical data (only {avail}h available)",
+                    baseline_hours=baseline_hours,
+                    available_history_hours=available_history_hours,
                 )
             return None
 
         table_name = temp_table
-
-        def make_investigate_url(filters: dict | None = None) -> str:
-            p: list[tuple[str, str]] = ([("service", service_id)] if service_id else []) + [
-                ("start", window_start_s),
-                ("end", now_s),
-            ]
-            p.extend((f"filter_{col}", str(val)) for col, val in (filters or {}).items() if val is not None)
-            return "/dashboard?" + urllib.parse.urlencode(p)
-
+        make_investigate_url = make_investigate_url_builder(service_id, window_start_s, now_s)
         tasks: list[Callable[[], dict | None]] = []
         _debug_lock = threading.Lock()
         from backend.repositories.utils.filters import build_geo_select_clause
@@ -1274,52 +1160,17 @@ def get_insights(
                             return None
                         params = [window_start_s] * sql.count("?")
                         rows = _execute_on_cursor(runner, _debug_lock, runner.con.cursor(), sql, params).fetchall()
-                    items = []
-                    if d.row_processor:
-                        context: dict[str, Any] = {
-                            "window_hours": window_hours,
-                            "baseline_hours": baseline_hours,
-                            "fp_col": fp_col,
-                            "actual_cols": actual_cols,
-                            "mask_ips": mask_ips,
-                        }
-                        context.update(
-                            build_insight_asn_context(src["name"], rows, d.id, include_dma="metro" in actual_cols)
-                        )
-                        for row in rows:
-                            try:
-                                item = d.row_processor(row, d, context)
-                                if "investigate_url" not in item:
-                                    item["investigate_url"] = make_investigate_url(
-                                        item.get("meta", {}).get("filters", {})
-                                    )
-                                items.append(item)
-                            except Exception:
-                                continue
-                    severity = "clean"
-                    if items:
-                        severity = (
-                            d.severity_logic(items)
-                            if d.severity_logic
-                            else ("critical" if any(i.get("severity") == "critical" for i in items) else "warning")
-                        )
-                    if items:
-                        if d.id == "error_spikes":
-                            summary = f"{len(items)} URLs with elevated server error rates"
-                        elif d.id == "botnet_grouping":
-                            summary = f"{len(items)} fingerprints with suspicious IP spread"
-                        else:
-                            summary = f"{len(items)} anomalies detected"
-                    else:
-                        summary = f"No {d.title.lower()} detected"
-                    return _build_insight_card(
-                        insight_id=d.id,
-                        title=d.title,
-                        description=d.description,
-                        category=str(d.category),
-                        severity=severity,
-                        summary=summary,
-                        items=items,
+                    return shape_insight_card_from_rows(
+                        d,
+                        rows,
+                        service_id=src["name"],
+                        window_hours=window_hours,
+                        baseline_hours=baseline_hours,
+                        fp_col=fp_col,
+                        actual_cols=actual_cols,
+                        mask_ips=mask_ips,
+                        investigate_url_builder=make_investigate_url,
+                        swallow_row_errors=True,
                     )
 
                 compute_insight._insight_id = d.id  # type: ignore[attr-defined]
@@ -1335,13 +1186,11 @@ def get_insights(
                 return fn()
             except Exception as e:
                 insight_id = getattr(fn, "_insight_id", "unknown")
-                return _build_insight_card(
+                return build_error_insight_card(
                     insight_id=insight_id,
                     title=getattr(fn, "_insight_title", insight_id.replace("_", " ").title()),
-                    description="",
                     category=getattr(fn, "_insight_category", None),
-                    severity="error",
-                    summary=f"Query failed: {str(e)}",
+                    error_message=str(e),
                 )
 
         if tasks:
@@ -1378,12 +1227,10 @@ def get_cache_collapse_detail(
     clamp_end: str | None = None,
     mask_ips: bool = False,
 ) -> dict:
-    from backend.core.share_db import mask_ip
-
     source_name = src["name"]
     table_name = _safe_table(source_name)
     _, now_s, window_start_s, baseline_start_s = _compute_clamped_insight_windows(
-        window_hours, baseline_hours, clamp_start, clamp_end
+        window_hours, baseline_hours, clamp_start, clamp_end, now=datetime.now(UTC)
     )
     runner = QueryRunner(con, src)
     rates_sql = f"""
@@ -1407,11 +1254,7 @@ def get_cache_collapse_detail(
     """
     params = [window_start_s, window_start_s, url, baseline_start_s, now_s]
     rates_res = runner.execute(rates_sql, params).fetchone() or (0, 0, 0, 0, 0, 0, 0, 0)
-    w_hits, w_miss, w_pass, w_total, b_hits, b_miss, b_pass, b_total = (int(v or 0) for v in rates_res)
-    w_cacheable, b_cacheable = w_hits + w_miss, b_hits + b_miss
-    w_rate, b_rate = (w_hits / w_cacheable) if w_cacheable else 0.0, (b_hits / b_cacheable) if b_cacheable else 0.0
-    w_pass_rate, b_pass_rate = (w_pass / w_total) if w_total else 0.0, (b_pass / b_total) if b_total else 0.0
-    breakdown = build_cache_collapse_breakdown(w_hits, w_miss, w_pass, w_total)
+    rates = tuple(int(v or 0) for v in rates_res)
     total_hours = window_hours + baseline_hours
     bucket_interval = select_insight_bucket_interval(total_hours)
     timeline_sql = f"""
@@ -1426,7 +1269,6 @@ def get_cache_collapse_detail(
         ORDER BY bucket ASC
     """
     timeline_rows = runner.execute(timeline_sql, [url, baseline_start_s, now_s]).fetchall()
-    timeline = [shape_cache_collapse_timeline_point(_iso_or_str(r[0]), r[1], r[2], r[3], b_rate) for r in timeline_rows]
     misses_sql = f"""
         SELECT timestamp, cache, pop, ip, status
         FROM {table_name}
@@ -1435,27 +1277,15 @@ def get_cache_collapse_detail(
         LIMIT 50
     """
     miss_rows = runner.execute(misses_sql, [url, baseline_start_s, now_s]).fetchall()
-    recent_misses = [
-        {
-            "timestamp": _iso_or_str(mr[0]),
-            "cache": mr[1] or "UNKNOWN",
-            "pop": mr[2],
-            "ip": mask_ip(mr[3]) if mask_ips and mr[3] else mr[3],
-            "status": int(mr[4]) if mr[4] is not None else None,
-        }
-        for mr in miss_rows
-    ]
-    return {
-        "url": url,
-        "timeline": timeline,
-        "recent_misses": recent_misses,
-        "breakdown": breakdown,
-        "baseline_hit_rate": float(b_rate) * 100,
-        "window_hit_rate": float(w_rate) * 100,
-        "baseline_pass_rate": float(b_pass_rate) * 100,
-        "window_pass_rate": float(w_pass_rate) * 100,
+    return shape_cache_collapse_detail(
+        url,
+        rates,  # type: ignore[arg-type]
+        timeline_rows,
+        miss_rows,
+        mask_ips=mask_ips,
+        iso_formatter=_iso_or_str,
         **runner.telemetry(),
-    }
+    )
 
 
 from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry  # noqa: E402

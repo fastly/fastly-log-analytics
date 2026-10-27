@@ -15,7 +15,7 @@ from __future__ import annotations
 import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from backend.utils.date_utils import ensure_utc, parse_iso_utc
 
@@ -1656,6 +1656,58 @@ def shape_sessions_envelope(
     return res
 
 
+if TYPE_CHECKING:
+    from backend.repositories.insights.shaping import (
+        build_error_insight_card,
+        build_insight_card,
+        build_insights_cache_key,
+        build_insufficient_baseline_card,
+        clamp_insight_window,
+        compute_available_history_hours,
+        compute_cache_collapse_rates,
+        compute_clamped_insight_windows,
+        evaluate_insight_severity,
+        fingerprint_column,
+        format_insight_summary,
+        make_investigate_url_builder,
+        process_insight_rows,
+        resolve_clamp_cache_key,
+        shape_cache_collapse_detail,
+        shape_cache_collapse_recent_misses,
+        shape_insight_card_from_rows,
+    )
+
+_INSIGHT_SHAPING_EXPORTS = frozenset(
+    {
+        "build_error_insight_card",
+        "build_insight_card",
+        "build_insights_cache_key",
+        "build_insufficient_baseline_card",
+        "clamp_insight_window",
+        "compute_available_history_hours",
+        "compute_cache_collapse_rates",
+        "compute_clamped_insight_windows",
+        "evaluate_insight_severity",
+        "fingerprint_column",
+        "format_insight_summary",
+        "make_investigate_url_builder",
+        "process_insight_rows",
+        "resolve_clamp_cache_key",
+        "shape_cache_collapse_detail",
+        "shape_cache_collapse_recent_misses",
+        "shape_insight_card_from_rows",
+    }
+)
+
+
+def __getattr__(name: str) -> Any:
+    if name in _INSIGHT_SHAPING_EXPORTS:
+        from backend.repositories.insights import shaping as _insight_shaping
+
+        return getattr(_insight_shaping, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 __all__ = [
     "CHART_INTERVAL_SECONDS",
     "CMCD_TS_DEFAULTS",
@@ -1678,12 +1730,20 @@ __all__ = [
     "build_asn_label_map",
     "build_asn_speed_mix",
     "build_cache_collapse_breakdown",
+    "build_error_insight_card",
     "build_insight_asn_context",
+    "build_insight_card",
+    "build_insights_cache_key",
     "build_insights_envelope",
+    "build_insufficient_baseline_card",
     "build_network_asn_leaderboard",
     "build_query_response_envelope",
     "chart_interval_seconds",
     "clamp_bucket_seconds",
+    "clamp_insight_window",
+    "compute_available_history_hours",
+    "compute_cache_collapse_rates",
+    "compute_clamped_insight_windows",
     "compute_network_global_summary",
     "compute_network_health_score",
     "compute_share_pct",
@@ -1700,21 +1760,30 @@ __all__ = [
     "empty_transport_metrics",
     "enrich_asn_rows",
     "enrich_row_with_pop_distance",
+    "evaluate_insight_severity",
+    "fingerprint_column",
     "finish_security_proxies",
     "float_or_zero",
     "format_asn_display_label",
+    "format_insight_summary",
     "generate_epoch_aligned_buckets",
     "haversine_km",
     "is_pop_latency_elevated",
+    "make_investigate_url_builder",
     "normalize_chart_interval",
     "normalize_sessions_sort",
     "opt_float",
     "pad_timeseries_buckets",
     "parse_asn_int",
     "parse_metro_code",
+    "process_insight_rows",
     "resolve_asn_names_map",
+    "resolve_clamp_cache_key",
     "select_insight_bucket_interval",
+    "shape_cache_collapse_detail",
+    "shape_cache_collapse_recent_misses",
     "shape_cache_collapse_timeline_point",
+    "shape_insight_card_from_rows",
     "shape_keyed_rows",
     "shape_latency_percentiles",
     "shape_origin_ip_health_response",
