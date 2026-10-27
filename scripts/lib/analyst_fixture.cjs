@@ -210,18 +210,52 @@ async function withAnalystUsers(options, work) {
       context.setDefaultTimeout(15000);
       context.setDefaultNavigationTimeout(30000);
       let originViolations = 0;
+      let checkedRequests = 0;
+      let interceptionFailures = 0;
+      const failureCategories = {};
+      const rejectedSchemes = {};
+      const pendingInterceptions = new Set();
       const page = await context.newPage();
       const interception = await context.newCDPSession(page);
-      interception.on('Fetch.requestPaused', async event => {
-        const target = new URL(event.request.url);
-        const allowed = target.protocol === 'https:' && !target.username && !target.password && target.origin === config.analystOrigin;
-        if (!allowed) originViolations++;
-        try {
-          await interception.send(allowed ? 'Fetch.continueRequest' : 'Fetch.failRequest', {
-            requestId: event.requestId, ...(allowed ? {} : { errorReason: 'BlockedByClient' }),
-          });
-        } catch { originViolations++; }
+      interception.on('Fetch.requestPaused', event => {
+        const handling = (async () => {
+          checkedRequests++;
+          let allowed = false;
+          let scheme = 'invalid';
+          try {
+            const target = new URL(event.request.url);
+            scheme = ['https:', 'http:', 'data:', 'blob:', 'about:'].includes(target.protocol) ? target.protocol : 'other';
+            allowed = target.protocol === 'https:' && !target.username && !target.password && target.origin === config.analystOrigin;
+          } catch {
+            scheme = 'invalid';
+          }
+          if (!allowed) {
+            originViolations++;
+            rejectedSchemes[scheme] = (rejectedSchemes[scheme] || 0) + 1;
+          }
+          try {
+            await interception.send(allowed ? 'Fetch.continueRequest' : 'Fetch.failRequest', {
+              requestId: event.requestId, ...(allowed ? {} : { errorReason: 'BlockedByClient' }),
+            });
+          } catch (error) {
+            interceptionFailures++;
+            const message = String(error?.message || '');
+            const category = /invalid interceptionid|invalid requestid/i.test(message) ? 'request_gone'
+              : /session closed|target closed|has been closed/i.test(message) ? 'session_closed' : 'other';
+            failureCategories[category] = (failureCategories[category] || 0) + 1;
+          }
+        })().finally(() => pendingInterceptions.delete(handling));
+        pendingInterceptions.add(handling);
+        return handling;
       });
+      const checkOrigin = async phase => {
+        while (pendingInterceptions.size) await Promise.all([...pendingInterceptions]);
+        appendJournal(fd, { event: 'origin_guard', user: index, phase, checked_requests: checkedRequests,
+          rejected_requests: originViolations, rejected_schemes: rejectedSchemes,
+          interception_failures: interceptionFailures, failure_categories: failureCategories });
+        requireThat(originViolations === 0, 'analyst_origin_violation');
+        requireThat(interceptionFailures === 0, 'analyst_interception_failed');
+      };
       await interception.send('Fetch.enable', { patterns: [{ urlPattern: '*', requestStage: 'Request' }] });
       stage = 'normal_login';
       await login(context, page, config.analystOrigin, options.serviceId, intent, passcode);
@@ -229,12 +263,12 @@ async function withAnalystUsers(options, work) {
       scopedBootstrap(await api(context.request, config.analystOrigin, '/api/bootstrap'), options.serviceId, options.maskIps);
       await api(context.request, config.analystOrigin, '/api/admin/share/status', { statuses: [403], json: false });
       await api(context.request, config.analystOrigin, `/api/dashboard/aggregates?service_id=${encodeURIComponent(deniedService)}`, { method: 'POST', headers: { Origin: config.analystOrigin }, data: { filters: {}, sections: ['core'] }, statuses: [403], json: false });
-      requireThat(originViolations === 0, 'analyst_origin_violation');
-      ready.push({ context, page, serviceId: options.serviceId, maskIps: options.maskIps, user: index, checkOrigin: () => requireThat(originViolations === 0, 'analyst_origin_violation') });
+      await checkOrigin('scope_verification');
+      ready.push({ context, page, serviceId: options.serviceId, maskIps: options.maskIps, user: index, checkOrigin });
     }
     stage = 'work';
     result = await work(ready.map(user => ({ context: user.context, page: user.page, serviceId: user.serviceId, maskIps: user.maskIps, user: user.user })));
-    for (const user of ready) user.checkOrigin();
+    for (const user of ready) await user.checkOrigin('work');
   } catch (error) {
     primary = error instanceof FixtureFailure ? error.code : stage;
   } finally {

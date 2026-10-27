@@ -66,7 +66,16 @@ function fixture(t, overrides = {}) {
     state.analystOptions.push(options);
     const context = { currentUrl: `${analystOrigin}/share-login`, values: {}, cookiesList: [], async close() { state.closed++; }, async route(pattern, handler) { this.routeGuard = handler; }, async cookies() { return this.cookiesList; }, setDefaultTimeout() {}, setDefaultNavigationTimeout() {} };
     context.request = api(false, context);
-    context.newCDPSession = async () => ({ on(event, handler) { assert.equal(event, 'Fetch.requestPaused'); context.requestGuard = handler; }, async send(method, args) { context.guardCommand = { method, args }; } });
+    context.newCDPSession = async () => ({
+      on(event, handler) { assert.equal(event, 'Fetch.requestPaused'); context.requestGuard = handler; },
+      async send(method, args) {
+        context.guardCommand = { method, args };
+        if (method === 'Fetch.continueRequest' && state.continueError) {
+          if (state.delayContinue) await new Promise(resolve => setImmediate(resolve));
+          throw new Error(state.continueError);
+        }
+      },
+    });
     const page = {
       goto: async url => { context.currentUrl = url; }, url: () => context.currentUrl,
       waitForURL: async predicate => { assert.ok(typeof predicate === 'function' ? predicate(new URL(context.currentUrl)) : context.currentUrl.includes(predicate)); },
@@ -214,6 +223,30 @@ test('cross-origin browser requests abort and invalidate the lifecycle', async t
   }), /analyst_origin_violation/);
   assert.equal(aborted, true);
   assert.equal(state.invites.length, 0);
+  const journal = fs.readFileSync(options.journalPath, 'utf8');
+  const observation = journal.trim().split('\n').map(line => JSON.parse(line)).find(row => row.event === 'origin_guard' && row.phase === 'work');
+  assert.equal(observation.rejected_requests, 1);
+  assert.deepEqual(observation.rejected_schemes, { 'https:': 1 });
+  assert.equal(observation.interception_failures, 0);
+  assert.equal(journal.includes('unexpected.example.com'), false);
+});
+
+for (const delayContinue of [false, true]) test(`interception failures ${delayContinue ? 'pending at callback completion' : 'already observed'} fail closed without claiming an origin violation`, async t => {
+  const { state, options } = fixture(t, { continueError: 'Invalid InterceptionId. PRIVATE_CDP_DETAIL', delayContinue });
+  await assert.rejects(withAnalystUsers(options, async users => {
+    const handling = users[0].context.requestGuard({ requestId: 'request-test', request: { url: `${analystOrigin}/dashboard?private=value` } });
+    if (!delayContinue) await handling;
+  }), error => error.code === 'analyst_interception_failed' && !error.message.includes('PRIVATE'));
+  const journal = fs.readFileSync(options.journalPath, 'utf8');
+  const observation = journal.trim().split('\n').map(line => JSON.parse(line)).find(row => row.event === 'origin_guard' && row.phase === 'work');
+  assert.equal(observation.rejected_requests, 0);
+  assert.equal(observation.interception_failures, 1);
+  assert.deepEqual(observation.failure_categories, { request_gone: 1 });
+  assert.equal(journal.includes('PRIVATE_CDP_DETAIL'), false);
+  assert.equal(journal.includes('private=value'), false);
+  assert.equal(state.invites.length, 0);
+  assert.equal(state.sessions.length, 0);
+  assert.ok(journal.includes('cleanup_verified'));
 });
 
 test('malformed recovery input cannot disclose its contents through errors', async t => {
@@ -222,7 +255,8 @@ test('malformed recovery input cannot disclose its contents through errors', asy
   await assert.rejects(recoverOwnedInvites(options), error => error.code === 'recovery_failed' && !error.message.includes('PRIVATE'));
 });
 
-for (const redirectLogin of [false, true]) test(`real Chromium ${redirectLogin ? 'blocks cross-origin redirects before credentials' : 'completes the normal form flow'}`, async t => {
+for (const scenario of ['normal', 'redirect', 'profile']) test(`real Chromium ${scenario === 'redirect' ? 'blocks cross-origin redirects before credentials' : scenario === 'profile' ? 'keeps the origin guard through traced inline assets and reloads' : 'completes the normal form flow'}`, async t => {
+  const redirectLogin = scenario === 'redirect';
   const { chromium } = require('../../frontend/node_modules/@playwright/test');
   const browser = await chromium.launch({ headless: true });
   t.after(() => browser.close());
@@ -247,7 +281,7 @@ for (const redirectLogin of [false, true]) test(`real Chromium ${redirectLogin ?
       } else if (url.pathname === '/share-login') {
         await route.fulfill({ contentType: 'text/html', body: `<form data-testid="share-login-form"><label for="email">Email</label><input id="email"><label for="passcode">Passcode</label><input id="passcode" type="password"><button type="submit">Sign in</button></form><script>document.querySelector('form').addEventListener('submit', async event => { event.preventDefault(); const response = await fetch('/api/share/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: document.querySelector('#email').value, passcode: document.querySelector('#passcode').value }) }); if (response.ok) location.assign('/dashboard?service=service-test'); });</script>` });
       } else {
-        await route.fulfill({ contentType: 'text/html', body: '<h1>Analyst fixture</h1>' });
+        await route.fulfill({ contentType: 'text/html', body: '<h1>Analyst fixture</h1><img alt="Inline chart" src="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%221%22 height=%221%22%3E%3C/svg%3E">' });
       }
     });
     const requests = api(false, identity);
@@ -258,7 +292,9 @@ for (const redirectLogin of [false, true]) test(`real Chromium ${redirectLogin ?
         session.on('Fetch.requestPaused', event => { (state.pausedOrigins ??= []).push(new URL(event.request.url).origin); });
         const send = session.send.bind(session);
         session.send = async (method, args) => {
-          const result = await send(method, args);
+          let result;
+          try { result = await send(method, args); }
+          catch (error) { (state.guardErrors ??= []).push({ method, message: error.message }); throw error; }
           if (method === 'Fetch.failRequest' && args.errorReason === 'BlockedByClient') state.redirectBlocked = true;
           return result;
         };
@@ -272,6 +308,27 @@ for (const redirectLogin of [false, true]) test(`real Chromium ${redirectLogin ?
     assert.equal(await users[0].page.locator('h1').textContent(), 'Analyst fixture');
     const cookies = await users[0].context.cookies(analystOrigin);
     assert.equal(cookies.find(cookie => cookie.name === 'analyst_session_id').secure, true);
+    if (scenario === 'profile') {
+      for (const traced of [true, false]) {
+        const cdp = await users[0].context.newCDPSession(users[0].page);
+        await cdp.send('Performance.enable');
+        if (traced) {
+          await users[0].context.tracing.start({ screenshots: true, snapshots: true, sources: false });
+          await browser.startTracing(users[0].page, { screenshots: true });
+        }
+        try {
+          await users[0].page.reload({ waitUntil: 'load' });
+          await users[0].page.getByRole('img', { name: 'Inline chart' }).evaluate(image => image.decode());
+        } finally {
+          if (traced) {
+            await browser.stopTracing();
+            await users[0].context.tracing.stop();
+          }
+          await cdp.detach();
+        }
+      }
+      assert.deepEqual(state.guardErrors ?? [], []);
+    }
   });
   if (redirectLogin) {
     await assert.rejects(run);
@@ -280,6 +337,9 @@ for (const redirectLogin of [false, true]) test(`real Chromium ${redirectLogin ?
     assert.ok(['net::ERR_ABORTED', 'net::ERR_BLOCKED_BY_CLIENT'].includes(state.redirectFailure));
   } else {
     await run;
+    const observations = fs.readFileSync(options.journalPath, 'utf8').trim().split('\n').map(line => JSON.parse(line)).filter(row => row.event === 'origin_guard');
+    assert.deepEqual(observations.map(row => row.phase), ['scope_verification', 'work']);
+    assert.ok(observations.every(row => row.checked_requests > 0 && row.rejected_requests === 0 && row.interception_failures === 0));
   }
   assert.equal(state.invites.length, 0);
   assert.equal(state.sessions.length, 0);
