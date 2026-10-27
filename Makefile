@@ -419,7 +419,7 @@ stray-file-gate:
 # overrides into .metrics/baseline/<ts>/. Run at Phase 0 + end of
 # Phase 10 for the success-criteria scorecard.
 baseline:
-	bash scripts/baseline_metrics.sh
+	bash scripts/perf_gate.sh --baseline-metrics
 
 # Pre-deploy gate. `ci` now runs every gating GitHub workflow itself (ci.yml +
 # e2e.yml), so verify is just an alias kept for muscle memory / older docs.

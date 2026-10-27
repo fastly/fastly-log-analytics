@@ -1,36 +1,202 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
+import contextvars
 import itertools
 import json
 import logging
-import math
 import os
-import random
+import queue
 import re
-import struct
 import sys
 import tempfile
 import threading
 import time
-from collections import deque
-from collections.abc import AsyncIterator, Callable, Iterable, Iterator, MutableMapping
+from collections import defaultdict, deque
+from collections.abc import AsyncIterator, Callable, Iterator, MutableMapping
 from contextlib import contextmanager, suppress
 from contextvars import ContextVar
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from types import FrameType
 from typing import Any
 
-import cachetools
-import httpx
+import aiohttp
 import structlog
-import tenacity
+import yarl
+from aiohttp import web
+from botocore.auth import S3SigV4Auth
+from botocore.awsrequest import AWSRequest
+from botocore.credentials import Credentials
 from opentelemetry import trace
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
+
+_backend_pkg = sys.modules.get("backend")
+if _backend_pkg is not None and hasattr(_backend_pkg, "_MODULE_ALIASES"):
+    for _restored_mod in (
+        "backend.utils.bounded_cache",
+        "backend.utils.hll",
+        "backend.utils.time_window",
+        "backend.utils.http",
+        "backend.core.retry",
+        "backend.utils.date_utils",
+        "backend.utils.terraform_gen",
+    ):
+        _backend_pkg._MODULE_ALIASES.pop(_restored_mod, None)
+        _existing = sys.modules.get(_restored_mod)
+        if _existing is not None and not (getattr(_existing, "__file__", None) or "").endswith(
+            f"{_restored_mod.rsplit('.', 1)[-1]}.py"
+        ):
+            del sys.modules[_restored_mod]
+    _backend_pkg._MODULE_ALIASES["backend.utils.cache_registry"] = "backend.utils.bounded_cache"
+
+from backend.core.retry import retry_call as retry_call
+from backend.utils.bounded_cache import (
+    _MISSING as _MISSING,
+)
+from backend.utils.bounded_cache import (
+    _PREV_CACHE_ENTRIES as _PREV_CACHE_ENTRIES,
+)
+from backend.utils.bounded_cache import (
+    BoundedCache as BoundedCache,
+)
+from backend.utils.bounded_cache import (
+    BoundedTTLCache as BoundedTTLCache,
+)
+from backend.utils.bounded_cache import (
+    CacheRegistry as CacheRegistry,
+)
+from backend.utils.bounded_cache import (
+    _try_clear_cache as _try_clear_cache,
+)
+from backend.utils.date_utils import (
+    _parse_dt as _parse_dt,
+)
+from backend.utils.date_utils import (
+    ensure_utc as ensure_utc,
+)
+from backend.utils.date_utils import (
+    iso_z as iso_z,
+)
+from backend.utils.date_utils import (
+    iso_z_now as iso_z_now,
+)
+from backend.utils.date_utils import (
+    parse_date_window as parse_date_window,
+)
+from backend.utils.date_utils import (
+    parse_day_key_strict as parse_day_key_strict,
+)
+from backend.utils.date_utils import (
+    parse_hour_key as parse_hour_key,
+)
+from backend.utils.date_utils import (
+    parse_hour_key_strict as parse_hour_key_strict,
+)
+from backend.utils.date_utils import (
+    parse_iso_utc as parse_iso_utc,
+)
+from backend.utils.date_utils import (
+    parse_relative_time_window as parse_relative_time_window,
+)
+from backend.utils.date_utils import (
+    parse_window as parse_window,
+)
+from backend.utils.date_utils import (
+    parse_window_str_to_dt as parse_window_str_to_dt,
+)
+from backend.utils.date_utils import (
+    safe_iso as safe_iso,
+)
+from backend.utils.date_utils import (
+    window_to_epoch as window_to_epoch,
+)
+from backend.utils.hll import (
+    _HASH_BITS as _HASH_BITS,
+)
+from backend.utils.hll import (
+    DEFAULT_PRECISION as DEFAULT_PRECISION,
+)
+from backend.utils.hll import (
+    HLL_SKETCH_NAMES as HLL_SKETCH_NAMES,
+)
+from backend.utils.hll import (
+    SERIALIZATION_VERSION as SERIALIZATION_VERSION,
+)
+from backend.utils.hll import (
+    HyperLogLog as HyperLogLog,
+)
+from backend.utils.hll import (
+    _alpha as _alpha,
+)
+from backend.utils.hll import (
+    _hash64 as _hash64,
+)
+from backend.utils.hll import (
+    _leading_zero_count as _leading_zero_count,
+)
+from backend.utils.hll import (
+    get_hll_sketch as get_hll_sketch,
+)
+from backend.utils.hll import (
+    merge_hll_sketches as merge_hll_sketches,
+)
+from backend.utils.hll import (
+    query_hll_distinct as query_hll_distinct,
+)
+from backend.utils.hll import (
+    query_hll_distinct_by_bucket as query_hll_distinct_by_bucket,
+)
+from backend.utils.hll import (
+    query_hll_distinct_filtered as query_hll_distinct_filtered,
+)
+from backend.utils.http import (
+    _DEFAULT_UA as _DEFAULT_UA,
+)
+from backend.utils.http import (
+    http_get_text as http_get_text,
+)
+from backend.utils.http import (
+    make_client as make_client,
+)
+from backend.utils.time_window import (
+    _BANDS as _BANDS,
+)
+from backend.utils.time_window import (
+    _FIXED_TOKEN_DELTAS as _FIXED_TOKEN_DELTAS,
+)
+from backend.utils.time_window import (
+    ANCHOR_QUANTUM_SECONDS as ANCHOR_QUANTUM_SECONDS,
+)
+from backend.utils.time_window import (
+    STATIC_DEFAULT as STATIC_DEFAULT,
+)
+from backend.utils.time_window import (
+    VALID_RANGE_TOKENS as VALID_RANGE_TOKENS,
+)
+from backend.utils.time_window import (
+    _pick_auto_token as _pick_auto_token,
+)
+from backend.utils.time_window import (
+    history_hours_from_earliest as history_hours_from_earliest,
+)
+from backend.utils.time_window import (
+    invite_clamp_fingerprint as invite_clamp_fingerprint,
+)
+from backend.utils.time_window import (
+    is_valid_range_token as is_valid_range_token,
+)
+from backend.utils.time_window import (
+    pick_insights_default as pick_insights_default,
+)
+from backend.utils.time_window import (
+    quantize_anchor as quantize_anchor,
+)
+from backend.utils.time_window import (
+    resolve_window as resolve_window,
+)
 
 logger = logging.getLogger("backend.utils.telemetry_proxy")
 _os = os
@@ -762,370 +928,6 @@ class ValkeyPublisher:
         return 0
 
 
-DEFAULT_PRECISION = 8
-SERIALIZATION_VERSION = 1
-_HASH_BITS = 64
-HLL_SKETCH_NAMES: tuple[str, ...] = ("hll_sketch",)
-
-
-def _alpha(m: int) -> float:
-    if m == 16:
-        return 0.673
-    if m == 32:
-        return 0.697
-    if m == 64:
-        return 0.709
-    return 0.7213 / (1.0 + 1.079 / m)
-
-
-def _hash64(item: str | bytes) -> int:
-    if isinstance(item, str):
-        item = item.encode("utf-8")
-    digest = hashlib.md5(item, usedforsecurity=False).digest()  # noqa: S324
-    return struct.unpack("<Q", digest[:8])[0]
-
-
-def _leading_zero_count(value: int, width_bits: int) -> int:
-    if value == 0:
-        return width_bits
-    rank = 1
-    msb = 1 << (width_bits - 1)
-    while (value & msb) == 0 and rank < width_bits:
-        rank += 1
-        value <<= 1
-    return rank
-
-
-class HyperLogLog:
-    __slots__ = ("_p", "_m", "_buckets")
-
-    def __init__(self, precision: int = DEFAULT_PRECISION) -> None:
-        if not 4 <= precision <= 16:
-            raise ValueError(f"precision must be in [4, 16], got {precision}")
-        self._p = precision
-        self._m = 1 << precision
-        self._buckets = bytearray(self._m)
-
-    @property
-    def precision(self) -> int:
-        return self._p
-
-    @property
-    def m(self) -> int:
-        return self._m
-
-    def add(self, item: str | bytes) -> None:
-        h = _hash64(item)
-        bucket = h >> (_HASH_BITS - self._p)
-        observed = h & ((1 << (_HASH_BITS - self._p)) - 1)
-        rank = _leading_zero_count(observed, _HASH_BITS - self._p)
-        if rank > self._buckets[bucket]:
-            self._buckets[bucket] = rank
-
-    def update(self, items: Iterable[str | bytes]) -> None:
-        for item in items:
-            self.add(item)
-
-    def count(self) -> int:
-        m = self._m
-        raw_sum = sum(2.0**-b for b in self._buckets)
-        if raw_sum == 0.0:
-            return m
-        estimate = _alpha(m) * m * m / raw_sum
-        if estimate <= 2.5 * m:
-            zeros = sum(1 for b in self._buckets if b == 0)
-            if zeros > 0:
-                estimate = m * math.log(m / zeros)
-        if estimate > (1 << 64) / 30.0:
-            estimate = -(1 << 64) * math.log(1 - estimate / (1 << 64))
-        return int(round(estimate))
-
-    def merge(self, other: HyperLogLog) -> None:
-        if other._p != self._p:
-            raise ValueError(f"merge precision mismatch: self.p={self._p} vs other.p={other._p}")
-        for i in range(self._m):
-            if other._buckets[i] > self._buckets[i]:
-                self._buckets[i] = other._buckets[i]
-
-    def to_bytes(self) -> bytes:
-        return bytes([SERIALIZATION_VERSION, self._p]) + bytes(self._buckets)
-
-    @classmethod
-    def from_bytes(cls, blob: bytes | bytearray) -> HyperLogLog:
-        if len(blob) < 2:
-            raise ValueError(f"sketch blob too short: {len(blob)} bytes")
-        version, precision = blob[0], blob[1]
-        if version != SERIALIZATION_VERSION:
-            raise ValueError(f"unknown HLL serialization version {version}; expected {SERIALIZATION_VERSION}")
-        if not 4 <= precision <= 16:
-            raise ValueError(f"invalid precision in blob: {precision}")
-        expected_len = 2 + (1 << precision)
-        if len(blob) != expected_len:
-            raise ValueError(f"sketch blob length mismatch: got {len(blob)}, expected {expected_len}")
-        sketch = cls(precision=precision)
-        sketch._buckets = bytearray(blob[2:])
-        return sketch
-
-    def __len__(self) -> int:
-        return self.count()
-
-    def __repr__(self) -> str:  # pragma: no cover - cosmetic only
-        return f"HyperLogLog(p={self._p}, estimate≈{self.count()})"
-
-
-def get_hll_sketch(precision: int = DEFAULT_PRECISION) -> HyperLogLog:
-    return HyperLogLog(precision=precision)
-
-
-def merge_hll_sketches(blobs: Iterable[bytes | bytearray], precision: int = DEFAULT_PRECISION) -> int:
-    acc: HyperLogLog | None = None
-    for blob in blobs:
-        if not blob:
-            continue
-        sketch = HyperLogLog.from_bytes(blob)
-        if acc is None:
-            acc = sketch
-        else:
-            acc.merge(sketch)
-    return acc.count() if acc is not None else 0
-
-
-query_hll_distinct = merge_hll_sketches
-query_hll_distinct_filtered = merge_hll_sketches
-
-
-def query_hll_distinct_by_bucket(rows: Iterable[tuple[Any, bytes | bytearray]]) -> dict[Any, int]:
-    buckets: dict[Any, HyperLogLog] = {}
-    for key, blob in rows:
-        if not blob:
-            continue
-        sketch = HyperLogLog.from_bytes(blob)
-        if key not in buckets:
-            buckets[key] = sketch
-        else:
-            buckets[key].merge(sketch)
-    return {k: v.count() for k, v in buckets.items()}
-
-
-STATIC_DEFAULT: tuple[float, float] = (24.0, 168.0)
-_BANDS: tuple[tuple[float, float, float], ...] = (
-    (1.0, 0.25, 1.0),
-    (4.0, 1.0, 1.0),
-    (24.0, 4.0, 1.0),
-    (48.0, 4.0, 24.0),
-    (168.0, 24.0, 24.0),
-    (math.inf, 24.0, 168.0),
-)
-ANCHOR_QUANTUM_SECONDS = 60
-_FIXED_TOKEN_DELTAS: dict[str, timedelta] = {
-    "1h": timedelta(hours=1),
-    "3h": timedelta(hours=3),
-    "6h": timedelta(hours=6),
-    "12h": timedelta(hours=12),
-    "24h": timedelta(hours=24),
-    "3d": timedelta(days=3),
-    "7d": timedelta(days=7),
-    "30d": timedelta(days=30),
-}
-VALID_RANGE_TOKENS: frozenset[str] = frozenset(_FIXED_TOKEN_DELTAS) | {"auto"}
-
-
-def history_hours_from_earliest(earliest: str | None, *, now: datetime | None = None) -> float | None:
-    dt = parse_iso_utc(earliest)
-    if dt is None:
-        return None
-    anchor = now if now is not None else datetime.now(UTC)
-    return max(0.0, (anchor - dt).total_seconds() / 3600.0)
-
-
-def pick_insights_default(history_hours: float | None) -> tuple[float, float]:
-    if history_hours is None or not math.isfinite(history_hours):
-        return STATIC_DEFAULT
-    for upper, window, baseline in _BANDS:
-        if history_hours < upper:
-            return (window, baseline)
-    return STATIC_DEFAULT
-
-
-def is_valid_range_token(token: str | None) -> bool:
-    return token in VALID_RANGE_TOKENS
-
-
-def quantize_anchor(anchor: str | None, *, now: datetime | None = None) -> str:
-    dt = (parse_iso_utc(anchor) if anchor else None) or (now if now is not None else datetime.now(UTC))
-    epoch = int(dt.timestamp())
-    return iso_z(datetime.fromtimestamp(epoch - (epoch % ANCHOR_QUANTUM_SECONDS), tz=UTC))
-
-
-def _pick_auto_token(earliest_log_at: str | None, *, now: datetime) -> str:
-    history_hours = history_hours_from_earliest(earliest_log_at, now=now)
-    if history_hours is None:
-        return "7d"
-    if history_hours < 7 * 24:
-        return "24h"
-    return "7d" if history_hours < 30 * 24 else "30d"
-
-
-def resolve_window(
-    range_token: str | None,
-    anchor: str | None,
-    *,
-    earliest_log_at: str | None = None,
-    now: datetime | None = None,
-) -> tuple[str, str]:
-    if not is_valid_range_token(range_token) or range_token is None:
-        raise ValueError(f"unrecognized range_token: {range_token!r}")
-    now_dt = now if now is not None else datetime.now(UTC)
-    anchor_dt = parse_iso_utc(quantize_anchor(anchor, now=now_dt))
-    if anchor_dt is None:
-        raise RuntimeError("anchor_dt is unexpectedly None")
-    token = _pick_auto_token(earliest_log_at, now=now_dt) if range_token == "auto" else range_token
-    return iso_z(anchor_dt - _FIXED_TOKEN_DELTAS[token]), iso_z(anchor_dt)
-
-
-def invite_clamp_fingerprint(analyst_session: object | None) -> str | None:
-    if analyst_session is None:
-        return None
-    qs = getattr(analyst_session, "query_start_time", None)
-    qe = getattr(analyst_session, "query_end_time", None)
-    qw = getattr(analyst_session, "query_window_hours", None)
-    return hashlib.sha256(f"{qs or ''}|{qe or ''}|{qw or ''}".encode()).hexdigest()[:16]
-
-
-_MISSING = object()
-
-
-class BoundedTTLCache:
-    def __init__(
-        self,
-        maxsize: int | None = None,
-        ttl_seconds: float = 60.0,
-        *,
-        max_entries: int | None = None,
-        name: str | None = None,
-    ) -> None:
-        resolved_max = max_entries if max_entries is not None else (256 if maxsize is None else maxsize)
-        if resolved_max <= 0:
-            raise ValueError("maxsize must be positive")
-        if ttl_seconds <= 0:
-            raise ValueError("ttl_seconds must be positive")
-        self.maxsize = resolved_max
-        self.ttl = self.ttl_seconds = float(ttl_seconds)
-        self.name = name
-        self._cache: cachetools.TTLCache = cachetools.TTLCache(
-            maxsize=resolved_max, ttl=self.ttl, timer=lambda: time.monotonic()
-        )
-        self.lock = threading.RLock()
-
-    def __contains__(self, key: Any) -> bool:
-        with self.lock:
-            return key in self._cache
-
-    def __getitem__(self, key: Any) -> Any:
-        with self.lock:
-            return self._cache[key]
-
-    def get(self, key: Any, default: Any = None) -> Any:
-        with self.lock:
-            return self._cache.get(key, default)
-
-    def __setitem__(self, key: Any, value: Any) -> None:
-        with self.lock:
-            self._cache[key] = value
-
-    def set(self, key: Any, value: Any) -> None:
-        self[key] = value
-
-    def put(self, key: Any, value: Any) -> None:
-        self[key] = value
-
-    def __delitem__(self, key: Any) -> None:
-        with self.lock:
-            del self._cache[key]
-
-    def delete(self, key: Any) -> bool:
-        with self.lock:
-            return self._cache.pop(key, _MISSING) is not _MISSING
-
-    def pop(self, key: Any, default: Any = _MISSING) -> Any:
-        with self.lock:
-            return self._cache.pop(key) if default is _MISSING else self._cache.pop(key, default)
-
-    def clear(self) -> None:
-        with self.lock:
-            self._cache.clear()
-
-    def __len__(self) -> int:
-        with self.lock:
-            return len(self._cache)
-
-    def __iter__(self) -> Iterator[Any]:
-        with self.lock:
-            return iter(list(self._cache.keys()))
-
-    def keys(self) -> list[Any]:
-        with self.lock:
-            return list(self._cache.keys())
-
-    def values(self) -> list[Any]:
-        with self.lock:
-            return list(self._cache.values())
-
-    def items(self) -> list[tuple[Any, Any]]:
-        with self.lock:
-            return list(self._cache.items())
-
-
-BoundedCache = BoundedTTLCache
-
-
-def _try_clear_cache(cache: Any) -> bool:
-    clear_fn = getattr(cache, "clear", None)
-    if not callable(clear_fn):
-        return False
-    try:
-        clear_fn()
-        return True
-    except Exception:  # pragma: no cover — best-effort drain
-        return False
-
-
-_PREV_CACHE_ENTRIES: dict[str, Any] = getattr(globals().get("CacheRegistry"), "_entries", {})
-
-
-class CacheRegistry:
-    _entries: dict[str, Any] = _PREV_CACHE_ENTRIES
-    _lock = threading.Lock()
-
-    @classmethod
-    def register(cls, name: str, cache: Any) -> None:
-        with cls._lock:
-            cls._entries[name] = cache
-
-    @classmethod
-    def clear_all(cls) -> None:
-        with cls._lock:
-            caches = list(cls._entries.values())
-        for cache in caches:
-            _try_clear_cache(cache)
-
-    @classmethod
-    def clear(cls, name: str) -> bool:
-        with cls._lock:
-            cache = cls._entries.get(name)
-        return _try_clear_cache(cache) if cache is not None else False
-
-    @classmethod
-    def names(cls) -> list[str]:
-        with cls._lock:
-            return list(cls._entries.keys())
-
-    @classmethod
-    def reset(cls) -> None:
-        with cls._lock:
-            cls._entries.clear()
-
-
 _JSON_CONTENT_TYPES: tuple[str, ...] = ("application/json",)
 _STREAMING_CONTENT_TYPES: tuple[str, ...] = (
     "text/event-stream",
@@ -1515,208 +1317,7 @@ def redact_error_text(msg: object) -> str:
     return ABS_PATH_RE.sub("<path>", scrub_secrets(str(msg)))
 
 
-_DEFAULT_UA = "fastly-log-analysis/1.0"
-
-
-def http_get_text(url: str, *, headers: dict[str, str] | None = None, timeout: float = 30.0) -> str:
-    hdrs = {"User-Agent": _DEFAULT_UA}
-    if headers:
-        hdrs.update(headers)
-    resp = httpx.get(url, headers=hdrs, timeout=timeout, follow_redirects=True)
-    resp.raise_for_status()
-    return resp.content.decode()
-
-
-def make_client(
-    timeout: float | httpx.Timeout | None = 5.0,
-    *,
-    verify: Any = None,
-    transport: httpx.BaseTransport | None = None,
-    **kwargs: Any,
-) -> httpx.Client:
-    if verify is not None:
-        kwargs["verify"] = verify
-    if transport is not None:
-        kwargs["transport"] = transport
-    return httpx.Client(timeout=timeout, **kwargs)
-
-
-def retry_call[T](
-    fn: Callable[[], T],
-    *,
-    retry_on: Callable[[BaseException], bool],
-    attempts: int,
-    base_delay: float = 0.0,
-    max_delay: float | None = None,
-    multiplier: float = 2.0,
-    jitter: float = 0.0,
-    max_elapsed: float | None = None,
-    before_retry: Callable[[BaseException], None] | None = None,
-    sleep: Callable[[float], None] = time.sleep,
-) -> T:
-    if attempts < 1:
-        raise ValueError("attempts must be >= 1")
-
-    def _wait(retry_state: tenacity.RetryCallState) -> float:
-        delay = base_delay * (multiplier ** (retry_state.attempt_number - 1))
-        if max_delay is not None:
-            delay = min(delay, max_delay)
-        if jitter:
-            delay += random.uniform(0, jitter)
-        return max(delay, 0.0)
-
-    def _before_sleep(retry_state: tenacity.RetryCallState) -> None:
-        if before_retry is None:
-            return
-        outcome = retry_state.outcome
-        exc = outcome.exception() if outcome is not None else None
-        if exc is not None:
-            before_retry(exc)
-
-    stop: tenacity.stop.stop_base = tenacity.stop_after_attempt(attempts)
-    if max_elapsed is not None:
-        stop = stop | tenacity.stop_after_delay(max_elapsed)
-    retrying = tenacity.Retrying(
-        retry=tenacity.retry_if_exception(retry_on),
-        stop=stop,
-        wait=_wait,
-        before_sleep=_before_sleep if before_retry is not None else None,
-        reraise=True,
-        sleep=sleep,
-    )
-    return retrying(fn)
-
-
-def parse_iso_utc(s: str | None) -> datetime | None:
-    if not s:
-        return None
-    try:
-        d = datetime.fromisoformat(s.replace("Z", "+00:00"))
-        return d.astimezone(UTC) if d.tzinfo is not None else d.replace(tzinfo=UTC)
-    except ValueError:
-        try:
-            return datetime.strptime(s, "%Y-%m-%d").replace(tzinfo=UTC)
-        except ValueError:
-            return None
-
-
-def parse_window(start: str | None, end: str | None) -> tuple[datetime, datetime] | None:
-    st = parse_iso_utc(start)
-    et = parse_iso_utc(end)
-    if st is None or et is None or et <= st:
-        return None
-    return st, et
-
-
-def parse_hour_key_strict(s: str) -> datetime:
-    return datetime.strptime(s, "%Y-%m-%d-%H").replace(tzinfo=UTC)
-
-
-def parse_hour_key(s: str) -> datetime | None:
-    try:
-        return parse_hour_key_strict(s)
-    except ValueError:
-        return None
-
-
-def parse_day_key_strict(s: str) -> datetime:
-    return datetime.strptime(s, "%Y-%m-%d").replace(tzinfo=UTC)
-
-
-def ensure_utc(dt: datetime) -> datetime:
-    return dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt.astimezone(UTC)
-
-
-def iso_z(dt: datetime) -> str:
-    return dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def iso_z_now() -> str:
-    return iso_z(datetime.now(UTC))
-
-
-def _parse_dt(s: str, default: datetime) -> datetime:
-    dt = parse_iso_utc(s)
-    return dt if dt is not None else default
-
-
-def parse_date_window(start: str, end: str, default_days: int = 7) -> tuple[str, str]:
-    now = datetime.now(UTC)
-    start_dt = _parse_dt(start, now - timedelta(days=default_days))
-    end_dt = _parse_dt(end, now)
-    if len(end) <= 10:
-        end_dt = end_dt.replace(hour=23, minute=59, second=59)
-    return iso_z(start_dt), iso_z(end_dt)
-
-
-def safe_iso(dt) -> str | None:
-    if dt is None:
-        return None
-    if hasattr(dt, "isoformat"):
-        s = dt.isoformat()
-        if not s.endswith("Z") and "+" not in s and s.count("-") <= 2:
-            s += "Z"
-        return s
-    s = str(dt).strip()
-    if not s:
-        return None
-    if " " in s:
-        s = s.replace(" ", "T")
-        if not s.endswith("Z") and "+" not in s:
-            s += "Z"
-    elif "T" in s and not s.endswith("Z") and "+" not in s:
-        s += "Z"
-    return s
-
-
-def parse_window_str_to_dt(s: str) -> datetime:
-    dt = parse_iso_utc(s)
-    if dt is None:
-        raise ValueError(f"Invalid date window string: {s}")
-    return dt
-
-
-def window_to_epoch(start: str, end: str) -> tuple[str, str, int, int]:
-    s, e = parse_date_window(start, end)
-    return s, e, int(parse_window_str_to_dt(s).timestamp()), int(parse_window_str_to_dt(e).timestamp())
-
-
-def parse_relative_time_window(since: str, max_lookback_days: int = 30) -> datetime:
-    now = datetime.now(UTC)
-    if not since:
-        return now - timedelta(hours=1)
-    s = since.strip().lower()
-    try:
-        if s.endswith("h"):
-            hours = max(1, min(int(s[:-1]), max_lookback_days * 24))
-            return now - timedelta(hours=hours)
-        if s.endswith("d"):
-            days = max(1, min(int(s[:-1]), max_lookback_days))
-            return now - timedelta(days=days)
-        if s.endswith("m"):
-            minutes = max(1, min(int(s[:-1]), max_lookback_days * 24 * 60))
-            return now - timedelta(minutes=minutes)
-    except ValueError:
-        pass
-    return now - timedelta(hours=1)
-
-
 # ── Local HTTP S3/CDN telemetry proxy (folded from telemetry_proxy.py) ──
-
-import contextvars
-import logging
-import os
-import queue
-import threading
-import time
-from collections import defaultdict
-
-import aiohttp
-import yarl
-from aiohttp import web
-from botocore.auth import S3SigV4Auth
-from botocore.awsrequest import AWSRequest
-from botocore.credentials import Credentials
 
 # Per-call caller-hint override. When set, the boto3 before-send hook
 # (install_boto3_proxy_hook) writes this value into X-Telemetry-Caller
@@ -2660,19 +2261,13 @@ def _reset_for_tests() -> None:
 _FOLDED_TELEMETRY_SUBMODULES: tuple[str, ...] = (
     "sqlite_profiler",
     "valkey_publisher",
-    "hll",
     "log_throttle",
     "usage_logger",
-    "time_window",
-    "bounded_cache",
-    "cache_registry",
     "telemetry_response_middleware",
     "active_requests",
     "structlog_config",
     "atomic_write",
     "error_redaction",
-    "http",
-    "date_utils",
     "telemetry_proxy",
 )
 _this_telemetry_mod = sys.modules[__name__]
@@ -2681,13 +2276,7 @@ for _submod_name in _FOLDED_TELEMETRY_SUBMODULES:
     sys.modules[f"backend.utils.{_submod_name}"] = _this_telemetry_mod
     if _utils_pkg is not None:
         setattr(_utils_pkg, _submod_name, _this_telemetry_mod)
-sys.modules["backend.core.retry"] = _this_telemetry_mod
-_core_pkg = sys.modules.get("backend.core")
-if _core_pkg is not None:
-    setattr(_core_pkg, "retry", _this_telemetry_mod)
-_backend_pkg = sys.modules.get("backend")
 if _backend_pkg is not None and hasattr(_backend_pkg, "_MODULE_ALIASES"):
     _backend_pkg._MODULE_ALIASES.update(
         {f"backend.utils.{_submod_name}": "backend.utils.telemetry" for _submod_name in _FOLDED_TELEMETRY_SUBMODULES}
     )
-    _backend_pkg._MODULE_ALIASES["backend.core.retry"] = "backend.utils.telemetry"

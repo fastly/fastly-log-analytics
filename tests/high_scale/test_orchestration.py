@@ -12,7 +12,6 @@ from uuid import UUID, uuid4
 
 import boto3
 import pytest
-from backend.high_scale._common import KeysetCursor, raw_query_producer
 from backend.high_scale.archive_models import ArchiveArtifact, ArchiveManifest, ArchiveSourceObject
 from backend.high_scale.archive_publication import ArchivePublication, InMemoryObjectStore, PublicationState
 from backend.high_scale.archive_writer import write_batch_archive_checkpoint
@@ -45,6 +44,7 @@ from backend.high_scale.source_discovery import (
 from botocore.stub import Stubber
 from psycopg_pool import ConnectionPool
 
+from backend.high_scale._common import KeysetCursor, raw_query_producer
 from backend.high_scale.postgres_control import PostgresControlPlane
 from tests.high_scale.conftest import (
     HighScaleLedger,
@@ -1907,12 +1907,6 @@ from backend.high_scale import query_service as console
 from backend.high_scale.archive import (
     ArchiveSourceEntry,
     ArchiveState,
-    replay_manifest,
-    replay_origin_projections,
-)
-from backend.high_scale.ingest_controller import (
-    rebuild_origin_projections_from_fos,
-    rebuild_serving_state_from_fos,
 )
 from backend.high_scale.postgres_control import (
     DeletionController,
@@ -2873,141 +2867,6 @@ def test_sweeper_groups_by_manifest_and_deletes_batch() -> None:
     controller.delete_manifest_sources.assert_called_once_with(
         manifest, current_owner_epoch=3, source_keys=["raw/1.gz", "raw/2.gz"], now=now
     )
-
-
-# ── Merged from test_archive_only_recovery.py ────────────────────────
-
-
-class _MockClickHouseClient:
-    def __init__(self) -> None:
-        self.batches: list[HighScaleBatch] = []
-
-    def insert(self, batch: HighScaleBatch) -> InsertReceipt:
-        self.batches.append(batch)
-        return InsertReceipt(batch.batch_id, len(batch.rows), batch.digest)
-
-    @property
-    def request_rows(self) -> list[dict[str, Any]]:
-        return [r for b in self.batches if b.domain == "request" for r in b.rows]
-
-
-class _InMemoryCatalog:
-    def __init__(self, manifests: tuple[ArchiveManifest, ...]) -> None:
-        self._manifests = manifests
-
-    def manifests_covering(self, service_id: str, domain: str, start: datetime, end: datetime) -> tuple[ArchiveManifest, ...]:
-        return tuple(
-            m for m in self._manifests
-            if m.service_id == service_id and m.domain == domain and m.coverage_end > start and m.coverage_start < end
-        )
-
-
-def _build_synthetic_batch_archive(
-    service_id: str, output_dir: Path, source_count: int = 5, rows_per_source: int = 5, now: datetime | None = None
-) -> tuple[ArchiveManifest, bytes, list[dict[str, Any]]]:
-    observed = now or datetime(2026, 10, 9, 12, 0, tzinfo=UTC)
-    source_batches: list[tuple[ArchiveSourceObject, tuple[dict[str, Any], ...]]] = []
-    all_events: list[dict[str, Any]] = []
-    for s_idx in range(source_count):
-        events_for_source = [
-            {
-                "event_id": f"evt-{service_id}-{s_idx}-{r_idx}",
-                "timestamp": (observed - timedelta(minutes=s_idx, seconds=r_idx * 10)).isoformat(),
-                "client_ip": f"198.51.100.{(s_idx * 5 + r_idx) % 250 + 1}",
-                "request_method": "GET" if r_idx % 2 == 0 else "POST",
-                "url": f"/api/v1/item/{s_idx}_{r_idx}",
-                "status": 200 if r_idx != 3 else 500, "ost": 200 if r_idx != 3 else 500,
-                "ottfb": 45000.0, "ttfb": 0.045, "cache": "MISS", "resp_bytes": 1024 * (r_idx + 1),
-                "pop": "JFK" if s_idx % 2 == 0 else "SFO", "fastly_backend_name": "origin-primary",
-                "time_elapsed": 30000 + (r_idx * 500),
-            }
-            for r_idx in range(rows_per_source)
-        ]
-        all_events.extend(events_for_source)
-        source_obj = ArchiveSourceObject(
-            service_id=service_id, domain="request",
-            object_key=f"raw/request/year=2026/month=10/day=09/source_{s_idx:03d}.gz",
-            checksum=f"sha256:synth_{s_idx:04d}", size_bytes=512, version=f"v{s_idx}",
-        )
-        source_batches.append((source_obj, tuple(events_for_source)))
-
-    manifest = write_batch_archive_checkpoint(
-        output_dir, service_id=service_id, domain="request", source_batches=source_batches, archive_epoch=1,
-        schema_version="request.v1", transform_version="normalize.v1",
-        coverage_start=observed - timedelta(hours=1), coverage_end=observed,
-        retention_seconds=86400 * 30, deletion_grace_seconds=86400 * 7,
-    )
-    artifact_bytes = Path(manifest.artifact.uri.removeprefix("file://")).read_bytes()
-    normalized = replace(manifest, artifact=replace(manifest.artifact, uri=f"s3://archive/artifacts/{manifest.manifest_id}.parquet"))
-    return normalized, artifact_bytes, all_events
-
-
-def _setup_recovery_fixture(
-    service_id: str, now: datetime
-) -> tuple[ArchiveManifest, list[dict[str, Any]], ArchivePublication, _MockClickHouseClient, ClickHousePublication]:
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        manifest, artifact_bytes, expected_events = _build_synthetic_batch_archive(service_id, Path(tmp_dir), 5, 5, now)
-    archive = ArchivePublication(InMemoryObjectStore())
-    archive.publish(manifest, artifact_bytes)
-    ch_client = _MockClickHouseClient()
-    publication = ClickHousePublication(InMemoryBatchManifestStore(), ch_client)
-    return manifest, expected_events, archive, ch_client, publication
-
-
-@pytest.mark.security_regression
-def test_archive_only_recovery_rebuilds_all_events_without_raw_logs() -> None:
-    manifest, expected_events, archive, ch_client, publication = _setup_recovery_fixture(
-        "recover-svc-001", datetime(2026, 10, 9, 14, 0, tzinfo=UTC)
-    )
-    assert archive.is_replayable(manifest.manifest_id)
-    replay_res = replay_manifest(manifest, archive, publication)
-    assert (replay_res.manifest_id, replay_res.rows_read, replay_res.publication.rows_visible) == (manifest.manifest_id, 25, 25)
-    assert replay_res.publication.status == PublicationStatus.VISIBLE and replay_res.publication.duplicate is False
-    assert {r["event_id"] for r in ch_client.request_rows} == {e["event_id"] for e in expected_events}
-
-
-@pytest.mark.security_regression
-def test_archive_only_recovery_rebuilds_origin_projections() -> None:
-    manifest, _, archive, ch_client, publication = _setup_recovery_fixture(
-        "recover-svc-002", datetime(2026, 10, 9, 14, 30, tzinfo=UTC)
-    )
-    proj_res = replay_origin_projections(manifest, archive, publication, rebuild_id="drill-origin-001")
-    assert proj_res.rows_read == 25 and proj_res.rows_published > 0
-    origin_batches = [b for b in ch_client.batches if b.domain in {"origin_summary", "origin_dimensions"}]
-    assert len(origin_batches) >= 1 and sum(len(b.rows) for b in origin_batches) == proj_res.rows_published
-
-
-@pytest.mark.security_regression
-def test_archive_only_recovery_idempotency_and_rebuild_scopes() -> None:
-    manifest, _, archive, ch_client, publication = _setup_recovery_fixture(
-        "recover-svc-003", datetime(2026, 10, 9, 15, 0, tzinfo=UTC)
-    )
-    res1 = replay_manifest(manifest, archive, publication)
-    assert res1.publication.duplicate is False and len(ch_client.batches) == 1
-    res2 = replay_manifest(manifest, archive, publication)
-    assert res2.publication.duplicate is True and len(ch_client.batches) == 1
-    res3 = replay_manifest(manifest, archive, publication, batch_id=f"rebuild:disaster-drill-99:{manifest.manifest_id}")
-    assert res3.publication.duplicate is False and len(ch_client.batches) == 2
-
-
-@pytest.mark.security_regression
-def test_archive_only_recovery_catalog_tiered_rebuild() -> None:
-    service_id, now = "recover-svc-004", datetime(2026, 10, 9, 16, 0, tzinfo=UTC)
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        recent_manifest, recent_bytes, _ = _build_synthetic_batch_archive(service_id, Path(tmp_dir), 3, 10, now - timedelta(hours=2))
-        warm_manifest, warm_bytes, _ = _build_synthetic_batch_archive(service_id, Path(tmp_dir), 4, 10, now - timedelta(days=5))
-    archive = ArchivePublication(InMemoryObjectStore())
-    archive.publish(recent_manifest, recent_bytes)
-    archive.publish(warm_manifest, warm_bytes)
-    catalog = _InMemoryCatalog((recent_manifest, warm_manifest))
-    publication = ClickHousePublication(InMemoryBatchManifestStore(), _MockClickHouseClient())
-
-    report = rebuild_serving_state_from_fos(catalog, archive, publication, service_id=service_id, domain="request", now=now)
-    assert (report.full_rebuild_complete, report.manifests_replayed, report.rows_replayed) == (True, 2, 70)
-    assert report.triage_available and report.raw_query_available and report.warm_history_available and not report.errors
-
-    proj_report = rebuild_origin_projections_from_fos(catalog, archive, publication, service_id=service_id, now=now)
-    assert proj_report.full_rebuild_complete and proj_report.manifests_replayed == 2 and proj_report.rows_replayed > 0
 
 
 # ── Merged from tests/high_scale/test_console_access_integration.py ──

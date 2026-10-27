@@ -26,7 +26,10 @@ import {
   Building2,
   Network,
 } from 'lucide-react'
-import { getSecurityContent, type InsightContent, type InsightHelpModalProps } from '@/components/Insights'
+import { getSecurityContent } from './sections/security'
+import type { InsightContent, InsightHelpModalProps } from '../types'
+
+export { getSecurityContent }
 
 export function getOptimizationContent(id: string): InsightContent | null {
   switch (id) {
