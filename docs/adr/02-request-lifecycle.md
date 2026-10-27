@@ -1,6 +1,9 @@
 # ADR-02 — Request Lifecycle
 
 **Status:** Accepted (Phase 0)
+
+> [!NOTE]
+> **v3.0:** the Iceberg/PyIceberg references below describe the v2 design. Storage is DuckLake now ([ADR-14](14-ducklake-replacement.md)); `backend/core/iceberg/` was replaced by `backend/core/storage/`.
 **Decided by:** v2.0 cleanup planning
 **Supersedes:** `AnalyticsDeps` bundle + standalone `require_service_access` calls (backend/deps.py)
 

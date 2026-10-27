@@ -1,11 +1,14 @@
 # ADR-09 — Error Handling, Retry, and Idempotency
 
 **Status:** Accepted (2026-06-10)
+
+> [!NOTE]
+> **v3.0:** the Iceberg/PyIceberg references below describe the v2 design. Storage is DuckLake now ([ADR-14](14-ducklake-replacement.md)); `backend/core/iceberg/` was replaced by `backend/core/storage/`.
 **Decided by:** v2.0 cleanup retrospective (2026-06-10)
 
 ## 1. Context & Motivation
 
-The codebase has several retry sites — inline `@tenacity.retry` decorators ([backend/utils/rdns_cache.py](../../backend/utils/rdns_cache.py), [backend/cron/jobs/metadata.py](../../backend/cron/jobs/metadata.py)) plus DB-level helpers `_execute_query_with_retry` ([backend/core/duckdb.py](../../backend/core/duckdb.py)) and `execute_with_retry` ([backend/repositories/_base.py](../../backend/repositories/_base.py)) — a canonical self-heal primitive ([`execute_with_stale_view_retry`](../../backend/core/iceberg/view.py)), a two-layer compaction-race retry in [backend/routers/query.py](../../backend/routers/query.py), and an in-flight manifest pattern for crash-safe ingest ([backend/core/ingest.py](../../backend/core/ingest.py)). They work; they were each added in response to a specific incident; nobody has written down the model they collectively express.
+The codebase has several retry sites — inline `@tenacity.retry` decorators ([backend/utils/rdns_cache.py](../../backend/utils/rdns_cache.py), [backend/cron/jobs/metadata.py](../../backend/cron/jobs/metadata.py)) plus DB-level helpers `_execute_query_with_retry` ([backend/core/duckdb.py](../../backend/core/duckdb.py)) and `execute_with_retry` ([backend/repositories/_base.py](../../backend/repositories/_base.py)) — a canonical self-heal primitive ([`execute_with_stale_view_retry`](../../backend/core/storage/_core.py)), a two-layer compaction-race retry in [backend/routers/query.py](../../backend/routers/query.py), and an in-flight manifest pattern for crash-safe ingest ([backend/core/ingest.py](../../backend/core/ingest.py)). They work; they were each added in response to a specific incident; nobody has written down the model they collectively express.
 
 The cost of not having the model written down: every new router and every new cron job re-derives whether/how to retry, and gets it slightly wrong. The 2026-06-10 stale-view incident, the 2026-05-21 ContextVar leak ([MONKEYPATCHES.md §6](../../MONKEYPATCHES.md)), and the compaction-race retry in `query.py` were all caught only because the same operator reviewed the same patterns three times. A second reviewer wouldn't have.
 
@@ -20,7 +23,7 @@ The codebase classifies operations along two axes: **what kind of failure can it
 | Tier | Trigger | Mechanism | Examples |
 |---|---|---|---|
 | **Fast-fail** | Auth, permission, validation errors (HTTP 4xx that aren't 429) | Raise to caller immediately; no retry adds value | `PermissionError`, `HTTPException(403)`, Pydantic validation |
-| **Self-heal once** | Known transient races between writer and reader (compaction, view staleness) | Dedicated retry primitive with cache invalidation in the rebuild step | [`execute_with_stale_view_retry`](../../backend/core/iceberg/view.py) for "No files found"; outer loop in [backend/routers/query.py:32–71](../../backend/routers/query.py) for "Cannot open file" |
+| **Self-heal once** | Known transient races between writer and reader (compaction, view staleness) | Dedicated retry primitive with cache invalidation in the rebuild step | [`execute_with_stale_view_retry`](../../backend/core/storage/_core.py) for "No files found"; outer loop in [backend/routers/query.py:32–71](../../backend/routers/query.py) for "Cannot open file" |
 | **Bounded backoff** | Network / SDK / DB-WAL contention (HTTP 5xx, 429, connection drops, SQLite `database is locked`) | Inline `@tenacity.retry` decorators (e.g. [rdns_cache](../../backend/utils/rdns_cache.py), [cron/jobs/metadata](../../backend/cron/jobs/metadata.py)) and the DB-level `_execute_query_with_retry` / `execute_with_retry` helpers | Fastly API calls, share_db writes, DuckDB httpfs ops |
 
 **The shared primitive.** New bounded-backoff retries use [`retry_call`](../../backend/core/retry.py): an explicit `retry_on` predicate (returning `False` re-raises immediately, so it can never broaden what is retried), `attempts`, exponential `base_delay`/`multiplier`/`max_delay` with optional `jitter`, an optional `max_elapsed` wall-clock budget, a `before_retry` hook for the one specialized recovery step (e.g. busting a view cache), and an injectable `sleep` for tests. It owns retry mechanics only; classification and recovery stay at the call site, which is why it is not a unified executor. A `for`/`while` loop with `try/except` and `sleep` is a hand-rolled retry: `make retry-guard` ratchets them (baseline only goes down). Loops whose timing `retry_call` cannot reproduce (a fixed sleep that also runs after the final attempt, a stepped schedule, status events yielded between attempts) are intentionally left as they are.
@@ -53,7 +56,7 @@ The 2026-06-09 incident (CHANGELOG v1.2.0) showed delete-then-insert under concu
 **Use when:** the second invocation should update existing state, not duplicate it.
 
 #### Pattern D — Per-service RLock around file-system mutations
-[`_get_service_lock`](../../backend/core/iceberg/view.py) serializes file-system mutations (compaction, view rebind) with dashboard query enumeration so the reader doesn't see "Cannot open file" mid-glob. The lock is held only for the FS mutation window — never across blocking I/O.
+[`_get_service_lock`](../../backend/core/storage/catalog.py) serializes file-system mutations (compaction, view rebind) with dashboard query enumeration so the reader doesn't see "Cannot open file" mid-glob. The lock is held only for the FS mutation window — never across blocking I/O.
 
 **Use when:** you delete, rename, or move files that a concurrent reader might enumerate. Document the held-region in a code comment.
 
