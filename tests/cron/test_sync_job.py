@@ -308,6 +308,24 @@ def test_adaptive_ingest_obeys_twenty_second_followup_cap(monkeypatch):
     assert len(calls) == 1
 
 
+def test_adaptive_ingest_drains_backlog_across_full_cap_passes(monkeypatch):
+    now = [0.0]
+    pass_counts = iter([500, 500, 120])
+    sleeps: list[float] = []
+
+    def ingest_fn(**_kwargs):
+        count = next(pass_counts)
+        now[0] += 8.0
+        yield {"type": "done", "new_files": count, "rows_inserted": count * 10}
+
+    monkeypatch.setattr(sync_mod.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(sync_mod.time, "sleep", sleeps.append)
+    events = list(sync_mod._ingest_with_adaptive_followups(ingest_fn, adaptive=True, max_files=500))
+    done = events[-1]
+    assert done["new_files"] == 1120 and done["rows_inserted"] == 11200
+    assert sleeps == []
+
+
 def test_log_discovery_stands_down_for_a_high_scale_shared_source(
     monkeypatch, stub_load_config, stub_progress, stub_post_ingest, stub_usage_log_phase
 ):

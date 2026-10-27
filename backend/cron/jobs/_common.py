@@ -308,17 +308,20 @@ def _ingest_with_adaptive_followups(
     }
     max_files = ingest_kwargs.get("max_files")
     adaptive_deadline_s = float(os.environ.get("INGEST_INCREMENTAL_ADAPTIVE_DEADLINE_S", "5.0"))
+    backlog_deadline_s = float(os.environ.get("INGEST_BACKLOG_DRAIN_DEADLINE_S", "45.0"))
 
     while True:
         if pass_number:
-            sleep_time = 0.0 if (max_files and pass_new_files >= max_files) else 0.5
-            if not adaptive or pass_number >= 3 or time.monotonic() - started + sleep_time > adaptive_deadline_s:
+            hit_cap = bool(max_files and pass_new_files >= max_files)
+            sleep_time = 0.0 if hit_cap else 0.5
+            effective_deadline_s = backlog_deadline_s if hit_cap else adaptive_deadline_s
+            if not adaptive or pass_number >= 3 or time.monotonic() - started + sleep_time > effective_deadline_s:
                 break
             # Publish this pass's rows now; the caller's final refresh only
             # runs after the whole polling window.
             if after_pass is not None and pass_rows > 0:
                 after_pass()
-            if time.monotonic() - started + sleep_time > adaptive_deadline_s:
+            if time.monotonic() - started + sleep_time > effective_deadline_s:
                 break
             if sleep_time > 0:
                 time.sleep(sleep_time)

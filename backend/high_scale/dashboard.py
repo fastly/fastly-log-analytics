@@ -304,12 +304,20 @@ def _facts_time_series(
 
 
 def _filtered_aggregates(
-    service: HighScaleService, req: AggregatesRequest, start_time: str | None, end_time: str | None
+    service: HighScaleService,
+    req: AggregatesRequest,
+    start_time: str | None,
+    end_time: str | None,
+    *,
+    trace: HighScaleSections | None = None,
+    request_watermark: Any = None,
 ):
     start = _range_value(start_time)
     end = _range_value(end_time)
-    trace = HighScaleSections(service.service_id, "dashboard")
-    request_watermark = trace.run("watermark", lambda: service.watermark_for("request"), activity="overhead")
+    if trace is None:
+        trace = HighScaleSections(service.service_id, "dashboard")
+    if request_watermark is None:
+        request_watermark = trace.run("watermark", lambda: service.watermark_for("request"), activity="overhead")
     want_time_series, want_map, want_top_n = _panels(req)
 
     if not req.filters:
@@ -436,6 +444,8 @@ def dashboard_aggregates(
     norm_interval = _normalize_chart_interval(req.chart_interval)
     start = _range_value(start_time)
     end = _range_value(end_time)
+    trace = HighScaleSections(service.service_id, "dashboard")
+    request_watermark = trace.run("watermark", lambda: service.watermark_for("request"), activity="overhead")
     cache_key: str | None = None
     if _HS_DASHBOARD_CACHE_TTL > 0 and start_time is not None and end_time is not None:
         raw_filters = (
@@ -446,6 +456,7 @@ def dashboard_aggregates(
                 "ep": "hs_dashboard_aggregates",
                 "svc": service.service_id,
                 "cid": client_cache_token(service.client),
+                "wm": (_watermark_extent(request_watermark.coverage_end), request_watermark.last_visible_event_id),
                 "s": start.isoformat() if start is not None else None,
                 "e": end.isoformat() if end is not None else None,
                 "f": serialize_filters_for_key(raw_filters),
@@ -469,13 +480,13 @@ def dashboard_aggregates(
         and any(bound.second != 0 or bound.microsecond != 0 for bound in (start, end))
     )
     if req.filters or norm_interval == "1 second" or partial_minutes:
-        resp = _filtered_aggregates(service, req, start_time, end_time)
+        resp = _filtered_aggregates(
+            service, req, start_time, end_time, trace=trace, request_watermark=request_watermark
+        )
         return _cache_agg_resp(cache_key, resp)
 
-    trace = HighScaleSections(service.service_id, "dashboard")
     want_time_series, want_map, want_top_n = _panels(req)
     top_fields, fields_to_query = _fields_to_fetch(req, want_map, want_top_n)
-    request_watermark = trace.run("watermark", lambda: service.watermark_for("request"), activity="overhead")
     all_fields_to_query = list(fields_to_query)
     if "url" not in all_fields_to_query:
         all_fields_to_query.append("url")

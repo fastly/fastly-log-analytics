@@ -288,7 +288,7 @@ def _run_log_discovery_cron(
             done_event: dict = {}
             ingest_outcomes = _new_object_outcome(processed=0)
             processed_files = inserted_rows = corrupt_rows = published_pass_rows = 0
-            max_incremental_files = int(os.environ.get("INGEST_INCREMENTAL_MAX_FILES", "250"))
+            max_incremental_files = int(os.environ.get("INGEST_INCREMENTAL_MAX_FILES", "500"))
             pass_max_files = max_incremental_files if not is_manual else 5000
             pass_max_seconds = 20 if not is_manual else 240
 
@@ -307,6 +307,17 @@ def _run_log_discovery_cron(
                         run_id, service_id, job_name="log_discovery", event=ev
                     ),
                 )
+                try:
+                    refresh_config_status(service_id, include_top_values=False)
+                except Exception:
+                    pass
+                try:
+                    from backend.repositories.dashboard import DASHBOARD_CACHE_TTL, invalidate_service
+
+                    if DASHBOARD_CACHE_TTL > 0:
+                        invalidate_service(src.get("name", ""))
+                except Exception:
+                    pass
                 publish_fn = _resolve_sync_hook(
                     "publish_sync_status_safe", _common.publish_sync_status_safe, _orig_publish_sync_status_safe
                 )
@@ -462,8 +473,12 @@ def _run_log_discovery_cron(
                     run_id, service_id, job_name="log_discovery", event={"type": "error", "message": str(e)}
                 )
 
-    # ── 2. Refresh cached status ──────────────────────────────────────────────
-    do_heavy_refresh = _claim_heavy_refresh(service_id) or bool(force)
+    # ── 2. Refresh cached status & invalidate dashboard cache ────────────────
+    from backend.utils.telemetry import should_defer_cron
+
+    do_heavy_refresh = (
+        False if (not force and should_defer_cron("log_discovery", service_id)) else _claim_heavy_refresh(service_id)
+    ) or bool(force)
     if bool(done_event.get("rows_inserted", 0) > 0 or do_heavy_refresh or force):
         if (sync_enabled or force) and run_id is not None:
             _progress_status(
@@ -481,16 +496,7 @@ def _run_log_discovery_cron(
         if run_id is not None:
             _progress_status(f"refresh_config_status: {int((time.time() - _t0) * 1000)}ms")
 
-    if do_heavy_refresh:
-        _t0 = time.time()
-        try:
-            refresh_config_status(service_id, include_top_values=True)
-        except Exception:
-            pass
-        if run_id is not None:
-            _progress_status(f"refresh_config_status (heavy): {int((time.time() - _t0) * 1000)}ms")
-
-    # ── 3. Invalidate dashboard cache ─────────────────────────────────────────
+    # ── 3. Invalidate dashboard cache immediately before heavy refresh ────────
     _t0 = time.time()
     _invalidated = 0
     try:
@@ -504,6 +510,15 @@ def _run_log_discovery_cron(
         pass
     if run_id is not None and _invalidated:
         _progress_status(f"dashboard cache invalidate ({_invalidated} keys): {int((time.time() - _t0) * 1000)}ms")
+
+    if do_heavy_refresh:
+        _t0 = time.time()
+        try:
+            refresh_config_status(service_id, include_top_values=True)
+        except Exception:
+            pass
+        if run_id is not None:
+            _progress_status(f"refresh_config_status (heavy): {int((time.time() - _t0) * 1000)}ms")
 
     # ── 4. Usage log bookkeeping ──────────────────────────────────────────────
     if (sync_enabled or force) and run_id is not None and do_heavy_refresh:

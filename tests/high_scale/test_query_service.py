@@ -261,6 +261,37 @@ def test_dashboard_cache_does_not_alias_different_event_windows(filtered: bool, 
     assert repeat.response_cache.state == "hit" and len(client.calls) == changed_calls
 
 
+def test_dashboard_cache_invalidates_when_request_watermark_advances() -> None:
+    from dataclasses import replace
+
+    service, client = _recording_service()
+    req = AggregatesRequest(fields=["url"], include_time_series=False, include_map_data=False)
+    start, end = "2026-01-01T00:00:00Z", "2026-01-02T00:00:00Z"
+    first = dashboard.aggregates(service, req, start, end)
+    assert first.response_cache.state == "miss"
+    cached = dashboard.aggregates(service, req, start, end)
+    assert cached.response_cache.state == "hit"
+    calls_before = len(client.calls)
+
+    advanced_service = replace(
+        service,
+        request_watermark=ServingWatermark(
+            service.service_id,
+            "request",
+            2,
+            datetime(2026, 1, 1, 0, 0, tzinfo=UTC),
+            datetime(2026, 1, 2, 0, 5, tzinfo=UTC),
+            "cursor-2",
+            "event-3",
+            "event-3",
+            True,
+        ),
+    )
+    refreshed = dashboard.aggregates(advanced_service, req, start, end)
+    assert refreshed.response_cache.state == "miss" and len(client.calls) > calls_before
+    assert refreshed.latest_log_at == "2026-01-02T00:05:00+00:00"
+
+
 class _ScopeClient:
     def __init__(self) -> None:
         self.scopes: list[dict] = []
