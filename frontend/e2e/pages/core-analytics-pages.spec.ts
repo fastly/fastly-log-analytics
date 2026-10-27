@@ -31,7 +31,7 @@ test.describe('Data Management Page Contract (/logs)', () => {
     const res = await page.goto('/logs')
     expect(res?.status()).toBe(200)
     await expect(page.getByRole('heading', { name: 'Data Management', exact: true })).toBeVisible({ timeout: 30_000 })
-    for (const btnName of [/Import Logs/i, /Sync from Cloud/i, /Commit Buffer/i]) {
+    for (const btnName of [/Import Logs/i, /Backfill Logs/i, /Commit Buffer/i]) {
       await expect(page.getByRole('button', { name: btnName })).toBeVisible({ timeout: 15_000 })
     }
     await assertFooterVisible(page)

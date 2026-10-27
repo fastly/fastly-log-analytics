@@ -626,6 +626,7 @@ test.describe('/admin/trends — Operational Trends & Health Sparklines Contract
     }
     await assertManualRefreshAttribution(page, {
       url: '/admin/trends', readyLocator: page.locator('[data-testid="admin-trends-card-cpu_load_1m"]:visible'),
+      ssrQueryKey: 'metric-history-batch',
       refreshLocator: page.locator('[data-testid="admin-trends-refresh-btn"]:visible'),
       requestFilter: (url) => url.includes('/api/admin/metric-history/batch'),
     })
