@@ -17,7 +17,9 @@ ALLOWLIST=(
   "backend/routers/admin/downloads.py"
   "backend/routers/admin/ingest.py"
   "backend/core/storage/_core.py"
-  "backend/core/metadata/state.py"
+  # 04759853: pinned FOS/CDN fetch + redirect validation moved byte-for-byte
+  # from metadata/base.py; originally sanctioned in metadata/state.py (bcb5fe6c).
+  "backend/core/metadata/state_sync.py"
   "backend/core/metadata/base.py"
   "backend/utils/http.py"
   "backend/utils/telemetry.py"
