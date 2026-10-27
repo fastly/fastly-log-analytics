@@ -3006,7 +3006,7 @@ def test_schedule_cloud_push_is_single_flight_and_coalesces_requests(monkeypatch
         return {}
 
     monkeypatch.setattr(backup, "push_to_cloud", fake_push)
-    monkeypatch.setattr("backend.cron.scheduler.dev_mode_no_crons", lambda: False)
+    monkeypatch.delenv("FLA_DEV_NO_CRONS", raising=False)
     monkeypatch.setattr(backup, "is_high_scale_mode", lambda _src: False)
     src = {"service_id": "svc_coalesce", "name": "svc_coalesce", "bucket": "b"}
     backup.schedule_cloud_push(src, ("logs",))
@@ -3026,8 +3026,8 @@ def test_schedule_cloud_push_does_nothing_without_a_bucket_or_in_dev_no_crons(mo
     ran = []
     monkeypatch.setattr(backup, "push_to_cloud", lambda *a: ran.append(a))
     monkeypatch.setattr(backup, "is_high_scale_mode", lambda _src: False)
-    monkeypatch.setattr("backend.cron.scheduler.dev_mode_no_crons", lambda: False)
+    monkeypatch.delenv("FLA_DEV_NO_CRONS", raising=False)
     backup.schedule_cloud_push({"service_id": "s", "name": "s"})
-    monkeypatch.setattr("backend.cron.scheduler.dev_mode_no_crons", lambda: True)
+    monkeypatch.setenv("FLA_DEV_NO_CRONS", "1")
     backup.schedule_cloud_push({"service_id": "s", "name": "s", "bucket": "b"})
     assert ran == [] and not backup._running

@@ -113,9 +113,8 @@ def push_to_cloud(source: dict, tables: tuple[str, ...] = BACKUP_TABLES) -> dict
 
 def schedule_cloud_push(source: dict, tables: tuple[str, ...] = BACKUP_TABLES) -> None:
     """Run ``push_to_cloud`` on a per-service single-flight daemon thread; requests made meanwhile coalesce into one rerun."""
-    from backend.cron.scheduler import dev_mode_no_crons
-
-    if dev_mode_no_crons() or not source.get("bucket") or is_high_scale_mode(source):
+    dev_no_crons = os.environ.get("FLA_DEV_NO_CRONS", "").lower() in ("1", "true", "yes")
+    if dev_no_crons or not source.get("bucket") or is_high_scale_mode(source):
         return
     service_id = _service_id(source)
     with _lock:
