@@ -1136,6 +1136,43 @@ def _ducklake_retention_delete(con, source: dict, data_retention_days: int, rum_
     return out
 
 
+def _remote_data_path(source: dict) -> bool:
+    return _resolve_data_path(source, source.get("service_id") or source.get("name", "default")).startswith("s3://")
+
+
+def _fos_object_size(source: dict, bucket: str, key: str) -> int:
+    from backend.core.duckdb import _get_fos_client
+
+    try:
+        return int(_get_fos_client(source).head_object(Bucket=bucket, Key=key)["ContentLength"])
+    except Exception:
+        return 0
+
+
+def _scheduled_file_sizes(source: dict, cutoff: datetime) -> dict[str, int]:
+    """Size by file name of this service's FOS files DuckLake has scheduled for deletion and the cleanup will unlink.
+
+    DuckLake keeps only a path once it schedules a file (a merge or rewrite schedules the replaced files at once), so the
+    size is read from FOS just before the cleanup deletes the object.
+    """
+    import psycopg
+
+    dsn = _resolve_catalog_dsn(source.get("service_id") or source.get("name"))
+    if not dsn:
+        return {}
+    root = _resolve_data_path(source, source.get("service_id") or source.get("name", "default"))
+    bucket, _, key = root[len("s3://") :].partition("/")
+    base = f"{key.rstrip('/')}/" if key.strip("/") else ""
+    patterns = [f"main/{ducklake_table_name(source, t)}/%" for t in ("logs", "client_vitals", "client_errors")]
+    with psycopg.connect(dsn.removeprefix("postgres:")) as pg:
+        rows = pg.execute(
+            "SELECT path FROM ducklake_files_scheduled_for_deletion WHERE path_is_relative AND schedule_start < %s "
+            "AND path LIKE ANY(%s)",
+            (cutoff, patterns),
+        ).fetchall()
+    return {os.path.basename(str(r[0])): _fos_object_size(source, bucket, base + str(r[0])) for r in rows}
+
+
 def _ducklake_expire_snapshots(con, source: dict, keep_snapshot_days: int) -> dict:
     """Step 2: prune DuckLake catalog snapshots older than ``keep_snapshot_days``."""
     out: dict[str, Any] = {}
@@ -1174,9 +1211,27 @@ def _ducklake_expire_snapshots(con, source: dict, keep_snapshot_days: int) -> di
     if snapshot_errors:
         out["snapshot_expiry_error"] = "; ".join(snapshot_errors)
 
+    billing_id = str(source.get("service_id") or source.get("name"))
+    sizes: dict[str, int] = {}
+    if _remote_data_path(source):
+        # FOS bills a deleted object for 30 days; read the sizes before the cleanup unlinks them.
+        try:
+            sizes = _scheduled_file_sizes(source, cutoff)
+        except Exception:
+            logger.debug("[ducklake] %s: could not size files for billing", source.get("name"), exc_info=True)
     try:
         cleaned = con.execute("CALL ducklake_cleanup_old_files('lake', older_than => ?)", [cutoff]).fetchall()
         out["data_files_cleaned"] = len(cleaned)
+        if sizes and cleaned:
+            try:
+                from backend.core.metadata.usage_log import record_cloud_copy_deletion
+
+                names = [os.path.basename(str(r[0])) for r in cleaned]
+                billed = sum(sizes.get(n, 0) for n in names)
+                record_cloud_copy_deletion(billing_id, billed, len(names))
+                out["fos_deleted_bytes_billed"] = billed
+            except Exception:
+                logger.debug("[ducklake] %s: could not bill deleted files", source.get("name"), exc_info=True)
     except Exception as e:
         logger.warning("[ducklake] %s: old-file cleanup after expiry failed: %s", source.get("name"), e)
         out["data_file_cleanup_error"] = str(e)

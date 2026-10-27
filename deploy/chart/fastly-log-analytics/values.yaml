@@ -120,7 +120,7 @@ persistence:
   enabled: true
   # Use an existing PVC instead of creating one.
   existingClaim: ""
-  storageClassName: ""
+  storageClassName: "hd-base-ext4"
   accessModes:
     - ReadWriteOnce
   size: 20Gi
@@ -319,9 +319,9 @@ observability:
 global:
   privateObservability:
     enabled: false
-    storageClassName: ""
-    prometheusStorage: 1Gi
-    tempoStorage: 2Gi
+    storageClassName: "hd-base-ext4"
+    prometheusStorage: 6Gi
+    tempoStorage: 6Gi
 
 # Portable high-scale application plane. Disabled by default so standard and
 # high_scale render exactly their existing workload set. Enabling this

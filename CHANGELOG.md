@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `restore-data` restores saved views from the cloud admin-state snapshot, and High-Scale compaction/retention deletions now count as still-billed FOS storage for 30 days in the cost surfaces.
+
 ### Breaking
 
 - Renamed the storage admin API: `/api/admin/iceberg-info` is now `/api/admin/storage-info`, `/api/admin/iceberg-calendar` is `/api/admin/storage-calendar`, `/api/admin/iceberg-tree` is `/api/admin/storage-tree` (it now lists the DuckLake data files: the local data directory in Standard, the FOS `ducklake/` prefix in High-Scale), and `/api/admin/commit-iceberg` is `/api/admin/commit-storage`. The status fields `iceberg_bytes` and `iceberg_files` are now `storage_bytes` and `storage_files`, and the `Iceberg*` response models are `Storage*`.
