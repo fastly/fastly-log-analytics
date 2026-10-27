@@ -15,7 +15,7 @@ function parameters(argv) {
     'paint-event-type': { type: 'string' }, 'paint-timeout-ms': { type: 'string' },
   } });
   if (values.help) return { help: true };
-  if (!['gce-standard', 'local-standard', 'elevation-high-scale'].includes(values.environment)
+  if (!['remote-standard', 'local-standard', 'remote-high-scale'].includes(values.environment)
     || !values['admin-origin'] || !values['analyst-origin'] || !values['service-id']
     || (!values.recover && !['masked', 'unmasked'].includes(values.role))
     || (values.recover && !values.journal) || ![1, 2, 5].includes(Number(values.users))) {
@@ -89,7 +89,7 @@ function writeEvidence(file, evidence) {
 async function main(argv = process.argv.slice(2)) {
   const options = parameters(argv);
   if (options.help) {
-    process.stdout.write('Usage: node scripts/dev/check_analyst_lifecycle.cjs --environment gce-standard|local-standard|elevation-high-scale --admin-origin HTTPS_ORIGIN --analyst-origin HTTPS_ORIGIN --service-id SERVICE_ID --role masked|unmasked [--users 1|2|5] [--journal PRIVATE_JSONL] [--output PRIVATE_JSON]\nRecovery: supply the same origins/service/environment with --recover --journal PRIVATE_JSONL\nOptional painted-action sample (observed-only, qualification stays incomplete):\n  --paint-target SELECTOR --paint-feedback-selector SELECTOR --paint-feedback-text TEXT\n  --paint-result-selector SELECTOR --paint-result-text TEXT (repeat the pair for each required panel)\n  [--paint-event-type click|keydown] [--paint-timeout-ms 1..60000]\nThis checks disposable analyst lifecycle and scope only; performance qualification remains incomplete.\n');
+    process.stdout.write('Usage: node scripts/dev/check_analyst_lifecycle.cjs --environment remote-standard|local-standard|remote-high-scale --admin-origin HTTPS_ORIGIN --analyst-origin HTTPS_ORIGIN --service-id SERVICE_ID --role masked|unmasked [--users 1|2|5] [--journal PRIVATE_JSONL] [--output PRIVATE_JSON]\nRecovery: supply the same origins/service/environment with --recover --journal PRIVATE_JSONL\nOptional painted-action sample (observed-only, qualification stays incomplete):\n  --paint-target SELECTOR --paint-feedback-selector SELECTOR --paint-feedback-text TEXT\n  --paint-result-selector SELECTOR --paint-result-text TEXT (repeat the pair for each required panel)\n  [--paint-event-type click|keydown] [--paint-timeout-ms 1..60000]\nThis checks disposable analyst lifecycle and scope only; performance qualification remains incomplete.\n');
     return;
   }
   const { chromium, request } = require('../../frontend/node_modules/@playwright/test');

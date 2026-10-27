@@ -6,12 +6,21 @@ const { spawnSync } = require('node:child_process');
 const { test } = require('node:test');
 const { parameters, writeEvidence, parsePaintOptions, INVALID_PAINT } = require('../../scripts/dev/check_analyst_lifecycle.cjs');
 
-const args = ['--environment', 'gce-standard', '--admin-origin', 'https://admin.example.com', '--analyst-origin', 'https://analyst.example.com', '--service-id', 'service-test'];
+const args = ['--environment', 'remote-standard', '--admin-origin', 'https://admin.example.com', '--analyst-origin', 'https://analyst.example.com', '--service-id', 'service-test'];
 
 const paintArgs = ['--role', 'masked',
   '--paint-target', 'button.apply-filter',
   '--paint-feedback-selector', '.toast', '--paint-feedback-text', 'Filter applied',
   '--paint-result-selector', 'table tbody tr', '--paint-result-text', '42'];
+
+test('only canonical measurement environment names are accepted', () => {
+  for (const environment of ['local-standard', 'remote-standard', 'remote-high-scale']) {
+    assert.equal(parameters(['--environment', environment, ...args.slice(2), '--role', 'masked']).environment, environment);
+  }
+  for (const environment of ['gce-standard', 'elevation-high-scale', 'unknown']) {
+    assert.throws(() => parameters(['--environment', environment, ...args.slice(2), '--role', 'masked']), /invalid_arguments/);
+  }
+});
 
 test('roles are explicit and normal/stress user counts remain bounded', () => {
   assert.throws(() => parameters(args), /invalid_arguments/);
