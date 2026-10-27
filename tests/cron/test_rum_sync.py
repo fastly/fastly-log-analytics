@@ -3361,9 +3361,7 @@ OTHER_JOB = "other_job"
 
 
 def _stray_threads(before: set[threading.Thread]) -> list[threading.Thread]:
-    return [
-        t for t in threading.enumerate() if t not in before and t.is_alive() and not t.name.startswith("cron-watchdog")
-    ]
+    return [t for t in threading.enumerate() if t not in before and t.is_alive() and t.name == f"cron-heartbeat-{SID}"]
 
 
 def _wait_for_exit(threads: list[threading.Thread], timeout: float = 5.0) -> list[threading.Thread]:

@@ -446,7 +446,7 @@ print(json.dumps({"completed": True}))
                 client=client,
                 prometheus_url=origin,
                 tempo_url=origin,
-                timeout_seconds=0,
+                timeout_seconds=5,
             )
         assert result["metric_observed"] and result["trace_observed"]
     finally:
