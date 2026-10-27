@@ -18,6 +18,7 @@ from backend import config as svcconfig
 from backend.core.metric_expressions import coalesce
 from backend.models.common import FiltersDict
 from backend.models.dashboard import ReaderCoverage
+from backend.repositories import dashboard as _dashboard_repo
 from backend.repositories._base import (
     QueryRunner,
     SectionTimer,
@@ -668,22 +669,14 @@ def summarize_bot_efficiency_rows(rows: list[tuple[str, str, int, int]]) -> list
     return results[:25]
 
 
-def get_top_bots(
-    con: duckdb.DuckDBPyConnection,
+def _top_bots_cache_key(
     src: dict,
     start_time: str | None,
     end_time: str | None,
     filters: FiltersDict,
-    n: int = 10,
+    n: int,
     shared_temp_table: str | None = None,
-    parent_runner: QueryRunner | None = None,
-) -> dict:
-    from backend.repositories import dashboard as _dashboard_repo
-
-    timer = SectionTimer()
-    section_timings = timer.entries
-    source_name = src["name"]
-    cache_key: str | None = None
+) -> str | None:
     if (
         _dashboard_repo.DASHBOARD_CACHE_TTL > 0
         and start_time is not None
@@ -699,13 +692,39 @@ def get_top_bots(
             },
             separators=(",", ":"),
         )
-        cache_key = f"top_bots:{_hashlib.sha256(_key_payload.encode()).hexdigest()}:{source_name}"
-        cached_entry = _dashboard_repo._dashboard_cache.get(cache_key)
-        if cached_entry is not None:
-            _cached_at, cached_res = cached_entry
-            return cache_result(
-                cached_res, state="hit", ttl_seconds=_dashboard_repo._dashboard_cache.ttl, prewarmer=False
-            )
+        return f"top_bots:{_hashlib.sha256(_key_payload.encode()).hexdigest()}:{src['name']}"
+    return None
+
+
+def peek_top_bots(
+    src: dict,
+    start_time: str | None,
+    end_time: str | None,
+    filters: FiltersDict,
+    n: int = 10,
+) -> dict | None:
+    key = _top_bots_cache_key(src, start_time, end_time, filters, n)
+    return _dashboard_repo._lookup_dashboard_cache(key) if key is not None else None
+
+
+def get_top_bots(
+    con: duckdb.DuckDBPyConnection,
+    src: dict,
+    start_time: str | None,
+    end_time: str | None,
+    filters: FiltersDict,
+    n: int = 10,
+    shared_temp_table: str | None = None,
+    parent_runner: QueryRunner | None = None,
+) -> dict:
+    timer = SectionTimer()
+    section_timings = timer.entries
+    source_name = src["name"]
+    cache_key = _top_bots_cache_key(src, start_time, end_time, filters, n, shared_temp_table)
+    if cache_key is not None:
+        cached = _dashboard_repo._lookup_dashboard_cache(cache_key)
+        if cached is not None:
+            return cached
     table_name = _safe_table(source_name)
     runner = parent_runner if parent_runner is not None else QueryRunner(con, src)
 

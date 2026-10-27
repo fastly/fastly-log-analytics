@@ -3,6 +3,115 @@ const { EventEmitter } = require('node:events');
 const { test } = require('node:test');
 const fs = require('node:fs');
 const { describeResponse, collectResponseMeasurements, measurePaintedAction, budgets } = require('../../scripts/lib/section_measurements.cjs');
+const { summarizeRequests, metricDelta, summarizeSample, renderReport, ledger, finishAll, journey } = require('../../scripts/dev/profile_dashboard.cjs');
+
+test('analyst journeys retain the fixture-owned, origin-guarded page even on failure', async () => {
+  const directory = fs.mkdtempSync(require('node:path').join(require('node:os').tmpdir(), 'dashboard-journey-'));
+  let closed = false;
+  let detached = false;
+  const page = {
+    setDefaultTimeout() {}, setDefaultNavigationTimeout() {},
+    async setViewportSize() {}, async addInitScript() {},
+    async waitForResponse() {}, async goto() { throw new Error('navigation-stopped'); },
+    async close() { closed = true; },
+  };
+  const context = Object.assign(new EventEmitter(), {
+    async newPage() { throw new Error('unguarded-page-created'); },
+    async addCookies() {}, async setExtraHTTPHeaders() {},
+    async newCDPSession(target) {
+      assert.equal(target, page);
+      return { async send() { return { metrics: [] }; }, async detach() { detached = true; } };
+    },
+  });
+  try {
+    await assert.rejects(journey({}, context, 'https://example.test', '', directory,
+      'masked-analyst', false, page), /navigation-stopped/);
+    assert.equal(closed, false);
+    assert.equal(detached, true);
+    assert.equal(context.listenerCount('request'), 0);
+  } finally {
+    fs.rmSync(directory, { recursive: true });
+  }
+});
+
+test('dashboard pilot retains failed requests, redirects and streams at cutoff', async () => {
+  const context = new EventEmitter();
+  const record = ledger(context);
+  const first = { url: () => 'https://example.test/first', method: () => 'GET',
+    resourceType: () => 'fetch', redirectedFrom: () => null, headers: () => ({}),
+    timing: () => ({ responseEnd: 10 }), sizes: async () => ({ responseBodySize: 64 }) };
+  const redirected = { ...first, url: () => 'https://example.test/redirected', redirectedFrom: () => first,
+    failure: () => ({ errorText: 'net::ERR_ABORTED' }) };
+  const stream = { ...first, url: () => 'https://example.test/api/log-extents/stream' };
+  context.emit('request', first);
+  context.emit('response', { request: () => first, status: () => 302, headers: () => ({}) });
+  context.emit('requestfinished', first);
+  record.setPhase('filter');
+  context.emit('request', redirected);
+  context.emit('requestfailed', redirected);
+  context.emit('request', stream);
+  await record.stop();
+  const summary = summarizeRequests(record.rows);
+  assert.deepEqual([summary.count, summary.finished, summary.failed, summary.open, summary.redirects], [3, 1, 1, 1, 1]);
+  assert.equal(record.rows[1].phase, 'filter');
+  assert.equal(record.rows[1].failure, 'net::ERR_ABORTED');
+  assert.equal(record.rows[0].response_bytes, 64);
+  assert.equal(context.listenerCount('request'), 0);
+});
+
+test('renderer measurements preserve separate durations and reject missing evidence', () => {
+  const before = { TaskDuration: 1, ScriptDuration: 0.1, LayoutDuration: 0.2, RecalcStyleDuration: 0.3 };
+  const after = { TaskDuration: 2, ScriptDuration: 0.6, LayoutDuration: 0.45, RecalcStyleDuration: 0.425 };
+  assert.deepEqual(metricDelta(before, after), {
+    TaskDuration: 1000, ScriptDuration: 500, LayoutDuration: 250, RecalcStyleDuration: 125,
+  });
+  assert.throws(() => metricDelta({}, after), /renderer_metric_missing/);
+});
+
+test('pilot report flags cross-path count mismatches without exporting raw private evidence', () => {
+  const sample = {
+    role: 'admin', traced: true, load_asserted_ms: 100, filter_asserted_ms: 200,
+    deployed_footer_commit: 'abc1234', assertions: { country_count_consistent: false },
+    initial: { country: 'PRIVATE_COUNTRY', count: 40 }, filtered: { count: 30 },
+    load_renderer_ms: {}, filter_renderer_ms: {},
+    browser_performance: { navigation: [{ name: 'PRIVATE_ORIGIN' }], paint: [],
+      entries: [{ type: 'longtask', duration: 60 }, { type: 'event', start: 10, processingStart: 30 }] },
+    requests: { count: 2, finished: 1, failed: 0, open: 1, redirects: 0, http_errors: 0,
+      endpoints: [{ endpoint: '/PRIVATE_SERVICE', url: 'PRIVATE_ORIGIN' }] },
+    diagnostics: [{ phase: 'load', raw_sql: 'PRIVATE_SQL',
+      components: [
+        { component: 'aggregates', cache_state: 'hit', execution_reused: true,
+          sections: [{ section: 'wide_temp_create', ms: 987654321, current_execution: false }] },
+        { component: 'top_bots', cache_state: 'hit', execution_reused: true },
+        { component: 'response', cache_state: 'bypass', execution_reused: false,
+          sections: [{ section: 'bundle:primary_checkout', ms: 420, current_execution: null }] },
+      ] }],
+  };
+  const summary = summarizeSample(sample);
+  const report = renderReport([summary], { checked_out_commit: 'def5678' });
+  assert.equal(summary.browser.maximum_observed_input_delay_ms, 20);
+  assert.equal(summary.browser.long_task_total_ms, 60);
+  assert.equal(summary.requests.open_at_cutoff, 1);
+  assert.equal(summary.components[0].execution_reused, true);
+  assert.match(report, /FAILED or unverified/);
+  assert.match(report, /not an overhead estimate or a before\/after improvement/);
+  assert.match(report, /\| admin \| yes \| load \| 420 \| unknown \| unknown \| unknown \|/);
+  assert.equal(report.includes('987654321'), false);
+  for (const secret of ['PRIVATE_COUNTRY', 'PRIVATE_ORIGIN', 'PRIVATE_SERVICE', 'PRIVATE_SQL']) {
+    assert.equal(JSON.stringify(summary).includes(secret), false);
+    assert.equal(report.includes(secret), false);
+  }
+});
+
+test('pilot cleanup continues after an individual artifact or browser cleanup failure', async () => {
+  const seen = [];
+  await assert.rejects(finishAll([
+    async () => { seen.push('trace'); throw new Error('trace_write_failed'); },
+    async () => { seen.push('browser'); },
+    async () => { seen.push('ledger'); },
+  ]), AggregateError);
+  assert.deepEqual(seen, ['trace', 'browser', 'ledger']);
+});
 
 test('default false does not establish miss and missing timing is explicit', () => {
   const report = describeResponse({ _is_cached: false });

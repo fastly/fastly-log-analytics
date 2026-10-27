@@ -34,6 +34,7 @@ from backend.core.duckdb_pool import _PoolBusy
 from backend.core.request_context import RequestContext, build_request_context
 from backend.main import app
 from backend.provision.rum_orchestrator_v2 import upgrade_faro_version
+from backend.repositories import security as security_repo
 from backend.routers import rum as rum_router
 from backend.routers.query import _redact_paths
 from backend.routers.rum import router as _rum_api_router
@@ -381,6 +382,87 @@ def test_bundle_parallel_checkout_and_fallbacks(client, stub_aggregates, stub_to
         if error_cls is None:
             mock_cm.__enter__.assert_called_once()
             mock_cm.__exit__.assert_called_once()
+
+
+@pytest.mark.parametrize("sections", [None, ["core"], ["bots"]])
+async def test_cached_bundle_skips_connections_after_resolving_scoped_window(monkeypatch, sections):
+    source = {"name": "cached_bundle", "service_id": "cached_bundle"}
+    bounds = ("2026-06-12T00:15:00Z", "2026-06-12T00:45:00Z")
+    ctx = SimpleNamespace(
+        source=source,
+        high_scale=None,
+        resolve_window=MagicMock(return_value=bounds),
+        prewarm_con=AsyncMock(side_effect=AssertionError("cached response checked out a connection")),
+    )
+    aggregates = {"total_rows": 7}
+    bots = {"bots": [{"name": "Example bot", "request_count": 3}], "ngwaf_bots": []}
+    aggregate_peek = MagicMock(return_value=aggregates)
+    bot_peek = MagicMock(return_value=bots)
+    monkeypatch.setattr(dash.repo, "peek_aggregates", aggregate_peek)
+    monkeypatch.setattr(security_repo, "peek_top_bots", bot_peek, raising=False)
+    checkout = MagicMock(side_effect=AssertionError("cached response acquired a second connection"))
+    monkeypatch.setattr("backend.core.duckdb_pool.checkout_connection", checkout)
+    req = AggregatesRequest(**_BUNDLE_BODY, fields=["country"], sections=sections)
+
+    result = await dash.dashboard_bundle(req, ctx)
+
+    ctx.resolve_window.assert_called_once_with(req)
+    ctx.prewarm_con.assert_not_called()
+    checkout.assert_not_called()
+    want_aggregates = sections != ["bots"]
+    want_bots = sections != ["core"]
+    assert result["aggregates"] == (aggregates if want_aggregates else None)
+    assert result["top_bots"] == (bots if want_bots else None)
+    assert aggregate_peek.called is want_aggregates
+    assert bot_peek.called is want_bots
+    for peek in (aggregate_peek, bot_peek):
+        if peek.called:
+            assert peek.call_args.kwargs["src"] is source
+            assert peek.call_args.kwargs["start_time"] == bounds[0]
+            assert peek.call_args.kwargs["end_time"] == bounds[1]
+            assert peek.call_args.kwargs["filters"] == req.filters
+    if want_aggregates:
+        assert aggregate_peek.call_args.kwargs["fields_filter"] == ["country"]
+        assert aggregate_peek.call_args.kwargs["include_top_n"] is (sections is None)
+
+
+@pytest.mark.parametrize("missing", ["aggregates", "bots"])
+async def test_cached_bundle_partial_miss_keeps_existing_reader_path(monkeypatch, missing):
+    source = {"name": "partial_bundle", "service_id": "partial_bundle"}
+    ctx = SimpleNamespace(
+        source=source,
+        high_scale=None,
+        con=object(),
+        resolve_window=MagicMock(return_value=("2026-06-12T00:00:00Z", "2026-06-12T01:00:00Z")),
+        prewarm_con=AsyncMock(),
+    )
+    aggregates = {"total_rows": 7}
+    bots = {"bots": [], "ngwaf_bots": []}
+    get_aggregates = MagicMock(return_value=aggregates)
+    get_aggregates.__module__ = "backend.repositories.dashboard"
+    get_bots = MagicMock(return_value=bots)
+    get_bots.__module__ = "backend.repositories.security"
+    monkeypatch.setattr(dash.repo, "get_aggregates", get_aggregates)
+    monkeypatch.setattr(security_repo, "get_top_bots", get_bots)
+    monkeypatch.setattr(
+        dash.repo, "peek_aggregates", MagicMock(return_value=None if missing == "aggregates" else aggregates)
+    )
+    monkeypatch.setattr(
+        security_repo, "peek_top_bots", MagicMock(return_value=None if missing == "bots" else bots), raising=False
+    )
+    monkeypatch.setattr(
+        "backend.core.duckdb_pool.checkout_connection", MagicMock(side_effect=RuntimeError("no second connection"))
+    )
+
+    result = await dash.dashboard_bundle(AggregatesRequest(), ctx)
+
+    ctx.prewarm_con.assert_awaited_once()
+    get_aggregates.assert_called_once()
+    get_bots.assert_called_once()
+    assert get_aggregates.call_args.kwargs["con"] is ctx.con
+    assert get_bots.call_args.kwargs["con"] is ctx.con
+    assert result["aggregates"] == aggregates
+    assert result["top_bots"] == bots
 
 
 async def _measure_heartbeat_ticks(coro) -> tuple[Any, int]:

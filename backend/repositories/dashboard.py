@@ -738,6 +738,7 @@ def _compute_dashboard_aggregates(
                     _phase_log=section_timings,
                     actual_cols=list(actual_cols),
                     schema_types=schema_types,
+                    exact_window=start_time is not None and end_time is not None,
                 ),
             )
             for f_name, _f_val, f_count in all_top_res:
@@ -1050,8 +1051,8 @@ def get_field_values(
     def _resp(vals: list) -> dict:
         return {"values": vals, "field": field, **runner.telemetry()}
 
-    # Try top-values cache first (no-search path only)
-    if not search:
+    # The reservoir sample has no time or filter scope.
+    if not search and start_time is None and end_time is None and not filters:
         try:
             from backend.core.duckdb import _cache_dir
 

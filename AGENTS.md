@@ -1346,6 +1346,26 @@ Standard keeps DuckLake Parquet on local disk and the catalog in Postgres. The c
 - **Restore** (`restore-data` CLI, `restore_from_cloud`) downloads missing files, creates absent tables from the Parquet schema and registers files with `ducklake_add_data_files`, which is not idempotent: it skips files `ducklake_list_files` already lists. It also rebuilds the Postgres `ingested_files` index from each restored row's `_source_file`, so raw `.gz` still in the bucket are not ingested twice; other operational metadata (cron history, usage log) is not restored, and raw objects that produced no rows are simply read again.
 - **Window of exposure:** data ingested since the last successful push exists only locally. The push cost model is in the Usage page calculator (Class A per file, 30-day minimum billing on rewritten files).
 
+### 51. Field-picker reservoir samples have no request scope
+
+`top_values.json` is an unbounded reservoir sample. `get_field_values` may use
+it only without search, time bounds or active filters. Scoped suggestions must
+query the scoped data while retaining the existing own-field filter exclusion.
+The regression cases live in `tests/repositories/test_top_n_rollups_golden.py`.
+
+### 52. Dashboard top-N must clip partial hours and include the exact endpoint
+
+Whole-hour aggregates cannot represent a partial leading or trailing hour.
+The dashboard's bounded top-N read selects only fully contained closed hours,
+merges scoped raw boundary slices and the inclusive endpoint, and retains the
+existing direct active-hour path. Virtual CSV fields need the same boundaries.
+Other callers retain their existing half-open contract. Read failures must not
+be converted into a successful partial result on this exact-window path.
+Existing any-field coverage and bounded gap-healing limits still apply; this
+does not establish complete historical coverage. Real-DuckDB cases in
+`tests/repositories/test_top_n_rollups_golden.py` compare country, map and virtual
+counts across active/closed transitions, including a missing hourly bundle.
+
 ### Bounded ClickHouse diagnostic index (ADR-20)
 
 `backend/core/clickhouse_{manifest,publication,rows,export}.py` (`clickhouse_schema` folded into `clickhouse_publication.py`) implements

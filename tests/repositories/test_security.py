@@ -19,6 +19,7 @@ from backend.repositories._sql.security import GET_SECURITY_PROXIES_COMBINED
 
 from backend.models.common import FilterSpec
 from backend.repositories import _base, security
+from backend.repositories import dashboard as dashboard_repo
 from backend.repositories._base import (
     _EMPTY_ROLLUP_WARN_TS,
     _LIVE_TOPN_SKIP_FIELDS,
@@ -57,6 +58,42 @@ def _seed_logs(con, src: dict, num_logs: int = 10, **overrides: Any) -> str:
             log[k] = v(i) if callable(v) else v
     insert_mock_logs(con, table_name, logs)
     return table_name
+
+
+def test_top_bots_cache_peek_matches_real_reader_and_preserves_scope(
+    in_memory_duckdb, test_service_source, monkeypatch
+):
+    now = datetime.now(UTC)
+    _seed_logs(in_memory_duckdb, test_service_source, num_logs=5, timestamp=now.isoformat())
+    classify = MagicMock(return_value=[{"id": "test-bot", "request_count": 5}])
+    monkeypatch.setattr(security, "classify_ua_counts", classify)
+    monkeypatch.setattr(dashboard_repo, "DASHBOARD_CACHE_TTL", 30)
+    kwargs = {
+        "src": test_service_source,
+        "start_time": (now - timedelta(minutes=5)).isoformat(),
+        "end_time": (now + timedelta(minutes=1)).isoformat(),
+        "filters": {},
+        "n": 3,
+    }
+    original = get_top_bots(con=in_memory_duckdb, **kwargs)
+    classify.assert_called_once()
+    monkeypatch.setattr(security, "QueryRunner", MagicMock(side_effect=AssertionError("cache opened a reader")))
+    cached = security.peek_top_bots(**kwargs)
+    assert cached is not None
+    assert cached["bots"] == original["bots"]
+    assert cached["_response_cache"]["state"] == "hit"
+    assert get_top_bots(con=None, **kwargs)["bots"] == original["bots"]
+    assert security.peek_top_bots(**{**kwargs, "n": 4}) is None
+    assert security.peek_top_bots(**{**kwargs, "src": {**test_service_source, "name": "other_bots"}}) is None
+    assert (
+        security.peek_top_bots(**{**kwargs, "filters": {"country": FilterSpec(mode="include", values=["US"])}}) is None
+    )
+    assert security.peek_top_bots(**{**kwargs, "start_time": (now - timedelta(minutes=4)).isoformat()}) is None
+    assert security.peek_top_bots(**{**kwargs, "start_time": None}) is None
+    with pytest.raises(AssertionError, match="cache opened a reader"):
+        get_top_bots(con=None, shared_temp_table="external_temp", **kwargs)
+    monkeypatch.setattr(dashboard_repo, "DASHBOARD_CACHE_TTL", 0)
+    assert security.peek_top_bots(**kwargs) is None
 
 
 def _use_cache_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:

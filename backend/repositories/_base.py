@@ -45,6 +45,8 @@ from backend.core.rollups._common import (
     SECURITY_TOPIPS_BUNDLE_FILENAME,
     SLOW_URLS_BUNDLE_FILENAME,
     VERIFIED_BOTS_TS_BUNDLE_FILENAME,
+    _VIRTUAL_FIELD_BACKING,
+    _build_virtual_field_copy_query,
     _hour_bundled_root,
     _ip_spread_root,
     _is_safe_ident,
@@ -787,6 +789,7 @@ class QueryRunner:
         actual_cols: list[str] | None = None,
         schema_types: dict[str, str] | None = None,
         _coverage_reader: Literal["dashboard.top_n", "dashboard.ua_bots"] = "dashboard.top_n",
+        exact_window: bool = False,
     ) -> tuple[list[tuple[str, Any, int]], list[str]]:
         from backend.core.duckdb import _cache_dir
         from backend.core.rollups import _safe_table_for
@@ -822,8 +825,15 @@ class QueryRunner:
         observed.top_n_plan = TopNRollupCoverage()
         win = _TopNWindow.build(st_dt, et_dt, datetime.now(UTC))
         active_dt = win.active_dt
+        plan_win = win
+        if exact_window:
+            closed_start = st_dt.replace(minute=0, second=0, microsecond=0) if st_dt else None
+            if st_dt is not None and closed_start is not None and st_dt > closed_start:
+                closed_start += timedelta(hours=1)
+            closed_end = et_dt.replace(minute=0, second=0, microsecond=0) if et_dt else None
+            plan_win = _TopNWindow.build(closed_start, closed_end, active_dt)
         _t_dir_enum = time.perf_counter()
-        plan = _plan_top_n_paths(cache_dir, safe_fields, win, observation=observed.top_n_plan)
+        plan = _plan_top_n_paths(cache_dir, safe_fields, plan_win, observation=observed.top_n_plan)
         day_paths, hour_paths = plan.paths.day_paths, plan.paths.hour_paths
         bundled_hour_paths, bundled_day_paths = plan.paths.bundled_hour_paths, plan.paths.bundled_day_paths
         _phase("dir_enum", (time.perf_counter() - _t_dir_enum) * 1000)
@@ -846,9 +856,44 @@ class QueryRunner:
                 raise
             except Exception:
                 observed.top_n_plan.rolled_read = "failed"
+                if exact_window:
+                    raise
                 rolled_res = []
         _phase("rolled_res", (time.perf_counter() - _t_rolled) * 1000)
         schema = _SchemaSeeds(actual_cols, schema_types)
+        if exact_window:
+            real_fields = [field for field in safe_fields if field not in _VIRTUAL_FIELD_BACKING]
+            _t_live = time.perf_counter()
+            live_res, partial_rows = self._top_n_live_active_hour(
+                win,
+                real_fields,
+                base_table,
+                pre_merge_limit,
+                pre_merge_per_field_limits,
+                schema,
+                _phase,
+                observation=observed,
+                fail_on_error=True,
+            )
+            _phase("live_active_hour", (time.perf_counter() - _t_live) * 1000)
+            missing_hours = _find_unrolled_hours(
+                plan, plan_win, safe_fields, _MISSING_HOUR_HEAL_CAP, observation=observed.top_n_plan
+            )
+            _t_raw = time.perf_counter()
+            raw_res = self._top_n_exact_window_rows(
+                win, missing_hours, safe_fields, base_table, pre_merge_limit, pre_merge_per_field_limits, schema
+            )
+            _phase("raw_boundaries", (time.perf_counter() - _t_raw) * 1000)
+            if missing_hours:
+                observed.closed_hour_heal = "used"
+            top_results, _ = _truncate_top_n(
+                _fold_rows(rolled_res, raw_res, live_res, [row for row in partial_rows if row[0] in real_fields]),
+                fields,
+                limit,
+                per_field_limits,
+            )
+            observed.outcome = "served"
+            return top_results, fields
         _t_live = time.perf_counter()
         live_res, partial_rows = self._top_n_live_active_hour(
             win,
@@ -901,6 +946,48 @@ class QueryRunner:
         observed.outcome = "served"
         return top_results, fields
 
+    def _top_n_exact_window_rows(
+        self,
+        win: _TopNWindow,
+        missing_hours: list[str],
+        fields: list[str],
+        base_table: str,
+        limit: int,
+        per_field_limits: dict[str, int] | None,
+        schema: _SchemaSeeds,
+    ) -> list[tuple]:
+        raw_hours = set(missing_hours)
+        for bound in (win.st_dt, win.et_dt):
+            if bound is not None:
+                hour = bound.replace(minute=0, second=0, microsecond=0)
+                if hour < win.active_dt and bound != hour:
+                    raw_hours.add(hour.strftime("%Y-%m-%d-%H"))
+        where = _heal_where_clause(sorted(raw_hours), win.st_dt, win.et_dt) if raw_hours else "FALSE"
+        virtual_where = where
+        if (win.et_dt is None or win.et_dt > win.active_dt) and (win.st_dt is None or win.st_dt < win.active_dt_end):
+            virtual_where = _heal_where_clause(sorted(raw_hours | {win.active_str}), win.st_dt, win.et_dt)
+        # Dashboard raw reads include the endpoint; hourly aggregates are half-open.
+        if win.et_dt is not None:
+            where = f"({where}) OR timestamp = TIMESTAMPTZ '{win.et_dt.isoformat()}'"
+            virtual_where = f"({virtual_where}) OR timestamp = TIMESTAMPTZ '{win.et_dt.isoformat()}'"
+        if where == "FALSE" and virtual_where == "FALSE":
+            return []
+        schema.ensure(self.get_schema_cols, lambda: {c["name"]: c["type"] for c in _get_schema(self.con, self.src)})
+        scoped_table = f"(SELECT * FROM {base_table} WHERE {where})"
+        real_fields = [f for f in fields if f in schema.cols]
+        rows, _ = self.execute_top_n_batch(
+            real_fields, scoped_table, schema.cols, schema.types, limit=limit, per_field_limits=per_field_limits
+        )
+        for field in fields:
+            backing = _VIRTUAL_FIELD_BACKING.get(field)
+            if backing is None or backing not in schema.cols:
+                continue
+            query = _build_virtual_field_copy_query(base_table, field, backing, virtual_where)
+            rows.extend(
+                self.execute(f"SELECT field, value, SUM(count) AS c FROM ({query}) GROUP BY field, value").fetchall()
+            )
+        return rows
+
     def _top_n_live_active_hour(
         self,
         win: _TopNWindow,
@@ -912,6 +999,7 @@ class QueryRunner:
         _phase: Callable[[str, float], None],
         *,
         observation: ReaderCoverage | None = None,
+        fail_on_error: bool = False,
     ) -> tuple[list[tuple], list[tuple]]:
         st_dt, et_dt, active_dt = win.st_dt, win.et_dt, win.active_dt
         live_res: list[tuple] = []
@@ -986,6 +1074,8 @@ class QueryRunner:
         except Exception:
             if observation is not None:
                 observation.live_top_up = "failed"
+            if fail_on_error:
+                raise
             _logger.exception("[top_n_rollups] live active hour query failed")
         return live_res, partial_rows
 
