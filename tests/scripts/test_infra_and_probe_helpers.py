@@ -573,7 +573,7 @@ const frontendWindow = {
   }},
 };
 function loadFrontend(relativePath) {
-  if (relativePath === 'lib/date.ts' || relativePath === 'lib/format.ts') relativePath = 'lib/utils.ts';
+  if (relativePath === 'lib/date.ts') relativePath = 'lib/utils.ts';
   const filename = frontendPath.resolve(frontendRoot, relativePath);
   if (modules.has(filename)) return modules.get(filename).exports;
   const module = {exports: {}};
@@ -581,9 +581,10 @@ function loadFrontend(relativePath) {
   const code = ts.transpileModule(frontendFs.readFileSync(filename, 'utf8'), {
     compilerOptions: {module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022}, fileName: filename,
   }).outputText;
+  const dir = frontendPath.posix.dirname(relativePath);
   frontendVm.runInNewContext(code, {
     module, exports: module.exports, Date: Clock, window: frontendWindow, URL, URLSearchParams, console,
-    require: name => name.startsWith('@/') ? loadFrontend(name.slice(2) + '.ts') : frontendRequire(name),
+    require: name => name.startsWith('@/') ? loadFrontend(name.slice(2) + '.ts') : (name.startsWith('./') || name.startsWith('../')) ? loadFrontend(frontendPath.posix.join(dir, name.endsWith('.ts') ? name : name + '.ts')) : frontendRequire(name),
   }, {filename});
   return module.exports;
 }

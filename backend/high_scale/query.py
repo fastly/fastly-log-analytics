@@ -31,6 +31,7 @@ from backend.high_scale.publication import (
 from backend.models.dashboard import QueryRequest as DashboardQueryRequest
 from backend.repositories._base import SectionTimer, _compact_sql_for_debug, _safe_table
 from backend.repositories.query import MAX_QUERY_ROWS
+from backend.repositories.utils.response_shaping import build_query_response_envelope
 from backend.utils.sql_validator import SAFE_IDENT_RE, SQLValidationError, validate_user_sql
 from backend.utils.telemetry import get_tracked_calls
 
@@ -665,18 +666,16 @@ def query_endpoint(
     if mask_ips:
         data = mask_ip_values(data)
     timer.mark("serialize_json", _t_serialize)
-    return {
-        "columns": cols,
-        "data": data,
-        "row_count": len(data),
-        "total_rows": total_rows,
-        "truncated": truncated,
-        "elapsed_ms": int(elapsed_ms),
-        "debug_queries": _debug_queries,
-        "_debug_queries": _debug_queries,
-        "debug_calls": get_tracked_calls(),
-        "section_timings": section_timings,
-    }
+    return build_query_response_envelope(
+        columns=cols,
+        data=data,
+        total_rows=total_rows,
+        truncated=truncated,
+        elapsed_ms=elapsed_ms,
+        debug_queries=_debug_queries,
+        debug_calls=get_tracked_calls(),
+        section_timings=section_timings,
+    )
 
 
 _self_mod = sys.modules[__name__]

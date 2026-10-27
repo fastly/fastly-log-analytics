@@ -17,6 +17,20 @@ from unittest.mock import MagicMock, patch
 import httpx
 import pytest
 from backend.core.oauth.client import OIDCError
+from backend.utils.tunnel.manager import AnalystSession
+from fastapi import FastAPI, HTTPException
+from fastapi.testclient import TestClient
+from joserfc import jwt
+from joserfc.jwk import KeySet, OctKey, RSAKey
+from starlette.requests import Request
+from starlette.responses import Response, StreamingResponse
+
+from backend.core import share_db
+from backend.core.oauth import client, registry
+from backend.core.share_db import validation
+from backend.utils import remote_access as ra
+from backend.utils import tunnel
+from backend.utils.date_utils import parse_iso_utc
 from backend.utils.remote_access import (
     _PII_FORBIDDEN_FILTER_COLS,
     BODY_INSPECT_MAX_BYTES,
@@ -43,20 +57,6 @@ from backend.utils.remote_access import (
     is_request_remote,
     resolve_analyst_insights_clamp,
 )
-from backend.utils.tunnel.manager import AnalystSession
-from fastapi import FastAPI, HTTPException
-from fastapi.testclient import TestClient
-from joserfc import jwt
-from joserfc.jwk import KeySet, OctKey, RSAKey
-from starlette.requests import Request
-from starlette.responses import Response, StreamingResponse
-
-from backend.core import share_db
-from backend.core.oauth import client, registry
-from backend.core.share_db import validation
-from backend.utils import remote_access as ra
-from backend.utils import tunnel
-from backend.utils.date_utils import parse_iso_utc
 from tests.remote_access import conftest as H
 
 

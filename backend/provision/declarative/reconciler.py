@@ -274,7 +274,8 @@ def migrate_config(cfg: dict[str, Any]) -> dict[str, Any]:
 
 def config_changed(before: dict[str, Any], after: dict[str, Any]) -> bool:
     """Detect if migration changed the config structure."""
-    return any(fk in before for _, fields in _MIGRATE_SPECS for fk, _, _ in fields) and before != after
+    has_flat_keys = any(flat_key in before for _, fields in _MIGRATE_SPECS for flat_key, _, _ in fields)
+    return has_flat_keys and before != after
 
 
 _self_state_mod = sys.modules[__name__]
@@ -399,7 +400,11 @@ class DiffResult:
 
     def is_empty(self) -> bool:
         """True if no changes needed."""
-        return not any(getattr(self, f"{k}_to_{op}") for k in _DIFF_KINDS for op in ("add", "update", "remove"))
+        for kind in _DIFF_KINDS:
+            for op in ("add", "update", "remove"):
+                if getattr(self, f"{kind}_to_{op}"):
+                    return False
+        return True
 
     def summary(self) -> dict[str, Any]:
         """Return a summary of changes for logging."""
@@ -413,7 +418,8 @@ class DiffResult:
 def _diff_named_resources(
     current_items: list[Any], desired_items: list[Any], label: str
 ) -> tuple[list[Any], list[Any], list[str]]:
-    cur, des = {item.name: item for item in current_items}, {item.name: item for item in desired_items}
+    cur = {item.name: item for item in current_items}
+    des = {item.name: item for item in desired_items}
     to_add = [item for name, item in des.items() if name not in cur]
     to_update = [item for name, item in des.items() if name in cur and cur[name] != item]
     to_remove = [name for name in cur if name not in des]
@@ -455,7 +461,9 @@ class VclValidationError(Exception):
     """Raised when Fastly VCL validation fails."""
 
     def __init__(self, service_id: str, draft_version: int, errors: str) -> None:
-        self.service_id, self.draft_version, self.errors = service_id, draft_version, errors
+        self.service_id = service_id
+        self.draft_version = draft_version
+        self.errors = errors
         super().__init__(f"VCL validation failed for {service_id} v{draft_version}: {errors}")
 
 
@@ -463,7 +471,8 @@ class LockAcquisitionTimeout(Exception):
     """Raised when VCL lock cannot be acquired within timeout."""
 
     def __init__(self, service_id: str, elapsed_seconds: float) -> None:
-        self.service_id, self.elapsed_seconds = service_id, elapsed_seconds
+        self.service_id = service_id
+        self.elapsed_seconds = elapsed_seconds
         super().__init__(f"Failed to acquire VCL lock for {service_id} after {elapsed_seconds:.1f}s")
 
 
@@ -555,7 +564,11 @@ _FORMAT_KEY_RE = re.compile(r'"([A-Za-z0-9_]+)"\s*:')
 
 
 def _format_field_names(endpoints: list[LoggingEndpoint]) -> set[str]:
-    return {m for ep in endpoints if ep.format_string for m in _FORMAT_KEY_RE.findall(ep.format_string)}
+    fields: set[str] = set()
+    for ep in endpoints:
+        if ep.format_string:
+            fields.update(_FORMAT_KEY_RE.findall(ep.format_string))
+    return fields
 
 
 def build_rum_log_condition(desired_state: FeatureState | None) -> str:
@@ -577,7 +590,8 @@ def _record_reconcile_audit(
     version: int,
 ) -> None:
     """Write a ``log_format_change`` audit row for an activated reconcile."""
-    before, after = _format_field_names(current_endpoints), _format_field_names(desired_endpoints)
+    before = _format_field_names(current_endpoints)
+    after = _format_field_names(desired_endpoints)
     details = {
         "source": "reconciler",
         "version": version,
@@ -701,7 +715,11 @@ def reconcile_vcl_state(
                     if desired_state.rum_enabled:
                         _upload_rum_tracker_best_effort(service_id, token, status_cb)
                     _purge_rum_surrogate_key(service_id, token)
-                    _update_local_config(service_id, lambda c: c.__setitem__("last_activated_version", draft_version))
+
+                    def _set_last_activated_version(c: dict[str, Any]) -> None:
+                        c["last_activated_version"] = draft_version
+
+                    _update_local_config(service_id, _set_last_activated_version)
                 elif status_cb:
                     status_cb(
                         f"✓ Configuration compiled and validated successfully in draft version {draft_version} (activation bypassed)."
@@ -754,7 +772,8 @@ def reconcile_cdn_service_state(
     from backend.core.fastly.client import SHIELD_MAP, load_vcl, region_endpoint
     from backend.provision.fastly_api import _CDN_SNIPPETS
 
-    cdn_managed_backend_names, cdn_managed_dictionary_names = {"fos_origin"}, {"fos_credentials", "cdn_auth"}
+    cdn_managed_backend_names = {"fos_origin"}
+    cdn_managed_dictionary_names = {"fos_credentials", "cdn_auth"}
     start_time = time.time()
     config_path = _config_path(logging_service_id)
     if not config_path.exists():
@@ -775,7 +794,8 @@ def reconcile_cdn_service_state(
         if "rate_limiting_enabled" in fos_proxy_cfg
         else cfg.get("rate_limiting", True)
     )
-    fos_access_key, fos_secret_key = cfg.get("fos_access_key_id", ""), cfg.get("fos_secret_access_key", "")
+    fos_access_key = cfg.get("fos_access_key_id", "")
+    fos_secret_key = cfg.get("fos_secret_access_key", "")
     fos_bucket = cfg.get("fos_bucket", "") or cfg.get("fos_bucket_name", "")
     fos_region = cfg.get("fos_region", "us-east-1")
     fos_host = region_endpoint(fos_region)
@@ -1675,7 +1695,8 @@ def _bootstrap_featurestate_from_fastly(service_id: str, token: str) -> FeatureS
                     scoring_enabled = True
         except Exception:
             pass
-    log_period, rum_log_period = 60, None
+    log_period = 60
+    rum_log_period = None
     for endpoint in endpoints:
         if (
             "Fastly Log Analytics" in endpoint.name or "Fastly Object Storage Logs" in endpoint.name
@@ -1706,7 +1727,12 @@ def _fetch_highest_version(service_id: str, token: str, *, raise_on_error: bool 
         if raise_on_error:
             raise RuntimeError(f"Cannot determine version to clone for {service_id}: {e}")
         return None
-    items = resp if isinstance(resp, list) else (resp.get("items", []) if isinstance(resp, dict) else [])
+    if isinstance(resp, list):
+        items = resp
+    elif isinstance(resp, dict):
+        items = resp.get("items", [])
+    else:
+        items = []
     versions = sorted([int(v.get("number", 0)) for v in items if isinstance(v, dict)])
     return versions[-1] if versions else None
 
@@ -1813,9 +1839,20 @@ def _apply_diff(
     desired_endpoints = desired_endpoints or []
     unmanaged_snippets = [s for s in (current_snippets or []) if not _is_managed_snippet(s.name)]
     vars_to_deconflict = (
-        "fosAccessKey", "fosSecretKey", "fosBucket", "fosRegion", "fosHost", "canonicalHeaders",
-        "signedHeaders", "canonicalRequest", "canonicalQuery", "stringToSign", "dateStamp", "signature", "scope",
-    )  # fmt: skip
+        "fosAccessKey",
+        "fosSecretKey",
+        "fosBucket",
+        "fosRegion",
+        "fosHost",
+        "canonicalHeaders",
+        "signedHeaders",
+        "canonicalRequest",
+        "canonicalQuery",
+        "stringToSign",
+        "dateStamp",
+        "signature",
+        "scope",
+    )
     for snippet in diff.snippets_to_add + diff.snippets_to_update:
         body, subroutine = snippet.body, snippet.subroutine
         for var_name in vars_to_deconflict:
@@ -2115,7 +2152,8 @@ def verify_compute_scorer_readiness(
     import httpx
     from tenacity import Retrying, retry_if_exception_type, stop_after_attempt, wait_exponential
 
-    url, max_retries = f"https://{compute_def.domains[0]}/health", 10
+    url = f"https://{compute_def.domains[0]}/health"
+    max_retries = 10
     for attempt in Retrying(
         stop=stop_after_attempt(max_retries),
         wait=wait_exponential(multiplier=1.0, exp_base=1.5, min=1.0, max=5.0),

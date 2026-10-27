@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from dataclasses import field as _dc_field
 
 from backend.core.request_telemetry import HighScaleSections
-from backend.high_scale._common import _FIELD_DIMENSIONS, resolve_asn_display_labels
+from backend.high_scale._common import _FIELD_DIMENSIONS
 from backend.high_scale._common import bucket as _bucket
 from backend.high_scale._common import build_published_facts_where as _facts_where
 from backend.high_scale._common import build_published_projection_where as _where
@@ -32,6 +32,12 @@ from backend.repositories.utils.response_cache import (
     client_cache_token,
     digest_cache_key,
     serialize_filters_for_key,
+)
+from backend.repositories.utils.response_shaping import (
+    float_or_zero,
+    shape_latency_percentiles,
+    shape_performance_asn_rows,
+    shape_waterfall_avg,
 )
 from backend.utils.bounded_cache import CacheRegistry
 
@@ -242,7 +248,7 @@ def _weighted(column: str, count_column: str = "latency_count") -> str:
 
 
 def _optional_float(value: Any) -> float:
-    return float(value) if value is not None else 0.0
+    return float_or_zero(value)
 
 
 def _projection_percentile_rows(
@@ -294,26 +300,12 @@ def _facts_percentile_rows(
 
 
 def _latency_row(row: Mapping[str, Any]) -> dict[str, Any]:
-    return {
-        "requests": int(row["req_count"]),
-        "avg": _optional_float(row["avg_ms"]),
-        "p50": _optional_float(row["p50_ms"]),
-        "p95": _optional_float(row["p95_ms"]),
-        "p99": _optional_float(row["p99_ms"]),
-    }
+    return shape_latency_percentiles(row)
 
 
 def _asn_rows(service: HighScaleService, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Attach the same ``label`` the standard path's ``_resolve_asns`` adds."""
-    asn_labels = resolve_asn_display_labels(
-        service.service_id, [int(row["value"]) for row in rows if str(row["value"]).isdigit()]
-    )
-    out: list[dict[str, Any]] = []
-    for row in rows:
-        asn: int | str = int(row["value"]) if str(row["value"]).isdigit() else row["value"]
-        label = asn_labels.get(asn, f"AS{asn}") if isinstance(asn, int) else str(asn)
-        out.append({"asn": asn, "label": label, **_latency_row(row)})
-    return out
+    return shape_performance_asn_rows(service.service_id, rows)
 
 
 def _ttl_dist(
@@ -360,14 +352,7 @@ def _waterfall(
         )
     rows = service.client.execute(sql, params)
     row = rows[0] if rows else {}
-    return {
-        "avg": {
-            "edge_processing": _optional_float(row.get("edge_processing")),
-            "origin_wait": _optional_float(row.get("origin_wait")),
-            "origin_download": _optional_float(row.get("origin_download")),
-            "client_download": _optional_float(row.get("client_download")),
-        }
-    }
+    return shape_waterfall_avg(row)
 
 
 def _scatter(

@@ -13,7 +13,6 @@ from unittest.mock import patch
 
 import pytest
 from backend.deps import get_source, require_admin
-from backend.utils.remote_access import _is_blocked_path
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
 
@@ -25,6 +24,7 @@ from backend.routers.admin import events as ev
 from backend.routers.admin import health as sampler
 from backend.routers.admin import router as admin_router
 from backend.utils.date_utils import iso_z
+from backend.utils.remote_access import _is_blocked_path
 from tests._helpers.sources import make_source
 from tests._helpers.wire import await_until
 from tests.conftest import MOCK_SERVICE_ID
@@ -960,9 +960,9 @@ from backend.core.high_scale_sections import current_clickhouse_scope
 from backend.high_scale.archive_models import ServingWatermark
 from backend.high_scale.exports import ExportManager, get_export_manager
 from backend.high_scale.registry_bootstrap import HighScaleService, HighScaleServiceRegistry
-from backend.utils.remote_access import TimeBounds
 
 from backend.core.request_context import build_request_context
+from backend.utils.remote_access import TimeBounds
 
 
 class _QueryClient:

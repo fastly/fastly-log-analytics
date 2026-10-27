@@ -22,7 +22,6 @@ import pandas as pd
 import pytest
 import time_machine
 from backend.models.dashboard import AggregatesRequest, QueryRequest
-from backend.utils.remote_access import TimeBounds, _is_blocked_path, get_analyst_time_bounds
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
@@ -39,6 +38,7 @@ from backend.routers import rum as rum_router
 from backend.routers.query import _redact_paths
 from backend.routers.rum import router as _rum_api_router
 from backend.utils.date_utils import iso_z, parse_iso_utc
+from backend.utils.remote_access import TimeBounds, _is_blocked_path, get_analyst_time_bounds
 from backend.utils.time_window import resolve_window
 from tests._helpers.config_fakes import mutate_via_save
 from tests._helpers.rum import insert_rum_beacons as _insert_beacons

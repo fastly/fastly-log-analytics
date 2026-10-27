@@ -31,6 +31,11 @@ from backend.repositories.utils.response_cache import (
     digest_cache_key,
     serialize_filters_for_key,
 )
+from backend.repositories.utils.response_shaping import (
+    chart_interval_seconds,
+    enrich_asn_rows,
+    normalize_chart_interval,
+)
 
 if TYPE_CHECKING:
     from backend.high_scale.ingest_controller import HighScaleService
@@ -192,36 +197,7 @@ def _aggregate(service: HighScaleService, *, start_time: str | None, end_time: s
     )
 
 
-def _normalize_chart_interval(chart_interval: str | None, default: str = "1 minute") -> str:
-    if not chart_interval:
-        return default
-    ci = chart_interval.strip().lower()
-    mapping = {
-        "1 second": "1 second",
-        "1 seconds": "1 second",
-        "1s": "1 second",
-        "second": "1 second",
-        "seconds": "1 second",
-        "1 minute": "1 minute",
-        "1 minutes": "1 minute",
-        "1m": "1 minute",
-        "minute": "1 minute",
-        "minutes": "1 minute",
-        "5 minute": "5 minutes",
-        "5 minutes": "5 minutes",
-        "5m": "5 minutes",
-        "1 hour": "1 hour",
-        "1 hours": "1 hour",
-        "1h": "1 hour",
-        "hour": "1 hour",
-        "hours": "1 hour",
-        "1 day": "1 day",
-        "1 days": "1 day",
-        "1d": "1 day",
-        "day": "1 day",
-        "days": "1 day",
-    }
-    return mapping.get(ci, default)
+_normalize_chart_interval = normalize_chart_interval
 
 
 def _time_series(
@@ -239,8 +215,7 @@ def _time_series(
         "AND publication_state='visible')",
     ]
     interval_norm = _normalize_chart_interval(chart_interval, default="1 minute")
-    interval_map = {"1 second": 1, "1 minute": 60, "5 minutes": 300, "1 hour": 3600, "1 day": 86400}
-    bucket_seconds = interval_map.get(interval_norm, 60)
+    bucket_seconds = chart_interval_seconds(interval_norm, default=60)
     params: dict[str, Any] = {"service_id": service.service_id, "bucket_seconds": bucket_seconds}
     if start is not None:
         clauses.append("bucket_start >= {start:DateTime64(3)}")
@@ -636,9 +611,7 @@ def field_values(
         vals: list[dict[str, Any]] = [{"value": str(val), "count": int(cnt)} for val, cnt in agg.top_values[:limit]]
         if key == "asn" and vals:
             try:
-                from backend.core.duckdb import enrich_asn_labels
-
-                enrich_asn_labels(vals, service.service_id)
+                enrich_asn_rows(vals, service.service_id, asn_key="value")
             except Exception:
                 pass
         return FieldValuesResponse.with_telemetry(values=[FieldTopEntry(**v) for v in vals], field=req.field)
@@ -669,9 +642,7 @@ def field_values(
     vals_facts: list[dict[str, Any]] = [{"value": str(r["v"]), "count": int(r["c"])} for r in rows]
     if key == "asn" and vals_facts:
         try:
-            from backend.core.duckdb import enrich_asn_labels
-
-            enrich_asn_labels(vals_facts, service.service_id)
+            enrich_asn_rows(vals_facts, service.service_id, asn_key="value")
         except Exception:
             pass
     return FieldValuesResponse.with_telemetry(values=[FieldTopEntry(**v) for v in vals_facts], field=req.field)

@@ -19,12 +19,6 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 from backend.core.metadata.cron_log import CronLeaseHeldError
-from backend.cron.jobs.compaction import (
-    _call_with_lookback,
-    _run_partial_hour_merge,
-    _run_rollup_compact_daily,
-    _run_rollup_hour_heal,
-)
 from backend.deps import get_service_id, get_source, require_admin
 from starlette.testclient import TestClient
 
@@ -36,6 +30,12 @@ from backend.core.metadata import reconciliation, usage_log_db
 from backend.core.rollups import partial_hour as ph
 from backend.cron.jobs import compaction
 from backend.cron.jobs import metadata as metadata_job
+from backend.cron.jobs.compaction import (
+    _call_with_lookback,
+    _run_partial_hour_merge,
+    _run_rollup_compact_daily,
+    _run_rollup_hour_heal,
+)
 from backend.cron.jobs.metadata import (
     _run_bot_data_refresh,
     _run_metadata_cleanup,

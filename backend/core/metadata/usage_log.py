@@ -752,7 +752,10 @@ def get_usage_logs(
     class_b_breakdown: dict[str, int] = {}
     total = 0
     for r in grouped:
-        cls, otype, c, b = r["operation_class"], r["operation_type"], int(r["c"] or 0), int(r["b"] or 0)
+        cls = r["operation_class"]
+        otype = r["operation_type"]
+        c = int(r["c"] or 0)
+        b = int(r["b"] or 0)
         total += c
         if cls in totals:
             totals[cls] += c
@@ -2051,15 +2054,19 @@ def get_cron_run_result(service_id: str, run_id: int) -> dict | None:
         return None
 
 
+def _parse_parquet_keys(v: Any) -> list[Any]:
+    if isinstance(v, (str, bytes)):
+        return _JSON_LIST_ADAPTER.validate_json(v or "[]")
+    if v:
+        return list(v)
+    return []
+
+
 class _CronRunEntryModel(BaseModel):
     model_config = ConfigDict(extra="allow")
     parquet_keys: Annotated[
         list[Any],
-        BeforeValidator(
-            lambda v: (
-                _JSON_LIST_ADAPTER.validate_json(v or "[]") if isinstance(v, (str, bytes)) else (list(v) if v else [])
-            )
-        ),
+        BeforeValidator(_parse_parquet_keys),
     ] = Field(default_factory=list)
 
 
@@ -2198,7 +2205,12 @@ def latest_cron_per_task(service_id: str, exclude_error_messages: tuple[str, ...
     if exclude_error_messages:
         cte_params.extend(exclude_error_messages)
     rows = con.execute(sql, tuple(cte_params)).fetchall()
-    return {r["task"]: {k: v for k, v in dict(r).items() if k != "task"} for r in rows}
+    latest_by_task: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        row_dict = dict(row)
+        task_name = row_dict.pop("task")
+        latest_by_task[task_name] = row_dict
+    return latest_by_task
 
 
 def adaptive_stale_minutes(

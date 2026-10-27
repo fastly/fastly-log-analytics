@@ -31,7 +31,6 @@ import pytest
 from backend.core.reset import _pause_rum_flags, _restore_rum_flags
 from backend.core.storage.view import _get_service_lock
 from backend.models.services import CustomFieldCreate, CustomFieldUpdate
-from backend.services import service_manager as sm
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from hypothesis import HealthCheck, assume, given, settings
@@ -74,6 +73,7 @@ from backend.repositories._base import _safe_table
 from backend.repositories.utils.filters import build_where_clause
 from backend.routers import services
 from backend.routers.services import core as services_core_router
+from backend.services import service_manager as sm
 from backend.utils import sql_validator as sql_ident
 from backend.utils.bounded_cache import CacheRegistry
 from tests.conftest import MOCK_SERVICE_ID

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import math
 import sys as _sys
 import time
 import uuid
@@ -28,6 +27,16 @@ from backend.repositories.utils.response_cache import (
     bucket_time_to_minute,
     digest_cache_key,
     serialize_filters_for_key,
+)
+from backend.repositories.utils.response_shaping import (
+    ORIGIN_SUMMARY_KEYS,
+    empty_origin_aggregates,
+    empty_origin_summary,
+    enrich_row_with_pop_distance,
+    haversine_km,
+    shape_keyed_rows,
+    shape_pop_latency_rows,
+    shape_status_code_rows,
 )
 from backend.utils.bounded_cache import CacheRegistry
 
@@ -240,62 +249,11 @@ def _store_response_cache(cache_key: str, payload: dict, runner: QueryRunner) ->
     return _memo.store(cache_key, payload, runner)
 
 
-# ── POP location helpers ──────────────────────────────────────────────────────
+# ── POP location & response shaping helpers ──────────────────────────────────
 
-SHIELDING_ANOMALY_MIN_REQUESTS = 30
-
-
-def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    dlat, dlon = math.radians(lat2 - lat1), math.radians(lon2 - lon1)
-    a = math.sin(dlat / 2) ** 2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2) ** 2
-    return 2.0 * 6371.0 * math.asin(math.sqrt(a))
-
-
-def _enrich_with_distance(row: dict) -> dict:
-    from backend.utils.pop_utils import get_pop_lat_lon_map
-
-    pops = get_pop_lat_lon_map()
-    e_coords = pops.get(str(row.get("edge_pop", "")).upper())
-    s_coords = pops.get(str(row.get("shield_pop", "")).upper())
-    low_sample = (row.get("requests") or 0) < SHIELDING_ANOMALY_MIN_REQUESTS
-    dist_km = light_rtt_ms = efficiency = None
-    anomaly_eligible = False
-    if e_coords and s_coords:
-        dist = _haversine_km(e_coords[0], e_coords[1], s_coords[0], s_coords[1])
-        dist_km, light_rtt_ms = round(dist, 1), round(2.0 * dist / 200_000.0 * 1000.0, 2)
-        p50 = row.get("p50_ms")
-        efficiency = round(p50 / light_rtt_ms, 2) if (light_rtt_ms > 0.5 and p50 is not None) else None
-        anomaly_eligible = bool(
-            efficiency is not None and efficiency > 3.0 and p50 is not None and p50 - light_rtt_ms >= 20.0
-        )
-    row.update(
-        distance_km=dist_km,
-        light_speed_rtt_ms=light_rtt_ms,
-        efficiency_ratio=efficiency,
-        low_sample=low_sample,
-        anomaly_eligible=anomaly_eligible,
-        anomaly_static=anomaly_eligible and not low_sample,
-        edge_lat=e_coords[0] if e_coords else None,
-        edge_lon=e_coords[1] if e_coords else None,
-        shield_lat=s_coords[0] if s_coords else None,
-        shield_lon=s_coords[1] if s_coords else None,
-    )
-    return row
-
-
-_SUMMARY_KEYS = (
-    "total_misses",
-    "total_passes",
-    "ottfb_p50_ms",
-    "ottfb_p75_ms",
-    "ottfb_p95_ms",
-    "ottfb_p99_ms",
-    "ottlb_p50_ms",
-    "ottlb_p95_ms",
-    "cdn_overhead_p50_ms",
-    "origin_error_rate",
-    "obytes_p50",
-)
+_haversine_km = haversine_km
+_enrich_with_distance = enrich_row_with_pop_distance
+_SUMMARY_KEYS = ORIGIN_SUMMARY_KEYS
 
 
 def _shape_summary(
@@ -324,7 +282,7 @@ def _shape_summary(
     cols = [d[0] for d in cur.description]
     rollup_row = next((dict(zip(cols, r, strict=False)) for r in cur.fetchall()), None)
     if rollup_row is None or rollup_row["ottfb_p50_ms"] is None:
-        return {"has_data": False, **{k: None for k in _SUMMARY_KEYS}}
+        return empty_origin_summary()
     return {"has_data": True, **{k: rollup_row[k] for k in _SUMMARY_KEYS}}
 
 
@@ -390,8 +348,7 @@ def _run_timeseries_query(
     return {"has_data": len(series) > 0, "series": series}
 
 
-def _shape_keyed_rows(rows: list[tuple], keys: tuple[str, ...], **extra: Any) -> dict:
-    return {"has_data": bool(rows), **extra, "rows": [dict(zip(keys, r, strict=False)) for r in rows]}
+_shape_keyed_rows = shape_keyed_rows
 
 
 def _shape_slow_url_rows(rows: list[tuple]) -> dict:
@@ -399,7 +356,7 @@ def _shape_slow_url_rows(rows: list[tuple]) -> dict:
 
 
 def _shape_status_code_rows(rows: list[tuple]) -> dict:
-    return _shape_keyed_rows(rows, ("status", "count", "pct"))
+    return shape_status_code_rows(rows)
 
 
 def _shape_path_breakdown_rows(rows: list[tuple]) -> dict:
@@ -409,25 +366,7 @@ def _shape_path_breakdown_rows(rows: list[tuple]) -> dict:
 
 
 def _shape_pop_latency_rows(rows: list[tuple]) -> dict:
-    if not rows:
-        return {"has_data": False, "requires_group_c": False, "rows": []}
-    valid_p95s = sorted(r[3] for r in rows if r[3] is not None)
-    median_p95 = valid_p95s[len(valid_p95s) // 2] if valid_p95s else 0
-    return {
-        "has_data": True,
-        "requires_group_c": False,
-        "median_p95_ms": median_p95,
-        "rows": [
-            {
-                "pop": r[0],
-                "requests": r[1],
-                "p50_ms": r[2],
-                "p95_ms": r[3],
-                "elevated": r[3] is not None and median_p95 is not None and r[3] > median_p95 * 2,
-            }
-            for r in rows
-        ],
-    }
+    return shape_pop_latency_rows(rows)
 
 
 def _shape_ip_health_rows(rows: list[tuple]) -> dict:
@@ -842,16 +781,7 @@ async def get_aggregates(
     table_name = _safe_table(src["name"])
     runner = QueryRunner(con, src)
     actual_cols = runner.get_schema_cols()
-    empty_payload = {
-        "has_data": False,
-        "summary": {},
-        "timeseries": {"has_data": False, "series": []},
-        "slow_urls": {"has_data": False, "rows": []},
-        "status_codes": {"has_data": False, "rows": []},
-        "path_breakdown": {"has_data": False, "shielding_detected": False, "rows": []},
-        "pop_latency": {"has_data": False, "requires_group_c": False, "rows": []},
-        "ip_health": {"has_data": False, "rows": []},
-    }
+    empty_payload = empty_origin_aggregates()
     if not actual_cols:
         return {**empty_payload, **runner.telemetry()}
 

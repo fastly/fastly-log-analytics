@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sys
 from collections.abc import Callable, Iterable, Mapping
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from backend.core.high_scale_sections import HighScaleSections
@@ -16,6 +16,13 @@ from backend.repositories.utils.response_cache import (
     client_cache_token,
     digest_cache_key,
     serialize_filters_for_key,
+)
+from backend.repositories.utils.response_shaping import (
+    CMCD_TS_DEFAULTS,
+    empty_cmcd_aggregates,
+    enrich_asn_rows,
+    opt_float,
+    pad_timeseries_buckets,
 )
 
 if TYPE_CHECKING:
@@ -172,22 +179,13 @@ def _cmcd_scope(
 
 
 def _round(value: Any) -> float | None:
-    return None if value is None else round(float(value), 2)
+    return opt_float(value, 2)
 
 
 def _pad(
     start: datetime, end: datetime, bucket_seconds: int, rows: dict[str, dict[str, Any]], default: dict[str, Any]
 ) -> list[dict[str, Any]]:
-    first = int(start.timestamp())
-    last = int(end.timestamp())
-    cursor = first - first % bucket_seconds
-    final = last - last % bucket_seconds
-    padded: list[dict[str, Any]] = []
-    while cursor <= final:
-        bucket = datetime.fromtimestamp(cursor, tz=UTC).strftime(_BUCKET_FORMAT)
-        padded.append({"bucket": bucket, **rows.get(bucket, default)})
-        cursor += bucket_seconds
-    return padded
+    return pad_timeseries_buckets(start, end, bucket_seconds, rows, default)
 
 
 def _sessions_ts(rows: Iterable[dict[str, Any]], new_sessions: Mapping[str, int]) -> dict[str, dict[str, Any]]:
@@ -268,7 +266,7 @@ def _cmcd_aggregates_compute(
         activity="overhead",
     )[0]
     if not int(probe["events"] or 0):
-        return {"available": True, "has_data": False, "section_timings": trace.timings()}
+        return empty_cmcd_aggregates(available=True, section_timings=trace.timings())
     has = {key: bool(int(probe[f"has_{key}"] or 0)) for key in ("bl", "br", "bs", "mtp", "ot", "sf", "su", "tb", "cid")}
     has_country = bool(int(probe["has_country"] or 0))
     has_asn = bool(int(probe["has_asn"] or 0))
@@ -384,7 +382,7 @@ def _cmcd_aggregates_compute(
                     end,
                     int(req.bucket_seconds),
                     _sessions_ts(rows, new_sessions),
-                    {"concurrent_sessions": 0, "rebuffer_session_pct": None, "new_sessions": 0},
+                    CMCD_TS_DEFAULTS["sessions_ts"],
                 )
             if want_ts["buffer_health_ts"]:
                 ts_out["buffer_health_ts"] = padded(
@@ -393,12 +391,12 @@ def _cmcd_aggregates_compute(
                         "p95_buffer": ("p95_buffer", _round),
                         "starvation_rate": ("starvation_rate", _round),
                     },
-                    {"p50_buffer": None, "p95_buffer": None, "starvation_rate": None},
+                    CMCD_TS_DEFAULTS["buffer_health_ts"],
                 )
             if want_ts["bitrate_ts"]:
                 ts_out["bitrate_ts"] = padded(
                     {"avg_bitrate": ("avg_bitrate", _round), "utilization_ratio": ("utilization_ratio", _round)},
-                    {"avg_bitrate": None, "utilization_ratio": None},
+                    CMCD_TS_DEFAULTS["bitrate_ts"],
                 )
             if want_ts["throughput_ts"]:
                 ts_out["throughput_ts"] = padded(
@@ -407,10 +405,13 @@ def _cmcd_aggregates_compute(
                         "p95": ("p95_throughput", _round),
                         "p99": ("p99_throughput", _round),
                     },
-                    {"p50": None, "p95": None, "p99": None},
+                    CMCD_TS_DEFAULTS["throughput_ts"],
                 )
             if want_ts["startup_ts"]:
-                ts_out["startup_ts"] = padded({"startup_ratio": ("startup_ratio", _round)}, {"startup_ratio": None})
+                ts_out["startup_ts"] = padded(
+                    {"startup_ratio": ("startup_ratio", _round)},
+                    CMCD_TS_DEFAULTS["startup_ts"],
+                )
             return ts_out
 
         tasks.append(("timeseries", _run_timeseries))
@@ -553,10 +554,12 @@ def _cmcd_aggregates_compute(
     if "rebuffer_by_asn" in result:
 
         def _label_asns() -> None:
-            rows = result["rebuffer_by_asn"]
-            names = _asn_names(service.service_id, [row["asn"] for row in rows])
-            for row in rows:
-                row["label"] = _asn_label(row["asn"], names)
+            enrich_asn_rows(
+                result["rebuffer_by_asn"],
+                service.service_id,
+                asn_key="asn",
+                name_lookup=_asn_names,
+            )
 
         trace.run("asn_labels", _label_asns, activity="overhead")
     result["section_timings"] = trace.timings()

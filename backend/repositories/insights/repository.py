@@ -13,6 +13,14 @@ from typing import Any
 import duckdb
 from backend.repositories._base import QueryRunner, _compact_sql_for_debug, _safe_table, record_duckdb_query
 from backend.repositories.insights import registry
+from backend.repositories.utils.response_shaping import (
+    INSIGHT_BUCKET_INTERVALS,
+    build_cache_collapse_breakdown,
+    build_insight_asn_context,
+    build_insights_envelope,
+    select_insight_bucket_interval,
+    shape_cache_collapse_timeline_point,
+)
 from . import (
     definitions as _definitions,  # noqa: F401  side-effect import: registers insight defs with the registry
     definitions as _insights_sql,
@@ -1000,18 +1008,18 @@ def get_insights(
     actual_cols = runner.get_schema_cols()
 
     def _insights_envelope(insights_list: list[dict], w_total: int = 0) -> dict[str, Any]:
-        return {
-            "insights": insights_list,
-            "window_start": window_start_s,
-            "window_end": now_s,
-            "baseline_start": baseline_start_s,
-            "baseline_end": window_start_s,
-            "computed_at": now_s,
-            "window_hours": window_hours,
-            "baseline_hours": baseline_hours,
-            "window_total_requests": w_total,
+        return build_insights_envelope(
+            insights_list,
+            window_start=window_start_s,
+            window_end=now_s,
+            baseline_start=baseline_start_s,
+            baseline_end=window_start_s,
+            computed_at=now_s,
+            window_hours=window_hours,
+            baseline_hours=baseline_hours,
+            window_total_requests=w_total,
             **runner.telemetry(),
-        }
+        )
 
     empty_resp = _insights_envelope([])
     if not actual_cols:
@@ -1275,12 +1283,9 @@ def get_insights(
                             "actual_cols": actual_cols,
                             "mask_ips": mask_ips,
                         }
-                        if any(p in d.id for p in ["asn", "metro"]):
-                            from backend.core import duckdb as _db_core
-
-                            context["asn_names"] = _db_core.get_asn_names(src["name"], [r[0] for r in rows if r])
-                            if "metro" in actual_cols:
-                                context["dma_map"] = _db_core._get_dma_map()
+                        context.update(
+                            build_insight_asn_context(src["name"], rows, d.id, include_dma="metro" in actual_cols)
+                        )
                         for row in rows:
                             try:
                                 item = d.row_processor(row, d, context)
@@ -1359,13 +1364,7 @@ def get_insights(
                 logger.debug("get_insights: runner.con.execute failed (ignored)", exc_info=True)
 
 
-_BUCKET_INTERVALS: tuple[tuple[float, str], ...] = (
-    (2, "1 minute"),
-    (12, "5 minutes"),
-    (48, "15 minutes"),
-    (168, "1 hour"),
-    (720, "4 hours"),
-)
+_BUCKET_INTERVALS = INSIGHT_BUCKET_INTERVALS
 
 
 def get_cache_collapse_detail(
@@ -1412,14 +1411,9 @@ def get_cache_collapse_detail(
     w_cacheable, b_cacheable = w_hits + w_miss, b_hits + b_miss
     w_rate, b_rate = (w_hits / w_cacheable) if w_cacheable else 0.0, (b_hits / b_cacheable) if b_cacheable else 0.0
     w_pass_rate, b_pass_rate = (w_pass / w_total) if w_total else 0.0, (b_pass / b_total) if b_total else 0.0
-    breakdown = {
-        "hits": w_hits,
-        "misses": w_miss,
-        "passes": w_pass,
-        "other": max(0, w_total - w_hits - w_miss - w_pass),
-    }
+    breakdown = build_cache_collapse_breakdown(w_hits, w_miss, w_pass, w_total)
     total_hours = window_hours + baseline_hours
-    bucket_interval = next((iv for max_h, iv in _BUCKET_INTERVALS if total_hours <= max_h), "1 day")
+    bucket_interval = select_insight_bucket_interval(total_hours)
     timeline_sql = f"""
         SELECT
             time_bucket(INTERVAL '{bucket_interval}', timestamp) AS bucket,
@@ -1432,20 +1426,7 @@ def get_cache_collapse_detail(
         ORDER BY bucket ASC
     """
     timeline_rows = runner.execute(timeline_sql, [url, baseline_start_s, now_s]).fetchall()
-    timeline = []
-    for r in timeline_rows:
-        bucket_ts, total_requests, real_hits, misses = r[0], int(r[1] or 0), int(r[2] or 0), int(r[3] or 0)
-        cacheable = real_hits + misses
-        timeline.append(
-            {
-                "bucket": _iso_or_str(bucket_ts),
-                "expected_hits": float(cacheable * b_rate),
-                "real_hits": real_hits,
-                "misses": misses,
-                "total_requests": total_requests,
-                "hit_rate": float(real_hits / cacheable) if cacheable > 0 else 0.0,
-            }
-        )
+    timeline = [shape_cache_collapse_timeline_point(_iso_or_str(r[0]), r[1], r[2], r[3], b_rate) for r in timeline_rows]
     misses_sql = f"""
         SELECT timestamp, cache, pop, ip, status
         FROM {table_name}

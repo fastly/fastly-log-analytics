@@ -10,16 +10,6 @@ from unittest.mock import MagicMock, PropertyMock, patch
 
 import pytest
 from backend.core.share_db.validation import IP_FAMILY_KEYS, SESSION_ID_KEYS, _mask_ip_scalar, apply_pii_policy, mask_ip
-from backend.utils.remote_access import (
-    _ANALYST_ALLOWED_WRITE_PREFIXES,
-    _PII_FORBIDDEN_FILTER_COLS,
-    _UNAUTH_ANALYST_PATHS,
-    RemoteAccessMiddleware,
-    _is_blocked_path,
-    _strip_analyst_envelope,
-    is_request_remote,
-    validate_admin_gateway_config,
-)
 from backend.utils.telemetry_response_middleware import TelemetryResponseBodyMiddleware
 from backend.utils.tunnel.manager import AnalystSession, get_tunnel_manager
 from fastapi import FastAPI, Request
@@ -36,6 +26,16 @@ from backend.routers import admin, provision, query, rum, services, share_admin,
 from backend.routers.session_scoring import _finalize_cached
 from backend.routers.share_admin import build_share_live_payload, build_share_status
 from backend.utils import telemetry, tunnel
+from backend.utils.remote_access import (
+    _ANALYST_ALLOWED_WRITE_PREFIXES,
+    _PII_FORBIDDEN_FILTER_COLS,
+    _UNAUTH_ANALYST_PATHS,
+    RemoteAccessMiddleware,
+    _is_blocked_path,
+    _strip_analyst_envelope,
+    is_request_remote,
+    validate_admin_gateway_config,
+)
 from tests.conftest import override_request_context
 from tests.remote_access import conftest as H
 

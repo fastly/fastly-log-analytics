@@ -165,8 +165,9 @@ def configure_registry(monkeypatch, tmp_path, *, enabled: bool = True, allowed_h
 
 def make_remote_access_app(*routers):
     """Build a minimal FastAPI app with RemoteAccessMiddleware and the given routers."""
-    from backend.utils.remote_access import RemoteAccessMiddleware
     from fastapi import FastAPI
+
+    from backend.utils.remote_access import RemoteAccessMiddleware
 
     app = FastAPI()
     app.add_middleware(RemoteAccessMiddleware)

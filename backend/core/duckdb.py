@@ -71,8 +71,11 @@ _cached_n_threads: int | None = None
 _cached_mem_limit_gb: int | None = None
 _dma_map_cache: dict[str, str] | None = None
 _STALE_VIEW_ERR_MARKERS = (
-    "No files found", "Catalog Error: Table with name", "does not exist", "No such file or directory",
-)  # fmt: skip
+    "No files found",
+    "Catalog Error: Table with name",
+    "does not exist",
+    "No such file or directory",
+)
 
 
 def _is_stale_view_error(err: object) -> bool:
@@ -122,10 +125,20 @@ def _build_default_source() -> dict:
     if cfgs:
         return _source_from_config(cfgs[0])
     return {
-        "name": "default", "endpoint": "", "access_key_id": "", "secret_access_key": "", "bucket": "",
-        "prefix": "", "region": "us-east-1", "cdn_url": "", "cdn_secret": "", "cdn_service_id": "",
-        "logging_service_id": "", "duckdb_path": "logs.duckdb", "storage_mode": "cloud",
-    }  # fmt: skip
+        "name": "default",
+        "endpoint": "",
+        "access_key_id": "",
+        "secret_access_key": "",
+        "bucket": "",
+        "prefix": "",
+        "region": "us-east-1",
+        "cdn_url": "",
+        "cdn_secret": "",
+        "cdn_service_id": "",
+        "logging_service_id": "",
+        "duckdb_path": "logs.duckdb",
+        "storage_mode": "cloud",
+    }
 
 
 _DEFAULT_SOURCE = _build_default_source()
@@ -310,9 +323,11 @@ class _ProxyClientShim:
 
 def _get_fos_client(source: dict):
     source_key = (
-        source.get("name", "default"), source.get("access_key_id", ""),
-        source.get("cdn_url", ""), source.get("cdn_secret", ""),
-    )  # fmt: skip
+        source.get("name", "default"),
+        source.get("access_key_id", ""),
+        source.get("cdn_url", ""),
+        source.get("cdn_secret", ""),
+    )
     with _fos_client_lock:
         if source_key in _fos_client_cache:
             return _fos_client_cache[source_key]
@@ -320,9 +335,13 @@ def _get_fos_client(source: dict):
 
         telemetry_proxy.start_proxy_server()
         proxy_config = Config(
-            retries={"max_attempts": 3, "mode": "adaptive"}, connect_timeout=10, read_timeout=30,
-            signature_version=UNSIGNED, s3={"addressing_style": "path"}, max_pool_connections=128,
-        )  # fmt: skip
+            retries={"max_attempts": 3, "mode": "adaptive"},
+            connect_timeout=10,
+            read_timeout=30,
+            signature_version=UNSIGNED,
+            s3={"addressing_style": "path"},
+            max_pool_connections=128,
+        )
         raw_client = boto3.client("s3", endpoint_url=telemetry_proxy.proxy_endpoint(), config=proxy_config)
         telemetry_proxy.install_boto3_proxy_hook(raw_client, source)
         client = _ProxyClientShim(raw_client)
@@ -486,10 +505,13 @@ def _lock_context(source: dict, db_path: str, read_only: bool) -> dict[str, obje
     catalog = os.getenv("DUCKLAKE_CATALOG", "")
     return {
         "service_id": source.get("logging_service_id") or source.get("name") or "unknown",
-        "pid": os.getpid(), "hostname": socket.gethostname(), "db_path": db_path, "read_only": read_only,
+        "pid": os.getpid(),
+        "hostname": socket.gethostname(),
+        "db_path": db_path,
+        "read_only": read_only,
         "deployment_mode": os.getenv("DEPLOYMENT_MODE", "standard"),
         "catalog_mode": "postgres" if catalog.startswith(("postgres://", "postgresql://")) else "file",
-    }  # fmt: skip
+    }
 
 
 _LOCK_RETRY_INITIAL_DELAY = 0.05
@@ -567,10 +589,16 @@ def current_rss_bytes() -> int | None:
 
 
 _CORRUPTION_MARKERS = (
-    "not a valid duckdb database file", "database file is corrupt", "could not read from file",
-    "failure while replaying wal file", "unrecognized magic bytes", "checksum mismatch",
-    "failed to deserialize", "serialization error", "field id mismatch",
-)  # fmt: skip
+    "not a valid duckdb database file",
+    "database file is corrupt",
+    "could not read from file",
+    "failure while replaying wal file",
+    "unrecognized magic bytes",
+    "checksum mismatch",
+    "failed to deserialize",
+    "serialization error",
+    "field id mismatch",
+)
 
 
 def _duckdb_connect(database: str, **kwargs: Any) -> duckdb.DuckDBPyConnection:
@@ -665,26 +693,30 @@ def get_connection(
     if limit:
         _exec_quietly(con, f"SET max_memory = '{limit}';", "get_connection: step failed (ignored)")
     _exec_quietly(con, "SET preserve_insertion_order = false;", "get_connection: preserve_insertion_order failed")
-    _service_temp_dir = (
-        os.getenv("DUCKDB_TEMP_DIRECTORY", "/tmp/duckdb")
-        if durable_serving
-        else (
-            os.path.join(os.path.dirname(db_path), ".tmp") if db_path and not db_path.startswith(":memory:") else None
-        )
-    )
+    if durable_serving:
+        _service_temp_dir: str | None = os.getenv("DUCKDB_TEMP_DIRECTORY", "/tmp/duckdb")
+    elif db_path and not db_path.startswith(":memory:"):
+        _service_temp_dir = os.path.join(os.path.dirname(db_path), ".tmp")
+    else:
+        _service_temp_dir = None
     if _service_temp_dir:
         try:
             os.makedirs(_service_temp_dir, exist_ok=True)
             con.execute(f"SET temp_directory = '{escape_sql_literal(_service_temp_dir)}';")
         except Exception as e:
-            log_fn = logger.debug if "cannot switch temporary directory" in str(e).lower() else logger.error
-            log_fn(f"[duckdb] Failed to configure temp_directory: {e}")
+            if "cannot switch temporary directory" in str(e).lower():
+                logger.debug(f"[duckdb] Failed to configure temp_directory: {e}")
+            else:
+                logger.error(f"[duckdb] Failed to configure temp_directory: {e}")
     try:
         con.execute(f"SET max_temp_directory_size = '{os.getenv('DUCKDB_MAX_TEMP_DIRECTORY_SIZE', '10GB')}';")
     except Exception as e:
         err_lower = str(e).lower()
         is_active = "cannot switch temporary directory" in err_lower or "cannot change" in err_lower
-        (logger.debug if is_active else logger.error)(f"[duckdb] Failed to configure max_temp_directory_size: {e}")
+        if is_active:
+            logger.debug(f"[duckdb] Failed to configure max_temp_directory_size: {e}")
+        else:
+            logger.error(f"[duckdb] Failed to configure max_temp_directory_size: {e}")
     for stmt in ("SET hive_partitioning = true;", "SET TimeZone='UTC';"):
         _exec_quietly(con, stmt, "get_connection: con.execute failed (ignored)")
     _configure_fos(con, src)
@@ -693,7 +725,6 @@ def get_connection(
         from backend.core.storage._core import _ducklake_attach
 
         storage.configure_duckdb_s3(con)
-        con.execute("SET unsafe_enable_version_guessing=true;")
         if not _ducklake_attach(con, src, read_only=True):
             raise RuntimeError("failed to attach DuckLake catalog")
     except Exception:
@@ -739,10 +770,16 @@ def _ensure_source_registered(source: dict) -> str:
 
     name = source["name"]
     table_name = _safe_table_name(name)
-    config_json = json.dumps({
-        "endpoint": source["endpoint"], "bucket": source["bucket"], "prefix": source["prefix"],
-        "region": source["region"], "cdn_url": source.get("cdn_url", ""), "cdn_secret": source.get("cdn_secret", ""),
-    })  # fmt: skip
+    config_json = json.dumps(
+        {
+            "endpoint": source["endpoint"],
+            "bucket": source["bucket"],
+            "prefix": source["prefix"],
+            "region": source["region"],
+            "cdn_url": source.get("cdn_url", ""),
+            "cdn_secret": source.get("cdn_secret", ""),
+        }
+    )
     metadata_db.register_source(name, name, config_json, table_name)
     return table_name
 
@@ -754,11 +791,23 @@ def start_cron_run(source: dict, task: str) -> int | None:
 
 
 def log_cron_run(
-    source: dict, task: str, duration_s: float, status: str, error_message: str = None, files_downloaded: int = 0,
-    files_deleted_fos: int = 0, rows_ingested: int = 0, corrupt_rows: int = 0, parquet_files_created: int = 0,
-    parquet_files_optimized: int = 0, parquet_keys: list = None, summary: str = None, log_output: str = None,
-    run_id: int | None = None, outcome_counters: dict[str, int] | None = None,
-):  # fmt: skip
+    source: dict,
+    task: str,
+    duration_s: float,
+    status: str,
+    error_message: str = None,
+    files_downloaded: int = 0,
+    files_deleted_fos: int = 0,
+    rows_ingested: int = 0,
+    corrupt_rows: int = 0,
+    parquet_files_created: int = 0,
+    parquet_files_optimized: int = 0,
+    parquet_keys: list = None,
+    summary: str = None,
+    log_output: str = None,
+    run_id: int | None = None,
+    outcome_counters: dict[str, int] | None = None,
+):
     from backend.core import metadata as metadata_db
 
     service_id = source["name"]
@@ -776,21 +825,36 @@ def log_cron_run(
         return
     try:
         metadata_db.log_cron_run(
-            service_id, task, duration_s, status, error_message=error_message,
-            files_downloaded=files_downloaded or 0, files_deleted_fos=files_deleted_fos or 0,
-            rows_ingested=rows_ingested or 0, corrupt_rows=corrupt_rows or 0,
-            parquet_files_created=parquet_files_created or 0, parquet_files_optimized=parquet_files_optimized or 0,
-            parquet_keys=parquet_keys or [], summary=summary, log_output=log_output, run_id=run_id,
+            service_id,
+            task,
+            duration_s,
+            status,
+            error_message=error_message,
+            files_downloaded=files_downloaded or 0,
+            files_deleted_fos=files_deleted_fos or 0,
+            rows_ingested=rows_ingested or 0,
+            corrupt_rows=corrupt_rows or 0,
+            parquet_files_created=parquet_files_created or 0,
+            parquet_files_optimized=parquet_files_optimized or 0,
+            parquet_keys=parquet_keys or [],
+            summary=summary,
+            log_output=log_output,
+            run_id=run_id,
             outcome_counters=outcome_counters,
-        )  # fmt: skip
+        )
     except Exception as e:
         logger.warning("[cron_log] failed to persist cron run for %s/%s: %s", service_id, task, e)
 
 
 def finalize_cron_run_if_running(
-    source: dict, task: str, run_id: int | None, *,
-    duration_s: float = 0.0, summary: str | None = None, error_message: str | None = None,
-) -> bool:  # fmt: skip
+    source: dict,
+    task: str,
+    run_id: int | None,
+    *,
+    duration_s: float = 0.0,
+    summary: str | None = None,
+    error_message: str | None = None,
+) -> bool:
     if run_id is None:
         return False
     from backend.core import metadata as metadata_db
@@ -850,7 +914,10 @@ def clear_ducklake_stats_cache(source_key: str | None = None) -> None:
             for k in [k for k in _ducklake_stats_cache if k[0] == source_key]:
                 _ducklake_stats_cache.pop(k, None)
     with _data_stats_cache_lock:
-        _data_stats_cache.clear() if source_key is None else _data_stats_cache.pop(source_key, None)
+        if source_key is None:
+            _data_stats_cache.clear()
+        else:
+            _data_stats_cache.pop(source_key, None)
 
 
 def _query_buffer_stats(con, src) -> tuple[int, Any, Any]:
@@ -919,7 +986,11 @@ def _authoritative_direct_stats(
     except Exception as e:
         logger.debug("[sync-status] direct buffer stats unavailable: %s", e)
     total = sum(counts)
-    return (total, min(mins) if mins else None, max(maxs) if maxs else None) if total > 0 else None
+    if total <= 0:
+        return None
+    earliest = min(mins) if mins else None
+    latest = max(maxs) if maxs else None
+    return (total, earliest, latest)
 
 
 def get_sync_status(
@@ -928,9 +999,12 @@ def get_sync_status(
     src = source or _DEFAULT_SOURCE
     if not is_configured(src):
         return {
-            "configured": False, "local_rows": 0, "ingested": 0, "fos_total": 0,
+            "configured": False,
+            "local_rows": 0,
+            "ingested": 0,
+            "fos_total": 0,
             "storage_mode": "cloud",
-        }  # fmt: skip
+        }
     cached_status = svcconfig.get_status(src["name"])
     if cached_status and not force and skip_fos:
         cached_status.update(storage_mode=src.get("storage_mode", "cloud"), configured=True)
@@ -942,9 +1016,13 @@ def get_sync_status(
         summary = metadata_db.get_ingested_files_status_summary(src["name"])
     except Exception:
         summary = {
-            "file_count": 0, "total_rows": 0, "total_bytes": 0, "count_with_bytes": 0,
-            "last_ingested": None, "latest_file_name": None,
-        }  # fmt: skip
+            "file_count": 0,
+            "total_rows": 0,
+            "total_bytes": 0,
+            "count_with_bytes": 0,
+            "last_ingested": None,
+            "latest_file_name": None,
+        }
     file_count, local_rows_ingested = summary["file_count"], summary["total_rows"]
     last_ingested, latest_file_name = summary["last_ingested"], summary["latest_file_name"]
     total_bytes, count_with_bytes = summary["total_bytes"], summary["count_with_bytes"]
@@ -958,7 +1036,9 @@ def get_sync_status(
     latest_log_at = earliest_log_at = None
     local_rows = local_rows_ingested
     try:
-        stats, data_fp, lake_table = None, _data_stats_fingerprint(src), None
+        stats = None
+        data_fp = _data_stats_fingerprint(src)
+        lake_table = None
         if data_fp is None:
             try:
                 from backend.core.storage._core import ducklake_current_snapshot_id, ducklake_table_name
@@ -968,10 +1048,13 @@ def get_sync_status(
                     "SELECT 1 FROM duckdb_tables() WHERE database_name = 'lake' AND table_name = ? LIMIT 1", [lt]
                 ).fetchone()
                 if exists and exists[0] and (snap_id := ducklake_current_snapshot_id(con)) is not None:
-                    data_fp, lake_table = ("ducklake", snap_id), lt
+                    data_fp = ("ducklake", snap_id)
+                    lake_table = lt
             except Exception:
                 logger.debug("get_sync_status: step failed (ignored)", exc_info=True)
-        cache_key, direct_stats, queried_buffer_stats = src["name"], None, None
+        cache_key = src["name"]
+        direct_stats = None
+        queried_buffer_stats = None
         if data_fp is not None:
             try:
                 if (
@@ -1060,21 +1143,33 @@ def get_sync_status(
             if data.get("status") == "running" and st and str(st) > time_cutoff:
                 busy = True
             cron_stats[t] = {
-                "last_run": _safe_iso(st), "duration_s": data.get("duration_s"), "status": data.get("status"),
-                "error_message": data.get("error_message"), "summary": data.get("summary"),
-            }  # fmt: skip
+                "last_run": _safe_iso(st),
+                "duration_s": data.get("duration_s"),
+                "status": data.get("status"),
+                "error_message": data.get("error_message"),
+                "summary": data.get("summary"),
+            }
     except Exception:
         busy, cron_stats = False, {}
     return {
-        "busy": busy, "fos_total": file_count, "ingested": file_count, "local_rows": local_rows,
-        "ingested_bytes": total_bytes, "avg_log_size_kb": avg_log_size_kb, "table_name": table_name,
-        "last_ingested_at": _safe_iso(last_ingested), "latest_log_at": _safe_iso(latest_log_at),
-        "earliest_log_at": _safe_iso(earliest_log_at), "latest_ingested_file_at": latest_ingested_file_at,
+        "busy": busy,
+        "fos_total": file_count,
+        "ingested": file_count,
+        "local_rows": local_rows,
+        "ingested_bytes": total_bytes,
+        "avg_log_size_kb": avg_log_size_kb,
+        "table_name": table_name,
+        "last_ingested_at": _safe_iso(last_ingested),
+        "latest_log_at": _safe_iso(latest_log_at),
+        "earliest_log_at": _safe_iso(earliest_log_at),
+        "latest_ingested_file_at": latest_ingested_file_at,
         "latest_available_file_at": latest_ingested_file_at,
-        "configured": is_configured(src), "storage_mode": src.get("storage_mode", "cloud"),
-        "logging_service_id": src.get("logging_service_id", ""), "cdn_service_id": src.get("cdn_service_id", ""),
+        "configured": is_configured(src),
+        "storage_mode": src.get("storage_mode", "cloud"),
+        "logging_service_id": src.get("logging_service_id", ""),
+        "cdn_service_id": src.get("cdn_service_id", ""),
         "cron_stats": cron_stats,
-    }  # fmt: skip
+    }
 
 
 def refresh_config_status(service_id: str, include_top_values: bool = True):
@@ -1177,10 +1272,32 @@ def refresh_config_status(service_id: str, include_top_values: bool = True):
 
 
 _TOP_VALUE_FIELDS = (
-    "ip", "country", "city", "host", "url", "method", "ua", "status", "cache", "waf",
-    "waf_resp", "waf_ms", "waf_sig", "waf_sig_ind", "ja3", "ja4", "asn", "edge",
-    "proto", "tls", "referer", "p_type", "p_desc", "backend", "pop",
-)  # fmt: skip
+    "ip",
+    "country",
+    "city",
+    "host",
+    "url",
+    "method",
+    "ua",
+    "status",
+    "cache",
+    "waf",
+    "waf_resp",
+    "waf_ms",
+    "waf_sig",
+    "waf_sig_ind",
+    "ja3",
+    "ja4",
+    "asn",
+    "edge",
+    "proto",
+    "tls",
+    "referer",
+    "p_type",
+    "p_desc",
+    "backend",
+    "pop",
+)
 
 
 def update_top_values(con: duckdb.DuckDBPyConnection, source: dict):
@@ -1299,15 +1416,25 @@ def get_schema(con: duckdb.DuckDBPyConnection, source: dict | None = None, stats
         if not stats:
             schema = [{"name": r[0], "type": r[1]} for r in con.execute(f"DESCRIBE {table_name}").fetchall()]
         else:
-            schema = [
-                {
-                    "name": r[0], "type": r[1], "min": str(r[2]) if r[2] is not None else None,
-                    "max": str(r[3]) if r[3] is not None else None, "approx_unique": r[4],
-                    "null_percentage": float(r[11]) if r[11] is not None else (100.0 if r[10] == 0 else 0.0),
-                    "count": r[10],
-                }
-                for r in con.execute(f"SUMMARIZE SELECT * FROM {table_name} LIMIT 10000").fetchall()
-            ]  # fmt: skip
+            schema = []
+            for r in con.execute(f"SUMMARIZE SELECT * FROM {table_name} LIMIT 10000").fetchall():
+                if r[11] is not None:
+                    null_pct = float(r[11])
+                elif r[10] == 0:
+                    null_pct = 100.0
+                else:
+                    null_pct = 0.0
+                schema.append(
+                    {
+                        "name": r[0],
+                        "type": r[1],
+                        "min": str(r[2]) if r[2] is not None else None,
+                        "max": str(r[3]) if r[3] is not None else None,
+                        "approx_unique": r[4],
+                        "null_percentage": null_pct,
+                        "count": r[10],
+                    }
+                )
         if len(schema) == 1 and schema[0]["name"] == "timestamp":
             schema = []
         _schema_cache[cache_key] = schema
@@ -1418,16 +1545,21 @@ def backfill_fastly_edge_writes(source: dict) -> int:
             return 0
         calls = [
             {
-                "method": "PUT_OBJECT", "path": f_name, "service": "FOS",
-                "details": "Class A · synthesized from ingest", "bytes": f_size, "status": "OK",
-                "caller": "fastly.edge", "time_ms": 0,
+                "method": "PUT_OBJECT",
+                "path": f_name,
+                "service": "FOS",
+                "details": "Class A · synthesized from ingest",
+                "bytes": f_size,
+                "status": "OK",
+                "caller": "fastly.edge",
+                "time_ms": 0,
                 "_timestamp_override": (m.group(1) + "Z")
                 if (m := re.search(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})", f_name))
                 else f_ingested,
             }
             for f_name, f_ingested, _row_count, f_size in files
             if f_name != "__seeding_attempted__"
-        ]  # fmt: skip
+        ]
         return metadata_db.log_synthetic_usage(service_id, calls)
     except Exception as e:
         logger.debug("[usage_log] Fastly-edge write backfill failed: %s", e)
@@ -1460,11 +1592,12 @@ def reconcile_fastly_stats(source: dict, hours_back: int = 12) -> int:
         hourly = [
             {
                 "hour_iso": datetime.fromtimestamp(rec.start_time, tz=UTC).strftime("%Y-%m-%dT%H:00:00Z"),
-                "class_a": rec.fos_ops()[0], "class_b": rec.fos_ops()[1],
+                "class_a": rec.fos_ops()[0],
+                "class_b": rec.fos_ops()[1],
             }
             for rec in StatsResponse.model_validate(payload).data
             if rec.start_time is not None
-        ]  # fmt: skip
+        ]
         return metadata_db.reconcile_fastly_stats(service_id, hourly)
     except Exception as e:
         logger.debug("[usage_log] Fastly stats reconciliation failed: %s", e)
@@ -1549,27 +1682,93 @@ _BLOCKED_TABLE_PREFIXES = ("duckdb_", "pg_")
 _BLOCKED_SCHEMA_NAMES = frozenset({"information_schema", "pg_catalog", "system"})
 ALLOWED_CATALOG = "main"
 
-_BLOCKED_FUNCTIONS = frozenset({
-    "getenv", "current_setting", "duckdb_secrets", "duckdb_settings", "duckdb_variables", "duckdb_extensions",
-    "read_csv", "read_csv_auto", "read_parquet", "read_parquet_metadata", "read_parquet_schema", "read_json",
-    "read_json_auto", "read_json_objects", "read_json_objects_auto", "read_ndjson", "read_ndjson_auto",
-    "read_ndjson_objects", "read_text", "read_text_auto", "read_blob", "read_blob_auto", "read_avro", "iceberg_scan",
-    "iceberg_metadata", "iceberg_snapshots", "parquet_scan", "parquet_metadata", "parquet_schema",
-    "parquet_kv_metadata", "glob", "lsdir", "sqlite_scan", "sqlite_attach", "postgres_scan", "postgres_attach",
-    "postgres_query", "mysql_scan", "mysql_attach", "mysql_query", "query", "query_table",
-})  # fmt: skip
+_BLOCKED_FUNCTIONS = frozenset(
+    {
+        "getenv",
+        "current_setting",
+        "duckdb_secrets",
+        "duckdb_settings",
+        "duckdb_variables",
+        "duckdb_extensions",
+        "read_csv",
+        "read_csv_auto",
+        "read_parquet",
+        "read_parquet_metadata",
+        "read_parquet_schema",
+        "read_json",
+        "read_json_auto",
+        "read_json_objects",
+        "read_json_objects_auto",
+        "read_ndjson",
+        "read_ndjson_auto",
+        "read_ndjson_objects",
+        "read_text",
+        "read_text_auto",
+        "read_blob",
+        "read_blob_auto",
+        "read_avro",
+        "iceberg_scan",
+        "iceberg_metadata",
+        "iceberg_snapshots",
+        "parquet_scan",
+        "parquet_metadata",
+        "parquet_schema",
+        "parquet_kv_metadata",
+        "glob",
+        "lsdir",
+        "sqlite_scan",
+        "sqlite_attach",
+        "postgres_scan",
+        "postgres_attach",
+        "postgres_query",
+        "mysql_scan",
+        "mysql_attach",
+        "mysql_query",
+        "query",
+        "query_table",
+    }
+)
 _BLOCKED_FUNCTION_PREFIXES = ("read_", "parquet_", "iceberg_", "duckdb_", "sniff_", "glob")
 _ALLOWED_TABLE_FUNCTIONS = frozenset(
     {"generate_series", "range", "repeat", "repeat_row", "unnest", "json_each", "json_tree"}
 )
-_BASELINE_TABLE_FUNCTIONS = frozenset({
-    "arrow_scan", "arrow_scan_dumb", "checkpoint", "force_checkpoint", "disable_logging", "enable_logging",
-    "disable_profiling", "enable_profiling", "truncate_duckdb_logs", "json_execute_serialized_sql", "pandas_scan",
-    "python_map_function", "seq_scan", "summary", "which_secret", "icu_calendar_names", "pg_timezone_names", "query",
-    "query_table", "sniff_csv", "read_duckdb", "parquet_file_metadata", "parquet_full_metadata", "parquet_bloom_probe",
-    "pragma_collations", "pragma_database_size", "pragma_metadata_info", "pragma_platform", "pragma_show",
-    "pragma_storage_info", "pragma_table_info", "pragma_user_agent", "pragma_version",
-})  # fmt: skip
+_BASELINE_TABLE_FUNCTIONS = frozenset(
+    {
+        "arrow_scan",
+        "arrow_scan_dumb",
+        "checkpoint",
+        "force_checkpoint",
+        "disable_logging",
+        "enable_logging",
+        "disable_profiling",
+        "enable_profiling",
+        "truncate_duckdb_logs",
+        "json_execute_serialized_sql",
+        "pandas_scan",
+        "python_map_function",
+        "seq_scan",
+        "summary",
+        "which_secret",
+        "icu_calendar_names",
+        "pg_timezone_names",
+        "query",
+        "query_table",
+        "sniff_csv",
+        "read_duckdb",
+        "parquet_file_metadata",
+        "parquet_full_metadata",
+        "parquet_bloom_probe",
+        "pragma_collations",
+        "pragma_database_size",
+        "pragma_metadata_info",
+        "pragma_platform",
+        "pragma_show",
+        "pragma_storage_info",
+        "pragma_table_info",
+        "pragma_user_agent",
+        "pragma_version",
+    }
+)
 
 
 def _enumerate_table_functions() -> frozenset[str]:
@@ -1608,15 +1807,24 @@ def _reject(sql: str, reason: str, message: str, session_id: str | None, service
     query_hash = "sha256:" + hashlib.sha256(sql_str.encode("utf-8", errors="replace")).hexdigest()
     _audit_logger.warning(
         "sql_validator_reject reason=%s session=%s service=%s hash=%s len=%d snippet=%r",
-        reason, session_id or "-", service_id or "-", query_hash, len(sql_str), sql_str[:500],
-    )  # fmt: skip
+        reason,
+        session_id or "-",
+        service_id or "-",
+        query_hash,
+        len(sql_str),
+        sql_str[:500],
+    )
     raise SQLValidationError(reason=reason, message=message)
 
 
 def validate_user_sql(
-    sql: str, *, parser_con: duckdb.DuckDBPyConnection,
-    session_id: str | None = None, service_id: str | None = None, allowed_tables: frozenset[str] | None = None,
-) -> ValidationResult:  # fmt: skip
+    sql: str,
+    *,
+    parser_con: duckdb.DuckDBPyConnection,
+    session_id: str | None = None,
+    service_id: str | None = None,
+    allowed_tables: frozenset[str] | None = None,
+) -> ValidationResult:
     if not isinstance(sql, str):
         _reject(sql, "input_type", "SQL must be a string", session_id, service_id)
     if "\x00" in sql:
@@ -1639,8 +1847,11 @@ def validate_user_sql(
     if elapsed_ms > 50:
         logger.warning(
             "[sql_validator] slow parse+walk: %.1fms for %d-byte input session=%s service=%s",
-            elapsed_ms, len(encoded), session_id, service_id,
-        )  # fmt: skip
+            elapsed_ms,
+            len(encoded),
+            session_id,
+            service_id,
+        )
     return ValidationResult(parse_tree=parsed, elapsed_ms=elapsed_ms)
 
 
@@ -1677,9 +1888,14 @@ def _check_function_node(
 
 
 def _check_table_reference(
-    node: dict, original_sql: str, session_id: str | None, service_id: str | None, *,
-    allowed_tables: frozenset[str] | None = None, cte_aliases: frozenset[str] = frozenset(),
-) -> None:  # fmt: skip
+    node: dict,
+    original_sql: str,
+    session_id: str | None,
+    service_id: str | None,
+    *,
+    allowed_tables: frozenset[str] | None = None,
+    cte_aliases: frozenset[str] = frozenset(),
+) -> None:
     table_name = (node.get("table_name") or "").strip()
     schema_name = (node.get("schema_name") or "").strip().lower()
     catalog_name = (node.get("catalog_name") or "").strip().lower()
@@ -1732,9 +1948,14 @@ def _check_table_reference(
 
 
 def _walk_and_validate(
-    node: Any, original_sql: str, session_id: str | None, service_id: str | None, *,
-    allowed_tables: frozenset[str] | None = None, cte_aliases: frozenset[str] = frozenset(),
-) -> None:  # fmt: skip
+    node: Any,
+    original_sql: str,
+    session_id: str | None,
+    service_id: str | None,
+    *,
+    allowed_tables: frozenset[str] | None = None,
+    cte_aliases: frozenset[str] = frozenset(),
+) -> None:
     if isinstance(node, dict):
         if allowed_tables is not None and isinstance(cte_map := node.get("cte_map"), dict):
             cte_entries = cte_map.get("map")
@@ -1749,20 +1970,30 @@ def _walk_and_validate(
                 is_recursive = isinstance(n, dict) and n.get("type") == "RECURSIVE_CTE_NODE"
                 if val is not None:
                     _walk_and_validate(
-                        val, original_sql, session_id, service_id, allowed_tables=allowed_tables,
+                        val,
+                        original_sql,
+                        session_id,
+                        service_id,
+                        allowed_tables=allowed_tables,
                         cte_aliases=(cte_aliases | alias_fs) if is_recursive else cte_aliases,
-                    )  # fmt: skip
+                    )
                 cte_aliases = cte_aliases | alias_fs
         if node.get("type") == "BASE_TABLE" or "table_name" in node:
-            _check_table_reference(node, original_sql, session_id, service_id, allowed_tables=allowed_tables, cte_aliases=cte_aliases)  # fmt: skip
+            _check_table_reference(
+                node, original_sql, session_id, service_id, allowed_tables=allowed_tables, cte_aliases=cte_aliases
+            )
         if node.get("class") == "FUNCTION":
             _check_function_node(node, original_sql, session_id, service_id)
         for key, value in node.items():
             if not (key == "cte_map" and allowed_tables is not None):
-                _walk_and_validate(value, original_sql, session_id, service_id, allowed_tables=allowed_tables, cte_aliases=cte_aliases)  # fmt: skip
+                _walk_and_validate(
+                    value, original_sql, session_id, service_id, allowed_tables=allowed_tables, cte_aliases=cte_aliases
+                )
     elif isinstance(node, list):
         for item in node:
-            _walk_and_validate(item, original_sql, session_id, service_id, allowed_tables=allowed_tables, cte_aliases=cte_aliases)  # fmt: skip
+            _walk_and_validate(
+                item, original_sql, session_id, service_id, allowed_tables=allowed_tables, cte_aliases=cte_aliases
+            )
 
 
 def apply_user_query_limits(
@@ -2062,9 +2293,13 @@ def _purge_clickhouse_tables_gen(
 
 
 def reset_service_logs(
-    service_id: str, *, delete_raw_logs: bool = False, preserve_usage_history: bool = True,
-    actor: str = "ui", reload_scheduler: Callable[[], None] | None = None,
-) -> Iterator[dict]:  # fmt: skip
+    service_id: str,
+    *,
+    delete_raw_logs: bool = False,
+    preserve_usage_history: bool = True,
+    actor: str = "ui",
+    reload_scheduler: Callable[[], None] | None = None,
+) -> Iterator[dict]:
     from backend.core import duckdb_pool as _pool
     from backend.core import metadata as metadata_db
     from backend.core.ingest import _delete_objects_robust
@@ -2113,7 +2348,7 @@ def reset_service_logs(
                     "Deleting raw cloud logs now means the next full sync has no dedup record "
                     "left and will re-ingest this service's ENTIRE request/RUM history."
                 ),
-            }  # fmt: skip
+            }
         yield {"type": "status", "message": "Draining local database connections..."}
         retired_pools = {}
         try:
@@ -2134,8 +2369,13 @@ def reset_service_logs(
         fos, bucket, prefix = _db._get_fos_client(source), source.get("bucket", ""), source.get("prefix", "")
         pfx = f"{prefix}/" if prefix else ""
         deleted = yield from _purge_ducklake_remote_dirs(
-            fos, ducklake_root, ducklake_table_name(source, "logs"), bucket, _delete_objects_robust, prefix,
-        )  # fmt: skip
+            fos,
+            ducklake_root,
+            ducklake_table_name(source, "logs"),
+            bucket,
+            _delete_objects_robust,
+            prefix,
+        )
         if deleted:
             yield {"type": "status", "message": f"Deleted {deleted:,} cloud DuckLake data object(s)."}
         if deleted_errors := (
@@ -2146,8 +2386,12 @@ def reset_service_logs(
             yield {"type": "status", "message": f"Deleted {deleted_errors:,} quarantined object(s) under errors/."}
         if delete_raw_logs:
             deleted_raw = yield from _purge_prefix(
-                fos, bucket, f"{pfx}raw/request/", _delete_objects_robust, label="request raw object(s) under raw/request/"
-            )  # fmt: skip
+                fos,
+                bucket,
+                f"{pfx}raw/request/",
+                _delete_objects_robust,
+                label="request raw object(s) under raw/request/",
+            )
             yield {"type": "status", "message": f"Deleted {deleted_raw:,} request raw object(s)."}
 
         yield {"type": "status", "message": "Purging local quarantine evidence..."}
@@ -2177,14 +2421,26 @@ def reset_service_logs(
         clear_source_caches(service_key)
         _reinit_ducklake_tables(source, source, service_id, (None,), "reset_service_logs")
         metadata_db.record_audit(
-            service_id, "logs_reset",
-            {"delete_raw_logs": delete_raw_logs, "preserve_usage_history": preserve_usage_history}, actor=actor,
-        )  # fmt: skip
+            service_id,
+            "logs_reset",
+            {"delete_raw_logs": delete_raw_logs, "preserve_usage_history": preserve_usage_history},
+            actor=actor,
+        )
         if svcconfig.is_high_scale_mode(source):
             from backend.core.clickhouse import CLICKHOUSE_HIGH_SCALE_TABLES
 
-            req_specs = [(t, " AND domain != 'rum'" if t == "high_scale_batch_publications" else "") for t in CLICKHOUSE_HIGH_SCALE_TABLES if t not in _RUM_CH_TABLES]  # fmt: skip
-            yield from _purge_clickhouse_tables_gen(service_id, req_specs, "Purging ClickHouse high-scale tables...", "Cleared data from", "ClickHouse tables")  # fmt: skip
+            req_specs = [
+                (t, " AND domain != 'rum'" if t == "high_scale_batch_publications" else "")
+                for t in CLICKHOUSE_HIGH_SCALE_TABLES
+                if t not in _RUM_CH_TABLES
+            ]
+            yield from _purge_clickhouse_tables_gen(
+                service_id,
+                req_specs,
+                "Purging ClickHouse high-scale tables...",
+                "Cleared data from",
+                "ClickHouse tables",
+            )
         yield {
             "type": "done",
             "message": "Log history deleted. New logs from the live edge will begin populating immediately.",
@@ -2192,10 +2448,11 @@ def reset_service_logs(
     finally:
         if paused_cron:
             try:
-                svcconfig.mutate_config(
-                    service_id,
-                    lambda c: c.setdefault("provisioning", {}).setdefault("cron_sync", {}).__setitem__("enabled", original_cron_sync_enabled),
-                )  # fmt: skip
+
+                def _resume_cron_sync(c: dict) -> None:
+                    c.setdefault("provisioning", {}).setdefault("cron_sync", {})["enabled"] = original_cron_sync_enabled
+
+                svcconfig.mutate_config(service_id, _resume_cron_sync)
                 if reload_scheduler:
                     reload_scheduler()
             except Exception as e:
@@ -2208,24 +2465,32 @@ def reset_service_logs(
 
 def _pause_rum_flags(cfg: dict) -> tuple[bool | None, bool] | None:
     rum_cfg = cfg.setdefault("rum", {})
-    original_rum, original_root = rum_cfg.get("enabled"), bool(cfg.get("rum_enabled", False))
+    original_rum = rum_cfg.get("enabled")
+    original_root = bool(cfg.get("rum_enabled", False))
     if not (original_rum or original_root):
         return None
-    rum_cfg["enabled"] = cfg["rum_enabled"] = False
+    rum_cfg["enabled"] = False
+    cfg["rum_enabled"] = False
     return original_rum, original_root
 
 
 def _restore_rum_flags(cfg: dict, paused: tuple[bool | None, bool]) -> None:
     original_rum, original_root = paused
     rum_cfg = cfg.setdefault("rum", {})
-    rum_cfg.pop("enabled", None) if original_rum is None else rum_cfg.__setitem__("enabled", original_rum)
+    if original_rum is None:
+        rum_cfg.pop("enabled", None)
+    else:
+        rum_cfg["enabled"] = original_rum
     cfg["rum_enabled"] = original_root
 
 
 def reset_service_rum(
-    service_id: str, *, delete_raw_logs: bool = False, actor: str = "ui",
+    service_id: str,
+    *,
+    delete_raw_logs: bool = False,
+    actor: str = "ui",
     reload_scheduler: Callable[[], None] | None = None,
-) -> Iterator[dict]:  # fmt: skip
+) -> Iterator[dict]:
     from backend.core import duckdb_pool as _pool
     from backend.core import metadata as metadata_db
     from backend.core.ingest import _delete_objects_robust
@@ -2322,7 +2587,13 @@ def reset_service_rum(
         metadata_db.record_audit(service_id, "rum_reset", {"delete_raw_logs": delete_raw_logs}, actor=actor)
         if svcconfig.is_high_scale_mode(source):
             rum_specs = [*((t, "") for t in _RUM_CH_TABLES), ("high_scale_batch_publications", " AND domain='rum'")]
-            yield from _purge_clickhouse_tables_gen(service_id, rum_specs, "Purging ClickHouse high-scale RUM tables...", "Cleared RUM data from", "ClickHouse RUM tables")  # fmt: skip
+            yield from _purge_clickhouse_tables_gen(
+                service_id,
+                rum_specs,
+                "Purging ClickHouse high-scale RUM tables...",
+                "Cleared RUM data from",
+                "ClickHouse RUM tables",
+            )
         yield {
             "type": "done",
             "message": "RUM history deleted. New RUM beacons from the live edge will populate on next sync.",
@@ -2330,7 +2601,8 @@ def reset_service_rum(
     finally:
         if paused_cron:
             try:
-                svcconfig.mutate_config(service_id, lambda c: _restore_rum_flags(c, paused_flags) if paused_flags is not None else None)  # fmt: skip
+                if paused_flags is not None:
+                    svcconfig.mutate_config(service_id, lambda c: _restore_rum_flags(c, paused_flags))
                 if reload_scheduler:
                     reload_scheduler()
             except Exception as e:

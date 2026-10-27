@@ -9,9 +9,8 @@ from unittest.mock import MagicMock
 import pytest
 
 try:
-    from backend.cron.jobs._common import get_service_display_label as _get_svc_label
-
     import backend.cron.scheduler as _sched_mod
+    from backend.cron.jobs._common import get_service_display_label as _get_svc_label
 
     if not hasattr(_sched_mod, "get_service_display_label"):
         _sched_mod.get_service_display_label = _get_svc_label  # type: ignore[attr-defined]

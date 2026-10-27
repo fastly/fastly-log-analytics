@@ -61,27 +61,32 @@ from backend.models.network import (
     TransportProtocolShare,
 )
 from backend.models.origin import OriginShieldingAnalysisResponse
-from backend.repositories.network import _avg_hs, _health_score
+from backend.repositories.utils.response_shaping import (
+    build_asn_speed_mix,
+    build_network_asn_leaderboard,
+    clamp_bucket_seconds,
+    compute_network_global_summary,
+    deduplicate_metro_leaderboard,
+    generate_epoch_aligned_buckets,
+    shape_protocol_distribution,
+)
+from backend.repositories.utils.response_shaping import (
+    compute_network_health_score as _health_score,
+)
+from backend.repositories.utils.response_shaping import (
+    enrich_row_with_pop_distance as _enrich_with_distance,
+)
+from backend.repositories.utils.response_shaping import (
+    opt_float as _flt,
+)
+from backend.repositories.utils.response_shaping import (
+    parse_metro_code as _parse_metro_code,
+)
 from backend.utils.countries import format_city_label
-
-
-def _parse_metro_code(metro_raw: Any) -> int | None:
-    if not metro_raw:
-        return None
-    try:
-        return int(float(metro_raw))
-    except (ValueError, TypeError):
-        return None
 
 
 def _fmt_ts(ts: int) -> str:
     return datetime.fromtimestamp(ts, tz=UTC).replace(tzinfo=None).isoformat()
-
-
-def _flt(val: Any, ndigits: int | None = None) -> float | None:
-    if val is None:
-        return None
-    return round(float(val), ndigits) if ndigits is not None else float(val)
 
 
 def _ch_bucket_expr(bucket_seconds: int) -> str:
@@ -164,8 +169,6 @@ def _want_shielding(sections: Any) -> bool:
 
 
 def _shielding_analysis(service: HighScaleService, start: datetime, end: datetime, filters: Any) -> ShieldingAnalysis:
-    from backend.repositories.origin import _enrich_with_distance
-
     filter_sql, filter_params = _filter_clause(filters)
     params = {"service_id": service.service_id, "start": start, "end": end, **filter_params}
     hop_ms = "coalesce(toFloat64OrNull(custom_fields['ottfb']), toFloat64OrNull(custom_fields['ttfb']) * 1000000.0)"
@@ -278,7 +281,7 @@ def network_health(
         )
 
     if start is not None and end is not None:
-        bs = max(bs, int((end - start).total_seconds()) // 8640) or bs
+        bs = clamp_bucket_seconds(bs, start, end) or bs
     filter_sql, filter_params = _filter_clause(getattr(req, "filters", None), drop_asn=map_asn != "all")
     params = {"service_id": service.service_id, "start": start, "end": end, **filter_params}
     rtt_where, bucket_expr = f"{_RTT_FILTER}{filter_sql}", _ch_bucket_expr(bs)
@@ -361,22 +364,10 @@ def network_health(
     top_asns = sorted(all_asns_seen, key=lambda a: all_asns_seen[a], reverse=True)[:top_n]
     top_asn_set, asn_labels = set(top_asns), resolve_asn_display_labels(service.service_id, top_asns)
 
-    all_buckets = (
-        [_fmt_ts(ts) for ts in range((int(start.timestamp()) // bs) * bs, (int(end.timestamp()) // bs) * bs + 1, bs)]
-        if start is not None and end is not None
-        else []
-    )
+    all_buckets = generate_epoch_aligned_buckets(start, end, bs) if start is not None and end is not None else []
     bucket_idx = {b: i for i, b in enumerate(all_buckets)}
 
-    asn_speed_rows: dict[int, list[tuple[str, int]]] = {}
-    for r in speed_rows:
-        if r["asn"] is not None and len(rows_for_asn := asn_speed_rows.setdefault(int(r["asn"]), [])) < 5:
-            rows_for_asn.append((str(r["c_speed"]), int(r["cnt"])))
-    asn_speed_mix = {
-        asn_v: {cs: round(cnt / total, 3) for cs, cnt in rows}
-        for asn_v, rows in asn_speed_rows.items()
-        if (total := sum(cnt for _, cnt in rows)) > 0
-    }
+    asn_speed_mix = build_asn_speed_mix((r["asn"], r["c_speed"], r["cnt"]) for r in speed_rows if r["asn"] is not None)
     asn_rtt_pct = {
         int(r["asn"]): {"p95_rtt_us": _flt(r["p95"]), "p99_rtt_us": _flt(r["p99"])}
         for r in pct_rows
@@ -478,7 +469,7 @@ def network_health(
         else []
     )
 
-    seen: dict[str, dict] = {}
+    raw_metro_entries: list[dict[str, Any]] = []
     for r in metro_rows:
         ctry, city, region = r["country"] or "", r["city"] or "", r["region"] or ""
         pkt, err = _flt(r["avg_ploss"]), _flt(r["error_pct"])
@@ -489,13 +480,8 @@ def network_health(
         )
         city_name = dma_map[str(metro_code)] if metro_code is not None and str(metro_code) in dma_map else city
         display = format_city_label(city_name, ctry, region)
-        if prev := seen.get(display):
-            total = prev["total_reqs"] + reqs
-            if prev["health_score"] is not None and hs is not None:
-                prev["health_score"] = round((prev["health_score"] * prev["total_reqs"] + hs * reqs) / total, 1)
-            prev["total_reqs"] = total
-        else:
-            seen[display] = {
+        raw_metro_entries.append(
+            {
                 "country": ctry,
                 "region": region,
                 "raw_city": city,
@@ -503,68 +489,34 @@ def network_health(
                 "total_reqs": reqs,
                 "health_score": hs,
             }
-    metro_leaderboard = sorted(seen.values(), key=lambda x: x["total_reqs"], reverse=True)
-
-    leaderboard: list[dict] = []
-    for asn in top_asns:
-        if not (buckets_data := asn_bucket_data.get(asn, {})):
-            continue
-        hs_now = buckets_data[max(buckets_data)].get("health_score")
-        hs_1h = hs_1w = hs_now
-        if len(all_buckets) > 1:
-            n_buckets_1h, sorted_buckets = max(1, 3600 // bs), sorted(buckets_data)
-            hs_1w = _avg_hs(buckets_data, sorted_buckets[: max(1, len(sorted_buckets) // 4)])
-            hs_1h = _avg_hs(buckets_data, sorted_buckets[max(0, len(sorted_buckets) - n_buckets_1h) :])
-        delta = (hs_now - hs_1h) if (hs_now is not None and hs_1h is not None) else 0.0
-        rtt_pct = asn_rtt_pct.get(asn, {})
-        leaderboard.append(
-            {
-                "asn": asn,
-                "label": asn_labels.get(asn, f"AS{asn}"),
-                "health_score_now": hs_now,
-                "health_score_1h_ago": hs_1h,
-                "health_score_1w_ago": hs_1w,
-                "trend": "degrading" if delta < -5 else ("improving" if delta > 5 else "stable"),
-                "total_reqs": all_asns_seen.get(asn, 0),
-                "c_speed_mix": asn_speed_mix.get(asn, {}),
-                "p95_rtt_us": rtt_pct.get("p95_rtt_us"),
-                "p99_rtt_us": rtt_pct.get("p99_rtt_us"),
-            }
         )
+    metro_leaderboard = deduplicate_metro_leaderboard(raw_metro_entries)
 
-    all_hs = [le["health_score_now"] for le in leaderboard if le["health_score_now"] is not None]
-    global_hs = round(sum(all_hs) / len(all_hs), 1) if all_hs else 0.0
-    all_rtt = [float(r["rtt_med_us"]) for r in heatmap_rows if r["rtt_med_us"] is not None]
-    total_reqs = sum(int(r["reqs"]) for r in heatmap_rows)
-    avg_rtt_ms = round(sum(all_rtt) / len(all_rtt) / 1000.0, 1) if all_rtt else 0.0
-
-    significant = [le for le in leaderboard if le["total_reqs"] > total_reqs * 0.01]
-    worst = (
-        min(significant, key=lambda le: le["health_score_now"] if le["health_score_now"] is not None else 100)
-        if significant
-        else None
+    leaderboard = build_network_asn_leaderboard(
+        top_asns=top_asns,
+        asn_bucket_data=asn_bucket_data,
+        all_buckets=all_buckets,
+        bucket_seconds=bs,
+        all_asns_seen=all_asns_seen,
+        asn_speed_mix=asn_speed_mix,
+        asn_rtt_pct=asn_rtt_pct,
+        asn_labels=asn_labels,
     )
-    worst_asn = NetworkWorstEntry(label=worst["label"], score=worst["health_score_now"]) if worst else None
 
-    worst_country = None
-    for b in reversed(map_buckets):
-        cities_raw = b.get("cities")
-        cities_seq = cities_raw if isinstance(cities_raw, list) else []
-        if sig := [c for c in cities_seq if isinstance(c, dict) and c.get("reqs", 0) >= 1]:
-            wc = min(sig, key=lambda c: c["health_score"] if c["health_score"] is not None else 100)
-            idx = wc.get("city_idx", -1)
-            city_name = cities_list[idx]["name"] if 0 <= idx < len(cities_list) else ""
-            worst_country = NetworkWorstEntry(
-                label=format_city_label(city_name, wc["country"]), score=wc["health_score"]
-            )
-            break
-
+    raw_summary = compute_network_global_summary(
+        leaderboard=leaderboard,
+        rtt_values=[float(r["rtt_med_us"]) for r in heatmap_rows if r["rtt_med_us"] is not None],
+        total_reqs=sum(int(r["reqs"]) for r in heatmap_rows),
+        map_buckets=map_buckets,
+        cities_list=cities_list,
+        zero_as_int=False,
+    )
     summary = NetworkHealthSummary(
-        global_health_score=global_hs,
-        avg_rtt_ms=avg_rtt_ms,
-        total_reqs=total_reqs,
-        worst_asn=worst_asn,
-        worst_country=worst_country,
+        global_health_score=raw_summary["global_health_score"],
+        avg_rtt_ms=raw_summary["avg_rtt_ms"],
+        total_reqs=raw_summary["total_reqs"],
+        worst_asn=NetworkWorstEntry(**raw_summary["worst_asn"]) if raw_summary["worst_asn"] else None,
+        worst_country=NetworkWorstEntry(**raw_summary["worst_country"]) if raw_summary["worst_country"] else None,
     )
     want_map = not sections or bool(set(sections) & {"health", "map_buckets", "cities"})
     return NetworkHealthResponse.with_telemetry(
@@ -747,7 +699,6 @@ def get_transport_metrics(
     r: Mapping[str, Any] = rows[0] if rows else {}
     total_requests = int(r.get("total_reqs") or 0)
     missing_fields = [f for f in _TRANSPORT_FIELDS if not int(r.get(f"seen_{f}") or 0)] if total_requests > 0 else []
-    sum_p = sum(pr.get("reqs", 0) for pr in p_rows) or total_requests or 1
     return TransportMetrics(
         **cache_result({}, state="bypass", prewarmer=False),
         section_timings=[SectionTimingEntry.model_validate(t) for t in trace.timings()],
@@ -756,12 +707,11 @@ def get_transport_metrics(
         bandwidth_bytes=int(r.get("total_bytes") or 0),
         total_requests=total_requests,
         protocol_distribution=[
-            TransportProtocolShare(
-                protocol=str(pr.get("proto_clean", "Other")),
-                requests=(p_cnt := int(pr.get("reqs", 0))),
-                share_pct=round(p_cnt * 100.0 / sum_p, 2),
+            TransportProtocolShare(**item)
+            for item in shape_protocol_distribution(
+                ((pr.get("proto_clean", "Other"), pr.get("reqs", 0)) for pr in p_rows),
+                total_requests=total_requests,
             )
-            for pr in p_rows
         ],
         missing_fields=missing_fields,
     )

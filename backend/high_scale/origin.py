@@ -25,7 +25,6 @@ if TYPE_CHECKING:
 
 # ── Folded from backend/high_scale/origin.py ─────────────────────────────────
 
-import math
 import sys
 from dataclasses import dataclass
 from dataclasses import field as _dc_field
@@ -40,17 +39,18 @@ from backend.high_scale._common import (
 from backend.high_scale._common import build_published_projection_where as _where
 from backend.high_scale._common import optional_int as _integer
 from backend.high_scale._common import sketch as _sketch
+from backend.repositories.utils.response_shaping import (
+    empty_origin_aggregates,
+    empty_origin_summary,
+    is_pop_latency_elevated,
+    opt_float,
+    shape_pop_latency_rows,
+    shape_status_code_rows,
+    us_to_ms,
+)
 from backend.utils.date_utils import safe_iso
 
-_EMPTY = {
-    "summary": {},
-    "timeseries": {"has_data": False, "series": []},
-    "slow_urls": {"has_data": False, "rows": []},
-    "status_codes": {"has_data": False, "rows": []},
-    "path_breakdown": {"has_data": False, "shielding_detected": False, "rows": []},
-    "pop_latency": {"has_data": False, "requires_group_c": False, "rows": []},
-    "ip_health": {"has_data": False, "rows": []},
-}
+_EMPTY = empty_origin_aggregates(include_has_data=False)
 
 _APPROX_NOTE = (
     "Latency percentiles are merged from per-minute log-histogram sketches "
@@ -141,20 +141,7 @@ def _origin_summary(service: HighScaleService, start_time: str | None, end_time:
     requests = int(row.get("requests") or 0)
     latency_p50 = _quantile(row, "latency", 0)
     if requests == 0 or latency_p50 is None:
-        return {
-            "has_data": False,
-            "total_misses": None,
-            "total_passes": None,
-            "ottfb_p50_ms": None,
-            "ottfb_p75_ms": None,
-            "ottfb_p95_ms": None,
-            "ottfb_p99_ms": None,
-            "ottlb_p50_ms": None,
-            "ottlb_p95_ms": None,
-            "cdn_overhead_p50_ms": None,
-            "origin_error_rate": None,
-            "obytes_p50": None,
-        }
+        return empty_origin_summary()
     return {
         "has_data": True,
         "total_misses": int(row.get("misses") or 0),
@@ -225,21 +212,7 @@ def _facts_summary(service: HighScaleService, facts: FactsScope) -> dict[str, An
     row = rows[0] if rows else {}
     requests = int(row.get("requests") or 0)
     if requests == 0:
-        return {
-            "has_data": False,
-            "total_misses": None,
-            "total_passes": None,
-            "ottfb_p50_ms": None,
-            "ottfb_p75_ms": None,
-            "ottfb_p95_ms": None,
-            "ottfb_p99_ms": None,
-            "ottlb_p50_ms": None,
-            "ottlb_p95_ms": None,
-            "cdn_overhead_p50_ms": None,
-            "origin_error_rate": None,
-            "obytes_p50": None,
-            **_NOT_APPROX,
-        }
+        return empty_origin_summary(**_NOT_APPROX)
     status_count = int(row.get("status_count") or 0)
     overhead_n = int(row.get("overhead_n") or 0)
     bytes_n = int(row.get("bytes_n") or 0)
@@ -316,16 +289,7 @@ def _facts_status_codes(service: HighScaleService, facts: FactsScope) -> dict[st
         f"FROM {facts.base} WHERE status IS NOT NULL GROUP BY value ORDER BY requests DESC",
         facts.params,
     )
-    total = sum(int(row["requests"]) for row in rows)
-    return {
-        "has_data": bool(rows),
-        "rows": [
-            {"status": int(row["value"]), "count": int(row["requests"]), "pct": int(row["requests"]) * 100.0 / total}
-            for row in rows
-            if total > 0
-        ],
-        **_NOT_APPROX,
-    }
+    return shape_status_code_rows(rows, round_pct=False, **_NOT_APPROX)
 
 
 def _facts_latency_dimension(
@@ -421,18 +385,7 @@ def _status_codes(service: HighScaleService, start_time: str | None, end_time: s
         ),
         order_by="requests DESC",
     )
-    return {
-        "has_data": bool(rows),
-        "rows": [
-            {
-                "status": int(row["value"]),
-                "count": int(row["requests"]),
-                "pct": (int(row["requests"]) * 100.0 / int(row["total_requests"])),
-            }
-            for row in rows
-            if int(row.get("total_requests") or 0) > 0
-        ],
-    }
+    return shape_status_code_rows(rows, round_pct=False)
 
 
 def _latency_dimension(
@@ -463,12 +416,11 @@ def _latency_dimension(
 
 
 def _milliseconds(value: object) -> float | None:
-    parsed = _float_or_none(value)
-    return parsed / 1000.0 if parsed is not None and math.isfinite(parsed) else None
+    return us_to_ms(value)
 
 
 def _float_or_none(value: object) -> float | None:
-    return float(str(value)) if value is not None else None
+    return opt_float(value)
 
 
 def origin_aggregates(
@@ -512,25 +464,16 @@ def origin_aggregates(
 
     def _build_pop_latency() -> dict[str, Any]:
         rows = latency_rows("pop_latency", "pop", limit=req.pop_latency_limit)
-        p95s = [value for row in rows if (value := _milliseconds(_quantile(row, "latency", 1))) is not None]
-        p95s.sort()
-        median_p95 = p95s[len(p95s) // 2] if p95s else 0
-        return {
-            "has_data": bool(rows),
-            "requires_group_c": False,
-            "median_p95_ms": median_p95,
-            "rows": [
-                {
-                    "pop": row["value"],
-                    "requests": int(row["requests"]),
-                    "p50_ms": _milliseconds(_quantile(row, "latency", 0)),
-                    "p95_ms": _milliseconds(_quantile(row, "latency", 1)),
-                    "elevated": _is_elevated(_quantile(row, "latency", 1), median_p95),
-                }
-                for row in rows
-            ],
-            **approx,
-        }
+        shaped_inputs = [
+            {
+                "pop": row["value"],
+                "requests": int(row["requests"]),
+                "p50_ms": _milliseconds(_quantile(row, "latency", 0)),
+                "p95_ms": _milliseconds(_quantile(row, "latency", 1)),
+            }
+            for row in rows
+        ]
+        return shape_pop_latency_rows(shaped_inputs, include_median_when_empty=True, **approx)
 
     def _build_ip_health() -> dict[str, Any]:
         rows = latency_rows(
@@ -610,8 +553,7 @@ def origin_aggregates(
 
 
 def _is_elevated(value_us: object, median_p95_ms: float) -> bool:
-    value_ms = _milliseconds(value_us)
-    return value_ms is not None and value_ms > median_p95_ms * 2
+    return is_pop_latency_elevated(_milliseconds(value_us), median_p95_ms)
 
 
 # ── Pure request-event projection (folded from backend.high_scale.origin_projection) ──

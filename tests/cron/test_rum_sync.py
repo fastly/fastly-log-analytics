@@ -25,7 +25,6 @@ import httpx
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
-from backend.core.faro_versions import DEFAULT_FARO_VERSION
 from backend.core.local_compaction import compact_local_partitions
 from backend.core.metadata.cron_log import CronLeaseHeldError
 from backend.core.query_attribution import current_attribution, derive_from_process_context
@@ -58,6 +57,7 @@ from backend.core import metadata as metadata_db
 from backend.core import metric_snapshots
 from backend.core import rum_ingest as rum_ingest_mod
 from backend.core import storage as storage_mod
+from backend.core.faro_versions import DEFAULT_FARO_VERSION
 from backend.core.ingest import sweep_rum_ledger_once
 from backend.core.metadata import pg_connection as pgc
 from backend.core.metadata import usage_log_db

@@ -1723,7 +1723,7 @@ else:
 ROOT = Path(__file__).resolve().parents[2]
 _NOW = datetime(2026, 6, 29, 12, 30, 45, tzinfo=UTC)
 _INSIGHTS_NOW = datetime(2026, 7, 7, 12, 0, 0, tzinfo=UTC)
-_TS_SOURCE = ROOT / "frontend" / "lib" / "utils.ts"
+_TS_SOURCE = ROOT / "frontend" / "lib" / "chartUtils.ts"
 _HOUR_KEYS = ["2026-10-19-00", "2026-10-19-23", "2026-02-28-23", "2024-02-29-12", "2026-1-5-3"]
 _BAD_KEYS = ["", "2026-10-19", "2026-10-19-24", "2026-13-01-00", "garbage", "2026-10-19T05", "2026-10-19-05-00"]
 _DROP_TABLE_FILES = sorted([*(ROOT / "backend" / "repositories").glob("*.py"), ROOT / "backend" / "core" / "duckdb.py"])
