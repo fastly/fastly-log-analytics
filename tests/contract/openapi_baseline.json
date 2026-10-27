@@ -2,7 +2,6 @@
   "paths": {
     "/api/admin/app-config/query-monitor": {},
     "/api/admin/backfill-bundle-rollups": {},
-    "/api/admin/backfill-window": {},
     "/api/admin/bot-sources": {},
     "/api/admin/bot-sources/refresh": {},
     "/api/admin/bot-sources/{source_id}/refresh": {},

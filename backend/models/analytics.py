@@ -204,13 +204,6 @@ class PageTelemetryResponse(WireSafeModel):
     calls: list[PageTelemetryCall]
 
 
-class BackfillWindowResponse(WireSafeModel):
-    error: str | None = None
-    files_downloaded: int | None = None
-    rows_downloaded: int | None = None
-    files_removed: int | None = None
-
-
 class HealthServiceState(WireSafeModel):
     service_id: str
     status: str

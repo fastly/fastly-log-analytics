@@ -995,22 +995,7 @@ def update_logging_endpoint(cfg: dict, token: str):
         raise RuntimeError(f"Declarative reconciliation failed: {err}")
 
 
-# ── Iceberg Metadata & CDN Snippets ───────────────────────────────────────────
-
-_ICEBERG_METADATA_SNIPPET_NAME = "iceberg-metadata-pointer-ttl"
-_ICEBERG_METADATA_SNIPPET = """\
-  if (req.url ~ "metadata_location\\.txt($|\\?)") {
-    set beresp.http.Surrogate-Key = "iceberg-metadata-pointer";
-    set beresp.ttl = 10s;
-    set beresp.stale_while_revalidate = 5s;
-    set beresp.stale_if_error = 60s;
-  }
-  if (req.url ~ "table_summary\\.json($|\\?)") {
-    set beresp.http.Surrogate-Key = "iceberg-table-summary";
-    set beresp.ttl = 300s;
-    set beresp.stale_while_revalidate = 60s;
-    set beresp.stale_if_error = 3600s;
-  }"""
+# ── CDN Snippets ──────────────────────────────────────────────────────────────
 
 _CDN_RECV_SWR_SNIPPET_NAME = "cdn-swr-shield-disable"
 _CDN_RECV_SWR_SNIPPET = """\
@@ -1053,7 +1038,6 @@ _CDN_STREAMING_BYPASS_SNIPPET = """\
 
 _CDN_SNIPPETS = [
     (_CDN_STREAMING_BYPASS_SNIPPET_NAME, "fetch", _CDN_STREAMING_BYPASS_SNIPPET, 5),
-    (_ICEBERG_METADATA_SNIPPET_NAME, "fetch", _ICEBERG_METADATA_SNIPPET, 10),
     (_CDN_RECV_SWR_SNIPPET_NAME, "recv", _CDN_RECV_SWR_SNIPPET, 10),
     (_CDN_FETCH_GENERATION_SNIPPET_NAME, "fetch", _CDN_FETCH_GENERATION_SNIPPET, 20),
     (_CDN_NO_CACHE_404_SNIPPET_NAME, "fetch", _CDN_NO_CACHE_404_SNIPPET, 30),

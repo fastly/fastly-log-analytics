@@ -1793,7 +1793,6 @@ from backend.models.admin import (
     UsageLoggingUpdateBody,
     UsageLogResponse,
 )
-from backend.models.admin_actions import BackfillWindowResponse
 from backend.models.common import OkResponse
 from backend.utils.bounded_cache import BoundedTTLCache
 from backend.utils.telemetry import track_query
@@ -1868,23 +1867,6 @@ _FASTLY_COUNTS_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=256, ttl_seconds
 # single round of clears would invalidate both halves of the response.
 _DUCKDB_COUNTS_TTL = 45.0
 _DUCKDB_COUNTS_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=256, ttl_seconds=_DUCKDB_COUNTS_TTL)
-
-
-@router.post("/admin/backfill-window", response_model=BackfillWindowResponse, response_model_exclude_unset=True)
-def backfill_window(
-    start_time: str = Query(..., description="ISO 8601 UTC start, e.g. '2026-05-31T23:00:00Z'"),
-    end_time: str = Query(..., description="ISO 8601 UTC end, e.g. '2026-06-01T01:00:00Z'"),
-    source: dict = Depends(get_source),
-) -> dict:
-    """Force-sync a specific time window from FOS into local cache.
-
-    Use to fill gaps left by ingestion outages (the normal cron pulls
-    'since last sync' and won't reach back past its pointer once recovered).
-    Idempotent — files already present in the local cache are skipped.
-    """
-    from backend.core import iceberg as _ice
-
-    return _ice.sync_data(source, start_time=start_time, end_time=end_time)
 
 
 def _fetch_fastly_request_counts(

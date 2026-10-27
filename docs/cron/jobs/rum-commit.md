@@ -53,8 +53,8 @@
    - Calls `start_cron_run(src, "rum_commit")` returning `run_id`.
    - Calls `cleanup_progress_and_reap()` and `start_progress(run_id, service_id=service_id, task="rum_commit")`.
 4. **Table Commit Execution (Dual-Table Isolated):**
-   - **`client_vitals`**: Calls `commit_buffer(src, table_name="client_vitals")` and `sync_data(src, table_name="client_vitals")`. Catches table-specific errors.
-   - **`client_errors`**: Calls `commit_buffer(src, table_name="client_errors")` and `sync_data(src, table_name="client_errors")`. Catches table-specific errors.
+   - **`client_vitals`**: Calls `commit_buffer(src, table_name="client_vitals")`.
+   - **`client_errors`**: Calls `commit_buffer(src, table_name="client_errors")`.
 5. **Ledger Publication:**
    - Calls `_mark_ledger_published(service_id, rum=True)` **only if both** tables committed without errors (prevents premature raw deletion).
 6. **Local Compaction Asynchronous Triggers:**

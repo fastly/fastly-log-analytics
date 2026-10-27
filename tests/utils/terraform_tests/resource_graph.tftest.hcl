@@ -67,15 +67,6 @@ run "cdn_proxy_has_required_cdn_snippets" {
     condition = length([
       for s in fastly_service_vcl.cdn_proxy.snippet :
       s
-      if s.name == "iceberg-metadata-pointer-ttl"
-    ]) == 1
-    error_message = "iceberg-metadata-pointer-ttl snippet missing"
-  }
-
-  assert {
-    condition = length([
-      for s in fastly_service_vcl.cdn_proxy.snippet :
-      s
       if s.name == "cdn-race-condition-generation"
     ]) == 1
     error_message = "cdn-race-condition-generation snippet missing"

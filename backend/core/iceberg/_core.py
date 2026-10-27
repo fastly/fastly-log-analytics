@@ -1685,19 +1685,6 @@ def _prune_empty_dirs(root: str) -> None:
                 logger.debug("_prune_empty_dirs: os.rmdir failed (ignored)", exc_info=True)
 
 
-# ── sync_data (DuckLake no-op shim) ──
-def sync_data(
-    source: dict,
-    progress_callback: Any = None,
-    start_time: str | None = None,
-    end_time: str | None = None,
-    table_name: str = "logs",
-    **kwargs: Any,
-) -> dict[str, int]:
-    """No-op under DuckLake (files are written locally on commit)."""
-    return {"files_downloaded": 0, "rows_downloaded": 0}
-
-
 _CDN_URL_ALLOWED_HOST_SUFFIXES = (
     ".fastly.net",
     ".fastlystorage.app",

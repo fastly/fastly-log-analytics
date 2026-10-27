@@ -2965,7 +2965,6 @@ _OPTIONAL_SNIPPETS = [
     "Fastly Log Analysis Origin Deliver",
 ]
 _REQUIRED_CDN_SNIPPETS = [
-    "iceberg-metadata-pointer-ttl",
     "cdn-swr-shield-disable",
     "cdn-race-condition-generation",
     "cdn-no-cache-404",
@@ -3024,7 +3023,7 @@ def test_check_config_logging_and_cdn_permutations():
         snippets=[{"name": "Fastly Log Analysis Capture"}],
         dicts=full_dicts,
         backends=full_backends,
-        cdn_snippets=[{"name": "iceberg-metadata-pointer-ttl"}],
+        cdn_snippets=[{"name": "cdn-swr-shield-disable"}],
     )
     with patch("backend.core.fastly.client.fastly", side_effect=side_missing_snip):
         res = _client().get("/api/provision/check-config", params=_CHECK_PARAMS).json()

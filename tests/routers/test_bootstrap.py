@@ -1535,19 +1535,6 @@ def test_ngwaf_share_purge_calendar_vcl_health_and_telemetry_match_producer(clie
 
 
 def test_admin_ingest_actions_beacons_celery_and_control_room_match_producer(client, monkeypatch):
-    for counters in (
-        {"files_downloaded": 2, "rows_downloaded": 10, "files_removed": 0},
-        {"error": "Could not load table: x", "files_downloaded": 0},
-    ):
-        with patch("backend.core.iceberg.sync_data", return_value=counters):
-            assert (
-                _body(
-                    client.post(
-                        "/api/admin/backfill-window?start_time=2026-10-01T00:00:00Z&end_time=2026-10-01T02:00:00Z"
-                    )
-                )
-                == counters
-            )
     started = {"ok": True, "message": "started", "run_id": 41}
     with patch("backend.utils.router_utils.start_or_resume_cron", return_value=started):
         assert _body(client.post("/api/admin/commit-iceberg"), status=202) == started

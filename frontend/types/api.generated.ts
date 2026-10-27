@@ -2875,30 +2875,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/admin/backfill-window": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Backfill Window
-         * @description Force-sync a specific time window from FOS into local cache.
-         *
-         *     Use to fill gaps left by ingestion outages (the normal cron pulls
-         *     'since last sync' and won't reach back past its pointer once recovered).
-         *     Idempotent — files already present in the local cache are skipped.
-         */
-        post: operations["backfill_window_api_admin_backfill_window_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/admin/log-accounting/{service_id}": {
         parameters: {
             query?: never;
@@ -6668,19 +6644,6 @@ export interface components {
             pop_health?: number | null;
             /** Rum */
             rum?: number | null;
-        } & {
-            [key: string]: unknown;
-        };
-        /** BackfillWindowResponse */
-        BackfillWindowResponse: {
-            /** Error */
-            error?: string | null;
-            /** Files Downloaded */
-            files_downloaded?: number | null;
-            /** Rows Downloaded */
-            rows_downloaded?: number | null;
-            /** Files Removed */
-            files_removed?: number | null;
         } & {
             [key: string]: unknown;
         };
@@ -38043,117 +38006,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
-                };
-            };
-            /** @description Bad request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Unauthenticated */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Forbidden */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Validation failed */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Rate limited */
-            429: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Internal error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Upstream error */
-            502: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Service unavailable */
-            503: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-        };
-    };
-    backfill_window_api_admin_backfill_window_post: {
-        parameters: {
-            query: {
-                /** @description ISO 8601 UTC start, e.g. '2026-05-31T23:00:00Z' */
-                start_time: string;
-                /** @description ISO 8601 UTC end, e.g. '2026-06-01T01:00:00Z' */
-                end_time: string;
-                service?: string | null;
-                service_id?: string | null;
-            };
-            header?: {
-                "x-fastly-service-id"?: string | null;
-                "x-service-id"?: string | null;
-            };
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["BackfillWindowResponse"];
                 };
             };
             /** @description Bad request */

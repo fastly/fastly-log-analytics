@@ -1689,7 +1689,6 @@ def _run_rum_commit(service_id: str, force: bool = False, run_id: int | None = N
             err = _buffer_result_error(res)
             if res.get("files_committed", 0) > 0:
                 committed_rows = res.get("rows_committed", 0)
-                db_iceberg.sync_data(src, table_name=table_name)
             if err:
                 logger.warning("[rum_commit] %s: %s commit incomplete: %s", service_id, table_name, err)
         except Exception as e:

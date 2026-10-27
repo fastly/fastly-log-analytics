@@ -380,7 +380,7 @@ def _setup_high_scale_discovery(
 
 
 def _setup_rum_commit_env(monkeypatch, *, run_id: int = 1101, disk_ok: tuple[bool, str] = (True, "")) -> dict:
-    log_calls, ledger_calls, status_calls, sync_calls = [], [], [], []
+    log_calls, ledger_calls, status_calls = [], [], []
     start_progress, _, end_progress, _ = _mock_progress(monkeypatch)
     monkeypatch.setattr("backend.config.load_config", lambda sid: _RUM_COMMIT_FAKE_CFG)
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: _RUM_COMMIT_FAKE_SRC)
@@ -393,12 +393,10 @@ def _setup_rum_commit_env(monkeypatch, *, run_id: int = 1101, disk_ok: tuple[boo
         "backend.core.ingest._mark_ledger_published", lambda sid, rum=False: ledger_calls.append((sid, rum))
     )
     monkeypatch.setattr("backend.config.update_status", lambda sid, status: status_calls.append((sid, status)))
-    monkeypatch.setattr("backend.core.iceberg.sync_data", lambda src, table_name: sync_calls.append(table_name))
     return {
         "log_calls": log_calls,
         "ledger_calls": ledger_calls,
         "status_calls": status_calls,
-        "sync_calls": sync_calls,
         "start_progress": start_progress,
         "end_progress": end_progress,
     }
@@ -1188,7 +1186,7 @@ def test_rum_commit_lifecycle_contracts(scenario, monkeypatch, mock_orchestratio
         assert [s for _, s in state["status_calls"] if "rum" in s][-1]["rum"]["total_rows"] == 60
     elif scenario == "partial_failure":
         assert args[3] == "warning" and kwargs.get("rows_ingested") == 45
-        assert "client_vitals" in state["sync_calls"] and state["ledger_calls"] == []
+        assert state["ledger_calls"] == []
         assert "Partial RUM commit" in kwargs.get("summary", "")
     elif scenario == "both_fail":
         assert args[3] == "error" and state["ledger_calls"] == []

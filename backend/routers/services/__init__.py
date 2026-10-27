@@ -2017,7 +2017,6 @@ def provision_check_config(
                         "GET", f"/service/{cdn_service_id}/version/{active_ver_cdn}/snippet", token=token
                     )
                     required_cdn = {
-                        "iceberg-metadata-pointer-ttl",
                         "cdn-swr-shield-disable",
                         "cdn-race-condition-generation",
                         "cdn-no-cache-404",

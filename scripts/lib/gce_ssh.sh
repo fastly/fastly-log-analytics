@@ -299,7 +299,7 @@ prune_unconfigured_service_artefacts() {
       [ -e "$f" ] || continue
       base="$(basename "$f")"
       case "$base" in
-        pop_locations.json|manifest_metadata_cache.json|iceberg_catalog.db|snapshot_files_cache.json|top_values.json) continue ;;
+        pop_locations.json|manifest_metadata_cache.json|snapshot_files_cache.json|top_values.json) continue ;;
       esac
       keep=0
       case "$base" in

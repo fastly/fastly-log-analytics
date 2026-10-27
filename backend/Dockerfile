@@ -40,7 +40,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # environment has network access. Runtime pods may not be able to reach
 # extensions.duckdb.org, especially on local ARM64 Kubernetes clusters.
 RUN /app/.venv/bin/python -c \
-    "import duckdb; con = duckdb.connect(); [con.execute(f'INSTALL {name}') for name in ('ducklake', 'iceberg', 'avro', 'httpfs', 'parquet')]; con.close()"
+    "import duckdb; con = duckdb.connect(); [con.execute(f'INSTALL {name}') for name in ('ducklake', 'avro', 'httpfs', 'parquet')]; con.close()"
 
 # Falco — Fastly VCL static analyser (github.com/ysugimoto/falco).
 # Download and unpack in builder so the runtime runner stage remains minimal
