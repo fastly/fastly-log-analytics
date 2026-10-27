@@ -76,7 +76,9 @@ def _compute_prefill_rates(source: dict[str, Any]) -> tuple[dict[str, Any], dict
         "edge_only": False,
         "compaction_enabled": True,
         "delete_after": True,
-        "log_retention_days": 90,
+        "log_retention_days": 30,
+        "rum_retention_days": 30,
+        "deployment_mode": "standard",
         "class_a_rate_per_1k": float(global_rates.get("class_a_rate_per_1k", 0.005)),
         "class_b_rate_per_10k": float(global_rates.get("class_b_rate_per_10k", 0.01)),
         "cdn_egress_rate_per_gb": float(global_rates.get("cdn_egress_rate_per_gb", 0.12)),
@@ -97,7 +99,9 @@ def _compute_prefill_rates(source: dict[str, Any]) -> tuple[dict[str, Any], dict
             result["compaction_enabled"] = prov.get("cron_compact", {}).get("enabled", True)
             result["delete_after"] = bool(cron_sync.get("delete_after", True))
             result["commit_interval_mins"] = int(cron_sync.get("commit_interval_mins", 5))
-            result["log_retention_days"] = int(cfg.get("log_retention_days", 90))
+            result["log_retention_days"] = int(cron_sync.get("data_retention_days", 30))
+            result["rum_retention_days"] = int(cron_sync.get("rum_retention_days", result["log_retention_days"]))
+            result["deployment_mode"] = "high_scale" if svcconfig.is_high_scale_mode(source) else "standard"
             try:
                 from backend.core.log_fields import estimate_log_line_bytes
 
@@ -323,7 +327,7 @@ def usage_current_storage(
         cfg = svcconfig.load_config(src["name"]) or {}
         cron_sync = cfg.get("provisioning", {}).get("cron_sync", {})
         delete_after = cron_sync.get("delete_after", True)
-        retention_days = int(cron_sync.get("log_retention_days", 30))
+        retention_days = int(cron_sync.get("data_retention_days", 30))
         retention_end_str = now.strftime("%Y-%m-%d %H:%M:%S")
         MIN_BILLING_DAYS = 30
         query_days = MIN_BILLING_DAYS if delete_after else retention_days
@@ -404,18 +408,47 @@ def usage_current_storage(
                 rum_bytes,
             )
 
+        # High-Scale also keeps one archive Parquet artifact (plus a manifest and a commit marker) per page; the
+        # worker deletes them past the retention window, and FOS still bills a deleted object for 30 days.
+        archive_bytes = archive_objects = archive_expired_bytes = 0
+        if svcconfig.is_high_scale_mode(src):
+            try:
+                from backend.high_scale.postgres_control import PostgresControlPlane
+
+                summary = PostgresControlPlane().archive_storage_summary(str(src.get("service_id") or src["name"]))
+                archive_bytes, archive_objects = summary["live_bytes"], summary["live_objects"]
+                archive_expired_bytes = summary["expired_30d_bytes"]
+            except Exception:
+                logger.debug("usage_current_storage: archive summary failed (ignored)", exc_info=True)
+
+        # Standard's cloud copy deletes superseded and expired files; FOS bills each for 30 days after deletion.
+        cloud_copy_deleted_bytes = 0
+        try:
+            from backend.core.metadata.usage_log import cloud_copy_deleted_bytes_in_billing_window
+
+            cloud_copy_deleted_bytes = cloud_copy_deleted_bytes_in_billing_window(src["name"])
+        except Exception:
+            logger.debug("usage_current_storage: cloud copy deletions failed (ignored)", exc_info=True)
+
         regular_log_bytes = total_bytes - rum_bytes
 
         if delete_after:
-            live_bytes = storage_bytes + quarantine_bytes
-            live_files = storage_files
-            deleted_bytes = total_bytes
+            live_bytes = storage_bytes + quarantine_bytes + archive_bytes
+            live_files = storage_files + archive_objects
+            deleted_bytes = total_bytes + archive_expired_bytes + cloud_copy_deleted_bytes
         else:
-            live_bytes = total_bytes + storage_bytes + quarantine_bytes
-            live_files = total_files + storage_files
-            deleted_bytes = 0
+            live_bytes = total_bytes + storage_bytes + quarantine_bytes + archive_bytes
+            live_files = total_files + storage_files + archive_objects
+            deleted_bytes = archive_expired_bytes + cloud_copy_deleted_bytes
 
-        billed_bytes = total_bytes + storage_bytes + quarantine_bytes
+        billed_bytes = (
+            total_bytes
+            + storage_bytes
+            + quarantine_bytes
+            + archive_bytes
+            + archive_expired_bytes
+            + cloud_copy_deleted_bytes
+        )
         billed_gb = billed_bytes / (1024 * 1024 * 1024)
         gb_hours = billed_gb * (MIN_BILLING_DAYS * 24)
 
@@ -427,6 +460,10 @@ def usage_current_storage(
             quarantine_bytes=quarantine_bytes,
             total_billed_bytes=billed_bytes,
             total_billed_gb_hours=gb_hours,
+            archive_bytes=archive_bytes,
+            archive_objects=archive_objects,
+            archive_expired_bytes=archive_expired_bytes,
+            cloud_copy_deleted_bytes=cloud_copy_deleted_bytes,
             total_files=total_files,
             total_bytes=total_bytes,
             rum_bytes=rum_bytes,

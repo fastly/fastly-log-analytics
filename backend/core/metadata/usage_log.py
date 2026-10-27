@@ -97,6 +97,15 @@ _SCHEMA = [
     )""",
     "CREATE INDEX IF NOT EXISTS idx_telemetry_sections_page ON telemetry_sections (page_load_id)",
     "CREATE INDEX IF NOT EXISTS idx_telemetry_sections_ts ON telemetry_sections (timestamp)",
+    # Bytes the Standard-mode cloud copy deleted from FOS (compaction, retention). FOS bills a deleted object for 30
+    # days, so the Usage page needs them; rows older than the billing window are pruned on insert.
+    """CREATE TABLE IF NOT EXISTS cloud_copy_deletions (
+        service_id TEXT NOT NULL,
+        deleted_at TEXT NOT NULL,
+        bytes BIGINT NOT NULL DEFAULT 0,
+        objects INTEGER NOT NULL DEFAULT 0
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_cloud_copy_deletions_svc ON cloud_copy_deletions(service_id, deleted_at)",
 ]
 
 
@@ -512,10 +521,42 @@ def purge_usage_log(service_id: str, retention_days: int) -> None:
     con.commit()
 
 
+_FOS_MIN_BILLING_DAYS = 30
+
+
+def record_cloud_copy_deletion(service_id: str, deleted_bytes: int, objects: int) -> None:
+    """Remember bytes the cloud copy deleted from FOS; they keep billing for the 30-day minimum."""
+    if objects <= 0:
+        return
+    con = _ul(service_id)
+    now = datetime.now(UTC)
+    con.execute(
+        "INSERT INTO cloud_copy_deletions (service_id, deleted_at, bytes, objects) VALUES (?, ?, ?, ?)",
+        (service_id, iso_z(now), int(deleted_bytes), int(objects)),
+    )
+    con.execute(
+        "DELETE FROM cloud_copy_deletions WHERE service_id = ? AND deleted_at < ?",
+        (service_id, iso_z(now - timedelta(days=_FOS_MIN_BILLING_DAYS + 5))),
+    )
+    con.commit()
+
+
+def cloud_copy_deleted_bytes_in_billing_window(service_id: str) -> int:
+    """Bytes the cloud copy deleted in the last 30 days: deleted, but still billed."""
+    con = _ul(service_id)
+    cutoff = iso_z(datetime.now(UTC) - timedelta(days=_FOS_MIN_BILLING_DAYS))
+    row = con.execute(
+        "SELECT COALESCE(SUM(bytes), 0) FROM cloud_copy_deletions WHERE service_id = ? AND deleted_at >= ?",
+        (service_id, cutoff),
+    ).fetchone()
+    return int(row[0]) if row and row[0] is not None else 0
+
+
 def clear_usage_log(service_id: str) -> None:
     con = _ul(service_id)
     con.execute("DELETE FROM usage_log WHERE service_id = ?", (service_id,))
     con.execute("DELETE FROM usage_log_hourly_summary WHERE service_id = ?", (service_id,))
+    con.execute("DELETE FROM cloud_copy_deletions WHERE service_id = ?", (service_id,))
     con.commit()
 
 

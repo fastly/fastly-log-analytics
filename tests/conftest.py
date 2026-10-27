@@ -350,6 +350,7 @@ _PER_TEST_RESET_TABLES = (
     "asn_names",
     "usage_log",
     "usage_log_hourly_summary",
+    "cloud_copy_deletions",
     "metric_snapshots",
     "slow_queries",
     "ingest_in_flight",

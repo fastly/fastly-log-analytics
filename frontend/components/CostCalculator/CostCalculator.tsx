@@ -35,12 +35,20 @@ export const BILLING_ZONE_DESCRIPTIONS: Record<BillingZone, string> = {
 
 export type DeploymentMode = 'standard' | 'high_scale'
 
-// Measured on the Elevation dev High-Scale deployment (165k request archive artifacts, 2026-10-27): artifact size is
-// about 32.8 KB fixed plus 417 bytes per row (R^2 0.96). The worker deletes artifacts one day after the data retention
-// window, so they are billed for the retention window here.
-const ARCHIVE_FIXED_BYTES = 32_772
-const ARCHIVE_BYTES_PER_ROW = 417
+// Measured on the Elevation dev High-Scale deployment (2026-10-27, 165k request and 90k RUM archive artifacts, R^2
+// 0.92-0.97): a request artifact is about 32.8 KB fixed plus 419 bytes per row, a RUM artifact about 22.5 KB fixed
+// plus 350 bytes per row. The worker deletes artifacts one day after the service's retention window (data retention
+// for requests, RUM retention for RUM), so they are billed for that window plus the margin.
+const ARCHIVE_FIXED_BYTES = 32_766
+const ARCHIVE_BYTES_PER_ROW = 419
+const RUM_ARCHIVE_FIXED_BYTES = 22_500
+const RUM_ARCHIVE_BYTES_PER_ROW = 350
+const ARCHIVE_RETENTION_MARGIN_DAYS = 1
 const ARCHIVE_TICK_SECONDS = 20
+// RUM beacons land as small raw objects: Elevation dev measured 7,104 RUM objects a day for 16,250 beacon rows.
+const RUM_OBJECTS_PER_BEACON = 0.44
+// A retention of 0 means keep forever; steady-state storage then has no bound, so model a year.
+const KEEP_FOREVER_DAYS = 365
 
 export interface CalcState {
   reqDay: number
@@ -57,6 +65,7 @@ export interface CalcState {
   logsChecksPerDay: number
   cdnEnabled: boolean
   retentionDays: number
+  rumRetentionDays: number
   deleteLogs: boolean
   compactionEnabled: boolean
   deploymentMode: DeploymentMode
@@ -80,7 +89,7 @@ export const DEFAULTS: CalcState = {
   logPeriod: 60, commitMins: 5, bytesPerLine: 500, parquetMB: 20,
   logNodes: 1, userEditedNodes: false,
   logsChecksPerDay: 2,
-  cdnEnabled: true, retentionDays: 90, deleteLogs: true,
+  cdnEnabled: true, retentionDays: 90, rumRetentionDays: 90, deleteLogs: true,
   compactionEnabled: true, deploymentMode: 'standard', archiveBatchObjects: 100,
   rateA: 0.005, rateB: 0.001, rateStorage: 0.02, rateEgress: 0.12, minDays: 30,
   billingZone: 'MBZ200',
@@ -137,7 +146,9 @@ export function reducer(state: CalcState, action: CalcAction): CalcState {
         ...(p.commit_interval_mins != null && { commitMins: p.commit_interval_mins }),
         ...(p.edge_only != null && { edgeOnly: p.edge_only }),
         ...(p.delete_after != null && { deleteLogs: p.delete_after }),
-        ...(p.log_retention_days != null && { retentionDays: p.log_retention_days }),
+        ...(p.log_retention_days != null && { retentionDays: p.log_retention_days || KEEP_FOREVER_DAYS }),
+        ...(p.rum_retention_days != null && { rumRetentionDays: p.rum_retention_days || KEEP_FOREVER_DAYS }),
+        ...(p.deployment_mode != null && { deploymentMode: p.deployment_mode === 'high_scale' ? 'high_scale' as const : 'standard' as const }),
         ...(p.compaction_enabled != null && { compactionEnabled: p.compaction_enabled }),
         ...(p.class_a_rate_per_1k != null && { rateA: p.class_a_rate_per_1k }),
         ...(p.class_b_rate_per_10k != null && { rateB: p.class_b_rate_per_10k / 10 }),
@@ -217,6 +228,11 @@ export function calculate(s: CalcState): CalcResults {
   const objectsPerTick = (logFilesPerDay * ARCHIVE_TICK_SECONDS) / 86400
   const archivePagesPerDay = highScale ? Math.ceil(logFilesPerDay / Math.min(Math.max(1, s.archiveBatchObjects), Math.max(1, objectsPerTick))) : 0
   const archiveObjectsPerDay = archivePagesPerDay * 3
+  // RUM archive: one artifact per page of RUM objects, and RUM objects follow the beacon volume, not the log cadence.
+  const rumObjectsPerDay = s.rumBeaconsDay * RUM_OBJECTS_PER_BEACON
+  const rumPagesPerDay = highScale && rumObjectsPerDay > 0
+    ? Math.ceil(rumObjectsPerDay / Math.min(Math.max(1, s.archiveBatchObjects), Math.max(1, (rumObjectsPerDay * ARCHIVE_TICK_SECONDS) / 86400)))
+    : 0
   const objectsPerDay = logFilesPerDay + rawPqFilesPerDay + archiveObjectsPerDay
 
   const logSteadyStateDays = s.deleteLogs ? syncHrs / 24 : s.retentionDays
@@ -236,11 +252,11 @@ export function calculate(s: CalcState): CalcResults {
   const duckLakeParquetClassA = parquetFilesPerMonth + (s.compactionEnabled ? 30 + parquetFilesPerMonth : 0)
   const classAPerMonth =
     logFilesPerMonth + listOpsClassA + classALogsPage +
-    stateSyncClassA + rumBeaconsMonth + duckLakeParquetClassA + archivePagesPerDay * 30 * 3
+    stateSyncClassA + rumBeaconsMonth + duckLakeParquetClassA + (archivePagesPerDay + rumPagesPerDay) * 30 * 3
 
   // Queries read local data, so FOS reads are the raw .gz ingest only (restores are rare and not modelled).
   // Each archive publish is read back to verify the artifact, manifest and commit marker.
-  const classBPerMonth = logFilesPerMonth + archivePagesPerDay * 30 * 3
+  const classBPerMonth = logFilesPerMonth + (archivePagesPerDay + rumPagesPerDay) * 30 * 3
 
   const logGBPerFile = logSizeKB / (1024 * 1024)
   const logActualH = s.deleteLogs ? Math.max(1, syncHrs) : s.retentionDays * 24
@@ -250,16 +266,23 @@ export function calculate(s: CalcState): CalcResults {
   const pqActualH = s.retentionDays * 24
   const pqBilledH = Math.max(pqActualH, minChargeHours)
   const duckLakeDataGBMonths = (parquetFilesPerMonth * parquetGBPerFile * pqBilledH) / 720
-  const rumParquetGBMonths = (s.rumBeaconsDay * 30 * 1024 / 4) / (1024 * 1024 * 1024)
+  // RUM data follows its own retention (rum_retention_days), not the request retention.
+  const rumBilledH = Math.max(s.rumRetentionDays * 24, minChargeHours)
+  const rumParquetGBMonths = ((s.rumBeaconsDay * 30 * 1024 / 4) / (1024 * 1024 * 1024)) * (rumBilledH / 720)
+  const archiveBilledH = Math.max((s.retentionDays + ARCHIVE_RETENTION_MARGIN_DAYS) * 24, minChargeHours)
   const archiveBytesPerMonth = archivePagesPerDay * 30 * ARCHIVE_FIXED_BYTES + reqDayEffective * 30 * ARCHIVE_BYTES_PER_ROW
-  const archiveGBMonths = highScale ? (archiveBytesPerMonth / (1024 * 1024 * 1024)) * (pqBilledH / 720) : 0
-  const totalGBStored = rawLogGBMonths + duckLakeDataGBMonths + rumParquetGBMonths + archiveGBMonths
+  const archiveGBMonths = highScale ? (archiveBytesPerMonth / (1024 * 1024 * 1024)) * (archiveBilledH / 720) : 0
+  const rumArchiveBilledH = Math.max((s.rumRetentionDays + ARCHIVE_RETENTION_MARGIN_DAYS) * 24, minChargeHours)
+  const rumArchiveBytesPerMonth = rumPagesPerDay * 30 * RUM_ARCHIVE_FIXED_BYTES + s.rumBeaconsDay * 30 * RUM_ARCHIVE_BYTES_PER_ROW
+  const rumArchiveGBMonths = highScale ? (rumArchiveBytesPerMonth / (1024 * 1024 * 1024)) * (rumArchiveBilledH / 720) : 0
+  const totalGBStored = rawLogGBMonths + duckLakeDataGBMonths + rumParquetGBMonths + archiveGBMonths + rumArchiveGBMonths
 
   const storageTiers: CalcResults['storageTiers'] = []
   if (rawLogGBMonths > 0) storageTiers.push({ label: 'Raw logs', gbMonths: rawLogGBMonths, flagged: logBilledH > logActualH })
   if (duckLakeDataGBMonths > 0) storageTiers.push({ label: 'DuckLake data', gbMonths: duckLakeDataGBMonths, flagged: pqBilledH > pqActualH })
   if (rumParquetGBMonths > 0) storageTiers.push({ label: 'RUM data', gbMonths: rumParquetGBMonths, flagged: false })
-  if (archiveGBMonths > 0) storageTiers.push({ label: 'High-Scale archive', gbMonths: archiveGBMonths, flagged: pqBilledH > pqActualH })
+  if (archiveGBMonths > 0) storageTiers.push({ label: 'High-Scale archive', gbMonths: archiveGBMonths, flagged: archiveBilledH > (s.retentionDays + ARCHIVE_RETENTION_MARGIN_DAYS) * 24 })
+  if (rumArchiveGBMonths > 0) storageTiers.push({ label: 'High-Scale RUM archive', gbMonths: rumArchiveGBMonths, flagged: rumArchiveBilledH > (s.rumRetentionDays + ARCHIVE_RETENTION_MARGIN_DAYS) * 24 })
 
   // With a CDN fronting FOS, the raw .gz objects read during ingest are the egress.
   const cdnEgressGB = s.cdnEnabled ? totalGzBytesPerMonth / (1024 * 1024 * 1024) : 0
@@ -269,7 +292,7 @@ export function calculate(s: CalcState): CalcResults {
   const costStorage = totalGBStored * s.rateStorage
   const costEgress = cdnEgressGB * s.rateEgress
   const totalCost = costA + costB + costStorage + costEgress
-  const costRum = (rumBeaconsMonth / 1000) * s.rateA + (rumParquetGBMonths * s.rateStorage)
+  const costRum = (rumBeaconsMonth / 1000) * s.rateA + ((rumParquetGBMonths + rumArchiveGBMonths) * s.rateStorage)
 
   return {
     classAPerMonth, classBPerMonth, totalGBStored, cdnEgressGB,
@@ -408,8 +431,11 @@ export function Inputs({ s, r, set }: InputsProps) {
         <Row label='CDN fronting FOS reads' tooltip="Use a Fastly CDN service to cache reads from Fastly Object Storage, reducing Class B operations.">
           <Switch aria-label="CDN fronting FOS reads" checked={s.cdnEnabled} onCheckedChange={set('cdnEnabled')} />
         </Row>
-        <Row label='Data retention (days)' tooltip="How many days to keep data in Object Storage before deleting.">
+        <Row label='Data retention (days)' tooltip="The service's data retention. Request data, its cloud copy and (High-Scale) its archive artifacts are deleted after this many days (archive a day later). A retention of 0 keeps data forever and is modelled as a year here. Deleted objects are still billed for the 30-day FOS minimum.">
           <NumInput value={s.retentionDays} onChange={set('retentionDays')} min={1} />
+        </Row>
+        <Row label='RUM retention (days)' tooltip="The service's RUM retention, which can differ from the request retention. It sizes RUM storage and, in High-Scale, the RUM archive artifacts.">
+          <NumInput value={s.rumRetentionDays} onChange={set('rumRetentionDays')} min={1} />
         </Row>
         <Row label='Auto-delete raw .gz logs after ingest' tooltip="Delete raw .gz log files once they are committed to DuckLake. They are still billed for the FOS minimum 30 days, but this prevents redundant long-term storage.">
           <Switch aria-label="Auto-delete raw .gz logs after ingest" checked={s.deleteLogs} onCheckedChange={set('deleteLogs')} />

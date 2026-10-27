@@ -347,6 +347,9 @@ function UsagePageContent({
       ...((storage?.regular_log_bytes ?? 0) > 0
         ? [{ id: 'regular', label: <span>Request Logs:</span>, value: <strong className="text-foreground">{formatBytes(storage?.regular_log_bytes ?? 0)}</strong> }]
         : []),
+      ...((storage?.archive_bytes ?? 0) > 0
+        ? [{ id: 'archive', rowClassName: 'text-blue-700 dark:text-blue-400', label: <span>High-Scale Archive:</span>, value: <strong>{formatBytes(storage?.archive_bytes ?? 0)} <span className="font-normal text-muted-foreground">({(storage?.archive_objects ?? 0).toLocaleString()} objects)</span></strong> }]
+        : []),
       ...((storage?.quarantine_bytes ?? 0) > 0
         ? [{ id: 'quarantine', label: <span>Quarantine:</span>, value: <strong className="text-foreground">{formatBytes(storage?.quarantine_bytes ?? 0)}</strong> }]
         : []),
@@ -359,8 +362,8 @@ function UsagePageContent({
               <TooltipTrigger>
                 <span className=" underline underline-offset-2 decoration-dotted">Deleted (Still Billed):</span>
               </TooltipTrigger>
-              <TooltipContent side="top" className="max-w-[200px] text-xs">
-                Objects created in this period but deleted early. Billed for minimum 30 days.
+              <TooltipContent side="top" className="max-w-[280px] text-xs">
+                Objects deleted early (raw logs after ingest) and High-Scale archive artifacts the worker expired in the last 30 days (past the service's retention). Fastly Object Storage bills every object for a minimum of 30 days.
               </TooltipContent>
             </Tooltip>
           </TooltipProvider>
@@ -368,7 +371,7 @@ function UsagePageContent({
         value: <strong>{formatBytes(storage?.deleted_bytes ?? 0)}</strong>,
       },
     ],
-    [storage?.live_bytes, storage?.rum_bytes, storage?.regular_log_bytes, storage?.quarantine_bytes, storage?.deleted_bytes],
+    [storage?.live_bytes, storage?.rum_bytes, storage?.regular_log_bytes, storage?.quarantine_bytes, storage?.deleted_bytes, storage?.archive_bytes, storage?.archive_objects],
   )
 
   const costBreakdownRows = useMemo<BreakdownRow[]>(

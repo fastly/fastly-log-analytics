@@ -1314,6 +1314,76 @@ def test_usage_prefill_operations_and_rum_breakdown(client, tmp_path, monkeypatc
         app.dependency_overrides.pop(get_source, None)
 
 
+def test_prefill_rates_follow_the_services_own_retention_and_mode(tmp_path, monkeypatch):
+    from backend.routers.usage import _compute_prefill_rates
+
+    cfg = {"provisioning": {"cron_sync": {"data_retention_days": 14, "rum_retention_days": 7}}}
+    with (
+        patch("backend.config.load_config", return_value=cfg),
+        patch("backend.config.is_high_scale_mode", return_value=True),
+    ):
+        result, _ = _compute_prefill_rates({"name": "svc-retention"})
+    assert (result["log_retention_days"], result["rum_retention_days"], result["deployment_mode"]) == (
+        14,
+        7,
+        "high_scale",
+    )
+
+    # RUM retention defaults to the data retention; unset data retention is the 30 days the cleanup enforces.
+    with patch("backend.config.load_config", return_value={"provisioning": {"cron_sync": {"data_retention_days": 21}}}):
+        result, _ = _compute_prefill_rates({"name": "svc-retention"})
+    assert (result["log_retention_days"], result["rum_retention_days"], result["deployment_mode"]) == (
+        21,
+        21,
+        "standard",
+    )
+    with patch("backend.config.load_config", return_value={"provisioning": {"cron_sync": {}}}):
+        result, _ = _compute_prefill_rates({"name": "svc-retention"})
+    assert (result["log_retention_days"], result["rum_retention_days"]) == (30, 30)
+
+
+@pytest.mark.parametrize("high_scale", [True, False])
+def test_current_storage_counts_the_high_scale_archive_and_recently_expired_artifacts(client, high_scale):
+    from backend.routers.usage import _STORAGE_INSPECTION_CACHE
+
+    src = {"name": "svc-archive-usage", "service_id": "svc-archive-usage", "bucket": "b", "prefix": ""}
+    _STORAGE_INSPECTION_CACHE[("svc-archive-usage", "b", "")] = (1000, 2, 0, 0)
+    app.dependency_overrides[get_source] = lambda: src
+    summary = {"live_bytes": 5_000_000, "live_objects": 30, "expired_30d_bytes": 2_000_000}
+    try:
+        with (
+            patch("backend.routers.usage.repo.get_storage_stats", return_value={"total_files": 0, "total_bytes": 0}),
+            patch("backend.config.load_config", return_value={}),
+            patch("backend.config.is_high_scale_mode", return_value=high_scale),
+            patch("backend.core.metadata.usage_log.cloud_copy_deleted_bytes_in_billing_window", return_value=3_000),
+            patch(
+                "backend.high_scale.postgres_control.PostgresControlPlane.archive_storage_summary", return_value=summary
+            ) as mock_summary,
+        ):
+            r = client.get("/api/usage/current-storage", headers={"x-fastly-service-id": "svc-archive-usage"})
+        assert r.status_code == 200
+        body = r.json()
+        if high_scale:
+            assert (body["archive_bytes"], body["archive_objects"], body["archive_expired_bytes"]) == (
+                5_000_000,
+                30,
+                2_000_000,
+            )
+            assert body["live_bytes"] == 1000 + 5_000_000 and body["live_files"] == 2 + 30
+            assert body["deleted_bytes"] == 2_000_000 + 3_000, (
+                "expired artifacts stay billed for the FOS 30-day minimum"
+            )
+            assert body["total_billed_bytes"] == 1000 + 5_000_000 + 2_000_000 + 3_000
+        else:
+            assert (body["archive_bytes"], body["archive_objects"], body["archive_expired_bytes"]) == (0, 0, 0)
+            assert body["total_billed_bytes"] == 1000 + 3_000
+            mock_summary.assert_not_called()
+        assert body["cloud_copy_deleted_bytes"] == 3_000, "cloud-copy deletions stay billed for 30 days"
+    finally:
+        app.dependency_overrides.pop(get_source, None)
+        _STORAGE_INSPECTION_CACHE.pop(("svc-archive-usage", "b", ""), None)
+
+
 # ── Merged from tests/routers/test_admin_mutation_endpoints.py ──
 
 SVC_HEADERS = {"x-fastly-service-id": MOCK_SERVICE_ID}
