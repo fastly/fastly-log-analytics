@@ -48,7 +48,7 @@ from filelock import Timeout as _FileLockTimeout
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_validator
 from tenacity import Retrying, retry_if_exception_type, stop_after_attempt, wait_fixed
 
-from backend.utils.atomic_write import atomic_write_json
+from backend.utils.telemetry import atomic_write_json
 
 try:
     import fcntl

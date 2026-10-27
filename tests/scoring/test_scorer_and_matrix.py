@@ -12,76 +12,70 @@ from unittest.mock import MagicMock, call, patch
 
 import pytest
 import time_machine
-from backend.provision.session_scoring_setup import (
+
+import backend.provision.session_scoring_orchestrator as sss
+import backend.scoring as _labels
+import backend.scoring as pyscorer
+from backend.provision.session_scoring_orchestrator import (
     COMPUTE_MANAGE_URL,
     CONFIG_RESOURCE_LINK_NAME,
     CONFIG_STORE_MANAGE_URL,
     CURRENT_KEY_HEX,
     DEBUG_LOG_DEFAULT,
     DEBUG_LOG_KEY,
+    DEFAULT_ENFORCE_STATUS_CODE,
     KEYS_RESOURCE_LINK_NAME,
     KV_STORE_MANAGE_URL,
     MATRIX_RESOURCE_LINK_NAME,
     PREVIOUS_KEY_HEX,
-    SCORING_ENABLED_AT_KEY,
-    EntitlementError,
-    delete_scoring_service,
-    ensure_scoring_service,
-    rotate_aes_key,
-)
-from backend.provision.session_scoring_vcl import (
-    DEFAULT_ENFORCE_STATUS_CODE,
     SCORING_BACKEND_API_NAME,
     SCORING_BACKEND_VCL_NAME,
     SCORING_DELIVER_NAME,
+    SCORING_ENABLED_AT_KEY,
     SCORING_ENFORCE_NAME,
     SCORING_FETCH_NAME,
     SCORING_MISS_NAME,
     SCORING_PASS_NAME,
     SCORING_RECV_NAME,
     SCORING_SNIPPET_PRIORITY,
+    EntitlementError,
+    delete_scoring_service,
     deliver_snippet,
     enforce_reason_phrase,
     enforce_snippet,
+    ensure_scoring_service,
     fetch_snippet,
     generate_scoring_vcl,
     miss_snippet,
     pass_snippet,
     recv_snippet,
     resolve_enforce_status_code,
+    rotate_aes_key,
     scoring_snippet_names,
 )
-from backend.scoring.evaluate import (
+from backend.scoring import (
+    _CATEGORY_MAP,
     _KNOWN_REASON_ATOMS,
+    SESSION_GAP_SECONDS,
+    Event,
+    Route,
+    TransitionMatrix,
     _compute_auc,
+    _l2_score_from_trans_prob,
     _session_l2_score,
+    _transition_prob,
+    build_matrix,
+    default_version,
     evaluate,
     evaluate_from_persisted_scores,
     evaluate_per_reason,
-)
-from backend.scoring.fixtures import (
-    SESSION_GAP_SECONDS,
-    Event,
     extract_traces,
+    normalize,
     rows_to_events,
+    score_layer2,
+    serialize_kv,
     sessionize,
 )
-from backend.scoring.matrix import (
-    TransitionMatrix,
-    build_matrix,
-    default_version,
-    serialize_kv,
-)
-from backend.scoring.normalize import _CATEGORY_MAP, Route, normalize
-from backend.scoring.scorer import (
-    _l2_score_from_trans_prob,
-    _transition_prob,
-    score_layer2,
-)
-
-from backend.provision import session_scoring_setup as sss
-from backend.scoring import labels as _labels
-from backend.scoring import scorer as pyscorer
 
 BASE_TS = datetime(2026, 5, 15, 10, 0, 0, tzinfo=UTC)
 SVC = "svc1"
@@ -1206,8 +1200,8 @@ def test_ensure_creates_full_stack_and_emits_status_callbacks():
     fastly_mock = _create_side_effect()
     status_cb = MagicMock()
     with (
-        patch("backend.provision.session_scoring_setup.fastly", fastly_mock),
-        patch("backend.provision.session_scoring_setup.product_enabled", return_value=True),
+        patch("backend.provision.session_scoring_orchestrator.fastly", fastly_mock),
+        patch("backend.provision.session_scoring_orchestrator.product_enabled", return_value=True),
     ):
         result = ensure_scoring_service(LOG_SVC, TOKEN, status_cb=status_cb)
 
@@ -1302,8 +1296,8 @@ def test_ensure_entitlement_mapping_and_rollback(
     fastly_mock = _create_side_effect(fail_on=fail_on, fail_exc=fail_exc)
     exc_cls = EntitlementError if expected_code else RuntimeError
     with (
-        patch("backend.provision.session_scoring_setup.fastly", fastly_mock),
-        patch("backend.provision.session_scoring_setup.product_enabled", return_value=kv_enabled),
+        patch("backend.provision.session_scoring_orchestrator.fastly", fastly_mock),
+        patch("backend.provision.session_scoring_orchestrator.product_enabled", return_value=kv_enabled),
         pytest.raises(exc_cls) as ei,
     ):
         ensure_scoring_service(LOG_SVC, TOKEN)
@@ -1345,7 +1339,7 @@ def test_ensure_reuses_existing_service_and_heals_missing_anchor(anchor_missing)
         raise AssertionError(f"unexpected API call: {method} {path}")
 
     fastly_mock = MagicMock(side_effect=side_effect)
-    with patch("backend.provision.session_scoring_setup.fastly", fastly_mock):
+    with patch("backend.provision.session_scoring_orchestrator.fastly", fastly_mock):
         result = ensure_scoring_service(LOG_SVC, TOKEN)
 
     assert (
@@ -1373,7 +1367,7 @@ def test_delete_runs_full_teardown_and_handles_edge_cases():
         calls_in_order.append((method, path))
         return versions if (method, path) == ("GET", "/service/SVC_X/version") else {}
 
-    with patch("backend.provision.session_scoring_setup.fastly", MagicMock(side_effect=side_effect)):
+    with patch("backend.provision.session_scoring_orchestrator.fastly", MagicMock(side_effect=side_effect)):
         failed = delete_scoring_service(
             "SVC_X",
             scoring_keys_store_id="KEYS_X",
@@ -1396,7 +1390,7 @@ def test_delete_runs_full_teardown_and_handles_edge_cases():
 
     # Empty service_id is a no-op
     noop_mock = MagicMock()
-    with patch("backend.provision.session_scoring_setup.fastly", noop_mock):
+    with patch("backend.provision.session_scoring_orchestrator.fastly", noop_mock):
         delete_scoring_service("", token=TOKEN)
     noop_mock.assert_not_called()
 
@@ -1413,7 +1407,7 @@ def test_delete_runs_full_teardown_and_handles_edge_cases():
         return {}
 
     msgs: list[str] = []
-    with patch("backend.provision.session_scoring_setup.fastly", MagicMock(side_effect=err_effect)):
+    with patch("backend.provision.session_scoring_orchestrator.fastly", MagicMock(side_effect=err_effect)):
         delete_scoring_service("MISSING", token=TOKEN)
         delete_scoring_service(
             "SVC", scoring_keys_store_id="MISSING_STORE", scoring_config_store_id="FINE", token=TOKEN
@@ -1439,7 +1433,7 @@ def test_rotate_aes_key_scenarios():
             raise RuntimeError("HTTP 404 PATCH /.../previous_key_hex\n    not found")
         return {}
 
-    with patch("backend.provision.session_scoring_setup.fastly", MagicMock(side_effect=side_effect_1)):
+    with patch("backend.provision.session_scoring_orchestrator.fastly", MagicMock(side_effect=side_effect_1)):
         res1 = rotate_aes_key(KEYS_STORE_ID, token=TOKEN)
 
     assert len(res1["current_key_hex"]) == 64 and int(res1["current_key_hex"], 16) >= 0
@@ -1464,7 +1458,7 @@ def test_rotate_aes_key_scenarios():
             else {}
         )
 
-    with patch("backend.provision.session_scoring_setup.fastly", MagicMock(side_effect=side_effect_2)):
+    with patch("backend.provision.session_scoring_orchestrator.fastly", MagicMock(side_effect=side_effect_2)):
         res2 = rotate_aes_key(KEYS_STORE_ID, token=TOKEN)
 
     assert res2["previous_key_hex"] == old_cur2 and res2["current_key_hex"] not in (old_cur2, old_prev2)
@@ -1481,7 +1475,7 @@ def test_rotate_aes_key_scenarios():
             raise RuntimeError("HTTP 404 not found")
         return {}
 
-    with patch("backend.provision.session_scoring_setup.fastly", MagicMock(side_effect=side_effect_3)):
+    with patch("backend.provision.session_scoring_orchestrator.fastly", MagicMock(side_effect=side_effect_3)):
         res3 = rotate_aes_key(KEYS_STORE_ID, token=TOKEN)
 
     assert res3["previous_key_hex"] == ""
@@ -1495,7 +1489,7 @@ def test_rotate_aes_key_scenarios():
     # 4. Validation, auth errors, chaining, and secrets.token_hex(32)
     fastly_mock = MagicMock()
     with (
-        patch("backend.provision.session_scoring_setup.fastly", fastly_mock),
+        patch("backend.provision.session_scoring_orchestrator.fastly", fastly_mock),
         pytest.raises(ValueError, match="scoring_keys_store_id is required"),
     ):
         rotate_aes_key("", token=TOKEN)
@@ -1509,7 +1503,7 @@ def test_rotate_aes_key_scenarios():
             raise RuntimeError("HTTP 401 unauthorized\n    bad token")
 
         with (
-            patch("backend.provision.session_scoring_setup.fastly", MagicMock(side_effect=_auth_fail)),
+            patch("backend.provision.session_scoring_orchestrator.fastly", MagicMock(side_effect=_auth_fail)),
             pytest.raises(RuntimeError, match="401"),
         ):
             rotate_aes_key(KEYS_STORE_ID, token=tok)
@@ -1523,7 +1517,7 @@ def test_rotate_aes_key_scenarios():
             state["current"] = body["item_value"]
         return {}
 
-    with patch("backend.provision.session_scoring_setup.fastly", MagicMock(side_effect=_stateful)):
+    with patch("backend.provision.session_scoring_orchestrator.fastly", MagicMock(side_effect=_stateful)):
         first = rotate_aes_key(KEYS_STORE_ID, token=TOKEN)
         second = rotate_aes_key(KEYS_STORE_ID, token=TOKEN)
     assert (
@@ -1532,7 +1526,7 @@ def test_rotate_aes_key_scenarios():
 
     sentinel = "ff" * 32
     with (
-        patch("backend.provision.session_scoring_setup.fastly", MagicMock(side_effect=_stateful)),
+        patch("backend.provision.session_scoring_orchestrator.fastly", MagicMock(side_effect=_stateful)),
         patch("secrets.token_hex", return_value=sentinel) as token_hex_mock,
     ):
         res = rotate_aes_key(KEYS_STORE_ID, token=TOKEN)

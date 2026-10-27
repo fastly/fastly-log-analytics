@@ -15,19 +15,18 @@ import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
-from backend.core.metadata.cron_log import CronLeaseHeldError
-from backend.core.rollups.hour_bundles import bundle_hours_ip_spread
 from tests._helpers.rollups import build_writer_patches, write_hour_bundle, writer_patches
 from tests._helpers.rollups import noop_lock as _noop_lock
 from tests._helpers.rollups import past_hour as _past_hour
 from tests._helpers.sources import make_source
 
+import backend.core.rollups.day_bundles as ph
 from backend.core import rollups
 from backend.core import rollups as rr
+from backend.core.metadata.usage_log import CronLeaseHeldError
 from backend.core.rollups import day_bundles, rollups_present
-from backend.core.rollups import partial_hour as ph
 from backend.core.rollups._common import DAY_BUNDLE_TOP_K, parquet_zstd_target, unlink_quiet, wavg
-from backend.core.rollups.day_bundles import _link_day_bundle_alias
+from backend.core.rollups.day_bundles import _link_day_bundle_alias, bundle_hours_ip_spread
 from backend.core.rollups.recompute import ADMIN_BACKFILLS, DAY_COMPACTORS, _bundle_metadata
 from backend.cron.jobs import compaction as sch
 from backend.repositories._base import QueryRunner
@@ -289,7 +288,7 @@ def _seed_logs(con: duckdb.DuckDBPyConnection, table: str, rows: list[dict]) -> 
 def test_build_slow_urls_writes_top_k_per_hour(tmp_path):
     """Happy path: closed hour with rows for several URLs produces one
     row per URL with the documented schema, ranked by p95 DESC."""
-    from backend.core.rollups import slow_urls
+    import backend.core.rollups.origin_dims as slow_urls
 
     cache_root = tmp_path / "cache"
     cache_root.mkdir()
@@ -367,7 +366,7 @@ def test_build_slow_urls_writes_top_k_per_hour(tmp_path):
 def test_build_slow_urls_skips_active_hour(tmp_path):
     """The active UTC hour is still being written; the writer must skip it
     (live SQL serves the active hour). Same convention as time_series."""
-    from backend.core.rollups import slow_urls
+    import backend.core.rollups.origin_dims as slow_urls
 
     cache_root = tmp_path / "cache"
     cache_root.mkdir()
@@ -392,7 +391,7 @@ def test_build_slow_urls_skips_active_hour(tmp_path):
 def test_build_slow_urls_no_url_column_skips(tmp_path):
     """Services whose schema lacks `url` have no panel input — writer
     must return 0 rather than fail or write an empty file."""
-    from backend.core.rollups import slow_urls
+    import backend.core.rollups.origin_dims as slow_urls
 
     cache_root = tmp_path / "cache"
     cache_root.mkdir()
@@ -422,7 +421,7 @@ def test_backfill_slow_urls_walks_existing_bundle_hours(tmp_path):
     """The self-heal driver should pick up closed hours that already have
     all_fields.parquet but no slow_urls.parquet, and build the missing
     bundle for each."""
-    from backend.core.rollups import slow_urls
+    import backend.core.rollups.origin_dims as slow_urls
 
     cache_root = tmp_path / "cache"
     cache_root.mkdir()
@@ -455,7 +454,7 @@ def test_backfill_slow_urls_walks_existing_bundle_hours(tmp_path):
         # the right hour.
         return len(hours)
 
-    with patch("backend.core.rollups.slow_urls.build_slow_urls_bundles", side_effect=_spy_build):
+    with patch("backend.core.rollups.origin_dims.build_slow_urls_bundles", side_effect=_spy_build):
         with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
             n = slow_urls.backfill_slow_urls_bundles("svc-su", src)
 
@@ -610,14 +609,14 @@ def _view_patches(cache_root, con):
         cache_root,
         "logs_wk",
         con,
-        safe_table_target="backend.core.rollups.wellknown_bots._safe_table_for",
+        safe_table_target="backend.core.rollups.security_dims._safe_table_for",
     )
 
 
 @pytest.mark.usefixtures("frozen_clock")
 def test_recompute_no_pattern_set_version_returns_zero(tmp_path):
     """No source files cached → no version → return 0 without writing."""
-    from backend.core.rollups import wellknown_bots
+    import backend.core.rollups.security_dims as wellknown_bots
 
     cache_root = tmp_path / "cache"
     cache_root.mkdir()
@@ -638,7 +637,7 @@ def test_recompute_no_bot_pattern_returns_zero(tmp_path):
     """Version present but the regex compiler returned empty → bail
     cleanly (the pattern compiler caches across calls; an empty result
     means the cache is in an indeterminate state)."""
-    from backend.core.rollups import wellknown_bots
+    import backend.core.rollups.security_dims as wellknown_bots
 
     cache_root = tmp_path / "cache"
     cache_root.mkdir()
@@ -658,7 +657,7 @@ def test_recompute_no_bot_pattern_returns_zero(tmp_path):
 @pytest.mark.usefixtures("frozen_clock")
 def test_recompute_empty_hours_input_returns_zero():
     """No hours → fast return without touching anything else."""
-    from backend.core.rollups import wellknown_bots
+    import backend.core.rollups.security_dims as wellknown_bots
 
     assert wellknown_bots.recompute_wellknown_bots_rollup("svc", {"name": "svc"}, []) == 0
 
@@ -668,7 +667,7 @@ def test_recompute_active_hour_filtered_out(tmp_path):
     """Active UTC hour is dropped from the parsed list — its data is
     still in flight (buffer) and the reader serves it live — even when
     the view already holds rows for it."""
-    from backend.core.rollups import wellknown_bots
+    import backend.core.rollups.security_dims as wellknown_bots
 
     cache_root = tmp_path / "cache"
     cache_root.mkdir()
@@ -690,7 +689,7 @@ def test_recompute_active_hour_filtered_out(tmp_path):
 
 @pytest.mark.usefixtures("frozen_clock")
 def test_recompute_malformed_hour_skipped(tmp_path):
-    from backend.core.rollups import wellknown_bots
+    import backend.core.rollups.security_dims as wellknown_bots
 
     cache_root = tmp_path / "cache"
     cache_root.mkdir()
@@ -710,7 +709,7 @@ def test_recompute_malformed_hour_skipped(tmp_path):
 def test_recompute_hour_without_matching_rows_writes_empty_partition(tmp_path):
     """A closed hour with no bot traffic still publishes a zero-row partition:
     it is covered-and-empty, so the reader doesn't treat the hour as a gap."""
-    from backend.core.rollups import wellknown_bots
+    import backend.core.rollups.security_dims as wellknown_bots
 
     cache_root = tmp_path / "cache"
     cache_root.mkdir()
@@ -735,7 +734,7 @@ def test_recompute_hour_without_matching_rows_writes_empty_partition(tmp_path):
 def test_recompute_table_missing_ua_or_ip_returns_zero(tmp_path):
     """Service whose schema lacks ua → can't materialize bots, skip
     cleanly without writing partial / wrong-shape files."""
-    from backend.core.rollups import wellknown_bots
+    import backend.core.rollups.security_dims as wellknown_bots
 
     cache_root = tmp_path / "cache"
     cache_root.mkdir()
@@ -762,7 +761,7 @@ def test_recompute_writes_filtered_rows_to_partition(tmp_path):
     """Happy path: a closed hour with bot-UA traffic produces a
     ``rollups/wellknown_bots/hour=H/compacted_*.parquet`` with the expected
     (ua, ip, count, version)."""
-    from backend.core.rollups import wellknown_bots
+    import backend.core.rollups.security_dims as wellknown_bots
 
     cache_root = tmp_path / "cache"
     cache_root.mkdir()
@@ -802,7 +801,7 @@ def test_recompute_sweeps_stale_parquets_in_hour_dir(tmp_path):
     pre-existing parquets in the rollup hour dir — otherwise a reader
     enumerating the dir could see a stale-version row alongside the fresh
     one for the same hour."""
-    from backend.core.rollups import wellknown_bots
+    import backend.core.rollups.security_dims as wellknown_bots
 
     cache_root = tmp_path / "cache"
     cache_root.mkdir()
@@ -831,7 +830,7 @@ def test_recompute_sweeps_stale_parquets_in_hour_dir(tmp_path):
 def test_recompute_copy_failure_skips_hour_without_raising(tmp_path):
     """A COPY failure for one hour leaves the rest untouched and returns the
     count successfully written."""
-    from backend.core.rollups import wellknown_bots
+    import backend.core.rollups.security_dims as wellknown_bots
 
     cache_root = tmp_path / "cache"
     cache_root.mkdir()
@@ -854,7 +853,7 @@ def test_recompute_copy_failure_skips_hour_without_raising(tmp_path):
         cache_root,
         "logs_wk",
         lambda: con,
-        safe_table_target="backend.core.rollups.wellknown_bots._safe_table_for",
+        safe_table_target="backend.core.rollups.security_dims._safe_table_for",
     )
     with (
         p[0],
@@ -896,7 +895,7 @@ def test_rollup_copy_failure_leaves_no_partial_bundle(tmp_path, monkeypatch):
     from contextlib import contextmanager
     from unittest.mock import patch
 
-    from backend.core.rollups import time_series
+    import backend.core.rollups.recompute as time_series
 
     @contextmanager
     def _noop(_k):
@@ -933,7 +932,7 @@ def test_rollup_copy_failure_leaves_no_partial_bundle(tmp_path, monkeypatch):
     with (
         patch("backend.core.rollups._common._safe_table_for", return_value="logs"),
         patch("backend.core.duckdb.get_connection", return_value=proxy),
-        patch("backend.core.storage.view._get_service_lock", _noop),
+        patch("backend.core.storage._core._get_service_lock", _noop),
         patch("backend.core.storage.execute_with_stale_view_retry", side_effect=lambda c, _s, fn: fn(c)),
     ):
         n = time_series.build_time_series_bundles("atomic-id", src, [hour])
@@ -952,9 +951,8 @@ def test_reader_ignores_stray_tmp_bundle(tmp_path):
     """A crash between tmp-write and os.replace can leave a ``.tmp_ts_*.parquet``
     in the bundle dir. The reader keys on the exact ``time_series.parquet``
     name, so a stray tmp must be invisible — never read as data."""
-    from backend.repositories.rollup_coverage import collect_hourly_bundle_paths
-
     from backend.core.rollups import TIME_SERIES_BUNDLE_FILENAME, _hour_bundled_root
+    from backend.core.rollups.recompute import collect_hourly_bundle_paths
 
     src = {"name": "stray-svc", "service_id": "stray-id", "_cache_dir_override": str(tmp_path)}
     hour_dt = (datetime.now(UTC) - timedelta(hours=3)).replace(minute=0, second=0, microsecond=0)
@@ -1101,7 +1099,7 @@ from unittest.mock import Mock
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from backend.core.rollups import time_series as _ts_mod
+import backend.core.rollups.recompute as _ts_mod
 from backend.models.admin import RebuildTimeSeriesRollupsResponse
 from backend.routers.admin import compaction as _compaction_api
 
@@ -1788,7 +1786,7 @@ def test_bundle_days_writes_combined_parquet(tmp_path):
 
     with (
         patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
-        patch("backend.core.storage.view._get_service_lock", _noop_lock),
+        patch("backend.core.storage._core._get_service_lock", _noop_lock),
     ):
         assert day_bundles.bundle_days("svc-day", {"name": "svc-day"}, [day]) == 1
 
@@ -1807,7 +1805,7 @@ def test_bundle_days_top_k_truncation_with_other_synthetic_row(tmp_path):
 
     with (
         patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
-        patch("backend.core.storage.view._get_service_lock", _noop_lock),
+        patch("backend.core.storage._core._get_service_lock", _noop_lock),
     ):
         assert day_bundles.bundle_days("svc-topk", {"name": "svc-topk"}, [day]) == 1
 
@@ -1829,7 +1827,7 @@ def test_bundle_days_preserves_unmodified_fields_from_existing_bundle(tmp_path):
 
     with (
         patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
-        patch("backend.core.storage.view._get_service_lock", _noop_lock),
+        patch("backend.core.storage._core._get_service_lock", _noop_lock),
     ):
         assert day_bundles.bundle_days("svc-day-preserve", src, [day]) == 1
         new_p = _write_per_field_day(str(cache_root), "url", day, [("/new", 250)])
@@ -1858,7 +1856,7 @@ def test_bundle_days_skips_when_bundle_up_to_date(tmp_path):
     _write_per_field_day(str(cache_root), "url", day, [("/a", 1)])
     with (
         patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
-        patch("backend.core.storage.view._get_service_lock", _noop_lock),
+        patch("backend.core.storage._core._get_service_lock", _noop_lock),
     ):
         assert day_bundles.bundle_days("svc", {"name": "svc"}, [day]) == 1
         assert day_bundles.bundle_days("svc", {"name": "svc"}, [day]) == 0
@@ -1871,7 +1869,7 @@ def test_bundle_days_rebuilds_when_source_newer_than_bundle(tmp_path):
     _write_per_field_day(str(cache_root), "url", day, [("/a", 1)])
     with (
         patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
-        patch("backend.core.storage.view._get_service_lock", _noop_lock),
+        patch("backend.core.storage._core._get_service_lock", _noop_lock),
     ):
         assert day_bundles.bundle_days("svc", {"name": "svc"}, [day]) == 1
         new_p = _write_per_field_day(str(cache_root), "url", day, [("/b", 5)])

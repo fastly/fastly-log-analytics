@@ -7,7 +7,6 @@ import asyncio
 from fastapi import APIRouter, Depends
 
 from backend.core.request_context import RequestContext, build_request_context
-from backend.models._base import DEFAULT_ERROR_RESPONSES
 from backend.models.analytics import (
     OriginAggregatesRequest,
     OriginAggregatesResponse,
@@ -31,6 +30,7 @@ from backend.models.analytics import (
 from backend.models.analytics import (
     SectionName as OriginSectionName,
 )
+from backend.models.common import DEFAULT_ERROR_RESPONSES
 from backend.repositories import origin as origin_repo
 from backend.repositories.utils.response_cache import cache_result
 from backend.utils.router_utils import make_section_expander, query_errors

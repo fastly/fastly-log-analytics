@@ -776,14 +776,3 @@ class _LoginRateLimiter(SlidingWindowLimiter):
     def record_failure(self, ip: str) -> bool:
         """Record a failure and return True if a NEW lockout was triggered."""
         return self.strike(ip, threshold=LOGIN_FAILURE_THRESHOLD, lockout_s=LOGIN_LOCKOUT_S)
-
-
-import sys as _sys
-
-_self = _sys.modules[__name__]
-for _sub in ("manager", "session", "rate_limiter", "state", "fingerprint"):
-    _sys.modules[f"{__name__}.{_sub}"] = _self
-    setattr(_self, _sub, _self)
-if "backend" in _sys.modules and hasattr(_sys.modules["backend"], "_MODULE_ALIASES"):
-    for _sub in ("manager", "session", "rate_limiter", "state", "fingerprint"):
-        _sys.modules["backend"]._MODULE_ALIASES[f"backend.utils.tunnel.{_sub}"] = __name__

@@ -38,11 +38,11 @@ ALLOWED: dict[tuple[str, str], str] = {
     ("backend/routers/provision.py", "provision_execute"): PARSE,
     ("backend/routers/provision.py", "provision_ingest"): PARSE,
     (
-        "backend/routers/session_scoring.py",
+        "backend/routers/session_scoring/scoring_analytics.py",
         "scoring_labels_create",
     ): "validation: labels.ALLOWED_LABELS ValueError, authored",
     (
-        "backend/routers/session_scoring.py",
+        "backend/routers/session_scoring/scoring_analytics.py",
         "scoring_labels_update",
     ): "validation: labels.ALLOWED_LABELS ValueError, authored",
     (
@@ -191,8 +191,8 @@ from unittest.mock import patch
 
 import duckdb
 import pytest
-from backend.core.query_registry import _scrub_secrets
 
+from backend.core.request_telemetry import _scrub_secrets
 from backend.repositories import query as q
 from backend.utils.router_utils import redact_error_text, register_salt
 from tests.conftest import MOCK_SERVICE_ID
@@ -394,7 +394,7 @@ def test_rollups_safe_ident_rejects_trailing_newline():
 
 
 def test_lake_ident_rejects_trailing_newline():
-    from backend.core.storage.buffer import _lake_ident
+    from backend.core.storage._core import _lake_ident
 
     assert _lake_ident("client_vitals") == "client_vitals"
     with pytest.raises(ValueError):
@@ -409,16 +409,14 @@ def test_lake_ident_rejects_trailing_newline():
     ],
 )
 def test_ducklake_idents_reject_trailing_newline(call):
-    from backend.core.storage import _ducklake
+    import backend.core.storage._core as _ducklake
 
     with pytest.raises(ValueError, match="invalid ducklake"):
         call(_ducklake)
 
 
 def test_custom_field_name_regex_rejects_trailing_newline():
-    from backend.core.field_registry import VALID_NAME_RE
-
-    from backend.core.log_fields import validate_custom_field
+    from backend.core.log_fields import VALID_NAME_RE, validate_custom_field
 
     field = {
         "name": "my_field" + NL,
@@ -434,8 +432,9 @@ def test_custom_field_name_regex_rejects_trailing_newline():
 
 
 def test_custom_field_model_rejects_trailing_newline():
-    from backend.models.services import CustomField
     from pydantic import ValidationError
+
+    from backend.models.common import CustomField
 
     body_cls = CustomField
     base = {
@@ -451,7 +450,7 @@ def test_custom_field_model_rejects_trailing_newline():
 
 
 def test_declarative_feature_state_rejects_newline_custom_field_name():
-    from backend.provision.declarative.state import FeatureState, LogFieldsConfig
+    from backend.provision.declarative.reconciler import FeatureState, LogFieldsConfig
 
     base = {
         "service_id": "svc",
@@ -484,7 +483,7 @@ def test_provision_router_has_no_bare_re_match():
 
 
 def test_share_db_name_and_email_validators_hold_with_whitespace():
-    from backend.core.share_db.validation import (
+    from backend.core.share_db import (
         InvalidEmailError,
         InvalidNameError,
         validate_email,
@@ -503,7 +502,7 @@ def test_share_db_name_and_email_validators_hold_with_whitespace():
 
 @pytest.mark.parametrize("value", ["1.2.3.4\n", " 1.2.3.4", "1.2.3.4\r\n", "\t2001:db8::1 \n"])
 def test_mask_ip_values_does_not_pass_ips_wrapped_in_whitespace(value):
-    from backend.core.share_db.validation import mask_ip_values
+    from backend.core.share_db import mask_ip_values
 
     out = mask_ip_values({"cell": value})["cell"]
     assert "1.2.3.4" not in out
@@ -513,7 +512,7 @@ def test_mask_ip_values_does_not_pass_ips_wrapped_in_whitespace(value):
 def test_share_db_validator_patterns_use_fullmatch():
     import inspect
 
-    from backend.core.share_db import validation
+    import backend.core.share_db as validation
 
     src = inspect.getsource(validation)
     for name in ("_NAME_RE", "_EMAIL_RE", "_MAYBE_IP_RE"):
@@ -875,9 +874,10 @@ def test_admin_paths_blocked_for_analyst(probe_session, path):
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+import backend.routers.share_admin as share_auth
 from backend.core import share_db
 from backend.repositories.query import execute_query
-from backend.routers import share_admin, share_auth
+from backend.routers import share_admin
 from backend.utils import tunnel
 from backend.utils.remote_access import RemoteAccessMiddleware
 
@@ -1348,7 +1348,7 @@ def _configured_oauth_secrets() -> list[str]:
     """
     out: list[str] = []
     try:
-        from backend.core.oauth import registry
+        import backend.core.oauth as registry
 
         registry.reset_cache_for_tests()
         for p in registry.get_all_providers():

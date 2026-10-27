@@ -26,7 +26,6 @@ import pyarrow.parquet as pq
 import pytest
 import yarl
 from aiohttp import web
-from backend.utils.telemetry_response_middleware import TelemetryResponseBodyMiddleware, _reconstruct
 from botocore import UNSIGNED
 from botocore.config import Config
 from fastapi import FastAPI, Response
@@ -35,15 +34,16 @@ from fastapi.testclient import TestClient
 from moto.server import ThreadedMotoServer
 from starlette.responses import JSONResponse, StreamingResponse
 
+import backend.core.metadata as metadata_db
+import backend.core.metadata.usage_log as usage_log_db
+import backend.utils.telemetry as sqlite_profiler
+import backend.utils.telemetry as telemetry_proxy
 from backend import config as svcconfig
 from backend.core import duckdb as _ddb
-from backend.core import metadata as metadata_db
 from backend.core import storage as _ic
 from backend.core.duckdb import log_usage_calls, purge_usage_log
-from backend.core.metadata import usage_log_db
 from backend.models import common as common_models
 from backend.models.common import BaseResponse
-from backend.utils import sqlite_profiler, telemetry_proxy
 from backend.utils import telemetry as _t
 from backend.utils import telemetry as tlm
 from backend.utils.hll import DEFAULT_PRECISION, SERIALIZATION_VERSION, HyperLogLog, _alpha
@@ -51,6 +51,8 @@ from backend.utils.telemetry import (
     _CALLS,
     _LATEST_PROCESS_CONTEXT_LOCK,
     _PROCESS_CONTEXT,
+    TelemetryResponseBodyMiddleware,
+    _reconstruct,
     _set_process_context_for_tests,
     flush_usage_log,
     get_process_context,
@@ -343,8 +345,7 @@ def test_query_iothread_calls_returns_shaped_rows(monkeypatch):
         def open_readonly(_sid):
             return _Con()
 
-    monkeypatch.setattr("backend.core.metadata.usage_log_db", _FakeDB, raising=False)
-    monkeypatch.setitem(sys.modules, "backend.core.metadata.usage_log_db", _FakeDB)
+    monkeypatch.setattr("backend.core.metadata.usage_log.open_readonly", _FakeDB.open_readonly)
 
     rows = _t._query_iothread_calls_from_usage_log()
     assert len(rows) == 2
@@ -1507,7 +1508,7 @@ async def test_proxy_handles_50_concurrent_requests_without_head_of_line_blockin
 
 
 async def test_proxy_logs_warning_when_dashboard_context_hits_fos(proxy_server, caplog):
-    with caplog.at_level(logging.WARNING, logger="backend.utils.telemetry_proxy"):
+    with caplog.at_level(logging.WARNING, logger="backend.utils"):
         await _proxy_call(
             proxy_server,
             "/k.parquet",
@@ -1584,7 +1585,7 @@ async def test_proxy_writes_actually_persist_to_metadata_db(proxy_server, tmp_pa
             await resp.read()
         telemetry_proxy._flush_log_writes_for_tests()
 
-    from backend.core.metadata import usage_log_db
+    import backend.core.metadata.usage_log as usage_log_db
 
     con = usage_log_db.get_con("real-svc-task6")
     rows = con.execute(
@@ -2212,7 +2213,7 @@ def test_fastapi_lifespan_starts_proxy():
 
     called = {"n": 0}
     with patch(
-        "backend.utils.telemetry_proxy.start_proxy_server", side_effect=lambda: called.__setitem__("n", called["n"] + 1)
+        "backend.utils.telemetry.start_proxy_server", side_effect=lambda: called.__setitem__("n", called["n"] + 1)
     ):
 
         async def _drive():

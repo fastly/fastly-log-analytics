@@ -225,7 +225,7 @@ def start_or_resume_cron(
     target kwargs varying.
     """
     from backend.core.duckdb import start_cron_run
-    from backend.cron_progress import list_active_runs, start_progress
+    from backend.cron.scheduler import list_active_runs, start_progress
 
     service_id = source["name"]
     try:
@@ -471,7 +471,7 @@ def sync_admin_state(service_id: str | None) -> None:
     if not service_id:
         return
     try:
-        from backend.state_sync import export_admin_state
+        from backend.core.metadata.base import export_admin_state
 
         export_admin_state(service_id)
     except Exception:

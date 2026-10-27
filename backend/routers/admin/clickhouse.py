@@ -10,24 +10,30 @@ from fastapi.responses import JSONResponse
 
 from backend import config
 from backend.core import metadata
-from backend.core.clickhouse import PgManifest, get_clickhouse_client
-from backend.core.clickhouse_publication import FosArtifacts, full_rebuild, replay_unpublished
-from backend.core.clickhouse_schema import CLICKHOUSE_SCHEMA_VERSION, target_identity
-from backend.deps import require_admin
-from backend.high_scale.archive_models import (
+from backend.core.clickhouse import (
+    CLICKHOUSE_SCHEMA_VERSION,
+    FosArtifacts,
+    PgManifest,
+    full_rebuild,
+    get_clickhouse_client,
+    replay_unpublished,
+    target_identity,
+)
+from backend.core.request_context import require_admin
+from backend.high_scale.archive import (
     ServiceProfile,
     StorageProfile,
     latest_disk_snapshot,
     recommend_retention,
 )
-from backend.models._base import ErrorDetail
-from backend.models.admin_status import (
+from backend.models.admin import (
     ClickHouseReplayErrorResponse,
     ClickHouseReplayRequest,
     ClickHouseReplayResponse,
     ClickHouseStatusResponse,
+    HighScaleRetentionRecommendationResponse,
 )
-from backend.models.high_scale import HighScaleRetentionRecommendationResponse
+from backend.models.common import ErrorDetail
 from backend.utils.router_utils import load_service_config_or_503, make_error, require_service_id
 
 from ._router import router

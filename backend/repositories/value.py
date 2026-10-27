@@ -11,6 +11,8 @@ from typing import Any
 import duckdb
 
 from backend.core.metric_expressions import HIT_STATES, sum_or_zero
+from backend.core.rollups.rollup_coverage import collect_hourly_bundle_paths
+from backend.core.sql_validator import escape_sql_literal
 from backend.models.common import FiltersDict
 from backend.repositories._base import (
     QueryRunner,
@@ -21,11 +23,9 @@ from backend.repositories._base import (
     safe_interval,
     time_bucket_select,
 )
-from backend.repositories.rollup_coverage import collect_hourly_bundle_paths
 from backend.repositories.utils.filters import build_where_clause
 from backend.utils.bounded_cache import BoundedTTLCache, CacheRegistry
 from backend.utils.date_utils import parse_window, safe_iso
-from backend.utils.sql_validator import escape_sql_literal
 
 logger = logging.getLogger(__name__)
 

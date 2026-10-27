@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import re
-import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
@@ -16,16 +15,16 @@ import urllib.parse
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 
-from backend.core.clickhouse_client import ClickHouseError
-from backend.core.share_db.validation import mask_ip
+from backend.core.clickhouse import ClickHouseError
+from backend.core.share_db import mask_ip
 from backend.high_scale._common import (
     build_clickhouse_filters,
     visible_fact_clauses,
 )
 from backend.high_scale._common import format_iso_utc_or_empty as _iso_or_empty
-from backend.models.insights import CacheCollapseDetailResponse, InsightsResponse
-from backend.repositories._sql.insights import NEW_PROBES
+from backend.models.analytics import CacheCollapseDetailResponse, InsightsResponse
 from backend.repositories.insights import InsightDefinition, registry  # noqa: F401  (registers the detections)
+from backend.repositories.insights.definitions import NEW_PROBES
 from backend.repositories.utils.response_cache import (
     bucket_time_to_minute,
 )
@@ -1452,10 +1451,3 @@ def cache_collapse_detail_endpoint(
         baseline_pass_rate=float(b_pass / b_total) * 100 if b_total else 0.0,
         window_pass_rate=float(w_pass / w_total) * 100 if w_total else 0.0,
     )
-
-
-_self_mod = sys.modules[__name__]
-sys.modules["backend.high_scale.insight_queries"] = _self_mod
-if (_hs_pkg := sys.modules.get("backend.high_scale")) is not None:
-    setattr(_hs_pkg, "insights", _self_mod)
-    setattr(_hs_pkg, "insight_queries", _self_mod)

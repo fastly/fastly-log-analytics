@@ -8,11 +8,11 @@ import duckdb
 import pytest
 from fastapi import HTTPException
 
+import backend.repositories.sessions as repo
 from backend.core.duckdb import _clear_schema_cache
 from backend.core.log_fields import LOG_FIELD_CATALOG
 from backend.models.common import FilterSpec
 from backend.repositories import _base
-from backend.repositories import session_scoring as repo
 from backend.repositories._base import QueryRunner, SectionTimer, _safe_table
 from backend.repositories.sessions import (
     _build_rollup_filter_sql,
@@ -982,7 +982,10 @@ from datetime import datetime
 from unittest.mock import patch
 
 import pytest
-from backend.repositories.alerts import (
+
+import backend.core.metadata as metadata_db
+from backend.models.common import Alert
+from backend.repositories.assets import (
     delete_alert,
     evaluate_alert,
     get_alert_by_id,
@@ -991,9 +994,6 @@ from backend.repositories.alerts import (
     toggle_alert,
     update_last_triggered,
 )
-
-from backend.core import metadata as metadata_db
-from backend.models.common import Alert
 
 
 def _make_alert(
@@ -1083,7 +1083,7 @@ def test_get_alerts_without_service_id_scans_all_configured_services():
     save_alert(_make_alert("svc-b", name="B's alert"))
 
     with patch(
-        "backend.repositories.alerts.svcconfig.list_configs",
+        "backend.repositories.assets.svcconfig.list_configs",
         return_value=[{"service_id": "svc-a"}, {"service_id": "svc-b"}],
     ):
         out = get_alerts()
@@ -1543,7 +1543,8 @@ def test_update_last_triggered_with_none_uses_now():
 
 from unittest.mock import MagicMock  # noqa: E402
 
-from backend.repositories.alerts import (  # noqa: E402
+from backend.models.common import SavedView  # noqa: E402
+from backend.repositories.assets import (  # noqa: E402
     delete_cron_log,
     delete_view,
     get_cron_logs,
@@ -1552,8 +1553,6 @@ from backend.repositories.alerts import (  # noqa: E402
     purge_cron_logs,
     save_view,
 )
-
-from backend.models.common import SavedView  # noqa: E402
 
 
 def _make_view(service_id: str, name: str = "My View") -> SavedView:
@@ -1603,8 +1602,8 @@ def test_get_view_by_id_returns_none_when_view_does_not_exist():
 
 
 def test_metadata_save_view_uses_service_id_parameter_not_payload_value():
-    from backend.core.metadata.views import list_views as md_list_views
-    from backend.core.metadata.views import save_view as md_save_view
+    from backend.core.metadata.base import list_views as md_list_views
+    from backend.core.metadata.base import save_view as md_save_view
 
     trusted_sid = "svc-views-016-trusted"
     untrusted_sid = "svc-views-016-attacker"
@@ -1819,7 +1818,7 @@ def test_get_cron_logs_comma_separated_tasks():
 
 
 def test_get_storage_stats_returns_filtered_files_and_bytes():
-    from backend.repositories.usage import get_storage_stats
+    from backend.repositories.assets import get_storage_stats
 
     metadata_db.get_con("test_svc").execute("DELETE FROM ingested_files")
 
@@ -1852,7 +1851,7 @@ def _schema(*cols: str) -> list[dict]:
 
 
 def test_get_edge_ratio_returns_none_when_edge_column_missing():
-    from backend.repositories.usage import get_edge_ratio
+    from backend.repositories.assets import get_edge_ratio
 
     src = {"name": "svc_no_edge"}
     con = MagicMock()
@@ -1863,7 +1862,7 @@ def test_get_edge_ratio_returns_none_when_edge_column_missing():
 
 
 def test_get_edge_ratio_returns_none_when_query_yields_no_result():
-    from backend.repositories.usage import get_edge_ratio
+    from backend.repositories.assets import get_edge_ratio
 
     src = {"name": "svc1"}
     con = MagicMock()
@@ -1876,7 +1875,7 @@ def test_get_edge_ratio_returns_none_when_query_yields_no_result():
 
 
 def test_get_edge_ratio_returns_rounded_value_for_valid_row():
-    from backend.repositories.usage import get_edge_ratio
+    from backend.repositories.assets import get_edge_ratio
 
     src = {"name": "svc1"}
     con = MagicMock()
@@ -1891,7 +1890,7 @@ def test_get_edge_ratio_returns_rounded_value_for_valid_row():
 
 
 def test_get_edge_ratio_returns_none_for_empty_table():
-    from backend.repositories.usage import get_edge_ratio
+    from backend.repositories.assets import get_edge_ratio
 
     src = {"name": "svc1"}
     con = MagicMock()
@@ -1906,7 +1905,7 @@ def test_get_edge_ratio_returns_none_for_empty_table():
 
 
 def test_get_edge_ratio_returns_none_when_no_row_at_all():
-    from backend.repositories.usage import get_edge_ratio
+    from backend.repositories.assets import get_edge_ratio
 
     src = {"name": "svc1"}
     con = MagicMock()
@@ -1921,7 +1920,7 @@ def test_get_edge_ratio_returns_none_when_no_row_at_all():
 
 
 def test_get_log_activity_uses_service_name_and_bucketing():
-    from backend.repositories.usage import get_log_activity
+    from backend.repositories.assets import get_log_activity
 
     metadata_db.get_con("act_svc").execute("DELETE FROM ingested_files")
     metadata_db.get_con("act_svc").execute(
@@ -1944,7 +1943,7 @@ def test_get_log_activity_uses_service_name_and_bucketing():
 
 
 def test_get_log_activity_falls_back_to_service_id_when_name_missing():
-    from backend.repositories.usage import get_log_activity
+    from backend.repositories.assets import get_log_activity
 
     metadata_db.get_con("id_only_svc").execute("DELETE FROM ingested_files")
 

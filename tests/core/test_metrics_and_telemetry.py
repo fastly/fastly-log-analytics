@@ -39,22 +39,21 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from tests._helpers.config_fakes import fetch_metric_snapshot_history as _get_history
 
+import backend.core.metadata.usage_log as slow_queries
+import backend.core.metadata.usage_log as usage_log_db
+import backend.core.request_telemetry as request_metrics
 from backend import config
 from backend.core import clickhouse as _ch_mod  # noqa: F401
 from backend.core import duckdb as _duckdb_mod
-from backend.core import duckdb_pool, request_telemetry
-from backend.core import log_fields as metric_expressions
+from backend.core import duckdb_pool, metric_expressions, request_telemetry
 from backend.core import metadata as _meta
 from backend.core import request_context as rc
 from backend.core import request_telemetry as observer_mod
 from backend.core import request_telemetry as qr_mod
-from backend.core import request_telemetry as request_metrics
 from backend.core import request_telemetry as web_vitals_store
 from backend.core.duckdb import refresh_config_status
 from backend.core.log_fields import METRIC_DEFINITIONS, get_metric_sql
 from backend.core.metadata import usage_log
-from backend.core.metadata import usage_log as slow_queries
-from backend.core.metadata import usage_log as usage_log_db
 from backend.core.metadata.usage_log import clear_usage_log
 from backend.core.request_context import RequestContext, _enforce_service_access
 from backend.core.request_telemetry import (
@@ -748,8 +747,8 @@ def _call_ctx_route(**get_kwargs):
             "backend.core.request_context._resolve_source",
             return_value={"name": "svc-1", "endpoint_url": "http://localhost"},
         ),
-        patch("backend.deps._ConnectionHolder.__enter__", return_value=MagicMock()),
-        patch("backend.deps._ConnectionHolder.__exit__", return_value=False),
+        patch("backend.core.request_context._ConnectionHolder.__enter__", return_value=MagicMock()),
+        patch("backend.core.request_context._ConnectionHolder.__exit__", return_value=False),
     ):
         return TestClient(sub_app).get("/api/test", **get_kwargs)
 
@@ -931,7 +930,7 @@ def durable_metrics(monkeypatch, tmp_path):
         },
     )
     cron = {"log_discovery": {"started_at": "2026-09-08T18:00:00Z"}}
-    monkeypatch.setattr("backend.core.metadata.cron_log.latest_cron_per_task", lambda sid: cron)
+    monkeypatch.setattr("backend.core.metadata.usage_log.latest_cron_per_task", lambda sid: cron)
     table = ducklake_table_name(source)
 
     def replace_rows(timestamps):
@@ -1048,7 +1047,7 @@ def test_durable_metrics_failure_legacy_refresh_and_lock_coalescing(durable_metr
         "backend.core.duckdb.get_sync_status", MagicMock(side_effect=AssertionError("local/stale stats path called"))
     )
     monkeypatch.setattr("backend.core.storage.get_table_info", lambda src: {})
-    monkeypatch.setattr("backend.repositories.usage.get_edge_ratio", lambda *a: (None, None))
+    monkeypatch.setattr("backend.repositories.assets.get_edge_ratio", lambda *a: (None, None))
     refresh_config_status(source["name"], include_top_values=False)
     assert config.get_status(source["name"])["request"]["total_rows"] == 1
 
@@ -1472,7 +1471,7 @@ def duck() -> duckdb.DuckDBPyConnection:
 
 
 def test_query_instrumentation_finish_terminal_and_deferred_readers(duck):
-    with patch("backend.core.query_instrumentation._deregister") as mock_dereg:
+    with patch("backend.core.request_telemetry._deregister") as mock_dereg:
         result = _InstrumentedResult(MagicMock(), qid=7, con_ref=None)
         for _ in range(3):
             result._finish(None, probe_memory=False)
@@ -1481,17 +1480,17 @@ def test_query_instrumentation_finish_terminal_and_deferred_readers(duck):
     duck.execute("CREATE TABLE t AS SELECT i FROM range(5_000) tbl(i)")
     con = InstrumentedDuckDBConnection(duck, service_id="inst_svc")
     for reader_fn in (lambda r: r.arrow(), lambda r: r.fetch_record_batch(100)):
-        with patch("backend.core.query_instrumentation._deregister") as mock_dereg:
+        with patch("backend.core.request_telemetry._deregister") as mock_dereg:
             reader = reader_fn(con.execute("SELECT * FROM t"))
             assert mock_dereg.call_count == 0 and isinstance(reader, _InstrumentedRecordReader)
             assert sum(b.num_rows for b in reader) == 5_000 and mock_dereg.call_count == 1
 
     for method in ("fetchall", "fetchone", "fetchnumpy"):
-        with patch("backend.core.query_instrumentation._deregister") as mock_dereg:
+        with patch("backend.core.request_telemetry._deregister") as mock_dereg:
             getattr(con.execute("SELECT i FROM t LIMIT 10"), method)()
             assert mock_dereg.call_count == 1 and mock_dereg.call_args.args[1] is None
 
-    with patch("backend.core.query_instrumentation._deregister") as mock_dereg:
+    with patch("backend.core.request_telemetry._deregister") as mock_dereg:
         with pytest.raises(duckdb.Error):
             con.execute("SELECT * FROM table_that_does_not_exist_xyz")
         assert mock_dereg.call_count == 1 and isinstance(mock_dereg.call_args.args[1], BaseException)
@@ -1509,7 +1508,7 @@ def test_weakref_and_probe_duckdb_memory_resilience():
     del raw
     gc.collect()
     assert ref() is None
-    with patch("backend.core.query_instrumentation._deregister") as mock_dereg:
+    with patch("backend.core.request_telemetry._deregister") as mock_dereg:
         result._finish(None, probe_memory=True)
     assert mock_dereg.call_count == 1 and mock_dereg.call_args.kwargs.get("peak_memory_mb") is None
 
@@ -1838,7 +1837,7 @@ def test_peak_memory_parsing_and_completed_rows():
     hist = query_registry.snapshot(include_completed=True)["completed"]
     assert "peak_memory_mb" in [c for c in hist if c["service_id"] == "mem_test_svc"][-1]
 
-    from backend.utils import sqlite_profiler
+    import backend.utils.telemetry as sqlite_profiler
 
     qid = sqlite_profiler._live_register("SQLite", "CREATE TABLE x (i INT)", con=None)
     sqlite_profiler._live_deregister(qid, error=None)
@@ -1931,7 +1930,7 @@ def test_cancel_for_key_disconnect_semantics():
 def svc_id(tmp_path, monkeypatch):
     monkeypatch.setattr("backend.config.DATA_DIR", tmp_path)
     monkeypatch.setattr("backend.core.metadata.base.DATA_DIR", tmp_path, raising=False)
-    monkeypatch.setattr("backend.core.query_registry._SLOW_QUERY_PERSIST_THRESHOLD_MS", 999999.0)
+    monkeypatch.setattr("backend.core.request_telemetry._SLOW_QUERY_PERSIST_THRESHOLD_MS", 999999.0)
     svc = "test-slow-queries-svc"
     con = _meta.get_con(svc)
     con.execute("DELETE FROM slow_queries WHERE service_id = ?", (svc,))

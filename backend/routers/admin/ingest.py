@@ -7,7 +7,7 @@ from typing import Any
 
 from fastapi import Depends, HTTPException, Query
 
-from backend.deps import get_source, require_admin
+from backend.core.request_context import get_source, require_admin
 from backend.models.admin import SyncStartResponse
 from backend.utils import router_utils as _ru
 from backend.utils.router_utils import (

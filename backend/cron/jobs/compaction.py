@@ -62,7 +62,7 @@ def _ledger_touched_hours(service_id: str, lookback_s: float) -> set[str]:
 def _run_local_compact(service_id: str) -> None:
     from backend.core import local_compaction as _lc  # type: ignore[attr-defined]
     from backend.core.duckdb import get_source_for_service
-    from backend.utils.active_requests import should_defer_cron
+    from backend.utils.telemetry import should_defer_cron
 
     if should_defer_cron("local_compact", service_id) or (src := get_source_for_service(service_id)) is None:
         return
@@ -112,7 +112,7 @@ def _run_rollup_hour_heal(service_id: str, manual: bool = False, run_id: int | N
     from backend.core.rollups import backfill_missing_hour_bundles
     from backend.core.rollups._common import _hour_bundled_root
     from backend.cron.jobs.sync import has_sufficient_disk_space
-    from backend.utils.active_requests import should_defer_cron
+    from backend.utils.telemetry import should_defer_cron
 
     if not manual and should_defer_cron("rollup_hour_heal", service_id):
         logger.info("⏸️  [rollup-heal] %s: deferring due to active user queries", service_id)
@@ -177,9 +177,9 @@ def _run_rollup_hour_heal(service_id: str, manual: bool = False, run_id: int | N
                 from contextlib import closing
 
                 from backend.core.duckdb import get_connection, rum_source_for
-                from backend.core.rollups.rum import backfill_missing_rum_aggregates
+                from backend.core.rollups.recompute import backfill_missing_rum_aggregates
                 from backend.core.storage import execute_with_stale_view_retry
-                from backend.core.storage._ducklake import _ducklake_attach
+                from backend.core.storage._core import _ducklake_attach
 
                 rum_src = rum_source_for(src)
                 with closing(get_connection(rum_src, read_only=False)) as rum_con:
@@ -245,7 +245,7 @@ def _run_rollup_compact_daily(service_id: str, manual: bool = False, run_id: int
     from backend.core.rollups._common import _day_bundled_root
     from backend.core.rollups.recompute import DAY_COMPACTORS, cleanup_old_rollups
     from backend.cron.jobs.sync import has_sufficient_disk_space
-    from backend.utils.active_requests import should_defer_cron
+    from backend.utils.telemetry import should_defer_cron
 
     if not manual and should_defer_cron("rollup_compact", service_id):
         logger.info("⏸️  [rollup-compact] %s: deferring due to active user queries", service_id)
@@ -348,10 +348,10 @@ def _run_rollup_compact_daily(service_id: str, manual: bool = False, run_id: int
 def _run_partial_hour_merge(service_id: str) -> None:
     from backend.core.duckdb import get_source_for_service
     from backend.core.log_fields import derived
-    from backend.core.rollups.partial_hour import gc_stale_partial_hours, merge_partial_hour
+    from backend.core.rollups.day_bundles import gc_stale_partial_hours, merge_partial_hour
     from backend.repositories._base import _LIVE_TOPN_SKIP_FIELDS
     from backend.repositories.dashboard import FIELDS
-    from backend.utils.active_requests import should_defer_cron
+    from backend.utils.telemetry import should_defer_cron
 
     if should_defer_cron("partial_hour_merge", service_id) or (src := get_source_for_service(service_id)) is None:
         return

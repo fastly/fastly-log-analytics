@@ -13,9 +13,8 @@ from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import replace
 from typing import Any
 
-from backend.high_scale.publication import ClickHousePublication, PostgresBatchManifestStore
-
 from backend import config
+from backend.high_scale.archive import ClickHousePublication, PostgresBatchManifestStore
 from backend.high_scale.postgres_control import PostgresControlPlane
 
 _TERMINAL_ARCHIVE_STATES = frozenset({"manifest_committed", "deletion_eligible", "source_deleted"})
@@ -26,13 +25,13 @@ _RUM_DOMAINS = frozenset({"rum_vitals", "rum_errors"})
 def recover(manifest_prefix: str, *, apply: bool, approve_digest: str | None) -> dict[str, Any]:
     started = time.perf_counter()
     import psycopg
-    from backend.high_scale.publication import _DOMAIN_COLUMNS, _DOMAIN_TABLES
-    from backend.high_scale.registry_bootstrap import _default_archive_factory
-    from backend.high_scale.rum_recovery import RumRecoveryBatchAdapter, execute_rum_recovery, plan_rum_recovery
     from psycopg.rows import dict_row
 
-    from backend.core import clickhouse_client
+    import backend.core.clickhouse as clickhouse_client
+    from backend.high_scale.archive import _DOMAIN_COLUMNS, _DOMAIN_TABLES
+    from backend.high_scale.ingest_controller import _default_archive_factory
     from backend.high_scale.postgres_control import _archive_from_row
+    from backend.high_scale.recovery import RumRecoveryBatchAdapter, execute_rum_recovery, plan_rum_recovery
 
     if not re.fullmatch(r"[0-9a-f]{8,64}", manifest_prefix):
         raise ValueError("manifest prefix must be 8-64 lowercase hexadecimal characters")

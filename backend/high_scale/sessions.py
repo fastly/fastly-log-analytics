@@ -23,8 +23,12 @@ from backend.repositories.utils.response_cache import (
     digest_cache_key,
 )
 from backend.repositories.utils.response_shaping import (
+    SESSIONS_DEFAULT_MIN_4XX_PCT_FLAG,
+    SESSIONS_DEFAULT_MIN_REQS_FLAG,
+    SESSIONS_SORTABLE_COLUMNS,
     build_asn_label_map,
-    empty_sessions_response,
+    normalize_sessions_sort,
+    shape_sessions_envelope,
 )
 from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry
 
@@ -33,20 +37,9 @@ if TYPE_CHECKING:
 
 _sessions_memo = ResponseMemo(ttl=30.0, maxsize=128)
 _CacheRegistry.register("high_scale.sessions._response_cache", _sessions_memo.cache)
-_DEFAULT_MIN_REQS_FLAG = 1000
-_DEFAULT_MIN_4XX_PCT_FLAG = 20.0
-_SORTABLE = frozenset(
-    {
-        "session_start",
-        "session_end",
-        "req_count",
-        "edge_count",
-        "shield_count",
-        "unique_urls",
-        "median_rtt_ms",
-        "total_bytes",
-    }
-)
+_DEFAULT_MIN_REQS_FLAG = SESSIONS_DEFAULT_MIN_REQS_FLAG
+_DEFAULT_MIN_4XX_PCT_FLAG = SESSIONS_DEFAULT_MIN_4XX_PCT_FLAG
+_SORTABLE = SESSIONS_SORTABLE_COLUMNS
 _HELPER_COLUMNS = (
     "sid",
     "total_sessions",
@@ -352,8 +345,7 @@ def sessions_endpoint(
         "streaming_only": 1 if req.streaming_only else 0,
         **filter_params,
     }
-    sort_by = req.sort_by if req.sort_by in _SORTABLE else "session_start"
-    sort_dir = "ASC" if str(req.sort_dir).lower() == "asc" else "DESC"
+    sort_by, sort_dir = normalize_sessions_sort(req.sort_by, str(req.sort_dir))
     fast_cte = _SESSIONS_FAST_CTE.format(where=where)
     cte = _SESSIONS_CTE.format(where=where) if sort_by in _FULL_CTE_SORTS else fast_cte
     memo_key = digest_cache_key(
@@ -418,23 +410,21 @@ def sessions_endpoint(
         session["flagged"] = bool(session.get("flagged"))
         session["is_streaming"] = bool(session.get("is_streaming"))
         sessions.append(session)
-    asns = sorted({int(session["asn"]) for session in sessions if session.get("asn") is not None})
-    result = {
-        **empty_sessions_response(
-            page=req.page,
-            limit=req.limit,
-            has_rtt=bool(first.get("any_rtt")),
-            has_ja4=bool(first.get("any_ja4")),
-            has_edge=bool(first.get("any_edge")),
-            has_edge_sid=bool(first.get("any_edge_sid")),
-            has_cmcd=bool(first.get("any_cmcd")),
-            min_reqs_flag=min_reqs_flag,
-            min_4xx_pct_flag=min_4xx_pct_flag,
-        ),
-        "sessions": sessions,
-        "asn_names": _asn_label_map(service.service_id, asns) if asns else {},
-        "total": total,
-    }
+    result = shape_sessions_envelope(
+        sessions,
+        total=total,
+        page=req.page,
+        limit=req.limit,
+        has_rtt=bool(first.get("any_rtt")),
+        has_ja4=bool(first.get("any_ja4")),
+        has_edge=bool(first.get("any_edge")),
+        has_edge_sid=bool(first.get("any_edge_sid")),
+        has_cmcd=bool(first.get("any_cmcd")),
+        min_reqs_flag=min_reqs_flag,
+        min_4xx_pct_flag=min_4xx_pct_flag,
+        service_id=service.service_id,
+        asn_label_resolver=_asn_label_map,
+    )
     _sessions_memo.put(memo_key, result)
     return result
 

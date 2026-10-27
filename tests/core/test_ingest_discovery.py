@@ -866,7 +866,7 @@ def test_in_flight_file_is_never_reclaimed_by_strand_reconcile(monkeypatch):
     so the strand delete is observed without mocking the DuckDB download path —
     same technique as test_stranded_reclaim_runs_even_when_new_files_present.
     """
-    from backend.core import metadata as metadata_db
+    import backend.core.metadata as metadata_db
 
     bucket = "test-bucket"
     strand_key = "raw/2026-05-04/14/2026-05-04T14-00-00.strand.gz"
@@ -982,16 +982,13 @@ from unittest.mock import MagicMock
 import botocore.exceptions
 import duckdb
 import pytest
-from backend.core.metadata.cron_log import OUTCOME_COUNTER_KEYS, record_ingest_object_outcome, start_cron_run
-from backend.core.storage._ducklake import ducklake_table_name
-from backend.utils.sql_validator import escape_sql_literal
 from tests._helpers.ledger import DuckLakeLedgerEnv, clear_ledger, lake_reader
 from tests._helpers.ledger import attacher as _attacher
 from tests._helpers.ledger import clear_ledger as _clear_ledger
 
 import backend.core.duckdb as my_duckdb
+import backend.core.metadata as metadata_db
 from backend.core import ingest as ing
-from backend.core import metadata as metadata_db
 from backend.core import storage as ice
 from backend.core.ingest import (
     LEDGER_MAX_ATTEMPTS,
@@ -1006,6 +1003,9 @@ from backend.core.ingest import (
     sweep_ledger_once,
 )
 from backend.core.metadata.ingest_log import get_ingested_files_status_summary
+from backend.core.metadata.usage_log import OUTCOME_COUNTER_KEYS, record_ingest_object_outcome, start_cron_run
+from backend.core.sql_validator import escape_sql_literal
+from backend.core.storage._core import ducklake_table_name
 
 
 def _drain(gen) -> list[dict]:
@@ -1121,7 +1121,7 @@ def test_corrupt_row_pipeline_valid_and_repair_and_evidence(ingest_local_env, mo
     mock_fos.delete_response = {"Errors": [{"Key": key_bad, "Code": "InternalError"}]}
     captured = []
     monkeypatch.setattr(
-        "backend.core.quarantine.capture_evidence",
+        "backend.core.metadata.ingest_log.capture_evidence",
         lambda sid, stype, okey, payload, **meta: (
             captured.append((stype, okey, payload)),
             {"id": 1, "cap_evictions": 0, "quarantine_capture_failures": 1},
@@ -1180,7 +1180,7 @@ def test_ingest_retains_corrupt_gzip_evidence_and_outcomes(ingest_local_env, mon
     _install_mock_fos(monkeypatch, log_dir, keys=[valid_key, corrupt_key])
     captured = []
     monkeypatch.setattr(
-        "backend.core.quarantine.capture_evidence",
+        "backend.core.metadata.ingest_log.capture_evidence",
         lambda sid, stype, okey, payload, **meta: (
             captured.append((sid, stype, okey, payload)),
             {"id": 1, "cap_evictions": 0, "quarantine_capture_failures": 0},
@@ -1624,7 +1624,7 @@ def test_merge_lake_files_compaction_and_error_handling(tmp_path):
 
     with (
         patch("backend.core.duckdb.get_source_for_service", return_value=SRC),
-        patch("backend.core.storage._ducklake._ducklake_attach", side_effect=attach),
+        patch("backend.core.storage._core._ducklake_attach", side_effect=attach),
         patch("backend.core.ingest._configure_fos"),
     ):
         merge_lake_files(SERVICE_ID)
@@ -1640,7 +1640,7 @@ def test_merge_lake_files_compaction_and_error_handling(tmp_path):
 
     with (
         patch("backend.core.duckdb.get_source_for_service", return_value=SRC),
-        patch("backend.core.storage._ducklake._ducklake_attach", return_value=False),
+        patch("backend.core.storage._core._ducklake_attach", return_value=False),
         patch("backend.core.ingest._configure_fos"),
     ):
         with pytest.raises(RuntimeError, match="attach failed"):
@@ -1663,7 +1663,7 @@ def test_merge_lake_files_compaction_and_error_handling(tmp_path):
     connection = Connection()
     with (
         patch("backend.core.duckdb.get_source_for_service", return_value=SRC),
-        patch("backend.core.storage._ducklake._ducklake_attach", return_value=True),
+        patch("backend.core.storage._core._ducklake_attach", return_value=True),
         patch("backend.core.ingest._configure_fos"),
         patch("duckdb.connect", return_value=connection),
         patch("backend.core.ingest._mark_ledger_published") as mark_published,
@@ -1704,7 +1704,7 @@ def test_sweeper_reclaim_redispatch_rum_exclusion_and_discovery():
         patch("backend.config.load_config", return_value={"service_id": service_id}),
         patch("backend.core.duckdb.get_source_for_service", return_value={"name": "test", "bucket": "test-bucket"}),
         patch("backend.core.ingest.list_fos_files", side_effect=_empty_list_fos),
-        patch("backend.celery_status.celery_queue_depths", return_value=({"q.ingest": 0}, True)),
+        patch("backend.celery_app.celery_queue_depths", return_value=({"q.ingest": 0}, True)),
         patch("backend.core.ingest.convert_batch_files.delay") as mock_delay,
     ):
         summary = sweep_ledger_once(service_id)
@@ -1810,7 +1810,7 @@ def test_convert_failure_retry_schedule_fencing_and_dead_letter(tmp_path):
         patch("backend.config.load_config", return_value={"service_id": service_id}),
         patch("backend.core.duckdb.get_source_for_service", return_value={"name": "test", "bucket": "test-bucket"}),
         patch("backend.core.ingest.list_fos_files", side_effect=_empty_list_fos),
-        patch("backend.celery_status.celery_queue_depths", return_value=({"q.ingest": 0}, True)),
+        patch("backend.celery_app.celery_queue_depths", return_value=({"q.ingest": 0}, True)),
     ):
         assert sweep_ledger_once(service_id)["dead_letter"] == 1
 
@@ -1829,7 +1829,7 @@ def test_quarantine_convert_corrupt_lines_and_lake_exclusion(tmp_path):
     fos = MagicMock()
     src = {"service_id": "svc-quarantine", "name": "svc-quarantine", "bucket": "test-bucket", "prefix": ""}
     with patch(
-        "backend.core.quarantine.capture_evidence",
+        "backend.core.metadata.ingest_log.capture_evidence",
         return_value={"id": 1, "cap_evictions": 0, "quarantine_capture_failures": 0},
     ) as capture:
         res = _quarantine_convert_corrupt_lines(

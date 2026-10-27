@@ -25,11 +25,10 @@ if TYPE_CHECKING:
 
 # ── Folded from backend/high_scale/origin.py ─────────────────────────────────
 
-import sys
 from dataclasses import dataclass
 from dataclasses import field as _dc_field
 
-from backend.core.high_scale_sections import HighScaleSections
+from backend.core.request_telemetry import HighScaleSections
 from backend.high_scale._common import (
     _TIMESERIES_METRICS,
     RELATIVE_ERROR,
@@ -44,6 +43,13 @@ from backend.repositories.utils.response_shaping import (
     empty_origin_summary,
     is_pop_latency_elevated,
     opt_float,
+    shape_origin_ip_health_response,
+    shape_origin_ip_health_row,
+    shape_origin_path_breakdown,
+    shape_origin_path_row,
+    shape_origin_slow_url_row,
+    shape_origin_slow_urls_response,
+    shape_origin_summary,
     shape_pop_latency_rows,
     shape_status_code_rows,
     us_to_ms,
@@ -56,8 +62,8 @@ _APPROX_NOTE = (
     "Latency percentiles are merged from per-minute log-histogram sketches "
     f"(relative error at most {RELATIVE_ERROR:.0%}). Request counts and error rates are exact."
 )
-_APPROX = {"_approx": True, "_approx_note": _APPROX_NOTE}
-_NOT_APPROX = {"_approx": False}
+_APPROX: dict[str, Any] = {"_approx": True, "_approx_note": _APPROX_NOTE}
+_NOT_APPROX: dict[str, Any] = {"_approx": False}
 
 _BASE_COLUMNS = (
     "event_timestamp, url, "
@@ -142,25 +148,24 @@ def _origin_summary(service: HighScaleService, start_time: str | None, end_time:
     latency_p50 = _quantile(row, "latency", 0)
     if requests == 0 or latency_p50 is None:
         return empty_origin_summary()
-    return {
-        "has_data": True,
-        "total_misses": int(row.get("misses") or 0),
-        "total_passes": int(row.get("passes") or 0),
-        "ottfb_p50_ms": _milliseconds(latency_p50),
-        "ottfb_p75_ms": _milliseconds(_quantile(row, "latency", 1)),
-        "ottfb_p95_ms": _milliseconds(_quantile(row, "latency", 2)),
-        "ottfb_p99_ms": _milliseconds(_quantile(row, "latency", 3)),
-        "ottlb_p50_ms": _milliseconds(_quantile(row, "ttlb", 0)),
-        "ottlb_p95_ms": _milliseconds(_quantile(row, "ttlb", 1)),
-        "cdn_overhead_p50_ms": _milliseconds(_quantile(row, "overhead", 0)),
-        "origin_error_rate": (
+    return shape_origin_summary(
+        int(row.get("misses") or 0),
+        int(row.get("passes") or 0),
+        _milliseconds(latency_p50),
+        _milliseconds(_quantile(row, "latency", 1)),
+        _milliseconds(_quantile(row, "latency", 2)),
+        _milliseconds(_quantile(row, "latency", 3)),
+        ottlb_p50_ms=_milliseconds(_quantile(row, "ttlb", 0)),
+        ottlb_p95_ms=_milliseconds(_quantile(row, "ttlb", 1)),
+        cdn_overhead_p50_ms=_milliseconds(_quantile(row, "overhead", 0)),
+        origin_error_rate=(
             int(row.get("origin_5xx") or 0) / int(row["status_count"])
             if int(row.get("status_count") or 0) > 0
             else None
         ),
-        "obytes_p50": _quantile(row, "bytes", 0),
+        obytes_p50=_quantile(row, "bytes", 0),
         **_APPROX,
-    }
+    )
 
 
 def _timeseries(service: HighScaleService, req: Any, start_time: str | None, end_time: str | None) -> dict[str, Any]:
@@ -216,21 +221,20 @@ def _facts_summary(service: HighScaleService, facts: FactsScope) -> dict[str, An
     status_count = int(row.get("status_count") or 0)
     overhead_n = int(row.get("overhead_n") or 0)
     bytes_n = int(row.get("bytes_n") or 0)
-    return {
-        "has_data": True,
-        "total_misses": int(row.get("misses") or 0),
-        "total_passes": int(row.get("passes") or 0),
-        "ottfb_p50_ms": _milliseconds(_quantile(row, "latency_q", 0, "requests")),
-        "ottfb_p75_ms": _milliseconds(_quantile(row, "latency_q", 1, "requests")),
-        "ottfb_p95_ms": _milliseconds(_quantile(row, "latency_q", 2, "requests")),
-        "ottfb_p99_ms": _milliseconds(_quantile(row, "latency_q", 3, "requests")),
-        "ottlb_p50_ms": _milliseconds(_quantile(row, "ttlb_q", 0, "ttlb_n")),
-        "ottlb_p95_ms": _milliseconds(_quantile(row, "ttlb_q", 1, "ttlb_n")),
-        "cdn_overhead_p50_ms": _milliseconds(float(row["overhead_q"])) if overhead_n else None,
-        "origin_error_rate": int(row.get("origin_5xx") or 0) / status_count if status_count else None,
-        "obytes_p50": float(row["bytes_q"]) if bytes_n else None,
+    return shape_origin_summary(
+        int(row.get("misses") or 0),
+        int(row.get("passes") or 0),
+        _milliseconds(_quantile(row, "latency_q", 0, "requests")),
+        _milliseconds(_quantile(row, "latency_q", 1, "requests")),
+        _milliseconds(_quantile(row, "latency_q", 2, "requests")),
+        _milliseconds(_quantile(row, "latency_q", 3, "requests")),
+        ottlb_p50_ms=_milliseconds(_quantile(row, "ttlb_q", 0, "ttlb_n")),
+        ottlb_p95_ms=_milliseconds(_quantile(row, "ttlb_q", 1, "ttlb_n")),
+        cdn_overhead_p50_ms=_milliseconds(float(row["overhead_q"])) if overhead_n else None,
+        origin_error_rate=int(row.get("origin_5xx") or 0) / status_count if status_count else None,
+        obytes_p50=float(row["bytes_q"]) if bytes_n else None,
         **_NOT_APPROX,
-    }
+    )
 
 
 def _facts_timeseries(service: HighScaleService, facts: FactsScope, req: Any) -> dict[str, Any]:
@@ -266,20 +270,19 @@ def _facts_slow_urls(service: HighScaleService, facts: FactsScope, req: Any) -> 
         f"HAVING requests >= {{min_requests:UInt64}} ORDER BY {_ORDER_BY_P95} LIMIT {{limit:UInt32}}",
         {**facts.params, "min_requests": int(req.slow_urls_min_requests), "limit": int(req.slow_urls_limit)},
     )
-    return {
-        "has_data": bool(rows),
-        "rows": [
-            {
-                "url": row["value"],
-                "requests": int(row["requests"]),
-                "p50_ms": _milliseconds(_quantile(row, "latency_q", 0, "requests")),
-                "p95_ms": _milliseconds(_quantile(row, "latency_q", 1, "requests")),
-                "p99_ms": _milliseconds(_quantile(row, "latency_q", 2, "requests")),
-            }
+    return shape_origin_slow_urls_response(
+        [
+            shape_origin_slow_url_row(
+                row["value"],
+                row["requests"],
+                _milliseconds(_quantile(row, "latency_q", 0, "requests")),
+                _milliseconds(_quantile(row, "latency_q", 1, "requests")),
+                _milliseconds(_quantile(row, "latency_q", 2, "requests")),
+            )
             for row in rows
         ],
         **_NOT_APPROX,
-    }
+    )
 
 
 def _facts_status_codes(service: HighScaleService, facts: FactsScope) -> dict[str, Any]:
@@ -356,20 +359,19 @@ def _slow_urls(service: HighScaleService, req: Any, start_time: str | None, end_
         limit=req.slow_urls_limit,
         extra_params={"min_requests": int(req.slow_urls_min_requests)},
     )
-    return {
-        "has_data": bool(rows),
-        "rows": [
-            {
-                "url": row["value"],
-                "requests": int(row["requests"]),
-                "p50_ms": _milliseconds(_quantile(row, "latency", 0)),
-                "p95_ms": _milliseconds(_quantile(row, "latency", 1)),
-                "p99_ms": _milliseconds(_quantile(row, "latency", 2)),
-            }
+    return shape_origin_slow_urls_response(
+        [
+            shape_origin_slow_url_row(
+                row["value"],
+                row["requests"],
+                _milliseconds(_quantile(row, "latency", 0)),
+                _milliseconds(_quantile(row, "latency", 1)),
+                _milliseconds(_quantile(row, "latency", 2)),
+            )
             for row in rows
         ],
         **_APPROX,
-    }
+    )
 
 
 def _status_codes(service: HighScaleService, start_time: str | None, end_time: str | None) -> dict[str, Any]:
@@ -447,20 +449,19 @@ def origin_aggregates(
 
     def _build_path_breakdown() -> dict[str, Any]:
         rows = latency_rows("path_breakdown", "edge")
-        return {
-            "has_data": bool(rows),
-            "shielding_detected": any(row["value"] == "false" for row in rows),
-            "rows": [
-                {
-                    "edge": row["value"] == "true",
-                    "requests": int(row["requests"]),
-                    "p50_ms": _milliseconds(_quantile(row, "latency", 0)),
-                    "p95_ms": _milliseconds(_quantile(row, "latency", 1)),
-                }
+        return shape_origin_path_breakdown(
+            [
+                shape_origin_path_row(
+                    row["value"] == "true",
+                    row["requests"],
+                    _milliseconds(_quantile(row, "latency", 0)),
+                    _milliseconds(_quantile(row, "latency", 1)),
+                )
                 for row in rows
             ],
+            shielding_detected=any(row["value"] == "false" for row in rows),
             **approx,
-        }
+        )
 
     def _build_pop_latency() -> dict[str, Any]:
         rows = latency_rows("pop_latency", "pop", limit=req.pop_latency_limit)
@@ -479,21 +480,21 @@ def origin_aggregates(
         rows = latency_rows(
             "ip_health", "oip", limit=req.ip_health_limit, having="sum(origin_minute_dimensions.requests) >= 10"
         )
-        return {
-            "has_data": bool(rows),
-            "rows": [
-                {
-                    "oip": row["value"],
-                    "requests": int(row["requests"]),
-                    "p50_ms": _milliseconds(_quantile(row, "latency", 0)),
-                    "p95_ms": _milliseconds(_quantile(row, "latency", 1)),
-                    "error_pct": int(row.get("origin_5xx") or 0) * 100.0 / int(row["requests"]),
-                }
+        return shape_origin_ip_health_response(
+            [
+                shape_origin_ip_health_row(
+                    row["value"],
+                    row["requests"],
+                    _milliseconds(_quantile(row, "latency", 0)),
+                    _milliseconds(_quantile(row, "latency", 1)),
+                    int(row.get("origin_5xx") or 0) * 100.0 / int(row["requests"]),
+                )
                 for row in rows
                 if int(row["requests"]) > 0
             ],
+            has_data=bool(rows),
             **approx,
-        }
+        )
 
     tasks: list[tuple[str, Any]] = []
     if "summary" in sections:
@@ -741,8 +742,3 @@ from backend.high_scale.network import origin_shielding_analysis  # noqa: E402
 
 aggregates = origin_aggregates
 shielding_analysis = origin_shielding_analysis
-_self_mod = sys.modules[__name__]
-sys.modules["backend.high_scale.origin_projection"] = _self_mod
-if (_hs_pkg := sys.modules.get("backend.high_scale")) is not None:
-    setattr(_hs_pkg, "origin", _self_mod)
-    setattr(_hs_pkg, "origin_projection", _self_mod)

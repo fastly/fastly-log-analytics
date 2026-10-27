@@ -12,25 +12,24 @@ from unittest.mock import MagicMock, patch
 
 import duckdb
 import pytest
-from backend.core.share_db.validation import apply_pii_policy
-from backend.models.session_scoring import ScoringL2EnforceBody
-from backend.repositories.session_scoring import _SCORING_COLUMN_TYPES
-from backend.routers.session_scoring_admin import _build_l2_enforce_block
-from backend.scoring.evaluate import EvaluationResult
-from backend.scoring.matrix import MatrixStats, TransitionMatrix
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
+import backend.routers.session_scoring as _admin
+import backend.routers.session_scoring as _ssa
+import backend.scoring as _labels
 from backend import config as svcconfig
 from backend.core.duckdb import _clear_schema_cache
 from backend.core.request_context import build_request_context
+from backend.core.share_db import apply_pii_policy
 from backend.main import app
+from backend.models.analytics import ScoringL2EnforceBody
 from backend.repositories._base import _safe_table
+from backend.repositories.sessions import _SCORING_COLUMN_TYPES
 from backend.routers import session_scoring as _ss
-from backend.routers import session_scoring_admin as _admin
-from backend.routers import session_scoring_admin as _ssa
+from backend.routers.session_scoring import _build_l2_enforce_block
 from backend.routers.session_scoring import router as scoring_router
-from backend.scoring import labels as _labels
+from backend.scoring import EvaluationResult, MatrixStats, TransitionMatrix
 from backend.utils.date_utils import parse_iso_utc
 from backend.utils.remote_access import _is_blocked_path
 from tests._helpers.config_fakes import mutate_via_save
@@ -81,8 +80,8 @@ def _patch_run_with_events(
 @contextmanager
 def _patch_labels(labels: list[dict], counts: dict[str, int]):
     with (
-        patch("backend.scoring.labels.list_labels", return_value=labels),
-        patch("backend.scoring.labels.counts_by_label", return_value=counts),
+        patch("backend.scoring.list_labels", return_value=labels),
+        patch("backend.scoring.counts_by_label", return_value=counts),
     ):
         yield
 
@@ -149,7 +148,7 @@ def _capture_cfg_save(monkeypatch) -> dict:
 
 
 def _patch_query_logs(rows: list[dict]):
-    return patch("backend.repositories.session_scoring.query_logs", return_value=rows)
+    return patch("backend.repositories.sessions.query_logs", return_value=rows)
 
 
 def _fake_request(analyst_session):
@@ -238,7 +237,7 @@ def test_status_active_version_lookup(client, with_config, token, info_return, i
         cfg["fastly_api_key"] = token
     with_config[LOG_SVC] = cfg
     kwargs = {"side_effect": info_exc} if info_exc else {"return_value": info_return}
-    with patch("backend.core.fastly.service.get_active_version_info", **kwargs) as mock_info:
+    with patch("backend.core.fastly.client.get_active_version_info", **kwargs) as mock_info:
         r = client.get(f"/api/services/{LOG_SVC}/scoring/status")
     assert r.status_code == 200
     body = r.json()
@@ -592,7 +591,7 @@ def test_latency_timeseries_buckets_by_minute_for_1h_window(client, monkeypatch)
         captured["sql"] = next((a for a in [*args, *kwargs.values()] if isinstance(a, str) and "date_trunc" in a), "")
         return [{"hour": "2026-06-17 10:00:00", "scored_count": 1, "fail_open_count": 0}]
 
-    with patch("backend.repositories.session_scoring.query_logs", side_effect=_fake_query_logs):
+    with patch("backend.repositories.sessions.query_logs", side_effect=_fake_query_logs):
         for hours, gran in ((1, "minute"), (24, "hour")):
             _ss._analytics_cache.clear()
             r = client.get(f"/api/services/{LOG_SVC}/scoring/latency-timeseries?since_hours={hours}")
@@ -658,8 +657,8 @@ def test_evaluation_and_curves_when_min_samples_met(client, with_config):
     with (
         _patch_labels(fake_labels, fake_counts),
         patch("backend.routers.session_scoring._load_matrix", return_value={"transitions": {}}),
-        patch("backend.repositories.session_scoring.reconstruct_labeled_sessions", return_value=reconstructed),
-        patch("backend.scoring.evaluate.evaluate_from_persisted_scores", return_value=fake_result),
+        patch("backend.repositories.sessions.reconstruct_labeled_sessions", return_value=reconstructed),
+        patch("backend.scoring.evaluate_from_persisted_scores", return_value=fake_result),
     ):
         r_eval = client.get(f"/api/services/{LOG_SVC}/scoring/evaluation")
         r_curves = client.get(f"/api/services/{LOG_SVC}/scoring/curves")
@@ -722,7 +721,7 @@ def test_threshold_preview_bucketing_and_extremes(client, with_config):
         )
 
     with (
-        patch("backend.repositories.session_scoring.query_logs", side_effect=_route_query),
+        patch("backend.repositories.sessions.query_logs", side_effect=_route_query),
         _patch_labels([], {"good": 0, "bad": 0, "neutral": 0}),
     ):
         _ss._analytics_cache.clear()
@@ -756,12 +755,12 @@ def test_retrain_smoke(client, with_config, tmp_path):
     with (
         patch("backend.core.duckdb.get_source_for_service", return_value={"name": LOG_SVC}),
         patch("backend.core.duckdb.get_connection") as mock_get_con,
-        patch("backend.scoring.fixtures.extract_traces", return_value=iter([])),
-        patch("backend.scoring.matrix.build_matrix", return_value=(fake_matrix, fake_stats)),
+        patch("backend.scoring.extract_traces", return_value=iter([])),
+        patch("backend.scoring.build_matrix", return_value=(fake_matrix, fake_stats)),
         _patch_labels([], {"good": 0, "bad": 0, "neutral": 0}),
         patch("backend.provision.session_scoring_orchestrator._MATRIX_PATH", tmp_path / "matrix.json"),
-        patch("backend.state_sync.publish_matrix_to_fos"),
-        patch("backend.routers.session_scoring_admin.resolve_fastly_token", return_value="tok"),
+        patch("backend.core.metadata.base.publish_matrix_to_fos"),
+        patch("backend.routers.session_scoring.resolve_fastly_token", return_value="tok"),
         patch("backend.core.fastly.client.fastly_raw") as mock_raw,
     ):
         mock_get_con.return_value.close = lambda: None
@@ -887,7 +886,7 @@ def test_scoring_threshold_get_and_put(client, with_config, monkeypatch):
 @pytest.mark.usefixtures("_clear_analytics_cache_between_tests")
 def test_matrix_versions_list_and_restore(client, with_config, monkeypatch, tmp_path):
     with_config[LOG_SVC] = {"service_id": LOG_SVC}
-    with patch("backend.state_sync.list_scoring_matrix_versions", return_value=[]):
+    with patch("backend.core.metadata.base.list_scoring_matrix_versions", return_value=[]):
         r0 = client.get(f"/api/services/{LOG_SVC}/scoring/matrix-versions").json()
     assert r0["versions"] == [] and r0["current_version"] is None
 
@@ -904,12 +903,12 @@ def test_matrix_versions_list_and_restore(client, with_config, monkeypatch, tmp_
         }
         for v in ("2026-06-03-c", "2026-06-02-b", "2026-06-01-a")
     ]
-    with patch("backend.state_sync.list_scoring_matrix_versions", return_value=fake_versions):
+    with patch("backend.core.metadata.base.list_scoring_matrix_versions", return_value=fake_versions):
         r_list = client.get(f"/api/services/{LOG_SVC}/scoring/matrix-versions").json()
     assert len(r_list["versions"]) == 3 and r_list["current_version"] == "2026-06-03-c"
 
     # Restore validation gates
-    with patch("backend.state_sync.restore_scoring_matrix_version") as mock_restore:
+    with patch("backend.core.metadata.base.restore_scoring_matrix_version") as mock_restore:
         assert client.post(f"/api/services/{LOG_SVC}/scoring/matrix-versions/2026-06-01-a/restore").status_code == 400
         assert client.post(
             f"/api/services/{LOG_SVC}/scoring/matrix-versions/..%2Fetc%2Fpasswd/restore?confirm=true"
@@ -925,7 +924,7 @@ def test_matrix_versions_list_and_restore(client, with_config, monkeypatch, tmp_
         mock_restore.assert_not_called()
 
     # Restore 404 when missing in FOS
-    with patch("backend.state_sync.restore_scoring_matrix_version", return_value=None):
+    with patch("backend.core.metadata.base.restore_scoring_matrix_version", return_value=None):
         assert (
             client.post(
                 f"/api/services/{LOG_SVC}/scoring/matrix-versions/no-such-version/restore?confirm=true"
@@ -935,7 +934,7 @@ def test_matrix_versions_list_and_restore(client, with_config, monkeypatch, tmp_
 
     # Restore 500 when state_sync raises
     no_reraise_client = TestClient(app, raise_server_exceptions=False)
-    with patch("backend.state_sync.restore_scoring_matrix_version", side_effect=RuntimeError("S3 reset")):
+    with patch("backend.core.metadata.base.restore_scoring_matrix_version", side_effect=RuntimeError("S3 reset")):
         assert (
             no_reraise_client.post(
                 f"/api/services/{LOG_SVC}/scoring/matrix-versions/2026-06-01-a/restore?confirm=true"
@@ -951,7 +950,7 @@ def test_matrix_versions_list_and_restore(client, with_config, monkeypatch, tmp_
     audit_calls: list = []
     with (
         patch(
-            "backend.state_sync.restore_scoring_matrix_version",
+            "backend.core.metadata.base.restore_scoring_matrix_version",
             return_value={"version": "2026-06-01-a", "restored_at": "2026-06-03T11:00:00+00:00"},
         ),
         patch("backend.provision.session_scoring_orchestrator._MATRIX_PATH", fake_shared_path),
@@ -959,7 +958,7 @@ def test_matrix_versions_list_and_restore(client, with_config, monkeypatch, tmp_
             "backend.core.metadata.record_scoring_audit",
             side_effect=lambda svc, action, details=None: audit_calls.append((svc, action, details)),
         ),
-        patch("backend.routers.session_scoring_admin.resolve_fastly_token", return_value="tok"),
+        patch("backend.routers.session_scoring.resolve_fastly_token", return_value="tok"),
         patch("backend.provision.session_scoring_orchestrator._write_matrix_to_kv") as mock_kv,
     ):
         r_ok = client.post(f"/api/services/{LOG_SVC}/scoring/matrix-versions/2026-06-01-a/restore?confirm=true")
@@ -1216,7 +1215,7 @@ def test_scoring_time_window_and_endpoint_clamping(monkeypatch):
 
     captured: dict = {}
     monkeypatch.setattr(
-        "backend.repositories.session_scoring.query_logs",
+        "backend.repositories.sessions.query_logs",
         lambda sid, sql, params=(): (
             captured.__setitem__("sql", sql) or [{"ip": "1.2.3.4", "ua": "Mozilla", "url": "/secret", "edge_score": 91}]
         ),
@@ -1264,7 +1263,7 @@ def test_scoring_source_and_pre_enablement_degradation(monkeypatch):
             cnames = [d[0] for d in cur.description] if cur.description else []
             return [dict(zip(cnames, r)) for r in rows]
 
-        monkeypatch.setattr("backend.repositories.session_scoring.query_logs", fake_query_logs)
+        monkeypatch.setattr("backend.repositories.sessions.query_logs", fake_query_logs)
         req = _fake_request(None)
         assert _ss.scoring_top_flagged(request=req, service_id="noscore", since_hours=24, limit=50)["rows"] == []
         assert _ss.scoring_score_distribution(request=req, service_id="noscore", since_hours=24)["rows"] == []
@@ -1355,7 +1354,7 @@ class TestSessionScoringStatusAndComposites:
                 return_value={"package_sha": "pkg_sha_1", "vcl_sha": "vcl_sha_1"},
             ),
             patch(
-                "backend.core.fastly.service.get_active_version_info",
+                "backend.core.fastly.client.get_active_version_info",
                 return_value={"number": 7, "updated_at": "2026-10-18T12:00:00Z"},
             ),
         ):
@@ -1381,7 +1380,7 @@ class TestSessionScoringStatusAndComposites:
                 return_value={"package_sha": "pkg_sha_1", "vcl_sha": "vcl_sha_1"},
             ),
             patch(
-                "backend.core.fastly.service.get_active_version_info",
+                "backend.core.fastly.client.get_active_version_info",
                 return_value={"number": 7, "updated_at": "2026-10-18T12:00:00Z"},
             ),
         ):
@@ -1400,9 +1399,9 @@ class TestSessionScoringStatusAndComposites:
         client = TestClient(_make_app(analyst=False))
         with (
             patch("backend.config.load_config", return_value=cfg),
-            patch("backend.scoring.labels.list_labels", return_value=[]),
-            patch("backend.scoring.labels.counts_by_label", return_value={"good": 0, "bad": 0, "neutral": 0}),
-            patch("backend.repositories.session_scoring.query_logs", return_value=[]),
+            patch("backend.scoring.list_labels", return_value=[]),
+            patch("backend.scoring.counts_by_label", return_value={"good": 0, "bad": 0, "neutral": 0}),
+            patch("backend.repositories.sessions.query_logs", return_value=[]),
         ):
             res = client.get(f"/api/services/{SVC}/{prefix}/dashboard?since_hours=24&threshold=75")
 
@@ -1577,7 +1576,7 @@ class TestSessionScoringMatrixAuditAndOperations:
         with (
             patch("backend.config.load_config", return_value=cfg),
             patch(
-                "backend.state_sync.list_scoring_matrix_versions",
+                "backend.core.metadata.base.list_scoring_matrix_versions",
                 return_value=[{"version": "2026-10-17", "saved_at": "2026-10-17T00:00:00Z", "size_bytes": 512}],
             ),
         ):
@@ -1590,7 +1589,7 @@ class TestSessionScoringMatrixAuditAndOperations:
             patch("backend.config.load_config", return_value=cfg),
             patch("backend.config.mutate_config", return_value=cfg),
             patch(
-                "backend.state_sync.restore_scoring_matrix_version",
+                "backend.core.metadata.base.restore_scoring_matrix_version",
                 return_value={"restored_version": "2026-10-17", "restored_at": "2026-10-19T08:00:00Z"},
             ),
             patch("backend.provision.session_scoring_orchestrator._write_matrix_to_kv"),
@@ -1611,7 +1610,7 @@ class TestSessionScoringMatrixAuditAndOperations:
         with (
             patch("backend.config.load_config", return_value=cfg),
             patch(
-                "backend.provision.session_scoring_setup.rotate_aes_key",
+                "backend.provision.session_scoring_orchestrator.rotate_aes_key",
                 return_value={"rotated_at": "2026-10-19T08:00:00Z", "previous_key_hex": "deadbeef"},
             ),
             patch("backend.core.metadata.record_scoring_audit") as mock_audit,
@@ -1806,7 +1805,7 @@ def test_validate_returns_error_for_disallowed_quote(seeded_service):
     the regex compile and before falco — exercise that path too."""
     with (
         TestClient(app) as c,
-        patch("backend.utils.vcl_validator.shutil.which", return_value=None),
+        patch("backend.core.log_fields.shutil.which", return_value=None),
         patch.dict("os.environ", {"SCORING_REQUIRE_FALCO": "0"}),
     ):
         r = c.post(
@@ -1866,7 +1865,7 @@ def test_get_reports_is_default_when_literal_default_stored(seeded_service):
     The GET must still report ``is_default=True`` in that case, otherwise
     the UI would mislabel a fresh-from-enable service as
     "currently custom override" the moment scoring is turned on."""
-    from backend.provision.session_scoring_vcl import DEFAULT_ASSET_EXT_REGEX
+    from backend.provision.session_scoring_orchestrator import DEFAULT_ASSET_EXT_REGEX
 
     cfg = svcconfig.load_config(_SERVICE_ID)
     cfg["scoring"]["exclude_url_regex"] = DEFAULT_ASSET_EXT_REGEX
@@ -1910,7 +1909,7 @@ def test_put_without_token_rejected(seeded_service):
 def test_put_with_disallowed_quote_rejected(seeded_service):
     with (
         TestClient(app) as c,
-        patch("backend.utils.vcl_validator.shutil.which", return_value=None),
+        patch("backend.core.log_fields.shutil.which", return_value=None),
         # Disable falco-required so validation flows on its input-layer reject.
         patch.dict("os.environ", {"SCORING_REQUIRE_FALCO": "0"}),
     ):
@@ -2025,7 +2024,7 @@ def test_scoring_vcl_excludes_query_params():
     excluded extensions in the query string parameter, but does match them in the path."""
     import re
 
-    from backend.provision.session_scoring_vcl import DEFAULT_ASSET_EXT_REGEX
+    from backend.provision.session_scoring_orchestrator import DEFAULT_ASSET_EXT_REGEX
 
     pattern = re.compile(DEFAULT_ASSET_EXT_REGEX, re.IGNORECASE)
 
@@ -2118,7 +2117,7 @@ def test_rotate_key_happy_path(seeded_service):
     with (
         TestClient(app) as c,
         patch(
-            "backend.provision.session_scoring_setup.rotate_aes_key",
+            "backend.provision.session_scoring_orchestrator.rotate_aes_key",
             return_value=fake_result,
         ) as stub_rotate,
         patch("backend.core.metadata.record_scoring_audit") as stub_audit,
@@ -2441,7 +2440,7 @@ def test_sessions_with_range_token(client, in_memory_duckdb, test_service_source
 def test_sessions_telemetry_attribution(client, in_memory_duckdb, test_service_source, monkeypatch):
     """Verify process_context is captured for sessions:list and sessions:detail."""
     captured_contexts = []
-    import backend.routers.sessions as sess_mod
+    import backend.routers.session_scoring as sess_mod
 
     orig_scope = sess_mod.process_context_scope
 
@@ -2465,7 +2464,7 @@ def test_sessions_telemetry_attribution(client, in_memory_duckdb, test_service_s
 
 def test_sessions_stale_view_retry_wrapped(client, in_memory_duckdb, test_service_source, monkeypatch):
     """Verify execute_with_stale_view_retry wraps get_sessions in sessions_endpoint."""
-    import backend.routers.sessions as sess_mod
+    import backend.routers.session_scoring as sess_mod
 
     called = []
     orig_retry = sess_mod.execute_with_stale_view_retry

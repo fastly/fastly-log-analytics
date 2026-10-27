@@ -225,7 +225,7 @@ class cron_run:  # noqa: N801 — context-manager factory, lowercase by conventi
 
     def __enter__(self) -> cron_run:
         from backend.core.duckdb import get_source_for_service, start_cron_run
-        from backend.core.metadata.cron_log import CronLeaseHeldError
+        from backend.core.metadata.usage_log import CronLeaseHeldError
 
         if self._source is None:
             self._source = get_source_for_service(self.service_id)
@@ -243,8 +243,6 @@ class cron_run:  # noqa: N801 — context-manager factory, lowercase by conventi
                 return self
         self._start_time = time.time()
         try:
-            from backend.cron_progress import cleanup_progress_and_reap, start_progress
-
             cleanup_progress_and_reap()
             start_progress(self._run_id, service_id=self.service_id, task=self.progress_task)
         except Exception as exc:
@@ -313,8 +311,6 @@ class cron_run:  # noqa: N801 — context-manager factory, lowercase by conventi
             self.result = self.error_result(exc) if callable(self.error_result) else self.error_result
 
     def _run_finally(self) -> None:
-        from backend.cron_progress import end_progress
-
         def _finish_progress_and_duration() -> None:
             try:
                 end_progress(self._run_id)
@@ -360,18 +356,6 @@ def record_skip_row(
     from backend.core.duckdb import log_cron_run
 
     log_cron_run(source, task, duration_s, status, summary=summary, error_message=error_message, run_id=run_id)
-
-
-sys.modules["backend.cron.decorators"] = sys.modules[__name__]
-sys.modules["backend.cron.lifecycle"] = sys.modules[__name__]
-_cron_pkg = sys.modules.get("backend.cron")
-if _cron_pkg is not None:
-    setattr(_cron_pkg, "decorators", sys.modules[__name__])
-    setattr(_cron_pkg, "lifecycle", sys.modules[__name__])
-_backend_pkg = sys.modules.get("backend")
-if _backend_pkg is not None and hasattr(_backend_pkg, "_MODULE_ALIASES"):
-    _backend_pkg._MODULE_ALIASES["backend.cron.decorators"] = "backend.cron.scheduler"
-    _backend_pkg._MODULE_ALIASES["backend.cron.lifecycle"] = "backend.cron.scheduler"
 
 
 def partial_hour_merge_enabled() -> bool:
@@ -451,8 +435,6 @@ if _ROOT not in sys.path:
 
 
 def _extract_log_text(run_id: int | None) -> str:
-    from backend.cron_progress import get_progress
-
     if run_id is None:
         return ""
     evs = get_progress(run_id)
@@ -496,7 +478,6 @@ def _log_and_add_progress(
     run_id: int | None, service_id: str, event: dict, job_name: str = "scheduler", service_name: str | None = None
 ) -> None:
     from backend.cron.jobs.sync import get_service_display_label
-    from backend.cron_progress import add_progress
 
     add_progress(run_id, event)
     msg = event.get("message")
@@ -743,7 +724,7 @@ class Scheduler:
         )
 
     def _register_recycle_job(self, seen_ids: set[str] | None = None) -> None:
-        from backend.core.duckdb_recycle import recycle_interval_min
+        from backend.cron.jobs.duckdb_recycle import recycle_interval_min
         from backend.cron.jobs.metadata import run_duckdb_recycle
 
         recycle_interval = recycle_interval_min()
@@ -762,7 +743,7 @@ class Scheduler:
         )
 
     def _register_metric_snapshot_job(self, seen_ids: set[str] | None = None) -> None:
-        from backend.cron.jobs.metric_snapshot import _run_metric_snapshot
+        from backend.cron.jobs.metric_snapshots import _run_metric_snapshot
 
         self._register_once_job(
             "metric_snapshot",
@@ -866,7 +847,7 @@ class Scheduler:
             return
         from backend import config as svcconfig
         from backend.core.duckdb import get_source_for_service, is_configured
-        from backend.high_scale.registry_bootstrap import get_high_scale_service_registry
+        from backend.high_scale.ingest_controller import get_high_scale_service_registry
 
         seen_ids: set[str] = set()
         for cfg in svcconfig.list_configs():
@@ -1561,13 +1542,13 @@ def compute_sync_status_cached(service_id: str | None) -> dict | None:
     if not src:
         return None
     from backend.high_scale.dashboard import header_metrics
-    from backend.high_scale.registry_bootstrap import get_high_scale_service_registry
+    from backend.high_scale.ingest_controller import get_high_scale_service_registry
 
     high_scale_service = get_high_scale_service_registry().resolve(service_id)
     if high_scale_service is not None:
         metrics = header_metrics(high_scale_service)
         try:
-            from backend.core.metadata.cron_log import latest_cron_per_task
+            from backend.core.metadata.usage_log import latest_cron_per_task
 
             latest_crons = latest_cron_per_task(service_id)
             req_sync = None
@@ -1655,17 +1636,3 @@ def compute_sync_status_cached(service_id: str | None) -> dict | None:
     cfg = svcconfig.load_config(service_id) or {}
     cached_status["ngwaf_workspace_id"] = cfg.get("ngwaf_workspace_id")
     return cached_status
-
-
-_self_mod = sys.modules[__name__]
-for _alias in (
-    "backend.cron_progress",
-    "backend.cron_runs_publisher",
-    "backend.sync_status_snapshot",
-):
-    sys.modules[_alias] = _self_mod
-if "backend" in sys.modules:
-    _backend_pkg = sys.modules["backend"]
-    _backend_pkg.cron_progress = _self_mod  # type: ignore[attr-defined]
-    _backend_pkg.cron_runs_publisher = _self_mod  # type: ignore[attr-defined]
-    _backend_pkg.sync_status_snapshot = _self_mod  # type: ignore[attr-defined]

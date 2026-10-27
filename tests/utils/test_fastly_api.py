@@ -7,7 +7,6 @@ import urllib.parse
 from unittest.mock import MagicMock, patch
 
 import pytest
-from backend.provision.session_scoring_vcl import scoring_snippet_names
 
 from backend import config as svcconfig
 from backend.provision import fastly_api
@@ -21,6 +20,7 @@ from backend.provision.fastly_api import (
     get_scrub_vcl_statements,
     load_log_format,
 )
+from backend.provision.session_scoring_orchestrator import scoring_snippet_names
 
 # ── load_log_format: defaults + override ───────────────────────────────────
 
@@ -582,7 +582,7 @@ def _run_reconciled_endpoint_update(
         patch("backend.config.load_config", return_value=stored_cfg),
         patch("backend.config.save_config"),
         patch("backend.provision.fastly_api.account_has_rate_limiting", return_value=None),
-        patch("backend.core.fastly.service.get_active_version", return_value=active_version),
+        patch("backend.core.fastly.client.get_active_version", return_value=active_version),
         patch("backend.provision.declarative.reconciler.reconcile_vcl_state", return_value=reconcile_result),
     ):
         return _drain(fastly_api.update_logging_endpoint(cfg_in, "tok"))
@@ -677,7 +677,7 @@ def _run_update_logging_endpoint(cfg_in, stored_cfg):
     svcconfig.save_config("svc-id", dict(stored_cfg))
     with (
         patch("backend.provision.fastly_api.account_has_rate_limiting", return_value=None),
-        patch("backend.core.fastly.service.get_active_version", return_value=10),
+        patch("backend.core.fastly.client.get_active_version", return_value=10),
         patch(
             "backend.provision.declarative.reconciler.reconcile_vcl_state",
             return_value=ReconciliationResult(service_id="svc-id", activated_version=11, changes_applied=["fmt"]),
@@ -960,7 +960,8 @@ def test_scoring_teardown_aborts_when_vcl_strip_fails_and_proceeds_when_gone():
 
 
 import pytest
-from backend.core.fastly.utils import load_vcl, parse_period, region_endpoint
+
+from backend.core.fastly.client import load_vcl, parse_period, region_endpoint
 
 
 def test_load_vcl_orders_auth_before_native_request_handling():
@@ -1122,10 +1123,8 @@ def test_load_vcl_with_rate_limiting_false_strips_ratelimit_blocks():
 
 # ── Merged from test_fastly_mock_mode.py ──────────────────────────────────────────────
 
-from backend.core.fastly.mock_fixtures import is_mock_mode, mock_response
-from backend.utils.ngwaf import fetch_verified_bots_paged
-
-from backend.core.fastly.client import fastly
+from backend.core.fastly.client import fastly, is_mock_mode, mock_response
+from backend.core.rollups.security_dims import fetch_verified_bots_paged
 
 
 def test_is_mock_mode_reads_env(monkeypatch):
@@ -1479,7 +1478,7 @@ class TestFormatCityLabel:
 
 import pytest
 
-from backend.provision import utils as pu
+import backend.provision.cli as pu
 
 # ── _highlight: regex-driven quote highlighting ──────────────────────────────
 
@@ -1664,23 +1663,20 @@ from pathlib import Path
 
 import pytest
 import structlog
-from backend.utils.active_requests import (
-    _reset_for_tests,
-    active_request_count,
-    decrement_active_requests,
-    increment_active_requests,
-    should_defer_cron,
-    yield_to_api,
-)
 from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
 
-from backend.core import query_registry
-from backend.core.metadata import base, pg_connection
+import backend.core.metadata.base as pg_connection
+import backend.core.request_telemetry as query_registry
+import backend.cron.scheduler as system_jobs
+import backend.utils.telemetry as active_requests
+import backend.utils.telemetry as log_throttle
+import backend.utils.telemetry as sqlite_profiler
+import backend.utils.telemetry as structlog_config
+import backend.utils.tunnel as _session_mod
+from backend.core.metadata import base
 from backend.core.rollups._common import parse_hour_token
-from backend.cron import decorators as system_jobs
-from backend.utils import active_requests, remote_access, sqlite_profiler, structlog_config, tunnel
-from backend.utils import telemetry as log_throttle
+from backend.utils import remote_access, tunnel
 from backend.utils.bounded_cache import BoundedTTLCache, CacheRegistry
 from backend.utils.date_utils import (
     _parse_dt,
@@ -1698,7 +1694,16 @@ from backend.utils.date_utils import (
     safe_iso,
     window_to_epoch,
 )
-from backend.utils.telemetry import _SQLITE_QUERIES, log_once_per
+from backend.utils.telemetry import (
+    _SQLITE_QUERIES,
+    _reset_for_tests,
+    active_request_count,
+    decrement_active_requests,
+    increment_active_requests,
+    log_once_per,
+    should_defer_cron,
+    yield_to_api,
+)
 from backend.utils.time_window import (
     _BANDS,
     ANCHOR_QUANTUM_SECONDS,
@@ -1711,14 +1716,13 @@ from backend.utils.time_window import (
     quantize_anchor,
     resolve_window,
 )
-from backend.utils.tunnel import manager as _session_mod
 
 ra = remote_access
 
 if hasattr(_session_mod, "MAX_TRACKED_IPS"):
     login_mod = _session_mod
 else:
-    from backend.utils.tunnel import rate_limiter as login_mod
+    import backend.utils.tunnel as login_mod
 
 ROOT = Path(__file__).resolve().parents[2]
 _NOW = datetime(2026, 6, 29, 12, 30, 45, tzinfo=UTC)
@@ -2456,7 +2460,7 @@ def test_should_defer_cron_lifecycle_and_starvation(monkeypatch, caplog):
     increment_active_requests()
     assert should_defer_cron("sync", "svc-A", max_defer_secs=0.01) is True
     time.sleep(0.02)
-    with caplog.at_level(logging.WARNING, logger="backend.utils.active_requests"):
+    with caplog.at_level(logging.WARNING, logger="backend.utils"):
         assert should_defer_cron("sync", "svc-A", max_defer_secs=0.01) is False
     assert ("sync", "svc-A") not in active_requests._defer_started_at
     assert any("active-request-gate" in r.getMessage() for r in caplog.records)
@@ -2691,7 +2695,7 @@ def test_system_jobs_status_recording():
     snap.pop("rdns")
     assert "rdns" in system_jobs.get_system_job_status()
 
-    with patch("backend.cron.decorators.iso_z_now", return_value="2026-05-15T12:30:45Z"):
+    with patch("backend.cron.scheduler.iso_z_now", return_value="2026-05-15T12:30:45Z"):
         system_jobs.record_job_run("bots", "success", 0.1)
     assert system_jobs.get_system_job_status()["bots"]["last_run_at"] == "2026-05-15T12:30:45Z"
 
@@ -2773,7 +2777,7 @@ def test_get_fos_s3_client_uses_region_endpoint():
     silently route eu-west-1 traffic to the US shard."""
     with (
         patch("boto3.client") as mock_boto,
-        patch("backend.core.fastly.utils.region_endpoint", return_value="eu-west-1.object.fastlystorage.app"),
+        patch("backend.core.fastly.client.region_endpoint", return_value="eu-west-1.object.fastlystorage.app"),
     ):
         fos_setup._get_fos_s3_client("k", "s", "eu-west-1")
 

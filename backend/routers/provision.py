@@ -19,10 +19,10 @@ from typing import Any
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
-from backend.core.fastly.rum_provisioning import validate_rum_custom_condition
-from backend.models._base import DEFAULT_ERROR_RESPONSES
+from backend.core.fastly.client import validate_rum_custom_condition
 from backend.models.admin import ProvisionService
 from backend.models.common import (
+    DEFAULT_ERROR_RESPONSES,
     CheckFosRequest,
     NgwafWorkspaceCreateRequest,
     NgwafWorkspaceSetResponse,
@@ -268,8 +268,8 @@ def provision_teardown(req: Request, body: ProvisionTeardownRequest | None = Non
     token, service_id = body.token, body.service_id
     from backend import config as svcconfig
     from backend.core import duckdb as _db
+    from backend.core.vcl_generator import validate_destructive_token
     from backend.provision import _sync_crontab, perform_teardown
-    from backend.utils.fastly_auth import validate_destructive_token
 
     state = None
     svc_cfg = svcconfig.load_config(service_id) if service_id else None
@@ -648,8 +648,8 @@ def provision_terraform_export(body: ProvisionConfigRequest):
 @provision_router.post("/ingest", response_model=ProvisionIngestResponse, response_model_exclude_unset=True)
 def provision_ingest(payload: ProvisionConfigRequest):
     from backend import config as svcconfig
+    from backend.core.vcl_generator import validate_destructive_token
     from backend.provision import ensure_fos_access_key, find_fos_key, parse_period, write_service_config
-    from backend.utils.fastly_auth import validate_destructive_token
     from backend.utils.pop_utils import fetch_pop_locations
 
     body: dict[str, Any] = payload.model_dump(exclude_none=False)
@@ -922,7 +922,7 @@ def _require_ngwaf_token(
     missing_message: str = "A Fastly API token is required.",
 ) -> str:
     """Resolve and validate a caller-supplied Fastly token for NGWAF operations."""
-    from backend.utils.fastly_auth import validate_destructive_token
+    from backend.core.vcl_generator import validate_destructive_token
 
     if authorization and authorization.lower().startswith("bearer "):
         resolved = authorization[len("bearer ") :].strip()

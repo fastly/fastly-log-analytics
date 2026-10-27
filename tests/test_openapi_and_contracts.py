@@ -202,7 +202,7 @@ def test_export_downloads_declare_their_body_in_openapi():
 
 
 def test_custom_fields_export_file_matches_import_body():
-    from backend.models.provision import CustomFieldsExportFile, CustomFieldsImportBody
+    from backend.models.common import CustomFieldsExportFile, CustomFieldsImportBody
 
     assert (
         CustomFieldsExportFile.model_json_schema()["properties"]
@@ -373,8 +373,7 @@ def test_dashboard_aggregates_contract(seeded_con):
     minus the explicit telemetry allowlist. Pinned because losing this
     would let a repo refactor silently drop a field the FE renders
     (the regression mode of the `window_total_requests` bug)."""
-    from backend.models.dashboard import AggregatesResponse
-
+    from backend.models.analytics import AggregatesResponse
     from backend.repositories.dashboard import _dashboard_cache, get_aggregates
 
     _dashboard_cache.clear()
@@ -401,8 +400,7 @@ def test_insights_get_insights_contract(seeded_con):
     ``InsightsResponse``, so Pydantic silently stripped it and the FE
     saw `undefined`. The fix was to add it to the model — this test
     keeps it from regressing."""
-    from backend.models.insights import InsightsResponse
-
+    from backend.models.analytics import InsightsResponse
     from backend.repositories.insights import _insights_cache, get_insights
 
     _insights_cache.clear()
@@ -416,8 +414,7 @@ def test_insights_get_insights_contract(seeded_con):
 
 def test_origin_get_summary_contract(seeded_con):
     """`get_summary` return keys must match `OriginSummaryResponse`."""
-    from backend.models.origin import OriginSummaryResponse
-
+    from backend.models.analytics import OriginSummaryResponse
     from backend.repositories.origin import get_summary
 
     result = get_summary(seeded_con, _src, None, None, {})
@@ -429,8 +426,7 @@ def test_origin_get_summary_contract(seeded_con):
 
 def test_origin_get_timeseries_contract(seeded_con):
     """`get_timeseries` return keys must match `OriginTimeseriesResponse`."""
-    from backend.models.origin import OriginTimeseriesResponse
-
+    from backend.models.analytics import OriginTimeseriesResponse
     from backend.repositories.origin import get_timeseries
 
     result = get_timeseries(seeded_con, _src, None, None, {})
@@ -443,8 +439,7 @@ def test_origin_get_timeseries_contract(seeded_con):
 def test_performance_aggregates_contract(seeded_con):
     """`get_performance_aggregates` return keys must match
     `PerformanceAggregatesResponse`."""
-    from backend.models.performance import PerformanceAggregatesResponse
-
+    from backend.models.analytics import PerformanceAggregatesResponse
     from backend.repositories.performance import get_performance_aggregates
 
     result = get_performance_aggregates(seeded_con, _src, None, None, {})
@@ -457,8 +452,7 @@ def test_performance_aggregates_contract(seeded_con):
 def test_security_aggregates_contract(seeded_con):
     """`get_security_aggregates` return keys must match
     `SecurityAggregatesResponse`."""
-    from backend.models.security import SecurityAggregatesResponse
-
+    from backend.models.analytics import SecurityAggregatesResponse
     from backend.repositories.security import get_security_aggregates
 
     result = get_security_aggregates(seeded_con, _src, None, None, {})
@@ -470,8 +464,7 @@ def test_security_aggregates_contract(seeded_con):
 
 def test_network_health_contract(seeded_con):
     """`get_health` return keys must match `NetworkHealthResponse`."""
-    from backend.models.network import NetworkHealthResponse
-
+    from backend.models.analytics import NetworkHealthResponse
     from backend.repositories.network import get_health
 
     result = get_health(lambda: seeded_con, _src, None, None, {})
@@ -503,8 +496,7 @@ def _check_scoring_keys(produced: dict, model_cls, label: str):
 
 
 def test_scoring_top_flagged_contract():
-    from backend.models.session_scoring import ScoringTopFlaggedResponse, ScoringTopFlaggedRow
-
+    from backend.models.analytics import ScoringTopFlaggedResponse, ScoringTopFlaggedRow
     from backend.routers import session_scoring as ss
 
     ss._analytics_cache.clear()
@@ -524,33 +516,31 @@ def test_scoring_top_flagged_contract():
             "country": "US",
         }
     ]
-    with _patch("backend.repositories.session_scoring.query_logs", return_value=rows):
+    with _patch("backend.repositories.sessions.query_logs", return_value=rows):
         result = ss.scoring_top_flagged(request=_admin_request(), service_id="csvc", since_hours=24, limit=50)
     _check_scoring_keys(result, ScoringTopFlaggedResponse, "scoring.top_flagged")
     _check_no_dropped_keys(result["rows"][0], ScoringTopFlaggedRow, "scoring.top_flagged[row]")
 
 
 def test_scoring_score_distribution_contract():
-    from backend.models.session_scoring import ScoringDistributionRow, ScoringScoreDistributionResponse
-
+    from backend.models.analytics import ScoringDistributionRow, ScoringScoreDistributionResponse
     from backend.routers import session_scoring as ss
 
     ss._analytics_cache.clear()
     rows = [{"hour": "2026-06-01T10:00:00+00:00", "bucket": "75-100", "count": 5}]
-    with _patch("backend.repositories.session_scoring.query_logs", return_value=rows):
+    with _patch("backend.repositories.sessions.query_logs", return_value=rows):
         result = ss.scoring_score_distribution(request=_admin_request(), service_id="csvc", since_hours=24)
     _check_scoring_keys(result, ScoringScoreDistributionResponse, "scoring.score_distribution")
     _check_no_dropped_keys(result["rows"][0], ScoringDistributionRow, "scoring.score_distribution[row]")
 
 
 def test_scoring_compliance_breakdown_contract():
-    from backend.models.session_scoring import ScoringComplianceBreakdownResponse, ScoringComplianceRow
-
+    from backend.models.analytics import ScoringComplianceBreakdownResponse, ScoringComplianceRow
     from backend.routers import session_scoring as ss
 
     ss._analytics_cache.clear()
     rows = [{"hour": "2026-06-01T10:00:00+00:00", "compliance": "ok", "count": 200}]
-    with _patch("backend.repositories.session_scoring.query_logs", return_value=rows):
+    with _patch("backend.repositories.sessions.query_logs", return_value=rows):
         result = ss.scoring_compliance_breakdown(request=_admin_request(), service_id="csvc", since_hours=24)
     _check_scoring_keys(result, ScoringComplianceBreakdownResponse, "scoring.compliance_breakdown")
     _check_no_dropped_keys(result["rows"][0], ScoringComplianceRow, "scoring.compliance_breakdown[row]")
@@ -560,8 +550,7 @@ def test_scoring_latency_timeseries_contract():
     """DICT-01: the latency rows carry the column-dependent percentile fields
     only on re-provisioned services — the maximal row must be a subset of
     ScoringLatencyRow so the FE useScorerTimeseries types stay complete."""
-    from backend.models.session_scoring import ScoringLatencyRow, ScoringLatencyTimeseriesResponse
-
+    from backend.models.analytics import ScoringLatencyRow, ScoringLatencyTimeseriesResponse
     from backend.routers import session_scoring as ss
 
     ss._analytics_cache.clear()
@@ -579,7 +568,7 @@ def test_scoring_latency_timeseries_contract():
     ]
     cols = {"edge_score", "edge_score_reason", "edge_score_rtt_us", "edge_score_exec_us"}
     with (
-        _patch("backend.repositories.session_scoring.query_logs", return_value=rows),
+        _patch("backend.repositories.sessions.query_logs", return_value=rows),
         _patch.object(ss, "_table_columns", lambda sid: cols),
     ):
         result = ss.scoring_latency_timeseries(request=_admin_request(), service_id="csvc", since_hours=24)
@@ -588,13 +577,12 @@ def test_scoring_latency_timeseries_contract():
 
 
 def test_scoring_health_contract():
-    from backend.models.session_scoring import (
+    from backend.models.analytics import (
         ScoringHealthResponse,
         ScoringLatencySnapshot,
         ScoringMatrixStaleness,
         ScoringReasonCount,
     )
-
     from backend.routers import session_scoring as ss
 
     ss._analytics_cache.clear()
@@ -630,9 +618,9 @@ def test_scoring_health_contract():
         "edge_score_exec_us",
     }
     with (
-        _patch("backend.repositories.session_scoring.query_logs", return_value=agg),
+        _patch("backend.repositories.sessions.query_logs", return_value=agg),
         _patch.object(ss, "_table_columns", lambda sid: cols),
-        _patch("backend.routers.session_scoring_admin.l2_enforce_readiness_block", lambda sid: {"enabled": False}),
+        _patch("backend.routers.session_scoring.l2_enforce_readiness_block", lambda sid: {"enabled": False}),
     ):
         result = ss.scoring_health(request=_admin_request(), service_id="csvc", since_hours=24)
     _check_scoring_keys(result, ScoringHealthResponse, "scoring.health")
@@ -644,18 +632,17 @@ def test_scoring_health_contract():
 def test_scoring_evaluation_contract():
     """Exercise the scored branch (the maximal key set: auc / passed /
     threshold / default_min_auc / n_reconstructed / n_labels_total)."""
-    from backend.models.session_scoring import ScoringEvaluationResponse
-
+    from backend.models.analytics import ScoringEvaluationResponse
     from backend.routers import session_scoring as ss
 
     ss._analytics_cache.clear()
     result_obj = types.SimpleNamespace(n_good=5, n_bad=5, auc=0.9, passed=True, pass_threshold=0.7)
     with (
-        _patch("backend.scoring.labels.counts_by_label", return_value={"good": 5, "bad": 5, "neutral": 1}),
-        _patch("backend.scoring.labels.list_labels", return_value=[{"id": "1", "label": "good", "sid": "s1"}]),
+        _patch("backend.scoring.counts_by_label", return_value={"good": 5, "bad": 5, "neutral": 1}),
+        _patch("backend.scoring.list_labels", return_value=[{"id": "1", "label": "good", "sid": "s1"}]),
         _patch.object(ss, "_load_matrix", lambda sid: {"version": "v9", "transitions": {}}),
         _patch.object(ss, "_reconstruct_labeled_sessions", lambda sid, labels: [({"max_edge_score": 90}, "bad")]),
-        _patch("backend.scoring.evaluate.evaluate_from_persisted_scores", return_value=result_obj),
+        _patch("backend.scoring.evaluate_from_persisted_scores", return_value=result_obj),
         _patch("backend.config.load_config", return_value={"scoring": {"matrix_version": "v8"}}),
     ):
         result = ss.scoring_evaluation(service_id="csvc")
@@ -664,15 +651,14 @@ def test_scoring_evaluation_contract():
 
 def test_scoring_curves_contract():
     """Exercise the scored branch (roc / pr / auc / average_precision)."""
-    from backend.models.session_scoring import ScoringCurvePoint, ScoringCurvesResponse
-
+    from backend.models.analytics import ScoringCurvePoint, ScoringCurvesResponse
     from backend.routers import session_scoring as ss
 
     ss._analytics_cache.clear()
     sessions = [({"max_edge_score": 90}, "bad"), ({"max_edge_score": 5}, "good")]
     with (
-        _patch("backend.scoring.labels.counts_by_label", return_value={"good": 5, "bad": 5}),
-        _patch("backend.scoring.labels.list_labels", return_value=[{"id": "1", "label": "good", "sid": "s1"}]),
+        _patch("backend.scoring.counts_by_label", return_value={"good": 5, "bad": 5}),
+        _patch("backend.scoring.list_labels", return_value=[{"id": "1", "label": "good", "sid": "s1"}]),
         _patch.object(ss, "_reconstruct_labeled_sessions", lambda sid, labels: sessions),
     ):
         result = ss.scoring_curves(service_id="csvc")
@@ -684,8 +670,7 @@ def test_scoring_curves_contract():
 
 
 def test_scoring_threshold_preview_contract():
-    from backend.models.session_scoring import ScoringThresholdBucket, ScoringThresholdPreviewResponse
-
+    from backend.models.analytics import ScoringThresholdBucket, ScoringThresholdPreviewResponse
     from backend.routers import session_scoring as ss
 
     ss._analytics_cache.clear()
@@ -700,9 +685,9 @@ def test_scoring_threshold_preview_contract():
         }
     ]
     with (
-        _patch("backend.repositories.session_scoring.query_logs", return_value=agg),
-        _patch("backend.scoring.labels.list_labels", return_value=[{"sid": "s1", "label": "bad"}]),
-        _patch("backend.scoring.labels.counts_by_label", return_value={"good": 5, "bad": 5}),
+        _patch("backend.repositories.sessions.query_logs", return_value=agg),
+        _patch("backend.scoring.list_labels", return_value=[{"sid": "s1", "label": "bad"}]),
+        _patch("backend.scoring.counts_by_label", return_value={"good": 5, "bad": 5}),
     ):
         result = ss.scoring_threshold_preview(request=_admin_request(), service_id="csvc", threshold=75, since_hours=24)
     _check_scoring_keys(result, ScoringThresholdPreviewResponse, "scoring.threshold_preview")
@@ -713,9 +698,8 @@ def test_scoring_threshold_preview_contract():
 def test_scoring_analytics_composite_contract():
     """Admin path includes all five analyst-safe sub-keys plus the two
     admin-only evaluation blocks — all must be declared on the composite."""
-    import backend.routers.session_scoring_admin as ss_admin
-    from backend.models.session_scoring import ScoringAnalyticsResponse
-
+    import backend.routers.session_scoring as ss_admin
+    from backend.models.analytics import ScoringAnalyticsResponse
     from backend.routers import session_scoring as ss
 
     ss._analytics_cache.clear()

@@ -505,7 +505,7 @@ def upload_rum_tracker_js(
             "skipped": bool (present and True only when readiness failed),
         }
     """
-    from backend.provision.utils import info, ok, warn
+    from backend.provision.cli import info, ok, warn
 
     cfg = svcconfig.load_config(service_id)
     if not cfg:
@@ -648,7 +648,7 @@ def delete_rum_tracker_js(
     status_cb=None,
 ) -> None:
     """Delete rum-tracker.js from FOS bucket (cleanup on disable)."""
-    from backend.provision.utils import info, ok, warn
+    from backend.provision.cli import info, ok, warn
 
     cfg = svcconfig.load_config(service_id)
     if not cfg:
@@ -762,7 +762,7 @@ async def download_and_upload_faro(
                 guard above skipped the config write),
         }
     """
-    from backend.provision.utils import info, ok, warn
+    from backend.provision.cli import info, ok, warn
 
     cfg = svcconfig.load_config(service_id)
     if not cfg:
@@ -916,7 +916,7 @@ async def cleanup_old_faro_versions(service_id: str, *, keep_current: bool = Tru
     (listing error, transient FOS blip) must never surface to the caller —
     it would otherwise turn a successful upgrade into a reported failure.
     """
-    from backend.provision.utils import info, ok, warn
+    from backend.provision.cli import info, ok, warn
 
     try:
         cfg = svcconfig.load_config(service_id)

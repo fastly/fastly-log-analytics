@@ -303,7 +303,7 @@ class _Pool:
 
         # Outside lock: view rebind / fresh build may take seconds on S3/DuckLake I/O.
         if reused_con is not None:
-            from backend.core.storage._ducklake import _ducklake_attach
+            from backend.core.storage._core import _ducklake_attach
 
             if not _ducklake_attach(reused_con, src, read_only=True):
                 self._discard(reused_con)
@@ -427,7 +427,7 @@ class _Pool:
         return fp
 
     def _current_view_fp(self) -> Any:
-        from backend.core.storage import view as storage_view
+        from backend.core.storage import _core as storage_view
 
         if self.service_key.endswith("::rum"):
             v = self._strip_view_timing(storage_view._view_cache.get(f"{self.service_key}::client_vitals"))
@@ -438,7 +438,7 @@ class _Pool:
     def _prepare_checkout(self, con: duckdb.DuckDBPyConnection, src: dict) -> duckdb.DuckDBPyConnection:
         """Re-validate ``_view_cache`` fingerprint + buffer mtime before handing ``con`` out."""
         try:
-            from backend.core.storage import view as storage_view
+            from backend.core.storage import _core as storage_view
 
             current = self._current_view_fp()
             if (
@@ -461,7 +461,7 @@ class _Pool:
 
     def warm_idle(self, src: dict) -> None:
         """Rebind every idle connection to the latest cached view (drain-then-requeue on LIFO)."""
-        from backend.core.storage import view as storage_view
+        from backend.core.storage import _core as storage_view
 
         drained: list[duckdb.DuckDBPyConnection] = []
         with self._cond:
@@ -650,7 +650,7 @@ def checkout_connection(
 def _instrument(raw_con, *, service_key: str | None):
     """Wrap a raw DuckDB connection in the live-query monitor proxy (fail-open)."""
     try:
-        from backend.core.query_instrumentation import InstrumentedDuckDBConnection
+        from backend.core.request_telemetry import InstrumentedDuckDBConnection
 
         return InstrumentedDuckDBConnection(raw_con, service_id=service_key)
     except Exception:

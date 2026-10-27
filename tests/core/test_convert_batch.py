@@ -31,7 +31,6 @@ from unittest.mock import MagicMock, patch
 
 import duckdb
 import pytest
-from backend.core.metadata.quarantine import list_quarantine_evidence
 from hypothesis import HealthCheck, settings
 from hypothesis import strategies as st
 from hypothesis.stateful import Bundle, RuleBasedStateMachine, consumes, initialize, invariant, rule
@@ -61,9 +60,9 @@ from tests._helpers.ledger import (
 )
 from tests._helpers.sources import make_source
 
+import backend.core.metadata as metadata_db
 from backend.core import duckdb as _ddb
 from backend.core import ingest
-from backend.core import metadata as metadata_db
 from backend.core.ingest import (
     _compute_incremental_start_after,
     _delete_objects_robust,
@@ -79,6 +78,7 @@ from backend.core.ingest import (
 from backend.core.log_fields import LOG_FIELD_CATALOG
 from backend.core.metadata import base as metadata_base
 from backend.core.metadata.base import get_con
+from backend.core.metadata.ingest_log import list_quarantine_evidence
 from tests.core.test_ingest_discovery import (  # reuse fixture helpers
     _install_mock_fos,
     _S3RewritingConn,
@@ -382,7 +382,7 @@ def test_convert_batch_downloads_outside_admission_lock(tmp_path):
         return got, {v: k for k, v in got.items()}
 
     with _batch_env(service_id, tmp_path, _download):
-        with patch("backend.core.storage._ducklake.ducklake_write_admission", _tracking_admission):
+        with patch("backend.core.storage._core.ducklake_write_admission", _tracking_admission):
             summary = convert_batch_objects(service_id, keys, "w-dl")
 
     assert summary["committed"] == 4, summary
@@ -410,7 +410,7 @@ def test_convert_batch_coalesces_cron_run_sse_publish_to_once_per_originating_ru
     ``convert_batch_objects`` must aggregate all N object outcomes into
     ``cron_runs`` and publish ``cron_run_changed`` at most ONCE per originating
     run — never once per file (which emitted up to 50 SSE events in ~1.3s)."""
-    from backend.core import metadata as metadata_db
+    import backend.core.metadata as metadata_db
 
     service_id = "test-batch-sse-coalesce-svc"
     con, cur = _clear_ledger(service_id)
@@ -436,7 +436,7 @@ def test_convert_batch_coalesces_cron_run_sse_publish_to_once_per_originating_ru
     fos.head_object.side_effect = Exception("An error occurred (404) when calling HeadObject: Not Found")
     with (
         _batch_env(service_id, tmp_path, _download_stub(s3_map), fos=fos),
-        patch("backend.core.metadata.cron_log._publish_cron_run_change") as mock_publish,
+        patch("backend.core.metadata.usage_log._publish_cron_run_change") as mock_publish,
     ):
         summary = convert_batch_objects(service_id, keys, "w-sse")
 
@@ -458,7 +458,7 @@ def test_convert_batch_coalesces_cron_run_sse_publish_to_once_per_originating_ru
         mock_publish.assert_not_called()
     with (
         _batch_env(service_id, tmp_path, _download_stub(s3_map), fos=fos),
-        patch("backend.core.metadata.cron_log._publish_cron_run_change") as replay_publish,
+        patch("backend.core.metadata.usage_log._publish_cron_run_change") as replay_publish,
     ):
         replay = convert_batch_objects(service_id, keys, "w-sse-replay")
     assert replay["committed"] == 0
@@ -959,7 +959,7 @@ def test_convert_object_commits_even_when_the_quarantine_check_blows_up(tmp_path
     local = _write_ndjson(local_path, [{"timestamp": "2026-08-27T15:06:00Z", "url": "/a"}])
     with _convert_env(tmp_path, _download_stub({f"s3://{BUCKET}/{object_key}": local})) as attach:
         with patch(
-            "backend.core.quarantine.capture_evidence",
+            "backend.core.metadata.ingest_log.capture_evidence",
             return_value={"id": 0, "cap_evictions": 0, "quarantine_capture_failures": 1},
         ):
             local_path.write_text('{"timestamp":"2026-08-27T15:06:00Z","url":"/a"}\n{"url":"/bad"}\n')
@@ -1131,7 +1131,7 @@ def test_quarantine_convert_corrupt_lines_records_a_truncated_line(tmp_path):
     fos = MagicMock()
     con = duckdb.connect()
 
-    with patch("backend.core.quarantine.capture_evidence") as capture:
+    with patch("backend.core.metadata.ingest_log.capture_evidence") as capture:
         capture.return_value = {"id": 1, "cap_evictions": 0, "quarantine_capture_failures": 0}
         result = _quarantine_convert_corrupt_lines(con, fos, SRC, _read_expr(str(local)), str(local), object_key)
     con.close()
@@ -1153,7 +1153,7 @@ def test_quarantine_convert_corrupt_lines_records_a_truncated_line(tmp_path):
 
 
 def test_request_worker_quarantine_captures_exact_line_bytes_without_fos_upload(tmp_path, monkeypatch):
-    from backend.core import quarantine
+    import backend.core.metadata.ingest_log as quarantine
 
     local = tmp_path / "mixed.json"
     valid_line = b'{"timestamp":"2026-08-27T15:08:00Z","url":"/ok"}\n'
@@ -1272,7 +1272,7 @@ def test_quarantine_convert_corrupt_gzip_captures_the_original_container_bytes(t
     con.execute.return_value.fetchone.return_value = (0, 1)
     key = "raw/request/year=2026/month=08/day=27/hour=15/minute=12/broken.json.gz"
 
-    with patch("backend.core.quarantine.capture_evidence") as capture:
+    with patch("backend.core.metadata.ingest_log.capture_evidence") as capture:
         capture.return_value = {"cap_evictions": 1, "quarantine_capture_failures": 0}
         result = _quarantine_convert_corrupt_lines(con, MagicMock(), SRC, "ignored", str(local), key)
 
@@ -1753,7 +1753,7 @@ _INGEST_WRAPPER_SERVICE_ID = "test-ingest-task-wrappers"
 
 
 def _depths(depth: int, ok: bool = True):
-    return patch("backend.celery_status.celery_queue_depths", return_value=({"q.ingest": depth}, ok))
+    return patch("backend.celery_app.celery_queue_depths", return_value=({"q.ingest": depth}, ok))
 
 
 @pytest.mark.parametrize(
@@ -1835,7 +1835,7 @@ def test_redispatch_pending_skip_conditions() -> None:
         assert ingest._redispatch_pending("svc", [], ["a"], dispatch, "") == (0, True)
     with _depths(0, ok=False):
         assert ingest._redispatch_pending("svc", ["a"], [], dispatch, "RUM ") == (0, False)
-    with patch("backend.celery_status.celery_queue_depths", side_effect=RuntimeError("boom")):
+    with patch("backend.celery_app.celery_queue_depths", side_effect=RuntimeError("boom")):
         assert ingest._redispatch_pending("svc", ["a"], [], dispatch, "") == (0, False)
     assert ingest._redispatch_pending("svc", [], [], dispatch, "") == (0, True)
     dispatch.assert_not_called()
@@ -1872,7 +1872,7 @@ def test_sweep_dispatches_each_pending_key_once_with_5000_rows(sweep_name: str, 
         patch("backend.core.ingest.list_fos_files", side_effect=_no_files),
         patch("backend.core.ingest.discover_prefix", return_value=0),
         patch("backend.core.ingest.discover_rum_prefix", return_value=0),
-        patch("backend.celery_status.celery_queue_depths", return_value=({"q.ingest": 0}, True)),
+        patch("backend.celery_app.celery_queue_depths", return_value=({"q.ingest": 0}, True)),
         patch(f"backend.core.ingest.{delay_name}.delay") as delay,
     ):
         summary = getattr(ingest, sweep_name)(service_id)

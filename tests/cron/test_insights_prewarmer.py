@@ -21,8 +21,8 @@ import logging
 from unittest.mock import MagicMock
 
 import pytest
-from backend.core.metadata.cron_log import CronLeaseHeldError
 
+from backend.core.metadata.usage_log import CronLeaseHeldError
 from backend.cron.jobs import insights_prewarmer
 
 
@@ -465,7 +465,7 @@ def test_run_insights_prewarmer_defers_when_active_requests_present(monkeypatch)
     """When active requests are executing on the dashboard, prewarmer defers to avoid DuckDB contention."""
     src = {"name": "svc-1", "service_id": "svc-1"}
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: src)
-    monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda task, sid: True)
+    monkeypatch.setattr("backend.utils.telemetry.should_defer_cron", lambda task, sid: True)
 
     started_runs = []
     monkeypatch.setattr("backend.core.duckdb.start_cron_run", lambda s, t: started_runs.append((s, t)))
@@ -480,7 +480,7 @@ def test_run_insights_prewarmer_emits_progress_and_finalizes_duration(monkeypatc
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: src)
     if hasattr(insights_prewarmer, "record_insights_request"):
         insights_prewarmer.record_insights_request("svc-1")
-    monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda task, sid: False)
+    monkeypatch.setattr("backend.utils.telemetry.should_defer_cron", lambda task, sid: False)
     monkeypatch.setattr("backend.core.duckdb.start_cron_run", lambda s, t: 99)
     monkeypatch.setattr("backend.config.get_status", lambda name: {})
     monkeypatch.setattr("backend.utils.time_window.pick_insights_default", lambda h: (1, 168), raising=False)
@@ -500,9 +500,9 @@ def test_run_insights_prewarmer_emits_progress_and_finalizes_duration(monkeypatc
     prog_events = []
     finalized = []
 
-    monkeypatch.setattr("backend.cron_progress.cleanup_progress_and_reap", lambda: None)
-    monkeypatch.setattr("backend.cron_progress.start_progress", lambda rid, **kw: prog_started.append((rid, kw)))
-    monkeypatch.setattr("backend.cron_progress.end_progress", lambda rid: prog_ended.append(rid))
+    monkeypatch.setattr("backend.cron.scheduler.cleanup_progress_and_reap", lambda: None)
+    monkeypatch.setattr("backend.cron.scheduler.start_progress", lambda rid, **kw: prog_started.append((rid, kw)))
+    monkeypatch.setattr("backend.cron.scheduler.end_progress", lambda rid: prog_ended.append(rid))
     monkeypatch.setattr(
         "backend.cron.scheduler._log_and_add_progress",
         lambda rid, sid, event, job_name=None: prog_events.append((rid, sid, job_name, event)),
@@ -554,7 +554,7 @@ def _mark_warm(service_id: str, age_s: float) -> None:
 
 
 def _start_ingest(run_id: int, service_id: str, task: str) -> None:
-    from backend.cron_progress import add_progress, start_progress
+    from backend.cron.scheduler import add_progress, start_progress
 
     start_progress(run_id, service_id=service_id, task=task)
     add_progress(run_id, {"type": "status", "message": "ingesting"})
@@ -585,7 +585,7 @@ def test_defers_tick_when_ingest_running_for_service(monkeypatch, stub_source, s
 def test_no_deferral_when_ingest_idle_or_other_service(monkeypatch, stub_source, stub_cron_run):
     """Ingest running for a DIFFERENT service, a finished ingest for this
     service, and a non-ingest job for this service must not block the warm."""
-    from backend.cron_progress import end_progress
+    from backend.cron.scheduler import end_progress
 
     get_insights_mock = MagicMock(return_value={})
     monkeypatch.setattr("backend.repositories.insights.get_insights", get_insights_mock)
@@ -607,7 +607,7 @@ def test_stale_progress_entry_does_not_defer(monkeypatch, stub_source, stub_cron
     a live ingest and must not hold the prewarmer off."""
     import time
 
-    from backend import cron_progress
+    import backend.cron.scheduler as cron_progress
 
     get_insights_mock = MagicMock(return_value={})
     monkeypatch.setattr("backend.repositories.insights.get_insights", get_insights_mock)
@@ -843,8 +843,7 @@ def test_demand_driven_idle_minutes_setting_and_env(monkeypatch, stub_source, st
 async def test_insights_router_records_request_timestamp(monkeypatch):
     """POST /api/insights records the service's request timestamp so the
     demand-driven prewarmer wakes up for that service."""
-    from backend.models.insights import InsightsRequest
-
+    from backend.models.analytics import InsightsRequest
     from backend.routers.insights import insights_endpoint
 
     insights_prewarmer._last_insights_request.clear()
@@ -993,7 +992,7 @@ def test_contract_local_safety_permitted_under_dev_no_crons():
         patch("backend.config.list_configs", return_value=[cfg]),
         patch("backend.core.duckdb.get_source_for_service", return_value=_fake_src("svc-dev-safe")),
         patch("backend.core.duckdb.is_configured", return_value=True),
-        patch("backend.high_scale.registry_bootstrap.get_high_scale_service_registry") as mock_hs_reg,
+        patch("backend.high_scale.ingest_controller.get_high_scale_service_registry") as mock_hs_reg,
     ):
         mock_hs_reg.return_value.resolve.return_value = None
         s._register_dev_local_safe_jobs()
@@ -1073,9 +1072,9 @@ from unittest.mock import patch
 import duckdb
 import pytest
 
+import backend.repositories.assets as alert_repo
 from backend.cron.jobs import metadata as metadata_job
 from backend.cron.scheduler import Scheduler
-from backend.repositories import alerts as alert_repo
 
 # ── Fixtures & Test Helpers ───────────────────────────────────────────────────
 
@@ -1161,7 +1160,7 @@ def test_contract_dev_mode_no_crons_skips_execution(monkeypatch):
 
     with (
         patch("backend.core.duckdb.get_source_for_service", mock_src),
-        patch("backend.repositories.alerts.get_alerts", mock_get_alerts),
+        patch("backend.repositories.assets.get_alerts", mock_get_alerts),
     ):
         metadata_job._run_service_alerts_evaluation("svc-alerts-contract")
 
@@ -1280,8 +1279,8 @@ def test_contract_politeness_deferral_when_active_requests_present():
 
     with (
         patch("backend.core.duckdb.get_source_for_service", return_value=src),
-        patch("backend.utils.active_requests.should_defer_cron", return_value=True) as mock_defer,
-        patch("backend.repositories.alerts.get_alerts", mock_get_alerts),
+        patch("backend.utils.telemetry.should_defer_cron", return_value=True) as mock_defer,
+        patch("backend.repositories.assets.get_alerts", mock_get_alerts),
         patch("backend.core.duckdb.get_connection", mock_get_conn),
         patch("backend.core.duckdb.log_cron_run", mock_log_cron),
     ):
@@ -1303,8 +1302,8 @@ def test_contract_early_exit_when_no_alerts_configured():
 
     with (
         patch("backend.core.duckdb.get_source_for_service", return_value=src),
-        patch("backend.utils.active_requests.should_defer_cron", return_value=False),
-        patch("backend.repositories.alerts.get_alerts", return_value=[]),
+        patch("backend.utils.telemetry.should_defer_cron", return_value=False),
+        patch("backend.repositories.assets.get_alerts", return_value=[]),
         patch("backend.core.duckdb.get_connection") as mock_conn,
         patch("backend.core.duckdb.log_cron_run", side_effect=lambda *a, **kw: log_calls.append((a, kw))),
     ):
@@ -1328,10 +1327,10 @@ def test_contract_early_exit_when_all_alerts_disabled():
 
     with (
         patch("backend.core.duckdb.get_source_for_service", return_value=src),
-        patch("backend.utils.active_requests.should_defer_cron", return_value=False),
-        patch("backend.repositories.alerts.get_alerts", return_value=alerts),
+        patch("backend.utils.telemetry.should_defer_cron", return_value=False),
+        patch("backend.repositories.assets.get_alerts", return_value=alerts),
         patch("backend.core.duckdb.get_connection") as mock_conn,
-        patch("backend.repositories.alerts.evaluate_alert") as mock_eval,
+        patch("backend.repositories.assets.evaluate_alert") as mock_eval,
         patch("backend.core.duckdb.log_cron_run", side_effect=lambda *a, **kw: log_calls.append((a, kw))),
     ):
         metadata_job._run_service_alerts_evaluation("svc-alerts-contract")
@@ -1367,7 +1366,7 @@ def test_contract_duckdb_metrics_evaluation_and_query_attribution(alert_db):
         tracked_queries.append((sql, category))
         return orig_track_query(con, sql, params, category)
 
-    with patch("backend.repositories.alerts.track_query", side_effect=recording_track_query):
+    with patch("backend.repositories.assets.track_query", side_effect=recording_track_query):
         fired, webhook_url, payload, max_ts = alert_repo.evaluate_alert(
             alert_db, src, alert, display_name="Test Service", service_id="svc_alerts_contract"
         )
@@ -1420,17 +1419,17 @@ def test_contract_resilience_per_alert_eval_failure_continues():
     fake_con = MagicMock()
     with (
         patch("backend.core.duckdb.get_source_for_service", return_value=src),
-        patch("backend.utils.active_requests.should_defer_cron", return_value=False),
-        patch("backend.repositories.alerts.get_alerts", return_value=alerts),
+        patch("backend.utils.telemetry.should_defer_cron", return_value=False),
+        patch("backend.repositories.assets.get_alerts", return_value=alerts),
         patch("backend.core.duckdb.get_connection", return_value=fake_con),
         patch("backend.core.duckdb.start_cron_run", return_value=101),
         patch("backend.core.duckdb.log_cron_run"),
-        patch("backend.repositories.alerts.evaluate_alert", side_effect=fake_eval),
-        patch("backend.repositories.alerts.update_last_triggered"),
-        patch("backend.state_sync.export_admin_state"),
-        patch("backend.cron_progress.start_progress"),
-        patch("backend.cron_progress.end_progress"),
-        patch("backend.cron_progress.cleanup_progress_and_reap"),
+        patch("backend.repositories.assets.evaluate_alert", side_effect=fake_eval),
+        patch("backend.repositories.assets.update_last_triggered"),
+        patch("backend.core.metadata.base.export_admin_state"),
+        patch("backend.cron.scheduler.start_progress"),
+        patch("backend.cron.scheduler.end_progress"),
+        patch("backend.cron.scheduler.cleanup_progress_and_reap"),
     ):
         metadata_job._run_service_alerts_evaluation("svc-alerts-contract")
 
@@ -1469,21 +1468,21 @@ def test_contract_two_phase_execution_timestamps_and_state_export_before_webhook
 
     with (
         patch("backend.core.duckdb.get_source_for_service", return_value=src),
-        patch("backend.utils.active_requests.should_defer_cron", return_value=False),
-        patch("backend.repositories.alerts.get_alerts", return_value=alerts),
+        patch("backend.utils.telemetry.should_defer_cron", return_value=False),
+        patch("backend.repositories.assets.get_alerts", return_value=alerts),
         patch("backend.core.duckdb.get_connection", return_value=fake_con),
         patch("backend.core.duckdb.start_cron_run", return_value=102),
         patch("backend.core.duckdb.log_cron_run"),
         patch(
-            "backend.repositories.alerts.evaluate_alert",
+            "backend.repositories.assets.evaluate_alert",
             return_value=(True, "https://webhook.example/hook", {"test": "payload"}, "2026-01-01T00:00:00Z"),
         ),
-        patch("backend.repositories.alerts.update_last_triggered", side_effect=mock_update),
-        patch("backend.state_sync.export_admin_state", side_effect=mock_export),
+        patch("backend.repositories.assets.update_last_triggered", side_effect=mock_update),
+        patch("backend.core.metadata.base.export_admin_state", side_effect=mock_export),
         patch("httpx.post", side_effect=mock_post),
-        patch("backend.cron_progress.start_progress"),
-        patch("backend.cron_progress.end_progress"),
-        patch("backend.cron_progress.cleanup_progress_and_reap"),
+        patch("backend.cron.scheduler.start_progress"),
+        patch("backend.cron.scheduler.end_progress"),
+        patch("backend.cron.scheduler.cleanup_progress_and_reap"),
     ):
         metadata_job._run_service_alerts_evaluation("svc-alerts-contract")
 
@@ -1535,21 +1534,21 @@ def test_contract_notification_dispatch_channel_payloads_and_timeouts():
 
     with (
         patch("backend.core.duckdb.get_source_for_service", return_value=src),
-        patch("backend.utils.active_requests.should_defer_cron", return_value=False),
-        patch("backend.repositories.alerts.get_alerts", return_value=alerts),
+        patch("backend.utils.telemetry.should_defer_cron", return_value=False),
+        patch("backend.repositories.assets.get_alerts", return_value=alerts),
         patch("backend.core.duckdb.get_connection", return_value=fake_con),
         patch("backend.core.duckdb.start_cron_run", return_value=103),
         patch("backend.core.duckdb.log_cron_run"),
         patch(
-            "backend.repositories.alerts.evaluate_alert",
+            "backend.repositories.assets.evaluate_alert",
             return_value=(True, "https://legacy.webhook.example/alert", payload, "2026-01-01T00:00:00Z"),
         ),
-        patch("backend.repositories.alerts.update_last_triggered"),
-        patch("backend.state_sync.export_admin_state"),
+        patch("backend.repositories.assets.update_last_triggered"),
+        patch("backend.core.metadata.base.export_admin_state"),
         patch("httpx.post", side_effect=fake_post),
-        patch("backend.cron_progress.start_progress"),
-        patch("backend.cron_progress.end_progress"),
-        patch("backend.cron_progress.cleanup_progress_and_reap"),
+        patch("backend.cron.scheduler.start_progress"),
+        patch("backend.cron.scheduler.end_progress"),
+        patch("backend.cron.scheduler.cleanup_progress_and_reap"),
     ):
         metadata_job._run_service_alerts_evaluation("svc-alerts-contract")
 
@@ -1613,21 +1612,21 @@ def test_contract_notification_failure_resilience_and_collection():
 
     with (
         patch("backend.core.duckdb.get_source_for_service", return_value=src),
-        patch("backend.utils.active_requests.should_defer_cron", return_value=False),
-        patch("backend.repositories.alerts.get_alerts", return_value=alerts),
+        patch("backend.utils.telemetry.should_defer_cron", return_value=False),
+        patch("backend.repositories.assets.get_alerts", return_value=alerts),
         patch("backend.core.duckdb.get_connection", return_value=fake_con),
         patch("backend.core.duckdb.start_cron_run", return_value=104),
         patch("backend.core.duckdb.log_cron_run", side_effect=lambda *a, **kw: log_calls.append((a, kw))),
         patch(
-            "backend.repositories.alerts.evaluate_alert",
+            "backend.repositories.assets.evaluate_alert",
             return_value=(True, "https://broken-legacy.example", {"test": 1}, "2026-01-01T00:00:00Z"),
         ),
-        patch("backend.repositories.alerts.update_last_triggered"),
-        patch("backend.state_sync.export_admin_state"),
+        patch("backend.repositories.assets.update_last_triggered"),
+        patch("backend.core.metadata.base.export_admin_state"),
         patch("httpx.post", side_effect=mock_post),
-        patch("backend.cron_progress.start_progress"),
-        patch("backend.cron_progress.end_progress"),
-        patch("backend.cron_progress.cleanup_progress_and_reap"),
+        patch("backend.cron.scheduler.start_progress"),
+        patch("backend.cron.scheduler.end_progress"),
+        patch("backend.cron.scheduler.cleanup_progress_and_reap"),
     ):
         metadata_job._run_service_alerts_evaluation("svc-alerts-contract")
 
@@ -1666,17 +1665,17 @@ def test_contract_status_warning_when_alert_triggers():
 
     with (
         patch("backend.core.duckdb.get_source_for_service", return_value=src),
-        patch("backend.utils.active_requests.should_defer_cron", return_value=False),
-        patch("backend.repositories.alerts.get_alerts", return_value=alerts),
+        patch("backend.utils.telemetry.should_defer_cron", return_value=False),
+        patch("backend.repositories.assets.get_alerts", return_value=alerts),
         patch("backend.core.duckdb.get_connection", return_value=fake_con),
         patch("backend.core.duckdb.start_cron_run", return_value=105),
         patch("backend.core.duckdb.log_cron_run", side_effect=lambda *a, **kw: log_calls.append((a, kw))),
-        patch("backend.repositories.alerts.evaluate_alert", side_effect=mock_eval),
-        patch("backend.repositories.alerts.update_last_triggered"),
-        patch("backend.state_sync.export_admin_state"),
-        patch("backend.cron_progress.start_progress"),
-        patch("backend.cron_progress.end_progress"),
-        patch("backend.cron_progress.cleanup_progress_and_reap"),
+        patch("backend.repositories.assets.evaluate_alert", side_effect=mock_eval),
+        patch("backend.repositories.assets.update_last_triggered"),
+        patch("backend.core.metadata.base.export_admin_state"),
+        patch("backend.cron.scheduler.start_progress"),
+        patch("backend.cron.scheduler.end_progress"),
+        patch("backend.cron.scheduler.cleanup_progress_and_reap"),
     ):
         metadata_job._run_service_alerts_evaluation("svc-alerts-contract")
 
@@ -1699,18 +1698,18 @@ def test_contract_status_success_when_no_alerts_trigger():
 
     with (
         patch("backend.core.duckdb.get_source_for_service", return_value=src),
-        patch("backend.utils.active_requests.should_defer_cron", return_value=False),
-        patch("backend.repositories.alerts.get_alerts", return_value=alerts),
+        patch("backend.utils.telemetry.should_defer_cron", return_value=False),
+        patch("backend.repositories.assets.get_alerts", return_value=alerts),
         patch("backend.core.duckdb.get_connection", return_value=fake_con),
         patch("backend.core.duckdb.start_cron_run", return_value=106),
         patch("backend.core.duckdb.log_cron_run", side_effect=lambda *a, **kw: log_calls.append((a, kw))),
         patch(
-            "backend.repositories.alerts.evaluate_alert",
+            "backend.repositories.assets.evaluate_alert",
             return_value=(False, None, None, None),
         ),
-        patch("backend.cron_progress.start_progress"),
-        patch("backend.cron_progress.end_progress"),
-        patch("backend.cron_progress.cleanup_progress_and_reap"),
+        patch("backend.cron.scheduler.start_progress"),
+        patch("backend.cron.scheduler.end_progress"),
+        patch("backend.cron.scheduler.cleanup_progress_and_reap"),
     ):
         metadata_job._run_service_alerts_evaluation("svc-alerts-contract")
 
@@ -1731,19 +1730,19 @@ def test_contract_status_error_on_unhandled_exception():
 
     with (
         patch("backend.core.duckdb.get_source_for_service", return_value=src),
-        patch("backend.utils.active_requests.should_defer_cron", return_value=False),
-        patch("backend.repositories.alerts.get_alerts", return_value=alerts),
+        patch("backend.utils.telemetry.should_defer_cron", return_value=False),
+        patch("backend.repositories.assets.get_alerts", return_value=alerts),
         patch("backend.core.duckdb.get_connection", return_value=fake_con),
         patch("backend.core.duckdb.start_cron_run", return_value=107),
         patch("backend.core.duckdb.log_cron_run", side_effect=lambda *a, **kw: log_calls.append((a, kw))),
         patch(
-            "backend.repositories.alerts.evaluate_alert",
+            "backend.repositories.assets.evaluate_alert",
             return_value=(True, None, None, "2026-01-01T00:00:00Z"),
         ),
-        patch("backend.repositories.alerts.update_last_triggered", side_effect=RuntimeError("Database I/O error")),
-        patch("backend.cron_progress.start_progress"),
-        patch("backend.cron_progress.end_progress"),
-        patch("backend.cron_progress.cleanup_progress_and_reap"),
+        patch("backend.repositories.assets.update_last_triggered", side_effect=RuntimeError("Database I/O error")),
+        patch("backend.cron.scheduler.start_progress"),
+        patch("backend.cron.scheduler.end_progress"),
+        patch("backend.cron.scheduler.cleanup_progress_and_reap"),
     ):
         metadata_job._run_service_alerts_evaluation("svc-alerts-contract")
 
@@ -1766,20 +1765,20 @@ def test_contract_progress_events_and_duration_finalization():
 
     with (
         patch("backend.core.duckdb.get_source_for_service", return_value=src),
-        patch("backend.utils.active_requests.should_defer_cron", return_value=False),
-        patch("backend.repositories.alerts.get_alerts", return_value=alerts),
+        patch("backend.utils.telemetry.should_defer_cron", return_value=False),
+        patch("backend.repositories.assets.get_alerts", return_value=alerts),
         patch("backend.core.duckdb.get_connection", return_value=fake_con),
         patch("backend.core.duckdb.start_cron_run", return_value=108),
         patch("backend.core.duckdb.log_cron_run"),
         patch(
-            "backend.repositories.alerts.evaluate_alert",
+            "backend.repositories.assets.evaluate_alert",
             return_value=(True, None, None, "2026-01-01T00:00:00Z"),
         ),
-        patch("backend.repositories.alerts.update_last_triggered"),
-        patch("backend.state_sync.export_admin_state"),
-        patch("backend.cron_progress.start_progress") as mock_start_prog,
-        patch("backend.cron_progress.end_progress") as mock_end_prog,
-        patch("backend.cron_progress.cleanup_progress_and_reap"),
+        patch("backend.repositories.assets.update_last_triggered"),
+        patch("backend.core.metadata.base.export_admin_state"),
+        patch("backend.cron.scheduler.start_progress") as mock_start_prog,
+        patch("backend.cron.scheduler.end_progress") as mock_end_prog,
+        patch("backend.cron.scheduler.cleanup_progress_and_reap"),
         patch(
             "backend.cron.jobs.metadata._log_and_add_progress",
             side_effect=lambda run_id, sid, job_name, event: progress_events.append(event),
@@ -1819,12 +1818,12 @@ def test_lease_held_skips_without_opening_duckdb_or_recording_a_row():
 
     with (
         patch("backend.core.duckdb.get_source_for_service", return_value=src),
-        patch("backend.utils.active_requests.should_defer_cron", return_value=False),
-        patch("backend.repositories.alerts.get_alerts", return_value=alerts),
+        patch("backend.utils.telemetry.should_defer_cron", return_value=False),
+        patch("backend.repositories.assets.get_alerts", return_value=alerts),
         patch("backend.core.duckdb.get_connection", get_conn),
         patch("backend.core.duckdb.start_cron_run", side_effect=CronLeaseHeldError("held")),
         patch("backend.core.duckdb.log_cron_run", side_effect=lambda *a, **kw: log_calls.append((a, kw))),
-        patch("backend.cron_progress.end_progress") as end_progress,
+        patch("backend.cron.scheduler.end_progress") as end_progress,
     ):
         metadata_job._run_service_alerts_evaluation("svc-alerts-contract")
 
@@ -1840,16 +1839,16 @@ def test_error_row_has_zero_counters_run_id_and_no_log_output():
 
     with (
         patch("backend.core.duckdb.get_source_for_service", return_value=src),
-        patch("backend.utils.active_requests.should_defer_cron", return_value=False),
-        patch("backend.repositories.alerts.get_alerts", return_value=alerts),
+        patch("backend.utils.telemetry.should_defer_cron", return_value=False),
+        patch("backend.repositories.assets.get_alerts", return_value=alerts),
         patch("backend.core.duckdb.get_connection", return_value=MagicMock()),
         patch("backend.core.duckdb.start_cron_run", return_value=108),
         patch("backend.core.duckdb.log_cron_run", side_effect=lambda *a, **kw: log_calls.append((a, kw))),
-        patch("backend.repositories.alerts.evaluate_alert", return_value=(True, None, None, "t")),
-        patch("backend.repositories.alerts.update_last_triggered", side_effect=RuntimeError("boom")),
-        patch("backend.cron_progress.start_progress"),
-        patch("backend.cron_progress.end_progress") as end_progress,
-        patch("backend.cron_progress.cleanup_progress_and_reap"),
+        patch("backend.repositories.assets.evaluate_alert", return_value=(True, None, None, "t")),
+        patch("backend.repositories.assets.update_last_triggered", side_effect=RuntimeError("boom")),
+        patch("backend.cron.scheduler.start_progress"),
+        patch("backend.cron.scheduler.end_progress") as end_progress,
+        patch("backend.cron.scheduler.cleanup_progress_and_reap"),
     ):
         metadata_job._run_service_alerts_evaluation("svc-alerts-contract")
 

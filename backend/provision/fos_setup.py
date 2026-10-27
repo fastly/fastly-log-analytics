@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import concurrent.futures
-import sys
 import threading
 import time
 from typing import Any
@@ -11,10 +10,6 @@ from typing import Any
 import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError
-
-_backend_pkg = sys.modules.get("backend")
-if _backend_pkg is not None and hasattr(_backend_pkg, "_MODULE_ALIASES"):
-    _backend_pkg._MODULE_ALIASES.pop("backend.provision.fos_setup", None)
 
 from backend.core.fastly.client import fastly, is_mock_mode, region_endpoint  # noqa: E402
 from backend.provision.cli import BOLD, _c, info, ok, warn  # noqa: E402

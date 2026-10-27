@@ -14,15 +14,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import starlette.datastructures
-from backend.core.query_registry import query_registry
-from backend.core.realtime.publisher import RealtimeMetricsPublisher
-from backend.core.realtime.publisher import publisher as rt_publisher
-from backend.core.realtime.transform import error_tick_payload
-from backend.core.share_db.settings import get_setting, set_setting
-from backend.deps import get_con, get_service_id, get_source, require_admin, require_service_access
-from backend.high_scale.archive_models import ServingWatermark
-from backend.scoring.labels import ALLOWED_LABELS
-from backend.utils.tunnel.manager import AnalystSession, get_tunnel_manager
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
@@ -30,35 +21,44 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 from starlette.middleware.base import BaseHTTPMiddleware
 
+import backend.core.metadata as metadata_db
+import backend.core.metadata.usage_log as _cron_log
+import backend.core.realtime as poller_mod
+import backend.models.analytics as m_scoring
+import backend.models.analytics as m_sec
+import backend.models.analytics as rum_models
+import backend.models.common as m_prov
+import backend.models.common as m_svc
+import backend.repositories.assets as _views_repo
+import backend.routers.session_scoring as scoring_admin
+import backend.scoring as _labels
+import backend.utils.telemetry as sqlite_profiler
 from backend import config as svcconfig
 from backend.core import duckdb, share_db
 from backend.core import log_fields as lf
-from backend.core import metadata as metadata_db
-from backend.core.metadata import cron_log as _cron_log
 from backend.core.metadata import usage_log
-from backend.core.realtime import poller as poller_mod
+from backend.core.realtime import RealtimeMetricsPublisher, error_tick_payload
+from backend.core.realtime import publisher as rt_publisher
+from backend.core.request_context import get_con, get_service_id, get_source, require_admin, require_service_access
+from backend.core.request_telemetry import query_registry
+from backend.core.share_db import get_setting, set_setting
 from backend.cron import scheduler as _sched
+from backend.high_scale.archive import ServingWatermark
 from backend.main import _APP_VERSION, app
 from backend.models import common as m_common
-from backend.models import provision as m_prov
-from backend.models import rum as rum_models
-from backend.models import security as m_sec
-from backend.models import services as m_svc
-from backend.models import session_scoring as m_scoring
-from backend.repositories import alerts as _views_repo
 from backend.repositories._base import _safe_table
 from backend.routers import alerts as alerts_router
 from backend.routers import bootstrap, share_admin
 from backend.routers import control_room as cr_mod
 from backend.routers import session_scoring as session_scoring_router
-from backend.routers import session_scoring_admin as scoring_admin
 from backend.routers.bootstrap import _bootstrap_sync, _compute_log_fields_catalog, _startup_stub_response
 from backend.routers.control_room import TAB_STUBS
 from backend.routers.services import core as services_core_router
-from backend.scoring import labels as _labels
-from backend.utils import sqlite_profiler, telemetry, tunnel
+from backend.scoring import ALLOWED_LABELS
+from backend.utils import telemetry, tunnel
 from backend.utils.remote_access import RemoteAccessMiddleware, _is_blocked_path
 from backend.utils.telemetry import set_page_load_id
+from backend.utils.tunnel import AnalystSession, get_tunnel_manager
 from tests._helpers.config_fakes import fake_mutate_config
 from tests._helpers.duckdb_fixtures import generate_mock_logs, insert_mock_logs
 from tests.conftest import MOCK_SERVICE_ID
@@ -340,7 +340,7 @@ def test_log_fields_catalog_handles_missing_config_gracefully(client):
 
 
 def test_log_fields_catalog_500s_on_exception(client):
-    with patch("backend.core.field_registry.get_catalog_for_api", side_effect=RuntimeError("oops")):
+    with patch("backend.core.log_fields.get_catalog_for_api", side_effect=RuntimeError("oops")):
         assert client.get("/api/log-fields/catalog").status_code == 500
 
 
@@ -385,7 +385,7 @@ def test_bootstrap_aligns_request_total_with_local_rows(client, tmp_path, monkey
         def __exit__(self, *args):
             pass
 
-    monkeypatch.setattr("backend.deps._ConnectionHolder", MockConnectionHolder)
+    monkeypatch.setattr("backend.core.request_context._ConnectionHolder", MockConnectionHolder)
     monkeypatch.setattr("backend.core.storage.execute_with_stale_view_retry", lambda *a, **kw: (800, None))
     mock_duckdb_con = MagicMock()
     mock_duckdb_con.execute.return_value.fetchone.side_effect = [(33000,), (None,)]
@@ -449,9 +449,9 @@ def test_bootstrap_header_badge_uses_live_sync_snapshot(client, tmp_path, monkey
     "patch_target,field,subkey",
     [
         ("backend.utils.tunnel.get_tunnel_manager", "share_banner", None),
-        ("backend.core.metadata.cron_log.get_cron_runs", "cron_runs_first_page", None),
-        ("backend.core.metadata.cron_log.latest_cron_per_task", "last_sync", None),
-        ("backend.scoring.labels.list_labels", "scoring_labels", None),
+        ("backend.core.metadata.usage_log.get_cron_runs", "cron_runs_first_page", None),
+        ("backend.core.metadata.usage_log.latest_cron_per_task", "last_sync", None),
+        ("backend.scoring.list_labels", "scoring_labels", None),
         ("backend.core.metadata.count_slow_queries", "ops_overview", "slow_queries_count"),
     ],
 )
@@ -480,9 +480,9 @@ def test_bootstrap_survives_simultaneous_optional_failures(client, tmp_path, mon
     monkeypatch.setattr(_views_repo, "get_views", lambda _sid: (_ for _ in ()).throw(RuntimeError("boom")))
     with (
         patch("backend.utils.tunnel.get_tunnel_manager", side_effect=RuntimeError("boom")),
-        patch("backend.core.metadata.cron_log.get_cron_runs", side_effect=RuntimeError("boom")),
-        patch("backend.core.metadata.cron_log.latest_cron_per_task", side_effect=RuntimeError("boom")),
-        patch("backend.scoring.labels.list_labels", side_effect=RuntimeError("boom")),
+        patch("backend.core.metadata.usage_log.get_cron_runs", side_effect=RuntimeError("boom")),
+        patch("backend.core.metadata.usage_log.latest_cron_per_task", side_effect=RuntimeError("boom")),
+        patch("backend.scoring.list_labels", side_effect=RuntimeError("boom")),
     ):
         resp = _get(client)
     assert resp.status_code == 200
@@ -724,7 +724,7 @@ async def _drive_sse_with_payload(monkeypatch, payload: dict) -> dict:
     test_publisher = RealtimeMetricsPublisher()
     test_publisher.bind_loop(asyncio.get_running_loop())
     monkeypatch.setattr(poller_mod.poller, "ensure_polling", lambda sid: None)
-    monkeypatch.setattr("backend.core.realtime.publisher.publisher", test_publisher)
+    monkeypatch.setattr(rt_publisher, "publisher", test_publisher)
 
     resp = await cr_mod.realtime_stream(request=_FakeRequest(disconnect_after=10), service_id=MOCK_SERVICE_ID)
     agen = resp.body_iterator
@@ -828,7 +828,7 @@ def test_fetch_seed_ticks_goes_through_fastly_rt_client(monkeypatch):
         return {"Timestamp": 1000, "Data": [{"aggregated": {}}]}
 
     monkeypatch.setattr("backend.core.fastly.client.fastly_rt", _fake_rt)
-    monkeypatch.setattr("backend.core.realtime.transform.transform_single_second", lambda point, ts: {"ts": ts})
+    monkeypatch.setattr("backend.core.realtime.transform_single_second", lambda point, ts: {"ts": ts})
     ticks = cr_mod._fetch_seed_ticks(MOCK_SERVICE_ID, count=5)
     assert calls == [("/v1/channel/cdn123/ts/h?limit=120", "tok")] and len(ticks) == 1
 
@@ -855,7 +855,7 @@ def test_realtime_seed_with_cached_ticks(admin_client, monkeypatch):
 def test_realtime_seed_with_fetch_fallback(admin_client, monkeypatch):
     monkeypatch.setattr(rt_publisher, "get_recent_ticks", lambda sid, count: [])
     monkeypatch.setattr(cr_mod, "_fetch_seed_ticks", lambda sid: [{"timestamp": "2026-07-07T00:01:00Z"}])
-    monkeypatch.setattr("backend.core.realtime.poller.poller.ensure_polling", lambda sid: None)
+    monkeypatch.setattr(poller_mod.poller, "ensure_polling", lambda sid: None)
     resp = admin_client.get(f"/api/services/{MOCK_SERVICE_ID}/realtime-seed", headers=_SVC_HDR)
     assert resp.status_code == 200 and resp.json()["ticks"] == [{"timestamp": "2026-07-07T00:01:00Z"}]
 
@@ -1028,7 +1028,7 @@ def _scope_403(resp) -> bool:
 @pytest.mark.security_regression
 def test_alerts_list_filters_to_analyst_scope_and_admin_sees_all(app_with_session):
     fake_alerts = [_fake_alert("a1", "svc-A"), _fake_alert("a2", "svc-B"), _fake_alert("a3", "svc-C")]
-    with patch("backend.repositories.alerts.get_alerts", return_value=fake_alerts), TestClient(app_with_session) as c:
+    with patch("backend.repositories.assets.get_alerts", return_value=fake_alerts), TestClient(app_with_session) as c:
         r = c.get("/api/alerts/", headers={"x-test-session-services": "svc-A,svc-B"})
         assert r.status_code == 200 and [a["id"] for a in r.json()["data"]] == ["a1", "a2"]
         r_admin = c.get("/api/alerts/")
@@ -1039,8 +1039,8 @@ def test_alerts_list_filters_to_analyst_scope_and_admin_sees_all(app_with_sessio
 @pytest.mark.parametrize(
     "path,patch_target",
     [
-        ("/api/alerts/svc-A", "backend.repositories.alerts.get_alerts"),
-        ("/api/views/svc-A", "backend.repositories.alerts.get_views"),
+        ("/api/alerts/svc-A", "backend.repositories.assets.get_alerts"),
+        ("/api/views/svc-A", "backend.repositories.assets.get_views"),
     ],
 )
 def test_alerts_and_views_service_scope_checks(app_with_session, path: str, patch_target: str):
@@ -1055,7 +1055,7 @@ def test_alerts_and_views_service_scope_checks(app_with_session, path: str, patc
 def test_views_list_admin_unrestricted(app_with_session):
     row = {"id": "v1", "service_id": "svc-anything", "name": "My view", "filters_json": "[]", "time_range_type": None}
     row |= {"start_time": None, "end_time": None, "page": None, "created_at": "2026-01-01 00:00:00"}
-    with patch("backend.repositories.alerts.get_views", return_value=[row]), TestClient(app_with_session) as c:
+    with patch("backend.repositories.assets.get_views", return_value=[row]), TestClient(app_with_session) as c:
         r = c.get("/api/views/svc-anything")
     assert r.status_code == 200 and r.json() == [row]
 
@@ -1080,7 +1080,7 @@ def test_alerts_and_views_create_rejects_unauthorized_analyst(app_with_session):
 def test_views_delete_rejects_unauthorized_analyst(app_with_session, view_exists: bool):
     """Finding 017: scope gate runs before any DB lookup so both existing and non-existent ids return 403."""
     view_row = {"id": "v-target", "service_id": "svc-B", "name": "n"} if view_exists else None
-    with patch("backend.repositories.alerts.get_view_by_id", return_value=view_row), TestClient(app_with_session) as c:
+    with patch("backend.repositories.assets.get_view_by_id", return_value=view_row), TestClient(app_with_session) as c:
         r = c.delete("/api/views/v-target?service_id=svc-B", headers={"x-test-session-services": "svc-A"})
     assert _scope_403(r), r.text
 
@@ -1130,7 +1130,7 @@ def test_scoring_labels_delete_scope_and_admin_bypass(app_with_session):
         )
     assert _scope_403(r_deny) and r_deny.json()["detail"]["service"] == "svc-B"
     with (
-        patch("backend.scoring.labels.delete_label", return_value={"id": "x", "service_id": "svc-B"}),
+        patch("backend.scoring.delete_label", return_value={"id": "x", "service_id": "svc-B"}),
         TestClient(app_with_session) as c,
     ):
         assert c.delete("/api/services/svc-B/scoring/labels/x").status_code != 403
@@ -1279,7 +1279,7 @@ def _audit_logs(client):
 
 
 def _storage_calendar(client):
-    from backend.deps import get_source
+    from backend.core.request_context import get_source
 
     app.dependency_overrides[get_source] = lambda: {"service_id": "service123", "name": "service123"}
     with patch(
@@ -1438,22 +1438,22 @@ def test_admin_bot_sources_rdns_and_duckdb_match_producer(client):
         with patch("backend.utils.bot_sources.refresh_all_sources", return_value=results):
             assert _body(client.post(path)) == {"ok": False, "sources": results, "updated_count": 1, "failed_count": 1}
     summary = {"resolved": 4, "errors": 1, "discovered": 7, "batch_limit": 100}
-    with patch("backend.utils.rdns_cache.enrich_batch", return_value=summary) as enrich:
+    with patch("backend.utils.bot_sources.enrich_batch", return_value=summary) as enrich:
         assert _body(client.post("/api/admin/rdns/enrich?limit=100")) == {"ok": True, "summary": summary}
     enrich.assert_called_once_with(limit=100)
 
     mb = 1024 * 1024
     with (
         patch("backend.core.duckdb.current_rss_bytes", return_value=100 * mb),
-        patch("backend.core.duckdb_recycle._recycle_rss_threshold_bytes", return_value=500 * mb),
+        patch("backend.cron.jobs.duckdb_recycle._recycle_rss_threshold_bytes", return_value=500 * mb),
     ):
         assert _body(client.post("/api/admin/duckdb/recycle")) == dict(
             ok=True, status="skipped", reason="RSS 100MB < threshold 500MB", rss_mb=100.0, threshold_mb=500.0
         )
     with (
         patch("backend.core.duckdb.current_rss_bytes", side_effect=[300 * mb, 200 * mb]),
-        patch("backend.core.duckdb_recycle._recycle_rss_threshold_bytes", return_value=500 * mb),
-        patch("backend.core.duckdb_recycle.recycle_once", return_value="manual_admin: recycled 1/1"),
+        patch("backend.cron.jobs.duckdb_recycle._recycle_rss_threshold_bytes", return_value=500 * mb),
+        patch("backend.cron.jobs.duckdb_recycle.recycle_once", return_value="manual_admin: recycled 1/1"),
     ):
         exp_recycled = {"ok": True, "status": "recycled", "detail": "manual_admin: recycled 1/1"}
         exp_recycled |= {"rss_before_mb": 300.0, "rss_after_mb": 200.0, "freed_mb": 100.0}
@@ -1470,13 +1470,13 @@ def test_ngwaf_share_purge_calendar_vcl_health_and_telemetry_match_producer(clie
         patch("backend.config.load_config", return_value={"service_id": "svc-n"}),
         patch("backend.config.get_ngwaf_workspace_id", return_value="ws-1"),
         patch("backend.cron.jobs.metadata._run_ngwaf_bot_sync"),
-        patch("backend.utils.ngwaf.get_cache_stats", return_value=stats),
+        patch("backend.core.rollups.security_dims.get_cache_stats", return_value=stats),
     ):
         exp_sync = {"ok": True, "service_id": "svc-n", "workspace_id": "ws-1", "stats": stats}
         assert _body(client.post("/api/admin/ngwaf/sync/svc-n")) == exp_sync
-    monkeypatch.setattr("backend.utils.ngwaf.get_cache_stats", lambda: dict(stats))
+    monkeypatch.setattr("backend.core.rollups.security_dims.get_cache_stats", lambda: dict(stats))
     assert _body(client.get("/api/admin/ngwaf/status")) == {"ok": True, **stats}
-    monkeypatch.setattr("backend.utils.rdns_cache.get_stats", lambda: {"entries": 4, "hit_rate": 0.5})
+    monkeypatch.setattr("backend.utils.bot_sources.get_stats", lambda: {"entries": 4, "hit_rate": 0.5})
     assert _body(client.get("/api/admin/rdns/stats")) == {"ok": True, "stats": {"entries": 4, "hit_rate": 0.5}}
     purge_stats = {"deleted_audit_logs": 3, "deleted_expired_invites": 1, "deleted_stale_sessions": 2}
     purge_stats |= {"deleted_claim_tokens": 0, "audit_retention_days": 90, "max_idle_session_days": 30}
@@ -1490,8 +1490,8 @@ def test_ngwaf_share_purge_calendar_vcl_health_and_telemetry_match_producer(clie
     snippets = [Snippet("Fastly Log Analytics - capture"), Snippet("Fastly Log Analytics - scoring")]
     with (
         patch("backend.config.load_config", return_value={"service_id": "svc-a", "admin_token": "tok"}),
-        patch("backend.provision.declarative.fastly_integration.fetch_active_version", return_value=7),
-        patch("backend.provision.declarative.fastly_integration.fetch_snippets", return_value=snippets),
+        patch("backend.provision.declarative.reconciler.fetch_active_version", return_value=7),
+        patch("backend.provision.declarative.reconciler.fetch_snippets", return_value=snippets),
     ):
         exp_vcl = {"service_id": "svc-a", "active_version": 7, "legacy_snippets_found": 0, "legacy_names": []}
         exp_vcl |= {

@@ -29,7 +29,7 @@ from botocore.exceptions import ClientError
 
 from backend.config import is_high_scale_mode
 from backend.core.metadata.usage_log import record_cloud_copy_deletion
-from backend.utils.sql_validator import escape_sql_literal
+from backend.core.sql_validator import escape_sql_literal
 from backend.utils.telemetry import log_once_per
 
 logger = logging.getLogger(__name__)
@@ -248,45 +248,6 @@ def _rebuild_ingest_index(con, service_id: str, name: str, ident: str) -> int:
     return len(rows)
 
 
-def restore_admin_state(source: dict) -> int:
-    """Re-save the saved views from the ``meta/admin_state.json`` snapshot; returns how many were restored.
-
-    The snapshot is exported after every settings change, so after a full loss it is the only copy of the saved views
-    (the audit log and custom fields in it are history and config, not restored). Views are keyed by id, so this is
-    idempotent.
-    """
-    from types import SimpleNamespace
-
-    from backend.core.duckdb import _get_fos_client
-    from backend.core.metadata.base import get_admin_state_key, save_view
-
-    if not source.get("bucket"):
-        return 0
-    try:
-        body = json.loads(
-            _get_fos_client(source).get_object(Bucket=source["bucket"], Key=get_admin_state_key(source))["Body"].read()
-        )
-    except ClientError as exc:
-        if exc.response.get("Error", {}).get("Code") in ("NoSuchKey", "404", "NotFound"):
-            return 0
-        raise
-    restored = 0
-    for view in body.get("_views") or []:
-        if not view.get("name"):
-            continue
-        save_view(
-            _service_id(source),
-            SimpleNamespace(
-                **{
-                    k: view.get(k)
-                    for k in ("id", "name", "filters_json", "time_range_type", "start_time", "end_time", "page")
-                }
-            ),
-        )
-        restored += 1
-    return restored
-
-
 def restore_from_cloud(source: dict, progress: Callable[[str], None] | None = None) -> dict:
     """Rebuild local DuckLake data from the FOS copy: download missing files, then register them in DuckLake.
 
@@ -354,17 +315,5 @@ def restore_from_cloud(source: dict, progress: Callable[[str], None] | None = No
     identity = _catalog_identity(source)
     if identity is not None:
         _write_marker(client, bucket, key_root + _MARKER_NAME, identity[0])
-    views = 0
-    try:
-        views = restore_admin_state(source)
-        say(f"Restored {views} saved view(s) from the admin state snapshot")
-    except Exception as exc:
-        logger.warning("[restore] %s: could not restore saved views: %s", _service_id(source), exc)
     clear_source_caches(source.get("name", "default"))
-    return {
-        "downloaded": downloaded,
-        "registered": registered,
-        "remote_files": len(remote),
-        "reindexed": reindexed,
-        "views_restored": views,
-    }
+    return {"downloaded": downloaded, "registered": registered, "remote_files": len(remote), "reindexed": reindexed}

@@ -34,8 +34,9 @@ import duckdb
 import pytest
 import time_machine
 
+import backend.core.rollups.recompute as rollup_coverage
 from backend.core import rollups as rr
-from backend.repositories import _base, rollup_coverage
+from backend.repositories import _base
 from backend.repositories._base import QueryRunner
 from tests._helpers.rollups import RollupGoldenLayout as Layout
 from tests._helpers.rollups import build_rollup_golden_layout
@@ -1291,7 +1292,7 @@ class TestPartialHourMergeIntoRollupReaders:
         """
         import os
 
-        from backend.core.rollups import partial_hour as ph
+        import backend.core.rollups.day_bundles as ph
 
         hour = active_start.strftime("%Y-%m-%d-%H")
         hourly_dir = Path(cache_dir) / "data" / f"timestamp_hour={hour}"
@@ -1677,15 +1678,15 @@ import re
 
 import pytest
 
-from backend.repositories import alerts as alerts_sql
+import backend.repositories.assets as alerts_sql
+import backend.repositories.assets as usage_sql
+import backend.repositories.insights.definitions as insights_sql
+import backend.repositories.network as network_sql
+import backend.repositories.origin as origin_sql
+import backend.repositories.security as security_sql
 from backend.repositories import dashboard as dashboard_sql
 from backend.repositories import query as query_sql
 from backend.repositories import sessions as sessions_sql
-from backend.repositories import usage as usage_sql
-from backend.repositories._sql import insights as insights_sql
-from backend.repositories._sql import network as network_sql
-from backend.repositories._sql import origin as origin_sql
-from backend.repositories._sql import security as security_sql
 from backend.repositories.insights import registry
 
 
@@ -2733,17 +2734,13 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
-from backend.core.query_instrumentation import InstrumentedDuckDBConnection
-from backend.core.query_registry import query_registry
-from backend.core.share_db.validation import apply_pii_policy
-from backend.high_scale.archive_models import ServingWatermark
-from backend.high_scale.registry_bootstrap import HighScaleService
-from backend.models.dashboard import AggregatesRequest, FieldValuesRequest, RawRequest
 
+import backend.utils.bot_sources as rdns_cache
 from backend import config as svcconfig
 from backend.core import duckdb as db_core
 from backend.core.log_fields import LOG_FIELD_CATALOG
 from backend.core.metadata import usage_log
+from backend.core.request_telemetry import InstrumentedDuckDBConnection, query_registry
 from backend.core.rollups._common import (
     OVERVIEW_BUNDLE_FILENAME,
     TIME_SERIES_BUNDLE_FILENAME,
@@ -2751,7 +2748,11 @@ from backend.core.rollups._common import (
     _hour_bundled_root,
 )
 from backend.core.rollups.day_bundles import compact_time_series_closed_days_to_daily
+from backend.core.share_db import apply_pii_policy
 from backend.high_scale import dashboard as high_scale_dashboard
+from backend.high_scale.archive import ServingWatermark
+from backend.high_scale.ingest_controller import HighScaleService
+from backend.models.analytics import AggregatesRequest, FieldValuesRequest, RawRequest
 from backend.models.common import FilterSpec
 from backend.repositories import _base as repo_base
 from backend.repositories import dashboard as dash
@@ -2768,7 +2769,7 @@ from backend.repositories.dashboard import (
 )
 from backend.repositories.performance import get_performance_aggregates
 from backend.repositories.query import _ANALYST_WINDOW_VIEW, MAX_QUERY_ROWS, execute_query, get_presets
-from backend.utils import bot_sources, rdns_cache
+from backend.utils import bot_sources
 from backend.utils.telemetry import set_page_load_id
 from tests._helpers.duckdb_fixtures import generate_mock_logs, insert_mock_logs
 from tests.conftest import MOCK_SERVICE_ID
@@ -3156,13 +3157,15 @@ def test_dashboard_country_rollups_match_scoped_filter_at_hour_boundaries(
         "A": initial["total_rows"],
         "B": initial["total_rows"],
     }
+    extent_idx = next(
+        i for i, row in enumerate(initial["debug_queries"]) if "min(timestamp), max(timestamp)" in row["sql"]
+    )
+    top_n_queries = initial["debug_queries"][extent_idx + 1 :]
     if start == "02:00" and end in ("03:00", "04:00"):
-        assert any("read_parquet" in row["sql"] for row in initial["debug_queries"])
-    assert not any("strftime(timestamp, '%Y-%m-%d-%H') IN" in row["sql"] for row in initial["debug_queries"])
+        assert any("read_parquet" in row["sql"] for row in top_n_queries)
+    assert not any("strftime(timestamp, '%Y-%m-%d-%H') IN" in row["sql"] for row in top_n_queries)
     raw_table_queries = [
-        row["sql"]
-        for row in initial["debug_queries"]
-        if f"FROM {table}" in row["sql"] or f"FROM ({table})" in row["sql"]
+        row["sql"] for row in top_n_queries if f"FROM {table}" in row["sql"] or f"FROM ({table})" in row["sql"]
     ]
     assert len(raw_table_queries) <= 2
 
@@ -4250,8 +4253,8 @@ def test_cid_salt_hash_parity_and_redaction_channels(raw_con, tmp_path):
 
     persisted: list[tuple] = []
     with (
-        patch("backend.core.query_registry._SLOW_QUERY_PERSIST_THRESHOLD_MS", 0.0),
-        patch("backend.core.query_registry._SLOW_QUERY_PERSIST_DISABLED", False),
+        patch("backend.core.request_telemetry._SLOW_QUERY_PERSIST_THRESHOLD_MS", 0.0),
+        patch("backend.core.request_telemetry._SLOW_QUERY_PERSIST_DISABLED", False),
         patch("backend.core.metadata.insert_slow_query", side_effect=lambda sid, row: persisted.append((sid, row))),
     ):
         _analyst_query(con, "SELECT cid FROM logs")

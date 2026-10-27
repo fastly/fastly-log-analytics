@@ -9,12 +9,12 @@ from typing import Any
 
 from backend import config as svcconfig
 from backend.core.faro_versions import DEFAULT_FARO_VERSION
-from backend.core.fastly.rum_provisioning import (
+from backend.core.fastly.client import (
+    SHIELD_MAP,
     _assert_faro_version_safe,
     generate_rum_asset_fetch_vcl,
     generate_rum_vcl,
 )
-from backend.core.fastly.utils import SHIELD_MAP
 from backend.provision.cli import BOLD, _c, fail, info, ok, warn
 from backend.provision.declarative.reconciler import reconcile_vcl_state
 from backend.provision.rum_assets import (

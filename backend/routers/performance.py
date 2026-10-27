@@ -8,9 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Path
 
 from backend.core.request_context import RequestContext, build_request_context
 from backend.core.storage import execute_with_stale_view_retry
-from backend.models._base import DEFAULT_ERROR_RESPONSES
-from backend.models.common import CmcdDisableBody, CmcdEnableBody, CmcdStatusResponse
-from backend.models.performance import (
+from backend.models.analytics import (
     AssetsAggregatesResponse,
     AssetsRequest,
     CmcdAggregatesResponse,
@@ -23,6 +21,7 @@ from backend.models.performance import (
     ValueSummaryRequest,
     ValueSummaryResponse,
 )
+from backend.models.common import DEFAULT_ERROR_RESPONSES, CmcdDisableBody, CmcdEnableBody, CmcdStatusResponse
 from backend.repositories import assets as assets_repo
 from backend.repositories import cmcd as cmcd_repo
 from backend.repositories import performance as perf_repo
@@ -94,7 +93,7 @@ def _assets_aggregates_impl(
         start_time, end_time = ctx.resolve_window(req)
         high_scale_service = ctx.high_scale
         if high_scale_service is not None:
-            from backend.high_scale.assets import assets_aggregates as hs_assets_aggregates
+            from backend.high_scale.ingest_controller import assets_aggregates as hs_assets_aggregates
 
             return hs_assets_aggregates(high_scale_service, req, start_time, end_time)
 

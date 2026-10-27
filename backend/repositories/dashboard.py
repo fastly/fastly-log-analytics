@@ -14,8 +14,9 @@ from typing import Any, Literal
 
 import duckdb
 
+from backend.core.sql_validator import escape_sql_literal
+from backend.models.analytics import HistoryObservation, ReaderCoverage
 from backend.models.common import FiltersDict
-from backend.models.dashboard import HistoryObservation, ReaderCoverage
 from backend.repositories._base import (
     CANONICAL_METRICS,
     QueryRunner,
@@ -44,7 +45,6 @@ from backend.repositories.utils.response_shaping import (
     parse_asn_int,
     resolve_asn_names_map,
 )
-from backend.utils.sql_validator import escape_sql_literal
 from backend.utils.telemetry import log_once_per
 
 # ── Virtual-field unnest top-N ────────────────────────────────────────────────
@@ -170,7 +170,7 @@ def invalidate_service(service_name: str) -> None:
 
 # ── aggregates ────────────────────────────────────────────────────────────────
 
-from backend.core.field_registry import REGISTRY as _FIELD_REGISTRY
+from backend.core.log_fields import REGISTRY as _FIELD_REGISTRY
 
 _VIRTUAL_BACKING = {"waf_sig_ind": "waf_sig", "edge_score_reason_ind": "edge_score_reason"}
 _VIRTUAL_FIELDS = tuple(_VIRTUAL_BACKING)
@@ -507,7 +507,7 @@ def _compute_dashboard_aggregates(
 
     cols_str = ", ".join(needed_cols) if needed_cols else "*"
     from backend.core.rollups import rollups_present
-    from backend.repositories.rollup_coverage import durable_serving_blocked
+    from backend.core.rollups.rollup_coverage import durable_serving_blocked
 
     _durable_blocked = durable_serving_blocked(src)
     _rollups_present = rollups_present(src) if not filters else None

@@ -6,7 +6,6 @@ import csv
 import io
 import logging
 import os
-import sys
 import time
 from collections import deque
 from collections.abc import Iterator
@@ -16,8 +15,8 @@ from fastapi import Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
 from backend.core import metadata as _meta_mod
+from backend.core.request_context import get_service_id, get_source, require_admin
 from backend.core.request_telemetry import query_registry
-from backend.deps import get_service_id, get_source, require_admin
 from backend.models.admin import (
     SystemJobsResponse,
     UsageLogAggregate,
@@ -26,7 +25,7 @@ from backend.models.admin import (
     UsageLoggingUpdateBody,
     UsageLogResponse,
 )
-from backend.models.admin_actions import (
+from backend.models.analytics import (
     ActiveQueryRow,
     CancelResponse,
     QueryMonitorConfigResponse,
@@ -176,7 +175,7 @@ def list_persisted_slow_queries(
         sort_by_duration=(sort == "duration"),
         limit=limit,
     )
-    out: list[dict[str, Any]] = []
+    out: list[Any] = []
     for r in rows:
         out.append(
             {
@@ -579,8 +578,7 @@ def purge_usage_log_endpoint(source: dict[str, Any] = Depends(get_source)) -> Ok
 )
 def get_system_jobs_endpoint() -> Any:
     """Return status and schedule info for global background jobs."""
-    from backend.cron.decorators import get_system_job_status
-    from backend.cron.scheduler import get_scheduler
+    from backend.cron.scheduler import get_scheduler, get_system_job_status
 
     statuses = get_system_job_status()
     result = []
@@ -613,13 +611,3 @@ def get_system_jobs_endpoint() -> Any:
 
 
 _CacheRegistry.register("routers.admin_queries._cancel_history", _cancel_history)
-
-_self_mod = sys.modules[__name__]
-sys.modules["backend.routers.admin_queries"] = _self_mod
-sys.modules["backend.routers.admin_usage"] = _self_mod
-if "backend.routers" in sys.modules:
-    setattr(sys.modules["backend.routers"], "admin_queries", _self_mod)
-    setattr(sys.modules["backend.routers"], "admin_usage", _self_mod)
-if "backend" in sys.modules and hasattr(sys.modules["backend"], "_MODULE_ALIASES"):
-    sys.modules["backend"]._MODULE_ALIASES["backend.routers.admin_queries"] = __name__
-    sys.modules["backend"]._MODULE_ALIASES["backend.routers.admin_usage"] = __name__

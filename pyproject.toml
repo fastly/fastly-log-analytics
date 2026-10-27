@@ -374,14 +374,12 @@ ignore_errors = true
 # inherit the stricter checks automatically.
 [[tool.mypy.overrides]]
 module = [
-    "backend.core.query_instrumentation",
-    "backend.core.query_attribution",
     # v2.0 final wave (2026-06-12): post-split modules with fresh test
     # coverage. Each verified clean under the strict flags below before
     # opt-in; new files in these packages inherit the stricter checks
     # automatically.
     "backend.core.rollups._common",
-    "backend.core.rollups.sessions",
+    "backend.core.rollups.session_rollups",
     "backend.core.rollups.day_bundles",
     "backend.core.rollups.recompute",
     "backend.routers.admin.health",
@@ -418,7 +416,6 @@ ignore = [
 # CLI tools and one-off scripts legitimately print to stdout.
 "scripts/*" = ["T201"]
 "backend/provision/cli.py" = ["T201"]
-"backend/provision/utils.py" = ["T201"]
 # Tests can print benchmark timings, debug dumps, etc. — not production code.
 "tests/*" = ["T201"]
 

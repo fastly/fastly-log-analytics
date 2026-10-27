@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import contextvars
 import json
-import sys
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
@@ -417,4 +416,3 @@ def rum_live_events(
 
 
 rum_events = rum_live_events
-sys.modules["backend.high_scale.rum_ingest"] = sys.modules[__name__]

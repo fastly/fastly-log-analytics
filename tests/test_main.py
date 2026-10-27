@@ -15,19 +15,24 @@ from unittest.mock import ANY, MagicMock, patch
 import duckdb
 import httpx
 import pytest
-from backend.core.query_attribution import current_attribution
-from backend.core.query_instrumentation import InstrumentedDuckDBConnection
-from backend.core.query_registry import _HISTORY_CAP, Attribution, QueryRegistry, query_registry
-from backend.cron.decorators import global_job
 from fastapi import FastAPI, HTTPException
 from starlette.requests import Request
 
+import backend.core.request_context as deps
 from backend import config as svcconfig
-from backend import deps
 from backend.core import duckdb_pool
 from backend.core import rollups as rr
 from backend.core.duckdb import DBBusyError
 from backend.core.duckdb_pool import _Pool, _PoolBusy
+from backend.core.request_telemetry import (
+    _HISTORY_CAP,
+    Attribution,
+    InstrumentedDuckDBConnection,
+    QueryRegistry,
+    current_attribution,
+    query_registry,
+)
+from backend.cron.scheduler import global_job
 from backend.main import (
     _background_startup,
     _bounded_scheduler_shutdown,
@@ -126,7 +131,7 @@ def _run_init_service(
         patch("backend.core.duckdb.refresh_config_status") as mock_refresh,
         patch("backend.main._ensure_persistent_view") as mock_ensure,
         patch("backend.routers.admin.compute_sync_status_cached"),
-        patch("backend.core.metadata.usage_log_db.get_con"),
+        patch("backend.core.metadata.usage_log.get_con"),
         patch("backend.main.logger.info") as mock_log_info,
     ):
         _initialize_service(cfg)
@@ -310,7 +315,7 @@ def _run_scoring_matrix(tmp_path, configs: list[dict], fetch_fn=None):
     with (
         patch("backend.provision.session_scoring_orchestrator._MATRIX_PATH", fake_matrix_path),
         patch("backend.config.list_configs", return_value=configs),
-        patch("backend.state_sync.fetch_matrix_from_fos", **fetch_kw) as mock_fetch,
+        patch("backend.core.metadata.base.fetch_matrix_from_fos", **fetch_kw) as mock_fetch,
     ):
         _ensure_scoring_matrix()
     return fake_matrix_path, mock_fetch
@@ -538,7 +543,7 @@ def test_maybe_instrument_asgi(enabled: bool):
     ],
 )
 def test_get_service_id_resolution_priority(kwargs: dict, expected: str):
-    with patch("backend.deps.svcconfig.load_config", return_value={"service_id": expected}):
+    with patch("backend.core.request_context.svcconfig.load_config", return_value={"service_id": expected}):
         assert _call_get_service_id(**kwargs) == expected
 
 
@@ -552,8 +557,8 @@ def test_get_service_id_resolution_priority(kwargs: dict, expected: str):
 )
 def test_get_service_id_cdn_fallback(sid: str, cdn_map: dict, expected: str):
     with (
-        patch("backend.deps.svcconfig.load_config", return_value=None),
-        patch("backend.deps.svcconfig.get_cdn_service_id_map", return_value=cdn_map),
+        patch("backend.core.request_context.svcconfig.load_config", return_value=None),
+        patch("backend.core.request_context.svcconfig.get_cdn_service_id_map", return_value=cdn_map),
     ):
         assert _call_get_service_id(sid=sid) == expected
 
@@ -561,7 +566,7 @@ def test_get_service_id_cdn_fallback(sid: str, cdn_map: dict, expected: str):
 @pytest.mark.usefixtures("_clean_registry")
 @pytest.mark.parametrize("active_id", ["active-svc", None])
 def test_get_service_id_falls_back_to_active_when_nothing_provided(active_id: str | None):
-    with patch("backend.deps.svcconfig.get_active_service_id", return_value=active_id):
+    with patch("backend.core.request_context.svcconfig.get_active_service_id", return_value=active_id):
         assert _call_get_service_id() == active_id
 
 
@@ -571,14 +576,14 @@ def test_get_service_id_falls_back_to_active_when_nothing_provided(active_id: st
 @pytest.mark.usefixtures("_clean_registry")
 def test_get_source_returns_source_dict_when_found():
     fake_src = {"name": "logs_svc", "service_id": "svc"}
-    with patch("backend.deps.db.get_source_for_service", return_value=fake_src):
+    with patch("backend.core.request_context.db.get_source_for_service", return_value=fake_src):
         assert deps.get_source(service_id="svc") is fake_src
 
 
 @pytest.mark.usefixtures("_clean_registry")
 @pytest.mark.parametrize("service_id", [None, "ghost"])
 def test_get_source_raises_400_when_missing(service_id: str | None):
-    with patch("backend.deps.db.get_source_for_service", return_value=None):
+    with patch("backend.core.request_context.db.get_source_for_service", return_value=None):
         with pytest.raises(HTTPException) as exc:
             deps.get_source(service_id=service_id)
     assert exc.value.status_code == 400
@@ -598,7 +603,7 @@ def disable_pool(monkeypatch):
 def test_connection_holder_opens_and_closes(disable_pool):
     fake_con = MagicMock()
     src = {"name": "x"}
-    with patch("backend.deps.get_connection", return_value=fake_con) as mock_get:
+    with patch("backend.core.request_context.get_connection", return_value=fake_con) as mock_get:
         holder = deps._ConnectionHolder(src, read_only=True)
         assert holder.__enter__() is fake_con
         mock_get.assert_called_once_with(source=src, max_wait=ANY, skip_view_update=False, read_only=True)
@@ -608,7 +613,7 @@ def test_connection_holder_opens_and_closes(disable_pool):
 
 @pytest.mark.usefixtures("_clean_registry")
 def test_connection_holder_skip_view_update_forwarded():
-    with patch("backend.deps.get_connection") as mock_get:
+    with patch("backend.core.request_context.get_connection") as mock_get:
         deps._ConnectionHolder({"name": "x"}, skip_view_update=True).__enter__()
         assert mock_get.call_args.kwargs["skip_view_update"] is True
 
@@ -620,21 +625,21 @@ def test_connection_holder_max_wait(disable_pool, monkeypatch, env_val: str | No
         monkeypatch.delenv("DUCKDB_POOL_MAX_WAIT_S", raising=False)
     else:
         monkeypatch.setenv("DUCKDB_POOL_MAX_WAIT_S", env_val)
-    with patch("backend.deps.get_connection", return_value=MagicMock()) as mock_get:
+    with patch("backend.core.request_context.get_connection", return_value=MagicMock()) as mock_get:
         deps._ConnectionHolder({"name": "x"}, read_only=True).__enter__()
         assert mock_get.call_args.kwargs["max_wait"] == expected_wait
 
 
 @pytest.mark.usefixtures("_clean_registry")
 def test_connection_holder_db_busy_and_exit_edge_cases(disable_pool):
-    with patch("backend.deps.get_connection", side_effect=DBBusyError("locked")):
+    with patch("backend.core.request_context.get_connection", side_effect=DBBusyError("locked")):
         with pytest.raises(HTTPException) as exc:
             deps._ConnectionHolder({"name": "x"}).__enter__()
     assert exc.value.status_code == 503 and exc.value.detail["busy"] is True
 
     fake_con = MagicMock()
     fake_con.close.side_effect = RuntimeError("already closed")
-    with patch("backend.deps.get_connection", return_value=fake_con):
+    with patch("backend.core.request_context.get_connection", return_value=fake_con):
         holder = deps._ConnectionHolder({"name": "x"})
         holder.__enter__()
         holder.__exit__(None, None, None)
@@ -648,7 +653,7 @@ def test_connection_holder_db_busy_and_exit_edge_cases(disable_pool):
 @pytest.mark.usefixtures("_clean_registry")
 def test_get_con_yields_connection_and_closes_after(disable_pool):
     fake_con = MagicMock()
-    with patch("backend.deps.get_connection", return_value=fake_con) as mock_get:
+    with patch("backend.core.request_context.get_connection", return_value=fake_con) as mock_get:
         gen = deps.get_con(source={"name": "x"})
         assert next(gen) is fake_con
         assert mock_get.call_args.kwargs["read_only"] is True
@@ -692,7 +697,7 @@ def test_connection_holder_pool_path_checkout_return_and_error():
 def test_connection_holder_pool_path_skipped_when_skip_view_update():
     with (
         patch.object(duckdb_pool, "checkout_connection") as mock_checkout,
-        patch("backend.deps.get_connection", return_value=MagicMock()) as mock_get,
+        patch("backend.core.request_context.get_connection", return_value=MagicMock()) as mock_get,
     ):
         deps._ConnectionHolder({"name": "x"}, skip_view_update=True).__enter__()
         mock_checkout.assert_not_called()
@@ -732,7 +737,7 @@ def test_new_request_id_is_nonempty_hex():
 
 @pytest.mark.usefixtures("_clean_registry")
 def test_global_job_runs_in_cron_attribution_scope(monkeypatch):
-    import backend.cron.decorators as sj
+    import backend.cron.scheduler as sj
 
     monkeypatch.setattr(sj, "record_job_run", lambda *a, **k: None)
     seen: dict = {}
@@ -838,7 +843,7 @@ def test_health_snapshot_has_new_observability_fields(client, monkeypatch):
 
 @pytest.mark.usefixtures("_clean_registry")
 def test_health_snapshot_scheduler_tick_age_surfaced(client):
-    with patch("backend.core.metric_snapshots.last_snapshot_age_s", return_value=12.5):
+    with patch("backend.cron.jobs.metric_snapshots.last_snapshot_age_s", return_value=12.5):
         body = client.get("/api/admin/health-snapshot").json()
     assert body["scheduler_last_tick_age_s"] == 12.5
 
@@ -851,7 +856,7 @@ def test_health_snapshot_recent_cron_failures_aggregates_errors(client):
     }
     with (
         patch("backend.config.list_service_ids", return_value=["svc-a"]),
-        patch("backend.core.metadata.cron_log.latest_cron_per_task", return_value=latest),
+        patch("backend.core.metadata.usage_log.latest_cron_per_task", return_value=latest),
     ):
         body = client.get("/api/admin/health-snapshot").json()
 
@@ -1122,12 +1127,6 @@ from functools import partial
 
 import pyarrow as pa
 import pytest
-from backend.core.metadata.pg_connection import is_postgres
-from backend.cron_runs_publisher import CronRunsPublisher
-from backend.high_scale.archive_models import ServingWatermark
-from backend.high_scale.registry_bootstrap import HighScaleService
-from backend.sync_status_publisher import SyncStatusPublisher
-from backend.sync_status_snapshot import compute_sync_status_cached
 from fastapi.testclient import TestClient
 from scripts.check_environment_health import (
     ENVIRONMENTS,
@@ -1136,14 +1135,19 @@ from scripts.check_environment_health import (
     check_tenancy,
 )
 
-from backend import cron_progress
-from backend import request_metrics_observer as module
+import backend.core.metadata as metadata_db
+import backend.core.request_telemetry as module
+import backend.core.storage._core as _dl
+import backend.core.storage._core as buffer_mod
+import backend.cron.scheduler as cron_progress
+from backend.celery_app import SyncStatusPublisher
 from backend.core import ingest as ing
-from backend.core import metadata as metadata_db
 from backend.core import storage as ice
 from backend.core.duckdb import _cache_dir
-from backend.core.storage import _ducklake as _dl
-from backend.core.storage import buffer as buffer_mod
+from backend.core.metadata.base import is_postgres
+from backend.cron.scheduler import CronRunsPublisher, compute_sync_status_cached
+from backend.high_scale.archive import ServingWatermark
+from backend.high_scale.ingest_controller import HighScaleService
 from backend.main import app
 from backend.repositories._base import _safe_table
 from backend.repositories.dashboard import _dashboard_cache, get_aggregates
@@ -2014,10 +2018,10 @@ def snapshot_state(monkeypatch):
         "backend.core.duckdb.get_source_for_service", lambda _: {"name": "snapshot-svc", "duckdb_path": __file__}
     )
     monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _: ".")
-    monkeypatch.setattr("backend.sync_status_snapshot._get_dir_size", lambda _: 0)
+    monkeypatch.setattr("backend.cron.scheduler._get_dir_size", lambda _: 0)
     monkeypatch.setattr("backend.core.metadata.get_ingested_files_status_summary", lambda _: summary)
     monkeypatch.setattr("backend.core.metadata.base.get_con", lambda _: ledger)
-    monkeypatch.setattr("backend.cron_progress.get_latest_progress_for_service", lambda _: None)
+    monkeypatch.setattr("backend.cron.scheduler.get_latest_progress_for_service", lambda _: None)
     monkeypatch.setattr(
         "backend.core.duckdb.get_connection", lambda *a, **kw: pytest.fail("cached status must not acquire DuckDB")
     )
@@ -2091,7 +2095,7 @@ def _bind_high_scale_service(monkeypatch, *, include_rum: bool) -> None:
     )
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda _: {"name": "high-scale-svc"})
     monkeypatch.setattr(
-        "backend.high_scale.registry_bootstrap.get_high_scale_service_registry",
+        "backend.high_scale.ingest_controller.get_high_scale_service_registry",
         lambda: type("Registry", (), {"resolve": lambda _, sid: service})(),
     )
     monkeypatch.setattr(

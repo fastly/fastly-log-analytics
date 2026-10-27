@@ -61,22 +61,20 @@ from backend.high_scale.archive import (
     ArchivePublication,
     ArchiveSourceObject,
     ArchiveState,
-    S3ObjectStore,
-    ServingWatermark,
-    write_batch_archive_checkpoint,
-)
-from backend.high_scale.publication import (
     BaseClickHouseBatchAdapter,
     ClickHousePublication,
     HighScaleBatch,
     InsertReceipt,
     PublicationResult,
     PublicationStatus,
+    S3ObjectStore,
+    ServingWatermark,
     _batch_uuid,
     build_batch_id_from_manifest_id,
     row_matches_serving_domain,
+    write_batch_archive_checkpoint,
 )
-from backend.models.performance import AssetsAggregatesResponse, AssetsRequest
+from backend.models.analytics import AssetsAggregatesResponse, AssetsRequest
 from backend.repositories.utils.response_cache import (
     ResponseMemo,
     bucket_time_to_minute,
@@ -542,13 +540,6 @@ class AggregateBatchAdapter(BaseClickHouseBatchAdapter):
         )
 
 
-_self_mod = sys.modules[__name__]
-sys.modules["backend.high_scale.registry_bootstrap"] = _self_mod
-sys.modules["backend.high_scale.aggregate_batch_adapter"] = _self_mod
-_hs_pkg = sys.modules.get("backend.high_scale")
-if _hs_pkg is not None:
-    setattr(_hs_pkg, "registry_bootstrap", _self_mod)
-    setattr(_hs_pkg, "aggregate_batch_adapter", _self_mod)
 from backend.high_scale.cmcd import project_cmcd  # noqa: E402
 from backend.high_scale.network import build_network_projection_rows  # noqa: E402
 from backend.high_scale.origin import build_origin_projection_rows  # noqa: E402
@@ -962,7 +953,7 @@ def _enrich_high_scale_ngwaf_bots(events: tuple[dict[str, Any], ...]) -> None:
     if not waf_req_ids:
         return
     try:
-        from backend.core.metadata import pg_connection
+        from backend.core.metadata import base as pg_connection
 
         pconn = pg_connection.get_pg_readonly_connection()
         try:
@@ -1209,8 +1200,6 @@ INITIAL_SOURCE_CURSOR = "__initial__"
 TERMINAL_SOURCE_CURSOR_PREFIX = "__terminal__:"
 RUM_REINSPECTION_INTERVAL = 10
 RUM_SOURCE_DOMAINS = frozenset({"rum_vitals", "rum_errors"})
-sys.modules["backend.high_scale.orchestration"] = sys.modules[__name__]
-sys.modules["backend.high_scale.source_discovery"] = sys.modules[__name__]
 
 
 class SourceObjectMissingError(RuntimeError):
@@ -1769,12 +1758,6 @@ class HighScaleWorkerCoordinator:
 
 _TERMINAL_SOURCE_STATES = frozenset({"appended", "archived", "acknowledged", "source_deleted", "source_missing"})
 
-_self_mod = sys.modules[__name__]
-sys.modules["backend.high_scale.source_discovery"] = _self_mod
-_hs_pkg = sys.modules.get("backend.high_scale")
-if _hs_pkg is not None:
-    setattr(_hs_pkg, "source_discovery", _self_mod)
-
 
 import backend.high_scale.recovery as recovery  # noqa: E402, F401
 import backend.high_scale.rum as rum  # noqa: E402, F401
@@ -1865,21 +1848,4 @@ def __getattr__(name: str) -> Any:
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-_self_mod = sys.modules[__name__]
-orchestration = _self_mod
-_hs_pkg = sys.modules.get("backend.high_scale")
-_ALIAS_NAMES = (
-    "aggregate_batch",
-    "aggregate_batch_adapter",
-    "assets",
-    "orchestration",
-    "registry_bootstrap",
-    "source_discovery",
-)
-for _alias in _ALIAS_NAMES:
-    sys.modules[f"backend.high_scale.{_alias}"] = _self_mod
-    if _hs_pkg is not None:
-        setattr(_hs_pkg, _alias, _self_mod)
-_backend_pkg = sys.modules.get("backend")
-if _backend_pkg is not None and hasattr(_backend_pkg, "_MODULE_ALIASES"):
-    _backend_pkg._MODULE_ALIASES.update({f"backend.high_scale.{a}": __name__ for a in _ALIAS_NAMES})
+orchestration = sys.modules[__name__]

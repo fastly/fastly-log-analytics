@@ -16,15 +16,15 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
-from backend.core.metadata.cron_log import CronLeaseHeldError
-from backend.deps import get_service_id, get_source, require_admin
 from fastapi import HTTPException
 from starlette.testclient import TestClient
 from tests._helpers.config_fakes import fake_mutate_config
 
-from backend.core import metadata as metadata_db
+import backend.core.metadata as metadata_db
+import backend.core.metadata.usage_log as usage_log_db
 from backend.core.ingest import sweep_ledger_once
-from backend.core.metadata import usage_log_db
+from backend.core.metadata.usage_log import CronLeaseHeldError
+from backend.core.request_context import get_service_id, get_source, require_admin
 from backend.cron.jobs import commit
 from backend.cron.jobs import rum_ledger as ledger_mod
 from backend.cron.jobs import sync as sync_mod
@@ -50,9 +50,9 @@ def _fake_src(service_id: str = "svc-1") -> dict:
 @pytest.fixture
 def stub_progress(monkeypatch) -> dict[str, MagicMock]:
     start_progress, end_progress, cleanup, log_event = MagicMock(), MagicMock(), MagicMock(), MagicMock()
-    monkeypatch.setattr("backend.cron_progress.start_progress", start_progress)
-    monkeypatch.setattr("backend.cron_progress.end_progress", end_progress)
-    monkeypatch.setattr("backend.cron_progress.cleanup_progress_and_reap", cleanup)
+    monkeypatch.setattr("backend.cron.scheduler.start_progress", start_progress)
+    monkeypatch.setattr("backend.cron.scheduler.end_progress", end_progress)
+    monkeypatch.setattr("backend.cron.scheduler.cleanup_progress_and_reap", cleanup)
     monkeypatch.setattr(sync_mod, "_log_and_add_progress", log_event)
     monkeypatch.setattr(sync_mod, "_display_label", lambda src, sid: src.get("name", sid))
     monkeypatch.setattr(sync_mod, "_extract_log_text", lambda rid: "")
@@ -105,7 +105,7 @@ def _setup_discovery_env(
     *,
     run_id: int = 42,
 ) -> MagicMock:
-    monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda kind, sid: False)
+    monkeypatch.setattr("backend.utils.telemetry.should_defer_cron", lambda kind, sid: False)
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", MagicMock(return_value=_fake_src()))
     monkeypatch.setattr("backend.core.duckdb.start_cron_run", MagicMock(return_value=run_id))
     log_cron = MagicMock()
@@ -119,7 +119,7 @@ def _setup_discovery_env(
 
 
 def test_scheduled_tick_is_not_deferred_by_in_flight_requests(monkeypatch, stub_load_config):
-    from backend.utils import active_requests
+    import backend.utils.telemetry as active_requests
 
     active_requests._reset_for_tests()
     active_requests.increment_active_requests()
@@ -135,7 +135,7 @@ def test_scheduled_tick_is_not_deferred_by_in_flight_requests(monkeypatch, stub_
 
 @pytest.mark.parametrize("case", ["config_missing", "source_missing"])
 def test_discovery_early_exit_gates(monkeypatch, stub_load_config, case):
-    monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda kind, sid: False)
+    monkeypatch.setattr("backend.utils.telemetry.should_defer_cron", lambda kind, sid: False)
     start_cron = MagicMock()
     monkeypatch.setattr("backend.core.duckdb.start_cron_run", start_cron)
     if case == "config_missing":
@@ -152,7 +152,7 @@ def test_discovery_early_exit_gates(monkeypatch, stub_load_config, case):
 
 def test_high_scale_discovery_persists_its_originating_run_id(monkeypatch, stub_load_config):
     source = {**_fake_src(), "deployment_mode": "high_scale"}
-    monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda kind, sid: False)
+    monkeypatch.setattr("backend.utils.telemetry.should_defer_cron", lambda kind, sid: False)
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: source)
     monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: True)
     monkeypatch.setattr("backend.config.CELERY_BROKER_URL", "redis://broker")
@@ -178,7 +178,7 @@ def test_high_scale_discovery_persists_its_originating_run_id(monkeypatch, stub_
 def test_high_scale_discovery_error_paths(
     monkeypatch, stub_load_config, broker_url, discover_err, run_id, expected_calls, expected_err
 ):
-    monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda kind, sid: False)
+    monkeypatch.setattr("backend.utils.telemetry.should_defer_cron", lambda kind, sid: False)
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: _fake_src())
     monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: True)
     monkeypatch.setattr("backend.config.CELERY_BROKER_URL", broker_url)
@@ -338,12 +338,12 @@ def test_sync_status_published_after_request_extents_refresh(
 
     monkeypatch.setattr("backend.core.duckdb.refresh_config_status", _fake_refresh_config_status)
     monkeypatch.setattr(
-        "backend.sync_status_snapshot.compute_sync_status_cached",
+        "backend.cron.scheduler.compute_sync_status_cached",
         lambda service_id: calls.append("compute_sync_status_cached") or dict(status),
     )
     fake_publisher = MagicMock()
     fake_publisher.publish.side_effect = lambda *a, **k: calls.append("publish")
-    monkeypatch.setattr("backend.sync_status_publisher.publisher", fake_publisher)
+    monkeypatch.setattr("backend.celery_app.publisher", fake_publisher)
 
     sync_mod._run_log_discovery_cron.__wrapped__("svc-1", force=True)
     assert calls == [
@@ -580,7 +580,7 @@ def test_scheduled_discovery_persists_service_creation_time_as_range_start(monke
     monkeypatch.setattr("backend.config.mutate_config", save)
     monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: True)
     monkeypatch.setattr("backend.config.CELERY_BROKER_URL", "memory://")
-    monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda job, sid: False)
+    monkeypatch.setattr("backend.utils.telemetry.should_defer_cron", lambda job, sid: False)
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: source)
     monkeypatch.setattr("backend.core.duckdb.start_cron_run", lambda src, task: 108)
     monkeypatch.setattr("backend.core.duckdb.log_cron_run", MagicMock())
@@ -607,7 +607,7 @@ def test_manual_discovery_clears_pinned_range_before_listing(monkeypatch):
     monkeypatch.setattr("backend.config.mutate_config", save)
     monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: True)
     monkeypatch.setattr("backend.config.CELERY_BROKER_URL", "memory://")
-    monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda job, sid: False)
+    monkeypatch.setattr("backend.utils.telemetry.should_defer_cron", lambda job, sid: False)
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: source)
     monkeypatch.setattr("backend.core.duckdb.log_cron_run", MagicMock())
     discover = MagicMock(return_value=1)
@@ -626,7 +626,7 @@ def test_full_sweep_skipped_when_start_cron_run_raises(monkeypatch, stub_load_co
     ingest_mock = MagicMock()
     monkeypatch.setattr("backend.core.ingest.ingest", ingest_mock)
     start_progress = MagicMock()
-    monkeypatch.setattr("backend.cron_progress.start_progress", start_progress)
+    monkeypatch.setattr("backend.cron.scheduler.start_progress", start_progress)
 
     sync_mod._run_full_sweep.__wrapped__("svc-1")
     ingest_mock.assert_not_called()
@@ -709,7 +709,7 @@ def test_high_scale_full_sweep_records_discovery_failure_on_originating_run(monk
 def test_run_log_discovery_cron_full_cascade_real_ingest_against_moto_s3(
     s3_mock, fos_source, monkeypatch, tmp_path, stub_progress, stub_usage_log_phase
 ):
-    from backend.core import metadata as metadata_db
+    import backend.core.metadata as metadata_db
     from backend.core import storage as ice
 
     cache_path = str(tmp_path / "cache")
@@ -732,7 +732,7 @@ def test_run_log_discovery_cron_full_cascade_real_ingest_against_moto_s3(
     monkeypatch.setattr("backend.core.ingest._get_fos_client", lambda _src: _CallerHintShim(s3_mock))
     if hasattr(ice, "_view_cache"):
         ice._view_cache.clear()
-    monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda *a, **kw: False)
+    monkeypatch.setattr("backend.utils.telemetry.should_defer_cron", lambda *a, **kw: False)
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: fos_source)
 
     base = datetime.now(UTC) - timedelta(hours=2)
@@ -788,7 +788,7 @@ def _lifecycle_env(monkeypatch, events, *, log_text="LOGTEXT"):
         "backend.core.duckdb.finalize_cron_run_if_running",
         lambda *a, **k: order.append(("backstop", a, k)) or True,
     )
-    monkeypatch.setattr("backend.cron_progress.end_progress", lambda rid: order.append(("end_progress", rid)))
+    monkeypatch.setattr("backend.cron.scheduler.end_progress", lambda rid: order.append(("end_progress", rid)))
     monkeypatch.setattr("backend.cron.scheduler._extract_log_text", lambda rid: log_text)
     monkeypatch.setattr("backend.core.ingest.ingest", _make_ingest_events(events))
     return start, log_cron, order
@@ -904,7 +904,7 @@ def test_contract_1_manual_trigger_with_synthetic_gz_in_fos(log_discovery_test_s
     try:
         with (
             patch("backend.core.duckdb.start_cron_run", side_effect=fake_start_cron_run),
-            patch("backend.cron_progress.start_progress"),
+            patch("backend.cron.scheduler.start_progress"),
             patch("backend.cron.jobs.sync._run_log_discovery_cron"),
             patch("backend.repositories.dashboard.invalidate_service"),
         ):
@@ -918,7 +918,7 @@ def test_contract_1_manual_trigger_with_synthetic_gz_in_fos(log_discovery_test_s
 
 
 def test_contract_2_cron_runs_records_success_and_nonzero_files_ingested(log_discovery_test_source):
-    from backend.core import metadata as metadata_db
+    import backend.core.metadata as metadata_db
 
     service_id, source_name = log_discovery_test_source["service_id"], log_discovery_test_source["name"]
     run_id = metadata_db.start_cron_run(service_id, "log_discovery")
@@ -942,8 +942,8 @@ def test_contract_2_cron_runs_records_success_and_nonzero_files_ingested(log_dis
 def test_contract_3_usage_log_attributes_fos_class_a_list_and_class_b_get_to_cron_log_discovery(
     log_discovery_test_source, monkeypatch
 ):
-    from backend.core import metadata as metadata_db
-    from backend.core.metadata import usage_log_db
+    import backend.core.metadata as metadata_db
+    import backend.core.metadata.usage_log as usage_log_db
     from backend.utils.telemetry import get_process_context
 
     service_id = log_discovery_test_source["service_id"]
@@ -959,9 +959,9 @@ def test_contract_3_usage_log_attributes_fos_class_a_list_and_class_b_get_to_cro
     monkeypatch.setattr("backend.core.duckdb.log_cron_run", lambda *a, **kw: None)
     monkeypatch.setattr("backend.cron.jobs.sync._ingest_with_adaptive_followups", fake_ingest_followups)
     monkeypatch.setattr("backend.cron.jobs.sync._claim_heavy_refresh", lambda sid: False)
-    monkeypatch.setattr("backend.cron_progress.start_progress", lambda *a, **kw: None)
-    monkeypatch.setattr("backend.cron_progress.end_progress", lambda *a, **kw: None)
-    monkeypatch.setattr("backend.cron_progress.cleanup_progress_and_reap", lambda *a, **kw: None)
+    monkeypatch.setattr("backend.cron.scheduler.start_progress", lambda *a, **kw: None)
+    monkeypatch.setattr("backend.cron.scheduler.end_progress", lambda *a, **kw: None)
+    monkeypatch.setattr("backend.cron.scheduler.cleanup_progress_and_reap", lambda *a, **kw: None)
     monkeypatch.setattr(
         "backend.utils.telemetry.flush_usage_log", lambda sid: flush_contexts.append(get_process_context())
     )
@@ -1022,9 +1022,8 @@ def test_contract_6_safety_gate_under_fla_dev_no_crons(log_discovery_test_source
 
 
 def test_contract_8_malformed_corrupt_caps_and_analyst_denial(log_discovery_test_source, tmp_path, monkeypatch):
-    from backend.core.metadata.quarantine import list_quarantine_evidence
-
-    from backend.core import quarantine
+    import backend.core.metadata.ingest_log as quarantine
+    from backend.core.metadata.ingest_log import list_quarantine_evidence
 
     service_id = log_discovery_test_source["service_id"]
     monkeypatch.setattr(quarantine, "QUARANTINE_ITEM_CAP", 2)
@@ -1392,7 +1391,7 @@ def test_contract_1_manual_trigger_endpoint(full_sync_test_source):
                 "backend.core.duckdb.start_cron_run",
                 side_effect=lambda src, task: started.setdefault("task", task) and "run-full-sweep-contract-456",
             ),
-            patch("backend.cron_progress.start_progress"),
+            patch("backend.cron.scheduler.start_progress"),
             patch("backend.cron.jobs.sync._run_full_sweep"),
             patch("backend.repositories.dashboard.invalidate_service"),
         ):
@@ -1457,8 +1456,8 @@ def test_contract_3_usage_log_attribution_cron_full_sync(full_sync_test_source, 
     monkeypatch.setattr("backend.core.duckdb.log_cron_run", lambda *a, **kw: None)
     monkeypatch.setattr("backend.core.duckdb.update_cron_duration", lambda *a, **kw: None)
     monkeypatch.setattr("backend.core.ingest.ingest", fake_ingest)
-    monkeypatch.setattr("backend.cron_progress.start_progress", lambda *a, **kw: None)
-    monkeypatch.setattr("backend.cron_progress.end_progress", lambda *a, **kw: None)
+    monkeypatch.setattr("backend.cron.scheduler.start_progress", lambda *a, **kw: None)
+    monkeypatch.setattr("backend.cron.scheduler.end_progress", lambda *a, **kw: None)
     monkeypatch.setattr(
         "backend.utils.telemetry.flush_usage_log", lambda sid: flush_contexts.append(get_process_context())
     )
@@ -1511,7 +1510,7 @@ def test_contract_4_safety_gate_under_fla_dev_no_crons(full_sync_test_source, mo
 
 
 def _patch_full_sweep_env(monkeypatch, src, *, defer: bool = False, run_id: int = 777):
-    monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda *a, **kw: defer)
+    monkeypatch.setattr("backend.utils.telemetry.should_defer_cron", lambda *a, **kw: defer)
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: src)
     start_cron = MagicMock(return_value=run_id)
     log_cron = MagicMock()
@@ -1519,8 +1518,8 @@ def _patch_full_sweep_env(monkeypatch, src, *, defer: bool = False, run_id: int 
     monkeypatch.setattr("backend.core.duckdb.start_cron_run", start_cron)
     monkeypatch.setattr("backend.core.duckdb.log_cron_run", log_cron)
     monkeypatch.setattr("backend.core.duckdb.update_cron_duration", finalize)
-    monkeypatch.setattr("backend.cron_progress.start_progress", MagicMock())
-    monkeypatch.setattr("backend.cron_progress.end_progress", MagicMock())
+    monkeypatch.setattr("backend.cron.scheduler.start_progress", MagicMock())
+    monkeypatch.setattr("backend.cron.scheduler.end_progress", MagicMock())
     return start_cron, log_cron, finalize
 
 
@@ -1537,7 +1536,7 @@ def test_contract_5_to_8_deferral_budget_high_scale_and_corrupt_rows(full_sync_t
     start_cron.assert_called_once()
 
     # Contract 6: Adaptive budget scaling
-    monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda *a, **kw: False)
+    monkeypatch.setattr("backend.utils.telemetry.should_defer_cron", lambda *a, **kw: False)
     for file_count, total_bytes, exp_files, exp_sec in (
         (3000, 100_000_000, 5000, 300),
         (50, 1_000_000, 50000, 1200),
@@ -1589,7 +1588,7 @@ def test_contract_5_to_8_deferral_budget_high_scale_and_corrupt_rows(full_sync_t
     # Contract 7: High-Scale mode prefix discovery attribution
     monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: True)
     monkeypatch.setattr(
-        "backend.celery_status.celery_queue_depths", lambda: ({"fastly:discovery": 6000, "fastly:convert": 100}, True)
+        "backend.celery_app.celery_queue_depths", lambda: ({"fastly:discovery": 6000, "fastly:convert": 100}, True)
     )
     discover = MagicMock(return_value=12)
     monkeypatch.setattr("backend.core.ingest.discover_prefix", discover)
@@ -1674,8 +1673,8 @@ def _gap_heal_ctx(*, run_id: int = 888, accounting_return=None, accounting_side_
             side_effect=lambda *a, **k: start_calls.append(a) or run_id,
         ),
         patch("backend.core.duckdb.log_cron_run", side_effect=lambda *a, **k: log_calls.append((a, k))),
-        patch("backend.cron_progress.start_progress"),
-        patch("backend.cron_progress.end_progress"),
+        patch("backend.cron.scheduler.start_progress"),
+        patch("backend.cron.scheduler.end_progress"),
         patch("backend.cron.jobs._common.finalize_cron_duration"),
         patch(
             "backend.cron.jobs.sync._run_full_sweep",
@@ -1699,7 +1698,7 @@ class TestGapHealContract:
                     "backend.core.duckdb.start_cron_run",
                     side_effect=lambda src, task: started.setdefault("task", task) and "run-gap-heal-contract-101",
                 ),
-                patch("backend.cron_progress.start_progress"),
+                patch("backend.cron.scheduler.start_progress"),
                 patch("backend.cron.jobs.sync._run_gap_heal"),
                 patch("backend.repositories.dashboard.invalidate_service"),
             ):
@@ -1715,7 +1714,7 @@ class TestGapHealContract:
             with (
                 patch("backend.core.duckdb.start_cron_run", side_effect=CronLeaseHeldError("Already running")),
                 patch(
-                    "backend.cron_progress.list_active_runs",
+                    "backend.cron.scheduler.list_active_runs",
                     return_value=[{"service_id": service_id, "task": "gap_heal", "run_id": "run-gap-heal-active-202"}],
                 ),
                 patch("backend.repositories.dashboard.invalidate_service"),
@@ -1806,7 +1805,7 @@ class TestGapHealContract:
 
         # Contract 6: Politeness deferral
         with (
-            patch("backend.utils.active_requests.should_defer_cron", return_value=True),
+            patch("backend.utils.telemetry.should_defer_cron", return_value=True),
             _gap_heal_ctx() as (
                 start_calls,
                 _,
@@ -1872,7 +1871,7 @@ def test_ledger_sweep_manual_trigger_and_quarantine_endpoints(monkeypatch):
     try:
         with (
             patch("backend.core.duckdb.start_cron_run", return_value="run-sweep-101"),
-            patch("backend.cron_progress.start_progress"),
+            patch("backend.cron.scheduler.start_progress"),
             patch("backend.cron.jobs.rum_ledger._run_ledger_sweep"),
             patch("backend.repositories.dashboard.invalidate_service"),
         ):
@@ -1884,7 +1883,7 @@ def test_ledger_sweep_manual_trigger_and_quarantine_endpoints(monkeypatch):
         with (
             patch("backend.core.duckdb.start_cron_run", side_effect=CronLeaseHeldError("Already running")),
             patch(
-                "backend.cron_progress.list_active_runs",
+                "backend.cron.scheduler.list_active_runs",
                 return_value=[{"service_id": SERVICE_ID, "task": "ledger_sweep", "run_id": "run-sweep-active"}],
             ),
             patch("backend.repositories.dashboard.invalidate_service"),
@@ -1947,9 +1946,9 @@ def _setup_ledger_sweep_env(monkeypatch, *, run_id=888, sweep_fn=None):
     monkeypatch.setattr(
         "backend.cron.jobs._common.finalize_cron_duration", lambda *a, **k: finalize_calls.append((a, k))
     )
-    monkeypatch.setattr("backend.cron_progress.start_progress", start_progress)
-    monkeypatch.setattr("backend.cron_progress.end_progress", end_progress)
-    monkeypatch.setattr("backend.cron_progress.cleanup_progress_and_reap", MagicMock())
+    monkeypatch.setattr("backend.cron.scheduler.start_progress", start_progress)
+    monkeypatch.setattr("backend.cron.scheduler.end_progress", end_progress)
+    monkeypatch.setattr("backend.cron.scheduler.cleanup_progress_and_reap", MagicMock())
     monkeypatch.setattr("backend.cron.jobs.metadata._log_and_add_progress", MagicMock())
     if sweep_fn is not None:
         monkeypatch.setattr("backend.core.ingest.sweep_ledger_once", sweep_fn)
@@ -2099,7 +2098,7 @@ def test_sweep_ledger_reclaim_and_queue_depth_guard(monkeypatch, queue_depth, ex
     monkeypatch.setattr("backend.core.metadata.base.get_con", lambda s: FakeCon())
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda s: {"prefix": "", "bucket": "b"})
     monkeypatch.setattr("backend.core.ingest.discover_prefix", lambda *a, **k: 0)
-    monkeypatch.setattr("backend.celery_status.celery_queue_depths", lambda: ({"q.ingest": queue_depth}, True))
+    monkeypatch.setattr("backend.celery_app.celery_queue_depths", lambda: ({"q.ingest": queue_depth}, True))
     mock_convert = MagicMock()
     monkeypatch.setattr("backend.core.ingest.convert_batch_files.delay", mock_convert)
 

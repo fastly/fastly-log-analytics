@@ -10,7 +10,7 @@ from typing import Any
 
 import duckdb
 
-from backend.core.metric_expressions import coalesce
+from backend.core.log_fields import coalesce
 from backend.models.common import FiltersDict
 from backend.repositories._base import (
     QueryRunner,
@@ -28,8 +28,13 @@ from backend.repositories.utils.response_cache import (
 )
 from backend.repositories.utils.response_shaping import (
     PERF_SECTION_DEFAULTS,
+    PERF_TTL_BUCKETS,
+    PERF_TTL_LAST_BUCKET,
     WATERFALL_KEYS,
     empty_performance_aggregates,
+    shape_perf_scatter_row,
+    shape_perf_top_url_row,
+    shape_perf_ttl_dist_rows,
     shape_performance_asn_rows,
     shape_waterfall_avg,
 )
@@ -51,30 +56,11 @@ def _top_latency_sql(col: str, min_reqs: int) -> str:
 TOP_URLS = _top_latency_sql("url", 5)
 TOP_ASNS = _top_latency_sql("asn", 10)
 
-_TTL_BUCKETS = (
-    (0, "0s"),
-    (10, "<10s"),
-    (30, "<30s"),
-    (60, "<1m"),
-    (300, "<5m"),
-    (600, "<10m"),
-    (1800, "<30m"),
-    (3600, "<1h"),
-    (10800, "<3h"),
-    (21600, "<6h"),
-    (43200, "<12h"),
-    (86400, "<1d"),
-    (259200, "<3d"),
-    (604800, "<1w"),
-    (1209600, "<2w"),
-    (2592000, "<30d"),
-    (7776000, "<90d"),
-    (31536000, "<1y"),
-)
+_TTL_BUCKETS = PERF_TTL_BUCKETS
 TTL_DIST = (
     "SELECT CASE "
     + " ".join(f"WHEN ttl <= {lim} THEN '{lbl}'" for lim, lbl in _TTL_BUCKETS)
-    + " ELSE '>1y' END as bucket, count(*) as count, min(ttl) as min_ttl "
+    + f" ELSE '{PERF_TTL_LAST_BUCKET}' END as bucket, count(*) as count, min(ttl) as min_ttl "
     "FROM {temp_table} WHERE ttl IS NOT NULL GROUP BY 1 ORDER BY min_ttl"
 )
 
@@ -264,17 +250,7 @@ def _compute_performance_aggregates(
             _need(sec, req_cols)
 
     def _apply_top_urls(rolled: dict[str, Any]) -> None:
-        results["top_urls"] = [
-            {
-                "url": r["value"],
-                "requests": r["requests"],
-                "avg": r["avg_ms"],
-                "p50": r["p50_ms"],
-                "p95": r["p95_ms"],
-                "p99": r["p99_ms"],
-            }
-            for r in rolled["rows"]
-        ]
+        results["top_urls"] = [shape_perf_top_url_row(r) for r in rolled["rows"]]
         results["approx"] = True
 
     def _apply_top_asns(rolled: dict[str, Any]) -> None:
@@ -344,9 +320,7 @@ def _compute_performance_aggregates(
         if "top_urls" in live_sections and temp_table:
             _t = time.perf_counter()
             url_res = runner.execute(SQL.TOP_URLS.format(temp_table=temp_table, sort_idx=sort_idx)).fetchall()
-            results["top_urls"] = [
-                {"url": r[0], "requests": r[1], "avg": r[2], "p50": r[3], "p95": r[4], "p99": r[5]} for r in url_res
-            ]
+            results["top_urls"] = [shape_perf_top_url_row(r) for r in url_res]
             timer.mark("top_urls_query", _t, source="live", activity="compute", current_execution=True)
 
         if "top_asns" in live_sections and temp_table:
@@ -358,7 +332,7 @@ def _compute_performance_aggregates(
         if "ttl_dist" in live_sections and temp_table:
             _t = time.perf_counter()
             ttl_res = runner.execute(SQL.TTL_DIST.format(temp_table=temp_table)).fetchall()
-            results["ttl_dist"] = [{"bucket": r[0], "count": r[1]} for r in ttl_res]
+            results["ttl_dist"] = shape_perf_ttl_dist_rows(ttl_res)
             timer.mark("ttl_dist_query", _t, source="live", activity="compute", current_execution=True)
 
         if "scatter_waterfall" in live_sections:
@@ -385,7 +359,7 @@ def _compute_performance_aggregates(
             waterfall_payload = shape_waterfall_avg(None)
             for r in combined_rows:
                 if r[0] == "s":
-                    scatter.append({"origin": r[1], "edge": r[2], "cache": r[3]})
+                    scatter.append(shape_perf_scatter_row(r[1], r[2], r[3]))
                 else:
                     waterfall_payload = shape_waterfall_avg({k: r[i + 4] for i, k in enumerate(WATERFALL_KEYS)})
             if _want_scatter:

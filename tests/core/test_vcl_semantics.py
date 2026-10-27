@@ -14,14 +14,33 @@ from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import patch
 
-import backend.provision.declarative.generators as gen
-import backend.utils.vcl_safety as vs
 import pytest
-from backend.core.fastly.rum_provisioning import RUM_ASSET_FETCH_NAME, generate_rum_asset_fetch_vcl
-from backend.provision.declarative.generators import generate_consolidated_snippet
-from backend.provision.declarative.state import CmcdConfig, FeatureState, LogFieldsConfig
-from backend.provision.session_scoring_vcl import DEFAULT_ASSET_EXT_REGEX, recv_snippet, resolve_exclude_url_regex
-from backend.provision.utils import (
+
+import backend.core.log_fields as vs
+import backend.provision.declarative.reconciler as gen
+import backend.provision.fastly_api as fa
+import backend.routers.services.core as sc
+from backend.config import path_within_dir
+from backend.core.fastly.client import RUM_ASSET_FETCH_NAME, generate_rum_asset_fetch_vcl
+from backend.core.log_fields import (
+    MAX_REGEX_BYTES,
+    LintResult,
+    RegexValidationError,
+    VclSafetyError,
+    generate_log_format,
+    lint_log_format,
+    lint_vcl,
+    log_format_to_vcl_log,
+    validate_log_format_macro,
+    validate_quoted_literal,
+    validate_recv_exclusion_regex_with_lint,
+    validate_url_exclusion_regex,
+)
+from backend.core.rollups._common import quote_path_list
+from backend.core.sql_validator import escape_sql_literal
+from backend.provision import cmcd_fields as orch
+from backend.provision import generate_capture_vcl
+from backend.provision.cli import (
     ANALYTICS_LOG_LAYOUT,
     VclBuilder,
     analytics_log_path,
@@ -31,34 +50,27 @@ from backend.provision.utils import (
     rum_log_path,
     rum_minute_list_prefix,
 )
-from backend.utils.sql_validator import escape_sql_literal
-from backend.utils.vcl_safety import LintResult, VclSafetyError, validate_log_format_macro, validate_quoted_literal
-from backend.utils.vcl_utils import lint_log_format, log_format_to_vcl_log
-from backend.utils.vcl_validator import (
-    MAX_REGEX_BYTES,
-    RegexValidationError,
-    lint_vcl,
-    validate_recv_exclusion_regex_with_lint,
-    validate_url_exclusion_regex,
-)
-
-import backend.provision.fastly_api as fa
-import backend.routers.services.core as sc
-from backend.config import path_within_dir
-from backend.core.log_fields import generate_log_format
-from backend.core.rollups._common import quote_path_list
-from backend.provision import cmcd_fields as orch
-from backend.provision import generate_capture_vcl
 from backend.provision.cmcd_fields import (
     _CMCD_FIELD_NAMES,
     get_cmcd_fields,
     reconcile_cmcd_custom_fields,
+)
+from backend.provision.declarative.reconciler import (
+    CmcdConfig,
+    FeatureState,
+    LogFieldsConfig,
+    generate_consolidated_snippet,
 )
 from backend.provision.fastly_api import (
     SESSION_COOKIE_ALLOWLIST,
     _session_cookie_hash_vcl,
     delete_remote_frontend,
     deploy_remote_frontend,
+)
+from backend.provision.session_scoring_orchestrator import (
+    DEFAULT_ASSET_EXT_REGEX,
+    recv_snippet,
+    resolve_exclude_url_regex,
 )
 
 FALCO_INSTALLED = shutil.which("falco") is not None
@@ -419,7 +431,7 @@ def test_log_format_to_vcl_log_variants():
     ],
 )
 def test_lint_log_format_json_rejections(fmt: str, substr: str):
-    with patch("backend.utils.vcl_utils.shutil.which", return_value=None):
+    with patch("backend.core.log_fields.shutil.which", return_value=None):
         ok, msg = lint_log_format(fmt)
     assert ok is False
     assert not substr or substr in msg.lower()
@@ -429,7 +441,7 @@ def test_lint_log_format_json_rejections(fmt: str, substr: str):
 
 def test_lint_log_format_json_and_falco_paths():
     valid = '{"timestamp":"%{time.start}V","ip":"%{client.ip}V"}'
-    with patch("backend.utils.vcl_utils.shutil.which", return_value=None):
+    with patch("backend.core.log_fields.shutil.which", return_value=None):
         ok, msg = lint_log_format(valid)
         assert ok is True
         assert "falco" in msg.lower() or "valid" in msg.lower()
@@ -440,9 +452,9 @@ def test_lint_log_format_json_and_falco_paths():
         assert lint_log_format(valid)[0] is True
 
     with (
-        patch("backend.utils.vcl_utils.shutil.which", return_value="/usr/bin/falco"),
+        patch("backend.core.log_fields.shutil.which", return_value="/usr/bin/falco"),
         patch(
-            "backend.utils.vcl_utils._run_falco_lint",
+            "backend.core.log_fields._run_falco_lint",
             return_value=(1, "falco 0.4.2 linting…", "[ERROR] vcl_log syntax invalid at line 9"),
         ),
     ):
@@ -451,8 +463,8 @@ def test_lint_log_format_json_and_falco_paths():
         assert "[ERROR]" in msg_err
 
     with (
-        patch("backend.utils.vcl_utils.shutil.which", return_value="/usr/bin/falco"),
-        patch("backend.utils.vcl_utils._run_falco_lint", return_value=(2, "falco: unexpected token near 'log'", "")),
+        patch("backend.core.log_fields.shutil.which", return_value="/usr/bin/falco"),
+        patch("backend.core.log_fields._run_falco_lint", return_value=(2, "falco: unexpected token near 'log'", "")),
     ):
         assert lint_log_format('{"timestamp":"%{time.start}V"}')[0] is False
 
@@ -542,7 +554,7 @@ def test_validate_url_exclusion_regex_and_lint_vcl():
             validate_url_exclusion_regex(bad_re)
         assert exc.value.reason == "invalid_regex"
 
-    with patch("backend.utils.vcl_validator.shutil.which", return_value=None):
+    with patch("backend.core.log_fields.shutil.which", return_value=None):
         res = lint_vcl("ignore me", snippet_name="test")
         assert res.skipped is True
         assert res.ok is True
@@ -765,7 +777,7 @@ def test_draft_version_lifecycle_and_rollback(caplog):
         pass
     assert custom_msgs == ["V9", "A9"]
 
-    with caplog.at_level(logging.WARNING, logger="backend.provision.draft_version"):
+    with caplog.at_level(logging.WARNING, logger="backend.provision"):
         with pytest.raises(ValueError, match="original"):
             with draft_version("svc", "t", base_version=5, call=_FastlyDraftFake(rollback_raises=True)):
                 raise ValueError("original")

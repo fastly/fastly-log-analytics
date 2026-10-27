@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol
 
-from backend.core.clickhouse_client import ClickHouseError
+from backend.core.clickhouse import ClickHouseError
 from backend.high_scale._common import visible_publication_fence_sql
 
 if TYPE_CHECKING:

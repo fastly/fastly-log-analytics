@@ -78,7 +78,6 @@ convention as :mod:`.slow_urls`.
 from __future__ import annotations
 
 import logging
-import sys
 from typing import cast
 
 from .. import metric_expressions
@@ -706,13 +705,6 @@ def backfill_perf_dims_bundles(service_id: str, source: dict) -> int:
     )
 
 
-sys.modules["backend.core.rollups.origin_summary"] = sys.modules[__name__]
-sys.modules["backend.core.rollups.origin_latency_ts"] = sys.modules[__name__]
-sys.modules["backend.core.rollups.slow_urls"] = sys.modules[__name__]
-sys.modules["backend.core.rollups.perf_latency"] = sys.modules[__name__]
-sys.modules["backend.core.rollups.perf_dims"] = sys.modules[__name__]
-
-
 # ── Network rollup writers (folded from backend.core.rollups.network) ────────
 
 from ._common import (
@@ -1229,17 +1221,3 @@ def backfill_network_geo_bundles(service_id: str, source: dict) -> int:
         builder=build_network_geo_bundles,
         logger=logger,
     )
-
-
-for _alias in (
-    "pop_health",
-    "network_quality",
-    "network_rtt",
-    "network_summary",
-    "network_speed",
-    "network_health_heatmap",
-    "network_health_geo",
-):
-    sys.modules[f"backend.core.rollups.{_alias}"] = sys.modules[__name__]
-
-sys.modules["backend.core.rollups.network"] = sys.modules[__name__]

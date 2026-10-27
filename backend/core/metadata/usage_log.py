@@ -11,14 +11,13 @@ from __future__ import annotations
 import atexit
 import logging
 import os
-import sys
 import threading
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict
 
-from backend.core.metadata import pg_connection
+from backend.core.metadata import base as pg_connection
 from backend.core.metadata.base import (
     _DATA_DIR,
     _validate_service_id_or_raise,
@@ -1300,14 +1299,6 @@ def clear_slow_queries(service_id: str) -> int:
     return int(cur.rowcount or 0)
 
 
-sys.modules["backend.core.metadata.slow_queries"] = sys.modules[__name__]
-_meta_pkg = sys.modules.get("backend.core.metadata")
-if _meta_pkg is not None:
-    setattr(_meta_pkg, "slow_queries", sys.modules[__name__])
-_backend_pkg = sys.modules.get("backend")
-if _backend_pkg is not None and hasattr(_backend_pkg, "_MODULE_ALIASES"):
-    _backend_pkg._MODULE_ALIASES["backend.core.metadata.slow_queries"] = "backend.core.metadata.usage_log"
-
 # ── Cron & ingest job run tracking (folded from cron_log.py) ──
 
 import json
@@ -1402,7 +1393,7 @@ def _publish_cron_run_change(
     ts: str | None = None,
 ) -> None:
     try:
-        from backend.cron_runs_publisher import publisher
+        from backend.cron.scheduler import publisher
 
         payload: dict[str, Any] = {
             "event": "cron_run_changed",
@@ -2355,23 +2346,3 @@ def cron_busy(service_id: str) -> bool:
         (service_id, now),
     ).fetchone()
     return bool(row and row["n"] > 0)
-
-
-_self_usage = sys.modules[__name__]
-for _mod_name in (
-    "backend.core.metadata.usage_log_db",
-    "backend.core.metadata.slow_queries",
-    "backend.core.metadata.cron_log",
-):
-    sys.modules[_mod_name] = _self_usage
-if "backend.core.metadata" in sys.modules:
-    _meta_pkg = sys.modules["backend.core.metadata"]
-    for _attr in ("usage_log_db", "slow_queries", "cron_log"):
-        setattr(_meta_pkg, _attr, _self_usage)
-if "backend" in sys.modules and hasattr(sys.modules["backend"], "_MODULE_ALIASES"):
-    for _mod_name in (
-        "backend.core.metadata.usage_log_db",
-        "backend.core.metadata.slow_queries",
-        "backend.core.metadata.cron_log",
-    ):
-        sys.modules["backend"]._MODULE_ALIASES[_mod_name] = __name__

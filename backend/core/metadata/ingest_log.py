@@ -12,7 +12,6 @@ import hashlib
 import json
 import logging
 import os
-import sys
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -20,7 +19,7 @@ from pathlib import Path
 from typing import Any, BinaryIO
 
 from backend import config
-from backend.core.metadata import pg_connection
+from backend.core.metadata import base as pg_connection
 from backend.core.metadata.base import (
     _ingested_filenames_cache,
     _ingested_filenames_cache_lock,
@@ -28,7 +27,7 @@ from backend.core.metadata.base import (
     get_con,
     get_con_readonly,
 )
-from backend.utils.atomic_write import atomic_write_bytes
+from backend.utils.telemetry import atomic_write_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -1349,7 +1348,3 @@ def purge_evidence(service_id: str, item_id: int | None = None) -> dict[str, int
                 raise OSError(f"could not delete quarantine evidence {item['id']}")
         purged = delete_quarantine_evidence(service_id, [int(item["id"]) for item in items])
         return {"purged": purged}
-
-
-sys.modules["backend.core.metadata.quarantine"] = sys.modules[__name__]
-sys.modules["backend.core.quarantine"] = sys.modules[__name__]

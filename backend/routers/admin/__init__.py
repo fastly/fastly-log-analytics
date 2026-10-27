@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import sys as _sys
-
 from backend.models.admin import SustainedLossAlert  # noqa: F401
 from backend.utils.dir_size import _DIR_SIZE_CACHE, _get_dir_size  # noqa: F401
 from backend.utils.sse import (  # noqa: F401
@@ -11,34 +9,6 @@ from backend.utils.sse import (  # noqa: F401
     _AbortableQueue,
     _stream_from_worker,
 )
-
-# Unregister unwound admin submodules from backend._MODULE_ALIASES so standard
-# Python import resolution loads their dedicated files under backend/routers/admin/.
-_backend_mod = _sys.modules.get("backend")
-_global_aliases = getattr(_backend_mod, "_MODULE_ALIASES", None)
-if isinstance(_global_aliases, dict):
-    for _unwound_submod in (
-        "backend.routers.admin._helpers",
-        "backend.routers.admin._router",
-        "backend.routers.admin.admin_queries",
-        "backend.routers.admin.bot_sources",
-        "backend.routers.admin.clickhouse",
-        "backend.routers.admin.compaction",
-        "backend.routers.admin.downloads",
-        "backend.routers.admin.events",
-        "backend.routers.admin.health",
-        "backend.routers.admin.high_scale",
-        "backend.routers.admin.ingest",
-        "backend.routers.admin.log_accounting",
-        "backend.routers.admin.quarantine",
-        "backend.routers.admin.sync_status",
-    ):
-        _global_aliases.pop(_unwound_submod, None)
-    _global_aliases["backend.routers.admin_queries"] = "backend.routers.admin.admin_queries"
-    _global_aliases["backend.routers.admin_usage"] = "backend.routers.admin.ingest"
-    _global_aliases["backend.routers.high_scale"] = "backend.routers.admin.high_scale"
-    _global_aliases["backend.routers.admin.system_metrics"] = "backend.routers.admin.health"
-    _global_aliases["backend.system_metrics_sampler"] = "backend.routers.admin.health"
 
 from . import _helpers as _helpers  # noqa: E402, F401
 from . import _router as _router  # noqa: E402, F401
@@ -76,17 +46,7 @@ for _src_mod in (_helpers, bot_sources, ingest, quarantine, downloads, high_scal
         if not _attr_name.startswith("__") and not hasattr(compaction, _attr_name):
             setattr(compaction, _attr_name, _attr_val)
 
-# Legacy module aliases that remain virtual (no dedicated file at that import path).
 system_metrics = health
-_sys.modules[f"{__name__}.system_metrics"] = health
-_sys.modules["backend.routers.admin_usage"] = ingest
-_sys.modules["backend.routers.admin_queries"] = admin_queries
-_sys.modules["backend.routers.high_scale"] = high_scale
-_sys.modules["backend.system_metrics_sampler"] = health
-if "backend.routers" in _sys.modules:
-    setattr(_sys.modules["backend.routers"], "admin_queries", admin_queries)
-    setattr(_sys.modules["backend.routers"], "admin_usage", ingest)
-    setattr(_sys.modules["backend.routers"], "high_scale", high_scale)
 
 
 __all__ = [

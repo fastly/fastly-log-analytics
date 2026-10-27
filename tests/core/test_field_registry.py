@@ -3,17 +3,20 @@
 from __future__ import annotations
 
 import pytest
-from backend.core.field_registry import BY_CODE, BY_GROUP, REGISTRY, LogField
 from hypothesis import given
 from hypothesis import strategies as st
 
-from backend.core import field_registry as fr
+import backend.core.log_fields as fr
 from backend.core import log_fields as lf
 from backend.core.log_fields import (
     _BUILTIN_FIELD_NAMES,
+    BY_CODE,
+    BY_GROUP,
     DEFAULT_OFF_FIELD_IDS,
     INSIGHT_DEFINITIONS,
     LOG_FIELD_CATALOG,
+    REGISTRY,
+    LogField,
 )
 
 

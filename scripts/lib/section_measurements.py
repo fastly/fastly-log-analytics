@@ -22,9 +22,10 @@ import duckdb
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
-from backend.models._base import ClickHouseQueryObservation
-from backend.models.dashboard import HistoryObservation, ReaderCoverage
 from pydantic import TypeAdapter, ValidationError
+
+from backend.models.analytics import HistoryObservation, ReaderCoverage
+from backend.models.common import ClickHouseQueryObservation
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:

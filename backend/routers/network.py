@@ -11,8 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from backend.core.request_context import RequestContext, build_request_context
 from backend.core.storage import execute_with_stale_view_retry
-from backend.models._base import DEFAULT_ERROR_RESPONSES
-from backend.models.network import (
+from backend.models.analytics import (
     NetworkBundleRequest,
     NetworkBundleResponse,
     NetworkHealthRequest,
@@ -24,6 +23,7 @@ from backend.models.network import (
     PopHealthListResponse,
     TransportMetrics,
 )
+from backend.models.common import DEFAULT_ERROR_RESPONSES
 from backend.repositories import network as network_repo
 from backend.repositories._base import SectionTimer, _safe_table
 from backend.repositories.utils.response_cache import cache_result

@@ -1,63 +1,46 @@
 """Hourly Top-N + bundled rollups for the dashboard.
 
-Carved out of a single 2,045-line ``rollups.py`` for 10.9 file-size
-sweep. Submodules:
+Submodules:
 
 - :mod:`._common` — constants, validators, paths, query builders, atomic
   marker IO. Imported by every other sub-module.
-- :mod:`.time_series` — per-hour 1-minute time_series.parquet bundles.
-- :mod:`.sessions` — per-hour per-(ip, ja4) sessions.parquet bundles.
-- :mod:`.hour_bundles` — combine per-field hour parquets into
-  ``hour_bundled/hour=H/all_fields.parquet`` + retention sweep + backfill.
-- :mod:`.day_bundles` — combine per-field day parquets into
+- :mod:`.time_series_rollups` — per-hour 1-minute time_series.parquet bundles.
+- :mod:`.overview_rollups` — per-hour overview.parquet bundles + backfill.
+- :mod:`.session_rollups` — per-hour per-(ip, ja4) sessions.parquet bundles.
+- :mod:`.rollup_coverage` — rollup partition discovery, coverage indexing, and
+  window read planning.
+- :mod:`.day_bundles` — combine per-field hour/day parquets into
+  ``hour_bundled/hour=H/all_fields.parquet`` and
   ``day_bundled/day=D/all_fields.parquet`` + closed-day compactor.
 - :mod:`.recompute` — per-tick recompute + one-shot backfill + cleanup +
-  the shared per-field COPY driver.
-- :mod:`.wellknown_bots` — pre-materialised bot-prefiltered rollup +
-  read path.
-
-External surface (preserved verbatim from the pre-split file — every
-symbol on the right-hand side of an existing
-``from backend.core.rollups import ...`` keeps working):
-
-  Public writers:
-    build_time_series_bundles
-    build_session_bundles
-    bundle_hours
-    bundle_days, backfill_day_bundles, compact_closed_days_to_daily
-    recompute_touched_hours, backfill_rollups
-    cleanup_old_rollups
-    recompute_wellknown_bots_rollup, read_wellknown_bots_rollup
-
-  Test-touched / cross-package internals:
-    _is_safe_ident, _safe_table_for, _VIRTUAL_FIELD_BACKING
-    _rollups_root, _hour_bundled_root, _day_bundled_root
-    _build_copy_query, _build_virtual_field_copy_query
-    _publish_field_partitions, _get_fields
-    TOP_K, DAY_BUNDLE_FILENAME, DAY_BUNDLE_TOP_K,
-    TIME_SERIES_BUNDLE_FILENAME, SESSIONS_BUNDLE_FILENAME
-    _run_per_field_copy, _cleanup_per_field_after_bundle
+  the shared per-field COPY driver + RUM aggregate rollups.
+- :mod:`.origin_dims` — origin, network, and performance rollup writers.
+- :mod:`.security_dims` — security, NGWAF bots, and well-known bots rollup writers.
 """
 
 from __future__ import annotations
 
-import sys
-
-from . import day_bundles, origin_dims, recompute, security_dims
+from . import (
+    day_bundles,
+    origin_dims,
+    overview_rollups,
+    recompute,
+    rollup_coverage,
+    security_dims,
+    session_rollups,
+    time_series_rollups,
+)
 
 network = origin_dims
 perf_latency = origin_dims
 hour_bundles = day_bundles
 partial_hour = day_bundles
-time_series = recompute
+time_series = time_series_rollups
 rum = recompute
 spec = recompute
 ngwaf_bots = security_dims
 wellknown_bots = security_dims
 
-# Re-exports — pull every public symbol up so callers continue to use
-# the flat ``backend.core.rollups.X`` path. Order doesn't matter; no
-# side-effect imports here.
 from ._common import (
     _VIRTUAL_FIELD_BACKING,
     DAY_BUNDLE_FILENAME,
@@ -153,6 +136,10 @@ from .origin_dims import (
     build_pop_health_bundles,
     build_slow_urls_bundles,
 )
+from .overview_rollups import (
+    backfill_overview_bundles,
+    build_overview_bundles,
+)
 from .recompute import (
     ADMIN_BACKFILLS,
     DAY_COMPACTORS,
@@ -163,10 +150,6 @@ from .recompute import (
     backfill_missing_hour_bundles,
     backfill_missing_hour_ip_spread,
     backfill_missing_rum_aggregates,
-    backfill_overview_bundles,
-    build_overview_bundles,
-    build_session_bundles,
-    build_time_series_bundles,
     cleanup_old_rollups,
     recompute_rum_aggregates,
     recompute_touched_hours,
@@ -186,6 +169,8 @@ from .security_dims import (
     read_wellknown_bots_rollup,
     recompute_wellknown_bots_rollup,
 )
+from .session_rollups import build_session_bundles
+from .time_series_rollups import build_time_series_bundles
 
 # Back-compat submodule attribute aliases on the rollups package
 network_health_geo = network
@@ -198,29 +183,11 @@ pop_health = network
 origin_summary = origin_dims
 origin_latency_ts = origin_dims
 slow_urls = origin_dims
-overview = recompute
-sessions = recompute
-rollup_coverage = recompute
+overview = overview_rollups
+sessions = session_rollups
 perf_dims = perf_latency
 security_proxies = security_dims
 verified_bots_ts = security_dims
-
-_backend_pkg = sys.modules.get("backend")
-if _backend_pkg is not None and hasattr(_backend_pkg, "_MODULE_ALIASES"):
-    _backend_pkg._MODULE_ALIASES.update(
-        {
-            "backend.utils.ngwaf": "backend.core.rollups.security_dims",
-            "backend.core.rollups.ngwaf_bots": "backend.core.rollups.security_dims",
-            "backend.core.rollups.wellknown_bots": "backend.core.rollups.security_dims",
-            "backend.core.rollups.hour_bundles": "backend.core.rollups.day_bundles",
-            "backend.core.rollups.partial_hour": "backend.core.rollups.day_bundles",
-            "backend.core.rollups.time_series": "backend.core.rollups.recompute",
-            "backend.core.rollups.overview": "backend.core.rollups.recompute",
-            "backend.core.rollups.sessions": "backend.core.rollups.recompute",
-            "backend.repositories.rollup_coverage": "backend.core.rollups.recompute",
-            "backend.repositories._rollup_planner": "backend.core.rollups.recompute",
-        }
-    )
 
 __all__ = [
     # Public writers
@@ -344,4 +311,8 @@ __all__ = [
     "_get_fields",
     "_run_per_field_copy",
     "_cleanup_per_field_after_bundle",
+    "rollup_coverage",
+    "overview_rollups",
+    "session_rollups",
+    "time_series_rollups",
 ]

@@ -26,14 +26,43 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 from backend.core.local_compaction import compact_local_partitions
-from backend.core.metadata.cron_log import CronLeaseHeldError
-from backend.core.query_attribution import current_attribution, derive_from_process_context
-from backend.core.query_registry import query_registry
-from backend.core.storage._ducklake import _ducklake_attach, ducklake_table_name
-from backend.core.storage.buffer import _commit_buffer_impl
-from backend.core.storage.rum_schema import CLIENT_VITALS_ARROW_SCHEMA
-from backend.cron.decorators import CronHeartbeat
-from backend.cron.jobs.metric_snapshot import (
+from fastapi import HTTPException
+from starlette.testclient import TestClient
+from tests._helpers.config_fakes import fetch_metric_snapshot_history as _get_history
+
+import backend.core.metadata as metadata_db
+import backend.core.metadata.base as pgc
+import backend.core.metadata.usage_log as usage_log_db
+import backend.core.storage._core as buffer_mod
+import backend.cron.jobs.duckdb_recycle as _recycle
+import backend.cron.jobs.maintenance as expire
+import backend.cron.jobs.maintenance as optimize
+import backend.cron.jobs.metric_snapshots as ms_mod
+import backend.cron.scheduler as decorators
+from backend.core import duckdb as _db
+from backend.core import duckdb as duckdb_mod
+from backend.core import duckdb_pool as _pool
+from backend.core import rum_ingest as rum_ingest_mod
+from backend.core import storage as storage_mod
+from backend.core.faro_versions import DEFAULT_FARO_VERSION
+from backend.core.ingest import sweep_rum_ledger_once
+from backend.core.metadata.base import get_con
+from backend.core.metadata.usage_log import CronLeaseHeldError
+from backend.core.request_context import get_service_id, get_source, require_admin
+from backend.core.request_telemetry import current_attribution, derive_from_process_context, query_registry
+from backend.core.storage._core import (
+    CLIENT_VITALS_ARROW_SCHEMA,
+    _commit_buffer_impl,
+    _ducklake_attach,
+    ducklake_table_name,
+)
+from backend.cron import scheduler as sched
+from backend.cron.jobs import metric_snapshots
+from backend.cron.jobs import rum_commit as rum_commit_mod
+from backend.cron.jobs import rum_ledger as rum_ledger_mod
+from backend.cron.jobs import rum_sync as rum_sync_mod
+from backend.cron.jobs.metadata import run_duckdb_recycle
+from backend.cron.jobs.metric_snapshots import (
     _run_metric_snapshot,
     _safe_record,
     _sample_active_queries,
@@ -43,36 +72,8 @@ from backend.cron.jobs.metric_snapshot import (
     _sample_ingest_ledger,
     _sample_os_vitals,
 )
-from backend.cron.lifecycle import record_skip_row
-from backend.deps import get_service_id, get_source, require_admin
-from fastapi import HTTPException
-from starlette.testclient import TestClient
-from tests._helpers.config_fakes import fetch_metric_snapshot_history as _get_history
-
-from backend.core import duckdb as _db
-from backend.core import duckdb as duckdb_mod
-from backend.core import duckdb_pool as _pool
-from backend.core import duckdb_recycle as _recycle
-from backend.core import metadata as metadata_db
-from backend.core import metric_snapshots
-from backend.core import rum_ingest as rum_ingest_mod
-from backend.core import storage as storage_mod
-from backend.core.faro_versions import DEFAULT_FARO_VERSION
-from backend.core.ingest import sweep_rum_ledger_once
-from backend.core.metadata import pg_connection as pgc
-from backend.core.metadata import usage_log_db
-from backend.core.metadata.base import get_con
-from backend.core.storage import buffer as buffer_mod
-from backend.cron import decorators
-from backend.cron import scheduler as sched
-from backend.cron.jobs import compaction as expire
-from backend.cron.jobs import compaction as optimize
-from backend.cron.jobs import metric_snapshot as ms_mod
-from backend.cron.jobs import rum_commit as rum_commit_mod
-from backend.cron.jobs import rum_ledger as rum_ledger_mod
-from backend.cron.jobs import rum_sync as rum_sync_mod
-from backend.cron.jobs.metadata import run_duckdb_recycle
 from backend.cron.scheduler import (
+    CronHeartbeat,
     Scheduler,
     _check_buffer_backlog,
     _check_disk_space,
@@ -81,6 +82,7 @@ from backend.cron.scheduler import (
     _log_and_add_progress,
     _resolve_rum_sync_interval,
     dev_mode_no_crons,
+    record_skip_row,
 )
 from backend.main import app
 from backend.provision.rum_orchestrator_v2 import rum_vcl_fingerprint
@@ -285,10 +287,10 @@ def mock_orchestration_env(monkeypatch):
         mock_con.execute.return_value.fetchall.return_value = []
         yield mock_con
 
-    import backend.core.storage._ducklake as _dl
+    import backend.core.storage._core as _dl
 
     monkeypatch.setattr("backend.core.duckdb.get_connection", mock_get_connection)
-    monkeypatch.setattr("backend.core.rollups.rum.recompute_rum_aggregates", MagicMock())
+    monkeypatch.setattr("backend.core.rollups.recompute.recompute_rum_aggregates", MagicMock())
     monkeypatch.setattr(_dl, "_ducklake_attach", MagicMock())
 
 
@@ -310,7 +312,7 @@ def _mock_progress(monkeypatch) -> tuple[MagicMock, MagicMock, MagicMock, MagicM
         ("end_progress", end_p),
         ("cleanup_progress_and_reap", cleanup_p),
     ]:
-        monkeypatch.setattr(f"backend.cron_progress.{name}", fn)
+        monkeypatch.setattr(f"backend.cron.scheduler.{name}", fn)
     return start_p, add_p, end_p, cleanup_p
 
 
@@ -489,7 +491,7 @@ def test_progress_and_compare_and_set_version_kwargs(
     mock_fos(lambda request: httpx.Response(404))
     add_progress_calls: list[tuple] = []
     seen_kwargs: list[dict] = []
-    monkeypatch.setattr("backend.cron_progress.add_progress", lambda r, e: add_progress_calls.append((r, e)))
+    monkeypatch.setattr("backend.cron.scheduler.add_progress", lambda r, e: add_progress_calls.append((r, e)))
 
     async def fake_download(service_id, version, token, *, status_cb=None, **kwargs):
         seen_kwargs.append(kwargs)
@@ -803,7 +805,7 @@ def test_politeness_gate_not_deferred_for_rum_sync_or_commit(monkeypatch, rum_sy
     ingest_mock = MagicMock(return_value=iter([("started", 1), ("done", 0)]))
     monkeypatch.setattr("backend.cron.jobs.rum_sync.ingest_rum_logs", ingest_mock)
     monkeypatch.setattr("backend.cron.jobs.rum_sync._reconcile_faro_bundle", lambda sid, rid: True)
-    monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda job, sid: True)
+    monkeypatch.setattr("backend.utils.telemetry.should_defer_cron", lambda job, sid: True)
     _mock_progress(monkeypatch)
 
     rum_sync_mod._run_rum_sync.__wrapped__(_RUM_DISC_SERVICE_ID)
@@ -956,7 +958,7 @@ def test_lease_held_is_clean_skip(cron_fn, sid, cfg, src, high_scale, monkeypatc
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda s: src)
     monkeypatch.setattr("backend.core.duckdb.start_cron_run", MagicMock(side_effect=CronLeaseHeldError("held")))
     monkeypatch.setattr("backend.core.duckdb.log_cron_run", log_mock)
-    monkeypatch.setattr("backend.cron_progress.end_progress", end_progress_mock)
+    monkeypatch.setattr("backend.cron.scheduler.end_progress", end_progress_mock)
 
     cron_fn(sid)
     log_mock.assert_not_called()
@@ -1041,7 +1043,7 @@ def test_manual_trigger_endpoints_lifecycle(endpoint, sid, src, cfg, job_patch_t
         _override_service_deps(src, sid) as client,
         patch("backend.config.load_config", return_value=cfg),
         patch("backend.core.duckdb.start_cron_run", return_value=run_id),
-        patch("backend.cron_progress.start_progress"),
+        patch("backend.cron.scheduler.start_progress"),
         patch(job_patch_target),
         patch("backend.repositories.dashboard.invalidate_service"),
     ):
@@ -1056,7 +1058,7 @@ def test_manual_trigger_endpoints_lifecycle(endpoint, sid, src, cfg, job_patch_t
             patch("backend.config.load_config", return_value=cfg),
             patch("backend.core.duckdb.start_cron_run", side_effect=CronLeaseHeldError("Already running")),
             patch(
-                "backend.cron_progress.list_active_runs",
+                "backend.cron.scheduler.list_active_runs",
                 return_value=[{"service_id": sid, "task": task_name, "run_id": run_id}],
             ),
             patch("backend.repositories.dashboard.invalidate_service"),
@@ -1072,7 +1074,7 @@ def test_manual_trigger_endpoints_lifecycle(endpoint, sid, src, cfg, job_patch_t
         with (
             _override_service_deps(src, sid) as client,
             patch("backend.core.duckdb.start_cron_run", side_effect=CronLeaseHeldError("Lease lock busy")),
-            patch("backend.cron_progress.list_active_runs", return_value=[]),
+            patch("backend.cron.scheduler.list_active_runs", return_value=[]),
             patch("backend.repositories.dashboard.invalidate_service"),
         ):
             resp = client.post(endpoint, headers={"x-fastly-service-id": sid})
@@ -1168,13 +1170,14 @@ def test_rum_commit_lifecycle_contracts(scenario, monkeypatch, mock_orchestratio
 
     monkeypatch.setattr("backend.core.storage.commit_buffer", mock_commit)
     monkeypatch.setattr(
-        "backend.core.rollups.rum.rum_count_and_latest", lambda con: (60, datetime(2026, 10, 11, 14, 30, tzinfo=UTC))
+        "backend.core.rollups.recompute.rum_count_and_latest",
+        lambda con: (60, datetime(2026, 10, 11, 14, 30, tzinfo=UTC)),
     )
     mock_pub = MagicMock()
     mock_pub.publish.side_effect = lambda sid, snap: sse_published.append((sid, snap))
-    monkeypatch.setattr("backend.sync_status_publisher.publisher", mock_pub)
+    monkeypatch.setattr("backend.celery_app.publisher", mock_pub)
     monkeypatch.setattr(
-        "backend.sync_status_snapshot.compute_sync_status_cached", lambda sid: {"service_id": sid, "sync_stage": "idle"}
+        "backend.cron.scheduler.compute_sync_status_cached", lambda sid: {"service_id": sid, "sync_stage": "idle"}
     )
 
     rum_commit_mod._run_rum_commit.__wrapped__(_RUM_COMMIT_SERVICE_ID)
@@ -1282,7 +1285,7 @@ def test_rum_commit_aggregates_self_heal_on_stale_lake(monkeypatch):
         "backend.core.storage.commit_buffer",
         lambda src, table_name="logs", **kw: {"files_committed": 1, "rows_committed": 5},
     )
-    monkeypatch.setattr("backend.core.rollups.rum.recompute_rum_aggregates", flaky_recompute)
+    monkeypatch.setattr("backend.core.rollups.recompute.recompute_rum_aggregates", flaky_recompute)
     monkeypatch.setattr(
         "backend.core.storage.execute_with_stale_view_retry", lambda con, source, fn, *a, **kw: _retry_once(con, fn)
     )
@@ -1389,7 +1392,7 @@ def test_sweep_rum_ledger_reclaim_and_queue_depth_guard(queue_depth, expected_re
     monkeypatch.setattr("backend.core.metadata.base.get_con", lambda s: FakeCon())
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda s: {"prefix": "", "bucket": "b"})
     monkeypatch.setattr("backend.core.ingest.discover_rum_prefix", lambda *a, **k: 0)
-    monkeypatch.setattr("backend.celery_status.celery_queue_depths", lambda: ({"q.ingest": queue_depth}, True))
+    monkeypatch.setattr("backend.celery_app.celery_queue_depths", lambda: ({"q.ingest": queue_depth}, True))
     mock_convert = MagicMock()
     monkeypatch.setattr("backend.core.ingest.convert_batch_rum_files.delay", mock_convert)
 
@@ -1433,14 +1436,14 @@ def test_elapsed_since_zeros_correctly_for_just_passed():
 
 
 def test_extract_log_text_returns_empty_for_none_run_id():
-    with patch("backend.cron_progress.get_progress") as mock_gp:
+    with patch("backend.cron.scheduler.get_progress") as mock_gp:
         assert _extract_log_text(None) == ""
     mock_gp.assert_not_called()
 
 
 @pytest.mark.parametrize("progress_ret", [None, []])
 def test_extract_log_text_returns_empty_when_no_or_empty_progress(progress_ret):
-    with patch("backend.cron_progress.get_progress", return_value=progress_ret):
+    with patch("backend.cron.scheduler.get_progress", return_value=progress_ret):
         assert _extract_log_text(999) == ""
 
 
@@ -1450,7 +1453,7 @@ def test_extract_log_text_formats_events_with_type_prefix():
         {"type": "error", "message": "Connection refused"},
         {"type": "done", "message": "Sync finished"},
     ]
-    with patch("backend.cron_progress.get_progress", return_value=fake_events):
+    with patch("backend.cron.scheduler.get_progress", return_value=fake_events):
         out = _extract_log_text(1)
 
     assert "[STATUS] Starting sync" in out
@@ -1466,7 +1469,7 @@ def test_extract_log_text_filters_out_progress_events():
         {"type": "progress", "current": 2, "total": 8},
         {"type": "done", "message": "All done"},
     ]
-    with patch("backend.cron_progress.get_progress", return_value=fake_events):
+    with patch("backend.cron.scheduler.get_progress", return_value=fake_events):
         out = _extract_log_text(1)
 
     assert out.count("\n") == 1
@@ -1480,7 +1483,7 @@ def test_extract_log_text_skips_events_without_message():
         {"type": "status"},
         {"type": "error", "message": "Real error"},
     ]
-    with patch("backend.cron_progress.get_progress", return_value=fake_events):
+    with patch("backend.cron.scheduler.get_progress", return_value=fake_events):
         assert _extract_log_text(1) == "[ERROR] Real error"
 
 
@@ -1752,7 +1755,7 @@ def test_sync_jobs_registers_hourly_rollup_heal_for_readwrite_service():
 def test_log_and_add_progress_persists_event_to_cron_progress():
     event = {"type": "status", "message": "Step 1"}
     with (
-        patch("backend.cron_progress.add_progress") as mock_add,
+        patch("backend.cron.scheduler.add_progress") as mock_add,
         patch("backend.config.load_config", return_value={"name": "Test Service"}),
     ):
         _log_and_add_progress(run_id=42, service_id="svc-1", event=event, job_name="sync")
@@ -1762,7 +1765,7 @@ def test_log_and_add_progress_persists_event_to_cron_progress():
 def test_log_and_add_progress_handles_missing_message_silently():
     event = {"type": "progress", "current": 1, "total": 8}
     with (
-        patch("backend.cron_progress.add_progress") as mock_add,
+        patch("backend.cron.scheduler.add_progress") as mock_add,
         patch("backend.config.load_config", return_value=None),
         patch("backend.cron.scheduler.logger") as mock_logger,
     ):
@@ -1777,7 +1780,7 @@ def test_log_and_add_progress_handles_missing_message_silently():
 def test_log_and_add_progress_uses_error_logger_for_error_type():
     event = {"type": "error", "message": "DB locked"}
     with (
-        patch("backend.cron_progress.add_progress"),
+        patch("backend.cron.scheduler.add_progress"),
         patch("backend.config.load_config", return_value={"name": "svc"}),
         patch("backend.cron.scheduler.logger") as mock_logger,
     ):
@@ -1789,7 +1792,7 @@ def test_log_and_add_progress_uses_error_logger_for_error_type():
 def test_log_and_add_progress_uses_warning_logger_for_warning_type():
     event = {"type": "warning", "message": "slow query"}
     with (
-        patch("backend.cron_progress.add_progress"),
+        patch("backend.cron.scheduler.add_progress"),
         patch("backend.config.load_config", return_value={"name": "svc"}),
         patch("backend.cron.scheduler.logger") as mock_logger,
     ):
@@ -1879,7 +1882,7 @@ def test_check_buffer_backlog_never_raises_on_probe_failure():
 
 def test_apscheduler_max_instances_1_waits_for_cleanup(monkeypatch, caplog):
     apscheduler = pytest.importorskip("apscheduler.schedulers.background")
-    from backend.cron import decorators as sched_mod
+    import backend.cron.scheduler as sched_mod
 
     monkeypatch.setattr(sched_mod, "_CRON_HARD_CAP_S", 0.1)
 
@@ -1950,14 +1953,14 @@ def test_usage_log_phase_30s_timeout_pattern_does_not_block_caller():
 
 
 def test_metadata_db_init_lock_has_finite_timeout():
-    from backend.core.metadata import pg_connection
+    import backend.core.metadata.base as pg_connection
 
     src = inspect.getsource(pg_connection.get_pg_pool)
     assert "timeout=" in src
 
 
 def test_cron_task_waits_for_cleanup_after_watchdog_threshold(monkeypatch, caplog):
-    from backend.cron import decorators as sched_mod
+    import backend.cron.scheduler as sched_mod
 
     monkeypatch.setattr(sched_mod, "_CRON_HARD_CAP_S", 0.05)
 
@@ -1982,7 +1985,7 @@ def test_cron_task_waits_for_cleanup_after_watchdog_threshold(monkeypatch, caplo
 
 
 def test_cron_task_propagates_normal_return(monkeypatch):
-    from backend.cron import decorators as sched_mod
+    import backend.cron.scheduler as sched_mod
 
     monkeypatch.setattr(sched_mod, "_CRON_HARD_CAP_S", 60)
     sentinel = object()
@@ -1997,7 +2000,7 @@ def test_cron_task_propagates_normal_return(monkeypatch):
 
 
 def test_cron_task_preserves_telemetry_context(monkeypatch):
-    from backend.cron import decorators as sched_mod
+    import backend.cron.scheduler as sched_mod
     from backend.utils.telemetry import get_process_context
 
     captured = {}
@@ -2011,7 +2014,7 @@ def test_cron_task_preserves_telemetry_context(monkeypatch):
 
 
 def test_cron_task_heartbeat_thread_releases_its_connection(monkeypatch):
-    from backend.cron import decorators as sched_mod
+    import backend.cron.scheduler as sched_mod
 
     monkeypatch.setattr(sched_mod, "_CRON_HARD_CAP_S", 60)
 
@@ -2103,7 +2106,7 @@ def test_dev_local_allowlist_skips_high_scale_services(monkeypatch):
         patch("backend.core.duckdb.get_source_for_service", return_value={"name": "svc-high"}),
         patch("backend.core.duckdb.is_configured", return_value=True),
         patch(
-            "backend.high_scale.registry_bootstrap.get_high_scale_service_registry",
+            "backend.high_scale.ingest_controller.get_high_scale_service_registry",
             return_value=type("Registry", (), {"resolve": lambda self, service_id: object()})(),
         ),
         patch.object(s._sched, "add_job") as add_job,
@@ -2413,10 +2416,10 @@ class TestLogCronRunDurationIsFloat:
             patch("backend.core.duckdb.log_cron_run", side_effect=fake_log_cron_run),
             patch("backend.core.duckdb.refresh_config_status"),
             patch("backend.core.ingest.ingest", side_effect=fake_ingest),
-            patch("backend.cron_progress.cleanup_progress"),
-            patch("backend.cron_progress.start_progress"),
-            patch("backend.cron_progress.end_progress"),
-            patch("backend.cron_progress.get_progress", return_value=[]),
+            patch("backend.cron.scheduler.cleanup_progress"),
+            patch("backend.cron.scheduler.start_progress"),
+            patch("backend.cron.scheduler.end_progress"),
+            patch("backend.cron.scheduler.get_progress", return_value=[]),
             patch("backend.core.duckdb.backfill_fastly_edge_writes"),
             patch("backend.core.duckdb.reconcile_fastly_stats"),
             patch("backend.utils.telemetry.flush_usage_log"),
@@ -2474,9 +2477,9 @@ def stub_cron_log(monkeypatch) -> dict[str, MagicMock]:
 
 
 def _stub_progress_and_duration(monkeypatch) -> None:
-    monkeypatch.setattr("backend.cron_progress.cleanup_progress_and_reap", lambda: None)
-    monkeypatch.setattr("backend.cron_progress.start_progress", lambda *args, **kwargs: None)
-    monkeypatch.setattr("backend.cron_progress.end_progress", lambda *args, **kwargs: None)
+    monkeypatch.setattr("backend.cron.scheduler.cleanup_progress_and_reap", lambda: None)
+    monkeypatch.setattr("backend.cron.scheduler.start_progress", lambda *args, **kwargs: None)
+    monkeypatch.setattr("backend.cron.scheduler.end_progress", lambda *args, **kwargs: None)
     monkeypatch.setattr("backend.cron.jobs._common.finalize_cron_duration", lambda *args, **kwargs: None)
 
 
@@ -2751,7 +2754,7 @@ def test_expire_finalizes_cron_lease_when_progress_fails(monkeypatch, failure_st
         raise RuntimeError(f"progress {failure_stage} failed")
 
     attr_map = {"cleanup": "cleanup_progress_and_reap", "start": "start_progress", "end": "end_progress"}
-    monkeypatch.setattr(f"backend.cron_progress.{attr_map[failure_stage]}", fail_progress)
+    monkeypatch.setattr(f"backend.cron.scheduler.{attr_map[failure_stage]}", fail_progress)
 
     if failure_stage == "end":
         with pytest.raises(RuntimeError, match=f"progress {failure_stage} failed"):
@@ -2779,7 +2782,7 @@ def test_expire_cron_context_attributes_queries_and_flushes_usage(monkeypatch):
         return {"snapshots_expired_count": 0}
 
     monkeypatch.setattr("backend.core.storage.run_cloud_maintenance", run_maintenance)
-    monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda *_args: False)
+    monkeypatch.setattr("backend.utils.telemetry.should_defer_cron", lambda *_args: False)
     monkeypatch.setattr("backend.utils.telemetry.start_call_tracking", lambda: None)
     monkeypatch.setattr(
         "backend.utils.telemetry.flush_usage_log",
@@ -2836,7 +2839,7 @@ def test_ducklake_maintenance_sql_is_registered_with_cron_attribution(monkeypatc
 def test_expire_politeness_gate_applies_to_cron_but_manual_trigger_bypasses(monkeypatch):
     src = {"name": "svc-expire-contract", "service_id": "svc-expire-contract"}
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda _sid: src)
-    monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda *_args: True)
+    monkeypatch.setattr("backend.utils.telemetry.should_defer_cron", lambda *_args: True)
     maintenance = MagicMock(return_value={"snapshots_expired_count": 0})
     monkeypatch.setattr("backend.core.storage.run_cloud_maintenance", maintenance)
 
@@ -2983,14 +2986,14 @@ def optimize_test_source(monkeypatch, tmp_path):
 
 class TestOptimizeJob:
     def test_returns_when_should_defer_cron_true(self, monkeypatch):
-        monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda *a, **kw: True)
+        monkeypatch.setattr("backend.utils.telemetry.should_defer_cron", lambda *a, **kw: True)
         get_src = MagicMock()
         monkeypatch.setattr("backend.core.duckdb.get_source_for_service", get_src)
         optimize._run_optimize.__wrapped__("svc-1")
         get_src.assert_not_called()
 
     def test_returns_when_source_missing(self, monkeypatch):
-        monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda *a, **kw: False)
+        monkeypatch.setattr("backend.utils.telemetry.should_defer_cron", lambda *a, **kw: False)
         monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: None)
         start = MagicMock()
         monkeypatch.setattr("backend.core.duckdb.start_cron_run", start)
@@ -3170,7 +3173,7 @@ class TestOptimizeJob:
     def test_contract_politeness_gating_and_manual_bypass(self, optimize_test_source):
         service_id = optimize_test_source["service_id"]
         with (
-            patch("backend.utils.active_requests.should_defer_cron", return_value=True),
+            patch("backend.utils.telemetry.should_defer_cron", return_value=True),
             patch("backend.core.storage.optimize_table") as mock_opt,
         ):
             res = optimize._run_optimize.__wrapped__(service_id, manual=False)
@@ -3244,7 +3247,7 @@ def _mock_sched_job(interval_seconds: int) -> tuple[MagicMock, MagicMock]:
 
 def test_run_duckdb_recycle_rss_threshold_skip():
     with (
-        patch("backend.core.duckdb_recycle.maybe_graceful_restart", return_value=False),
+        patch("backend.cron.jobs.duckdb_recycle.maybe_graceful_restart", return_value=False),
         patch("backend.cron.jobs.metadata._recycle_rss_threshold_bytes", return_value=500 * 1024 * 1024),
         patch("backend.core.duckdb.current_rss_bytes", return_value=100 * 1024 * 1024),
         patch("backend.cron.jobs.metadata.recycle_once") as mock_recycle,
@@ -3257,11 +3260,11 @@ def test_run_duckdb_recycle_rss_threshold_skip():
 def test_run_duckdb_recycle_adaptive_expedite():
     mock_sched, mock_job = _mock_sched_job(3600)
     with (
-        patch("backend.core.duckdb_recycle.maybe_graceful_restart", return_value=False),
+        patch("backend.cron.jobs.duckdb_recycle.maybe_graceful_restart", return_value=False),
         patch("backend.cron.jobs.metadata._recycle_rss_threshold_bytes", return_value=1000 * 1024 * 1024),
         patch("backend.core.duckdb.current_rss_bytes", return_value=850 * 1024 * 1024),
         patch("backend.cron.scheduler.get_scheduler", return_value=mock_sched),
-        patch("backend.core.duckdb_recycle.recycle_interval_min", return_value=60.0),
+        patch("backend.cron.jobs.duckdb_recycle.recycle_interval_min", return_value=60.0),
         patch("backend.cron.jobs.metadata.recycle_once") as mock_recycle,
     ):
         result = run_duckdb_recycle.__wrapped__()
@@ -3273,11 +3276,11 @@ def test_run_duckdb_recycle_adaptive_expedite():
 def test_run_duckdb_recycle_adaptive_incomplete():
     mock_sched, mock_job = _mock_sched_job(3600)
     with (
-        patch("backend.core.duckdb_recycle.maybe_graceful_restart", return_value=False),
+        patch("backend.cron.jobs.duckdb_recycle.maybe_graceful_restart", return_value=False),
         patch("backend.cron.jobs.metadata._recycle_rss_threshold_bytes", return_value=0),
         patch("backend.core.duckdb.current_rss_bytes", return_value=200 * 1024 * 1024),
         patch("backend.cron.scheduler.get_scheduler", return_value=mock_sched),
-        patch("backend.core.duckdb_recycle.recycle_interval_min", return_value=60.0),
+        patch("backend.cron.jobs.duckdb_recycle.recycle_interval_min", return_value=60.0),
         patch(
             "backend.cron.jobs.metadata.recycle_once",
             return_value="interval: recycled 0/1 instance(s), freed ~0MB (incomplete: 1)",
@@ -3291,11 +3294,11 @@ def test_run_duckdb_recycle_adaptive_incomplete():
 def test_run_duckdb_recycle_adaptive_relax():
     mock_sched, mock_job = _mock_sched_job(120)
     with (
-        patch("backend.core.duckdb_recycle.maybe_graceful_restart", return_value=False),
+        patch("backend.cron.jobs.duckdb_recycle.maybe_graceful_restart", return_value=False),
         patch("backend.cron.jobs.metadata._recycle_rss_threshold_bytes", return_value=1000 * 1024 * 1024),
         patch("backend.core.duckdb.current_rss_bytes", side_effect=[1100 * 1024 * 1024, 400 * 1024 * 1024]),
         patch("backend.cron.scheduler.get_scheduler", return_value=mock_sched),
-        patch("backend.core.duckdb_recycle.recycle_interval_min", return_value=60.0),
+        patch("backend.cron.jobs.duckdb_recycle.recycle_interval_min", return_value=60.0),
         patch(
             "backend.cron.jobs.metadata.recycle_once", return_value="interval: recycled 1/1 instance(s), freed ~700MB"
         ),
@@ -3319,16 +3322,16 @@ def test_admin_duckdb_recycle_endpoint():
     client = TestClient(app)
     with (
         patch("backend.core.duckdb.current_rss_bytes", return_value=100 * 1024 * 1024),
-        patch("backend.core.duckdb_recycle._recycle_rss_threshold_bytes", return_value=500 * 1024 * 1024),
+        patch("backend.cron.jobs.duckdb_recycle._recycle_rss_threshold_bytes", return_value=500 * 1024 * 1024),
     ):
         resp = client.post("/api/admin/duckdb/recycle")
         assert resp.status_code == 200 and resp.json()["ok"] is True and resp.json()["status"] == "skipped"
 
     with (
         patch("backend.core.duckdb.current_rss_bytes", side_effect=[300 * 1024 * 1024, 200 * 1024 * 1024]),
-        patch("backend.core.duckdb_recycle._recycle_rss_threshold_bytes", return_value=500 * 1024 * 1024),
+        patch("backend.cron.jobs.duckdb_recycle._recycle_rss_threshold_bytes", return_value=500 * 1024 * 1024),
         patch(
-            "backend.core.duckdb_recycle.recycle_once",
+            "backend.cron.jobs.duckdb_recycle.recycle_once",
             return_value="manual_admin: recycled 1/1 instance(s), freed ~100MB",
         ),
     ):
@@ -3342,8 +3345,8 @@ def test_admin_duckdb_status_endpoint():
     client = TestClient(app)
     with (
         patch("backend.core.duckdb.current_rss_bytes", return_value=250 * 1024 * 1024),
-        patch("backend.core.duckdb_recycle._recycle_rss_threshold_bytes", return_value=1000 * 1024 * 1024),
-        patch("backend.core.duckdb_recycle.recycle_interval_min", return_value=60.0),
+        patch("backend.cron.jobs.duckdb_recycle._recycle_rss_threshold_bytes", return_value=1000 * 1024 * 1024),
+        patch("backend.cron.jobs.duckdb_recycle.recycle_interval_min", return_value=60.0),
     ):
         resp = client.get("/api/admin/duckdb/status")
         assert resp.status_code == 200
@@ -3464,7 +3467,7 @@ def test_a_failing_refresh_does_not_kill_the_loop_or_leak(baseline):
 
 @pytest.fixture
 def fast_heartbeat(monkeypatch):
-    monkeypatch.setattr("backend.cron.decorators.DEFAULT_INTERVAL_S", 0.02)
+    monkeypatch.setattr("backend.cron.scheduler.DEFAULT_INTERVAL_S", 0.02)
 
 
 def test_cron_task_leaks_nothing_when_the_executor_refuses_the_job(baseline, fast_heartbeat):
@@ -3535,7 +3538,7 @@ def _recent_hist(metric: str, **kwargs) -> list[dict]:
 )
 def test_metric_snapshot_tick_and_error_isolation(scenario):
     if scenario == "active_query":
-        with patch("backend.core.query_registry.query_registry.summary", return_value={"active_total": 3}):
+        with patch("backend.core.request_telemetry.query_registry.summary", return_value={"active_total": 3}):
             _run_metric_snapshot()
         assert _recent_hist("active_query_count")[-1]["value"] == 3.0
     elif scenario == "pool_wait":
@@ -3550,7 +3553,7 @@ def test_metric_snapshot_tick_and_error_isolation(scenario):
     elif scenario == "partial_failure":
         with (
             patch("backend.core.duckdb_pool.get_all_stats", side_effect=RuntimeError("boom")),
-            patch("backend.core.query_registry.query_registry.summary", return_value={"active_total": 7}),
+            patch("backend.core.request_telemetry.query_registry.summary", return_value={"active_total": 7}),
         ):
             _run_metric_snapshot()
         assert _recent_hist("active_query_count")[-1]["value"] == 7.0
@@ -3558,7 +3561,7 @@ def test_metric_snapshot_tick_and_error_isolation(scenario):
         with patch.object(metric_snapshots, "record_snapshot", side_effect=ValueError("bad metric")):
             _safe_record("bogus", 1.0)
     else:
-        with patch("backend.core.query_registry.query_registry.summary", side_effect=RuntimeError("boom")):
+        with patch("backend.core.request_telemetry.query_registry.summary", side_effect=RuntimeError("boom")):
             _sample_active_queries()
 
 
@@ -3566,7 +3569,7 @@ def test_metric_snapshot_tick_and_error_isolation(scenario):
     "reachable,depths,exp_ingest,exp_total", [(True, {"q.ingest": 4}, 4.0, 4.0), (False, {}, 0.0, 0.0)]
 )
 def test_sample_celery_queues_and_ingest_ledger(reachable, depths, exp_ingest, exp_total):
-    with patch("backend.celery_status.celery_queue_depths", return_value=(depths, reachable)):
+    with patch("backend.celery_app.celery_queue_depths", return_value=(depths, reachable)):
         _sample_celery_queues()
     assert _recent_hist("celery_broker_reachable")[-1]["value"] == (1.0 if reachable else 0.0)
     assert _recent_hist("celery_queue_depth")[-1]["value"] == exp_total
@@ -3574,7 +3577,7 @@ def test_sample_celery_queues_and_ingest_ledger(reachable, depths, exp_ingest, e
         assert _recent_hist("celery_queue_depth_q.ingest")[-1]["value"] == exp_ingest
         assert _recent_hist("celery_queue_depth_q.control")[-1]["value"] == 0.0
         with patch(
-            "backend.celery_status.ingest_ledger_summary", return_value={"discovered": 5, "claimed": 2, "committed": 9}
+            "backend.celery_app.ingest_ledger_summary", return_value={"discovered": 5, "claimed": 2, "committed": 9}
         ):
             _sample_ingest_ledger()
         assert _recent_hist("ingest_ledger_discovered")[-1]["value"] == 5.0
@@ -3683,7 +3686,7 @@ def test_sample_ingest_lag_skips_configs_without_service_id():
 
 
 def test_sample_active_queries_swallows_summary_exception():
-    with patch("backend.core.query_registry.query_registry.summary", side_effect=RuntimeError("boom")):
+    with patch("backend.core.request_telemetry.query_registry.summary", side_effect=RuntimeError("boom")):
         _sample_active_queries()
     pre = _get_history("active_query_count", since=datetime.now(UTC) - timedelta(seconds=5))
     assert pre == [] or all(r["value"] != 0 for r in pre[:0])
@@ -3742,13 +3745,13 @@ def test_metric_snapshot_samples_vitals(monkeypatch):
         "backend.core.duckdb_pool.get_all_stats",
         lambda: [{"service": "svc_test", "wait": {"p95_ms": 12.5}}],
     )
-    monkeypatch.setattr("backend.core.query_registry.query_registry.summary", lambda: {"active_total": 3})
+    monkeypatch.setattr("backend.core.request_telemetry.query_registry.summary", lambda: {"active_total": 3})
     monkeypatch.setattr(
-        "backend.core.storage._ducklake.get_admission_stats",
+        "backend.core.storage._core.get_admission_stats",
         lambda: {"svc_test": {"acquisitions": 2.0, "wait_ms_total": 40.0, "hold_ms_total": 100.0, "timeouts": 0.0}},
     )
-    monkeypatch.setattr("backend.celery_status.celery_queue_depths", lambda: ({"q.ingest": 5}, True))
-    monkeypatch.setattr("backend.celery_status.ingest_ledger_summary", lambda: {"discovered": 10, "claimed": 2})
+    monkeypatch.setattr("backend.celery_app.celery_queue_depths", lambda: ({"q.ingest": 5}, True))
+    monkeypatch.setattr("backend.celery_app.ingest_ledger_summary", lambda: {"discovered": 10, "claimed": 2})
     monkeypatch.setattr("os.path.exists", lambda p: "svc_test.duckdb" in p)
     monkeypatch.setattr("os.path.getsize", lambda p: 1048576)
 

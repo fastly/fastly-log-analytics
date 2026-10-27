@@ -7,7 +7,7 @@ from collections.abc import Callable, Iterable, Mapping
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from backend.core.high_scale_sections import HighScaleSections
+from backend.core.request_telemetry import HighScaleSections
 from backend.high_scale._common import (
     parse_time_window,
 )
@@ -30,8 +30,8 @@ if TYPE_CHECKING:
 
 from datetime import timedelta
 
-from backend.high_scale.publication import build_cmcd_projection_key
-from backend.models.performance import CmcdRequest
+from backend.high_scale.archive import build_cmcd_projection_key
+from backend.models.analytics import CmcdRequest
 from backend.repositories.utils.response_cache import ResponseMemo
 from backend.utils.bounded_cache import CacheRegistry
 

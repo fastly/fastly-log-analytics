@@ -230,7 +230,7 @@ def test_ip_in_whitelist_cidr_match():
 
 
 def test_validate_pii_policy_accepts_mask_ips():
-    from backend.core.share_db.validation import validate_pii_policy
+    from backend.core.share_db import validate_pii_policy
 
     assert validate_pii_policy({"mask_ips": True}) == {"mask_ips": True}
     assert validate_pii_policy(None) == {"mask_ips": False}
@@ -241,7 +241,8 @@ def test_validate_pii_policy_rejects_unenforced_controls_when_enabled():
     """mask_user_agent / mask_geo / redact_fields are not enforced anywhere;
     enabling them must error rather than be silently accepted-and-ignored."""
     import pytest
-    from backend.core.share_db.validation import InvalidPiiPolicyError, validate_pii_policy
+
+    from backend.core.share_db import InvalidPiiPolicyError, validate_pii_policy
 
     for policy in (
         {"mask_user_agent": True},
@@ -255,7 +256,7 @@ def test_validate_pii_policy_rejects_unenforced_controls_when_enabled():
 def test_validate_pii_policy_allows_disabled_unenforced_controls():
     """Turning the unenforced knobs OFF (or an empty redact_fields) is a
     harmless no-op — accepted, and dropped from the stored policy."""
-    from backend.core.share_db.validation import validate_pii_policy
+    from backend.core.share_db import validate_pii_policy
 
     out = validate_pii_policy({"mask_ips": True, "mask_user_agent": False, "mask_geo": False, "redact_fields": []})
     assert out == {"mask_ips": True}
@@ -263,7 +264,8 @@ def test_validate_pii_policy_allows_disabled_unenforced_controls():
 
 def test_validate_pii_policy_redact_fields_shape_error_precedes_rejection():
     import pytest
-    from backend.core.share_db.validation import InvalidPiiPolicyError, validate_pii_policy
+
+    from backend.core.share_db import InvalidPiiPolicyError, validate_pii_policy
 
     with pytest.raises(InvalidPiiPolicyError, match="list of strings"):
         validate_pii_policy({"redact_fields": "ip"})
@@ -276,7 +278,7 @@ def test_mask_ip_is_idempotent_on_already_masked_v4():
     """The /api/query path masks by value, then the analyst-response middleware
     runs the key-name masker over the SAME body. Without the idempotency guard
     an ``ip`` column would degrade from '1.2.3.xxx' to '[redacted]'."""
-    from backend.core.share_db.validation import mask_ip
+    from backend.core.share_db import mask_ip
 
     assert mask_ip("1.2.3.xxx") == "1.2.3.xxx"
 
@@ -287,14 +289,14 @@ def test_mask_ip_is_idempotent_on_already_masked_v4():
     ["203.0.113.7, 198.51.100.xxx", "999.0.0.xxx"],
 )
 def test_mask_ip_redacts_malformed_values_with_xxx_suffix(value):
-    from backend.core.share_db.validation import apply_pii_policy, mask_ip
+    from backend.core.share_db import apply_pii_policy, mask_ip
 
     assert mask_ip(value) == "[redacted]"
     assert apply_pii_policy({"client_ip": value}, {"mask_ips": True})["client_ip"] == "[redacted]"
 
 
 def test_mask_ip_values_masks_by_value_not_key():
-    from backend.core.share_db.validation import mask_ip_values
+    from backend.core.share_db import mask_ip_values
 
     out = mask_ip_values({"addr": "1.2.3.4", "url": "https://x/var/y", "country": "US"})
     assert out["addr"] == "1.2.3.xxx"  # masked despite the non-ip column name
@@ -303,7 +305,7 @@ def test_mask_ip_values_masks_by_value_not_key():
 
 
 def test_mask_ip_values_handles_ipv6_nested_and_xff():
-    from backend.core.share_db.validation import mask_ip_values
+    from backend.core.share_db import mask_ip_values
 
     out = mask_ip_values(
         {
@@ -633,7 +635,7 @@ def test_passcode_lookup_never_returns_oauth_invite():
     # Even handed the exact stored hash's plaintext is impossible; assert the
     # lookup returns None for ANY passcode against an OAuth invite. The email
     # has no passcode invite, so the no-rows timing-equalization path runs.
-    with patch("backend.core.share_db.invites._equalize_passcode_timing") as eq:
+    with patch("backend.core.share_db._equalize_passcode_timing") as eq:
         assert share_db.get_remote_invite_by_email_passcode("gate@corp.com", "anything-at-all-here") is None
         eq.assert_called_once()  # treated as "email not invited" (no passcode row)
     # Sanity: the invite genuinely exists on the OAuth path.
@@ -1027,7 +1029,7 @@ def test_get_remote_invite_timing_equalization():
     from unittest.mock import patch
 
     # 1. Call with a non-existent email -> must equalize timing once
-    with patch("backend.core.share_db.invites._equalize_passcode_timing") as mock_equalize:
+    with patch("backend.core.share_db._equalize_passcode_timing") as mock_equalize:
         res = share_db.get_remote_invite_by_email_passcode("nonexistent@example.com", "some-passcode")
         assert res is None
         mock_equalize.assert_called_once_with("some-passcode")
@@ -1042,7 +1044,7 @@ def test_get_remote_invite_timing_equalization():
         ip_whitelist=None,
         service_ids=[],
     )
-    with patch("backend.core.share_db.invites._equalize_passcode_timing") as mock_equalize:
+    with patch("backend.core.share_db._equalize_passcode_timing") as mock_equalize:
         res = share_db.get_remote_invite_by_email_passcode("existing_timing_test@example.com", "wrong-passcode")
         assert res is None
         mock_equalize.assert_not_called()
@@ -1638,9 +1640,9 @@ def test_get_share_audit_logs_filters_by_time_window():
 
 def test_rate_limiter_lru_eviction(monkeypatch):
     try:
-        from backend.utils.tunnel import rate_limiter
+        import backend.utils.tunnel as rate_limiter
     except ImportError:
-        from backend.utils.tunnel import manager as rate_limiter
+        import backend.utils.tunnel as rate_limiter
 
     # Set MAX_TRACKED_IPS to 3 for testing.
     monkeypatch.setattr(rate_limiter, "MAX_TRACKED_IPS", 3)
@@ -1758,7 +1760,8 @@ def test_validate_session_propagates_explicit_service_ids_null_revocation(monkey
 from pathlib import Path
 
 import pytest
-from backend.utils.tunnel.manager import (
+
+from backend.utils.tunnel import (
     TunnelState,
     clear_persisted_state,
     persist_direct_state,
@@ -1807,7 +1810,7 @@ def test_persist_then_restore_round_trip(state_file: Path):
 def test_persist_swallows_io_errors(monkeypatch):
     """persist_direct_state is best-effort — an IO failure must not
     propagate up to the tunnel manager and break setup."""
-    from backend.utils.tunnel import manager as state_mod
+    import backend.utils.tunnel as state_mod
 
     monkeypatch.setattr(state_mod, "_state_file_path", lambda: "/nonexistent/dir/x.json")
     # Must not raise — exception is logged + swallowed.
@@ -1828,7 +1831,7 @@ def test_clear_is_noop_when_file_missing(state_file: Path):
 
 
 def test_clear_swallows_io_errors(monkeypatch):
-    from backend.utils.tunnel import manager as state_mod
+    import backend.utils.tunnel as state_mod
 
     # Make the path point to something that exists but can't be removed
     # (a directory, in this case — os.remove on a dir raises OSError).

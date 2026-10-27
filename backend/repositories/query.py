@@ -10,7 +10,13 @@ from typing import Any
 
 import duckdb
 
-from backend.core.share_db.validation import IP_FAMILY_KEYS, SESSION_ID_KEYS, mask_ip_values
+from backend.core.share_db import IP_FAMILY_KEYS, SESSION_ID_KEYS, mask_ip_values
+from backend.core.sql_validator import (
+    SQLValidationError,
+    apply_user_query_limits,
+    is_simple_select_statement,
+    validate_user_sql,
+)
 from backend.repositories._base import (
     SectionTimer,
     _compact_sql_for_debug,
@@ -21,12 +27,6 @@ from backend.repositories.utils.response_shaping import build_query_response_env
 from backend.utils.bounded_cache import BoundedTTLCache
 from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry
 from backend.utils.date_utils import parse_iso_utc
-from backend.utils.sql_validator import (
-    SQLValidationError,
-    apply_user_query_limits,
-    is_simple_select_statement,
-    validate_user_sql,
-)
 from backend.utils.telemetry import get_tracked_calls, log_once_per, register_salt
 
 logger = logging.getLogger(__name__)

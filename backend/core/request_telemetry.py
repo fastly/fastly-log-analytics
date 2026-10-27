@@ -185,9 +185,6 @@ def derive_from_process_context(process_ctx: str | None) -> Attribution | None:
     return None
 
 
-sys.modules["backend.core.query_attribution"] = sys.modules[__name__]
-
-
 # ── OpenTelemetry SDK & RequestTelemetry ─────────────────────────────────────
 
 _SERVICE_NAME = "fastly-log-analytics"
@@ -637,13 +634,13 @@ class HighScaleSections:
 
 
 def compute_sync_status_cached(*args: Any, **kwargs: Any) -> Any:
-    from backend.cron_progress import compute_sync_status_cached as _compute
+    from backend.cron.scheduler import compute_sync_status_cached as _compute
 
     return _compute(*args, **kwargs)
 
 
 def get_high_scale_service_registry(*args: Any, **kwargs: Any) -> Any:
-    from backend.high_scale.registry_bootstrap import get_high_scale_service_registry as _get_registry
+    from backend.high_scale.ingest_controller import get_high_scale_service_registry as _get_registry
 
     return _get_registry(*args, **kwargs)
 
@@ -719,7 +716,7 @@ def refresh_durable_request_metrics(
     finished = threading.Event()
     try:
         from backend.core.duckdb import _safe_table_name, open_serving_connection
-        from backend.core.metadata.cron_log import latest_cron_per_task
+        from backend.core.metadata.usage_log import latest_cron_per_task
         from backend.utils.telemetry import process_context_scope
 
         service_id = source["name"]
@@ -1266,7 +1263,6 @@ def _deregister(qid: int, error: BaseException | None, *, peak_memory_mb: float 
 from backend.utils.telemetry import (  # noqa: E402, F401, I001
     _BANDS,
     _FIXED_TOKEN_DELTAS,
-    _FOLDED_TELEMETRY_SUBMODULES,
     _JSON_CONTENT_TYPES,
     _MIN_SALT_LEN,
     _MISSING,
@@ -1807,43 +1803,3 @@ threading.Thread(
     name="duckdb-pool-query-watchdog",
     daemon=True,
 ).start()
-
-_this_module = sys.modules[__name__]
-for _alias in (
-    "high_scale_sections",
-    "query_attribution",
-    "request_metrics",
-    "query_instrumentation",
-    "query_registry",
-):
-    sys.modules[f"backend.core.{_alias}"] = _this_module
-sys.modules["backend.request_metrics_observer"] = _this_module
-
-_core_pkg = sys.modules.get("backend.core")
-if _core_pkg is not None:
-    for _alias in (
-        "high_scale_sections",
-        "query_attribution",
-        "request_metrics",
-        "query_instrumentation",
-        "query_registry",
-    ):
-        setattr(_core_pkg, _alias, _this_module)
-
-_backend_pkg = sys.modules.get("backend")
-if _backend_pkg is not None:
-    setattr(_backend_pkg, "request_metrics_observer", _this_module)
-    if hasattr(_backend_pkg, "_MODULE_ALIASES"):
-        _backend_pkg._MODULE_ALIASES.update(
-            {
-                "backend.core.query_attribution": "backend.core.request_telemetry",
-                "backend.core.request_metrics": "backend.core.request_telemetry",
-                "backend.core.query_instrumentation": "backend.core.request_telemetry",
-                "backend.core.query_registry": "backend.core.request_telemetry",
-                "backend.request_metrics_observer": "backend.core.request_telemetry",
-                **{
-                    f"backend.utils.{_submod_name}": "backend.utils.telemetry"
-                    for _submod_name in _FOLDED_TELEMETRY_SUBMODULES
-                },
-            }
-        )

@@ -11,9 +11,9 @@ from urllib.parse import urlparse
 import duckdb
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Response
 
-from backend.deps import get_con, get_service_id
-from backend.models._base import DEFAULT_ERROR_RESPONSES
+from backend.core.request_context import get_con, get_service_id
 from backend.models.common import (
+    DEFAULT_ERROR_RESPONSES,
     Alert,
     AlertEvaluateData,
     AlertEvaluateRequest,

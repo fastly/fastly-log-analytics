@@ -10,15 +10,15 @@ from unittest.mock import patch
 
 import botocore.exceptions
 import pytest
-from backend.core.metadata.cron_log import CronLeaseHeldError
-from backend.models.services import CronSettingsPartial
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
+import backend.core.metadata as metadata_db
 from backend import config
 from backend.core import log_fields as lf_module
-from backend.core import metadata as metadata_db
+from backend.core.metadata.usage_log import CronLeaseHeldError
 from backend.main import app
+from backend.models.common import CronSettingsPartial
 from backend.provision import fastly_api
 from backend.provision.cmcd_fields import _CMCD_FIELD_NAMES
 from backend.routers.services import core as services_core
@@ -104,7 +104,7 @@ def _mutate_cfg_ctx(initial_cfg: dict | None = None, *extra_patches):
         stack.enter_context(patch("backend.config.mutate_config", side_effect=mutate_via_save(_save)))
         stack.enter_context(patch("backend.provision._sync_crontab"))
         stack.enter_context(patch("backend.core.metadata.record_audit"))
-        stack.enter_context(patch("backend.state_sync.export_admin_state"))
+        stack.enter_context(patch("backend.core.metadata.base.export_admin_state"))
         for p in extra_patches:
             stack.enter_context(p)
         yield saved
@@ -489,18 +489,22 @@ def _ngwaf_sync_ctx(
             patch("backend.core.duckdb.log_cron_run", side_effect=lambda *a, **kw: log_calls.append((a, kw)))
         )
         stack.enter_context(patch("backend.utils.bot_sources.build_matcher", return_value=matcher or (lambda ua: ())))
-        stack.enter_context(patch("backend.utils.ngwaf.oldest_unenriched_timestamp", return_value=oldest_ts))
+        stack.enter_context(
+            patch("backend.core.rollups.security_dims.oldest_unenriched_timestamp", return_value=oldest_ts)
+        )
         mock_fetch = stack.enter_context(
-            fetch_patch if fetch_patch is not None else patch("backend.utils.ngwaf.fetch_verified_bots_paged")
+            fetch_patch
+            if fetch_patch is not None
+            else patch("backend.core.rollups.security_dims.fetch_verified_bots_paged")
         )
         if upsert_calls is not None:
             stack.enter_context(
                 patch(
-                    "backend.utils.ngwaf.upsert_bots",
+                    "backend.core.rollups.security_dims.upsert_bots",
                     side_effect=lambda rows, ws, ts: upsert_calls.append((list(rows), ws, ts)),
                 )
             )
-            stack.enter_context(patch("backend.utils.ngwaf.cleanup_old_bots", return_value=0))
+            stack.enter_context(patch("backend.core.rollups.security_dims.cleanup_old_bots", return_value=0))
         yield log_calls, mock_fetch
 
 
@@ -520,7 +524,7 @@ def test_ngwaf_sync_happy_path_streams_page_status_then_done():
 
     with _ngwaf_sync_ctx(
         matcher=lambda ua: ({"id": "googlebot", "name": "Google Bot"},) if "Google" in (ua or "") else (),
-        fetch_patch=patch("backend.utils.ngwaf.fetch_verified_bots_paged", return_value=iter(pages)),
+        fetch_patch=patch("backend.core.rollups.security_dims.fetch_verified_bots_paged", return_value=iter(pages)),
         upsert_calls=upsert_calls,
     ):
         resp = _client().post("/api/services/svc1/ngwaf-sync")
@@ -536,7 +540,9 @@ def test_ngwaf_sync_happy_path_streams_page_status_then_done():
 
 def test_ngwaf_sync_fetcher_exception_yields_error_event_and_logs():
     with _ngwaf_sync_ctx(
-        fetch_patch=patch("backend.utils.ngwaf.fetch_verified_bots_paged", side_effect=RuntimeError("NGWAF 503"))
+        fetch_patch=patch(
+            "backend.core.rollups.security_dims.fetch_verified_bots_paged", side_effect=RuntimeError("NGWAF 503")
+        )
     ) as (log_calls, _):
         resp = _client().post("/api/services/svc1/ngwaf-sync")
 
@@ -646,9 +652,9 @@ def _seed_cache(service_id: str, **overrides) -> dict:
 
 
 @patch("backend.config.load_config")
-@patch("backend.core.fastly.service.get_active_version")
+@patch("backend.core.fastly.client.get_active_version")
 @patch("backend.core.fastly.client.fastly")
-@patch("backend.core.fastly.service.find_condition")
+@patch("backend.core.fastly.client.find_condition")
 def test_logging_settings_extracts_custom_condition(
     mock_find_condition, mock_fastly, mock_get_active_version, mock_load_config
 ):
@@ -675,9 +681,9 @@ def test_logging_settings_extracts_custom_condition(
 
 
 @patch("backend.config.load_config")
-@patch("backend.core.fastly.service.get_active_version")
+@patch("backend.core.fastly.client.get_active_version")
 @patch("backend.core.fastly.client.fastly")
-@patch("backend.core.fastly.service.find_condition")
+@patch("backend.core.fastly.client.find_condition")
 def test_logging_settings_custom_condition_fallback(
     mock_find_condition, mock_fastly, mock_get_active_version, mock_load_config
 ):
@@ -1137,7 +1143,7 @@ class TestCustomFieldCountLimits:
 
 # ── Merged from tests/routers/test_services_get_and_cron.py ──
 
-"""Tests for ``backend.routers.services.core`` and ``backend.routers.services.cron``."""
+"""Tests for ``backend.routers.services.core`` and ``backend.routers.services.core``."""
 
 
 import os
@@ -1145,17 +1151,17 @@ import time
 from unittest.mock import MagicMock, patch
 
 import pytest
-from backend.core.metadata.cron_log import (
+from fastapi.testclient import TestClient
+
+import backend.routers.services.core as _cron_router
+from backend.core.metadata.usage_log import (
     finalize_cron_run_if_running,
     log_cron_run,
     start_cron_run,
 )
-from backend.cron_progress import _progress, _run_metadata, end_progress, start_progress
-from fastapi.testclient import TestClient
-
+from backend.cron.scheduler import _progress, _run_metadata, end_progress, start_progress
 from backend.main import app
 from backend.routers.services import core as _core
-from backend.routers.services import cron as _cron_router
 from backend.services import service_manager
 from backend.services.service_manager import _get_dir_stats
 
@@ -1201,10 +1207,10 @@ def test_logging_settings_errors(client, tmp_path, monkeypatch):
     assert client.get(f"/api/services/{MOCK_SERVICE_ID}/logging-settings", headers=_SVC_HEADERS).status_code == 404
 
     _cfg_dir(tmp_path, monkeypatch, {"fastly_api_key": "tok"})
-    with patch("backend.core.fastly.service.get_active_version", return_value=None):
+    with patch("backend.core.fastly.client.get_active_version", return_value=None):
         assert client.get(f"/api/services/{MOCK_SERVICE_ID}/logging-settings", headers=_SVC_HEADERS).status_code == 400
 
-    with patch("backend.core.fastly.service.get_active_version", side_effect=RuntimeError("network")):
+    with patch("backend.core.fastly.client.get_active_version", side_effect=RuntimeError("network")):
         assert client.get(f"/api/services/{MOCK_SERVICE_ID}/logging-settings", headers=_SVC_HEADERS).status_code == 500
 
 
@@ -1245,9 +1251,9 @@ def test_logging_settings_parsing_and_defaults(
     fake_ep = {"format": "x", "period": 60, "path": "/raw/", "response_condition": resp_cond}
     fake_cond = {"statement": cond_stmt} if cond_stmt else None
     with (
-        patch("backend.core.fastly.service.get_active_version", return_value=42),
+        patch("backend.core.fastly.client.get_active_version", return_value=42),
         patch("backend.core.fastly.client.fastly", return_value=fake_ep),
-        patch("backend.core.fastly.service.find_condition", return_value=fake_cond),
+        patch("backend.core.fastly.client.find_condition", return_value=fake_cond),
     ):
         resp = client.get(f"/api/services/{MOCK_SERVICE_ID}/logging-settings", headers=_SVC_HEADERS)
     assert resp.status_code == 200
@@ -1583,7 +1589,7 @@ def test_validate_custom_vcl(client, tmp_path, monkeypatch):
 
     _cfg_dir(tmp_path, monkeypatch, {})
     with (
-        patch("backend.core.field_registry.validate_custom_field", return_value=[]),
+        patch("backend.core.log_fields.validate_custom_field", return_value=[]),
         patch("backend.provision.validate_log_format", return_value=[]),
         patch("backend.provision.load_log_format", return_value="format string"),
     ):
@@ -1596,7 +1602,7 @@ def test_validate_custom_vcl(client, tmp_path, monkeypatch):
 
     with (
         patch(
-            "backend.core.field_registry.validate_custom_field",
+            "backend.core.log_fields.validate_custom_field",
             return_value=["WARN: deprecated VCL function used", "Real syntax error"],
         ),
         patch("backend.provision.validate_log_format", return_value=[]),
@@ -1663,8 +1669,8 @@ def test_cron_log_hooks_bust_cache():
     fake_con = MagicMock(**{"execute.return_value": fake_cursor})
 
     with (
-        patch("backend.core.metadata.cron_log.get_con", return_value=fake_con),
-        patch("backend.cron_runs_publisher.publisher.publish"),
+        patch("backend.core.metadata.usage_log.get_con", return_value=fake_con),
+        patch("backend.cron.scheduler.publisher.publish"),
     ):
         for fn in (
             lambda: start_cron_run("svc-1", "sync"),

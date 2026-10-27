@@ -16,8 +16,6 @@ from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
-from backend.core.oauth.client import OIDCError
-from backend.utils.tunnel.manager import AnalystSession
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from joserfc import jwt
@@ -25,9 +23,11 @@ from joserfc.jwk import KeySet, OctKey, RSAKey
 from starlette.requests import Request
 from starlette.responses import Response, StreamingResponse
 
+import backend.core.oauth as client
+import backend.core.oauth as registry
+import backend.core.share_db as validation
 from backend.core import share_db
-from backend.core.oauth import client, registry
-from backend.core.share_db import validation
+from backend.core.oauth import OIDCError
 from backend.utils import remote_access as ra
 from backend.utils import tunnel
 from backend.utils.date_utils import parse_iso_utc
@@ -57,6 +57,7 @@ from backend.utils.remote_access import (
     is_request_remote,
     resolve_analyst_insights_clamp,
 )
+from backend.utils.tunnel import AnalystSession
 from tests.remote_access import conftest as H
 
 
@@ -394,7 +395,8 @@ switch) nothing is advertised, and passcode login is unchanged.
 
 import pytest
 
-from backend.routers import share_admin, share_auth
+import backend.routers.share_admin as share_auth
+from backend.routers import share_admin
 
 _REMOTE_HEADERS = {"X-Remote-Analyst": "1", "Host": "testserver", "Origin": "https://testserver"}
 
@@ -690,9 +692,9 @@ state/nonce/verifier are fully controlled.
 
 import pytest
 
-from backend.core.oauth import client as oidc
-from backend.core.oauth import registry as flow_state
-from backend.routers import share_oauth
+import backend.core.oauth as flow_state
+import backend.core.oauth as oidc
+import backend.routers.share_admin as share_oauth
 
 REDIRECT_URI = "https://testserver/api/share/oauth/callback"
 
@@ -1018,7 +1020,8 @@ def test_callback_expired_token_rejected(tmp_path, monkeypatch):
 from urllib.parse import parse_qs, urlparse
 
 import pytest
-from backend.core.oauth.registry import FlowStateError
+
+from backend.core.oauth import FlowStateError
 
 _PAYLOAD = {
     "provider": "google",
@@ -1037,7 +1040,7 @@ UNRESERVED = re.compile(r"^[A-Za-z0-9\-._~]+$")
 
 def _authorize() -> tuple[dict, dict]:
     """One /authorize round trip -> (authorize-URL query, opened flow-state)."""
-    from backend.routers import share_oauth
+    import backend.routers.share_admin as share_oauth
 
     app = FastAPI()
     app.add_middleware(RemoteAccessMiddleware)
@@ -1253,7 +1256,8 @@ def _isolate(tmp_path, monkeypatch):
 
 
 def _build_app() -> FastAPI:
-    from backend.routers import share_admin, share_auth
+    import backend.routers.share_admin as share_auth
+    from backend.routers import share_admin
 
     app = FastAPI()
     app.add_middleware(RemoteAccessMiddleware)

@@ -22,40 +22,36 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
-import backend.core.storage._ducklake as _dl
 import duckdb
 import pyarrow.parquet as pq
 import pytest
-from backend.core.rollups.rum import backfill_missing_rum_aggregates, recompute_rum_aggregates, table_exists
 from tests._helpers.rollups import noop_lock as _noop_lock
 from tests._helpers.rollups import past_hour as _past_hour
 from tests._helpers.rollups import writer_patches
 
+import backend.core.rollups.day_bundles as hour_bundles
+import backend.core.rollups.origin_dims as network_health_geo
+import backend.core.rollups.origin_dims as network_health_heatmap
+import backend.core.rollups.origin_dims as network_quality
+import backend.core.rollups.origin_dims as network_rtt
+import backend.core.rollups.origin_dims as network_speed
+import backend.core.rollups.origin_dims as network_summary
+import backend.core.rollups.origin_dims as origin_latency_ts
+import backend.core.rollups.origin_dims as origin_summary
+import backend.core.rollups.origin_dims as perf_dims
+import backend.core.rollups.origin_dims as perf_latency
+import backend.core.rollups.origin_dims as pop_health
+import backend.core.rollups.origin_dims as slow_urls
+import backend.core.rollups.recompute as overview
+import backend.core.rollups.recompute as sessions
+import backend.core.rollups.recompute as time_series
+import backend.core.rollups.security_dims as ngwaf_bots
+import backend.core.rollups.security_dims as verified_bots_ts
+import backend.core.rollups.security_dims as wellknown_bots
+import backend.core.storage._core as _dl
 from backend.core import rollups
-from backend.core.rollups import (
-    day_bundles,
-    hour_bundles,
-    network_health_geo,
-    network_health_heatmap,
-    network_quality,
-    network_rtt,
-    network_speed,
-    network_summary,
-    ngwaf_bots,
-    origin_dims,
-    origin_latency_ts,
-    origin_summary,
-    overview,
-    perf_dims,
-    perf_latency,
-    pop_health,
-    security_dims,
-    sessions,
-    slow_urls,
-    time_series,
-    verified_bots_ts,
-    wellknown_bots,
-)
+from backend.core.rollups import day_bundles, origin_dims, security_dims
+from backend.core.rollups.recompute import backfill_missing_rum_aggregates, recompute_rum_aggregates, table_exists
 from backend.cron.jobs import compaction
 from backend.repositories import rum as rum_repo
 
@@ -96,7 +92,7 @@ def test_run_per_field_copy_writes_partitioned_parquet(tmp_path):
     with (
         patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
         patch("backend.core.duckdb.get_connection", return_value=con),
-        patch("backend.core.storage.view._get_service_lock", _noop_lock),
+        patch("backend.core.storage._core._get_service_lock", _noop_lock),
         patch(
             "backend.core.storage.execute_with_stale_view_retry",
             side_effect=lambda c, _src, fn: fn(c),
@@ -130,7 +126,7 @@ def test_run_per_field_copy_skips_unsafe_field_name(tmp_path):
     with (
         patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
         patch("backend.core.duckdb.get_connection", return_value=con),
-        patch("backend.core.storage.view._get_service_lock", _noop_lock),
+        patch("backend.core.storage._core._get_service_lock", _noop_lock),
         patch(
             "backend.core.storage.execute_with_stale_view_retry",
             side_effect=lambda c, _src, fn: fn(c),
@@ -158,7 +154,7 @@ def test_run_per_field_copy_skips_field_missing_from_schema(tmp_path):
     with (
         patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
         patch("backend.core.duckdb.get_connection", return_value=con),
-        patch("backend.core.storage.view._get_service_lock", _noop_lock),
+        patch("backend.core.storage._core._get_service_lock", _noop_lock),
         patch(
             "backend.core.storage.execute_with_stale_view_retry",
             side_effect=lambda c, _src, fn: fn(c),
@@ -186,7 +182,7 @@ def test_run_per_field_copy_skips_virtual_field_with_missing_backing(tmp_path):
     with (
         patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
         patch("backend.core.duckdb.get_connection", return_value=con),
-        patch("backend.core.storage.view._get_service_lock", _noop_lock),
+        patch("backend.core.storage._core._get_service_lock", _noop_lock),
         patch(
             "backend.core.storage.execute_with_stale_view_retry",
             side_effect=lambda c, _src, fn: fn(c),
@@ -257,7 +253,7 @@ def test_run_per_field_copy_copy_failure_cleans_tmp_and_continues(tmp_path):
     with (
         patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
         patch("backend.core.duckdb.get_connection", return_value=proxy),
-        patch("backend.core.storage.view._get_service_lock", _noop_lock),
+        patch("backend.core.storage._core._get_service_lock", _noop_lock),
         patch(
             "backend.core.storage.execute_with_stale_view_retry",
             side_effect=lambda c, _src, fn: fn(c),
@@ -328,7 +324,7 @@ def test_run_per_field_copy_self_heals_stale_view_on_copy(tmp_path):
     with (
         patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
         patch("backend.core.duckdb.get_connection", return_value=con),
-        patch("backend.core.storage.view._get_service_lock", _noop_lock),
+        patch("backend.core.storage._core._get_service_lock", _noop_lock),
         patch(
             "backend.core.storage.execute_with_stale_view_retry",
             side_effect=_retry_double,
@@ -395,7 +391,7 @@ def test_run_ip_spread_per_field_writes_partitioned_parquet_with_hll(tmp_path):
     with (
         patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
         patch("backend.core.duckdb.get_connection", return_value=con),
-        patch("backend.core.storage.view._get_service_lock", _noop_lock),
+        patch("backend.core.storage._core._get_service_lock", _noop_lock),
         patch(
             "backend.core.storage.execute_with_stale_view_retry",
             side_effect=lambda c, _src, fn: fn(c),
@@ -454,7 +450,7 @@ def test_run_ip_spread_per_field_silent_when_no_ip_column(tmp_path):
     with (
         patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
         patch("backend.core.duckdb.get_connection", return_value=con),
-        patch("backend.core.storage.view._get_service_lock", _noop_lock),
+        patch("backend.core.storage._core._get_service_lock", _noop_lock),
         patch(
             "backend.core.storage.execute_with_stale_view_retry",
             side_effect=lambda c, _src, fn: fn(c),
@@ -496,7 +492,7 @@ def test_run_ip_spread_per_field_skips_virtual_fields(tmp_path):
     with (
         patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
         patch("backend.core.duckdb.get_connection", return_value=con),
-        patch("backend.core.storage.view._get_service_lock", _noop_lock),
+        patch("backend.core.storage._core._get_service_lock", _noop_lock),
         patch(
             "backend.core.storage.execute_with_stale_view_retry",
             side_effect=lambda c, _src, fn: fn(c),
@@ -551,7 +547,7 @@ def test_run_ip_spread_per_field_marks_capped_when_sample_hits_cap(tmp_path, mon
     with (
         patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
         patch("backend.core.duckdb.get_connection", return_value=con),
-        patch("backend.core.storage.view._get_service_lock", _noop_lock),
+        patch("backend.core.storage._core._get_service_lock", _noop_lock),
         patch(
             "backend.core.storage.execute_with_stale_view_retry",
             side_effect=lambda c, _src, fn: fn(c),
@@ -587,7 +583,7 @@ def test_run_ip_spread_per_field_empty_result_writes_nothing(tmp_path):
     with (
         patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
         patch("backend.core.duckdb.get_connection", return_value=con),
-        patch("backend.core.storage.view._get_service_lock", _noop_lock),
+        patch("backend.core.storage._core._get_service_lock", _noop_lock),
         patch(
             "backend.core.storage.execute_with_stale_view_retry",
             side_effect=lambda c, _src, fn: fn(c),
@@ -656,7 +652,7 @@ def test_run_ip_spread_per_field_self_heals_stale_view_on_select(tmp_path):
     with (
         patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
         patch("backend.core.duckdb.get_connection", return_value=con),
-        patch("backend.core.storage.view._get_service_lock", _noop_lock),
+        patch("backend.core.storage._core._get_service_lock", _noop_lock),
         patch(
             "backend.core.storage.execute_with_stale_view_retry",
             side_effect=_retry_double,
@@ -1724,15 +1720,15 @@ def test_rollup_hour_heal_invokes_rum_total_beacons_backfill(monkeypatch, tmp_pa
         "_cache_dir_override": str(tmp_path),
     }
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda s: src)
-    monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda *a, **k: False)
+    monkeypatch.setattr("backend.utils.telemetry.should_defer_cron", lambda *a, **k: False)
     monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda s: str(tmp_path))
     monkeypatch.setattr("backend.core.duckdb.start_cron_run", lambda *a, **k: 42)
     for target in (
         "backend.core.duckdb.log_cron_run",
         "backend.core.duckdb.finalize_cron_run_if_running",
-        "backend.cron_progress.start_progress",
-        "backend.cron_progress.end_progress",
-        "backend.cron_progress.cleanup_progress_and_reap",
+        "backend.cron.scheduler.start_progress",
+        "backend.cron.scheduler.end_progress",
+        "backend.cron.scheduler.cleanup_progress_and_reap",
         "backend.cron.scheduler._log_and_add_progress",
     ):
         monkeypatch.setattr(target, lambda *a, **k: None)
@@ -1755,7 +1751,7 @@ def test_rollup_hour_heal_invokes_rum_total_beacons_backfill(monkeypatch, tmp_pa
 
     backfill_calls: list[tuple[object, str, int]] = []
     monkeypatch.setattr(
-        "backend.core.rollups.rum.backfill_missing_rum_aggregates",
+        "backend.core.rollups.recompute.backfill_missing_rum_aggregates",
         lambda con, service_id, lookback_days=30: backfill_calls.append((con, service_id, lookback_days)) or [],
     )
 
@@ -2133,7 +2129,7 @@ def _run_pipeline(tmp_path: Path) -> tuple[dict[str, Any], dict[str, str]]:
         patch("backend.core.duckdb._cache_dir", return_value=root),
         patch("backend.core.duckdb.get_connection", side_effect=_writer_con),
         patch("backend.core.duckdb.get_memory_connection", side_effect=_memory_con),
-        patch("backend.core.storage.view._get_service_lock", _noop_lock),
+        patch("backend.core.storage._core._get_service_lock", _noop_lock),
         patch("backend.core.storage.execute_with_stale_view_retry", side_effect=lambda c, _s, fn: fn(c)),
         patch("backend.config.ngwaf_db_path", return_value=str(ngwaf_db)),
         patch("backend.utils.bot_sources.get_pattern_set_version", return_value=_BOT_VERSION),

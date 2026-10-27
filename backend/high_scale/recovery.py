@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -781,6 +780,3 @@ def execute_rum_recovery(
     if verified.plan_digest != plan.plan_digest or any(verified.missing_counts.values()):
         raise ValueError("RUM repair post-apply identity verification failed")
     return {**report, "applied": True, "remaining_counts": verified.missing_counts}
-
-
-sys.modules["backend.high_scale.rum_recovery"] = sys.modules[__name__]

@@ -126,7 +126,7 @@ _rollup_workers: dict[str, threading.Thread] = {}
 
 def _post_ingest_rollup_worker(service_id: str) -> None:
     from backend.core import rollups
-    from backend.utils.active_requests import yield_to_api
+    from backend.utils.telemetry import yield_to_api
 
     while True:
         with _rollup_lock:
@@ -220,7 +220,7 @@ def _run_log_discovery_cron(
 
             if svcconfig.is_high_scale_mode(src):
                 from backend.core.ingest import discover_prefix
-                from backend.provision.log_paths import minute_list_prefix
+                from backend.provision.cli import minute_list_prefix
 
                 run.include_log_output = False
                 if not svcconfig.CELERY_BROKER_URL:
@@ -581,7 +581,7 @@ def _run_full_sweep(
 
     from backend.core.duckdb import get_source_for_service
     from backend.core.ingest import ingest
-    from backend.utils.active_requests import should_defer_cron
+    from backend.utils.telemetry import should_defer_cron
 
     cfg = svcconfig.load_config(service_id) or {}
     delete_after = svcconfig.resolve_raw_delete_after(cfg)
@@ -613,7 +613,7 @@ def _run_full_sweep(
                 effective_max_files = int(configured_max_files)
             elif svcconfig.is_high_scale_mode(src):
                 try:
-                    from backend.celery_status import celery_queue_depths
+                    from backend.celery_app import celery_queue_depths
 
                     queues, broker_ok = celery_queue_depths()
                     total_queue = sum(queues.values()) if broker_ok else 0
@@ -792,7 +792,7 @@ def _run_gap_heal(service_id: str, run_id: int | None = None, force: bool = Fals
         return
 
     from backend.core.duckdb import get_source_for_service
-    from backend.utils.active_requests import should_defer_cron
+    from backend.utils.telemetry import should_defer_cron
 
     src = get_source_for_service(service_id)
     if src is None or (not force and should_defer_cron("gap_heal", service_id)):
@@ -932,8 +932,3 @@ class _SyncModule(_sys.modules[__name__].__class__):  # type: ignore[misc]
 
 
 _sys.modules[__name__].__class__ = _SyncModule
-
-_backend_pkg = _sys.modules.get("backend")
-if _backend_pkg is not None and hasattr(_backend_pkg, "_MODULE_ALIASES"):
-    for _mod in ("_common", "commit", "rum_sync", "rum_ledger", "rum_commit"):
-        _backend_pkg._MODULE_ALIASES.pop(f"backend.cron.jobs.{_mod}", None)

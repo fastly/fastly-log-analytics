@@ -1,9 +1,9 @@
 import type { QueryClient } from '@tanstack/react-query'
-import { z } from 'zod'
 import { client, unwrapClient, queryKeys, adminFetch } from '@/lib/api'
 import { downloadBlob } from '@/lib/utils'
 import type { Service } from '@/stores/filterStore'
 import type { components } from '@/types/api.generated'
+import { WizardDraftHeaderSchema } from './wizardSchemas'
 import {
   INITIAL_CONFIG,
   WIZARD_DRAFT_VERSION,
@@ -438,11 +438,7 @@ function safeLocalStorage(): Storage | null {
   }
 }
 
-const WizardDraftHeaderSchema = z.object({
-  version: z.number(),
-  mode: z.enum(["provision", "ingest"]),
-  step: z.string(),
-})
+export { WizardDraftHeaderSchema }
 
 export function loadDraft(): WizardDraft | null {
   const ls = safeLocalStorage()

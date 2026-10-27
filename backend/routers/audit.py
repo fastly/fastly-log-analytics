@@ -6,10 +6,10 @@ from typing import Any
 
 from fastapi import APIRouter, Depends
 
-from backend.core.metadata.state import list_audit, record_audit
-from backend.deps import ServiceId, require_service_access
-from backend.models._base import DEFAULT_ERROR_RESPONSES
+from backend.core.metadata.base import list_audit, record_audit
+from backend.core.request_context import ServiceId, require_service_access
 from backend.models.common import (
+    DEFAULT_ERROR_RESPONSES,
     LogFieldAuditFeature,
     LogFieldAuditResponse,
     WizardStateResponse,

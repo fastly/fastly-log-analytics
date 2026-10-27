@@ -23,67 +23,69 @@ from unittest.mock import MagicMock, patch
 import httpx
 import pytest
 import structlog
-from backend.core.clickhouse_client import ClickHouseClient
-from backend.cron.jobs.metric_snapshot import _run_metric_snapshot, _sample_high_scale_disk
-from backend.high_scale.archive_models import (
+from structlog.testing import capture_logs
+
+import backend.high_scale.archive as disk_sampler
+from backend.config import ClickHouseConfig
+from backend.core.clickhouse import ClickHouseClient
+from backend.core.rum_ingest import extract_metrics_from_faro_payload
+from backend.cron.jobs import metric_snapshots
+from backend.cron.jobs.metric_snapshots import _run_metric_snapshot, _sample_high_scale_disk
+from backend.high_scale import cmcd as hs_cmcd
+from backend.high_scale import sessions as hs_sessions
+from backend.high_scale.archive import (
     ArchiveArtifact,
     ArchiveManifest,
     ArchiveSourceEntry,
     ArchiveSourceObject,
     ArchiveState,
+    ClickHousePublication,
+    ExportManager,
+    ExportState,
+    HighScaleBatch,
     HighScaleConfig,
+    InMemoryBatchManifestStore,
+    PartialInsert,
+    PublicationStatus,
     ServiceProfile,
     ServingWatermark,
     StorageProfile,
     VolumeStats,
-    build_topology_profile,
-    evaluate_disk_state,
-    recommend_retention,
-    validate_archive_transition,
-)
-from backend.high_scale.archive_writer import write_batch_archive_checkpoint
-from backend.high_scale.decoder import decode_source_object
-from backend.high_scale.exports import ExportManager, ExportState
-from backend.high_scale.origin_projection import build_origin_projection_rows
-from backend.high_scale.publication import (
-    ClickHousePublication,
-    HighScaleBatch,
-    InMemoryBatchManifestStore,
-    PartialInsert,
-    PublicationStatus,
     _rows_for_domain,
     build_batch_id_from_manifest_id,
     build_cmcd_projection_key,
     build_request_event_id,
     build_rum_event_id,
+    build_topology_profile,
+    evaluate_disk_state,
+    recommend_retention,
     row_matches_serving_domain,
+    validate_archive_transition,
+    write_batch_archive_checkpoint,
 )
-from backend.high_scale.registry_bootstrap import (
+from backend.high_scale.cmcd import cmcd_aggregates, project_cmcd
+from backend.high_scale.dashboard import aggregates as dashboard_aggregates
+from backend.high_scale.ingest_controller import (
     HighScaleService,
     HighScaleServiceRegistry,
     register_high_scale_services,
     register_high_scale_services_from_environment,
 )
-from backend.models.dashboard import AggregatesRequest, QueryRequest, SessionsRequest
-from backend.models.insights import CacheCollapseDetailRequest, InsightsRequest
-from backend.models.performance import CmcdRequest
-from structlog.testing import capture_logs
-
-from backend.config import ClickHouseConfig
-from backend.core import metric_snapshots
-from backend.core.rum_ingest import extract_metrics_from_faro_payload
-from backend.high_scale import archive_models as disk_sampler
-from backend.high_scale import cmcd as hs_cmcd
-from backend.high_scale import sessions as hs_sessions
-from backend.high_scale.cmcd import cmcd_aggregates, project_cmcd
-from backend.high_scale.dashboard import aggregates as dashboard_aggregates
 from backend.high_scale.insights import cache_collapse_detail_endpoint, insights_endpoint
 from backend.high_scale.origin import aggregates as origin_aggregates
 from backend.high_scale.postgres_control import PostgresControlPlane
-from backend.high_scale.query import query_endpoint
-from backend.high_scale.query_service import QueryResponseMetadata, query_request_facts
+from backend.high_scale.query import decode_source_object, query_endpoint
+from backend.high_scale.query_service import QueryResponseMetadata, build_origin_projection_rows, query_request_facts
 from backend.high_scale.recovery import RecoveryCapacityMeasurement, evaluate_recovery_capacity
 from backend.high_scale.sessions import sessions_endpoint
+from backend.models.analytics import (
+    AggregatesRequest,
+    CacheCollapseDetailRequest,
+    CmcdRequest,
+    InsightsRequest,
+    QueryRequest,
+    SessionsRequest,
+)
 from backend.models.common import FilterSpec
 from backend.repositories.insights import registry
 from backend.repositories.query import MAX_QUERY_ROWS
@@ -1670,7 +1672,7 @@ def test_metric_snapshot_tick_high_scale_vs_standard_and_probe_failure() -> None
     probe = _FakeClickHouse(free_fraction=0.12)
     with (
         patch("backend.config.is_high_scale_mode", return_value=True),
-        patch("backend.core.clickhouse_client.get_clickhouse_client", return_value=probe),
+        patch("backend.core.clickhouse.get_clickhouse_client", return_value=probe),
     ):
         _run_metric_snapshot()
     assert probe.calls == 1
@@ -1680,7 +1682,7 @@ def test_metric_snapshot_tick_high_scale_vs_standard_and_probe_failure() -> None
     disk_sampler.reset_for_tests()
     with (
         patch("backend.config.is_high_scale_mode", return_value=False),
-        patch("backend.core.clickhouse_client.get_clickhouse_client") as get_client,
+        patch("backend.core.clickhouse.get_clickhouse_client") as get_client,
     ):
         assert _sample_high_scale_disk() == 0
         _run_metric_snapshot()
@@ -1694,7 +1696,7 @@ def test_metric_snapshot_tick_high_scale_vs_standard_and_probe_failure() -> None
     with (
         capture_logs() as logs,
         patch("backend.config.is_high_scale_mode", return_value=True),
-        patch("backend.core.clickhouse_client.get_clickhouse_client", return_value=_Down()),
+        patch("backend.core.clickhouse.get_clickhouse_client", return_value=_Down()),
     ):
         assert _sample_high_scale_disk() == 0
     assert any(e["event"] == "high_scale.disk_sample_failed" and e["error_kind"] == "RuntimeError" for e in logs)
@@ -1711,7 +1713,7 @@ def test_health_snapshot_disk_states(client: Any) -> None:
     probe = _FakeClickHouse(free_fraction=0.09)
     with (
         patch("backend.config.is_high_scale_mode", return_value=True),
-        patch("backend.core.clickhouse_client.get_clickhouse_client", return_value=probe),
+        patch("backend.core.clickhouse.get_clickhouse_client", return_value=probe),
     ):
         _run_metric_snapshot()
         resp = client.get("/api/admin/health-snapshot")

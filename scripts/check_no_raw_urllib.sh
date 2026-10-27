@@ -11,6 +11,8 @@ ALLOWLIST=(
   "backend/routers/provision.py"
   "backend/routers/services/__init__.py"
   "backend/routers/admin/health.py"
+  "backend/routers/admin/_helpers.py"
+  "backend/routers/admin/downloads.py"
   "backend/routers/admin/high_scale.py"
   "backend/routers/admin/compaction.py"
   "backend/routers/admin/ingest.py"

@@ -834,14 +834,3 @@ def aggregates(
             sections=None if sections is _AGG_UNSET else sections,  # type: ignore[arg-type]
         )
     return dashboard_aggregates(service, req, start_time, end_time)
-
-
-_QUERY_SERVICE_ALIASES = ("query_router", "clickhouse")
-for _alias_name in _QUERY_SERVICE_ALIASES:
-    sys.modules[f"backend.high_scale.{_alias_name}"] = _self_mod
-if (_hs_pkg := sys.modules.get("backend.high_scale")) is not None:
-    for _alias_name in _QUERY_SERVICE_ALIASES:
-        setattr(_hs_pkg, _alias_name, _self_mod)
-if (_backend_pkg := sys.modules.get("backend")) is not None and hasattr(_backend_pkg, "_MODULE_ALIASES"):
-    for _alias_name in _QUERY_SERVICE_ALIASES:
-        _backend_pkg._MODULE_ALIASES[f"backend.high_scale.{_alias_name}"] = __name__

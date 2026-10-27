@@ -105,16 +105,16 @@ def _post_pagerduty_notification(url: str, alert_name: str, metric: str, msg_val
 @cron_task("sync_ngwaf_bots", job_name="ngwaf_sync")
 def _run_ngwaf_bot_sync(service_id: str) -> None:
     from backend.core.duckdb import get_source_for_service
-    from backend.cron.decorators import dev_mode_no_crons
-    from backend.cron.jobs.sync import get_service_display_label
-    from backend.utils.bot_sources import build_matcher
-    from backend.utils.ngwaf import (
+    from backend.core.rollups.security_dims import (
         cleanup_old_bots,
         fetch_verified_bots_paged,
         get_last_timestamp,
         update_sync_watermark,
         upsert_bots,
     )
+    from backend.cron.jobs.sync import get_service_display_label
+    from backend.cron.scheduler import dev_mode_no_crons
+    from backend.utils.bot_sources import build_matcher
 
     if dev_mode_no_crons():
         logger.info("⏸️  \x1b[36m[ngwaf_sync]\x1b[0m %s: dev_mode_no_crons active, skipping NGWAF sync.", service_id)
@@ -217,7 +217,7 @@ def _run_ngwaf_bot_sync(service_id: str) -> None:
 
 @global_job("bot_data_refresh", color="36", tag="bots", label="Bot data refresh")
 def _run_bot_data_refresh() -> tuple[str, str]:
-    from backend.cron.decorators import dev_mode_no_crons
+    from backend.cron.scheduler import dev_mode_no_crons
     from backend.utils.bot_sources import refresh_all_sources
 
     if dev_mode_no_crons():
@@ -239,7 +239,7 @@ def _run_bot_data_refresh() -> tuple[str, str]:
 
 @global_job("rdns_enrichment", color="34", tag="rdns", label="rDNS enrichment")
 def _run_rdns_enrichment() -> tuple[str, str]:
-    from backend.cron.decorators import dev_mode_no_crons
+    from backend.cron.scheduler import dev_mode_no_crons
     from backend.utils.bot_sources import enrich_batch
 
     if dev_mode_no_crons():
@@ -255,7 +255,7 @@ def _run_rdns_enrichment() -> tuple[str, str]:
 @global_job("share_audit_purge", color="35", tag="share_audit_purge", label="Share audit purge")
 def _run_share_audit_purge() -> tuple[str, str]:
     from backend.core import share_db
-    from backend.cron.decorators import dev_mode_no_crons
+    from backend.cron.scheduler import dev_mode_no_crons
 
     if dev_mode_no_crons():
         logger.info("⏸️  \x1b[35m[share_audit_purge]\x1b[0m dev_mode_no_crons active, skipping share audit purge.")
@@ -286,9 +286,9 @@ def _run_share_audit_purge() -> tuple[str, str]:
 @cron_task("evaluate_alerts", job_name="alerts")
 def _run_service_alerts_evaluation(service_id: str) -> None:
     from backend.core.duckdb import get_connection, get_source_for_service
-    from backend.cron.decorators import dev_mode_no_crons
-    from backend.repositories import alerts as alert_repo  # type: ignore[attr-defined]
-    from backend.utils.active_requests import should_defer_cron
+    from backend.cron.scheduler import dev_mode_no_crons
+    from backend.repositories import assets as alert_repo
+    from backend.utils.telemetry import should_defer_cron
 
     if dev_mode_no_crons():
         logger.info("⏸️  \x1b[93m[alerts]\x1b[0m %s: dev_mode_no_crons active, skipping alerts evaluation.", service_id)
@@ -350,7 +350,7 @@ def _run_service_alerts_evaluation(service_id: str) -> None:
             if triggered_items:
                 for alert, _, _, max_ts in triggered_items:
                     alert_repo.update_last_triggered(service_id, alert["id"], max_ts)
-                from backend.state_sync import export_admin_state
+                from backend.core.metadata.base import export_admin_state
 
                 export_admin_state(service_id)
                 for alert, webhook_url, payload, _ in triggered_items:
@@ -507,27 +507,6 @@ _DELEGATED_EXPORTS: dict[str, str] = {
     "teardown": "backend.cron.jobs.metric_snapshots",
 }
 
-_REAL_SUBMODULES = (
-    "backend.cron.jobs.maintenance",
-    "backend.cron.jobs.metric_snapshots",
-    "backend.cron.jobs.duckdb_recycle",
-    "backend.cron.jobs.insights_prewarmer",
-    "backend.cron.jobs.compaction",
-)
-
-if (_backend_pkg := _sys.modules.get("backend")) is not None and hasattr(_backend_pkg, "_MODULE_ALIASES"):
-    for _mod_name in _REAL_SUBMODULES:
-        _backend_pkg._MODULE_ALIASES.pop(_mod_name, None)
-    _backend_pkg._MODULE_ALIASES.update(
-        {
-            "backend.core.metric_snapshots": "backend.cron.jobs.metric_snapshots",
-            "backend.cron.jobs.metric_snapshot": "backend.cron.jobs.metric_snapshots",
-            "backend.core.duckdb_recycle": "backend.cron.jobs.duckdb_recycle",
-            "backend.cron.jobs.optimize": "backend.cron.jobs.maintenance",
-            "backend.cron.jobs.expire": "backend.cron.jobs.maintenance",
-        }
-    )
-
 
 class _MetadataModule(ModuleType):
     def __getattr__(self, name: str) -> Any:
@@ -556,8 +535,3 @@ class _MetadataModule(ModuleType):
 
 _self_mod = _sys.modules[__name__]
 _self_mod.__class__ = _MetadataModule
-
-for _mod_name in _REAL_SUBMODULES:
-    if _sys.modules.get(_mod_name) is _self_mod:
-        _sys.modules.pop(_mod_name, None)
-    importlib.import_module(_mod_name)

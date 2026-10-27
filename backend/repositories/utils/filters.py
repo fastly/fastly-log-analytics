@@ -10,8 +10,8 @@ from dataclasses import dataclass
 from dataclasses import field as _dc_field
 from typing import TYPE_CHECKING, Any
 
+from backend.core.sql_validator import escape_sql_literal
 from backend.utils.date_utils import parse_iso_utc
-from backend.utils.sql_validator import escape_sql_literal
 
 if TYPE_CHECKING:
     from backend.models.common import FiltersDict
@@ -68,7 +68,7 @@ def _lookup_ngwaf_waf_req_ids(bot_names: list[str], db_path: str | None = None) 
         except Exception as e:
             _logger.warning("[build_where_clause] ngwaf_bots test cache lookup failed: %s", e)
             return []
-    from backend.core.metadata import pg_connection
+    from backend.core.metadata import base as pg_connection
 
     try:
         with contextlib.closing(pg_connection.get_pg_readonly_connection()) as pconn:
@@ -247,7 +247,7 @@ def build_where_clause(
                 exact_vals = [v for v in non_none if not (isinstance(v, str) and "*" in v)]
                 wildcard_vals = [v for v in non_none if isinstance(v, str) and "*" in v]
                 sub_parts = []
-                from backend.core import field_registry
+                from backend.core import log_fields as field_registry
 
                 field = field_registry.try_get(clean_col)
                 is_varchar = field is not None and field.duck_type == field_registry.DuckType.VARCHAR

@@ -16,8 +16,16 @@ from unittest.mock import MagicMock, patch
 import duckdb
 import httpx
 import pytest
-from backend.core.storage.view import configure_duckdb_s3
-from backend.utils.sql_validator import (
+from fastapi import HTTPException
+from sse_starlette.sse import EventSourceResponse
+
+import backend.core.realtime as poller_mod
+import backend.utils.telemetry as vp
+from backend import config as config_mod
+from backend.config import service_id_from_source
+from backend.core import duckdb as core_duckdb
+from backend.core.retry import retry_call
+from backend.core.sql_validator import (
     _ALLOWED_TABLE_FUNCTIONS,
     MAX_INPUT_BYTES,
     SQLValidationError,
@@ -25,19 +33,10 @@ from backend.utils.sql_validator import (
     escape_sql_literal,
     validate_user_sql,
 )
-from backend.utils.valkey_publisher import ValkeyPublisher
-from fastapi import HTTPException
-from sse_starlette.sse import EventSourceResponse
-
-from backend import config as config_mod
-from backend.config import service_id_from_source
-from backend.core import duckdb as core_duckdb
-from backend.core.realtime import poller as poller_mod
-from backend.core.retry import retry_call
 from backend.core.storage import execute_with_stale_view_retry, is_stale_view_error
+from backend.core.storage._core import configure_duckdb_s3
 from backend.repositories._base import QueryRunner
 from backend.utils import router_utils
-from backend.utils import valkey_publisher as vp
 from backend.utils.auth import analyst_allowed_services, mask_ips_for, require_owned_row
 from backend.utils.http import make_client
 from backend.utils.router_utils import (
@@ -47,6 +46,7 @@ from backend.utils.router_utils import (
     stored_fastly_token,
 )
 from backend.utils.sse import sse_response
+from backend.utils.telemetry import ValkeyPublisher
 from backend.utils.telemetry import _last as _last_error_log
 
 
@@ -146,7 +146,7 @@ def test_sync_admin_state_skips_when_service_id_is_none():
 def test_sync_admin_state_calls_export_admin_state(monkeypatch):
     calls: list[str] = []
     # The function imports state_sync lazily; patch on the source module
-    import backend.state_sync as ss
+    import backend.core.metadata.base as ss
 
     monkeypatch.setattr(ss, "export_admin_state", calls.append)
     router_utils.sync_admin_state("svc-1")
@@ -157,7 +157,7 @@ def test_sync_admin_state_swallows_all_exceptions(monkeypatch):
     """Fire-and-forget: a sync failure must NEVER bubble back into the
     HTTP request that triggered the mutation. A 500 here would make
     the alert-save UI flash an error even though the alert WAS saved."""
-    import backend.state_sync as ss
+    import backend.core.metadata.base as ss
 
     def boom(sid):
         raise RuntimeError("S3 unreachable")
@@ -1668,7 +1668,7 @@ def _fetch(session, cursor=0):
 
 def test_poller_retries_503_with_1s_2s_backoff_then_succeeds(_poller_creds):
     session = _ScriptedSession([_Resp(503), _Resp(503), _Resp(200, {"ok": 1})])
-    with _captured_sleeps("backend.core.realtime.poller._retry_sleep") as delays:
+    with _captured_sleeps("backend.core.realtime._retry_sleep") as delays:
         assert _fetch(session) == {"ok": 1}
     assert session.calls == 3 and delays == [1, 2]
 
@@ -1676,7 +1676,7 @@ def test_poller_retries_503_with_1s_2s_backoff_then_succeeds(_poller_creds):
 def test_poller_exhausted_retryable_status_raises_http_error_without_final_sleep(_poller_creds):
     session = _ScriptedSession([_Resp(429), _Resp(502), _Resp(500)])
     with (
-        _captured_sleeps("backend.core.realtime.poller._retry_sleep") as delays,
+        _captured_sleeps("backend.core.realtime._retry_sleep") as delays,
         pytest.raises(httpx.HTTPStatusError) as ei,
     ):
         _fetch(session)
@@ -1686,7 +1686,7 @@ def test_poller_exhausted_retryable_status_raises_http_error_without_final_sleep
 
 def test_poller_non_longpoll_read_timeout_is_retried(_poller_creds):
     session = _ScriptedSession([httpx.ReadTimeout("timed out"), _Resp(200, {"ok": 2})])
-    with _captured_sleeps("backend.core.realtime.poller._retry_sleep") as delays:
+    with _captured_sleeps("backend.core.realtime._retry_sleep") as delays:
         assert _fetch(session, cursor=0) == {"ok": 2}
     assert delays == [1]
 
@@ -1702,7 +1702,7 @@ def test_poller_non_longpoll_read_timeout_is_retried(_poller_creds):
 )
 def test_poller_error_and_short_circuit_cases(_poller_creds, script, cursor, exc_type, expected_calls, expected_delays):
     session = _ScriptedSession(script)
-    with _captured_sleeps("backend.core.realtime.poller._retry_sleep") as delays, pytest.raises(exc_type):
+    with _captured_sleeps("backend.core.realtime._retry_sleep") as delays, pytest.raises(exc_type):
         _fetch(session, cursor=cursor)
     assert session.calls == expected_calls and delays == expected_delays
 
@@ -1710,8 +1710,8 @@ def test_poller_error_and_short_circuit_cases(_poller_creds, script, cursor, exc
 def _configure(con) -> None:
     with (
         patch("backend.core.duckdb._load_httpfs"),
-        patch("backend.utils.telemetry_proxy.start_proxy_server"),
-        patch("backend.utils.telemetry_proxy.proxy_endpoint", return_value="http://127.0.0.1:1"),
+        patch("backend.utils.telemetry.start_proxy_server"),
+        patch("backend.utils.telemetry.proxy_endpoint", return_value="http://127.0.0.1:1"),
     ):
         core_duckdb._configure_fos(con, {"name": "svc-retry", "access_key_id": "a", "secret_access_key": "b"})
 

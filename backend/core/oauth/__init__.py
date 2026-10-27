@@ -28,12 +28,8 @@ from joserfc import jwt
 from joserfc.errors import ExpiredTokenError, InvalidClaimError, JoseError, MissingClaimError
 from joserfc.jwk import KeySet
 
-import backend as _backend_pkg
 from backend.config import SYSTEM_DATA_DIR
 
-if hasattr(_backend_pkg, "_MODULE_ALIASES"):
-    _backend_pkg._MODULE_ALIASES.setdefault("backend.routers.share_auth", "backend.routers.share_admin")
-    _backend_pkg._MODULE_ALIASES.setdefault("backend.routers.remote_share", "backend.routers.share_admin")
 logger = logging.getLogger(__name__)
 # ── Provider Registry ────────────────────────────────────────────────────────
 _SECRET_ENV = "OAUTH_FLOW_STATE_SECRET"

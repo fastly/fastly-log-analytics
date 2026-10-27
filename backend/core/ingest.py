@@ -34,7 +34,7 @@ from backend.core.duckdb import (
 )
 from backend.core.log_fields import LOG_FIELD_CATALOG
 from backend.core.metadata import ingest_log as _quarantine_mod
-from backend.utils.active_requests import yield_to_api
+from backend.utils.telemetry import yield_to_api
 
 _core_pkg.quarantine = _quarantine_mod  # type: ignore[attr-defined]
 logger = logging.getLogger(__name__)
@@ -48,7 +48,7 @@ def _new_object_outcome(*, processed: int = 1) -> dict[str, int]:
 
 
 def _record_ledger_object_outcome(service_id: str, object_key: str, counters: dict[str, int]) -> None:
-    from backend.core.metadata.cron_log import record_ingest_object_outcome
+    from backend.core.metadata.usage_log import record_ingest_object_outcome
 
     record_ingest_object_outcome(service_id, object_key, counters)
 
@@ -56,7 +56,7 @@ def _record_ledger_object_outcome(service_id: str, object_key: str, counters: di
 def _record_ledger_batch_outcomes(service_id: str, outcomes_by_key: dict[str, dict[str, int]]) -> None:
     if not outcomes_by_key:
         return
-    from backend.core.metadata.cron_log import record_ingest_batch_outcomes
+    from backend.core.metadata.usage_log import record_ingest_batch_outcomes
 
     record_ingest_batch_outcomes(service_id, outcomes_by_key)
 
@@ -139,7 +139,7 @@ def _ducklake_replace_source_rows(
 
 def _record_raw_delete_failure(service_id: str, object_key: str) -> None:
     from backend.core.metadata.base import get_con
-    from backend.core.metadata.cron_log import OUTCOME_COUNTER_KEYS
+    from backend.core.metadata.usage_log import OUTCOME_COUNTER_KEYS
 
     q = "SELECT outcome_counters FROM ingest_ledger WHERE service_id = ? AND object_key = ?"
     row = get_con(service_id).execute(q, (service_id, object_key)).fetchone()
@@ -159,7 +159,7 @@ def _capture_corrupt_container(
     *,
     full_outcome: bool = True,
 ) -> dict[str, int]:
-    from backend.core.quarantine import capture_evidence
+    from backend.core.metadata.ingest_log import capture_evidence
 
     try:
         with open(local_file, "rb") as raw:
@@ -417,7 +417,7 @@ def _scan_invalid_gzip_lines(paths: list[str]) -> list[tuple[str, str]]:
 
 
 def _download_chunk_to_local(fos_client, s3_paths: list[str], tmpdir: str) -> tuple[dict[str, str], dict[str, str]]:
-    from backend.utils.telemetry_proxy import _BOTO3_CALLER_HINT
+    from backend.utils.telemetry import _BOTO3_CALLER_HINT
 
     s3_to_local, local_to_s3 = {}, {}
 
@@ -529,7 +529,7 @@ def list_fos_files(  # fmt: skip
         paginator = fos_client.get_paginator("list_objects_v2", caller_hint="ingest_scan")
         raw_prefix = f"{prefix_path}/{prefix_subpath}" if prefix_path else prefix_subpath
         yield {"type": "status", "message": f"{elapsed_fn()} Discovering new files in Fastly Object Storage..."}
-        from backend.provision.log_paths import minute_list_prefix, rum_minute_list_prefix
+        from backend.provision.cli import minute_list_prefix, rum_minute_list_prefix
 
         now_utc, norm_subpath = datetime.now(UTC), prefix_subpath.strip("/")
         has_v3_files = bool(already) and any("year=" in f for f in already)
@@ -1668,7 +1668,7 @@ def _quarantine_convert_corrupt_lines(
     local_file: str,
     object_key: str,
 ) -> dict[str, int]:
-    from backend.core.quarantine import capture_evidence
+    from backend.core.metadata.ingest_log import capture_evidence
 
     valid_count, corrupt_count = duckdb_con.execute(
         f"SELECT count(*) FILTER (timestamp IS NOT NULL), count(*) FILTER (timestamp IS NULL) FROM {read_expr}"
@@ -1778,16 +1778,9 @@ def _redispatch_pending(
     pending_batches = math.ceil(pending / LEDGER_CONVERT_BATCH_SIZE)
     broker_ok = False
     try:
-        import sys as _sys
-
         from backend import celery_app as _cq
 
-        if queue_depths_fn is not None:
-            depth_fn = queue_depths_fn
-        else:
-            cs_mod = _sys.modules.get("backend.celery_status")
-            cs_fn = getattr(cs_mod, "celery_queue_depths", None) if cs_mod is not None else None
-            depth_fn = cs_fn if cs_fn is not None and cs_fn is not _cq.celery_queue_depths else _cq.celery_queue_depths
+        depth_fn = queue_depths_fn if queue_depths_fn is not None else _cq.celery_queue_depths
         queues, broker_ok = depth_fn()
         queue_depth = queues.get("q.ingest", 0) if broker_ok else 0
     except Exception:
@@ -2268,7 +2261,3 @@ class _IngestModule(sys.modules[__name__].__class__):  # type: ignore[misc]
 
 
 sys.modules[__name__].__class__ = _IngestModule
-_backend_pkg = sys.modules.get("backend")
-if _backend_pkg is not None and hasattr(_backend_pkg, "_MODULE_ALIASES"):
-    _backend_pkg._MODULE_ALIASES.pop("backend.core.faro_versions", None)
-    _backend_pkg._MODULE_ALIASES.pop("backend.core.rum_ingest", None)

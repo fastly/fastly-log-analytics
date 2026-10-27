@@ -28,22 +28,21 @@ import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
-from backend.core.reset import _pause_rum_flags, _restore_rum_flags
-from backend.core.storage.view import _get_service_lock
-from backend.models.services import CustomFieldCreate, CustomFieldUpdate
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from hypothesis import HealthCheck, assume, given, settings
 from hypothesis import strategies as st
 
+import backend.core.metadata.ingest_log as quarantine
+import backend.core.sql_validator as sql_ident
 from backend import config
 from backend import config as svcconfig
 from backend.config import is_rum_enabled
 from backend.core import duckdb as _bk_duckdb
 from backend.core import ingest as _bk_ingest
 from backend.core import log_fields as lf
-from backend.core import quarantine, storage
 from backend.core import reset as reset_mod
+from backend.core import storage
 from backend.core.duckdb import ensure_cid_salt, get_or_generate_cid_salt
 from backend.core.ingest import get_catalog_field_ids, get_ingest_type_hints
 from backend.core.log_fields import (
@@ -60,9 +59,11 @@ from backend.core.log_fields import (
     validate_custom_field,
 )
 from backend.core.metadata.base import get_con
+from backend.core.reset import _pause_rum_flags, _restore_rum_flags
 from backend.core.storage import _core as _storage_core
+from backend.core.storage._core import _get_service_lock
 from backend.main import app as _fastapi_app
-from backend.models.common import FilterSpec
+from backend.models.common import CustomFieldCreate, CustomFieldUpdate, FilterSpec
 from backend.provision import generate_capture_vcl
 from backend.provision.cmcd_fields import (
     _CMCD_CUSTOM_FIELDS,
@@ -74,7 +75,6 @@ from backend.repositories.utils.filters import build_where_clause
 from backend.routers import services
 from backend.routers.services import core as services_core_router
 from backend.services import service_manager as sm
-from backend.utils import sql_validator as sql_ident
 from backend.utils.bounded_cache import CacheRegistry
 from tests.conftest import MOCK_SERVICE_ID
 
@@ -420,7 +420,7 @@ def test_compaction_stats_memoised_drained_and_missing_dir(tmp_path):
 
 @pytest.mark.usefixtures("_drain_caches")
 def test_storage_stats_cache_hit_force_and_invalidate():
-    from backend.core.metadata import reconciliation as rec
+    import backend.core.metadata.base as rec
 
     con = MagicMock()
     con.execute.return_value.fetchone.return_value = [3]
@@ -674,7 +674,7 @@ def _table_count(table: str) -> int:
 @pytest.fixture
 def _stub_storage_catalog(monkeypatch):
     monkeypatch.setattr("backend.core.storage._core.init_storage_table", MagicMock())
-    monkeypatch.setattr("backend.core.storage.view.update_storage_view", MagicMock())
+    monkeypatch.setattr("backend.core.storage._core.update_storage_view", MagicMock())
     monkeypatch.setattr("backend.core.duckdb.get_connection", MagicMock())
 
 
@@ -2076,7 +2076,7 @@ def test_log_fields_endpoints_surface_warning_and_noop(tmp_path, monkeypatch):
             "custom_fields": _make_custom_fields(count=20, bytes_each=500),
         }
     }
-    with patch("backend.state_sync.export_admin_state", return_value=None):
+    with patch("backend.core.metadata.base.export_admin_state", return_value=None):
         resp_post = client.post(f"/api/services/{svc_post}/log-fields", json=payload)
     assert (
         resp_post.status_code == 200 and resp_post.json()["line_budget_warning"]["code"] == "LOG_LINE_APPROACHING_LIMIT"
@@ -2133,4 +2133,4 @@ def test_bare_identifier_regex_has_one_owner() -> None:
             continue
         if any(n in text for n in needles):
             offenders.append(str(path.relative_to(BACKEND)))
-    assert offenders == [], f"use backend.core.sql_ident instead of a private identifier regex: {offenders}"
+    assert offenders == [], f"use backend.core.sql_validator instead of a private identifier regex: {offenders}"

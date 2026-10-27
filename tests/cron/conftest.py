@@ -103,15 +103,15 @@ def stub_cron_envelope(request: pytest.FixtureRequest, monkeypatch: pytest.Monke
     end_progress = MagicMock()
     cleanup = MagicMock()
     log_event = MagicMock()
-    monkeypatch.setattr("backend.cron_progress.start_progress", start_progress)
-    monkeypatch.setattr("backend.cron_progress.end_progress", end_progress)
-    monkeypatch.setattr("backend.cron_progress.cleanup_progress_and_reap", cleanup)
+    monkeypatch.setattr("backend.cron.scheduler.start_progress", start_progress)
+    monkeypatch.setattr("backend.cron.scheduler.end_progress", end_progress)
+    monkeypatch.setattr("backend.cron.scheduler.cleanup_progress_and_reap", cleanup)
     monkeypatch.setattr("backend.cron.scheduler._log_and_add_progress", log_event)
     monkeypatch.setattr("backend.cron.scheduler._check_disk_space", lambda *a, **kw: (True, ""))
     monkeypatch.setattr("backend.cron.scheduler._check_buffer_backlog", lambda *a, **kw: "")
     monkeypatch.setattr("backend.cron.scheduler._extract_log_text", lambda rid: "")
     monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda src: "/tmp/cache")
-    monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda *a, **kw: False)
+    monkeypatch.setattr("backend.utils.telemetry.should_defer_cron", lambda *a, **kw: False)
     monkeypatch.setattr("backend.cron.jobs._common.finalize_cron_duration", MagicMock())
     monkeypatch.setattr("backend.cron.jobs._common.refresh_view_and_warm_pool", MagicMock())
     monkeypatch.setattr("backend.cron.jobs._common._refresh_status_after_commit", MagicMock())
@@ -130,9 +130,9 @@ def assert_manual_trigger_standard_mode_rejected(
     base_source: dict[str, Any],
 ) -> Any:
     """Assert that a High-Scale-only manual trigger endpoint returns 400 in standard mode."""
-    from backend.deps import get_service_id, get_source
     from starlette.testclient import TestClient
 
+    from backend.core.request_context import get_service_id, get_source
     from backend.main import app
 
     standard_src = {**base_source, "deployment_mode": "standard"}
@@ -157,10 +157,10 @@ def assert_manual_trigger_non_admin_rejected(
     base_source: dict[str, Any],
 ) -> Any:
     """Assert that a manual trigger endpoint returns 403 when invoked by a non-admin."""
-    from backend.deps import get_service_id, get_source, require_admin
     from fastapi import HTTPException
     from starlette.testclient import TestClient
 
+    from backend.core.request_context import get_service_id, get_source, require_admin
     from backend.main import app
 
     def reject_analyst() -> None:

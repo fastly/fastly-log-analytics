@@ -6,7 +6,6 @@ import contextlib
 import heapq
 import math
 import os
-import sys as _sys
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from dataclasses import field as dc_field
@@ -14,11 +13,11 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from backend.core.rollups._common import IP_SPREAD_BUNDLE_FILENAME, quote_path_list
-from backend.models.dashboard import TopNRollupCoverage
-from backend.repositories.rollup_coverage import CoverageIndex, cached_listdir
+from backend.core.rollups.rollup_coverage import CoverageIndex, cached_listdir
+from backend.core.sql_validator import escape_sql_literal
+from backend.models.analytics import TopNRollupCoverage
 from backend.utils.date_utils import parse_day_key_strict
 from backend.utils.hll import HyperLogLog
-from backend.utils.sql_validator import escape_sql_literal
 
 TopNRow = tuple[str, Any, int]
 _EDGE_PREFIXES = ("cmcd_", "edge_", "rum_")
@@ -540,4 +539,3 @@ _plan_ip_spread_paths = plan_ip_spread_paths
 _plan_top_n_paths = plan_top_n_paths
 _spread_meta = spread_meta
 _truncate_top_n = truncate_top_n
-_sys.modules["backend.repositories.ip_spread_rollups"] = _sys.modules[__name__]

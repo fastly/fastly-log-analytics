@@ -46,8 +46,10 @@ from tests._helpers.rollups import (
     yesterday_iso as _yesterday_iso,
 )
 
+import backend.core.rollups.origin_dims as origin_latency_ts
+import backend.core.rollups.origin_dims as origin_summary
 from backend.core import rollups
-from backend.core.rollups import day_bundles, origin_dims, origin_latency_ts, origin_summary
+from backend.core.rollups import day_bundles, origin_dims
 from backend.repositories import origin as origin_repo
 from backend.repositories._base import QueryRunner
 
@@ -106,7 +108,7 @@ def _run_with_build_patches(cache_root, table: str, fresh_con):
 def _compact_patches(cache_root):
     with (
         patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
-        patch("backend.core.storage.view._get_service_lock", _noop_lock),
+        patch("backend.core.storage._core._get_service_lock", _noop_lock),
     ):
         yield
 
@@ -1280,7 +1282,7 @@ class TestRollupsNetworkRtt:
         AND WITHOUT network_rtt.parquet get queued. Already-built hours
         skip cleanly. Verified without a real duckdb path by stubbing the
         inner writer."""
-        from backend.core.rollups import network_rtt
+        import backend.core.rollups.origin_dims as network_rtt
 
         cache_root = tmp_path / "cache"
         cache_root.mkdir()
@@ -1402,7 +1404,7 @@ class TestRollupsNetworkRtt:
             )
 
         with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
-            with patch("backend.core.storage.view._get_service_lock", _noop_lock):
+            with patch("backend.core.storage._core._get_service_lock", _noop_lock):
                 rebuilt = rollups.compact_network_rtt_closed_days_to_daily("svc-nr-cd", src)
 
         assert rebuilt == 1
@@ -1439,7 +1441,7 @@ class TestRollupsNetworkRtt:
             )
 
         with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
-            with patch("backend.core.storage.view._get_service_lock", _noop_lock):
+            with patch("backend.core.storage._core._get_service_lock", _noop_lock):
                 rebuilt = rollups.compact_network_rtt_closed_days_to_daily("svc-nr-active", src)
 
         assert rebuilt == 0
@@ -1467,7 +1469,7 @@ class TestRollupsNetworkSpeed:
     def test_backfill_skips_built_hours(self, tmp_path):
         """Backfill walks rollups/hour_bundled and only queues hours WITH
         all_fields.parquet AND WITHOUT network_speed.parquet."""
-        from backend.core.rollups import network_speed
+        import backend.core.rollups.origin_dims as network_speed
 
         cache_root = tmp_path / "cache"
         cache_root.mkdir()
@@ -1576,7 +1578,7 @@ class TestRollupsNetworkSpeed:
             )
 
         with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
-            with patch("backend.core.storage.view._get_service_lock", _noop_lock):
+            with patch("backend.core.storage._core._get_service_lock", _noop_lock):
                 rebuilt = rollups.compact_network_speed_closed_days_to_daily("svc-ns-cd", src)
 
         assert rebuilt == 1
@@ -1613,7 +1615,7 @@ class TestRollupsNetworkSpeed:
             )
 
         with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
-            with patch("backend.core.storage.view._get_service_lock", _noop_lock):
+            with patch("backend.core.storage._core._get_service_lock", _noop_lock):
                 rebuilt = rollups.compact_network_speed_closed_days_to_daily("svc-ns-active", src)
 
         assert rebuilt == 0
@@ -1680,7 +1682,7 @@ class TestRollupsPerfDims:
     def test_build_perf_dims_writes_bundle(self, tmp_path):
         """A closed hour with the ttl column produces perf_ttl_dist.parquet with the
         documented schema + exact bucket counts + MIN(ttl)."""
-        from backend.core.rollups import perf_dims
+        import backend.core.rollups.origin_dims as perf_dims
 
         cache_root = tmp_path / "cache"
         cache_root.mkdir()
@@ -1721,7 +1723,7 @@ class TestRollupsPerfDims:
 
     def test_build_perf_dims_skips_active_hour(self, tmp_path):
         """The active UTC hour is still being written; the writer must skip it."""
-        from backend.core.rollups import perf_dims
+        import backend.core.rollups.origin_dims as perf_dims
 
         cache_root = tmp_path / "cache"
         cache_root.mkdir()
@@ -1743,7 +1745,7 @@ class TestRollupsPerfDims:
 
     def test_build_perf_dims_missing_ttl_skips_bundle(self, tmp_path):
         """A service whose schema lacks the ttl column produces no bundle."""
-        from backend.core.rollups import perf_dims
+        import backend.core.rollups.origin_dims as perf_dims
 
         cache_root = tmp_path / "cache"
         cache_root.mkdir()
@@ -1768,7 +1770,7 @@ class TestRollupsPerfDims:
     def test_backfill_perf_dims_skips_built_hours(self, tmp_path):
         """Backfill walks rollups/hour_bundled and only queues hours WITH
         all_fields.parquet AND WITHOUT perf_ttl_dist.parquet."""
-        from backend.core.rollups import perf_dims
+        import backend.core.rollups.origin_dims as perf_dims
 
         cache_root = tmp_path / "cache"
         cache_root.mkdir()
@@ -1788,7 +1790,7 @@ class TestRollupsPerfDims:
             calls.append(set(hours))
             return len(hours)
 
-        with patch("backend.core.rollups.perf_latency.build_per_hour_bundles", side_effect=_spy_bphb):
+        with patch("backend.core.rollups.origin_dims.build_per_hour_bundles", side_effect=_spy_bphb):
             with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
                 n = perf_dims.backfill_perf_dims_bundles("svc-pd-bf", src)
 
@@ -1822,7 +1824,7 @@ class TestRollupsPerfDims:
             )
 
         with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
-            with patch("backend.core.storage.view._get_service_lock", _noop_lock):
+            with patch("backend.core.storage._core._get_service_lock", _noop_lock):
                 n = day_bundles.compact_perf_dims_closed_days_to_daily("svc-pd-4", src)
 
         assert n == 1  # one bundle for the single closed day
@@ -1845,7 +1847,7 @@ class TestRollupsPerfDims:
             _write_hour_ttl(str(cache_root), f"{today}-{h:02d}", [{"bucket": "0s", "count": 5, "min_ttl": 0}])
 
         with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
-            with patch("backend.core.storage.view._get_service_lock", _noop_lock):
+            with patch("backend.core.storage._core._get_service_lock", _noop_lock):
                 n = day_bundles.compact_perf_dims_closed_days_to_daily("svc-pd-active", src)
 
         assert n == 0
@@ -1934,7 +1936,7 @@ class TestRollupsPerfDims:
         """Seed known rows across a 50-hour closed window; build the perf_dims
         rollup; assert the reader's [{"bucket","count"}] output is byte-equal to the
         live ttl_dist SQL over the SAME rows (one temp table holding all 50 hours)."""
-        from backend.core.rollups import perf_dims
+        import backend.core.rollups.origin_dims as perf_dims
         from backend.repositories._base import QueryRunner
 
         cache_root = tmp_path / "cache"
@@ -2039,7 +2041,7 @@ class TestRollupsPerfLatency:
     def test_backfill_skips_built_hours(self, tmp_path):
         """Backfill walks hour_bundled and queues hours WITH all_fields.parquet
         but WITHOUT perf_top_urls.parquet (the sentinel)."""
-        from backend.core.rollups import perf_latency
+        import backend.core.rollups.origin_dims as perf_latency
 
         cache_root = tmp_path / "cache"
         cache_root.mkdir()
@@ -2168,7 +2170,7 @@ class TestRollupsPerfLatency:
             )
 
         with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
-            with patch("backend.core.storage.view._get_service_lock", _noop_lock):
+            with patch("backend.core.storage._core._get_service_lock", _noop_lock):
                 rebuilt = rollups.compact_perf_latency_closed_days_to_daily("svc-pl-cd", src)
 
         assert rebuilt >= 1
@@ -2198,7 +2200,7 @@ class TestRollupsPerfLatency:
             _write_hour_perf(str(cache_root), f"{today}-{h:02d}", [_row("/a", 10, 100.0, 200.0, 300.0)])
 
         with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
-            with patch("backend.core.storage.view._get_service_lock", _noop_lock):
+            with patch("backend.core.storage._core._get_service_lock", _noop_lock):
                 rebuilt = rollups.compact_perf_latency_closed_days_to_daily("svc-pl-active", src)
 
         assert rebuilt == 0
@@ -2228,7 +2230,7 @@ def _write_hour_pop_health(cache_root: str, hour: str, rows: list[dict]) -> str:
 @pytest.mark.usefixtures("frozen_clock")
 class TestRollupsPopHealth:
     def test_backfill_skips_built_hours(self, tmp_path):
-        from backend.core.rollups import pop_health
+        import backend.core.rollups.origin_dims as pop_health
 
         cache_root = tmp_path / "cache"
         cache_root.mkdir()
@@ -2354,7 +2356,7 @@ class TestRollupsPopHealth:
             )
 
         with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
-            with patch("backend.core.storage.view._get_service_lock", _noop_lock):
+            with patch("backend.core.storage._core._get_service_lock", _noop_lock):
                 rebuilt = rollups.compact_pop_health_closed_days_to_daily("svc-ns-cd", src)
 
         assert rebuilt == 1
@@ -2400,7 +2402,7 @@ class TestRollupsPopHealth:
             )
 
         with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
-            with patch("backend.core.storage.view._get_service_lock", _noop_lock):
+            with patch("backend.core.storage._core._get_service_lock", _noop_lock):
                 rebuilt = rollups.compact_pop_health_closed_days_to_daily("svc-ns-active", src)
 
         assert rebuilt == 0

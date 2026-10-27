@@ -1092,7 +1092,7 @@ def get_insights(
             except Exception:
                 w_total = 0
         try:
-            from backend.core.field_registry import INSIGHT_DEFINITIONS as _defs
+            from backend.core.log_fields import INSIGHT_DEFINITIONS as _defs
 
             defs_map = {d["id"]: d for d in _defs}
         except Exception:
@@ -1378,7 +1378,7 @@ def get_cache_collapse_detail(
     clamp_end: str | None = None,
     mask_ips: bool = False,
 ) -> dict:
-    from backend.core.share_db.validation import mask_ip
+    from backend.core.share_db import mask_ip
 
     source_name = src["name"]
     table_name = _safe_table(source_name)

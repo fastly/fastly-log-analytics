@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import sys
 import threading
 from datetime import datetime
 from typing import Any
@@ -12,28 +11,37 @@ from uuid import uuid4
 from fastapi import APIRouter, Depends, HTTPException
 
 from backend.core import metadata
-from backend.core.high_scale_sections import HighScaleSections
-from backend.core.request_context import RequestContext, build_request_context
-from backend.core.share_db.validation import mask_ip
-from backend.deps import require_admin
+from backend.core.request_context import RequestContext, build_request_context, require_admin
+from backend.core.request_telemetry import HighScaleSections
+from backend.core.share_db import mask_ip
 from backend.high_scale._common import KeysetCursor, raw_query_producer
 from backend.high_scale.aggregate_query import (
     DEFAULT_AGGREGATE_DIMENSIONS,
     AggregateRequest,
     query_clickhouse_aggregate,
 )
-from backend.high_scale.exports import ExportJob, ExportManager, get_export_manager
-from backend.high_scale.historical_jobs import HistoricalJobManager, get_historical_job_manager
-from backend.high_scale.query_router import QueryIntent, QueryRouter, QueryTier
-from backend.high_scale.query_router import QueryRequest as RouterQueryRequest
-from backend.high_scale.query_service import query_cmcd_facts, query_request_facts, query_rum_facts
-from backend.high_scale.registry_bootstrap import (
+from backend.high_scale.archive import (
+    ExportJob,
+    ExportManager,
+    HistoricalJobManager,
+    get_export_manager,
+    get_historical_job_manager,
+)
+from backend.high_scale.ingest_controller import (
     HighScaleService,
     HighScaleServiceRegistryProtocol,
     get_high_scale_service_registry,
 )
-from backend.models._base import DEFAULT_ERROR_RESPONSES, ErrorEnvelope
-from backend.models.high_scale import (
+from backend.high_scale.query_service import (
+    QueryIntent,
+    QueryRouter,
+    QueryTier,
+    query_cmcd_facts,
+    query_request_facts,
+    query_rum_facts,
+)
+from backend.high_scale.query_service import QueryRequest as RouterQueryRequest
+from backend.models.admin import (
     HighScaleAggregateRequest,
     HighScaleAggregateResponse,
     HighScaleAggregateValue,
@@ -51,6 +59,7 @@ from backend.models.high_scale import (
     QueryResponseMetadataResponse,
     ServingWatermarkResponse,
 )
+from backend.models.common import DEFAULT_ERROR_RESPONSES, ErrorEnvelope
 from backend.utils.auth import mask_ips_for
 from backend.utils.bounded_cache import BoundedTTLCache, CacheRegistry
 from backend.utils.date_utils import parse_iso_utc
@@ -853,9 +862,3 @@ def cancel_query_job(
 
 
 router = high_scale_router
-
-sys.modules["backend.routers.high_scale"] = sys.modules[__name__]
-if "backend.routers" in sys.modules:
-    setattr(sys.modules["backend.routers"], "high_scale", sys.modules[__name__])
-if "backend" in sys.modules and hasattr(sys.modules["backend"], "_MODULE_ALIASES"):
-    sys.modules["backend"]._MODULE_ALIASES["backend.routers.high_scale"] = __name__

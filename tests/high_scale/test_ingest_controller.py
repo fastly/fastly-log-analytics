@@ -10,18 +10,18 @@ from unittest.mock import MagicMock, patch
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
-from backend.high_scale.archive_models import ArchiveState
-from backend.high_scale.archive_publication import ArchivePublication, InMemoryObjectStore
-from backend.high_scale.deletion import DeletionController
-from backend.high_scale.publication import (
+
+from backend.high_scale.archive import (
+    ArchivePublication,
+    ArchiveState,
     ClickHousePublication,
     InMemoryBatchManifestStore,
+    InMemoryObjectStore,
     InsertReceipt,
+    replay_manifest,
 )
-from backend.high_scale.replay import replay_manifest
-from backend.high_scale.source_discovery import SourceObjectDescriptor
-
-from backend.high_scale.ingest_controller import HighScaleIngestController
+from backend.high_scale.ingest_controller import HighScaleIngestController, SourceObjectDescriptor
+from backend.high_scale.postgres_control import DeletionController
 from tests.high_scale.conftest import HighScaleLedger, OwnershipStore
 
 
@@ -717,20 +717,18 @@ def test_server_memory_ratio_has_headroom_over_real_usage() -> None:
 
 
 import pytest
-from backend.high_scale.orchestration import HighScaleWorkerCoordinator
-from backend.high_scale.publication import (
+
+from backend.high_scale.archive import (
     HighScaleBatch,
     PublicationResult,
     PublicationStatus,
 )
-from backend.high_scale.source_discovery import (
-    SourceObjectMissingError,
-    SourceObjectPage,
-)
-
 from backend.high_scale.ingest_controller import (
     HIGH_SCALE_PAGE_MAX_BYTES,
     BatchIngestResult,
+    HighScaleWorkerCoordinator,
+    SourceObjectMissingError,
+    SourceObjectPage,
 )
 
 
@@ -1121,11 +1119,9 @@ def test_controller_ingest_batch_empty_payloads() -> None:
 from collections.abc import Sequence
 from typing import Any
 
-from backend.high_scale.aggregate_batch_adapter import compute_dimension_counts
-from backend.high_scale.origin_projection import build_origin_projection_rows
-from backend.high_scale.performance_projection import build_performance_projection_rows
-
+from backend.high_scale.ingest_controller import compute_dimension_counts
 from backend.high_scale.network import build_network_projection_rows
+from backend.high_scale.query_service import build_origin_projection_rows, build_performance_projection_rows
 from backend.high_scale.security import build_security_projection_rows
 
 
@@ -1460,23 +1456,22 @@ from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
-from backend.core.high_scale_sections import current_clickhouse_scope
-from backend.core.query_attribution import Attribution, current_attribution
-from backend.high_scale.publication import (
+
+import backend.high_scale.archive as publication
+from backend.core.request_telemetry import Attribution, current_attribution, current_clickhouse_scope
+from backend.high_scale import _common as raw_query
+from backend.high_scale import cmcd as hs_cmcd
+from backend.high_scale import dashboard as hs_dashboard
+from backend.high_scale import security as hs
+from backend.high_scale.archive import (
     PartialInsert,
+    ServingWatermark,
     _batch_uuid,
     _rows_for_domain,
     build_batch_id_from_manifest_id,
     build_cmcd_projection_key,
 )
-from backend.high_scale.publication import _extract_custom_fields as persisted_fact_fields
-
-from backend.high_scale import _common as raw_query
-from backend.high_scale import cmcd as hs_cmcd
-from backend.high_scale import dashboard as hs_dashboard
-from backend.high_scale import publication
-from backend.high_scale import security as hs
-from backend.high_scale.archive import ServingWatermark
+from backend.high_scale.archive import _extract_custom_fields as persisted_fact_fields
 from backend.high_scale.ingest_controller import (
     RELATIVE_ERROR,
     AggregateBatchAdapter,
@@ -2281,8 +2276,8 @@ def test_wellknown_bots_carry_real_verification_counters():
     with (
         patch("backend.utils.bot_sources.build_matcher", return_value=_match_googlebot),
         patch("backend.utils.bot_sources.get_bot_regex_pattern", return_value="(?i)googlebot"),
-        patch("backend.utils.rdns_cache.get_hostnames", return_value=hostnames),
-        patch("backend.utils.rdns_cache.enqueue"),
+        patch("backend.utils.bot_sources.get_hostnames", return_value=hostnames),
+        patch("backend.utils.bot_sources.enqueue"),
     ):
         res = hs.security_aggregates(_service(client), _req(), START, END, sections={"wellknown_bots"})
     sql, params = client.call("wellknown_bots")
@@ -2441,7 +2436,7 @@ def test_dashboard_bundle_serves_real_top_bots():
 # ── Merged from test_security_ngwaf.py ───────────────────────────────
 
 NOW_security = datetime(2026, 9, 11, 20, 0, tzinfo=UTC)
-_PG_TARGET = "backend.core.metadata.pg_connection.get_pg_readonly_connection"
+_PG_TARGET = "backend.core.metadata.base.get_pg_readonly_connection"
 _BOT_ROW = {"waf_req_id": "req-1", "bot_name": "bingbot", "category": "search", "wellknown_bot_name": "bing"}
 
 
@@ -3082,7 +3077,7 @@ def test_batch_ingest_publishes_a_manifest_scoped_cmcd_batch() -> None:
 def test_probe_and_asn_enrichment_are_disjoint_overhead(monkeypatch: pytest.MonkeyPatch) -> None:
     clock = [0.0]
     lookup_scopes: list[dict[str, Any]] = []
-    monkeypatch.setattr("backend.core.high_scale_sections.time.perf_counter", lambda: clock[0])
+    monkeypatch.setattr("backend.core.request_telemetry.time.perf_counter", lambda: clock[0])
 
     class TimedClient(_Client_cmcd):
         def execute(self, sql: str, params: dict | None = None) -> list[dict]:
@@ -3128,7 +3123,7 @@ def test_probe_and_asn_enrichment_are_disjoint_overhead(monkeypatch: pytest.Monk
 def test_asn_enrichment_failure_is_overhead_and_not_cached(monkeypatch: pytest.MonkeyPatch) -> None:
     observations: list[dict[str, Any]] = []
     monkeypatch.setattr(
-        "backend.core.high_scale_sections._logger.info", lambda event, **entry: observations.append(entry)
+        "backend.core.request_telemetry._logger.info", lambda event, **entry: observations.append(entry)
     )
 
     def fails(service_id: str, asns: list[int]) -> dict[int, str]:

@@ -80,7 +80,7 @@ def _run_rum_discovery_cron(service_id: str, run_id: int | None = None) -> None:
             return
 
         from backend.core.ingest import discover_rum_prefix
-        from backend.provision.log_paths import rum_minute_list_prefix
+        from backend.provision.cli import rum_minute_list_prefix
 
         now = datetime.now(UTC)
         discovered = sum(

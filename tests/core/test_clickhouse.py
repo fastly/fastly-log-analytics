@@ -22,12 +22,26 @@ from uuid import UUID, uuid4
 import duckdb
 import httpx
 import pytest
-from backend.core.clickhouse_client import CLICKHOUSE_FACT_COLUMNS, ClickHouseClient, ClickHouseError
-from backend.core.clickhouse_manifest import Artifact, Dataset, PgManifest
-from backend.core.clickhouse_publication import (
+from psycopg_pool import ConnectionPool
+from tests._helpers.sources import TinyFos
+
+import backend.core.clickhouse as ch
+import backend.core.clickhouse as clickhouse_metrics
+import backend.core.clickhouse as metrics
+import backend.core.clickhouse as observer
+import backend.core.clickhouse as schema
+from backend import config
+from backend.core.clickhouse import (
+    CLICKHOUSE_FACT_COLUMNS,
+    CLICKHOUSE_SCHEMA_VERSION,
     PAYLOAD_COLUMNS,
+    Artifact,
+    ClickHouseClient,
+    ClickHouseError,
+    Dataset,
     DurableBatch,
     FosArtifacts,
+    PgManifest,
     build_batch_id,
     canonical_bytes,
     canonical_row,
@@ -37,22 +51,11 @@ from backend.core.clickhouse_publication import (
     replay_unpublished,
     verify_generation,
 )
-from backend.core.clickhouse_schema import CLICKHOUSE_SCHEMA_VERSION
-from backend.core.high_scale_sections import HighScaleSections, current_clickhouse_scope
-from backend.core.metadata.pg_schema import pg_schema_statements
-from backend.core.query_attribution import Attribution, current_attribution
-from backend.high_scale.archive_models import ArchiveArtifact, ArchiveManifest, ArchiveSourceObject, ArchiveState
-from backend.high_scale.source_discovery import INITIAL_SOURCE_CURSOR
-from psycopg_pool import ConnectionPool
-from tests._helpers.sources import TinyFos
-
-from backend import config
-from backend.core import clickhouse_client as ch
-from backend.core import clickhouse_observer as clickhouse_metrics
-from backend.core import clickhouse_observer as metrics
-from backend.core import clickhouse_observer as observer
-from backend.core import clickhouse_schema as schema
 from backend.core.metadata import usage_log
+from backend.core.metadata.base import pg_schema_statements
+from backend.core.request_telemetry import Attribution, HighScaleSections, current_attribution, current_clickhouse_scope
+from backend.high_scale.archive import ArchiveArtifact, ArchiveManifest, ArchiveSourceObject, ArchiveState
+from backend.high_scale.ingest_controller import INITIAL_SOURCE_CURSOR
 from backend.high_scale.postgres_control import PostgresControlPlane
 from backend.models.common import DebugQuery
 from backend.utils import telemetry
@@ -123,7 +126,7 @@ def test_insert_failure_records_sanitized_failure_and_raises(monkeypatch):
     store.artifact.return_value = artifact
     store.claim.return_value = 1
     store.generation.return_value = {"target_identity": "target"}
-    monkeypatch.setattr("backend.core.clickhouse_publication.target_identity", lambda c: "target")
+    monkeypatch.setattr("backend.core.clickhouse.target_identity", lambda c: "target")
     client.insert_rows.side_effect = RuntimeError("credentials must not escape")
     with pytest.raises(RuntimeError, match="publication failed: RuntimeError"):
         publish_batch(dataset.service_id, batch, generation="g", store=store, client=client)
@@ -142,7 +145,7 @@ def published_fixture(monkeypatch):
     store.finish.return_value = True
     store.activate.return_value = True
     store.selected.return_value = {"dataset_id": dataset.dataset_id, "generation": "g"}
-    monkeypatch.setattr("backend.core.clickhouse_publication.target_identity", lambda c: "target")
+    monkeypatch.setattr("backend.core.clickhouse.target_identity", lambda c: "target")
 
     def execute(sql, params):
         assert "log_facts FINAL" in sql and params["service"] == dataset.service_id
@@ -169,7 +172,7 @@ def test_successful_publication_checks_actual_ordered_payload(published_fixture)
 def test_publication_metric_includes_preclaim_errors(published_fixture, monkeypatch, outcome):
     dataset, _, batch, store, client = published_fixture
     record = MagicMock()
-    monkeypatch.setattr("backend.core.clickhouse_publication.record_publication", record)
+    monkeypatch.setattr("backend.core.clickhouse.record_publication", record)
     if outcome == "not_claimed":
         store.claim.return_value = None
     elif outcome == "stale":
@@ -186,10 +189,8 @@ def test_publication_metric_includes_preclaim_errors(published_fixture, monkeypa
 
 def test_publication_telemetry_verification_and_rebuild(published_fixture, monkeypatch):
     dataset, artifact, batch, store, client = published_fixture
-    monkeypatch.setattr(
-        "backend.core.clickhouse_publication.record_publication", MagicMock(side_effect=RuntimeError("telemetry"))
-    )
-    monkeypatch.setattr("backend.core.clickhouse_publication.logger.info", MagicMock(side_effect=RuntimeError("log")))
+    monkeypatch.setattr("backend.core.clickhouse.record_publication", MagicMock(side_effect=RuntimeError("telemetry")))
+    monkeypatch.setattr("backend.core.clickhouse.logger.info", MagicMock(side_effect=RuntimeError("log")))
     assert publish_batch(dataset.service_id, batch, generation="g", store=store, client=client).status == "published"
     client.insert_rows.side_effect = ValueError("original")
     store.finish.side_effect = RuntimeError("manifest unavailable")
@@ -484,7 +485,7 @@ def test_insert_timeout_and_health_and_storage_health(clients):
 
 
 def test_active_query_monitor_pool_acquisition_and_close(clients):
-    from backend.core.query_registry import query_registry
+    from backend.core.request_telemetry import query_registry
 
     active = []
 
@@ -688,14 +689,14 @@ def test_app_lifecycle_initializes_probes_and_always_closes(monkeypatch, failure
         patch("backend.main._enforce_data_dir_mounted"),
         patch("backend.main._migrate_config_on_startup"),
         patch("backend.main._enforce_proxy_headers_configured"),
-        patch("backend.core.metadata.pg_schema.ensure_pg_schema"),
+        patch("backend.core.metadata.base.ensure_pg_schema"),
         patch("backend.config.validate_deployment_mode"),
-        patch("backend.utils.telemetry_proxy.start_proxy_server"),
+        patch("backend.utils.telemetry.start_proxy_server"),
         patch("backend.utils.tunnel.get_tunnel_manager"),
         patch("backend.main._bounded_scheduler_shutdown"),
         patch("backend.core.duckdb.close_all_connections"),
-        patch("backend.core.clickhouse_client.get_clickhouse_client", return_value=c) as initialize,
-        patch("backend.core.clickhouse_client.close_clickhouse_client") as close,
+        patch("backend.core.clickhouse.get_clickhouse_client", return_value=c) as initialize,
+        patch("backend.core.clickhouse.close_clickhouse_client") as close,
     ):
 
         async def run_lifespan():
@@ -1050,7 +1051,7 @@ def manifest(monkeypatch):
     monkeypatch.setenv("METADATA_DSN", "postgresql://placeholder")
     pool, con = MagicMock(), MagicMock()
     pool.connection.return_value.__enter__.return_value = con
-    monkeypatch.setattr("backend.core.clickhouse_manifest.get_pg_pool", lambda: pool)
+    monkeypatch.setattr("backend.core.clickhouse.get_pg_pool", lambda: pool)
     return PgManifest(), con
 
 
@@ -1700,7 +1701,7 @@ def test_sections_propagation_queue_wait_persistence_and_nesting(monkeypatch) ->
     assert current_clickhouse_scope()["service_id"] is None
 
     clock = [0.0]
-    monkeypatch.setattr("backend.core.high_scale_sections.time.perf_counter", lambda: clock[0])
+    monkeypatch.setattr("backend.core.request_telemetry.time.perf_counter", lambda: clock[0])
     trace2 = HighScaleSections("service-test", "network")
     ready, release = threading.Event(), threading.Event()
     with ThreadPoolExecutor(max_workers=1) as pool:

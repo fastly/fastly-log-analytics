@@ -957,14 +957,14 @@ sys.addaudithook(audit)
 launcher = runpy.run_path({str(LAUNCHER)!r})
 launcher["_maybe_redirect_config_paths"]()
 from backend import config
-from backend.core.metadata import base, usage_log_db
+from backend.core.metadata import base, usage_log
 paths = {{
     "cwd": Path.cwd(),
     "configs": config.CONFIGS_DIR,
     "data": config.DATA_DIR,
     "duckdb": config.duckdb_path("sandbox-service"),
     "metadata": base.db_path("sandbox-service"),
-    "usage_db": usage_log_db.db_path("sandbox-service"),
+    "usage_db": usage_log.db_path("sandbox-service"),
     "usage_config": config._USAGE_LOGGING_CONFIG_PATH,
     "buffer_cache": Path("cache"),
 }}

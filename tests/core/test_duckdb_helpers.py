@@ -15,15 +15,14 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
-import backend.core.duckdb_recycle as rec
 import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
-from backend.core.storage.view import _get_service_lock
 
 import backend.core.duckdb as d
 import backend.core.duckdb as duckdb_mod
+import backend.cron.jobs.duckdb_recycle as rec
 from backend.core import duckdb_pool
 from backend.core import duckdb_pool as _pool
 from backend.core import storage as _storage
@@ -81,6 +80,7 @@ from backend.core.duckdb_pool import (
     warm_pool_for_service,
 )
 from backend.core.log_fields import LOG_FIELD_CATALOG
+from backend.core.storage._core import _get_service_lock
 from backend.utils.date_utils import safe_iso as _safe_iso
 
 
@@ -750,8 +750,8 @@ def test_threads_and_pool_settings(tmp_path, monkeypatch):
     mock_conn = MagicMock(spec=duckdb.DuckDBPyConnection)
     with (
         patch("backend.core.duckdb.get_connection", return_value=mock_conn),
-        patch("backend.core.storage.view._view_cache", {}),
-        patch("backend.core.storage.view.update_storage_view"),
+        patch("backend.core.storage._core._view_cache", {}),
+        patch("backend.core.storage._core.update_storage_view"),
     ):
         pool.acquire(src={"name": "test_no_threads"}, max_wait=0.5)
     executed = [str(c.args[0]).lower() for c in mock_conn.execute.call_args_list if c.args]
@@ -1098,14 +1098,18 @@ def test_recycle_barriers(monkeypatch):
 
 # ── Merged from tests/core/test_duckdb_status_helpers.py ──
 
-"""Targeted coverage for backend.core._duckdb_status helpers."""
+"""Targeted coverage for backend.core.duckdb_status helpers."""
 
 
 from contextlib import ExitStack
 from datetime import timedelta
 
 import pytest
-from backend.core._duckdb_status import (
+
+import backend.core.duckdb_status as _duckdb_status
+import backend.core.metadata as metadata_db
+from backend.core import duckdb as _db
+from backend.core.duckdb_status import (
     _clear_schema_cache,
     _schema_cache,
     backfill_fastly_edge_writes,
@@ -1113,11 +1117,7 @@ from backend.core._duckdb_status import (
     reconcile_fastly_stats,
     update_top_values,
 )
-from backend.core.rollups.rum import rum_count_and_latest
-
-from backend.core import _duckdb_status
-from backend.core import duckdb as _db
-from backend.core import metadata as metadata_db
+from backend.core.rollups.recompute import rum_count_and_latest
 from backend.utils.bounded_cache import BoundedTTLCache
 from backend.utils.date_utils import safe_iso
 
@@ -1181,7 +1181,7 @@ def test_update_top_values_happy_retry_and_no_overlap(in_memory_duckdb, fos_sour
 
     with _db._top_values_cache_lock:
         _db._top_values_cache.pop(src["name"], None)
-    with patch("backend.core._duckdb_status.get_schema", return_value=schema):
+    with patch("backend.core.duckdb_status.get_schema", return_value=schema):
         update_top_values(in_memory_duckdb, src)
 
     out_path = cache_dir / "top_values.json"
@@ -1207,7 +1207,7 @@ def test_update_top_values_happy_retry_and_no_overlap(in_memory_duckdb, fos_sour
             return in_memory_duckdb.execute(sql, *a, **kw)
 
     with (
-        patch("backend.core._duckdb_status.get_schema", return_value=schema[:2]),
+        patch("backend.core.duckdb_status.get_schema", return_value=schema[:2]),
         patch("backend.core.storage.update_storage_view") as mock_update,
     ):
         update_top_values(_Proxy(), src)
@@ -1221,7 +1221,7 @@ def test_update_top_values_happy_retry_and_no_overlap(in_memory_duckdb, fos_sour
         _db._top_values_cache.pop(src["name"], None)
     state["creates"] = 0
     no_overlap_schema = [{"name": "timestamp", "type": "TIMESTAMP"}, {"name": "custom_blob", "type": "VARCHAR"}]
-    with patch("backend.core._duckdb_status.get_schema", return_value=no_overlap_schema):
+    with patch("backend.core.duckdb_status.get_schema", return_value=no_overlap_schema):
         update_top_values(_Proxy(), src)
     assert state["creates"] == 0
     assert not out_path.exists()
@@ -1241,7 +1241,7 @@ def test_refresh_config_status_swallow_and_error_branches():
         patch("backend.config.load_config", return_value={"name": "svc", "bucket": "b", "service_id": "svc"}),
         patch("backend.config.config_to_source", return_value={"name": "svc", "bucket": "b"}),
         patch(
-            "backend.high_scale.registry_bootstrap.get_high_scale_service_registry",
+            "backend.high_scale.ingest_controller.get_high_scale_service_registry",
             return_value=type("Registry", (), {"resolve": lambda self, service_id: object()})(),
         ),
         patch("backend.core.duckdb.get_connection") as get_con,
@@ -1286,11 +1286,11 @@ def test_refresh_config_status_happy_path_and_rum_persisted(tmp_path):
     with _refresh_ctx(
         captured,
         **{
-            "backend.core._duckdb_status.get_schema": {"return_value": [{"name": "ip", "type": "VARCHAR"}]},
-            "backend.core._duckdb_status.update_top_values": {},
-            "backend.core._duckdb_status._cache_dir": {"return_value": str(buf_dir)},
+            "backend.core.duckdb_status.get_schema": {"return_value": [{"name": "ip", "type": "VARCHAR"}]},
+            "backend.core.duckdb_status.update_top_values": {},
+            "backend.core.duckdb_status._cache_dir": {"return_value": str(buf_dir)},
             "backend.core.storage.get_table_info": {"return_value": {"size_bytes": 12345, "data_files": 7}},
-            "backend.repositories.usage.get_edge_ratio": {"return_value": (0.42, None)},
+            "backend.repositories.assets.get_edge_ratio": {"return_value": (0.42, None)},
         },
     ):
         refresh_config_status("svc")
@@ -1315,11 +1315,11 @@ def test_refresh_config_status_happy_path_and_rum_persisted(tmp_path):
         cfg=rum_cfg,
         src=rum_cfg,
         **{
-            "backend.core._duckdb_status.get_schema": {"return_value": [{"name": "ip", "type": "VARCHAR"}]},
-            "backend.core._duckdb_status.update_top_values": {},
-            "backend.core._duckdb_status._cache_dir": {"return_value": "/tmp/nonexistent-rum-fresh"},
+            "backend.core.duckdb_status.get_schema": {"return_value": [{"name": "ip", "type": "VARCHAR"}]},
+            "backend.core.duckdb_status.update_top_values": {},
+            "backend.core.duckdb_status._cache_dir": {"return_value": "/tmp/nonexistent-rum-fresh"},
             "backend.core.storage.get_table_info": {"return_value": {"error": "skip"}},
-            "backend.core.rollups.rum.rum_count_and_latest": {"new": live_rum},
+            "backend.core.rollups.recompute.rum_count_and_latest": {"new": live_rum},
         },
     ):
         refresh_config_status("svc")
@@ -1341,9 +1341,9 @@ def test_refresh_config_status_skip_top_values_omits_schema_key(discovery_time):
     with _refresh_ctx(
         captured,
         **{
-            "backend.core._duckdb_status.get_schema": {"side_effect": _track_schema},
-            "backend.core._duckdb_status.update_top_values": {},
-            "backend.core.metadata.cron_log.latest_cron_per_task": {
+            "backend.core.duckdb_status.get_schema": {"side_effect": _track_schema},
+            "backend.core.duckdb_status.update_top_values": {},
+            "backend.core.metadata.usage_log.latest_cron_per_task": {
                 "return_value": {
                     "sync": {"started_at": "2026-09-01T18:00:00Z"},
                     "log_discovery": {"started_at": discovery_time},
@@ -1354,7 +1354,7 @@ def test_refresh_config_status_skip_top_values_omits_schema_key(discovery_time):
         refresh_config_status("svc", include_top_values=False)
 
     assert "schema" not in captured["status"]
-    mocks["backend.core._duckdb_status.update_top_values"].assert_not_called()
+    mocks["backend.core.duckdb_status.update_top_values"].assert_not_called()
     assert schema_calls["count"] == 0
     assert captured["status"]["request"]["last_sync_at"] == (discovery_time or "2026-09-01T18:00:00Z")
 
@@ -1417,7 +1417,7 @@ def test_get_sync_status_unconfigured_and_cached_modes(in_memory_duckdb, fos_sou
         "latest_file_name": None,
     }
     with (
-        patch("backend.core._duckdb_status._data_stats_fingerprint", return_value=None),
+        patch("backend.core.duckdb_status._data_stats_fingerprint", return_value=None),
         patch("backend.config.get_status", return_value={"local_rows": 0, "latest_log_at": None}),
         patch("backend.core.metadata.get_ingested_files_status_summary", return_value=empty_sum),
     ):
@@ -1447,7 +1447,7 @@ def test_get_sync_status_stale_catalog_rebuild_and_unknown_error_fallback(in_mem
             return in_memory_duckdb.execute(sql, *a, **kw)
 
     with (
-        patch("backend.core._duckdb_status._data_stats_fingerprint", return_value=None),
+        patch("backend.core.duckdb_status._data_stats_fingerprint", return_value=None),
         patch("backend.config.get_status", return_value={}),
         patch("backend.core.storage.clear_source_caches") as mock_clear,
         patch("backend.core.storage.update_storage_view") as mock_update,
@@ -1476,7 +1476,7 @@ def test_get_sync_status_stale_catalog_rebuild_and_unknown_error_fallback(in_mem
             return _StubRow(one=(0,))
 
     with (
-        patch("backend.core._duckdb_status._data_stats_fingerprint", return_value=None),
+        patch("backend.core.duckdb_status._data_stats_fingerprint", return_value=None),
         patch("backend.config.get_status", return_value={}),
         patch("backend.core.metadata.get_ingested_files_status_summary", return_value=summary),
         patch("backend.core.storage.clear_source_caches") as mock_clear2,
@@ -1507,7 +1507,7 @@ def test_get_sync_status_empty_and_stale_view_lake_reconciliation(in_memory_duck
 
     # 1. Empty view with prior status prefers last-known-good local_rows
     with (
-        patch("backend.core._duckdb_status._data_stats_fingerprint", return_value=None),
+        patch("backend.core.duckdb_status._data_stats_fingerprint", return_value=None),
         patch(
             "backend.config.get_status", return_value={"local_rows": 8_090_191, "latest_log_at": "2026-06-20T14:00:00"}
         ),
@@ -1522,7 +1522,7 @@ def test_get_sync_status_empty_and_stale_view_lake_reconciliation(in_memory_duck
 
     # 2. Empty view without prior status falls back to metadata sum
     with (
-        patch("backend.core._duckdb_status._data_stats_fingerprint", return_value=None),
+        patch("backend.core.duckdb_status._data_stats_fingerprint", return_value=None),
         patch("backend.config.get_status", return_value={}),
         patch("backend.core.metadata.get_ingested_files_status_summary", return_value=summary),
         patch("backend.core.storage.clear_source_caches"),
@@ -1549,7 +1549,7 @@ def test_get_sync_status_empty_and_stale_view_lake_reconciliation(in_memory_duck
             return in_memory_duckdb.execute(sql, *a, **kw)
 
     with (
-        patch("backend.core._duckdb_status._data_stats_fingerprint", return_value=None),
+        patch("backend.core.duckdb_status._data_stats_fingerprint", return_value=None),
         patch(
             "backend.config.get_status", return_value={"local_rows": 13_948_280, "latest_log_at": "2026-09-22T00:58:06"}
         ),
@@ -1583,7 +1583,7 @@ def test_get_sync_status_empty_and_stale_view_lake_reconciliation(in_memory_duck
             return in_memory_duckdb.execute(sql, *a, **kw)
 
     with (
-        patch("backend.core._duckdb_status._data_stats_fingerprint", return_value=None),
+        patch("backend.core.duckdb_status._data_stats_fingerprint", return_value=None),
         patch("backend.config.get_status", return_value=None),
         patch("backend.core.metadata.get_ingested_files_status_summary", return_value=summary),
         patch("backend.core.storage.buffer_files", return_value=[]),
@@ -1613,8 +1613,8 @@ def test_get_sync_status_ducklake_snapshot_cached_split_stats(in_memory_duckdb, 
 
     def _run_with_snap(snap_id: int):
         with (
-            patch("backend.core.storage._ducklake.ducklake_table_name", return_value="logs"),
-            patch("backend.core.storage._ducklake.ducklake_current_snapshot_id", return_value=snap_id),
+            patch("backend.core.storage._core.ducklake_table_name", return_value="logs"),
+            patch("backend.core.storage._core.ducklake_current_snapshot_id", return_value=snap_id),
             patch("backend.config.get_status", return_value={}),
         ):
             return get_sync_status(in_memory_duckdb, src, force=True)
@@ -1833,7 +1833,7 @@ def test_usage_and_cron_forwarding_helpers():
 
 
 def _seed_reconciliation_row(service_id: str, ts_iso: str) -> None:
-    from backend.core.metadata import usage_log_db as _usage_log_db
+    import backend.core.metadata.usage_log as _usage_log_db
 
     con = _usage_log_db.get_con(service_id)
     con.execute(
@@ -1951,9 +1951,9 @@ def _checkout_idle_conn_with_rebind(pool: _Pool, mock_conn: MagicMock) -> dict:
     pool._in_use = 1
     captured: dict = {}
     with (
-        patch("backend.core.storage.view._view_cache", {}),
+        patch("backend.core.storage._core._view_cache", {}),
         patch(
-            "backend.core.storage.view.update_storage_view",
+            "backend.core.storage._core.update_storage_view",
             side_effect=lambda con, src, **kwargs: captured.update({"con": con, "src": src, "kwargs": kwargs}),
         ) as mock_uiv,
     ):
@@ -1975,8 +1975,8 @@ def test_pool_deadlock_safety_and_recovery_on_checkout_exception():
     pool._in_use = 1
 
     with (
-        patch("backend.core.storage.view._view_cache", {}),
-        patch("backend.core.storage.view.update_storage_view", side_effect=RuntimeError("Mock view rebind failed")),
+        patch("backend.core.storage._core._view_cache", {}),
+        patch("backend.core.storage._core.update_storage_view", side_effect=RuntimeError("Mock view rebind failed")),
     ):
         completed = False
 
@@ -1997,8 +1997,8 @@ def test_pool_deadlock_safety_and_recovery_on_checkout_exception():
     fresh_conn = _mock_conn()
     with (
         patch("backend.core.duckdb.get_connection", return_value=fresh_conn) as build_mock,
-        patch("backend.core.storage.view.update_storage_view", return_value=None),
-        patch("backend.core.storage.view._try_fast_path_view", return_value=True),
+        patch("backend.core.storage._core.update_storage_view", return_value=None),
+        patch("backend.core.storage._core._try_fast_path_view", return_value=True),
         patch("backend.core.duckdb_pool._set_conn_state"),
         patch("backend.core.duckdb_pool._pool_conn_memory_limit", return_value=None),
     ):
@@ -2011,20 +2011,20 @@ def test_warm_idle_and_warm_pool_for_service():
     for c in conns:
         pool._idle.put_nowait(c)
     pool._in_use = 3
-    with patch("backend.core.storage.view._try_fast_path_view", return_value=True) as mock_fp:
+    with patch("backend.core.storage._core._try_fast_path_view", return_value=True) as mock_fp:
         pool.warm_idle(src={"name": "test_warm", "bucket": "b"})
     assert mock_fp.call_count == 3 and {call.args[0] for call in mock_fp.call_args_list} == set(conns)
     assert (pool._in_use, pool._idle.qsize()) == (3, 3)
 
     empty_pool = _Pool(service_key="test_warm_empty", max_size=2)
-    with patch("backend.core.storage.view._try_fast_path_view") as mock_fp2:
+    with patch("backend.core.storage._core._try_fast_path_view") as mock_fp2:
         empty_pool.warm_idle(src={"name": "test_warm_empty", "bucket": "b"})
     assert (mock_fp2.call_count, empty_pool._in_use, empty_pool._idle.qsize()) == (0, 0, 0)
 
     fail_pool, mc = _Pool(service_key="test_warm_fail", max_size=1), _mock_conn()
     fail_pool._idle.put_nowait(mc)
     fail_pool._in_use = 1
-    with patch("backend.core.storage.view._try_fast_path_view", side_effect=RuntimeError("bind boom")):
+    with patch("backend.core.storage._core._try_fast_path_view", side_effect=RuntimeError("bind boom")):
         fail_pool.warm_idle(src={"name": "test_warm_fail", "bucket": "b"})
     assert (fail_pool._in_use, fail_pool._idle.qsize()) == (1, 1)
     mc.close.assert_not_called()
@@ -2044,8 +2044,8 @@ def test_warm_pool_at_startup_builds_clamps_and_swallows_errors():
     with _clean_pool_keys(k1, k2, k3):
         with (
             patch("backend.core.duckdb.get_connection", return_value=_mock_conn()),
-            patch("backend.core.storage.view._view_cache", {}),
-            patch("backend.core.storage.view.update_storage_view"),
+            patch("backend.core.storage._core._view_cache", {}),
+            patch("backend.core.storage._core.update_storage_view"),
         ):
             assert warm_pool_at_startup(k1, src={"name": k1}, count=4) == 4
             _get_pool(k2, max_size=2)
@@ -2059,8 +2059,8 @@ def test_warm_pool_at_startup_builds_clamps_and_swallows_errors():
                 "backend.core.duckdb.get_connection",
                 side_effect=[_mock_conn(), RuntimeError("simulated build failure")],
             ),
-            patch("backend.core.storage.view._view_cache", {}),
-            patch("backend.core.storage.view.update_storage_view"),
+            patch("backend.core.storage._core._view_cache", {}),
+            patch("backend.core.storage._core.update_storage_view"),
         ):
             assert warm_pool_at_startup(k3, src={"name": k3}, count=4) == 1
 
@@ -2122,8 +2122,8 @@ def test_prepare_checkout_lock_timeout_and_rebind_wait_samples(monkeypatch):
     pool_fail._idle.put_nowait(_mock_conn())
     pool_fail._in_use = 1
     with (
-        patch("backend.core.storage.view._view_cache", {}),
-        patch("backend.core.storage.view.update_storage_view", side_effect=RuntimeError("boom")),
+        patch("backend.core.storage._core._view_cache", {}),
+        patch("backend.core.storage._core.update_storage_view", side_effect=RuntimeError("boom")),
         pytest.raises(RuntimeError),
     ):
         pool_fail.acquire(src={"name": "test_rebind_fail", "bucket": "b"}, max_wait=0.1)
@@ -2136,8 +2136,8 @@ def test_prepare_checkout_fingerprints_and_skip_view_update(monkeypatch):
     pool._idle.put_nowait(mc)
     pool._in_use = 1
     with (
-        patch.dict("backend.core.storage.view._view_cache", {"test_fp": same_tuple}, clear=False),
-        patch("backend.core.storage.view.update_storage_view") as mock_uiv,
+        patch.dict("backend.core.storage._core._view_cache", {"test_fp": same_tuple}, clear=False),
+        patch("backend.core.storage._core.update_storage_view") as mock_uiv,
         patch("backend.core.duckdb_pool._safe_buffer_mtime", return_value=42.0),
     ):
         assert pool.acquire(src={"name": "test_fp", "bucket": "b"}, max_wait=0.5) is mc
@@ -2146,8 +2146,8 @@ def test_prepare_checkout_fingerprints_and_skip_view_update(monkeypatch):
 
     pool._idle.put_nowait(mc)
     with (
-        patch.dict("backend.core.storage.view._view_cache", {"test_fp": ("new_sql", "new_hash")}, clear=False),
-        patch("backend.core.storage.view.update_storage_view") as mock_uiv2,
+        patch.dict("backend.core.storage._core._view_cache", {"test_fp": ("new_sql", "new_hash")}, clear=False),
+        patch("backend.core.storage._core.update_storage_view") as mock_uiv2,
         patch("backend.core.duckdb_pool._safe_buffer_mtime", return_value=42.0),
     ):
         assert pool.acquire(src={"name": "test_fp", "bucket": "b"}, max_wait=0.5) is mc
@@ -2156,8 +2156,8 @@ def test_prepare_checkout_fingerprints_and_skip_view_update(monkeypatch):
     _set_conn_state(mc, view_fingerprint=same_tuple, buffer_mtime=100.0)
     pool._idle.put_nowait(mc)
     with (
-        patch.dict("backend.core.storage.view._view_cache", {"test_fp": same_tuple}, clear=False),
-        patch("backend.core.storage.view.update_storage_view") as mock_uiv3,
+        patch.dict("backend.core.storage._core._view_cache", {"test_fp": same_tuple}, clear=False),
+        patch("backend.core.storage._core.update_storage_view") as mock_uiv3,
         patch("backend.core.duckdb_pool._safe_buffer_mtime", return_value=200.0),
     ):
         assert pool.acquire(src={"name": "test_fp", "bucket": "b"}, max_wait=0.5) is mc
@@ -2167,8 +2167,8 @@ def test_prepare_checkout_fingerprints_and_skip_view_update(monkeypatch):
     pool_skip._idle.put_nowait(mc_skip)
     pool_skip._in_use = 1
     with (
-        patch.dict("backend.core.storage.view._view_cache", {"test_skip_view": ("fresh",)}, clear=False),
-        patch("backend.core.storage.view.update_storage_view") as mock_uiv_skip,
+        patch.dict("backend.core.storage._core._view_cache", {"test_skip_view": ("fresh",)}, clear=False),
+        patch("backend.core.storage._core.update_storage_view") as mock_uiv_skip,
         patch("backend.core.duckdb_pool._safe_buffer_mtime", return_value=12345.0),
     ):
         assert pool_skip.acquire(src={"name": "test_skip_view"}, max_wait=0.5, skip_view_update=True) is mc_skip
@@ -2183,8 +2183,8 @@ def test_prepare_checkout_fingerprints_and_skip_view_update(monkeypatch):
     with (
         _clean_pool_keys(key),
         patch("backend.core.duckdb.get_connection", return_value=_mock_conn()),
-        patch("backend.core.storage.view._view_cache", {}),
-        patch("backend.core.storage.view.update_storage_view") as mock_uiv_pass,
+        patch("backend.core.storage._core._view_cache", {}),
+        patch("backend.core.storage._core.update_storage_view") as mock_uiv_pass,
     ):
         with checkout_connection(src={"name": key}, max_wait=1.0):
             pass
@@ -2254,7 +2254,7 @@ def test_env_parsers_and_conn_state_helpers(monkeypatch, tmp_path):
 
     pool, bad_cache = _Pool(service_key="test_stamp_err", max_size=1), MagicMock()
     bad_cache.get.side_effect = RuntimeError("cache blew up")
-    with patch("backend.core.storage.view._view_cache", bad_cache):
+    with patch("backend.core.storage._core._view_cache", bad_cache):
         pool._stamp_fingerprint(mc, src={"name": "test_stamp_err"})
     assert (
         _get_conn_state(mc, "view_fingerprint", default="NOT_SET"),
@@ -2262,9 +2262,7 @@ def test_env_parsers_and_conn_state_helpers(monkeypatch, tmp_path):
     ) == (None, None)
 
     assert _instrument(mc, service_key="svc") is not None
-    with patch(
-        "backend.core.query_instrumentation.InstrumentedDuckDBConnection", side_effect=RuntimeError("wrap failed")
-    ):
+    with patch("backend.core.request_telemetry.InstrumentedDuckDBConnection", side_effect=RuntimeError("wrap failed")):
         assert _instrument(mc, service_key="svc") is mc
 
 
@@ -2276,8 +2274,8 @@ def test_fresh_build_memory_limit_pragma_and_failure(monkeypatch):
     pool, mc = _Pool(service_key="test_fresh", max_size=2), _mock_conn()
     with (
         patch("backend.core.duckdb.get_connection", return_value=mc),
-        patch("backend.core.storage.view._view_cache", {}),
-        patch("backend.core.storage.view.update_storage_view"),
+        patch("backend.core.storage._core._view_cache", {}),
+        patch("backend.core.storage._core.update_storage_view"),
     ):
         assert pool.acquire(src={"name": "test_fresh"}, max_wait=0.5) is mc
     assert any("memory_limit" in c.args[0] and "512MB" in c.args[0] for c in mc.execute.call_args_list)
@@ -2288,8 +2286,8 @@ def test_fresh_build_memory_limit_pragma_and_failure(monkeypatch):
     pool_err = _Pool(service_key="test_fresh_err", max_size=1)
     with (
         patch("backend.core.duckdb.get_connection", return_value=mc_err),
-        patch("backend.core.storage.view._view_cache", {}),
-        patch("backend.core.storage.view.update_storage_view"),
+        patch("backend.core.storage._core._view_cache", {}),
+        patch("backend.core.storage._core.update_storage_view"),
     ):
         assert pool_err.acquire(src={"name": "test_fresh_err"}, max_wait=0.5) is mc_err
 
@@ -2402,8 +2400,8 @@ def test_checkout_connection_disabled_pooled_errored_and_interrupted(monkeypatch
         raw_int = _mock_conn()
         with (
             patch("backend.core.duckdb.get_connection", side_effect=[_mock_conn(), _mock_conn(), raw_int]),
-            patch("backend.core.storage.view._view_cache", {}),
-            patch("backend.core.storage.view.update_storage_view"),
+            patch("backend.core.storage._core._view_cache", {}),
+            patch("backend.core.storage._core.update_storage_view"),
         ):
             with checkout_connection(src={"name": k_ok}, max_wait=1.0) as con:
                 assert con is not None
@@ -2663,8 +2661,7 @@ def test_discard_idle_reset_and_reuse_only():
 
 import multiprocessing
 
-from backend.utils.sql_validator import escape_sql_literal
-
+from backend.core.sql_validator import escape_sql_literal
 from backend.utils.hll import HyperLogLog
 
 
@@ -2866,7 +2863,7 @@ def test_drop_service_ducklake_state_drops_tables_and_removes_local_dir(tmp_path
     with (
         patch.object(d, "get_source_for_service", return_value=source),
         patch.object(d.duckdb, "connect", return_value=fake_con),
-        patch("backend.core.storage._ducklake._ducklake_attach", return_value=True),
+        patch("backend.core.storage._core._ducklake_attach", return_value=True),
         patch.object(d, "_purge_dropped_catalog_rows", return_value=7) as purge,
     ):
         result = d.drop_service_ducklake_state("svc")
@@ -2898,7 +2895,7 @@ def test_drop_service_ducklake_state_attach_failure_raises_and_keeps_local_files
     with (
         patch.object(d, "get_source_for_service", return_value={"service_id": "svc", "name": "svc"}),
         patch.object(d.duckdb, "connect", return_value=fake_con),
-        patch("backend.core.storage._ducklake._ducklake_attach", return_value=False),
+        patch("backend.core.storage._core._ducklake_attach", return_value=False),
         pytest.raises(RuntimeError, match="could not attach"),
     ):
         d.drop_service_ducklake_state("svc")
@@ -2920,7 +2917,7 @@ def test_drop_service_ducklake_state_drop_failure_raises_and_keeps_local_files(t
     with (
         patch.object(d, "get_source_for_service", return_value={"service_id": "svc", "name": "svc"}),
         patch.object(d.duckdb, "connect", return_value=fake_con),
-        patch("backend.core.storage._ducklake._ducklake_attach", return_value=True),
+        patch("backend.core.storage._core._ducklake_attach", return_value=True),
         pytest.raises(RuntimeError, match="client_vitals: catalog locked"),
     ):
         d.drop_service_ducklake_state("svc")
@@ -2942,7 +2939,7 @@ def test_drop_service_ducklake_state_blocked_remote_root_uses_the_writers_local_
     with (
         patch.object(d, "get_source_for_service", return_value={"service_id": "svc", "name": "svc"}),
         patch.object(d.duckdb, "connect", return_value=MagicMock()),
-        patch("backend.core.storage._ducklake._ducklake_attach", return_value=True),
+        patch("backend.core.storage._core._ducklake_attach", return_value=True),
     ):
         result = d.drop_service_ducklake_state("svc")
     assert result["local_dirs_removed"] == 1 and not lake_dir.exists()

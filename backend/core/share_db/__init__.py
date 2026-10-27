@@ -28,13 +28,9 @@ from pydantic import (
     ValidationError,
 )
 
-import backend as _backend_pkg
 from backend.core.metadata.base import close_all_pg_connections, get_pg_thread_connection
 from backend.utils.date_utils import iso_z, iso_z_now
 
-if hasattr(_backend_pkg, "_MODULE_ALIASES"):
-    _backend_pkg._MODULE_ALIASES.setdefault("backend.routers.share_auth", "backend.routers.share_admin")
-    _backend_pkg._MODULE_ALIASES.setdefault("backend.routers.remote_share", "backend.routers.share_admin")
 logger = logging.getLogger(__name__)
 
 

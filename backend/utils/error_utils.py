@@ -31,7 +31,7 @@ def current_request_id(request: Request | None = None) -> str | None:
     """The access-log request id: from ``request.state`` when given, else the per-request attribution contextvar."""
     rid = getattr(getattr(request, "state", None), "request_id", None) if request is not None else None
     if not (isinstance(rid, str) and rid):
-        from backend.core.query_attribution import current_attribution
+        from backend.core.request_telemetry import current_attribution
 
         attr = current_attribution.get()
         rid = getattr(attr, "request_id", None)

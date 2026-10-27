@@ -31,7 +31,6 @@ import logging
 import math
 import posixpath
 import re
-import sys as _sys
 import time
 import uuid
 from collections.abc import Iterable, Iterator
@@ -967,49 +966,3 @@ def evaluate_per_reason(
             bucket["threshold"] = float(result.pass_threshold)
         buckets.append(bucket)
     return {"buckets": buckets, "min_per_class": min_per_class, "known_reasons": list(_KNOWN_REASON_ATOMS)}
-
-
-import types as _types
-
-_self = _sys.modules[__name__]
-_evaluate_fn = evaluate
-_normalize_fn = normalize
-
-
-class _CallableSubmodule(_types.ModuleType):
-    def __init__(self, name: str, fn):
-        super().__init__(name)
-        self.__dict__.update(_self.__dict__)
-        object.__setattr__(self, "_fn", fn)
-        object.__setattr__(self, name.rsplit(".", 1)[-1], fn)
-
-    def __call__(self, *args, **kwargs):
-        return object.__getattribute__(self, "_fn")(*args, **kwargs)
-
-    def __getattr__(self, attr: str):
-        return getattr(_self, attr)
-
-    def __setattr__(self, attr: str, val):
-        object.__setattr__(self, attr, val)
-        if attr != "_fn" and not self.__name__.endswith(f".{attr}"):
-            setattr(_self, attr, val)
-
-
-for _alias in ("features", "scorer", "labels", "fixtures", "matrix"):
-    _sys.modules[f"backend.scoring.{_alias}"] = _self
-    setattr(_self, _alias, _self)
-
-for _fn_alias, _fn_ref in (("evaluate", _evaluate_fn), ("normalize", _normalize_fn)):
-    _proxy = _CallableSubmodule(f"backend.scoring.{_fn_alias}", _fn_ref)
-    _sys.modules[f"backend.scoring.{_fn_alias}"] = _proxy
-    setattr(_self, _fn_alias, _proxy)
-
-if "backend" in _sys.modules and hasattr(_sys.modules["backend"], "_MODULE_ALIASES"):
-    for _alias in ("features", "scorer", "normalize", "labels", "fixtures", "evaluate", "matrix"):
-        _sys.modules["backend"]._MODULE_ALIASES[f"backend.scoring.{_alias}"] = __name__
-
-
-def __getattr__(name: str) -> Any:
-    if name in ("features", "scorer", "labels", "fixtures", "matrix"):
-        return _self
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

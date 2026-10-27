@@ -12,7 +12,6 @@ if TYPE_CHECKING:
 import hashlib
 import heapq
 import os
-import sys
 from collections import defaultdict
 from dataclasses import dataclass
 from dataclasses import field as _dc_field
@@ -25,7 +24,7 @@ from backend.high_scale._common import build_published_projection_where as _wher
 from backend.high_scale._common import finite_float as _finite_float
 from backend.high_scale._common import percentiles as _percentiles
 from backend.high_scale._common import text as _text
-from backend.models.performance import PerformanceAggregatesResponse
+from backend.models.analytics import PerformanceAggregatesResponse
 from backend.repositories.utils.response_cache import (
     ResponseMemo,
     bucket_time_to_minute,
@@ -34,8 +33,13 @@ from backend.repositories.utils.response_cache import (
     serialize_filters_for_key,
 )
 from backend.repositories.utils.response_shaping import (
+    PERF_TTL_BUCKETS,
+    PERF_TTL_LAST_BUCKET,
     float_or_zero,
     shape_latency_percentiles,
+    shape_perf_scatter_row,
+    shape_perf_top_url_row,
+    shape_perf_ttl_dist_rows,
     shape_performance_asn_rows,
     shape_waterfall_avg,
 )
@@ -196,32 +200,13 @@ _SORT_COLUMNS = {"avg": "avg_ms", "p50": "p50_ms", "p95": "p95_ms", "p99": "p99_
 _MIN_URL_REQUESTS = 5
 _MIN_ASN_REQUESTS = 10
 _TOP_N = 20
-_TTL_EDGES = (
-    (0, "0s"),
-    (10, "<10s"),
-    (30, "<30s"),
-    (60, "<1m"),
-    (300, "<5m"),
-    (600, "<10m"),
-    (1800, "<30m"),
-    (3600, "<1h"),
-    (10800, "<3h"),
-    (21600, "<6h"),
-    (43200, "<12h"),
-    (86400, "<1d"),
-    (259200, "<3d"),
-    (604800, "<1w"),
-    (1209600, "<2w"),
-    (2592000, "<30d"),
-    (7776000, "<90d"),
-    (31536000, "<1y"),
-)
+_TTL_EDGES = PERF_TTL_BUCKETS
 
 
 def _ttl_bucket_expr(column: str) -> str:
     from backend.high_scale._common import _bucket_case
 
-    return _bucket_case(column, _TTL_EDGES, ">1y")
+    return _bucket_case(column, _TTL_EDGES, PERF_TTL_LAST_BUCKET)
 
 
 _ELAPSED_MS = "toFloat64OrNull(custom_fields['elapsed']) / 1000.0"
@@ -322,7 +307,7 @@ def _ttl_dist(
         f"FROM ({source}) WHERE ttl IS NOT NULL GROUP BY bucket ORDER BY min_ttl",
         params,
     )
-    return [{"bucket": row["bucket"], "count": int(row["count"])} for row in rows]
+    return shape_perf_ttl_dist_rows(rows)
 
 
 def _waterfall(
@@ -375,14 +360,7 @@ def _scatter(
             "ORDER BY sample_key LIMIT {scatter_limit:UInt32}"
         )
     rows = service.client.execute(sql, {**params, "scatter_limit": SCATTER_SAMPLE_SIZE})
-    return [
-        {
-            "origin": _optional_float(row["origin_ms"]),
-            "edge": _optional_float(row["edge_ms"]),
-            "cache": row["cache"] or None,
-        }
-        for row in rows
-    ]
+    return [shape_perf_scatter_row(row["origin_ms"], row["edge_ms"], row["cache"], coerce_float=True) for row in rows]
 
 
 def performance_aggregates(
@@ -444,7 +422,7 @@ def performance_aggregates(
                     sort_column=sort_column,
                     min_requests=_MIN_URL_REQUESTS,
                 )
-            return [{"url": row["value"], **_latency_row(row)} for row in rows]
+            return [shape_perf_top_url_row(row, normalize_float=True) for row in rows]
 
         tasks.append(("top_urls", _fetch_top_urls))
     if "top_asns" in wanted:
@@ -491,10 +469,3 @@ def performance_aggregates(
     return PerformanceAggregatesResponse.with_telemetry(
         **_perf_memo.result(payload, state="miss" if cache_key is not None else "bypass")
     )
-
-
-_self_mod = sys.modules[__name__]
-sys.modules["backend.high_scale.performance_projection"] = _self_mod
-if (_hs_pkg := sys.modules.get("backend.high_scale")) is not None:
-    setattr(_hs_pkg, "performance", _self_mod)
-    setattr(_hs_pkg, "performance_projection", _self_mod)

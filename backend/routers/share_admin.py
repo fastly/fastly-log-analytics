@@ -8,7 +8,6 @@ import hmac
 import json
 import logging
 import os
-import sys
 import time
 from datetime import UTC, datetime, timedelta
 
@@ -17,15 +16,13 @@ from fastapi.responses import RedirectResponse, Response
 from joserfc import jwt
 from joserfc.jwk import RSAKey
 
-import backend as _backend_pkg
+import backend.core.oauth as oauth_registry
+import backend.core.oauth as oidc
 from backend import config as svcconfig
 from backend.config import list_configs
 from backend.core import share_db
-from backend.core.oauth import client as oidc
-from backend.core.oauth import registry as oauth_registry
-from backend.core.oauth.client import OIDCError
-from backend.deps import require_admin
-from backend.models._base import DEFAULT_ERROR_RESPONSES
+from backend.core.oauth import OIDCError
+from backend.core.request_context import require_admin
 from backend.models.admin import (
     AuthConfigResponse,
     BackupExportPayload,
@@ -67,8 +64,8 @@ from backend.models.admin import (
     TosDocument,
     WordphraseResponse,
 )
-from backend.models.admin_actions import SharePurgeResponse
-from backend.models.common import OkMessageResponse, OkResponse
+from backend.models.analytics import SharePurgeResponse
+from backend.models.common import DEFAULT_ERROR_RESPONSES, OkMessageResponse, OkResponse
 from backend.provision.fastly_api import delete_remote_frontend, deploy_remote_frontend
 from backend.utils.auth import (
     ANALYST_PENDING_SESSION_COOKIE,
@@ -81,10 +78,6 @@ from backend.utils.remote_access import client_ip
 from backend.utils.router_utils import make_error
 from backend.utils.tunnel import TunnelCapacityError, build_share_live_payload, get_tunnel_manager
 
-if hasattr(_backend_pkg, "_MODULE_ALIASES"):
-    _backend_pkg._MODULE_ALIASES.setdefault("backend.routers.share_auth", "backend.routers.share_admin")
-    _backend_pkg._MODULE_ALIASES.setdefault("backend.routers.remote_share", "backend.routers.share_admin")
-    _backend_pkg._MODULE_ALIASES.setdefault("backend.routers.share_oauth", "backend.routers.share_admin")
 logger = logging.getLogger(__name__)
 flow_state = oauth_registry
 router = APIRouter()
@@ -1159,13 +1152,3 @@ async def token(request: Request):
 router.include_router(admin_router)
 router.include_router(share_auth_router)
 router.include_router(share_oauth_router)
-_self_mod = sys.modules[__name__]
-sys.modules["backend.routers.share_auth"] = _self_mod
-sys.modules["backend.routers.remote_share"] = _self_mod
-sys.modules["backend.routers.share_oauth"] = _self_mod
-_routers_pkg = sys.modules.get("backend.routers")
-if _routers_pkg is not None:
-    setattr(_routers_pkg, "share_admin", _self_mod)
-    setattr(_routers_pkg, "share_auth", _self_mod)
-    setattr(_routers_pkg, "remote_share", _self_mod)
-    setattr(_routers_pkg, "share_oauth", _self_mod)

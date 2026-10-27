@@ -10,7 +10,7 @@ from typing import Any
 
 import duckdb
 
-from backend.core import metric_expressions
+from backend.core import log_fields as metric_expressions
 from backend.models.common import FiltersDict
 from backend.repositories._base import (
     QueryRunner,
@@ -35,6 +35,9 @@ from backend.repositories.utils.response_shaping import (
     enrich_row_with_pop_distance,
     haversine_km,
     shape_keyed_rows,
+    shape_origin_ip_health_response,
+    shape_origin_path_breakdown,
+    shape_origin_slow_urls_response,
     shape_pop_latency_rows,
     shape_status_code_rows,
 )
@@ -352,7 +355,7 @@ _shape_keyed_rows = shape_keyed_rows
 
 
 def _shape_slow_url_rows(rows: list[tuple]) -> dict:
-    return _shape_keyed_rows(rows, ("url", "requests", "p50_ms", "p95_ms", "p99_ms"))
+    return shape_origin_slow_urls_response(rows)
 
 
 def _shape_status_code_rows(rows: list[tuple]) -> dict:
@@ -360,9 +363,7 @@ def _shape_status_code_rows(rows: list[tuple]) -> dict:
 
 
 def _shape_path_breakdown_rows(rows: list[tuple]) -> dict:
-    return _shape_keyed_rows(
-        rows, ("edge", "requests", "p50_ms", "p95_ms"), shielding_detected=any(r[0] is False for r in rows)
-    )
+    return shape_origin_path_breakdown(rows)
 
 
 def _shape_pop_latency_rows(rows: list[tuple]) -> dict:
@@ -370,7 +371,7 @@ def _shape_pop_latency_rows(rows: list[tuple]) -> dict:
 
 
 def _shape_ip_health_rows(rows: list[tuple]) -> dict:
-    return _shape_keyed_rows(rows, ("oip", "requests", "p50_ms", "p95_ms", "error_pct"))
+    return shape_origin_ip_health_response(rows)
 
 
 def _resolve_origin_ts_expr(
