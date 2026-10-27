@@ -88,7 +88,6 @@ if not hasattr(_duckdb_mod, "quote_sql_literal"):
 sys.modules.setdefault("backend.core.sql_safety", _duckdb_mod)
 if not hasattr(sys.modules["backend.utils.telemetry"], "sanitize_log_Url"):
     sys.modules["backend.utils.telemetry"].sanitize_log_Url = _redact_error_text  # type: ignore[attr-defined]
-sys.modules.setdefault("backend.main", SimpleNamespace(app=FastAPI()))  # type: ignore[arg-type]
 from backend.core.storage._core import _ducklake_attach, ducklake_table_name  # noqa: E402
 
 # ── Section 1: Metric Expressions & Null Default Helpers ─────────────────────

@@ -2447,7 +2447,7 @@ def _find_bad_start_time_subtractions(file_path: str, fn_name: str) -> list[ast.
 
 class TestIngestTimingVariableNames:
     def test_start_time_exec_exists_in_ingest(self):
-        tree = ast.parse(pathlib.Path("backend/core/ingest.py").read_text())
+        tree = ast.parse(pathlib.Path("backend/core/ingest/writer.py").read_text())
         ingest_fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "ingest")
         assignments = [
             node
@@ -2458,7 +2458,7 @@ class TestIngestTimingVariableNames:
         assert assignments, "start_time_exec variable not found in ingest() — timing regression risk"
 
     def test_no_time_minus_start_time_in_ingest(self):
-        assert not _find_bad_start_time_subtractions("backend/core/ingest.py", "ingest")
+        assert not _find_bad_start_time_subtractions("backend/core/ingest/writer.py", "ingest")
 
     def test_no_time_minus_start_time_in_scheduler(self):
         assert not _find_bad_start_time_subtractions("backend/cron/jobs/sync.py", "_run_log_discovery_cron")

@@ -27,6 +27,7 @@ backend/routers/provision.py 1
 backend/routers/services/__init__.py 2
 backend/routers/services/crud.py 1
 backend/utils/telemetry.py 1
+backend/utils/telemetry/metrics.py 1
 '
 
 run_ast_ratchet \

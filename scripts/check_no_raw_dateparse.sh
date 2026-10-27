@@ -12,11 +12,15 @@ backend/core/clickhouse.py 2
 backend/core/duckdb.py 1
 backend/core/storage/_core.py 2
 backend/core/ingest.py 3
+backend/core/ingest/discovery.py 2
+backend/core/ingest/writer.py 1
+backend/core/metadata/fos_usage.py 2
 backend/core/metadata/usage_log.py 2
 backend/core/rollups/recompute.py 1
 backend/core/rollups/security_dims.py 1
 backend/repositories/assets.py 1
 backend/repositories/insights/repository.py 1
+backend/repositories/insights/shaping.py 1
 backend/repositories/rum.py 1
 backend/repositories/security.py 1
 backend/utils/telemetry.py 2

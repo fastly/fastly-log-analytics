@@ -1975,8 +1975,8 @@ def _unthrottled(path: str, only_funcs: set[str] | None, only_msg: str | None) -
     ("path", "funcs", "msg"),
     [
         ("backend/core/duckdb_pool.py", None, None),
-        ("backend/core/ingest.py", None, "_parse_rum_line"),
-        ("backend/core/ingest.py", {"extract_metrics_from_faro_payload"}, None),
+        ("backend/core/ingest/parser.py", None, "_parse_rum_line"),
+        ("backend/core/ingest/parser.py", {"extract_metrics_from_faro_payload"}, None),
         ("backend/repositories/dashboard.py", None, "analyst"),
         *[(p.relative_to(ROOT).as_posix(), None, "DROP TABLE") for p in _DROP_TABLE_FILES],
     ],

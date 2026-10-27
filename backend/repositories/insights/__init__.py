@@ -74,7 +74,7 @@ class InsightsRegistry:
 
 
 # Singleton registry instance
-registry = InsightsRegistry()
+registry: InsightsRegistry = InsightsRegistry()
 
 from .repository import _insights_cache, check_insights_cache, get_cache_collapse_detail, get_insights  # noqa: E402
 from .shaping import (  # noqa: E402
