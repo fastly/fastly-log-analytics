@@ -213,6 +213,7 @@ async function withAnalystUsers(options, work) {
       let checkedRequests = 0;
       let interceptionFailures = 0;
       const failureCategories = {};
+      const failureEvents = [];
       const rejectedSchemes = {};
       const pendingInterceptions = new Set();
       const page = await context.newPage();
@@ -243,6 +244,12 @@ async function withAnalystUsers(options, work) {
             const category = /invalid interceptionid|invalid requestid/i.test(message) ? 'request_gone'
               : /session closed|target closed|has been closed/i.test(message) ? 'session_closed' : 'other';
             failureCategories[category] = (failureCategories[category] || 0) + 1;
+            if (failureEvents.length < 10) failureEvents.push({
+              category, timestamp_ms: Date.now(), action: allowed ? 'continue' : 'block',
+              has_network_id: typeof event.networkId === 'string',
+              network_id: typeof event.networkId === 'string' && /^(?:\d+\.\d+|[a-f0-9]{32})$/i.test(event.networkId) ? event.networkId : null,
+              resource_type: ['Document', 'Stylesheet', 'Image', 'Media', 'Font', 'Script', 'XHR', 'Fetch', 'EventSource', 'Other'].includes(event.resourceType) ? event.resourceType : 'Other',
+            });
           }
         })().finally(() => pendingInterceptions.delete(handling));
         pendingInterceptions.add(handling);
@@ -252,7 +259,7 @@ async function withAnalystUsers(options, work) {
         while (pendingInterceptions.size) await Promise.all([...pendingInterceptions]);
         appendJournal(fd, { event: 'origin_guard', user: index, phase, checked_requests: checkedRequests,
           rejected_requests: originViolations, rejected_schemes: rejectedSchemes,
-          interception_failures: interceptionFailures, failure_categories: failureCategories });
+          interception_failures: interceptionFailures, failure_categories: failureCategories, failure_events: failureEvents });
         requireThat(originViolations === 0, 'analyst_origin_violation');
         requireThat(interceptionFailures === 0, 'analyst_interception_failed');
       };

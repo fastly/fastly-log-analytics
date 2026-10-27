@@ -234,7 +234,7 @@ test('cross-origin browser requests abort and invalidate the lifecycle', async t
 for (const delayContinue of [false, true]) test(`interception failures ${delayContinue ? 'pending at callback completion' : 'already observed'} fail closed without claiming an origin violation`, async t => {
   const { state, options } = fixture(t, { continueError: 'Invalid InterceptionId. PRIVATE_CDP_DETAIL', delayContinue });
   await assert.rejects(withAnalystUsers(options, async users => {
-    const handling = users[0].context.requestGuard({ requestId: 'request-test', request: { url: `${analystOrigin}/dashboard?private=value` } });
+    const handling = users[0].context.requestGuard({ requestId: 'request-test', networkId: delayContinue ? 'PRIVATE_CDP_DETAIL' : '42.7', resourceType: delayContinue ? 'PRIVATE_CDP_DETAIL' : 'Fetch', request: { url: `${analystOrigin}/dashboard?private=value` } });
     if (!delayContinue) await handling;
   }), error => error.code === 'analyst_interception_failed' && !error.message.includes('PRIVATE'));
   const journal = fs.readFileSync(options.journalPath, 'utf8');
@@ -242,6 +242,12 @@ for (const delayContinue of [false, true]) test(`interception failures ${delayCo
   assert.equal(observation.rejected_requests, 0);
   assert.equal(observation.interception_failures, 1);
   assert.deepEqual(observation.failure_categories, { request_gone: 1 });
+  assert.equal(observation.failure_events.length, 1);
+  assert.deepEqual({ ...observation.failure_events[0], timestamp_ms: 0 }, {
+    category: 'request_gone', network_id: delayContinue ? null : '42.7', resource_type: delayContinue ? 'Other' : 'Fetch',
+    has_network_id: true, action: 'continue', timestamp_ms: 0,
+  });
+  assert.ok(Number.isFinite(observation.failure_events[0].timestamp_ms));
   assert.equal(journal.includes('PRIVATE_CDP_DETAIL'), false);
   assert.equal(journal.includes('private=value'), false);
   assert.equal(state.invites.length, 0);
@@ -255,7 +261,7 @@ test('malformed recovery input cannot disclose its contents through errors', asy
   await assert.rejects(recoverOwnedInvites(options), error => error.code === 'recovery_failed' && !error.message.includes('PRIVATE'));
 });
 
-for (const scenario of ['normal', 'redirect', 'profile']) test(`real Chromium ${scenario === 'redirect' ? 'blocks cross-origin redirects before credentials' : scenario === 'profile' ? 'keeps the origin guard through traced inline assets and reloads' : 'completes the normal form flow'}`, async t => {
+for (const scenario of ['normal', 'redirect', 'profile', 'profile-redirect']) test(`real Chromium ${scenario === 'redirect' ? 'blocks cross-origin redirects before credentials' : scenario === 'profile-redirect' ? 'blocks cross-origin navigation after profiling-session detach' : scenario === 'profile' ? 'keeps the origin guard through traced inline assets and reloads' : 'completes the normal form flow'}`, async t => {
   const redirectLogin = scenario === 'redirect';
   const { chromium } = require('../../frontend/node_modules/@playwright/test');
   const browser = await chromium.launch({ headless: true });
@@ -308,7 +314,7 @@ for (const scenario of ['normal', 'redirect', 'profile']) test(`real Chromium ${
     assert.equal(await users[0].page.locator('h1').textContent(), 'Analyst fixture');
     const cookies = await users[0].context.cookies(analystOrigin);
     assert.equal(cookies.find(cookie => cookie.name === 'analyst_session_id').secure, true);
-    if (scenario === 'profile') {
+    if (scenario.startsWith('profile')) {
       for (const traced of [true, false]) {
         const cdp = await users[0].context.newCDPSession(users[0].page);
         await cdp.send('Performance.enable');
@@ -329,8 +335,9 @@ for (const scenario of ['normal', 'redirect', 'profile']) test(`real Chromium ${
       }
       assert.deepEqual(state.guardErrors ?? [], []);
     }
+    if (scenario === 'profile-redirect') await users[0].page.goto('https://unexpected.invalid/after-profile');
   });
-  if (redirectLogin) {
+  if (redirectLogin || scenario === 'profile-redirect') {
     await assert.rejects(run);
     assert.equal(state.redirectBlocked, true);
     assert.ok(state.pausedOrigins.includes('https://unexpected.invalid'));
