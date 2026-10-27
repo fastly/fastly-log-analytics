@@ -28,6 +28,7 @@
  * @vitest-environment node
  */
 import createClient from 'openapi-fetch'
+import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 
 import type { paths } from '@/types/api.generated'
@@ -45,13 +46,13 @@ afterAll(async () => {
 })
 
 describe('frontend → backend HTTP contract', () => {
-  it('preserves explicit uv isolation for the backend subprocess', () => {
-    vi.stubEnv('UV_NO_CACHE', '1')
+  it('pins the backend subprocess to its repository environment', () => {
+    vi.stubEnv('UV_NO_CACHE', '0')
     vi.stubEnv('UV_PROJECT_ENVIRONMENT', '/tmp/fla-test-venv')
     try {
       const env = backendTestEnvironment('/tmp/fla-test-sandbox')
       expect(env.UV_NO_CACHE).toBe('1')
-      expect(env.UV_PROJECT_ENVIRONMENT).toBe('/tmp/fla-test-venv')
+      expect(env.UV_PROJECT_ENVIRONMENT).toBe(join(__dirname, '..', '..', '..', '.venv'))
     } finally {
       vi.unstubAllEnvs()
     }

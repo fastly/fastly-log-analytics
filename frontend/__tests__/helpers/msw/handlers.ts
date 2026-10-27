@@ -472,8 +472,9 @@ export const server = setupServer(...handlers)
 
 const PORT = 13003
 const HOST = '127.0.0.1'
+const REPO_ROOT = join(__dirname, '..', '..', '..', '..')
 export const CONTRACT_API_BASE = `http://${HOST}:${PORT}`
-const HOST_ENV_KEYS = ['PATH', 'HOME', 'USER', 'LOGNAME', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TZ', 'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'PATHEXT', 'UV_NO_CACHE', 'UV_PROJECT_ENVIRONMENT'] as const
+const HOST_ENV_KEYS = ['PATH', 'HOME', 'USER', 'LOGNAME', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TZ', 'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'PATHEXT'] as const
 
 interface MockOAuth {
   backendPort: number
@@ -496,6 +497,8 @@ export function backendTestEnvironment(sandboxDir: string, oauth?: MockOAuth): N
     (process.env.DUCKLAKE_CATALOG && !process.env.DUCKLAKE_CATALOG.includes('example.invalid') ? process.env.DUCKLAKE_CATALOG : metaDsn)
 
   Object.assign(env, {
+    UV_NO_CACHE: '1',
+    UV_PROJECT_ENVIRONMENT: join(REPO_ROOT, '.venv'),
     UV_NO_ENV_FILE: '1',
     UV_NO_CONFIG: '1',
     PYTHON_DOTENV_DISABLED: '1',
@@ -549,10 +552,9 @@ async function poll(healthUrl: string, timeoutMs = 30_000): Promise<void> {
 
 export async function startBackend(): Promise<void> {
   if (proc) return
-  const repoRoot = join(__dirname, '..', '..', '..', '..')
   sandbox = mkdtempSync(join(tmpdir(), 'fla-contract-'))
-  proc = spawn('uv', ['run', '--project', repoRoot, 'python', 'scripts/run_contract_backend.py', '--host', HOST, '--port', String(PORT)], {
-    cwd: repoRoot,
+  proc = spawn('uv', ['run', '--project', REPO_ROOT, 'python', 'scripts/run_contract_backend.py', '--host', HOST, '--port', String(PORT)], {
+    cwd: REPO_ROOT,
     env: backendTestEnvironment(sandbox),
     stdio: ['ignore', 'pipe', 'pipe'],
   })
