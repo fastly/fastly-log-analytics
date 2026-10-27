@@ -208,7 +208,7 @@ jobs:
           falco --version
           # Assert that the Falco semantic suite is present without starting
           # pytest; collection also loads the repository-wide cassette-age gate.
-          count=$(grep -c '^def test_falco_' tests/core/test_vcl_semantics.py || true)
+          count=$(grep -c '^def test_falco_' tests/core/test_core_models_and_tokens.py || true)
           echo "Discovered $count falco semantic test(s)"
           if [ "$count" -lt 1 ]; then
             echo "ERROR: expected at least one test_falco_* test to be collected" >&2

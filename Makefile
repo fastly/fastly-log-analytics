@@ -172,7 +172,7 @@ verify-deps:
 
 vcl-test:
 	@if command -v falco > /dev/null; then \
-		uv run pytest tests/core/test_vcl_semantics.py; \
+		uv run pytest tests/core/test_core_models_and_tokens.py -k falco; \
 	else \
 		echo "Skipping VCL tests: falco linter not found in PATH"; \
 	fi
