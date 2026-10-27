@@ -26,8 +26,8 @@ import backend.core.metadata.usage_log as usage_log_db
 import backend.core.rollups.day_bundles as ph
 import backend.utils.bot_sources as rdns_cache
 from backend.core import duckdb as _db
-from backend.core import local_compaction as lc
 from backend.core import share_db
+from backend.core import storage as lc
 from backend.core.metadata.usage_log import CronLeaseHeldError
 from backend.core.request_context import get_service_id, get_source, require_admin
 from backend.cron.jobs import compaction
@@ -842,7 +842,7 @@ def stub_progress(monkeypatch) -> dict[str, MagicMock]:
 @pytest.mark.parametrize(
     "job_fn,target_attr",
     [
-        (compaction._run_local_compact, "backend.core.local_compaction.compact_local_partitions"),
+        (compaction._run_local_compact, "backend.core.storage.compact_local_partitions"),
         (compaction._run_rollup_compact_daily, "backend.core.rollups.compact_closed_days_to_daily"),
         (_run_rollup_hour_heal, "backend.core.rollups.backfill_missing_hour_bundles"),
     ],
@@ -865,7 +865,7 @@ def test_compaction_jobs_missing_source_and_lease_skip(monkeypatch, stub_source,
 
 def test_local_compact_outcomes(monkeypatch, stub_source, stub_progress):
     monkeypatch.setattr(
-        "backend.core.local_compaction.compact_local_partitions",
+        "backend.core.storage.compact_local_partitions",
         MagicMock(return_value={"partitions_compacted": 3, "files_merged": 12, "files_removed": 9, "errors": []}),
     )
     compaction._run_local_compact.__wrapped__("svc-1")
@@ -875,7 +875,7 @@ def test_local_compact_outcomes(monkeypatch, stub_source, stub_progress):
     stub_progress["end_progress"].assert_called_once()
 
     monkeypatch.setattr(
-        "backend.core.local_compaction.compact_local_partitions",
+        "backend.core.storage.compact_local_partitions",
         MagicMock(
             return_value={
                 "partitions_compacted": 2,
@@ -891,7 +891,7 @@ def test_local_compact_outcomes(monkeypatch, stub_source, stub_progress):
     assert "partition a failed" in kwargs["error_message"] and "1 more" in kwargs["error_message"]
 
     monkeypatch.setattr(
-        "backend.core.local_compaction.compact_local_partitions", MagicMock(side_effect=RuntimeError("disk full"))
+        "backend.core.storage.compact_local_partitions", MagicMock(side_effect=RuntimeError("disk full"))
     )
     compaction._run_local_compact.__wrapped__("svc-1")
     args, kwargs = _db.log_cron_run.call_args
@@ -1001,8 +1001,8 @@ def mock_service_env(tmp_path, monkeypatch):
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: src if sid == service_id else None)
     monkeypatch.setattr("backend.core.request_context.get_service_id", lambda request=None: service_id)
     monkeypatch.setattr("backend.core.request_context.get_source", lambda service_id=None: src)
-    monkeypatch.setattr("backend.core.local_compaction._DAILY_TIER_AGE_DAYS", 365)
-    monkeypatch.setattr("backend.core.local_compaction._WEEKLY_TIER_AGE_DAYS", 365)
+    monkeypatch.setattr("backend.core.storage._DAILY_TIER_AGE_DAYS", 365)
+    monkeypatch.setattr("backend.core.storage._WEEKLY_TIER_AGE_DAYS", 365)
     return {"service_id": service_id, "source": src, "data_dir": str(data_dir), "cache_root": str(cache_root)}
 
 
@@ -1160,7 +1160,7 @@ class TestLocalCompactContract:
         monkeypatch.setattr("backend.core.duckdb.start_cron_run", MagicMock(return_value="run_ht_123"))
         monkeypatch.setattr("backend.core.duckdb.log_cron_run", MagicMock())
         monkeypatch.setattr(
-            "backend.core.local_compaction.compact_local_partitions",
+            "backend.core.storage.compact_local_partitions",
             MagicMock(return_value={"partitions_compacted": 0, "files_merged": 0, "files_removed": 0, "errors": []}),
         )
         touched_hours = {"2026-10-01-12", "2026-10-01-13"}

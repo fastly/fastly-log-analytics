@@ -19,22 +19,21 @@ import psycopg
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
-from backend.core.local_compaction import _compact_single_partition
 from tests._helpers.sources import make_source
 
 import backend.core.storage._core as buffer_mod
 import backend.core.storage._core as ducklake
 from backend import config as svcconfig
 from backend.core import duckdb as db
-from backend.core import local_compaction as lc
 from backend.core import reset as reset_mod
 from backend.core import storage
+from backend.core import storage as lc
 from backend.core.duckdb import get_connection
 from backend.core.duckdb_pool import _Pool
 from backend.core.ingest import get_catalog_field_ids
 from backend.core.log_fields import LOG_FIELD_CATALOG
 from backend.core.rollups.recompute import build_time_series_bundles
-from backend.core.storage import _core
+from backend.core.storage import _compact_single_partition, _core
 from backend.core.storage._core import (
     DuckLakeAdmissionTimeout,
     _commit_buffer_impl,
@@ -1214,8 +1213,8 @@ _NAME = "test-svc-local-compact"
 def patched_cache_dir(tmp_path, monkeypatch):
     src = make_source(tmp_path / "cache" / _NAME, _NAME, cache_key="_test_cache_root", mkdirs=("data",))
     monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda source: source["_test_cache_root"])
-    monkeypatch.setattr("backend.core.local_compaction._DAILY_TIER_AGE_DAYS", 365)
-    monkeypatch.setattr("backend.core.local_compaction._WEEKLY_TIER_AGE_DAYS", 365)
+    monkeypatch.setattr("backend.core.storage._DAILY_TIER_AGE_DAYS", 365)
+    monkeypatch.setattr("backend.core.storage._WEEKLY_TIER_AGE_DAYS", 365)
     return src
 
 
@@ -1321,14 +1320,14 @@ def test_partition_above_size_ceiling_is_skipped(patched_cache_dir, monkeypatch)
     os.makedirs(part)
     for i in range(5):
         _write_parquet(os.path.join(part, f"f{i}.parquet"), rows=10)
-    monkeypatch.setattr("backend.core.local_compaction._MAX_PARTITION_BYTES", 100)
+    monkeypatch.setattr("backend.core.storage._MAX_PARTITION_BYTES", 100)
     result = lc.compact_local_partitions(patched_cache_dir)
     assert result["partitions_compacted"] == 0 and len([f for f in os.listdir(part) if f.endswith(".parquet")]) == 5
 
 
 def test_daily_tier_rolls_up_old_partitions(patched_cache_dir, monkeypatch):
     data_dir = os.path.join(patched_cache_dir["_test_cache_root"], "data")
-    monkeypatch.setattr("backend.core.local_compaction._DAILY_TIER_AGE_DAYS", 0)
+    monkeypatch.setattr("backend.core.storage._DAILY_TIER_AGE_DAYS", 0)
     day = "2026-05-15"
     for hh in ("00", "01", "02"):
         part = os.path.join(data_dir, f"timestamp_hour={day}-{hh}")
@@ -1347,7 +1346,7 @@ def test_weekly_tier_rolls_up_old_daily_files(patched_cache_dir, monkeypatch):
     data_dir = os.path.join(patched_cache_dir["_test_cache_root"], "data")
     daily_dir = os.path.join(data_dir, "daily")
     os.makedirs(daily_dir)
-    monkeypatch.setattr("backend.core.local_compaction._WEEKLY_TIER_AGE_DAYS", 0)
+    monkeypatch.setattr("backend.core.storage._WEEKLY_TIER_AGE_DAYS", 0)
     for day in ("2026-05-04", "2026-05-05", "2026-05-06"):
         _write_parquet(os.path.join(daily_dir, f"daily_{day}_abc12345.parquet"), rows=10)
 
@@ -1362,7 +1361,7 @@ def test_weekly_tier_skips_single_day_weeks(patched_cache_dir, monkeypatch):
     cache_root = patched_cache_dir["_test_cache_root"]
     daily_dir = os.path.join(cache_root, "data", "daily")
     os.makedirs(daily_dir)
-    monkeypatch.setattr("backend.core.local_compaction._WEEKLY_TIER_AGE_DAYS", 0)
+    monkeypatch.setattr("backend.core.storage._WEEKLY_TIER_AGE_DAYS", 0)
     _write_parquet(os.path.join(daily_dir, "daily_2026-05-04_deadbeef.parquet"), rows=10)
 
     result = lc.compact_local_partitions(patched_cache_dir)
@@ -1388,7 +1387,7 @@ def test_compaction_stats_snapshot(patched_cache_dir):
 
 def test_daily_tier_bin_packing_splits_files(patched_cache_dir, monkeypatch):
     data_dir = os.path.join(patched_cache_dir["_test_cache_root"], "data")
-    monkeypatch.setattr("backend.core.local_compaction._DAILY_TIER_AGE_DAYS", 0)
+    monkeypatch.setattr("backend.core.storage._DAILY_TIER_AGE_DAYS", 0)
     day = "2026-05-15"
     paths = []
     for hh in ("00", "01", "02"):
@@ -1398,7 +1397,7 @@ def test_daily_tier_bin_packing_splits_files(patched_cache_dir, monkeypatch):
         _write_parquet(p, rows=10)
         paths.append(p)
 
-    monkeypatch.setattr("backend.core.local_compaction._MAX_PARTITION_BYTES", os.path.getsize(paths[0]) + 50)
+    monkeypatch.setattr("backend.core.storage._MAX_PARTITION_BYTES", os.path.getsize(paths[0]) + 50)
     lc.compact_local_partitions(patched_cache_dir)
     daily_dir = os.path.join(data_dir, "daily")
     daily_files = sorted([f for f in os.listdir(daily_dir) if f.endswith(".parquet")])
@@ -1413,14 +1412,14 @@ def test_weekly_tier_bin_packing_splits_files(patched_cache_dir, monkeypatch):
     data_dir = os.path.join(patched_cache_dir["_test_cache_root"], "data")
     daily_dir = os.path.join(data_dir, "daily")
     os.makedirs(daily_dir)
-    monkeypatch.setattr("backend.core.local_compaction._WEEKLY_TIER_AGE_DAYS", 0)
+    monkeypatch.setattr("backend.core.storage._WEEKLY_TIER_AGE_DAYS", 0)
     paths = []
     for day in ("2026-05-04", "2026-05-05", "2026-05-06"):
         p = os.path.join(daily_dir, f"daily_{day}_abc12345.parquet")
         _write_parquet(p, rows=10)
         paths.append(p)
 
-    monkeypatch.setattr("backend.core.local_compaction._MAX_PARTITION_BYTES", os.path.getsize(paths[0]) + 50)
+    monkeypatch.setattr("backend.core.storage._MAX_PARTITION_BYTES", os.path.getsize(paths[0]) + 50)
     lc.compact_local_partitions(patched_cache_dir)
     weekly_dir = os.path.join(data_dir, "weekly")
     weekly_files = sorted([f for f in os.listdir(weekly_dir) if f.endswith(".parquet")])
@@ -1432,7 +1431,7 @@ def test_weekly_tier_bin_packing_splits_files(patched_cache_dir, monkeypatch):
 
 def test_daily_tier_migrates_single_file_bins_and_removes_dir(patched_cache_dir, monkeypatch):
     data_dir = os.path.join(patched_cache_dir["_test_cache_root"], "data")
-    monkeypatch.setattr("backend.core.local_compaction._DAILY_TIER_AGE_DAYS", 0)
+    monkeypatch.setattr("backend.core.storage._DAILY_TIER_AGE_DAYS", 0)
     day = "2026-05-15"
     part = os.path.join(data_dir, f"timestamp_hour={day}-00")
     os.makedirs(part)

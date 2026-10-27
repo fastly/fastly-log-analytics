@@ -25,7 +25,6 @@ import httpx
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
-from backend.core.local_compaction import compact_local_partitions
 from fastapi import HTTPException
 from starlette.testclient import TestClient
 from tests._helpers.config_fakes import fetch_metric_snapshot_history as _get_history
@@ -50,6 +49,7 @@ from backend.core.metadata.base import get_con
 from backend.core.metadata.usage_log import CronLeaseHeldError
 from backend.core.request_context import get_service_id, get_source, require_admin
 from backend.core.request_telemetry import current_attribution, derive_from_process_context, query_registry
+from backend.core.storage import compact_local_partitions
 from backend.core.storage._core import (
     CLIENT_VITALS_ARROW_SCHEMA,
     _commit_buffer_impl,

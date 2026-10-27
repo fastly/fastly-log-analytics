@@ -1150,4 +1150,4 @@ def compaction_stats(source: dict, table_name: str = "logs") -> dict[str, Any]:
     return result
 
 
-_CacheRegistry.register("core.local_compaction._COMPACTION_STATS_CACHE", _COMPACTION_STATS_CACHE)
+_CacheRegistry.register("core.storage._COMPACTION_STATS_CACHE", _COMPACTION_STATS_CACHE)

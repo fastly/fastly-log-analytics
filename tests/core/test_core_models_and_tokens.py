@@ -397,25 +397,25 @@ def test_pii_cols_cached_and_describe_failure_not_cached():
 
 @pytest.mark.usefixtures("_drain_caches")
 def test_compaction_stats_memoised_drained_and_missing_dir(tmp_path):
-    from backend.core import local_compaction
+    from backend.core import storage
 
     root = tmp_path / "cache"
     part = root / "data" / "timestamp_hour=2026-10-19-00"
     part.mkdir(parents=True)
     (part / "a.parquet").write_bytes(b"x")
     with patch("backend.core.duckdb._cache_dir", return_value=str(root)):
-        first = local_compaction.compaction_stats({"name": "svc"})
+        first = storage.compaction_stats({"name": "svc"})
         (part / "b.parquet").write_bytes(b"x")
-        assert first == local_compaction.compaction_stats({"name": "svc"}) and first["total_files"] == 1
-        CacheRegistry.clear("core.local_compaction._COMPACTION_STATS_CACHE")
-        assert local_compaction.compaction_stats({"name": "svc"})["total_files"] == 2
+        assert first == storage.compaction_stats({"name": "svc"}) and first["total_files"] == 1
+        CacheRegistry.clear("core.storage._COMPACTION_STATS_CACHE")
+        assert storage.compaction_stats({"name": "svc"})["total_files"] == 2
 
     CacheRegistry.clear_all()
     missing = tmp_path / "nothing"
     with patch("backend.core.duckdb._cache_dir", return_value=str(missing)):
-        assert local_compaction.compaction_stats({"name": "svc"})["total_files"] == 0
+        assert storage.compaction_stats({"name": "svc"})["total_files"] == 0
         (missing / "data").mkdir(parents=True)
-        assert local_compaction.compaction_stats({"name": "svc"})["total_files"] == 0
+        assert storage.compaction_stats({"name": "svc"})["total_files"] == 0
 
 
 @pytest.mark.usefixtures("_drain_caches")

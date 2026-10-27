@@ -238,7 +238,6 @@ _MODULE_LOCAL_ATTRS = frozenset(
         "buffer",
         "catalog",
         "compaction",
-        "local_compaction",
         "manifest",
         "rum_schema",
         "sync",
@@ -330,9 +329,6 @@ setattr(_self_mod, "buffer", _buffer_module)
 setattr(_self_mod, "catalog", _catalog_module)
 setattr(_self_mod, "compaction", _compaction_module)
 setattr(_self_mod, "view", _view_module)
-sys.modules["backend.core.local_compaction"] = _self_mod
-if "backend.core" in sys.modules:
-    setattr(sys.modules["backend.core"], "local_compaction", _self_mod)
 del _self_mod
 
 __all__ = [

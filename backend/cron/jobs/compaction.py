@@ -60,7 +60,7 @@ def _ledger_touched_hours(service_id: str, lookback_s: float) -> set[str]:
 
 @cron_task("local_compact", job_name="local_compact")
 def _run_local_compact(service_id: str) -> None:
-    from backend.core import local_compaction as _lc  # type: ignore[attr-defined]
+    from backend.core import storage as _lc  # type: ignore[attr-defined]
     from backend.core.duckdb import get_source_for_service
     from backend.utils.telemetry import should_defer_cron
 

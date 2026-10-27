@@ -169,7 +169,7 @@ No freshness impact. Trade-off: ~5 minutes of disk retention for tombstoned buff
 
 ## 4. Out of Scope
 
-- **Local compaction warming.** `backend/core/local_compaction.py` rewrites files under `cache/data/`, not the buffer dir. Per the explicit comment in `backend/routers/query.py:44–48`, the "Cannot open file" race local_compaction can trigger is a glob-enumeration race resolved at query execution time, not a view-binding race. The existing one-shot retry handles it correctly; rebinding the view does not reach inside the race window. If observed to matter post-deploy, the right fix is extending compaction's own pre-delete grace, not pool warming.
+- **Local compaction warming.** `backend/core/storage/compaction.py` rewrites files under `cache/data/`, not the buffer dir. Per the explicit comment in `backend/routers/query.py:44–48`, the "Cannot open file" race local_compaction can trigger is a glob-enumeration race resolved at query execution time, not a view-binding race. The existing one-shot retry handles it correctly; rebinding the view does not reach inside the race window. If observed to matter post-deploy, the right fix is extending compaction's own pre-delete grace, not pool warming.
 - **Schema-change warming.** Same writer-side hook pattern would apply, but schema changes are rare enough to leave to the existing reader-side self-heal path (`execute_with_stale_view_retry` in `backend/core/iceberg/_core.py`).
 - **Per-page-load coalescing.** Once writer-driven warming is in place, the request-path cost is sub-ms per checkout. Coalescing across panels would be premature.
 

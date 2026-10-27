@@ -543,19 +543,19 @@ def test_optimize_now_local_compact_and_compaction_stats_endpoints(client):
         resp2 = client.post("/api/admin/optimize-now?min_files=1")
     assert resp2.status_code == 200 and m2.call_args.kwargs.get("min_files_per_partition") == 1
 
-    with patch("backend.core.local_compaction.compact_local_partitions", return_value={"rewritten": 2}) as m3:
+    with patch("backend.core.storage.compact_local_partitions", return_value={"rewritten": 2}) as m3:
         resp3 = client.post("/api/admin/local-compact-now")
     assert resp3.status_code == 200 and resp3.json()["rewritten"] == 2
     assert m3.call_args.kwargs["min_files_per_partition"] == 3 and m3.call_args.kwargs["dry_run"] is False
 
-    with patch("backend.core.local_compaction.compact_local_partitions", return_value={"rewritten": 0}) as m4:
+    with patch("backend.core.storage.compact_local_partitions", return_value={"rewritten": 0}) as m4:
         resp4 = client.post("/api/admin/local-compact-now?min_files=0&dry_run=true")
     assert resp4.status_code == 200 and m4.call_args.kwargs["min_files_per_partition"] == 0
     assert m4.call_args.kwargs["dry_run"] is True
     assert client.post("/api/admin/local-compact-now?min_files=-1").status_code == 422
 
     fake_stats = {"partitions": 100, "partitions_above_3": 5, "avg_files_per_partition": 1.8}
-    with patch("backend.core.local_compaction.compaction_stats", return_value=fake_stats):
+    with patch("backend.core.storage.compaction_stats", return_value=fake_stats):
         resp_s = client.get("/api/admin/compaction-stats")
     assert resp_s.status_code == 200 and resp_s.json()["partitions"] == 100 and resp_s.json()["partitions_above_3"] == 5
 

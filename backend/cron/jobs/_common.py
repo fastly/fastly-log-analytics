@@ -45,7 +45,7 @@ def _spawn_local_compaction(
 ) -> None:
     def _worker() -> None:
         try:
-            from backend.core import local_compaction as _lc  # type: ignore[attr-defined]
+            from backend.core import storage as _lc  # type: ignore[attr-defined]
 
             res = (
                 _lc.compact_local_partitions(src, compact_active_hour=True)

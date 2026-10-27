@@ -181,7 +181,7 @@ def _run_rum_commit(service_id: str, force: bool = False, run_id: int | None = N
 
             # Launch local compaction for BOTH tables with error logging
             try:
-                from backend.core import local_compaction as _lc  # type: ignore[attr-defined]
+                from backend.core import storage as _lc  # type: ignore[attr-defined]
 
                 for short_name, tbl in (("vitals", "client_vitals"), ("errors", "client_errors")):
                     threading.Thread(

@@ -493,7 +493,7 @@ def test_health_snapshot_in_flight_compaction_pool_and_fos(client):
         patch("backend.config.list_configs", return_value=fake_configs),
         patch("backend.config.config_to_source", side_effect=lambda c: c),
         patch(
-            "backend.core.local_compaction.compaction_stats",
+            "backend.core.storage.compaction_stats",
             side_effect=_compaction_stats_fail_bad,
         ),
     ):
@@ -643,7 +643,7 @@ def test_admin_manual_cron_trigger_routes_and_rbac(overview_client: TestClient):
                 return_value={"ok": True, "message": "Started.", "run_id": 42},
             ) as mock_start,
             patch(
-                "backend.core.local_compaction.compact_local_partitions",
+                "backend.core.storage.compact_local_partitions",
                 return_value={
                     "partitions_checked": 2,
                     "partitions_compacted": 1,

@@ -49,6 +49,5 @@ _sys.modules[f"{__name__}._ducklake"] = _core_module
 _sys.modules[f"{__name__}.manifest"] = _self
 _sys.modules[f"{__name__}.rum_schema"] = _self
 _sys.modules[f"{__name__}.sync"] = _self
-_sys.modules["backend.core.local_compaction"] = _core_module
 
 del _self

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- The `backend.core.local_compaction` import alias and the `backend/__init__.py` module-alias machinery behind it (nothing else used it). Import compaction helpers from `backend.core.storage`.
+
 ### Added
 
 - `restore-data` restores saved views from the cloud admin-state snapshot, and High-Scale compaction/retention deletions now count as still-billed FOS storage for 30 days in the cost surfaces.
