@@ -3119,7 +3119,7 @@ def test_log_extents_stream_requires_service_id_and_projects_safe_fields():
         "logging_service_id": "ExampleSvcId0000000001",
         "schema": [{"name": "ip", "type": "VARCHAR"}],
         "duckdb_size_bytes": 451_651_568,
-        "iceberg_files": 1238,
+        "storage_files": 1238,
     }
     pushed_full = {**full_snapshot, "latest_log_at": "2026-06-15T22:48:00+00:00", "local_rows": 6_660_000}
 

@@ -167,7 +167,7 @@ test.describe('Dashboard Page Contract (/dashboard)', () => {
       const queries = json._debug_queries ?? []
       expect(queries.length).toBeGreaterThan(0)
       expect(queries.reduce((acc, q) => acc + (q.time_ms || 0), 0)).toBeLessThan(2500)
-      const analyticalQueries = queries.filter((q) => !q.sql?.startsWith('-- DuckDB Iceberg View Resolution'))
+      const analyticalQueries = queries.filter((q) => !q.sql?.startsWith('-- DuckDB Storage View Resolution'))
       const sqlStatements = analyticalQueries.map((q) => JSON.stringify({ sql: q.sql?.trim?.() ?? '', params: q.params ?? null }))
       expect(new Set(sqlStatements).size).toBe(sqlStatements.length)
     }

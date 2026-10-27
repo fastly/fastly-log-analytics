@@ -43,10 +43,10 @@ function DeleteDataDialogBody({ service, open, onOpenChange, onComplete }: Delet
   const { lines, status, error: sseError, start, stop } = useSSE()
 
   const serviceId = service?.service_id
-  const { data: icebergInfo, isLoading: icebergLoading } = useQuery({
-    queryKey: queryKeys.admin.icebergInfo(serviceId),
+  const { data: storageInfo, isLoading: storageLoading } = useQuery({
+    queryKey: queryKeys.admin.storageInfo(serviceId),
     queryFn: async () => {
-      return unwrapClient(client.GET('/api/admin/iceberg-info', {
+      return unwrapClient(client.GET('/api/admin/storage-info', {
         params: { query: { service_id: serviceId } as Record<string, string> },
       }))
     },
@@ -106,7 +106,7 @@ function DeleteDataDialogBody({ service, open, onOpenChange, onComplete }: Delet
           <AlertDescription className="text-[13px] ml-1 font-medium">
             {service.is_high_scale
               ? "This permanently deletes all of this service's log data from the high-scale ClickHouse cluster. New logs from the live edge will start populating immediately afterward. This cannot be undone."
-              : "This permanently deletes all of this service's log data — both local (the analytical database and cache) and cloud-stored (the Iceberg log table in Fastly Object Storage). New logs from the live edge will start populating immediately afterward. This cannot be undone."
+              : "This permanently deletes all of this service's log data — both local (the analytical database and cache) and cloud-stored (the DuckLake log data; in High-Scale it lives in Fastly Object Storage). New logs from the live edge will start populating immediately afterward. This cannot be undone."
             }
           </AlertDescription>
         </Alert>
@@ -129,15 +129,15 @@ function DeleteDataDialogBody({ service, open, onOpenChange, onComplete }: Delet
               <div className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
                 <Cloud className="h-3 w-3" /> Cloud
               </div>
-              {icebergLoading ? (
+              {storageLoading ? (
                 <div className="text-lg font-mono font-bold tracking-tight text-muted-foreground">…</div>
               ) : (
                 <>
                   <div className="text-lg font-mono font-bold tracking-tight">
-                    {formatBytes(icebergInfo?.size_bytes ?? 0)}
+                    {formatBytes(storageInfo?.size_bytes ?? 0)}
                   </div>
                   <div className="text-[11px] text-muted-foreground">
-                    {formatCount(icebergInfo?.data_files ?? 0)} file{icebergInfo?.data_files === 1 ? '' : 's'}
+                    {formatCount(storageInfo?.data_files ?? 0)} file{storageInfo?.data_files === 1 ? '' : 's'}
                   </div>
                 </>
               )}
@@ -423,7 +423,7 @@ function TeardownDialogBody({ service, open, onOpenChange, onComplete }: Teardow
                   <div className="flex items-center justify-between group">
                     <div className="space-y-0.5">
                       <Label htmlFor="rem-cache-new" className="text-sm font-medium cursor-pointer">Purge local database and cache</Label>
-                      <p className="text-[10px] text-muted-foreground text-destructive font-medium">Removes the local DuckDB file, Iceberg catalog, and buffer cache.</p>
+                      <p className="text-[10px] text-muted-foreground text-destructive font-medium">Removes the local DuckDB file, DuckLake catalog entries, and buffer cache.</p>
                     </div>
                     <Switch id="rem-cache-new" checked={removeCache} onCheckedChange={setRemoveCache} />
                   </div>

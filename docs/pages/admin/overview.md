@@ -60,7 +60,7 @@ The **Admin Overview** page (`/admin`) is the administrative mission control for
    - Full service CRUD and lifecycle management.
 7. Manual Operation Triggers (`SyncStartResponse`, HTTP `202 Accepted`):
    - `POST /api/admin/sync/{service_id}` & `POST /api/admin/sync-now`
-   - `POST /api/admin/commit/{service_id}` & `POST /api/admin/commit-iceberg`
+   - `POST /api/admin/commit/{service_id}` & `POST /api/admin/commit-storage`
    - `POST /api/admin/compact/{service_id}` & `POST /api/admin/compact-local`
    - `POST /api/admin/optimize/{service_id}`
 

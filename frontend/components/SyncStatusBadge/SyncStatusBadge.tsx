@@ -367,7 +367,7 @@ function SyncStatusBadgeInner() {
   //  - sync-status: full snapshot → ['sync-status', svc]
   //  - cron-runs: cron-run state changes → invalidates ['admin','cron-logs'],
   //      ['admin','cron-logs-recent'], ['last-sync', svc] (on task === 'sync'),
-  //      and the iceberg/audit/ingested/schema keys.
+  //      and the storage/audit/ingested/schema keys.
   //  - system-metrics: bundled snapshot → the seven admin-overview slice keys.
   //  - share: lean tunnel-live snapshot → ['admin','share','live'] (only on
   //      /admin/share; replaces the page's separate useShareStream connection).

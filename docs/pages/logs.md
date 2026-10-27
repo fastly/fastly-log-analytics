@@ -67,14 +67,14 @@ The **Data Management** page (`/logs`) is the operational hub for inspecting and
 5. `GET /api/schema` ([`backend/routers/services/core.py`](../../backend/routers/services/core.py)):
    - Returns column names, DuckDB types, and nullability for the `logs` analytical table/view (`SchemaTab`).
 6. DuckLake & Storage Inspection Endpoints ([`backend/routers/admin/`](../../backend/routers/admin/)):
-   - `GET /api/admin/iceberg-status` (`IcebergStatus` card)
-   - `GET /api/admin/iceberg-calendar` (`IcebergCalendar` daily heatmap)
+   - `GET /api/admin/iceberg-status` (`StorageStatus` card)
+   - `GET /api/admin/storage-calendar` (`StorageCalendar` daily heatmap)
    - `GET /api/admin/compaction-status` (local Parquet compaction metrics)
    - `GET /api/admin/tree/iceberg` & `GET /api/admin/tree/raw` (`FileBrowser` lazy directory trees)
    - `GET /api/admin/metadata-storage` & `POST /api/admin/metadata-cleanup` (`MetadataStorageCard`)
 7. Interactive Action & SSE Streaming Endpoints:
    - `POST /api/admin/ingest-logs` & `GET /api/cron-runs/{run_id}/stream` (manual log discovery & SSE stream)
-   - `POST /api/admin/commit-iceberg` & `GET /api/cron-runs/{run_id}/stream` (manual commit of local Parquet buffer to DuckLake & SSE stream)
+   - `POST /api/admin/commit-storage` & `GET /api/cron-runs/{run_id}/stream` (manual commit of local Parquet buffer to DuckLake & SSE stream)
    - `POST /api/services/{service_id}/ngwaf-sync` (SSE NGWAF verified bot sync)
    - `POST /api/admin/ingest-logs?start_time=&end_time=` (`BackfillRangeModal` historical backfill)
 
@@ -96,7 +96,7 @@ The **Data Management** page (`/logs`) is the operational hub for inspecting and
   1. **Cron Runs (`cron`):** `CronTab` (`CronScheduleSection` collapsible schedule overview + filterable `cron_runs` table by task & status, live elapsed duration counter for `running` jobs, and `Purge History` action).
   2. **Service History (`service_history`):** `ServiceHistoryTab` displaying chronological configuration and lifecycle audit events with action badges (`provision`, `update_settings`, `commit`, `sync`, etc.).
   3. **Ingestion History (`ingestion`, Admin-only):** `IngestionTab` with substring search, multi-select checkboxes, and `Delete Selected` (removes entries from `ingested_files` so they re-ingest on next sync).
-  4. **DuckLake Storage (`iceberg`, lazy-mounted):** `IcebergStatus` + `IcebergCalendar` + `FileBrowser(type="iceberg")` for browsing committed Parquet partitions and snapshots.
+  4. **DuckLake Storage (`iceberg`, lazy-mounted):** `StorageStatus` + `StorageCalendar` + `FileBrowser(type="iceberg")` for browsing committed Parquet partitions and snapshots.
   5. **Metadata Storage (`metadata_storage`, Admin-only, lazy-mounted):** `MetadataStorageCard` showing PostgreSQL table row counts, disk bytes, retention windows, and a `Run Cleanup Now` trigger.
   6. **Available Logs (`raw`, Admin-only, lazy-mounted):** `FileBrowser(type="raw")` with date-range picker and bulk ZIP / single-file download from FOS `raw/`.
   7. **DuckDB Schema (`schema`, lazy-mounted):** `SchemaTab` listing all columns and data types in the active `logs` view with instant column search.
@@ -108,7 +108,7 @@ The **Data Management** page (`/logs`) is the operational hub for inspecting and
 ## 7. Interactive Workflows & Edge Cases
 
 - **Delta Polling for Cron Runs:** `useLogsPageState` ([`frontend/app/logs/_state.ts`](../../frontend/app/logs/_state.ts)) polls `/api/cron-runs?since_id={latestCronIdRef}` every 15s (or 3s while a job is in `running` state) and merges updates in-place without resetting scroll position or collapsing the table into a skeleton.
-- **Lazy Tab Mounting:** Heavy storage and S3 tree components (`IcebergStatus`, `IcebergCalendar`, `MetadataStorageCard`, `FileBrowser`, `SchemaTab`) only mount and issue network requests when their tab becomes active (`activeTab === '...'`), keeping initial `/logs` page load fast and free of unnecessary S3 LIST operations.
+- **Lazy Tab Mounting:** Heavy storage and S3 tree components (`StorageStatus`, `StorageCalendar`, `MetadataStorageCard`, `FileBrowser`, `SchemaTab`) only mount and issue network requests when their tab becomes active (`activeTab === '...'`), keeping initial `/logs` page load fast and free of unnecessary S3 LIST operations.
 - **Analyst Redirect:** Share analysts (`isShareAnalyst` / `isAnalyst`) are immediately blocked by `AppLayout` with an ARIA-live status message and redirected to `/dashboard`.
 
 ---

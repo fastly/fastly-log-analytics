@@ -225,9 +225,9 @@ export function ExecuteStep({ s }: { s: WizardState }) { const { config, catalog
   const enabledGroups = React.useMemo(() => resolveEnabledGroupsWithDeps(config.log_fields?.groups, catalog), [config.log_fields?.groups, catalog]);
   const presetSummary = React.useMemo(() => evaluateLogFieldPresetSummary(config.log_fields, catalog), [config.log_fields, catalog]); const automationChecks = [
     { label: `Sync every ${config.log_period >= 120 ? Math.floor(config.log_period / 120) + "m" : Math.floor(config.log_period / 2) + "s"}`, enabled: config.enable_cron_sync },
-    { label: `Commit to Iceberg every ${config.commit_interval_mins}m`, enabled: config.enable_cron_sync },
+    { label: `Commit to DuckLake every ${config.commit_interval_mins}m`, enabled: config.enable_cron_sync },
     { label: "Auto-delete Raw Logs", enabled: config.delete_after && config.enable_cron_sync },
-    { label: "Daily Iceberg Optimization", enabled: config.enable_cron_compact && config.enable_cron_sync }, ]; return (
+    { label: "Daily DuckLake Optimization", enabled: config.enable_cron_compact && config.enable_cron_sync }, ]; return (
     <div className="flex-1 overflow-y-auto min-h-0 flex flex-col p-8 items-center text-left">
       <div className="w-full max-w-2xl space-y-8">
         {s.isDeploying ? ( <div className="space-y-6 w-full animate-in fade-in slide-in-from-bottom-4 duration-500">
@@ -1044,14 +1044,14 @@ export function StorageStep({ s }: { s: WizardState }) {
           <div className="grid grid-cols-2 gap-4">
             <div className="flex items-center justify-between p-3 border rounded-md bg-muted/5">
               <div className="space-y-0.5">
-                <LabelWithInfo label="Background Sync" info={`Automatically polls FOS for new ${isLogging ? "log" : "RUM telemetry"} files (every ${pollFreqLong}) and writes them into the local buffer. The buffer is then committed to the shared Iceberg table at the Cloud Commit Interval below.`} />
+                <LabelWithInfo label="Background Sync" info={`Automatically polls FOS for new ${isLogging ? "log" : "RUM telemetry"} files (every ${pollFreqLong}) and writes them into the local buffer. The buffer is then committed to the shared DuckLake table at the Cloud Commit Interval below.`} />
                 <p className="text-[10px] text-muted-foreground">Polls FOS every {pollFreqShort}</p>
               </div>
               <Switch aria-label="Background Sync" checked={config.enable_cron_sync} onCheckedChange={(v) => update("enable_cron_sync", v)} />
             </div>
             <div className={cn("flex items-center justify-between p-3 border rounded-md bg-muted/5 transition-opacity", syncDisabledClass)}>
               <div className="space-y-0.5">
-                <LabelWithInfo label="Auto-Delete Raw Logs" info={`Deletes the raw .gz ${isLogging ? "log" : "RUM beacon"} files from FOS after they are ingested into Iceberg. Recommended — the Iceberg table holds the same data in a more efficient format.`} />
+                <LabelWithInfo label="Auto-Delete Raw Logs" info={`Deletes the raw .gz ${isLogging ? "log" : "RUM beacon"} files from FOS after they are ingested into DuckLake. Recommended — the DuckLake table holds the same data in a more efficient format.`} />
                 <p className="text-[10px] text-muted-foreground">{isLogging ? "Remove .gz files after ingest" : "Remove .gz RUM files after ingest"}</p>
               </div>
               <Switch aria-label="Auto-Delete Raw Logs" checked={config.delete_after} onCheckedChange={(v) => update("delete_after", v)} />
@@ -1062,8 +1062,8 @@ export function StorageStep({ s }: { s: WizardState }) {
           <div className={cn("p-4 border rounded-md bg-muted/5 space-y-3 transition-opacity", syncDisabledClass)}>
             <div className="flex items-start justify-between gap-4">
               <div className="space-y-1">
-                <LabelWithInfo label="Cloud Commit Interval" info="How often the local buffer is flushed to the shared Iceberg table in Fastly Object Storage. This determines how quickly data becomes visible to other users or tools querying the Iceberg table directly. More frequent commits mean fresher data but create more small files — the daily Iceberg optimization consolidates them." />
-                <p className="text-[10px] text-muted-foreground leading-relaxed">Controls data freshness for shared access. Every commit creates one Iceberg snapshot in FOS.</p>
+                <LabelWithInfo label="Cloud Commit Interval" info="How often the local buffer is flushed to the shared DuckLake table. This determines how quickly data becomes visible to other users or tools querying the DuckLake table directly. More frequent commits mean fresher data but create more small files — the daily DuckLake optimization consolidates them." />
+                <p className="text-[10px] text-muted-foreground leading-relaxed">Controls data freshness for shared access. Every commit creates one DuckLake snapshot.</p>
               </div>
               <Select value={String(config.commit_interval_mins)} onValueChange={(v) => v && update("commit_interval_mins", Number(v))}>
                 <SelectTrigger className="h-8 w-[220px] shrink-0 text-xs"><SelectValue /></SelectTrigger>
@@ -1072,14 +1072,14 @@ export function StorageStep({ s }: { s: WizardState }) {
             </div>
             <div className="text-[10px] text-muted-foreground bg-muted/30 rounded px-3 py-2 leading-relaxed">
               {isLogging ? `With a ${config.log_period >= 60 ? `${config.log_period / 60}-minute` : `${config.log_period}-second`} log period` : "With a 1-minute RUM poll period"}{" "}
-              and a {config.commit_interval_mins}-minute commit interval, the system will create ~{Math.round(1440 / config.commit_interval_mins)} Iceberg snapshots per day before the daily optimization consolidates them.
+              and a {config.commit_interval_mins}-minute commit interval, the system will create ~{Math.round(1440 / config.commit_interval_mins)} DuckLake snapshots per day before the daily optimization consolidates them.
             </div>
           </div>
 
           {/* Section: Data Retention Policies */}
           <div className={cn("p-4 border rounded-md bg-muted/5 space-y-4 transition-opacity", syncDisabledClass)}>
             <div>
-              <LabelWithInfo label="Data Retention Policy" info="Control how long data is stored in your Iceberg table before being deleted to manage storage size and billing. General edge logs are high-volume, while RUM beacons are low-volume." />
+              <LabelWithInfo label="Data Retention Policy" info="Control how long data is stored in your DuckLake table before being deleted to manage storage size and billing. General edge logs are high-volume, while RUM beacons are low-volume." />
               <p className="text-[10px] text-muted-foreground leading-relaxed">Configure separate retention windows to optimize storage billing and historical trend depth.</p>
             </div>
             <div className={cn("grid gap-6", isLogging && config.rum_enabled ? "grid-cols-2" : "grid-cols-1")}>
@@ -1129,10 +1129,10 @@ export function StorageStep({ s }: { s: WizardState }) {
 
           <div className={cn("flex items-center justify-between p-3 border rounded-md bg-muted/5 transition-opacity", syncDisabledClass)}>
             <div className="space-y-0.5">
-              <LabelWithInfo label="Daily Iceberg Optimization" info="Every night at 04:00 UTC, rewrites many small Iceberg snapshot files into larger, optimized Parquet files in FOS. This is storage-side housekeeping that keeps cloud storage costs down — dashboard query speed is handled separately by always-on local compaction. Strongly recommended when using frequent commit intervals." />
+              <LabelWithInfo label="Daily DuckLake Optimization" info="Every night at 04:00 UTC, rewrites many small DuckLake snapshot files into larger, optimized Parquet files. This is storage-side housekeeping that keeps cloud storage costs down — dashboard query speed is handled separately by always-on local compaction. Strongly recommended when using frequent commit intervals." />
               <p className="text-[10px] text-muted-foreground">Runs at 04:00 UTC — consolidates daily snapshots</p>
             </div>
-            <Switch aria-label="Daily Iceberg Optimization" checked={config.enable_cron_compact} onCheckedChange={(v) => update("enable_cron_compact", v)} />
+            <Switch aria-label="Daily DuckLake Optimization" checked={config.enable_cron_compact} onCheckedChange={(v) => update("enable_cron_compact", v)} />
           </div>
         </div>
       </div>

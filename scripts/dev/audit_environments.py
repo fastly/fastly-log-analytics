@@ -118,8 +118,8 @@ class AuditResult:
     compaction_partitions_above_3: int = 0
     compaction_partitions_above_10: int = 0
     duckdb_size_bytes: int = 0
-    iceberg_bytes: int = 0
-    iceberg_files: int = 0
+    storage_bytes: int = 0
+    storage_files: int = 0
     pool_saturated_rejects: int = 0
     pool_wait_p95_ms: float = 0.0
     clickhouse_health: str | None = None
@@ -240,7 +240,7 @@ def audit_target(env: EnvironmentConfig, timeout: float = 5.0) -> AuditResult:
         res.rum_latest_log_age_s = parse_timestamp_age(res.rum_latest_log_at)
         res.rum_total_rows, res.rum_last_sync_at = rum_sec.get("total_rows"), rum_sec.get("last_sync_at")
         res.duckdb_size_bytes = status_sec.get("duckdb_size_bytes") or 0
-        res.iceberg_bytes, res.iceberg_files = status_sec.get("iceberg_bytes") or 0, status_sec.get("iceberg_files") or 0
+        res.storage_bytes, res.storage_files = status_sec.get("storage_bytes") or 0, status_sec.get("storage_files") or 0
 
     if hs_status == 200 and isinstance(hs_data, dict):
         load = hs_data.get("load") or {}
@@ -381,8 +381,8 @@ def print_audit_report(results: list[AuditResult], clear_screen: bool = False) -
         storage_parts = [f"Scheduler Tick: {sched_color}{sched_str}{RESET}"]
         if (r.duckdb_size_bytes or 0) > 0:
             storage_parts.append(f"DuckDB: {format_bytes(r.duckdb_size_bytes)}")
-        if (r.iceberg_files or 0) > 0 or (r.iceberg_bytes or 0) > 0:
-            storage_parts.append(f"DuckLake: {format_bytes(r.iceberg_bytes)} ({r.iceberg_files} files)")
+        if (r.storage_files or 0) > 0 or (r.storage_bytes or 0) > 0:
+            storage_parts.append(f"DuckLake: {format_bytes(r.storage_bytes)} ({r.storage_files} files)")
         storage_parts.append(f"Compaction: {comp_color}{r.compaction_total_files or 0} files ({r.compaction_daily_files or 0} daily, {r.compaction_weekly_files or 0} weekly){RESET}")
         storage_line = f"  {BOLD}Pipeline:{RESET}  {' │ '.join(storage_parts)}"
         if (r.compaction_partitions_above_10 or 0) > 0:

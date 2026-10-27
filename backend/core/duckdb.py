@@ -425,6 +425,44 @@ def get_raw_tree_node(source: dict | None, prefix_filter: str = "", root: str = 
     return {"children": children}
 
 
+def get_storage_tree_node(source: dict | None, prefix_filter: str = "") -> dict[str, Any]:
+    """List the service's DuckLake data files: the local data directory (Standard) or the FOS ``ducklake/`` prefix (High-Scale)."""
+    from backend.core.storage._core import _resolve_data_path
+
+    src = source or _DEFAULT_SOURCE
+    root = _resolve_data_path(src, src.get("service_id") or src.get("name", "default"))
+    if root.startswith(("s3://", "http://", "https://")):
+        return get_raw_tree_node(src, prefix_filter, root="ducklake")
+    base = os.path.realpath(root)
+    target = os.path.realpath(os.path.join(base, prefix_filter))
+    if os.path.commonpath([base, target]) != base or not os.path.isdir(target):
+        return {"children": []}
+    rel = prefix_filter.strip("/")
+    dirs: list[dict[str, Any]] = []
+    files: list[dict[str, Any]] = []
+    scanned = 0
+    for entry in sorted(os.scandir(target), key=lambda e: e.name):
+        if entry.is_dir(follow_symlinks=False):
+            size = 0
+            for dirpath, _, names in os.walk(entry.path):
+                for name in names:
+                    scanned += 1
+                    try:
+                        size += os.path.getsize(os.path.join(dirpath, name))
+                    except OSError:
+                        continue
+                if scanned >= 10000:
+                    break
+            dirs.append(
+                {"name": entry.name, "type": "directory", "size": size, "prefix": f"{rel}/{entry.name}".lstrip("/")}
+            )
+        elif entry.is_file(follow_symlinks=False):
+            st = entry.stat(follow_symlinks=False)
+            mtime = datetime.fromtimestamp(st.st_mtime, UTC).isoformat()
+            files.append({"name": entry.name, "type": "file", "size": st.st_size, "mtime": mtime, "key": entry.name})
+    return {"children": dirs + files}
+
+
 _initialized_paths: set[str] = set()
 _init_lock = threading.Lock()
 
@@ -1062,16 +1100,16 @@ def refresh_config_status(service_id: str, include_top_values: bool = True):
                 buf_bytes = _get_dir_size(buf_dir)
         except Exception:
             logger.debug("refresh_config_status: step failed (ignored)", exc_info=True)
-    iceberg_bytes = iceberg_files = None
-    if not include_top_values and "iceberg_bytes" in cached_status and "iceberg_files" in cached_status:
-        iceberg_bytes, iceberg_files = cached_status.get("iceberg_bytes"), cached_status.get("iceberg_files")
+    storage_bytes = storage_files = None
+    if not include_top_values and "storage_bytes" in cached_status and "storage_files" in cached_status:
+        storage_bytes, storage_files = cached_status.get("storage_bytes"), cached_status.get("storage_files")
     else:
         try:
             from backend.core import storage as _db_storage
 
             info = _db_storage.get_table_info(source)
             if not info.get("error"):
-                iceberg_bytes, iceberg_files = int(info.get("size_bytes", 0) or 0), int(info.get("data_files", 0) or 0)
+                storage_bytes, storage_files = int(info.get("size_bytes", 0) or 0), int(info.get("data_files", 0) or 0)
         except Exception:
             logger.debug("refresh_config_status: step failed (ignored)", exc_info=True)
     con = None
@@ -1080,8 +1118,8 @@ def refresh_config_status(service_id: str, include_top_values: bool = True):
         status = {} if durable_serving else get_sync_status(con, source, skip_fos=False, force=True)
         for k, v in (
             ("buffer_size_bytes", buf_bytes),
-            ("iceberg_bytes", iceberg_bytes),
-            ("iceberg_files", iceberg_files),
+            ("storage_bytes", storage_bytes),
+            ("storage_files", storage_files),
         ):
             if v is not None:
                 status[k] = v

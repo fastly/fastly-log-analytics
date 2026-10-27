@@ -132,11 +132,11 @@ describe('ProvisionWizard modes and ingest connect step', () => {
     expect(s.setStep).toHaveBeenCalledWith('token')
   })
 
-  it('renders the ingest connect form without Iceberg or analyst-invite inputs', () => {
+  it('renders the ingest connect form without DuckLake or analyst-invite inputs', () => {
     render(<ConnectStep s={makeConnectState()} />)
     expect(screen.getByText(/connect to existing storage/i)).toBeVisible()
     expect(screen.getByText('Logging Service', { selector: 'label, span, div' })).toBeVisible()
-    expect(screen.queryByText(/iceberg metadata location/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/metadata location/i)).not.toBeInTheDocument()
     expect(screen.queryByText(/import config from admin/i)).not.toBeInTheDocument()
     expect(screen.queryByText(/read-only mode/i)).not.toBeInTheDocument()
   })
@@ -507,7 +507,7 @@ describe('wizard-draft persistence', () => {
   it('persists no analyst-import fields', () => {
     saveDraft(makeDraft())
     const raw = window.localStorage.getItem(WIZARD_DRAFT_KEY)!
-    for (const k of ['importMode', 'importRange', 'syncEnabled', 'syncIntervalMins', 'icebergMetadataLocation']) expect(raw).not.toContain(k)
+    for (const k of ['importMode', 'importRange', 'syncEnabled', 'syncIntervalMins']) expect(raw).not.toContain(k)
   })
 
   it('handles version mismatch, mode step, invalid JSON, clearDraft, and broken localStorage', () => {
@@ -1255,7 +1255,7 @@ describe('DeleteDataDialog & TeardownDialog', () => {
   test('DeleteDataDialog shows local + cloud file counts and sizes before confirming', async () => {
     sseState.status = 'idle'
     server.use(
-      http.get(`${API_BASE}/api/admin/iceberg-info`, ({ request }) => {
+      http.get(`${API_BASE}/api/admin/storage-info`, ({ request }) => {
         const url = new URL(request.url)
         if (url.searchParams.get('service_id') !== 'test-svc') {
           return HttpResponse.json({ error: 'wrong service targeted' }, { status: 400 })

@@ -1278,14 +1278,14 @@ def _audit_logs(client):
     return client.get("/api/audit-logs", headers={"x-fastly-service-id": MOCK_SERVICE_ID})
 
 
-def _iceberg_calendar(client):
+def _storage_calendar(client):
     from backend.deps import get_source
 
     app.dependency_overrides[get_source] = lambda: {"service_id": "service123", "name": "service123"}
     with patch(
         "backend.core.storage.get_snapshot_calendar", return_value={"2026-08-19": {"data_files": 5, "size_bytes": 1}}
     ):
-        return client.get("/api/admin/iceberg-calendar?table_name=logs")
+        return client.get("/api/admin/storage-calendar?table_name=logs")
 
 
 def _log_fields_get(client):
@@ -1299,7 +1299,7 @@ _SITES = [
     pytest.param(lambda c: _check_fos(c, fail=False), id="provision-check-fos-ok"),
     pytest.param(lambda c: _check_fos(c, fail=True), id="provision-check-fos-failed"),
     pytest.param(_audit_logs, id="audit-logs"),
-    pytest.param(_iceberg_calendar, id="iceberg-calendar"),
+    pytest.param(_storage_calendar, id="storage-calendar"),
     pytest.param(_log_fields_get, id="service-log-fields"),
 ]
 
@@ -1484,7 +1484,7 @@ def test_ngwaf_share_purge_calendar_vcl_health_and_telemetry_match_producer(clie
         assert _body(client.post("/api/admin/share/purge")) == {"ok": True, **purge_stats}
     calendar = {"2026-10-01": {"data_files": 4, "size_bytes": 0}, "2026-10-02": {"data_files": 9, "size_bytes": 0}}
     with patch("backend.core.storage.get_snapshot_calendar", return_value=calendar):
-        assert _body(client.get("/api/admin/iceberg-calendar")) == calendar
+        assert _body(client.get("/api/admin/storage-calendar")) == calendar
 
     Snippet = namedtuple("Snippet", "name")
     snippets = [Snippet("Fastly Log Analytics - capture"), Snippet("Fastly Log Analytics - scoring")]
@@ -1537,7 +1537,7 @@ def test_ngwaf_share_purge_calendar_vcl_health_and_telemetry_match_producer(clie
 def test_admin_ingest_actions_beacons_celery_and_control_room_match_producer(client, monkeypatch):
     started = {"ok": True, "message": "started", "run_id": 41}
     with patch("backend.utils.router_utils.start_or_resume_cron", return_value=started):
-        assert _body(client.post("/api/admin/commit-iceberg"), status=202) == started
+        assert _body(client.post("/api/admin/commit-storage"), status=202) == started
         assert _body(client.post("/api/admin/ingest-logs")) == started
     with patch("backend.core.storage.clear_source_caches"), patch("threading.Thread"):
         assert _body(client.post("/api/admin/rebuild-local-view"), status=202) == {

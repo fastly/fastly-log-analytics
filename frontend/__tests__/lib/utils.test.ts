@@ -457,7 +457,7 @@ const ALLOWED_GAPS = new Set<string>([
   'POST /api/admin/rollups/compact/:service_id', 'POST /api/admin/rollups/compact', 'POST /api/admin/rollups/heal/:service_id', 'POST /api/admin/rollups/heal',
   'POST /api/admin/rollup-heal/:service_id', 'POST /api/admin/rollup-heal', 'GET /api/admin/rollups/status/:service_id', 'GET /api/admin/rollups/status',
   'POST /api/admin/rebuild-time-series-rollups', 'POST /api/admin/partial-hour-merge/:service_id', 'POST /api/admin/partial-hour-merge',
-  'GET /api/admin/partial-hour-status/:service_id', 'GET /api/admin/partial-hour-status', 'GET /api/admin/metric-history', 'GET /api/admin/iceberg-tree',
+  'GET /api/admin/partial-hour-status/:service_id', 'GET /api/admin/partial-hour-status', 'GET /api/admin/metric-history', 'GET /api/admin/storage-tree',
   'GET /api/admin/usage-log/export', 'GET /api/admin/slow-queries/count', 'GET /api/admin/slow-queries', 'GET /api/download-folder', 'GET /api/download', 'GET /api/download-all',
   'GET /api/admin/vcl-health', 'POST /api/provision/reconcile', 'POST /api/admin/optimize-now', 'POST /api/admin/local-compact-now',
   'POST /api/admin/backfill-bundle-rollups', 'POST /api/admin/usage-logging', 'POST /api/admin/reset-rum', 'POST /api/provision/teardown',

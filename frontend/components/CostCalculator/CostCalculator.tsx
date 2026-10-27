@@ -45,15 +45,11 @@ export interface CalcState {
   parquetMB: number
   logNodes: number
   userEditedNodes: boolean
-  cacheEnabled: boolean
-  queriesDay: number
   logsChecksPerDay: number
   cdnEnabled: boolean
   retentionDays: number
   deleteLogs: boolean
-  icebergOptimizeEnabled: boolean
-  activeAnalysts: number
-  analystFullSyncsPerMonth: number
+  compactionEnabled: boolean
   rateA: number
   rateB: number
   rateStorage: number
@@ -72,10 +68,9 @@ export const DEFAULTS: CalcState = {
   reqDay: 1_000_000, sampleRate: 100, edgeOnly: true, edgeReqDay: 800_000, rumBeaconsDay: 0,
   logPeriod: 60, commitMins: 5, bytesPerLine: 500, parquetMB: 20,
   logNodes: 1, userEditedNodes: false,
-  cacheEnabled: true, queriesDay: 50, logsChecksPerDay: 2,
+  logsChecksPerDay: 2,
   cdnEnabled: true, retentionDays: 90, deleteLogs: true,
-  icebergOptimizeEnabled: true,
-  activeAnalysts: 2, analystFullSyncsPerMonth: 1,
+  compactionEnabled: true,
   rateA: 0.005, rateB: 0.001, rateStorage: 0.02, rateEgress: 0.12, minDays: 30,
   billingZone: 'MBZ200',
 }
@@ -132,7 +127,7 @@ export function reducer(state: CalcState, action: CalcAction): CalcState {
         ...(p.edge_only != null && { edgeOnly: p.edge_only }),
         ...(p.delete_after != null && { deleteLogs: p.delete_after }),
         ...(p.log_retention_days != null && { retentionDays: p.log_retention_days }),
-        ...(p.compaction_enabled != null && { icebergOptimizeEnabled: p.compaction_enabled }),
+        ...(p.compaction_enabled != null && { compactionEnabled: p.compaction_enabled }),
         ...(p.class_a_rate_per_1k != null && { rateA: p.class_a_rate_per_1k }),
         ...(p.class_b_rate_per_10k != null && { rateB: p.class_b_rate_per_10k / 10 }),
         rateEgress: resolvedEgress,
@@ -201,17 +196,16 @@ export function calculate(s: CalcState): CalcResults {
   const actualParquetBytesPerFile = parquetBytesPerSync / parquetFilesPerSync
   const parquetGBPerFile = actualParquetBytesPerFile / (1024 * 1024 * 1024)
 
+  // Committed DuckLake Parquet is pushed to FOS after each commit (the cloud copy used to rebuild local data).
   const minChargeHours = s.minDays * 24
   const rawPqFilesPerDay = parquetFilesPerSync * syncsPerDay
-  const icebergMetadataFilesPerDay = syncsPerDay * 4
-  const objectsPerDay = logFilesPerDay + rawPqFilesPerDay + icebergMetadataFilesPerDay
+  const objectsPerDay = logFilesPerDay + rawPqFilesPerDay
 
   const logSteadyStateDays = s.deleteLogs ? syncHrs / 24 : s.retentionDays
   const billedLogDays = Math.max(logSteadyStateDays, s.minDays)
   const billedPqDays = Math.max(s.retentionDays, s.minDays)
-  const billedMetadataDays = Math.max(s.retentionDays, s.minDays)
 
-  const objectsBilled = (logFilesPerDay * billedLogDays) + (rawPqFilesPerDay * billedPqDays) + (icebergMetadataFilesPerDay * billedMetadataDays)
+  const objectsBilled = (logFilesPerDay * billedLogDays) + (rawPqFilesPerDay * billedPqDays)
 
   const ingestSeconds = Math.max(10, Math.floor(s.logPeriod / 2))
   const ingestsPerMonth = ((24 * 60 * 60) / ingestSeconds) * 30
@@ -221,20 +215,13 @@ export function calculate(s: CalcState): CalcResults {
   const stateSyncClassA = syncsPerDay * 30
   const rumBeaconsMonth = s.rumBeaconsDay * 30
 
+  const duckLakeParquetClassA = parquetFilesPerMonth + (s.compactionEnabled ? 30 + parquetFilesPerMonth : 0)
   const classAPerMonth =
-    logFilesPerMonth + parquetFilesPerMonth + listOpsClassA + classALogsPage +
-    stateSyncClassA + rumBeaconsMonth + (s.icebergOptimizeEnabled ? 30 + parquetFilesPerMonth : 0)
+    logFilesPerMonth + listOpsClassA + classALogsPage +
+    stateSyncClassA + rumBeaconsMonth + duckLakeParquetClassA
 
-  const cdnHitRate = s.cdnEnabled ? 0.8 : 0
-  const cacheHitRate = s.cacheEnabled ? 1.0 : cdnHitRate
-  const parquetFilesForQuery = Math.max(1, Math.round(parquetFilesPerMonth / syncsPerMonth))
-  const analystSyncsPerMonth = s.activeAnalysts * 720 * 30
-  const analystNewParquetDl = s.activeAnalysts * parquetFilesPerMonth * (1 - cdnHitRate)
-  const analystHistoricalDl = s.analystFullSyncsPerMonth * (rawPqFilesPerDay * s.retentionDays) * (1 - cdnHitRate)
-
-  const classBPerMonth =
-    logFilesPerMonth + (s.queriesDay * 30 * parquetFilesForQuery * (1 - cacheHitRate)) +
-    analystSyncsPerMonth + analystNewParquetDl + analystHistoricalDl
+  // Queries read local data, so FOS reads are the raw .gz ingest only (restores are rare and not modelled).
+  const classBPerMonth = logFilesPerMonth
 
   const logGBPerFile = logSizeKB / (1024 * 1024)
   const logActualH = s.deleteLogs ? Math.max(1, syncHrs) : s.retentionDays * 24
@@ -243,24 +230,17 @@ export function calculate(s: CalcState): CalcResults {
 
   const pqActualH = s.retentionDays * 24
   const pqBilledH = Math.max(pqActualH, minChargeHours)
-  const icebergDataGBMonths = (parquetFilesPerMonth * parquetGBPerFile * pqBilledH) / 720
-  const metadataGBMonths = (icebergMetadataFilesPerDay * 30 * (0.1 / 1024) * billedMetadataDays) / 30
+  const duckLakeDataGBMonths = (parquetFilesPerMonth * parquetGBPerFile * pqBilledH) / 720
   const rumParquetGBMonths = (s.rumBeaconsDay * 30 * 1024 / 4) / (1024 * 1024 * 1024)
-  const totalGBStored = rawLogGBMonths + icebergDataGBMonths + metadataGBMonths + rumParquetGBMonths
+  const totalGBStored = rawLogGBMonths + duckLakeDataGBMonths + rumParquetGBMonths
 
   const storageTiers: CalcResults['storageTiers'] = []
   if (rawLogGBMonths > 0) storageTiers.push({ label: 'Raw logs', gbMonths: rawLogGBMonths, flagged: logBilledH > logActualH })
-  if (icebergDataGBMonths > 0) storageTiers.push({ label: 'Iceberg data', gbMonths: icebergDataGBMonths, flagged: pqBilledH > pqActualH })
+  if (duckLakeDataGBMonths > 0) storageTiers.push({ label: 'DuckLake data', gbMonths: duckLakeDataGBMonths, flagged: pqBilledH > pqActualH })
   if (rumParquetGBMonths > 0) storageTiers.push({ label: 'RUM data', gbMonths: rumParquetGBMonths, flagged: false })
-  if (metadataGBMonths > 0) storageTiers.push({ label: 'Metadata', gbMonths: metadataGBMonths, flagged: false })
 
-  const icebergMetaEgressGB = s.cdnEnabled ? (syncsPerMonth * 4 * 5) / (1024 * 1024) : 0
-  let cdnEgressGB = 0
-  if (s.cdnEnabled) {
-    cdnEgressGB = s.cacheEnabled
-      ? parquetFilesPerMonth * parquetGBPerFile + icebergMetaEgressGB
-      : (s.queriesDay * 30 * parquetFilesForQuery * parquetGBPerFile) + icebergMetaEgressGB
-  }
+  // With a CDN fronting FOS, the raw .gz objects read during ingest are the egress.
+  const cdnEgressGB = s.cdnEnabled ? totalGzBytesPerMonth / (1024 * 1024 * 1024) : 0
 
   const costA = (classAPerMonth / 1000) * s.rateA
   const costB = (classBPerMonth / 1000) * s.rateB
@@ -377,23 +357,17 @@ export function Inputs({ s, r, set }: InputsProps) {
         <Row label='Log file period (seconds)' tooltip="How often Fastly closes and uploads a log file. Controlled by the Fastly logging configuration.">
           <NumInput value={s.logPeriod} onChange={set('logPeriod')} min={1} />
         </Row>
-        <Row label='Cloud Commit Interval (minutes)' tooltip="How often the local buffer is flushed to the shared Iceberg table in FOS, creating new snapshots (e.g., 5).">
+        <Row label='Cloud Commit Interval (minutes)' tooltip="How often the local buffer is committed to DuckLake and the new Parquet files are pushed to FOS (e.g., 5).">
           <NumInput value={s.commitMins} onChange={set('commitMins')} min={1} />
         </Row>
         <Row label='Average bytes per log line' tooltip="The average uncompressed bytes per request based on your selected fields. Used to calculate storage sizes.">
           <NumInput value={s.bytesPerLine} onChange={set('bytesPerLine')} min={1} />
         </Row>
-        <Row label='Parquet target size (MB)' tooltip="Target file size for the nightly FOS Iceberg optimize. Larger targets mean fewer rewritten objects and lower FOS storage cost.">
+        <Row label='Parquet target size (MB)' tooltip="Target file size for the nightly DuckLake compaction. Larger targets mean fewer rewritten objects (and lower FOS storage cost in High-Scale).">
           <NumInput value={s.parquetMB} onChange={set('parquetMB')} min={1} />
         </Row>
         <Row label='Log nodes / fan-out' tooltip="Estimated number of Fastly aggregators/cache nodes flushing per period. Higher traffic = more nodes.">
           <NumInput value={s.logNodes} onChange={set('logNodes')} min={1} max={72} />
-        </Row>
-        <Row label='Local parquet cache enabled' tooltip="Download and cache Parquet files locally to avoid paying Class B operations on every query.">
-          <Switch aria-label="Local parquet cache enabled" checked={s.cacheEnabled} onCheckedChange={set('cacheEnabled')} />
-        </Row>
-        <Row label='Dashboard page loads per day' tooltip="Page loads across dashboard, charts, etc. Costs FOS reads if local cache is disabled.">
-          <NumInput value={s.queriesDay} onChange={set('queriesDay')} />
         </Row>
         <Row label='Manual log checks per day' tooltip="Each click of 'Refresh' on the Ingestion tab performs 1 Class A list operation against FOS.">
           <NumInput value={s.logsChecksPerDay} onChange={set('logsChecksPerDay')} />
@@ -404,17 +378,11 @@ export function Inputs({ s, r, set }: InputsProps) {
         <Row label='Data retention (days)' tooltip="How many days to keep data in Object Storage before deleting.">
           <NumInput value={s.retentionDays} onChange={set('retentionDays')} min={1} />
         </Row>
-        <Row label='Auto-delete raw .gz logs after ingest' tooltip="Delete raw .gz log files immediately after ingesting them into Iceberg. They will still be billed for the FOS minimum 30 days, but doing this prevents redundant long-term storage since Iceberg writes its own optimized Parquet files.">
+        <Row label='Auto-delete raw .gz logs after ingest' tooltip="Delete raw .gz log files once they are committed to DuckLake. They are still billed for the FOS minimum 30 days, but this prevents redundant long-term storage.">
           <Switch aria-label="Auto-delete raw .gz logs after ingest" checked={s.deleteLogs} onCheckedChange={set('deleteLogs')} />
         </Row>
-        <Row label='Iceberg table optimization enabled' tooltip="Periodically rewrite and merge small Parquet files into larger ones. This happens automatically but you can model the cost impact here.">
-          <Switch aria-label="Iceberg table optimization enabled" checked={s.icebergOptimizeEnabled} onCheckedChange={set('icebergOptimizeEnabled')} />
-        </Row>
-        <Row label='Active remote analysts' tooltip="How many other team members have this service open on their computer simultaneously. Each analyst syncs metadata every 2 minutes.">
-          <NumInput value={s.activeAnalysts} onChange={set('activeAnalysts')} min={0} />
-        </Row>
-        <Row label='Analyst full syncs / month' tooltip="How many times per month an analyst completely resets their local cache and re-downloads the entire historical Iceberg table.">
-          <NumInput value={s.analystFullSyncsPerMonth} onChange={set('analystFullSyncsPerMonth')} min={0} />
+        <Row label='DuckLake compaction enabled' tooltip="Periodically rewrite and merge small Parquet files into larger ones. The merged files are pushed to FOS and the replaced ones deleted (30-day minimum billing applies).">
+          <Switch aria-label="DuckLake compaction enabled" checked={s.compactionEnabled} onCheckedChange={set('compactionEnabled')} />
         </Row>
       </div>
 
@@ -455,12 +423,12 @@ const OPS_SECTIONS = [
     ],
   },
   {
-    title: 'Iceberg Maintenance (if enabled)',
+    title: 'DuckLake Cloud Copy (if compaction enabled)',
     cls: 'py-1 font-semibold text-blue-500 dark:text-blue-300 italic',
     rowCls: 'pl-3 py-0.5 text-muted-foreground/70',
     valCls: 'text-right text-muted-foreground/70',
     rows: [
-      ['Iceberg commit (append data)', '1 op/sync'],
+      ['DuckLake commit (append data)', '1 op/sync'],
       ['Table optimization (rewrite)', '1 op/file'],
       ['Weekly snapshot expiry', '1 op/week'],
     ],
@@ -472,9 +440,6 @@ const OPS_SECTIONS = [
     valCls: 'text-right',
     rows: [
       ['Read each .gz during ingest', '1 op/file'],
-      ['Analyst metadata pull (cached)', '1 op/min'],
-      ['Query Parquet (no local cache)', '1 op/file/query'],
-      ['CDN-cached reads', '0 ops'],
     ],
   },
   {
@@ -483,8 +448,7 @@ const OPS_SECTIONS = [
     rowCls: 'pl-3 py-0.5',
     valCls: 'text-right',
     rows: [
-      ['Dashboard queries (uncached)', 'MBs'],
-      ['Analyst metadata sync (cached)', '~10KB/min'],
+      ['Raw .gz logs read via the CDN during ingest', 'compressed log volume'],
     ],
   },
 ] as const
@@ -673,7 +637,7 @@ export function Results({ s, r }: ResultsProps) {
             ['Raw volume / month (uncompressed)', formatBytes(r.totalBytesPerMonth)],
             ['Est. volume / month (.gz compressed)', formatBytes(r.totalGzBytesPerMonth)],
             ['Log files written / month', fmtN(Math.round(r.logFilesPerMonth))],
-            ['Iceberg data files created / month', fmtN(Math.round(r.parquetFilesPerMonth))],
+            ['DuckLake data files pushed to FOS / month', fmtN(Math.round(r.parquetFilesPerMonth))],
             ['Billed footprint (30d min)', fmtN(Math.round(r.objectsBilled)) + ' objects'],
             ['Syncs / month', fmtN(Math.round(r.syncsPerMonth))],
             ...(s.rumBeaconsDay > 0 ? [

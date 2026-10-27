@@ -156,13 +156,13 @@ class SharePurgeResponse(_OkWireSafeBase):
     max_idle_session_days: int | None = None
 
 
-class IcebergCalendarDay(WireSafeModel):
+class StorageCalendarDay(WireSafeModel):
     data_files: int
     size_bytes: int
 
 
-class IcebergCalendarResponse(WireSafeModel):
-    __pydantic_extra__: dict[str, IcebergCalendarDay | list]  # type: ignore[assignment]
+class StorageCalendarResponse(WireSafeModel):
+    __pydantic_extra__: dict[str, StorageCalendarDay | list]  # type: ignore[assignment]
 
 
 class VclHealthResponse(WireSafeModel):

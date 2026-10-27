@@ -35544,14 +35544,14 @@
         }
       }
     },
-    "/api/admin/iceberg-info": {
+    "/api/admin/storage-info": {
       "get": {
         "tags": [
           "admin"
         ],
-        "summary": "Iceberg Info Endpoint",
+        "summary": "Storage Info Endpoint",
         "description": "Return DuckLake table metadata: snapshots, data files, size, buffer status.",
-        "operationId": "iceberg_info_endpoint_api_admin_iceberg_info_get",
+        "operationId": "storage_info_endpoint_api_admin_storage_info_get",
         "parameters": [
           {
             "name": "table_name",
@@ -35639,7 +35639,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/IcebergTableInfoResponse"
+                  "$ref": "#/components/schemas/StorageTableInfoResponse"
                 }
               }
             }
@@ -35737,14 +35737,14 @@
         }
       }
     },
-    "/api/admin/iceberg-calendar": {
+    "/api/admin/storage-calendar": {
       "get": {
         "tags": [
           "admin"
         ],
-        "summary": "Iceberg Calendar Endpoint",
+        "summary": "Storage Calendar Endpoint",
         "description": "Return per-date data file counts from DuckLake file metadata.",
-        "operationId": "iceberg_calendar_endpoint_api_admin_iceberg_calendar_get",
+        "operationId": "storage_calendar_endpoint_api_admin_storage_calendar_get",
         "parameters": [
           {
             "name": "table_name",
@@ -35832,7 +35832,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/IcebergCalendarResponse"
+                  "$ref": "#/components/schemas/StorageCalendarResponse"
                 }
               }
             }
@@ -35935,9 +35935,9 @@
         "tags": [
           "admin"
         ],
-        "summary": "Iceberg Commit Endpoint",
+        "summary": "Storage Commit Endpoint",
         "description": "Manually flush the local buffer to the DuckLake table.\n\nReturns 202 Accepted \u2014 the commit runs asynchronously in a worker\nthread and the response body carries a ``run_id`` the caller can\npoll for completion. 200 (the prior status) misled clients that\ntreated it as \"done\".",
-        "operationId": "iceberg_commit_endpoint_api_admin_commit__service_id__post",
+        "operationId": "storage_commit_endpoint_api_admin_commit__service_id__post",
         "parameters": [
           {
             "name": "service_id",
@@ -36124,14 +36124,14 @@
         }
       }
     },
-    "/api/admin/commit-iceberg": {
+    "/api/admin/commit-storage": {
       "post": {
         "tags": [
           "admin"
         ],
-        "summary": "Iceberg Commit Endpoint",
+        "summary": "Storage Commit Endpoint",
         "description": "Manually flush the local buffer to the DuckLake table.\n\nReturns 202 Accepted \u2014 the commit runs asynchronously in a worker\nthread and the response body carries a ``run_id`` the caller can\npoll for completion. 200 (the prior status) misled clients that\ntreated it as \"done\".",
-        "operationId": "iceberg_commit_endpoint_api_admin_commit_iceberg_post",
+        "operationId": "storage_commit_endpoint_api_admin_commit_storage_post",
         "parameters": [
           {
             "name": "service_id",
@@ -39599,13 +39599,13 @@
         }
       }
     },
-    "/api/admin/iceberg-tree": {
+    "/api/admin/storage-tree": {
       "get": {
         "tags": [
           "admin"
         ],
-        "summary": "Iceberg Tree Endpoint",
-        "operationId": "iceberg_tree_endpoint_api_admin_iceberg_tree_get",
+        "summary": "Storage Tree Endpoint",
+        "operationId": "storage_tree_endpoint_api_admin_storage_tree_get",
         "parameters": [
           {
             "name": "prefix",
@@ -64342,164 +64342,6 @@
           "total_bytes"
         ],
         "title": "IOOpportunityRow"
-      },
-      "IcebergCalendarDay": {
-        "properties": {
-          "data_files": {
-            "type": "integer",
-            "title": "Data Files"
-          },
-          "size_bytes": {
-            "type": "integer",
-            "title": "Size Bytes"
-          }
-        },
-        "additionalProperties": true,
-        "type": "object",
-        "required": [
-          "data_files",
-          "size_bytes"
-        ],
-        "title": "IcebergCalendarDay"
-      },
-      "IcebergCalendarResponse": {
-        "properties": {},
-        "additionalProperties": {
-          "anyOf": [
-            {
-              "$ref": "#/components/schemas/IcebergCalendarDay"
-            },
-            {
-              "items": {},
-              "type": "array"
-            }
-          ]
-        },
-        "type": "object",
-        "title": "IcebergCalendarResponse"
-      },
-      "IcebergTableInfoResponse": {
-        "properties": {
-          "table_name": {
-            "type": "string",
-            "title": "Table Name"
-          },
-          "table_location": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Table Location"
-          },
-          "snapshots": {
-            "type": "integer",
-            "title": "Snapshots"
-          },
-          "data_files": {
-            "type": "integer",
-            "title": "Data Files"
-          },
-          "size_bytes": {
-            "type": "integer",
-            "title": "Size Bytes"
-          },
-          "latest_snapshot_at": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Latest Snapshot At"
-          },
-          "buffer_files": {
-            "type": "integer",
-            "title": "Buffer Files",
-            "default": 0
-          },
-          "buffer_size_bytes": {
-            "type": "integer",
-            "title": "Buffer Size Bytes",
-            "default": 0
-          },
-          "region": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Region"
-          },
-          "_debug_queries": {
-            "items": {
-              "$ref": "#/components/schemas/DebugQuery"
-            },
-            "type": "array",
-            "title": "Debug Queries"
-          },
-          "_debug_calls": {
-            "items": {
-              "$ref": "#/components/schemas/DebugCall"
-            },
-            "type": "array",
-            "title": "Debug Calls"
-          },
-          "_debug_sqlite": {
-            "items": {
-              "additionalProperties": true,
-              "type": "object"
-            },
-            "type": "array",
-            "title": "Debug Sqlite"
-          },
-          "_debug_postgres": {
-            "items": {
-              "additionalProperties": true,
-              "type": "object"
-            },
-            "type": "array",
-            "title": "Debug Postgres"
-          },
-          "_is_cached": {
-            "type": "boolean",
-            "title": "Is Cached",
-            "default": false
-          },
-          "_response_cache": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/ResponseCacheObservation"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "_section_timings": {
-            "items": {
-              "$ref": "#/components/schemas/SectionTimingEntry"
-            },
-            "type": "array",
-            "title": "Section Timings"
-          }
-        },
-        "type": "object",
-        "required": [
-          "table_name",
-          "snapshots",
-          "data_files",
-          "size_bytes"
-        ],
-        "title": "IcebergTableInfoResponse"
       },
       "ImageOptimizationOpportunitiesInsightCard": {
         "properties": {
@@ -91936,6 +91778,164 @@
         "additionalProperties": true,
         "type": "object",
         "title": "StandardIngestSummary"
+      },
+      "StorageCalendarDay": {
+        "properties": {
+          "data_files": {
+            "type": "integer",
+            "title": "Data Files"
+          },
+          "size_bytes": {
+            "type": "integer",
+            "title": "Size Bytes"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "data_files",
+          "size_bytes"
+        ],
+        "title": "StorageCalendarDay"
+      },
+      "StorageCalendarResponse": {
+        "properties": {},
+        "additionalProperties": {
+          "anyOf": [
+            {
+              "$ref": "#/components/schemas/StorageCalendarDay"
+            },
+            {
+              "items": {},
+              "type": "array"
+            }
+          ]
+        },
+        "type": "object",
+        "title": "StorageCalendarResponse"
+      },
+      "StorageTableInfoResponse": {
+        "properties": {
+          "table_name": {
+            "type": "string",
+            "title": "Table Name"
+          },
+          "table_location": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Table Location"
+          },
+          "snapshots": {
+            "type": "integer",
+            "title": "Snapshots"
+          },
+          "data_files": {
+            "type": "integer",
+            "title": "Data Files"
+          },
+          "size_bytes": {
+            "type": "integer",
+            "title": "Size Bytes"
+          },
+          "latest_snapshot_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latest Snapshot At"
+          },
+          "buffer_files": {
+            "type": "integer",
+            "title": "Buffer Files",
+            "default": 0
+          },
+          "buffer_size_bytes": {
+            "type": "integer",
+            "title": "Buffer Size Bytes",
+            "default": 0
+          },
+          "region": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Region"
+          },
+          "_debug_queries": {
+            "items": {
+              "$ref": "#/components/schemas/DebugQuery"
+            },
+            "type": "array",
+            "title": "Debug Queries"
+          },
+          "_debug_calls": {
+            "items": {
+              "$ref": "#/components/schemas/DebugCall"
+            },
+            "type": "array",
+            "title": "Debug Calls"
+          },
+          "_debug_sqlite": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Sqlite"
+          },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
+          },
+          "_is_cached": {
+            "type": "boolean",
+            "title": "Is Cached",
+            "default": false
+          },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "_section_timings": {
+            "items": {
+              "$ref": "#/components/schemas/SectionTimingEntry"
+            },
+            "type": "array",
+            "title": "Section Timings"
+          }
+        },
+        "type": "object",
+        "required": [
+          "table_name",
+          "snapshots",
+          "data_files",
+          "size_bytes"
+        ],
+        "title": "StorageTableInfoResponse"
       },
       "StreamMetrics": {
         "properties": {

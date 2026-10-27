@@ -63,7 +63,7 @@ function _seedSyntheticLogs(sandbox: string, configsDir: string, repoRoot: strin
 
 async function poll(url: string, timeoutMs = 180_000): Promise<void> {
   // Default 180s: the playwright config webServer timeout is 120s for the
-  // FRONTEND, but the BACKEND boot cost (DuckDB init + httpfs load + Iceberg
+  // FRONTEND, but the BACKEND boot cost (DuckDB init + httpfs load + DuckLake
   // catalog open + every router import) is the lion's share of cold-start.
   // The prior 60s default failed on slow CI runners with the misleading
   // 'backend never returned 200' before the frontend even got a chance to
@@ -122,8 +122,8 @@ function _seedDefaultServiceConfig(configsDir: string): void {
     // writes them here). With both present, GET /api/usage/current-storage
     // uses them instead of falling back to a live FOS ListObjectsV2 scan
     // against the mock bucket, which only logged `FOS Scan failed ... 400`
-    // on every /usage page load. The sandbox has no committed Iceberg data.
-    status: { iceberg_bytes: 0, iceberg_files: 0 },
+    // on every /usage page load. The sandbox has no committed DuckLake data.
+    status: { storage_bytes: 0, storage_files: 0 },
     log_fields: {
       schema_version: 2,
       preset: 'recommended',

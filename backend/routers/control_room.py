@@ -1606,7 +1606,7 @@ def usage_current_storage(
 
         # Prefer the cached metadata path: get_table_info reads manifest
         # summaries (with multi-layer local caching) instead of doing a
-        # paginated FOS LIST on iceberg/. The undercount vs LIST is just
+        # paginated FOS LIST on ducklake/. The undercount vs LIST is just
         # metadata-file bytes (manifests/snapshots, typically <1% of total),
         # and trading that for ~5s of cloud LIST per panel open is correct
         # per the standing "be a little behind the data rather than read
@@ -1615,44 +1615,44 @@ def usage_current_storage(
         cache_key = (src.get("name"), src.get("bucket"), src.get("prefix"))
         cached_insp = _STORAGE_INSPECTION_CACHE.get(cache_key)
         if cached_insp is not None:
-            iceberg_bytes, iceberg_files, quarantine_bytes, rum_bytes = cached_insp
+            storage_bytes, storage_files, quarantine_bytes, rum_bytes = cached_insp
         else:
-            iceberg_bytes = 0
-            iceberg_files = 0
-            iceberg_info_success = False
+            storage_bytes = 0
+            storage_files = 0
+            storage_info_success = False
             # First try the cron-written cached values in svcconfig.status —
             # the heavy refresh_config_status tick already populated these,
             # so this endpoint stays sub-50 ms even on a cold-cache process.
             cached_status = svcconfig.get_status(src["name"]) or {}
-            cached_ib = cached_status.get("iceberg_bytes")
-            cached_if = cached_status.get("iceberg_files")
+            cached_ib = cached_status.get("storage_bytes")
+            cached_if = cached_status.get("storage_files")
             if cached_ib is not None and cached_if is not None:
-                iceberg_bytes = int(cached_ib)
-                iceberg_files = int(cached_if)
-                iceberg_info_success = True
+                storage_bytes = int(cached_ib)
+                storage_files = int(cached_if)
+                storage_info_success = True
             else:
                 try:
                     from backend.core import storage as db_storage
 
-                    iceberg_info = db_storage.get_table_info(src)
-                    if not iceberg_info.get("error"):
-                        iceberg_bytes = iceberg_info.get("size_bytes", 0)
-                        iceberg_files = iceberg_info.get("data_files", 0)
-                        iceberg_info_success = True
+                    storage_info = db_storage.get_table_info(src)
+                    if not storage_info.get("error"):
+                        storage_bytes = storage_info.get("size_bytes", 0)
+                        storage_files = storage_info.get("data_files", 0)
+                        storage_info_success = True
                 except Exception:
                     logger.debug("usage_current_storage: step failed (ignored)", exc_info=True)
 
-            if not iceberg_info_success:
+            if not storage_info_success:
                 try:
                     s3 = _get_fos_client(src)
                     bucket = src["bucket"]
                     prefix = f"{src.get('prefix', '').strip().rstrip('/')}/" if src.get("prefix") else ""
-                    iceberg_prefix = f"{prefix}iceberg/"
+                    storage_prefix = f"{prefix}ducklake/"
                     paginator = s3.get_paginator("list_objects_v2")
-                    for page in paginator.paginate(Bucket=bucket, Prefix=iceberg_prefix.rstrip("/")):
+                    for page in paginator.paginate(Bucket=bucket, Prefix=storage_prefix.rstrip("/")):
                         for obj in page.get("Contents", []):
-                            iceberg_bytes += obj.get("Size", 0)
-                            iceberg_files += 1
+                            storage_bytes += obj.get("Size", 0)
+                            storage_files += 1
                 except Exception as e:
                     import logging
 
@@ -1681,8 +1681,8 @@ def usage_current_storage(
                 logger.debug("usage_current_storage: step failed (ignored)", exc_info=True)
 
             _STORAGE_INSPECTION_CACHE[cache_key] = (
-                iceberg_bytes,
-                iceberg_files,
+                storage_bytes,
+                storage_files,
                 quarantine_bytes,
                 rum_bytes,
             )
@@ -1690,17 +1690,17 @@ def usage_current_storage(
         regular_log_bytes = total_bytes - rum_bytes
 
         if delete_after:
-            live_bytes = iceberg_bytes + quarantine_bytes
-            live_files = iceberg_files
+            live_bytes = storage_bytes + quarantine_bytes
+            live_files = storage_files
             deleted_bytes = total_bytes
             deleted_files = total_files
         else:
-            live_bytes = total_bytes + iceberg_bytes + quarantine_bytes
-            live_files = total_files + iceberg_files
+            live_bytes = total_bytes + storage_bytes + quarantine_bytes
+            live_files = total_files + storage_files
             deleted_bytes = 0
             deleted_files = 0
 
-        billed_bytes = total_bytes + iceberg_bytes + quarantine_bytes
+        billed_bytes = total_bytes + storage_bytes + quarantine_bytes
         # GB-hours using the 720-hour (30-day) basis so the frontend can divide by 720
         # to get GB-months cost. This correctly applies the 30-day minimum billing
         # floor: files deleted in < 30 days are still billed for their full minimum period.

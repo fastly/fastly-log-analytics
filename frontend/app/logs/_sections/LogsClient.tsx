@@ -244,8 +244,8 @@ export function useLogsPageState(initialTab?: string) {
     // completion (+ a 60s staleTime safety net). Switching to them serves
     // instantly from cache instead of spinning on every visit.
     //
-    // iceberg / raw have no stream coverage, so keep refreshing on entry.
-    if (value === 'iceberg') { queryClient.invalidateQueries({ queryKey: queryKeys.admin.iceberg(activeServiceId) }); queryClient.invalidateQueries({ queryKey: queryKeys.admin.icebergTree(activeServiceId) }) }
+    // storage / raw have no stream coverage, so keep refreshing on entry.
+    if (value === 'storage') { queryClient.invalidateQueries({ queryKey: queryKeys.admin.storage(activeServiceId) }); queryClient.invalidateQueries({ queryKey: queryKeys.admin.storageTree(activeServiceId) }) }
     else if (value === 'raw') queryClient.invalidateQueries({ queryKey: queryKeys.admin.rawTree(activeServiceId) })
   }, [activeServiceId, queryClient, setActiveTab])
   return {
@@ -276,7 +276,7 @@ export const CRON_EXPLANATIONS: Record<string, string> = {
   gap_heal: 'Reconciles Fastly\'s authoritative log-line emission counts against ingested rows every 30 min. On sustained loss (>=2 consecutive hourly buckets >=5% gap), triggers a full_sweep — throttled to one heal per 4h.',
   alerts: 'Evaluates recent logs against configured alert thresholds.',
   commit: 'Finalizes ingested data: compacts small lake files, reports how many files the ingest workers landed since the last tick, and deletes raw .gz files whose rows are durably committed (when delete_after is on).',
-  optimize: 'Compacts small Iceberg data files into larger ones (writes back to FOS — incurs 30-day-minimum cost on rewritten files).',
+  optimize: 'Compacts small DuckLake data files into larger ones (writes back to FOS — incurs 30-day-minimum cost on rewritten files).',
   local_compact: 'Merges small parquet files in the LOCAL CACHE every 2 min. Free vs FOS — speeds up dashboard scans without touching the cloud manifest.',
   expire_snapshots: 'Removes old snapshots and orphaned files to reclaim storage.',
   ngwaf_sync: 'Fetches verified bot records from Fastly NGWAF and caches them locally for enriched bot detection.',
@@ -877,7 +877,7 @@ export function QuickActionsBar({ status, activeServiceId, recentCrons, cronLogs
   setDisplayedJobs: React.Dispatch<React.SetStateAction<CronRun[]>>; setSelectedConsoleJobId: (id: number | string | null) => void; setConsoleOpen: (open: boolean) => void
 }) {
   const queryClient = useQueryClient()
-  const triggerCronAction = async (endpoint: '/api/admin/ingest-logs' | '/api/admin/commit-iceberg', title: string, description: string) => {
+  const triggerCronAction = async (endpoint: '/api/admin/ingest-logs' | '/api/admin/commit-storage', title: string, description: string) => {
     try {
       const data = (await unwrapClient(client.POST(endpoint, {}))) as { run_id?: number | string } | undefined
       if (!data?.run_id) { showToast('No run id returned'); return }
@@ -890,7 +890,7 @@ export function QuickActionsBar({ status, activeServiceId, recentCrons, cronLogs
       <>
           <Button size="sm" variant="default" className="h-8 text-xs bg-primary text-primary-foreground hover:bg-primary/90" onClick={() => triggerCronAction('/api/admin/ingest-logs', 'Importing Logs', 'Downloading new raw logs from Fastly Object Storage and processing them...')}><RefreshCw className="h-3 w-3 mr-1.5" /> Import Logs</Button>
           <Button size="sm" variant="outline" className="h-8 text-xs bg-background" onClick={() => setIsSyncModalOpen(true)} title="Open the range-picker to backfill a specific historical window (e.g., to close an Ingest Gap)"><Download className="h-3 w-3 mr-1.5" /> Backfill Logs</Button>
-          <Button size="sm" variant="outline" className="h-8 text-xs bg-background" onClick={() => triggerCronAction('/api/admin/commit-iceberg', 'Committing Buffer', 'Flushing local Parquet buffer to the shared Iceberg table in Object Storage...')}><Archive className="h-3 w-3 mr-1.5" /> Commit Buffer</Button>
+          <Button size="sm" variant="outline" className="h-8 text-xs bg-background" onClick={() => triggerCronAction('/api/admin/commit-storage', 'Committing Buffer', 'Flushing local Parquet buffer to the shared DuckLake table...')}><Archive className="h-3 w-3 mr-1.5" /> Commit Buffer</Button>
       </>
       {status?.ngwaf_workspace_id && (
         <Button size="sm" variant="outline" className="h-8 text-xs bg-background" onClick={() => {
@@ -906,7 +906,7 @@ export function QuickActionsBar({ status, activeServiceId, recentCrons, cronLogs
     </div>
   )
 }
-interface TreeProps { prefix: string; level: number; type: 'iceberg' | 'raw'; forceExpand?: boolean }
+interface TreeProps { prefix: string; level: number; type: 'storage' | 'raw'; forceExpand?: boolean }
 function Node({ node, prefix, level, type, forceExpand }: TreeProps & { node: TreeNode }) {
   const [isOpen, setIsOpen] = useState(false)
   const { full, abbr, relative } = useDateFormat()
@@ -958,7 +958,7 @@ function Tree({ prefix, level, type, forceExpand }: TreeProps) {
   const activeServiceId = useServiceStore(s => s.activeServiceId)
   const { data, isLoading, error } = useQuery({
     queryKey: queryKeys.admin.fileTree(type, activeServiceId, prefix),
-    queryFn: () => { const init = { params: { query: { prefix: prefix || undefined } } }; return type === 'iceberg' ? unwrapClient(client.GET("/api/admin/iceberg-tree", init)) : unwrapClient(client.GET("/api/admin/raw-tree", init)) },
+    queryFn: () => { const init = { params: { query: { prefix: prefix || undefined } } }; return type === 'storage' ? unwrapClient(client.GET("/api/admin/storage-tree", init)) : unwrapClient(client.GET("/api/admin/raw-tree", init)) },
     enabled: !!activeServiceId,
   })
   if (isLoading) return <div className="flex items-center gap-2 py-2 text-sm text-muted-foreground animate-pulse" style={{ paddingLeft: `${level * 16 + 28}px` }}><Loader2 className="h-3 w-3 animate-spin" /> Loading...</div>
@@ -966,7 +966,7 @@ function Tree({ prefix, level, type, forceExpand }: TreeProps) {
   if (data.nodes.length === 0) return <div className="py-2 text-xs text-muted-foreground italic" style={{ paddingLeft: `${level * 16 + 32}px` }}>Empty directory</div>
   return <div className="flex flex-col">{data.nodes.map((node: TreeNode) => <Node key={node.name} node={node} prefix={prefix} level={level} type={type} forceExpand={forceExpand} />)}</div>
 }
-export function FileBrowser({ type }: { type: 'iceberg' | 'raw' }) {
+export function FileBrowser({ type }: { type: 'storage' | 'raw' }) {
   const [forceExpand, setForceExpand] = useState<boolean | undefined>(undefined)
   const queryClient = useQueryClient()
   const [isRefreshing, setIsRefreshing] = useState(false)
@@ -975,7 +975,7 @@ export function FileBrowser({ type }: { type: 'iceberg' | 'raw' }) {
   return (
     <div className="flex flex-col font-sans h-full relative">
       <div className="flex items-center justify-between px-4 py-2 border-b bg-muted/5 sticky top-0 z-10 backdrop-blur-sm">
-        <span className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest">{type === 'iceberg' ? 'Iceberg Data Lake' : 'Raw Archives'}</span>
+        <span className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest">{type === 'storage' ? 'DuckLake Data' : 'Raw Archives'}</span>
         <div className="flex items-center gap-2">
           <Button variant="outline" size="sm" className="h-7 w-7 p-0 font-semibold shadow-none border-muted/60 bg-background" onClick={handleRefresh} title="Refresh file list"><RefreshCw className={cn("h-3.5 w-3.5", isRefreshing && "animate-spin")} /></Button>
           <Button variant="outline" size="sm" className="h-7 text-[10px] px-2 font-semibold shadow-none border-muted/60 bg-background" onClick={() => setForceExpand(prev => prev === undefined ? true : !prev)}>
@@ -987,14 +987,14 @@ export function FileBrowser({ type }: { type: 'iceberg' | 'raw' }) {
     </div>
   )
 }
-const IcebergStatus = dynamic(() => import('@/components/SessionScoring/StatusPanel').then(m => m.IcebergStatus), { ssr: false })
-const IcebergCalendar = dynamic(() => import('@/components/SessionScoring/StatusPanel').then(m => m.IcebergCalendar), { ssr: false })
+const StorageStatus = dynamic(() => import('@/components/SessionScoring/StatusPanel').then(m => m.StorageStatus), { ssr: false })
+const StorageCalendar = dynamic(() => import('@/components/SessionScoring/StatusPanel').then(m => m.StorageCalendar), { ssr: false })
 const MetadataStorageCard = dynamic(() => import('@/components/SessionScoring/StatusPanel').then(m => m.MetadataStorageCard), { ssr: false })
 const LOG_TABS = [
   { value: 'cron', label: 'Cron Runs', icon: History },
   { value: 'service_history', label: 'Service History', icon: ClipboardList },
   { value: 'ingestion', label: 'Ingestion History', icon: Database },
-  { value: 'iceberg', label: 'DuckLake Storage', icon: Archive },
+  { value: 'storage', label: 'DuckLake Storage', icon: Archive },
   { value: 'metadata_storage', label: 'Metadata Storage', icon: HardDrive },
   { value: 'raw', label: 'Available Logs', icon: FileCode },
   { value: 'schema', label: 'DuckDB Schema', icon: FileCode },
@@ -1018,8 +1018,8 @@ export default function LogsClient({ initialTab }: { initialTab?: string } = {})
         <TabsContent value="cron" className="mt-4 border rounded-lg overflow-hidden bg-card"><CronTab cronColumns={cronColumns} cronLogs={s.cronLogs} isLoadingCron={s.isLoadingCron} isFetchingCron={s.isFetchingCron} orderedSchedules={s.orderedSchedules} isLoadingSchedule={s.isLoadingSchedule} taskFilter={s.taskFilter} setTaskFilter={s.setTaskFilter} statusFilter={s.statusFilter} setStatusFilter={s.setStatusFilter} status={s.status} activeServiceId={s.activeServiceId} setDisplayedJobs={s.setDisplayedJobs} setSelectedConsoleJobId={s.setSelectedConsoleJobId} setConsoleOpen={s.setConsoleOpen} isPurgeOpen={s.isPurgeOpen} setIsPurgeOpen={s.setIsPurgeOpen} purgeMutation={s.purgeMutation} /></TabsContent>
         <TabsContent value="service_history" className="mt-4 border rounded-lg overflow-hidden bg-card"><ServiceHistoryTab auditColumns={auditColumns} auditLogs={s.auditLogs} isLoadingAudit={s.isLoadingAudit} isFetchingAudit={s.isFetchingAudit} eventFilter={s.eventFilter} setEventFilter={s.setEventFilter} activeServiceId={s.activeServiceId} /></TabsContent>
         <TabsContent value="ingestion" className="mt-4 border rounded-lg overflow-hidden bg-card"><IngestionTab ingestedColumns={ingestedFilesColumns} ingestedFiles={s.ingestedFiles} isLoadingIngested={s.isLoadingIngested} /></TabsContent>
-        <TabsContent value="iceberg" className="mt-4 space-y-4">
-          {s.activeTab === 'iceberg' && <><IcebergStatus /><IcebergCalendar /><div className="border rounded-lg overflow-hidden bg-card"><div className="p-4 border-b"><h3 className="text-sm font-medium">Iceberg Data Lake Layout</h3><p className="text-xs text-muted-foreground mt-1">Direct view into the Iceberg metadata and data files in Object Storage.</p></div><FileBrowser type="iceberg" /></div></>}
+        <TabsContent value="storage" className="mt-4 space-y-4">
+          {s.activeTab === 'storage' && <><StorageStatus /><StorageCalendar /><div className="border rounded-lg overflow-hidden bg-card"><div className="p-4 border-b"><h3 className="text-sm font-medium">DuckLake Data Layout</h3><p className="text-xs text-muted-foreground mt-1">Direct view of the DuckLake Parquet data files (the local data directory in Standard, Object Storage in High-Scale).</p></div><FileBrowser type="storage" /></div></>}
         </TabsContent>
         <TabsContent value="metadata_storage" className="mt-4 space-y-4">{s.activeTab === 'metadata_storage' && <MetadataStorageCard />}</TabsContent>
         <TabsContent value="raw" className="mt-4 border rounded-lg overflow-hidden bg-card">{s.activeTab === 'raw' && <><div className="p-4 border-b"><h3 className="text-sm font-medium">Available Logs</h3><p className="text-xs text-muted-foreground mt-1">Raw .gz files delivered by Fastly waiting to be processed.</p></div><FileBrowser type="raw" /></>}</TabsContent>

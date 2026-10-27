@@ -323,21 +323,21 @@ describe('makeCronRunsApplier', () => {
     expect(invalidatedKeys(spy)).not.toContain(JSON.stringify(['last-sync', 'svc-1']))
   })
 
-  it('invalidates [admin, iceberg] only when an iceberg-mutating task COMPLETES', () => {
+  it('invalidates [admin, storage] only when a storage-mutating task COMPLETES', () => {
     const { spy, applier } = setupCronApplier()
-    applier.apply({ task: 'optimize_iceberg', status: 'running' })
+    applier.apply({ task: 'optimize', status: 'running' })
     vi.advanceTimersByTime(100)
-    expect(invalidatedKeys(spy)).not.toContain(JSON.stringify(['admin', 'iceberg']))
+    expect(invalidatedKeys(spy)).not.toContain(JSON.stringify(['admin', 'storage']))
 
     spy.mockClear()
     applier.apply({ task: 'gap_heal', status: 'success' })
     vi.advanceTimersByTime(100)
-    expect(invalidatedKeys(spy)).not.toContain(JSON.stringify(['admin', 'iceberg']))
+    expect(invalidatedKeys(spy)).not.toContain(JSON.stringify(['admin', 'storage']))
 
     spy.mockClear()
-    applier.apply({ task: 'optimize_iceberg', status: 'success' })
+    applier.apply({ task: 'optimize', status: 'success' })
     vi.advanceTimersByTime(100)
-    expect(invalidatedKeys(spy)).toContain(JSON.stringify(['admin', 'iceberg']))
+    expect(invalidatedKeys(spy)).toContain(JSON.stringify(['admin', 'storage']))
   })
 
   it('invalidates audit/ingested on complete, schema only for data-mutating tasks', () => {

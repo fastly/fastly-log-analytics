@@ -18,7 +18,6 @@ from backend.models.admin import (
     CompactionStatsResponse,
     ConsolidateRollupsResponse,
     ExpireSnapshotsResponse,
-    IcebergTableInfoResponse,
     LocalCompactNowResponse,
     MetadataRetentionResponse,
     MetadataRetentionUpdate,
@@ -34,14 +33,15 @@ from backend.models.admin import (
     RollupCompactResponse,
     RollupHealResponse,
     RollupStatusResponse,
+    StorageTableInfoResponse,
     SyncStartResponse,
 )
 from backend.models.admin_actions import (
     BotSourceRefreshResponse,
     BotSourcesRefreshResponse,
-    IcebergCalendarResponse,
     NgwafSyncResponse,
     RdnsEnrichResponse,
+    StorageCalendarResponse,
 )
 from backend.models.admin_status import NgwafStatusResponse, RdnsStatsResponse
 from backend.utils.date_utils import parse_day_key_strict, parse_hour_key_strict
@@ -901,9 +901,9 @@ def get_rdns_stats_endpoint():
 # ── Storage admin endpoints ──────────────────
 
 
-@router.get("/admin/iceberg-info", response_model=IcebergTableInfoResponse)
+@router.get("/admin/storage-info", response_model=StorageTableInfoResponse)
 @query_errors(status_code=500)
-def iceberg_info_endpoint(
+def storage_info_endpoint(
     table_name: Literal["logs", "client_vitals", "client_errors"] = "logs",
     source: dict = Depends(get_source),
 ):
@@ -911,12 +911,12 @@ def iceberg_info_endpoint(
     from backend.core import storage as db_storage
 
     result = db_storage.get_table_info(source, table_name=table_name)
-    return IcebergTableInfoResponse.with_telemetry(**result)
+    return StorageTableInfoResponse.with_telemetry(**result)
 
 
-@router.get("/admin/iceberg-calendar", response_model=IcebergCalendarResponse, response_model_exclude_unset=True)
+@router.get("/admin/storage-calendar", response_model=StorageCalendarResponse, response_model_exclude_unset=True)
 @query_errors(status_code=500)
-def iceberg_calendar_endpoint(
+def storage_calendar_endpoint(
     table_name: Literal["logs", "client_vitals", "client_errors"] = "logs",
     source: dict = Depends(get_source),
 ):
@@ -929,7 +929,7 @@ def iceberg_calendar_endpoint(
 
 
 @router.post(
-    "/admin/commit-iceberg",
+    "/admin/commit-storage",
     status_code=202,
     response_model=SyncStartResponse,
     response_model_exclude_unset=True,
@@ -940,7 +940,7 @@ def iceberg_calendar_endpoint(
     response_model=SyncStartResponse,
     response_model_exclude_unset=True,
 )
-def iceberg_commit_endpoint(
+def storage_commit_endpoint(
     service_id: str | None = None,
     _admin: None = Depends(require_admin),
     source: dict = Depends(get_source),
@@ -1484,15 +1484,15 @@ def raw_tree_endpoint(
     return resp
 
 
-@router.get("/admin/iceberg-tree", response_model=TreeResponse)
-def iceberg_tree_endpoint(
+@router.get("/admin/storage-tree", response_model=TreeResponse)
+def storage_tree_endpoint(
     source: dict[str, Any] = Depends(get_source),
     prefix: str = Query(default=""),
 ) -> TreeResponse:
     from backend.core import duckdb as _db_mod
 
     _db: Any = _db_mod
-    result = _db.get_raw_tree_node(source, prefix, root="iceberg")
+    result = _db.get_storage_tree_node(source, prefix)
     resp: TreeResponse = TreeResponse.with_telemetry(nodes=result.get("children", []))
     return resp
 

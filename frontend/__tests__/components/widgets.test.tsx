@@ -1275,7 +1275,7 @@ describe('FilterBar, ActiveFiltersBanner, AddFilterDialogContent & FilterValueCe
       expect(p({ queryKey: ['last-sync', 'svc'] })).toBe(false)
       expect(p({ queryKey: ['admin', 'health-snapshot'] })).toBe(false)
       expect(p({ queryKey: ['admin', 'overview', 'queries-summary'] })).toBe(false)
-      expect(p({ queryKey: ['admin', 'iceberg', 'svc'] })).toBe(false)
+      expect(p({ queryKey: ['admin', 'storage', 'svc'] })).toBe(false)
       expect(p({ queryKey: ['admin', 'share', 'live'] })).toBe(false)
       expect(p({ queryKey: ['system-jobs'] })).toBe(false)
       expect(p({ queryKey: ['alerts', 'svc'] })).toBe(false)

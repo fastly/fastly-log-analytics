@@ -540,6 +540,34 @@ def test_clear_source_caches_and_refresh_config_status():
     assert captured.get("read_only") is True and captured.get("skip_view_update") is True
 
 
+def test_get_storage_tree_node_lists_the_local_data_dir_and_rejects_traversal(tmp_path, monkeypatch):
+    from backend import config as svcconfig
+
+    lake = tmp_path / "svc" / "ducklake" / "main" / "logs_svc"
+    lake.mkdir(parents=True)
+    (lake / "a.parquet").write_bytes(b"12345")
+    (tmp_path / "svc" / "ducklake" / "top.txt").write_bytes(b"xy")
+    monkeypatch.setattr(svcconfig, "SERVICES_DATA_DIR", tmp_path)
+    monkeypatch.setattr(svcconfig, "DUCKLAKE_DATA_PATH", None)
+    src = {"service_id": "svc", "name": "svc"}
+
+    top = d.get_storage_tree_node(src)["children"]
+    assert [(c["name"], c["type"]) for c in top] == [("main", "directory"), ("top.txt", "file")]
+    assert top[0]["size"] == 5 and top[0]["prefix"] == "main"
+    inner = d.get_storage_tree_node(src, "main/logs_svc")["children"]
+    assert [(c["name"], c["size"]) for c in inner] == [("a.parquet", 5)]
+    assert d.get_storage_tree_node(src, "../../..") == {"children": []}
+
+
+def test_get_storage_tree_node_uses_the_fos_ducklake_prefix_for_remote_data(monkeypatch):
+    with (
+        patch("backend.core.storage._core._resolve_data_path", return_value="s3://bkt/pfx/ducklake/"),
+        patch.object(d, "get_raw_tree_node", return_value={"children": []}) as raw,
+    ):
+        assert d.get_storage_tree_node({"service_id": "svc", "name": "svc"}, "main") == {"children": []}
+    raw.assert_called_once_with({"service_id": "svc", "name": "svc"}, "main", root="ducklake")
+
+
 def test_get_raw_tree_node():
     assert get_raw_tree_node({"name": "fresh"}) == {"children": []}
 
@@ -1240,13 +1268,13 @@ def test_refresh_config_status_swallow_and_error_branches():
         refresh_config_status("svc")
     assert "status" in captured and "buffer_size_bytes" not in captured["status"]
 
-    # Iceberg error envelope skips iceberg_bytes/iceberg_files
+    # Storage error envelope skips storage_bytes/storage_files
     captured.clear()
     with _refresh_ctx(
         captured, **{"backend.core.storage.get_table_info": {"return_value": {"error": "catalog unreachable"}}}
     ):
         refresh_config_status("svc")
-    assert "iceberg_bytes" not in captured["status"] and "iceberg_files" not in captured["status"]
+    assert "storage_bytes" not in captured["status"] and "storage_files" not in captured["status"]
 
 
 def test_refresh_config_status_happy_path_and_rum_persisted(tmp_path):
@@ -1269,7 +1297,7 @@ def test_refresh_config_status_happy_path_and_rum_persisted(tmp_path):
 
     st = captured["status"]
     assert st["buffer_size_bytes"] == 17
-    assert (st["iceberg_bytes"], st["iceberg_files"], st["edge_ratio"]) == (12345, 7, 0.42)
+    assert (st["storage_bytes"], st["storage_files"], st["edge_ratio"]) == (12345, 7, 0.42)
     assert st["schema"] == [{"name": "ip", "type": "VARCHAR"}]
 
     # Persisted RUM freshness (real sub-hour timestamp) surfaced without live lake scan

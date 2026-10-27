@@ -1097,7 +1097,7 @@ _ADMIN_SITES = [
     ("GET", "/api/provision/check-domain?prefix=abc", None),
     ("POST", "/api/provision/check-fos", {"bucket": "b", "region": "us-east-1", "access_key": "a", "secret_key": "s"}),
     ("GET", "/api/audit-logs", None),
-    ("GET", "/api/admin/iceberg-calendar", None),
+    ("GET", "/api/admin/storage-calendar", None),
     ("GET", f"/api/services/{_SVC}/log-fields", None),
 ]
 

@@ -1415,7 +1415,7 @@ def test_refresh_pop_locations_returns_refreshed_pops(client):
     assert len(pops) == 1 and pops[0]["code"] == "iad-va-us" and pops[0]["latitude"] == 38.94
 
 
-# ── POST /admin/ingest-logs, /admin/sync/{service_id}, /admin/commit-iceberg ──
+# ── POST /admin/ingest-logs, /admin/sync/{service_id}, /admin/commit-storage ──
 
 
 @pytest.mark.parametrize(
@@ -1429,13 +1429,13 @@ def test_refresh_pop_locations_returns_refreshed_pops(client):
             200,
             "backend.cron.jobs.sync._run_log_discovery_cron",
         ),
-        ("/api/admin/commit-iceberg", "commit-run-789", "commit", 202, "backend.cron.jobs.commit._run_commit"),
+        ("/api/admin/commit-storage", "commit-run-789", "commit", 202, "backend.cron.jobs.commit._run_commit"),
     ],
 )
 def test_background_task_endpoints_start_job(
     client, endpoint: str, run_id: str, expected_task: str, expected_status: int, target_patch: str
 ):
-    """Read-write ingest, per-service sync, and commit-iceberg start background cron tasks and return run_id."""
+    """Read-write ingest, per-service sync, and commit-storage start background cron tasks and return run_id."""
     started = {}
 
     def fake_start_cron_run(src, task):
@@ -1474,7 +1474,7 @@ def test_sync_service_endpoint_rejects_analyst_session_with_403(client):
     ("endpoint", "exc"),
     [
         ("/api/admin/ingest-logs", CronLeaseHeldError("commit already running")),
-        ("/api/admin/commit-iceberg", RuntimeError("locked")),
+        ("/api/admin/commit-storage", RuntimeError("locked")),
     ],
 )
 def test_background_task_endpoints_503_when_busy_and_no_active_run(client, endpoint: str, exc: Exception):
@@ -1491,7 +1491,7 @@ def test_background_task_endpoints_503_when_busy_and_no_active_run(client, endpo
     ("endpoint", "task", "existing_id", "expected_status"),
     [
         ("/api/admin/ingest-logs", "log_discovery", "existing-run-id", 200),
-        ("/api/admin/commit-iceberg", "commit", "existing-commit", 202),
+        ("/api/admin/commit-storage", "commit", "existing-commit", 202),
     ],
 )
 def test_background_task_endpoints_return_existing_run_when_already_running(
@@ -1512,28 +1512,28 @@ def test_background_task_endpoints_return_existing_run_when_already_running(
         assert "already running" in resp.json()["message"].lower()
 
 
-# ── GET /admin/raw-tree, /admin/iceberg-tree ───────────────────────────────
+# ── GET /admin/raw-tree, /admin/storage-tree ───────────────────────────────
 
 
 @pytest.mark.parametrize(
-    ("endpoint", "expected_root", "child_name", "child_size"),
+    ("endpoint", "patched", "child_name", "child_size"),
     [
-        ("/api/admin/raw-tree", "raw", "2026-01-01", 12345),
-        ("/api/admin/iceberg-tree", "iceberg", "metadata", 0),
+        ("/api/admin/raw-tree", "get_raw_tree_node", "2026-01-01", 12345),
+        ("/api/admin/storage-tree", "get_storage_tree_node", "metadata", 0),
     ],
 )
-def test_tree_endpoints_pass_correct_root_and_return_children(
-    client, endpoint: str, expected_root: str, child_name: str, child_size: int
+def test_tree_endpoints_use_their_tree_function_and_return_children(
+    client, endpoint: str, patched: str, child_name: str, child_size: int
 ):
-    """Raw and storage tree endpoints pass their respective ``root`` and return ``nodes``."""
+    """Raw and storage tree endpoints call their own listing function and return ``nodes``."""
     fake_result = {"children": [{"name": child_name, "size": child_size, "type": "directory"}]}
-    with patch("backend.core.duckdb.get_raw_tree_node", return_value=fake_result) as mock_get:
+    with patch(f"backend.core.duckdb.{patched}", return_value=fake_result) as mock_get:
         resp = client.get(endpoint, headers=SVC_HEADERS)
 
     assert resp.status_code == 200
     nodes = resp.json()["nodes"]
     assert len(nodes) == 1 and nodes[0]["name"] == child_name
-    assert mock_get.call_args[1].get("root") == expected_root
+    mock_get.assert_called_once()
 
 
 def test_raw_tree_returns_empty_when_no_children_key(client):

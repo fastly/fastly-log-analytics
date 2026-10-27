@@ -90,10 +90,10 @@ export function applyShare(qc: QueryClient, data: unknown): void {
 }
 
 const INVALIDATION_COALESCE_MS = 100
-const ICEBERG_MUTATING_TASKS = new Set(['commit', 'optimize', 'optimize_iceberg', 'expire_snapshots', 'metadata_cleanup'])
+const STORAGE_MUTATING_TASKS = new Set(['commit', 'optimize', 'expire_snapshots', 'metadata_cleanup'])
 const SCHEMA_AFFECTING_TASKS = new Set(['sync', 'log_discovery', 'full_sync', 'commit'])
 
-type InvalidationKey = 'table' | 'recent' | 'last-sync' | 'iceberg' | 'schedule' | 'audit' | 'ingested' | 'schema'
+type InvalidationKey = 'table' | 'recent' | 'last-sync' | 'storage' | 'schedule' | 'audit' | 'ingested' | 'schema'
 
 export interface CronRunsApplier {
   apply: (data: unknown) => void
@@ -112,7 +112,7 @@ export function makeCronRunsApplier(qc: QueryClient, serviceId: string | null): 
     if (due.has('table')) qc.invalidateQueries({ queryKey: queryKeys.admin.cronLogsFor(serviceId) }, opts)
     if (due.has('recent')) qc.invalidateQueries({ queryKey: queryKeys.admin.cronLogsRecent(serviceId) }, opts)
     if (due.has('last-sync')) qc.invalidateQueries({ queryKey: queryKeys.lastSync(serviceId) }, opts)
-    if (due.has('iceberg')) qc.invalidateQueries({ queryKey: queryKeys.admin.icebergAll() }, opts)
+    if (due.has('storage')) qc.invalidateQueries({ queryKey: queryKeys.admin.storageAll() }, opts)
     if (due.has('schedule')) qc.invalidateQueries({ queryKey: queryKeys.admin.cronSchedule(serviceId) }, opts)
     if (due.has('audit')) qc.invalidateQueries({ queryKey: queryKeys.admin.auditLogsFor(serviceId) }, opts)
     if (due.has('ingested')) qc.invalidateQueries({ queryKey: queryKeys.admin.ingestedFiles(serviceId) }, opts)
@@ -145,7 +145,7 @@ export function makeCronRunsApplier(qc: QueryClient, serviceId: string | null): 
         schedule('last-sync')
       }
     }
-    if (completed && payload.task && ICEBERG_MUTATING_TASKS.has(payload.task)) schedule('iceberg')
+    if (completed && payload.task && STORAGE_MUTATING_TASKS.has(payload.task)) schedule('storage')
     if (completed) {
       schedule('audit')
       schedule('ingested')
@@ -165,7 +165,7 @@ export function cronCacheBust(queryClient: QueryClient, _serviceId?: string | nu
   const keys = [
     queryKeys.admin.cronLogsAll(),
     queryKeys.admin.cronLogsRecentAll(),
-    queryKeys.admin.icebergAll(),
+    queryKeys.admin.storageAll(),
     queryKeys.admin.schemaAll(),
     queryKeys.lastSyncAll(),
     queryKeys.logExtentsAll(),

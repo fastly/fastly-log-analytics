@@ -148,7 +148,7 @@ export function LogSyncSection({
         <div className="flex items-center justify-between">
           <div className="space-y-0.5 pr-4">
             <Label className="text-[11px] font-semibold cursor-pointer" htmlFor="auto-delete">Auto-delete Raw .gz Logs</Label>
-            <p className="text-[10px] text-muted-foreground leading-tight">Saves FOS storage by removing raw logs once they are ingested into Iceberg.</p>
+            <p className="text-[10px] text-muted-foreground leading-tight">Saves FOS storage by removing raw logs once they are ingested into DuckLake.</p>
           </div>
           <Switch id="auto-delete" checked={deleteAfter} onCheckedChange={setDeleteAfter} />
         </div>
@@ -159,7 +159,7 @@ export function LogSyncSection({
               {rumEnabled ? 'Request Log Retention' : 'Cloud Data Retention'}
             </Label>
             <p className="text-[10px] text-muted-foreground leading-tight h-6">
-              Delete CDN request log data from Iceberg older than this.
+              Delete CDN request log data from DuckLake older than this.
             </p>
             <RetentionSelect id="data-retention" value={dataRetention} onValueChange={setDataRetention} />
           </div>
@@ -168,7 +168,7 @@ export function LogSyncSection({
             <div className="grid gap-1.5">
               <Label htmlFor="rum-retention" className="text-[11px] font-medium">RUM Data Retention</Label>
               <p className="text-[10px] text-muted-foreground leading-tight h-6">
-                Delete RUM beacon telemetry from Iceberg older than this.
+                Delete RUM beacon telemetry from DuckLake older than this.
               </p>
               <RetentionSelect id="rum-retention" value={rumRetention} onValueChange={setRumRetention} />
             </div>
@@ -205,7 +205,7 @@ export function LogSyncSection({
               <Label htmlFor="commit-interval" className="text-[11px] font-semibold">Cloud Commit Interval</Label>
             </div>
             <p className="text-[10px] text-muted-foreground leading-tight">
-              How often the local buffer is pushed to Iceberg. Cannot be shorter than sync frequency ({syncFreqLabel}).
+              How often the local buffer is pushed to DuckLake. Cannot be shorter than sync frequency ({syncFreqLabel}).
             </p>
             <Select
               value={commitInterval}
@@ -362,7 +362,7 @@ export function NgwafSection({
   )
 }
 
-interface IcebergOptimizationSectionProps {
+interface StorageOptimizationSectionProps {
   compactEnabled: boolean
   setCompactEnabled: (v: boolean) => void
   compactLogEnabled: boolean
@@ -371,18 +371,18 @@ interface IcebergOptimizationSectionProps {
   setCompactRetention: (v: string) => void
 }
 
-export function IcebergOptimizationSection({
+export function StorageOptimizationSection({
   compactEnabled,
   setCompactEnabled,
   compactLogEnabled,
   setCompactLogEnabled,
   compactRetention,
   setCompactRetention,
-}: IcebergOptimizationSectionProps) {
+}: StorageOptimizationSectionProps) {
   return (
     <div className="space-y-3">
       <div>
-        <h3 className="text-sm font-bold uppercase tracking-widest text-foreground/80">Iceberg Optimization</h3>
+        <h3 className="text-sm font-bold uppercase tracking-widest text-foreground/80">DuckLake Optimization</h3>
         <p className="text-[10px] text-muted-foreground">Nightly FOS-side housekeeping to keep cloud storage costs down. (Dashboard query speed is handled separately by always-on local compaction.)</p>
       </div>
 
@@ -390,7 +390,7 @@ export function IcebergOptimizationSection({
         <div className="space-y-0.5 pr-4">
           <Label className="text-xs font-semibold cursor-pointer" htmlFor="enable-compact">Enable Daily Optimization</Label>
           <p className="text-[10px] text-muted-foreground leading-tight">
-            Rewrites many small Iceberg snapshot files into larger, optimized Parquet files at 04:00 UTC.
+            Rewrites many small DuckLake snapshot files into larger, optimized Parquet files at 04:00 UTC.
             Strongly recommended when using frequent commit intervals.
           </p>
         </div>
@@ -624,7 +624,7 @@ function CronSettingsModalBody({ service, open, onOpenChange }: CronSettingsModa
             />
           )}
 
-          <IcebergOptimizationSection
+          <StorageOptimizationSection
             compactEnabled={compactEnabled}
             setCompactEnabled={bind('compactEnabled')}
             compactLogEnabled={compactLogEnabled}

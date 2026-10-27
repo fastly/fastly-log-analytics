@@ -14,7 +14,7 @@
   compact/finalize already committed ledger data in High-Scale mode.
 - **Schedule:** `provisioning.cron_sync.commit_interval_mins`, default 5 minutes,
   minimum 1 minute.
-- **Manual trigger:** `POST /api/admin/commit-iceberg`. Returns `202 Accepted`
+- **Manual trigger:** `POST /api/admin/commit-storage`. Returns `202 Accepted`
   with a `run_id`; the commit runs asynchronously.
 
 The current job ID is `commit_{service_id}`. The older `log_commit_` label is
@@ -100,7 +100,7 @@ The job does not directly transition claimed rows into committed state.
 
 | Caller | Commit behavior |
 |---|---|
-| **Admin (`read_write`)** | Background commits are enabled by configuration. An admin can trigger `POST /api/admin/commit-iceberg`; the response is `202 Accepted` with a pollable run ID. |
+| **Admin (`read_write`)** | Background commits are enabled by configuration. An admin can trigger `POST /api/admin/commit-storage`; the response is `202 Accepted` with a pollable run ID. |
 | **Analyst (live shared instance)** | Read-only analytics only. Admin commit endpoints remain blocked over the analyst share surface. |
 
 ## 7. Telemetry and status

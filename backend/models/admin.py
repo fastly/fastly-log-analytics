@@ -364,7 +364,7 @@ class SystemJobsResponse(BaseResponse):
     jobs: list[SystemJobStatus]
 
 
-class IcebergTableInfo(BaseModel):
+class StorageTableInfo(BaseModel):
     table_name: str
     table_location: str | None = None
     snapshots: int
@@ -376,7 +376,7 @@ class IcebergTableInfo(BaseModel):
     region: str | None = None
 
 
-class IcebergTableInfoResponse(BaseResponse, IcebergTableInfo):
+class StorageTableInfoResponse(BaseResponse, StorageTableInfo):
     pass
 
 

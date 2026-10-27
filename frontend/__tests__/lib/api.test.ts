@@ -440,15 +440,15 @@ describe('queryKeys.admin shapes', () => {
     ['ingestedFiles', k.ingestedFiles('s'), ['admin', 'ingested-files', 's']],
     ['schema', k.schema('s'), ['admin', 'schema', 's']],
     ['schemaAll', k.schemaAll(), ['admin', 'schema']],
-    ['iceberg', k.iceberg('s'), ['admin', 'iceberg', 's']],
-    ['icebergAll', k.icebergAll(), ['admin', 'iceberg']],
-    ['icebergCalendar', k.icebergCalendar('s'), ['admin', 'iceberg', 'calendar', 's']],
-    ['icebergInfo', k.icebergInfo('s'), ['admin', 'iceberg-info', 's']],
-    ['icebergTree', k.icebergTree('s'), ['admin', 'iceberg-tree', 's']],
+    ['storage', k.storage('s'), ['admin', 'storage', 's']],
+    ['storageAll', k.storageAll(), ['admin', 'storage']],
+    ['storageCalendar', k.storageCalendar('s'), ['admin', 'storage', 'calendar', 's']],
+    ['storageInfo', k.storageInfo('s'), ['admin', 'storage-info', 's']],
+    ['storageTree', k.storageTree('s'), ['admin', 'storage-tree', 's']],
     ['rawTree', k.rawTree('s'), ['admin', 'raw-tree', 's']],
-    ['fileTree iceberg', k.fileTree('iceberg', 's', 'p/'), ['admin', 'iceberg-tree', 's', 'p/']],
+    ['fileTree storage', k.fileTree('storage', 's', 'p/'), ['admin', 'storage-tree', 's', 'p/']],
     ['fileTree raw', k.fileTree('raw', 's', 'p/'), ['admin', 'raw-tree', 's', 'p/']],
-    ['fileTreeFor iceberg', k.fileTreeFor('iceberg', 's'), ['admin', 'iceberg-tree', 's']],
+    ['fileTreeFor storage', k.fileTreeFor('storage', 's'), ['admin', 'storage-tree', 's']],
     ['fileTreeFor raw', k.fileTreeFor('raw', 's'), ['admin', 'raw-tree', 's']],
   ]
 
@@ -460,15 +460,15 @@ describe('queryKeys.admin shapes', () => {
     const qc = createTestQueryClient()
     qc.setQueryData(k.cronLogs('s', 'all', 'all'), 1)
     qc.setQueryData(k.cronLogs('other', 'all', 'all'), 2)
-    qc.setQueryData(k.icebergCalendar('s'), 3)
+    qc.setQueryData(k.storageCalendar('s'), 3)
     qc.setQueryData(k.queryMonitorSnapshot(false), 4)
 
     qc.invalidateQueries({ queryKey: k.cronLogsFor('s') })
     expect(qc.getQueryState(k.cronLogs('s', 'all', 'all'))?.isInvalidated).toBe(true)
     expect(qc.getQueryState(k.cronLogs('other', 'all', 'all'))?.isInvalidated).toBe(false)
 
-    qc.invalidateQueries({ queryKey: k.icebergAll() })
-    expect(qc.getQueryState(k.icebergCalendar('s'))?.isInvalidated).toBe(true)
+    qc.invalidateQueries({ queryKey: k.storageAll() })
+    expect(qc.getQueryState(k.storageCalendar('s'))?.isInvalidated).toBe(true)
 
     qc.invalidateQueries({ queryKey: k.queryMonitorSnapshotAll() })
     expect(qc.getQueryState(k.queryMonitorSnapshot(false))?.isInvalidated).toBe(true)

@@ -203,7 +203,7 @@ def main() -> int:
         # baseline section, no schema bump.
         "scale_key": scale_key,
         "scenarios": {
-            "cold_path_36M_1h_iceberg_committed_p95_ms": cold_p95,
+            "cold_path_36M_1h_committed_p95_ms": cold_p95,
             "warm_path_36M_1h_p50_ms": warm_p50,
         },
     }

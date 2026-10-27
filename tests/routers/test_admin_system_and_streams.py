@@ -304,13 +304,13 @@ def test_log_extents_endpoint_variants(client):
             lambda b: len(b["files"]) == 1 and b["files"][0]["file_name"] == "log-001.gz",
         ),
         (
-            "/api/admin/iceberg-info",
+            "/api/admin/storage-info",
             "backend.core.storage.get_table_info",
             {"table_name": "logs_test_service", "snapshots": 7, "data_files": 42, "size_bytes": 52428800},
             lambda b: b["data_files"] == 42 and b["snapshots"] == 7,
         ),
         (
-            "/api/admin/iceberg-calendar",
+            "/api/admin/storage-calendar",
             "backend.core.storage.get_snapshot_calendar",
             {"2026-01-01": {"data_files": 12, "size_bytes": 4096}},
             lambda b: b["2026-01-01"]["data_files"] == 12 and "_debug_calls" in b,
@@ -685,7 +685,7 @@ def test_analyst_path_b_rejected_with_403_on_admin_overview_routes():
     assert exc.value.status_code == 403
 
 
-def test_iceberg_info_calendar_and_commit_endpoints(overview_client, override_source):
+def test_storage_info_calendar_and_commit_endpoints(overview_client, override_source):
     fake_info = {
         "table_name": "logs",
         "table_location": "s3://bucket/prefix/ducklake",
@@ -697,18 +697,18 @@ def test_iceberg_info_calendar_and_commit_endpoints(overview_client, override_so
         "buffer_size_bytes": 512,
     }
     with patch("backend.core.storage.get_table_info", return_value=fake_info) as mock_get:
-        r_info = overview_client.get("/api/admin/iceberg-info?table_name=logs")
+        r_info = overview_client.get("/api/admin/storage-info?table_name=logs")
         assert r_info.status_code == 200 and r_info.json()["size_bytes"] == 1024
         mock_get.assert_called_once_with(override_source, table_name="logs")
 
     fake_cal = {"2026-08-19": {"data_files": 5, "size_bytes": 1024}}
     with patch("backend.core.storage.get_snapshot_calendar", return_value=fake_cal) as mock_cal:
-        r_cal = overview_client.get("/api/admin/iceberg-calendar?table_name=logs")
+        r_cal = overview_client.get("/api/admin/storage-calendar?table_name=logs")
         assert r_cal.status_code == 200 and r_cal.json()["2026-08-19"] == {"data_files": 5, "size_bytes": 1024}
         mock_cal.assert_called_once_with(override_source, table_name="logs")
 
     with patch("backend.utils.router_utils.start_or_resume_cron", return_value={"ok": True}) as mock_start:
-        assert overview_client.post("/api/admin/commit-iceberg").status_code == 202 and mock_start.called
+        assert overview_client.post("/api/admin/commit-storage").status_code == 202 and mock_start.called
 
 
 @pytest.mark.parametrize(

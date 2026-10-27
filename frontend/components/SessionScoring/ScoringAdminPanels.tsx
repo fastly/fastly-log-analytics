@@ -1927,15 +1927,15 @@ function BucketRow({ bucket }: { bucket: components['schemas']['ScoringPerReason
 }
 
 // =============================================================================
-// 2. DuckLake / Iceberg Status & 90-Day Storage Distribution Calendar
+// 2. DuckLake / DuckLake Status & 90-Day Storage Distribution Calendar
 // =============================================================================
 
-export function IcebergStatus() {
+export function StorageStatus() {
   const activeServiceId = useServiceStore((s) => s.activeServiceId)
   const { full, abbr } = useDateFormat()
   const { data: info, isLoading, error } = useQuery({
-    queryKey: queryKeys.admin.iceberg(activeServiceId),
-    queryFn: async () => unwrapClient(client.GET('/api/admin/iceberg-info')),
+    queryKey: queryKeys.admin.storage(activeServiceId),
+    queryFn: async () => unwrapClient(client.GET('/api/admin/storage-info')),
     enabled: !!activeServiceId, staleTime: 60_000, refetchInterval: 5 * 60_000, refetchIntervalInBackground: false,
   })
   if (!activeServiceId) return null
@@ -2006,11 +2006,11 @@ export function IcebergStatus() {
   )
 }
 
-export function IcebergCalendar() {
+export function StorageCalendar() {
   const activeServiceId = useServiceStore((s) => s.activeServiceId)
   const { data: calendar, isLoading } = useQuery({
-    queryKey: queryKeys.admin.icebergCalendar(activeServiceId),
-    queryFn: async () => unwrapClient(client.GET('/api/admin/iceberg-calendar')),
+    queryKey: queryKeys.admin.storageCalendar(activeServiceId),
+    queryFn: async () => unwrapClient(client.GET('/api/admin/storage-calendar')),
     enabled: !!activeServiceId, staleTime: 60_000, refetchInterval: 5 * 60_000, refetchIntervalInBackground: false,
   })
   const days = React.useMemo(() => {

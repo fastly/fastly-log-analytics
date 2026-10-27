@@ -702,16 +702,16 @@ export const queryKeys = {
     schema: (serviceId: string | null | undefined) => ['admin', 'schema', serviceId] as const,
     schemaAll: () => ['admin', 'schema'] as const,
 
-    iceberg: (serviceId: string | null | undefined) => ['admin', 'iceberg', serviceId] as const,
-    icebergAll: () => ['admin', 'iceberg'] as const,
-    icebergCalendar: (serviceId: string | null | undefined) => ['admin', 'iceberg', 'calendar', serviceId] as const,
-    icebergInfo: (serviceId: string | null | undefined) => ['admin', 'iceberg-info', serviceId] as const,
-    icebergTree: (serviceId: string | null | undefined) => ['admin', 'iceberg-tree', serviceId] as const,
+    storage: (serviceId: string | null | undefined) => ['admin', 'storage', serviceId] as const,
+    storageAll: () => ['admin', 'storage'] as const,
+    storageCalendar: (serviceId: string | null | undefined) => ['admin', 'storage', 'calendar', serviceId] as const,
+    storageInfo: (serviceId: string | null | undefined) => ['admin', 'storage-info', serviceId] as const,
+    storageTree: (serviceId: string | null | undefined) => ['admin', 'storage-tree', serviceId] as const,
     rawTree: (serviceId: string | null | undefined) => ['admin', 'raw-tree', serviceId] as const,
-    fileTree: (type: 'iceberg' | 'raw', serviceId: string | null | undefined, prefix: string) =>
-      ['admin', type === 'iceberg' ? 'iceberg-tree' : 'raw-tree', serviceId, prefix] as const,
-    fileTreeFor: (type: 'iceberg' | 'raw', serviceId: string | null | undefined) =>
-      ['admin', type === 'iceberg' ? 'iceberg-tree' : 'raw-tree', serviceId] as const,
+    fileTree: (type: 'storage' | 'raw', serviceId: string | null | undefined, prefix: string) =>
+      ['admin', type === 'storage' ? 'storage-tree' : 'raw-tree', serviceId, prefix] as const,
+    fileTreeFor: (type: 'storage' | 'raw', serviceId: string | null | undefined) =>
+      ['admin', type === 'storage' ? 'storage-tree' : 'raw-tree', serviceId] as const,
     clickhouseStatus: (serviceId: string | null | undefined) =>
       ['admin', 'clickhouse', 'status', serviceId] as const,
   },

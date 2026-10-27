@@ -3863,7 +3863,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/admin/iceberg-info": {
+    "/api/admin/storage-info": {
         parameters: {
             query?: never;
             header?: never;
@@ -3871,10 +3871,10 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Iceberg Info Endpoint
+         * Storage Info Endpoint
          * @description Return DuckLake table metadata: snapshots, data files, size, buffer status.
          */
-        get: operations["iceberg_info_endpoint_api_admin_iceberg_info_get"];
+        get: operations["storage_info_endpoint_api_admin_storage_info_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -3883,7 +3883,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/admin/iceberg-calendar": {
+    "/api/admin/storage-calendar": {
         parameters: {
             query?: never;
             header?: never;
@@ -3891,10 +3891,10 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Iceberg Calendar Endpoint
+         * Storage Calendar Endpoint
          * @description Return per-date data file counts from DuckLake file metadata.
          */
-        get: operations["iceberg_calendar_endpoint_api_admin_iceberg_calendar_get"];
+        get: operations["storage_calendar_endpoint_api_admin_storage_calendar_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -3913,7 +3913,7 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Iceberg Commit Endpoint
+         * Storage Commit Endpoint
          * @description Manually flush the local buffer to the DuckLake table.
          *
          *     Returns 202 Accepted — the commit runs asynchronously in a worker
@@ -3921,14 +3921,14 @@ export interface paths {
          *     poll for completion. 200 (the prior status) misled clients that
          *     treated it as "done".
          */
-        post: operations["iceberg_commit_endpoint_api_admin_commit__service_id__post"];
+        post: operations["storage_commit_endpoint_api_admin_commit__service_id__post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/api/admin/commit-iceberg": {
+    "/api/admin/commit-storage": {
         parameters: {
             query?: never;
             header?: never;
@@ -3938,7 +3938,7 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Iceberg Commit Endpoint
+         * Storage Commit Endpoint
          * @description Manually flush the local buffer to the DuckLake table.
          *
          *     Returns 202 Accepted — the commit runs asynchronously in a worker
@@ -3946,7 +3946,7 @@ export interface paths {
          *     poll for completion. 200 (the prior status) misled clients that
          *     treated it as "done".
          */
-        post: operations["iceberg_commit_endpoint_api_admin_commit_iceberg_post"];
+        post: operations["storage_commit_endpoint_api_admin_commit_storage_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -4276,15 +4276,15 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/admin/iceberg-tree": {
+    "/api/admin/storage-tree": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /** Iceberg Tree Endpoint */
-        get: operations["iceberg_tree_endpoint_api_admin_iceberg_tree_get"];
+        /** Storage Tree Endpoint */
+        get: operations["storage_tree_endpoint_api_admin_storage_tree_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -10191,66 +10191,6 @@ export interface components {
             avg_kb?: number | null;
         } & {
             [key: string]: unknown;
-        };
-        /** IcebergCalendarDay */
-        IcebergCalendarDay: {
-            /** Data Files */
-            data_files: number;
-            /** Size Bytes */
-            size_bytes: number;
-        } & {
-            [key: string]: unknown;
-        };
-        /** IcebergCalendarResponse */
-        IcebergCalendarResponse: {
-            [key: string]: components["schemas"]["IcebergCalendarDay"] | unknown[];
-        };
-        /** IcebergTableInfoResponse */
-        IcebergTableInfoResponse: {
-            /** Table Name */
-            table_name: string;
-            /** Table Location */
-            table_location?: string | null;
-            /** Snapshots */
-            snapshots: number;
-            /** Data Files */
-            data_files: number;
-            /** Size Bytes */
-            size_bytes: number;
-            /** Latest Snapshot At */
-            latest_snapshot_at?: string | null;
-            /**
-             * Buffer Files
-             * @default 0
-             */
-            buffer_files: number;
-            /**
-             * Buffer Size Bytes
-             * @default 0
-             */
-            buffer_size_bytes: number;
-            /** Region */
-            region?: string | null;
-            /** Debug Queries */
-            _debug_queries?: components["schemas"]["DebugQuery"][];
-            /** Debug Calls */
-            _debug_calls?: components["schemas"]["DebugCall"][];
-            /** Debug Sqlite */
-            _debug_sqlite?: {
-                [key: string]: unknown;
-            }[];
-            /** Debug Postgres */
-            _debug_postgres?: {
-                [key: string]: unknown;
-            }[];
-            /**
-             * Is Cached
-             * @default false
-             */
-            _is_cached: boolean;
-            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
-            /** Section Timings */
-            _section_timings?: components["schemas"]["SectionTimingEntry"][];
         };
         /** ImageOptimizationOpportunitiesInsightCard */
         ImageOptimizationOpportunitiesInsightCard: {
@@ -19289,6 +19229,66 @@ export interface components {
             quarantined_items: number;
         } & {
             [key: string]: unknown;
+        };
+        /** StorageCalendarDay */
+        StorageCalendarDay: {
+            /** Data Files */
+            data_files: number;
+            /** Size Bytes */
+            size_bytes: number;
+        } & {
+            [key: string]: unknown;
+        };
+        /** StorageCalendarResponse */
+        StorageCalendarResponse: {
+            [key: string]: components["schemas"]["StorageCalendarDay"] | unknown[];
+        };
+        /** StorageTableInfoResponse */
+        StorageTableInfoResponse: {
+            /** Table Name */
+            table_name: string;
+            /** Table Location */
+            table_location?: string | null;
+            /** Snapshots */
+            snapshots: number;
+            /** Data Files */
+            data_files: number;
+            /** Size Bytes */
+            size_bytes: number;
+            /** Latest Snapshot At */
+            latest_snapshot_at?: string | null;
+            /**
+             * Buffer Files
+             * @default 0
+             */
+            buffer_files: number;
+            /**
+             * Buffer Size Bytes
+             * @default 0
+             */
+            buffer_size_bytes: number;
+            /** Region */
+            region?: string | null;
+            /** Debug Queries */
+            _debug_queries?: components["schemas"]["DebugQuery"][];
+            /** Debug Calls */
+            _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
+            /**
+             * Is Cached
+             * @default false
+             */
+            _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
+            /** Section Timings */
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
         };
         /** StreamMetrics */
         StreamMetrics: {
@@ -42907,7 +42907,7 @@ export interface operations {
             };
         };
     };
-    iceberg_info_endpoint_api_admin_iceberg_info_get: {
+    storage_info_endpoint_api_admin_storage_info_get: {
         parameters: {
             query?: {
                 table_name?: "logs" | "client_vitals" | "client_errors";
@@ -42929,7 +42929,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["IcebergTableInfoResponse"];
+                    "application/json": components["schemas"]["StorageTableInfoResponse"];
                 };
             };
             /** @description Bad request */
@@ -43015,7 +43015,7 @@ export interface operations {
             };
         };
     };
-    iceberg_calendar_endpoint_api_admin_iceberg_calendar_get: {
+    storage_calendar_endpoint_api_admin_storage_calendar_get: {
         parameters: {
             query?: {
                 table_name?: "logs" | "client_vitals" | "client_errors";
@@ -43037,7 +43037,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["IcebergCalendarResponse"];
+                    "application/json": components["schemas"]["StorageCalendarResponse"];
                 };
             };
             /** @description Bad request */
@@ -43123,7 +43123,7 @@ export interface operations {
             };
         };
     };
-    iceberg_commit_endpoint_api_admin_commit__service_id__post: {
+    storage_commit_endpoint_api_admin_commit__service_id__post: {
         parameters: {
             query?: {
                 service?: string | null;
@@ -43232,7 +43232,7 @@ export interface operations {
             };
         };
     };
-    iceberg_commit_endpoint_api_admin_commit_iceberg_post: {
+    storage_commit_endpoint_api_admin_commit_storage_post: {
         parameters: {
             query?: {
                 service_id?: string | null;
@@ -45199,7 +45199,7 @@ export interface operations {
             };
         };
     };
-    iceberg_tree_endpoint_api_admin_iceberg_tree_get: {
+    storage_tree_endpoint_api_admin_storage_tree_get: {
         parameters: {
             query?: {
                 prefix?: string;
