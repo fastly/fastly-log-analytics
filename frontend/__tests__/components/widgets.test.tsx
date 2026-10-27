@@ -221,7 +221,7 @@ vi.mock('@/lib/utils', async (importOriginal) => ({
   }),
 }))
 vi.mock('@/components/SSEModal', () => ({ ControlledSSEModal: () => null, SSEModal: () => null, SSEProgressView: () => null, SSEExecutionSection: () => null, SSEDialogFooter: () => null }))
-vi.mock('@/components/SyncStatusBadge/SyncStatusBadge', async (importOriginal) => ({ ...(await importOriginal<typeof import('@/components/SyncStatusBadge/SyncStatusBadge')>()), SyncFromCloudModal: () => null }))
+vi.mock('@/components/SyncStatusBadge/SyncStatusBadge', async (importOriginal) => ({ ...(await importOriginal<typeof import('@/components/SyncStatusBadge/SyncStatusBadge')>()), BackfillRangeModal: () => null }))
 vi.mock('@/components/ReportLayout', async (importOriginal) => ({ ...(await importOriginal<typeof import('@/components/ReportLayout')>()), NoServiceSelected: () => null }))
 
 import { DeltaIndicator } from '@/components/Insights/InsightCard'
@@ -388,6 +388,38 @@ describe('TimeAgo', () => {
     expect(render(<TimeAgo timestamp={null} />).container.textContent).toBe('')
     render(<TimeAgo timestamp={undefined} fallback={<span>Never</span>} />)
     expect(screen.getByText('Never')).toBeInTheDocument()
+  })
+})
+
+describe('BackfillRangeModal', () => {
+  async function renderModal() {
+    const { BackfillRangeModal } = await vi.importActual<typeof import('@/components/SyncStatusBadge/SyncStatusBadge')>('@/components/SyncStatusBadge/SyncStatusBadge')
+    useTimezoneStore.setState({ mode: 'manual', timezone: 'UTC' })
+    const onStartSync = vi.fn(), onOpenChange = vi.fn()
+    render(<BackfillRangeModal open onOpenChange={onOpenChange} onStartSync={onStartSync} />)
+    return { onStartSync, onOpenChange }
+  }
+
+  test('start is disabled until both times are set and start precedes end', async () => {
+    await renderModal()
+    const start = screen.getByLabelText(/start time/i), end = screen.getByLabelText(/end time/i)
+    const button = screen.getByRole('button', { name: /start backfill/i })
+    expect(button).toBeDisabled()
+    fireEvent.change(start, { target: { value: '2026-01-02T00:00:00' } })
+    expect(button).toBeDisabled()
+    fireEvent.change(end, { target: { value: '2026-01-01T00:00:00' } })
+    expect(button).toBeDisabled()
+    fireEvent.change(end, { target: { value: '2026-01-03T00:00:00' } })
+    expect(button).toBeEnabled()
+  })
+
+  test('starting passes the chosen range and closes the dialog', async () => {
+    const { onStartSync, onOpenChange } = await renderModal()
+    fireEvent.change(screen.getByLabelText(/start time/i), { target: { value: '2026-01-01T00:00:00' } })
+    fireEvent.change(screen.getByLabelText(/end time/i), { target: { value: '2026-01-02T00:00:00' } })
+    await userEvent.click(screen.getByRole('button', { name: /start backfill/i }))
+    expect(onStartSync).toHaveBeenCalledWith({ start: '2026-01-01T00:00:00.000Z', end: '2026-01-02T00:00:00.000Z' })
+    expect(onOpenChange).toHaveBeenCalledWith(false)
   })
 })
 
@@ -875,7 +907,7 @@ describe('CronLiveLog, LogSyncSection & LogsClient', () => {
 
   test('LogsClient mounts in cron mode, QuickActionsBar handles failures, and partial_hour_merge is registered', async () => {
     useServiceStore.setState({ activeServiceId: 'test-svc' })
-    mocks.status.mockReturnValue({ data: { idle: true, access_level: 'read_write' } })
+    mocks.status.mockReturnValue({ data: { idle: true } })
     const { unmount } = renderWithQuery(<LogsClient initialTab="cron" />)
     expect(screen.getByText('Data Management')).toBeInTheDocument()
     expect(errorSpy).not.toHaveBeenCalled(); unmount()
@@ -885,7 +917,7 @@ describe('CronLiveLog, LogSyncSection & LogsClient', () => {
     const postSpy = vi.spyOn(client, 'POST'), start = vi.fn()
     renderWithQuery(
       <QuickActionsBar
-        isAnalyst={false} status={{ access_level: 'read_write' }} activeServiceId="svc" recentCrons={{}} cronLogs={{}}
+        status={{}} activeServiceId="svc" recentCrons={{}} cronLogs={{}}
         setSseTitle={vi.fn()} setSseDescription={vi.fn()} setIsSSEModalOpen={vi.fn()} setIsSyncModalOpen={vi.fn()}
         reset={vi.fn()} start={start} setDisplayedJobs={vi.fn()} setSelectedConsoleJobId={vi.fn()} setConsoleOpen={vi.fn()}
       />,

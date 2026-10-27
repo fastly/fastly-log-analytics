@@ -1,7 +1,9 @@
 # ADR-17 — Analyst Path A Under DuckLake (Open Gap)
 
-**Status:** Accepted — Path A is disabled for the scalable Celery topology pending a validated catalog export.
+**Status:** Withdrawn — Path A was removed in v3 (see below). Original status: Accepted — Path A is disabled for the scalable Celery topology pending a validated catalog export.
 **Decided by:** v3.0.0-beta1 scalability review, 2026-08-31/09-01
+
+> **Withdrawn.** Analyst Path A (the independent-instance analyst join) was removed entirely in v3, including `generate-viewer-key`, the wizard join mode, the `metadata_sync` cron job, and the read-only `access_level` service setting. It cannot work against DuckLake in any topology: Standard keeps parquet on the admin's local disk and the catalog in Postgres, so a read-only bucket credential reaches neither. Remote sharing (live shared instance) is the only analyst access model. The record below is kept as history.
 
 ## Context
 

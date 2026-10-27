@@ -7,13 +7,13 @@
 
 ## 1. Overview & Objectives
 
-The **Admin Overview** page (`/admin`) is the administrative mission control for Fastly Log Analytics. It surfaces real-time operational health (`OperationsOverview` 4-card status row: Live Queries, Ingest Gap, Notable Slow Queries, Workers & Queues), Fastly service lifecycle CRUD (`ServicesTable` with provisioning wizard, credentials editor, cron settings, log field settings, NGWAF bot telemetry config, RUM settings, Analyst Path A invite generator, data deletion, and teardown), host/process/DuckDB/PostgreSQL vitals (`SystemHealthCard`), quarantined ingest batches (`QuarantineSection`), global debug/usage settings (`GlobalSettings`), and FOS cost estimator pricing (`PricingSettings`).
+The **Admin Overview** page (`/admin`) is the administrative mission control for Fastly Log Analytics. It surfaces real-time operational health (`OperationsOverview` 4-card status row: Live Queries, Ingest Gap, Notable Slow Queries, Workers & Queues), Fastly service lifecycle CRUD (`ServicesTable` with provisioning wizard, credentials editor, cron settings, log field settings, NGWAF bot telemetry config, RUM settings, data deletion, and teardown), host/process/DuckDB/PostgreSQL vitals (`SystemHealthCard`), quarantined ingest batches (`QuarantineSection`), global debug/usage settings (`GlobalSettings`), and FOS cost estimator pricing (`PricingSettings`).
 
 ### Key Tenets:
 - **Operational Control:** Allows administrators to monitor ingestion health, detect sustained log-accounting gaps, inspect live query activity, and trigger background lifecycle pipelines (`sync`, `commit`, `compact`, `optimize`).
 - **Service Management:** Full CRUD management for configured Fastly services, FOS credentials, custom VCL field mappings, and DuckLake storage maintenance.
 - **Unified PostgreSQL Metadata (ADR-22):** Operational state (`cron_runs`, `ingested_files`, `slow_queries`, `usage_log`, `sources`) is backed exclusively by PostgreSQL 16 (`METADATA_DSN`), while analytical tables are managed via DuckLake (`DUCKLAKE_CATALOG`) in Standard mode and ClickHouse MergeTree in High-Scale mode.
-- **Strict RBAC:** Accessible **exclusively** to Admin (`read_write`) sessions. Analyst Path B (Remote Share) and Analyst Path A (`read_only` write routes) receive HTTP `403 Forbidden`.
+- **Strict RBAC:** Accessible **exclusively** to Admin sessions. Analysts (Remote Share) receive HTTP `403 Forbidden`.
 
 ---
 
@@ -29,8 +29,7 @@ The **Admin Overview** page (`/admin`) is the administrative mission control for
 | Role | Access Level | Data Redaction & Capabilities |
 |---|---|---|
 | **Admin (`read_write`)** | Full Control | Full access to `/admin`, service configurations, credentials rotation, manual cron triggers (`sync`, `commit`, `compact`, `optimize`), quarantine inspection, and system vitals. |
-| **Analyst Path B (Remote Share)** | Blocked (`403 Forbidden`) | Blocked by `RemoteAccessGuardMiddleware` (`403 admin_only`) on all `/api/admin/*` and `/api/services/*` mutation routes. UI hides all admin navigation links. |
-| **Analyst Path A (JSON Join)** | Read-Only Config (`403 Forbidden` on writes) | Cannot trigger manual ingest/commit/compact/optimize mutations (`403 Forbidden: Write operations not permitted for read-only service`). |
+| **Analyst (Remote Share)** | Blocked (`403 Forbidden`) | Blocked by `RemoteAccessGuardMiddleware` (`403 admin_only`) on all `/api/admin/*` and `/api/services/*` mutation routes. UI hides all admin navigation links. |
 
 ---
 
@@ -48,7 +47,7 @@ The **Admin Overview** page (`/admin`) is the administrative mission control for
 
 ### Endpoints Consumed / Exposed:
 1. `GET /api/admin/sync-status` & `GET /api/sync-status` (`SyncStatusResponse`):
-   - Returns service readiness (`has_service`, `has_duckdb`, `has_logs`), `access_level`, `log_period`, `commit_interval_mins`, `last_ingested`, `last_ingested_request_at`, `total_events`, and active cron status.
+   - Returns service readiness (`has_service`, `has_duckdb`, `has_logs`), `log_period`, `commit_interval_mins`, `last_ingested`, `last_ingested_request_at`, `total_events`, and active cron status.
 2. `GET /api/admin/system-metrics`, `GET /api/admin/health`, & `GET /api/admin/health-snapshot` (`HealthSnapshotResponse`):
    - Returns `captured_at`, `process` (RSS, CPU, threads, open FDs), `system` (memory, disk), `duckdb` pool stats, `metadata_db` table counts, and per-service storage breakdown.
 3. `GET /api/admin/compaction-status` & `GET /api/admin/compaction-status/{service_id}` (`CompactionStatusResponse`):
@@ -102,12 +101,12 @@ The **Admin Overview** page (`/admin`) is the administrative mission control for
 
 ## 9. AI Session Automated Verification Checklist
 
-- [x] **1. Route Accessibility:** `GET /admin` returns HTTP 200 for Admin; Analyst Path B receives HTTP 403 on `/api/admin/sync-status`.
+- [x] **1. Route Accessibility:** `GET /admin` returns HTTP 200 for Admin; Analyst receives HTTP 403 on `/api/admin/sync-status`.
 - [x] **2. Zero Layout Shift:** Page loads with pre-allocated `[contain-intrinsic-size:...]` containers and `CLS <= 0.05`.
 - [x] **3. Ingest & System Health Contracts:** `/api/admin/sync-status`, `/api/admin/system-metrics`, `/api/admin/health`, `/api/admin/compaction-status/{service_id}`, and `/api/admin/log-accounting/{service_id}` return typed Pydantic models.
 - [x] **4. Manual Triggers & Refresh:** Manual cron triggers (`/api/admin/{sync,commit,compact,optimize}/{service_id}`) return `202 Accepted` and the UI `Refresh Status` workflow re-fetches with `X-Page-Load-ID`.
 - [x] **5. Services CRUD:** Configured services render in `ServicesTable` with status badges and management actions.
-- [x] **6. Role Verification:** Analyst Path B and `read_only` service mutations receive HTTP `403 Forbidden`.
+- [x] **6. Role Verification:** Analyst mutations receive HTTP `403 Forbidden`.
 - [x] **7. Telemetry & Environment Indicator:** `ServerFooter` renders active environment indicator and all API fetches carry `X-Page-Load-ID`.
 
 ---

@@ -1160,7 +1160,7 @@ def health_check(
       - a ``sync`` row is stuck in ``running`` past ``_STUCK_SYNC_RUNNING_MINS``
         (SRE-04 — the orphan-stall / OOM-leak the success-only filter hides);
       - the latest terminal run of a critical non-sync ingest task
-        (``commit`` / ``metadata_sync``) ended in ``error`` (SRE-05).
+        (``commit``) ended in ``error`` (SRE-05).
     The endpoint returns HTTP 503 when ANY service is degraded; otherwise 200.
 
     Cost: hits SQLite only — no FOS, no CDN, no Fastly API. Safe to wire
@@ -1278,10 +1278,9 @@ def health_check(
                     pass
 
             # SRE-05: the probe is otherwise task='sync'-blind. A commit cron
-            # erroring every run (buffer growing, nothing reaching DuckLake) or
-            # a read_only service's metadata_sync failing (its ONLY ingest
-            # path) stays ok. Degrade if the latest terminal run of any
-            # critical ingest task errored. Maintenance tasks (optimize /
+            # erroring every run (buffer growing, nothing reaching DuckLake)
+            # stays ok. Degrade if the latest terminal run of any critical
+            # ingest task errored. Maintenance tasks (optimize /
             # expire / *_cleanup / rollup_compact) are intentionally excluded
             # — their failure doesn't freeze ingestion. Additive + fail-safe
             # for the same reason as SRE-04 above.
@@ -1289,16 +1288,12 @@ def health_check(
                 try:
                     # Recency window: only degrade on errors from the last 24h.
                     # A per-task-latest scan with no window pins 'degraded'
-                    # FOREVER on a task that never runs again — e.g. a restart
-                    # reap errors the last metadata_sync row of a read_write
-                    # service (metadata_sync is scheduled only for read_only),
-                    # so nothing ever supersedes it. A live failing cron keeps
+                    # FOREVER on a task that never runs again, so nothing ever
+                    # supersedes its last error. A live failing cron keeps
                     # re-erroring inside the window, so real incidents still
                     # degrade.
                     crit_cutoff = iso_z(datetime.now(UTC) - timedelta(hours=24))
                     critical_tasks = ["commit"]
-                    if not config.is_durable_serving_mode():
-                        critical_tasks.append("metadata_sync")
                     placeholders = ", ".join("?" for _ in critical_tasks)
                     crit_row = con.execute(
                         "SELECT task, error_message FROM ("
@@ -1308,9 +1303,8 @@ def health_check(
                         "  AND started_at >= ?"
                         # Boot-reap rows are lifecycle artifacts (the process
                         # stopped mid-run), not failing crons — a task that is
-                        # never scheduled again (metadata_sync on a read_write
-                        # service) would otherwise hold 'degraded' for the whole
-                        # window on every restart.
+                        # never scheduled again would otherwise hold 'degraded'
+                        # for the whole window on every restart.
                         "  AND COALESCE(error_message, '') != 'Process interrupted by server restart'"
                         ") WHERE rn = 1 AND status = 'error' LIMIT 1",
                         (*service_args, *critical_tasks, crit_cutoff),

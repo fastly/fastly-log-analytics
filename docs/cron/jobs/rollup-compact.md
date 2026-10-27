@@ -32,8 +32,7 @@
 | Role | Job State | Manual API Trigger | Data Visibility |
 |---|---|---|---|
 | **Admin (`read_write`)** | Active | `POST /api/admin/rollups/compact/{service_id}` | Accelerated multi-day dashboard querying. Live SSE progress updates in Admin UI. |
-| **Analyst Path A (Standalone Instance)** | Active | Internal trigger | Keeps multi-day queries fast on analyst laptops. |
-| **Analyst Path B (Remote Share)** | N/A | Blocked (403) | Benefits transparently from server-side compaction. |
+| **Analyst (Remote Share)** | N/A | Blocked (403) | Benefits transparently from server-side compaction. |
 
 ---
 

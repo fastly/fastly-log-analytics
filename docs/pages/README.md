@@ -8,7 +8,7 @@ Before beginning implementation, testing, or refactoring on any page specificati
 1. **Read & Synthesize First:** Thoroughly read the target page specification (`docs/pages/{page}.md`), supporting architecture guides (`docs/ARCHITECTURE.md`, `AGENTS.md`), deployment runbooks (`deploy-to-gce-and-verify`), and existing test suites.
 2. **Interactive Inquiry Mandate:** Ask the operator as many clarifying questions as necessary about requirements, ambiguous behaviors, test traffic profiles, UI expectations, deployment nuances, or architecture-specific edge cases. **Never make unvalidated assumptions or guess intent** when details can be clarified.
 3. **Document First, Then Execute:** Incorporate all answers, clarifications, and design decisions directly back into the page specification before executing code changes or test suites. The documentation must always reflect the verified truth.
-4. **End-to-End Verification Across All Dimensions:** Execute thorough testing across both deployment modes (`standard` vs `high_scale`) and all user roles (Admin vs Analyst Path B vs Analyst Path A), verifying 100% query and API call telemetry attribution.
+4. **End-to-End Verification Across All Dimensions:** Execute thorough testing across both deployment modes (`standard` vs `high_scale`) and all user roles (Admin vs Analyst), verifying 100% query and API call telemetry attribution.
 
 ---
 
@@ -161,14 +161,12 @@ To prevent fragmentation and duplicate logic as we implement and test individual
   - `ChoroplethMap`: Client-only SVG world map with country click-to-filter drill-down.
 
 ### 2. Multi-Role Parity Contract (Admin vs Remote Share vs Standalone)
-Every page feature, drill-down, and visualization must work properly across all three supported user personas:
-- **Admin (`read_write`):**
+Every page feature, drill-down, and visualization must work properly across both supported user personas:
+- **Admin:**
   - Full access to all analytics, admin configuration (`/admin/*`), custom field management, alert rule creation, raw IPs, and SQL execution (`/query`).
-- **Analyst Path B (Remote Share - Live Instance):**
+- **Analyst (Remote Share - Live Instance):**
   - Read-only analytics access through authenticated live share sessions (`/share-login`).
   - Strict security boundaries: Administrative mutation endpoints are blocked; mutation buttons (e.g. "Save View", "Create Alert", "Edit Custom Fields") are hidden or read-only; IP addresses are masked if the administrator enabled privacy masking; direct filesystem and raw FOS credentials are never exposed.
-- **Analyst Path A (Standalone Instance - JSON Join):**
-  - Independent instance running against read-only FOS bucket credentials.
 - **Enforcement:** Tenancy, role permissions, and service isolation are enforced server-side via `RequestContext` (`backend/core/request_context.py`). No client-side bypass is possible.
 
 ### 3. Multi-Architecture Parity Contract (Standard vs High-Scale)
@@ -205,7 +203,7 @@ All page specifications, tests, and deployment verification procedures must acco
 - **Fastly VCL Linter & Dialect Simulator (`falco`):** Any VCL generated for log format strings, custom field expressions (`vcl_log_expression`), or edge snippets must pass `falco lint` and simulation tests before edge deployment.
 - **Distributed Ingestion & Scheduler (Celery, APScheduler, Valkey/Redis):** Asynchronous task distribution, high-scale ingest workers, crash-net recovery sweeps (`ledger_sweep`), and shared distributed state.
 - **Telemetry & Monitoring (OpenTelemetry, Prometheus, Grafana):** OTel tracing propagation, Prometheus scrape rules (`deploy/chart/fastly-log-analytics/files/observability/clickhouse.rules.yml`, `observability/prometheus.yml`), and multi-pod dashboards (`deploy/chart/fastly-log-analytics/files/observability/dashboards/fla-multipod.json`).
-- **End-to-End Testing & Verification (Playwright, Vitest, Pytest):** Dual-role Playwright E2E suites verifying Admin vs Analyst Path B access, network HAR performance capture, Core Web Vitals audits (LCP, INP, CLS), and unit tests (`pytest -n` with strict database test isolation).
+- **End-to-End Testing & Verification (Playwright, Vitest, Pytest):** Dual-role Playwright E2E suites verifying Admin vs Analyst access, network HAR performance capture, Core Web Vitals audits (LCP, INP, CLS), and unit tests (`pytest -n` with strict database test isolation).
 
 ### 5.7 Scheduled Jobs & Cron Testing Contract
 In addition to user-facing page requests, Fastly Log Analytics relies on 25 background automation jobs that continuously drive ingest, compaction, table optimization, snapshot expiry, and metadata housekeeping across Standard and High-Scale modes.
@@ -225,7 +223,7 @@ When creating or updating a page specification, use the following standard struc
 
 1. **Overview & Objectives:** User goals, page purpose, key design tenets.
 2. **Routes, URLs & Query Parameters:** Supported params (`service`, `from`, `to`, `filters`, etc.).
-3. **Role & Permission Matrix:** Admin vs Analyst Path B (Remote Share) vs Analyst Path A.
+3. **Role & Permission Matrix:** Admin vs Analyst (Remote Share).
 4. **Architecture Execution Matrix:** Standard (DuckDB + Parquet) vs High-Scale (Postgres + DuckLake/ClickHouse).
 5. **Backend APIs & Query Attributions:** Endpoints hit, request/response contracts, SQL templates.
 6. **UI Components, Panels & Tabs:** Visual breakdown of all cards, charts, toolbars, and modals.

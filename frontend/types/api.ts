@@ -8,11 +8,8 @@ export function toService(s: components['schemas']['BootstrapService']): Service
   return {
     id: s.service_id,
     name: s.name || s.service_id,
-    accessLevel: s.access_level ?? undefined,
     cmcdEnabled: s.cmcd_enabled ?? undefined,
     rum_enabled: s.rum_enabled ?? undefined,
-    analystPathASupported: s.analyst_path_a_supported ?? true,
-    analystPathAReason: s.analyst_path_a_reason ?? null,
     is_high_scale: s.is_high_scale ?? undefined,
   }
 }

@@ -108,14 +108,11 @@ beforeEach(async () => {
     isLoading: false,
   }))
   const { useIsAnalyst } = await import('@/hooks/useBootstrap')
-  vi.mocked(useIsAnalyst).mockImplementation(() => {
-    const { activeServiceId, services } = useServiceStore.getState()
-    return services.find((s) => s.id === activeServiceId)?.accessLevel === 'read_only'
-  })
+  vi.mocked(useIsAnalyst).mockReturnValue(false)
   act(() => {
     useServiceStore.setState({
       activeServiceId: 'test-svc',
-      services: [{ id: 'test-svc', name: 'Test Service', accessLevel: 'read_write' }],
+      services: [{ id: 'test-svc', name: 'Test Service' }],
       isInitialized: true,
     })
   })
@@ -127,11 +124,13 @@ test('renders AppLayout with standard navigation', () => {
   expect(screen.getByText('Usage & Cost')).toBeInTheDocument()
 })
 
-test('hides restricted items for analysts', () => {
+test('hides restricted items for analysts', async () => {
+  const { useIsAnalyst } = await import('@/hooks/useBootstrap')
+  vi.mocked(useIsAnalyst).mockReturnValue(true)
   act(() => {
     useServiceStore.setState({
       activeServiceId: 'analyst-svc',
-      services: [{ id: 'analyst-svc', name: 'Analyst Service', accessLevel: 'read_only' }],
+      services: [{ id: 'analyst-svc', name: 'Analyst Service' }],
     })
   })
   renderWithQueryClient(<AppLayout><div>Content</div></AppLayout>)

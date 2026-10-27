@@ -32,8 +32,7 @@ The **Network Path** page provides deep visibility into client network condition
 | Role | Access Level | Data Redaction & Capabilities |
 |---|---|---|
 | **Admin (`read_write`)** | Full Access | Full TCP metrics, ASN labels, unmasked client IP network paths. |
-| **Analyst Path B (Remote Share)** | Read-Only Access | Full ASN health heatmap and TCP charts viewable; client IPs masked (if enabled). Allowed under `_ANALYST_ALLOWED_WRITE_PREFIXES` for `/api/network/bundle`. |
-| **Analyst Path A (JSON Join)** | Local Read-Only | Queries local DuckLake / cached buffer. |
+| **Analyst (Remote Share)** | Read-Only Access | Full ASN health heatmap and TCP charts viewable; client IPs masked (if enabled). Allowed under `_ANALYST_ALLOWED_WRITE_PREFIXES` for `/api/network/bundle`. |
 
 ---
 
@@ -100,7 +99,7 @@ The **Network Path** page provides deep visibility into client network condition
 - [x] **3. Network Bundle Contract:** `POST /api/network/bundle` returns valid typed Pydantic schema with transport metrics and protocol breakdown.
 - [x] **4. Time Range Extent:** Confirms 24h default or adaptive extent for services < 24h history.
 - [x] **5. ASN Filtering:** Clicking an ASN row applies the filter chip and re-evaluates TCP metrics.
-- [x] **6. Role Verification:** Analyst Path B allowed to access `/api/network/bundle` via `_ANALYST_ALLOWED_WRITE_PREFIXES`.
+- [x] **6. Role Verification:** Analyst allowed to access `/api/network/bundle` via `_ANALYST_ALLOWED_WRITE_PREFIXES`.
 - [x] **7. Telemetry & Query Audit:** Telemetry queries captured with `process_context="network:bundle"`.
 
 ---

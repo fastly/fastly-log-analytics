@@ -252,7 +252,7 @@ def api_clickhouse_status(
     dependencies=[Depends(require_admin)],
 )
 def api_clickhouse_replay(req: ClickHouseReplayRequest) -> Any:
-    cfg = load_service_config_or_503(req.service_id, writable=True)
+    cfg = load_service_config_or_503(req.service_id)
     if req.limit > 100:
         raise HTTPException(422, detail=make_error("invalid_replay_limit", "HTTP replay limit must be 1..100"))
     try:
@@ -782,7 +782,7 @@ def health_snapshot(probe_fos: bool = False) -> dict[str, Any]:
     # The cross-service aggregate ADR-09 §2.3's runbook tells the operator
     # to watch. For each configured service, take the latest *terminal* run
     # per task and surface the ones that ended in error. This catches the
-    # non-`sync` crons (commit / optimize / rollup_compact / metadata_sync)
+    # non-`sync` crons (commit / optimize / rollup_compact)
     # that the deep /api/health probe and the per-service Cron History both
     # miss as a single glance.
     try:

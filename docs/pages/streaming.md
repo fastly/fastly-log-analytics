@@ -32,8 +32,7 @@ The **Streaming** page turns Common Media Client Data (CMCD v1/v2) that players 
 | Role | Access Level | Data Redaction & Capabilities |
 |---|---|---|
 | **Admin (`read_write`)** | Full Access | All sections. |
-| **Analyst Path B (Remote Share)** | Read-Only Access | All sections. `/api/cmcd/` is in the analyst-allowed POST prefixes (`_ANALYST_ALLOWED_WRITE_PREFIXES` in `backend/utils/remote_access.py`) because the aggregates call is a read-only query sent as POST. No section returns a client IP, so the IP-masking flag (`mask_ips_for`) is accepted for contract parity and has nothing to mask. |
-| **Analyst Path A (JSON Join)** | Local Read-Only | Reads the local DuckLake view. |
+| **Analyst (Remote Share)** | Read-Only Access | All sections. `/api/cmcd/` is in the analyst-allowed POST prefixes (`_ANALYST_ALLOWED_WRITE_PREFIXES` in `backend/utils/remote_access.py`) because the aggregates call is a read-only query sent as POST. No section returns a client IP, so the IP-masking flag (`mask_ips_for`) is accepted for contract parity and has nothing to mask. |
 
 ---
 
@@ -112,7 +111,7 @@ What the breakdown says:
 - [x] **2. CMCD traffic exists:** `scripts/dev/scale_harness.py --cmcd-ratio` sends CMCD playback traffic (headers and `?CMCD=`, v1/v2, 300-session pool, rebuffer and startup flags). The deploy script seeds with `--cmcd-ratio 0.35`.
 - [x] **3. Layout stability:** CLS 0.013 on all three environments (budget 0.05); the e2e test also holds CLS <= 0.05 on a warm reload.
 - [x] **4. Accessibility:** `/streaming` is in `e2e/a11y-routes.spec.ts` and the populated page is axe-checked in `e2e/pages/streaming.spec.ts`; both pass on chromium, firefox and webkit.
-- [ ] **5. Role verification:** confirm Analyst Path B can load the page and that no section exposes a client IP.
+- [ ] **5. Role verification:** confirm Analyst can load the page and that no section exposes a client IP.
 - [x] **6. Duplicate-request audit:** one `/api/cmcd/aggregates` call per load on every environment. Latency is recorded in section 8 and is above a sensible target (open: connection wait).
 - [x] **7. Not-enabled state:** covered by a unit test and an e2e test with `available: false`; the nav link hides when the schema has no `cmcd_sid`.
 

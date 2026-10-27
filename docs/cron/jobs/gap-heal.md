@@ -37,14 +37,13 @@
 | Role | Job State | Manual API Trigger | Data Visibility |
 |---|---|---|---|
 | **Admin (`read_write`)** | Active | `POST /api/admin/gap-heal/{service_id}` | Accounting loss alerts in Admin UI. |
-| **Analyst Path A (Standalone Instance)** | Disabled | Disabled | Gap healing requires Admin credentials and Fastly API access. |
-| **Analyst Path B (Remote Share)** | N/A | Blocked (403) | Benefits from healed data; no cron interaction. |
+| **Analyst (Remote Share)** | N/A | Blocked (403) | Benefits from healed data; no cron interaction. |
 
 ---
 
 ## 5. Execution Lifecycle & Step-by-Step Logic
 1. **Prerequisite & Politeness Check:**
-   - Verifies service has a valid `logging_service_id` or `service_id` configured and is not read-only.
+   - Verifies service has a valid `logging_service_id` or `service_id` configured.
    - Checks `FLA_DEV_NO_CRONS=1` (aborts if set).
    - Evaluates `should_defer_cron("gap_heal", service_id)`. If active user queries are running in DuckDB, yields to preserve dashboard query latency.
 2. **Accounting Computation:**

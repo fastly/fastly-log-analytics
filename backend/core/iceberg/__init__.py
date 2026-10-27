@@ -38,7 +38,6 @@ class _IcebergPackageProxy(_types.ModuleType):
             "_core",
             "_ducklake",
             "buffer",
-            "lake_info",
             "manifest",
             "rum_schema",
             "sync",
@@ -104,13 +103,11 @@ _proxy.__dict__["ducklake_current_snapshot_id"] = ducklake_current_snapshot_id
 _proxy.__dict__["ducklake_table_name"] = ducklake_table_name
 _proxy.__dict__["ducklake_write_admission"] = ducklake_write_admission
 _proxy.__dict__["get_admission_stats"] = get_admission_stats
-_proxy.__dict__["lake_info"] = _proxy
 _proxy.__dict__["manifest"] = _proxy
 _proxy.__dict__["rum_schema"] = _proxy
 _proxy.__dict__["sync"] = _proxy
 _sys.modules[__name__] = _proxy
 _sys.modules[f"{__name__}._ducklake"] = _core_module
-_sys.modules[f"{__name__}.lake_info"] = _proxy
 _sys.modules[f"{__name__}.manifest"] = _proxy
 _sys.modules[f"{__name__}.rum_schema"] = _proxy
 _proxy.__dict__["view"] = _proxy

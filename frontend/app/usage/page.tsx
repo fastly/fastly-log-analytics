@@ -108,7 +108,6 @@ function UsagePageContent({
   const router = useRouter()
   const services = useServiceStore(s => s.services);
         const activeSvc = services.find((s) => s.id === activeServiceId)
-        const isAnalyst = activeSvc?.accessLevel === 'read_only'
         const isRumEnabled = activeSvc?.rum_enabled ?? false
         const isReady = useIsDataReady()
         const activityBy = config.effectiveInterval.split(' ')[1] || 'hour' // fallback
@@ -603,25 +602,23 @@ function UsagePageContent({
         </div>
 
       {/* ── Cost Estimator ─────────────────────────────────────────────────── */}
-      {!isAnalyst && (
-        <div ref={estimatorRef} className="min-h-[420px] [contain-intrinsic-size:420px] [content-visibility:auto]">
-          <AnalyticsCard
-            title="Cost Estimator"
-            description="Estimate your monthly FOS cost based on your configuration and contract rates. Pre-filled from your active service and rate settings."
-          >
-            {loadingPrefill || (estimatorVisible && loadingPrefillFull) ? (
-              <div className="space-y-3">
-                <SkeletonGrid count={4} height="36px" className="rounded-md" />
-              </div>
-            ) : (
-              <CostCalculator
-                prefillData={prefill ?? undefined}
-                prefillNote={prefillNote}
-              />
-            )}
-          </AnalyticsCard>
-        </div>
-      )}
+      <div ref={estimatorRef} className="min-h-[420px] [contain-intrinsic-size:420px] [content-visibility:auto]">
+        <AnalyticsCard
+          title="Cost Estimator"
+          description="Estimate your monthly FOS cost based on your configuration and contract rates. Pre-filled from your active service and rate settings."
+        >
+          {loadingPrefill || (estimatorVisible && loadingPrefillFull) ? (
+            <div className="space-y-3">
+              <SkeletonGrid count={4} height="36px" className="rounded-md" />
+            </div>
+          ) : (
+            <CostCalculator
+              prefillData={prefill ?? undefined}
+              prefillNote={prefillNote}
+            />
+          )}
+        </AnalyticsCard>
+      </div>
       </>
     )
 }

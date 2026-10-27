@@ -786,7 +786,6 @@ def test_history_cap_is_400():
         ([("sync", "success", 120, None), ("sync", "running", 20, None)], 503, "degraded", "stuck running"),
         ([("sync", "success", 30, None), ("sync", "running", 2, None)], 200, "ok", None),
         ([("sync", "success", 2, None), ("commit", "error", 1, "boom")], 503, "degraded", "commit cron errored"),
-        ([("metadata_sync", "error", 1, "fos down")], 503, "degraded", "metadata_sync cron errored"),
     ],
 )
 def test_deep_health_cron_modes(
@@ -804,15 +803,6 @@ def test_deep_health_cron_modes(
         assert svc["status"] == expected_status
         if reason_substr:
             assert reason_substr in svc["reason"]
-
-
-@pytest.mark.usefixtures("_clean_registry")
-def test_deep_health_ignores_metadata_sync_error_in_durable_mode():
-    code, result = _deep_health(
-        [("metadata_sync", "error", 0, "old topology"), ("sync", "success", 0, None)],
-        durable=True,
-    )
-    assert code == 200 and result["status"] == "ok"
 
 
 @pytest.mark.usefixtures("_clean_registry")
@@ -2035,7 +2025,6 @@ def pipeline_env(monkeypatch):
         "fos_native_endpoint": "us-east-1.object.fastlystorage.app",
         "access_key_id": "test-key",
         "secret_access_key": "test-secret",
-        "access_level": "read_write",
         "storage_mode": "cloud",
         "duckdb_path": os.path.join(tmpdir, f"e2e_{sfx}.duckdb"),
     }
@@ -2846,8 +2835,7 @@ def test_cloud_kind_defaults_overrides_and_errors():
     src = make_source(kind="cloud", bucket="b2", access_key_id="k")
     assert src["name"] == src["service_id"] == "test"
     assert src["bucket"] == "b2" and src["access_key_id"] == "k"
-    assert src["storage_mode"] == "cloud" and src["access_level"] == "read_write"
-    assert make_source(kind="cloud", access_level="read_only")["access_level"] == "read_only"
+    assert src["storage_mode"] == "cloud" and "access_level" not in src
 
     preset = partial(make_source, kind="cloud", provisioning={})
     preset()["provisioning"]["mutated"] = True
@@ -2952,9 +2940,7 @@ def _bind_high_scale_service(monkeypatch, *, include_rum: bool) -> None:
     service = HighScaleService(
         service_id="high-scale-svc", client=Client(), cursor_secret=b"secret", request_watermark=wm
     )
-    monkeypatch.setattr(
-        "backend.core.duckdb.get_source_for_service", lambda _: {"name": "high-scale-svc", "access_level": "read_write"}
-    )
+    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda _: {"name": "high-scale-svc"})
     monkeypatch.setattr(
         "backend.high_scale.registry_bootstrap.get_high_scale_service_registry",
         lambda: type("Registry", (), {"resolve": lambda _, sid: service})(),
@@ -3318,7 +3304,7 @@ def test_list_active_runs_and_reap_zombies():
     cron_progress.add_progress(1, {"type": "step", "i": 1})
     cron_progress.start_progress(2, service_id="svc-a", task="sync")
     cron_progress.add_progress(2, {"type": "done", "rows": 100})
-    cron_progress.start_progress(3, service_id="svc-b", task="metadata_sync")
+    cron_progress.start_progress(3, service_id="svc-b", task="sync")
     cron_progress.add_progress(3, {"type": "error", "msg": "S3 timeout"})
     cron_progress.start_progress(4, service_id="svc-b", task="commit")
 

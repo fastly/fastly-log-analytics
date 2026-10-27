@@ -690,7 +690,6 @@ def fos_source(s3_mock):
         "fos_native_endpoint": "us-east-1.object.fastlystorage.app",
         "access_key_id": "test-key",
         "secret_access_key": "test-secret",
-        "access_level": "read_write",
         "storage_mode": "cloud",
     }
 
@@ -739,7 +738,6 @@ def override_source():
         "name": "service123",
         "bucket": "test-bucket",
         "prefix": "raw_prefix",
-        "access_level": "read_write",
         "cdn_url": "",
     }
     app.dependency_overrides[get_source] = lambda: src

@@ -36,8 +36,7 @@
 | Role | Job State | Manual API Trigger | Data Visibility |
 |---|---|---|---|
 | **Admin (`read_write`)** | Active | `POST /api/admin/ngwaf/sync/{service_id}` | Full NGWAF cache management via `GET /api/admin/ngwaf/status`, verified bot analytics on Security pages. |
-| **Analyst Path A (Standalone Instance)** | Active | Internal trigger | Synchronizes WAF signals locally if credentials provided. |
-| **Analyst Path B (Remote Share)** | N/A | Blocked (403) | Reads enriched WAF intelligence from shared server. |
+| **Analyst (Remote Share)** | N/A | Blocked (403) | Reads enriched WAF intelligence from shared server. |
 
 ---
 

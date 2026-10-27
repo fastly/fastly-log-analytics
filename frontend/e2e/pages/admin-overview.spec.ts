@@ -106,7 +106,7 @@ test.describe('Admin Overview & Ingest Operations Page Contract (/admin)', () =>
     expect((await measureWarmPaintAndCls(page, 500)).cls).toBeLessThanOrEqual(0.05)
     const syncRes = await page.request.get('/api/admin/sync-status')
     expect(syncRes.status()).toBe(200)
-    expect((await syncRes.json()).access_level).toBe('read_write')
+    expect(await syncRes.json()).toHaveProperty('configured')
     await assertAnalyst403(page, 'Admin', () => ['/api/admin/sync-status'])
   })
 
@@ -119,7 +119,7 @@ test.describe('Admin Overview & Ingest Operations Page Contract (/admin)', () =>
     const [syncData, metricsData, healthData, servicesData] = await Promise.all([
       syncRes.json(), metricsRes.json(), healthRes.json(), servicesRes.json(),
     ])
-    for (const p of ['configured', 'access_level']) expect(syncData).toHaveProperty(p)
+    for (const p of ['configured']) expect(syncData).toHaveProperty(p)
     for (const p of ['load', 'vcpus', 'in_flight_runs', 'compaction']) expect(metricsData).toHaveProperty(p)
     for (const p of ['load', 'recent_cron_failures']) expect(healthData).toHaveProperty(p)
     expect(Array.isArray(servicesData.services)).toBeTruthy()
@@ -528,7 +528,7 @@ test.describe('Control Room', () => {
   test.beforeEach(async ({ page }) => {
     await page.addInitScript((sid) => {
       localStorage.setItem('service-storage', JSON.stringify({
-        state: { activeServiceId: sid, services: [{ id: sid, name: 'Playwright E2E Service', accessLevel: 'read_write' }] }, version: 0,
+        state: { activeServiceId: sid, services: [{ id: sid, name: 'Playwright E2E Service' }] }, version: 0,
       }))
       localStorage.setItem('timezone-storage', JSON.stringify({ state: { timezone: 'UTC' }, version: 0 }))
     }, CONTROL_ROOM_SERVICE_ID)

@@ -31,8 +31,7 @@ The **Security & Bot Intelligence** page delivers threat analytics across Fastly
 | Role | Access Level | Data Redaction & Capabilities |
 |---|---|---|
 | **Admin (`read_write`)** | Full Access | Full client IPs, threat payloads, NGWAF signal drill-down, IP blocking triggers. |
-| **Analyst Path B (Remote Share)** | Read-Only Access | Aggregated attack charts and threat distributions viewable; client IPs masked (if enabled). |
-| **Analyst Path A (JSON Join)** | Local Read-Only | Queries local DuckLake / cached buffer. |
+| **Analyst (Remote Share)** | Read-Only Access | Aggregated attack charts and threat distributions viewable; client IPs masked (if enabled). |
 
 ---
 
@@ -97,7 +96,7 @@ The **Security & Bot Intelligence** page delivers threat analytics across Fastly
 - [x] **3. Threat Bundle Contract:** Verify WAF actions and bot classifications populate accurately.
 - [x] **4. Time Range Extent:** Confirms 24h default or adaptive extent for services < 24h history.
 - [x] **5. Bot Verification Filter:** Filter by "Verified Bots" vs "Spoofed Bots" and verify graph transitions.
-- [x] **6. Role Verification:** Confirm Analyst Path B observes masked IPs and cannot access admin triggers.
+- [x] **6. Role Verification:** Confirm Analyst observes masked IPs and cannot access admin triggers.
 - [x] **7. Telemetry & Query Audit:** Verify all DuckDB and PostgreSQL queries are recorded with zero duplicate queries.
 
 ---

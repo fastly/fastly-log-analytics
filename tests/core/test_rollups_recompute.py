@@ -1721,7 +1721,6 @@ def test_rollup_hour_heal_invokes_rum_total_beacons_backfill(monkeypatch, tmp_pa
     src = {
         "name": "rum-heal-svc",
         "service_id": sid,
-        "access_level": "read_write",
         "cache_dir": str(tmp_path),
         "_cache_dir_override": str(tmp_path),
     }

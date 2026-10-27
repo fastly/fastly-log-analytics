@@ -1577,26 +1577,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/services/{service_id}/lake-info": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Get Service Lake Info
-         * @description Return Iceberg table range and calendar for a configured service.
-         */
-        get: operations["get_service_lake_info_api_services__service_id__lake_info_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/services/{service_id}/cron-settings": {
         parameters: {
             query?: never;
@@ -1734,23 +1714,6 @@ export interface paths {
         put?: never;
         /** Api Service Update Logging Settings */
         post: operations["api_service_update_logging_settings_api_services__service_id__logging_settings_update_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/services/{service_id}/generate-viewer-key": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Api Invite Analyst */
-        post: operations["api_invite_analyst_api_services__service_id__generate_viewer_key_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2001,26 +1964,6 @@ export interface paths {
          * @description Destructive service teardown over SSE.
          */
         post: operations["provision_teardown_api_provision_teardown_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/provision/lake-info": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Provision Lake Info
-         * @description Return Iceberg table range and calendar for a given bucket/credentials without registering it.
-         */
-        post: operations["provision_lake_info_api_provision_lake_info_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -4047,18 +3990,16 @@ export interface paths {
          * Rebuild Local View Endpoint
          * @description One-button "fix it" for a stuck or stale local DuckDB view.
          *
-         *     Returns 202 Accepted — the rebuild runs asynchronously in a worker
-         *     thread and the response body carries a ``run_id`` the caller can
-         *     poll for completion.
+         *     Returns 202 Accepted: the rebuild runs in a background thread.
          *
-         *     Clears the in-memory + on-disk caches that drive view SQL generation,
-         *     then triggers a metadata_sync that re-pulls the catalog from the cloud
-         *     and rebuilds the view. The local raw buffer is NOT touched —
-         *     un-committed data is safe.
+         *     Clears the in-memory caches that drive view SQL generation, then rebuilds
+         *     the view over the DuckLake table and the local buffer, warms the pool, and
+         *     refreshes the cached service status. The local raw buffer is NOT touched,
+         *     so un-committed data is safe.
          *
          *     When to use: after manually editing parquet files, after a catalog
-         *     schema-mapping desync, or when "Sync All" already ran and the view
-         *     still looks wrong. This is the nuclear-option version of refresh.
+         *     schema-mapping desync, or when the view still looks wrong. This is the
+         *     nuclear-option version of refresh.
          */
         post: operations["rebuild_local_view_endpoint_api_admin_rebuild_local_view_post"];
         delete?: never;
@@ -5926,7 +5867,7 @@ export interface paths {
          *       - a ``sync`` row is stuck in ``running`` past ``_STUCK_SYNC_RUNNING_MINS``
          *         (SRE-04 — the orphan-stall / OOM-leak the success-only filter hides);
          *       - the latest terminal run of a critical non-sync ingest task
-         *         (``commit`` / ``metadata_sync``) ended in ``error`` (SRE-05).
+         *         (``commit``) ended in ``error`` (SRE-05).
          *     The endpoint returns HTTP 503 when ANY service is degraded; otherwise 200.
          *
          *     Cost: hits SQLite only — no FOS, no CDN, no Fastly API. Safe to wire
@@ -6404,53 +6345,6 @@ export interface components {
             /** Section Timings */
             _section_timings?: components["schemas"]["SectionTimingEntry"][];
             data: components["schemas"]["AlertTestWebhookData"];
-        };
-        /** AnalystInvite */
-        AnalystInvite: {
-            /** Debug Queries */
-            _debug_queries?: components["schemas"]["DebugQuery"][];
-            /** Debug Calls */
-            _debug_calls?: components["schemas"]["DebugCall"][];
-            /** Debug Sqlite */
-            _debug_sqlite?: {
-                [key: string]: unknown;
-            }[];
-            /** Debug Postgres */
-            _debug_postgres?: {
-                [key: string]: unknown;
-            }[];
-            /**
-             * Is Cached
-             * @default false
-             */
-            _is_cached: boolean;
-            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
-            /** Section Timings */
-            _section_timings?: components["schemas"]["SectionTimingEntry"][];
-            /** Name */
-            name: string;
-            /** Service Id */
-            service_id: string;
-            /** Fos Bucket */
-            fos_bucket: string;
-            /** Fos Region */
-            fos_region: string;
-            /** Fos Endpoint */
-            fos_endpoint: string;
-            /** Fos Prefix */
-            fos_prefix: string;
-            /** Access Key Id */
-            access_key_id: string;
-            /** Secret Key */
-            secret_key: string;
-            /** Iceberg Metadata Location */
-            iceberg_metadata_location?: string | null;
-            /** Cdn Url */
-            cdn_url?: string | null;
-            /** Cdn Service Id */
-            cdn_service_id?: string | null;
-            /** Cdn Secret */
-            cdn_secret?: string | null;
         };
         /** AsnConcentrationInsightCard */
         AsnConcentrationInsightCard: {
@@ -6951,21 +6845,12 @@ export interface components {
             service_id: string;
             /** Name */
             name?: string | null;
-            /** Access Level */
-            access_level?: string | null;
             /** Cmcd Enabled */
             cmcd_enabled?: boolean | null;
             /** Rum Enabled */
             rum_enabled?: boolean | null;
             /** Rum Log Period */
             rum_log_period?: number | null;
-            /**
-             * Analyst Path A Supported
-             * @default true
-             */
-            analyst_path_a_supported: boolean;
-            /** Analyst Path A Reason */
-            analyst_path_a_reason?: string | null;
             /** Is High Scale */
             is_high_scale?: boolean | null;
         } & {
@@ -6978,8 +6863,6 @@ export interface components {
         BootstrapSettings: {
             /** Initializing */
             initializing?: boolean | null;
-            /** Access Level */
-            access_level?: string | null;
             /** Storage Mode */
             storage_mode?: string | null;
             /** Is Remote Analyst */
@@ -9457,7 +9340,7 @@ export interface components {
          * @description One service+task whose most recent terminal cron run ended in error.
          *
          *     Powers the SRE-03 ``recent_cron_failures`` glance surface: a non-``sync``
-         *     per-service cron (commit / optimize / rollup_compact / metadata_sync / …)
+         *     per-service cron (commit / optimize / rollup_compact / …)
          *     erroring every tick is otherwise visible only by opening that service's
          *     Cron History. The aggregate keeps the standing System Health card honest.
          */
@@ -12239,29 +12122,6 @@ export interface components {
             [key: string]: unknown;
         };
         JsonValue: unknown;
-        /**
-         * LakeInfoRequest
-         * @description Body for ``POST /api/provision/lake-info``.
-         */
-        LakeInfoRequest: {
-            /** Bucket */
-            bucket: string;
-            /** Region */
-            region: string;
-            /** Access Key */
-            access_key: string;
-            /** Secret Key */
-            secret_key: string;
-            /**
-             * Prefix
-             * @default
-             */
-            prefix: string;
-            /** Endpoint */
-            endpoint?: string | null;
-            /** Iceberg Metadata Location */
-            iceberg_metadata_location?: string | null;
-        };
         /** LargeUncompressedAssetRow */
         LargeUncompressedAssetRow: {
             /** Url */
@@ -15791,70 +15651,6 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
-        /** ProvisionLakeInfoCalendarDay */
-        ProvisionLakeInfoCalendarDay: {
-            /** Data Files */
-            data_files: number;
-            /** Size Bytes */
-            size_bytes: number;
-        } & {
-            [key: string]: unknown;
-        };
-        /** ProvisionLakeInfoRange */
-        ProvisionLakeInfoRange: {
-            /** Start */
-            start?: string | null;
-            /** End */
-            end?: string | null;
-        } & {
-            [key: string]: unknown;
-        };
-        /** ProvisionLakeInfoResponse */
-        ProvisionLakeInfoResponse: {
-            /** Ok */
-            ok?: boolean | null;
-            /** Table Exists */
-            table_exists?: boolean | null;
-            /** Message */
-            message?: string | null;
-            /** Error */
-            error?: string | null;
-            info?: components["schemas"]["ProvisionLakeInfoTable"] | null;
-            /** Calendar */
-            calendar?: {
-                [key: string]: components["schemas"]["ProvisionLakeInfoCalendarDay"];
-            } | null;
-            range?: components["schemas"]["ProvisionLakeInfoRange"] | null;
-        } & {
-            [key: string]: unknown;
-        };
-        /** ProvisionLakeInfoTable */
-        ProvisionLakeInfoTable: {
-            /** Table Name */
-            table_name?: string | null;
-            /** Snapshots */
-            snapshots?: number | null;
-            /** Data Files */
-            data_files?: number | null;
-            /** Size Bytes */
-            size_bytes?: number | null;
-            /** Latest Snapshot At */
-            latest_snapshot_at?: string | null;
-            /** Buffer Files */
-            buffer_files?: number | null;
-            /** Buffer Size Bytes */
-            buffer_size_bytes?: number | null;
-            /** Table Location */
-            table_location?: string | null;
-            /** Region */
-            region?: string | null;
-            /** Min Timestamp */
-            min_timestamp?: string | null;
-            /** Max Timestamp */
-            max_timestamp?: string | null;
-        } & {
-            [key: string]: unknown;
-        };
         /**
          * ProvisionReconcileRequest
          * @description Body for ``POST /api/provision/reconcile``.
@@ -18485,8 +18281,6 @@ export interface components {
             fos_bucket?: string | null;
             /** Log Period */
             log_period?: number | null;
-            /** Access Level */
-            access_level?: string | null;
             /** Storage Mode */
             storage_mode?: string | null;
             /** Duckdb Size Bytes */
@@ -18509,8 +18303,6 @@ export interface components {
             rum?: components["schemas"]["RumConfigSection"] | null;
             /** Rum Log Period */
             rum_log_period?: number | null;
-            /** Analyst Path A Supported */
-            analyst_path_a_supported?: boolean | null;
             /** Is High Scale */
             is_high_scale?: boolean | null;
         };
@@ -19618,8 +19410,6 @@ export interface components {
             busy: boolean;
             /** Storage Mode */
             storage_mode?: string | null;
-            /** Access Level */
-            access_level?: string | null;
             /** Latest Ingested File At */
             latest_ingested_file_at?: string | null;
             /** Latest Available File At */
@@ -30597,113 +30387,6 @@ export interface operations {
             };
         };
     };
-    get_service_lake_info_api_services__service_id__lake_info_get: {
-        parameters: {
-            query?: {
-                service?: string | null;
-                service_id?: string | null;
-            };
-            header?: {
-                "x-fastly-service-id"?: string | null;
-                "x-service-id"?: string | null;
-            };
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ProvisionLakeInfoResponse"];
-                };
-            };
-            /** @description Bad request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Unauthenticated */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Forbidden */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Validation failed */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Rate limited */
-            429: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Internal error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Upstream error */
-            502: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Service unavailable */
-            503: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-        };
-    };
     api_service_cron_settings_api_services__service_id__cron_settings_post: {
         parameters: {
             query?: never;
@@ -31578,109 +31261,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
-                };
-            };
-            /** @description Bad request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Unauthenticated */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Forbidden */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Validation failed */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Rate limited */
-            429: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Internal error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Upstream error */
-            502: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Service unavailable */
-            503: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-        };
-    };
-    api_invite_analyst_api_services__service_id__generate_viewer_key_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                service_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["AnalystInvite"];
                 };
             };
             /** @description Bad request */
@@ -33486,111 +33066,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
-                };
-            };
-            /** @description Bad request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Unauthenticated */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Forbidden */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Validation failed */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Rate limited */
-            429: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Internal error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Upstream error */
-            502: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description Service unavailable */
-            503: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-        };
-    };
-    provision_lake_info_api_provision_lake_info_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["LakeInfoRequest"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ProvisionLakeInfoResponse"];
                 };
             };
             /** @description Bad request */

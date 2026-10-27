@@ -24,7 +24,6 @@ from backend.cron.scheduler import (
     JOB_COLORS,
     RESET_COLOR,
     _display_label,
-    _elapsed_since,
     _log_and_add_progress,
     cron_run,
     cron_task,
@@ -37,8 +36,6 @@ from backend.utils.date_utils import iso_z, iso_z_now, parse_relative_time_windo
 _os = os
 _shutil = shutil
 logger = logging.getLogger("backend.scheduler")
-_post_commit_metadata_sync_lock = threading.Lock()
-_post_commit_metadata_sync_rerun: dict[str, bool] = {}
 _RETRYABLE_WEBHOOK_STATUS = (429, 500, 502, 503, 504)
 
 
@@ -73,154 +70,6 @@ def _post_pagerduty_notification(url: str, alert_name: str, metric: str, msg_val
             },
         },
     )
-
-
-def _run_metadata_sync(
-    service_id: str, run_id: int | None = None, start_time: str | None = None, end_time: str | None = None
-) -> None:
-    from backend import config as svcconfig
-    from backend.core import iceberg as db_iceberg
-    from backend.core.duckdb import get_connection, get_source_for_service, refresh_config_status
-    from backend.cron.jobs.sync import apply_time_range_pinning, get_service_display_label
-    from backend.utils.active_requests import should_defer_cron
-
-    cfg = svcconfig.load_config(service_id)
-    src = get_source_for_service(service_id) if cfg else None
-    is_manual = run_id is not None
-    if not cfg or src is None or (not is_manual and should_defer_cron("metadata_sync", service_id)):
-        return
-    start_time_exec = time.time()
-
-    def elapsed() -> str:
-        return _elapsed_since(start_time_exec)
-
-    _display = get_service_display_label(service_id, cfg)
-    with cron_run(
-        service_id,
-        "metadata_sync",
-        source=src,
-        run_id=run_id,
-        error_summary="Metadata sync failed",
-        finalize_duration=True,
-        include_log_output=False,
-        skip_log_prefix="scheduler",
-    ) as run:
-        if not run.ok:
-            return
-        run_id = run.run_id
-        logger.info("🏎️  \x1b[96m[metadata_sync]\x1b[0m %s: Metadata sync job started.", _display)
-
-        def _prog(message: Any, ev_type: str | None = "status") -> None:
-            ev = {"type": ev_type, "message": message} if ev_type else {"message": message}
-            _log_and_add_progress(run_id, service_id, job_name="metadata_sync", event=ev)
-
-        for step_msg in (
-            "Starting metadata sync...",
-            "Checking cloud for new Iceberg snapshots...",
-            "  ↳ Downloading and parsing the latest catalog metadata (this may take 5-10 seconds)...",
-        ):
-            _prog(f"{elapsed()} {step_msg}")
-        try:
-            if db_iceberg.init_iceberg_table(src, create=False) is None:
-                raise RuntimeError(f"could not attach the DuckLake catalog for {service_id}")
-            table_present = db_iceberg.ducklake_table_exists(src)
-        except Exception as e:
-            err_str = str(e).lower()
-            if any(tok in err_str for tok in ("not found", "does not exist", "nosuchtable")):
-                table_present = False
-            else:
-                raise
-        if not table_present:
-            msg = "Iceberg table not found, skipping sync until data is committed."
-            _prog(msg, None)
-            _prog(msg, "status")
-            run.success(msg)
-            _prog(msg, "done")
-            return
-        start_time, end_time = apply_time_range_pinning(
-            service_id, cfg, src, start_time=start_time, end_time=end_time, is_manual=is_manual, pin_explicit_range=True
-        )
-        msg = "Scanning Iceberg table for new data files..."
-        if start_time or end_time:
-            msg += f" (Range: {start_time or 'Start'} to {end_time or 'End'})"
-        _prog(msg)
-
-        def _sync_progress(downloaded: int, total: int, filename: str, rows: int) -> None:
-            _prog(f"Downloading file {downloaded}/{total}: {filename} ({rows:,} rows)")
-
-        data_res = db_iceberg.sync_data(src, progress_callback=_sync_progress, start_time=start_time, end_time=end_time)
-        files_cached, rows_cached = data_res.get("files_downloaded", 0), data_res.get("rows_downloaded", 0)
-        _prog(
-            "No new Iceberg files to sync — already up to date."
-            if files_cached == 0
-            else f"Synced {files_cached} Iceberg data file(s) to local cache, {rows_cached:,} rows."
-        )
-        _prog("Updating DuckDB views...")
-        with closing(get_connection(source=src, read_only=svcconfig.is_durable_serving_mode(src))) as con:
-            db_iceberg.update_iceberg_view(con, src)
-        import_error: str | None = None
-        try:
-            from backend.state_sync import import_admin_state
-
-            import_admin_state(service_id)
-        except Exception as e:
-            import_error = str(e)
-            _prog(e, "warning")
-        refresh_config_status(service_id)
-        try:
-            from backend.repositories.dashboard import invalidate_service
-
-            invalidate_service(src["name"])
-        except Exception:
-            pass
-        summary = "Refreshed metadata"
-        if files_cached > 0:
-            verb = "downloaded" if src.get("access_level") == "read_only" else "synced"
-            summary += f" and {verb} {files_cached} new Iceberg data file(s)"
-        if import_error:
-            summary += f" (admin state import warning: {import_error})"
-        run_status = "warning" if import_error else "success"
-        run.record(run_status, summary=summary, files_downloaded=files_cached, rows_ingested=rows_cached)
-        _prog(summary, "done")
-    logger.info("🏁  \x1b[96m[metadata_sync]\x1b[0m %s: Metadata sync job finished.", _display)
-
-
-@cron_task("metadata_sync", job_name="metadata_sync")
-def _run_post_commit_metadata_sync(service_id: str) -> None:
-    _run_metadata_sync(service_id)
-
-
-def _post_commit_metadata_sync_worker(service_id: str) -> None:
-    while True:
-        try:
-            _run_post_commit_metadata_sync(service_id)
-        except Exception:
-            logger.exception("[scheduler] %s: post-commit metadata sync failed unexpectedly", service_id)
-        with _post_commit_metadata_sync_lock:
-            if _post_commit_metadata_sync_rerun.get(service_id, False):
-                _post_commit_metadata_sync_rerun[service_id] = False
-                continue
-            _post_commit_metadata_sync_rerun.pop(service_id, None)
-            return
-
-
-def dispatch_post_commit_metadata_sync(service_id: str) -> None:
-    with _post_commit_metadata_sync_lock:
-        if service_id in _post_commit_metadata_sync_rerun:
-            _post_commit_metadata_sync_rerun[service_id] = True
-            return
-        _post_commit_metadata_sync_rerun[service_id] = False
-        worker = threading.Thread(
-            target=_post_commit_metadata_sync_worker,
-            args=(service_id,),
-            name=f"metadata-sync-on-commit:{service_id}",
-            daemon=True,
-        )
-        try:
-            worker.start()
-        except Exception:
-            _post_commit_metadata_sync_rerun.pop(service_id, None)
-            raise
 
 
 @cron_task("sync_ngwaf_bots", job_name="ngwaf_sync")
@@ -1961,8 +1810,6 @@ def _run_expire_snapshots(service_id: str, *, manual: bool = False) -> dict:
         return {"status": "deferred", "service_id": service_id, "summary": "active requests"}
     if (src := get_source_for_service(service_id)) is None:
         return {"status": "skipped", "service_id": service_id, "summary": "service not found"}
-    if src.get("access_level") == "read_only":
-        return {"status": "skipped", "service_id": service_id, "summary": "read-only services cannot run maintenance"}
     display_name = _display_label(src, str(src.get("service_id", "unknown")))
     with cron_run(
         service_id,

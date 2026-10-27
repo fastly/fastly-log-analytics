@@ -12,7 +12,7 @@ The **Admin RUM Ingestion & Configuration** page (`/admin/rum`) inspects and con
 ### Key Tenets:
 - **Telemetry Pipeline Configuration:** Controls RUM collector configuration, Faro SDK version upgrades, and VCL condition guards (`inject_vcl_condition`), persisting settings to `configs/{service_id}.json`, uploading self-hosted SDK bundles to Fastly Object Storage (`{prefix}/rum/sdk/`), and reconciling VCL snippets when conditions change.
 - **VCL Drift Detection:** Recomputes `expected_sha` over the active service's RUM config, Faro SDK version, and custom VCL snippet (`fla_rum_custom`) to detect and remediate out-of-band VCL changes.
-- **Strict Admin RBAC:** Accessible **exclusively** to Admin (`read_write`) users (`/admin/*` prefix blocked by `_ANALYST_BLOCKED_PREFIXES`). All RUM mutation and admin routes (`/enable`, `/disable`, `/settings`, `/versions`, `/upgrade`, `/api/admin/faro-sdk-version`) enforce `Depends(require_admin)` + `_ANALYST_BLOCKED_RUM_SUFFIXES`, returning HTTP `403 Forbidden` with `{"error": "admin_only"}` for Analyst Path B sessions.
+- **Strict Admin RBAC:** Accessible **exclusively** to Admin (`read_write`) users (`/admin/*` prefix blocked by `_ANALYST_BLOCKED_PREFIXES`). All RUM mutation and admin routes (`/enable`, `/disable`, `/settings`, `/versions`, `/upgrade`, `/api/admin/faro-sdk-version`) enforce `Depends(require_admin)` + `_ANALYST_BLOCKED_RUM_SUFFIXES`, returning HTTP `403 Forbidden` with `{"error": "admin_only"}` for Analyst sessions.
 
 ---
 
@@ -29,8 +29,7 @@ The **Admin RUM Ingestion & Configuration** page (`/admin/rum`) inspects and con
 | Role | Access Level | Data Redaction & Capabilities |
 |---|---|---|
 | **Admin (`read_write`)** | Full Control | View full RUM status (`enabled`, `enabled_at`, `vcl_drift`, `capture_*`, `faro_sdk_version`, `inject_vcl_condition`), enable/disable RUM via SSE, configure collectors/VCL conditions, inspect/upgrade Faro SDK versions. |
-| **Analyst Path B (Remote Share)** | Blocked (`403 Forbidden`) | `/admin/rum` route blocked; `POST /api/services/{id}/rum/{enable,disable,settings,upgrade}`, `GET /api/services/{id}/rum/versions`, and `GET /api/admin/faro-sdk-version` return `403 {"error": "admin_only"}`. (`GET /api/services/{id}/rum/status` returns minimal `{enabled, enabled_at}` projection for main navigation badge visibility only.) |
-| **Analyst Path A (JSON Join)** | Read-Only | View-only status inspection; Fastly API provisioning and FOS SDK writes require `read_write` service credentials. |
+| **Analyst (Remote Share)** | Blocked (`403 Forbidden`) | `/admin/rum` route blocked; `POST /api/services/{id}/rum/{enable,disable,settings,upgrade}`, `GET /api/services/{id}/rum/versions`, and `GET /api/admin/faro-sdk-version` return `403 {"error": "admin_only"}`. (`GET /api/services/{id}/rum/status` returns minimal `{enabled, enabled_at}` projection for main navigation badge visibility only.) |
 
 ---
 
@@ -99,18 +98,18 @@ The **Admin RUM Ingestion & Configuration** page (`/admin/rum`) inspects and con
 
 ## 9. AI Session Automated Verification Checklist
 
-- [x] **1. Route Accessibility:** `GET /admin/rum` returns HTTP 200 for Admin; Analyst Path B receives HTTP 403 on all RUM admin/mutation endpoints.
+- [x] **1. Route Accessibility:** `GET /admin/rum` returns HTTP 200 for Admin; Analyst receives HTTP 403 on all RUM admin/mutation endpoints.
 - [x] **2. Zero Layout Shift:** Verified pre-allocated reservation containers (`[contain-intrinsic-size:auto_*]`) and warm-load `CLS <= 0.05`.
 - [x] **3. RUM Status Contract:** Verified `/api/services/{service_id}/rum/status` payload schema (`enabled`, `enabled_at`, `vcl_drift`, `capture_*`, `faro_sdk_version`) and `/api/admin/faro-sdk-version`.
 - [x] **4. Config Update & Rollback Safety:** Verified `POST /api/services/{service_id}/rum/settings` updates config, skips redundant VCL deploys when condition is unchanged, and rolls back on FOS or VCL failure.
-- [x] **5. Role Verification:** Confirmed Analyst Path B receives `403 {"error": "admin_only"}` across `/enable`, `/disable`, `/settings`, `/versions`, `/upgrade`, and `/api/admin/faro-sdk-version`.
+- [x] **5. Role Verification:** Confirmed Analyst receives `403 {"error": "admin_only"}` across `/enable`, `/disable`, `/settings`, `/versions`, `/upgrade`, and `/api/admin/faro-sdk-version`.
 - [x] **6. Telemetry & Manual Refresh Audit:** Verified `X-Page-Load-ID` header propagation and interactive manual refresh (`admin-rum-refresh-btn`).
 
 ---
 
 ## 10. Automated Test Suite
 
-- **Backend Unit Tests:** `tests/routers/test_rum_admin.py` (17 tests covering status, drift, legacy SHA migration, settings updates/rollbacks, SSE enable/disable, and Analyst Path B `403` enforcement).
+- **Backend Unit Tests:** `tests/routers/test_rum_admin.py` (17 tests covering status, drift, legacy SHA migration, settings updates/rollbacks, SSE enable/disable, and Analyst `403` enforcement).
 - **Route Table Tripwire:** `tests/remote_access/test_route_table_tripwire.py`.
 - **Frontend Unit Tests:** `frontend/__tests__/app/admin-rum.test.tsx` & `frontend/components/Rum/__tests__/RumStatusPanel.test.tsx`.
 - **Playwright E2E Suite:** `frontend/e2e/pages/admin-rum.spec.ts` (5 end-to-end contract tests verified across Local Standard, Remote Standard GCE, and High-Scale Elevation).

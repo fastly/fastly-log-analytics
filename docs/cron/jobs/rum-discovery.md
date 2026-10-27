@@ -36,8 +36,7 @@
 | Role | Job State | Manual API Trigger | Data Visibility |
 |---|---|---|---|
 | **Admin (`read_write`)** | Active | `POST /api/admin/rum/discovery/{service_id}` | Distributed RUM queue metrics in Admin UI. |
-| **Analyst Path A (Standalone Instance)** | Disabled | Disabled | Server-side distributed infrastructure. |
-| **Analyst Path B (Remote Share)** | N/A | Blocked (403) | Server-side background daemon. |
+| **Analyst (Remote Share)** | N/A | Blocked (403) | Server-side background daemon. |
 
 ---
 

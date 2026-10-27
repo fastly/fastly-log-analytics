@@ -90,7 +90,7 @@ export function applyShare(qc: QueryClient, data: unknown): void {
 }
 
 const INVALIDATION_COALESCE_MS = 100
-const ICEBERG_MUTATING_TASKS = new Set(['commit', 'optimize', 'optimize_iceberg', 'expire_snapshots', 'metadata_sync', 'metadata_cleanup'])
+const ICEBERG_MUTATING_TASKS = new Set(['commit', 'optimize', 'optimize_iceberg', 'expire_snapshots', 'metadata_cleanup'])
 const SCHEMA_AFFECTING_TASKS = new Set(['sync', 'log_discovery', 'full_sync', 'commit'])
 
 type InvalidationKey = 'table' | 'recent' | 'last-sync' | 'iceberg' | 'schedule' | 'audit' | 'ingested' | 'schema'

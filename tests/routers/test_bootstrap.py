@@ -104,29 +104,6 @@ def test_bootstrap_endpoint_success(client, tmp_path, monkeypatch):
     assert "pops" in data and "services" in data and data["settings"]["mask_ips"] is False
 
 
-@pytest.mark.parametrize(
-    "mode,extra,supported,reason",
-    [
-        ("standard", {}, True, None),
-        (
-            "high_scale",
-            {"raw_layout_version": 3},
-            False,
-            "Independent analyst access is unavailable for high-scale services. "
-            "Use live shared-instance analyst access (Path B).",
-        ),
-    ],
-    ids=["sync", "celery"],
-)
-def test_bootstrap_projects_path_a_capability(client, tmp_path, monkeypatch, mode, extra, supported, reason):
-    _seed_active_service(monkeypatch, tmp_path, extra)
-    monkeypatch.setattr(svcconfig, "DEPLOYMENT_MODE", mode)
-    resp = _get(client)
-    assert resp.status_code == 200
-    svc = resp.json()["services"][0]
-    assert svc["analyst_path_a_supported"] is supported and svc["analyst_path_a_reason"] == reason
-
-
 def test_startup_stub_still_withholds_warmup_dependent_fields():
     for is_remote in (False, True):
         fake_request = MagicMock()
@@ -1167,7 +1144,6 @@ _BLOCKED_BASE_PATHS = [
     "/api/download-all",
     "/api/download-folder",
     "/api/download",
-    "/api/services/svc-A/lake-info",
     "/api/cron-schedule",
     "/api/services/svc-A/log-field-audit",
     *(f"/api/services/svc-A/scoring{s}" for s in _SCORING_ADMIN_SUFFIXES),
@@ -1198,7 +1174,6 @@ def app_with_blocklist():
         "/api/download-all",
         "/api/download-folder",
         "/api/cron-schedule",
-        "/api/services/{service_id}/lake-info",
         "/api/services/{service_id}/realtime-stream",
         "/api/services/{service_id}/realtime-seed",
         "/api/services/{service_id}/control-room/{tab}",
@@ -1318,13 +1293,6 @@ def _log_fields_get(client):
     return client.get(f"/api/services/{MOCK_SERVICE_ID}/log-fields", headers={"x-fastly-service-id": MOCK_SERVICE_ID})
 
 
-def _generate_viewer_key(client):
-    invite = {"service_id": "svc-1", "name": "MyService", "access_key_id": "AK", "secret_key": "SK", "fos_bucket": "b"}
-    invite |= {"fos_region": "us-east-1", "fos_endpoint": "https://s3.us-east-1.amazonaws.com", "fos_prefix": ""}
-    with patch("backend.provision.generate_analyst_invite", return_value=invite):
-        return client.post(f"/api/services/{MOCK_SERVICE_ID}/generate-viewer-key")
-
-
 _SITES = [
     pytest.param(_validate, id="provision-validate"),
     pytest.param(_check_domain, id="provision-check-domain"),
@@ -1333,7 +1301,6 @@ _SITES = [
     pytest.param(_audit_logs, id="audit-logs"),
     pytest.param(_iceberg_calendar, id="iceberg-calendar"),
     pytest.param(_log_fields_get, id="service-log-fields"),
-    pytest.param(_generate_viewer_key, id="generate-viewer-key"),
 ]
 
 _is_remote_flag = False
@@ -1585,16 +1552,10 @@ def test_admin_ingest_actions_beacons_celery_and_control_room_match_producer(cli
     with patch("backend.utils.router_utils.start_or_resume_cron", return_value=started):
         assert _body(client.post("/api/admin/commit-iceberg"), status=202) == started
         assert _body(client.post("/api/admin/ingest-logs")) == started
-    with (
-        patch("backend.core.iceberg.clear_source_caches"),
-        patch("backend.core.duckdb.start_cron_run", return_value=77),
-        patch("backend.cron_progress.start_progress"),
-        patch("backend.cron.jobs.metadata._run_metadata_sync"),
-    ):
+    with patch("backend.core.iceberg.clear_source_caches"), patch("threading.Thread"):
         assert _body(client.post("/api/admin/rebuild-local-view"), status=202) == {
             "ok": True,
             "message": "Local view rebuild started.",
-            "run_id": 77,
         }
     cfg = {"service_id": "svc-t", "remote_frontend": {"service_id": "remote-1"}}
     with (
@@ -1693,16 +1654,6 @@ def test_admin_ingest_actions_beacons_celery_and_control_room_match_producer(cli
         (
             m_prov.ProvisionValidateResponse,
             {"service_name": "s", "token_info": {"id": "1", "name": "t", "user_id": None, "type": "automation"}},
-        ),
-        (
-            m_prov.ProvisionLakeInfoResponse,
-            {
-                "ok": True,
-                "table_exists": True,
-                "info": {"table_name": "logs", "snapshots": 2, "data_files": 7, "size_bytes": 10, "region": None},
-                "calendar": {"2026-01-01": {"data_files": 7, "size_bytes": 0}},
-                "range": {"start": "2026-01-01T00:00:00", "end": "2026-01-02T00:00:00"},
-            },
         ),
         (m_sec.SecurityBotRow, {"id": "gptbot", "name": "Gptbot", "category": "ai", "request_count": 12}),
         (m_sec.SecurityBotRow, {"name": "Googlebot", "category": "search", "request_count": 5}),

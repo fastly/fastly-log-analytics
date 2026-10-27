@@ -34,7 +34,6 @@ from backend.routers.admin import SustainedLossAlert
 from backend.utils.telemetry import get_process_context
 from tests.cron.conftest import (
     assert_manual_trigger_non_admin_rejected,
-    assert_manual_trigger_read_only_rejected,
     assert_manual_trigger_standard_mode_rejected,
 )
 
@@ -44,8 +43,8 @@ def clean_dev_no_crons(monkeypatch):
     monkeypatch.delenv("FLA_DEV_NO_CRONS", raising=False)
 
 
-def _fake_src(service_id: str = "svc-1", access_level: str = "read_write") -> dict:
-    return {"name": service_id, "service_id": service_id, "bucket": "fos-test-bkt", "access_level": access_level}
+def _fake_src(service_id: str = "svc-1") -> dict:
+    return {"name": service_id, "service_id": service_id, "bucket": "fos-test-bkt"}
 
 
 @pytest.fixture
@@ -104,13 +103,10 @@ def _setup_discovery_env(
     monkeypatch,
     events: list[dict] | None = None,
     *,
-    access_level: str = "read_write",
     run_id: int = 42,
 ) -> MagicMock:
     monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda kind, sid: False)
-    monkeypatch.setattr(
-        "backend.core.duckdb.get_source_for_service", MagicMock(return_value=_fake_src(access_level=access_level))
-    )
+    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", MagicMock(return_value=_fake_src()))
     monkeypatch.setattr("backend.core.duckdb.start_cron_run", MagicMock(return_value=run_id))
     log_cron = MagicMock()
     monkeypatch.setattr("backend.core.duckdb.log_cron_run", log_cron)
@@ -137,7 +133,7 @@ def test_scheduled_tick_is_not_deferred_by_in_flight_requests(monkeypatch, stub_
         active_requests._reset_for_tests()
 
 
-@pytest.mark.parametrize("case", ["config_missing", "source_missing", "read_only_no_force"])
+@pytest.mark.parametrize("case", ["config_missing", "source_missing"])
 def test_discovery_early_exit_gates(monkeypatch, stub_load_config, case):
     monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda kind, sid: False)
     start_cron = MagicMock()
@@ -151,12 +147,6 @@ def test_discovery_early_exit_gates(monkeypatch, stub_load_config, case):
     elif case == "source_missing":
         monkeypatch.setattr("backend.core.duckdb.get_source_for_service", MagicMock(return_value=None))
         sync_mod._run_log_discovery_cron.__wrapped__("svc-1")
-    else:
-        monkeypatch.setattr(
-            "backend.core.duckdb.get_source_for_service",
-            MagicMock(return_value=_fake_src(access_level="read_only")),
-        )
-        sync_mod._run_log_discovery_cron.__wrapped__("svc-1", force=False)
     start_cron.assert_not_called()
 
 
@@ -205,18 +195,6 @@ def test_high_scale_discovery_error_paths(
     assert log_run.call_args.args[3] == "error"
     assert log_run.call_args.kwargs["run_id"] == run_id
     assert expected_err in log_run.call_args.kwargs["error_message"]
-
-
-def test_read_only_runs_with_force(
-    monkeypatch, stub_load_config, stub_progress, stub_post_ingest, stub_usage_log_phase
-):
-    log_cron = _setup_discovery_env(
-        monkeypatch, [{"type": "done", "new_files": 0, "rows_inserted": 0}], access_level="read_only"
-    )
-    sync_mod._run_log_discovery_cron.__wrapped__("svc-1", force=True)
-    stub_progress["start_progress"].assert_called_once()
-    stub_progress["end_progress"].assert_called_once()
-    assert [c for c in log_cron.call_args_list if c.args[3] == "success"]
 
 
 def test_sync_no_new_files_surfaces_reclaimed_count(
@@ -905,7 +883,7 @@ def log_discovery_test_source(monkeypatch, tmp_path):
         "service_id": service_id,
         "bucket": "test-log-discovery-bucket",
         "_cache_dir_override": str(cache_root),
-        "provisioning": {"access_level": "read_write", "cron_sync": {"enabled": True}},
+        "provisioning": {"cron_sync": {"enabled": True}},
     }
     monkeypatch.delenv("FLA_DEV_NO_CRONS", raising=False)
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: src if sid == service_id else None)
@@ -1092,11 +1070,6 @@ def test_contract_8_malformed_corrupt_caps_and_analyst_denial(log_discovery_test
         )
         denied_resp = client.get(f"/api/admin/quarantine/download/{results[2]['id']}")
         assert denied_resp.status_code == 403 and denied_resp.json()["detail"]["error"] == "admin_only"
-
-        app.dependency_overrides[get_source] = lambda: {**log_discovery_test_source, "access_level": "read_only"}
-        app.dependency_overrides.pop(require_admin, None)
-        sync_denied_resp = client.post(f"/api/admin/sync/{service_id}", headers={"x-fastly-service-id": service_id})
-        assert sync_denied_resp.status_code == 403 and "read-only" in sync_denied_resp.json()["detail"].lower()
     finally:
         app.dependency_overrides.clear()
 
@@ -1116,7 +1089,7 @@ class TestCommitJob:
         monkeypatch.setattr("backend.config.load_config", load)
         return {"load": load, "cfg": cfg}
 
-    @pytest.mark.parametrize("case", ["config_missing", "source_missing", "read_only", "disabled_sync"])
+    @pytest.mark.parametrize("case", ["config_missing", "source_missing", "disabled_sync"])
     def test_early_exit_gates(self, monkeypatch, stub_load_config, stub_source, case):
         start = MagicMock()
         monkeypatch.setattr("backend.core.duckdb.start_cron_run", start)
@@ -1128,12 +1101,6 @@ class TestCommitJob:
             get_src.assert_not_called()
         elif case == "source_missing":
             monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: None)
-            commit._run_commit.__wrapped__("svc-1")
-        elif case == "read_only":
-            monkeypatch.setattr(
-                "backend.core.duckdb.get_source_for_service",
-                lambda sid: {"name": "ro", "service_id": "svc-1", "access_level": "read_only"},
-            )
             commit._run_commit.__wrapped__("svc-1")
         else:
             stub_load_config["cfg"]["provisioning"]["cron_sync"]["enabled"] = False
@@ -1168,10 +1135,10 @@ class TestCommitJob:
         assert "1234 rows" in kwargs["summary"] and "8675309" in kwargs["summary"]
 
         from backend.cron.jobs import _common
-        from backend.cron.jobs.metadata import dispatch_post_commit_metadata_sync
 
         _common.refresh_view_and_warm_pool.assert_called_once()
-        dispatch_post_commit_metadata_sync.assert_called_once_with("svc-1")
+        _common._refresh_status_after_commit.assert_called_once()
+        assert _common._refresh_status_after_commit.call_args.args[0] == "svc-1"
 
     def test_success_no_files_committed_logs_no_new_data(
         self, monkeypatch, stub_load_config, stub_source, stub_cron_envelope
@@ -1184,11 +1151,11 @@ class TestCommitJob:
 
         args, kwargs = stub_cron_envelope["log"].call_args
         assert args[3] == "success" and "No new data" in kwargs["summary"]
-        from backend.cron.jobs.metadata import dispatch_post_commit_metadata_sync
+        from backend.cron.jobs import _common
 
-        dispatch_post_commit_metadata_sync.assert_not_called()
+        _common._refresh_status_after_commit.assert_not_called()
 
-    def test_metadata_sync_dispatch_failure_does_not_fail_durable_commit(
+    def test_status_refresh_failure_does_not_fail_durable_commit(
         self, monkeypatch, stub_load_config, stub_source, stub_cron_envelope
     ):
         monkeypatch.setattr("backend.cron.jobs.commit._log_and_add_progress", stub_cron_envelope["log_event"])
@@ -1197,8 +1164,8 @@ class TestCommitJob:
             MagicMock(return_value={"files_committed": 1, "rows_committed": 12, "snapshot_id": "ducklake"}),
         )
         monkeypatch.setattr(
-            "backend.cron.jobs.metadata.dispatch_post_commit_metadata_sync",
-            MagicMock(side_effect=RuntimeError("worker unavailable")),
+            "backend.cron.jobs._common._refresh_status_after_commit",
+            MagicMock(side_effect=RuntimeError("status unavailable")),
         )
         commit._run_commit.__wrapped__("svc-1")
 
@@ -1292,9 +1259,9 @@ class TestCommitJob:
         args, kwargs = stub_cron_envelope["log"].call_args
         assert args[3] == "success" and "merged small lake files" in kwargs["summary"]
         assert kwargs["files_downloaded"] == 4
-        from backend.cron.jobs.metadata import dispatch_post_commit_metadata_sync
+        from backend.cron.jobs import _common
 
-        dispatch_post_commit_metadata_sync.assert_not_called()
+        _common._refresh_status_after_commit.assert_not_called()
 
     def test_unexpected_exception_logged_as_error(self, monkeypatch, stub_load_config, stub_source, stub_cron_envelope):
         monkeypatch.setattr(
@@ -1382,11 +1349,6 @@ def _assert_analyst_and_ro_rejected(client: TestClient, path: str, service_id: s
     app.dependency_overrides[require_admin] = reject_analyst
     assert client.post(path, headers={"x-fastly-service-id": service_id}).status_code == 403
 
-    app.dependency_overrides[get_source] = lambda: {**base_src, "access_level": "read_only"}
-    app.dependency_overrides.pop(require_admin, None)
-    ro_resp = client.post(path, headers={"x-fastly-service-id": service_id})
-    assert ro_resp.status_code == 403 and "read-only" in ro_resp.json()["detail"].lower()
-
 
 # ── Full sync contract ───────────────────────────────────────────────────────
 
@@ -1401,9 +1363,7 @@ def full_sync_test_source(monkeypatch, tmp_path):
         "service_id": service_id,
         "bucket": "test-full-sync-bucket",
         "_cache_dir_override": str(cache_root),
-        "access_level": "read_write",
         "provisioning": {
-            "access_level": "read_write",
             "cron_sync": {"enabled": True},
             "cron_full_sweep": {"enabled": True},
         },
@@ -1682,9 +1642,7 @@ def gap_heal_test_source(monkeypatch, tmp_path):
         "logging_service_id": "log-svc-gap-contract",
         "bucket": "test-gap-heal-bucket",
         "_cache_dir_override": str(cache_root),
-        "access_level": "read_write",
         "provisioning": {
-            "access_level": "read_write",
             "cron_sync": {"enabled": True},
             "cron_gap_heal": {"enabled": True, "interval_minutes": 30},
         },
@@ -1866,7 +1824,7 @@ class TestGapHealContract:
         with (
             patch(
                 "backend.core.duckdb.get_source_for_service",
-                return_value={"name": "svc-ctx", "access_level": "read_write"},
+                return_value={"name": "svc-ctx"},
             ),
             _gap_heal_ctx(accounting_side_effect=lambda sid, *a, **k: captured_context.append(get_process_context())),
         ):
@@ -1877,14 +1835,13 @@ class TestGapHealContract:
         cfg = {
             "service_id": "svc-sched-gap",
             "log_period": 60,
-            "access_level": "read_write",
             "logging_service_id": "log-svc-sched",
             "provisioning": {
                 "cron_sync": {"enabled": True},
                 "cron_gap_heal": {"enabled": True, "interval_minutes": 45},
             },
         }
-        src = {"name": "svc-sched-gap", "access_level": "read_write"}
+        src = {"name": "svc-sched-gap"}
         assert "gap_heal_svc-sched-gap" in _sync_scheduler(cfg, src, alerts=1)._job_ids
         cfg_disabled = {**cfg, "provisioning": {"cron_sync": {"enabled": True}, "cron_gap_heal": {"enabled": False}}}
         assert "gap_heal_svc-sched-gap" not in _sync_scheduler(cfg_disabled, src, alerts=1)._job_ids
@@ -1897,8 +1854,7 @@ FAKE_CFG = {
     "service_id": SERVICE_ID,
     "name": SERVICE_ID,
     "deployment_mode": "high_scale",
-    "access_level": "read_write",
-    "provisioning": {"access_level": "read_write", "cron_ledger_sweep": {"enabled": True, "interval_minutes": 15}},
+    "provisioning": {"cron_ledger_sweep": {"enabled": True, "interval_minutes": 15}},
 }
 FAKE_SRC = {**FAKE_CFG, "bucket": "test-sweep-bucket"}
 
@@ -1937,7 +1893,6 @@ def test_ledger_sweep_manual_trigger_and_quarantine_endpoints(monkeypatch):
         app.dependency_overrides.clear()
 
     assert_manual_trigger_standard_mode_rejected(f"/api/admin/ledger/sweep/{SERVICE_ID}", SERVICE_ID, FAKE_SRC)
-    assert_manual_trigger_read_only_rejected(f"/api/admin/ledger/sweep/{SERVICE_ID}", SERVICE_ID, FAKE_SRC)
     assert_manual_trigger_non_admin_rejected(f"/api/admin/ledger/sweep/{SERVICE_ID}", SERVICE_ID, FAKE_SRC)
 
     # Quarantine endpoint tests
@@ -1965,11 +1920,6 @@ def test_ledger_sweep_manual_trigger_and_quarantine_endpoints(monkeypatch):
 
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: None)
     assert client.get("/api/admin/ledger/quarantine?service_id=nonexistent-svc").status_code == 404
-
-    monkeypatch.setattr(
-        "backend.core.duckdb.get_source_for_service", lambda sid: {**FAKE_SRC, "access_level": "read_only"}
-    )
-    assert client.get(f"/api/admin/ledger/quarantine?service_id={SERVICE_ID}").status_code == 403
 
     app.dependency_overrides[require_admin] = lambda: (_ for _ in ()).throw(
         HTTPException(status_code=403, detail={"error": "admin_only"})
@@ -2060,15 +2010,11 @@ def test_run_ledger_sweep_lifecycle_outcomes(monkeypatch):
     assert "Postgres connection lost" in log_calls[0][1].get("error_message", "")
 
 
-@pytest.mark.parametrize("mode", ["standard", "read_only", "dev_no_crons", "missing_cfg"])
+@pytest.mark.parametrize("mode", ["standard", "dev_no_crons", "missing_cfg"])
 def test_run_ledger_sweep_skips_when_guarded(monkeypatch, mode):
     start_calls, _, _, _, _ = _setup_ledger_sweep_env(monkeypatch)
     if mode == "standard":
         monkeypatch.setattr("backend.config.is_high_scale_mode", lambda src: False)
-    elif mode == "read_only":
-        monkeypatch.setattr(
-            "backend.core.duckdb.get_source_for_service", lambda sid: {**FAKE_SRC, "access_level": "read_only"}
-        )
     elif mode == "dev_no_crons":
         monkeypatch.setenv("FLA_DEV_NO_CRONS", "1")
     elif mode == "missing_cfg":
@@ -2084,9 +2030,7 @@ def test_scheduler_registers_reschedules_and_skips_ledger_sweep():
         "name": sid,
         "log_period": 60,
         "deployment_mode": "high_scale",
-        "access_level": "read_write",
         "provisioning": {
-            "access_level": "read_write",
             "cron_sync": {"enabled": True},
             "cron_ledger_sweep": {"enabled": True, "interval_minutes": 15},
         },
@@ -2095,7 +2039,6 @@ def test_scheduler_registers_reschedules_and_skips_ledger_sweep():
         "name": sid,
         "service_id": sid,
         "bucket": "test-b",
-        "access_level": "read_write",
         "deployment_mode": "high_scale",
     }
     job_id = f"ledger_sweep_{sid}"

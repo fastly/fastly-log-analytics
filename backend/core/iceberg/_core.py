@@ -1685,7 +1685,7 @@ def _prune_empty_dirs(root: str) -> None:
                 logger.debug("_prune_empty_dirs: os.rmdir failed (ignored)", exc_info=True)
 
 
-# ── sync_data (DuckLake no-op shim) + lake_info helpers ──
+# ── sync_data (DuckLake no-op shim) ──
 def sync_data(
     source: dict,
     progress_callback: Any = None,
@@ -1723,57 +1723,6 @@ def _safe_cdn_url(cdn_url: str) -> str | None:
         if hostname.endswith(suffix):
             return cdn_url
     return None
-
-
-def fetch_lake_info(source: dict, use_temp_cache: bool = False) -> dict:
-    """Return DuckLake table range and calendar for *source*."""
-    from backend.core import iceberg as db_iceberg
-
-    if use_temp_cache:
-        return _fetch_with_temp_cache(source, db_iceberg)
-    return _fetch_direct(source, db_iceberg)
-
-
-def _fetch_direct(source: dict, db_iceberg) -> dict:
-    """DuckLake-native fallback (v3 write-path cutover)."""
-    try:
-        with db_iceberg.ducklake_session(source):
-            if not db_iceberg.ducklake_table_exists(source):
-                return {"ok": True, "table_exists": False, "message": "DuckLake table not found."}
-
-            info = db_iceberg.get_table_info(source)
-            if "error" in info:
-                return {"ok": False, "error": info["error"]}
-            calendar = db_iceberg.get_snapshot_calendar(source)
-
-            return {
-                "ok": True,
-                "table_exists": True,
-                "info": info,
-                "calendar": calendar,
-                "range": {"start": info.get("min_timestamp"), "end": info.get("max_timestamp")},
-            }
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
-
-
-def _fetch_with_temp_cache(source: dict, db_iceberg) -> dict:
-    """Same DuckLake-native fallback as :func:`_fetch_direct`, but scoped to
-    a throwaway ``_cache_dir_override`` and cleared via
-    ``clear_source_caches`` afterward."""
-    import tempfile
-
-    try:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            src = {**source, "_cache_dir_override": tmp_dir}
-            if "iceberg_metadata_location" in source:
-                src["iceberg_metadata_location"] = source["iceberg_metadata_location"]
-            try:
-                return _fetch_direct(src, db_iceberg)
-            finally:
-                db_iceberg.clear_source_caches(src["name"])
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
 
 
 # ── View binding + stale-view self-heal (folded from view.py) ──
@@ -1817,10 +1766,9 @@ def _get_service_lock(source_key: str) -> threading.RLock:
 #
 # ``source_variant_fp`` (added 2026-06-15, finding 002) is a short tuple
 # capturing the per-source-dict inputs that materially affect the
-# generated view SQL beyond the schema fields: ``access_level`` and
-# ``time_range``. Both come from the per-service config today, but the
-# cron's manual-import path mutates ``time_range`` temporarily on the
-# in-memory source dict during analyst-driven backfills — without the
+# generated view SQL beyond the schema fields: ``time_range`` and
+# ``provisioning.cron_sync.enabled``. The cron's manual-import path mutates
+# ``time_range`` temporarily on the in-memory source dict — without the
 # fingerprint, a concurrent dashboard call could read back the cached
 # SQL from a moment when the WHERE clause had a different time bound.
 # Cheap defense-in-depth: cache miss on any drift, cache hit when the
@@ -1833,12 +1781,11 @@ def _source_variant_fp(source: dict) -> tuple:
     affect the generated view SQL beyond the schema fields.
 
     Finding 002 (2026-06-15): ``_update_iceberg_view_locked`` appends a
-    WHERE clause derived from ``source["time_range"]`` and the analyst
-    flag derived from ``source["access_level"]``. Without these in the
+    WHERE clause derived from ``source["time_range"]``. Without it in the
     ``_view_cache`` key tuple, a cached SQL string from one variant
     could be served back to a request that wrote a different time
     range — silently applying the wrong WHERE clause to the result
-    set. Cheap defense in depth: include both in the key.
+    set. Cheap defense in depth: include it in the key.
 
     ``provisioning.cron_sync.enabled`` is also folded in because the
     same WHERE-clause branch fires when cron sync is disabled.
@@ -1848,9 +1795,8 @@ def _source_variant_fp(source: dict) -> tuple:
         tr_fp: tuple = (tr.get("start"), tr.get("end"))
     else:
         tr_fp = ()
-    access = source.get("access_level") or ""
     cron_enabled = bool(((source.get("provisioning") or {}).get("cron_sync") or {}).get("enabled", True))
-    return (access, tr_fp, cron_enabled)
+    return (tr_fp, cron_enabled)
 
 
 # Per-source rebuild signal: source_key -> Event set when an in-progress
@@ -2048,10 +1994,7 @@ def _finalize_view_sql(
       WHEREs in alerts.py and the rollup readers depend on them);
     - the ``c_speed`` / ``p_type`` / ``p_desc`` decode CASEs and the
       ``ttl`` / ``age`` integer rounding (logs table only);
-    - the ``time_range`` WHERE clamp for ``read_only`` (analyst) sources
-      and cron-disabled manual imports — a DATA-SCOPING boundary, not an
-      optimization: an analyst share must never expose rows outside the
-      granted window.
+    - the ``time_range`` WHERE clamp for cron-disabled manual imports.
     """
     sql = union_sql
 
@@ -2090,10 +2033,9 @@ def _finalize_view_sql(
         if exclude_cols:
             sql = f"SELECT * EXCLUDE ({', '.join(exclude_cols)}), {', '.join(select_extras)} FROM ({sql})"
 
-    # 3. Analyst / manual-import time clamp.
+    # 3. Manual-import time clamp.
     tr = source.get("time_range")
-    is_analyst = source.get("access_level") == "read_only"
-    if tr and (is_analyst or not source.get("provisioning", {}).get("cron_sync", {}).get("enabled", True)):
+    if tr and not source.get("provisioning", {}).get("cron_sync", {}).get("enabled", True):
         import dateutil.parser as _dt
 
         where_clauses = []

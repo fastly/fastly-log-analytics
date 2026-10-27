@@ -12,7 +12,7 @@ The **Live Query Monitor** provides real-time observability into all running and
 ### Key Tenets:
 - **Zero Dark Queries:** Every database statement across DuckDB, ClickHouse, and PostgreSQL (`sqlite_profiler` instrumentation) is surfaced in real time with duration, row counts, and caller tags.
 - **Lock Contention Forensics:** Visualizes metadata/catalog thread locks and DuckDB connection pool saturation.
-- **Strict RBAC:** Accessible **exclusively** to Admin (`read_write`) users. Analyst Path B (Remote Share) and Analyst Path A receive HTTP `403 Forbidden`.
+- **Strict RBAC:** Accessible **exclusively** to Admin users. Analysts (Remote Share) receive HTTP `403 Forbidden`.
 
 ---
 
@@ -32,8 +32,7 @@ The **Live Query Monitor** provides real-time observability into all running and
 | Role | Access Level | Data Redaction & Capabilities |
 |---|---|---|
 | **Admin (`read_write`)** | Full Control | Full query texts, caller attribution, thread IDs, query cancellation (`POST /api/admin/queries/{qid}/cancel`), slow query log clearing (`DELETE /api/admin/slow-queries`). |
-| **Analyst Path B (Remote Share)** | Blocked (403) | All `/api/admin/queries*` and `/api/admin/slow-queries*` routes rejected with HTTP `403 Forbidden` via `_ANALYST_BLOCKED_PREFIXES` (`admin_only`). |
-| **Analyst Path A (JSON Join)** | Blocked (403) | Route access and administrative mutations rejected. |
+| **Analyst (Remote Share)** | Blocked (403) | All `/api/admin/queries*` and `/api/admin/slow-queries*` routes rejected with HTTP `403 Forbidden` via `_ANALYST_BLOCKED_PREFIXES` (`admin_only`). |
 
 ---
 
@@ -103,17 +102,17 @@ The **Live Query Monitor** provides real-time observability into all running and
 
 ## 9. AI Session Automated Verification Checklist
 
-- [x] **1. Route Accessibility:** `GET /admin/queries` returns HTTP 200 for Admin; returns HTTP 403 for Analyst Path B across all `/api/admin/queries*` and `/api/admin/slow-queries*` endpoints.
+- [x] **1. Route Accessibility:** `GET /admin/queries` returns HTTP 200 for Admin; returns HTTP 403 for Analyst across all `/api/admin/queries*` and `/api/admin/slow-queries*` endpoints.
 - [x] **2. Zero Layout Shift:** Verified page loads with pre-allocated panel reservations (`[contain-intrinsic-size:...]`) and `CLS <= 0.05`.
 - [x] **3. Active Query & Snapshot Telemetry:** Verified `/api/admin/queries` and `/api/admin/queries/summary` render live active, slow, and completed ring-buffer telemetry.
 - [x] **4. Slow Query History:** Verified persisted slow queries (`GET /api/admin/slow-queries`, `GET /api/admin/slow-queries/count`, `DELETE /api/admin/slow-queries`) against PostgreSQL `slow_queries` (`METADATA_DSN`).
-- [x] **5. Role Verification:** Confirmed Analyst Path B receives HTTP 403 across all 8 endpoints in `tests/routers/test_admin_queries.py` and `frontend/e2e/pages/admin-queries.spec.ts`.
+- [x] **5. Role Verification:** Confirmed Analyst receives HTTP 403 across all 8 endpoints in `tests/routers/test_admin_queries.py` and `frontend/e2e/pages/admin-queries.spec.ts`.
 - [x] **6. Telemetry & Query Audit:** Verified `X-Page-Load-ID` propagation and profiler self-exclusion (`exclude_from_profiling`).
 
 ---
 
 ## 10. Automated Test Suite & Traffic Generation
 
-- **Backend Unit Tests:** `tests/routers/test_admin_queries.py` (35 tests covering registry, snapshot, summary, detail, cancel + audit, persisted slow query list/count/clear, config endpoint, and Analyst Path B 403 rejection).
+- **Backend Unit Tests:** `tests/routers/test_admin_queries.py` (35 tests covering registry, snapshot, summary, detail, cancel + audit, persisted slow query list/count/clear, config endpoint, and Analyst 403 rejection).
 - **Frontend Unit Tests:** `frontend/__tests__/app/admin-queries.test.tsx` (3 tests covering `loading.tsx`, initial skeleton reservations, and populated query tables + interactive controls).
 - **Playwright E2E Suite:** `frontend/e2e/pages/admin-queries.spec.ts` (5 E2E contract tests certified across Local Standard, Remote Standard GCE, and High-Scale Elevation).

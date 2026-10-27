@@ -113,6 +113,15 @@ def refresh_view_and_warm_pool(
         logger.warning("[scheduler] %s: post-%s view refresh failed: %s", service_id, log_prefix.strip(": "), e)
 
 
+def _refresh_status_after_commit(service_id: str, source: dict) -> None:
+    """Refresh the cached service status and drop stale dashboard cache entries after a commit."""
+    from backend.core.duckdb import refresh_config_status
+    from backend.repositories.dashboard import invalidate_service
+
+    refresh_config_status(service_id)
+    invalidate_service(source["name"])
+
+
 def finalize_cron_duration(
     src: dict,
     run_id: int | None,
@@ -426,9 +435,6 @@ def _run_log_discovery_cron(
     if src is None:
         logger.warning("[scheduler] %s: source not found, skipping.", service_id)
         return
-    if src.get("access_level") == "read_only" and not force:
-        return
-
     sync_cfg = cfg.get("provisioning", {}).get("cron_sync", {})
     sync_enabled = sync_cfg.get("enabled", True)
     delete_after = svcconfig.resolve_raw_delete_after(cfg, delete_after)
@@ -797,11 +803,7 @@ def _run_full_sweep(
     cfg = svcconfig.load_config(service_id) or {}
     delete_after = svcconfig.resolve_raw_delete_after(cfg)
     src = get_source_for_service(service_id)
-    if (
-        src is None
-        or src.get("access_level") == "read_only"
-        or (not force and should_defer_cron("full_sync", service_id))
-    ):
+    if src is None or (not force and should_defer_cron("full_sync", service_id)):
         return
 
     _display = _display_label(src, service_id)
@@ -1005,11 +1007,7 @@ def _run_gap_heal(service_id: str, run_id: int | None = None, force: bool = Fals
     from backend.utils.active_requests import should_defer_cron
 
     src = get_source_for_service(service_id)
-    if (
-        src is None
-        or src.get("access_level") == "read_only"
-        or (not force and should_defer_cron("gap_heal", service_id))
-    ):
+    if src is None or (not force and should_defer_cron("gap_heal", service_id)):
         return
 
     _display = _display_label(src, service_id)
@@ -1104,7 +1102,7 @@ def _run_commit(service_id: str, force: bool = False, run_id: int | None = None)
     if not cfg:
         return
     src = get_source_for_service(service_id)
-    if src is None or (src.get("access_level") == "read_only" and not force):
+    if src is None:
         return
     sync_cfg = cfg.get("provisioning", {}).get("cron_sync", {})
     if not sync_cfg.get("enabled", True) and not force:
@@ -1221,9 +1219,7 @@ def _run_commit(service_id: str, force: bool = False, run_id: int | None = None)
                     progress_log=lambda ev: _log_and_add_progress(run_id, service_id, job_name="commit", event=ev),
                 )
                 try:
-                    from backend.cron.jobs import metadata as _metadata_jobs
-
-                    _metadata_jobs.dispatch_post_commit_metadata_sync(service_id)
+                    _refresh_status_after_commit(service_id, src)
                 except Exception as e:
                     _log_and_add_progress(
                         run_id, service_id, job_name="commit", event={"type": "warning", "message": e}
@@ -1520,7 +1516,7 @@ def _run_rum_discovery_cron(service_id: str, run_id: int | None = None) -> None:
     if not cfg or not svcconfig.is_rum_enabled(cfg):
         return
     src = get_source_for_service(service_id)
-    if src is None or src.get("access_level") == "read_only" or not svcconfig.is_high_scale_mode(src):
+    if src is None or not svcconfig.is_high_scale_mode(src):
         return
 
     with cron_run(
@@ -1599,7 +1595,7 @@ def _run_ledger_sweep_impl(
     if not cfg or (require_rum and not svcconfig.is_rum_enabled(cfg)):
         return
     src = get_source_for_service(service_id)
-    if src is None or not svcconfig.is_high_scale_mode(src) or src.get("access_level") == "read_only":
+    if src is None or not svcconfig.is_high_scale_mode(src):
         return
 
     row_prefix = "RUM " if require_rum else ""
@@ -1679,7 +1675,7 @@ def _run_rum_commit(service_id: str, force: bool = False, run_id: int | None = N
     if not cfg:
         return
     src = get_source_for_service(service_id)
-    if src is None or (src.get("access_level") == "read_only" and not force):
+    if src is None:
         return
     if not cfg.get("provisioning", {}).get("cron_sync", {}).get("enabled", True) and not force:
         return

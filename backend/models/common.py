@@ -536,12 +536,9 @@ class BaseResponse(BaseModel):
 class BootstrapService(WireSafeModel):
     service_id: str
     name: str | None = None
-    access_level: str | None = None
     cmcd_enabled: bool | None = None
     rum_enabled: bool | None = None
     rum_log_period: int | None = None
-    analyst_path_a_supported: bool = True
-    analyst_path_a_reason: str | None = None
     is_high_scale: bool | None = None
 
 
@@ -549,7 +546,6 @@ class BootstrapSettings(WireSafeModel):
     """Typed settings envelope returned by ``GET /api/bootstrap``."""
 
     initializing: bool | None = None
-    access_level: str | None = None
     storage_mode: str | None = None
     is_remote_analyst: bool | None = None
     needs_login: bool | None = None
@@ -678,7 +674,6 @@ class ServiceConfig(BaseModel):
     # analyst-scoped reads.
     fos_bucket: str | None = None
     log_period: int | None = None
-    access_level: str | None = None
     storage_mode: str | None = None
     duckdb_size_bytes: int | None = None
     cache_file_count: int | None = None
@@ -692,7 +687,6 @@ class ServiceConfig(BaseModel):
     rum_enabled: bool | None = None
     rum: RumConfigSection | None = None
     rum_log_period: int | None = None
-    analyst_path_a_supported: bool | None = None
     is_high_scale: bool | None = None
 
 
@@ -765,21 +759,6 @@ class LoggingSettingsResponse(BaseResponse):
     format_match: bool | None = None
     version: int | str | None = None
     cmcd: CmcdSettingsResponse | None = None
-
-
-class AnalystInvite(BaseResponse):
-    name: str
-    service_id: str
-    fos_bucket: str
-    fos_region: str
-    fos_endpoint: str
-    fos_prefix: str
-    access_key_id: str
-    secret_key: str
-    iceberg_metadata_location: str | None = None
-    cdn_url: str | None = None
-    cdn_service_id: str | None = None
-    cdn_secret: str | None = None
 
 
 class RumSettingsPartial(BaseModel):
@@ -1170,18 +1149,6 @@ class CheckFosRequest(BaseModel):
     secret_key: str
 
 
-class LakeInfoRequest(BaseModel):
-    """Body for ``POST /api/provision/lake-info``."""
-
-    bucket: str
-    region: str
-    access_key: str
-    secret_key: str
-    prefix: str = ""
-    endpoint: str | None = None
-    iceberg_metadata_location: str | None = None
-
-
 class ProvisionExecuteRequest(BaseModel):
     """Body for ``POST /api/provision/execute``."""
 
@@ -1358,40 +1325,6 @@ class ProvisionCheckDomainResponse(PassthroughModel):
 class ProvisionCheckFosResponse(PassthroughModel):
     ok: bool | None = None
     error: str | None = None
-
-
-class ProvisionLakeInfoRange(PassthroughModel):
-    start: str | None = None
-    end: str | None = None
-
-
-class ProvisionLakeInfoCalendarDay(PassthroughModel):
-    data_files: int
-    size_bytes: int
-
-
-class ProvisionLakeInfoTable(PassthroughModel):
-    table_name: str | None = None
-    snapshots: int | None = None
-    data_files: int | None = None
-    size_bytes: int | None = None
-    latest_snapshot_at: str | None = None
-    buffer_files: int | None = None
-    buffer_size_bytes: int | None = None
-    table_location: str | None = None
-    region: str | None = None
-    min_timestamp: str | None = None
-    max_timestamp: str | None = None
-
-
-class ProvisionLakeInfoResponse(PassthroughModel):
-    ok: bool | None = None
-    table_exists: bool | None = None
-    message: str | None = None
-    error: str | None = None
-    info: ProvisionLakeInfoTable | None = None
-    calendar: dict[str, ProvisionLakeInfoCalendarDay] | None = None
-    range: ProvisionLakeInfoRange | None = None
 
 
 class ProvisionIngestResponse(PassthroughModel):

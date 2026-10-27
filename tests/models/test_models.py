@@ -1385,7 +1385,6 @@ def _cfg(**overrides) -> dict:
     return {
         "service_id": "svc-1",
         "name": "My Service",
-        "access_level": "read_write",
         "fos_endpoint": "us-east-1.object.fastlystorage.app",
         "fos_access_key_id": "key",
         "fos_secret_access_key": "secret",
@@ -1538,10 +1537,6 @@ def test_config_to_source_field_mappings():
         ]["fos_key_id"]
         == "key-123"
     )
-    cfg_no_al = _cfg()
-    del cfg_no_al["access_level"]
-    assert svcconfig.config_to_source(cfg_no_al)["access_level"] == "read_write"
-
     for kw, exp_en, exp_rum in [
         ({"rum_enabled": True, "rum": {"enabled": False}}, False, {"enabled": False}),
         ({"rum_enabled": True}, True, {}),

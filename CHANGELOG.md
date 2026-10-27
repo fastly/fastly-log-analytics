@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
+- Removed analyst Path A (the "independent instance" analyst join that used read-only FOS credentials; it could not work against DuckLake). Remote sharing (Path B) is the only analyst access model. Removed endpoints: `POST /api/services/{service_id}/generate-viewer-key`, `GET /api/services/{service_id}/lake-info` and `POST /api/provision/lake-info`. Also removed: the `invite-analyst` CLI command, the Provision Wizard "Analyst: Join" mode and its analyze, settings and confirm steps, the `metadata_sync` cron job and `import_admin_state`, the read-only `access_level` service setting (the `access_level` and `analyst_path_a_supported` fields are gone from API responses), and the `iceberg_metadata_location` field.
+- `POST /api/admin/rebuild-local-view` now rebuilds the view in a background thread and no longer returns a `run_id`; it no longer starts a `metadata_sync` run.
+- Service reset and teardown now remove DuckLake data (the FOS `ducklake/` prefix for High-Scale, the local DuckLake data directory, and the service's DuckLake tables) instead of the legacy `iceberg/default/` prefix.
+
 - Removed the raw-logs and live-tail endpoints `POST /api/logs`, `POST /api/logs/query`, `GET /api/logs`, `GET /api/logs/{service_id}`, `GET /api/stream/{service_id}` and `GET /api/services/{service_id}/stream`. Their only consumers, the `/logs` Raw Logs and Live Tail tabs, were removed; use `POST /api/query` raw-query mode instead.
 
 ## [3.0.0-beta4] - 2026-10-20

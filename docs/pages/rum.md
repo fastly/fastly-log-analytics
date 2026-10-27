@@ -31,8 +31,7 @@ The **Real User Monitoring (RUM)** page captures browser-side telemetry delivere
 | Role | Access Level | Data Redaction & Capabilities |
 |---|---|---|
 | **Admin (`read_write`)** | Full Access | Full CWV histograms, client JS error stack traces, unmasked client IPs. |
-| **Analyst Path B (Remote Share)** | Read-Only Access | Full CWV dashboards viewable; JS error details viewable; client IPs masked (if enabled). |
-| **Analyst Path A (JSON Join)** | Local Read-Only | Queries local DuckLake `client_vitals` / `client_errors`. |
+| **Analyst (Remote Share)** | Read-Only Access | Full CWV dashboards viewable; JS error details viewable; client IPs masked (if enabled). |
 
 ---
 
@@ -157,7 +156,7 @@ selected real-data window.
 - [ ] **3. CWV Metric Contract:** Verify LCP, INP, and CLS percentiles calculate accurately against Google thresholds.
 - [ ] **4. Time Range Extent:** Confirms 24h default or adaptive extent for services < 24h history.
 - [ ] **5. Unconfigured State:** Disabling RUM renders the onboarding helper gracefully.
-- [ ] **6. Role Verification:** Confirm Analyst Path B observes expected view without administrative buttons.
+- [ ] **6. Role Verification:** Confirm Analyst observes expected view without administrative buttons.
 - [ ] **7. Telemetry & Query Audit:** Verify all DuckDB and PostgreSQL queries are recorded with zero duplicate queries.
 - [ ] **8. High-scale positive chart gate:** On a service with real visible RUM
   facts in the selected 30-day range, verify both trend charts have finite

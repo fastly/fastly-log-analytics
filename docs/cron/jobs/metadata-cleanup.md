@@ -37,8 +37,7 @@
 | Role | Job State | Manual API Trigger | Data Visibility |
 |---|---|---|---|
 | **Admin (`read_write`)** | Active | `POST /api/admin/metadata-cleanup/{service_id}` (or `POST /api/admin/metadata-cleanup`) | Pruning statistics in Admin UI via SSE streaming. |
-| **Analyst Path A (Standalone Instance)** | Active | Internal trigger | Prunes local analyst metadata databases. Quarantine writes and maintenance skipped. |
-| **Analyst Path B (Remote Share)** | N/A | Blocked (403) | Server-side maintenance only; no direct interaction. |
+| **Analyst (Remote Share)** | N/A | Blocked (403) | Server-side maintenance only; no direct interaction. |
 
 ---
 
@@ -92,7 +91,6 @@
 ## 7. Failure Modes & Recovery Runbooks
 - **PostgreSQL Pool Contention / Statement Timeout:** Handled gracefully; politeness gate prevents contention with active dashboard users. Connection pool manages transaction lifecycle with automatic rollback on error.
 - **Transient Failures:** Logged to `cron_runs` with `status="error"` and error summary; `finally:` block ensures `finalize_cron_duration` and `end_progress` always run.
-- **Read-Only Service (Analyst):** Quarantine writes and maintenance are skipped; only the instance's owned operational metadata is pruned.
 
 ### Local Quarantine Evidence
 - Each malformed line and corrupt gzip container is one item in a shared 1,000-item cap for that service. There is no age-based expiry or cloud deletion.

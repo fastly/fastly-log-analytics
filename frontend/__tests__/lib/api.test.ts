@@ -222,13 +222,13 @@ describe('serviceless service-discovery & global-admin observability exemptions 
   it('STILL aborts a service-scoped subpath (/api/services/{id}/…)', async () => {
     let reached = false
     server.use(
-      http.get(`${API_BASE}/api/services/:id/lake-info`, () => {
+      http.get(`${API_BASE}/api/services/:id/log-field-audit`, () => {
         reached = true
         return HttpResponse.json({ ok: true })
       }),
     )
     await expect(
-      client.GET('/api/services/{service_id}/lake-info', { params: invalidInput({ path: { service_id: 'svc-123' } }) }),
+      client.GET('/api/services/{service_id}/log-field-audit', { params: invalidInput({ path: { service_id: 'svc-123' } }) }),
     ).rejects.toMatchObject({ code: 'NO_SERVICE' })
     expect(reached).toBe(false)
   })

@@ -468,7 +468,6 @@ def _extract_log_text(run_id: int | None) -> str:
 JOB_COLORS = {
     "sync": "\x1b[94m",  # Bright Blue
     "commit": "\x1b[95m",  # Bright Magenta
-    "metadata_sync": "\x1b[96m",  # Bright Cyan
     "metadata_cleanup": "\x1b[35m",  # Magenta
     "alerts": "\x1b[93m",  # Bright Yellow
     "optimize": "\x1b[92m",  # Bright Green
@@ -487,11 +486,8 @@ TYPE_ICONS = {
     "commit": "💾 ",
     "optimize": "🔨 ",
     "expire": "🗑️ ",
-    "metadata_sync": "🔄 ",
     "alerts": "🔔 ",
     "ngwaf_sync": "👾 ",
-    "iceberg": "🧊 ",
-    "sync_data": "⬇️  ",
     "usage_log": "📊 ",
 }
 
@@ -618,8 +614,6 @@ class Scheduler:
                 len(self._job_ids),
             )
             return
-        from backend.cron.jobs.metadata import _run_metadata_sync
-
         self._sync_jobs()
         self._sched.start()
         logger.info("🟢 [scheduler] Started (pid: %d). %d job(s) registered.", os.getpid(), len(self._job_ids))
@@ -637,15 +631,6 @@ class Scheduler:
             service_id = cfg.get("service_id")
             if not service_id:
                 continue
-            prov = cfg.get("provisioning", {})
-            sync_cfg = prov.get("cron_sync", {})
-            if cfg.get("access_level") == "read_only" and sync_cfg.get("enabled", True):
-                try:
-                    self._add_job(
-                        _run_metadata_sync, args=[service_id], id=f"initial_sync_{service_id}", replace_existing=True
-                    )
-                except Exception:
-                    pass
             if warm_enabled:
                 src = get_source_for_service(service_id)
                 if src and is_configured(src):
@@ -843,7 +828,7 @@ class Scheduler:
                 args=[service_id],
                 misfire_grace_time=60,
             )
-        if compact_cfg.get("enabled", True) and prov.get("access_level") != "read_only":
+        if compact_cfg.get("enabled", True):
             rc_job_id = f"rollup_compact_{service_id}"
             self._register_once_job(
                 rc_job_id,
@@ -909,7 +894,6 @@ class Scheduler:
             _run_bot_data_refresh,
             _run_expire_snapshots,
             _run_metadata_cleanup,
-            _run_metadata_sync,
             _run_ngwaf_bot_sync,
             _run_optimize,
             _run_rdns_enrichment,
@@ -940,33 +924,6 @@ class Scheduler:
             else:
                 interval_seconds = max(5, log_period // 2 if log_period >= 60 else log_period)
             commit_interval_mins = max(1, int(sync_cfg.get("commit_interval_mins", 5)))
-            is_readonly = cfg.get("access_level") == "read_only"
-            sync_metadata_id = f"sync_metadata_{service_id}"
-            if is_readonly:
-                meta_cfg = prov.get("cron_metadata_sync", {})
-                if meta_cfg.get("enabled", True):
-                    meta_interval = int(meta_cfg.get("interval_seconds") or interval_seconds)
-                    self._register_reschedulable_job(
-                        sync_metadata_id,
-                        _run_metadata_sync,
-                        "interval",
-                        seen_ids,
-                        "[scheduler] Registered metadata sync job %s (every %ds).",
-                        sync_metadata_id,
-                        meta_interval,
-                        max_instances=0,
-                        seconds=meta_interval,
-                        replace_existing=True,
-                        start_date=None,
-                        args=[service_id],
-                        misfire_grace_time=60,
-                    )
-                alerts_cfg = prov.get("cron_alerts", {})
-                alerts_enabled = alerts_cfg.get("enabled", True)
-                alerts_seconds = int(alerts_cfg.get("interval_seconds") or interval_seconds)
-                self._register_alerts_evaluation_job(service_id, alerts_seconds, seen_ids, enabled=alerts_enabled)
-                self._register_insights_prewarmer_job(service_id, seen_ids, prov)
-                continue
             job_id = f"log_discovery_{service_id}"
             seen_ids.add(job_id)
             if job_id in self._job_ids:
@@ -1332,7 +1289,6 @@ from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry  # noqa:
 
 _CacheRegistry.register("cron.scheduler._last_heavy_refresh", _last_heavy_refresh)
 TASK_MAP = {
-    "sync_metadata": "metadata_sync",
     "log_discovery": "log_discovery",
     "rum_sync": "rum_sync",
     "full_sync": "full_sync",
@@ -1376,8 +1332,6 @@ def build_cron_schedule_payload(source: dict) -> dict:
     for job in sched._sched.get_jobs():
         job_id = getattr(job, "id", "")
         if not job_id.endswith(f"_{service_id}"):
-            continue
-        if job_id.startswith("initial_sync"):
             continue
         task_name = job_id[: -len(f"_{service_id}")]
         db_task = TASK_MAP.get(task_name)
@@ -1637,7 +1591,6 @@ def compute_sync_status_cached(service_id: str | None) -> dict | None:
         return {
             "configured": True,
             **metrics,
-            "access_level": src.get("access_level", "read_write"),
             "storage_mode": src.get("storage_mode", "cloud"),
         }
     lookup_key = service_id or src.get("service_id") or src.get("name", "")
@@ -1687,7 +1640,6 @@ def compute_sync_status_cached(service_id: str | None) -> dict | None:
             cached_status["local_rows"] = total_rows
     except Exception as e:
         logger.debug("[compute_sync_status_cached] failed to overlay real-time SQLite metadata: %s", e)
-    cached_status["access_level"] = src.get("access_level", "read_write")
     cached_status["storage_mode"] = src.get("storage_mode", "cloud")
     cached_status["configured"] = True
     db_path = src.get("duckdb_path") or svcconfig.duckdb_path(service_id)

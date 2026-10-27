@@ -713,7 +713,6 @@ def _save_config(**cron_sync_overrides):
             "fos_region": "us-east-1",
             "fos_access_key_id": "test-key",
             "fos_secret_access_key": "test-secret",
-            "access_level": "read_write",
             "provisioning": {"cron_sync": {"enabled": True, **cron_sync_overrides}},
         },
     )

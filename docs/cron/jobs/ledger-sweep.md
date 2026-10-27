@@ -32,8 +32,7 @@
 | Role | Job State | Manual API Trigger | Data Visibility |
 |---|---|---|---|
 | **Admin (`read_write`)** | Active | `POST /api/admin/ledger/sweep/{service_id}` | Ingestion health, recovery metrics, and quarantine visibility in Admin UI. |
-| **Analyst Path A (Standalone Instance)** | Disabled | Disabled | Distributed ledger operates server-side only. |
-| **Analyst Path B (Remote Share)** | N/A | Blocked (403) | Server-side background daemon. |
+| **Analyst (Remote Share)** | N/A | Blocked (403) | Server-side background daemon. |
 
 ---
 
@@ -105,5 +104,4 @@
 - [x] 6. Stale worker claim reclamation verified via `tests/core/test_step4_sweeper.py` and `tests/cron/test_ledger_sweep_contract.py`.
 - [x] 7. Queue depth lost-message guard verified via `tests/core/test_step4_sweeper.py` and `tests/cron/test_ledger_sweep_contract.py`.
 - [x] 8. Deployment mode gating (clean exit in standard mode) verified via `test_run_ledger_sweep_skips_in_standard_mode` and `test_ledger_sweep_manual_endpoint_standard_mode_400`.
-- [x] 9. Role-based access control and analyst isolation verified via `test_run_ledger_sweep_skips_for_analyst_path_a` and `test_ledger_sweep_manual_endpoint_read_only_403`.
 - [x] 10. Manual trigger endpoint `POST /api/admin/ledger/sweep/{service_id}` and quarantine inspection `GET /api/admin/ledger/quarantine` verified in `tests/cron/test_ledger_sweep_contract.py`.

@@ -34,8 +34,7 @@ The **Origin Health & Shielding** page focuses on backend origin infrastructure,
 | Role | Access Level | Data Redaction & Capabilities |
 |---|---|---|
 | **Admin (`read_write`)** | Full Access | Full origin host names, backend IP diagnostics, retry logs, and drill-down controls. |
-| **Analyst Path B (Remote Share)** | Read-Only Access | Origin health metrics viewable; invite session bounds clamped via `ctx.clamp`; write/admin endpoints blocked. |
-| **Analyst Path A (JSON Join)** | Local Read-Only | Queries local DuckLake / cached buffer. |
+| **Analyst (Remote Share)** | Read-Only Access | Origin health metrics viewable; invite session bounds clamped via `ctx.clamp`; write/admin endpoints blocked. |
 
 ---
 
@@ -142,7 +141,7 @@ rebuilt, see
 - [x] **3. Data Aggregates Contract:** `POST /api/origin/aggregates` returns complete summary, timeseries, slow_urls, status_codes, path_breakdown, pop_latency, and ip_health.
 - [x] **4. Section Pruning & Coupling:** Backend correctly handles `_TS_STATUS_PATH_TRIPLE` and `_POP_IP_PAIR` couplings.
 - [x] **5. Time Range Extents & SSR Parity:** Range tokens (`15m`, `24h`, `30d`) and anchors resolve identically across client and server.
-- [x] **6. Role Verification:** Analyst Path B adheres to `_ANALYST_ALLOWED_WRITE_PREFIXES`, session time bounds clamping, and IP masking.
+- [x] **6. Role Verification:** Analyst adheres to `_ANALYST_ALLOWED_WRITE_PREFIXES`, session time bounds clamping, and IP masking.
 - [x] **7. Telemetry & Query Audit:** All DuckDB and ClickHouse queries are attributed with `X-Page-Load-ID` and profiled.
 - [x] **8. Backend Router Tests:** `tests/routers/test_origin_router.py` (23 tests passing).
 - [x] **9. Frontend Unit Tests:** `frontend/__tests__/app/origin.test.tsx` (3 tests passing).

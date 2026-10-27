@@ -44,7 +44,7 @@ function fixture(t, overrides = {}) {
           return response(url, 200, { ok: true });
         }
         if (!isAdmin && endpoint === '/api/share/auth-config') return response(url, 200, { passcode_enabled: state.passcodesEnabled !== false });
-        if (!isAdmin && endpoint === '/api/bootstrap') return response(url, 200, { active_service_id: serviceId, services: [{ service_id: state.badScope ? 'service-other' : serviceId }], settings: { is_remote_analyst: !state.badBootstrap, access_level: 'read_only', mask_ips: state.badMask ? !context.invite.pii_policy.mask_ips : context.invite.pii_policy.mask_ips } });
+        if (!isAdmin && endpoint === '/api/bootstrap') return response(url, 200, { active_service_id: serviceId, services: [{ service_id: state.badScope ? 'service-other' : serviceId }], settings: { is_remote_analyst: !state.badBootstrap, mask_ips: state.badMask ? !context.invite.pii_policy.mask_ips : context.invite.pii_policy.mask_ips } });
         if (!isAdmin && endpoint === '/api/admin/share/status') return response(url, 403, {});
         if (!isAdmin && endpoint === '/api/dashboard/aggregates') {
           assert.equal(options.headers?.Origin, analystOrigin);

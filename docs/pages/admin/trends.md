@@ -37,9 +37,8 @@ The **Admin System Trends** page (`/admin/trends`) provides longitudinal time-se
 
 | Persona | Access Level | Expected Behavior |
 |---|---|---|
-| **Admin** (`access_level: "read_write"` / mTLS Admin Gateway) | Full Access | `200 OK` on `/admin/trends` and `GET /api/admin/metric-history/batch`. |
-| **Analyst Path A** (Read-Only FOS Instance) | Local Instance Admin UI | Can view local instance trends for their own process (`200 OK`). |
-| **Analyst Path B** (Remote Live-Share Session) | **Blocked (`403 Forbidden`)** | Blocked at both `RemoteAccessMiddleware` (`/api/admin/*` prefix gate) and route-level `Depends(require_admin)`. `GET /api/admin/metric-history/batch` with `X-Remote-Analyst: 1` returns `403 Forbidden` with `{"error": "admin_only"}`. SSR helper refuses to inject the admin token on the analyst branch and fails closed. |
+| **Admin** (mTLS Admin Gateway) | Full Access | `200 OK` on `/admin/trends` and `GET /api/admin/metric-history/batch`. |
+| **Analyst** (Remote Live-Share Session) | **Blocked (`403 Forbidden`)** | Blocked at both `RemoteAccessMiddleware` (`/api/admin/*` prefix gate) and route-level `Depends(require_admin)`. `GET /api/admin/metric-history/batch` with `X-Remote-Analyst: 1` returns `403 Forbidden` with `{"error": "admin_only"}`. SSR helper refuses to inject the admin token on the analyst branch and fails closed. |
 
 ---
 
@@ -100,7 +99,7 @@ The **Admin System Trends** page (`/admin/trends`) provides longitudinal time-se
 
 ## 6. Verification & Automated Test Suite
 
-- **Backend Unit Tests:** [`tests/routers/test_admin_metric_history.py`](../../../tests/routers/test_admin_metric_history.py) (covers composite scope keys, chronological ordering, `30m`/`1h`/`6h`/`24h`/`7d` windows, `400 Bad Request` on invalid windows, and Analyst Path B `403` rejection).
+- **Backend Unit Tests:** [`tests/routers/test_admin_metric_history.py`](../../../tests/routers/test_admin_metric_history.py) (covers composite scope keys, chronological ordering, `30m`/`1h`/`6h`/`24h`/`7d` windows, `400 Bad Request` on invalid windows, and Analyst `403` rejection).
 - **Route Tripwire & OpenAPI Contract Tests:** [`tests/remote_access/test_route_table_tripwire.py`](../../../tests/remote_access/test_route_table_tripwire.py) and [`tests/test_openapi_snapshot.py`](../../../tests/test_openapi_snapshot.py).
 - **Frontend Unit Tests:** [`frontend/__tests__/app/admin/trends.test.tsx`](../../../frontend/__tests__/app/admin/trends.test.tsx) (4 tests covering `loading.tsx` reservations, pending skeleton state, all 7 series cards + `max-per-ts` multi-service aggregation, and `1h` -> `6h` -> `24h` -> `7d` window switching + manual `Refresh`).
 - **Playwright E2E Suite:** [`frontend/e2e/pages/admin-trends.spec.ts`](../../../frontend/e2e/pages/admin-trends.spec.ts) (5 end-to-end contract tests verified across Local Standard, Remote Standard GCE, and High-Scale Elevation).

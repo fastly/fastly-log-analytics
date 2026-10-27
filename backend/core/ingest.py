@@ -625,9 +625,6 @@ def ingest(  # fmt: skip
         return f"{int(s // 60)}m{int(s % 60):02d}s" if s >= 60 else f"{s:.1f}s"
 
     src = source or _DEFAULT_SOURCE
-    if src.get("access_level") == "read_only":
-        yield {"type": "error", "message": "Write operations are disabled in read-only mode."}
-        return
     svc_id, source_name = src.get("service_id", "unknown"), src["name"]
     svc_name = src.get("service_name") or source_name
     display_name = f"{svc_name} ({svc_id})" if svc_name != svc_id else svc_id

@@ -29,7 +29,6 @@ from tests.conftest import MOCK_SERVICE_ID
 _BASE_CFG = {
     "service_id": "svc1",
     "name": "Test Service",
-    "access_level": "read_write",
     "fos_bucket": "my-bucket",
     "fos_region": "us-east-1",
     "fos_endpoint": "us-east-1.object.fastlystorage.app",
@@ -131,12 +130,6 @@ def test_credentials_missing_both_keys_returns_400():
     with patch("backend.config.load_config", return_value=_cfg()):
         response = _client().patch("/api/services/svc1/credentials", json={"access_key": "AKID"})
     assert response.status_code == 400
-
-
-def test_credentials_api_token_rejected_for_read_only_service():
-    with patch("backend.config.load_config", return_value=_cfg(access_level="read_only")):
-        response = _client().patch("/api/services/svc1/credentials", json={"api_token": "tok_abc"})
-    assert response.status_code == 403
 
 
 def test_credentials_fos_validation_failure_returns_400():
@@ -559,7 +552,6 @@ def _post(body: dict, stored_cron_sync: dict) -> dict:
     cfg = {
         "service_id": "svc1",
         "name": "Test Service",
-        "access_level": "read_write",
         "log_period": 60,
         "provisioning": {"cron_sync": dict(stored_cron_sync), "cron_compact": {"enabled": True}},
     }
@@ -620,7 +612,6 @@ def test_expiry_tuning_fields_round_trip():
 _FAKE_CFG = {
     "service_id": "svc123",
     "name": "Test Service",
-    "access_level": "read_write",
     "fos_bucket": "test-bucket",
     "fos_region": "us-east-1",
     "fos_endpoint": "us-east-1.object.fastlystorage.app",
@@ -631,42 +622,6 @@ _FAKE_CFG = {
 }
 
 _FAKE_KEY = {"access_key": "ANALYST_KEY", "secret_key": "ANALYST_SECRET"}
-
-
-def test_generate_viewer_key_returns_raw_credentials():
-    with (
-        patch("backend.config.load_config", return_value=_FAKE_CFG),
-        patch("backend.provision.orchestrator.fastly", return_value=_FAKE_KEY),
-        patch("backend.config.config_to_source", return_value={**_FAKE_CFG}),
-    ):
-        response = TestClient(app).post("/api/services/svc123/generate-viewer-key")
-
-    assert response.status_code == 200
-    data = response.json()
-    assert data["access_key_id"] == "ANALYST_KEY" and data["secret_key"] == "ANALYST_SECRET"
-    assert data["fos_bucket"] == "test-bucket"
-    assert "invite_block" not in data and "invite_secret" not in data and "expires_at" not in data
-
-
-def test_generate_viewer_key_requires_stored_api_key():
-    with patch("backend.config.load_config", return_value={**_FAKE_CFG, "fastly_api_key": ""}):
-        response = TestClient(app).post("/api/services/svc123/generate-viewer-key")
-    assert response.status_code == 400
-
-
-def test_generate_viewer_key_rejects_celery_topology():
-    with (
-        patch("backend.config.DEPLOYMENT_MODE", "high_scale"),
-        patch("backend.config.load_config", return_value=_FAKE_CFG),
-    ):
-        response = TestClient(app).post("/api/services/svc123/generate-viewer-key")
-    assert response.status_code == 409 and "Path B" in response.json()["detail"]["error"]
-
-
-def test_generate_viewer_key_requires_read_write_service():
-    with patch("backend.config.load_config", return_value={**_FAKE_CFG, "access_level": "read_only"}):
-        response = TestClient(app).post("/api/services/svc123/generate-viewer-key")
-    assert response.status_code == 403
 
 
 def test_decrypt_invite_endpoint_does_not_exist():
@@ -1225,7 +1180,7 @@ def _empty_sched():
 
 
 @pytest.mark.usefixtures("_clear_cron_schedule_ttl_cache")
-def test_services_list_and_lake_info(client):
+def test_services_list(client):
     fake_services = [
         {"service_id": "svc-1", "name": "Svc 1", "fos_bucket": "b1", "fos_region": "us-east-1"},
         {"service_id": "svc-2", "name": "Svc 2", "fos_bucket": "b2", "fos_region": "us-west-2"},
@@ -1238,13 +1193,6 @@ def test_services_list_and_lake_info(client):
     with patch("backend.services.service_manager.get_enriched_services", return_value=[]):
         resp_empty = client.get("/api/services")
     assert resp_empty.status_code == 200 and resp_empty.json()["services"] == []
-
-    fake_info = {"earliest": "2026-01-01T00:00:00Z", "latest": "2026-05-18T00:00:00Z", "calendar": {}}
-    with patch("backend.core.iceberg.lake_info.fetch_lake_info", return_value=fake_info) as mock_fetch:
-        resp_lake = client.get(f"/api/services/{MOCK_SERVICE_ID}/lake-info", headers=_SVC_HEADERS)
-    assert resp_lake.status_code == 200
-    assert resp_lake.json()["earliest"] == "2026-01-01T00:00:00Z"
-    assert mock_fetch.call_args.kwargs.get("use_temp_cache") is False
 
 
 @pytest.mark.usefixtures("_clear_cron_schedule_ttl_cache")
@@ -1442,36 +1390,6 @@ def test_update_logging_settings_validation_and_sse(client, tmp_path, monkeypatc
     with patch("backend.provision.update_logging_endpoint", side_effect=RuntimeError("API down")):
         resp_err = client.post(f"/api/services/{MOCK_SERVICE_ID}/logging-settings/update")
     assert resp_err.status_code == 200 and "API down" in resp_err.text and "error" in resp_err.text
-
-
-@pytest.mark.usefixtures("_clear_cron_schedule_ttl_cache")
-def test_invite_analyst_success_and_error_mappings(client):
-    fake_invite = {
-        "service_id": "svc-1",
-        "name": "MyService",
-        "access_key_id": "AK",
-        "secret_key": "SK",
-        "fos_bucket": "b",
-        "fos_region": "us-east-1",
-        "fos_endpoint": "https://s3.us-east-1.amazonaws.com",
-        "fos_prefix": "",
-    }
-    with patch("backend.provision.generate_analyst_invite", return_value=fake_invite):
-        resp = client.post(f"/api/services/{MOCK_SERVICE_ID}/generate-viewer-key")
-    assert resp.status_code == 200
-    body = resp.json()
-    assert (body["access_key_id"], body["secret_key"]) == ("AK", "SK") and "_debug_calls" in body
-
-    for msg, expected_code in (
-        ("Service ghost not found", 404),
-        ("Invite generation requires a read_write service configuration", 403),
-        ("Fastly upstream timeout", 400),
-    ):
-        with patch("backend.provision.generate_analyst_invite", side_effect=RuntimeError(msg)):
-            r = client.post(f"/api/services/{MOCK_SERVICE_ID}/generate-viewer-key")
-        assert r.status_code == expected_code
-        if expected_code == 400:
-            assert "timeout" in r.json()["detail"]["error"]
 
 
 @pytest.mark.usefixtures("_clear_cron_schedule_ttl_cache")

@@ -30,7 +30,7 @@ You'll need:
 
 ## Server Specifications
 
-When running as a shared server (Path B), the host machine should meet these minimums:
+When running as a shared server (remote sharing), the host machine should meet these minimums:
 
 - **RAM:** 16 GB
 - **CPU:** 2 vCPUs
@@ -85,32 +85,13 @@ The **admin** runs the provisioning wizard to set up a Fastly Object Storage buc
 
 ![ETL Process](docs/assets/etl.png)
 
-Once the data lake is healthy, you can collaborate with teammates using two different approaches depending on your hosting setup and security needs:
+Once the data lake is healthy, you can collaborate with teammates by sharing the live dashboard:
 
 ![Sharing Process](docs/assets/sharing.png)
 
-| Model | Path A: Independent Copy | Path B: Live Shared Server |
-| :--- | :--- | :--- |
-| **Analyst Setup** | Runs their own local copy of the app | Standard web browser only |
-| **Admin Setup** | **Offline-friendly.** Your laptop/server can go offline. | **Always-on.** Your machine hosts the active web server. |
-| **Data Source** | Analyst queries FOS bucket directly | Analyst queries the Admin's database over HTTP |
-| **Credential Sharing** | Shares read-only FOS bucket keys | **Zero keys shared.** Admin handles all credentials. |
-| **Best For** | Long-term analysts, laptop-only admins. | Quick screen-shares & non-technical associates. |
-
 ---
 
-### Path A: Independent Copy (Direct Bucket Access)
-
-The analyst runs their own independent copy of the app on their laptop or server. They use a read-only credential package to sync and query the Fastly Object Storage bucket directly.
-
-#### How it works:
-1. **Admin:** Click **Invite Analyst** in your dashboard. The app packages your FOS bucket name, region, and a set of read-only access keys into a secure JSON string. Send this JSON securely to your teammate.
-2. **Analyst:** Start your own copy of the app (e.g., using `docker compose`), select **Join Service** on the setup screen, and paste the JSON config.
-3. Your teammate's app automatically configures itself in `read_only` mode and syncs directly from the bucket. *Note: Because only the Admin's machine runs the active raw log ingestion pipeline, if the admin is offline, no new logs will be written to the database (though the analyst can still query all historical data). Once the admin is back online, the analyst's dashboard will automatically sync the newly committed logs.*
-
----
-
-### Path B: Live Shared Server (Web-Accessible Host)
+### Live Shared Server (Web-Accessible Host)
 
 You run the application as a central web-accessible server on a dedicated VM (or a laptop reachable at its own hostname / IP). Your associates connect using a standard web browser and sign in with a passcode — or, if you configure an OAuth/OIDC identity provider, with single sign-on.
 

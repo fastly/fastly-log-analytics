@@ -17,7 +17,7 @@ import { Database, HardDrive, History, FileCode, Archive, ClipboardList, Refresh
 import { NoServiceSelected } from '@/components/ReportLayout'
 import { useBootstrapResolved, useEffectiveServiceId, useLogFieldsCatalog } from '@/hooks/useBootstrap'
 import { ScrollArea } from '@/components/ui/scroll-area'
-import { SyncFromCloudModal, LiveElapsed, NextRunCountdown, TimeAgo } from '@/components/SyncStatusBadge/SyncStatusBadge'
+import { BackfillRangeModal, LiveElapsed, NextRunCountdown, TimeAgo } from '@/components/SyncStatusBadge/SyncStatusBadge'
 import { DataTable, DataTableReadonly, ColumnVisibilityDropdown, DateTimeCell, ingestedFilesColumns } from '@/components/DataTable'
 import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
@@ -66,12 +66,8 @@ export function useLogsPageState(initialTab?: string) {
   // load (empty localStorage, bootstrap still in flight or just
   // hydrated into the React Query cache) doesn't flash through the
   // <NoServiceSelected /> branch before useBootstrap's post-mount
-  // effect writes the persisted Zustand store. ``services`` still
-  // comes from the store — it's seeded synchronously by useBootstrap.
-  const services = useServiceStore(s => s.services)
+  // effect writes the persisted Zustand store.
   const activeServiceId = useEffectiveServiceId() ?? null
-  const activeService = services.find(s => s.id === activeServiceId)
-  const isAnalyst = activeService?.accessLevel === 'read_only'
   const queryClient = useQueryClient()
   const [activeTab, setActiveTab] = useQueryState('tab', parseAsString.withDefault(initialTab || 'cron'))
   const [isPurgeOpen, setIsPurgeOpen] = useState(false)
@@ -86,7 +82,7 @@ export function useLogsPageState(initialTab?: string) {
   const [consoleOpen, setConsoleOpen] = useState(false)
   const [selectedConsoleJobId, setSelectedConsoleJobId] = useState<number | string | null>(null)
   const notifyCronRun = useCallback((run: CronRun) => {
-    const taskName = run.task === 'metadata_sync' ? 'sync' : run.task
+    const taskName = run.task
     const label = run.status === 'running' ? 'Background Sync Started' : run.status === 'error' ? 'Background Sync Failed' : 'Background Sync Completed'
     const details = [taskName, run.status !== 'running' && run.rows_ingested != null ? `${formatCount(run.rows_ingested)} rows` : null, run.status !== 'running' && run.duration_s != null ? `${run.duration_s.toFixed(1)}s` : null].filter(Boolean).join(' · ')
     showToastWithAction(`${label} (${details})`, { actionLabel: 'View Console Logs', kind: run.status === 'error' ? 'error' : run.status === 'running' ? 'info' : 'success', durationMs: 8000, onAction: () => { setSelectedConsoleJobId(run.id); setConsoleOpen(true) } })
@@ -197,22 +193,13 @@ export function useLogsPageState(initialTab?: string) {
     // up on the grid automatically; only its position needs curating.
     const TASK_PRIORITY: Record<string, number> = {
       log_discovery: 1, rum_sync: 2, rum_discovery: 2, alerts: 3, commit: 4, rum_commit: 5, optimize: 6, local_compact: 7,
-      metadata_cleanup: 8, expire_snapshots: 9, full_sync: 10, gap_heal: 11, ngwaf_sync: 12, insights_prewarmer: 13, rollup_compact_daily: 14, rollup_hour_heal: 15, metadata_sync: 16,
+      metadata_cleanup: 8, expire_snapshots: 9, full_sync: 10, gap_heal: 11, ngwaf_sync: 12, insights_prewarmer: 13, rollup_compact_daily: 14, rollup_hour_heal: 15,
     }
-    // Analysts only see the read-only subset; nothing else is even
-    // exposed via the analyst-facing /api/cron-schedule path.
-    const analystAllowed = new Set(['metadata_sync', 'alerts'])
-    // For admin views, hide `metadata_sync` — it's the analyst-only
-    // read-only counterpart of `sync` and only shows up here as a
-    // historical-run entry (next_run_time=null). Worse, CronScheduleBox
-    // renders metadata_sync with the LABEL "sync" by design (so the
-    // analyst tile reads naturally), which created a confusing duplicate
-    // tile both labelled "sync" once the whitelist was lifted.
-    const adminExcluded = new Set(['metadata_sync']), source = cronSchedule?.schedules ?? [], hasNgwaf = !!status?.ngwaf_workspace_id
-    const filtered = isAnalyst ? source.filter((s) => analystAllowed.has(s.task)) : source.filter((s) => !adminExcluded.has(s.task) && (s.task !== 'ngwaf_sync' || hasNgwaf))
+    const source = cronSchedule?.schedules ?? [], hasNgwaf = !!status?.ngwaf_workspace_id
+    const filtered = source.filter((s) => s.task !== 'ngwaf_sync' || hasNgwaf)
     const sorted = [...filtered].sort((a, b) => (TASK_PRIORITY[a.task] ?? 999) - (TASK_PRIORITY[b.task] ?? 999) || a.task.localeCompare(b.task))
     return sorted.map((schedule) => ({ task: schedule.task, activeJob: displayedJobs.find((j) => j.task === schedule.task && j.status === 'running'), schedule }))
-  }, [cronSchedule?.schedules, displayedJobs, isAnalyst, status?.ngwaf_workspace_id])
+  }, [cronSchedule?.schedules, displayedJobs, status?.ngwaf_workspace_id])
   const { data: catalog } = useLogFieldsCatalog()
   const catalogMaps = React.useMemo(() => {
     if (!catalog) return { groups: {}, fields: {} }
@@ -263,7 +250,7 @@ export function useLogsPageState(initialTab?: string) {
   }, [activeServiceId, queryClient, setActiveTab])
   return {
     // identity
-    activeServiceId, isAnalyst,
+    activeServiceId,
     // tab state
     activeTab, handleTabChange,
     // cron tab filters
@@ -292,7 +279,6 @@ export const CRON_EXPLANATIONS: Record<string, string> = {
   optimize: 'Compacts small Iceberg data files into larger ones (writes back to FOS — incurs 30-day-minimum cost on rewritten files).',
   local_compact: 'Merges small parquet files in the LOCAL CACHE every 2 min. Free vs FOS — speeds up dashboard scans without touching the cloud manifest.',
   expire_snapshots: 'Removes old snapshots and orphaned files to reclaim storage.',
-  metadata_sync: 'Downloads the latest Iceberg metadata to sync with the remote data source.',
   ngwaf_sync: 'Fetches verified bot records from Fastly NGWAF and caches them locally for enriched bot detection.',
   metadata_cleanup: 'Daily 03:15 UTC. Trims usage_log + ingested_files + cron_runs in the per-service metadata.db per the retention policy (defaults 1d/1d/7d). VACUUMs the file only when something was actually deleted.',
   insights_prewarmer: 'Every 4 min. Pre-runs the default-selection insights query and warms the response cache so /insights returns warm (~80-130 ms) instead of cold-scanning the parquet (~3 s).',
@@ -304,13 +290,13 @@ export const CRON_EXPLANATIONS: Record<string, string> = {
 export const CRON_DISPLAY_NAMES: Record<string, string> = {
   log_discovery: 'Log Discovery', commit: 'Commit', full_sync: 'Full Discovery Sweep', gap_heal: 'Gap Heal', local_compact: 'Local Compact', optimize: 'Cloud Compact', expire_snapshots: 'Expire Snapshots',
   rollup_compact_daily: 'Rollup Compact', rollup_hour_heal: 'Rollup Heal', partial_hour_merge: 'Partial-Hour Merge', ledger_sweep: 'Ledger Sweep', insights_prewarmer: 'Insights Prewarmer', metadata_cleanup: 'Metadata Cleanup',
-  ngwaf_sync: 'NGWAF Sync', metadata_sync: 'Metadata Sync', alerts: 'Alerts Evaluation', rum_sync: 'RUM Discovery', rum_discovery: 'RUM Discovery', rum_commit: 'Ingest RUM',
+  ngwaf_sync: 'NGWAF Sync', alerts: 'Alerts Evaluation', rum_sync: 'RUM Discovery', rum_discovery: 'RUM Discovery', rum_commit: 'Ingest RUM',
 }
 export const CRON_GROUPS = [
   { title: 'Ingestion Pipeline', tasks: ['log_discovery', 'commit', 'full_sync', 'gap_heal'] },
   { title: 'Storage Maintenance', tasks: ['local_compact', 'optimize', 'expire_snapshots'] },
   { title: 'Rollups & Caching', tasks: ['rollup_compact_daily', 'rollup_hour_heal', 'insights_prewarmer', 'partial_hour_merge'] },
-  { title: 'Metadata & Enrichments', tasks: ['metadata_cleanup', 'ngwaf_sync', 'metadata_sync', 'alerts'] },
+  { title: 'Metadata & Enrichments', tasks: ['metadata_cleanup', 'ngwaf_sync', 'alerts'] },
   { title: 'Real User Monitoring', tasks: ['rum_sync', 'rum_discovery', 'rum_commit'] },
 ]
 type CronScheduleEntry = components['schemas']['CronScheduleEntry']
@@ -369,10 +355,10 @@ function CronScheduleGroupSection({ title, items, onOpenConsole }: { title: stri
     </div>
   )
 }
-export function CronTab({ cronColumns, cronLogs, isLoadingCron, isFetchingCron, orderedSchedules, isLoadingSchedule = false, taskFilter, setTaskFilter, statusFilter, setStatusFilter, isAnalyst, status, activeServiceId, setDisplayedJobs, setSelectedConsoleJobId, setConsoleOpen, isPurgeOpen, setIsPurgeOpen, purgeMutation }: {
+export function CronTab({ cronColumns, cronLogs, isLoadingCron, isFetchingCron, orderedSchedules, isLoadingSchedule = false, taskFilter, setTaskFilter, statusFilter, setStatusFilter, status, activeServiceId, setDisplayedJobs, setSelectedConsoleJobId, setConsoleOpen, isPurgeOpen, setIsPurgeOpen, purgeMutation }: {
   cronColumns: ColumnDef<CronRun>[]; cronLogs: components['schemas']['CronRunsResponse'] | undefined; isLoadingCron: boolean; isFetchingCron: boolean
   orderedSchedules: Array<{ task: string; activeJob: CronRun | undefined; schedule: CronScheduleEntry }>; isLoadingSchedule?: boolean; taskFilter: string; setTaskFilter: (v: string) => void; statusFilter: string; setStatusFilter: (v: string) => void
-  isAnalyst: boolean; status: SyncStatus | undefined; activeServiceId: string | null | undefined; setDisplayedJobs: React.Dispatch<React.SetStateAction<CronRun[]>>; setSelectedConsoleJobId: (id: number | string | null) => void; setConsoleOpen: (open: boolean) => void; isPurgeOpen: boolean; setIsPurgeOpen: (open: boolean) => void; purgeMutation: { isPending: boolean; mutate: () => void }
+  status: SyncStatus | undefined; activeServiceId: string | null | undefined; setDisplayedJobs: React.Dispatch<React.SetStateAction<CronRun[]>>; setSelectedConsoleJobId: (id: number | string | null) => void; setConsoleOpen: (open: boolean) => void; isPurgeOpen: boolean; setIsPurgeOpen: (open: boolean) => void; purgeMutation: { isPending: boolean; mutate: () => void }
 }) {
   const queryClient = useQueryClient()
   const [isHelpOpen, setIsHelpOpen] = React.useState(false)
@@ -380,8 +366,8 @@ export function CronTab({ cronColumns, cronLogs, isLoadingCron, isFetchingCron, 
   const handleOpenConsole = React.useCallback((jobId: number | string) => { setConsoleOpen(true); setSelectedConsoleJobId(jobId) }, [setConsoleOpen, setSelectedConsoleJobId])
   const groupedTaskNames = React.useMemo(() => CRON_GROUPS.flatMap(g => g.tasks), [])
   const otherTasks = React.useMemo(() => orderedSchedules.filter(s => !groupedTaskNames.includes(s.task)), [orderedSchedules, groupedTaskNames])
-  const adminTaskFilterOptions: Array<[string, string, boolean?]> = [
-    ['rum_sync', 'RUM Sync'], ['full_sync', 'Full Sync'], ['gap_heal', 'Gap Heal'], ['alerts', 'Alerts', true],
+  const taskFilterOptions: Array<[string, string]> = [
+    ['rum_sync', 'RUM Sync'], ['full_sync', 'Full Sync'], ['gap_heal', 'Gap Heal'], ['alerts', 'Alerts'],
     ['commit', 'Commit'], ['rum_commit', 'RUM Commit'], ['optimize', 'Optimize'], ['local_compact', 'Local Compact'],
     ['rollup_compact_daily', 'Rollup Compact'], ['rollup_hour_heal', 'Rollup Heal'], ['expire_snapshots', 'Expire'],
     ...(status?.ngwaf_workspace_id ? [['ngwaf_sync', 'NGWAF Sync'] as [string, string]] : []), ['metadata_cleanup', 'Metadata Cleanup'],
@@ -418,11 +404,11 @@ export function CronTab({ cronColumns, cronLogs, isLoadingCron, isFetchingCron, 
                   </div>
                 </HelpDialog>
                 <div className="space-y-5">
-                  {orderedSchedules.length === 0 ? (isAnalyst ? [CRON_GROUPS[3]] : CRON_GROUPS).map(group => (
+                  {orderedSchedules.length === 0 ? CRON_GROUPS.map(group => (
                     <div key={group.title} className="space-y-3">
                       <div className="text-[10px] font-semibold text-muted-foreground uppercase tracking-widest">{group.title}</div>
                       <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-2 w-full">
-                        {group.tasks.slice(0, isAnalyst ? 2 : 3).map((task) => <div key={task} className="h-8 rounded-md border border-muted bg-muted/20 animate-pulse min-w-[130px] flex-1" />)}
+                        {group.tasks.slice(0, 3).map((task) => <div key={task} className="h-8 rounded-md border border-muted bg-muted/20 animate-pulse min-w-[130px] flex-1" />)}
                       </div>
                     </div>
                   )) : (
@@ -442,15 +428,15 @@ export function CronTab({ cronColumns, cronLogs, isLoadingCron, isFetchingCron, 
                     <SelectTrigger className="h-8 w-[140px] text-xs"><SelectValue placeholder="All tasks" /></SelectTrigger>
                     <SelectContent>
                       <SelectItem value="all">All tasks</SelectItem>
-                      <SelectItem value={isAnalyst ? 'metadata_sync' : 'log_discovery'}>Log Discovery</SelectItem>
-                      {adminTaskFilterOptions.filter(([, , allowAnalyst]) => !isAnalyst || allowAnalyst).map(([val, label]) => <SelectItem key={val} value={val}>{label}</SelectItem>)}
+                      <SelectItem value="log_discovery">Log Discovery</SelectItem>
+                      {taskFilterOptions.map(([val, label]) => <SelectItem key={val} value={val}>{label}</SelectItem>)}
                     </SelectContent>
                   </Select>
                   <Select value={statusFilter} onValueChange={(v) => setStatusFilter(v || 'all')}>
                     <SelectTrigger className="h-8 w-[140px] text-xs"><SelectValue placeholder="All statuses" /></SelectTrigger>
                     <SelectContent>
                       <SelectItem value="all">All statuses</SelectItem><SelectItem value="success">Success</SelectItem>
-                      {!isAnalyst && <SelectItem value="partial_success">Partial Success</SelectItem>}<SelectItem value="error">Error</SelectItem>
+                      <SelectItem value="partial_success">Partial Success</SelectItem><SelectItem value="error">Error</SelectItem>
                     </SelectContent>
                   </Select>
                 </div>
@@ -483,7 +469,7 @@ const DASH_CELL = <span className="text-muted-foreground">—</span>
 const PROCESSING_CELL = <span className="font-mono text-muted-foreground text-xs italic">Processing...</span>
 const NO_FILES_TASKS = new Set(['expire_snapshots', 'rollup_compact_daily', 'rollup_hour_heal', 'metadata_cleanup', 'insights_prewarmer', 'partial_hour_merge'])
 const NO_ROWS_TASKS = new Set([...NO_FILES_TASKS, 'optimize', 'commit', 'rum_commit', 'local_compact'])
-const ADMIN_ONLY_CRON_COLUMNS: ColumnDef<CronRun>[] = [
+const COMMIT_CRON_COLUMNS: ColumnDef<CronRun>[] = [
   { accessorKey: 'files_deleted_fos', header: 'Log Files Deleted', cell: ({ row }) => row.original.status === 'running' || row.original.task !== 'log_discovery' ? DASH_CELL : <span className="font-mono text-muted-foreground tabular-nums text-xs">{formatCount(row.original.files_deleted_fos || 0)}</span> },
   { id: 'rows_committed', header: 'Rows Committed', cell: ({ row }) => {
     if (row.original.status === 'running') return PROCESSING_CELL
@@ -491,7 +477,7 @@ const ADMIN_ONLY_CRON_COLUMNS: ColumnDef<CronRun>[] = [
     return <span className="font-mono text-muted-foreground tabular-nums text-xs">{val != null ? formatCount(val) : DASH_CELL}</span>
   } },
 ]
-export function useCronColumns(isAnalyst: boolean): ColumnDef<CronRun>[] {
+export function useCronColumns(): ColumnDef<CronRun>[] {
   return React.useMemo(() => [
     { accessorKey: 'started_at', id: 'started_at', meta: { label: 'Started At' }, header: 'Started At', cell: ({ row }) => <DateTimeCell iso={row.original.started_at} /> },
     { id: 'finished_at', meta: { label: 'Finished At' }, enableSorting: false, accessorFn: (row) => row.started_at && row.duration_s != null ? new Date(new Date(row.started_at).getTime() + row.duration_s * 1000).toISOString() : null, header: () => <span className="text-xs font-medium px-2.5">Finished At</span>, cell: ({ row }) => {
@@ -500,7 +486,7 @@ export function useCronColumns(isAnalyst: boolean): ColumnDef<CronRun>[] {
     } },
     { accessorKey: 'task', id: 'task', meta: { label: 'Task' }, header: 'Task', cell: ({ row }) => {
       const { task, summary } = row.original
-      const isSync = task === 'log_discovery' || task === 'metadata_sync'
+      const isSync = task === 'log_discovery'
       return (
         <div className="flex flex-col gap-1 py-1">
           <TooltipProvider delay={200}><Tooltip>
@@ -534,18 +520,17 @@ export function useCronColumns(isAnalyst: boolean): ColumnDef<CronRun>[] {
     { accessorKey: 'files_downloaded', id: 'files_downloaded', meta: { label: 'Files Downloaded' }, header: 'Files Processed', cell: ({ row }) => {
       if (row.original.status === 'running') return PROCESSING_CELL
       const { task, files_downloaded, rows_ingested, parquet_files_optimized } = row.original
-      if (NO_FILES_TASKS.has(task) || (task === 'metadata_sync' && !isAnalyst) || ((task === 'commit' || task === 'rum_commit') && !rows_ingested)) return DASH_CELL
+      if (NO_FILES_TASKS.has(task) || ((task === 'commit' || task === 'rum_commit') && !rows_ingested)) return DASH_CELL
       const count = task === 'commit' || task === 'rum_commit' ? 1 : task === 'optimize' ? (parquet_files_optimized || 0) : (files_downloaded || 0)
-      const label = task === 'alerts' ? (count === 1 ? 'alert evaluated' : 'alerts evaluated') : task === 'commit' || task === 'rum_commit' ? 'cloud file cached' : task === 'metadata_sync' ? 'cloud files downloaded' : task === 'optimize' || task === 'local_compact' ? 'files merged' : task === 'rum_sync' || task === 'rum_discovery' ? 'raw RUM logs' : task === 'ngwaf_sync' ? (count === 1 ? 'bot record' : 'bot records') : 'raw logs'
+      const label = task === 'alerts' ? (count === 1 ? 'alert evaluated' : 'alerts evaluated') : task === 'commit' || task === 'rum_commit' ? 'cloud file cached' : task === 'optimize' || task === 'local_compact' ? 'files merged' : task === 'rum_sync' || task === 'rum_discovery' ? 'raw RUM logs' : task === 'ngwaf_sync' ? (count === 1 ? 'bot record' : 'bot records') : 'raw logs'
       return <span className="font-mono text-muted-foreground tabular-nums text-xs" title={label}>{formatCount(count)} <span className="text-[10px] text-muted-foreground">{label}</span></span>
     } },
-    { accessorKey: 'rows_ingested', header: isAnalyst ? 'Log Entries Imported' : 'Log Entries Processed', cell: ({ row }) => {
+    { accessorKey: 'rows_ingested', header: 'Log Entries Processed', cell: ({ row }) => {
       if (row.original.status === 'running') return PROCESSING_CELL
       const { task, rows_ingested, corrupt_rows, error_message } = row.original
       if (NO_ROWS_TASKS.has(task)) return DASH_CELL
       if (task === 'alerts') { const triggered = rows_ingested || 0; return triggered === 0 ? DASH_CELL : <span className="font-mono tabular-nums text-xs text-amber-500 font-medium">{triggered} {triggered === 1 ? 'alert triggered' : 'alerts triggered'}</span> }
       const rows = rows_ingested || 0, corrupt = corrupt_rows || 0
-      if (task === 'metadata_sync') return rows === 0 ? DASH_CELL : <span className="font-mono text-muted-foreground tabular-nums text-xs">{formatCount(rows)}</span>
       return (
         <div className="flex items-center gap-2">
           <span className="font-mono text-muted-foreground tabular-nums text-xs">{formatCount(rows)}</span>
@@ -558,8 +543,8 @@ export function useCronColumns(isAnalyst: boolean): ColumnDef<CronRun>[] {
         </div>
       )
     } },
-    ...(isAnalyst ? [] : ADMIN_ONLY_CRON_COLUMNS),
-  ], [isAnalyst])
+    ...COMMIT_CRON_COLUMNS,
+  ], [])
 }
 function AuditKVRow({ label, value }: { label: string; value: React.ReactNode }) {
   return <div className="flex justify-between items-center text-xs"><span className="text-muted-foreground">{label}</span><span className="font-mono">{value}</span></div>
@@ -786,7 +771,7 @@ export function FloatingOperationsDock({ displayedJobs, setDisplayedJobs, isOpen
           {displayedJobs.length > 1 && (
             <div className="flex border-b border-zinc-800 bg-zinc-900/50 overflow-x-auto scrollbar-none shrink-0 px-2 pt-1 gap-1">
               {displayedJobs.map((job) => {
-                const isActive = job.id === selectedJobId, taskLabel = job.task === 'metadata_sync' ? 'sync' : job.task
+                const isActive = job.id === selectedJobId, taskLabel = job.task
                 return (
                   <div key={job.id} className={cn("rounded-t text-[10px] font-mono uppercase tracking-wider flex items-center gap-1.5 border-t border-x transition-all shrink-0", isActive ? "bg-zinc-950 text-blue-400 border-zinc-800 border-b-zinc-950 font-bold" : "bg-transparent text-zinc-400 border-transparent hover:text-zinc-200 hover:bg-zinc-800/30")}>
                     <button type="button" onClick={() => setSelectedJobId(job.id)} className="pl-3 py-1.5 flex items-center gap-1.5 cursor-pointer uppercase tracking-wider">
@@ -886,13 +871,12 @@ export function ServiceHistoryTab({ auditColumns, auditLogs, isLoadingAudit, isF
     </div>
   )
 }
-export function QuickActionsBar({ isAnalyst, status, activeServiceId, recentCrons, cronLogs, setSseTitle, setSseDescription, setIsSSEModalOpen, setIsSyncModalOpen, reset, start, setDisplayedJobs, setSelectedConsoleJobId, setConsoleOpen }: {
-  isAnalyst: boolean; status: Partial<SyncStatus> | undefined; activeServiceId: string | null | undefined; recentCrons: Partial<CronRunsResponse> | undefined; cronLogs: Partial<CronRunsResponse> | undefined
+export function QuickActionsBar({ status, activeServiceId, recentCrons, cronLogs, setSseTitle, setSseDescription, setIsSSEModalOpen, setIsSyncModalOpen, reset, start, setDisplayedJobs, setSelectedConsoleJobId, setConsoleOpen }: {
+  status: Partial<SyncStatus> | undefined; activeServiceId: string | null | undefined; recentCrons: Partial<CronRunsResponse> | undefined; cronLogs: Partial<CronRunsResponse> | undefined
   setSseTitle: (s: string) => void; setSseDescription: (s: string) => void; setIsSSEModalOpen: (open: boolean) => void; setIsSyncModalOpen: (open: boolean) => void; reset: () => void; start: ReturnType<typeof useSSE>['start']
   setDisplayedJobs: React.Dispatch<React.SetStateAction<CronRun[]>>; setSelectedConsoleJobId: (id: number | string | null) => void; setConsoleOpen: (open: boolean) => void
 }) {
   const queryClient = useQueryClient()
-  const isReadOnly = status?.access_level === 'read_only'
   const triggerCronAction = async (endpoint: '/api/admin/ingest-logs' | '/api/admin/commit-iceberg', title: string, description: string) => {
     try {
       const data = (await unwrapClient(client.POST(endpoint, {}))) as { run_id?: number | string } | undefined
@@ -903,16 +887,12 @@ export function QuickActionsBar({ isAnalyst, status, activeServiceId, recentCron
   return (
     <div className="flex flex-wrap items-center gap-2 bg-muted/30 p-2 rounded-lg border">
       <div className="text-xs font-bold text-muted-foreground uppercase tracking-wider mx-2">Quick Actions</div>
-      {!isAnalyst ? (
-        <>
-          <Button size="sm" variant="default" className="h-8 text-xs bg-primary text-primary-foreground hover:bg-primary/90" disabled={isReadOnly} onClick={() => triggerCronAction('/api/admin/ingest-logs', 'Importing Logs', 'Downloading new raw logs from Fastly Object Storage and processing them...')}><RefreshCw className="h-3 w-3 mr-1.5" /> Import Logs</Button>
-          <Button size="sm" variant="outline" className="h-8 text-xs bg-background" disabled={isReadOnly} onClick={() => setIsSyncModalOpen(true)} title="Open the range-picker to backfill a specific historical window (e.g., to close an Ingest Gap)"><Download className="h-3 w-3 mr-1.5" /> Sync from Cloud</Button>
-          <Button size="sm" variant="outline" className="h-8 text-xs bg-background" disabled={isReadOnly} onClick={() => triggerCronAction('/api/admin/commit-iceberg', 'Committing Buffer', 'Flushing local Parquet buffer to the shared Iceberg table in Object Storage...')}><Archive className="h-3 w-3 mr-1.5" /> Commit Buffer</Button>
-        </>
-      ) : (
-        <Button size="sm" variant="default" className="h-8 text-xs bg-primary/90 hover:bg-primary" onClick={() => setIsSyncModalOpen(true)}><Download className="h-3 w-3 mr-1.5" /> Sync from Cloud</Button>
-      )}
-      {!isAnalyst && status?.ngwaf_workspace_id && (
+      <>
+          <Button size="sm" variant="default" className="h-8 text-xs bg-primary text-primary-foreground hover:bg-primary/90" onClick={() => triggerCronAction('/api/admin/ingest-logs', 'Importing Logs', 'Downloading new raw logs from Fastly Object Storage and processing them...')}><RefreshCw className="h-3 w-3 mr-1.5" /> Import Logs</Button>
+          <Button size="sm" variant="outline" className="h-8 text-xs bg-background" onClick={() => setIsSyncModalOpen(true)} title="Open the range-picker to backfill a specific historical window (e.g., to close an Ingest Gap)"><Download className="h-3 w-3 mr-1.5" /> Backfill Logs</Button>
+          <Button size="sm" variant="outline" className="h-8 text-xs bg-background" onClick={() => triggerCronAction('/api/admin/commit-iceberg', 'Committing Buffer', 'Flushing local Parquet buffer to the shared Iceberg table in Object Storage...')}><Archive className="h-3 w-3 mr-1.5" /> Commit Buffer</Button>
+      </>
+      {status?.ngwaf_workspace_id && (
         <Button size="sm" variant="outline" className="h-8 text-xs bg-background" onClick={() => {
           setSseTitle('NGWAF Bot Sync'); setSseDescription('Fetching verified bot records from Fastly NGWAF and caching them locally. Progress is saved after each page — run again if the time budget is reached.')
           setIsSSEModalOpen(true); reset(); start(`/api/services/${activeServiceId}/ngwaf-sync`, {}); queryClient.invalidateQueries({ queryKey: queryKeys.admin.cronLogsFor(activeServiceId) })
@@ -1011,44 +991,44 @@ const IcebergStatus = dynamic(() => import('@/components/SessionScoring/StatusPa
 const IcebergCalendar = dynamic(() => import('@/components/SessionScoring/StatusPanel').then(m => m.IcebergCalendar), { ssr: false })
 const MetadataStorageCard = dynamic(() => import('@/components/SessionScoring/StatusPanel').then(m => m.MetadataStorageCard), { ssr: false })
 const LOG_TABS = [
-  { value: 'cron', label: 'Cron Runs', icon: History, adminOnly: false },
-  { value: 'service_history', label: 'Service History', icon: ClipboardList, adminOnly: false },
-  { value: 'ingestion', label: 'Ingestion History', icon: Database, adminOnly: true },
-  { value: 'iceberg', label: 'DuckLake Storage', icon: Archive, adminOnly: false },
-  { value: 'metadata_storage', label: 'Metadata Storage', icon: HardDrive, adminOnly: true },
-  { value: 'raw', label: 'Available Logs', icon: FileCode, adminOnly: true },
-  { value: 'schema', label: 'DuckDB Schema', icon: FileCode, adminOnly: false },
+  { value: 'cron', label: 'Cron Runs', icon: History },
+  { value: 'service_history', label: 'Service History', icon: ClipboardList },
+  { value: 'ingestion', label: 'Ingestion History', icon: Database },
+  { value: 'iceberg', label: 'DuckLake Storage', icon: Archive },
+  { value: 'metadata_storage', label: 'Metadata Storage', icon: HardDrive },
+  { value: 'raw', label: 'Available Logs', icon: FileCode },
+  { value: 'schema', label: 'DuckDB Schema', icon: FileCode },
 ] as const
 export default function LogsClient({ initialTab }: { initialTab?: string } = {}) {
   const s = useLogsPageState(initialTab)
   const queryClient = useQueryClient()
   const bootstrapResolved = useBootstrapResolved()
   const auditColumns = useAuditColumns(s.catalogMaps)
-  const cronColumns = useCronColumns(s.isAnalyst)
+  const cronColumns = useCronColumns()
   if (!s.activeServiceId && bootstrapResolved) return <NoServiceSelected icon={Database} message="Please select a service from the header to access admin controls." />
   if (!s.activeServiceId) return <Loading />
   return (
     <div className="space-y-6">
       <PageHeader title="Data Management" description="Monitor and manage log ingestion history and active data syncs." />
-      <QuickActionsBar isAnalyst={s.isAnalyst} status={s.status} activeServiceId={s.activeServiceId} recentCrons={s.recentCrons} cronLogs={s.cronLogs} setSseTitle={s.setSseTitle} setSseDescription={s.setSseDescription} setIsSSEModalOpen={s.setIsSSEModalOpen} setIsSyncModalOpen={s.setIsSyncModalOpen} reset={s.reset} start={s.start} setDisplayedJobs={s.setDisplayedJobs} setSelectedConsoleJobId={s.setSelectedConsoleJobId} setConsoleOpen={s.setConsoleOpen} />
+      <QuickActionsBar status={s.status} activeServiceId={s.activeServiceId} recentCrons={s.recentCrons} cronLogs={s.cronLogs} setSseTitle={s.setSseTitle} setSseDescription={s.setSseDescription} setIsSSEModalOpen={s.setIsSSEModalOpen} setIsSyncModalOpen={s.setIsSyncModalOpen} reset={s.reset} start={s.start} setDisplayedJobs={s.setDisplayedJobs} setSelectedConsoleJobId={s.setSelectedConsoleJobId} setConsoleOpen={s.setConsoleOpen} />
       <Tabs value={s.activeTab} onValueChange={s.handleTabChange} className="w-full">
         <ScrollArea className="w-full max-w-full overflow-hidden">
-          <TabsList className="w-full flex">{LOG_TABS.filter(t => !s.isAnalyst || !t.adminOnly).map(({ value, label, icon: Icon }) => <TabsTrigger key={value} value={value} className="flex-1 flex items-center justify-center gap-2 text-xs"><Icon className="h-4 w-4" /> {label}</TabsTrigger>)}</TabsList>
+          <TabsList className="w-full flex">{LOG_TABS.map(({ value, label, icon: Icon }) => <TabsTrigger key={value} value={value} className="flex-1 flex items-center justify-center gap-2 text-xs"><Icon className="h-4 w-4" /> {label}</TabsTrigger>)}</TabsList>
         </ScrollArea>
-        <TabsContent value="cron" className="mt-4 border rounded-lg overflow-hidden bg-card"><CronTab cronColumns={cronColumns} cronLogs={s.cronLogs} isLoadingCron={s.isLoadingCron} isFetchingCron={s.isFetchingCron} orderedSchedules={s.orderedSchedules} isLoadingSchedule={s.isLoadingSchedule} taskFilter={s.taskFilter} setTaskFilter={s.setTaskFilter} statusFilter={s.statusFilter} setStatusFilter={s.setStatusFilter} isAnalyst={s.isAnalyst} status={s.status} activeServiceId={s.activeServiceId} setDisplayedJobs={s.setDisplayedJobs} setSelectedConsoleJobId={s.setSelectedConsoleJobId} setConsoleOpen={s.setConsoleOpen} isPurgeOpen={s.isPurgeOpen} setIsPurgeOpen={s.setIsPurgeOpen} purgeMutation={s.purgeMutation} /></TabsContent>
+        <TabsContent value="cron" className="mt-4 border rounded-lg overflow-hidden bg-card"><CronTab cronColumns={cronColumns} cronLogs={s.cronLogs} isLoadingCron={s.isLoadingCron} isFetchingCron={s.isFetchingCron} orderedSchedules={s.orderedSchedules} isLoadingSchedule={s.isLoadingSchedule} taskFilter={s.taskFilter} setTaskFilter={s.setTaskFilter} statusFilter={s.statusFilter} setStatusFilter={s.setStatusFilter} status={s.status} activeServiceId={s.activeServiceId} setDisplayedJobs={s.setDisplayedJobs} setSelectedConsoleJobId={s.setSelectedConsoleJobId} setConsoleOpen={s.setConsoleOpen} isPurgeOpen={s.isPurgeOpen} setIsPurgeOpen={s.setIsPurgeOpen} purgeMutation={s.purgeMutation} /></TabsContent>
         <TabsContent value="service_history" className="mt-4 border rounded-lg overflow-hidden bg-card"><ServiceHistoryTab auditColumns={auditColumns} auditLogs={s.auditLogs} isLoadingAudit={s.isLoadingAudit} isFetchingAudit={s.isFetchingAudit} eventFilter={s.eventFilter} setEventFilter={s.setEventFilter} activeServiceId={s.activeServiceId} /></TabsContent>
         <TabsContent value="ingestion" className="mt-4 border rounded-lg overflow-hidden bg-card"><IngestionTab ingestedColumns={ingestedFilesColumns} ingestedFiles={s.ingestedFiles} isLoadingIngested={s.isLoadingIngested} /></TabsContent>
         <TabsContent value="iceberg" className="mt-4 space-y-4">
-          {s.activeTab === 'iceberg' && <><IcebergStatus accessLevel={s.status?.access_level ?? undefined} /><IcebergCalendar /><div className="border rounded-lg overflow-hidden bg-card"><div className="p-4 border-b"><h3 className="text-sm font-medium">Iceberg Data Lake Layout</h3><p className="text-xs text-muted-foreground mt-1">Direct view into the Iceberg metadata and data files in Object Storage.</p></div><FileBrowser type="iceberg" /></div></>}
+          {s.activeTab === 'iceberg' && <><IcebergStatus /><IcebergCalendar /><div className="border rounded-lg overflow-hidden bg-card"><div className="p-4 border-b"><h3 className="text-sm font-medium">Iceberg Data Lake Layout</h3><p className="text-xs text-muted-foreground mt-1">Direct view into the Iceberg metadata and data files in Object Storage.</p></div><FileBrowser type="iceberg" /></div></>}
         </TabsContent>
         <TabsContent value="metadata_storage" className="mt-4 space-y-4">{s.activeTab === 'metadata_storage' && <MetadataStorageCard />}</TabsContent>
         <TabsContent value="raw" className="mt-4 border rounded-lg overflow-hidden bg-card">{s.activeTab === 'raw' && <><div className="p-4 border-b"><h3 className="text-sm font-medium">Available Logs</h3><p className="text-xs text-muted-foreground mt-1">Raw .gz files delivered by Fastly waiting to be processed.</p></div><FileBrowser type="raw" /></>}</TabsContent>
         <TabsContent value="schema" className="mt-4 border rounded-lg overflow-hidden bg-card">{s.activeTab === 'schema' && <SchemaTab schemaData={s.schemaData} isLoadingSchema={s.isLoadingSchema} />}</TabsContent>
       </Tabs>
-      <SyncFromCloudModal open={s.isSyncModalOpen} onOpenChange={s.setIsSyncModalOpen} onStartSync={async (range) => {
+      <BackfillRangeModal open={s.isSyncModalOpen} onOpenChange={s.setIsSyncModalOpen} onStartSync={async (range) => {
         try {
-          const data = await unwrapClient(client.POST("/api/admin/ingest-logs", { params: { query: range ? { start_time: range.start, end_time: range.end } : {} } }))
-          s.setSseTitle('Syncing from Cloud'); s.setSseDescription('Fetching latest snapshots and downloading new data files from the cloud...'); s.setIsSSEModalOpen(true); s.reset(); s.start(`/api/cron-runs/${data?.run_id}/stream`); cronCacheBust(queryClient, s.activeServiceId)
+          const data = await unwrapClient(client.POST("/api/admin/ingest-logs", { params: { query: { start_time: range.start, end_time: range.end } } }))
+          s.setSseTitle('Backfilling Logs'); s.setSseDescription('Re-importing raw logs for the selected window...'); s.setIsSSEModalOpen(true); s.reset(); s.start(`/api/cron-runs/${data?.run_id}/stream`); cronCacheBust(queryClient, s.activeServiceId)
         } catch (e) { console.error(e) }
       }} />
       <SSEModal isSSEModalOpen={s.isSSEModalOpen} setIsSSEModalOpen={s.setIsSSEModalOpen} sseStatus={s.sseStatus} sseTitle={s.sseTitle} sseError={s.sseError} sseDescription={s.sseDescription} lines={s.lines} stop={s.stop} />

@@ -2058,71 +2058,6 @@ def export_audit(service_id: str, limit: int = 200) -> list[dict]:
     return list_audit(service_id, limit=limit)
 
 
-_AUDIT_INSERT_SQL = "INSERT INTO audit_logs (timestamp, source_name, event_type, details, actor) VALUES (?, ?, ?, ?, ?)"
-
-
-def replace_audit_for_service(service_id: str, rows: list[dict]) -> None:
-    """Replace all audit logs for a service. Used by state_sync.import_admin_state."""
-    con = get_con(service_id)
-    con.execute("DELETE FROM audit_logs WHERE source_name = ?", (service_id,))
-    if rows:
-        con.executemany(
-            _AUDIT_INSERT_SQL,
-            [_AuditLogRow.model_validate(r).as_insert_tuple() for r in rows],
-        )
-    con.commit()
-
-
-def merge_audit_for_service(service_id: str, rows: list[dict]) -> None:
-    """Insert audit log entries from remote without deleting local ones.
-
-    Used by state_sync.import_admin_state on read_only analyst hosts to
-    preserve local audit entries created by the analyst's own actions
-    (which the wholesale ``replace_audit_for_service`` would have wiped on
-    every cron tick).
-
-    Dedup key: (timestamp, source_name, event_type, actor) — a row with
-    those four fields equal to an existing row is considered the same
-    event and skipped.
-    """
-    if not rows:
-        return
-    con = get_con(service_id)
-    validated = [_AuditLogRow.model_validate(r) for r in rows]
-    src_names = list({r.source_name for r in validated if r.source_name is not None})
-    has_null_src = any(r.source_name is None for r in validated)
-    if src_names and not has_null_src:
-        placeholders = ", ".join("?" for _ in src_names)
-        existing_rows = con.execute(
-            f"SELECT timestamp, source_name, event_type, actor FROM audit_logs WHERE source_name IN ({placeholders})",
-            src_names,
-        ).fetchall()
-    else:
-        existing_rows = con.execute(
-            "SELECT timestamp, source_name, event_type, actor FROM audit_logs",
-        ).fetchall()
-    seen: set[tuple] = {
-        (
-            str(er["timestamp"]) if er["timestamp"] is not None else None,
-            er["source_name"],
-            er["event_type"],
-            er["actor"],
-        )
-        for er in existing_rows
-    }
-    to_insert: list[tuple] = []
-    for row in validated:
-        ts_str = str(row.timestamp) if row.timestamp is not None else None
-        key = (ts_str, row.source_name, row.event_type, row.actor)
-        if key in seen:
-            continue
-        seen.add(key)
-        to_insert.append(row.as_insert_tuple())
-    if to_insert:
-        con.executemany(_AUDIT_INSERT_SQL, to_insert)
-    con.commit()
-
-
 # ── asn_names cache ──────────────────────────────────────────────────────────
 
 
@@ -2206,46 +2141,6 @@ def delete_view(service_id: str, view_id: str) -> dict:
     con.execute("DELETE FROM views WHERE id = ? AND service_id = ?", (view_id, service_id))
     con.commit()
     return {"status": "success"}
-
-
-def _view_row_tuple(v: dict) -> tuple:
-    return _ViewRow.model_validate(v).as_insert_tuple()
-
-
-_VIEW_INSERT_SQL = (
-    "INSERT INTO views (id, service_id, name, filters_json, time_range_type, start_time, end_time, page, created_at) "
-    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
-)
-
-
-def replace_views_for_service(service_id: str, views: list[dict]) -> None:
-    """Replace all saved views for a service. Used by state_sync.import_admin_state."""
-    con = get_con(service_id)
-    con.execute("DELETE FROM views WHERE service_id = ?", (service_id,))
-    if views:
-        con.executemany(_VIEW_INSERT_SQL, [_view_row_tuple(v) for v in views])
-    con.commit()
-
-
-def upsert_views_for_service(service_id: str, views: list[dict]) -> None:
-    """Upsert saved views by id WITHOUT deleting local-only rows.
-
-    Used by state_sync.import_admin_state on read_only analyst hosts so
-    locally-created views (which the analyst created on their own pod) are
-    preserved through every metadata_sync cron tick.
-    """
-    if not views:
-        return
-    con = get_con(service_id)
-    con.executemany(
-        f"{_VIEW_INSERT_SQL} "
-        "ON CONFLICT(id) DO UPDATE SET "
-        "name=excluded.name, filters_json=excluded.filters_json, "
-        "time_range_type=excluded.time_range_type, start_time=excluded.start_time, "
-        "end_time=excluded.end_time, page=excluded.page, created_at=excluded.created_at",
-        [_view_row_tuple(v) for v in views],
-    )
-    con.commit()
 
 
 # ── Alert-rule CRUD ──────────────────────────────────────────────────────────
@@ -2446,13 +2341,6 @@ def get_scoring_matrix_history_key(source: dict, version: str) -> str:
     return f"{_iceberg_meta_prefix(source)}scoring_matrix_history/{version}.json"
 
 
-def _writable_source(service_id: str) -> dict | None:
-    source = get_source_for_service(service_id)
-    if not source or source.get("access_level") == "read_only":
-        return None
-    return source
-
-
 def list_scoring_matrix_versions(service_id: str) -> list[dict]:
     """List archived matrix versions under iceberg/meta/scoring_matrix_history/."""
     source = get_source_for_service(service_id)
@@ -2486,7 +2374,7 @@ def restore_scoring_matrix_version(service_id: str, version: str) -> dict | None
     """Copy a historical scoring_matrix_history/{version}.json back to
     the current scoring_matrix.json key.
     """
-    source = _writable_source(service_id)
+    source = get_source_for_service(service_id)
     if not source:
         return None
     history_key = get_scoring_matrix_history_key(source, version)
@@ -2529,7 +2417,7 @@ def publish_matrix_to_fos(service_id: str, matrix: dict) -> None:
     """Upload the trained scoring matrix JSON to FOS so analyst replicas
     + the prod VM backend can fetch the same matrix the admin host has on disk.
     """
-    source = _writable_source(service_id)
+    source = get_source_for_service(service_id)
     if not source:
         return
     try:
@@ -2633,7 +2521,7 @@ def fetch_matrix_from_fos(service_id: str) -> dict | None:
 
 
 def export_admin_state(service_id: str):
-    source = _writable_source(service_id)
+    source = get_source_for_service(service_id)
     if not source:
         return
 
@@ -2665,54 +2553,6 @@ def export_admin_state(service_id: str):
         logger.debug(f"[state_sync] Exported admin state to {key}")
     except Exception as e:
         logger.warning(f"[state_sync] Failed to export admin state: {e}")
-
-
-def import_admin_state(service_id: str):
-    source = get_source_for_service(service_id)
-    if not source:
-        return
-
-    try:
-        key = get_admin_state_key(source)
-        raw_state = _read_fos_json(source, key, swallow_cdn_404=True)
-        if raw_state is None:
-            return
-
-        payload = _AdminStatePayload.model_validate(raw_state)
-        from backend.core import metadata as metadata_db
-
-        is_read_only = (source or {}).get("access_level") == "read_only"
-        if is_read_only:
-            metadata_db.upsert_views_for_service(service_id, payload.views)
-            metadata_db.merge_audit_for_service(service_id, payload.audit_logs)
-        else:
-            metadata_db.replace_audit_for_service(service_id, payload.audit_logs)
-            metadata_db.replace_views_for_service(service_id, payload.views)
-
-        if payload.custom_fields is not None:
-            from backend.core import field_registry as _lf
-            from backend.provision.cmcd_fields import (
-                reconcile_system_custom_fields,
-                system_feature_flags,
-            )
-
-            remote_custom_fields = list(payload.custom_fields)
-
-            def _apply_remote_custom_fields(cfg: dict) -> None:
-                lf = _lf.get_lf_config(cfg)
-                scoring_enabled, cmcd_enabled = system_feature_flags(cfg)
-                lf["custom_fields"] = reconcile_system_custom_fields(
-                    list(remote_custom_fields),
-                    scoring_enabled=scoring_enabled,
-                    cmcd_enabled=cmcd_enabled,
-                )
-                cfg["log_fields"] = lf
-
-            svcconfig.mutate_config(service_id, _apply_remote_custom_fields)
-
-        logger.debug(f"[state_sync] Imported admin state from {key}")
-    except Exception as e:
-        logger.warning(f"[state_sync] Failed to import admin state: {e}")
 
 
 _self = _sys.modules[__name__]

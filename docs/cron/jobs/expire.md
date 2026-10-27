@@ -45,8 +45,7 @@ retention as the cause.
 | Role | Job State | Manual API Trigger | Data Visibility |
 |---|---|---|---|
 | **Admin (`read_write`)** | Active | `POST /api/admin/expire-snapshots/{service_id}` | Full retention and expiry status in Admin UI. |
-| **Analyst Path A (Standalone Instance)** | Disabled | Disabled | Cloud retention is managed exclusively by Admin. |
-| **Analyst Path B (Remote Share)** | N/A | Blocked (403) | Reads server-side DuckLake state; no cron interaction. |
+| **Analyst (Remote Share)** | N/A | Blocked (403) | Reads server-side DuckLake state; no cron interaction. |
 
 ---
 

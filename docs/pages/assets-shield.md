@@ -35,8 +35,7 @@ The **Assets & Origin Shielding** page provides detailed caching diagnostics bro
 | Role | Access Level | Data Redaction & Capabilities |
 |---|---|---|
 | **Admin (`read_write`)** | Full Access | Full asset URLs, compression diagnostics, cache state distributions, and service log configuration link. |
-| **Analyst Path B (Remote Share)** | Read-Only Access | Asset breakdowns and caching metrics viewable; client IPs masked (if enabled). `POST /api/assets/aggregates` allowed under `_ANALYST_ALLOWED_WRITE_PREFIXES` and `_WRITE_VERB_GATE_ROUTES`; `GET /api/assets/aggregates` allowed in `_READ_ALLOWLIST`. |
-| **Analyst Path A (JSON Join)** | Local Read-Only | Queries local DuckLake / cached buffer. |
+| **Analyst (Remote Share)** | Read-Only Access | Asset breakdowns and caching metrics viewable; client IPs masked (if enabled). `POST /api/assets/aggregates` allowed under `_ANALYST_ALLOWED_WRITE_PREFIXES` and `_WRITE_VERB_GATE_ROUTES`; `GET /api/assets/aggregates` allowed in `_READ_ALLOWLIST`. |
 
 ---
 
@@ -106,7 +105,7 @@ The **Assets & Origin Shielding** page provides detailed caching diagnostics bro
 - [x] **3. Asset Aggregates Contract:** `POST /api/assets/aggregates` and `GET /api/assets/aggregates` return complete schema.
 - [x] **4. Missing Fields Handling:** Gracefully handles missing `resp_header_content_encoding` and `ttl`, rendering banner linking to `/service-config`.
 - [x] **5. Time Range Extent:** Confirms 24h default and clean preset switching without 500s.
-- [x] **6. Role Verification:** Confirm Analyst Path B observes expected view without administrative configuration buttons; verb gate passes `/api/assets/aggregates`.
+- [x] **6. Role Verification:** Confirm Analyst observes expected view without administrative configuration buttons; verb gate passes `/api/assets/aggregates`.
 - [x] **7. Telemetry & Query Audit:** Verify all DuckDB queries execute under `assets:aggregates` with zero duplicate queries.
 
 ---

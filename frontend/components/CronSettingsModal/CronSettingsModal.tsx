@@ -69,49 +69,6 @@ function CronLogRetentionControls({
   )
 }
 
-interface AnalystSchedulePanelProps {
-  syncEnabled: boolean; setSyncEnabled: (v: boolean) => void
-  syncIntervalMins: string; setSyncIntervalMins: (v: string) => void
-  cacheRetention: string; setCacheRetention: (v: string) => void
-}
-
-export function AnalystSchedulePanel({
-  syncEnabled, setSyncEnabled, syncIntervalMins, setSyncIntervalMins, cacheRetention, setCacheRetention,
-}: AnalystSchedulePanelProps) {
-  return (
-    <div className="p-6 space-y-6 text-sm divide-y">
-      <div className="space-y-4">
-        <div>
-          <h3 className="text-sm font-bold uppercase tracking-widest text-foreground/80">Cloud Sync Interval</h3>
-          <p className="text-[10px] text-muted-foreground mt-1">How often to pull new log files from the cloud bucket to your local cache.</p>
-        </div>
-        <div className="flex items-center justify-between p-3 border rounded-md bg-muted/10">
-          <div className="space-y-0.5 pr-4">
-            <Label className="text-xs font-semibold cursor-pointer" htmlFor="enable-sync-analyst">Auto-Sync New Data</Label>
-            <p className="text-[10px] text-muted-foreground">Automatically poll for and download new processed log files.</p>
-          </div>
-          <Switch id="enable-sync-analyst" checked={syncEnabled} onCheckedChange={setSyncEnabled} />
-        </div>
-        {syncEnabled && (
-          <Select value={syncIntervalMins} onValueChange={v => v && setSyncIntervalMins(v)}>
-            <SelectTrigger className="h-9 text-sm"><SelectValue /></SelectTrigger>
-            <SelectContent>
-              {SYNC_INTERVAL_OPTIONS.map(o => <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>)}
-            </SelectContent>
-          </Select>
-        )}
-        <div className="grid gap-1.5 pt-2 border-t border-border/50">
-          <Label htmlFor="cache-retention-analyst" className="text-xs font-semibold">Local Cache Retention</Label>
-          <p className="text-[10px] text-muted-foreground leading-tight">
-            Automatically deletes local data files older than this to save disk space.
-          </p>
-          <RetentionSelect id="cache-retention-analyst" value={cacheRetention} onValueChange={setCacheRetention} triggerClassName="h-9 text-sm" itemClassName="" />
-        </div>
-      </div>
-    </div>
-  )
-}
-
 interface LogSyncSectionProps {
   syncEnabled: boolean
   setSyncEnabled: (v: boolean) => void
@@ -132,8 +89,6 @@ interface LogSyncSectionProps {
   syncRetention: string
   setSyncRetention: (v: string) => void
   syncFreqLabel: string
-  isAnalyst: boolean
-  syncIntervalNum: number
   adminSyncSeconds: number
   rumRetention: string
   setRumRetention: (v: string) => void
@@ -151,10 +106,10 @@ export function LogSyncSection({
   syncEnabled, setSyncEnabled, pollingMode, setPollingMode, deleteAfter, setDeleteAfter,
   dataRetention, setDataRetention, cacheRetention, setCacheRetention, rollupRetention, setRollupRetention,
   commitInterval, setCommitInterval, syncLogEnabled, setSyncLogEnabled, syncRetention, setSyncRetention,
-  syncFreqLabel, isAnalyst, syncIntervalNum, adminSyncSeconds, rumRetention, setRumRetention,
+  syncFreqLabel, adminSyncSeconds, rumRetention, setRumRetention,
   rumEnabled, rumSyncEnabled, setRumSyncEnabled, rumLogPeriod, setRumLogPeriod, rumDeleteAfter, setRumDeleteAfter, serviceId,
 }: LogSyncSectionProps) {
-  const minCommitMins = isAnalyst ? syncIntervalNum : Math.max(1, Math.ceil(adminSyncSeconds / 60))
+  const minCommitMins = Math.max(1, Math.ceil(adminSyncSeconds / 60))
   const rumPeriodInt = parseInt(rumLogPeriod)
   const derivedRumSecs = rumPeriodInt >= 60 ? Math.max(5, Math.floor(rumPeriodInt / 2)) : Math.max(5, rumPeriodInt)
 
@@ -539,22 +494,9 @@ function CronSettingsModalBody({ service, open, onOpenChange }: CronSettingsModa
   const bind = <K extends keyof CronSettingsFormValues>(key: K) => (v: CronSettingsFormValues[K]) =>
     setValue(key, v as PathValue<CronSettingsFormValues, K>, { shouldDirty: true })
 
-  const isAnalyst = service?.access_level === 'read_only'
-
   const handleSave = () => {
     if (!service) return
     const intervalMins = parseInt(syncIntervalMins)
-    if (isAnalyst) {
-      start(`/api/services/${service.service_id}/cron-settings`, {
-        cron_sync: {
-          enabled: syncEnabled,
-          interval_mins: intervalMins,
-          cache_retention_days: parseInt(cacheRetention),
-          rollup_retention_months: parseInt(rollupRetention),
-        },
-      })
-      return
-    }
     const commitMins = Math.max(intervalMins, parseInt(commitInterval))
     start(`/api/services/${service.service_id}/cron-settings`, {
       cron_sync: {
@@ -595,13 +537,10 @@ function CronSettingsModalBody({ service, open, onOpenChange }: CronSettingsModa
 
   const isPending = status === 'streaming'
   const isExecuting = status === 'done' || status === 'error' || status === 'streaming'
-  const syncIntervalNum = parseInt(syncIntervalMins)
   const adminSyncSeconds = Math.max(10, Math.floor((service?.log_period || 60) / 2))
-  const syncFreqLabel = isAnalyst
-    ? (syncIntervalNum === 1 ? 'every 1 minute' : `every ${syncIntervalNum} minutes`)
-    : (adminSyncSeconds >= 60
-        ? `every ${Math.floor(adminSyncSeconds / 60)}m${adminSyncSeconds % 60 > 0 ? ` ${adminSyncSeconds % 60}s` : ''}`
-        : `every ${adminSyncSeconds} seconds`)
+  const syncFreqLabel = adminSyncSeconds >= 60
+    ? `every ${Math.floor(adminSyncSeconds / 60)}m${adminSyncSeconds % 60 > 0 ? ` ${adminSyncSeconds % 60}s` : ''}`
+    : `every ${adminSyncSeconds} seconds`
 
   return (
     <SSEActionDialogShell
@@ -640,16 +579,6 @@ function CronSettingsModalBody({ service, open, onOpenChange }: CronSettingsModa
       }
       idleOrErrorLabel="Close"
     >
-      {isAnalyst ? (
-        <AnalystSchedulePanel
-          syncEnabled={syncEnabled}
-          setSyncEnabled={bind('syncEnabled')}
-          syncIntervalMins={syncIntervalMins}
-          setSyncIntervalMins={bind('syncIntervalMins')}
-          cacheRetention={cacheRetention}
-          setCacheRetention={bind('cacheRetention')}
-        />
-      ) : (
         <div className="space-y-8 p-6 text-sm">
           <LogSyncSection
             syncEnabled={syncEnabled}
@@ -671,8 +600,6 @@ function CronSettingsModalBody({ service, open, onOpenChange }: CronSettingsModa
             syncRetention={syncRetention}
             setSyncRetention={bind('syncRetention')}
             syncFreqLabel={syncFreqLabel}
-            isAnalyst={isAnalyst}
-            syncIntervalNum={syncIntervalNum}
             adminSyncSeconds={adminSyncSeconds}
             rumRetention={rumRetention}
             setRumRetention={bind('rumRetention')}
@@ -706,7 +633,6 @@ function CronSettingsModalBody({ service, open, onOpenChange }: CronSettingsModa
             setCompactRetention={bind('compactRetention')}
           />
         </div>
-      )}
     </SSEActionDialogShell>
   )
 }

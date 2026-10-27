@@ -28,7 +28,6 @@ from backend.cron.jobs.compaction import (
 from backend.deps import get_service_id, get_source, require_admin
 from backend.utils.date_utils import iso_z
 from starlette.testclient import TestClient
-from tests._helpers.config_fakes import fake_mutate_config
 
 from backend.core import duckdb as _db
 from backend.core import local_compaction as lc
@@ -49,7 +48,6 @@ from backend.cron.scheduler import TASK_MAP, Scheduler, partial_hour_merge_inter
 from backend.main import app
 from backend.repositories._base import _LIVE_TOPN_SKIP_FIELDS, QueryRunner
 from backend.utils import rdns_cache
-from tests.cron.conftest import _StubSource
 
 metadata = metadata_job
 
@@ -137,7 +135,6 @@ def mc_contract_source(monkeypatch, tmp_path):
         "logging_service_id": "log-svc-mc-contract",
         "bucket": "test-mc-contract-bucket",
         "_cache_dir_override": str(cache_root),
-        "access_level": "read_write",
         "log_retention_days": 90,
         "metadata_retention": {
             "usage_log_days": 1,
@@ -146,7 +143,6 @@ def mc_contract_source(monkeypatch, tmp_path):
             "slow_queries_days": 30,
         },
         "provisioning": {
-            "access_level": "read_write",
             "cron_sync": {"enabled": True, "delete_after": True},
             "cron_metadata_cleanup": {"enabled": True, "cron_hour": 3, "cron_minute": 0},
         },
@@ -376,402 +372,34 @@ def test_metadata_cleanup_telemetry_manual_trigger_and_scheduler(monkeypatch, mc
     assert all(not kw.get("id", "").startswith("metadata_cleanup_") for _, kw in s2._sched.add_job.call_args_list)
 
 
-# ── Metadata Sync Contract ───────────────────────────────────────────────────
+# ── Rebuild local view ───────────────────────────────────────────────────────
 
 
-def _fake_src(service_id: str = "svc-meta-contract", access_level: str = "read_only") -> dict:
-    return _StubSource(service_id=service_id, access_level=access_level)
-
-
-def _fake_cfg(
-    service_id: str = "svc-meta-contract",
-    access_level: str = "read_only",
-    log_period: int = 60,
-    sync_enabled: bool = True,
-    sync_interval_seconds: int | None = None,
-    meta_enabled: bool = True,
-    meta_interval_seconds: int | None = None,
-    time_range: dict | None = None,
-) -> dict:
-    prov: dict = {
-        "access_level": access_level,
-        "cron_sync": {"enabled": sync_enabled},
-        "cron_metadata_sync": {"enabled": meta_enabled},
-    }
-    if sync_interval_seconds is not None:
-        prov["cron_sync"]["interval_seconds"] = sync_interval_seconds
-    if meta_interval_seconds is not None:
-        prov["cron_metadata_sync"]["interval_seconds"] = meta_interval_seconds
-    if time_range is not None:
-        prov["time_range"] = time_range
-    return {
-        "service_id": service_id,
-        "name": service_id,
-        "log_period": log_period,
-        "access_level": access_level,
-        "provisioning": prov,
-    }
-
-
-def _patch_iceberg_sync(
-    monkeypatch,
-    *,
-    init_ret: object = True,
-    table_exists: bool = True,
-    files: int = 0,
-    rows: int = 0,
-    admin_err: Exception | None = None,
-):
-    init_mock = MagicMock(side_effect=init_ret) if isinstance(init_ret, Exception) else MagicMock(return_value=init_ret)
-    monkeypatch.setattr("backend.core.iceberg.init_iceberg_table", init_mock)
-    monkeypatch.setattr("backend.core.iceberg.ducklake_table_exists", MagicMock(return_value=table_exists))
-    sync_mock = MagicMock(return_value={"files_downloaded": files, "rows_downloaded": rows})
-    monkeypatch.setattr("backend.core.iceberg.sync_data", sync_mock)
-    update_view = MagicMock()
-    monkeypatch.setattr("backend.core.iceberg.update_iceberg_view", update_view)
-    import_admin = MagicMock(side_effect=admin_err) if admin_err else MagicMock()
-    monkeypatch.setattr("backend.state_sync.import_admin_state", import_admin)
-    return sync_mock, update_view, import_admin
-
-
-@pytest.fixture
-def stub_source(monkeypatch) -> dict:
-    src = _fake_src("svc-meta-contract", access_level="read_only")
-    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: src)
-    return src
-
-
-@pytest.fixture
-def base_context(monkeypatch, stub_source):
-    cfg = _fake_cfg("svc-meta-contract", access_level="read_only")
-    load_cfg = MagicMock(return_value=cfg)
-    saved_cfgs: list[dict] = []
-    save_cfg = MagicMock(side_effect=fake_mutate_config(lambda: cfg, saves=saved_cfgs))
-    monkeypatch.setattr("backend.config.load_config", load_cfg)
-    monkeypatch.setattr("backend.config.mutate_config", save_cfg)
-
-    fake_con, start_run = MagicMock(), MagicMock(return_value=88)
-    get_conn = MagicMock(return_value=fake_con)
-    log_run, refresh_status, finalize_dur = MagicMock(), MagicMock(), MagicMock()
-    start_prog, end_prog, log_prog, reap_prog = MagicMock(), MagicMock(), MagicMock(), MagicMock()
-
-    monkeypatch.setattr("backend.core.duckdb.get_connection", get_conn)
-    monkeypatch.setattr("backend.core.duckdb.start_cron_run", start_run)
-    monkeypatch.setattr("backend.core.duckdb.log_cron_run", log_run)
-    monkeypatch.setattr("backend.core.duckdb.refresh_config_status", refresh_status)
-    monkeypatch.setattr("backend.cron.jobs._common.finalize_cron_duration", finalize_dur)
-    monkeypatch.setattr("backend.cron_progress.start_progress", start_prog)
-    monkeypatch.setattr("backend.cron_progress.end_progress", end_prog)
-    monkeypatch.setattr("backend.cron_progress.cleanup_progress_and_reap", reap_prog)
-    monkeypatch.setattr("backend.cron.jobs.metadata._log_and_add_progress", log_prog)
-    monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda task, sid: False)
-
-    return {
-        "cfg": cfg,
-        "load_cfg": load_cfg,
-        "save_cfg": save_cfg,
-        "saved_cfgs": saved_cfgs,
-        "src": stub_source,
-        "fake_con": fake_con,
-        "get_conn": get_conn,
-        "start_run": start_run,
-        "log_run": log_run,
-        "refresh_status": refresh_status,
-        "finalize_dur": finalize_dur,
-        "start_prog": start_prog,
-        "end_prog": end_prog,
-        "log_prog": log_prog,
-        "reap_prog": reap_prog,
-    }
-
-
-def test_metadata_sync_role_gates_cadence_and_scheduler_registration():
-    from backend.utils.remote_access import _ANALYST_BLOCKED_PREFIXES, _is_blocked_path
-
-    assert any("/api/admin/" == p for p in _ANALYST_BLOCKED_PREFIXES)
-    assert _is_blocked_path("/api/admin/rebuild-local-view") and _is_blocked_path(
-        "/api/admin/rebuild-local-view?service_id=svc-1"
-    )
-
-    s = Scheduler()
-    _sync_scheduler_with(
-        s, _fake_cfg("svc-analyst-1", access_level="read_only"), _fake_src("svc-analyst-1", "read_only")
-    )
-    assert "sync_metadata_svc-analyst-1" in s._job_ids
-    assert all(f"{p}_svc-analyst-1" not in s._job_ids for p in ("log_discovery", "commit", "optimize", "expire"))
-
-    s._sched.remove_all_jobs()
-    s._job_ids.clear()
-    _sync_scheduler_with(s, _fake_cfg("svc-admin-1", access_level="read_write"), _fake_src("svc-admin-1", "read_write"))
-    assert "sync_metadata_svc-admin-1" not in s._job_ids
-
-    for sid, log_period, custom_sec, expected_sec in (
-        ("svc-c60", 60, None, 30),
-        ("svc-c15", 15, None, 15),
-        ("svc-cc", 60, 45, 45),
-    ):
-        s._sched.remove_all_jobs()
-        s._job_ids.clear()
-        _sync_scheduler_with(
-            s,
-            _fake_cfg(sid, access_level="read_only", log_period=log_period, meta_interval_seconds=custom_sec),
-            _fake_src(sid, "read_only"),
-        )
-        job = s._sched.get_job(f"sync_metadata_{sid}")
-        assert job is not None and int(job.trigger.interval.total_seconds()) == expected_sec
-        assert job.coalesce is True and job.misfire_grace_time == 60
-
-    # Disabled vs rescheduled
-    s._sched.remove_all_jobs()
-    s._job_ids.clear()
-    _sync_scheduler_with(
-        s,
-        _fake_cfg("svc-meta-dis", access_level="read_only", meta_enabled=False),
-        _fake_src("svc-meta-dis", "read_only"),
-    )
-    assert "sync_metadata_svc-meta-dis" not in s._job_ids
-
-    mock_job = MagicMock()
-    s._sched = MagicMock()
-    s._sched.get_job = MagicMock(return_value=mock_job)
-    s._job_ids["sync_metadata_svc-resched"] = "sync_metadata_svc-resched"
-    _sync_scheduler_with(
-        s,
-        _fake_cfg("svc-resched", access_level="read_only", log_period=60, meta_interval_seconds=45),
-        _fake_src("svc-resched", "read_only"),
-    )
-    mock_job.reschedule.assert_called_once_with("interval", seconds=45)
-
-    # Startup initial_sync trigger
-    s_boot = Scheduler()
-    added_jobs: list[dict] = []
-    s_boot._add_job = lambda fn, *a, **kw: added_jobs.append({"fn": fn, "args": a, "kwargs": kw})
-    s_boot._sched = MagicMock()
-    s_boot._sync_jobs = MagicMock()
-    cfgs = [
-        _fake_cfg("svc-init-analyst", access_level="read_only", sync_enabled=True),
-        _fake_cfg("svc-init-admin", access_level="read_write", sync_enabled=True),
-        _fake_cfg("svc-init-disabled", access_level="read_only", sync_enabled=False),
-    ]
-    with (
-        patch("backend.cron.scheduler.dev_mode_no_crons", return_value=False),
-        patch("backend.core.duckdb_pool._pool_warm_at_boot_enabled", return_value=False),
-        patch("backend.config.list_configs", return_value=cfgs),
-        patch("backend.core.duckdb.get_source_for_service", return_value=_fake_src()),
-        patch("backend.core.duckdb.is_configured", return_value=True),
-    ):
-        s_boot.start()
-    job_ids = [j["kwargs"].get("id") for j in added_jobs]
-    assert "initial_sync_svc-init-analyst" in job_ids
-    assert "initial_sync_svc-init-admin" not in job_ids and "initial_sync_svc-init-disabled" not in job_ids
-
-
-def test_post_commit_metadata_sync_dispatch_coalesce_and_error_recovery(monkeypatch):
-    calls, dispatched_threads = [], []
-
-    class DeferredThread:
-        def __init__(self, *, target, args, **kwargs):
-            self.target, self.args = target, args
-            dispatched_threads.append(self)
-
-        def start(self):
-            return None
-
-    def fake_sync(service_id: str) -> None:
-        calls.append(service_id)
-        if len(calls) == 1:
-            metadata.dispatch_post_commit_metadata_sync(service_id)
-
-    with (
-        patch.object(metadata.threading, "Thread", DeferredThread),
-        patch.object(metadata, "_run_post_commit_metadata_sync", fake_sync),
-    ):
-        metadata.dispatch_post_commit_metadata_sync("svc-admin-coalesce")
-        metadata.dispatch_post_commit_metadata_sync("svc-admin-coalesce")
-        assert len(dispatched_threads) == 1 and calls == []
-        dispatched_threads[0].target(*dispatched_threads[0].args)
-        assert calls == ["svc-admin-coalesce", "svc-admin-coalesce"]
-        assert metadata._post_commit_metadata_sync_rerun == {}
-
-    # Worker failure clears rerun state
-    monkeypatch.setattr(metadata.threading, "Thread", DeferredThread)
-    monkeypatch.setattr(
-        metadata, "_run_post_commit_metadata_sync", MagicMock(side_effect=RuntimeError("unexpected failure"))
-    )
-    metadata.dispatch_post_commit_metadata_sync("svc-1")
-    metadata._post_commit_metadata_sync_worker("svc-1")
-    assert metadata._post_commit_metadata_sync_rerun == {}
-
-    # Thread start failure clears rerun state
-    class FailedThread:
-        def __init__(self, *, target, args, **kwargs):
-            pass
-
-        def start(self):
-            raise RuntimeError("thread unavailable")
-
-    monkeypatch.setattr(metadata.threading, "Thread", FailedThread)
-    with pytest.raises(RuntimeError, match="thread unavailable"):
-        metadata.dispatch_post_commit_metadata_sync("svc-1")
-    assert metadata._post_commit_metadata_sync_rerun == {}
-
-
-def test_metadata_sync_politeness_early_exits_and_catalog_states(base_context, monkeypatch):
-    # Politeness deferral on scheduled vs manual trigger
-    with patch("backend.utils.active_requests.should_defer_cron", return_value=True) as mock_defer:
-        metadata._run_metadata_sync("svc-meta-contract")
-        mock_defer.assert_called_once_with("metadata_sync", "svc-meta-contract")
-        base_context["start_run"].assert_not_called()
-
-    _patch_iceberg_sync(monkeypatch)
-    with patch("backend.utils.active_requests.should_defer_cron", return_value=True) as mock_defer:
-        metadata._run_metadata_sync("svc-meta-contract", run_id=777)
-        mock_defer.assert_not_called()
-        assert (
-            base_context["log_run"].call_args[0][3] == "success"
-            and base_context["log_run"].call_args[1]["run_id"] == 777
-        )
-
-    # Uncommitted table / table not found -> graceful success skip; catalog attach None -> error
-    for init_ret, tbl_exists, exp_status, exp_text in (
-        (True, False, "success", "not found"),
-        (ValueError("Table logs not found in catalog"), True, "success", "not found"),
-        (None, True, "error", "Metadata sync failed"),
-    ):
-        base_context["log_run"].reset_mock()
-        base_context["end_prog"].reset_mock()
-        sync_data, _, _ = _patch_iceberg_sync(monkeypatch, init_ret=init_ret, table_exists=tbl_exists)
-        metadata._run_metadata_sync("svc-meta-contract")
-        sync_data.assert_not_called()
-        args, kwargs = base_context["log_run"].call_args
-        assert args[3] == exp_status and exp_text.lower() in kwargs["summary"].lower()
-        assert kwargs["log_output"] is None and base_context["end_prog"].called
-
-    # Missing config, missing source, and lease held skips
-    base_context["start_run"].reset_mock()
-    base_context["log_run"].reset_mock()
-    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: None)
-    metadata._run_metadata_sync("svc-meta-contract")
-    base_context["start_run"].assert_not_called()
-
-    monkeypatch.setattr("backend.config.load_config", MagicMock(return_value=None))
-    get_src = MagicMock()
-    monkeypatch.setattr("backend.core.duckdb.get_source_for_service", get_src)
-    metadata._run_metadata_sync("ghost")
-    get_src.assert_not_called()
-
-
-def test_metadata_sync_lease_held_skips(base_context, monkeypatch):
-    base_context["start_run"].side_effect = CronLeaseHeldError("already running")
-    init = MagicMock()
-    monkeypatch.setattr("backend.core.iceberg.init_iceberg_table", init)
-    metadata._run_metadata_sync("svc-meta-contract")
-    init.assert_not_called()
-    base_context["log_run"].assert_not_called()
-
-
-def test_metadata_sync_time_ranges_admin_import_and_telemetry(base_context, monkeypatch):
-    # Explicit time range persisted to config
-    sync_mock, _, _ = _patch_iceberg_sync(monkeypatch)
-    metadata._run_metadata_sync(
-        "svc-meta-contract", run_id=12, start_time="2026-06-01T00:00:00Z", end_time="2026-06-15T00:00:00Z"
-    )
-    tr = base_context["saved_cfgs"][-1]["provisioning"]["time_range"]
-    assert tr == {"start": "2026-06-01T00:00:00Z", "end": "2026-06-15T00:00:00Z"} == base_context["src"]["time_range"]
-    assert (sync_mock.call_args[1]["start_time"], sync_mock.call_args[1]["end_time"]) == (
-        "2026-06-01T00:00:00Z",
-        "2026-06-15T00:00:00Z",
-    )
-
-    # Manual sync all clears pinned time range
-    base_context["cfg"]["provisioning"]["time_range"] = {"start": "2026-01-01T00:00:00Z"}
-    _patch_iceberg_sync(monkeypatch, files=1, rows=10)
-    metadata._run_metadata_sync("svc-meta-contract", run_id=999)
-    assert (
-        "time_range" not in base_context["saved_cfgs"][-1]["provisioning"] and base_context["src"]["time_range"] is None
-    )
-
-    # Scheduled run respects existing config time range + zero new files succeeds
-    base_context["cfg"]["provisioning"]["time_range"] = {"start": "2026-05-01T00:00:00Z"}
-    sync_mock, _, _ = _patch_iceberg_sync(monkeypatch, files=0, rows=0)
-    metadata._run_metadata_sync("svc-meta-contract")
-    assert sync_mock.call_args[1]["start_time"] == "2026-05-01T00:00:00Z"
-    assert (
-        base_context["log_run"].call_args[0][3] == "success"
-        and "new Iceberg data file" not in base_context["log_run"].call_args[1]["summary"]
-    )
-
-    # Admin state import failure yields warning status
-    base_context["refresh_status"].reset_mock()
-    _, update_view, _ = _patch_iceberg_sync(
-        monkeypatch, files=2, rows=500, admin_err=RuntimeError("connection refused to admin state bucket")
-    )
-    metadata._run_metadata_sync("svc-meta-contract")
-    update_view.assert_called_once()
-    base_context["refresh_status"].assert_called_once_with("svc-meta-contract")
-    args, kwargs = base_context["log_run"].call_args
-    assert args[3] == "warning" and "admin state import warning" in kwargs["summary"]
-    assert (kwargs["files_downloaded"], kwargs["rows_ingested"]) == (2, 500)
-
-    # Telemetry attribution, dashboard invalidation, zero Class-A cloud mutations, and error cleanup
-    mock_s3 = MagicMock()
-    monkeypatch.setattr("backend.core.duckdb._get_fos_client", lambda src: mock_s3)
-    _, update_view, _ = _patch_iceberg_sync(monkeypatch, files=3, rows=2_500)
-    invalidate_mock = MagicMock()
-    monkeypatch.setattr("backend.repositories.dashboard.invalidate_service", invalidate_mock)
-    metadata._run_metadata_sync("svc-meta-contract", run_id=101)
-    invalidate_mock.assert_called_once_with(base_context["src"]["name"])
-    assert "downloaded 3 new Iceberg data file(s)" in base_context["log_run"].call_args[1]["summary"]
-    base_context["end_prog"].assert_called_with(101)
-    for m in (mock_s3.put_object, mock_s3.delete_object, mock_s3.delete_objects, mock_s3.create_multipart_upload):
-        m.assert_not_called()
-
-    base_context["end_prog"].reset_mock()
-    base_context["finalize_dur"].reset_mock()
-    monkeypatch.setattr("backend.core.iceberg.sync_data", MagicMock(side_effect=RuntimeError("disk write error")))
-    metadata._run_metadata_sync("svc-meta-contract", run_id=102)
-    base_context["end_prog"].assert_called_with(102)
-    base_context["finalize_dur"].assert_called_once()
-    assert (
-        base_context["log_run"].call_args[0][3] == "error"
-        and "disk write error" in base_context["log_run"].call_args[1]["error_message"]
-    )
-
-
-def test_rebuild_local_view_endpoint_lifecycle_and_busy():
-    test_src = _fake_src("svc-rebuild-test")
-    app.dependency_overrides[get_source] = lambda: test_src
+def test_rebuild_local_view_endpoint_clears_caches_and_rebuilds_in_background():
+    src = {"name": "svc-rebuild-test", "service_id": "svc-rebuild-test"}
+    app.dependency_overrides[get_source] = lambda: src
     client = TestClient(app)
     try:
         with (
             patch("backend.core.iceberg.clear_source_caches") as mock_clear,
-            patch("backend.core.duckdb._cache_dir", return_value="/tmp/test_cache"),
-            patch("os.path.exists", return_value=True),
-            patch("os.remove"),
-            patch("backend.core.duckdb.start_cron_run", return_value="run-789") as mock_start,
-            patch("backend.cron_progress.start_progress") as mock_prog,
+            patch("backend.cron.jobs.sync.refresh_view_and_warm_pool") as mock_refresh,
+            patch("backend.core.duckdb.refresh_config_status") as mock_status,
+            patch("backend.repositories.dashboard.invalidate_service") as mock_invalidate,
             patch("threading.Thread") as mock_thread,
         ):
             resp = client.post("/api/admin/rebuild-local-view")
-            body = resp.json()
-            assert resp.status_code == 202 and (body["ok"], body["run_id"], body["message"]) == (
-                True,
-                "run-789",
-                "Local view rebuild started.",
-            )
+            assert resp.status_code == 202 and resp.json()["ok"] is True
+            assert resp.json()["message"] == "Local view rebuild started."
             mock_clear.assert_called_once_with("svc-rebuild-test")
-            mock_start.assert_called_once_with(test_src, "metadata_sync")
-            mock_prog.assert_called_once_with("run-789", service_id="svc-rebuild-test", task="metadata_sync")
-            mock_thread.assert_called_once()
+            mock_thread.return_value.start.assert_called_once()
 
-        with (
-            patch("backend.core.iceberg.clear_source_caches"),
-            patch("backend.core.duckdb._cache_dir", return_value="/tmp/test_cache"),
-            patch("os.path.exists", return_value=False),
-            patch("backend.core.duckdb.start_cron_run", side_effect=CronLeaseHeldError("cron job busy")),
-        ):
-            resp_busy = client.post("/api/admin/rebuild-local-view")
-            assert resp_busy.status_code == 503 and "cron_busy" in str(resp_busy.json())
+            mock_thread.call_args.kwargs["target"]()
+            mock_refresh.assert_called_once_with(src, "svc-rebuild-test", log_prefix="rebuild: ")
+            mock_status.assert_called_once_with("svc-rebuild-test")
+            mock_invalidate.assert_called_once_with("svc-rebuild-test")
+
+            mock_status.side_effect = RuntimeError("status refresh failed")
+            mock_thread.call_args.kwargs["target"]()
     finally:
         app.dependency_overrides.pop(get_source, None)
 
@@ -1366,7 +994,7 @@ def mock_service_env(tmp_path, monkeypatch):
         "service_id": service_id,
         "bucket": service_id,
         "_test_cache_root": str(cache_root),
-        "provisioning": {"access_level": "read_write", "cron_compact": {"enabled": True}},
+        "provisioning": {"cron_compact": {"enabled": True}},
     }
     monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda s: s.get("_test_cache_root", str(cache_root)))
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: src if sid == service_id else None)
@@ -1505,7 +1133,7 @@ class TestLocalCompactContract:
         monkeypatch.setenv("LOCAL_COMPACT_INTERVAL_MIN", "5")
         cfg = {
             "service_id": "svc-contract-test",
-            "provisioning": {"access_level": "read_write", "cron_compact": {"enabled": True}},
+            "provisioning": {"cron_compact": {"enabled": True}},
         }
         sched = Scheduler()
         with (
@@ -1525,7 +1153,7 @@ class TestLocalCompactContract:
             "name": service_id,
             "service_id": service_id,
             "deployment_mode": "high_scale",
-            "provisioning": {"access_level": "read_write"},
+            "provisioning": {},
         }
         monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: src)
         monkeypatch.setattr("backend.core.duckdb.start_cron_run", MagicMock(return_value="run_ht_123"))
@@ -1774,7 +1402,7 @@ class TestRollupHealContract:
             "service_id": "svc-dev-test",
             "name": "Dev Test Svc",
             "fastly": {"service_id": "svc-dev-test"},
-            "provisioning": {"access_level": "read_write"},
+            "provisioning": {},
         }
         expected_startup = datetime.now(UTC) + timedelta(seconds=5)
 
@@ -2028,7 +1656,7 @@ def mock_ph_env(tmp_path, monkeypatch):
         "service_id": service_id,
         "bucket": service_id,
         "_test_cache_root": str(cache_root),
-        "provisioning": {"access_level": "read_write"},
+        "provisioning": {},
     }
     monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda s: s.get("_test_cache_root", str(cache_root)))
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: src if sid == service_id else None)
@@ -2165,7 +1793,7 @@ def test_contract_concurrent_reader_resilience_and_scheduler(mock_ph_env, monkey
 
     monkeypatch.setenv("PARTIAL_HOUR_MERGE_INTERVAL_SEC", "40")
     monkeypatch.setenv("FLA_DEV_NO_CRONS", "1")
-    cfg = {"service_id": "svc-ph-sched", "provisioning": {"access_level": "read_write"}}
+    cfg = {"service_id": "svc-ph-sched", "provisioning": {}}
     sched = Scheduler()
     with (
         patch("backend.config.list_configs", return_value=[cfg]),

@@ -35,8 +35,7 @@
 | Role | Job State | Manual API Trigger | Data Visibility |
 |---|---|---|---|
 | **Admin (`read_write`)** | Active | `POST /api/admin/backfill-bundle-rollups` | Complete Top-N rollup coverage. Live SSE progress updates in Admin UI. |
-| **Analyst Path A (Standalone Instance)** | Active | Internal trigger | Heals local analyst rollup bundles. |
-| **Analyst Path B (Remote Share)** | N/A | Blocked (403) | Benefits transparently from healed rollups. |
+| **Analyst (Remote Share)** | N/A | Blocked (403) | Benefits transparently from healed rollups. |
 
 ---
 

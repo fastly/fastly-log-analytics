@@ -20,7 +20,7 @@ Each ADR captures one significant design decision — the context, the choice, a
 | [ADR-14](14-ducklake-replacement.md) | DuckLake Replaces PyIceberg | Accepted | v3.0.0-beta1 commit-path catalog swap; supersedes ADR-01's Iceberg decision |
 | [ADR-15](15-multi-writer-topology.md) | Multi-Writer Topology | **Superseded by ADR-22** | Postgres metadata backend, split cron scheduling; dual SQLite/Postgres mode retired |
 | [ADR-16](16-ingest-ledger.md) | Ingest Ledger | Accepted | discovered/claimed/committed/quarantined/dead_letter state machine for celery/high-scale ingest |
-| [ADR-17](17-analyst-path-a-ducklake.md) | Analyst Path A Under DuckLake | Accepted (Known Gap) | Path A disabled for scalable topologies pending FOS catalog export |
+| [ADR-17](17-analyst-path-a-ducklake.md) | Analyst Path A Under DuckLake | Withdrawn | Path A removed in v3; remote sharing is the only analyst access model |
 | [ADR-18](18-serving-tier-single-pod.md) | The Serving Tier Is Single-Pod | Accepted | Ingest scales horizontally across Celery workers; backend serving tier pinned to single replica |
 | [ADR-19](19-fos-native-v3-topology.md) | FOS-native v3 Topology | Accepted | Formalizes the 4 explicit planes (landing, ingest, durable catalog, serving) and FOS as truth |
 | [ADR-20](20-clickhouse-serving-plane.md) | Reject ClickHouse Dashboard Serving Prototype | Decided (Historical Prototype) | Measured latency/saturation gates failed on early hybrid prototype; evolved into ADR-21 |

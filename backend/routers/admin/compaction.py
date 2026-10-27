@@ -115,9 +115,6 @@ def expire_snapshots_service(
     source: dict = Depends(get_source),
 ) -> ExpireSnapshotsResponse:
     """Trigger an immediate DuckLake retention and snapshot-expiry pass."""
-    if source.get("access_level") == "read_only":
-        raise HTTPException(status_code=403, detail="Read-only services cannot run cloud maintenance.")
-
     from backend.cron.jobs.metadata import _run_expire_snapshots
 
     result = _run_expire_snapshots(service_id, manual=True)
@@ -964,7 +961,6 @@ def iceberg_commit_endpoint(
         target_kwargs={"force": True},
         success_msg="Commit started.",
         in_progress_msg="Commit already running.",
-        readonly_detail=make_error("read_only", "Read-only services cannot run DuckLake commit."),
         invalidate_cache=False,
     )
 
@@ -975,48 +971,37 @@ def iceberg_commit_endpoint(
 def rebuild_local_view_endpoint(source: dict = Depends(get_source)):
     """One-button "fix it" for a stuck or stale local DuckDB view.
 
-    Returns 202 Accepted — the rebuild runs asynchronously in a worker
-    thread and the response body carries a ``run_id`` the caller can
-    poll for completion.
+    Returns 202 Accepted: the rebuild runs in a background thread.
 
-    Clears the in-memory + on-disk caches that drive view SQL generation,
-    then triggers a metadata_sync that re-pulls the catalog from the cloud
-    and rebuilds the view. The local raw buffer is NOT touched —
-    un-committed data is safe.
+    Clears the in-memory caches that drive view SQL generation, then rebuilds
+    the view over the DuckLake table and the local buffer, warms the pool, and
+    refreshes the cached service status. The local raw buffer is NOT touched,
+    so un-committed data is safe.
 
     When to use: after manually editing parquet files, after a catalog
-    schema-mapping desync, or when "Sync All" already ran and the view
-    still looks wrong. This is the nuclear-option version of refresh.
+    schema-mapping desync, or when the view still looks wrong. This is the
+    nuclear-option version of refresh.
     """
     import threading
 
     from backend.core import iceberg as db_iceberg
-    from backend.core.duckdb import start_cron_run
-    from backend.cron.jobs.metadata import _run_metadata_sync
-    from backend.cron_progress import start_progress
+    from backend.core.duckdb import refresh_config_status
+    from backend.cron.jobs.sync import refresh_view_and_warm_pool
+    from backend.repositories.dashboard import invalidate_service
 
     service_id = source["name"]
-
     db_iceberg.clear_source_caches(service_id)
 
-    try:
-        # Deliberate divergence from router_utils.start_or_resume_cron: this
-        # path does NOT resume an in-flight run on RuntimeError — it 503s
-        # cron_busy instead. A rebuild is the nuclear "fix it" button, so
-        # piggy-backing on an existing run_id would silently no-op the
-        # cache-clearing the operator explicitly asked for.
-        run_id = start_cron_run(source, "metadata_sync")
-    except RuntimeError as e:
-        logger.warning("cron_busy service_id=%s: %s", service_id, e)
-        raise HTTPException(
-            status_code=503,
-            detail=make_error("cron_busy", "A sync run is already in progress", busy=True),
-        ) from e
+    def _rebuild() -> None:
+        try:
+            refresh_view_and_warm_pool(source, service_id, log_prefix="rebuild: ")
+            refresh_config_status(service_id)
+            invalidate_service(service_id)
+        except Exception:
+            logger.exception("rebuild-local-view failed service_id=%s", service_id)
 
-    start_progress(run_id, service_id=service_id, task="metadata_sync")
-    t = threading.Thread(target=_run_metadata_sync, args=(service_id,), kwargs={"run_id": run_id}, daemon=True)
-    t.start()
-    return {"ok": True, "message": "Local view rebuild started.", "run_id": run_id}
+    threading.Thread(target=_rebuild, name=f"rebuild-local-view:{service_id}", daemon=True).start()
+    return {"ok": True, "message": "Local view rebuild started."}
 
 
 def _stream_reset_sse(
@@ -1029,8 +1014,6 @@ def _stream_reset_sse(
     from backend.utils.sse import stream_sse_from_worker
 
     service_id = source["name"]
-    if source.get("access_level") != "read_write":
-        raise HTTPException(status_code=403, detail=make_error("read_only", "This service is read-only."))
     if body.confirm != service_id:
         raise HTTPException(
             status_code=400,
@@ -1155,7 +1138,6 @@ def sync_service(
         target_kwargs={"force": force, "start_time": start_time, "end_time": end_time},
         success_msg="Ingestion started.",
         in_progress_msg="Ingestion already running.",
-        readonly_detail="Read-only services cannot run log discovery.",
     )
 
 
@@ -1179,7 +1161,6 @@ def full_sweep_service(
         target_kwargs={"force": force},
         success_msg="Full sweep started.",
         in_progress_msg="Full sweep already running.",
-        readonly_detail="Read-only services cannot run full sweep.",
     )
 
 
@@ -1203,7 +1184,6 @@ def gap_heal_service(
         target_kwargs={"force": force},
         success_msg="Gap heal evaluation started.",
         in_progress_msg="Gap heal already running.",
-        readonly_detail="Read-only services cannot run gap heal.",
     )
 
 
@@ -1225,7 +1205,6 @@ def ledger_sweep_service(
         _run_ledger_sweep,
         success_msg="Ledger sweep started.",
         in_progress_msg="Ledger sweep already running.",
-        readonly_detail="Read-only services cannot run ledger sweep.",
         require_high_scale=True,
         high_scale_detail="Ledger sweep is only supported under high-scale mode.",
     )
@@ -1249,7 +1228,6 @@ def rum_sync_service(
         _run_rum_sync,
         success_msg="RUM sync started.",
         in_progress_msg="RUM sync already running.",
-        readonly_detail="Read-only services cannot run RUM sync.",
     )
 
 
@@ -1271,7 +1249,6 @@ def rum_discovery_service(
         _run_rum_discovery_cron,
         success_msg="RUM discovery started.",
         in_progress_msg="RUM discovery already running.",
-        readonly_detail="Read-only services cannot run RUM discovery.",
         require_high_scale=True,
         high_scale_detail="RUM discovery is only supported under high-scale mode.",
     )
@@ -1310,7 +1287,6 @@ def rum_ledger_sweep_service(
         _run_rum_ledger_sweep,
         success_msg="RUM ledger sweep started.",
         in_progress_msg="RUM ledger sweep already running.",
-        readonly_detail=make_error("admin_only", "Read-only services cannot run RUM ledger sweep."),
         require_high_scale=True,
         high_scale_detail=make_error(
             "high_scale_required", "RUM ledger sweep is only supported under high-scale mode."
@@ -1325,22 +1301,12 @@ def ingest_endpoint(
     end_time: str | None = Query(default=None),
     source: dict = Depends(get_source),
 ) -> dict:
-    from backend.cron.jobs.metadata import _run_metadata_sync
     from backend.cron.jobs.sync import _run_log_discovery_cron
     from backend.repositories.dashboard import invalidate_service
     from backend.utils.router_utils import start_or_resume_cron
 
     src = source
     invalidate_service(src["name"])
-    if source.get("access_level") == "read_only":
-        return start_or_resume_cron(
-            source,
-            "metadata_sync",
-            _run_metadata_sync,
-            target_kwargs={"start_time": start_time, "end_time": end_time},
-            success_msg="Metadata sync started.",
-            in_progress_msg="Metadata sync already running.",
-        )
     return start_or_resume_cron(
         src,
         "log_discovery",
@@ -1358,14 +1324,6 @@ _MAX_EVIDENCE_DOWNLOAD_BYTES = 50 * 1024 * 1024
 
 def _service_id_from_source(source: dict) -> str:
     return str(source.get("service_id") or source.get("name", ""))
-
-
-def _require_read_write_source(source: dict) -> None:
-    if source.get("access_level", "read_write") != "read_write":
-        raise HTTPException(
-            status_code=403,
-            detail=make_error("admin_only", "This operation requires admin access."),
-        )
 
 
 def _fetch_quarantine_list_payload(
@@ -1405,7 +1363,6 @@ def list_quarantine(
     source: dict = Depends(get_source),
     _admin: None = Depends(require_admin),
 ) -> dict:
-    _require_read_write_source(source)
     service_id = _service_id_from_source(source)
     return _fetch_quarantine_list_payload(
         service_id,
@@ -1434,7 +1391,6 @@ def list_ledger_quarantine(
             status_code=404,
             detail=make_error("service_not_found", f"Service {service_id} not found."),
         )
-    _require_read_write_source(src)
     return _fetch_quarantine_list_payload(
         service_id,
         limit=limit,
@@ -1449,7 +1405,6 @@ def quarantine_summary(
     source: dict = Depends(get_source),
     _admin: None = Depends(require_admin),
 ) -> dict:
-    _require_read_write_source(source)
     return get_quarantine_evidence_summary(_service_id_from_source(source))
 
 
@@ -1459,7 +1414,6 @@ def download_quarantine_evidence(
     source: dict = Depends(get_source),
     _admin: None = Depends(require_admin),
 ) -> StreamingResponse:
-    _require_read_write_source(source)
     service_id = _service_id_from_source(source)
     try:
         result = _quarantine_store.read_evidence(service_id, item_id)
@@ -1505,7 +1459,6 @@ def purge_quarantine_evidence(
     source: dict = Depends(get_source),
     _admin: None = Depends(require_admin),
 ) -> dict[str, int]:
-    _require_read_write_source(source)
     service_id = _service_id_from_source(source)
     if item_id is not None and get_quarantine_evidence(service_id, item_id) is None:
         raise HTTPException(

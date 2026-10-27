@@ -183,7 +183,7 @@ reuse remain historical; missing query/section links and server CPU observations
 stay explicit gaps. Existing debug permissions are unchanged. This instrumentation
 alone is not deployed correlation evidence or performance certification.
 
-## Disposable Analyst Path B fixture
+## Disposable Analyst fixture
 
 `scripts/lib/analyst_fixture.cjs` exports `withAnalystUsers(options, work)` and
 `recoverOwnedInvites(options)`. This is a Chromium fixture, not a sharing setup
@@ -254,7 +254,7 @@ Standard Security, Origin, Performance, CMCD and Network dispatch sites stamp th
 
 Standard granular Origin endpoints stamp the live reader only after it runs; SQL templates named `ROLLUP` do not imply a precomputed rollup source. Shielding records its no-match presence probe separately, only when executed. Missing required columns or latency expressions emit no compute claim. The existing response memo retains these timings as historical on a hit; cache reuse does not become new reader execution.
 
-The current live sampler uses administrator mTLS only. It does not implement the Analyst Path B lifecycle or imply analyst coverage. HTTP sampling does not establish page-ready, interactions, history, coverage, controlled misses or complete query/I/O attribution. Consequently it reports `qualification: incomplete` and exits with status 2 even when requests succeed.
+The current live sampler uses administrator mTLS only. It does not implement the Analyst lifecycle or imply analyst coverage. HTTP sampling does not establish page-ready, interactions, history, coverage, controlled misses or complete query/I/O attribution. Consequently it reports `qualification: incomplete` and exits with status 2 even when requests succeed.
 
 ## Prerequisite gate
 

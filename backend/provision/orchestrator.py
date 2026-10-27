@@ -904,7 +904,6 @@ def write_service_config(state: dict):
             "service_id": service_id,
             "name": state.get("name") or state.get("service_name") or service_id,
             "created_at": created_at,
-            "access_level": state.get("access_level", "read_write"),
             "storage_mode": state.get("storage_mode", "cloud"),
             "fos_endpoint": region_endpoint(region),
             "fos_access_key_id": fos_key,
@@ -1531,65 +1530,6 @@ def cleanup_local_data(service_id: str, bucket: str = None, remove_data: bool = 
                         shutil.rmtree(svc_cache_dir)
                         ok(f"Removed local cache: {svc_cache_dir}")
     _sync_crontab()
-
-
-def analyst_path_a_supported(source: dict | None = None) -> bool:
-    """Return whether independent FOS-only analyst invites are usable."""
-    from backend import config as svcconfig
-
-    return not svcconfig.is_high_scale_mode(source)
-
-
-def generate_analyst_invite(service_id: str) -> dict:
-    from backend import config as svcconfig
-
-    cfg = svcconfig.load_config(service_id)
-    if not cfg:
-        raise RuntimeError(f"Service {service_id} not found")
-    if cfg.get("access_level") != "read_write":
-        raise RuntimeError("Invite generation requires a read_write service configuration")
-    if not analyst_path_a_supported(cfg):
-        raise RuntimeError(
-            "Independent analyst invites are unavailable when DEPLOYMENT_MODE=high_scale: "
-            "analytical data resides in ClickHouse and is not included in the FOS-only invite. "
-            "Use live shared-instance analyst access (Path B) instead."
-        )
-    api_token = cfg.get("fastly_api_key", "").strip()
-    if not api_token:
-        raise RuntimeError(
-            f"Service {service_id} has no stored fastly_api_key. Rotate the credential before generating a viewer key."
-        )
-    bucket = cfg.get("fos_bucket", "")
-    region = cfg.get("fos_region", "us-east-1")
-    key = fastly(
-        "POST",
-        "/resources/object-storage/access-keys",
-        {
-            "permission": "read-only-objects",
-            "description": f"fos-log-analysis-analyst-{service_id}-{int(time.time())}",
-            "buckets": [bucket],
-        },
-        token=api_token,
-    )
-    if not isinstance(key, dict) or "access_key" not in key or "secret_key" not in key:
-        raise RuntimeError(
-            f"Fastly access-key API returned unexpected shape (keys={list(key.keys()) if isinstance(key, dict) else type(key).__name__}); "
-            "cannot generate analyst invite."
-        )
-    return {
-        "name": cfg.get("name", service_id),
-        "service_id": service_id,
-        "fos_bucket": bucket,
-        "fos_region": region,
-        "fos_endpoint": cfg.get("fos_endpoint", f"{region}.object.fastlystorage.app"),
-        "fos_prefix": cfg.get("fos_prefix", ""),
-        "access_key_id": key["access_key"],
-        "secret_key": key["secret_key"],
-        "iceberg_metadata_location": None,
-        "cdn_url": cfg.get("cdn_url", ""),
-        "cdn_service_id": cfg.get("cdn_service_id") or "",
-        "cdn_secret": cfg.get("cdn_secret") or "",
-    }
 
 
 def _build_log_fields_config(args) -> dict:

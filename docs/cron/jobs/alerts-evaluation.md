@@ -32,8 +32,7 @@
 | Role | Job State | Manual API Trigger | Data Visibility |
 |---|---|---|---|
 | **Admin (`read_write`)** | Active | `POST /api/alerts/test/{alert_id}` | Full alert CRUD and incident history. Dispatches webhook notifications to external channels. |
-| **Analyst Path A (Standalone Instance)** | Active | Internal trigger | Evaluates alerts locally against cached dataset on analyst instance. |
-| **Analyst Path B (Remote Share)** | N/A | Blocked (403) | Server-side alert daemon; notifications sent to configured webhooks. |
+| **Analyst (Remote Share)** | N/A | Blocked (403) | Server-side alert daemon; notifications sent to configured webhooks. |
 
 ---
 

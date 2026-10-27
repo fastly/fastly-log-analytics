@@ -267,7 +267,6 @@ from backend.provision.fastly_api import (  # noqa: E402
 from backend.provision.orchestrator import (  # noqa: E402
     _build_log_fields_config,
     cleanup_local_data,
-    generate_analyst_invite,
     perform_teardown,
     write_service_config,
 )
@@ -276,7 +275,7 @@ from backend.provision.orchestrator import (  # noqa: E402
 # Handler functions — driven directly by the unit tests; the typer
 # commands at the bottom call into these via a SimpleNamespace.
 # Patching contracts (the test file pokes ``backend.provision.cli.<name>``):
-#   perform_teardown, cleanup_local_data, generate_analyst_invite,
+#   perform_teardown, cleanup_local_data,
 #   update_logging_endpoint, write_service_config, validate_log_format,
 #   redeploy_cdn_vcl, find_service_by_name, fastly, ask, ask_yes, ask_int
 # ────────────────────────────────────────────────────────────────────────────
@@ -514,43 +513,6 @@ def handle_reset_logs(args):
                 fail(event["message"])
     except Exception as exc:
         fail(f"Log deletion failed: {exc}")
-        sys.exit(1)
-
-
-def handle_invite_analyst(args):
-    banner("Fastly Log Analysis — Invite Analyst")
-    from backend import config as svcconfig
-
-    service_id = args.service_id
-    if not service_id:
-        ids = svcconfig.list_service_ids()
-        if len(ids) == 1:
-            service_id = ids[0]
-        elif ids:
-            for sid in ids:
-                c = svcconfig.load_config(sid)
-                info(f"  {sid}  ({c.get('name', '')})")
-            service_id = ask("Service ID")
-    if not service_id:
-        fail("--service-id is required.")
-        sys.exit(1)
-
-    cfg = svcconfig.load_config(service_id)
-    if not cfg or cfg.get("access_level") != "read_write":
-        fail("Service not found or not read_write.")
-        sys.exit(1)
-
-    if not args.yes and not ask_yes("Proceed?"):
-        return
-
-    try:
-        import json
-
-        result = generate_analyst_invite(service_id)
-        print(json.dumps({k: v for k, v in result.items() if v}, indent=2))
-        warn("Save the secret_key now — it cannot be retrieved again.")
-    except Exception as e:
-        fail(str(e))
         sys.exit(1)
 
 
@@ -859,15 +821,6 @@ def cmd_reset_logs(
 ):
     args = SimpleNamespace(service_id=service_id, delete_raw=delete_raw, wipe_usage=wipe_usage, yes=yes)
     handle_reset_logs(args)
-
-
-@app.command("invite-analyst", help="Generate a read-only analyst invite.")
-def cmd_invite_analyst(
-    yes: bool = typer.Option(False, "--yes", "-y"),
-    service_id: str | None = typer.Option(None, "--service-id"),
-):
-    args = SimpleNamespace(yes=yes, service_id=service_id)
-    handle_invite_analyst(args)
 
 
 @app.command("update-logs", help="Push a refreshed log_fields config.")

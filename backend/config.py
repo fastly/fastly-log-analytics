@@ -7,7 +7,6 @@ Config file schema:
 {
     "service_id": "abcdefg12345abcdef1234",   # Fastly logging service ID (matches filename)
     "name": "My Production Site",               # Human-readable label (from Fastly API)
-    "access_level": "read_write",               # "read_write" or "read_only"
     "fos_endpoint": "us-east-1.object.fastlystorage.app",
     "fos_access_key_id": "...",
     "fos_secret_access_key": "...",
@@ -627,7 +626,6 @@ class _SourceConfigModel(BaseModel):
     logging_service_id: Any = Field("", validation_alias="service_id")
     duckdb_path: str = ""
     deployment_mode: str = DEPLOYMENT_MODE
-    access_level: Any = "read_write"
     storage_mode: Any = "cloud"
     log_period: int = 60
     log_fields: Annotated[dict[str, Any], BeforeValidator(lambda v: dict(v) if v else {})] = Field(default_factory=dict)

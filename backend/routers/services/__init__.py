@@ -23,7 +23,6 @@ from backend.core.log_fields import _filter_user_custom_fields, _is_system_field
 from backend.deps import get_service_id, get_source
 from backend.models._base import DEFAULT_ERROR_RESPONSES
 from backend.models.common import (
-    AnalystInvite,
     AuditLogsResponse,
     CmcdSettingsResponse,
     CredentialsUpdateResponse,
@@ -41,7 +40,6 @@ from backend.models.common import (
     LogFieldsUpdateResponse,
     LoggingSettingsResponse,
     OkMessageResponse,
-    ProvisionLakeInfoResponse,
     ServiceCredentialsBody,
     ServiceCronSettingsBody,
     ServicesListResponse,
@@ -77,7 +75,7 @@ _LOGGING_SETTINGS_CACHE_TTL = 300.0
 _logging_settings_cache: BoundedTTLCache = BoundedTTLCache(maxsize=256, ttl_seconds=_LOGGING_SETTINGS_CACHE_TTL)
 
 # Whitelisted fields safe to surface to a remote analyst on GET /api/services.
-_ANALYST_SAFE_SERVICE_FIELDS = frozenset({"service_id", "name", "access_level", "is_active"})
+_ANALYST_SAFE_SERVICE_FIELDS = frozenset({"service_id", "name", "is_active"})
 
 
 def _sse(type_: str, message: str | None = None, **extra: object) -> str:
@@ -112,18 +110,6 @@ def api_services_list(request: Request, service_id: str | None = Depends(get_ser
     if analyst_session is not None:
         result = _trim_for_analyst(result, set(analyst_session.service_ids or []))
     return ServicesListResponse.with_telemetry(services=result, debug_queries=[])
-
-
-@core_router.get(
-    "/services/{service_id}/lake-info",
-    response_model=ProvisionLakeInfoResponse,
-    response_model_exclude_unset=True,
-)
-def get_service_lake_info(source: dict = Depends(get_source)):
-    """Return Iceberg table range and calendar for a configured service."""
-    from backend.core.iceberg.lake_info import fetch_lake_info
-
-    return fetch_lake_info(source, use_temp_cache=False)
 
 
 @core_router.post("/services/{service_id}/cron-settings")
@@ -318,11 +304,6 @@ def api_service_update_credentials(request: Request, service_id: str, body: Serv
     endpoint = cfg.get("fos_endpoint") or f"{region}.object.fastlystorage.app"
     api_token, access_key, secret_key = body.api_token.strip(), body.access_key.strip(), body.secret_key.strip()
     if api_token:
-        if cfg.get("access_level") != "read_write":
-            raise HTTPException(
-                status_code=403,
-                detail={"error": "API token rotation is only available for admin (read_write) services"},
-            )
         from backend.core.fastly.client import fastly
 
         desc = f"fos-log-analysis-{service_id}-{int(time.time())}"
@@ -676,26 +657,6 @@ def api_service_update_logging_settings(
             yield _sse("error", str(e))
 
     return sse_response(stream())
-
-
-@core_router.post("/services/{service_id}/generate-viewer-key", response_model=AnalystInvite)
-def api_invite_analyst(service_id: str):
-    from backend.provision import generate_analyst_invite
-
-    try:
-        return AnalystInvite.with_telemetry(**generate_analyst_invite(service_id))
-    except RuntimeError as e:
-        msg, low = str(e), str(e).lower()
-        status = (
-            404
-            if "not found" in low
-            else 403
-            if "read_write" in low
-            else 409
-            if "independent analyst invites are unavailable" in low
-            else 400
-        )
-        raise HTTPException(status_code=status, detail={"error": msg})
 
 
 @core_router.post("/services/{service_id}/ngwaf-sync")
@@ -1186,12 +1147,10 @@ router.include_router(cron_router)
 
 
 import datetime as _dt
-import hashlib
 import io
 import logging
 import secrets
 import shutil
-import threading
 import urllib.error
 import urllib.request
 import zipfile
@@ -1205,7 +1164,6 @@ from backend.models._base import DEFAULT_ERROR_RESPONSES
 from backend.models.admin import ProvisionService
 from backend.models.common import (
     CheckFosRequest,
-    LakeInfoRequest,
     NgwafWorkspaceCreateRequest,
     NgwafWorkspaceSetResponse,
     NgwafWorkspacesResponse,
@@ -1215,7 +1173,6 @@ from backend.models.common import (
     ProvisionConfigRequest,
     ProvisionExecuteRequest,
     ProvisionIngestResponse,
-    ProvisionLakeInfoResponse,
     ProvisionReconcileRequest,
     ProvisionTeardownRequest,
     ProvisionValidateRequest,
@@ -1582,26 +1539,6 @@ def provision_teardown(req: Request, body: ProvisionTeardownRequest | None = Non
     return sse_response(stream())
 
 
-@provision_router.post("/lake-info", response_model=ProvisionLakeInfoResponse, response_model_exclude_unset=True)
-def provision_lake_info(req: LakeInfoRequest):
-    """Return Iceberg table range and calendar for a given bucket/credentials without registering it."""
-    from backend.core.iceberg.lake_info import fetch_lake_info
-
-    h = hashlib.md5(f"{req.bucket}:{req.prefix}".encode(), usedforsecurity=False).hexdigest()[:12]
-    src = {
-        "bucket": req.bucket,
-        "region": req.region,
-        "access_key_id": req.access_key,
-        "secret_access_key": req.secret_key,
-        "prefix": req.prefix,
-        "endpoint": req.endpoint or f"{req.region}.object.fastlystorage.app",
-        "name": f"_check_{h}",
-        "storage_mode": "cloud",
-        "iceberg_metadata_location": req.iceberg_metadata_location,
-    }
-    return fetch_lake_info(src, use_temp_cache=True)
-
-
 @provision_router.post("/execute")
 def provision_execute(req: ProvisionExecuteRequest):
     from backend import config as svcconfig
@@ -1752,12 +1689,6 @@ def provision_execute(req: ProvisionExecuteRequest):
                         from backend.provision import _sync_crontab
 
                         _sync_crontab()
-                        try:
-                            from backend.cron.jobs.metadata import _run_metadata_sync
-
-                            _run_metadata_sync(cfg["logging_service_id"])
-                        except Exception as e:
-                            logger.warning("[provision] Initial metadata sync after provision failed: %s", e)
                     except Exception:
                         logger.debug("stream: step failed (ignored)", exc_info=True)
         except Exception as e:
@@ -2004,20 +1935,6 @@ def provision_ingest(payload: ProvisionConfigRequest):
         _sync_crontab()
     except Exception:
         logger.warning("provision_ingest: _sync_crontab failed (ignored)", exc_info=True)
-
-    try:
-
-        def background_sync():
-            try:
-                from backend.cron.jobs.metadata import _run_metadata_sync
-
-                _run_metadata_sync(state["logging_service_id"])
-            except Exception as e:
-                logger.warning("[provision_ingest] Initial metadata sync after ingest failed: %s", e)
-
-        threading.Thread(target=background_sync, daemon=True).start()
-    except Exception as e:
-        logger.warning("[provision_ingest] Failed to spawn background metadata sync thread: %s", e)
 
     return {"ok": True, "service_id": state["logging_service_id"]}
 
@@ -2294,10 +2211,6 @@ _bootstrap_inflight: dict[str, asyncio.Future] = {}
 # and remote analyst requests (which don't hit the short-TTL _bootstrap_cache).
 _HEADER_BADGE_CACHE_TTL_S = 30.0
 _header_badge_cache: TTLCache = TTLCache(maxsize=256, ttl=_HEADER_BADGE_CACHE_TTL_S)
-_ANALYST_PATH_A_UNSUPPORTED_REASON = (
-    "Independent analyst access is unavailable for high-scale services. "
-    "Use live shared-instance analyst access (Path B)."
-)
 
 from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry  # noqa: E402
 
@@ -2443,33 +2356,15 @@ def _bootstrap_sync(
             },
         )
 
-    src: dict | None = None
-    if service_id:
-        src = timer.call("get_source_for_service", lambda: _db.get_source_for_service(service_id))
-
     services = timer.call("get_enriched_services", lambda: get_enriched_services(service_id))
 
-    def _project_analyst_path_capability() -> None:
-        from backend import config as svcconfig
-        from backend.provision import analyst_path_a_supported
-
-        for service in services:
-            cfg = svcconfig.load_config(service.get("service_id"))
-            supported = analyst_path_a_supported(cfg)
-            service["analyst_path_a_supported"] = supported
-            service["analyst_path_a_reason"] = None if supported else _ANALYST_PATH_A_UNSUPPORTED_REASON
-
-    timer.call("analyst_path_a_capability", _project_analyst_path_capability)
-
-    # Analyst path: filter services to those scoped on the invite and force
-    # access_level=read_only regardless of what get_source_for_service returned.
+    # Analyst path: filter services to those scoped on the invite.
     if analyst_session is not None:
         allowed = set(analyst_session.service_ids or [])
         services = [s for s in services if s.get("service_id") in allowed]
         if service_id not in allowed:
             # Reset active id to the first allowed service (if any).
             service_id = next((s.get("service_id") for s in services), None)
-            src = _db.get_source_for_service(service_id) if service_id else None
 
     # Validate the provided service_id exists; if not, fallback to the first one
     valid_active_id = service_id
@@ -2974,14 +2869,6 @@ def _bootstrap_sync(
 
     views = timer.call("views", _resolve_views)
 
-    # Force read_only for analyst sessions regardless of underlying source.
-    if analyst_session is not None:
-        access_level = "read_only"
-    elif src and valid_active_id == service_id:
-        access_level = src.get("access_level", "read_write")
-    else:
-        access_level = "read_write"
-
     from backend.core.request_telemetry import collection_enabled as _web_vitals_collection_enabled
 
     storage_mode = active_src.get("storage_mode", "cloud") if active_src else "cloud"
@@ -3005,7 +2892,6 @@ def _bootstrap_sync(
         pops=pops,
         pop_geo=pop_geo,
         settings={
-            "access_level": access_level,
             "storage_mode": storage_mode,
             "is_remote_analyst": analyst_session is not None,
             "analyst_email": analyst_session.email if analyst_session else None,

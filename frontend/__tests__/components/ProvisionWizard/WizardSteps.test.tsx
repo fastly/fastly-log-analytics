@@ -2,7 +2,7 @@
  * @vitest-environment jsdom
  *
  * Consolidated ProvisionWizard component tests: TerraformStep,
- * topology capability (ModeStep + JoinStep), WizardFooter, RumVersionPicker, and ResumeBanner.
+ * ModeStep / step ordering / ConnectStep, WizardFooter, RumVersionPicker, and ResumeBanner.
  */
 import * as React from 'react'
 import {
@@ -17,23 +17,21 @@ import { afterEach, beforeEach, describe, expect, it, test, vi } from 'vitest'
 import { http, HttpResponse } from 'msw'
 import { axe } from 'vitest-axe'
 import { DeleteDataDialog, TeardownDialog } from '@/components/TeardownDialog'
-import { SSEProgressView } from '@/components/SSEModal'
 import { LogSettingsModal } from '@/components/LogSettingsModal/LogSettingsModal'
 import { CustomFieldDrawer, CustomFieldsManager } from '@/components/CustomFields/CustomFieldDrawer'
-import type { SSELine } from '@/hooks/useSSE'
 import type { ServiceConfig } from '@/types/api'
 import type { components } from '@/types/api.generated'
 import {
   ProvisionWizard, TerraformStep, ModeStep, ResumeBanner, WizardFooter,
-  ANALYST_PATH_A_UNSUPPORTED_REASON, INITIAL_CONFIG, WIZARD_DRAFT_VERSION,
+  INITIAL_CONFIG, WIZARD_DRAFT_VERSION, getStepsForMode,
   type LogFieldsCatalog, type WizardDraft, type WizardState,
-  JoinStep,
+  ConnectStep,
 } from '@/components/ProvisionWizard/ProvisionWizard'
 import { RumVersionPicker } from '@/components/ProvisionWizard/steps/StorageStep'
 import {
   WIZARD_DRAFT_KEY, buildHandleModalClose, buildValidateOnSuccess, clearDraft, loadDraft,
-  mergePersistedConfig, runAdminIngest, runAnalyzeLake, runCheckConfig, runCheckDomain,
-  runCheckFos, runDeploy, runFetchTerraformPreview, runJoin, saveDraft, stripSecretsFromConfig,
+  mergePersistedConfig, runAdminIngest, runCheckConfig, runCheckDomain,
+  runCheckFos, runDeploy, runFetchTerraformPreview, saveDraft, stripSecretsFromConfig,
   validateMutationFn,
 } from '@/components/ProvisionWizard/useWizardState'
 import { useServiceStore } from '@/stores/filterStore'
@@ -102,46 +100,117 @@ describe('TerraformStep', () => {
   })
 })
 
-function makeTopologyState(overrides: Partial<WizardState> = {}): WizardState {
+function makeConnectState(overrides: Partial<WizardState> = {}): WizardState {
   return {
-    step: 'mode', setStep: vi.fn(), mode: 'join', setMode: vi.fn(),
-    analystPathASupported: true, analystPathAReason: null, joinPhase: 'form',
-    config: INITIAL_CONFIG, setConfig: vi.fn(), isAnalyzing: false,
-    lines: [], status: 'idle', sseError: null, icebergMetadataLocation: '', setIcebergMetadataLocation: vi.fn(),
+    step: 'connect', setStep: vi.fn(), setMode: vi.fn(), mode: 'ingest', setupPhase: 'form',
+    config: INITIAL_CONFIG, setConfig: vi.fn(),
+    lines: [], status: 'idle', sseError: null,
     handleCheckFos: vi.fn(), fosStatus: 'idle', fosError: '', selectedService: null, selectedCdnService: null,
+    setSelectedService: vi.fn(), setSelectedCdnService: vi.fn(),
     servicesData: [], configStatus: null, isCheckingConfig: false, handleCheckConfig: vi.fn(),
     ...overrides,
   } as WizardState
 }
 
-describe('ProvisionWizard topology capability', () => {
-  it('keeps Analyst: Join enabled for supported sync topology', () => {
-    render(<ModeStep s={makeTopologyState({ analystPathASupported: true })} />)
-    expect(screen.getByRole('button', { name: /analyst: join/i })).toBeEnabled()
+describe('ProvisionWizard modes and ingest connect step', () => {
+  it('offers exactly the two admin modes and no analyst join', () => {
+    render(<ModeStep s={makeConnectState({ step: 'mode', mode: null })} />)
+    expect(screen.getAllByRole('button')).toHaveLength(2)
+    expect(screen.getByRole('button', { name: /admin: provision/i })).toBeEnabled()
+    expect(screen.getByRole('button', { name: /admin: connect terraform/i })).toBeEnabled()
+    expect(screen.queryByRole('button', { name: /analyst/i })).not.toBeInTheDocument()
   })
 
-  it('disables Analyst: Join for unsupported scalable topology', () => {
-    render(<ModeStep s={makeTopologyState({ analystPathASupported: false, analystPathAReason: ANALYST_PATH_A_UNSUPPORTED_REASON })} />)
-    expect(screen.getByRole('button', { name: /analyst: join/i })).toBeDisabled()
-    expect(screen.getByText(ANALYST_PATH_A_UNSUPPORTED_REASON)).toBeVisible()
+  it.each([
+    ['provision', 'Admin: Provision'],
+    ['ingest', 'Admin: Connect Terraform'],
+  ] as const)('selecting %s starts at the token step', async (mode, label) => {
+    const s = makeConnectState({ step: 'mode', mode: null })
+    render(<ModeStep s={s} />)
+    await userEvent.click(screen.getByRole('button', { name: new RegExp(label, 'i') }))
+    expect(s.setMode).toHaveBeenCalledWith(mode)
+    expect(s.setStep).toHaveBeenCalledWith('token')
   })
 
-  it('warns when a stale invite or manual entry reaches JoinStep', () => {
-    render(<JoinStep s={makeTopologyState({ analystPathASupported: false, analystPathAReason: ANALYST_PATH_A_UNSUPPORTED_REASON })} />)
-    expect(screen.getByText(/independent analyst join is unavailable/i)).toBeVisible()
-    expect(screen.getByText(/old invite or entered credentials manually/i)).toBeVisible()
-    expect(screen.getByText(/Path B/i)).toBeVisible()
+  it('renders the ingest connect form without Iceberg or analyst-invite inputs', () => {
+    render(<ConnectStep s={makeConnectState()} />)
+    expect(screen.getByText(/connect to existing storage/i)).toBeVisible()
+    expect(screen.getByText('Logging Service', { selector: 'label, span, div' })).toBeVisible()
+    expect(screen.queryByText(/iceberg metadata location/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/import config from admin/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/read-only mode/i)).not.toBeInTheDocument()
+  })
+
+  it('shows the completion panel once setup is done', () => {
+    render(<ConnectStep s={makeConnectState({ setupPhase: 'done' })} />)
+    expect(screen.getByText(/setup complete/i)).toBeVisible()
+    expect(screen.queryByText(/connect to existing storage/i)).not.toBeInTheDocument()
+  })
+})
+
+describe('getStepsForMode', () => {
+  const ids = (mode: Parameters<typeof getStepsForMode>[0], cfg?: { logging_enabled?: boolean }) =>
+    getStepsForMode(mode, cfg).map((x) => x.id)
+
+  it('provision mode skips the connect step', () => {
+    expect(ids('provision')).toEqual(['mode', 'token', 'service', 'features', 'storage', 'ngwaf', 'fields', 'execute'])
+  })
+
+  it('ingest mode inserts connect between service and features', () => {
+    expect(ids('ingest')).toEqual(['mode', 'token', 'service', 'connect', 'features', 'storage', 'ngwaf', 'fields', 'execute'])
+  })
+
+  it('drops the NGWAF and log-field steps when logging is disabled', () => {
+    expect(ids('ingest', { logging_enabled: false })).toEqual(['mode', 'token', 'service', 'connect', 'features', 'storage', 'execute'])
+    expect(ids('provision', { logging_enabled: false })).toEqual(['mode', 'token', 'service', 'features', 'storage', 'execute'])
+  })
+
+  it('never contains the removed analyst-join steps', () => {
+    for (const mode of ['provision', 'ingest', null] as const) {
+      for (const removed of ['join', 'analyze', 'settings', 'confirm']) expect(ids(mode)).not.toContain(removed)
+    }
+  })
+})
+
+describe('WizardFooter — ingest connect step', () => {
+  it('Continue stays disabled until storage access is verified and both services are chosen', async () => {
+    const setStep = vi.fn()
+    const { rerender } = render(<WizardFooter s={makeFooterState({ step: 'connect', mode: 'ingest', setStep, setupPhase: 'form', fosStatus: 'idle', config: { endpoint_name: 'EP', cdn_service_name: 'cdn' } as never })} />)
+    expect(screen.getByRole('button', { name: /^continue$/i })).toBeDisabled()
+    rerender(<WizardFooter s={makeFooterState({ step: 'connect', mode: 'ingest', setStep, setupPhase: 'form', fosStatus: 'success', config: { endpoint_name: 'EP', cdn_service_name: '' } as never })} />)
+    expect(screen.getByRole('button', { name: /^continue$/i })).toBeDisabled()
+    rerender(<WizardFooter s={makeFooterState({ step: 'connect', mode: 'ingest', setStep, setupPhase: 'form', fosStatus: 'success', config: { endpoint_name: 'EP', cdn_service_name: 'cdn' } as never })} />)
+    await userEvent.click(screen.getByRole('button', { name: /^continue$/i }))
+    expect(setStep).toHaveBeenCalledWith('features')
+  })
+
+  it('Back from connect returns to the service step; Back from features (ingest) returns to connect', async () => {
+    const setStep = vi.fn()
+    const { unmount } = render(<WizardFooter s={makeFooterState({ step: 'connect', mode: 'ingest', setStep, setupPhase: 'form' })} />)
+    await userEvent.click(screen.getByRole('button', { name: /back/i }))
+    expect(setStep).toHaveBeenCalledWith('service')
+    unmount()
+    const setStep2 = vi.fn()
+    render(<WizardFooter s={makeFooterState({ step: 'features', mode: 'ingest', setStep: setStep2, setupPhase: 'form' })} />)
+    await userEvent.click(screen.getByRole('button', { name: /back/i }))
+    expect(setStep2).toHaveBeenCalledWith('connect')
+  })
+
+  it('execute step in ingest mode finishes with Complete Setup (handleAdminIngest)', async () => {
+    const handleAdminIngest = vi.fn()
+    render(<WizardFooter s={makeFooterState({ step: 'execute', mode: 'ingest', handleAdminIngest })} />)
+    await userEvent.click(screen.getByRole('button', { name: /complete setup/i }))
+    expect(handleAdminIngest).toHaveBeenCalled()
   })
 })
 
 function makeFooterState(overrides: Partial<WizardState> = {}): WizardState {
   return {
     step: 'terraform', setStep: vi.fn(), mode: 'provision', isDeploying: false, status: 'idle', isDone: false,
-    handleModalClose: vi.fn(), isAnalyzing: false, token: 'tok', isLoadingServices: false, handleTokenSubmit: vi.fn(),
+    handleModalClose: vi.fn(), token: 'tok', isLoadingServices: false, handleTokenSubmit: vi.fn(),
     selectedService: { id: 'svc', name: 'Svc' }, validateMutation: { isPending: false }, domainStatus: 'available',
     config: { fos_bucket_name: 'bucket', ngwaf_workspace_id: '' }, fetchTerraformPreview: vi.fn(),
-    handleDeploy: vi.fn(), handleAdminIngest: vi.fn(), fosStatus: 'idle', handleAnalyzeLake: vi.fn(),
-    importMode: 'all', importRange: { start: '', end: '' }, handleJoin: vi.fn(), joinPhase: 'form', stop: vi.fn(),
+    handleDeploy: vi.fn(), handleAdminIngest: vi.fn(), fosStatus: 'idle', setupPhase: 'form', stop: vi.fn(),
     ...overrides,
   } as WizardState
 }
@@ -246,8 +315,7 @@ function makeDraft(overrides: Partial<WizardDraft> = {}): WizardDraft {
       ...INITIAL_CONFIG, endpoint_name: 'My EP', fos_bucket_name: 'b',
       fos_access_key: 'AK-LEAK', fos_secret_key: 'SK-LEAK', cdn_secret: 'CDN-LEAK',
     }),
-    importMode: 'all', importRange: { start: '', end: '' }, syncEnabled: true, syncIntervalMins: '2',
-    icebergMetadataLocation: '', updatedAt: new Date().toISOString(), createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(), createdAt: new Date().toISOString(),
     ...overrides,
   }
 }
@@ -420,6 +488,28 @@ describe('wizard-draft persistence', () => {
     for (const s of ['AK-LEAK', 'SK-LEAK', 'CDN-LEAK']) expect(raw).not.toContain(s)
   })
 
+  it('discards a v1 draft, including one left under the legacy v1 key', () => {
+    expect(WIZARD_DRAFT_VERSION).toBe(2)
+    window.localStorage.setItem(WIZARD_DRAFT_KEY, JSON.stringify({ ...makeDraft(), version: 1 }))
+    expect(loadDraft()).toBeNull()
+    expect(window.localStorage.getItem(WIZARD_DRAFT_KEY)).toBeNull()
+
+    window.localStorage.setItem('provision-wizard-draft-v1', JSON.stringify({ ...makeDraft(), version: 1, mode: 'join' }))
+    expect(loadDraft()).toBeNull()
+    expect(window.localStorage.getItem('provision-wizard-draft-v1')).toBeNull()
+  })
+
+  it('rejects a draft whose mode is the removed analyst join mode', () => {
+    window.localStorage.setItem(WIZARD_DRAFT_KEY, JSON.stringify({ ...makeDraft(), mode: 'join' }))
+    expect(loadDraft()).toBeNull()
+  })
+
+  it('persists no analyst-import fields', () => {
+    saveDraft(makeDraft())
+    const raw = window.localStorage.getItem(WIZARD_DRAFT_KEY)!
+    for (const k of ['importMode', 'importRange', 'syncEnabled', 'syncIntervalMins', 'icebergMetadataLocation']) expect(raw).not.toContain(k)
+  })
+
   it('handles version mismatch, mode step, invalid JSON, clearDraft, and broken localStorage', () => {
     saveDraft(makeDraft({ version: WIZARD_DRAFT_VERSION + 1 }))
     expect(loadDraft()).toBeNull()
@@ -475,7 +565,7 @@ describe('validateMutationFn', () => {
 })
 
 describe('buildValidateOnSuccess', () => {
-  const makeDeps = (mode: 'join' | 'ingest' | 'create' = 'create') => ({
+  const makeDeps = (mode: 'provision' | 'ingest' = 'provision') => ({
     token: 'TOK', mode, setTokenInfo: vi.fn(), setConfig: vi.fn(), setStep: vi.fn(),
   })
 
@@ -509,10 +599,9 @@ describe('buildValidateOnSuccess', () => {
   })
 
   it.each([
-    ['join' as const, 'join'],
-    ['ingest' as const, 'join'],
-    ['create' as const, 'features'],
-  ])('advances to %s step when mode is %s', (mode, expectedStep) => {
+    ['ingest' as const, 'connect'],
+    ['provision' as const, 'features'],
+  ])('routes %s mode to the %s step', (mode, expectedStep) => {
     const deps = makeDeps(mode)
     buildValidateOnSuccess(deps)({})
     expect(deps.setStep).toHaveBeenCalledWith(expectedStep)
@@ -609,47 +698,6 @@ describe('runCheckDomain', () => {
   })
 })
 
-describe('runAnalyzeLake', () => {
-  const makeArgs = (overrides: Partial<Parameters<typeof runAnalyzeLake>[0]> = {}): Parameters<typeof runAnalyzeLake>[0] => ({
-    config: { ...INITIAL_CONFIG, fos_bucket_name: 'b', fos_region: 'us-east-1', fos_access_key: 'ak', fos_secret_key: 'sk', fos_prefix: 'p/' },
-    icebergMetadataLocation: 's3://b/metadata/v1.json',
-    setIsAnalyzing: vi.fn(), setLakeInfo: vi.fn(), setImportRange: vi.fn(),
-    setStep: vi.fn(), setFosStatus: vi.fn(), setFosError: vi.fn(), ...overrides,
-  })
-
-  it('writes lake info + import range (when present) and advances to analyze step', async () => {
-    const body = { ok: true, table_count: 3, range: { start: '2026-01-01', end: '2026-02-01' } }
-    server.use(http.post(`${API_BASE}/api/provision/lake-info`, () => HttpResponse.json(body)))
-    const args = makeArgs()
-    await runAnalyzeLake(args)
-    expect(args.setIsAnalyzing).toHaveBeenNthCalledWith(1, true)
-    expect(args.setLakeInfo).toHaveBeenCalledWith(body)
-    expect(args.setImportRange).toHaveBeenCalledWith({ start: '2026-01-01', end: '2026-02-01' })
-    expect(args.setStep).toHaveBeenCalledWith('analyze')
-    expect(args.setIsAnalyzing).toHaveBeenLastCalledWith(false)
-
-    server.use(http.post(`${API_BASE}/api/provision/lake-info`, () => HttpResponse.json({ ok: true, table_count: 0 })))
-    const noRangeArgs = makeArgs()
-    await runAnalyzeLake(noRangeArgs)
-    expect(noRangeArgs.setImportRange).not.toHaveBeenCalled()
-    expect(noRangeArgs.setStep).toHaveBeenCalledWith('analyze')
-  })
-
-  it.each([
-    ['ok:false', () => HttpResponse.json({ ok: false, error: 'no manifests found' }), 'no manifests found'],
-    ['network error', () => HttpResponse.error(), null],
-  ])('surfaces error on %s', async (_label, respFn, expectedMsg) => {
-    server.use(http.post(`${API_BASE}/api/provision/lake-info`, respFn))
-    const args = makeArgs()
-    await runAnalyzeLake(args)
-    expect(args.setFosStatus).toHaveBeenLastCalledWith('error')
-    if (expectedMsg) expect(args.setFosError).toHaveBeenCalledWith(expectedMsg)
-    else expect(args.setFosError).toHaveBeenCalled()
-    expect(args.setStep).not.toHaveBeenCalled()
-    expect(args.setIsAnalyzing).toHaveBeenLastCalledWith(false)
-  })
-})
-
 describe('runFetchTerraformPreview', () => {
   const makeArgs = (overrides: Partial<Parameters<typeof runFetchTerraformPreview>[0]> = {}): Parameters<typeof runFetchTerraformPreview>[0] => ({
     token: 'TOK', selectedService: { id: 'svc-1', name: 'svc', provisioned: false }, config: FULL_CONFIG,
@@ -692,7 +740,7 @@ describe('buildHandleModalClose', () => {
     status: 'idle', isDone: false, onOpenChange: vi.fn(), selectedService: null, setActiveServiceId: vi.fn(),
     queryClient: { invalidateQueries: vi.fn() }, setStep: vi.fn(), setMode: vi.fn(), setSearch: vi.fn(),
     setSelectedService: vi.fn(), setIsDeploying: vi.fn(), setFosStatus: vi.fn(), setFosError: vi.fn(),
-    setLakeInfo: vi.fn(), setIsAnalyzing: vi.fn(), setImportMode: vi.fn(), setSyncEnabled: vi.fn(),
+    setSetupPhase: vi.fn(),
     reset: vi.fn(), resetConfig: vi.fn(), setNgwafWorkspaces: vi.fn(), setNgwafFetching: vi.fn(), setNgwafFetchError: vi.fn(),
     ...overrides,
   })
@@ -727,6 +775,7 @@ describe('buildHandleModalClose', () => {
     expect(deps.setStep).toHaveBeenCalledWith('mode')
     expect(deps.setMode).toHaveBeenCalledWith(null)
     expect(deps.setFosStatus).toHaveBeenCalledWith('idle')
+    expect(deps.setSetupPhase).toHaveBeenCalledWith('form')
     expect(deps.reset).toHaveBeenCalled()
     expect(deps.resetConfig).toHaveBeenCalled()
   })
@@ -772,59 +821,14 @@ describe('runDeploy', () => {
   })
 })
 
-describe('runJoin', () => {
-  const makeArgs = (overrides: Partial<Parameters<typeof runJoin>[0]> = {}) => ({
-    config: FULL_CONFIG, analystPathASupported: true, syncIntervalMins: '15', syncEnabled: true,
-    icebergMetadataLocation: 's3://b/meta.json', importMode: 'all' as 'all' | 'range',
-    importRange: { start: '', end: '' }, setIsDeploying: vi.fn(), setJoinPhase: vi.fn(),
-    setStep: vi.fn(), reset: vi.fn(), start: vi.fn(), ...overrides,
-  })
-
-  it.each([
-    ['missing credential', { config: { ...FULL_CONFIG, fos_bucket_name: '' } }],
-    ['unsupported independent analyst join', { analystPathASupported: false }],
-  ])('skips when %s', (_label, overrides) => {
-    const args = makeArgs(overrides)
-    runJoin(args)
-    expect(args.setIsDeploying).not.toHaveBeenCalled()
-    expect(args.start).not.toHaveBeenCalled()
-  })
-
-  it('starts the join SSE with query string for all/range modes', () => {
-    const allArgs = makeArgs()
-    runJoin(allArgs)
-    expect(allArgs.setIsDeploying).toHaveBeenCalledWith(true)
-    expect(allArgs.setJoinPhase).toHaveBeenCalledWith('connecting')
-    expect(allArgs.setStep).toHaveBeenCalledWith('join')
-    expect(allArgs.reset).toHaveBeenCalled()
-    const [urlAll] = (allArgs.start as ReturnType<typeof vi.fn>).mock.calls[0]
-    expect(urlAll).toMatch(/^\/api\/provision\/join\?/)
-    for (const part of ['fos_bucket_name=my-bucket', 'sync_interval_mins=15', 'sync_enabled=true', 'iceberg_metadata_location=s3%3A%2F%2Fb%2Fmeta.json']) {
-      expect(urlAll).toContain(part)
-    }
-    expect(urlAll).not.toContain('start_time')
-
-    const rangeArgs = makeArgs({ importMode: 'range', importRange: { start: '2026-01-01', end: '2026-02-01' } })
-    runJoin(rangeArgs)
-    const [urlRange] = (rangeArgs.start as ReturnType<typeof vi.fn>).mock.calls[0]
-    expect(urlRange).toContain('start_time=2026-01-01')
-    expect(urlRange).toContain('end_time=2026-02-01')
-
-    const blankRangeArgs = makeArgs({ importMode: 'range', importRange: { start: '', end: '' } })
-    runJoin(blankRangeArgs)
-    const [urlBlank] = (blankRangeArgs.start as ReturnType<typeof vi.fn>).mock.calls[0]
-    expect(urlBlank).not.toContain('start_time')
-  })
-})
-
 describe('runAdminIngest', () => {
   const makeArgs = (overrides: Partial<Parameters<typeof runAdminIngest>[0]> = {}) => ({
     token: 'TOK', selectedService: { id: 'svc-1', name: 'svc', provisioned: false },
     selectedCdnService: { id: 'cdn-1', name: 'cdn', provisioned: false }, config: FULL_CONFIG,
-    services: [{ id: 'svc-other', name: 'other', accessLevel: 'read_write' as const }],
-    setIsDeploying: vi.fn(), setJoinedServiceId: vi.fn(), setActiveServiceId: vi.fn(),
+    services: [{ id: 'svc-other', name: 'other' }],
+    setIsDeploying: vi.fn(), setActiveServiceId: vi.fn(),
     setServices: vi.fn(), queryClient: { invalidateQueries: vi.fn() },
-    setJoinPhase: vi.fn(), setStep: vi.fn(), ...overrides,
+    setSetupPhase: vi.fn(), setStep: vi.fn(), ...overrides,
   })
 
   it('skips when no service is selected', async () => {
@@ -833,26 +837,25 @@ describe('runAdminIngest', () => {
     expect(args.setIsDeploying).not.toHaveBeenCalled()
   })
 
-  it('on success adds the joined service (deduping existing) and advances phase', async () => {
+  it('on success registers the ingested service (deduping existing) and marks setup done', async () => {
     server.use(http.post(`${API_BASE}/api/provision/ingest`, () => HttpResponse.json({ ok: true })))
     const args = makeArgs()
     await runAdminIngest(args)
     expect(args.setIsDeploying).toHaveBeenNthCalledWith(1, true)
-    expect(args.setJoinedServiceId).toHaveBeenCalledWith('svc-1')
     expect(args.setActiveServiceId).toHaveBeenCalledWith('svc-1')
     expect(args.setServices).toHaveBeenCalledOnce()
     const newServices = (args.setServices as ReturnType<typeof vi.fn>).mock.calls[0][0]
     expect(newServices).toHaveLength(2)
-    expect(newServices[1]).toMatchObject({ id: 'svc-1', accessLevel: 'read_write' })
+    expect(newServices[1]).toEqual({ id: 'svc-1', name: 'svc' })
     expect(args.queryClient.invalidateQueries).toHaveBeenCalledWith({ queryKey: ['bootstrap'] })
-    expect(args.setJoinPhase).toHaveBeenCalledWith('done')
-    expect(args.setStep).toHaveBeenCalledWith('join')
+    expect(args.setSetupPhase).toHaveBeenCalledWith('done')
+    expect(args.setStep).toHaveBeenCalledWith('connect')
     expect(args.setIsDeploying).toHaveBeenLastCalledWith(false)
 
-    const existingArgs = makeArgs({ services: [{ id: 'svc-1', name: 'svc', accessLevel: 'read_write' as const }] })
+    const existingArgs = makeArgs({ services: [{ id: 'svc-1', name: 'svc' }] })
     await runAdminIngest(existingArgs)
     expect(existingArgs.setServices).not.toHaveBeenCalled()
-    expect(existingArgs.setJoinPhase).toHaveBeenCalledWith('done')
+    expect(existingArgs.setSetupPhase).toHaveBeenCalledWith('done')
   })
 
   it.each([
@@ -863,7 +866,7 @@ describe('runAdminIngest', () => {
     server.use(http.post(`${API_BASE}/api/provision/ingest`, respFn))
     const args = makeArgs()
     await runAdminIngest(args)
-    expect(args.setJoinPhase).not.toHaveBeenCalled()
+    expect(args.setSetupPhase).not.toHaveBeenCalled()
     expect(args.setStep).not.toHaveBeenCalled()
     expect(args.setIsDeploying).toHaveBeenLastCalledWith(false)
     if (logsErr) expect(errSpy).toHaveBeenCalled()
@@ -1238,7 +1241,6 @@ describe('DeleteDataDialog & TeardownDialog', () => {
         service={{
           service_id: 'test-svc',
           name: 'Test Service',
-          access_level: 'read_write',
           duckdb_size_bytes: 5_000_000,
           cache_file_count: 12,
         } as ServiceConfig}
@@ -1326,7 +1328,7 @@ describe('DeleteDataDialog & TeardownDialog', () => {
     const qc = createTestQueryClient()
     const { rerender } = render(
       <DeleteDataDialog
-        service={{ service_id: 'test-svc', name: 'Test Service', access_level: 'read_write' } as ServiceConfig}
+        service={{ service_id: 'test-svc', name: 'Test Service' } as ServiceConfig}
         open={true}
         onOpenChange={onOpenChange}
       />,
@@ -1338,7 +1340,7 @@ describe('DeleteDataDialog & TeardownDialog', () => {
     sseState.status = 'streaming'
     rerender(
       <DeleteDataDialog
-        service={{ service_id: 'test-svc', name: 'Test Service', access_level: 'read_write' } as ServiceConfig}
+        service={{ service_id: 'test-svc', name: 'Test Service' } as ServiceConfig}
         open={true}
         onOpenChange={onOpenChange}
       />,
@@ -1392,62 +1394,4 @@ describe('DeleteDataDialog & TeardownDialog', () => {
     })
   })
 
-  test('TeardownDialog allows analyst (cache-only) teardown without a token', async () => {
-    const user = userEvent.setup()
-    const onOpenChange = vi.fn()
-    const onComplete = vi.fn()
-
-    render(
-      <TeardownDialog
-        service={{ service_id: 'test-svc', name: 'Test Service', access_level: 'read_only' } as ServiceConfig}
-        open={true}
-        onOpenChange={onOpenChange}
-        onComplete={onComplete}
-      />,
-    )
-
-    const teardownBtn = screen.getByRole('button', { name: /execute teardown/i })
-    expect((teardownBtn as HTMLButtonElement).disabled).toBe(false)
-    await user.click(teardownBtn)
-
-    await waitFor(() => {
-      expect(mockStart).toHaveBeenCalledWith(
-        '/api/provision/teardown',
-        {
-          service_id: 'test-svc',
-          remove_logging: false,
-          remove_rum: false,
-          remove_cdn: false,
-          remove_bucket: false,
-          remove_cache: true,
-        },
-      )
-    })
-  })
-
-  describe('SSEProgressView error link', () => {
-    it('renders a clickable Fastly link when the error event carries one', () => {
-      const link = 'https://manage.fastly.com/products/compute'
-      const lines: SSELine[] = [
-        { type: 'status', message: 'Enabling…', _id: 1 },
-        { type: 'error', message: 'Compute isn’t enabled', link, _id: 2 },
-      ]
-      render(
-        <SSEProgressView lines={lines} status="error" error="Compute isn’t enabled" />,
-      )
-
-      const anchor = screen.getByRole('link', { name: /open fastly to enable it/i })
-      expect(anchor).toHaveAttribute('href', link)
-      expect(anchor).toHaveAttribute('target', '_blank')
-      expect(screen.getByText(/Compute isn’t enabled/)).toBeInTheDocument()
-    })
-
-    it('renders no link for a plain error event', () => {
-      const lines: SSELine[] = [{ type: 'error', message: 'Something broke', _id: 1 }]
-      render(<SSEProgressView lines={lines} status="error" error="Something broke" />)
-
-      expect(screen.queryByRole('link')).toBeNull()
-      expect(screen.getByText(/Something broke/)).toBeInTheDocument()
-    })
-  })
 })

@@ -12,7 +12,7 @@ The **Admin FOS Usage & Class A/B Ledger** page (`/admin/usage-log`) provides gr
 - **Zero Dark Cloud Ops:** Every S3/FOS and Fastly CDN API call executed by any API route, background scheduler job, or Celery worker is logged with `process_context`, `function_name`, `operation_class`, and `operation_type` attribution.
 - **Two-Stage Query Pattern (Fast First Paint):** Pre-fetches the initial 50-row `head` slice + aggregate KPI totals server-side (`fetchUsageLogServerSide` in [`frontend/lib/ssr/usage_log.ts`](../../../frontend/lib/ssr/usage_log.ts)) and hydrates via `HydrationBoundary`, then loads the full 500-row table slice in the background with `include_aggregate=false` to skip redundant SQL `SUM()` scans.
 - **Durable Hourly Rollup Summaries:** Backed by PostgreSQL 16 `usage_log` (detailed call records) and `usage_log_hourly_summary` (compact hourly rollups preserved across detailed-row purges) per [ADR-22](../../adr/22-postgres-only-metadata.md).
-- **Strict Admin-Only RBAC:** Accessible **exclusively** to Admin (`read_write`) operators. Analyst Path B remote-share sessions receive `403 Forbidden` with `{"error": "admin_only"}`.
+- **Strict Admin-Only RBAC:** Accessible **exclusively** to Admin (`read_write`) operators. Analyst remote-share sessions receive `403 Forbidden` with `{"error": "admin_only"}`.
 
 ---
 
@@ -37,8 +37,7 @@ The **Admin FOS Usage & Class A/B Ledger** page (`/admin/usage-log`) provides gr
 | Role | Access Level | Data Redaction & Capabilities |
 |---|---|---|
 | **Admin (`read_write` / mTLS Admin Gateway)** | Full Control | `200 OK` across `/admin/usage-log`, `GET /api/admin/usage-log`, `GET /api/admin/usage-log/export`, `DELETE /api/admin/usage-log`, `GET/PATCH /api/admin/usage-logging`, `GET /api/admin/system-jobs`, and `GET /api/admin/log-accounting`. |
-| **Analyst Path B (Remote Share)** | **Blocked (`403 Forbidden`)** | Enforced at both `RemoteAccessMiddleware` (`/api/admin/*` prefix gate) and route-level `dependencies=[Depends(require_admin)]` across all 6 endpoints in [`backend/routers/admin_usage.py`](../../../backend/routers/admin_usage.py). Any request carrying `X-Remote-Analyst: 1` returns `403 Forbidden` with `{"error": "admin_only"}`. `fetchUsageLogServerSide()` refuses to inject the admin bearer token when `x-fla-role: analyst` is present. |
-| **Analyst Path A (Standalone Read-Only FOS Instance)** | Local Instance Admin UI | Can inspect local FOS usage ledger for their own standalone process (`200 OK`). |
+| **Analyst (Remote Share)** | **Blocked (`403 Forbidden`)** | Enforced at both `RemoteAccessMiddleware` (`/api/admin/*` prefix gate) and route-level `dependencies=[Depends(require_admin)]` across all 6 endpoints in [`backend/routers/admin_usage.py`](../../../backend/routers/admin_usage.py). Any request carrying `X-Remote-Analyst: 1` returns `403 Forbidden` with `{"error": "admin_only"}`. `fetchUsageLogServerSide()` refuses to inject the admin bearer token when `x-fla-role: analyst` is present. |
 
 ---
 
@@ -137,18 +136,18 @@ The **Admin FOS Usage & Class A/B Ledger** page (`/admin/usage-log`) provides gr
 
 ## 9. AI Session Automated Verification Checklist
 
-- [x] **1. Route Accessibility:** `GET /admin/usage-log` returns HTTP 200 for Admin; Analyst Path B requests to `/api/admin/usage-log*`, `/api/admin/usage-logging`, and `/api/admin/system-jobs` return HTTP 403 (`{"error": "admin_only"}`).
+- [x] **1. Route Accessibility:** `GET /admin/usage-log` returns HTTP 200 for Admin; Analyst requests to `/api/admin/usage-log*`, `/api/admin/usage-logging`, and `/api/admin/system-jobs` return HTTP 403 (`{"error": "admin_only"}`).
 - [x] **2. Zero Layout Shift:** Page loads with pre-allocated reservation containers (`admin-usage-log-toolbar`, `admin-usage-log-kpi-reservation`, `admin-usage-log-chart-reservation`, `admin-usage-log-table-reservation`) and achieves `CLS <= 0.05` (`0.00` measured).
 - [x] **3. Usage Log & Config Contracts:** `GET /api/admin/usage-log`, `GET /api/admin/usage-logging`, `PATCH /api/admin/usage-logging`, `GET /api/admin/usage-log/export`, `DELETE /api/admin/usage-log`, and `GET /api/admin/system-jobs` verified against Pydantic schemas and OpenAPI snapshot.
 - [x] **4. Filter & Preset Workflows:** Time-window preset switching (`24h` -> `1h` -> `7d` -> `30d`), `process_context` filtering, and `operation_type` filtering verified in both Vitest and Playwright E2E.
-- [x] **5. Role Verification:** Analyst Path B `403` rejection verified across all 6 endpoints in `tests/routers/test_admin_usage_log.py` and `tests/remote_access/test_route_table_tripwire.py`.
+- [x] **5. Role Verification:** Analyst `403` rejection verified across all 6 endpoints in `tests/routers/test_admin_usage_log.py` and `tests/remote_access/test_route_table_tripwire.py`.
 - [x] **6. Telemetry & Export Audit:** Manual refresh (`admin-usage-log-refresh-btn`) and CSV export (`admin-usage-log-export-link`) verified with `X-Page-Load-ID` header attribution across Local Standard, Remote Standard GCE, and High-Scale Elevation.
 
 ---
 
 ## 10. Automated Test Suite
 
-- **Backend Unit Tests:** [`tests/routers/test_admin_usage_log.py`](../../../tests/routers/test_admin_usage_log.py) (19 tests covering raw entries, aggregates, `include_aggregate=False`, filtering by `service_id`/`usage_type`/`process_context`/`operation_type`, CSV export, purge, `GET/PATCH /api/admin/usage-logging` validation, `GET /api/admin/system-jobs`, and Analyst Path B `403` rejection across all 6 endpoints).
+- **Backend Unit Tests:** [`tests/routers/test_admin_usage_log.py`](../../../tests/routers/test_admin_usage_log.py) (19 tests covering raw entries, aggregates, `include_aggregate=False`, filtering by `service_id`/`usage_type`/`process_context`/`operation_type`, CSV export, purge, `GET/PATCH /api/admin/usage-logging` validation, `GET /api/admin/system-jobs`, and Analyst `403` rejection across all 6 endpoints).
 - **Route Tripwire & OpenAPI Snapshot Tests:** [`tests/remote_access/test_route_table_tripwire.py`](../../../tests/remote_access/test_route_table_tripwire.py) and [`tests/test_openapi_snapshot.py`](../../../tests/test_openapi_snapshot.py).
 - **Frontend Unit Tests:** [`frontend/__tests__/app/admin/usage-log.test.tsx`](../../../frontend/__tests__/app/admin/usage-log.test.tsx) (4 tests covering `loading.tsx` geometry, pending skeleton state, KPI/accounting/table rendering, and preset/filter/refresh/purge interactions).
 - **Playwright E2E Suite:** [`frontend/e2e/pages/admin-usage-log.spec.ts`](../../../frontend/e2e/pages/admin-usage-log.spec.ts) (5 end-to-end contract tests verified locally and across all 3 live deployment tiers).

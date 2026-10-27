@@ -36,8 +36,7 @@
 | Role | Job State | Manual API Trigger | Data Visibility |
 |---|---|---|---|
 | **Admin (`read_write`)** | Active | `POST /api/admin/compact/{service_id}` | Full compaction stats in Admin UI. |
-| **Analyst Path A (Standalone Instance)** | Active | Internal trigger | Compaction runs locally to keep analyst queries fast. |
-| **Analyst Path B (Remote Share)** | N/A | Blocked (403) | Benefits transparently from server-side compaction. |
+| **Analyst (Remote Share)** | N/A | Blocked (403) | Benefits transparently from server-side compaction. |
 
 ---
 

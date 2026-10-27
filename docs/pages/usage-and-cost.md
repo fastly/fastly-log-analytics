@@ -36,8 +36,7 @@ Per H-1 security hardening, `/usage` and `/api/usage/*` expose financial cost ra
 | Role | Access Level | Data Redaction & Capabilities |
 |---|---|---|
 | **Admin (`read_write`)** | Full Access | Full usage metrics, Fastly billing zone selection, cost rates configuration, manual billing reconciliation trigger, FOS ops inspection. |
-| **Analyst Path B (Remote Share)** | Blocked (403 Forbidden) | Blocked at middleware via `_ANALYST_BLOCKED_PREFIXES`. Financial and billing data protected. |
-| **Analyst Path A (JSON Join)** | Blocked / Local-Only | Evaluated locally; no remote share access. |
+| **Analyst (Remote Share)** | Blocked (403 Forbidden) | Blocked at middleware via `_ANALYST_BLOCKED_PREFIXES`. Financial and billing data protected. |
 
 ---
 
@@ -108,7 +107,7 @@ Per H-1 security hardening, `/usage` and `/api/usage/*` expose financial cost ra
 - [x] **3. Usage Contract:** Verify `/api/usage/prefill/rates`, `/api/usage/prefill`, and `/api/usage/current-storage` schema contracts.
 - [x] **4. Fastly Delivery Billing Zones:** `MBZ100`, `MBZ200`, `Global` rates correctly configure calculator state and compute costs.
 - [x] **5. Cost Calculator:** Interactive sliders and inputs update projected costs instantaneously with zero network hops.
-- [x] **6. Role Verification:** H-1 security boundary blocks Analyst Path B from accessing billing/usage endpoints.
+- [x] **6. Role Verification:** H-1 security boundary blocks Analyst from accessing billing/usage endpoints.
 - [x] **7. Telemetry & Query Audit:** All PostgreSQL and DuckDB statements recorded with zero duplicate queries.
 
 ---

@@ -34,8 +34,7 @@
 | Role | Job State | Manual API Trigger | Data Visibility |
 |---|---|---|---|
 | **Admin (`read_write`)** | Active | `POST /api/admin/duckdb/recycle` | Memory and pool statistics in Admin UI. |
-| **Analyst Path A (Standalone Instance)** | Active | Internal trigger | Keeps analyst process memory bounded. |
-| **Analyst Path B (Remote Share)** | N/A | Blocked (403) | Server-side memory management daemon. |
+| **Analyst (Remote Share)** | N/A | Blocked (403) | Server-side memory management daemon. |
 
 ---
 

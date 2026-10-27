@@ -11,7 +11,7 @@ The ClickHouse Replay & Cluster Operations page provides administrative visibili
 - **Cluster & Manifest Health Monitoring:** Surface authenticated connection health (`ok` | `disabled` | `unavailable`), schema version alignment (`CLICKHOUSE_SCHEMA_VERSION = 2`), publication batch counts (`published`, `pending`, `claimed`, `failed`), oldest pending batch age, active generation coverage metadata, and expired dataset count via `PgManifest(bounded=True).admin_status(service_id, target_identity(client))`.
 - **Bounded Diagnostic Replay:** Provide operators with a safe, bounded HTTP replay mechanism (`limit` 1..100 artifacts per request) to rebuild (`dataset_id`) or resume (`generation`) ClickHouse analytical state from sealed Fastly Object Storage (FOS) artifacts and PostgreSQL replay manifests (`PgManifest`).
 - **Dry-Run Safety:** Replay workflows default to `dry_run: true`, validating manifest references (`store.replay_preview(...)`) and returning `planned_artifacts` and `artifact_count` without mutating ClickHouse or reading FOS.
-- **Strict Role & Tenancy Isolation:** Administrative operations are restricted to `read_write` Admin sessions via both `RemoteAccessMiddleware` defense-in-depth and route-level `Depends(require_admin)`. Analyst Path B sessions receive HTTP `403 Forbidden` with `{"detail": {"error": "admin_only", ...}}`.
+- **Strict Role & Tenancy Isolation:** Administrative operations are restricted to `read_write` Admin sessions via both `RemoteAccessMiddleware` defense-in-depth and route-level `Depends(require_admin)`. Analyst sessions receive HTTP `403 Forbidden` with `{"detail": {"error": "admin_only", ...}}`.
 
 ---
 
@@ -25,10 +25,8 @@ The ClickHouse Replay & Cluster Operations page provides administrative visibili
 ## 3. Role & Permission Matrix
 | Role | Page Access | Status Inspection (`GET /api/admin/clickhouse/status`) | Dry-Run Preview (`POST /api/admin/clickhouse/replay`) | Live Replay (`dry_run: false`) |
 |---|---|---|---|---|
-| **Admin** (`read_write`) | Full Access (`200 OK`) | Allowed (`200 OK` / `503 Unavailable`) | Allowed (cap: `1..100` artifacts) | Allowed (cap: `1..100` artifacts; audited in `audit_logs`) |
-| **Admin** (`read_only` service) | Full Access (`200 OK`) | Allowed (`200 OK`) | Rejected (`403 read_write_required`) | Rejected (`403 read_write_required`) |
-| **Analyst Path B** (Remote Share) | Blocked by `RemoteAccessMiddleware` | HTTP `403 Forbidden` (`{"error": "admin_only"}`) | HTTP `403 Forbidden` (`{"error": "admin_only"}`) | HTTP `403 Forbidden` (`{"error": "admin_only"}`) |
-| **Analyst Path A** (Standalone) | Read-only service config | Allowed (`200 OK`) | Rejected (`403 read_write_required`) | Rejected (`403 read_write_required`) |
+| **Admin** | Full Access (`200 OK`) | Allowed (`200 OK` / `503 Unavailable`) | Allowed (cap: `1..100` artifacts) | Allowed (cap: `1..100` artifacts; audited in `audit_logs`) |
+| **Analyst** (Remote Share) | Blocked by `RemoteAccessMiddleware` | HTTP `403 Forbidden` (`{"error": "admin_only"}`) | HTTP `403 Forbidden` (`{"error": "admin_only"}`) | HTTP `403 Forbidden` (`{"error": "admin_only"}`) |
 
 *Both `RemoteAccessMiddleware` and route-level `dependencies=[Depends(require_admin)]` guard `/api/admin/clickhouse/status` and `/api/admin/clickhouse/replay`.*
 
@@ -79,7 +77,7 @@ The ClickHouse Replay & Cluster Operations page provides administrative visibili
      - `activated: bool` (`False` when `dry_run=True`)
      - `limit: int`
    - **Error Responses:**
-     - `403 Forbidden`: `admin_only` (Analyst Path B) or `read_write_required` (read-only service config)
+     - `403 Forbidden`: `admin_only` (analyst)
      - `404 Not Found`: `service_not_found` or `replay_not_found` (`LookupError` from `PgManifest.replay_preview`)
      - `409 Conflict`: `clickhouse_disabled` (Standard mode) or `replay_ineligible` (`ValueError` when reference is expired, target mismatches, or exceeds HTTP cap)
      - `422 Unprocessable Entity`: Invalid `limit` (`< 1` or `> 100`), missing/both `dataset_id` and `generation`, or extra fields
@@ -127,7 +125,7 @@ Implemented in `frontend/app/admin/clickhouse/page.tsx`, `frontend/app/admin/cli
 - [x] 2. Measure layout shifts and FCP during page load; confirm `CLS <= 0.05` and `FCP < 1200ms` with all 4 reservation containers (`admin-clickhouse-toolbar`, `admin-clickhouse-vitals-reservation`, `admin-clickhouse-generation-reservation`, `admin-clickhouse-replay-reservation`) pre-allocated.
 - [x] 3. Verify `GET /api/admin/clickhouse/status?service_id=<id>` returns HTTP 200 with `enabled: false, health: "disabled"` in Standard mode and `enabled: true, health: "ok", schema_version: 2` in High-Scale mode.
 - [x] 4. Verify `POST /api/admin/clickhouse/replay` rejects `limit: 101` with HTTP 422, rejects missing `dataset_id`/`generation` with HTTP 422, and returns HTTP 409 `clickhouse_disabled` in Standard mode or HTTP 200/404 in High-Scale mode.
-- [x] 5. Verify Analyst Path B sessions receive HTTP 403 Forbidden (`{"error": "admin_only"}`) on both `/api/admin/clickhouse/status` and `/api/admin/clickhouse/replay`.
+- [x] 5. Verify Analyst sessions receive HTTP 403 Forbidden (`{"error": "admin_only"}`) on both `/api/admin/clickhouse/status` and `/api/admin/clickhouse/replay`.
 - [x] 6. Confirm manual refresh (`admin-clickhouse-refresh-btn`) rotates and propagates `X-Page-Load-ID` header on `/api/admin/clickhouse/status`.
 
 ---

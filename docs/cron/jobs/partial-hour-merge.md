@@ -35,8 +35,7 @@
 | Role | Job State | Manual API Trigger | Data Visibility |
 |---|---|---|---|
 | **Admin (`read_write`)** | Active | Internal trigger | Fast active-hour dashboard renders. |
-| **Analyst Path A (Standalone Instance)** | Active | Internal trigger | Maintains local partial rollups. |
-| **Analyst Path B (Remote Share)** | N/A | Blocked (403) | Benefits transparently from speed layer. |
+| **Analyst (Remote Share)** | N/A | Blocked (403) | Benefits transparently from speed layer. |
 
 ---
 

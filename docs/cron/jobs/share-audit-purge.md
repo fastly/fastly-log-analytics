@@ -5,7 +5,7 @@
 - **Category:** Live-Share Security, Compliance & Audit Retention
 - **Status:** Verified (Automated Unit Tests & Lifecycle Audited)
 - **Purpose:** Daily retention cleanup of expired remote analyst live-share invitations, invalidated authentication sessions, expired claim tokens, and historical share audit logs in PostgreSQL 16 per ADR-22.
-- **Why It Runs:** Live Dashboard Sharing (Path B) generates audit events, session tokens, and invite records. For compliance and operational hygiene, expired invitations, stale session records, and audit logs beyond the retention window (`share_audit_retention_days`, default: 90 days) must be safely purged.
+- **Why It Runs:** Live Dashboard Sharing generates audit events, session tokens, and invite records. For compliance and operational hygiene, expired invitations, stale session records, and audit logs beyond the retention window (`share_audit_retention_days`, default: 90 days) must be safely purged.
 
 ---
 
@@ -33,8 +33,7 @@
 | Role | Job State | Manual API Trigger | Data Visibility |
 |---|---|---|---|
 | **Admin (`read_write`)** | Active | `POST /api/admin/share/purge` | Share audit trail and invite management in Admin UI (`GET /api/admin/share/audit-logs`). |
-| **Analyst Path A (Standalone Instance)** | Active | Internal trigger | Prunes local share database if live-sharing enabled. |
-| **Analyst Path B (Remote Share)** | N/A | Blocked (403) | Analyst sessions are subject to retention pruning. |
+| **Analyst (Remote Share)** | N/A | Blocked (403) | Analyst sessions are subject to retention pruning. |
 
 ---
 

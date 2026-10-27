@@ -14,7 +14,6 @@ ALLOWLIST=(
   "backend/routers/admin/high_scale.py"
   "backend/routers/admin/compaction.py"
   "backend/routers/admin/ingest.py"
-  "backend/core/iceberg/lake_info.py"
   "backend/core/iceberg/sync.py"
   "backend/core/iceberg/_core.py"
   "backend/core/metadata/state.py"

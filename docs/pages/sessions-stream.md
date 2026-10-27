@@ -31,8 +31,7 @@ The **Stream Session Detail & QoE Inspector** provides deep video Quality of Exp
 | Role | Access Level | Data Redaction & Capabilities |
 |---|---|---|
 | **Admin (`read_write`)** | Full Access | Full QoE metrics, unmasked client IPs, full request attributes, and media segment URLs. |
-| **Analyst Path B (Remote Share)** | Read-Only Access | Full QoE graphs, buffer distributions, and segment tables viewable; client IPs masked (if enabled). Allowed via unsealed `session_token` on `POST /api/sessions/detail`. |
-| **Analyst Path A (JSON Join)** | Local Read-Only | Queries local DuckLake / cached buffer. |
+| **Analyst (Remote Share)** | Read-Only Access | Full QoE graphs, buffer distributions, and segment tables viewable; client IPs masked (if enabled). Allowed via unsealed `session_token` on `POST /api/sessions/detail`. |
 
 ---
 
@@ -93,7 +92,7 @@ The **Stream Session Detail & QoE Inspector** provides deep video Quality of Exp
 - [x] **2. Zero Layout Shift:** Page loads with pre-allocated zero-CLS containers (`contain-intrinsic-size`) and CLS <= 0.05.
 - [x] **3. Missing Token Graceful State:** Page without `?token=...` renders "No session token" alert without errors.
 - [x] **4. Active Token Loading:** Navigating with valid token fetches `POST /api/sessions/detail` and mounts summary cards, timeline, and histograms.
-- [x] **5. Role Verification:** Confirm Analyst Path B observes masked client IPs in segment lists.
+- [x] **5. Role Verification:** Confirm Analyst observes masked client IPs in segment lists.
 - [x] **6. Telemetry & Query Audit:** Verify all DuckDB and ClickHouse queries are recorded with zero duplicate queries.
 
 ---

@@ -22,14 +22,13 @@ except Exception:
 class _StubSource(dict):
     """Minimal dict-subclass representing a configured service source."""
 
-    def __init__(self, service_id: str = "svc-1", access_level: str = "read_write", **overrides: Any) -> None:
+    def __init__(self, service_id: str = "svc-1", **overrides: Any) -> None:
         base: dict[str, Any] = {
             "name": service_id,
             "service_id": service_id,
             "service_name": service_id,
             "logging_service_id": f"log-{service_id}",
             "bucket": "test-fos-bucket",
-            "access_level": access_level,
             "endpoint": "https://s3.example.com",
             "access_key_id": "test-key",
             "secret_access_key": "test-secret",
@@ -52,7 +51,6 @@ def stub_source(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         "name": "fos-test-svc",
         "service_id": "svc-1",
         "bucket": "fos-test-bkt",
-        "access_level": "read_write",
     }
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: src)
     return src
@@ -83,8 +81,8 @@ def patch_maintenance_config(monkeypatch: pytest.MonkeyPatch, **cron_sync: Any) 
 def fake_source():
     """Factory fixture returning a ``_StubSource`` dict."""
 
-    def _factory(service_id: str = "svc-1", access_level: str = "read_write", **overrides: Any) -> dict[str, Any]:
-        return _StubSource(service_id=service_id, access_level=access_level, **overrides)
+    def _factory(service_id: str = "svc-1", **overrides: Any) -> dict[str, Any]:
+        return _StubSource(service_id=service_id, **overrides)
 
     return _factory
 
@@ -117,7 +115,7 @@ def stub_cron_envelope(request: pytest.FixtureRequest, monkeypatch: pytest.Monke
     monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda *a, **kw: False)
     monkeypatch.setattr("backend.cron.jobs._common.finalize_cron_duration", MagicMock())
     monkeypatch.setattr("backend.cron.jobs._common.refresh_view_and_warm_pool", MagicMock())
-    monkeypatch.setattr("backend.cron.jobs.metadata.dispatch_post_commit_metadata_sync", MagicMock())
+    monkeypatch.setattr("backend.cron.jobs._common._refresh_status_after_commit", MagicMock())
     return {
         "start": start,
         "log": log,
@@ -148,33 +146,6 @@ def assert_manual_trigger_standard_mode_rejected(
         detail = resp.json()["detail"]
         msg = detail["message"] if isinstance(detail, dict) else str(detail)
         assert "high-scale" in msg.lower()
-        return resp
-    finally:
-        app.dependency_overrides.pop(get_source, None)
-        app.dependency_overrides.pop(get_service_id, None)
-
-
-def assert_manual_trigger_read_only_rejected(
-    endpoint_path: str,
-    service_id: str,
-    base_source: dict[str, Any],
-) -> Any:
-    """Assert that a manual trigger endpoint returns 403 on a read-only service."""
-    from backend.deps import get_service_id, get_source
-    from starlette.testclient import TestClient
-
-    from backend.main import app
-
-    ro_src = {**base_source, "access_level": "read_only"}
-    app.dependency_overrides[get_source] = lambda: ro_src
-    app.dependency_overrides[get_service_id] = lambda: service_id
-    try:
-        client = TestClient(app)
-        resp = client.post(endpoint_path, headers={"x-fastly-service-id": service_id})
-        assert resp.status_code == 403
-        detail = resp.json()["detail"]
-        msg = detail["message"] if isinstance(detail, dict) else str(detail)
-        assert "read-only" in msg.lower()
         return resp
     finally:
         app.dependency_overrides.pop(get_source, None)

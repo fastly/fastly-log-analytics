@@ -544,7 +544,7 @@ describe('debugStore, popGeoStore, serviceStore, sessionRoleStore & timezoneStor
     useServiceStore.getState().setActiveServiceId(null)
     expect(useServiceStore.getState().activeServiceId).toBeNull()
 
-    const list: Service[] = [{ id: 'a', name: 'A', accessLevel: 'read_write' }, { id: 'b', name: 'B', accessLevel: 'read_only' }]
+    const list: Service[] = [{ id: 'a', name: 'A' }, { id: 'b', name: 'B' }]
     useServiceStore.getState().setServices(list)
     expect(useServiceStore.getState().services).toEqual(list)
     useServiceStore.getState().setServices([])

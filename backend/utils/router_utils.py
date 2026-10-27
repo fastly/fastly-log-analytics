@@ -121,7 +121,7 @@ def start_or_resume_cron(
     in progress; surface 503 with ``busy: True`` if neither path matches.
 
     Consolidates the 3 hand-rolled copies of this routine across
-    ``backend.routers.admin.ingest`` (metadata_sync + sync) and
+    ``backend.routers.admin.ingest`` (sync) and
     ``backend.routers.admin.iceberg`` (commit). Each used to duplicate the
     same ``try: start_cron_run -> spawn thread -> return {ok}; except
     RuntimeError: scan list_active_runs -> return {ok, in_progress_msg};
@@ -163,16 +163,12 @@ def run_admin_cron_trigger(
     target_kwargs: dict[str, Any] | None = None,
     success_msg: str,
     in_progress_msg: str,
-    readonly_detail: Any,
     invalidate_cache: bool = True,
     require_high_scale: bool = False,
     high_scale_detail: Any = None,
     precheck: Callable[[], None] | None = None,
 ) -> SyncStartResponse:
     """Shared execution wrapper for manual admin cron trigger routes."""
-    if source.get("access_level") == "read_only":
-        raise HTTPException(status_code=403, detail=readonly_detail)
-
     if require_high_scale:
         from backend import config as svcconfig
 
@@ -228,8 +224,8 @@ def load_service_config(service_id: str) -> dict:
     return cfg
 
 
-def load_service_config_or_503(service_id: str, *, writable: bool = False) -> dict:
-    """Load a service's config, raising 503 on read error, 404 if missing, or 403 if writable required."""
+def load_service_config_or_503(service_id: str) -> dict:
+    """Load a service's config, raising 503 on read error or 404 if missing."""
     from backend import config as svcconfig
 
     try:
@@ -240,8 +236,6 @@ def load_service_config_or_503(service_id: str, *, writable: bool = False) -> di
         ) from None
     if not cfg:
         raise HTTPException(404, detail=make_error("service_not_found", "Service not found"))
-    if writable and cfg.get("access_level", "read_write") != "read_write":
-        raise HTTPException(403, detail=make_error("read_write_required", "Read-write service required"))
     return cfg
 
 
@@ -879,7 +873,6 @@ def get_enriched_services(active_service_id: str | None = None) -> list[dict[str
             {
                 "service_id": sid,
                 "name": name,
-                "access_level": cfg.get("access_level", "read_write"),
                 "storage_mode": cfg.get("storage_mode", "cloud"),
                 "is_high_scale": is_hs,
                 "log_period": cfg.get("log_period", 60),
@@ -892,7 +885,6 @@ def get_enriched_services(active_service_id: str | None = None) -> list[dict[str
                 "cache_file_count": cache_file_count,
                 "log_row_count": log_row_count,
                 "is_active": sid == active_service_id,
-                "analyst_path_a_supported": not is_hs,
                 "cron_stats": cron_stats,
                 "status": cached_status,
                 "cron_sync": prov.get(
@@ -1822,7 +1814,6 @@ _ANALYST_BLOCKED_SUBPATHS = (
     "/redoc",
 )
 _ANALYST_BLOCKED_SUBPATH_REGEX: tuple[re.Pattern[str], ...] = (
-    re.compile(r"^/api/services/[^/]+/lake-info$"),
     re.compile(r"^/api/services/[^/]+/logging-settings(/.*)?$"),
     re.compile(r"^/api/services/[^/]+/log-fields$"),
     re.compile(r"^/api/services/[^/]+/custom-fields(/.*)?$"),

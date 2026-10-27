@@ -1930,7 +1930,7 @@ function BucketRow({ bucket }: { bucket: components['schemas']['ScoringPerReason
 // 2. DuckLake / Iceberg Status & 90-Day Storage Distribution Calendar
 // =============================================================================
 
-export function IcebergStatus({ accessLevel }: { accessLevel?: string }) {
+export function IcebergStatus() {
   const activeServiceId = useServiceStore((s) => s.activeServiceId)
   const { full, abbr } = useDateFormat()
   const { data: info, isLoading, error } = useQuery({
@@ -1971,30 +1971,28 @@ export function IcebergStatus({ accessLevel }: { accessLevel?: string }) {
           </Card>
         ))}
       </div>
-      {accessLevel !== 'read_only' && (
-        <Card className="shadow-none border-muted/60 bg-muted/5">
-          <CardContent className="p-4 flex flex-col md:flex-row md:items-center justify-between gap-4">
-            <div className="flex items-center gap-3">
-              <div className="p-2 bg-blue-500/10 rounded-full"><Archive className="h-4 w-4 text-blue-500" /></div>
-              <div>
-                <h4 className="text-sm font-semibold">Local Buffer Status</h4>
-                <p className="text-xs text-muted-foreground">Data ingested but not yet committed to the DuckLake table.</p>
-              </div>
+      <Card className="shadow-none border-muted/60 bg-muted/5">
+        <CardContent className="p-4 flex flex-col md:flex-row md:items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <div className="p-2 bg-blue-500/10 rounded-full"><Archive className="h-4 w-4 text-blue-500" /></div>
+            <div>
+              <h4 className="text-sm font-semibold">Local Buffer Status</h4>
+              <p className="text-xs text-muted-foreground">Data ingested but not yet committed to the DuckLake table.</p>
             </div>
-            <div className="flex items-center gap-6">
-              {([['Pending Files', info?.buffer_files ?? 0, 'w-12'], ['Buffer Size', formatBytes(info?.buffer_size_bytes ?? 0), 'w-16']] as const).map(([lbl, val, wCls]) => (
-                <div key={lbl} className="flex flex-col">
-                  <span className="text-[10px] font-bold uppercase text-muted-foreground">{lbl}</span>
-                  {isLoading ? <Skeleton className={`h-5 ${wCls} mt-1`} /> : <span className="text-sm font-mono font-bold">{val}</span>}
-                </div>
-              ))}
-              <div className="flex items-center gap-2 ml-4">
-                {info?.buffer_files && info.buffer_files > 0 ? <Badge variant="outline" className="h-6 px-2 text-[10px] bg-blue-500/10 text-blue-600 border-blue-500/20 animate-pulse shadow-none uppercase font-bold">Pending Commit</Badge> : null}
+          </div>
+          <div className="flex items-center gap-6">
+            {([['Pending Files', info?.buffer_files ?? 0, 'w-12'], ['Buffer Size', formatBytes(info?.buffer_size_bytes ?? 0), 'w-16']] as const).map(([lbl, val, wCls]) => (
+              <div key={lbl} className="flex flex-col">
+                <span className="text-[10px] font-bold uppercase text-muted-foreground">{lbl}</span>
+                {isLoading ? <Skeleton className={`h-5 ${wCls} mt-1`} /> : <span className="text-sm font-mono font-bold">{val}</span>}
               </div>
+            ))}
+            <div className="flex items-center gap-2 ml-4">
+              {info?.buffer_files && info.buffer_files > 0 ? <Badge variant="outline" className="h-6 px-2 text-[10px] bg-blue-500/10 text-blue-600 border-blue-500/20 animate-pulse shadow-none uppercase font-bold">Pending Commit</Badge> : null}
             </div>
-          </CardContent>
-        </Card>
-      )}
+          </div>
+        </CardContent>
+      </Card>
       {info?.table_location && (
         <div className="px-4 py-2 bg-muted/30 rounded-md border border-dashed flex items-center justify-between">
           <div className="flex items-center gap-2 overflow-hidden">

@@ -32,8 +32,7 @@
 | Role | Job State | Manual API Trigger | Data Visibility |
 |---|---|---|---|
 | **Admin (`read_write`)** | Active | `POST /api/admin/rdns/enrich` | Reverse DNS hostnames in Network and Security tables; full cache stats via `GET /api/admin/rdns/stats` and `GET /api/admin/bot-sources`. |
-| **Analyst Path A (Standalone Instance)** | Active | Internal trigger | Enriches hostnames locally on analyst instance. |
-| **Analyst Path B (Remote Share)** | N/A | Blocked (403) | Reads enriched hostnames from shared server cache without scheduling independent jobs. |
+| **Analyst (Remote Share)** | N/A | Blocked (403) | Reads enriched hostnames from shared server cache without scheduling independent jobs. |
 
 ---
 

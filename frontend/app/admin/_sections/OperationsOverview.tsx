@@ -19,7 +19,6 @@ import { ProvisionWizard } from '@/components/ProvisionWizard/ProvisionWizard'
 import { DeleteDataDialog, TeardownDialog } from '@/components/TeardownDialog'
 import { CronSettingsModal } from '@/components/CronSettingsModal/CronSettingsModal'
 import { LogSettingsModal } from '@/components/LogSettingsModal/LogSettingsModal'
-import { InviteAnalystDialog } from '@/components/share-dashboard/InvitationsPanel'
 import { Sparkline } from '@/app/dashboard/_sections/DashboardClient'
 import { BotSourcesPanel } from '@/app/control-room/_sections/ControlRoomClient'
 import { scoringAnalyticsCompositeOptions, scoringConfigCompositeOptions } from '@/components/SessionScoring/ScoringAdminPanels'
@@ -582,7 +581,7 @@ interface ServiceColumnDeps {
   activeServiceId: string | null; switchToService: (id: string) => void; servicesLength: number
   setCronService: (s: ServiceConfig) => void; setSettingsService: (s: ServiceConfig) => void
   setDeleteDataService: (s: ServiceConfig) => void; setTeardownService: (s: ServiceConfig) => void
-  setInviteService: (s: ServiceConfig) => void; openNgwaf: (s: ServiceConfig) => void
+  openNgwaf: (s: ServiceConfig) => void
   openRum?: (s: ServiceConfig) => void; openCredentials: (s: ServiceConfig) => void
 }
 
@@ -598,7 +597,7 @@ function MonoExternalCell({ text, href, title }: { text: string; href: string; t
 }
 
 function buildServiceColumns(deps: ServiceColumnDeps): ColumnDef<ServiceConfig>[] {
-  const { activeServiceId, switchToService, servicesLength, setCronService, setSettingsService, setDeleteDataService, setTeardownService, setInviteService, openNgwaf, openRum, openCredentials } = deps
+  const { activeServiceId, switchToService, servicesLength, setCronService, setSettingsService, setDeleteDataService, setTeardownService, openNgwaf, openRum, openCredentials } = deps
   return [
     {
       accessorKey: 'name', header: 'Service Name', size: 200,
@@ -663,10 +662,9 @@ function buildServiceColumns(deps: ServiceColumnDeps): ColumnDef<ServiceConfig>[
                 <DropdownMenuItem onClick={() => setSettingsService(service)}><Settings2 className="mr-2 h-4 w-4" /> Log Settings</DropdownMenuItem>
                 {openRum && <DropdownMenuItem onClick={() => openRum(service)}><Eye className="mr-2 h-4 w-4" /> RUM Configuration</DropdownMenuItem>}
                 <DropdownMenuItem onClick={() => openNgwaf(service)}><Bot className="mr-2 h-4 w-4" /> NGWAF Config</DropdownMenuItem>
-                {service.access_level === 'read_write' && service.analyst_path_a_supported && <DropdownMenuItem onClick={() => setInviteService(service)}><UserPlus className="mr-2 h-4 w-4" /> Invite User</DropdownMenuItem>}
                 <DropdownMenuItem onClick={() => openCredentials(service)}><KeyRound className="mr-2 h-4 w-4" /> Rotate Key</DropdownMenuItem>
                 <DropdownMenuSeparator />
-                {service.access_level === 'read_write' && <DropdownMenuItem className="text-destructive focus:text-destructive focus:bg-destructive/10" onClick={() => setDeleteDataService(service)}><Eraser className="mr-2 h-4 w-4" /> Delete Data</DropdownMenuItem>}
+                <DropdownMenuItem className="text-destructive focus:text-destructive focus:bg-destructive/10" onClick={() => setDeleteDataService(service)}><Eraser className="mr-2 h-4 w-4" /> Delete Data</DropdownMenuItem>
                 <DropdownMenuItem className="text-destructive focus:text-destructive focus:bg-destructive/10" onClick={() => setTeardownService(service)}><Trash2 className="mr-2 h-4 w-4" /> Teardown Service</DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
@@ -678,12 +676,12 @@ function buildServiceColumns(deps: ServiceColumnDeps): ColumnDef<ServiceConfig>[
   ]
 }
 
-interface CredentialsDialogProps { service: ServiceConfig | null; onClose: () => void; initialMode: 'token' | 'manual' }
+interface CredentialsDialogProps { service: ServiceConfig | null; onClose: () => void }
 function CredentialsDialog(props: CredentialsDialogProps) {
-  return <CredentialsDialogBody key={`${props.service?.service_id ?? ''}|${props.initialMode}`} {...props} />
+  return <CredentialsDialogBody key={props.service?.service_id ?? ''} {...props} />
 }
-function CredentialsDialogBody({ service, onClose, initialMode }: CredentialsDialogProps) {
-  const [credMode, setCredMode] = useState<'token' | 'manual'>(initialMode)
+function CredentialsDialogBody({ service, onClose }: CredentialsDialogProps) {
+  const [credMode, setCredMode] = useState<'token' | 'manual'>('token')
   const [credApiToken, setCredApiToken] = useState('')
   const [credAccessKey, setCredAccessKey] = useState('')
   const [credSecretKey, setCredSecretKey] = useState('')
@@ -700,11 +698,11 @@ function CredentialsDialogBody({ service, onClose, initialMode }: CredentialsDia
           <DialogTitle>Rotate FOS Credentials</DialogTitle>
           <DialogDescription>
             Replace the Fastly Object Storage access key for <strong>{service?.name}</strong>.
-            {service?.access_level === 'read_write' ? ' Use your Fastly API token to auto-generate a new key, or enter one manually.' : ' Enter the new key credentials manually.'}
+            {' Use your Fastly API token to auto-generate a new key, or enter one manually.'}
           </DialogDescription>
         </DialogHeader>
         <div className="px-6 py-4 space-y-4 overflow-y-auto flex-1">
-          {service?.access_level === 'read_write' && (
+          {(
             <div className="flex rounded-md border overflow-hidden text-xs font-semibold">
               {(['token', 'manual'] as const).map((m) => (
                 <button key={m} type="button" className={`flex-1 py-1.5 transition-colors ${credMode === m ? 'bg-primary text-primary-foreground' : 'hover:bg-muted text-muted-foreground'}`} onClick={() => { setCredMode(m); credentialsMutation.reset() }}>
@@ -713,14 +711,14 @@ function CredentialsDialogBody({ service, onClose, initialMode }: CredentialsDia
               ))}
             </div>
           )}
-          {credMode === 'token' && service?.access_level === 'read_write' && (
+          {credMode === 'token' && (
             <div className="space-y-1.5">
               <Label htmlFor="cred-api-token" className="text-sm">Fastly API Token</Label>
               <p className="text-xs text-muted-foreground">A new <code>read-write-objects</code> FOS key will be created for this bucket. The old key will be deleted automatically.</p>
               <Input id="cred-api-token" type="password" placeholder="Fastly API token" value={credApiToken} onChange={(e) => setCredApiToken(e.target.value)} className="font-mono text-sm" />
             </div>
           )}
-          {(credMode === 'manual' || service?.access_level !== 'read_write') && (
+          {credMode === 'manual' && (
             <>
               <div className="space-y-1.5">
                 <Label htmlFor="cred-access-key" className="text-sm">Access Key ID</Label>
@@ -837,16 +835,11 @@ export function ServicesTable() {
   const [settingsService, setSettingsService] = useState<ServiceConfig | null>(null)
   const [teardownService, setTeardownService] = useState<ServiceConfig | null>(null)
   const [deleteDataService, setDeleteDataService] = useState<ServiceConfig | null>(null)
-  const [inviteService, setInviteService] = useState<ServiceConfig | null>(null)
   const [credentialsService, setCredentialsService] = useState<ServiceConfig | null>(null)
-  const [credInitialMode, setCredInitialMode] = useState<'token' | 'manual'>('token')
   const [wizardOpen, setWizardOpen] = useState(false)
   const [ngwafService, setNgwafService] = useState<ServiceConfig | null>(null)
 
-  const openCredentials = React.useCallback((service: ServiceConfig) => {
-    setCredInitialMode(service.access_level === 'read_write' ? 'token' : 'manual')
-    setCredentialsService(service)
-  }, [])
+  const openCredentials = React.useCallback((service: ServiceConfig) => setCredentialsService(service), [])
   const switchToService = React.useCallback((id: string) => {
     setActiveServiceId(id); queryClient.invalidateQueries({ queryKey: queryKeys.bootstrap() }); router.push(`/dashboard?service=${id}`)
   }, [setActiveServiceId, queryClient, router])
@@ -867,7 +860,7 @@ export function ServicesTable() {
 
   const columns = React.useMemo(() => buildServiceColumns({
     activeServiceId, switchToService, servicesLength: services?.services?.length || 0,
-    setCronService, setSettingsService, setDeleteDataService, setTeardownService, setInviteService, openNgwaf: setNgwafService, openRum, openCredentials,
+    setCronService, setSettingsService, setDeleteDataService, setTeardownService, openNgwaf: setNgwafService, openRum, openCredentials,
   }), [activeServiceId, switchToService, services?.services?.length, openRum, openCredentials])
 
   return (
@@ -895,14 +888,13 @@ export function ServicesTable() {
       <ProvisionWizard open={wizardOpen} onOpenChange={setWizardOpen} />
       {cronService && <CronSettingsModal service={cronService} open={!!cronService} onOpenChange={(open) => !open && setCronService(null)} />}
       {settingsService && <LogSettingsModal service={settingsService} open={!!settingsService} onOpenChange={(open) => !open && setSettingsService(null)} />}
-      <InviteAnalystDialog service={inviteService} open={!!inviteService} onOpenChange={(open) => !open && setInviteService(null)} />
       <TeardownDialog service={teardownService} open={!!teardownService} onOpenChange={(open) => !open && setTeardownService(null)} onComplete={() => {
         queryClient.invalidateQueries({ queryKey: queryKeys.services() }); queryClient.invalidateQueries({ queryKey: queryKeys.bootstrap() }); setTeardownService(null)
       }} />
       <DeleteDataDialog service={deleteDataService} open={!!deleteDataService} onOpenChange={(open) => !open && setDeleteDataService(null)} onComplete={() => {
         cronCacheBust(queryClient, deleteDataService?.service_id); queryClient.invalidateQueries({ queryKey: queryKeys.services() }); setDeleteDataService(null)
       }} />
-      <CredentialsDialog service={credentialsService} initialMode={credInitialMode} onClose={() => setCredentialsService(null)} />
+      <CredentialsDialog service={credentialsService} onClose={() => setCredentialsService(null)} />
       <NgwafDialog service={ngwafService} onClose={() => setNgwafService(null)} />
     </>
   )

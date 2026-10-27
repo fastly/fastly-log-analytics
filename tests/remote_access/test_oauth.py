@@ -2129,7 +2129,6 @@ def test_is_request_remote_peer_classification(client_peer, extra_headers, expec
         ("/api/services/abc/scoring/status", True),
         ("/api/services/abc/scoring/labels", False),
         # Regex subpath matches
-        ("/api/services/abc/lake-info", True),
         ("/api/services/xyz/custom-fields", True),
         ("/api/services/xyz/custom-fields/items", True),
         # OpenAPI surface blocked for analysts (L7)

@@ -231,7 +231,6 @@ def test_build_and_reload_default_source():
         "region": "us-west-2",
         "duckdb_path": "/tmp/new.duckdb",
         "storage_mode": "local",
-        "access_level": "read_only",
     }
     try:
         with (
@@ -360,7 +359,7 @@ def test_log_cron_run_behaviors():
         log_cron_run({"name": "svc"}, "local_compact", 1.0, "success", run_id=11)
     assert deleted_lc == [("svc", 11)]
 
-    for task in ("commit", "optimize", "expire", "full_sync", "metadata_cleanup", "metadata_sync"):
+    for task in ("commit", "optimize", "expire", "full_sync", "metadata_cleanup"):
         del_t, log_t = [], []
         with (
             patch(
@@ -1369,7 +1368,6 @@ def test_get_sync_status_unconfigured_and_cached_modes(in_memory_duckdb, fos_sou
         "ingested": 0,
         "fos_total": 0,
         "storage_mode": "cloud",
-        "access_level": "read_write",
     }
 
     cached = {"local_rows": 12345, "ingested": 99, "latest_log_at": "2026-06-15T00:00:00Z"}
@@ -1378,13 +1376,8 @@ def test_get_sync_status_unconfigured_and_cached_modes(in_memory_duckdb, fos_sou
         out_local = get_sync_status(
             in_memory_duckdb, {**fos_source, "storage_mode": "local"}, skip_fos=True, force=False
         )
-    assert (out["local_rows"], out["ingested"], out["access_level"], out["storage_mode"], out["configured"]) == (
-        12345,
-        99,
-        "read_write",
-        "cloud",
-        True,
-    )
+    assert (out["local_rows"], out["ingested"], out["storage_mode"], out["configured"]) == (12345, 99, "cloud", True)
+    assert "access_level" not in out
     assert out_local["storage_mode"] == "local"
 
     empty_sum = {
@@ -2662,7 +2655,6 @@ def _minimal_cfg(service_id="svc-perf", commit_interval_mins=5):
     return {
         "service_id": service_id,
         "log_period": 60,
-        "access_level": "read_write",
         "commit_interval_mins": commit_interval_mins,
         "provisioning": {"cron_sync": {"enabled": True}, "cron_compact": {"enabled": False}},
     }
@@ -2846,15 +2838,15 @@ def test_drop_service_ducklake_state_drops_tables_and_removes_local_dir(tmp_path
         patch.object(d, "get_source_for_service", return_value=source),
         patch.object(d.duckdb, "connect", return_value=fake_con),
         patch("backend.core.iceberg._ducklake._ducklake_attach", return_value=True),
+        patch.object(d, "_purge_dropped_catalog_rows", return_value=7) as purge,
     ):
         result = d.drop_service_ducklake_state("svc")
 
     statements = [c.args[0] for c in fake_con.execute.call_args_list]
-    assert statements == [
-        f'DROP TABLE IF EXISTS lake."{ducklake_table_name(source, t)}"'
-        for t in ("logs", "client_vitals", "client_errors")
-    ]
-    assert result == {"tables_dropped": 3, "local_dirs_removed": 1}
+    expected_tables = [ducklake_table_name(source, t) for t in ("logs", "client_vitals", "client_errors")]
+    assert statements == [f'DROP TABLE IF EXISTS lake."{t}"' for t in expected_tables]
+    purge.assert_called_once_with("svc", expected_tables)
+    assert result == {"tables_dropped": 3, "local_dirs_removed": 1, "catalog_rows_purged": 7}
     assert not (tmp_path / "svc").exists()
     assert other_dir.exists(), "another service's DuckLake data must survive"
     fake_con.close.assert_called_once()

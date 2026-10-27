@@ -12,14 +12,13 @@ import { SectionHeader, LabelWithInfo, ReviewCard, ReviewHeader, ReviewContent, 
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import { Textarea } from '@/components/ui/textarea'
 import { CollapsibleGroup, CmcdConfigSection } from '@/components/LogSettingsModal/LogSettingsModal'
 import { SSEProgressView } from '@/components/SSEModal'
-import { Activity, AlertCircle, Calendar, CheckCircle2, ChevronLeft, ChevronRight, Cloud, Copy, Database, Eye, FileJson, FileText, Globe, Info, Layers, Loader2, Lock, Plus, RotateCcw, Search, Settings, Shield, Sparkles, XCircle, Zap, ArrowRight, RefreshCw, TriangleAlert } from 'lucide-react'
-import { cn, copyToClipboard, formatDateTime, panelDialogContent, panelDialogFooter, REGION_LABELS, SHIELD_LABELS, ELAPSED_RELATIVE_AGO, formatBytes, formatElapsed, PERIOD_LABELS, formatForInput, parseFromInput, downloadBlob, SHIELD_MAP, showToast } from '@/lib/utils'
+import { Activity, AlertCircle, CheckCircle2, ChevronLeft, ChevronRight, Cloud, Copy, Database, Eye, FileJson, FileText, Globe, Info, Layers, Loader2, Lock, Plus, RotateCcw, Search, Settings, Shield, Sparkles, XCircle, Zap, RefreshCw, TriangleAlert } from 'lucide-react'
+import { cn, copyToClipboard, panelDialogContent, panelDialogFooter, REGION_LABELS, SHIELD_LABELS, ELAPSED_RELATIVE_AGO, formatBytes, formatElapsed, PERIOD_LABELS, downloadBlob, SHIELD_MAP, showToast } from '@/lib/utils'
 import { evaluateLogFieldPresetSummary, resolveEnabledGroupsWithDeps, client, unwrapClient, queryKeys, adminFetch, extractApiError, estimateLogFieldBytesPerLine, isLogFieldPresetActive, toggleLogFieldGroup, toggleLogFieldOverride, toggleLogFieldPreset, updateLogFieldLimit } from '@/lib/api'
 import { type Service, useServiceStore, useTimezoneStore } from '@/stores/filterStore'
-import { useAutoFlash, type SSELine, type SSEStatus, useSSE } from '@/hooks/useSSE'
+import { type SSELine, type SSEStatus, useSSE } from '@/hooks/useSSE'
 import type { Schema } from '@/types/api'
 import { useForm, type PathValue } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
@@ -27,14 +26,13 @@ import { z } from 'zod'
 import { Skeleton } from '@/components/ui/skeleton'
 import type { components } from '@/types/api.generated'
 
-export type ProvisionService = Schema<"ProvisionService">; export type LakeInfo = Schema<"ProvisionLakeInfoResponse">;
+export type ProvisionService = Schema<"ProvisionService">;
 export type LogFieldsCatalog = Schema<"LogFieldsCatalogResponse">; type LogFieldsConfig = Schema<"LogFieldsConfig">;
-type ValidateResponse = Schema<"ProvisionValidateResponse">; export const WIZARD_DRAFT_VERSION = 1; export type Step =
+type ValidateResponse = Schema<"ProvisionValidateResponse">; export const WIZARD_DRAFT_VERSION = 2; export type Step =
   | "mode" | "token" | "service" | "features" | "storage" | "ngwaf"
-  | "fields" | "execute" | "terraform" | "join" | "analyze" | "settings" | "confirm"; export type WizardMode = "provision" | "join" | "ingest" | null;
+  | "fields" | "execute" | "terraform" | "connect"; export type WizardMode = "provision" | "ingest" | null;
 export type FosStatus = "idle" | "checking" | "success" | "error"; export type DomainStatus = "idle" | "checking" | "available" | "taken" | "error";
-export type JoinPhase = "form" | "connecting" | "importing" | "done"; export const ANALYST_PATH_A_UNSUPPORTED_REASON =
-  "Independent analyst access is unavailable for scalable Celery/DuckLake services. Use live shared-instance analyst access (Path B).";
+export type SetupPhase = "form" | "done";
 export interface TokenInfo { id: string; name: string; type: "user" | "automation"; }
 export interface ProvisionConfig { endpoint_name: string; fos_region: string; fos_endpoint: string; fos_bucket_name: string; fos_prefix: string;
   fos_access_key: string; fos_secret_key: string; sample_rate: number; edge_only: boolean; custom_condition: string;
@@ -54,16 +52,13 @@ export const INITIAL_CONFIG: ProvisionConfig = { endpoint_name: "", fos_region: 
 export type PersistedConfig = Omit<ProvisionConfig, "fos_access_key" | "fos_secret_key" | "cdn_secret">; export interface WizardDraft {
   version: number; draftId: string; mode: Exclude<WizardMode, null>; step: Step; currentStep: Step;
   selectedServiceId: string | null; selectedServiceName: string | null; selectedCdnServiceId: string | null; selectedCdnServiceName: string | null;
-  tokenInfo: TokenInfo | null; config: PersistedConfig; importMode: "all" | "range";
-  importRange: { start: string; end: string }; syncEnabled: boolean; syncIntervalMins: string; icebergMetadataLocation: string; updatedAt: string; createdAt: string;
+  tokenInfo: TokenInfo | null; config: PersistedConfig; updatedAt: string; createdAt: string;
 }
-const JOIN_FLOW_STEPS: { id: Step; label: string }[] = [ { id: "join", label: "Connect" }, { id: "analyze", label: "Analyze" },
-  { id: "settings", label: "Settings" }, { id: "confirm", label: "Confirm" }, ]; export function getStepsForMode( mode: WizardMode,
-  config?: { logging_enabled?: boolean }, step?: Step, ): { id: Step; label: string }[] {
-  if (mode === "join") return [{ id: "mode", label: "Role" }, ...JOIN_FLOW_STEPS]; if (mode === "ingest" && step && JOIN_FLOW_STEPS.some((s) => s.id === step)) {
-    return [{ id: "mode", label: "Role" }, { id: "token", label: "Auth" }, { id: "service", label: "Service" }, ...JOIN_FLOW_STEPS]; }
+export function getStepsForMode( mode: WizardMode, config?: { logging_enabled?: boolean }, ): { id: Step; label: string }[] {
   const steps: { id: Step; label: string }[] = [ { id: "mode", label: "Role" }, { id: "token", label: "Auth" },
-    { id: "service", label: "Service" }, { id: "features", label: "Features" }, { id: "storage", label: "Storage" }, ];
+    { id: "service", label: "Service" }, ];
+  if (mode === "ingest") steps.push({ id: "connect", label: "Connect" });
+  steps.push({ id: "features", label: "Features" }, { id: "storage", label: "Storage" });
   if (!config || config.logging_enabled !== false) { steps.push({ id: "ngwaf", label: "NGWAF" }, { id: "fields", label: "Log Fields" }); }
   steps.push({ id: "execute", label: "Review" }); return steps; }
 export interface ProvisionWizardProps { open: boolean; onOpenChange: (open: boolean) => void; }
@@ -77,10 +72,7 @@ export interface WizardState { setActiveServiceId: (id: string) => void; setServ
   selectedTfFile: string; setSelectedTfFile: (f: string) => void; isFetchingTerraform: boolean;
   configStatus: Schema<"ProvisionCheckConfigResponse"> | null; isCheckingConfig: boolean;
   handleCheckConfig: () => Promise<void>; ngwafWorkspaces: { id: string; name: string }[]; ngwafFetching: boolean; ngwafFetchError: string; ngwafDebugRaw: string;
-  analystPathASupported: boolean; analystPathAReason: string | null; lakeInfo: LakeInfo | null;
-  isAnalyzing: boolean; importMode: "all" | "range"; setImportMode: (m: "all" | "range") => void; importRange: { start: string; end: string };
-  setImportRange: React.Dispatch<React.SetStateAction<{ start: string; end: string }>>;
-  syncEnabled: boolean; setSyncEnabled: (b: boolean) => void; lines: SSELine[]; status: SSEStatus;
+  lines: SSELine[]; status: SSEStatus;
   isDone: boolean; sseError: string | null; stop: () => void; handleModalClose: (isOpen: boolean) => void;
   onOpenChange: (open: boolean) => void; config: ProvisionConfig; setConfig: React.Dispatch<React.SetStateAction<ProvisionConfig>>;
   catalog: LogFieldsCatalog | undefined; isLoadingCatalog: boolean; toggleGroup: (groupId: string, checked: boolean) => void;
@@ -91,10 +83,7 @@ export interface WizardState { setActiveServiceId: (id: string) => void; setServ
   validateMutation: ReturnType<typeof useMutation<ValidateResponse | undefined, Error, string>>; handleServiceSelect: (service: ProvisionService) => void;
   handleCheckFos: (vals?: { bucket?: string; region?: string; access_key?: string; secret_key?: string }) => Promise<void>;
   checkDomain: (prefix: string) => Promise<void>; domainStatus: DomainStatus; domainMessage: string;
-  joinPhase: JoinPhase; joinedServiceId: string; syncIntervalMins: string; setSyncIntervalMins: (s: string) => void;
-  icebergMetadataLocation: string; setIcebergMetadataLocation: (s: string) => void;
-  estimatedImportSize: number; handleAnalyzeLake: () => Promise<void>; handleJoin: () => void;
-  handleFinishJoin: () => void; handleDeploy: () => void; fetchTerraformPreview: () => Promise<void>;
+  setupPhase: SetupPhase; handleDeploy: () => void; fetchTerraformPreview: () => Promise<void>;
   handleExportTerraform: () => Promise<void>; handleAdminIngest: () => Promise<void>; STEPS: { id: Step; label: string }[]; pendingDraft: WizardDraft | null;
   resumeDraft: () => void; discardDraft: () => void; }
 function relativeTime(iso: string): string { const then = new Date(iso).getTime();
@@ -146,14 +135,14 @@ export function WizardHeader({ s }: { s: WizardState }) { const { step, STEPS } 
         Step <span className="text-foreground font-semibold">{stepIndex + 1}</span> of {STEPS.length}
       </div>
     </DialogHeader> ); }
-export function WizardFooter({ s }: { s: WizardState }) { const { step, setStep, mode, isDeploying, status, isDone, handleModalClose, isAnalyzing,
+export function WizardFooter({ s }: { s: WizardState }) { const { step, setStep, mode, isDeploying, status, isDone, handleModalClose,
     token, isLoadingServices, handleTokenSubmit, selectedService, validateMutation, domainStatus, config, fetchTerraformPreview, handleDeploy, handleAdminIngest,
-    fosStatus, handleAnalyzeLake, importMode, importRange, handleJoin, joinPhase, stop, } = s; const handleBack = () => {
-    const baseSteps = getStepsForMode(mode, config, step).map((x) => x.id);
+    fosStatus, setupPhase, stop, } = s; const handleBack = () => {
+    const baseSteps = getStepsForMode(mode, config).map((x) => x.id);
     const order = baseSteps.includes("execute") ? [...baseSteps, "terraform" as Step] : baseSteps; const idx = order.indexOf(step);
     if (idx > 0) setStep(order[idx - 1]); }; return ( <DialogFooter className={panelDialogFooter}>
-      {!isDeploying && step !== "mode" && step !== "terraform" && (
-        <Button variant="ghost" className="mr-auto h-9 text-xs" disabled={isAnalyzing} onClick={handleBack}>
+      {!isDeploying && step !== "mode" && step !== "terraform" && !(step === "connect" && setupPhase === "done") && (
+        <Button variant="ghost" className="mr-auto h-9 text-xs" onClick={handleBack}>
           <ChevronLeft className="h-4 w-4 mr-1" /> Back
         </Button>
       )}
@@ -209,23 +198,12 @@ export function WizardFooter({ s }: { s: WizardState }) { const { step, setStep,
           )}
           {step === "terraform" && ( <Button size="lg" className="h-9 px-6 font-bold" onClick={() => setStep("execute")}>Back to Review</Button>
           )}
-          {step === "join" && joinPhase === "form" && ( <Button
+          {step === "connect" && setupPhase === "form" && ( <Button
               size="lg"
-              disabled={!config.endpoint_name || !config.cdn_service_name || fosStatus !== "success" || isAnalyzing}
+              disabled={!config.endpoint_name || !config.cdn_service_name || fosStatus !== "success"}
               className="h-9 px-6 font-bold"
-              onClick={handleAnalyzeLake} >
-              {isAnalyzing && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-              Analyze Data Lake
-            </Button>
-          )}
-          {step === "analyze" && <Button className="h-9 text-xs" onClick={() => setStep("settings")}>Continue</Button>}
-          {step === "settings" && <Button className="h-9 text-xs" onClick={() => setStep("confirm")}>Review Summary</Button>}
-          {step === "confirm" && ( <Button
-              size="lg"
-              className="h-9 px-6 font-bold"
-              onClick={handleJoin}
-              disabled={!s.analystPathASupported || (importMode === "range" && (!importRange.start || !importRange.end))} >
-              Confirm & Connect
+              onClick={() => setStep("features")} >
+              Continue
             </Button>
           )}
         </>
@@ -458,56 +436,6 @@ export function ServiceStep({ s }: { s: WizardState }) { return ( <div className
         </div>
       </div>
     </div> ); }
-export function SettingsStep({ s }: { s: WizardState }) { return ( <div className="flex-1 overflow-y-auto min-h-0">
-      <div className="p-8 space-y-10 pb-12 max-w-3xl mx-auto">
-        <div className="space-y-6">
-          <SectionHeader title="Ingestion Settings" icon={Settings} />
-          <p className="text-sm text-muted-foreground leading-relaxed">
-            Configure how you want to handle ongoing updates from the data lake.
-          </p>
-          <div className="bg-muted/5 border rounded-xl overflow-hidden divide-y">
-            <div className="p-6 flex items-center justify-between gap-8">
-              <div className="space-y-1 flex-1">
-                <div className="flex items-center gap-2">
-                  <Label id="settings-auto-sync-label" className="text-sm font-bold tracking-tight">Auto-Sync New Data</Label>
-                  <Badge variant="secondary" className="text-[9px] uppercase h-4">Recommended</Badge>
-                </div>
-                <p className="text-xs text-muted-foreground leading-relaxed">
-                  Automatically poll for and download new processed log files as they are committed to the cloud.
-                </p>
-              </div>
-              <Switch aria-labelledby="settings-auto-sync-label" checked={s.syncEnabled} onCheckedChange={s.setSyncEnabled} />
-            </div>
-            {s.syncEnabled && ( <div className="p-6 space-y-4 bg-background/30 animate-in fade-in slide-in-from-top-1">
-                <div className="flex items-start justify-between gap-8">
-                  <div className="space-y-1">
-                    <Label htmlFor="settings-sync-interval" className="text-sm font-bold tracking-tight">Cloud Sync Interval</Label>
-                    <p className="text-xs text-muted-foreground leading-relaxed">
-                      How often to check for new cloud commits. More frequent = fresher data.
-                    </p>
-                  </div>
-                  <Select value={s.syncIntervalMins} onValueChange={(v) => v && s.setSyncIntervalMins(v)}>
-                    <SelectTrigger id="settings-sync-interval" className="h-9 w-[180px] shrink-0"><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                      {["1", "2", "5", "15", "30", "60"].map((mins) => (
-                        <SelectItem key={mins} value={mins}>Every {mins} {mins === "1" ? "min" : "mins"}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-              </div>
-            )}
-          </div>
-          {!s.syncEnabled && ( <div className="p-4 rounded-lg bg-amber-500/5 border border-amber-500/20 flex items-start gap-3">
-              <Info className="h-4 w-4 text-amber-500 mt-0.5" />
-              <p className="text-[11px] text-amber-700 dark:text-amber-400 leading-normal">
-                With auto-sync disabled, your local dashboard will only show the data you import now. You will need to manually trigger a sync later to see newer logs.
-              </p>
-            </div>
-          )}
-        </div>
-      </div>
-    </div> ); }
 export function NgwafStep({ s }: { s: WizardState }) { const { config, setConfig } = s; return ( <div className="flex-1 overflow-y-auto min-h-0">
       <div className="p-8 space-y-6 max-w-2xl mx-auto">
         <div className="flex items-center gap-2 pb-2 border-b">
@@ -570,7 +498,7 @@ export function FeaturesStep({ s }: { s: WizardState }) { const { config, setCon
   const currentSelection = config.logging_enabled && config.rum_enabled ? "both" : config.rum_enabled && !config.logging_enabled ? "rum" : "logging"; return (
     <div className="flex-1 flex flex-col items-center justify-center p-6 md:p-8 space-y-8 text-center animate-in fade-in slide-in-from-bottom-4 duration-500 max-w-4xl mx-auto w-full">
       <div className="space-y-3 max-w-lg">
-        <span className="text-[10px] font-bold uppercase tracking-widest text-primary bg-primary/10 px-2.5 py-1 rounded-full">Step 4 of {s.STEPS.length}</span>
+        <span className="text-[10px] font-bold uppercase tracking-widest text-primary bg-primary/10 px-2.5 py-1 rounded-full">Step {s.STEPS.findIndex((x) => x.id === "features") + 1} of {s.STEPS.length}</span>
         <h3 className="text-2xl font-bold tracking-tight">Select features to deploy</h3>
         <p className="text-sm text-muted-foreground leading-relaxed">
           Choose the integration capabilities you want to configure on your Fastly service. You can adjust these settings later.
@@ -664,95 +592,29 @@ export function FieldsStep({ s }: { s: WizardState }) { const { config, setConfi
         )}
       </div>
     </div> ); }
-export function ConfirmStep({ s }: { s: WizardState }) { const { config, importMode, importRange, lakeInfo } = s; return (
-    <div className="flex-1 overflow-y-auto min-h-0">
-      <div className="p-8 space-y-8 pb-12 max-w-4xl mx-auto text-left">
-        <div className="text-center space-y-2">
-          <h3 className="text-2xl font-bold tracking-tight">Confirm Connection</h3>
-          <p className="text-sm text-muted-foreground leading-relaxed">Review your connection and import settings before continuing.</p>
-        </div>
-        <div className="grid grid-cols-2 gap-4">
-          <ReviewCard>
-            <ReviewHeader icon={Cloud}>Target Service</ReviewHeader>
-            <ReviewContent>
-              <ReviewItem label="Service Name" value={config.endpoint_name} />
-              <ReviewItem label="Service ID" value={config.cdn_service_name} />
-              <ReviewItem label="Mode" value="Read-Only Analyst" />
-            </ReviewContent>
-          </ReviewCard>
-          <ReviewCard>
-            <ReviewHeader icon={Database}>Data Lake</ReviewHeader>
-            <ReviewContent>
-              <ReviewItem label="Bucket" value={config.fos_bucket_name} />
-              <ReviewItem label="Region" value={config.fos_region} />
-              <ReviewItem label="Existing Data" value={lakeInfo?.table_exists ? "Available" : "Not Found"} />
-            </ReviewContent>
-          </ReviewCard>
-          <ReviewCard>
-            <ReviewHeader icon={Calendar}>Initial Import</ReviewHeader>
-            <ReviewContent>
-              <ReviewItem label="Strategy" value={importMode === "all" ? "Import All" : "Custom Range"} />
-              {importMode === "range" ? ( <>
-                  <ReviewItem label="Start Time" value={formatDateTime(importRange.start, s.timezone)} />
-                  <ReviewItem label="End Time" value={formatDateTime(importRange.end, s.timezone)} />
-                </>
-              ) : (
-                <ReviewItem label="Range" value={`${formatDateTime(lakeInfo?.range?.start, s.timezone)} → ${formatDateTime(lakeInfo?.range?.end, s.timezone)}`} />
-              )}
-              <ReviewItem label="Est. Download Size" value={`~${formatBytes(s.estimatedImportSize)}`} className="text-primary font-medium" />
-            </ReviewContent>
-          </ReviewCard>
-          <ReviewCard>
-            <ReviewHeader icon={Settings}>Automation</ReviewHeader>
-            <ReviewContent>
-              <ReviewItem variant="between" label="Background Sync" value={<StatusCheckIcon enabled={s.syncEnabled} />} />
-              {s.syncEnabled && <ReviewItem label="Sync Interval" value={`Every ${s.syncIntervalMins} minutes`} />}
-            </ReviewContent>
-          </ReviewCard>
-        </div>
-        <div className="p-4 rounded-xl bg-primary/5 border border-primary/20 space-y-3">
-          <div className="flex items-center gap-2 text-primary">
-            <Sparkles className="h-4 w-4" />
-            <span className="text-xs font-bold uppercase tracking-wider">What to expect</span>
-          </div>
-          <p className="text-xs text-muted-foreground leading-relaxed">
-            After connecting, the system will begin downloading the requested Parquet data files to your local cache. This process happens in the background and may take a few minutes depending on the volume of data. Your dashboard will begin populating as files arrive.
-          </p>
-        </div>
-      </div>
-    </div> ); }
-export function ModeStep({ s }: { s: WizardState }) { const joinDisabled = !s.analystPathASupported;
-  const analystPathAReason = s.analystPathAReason ?? ANALYST_PATH_A_UNSUPPORTED_REASON; const modeCards = [ {
+export function ModeStep({ s }: { s: WizardState }) { const modeCards = [ {
       mode: "provision" as const, nextStep: "token" as const, icon: Zap, iconBg: "bg-primary/10", iconColor: "text-primary", hoverBorder: "hover:border-primary",
-      title: "Admin: Provision", description: "Deploy new Fastly Object Storage resources, logging endpoints, and a CDN proxy. Best for new projects.",
-      disabled: false, }, { mode: "ingest" as const, nextStep: "token" as const, icon: Settings,
+      title: "Admin: Provision", description: "Deploy new Fastly Object Storage resources, logging endpoints, and a CDN proxy. Best for new projects.", }, {
+      mode: "ingest" as const, nextStep: "token" as const, icon: Settings,
       iconBg: "bg-amber-500/10", iconColor: "text-amber-500", hoverBorder: "hover:border-amber-500", title: "Admin: Connect Terraform",
-      description: "Set up ingestion for a service that is already managed via Terraform. We'll skip creating Fastly resources but set up data sync.",
-      disabled: false, }, { mode: "join" as const, nextStep: "join" as const, icon: Search,
-      iconBg: "bg-blue-500/10", iconColor: "text-blue-500", hoverBorder: "hover:border-blue-500", title: "Analyst: Join",
-      description: "Connect to an existing project. We'll only sync the processed data from the cloud. No new resources.",
-      disabled: joinDisabled, reason: joinDisabled ? analystPathAReason : undefined, }, ]; return (
+      description: "Set up ingestion for a service that is already managed via Terraform. We'll skip creating Fastly resources but set up data sync.", }, ]; return (
     <div className="flex-1 flex flex-col items-center justify-center p-8 space-y-10 text-center animate-in fade-in slide-in-from-bottom-4 duration-500">
       <div className="space-y-3 max-w-lg">
         <h3 className="text-2xl font-bold tracking-tight">Select your role</h3>
         <p className="text-muted-foreground leading-relaxed">Choose how you want to set up this service.</p>
       </div>
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6 w-full max-w-4xl">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6 w-full max-w-3xl">
         {modeCards.map((card) => { const Icon = card.icon; return ( <button
               key={card.mode}
               type="button"
-              disabled={card.disabled}
-              aria-describedby={card.reason ? "analyst-path-a-reason" : undefined}
               onClick={() => { s.setMode(card.mode); s.setStep(card.nextStep); }}
-              className={cn( "group relative flex flex-col items-center gap-6 p-8 border-2 rounded-2xl bg-background hover:bg-muted/50 transition-all text-left",
-                card.hoverBorder, card.disabled && "cursor-not-allowed opacity-60 hover:bg-background hover:border-border", )} >
+              className={cn( "group relative flex flex-col items-center gap-6 p-8 border-2 rounded-2xl bg-background hover:bg-muted/50 transition-all text-left", card.hoverBorder, )} >
               <div className={cn("w-16 h-16 rounded-2xl flex items-center justify-center group-hover:scale-110 transition-transform", card.iconBg)}>
                 <Icon className={cn("h-8 w-8", card.iconColor)} />
               </div>
               <div className="space-y-2 text-center">
                 <h4 className="font-bold text-lg">{card.title}</h4>
                 <p className="text-xs text-muted-foreground leading-relaxed">{card.description}</p>
-                {card.reason && <p id="analyst-path-a-reason" className="text-xs font-medium text-amber-600 dark:text-amber-400 leading-relaxed">{card.reason}</p>}
               </div>
             </button> ); })}
       </div>
@@ -826,11 +688,11 @@ export function TerraformStep({ s }: { s: WizardState }) { const { terraformFile
     </div> ); }
 const STEP_COMPONENTS: Record<WizardState["step"], React.ComponentType<{ s: WizardState }>> = {
   mode: ModeStep, token: TokenStep, service: ServiceStep, storage: StorageStep, features: FeaturesStep,
-  join: JoinStep, analyze: AnalyzeStep, settings: SettingsStep, confirm: ConfirmStep,
+  connect: ConnectStep,
   ngwaf: NgwafStep, fields: FieldsStep, execute: ExecuteStep, terraform: TerraformStep, };
 export function ProvisionWizard({ open, onOpenChange }: ProvisionWizardProps) { const s = useWizardState(open, onOpenChange);
   const StepComponent = STEP_COMPONENTS[s.step]; return ( <Dialog open={open} onOpenChange={s.handleModalClose}>
-      <DialogContent className={cn("sm:max-w-5xl h-[85vh]", panelDialogContent)} showCloseButton={s.status !== "streaming" && s.joinPhase !== "done"} >
+      <DialogContent className={cn("sm:max-w-5xl h-[85vh]", panelDialogContent)} showCloseButton={s.status !== "streaming" && s.setupPhase !== "done"} >
         {s.pendingDraft && s.mode === null && ( <ResumeBanner draft={s.pendingDraft} onResume={s.resumeDraft} onStartFresh={s.discardDraft} />
         )}
         <WizardHeader s={s} />
@@ -840,44 +702,6 @@ export function ProvisionWizard({ open, onOpenChange }: ProvisionWizardProps) { 
         <WizardFooter s={s} />
       </DialogContent>
     </Dialog> ); }
-interface JsonImportSectionProps { onImport: (parsed: Record<string, string>) => void; }
-export function JsonImportSection({ onImport }: JsonImportSectionProps) { const [open, setOpen] = useState(false); const [raw, setRaw] = useState("");
-  const [parseError, setParseError] = useState(""); const { active: imported, flash: flashImported } = useAutoFlash(3000); const handleImport = () => {
-    setParseError(""); try { const parsed = JSON.parse(raw); if (typeof parsed !== "object" || Array.isArray(parsed))
-        throw new Error("Expected a JSON object"); onImport(parsed); flashImported(); setOpen(false); setRaw(""); } catch (e) {
-      setParseError(e instanceof Error && e.message ? e.message : "Invalid JSON"); } }; return ( <div className="rounded-lg border bg-muted/20 p-4 space-y-3">
-      {/* a11y: was a <div onClick> — invisible to the keyboard. Native
-          button with aria-expanded/aria-controls so SR users hear the
-          collapse state and can Tab to it like any disclosure. */}
-      <button type="button" aria-expanded={open} aria-controls="json-import-body"
-        className="w-full flex items-center justify-between select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded-sm"
-        onClick={() => setOpen((o) => !o)} >
-        <div className="flex items-center gap-2">
-          <FileJson className="h-4 w-4 text-muted-foreground" />
-          <span className="text-sm font-medium">Import config from admin</span>
-          {imported && ( <span className="text-xs text-emerald-500 font-medium">
-              Fields populated!
-            </span>
-          )}
-        </div>
-        <span className="text-xs text-muted-foreground">
-          {open ? "Cancel" : "Paste JSON"}
-        </span>
-      </button>
-      {open && ( <div id="json-import-body" className="space-y-3 animate-in fade-in slide-in-from-top-2 duration-200">
-          <Textarea value={raw} onChange={(e) => { setRaw(e.target.value); setParseError(""); }} placeholder={
-              '{\n  "name": "...",\n  "service_id": "...",\n  ...\n}'
-            }
-            className="font-mono text-xs h-36 resize-none"
-            autoFocus />
-          {parseError && ( <p className="text-xs text-destructive">{parseError}</p>
-          )}
-          <Button size="sm" disabled={!raw.trim()} onClick={handleImport} className="h-8" >
-            Import
-          </Button>
-        </div>
-      )}
-    </div> ); }
 // Lightweight per-field validators that fire on blur so wizard users see
 // errors as they tab through, not only when the validate-mutation rejects
 // on Next-click. Each returns null on valid input, an error string otherwise.
@@ -896,34 +720,24 @@ function validateAccessKey(v: string): string | null { if (!v) return null
   }
   return null
 }
-function validateS3Uri(v: string): string | null { if (!v) return null
-  // Optional field — only validate when populated.
-  if (!/^s3:\/\/[^/]+\/.+/.test(v.trim())) {
-    return 'Expected an s3://bucket/key URI.'
-  }
-  return null
-}
-export function JoinStep({ s }: { s: WizardState }) {
-  // Local per-field error state. Lives in JoinStep, not WizardState, since
+export function ConnectStep({ s }: { s: WizardState }) {
+  // Local per-field error state. Lives in ConnectStep, not WizardState, since
   // it's a UI affordance only — the backend validates authoritatively on
   // submit. Map ties field-key to its blur-validation message.
   const [fieldErrors, setFieldErrors] = React.useState<Record<string, string | null>>({});
   const setError = (key: string, msg: string | null) => setFieldErrors((prev) => ({ ...prev, [key]: msg }));
-  // Sub-phase: connecting / done show SSE progress
-  if (s.joinPhase === "connecting" || s.joinPhase === "done") {
+  if (s.setupPhase === "done") {
     return (
       <div className="flex-1 overflow-y-auto min-h-0 p-8 space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
         <div className="text-center space-y-1">
-          <h3 className="text-lg font-semibold tracking-tight">{s.joinPhase === "connecting" ? `Connecting to ${s.config.endpoint_name}` : "Setup Complete"}</h3>
-          <p className="text-sm text-muted-foreground">{s.joinPhase === "connecting" ? "Please wait while we secure your connection and import initial data." : "Your service is connected and the initial data import is complete."}</p>
+          <h3 className="text-lg font-semibold tracking-tight">Setup Complete</h3>
+          <p className="text-sm text-muted-foreground">Your service is connected and background ingestion is configured.</p>
         </div>
-        <SSEProgressView lines={s.lines} status={s.status} error={s.sseError} className="h-[320px]" progressLabel="Progress" doneMessage="" />
       </div>
     );
   }
   // form phase
-  const { config, setConfig, mode } = s;
-  const analystPathAReason = s.analystPathAReason ?? ANALYST_PATH_A_UNSUPPORTED_REASON;
+  const { config, setConfig } = s;
   const renderServicePicker = (selected: ProvisionService | null, onSelect: (svc: ProvisionService) => void, placeholder: string) => (
     <Select value={selected?.id || ""} onValueChange={(id) => { const svc = (s.servicesData ?? []).find((item) => item.id === id); if (svc) onSelect(svc); }}>
       <SelectTrigger className="h-9 font-mono text-sm"><SelectValue placeholder={placeholder} /></SelectTrigger>
@@ -932,44 +746,23 @@ export function JoinStep({ s }: { s: WizardState }) {
   );
   return (
     <div className="flex-1 overflow-y-auto min-h-0">
-      <div className={cn("p-8 space-y-10 pb-12 max-w-3xl mx-auto transition-opacity duration-300", s.isAnalyzing && "pointer-events-none opacity-50")}>
+      <div className="p-8 space-y-10 pb-12 max-w-3xl mx-auto">
         <div className="space-y-5">
           <SectionHeader title="Connect to Existing Storage" icon={Database} />
           <p className="text-sm text-muted-foreground leading-relaxed">
-            {mode === "ingest"
-              ? "Enter the credentials for your existing Fastly Object Storage bucket and CDN proxy. We will use these to set up background ingestion."
-              : "Enter the Fastly Object Storage credentials for the service you want to analyze, or paste the JSON config your admin shared with you."}
+            Enter the credentials for your existing Fastly Object Storage bucket and CDN proxy. We will use these to set up background ingestion.
           </p>
-          {!s.analystPathASupported && mode === "join" && (
-            <Alert className="border-amber-500/40 bg-amber-500/10 text-amber-950 dark:text-amber-100">
-              <Info className="h-4 w-4" /><AlertTitle>Independent analyst join is unavailable</AlertTitle>
-              <AlertDescription className="text-amber-900 dark:text-amber-100/90">{analystPathAReason} If you opened an old invite or entered credentials manually, ask an admin to use live shared-instance analyst access instead.</AlertDescription>
-            </Alert>
-          )}
-          <JsonImportSection onImport={(parsed) => {
-            setConfig((prev) => ({
-              ...prev, endpoint_name: parsed.name ?? prev.endpoint_name, cdn_service_name: parsed.cdn_service_id ?? parsed.service_id ?? prev.cdn_service_name,
-              fos_bucket_name: parsed.fos_bucket ?? prev.fos_bucket_name, fos_region: parsed.fos_region ?? prev.fos_region,
-              fos_endpoint: parsed.fos_endpoint ?? prev.fos_endpoint, fos_prefix: parsed.fos_prefix ?? prev.fos_prefix,
-              fos_access_key: parsed.access_key_id ?? parsed.fos_key_id ?? prev.fos_access_key,
-              fos_secret_key: parsed.secret_key ?? parsed.fos_secret_key ?? prev.fos_secret_key,
-              cdn_url: parsed.cdn_url ?? prev.cdn_url, cdn_secret: parsed.cdn_secret ?? prev.cdn_secret,
-            }));
-            if (parsed.iceberg_metadata_location) s.setIcebergMetadataLocation(parsed.iceberg_metadata_location);
-            s.handleCheckFos({ bucket: parsed.fos_bucket, region: parsed.fos_region, access_key: parsed.access_key_id ?? parsed.fos_key_id, secret_key: parsed.secret_key ?? parsed.fos_secret_key });
-          }} />
           <div className="grid grid-cols-2 gap-6 pt-2">
             <div className="space-y-1.5">
-              <LabelWithInfo label={mode === "ingest" ? "Logging Service" : "Display Name"} info={mode === "ingest" ? "The Fastly service that is streaming logs to Object Storage." : "A friendly name for this service in your local dashboard."} />
-              {mode === "ingest" ? renderServicePicker(s.selectedService, s.setSelectedService, "Select logging service...") : <Input value={config.endpoint_name} onChange={(e) => setConfig({ ...config, endpoint_name: e.target.value })} className="h-9 font-mono text-sm" placeholder="e.g. Production Logs" />}
+              <LabelWithInfo label="Logging Service" info="The Fastly service that is streaming logs to Object Storage." />
+              {renderServicePicker(s.selectedService, s.setSelectedService, "Select logging service...")}
             </div>
             <div className="space-y-1.5">
-              <LabelWithInfo label={mode === "ingest" ? "CDN Proxy Service" : "Fastly Service ID"} info={mode === "ingest" ? "The Fastly service used to front the Object Storage bucket." : "The Fastly Service ID you are pulling logs for."} />
-              {mode === "ingest" ? renderServicePicker(s.selectedCdnService, s.setSelectedCdnService, "Select CDN service...") : <Input value={config.cdn_service_name} onChange={(e) => setConfig({ ...config, cdn_service_name: e.target.value })} className="h-9 font-mono text-sm" placeholder="e.g. 5xXj0O1P2R..." />}
+              <LabelWithInfo label="CDN Proxy Service" info="The Fastly service used to front the Object Storage bucket." />
+              {renderServicePicker(s.selectedCdnService, s.setSelectedCdnService, "Select CDN service...")}
             </div>
           </div>
-          {mode === "ingest" && (
-            <div className="space-y-4 pt-2 border-t">
+          <div className="space-y-4 pt-2 border-t">
               <div className="flex items-center justify-between">
                 <div className="text-sm text-muted-foreground italic">We will verify that both services have the correct resources and VCL snippets.</div>
                 <Button variant="secondary" size="sm" disabled={s.isCheckingConfig || !s.selectedService || !s.selectedCdnService || !config.fos_bucket_name} onClick={s.handleCheckConfig}>
@@ -986,8 +779,7 @@ export function JoinStep({ s }: { s: WizardState }) {
                   ))}
                 </div>
               )}
-            </div>
-          )}
+          </div>
           <div className="grid grid-cols-2 gap-6">
             <div className="space-y-1.5">
               <LabelWithInfo label="FOS Bucket Name" info="The name of the existing Fastly Object Storage bucket." />
@@ -1001,11 +793,6 @@ export function JoinStep({ s }: { s: WizardState }) {
                 <SelectContent>{Object.entries(REGION_LABELS).map(([k, label]) => <SelectItem key={k} value={k}>{label}</SelectItem>)}</SelectContent>
               </Select>
             </div>
-          </div>
-          <div className="space-y-1.5">
-            <LabelWithInfo label="Iceberg Metadata Location (Optional)" info="The full S3 URI to the latest .metadata.json file. Required for analysts without ListBucket permissions. If you used an invite link or JSON export, this is filled automatically." />
-            <Input value={s.icebergMetadataLocation} onChange={(e) => s.setIcebergMetadataLocation(e.target.value)} onBlur={(e) => setError("iceberg_uri", validateS3Uri(e.target.value))} aria-invalid={fieldErrors.iceberg_uri != null} className="h-9 font-mono text-xs" placeholder="s3://bucket/iceberg/default/logs/metadata/..." />
-            {fieldErrors.iceberg_uri && <p role="alert" className="text-[11px] text-destructive">{fieldErrors.iceberg_uri}</p>}
           </div>
           <div className="grid grid-cols-2 gap-6">
             <div className="space-y-1.5">
@@ -1032,9 +819,9 @@ export function JoinStep({ s }: { s: WizardState }) {
         <div className="space-y-4 pt-4 border-t">
           <div className="flex items-center justify-between">
             {s.fosStatus === "idle" || s.fosStatus === "checking" ? (
-              <div className="text-sm text-muted-foreground">Please verify your credentials before connecting.</div>
+              <div className="text-sm text-muted-foreground">Please verify your credentials before continuing.</div>
             ) : s.fosStatus === "success" ? (
-              <div className="flex items-center gap-2 text-emerald-500 font-semibold"><CheckCircle2 className="h-5 w-5" /><h4>Ready to Connect</h4></div>
+              <div className="flex items-center gap-2 text-emerald-500 font-semibold"><CheckCircle2 className="h-5 w-5" /><h4>Ready to Continue</h4></div>
             ) : (
               <div className="flex items-center gap-2 text-destructive font-semibold"><div className="h-5 w-5 rounded-full bg-destructive/10 flex items-center justify-center text-xs">!</div><h4>Connection Failed</h4></div>
             )}
@@ -1045,9 +832,7 @@ export function JoinStep({ s }: { s: WizardState }) {
           {s.fosStatus === "error" && <div className="text-sm text-destructive bg-destructive/10 p-3 rounded-md">{s.fosError}</div>}
           {s.fosStatus === "success" && (
             <p className="text-xs text-muted-foreground leading-relaxed animate-in fade-in slide-in-from-top-1">
-              {mode === "ingest"
-                ? <>We will connect to this service in <strong>Admin</strong> mode. We will set up background ingestion and metadata management.</>
-                : <>We will connect to this service in <strong>Read-Only</strong> mode. We will not create any resources or modify your logging configuration.</>}
+              We will connect to this service in <strong>Admin</strong> mode. We will set up background ingestion and metadata management.
             </p>
           )}
         </div>
@@ -1068,8 +853,6 @@ const storageStepSchema = z.object({
   rollup_retention_months: z.number().int().min(0), enable_cron_compact: z.boolean(),
 });
 type StorageStepFormValues = z.infer<typeof storageStepSchema>;
-const analyzeStepSchema = z.object({ importMode: z.enum(["all", "range"]), start: z.string(), end: z.string() });
-type AnalyzeStepFormValues = z.infer<typeof analyzeStepSchema>;
 
 interface RumVersionPickerProps {
   serviceId: string; value: string | null; onChange: (version: string | null) => void;
@@ -1357,77 +1140,6 @@ export function StorageStep({ s }: { s: WizardState }) {
   );
 }
 
-export function AnalyzeStep({ s }: { s: WizardState }) {
-  const { lakeInfo, importMode, setImportMode, importRange, setImportRange } = s;
-  const { setValue } = useForm<AnalyzeStepFormValues>({ resolver: zodResolver(analyzeStepSchema), values: { importMode, start: importRange.start, end: importRange.end } });
-  return (
-    <div className="flex-1 overflow-y-auto min-h-0">
-      <div className="p-8 space-y-8 pb-12 max-w-3xl mx-auto">
-        <div className="space-y-4">
-          <SectionHeader title="Analyze Data Lake" icon={Search} />
-          {lakeInfo?.table_exists ? (
-            <div className="space-y-6">
-              <div className="bg-emerald-500/5 border border-emerald-500/20 rounded-xl p-6 space-y-4">
-                <div className="flex items-center gap-3 text-emerald-600 dark:text-emerald-400"><CheckCircle2 className="h-6 w-6" /><h4 className="text-lg font-bold">Found existing Iceberg Table</h4></div>
-                <p className="text-sm text-muted-foreground leading-relaxed">We found an active data lake in this bucket with <strong>{lakeInfo.info?.data_files}</strong> data files and <strong>{lakeInfo.info?.snapshots}</strong> snapshots.</p>
-                <div className="grid grid-cols-2 gap-4 pt-2">
-                  {[["Available From", lakeInfo.range?.start], ["Available To", lakeInfo.range?.end]].map(([label, val]) => (
-                    <div key={String(label)} className="bg-background/50 border rounded-lg p-4 space-y-1">
-                      <span className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">{label}</span>
-                      <div className="flex flex-col font-mono text-sm font-semibold"><div className="flex items-center gap-2"><Calendar className="h-3.5 w-3.5 text-primary" />{formatDateTime(val, s.timezone)}</div></div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-              <div className="space-y-4">
-                <div className="flex items-center justify-between">
-                  <LabelWithInfo label="Data Import Strategy" info="Choose how much historical data you want to sync to your local machine. You can always sync more later." />
-                  <Badge variant="secondary" className="font-mono bg-muted/50 border shadow-sm">~{formatBytes(s.estimatedImportSize)}</Badge>
-                </div>
-                <div className="grid grid-cols-2 gap-4">
-                  {([["all", Database, "Import All Data", "Sync every available log file"], ["range", Calendar, "Select Range", "Choose specific dates to import"]] as const).map(([modeKey, Icon, title, sub]) => (
-                    <button key={modeKey} onClick={() => { setValue("importMode", modeKey, { shouldDirty: true }); setImportMode(modeKey); }} className={cn("flex flex-col items-center gap-3 p-6 border-2 rounded-xl transition-all text-left", importMode === modeKey ? "border-primary bg-primary/5 ring-4 ring-primary/10" : "border-muted hover:bg-muted/50")}>
-                      <Icon className="h-6 w-6 text-primary" />
-                      <div className="text-center"><div className="font-bold text-sm">{title}</div><p className="text-[10px] text-muted-foreground mt-1">{sub}</p></div>
-                    </button>
-                  ))}
-                </div>
-              </div>
-              {importMode === "range" && (
-                <div className="p-6 border rounded-xl bg-muted/5 space-y-4 animate-in fade-in slide-in-from-top-2">
-                  <div className="flex items-center gap-4">
-                    <div className="space-y-1.5 flex-1">
-                      <Label className="text-xs font-bold uppercase tracking-wider text-muted-foreground">Start Time</Label>
-                      <Input type="datetime-local" step="1" value={formatForInput(importRange.start, s.timezone)} min={formatForInput(lakeInfo.range?.start ?? "", s.timezone)} max={formatForInput(importRange.end || lakeInfo.range?.end || "", s.timezone)} onChange={(e) => { const start = parseFromInput(e.target.value, s.timezone) ?? ""; setValue("start", start, { shouldDirty: true }); setImportRange((prev) => ({ ...prev, start })); }} className="h-9 font-mono" />
-                    </div>
-                    <ArrowRight className="h-4 w-4 text-muted-foreground mt-6" />
-                    <div className="space-y-1.5 flex-1">
-                      <Label className="text-xs font-bold uppercase tracking-wider text-muted-foreground">End Time</Label>
-                      <Input type="datetime-local" step="1" value={formatForInput(importRange.end, s.timezone)} min={formatForInput(importRange.start || lakeInfo.range?.start || "", s.timezone)} max={formatForInput(lakeInfo.range?.end ?? "", s.timezone)} onChange={(e) => { const end = parseFromInput(e.target.value, s.timezone) ?? ""; setValue("end", end, { shouldDirty: true }); setImportRange((prev) => ({ ...prev, end })); }} className="h-9 font-mono" />
-                    </div>
-                  </div>
-                  <div className="flex items-center justify-between mt-2 pt-2 border-t border-muted/50">
-                    <p className="text-[10px] text-muted-foreground italic">Only data between these times will be downloaded initially.</p>
-                  </div>
-                </div>
-              )}
-            </div>
-          ) : (
-            <div className="p-12 border border-dashed rounded-xl bg-muted/5 text-center space-y-4">
-              <div className="mx-auto w-12 h-12 rounded-full bg-amber-500/10 flex items-center justify-center"><AlertCircle className="h-6 w-6 text-amber-500" /></div>
-              <div className="space-y-1">
-                <h4 className="font-bold">No Data Found</h4>
-                <p className="text-sm text-muted-foreground max-w-xs mx-auto">We couldn&apos;t find an Iceberg table in this bucket. The admin might not have started the ingestion yet.</p>
-              </div>
-              <p className="text-xs text-muted-foreground">You can still connect, but the dashboard will be empty until data is available.</p>
-            </div>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
 // ── Folded from wizard-deploy.ts ──────────────────────────────────────────
 
 function buildTerraformPayload(token: string, selectedService: ProvisionService, config: ProvisionConfig) {
@@ -1484,8 +1196,7 @@ interface ModalCloseDeps {
   setActiveServiceId: (id: string) => void; queryClient: Pick<QueryClient, "invalidateQueries">;
   setStep: (s: Step) => void; setMode: (m: WizardMode) => void; setSearch: (s: string) => void;
   setSelectedService: (s: ProvisionService | null) => void; setIsDeploying: (b: boolean) => void;
-  setFosStatus: (s: FosStatus) => void; setFosError: (s: string) => void; setLakeInfo: (l: LakeInfo | null) => void;
-  setIsAnalyzing: (b: boolean) => void; setImportMode: (m: "all" | "range") => void; setSyncEnabled: (b: boolean) => void;
+  setFosStatus: (s: FosStatus) => void; setFosError: (s: string) => void; setSetupPhase: (p: SetupPhase) => void;
   reset: () => void; resetConfig: () => void; setNgwafWorkspaces: (w: { id: string; name: string }[]) => void;
   setNgwafFetching: (b: boolean) => void; setNgwafFetchError: (s: string) => void;
 }
@@ -1503,8 +1214,7 @@ export function buildHandleModalClose(deps: ModalCloseDeps) {
       } else {
         setTimeout(() => {
           deps.setStep("mode"); deps.setMode(null); deps.setSearch(""); deps.setSelectedService(null);
-          deps.setIsDeploying(false); deps.setFosStatus("idle"); deps.setFosError(""); deps.setLakeInfo(null);
-          deps.setIsAnalyzing(false); deps.setImportMode("all"); deps.setSyncEnabled(true);
+          deps.setIsDeploying(false); deps.setFosStatus("idle"); deps.setFosError(""); deps.setSetupPhase("form");
           deps.reset(); deps.resetConfig(); deps.setNgwafWorkspaces([]);
           deps.setNgwafFetching(false); deps.setNgwafFetchError("");
         }, 300);
@@ -1539,49 +1249,15 @@ export function runDeploy({ token, selectedService, config, setIsDeploying, star
   start("/api/provision/execute", body);
 }
 
-interface JoinArgs {
-  config: ProvisionConfig; analystPathASupported: boolean; syncIntervalMins: string; syncEnabled: boolean;
-  icebergMetadataLocation: string; importMode: "all" | "range"; importRange: { start: string; end: string };
-  setIsDeploying: (b: boolean) => void; setJoinPhase: (p: JoinPhase) => void; setStep: (s: Step) => void;
-  reset: () => void; start: (urlPath: string, body?: Record<string, unknown>) => void;
-}
-
-export function runJoin(args: JoinArgs) {
-  const {
-    config, analystPathASupported, syncIntervalMins, syncEnabled, icebergMetadataLocation,
-    importMode, importRange, setIsDeploying, setJoinPhase, setStep, reset, start,
-  } = args;
-  if (
-    !analystPathASupported || !config.endpoint_name || !config.cdn_service_name ||
-    !config.fos_bucket_name || !config.fos_region || !config.fos_access_key || !config.fos_secret_key
-  ) return;
-  setIsDeploying(true); setJoinPhase("connecting"); setStep("join"); reset();
-  const params: Record<string, string> = {
-    service_id: config.cdn_service_name, service_name: config.endpoint_name,
-    fos_bucket_name: config.fos_bucket_name, fos_region: config.fos_region,
-    fos_endpoint: config.fos_endpoint || "", fos_access_key: config.fos_access_key,
-    fos_secret_key: config.fos_secret_key, cdn_url: config.cdn_url || "",
-    cdn_service_id: config.cdn_service_name || "", cdn_secret: config.cdn_secret || "",
-    sync_interval_mins: syncIntervalMins, sync_enabled: String(syncEnabled),
-    iceberg_metadata_location: icebergMetadataLocation || "",
-  };
-  if (importMode === "range") {
-    if (importRange.start) params.start_time = importRange.start;
-    if (importRange.end) params.end_time = importRange.end;
-  }
-  start(`/api/provision/join?${new URLSearchParams(params).toString()}`);
-}
-
-function registerServiceAndInvalidate<T extends { id: string; name: string; accessLevel?: string }>(
-  id: string, name: string, accessLevel: "read_write" | "read_only",
+function registerServiceAndInvalidate<T extends { id: string; name: string }>(
+  id: string, name: string,
   services: T[], setServices: (s: T[]) => void,
-  setActiveServiceId: (id: string) => void, setJoinedServiceId: (id: string) => void,
+  setActiveServiceId: (id: string) => void,
   queryClient: Pick<QueryClient, "invalidateQueries">,
 ) {
-  setJoinedServiceId(id);
   if (id) {
     setActiveServiceId(id);
-    if (!services.some((s) => s.id === id)) setServices([...services, { id, name, accessLevel } as T]);
+    if (!services.some((s) => s.id === id)) setServices([...services, { id, name } as T]);
   }
   queryClient.invalidateQueries({ queryKey: queryKeys.bootstrap() });
 }
@@ -1589,15 +1265,15 @@ function registerServiceAndInvalidate<T extends { id: string; name: string; acce
 interface AdminIngestArgs {
   token: string; selectedService: ProvisionService | null; selectedCdnService: ProvisionService | null;
   config: ProvisionConfig; services: Service[]; setIsDeploying: (b: boolean) => void;
-  setJoinedServiceId: (id: string) => void; setActiveServiceId: (id: string) => void;
+  setActiveServiceId: (id: string) => void;
   setServices: (services: Service[]) => void; queryClient: Pick<QueryClient, "invalidateQueries">;
-  setJoinPhase: (p: JoinPhase) => void; setStep: (s: Step) => void;
+  setSetupPhase: (p: SetupPhase) => void; setStep: (s: Step) => void;
 }
 
 export async function runAdminIngest(args: AdminIngestArgs) {
   const {
     token, selectedService, selectedCdnService, config, services, setIsDeploying,
-    setJoinedServiceId, setActiveServiceId, setServices, queryClient, setJoinPhase, setStep,
+    setActiveServiceId, setServices, queryClient, setSetupPhase, setStep,
   } = args;
   if (!selectedService) return;
   setIsDeploying(true);
@@ -1622,11 +1298,11 @@ export async function runAdminIngest(args: AdminIngestArgs) {
     );
     if (data?.ok) {
       registerServiceAndInvalidate(
-        selectedService.id, selectedService.name, "read_write",
-        services, setServices, setActiveServiceId, setJoinedServiceId, queryClient,
+        selectedService.id, selectedService.name,
+        services, setServices, setActiveServiceId, queryClient,
       );
-      setJoinPhase("done");
-      setStep("join");
+      setSetupPhase("done");
+      setStep("connect");
     }
   } catch (e) {
     console.error("Ingest failed", e);
@@ -1642,8 +1318,7 @@ interface WizardEffectsArgs {
   fosStatus: FosStatus; setFosStatus: (s: FosStatus) => void; setFosError: (s: string) => void;
   setStep: (s: Step) => void; setMode: (m: WizardMode) => void; setSearch: (s: string) => void;
   setSelectedService: (s: ProvisionService | null) => void; setIsDeploying: (b: boolean) => void;
-  reset: () => void; resetConfig: () => void; joinPhase: JoinPhase; isAnalyzing: boolean;
-  handleAnalyzeLake: () => void; selectedService: ProvisionService | null; token: string;
+  reset: () => void; resetConfig: () => void; selectedService: ProvisionService | null; token: string;
   setNgwafWorkspaces: (w: { id: string; name: string }[]) => void;
   setNgwafFetchError: (s: string) => void; setNgwafDebugRaw: (s: string) => void;
   setNgwafFetching: (b: boolean) => void; isDone: boolean;
@@ -1653,7 +1328,7 @@ interface WizardEffectsArgs {
 export function useWizardEffects(args: WizardEffectsArgs) {
   const {
     open, step, config, setConfig, fosStatus, setFosStatus, setFosError, setStep, setMode, setSearch,
-    setSelectedService, setIsDeploying, reset, resetConfig, joinPhase, isAnalyzing, handleAnalyzeLake,
+    setSelectedService, setIsDeploying, reset, resetConfig,
     selectedService, token, setNgwafWorkspaces, setNgwafFetchError, setNgwafDebugRaw, setNgwafFetching,
     isDone, checkDomain, pendingDraft,
   } = args;
@@ -1680,13 +1355,6 @@ export function useWizardEffects(args: WizardEffectsArgs) {
   useEffect(() => {
     if (fosStatus !== "idle" && fosStatus !== "checking") { setFosStatus("idle"); setFosError(""); }
   }, [config.fos_bucket_name, config.fos_region, config.fos_access_key, config.fos_secret_key]);
-
-  const autoAnalyzeLake = useEffectEvent(() => {
-    if (fosStatus === "success" && step === "join" && joinPhase === "form" && config.endpoint_name && config.cdn_service_name && !isAnalyzing) {
-      handleAnalyzeLake();
-    }
-  });
-  useEffect(() => { autoAnalyzeLake(); }, [fosStatus]);
 
   useEffect(() => {
     if (step !== "ngwaf" || !selectedService?.id) return;
@@ -1722,35 +1390,6 @@ export function useWizardEffects(args: WizardEffectsArgs) {
   useEffect(() => { persistNgwafWorkspace(); }, [isDone]);
 }
 
-interface JoinCompletionEffectArgs {
-  joinPhase: JoinPhase; status: string; config: ProvisionConfig;
-  setIsDeploying: (b: boolean) => void; setJoinedServiceId: (id: string) => void; setActiveServiceId: (id: string) => void;
-  services: { id: string; name: string; accessLevel?: string }[];
-  setServices: (s: { id: string; name: string; accessLevel?: string }[]) => void;
-  queryClient: Pick<QueryClient, "invalidateQueries">; setJoinPhase: (p: JoinPhase) => void; reset: () => void;
-}
-
-export function useJoinCompletionEffect(args: JoinCompletionEffectArgs) {
-  const {
-    joinPhase, status, config, setIsDeploying, setJoinedServiceId,
-    setActiveServiceId, services, setServices, queryClient, setJoinPhase, reset,
-  } = args;
-  useEffect(() => {
-    if (joinPhase !== "connecting") return;
-    if (status === "done") {
-      setIsDeploying(false);
-      registerServiceAndInvalidate(
-        config.cdn_service_name, config.cdn_service_name, "read_only",
-        services, setServices, setActiveServiceId, setJoinedServiceId, queryClient,
-      );
-      setJoinPhase("done");
-    } else if (status === "error") {
-      setIsDeploying(false); setJoinPhase("form"); reset();
-    }
-  }, [joinPhase, status, config.cdn_service_name, setActiveServiceId, setServices, services, queryClient, reset]);
-}
-
-
 interface ValidateMutationDeps {
   token: string; setTokenInfo: (info: { id: string; name: string; type: "user" | "automation" }) => void;
   setConfig: (updater: (prev: ProvisionConfig) => ProvisionConfig) => void; setStep: (s: Step) => void; mode: string | null;
@@ -1779,7 +1418,7 @@ export function buildValidateOnSuccess(deps: ValidateMutationDeps) {
         ).toLowerCase(),
       }));
     }
-    deps.setStep(deps.mode === "join" || deps.mode === "ingest" ? "join" : "features");
+    deps.setStep(deps.mode === "ingest" ? "connect" : "features");
   };
 }
 
@@ -1844,40 +1483,8 @@ export async function runCheckDomain({
   }
 }
 
-interface AnalyzeLakeArgs {
-  config: ProvisionConfig; icebergMetadataLocation: string; setIsAnalyzing: (b: boolean) => void;
-  setLakeInfo: (l: LakeInfo) => void; setImportRange: (r: { start: string; end: string }) => void;
-  setStep: (s: Step) => void; setFosStatus: (s: FosStatus) => void; setFosError: (s: string) => void;
-}
-
-export async function runAnalyzeLake(args: AnalyzeLakeArgs) {
-  const { config, icebergMetadataLocation, setIsAnalyzing, setLakeInfo, setImportRange, setStep, setFosStatus, setFosError } = args;
-  setIsAnalyzing(true);
-  try {
-    const data = await unwrapClient(
-      client.POST("/api/provision/lake-info", {
-        body: {
-          bucket: config.fos_bucket_name, region: config.fos_region, access_key: config.fos_access_key,
-          secret_key: config.fos_secret_key, prefix: config.fos_prefix,
-          endpoint: config.fos_endpoint || undefined, iceberg_metadata_location: icebergMetadataLocation || undefined,
-        },
-      }),
-    );
-    if (data?.ok) {
-      setLakeInfo(data);
-      if (data.range?.start && data.range?.end) setImportRange({ start: data.range.start, end: data.range.end });
-      setStep("analyze");
-    } else {
-      setFosStatus("error"); setFosError(data?.error || "Failed to analyze data lake.");
-    }
-  } catch (e) {
-    setFosStatus("error"); setFosError(e instanceof Error ? e.message : String(e));
-  } finally {
-    setIsAnalyzing(false);
-  }
-}
-
-export const WIZARD_DRAFT_KEY = "provision-wizard-draft-v1";
+export const WIZARD_DRAFT_KEY = "provision-wizard-draft-v2";
+const LEGACY_WIZARD_DRAFT_KEYS = ["provision-wizard-draft-v1"];
 const SECRET_KEYS = ["fos_access_key", "fos_secret_key", "cdn_secret"] as const;
 
 export function stripSecretsFromConfig(config: ProvisionConfig): PersistedConfig {
@@ -1895,12 +1502,13 @@ function safeLocalStorage(): Storage | null {
 }
 
 const WizardDraftHeaderSchema = z.object({
-  version: z.number(), mode: z.enum(["provision", "join", "ingest"]), step: z.string(),
+  version: z.number(), mode: z.enum(["provision", "ingest"]), step: z.string(),
 });
 
 export function loadDraft(): WizardDraft | null {
   const ls = safeLocalStorage();
   if (!ls) return null;
+  for (const legacyKey of LEGACY_WIZARD_DRAFT_KEYS) { try { ls.removeItem(legacyKey); } catch { /* ignore */ } }
   try {
     const raw = ls.getItem(WIZARD_DRAFT_KEY);
     if (!raw) return null;
@@ -1952,7 +1560,6 @@ export function makeDraftId(): string {
 
 export function useWizardState(open: boolean, onOpenChange: (open: boolean) => void): WizardState {
   const setActiveServiceId = useServiceStore((s) => s.setActiveServiceId);
-  const activeServiceId = useServiceStore((s) => s.activeServiceId);
   const setServices = useServiceStore((s) => s.setServices);
   const services = useServiceStore((s) => s.services);
   const { timezone } = useTimezoneStore();
@@ -1981,18 +1588,7 @@ export function useWizardState(open: boolean, onOpenChange: (open: boolean) => v
   const [ngwafFetching, setNgwafFetching] = useState(false);
   const [ngwafFetchError, setNgwafFetchError] = useState("");
   const [ngwafDebugRaw, setNgwafDebugRaw] = useState("");
-  const [lakeInfo, setLakeInfo] = useState<LakeInfo | null>(null);
-  const [isAnalyzing, setIsAnalyzing] = useState(false);
-  const [importMode, setImportMode] = useState<"all" | "range">("all");
-  const [importRange, setImportRange] = useState<{ start: string; end: string }>({ start: "", end: "" });
-  const [syncEnabled, setSyncEnabled] = useState(true);
-
-  const capabilityService = React.useMemo(() => {
-    if (!services.length) return null;
-    return !activeServiceId ? (services[0] ?? null) : (services.find((service) => service.id === activeServiceId) ?? null);
-  }, [activeServiceId, services]);
-  const analystPathASupported = capabilityService?.analystPathASupported ?? true;
-  const analystPathAReason = analystPathASupported ? null : (capabilityService?.analystPathAReason ?? ANALYST_PATH_A_UNSUPPORTED_REASON);
+  const [setupPhase, setSetupPhase] = useState<SetupPhase>("form");
 
   const [pendingDraft, setPendingDraft] = useState<WizardDraft | null>(() => (open ? loadDraft() : null));
   const draftIdRef = useRef<string | null>(null);
@@ -2002,7 +1598,7 @@ export function useWizardState(open: boolean, onOpenChange: (open: boolean) => v
   const handleModalClose = buildHandleModalClose({
     status, isDone, onOpenChange, selectedService, setActiveServiceId, queryClient,
     setStep, setMode, setSearch, setSelectedService, setIsDeploying, setFosStatus,
-    setFosError, setLakeInfo, setIsAnalyzing, setImportMode, setSyncEnabled, reset,
+    setFosError, setSetupPhase, reset,
     resetConfig: () => setConfig({ ...INITIAL_CONFIG }), setNgwafWorkspaces, setNgwafFetching, setNgwafFetchError,
   });
 
@@ -2065,11 +1661,6 @@ export function useWizardState(open: boolean, onOpenChange: (open: boolean) => v
     runCheckFos({ vals, config, setFosStatus, setFosError });
   const checkDomain = (prefix: string) => runCheckDomain({ prefix, setDomainStatus, setDomainMessage });
 
-  const [joinPhase, setJoinPhase] = useState<JoinPhase>("form");
-  const [joinedServiceId, setJoinedServiceId] = useState("");
-  const [syncIntervalMins, setSyncIntervalMins] = useState("2");
-  const [icebergMetadataLocation, setIcebergMetadataLocation] = useState("");
-
   const resumeDraft = () => {
     if (!pendingDraft) return;
     setMode(pendingDraft.mode);
@@ -2077,13 +1668,8 @@ export function useWizardState(open: boolean, onOpenChange: (open: boolean) => v
     const toSvc = (id: string | null, name: string | null) => (id ? ({ id, name: name || id } as ProvisionService) : null);
     setSelectedService(toSvc(pendingDraft.selectedServiceId, pendingDraft.selectedServiceName));
     setSelectedCdnService(toSvc(pendingDraft.selectedCdnServiceId, pendingDraft.selectedCdnServiceName));
-    setImportMode(pendingDraft.importMode);
-    setImportRange(pendingDraft.importRange);
-    setSyncEnabled(pendingDraft.syncEnabled);
-    setSyncIntervalMins(pendingDraft.syncIntervalMins);
-    setIcebergMetadataLocation(pendingDraft.icebergMetadataLocation);
     let next: Step = pendingDraft.currentStep === "execute" ? "fields" : pendingDraft.currentStep;
-    if ((["service", "storage", "ngwaf", "fields", "execute"] as Step[]).includes(next)) next = "token";
+    if ((["service", "connect", "storage", "ngwaf", "fields", "execute"] as Step[]).includes(next)) next = "token";
     setStep(next);
     draftIdRef.current = pendingDraft.draftId;
     draftCreatedAtRef.current = pendingDraft.createdAt;
@@ -2092,32 +1678,12 @@ export function useWizardState(open: boolean, onOpenChange: (open: boolean) => v
 
   const discardDraft = () => { clearDraft(); draftIdRef.current = null; draftCreatedAtRef.current = null; setPendingDraft(null); };
 
-  const estimatedImportSize = React.useMemo(() => {
-    if (!lakeInfo?.calendar) return 0;
-    let total = 0;
-    const { start, end } = importRange;
-    for (const [dateStr, stats] of Object.entries(lakeInfo.calendar)) {
-      if (dateStr === "unknown") continue;
-      if (importMode === "range" && ((start && dateStr < start.split("T")[0]) || (end && dateStr > end.split("T")[0]))) continue;
-      total += stats.size_bytes;
-    }
-    return total;
-  }, [lakeInfo, importMode, importRange]);
-
-  const handleAnalyzeLake = () =>
-    runAnalyzeLake({ config, icebergMetadataLocation, setIsAnalyzing, setLakeInfo, setImportRange, setStep, setFosStatus, setFosError });
-  const handleJoin = () =>
-    runJoin({ config, analystPathASupported, syncIntervalMins, syncEnabled, icebergMetadataLocation, importMode, importRange, setIsDeploying, setJoinPhase, setStep, reset, start });
-
-  useJoinCompletionEffect({ joinPhase, status, config, setIsDeploying, setJoinedServiceId, setActiveServiceId, services, setServices, queryClient, setJoinPhase, reset });
-
-  const handleFinishJoin = () => { onOpenChange(false); window.location.reload(); };
-  const STEPS = getStepsForMode(mode, config, step);
+  const STEPS = getStepsForMode(mode, config);
 
   useWizardEffects({
     open, step, config, setConfig, fosStatus, setFosStatus, setFosError, setStep, setMode, setSearch,
     setSelectedService, setIsDeploying, reset, resetConfig: () => setConfig({ ...INITIAL_CONFIG }),
-    joinPhase, isAnalyzing, handleAnalyzeLake, selectedService, token, setNgwafWorkspaces,
+    selectedService, token, setNgwafWorkspaces,
     setNgwafFetchError, setNgwafDebugRaw, setNgwafFetching, isDone, checkDomain, pendingDraft,
   });
 
@@ -2126,7 +1692,7 @@ export function useWizardState(open: boolean, onOpenChange: (open: boolean) => v
     runFetchTerraformPreview({ token, selectedService, config, setIsFetchingTerraform, setTerraformFiles, setSelectedTfFile });
   const handleExportTerraform = () => runExportTerraform({ token, selectedService, config });
   const handleAdminIngest = () =>
-    runAdminIngest({ token, selectedService, selectedCdnService, config, services, setIsDeploying, setJoinedServiceId, setActiveServiceId, setServices, queryClient, setJoinPhase, setStep });
+    runAdminIngest({ token, selectedService, selectedCdnService, config, services, setIsDeploying, setActiveServiceId, setServices, queryClient, setSetupPhase, setStep });
 
   const [draftOpen, setDraftOpen] = useState(false);
   if (open !== draftOpen) { setDraftOpen(open); setPendingDraft(open ? loadDraft() : null); }
@@ -2141,8 +1707,7 @@ export function useWizardState(open: boolean, onOpenChange: (open: boolean) => v
         mode: mode as Exclude<WizardMode, null>, step, currentStep: step,
         selectedServiceId: selectedService?.id ?? null, selectedServiceName: selectedService?.name ?? null,
         selectedCdnServiceId: selectedCdnService?.id ?? null, selectedCdnServiceName: selectedCdnService?.name ?? null,
-        tokenInfo, config: stripSecretsFromConfig(config), importMode, importRange,
-        syncEnabled, syncIntervalMins, icebergMetadataLocation,
+        tokenInfo, config: stripSecretsFromConfig(config),
         updatedAt: new Date().toISOString(), createdAt: draftCreatedAtRef.current,
       });
     }, 500);
@@ -2150,7 +1715,6 @@ export function useWizardState(open: boolean, onOpenChange: (open: boolean) => v
   }, [
     open, pendingDraft, step, mode, selectedService?.id, selectedService?.name,
     selectedCdnService?.id, selectedCdnService?.name, tokenInfo, config,
-    importMode, importRange, syncEnabled, syncIntervalMins, icebergMetadataLocation,
   ]);
 
   useEffect(() => {
@@ -2179,15 +1743,12 @@ export function useWizardState(open: boolean, onOpenChange: (open: boolean) => v
     selectedCdnService, setSelectedCdnService, isDeploying, fosStatus, fosError, terraformFiles,
     selectedTfFile, setSelectedTfFile, isFetchingTerraform, configStatus, isCheckingConfig,
     handleCheckConfig, ngwafWorkspaces, ngwafFetching, ngwafFetchError, ngwafDebugRaw,
-    lakeInfo, isAnalyzing, analystPathASupported, analystPathAReason, importMode, setImportMode,
-    importRange, setImportRange, syncEnabled, setSyncEnabled, lines, status, isDone, sseError,
+    lines, status, isDone, sseError,
     stop, handleModalClose, onOpenChange, config, setConfig, catalog, isLoadingCatalog,
     toggleGroup, toggleField, updateFieldLimit, togglePreset, isPresetActive, estimatedBytes,
     servicesData, servicesError, isLoadingServices, filteredServices, handleTokenSubmit,
     validateMutation, handleServiceSelect, handleCheckFos, checkDomain, domainStatus,
-    domainMessage, joinPhase, joinedServiceId, syncIntervalMins, setSyncIntervalMins,
-    icebergMetadataLocation, setIcebergMetadataLocation, estimatedImportSize, handleAnalyzeLake,
-    handleJoin, handleFinishJoin, handleDeploy, fetchTerraformPreview, handleExportTerraform,
+    domainMessage, setupPhase, handleDeploy, fetchTerraformPreview, handleExportTerraform,
     handleAdminIngest, STEPS, pendingDraft, resumeDraft, discardDraft,
   };
 }

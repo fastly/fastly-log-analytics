@@ -263,11 +263,8 @@ export const useTimezoneStore = create<TimezoneState>()(
 export interface Service {
   id: string
   name: string
-  accessLevel?: string
   cmcdEnabled?: boolean
   rum_enabled?: boolean
-  analystPathASupported?: boolean
-  analystPathAReason?: string | null
   is_high_scale?: boolean
 }
 

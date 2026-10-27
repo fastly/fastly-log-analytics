@@ -30,8 +30,7 @@
 | Role | Job State | Manual API Trigger | Data Visibility |
 |---|---|---|---|
 | **Admin (`read_write`)** | Active | `POST /api/admin/bot-sources/refresh`<br/>`POST /api/admin/bots/refresh` | Full bot source management via `GET /api/admin/bot-sources`, per-source refresh `POST /api/admin/bot-sources/{source_id}/refresh`. |
-| **Analyst Path A (Standalone Instance)** | Active | Internal trigger | Maintains local bot source cache on analyst instance. |
-| **Analyst Path B (Remote Share)** | N/A | Blocked (403) | Reads enriched bot metrics from shared server. |
+| **Analyst (Remote Share)** | N/A | Blocked (403) | Reads enriched bot metrics from shared server. |
 
 ---
 

@@ -246,8 +246,8 @@ def test_write_service_config_options_and_defaults(tmp_path):
     state["provisioning"] = {"log_period": 120}
     assert _write_cfg(tmp_path, state)["log_period"] == 120
 
-    cfg_ro = _write_cfg(tmp_path, _make_state(access_level="read_only", storage_mode="local"))
-    assert cfg_ro["access_level"] == "read_only" and cfg_ro["storage_mode"] == "local"
+    cfg_local = _write_cfg(tmp_path, _make_state(storage_mode="local"))
+    assert cfg_local["storage_mode"] == "local" and "access_level" not in cfg_local
 
     state_noname = _make_state()
     state_noname.pop("service_name", None)
@@ -314,7 +314,7 @@ def test_run_with_events_and_state_persistence():
         orchestrator.save_state({"k": "v"})
 
 
-# ── cleanup_local_data & generate_analyst_invite tests ──
+# ── cleanup_local_data tests ──
 
 
 def test_cleanup_local_data_variants(tmp_path, monkeypatch):
@@ -381,72 +381,7 @@ def test_cleanup_local_data_continues_when_ducklake_cleanup_fails(tmp_path):
     assert not db.exists()
 
 
-def test_analyst_invite_and_sync_crontab(monkeypatch):
-    monkeypatch.setattr(svcconfig, "DEPLOYMENT_MODE", "standard")
-    assert orchestrator.analyst_path_a_supported() is True
-    assert orchestrator.analyst_path_a_supported({"deployment_mode": "high_scale"}) is False
-
-    monkeypatch.setattr(svcconfig, "DEPLOYMENT_MODE", "high_scale")
-    assert orchestrator.analyst_path_a_supported() is False
-    assert orchestrator.analyst_path_a_supported({"deployment_mode": "standard"}) is True
-    monkeypatch.setattr(svcconfig, "DEPLOYMENT_MODE", "standard")
-
-    with patch("backend.config.load_config", return_value=None):
-        with pytest.raises(RuntimeError, match="not found"):
-            orchestrator.generate_analyst_invite("ghost-svc")
-
-    with patch("backend.config.load_config", return_value={"access_level": "read_only", "fastly_api_key": "k"}):
-        with pytest.raises(RuntimeError, match="read_write"):
-            orchestrator.generate_analyst_invite("svc")
-
-    with (
-        patch("backend.config.DEPLOYMENT_MODE", "high_scale"),
-        patch("backend.config.load_config", return_value={"access_level": "read_write", "fastly_api_key": "k"}),
-    ):
-        with pytest.raises(RuntimeError, match="DEPLOYMENT_MODE=high_scale"):
-            orchestrator.generate_analyst_invite("svc")
-
-    fake_cfg = {
-        "access_level": "read_write",
-        "fastly_api_key": "tok",
-        "fos_bucket": "b",
-        "fos_region": "us-east-1",
-        "fos_endpoint": "us-east-1.object.fastlystorage.app",
-        "fos_prefix": "logs/",
-        "name": "MyService",
-        "cdn_url": "https://cdn.example",
-        "cdn_service_id": "cdn-id",
-        "cdn_secret": "cdn-sec",
-    }
-    captured = []
-
-    def fake_fastly(method, path, body=None, **kwargs):
-        captured.append((method, path, body, kwargs))
-        return {"access_key": "AKIANEW", "secret_key": "SECRETNEW"}
-
-    with (
-        patch("backend.config.load_config", return_value=fake_cfg),
-        patch("backend.provision.orchestrator.fastly", side_effect=fake_fastly),
-    ):
-        out = orchestrator.generate_analyst_invite("svc")
-
-    assert (out["access_key_id"], out["secret_key"], out["fos_bucket"], out["cdn_url"]) == (
-        "AKIANEW",
-        "SECRETNEW",
-        "b",
-        "https://cdn.example",
-    )
-    assert out["fos_endpoint"].endswith("fastlystorage.app") and out["iceberg_metadata_location"] is None
-    method, path, body, kwargs = captured[0]
-    assert (method, path, body["permission"], body["buckets"], kwargs["token"]) == (
-        "POST",
-        "/resources/object-storage/access-keys",
-        "read-only-objects",
-        ["b"],
-        "tok",
-    )
-    assert "fos-log-analysis-analyst" in body["description"]
-
+def test_sync_crontab_tolerates_missing_scheduler_and_busy_lease():
     with patch("backend.cron.scheduler.get_scheduler", side_effect=ImportError("no scheduler")):
         orchestrator._sync_crontab()
 

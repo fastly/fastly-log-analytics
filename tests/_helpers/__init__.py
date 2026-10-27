@@ -42,7 +42,6 @@ _CLOUD_DEFAULTS: dict[str, Any] = {
     "bucket": "bucket",
     "prefix": "",
     "region": "us-east-1",
-    "access_level": "read_write",
     "storage_mode": "cloud",
 }
 
@@ -1128,7 +1127,6 @@ def setup_temp_rum_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         "name": unique_id,
         "service_id": unique_id,
         "duckdb_path": str(base_db_path),
-        "access_level": "read_write",
         "endpoint": "localhost",
         "access_key_id": "mock",
         "secret_access_key": "mock",

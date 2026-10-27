@@ -35,8 +35,7 @@
 | Role | Job State | Manual API Trigger | Data Visibility |
 |---|---|---|---|
 | **Admin (`read_write`)** | Active | `POST /api/admin/full-sweep/{service_id}` | Complete audit log in Admin UI. |
-| **Analyst Path A (Standalone Instance)** | Disabled | Disabled | Standard ingestion disabled for analysts. |
-| **Analyst Path B (Remote Share)** | N/A | Blocked (403) | Reads server-side ingested state; no cron interaction. |
+| **Analyst (Remote Share)** | N/A | Blocked (403) | Reads server-side ingested state; no cron interaction. |
 
 ---
 
@@ -98,7 +97,7 @@
 ---
 
 ## 9. Automated Verification Matrix
-- [x] 1. Manual API trigger `POST /api/admin/full-sweep/{service_id}` returns HTTP 200 with `run_id`, requires admin authorization, and denies Analyst Path A/B with HTTP 403. Verified in `test_contract_1_manual_trigger_endpoint`.
+- [x] 1. Manual API trigger `POST /api/admin/full-sweep/{service_id}` returns HTTP 200 with `run_id`, requires admin authorization, and denies analysts with HTTP 403. Verified in `test_contract_1_manual_trigger_endpoint`.
 - [x] 2. Execution records in `cron_runs` with status `success`, duration, non-zero `files_downloaded`, and structured `outcome_counters`. Verified in `test_contract_2_cron_runs_records_success_and_outcome_counters`.
 - [x] 3. Usage log attributes FOS Class A LIST calls to `cron.full_sync` under `process_context="cron.full_sync"`. Verified in `test_contract_3_usage_log_attribution_cron_full_sync`.
 - [x] 4. Under `FLA_DEV_NO_CRONS=1`, verify job does not register or execute. Verified in `test_contract_4_safety_gate_under_fla_dev_no_crons`.

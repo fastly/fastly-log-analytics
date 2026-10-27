@@ -315,7 +315,7 @@ REPLAY = "/api/admin/clickhouse/replay"
 
 @pytest.fixture
 def boundary(monkeypatch):
-    cfg = {"service_id": SERVICE, "access_level": "read_write"}
+    cfg = {"service_id": SERVICE}
     monkeypatch.setattr(api.config, "load_config", lambda sid: cfg if sid == SERVICE else None)
     store, ch, objects, audit = MagicMock(), MagicMock(), MagicMock(), MagicMock()
     counts = {"pending": 1, "claimed": 0, "failed": 0, "published": 2}
@@ -401,12 +401,10 @@ def test_missing_or_invalid_service_and_config_failure(boundary, monkeypatch, si
         assert response.status_code == 503 and "private" not in response.text
 
 
-def test_replay_disabled_and_readonly_rejected(boundary, monkeypatch):
-    client, store, _, objects, audit, cfg = boundary
+def test_replay_disabled_rejected(boundary, monkeypatch):
+    client, store, _, objects, audit, _ = boundary
     monkeypatch.setattr(api, "get_clickhouse_client", lambda: None)
     assert client.post(REPLAY, json={"service_id": SERVICE, "dataset_id": "d"}).status_code == 409
-    cfg["access_level"] = "read_only"
-    assert client.post(REPLAY, json={"service_id": SERVICE, "dataset_id": "d"}).status_code == 403
     assert not store.mock_calls and not objects.called and not audit.called
 
 
@@ -888,11 +886,6 @@ def test_quarantine_routes_list_summary_download_purge_and_rbac(client, override
     with patch("backend.routers.admin.quarantine.get_quarantine_evidence", return_value=None):
         assert client.post("/api/admin/quarantine/purge?item_id=999").status_code == 404
 
-    override_source["access_level"] = "read_only"
-    with patch("backend.routers.admin.quarantine.list_quarantine_evidence") as list_ro:
-        resp_ro = client.get("/api/admin/quarantine")
-    assert resp_ro.status_code == 403 and resp_ro.json()["detail"]["error"] == "admin_only" and not list_ro.called
-    override_source["access_level"] = "read_write"
     _assert_analyst_rbac_403(client, "GET", "/api/admin/quarantine/summary")
 
     from tests.remote_access.test_middleware import _login_analyst, _seed_invite, _start_share
@@ -1464,26 +1457,6 @@ def test_background_task_endpoints_start_job(
         assert body["ok"] is True and "started" in body["message"].lower()
 
 
-def test_ingest_endpoint_read_only_starts_metadata_sync(client, test_service_source):
-    """Read-only (analyst) services trigger the metadata_sync path instead of full sync."""
-    started = {}
-
-    def fake_start_cron_run(src, task):
-        started["task"] = task
-        return "run-meta-456"
-
-    app.dependency_overrides[get_source] = lambda: {**test_service_source, "access_level": "read_only"}
-    with (
-        patch("backend.core.duckdb.start_cron_run", side_effect=fake_start_cron_run),
-        patch("backend.cron_progress.start_progress"),
-        patch("backend.cron.jobs.metadata._run_metadata_sync"),
-    ):
-        resp = client.post("/api/admin/ingest-logs", headers=SVC_HEADERS)
-
-    assert resp.status_code == 200 and started["task"] == "metadata_sync"
-    assert "metadata sync" in resp.json()["message"].lower()
-
-
 def test_sync_service_endpoint_rejects_analyst_session_with_403(client):
     """Analyst Path B (remote share) is blocked with 403 by require_admin."""
 
@@ -1495,14 +1468,6 @@ def test_sync_service_endpoint_rejects_analyst_session_with_403(client):
     with _override_dep(require_admin, reject_admin):
         resp = client.post(f"/api/admin/sync/{MOCK_SERVICE_ID}", headers=SVC_HEADERS)
         assert resp.status_code == 403 and resp.json()["detail"]["error"] == "admin_only"
-
-
-def test_sync_service_endpoint_rejects_read_only_source_with_403(client, test_service_source):
-    """Analyst Path A (read_only instance) is disabled from triggering log discovery."""
-    with _override_dep(get_source, lambda: {**test_service_source, "access_level": "read_only"}):
-        resp = client.post(f"/api/admin/sync/{MOCK_SERVICE_ID}", headers=SVC_HEADERS)
-        assert resp.status_code == 403
-        assert "read-only" in resp.json()["detail"].lower()
 
 
 @pytest.mark.parametrize(
@@ -1683,53 +1648,6 @@ def test_download_file_fails_on_sibling_prefix_partial_match(client, test_servic
     resp = client.get("/api/download", headers=SVC_HEADERS, params={"key": "tenant-2/file.log"})
     assert resp.status_code == 400
     assert resp.json()["detail"]["error"] == "invalid_key"
-
-
-# ── POST /admin/rebuild-local-view ────────────────────────────────────────
-
-
-def test_rebuild_local_view_clears_caches_and_spawns_sync(client, tmp_path):
-    """clear_source_caches MUST run, snapshot_files_cache.json removed, and _run_metadata_sync spawned."""
-    cache_dir = tmp_path / "cache"
-    cache_dir.mkdir()
-    cache_file = cache_dir / "snapshot_files_cache.json"
-    cache_file.write_text("{}")
-
-    cleared: list[str] = []
-    sync_calls: list[tuple] = []
-    fake_thread = MagicMock()
-
-    with (
-        patch("backend.core.iceberg.clear_source_caches", side_effect=cleared.append),
-        patch("backend.core.duckdb._cache_dir", return_value=str(cache_dir)),
-        patch("backend.core.duckdb.start_cron_run", return_value="rebuild-run-1"),
-        patch("backend.cron_progress.start_progress"),
-        patch(
-            "backend.cron.jobs.metadata._run_metadata_sync",
-            side_effect=lambda sid, run_id=None: sync_calls.append((sid, run_id)),
-        ),
-        patch("threading.Thread", return_value=fake_thread),
-    ):
-        resp = client.post("/api/admin/rebuild-local-view", headers=SVC_HEADERS)
-
-    assert resp.status_code == 202
-    body = resp.json()
-    assert body["ok"] is True and body["run_id"] == "rebuild-run-1"
-    assert len(cleared) == 1
-    fake_thread.start.assert_called_once()
-
-
-def test_rebuild_local_view_busy_returns_503(client, tmp_path):
-    cache_dir = tmp_path / "cache"
-    cache_dir.mkdir()
-    with (
-        patch("backend.core.iceberg.clear_source_caches"),
-        patch("backend.core.duckdb._cache_dir", return_value=str(cache_dir)),
-        patch("backend.core.duckdb.start_cron_run", side_effect=RuntimeError("sync locked")),
-    ):
-        resp = client.post("/api/admin/rebuild-local-view", headers=SVC_HEADERS)
-    assert resp.status_code == 503
-    assert resp.json()["detail"]["busy"] is True
 
 
 # ── POST /admin/bot-sources/{source_id}/refresh ───────────────────────────

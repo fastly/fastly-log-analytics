@@ -238,7 +238,7 @@ for fname in sorted(os.listdir(cfg_dir)):
     prov = cfg.get("provisioning")
     if isinstance(prov, dict):
         for k, v in list(prov.items()):
-            if (k.startswith("cron_") or k == "metadata_sync") and isinstance(v, dict) and v.get("enabled") is True:
+            if k.startswith("cron_") and isinstance(v, dict) and v.get("enabled") is True:
                 v["enabled"] = False
                 changes.append(f"provisioning.{k}.enabled")
         for k in PROV_CRED_FIELDS + CLEAR_URL_FIELDS:

@@ -72,17 +72,13 @@ from backend.core.metadata.base import (
     list_audit,
     list_views,
     lookup_asn_names,
-    merge_audit_for_service,
     record_audit,
-    replace_audit_for_service,
-    replace_views_for_service,
     save_alert,
     save_view,
     teardown,
     toggle_alert,
     update_alert_last_triggered,
     upsert_asn_names,
-    upsert_views_for_service,
 )
 
 # Ingested-files tracking + activity reporting + quarantined-file tracking.
@@ -231,15 +227,11 @@ __all__ = [
     "list_views",
     "save_view",
     "delete_view",
-    "replace_views_for_service",
-    "upsert_views_for_service",
     # Audit + data migration tracking
     "record_audit",
     "list_audit",
     "get_audit_logs",
     "export_audit",
-    "replace_audit_for_service",
-    "merge_audit_for_service",
     # Ingested files
     "get_ingested_filenames",
     "get_reclaimable_strand_filenames",

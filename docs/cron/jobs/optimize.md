@@ -30,8 +30,7 @@
 | Role | Job State | Manual API Trigger | Data Visibility |
 |---|---|---|---|
 | **Admin (`read_write`)** | Active | `POST /api/admin/optimize/{service_id}` | Full cloud optimization history in Admin UI. |
-| **Analyst Path A (Standalone Instance)** | Disabled | Disabled | Cloud maintenance is strictly an Admin duty. |
-| **Analyst Path B (Remote Share)** | N/A | Blocked (403) | Reads server-side DuckLake state; no cron interaction. |
+| **Analyst (Remote Share)** | N/A | Blocked (403) | Reads server-side DuckLake state; no cron interaction. |
 
 ---
 
@@ -49,8 +48,7 @@
 5. **Exact Metric Return:**
    - Sums `files_processed` and `files_created` from both merge and rewrite procedures.
    - Populates `files_rewritten` and `files_added` accurately in `cron_runs` (eliminating `-1` stubs).
-6. **Metadata Pointer Sync & Audit:**
-   - Updates `_sync_metadata_pointer_from_discovery` and commits rewritten file references.
+6. **Audit:**
    - Logs FOS Class A PUT and Class B GET/DELETE calls in PostgreSQL's `usage_log` table.
    - Records status, `parquet_files_optimized`, and `parquet_files_created` in `cron_runs`.
 7. **Lock Release:** Releases exclusive service lock.

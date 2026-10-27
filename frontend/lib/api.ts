@@ -241,7 +241,7 @@ export const customFieldsApi = {
 
 class StaleDashboardViewError extends Error {
   constructor() {
-    super("dashboard aggregates response is internally inconsistent (likely stale-view symptom during a metadata_sync tick)");
+    super("dashboard aggregates response is internally inconsistent (likely stale-view symptom during a commit tick)");
     this.name = "StaleDashboardViewError";
   }
 }

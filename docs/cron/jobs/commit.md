@@ -42,8 +42,8 @@ The scheduler registers `commit_{service_id}` at the configured interval with
 `max_instances=1`, `coalesce=True`, 30-second jitter, and
 `misfire_grace_time=commit_interval_mins * 60`.
 
-The cron skips missing configuration/source, read-only services (unless
-explicitly forced), and disabled `cron_sync` (unless forced). A cron-run lease
+The cron skips missing configuration/source and disabled `cron_sync` (unless
+forced). A cron-run lease
 prevents overlapping runs. Standard mode checks disk space before touching the
 buffer. A held Standard per-service commit lock skips the buffer cycle cleanly;
 the next scheduled cycle can retry it.
@@ -65,16 +65,13 @@ the next scheduled cycle can retry it.
    an unquarantined per-file failure, or a quarantined unreadable file makes
    the cron run `error`, even if other files committed. Preserve partial
    progress in the summary and error detail.
-6. When files did commit, refresh and warm the local DuckDB view/pool, trigger
-   a coalesced background metadata sync, and launch local compaction even if
-   another chunk or file failed. The view/pool refresh remains synchronous so
-   durable partial progress is visible before commit completion; metadata sync
-   runs with its own `metadata_sync` cron record and telemetry so a slow remote
-   metadata read does not extend the commit duration. At most one sync runs per
-   service, with one follow-up pass coalescing commits that arrive while it is
-   running.
-7. Empty input remains a successful no-op. On-demand metadata sync is not
-   triggered when there were no committed files.
+6. When files did commit, refresh and warm the local DuckDB view/pool, refresh
+   the cached service status and invalidate stale dashboard cache entries, and
+   launch local compaction even if another chunk or file failed. The view/pool
+   refresh remains synchronous so durable partial progress is visible before
+   commit completion.
+7. Empty input remains a successful no-op. The status refresh is not triggered
+   when there were no committed files.
 
 ## 5. High-Scale commit lifecycle
 
@@ -104,8 +101,7 @@ The job does not directly transition claimed rows into committed state.
 | Caller | Commit behavior |
 |---|---|
 | **Admin (`read_write`)** | Background commits are enabled by configuration. An admin can trigger `POST /api/admin/commit-iceberg`; the response is `202 Accepted` with a pollable run ID. |
-| **Analyst Path A (standalone, read-only)** | Background commit is skipped. The instance reads shared data and does not write the service catalog. |
-| **Analyst Path B (live shared instance)** | Read-only analytics only. Admin commit endpoints remain blocked over the analyst share surface. |
+| **Analyst (live shared instance)** | Read-only analytics only. Admin commit endpoints remain blocked over the analyst share surface. |
 
 ## 7. Telemetry and status
 
@@ -134,10 +130,9 @@ Usage records are written to PostgreSQL `usage_log`. There is no SQLite
   a full-success run.
 - **High-Scale merge/finalization failure:** record `error`; do not proceed to
   raw-file finalization after a failed durable merge.
-- **Post-commit metadata sync failure:** it is recorded by its own
-  `metadata_sync` cron run and cannot undo durable commits. A dispatch failure
-  is attached as a warning to the commit progress; the next commit can request
-  another sync.
+- **Post-commit status refresh failure:** it cannot undo durable commits. The
+  failure is attached as a warning to the commit progress; the next commit
+  refreshes the status again.
 
 ## 9. Verification checklist
 

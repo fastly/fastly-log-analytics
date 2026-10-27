@@ -12,7 +12,7 @@ The **Admin Task Queue & Ingest Ledger** page provides deep operational visibili
 ### Key Tenets:
 - **Ledger State Transparency:** Aggregates file claim states (`discovered`, `claimed`, `committed`, `quarantined`, `dead_letter`) across all configured services in PostgreSQL `ingest_ledger` (`METADATA_DSN`), explicitly scoped per `service_id` (`WHERE service_id = ?`) so shared PostgreSQL catalog tables never double-count rows across services.
 - **Queue Health & Backpressure:** Monitors message depth across `KNOWN_QUEUES` (`celery`, `q.ingest`, `q.control`) plus any dynamically routed `q.*` queues in Valkey, active worker task assignments, in-process APScheduler schedule entries, and 1-hour historical queue depth / active task sparklines.
-- **Strict RBAC:** Accessible **exclusively** to Admin (`read_write`) users. Analyst Path B (Remote Share) and Analyst Path A receive HTTP `403 Forbidden` (`{"error": "admin_only"}`).
+- **Strict RBAC:** Accessible **exclusively** to Admin users. Analysts (Remote Share) receive HTTP `403 Forbidden` (`{"error": "admin_only"}`).
 
 ---
 
@@ -31,8 +31,7 @@ The **Admin Task Queue & Ingest Ledger** page provides deep operational visibili
 | Role | Access Level | Data Redaction & Capabilities |
 |---|---|---|
 | **Admin (`read_write`)** | Full Control | Full queue depth telemetry, active worker task inspection, in-process APScheduler schedules, PostgreSQL `ingest_ledger` state counts, and 1h metric trend sparklines. |
-| **Analyst Path B (Remote Share)** | Blocked (403) | All `/api/admin/celery/status` and `/api/admin/metric-history/batch` requests rejected with HTTP `403 Forbidden` (`{"error": "admin_only"}`) via `_ANALYST_BLOCKED_PREFIXES` and route-level `Depends(require_admin)`. |
-| **Analyst Path A (JSON Join)** | Blocked (403) | Administrative queue & broker telemetry rejected. |
+| **Analyst (Remote Share)** | Blocked (403) | All `/api/admin/celery/status` and `/api/admin/metric-history/batch` requests rejected with HTTP `403 Forbidden` (`{"error": "admin_only"}`) via `_ANALYST_BLOCKED_PREFIXES` and route-level `Depends(require_admin)`. |
 
 ---
 
@@ -99,17 +98,17 @@ The **Admin Task Queue & Ingest Ledger** page provides deep operational visibili
 
 ## 9. AI Session Automated Verification Checklist
 
-- [x] **1. Route Accessibility:** `GET /admin/queue` returns HTTP 200 for Admin; returns HTTP 403 (`{"error": "admin_only"}`) for Analyst Path B on `/api/admin/celery/status` and `/api/admin/metric-history/batch`.
+- [x] **1. Route Accessibility:** `GET /admin/queue` returns HTTP 200 for Admin; returns HTTP 403 (`{"error": "admin_only"}`) for Analyst on `/api/admin/celery/status` and `/api/admin/metric-history/batch`.
 - [x] **2. Zero Layout Shift:** Verified page loads with pre-allocated panel reservations (`[contain-intrinsic-size:auto_*]`) and `CLS <= 0.05`.
 - [x] **3. Queue Status & Metric History Contracts:** Verified `/api/admin/celery/status` and `/api/admin/metric-history/batch?since=1h` populate queue depths, worker states, in-process schedules, `ingest_ledger` state counts, and 1h sparkline series accurately.
 - [x] **4. Per-Service Ledger Scoping (ADR-22):** Verified `ingest_ledger_summary()` scopes queries by `WHERE service_id = ?` on the shared PostgreSQL `ingest_ledger` table so multi-service deployments never multiply counts.
-- [x] **5. Role Verification:** Confirmed Analyst Path B receives HTTP 403 in `tests/routers/test_admin_celery.py` and `frontend/e2e/pages/admin-queue.spec.ts`.
+- [x] **5. Role Verification:** Confirmed Analyst receives HTTP 403 in `tests/routers/test_admin_celery.py` and `frontend/e2e/pages/admin-queue.spec.ts`.
 - [x] **6. Interactive Refresh & Telemetry Audit:** Verified manual `Refresh` (`data-testid="admin-queue-refresh-btn"`) triggers refetches with `X-Page-Load-ID` header propagation.
 
 ---
 
 ## 10. Automated Test Suite & Traffic Generation
 
-- **Backend Unit Tests:** `tests/routers/test_admin_celery.py` & `tests/routers/test_admin_celery_status.py` (covering queue lengths, worker status, in-process schedules, per-service `ingest_ledger` state counts, Standard vs High-Scale fallbacks, metric history batch sparkline series, and Analyst Path B 403 rejection).
+- **Backend Unit Tests:** `tests/routers/test_admin_celery.py` & `tests/routers/test_admin_celery_status.py` (covering queue lengths, worker status, in-process schedules, per-service `ingest_ledger` state counts, Standard vs High-Scale fallbacks, metric history batch sparkline series, and Analyst 403 rejection).
 - **Frontend Unit Tests:** `frontend/__tests__/app/admin-queue.test.tsx` (4 tests covering `loading.tsx`, initial skeleton reservations without raw `Loading...` text, populated High-Scale queue/worker/ledger/schedule cards + manual refresh, and Standard-mode offline broker fallback).
 - **Playwright E2E Suite:** `frontend/e2e/pages/admin-queue.spec.ts` (5 E2E contract tests certified across Local Standard, Remote Standard GCE, and High-Scale Elevation).

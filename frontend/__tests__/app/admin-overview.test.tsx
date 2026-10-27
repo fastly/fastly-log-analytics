@@ -3,13 +3,13 @@ import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import { withNuqsTestingAdapter, type OnUrlUpdateFunction } from 'nuqs/adapters/testing'
 import {
-  createTestQueryClient, makeQueryWrapper, renderWithQuery, renderWithQueryClient,
+  createTestQueryClient, renderWithQuery, renderWithQueryClient,
   stubMatchMedia, stubResizeObserver, stubGetAnimations, stubPointerCaptureAndScroll,
   stubWindowLocationAssign,
 } from '../helpers/page-smoke'
 import { describe, expect, it, test, vi, beforeAll, beforeEach, afterEach } from 'vitest'
 import React from 'react'
-import type { PlotlyLayout, PlotlyTrace, ServiceConfig, SessionsResponse } from '@/types/api'
+import type { PlotlyLayout, PlotlyTrace, SessionsResponse } from '@/types/api'
 import type { components } from '@/types/api.generated'
 import {
   INSIGHT_SECTIONS, OTHER_SECTION, categoryToSection, sortInsights, groupInsightsBySection,
@@ -209,7 +209,7 @@ import { QuarantineSection } from '@/app/control-room/_sections/ControlRoomClien
 import TrendsLoading from '@/app/admin/trends/loading'
 import { getApiBase } from '@/lib/api'
 import { server } from '@/__tests__/helpers/msw/handlers'
-import { InviteAnalystDialog, InvitationsPanel } from '@/components/share-dashboard/InvitationsPanel'
+import { InvitationsPanel } from '@/components/share-dashboard/InvitationsPanel'
 import { CreateInviteDialog } from '@/components/share-dashboard/CreateInviteDialog'
 import { useTableSort, type ShareStatus, type SortAccessors } from '@/components/share-dashboard/SharingControlPanel'
 import { StatusPanel, L2EnforcementCard } from '@/components/SessionScoring/StatusPanel'
@@ -295,7 +295,7 @@ test('ServicesTable renders services, manual Refresh Status trigger, and Delete 
   server.use(
     http.get(`${API_BASE}/api/services`, () => {
       fetchCount += 1
-      return HttpResponse.json({ services: [{ service_id: 'test-svc', name: 'Production Edge CDN', fos_bucket: 'prod-logs-bucket', access_level: 'read_write' }] })
+      return HttpResponse.json({ services: [{ service_id: 'test-svc', name: 'Production Edge CDN', fos_bucket: 'prod-logs-bucket' }] })
     }),
   )
   const user = userEvent.setup()
@@ -665,7 +665,7 @@ const stubClipboard = (writeText: () => Promise<void>) =>
   Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
 const hasCheck = (btn: HTMLElement) => btn.querySelector('svg.lucide-check') !== null
 
-describe('InvitationsPanel, CreateInviteDialog, useTableSort & InviteAnalystDialog', () => {
+describe('InvitationsPanel, CreateInviteDialog & useTableSort', () => {
   afterEach(() => {
     vi.useRealTimers()
     vi.restoreAllMocks()
@@ -762,32 +762,6 @@ describe('InvitationsPanel, CreateInviteDialog, useTableSort & InviteAnalystDial
     expect(names(result.current.sorted)).toEqual(['bravo', 'charlie', 'alpha'])
     act(() => result.current.toggle('n'))
     expect(names(result.current.sorted)).toEqual(['charlie', 'bravo', 'alpha'])
-  })
-
-  test('InviteAnalystDialog handles Copy JSON success and clipboard rejection', async () => {
-    useServiceStore.setState({ activeServiceId: 'svc-copy' })
-    server.use(http.post('*/api/services/:service_id/generate-viewer-key', () => HttpResponse.json({
-      name: 'analyst', service_id: 'svc-copy', fos_bucket: 'b', fos_region: 'r', fos_endpoint: 'e', fos_prefix: 'p',
-      access_key_id: 'AKIAEXAMPLE', secret_key: 'not-a-real-secret',
-    })))
-    render(<InviteAnalystDialog service={{ service_id: 'svc-copy', name: 'Copy Svc' } as unknown as ServiceConfig} open onOpenChange={vi.fn()} />, {
-      wrapper: makeQueryWrapper(createTestQueryClient()),
-    })
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /generate invite/i })) })
-    const btn = await screen.findByRole('button', { name: /copy json/i })
-
-    const writeText = vi.fn().mockResolvedValue(undefined)
-    stubClipboard(writeText)
-    vi.useFakeTimers()
-    await act(async () => { fireEvent.click(btn) })
-    expect(JSON.parse(writeText.mock.calls[0][0]).service_id).toBe('svc-copy')
-    expect(screen.getByRole('button', { name: /copied!/i })).toBeInTheDocument()
-    await act(async () => { vi.advanceTimersByTime(2000) })
-    expect(screen.getByRole('button', { name: /copy json/i })).toBeInTheDocument()
-
-    stubClipboard(vi.fn().mockRejectedValue(new Error('denied')))
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /copy json/i })) })
-    expect(screen.queryByRole('button', { name: /copied!/i })).toBeNull()
   })
 })
 
@@ -1333,7 +1307,7 @@ describe('Alerts & Insights Pages', () => {
     server.use(
       http.get(`${API_BASE}/api/bootstrap`, () =>
         HttpResponse.json({
-          services: [{ id: 'test-svc', name: 'Test Service', access_level: role === 'admin' ? 'read_write' : 'read_only' }],
+          services: [{ id: 'test-svc', name: 'Test Service' }],
           analyst_session: role === 'analyst' ? { session_id: 'sess-1', role: 'analyst', allowed_services: ['test-svc'] } : null,
         }),
       ),
@@ -1354,7 +1328,7 @@ describe('Alerts & Insights Pages', () => {
     useServiceStore.setState({
       activeServiceId: 'test-svc',
       isInitialized: true,
-      services: [{ id: 'test-svc', name: 'Test Service', accessLevel: 'read_write' }],
+      services: [{ id: 'test-svc', name: 'Test Service' }],
     })
     useFilterStore.setState({ startTime: '2026-01-01T00:00:00Z', endTime: '2026-01-01T01:00:00Z', isAutoRange: false })
     queryClient.clear()
@@ -1428,8 +1402,9 @@ describe('Alerts & Insights Pages', () => {
     useServiceStore.setState({
       activeServiceId: 'test-svc',
       isInitialized: true,
-      services: [{ id: 'test-svc', name: 'Test Service', accessLevel: 'read_only' }],
+      services: [{ id: 'test-svc', name: 'Test Service' }],
     })
+    queryClient.setQueryData(['bootstrap'], { settings: { is_remote_analyst: true } })
     queryClient.setQueryData(['alerts', 'test-svc'], { data: SAMPLE_ALERTS, evaluated_at: new Date().toISOString() })
 
     renderWithQuery(<AlertsClient />, { queryClient })
@@ -1549,7 +1524,7 @@ describe('Alerts & Insights Pages', () => {
       putCalls = []
       useServiceStore.setState({
         activeServiceId: FORM_SVC,
-        services: [{ id: FORM_SVC, name: 'Svc', accessLevel: 'read_write' }],
+        services: [{ id: FORM_SVC, name: 'Svc' }],
         isInitialized: true,
       })
       server.use(

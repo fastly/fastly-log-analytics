@@ -425,7 +425,7 @@ test.describe('SSR hydration smoke', () => {
   for (const route of HYDRATION_ROUTES) {
     test(`${route} hydrates without a React hydration error`, async ({ page }) => {
       await page.addInitScript((sid) => {
-        localStorage.setItem('service-storage', JSON.stringify({ state: { activeServiceId: sid, services: [{ id: sid, name: 'Playwright E2E Service', accessLevel: 'read_write' }] }, version: 0 }))
+        localStorage.setItem('service-storage', JSON.stringify({ state: { activeServiceId: sid, services: [{ id: sid, name: 'Playwright E2E Service' }] }, version: 0 }))
         localStorage.setItem('timezone-storage', JSON.stringify({ state: { timezone: 'America/New_York' }, version: 0 }))
         localStorage.setItem('fastly-debug-settings', JSON.stringify({ state: { enabled: true, apiCallsEnabled: true }, version: 0 }))
         localStorage.setItem('dashboard_collapsed_sections', JSON.stringify(['request', 'cache']))

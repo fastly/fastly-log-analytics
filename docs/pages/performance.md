@@ -35,8 +35,7 @@ The **Edge Performance** page analyzes end-to-end delivery latency across Fastly
 | Role | Access Level | Data Redaction & Capabilities |
 |---|---|---|
 | **Admin (`read_write`)** | Full Access | Full percentile charts, slow URL drill-down, unmasked IPs, sort-by customization. |
-| **Analyst Path B (Remote Share)** | Read-Only Access | Full latency percentiles and charts viewable; registered in `_READ_ALLOWLIST` (`("POST", "/api/performance/aggregates")`). Time range strictly clamped via `ctx.clamp` to session bounds. Client IPs masked if configured. |
-| **Analyst Path A (JSON Join)** | Local Read-Only | Queries local DuckLake / cached buffer. |
+| **Analyst (Remote Share)** | Read-Only Access | Full latency percentiles and charts viewable; registered in `_READ_ALLOWLIST` (`("POST", "/api/performance/aggregates")`). Time range strictly clamped via `ctx.clamp` to session bounds. Client IPs masked if configured. |
 
 ---
 
@@ -156,7 +155,7 @@ The **Edge Performance** page analyzes end-to-end delivery latency across Fastly
 - [x] **3. Data Aggregates Contract:** `POST /api/performance/aggregates` returns complete waterfall, top_urls, top_asns, ttl_dist, and scatter data.
 - [x] **4. Section Pruning & Coupling:** Backend correctly handles `_TOP_N_PAIR` and `_WATERFALL_SCATTER_PAIR` couplings.
 - [x] **5. Time Range Extents & SSR Parity:** Range tokens (`24h`, `7d`, `30d`) and anchors resolve identically across client and server.
-- [x] **6. Role Verification:** Analyst Path B adheres to `_READ_ALLOWLIST`, session time bounds clamping, and IP masking.
+- [x] **6. Role Verification:** Analyst adheres to `_READ_ALLOWLIST`, session time bounds clamping, and IP masking.
 - [x] **7. Telemetry & Query Audit:** All DuckDB and ClickHouse queries are attributed with `X-Page-Load-ID` and profiled.
 - [x] **8. Backend Router Tests:** `tests/routers/test_performance_router.py` (10 tests passing).
 - [x] **9. Frontend Unit Tests:** `frontend/__tests__/app/performance.test.tsx` (3 tests passing).

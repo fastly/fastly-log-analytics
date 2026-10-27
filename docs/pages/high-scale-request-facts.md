@@ -1,7 +1,7 @@
 # Page Specification: High-Scale Request Facts (`/high-scale/request-facts`)
 
 > [!IMPORTANT] **Page Specification Status: Live-Certified (2026-10-16)**
-> Audited, hardened, and live-certified across Local Standard, Remote Standard GCE, and Remote High-Scale Elevation environments across Admin and Analyst Path B roles.
+> Audited, hardened, and live-certified across Local Standard, Remote Standard GCE, and Remote High-Scale Elevation environments across Admin and Analyst roles.
 
 ---
 
@@ -31,8 +31,7 @@ The **High-Scale Request Facts** page provides specialized deep-dive analytical 
 | Role | Access Level | Data Redaction & Capabilities |
 |---|---|---|
 | **Admin (`read_write`)** | Full Access | Full distributed query execution, watermark/freshness metrics, cluster mode indicator, unmasked client IPs. |
-| **Analyst Path B (Remote Share)** | Read-Only Access | Enforced via `RequestContext` (`require_service_access`) and clamped to session `TimeBounds`; client IPs masked (`mask_ips_for` → `x.x.x.xxx` / `xxxx:...`) when privacy masking is active. |
-| **Analyst Path A (JSON Join)** | Standalone Read-Only | Queries standalone engine replica via DuckDB emulation (see ADR-17). |
+| **Analyst (Remote Share)** | Read-Only Access | Enforced via `RequestContext` (`require_service_access`) and clamped to session `TimeBounds`; client IPs masked (`mask_ips_for` → `x.x.x.xxx` / `xxxx:...`) when privacy masking is active. |
 
 ---
 
@@ -96,7 +95,7 @@ The **High-Scale Request Facts** page provides specialized deep-dive analytical 
 - [x] **2. Zero Layout Shift:** Page loads with pre-allocated `[contain-intrinsic-size:...]` skeletons and `CLS <= 0.05`.
 - [x] **3. Facts Contract:** `GET /api/high-scale/request-facts` and `POST /api/high-scale/services/{service_id}/request-facts` return valid rows, watermark metadata, and execution `mode`.
 - [x] **4. Interactive Filters & Time Range:** Filter inputs (`status`, `domain`, `pop`, `country`, `batch_id`) and clear button update queries cleanly without console errors or HTTP 500s.
-- [x] **5. Role Verification:** Analyst Path B is permitted in route tripwire allowlists and observes masked client IPs (`x.x.x.xxx`).
+- [x] **5. Role Verification:** Analyst is permitted in route tripwire allowlists and observes masked client IPs (`x.x.x.xxx`).
 - [x] **6. Telemetry & Query Audit:** All ClickHouse and DuckDB queries are recorded in `_debug_queries` and `telemetry_queries` under `X-Page-Load-ID`.
 
 ---

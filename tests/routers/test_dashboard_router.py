@@ -948,7 +948,6 @@ def _mock_rum_source(db_path: Any) -> dict[str, str]:
         "name": "test_service",
         "service_id": "test_service",
         "duckdb_path": str(db_path).replace(".rum.duckdb", ".duckdb"),
-        "access_level": "read_write",
         "endpoint": "localhost",
         "access_key_id": "mock",
         "secret_access_key": "mock",
@@ -1542,7 +1541,6 @@ def test_rum_analytics_cold_start_readonly(tmp_path):
             "name": "cold_start::rum",
             "service_id": "cold_start",
             "duckdb_path": str(tmp_path / "cold_start.duckdb"),
-            "access_level": "read_only",
         }
         update_iceberg_view(ro_con, source)
         assert ro_con.execute("SELECT COUNT(*) FROM client_vitals").fetchone()[0] == 0
@@ -1604,7 +1602,6 @@ def test_rum_live_buffer_unlink_race_self_heals(tmp_path, monkeypatch) -> None:
         "bucket": "bucket-race",
         "duckdb_path": str(tmp_path / "svc_race.duckdb"),
         "local_buffer_dir": str(tmp_path / "cache" / "bucket-race" / "buffer"),
-        "access_level": "read_only",
     }
 
     con = duckdb.connect(str(rum_db_path), read_only=False)

@@ -12,7 +12,6 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
-from backend.core.metadata.cron_log import CronLeaseHeldError
 from backend.deps import get_source, require_admin
 from backend.utils.date_utils import iso_z
 from backend.utils.remote_access import _is_blocked_path
@@ -573,7 +572,6 @@ def test_admin_sync_status_and_health_aliases(overview_client: TestClient):
         "configured": True,
         "busy": False,
         "storage_mode": "ducklake",
-        "access_level": "read_write",
         "local_rows": 1250,
         "earliest_log_at": "2026-10-15T20:00:00Z",
         "latest_log_at": "2026-10-16T20:00:00Z",
@@ -584,7 +582,7 @@ def test_admin_sync_status_and_health_aliases(overview_client: TestClient):
     ):
         for p in ("/api/admin/sync-status", "/api/sync-status"):
             r = overview_client.get(f"{p}?service_id=svc-admin-test&skip_fos=true")
-            assert r.status_code == 200 and r.json()["local_rows"] == 1250 and r.json()["access_level"] == "read_write"
+            assert r.status_code == 200 and r.json()["local_rows"] == 1250
 
     for path in ("/api/admin/system-metrics", "/api/admin/health", "/api/admin/health-snapshot"):
         resp = overview_client.get(path)
@@ -656,11 +654,6 @@ def test_admin_manual_cron_trigger_routes_and_rbac(overview_client: TestClient):
             assert overview_client.post(f"/api/admin/commit/{sid}").status_code == 202
             assert overview_client.post(f"/api/admin/compact/{sid}").json()["partitions_compacted"] == 1
             assert overview_client.post(f"/api/admin/optimize/{sid}").json()["files_rewritten"] == 4
-
-        ro_src = _make_source(access_level="read_only")
-        app.dependency_overrides[get_source] = lambda: ro_src
-        for path in (f"/api/admin/sync/{ro_src['service_id']}", f"/api/admin/commit/{ro_src['service_id']}"):
-            assert overview_client.post(path).status_code == 403
     finally:
         app.dependency_overrides.pop(get_source, None)
 
@@ -692,7 +685,7 @@ def test_analyst_path_b_rejected_with_403_on_admin_overview_routes():
     assert exc.value.status_code == 403
 
 
-def test_iceberg_and_rebuild_local_view_endpoints(overview_client, override_source):
+def test_iceberg_info_calendar_and_commit_endpoints(overview_client, override_source):
     fake_info = {
         "table_name": "logs",
         "table_location": "s3://bucket/prefix/iceberg",
@@ -716,27 +709,6 @@ def test_iceberg_and_rebuild_local_view_endpoints(overview_client, override_sour
 
     with patch("backend.utils.router_utils.start_or_resume_cron", return_value={"ok": True}) as mock_start:
         assert overview_client.post("/api/admin/commit-iceberg").status_code == 202 and mock_start.called
-
-    with (
-        patch("backend.core.iceberg.clear_source_caches") as mock_clear,
-        patch("backend.core.duckdb.start_cron_run", return_value="run-123") as mock_start_cron,
-        patch("backend.cron_progress.start_progress") as mock_prog,
-        patch("threading.Thread") as mock_thread,
-    ):
-        resp = overview_client.post("/api/admin/rebuild-local-view")
-        assert resp.status_code == 202 and resp.json()["run_id"] == "run-123"
-        mock_clear.assert_called_once_with("service123")
-        mock_start_cron.assert_called_once_with(override_source, "metadata_sync")
-        mock_prog.assert_called_once_with("run-123", service_id="service123", task="metadata_sync")
-        mock_thread.assert_called_once()
-
-    with (
-        patch("backend.core.iceberg.clear_source_caches"),
-        patch("backend.core.duckdb._cache_dir", return_value="/tmp"),
-        patch("os.path.exists", return_value=False),
-        patch("backend.core.duckdb.start_cron_run", side_effect=CronLeaseHeldError("busy")),
-    ):
-        assert overview_client.post("/api/admin/rebuild-local-view").status_code == 503
 
 
 @pytest.mark.parametrize(
@@ -767,9 +739,6 @@ def test_reset_endpoints(overview_client, override_source, endpoint, patch_targe
         assert resp.status_code == 200 and "text/event-stream" in resp.headers["content-type"]
         events = [json.loads(line[5:]) for line in resp.iter_lines() if line.startswith("data:")]
         assert [e["type"] for e in events] == ["status", "done"]
-
-    override_source["access_level"] = "read_only"
-    assert overview_client.post(endpoint, json=payload).status_code == 403
 
 
 def test_metric_history_batch_groups_by_scope_key():
@@ -1711,7 +1680,6 @@ from tests._helpers.wire import parse_sse_events as _parse_sse_events
 _FAKE_CFG = {
     "service_id": "svc123",
     "name": "Test Service",
-    "access_level": "read_write",
     "fos_bucket": "bucket",
     "fos_region": "us-east-1",
     "fos_endpoint": "us-east-1.object.fastlystorage.app",
@@ -2243,10 +2211,7 @@ def _wizard_payload(sid: str, bucket: str, **overrides) -> dict:
 def test_wizard_execute_runs_orchestrator_and_bootstrap_sees_service(isolated_configs_dir, tmp_path, monkeypatch):
     """End-to-end: execute → orchestrator yields done → config persists → bootstrap lists svc."""
     sid = "svc-wizard-e2e-1"
-    extras = [
-        patch("backend.cron.jobs.metadata._run_metadata_sync"),
-        patch("backend.core.iceberg.init_iceberg_table", side_effect=RuntimeError("iceberg init skipped (test)")),
-    ]
+    extras = [patch("backend.core.iceberg.init_iceberg_table", side_effect=RuntimeError("iceberg init skipped (test)"))]
     with _wizard_env(tmp_path, monkeypatch, extra_patches=extras), TestClient(app) as client:
         r = client.post("/api/provision/execute", json=_wizard_payload(sid, "wizard-e2e-bucket"))
 
@@ -2282,10 +2247,9 @@ def test_wizard_execute_e2e_iceberg_init_success(isolated_configs_dir, tmp_path,
     """R-15: positive-path variant exercising real `init_iceberg_table` against moto S3."""
     sid = "svc-wizard-iceberg-success"
     monkeypatch.setattr(svcconfig, "CACHE_DATA_DIR", tmp_path / "data" / "cache")
-    extras = [patch("backend.cron.jobs.metadata._run_metadata_sync")]
 
     with (
-        _wizard_env(tmp_path, monkeypatch, service_name="Wizard Iceberg Success", extra_patches=extras),
+        _wizard_env(tmp_path, monkeypatch, service_name="Wizard Iceberg Success"),
         TestClient(app) as client,
     ):
         r = client.post(
@@ -2402,70 +2366,6 @@ def test_wizard_execute_rollback_actually_invokes_resource_deletion(isolated_con
 
 
 # ── Merged from tests/routers/test_provision.py ──
-
-
-# ─── /api/provision/lake-info ────────────────────────────────────────────────
-
-
-def test_lake_info_modes():
-    with (
-        patch("backend.core.iceberg.ducklake_table_exists", return_value=True) as mock_exists,
-        patch(
-            "backend.core.iceberg.get_table_info",
-            return_value={
-                "min_timestamp": "2026-05-01T00:00:00Z",
-                "max_timestamp": "2026-05-02T00:00:00Z",
-                "data_files": 10,
-                "size_bytes": 1024,
-            },
-        ),
-        patch(
-            "backend.core.iceberg.get_snapshot_calendar",
-            return_value={
-                "2026-05-01": {"data_files": 5, "size_bytes": 512},
-                "2026-05-02": {"data_files": 5, "size_bytes": 512},
-            },
-        ),
-        patch("urllib.request.urlopen", side_effect=Exception("Fast path miss")),
-        patch("backend.core.duckdb._get_fos_client", side_effect=Exception("Fast path miss")),
-    ):
-        base_req = {"bucket": "test-bucket", "region": "us-east-1", "access_key": "ak", "secret_key": "sk"}
-        resp = _client().post("/api/provision/lake-info", json={**base_req, "prefix": "p/"})
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["ok"] is True and data["table_exists"] is True
-        assert data["info"]["data_files"] == 10
-        assert data["range"]["start"] == "2026-05-01T00:00:00Z"
-
-        loc = "s3://test-bucket/iceberg/metadata/v1.metadata.json"
-        _client().post("/api/provision/lake-info", json={**base_req, "iceberg_metadata_location": loc})
-        assert mock_exists.call_args[0][0]["iceberg_metadata_location"] == loc
-
-        mock_exists.return_value = False
-        resp_nf = _client().post("/api/provision/lake-info", json=base_req)
-        assert resp_nf.status_code == 200
-        assert resp_nf.json()["table_exists"] is False
-        assert "not found" in resp_nf.json()["message"]
-
-
-def test_lake_info_range_and_calendar_match_producer():
-    producer = {
-        "ok": True,
-        "table_exists": True,
-        "info": {"min_timestamp": "2026-05-01T00:00:00", "max_timestamp": "2026-05-02T00:00:00", "snapshots": 3},
-        "calendar": {
-            "2026-05-01": {"data_files": 5, "size_bytes": 512},
-            "unknown": {"data_files": 1, "size_bytes": 0},
-        },
-        "range": {"start": "2026-05-01T00:00:00", "end": None},
-    }
-    with patch("backend.core.iceberg.lake_info.fetch_lake_info", return_value=producer):
-        response = _client().post(
-            "/api/provision/lake-info",
-            json={"bucket": "b", "region": "us-east-1", "access_key": "ak", "secret_key": "sk", "prefix": "p/"},
-        )
-    assert response.status_code == 200
-    assert {k: v for k, v in response.json().items() if not k.startswith("_")} == producer
 
 
 # ─── /api/provision/services/{id}/ngwaf-workspace & /ngwaf-workspaces ────────
@@ -3035,7 +2935,6 @@ def test_provision_execute_dns_fallback_and_faro_version_threading():
         ),
         patch("backend.provision.provision", side_effect=fake_provision),
         patch("backend.provision._sync_crontab"),
-        patch("backend.cron.jobs.metadata._run_metadata_sync"),
         patch("backend.core.duckdb.reload_default_source"),
         patch("backend.core.metadata.record_audit"),
     ):

@@ -846,7 +846,7 @@ def _delete_scoring_matrix_from_fos(logging_service_id: str) -> None:
         from backend.state_sync import get_scoring_matrix_key
 
         source = get_source_for_service(logging_service_id)
-        if not source or source.get("access_level") == "read_only":
+        if not source:
             return
         s3 = _get_fos_client(source)
         bucket = source["bucket"]

@@ -43,8 +43,7 @@ The **Fastly Value** (Service Summary) page provides executive and financial vis
 | Role | Access Level | Data Redaction & Capabilities |
 |---|---|---|
 | **Admin (`read_write`)** | Full Access | Full value KPIs, all 8 tabs, export capabilities, raw IP inspection. |
-| **Analyst Path B (Remote Share)** | Read-Only Access | Full executive charts and offload KPIs viewable; registered in `_READ_ALLOWLIST` (`("POST", "/api/value/summary")`). Time range strictly clamped via `ctx.clamp` to session bounds. IP masking enforced if configured. |
-| **Analyst Path A (JSON Join)** | Local Read-Only | Queries local DuckLake / cached buffer. |
+| **Analyst (Remote Share)** | Read-Only Access | Full executive charts and offload KPIs viewable; registered in `_READ_ALLOWLIST` (`("POST", "/api/value/summary")`). Time range strictly clamped via `ctx.clamp` to session bounds. IP masking enforced if configured. |
 
 ---
 
@@ -133,7 +132,7 @@ The **Fastly Value** (Service Summary) page provides executive and financial vis
 - [x] **3. Value Contract:** Verified offload percentage, bandwidth savings, and section expansion in `backend/repositories/value.py`.
 - [x] **4. Time Range Extent:** Confirms 24h default and range token resolution via `resolve_window` and `quantizeAnchor`.
 - [x] **5. Cost & IO Calculation:** Confirms `$0.0025` per transform cost estimation and 40% compression calculation.
-- [x] **6. Role Verification:** Analyst Path B allowed via `_READ_ALLOWLIST` with time-window clamping verified (`tests/routers/test_value_router.py::test_value_summary_analyst_session_clamps_window`).
+- [x] **6. Role Verification:** Analyst allowed via `_READ_ALLOWLIST` with time-window clamping verified (`tests/routers/test_value_router.py::test_value_summary_analyst_session_clamps_window`).
 - [x] **7. Telemetry & Query Audit:** Verified `X-Page-Load-ID` injection and SectionTimer query attribution.
 
 ---

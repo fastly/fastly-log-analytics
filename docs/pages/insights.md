@@ -103,8 +103,7 @@ The **Insights** page runs 51 automated anomaly and pattern detectors comparing 
 | Role | Access Level | Data Redaction & Capabilities |
 |---|---|---|
 | **Admin (`read_write`)** | Full Access | Full anomaly cards, sensitivity controls, trigger immediate re-scan (`force_refresh=True`). |
-| **Analyst Path B (Remote Share)** | Read-Only Access | Full anomaly cards and baseline comparisons viewable; re-scan trigger hidden from DOM (`!isRemoteAnalyst`); server-side `force_refresh` clamped to `False`; IP addresses masked if enabled by admin. |
-| **Analyst Path A (JSON Join)** | Local Read-Only | Queries local DuckLake / cached buffer. |
+| **Analyst (Remote Share)** | Read-Only Access | Full anomaly cards and baseline comparisons viewable; re-scan trigger hidden from DOM (`!isRemoteAnalyst`); server-side `force_refresh` clamped to `False`; IP addresses masked if enabled by admin. |
 
 ---
 
@@ -207,7 +206,7 @@ ClickHouse engine (disposable `clickhouse-local` processes) over planted anomali
 - [x] **3. Anomaly Evaluation Contract:** Verify all 5 categories return valid insight cards or clean passes. Unavailable insights render guidance linking to `/service-config`.
 - [x] **4. Prewarmer Effectiveness:** Confirm response time for default window is < 150ms due to `insights_prewarmer_{id}`.
 - [x] **5. Category Tab Switching:** Click category tabs and verify instantaneous client-side filtering without refetching.
-- [x] **6. Role Verification:** Confirm Analyst Path B observes expected view with Re-scan button hidden from DOM and server-side `force_refresh` clamped.
+- [x] **6. Role Verification:** Confirm Analyst observes expected view with Re-scan button hidden from DOM and server-side `force_refresh` clamped.
 - [x] **7. Telemetry & Query Audit:** Verify all DuckDB and SQLite queries are recorded with zero duplicate queries and proper attribution (`process_context="insights:eval"`).
 
 ---

@@ -1506,7 +1506,6 @@ def _drain_ingest(gen):
 @pytest.mark.parametrize(
     ("src", "needle"),
     [
-        ({"name": "test-svc", "service_id": "svc-1", "access_level": "read_only", "bucket": "b"}, "read-only"),
         ({"name": "test-svc", "service_id": "svc-1", "bucket": ""}, "bucket"),
     ],
 )
@@ -1901,17 +1900,6 @@ def _drain(gen) -> list[dict]:
     return list(gen)
 
 
-class TestIngestReadOnlyGuard:
-    def test_read_only_yields_error_immediately(self):
-        events = _drain(ingest.ingest(source=_make_source(access_level="read_only")))
-        assert len(events) == 1 and events[0]["type"] == "error" and "read-only" in events[0]["message"].lower()
-
-    def test_read_write_does_not_error_on_access_level(self):
-        with patch("backend.core.ingest._ensure_source_registered", side_effect=ValueError("stop")):
-            events, _ = _drain_ingest(ingest.ingest(source=_make_source(access_level="read_write")))
-        assert not any(e.get("type") == "error" and "read-only" in e.get("message", "").lower() for e in events)
-
-
 class TestIngestStartTimeExec:
     def test_start_time_exec_is_float(self):
         call_count = {"n": 0}
@@ -1964,9 +1952,7 @@ class TestIngestMaxSeconds:
         download.assert_called_once()
         assert any("Processing 1 files in batch 1/1" in event.get("message", "") for event in events)
 
-    def test_max_seconds_zero_and_type_annotations(self):
-        events = _drain(ingest.ingest(source=_make_source(access_level="read_only"), max_seconds=0))
-        assert events[0]["type"] == "error"
+    def test_max_seconds_and_start_time_type_annotations(self):
         sig = inspect.signature(ingest.ingest)
         max_s = str(sig.parameters["max_seconds"].annotation)
         start_t = str(sig.parameters["start_time"].annotation)

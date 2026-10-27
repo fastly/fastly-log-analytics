@@ -7,12 +7,12 @@
 
 ## 1. Overview & Objectives
 
-The **Admin Live Share Management** page (`/admin/share`, implemented in `frontend/app/admin/share/page.tsx` with `SharingControlPanel`, `InvitationsPanel`, `SessionsPanel`, and `AuditLogPanel` under `frontend/components/share-dashboard/`) provides complete administrative control over remote live sharing (Analyst Path B). It governs direct-mode public endpoint activation, analyst invitation CRUD, Argon2id passcode and SSO/OIDC authentication policies, one-shot invite claim tokens, active analyst session monitoring, instant session revocation and panic shutoff, compliance audit trails, Terms of Service (TOS) publishing, and remote frontend domain deployment/teardown.
+The **Admin Live Share Management** page (`/admin/share`, implemented in `frontend/app/admin/share/page.tsx` with `SharingControlPanel`, `InvitationsPanel`, `SessionsPanel`, and `AuditLogPanel` under `frontend/components/share-dashboard/`) provides complete administrative control over remote live sharing (Analyst). It governs direct-mode public endpoint activation, analyst invitation CRUD, Argon2id passcode and SSO/OIDC authentication policies, one-shot invite claim tokens, active analyst session monitoring, instant session revocation and panic shutoff, compliance audit trails, Terms of Service (TOS) publishing, and remote frontend domain deployment/teardown.
 
 ### Key Tenets:
 - **Zero-FOS-Credential Analyst Access:** Grants time-limited, service-scoped read-only access to running instances without exposing Fastly Object Storage keys or admin routes.
 - **Session Governance & Panic Shutoff:** Real-time visibility into active analyst sessions with instant per-session revocation (`/revoke` / `/boot`) and emergency panic shutoff (`/panic` stops sharing and revokes all active sessions).
-- **Strict RBAC:** Accessible **exclusively** to Admin (`read_write`) operators via loopback or mTLS admin gateway. Analyst Path B sessions receive `403 Forbidden` (`{"error": "admin_only"}`) on every `/api/admin/share/*` endpoint.
+- **Strict RBAC:** Accessible **exclusively** to Admin (`read_write`) operators via loopback or mTLS admin gateway. Analyst sessions receive `403 Forbidden` (`{"error": "admin_only"}`) on every `/api/admin/share/*` endpoint.
 
 ---
 
@@ -30,8 +30,7 @@ The **Admin Live Share Management** page (`/admin/share`, implemented in `fronte
 | Role | Access Level | Data Redaction & Capabilities |
 |---|---|---|
 | **Admin (`read_write`)** | Full Control | Start/stop/panic live sharing, configure public endpoint & max concurrent sessions, create/update/revoke/reactivate/delete invites, regenerate passcodes & claim links, revoke active sessions, inspect/filter/export/purge audit logs, publish TOS versions, and deploy/teardown remote frontend domains. |
-| **Analyst Path B (Remote Share)** | Blocked (`403 Forbidden`) | Rejected by `require_admin` and `RemoteAccessGuardMiddleware` (`{"error": "admin_only"}`) across all `/api/admin/share/*` endpoints. |
-| **Analyst Path A (JSON Join)** | Read-Only Instance | Cannot mutate live-share admin state on remote instances. |
+| **Analyst (Remote Share)** | Blocked (`403 Forbidden`) | Rejected by `require_admin` and `RemoteAccessGuardMiddleware` (`{"error": "admin_only"}`) across all `/api/admin/share/*` endpoints. |
 
 ---
 
@@ -114,11 +113,11 @@ The **Admin Live Share Management** page (`/admin/share`, implemented in `fronte
 
 ## 9. AI Session Automated Verification Checklist
 
-- [x] **1. Route Accessibility:** `GET /admin/share` returns HTTP 200 for Admin; Analyst Path B receives HTTP 403 (`{"error": "admin_only"}`) on all `/api/admin/share/*` endpoints.
+- [x] **1. Route Accessibility:** `GET /admin/share` returns HTTP 200 for Admin; Analyst receives HTTP 403 (`{"error": "admin_only"}`) on all `/api/admin/share/*` endpoints.
 - [x] **2. Zero Layout Shift:** Verified pre-allocated `admin-share-control-reservation` and `admin-share-panel-reservation` containers with `CLS <= 0.05` (`0.00` measured).
 - [x] **3. Invite Lifecycle:** Verified invite creation, listing (`GET /api/admin/share/invites`), revocation (`/revoke`), reactivation (`/reactivate`), passcode regeneration (`/regenerate-passcode`), and deletion.
 - [x] **4. Session Revocation:** Verified active session revocation (`POST /api/admin/share/sessions/{session_id}/revoke` and `/boot`) immediately invalidates the analyst session.
-- [x] **5. Role Verification:** Confirmed Analyst Path B receives `403 Forbidden` (`{"error": "admin_only"}`) across all 18 `/api/admin/share/*` routes.
+- [x] **5. Role Verification:** Confirmed Analyst receives `403 Forbidden` (`{"error": "admin_only"}`) across all 18 `/api/admin/share/*` routes.
 - [x] **6. Telemetry & Multi-Tier Certification:** Verified `X-Page-Load-ID` propagation and live E2E execution across Local Standard (`:9443`), Remote Standard GCE (`:9444`), and Remote High-Scale Elevation (`:9445`).
 
 ---

@@ -63,7 +63,7 @@ const hsMeta = (domain: string) => ({
   error: null,
 })
 
-const defaultServiceList = [{ service_id: 'svc-default', name: 'Default Service', access_level: 'read_write' }]
+const defaultServiceList = [{ service_id: 'svc-default', name: 'Default Service' }]
 
 export const CMCD_FIXTURE = {
   available: true,
@@ -96,7 +96,7 @@ export const handlers = [
   get('/api/services', { services: defaultServiceList }),
   http.get(url('/api/health'), okFor('/api/health', 'get', { status: 'ok', version: 'test' })),
   get('/api/query/schema/:service_id', { source: 'svc-default', table_name: 'logs', schema: [], columns: [] }),
-  get('/api/admin/sync-status', { configured: false, access_level: 'read_write', state: 'idle' }),
+  get('/api/admin/sync-status', { configured: false, state: 'idle' }),
   get('/api/admin/health', { status: 'ok', load: [0, 0, 0], recent_cron_failures: [] }),
   get('/api/admin/system-metrics', { load: [0, 0, 0], vcpus: 1, in_flight_runs: [], compaction: {} }),
   post('/api/admin/commit/:service_id', { type: 'done', message: 'ok' }),
@@ -187,7 +187,6 @@ export const handlers = [
   post('/api/services/:service_id/custom-fields/validate-vcl', { valid: true, errors: [] }),
   put('/api/services/:service_id/custom-fields/:field_name', { ok: true }),
   del('/api/services/:service_id/custom-fields/:field_name'),
-  post('/api/services/:service_id/generate-viewer-key', { passcode: 'TEST-0000-0000', expires_at: '2030-01-01T00:00:00Z' }),
 
   // ── Session scoring + RUM versions ─────────────────────────────────
   get('/api/services/:service_id/scoring/analytics', {
@@ -309,7 +308,6 @@ export const handlers = [
   get('/api/provision/check-domain', { available: true }),
   post('/api/provision/check-fos', { ok: true, bucket: 'test-bucket' }),
   post('/api/provision/ingest', { ok: true, ingested: 0 }),
-  post('/api/provision/lake-info', { ok: true, table: 'logs' }),
   post('/api/provision/execute', { status: 'completed', service_id: 'svc-default' }),
   get('/api/provision/services', []),
   get('/api/provision/ngwaf-workspaces', { workspaces: [] }),
@@ -358,7 +356,6 @@ export const handlers = [
   get('/api/services/:service_id/log-fields', { fields: [] }),
   http.post(url('/api/services/:service_id/log-fields'), okFor('/api/services/{service_id}/log-fields', 'post', { ok: true })),
   http.patch(url('/api/services/:service_id/credentials'), okFor('/api/services/{service_id}/credentials', 'patch', { ok: true })),
-  get('/api/services/:service_id/lake-info', { ok: true, table: 'logs' }),
   http.post(url('/api/services/:service_id/logging-settings/update'), okFor('/api/services/{service_id}/logging-settings/update', 'post', { ok: true })),
   post('/api/services/:service_id/custom-fields', { ok: true, name: 'test-field' }),
   http.get(url('/api/services/:service_id/custom-fields/export'), () => new HttpResponse('name,type,vcl\n', { headers: { 'content-type': 'text/csv' } })),

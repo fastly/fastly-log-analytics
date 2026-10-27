@@ -14,9 +14,9 @@ The **Data Management** page (`/logs`) is the operational hub for inspecting and
 
 ### Key Tenets:
 - **End-to-End Pipeline Visibility:** Unifies scheduled job schedules, execution histories (`cron_runs`), configuration audit trails (`audit_logs`), ingested `.gz` file ledgers (`ingested_files`), DuckLake catalog/file trees, PostgreSQL metadata table sizes, raw FOS object trees, and DuckDB table/view schemas into a single 7-tab workspace.
-- **Interactive Pipeline Controls (`QuickActionsBar` & `FloatingOperationsDock`):** Provides one-click administrative triggers for **Import Logs**, **Sync from Cloud**, **Commit Buffer**, **NGWAF Bot Sync** (when NGWAF workspace is configured), and **View Recent Logs**, with live Server-Sent Events (SSE) progress modals and background dock status tracking.
+- **Interactive Pipeline Controls (`QuickActionsBar` & `FloatingOperationsDock`):** Provides one-click administrative triggers for **Import Logs**, **Backfill Logs**, **Commit Buffer**, **NGWAF Bot Sync** (when NGWAF workspace is configured), and **View Recent Logs**, with live Server-Sent Events (SSE) progress modals and background dock status tracking.
 - **Unified PostgreSQL Metadata (ADR-22):** All operational tables (`cron_runs`, `audit_logs`, `ingested_files`, `sources`, `usage_log`) reside in PostgreSQL 16 (`METADATA_DSN`), while analytical storage is backed by DuckLake (`DUCKLAKE_CATALOG`) in Standard mode and ClickHouse MergeTree + DuckLake archive in High-Scale mode.
-- **Strict RBAC:** `/logs` is an **Admin (`read_write`)** and **Analyst Path A (`read_only` local instance)** data-management surface; **Analyst Path B (Remote Share)** sessions are blocked at both the UI shell (`AppLayout` redirect to `/dashboard`) and the API boundary (`RemoteAccessGuardMiddleware` returning `403 Forbidden`).
+- **Strict RBAC:** `/logs` is an **Admin** data-management surface; **Analyst (Remote Share)** sessions are blocked at both the UI shell (`AppLayout` redirect to `/dashboard`) and the API boundary (`RemoteAccessGuardMiddleware` returning `403 Forbidden`).
 
 ---
 
@@ -34,8 +34,7 @@ The **Data Management** page (`/logs`) is the operational hub for inspecting and
 | Role | Access Level | Data Redaction & Capabilities |
 |---|---|---|
 | **Admin (`read_write`)** | Full Control | Full access to all 7 tabs (`cron`, `service_history`, `ingestion`, `iceberg`, `metadata_storage`, `raw`, `schema`), `QuickActionsBar` triggers (`Import Logs`, `Sync from Cloud`, `Commit Buffer`, `NGWAF Bot Sync`, `View Recent Logs`), cron history purge (`DELETE /api/cron-runs`), ingested file deletion (`DELETE /api/admin/ingested-files`), and DuckLake maintenance triggers (`compact`, `optimize`, `expire-snapshots`, `metadata-cleanup`). |
-| **Analyst Path B (Remote Share)** | Blocked (`403 Forbidden` / Redirect) | Hidden from sidebar navigation (`shareAnalystVisible: false` in [`AppLayout.tsx`](../../frontend/components/AppLayout.tsx)). Navigating directly to `/logs` renders an accessible polite status banner (`"This page is not available for your account. Redirecting to the dashboard."`) and redirects to `/dashboard`. All backing endpoints (`/api/cron-runs`, `/api/cron-schedule`, `/api/audit-logs`, `/api/admin/*`) are blocked by `RemoteAccessGuardMiddleware` (`403 admin_only`). |
-| **Analyst Path A (JSON Join)** | Read-Only Inspection (`isViewerMode = true`) | Can inspect `Cron Runs`, `Service History`, `DuckLake Storage`, and `DuckDB Schema`. Admin-only tabs (`ingestion`, `metadata_storage`, `raw`) and write triggers (`Import Logs`, `Commit Buffer`, `Purge History`) are hidden or disabled, and backend write routes enforce `require_write_access` (`403 Forbidden`). |
+| **Analyst (Remote Share)** | Blocked (`403 Forbidden` / Redirect) | Hidden from sidebar navigation (`shareAnalystVisible: false` in [`AppLayout.tsx`](../../frontend/components/AppLayout.tsx)). Navigating directly to `/logs` renders an accessible polite status banner (`"This page is not available for your account. Redirecting to the dashboard."`) and redirects to `/dashboard`. All backing endpoints (`/api/cron-runs`, `/api/cron-schedule`, `/api/audit-logs`, `/api/admin/*`) are blocked by `RemoteAccessGuardMiddleware` (`403 admin_only`). |
 
 ---
 
@@ -77,7 +76,7 @@ The **Data Management** page (`/logs`) is the operational hub for inspecting and
    - `POST /api/admin/ingest-logs` & `GET /api/cron-runs/{run_id}/stream` (manual log discovery & SSE stream)
    - `POST /api/admin/commit-iceberg` & `GET /api/cron-runs/{run_id}/stream` (manual commit of local Parquet buffer to DuckLake & SSE stream)
    - `POST /api/services/{service_id}/ngwaf-sync` (SSE NGWAF verified bot sync)
-   - `POST /api/admin/sync-from-cloud` (`SyncFromCloudModal` historical backfill)
+   - `POST /api/admin/ingest-logs?start_time=&end_time=` (`BackfillRangeModal` historical backfill)
 
 ### Telemetry Attribution:
 - Every client fetch propagates `X-Page-Load-ID` via `client` / `apiFetch`.
@@ -92,7 +91,7 @@ The **Data Management** page (`/logs`) is the operational hub for inspecting and
 - **Zero-CLS Skeleton ([`frontend/app/logs/loading.tsx`](../../frontend/app/logs/loading.tsx)):**
   - Reserves exact dimensions for `PageHeader` ("Data Management"), `QuickActionsBar` (`h-12`), `TabsList` (`h-10`), and a 10-row table skeleton (`h-[440px]`).
 - **`QuickActionsBar` ([`frontend/app/logs/_sections/QuickActionsBar.tsx`](../../frontend/app/logs/_sections/QuickActionsBar.tsx)):**
-  - Provides **Import Logs**, **Sync from Cloud**, **Commit Buffer**, **NGWAF Bot Sync** (conditional on `ngwaf_workspace_id`), and **View Recent Logs** buttons.
+  - Provides **Import Logs**, **Backfill Logs**, **Commit Buffer**, **NGWAF Bot Sync** (conditional on `ngwaf_workspace_id`), and **View Recent Logs** buttons.
 - **7-Tab Workspace ([`frontend/app/logs/_sections/LogsClient.tsx`](../../frontend/app/logs/_sections/LogsClient.tsx)):**
   1. **Cron Runs (`cron`):** `CronTab` (`CronScheduleSection` collapsible schedule overview + filterable `cron_runs` table by task & status, live elapsed duration counter for `running` jobs, and `Purge History` action).
   2. **Service History (`service_history`):** `ServiceHistoryTab` displaying chronological configuration and lifecycle audit events with action badges (`provision`, `update_settings`, `commit`, `sync`, etc.).
@@ -110,8 +109,7 @@ The **Data Management** page (`/logs`) is the operational hub for inspecting and
 
 - **Delta Polling for Cron Runs:** `useLogsPageState` ([`frontend/app/logs/_state.ts`](../../frontend/app/logs/_state.ts)) polls `/api/cron-runs?since_id={latestCronIdRef}` every 15s (or 3s while a job is in `running` state) and merges updates in-place without resetting scroll position or collapsing the table into a skeleton.
 - **Lazy Tab Mounting:** Heavy storage and S3 tree components (`IcebergStatus`, `IcebergCalendar`, `MetadataStorageCard`, `FileBrowser`, `SchemaTab`) only mount and issue network requests when their tab becomes active (`activeTab === '...'`), keeping initial `/logs` page load fast and free of unnecessary S3 LIST operations.
-- **Viewer Mode (`isViewerMode`) Guardrails:** When viewing a read-only service (Analyst Path A), admin-only tabs (`ingestion`, `metadata_storage`, `raw`) are omitted from `TabsList`, and write buttons in `QuickActionsBar` (`Import Logs`, `Commit Buffer`) and `CronTab` (`Purge History`) are hidden or disabled.
-- **Analyst Path B Redirect:** Share analysts (`isShareAnalyst` / `isAnalyst`) are immediately blocked by `AppLayout` with an ARIA-live status message and redirected to `/dashboard`.
+- **Analyst Redirect:** Share analysts (`isShareAnalyst` / `isAnalyst`) are immediately blocked by `AppLayout` with an ARIA-live status message and redirected to `/dashboard`.
 
 ---
 
@@ -126,13 +124,13 @@ The **Data Management** page (`/logs`) is the operational hub for inspecting and
 | **API Latency (`GET /api/audit-logs`)** | < 150 ms (p95) | < 150 ms (p95) | HAR log / API benchmark |
 | **API Latency (`GET /api/schema`)** | < 200 ms (p95) | < 200 ms (p95) | HAR log / API benchmark |
 | **Zero Unsolicited S3 Calls on Initial Load** | 0 FOS Class A/B ops on `cron` tab | 0 FOS Class A/B ops on `cron` tab | `usage_log` attribution audit |
-| **RBAC Enforcement** | 100% Analyst Path B requests 403 / redirected | 100% Analyst Path B requests 403 / redirected | Playwright & pytest RBAC audit |
+| **RBAC Enforcement** | 100% Analyst requests 403 / redirected | 100% Analyst requests 403 / redirected | Playwright & pytest RBAC audit |
 
 ---
 
 ## 9. AI Session Automated Verification Checklist
 
-- [x] **1. Route Accessibility & SSR Hydration:** `GET /logs` returns HTTP 200 for Admin with `"Data Management"` heading and pre-hydrated `Cron Runs` table; Analyst Path B is redirected to `/dashboard` and receives HTTP `403 Forbidden` on `/api/cron-runs`, `/api/cron-schedule`, `/api/audit-logs`, and `/api/admin/ingested-files`.
+- [x] **1. Route Accessibility & SSR Hydration:** `GET /logs` returns HTTP 200 for Admin with `"Data Management"` heading and pre-hydrated `Cron Runs` table; Analyst is redirected to `/dashboard` and receives HTTP `403 Forbidden` on `/api/cron-runs`, `/api/cron-schedule`, `/api/audit-logs`, and `/api/admin/ingested-files`.
 - [x] **2. Zero Layout Shift:** Page loads with `CLS == 0.000` and zero console or uncaught page errors.
 - [x] **3. Quick Actions Bar:** Renders `Import Logs`, `Sync from Cloud`, `Commit Buffer`, and `View Recent Logs` buttons for Admin.
 - [x] **4. 7-Tab Navigation:** Switching across `Cron Runs`, `Service History`, `Ingestion History`, `DuckLake Storage`, `Metadata Storage`, `Available Logs`, and `DuckDB Schema` renders each tab panel cleanly without collapsing previously loaded tabs or throwing runtime errors.

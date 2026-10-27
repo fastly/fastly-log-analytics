@@ -1295,7 +1295,6 @@ runner = CliRunner()
 SUBCOMMANDS = (
     "provision",
     "teardown",
-    "invite-analyst",
     "update-logs",
     "update-cdn",
     "list-groups",
@@ -1472,17 +1471,6 @@ def test_update_logs_parses_dry_run_and_list_flags():
     assert args.enable_group == ["L"]
     assert args.disable_group == ["M"]
     assert args.service_id == "svc"
-
-
-def test_invite_analyst_parses_minimal_flags():
-    """Exposes only ``--yes`` and ``--service-id`` — adding flags
-    without threading them through the handler has bitten this before."""
-    with patch("backend.provision.cli.handle_invite_analyst") as mock_handler:
-        result = runner.invoke(app, ["invite-analyst", "--yes", "--service-id", "svc-x"])
-    assert result.exit_code == 0, result.output
-    args = mock_handler.call_args.args[0]
-    assert args.yes is True
-    assert args.service_id == "svc-x"
 
 
 def test_update_cdn_parses_service_and_token():
@@ -1744,78 +1732,6 @@ def test_handle_teardown_exits_1_on_orchestrator_exception(capsys):
     captured = capsys.readouterr()
     combined = captured.out + captured.err
     assert "Teardown failed" in combined or "network down" in combined
-
-
-def test_handle_invite_analyst_fails_without_service_id(capsys):
-    """No --service-id and no configured services → exit 1. Pinned
-    because the handler is sometimes invoked from a CI step where
-    no services have been provisioned yet."""
-    with patch("backend.config.list_service_ids", return_value=[]):
-        with pytest.raises(SystemExit) as exc:
-            cli.handle_invite_analyst(_args())
-    assert exc.value.code == 1
-
-
-def test_handle_invite_analyst_auto_picks_single_service():
-    """When exactly one service is configured, the handler picks it
-    automatically rather than prompting. Pinned because most installs
-    have a single service and the prompt would be friction."""
-    fake_cfg = {"access_level": "read_write"}
-    with (
-        patch("backend.config.list_service_ids", return_value=["only-svc"]),
-        patch("backend.config.load_config", return_value=fake_cfg),
-        patch(
-            "backend.provision.cli.generate_analyst_invite",
-            return_value={"service_id": "only-svc", "secret_key": "sk"},
-        ),
-    ):
-        cli.handle_invite_analyst(_args())
-
-
-def test_handle_invite_analyst_rejects_readonly_service(capsys):
-    """An analyst can only be invited from a ``read_write`` service —
-    inviting from another analyst's read-only replica must be refused.
-    Pinned because the read-only invite would generate an unusable
-    credential that fails on first read."""
-    with (
-        patch("backend.config.list_service_ids", return_value=["svc"]),
-        patch("backend.config.load_config", return_value={"access_level": "read_only"}),
-    ):
-        with pytest.raises(SystemExit) as exc:
-            cli.handle_invite_analyst(_args(service_id="svc"))
-    assert exc.value.code == 1
-
-
-def test_handle_invite_analyst_prints_invite_and_warns_about_secret(capsys):
-    """Output must include the invite payload AND the "save the secret
-    now" warning. Pinned because the secret can never be regenerated;
-    losing the warning would lead to a lockout."""
-    with (
-        patch("backend.config.list_service_ids", return_value=["svc"]),
-        patch("backend.config.load_config", return_value={"access_level": "read_write"}),
-        patch(
-            "backend.provision.cli.generate_analyst_invite",
-            return_value={"service_id": "svc", "secret_key": "abc123"},
-        ),
-    ):
-        cli.handle_invite_analyst(_args(service_id="svc"))
-    out = capsys.readouterr().out
-    assert "abc123" in out
-    assert "secret" in out.lower()
-
-
-def test_handle_invite_analyst_exits_1_on_generation_failure(capsys):
-    """If ``generate_analyst_invite`` raises (e.g., DB write failed),
-    surface as exit 1 with the message. Pinned because silent failures
-    here have led to admins thinking the invite went through."""
-    with (
-        patch("backend.config.list_service_ids", return_value=["svc"]),
-        patch("backend.config.load_config", return_value={"access_level": "read_write"}),
-        patch("backend.provision.cli.generate_analyst_invite", side_effect=RuntimeError("db locked")),
-    ):
-        with pytest.raises(SystemExit) as exc:
-            cli.handle_invite_analyst(_args(service_id="svc"))
-    assert exc.value.code == 1
 
 
 def test_handle_update_logs_fails_when_no_services_configured(capsys):
@@ -2299,29 +2215,6 @@ def test_handle_teardown_exits_1_when_prompt_returns_no_token():
         with pytest.raises(SystemExit) as exc:
             cli.handle_teardown(_args(service_id="svc-1"))
     assert exc.value.code == 1
-
-
-def test_handle_invite_analyst_multi_service_prompts_for_id():
-    """When multiple services exist and no --service-id was supplied,
-    print a menu and prompt for the ID. Pinned because losing this
-    would auto-pick the first service silently (wrong service in a
-    multi-tenant install)."""
-    cfgs_by_id = {
-        "svc-a": {"name": "Svc A", "access_level": "read_write"},
-        "svc-b": {"name": "Svc B", "access_level": "read_write"},
-    }
-
-    with (
-        patch("backend.config.list_service_ids", return_value=["svc-a", "svc-b"]),
-        patch("backend.config.load_config", side_effect=lambda sid: cfgs_by_id.get(sid)),
-        patch("backend.provision.cli.ask", return_value="svc-b"),
-        patch(
-            "backend.provision.cli.generate_analyst_invite",
-            return_value={"service_id": "svc-b", "secret_key": "sk"},
-        ),
-    ):
-        # Should NOT raise — the prompt picks svc-b
-        cli.handle_invite_analyst(_args(service_id=None))
 
 
 def test_wizard_default_token_from_env(monkeypatch):

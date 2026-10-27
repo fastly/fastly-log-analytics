@@ -31,8 +31,7 @@ The **SQL Query Pad** provides an interactive SQL analytical development interfa
 | Role | Access Level | Data Redaction & Capabilities |
 |---|---|---|
 | **Admin (`read_write`)** | Full Access | Arbitrary read-only SQL execution, schema exploration, CSV download. |
-| **Analyst Path B (Remote Share)** | Read-Only Access | Read-only SQL queries allowed (`POST /api/query` in `_ANALYST_ALLOWED_WRITE_PREFIXES`, `GET /api/query/schema/{service_id}` in `_READ_ALLOWLIST`); queries automatically sanitize/mask client IP (`mask_ips_for` / `mask_ip_values`) and redact sensitive keys (`redact_keys`); CSV export allowed. |
-| **Analyst Path A (JSON Join)** | Local Read-Only | Queries local DuckDB engine. |
+| **Analyst (Remote Share)** | Read-Only Access | Read-only SQL queries allowed (`POST /api/query` in `_ANALYST_ALLOWED_WRITE_PREFIXES`, `GET /api/query/schema/{service_id}` in `_READ_ALLOWLIST`); queries automatically sanitize/mask client IP (`mask_ips_for` / `mask_ip_values`) and redact sensitive keys (`redact_keys`); CSV export allowed. |
 
 ---
 
@@ -97,7 +96,7 @@ The **SQL Query Pad** provides an interactive SQL analytical development interfa
 - [x] **3. SQL Execution Contract:** Execute `SELECT count(*) AS total_count FROM logs` and verify valid JSON result and rendered table.
 - [x] **4. Safety Enforcement:** Execute `DROP TABLE logs`, `DELETE`, `INSERT`, `ALTER` and verify HTTP 403 `sql_not_permitted` error and UI alert banner.
 - [x] **5. Schema Explorer:** Verify `/api/query/schema/{service_id}` and schema sidebar display column names and types.
-- [x] **6. Role Verification:** Confirm Analyst Path B observes masked client IPs (`xxx.xxx.xxx.xxx`) when querying `client_ip`.
+- [x] **6. Role Verification:** Confirm Analyst observes masked client IPs (`xxx.xxx.xxx.xxx`) when querying `client_ip`.
 - [x] **7. Telemetry & Query Audit:** Verify executed SQL query is recorded in `_debug_queries` / `debug_queries`.
 
 ---

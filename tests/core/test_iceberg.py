@@ -369,23 +369,19 @@ def test_update_iceberg_view_lock_contention(
         iceberg._service_locks.pop(source_key, None)
 
 
-def test_source_variant_fp_changes_when_access_or_time_range_changes():
-    base = {"name": "svc-002", "access_level": "read_write"}
-    assert _source_variant_fp(base) == ("read_write", (), True)
-    analyst = {"name": "svc-002", "access_level": "read_only"}
-    assert _source_variant_fp(analyst) == ("read_only", (), True)
-    assert _source_variant_fp(analyst) != _source_variant_fp(base)
+def test_source_variant_fp_changes_when_time_range_or_cron_changes():
+    base = {"name": "svc-002"}
+    assert _source_variant_fp(base) == ((), True)
 
     bounded = {
         "name": "svc-002",
-        "access_level": "read_only",
         "time_range": {"start": "2026-06-01T00:00:00Z", "end": "2026-06-02T00:00:00Z"},
     }
     fp_bounded = _source_variant_fp(bounded)
-    assert fp_bounded != _source_variant_fp(analyst)
-    assert fp_bounded[1] == ("2026-06-01T00:00:00Z", "2026-06-02T00:00:00Z")
+    assert fp_bounded != _source_variant_fp(base)
+    assert fp_bounded[0] == ("2026-06-01T00:00:00Z", "2026-06-02T00:00:00Z")
 
-    cron_disabled = {"name": "svc-002", "access_level": "read_write", "provisioning": {"cron_sync": {"enabled": False}}}
+    cron_disabled = {"name": "svc-002", "provisioning": {"cron_sync": {"enabled": False}}}
     assert _source_variant_fp(cron_disabled) != _source_variant_fp(base)
 
 
@@ -484,7 +480,6 @@ def test_reset_excludes_a_concurrent_commit_attempt(monkeypatch, s3_mock, fos_so
             "fos_region": "us-east-1",
             "fos_access_key_id": "test-key",
             "fos_secret_access_key": "test-secret",
-            "access_level": "read_write",
             "provisioning": {"cron_sync": {"enabled": True}},
         },
     )
@@ -955,11 +950,12 @@ def test_ducklake_attach_extension_options(monkeypatch, tmp_path):
 
 
 def test_drop_service_ducklake_state_drops_real_tables_and_files(monkeypatch, tmp_path):
+    import psycopg
+
     import backend.core.duckdb as core_duckdb
-    from backend.core.iceberg._core import ducklake_table_name
+    from backend.core.iceberg._core import _resolve_catalog_dsn, ducklake_table_name
 
     data_dir = tmp_path / "data"
-    monkeypatch.setattr(ducklake.config, "DUCKLAKE_CATALOG", f"ducklake:{tmp_path / 'lake.ducklake'}")
     monkeypatch.setattr(ducklake.config, "DUCKLAKE_DATA_PATH", str(data_dir))
     monkeypatch.delenv("DUCKLAKE_EXTENSION_PATH", raising=False)
     mine, other = {"service_id": "svc_drop", "name": "svc_drop"}, {"service_id": "svc_keep", "name": "svc_keep"}
@@ -969,14 +965,42 @@ def test_drop_service_ducklake_state_drops_real_tables_and_files(monkeypatch, tm
     try:
         assert ducklake._ducklake_attach(con, mine, read_only=False)
         for name in (*names, keep):
+            con.execute(f'DROP TABLE IF EXISTS lake."{name}"')
             con.execute(f'CREATE TABLE lake."{name}" AS SELECT i AS a FROM range(100) t(i)')
         assert list(data_dir.rglob("*.parquet"))
     finally:
         con.close()
 
+    pg_dsn = _resolve_catalog_dsn("svc_drop").removeprefix("postgres:")
+
+    def catalog_rows(table_names):
+        """Rows still keyed to these tables across every catalog child table."""
+        with psycopg.connect(pg_dsn) as pg:
+            ids = [
+                r[0]
+                for r in pg.execute(
+                    "SELECT table_id FROM ducklake_table WHERE table_name = ANY(%s)", (list(table_names),)
+                )
+            ]
+            children = [
+                r[0]
+                for r in pg.execute(
+                    "SELECT table_name FROM information_schema.columns WHERE table_schema = 'public' "
+                    "AND table_name LIKE 'ducklake\\_%' AND column_name = 'table_id'"
+                )
+            ]
+            return sum(
+                pg.execute(f'SELECT count(*) FROM "{c}" WHERE table_id = ANY(%s)', (ids,)).fetchone()[0]
+                for c in children
+            )
+
+    assert catalog_rows(names) and catalog_rows([keep])
+    keep_rows_before = catalog_rows([keep])
+
     with patch.object(core_duckdb, "get_source_for_service", return_value=mine):
         result = core_duckdb.drop_service_ducklake_state("svc_drop")
     assert result["tables_dropped"] == 3
+    assert result["catalog_rows_purged"] > 0
 
     con = duckdb.connect()
     try:
@@ -984,11 +1008,16 @@ def test_drop_service_ducklake_state_drops_real_tables_and_files(monkeypatch, tm
         remaining = {
             r[0] for r in con.execute("SELECT table_name FROM duckdb_tables() WHERE database_name = 'lake'").fetchall()
         }
+        assert con.execute(f'SELECT count(*) FROM lake."{keep}"').fetchone()[0] == 100
         con.execute(f'DROP TABLE IF EXISTS lake."{keep}"')
+        # A catalog-wide expiry still works, i.e. the purge left no orphaned rows behind.
+        con.execute("CALL ducklake_expire_snapshots('lake', older_than => now() + INTERVAL 1 DAY)")
     finally:
         con.close()
     assert not names & remaining, "the torn-down service's tables are dropped"
     assert keep in remaining, "other services' tables survive"
+    assert catalog_rows(names) == 0, "no catalog rows of the torn-down service are left"
+    assert keep_rows_before > 0
     assert not any(p.parent.name in names for p in data_dir.rglob("*.parquet"))
     assert any(p.parent.name == keep for p in data_dir.rglob("*.parquet")), "other services' data files survive"
 
@@ -1679,15 +1708,6 @@ def _reset_pg_state():
 # ── Shared test helpers ─────────────────────────────────────────────────────
 
 
-def _seed_view_directly(sid: str, view_id: str = "old", name: str = "Old View") -> None:
-    con = metadata_db.get_con(sid)
-    con.execute(
-        "INSERT OR REPLACE INTO views (id, service_id, name, filters_json, page) VALUES (?, ?, ?, ?, ?)",
-        (view_id, sid, name, "{}", "dashboard"),
-    )
-    con.commit()
-
-
 def _insert_raw_ingested_file(
     sid: str,
     file_name: str,
@@ -1752,31 +1772,10 @@ def _exploding_executemany(con):
         con.executemany = real_executemany  # type: ignore[method-assign]
 
 
-# ── replace_views_for_service & audit_logs ──────────────────────────────────
+# ── audit_logs ──────────────────────────────────────────────────────────────
 
 
-def test_replace_views_for_service(sid):
-    _seed_view_directly(sid, view_id="old", name="Old View")
-    view = {
-        "id": "new1",
-        "service_id": sid,
-        "name": "New A",
-        "filters_json": "{}",
-        "time_range_type": "rolling",
-        "start_time": None,
-        "end_time": None,
-        "page": "dashboard",
-        "created_at": "2026-01-01T00:00:00Z",
-    }
-    metadata_db.replace_views_for_service(sid, [view])
-    names = {v["name"] for v in metadata_db.list_views(sid)}
-    assert "Old View" not in names and "New A" in names
-
-    metadata_db.replace_views_for_service(sid, [])
-    assert metadata_db.list_views(sid) == []
-
-
-def test_audit_logs_crud_export_and_replace(sid):
+def test_audit_logs_crud_and_export(sid):
     metadata_db.record_audit(sid, "alert_created", {"alert_id": "a1", "name": "5xx"}, actor="dmichael")
     entries = metadata_db.list_audit(sid)
     assert len(entries) == 1
@@ -1789,16 +1788,6 @@ def test_audit_logs_crud_export_and_replace(sid):
     for i in range(5):
         metadata_db.record_audit(sid, f"event_{i}", {}, actor="x")
     assert len(metadata_db.list_audit(sid, limit=2)) == 2
-
-    entry = {
-        "timestamp": "2026-01-01T00:00:00Z",
-        "source_name": sid,
-        "event_type": "evt_new",
-        "details": json.dumps({"k": "v"}),
-        "actor": "admin",
-    }
-    metadata_db.replace_audit_for_service(sid, [entry])
-    assert {e["event_type"] for e in metadata_db.list_audit(sid)} == {"evt_new"}
 
 
 # ── ingested_files & dedup cache ────────────────────────────────────────────

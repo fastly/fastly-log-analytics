@@ -754,9 +754,7 @@ def test_retrain_smoke(client, with_config, tmp_path):
     )
 
     with (
-        patch(
-            "backend.core.duckdb.get_source_for_service", return_value={"name": LOG_SVC, "access_level": "read_write"}
-        ),
+        patch("backend.core.duckdb.get_source_for_service", return_value={"name": LOG_SVC}),
         patch("backend.core.duckdb.get_connection") as mock_get_con,
         patch("backend.scoring.fixtures.extract_traces", return_value=iter([])),
         patch("backend.scoring.matrix.build_matrix", return_value=(fake_matrix, fake_stats)),

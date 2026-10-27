@@ -37,10 +37,8 @@ from .fastly_api import (  # noqa: E402
 )
 from .orchestrator import (  # noqa: E402
     _sync_crontab,
-    analyst_path_a_supported,
     ensure_fos_access_key,
     find_fos_key,
-    generate_analyst_invite,
     perform_teardown,
     provision,
     write_service_config,
@@ -80,8 +78,6 @@ __all__ = [
     "find_fos_key",
     # orchestrator
     "_sync_crontab",
-    "analyst_path_a_supported",
-    "generate_analyst_invite",
     "perform_teardown",
     "provision",
     "write_service_config",

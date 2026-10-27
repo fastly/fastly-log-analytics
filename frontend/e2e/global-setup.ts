@@ -117,7 +117,6 @@ function _seedDefaultServiceConfig(configsDir: string): void {
     fastly_api_key: '',
     cdn_service_id: '',
     cdn_secret: 'mock-cdn-secret',
-    access_level: 'read_write',
     provisioning: { endpoint_name: 'Mock Logger' },
     // Cron-written storage totals (FLA_DEV_NO_CRONS=1 means no cron ever
     // writes them here). With both present, GET /api/usage/current-storage
@@ -167,7 +166,6 @@ function _seedRealRtServiceConfig(configsDir: string): void {
     fastly_api_key: apiKey,
     cdn_service_id: serviceId,
     cdn_secret: 'mock-cdn-secret',
-    access_level: 'read_write',
     provisioning: { endpoint_name: 'Mock Logger' },
   }
   writeFileSync(join(configsDir, `${serviceId}.json`), JSON.stringify(config, null, 2))

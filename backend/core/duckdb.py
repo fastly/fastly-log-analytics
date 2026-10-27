@@ -21,6 +21,7 @@ from typing import Any, NoReturn
 
 import boto3
 import duckdb
+import psycopg
 from botocore import UNSIGNED
 from botocore.config import Config
 
@@ -123,7 +124,7 @@ def _build_default_source() -> dict:
     return {
         "name": "default", "endpoint": "", "access_key_id": "", "secret_access_key": "", "bucket": "",
         "prefix": "", "region": "us-east-1", "cdn_url": "", "cdn_secret": "", "cdn_service_id": "",
-        "logging_service_id": "", "duckdb_path": "logs.duckdb", "access_level": "read_write", "storage_mode": "cloud",
+        "logging_service_id": "", "duckdb_path": "logs.duckdb", "storage_mode": "cloud",
     }  # fmt: skip
 
 
@@ -890,14 +891,11 @@ def get_sync_status(
     if not is_configured(src):
         return {
             "configured": False, "local_rows": 0, "ingested": 0, "fos_total": 0,
-            "storage_mode": "cloud", "access_level": "read_write",
+            "storage_mode": "cloud",
         }  # fmt: skip
     cached_status = svcconfig.get_status(src["name"])
     if cached_status and not force and skip_fos:
-        cached_status.update(
-            access_level=src.get("access_level", "read_write"),
-            storage_mode=src.get("storage_mode", "cloud"), configured=True,
-        )  # fmt: skip
+        cached_status.update(storage_mode=src.get("storage_mode", "cloud"), configured=True)
         return cached_status
     table_name = _safe_table_name(src["name"])
     try:
@@ -1034,7 +1032,7 @@ def get_sync_status(
         "ingested_bytes": total_bytes, "avg_log_size_kb": avg_log_size_kb, "table_name": table_name,
         "last_ingested_at": _safe_iso(last_ingested), "latest_log_at": _safe_iso(latest_log_at),
         "earliest_log_at": _safe_iso(earliest_log_at), "latest_ingested_file_at": latest_ingested_file_at,
-        "latest_available_file_at": latest_ingested_file_at, "access_level": src.get("access_level", "read_write"),
+        "latest_available_file_at": latest_ingested_file_at,
         "configured": is_configured(src), "storage_mode": src.get("storage_mode", "cloud"),
         "logging_service_id": src.get("logging_service_id", ""), "cdn_service_id": src.get("cdn_service_id", ""),
         "cron_stats": cron_stats,
@@ -1913,13 +1911,49 @@ def _reinit_ducklake_tables(
         con2.close()
 
 
+def _purge_dropped_catalog_rows(service_id: str, table_names: list[str]) -> int:
+    """Delete the catalog rows of already-dropped DuckLake tables, atomically.
+
+    ``DROP TABLE`` only end-dates ``ducklake_table``; every child row keyed by ``table_id`` stays until
+    a snapshot expiry. Removing a subset corrupts the catalog (``ducklake_expire_snapshots`` then fails
+    on the orphaned rows), so all child tables go in one transaction. Live tables are never touched.
+    """
+    from backend.core.iceberg._core import _resolve_catalog_dsn
+
+    if not (dsn := _resolve_catalog_dsn(service_id)):
+        return 0
+    deleted = 0
+    with psycopg.connect(dsn.removeprefix("postgres:")) as pg:
+        ids = [
+            r[0]
+            for r in pg.execute(
+                "SELECT table_id FROM ducklake_table WHERE table_name = ANY(%s) AND end_snapshot IS NOT NULL",
+                (table_names,),
+            )
+        ]
+        if not ids:
+            return 0
+        children = [
+            r[0]
+            for r in pg.execute(
+                "SELECT table_name FROM information_schema.columns WHERE table_schema = 'public' "
+                "AND table_name LIKE 'ducklake\\_%' AND column_name = 'table_id' AND table_name <> 'ducklake_table'"
+            )
+        ]
+        for child in children:
+            deleted += pg.execute(f'DELETE FROM "{child}" WHERE table_id = ANY(%s)', (ids,)).rowcount
+        deleted += pg.execute("DELETE FROM ducklake_table WHERE table_id = ANY(%s)", (ids,)).rowcount
+    return deleted
+
+
 def drop_service_ducklake_state(service_id: str) -> dict[str, int]:
     """Teardown helper: drop a service's DuckLake tables and delete its local DuckLake data files.
 
     The catalog may be shared across services, so only this service's tables are dropped (never a
-    catalog-wide snapshot expiry). Dropped tables stop appearing in the catalog; their history rows
-    are removed by the scheduled snapshot expiry. Remote (``s3://``) data is removed by the FOS
-    bucket or prefix deletion that teardown already offers.
+    catalog-wide snapshot expiry). After the drops, the dropped tables' own catalog rows (columns,
+    data-file entries, statistics) are deleted in one Postgres transaction keyed by their table ids,
+    so nothing of this service is left behind; shared snapshot rows stay. Remote (``s3://``) data is
+    removed by the FOS bucket or prefix deletion that teardown already offers.
 
     Raises ``RuntimeError`` when the catalog cannot be attached or a drop fails, and leaves local
     files in place in that case so the catalog never points at deleted data.
@@ -1945,6 +1979,7 @@ def drop_service_ducklake_state(service_id: str) -> dict[str, int]:
         con.close()
     if errors:
         raise RuntimeError(f"DuckLake table drop failed for service {service_id!r}: {'; '.join(errors)}")
+    purged = _purge_dropped_catalog_rows(service_id, [ducklake_table_name(source, t) for t in tables])
     root = _resolve_data_path(source, service_id)
     removed = 0
     if not root.startswith(("s3://", "http://", "https://")):
@@ -1964,7 +1999,7 @@ def drop_service_ducklake_state(service_id: str) -> dict[str, int]:
                 for _ in _wipe_ducklake_table_dirs(root, tbl):
                     pass
                 removed += len(existing)
-    return {"tables_dropped": dropped, "local_dirs_removed": removed}
+    return {"tables_dropped": dropped, "local_dirs_removed": removed, "catalog_rows_purged": purged}
 
 
 def _purge_clickhouse_tables_gen(

@@ -428,17 +428,10 @@ export function useServiceSwitchReset(
  * Whether the current session is an "analyst" (read-only role).
  */
 export function useIsAnalyst(): boolean {
-  const activeServiceId = useServiceStore(s => s.activeServiceId)
-  const services = useServiceStore(s => s.services)
-  const isRemoteAnalyst = useBootstrapCacheSelector(
+  return useBootstrapCacheSelector(
     (bootstrapData) =>
       (bootstrapData?.settings as Record<string, unknown> | undefined)?.is_remote_analyst === true,
     false,
-  )
-  const activeService = services?.find(s => s.id === activeServiceId)
-  return (
-    activeService?.accessLevel === 'read_only' ||
-    isRemoteAnalyst
   )
 }
 

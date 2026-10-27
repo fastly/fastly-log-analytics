@@ -877,12 +877,10 @@ from tests.cron.conftest import _StubSource as _fake_src
 
 def _fake_cfg(
     service_id: str = "svc-prewarm-contract",
-    access_level: str = "read_write",
     ip_enabled: bool = True,
     ip_interval: int | None = None,
 ) -> dict:
     prov: dict = {
-        "access_level": access_level,
         "cron_sync": {"enabled": True},
         "cron_compact": {"enabled": False},
     }
@@ -894,7 +892,6 @@ def _fake_cfg(
     return {
         "service_id": service_id,
         "log_period": 60,
-        "access_level": access_level,
         "provisioning": prov,
     }
 
@@ -913,7 +910,6 @@ def test_contract_dynamic_registration_gating_and_rescheduling():
     cfg_default = {
         "service_id": "svc-ip-default",
         "log_period": 60,
-        "access_level": "read_write",
         "provisioning": {"cron_sync": {"enabled": True}},
     }
     with (
@@ -959,32 +955,6 @@ def test_contract_dynamic_registration_gating_and_rescheduling():
     mock_job.reschedule.assert_called_once_with("interval", seconds=180, jitter=15)
 
 
-def test_contract_dual_role_registration_admin_and_analyst():
-    """Registered for both Admin (read_write) and Analyst Path A (read_only)."""
-    from unittest.mock import patch
-
-    from backend.cron.scheduler import Scheduler
-
-    s = Scheduler()
-    cfg_admin = _fake_cfg("svc-role-admin", access_level="read_write")
-    cfg_analyst = _fake_cfg("svc-role-analyst", access_level="read_only")
-
-    with (
-        patch("backend.config.list_configs", return_value=[cfg_admin, cfg_analyst]),
-        patch(
-            "backend.core.duckdb.get_source_for_service",
-            side_effect=lambda sid: _fake_src(sid, "read_only" if "analyst" in sid else "read_write"),
-        ),
-        patch("backend.core.duckdb.is_configured", return_value=True),
-        patch("backend.config.get_ngwaf_workspace_id", return_value=None),
-        patch("backend.core.metadata.count_alerts", return_value=0),
-    ):
-        s._sync_jobs()
-
-    assert "insights_prewarmer_svc-role-admin" in s._job_ids, "Admin must register insights_prewarmer"
-    assert "insights_prewarmer_svc-role-analyst" in s._job_ids, "Analyst Path A must register insights_prewarmer"
-
-
 def test_contract_pod_safety_registers_on_apscheduler():
     """In distributed High-Scale mode, insights_prewarmer runs strictly on the web serving pod's APScheduler."""
     from unittest.mock import patch
@@ -993,7 +963,7 @@ def test_contract_pod_safety_registers_on_apscheduler():
 
     s = Scheduler()
 
-    cfg = _fake_cfg("svc-highscale-pod", access_level="read_write")
+    cfg = _fake_cfg("svc-highscale-pod")
     with (
         patch("backend.config.list_configs", return_value=[cfg]),
         patch("backend.core.duckdb.get_source_for_service", return_value=_fake_src("svc-highscale-pod")),
@@ -1117,9 +1087,7 @@ def _sample_source(service_id: str = "svc-alerts-contract") -> dict:
         "service_name": service_id,
         "logging_service_id": f"log-{service_id}",
         "bucket": "test-fos-bucket",
-        "access_level": "read_write",
         "provisioning": {
-            "access_level": "read_write",
             "log_period": 60,
             "cron_alerts": {
                 "enabled": True,
@@ -1283,7 +1251,6 @@ def test_contract_unregistration_when_all_alerts_deleted():
 
     cfg = {
         "service_id": service_id,
-        "access_level": "read_write",
         "provisioning": {"cron_alerts": {"enabled": True, "interval_seconds": 60}},
     }
 

@@ -13,7 +13,7 @@ v3.0.0 replaces the commit-path storage engine (Apache Iceberg/pyiceberg → Duc
 | | You are here if | What you do |
 |---|---|---|
 | **Standard** (default) | You run one instance. `DEPLOYMENT_MODE=standard` (with PostgreSQL 16 included in the compose stack for `METADATA_DSN` and `DUCKLAKE_CATALOG`). | Tear down on v2, pull, restart, provision. |
-| **High-scale** (opt-in) | You want ingestion to fan out across many workers with ClickHouse. | The same, plus external Postgres + valkey + ClickHouse and the env vars in Path B below. |
+| **High-scale** (opt-in) | You want ingestion to fan out across many workers with ClickHouse. | The same, plus external Postgres + valkey + ClickHouse and the env vars in the High-scale deployment section below. |
 
 ---
 
@@ -33,12 +33,12 @@ Use the Teardown action in the admin UI or the CLI (`uv run python -m backend.pr
 
 ### 4. Note what does not carry forward
 
-- **Analyst "independent instance" (Path A) is not available on v3.** It depended on rebuilding the old catalog from a read-only bucket key, and a DuckLake catalog is not bucket-resident. Use live shared-instance access (remote sharing) instead. See [ADR-17](adr/17-analyst-path-a-ducklake.md).
+- **The analyst "independent instance" (Path A) is removed in v3.** It depended on rebuilding the old catalog from a read-only bucket key, and a DuckLake catalog is not bucket-resident. Use live shared-instance access (remote sharing) instead. See [ADR-17](adr/17-analyst-path-a-ducklake.md).
 - **The serving tier is single-node.** Ingest scales horizontally; the process that answers API requests does not, because the per-service DuckDB file is process-exclusive. Do not run more than one backend replica. See [ADR-18](adr/18-serving-tier-single-pod.md).
 
 ---
 
-## Path A — standard deployment
+## Standard deployment
 
 ```bash
 git pull                      # or pull the new image
@@ -55,7 +55,7 @@ curl -s 'http://localhost/api/health?deep=1'   # expect "status": "ok"
 
 ---
 
-## Path B — high-scale deployment (`DEPLOYMENT_MODE=high_scale`)
+## High-scale deployment (`DEPLOYMENT_MODE=high_scale`)
 
 Only take this path if you actually need ingestion to scale across workers. It requires datastores you provide.
 

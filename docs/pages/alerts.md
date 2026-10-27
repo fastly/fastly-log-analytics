@@ -1,7 +1,7 @@
 # Page Specification: Alerts & Notifications (`/alerts`)
 
 > [!IMPORTANT] **Page Specification Live-Certified (v3.0.0-beta3)**
-> This specification defines the verified contract, architecture behaviors, role permissions, SSRF protections, and automated test cases for `/alerts`. Certified across Local Standard, Remote Standard GCE, and High-Scale Elevation across Admin and Analyst Path B roles.
+> This specification defines the verified contract, architecture behaviors, role permissions, SSRF protections, and automated test cases for `/alerts`. Certified across Local Standard, Remote Standard GCE, and High-Scale Elevation across Admin and Analyst roles.
 
 ---
 
@@ -31,8 +31,7 @@ The **Alerts** page manages automated anomaly detection rules, threshold trigger
 | Role | Access Level | Data Redaction & Capabilities |
 |---|---|---|
 | **Admin (`read_write`)** | Full Access | Create, edit, mute/enable, evaluate, test notification channels, and delete alert rules; configure Webhook, Slack, and PagerDuty destinations. |
-| **Analyst Path B (Remote Share)** | Read-Only Access | Active alerts and rule configurations viewable; rule creation, editing, muting, evaluation, webhook testing, and deletion are blocked (`403 Forbidden`) and disabled/hidden in UI. |
-| **Analyst Path A (JSON Join)** | Local Read-Only | Local alert evaluation against local engine. |
+| **Analyst (Remote Share)** | Read-Only Access | Active alerts and rule configurations viewable; rule creation, editing, muting, evaluation, webhook testing, and deletion are blocked (`403 Forbidden`) and disabled/hidden in UI. |
 
 ---
 
@@ -107,13 +106,13 @@ The **Alerts** page manages automated anomaly detection rules, threshold trigger
 - [x] **3. Alerts List Contract:** Verify configured rules and active incident statuses (`all`, `alerting`, `ok`, `muted`) return accurately.
 - [x] **4. Rule Creation:** (Admin) Create, update (`PUT`), and toggle (`PATCH`) a test alert rule and verify it appears in the list.
 - [x] **5. Test Webhook & Evaluation:** (Admin) Trigger test notification (`POST /api/alerts/{alert_id}/test`) and on-demand evaluation (`POST /api/alerts/evaluate`) and verify HTTP 200 responses.
-- [x] **6. Role Verification:** Confirm Analyst Path B receives HTTP 403 on mutations and observes read-only UI gating.
+- [x] **6. Role Verification:** Confirm Analyst receives HTTP 403 on mutations and observes read-only UI gating.
 - [x] **7. Telemetry & Query Audit:** Verify all DuckDB and PostgreSQL queries are recorded with zero duplicate queries.
 
 ---
 
 ## 10. Automated Test Suite & Traffic Generation
 
-- **Playwright E2E Suite:** `frontend/e2e/pages/alerts.spec.ts` (7 contract tests: route & zero-CLS reservations, status filter tabs, Admin CRUD + toggle + evaluate + test webhook lifecycle, SSRF validation, Analyst Path B 403 boundary, warm FCP/CLS performance budget, and telemetry audit).
-- **Frontend Unit Tests:** `frontend/__tests__/app/alerts.test.tsx` (4 tests covering empty state, KPI summary + status tabs, PATCH toggle + POST test webhook, and Analyst Path B read-only gating).
-- **Backend Unit Tests:** `tests/routers/test_alerts_and_views.py` (22 tests covering CRUD, `PUT` update, status filtering, `/evaluate`, `/preview`, `/test` webhook dispatch, SSRF private-IP rejection, and Analyst Path B 403 enforcement).
+- **Playwright E2E Suite:** `frontend/e2e/pages/alerts.spec.ts` (7 contract tests: route & zero-CLS reservations, status filter tabs, Admin CRUD + toggle + evaluate + test webhook lifecycle, SSRF validation, Analyst 403 boundary, warm FCP/CLS performance budget, and telemetry audit).
+- **Frontend Unit Tests:** `frontend/__tests__/app/alerts.test.tsx` (4 tests covering empty state, KPI summary + status tabs, PATCH toggle + POST test webhook, and Analyst read-only gating).
+- **Backend Unit Tests:** `tests/routers/test_alerts_and_views.py` (22 tests covering CRUD, `PUT` update, status filtering, `/evaluate`, `/preview`, `/test` webhook dispatch, SSRF private-IP rejection, and Analyst 403 enforcement).

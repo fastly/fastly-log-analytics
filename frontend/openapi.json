@@ -16674,184 +16674,6 @@
         }
       }
     },
-    "/api/services/{service_id}/lake-info": {
-      "get": {
-        "tags": [
-          "services"
-        ],
-        "summary": "Get Service Lake Info",
-        "description": "Return Iceberg table range and calendar for a configured service.",
-        "operationId": "get_service_lake_info_api_services__service_id__lake_info_get",
-        "parameters": [
-          {
-            "name": "service",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Service"
-            }
-          },
-          {
-            "name": "service_id",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Service Id"
-            }
-          },
-          {
-            "name": "x-fastly-service-id",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Fastly-Service-Id"
-            }
-          },
-          {
-            "name": "x-service-id",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Service-Id"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ProvisionLakeInfoResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Bad request",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Unauthenticated",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Forbidden",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation failed",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Rate limited",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Internal error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "502": {
-            "description": "Upstream error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "503": {
-            "description": "Service unavailable",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/api/services/{service_id}/cron-settings": {
       "post": {
         "tags": [
@@ -18135,128 +17957,6 @@
             "content": {
               "application/json": {
                 "schema": {}
-              }
-            }
-          },
-          "400": {
-            "description": "Bad request",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Unauthenticated",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Forbidden",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation failed",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Rate limited",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Internal error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "502": {
-            "description": "Upstream error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "503": {
-            "description": "Service unavailable",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/services/{service_id}/generate-viewer-key": {
-      "post": {
-        "tags": [
-          "services"
-        ],
-        "summary": "Api Invite Analyst",
-        "operationId": "api_invite_analyst_api_services__service_id__generate_viewer_key_post",
-        "parameters": [
-          {
-            "name": "service_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Service Id"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AnalystInvite"
-                }
               }
             }
           },
@@ -20806,128 +20506,6 @@
             "content": {
               "application/json": {
                 "schema": {}
-              }
-            }
-          },
-          "400": {
-            "description": "Bad request",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Unauthenticated",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Forbidden",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation failed",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Rate limited",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Internal error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "502": {
-            "description": "Upstream error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "503": {
-            "description": "Service unavailable",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/provision/lake-info": {
-      "post": {
-        "tags": [
-          "provision"
-        ],
-        "summary": "Provision Lake Info",
-        "description": "Return Iceberg table range and calendar for a given bucket/credentials without registering it.",
-        "operationId": "provision_lake_info_api_provision_lake_info_post",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/LakeInfoRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ProvisionLakeInfoResponse"
-                }
               }
             }
           },
@@ -36930,7 +36508,7 @@
           "admin"
         ],
         "summary": "Rebuild Local View Endpoint",
-        "description": "One-button \"fix it\" for a stuck or stale local DuckDB view.\n\nReturns 202 Accepted \u2014 the rebuild runs asynchronously in a worker\nthread and the response body carries a ``run_id`` the caller can\npoll for completion.\n\nClears the in-memory + on-disk caches that drive view SQL generation,\nthen triggers a metadata_sync that re-pulls the catalog from the cloud\nand rebuilds the view. The local raw buffer is NOT touched \u2014\nun-committed data is safe.\n\nWhen to use: after manually editing parquet files, after a catalog\nschema-mapping desync, or when \"Sync All\" already ran and the view\nstill looks wrong. This is the nuclear-option version of refresh.",
+        "description": "One-button \"fix it\" for a stuck or stale local DuckDB view.\n\nReturns 202 Accepted: the rebuild runs in a background thread.\n\nClears the in-memory caches that drive view SQL generation, then rebuilds\nthe view over the DuckLake table and the local buffer, warms the pool, and\nrefreshes the cached service status. The local raw buffer is NOT touched,\nso un-committed data is safe.\n\nWhen to use: after manually editing parquet files, after a catalog\nschema-mapping desync, or when the view still looks wrong. This is the\nnuclear-option version of refresh.",
         "operationId": "rebuild_local_view_endpoint_api_admin_rebuild_local_view_post",
         "parameters": [
           {
@@ -52385,7 +51963,7 @@
           "meta"
         ],
         "summary": "Health Check",
-        "description": "Liveness/readiness probe.\n\nDefault (``?deep=0``) is a cheap liveness response \u2014 200 as soon as the\nHTTP server is answering. Pass ``?deep=1`` to also verify ingest\nfreshness per configured service. A service is reported ``degraded``\nwhen ANY of:\n  - its newest ``ingested_files.ingested_at`` is older than\n    ``stale_minutes`` (default 30) \u2014 SRE-22: before degrading on this\n    check, the cutoff is widened to the service's own historical p95\n    gap between non-empty ingests (never narrower than\n    ``stale_minutes``), so a low-traffic service's organic quiet\n    periods don't false-positive;\n  - the last terminal ``sync`` cron run ended in ``error``;\n  - a ``sync`` row is stuck in ``running`` past ``_STUCK_SYNC_RUNNING_MINS``\n    (SRE-04 \u2014 the orphan-stall / OOM-leak the success-only filter hides);\n  - the latest terminal run of a critical non-sync ingest task\n    (``commit`` / ``metadata_sync``) ended in ``error`` (SRE-05).\nThe endpoint returns HTTP 503 when ANY service is degraded; otherwise 200.\n\nCost: hits SQLite only \u2014 no FOS, no CDN, no Fastly API. Safe to wire\ninto a load-balancer health check.\n\nSecurity (finding 003): the deep variant enumerates every configured\nservice_id and reports per-service sync errors / staleness, which is\noperational metadata an analyst should not see. Force ``deep`` to\nFalse for remote (live-share) callers so analysts only ever get the\nshallow ok/degraded liveness signal.",
+        "description": "Liveness/readiness probe.\n\nDefault (``?deep=0``) is a cheap liveness response \u2014 200 as soon as the\nHTTP server is answering. Pass ``?deep=1`` to also verify ingest\nfreshness per configured service. A service is reported ``degraded``\nwhen ANY of:\n  - its newest ``ingested_files.ingested_at`` is older than\n    ``stale_minutes`` (default 30) \u2014 SRE-22: before degrading on this\n    check, the cutoff is widened to the service's own historical p95\n    gap between non-empty ingests (never narrower than\n    ``stale_minutes``), so a low-traffic service's organic quiet\n    periods don't false-positive;\n  - the last terminal ``sync`` cron run ended in ``error``;\n  - a ``sync`` row is stuck in ``running`` past ``_STUCK_SYNC_RUNNING_MINS``\n    (SRE-04 \u2014 the orphan-stall / OOM-leak the success-only filter hides);\n  - the latest terminal run of a critical non-sync ingest task\n    (``commit``) ended in ``error`` (SRE-05).\nThe endpoint returns HTTP 503 when ANY service is degraded; otherwise 200.\n\nCost: hits SQLite only \u2014 no FOS, no CDN, no Fastly API. Safe to wire\ninto a load-balancer health check.\n\nSecurity (finding 003): the deep variant enumerates every configured\nservice_id and reports per-service sync errors / staleness, which is\noperational metadata an analyst should not see. Force ``deep`` to\nFalse for remote (live-share) callers so analysts only ever get the\nshallow ok/degraded liveness signal.",
         "operationId": "health_check_api_health_get",
         "parameters": [
           {
@@ -53961,150 +53539,6 @@
           "data"
         ],
         "title": "AlertTestWebhookResponse"
-      },
-      "AnalystInvite": {
-        "properties": {
-          "_debug_queries": {
-            "items": {
-              "$ref": "#/components/schemas/DebugQuery"
-            },
-            "type": "array",
-            "title": "Debug Queries"
-          },
-          "_debug_calls": {
-            "items": {
-              "$ref": "#/components/schemas/DebugCall"
-            },
-            "type": "array",
-            "title": "Debug Calls"
-          },
-          "_debug_sqlite": {
-            "items": {
-              "additionalProperties": true,
-              "type": "object"
-            },
-            "type": "array",
-            "title": "Debug Sqlite"
-          },
-          "_debug_postgres": {
-            "items": {
-              "additionalProperties": true,
-              "type": "object"
-            },
-            "type": "array",
-            "title": "Debug Postgres"
-          },
-          "_is_cached": {
-            "type": "boolean",
-            "title": "Is Cached",
-            "default": false
-          },
-          "_response_cache": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/ResponseCacheObservation"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "_section_timings": {
-            "items": {
-              "$ref": "#/components/schemas/SectionTimingEntry"
-            },
-            "type": "array",
-            "title": "Section Timings"
-          },
-          "name": {
-            "type": "string",
-            "title": "Name"
-          },
-          "service_id": {
-            "type": "string",
-            "title": "Service Id"
-          },
-          "fos_bucket": {
-            "type": "string",
-            "title": "Fos Bucket"
-          },
-          "fos_region": {
-            "type": "string",
-            "title": "Fos Region"
-          },
-          "fos_endpoint": {
-            "type": "string",
-            "title": "Fos Endpoint"
-          },
-          "fos_prefix": {
-            "type": "string",
-            "title": "Fos Prefix"
-          },
-          "access_key_id": {
-            "type": "string",
-            "title": "Access Key Id"
-          },
-          "secret_key": {
-            "type": "string",
-            "title": "Secret Key"
-          },
-          "iceberg_metadata_location": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Iceberg Metadata Location"
-          },
-          "cdn_url": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Cdn Url"
-          },
-          "cdn_service_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Cdn Service Id"
-          },
-          "cdn_secret": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Cdn Secret"
-          }
-        },
-        "type": "object",
-        "required": [
-          "name",
-          "service_id",
-          "fos_bucket",
-          "fos_region",
-          "fos_endpoint",
-          "fos_prefix",
-          "access_key_id",
-          "secret_key"
-        ],
-        "title": "AnalystInvite"
       },
       "AsnConcentrationInsightCard": {
         "properties": {
@@ -55698,17 +55132,6 @@
             ],
             "title": "Name"
           },
-          "access_level": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Access Level"
-          },
           "cmcd_enabled": {
             "anyOf": [
               {
@@ -55742,22 +55165,6 @@
             ],
             "title": "Rum Log Period"
           },
-          "analyst_path_a_supported": {
-            "type": "boolean",
-            "title": "Analyst Path A Supported",
-            "default": true
-          },
-          "analyst_path_a_reason": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Analyst Path A Reason"
-          },
           "is_high_scale": {
             "anyOf": [
               {
@@ -55789,17 +55196,6 @@
               }
             ],
             "title": "Initializing"
-          },
-          "access_level": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Access Level"
           },
           "storage_mode": {
             "anyOf": [
@@ -62594,7 +61990,7 @@
           "status"
         ],
         "title": "HealthCronFailure",
-        "description": "One service+task whose most recent terminal cron run ended in error.\n\nPowers the SRE-03 ``recent_cron_failures`` glance surface: a non-``sync``\nper-service cron (commit / optimize / rollup_compact / metadata_sync / \u2026)\nerroring every tick is otherwise visible only by opening that service's\nCron History. The aggregate keeps the standing System Health card honest."
+        "description": "One service+task whose most recent terminal cron run ended in error.\n\nPowers the SRE-03 ``recent_cron_failures`` glance surface: a non-``sync``\nper-service cron (commit / optimize / rollup_compact / \u2026)\nerroring every tick is otherwise visible only by opening that service's\nCron History. The aggregate keeps the standing System Health card honest."
       },
       "HealthDiskStats": {
         "properties": {
@@ -71380,62 +70776,6 @@
         "title": "Ipv6AdoptionRow"
       },
       "JsonValue": {},
-      "LakeInfoRequest": {
-        "properties": {
-          "bucket": {
-            "type": "string",
-            "title": "Bucket"
-          },
-          "region": {
-            "type": "string",
-            "title": "Region"
-          },
-          "access_key": {
-            "type": "string",
-            "title": "Access Key"
-          },
-          "secret_key": {
-            "type": "string",
-            "title": "Secret Key"
-          },
-          "prefix": {
-            "type": "string",
-            "title": "Prefix",
-            "default": ""
-          },
-          "endpoint": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Endpoint"
-          },
-          "iceberg_metadata_location": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Iceberg Metadata Location"
-          }
-        },
-        "type": "object",
-        "required": [
-          "bucket",
-          "region",
-          "access_key",
-          "secret_key"
-        ],
-        "title": "LakeInfoRequest",
-        "description": "Body for ``POST /api/provision/lake-info``."
-      },
       "LargeUncompressedAssetRow": {
         "properties": {
           "url": {
@@ -81444,267 +80784,6 @@
         "type": "object",
         "title": "ProvisionIngestResponse"
       },
-      "ProvisionLakeInfoCalendarDay": {
-        "properties": {
-          "data_files": {
-            "type": "integer",
-            "title": "Data Files"
-          },
-          "size_bytes": {
-            "type": "integer",
-            "title": "Size Bytes"
-          }
-        },
-        "additionalProperties": true,
-        "type": "object",
-        "required": [
-          "data_files",
-          "size_bytes"
-        ],
-        "title": "ProvisionLakeInfoCalendarDay"
-      },
-      "ProvisionLakeInfoRange": {
-        "properties": {
-          "start": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Start"
-          },
-          "end": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "End"
-          }
-        },
-        "additionalProperties": true,
-        "type": "object",
-        "title": "ProvisionLakeInfoRange"
-      },
-      "ProvisionLakeInfoResponse": {
-        "properties": {
-          "ok": {
-            "anyOf": [
-              {
-                "type": "boolean"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Ok"
-          },
-          "table_exists": {
-            "anyOf": [
-              {
-                "type": "boolean"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Table Exists"
-          },
-          "message": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Message"
-          },
-          "error": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Error"
-          },
-          "info": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/ProvisionLakeInfoTable"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "calendar": {
-            "anyOf": [
-              {
-                "additionalProperties": {
-                  "$ref": "#/components/schemas/ProvisionLakeInfoCalendarDay"
-                },
-                "type": "object"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Calendar"
-          },
-          "range": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/ProvisionLakeInfoRange"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          }
-        },
-        "additionalProperties": true,
-        "type": "object",
-        "title": "ProvisionLakeInfoResponse"
-      },
-      "ProvisionLakeInfoTable": {
-        "properties": {
-          "table_name": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Table Name"
-          },
-          "snapshots": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Snapshots"
-          },
-          "data_files": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Data Files"
-          },
-          "size_bytes": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Size Bytes"
-          },
-          "latest_snapshot_at": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Latest Snapshot At"
-          },
-          "buffer_files": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Buffer Files"
-          },
-          "buffer_size_bytes": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Buffer Size Bytes"
-          },
-          "table_location": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Table Location"
-          },
-          "region": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Region"
-          },
-          "min_timestamp": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Min Timestamp"
-          },
-          "max_timestamp": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Max Timestamp"
-          }
-        },
-        "additionalProperties": true,
-        "type": "object",
-        "title": "ProvisionLakeInfoTable"
-      },
       "ProvisionReconcileRequest": {
         "properties": {
           "service_id": {
@@ -89928,17 +89007,6 @@
             ],
             "title": "Log Period"
           },
-          "access_level": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Access Level"
-          },
           "storage_mode": {
             "anyOf": [
               {
@@ -90077,17 +89145,6 @@
               }
             ],
             "title": "Rum Log Period"
-          },
-          "analyst_path_a_supported": {
-            "anyOf": [
-              {
-                "type": "boolean"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Analyst Path A Supported"
           },
           "is_high_scale": {
             "anyOf": [
@@ -93368,17 +92425,6 @@
               }
             ],
             "title": "Storage Mode"
-          },
-          "access_level": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Access Level"
           },
           "latest_ingested_file_at": {
             "anyOf": [

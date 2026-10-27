@@ -1,1 +1,1 @@
-export { RumVersionPicker, StorageStep, AnalyzeStep } from '../ProvisionWizard'
+export { RumVersionPicker, StorageStep } from '../ProvisionWizard'

@@ -90,7 +90,7 @@ const { mockSetServices, mockSetInitialized, mockSetActiveServiceId, mockService
   const mockSetActiveServiceId = vi.fn()
   const mockServiceState = {
     activeServiceId: null as string | null,
-    services: [] as Array<{ id: string; name: string; accessLevel?: 'read_write' | 'read_only' }>,
+    services: [] as Array<{ id: string; name: string }>,
     isInitialized: false,
     setActiveServiceId: mockSetActiveServiceId,
     setServices: mockSetServices,
@@ -184,14 +184,8 @@ describe('useBootstrap (MSW)', () => {
       http.get(`${API_BASE}/api/bootstrap`, () =>
         HttpResponse.json({
           services: [
-            { service_id: 'svc-1', name: 'My CDN', access_level: 'read_write' },
-            {
-              service_id: 'svc-2',
-              name: 'Staging',
-              access_level: 'read_only',
-              analyst_path_a_supported: false,
-              analyst_path_a_reason: 'Use Path B.',
-            },
+            { service_id: 'svc-1', name: 'My CDN' },
+            { service_id: 'svc-2', name: 'Staging' },
           ],
           active_service_id: 'svc-1',
         }),
@@ -202,20 +196,10 @@ describe('useBootstrap (MSW)', () => {
     await waitFor(() => expect(mockSetServices).toHaveBeenCalled())
     const [mapped] = mockSetServices.mock.calls[0]
     expect(mapped).toEqual([
-      {
-        id: 'svc-1', name: 'My CDN', accessLevel: 'read_write',
-        cmcdEnabled: undefined, rum_enabled: undefined,
-        analystPathASupported: true, analystPathAReason: null,
-      },
-      {
-        id: 'svc-2', name: 'Staging', accessLevel: 'read_only',
-        cmcdEnabled: undefined, rum_enabled: undefined,
-        analystPathASupported: false, analystPathAReason: 'Use Path B.',
-      },
+      { id: 'svc-1', name: 'My CDN', cmcdEnabled: undefined, rum_enabled: undefined },
+      { id: 'svc-2', name: 'Staging', cmcdEnabled: undefined, rum_enabled: undefined },
     ])
     expect(mapped[1].service_id).toBeUndefined()
-    expect(mapped[1].access_level).toBeUndefined()
-    expect(mapped[1].analyst_path_a_supported).toBeUndefined()
     expect(mockSetActiveServiceId).toHaveBeenCalledWith('svc-1')
     expect(mockSetInitialized).toHaveBeenCalledWith(true)
   })
@@ -248,7 +232,7 @@ describe('useBootstrap (MSW)', () => {
     const qc = createTestQueryClient({ queries: { gcTime: 0 } })
     qc.setQueryData(
       ['bootstrap'],
-      { services: [{ service_id: 'svc-old', name: 'Old', access_level: 'read_write' }], active_service_id: 'svc-old' },
+      { services: [{ service_id: 'svc-old', name: 'Old' }], active_service_id: 'svc-old' },
       { updatedAt: Date.now() - 10 * 60 * 1000 },
     )
     server.use(http.get(`${API_BASE}/api/bootstrap`, () => new Promise(() => {})))
@@ -262,7 +246,7 @@ describe('useBootstrap (MSW)', () => {
     server.use(
       http.get(`${API_BASE}/api/bootstrap`, () =>
         HttpResponse.json({
-          services: [{ service_id: 'svc-real', name: 'Real', access_level: 'read_write' }],
+          services: [{ service_id: 'svc-real', name: 'Real' }],
           active_service_id: 'svc-real',
         }),
       ),
@@ -279,7 +263,7 @@ describe('useBootstrap (MSW)', () => {
         calls += 1
         if (failing) return new HttpResponse(null, { status: 503 })
         return HttpResponse.json({
-          services: [{ service_id: 'svc-1', name: 'My CDN', access_level: 'read_write' }],
+          services: [{ service_id: 'svc-1', name: 'My CDN' }],
           active_service_id: 'svc-1',
         })
       }),
@@ -390,11 +374,10 @@ describe('useIsAnalyst, useMaskIps, useEnforceMaskedFilters & useIsDataReady', (
   })
 
   it.each([
-    ['admin (no signals)', 'svc-1', [{ id: 'svc-1', name: 'Test' }], false, false],
+    ['admin (flag absent)', 'svc-1', [{ id: 'svc-1', name: 'Test' }], undefined, false],
+    ['admin (flag false)', 'svc-1', [{ id: 'svc-1', name: 'Test' }], false, false],
     ['remote analyst flag', 'svc-1', [{ id: 'svc-1', name: 'Test' }], true, true],
-    ['read_only accessLevel', 'svc-1', [{ id: 'svc-1', name: 'Test', accessLevel: 'read_only' as const }], false, true],
-    ['both signals', 'svc-1', [{ id: 'svc-1', name: 'Test', accessLevel: 'read_only' as const }], true, true],
-    ['missing service', 'svc-missing', [{ id: 'svc-1', name: 'Test', accessLevel: 'read_only' as const }], false, false],
+    ['remote analyst, service not in store', 'svc-missing', [{ id: 'svc-1', name: 'Test' }], true, true],
   ])('useIsAnalyst (%s) → %s', (_label, activeId, services, isRemoteAnalyst, expected) => {
     mockServiceState.activeServiceId = activeId
     mockServiceState.services = services
@@ -626,8 +609,9 @@ describe('useCardVisibility', () => {
 
 // ── useSyncStatus, useLastSync & useHeaderBadgeStream ───────────────────────
 
-function syncWrapper(opts: { staleSeed?: boolean; staleLastSyncSeed?: boolean } = {}) {
+function syncWrapper(opts: { staleSeed?: boolean; staleLastSyncSeed?: boolean; remoteAnalyst?: boolean } = {}) {
   const qc = createTestQueryClient({ queries: { gcTime: Infinity, staleTime: 0 } })
+  if (opts.remoteAnalyst) qc.setQueryData(queryKeys.bootstrap(), { settings: { is_remote_analyst: true } })
   if (opts.staleSeed) qc.setQueryData(queryKeys.syncStatus('svc-1'), null, { updatedAt: 0 })
   if (opts.staleLastSyncSeed) qc.setQueryData(queryKeys.lastSync('svc-1'), null, { updatedAt: 0 })
   return makeQueryWrapper(qc)
@@ -637,7 +621,7 @@ describe('useSyncStatus, useLastSync & useHeaderBadgeStream', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mockServiceState.activeServiceId = 'svc-1'
-    mockServiceState.services = [{ id: 'svc-1', name: 'Test', accessLevel: 'read_write' }]
+    mockServiceState.services = [{ id: 'svc-1', name: 'Test' }]
   })
 
   afterEach(() => {
@@ -663,8 +647,7 @@ describe('useSyncStatus, useLastSync & useHeaderBadgeStream', () => {
     unmount()
 
     calls = 0
-    mockServiceState.services = [{ id: 'svc-1', name: 'Test', accessLevel: 'read_only' }]
-    const { result: analystRes } = renderHook(() => useSyncStatus(), { wrapper: syncWrapper({ staleSeed: true }) })
+    const { result: analystRes } = renderHook(() => useSyncStatus(), { wrapper: syncWrapper({ staleSeed: true, remoteAnalyst: true }) })
     await new Promise((r) => setTimeout(r, 30))
     expect(calls).toBe(0)
     expect(analystRes.current.data).toBeNull()
@@ -697,8 +680,7 @@ describe('useSyncStatus, useLastSync & useHeaderBadgeStream', () => {
     u2()
 
     calls = 0
-    mockServiceState.services = [{ id: 'svc-1', name: 'Test', accessLevel: 'read_only' }]
-    const { result: analystRes } = renderHook(() => useLastSync(), { wrapper: syncWrapper({ staleLastSyncSeed: true }) })
+    const { result: analystRes } = renderHook(() => useLastSync(), { wrapper: syncWrapper({ staleLastSyncSeed: true, remoteAnalyst: true }) })
     await new Promise((r) => setTimeout(r, 30))
     expect(calls).toBe(0)
     expect(analystRes.current.data).toBeNull()

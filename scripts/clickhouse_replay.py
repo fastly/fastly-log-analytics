@@ -99,7 +99,7 @@ def run(args) -> dict:
     if args.export:
         raise RuntimeError("Snapshot export is not available in this CLI mode")
     cfg = config.load_config(args.service_id)
-    if not cfg or cfg.get("access_level", "read_write") != "read_write":
+    if not cfg:
         raise ValueError("configured admin service required")
     objects = FosArtifacts(config.config_to_source(cfg))
     store = PgManifest()

@@ -72,10 +72,9 @@ const zustandMock = <T,>(state: T) =>
 
 // ── Shared cross-page module mocks ───────────────────────────────────────────
 
-export async function serviceStoreModuleMock(opts: { accessLevel?: string } = {}) {
+export async function serviceStoreModuleMock() {
   const actual = await vi.importActual<typeof import('@/stores/filterStore')>('@/stores/filterStore')
   const service: Record<string, unknown> = { id: 'test-svc', name: 'Test' }
-  if (opts.accessLevel) service.accessLevel = opts.accessLevel
   const state = {
     activeServiceId: 'test-svc', isInitialized: true, services: [service],
     setServices: vi.fn(), setInitialized: vi.fn(), setActiveServiceId: vi.fn(),

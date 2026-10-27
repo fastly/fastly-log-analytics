@@ -12,7 +12,7 @@ The **Admin Session Scoring & Scorer Weights** page (`/admin/session-scoring`) m
 ### Key Tenets:
 - **Composite Single-Round-Trip Hydraulics (`GET /scoring/config` & `GET /scoring/analytics`):** Eliminates 11-way HTTP request waterfalls on page mount by fetching two composite bundles (`ConfigCompositeResponse` and `AnalyticsCompositeResponse` / `/dashboard`) and synchronously seeding individual TanStack Query cache keys (`['scoring-status']`, `['scoring-health']`, `['scoring-score-dist']`, `['scoring-evaluation']`, `['scoring-per-reason']`, `['scoring-top-flagged']`, `['scoring-matrix-versions']`, `['scoring-audit']`) inside `queryFn` before child panels render.
 - **Canonical & Alias Route Support:** Supports both `/api/services/{service_id}/scoring/*` and `/api/services/{service_id}/session-scoring/*` route aliases across all status, composite, configuration, retraining, matrix restore, key rotation, label, and audit endpoints.
-- **Strict Admin RBAC:** Accessible **exclusively** to Admin (`read_write`) users (`/admin/*` prefix blocked by `_ANALYST_BLOCKED_PREFIXES`). All 22 session-scoring admin/mutation endpoints enforce `Depends(require_admin)` + `_ANALYST_BLOCKED_SCORING_SUFFIXES`, returning HTTP `403 Forbidden` with `{"error": "admin_only"}` for Analyst Path B sessions.
+- **Strict Admin RBAC:** Accessible **exclusively** to Admin (`read_write`) users (`/admin/*` prefix blocked by `_ANALYST_BLOCKED_PREFIXES`). All 22 session-scoring admin/mutation endpoints enforce `Depends(require_admin)` + `_ANALYST_BLOCKED_SCORING_SUFFIXES`, returning HTTP `403 Forbidden` with `{"error": "admin_only"}` for Analyst sessions.
 
 ---
 
@@ -29,8 +29,7 @@ The **Admin Session Scoring & Scorer Weights** page (`/admin/session-scoring`) m
 | Role | Access Level | Data Redaction & Capabilities |
 |---|---|---|
 | **Admin (`read_write`)** | Full Control | View status & drift, enable/disable/redeploy edge scorer via SSE, adjust alert/enforcement thresholds (`threshold`, `enforce-threshold`), configure L2 NGWAF enforcement (`l2-enforce`, `enforce-status-code`), edit exclusion regex (`exclude-regex`), trigger model retraining (`retrain`), restore matrix versions (`restore`), rotate signing keys (`rotate-key`), manage ground-truth labels (`labels`), and inspect audit logs (`audit`). |
-| **Analyst Path B (Remote Share)** | Blocked (`403 Forbidden`) | `/admin/session-scoring` route blocked; all `/api/services/{id}/scoring/*` and `/api/services/{id}/session-scoring/*` admin/config/mutation routes return `403 {"error": "admin_only"}`. |
-| **Analyst Path A (JSON Join)** | Read-Only | View-only status/analytics inspection; Fastly Compute/VCL deployment and FOS/KV mutations require `read_write` service credentials. |
+| **Analyst (Remote Share)** | Blocked (`403 Forbidden`) | `/admin/session-scoring` route blocked; all `/api/services/{id}/scoring/*` and `/api/services/{id}/session-scoring/*` admin/config/mutation routes return `403 {"error": "admin_only"}`. |
 
 ---
 
@@ -113,18 +112,18 @@ The **Admin Session Scoring & Scorer Weights** page (`/admin/session-scoring`) m
 
 ## 9. AI Session Automated Verification Checklist
 
-- [x] **1. Route Accessibility:** `GET /admin/session-scoring` returns HTTP 200 for Admin; Analyst Path B receives HTTP 403 on all session-scoring admin/mutation endpoints.
+- [x] **1. Route Accessibility:** `GET /admin/session-scoring` returns HTTP 200 for Admin; Analyst receives HTTP 403 on all session-scoring admin/mutation endpoints.
 - [x] **2. Zero Layout Shift:** Verified pre-allocated reservation containers (`[contain-intrinsic-size:auto_220px]`, `[contain-intrinsic-size:auto_900px]`), synchronous composite cache seeding, and warm-load `CLS <= 0.05`.
 - [x] **3. Composite & Status Contracts:** Verified `/api/services/{service_id}/scoring/config`, `/api/services/{service_id}/scoring/analytics`, and `/api/services/{service_id}/session-scoring/status` schemas.
 - [x] **4. Config & Threshold Validation:** Verified threshold, enforce-threshold, l2-enforce, exclude-regex, enforce-status-code, matrix-versions, restore, rotate-key, and audit endpoints.
-- [x] **5. Role Verification:** Confirmed Analyst Path B receives `403 {"error": "admin_only"}` across both `/scoring/*` and `/session-scoring/*` routes.
+- [x] **5. Role Verification:** Confirmed Analyst receives `403 {"error": "admin_only"}` across both `/scoring/*` and `/session-scoring/*` routes.
 - [x] **6. Telemetry & Manual Refresh Audit:** Verified `X-Page-Load-ID` header propagation and interactive manual refresh (`admin-session-scoring-refresh-btn`).
 
 ---
 
 ## 10. Automated Test Suite
 
-- **Backend Unit Tests:** `tests/routers/test_session_scoring_admin.py` (18 tests covering status, config composite, dashboard composite, threshold, enforce-threshold, l2-enforce, exclude-regex, enforce-status-code, matrix-versions, restore, rotate-key, audit, `/session-scoring/*` aliases, and Analyst Path B `403` enforcement).
+- **Backend Unit Tests:** `tests/routers/test_session_scoring_admin.py` (18 tests covering status, config composite, dashboard composite, threshold, enforce-threshold, l2-enforce, exclude-regex, enforce-status-code, matrix-versions, restore, rotate-key, audit, `/session-scoring/*` aliases, and Analyst `403` enforcement).
 - **Route Table Tripwire & OpenAPI Snapshot:** `tests/remote_access/test_route_table_tripwire.py` & `tests/test_openapi_snapshot.py`.
 - **Frontend Unit Tests:** `frontend/__tests__/app/admin/session-scoring.test.tsx` (3 tests covering composite rendering + zero-CLS containers/tabs, manual refresh invalidation, and `/api/services` fallback).
 - **Prerequisite Dialog Unit Tests:** `frontend/__tests__/components/SessionScoring/StatusPanel.test.tsx` covers the prerequisite gate, readiness recheck and keeping a resolved dialog closed across later readiness regression.

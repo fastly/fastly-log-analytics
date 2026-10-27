@@ -86,9 +86,8 @@ Background jobs respect tenant isolation and dual-role permission models:
 
 | Role | Permitted Jobs | Prohibited Jobs | Architectural Rationale |
 |---|---|---|---|
-| **Admin (`read_write`)** | **All 24 Active Jobs:** Full ingest, compaction, optimization, snapshot expiry, full sweeps, alerting, and housekeeping. | None | Admins own the data plane and cloud storage credentials. |
-| **Analyst Path A (Standalone Instance)** | `sync_metadata_{id}`, `local_compact_{id}`, `partial_hour_merge_{id}`, `alerts_evaluation_{id}`, `insights_prewarmer_{id}`, `metric_snapshot`, `duckdb_recycle`, `share_audit_purge`. | `log_discovery_{id}`, `commit_{id}`, `optimize_{id}`, `expire_{id}`, `full_sync_{id}`, `gap_heal_{id}`, `rum_sync_{id}` / `rum_discovery_{id}`, `rum_commit_{id}`. | Analysts have read-only FOS credentials. They must never perform cloud mutations, cloud commits, or raw log unlinking. |
-| **Analyst Path B (Remote Live Share)** | **Zero Cron Execution:** Read-only analyst sessions connect over HTTPS to the admin's running process. | All cron execution APIs blocked with HTTP 403. | Analysts share the running host server; all background maintenance is handled by the host admin process. |
+| **Admin** | **All Active Jobs:** Full ingest, compaction, optimization, snapshot expiry, full sweeps, alerting, and housekeeping. | None | Admins own the data plane and cloud storage credentials. |
+| **Analyst (Remote Live Share)** | **Zero Cron Execution:** Read-only analyst sessions connect over HTTPS to the admin's running process. | All cron execution APIs blocked with HTTP 403. | Analysts share the running host server; all background maintenance is handled by the host admin process. |
 
 ---
 
@@ -100,8 +99,8 @@ Below is the master catalog of all 24 active scheduled background tasks. Standar
 |---|---|---|---|---|---|---|
 | `log_discovery_{id}` | Derived (`log_period // 2`, min 5s) | streaming [10] / Celery | APScheduler | APScheduler + Celery | Admin | [log-discovery.md](jobs/log-discovery.md) (Verified) |
 | `commit_{id}` | Every 5 min (configurable) | streaming [10] / Celery | APScheduler | APScheduler + Celery | Admin | [commit.md](jobs/commit.md) (Verified) |
-| `local_compact_{id}` | Every 2 min (`LOCAL_COMPACT_INTERVAL_MIN`) | maintenance [3] | APScheduler | Pod APScheduler | Admin & Analyst A | [local-compact.md](jobs/local-compact.md) (Verified) |
-| `partial_hour_merge_{id}` | Every 30 sec (`PARTIAL_HOUR_MERGE_INTERVAL_SEC`) | default [10] | APScheduler | Pod APScheduler | Admin & Analyst A | [partial-hour-merge.md](jobs/partial-hour-merge.md) (Verified) |
+| `local_compact_{id}` | Every 2 min (`LOCAL_COMPACT_INTERVAL_MIN`) | maintenance [3] | APScheduler | Pod APScheduler | Admin | [local-compact.md](jobs/local-compact.md) (Verified) |
+| `partial_hour_merge_{id}` | Every 30 sec (`PARTIAL_HOUR_MERGE_INTERVAL_SEC`) | default [10] | APScheduler | Pod APScheduler | Admin | [partial-hour-merge.md](jobs/partial-hour-merge.md) (Verified) |
 | `rollup_heal_{id}` | Hourly at :05 | maintenance [3] | APScheduler | Pod APScheduler | Admin | [rollup-heal.md](jobs/rollup-heal.md) (Verified) |
 | `rollup_compact_{id}` | Daily 02:00 UTC | maintenance [3] | APScheduler | Pod APScheduler | Admin | [rollup-compact.md](jobs/rollup-compact.md) (Verified) |
 | `optimize_{id}` | Daily 04:00 UTC | maintenance [3] | APScheduler | Pod APScheduler | Admin | [optimize.md](jobs/optimize.md) (Verified) |
@@ -109,9 +108,8 @@ Below is the master catalog of all 24 active scheduled background tasks. Standar
 | `full_sync_{id}` | Every 6h (:30 UTC) | default [10] / Celery | APScheduler | APScheduler + Celery | Admin | [full-sync.md](jobs/full-sync.md) (Verified) |
 | `gap_heal_{id}` | Every 30 min (configurable) | default [10] / Celery | APScheduler | APScheduler + Celery | Admin | [gap-heal.md](jobs/gap-heal.md) (Verified) |
 | `metadata_cleanup_{id}` | Daily 03:15 UTC (configurable) | maintenance [3] | APScheduler | Pod APScheduler | Admin | [metadata-cleanup.md](jobs/metadata-cleanup.md) (Verified) |
-| `alerts_evaluation_{id}` | Every `log_period` sec (configurable) | default [10] | APScheduler | Pod APScheduler | Admin & Analyst A | [alerts-evaluation.md](jobs/alerts-evaluation.md) (Verified) |
-| `insights_prewarmer_{id}` | Every 240 sec (jitter 15s) | maintenance [3] | APScheduler | Pod APScheduler | Admin & Analyst A | [insights-prewarmer.md](jobs/insights-prewarmer.md) (Verified) |
-| `sync_metadata_{id}` | Every `log_period` sec (configurable) | streaming [10] | APScheduler | N/A (ADR-17) | Analyst Path A | [sync-metadata.md](jobs/sync-metadata.md) (Verified) |
+| `alerts_evaluation_{id}` | Every `log_period` sec (configurable) | default [10] | APScheduler | Pod APScheduler | Admin | [alerts-evaluation.md](jobs/alerts-evaluation.md) (Verified) |
+| `insights_prewarmer_{id}` | Every 240 sec (jitter 15s) | maintenance [3] | APScheduler | Pod APScheduler | Admin | [insights-prewarmer.md](jobs/insights-prewarmer.md) (Verified) |
 | `ledger_sweep_{id}` | Every 15 min (configurable) | default [10] / Celery | Disabled | APScheduler + Celery | Admin | [ledger-sweep.md](jobs/ledger-sweep.md) (Verified) |
 | `rum_sync_{id}` (Standard) / `rum_discovery_{id}` (High-Scale) | Derived / 60 sec (min 5s) | streaming [10] (Standard) / Celery (High-Scale) | APScheduler | APScheduler + Celery | Admin | [Standard mode](jobs/rum-sync.md) (Verified); [High-Scale mode](jobs/rum-discovery.md) (Verified) |
 | `rum_commit_{id}` | Post-sync immediate & 1m periodic | default [10] | APScheduler | Disabled | Admin | [rum-commit.md](jobs/rum-commit.md) (Verified) |
@@ -152,7 +150,7 @@ To maintain sub-second UI responsiveness while background jobs run:
 
 1. **3-Executor Thread Pool Architecture (`backend/cron/scheduler.py`):**
    - The in-process APScheduler partitions execution across three isolated `ThreadPoolExecutor` pools configured in `backend/cron/scheduler.py`:
-     - **`streaming` (10 worker threads):** Dedicated exclusively to latency-critical, high-frequency data ingestion, buffer flushing, and metadata pointer synchronization (`log_discovery_`, `rum_discovery_`, `rum_sync_`, `commit_`, `sync_metadata_`).
+     - **`streaming` (10 worker threads):** Dedicated exclusively to latency-critical, high-frequency data ingestion, and buffer flushing (`log_discovery_`, `rum_discovery_`, `rum_sync_`, `commit_`).
      - **`maintenance` (3 worker threads):** Dedicated to periodic, heavy, multi-step housekeeping and analytics precomputation jobs (`local_compact_`, `rollup_compact_`, `rollup_heal_`, `optimize_`, `insights_prewarmer_`, `metadata_cleanup`, `rdns_enrichment`, `bot_data_refresh`, `ngwaf_sync_`, `share_audit_purge`, `duckdb_recycle`, `reconcile_fastly_`, `metric_snapshot`).
      - **`default` (10 worker threads):** Allocated for general alerting, active-hour speed layer, and retention enforcement (`alerts_evaluation_`, `partial_hour_merge_`, `expire_`, `rum_commit_`, `full_sync_`, `gap_heal_`).
    - **Starvation Isolation:** Segregating heavy maintenance jobs into a tightly bounded pool (3 threads) prevents multi-minute operations (such as DuckLake cloud compaction, daily rollup merges, or statistical prewarming) from monopolizing execution slots. High-frequency streaming discovery and commit cycles are guaranteed immediate thread allocation in `streaming`, preventing log ingestion lag and buffer backlog accumulation.

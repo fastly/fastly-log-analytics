@@ -74,7 +74,6 @@ def _build_test_app() -> FastAPI:
         "/api/services/{service_id}/cost-governor-stream",
         "/api/alerts/{service_id}",
         "/api/custom-endpoint/{service_id}/data",
-        "/api/services/{service_id}/lake-info",
         *(f"/api/services/{{service_id}}/rum/{s}" for s in rum_sub),
         *(f"/api/services/{{service_id}}/scoring/{s}" for s in score_sub),
     ]
@@ -200,7 +199,6 @@ def test_analyst_without_session_blocked(client):
         ("/api/download-folder", 403, "admin_only"),
         ("/api/download-foo", 403, "service_not_authorized"),
         ("/api/cron-schedule", 403, "admin_only"),
-        ("/api/services/svcA/lake-info", 403, "admin_only"),
     ],
 )
 def test_analyst_route_blocks_and_allows(client, path, expected_status, expected_error):
@@ -1101,7 +1099,6 @@ _ADMIN_SITES = [
     ("GET", "/api/audit-logs", None),
     ("GET", "/api/admin/iceberg-calendar", None),
     ("GET", f"/api/services/{_SVC}/log-fields", None),
-    ("POST", f"/api/services/{_SVC}/generate-viewer-key", None),
 ]
 
 

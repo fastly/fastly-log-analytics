@@ -12,7 +12,7 @@ The **User Sessions Explorer** aggregates client requests into behavioral sessio
 ### Key Tenets:
 - **Session Clustering:** Groups high-frequency request sequences into logical client sessions bounded by a 7-day safety ceiling.
 - **Flagging & Labeling:** Surfaces operator-flagged sessions and integration with session scoring labels (`useScoringLabels`).
-- **Opaque Token Drill-Down:** Generates cryptographically sealed, tamper-proof `session_token`s that allow Analyst Path B users with client IP masking to inspect deep request-level session logs without deanonymizing real client IPs.
+- **Opaque Token Drill-Down:** Generates cryptographically sealed, tamper-proof `session_token`s that allow Analyst users with client IP masking to inspect deep request-level session logs without deanonymizing real client IPs.
 - **CMCD Video Streaming Integration:** Detects Common Media Client Data (CMCD) beacons and provides direct deep-link navigation to `/sessions/stream?token={session_token}`.
 - **Shared Primitives:** Conforms strictly to `ReportLayout`, `FilterBar`, and global Zustand stores.
 
@@ -33,8 +33,7 @@ The **User Sessions Explorer** aggregates client requests into behavioral sessio
 | Role | Access Level | Data Redaction & Capabilities |
 |---|---|---|
 | **Admin (`read_write`)** | Full Access | Full session details, unmasked client IPs, full access to flag/label sessions and drill down into raw request records. |
-| **Analyst Path B (Remote Share)** | Read-Only Access | Session distributions and metrics viewable; client IPs masked (if enabled). Allowed under `_ANALYST_ALLOWED_WRITE_PREFIXES` and `_WRITE_VERB_GATE_ROUTES` for `POST /api/sessions` and `POST /api/sessions/detail`. Opaque `session_token` unsealing permits drill-down without violating IP redaction policies. |
-| **Analyst Path A (JSON Join)** | Local Read-Only | Queries local DuckLake / cached buffer. |
+| **Analyst (Remote Share)** | Read-Only Access | Session distributions and metrics viewable; client IPs masked (if enabled). Allowed under `_ANALYST_ALLOWED_WRITE_PREFIXES` and `_WRITE_VERB_GATE_ROUTES` for `POST /api/sessions` and `POST /api/sessions/detail`. Opaque `session_token` unsealing permits drill-down without violating IP redaction policies. |
 
 ---
 
@@ -111,7 +110,7 @@ column allow-list as the standard path), real pagination, and report a real `tot
 - [x] **4. Session Detail Contract:** `POST /api/sessions/detail` unseals `session_token` and returns request logs with column definitions.
 - [x] **5. Interactive Controls:** Flagged toggle, streaming toggle, min-requests, and min-4xx% filters function smoothly without console errors.
 - [x] **6. Session Detail Modal:** Clicking a session row opens the inspector dialog with parsed fields.
-- [x] **7. Role Verification:** Confirm Analyst Path B observes masked IPs and can drill down via `session_token` without PII violation.
+- [x] **7. Role Verification:** Confirm Analyst observes masked IPs and can drill down via `session_token` without PII violation.
 - [x] **8. Telemetry & Query Audit:** Verify all DuckDB and ClickHouse queries are recorded with zero duplicate queries.
 
 ---

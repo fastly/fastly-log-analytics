@@ -31,8 +31,7 @@ The **Control Room** is the real-time operations console for Fastly Log Analytic
 | Role | Access Level | Data Redaction & Capabilities |
 |---|---|---|
 | **Admin (`read_write`)** | Full Access | Live throughput and metrics stream (`/realtime-stream`), live error event stream (`/control-room/error-stream`), Top-N error correlator (`/control-room/correlate`), VCL log field audit (`/log-field-audit`), admin configuration tab visible. Edge mutation endpoints (`/control-room/{mitigations,rules,allowlist,big-red-button,cost-governor}`) enforce `require_admin` and return `501 Not Implemented` stubs. |
-| **Analyst Path B (Remote Share)** | Read-Only Access | Real-time metrics stream and live error event stream accessible (`test_realtime_stream_allowed_for_analyst`). Client IPs automatically masked (`xxx.xxx.xxx.xxx`) when `mask_ips` is active. Admin tab hidden via `useIsAnalyst()`. Edge mutation endpoints return `403 Forbidden`. |
-| **Analyst Path A (JSON Join)** | Local Read-Only | Operates in Standard mode against local DuckLake / cached buffer. |
+| **Analyst (Remote Share)** | Read-Only Access | Real-time metrics stream and live error event stream accessible (`test_realtime_stream_allowed_for_analyst`). Client IPs automatically masked (`xxx.xxx.xxx.xxx`) when `mask_ips` is active. Admin tab hidden via `useIsAnalyst()`. Edge mutation endpoints return `403 Forbidden`. |
 
 ---
 
@@ -112,7 +111,7 @@ The **Control Room** is the real-time operations console for Fastly Log Analytic
 - [x] **3. Data Stream:** Verified `/realtime-stream` and `/control-room/error-stream` deliver live metrics ticks and error incidents.
 - [x] **4. Time Range Extent:** Verified real-time 60s sliding window and 60m correlator window behavior under `ReportShell`.
 - [x] **5. Click-to-Filter:** Verified clicking error attributes navigates to `/dashboard` with pre-filled query filters.
-- [x] **6. Role Verification:** Confirmed Analyst Path B observes masked IPs (`xxx.xxx.xxx.xxx`), Admin tab is hidden, and edge mutations return 403 Forbidden.
+- [x] **6. Role Verification:** Confirmed Analyst observes masked IPs (`xxx.xxx.xxx.xxx`), Admin tab is hidden, and edge mutations return 403 Forbidden.
 - [x] **7. Telemetry & Query Audit:** Verified `X-Page-Load-ID` propagation across all fetch and SSE calls with 100% telemetry attribution.
 
 ---

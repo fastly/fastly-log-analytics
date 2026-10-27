@@ -192,10 +192,6 @@ interface TeardownDialogProps {
   onComplete?: () => void
 }
 
-function isAnalyst(service: ServiceConfig | null) {
-  return service?.access_level === 'read_only'
-}
-
 export function TeardownDialog(props: TeardownDialogProps) {
   const { service, open } = props
   const generation = useOpenGeneration(open)
@@ -247,7 +243,6 @@ function TeardownDialogBody({ service, open, onOpenChange, onComplete }: Teardow
 
   if (!service) return null
 
-  const analyst = isAnalyst(service)
   const removeCdn = removeLogging
   const bucketDisabled = !removeLogging || !removeRum
   const effectiveRemoveBucket = bucketDisabled ? false : removeBucket
@@ -257,27 +252,18 @@ function TeardownDialogBody({ service, open, onOpenChange, onComplete }: Teardow
   // the Fastly API token out of browser history, proxy access logs, and
   // the Referer header on any subsequent navigation.
   const teardownUrl = '/api/provision/teardown'
-  const teardownBody: Record<string, unknown> = analyst
-    ? {
-        service_id: service.service_id,
-        remove_logging: false,
-        remove_rum: false,
-        remove_cdn: false,
-        remove_bucket: false,
-        remove_cache: removeCache,
-      }
-    : {
-        service_id: service.service_id,
-        remove_logging: removeLogging,
-        remove_rum: removeRum,
-        remove_cdn: removeCdn,
-        remove_bucket: effectiveRemoveBucket,
-        remove_cloud_files: removeCloudFiles,
-        remove_cache: removeCache,
-        token: apiToken,
-      }
+  const teardownBody: Record<string, unknown> = {
+    service_id: service.service_id,
+    remove_logging: removeLogging,
+    remove_rum: removeRum,
+    remove_cdn: removeCdn,
+    remove_bucket: effectiveRemoveBucket,
+    remove_cloud_files: removeCloudFiles,
+    remove_cache: removeCache,
+    token: apiToken,
+  }
 
-  const tokenRequired = !analyst && (removeLogging || removeRum || removeCdn || effectiveRemoveBucket)
+  const tokenRequired = (removeLogging || removeRum || removeCdn || effectiveRemoveBucket)
   const hasSelectedAnyAction = removeLogging || removeRum || removeCache
   const canExecute = (!tokenRequired || apiToken.trim().length > 0) && hasSelectedAnyAction
 
@@ -321,32 +307,6 @@ function TeardownDialogBody({ service, open, onOpenChange, onComplete }: Teardow
         </Button>
       }
     >
-      {analyst ? (
-        <div className="p-8 space-y-8">
-          <Alert variant="destructive" className="bg-destructive/5 text-destructive border-destructive/20">
-            <AlertCircle className="h-4 w-4" />
-            <AlertDescription className="text-[13px] ml-1 font-medium">
-              This will remove your local analyst connection to this service. It does not affect the shared cloud data or the admin&apos;s configuration.
-            </AlertDescription>
-          </Alert>
-
-          <div className="space-y-4">
-            <div className="flex items-center gap-2 mb-1">
-              <Trash2 className="h-4 w-4 text-muted-foreground" />
-              <h4 className="text-xs font-bold uppercase tracking-widest text-muted-foreground">Local Data</h4>
-            </div>
-            <div className="space-y-3 bg-destructive/5 border border-destructive/10 rounded-lg p-4">
-              <div className="flex items-center justify-between">
-                <div className="space-y-0.5">
-                  <Label htmlFor="analyst-rem-cache" className="text-sm font-medium cursor-pointer">Purge local database and cache</Label>
-                  <p className="text-[10px] text-muted-foreground">Removes the local DuckDB file and Parquet cache. The cloud data is unaffected.</p>
-                </div>
-                <Switch id="analyst-rem-cache" checked={removeCache} onCheckedChange={setRemoveCache} />
-              </div>
-            </div>
-          </div>
-        </div>
-      ) : (
         <div className="p-8 space-y-8">
           <Alert variant="destructive" className="bg-destructive/5 text-destructive border-destructive/20">
             <AlertCircle className="h-4 w-4" />
@@ -499,7 +459,6 @@ function TeardownDialogBody({ service, open, onOpenChange, onComplete }: Teardow
             </div>
           )}
         </div>
-      )}
     </SSEActionDialogShell>
   )
 }

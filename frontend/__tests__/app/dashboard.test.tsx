@@ -140,6 +140,9 @@ let useMockActiveLogFields = false
 let useSecurityActiveFields = false
 let mockIsDataReady: boolean | null = null
 let useMockHighScaleBootstrap = false
+let mockIsAnalyst: boolean | null = null
+
+afterEach(() => { mockIsAnalyst = null })
 
 vi.mock('@/hooks/useBootstrap', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/hooks/useBootstrap')>()
@@ -158,6 +161,7 @@ vi.mock('@/hooks/useBootstrap', async (importOriginal) => {
           : actual.useActiveLogFields(...args),
     useIsDataReady: (...args: Parameters<typeof actual.useIsDataReady>) =>
       mockIsDataReady !== null ? mockIsDataReady : actual.useIsDataReady(...args),
+    useIsAnalyst: () => (mockIsAnalyst !== null ? mockIsAnalyst : actual.useIsAnalyst()),
     useEffectiveServiceId: (...args: Parameters<typeof actual.useEffectiveServiceId>) =>
       useMockHighScaleBootstrap ? 'service-1' : actual.useEffectiveServiceId(...args),
     useBootstrapResolved: (...args: Parameters<typeof actual.useBootstrapResolved>) =>
@@ -1153,7 +1157,7 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
     resetDefaultStores()
     useServiceStore.setState({
       activeServiceId: 'test-svc', isInitialized: true,
-      services: [{ id: 'test-svc', name: 'Test', accessLevel: 'read_write' }],
+      services: [{ id: 'test-svc', name: 'Test' }],
     })
     useMockAnalyticsCard = false
     useMockDataTable = true
@@ -1797,7 +1801,7 @@ describe('RumClient, RumFaroVersionCard, RumSettingsDialog & RumStatusPanel', ()
     it('admin: renders the Faro version card alongside the vitals dashboard when RUM is enabled', async () => {
       useServiceStore.setState({
         activeServiceId: SVC,
-        services: [{ id: SVC, name: 'Test Service', accessLevel: 'read_write' }],
+        services: [{ id: SVC, name: 'Test Service' }],
         isInitialized: true,
       })
       mockRumEndpoints()
@@ -1812,9 +1816,10 @@ describe('RumClient, RumFaroVersionCard, RumSettingsDialog & RumStatusPanel', ()
     })
 
     it('analyst: does not render the version card, and never calls /rum/versions', async () => {
+      mockIsAnalyst = true
       useServiceStore.setState({
         activeServiceId: SVC,
-        services: [{ id: SVC, name: 'Test Service', accessLevel: 'read_only' }],
+        services: [{ id: SVC, name: 'Test Service' }],
         isInitialized: true,
       })
       let versionsCalled = false
@@ -1838,7 +1843,7 @@ describe('RumClient, RumFaroVersionCard, RumSettingsDialog & RumStatusPanel', ()
     it('a 503 from /rum/versions leaves the dashboard usable', async () => {
       useServiceStore.setState({
         activeServiceId: SVC,
-        services: [{ id: SVC, name: 'Test Service', accessLevel: 'read_write' }],
+        services: [{ id: SVC, name: 'Test Service' }],
         isInitialized: true,
       })
       mockRumEndpoints({
@@ -1860,7 +1865,7 @@ describe('RumClient, RumFaroVersionCard, RumSettingsDialog & RumStatusPanel', ()
     it('renders worst pages through the shared table with formatted vitals', async () => {
       useServiceStore.setState({
         activeServiceId: SVC,
-        services: [{ id: SVC, name: 'Test Service', accessLevel: 'read_write' }],
+        services: [{ id: SVC, name: 'Test Service' }],
         isInitialized: true,
       })
       mockRumEndpoints({
@@ -1889,7 +1894,7 @@ describe('RumClient, RumFaroVersionCard, RumSettingsDialog & RumStatusPanel', ()
     it('sends range_token+anchor on the default window and keys the query [rum-analytics, svc, token, anchor, filters]', async () => {
       useServiceStore.setState({
         activeServiceId: SVC,
-        services: [{ id: SVC, name: 'Test Service', accessLevel: 'read_write' }],
+        services: [{ id: SVC, name: 'Test Service' }],
         isInitialized: true,
       })
       useFilterStore.getState().resetAll()
@@ -2202,7 +2207,7 @@ describe('RumClient, RumFaroVersionCard, RumSettingsDialog & RumStatusPanel', ()
       ),
       http.get('/api/services', () =>
         HttpResponse.json({
-          services: [{ service_id: SVC_PANEL, name: 'Test Service', access_level: 'read_write' }],
+          services: [{ service_id: SVC_PANEL, name: 'Test Service' }],
         }),
       ),
     )
@@ -2215,9 +2220,10 @@ describe('RumClient, RumFaroVersionCard, RumSettingsDialog & RumStatusPanel', ()
     })
 
     it('analyst + RUM not enabled: shows the empty state, not Enable/Disable controls', async () => {
+      mockIsAnalyst = true
       useServiceStore.setState({
         activeServiceId: SVC_PANEL,
-        services: [{ id: SVC_PANEL, name: 'Test Service', accessLevel: 'read_only' }],
+        services: [{ id: SVC_PANEL, name: 'Test Service' }],
         isInitialized: true,
       })
       mockRumStatus(false)
@@ -2232,7 +2238,7 @@ describe('RumClient, RumFaroVersionCard, RumSettingsDialog & RumStatusPanel', ()
     it('admin + RUM not enabled: still shows Enable/Disable controls', async () => {
       useServiceStore.setState({
         activeServiceId: SVC_PANEL,
-        services: [{ id: SVC_PANEL, name: 'Test Service', accessLevel: 'read_write' }],
+        services: [{ id: SVC_PANEL, name: 'Test Service' }],
         isInitialized: true,
       })
       mockRumStatus(false)

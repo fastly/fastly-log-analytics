@@ -38,8 +38,7 @@
 | Role | Job State | Manual API Trigger | Data Visibility |
 |---|---|---|---|
 | **Admin (`read_write`)** | Active | `POST /api/admin/sync/{service_id}` | Full access to raw ingestion status and logs. |
-| **Analyst Path A (Standalone Instance)** | Disabled | Disabled | Skips ingest; uses `sync_metadata_{service_id}` pull model instead. |
-| **Analyst Path B (Remote Share)** | N/A | Blocked (403) | Reads server-side ingested state; no cron interaction. |
+| **Analyst (Remote Share)** | N/A | Blocked (403) | Reads server-side ingested state; no cron interaction. |
 
 ---
 
@@ -120,8 +119,8 @@
 - There is no age-based expiry and no configurable override. New writes enforce the cap
   immediately by evicting oldest individual items; failures are recorded while other
   eligible evictions continue.
-- Evidence is admin/read-write only. Both Analyst Path A and Analyst Path B are denied by
-  backend authorization, regardless of UI visibility.
+- Evidence is admin-only. Analysts are denied by backend authorization, regardless of
+  UI visibility.
 - The UI treats each line/container as an individual item, paginates results, and supports
   error-category filtering. It shows source identity, byte/line offsets, error details,
   and the SHA-256 digest; the operator can download exact bytes or purge one item.
@@ -149,7 +148,7 @@
 - [x] 6. Under `FLA_DEV_NO_CRONS=1`, verify job does not register or execute.
 - [x] 7. In High-Scale mode, verify source objects transition `discovered → claimed → acknowledged` (`high_scale_source_objects` for the isolated worker plane; `ingest_ledger` for Celery).
 - [x] 8. Verify malformed-line and corrupt-gzip outcomes, per-category counters, `error` status,
-  immediate per-service cap eviction, private evidence downloads, and Analyst Path A/B denial.
+  immediate per-service cap eviction, private evidence downloads, and analyst denial.
 
 ## 10. Marketplace Comparison & Design Decisions
 

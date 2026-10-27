@@ -84,11 +84,9 @@ from backend.cron.scheduler import (
     dev_mode_no_crons,
 )
 from backend.main import app
-from backend.routers.admin.compaction import expire_snapshots_service
 from backend.utils.telemetry import get_process_context, process_context_scope
 from tests.cron.conftest import (
     assert_manual_trigger_non_admin_rejected,
-    assert_manual_trigger_read_only_rejected,
     assert_manual_trigger_standard_mode_rejected,
 )
 from tests.cron.conftest import make_cron_source as _source
@@ -127,9 +125,8 @@ FAKE_CFG_STANDARD: dict[str, Any] = {
     "access_key_id": "test_key",
     "secret_access_key": "test_secret",
     "deployment_mode": "standard",
-    "access_level": "read_write",
     "rum": {"enabled": True, "sync_interval_seconds": 30, "commit_interval_mins": 1},
-    "provisioning": {"access_level": "read_write"},
+    "provisioning": {},
 }
 FAKE_SRC_STANDARD = FAKE_CFG_STANDARD
 FAKE_CFG_HIGH_SCALE: dict[str, Any] = {
@@ -148,16 +145,14 @@ _RUM_COMMIT_FAKE_CFG: dict[str, Any] = {
 _RUM_COMMIT_FAKE_SRC: dict[str, Any] = {
     "service_id": _RUM_COMMIT_SERVICE_ID,
     "name": "RUM Contract Test Service",
-    "access_level": "read_write",
 }
 
 _RUM_SWEEP_FAKE_CFG: dict[str, Any] = {
     "service_id": _RUM_SWEEP_SERVICE_ID,
     "name": _RUM_SWEEP_SERVICE_ID,
     "deployment_mode": "high_scale",
-    "access_level": "read_write",
     "rum": {"enabled": True},
-    "provisioning": {"access_level": "read_write", "cron_ledger_rum_sweep": {"enabled": True, "interval_minutes": 15}},
+    "provisioning": {"cron_ledger_rum_sweep": {"enabled": True, "interval_minutes": 15}},
 }
 _RUM_SWEEP_FAKE_SRC: dict[str, Any] = {**_RUM_SWEEP_FAKE_CFG, "bucket": "test-rum-sweep-bucket"}
 
@@ -921,23 +916,7 @@ _COMMIT_FN = rum_commit_mod._run_rum_commit.__wrapped__
     ("cron_fn", "sid", "cfg", "src", "high_scale", "env_no_crons"),
     [
         (_DISC_FN, _RUM_DISC_SERVICE_ID, FAKE_CFG_STANDARD, FAKE_SRC_STANDARD, False, False),
-        (
-            _DISC_FN,
-            _RUM_DISC_SERVICE_ID,
-            FAKE_CFG_HIGH_SCALE,
-            {**FAKE_SRC_HIGH_SCALE, "access_level": "read_only"},
-            True,
-            False,
-        ),
         (_SWEEP_FN, _RUM_SWEEP_SERVICE_ID, _RUM_SWEEP_FAKE_CFG, _RUM_SWEEP_FAKE_SRC, False, False),
-        (
-            _SWEEP_FN,
-            _RUM_SWEEP_SERVICE_ID,
-            _RUM_SWEEP_FAKE_CFG,
-            {**_RUM_SWEEP_FAKE_SRC, "access_level": "read_only"},
-            True,
-            False,
-        ),
         (
             _SWEEP_FN,
             _RUM_SWEEP_SERVICE_ID,
@@ -1101,7 +1080,6 @@ def test_manual_trigger_endpoints_lifecycle(endpoint, sid, src, cfg, job_patch_t
             resp = client.post(endpoint, headers={"x-fastly-service-id": sid})
             assert resp.status_code == 503 and resp.json()["detail"]["error"] == "cron_busy"
 
-    assert_manual_trigger_read_only_rejected(endpoint, sid, src)
     if task_name in ("rum_sync", "ledger_rum_sweep"):
         assert_manual_trigger_non_admin_rejected(endpoint, sid, src)
     if task_name in ("rum_discovery", "ledger_rum_sweep"):
@@ -1160,11 +1138,6 @@ def test_quarantine_endpoints_with_source_type_rum_and_rbac(monkeypatch):
 
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: None)
     assert TestClient(app).get("/api/admin/ledger/quarantine?service_id=nonexistent-svc").status_code == 404
-
-    monkeypatch.setattr(
-        "backend.core.duckdb.get_source_for_service", lambda sid: {**_RUM_SWEEP_FAKE_SRC, "access_level": "read_only"}
-    )
-    assert TestClient(app).get(f"/api/admin/ledger/quarantine?service_id={_RUM_SWEEP_SERVICE_ID}").status_code == 403
 
     app.dependency_overrides[require_admin] = lambda: (_ for _ in ()).throw(
         HTTPException(status_code=403, detail={"error": "admin_only"})
@@ -1368,7 +1341,6 @@ def test_scheduler_registers_reschedules_and_skips_rum_ledger_sweep(monkeypatch)
             "log_period": 60,
             "rum": {"enabled": rum_en},
             "provisioning": {
-                "access_level": "read_write",
                 "cron_sync": {"enabled": True},
                 "cron_ledger_rum_sweep": {"enabled": sweep_en, "interval_minutes": mins},
             },
@@ -1598,31 +1570,16 @@ def test_sync_jobs_registers_sync_commit_and_alerts_for_readwrite_service():
     cfg = {
         "service_id": "svc-1",
         "log_period": 60,
-        "access_level": "read_write",
         "provisioning": {"cron_sync": {"enabled": True}},
     }
     s = _run_sync_jobs(cfg, alerts=1)
     assert {"log_discovery_svc-1", "commit_svc-1", "alerts_evaluation_svc-1"}.issubset(s._job_ids)
 
 
-def test_sync_jobs_registers_metadata_sync_and_alerts_for_readonly_service():
-    cfg = {
-        "service_id": "svc-2",
-        "log_period": 60,
-        "access_level": "read_only",
-        "provisioning": {"cron_sync": {"enabled": True}},
-    }
-    s = _run_sync_jobs(cfg, alerts=1)
-    assert "sync_metadata_svc-2" in s._job_ids
-    assert "alerts_evaluation_svc-2" in s._job_ids
-    assert "sync_svc-2" not in s._job_ids and "commit_svc-2" not in s._job_ids
-
-
 def test_sync_jobs_skips_alerts_cron_when_no_alerts_configured():
     cfg = {
         "service_id": "svc-noalert",
         "log_period": 60,
-        "access_level": "read_write",
         "provisioning": {"cron_sync": {"enabled": True}},
     }
     s = _run_sync_jobs(cfg, alerts=0)
@@ -1634,7 +1591,6 @@ def test_sync_jobs_skips_disabled_services():
     cfg = {
         "service_id": "paused-svc",
         "log_period": 60,
-        "access_level": "read_write",
         "provisioning": {"cron_sync": {"enabled": False}},
     }
     s = _run_sync_jobs(cfg)
@@ -1645,7 +1601,6 @@ def test_sync_jobs_skips_unconfigured_service():
     cfg = {
         "service_id": "halfbaked",
         "log_period": 60,
-        "access_level": "read_write",
         "provisioning": {"cron_sync": {"enabled": True}},
     }
     s = _run_sync_jobs(cfg, is_configured=False)
@@ -1656,7 +1611,6 @@ def test_sync_jobs_registers_ngwaf_job_when_workspace_configured():
     cfg = {
         "service_id": "ngwaf-svc",
         "log_period": 60,
-        "access_level": "read_write",
         "provisioning": {"cron_sync": {"enabled": True}},
     }
     s = _run_sync_jobs(cfg, ngwaf_ws="workspace-id")
@@ -1669,7 +1623,6 @@ def test_sync_jobs_omits_optimize_and_expire_when_compact_disabled():
     cfg = {
         "service_id": "no-compact",
         "log_period": 60,
-        "access_level": "read_write",
         "provisioning": {"cron_sync": {"enabled": True}, "cron_compact": {"enabled": False}},
     }
     s = _run_sync_jobs(cfg)
@@ -1699,7 +1652,6 @@ def test_sync_jobs_uses_interval_mins_over_interval_seconds_when_both_present():
     cfg = {
         "service_id": "svc-priority",
         "log_period": 60,
-        "access_level": "read_write",
         "provisioning": {"cron_sync": {"enabled": True, "interval_mins": 10, "interval_seconds": 30}},
     }
     captured: dict = {}
@@ -1721,7 +1673,6 @@ def test_sync_jobs_registers_rum_jobs_when_rum_enabled_on_root():
     cfg = {
         "service_id": "svc-rum-root",
         "log_period": 60,
-        "access_level": "read_write",
         "rum_enabled": True,
         "provisioning": {"cron_sync": {"enabled": True}},
     }
@@ -1733,7 +1684,6 @@ def test_sync_jobs_registers_rum_jobs_when_rum_enabled_nested():
     cfg = {
         "service_id": "svc-rum-nested",
         "log_period": 60,
-        "access_level": "read_write",
         "rum": {"enabled": True},
         "provisioning": {"cron_sync": {"enabled": True}},
     }
@@ -1745,7 +1695,6 @@ def test_sync_jobs_does_not_register_rum_jobs_when_rum_disabled_in_nested():
     cfg = {
         "service_id": "svc-rum-disabled",
         "log_period": 60,
-        "access_level": "read_write",
         "rum_enabled": True,
         "rum": {"enabled": False},
         "provisioning": {"cron_sync": {"enabled": True}},
@@ -1771,7 +1720,6 @@ def test_sync_jobs_schedules_rum_sync_with_derived_interval():
     cfg = {
         "service_id": "svc-rum-derived",
         "log_period": 60,
-        "access_level": "read_write",
         "rum": {"enabled": True, "log_period": 300},
         "provisioning": {"cron_sync": {"enabled": True}},
     }
@@ -1798,20 +1746,6 @@ def test_sync_jobs_registers_hourly_rollup_heal_for_readwrite_service():
     heal_job = s._sched.get_job("rollup_heal_svc-1")
     assert heal_job is not None
     assert "minute='5'" in str(heal_job.trigger) and "hour=" not in str(heal_job.trigger)
-
-
-def test_sync_jobs_skips_rollup_heal_for_read_only_service():
-    cfg = {
-        "service_id": "svc-2",
-        "log_period": 60,
-        "provisioning": {
-            "cron_sync": {"enabled": True},
-            "cron_compact": {"enabled": True},
-            "access_level": "read_only",
-        },
-    }
-    s = _run_sync_jobs(cfg)
-    assert "rollup_compact_svc-2" not in s._job_ids and "rollup_heal_svc-2" not in s._job_ids
 
 
 # ── _log_and_add_progress ─────────────────────────────────────────────────
@@ -2139,7 +2073,7 @@ def test_dev_local_allowlist_registers_only_local_compaction(monkeypatch):
     monkeypatch.setenv("FLA_DEV_NO_CRONS", "1")
     cfg = {
         "service_id": "svc-x",
-        "provisioning": {"access_level": "read_write", "cron_compact": {"enabled": True}},
+        "provisioning": {"cron_compact": {"enabled": True}},
     }
     s = Scheduler()
     with (
@@ -2162,31 +2096,9 @@ def test_dev_local_allowlist_registers_only_local_compaction(monkeypatch):
     assert sorted(c.kwargs["id"] for c in add_job.call_args_list) == expected
 
 
-def test_dev_local_allowlist_skips_rollup_compact_for_read_only(monkeypatch):
-    monkeypatch.setenv("FLA_DEV_NO_CRONS", "1")
-    cfg = {"service_id": "svc-ro", "provisioning": {"access_level": "read_only"}}
-    s = Scheduler()
-    with (
-        patch("backend.config.list_configs", return_value=[cfg]),
-        patch("backend.core.duckdb.get_source_for_service", return_value={"name": "svc-ro"}),
-        patch("backend.core.duckdb.is_configured", return_value=True),
-        patch.object(s._sched, "add_job") as add_job,
-    ):
-        s._register_dev_local_safe_jobs()
-
-    expected = [
-        "insights_prewarmer_svc-ro",
-        "local_compact_svc-ro",
-        "metric_snapshot",
-        "partial_hour_merge_svc-ro",
-    ]
-    assert sorted(s._job_ids) == expected
-    assert sorted(c.kwargs["id"] for c in add_job.call_args_list) == expected
-
-
 def test_dev_local_allowlist_skips_high_scale_services(monkeypatch):
     monkeypatch.setenv("FLA_DEV_NO_CRONS", "1")
-    cfg = {"service_id": "svc-high", "provisioning": {"access_level": "read_write"}}
+    cfg = {"service_id": "svc-high", "provisioning": {}}
     s = Scheduler()
     with (
         patch("backend.config.list_configs", return_value=[cfg]),
@@ -2462,7 +2374,7 @@ class TestRunCommitUsesLocalStartTime:
     def test_run_commit_no_str_subtraction(self):
         from backend.cron.jobs.commit import _run_commit
 
-        mock_src = {"name": "test", "service_id": "test", "access_level": "read_write", "storage_mode": "cloud"}
+        mock_src = {"name": "test", "service_id": "test", "storage_mode": "cloud"}
         with (
             patch("backend.config.load_config", return_value={"provisioning": {}}),
             patch("backend.core.duckdb.get_source_for_service", return_value=mock_src),
@@ -2480,7 +2392,6 @@ class TestLogCronRunDurationIsFloat:
             "name": "test",
             "service_id": "test",
             "service_name": "Test",
-            "access_level": "read_write",
             "storage_mode": "cloud",
             "bucket": "b",
             "prefix": "",
@@ -2787,7 +2698,7 @@ def test_local_cache_delete_failure_is_recorded(tmp_path, monkeypatch):
 
 
 def test_manual_trigger_runs_expire_and_persists_file_deletion_count(client, monkeypatch):
-    src = {"name": "svc-expire-contract", "service_id": "svc-expire-contract", "access_level": "read_write"}
+    src = {"name": "svc-expire-contract", "service_id": "svc-expire-contract"}
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda _sid: src)
     with patch("backend.cron.jobs.compaction._run_expire_snapshots", return_value={"status": "success"}) as run_expire:
         response = client.post("/api/admin/expire-snapshots/svc-expire-contract")
@@ -2985,19 +2896,12 @@ def test_nonfatal_step_error_is_recorded_as_warning(monkeypatch):
     assert "local_cache_error=cache is read-only" in logged[0]["kwargs"]["error_message"]
 
 
-def test_manual_endpoint_rejects_read_only_service():
-    with pytest.raises(HTTPException) as exc:
-        expire_snapshots_service("svc-analyst", {"access_level": "read_only"})
-    assert exc.value.status_code == 403
-
-
 def test_dev_no_crons_blocks_expire_registration_and_execution(monkeypatch, tmp_path):
     service_id = "svc-expire-contract"
     src = _source(tmp_path, service_id)
     cfg = {
         **src,
         "log_period": 60,
-        "access_level": "read_write",
         "provisioning": {"cron_sync": {"enabled": True}, "cron_compact": {"enabled": True}},
     }
     monkeypatch.setenv("FLA_DEV_NO_CRONS", "1")
@@ -3022,11 +2926,9 @@ def test_dev_no_crons_blocks_expire_registration_and_execution(monkeypatch, tmp_
 def test_registers_expire_on_the_serving_scheduler(monkeypatch, tmp_path):
     service_id = "svc-expire-contract"
     src = _source(tmp_path, service_id)
-    src["access_level"] = "read_write"
     cfg = {
         **src,
         "log_period": 60,
-        "access_level": "read_write",
         "provisioning": {"cron_sync": {"enabled": True}, "cron_compact": {"enabled": True}},
     }
     monkeypatch.delenv("FLA_DEV_NO_CRONS", raising=False)
@@ -3073,7 +2975,7 @@ def optimize_test_source(monkeypatch, tmp_path):
         "service_id": service_id,
         "bucket": "test-fos-bucket",
         "_cache_dir_override": str(cache_root),
-        "provisioning": {"access_level": "read_write", "cron_compact": {"enabled": True}},
+        "provisioning": {"cron_compact": {"enabled": True}},
     }
     monkeypatch.delenv("FLA_DEV_NO_CRONS", raising=False)
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: src if sid == service_id else None)

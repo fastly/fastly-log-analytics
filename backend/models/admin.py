@@ -91,7 +91,7 @@ class HealthCronFailure(BaseModel):
     """One service+task whose most recent terminal cron run ended in error.
 
     Powers the SRE-03 ``recent_cron_failures`` glance surface: a non-``sync``
-    per-service cron (commit / optimize / rollup_compact / metadata_sync / …)
+    per-service cron (commit / optimize / rollup_compact / …)
     erroring every tick is otherwise visible only by opening that service's
     Cron History. The aggregate keeps the standing System Health card honest.
     """
@@ -305,7 +305,6 @@ class SyncStatus(ShareHeaderBadgeResponse, LogExtentsMixin):
     configured: bool = True
     busy: bool = False
     storage_mode: str | None = None
-    access_level: str | None = None
     latest_ingested_file_at: str | None = None
     latest_available_file_at: str | None = None
     duckdb_size_bytes: int | None = None

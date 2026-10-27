@@ -37,8 +37,7 @@
 | Role | Job State | Manual API Trigger | Data Visibility |
 |---|---|---|---|
 | **Admin (`read_write`)** | Active | `GET /api/admin/metric-history/batch` | Trends and System Health in Admin UI. |
-| **Analyst Path A (Standalone Instance)** | Active | Internal trigger | Monitors local analyst process health. |
-| **Analyst Path B (Remote Share)** | N/A | Blocked (403) | System-wide daemon on host server. |
+| **Analyst (Remote Share)** | N/A | Blocked (403) | System-wide daemon on host server. |
 
 ---
 
