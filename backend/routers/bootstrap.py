@@ -78,7 +78,7 @@ def _startup_stub_response(request: Request) -> BootstrapResponse:
     (``backend.main._background_startup``) is still draining.
 
     Fields that depend on that warm-up (the real ``services`` list, per-service
-    ``schema``/``settings``, anything sourced from Iceberg/DuckDB) are withheld
+    ``schema``/``settings``, anything sourced from DuckLake/DuckDB) are withheld
     here — they stay `[]`/`None` until ``startup_complete`` flips.
     """
     from backend.core.request_telemetry import collection_enabled as _web_vitals_enabled

@@ -190,7 +190,7 @@ async def dashboard_bundle(
 
     # Resolve the primary pooled connection OFF the asyncio event loop. The
     # first ``ctx.con`` access performs a BLOCKING pool checkout (DuckLake
-    # attach + Iceberg view rebuild + up-to-max_wait lock retry); passed as an
+    # attach + storage view rebuild + up-to-max_wait lock retry); passed as an
     # argument to ``asyncio.to_thread(_run_aggregates, ctx.con)`` it is
     # evaluated ON the loop BEFORE the worker thread runs, so under
     # cron-vs-dashboard DuckLake contention it freezes /api/health and every

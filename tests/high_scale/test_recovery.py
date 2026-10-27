@@ -14,7 +14,6 @@ from unittest.mock import MagicMock
 
 import psycopg
 import pytest
-from backend.core.rum_ingest import extract_metrics_from_faro_payload
 from backend.high_scale.archive_models import ArchiveArtifact, ArchiveManifest, ArchiveSourceObject
 from backend.high_scale.archive_publication import (
     ArchivePublication,
@@ -38,6 +37,7 @@ from structlog.testing import capture_logs
 
 from backend import config
 from backend.core import clickhouse_client
+from backend.core.rum_ingest import extract_metrics_from_faro_payload
 from backend.high_scale import postgres_control, registry_bootstrap, rum_recovery
 from backend.high_scale import publication as pub_mod
 from backend.high_scale.recovery import (

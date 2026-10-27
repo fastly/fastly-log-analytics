@@ -178,7 +178,7 @@ def _run_commit(service_id: str, force: bool = False, run_id: int | None = None)
                 )
                 spawn_compact_fn(src, service_id)
                 push_fn = _resolve_sync_hook("schedule_cloud_push", schedule_cloud_push, _orig_schedule_cloud_push)
-                push_fn(src, ("logs",))
+                push_fn(src)
         except Exception as e:
             run.fail("Buffer commit failed", error_message=str(e))
             progress_fn(run_id, service_id, job_name="commit", event={"type": "error", "message": str(e)})

@@ -88,7 +88,7 @@ def _run_rum_commit(service_id: str, force: bool = False, run_id: int | None = N
             # have completed successfully and their publication is durable.
             if total_committed_vitals or total_committed_errors:
                 push_fn = _resolve_sync_hook("schedule_cloud_push", schedule_cloud_push, _orig_schedule_cloud_push)
-                push_fn(src, ("client_vitals", "client_errors"))
+                push_fn(src)
             if vitals_err is None and errors_err is None:
                 from backend.core.ingest import _mark_ledger_published
 

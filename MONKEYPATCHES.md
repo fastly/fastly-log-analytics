@@ -11,7 +11,7 @@ abstractions.
 All five `s3fs` / `botocore` patches (`S3FileSystem.__init__`,
 `S3FileSystem.set_session`, `S3FileSystem._cat_file`, `S3FileSystem._info`,
 `S3FileSystem._open`) and the `ThreadPoolExecutor.submit` ContextVar patch
-formerly in `backend/core/storage/fs.py (formerly backend/core/iceberg/)` were retired in v3.0 alongside the
+formerly in the Iceberg package's `fs.py` were retired in v3.0 alongside the
 removal of `pyiceberg` and `s3fs` in favor of DuckDB's native DuckLake
 extension.
 

@@ -1132,7 +1132,6 @@ class TestCommitJob:
         monkeypatch.setattr(commit, "schedule_cloud_push", push)
         commit._run_commit.__wrapped__("svc-1")
         push.assert_called_once()
-        assert push.call_args.args[1] == ("logs",)
 
         args, kwargs = stub_cron_envelope["log"].call_args
         assert args[3] == "success" and kwargs["rows_ingested"] == 1234

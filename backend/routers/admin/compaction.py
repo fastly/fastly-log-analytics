@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import os
-import sys
 from datetime import UTC, datetime
 from typing import Any, Literal
 
@@ -966,10 +965,3 @@ def fetch_request_facts_emulation(
         cov_start = ext_row[0] if ext_row else None
         cov_end = ext_row[1] if ext_row else None
     return fetched, cov_start, cov_end
-
-
-sys.modules["backend.routers.admin.iceberg"] = sys.modules[__name__]
-if "backend.routers.admin" in sys.modules:
-    setattr(sys.modules["backend.routers.admin"], "iceberg", sys.modules[__name__])
-if "backend" in sys.modules and hasattr(sys.modules["backend"], "_MODULE_ALIASES"):
-    sys.modules["backend"]._MODULE_ALIASES["backend.routers.admin.iceberg"] = __name__

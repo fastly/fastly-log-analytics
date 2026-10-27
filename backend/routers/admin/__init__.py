@@ -37,7 +37,6 @@ if isinstance(_global_aliases, dict):
     _global_aliases["backend.routers.admin_queries"] = "backend.routers.admin.admin_queries"
     _global_aliases["backend.routers.admin_usage"] = "backend.routers.admin.ingest"
     _global_aliases["backend.routers.high_scale"] = "backend.routers.admin.high_scale"
-    _global_aliases["backend.routers.admin.iceberg"] = "backend.routers.admin.compaction"
     _global_aliases["backend.routers.admin.system_metrics"] = "backend.routers.admin.health"
     _global_aliases["backend.system_metrics_sampler"] = "backend.routers.admin.health"
 
@@ -78,9 +77,7 @@ for _src_mod in (_helpers, bot_sources, ingest, quarantine, downloads, high_scal
             setattr(compaction, _attr_name, _attr_val)
 
 # Legacy module aliases that remain virtual (no dedicated file at that import path).
-iceberg = compaction
 system_metrics = health
-_sys.modules[f"{__name__}.iceberg"] = compaction
 _sys.modules[f"{__name__}.system_metrics"] = health
 _sys.modules["backend.routers.admin_usage"] = ingest
 _sys.modules["backend.routers.admin_queries"] = admin_queries
