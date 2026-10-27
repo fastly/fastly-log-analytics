@@ -219,6 +219,7 @@ async function withAnalystUsers(options, work) {
       const page = await context.newPage();
       const interception = await context.newCDPSession(page);
       interception.on('Fetch.requestPaused', event => {
+        const pausedAt = Date.now();
         const handling = (async () => {
           checkedRequests++;
           let allowed = false;
@@ -246,6 +247,8 @@ async function withAnalystUsers(options, work) {
             failureCategories[category] = (failureCategories[category] || 0) + 1;
             if (failureEvents.length < 10) failureEvents.push({
               category, timestamp_ms: Date.now(), action: allowed ? 'continue' : 'block',
+              paused_at_ms: pausedAt,
+              url_sha256: crypto.createHash('sha256').update(event.request.url).digest('hex'),
               has_network_id: typeof event.networkId === 'string',
               network_id: typeof event.networkId === 'string' && /^(?:\d+\.\d+|[a-f0-9]{32})$/i.test(event.networkId) ? event.networkId : null,
               resource_type: ['Document', 'Stylesheet', 'Image', 'Media', 'Font', 'Script', 'XHR', 'Fetch', 'EventSource', 'Other'].includes(event.resourceType) ? event.resourceType : 'Other',

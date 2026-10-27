@@ -1,4 +1,5 @@
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -243,11 +244,13 @@ for (const delayContinue of [false, true]) test(`interception failures ${delayCo
   assert.equal(observation.interception_failures, 1);
   assert.deepEqual(observation.failure_categories, { request_gone: 1 });
   assert.equal(observation.failure_events.length, 1);
-  assert.deepEqual({ ...observation.failure_events[0], timestamp_ms: 0 }, {
+  assert.deepEqual({ ...observation.failure_events[0], timestamp_ms: 0, paused_at_ms: 0 }, {
     category: 'request_gone', network_id: delayContinue ? null : '42.7', resource_type: delayContinue ? 'Other' : 'Fetch',
-    has_network_id: true, action: 'continue', timestamp_ms: 0,
+    has_network_id: true, action: 'continue', timestamp_ms: 0, paused_at_ms: 0,
+    url_sha256: crypto.createHash('sha256').update(`${analystOrigin}/dashboard?private=value`).digest('hex'),
   });
   assert.ok(Number.isFinite(observation.failure_events[0].timestamp_ms));
+  assert.ok(observation.failure_events[0].paused_at_ms <= observation.failure_events[0].timestamp_ms);
   assert.equal(journal.includes('PRIVATE_CDP_DETAIL'), false);
   assert.equal(journal.includes('private=value'), false);
   assert.equal(state.invites.length, 0);

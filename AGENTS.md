@@ -718,9 +718,9 @@ The disposable analyst origin guard must distinguish rejected URLs from CDP
 interception failures and await pending interception commands before accepting a
 run. Both invalidate the run; an expired interception ID is not an origin
 violation or permission to ignore a failed command. Its ownership journal records
-bounded counts and categories plus at most ten failure receipts (timestamp,
-action, normalized browser network ID and resource type), never request URLs or
-raw protocol errors. A null normalized ID does not prove the event lacked one;
+bounded counts and categories plus at most ten failure receipts (pause/error
+timestamps, URL SHA-256, action, normalized browser network ID and resource type),
+never raw request URLs or protocol errors. A null normalized ID does not prove the event lacked one;
 consult the separate presence flag before attributing an internal browser load.
 
 ### Perf gate scales
