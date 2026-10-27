@@ -3649,3 +3649,111 @@ def test_the_provisioner_has_no_privileges_outside_access_management_and_the_app
                 prov.execute(sql)
     finally:
         prov.close()
+
+
+# ── Archive retention: expire artifacts past the service's retention window ──
+
+
+def test_archive_publication_expire_removes_commit_manifest_and_artifact_and_is_repeatable() -> None:
+    store = InMemoryObjectStore()
+    publication = ArchivePublication(store)
+    manifest = _manifest_for("expire-me", now=datetime(2026, 9, 4, tzinfo=UTC))
+    publication.publish(manifest, b"data")
+    assert store.exists("archive/manifests/expire-me.json") and store.exists("archive/manifests/expire-me.commit")
+    publication.expire(manifest)
+    assert not any(store.exists(k) for k in (
+        "archive/manifests/expire-me.json", "archive/manifests/expire-me.commit", "archive/expire-me.parquet",
+    ))  # fmt: skip
+    publication.expire(manifest)
+
+
+class _ExpiryControl:
+    def __init__(self, manifests) -> None:
+        self.manifests, self.windows, self.marked = manifests, None, []
+
+    def expirable_archive_manifests(self, service_id, domain_retention_days, *, limit):
+        self.windows = dict(domain_retention_days)
+        return self.manifests
+
+    def mark_archive_expired(self, manifest_id):
+        self.marked.append(manifest_id)
+
+
+def test_archive_expirer_deletes_objects_then_marks_and_adds_a_day_of_margin() -> None:
+    store = InMemoryObjectStore()
+    publication = ArchivePublication(store)
+    manifests = [_manifest_for(f"m{i}", now=datetime(2026, 9, 4, tzinfo=UTC)) for i in range(2)]
+    for m in manifests:
+        publication.publish(m, b"data")
+    control = _ExpiryControl(manifests)
+    expirer = access.HighScaleArchiveExpirer(
+        control=control, archive=publication, retention_loader=lambda _sid: {"request": 30, "rum_vitals": 0}
+    )
+    assert expirer.expire("svc") == 2
+    assert control.windows == {"request": 31, "rum_vitals": 0}
+    assert control.marked == ["m0", "m1"] and not store.exists("archive/manifests/m0.json")
+
+
+def test_archive_expirer_leaves_a_manifest_unmarked_when_deletion_fails() -> None:
+    publication = MagicMock()
+    publication.expire.side_effect = [RuntimeError("fos down"), None]
+    control = _ExpiryControl([_manifest_for("bad"), _manifest_for("good")])
+    expirer = access.HighScaleArchiveExpirer(control=control, archive=publication, retention_loader=lambda _s: {"request": 7})
+    assert expirer.expire("svc") == 1 and control.marked == ["good"]
+
+
+def test_deletion_sweeper_also_runs_the_archive_expirer() -> None:
+    expirer = MagicMock()
+    controller = MagicMock()
+    sweeper = HighScaleDeletionSweeper(
+        control=_SweepControl([], {}), controller=controller, archive_expirer=expirer
+    )
+    sweeper.sweep(service_id="svc", limit=7)
+    expirer.expire.assert_called_once_with("svc", limit=7)
+
+
+def test_configured_domain_retention_follows_data_and_rum_retention_days(monkeypatch) -> None:
+    cfg = {"provisioning": {"cron_sync": {"data_retention_days": 14}}}
+    monkeypatch.setattr("backend.config.load_config", lambda _sid: cfg)
+    assert access._configured_domain_retention("svc") == {"request": 14, "rum_vitals": 14, "rum_errors": 14}
+    cfg["provisioning"]["cron_sync"]["rum_retention_days"] = 0
+    assert access._configured_domain_retention("svc") == {"request": 14, "rum_vitals": 0, "rum_errors": 0}
+    monkeypatch.setattr("backend.config.load_config", lambda _sid: None)
+    assert access._configured_domain_retention("svc")["request"] == 30
+
+
+def test_expirable_archive_manifests_selects_only_old_source_deleted_rows_of_retained_domains() -> None:
+    control = PostgresControlPlane()
+    control.create_schema()
+    sid = "svc-archive-expiry"
+
+    def insert(manifest_id, domain, state, age_days):
+        with control.transaction() as connection:
+            connection.execute(
+                "INSERT INTO high_scale_archive_manifests (manifest_id, service_id, domain, source_key, source_checksum, "
+                "source_size, artifact_uri, artifact_checksum, artifact_size, row_count, byte_count, canonical_digest, "
+                "schema_version, transform_version, coverage_start, coverage_end, retention_deadline, "
+                "deletion_authorization_deadline, archive_epoch, owner_epoch, state) VALUES "
+                "(%s, %s, %s, %s, 'c', 1, %s, 'c', 1, 1, 1, 'd', 'v', 'v', "
+                "clock_timestamp() - make_interval(days => %s), clock_timestamp() - make_interval(days => %s), "
+                "clock_timestamp() - make_interval(days => %s), clock_timestamp() - make_interval(days => %s), 0, 1, %s)",
+                (manifest_id, sid, domain, f"raw/{manifest_id}", f"s3://a/{manifest_id}.parquet", age_days, age_days, age_days, age_days, state),
+            )
+
+    try:
+        insert("old-request", "request", "source_deleted", 40)
+        insert("young-request", "request", "source_deleted", 5)
+        insert("old-not-deleted", "request", "manifest_committed", 40)
+        insert("old-rum", "rum_vitals", "source_deleted", 40)
+        picked = control.expirable_archive_manifests(sid, {"request": 31, "rum_vitals": 0})
+        assert [m.manifest_id for m in picked] == ["old-request"]
+        control.mark_archive_expired("old-request")
+        assert control.expirable_archive_manifests(sid, {"request": 31}) == ()
+        assert control.expirable_archive_manifests(sid, {"request": 0}) == ()
+        covering = control.manifests_covering(
+            sid, "request", datetime.now(UTC) - timedelta(days=60), datetime.now(UTC) - timedelta(days=30)
+        )
+        assert "old-request" not in {m.manifest_id for m in covering}
+    finally:
+        with control.transaction() as connection:
+            connection.execute("DELETE FROM high_scale_archive_manifests WHERE service_id = %s", (sid,))

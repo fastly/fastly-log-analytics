@@ -1569,6 +1569,7 @@ sys.modules["backend.high_scale.source_discovery"] = sys.modules[__name__]
 
 from backend.high_scale.deletion import (  # noqa: E402
     DeletionController,
+    HighScaleArchiveExpirer,
     HighScaleDeletionSweeper,
     PostgresDeletionLedger,
 )
@@ -2470,7 +2471,13 @@ def build_worker_from_environment() -> HighScaleWorkerLoop:
             deletion_controller = DeletionController(
                 S3ObjectStore(fos_client, bucket=bucket), archive, deletion_ledger, ownership=deletion_ledger
             )
-            sweepers.append(HighScaleDeletionSweeper(control=control, controller=deletion_controller))
+            sweepers.append(
+                HighScaleDeletionSweeper(
+                    control=control,
+                    controller=deletion_controller,
+                    archive_expirer=HighScaleArchiveExpirer(control=control, archive=archive),
+                )
+            )
         else:
             sweepers.append(None)
     return _MultiServiceWorkerLoop(

@@ -590,6 +590,18 @@ class ArchivePublication:
         if self._store.get(key) != payload:
             raise ValueError(f"{label} verification failed after upload")
 
+    def expire(self, manifest: ArchiveManifest) -> None:
+        """Delete a manifest's FOS objects: the commit marker first so a partial deletion never looks committed.
+
+        Deleting a missing key is a no-op, so an interrupted expiry can simply be run again.
+        """
+        for key in (
+            f"archive/manifests/{manifest.manifest_id}.commit",
+            f"archive/manifests/{manifest.manifest_id}.json",
+            _artifact_key(manifest.artifact.uri),
+        ):
+            self._store.delete(key)
+
     def publish(self, manifest: ArchiveManifest, artifact: bytes) -> PublicationResult:
         manifest.validate()
         artifact_key = _artifact_key(manifest.artifact.uri)

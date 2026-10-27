@@ -98,6 +98,7 @@ CREATE TABLE IF NOT EXISTS high_scale_archive_manifests (
     CHECK (deletion_authorization_deadline >= retention_deadline)
 );
 ALTER TABLE high_scale_archive_manifests ADD COLUMN IF NOT EXISTS sources_json TEXT;
+ALTER TABLE high_scale_archive_manifests ADD COLUMN IF NOT EXISTS archive_expired_at TIMESTAMPTZ;
 CREATE INDEX IF NOT EXISTS high_scale_archive_manifest_source_idx ON high_scale_archive_manifests (service_id, source_key);
 CREATE TABLE IF NOT EXISTS high_scale_archive_manifest_sources (
     manifest_id TEXT NOT NULL REFERENCES high_scale_archive_manifests(manifest_id) ON DELETE CASCADE,
@@ -759,7 +760,7 @@ class PostgresControlPlane:
         with self.transaction(read_only=True) as connection:
             rows = connection.execute(
                 "SELECT * FROM high_scale_archive_manifests WHERE service_id = %s AND domain = %s "
-                "AND coverage_end > %s AND coverage_start < %s ORDER BY coverage_start",
+                "AND archive_expired_at IS NULL AND coverage_end > %s AND coverage_start < %s ORDER BY coverage_start",
                 (service_id, domain, start, end),
             ).fetchall()
             return tuple(_archive_from_row(row).manifest for row in rows)
@@ -780,6 +781,40 @@ class PostgresControlPlane:
                 (service_id, limit),
             ).fetchall()
             return tuple(_source_from_row(row) for row in rows)
+
+    def expirable_archive_manifests(
+        self, service_id: str, domain_retention_days: Mapping[str, int], *, limit: int = 100
+    ) -> tuple[ArchiveManifest, ...]:
+        """Manifests whose raw source is already gone and whose coverage is older than the domain's retention.
+
+        A domain with a retention of 0 days (or less) is kept forever.
+        """
+        _require_text(service_id, "service_id")
+        if limit <= 0:
+            raise ValueError("limit must be positive")
+        windows = [(domain, int(days)) for domain, days in domain_retention_days.items() if int(days) > 0]
+        if not windows:
+            return ()
+        predicate = " OR ".join(
+            "(domain = %s AND coverage_end < clock_timestamp() - make_interval(days => %s))" for _ in windows
+        )
+        params = [value for window in windows for value in window]
+        with self.transaction(read_only=True) as connection:
+            rows = connection.execute(
+                "SELECT * FROM high_scale_archive_manifests WHERE service_id = %s AND state = 'source_deleted' "
+                f"AND archive_expired_at IS NULL AND ({predicate}) ORDER BY coverage_end LIMIT %s",
+                (service_id, *params, limit),
+            ).fetchall()
+            return tuple(_archive_from_row(row).manifest for row in rows)
+
+    def mark_archive_expired(self, manifest_id: str) -> None:
+        _require_text(manifest_id, "manifest_id")
+        with self.transaction() as connection:
+            connection.execute(
+                "UPDATE high_scale_archive_manifests SET archive_expired_at = clock_timestamp(), "
+                "updated_at = clock_timestamp() WHERE manifest_id = %s AND archive_expired_at IS NULL",
+                (manifest_id,),
+            )
 
     def acknowledge_sources_batch(
         self,
@@ -1648,14 +1683,72 @@ class DeletionSweepResult:
     skipped: int
 
 
+class HighScaleArchiveExpirer:
+    """Deletes archive artifacts once their data is past the service's retention (ClickHouse has expired it too).
+
+    The archive is the only copy that can rebuild ClickHouse after a volume loss, because raw source objects are
+    deleted once archived, so it is kept for the retention window and then removed. ``data_retention_days`` covers
+    the request domain and ``rum_retention_days`` the RUM domains; 0 keeps a domain forever. A day of margin keeps
+    the archive until after the matching ClickHouse TTL.
+    """
+
+    MARGIN_DAYS = 1
+
+    def __init__(
+        self,
+        *,
+        control: Any,
+        archive: ArchivePublication,
+        retention_loader: Callable[[str], Mapping[str, int]] | None = None,
+    ) -> None:
+        self._control = control
+        self._archive = archive
+        self._retention_loader = retention_loader or _configured_domain_retention
+
+    def expire(self, service_id: str, *, limit: int = 100) -> int:
+        retention = {
+            d: (days + self.MARGIN_DAYS if days > 0 else 0) for d, days in self._retention_loader(service_id).items()
+        }
+        expired = 0
+        for manifest in self._control.expirable_archive_manifests(service_id, retention, limit=limit):
+            try:
+                self._archive.expire(manifest)
+                self._control.mark_archive_expired(manifest.manifest_id)
+            except Exception:
+                logger.warning(
+                    "high-scale archive expiry failed for manifest %s; retrying next sweep",
+                    manifest.manifest_id,
+                    exc_info=True,
+                )
+                continue
+            expired += 1
+        return expired
+
+
+def _configured_domain_retention(service_id: str) -> dict[str, int]:
+    sync_cfg = (config.load_config(service_id) or {}).get("provisioning", {}).get("cron_sync", {})
+    data_days = int(sync_cfg.get("data_retention_days", 30))
+    rum_days = int(sync_cfg.get("rum_retention_days", data_days))
+    return {"request": data_days, "rum_vitals": rum_days, "rum_errors": rum_days}
+
+
 class HighScaleDeletionSweeper:
     """Periodically deletes raw source objects whose archive is durably verified and whose grace period has elapsed."""
 
-    def __init__(self, *, control: Any, controller: DeletionController) -> None:
+    def __init__(
+        self, *, control: Any, controller: DeletionController, archive_expirer: HighScaleArchiveExpirer | None = None
+    ) -> None:
         self._control = control
         self._controller = controller
+        self._archive_expirer = archive_expirer
 
     def sweep(self, *, service_id: str, limit: int = 100, now: datetime | None = None) -> DeletionSweepResult:
+        result = self._sweep_sources(service_id=service_id, limit=limit, now=now)
+        if self._archive_expirer is not None:
+            self._archive_expirer.expire(service_id, limit=limit)
+        return result
+
+    def _sweep_sources(self, *, service_id: str, limit: int = 100, now: datetime | None = None) -> DeletionSweepResult:
         is_mock = hasattr(self._controller, "_mock_return_value") or type(self._controller).__name__ == "MagicMock"
         if (
             is_mock

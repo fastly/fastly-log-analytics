@@ -36,8 +36,8 @@ export const BILLING_ZONE_DESCRIPTIONS: Record<BillingZone, string> = {
 export type DeploymentMode = 'standard' | 'high_scale'
 
 // Measured on the Elevation dev High-Scale deployment (165k request archive artifacts, 2026-10-27): artifact size is
-// about 32.8 KB fixed plus 417 bytes per row (R^2 0.96). Nothing deletes archive artifacts, so they are billed at the
-// retention window here but really keep growing until purged.
+// about 32.8 KB fixed plus 417 bytes per row (R^2 0.96). The worker deletes artifacts one day after the data retention
+// window, so they are billed for the retention window here.
 const ARCHIVE_FIXED_BYTES = 32_772
 const ARCHIVE_BYTES_PER_ROW = 417
 const ARCHIVE_TICK_SECONDS = 20
@@ -379,7 +379,7 @@ export function Inputs({ s, r, set }: InputsProps) {
         <Row label='Log file period (seconds)' tooltip="How often Fastly closes and uploads a log file. Controlled by the Fastly logging configuration.">
           <NumInput value={s.logPeriod} onChange={set('logPeriod')} min={1} />
         </Row>
-        <Row label='Deployment mode' tooltip="High-Scale also writes an archive Parquet artifact per page of raw log objects to FOS: about 33 KB fixed plus 417 bytes per row (measured on Elevation dev). Archive artifacts are never deleted automatically, so this storage keeps growing.">
+        <Row label='Deployment mode' tooltip="High-Scale also writes an archive Parquet artifact per page of raw log objects to FOS: about 33 KB fixed plus 417 bytes per row (measured on Elevation dev). The worker deletes archive artifacts a day after the data retention window.">
           <select aria-label="Deployment mode" value={s.deploymentMode} onChange={(e) => set('deploymentMode')(e.target.value as DeploymentMode)} className="h-8 rounded-md border bg-background px-2 text-xs">
             <option value="standard">Standard</option>
             <option value="high_scale">High-Scale</option>
