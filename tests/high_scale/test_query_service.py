@@ -14,25 +14,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 from backend.core.high_scale_sections import current_clickhouse_scope
 from backend.core.query_attribution import Attribution, current_attribution
-from backend.high_scale._common import KeysetCursor, request_filter_clauses
-from backend.high_scale.aggregate_query import (
-    AggregateRequest,
-    query_clickhouse_aggregate,
-    query_clickhouse_aggregates_batch,
-)
 from backend.high_scale.archive_models import ServingWatermark
-from backend.high_scale.dashboard import aggregates, bundle, header_metrics
 from backend.high_scale.historical_jobs import HistoricalJob, HistoricalJobManager, HistoricalJobState
 from backend.high_scale.insight_queries import COLUMNS, DETECTIONS, botnet_grouping
-from backend.high_scale.insights import cache_collapse_detail_endpoint, insights_endpoint
-from backend.high_scale.network import (
-    get_pop_health,
-    get_transport_metrics,
-    network_bundle,
-    network_health,
-    network_quality,
-)
-from backend.high_scale.origin import aggregates as origin_aggregates
 from backend.high_scale.origin_projection import build_origin_projection_rows
 from backend.high_scale.performance_projection import SCATTER_SAMPLE_SIZE, build_performance_projection_rows
 from backend.high_scale.query_router import (
@@ -43,9 +27,7 @@ from backend.high_scale.query_router import (
     QueryRouterConfig,
     QueryTier,
 )
-from backend.high_scale.recovery import RecoveryReport
 from backend.high_scale.registry_bootstrap import HighScaleService
-from backend.high_scale.sessions import sessions_detail, sessions_endpoint
 from backend.models.dashboard import AggregatesRequest, SessionDetailRequest, SessionsRequest, SessionsResponse
 from backend.models.insights import CacheCollapseDetailRequest, InsightsRequest
 from backend.models.network import NetworkBundleRequest, NetworkHealthRequest, NetworkQualityRequest
@@ -57,7 +39,25 @@ from backend.high_scale import insights as hs_insights
 from backend.high_scale import performance as hs_performance
 from backend.high_scale import security as hs_security
 from backend.high_scale import sessions as hs_sessions
+from backend.high_scale._common import KeysetCursor, request_filter_clauses
+from backend.high_scale.aggregate_query import (
+    AggregateRequest,
+    query_clickhouse_aggregate,
+    query_clickhouse_aggregates_batch,
+)
+from backend.high_scale.dashboard import aggregates, bundle, header_metrics
+from backend.high_scale.insights import cache_collapse_detail_endpoint, insights_endpoint
+from backend.high_scale.network import (
+    get_pop_health,
+    get_transport_metrics,
+    network_bundle,
+    network_health,
+    network_quality,
+)
+from backend.high_scale.origin import aggregates as origin_aggregates
 from backend.high_scale.query_service import query_cmcd_facts, query_request_facts, query_rum_facts
+from backend.high_scale.recovery import RecoveryReport
+from backend.high_scale.sessions import sessions_detail, sessions_endpoint
 from backend.models.common import FilterSpec
 from backend.repositories.insights import registry
 from backend.utils.telemetry import get_page_load_id, set_page_load_id

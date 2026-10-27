@@ -43,12 +43,8 @@ from backend.high_scale.archive_models import (
     validate_archive_transition,
 )
 from backend.high_scale.archive_writer import write_batch_archive_checkpoint
-from backend.high_scale.cmcd import cmcd_aggregates, project_cmcd
-from backend.high_scale.dashboard import aggregates as dashboard_aggregates
 from backend.high_scale.decoder import decode_source_object
 from backend.high_scale.exports import ExportManager, ExportState
-from backend.high_scale.insights import cache_collapse_detail_endpoint, insights_endpoint
-from backend.high_scale.origin import aggregates as origin_aggregates
 from backend.high_scale.origin_projection import build_origin_projection_rows
 from backend.high_scale.publication import (
     ClickHousePublication,
@@ -63,19 +59,15 @@ from backend.high_scale.publication import (
     build_rum_event_id,
     row_matches_serving_domain,
 )
-from backend.high_scale.query import query_endpoint
-from backend.high_scale.recovery import RecoveryCapacityMeasurement, evaluate_recovery_capacity
 from backend.high_scale.registry_bootstrap import (
     HighScaleService,
     HighScaleServiceRegistry,
     register_high_scale_services,
     register_high_scale_services_from_environment,
 )
-from backend.high_scale.sessions import sessions_endpoint
 from backend.models.dashboard import AggregatesRequest, QueryRequest, SessionsRequest
 from backend.models.insights import CacheCollapseDetailRequest, InsightsRequest
 from backend.models.performance import CmcdRequest
-from backend.repositories.query import MAX_QUERY_ROWS
 from backend.utils.remote_access import _is_blocked_path
 from structlog.testing import capture_logs
 
@@ -84,10 +76,18 @@ from backend.core import metric_snapshots
 from backend.high_scale import archive_models as disk_sampler
 from backend.high_scale import cmcd as hs_cmcd
 from backend.high_scale import sessions as hs_sessions
+from backend.high_scale.cmcd import cmcd_aggregates, project_cmcd
+from backend.high_scale.dashboard import aggregates as dashboard_aggregates
+from backend.high_scale.insights import cache_collapse_detail_endpoint, insights_endpoint
+from backend.high_scale.origin import aggregates as origin_aggregates
 from backend.high_scale.postgres_control import PostgresControlPlane
+from backend.high_scale.query import query_endpoint
 from backend.high_scale.query_service import QueryResponseMetadata, query_request_facts
+from backend.high_scale.recovery import RecoveryCapacityMeasurement, evaluate_recovery_capacity
+from backend.high_scale.sessions import sessions_endpoint
 from backend.models.common import FilterSpec
 from backend.repositories.insights import registry
+from backend.repositories.query import MAX_QUERY_ROWS
 
 
 def identity(ordinal: int = 0, **overrides: Any) -> dict[str, Any]:
