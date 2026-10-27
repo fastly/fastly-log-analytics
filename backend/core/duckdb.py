@@ -283,6 +283,22 @@ class _ProxyPaginatorShim:
         return getattr(self._paginator, name)
 
 
+# S3 operations worth attributing as FOS I/O spans. Non-S3 attributes and
+# non-callable attributes pass through the shim unwrapped.
+_FOS_SPAN_METHODS = frozenset(
+    {
+        "list_objects_v2",
+        "list_objects",
+        "get_object",
+        "head_object",
+        "put_object",
+        "copy_object",
+        "delete_object",
+        "delete_objects",
+    }
+)
+
+
 class _ProxyClientShim:
     def __init__(self, obj):
         self._obj = obj
@@ -291,7 +307,35 @@ class _ProxyClientShim:
         return _ProxyPaginatorShim(self._obj.get_paginator(s3_method), caller_hint)
 
     def __getattr__(self, name):
-        return getattr(self._obj, name)
+        attr = getattr(self._obj, name)
+        if name not in _FOS_SPAN_METHODS or not callable(attr):
+            return attr
+
+        def _span_wrapped(*args, **kwargs):
+            try:
+                from backend.core.request_telemetry import (
+                    _end_db_span,
+                    _start_db_span,
+                )
+
+                span = _start_db_span("fos", name, None)
+            except Exception:
+                span = None
+            try:
+                result = attr(*args, **kwargs)
+            except BaseException as exc:
+                try:
+                    _end_db_span(span, exc)
+                except Exception:
+                    pass
+                raise
+            try:
+                _end_db_span(span, None)
+            except Exception:
+                pass
+            return result
+
+        return _span_wrapped
 
 
 def _get_fos_client(source: dict):

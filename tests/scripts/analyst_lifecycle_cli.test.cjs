@@ -4,9 +4,23 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { test } = require('node:test');
-const { parameters, writeEvidence } = require('../../scripts/dev/check_analyst_lifecycle.cjs');
+const { parameters, writeEvidence, parsePaintOptions, INVALID_PAINT } = require('../../scripts/dev/check_analyst_lifecycle.cjs');
 
-const args = ['--environment', 'gce-standard', '--admin-origin', 'https://admin.example.com', '--analyst-origin', 'https://analyst.example.com', '--service-id', 'service-test'];
+const args = ['--environment', 'remote-standard', '--admin-origin', 'https://admin.example.com', '--analyst-origin', 'https://analyst.example.com', '--service-id', 'service-test'];
+
+const paintArgs = ['--role', 'masked',
+  '--paint-target', 'button.apply-filter',
+  '--paint-feedback-selector', '.toast', '--paint-feedback-text', 'Filter applied',
+  '--paint-result-selector', 'table tbody tr', '--paint-result-text', '42'];
+
+test('only canonical measurement environment names are accepted', () => {
+  for (const environment of ['local-standard', 'remote-standard', 'remote-high-scale']) {
+    assert.equal(parameters(['--environment', environment, ...args.slice(2), '--role', 'masked']).environment, environment);
+  }
+  for (const environment of ['gce-standard', 'elevation-high-scale', 'unknown']) {
+    assert.throws(() => parameters(['--environment', environment, ...args.slice(2), '--role', 'masked']), /invalid_arguments/);
+  }
+});
 
 test('roles are explicit and normal/stress user counts remain bounded', () => {
   assert.throws(() => parameters(args), /invalid_arguments/);
@@ -46,4 +60,85 @@ test('invalid CLI arguments fail before browser or transport setup with safe out
   assert.equal(result.status, 2);
   assert.deepEqual(JSON.parse(result.stderr), { status: 'blocked', error: 'invalid_arguments', qualification: 'incomplete' });
   assert.equal(result.stdout, '');
+});
+
+test('parsePaintOptions returns null when no painted-action target is supplied', () => {
+  assert.equal(parsePaintOptions({}), null);
+});
+
+test('parsePaintOptions rejects paint flags supplied without a target', () => {
+  assert.equal(parsePaintOptions({ 'paint-scroll-selector': '#section-request-cards' }), INVALID_PAINT);
+  assert.equal(parsePaintOptions({ 'paint-result-selector': ['tr'] }), INVALID_PAINT);
+  assert.equal(parsePaintOptions({ 'paint-result-text': ['42'] }), INVALID_PAINT);
+  assert.equal(parsePaintOptions({ 'paint-feedback-selector': '.toast' }), INVALID_PAINT);
+  assert.equal(parsePaintOptions({ 'paint-feedback-text': 'ok' }), INVALID_PAINT);
+  assert.equal(parsePaintOptions({ 'paint-event-type': 'click' }), INVALID_PAINT);
+  assert.equal(parsePaintOptions({ 'paint-timeout-ms': '5000' }), INVALID_PAINT);
+});
+
+test('parsePaintOptions requires feedback and matched result pairs when a target is present', () => {
+  const base = {
+    'paint-target': 'button.apply-filter',
+    'paint-feedback-selector': '.toast', 'paint-feedback-text': 'Filter applied',
+    'paint-result-selector': ['tbody tr'], 'paint-result-text': ['42'],
+  };
+  assert.deepEqual(parsePaintOptions(base), {
+    target: 'button.apply-filter',
+    feedback: { selector: '.toast', text: 'Filter applied' },
+    results: [{ selector: 'tbody tr', text: '42' }],
+    eventType: 'click', timeoutMs: 5000,
+  });
+  assert.equal(parsePaintOptions({ ...base, 'paint-feedback-selector': undefined }), INVALID_PAINT);
+  assert.equal(parsePaintOptions({ ...base, 'paint-feedback-text': undefined }), INVALID_PAINT);
+  assert.equal(parsePaintOptions({ ...base, 'paint-result-selector': [] }), INVALID_PAINT);
+  assert.equal(parsePaintOptions({ ...base, 'paint-result-text': ['42', 'extra'] }), INVALID_PAINT);
+});
+
+test('parsePaintOptions maps multiple required result panels in order', () => {
+  const paint = parsePaintOptions({
+    'paint-target': 'button.apply-filter',
+    'paint-feedback-selector': '.toast', 'paint-feedback-text': 'Filter applied',
+    'paint-result-selector': ['tbody tr', '.summary .count'], 'paint-result-text': ['42', '7 shown'],
+  });
+  assert.deepEqual(paint.results, [
+    { selector: 'tbody tr', text: '42' },
+    { selector: '.summary .count', text: '7 shown' },
+  ]);
+});
+
+test('parsePaintOptions validates event type and timeout bounds', () => {
+  const base = {
+    'paint-target': 'button.apply-filter',
+    'paint-feedback-selector': '.toast', 'paint-feedback-text': 'Filter applied',
+    'paint-result-selector': ['tbody tr'], 'paint-result-text': ['42'],
+  };
+  assert.equal(parsePaintOptions({ ...base, 'paint-event-type': 'keydown' }).eventType, 'keydown');
+  assert.equal(parsePaintOptions({ ...base, 'paint-event-type': 'hover' }), INVALID_PAINT);
+  assert.equal(parsePaintOptions({ ...base, 'paint-timeout-ms': '1000' }).timeoutMs, 1000);
+  for (const bad of ['0', '-1', '60001', 'abc']) {
+    assert.equal(parsePaintOptions({ ...base, 'paint-timeout-ms': bad }), INVALID_PAINT);
+  }
+});
+
+test('paint preparation accepts an explicit scroll ancestor but rejects an empty selector', () => {
+  const values = {
+    'paint-target': 'button.apply-filter',
+    'paint-feedback-selector': '.toast', 'paint-feedback-text': 'Filter applied',
+    'paint-result-selector': ['tbody tr'], 'paint-result-text': ['42'],
+    'paint-scroll-selector': '#section-request-cards',
+  };
+  assert.equal(parsePaintOptions(values).scrollSelector, '#section-request-cards');
+  assert.equal(parsePaintOptions({ ...values, 'paint-scroll-selector': ' ' }), INVALID_PAINT);
+});
+
+test('parameters folds a valid painted-action request into options and rejects a malformed one', () => {
+  const resolved = parameters([...args, ...paintArgs]);
+  assert.deepEqual(resolved.paint, {
+    target: 'button.apply-filter',
+    feedback: { selector: '.toast', text: 'Filter applied' },
+    results: [{ selector: 'table tbody tr', text: '42' }],
+    eventType: 'click', timeoutMs: 5000,
+  });
+  assert.equal(parameters([...args, '--role', 'masked']).paint, null);
+  assert.throws(() => parameters([...args, '--role', 'masked', '--paint-target', 'button.apply-filter']), /invalid_arguments/);
 });
