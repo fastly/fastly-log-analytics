@@ -16,6 +16,10 @@
   minimum 1 minute.
 - **Manual trigger:** `POST /api/admin/commit-storage`. Returns `202 Accepted`
   with a `run_id`; the commit runs asynchronously.
+- **Cloud copy (Standard):** after a commit that committed files, the new DuckLake Parquet files are pushed to
+  `{prefix}/ducklake/` in the service's FOS bucket on a background thread (`schedule_cloud_push`). `optimize`, `expire`
+  and the RUM commit trigger the same push, which also deletes keys the catalog no longer references. Restore with
+  `python -m backend.provision.cli restore-data --service-id <id>`. See AGENTS.md trap 50.
 
 The current job ID is `commit_{service_id}`. The older `log_commit_` label is
 not the scheduler ID used by this branch.

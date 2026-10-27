@@ -1884,19 +1884,21 @@ def _wipe_ducklake_table_dirs(ducklake_root: str, tbl: str) -> Generator[dict]:
 
 
 def _purge_ducklake_remote_dirs(
-    fos_client, ducklake_root: str, tbl: str, source_bucket: str, delete_fn
+    fos_client, ducklake_root: str, tbl: str, source_bucket: str, delete_fn, source_prefix: str = ""
 ) -> Generator[dict, None, int]:
-    """Delete a table's DuckLake data files from FOS when DATA_PATH is an ``s3://`` root (High-Scale)."""
-    if not ducklake_root.startswith("s3://"):
-        return 0
-    bucket, _, key = ducklake_root[len("s3://") :].partition("/")
-    if bucket != source_bucket:
-        yield {
-            "type": "status",
-            "message": f"Skipping cloud DuckLake purge: data path bucket {bucket!r} is not this service's bucket.",
-        }
-        return 0
-    base = f"{key.rstrip('/')}/" if key.strip("/") else ""
+    """Delete a table's DuckLake data files from FOS: the live data (High-Scale ``s3://`` root) or the cloud copy of local data."""
+    if ducklake_root.startswith("s3://"):
+        bucket, _, key = ducklake_root[len("s3://") :].partition("/")
+        if bucket != source_bucket:
+            yield {
+                "type": "status",
+                "message": f"Skipping cloud DuckLake purge: data path bucket {bucket!r} is not this service's bucket.",
+            }
+            return 0
+        base = f"{key.rstrip('/')}/" if key.strip("/") else ""
+    else:
+        bucket, prefix = source_bucket, source_prefix.strip("/")
+        base = f"{prefix}/ducklake/" if prefix else "ducklake/"
     deleted = 0
     for sub in (f"{base}main/{tbl}/", f"{base}{tbl}/"):
         deleted += yield from _purge_prefix(fos_client, bucket, sub, delete_fn, label=f"object(s) under {sub}")
@@ -2132,7 +2134,7 @@ def reset_service_logs(
         fos, bucket, prefix = _db._get_fos_client(source), source.get("bucket", ""), source.get("prefix", "")
         pfx = f"{prefix}/" if prefix else ""
         deleted = yield from _purge_ducklake_remote_dirs(
-            fos, ducklake_root, ducklake_table_name(source, "logs"), bucket, _delete_objects_robust,
+            fos, ducklake_root, ducklake_table_name(source, "logs"), bucket, _delete_objects_robust, prefix,
         )  # fmt: skip
         if deleted:
             yield {"type": "status", "message": f"Deleted {deleted:,} cloud DuckLake data object(s)."}
@@ -2285,7 +2287,7 @@ def reset_service_rum(
         pfx = f"{prefix}/" if prefix else ""
         for t_name in _RUM_TABLES:
             deleted = yield from _purge_ducklake_remote_dirs(
-                fos, ducklake_root, ducklake_table_name(source, t_name), bucket, _delete_objects_robust
+                fos, ducklake_root, ducklake_table_name(source, t_name), bucket, _delete_objects_robust, prefix
             )
             if deleted:
                 yield {"type": "status", "message": f"Deleted {deleted:,} cloud object(s) for RUM {t_name}."}

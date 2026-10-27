@@ -27,6 +27,7 @@ from typing import Any
 
 from backend import config as svcconfig
 from backend.core.rum_ingest import ingest_rum_logs
+from backend.core.storage.backup import schedule_cloud_push
 from backend.cron.scheduler import (
     _check_buffer_backlog,
     _check_disk_space,
@@ -1225,6 +1226,7 @@ def _run_commit(service_id: str, force: bool = False, run_id: int | None = None)
                         run_id, service_id, job_name="commit", event={"type": "warning", "message": e}
                     )
                 _spawn_local_compaction(src, service_id)
+                schedule_cloud_push(src, ("logs",))
         except Exception as e:
             run.fail("Buffer commit failed", error_message=str(e))
             _log_and_add_progress(run_id, service_id, job_name="commit", event={"type": "error", "message": str(e)})
@@ -1725,6 +1727,8 @@ def _run_rum_commit(service_id: str, force: bool = False, run_id: int | None = N
 
             # Raw RUM objects may only be deleted after both DuckLake commit paths
             # have completed successfully and their publication is durable.
+            if total_committed_vitals or total_committed_errors:
+                schedule_cloud_push(src, ("client_vitals", "client_errors"))
             if vitals_err is None and errors_err is None:
                 from backend.core.ingest import _mark_ledger_published
 

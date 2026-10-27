@@ -2886,3 +2886,137 @@ def test_cleanup_ingested_files_summary_recompute():
     assert reconciliation.cleanup_metadata(sid2, retention={"ingested_files_days": 7})["deleted"]["ingested_files"] == 0
     s2 = metadata_db.get_ingested_files_status_summary(sid2)
     assert (s2["file_count"], s2["total_rows"]) == (42, 4242)
+
+
+# ── Cloud copy of committed Parquet (push) and restore ──────────────────────
+
+
+def _cloud_env(monkeypatch, tmp_path):
+    from backend.core.storage import backup
+    from backend.core.storage._core import ducklake_table_name
+
+    monkeypatch.setattr(ducklake.config, "DUCKLAKE_DATA_PATH", str(tmp_path / "data"))
+    monkeypatch.delenv("DUCKLAKE_EXTENSION_PATH", raising=False)
+    src = {"service_id": "svc_cloud", "name": "svc_cloud", "bucket": "test-bucket", "prefix": "pfx"}
+    table = ducklake_table_name(src, "logs")
+    con = duckdb.connect()
+    assert ducklake._ducklake_attach(con, src, read_only=False)
+    con.execute(f'DROP TABLE IF EXISTS lake."{table}"')
+    con.execute(f"CREATE TABLE lake.\"{table}\" AS SELECT i AS a, 'x'::VARCHAR AS b FROM range(0, 100) t(i)")
+    con.execute(f"INSERT INTO lake.\"{table}\" SELECT i, 'y' FROM range(100, 200) t(i)")
+    return backup, src, table, con
+
+
+def _keys(client, prefix="pfx/ducklake/"):
+    pages = client.get_paginator("list_objects_v2").paginate(Bucket="test-bucket", Prefix=prefix)
+    return sorted(o["Key"] for p in pages for o in p.get("Contents", ()))
+
+
+def test_push_to_cloud_uploads_live_files_and_removes_compacted_ones(monkeypatch, tmp_path, s3_mock):
+    backup, src, table, con = _cloud_env(monkeypatch, tmp_path)
+    try:
+        first = backup.push_to_cloud(src, ("logs",))
+        assert first["uploaded"] == 2 and first["deleted"] == 0
+        assert len(_keys(s3_mock)) == 2 and all(f"/main/{table}/" in k for k in _keys(s3_mock))
+        assert backup.push_to_cloud(src, ("logs",)) == {"uploaded": 0, "uploaded_bytes": 0, "deleted": 0}
+
+        con.execute(f"CALL ducklake_merge_adjacent_files('lake', '{table}')")
+        con.execute("CALL ducklake_expire_snapshots('lake', older_than => now() + INTERVAL 1 DAY)")
+        con.execute("CALL ducklake_cleanup_old_files('lake', cleanup_all => true)")
+        merged = backup.push_to_cloud(src, ("logs",))
+        assert merged["uploaded"] == 1 and merged["deleted"] == 2
+        assert len(_keys(s3_mock)) == 1
+    finally:
+        con.execute(f'DROP TABLE IF EXISTS lake."{table}"')
+        con.close()
+
+
+def test_push_to_cloud_never_deletes_when_the_catalog_reports_no_live_files(monkeypatch, tmp_path, s3_mock):
+    backup, src, table, con = _cloud_env(monkeypatch, tmp_path)
+    try:
+        backup.push_to_cloud(src, ("logs",))
+        before = _keys(s3_mock)
+        con.execute(f'DROP TABLE lake."{table}"')
+        con.execute(f'CREATE TABLE lake."{table}" (a BIGINT, b VARCHAR)')
+        result = backup.push_to_cloud(src, ("logs",))
+        assert result["deleted"] == 0 and _keys(s3_mock) == before
+    finally:
+        con.execute(f'DROP TABLE IF EXISTS lake."{table}"')
+        con.close()
+
+
+def test_push_to_cloud_skips_high_scale_and_missing_bucket(monkeypatch, tmp_path):
+    from backend.core.storage import backup
+
+    monkeypatch.setattr(ducklake.config, "DUCKLAKE_DATA_PATH", str(tmp_path))
+    assert "skipped" in backup.push_to_cloud({"service_id": "s", "name": "s"})
+    monkeypatch.setattr(ducklake.config, "DUCKLAKE_DATA_PATH", "s3://bkt/pfx/ducklake/")
+    monkeypatch.setenv("ALLOW_REMOTE_S3_PARQUET_SCAN", "1")
+    assert "skipped" in backup.push_to_cloud({"service_id": "s", "name": "s", "bucket": "bkt"})
+
+
+@pytest.mark.parametrize("lose_catalog", [False, True])
+def test_restore_from_cloud_rebuilds_lost_local_data(monkeypatch, tmp_path, s3_mock, lose_catalog):
+    import shutil
+
+    from backend.core.duckdb import _purge_dropped_catalog_rows
+
+    backup, src, table, con = _cloud_env(monkeypatch, tmp_path)
+    try:
+        backup.push_to_cloud(src, ("logs",))
+        con.execute(f'DROP TABLE lake."{table}"') if lose_catalog else None
+        con.close()
+        if lose_catalog:
+            _purge_dropped_catalog_rows("svc_cloud", [table])
+        shutil.rmtree(tmp_path / "data")
+
+        result = backup.restore_from_cloud(src)
+        assert result["downloaded"] == 2 and result["registered"] == (2 if lose_catalog else 0)
+
+        con = duckdb.connect()
+        assert ducklake._ducklake_attach(con, src, read_only=False)
+        assert con.execute(f'SELECT count(*), min(a), max(a) FROM lake."{table}"').fetchone() == (200, 0, 199)
+    finally:
+        con.execute(f'DROP TABLE IF EXISTS lake."{table}"')
+        con.close()
+
+
+def test_schedule_cloud_push_is_single_flight_and_coalesces_requests(monkeypatch):
+    import threading
+
+    from backend.core.storage import backup
+
+    started, release, calls = threading.Event(), threading.Event(), []
+
+    def fake_push(source, tables):
+        calls.append(tables)
+        started.set()
+        release.wait(5)
+        return {}
+
+    monkeypatch.setattr(backup, "push_to_cloud", fake_push)
+    monkeypatch.setattr("backend.cron.scheduler.dev_mode_no_crons", lambda: False)
+    monkeypatch.setattr(backup, "is_high_scale_mode", lambda _src: False)
+    src = {"service_id": "svc_coalesce", "name": "svc_coalesce", "bucket": "b"}
+    backup.schedule_cloud_push(src, ("logs",))
+    assert started.wait(5)
+    backup.schedule_cloud_push(src, ("client_vitals",))
+    backup.schedule_cloud_push(src, ("client_errors", "client_vitals"))
+    release.set()
+    deadline = time.time() + 5
+    while time.time() < deadline and "svc_coalesce" in backup._running:
+        time.sleep(0.02)
+    assert calls == [("logs",), ("client_vitals", "client_errors")]
+
+
+def test_schedule_cloud_push_does_nothing_without_a_bucket_or_in_dev_no_crons(monkeypatch):
+    from backend.core.storage import backup
+
+    ran = []
+    monkeypatch.setattr(backup, "push_to_cloud", lambda *a: ran.append(a))
+    monkeypatch.setattr(backup, "is_high_scale_mode", lambda _src: False)
+    monkeypatch.setattr("backend.cron.scheduler.dev_mode_no_crons", lambda: False)
+    backup.schedule_cloud_push({"service_id": "s", "name": "s"})
+    monkeypatch.setattr("backend.cron.scheduler.dev_mode_no_crons", lambda: True)
+    backup.schedule_cloud_push({"service_id": "s", "name": "s", "bucket": "b"})
+    assert ran == [] and not backup._running

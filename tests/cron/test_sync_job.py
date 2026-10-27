@@ -1128,7 +1128,11 @@ class TestCommitJob:
             "backend.core.storage.commit_buffer",
             MagicMock(return_value={"files_committed": 2, "rows_committed": 1234, "snapshot_id": 8675309}),
         )
+        push = MagicMock()
+        monkeypatch.setattr(commit, "schedule_cloud_push", push)
         commit._run_commit.__wrapped__("svc-1")
+        push.assert_called_once()
+        assert push.call_args.args[1] == ("logs",)
 
         args, kwargs = stub_cron_envelope["log"].call_args
         assert args[3] == "success" and kwargs["rows_ingested"] == 1234
@@ -1147,7 +1151,10 @@ class TestCommitJob:
             "backend.core.storage.commit_buffer",
             MagicMock(return_value={"files_committed": 0, "rows_committed": 0, "snapshot_id": None}),
         )
+        push = MagicMock()
+        monkeypatch.setattr(commit, "schedule_cloud_push", push)
         commit._run_commit.__wrapped__("svc-1")
+        push.assert_not_called()
 
         args, kwargs = stub_cron_envelope["log"].call_args
         assert args[3] == "success" and "No new data" in kwargs["summary"]

@@ -1062,8 +1062,8 @@ export function StorageStep({ s }: { s: WizardState }) {
           <div className={cn("p-4 border rounded-md bg-muted/5 space-y-3 transition-opacity", syncDisabledClass)}>
             <div className="flex items-start justify-between gap-4">
               <div className="space-y-1">
-                <LabelWithInfo label="Cloud Commit Interval" info="How often the local buffer is flushed to the shared DuckLake table. This determines how quickly data becomes visible to other users or tools querying the DuckLake table directly. More frequent commits mean fresher data but create more small files — the daily DuckLake optimization consolidates them." />
-                <p className="text-[10px] text-muted-foreground leading-relaxed">Controls data freshness for shared access. Every commit creates one DuckLake snapshot.</p>
+                <LabelWithInfo label="Cloud Commit Interval" info="How often the local buffer is committed to DuckLake and the new Parquet files are pushed to Fastly Object Storage. The cloud copy is what lets you rebuild your data if the local disk is lost. More frequent commits mean fresher data and a more current backup, but create more small files — the daily DuckLake optimization consolidates them." />
+                <p className="text-[10px] text-muted-foreground leading-relaxed">Controls data freshness and how current the cloud copy is. Every commit creates one DuckLake snapshot.</p>
               </div>
               <Select value={String(config.commit_interval_mins)} onValueChange={(v) => v && update("commit_interval_mins", Number(v))}>
                 <SelectTrigger className="h-8 w-[220px] shrink-0 text-xs"><SelectValue /></SelectTrigger>

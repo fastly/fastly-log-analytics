@@ -106,7 +106,7 @@ function DeleteDataDialogBody({ service, open, onOpenChange, onComplete }: Delet
           <AlertDescription className="text-[13px] ml-1 font-medium">
             {service.is_high_scale
               ? "This permanently deletes all of this service's log data from the high-scale ClickHouse cluster. New logs from the live edge will start populating immediately afterward. This cannot be undone."
-              : "This permanently deletes all of this service's log data — both local (the analytical database and cache) and cloud-stored (the DuckLake log data; in High-Scale it lives in Fastly Object Storage). New logs from the live edge will start populating immediately afterward. This cannot be undone."
+              : "This permanently deletes all of this service's log data — both local (the analytical database and cache) and cloud-stored (the DuckLake copy in Fastly Object Storage). New logs from the live edge will start populating immediately afterward. This cannot be undone."
             }
           </AlertDescription>
         </Alert>

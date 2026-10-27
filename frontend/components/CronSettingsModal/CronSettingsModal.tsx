@@ -205,7 +205,7 @@ export function LogSyncSection({
               <Label htmlFor="commit-interval" className="text-[11px] font-semibold">Cloud Commit Interval</Label>
             </div>
             <p className="text-[10px] text-muted-foreground leading-tight">
-              How often the local buffer is pushed to DuckLake. Cannot be shorter than sync frequency ({syncFreqLabel}).
+              How often the local buffer is committed to DuckLake and pushed to cloud storage. Cannot be shorter than sync frequency ({syncFreqLabel}).
             </p>
             <Select
               value={commitInterval}

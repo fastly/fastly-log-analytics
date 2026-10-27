@@ -50,7 +50,7 @@ User-facing pitch + features list lives in [README.md](README.md). This file doc
 |---|---|---|
 | Raw logs | `s3://{bucket}/{prefix}/raw/request/**/*.gz` and `.../raw/rum/**/*.gz` | Immutable gzipped request and RUM JSON from Fastly; v3 services use these roots exclusively |
 | Local buffer | `cache/{bucket}/` | Transient Parquet between ingest and commit |
-| DuckLake table | Catalog: Postgres DSN (`DUCKLAKE_CATALOG`, required across all deployment modes — see [ADR-22](docs/adr/22-postgres-only-metadata.md)); data: local disk under `/app/data/services/{service_id}/ducklake/` | Long-term, transactional storage powered by DuckDB's DuckLake extension. All queried parquet data is stored locally on NVMe/SSD disk for instant analytical queries with 0 network latency. FOS / S3 serves as the edge ingress destination for raw `.gz` logs as well as the durable cloud backup/sync store for periodic commits (every `commit_interval_mins`), archive Parquet, and synchronized admin state. |
+| DuckLake table | Catalog: Postgres DSN (`DUCKLAKE_CATALOG`, required across all deployment modes — see [ADR-22](docs/adr/22-postgres-only-metadata.md)); data: local disk under `/app/data/services/{service_id}/ducklake/` | Long-term, transactional storage powered by DuckDB's DuckLake extension. All queried parquet data is stored locally on NVMe/SSD disk for instant analytical queries with 0 network latency. FOS / S3 serves as the edge ingress destination for raw `.gz` logs and as the durable cloud copy of committed data: in Standard, `backend/core/storage/backup.py` pushes the catalog-live Parquet files to `{prefix}/ducklake/<path under the data root>` after every commit (every `commit_interval_mins`), compaction and retention run, and `python -m backend.provision.cli restore-data --service-id <id>` rebuilds local data from it; in High-Scale the data lives there directly. Archive Parquet and synchronized admin state also live in FOS. |
 | Admin state | `s3://{bucket}/{prefix}/meta/admin_state.json` | log_format_history, audit_logs, views, custom_fields (no alerts — alerts are per-instance). Moved from `iceberg/meta/` in v3.0.0-beta4 (no read fallback; re-provision). The scoring matrix and its history live beside it under `meta/`. |
 | DuckDB | `data/services/{service_id}.duckdb` | Per-service analytical engine **only**: session-scoped `logs` view + temp tables |
 | Metadata & State DB | PostgreSQL 16 (`METADATA_DSN`, mandatory across all modes — see [ADR-22](docs/adr/22-postgres-only-metadata.md)) | Unified relational store: `alerts`, `views`, `audit_logs`, `cron_runs`, `sources`, `ingested_files`, `asn_names`, `slow_queries`, `usage_log`, `usage_log_hourly_summary`, `remote_invites`, `remote_sessions`, `remote_share_audit_logs`, `share_settings`, `share_tos_versions`, `ngwaf_bots`, and `rdns` |
@@ -107,7 +107,7 @@ Two data planes are selected by `DEPLOYMENT_MODE`: `standard` uses synchronous D
 | Job | Schedule | Function |
 |---|---|---|
 | `log_discovery_{id}` | every `log_period` sec | LIST FOS raw/, download new `.gz`, transform to Parquet, update DuckDB view, flush usage log, run cleanup |
-| `commit_{id}` | every `commit_interval_mins` (default 5) | Commit local Parquet buffer → DuckLake table, flush usage log |
+| `commit_{id}` | every `commit_interval_mins` (default 5) | Commit local Parquet buffer → DuckLake table, flush usage log, then (Standard) push the new data files to FOS on a single-flight background thread (`schedule_cloud_push`; `optimize`, `expire` and the RUM commit trigger it too) |
 | `local_compact_{id}` | every 2 min | Compact local-only hourly/daily Parquet files, flush usage log |
 | `rollup_heal_{id}` | hourly at :05 | Re-run the idempotent `backfill_missing_hour_bundles` (48-hour lookback, `lookback_days = 2`) so closed hours the per-sync recompute missed get their top-N rollups within ~1 h; local-only writes |
 | `rollup_compact_{id}` | daily 02:00 UTC | Consolidate closed-day per-hour rollup parquet into per-day files (30-day deep pass); local-only writes |
@@ -1330,6 +1330,17 @@ through an hour must use the existing scoped raw fallback, not serve a truncated
 rollup result. Keep hour-aligned starts eligible. The real-DuckDB regression in
 `tests/repositories/test_rollup_reader_coverage_golden.py` checks both dispatch
 paths against retained events over the same 24-hour bounds.
+
+### 50. The Standard-mode cloud copy is the only off-box copy of committed data
+
+Standard keeps DuckLake Parquet on local disk and the catalog in Postgres. The cloud copy under `{prefix}/ducklake/` (`backend/core/storage/backup.py`) is the only thing that survives losing both, because the raw `.gz` are deleted after ingest when `delete_after` is on. The v3 cutover silently dropped the old "push to the cloud after commit" step (the commit interval kept its "Cloud Commit Interval" label while only committing locally); this restores it.
+
+- **The FOS listing is the only state.** Nothing about the copy is recorded in Postgres, so it stays usable when the catalog is lost. Each push lists `ducklake/main/<table>/`, uploads catalog-live files that are missing or differ in size, and deletes keys the catalog no longer references.
+- **Never delete when the live set is empty.** An empty `ducklake_list_files` means a wiped or unreadable catalog, not "everything was compacted away"; deleting then would destroy the backup. Pinned by `test_push_to_cloud_never_deletes_when_the_catalog_reports_no_live_files`.
+- **Hook every writer of the file set.** `schedule_cloud_push` runs after a commit that committed files, after the RUM commit, and after `optimize` and `expire`. A new job that adds, rewrites or removes DuckLake data files needs the same call. It is single-flight per service and skipped in High-Scale, without a bucket and under `FLA_DEV_NO_CRONS=1` (so a dev checkout never pushes to a real bucket).
+- **Reset and teardown must purge the copy**, or a restore would bring deleted data back: `reset_service_logs` / `reset_service_rum` delete `ducklake/main/<table>/` through `_purge_ducklake_remote_dirs`. Teardown relies on its bucket or prefix deletion options.
+- **Restore** (`restore-data` CLI, `restore_from_cloud`) downloads missing files, creates absent tables from the Parquet schema and registers files with `ducklake_add_data_files`, which is not idempotent: it skips files `ducklake_list_files` already lists. It restores data, not the Postgres operational metadata (`ingested_files`, cron history), so raw `.gz` still in the bucket can be re-ingested as duplicates after a full loss.
+- **Window of exposure:** data ingested since the last successful push exists only locally. The push cost model is in the Usage page calculator (Class A per file, 30-day minimum billing on rewritten files).
 
 ### Bounded ClickHouse diagnostic index (ADR-20)
 

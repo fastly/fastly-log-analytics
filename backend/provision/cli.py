@@ -823,6 +823,22 @@ def cmd_reset_logs(
     handle_reset_logs(args)
 
 
+@app.command("restore-data", help="Rebuild a service's local DuckLake data from its cloud copy in FOS.")
+def cmd_restore_data(
+    service_id: str = typer.Option(..., "--service-id", help="The Fastly service ID to restore."),
+):
+    from backend.core.duckdb import get_source_for_service
+    from backend.core.storage.backup import restore_from_cloud
+
+    source = get_source_for_service(service_id)
+    if source is None:
+        raise typer.BadParameter(f"No configured service {service_id!r}", param_hint="--service-id")
+    result = restore_from_cloud(source, progress=info)
+    ok(
+        f"Restored {result['remote_files']} cloud file(s): {result['downloaded']} downloaded, {result['registered']} registered."
+    )
+
+
 @app.command("update-logs", help="Push a refreshed log_fields config.")
 def cmd_update_logs(
     service_id: str | None = typer.Option(None, "--service-id"),

@@ -890,7 +890,7 @@ export function QuickActionsBar({ status, activeServiceId, recentCrons, cronLogs
       <>
           <Button size="sm" variant="default" className="h-8 text-xs bg-primary text-primary-foreground hover:bg-primary/90" onClick={() => triggerCronAction('/api/admin/ingest-logs', 'Importing Logs', 'Downloading new raw logs from Fastly Object Storage and processing them...')}><RefreshCw className="h-3 w-3 mr-1.5" /> Import Logs</Button>
           <Button size="sm" variant="outline" className="h-8 text-xs bg-background" onClick={() => setIsSyncModalOpen(true)} title="Open the range-picker to backfill a specific historical window (e.g., to close an Ingest Gap)"><Download className="h-3 w-3 mr-1.5" /> Backfill Logs</Button>
-          <Button size="sm" variant="outline" className="h-8 text-xs bg-background" onClick={() => triggerCronAction('/api/admin/commit-storage', 'Committing Buffer', 'Flushing local Parquet buffer to the shared DuckLake table...')}><Archive className="h-3 w-3 mr-1.5" /> Commit Buffer</Button>
+          <Button size="sm" variant="outline" className="h-8 text-xs bg-background" onClick={() => triggerCronAction('/api/admin/commit-storage', 'Committing Buffer', 'Committing the local Parquet buffer to DuckLake and pushing it to cloud storage...')}><Archive className="h-3 w-3 mr-1.5" /> Commit Buffer</Button>
       </>
       {status?.ngwaf_workspace_id && (
         <Button size="sm" variant="outline" className="h-8 text-xs bg-background" onClick={() => {

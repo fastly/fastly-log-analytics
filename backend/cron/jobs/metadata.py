@@ -20,6 +20,7 @@ from backend import config as svcconfig
 from backend.core import duckdb as _db
 from backend.core import duckdb_pool as _pool
 from backend.core.request_telemetry import get_meter
+from backend.core.storage.backup import schedule_cloud_push
 from backend.cron.scheduler import (
     JOB_COLORS,
     RESET_COLOR,
@@ -1872,6 +1873,7 @@ def _run_expire_snapshots(service_id: str, *, manual: bool = False) -> dict:
                 )
                 run.result = {**result, "status": status, "service_id": service_id, "summary": summary}
                 run.log_progress({"type": "done" if status == "success" else status, "message": summary})
+                schedule_cloud_push(src)
     logger.info("🏁  \x1b[90m[expire]\x1b[0m %s: Maintenance job finished.", display_name)
     return dict(run.result) if isinstance(run.result, dict) else {}
 
@@ -1947,6 +1949,7 @@ def _run_optimize(service_id: str, manual: bool = False) -> dict | None:
             )
             run.log_progress({"type": "done" if status == "success" else status, "message": summary})
             logger.info("[scheduler] %s: optimize complete — %s", service_id, summary)
+            schedule_cloud_push(src)
             outcome = {
                 "status": status,
                 "service_id": service_id,

@@ -2955,7 +2955,7 @@ class _KeyStorePaginator:
         return [{"Contents": [{"Key": k} for k in sorted(self._keys) if k.startswith(Prefix)]}]
 
 
-def _run_purge(root, tbl, keys, bucket="b"):
+def _run_purge(root, tbl, keys, bucket="b", prefix=""):
     fos = MagicMock()
     fos.get_paginator.return_value = _KeyStorePaginator(keys)
     deleted = []
@@ -2964,7 +2964,7 @@ def _run_purge(root, tbl, keys, bucket="b"):
         deleted.extend(batch)
         return len(batch)
 
-    gen = d._purge_ducklake_remote_dirs(fos, root, tbl, bucket, delete_fn)
+    gen = d._purge_ducklake_remote_dirs(fos, root, tbl, bucket, delete_fn, prefix)
     messages = []
     try:
         while True:
@@ -2997,7 +2997,13 @@ def test_purge_ducklake_remote_dirs_only_deletes_the_named_table(root, expected_
     assert sorted(deleted) == expected_deleted and total == 2
 
 
-def test_purge_ducklake_remote_dirs_skips_foreign_bucket_and_local_roots():
+def test_purge_ducklake_remote_dirs_skips_a_foreign_bucket():
     total, deleted, messages = _run_purge("s3://elsewhere/ducklake/", "logs_svc", ["main/logs_svc/f.parquet"])
     assert (total, deleted) == (0, []) and "Skipping cloud DuckLake purge" in messages[0]["message"]
-    assert _run_purge("/local/ducklake", "logs_svc", ["main/logs_svc/f.parquet"]) == (0, [], [])
+
+
+@pytest.mark.parametrize(("prefix", "base"), [("pfx", "pfx/ducklake/"), ("/pfx/", "pfx/ducklake/"), ("", "ducklake/")])
+def test_purge_ducklake_remote_dirs_removes_the_cloud_copy_of_local_data(prefix, base):
+    keys = [f"{base}main/logs_svc/f1.parquet", f"{base}main/logs_svc__client_vitals/other.parquet", "raw/request/x.gz"]
+    total, deleted, _ = _run_purge("/local/ducklake", "logs_svc", keys, prefix=prefix)
+    assert deleted == [f"{base}main/logs_svc/f1.parquet"] and total == 1
