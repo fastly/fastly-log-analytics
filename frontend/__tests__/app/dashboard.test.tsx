@@ -1257,18 +1257,22 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
       expect(rumTier?.gbMonths).toBeCloseTo(0.071525, 4)
     })
 
-    test('High-Scale adds the archive Parquet storage tier and its write and verification requests', () => {
+    test('High-Scale adds the archive Parquet tier sized from the measured per-artifact and per-row bytes', () => {
       const standard = calculate(DEFAULTS)
       const highScale = calculate({ ...DEFAULTS, deploymentMode: 'high_scale' })
       expect(standard.storageTiers.find(t => t.label === 'High-Scale archive')).toBeUndefined()
       const archive = highScale.storageTiers.find(t => t.label === 'High-Scale archive')
       expect(archive?.gbMonths).toBeGreaterThan(0)
       expect(highScale.totalGBStored).toBeCloseTo(standard.totalGBStored + (archive?.gbMonths ?? 0), 6)
-      const pagesPerMonth = Math.ceil(((86400 / DEFAULTS.logPeriod) * DEFAULTS.logNodes) / DEFAULTS.archiveBatchObjects) * 30
-      expect(highScale.classAPerMonth - standard.classAPerMonth).toBeCloseTo(pagesPerMonth * 3, 6)
-      expect(highScale.classBPerMonth - standard.classBPerMonth).toBeCloseTo(pagesPerMonth * 3, 6)
-      expect(calculate({ ...DEFAULTS, deploymentMode: 'high_scale', archiveBatchObjects: 500 }).classAPerMonth)
-        .toBeLessThan(highScale.classAPerMonth)
+      // Defaults: 1440 log files/day at ~0.33 objects per tick means one object per page, so 3 writes and 3 reads per file.
+      const filesPerMonth = (86400 / DEFAULTS.logPeriod) * DEFAULTS.logNodes * 30
+      expect(highScale.classAPerMonth - standard.classAPerMonth).toBeCloseTo(filesPerMonth * 3, 6)
+      expect(highScale.classBPerMonth - standard.classBPerMonth).toBeCloseTo(filesPerMonth * 3, 6)
+      const busy = calculate({ ...DEFAULTS, deploymentMode: 'high_scale', logNodes: 60 })
+      const busyFiles = (86400 / DEFAULTS.logPeriod) * 60
+      const busyPages = Math.ceil(busyFiles / Math.min(DEFAULTS.archiveBatchObjects, (busyFiles * 20) / 86400))
+      expect(busy.classAPerMonth - calculate({ ...DEFAULTS, logNodes: 60 }).classAPerMonth).toBeCloseTo(busyPages * 30 * 3, 6)
+      expect(busyPages).toBeLessThan(busyFiles)
     })
 
     test('reducer PREFILL handles rum_beacons_per_day correctly', () => {

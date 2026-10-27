@@ -35,6 +35,13 @@ export const BILLING_ZONE_DESCRIPTIONS: Record<BillingZone, string> = {
 
 export type DeploymentMode = 'standard' | 'high_scale'
 
+// Measured on the Elevation dev High-Scale deployment (165k request archive artifacts, 2026-10-27): artifact size is
+// about 32.8 KB fixed plus 417 bytes per row (R^2 0.96). Nothing deletes archive artifacts, so they are billed at the
+// retention window here but really keep growing until purged.
+const ARCHIVE_FIXED_BYTES = 32_772
+const ARCHIVE_BYTES_PER_ROW = 417
+const ARCHIVE_TICK_SECONDS = 20
+
 export interface CalcState {
   reqDay: number
   sampleRate: number
@@ -205,7 +212,10 @@ export function calculate(s: CalcState): CalcResults {
   const rawPqFilesPerDay = parquetFilesPerSync * syncsPerDay
   // High-Scale also archives each page of raw objects as one Parquet artifact plus a manifest and a commit marker.
   const highScale = s.deploymentMode === 'high_scale'
-  const archivePagesPerDay = highScale ? Math.ceil(logFilesPerDay / Math.max(1, s.archiveBatchObjects)) : 0
+  // A page holds whatever the worker discovered in one tick (up to the page size), so quiet services archive one
+  // object per page. Elevation dev measured 2.5 source objects per page on average.
+  const objectsPerTick = (logFilesPerDay * ARCHIVE_TICK_SECONDS) / 86400
+  const archivePagesPerDay = highScale ? Math.ceil(logFilesPerDay / Math.min(Math.max(1, s.archiveBatchObjects), Math.max(1, objectsPerTick))) : 0
   const archiveObjectsPerDay = archivePagesPerDay * 3
   const objectsPerDay = logFilesPerDay + rawPqFilesPerDay + archiveObjectsPerDay
 
@@ -241,7 +251,8 @@ export function calculate(s: CalcState): CalcResults {
   const pqBilledH = Math.max(pqActualH, minChargeHours)
   const duckLakeDataGBMonths = (parquetFilesPerMonth * parquetGBPerFile * pqBilledH) / 720
   const rumParquetGBMonths = (s.rumBeaconsDay * 30 * 1024 / 4) / (1024 * 1024 * 1024)
-  const archiveGBMonths = highScale ? (totalBytesPerMonth / 4 / (1024 * 1024 * 1024)) * (pqBilledH / 720) : 0
+  const archiveBytesPerMonth = archivePagesPerDay * 30 * ARCHIVE_FIXED_BYTES + reqDayEffective * 30 * ARCHIVE_BYTES_PER_ROW
+  const archiveGBMonths = highScale ? (archiveBytesPerMonth / (1024 * 1024 * 1024)) * (pqBilledH / 720) : 0
   const totalGBStored = rawLogGBMonths + duckLakeDataGBMonths + rumParquetGBMonths + archiveGBMonths
 
   const storageTiers: CalcResults['storageTiers'] = []
@@ -368,14 +379,14 @@ export function Inputs({ s, r, set }: InputsProps) {
         <Row label='Log file period (seconds)' tooltip="How often Fastly closes and uploads a log file. Controlled by the Fastly logging configuration.">
           <NumInput value={s.logPeriod} onChange={set('logPeriod')} min={1} />
         </Row>
-        <Row label='Deployment mode' tooltip="High-Scale also writes an archive Parquet artifact per batch of raw log objects to FOS (modelled at about a quarter of the uncompressed log volume, kept for the retention period).">
+        <Row label='Deployment mode' tooltip="High-Scale also writes an archive Parquet artifact per page of raw log objects to FOS: about 33 KB fixed plus 417 bytes per row (measured on Elevation dev). Archive artifacts are never deleted automatically, so this storage keeps growing.">
           <select aria-label="Deployment mode" value={s.deploymentMode} onChange={(e) => set('deploymentMode')(e.target.value as DeploymentMode)} className="h-8 rounded-md border bg-background px-2 text-xs">
             <option value="standard">Standard</option>
             <option value="high_scale">High-Scale</option>
           </select>
         </Row>
         {s.deploymentMode === 'high_scale' && (
-          <Row label='Raw objects per archive batch' tooltip="Source objects the High-Scale worker merges into one archive artifact (HIGH_SCALE_PAGE_SIZE, default 100). Each batch costs 3 writes (artifact, manifest, commit marker) and 3 verification reads.">
+          <Row label='Raw objects per archive batch' tooltip="Upper bound of source objects per archive artifact (HIGH_SCALE_PAGE_SIZE, default 100). Quiet services archive about one object per page. Each page costs 3 writes (artifact, manifest, commit marker) and 3 verification reads.">
             <NumInput value={s.archiveBatchObjects} onChange={set('archiveBatchObjects')} min={1} max={500} />
           </Row>
         )}
