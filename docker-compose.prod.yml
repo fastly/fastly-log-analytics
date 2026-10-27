@@ -84,7 +84,7 @@ services:
     mem_limit: 12g
     memswap_limit: 12g
     # Without an explicit ulimit, Docker inherits the daemon default (often
-    # 1024 soft). DuckDB parallel Iceberg scans open one fd per parquet file;
+    # 1024 soft). DuckDB parallel DuckLake scans open one fd per parquet file;
     # a populated service with 1k+ files hits the limit and throws
     # "Too many open files". main.py bumps the soft limit at startup via
     # resource.setrlimit, but that call silently no-ops when Docker's hard
@@ -101,7 +101,7 @@ services:
       # being UNSET (pre-fix it silently overrode this value with
       # ``int(physical_ram * 0.6)`` ≈ 9-10GB on the 16GB VM, which left
       # too little headroom and caused recurring host OOM-kills).
-      # 6GB chosen so: DuckDB 6 + Python/pyiceberg/aiohttp working set
+      # 6GB chosen so: DuckDB 6 + Python/aiohttp working set
       # ~3 + scoring/cache working set ~2 = ~11GB < 12GB container cap
       # < 16GB host. Bump only after confirming RSS plateaus below 9GB.
       - DUCKDB_MEMORY_LIMIT=6GB

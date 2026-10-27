@@ -48,7 +48,7 @@ jobs:
       # _pg_worker_schema fixture layers a per-xdist-worker schema on top of
       # this DSN via `options=-c search_path=...` for parallel-safe isolation.
       # DUCKLAKE_CATALOG must be the bare DSN (no `postgres:` prefix) —
-      # backend/core/iceberg/_ducklake.py::_ducklake_attach adds that prefix
+      # backend/core/iceberg/_core.py::_ducklake_attach adds that prefix
       # itself before the ATTACH statement.
       METADATA_DSN: postgresql://fla:fla_test_password@localhost:5432/ducklake_test
       DUCKLAKE_CATALOG: postgresql://fla:fla_test_password@localhost:5432/ducklake_test

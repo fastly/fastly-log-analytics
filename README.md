@@ -34,9 +34,9 @@ When running as a shared server (Path B), the host machine should meet these min
 
 - **RAM:** 16 GB
 - **CPU:** 2 vCPUs
-- **Disk:** 40 GB minimum — the Next.js build alone needs ~1 GB and the Iceberg cache grows with log volume; 25 GB is sufficient for light use but can fill during `next build`
+- **Disk:** 40 GB minimum — the Next.js build alone needs ~1 GB and the local DuckLake data and cache grow with log volume; 25 GB is sufficient for light use but can fill during `next build`
 - **Swap:** 4 GB minimum, 8 GB preferred — the backend holds large DuckDB query buffers in memory; swap prevents OOM kills during peak analytical load
-- **Open file descriptors:** set the host (and Docker) `nofile` limit to at least 65536 — DuckDB parallel Iceberg scans open one file descriptor per Parquet file; the default Docker limit (~1024) causes `Too many open files` errors on large services. The production overlay (`docker-compose.prod.yml`) sets this automatically.
+- **Open file descriptors:** set the host (and Docker) `nofile` limit to at least 65536 — DuckDB parallel DuckLake scans open one file descriptor per Parquet file; the default Docker limit (~1024) causes `Too many open files` errors on large services. The production overlay (`docker-compose.prod.yml`) sets this automatically.
 
 ---
 
@@ -79,7 +79,7 @@ For manual install (no Docker), see [Manual Installation](#manual-installation).
 
 ## How It Works
 
-The **admin** runs the provisioning wizard to set up a Fastly Object Storage bucket, deploy a CDN-fronting service for cheap log reads, and attach a structured JSON logging endpoint to a chosen VCL service. Once that's in place, the app continuously ingests new `.gz` log files from the bucket into an Apache Iceberg table.
+The **admin** runs the provisioning wizard to set up a Fastly Object Storage bucket, deploy a CDN-fronting service for cheap log reads, and attach a structured JSON logging endpoint to a chosen VCL service. Once that's in place, the app continuously ingests new `.gz` log files from the bucket into a DuckLake table.
 
 ![Provisioning Process](docs/assets/provisioning.png)
 
@@ -123,7 +123,7 @@ You run the application as a central web-accessible server on a dedicated VM (or
 
 ## Features
 
-- **Apache Iceberg data lake** — ACID-compliant log storage in FOS, safe for concurrent readers and writers
+- **DuckLake storage** — ACID-compliant log storage with a PostgreSQL catalog; parquet on local disk (Standard) or in FOS (High-Scale)
 - **Automated provisioning** — wizard creates the bucket, access keys, CDN-fronting service, and logging endpoint
 - **CDN-accelerated reads** — every FOS read goes through a Fastly service to minimize egress and maximize caching
 - **Crash-safe ingestion** — buffered locally, atomically committed; interrupted imports never corrupt the table

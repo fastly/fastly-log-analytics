@@ -176,8 +176,7 @@ dev = [
     # (DEP002), and missing declared deps (DEP001). Configured under
     # [tool.deptry] below — runtime-only deps (uvicorn CLI, pytz for
     # DuckDB ICU, python-dotenv, python-multipart for FastAPI form
-    # parsing) get DEP002 ignores; s3fs+fsspec are first-class imports
-    # served by the ``pyiceberg[s3fs]`` extra so DEP003 ignores them.
+    # parsing) get DEP002 ignores.
     "deptry>=0.20",
     # time-machine: deterministic time travel for tests. Enables
     # tests that assert on time boundaries (cron orphan threshold,
@@ -224,7 +223,7 @@ DEP003 = ["botocore", "yarl", "dateutil"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # Worker cap: -n auto spawns cpu_count() workers, and each worker re-imports
-# the full backend (DuckDB, pyiceberg, boto3, fastapi) at ~500 MB resident.
+# the full backend (DuckDB, boto3, fastapi) at ~500 MB resident.
 # On an 8-10 core Mac that's 4-5 GB just for pytest workers, which combined
 # with `make ci -j2` running vitest in parallel was pushing 16 GB Macs into
 # swap. -n 4 caps the worker pool at 4 regardless of CPU count.
