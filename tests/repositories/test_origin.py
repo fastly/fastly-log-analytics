@@ -1059,8 +1059,8 @@ def _seed_full_rollup_coverage(cache_root: str, base_rows: list[dict], hour_toke
         patch("backend.core.duckdb._cache_dir", return_value=cache_root),
         patch("backend.core.rollups._common._safe_table_for", return_value=_rollup_base_table()),
         patch("backend.core.duckdb.get_connection", side_effect=lambda *a, **k: _fresh_con()),
-        patch("backend.core.iceberg.view._get_service_lock", _noop_lock),
-        patch("backend.core.iceberg.execute_with_stale_view_retry", side_effect=lambda c, _src, fn: fn(c)),
+        patch("backend.core.storage.view._get_service_lock", _noop_lock),
+        patch("backend.core.storage.execute_with_stale_view_retry", side_effect=lambda c, _src, fn: fn(c)),
     ):
         rollups.build_origin_summary_bundles(sid, src, hour_tokens)
         rollups.build_slow_urls_bundles(sid, src, hour_tokens)

@@ -1,4 +1,4 @@
-"""Compaction, Iceberg/DuckLake, bot-sources, and metadata-retention/storage/cleanup admin endpoints."""
+"""Compaction, DuckLake storage, bot-sources, and metadata-retention/storage/cleanup admin endpoints."""
 
 from __future__ import annotations
 
@@ -72,15 +72,15 @@ def optimize_now(
         default=None, description="Override auto-derived threshold. Pass 1 for max-aggressive cleanup."
     ),
 ):
-    """Trigger an immediate Iceberg table optimize (compaction) pass.
+    """Trigger an immediate DuckLake table optimize (compaction) pass.
     Bypasses the nightly cron schedule for ad-hoc cleanup. Returns the
     optimize_table result dict (files_rewritten / files_added / etc).
     Writes through to FOS — use ``/admin/local-compact-now`` for the
     free local-only equivalent.
     """
-    from backend.core import iceberg as _ice
+    from backend.core import storage as _storage
 
-    return _ice.optimize_table(source, min_files_per_partition=min_files)
+    return _storage.optimize_table(source, min_files_per_partition=min_files)
 
 
 @router.post(
@@ -486,7 +486,7 @@ def local_compact_now(
     The 2-minute cron does this automatically; this endpoint is for
     ad-hoc cleanup.
     """
-    from backend.core.iceberg import _core as _lc
+    from backend.core.storage import _core as _lc
 
     return _lc.compact_local_partitions(source, min_files_per_partition=min_files, dry_run=dry_run)
 
@@ -501,7 +501,7 @@ def compaction_stats(service_id: str | None = None, source: dict = Depends(get_s
     compaction cron has stopped keeping up; rising avg_files_per_partition
     correlates with slow dashboard scans.
     """
-    from backend.core.iceberg import _core as _lc
+    from backend.core.storage import _core as _lc
 
     return CompactionStatsResponse(**_lc.compaction_stats(source))
 
@@ -898,7 +898,7 @@ def get_rdns_stats_endpoint():
     return {"ok": True, "stats": rdns_stats()}
 
 
-# ── Iceberg admin endpoints (folded from iceberg.py) ──────────────────
+# ── Storage admin endpoints ──────────────────
 
 
 @router.get("/admin/iceberg-info", response_model=IcebergTableInfoResponse)
@@ -907,10 +907,10 @@ def iceberg_info_endpoint(
     table_name: Literal["logs", "client_vitals", "client_errors"] = "logs",
     source: dict = Depends(get_source),
 ):
-    """Return Iceberg table metadata: snapshots, data files, size, buffer status."""
-    from backend.core import iceberg as db_iceberg
+    """Return DuckLake table metadata: snapshots, data files, size, buffer status."""
+    from backend.core import storage as db_storage
 
-    result = db_iceberg.get_table_info(source, table_name=table_name)
+    result = db_storage.get_table_info(source, table_name=table_name)
     return IcebergTableInfoResponse.with_telemetry(**result)
 
 
@@ -920,11 +920,11 @@ def iceberg_calendar_endpoint(
     table_name: Literal["logs", "client_vitals", "client_errors"] = "logs",
     source: dict = Depends(get_source),
 ):
-    """Return per-date data file counts from Iceberg partition metadata."""
-    from backend.core import iceberg as db_iceberg
+    """Return per-date data file counts from DuckLake file metadata."""
+    from backend.core import storage as db_storage
     from backend.utils.telemetry import debug_envelope
 
-    result = db_iceberg.get_snapshot_calendar(source, table_name=table_name)
+    result = db_storage.get_snapshot_calendar(source, table_name=table_name)
     return debug_envelope(result, gated=True, is_cached=None, inject_calls=True)
 
 
@@ -984,13 +984,13 @@ def rebuild_local_view_endpoint(source: dict = Depends(get_source)):
     """
     import threading
 
-    from backend.core import iceberg as db_iceberg
+    from backend.core import storage as db_storage
     from backend.core.duckdb import refresh_config_status
     from backend.cron.jobs.sync import refresh_view_and_warm_pool
     from backend.repositories.dashboard import invalidate_service
 
     service_id = source["name"]
-    db_iceberg.clear_source_caches(service_id)
+    db_storage.clear_source_caches(service_id)
 
     def _rebuild() -> None:
         try:
@@ -1044,7 +1044,7 @@ def _stream_reset_sse(
 def reset_logs_endpoint(body: ResetLogsRequest, source: dict = Depends(get_source)):
     """Permanently delete this service's log data (cloud + local) over SSE.
 
-    Wipes the cloud Iceberg log table, the local DuckDB file + cache, and
+    Wipes the DuckLake log table, the local DuckDB file + cache, and
     the SQLite ingestion ledgers, then re-initializes an empty, queryable
     0-state. Preserves the service's configuration: saved views, alerts,
     source registration, audit history, and scoring labels/audit. See
@@ -1070,7 +1070,7 @@ def reset_logs_endpoint(body: ResetLogsRequest, source: dict = Depends(get_sourc
 def reset_rum_endpoint(body: ResetLogsRequest, source: dict = Depends(get_source)):
     """Permanently delete this service's RUM telemetry data (cloud + local) over SSE.
 
-    Wipes the cloud Iceberg RUM tables and the local RUM DuckDB file and cache
+    Wipes the DuckLake RUM tables and the local RUM DuckDB file and cache
     while leaving logs data completely untouched.
     """
     from backend.core.duckdb import reset_service_rum
@@ -1762,7 +1762,6 @@ sys.modules["backend.routers.admin.ingest"] = sys.modules[__name__]
 sys.modules["backend.routers.admin.quarantine"] = sys.modules[__name__]
 sys.modules["backend.routers.admin.downloads"] = sys.modules[__name__]
 sys.modules["backend.routers.admin.bot_sources"] = sys.modules[__name__]
-sys.modules["backend.routers.admin.iceberg"] = sys.modules[__name__]
 
 # ── High-scale control plane & migration endpoints (folded from high_scale.py) ──
 
@@ -2112,7 +2111,7 @@ def _emulate_standard_request_facts(
     from datetime import UTC
 
     from backend.core.duckdb import _safe_table_name
-    from backend.core.iceberg import execute_with_stale_view_retry
+    from backend.core.storage import execute_with_stale_view_retry
 
     secret = (os.getenv("HIGH_SCALE_CURSOR_SECRET", "").strip() or "standard-emulation-cursor-secret").encode("utf-8")
     decoded = KeysetCursor.decode(req.cursor, secret) if req.cursor else None
@@ -2762,7 +2761,6 @@ for _mod_name in (
     "backend.routers.admin.ingest",
     "backend.routers.admin.quarantine",
     "backend.routers.admin.downloads",
-    "backend.routers.admin.iceberg",
     "backend.routers.admin.bot_sources",
     "backend.routers.high_scale",
 ):

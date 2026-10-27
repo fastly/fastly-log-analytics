@@ -498,7 +498,7 @@ def test_query_empty_or_whitespace_sql_returns_400(client, sql: str):
         (
             [
                 RuntimeError("Cannot open file '/srv/data/buffers/x.parquet'"),
-                RuntimeError("IO Error: file '/srv/data/iceberg/snap.json' is corrupt"),
+                RuntimeError("IO Error: file '/srv/data/ducklake/snap.json' is corrupt"),
             ],
             "SELECT 1",
             400,
@@ -628,7 +628,7 @@ def test_query_select_executes_against_duckdb_and_stale_view_retry(client, in_me
     assert body["data"][0] == {"url": "/index.html", "status": 200}
     assert isinstance(body["_debug_queries"], list) and len(body["_debug_queries"]) >= 1
 
-    with patch("backend.core.iceberg.execute_with_stale_view_retry", return_value=_stub_result()) as mock_retry:
+    with patch("backend.core.storage.execute_with_stale_view_retry", return_value=_stub_result()) as mock_retry:
         resp_retry = client.post("/api/query", headers=_Q_HEADERS, json={"sql": "SELECT 1"})
     assert resp_retry.status_code == 200 and mock_retry.call_count == 1
 
@@ -960,7 +960,7 @@ def skip_view_update(request):
     if request.node.name in ("test_rum_analytics_cold_start_readonly", "test_rum_live_buffer_unlink_race_self_heals"):
         yield None
     else:
-        with patch("backend.core.iceberg.view.update_iceberg_view") as mock:
+        with patch("backend.core.storage.view.update_storage_view") as mock:
             yield mock
 
 
@@ -1531,7 +1531,7 @@ def test_analyst_request_outside_invite_window_is_clamped(setup_temp_rum_db) -> 
 
 @pytest.mark.usefixtures("skip_view_update")
 def test_rum_analytics_cold_start_readonly(tmp_path):
-    from backend.core.iceberg.view import update_iceberg_view
+    from backend.core.storage.view import update_storage_view
 
     temp_db_path = tmp_path / "cold_start.rum.duckdb"
     duckdb.connect(str(temp_db_path)).close()
@@ -1542,7 +1542,7 @@ def test_rum_analytics_cold_start_readonly(tmp_path):
             "service_id": "cold_start",
             "duckdb_path": str(tmp_path / "cold_start.duckdb"),
         }
-        update_iceberg_view(ro_con, source)
+        update_storage_view(ro_con, source)
         assert ro_con.execute("SELECT COUNT(*) FROM client_vitals").fetchone()[0] == 0
         assert ro_con.execute("SELECT COUNT(*) FROM client_errors").fetchone()[0] == 0
     finally:
@@ -1551,7 +1551,7 @@ def test_rum_analytics_cold_start_readonly(tmp_path):
 
 @pytest.mark.usefixtures("skip_view_update")
 def test_rum_live_buffer_unlink_race_self_heals(tmp_path, monkeypatch) -> None:
-    from backend.core.iceberg.view import clear_source_caches, update_iceberg_view
+    from backend.core.storage.view import clear_source_caches, update_storage_view
 
     from backend.core import duckdb as db_mod
     from backend.repositories import rum as rum_repo
@@ -1607,7 +1607,7 @@ def test_rum_live_buffer_unlink_race_self_heals(tmp_path, monkeypatch) -> None:
     con = duckdb.connect(str(rum_db_path), read_only=False)
     try:
         clear_source_caches("svc_race")
-        update_iceberg_view(con, source, force=True)
+        update_storage_view(con, source, force=True)
         batch2_v.unlink()
 
         start_iso, end_iso = (now - datetime.timedelta(minutes=15)).isoformat(), now.isoformat()
@@ -1617,7 +1617,7 @@ def test_rum_live_buffer_unlink_race_self_heals(tmp_path, monkeypatch) -> None:
         assert "/surviving" in {e[2] for e in events}
 
         clear_source_caches("svc_race")
-        update_iceberg_view(con, source, force=True)
+        update_storage_view(con, source, force=True)
         batch2_e.unlink()
 
         analytics = rum_repo.fetch_rum_analytics(
@@ -1639,7 +1639,7 @@ def test_rum_live_buffer_unlink_race_self_heals(tmp_path, monkeypatch) -> None:
         finally:
             seed_con2.close()
         clear_source_caches("svc_race")
-        update_iceberg_view(con, source, force=True)
+        update_storage_view(con, source, force=True)
         batch2_v.unlink()
 
         recent_count, last_dt = rum_repo.get_beacon_health(con)

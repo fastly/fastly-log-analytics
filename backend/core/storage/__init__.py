@@ -1,11 +1,11 @@
-"""``backend.core.iceberg`` — DuckLake / Parquet integration for FOS log analysis.
+"""``backend.core.storage`` — DuckLake / Parquet integration for FOS log analysis.
 
 This file re-exports ``_core.py`` symbols so the historical flat-module import
 surface keeps working:
 
-    from backend.core.iceberg import init_iceberg_table, get_arrow_schema, ...
-    from backend.core import iceberg; iceberg.init_iceberg_table(src)
-    monkeypatch.setattr("backend.core.iceberg._buffer_dir", ...)
+    from backend.core.storage import init_storage_table, get_arrow_schema, ...
+    from backend.core import storage; storage.init_storage_table(src)
+    monkeypatch.setattr("backend.core.storage._buffer_dir", ...)
 
 We install a ``ModuleType`` proxy into ``sys.modules`` whose ``__setattr__``
 mirrors writes to ``_core``, so test patches reach the actual call sites.
@@ -16,11 +16,11 @@ from __future__ import annotations
 import sys as _sys
 import types as _types
 
-from backend.core.iceberg import _core as _core_module  # noqa: F401
-from backend.core.iceberg._core import *  # noqa: F401,F403
+from backend.core.storage import _core as _core_module  # noqa: F401
+from backend.core.storage._core import *  # noqa: F401,F403
 
 
-class _IcebergPackageProxy(_types.ModuleType):
+class _StoragePackageProxy(_types.ModuleType):
     """Delegates attribute reads/writes to ``_core`` while preserving package metadata."""
 
     _PACKAGE_ONLY = frozenset(
@@ -71,7 +71,7 @@ class _IcebergPackageProxy(_types.ModuleType):
 
 
 _self = _sys.modules[__name__]
-_proxy = _IcebergPackageProxy(__name__)
+_proxy = _StoragePackageProxy(__name__)
 _proxy.__dict__.update(_self.__dict__)
 for _k, _v in vars(_core_module).items():
     if _k.startswith("__"):
@@ -83,7 +83,7 @@ del _k, _v
 _proxy.__path__ = _self.__path__  # type: ignore[attr-defined]
 _proxy.__file__ = _self.__file__
 _proxy.__spec__ = _self.__spec__
-from backend.core.iceberg._core import (
+from backend.core.storage._core import (
     DUCKLAKE_WRITE_ADMISSION_TIMEOUT_S,
     DuckLakeAdmissionTimeout,
     _ducklake_attach,

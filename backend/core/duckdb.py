@@ -651,10 +651,10 @@ def get_connection(
         _exec_quietly(con, stmt, "get_connection: con.execute failed (ignored)")
     _configure_fos(con, src)
     try:
-        from backend.core import iceberg
-        from backend.core.iceberg._core import _ducklake_attach
+        from backend.core import storage
+        from backend.core.storage._core import _ducklake_attach
 
-        iceberg.configure_duckdb_s3(con)
+        storage.configure_duckdb_s3(con)
         con.execute("SET unsafe_enable_version_guessing=true;")
         if not _ducklake_attach(con, src, read_only=True):
             raise RuntimeError("failed to attach DuckLake catalog")
@@ -684,14 +684,14 @@ def get_connection(
     con.execute("SET checkpoint_threshold = '512MB';")
     if not skip_view_update:
         try:
-            from backend.core import iceberg
+            from backend.core import storage
 
-            iceberg.update_iceberg_view(con, src)
+            storage.update_storage_view(con, src)
         except Exception as e:
             if durable_serving:
                 con.close()
                 raise
-            logger.debug("[duckdb] update_iceberg_view skipped on RO connection: %s", e)
+            logger.debug("[duckdb] update_storage_view skipped on RO connection: %s", e)
     _initialized_paths.add(db_path)
     return con
 
@@ -795,7 +795,7 @@ def _top_values_fingerprint(con: duckdb.DuckDBPyConnection, source: dict) -> tup
     if (fp := _data_stats_fingerprint(source)) is not None:
         return fp
     try:
-        from backend.core.iceberg._core import ducklake_current_snapshot_id
+        from backend.core.storage._core import ducklake_current_snapshot_id
 
         snap_id = ducklake_current_snapshot_id(con)
         return ("ducklake", snap_id) if snap_id is not None else None
@@ -816,9 +816,9 @@ def clear_ducklake_stats_cache(source_key: str | None = None) -> None:
 
 
 def _query_buffer_stats(con, src) -> tuple[int, Any, Any]:
-    from backend.core import iceberg as _ice
+    from backend.core import storage as _storage
 
-    buf_paths = [p for p in _ice.buffer_files(src) if os.path.isfile(p)]
+    buf_paths = [p for p in _storage.buffer_files(src) if os.path.isfile(p)]
     if not buf_paths:
         return (0, None, None)
     paths_sql = ", ".join(f"'{escape_sql_literal(p)}'" for p in buf_paths)
@@ -859,7 +859,7 @@ def _authoritative_direct_stats(
     counts, mins, maxs = [], [], []
     src_name = src.get("name", "default")
     try:
-        from backend.core.iceberg._core import ducklake_current_snapshot_id, ducklake_table_name
+        from backend.core.storage._core import ducklake_current_snapshot_id, ducklake_table_name
 
         lake_table = ducklake_table_name(src)
         if con.execute(
@@ -923,7 +923,7 @@ def get_sync_status(
         stats, data_fp, lake_table = None, _data_stats_fingerprint(src), None
         if data_fp is None:
             try:
-                from backend.core.iceberg._core import ducklake_current_snapshot_id, ducklake_table_name
+                from backend.core.storage._core import ducklake_current_snapshot_id, ducklake_table_name
 
                 lt = ducklake_table_name(src)
                 exists = con.execute(
@@ -994,10 +994,10 @@ def get_sync_status(
     except Exception as e:
         if _is_stale_view_error(e):
             try:
-                from backend.core import iceberg
+                from backend.core import storage
 
-                iceberg.clear_source_caches(src.get("name", "default"), keep_snapshot_cache=True)
-                iceberg.update_iceberg_view(con, src)
+                storage.clear_source_caches(src.get("name", "default"), keep_snapshot_cache=True)
+                storage.update_storage_view(con, src)
                 if stats := con.execute(
                     f"SELECT count(*), min(timestamp), max(timestamp) FROM {table_name}"
                 ).fetchone():
@@ -1067,9 +1067,9 @@ def refresh_config_status(service_id: str, include_top_values: bool = True):
         iceberg_bytes, iceberg_files = cached_status.get("iceberg_bytes"), cached_status.get("iceberg_files")
     else:
         try:
-            from backend.core import iceberg as _db_iceberg
+            from backend.core import storage as _db_storage
 
-            info = _db_iceberg.get_table_info(source)
+            info = _db_storage.get_table_info(source)
             if not info.get("error"):
                 iceberg_bytes, iceberg_files = int(info.get("size_bytes", 0) or 0), int(info.get("data_files", 0) or 0)
         except Exception:
@@ -1183,9 +1183,9 @@ def update_top_values(con: duckdb.DuckDBPyConnection, source: dict):
         except Exception as _e:
             if not _is_stale_view_error(_e):
                 raise
-            from backend.core import iceberg
+            from backend.core import storage
 
-            iceberg.update_iceberg_view(con, source)
+            storage.update_storage_view(con, source)
             con.execute(f'DROP TABLE IF EXISTS "{sample_table}"')
             con.execute(sample_sql)
         queries, field_order = [], []
@@ -1888,12 +1888,12 @@ def _drain_and_wipe_db_files(db_path: str, pool_key: str, wipe_msg: str) -> Gene
 def _reinit_ducklake_tables(
     con_source: dict, source: dict, service_id: str, tables: tuple[str | None, ...], fn_label: str
 ) -> None:
-    from backend.core import iceberg as iceberg_core
-    from backend.core.iceberg._core import update_iceberg_view
-    from backend.core.iceberg._ducklake import _ducklake_attach, ducklake_table_name
+    from backend.core import storage as storage_core
+    from backend.core.storage._core import update_storage_view
+    from backend.core.storage._ducklake import _ducklake_attach, ducklake_table_name
 
     for t_name in tables:
-        iceberg_core.init_iceberg_table(source, create=True, **({} if t_name is None else {"table_name": t_name}))
+        storage_core.init_storage_table(source, create=True, **({} if t_name is None else {"table_name": t_name}))
     con2 = sys.modules[__name__].get_connection(con_source)
     try:
         try:
@@ -1904,9 +1904,9 @@ def _reinit_ducklake_tables(
             logger.debug("%s(%s): DuckLake table drop skipped: %s", fn_label, service_id, e)
         for t_name in tables:
             if t_name is None:
-                update_iceberg_view(con2, source, force=True)
+                update_storage_view(con2, source, force=True)
             else:
-                update_iceberg_view(con2, source, force=True, target_table=t_name)
+                update_storage_view(con2, source, force=True, target_table=t_name)
     finally:
         con2.close()
 
@@ -1918,7 +1918,7 @@ def _purge_dropped_catalog_rows(service_id: str, table_names: list[str]) -> int:
     a snapshot expiry. Removing a subset corrupts the catalog (``ducklake_expire_snapshots`` then fails
     on the orphaned rows), so all child tables go in one transaction. Live tables are never touched.
     """
-    from backend.core.iceberg._core import _resolve_catalog_dsn
+    from backend.core.storage._core import _resolve_catalog_dsn
 
     if not (dsn := _resolve_catalog_dsn(service_id)):
         return 0
@@ -1958,8 +1958,8 @@ def drop_service_ducklake_state(service_id: str) -> dict[str, int]:
     Raises ``RuntimeError`` when the catalog cannot be attached or a drop fails, and leaves local
     files in place in that case so the catalog never points at deleted data.
     """
-    from backend.core.iceberg._core import _resolve_data_path, ducklake_table_name
-    from backend.core.iceberg._ducklake import _ducklake_attach
+    from backend.core.storage._core import _resolve_data_path, ducklake_table_name
+    from backend.core.storage._ducklake import _ducklake_attach
 
     if not (source := sys.modules[__name__].get_source_for_service(service_id)):
         return {"tables_dropped": 0, "local_dirs_removed": 0}
@@ -2027,10 +2027,10 @@ def reset_service_logs(
 ) -> Iterator[dict]:  # fmt: skip
     from backend.core import duckdb_pool as _pool
     from backend.core import metadata as metadata_db
-    from backend.core.iceberg._core import _get_service_lock, _resolve_data_path, clear_source_caches
-    from backend.core.iceberg._ducklake import ducklake_table_name
     from backend.core.ingest import _delete_objects_robust
     from backend.core.metadata.reconciliation import is_ingested_files_dedup_active
+    from backend.core.storage._core import _get_service_lock, _resolve_data_path, clear_source_caches
+    from backend.core.storage._ducklake import ducklake_table_name
 
     _db = sys.modules[__name__]
     if not (source := _db.get_source_for_service(service_id)):
@@ -2188,9 +2188,9 @@ def reset_service_rum(
 ) -> Iterator[dict]:  # fmt: skip
     from backend.core import duckdb_pool as _pool
     from backend.core import metadata as metadata_db
-    from backend.core.iceberg._core import _get_service_lock, _resolve_data_path, clear_source_caches
-    from backend.core.iceberg._ducklake import ducklake_table_name
     from backend.core.ingest import _delete_objects_robust
+    from backend.core.storage._core import _get_service_lock, _resolve_data_path, clear_source_caches
+    from backend.core.storage._ducklake import ducklake_table_name
 
     _db = sys.modules[__name__]
     if not (source := _db.get_source_for_service(service_id)):

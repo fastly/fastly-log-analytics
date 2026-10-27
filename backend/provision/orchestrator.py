@@ -1232,7 +1232,7 @@ def provision(cfg: dict, _resume_from_state: bool = False):
             return
         try:
             from backend.core import duckdb as db
-            from backend.core import iceberg as db_iceberg
+            from backend.core import storage as db_storage
 
             src = db.get_source_for_service(state["logging_service_id"])
             if not src:
@@ -1270,7 +1270,7 @@ def provision(cfg: dict, _resume_from_state: bool = False):
                                     ),
                                 }
                                 time.sleep(1.5 * (idx - 1))
-                            db_iceberg.init_iceberg_table(src)
+                            db_storage.init_storage_table(src)
                 except Exception as e:
                     ice_exc = e
                 if ice_exc is None:

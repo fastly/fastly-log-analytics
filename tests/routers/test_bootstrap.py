@@ -386,7 +386,7 @@ def test_bootstrap_aligns_request_total_with_local_rows(client, tmp_path, monkey
             pass
 
     monkeypatch.setattr("backend.deps._ConnectionHolder", MockConnectionHolder)
-    monkeypatch.setattr("backend.core.iceberg.execute_with_stale_view_retry", lambda *a, **kw: (800, None))
+    monkeypatch.setattr("backend.core.storage.execute_with_stale_view_retry", lambda *a, **kw: (800, None))
     mock_duckdb_con = MagicMock()
     mock_duckdb_con.execute.return_value.fetchone.side_effect = [(33000,), (None,)]
     monkeypatch.setattr("backend.core.duckdb.get_connection", lambda src: mock_duckdb_con)
@@ -1283,7 +1283,7 @@ def _iceberg_calendar(client):
 
     app.dependency_overrides[get_source] = lambda: {"service_id": "service123", "name": "service123"}
     with patch(
-        "backend.core.iceberg.get_snapshot_calendar", return_value={"2026-08-19": {"data_files": 5, "size_bytes": 1}}
+        "backend.core.storage.get_snapshot_calendar", return_value={"2026-08-19": {"data_files": 5, "size_bytes": 1}}
     ):
         return client.get("/api/admin/iceberg-calendar?table_name=logs")
 
@@ -1483,7 +1483,7 @@ def test_ngwaf_share_purge_calendar_vcl_health_and_telemetry_match_producer(clie
     with patch("backend.core.share_db.purge_all_share_records", return_value=purge_stats):
         assert _body(client.post("/api/admin/share/purge")) == {"ok": True, **purge_stats}
     calendar = {"2026-10-01": {"data_files": 4, "size_bytes": 0}, "2026-10-02": {"data_files": 9, "size_bytes": 0}}
-    with patch("backend.core.iceberg.get_snapshot_calendar", return_value=calendar):
+    with patch("backend.core.storage.get_snapshot_calendar", return_value=calendar):
         assert _body(client.get("/api/admin/iceberg-calendar")) == calendar
 
     Snippet = namedtuple("Snippet", "name")
@@ -1539,7 +1539,7 @@ def test_admin_ingest_actions_beacons_celery_and_control_room_match_producer(cli
     with patch("backend.utils.router_utils.start_or_resume_cron", return_value=started):
         assert _body(client.post("/api/admin/commit-iceberg"), status=202) == started
         assert _body(client.post("/api/admin/ingest-logs")) == started
-    with patch("backend.core.iceberg.clear_source_caches"), patch("threading.Thread"):
+    with patch("backend.core.storage.clear_source_caches"), patch("threading.Thread"):
         assert _body(client.post("/api/admin/rebuild-local-view"), status=202) == {
             "ok": True,
             "message": "Local view rebuild started.",

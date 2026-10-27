@@ -52,7 +52,7 @@
    - Downloads new `.gz` chunks in parallel using thread pool.
    - Decompresses gzip stream in memory, extracts custom VCL expressions and standard log schema.
    - Converts rows to size-optimized Parquet files in `cache/{bucket}/`.
-5. **View Update:** Calls `update_iceberg_view()` to stitch local Parquet buffer files into the DuckDB `logs` view.
+5. **View Update:** Calls `update_storage_view()` to stitch local Parquet buffer files into the DuckDB `logs` view.
    - Adaptive polling re-lists FOS up to twice more, at 3 s intervals, within a 20 s window.
    - Before each follow-up pass, the rows from the previous pass are published: view refresh, header-only `refresh_config_status`, and an SSE snapshot.
    - Before this, rows stayed invisible until the window closed, which added up to about 20 s of request lag.

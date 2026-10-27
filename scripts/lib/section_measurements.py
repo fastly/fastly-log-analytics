@@ -434,7 +434,7 @@ def build_synthetic_30d_dataset(
     num_files: int = 10,
     seed: int = 42,
 ) -> dict[str, Any]:
-    from backend.core.iceberg import get_arrow_schema
+    from backend.core.storage import get_arrow_schema
     from backend.repositories._base import _safe_table
 
     arrow_schema = get_arrow_schema()

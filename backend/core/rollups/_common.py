@@ -82,7 +82,7 @@ def _safe_table_for(source: dict) -> str | None:
     (``backend.core.duckdb._safe_table_name``: non-alphanumerics to ``_``,
     lowercased, ``logs_`` prefix) so the rollup COPY/SELECT targets the
     same view name the dashboard creates. Reads ``name`` first (matching
-    ``update_iceberg_view``) and falls back to ``service_id`` for callers that
+    ``update_storage_view``) and falls back to ``service_id`` for callers that
     pass a raw on-disk config — both cases pass through the slugifier
     identically.
     """
@@ -172,7 +172,7 @@ def publish_temp_parquet(
     before_replace_under_lock: Callable[[], bool] | None = None,
 ) -> bool:
     """Atomically replace ``tmp_path`` onto ``dst_path`` under the service view lock."""
-    from backend.core.iceberg.view import _get_service_lock
+    from backend.core.storage.view import _get_service_lock
 
     try:
         with _get_service_lock(lock_key):
@@ -1452,7 +1452,7 @@ def describe_columns(
     ``None`` and (optionally) warns through ``logger`` if DuckDB raises —
     callers treat that as "view not ready, skip this round".
     """
-    from backend.core.iceberg import execute_with_stale_view_retry
+    from backend.core.storage import execute_with_stale_view_retry
 
     try:
         rows = execute_with_stale_view_retry(

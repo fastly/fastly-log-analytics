@@ -840,7 +840,7 @@ def retire_compacted_hour_bundles(
     lookback_days: int | None = 30,
 ) -> tuple[int, int]:
     from backend.core.duckdb import get_memory_connection
-    from backend.core.iceberg.view import _get_service_lock
+    from backend.core.storage.view import _get_service_lock
 
     bundled_root = _day_bundled_root(source)
     hour_bundled_root = _hour_bundled_root(source)
@@ -1173,7 +1173,7 @@ def _read_partial_hour_parquet[T](
 ) -> T:
     if not os.path.isfile(path):
         return default
-    from backend.core.iceberg import is_stale_view_error
+    from backend.core.storage import is_stale_view_error
 
     def _run_once() -> T:
         if con is not None:
@@ -1232,7 +1232,7 @@ def _list_new_source_files(source: dict, hour: str, watermark: float) -> list[st
     cache_dir = _cache_dir(source)
     dirs = [os.path.join(cache_dir, "buffer"), os.path.join(cache_dir, "data", f"timestamp_hour={hour}")]
     try:
-        from backend.core.iceberg.buffer import _tombstoned_parquet_paths
+        from backend.core.storage.buffer import _tombstoned_parquet_paths
 
         tombstoned = _tombstoned_parquet_paths(os.path.join(cache_dir, "buffer"))
     except Exception:
@@ -1258,7 +1258,7 @@ def _list_new_source_files(source: dict, hour: str, watermark: float) -> list[st
 
 
 def merge_partial_hour(service_id: str, source: dict, fields: list[str]) -> dict:
-    from backend.core.iceberg.view import _get_service_lock
+    from backend.core.storage.view import _get_service_lock
 
     lock_key = source.get("name", service_id)
     with _get_service_lock(lock_key):
@@ -1336,7 +1336,7 @@ def _merge_partial_hour_locked(service_id: str, source: dict, fields: list[str])
             try:
                 con.execute(f"COPY ({merged_sql}) {parquet_zstd_target(tmp_path)}")
             except Exception as e:
-                from backend.core.iceberg import is_stale_view_error
+                from backend.core.storage import is_stale_view_error
 
                 if is_stale_view_error(e) or "Cannot open file" in str(e) or "No such file" in str(e):
                     logger.info(
@@ -1391,7 +1391,7 @@ def _merge_partial_hour_locked(service_id: str, source: dict, fields: list[str])
 
 
 def gc_stale_partial_hours(source: dict, max_age_hours: int = 2) -> int:
-    from backend.core.iceberg.view import _get_service_lock
+    from backend.core.storage.view import _get_service_lock
 
     lock_key = source.get("name", source.get("service_id", "default"))
     with _get_service_lock(lock_key):

@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
-import backend.core.iceberg._ducklake as _dl
+import backend.core.storage._ducklake as _dl
 import duckdb
 import pyarrow.parquet as pq
 import pytest
@@ -96,9 +96,9 @@ def test_run_per_field_copy_writes_partitioned_parquet(tmp_path):
     with (
         patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
         patch("backend.core.duckdb.get_connection", return_value=con),
-        patch("backend.core.iceberg.view._get_service_lock", _noop_lock),
+        patch("backend.core.storage.view._get_service_lock", _noop_lock),
         patch(
-            "backend.core.iceberg.execute_with_stale_view_retry",
+            "backend.core.storage.execute_with_stale_view_retry",
             side_effect=lambda c, _src, fn: fn(c),
         ),
     ):
@@ -130,9 +130,9 @@ def test_run_per_field_copy_skips_unsafe_field_name(tmp_path):
     with (
         patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
         patch("backend.core.duckdb.get_connection", return_value=con),
-        patch("backend.core.iceberg.view._get_service_lock", _noop_lock),
+        patch("backend.core.storage.view._get_service_lock", _noop_lock),
         patch(
-            "backend.core.iceberg.execute_with_stale_view_retry",
+            "backend.core.storage.execute_with_stale_view_retry",
             side_effect=lambda c, _src, fn: fn(c),
         ),
     ):
@@ -158,9 +158,9 @@ def test_run_per_field_copy_skips_field_missing_from_schema(tmp_path):
     with (
         patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
         patch("backend.core.duckdb.get_connection", return_value=con),
-        patch("backend.core.iceberg.view._get_service_lock", _noop_lock),
+        patch("backend.core.storage.view._get_service_lock", _noop_lock),
         patch(
-            "backend.core.iceberg.execute_with_stale_view_retry",
+            "backend.core.storage.execute_with_stale_view_retry",
             side_effect=lambda c, _src, fn: fn(c),
         ),
     ):
@@ -186,9 +186,9 @@ def test_run_per_field_copy_skips_virtual_field_with_missing_backing(tmp_path):
     with (
         patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
         patch("backend.core.duckdb.get_connection", return_value=con),
-        patch("backend.core.iceberg.view._get_service_lock", _noop_lock),
+        patch("backend.core.storage.view._get_service_lock", _noop_lock),
         patch(
-            "backend.core.iceberg.execute_with_stale_view_retry",
+            "backend.core.storage.execute_with_stale_view_retry",
             side_effect=lambda c, _src, fn: fn(c),
         ),
     ):
@@ -212,7 +212,7 @@ def test_run_per_field_copy_describe_failure_returns(tmp_path):
     with (
         patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
         patch("backend.core.duckdb.get_connection", return_value=con),
-        patch("backend.core.iceberg.execute_with_stale_view_retry", side_effect=_boom),
+        patch("backend.core.storage.execute_with_stale_view_retry", side_effect=_boom),
     ):
         # Should NOT raise — function logs and returns.
         recompute._run_per_field_copy("svc", {"name": "svc"}, "logs_x", "1=1", ["ip"])
@@ -257,9 +257,9 @@ def test_run_per_field_copy_copy_failure_cleans_tmp_and_continues(tmp_path):
     with (
         patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
         patch("backend.core.duckdb.get_connection", return_value=proxy),
-        patch("backend.core.iceberg.view._get_service_lock", _noop_lock),
+        patch("backend.core.storage.view._get_service_lock", _noop_lock),
         patch(
-            "backend.core.iceberg.execute_with_stale_view_retry",
+            "backend.core.storage.execute_with_stale_view_retry",
             side_effect=lambda c, _src, fn: fn(c),
         ),
     ):
@@ -316,7 +316,7 @@ def test_run_per_field_copy_self_heals_stale_view_on_copy(tmp_path):
     con = _FlakyCopyCon(real)
 
     def _retry_double(c, _src, fn):
-        from backend.core.iceberg import is_stale_view_error
+        from backend.core.storage import is_stale_view_error
 
         try:
             return fn(c)
@@ -328,9 +328,9 @@ def test_run_per_field_copy_self_heals_stale_view_on_copy(tmp_path):
     with (
         patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
         patch("backend.core.duckdb.get_connection", return_value=con),
-        patch("backend.core.iceberg.view._get_service_lock", _noop_lock),
+        patch("backend.core.storage.view._get_service_lock", _noop_lock),
         patch(
-            "backend.core.iceberg.execute_with_stale_view_retry",
+            "backend.core.storage.execute_with_stale_view_retry",
             side_effect=_retry_double,
         ),
     ):
@@ -396,9 +396,9 @@ def test_run_ip_spread_per_field_writes_partitioned_parquet_with_hll(tmp_path):
     with (
         patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
         patch("backend.core.duckdb.get_connection", return_value=con),
-        patch("backend.core.iceberg.view._get_service_lock", _noop_lock),
+        patch("backend.core.storage.view._get_service_lock", _noop_lock),
         patch(
-            "backend.core.iceberg.execute_with_stale_view_retry",
+            "backend.core.storage.execute_with_stale_view_retry",
             side_effect=lambda c, _src, fn: fn(c),
         ),
     ):
@@ -455,9 +455,9 @@ def test_run_ip_spread_per_field_silent_when_no_ip_column(tmp_path):
     with (
         patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
         patch("backend.core.duckdb.get_connection", return_value=con),
-        patch("backend.core.iceberg.view._get_service_lock", _noop_lock),
+        patch("backend.core.storage.view._get_service_lock", _noop_lock),
         patch(
-            "backend.core.iceberg.execute_with_stale_view_retry",
+            "backend.core.storage.execute_with_stale_view_retry",
             side_effect=lambda c, _src, fn: fn(c),
         ),
     ):
@@ -497,9 +497,9 @@ def test_run_ip_spread_per_field_skips_virtual_fields(tmp_path):
     with (
         patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
         patch("backend.core.duckdb.get_connection", return_value=con),
-        patch("backend.core.iceberg.view._get_service_lock", _noop_lock),
+        patch("backend.core.storage.view._get_service_lock", _noop_lock),
         patch(
-            "backend.core.iceberg.execute_with_stale_view_retry",
+            "backend.core.storage.execute_with_stale_view_retry",
             side_effect=lambda c, _src, fn: fn(c),
         ),
     ):
@@ -552,9 +552,9 @@ def test_run_ip_spread_per_field_marks_capped_when_sample_hits_cap(tmp_path, mon
     with (
         patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
         patch("backend.core.duckdb.get_connection", return_value=con),
-        patch("backend.core.iceberg.view._get_service_lock", _noop_lock),
+        patch("backend.core.storage.view._get_service_lock", _noop_lock),
         patch(
-            "backend.core.iceberg.execute_with_stale_view_retry",
+            "backend.core.storage.execute_with_stale_view_retry",
             side_effect=lambda c, _src, fn: fn(c),
         ),
     ):
@@ -588,9 +588,9 @@ def test_run_ip_spread_per_field_empty_result_writes_nothing(tmp_path):
     with (
         patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
         patch("backend.core.duckdb.get_connection", return_value=con),
-        patch("backend.core.iceberg.view._get_service_lock", _noop_lock),
+        patch("backend.core.storage.view._get_service_lock", _noop_lock),
         patch(
-            "backend.core.iceberg.execute_with_stale_view_retry",
+            "backend.core.storage.execute_with_stale_view_retry",
             side_effect=lambda c, _src, fn: fn(c),
         ),
     ):
@@ -645,7 +645,7 @@ def test_run_ip_spread_per_field_self_heals_stale_view_on_select(tmp_path):
     con = _FlakySelectCon(real)
 
     def _retry_double(c, _src, fn):
-        from backend.core.iceberg import is_stale_view_error
+        from backend.core.storage import is_stale_view_error
 
         try:
             return fn(c)
@@ -657,9 +657,9 @@ def test_run_ip_spread_per_field_self_heals_stale_view_on_select(tmp_path):
     with (
         patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
         patch("backend.core.duckdb.get_connection", return_value=con),
-        patch("backend.core.iceberg.view._get_service_lock", _noop_lock),
+        patch("backend.core.storage.view._get_service_lock", _noop_lock),
         patch(
-            "backend.core.iceberg.execute_with_stale_view_retry",
+            "backend.core.storage.execute_with_stale_view_retry",
             side_effect=_retry_double,
         ),
     ):
@@ -1516,7 +1516,7 @@ def test_rollup_writer_edge_cases_and_skips(tmp_path, writer_fn, seed_fn, missin
         patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
         patch("backend.core.rollups._common._safe_table_for", return_value="logs_missing"),
         patch("backend.core.duckdb.get_connection", return_value=con_missing),
-        patch("backend.core.iceberg.execute_with_stale_view_retry", side_effect=lambda c, _src, fn: fn(c)),
+        patch("backend.core.storage.execute_with_stale_view_retry", side_effect=lambda c, _src, fn: fn(c)),
     ):
         assert writer_fn("svc", src, [hour_token]) == 0
 
@@ -1528,7 +1528,7 @@ def test_rollup_writer_edge_cases_and_skips(tmp_path, writer_fn, seed_fn, missin
         patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
         patch("backend.core.rollups._common._safe_table_for", return_value="logs_x"),
         patch("backend.core.duckdb.get_connection", return_value=con),
-        patch("backend.core.iceberg.execute_with_stale_view_retry", side_effect=_boom),
+        patch("backend.core.storage.execute_with_stale_view_retry", side_effect=_boom),
     ):
         assert writer_fn("svc", src, [hour_token]) == 0
 
@@ -1752,7 +1752,7 @@ def test_rollup_hour_heal_invokes_rum_total_beacons_backfill(monkeypatch, tmp_pa
     monkeypatch.setattr("backend.core.duckdb.rum_source_for", lambda s: dict(s))
     monkeypatch.setattr("backend.core.duckdb.get_connection", lambda *a, **k: fake_con)
     monkeypatch.setattr(_dl, "_ducklake_attach", lambda *a, **k: None)
-    monkeypatch.setattr("backend.core.iceberg.execute_with_stale_view_retry", lambda con, s, fn, **kw: fn(con))
+    monkeypatch.setattr("backend.core.storage.execute_with_stale_view_retry", lambda con, s, fn, **kw: fn(con))
 
     backfill_calls: list[tuple[object, str, int]] = []
     monkeypatch.setattr(
@@ -2134,8 +2134,8 @@ def _run_pipeline(tmp_path: Path) -> tuple[dict[str, Any], dict[str, str]]:
         patch("backend.core.duckdb._cache_dir", return_value=root),
         patch("backend.core.duckdb.get_connection", side_effect=_writer_con),
         patch("backend.core.duckdb.get_memory_connection", side_effect=_memory_con),
-        patch("backend.core.iceberg.view._get_service_lock", _noop_lock),
-        patch("backend.core.iceberg.execute_with_stale_view_retry", side_effect=lambda c, _s, fn: fn(c)),
+        patch("backend.core.storage.view._get_service_lock", _noop_lock),
+        patch("backend.core.storage.execute_with_stale_view_retry", side_effect=lambda c, _s, fn: fn(c)),
         patch("backend.config.ngwaf_db_path", return_value=str(ngwaf_db)),
         patch("backend.utils.bot_sources.get_pattern_set_version", return_value=_BOT_VERSION),
         patch("backend.utils.bot_sources.get_bot_regex_pattern", return_value=_BOT_PATTERN),

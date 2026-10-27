@@ -1016,9 +1016,9 @@ def get_insights(
     empty_resp = _insights_envelope([])
     if not actual_cols:
         try:
-            from backend.core import iceberg as db_iceberg
+            from backend.core import storage as db_storage
 
-            db_iceberg.update_iceberg_view(con, src, force=True)
+            db_storage.update_storage_view(con, src, force=True)
             actual_cols = runner.get_schema_cols()
         except Exception:
             logger.debug("get_insights: runner.get_schema_cols failed (ignored)", exc_info=True)

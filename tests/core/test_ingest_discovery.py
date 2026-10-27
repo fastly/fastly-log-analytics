@@ -90,7 +90,7 @@ class TestComputeIncrementalStartAfter:
 
     def test_skips_files_without_raw_segment(self):
         # Files without /raw/ in the path don't carry timestamps to derive from
-        already = {"s3://bkt/iceberg/metadata/v1.metadata.json"}
+        already = {"s3://bkt/ducklake/main/logs/part.parquet"}
         assert _compute_incremental_start_after(already) is None
 
     def test_skips_files_with_unparseable_timestamps(self):
@@ -982,17 +982,17 @@ from unittest.mock import MagicMock
 import botocore.exceptions
 import duckdb
 import pytest
-from backend.core.iceberg._ducklake import ducklake_table_name
 from backend.core.metadata.cron_log import OUTCOME_COUNTER_KEYS, record_ingest_object_outcome, start_cron_run
+from backend.core.storage._ducklake import ducklake_table_name
 from backend.utils.sql_validator import escape_sql_literal
 from tests._helpers.ledger import DuckLakeLedgerEnv, clear_ledger, lake_reader
 from tests._helpers.ledger import attacher as _attacher
 from tests._helpers.ledger import clear_ledger as _clear_ledger
 
 import backend.core.duckdb as my_duckdb
-from backend.core import iceberg as ice
 from backend.core import ingest as ing
 from backend.core import metadata as metadata_db
+from backend.core import storage as ice
 from backend.core.ingest import (
     LEDGER_MAX_ATTEMPTS,
     LEDGER_RECLAIM_AFTER_S,
@@ -1216,7 +1216,7 @@ def ingest_env(s3_mock, fos_source, tmp_path, monkeypatch):
     monkeypatch.setattr("backend.core.ingest._get_fos_client", lambda _src: _Shim(s3_mock))
     if hasattr(ice, "_view_cache"):
         ice._view_cache.clear()
-    ice.init_iceberg_table(fos_source)
+    ice.init_storage_table(fos_source)
     return {"s3": s3_mock, "src": fos_source, "cache": cache_path, "bucket": fos_source["bucket"]}
 
 
@@ -1265,7 +1265,7 @@ def test_crash_before_write_to_buffer_recovers_clean(ingest_env, monkeypatch):
     s3, src, sid = ingest_env["s3"], ingest_env["src"], ingest_env["src"]["name"]
     key, n = _one_log_file(s3, ingest_env["bucket"])
     monkeypatch.setattr(
-        "backend.core.iceberg.write_to_buffer", _RaiseOnce(ice.write_to_buffer, RuntimeError("crash: write_to_buffer"))
+        "backend.core.storage.write_to_buffer", _RaiseOnce(ice.write_to_buffer, RuntimeError("crash: write_to_buffer"))
     )
     with pytest.raises(RuntimeError, match="write_to_buffer"):
         _drain(ing.ingest(source=src, delete_after=True))
@@ -1624,7 +1624,7 @@ def test_merge_lake_files_compaction_and_error_handling(tmp_path):
 
     with (
         patch("backend.core.duckdb.get_source_for_service", return_value=SRC),
-        patch("backend.core.iceberg._ducklake._ducklake_attach", side_effect=attach),
+        patch("backend.core.storage._ducklake._ducklake_attach", side_effect=attach),
         patch("backend.core.ingest._configure_fos"),
     ):
         merge_lake_files(SERVICE_ID)
@@ -1640,7 +1640,7 @@ def test_merge_lake_files_compaction_and_error_handling(tmp_path):
 
     with (
         patch("backend.core.duckdb.get_source_for_service", return_value=SRC),
-        patch("backend.core.iceberg._ducklake._ducklake_attach", return_value=False),
+        patch("backend.core.storage._ducklake._ducklake_attach", return_value=False),
         patch("backend.core.ingest._configure_fos"),
     ):
         with pytest.raises(RuntimeError, match="attach failed"):
@@ -1663,7 +1663,7 @@ def test_merge_lake_files_compaction_and_error_handling(tmp_path):
     connection = Connection()
     with (
         patch("backend.core.duckdb.get_source_for_service", return_value=SRC),
-        patch("backend.core.iceberg._ducklake._ducklake_attach", return_value=True),
+        patch("backend.core.storage._ducklake._ducklake_attach", return_value=True),
         patch("backend.core.ingest._configure_fos"),
         patch("duckdb.connect", return_value=connection),
         patch("backend.core.ingest._mark_ledger_published") as mark_published,

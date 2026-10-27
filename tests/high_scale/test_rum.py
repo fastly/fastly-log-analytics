@@ -2267,7 +2267,7 @@ def rum_ingest_env(mock_metadata_db):
         patch("backend.core.rum_ingest.start_cron_run", return_value=123) as mock_start,
         patch("backend.core.rum_ingest.log_cron_run") as mock_log,
         patch("backend.core.rum_ingest.finalize_cron_run_if_running") as mock_finalize,
-        patch("backend.core.iceberg.write_to_buffer") as mock_write_buffer,
+        patch("backend.core.storage.write_to_buffer") as mock_write_buffer,
     ):
         mock_s3 = MagicMock()
         mock_get_fos.return_value = mock_s3
@@ -2877,7 +2877,7 @@ def test_convert_rum_object_uses_ducklake_detach_in_finally(tmp_path):
     _write_gz(raw, [VITALS_LINE])
     with (
         _rum_env(tmp_path, download_stub({f"s3://{BUCKET}/{object_key}": str(raw)})),
-        patch("backend.core.iceberg._ducklake._ducklake_detach") as mock_detach,
+        patch("backend.core.storage._ducklake._ducklake_detach") as mock_detach,
     ):
         assert convert_batch_rum_objects(SERVICE_ID, [object_key], "w1")["committed"] == 1
         assert mock_detach.called

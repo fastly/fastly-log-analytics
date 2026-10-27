@@ -740,7 +740,7 @@ def health_snapshot(probe_fos: bool = False) -> dict[str, Any]:
     # ── Per-service compaction stats ─────────────────────────────────
     try:
         from backend import config as _svcconfig
-        from backend.core.iceberg import _core as _lc
+        from backend.core.storage import _core as _lc
 
         stats_by_svc: dict = {}
         for cfg in _svcconfig.list_configs():
@@ -2019,7 +2019,7 @@ def _try_row_counts_from_rollup(
 
         from backend.core import duckdb as _ddb
         from backend.core.duckdb import escape_sql_literal
-        from backend.core.iceberg.buffer import buffer_files
+        from backend.core.storage.buffer import buffer_files
 
         active_hour_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
         live_start = max(start, active_hour_dt)

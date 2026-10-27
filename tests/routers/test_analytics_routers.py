@@ -221,8 +221,8 @@ def test_insights_endpoint_stale_view_retry_and_real_execution(client, in_memory
 
     with (
         patch("backend.repositories.insights.get_insights", side_effect=_side_effect),
-        patch("backend.core.iceberg._core.clear_source_caches") as mock_clear,
-        patch("backend.core.iceberg._core.update_iceberg_view") as mock_update,
+        patch("backend.core.storage._core.clear_source_caches") as mock_clear,
+        patch("backend.core.storage._core.update_storage_view") as mock_update,
     ):
         resp = client.post(
             "/api/insights", headers=_SVC_HEADERS, json={"window_size_hrs": 24.0, "baseline_hours": 168.0}
@@ -389,8 +389,8 @@ def test_get_pop_health_returns_data_and_self_heals_on_lake_detach_race(client, 
 
     with (
         patch.object(telemetry_mod, "track_query", flaky_track_query),
-        patch("backend.core.iceberg._core.update_iceberg_view", lambda *a, **k: None),
-        patch("backend.core.iceberg._core.clear_source_caches", lambda *a, **k: None),
+        patch("backend.core.storage._core.update_storage_view", lambda *a, **k: None),
+        patch("backend.core.storage._core.clear_source_caches", lambda *a, **k: None),
     ):
         response = client.get(f"/api/network/pop-health?start_time={st}&end_time={et}", headers=_SVC_HEADERS)
 

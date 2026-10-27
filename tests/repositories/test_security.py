@@ -1324,7 +1324,7 @@ class TestQueryRunner:
             refresh_calls["n"] += 1
             refresh_calls["force_seen"] = force
 
-        with patch("backend.core.iceberg.update_iceberg_view", side_effect=fake_refresh):
+        with patch("backend.core.storage.update_storage_view", side_effect=fake_refresh):
             res = runner.execute("SELECT 1")
         assert attempts["n"] == 2 and refresh_calls["n"] == 1 and refresh_calls["force_seen"] is True
         assert res.fetchone()[0] == 1
@@ -1344,7 +1344,7 @@ class TestQueryRunner:
         assert attempts["n"] == 1
 
         fake_con.execute.side_effect = duckdb.IOException("IO Error: No files found at path")
-        with patch("backend.core.iceberg.update_iceberg_view", side_effect=RuntimeError("rebind failed")):
+        with patch("backend.core.storage.update_storage_view", side_effect=RuntimeError("rebind failed")):
             with pytest.raises(Exception, match="No files found"):
                 runner.execute("SELECT 1")
 
@@ -1364,7 +1364,7 @@ class TestQueryRunner:
 
         with (
             patch.object(runner, "execute", side_effect=flaky_execute),
-            patch("backend.core.iceberg.update_iceberg_view"),
+            patch("backend.core.storage.update_storage_view"),
         ):
             runner.execute_with_retry("SELECT 1")
         assert call_count["n"] == 2
@@ -1382,7 +1382,7 @@ class TestQueryRunner:
         stale_error = duckdb.IOException("No files found in the given path")
         with (
             patch.object(runner, "execute", side_effect=stale_error),
-            patch("backend.core.iceberg.update_iceberg_view"),
+            patch("backend.core.storage.update_storage_view"),
         ):
             assert runner.create_temp_table("CREATE TEMP TABLE _unreachable AS SELECT 1") is False
 
@@ -1400,21 +1400,21 @@ class TestQueryRunner:
         with (
             patch("backend.repositories._base._get_schema", side_effect=fake_get_schema),
             patch(
-                "backend.core.iceberg.clear_source_caches",
+                "backend.core.storage.clear_source_caches",
                 side_effect=lambda _k, keep_snapshot_cache=False: call_order.append(
                     f"clear_source_caches(keep_snapshot_cache={keep_snapshot_cache})"
                 ),
             ),
             patch(
-                "backend.core.iceberg.update_iceberg_view",
+                "backend.core.storage.update_storage_view",
                 side_effect=lambda con, src, force=False, lock_timeout=5.0: call_order.append(
-                    f"update_iceberg_view(force={force})"
+                    f"update_storage_view(force={force})"
                 ),
             ),
         ):
             cols = runner.get_schema_cols()
 
-        assert call_order == ["clear_source_caches(keep_snapshot_cache=True)", "update_iceberg_view(force=True)"]
+        assert call_order == ["clear_source_caches(keep_snapshot_cache=True)", "update_storage_view(force=True)"]
         assert cols == ["timestamp", "ip", "status"]
 
 

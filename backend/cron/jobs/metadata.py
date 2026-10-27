@@ -698,7 +698,7 @@ def _trim_memory() -> None:
 
 
 def _recycle_db_path(db_path: str, sources: list[dict]) -> dict:
-    from backend.core.iceberg._core import _get_service_lock
+    from backend.core.storage._core import _get_service_lock
 
     drain_timeout, grace, lock_timeout = _recycle_drain_timeout_s(), _recycle_grace_s(), _recycle_lock_timeout_s()
     service_keys = [_service_key(s) for s in sources]
@@ -1184,7 +1184,7 @@ def _sample_active_queries() -> int:
 def _sample_ducklake_admission() -> int:
     count = 0
     try:
-        from backend.core.iceberg._ducklake import get_admission_stats
+        from backend.core.storage._ducklake import get_admission_stats
 
         for service_id, stats in get_admission_stats().items():
             acquisitions = stats.get("acquisitions", 0.0)
@@ -1599,9 +1599,9 @@ def _run_rollup_hour_heal(service_id: str, manual: bool = False, run_id: int | N
                 from contextlib import closing
 
                 from backend.core.duckdb import get_connection, rum_source_for
-                from backend.core.iceberg import execute_with_stale_view_retry
-                from backend.core.iceberg._ducklake import _ducklake_attach
                 from backend.core.rollups.rum import backfill_missing_rum_aggregates
+                from backend.core.storage import execute_with_stale_view_retry
+                from backend.core.storage._ducklake import _ducklake_attach
 
                 rum_src = rum_source_for(src)
                 with closing(get_connection(rum_src, read_only=False)) as rum_con:
@@ -1799,7 +1799,7 @@ def _run_partial_hour_merge(service_id: str) -> None:
 
 @cron_task("cron:expire_snapshots", job_name="expire_snapshots")
 def _run_expire_snapshots(service_id: str, *, manual: bool = False) -> dict:
-    from backend.core import iceberg as db_iceberg
+    from backend.core import storage as db_storage
     from backend.core.duckdb import get_source_for_service
     from backend.cron.scheduler import dev_mode_no_crons
     from backend.utils.active_requests import should_defer_cron
@@ -1831,7 +1831,7 @@ def _run_expire_snapshots(service_id: str, *, manual: bool = False) -> dict:
         if run.ok:
             logger.info("🏎️  \x1b[90m[expire]\x1b[0m %s: Maintenance job started.", display_name)
             run.log_progress({"type": "status", "message": "Starting snapshot expiry and retention cleanup..."})
-            result = db_iceberg.run_cloud_maintenance(src)
+            result = db_storage.run_cloud_maintenance(src)
             if "error" in result:
                 logger.warning(
                     "%s %s: %s", JOB_COLORS["expire"] + "[expire]" + RESET_COLOR, display_name, result["error"]
@@ -1878,7 +1878,7 @@ def _run_expire_snapshots(service_id: str, *, manual: bool = False) -> dict:
 
 @cron_task("cron.optimize", job_name="optimize")
 def _run_optimize(service_id: str, manual: bool = False) -> dict | None:
-    from backend.core import iceberg as db_iceberg
+    from backend.core import storage as db_storage
     from backend.core.duckdb import get_source_for_service
     from backend.cron.decorators import dev_mode_no_crons
     from backend.cron.jobs.sync import publish_sync_status_safe
@@ -1898,14 +1898,14 @@ def _run_optimize(service_id: str, manual: bool = False) -> dict | None:
         service_id,
         "optimize",
         source=src,
-        error_summary="Iceberg optimize failed",
+        error_summary="DuckLake optimize failed",
         error_result=lambda exc: {
             "status": "error",
             "service_id": service_id,
             "error": str(exc),
             "files_rewritten": 0,
             "files_added": 0,
-            "summary": "Iceberg optimize failed",
+            "summary": "DuckLake optimize failed",
         },
         finalize_duration=True,
         skip_log_prefix="optimize",
@@ -1913,10 +1913,10 @@ def _run_optimize(service_id: str, manual: bool = False) -> dict | None:
         if run.skipped:
             return {"status": "skipped", "service_id": service_id, "summary": run.skip_reason}
         logger.info("🏎️  \x1b[92m[optimize]\x1b[0m %s: Optimize job started.", _display)
-        run.log_progress({"type": "status", "message": "Scanning Iceberg table for small files to compact..."})
-        result = db_iceberg.optimize_table(src, min_files_per_partition=10)
+        run.log_progress({"type": "status", "message": "Scanning DuckLake table for small files to compact..."})
+        result = db_storage.optimize_table(src, min_files_per_partition=10)
         if "error" in result:
-            run.fail("Iceberg optimize failed", error_message=result["error"])
+            run.fail("DuckLake optimize failed", error_message=result["error"])
             run.log_progress({"type": "error", "message": result["error"]})
             run.log_progress({"type": "warning", "message": result["error"]})
             outcome = {
@@ -1925,7 +1925,7 @@ def _run_optimize(service_id: str, manual: bool = False) -> dict | None:
                 "error": result["error"],
                 "files_rewritten": 0,
                 "files_added": 0,
-                "summary": "Iceberg optimize failed",
+                "summary": "DuckLake optimize failed",
             }
         else:
             summary = f"Rewrote {result.get('files_rewritten', 0)} files into {result.get('files_added', 0)} files"

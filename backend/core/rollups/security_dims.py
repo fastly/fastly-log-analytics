@@ -958,7 +958,7 @@ def recompute_wellknown_bots_rollup(
     if not hours:
         return 0
 
-    from backend.core.iceberg.view import _get_service_lock
+    from backend.core.storage.view import _get_service_lock
     from backend.utils.bot_sources import get_bot_regex_pattern, get_pattern_set_version
 
     version = get_pattern_set_version()
@@ -996,7 +996,7 @@ def recompute_wellknown_bots_rollup(
         if cols is None or "ua" not in cols or "ip" not in cols:
             return 0
 
-        from backend.core.iceberg import execute_with_stale_view_retry
+        from backend.core.storage import execute_with_stale_view_retry
 
         os.makedirs(bots_root, exist_ok=True)
         for hour in parsed:
@@ -1065,7 +1065,7 @@ def backfill_wellknown_bots_rollup(
 ) -> int:
     """Self-heal the wellknown_bots rollup tree against the CURRENT
     ``pattern_set_version``: rebuild what it can, drop what it can't."""
-    from backend.core.iceberg.view import _get_service_lock
+    from backend.core.storage.view import _get_service_lock
     from backend.utils.bot_sources import get_pattern_set_version
 
     version = get_pattern_set_version()

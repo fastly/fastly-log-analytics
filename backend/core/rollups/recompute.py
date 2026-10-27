@@ -268,7 +268,7 @@ def backfill_missing_hour_bundles(
     """Self-heal pass: rebuild closed hours where the lake view has rows but no bundle exists."""
     import duckdb as _ddb
 
-    from backend.core.iceberg import update_iceberg_view
+    from backend.core.storage import update_storage_view
 
     bundled_root = _hour_bundled_root(source)
     existing: set[str] = set()
@@ -303,7 +303,7 @@ def backfill_missing_hour_bundles(
         from backend.core.duckdb import _configure_fos, _safe_table_name
 
         _configure_fos(con, source)
-        update_iceberg_view(con, source)
+        update_storage_view(con, source)
         from backend import config as svcconfig
 
         if svcconfig.is_durable_serving_mode(source):
@@ -612,8 +612,8 @@ def _run_per_field_copy(
 ) -> None:
     """Shared core of recompute_touched_hours and backfill_rollups."""
     from backend.core.duckdb import _cache_dir
-    from backend.core.iceberg import execute_with_stale_view_retry
-    from backend.core.iceberg.view import _get_service_lock
+    from backend.core.storage import execute_with_stale_view_retry
+    from backend.core.storage.view import _get_service_lock
 
     cache_root = _cache_dir(source)
     rollups_dir = _rollups_root(source)
@@ -678,8 +678,8 @@ def _run_ip_spread_per_field(
 ) -> None:
     """Build the per-(field, hour, value) HLL IP-spread parquets."""
     from backend.core.duckdb import _cache_dir
-    from backend.core.iceberg import execute_with_stale_view_retry
-    from backend.core.iceberg.view import _get_service_lock
+    from backend.core.storage import execute_with_stale_view_retry
+    from backend.core.storage.view import _get_service_lock
     from backend.utils.hll import HyperLogLog
 
     cache_root = _cache_dir(source)

@@ -1885,15 +1885,15 @@ def test_cache_registry_register_and_clear():
     assert d == {} and s == set() and b.cleared is True and b.items == []
 
 
-def test_iceberg_caches_are_registered_at_import():
+def test_storage_caches_are_registered_at_import():
     import backend.core.duckdb  # noqa: F401
-    import backend.core.iceberg  # noqa: F401
+    import backend.core.storage  # noqa: F401
     import backend.repositories.dashboard  # noqa: F401
     import backend.repositories.network  # noqa: F401
 
     names = set(CacheRegistry.names())
     for required in (
-        "iceberg._view_cache",
+        "storage._view_cache",
         "dashboard._dashboard_cache",
         "network._response_cache",
         "duckdb._fos_client_cache",

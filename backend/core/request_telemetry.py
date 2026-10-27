@@ -662,7 +662,7 @@ _cancelled = threading.Event()
 
 def _read_durable_rum_metrics(con: Any, source: dict) -> dict[str, Any] | None:
     """Read RUM extents from the same durable serving connection as requests."""
-    from backend.core.iceberg._core import ducklake_table_name
+    from backend.core.storage._core import ducklake_table_name
 
     tables: list[str] = []
     for table_name in (ducklake_table_name(source, "client_vitals"), ducklake_table_name(source, "client_errors")):

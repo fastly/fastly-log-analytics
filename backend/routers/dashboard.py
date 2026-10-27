@@ -14,8 +14,8 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Path
 from fastapi.responses import StreamingResponse
 
-from backend.core.iceberg import execute_with_stale_view_retry
 from backend.core.request_context import RequestContext, build_request_context
+from backend.core.storage import execute_with_stale_view_retry
 from backend.cron.jobs.insights_prewarmer import record_insights_request
 from backend.deps import ServiceId, get_service_id
 from backend.models._base import DEFAULT_ERROR_RESPONSES
@@ -205,7 +205,7 @@ async def dashboard_bundle(
 
     # Resolve the primary pooled connection OFF the asyncio event loop. The
     # first ``ctx.con`` access performs a BLOCKING pool checkout (DuckLake
-    # attach + Iceberg view rebuild + up-to-max_wait lock retry); passed as an
+    # attach + storage view rebuild + up-to-max_wait lock retry); passed as an
     # argument to ``asyncio.to_thread(_run_aggregates, ctx.con)`` it is
     # evaluated ON the loop BEFORE the worker thread runs, so under
     # cron-vs-dashboard DuckLake contention it freezes /api/health and every
@@ -761,7 +761,7 @@ def query_endpoint(
                 detail=make_error("query_failed", _redact_paths(str(e))),
             )
 
-    from backend.core.iceberg import execute_with_stale_view_retry as _exec_stale_retry
+    from backend.core.storage import execute_with_stale_view_retry as _exec_stale_retry
 
     def _run_with_compaction_retry(con, src: dict, fn, *, table_name: str):
         for attempt in (1, 2):

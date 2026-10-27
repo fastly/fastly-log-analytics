@@ -127,7 +127,7 @@ def _mocked_provision_steps(
     write_side_effect=...,
     upload_faro_side_effect=...,
     source_return=None,
-    iceberg_side_effect=None,
+    storage_side_effect=None,
     teardown_side_effect=None,
 ):
     reconcile_kw = (
@@ -160,10 +160,10 @@ def _mocked_provision_steps(
         stack.enter_context(patch("backend.core.duckdb.get_source_for_service", return_value=source_return))
         if source_return is not None:
             stack.enter_context(patch("backend.core.duckdb.get_connection"))
-        mock_iceberg = stack.enter_context(
-            patch("backend.core.iceberg.init_iceberg_table", side_effect=iceberg_side_effect)
+        mock_storage = stack.enter_context(
+            patch("backend.core.storage.init_storage_table", side_effect=storage_side_effect)
         )
-        yield {"upload": mock_upload, "iceberg": mock_iceberg}
+        yield {"upload": mock_upload, "storage": mock_storage}
 
 
 def _teardown_state(**overrides) -> dict:
@@ -540,7 +540,7 @@ def test_provision_faro_upload_failure_and_hash_persistence(tmp_path, monkeypatc
     ) == ("1.2.3", "sha256-fake-content-hash", "fake-etag-md5")
 
 
-def test_provision_rollback_resume_and_iceberg_warnings(tmp_path, monkeypatch):
+def test_provision_rollback_resume_and_storage_warnings(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     teardown_called = []
 
@@ -580,17 +580,17 @@ def test_provision_rollback_resume_and_iceberg_warnings(tmp_path, monkeypatch):
 
     with _mocked_provision_steps(write_side_effect=None, source_return=None) as env:
         events, exc = _consume(orchestrator.provision(_provision_cfg()))
-    assert exc is None and events[-1]["type"] == "done" and not env["iceberg"].called
+    assert exc is None and events[-1]["type"] == "done" and not env["storage"].called
     assert any(e["type"] == "status" and "not initialized" in e["message"].lower() for e in events)
 
     with _mocked_provision_steps(
         write_side_effect=None,
         source_return={"name": "svc", "service_id": "sid", "logging_service_id": "lsid"},
-        iceberg_side_effect=RuntimeError("FOS not ready"),
+        storage_side_effect=RuntimeError("FOS not ready"),
     ) as env:
         events, exc = _consume(orchestrator.provision(_provision_cfg()))
     assert exc is None and events[-1]["type"] == "done"
-    env["iceberg"].assert_called_once()
+    env["storage"].assert_called_once()
     assert any(e["type"] == "status" and "deferred to first commit" in e["message"].lower() for e in events)
 
 

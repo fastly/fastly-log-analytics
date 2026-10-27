@@ -152,7 +152,7 @@ def _safe_buffer_mtime(src: dict | None) -> float | tuple[float | None, ...] | N
 
         if svcconfig.is_durable_serving_mode(src):
             return None
-        from backend.core.iceberg._core import _buffer_dir
+        from backend.core.storage._core import _buffer_dir
 
         if src.get("name", "").endswith("::rum"):
             mtimes: list[float | None] = []
@@ -303,7 +303,7 @@ class _Pool:
 
         # Outside lock: view rebind / fresh build may take seconds on S3/DuckLake I/O.
         if reused_con is not None:
-            from backend.core.iceberg._ducklake import _ducklake_attach
+            from backend.core.storage._ducklake import _ducklake_attach
 
             if not _ducklake_attach(reused_con, src, read_only=True):
                 self._discard(reused_con)
@@ -427,18 +427,18 @@ class _Pool:
         return fp
 
     def _current_view_fp(self) -> Any:
-        from backend.core.iceberg import view as iceberg_view
+        from backend.core.storage import view as storage_view
 
         if self.service_key.endswith("::rum"):
-            v = self._strip_view_timing(iceberg_view._view_cache.get(f"{self.service_key}::client_vitals"))
-            e = self._strip_view_timing(iceberg_view._view_cache.get(f"{self.service_key}::client_errors"))
+            v = self._strip_view_timing(storage_view._view_cache.get(f"{self.service_key}::client_vitals"))
+            e = self._strip_view_timing(storage_view._view_cache.get(f"{self.service_key}::client_errors"))
             return (v, e) if (v is not None or e is not None) else None
-        return self._strip_view_timing(iceberg_view._view_cache.get(self.service_key))
+        return self._strip_view_timing(storage_view._view_cache.get(self.service_key))
 
     def _prepare_checkout(self, con: duckdb.DuckDBPyConnection, src: dict) -> duckdb.DuckDBPyConnection:
         """Re-validate ``_view_cache`` fingerprint + buffer mtime before handing ``con`` out."""
         try:
-            from backend.core.iceberg import view as iceberg_view
+            from backend.core.storage import view as storage_view
 
             current = self._current_view_fp()
             if (
@@ -449,7 +449,7 @@ class _Pool:
                 return con
             t_rebind_start = time.monotonic()
             try:
-                iceberg_view.update_iceberg_view(con, src, lock_timeout=_pool_api_rebind_lock_timeout_s())
+                storage_view.update_storage_view(con, src, lock_timeout=_pool_api_rebind_lock_timeout_s())
             finally:
                 self._record_rebind_wait_sample((time.monotonic() - t_rebind_start) * 1000.0)
             self._stamp_fingerprint(con, src)
@@ -461,7 +461,7 @@ class _Pool:
 
     def warm_idle(self, src: dict) -> None:
         """Rebind every idle connection to the latest cached view (drain-then-requeue on LIFO)."""
-        from backend.core.iceberg import view as iceberg_view
+        from backend.core.storage import view as storage_view
 
         drained: list[duckdb.DuckDBPyConnection] = []
         with self._cond:
@@ -478,10 +478,10 @@ class _Pool:
         for con in drained:
             try:
                 if self.service_key.endswith("::rum"):
-                    iceberg_view._try_fast_path_view(con, src, target_table="client_vitals")
-                    iceberg_view._try_fast_path_view(con, src, target_table="client_errors")
+                    storage_view._try_fast_path_view(con, src, target_table="client_vitals")
+                    storage_view._try_fast_path_view(con, src, target_table="client_errors")
                 else:
-                    iceberg_view._try_fast_path_view(con, src)
+                    storage_view._try_fast_path_view(con, src)
                 self._stamp_fingerprint(con, src)
             except Exception as e:
                 logger.warning(

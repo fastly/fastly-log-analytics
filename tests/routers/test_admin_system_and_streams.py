@@ -305,13 +305,13 @@ def test_log_extents_endpoint_variants(client):
         ),
         (
             "/api/admin/iceberg-info",
-            "backend.core.iceberg.get_table_info",
+            "backend.core.storage.get_table_info",
             {"table_name": "logs_test_service", "snapshots": 7, "data_files": 42, "size_bytes": 52428800},
             lambda b: b["data_files"] == 42 and b["snapshots"] == 7,
         ),
         (
             "/api/admin/iceberg-calendar",
-            "backend.core.iceberg.get_snapshot_calendar",
+            "backend.core.storage.get_snapshot_calendar",
             {"2026-01-01": {"data_files": 12, "size_bytes": 4096}},
             lambda b: b["2026-01-01"]["data_files"] == 12 and "_debug_calls" in b,
         ),
@@ -688,7 +688,7 @@ def test_analyst_path_b_rejected_with_403_on_admin_overview_routes():
 def test_iceberg_info_calendar_and_commit_endpoints(overview_client, override_source):
     fake_info = {
         "table_name": "logs",
-        "table_location": "s3://bucket/prefix/iceberg",
+        "table_location": "s3://bucket/prefix/ducklake",
         "snapshots": 5,
         "data_files": 12,
         "size_bytes": 1024,
@@ -696,13 +696,13 @@ def test_iceberg_info_calendar_and_commit_endpoints(overview_client, override_so
         "buffer_files": 1,
         "buffer_size_bytes": 512,
     }
-    with patch("backend.core.iceberg.get_table_info", return_value=fake_info) as mock_get:
+    with patch("backend.core.storage.get_table_info", return_value=fake_info) as mock_get:
         r_info = overview_client.get("/api/admin/iceberg-info?table_name=logs")
         assert r_info.status_code == 200 and r_info.json()["size_bytes"] == 1024
         mock_get.assert_called_once_with(override_source, table_name="logs")
 
     fake_cal = {"2026-08-19": {"data_files": 5, "size_bytes": 1024}}
-    with patch("backend.core.iceberg.get_snapshot_calendar", return_value=fake_cal) as mock_cal:
+    with patch("backend.core.storage.get_snapshot_calendar", return_value=fake_cal) as mock_cal:
         r_cal = overview_client.get("/api/admin/iceberg-calendar?table_name=logs")
         assert r_cal.status_code == 200 and r_cal.json()["2026-08-19"] == {"data_files": 5, "size_bytes": 1024}
         mock_cal.assert_called_once_with(override_source, table_name="logs")
@@ -2211,7 +2211,7 @@ def _wizard_payload(sid: str, bucket: str, **overrides) -> dict:
 def test_wizard_execute_runs_orchestrator_and_bootstrap_sees_service(isolated_configs_dir, tmp_path, monkeypatch):
     """End-to-end: execute → orchestrator yields done → config persists → bootstrap lists svc."""
     sid = "svc-wizard-e2e-1"
-    extras = [patch("backend.core.iceberg.init_iceberg_table", side_effect=RuntimeError("iceberg init skipped (test)"))]
+    extras = [patch("backend.core.storage.init_storage_table", side_effect=RuntimeError("storage init skipped (test)"))]
     with _wizard_env(tmp_path, monkeypatch, extra_patches=extras), TestClient(app) as client:
         r = client.post("/api/provision/execute", json=_wizard_payload(sid, "wizard-e2e-bucket"))
 
@@ -2243,13 +2243,13 @@ def test_wizard_execute_runs_orchestrator_and_bootstrap_sees_service(isolated_co
     assert sid in [s.get("service_id") for s in boot.json()["services"]]
 
 
-def test_wizard_execute_e2e_iceberg_init_success(isolated_configs_dir, tmp_path, monkeypatch, s3_mock):
-    """R-15: positive-path variant exercising real `init_iceberg_table` against moto S3."""
-    sid = "svc-wizard-iceberg-success"
+def test_wizard_execute_e2e_storage_init_success(isolated_configs_dir, tmp_path, monkeypatch, s3_mock):
+    """R-15: positive-path variant exercising real `init_storage_table` against moto S3."""
+    sid = "svc-wizard-storage-success"
     monkeypatch.setattr(svcconfig, "CACHE_DATA_DIR", tmp_path / "data" / "cache")
 
     with (
-        _wizard_env(tmp_path, monkeypatch, service_name="Wizard Iceberg Success"),
+        _wizard_env(tmp_path, monkeypatch, service_name="Wizard Storage Success"),
         TestClient(app) as client,
     ):
         r = client.post(
@@ -2257,8 +2257,8 @@ def test_wizard_execute_e2e_iceberg_init_success(isolated_configs_dir, tmp_path,
             json=_wizard_payload(
                 sid,
                 "test-bucket",
-                service_name="Wizard Iceberg Success",
-                endpoint_name="Wizard Iceberg Logger",
+                service_name="Wizard Storage Success",
+                endpoint_name="Wizard Storage Logger",
             ),
         )
 
@@ -3093,7 +3093,7 @@ def test_teardown_endpoint_flows():
         patch("backend.config.duckdb_path", return_value="/tmp/nonexistent.duckdb"),
         patch("backend.provision._sync_crontab", side_effect=lambda: sync_calls.append(True)),
         patch("backend.cron.scheduler.get_scheduler", return_value=fake_scheduler),
-        patch("backend.core.iceberg.clear_source_caches"),
+        patch("backend.core.storage.clear_source_caches"),
         patch(
             "backend.provision.perform_teardown",
             return_value=iter([{"type": "status", "message": "removed s3 bucket"}]),
@@ -3120,7 +3120,7 @@ def test_teardown_endpoint_flows():
         patch("backend.config.duckdb_path", return_value="/tmp/nonexistent.duckdb"),
         patch("backend.provision._sync_crontab"),
         patch("backend.cron.scheduler.get_scheduler", return_value=MagicMock()),
-        patch("backend.core.iceberg.clear_source_caches"),
+        patch("backend.core.storage.clear_source_caches"),
         patch("backend.provision.perform_teardown", side_effect=_boom),
         patch("backend.core.duckdb.reload_default_source"),
         patch("backend.utils.fastly_auth.fastly", side_effect=_auth_fastly_ok("svc", "cust-X")),

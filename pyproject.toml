@@ -11,7 +11,7 @@ dependencies = [
     # Pin to the 1.5 line specifically. Pre-1.3 ships without the
     # canonical ``.to_arrow_table()`` method on DuckDBPyConnection
     # (only the now-deprecated ``.fetch_arrow_table()`` alias), so
-    # ingest.py / iceberg/buffer.py / rollups/recompute.py — which all
+    # ingest.py / storage/_core.py / rollups/recompute.py — which all
     # use ``.to_arrow_table()`` — silently break on a dev box that
     # resolved an older version. Prod docker has consistently shipped
     # 1.5.x; matching that here closes the dev/prod drift window.
@@ -453,7 +453,7 @@ modules = ["backend.routers.*"]
 ignore_imports = [
     # Direct admin re-exports — bootstrap surfaces an admin helper via
     # the bootstrap route.
-    "backend.routers.bootstrap -> backend.routers.admin",
+    "backend.routers.services -> backend.routers.admin",
     # backend.cron.jobs.sync's gap-heal detector reuses the admin router's
     # compute_log_accounting (sync.py `from backend.routers.admin import
     # compute_log_accounting`). Extracting log accounting out of the router

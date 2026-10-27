@@ -3033,7 +3033,7 @@ export interface paths {
         put?: never;
         /**
          * Optimize Now
-         * @description Trigger an immediate Iceberg table optimize (compaction) pass.
+         * @description Trigger an immediate DuckLake table optimize (compaction) pass.
          *     Bypasses the nightly cron schedule for ad-hoc cleanup. Returns the
          *     optimize_table result dict (files_rewritten / files_added / etc).
          *     Writes through to FOS — use ``/admin/local-compact-now`` for the
@@ -3872,7 +3872,7 @@ export interface paths {
         };
         /**
          * Iceberg Info Endpoint
-         * @description Return Iceberg table metadata: snapshots, data files, size, buffer status.
+         * @description Return DuckLake table metadata: snapshots, data files, size, buffer status.
          */
         get: operations["iceberg_info_endpoint_api_admin_iceberg_info_get"];
         put?: never;
@@ -3892,7 +3892,7 @@ export interface paths {
         };
         /**
          * Iceberg Calendar Endpoint
-         * @description Return per-date data file counts from Iceberg partition metadata.
+         * @description Return per-date data file counts from DuckLake file metadata.
          */
         get: operations["iceberg_calendar_endpoint_api_admin_iceberg_calendar_get"];
         put?: never;
@@ -3997,7 +3997,7 @@ export interface paths {
          * Reset Logs Endpoint
          * @description Permanently delete this service's log data (cloud + local) over SSE.
          *
-         *     Wipes the cloud Iceberg log table, the local DuckDB file + cache, and
+         *     Wipes the DuckLake log table, the local DuckDB file + cache, and
          *     the SQLite ingestion ledgers, then re-initializes an empty, queryable
          *     0-state. Preserves the service's configuration: saved views, alerts,
          *     source registration, audit history, and scoring labels/audit. See
@@ -4028,7 +4028,7 @@ export interface paths {
          * Reset Rum Endpoint
          * @description Permanently delete this service's RUM telemetry data (cloud + local) over SSE.
          *
-         *     Wipes the cloud Iceberg RUM tables and the local RUM DuckDB file and cache
+         *     Wipes the DuckLake RUM tables and the local RUM DuckDB file and cache
          *     while leaving logs data completely untouched.
          */
         post: operations["reset_rum_endpoint_api_admin_reset_rum_post"];

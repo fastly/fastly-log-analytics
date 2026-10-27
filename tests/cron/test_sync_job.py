@@ -709,8 +709,8 @@ def test_high_scale_full_sweep_records_discovery_failure_on_originating_run(monk
 def test_run_log_discovery_cron_full_cascade_real_ingest_against_moto_s3(
     s3_mock, fos_source, monkeypatch, tmp_path, stub_progress, stub_usage_log_phase
 ):
-    from backend.core import iceberg as ice
     from backend.core import metadata as metadata_db
+    from backend.core import storage as ice
 
     cache_path = str(tmp_path / "cache")
     os.makedirs(cache_path, exist_ok=True)
@@ -760,7 +760,7 @@ def test_run_log_discovery_cron_full_cascade_real_ingest_against_moto_s3(
             gz.write(("\n".join(json.dumps(r) for r in rows) + "\n").encode())
         s3_mock.put_object(Bucket=fos_source["bucket"], Key=key, Body=body.getvalue())
 
-    ice.init_iceberg_table(fos_source)
+    ice.init_storage_table(fos_source)
     svc_id, svc_name = fos_source["service_id"], fos_source["name"]
     sync_mod._run_log_discovery_cron.__wrapped__(svc_id, force=True)
 
@@ -1112,7 +1112,7 @@ class TestCommitJob:
     ):
         monkeypatch.setattr("backend.cron.jobs.commit._check_disk_space", lambda *a, **kw: (False, "disk 95% full"))
         cb = MagicMock()
-        monkeypatch.setattr("backend.core.iceberg.commit_buffer", cb)
+        monkeypatch.setattr("backend.core.storage.commit_buffer", cb)
 
         commit._run_commit.__wrapped__("svc-1")
         cb.assert_not_called()
@@ -1125,7 +1125,7 @@ class TestCommitJob:
         self, monkeypatch, stub_load_config, stub_source, stub_cron_envelope
     ):
         monkeypatch.setattr(
-            "backend.core.iceberg.commit_buffer",
+            "backend.core.storage.commit_buffer",
             MagicMock(return_value={"files_committed": 2, "rows_committed": 1234, "snapshot_id": 8675309}),
         )
         commit._run_commit.__wrapped__("svc-1")
@@ -1144,7 +1144,7 @@ class TestCommitJob:
         self, monkeypatch, stub_load_config, stub_source, stub_cron_envelope
     ):
         monkeypatch.setattr(
-            "backend.core.iceberg.commit_buffer",
+            "backend.core.storage.commit_buffer",
             MagicMock(return_value={"files_committed": 0, "rows_committed": 0, "snapshot_id": None}),
         )
         commit._run_commit.__wrapped__("svc-1")
@@ -1160,7 +1160,7 @@ class TestCommitJob:
     ):
         monkeypatch.setattr("backend.cron.jobs.commit._log_and_add_progress", stub_cron_envelope["log_event"])
         monkeypatch.setattr(
-            "backend.core.iceberg.commit_buffer",
+            "backend.core.storage.commit_buffer",
             MagicMock(return_value={"files_committed": 1, "rows_committed": 12, "snapshot_id": "ducklake"}),
         )
         monkeypatch.setattr(
@@ -1221,7 +1221,7 @@ class TestCommitJob:
         expect_refresh,
     ):
         monkeypatch.setattr("backend.cron.jobs.commit._log_and_add_progress", stub_cron_envelope["log_event"])
-        monkeypatch.setattr("backend.core.iceberg.commit_buffer", MagicMock(return_value=result_dict))
+        monkeypatch.setattr("backend.core.storage.commit_buffer", MagicMock(return_value=result_dict))
 
         commit._run_commit.__wrapped__("svc-1")
         args, kwargs = stub_cron_envelope["log"].call_args
@@ -1249,7 +1249,7 @@ class TestCommitJob:
         ]
         monkeypatch.setattr("backend.core.metadata.base.get_con", lambda sid: meta_con)
         standard_commit = MagicMock()
-        monkeypatch.setattr("backend.core.iceberg.commit_buffer", standard_commit)
+        monkeypatch.setattr("backend.core.storage.commit_buffer", standard_commit)
 
         commit._run_commit.__wrapped__("svc-1")
         assert merge_calls == [("merge", "svc-1"), ("finalize", "svc-1")]
@@ -1265,7 +1265,7 @@ class TestCommitJob:
 
     def test_unexpected_exception_logged_as_error(self, monkeypatch, stub_load_config, stub_source, stub_cron_envelope):
         monkeypatch.setattr(
-            "backend.core.iceberg.commit_buffer", MagicMock(side_effect=RuntimeError("snapshot conflict"))
+            "backend.core.storage.commit_buffer", MagicMock(side_effect=RuntimeError("snapshot conflict"))
         )
         commit._run_commit.__wrapped__("svc-1")
         args, kwargs = stub_cron_envelope["log"].call_args
@@ -1277,7 +1277,7 @@ class TestCommitJob:
     ):
         stub_cron_envelope["start"].side_effect = CronLeaseHeldError("lease held")
         cb = MagicMock()
-        monkeypatch.setattr("backend.core.iceberg.commit_buffer", cb)
+        monkeypatch.setattr("backend.core.storage.commit_buffer", cb)
         commit._run_commit.__wrapped__("svc-1")
         cb.assert_not_called()
         stub_cron_envelope["log"].assert_not_called()
@@ -1287,7 +1287,7 @@ class TestCommitJob:
         self, monkeypatch, stub_load_config, stub_source, stub_cron_envelope
     ):
         monkeypatch.setattr(
-            "backend.core.iceberg.commit_buffer", MagicMock(return_value={"files_committed": 0, "rows_committed": 0})
+            "backend.core.storage.commit_buffer", MagicMock(return_value={"files_committed": 0, "rows_committed": 0})
         )
         commit._run_commit.__wrapped__("svc-1", run_id=77)
         stub_cron_envelope["start"].assert_not_called()
@@ -1298,7 +1298,7 @@ class TestCommitJob:
         self, monkeypatch, stub_load_config, stub_source, stub_cron_envelope
     ):
         monkeypatch.setattr(
-            "backend.core.iceberg.commit_buffer",
+            "backend.core.storage.commit_buffer",
             MagicMock(return_value={"files_committed": 1, "rows_committed": 5, "snapshot_id": 9}),
         )
         monkeypatch.setattr(
@@ -1537,7 +1537,7 @@ def test_contract_5_to_8_deferral_budget_high_scale_and_corrupt_rows(full_sync_t
         (50, 1_000_000, 50000, 1200),
     ):
         monkeypatch.setattr(
-            "backend.core.iceberg.buffer_backlog_stats",
+            "backend.core.storage.buffer_backlog_stats",
             lambda src, fc=file_count, tb=total_bytes: {"file_count": fc, "total_bytes": tb},
         )
         sync_mod._run_full_sweep(service_id, force=True)

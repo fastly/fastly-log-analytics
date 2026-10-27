@@ -136,7 +136,7 @@ if [ "$DEV_MODE" = true ]; then
     fi
     # Local dev runs against the same FOS bucket as prod — any
     # background ingestion would race the prod cron and double-write
-    # rows into the shared Iceberg snapshot. The kill switch in
+    # rows into the shared DuckLake snapshot. The kill switch in
     # backend/cron/scheduler.py reads this env var and refuses to
     # register OR execute any scheduled cron job (including the
     # ingest-class jobs that gap_heal / manual /admin/ingest-logs

@@ -182,7 +182,7 @@ def _ensure_persistent_view(sid: str, src: dict) -> None:
         logger.info("[fastapi] Service %s: durable serving uses per-connection views; skipping file pre-warm", sid)
         return
     try:
-        from backend.core import iceberg as _ice
+        from backend.core import storage as _storage
         from backend.core.duckdb import get_connection
 
         # Always refresh the view at startup so the first dashboard load
@@ -194,7 +194,7 @@ def _ensure_persistent_view(sid: str, src: dict) -> None:
         logger.info("[fastapi] Service %s: pre-warming DuckLake view at startup", sid)
         writer = get_connection(source=src, read_only=False)
         try:
-            _ice.update_iceberg_view(writer, src)
+            _storage.update_storage_view(writer, src)
         finally:
             writer.close()
         logger.info("[fastapi] Service %s: view pre-warmed", sid)

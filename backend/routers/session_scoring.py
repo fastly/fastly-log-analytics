@@ -11,7 +11,7 @@ from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query, Request
 
-from backend.core.iceberg import execute_with_stale_view_retry
+from backend.core.storage import execute_with_stale_view_retry
 from backend.core.request_context import RequestContext, build_request_context
 from backend.core.session_token import SessionTokenError, open_session_token, seal_session_token
 from backend.deps import ServiceId, require_admin

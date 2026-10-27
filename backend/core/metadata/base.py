@@ -2453,7 +2453,7 @@ def publish_matrix_to_fos(service_id: str, matrix: dict) -> None:
 
 def _cdn_get(source: dict, key: str) -> bytes:
     """Fetch *key* via CDN, recording telemetry. Raises on any HTTP error."""
-    from backend.core.iceberg._core import _safe_cdn_url
+    from backend.core.storage._core import _safe_cdn_url
     from backend.utils.telemetry import record_cdn_call
 
     cdn_url = _safe_cdn_url((source.get("cdn_url") or "").rstrip("/"))

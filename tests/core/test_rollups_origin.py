@@ -106,7 +106,7 @@ def _run_with_build_patches(cache_root, table: str, fresh_con):
 def _compact_patches(cache_root):
     with (
         patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
-        patch("backend.core.iceberg.view._get_service_lock", _noop_lock),
+        patch("backend.core.storage.view._get_service_lock", _noop_lock),
     ):
         yield
 
@@ -1402,7 +1402,7 @@ class TestRollupsNetworkRtt:
             )
 
         with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
-            with patch("backend.core.iceberg.view._get_service_lock", _noop_lock):
+            with patch("backend.core.storage.view._get_service_lock", _noop_lock):
                 rebuilt = rollups.compact_network_rtt_closed_days_to_daily("svc-nr-cd", src)
 
         assert rebuilt == 1
@@ -1439,7 +1439,7 @@ class TestRollupsNetworkRtt:
             )
 
         with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
-            with patch("backend.core.iceberg.view._get_service_lock", _noop_lock):
+            with patch("backend.core.storage.view._get_service_lock", _noop_lock):
                 rebuilt = rollups.compact_network_rtt_closed_days_to_daily("svc-nr-active", src)
 
         assert rebuilt == 0
@@ -1576,7 +1576,7 @@ class TestRollupsNetworkSpeed:
             )
 
         with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
-            with patch("backend.core.iceberg.view._get_service_lock", _noop_lock):
+            with patch("backend.core.storage.view._get_service_lock", _noop_lock):
                 rebuilt = rollups.compact_network_speed_closed_days_to_daily("svc-ns-cd", src)
 
         assert rebuilt == 1
@@ -1613,7 +1613,7 @@ class TestRollupsNetworkSpeed:
             )
 
         with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
-            with patch("backend.core.iceberg.view._get_service_lock", _noop_lock):
+            with patch("backend.core.storage.view._get_service_lock", _noop_lock):
                 rebuilt = rollups.compact_network_speed_closed_days_to_daily("svc-ns-active", src)
 
         assert rebuilt == 0
@@ -1822,7 +1822,7 @@ class TestRollupsPerfDims:
             )
 
         with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
-            with patch("backend.core.iceberg.view._get_service_lock", _noop_lock):
+            with patch("backend.core.storage.view._get_service_lock", _noop_lock):
                 n = day_bundles.compact_perf_dims_closed_days_to_daily("svc-pd-4", src)
 
         assert n == 1  # one bundle for the single closed day
@@ -1845,7 +1845,7 @@ class TestRollupsPerfDims:
             _write_hour_ttl(str(cache_root), f"{today}-{h:02d}", [{"bucket": "0s", "count": 5, "min_ttl": 0}])
 
         with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
-            with patch("backend.core.iceberg.view._get_service_lock", _noop_lock):
+            with patch("backend.core.storage.view._get_service_lock", _noop_lock):
                 n = day_bundles.compact_perf_dims_closed_days_to_daily("svc-pd-active", src)
 
         assert n == 0
@@ -2168,7 +2168,7 @@ class TestRollupsPerfLatency:
             )
 
         with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
-            with patch("backend.core.iceberg.view._get_service_lock", _noop_lock):
+            with patch("backend.core.storage.view._get_service_lock", _noop_lock):
                 rebuilt = rollups.compact_perf_latency_closed_days_to_daily("svc-pl-cd", src)
 
         assert rebuilt >= 1
@@ -2198,7 +2198,7 @@ class TestRollupsPerfLatency:
             _write_hour_perf(str(cache_root), f"{today}-{h:02d}", [_row("/a", 10, 100.0, 200.0, 300.0)])
 
         with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
-            with patch("backend.core.iceberg.view._get_service_lock", _noop_lock):
+            with patch("backend.core.storage.view._get_service_lock", _noop_lock):
                 rebuilt = rollups.compact_perf_latency_closed_days_to_daily("svc-pl-active", src)
 
         assert rebuilt == 0
@@ -2354,7 +2354,7 @@ class TestRollupsPopHealth:
             )
 
         with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
-            with patch("backend.core.iceberg.view._get_service_lock", _noop_lock):
+            with patch("backend.core.storage.view._get_service_lock", _noop_lock):
                 rebuilt = rollups.compact_pop_health_closed_days_to_daily("svc-ns-cd", src)
 
         assert rebuilt == 1
@@ -2400,7 +2400,7 @@ class TestRollupsPopHealth:
             )
 
         with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
-            with patch("backend.core.iceberg.view._get_service_lock", _noop_lock):
+            with patch("backend.core.storage.view._get_service_lock", _noop_lock):
                 rebuilt = rollups.compact_pop_health_closed_days_to_daily("svc-ns-active", src)
 
         assert rebuilt == 0

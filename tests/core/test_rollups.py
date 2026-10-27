@@ -408,7 +408,7 @@ def test_build_slow_urls_no_url_column_skips(tmp_path):
         patch("backend.core.rollups._common._safe_table_for", return_value="logs_nourl"),
         patch("backend.core.duckdb.get_connection", return_value=con),
         patch(
-            "backend.core.iceberg.execute_with_stale_view_retry",
+            "backend.core.storage.execute_with_stale_view_retry",
             side_effect=lambda c, _src, fn: fn(c),
         ),
     ):
@@ -861,7 +861,7 @@ def test_recompute_copy_failure_skips_hour_without_raising(tmp_path):
         p[1],
         p[2],
         p[3],
-        patch("backend.core.iceberg.execute_with_stale_view_retry", side_effect=_flaky_retry),
+        patch("backend.core.storage.execute_with_stale_view_retry", side_effect=_flaky_retry),
         patch("backend.utils.bot_sources.get_pattern_set_version", return_value="v1"),
         patch("backend.utils.bot_sources.get_bot_regex_pattern", return_value="bot|Googlebot"),
     ):
@@ -933,8 +933,8 @@ def test_rollup_copy_failure_leaves_no_partial_bundle(tmp_path, monkeypatch):
     with (
         patch("backend.core.rollups._common._safe_table_for", return_value="logs"),
         patch("backend.core.duckdb.get_connection", return_value=proxy),
-        patch("backend.core.iceberg.view._get_service_lock", _noop),
-        patch("backend.core.iceberg.execute_with_stale_view_retry", side_effect=lambda c, _s, fn: fn(c)),
+        patch("backend.core.storage.view._get_service_lock", _noop),
+        patch("backend.core.storage.execute_with_stale_view_retry", side_effect=lambda c, _s, fn: fn(c)),
     ):
         n = time_series.build_time_series_bundles("atomic-id", src, [hour])
 
@@ -1382,11 +1382,11 @@ def _write_hour_bundle(buf: str, hour: str, rows: list[dict]) -> str:
 def _setup_backfill_env(monkeypatch, view_sqls: str | list[str], recompute_fn=None):
     sql_list = [view_sqls] if isinstance(view_sqls, str) else view_sqls
 
-    def _fake_update_iceberg_view(con, _src):
+    def _fake_update_storage_view(con, _src):
         for s in sql_list:
             con.execute(s)
 
-    monkeypatch.setattr("backend.core.iceberg.update_iceberg_view", _fake_update_iceberg_view)
+    monkeypatch.setattr("backend.core.storage.update_storage_view", _fake_update_storage_view)
     monkeypatch.setattr("backend.core.rollups.recompute.datetime", _FrozenNow)
     captured_hours: list[set[str]] = []
     monkeypatch.setattr(
@@ -1788,7 +1788,7 @@ def test_bundle_days_writes_combined_parquet(tmp_path):
 
     with (
         patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
-        patch("backend.core.iceberg.view._get_service_lock", _noop_lock),
+        patch("backend.core.storage.view._get_service_lock", _noop_lock),
     ):
         assert day_bundles.bundle_days("svc-day", {"name": "svc-day"}, [day]) == 1
 
@@ -1807,7 +1807,7 @@ def test_bundle_days_top_k_truncation_with_other_synthetic_row(tmp_path):
 
     with (
         patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
-        patch("backend.core.iceberg.view._get_service_lock", _noop_lock),
+        patch("backend.core.storage.view._get_service_lock", _noop_lock),
     ):
         assert day_bundles.bundle_days("svc-topk", {"name": "svc-topk"}, [day]) == 1
 
@@ -1829,7 +1829,7 @@ def test_bundle_days_preserves_unmodified_fields_from_existing_bundle(tmp_path):
 
     with (
         patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
-        patch("backend.core.iceberg.view._get_service_lock", _noop_lock),
+        patch("backend.core.storage.view._get_service_lock", _noop_lock),
     ):
         assert day_bundles.bundle_days("svc-day-preserve", src, [day]) == 1
         new_p = _write_per_field_day(str(cache_root), "url", day, [("/new", 250)])
@@ -1858,7 +1858,7 @@ def test_bundle_days_skips_when_bundle_up_to_date(tmp_path):
     _write_per_field_day(str(cache_root), "url", day, [("/a", 1)])
     with (
         patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
-        patch("backend.core.iceberg.view._get_service_lock", _noop_lock),
+        patch("backend.core.storage.view._get_service_lock", _noop_lock),
     ):
         assert day_bundles.bundle_days("svc", {"name": "svc"}, [day]) == 1
         assert day_bundles.bundle_days("svc", {"name": "svc"}, [day]) == 0
@@ -1871,7 +1871,7 @@ def test_bundle_days_rebuilds_when_source_newer_than_bundle(tmp_path):
     _write_per_field_day(str(cache_root), "url", day, [("/a", 1)])
     with (
         patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
-        patch("backend.core.iceberg.view._get_service_lock", _noop_lock),
+        patch("backend.core.storage.view._get_service_lock", _noop_lock),
     ):
         assert day_bundles.bundle_days("svc", {"name": "svc"}, [day]) == 1
         new_p = _write_per_field_day(str(cache_root), "url", day, [("/b", 5)])

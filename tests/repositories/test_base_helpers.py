@@ -248,7 +248,7 @@ def test_canonical_metrics_contract_and_guards():
     ],
 )
 def test_is_stale_view_error_recognises_known_messages(msg, exc_cls):
-    """Each of these messages indicates an Iceberg view that points
+    """Each of these messages indicates a storage view that points
     to a deleted buffer file — recoverable by refreshing the view.
     Pinned because adding a new DuckDB version that changes the
     message would silently turn recoverable errors into 500s.
@@ -383,7 +383,7 @@ def test_queryrunner_execute_clears_view_cache_before_force_rebuild(monkeypatch)
     ``No files found ... batch_0398ac66102f151b.parquet`` for ~30 min.
 
     Root cause: ``QueryRunner.execute`` self-heal called
-    ``update_iceberg_view(force=True)`` without first calling
+    ``update_storage_view(force=True)`` without first calling
     ``clear_source_caches``. When the per-service lock is contended (the
     every-10s sync cron holds it) the force-rebuild's 5 s lock-acquire
     times out and falls back to executing the cached view SQL — which
@@ -391,11 +391,11 @@ def test_queryrunner_execute_clears_view_cache_before_force_rebuild(monkeypatch)
     re-binds the same dead paths and re-raises the same IOException.
 
     This test pins the ordering: ``clear_source_caches`` MUST be called
-    before ``update_iceberg_view`` so the lock-timeout fallback sees an
+    before ``update_storage_view`` so the lock-timeout fallback sees an
     empty ``_view_cache`` and falls through to persistent-view /
     extended-wait paths.
     """
-    from backend.core import iceberg as db_iceberg
+    from backend.core import storage as db_storage
 
     call_order: list[str] = []
 
@@ -403,10 +403,10 @@ def test_queryrunner_execute_clears_view_cache_before_force_rebuild(monkeypatch)
         call_order.append(f"clear_source_caches(name={name},keep_snapshot_cache={keep_snapshot_cache})")
 
     def _track_update(con, src, *args, force=False, **kwargs):
-        call_order.append(f"update_iceberg_view(force={force})")
+        call_order.append(f"update_storage_view(force={force})")
 
-    monkeypatch.setattr(db_iceberg, "clear_source_caches", _track_clear)
-    monkeypatch.setattr(db_iceberg, "update_iceberg_view", _track_update)
+    monkeypatch.setattr(db_storage, "clear_source_caches", _track_clear)
+    monkeypatch.setattr(db_storage, "update_storage_view", _track_update)
 
     con = duckdb.connect(":memory:")
     try:
@@ -451,9 +451,9 @@ def test_queryrunner_execute_clears_view_cache_before_force_rebuild(monkeypatch)
 
         assert call_order == [
             "clear_source_caches(name=svc-stale,keep_snapshot_cache=True)",
-            "update_iceberg_view(force=True)",
+            "update_storage_view(force=True)",
         ], (
-            "clear_source_caches MUST be called before update_iceberg_view, "
+            "clear_source_caches MUST be called before update_storage_view, "
             "with keep_snapshot_cache=True (matches the duckdb.py:1284 "
             "self-heal pattern). Reordering or omitting the clear call "
             f"reintroduces the 2026-06-05 prod hang. Got: {call_order}"
@@ -579,7 +579,7 @@ def test_queryrunner_retry_and_temp_table_error_branches():
     runner.con = MagicMock()
     runner.con.execute.side_effect = _stale_view_error()
 
-    with patch("backend.core.iceberg.update_iceberg_view"):
+    with patch("backend.core.storage.update_storage_view"):
         assert runner.execute_with_retry("SELECT 1") is None
         assert runner.create_temp_table("CREATE TEMP TABLE t AS SELECT 1") is False
 

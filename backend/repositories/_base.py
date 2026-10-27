@@ -853,10 +853,10 @@ def should_self_heal_stale_view(
 
 
 def _refresh_stale_view(con: duckdb.DuckDBPyConnection, src: dict) -> None:
-    from backend.core import iceberg as db_iceberg
+    from backend.core import storage as db_storage
 
-    db_iceberg.clear_source_caches(src.get("name", "default"), keep_snapshot_cache=True)
-    db_iceberg.update_iceberg_view(con, src, force=True)
+    db_storage.clear_source_caches(src.get("name", "default"), keep_snapshot_cache=True)
+    db_storage.update_storage_view(con, src, force=True)
 
 
 def force_rebuild_view(con: duckdb.DuckDBPyConnection, src: dict) -> None:
@@ -880,7 +880,7 @@ class QueryRunner:
         self._shared_active_depth: int = 0
         self._shared_active_seed_fields: tuple[str, ...] = ()
         self._last_active_direct_n_files: int = 0
-        from backend.core.iceberg import inject_view_debug
+        from backend.core.storage import inject_view_debug
 
         inject_view_debug(self.debug_queries, src)
 
@@ -984,9 +984,9 @@ class QueryRunner:
         def _refresh(_exc: BaseException) -> None:
             nonlocal refreshed
             refreshed = True
-            from backend.core import iceberg as db_iceberg
+            from backend.core import storage as db_storage
 
-            db_iceberg.update_iceberg_view(self.con, self.src)
+            db_storage.update_storage_view(self.con, self.src)
 
         try:
             return True, retry_call(run, retry_on=_is_stale_view_error, attempts=2, before_retry=_refresh)
@@ -1071,7 +1071,7 @@ class QueryRunner:
         projected_set = frozenset(projected)
         mtime_floor = (live_start - timedelta(seconds=_MTIME_SKEW_MARGIN_S)).timestamp()
         try:
-            from backend.core.iceberg.buffer import _tombstoned_parquet_paths
+            from backend.core.storage.buffer import _tombstoned_parquet_paths
 
             tombstoned = _tombstoned_parquet_paths(buffer_dir)
         except Exception:
@@ -1099,7 +1099,7 @@ class QueryRunner:
         buffer_files = [] if durable_serving else _list_parquets(buffer_dir, prune_mtime=True)
         lake_table = None
         try:
-            from backend.core.iceberg._ducklake import ducklake_table_name
+            from backend.core.storage._ducklake import ducklake_table_name
 
             cand = ducklake_table_name(self.src)
             if self.con.execute(
@@ -1133,7 +1133,7 @@ class QueryRunner:
             union_sql = " UNION ALL BY NAME ".join(branches)
             desc = self.con.execute(f"SELECT * FROM ({union_sql}) LIMIT 0").description or []
             physical_cols = {d[0] for d in desc}
-            from backend.core.iceberg.view import _finalize_view_sql
+            from backend.core.storage.view import _finalize_view_sql
 
             target_table = "logs"  # QueryRunner active hour direct is only used for logs path right now
             finalized = _finalize_view_sql(

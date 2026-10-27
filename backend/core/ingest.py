@@ -19,9 +19,9 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 import backend.core as _core_pkg
-from backend.core import iceberg
 from backend.core import log_fields as fc
 from backend.core import metadata as metadata_db
+from backend.core import storage
 from backend.core.duckdb import (
     _DEFAULT_SOURCE,
     INGEST_CHUNK_SIZE,
@@ -463,7 +463,7 @@ def _recover_in_flight(source: dict, table_name: str = "logs") -> dict:
     pending = metadata_db.list_in_flight(source_name, table_name=table_name)
     if not pending:
         return {"promoted": 0, "dropped": 0, "rows_recovered": 0}
-    buf_dir = iceberg._buffer_dir(source, table_name=table_name)  # type: ignore[attr-defined]
+    buf_dir = storage._buffer_dir(source, table_name=table_name)  # type: ignore[attr-defined]
     promoted = dropped = rows_recovered = 0
     for buffer_filename, file_rows in pending:
         if os.path.isfile(os.path.join(buf_dir, buffer_filename)) and file_rows:
@@ -1465,7 +1465,7 @@ def _handle_batch_convert_exception(
 def _cleanup_batch_resources(
     admission_cm: Any, admission_entered: bool, duckdb_con: Any, service_id: str, caller_name: str
 ) -> None:
-    from backend.core.iceberg._core import _ducklake_detach
+    from backend.core.storage._core import _ducklake_detach
 
     if admission_entered:
         admission_cm.__exit__(None, None, None)
@@ -1508,7 +1508,7 @@ def _run_batch_convert_common(
 ) -> dict[str, int]:
     from backend import config as svcconfig
     from backend.core.duckdb import get_memory_connection
-    from backend.core.iceberg._core import _ducklake_attach, ducklake_write_admission
+    from backend.core.storage._core import _ducklake_attach, ducklake_write_admission
 
     summary, con_meta, src, claimed_generations, claimed_keys = _claim_and_resolve_batch_source(
         service_id, object_keys, worker_id
@@ -1569,7 +1569,7 @@ def _run_batch_convert_common(
 
 def convert_batch_objects(service_id: str, object_keys: list[str], worker_id: str) -> dict:
     from backend import config as svcconfig
-    from backend.core.iceberg._core import ducklake_table_name
+    from backend.core.storage._core import ducklake_table_name
 
     def _process_request_batch(*, src, fos, duckdb_con, files, outcomes, enter_write_admission) -> None:
         table = ducklake_table_name(src)
@@ -2200,7 +2200,7 @@ def _write_rum_arrow_table_batch(
 
 
 def convert_batch_rum_objects(service_id: str, object_keys: list[str], worker_id: str) -> dict:
-    from backend.core.iceberg._core import CLIENT_ERRORS_ARROW_SCHEMA, CLIENT_VITALS_ARROW_SCHEMA, ducklake_table_name
+    from backend.core.storage._core import CLIENT_ERRORS_ARROW_SCHEMA, CLIENT_VITALS_ARROW_SCHEMA, ducklake_table_name
 
     def _process_rum_batch(*, src, fos, duckdb_con, files, outcomes, enter_write_admission) -> None:
         vitals_table = ducklake_table_name(src, table_name="client_vitals")
@@ -2396,7 +2396,7 @@ def merge_lake_files(service_id: str) -> None:
     import duckdb as _duckdb
 
     from backend.core.duckdb import get_memory_connection, get_source_for_service
-    from backend.core.iceberg._core import _ducklake_attach, ducklake_write_admission
+    from backend.core.storage._core import _ducklake_attach, ducklake_write_admission
 
     src = get_source_for_service(service_id)
     if src is None:
@@ -2473,7 +2473,7 @@ def _write_buffer_with_in_flight(
     if arrow_table is not None:
         if rows_to_track:
             metadata_db.record_in_flight(source_name, buf_filename, rows_to_track, **kw)
-        iceberg.write_to_buffer(src, arrow_table, buf_filename, **kw)
+        storage.write_to_buffer(src, arrow_table, buf_filename, **kw)
         if rows_to_track:
             metadata_db.insert_ingested_files(source_name, rows_to_track, **kw)
             metadata_db.clear_in_flight(source_name, buf_filename, **kw)
@@ -2582,7 +2582,7 @@ def extract_metrics_from_faro_payload(payload: dict, log_data: dict) -> list[dic
 def ingest_rum_logs(service_id: str, max_seconds: int | None = None, run_id: int | None = None) -> Generator[tuple]:
     """Ingest RUM beacon logs from FOS raw_rum/ prefix into local Parquet buffers & DuckDB DuckLake views."""
     from backend.config import load_config, resolve_raw_delete_after
-    from backend.core.iceberg._core import CLIENT_ERRORS_ARROW_SCHEMA, CLIENT_VITALS_ARROW_SCHEMA
+    from backend.core.storage._core import CLIENT_ERRORS_ARROW_SCHEMA, CLIENT_VITALS_ARROW_SCHEMA
 
     start_time = time.time()
     if run_id is None:

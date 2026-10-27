@@ -2289,7 +2289,7 @@ async def _handle_request_inner(request: web.Request) -> web.StreamResponse:
             try:
                 # encoded=True preserves the URL verbatim on the wire. botocore's
                 # S3SigV4Auth derives the canonical URI from urlsplit(url).path
-                # without re-encoding, so a path containing %3D (e.g. iceberg
+                # without re-encoding, so a path containing %3D (e.g. hive-style
                 # partition keys like timestamp_hour%3D2026-05-19-23) signs the
                 # %3D form. aiohttp's default URL(str, encoded=False) would DECODE
                 # %3D -> = on the wire, leaving the canonical URI we signed
@@ -2475,7 +2475,7 @@ def _run_server() -> None:
     _SESSION = _LOOP.run_until_complete(_create_session())
 
     # Cap request bodies at 4GB. aiohttp's default 1MB cap is too small
-    # for our use case (Iceberg commit multiparts), but the previous
+    # for our use case (DuckLake commit multiparts), but the previous
     # ``client_max_size=0`` (unlimited) made the proxy a credible OOM
     # vector: ``await request.read()`` buffers the whole body, so two
     # concurrent multi-GB PUTs through the proxy could blow past the

@@ -307,7 +307,7 @@ def load_config(service_id: str | None) -> dict | None:
     are picked up on the next call without explicit invalidation.
 
     Returns ``None`` (not a raised exception) for invalid service IDs,
-    including ``None`` itself — several call sites in the core/iceberg/
+    including ``None`` itself — several call sites in the core/storage/
     package pass ``src.get("name")`` (typed as ``Any | None``) and
     rely on the None response to mean "no config". Security's validation
     in ``config_path`` is still what blocks path-traversal; this just

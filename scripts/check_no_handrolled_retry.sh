@@ -11,7 +11,7 @@ BASELINE='
 backend/config.py 2
 backend/core/_duckdb_status.py 1
 backend/core/duckdb.py 1
-backend/core/iceberg/_core.py 1
+backend/core/storage/_core.py 1
 backend/core/query_registry.py 1
 backend/core/request_telemetry.py 1
 backend/provision/declarative/iac_reconciler.py 1

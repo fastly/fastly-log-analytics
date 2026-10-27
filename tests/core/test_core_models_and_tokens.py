@@ -36,9 +36,9 @@ import pyarrow.parquet as pq
 import pytest
 from backend.core.fastly.rum_provisioning import RUM_ASSET_FETCH_NAME, generate_rum_asset_fetch_vcl
 from backend.core.field_registry import BY_CODE, BY_GROUP, REGISTRY, LogField
-from backend.core.iceberg.view import _get_service_lock
 from backend.core.reset import _pause_rum_flags, _restore_rum_flags
 from backend.core.session_token import SessionTokenError, open_session_token, seal_session_token
+from backend.core.storage.view import _get_service_lock
 from backend.models.services import CustomFieldCreate, CustomFieldUpdate
 from backend.provision.cmcd_fields import (
     _CMCD_CUSTOM_FIELDS,
@@ -83,13 +83,12 @@ from backend import config as svcconfig
 from backend.config import is_rum_enabled, path_within_dir
 from backend.core import duckdb as _bk_duckdb
 from backend.core import field_registry as fr
-from backend.core import iceberg, quarantine
 from backend.core import ingest as _bk_ingest
 from backend.core import log_fields as lf
+from backend.core import quarantine, storage
 from backend.core import reset as reset_mod
 from backend.core import session_token as _st_mod
 from backend.core.duckdb import ensure_cid_salt, get_or_generate_cid_salt
-from backend.core.iceberg import _core as _iceberg_core
 from backend.core.ingest import get_catalog_field_ids, get_ingest_type_hints
 from backend.core.log_fields import (
     _BUILTIN_FIELD_NAMES,
@@ -108,6 +107,7 @@ from backend.core.log_fields import (
 )
 from backend.core.metadata.base import get_con
 from backend.core.rollups._common import quote_path_list
+from backend.core.storage import _core as _storage_core
 from backend.main import app as _fastapi_app
 from backend.models.common import FilterSpec
 from backend.provision import cmcd_fields as orch
@@ -762,9 +762,9 @@ def _table_count(table: str) -> int:
 
 
 @pytest.fixture
-def _stub_iceberg_catalog(monkeypatch):
-    monkeypatch.setattr("backend.core.iceberg._core.init_iceberg_table", MagicMock())
-    monkeypatch.setattr("backend.core.iceberg.view.update_iceberg_view", MagicMock())
+def _stub_storage_catalog(monkeypatch):
+    monkeypatch.setattr("backend.core.storage._core.init_storage_table", MagicMock())
+    monkeypatch.setattr("backend.core.storage.view.update_storage_view", MagicMock())
     monkeypatch.setattr("backend.core.duckdb.get_connection", MagicMock())
 
 
@@ -773,9 +773,9 @@ def fake_scheduler():
     return MagicMock()
 
 
-@pytest.mark.usefixtures("_stub_iceberg_catalog")
+@pytest.mark.usefixtures("_stub_storage_catalog")
 def test_wipes_operational_preserves_config_and_meta(s3_mock, fos_source, fake_scheduler, monkeypatch):
-    from backend.core.iceberg._core import ducklake_table_name
+    from backend.core.storage._core import ducklake_table_name
 
     monkeypatch.setattr(svcconfig, "DUCKLAKE_DATA_PATH", "s3://test-bucket/ducklake/")
     monkeypatch.setenv("ALLOW_REMOTE_S3_PARQUET_SCAN", "1")
@@ -828,9 +828,9 @@ def test_wipes_operational_preserves_config_and_meta(s3_mock, fos_source, fake_s
     assert svcconfig.load_config(MOCK_SERVICE_ID)["provisioning"]["cron_sync"]["enabled"] is True
 
 
-@pytest.mark.usefixtures("_stub_iceberg_catalog")
+@pytest.mark.usefixtures("_stub_storage_catalog")
 def test_reset_rum_purges_only_this_services_rum_ducklake_data(s3_mock, fos_source, fake_scheduler, monkeypatch):
-    from backend.core.iceberg._core import ducklake_table_name
+    from backend.core.storage._core import ducklake_table_name
 
     monkeypatch.setattr(svcconfig, "DUCKLAKE_DATA_PATH", "s3://test-bucket/ducklake/")
     monkeypatch.setenv("ALLOW_REMOTE_S3_PARQUET_SCAN", "1")
@@ -853,7 +853,7 @@ def test_reset_rum_purges_only_this_services_rum_ducklake_data(s3_mock, fos_sour
     assert survivors <= keys, "RUM reset must not touch request-log or other tenants' DuckLake data"
 
 
-@pytest.mark.usefixtures("_stub_iceberg_catalog")
+@pytest.mark.usefixtures("_stub_storage_catalog")
 def test_reset_logs_skips_cloud_purge_when_data_path_is_another_bucket(
     s3_mock, fos_source, fake_scheduler, monkeypatch
 ):
@@ -867,7 +867,7 @@ def test_reset_logs_skips_cloud_purge_when_data_path_is_another_bucket(
     assert "ducklake/main/anything/part.parquet" in keys
 
 
-@pytest.mark.usefixtures("_stub_iceberg_catalog")
+@pytest.mark.usefixtures("_stub_storage_catalog")
 def test_delete_raw_logs_true_purges_raw_prefix(s3_mock, fos_source, fake_scheduler):
     _save_config()
     raw_key = "raw/request/year=2026/month=01/day=01/hour=00/minute=00/log.gz"
@@ -876,7 +876,7 @@ def test_delete_raw_logs_true_purges_raw_prefix(s3_mock, fos_source, fake_schedu
     assert raw_key not in {o["Key"] for o in s3_mock.list_objects_v2(Bucket="test-bucket").get("Contents", [])}
 
 
-@pytest.mark.usefixtures("_stub_iceberg_catalog")
+@pytest.mark.usefixtures("_stub_storage_catalog")
 def test_cron_busy_blocks_reset(monkeypatch, s3_mock, fos_source, fake_scheduler):
     _save_config()
     monkeypatch.setattr("backend.core.metadata.cron_busy", lambda service_id: True)
@@ -887,7 +887,7 @@ def test_cron_busy_blocks_reset(monkeypatch, s3_mock, fos_source, fake_scheduler
     lock.release()
 
 
-@pytest.mark.usefixtures("_stub_iceberg_catalog")
+@pytest.mark.usefixtures("_stub_storage_catalog")
 def test_concurrent_reset_is_excluded_by_service_lock(monkeypatch, s3_mock, fos_source, fake_scheduler):
     _save_config()
     monkeypatch.setattr(reset_mod, "_LOCK_TIMEOUT_S", 0.1)
@@ -911,7 +911,7 @@ def test_concurrent_reset_is_excluded_by_service_lock(monkeypatch, s3_mock, fos_
         holder.join(timeout=5)
 
 
-@pytest.mark.usefixtures("_stub_iceberg_catalog")
+@pytest.mark.usefixtures("_stub_storage_catalog")
 def test_error_mid_reset_still_resumes_scheduler_and_releases_lock(monkeypatch, s3_mock, fos_source, fake_scheduler):
     _save_config()
     s3_mock.put_object(Bucket="test-bucket", Key="errors/foo.bad.jsonl", Body=b"x")
@@ -927,7 +927,7 @@ def test_error_mid_reset_still_resumes_scheduler_and_releases_lock(monkeypatch, 
     lock.release()
 
 
-@pytest.mark.usefixtures("_stub_iceberg_catalog")
+@pytest.mark.usefixtures("_stub_storage_catalog")
 def test_no_service_raises_value_error(fake_scheduler):
     with pytest.raises(ValueError, match="No service found"):
         next(reset_mod.reset_service_logs("does-not-exist"))
@@ -942,17 +942,17 @@ def _drain(gen):
         return {"yielded": yielded, "return": stop.value}
 
 
-@pytest.mark.usefixtures("_stub_iceberg_catalog")
+@pytest.mark.usefixtures("_stub_storage_catalog")
 @pytest.mark.parametrize(
     ("pages", "exclude_prefix", "expected_calls", "expected_return", "expected_msgs"),
     [
         (
             [
-                {"Contents": [{"Key": "iceberg/a.parquet"}, {"Key": "iceberg/b.parquet"}]},
-                {"Contents": [{"Key": "iceberg/c.parquet"}]},
+                {"Contents": [{"Key": "ducklake/a.parquet"}, {"Key": "ducklake/b.parquet"}]},
+                {"Contents": [{"Key": "ducklake/c.parquet"}]},
             ],
             None,
-            [["iceberg/a.parquet", "iceberg/b.parquet"], ["iceberg/c.parquet"]],
+            [["ducklake/a.parquet", "ducklake/b.parquet"], ["ducklake/c.parquet"]],
             3,
             ["Deleted 2 thing(s) so far...", "Deleted 3 thing(s) so far..."],
         ),
@@ -960,10 +960,10 @@ def _drain(gen):
             [
                 {"Contents": [{"Key": "meta/admin_state.json"}]},
                 {"Contents": []},
-                {"Contents": [{"Key": "iceberg/data/x.parquet"}]},
+                {"Contents": [{"Key": "ducklake/data/x.parquet"}]},
             ],
             "meta/",
-            [["iceberg/data/x.parquet"]],
+            [["ducklake/data/x.parquet"]],
             1,
             ["Deleted 1 thing(s) so far..."],
         ),
@@ -979,13 +979,13 @@ def test_purge_prefix_pagination_and_exclusion(pages, exclude_prefix, expected_c
         return len(keys)
 
     kwargs = {"exclude_prefix": exclude_prefix} if exclude_prefix else {}
-    result = _drain(reset_mod._purge_prefix(fos, "bucket", "iceberg/", _fake_delete, label="thing(s)", **kwargs))
+    result = _drain(reset_mod._purge_prefix(fos, "bucket", "ducklake/", _fake_delete, label="thing(s)", **kwargs))
     assert result["return"] == expected_return
     assert delete_calls == expected_calls
     assert [e["message"] for e in result["yielded"]] == expected_msgs
 
 
-@pytest.mark.usefixtures("_stub_iceberg_catalog")
+@pytest.mark.usefixtures("_stub_storage_catalog")
 def test_remove_tree_with_progress_reports_batches_and_removes_everything(tmp_path):
     for i in range(5):
         (tmp_path / f"f{i}.parquet").write_bytes(b"x")
@@ -998,7 +998,7 @@ def test_remove_tree_with_progress_reports_batches_and_removes_everything(tmp_pa
     assert not os.path.exists(tmp_path)
 
 
-@pytest.mark.usefixtures("_stub_iceberg_catalog")
+@pytest.mark.usefixtures("_stub_storage_catalog")
 def test_rum_pause_and_restore_flags():
 
     cfg = {"rum_enabled": True, "rum": {"faro_version": "1.2.3"}}
@@ -1195,8 +1195,8 @@ def custom_field_env(
     shim = _CallerHintShim(s3_mock)
     monkeypatch.setattr("backend.core.ingest._get_fos_client", lambda _src: shim)
 
-    if hasattr(iceberg, "_view_cache"):
-        iceberg._view_cache.clear()
+    if hasattr(storage, "_view_cache"):
+        storage._view_cache.clear()
 
     def _set_custom_fields(custom_fields: list[dict[str, Any]]) -> None:
         cfg = {
@@ -1401,8 +1401,8 @@ def test_custom_field_in_service_a_not_visible_in_service_b(app):
 
     cfg_a, cfg_b = svcconfig.load_config(svc_a), svcconfig.load_config(svc_b)
     assert cfg_a is not None and cfg_b is not None
-    assert "svc_a_field" in {f.name for f in _iceberg_core.get_arrow_schema(cfg_a["log_fields"])}
-    assert "svc_a_field" not in {f.name for f in _iceberg_core.get_arrow_schema(cfg_b["log_fields"])}
+    assert "svc_a_field" in {f.name for f in _storage_core.get_arrow_schema(cfg_a["log_fields"])}
+    assert "svc_a_field" not in {f.name for f in _storage_core.get_arrow_schema(cfg_b["log_fields"])}
     assert _bk_duckdb._safe_table_name(svc_a) != _bk_duckdb._safe_table_name(svc_b)
 
 
@@ -1413,7 +1413,7 @@ def test_same_field_name_in_both_services_has_independent_values(tmp_path):
     _save_service_config(svc_b, custom_fields=[_cf("my_field")])
 
     for svc in (svc_a, svc_b):
-        assert "my_field" in {f.name for f in _iceberg_core.get_arrow_schema(svcconfig.load_config(svc)["log_fields"])}
+        assert "my_field" in {f.name for f in _storage_core.get_arrow_schema(svcconfig.load_config(svc)["log_fields"])}
 
     pq_a, pq_b = tmp_path / "a" / "rows.parquet", tmp_path / "b" / "rows.parquet"
     pq_a.parent.mkdir()
@@ -1452,7 +1452,7 @@ def _row(ts: datetime, idx: int, **extra):
 
 def _connect(env):
     con = _bk_duckdb.get_connection(env["fos_source"])
-    iceberg.update_iceberg_view(con, env["fos_source"])
+    storage.update_storage_view(con, env["fos_source"])
     return con, _safe_table(env["fos_source"]["name"])
 
 
@@ -1467,13 +1467,13 @@ def _query_all(env, columns: str) -> list:
 def _ingest_and_commit(env, expected: int):
     done = next((e for e in env["drain_ingest"]() if e["type"] == "done"), None)
     assert done is not None and done["rows_inserted"] == expected, f"expected {expected} rows, got {done}"
-    iceberg.commit_buffer(env["fos_source"])
+    storage.commit_buffer(env["fos_source"])
 
 
 def test_hard_delete_preserves_old_data_and_allows_new_ingest(custom_field_env):
     env = custom_field_env
     env["set_custom_fields"]([{"name": "doomed", "duckdb_type": "VARCHAR", "enabled": True, "vcl": '"doomed":""'}])
-    iceberg.init_iceberg_table(env["fos_source"])
+    storage.init_storage_table(env["fos_source"])
 
     base = datetime.now(UTC) - timedelta(hours=2)
     env["seed_gz"](
@@ -1483,9 +1483,9 @@ def test_hard_delete_preserves_old_data_and_allows_new_ingest(custom_field_env):
     _ingest_and_commit(env, expected=2)
 
     env["set_custom_fields"]([])
-    if hasattr(iceberg, "_view_cache"):
-        iceberg._view_cache.clear()
-    iceberg.init_iceberg_table(env["fos_source"])
+    if hasattr(storage, "_view_cache"):
+        storage._view_cache.clear()
+    storage.init_storage_table(env["fos_source"])
 
     env["seed_gz"](
         "raw/request/year=2026/month=05/day=22/hour=11/minute=00/2026-05-22T11-00-00.svc.gz",
@@ -1505,7 +1505,7 @@ def test_hard_delete_does_not_corrupt_remaining_field_values(custom_field_env):
             {"name": "beta", "duckdb_type": "VARCHAR", "enabled": True, "vcl": '"beta":""'},
         ]
     )
-    iceberg.init_iceberg_table(env["fos_source"])
+    storage.init_storage_table(env["fos_source"])
 
     base = datetime.now(UTC) - timedelta(hours=2)
     env["seed_gz"](
@@ -1515,9 +1515,9 @@ def test_hard_delete_does_not_corrupt_remaining_field_values(custom_field_env):
     _ingest_and_commit(env, expected=2)
 
     env["set_custom_fields"]([{"name": "beta", "duckdb_type": "VARCHAR", "enabled": True, "vcl": '"beta":""'}])
-    if hasattr(iceberg, "_view_cache"):
-        iceberg._view_cache.clear()
-    iceberg.init_iceberg_table(env["fos_source"])
+    if hasattr(storage, "_view_cache"):
+        storage._view_cache.clear()
+    storage.init_storage_table(env["fos_source"])
 
     env["seed_gz"](
         "raw/request/year=2026/month=05/day=22/hour=11/minute=00/2026-05-22T11-00-00.svc.gz",
@@ -1570,14 +1570,14 @@ def test_new_field_added_while_old_is_disabled_does_not_collide_on_name():
             {"name": "new_enabled", "duckdb_type": "VARCHAR", "enabled": True},
         ]
     )
-    names = {f.name for f in iceberg.get_arrow_schema(cfg)}
+    names = {f.name for f in storage.get_arrow_schema(cfg)}
     assert "new_enabled" in names and "old_disabled" not in names
 
 
 def test_aggregation_over_all_null_column(custom_field_env):
     env = custom_field_env
     env["set_custom_fields"]([{"name": "score", "duckdb_type": "INTEGER", "enabled": True, "vcl": '"score":0'}])
-    iceberg.init_iceberg_table(env["fos_source"])
+    storage.init_storage_table(env["fos_source"])
 
     base = datetime.now(UTC) - timedelta(hours=2)
     env["seed_gz"](
@@ -1654,21 +1654,21 @@ def _ingest_once(monkeypatch, source, log_dir, key, payload, *, include_commit: 
             return {}
 
     monkeypatch.setattr(_bk_ingest, "_get_fos_client", lambda *a: _Fos())
-    iceberg._view_cache.clear()
+    storage._view_cache.clear()
     _bk_duckdb._clear_schema_cache()
     _bk_duckdb._initialized_paths.clear()
     list(_bk_ingest.ingest(source=source))
     if include_commit:
-        iceberg.commit_buffer(source)
-    iceberg._view_cache.clear()
+        storage.commit_buffer(source)
+    storage._view_cache.clear()
     _bk_duckdb._clear_schema_cache()
     _bk_duckdb._initialized_paths.clear()
 
 
 def _open_view(source):
     con = _bk_duckdb.get_connection(source=source, skip_view_update=False)
-    iceberg._view_cache.clear()
-    iceberg.update_iceberg_view(con, source)
+    storage._view_cache.clear()
+    storage.update_storage_view(con, source)
     return con
 
 
@@ -1864,7 +1864,7 @@ def test_ingest_and_query_numeric_custom_fields(tmp_path, monkeypatch):
 # ── Type mismatch resilience ──
 def _run_type_mismatch_batch(env, field_def: dict, gz_key: str, values: list):
     env["set_custom_fields"]([field_def])
-    iceberg.init_iceberg_table(env["fos_source"])
+    storage.init_storage_table(env["fos_source"])
     base = datetime.now(UTC) - timedelta(hours=2)
     col = field_def["name"]
     env["seed_gz"](
@@ -1913,7 +1913,7 @@ def test_boolean_field_with_arbitrary_string_nulls_the_cell(custom_field_env):
 def test_batch_proceeds_when_one_file_has_only_type_mismatches(custom_field_env):
     env = custom_field_env
     env["set_custom_fields"]([{"name": "n", "duckdb_type": "INTEGER", "enabled": True, "vcl": '"n":1'}])
-    iceberg.init_iceberg_table(env["fos_source"])
+    storage.init_storage_table(env["fos_source"])
 
     base = datetime.now(UTC) - timedelta(hours=2)
     env["seed_gz"](

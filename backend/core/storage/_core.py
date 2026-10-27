@@ -22,7 +22,7 @@ from backend.core.duckdb import escape_sql_literal, require_safe_ident
 from backend.core.log_fields import LOG_FIELD_CATALOG
 
 _C, _R = "\x1b[36m", "\x1b[0m"
-_ICE = f"🧊 {_C}[iceberg]{_R}"
+_ICE = f"🧊 {_C}[storage]{_R}"
 logger = logging.getLogger(__name__)
 
 # Arrow Schema — derived from LOG_FIELD_CATALOG (unsigned DuckDB types widened to signed Arrow types).
@@ -42,7 +42,7 @@ _DUCKDB_TO_ARROW: dict[str, pa.DataType] = {
     "BOOLEAN": pa.bool_(),
 }
 
-# Field order is FIXED — Iceberg assigns field IDs by position; append new fields at the end.
+# Field order is FIXED; append new fields at the end.
 _FIELD_ORDER = (
     "timestamp ip status elapsed cache resp_bytes "
     "host url method proto ua referer req_bytes "
@@ -160,12 +160,12 @@ def invalidate_service_caches(source: dict) -> dict[str, int]:
     return {"view_entries_cleared": cleared}
 
 
-def init_iceberg_table(source: dict, create: bool = True, table_name: str = "logs"):
+def init_storage_table(source: dict, create: bool = True, table_name: str = "logs"):
     with _get_service_lock(source.get("name", "default")):
-        return _init_iceberg_table_locked(source, create, table_name=table_name)
+        return _init_storage_table_locked(source, create, table_name=table_name)
 
 
-def _init_iceberg_table_locked(source: dict, create: bool = True, table_name: str = "logs"):
+def _init_storage_table_locked(source: dict, create: bool = True, table_name: str = "logs"):
     """Ensure the service's DuckLake catalog is attachable (True, or None on failure)."""
     from backend.core.duckdb import get_connection
 
@@ -602,7 +602,7 @@ def _reset_for_tests() -> None:
         _stats.clear()
 
 
-sys.modules["backend.core.iceberg._ducklake"] = sys.modules[__name__]
+sys.modules["backend.core.storage._ducklake"] = sys.modules[__name__]
 
 # ── Local Parquet buffer & DuckLake commit/maintenance (folded from buffer.py) ──
 
@@ -1269,7 +1269,7 @@ def _run_cloud_maintenance_impl(source: dict) -> dict:
 
         def _on_walk_err(error: OSError) -> None:
             errors.append(str(error))
-            logger.warning("[iceberg] Local %s scan failed: %s", label, error)
+            logger.warning("[storage] Local %s scan failed: %s", label, error)
 
         for root, _, files in os.walk(dir_path, onerror=_on_walk_err):
             for file in files:
@@ -1282,7 +1282,7 @@ def _run_cloud_maintenance_impl(source: dict) -> dict:
                         deleted += 1
                 except Exception as e:
                     errors.append(f"{filepath}: {e}")
-                    logger.warning("[iceberg] Could not remove expired %s %s: %s", label, filepath, e)
+                    logger.warning("[storage] Could not remove expired %s %s: %s", label, filepath, e)
         if prune:
             _core_mod._prune_empty_dirs(dir_path)
         return deleted
@@ -1307,7 +1307,7 @@ def _run_cloud_maintenance_impl(source: dict) -> dict:
         )
     except Exception as e:
         cache_errors.append(str(e))
-        logger.warning("[iceberg] Local cache cleanup failed: %s", e)
+        logger.warning("[storage] Local cache cleanup failed: %s", e)
     if cache_errors:
         results["local_cache_error"] = "; ".join(cache_errors)
 
@@ -1328,7 +1328,7 @@ def _run_cloud_maintenance_impl(source: dict) -> dict:
             if rollup_errors:
                 results["local_rollup_error"] = "; ".join(rollup_errors)
         except Exception as e:
-            logger.warning("[iceberg] Local rollup cleanup skipped: %s", e)
+            logger.warning("[storage] Local rollup cleanup skipped: %s", e)
             results["local_rollup_error"] = str(e)
 
     results["retention_deleted_rows"] = sum(
@@ -1346,8 +1346,8 @@ def _run_cloud_maintenance_impl(source: dict) -> dict:
 
 # ── DuckLake-native table-info / calendar + schema alignment (folded from manifest.py) ──
 #
-# Every commit goes through `backend.core.iceberg.buffer._commit_buffer_impl`'s
-# DuckLake attach (see `backend/core/iceberg/_ducklake.py` module docstring),
+# Every commit goes through `backend.core.storage.buffer._commit_buffer_impl`'s
+# DuckLake attach (see `backend/core/storage/_ducklake.py` module docstring),
 # and `get_table_info`/`get_snapshot_calendar` below read DuckLake state
 # directly.
 
@@ -1358,7 +1358,7 @@ _ducklake_session_local = threading.local()
 
 from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry  # noqa: E402
 
-_CacheRegistry.register("iceberg._ducklake_table_metadata_cache", _ducklake_table_metadata_cache)
+_CacheRegistry.register("storage._ducklake_table_metadata_cache", _ducklake_table_metadata_cache)
 
 
 @contextmanager
@@ -1430,10 +1430,10 @@ def _scan_ducklake_table_metadata(con, lake_table: str) -> tuple[int, str | None
     and a per-day row-count calendar.
 
     DuckLake exposes no manifest/partition-value API at the SQL level the
-    way pyiceberg's manifests did, and small commits get "inlined" into the
+    way the pre-v3 table manifests did, and small commits get "inlined" into the
     catalog metadata rather than written as parquet files — so there are no
     reliable per-file stats to read either way (see
-    ``backend/core/iceberg/_ducklake.py`` module docstring). A direct scan
+    ``backend/core/storage/_ducklake.py`` module docstring). A direct scan
     is the only approach that stays correct in both cases. Callers should
     go through ``_get_cached_or_scan_ducklake_metadata`` rather than call
     this directly — it's O(table size) and this codebase treats "MANY
@@ -1767,7 +1767,7 @@ def _source_variant_fp(source: dict) -> tuple:
     """Hashable fingerprint of the per-source inputs that materially
     affect the generated view SQL beyond the schema fields.
 
-    Finding 002 (2026-06-15): ``_update_iceberg_view_locked`` appends a
+    Finding 002 (2026-06-15): ``_update_storage_view_locked`` appends a
     WHERE clause derived from ``source["time_range"]``. Without it in the
     ``_view_cache`` key tuple, a cached SQL string from one variant
     could be served back to a request that wrote a different time
@@ -1794,7 +1794,7 @@ _rebuild_signals_lock = threading.Lock()
 
 
 def is_stale_view_error(exc: BaseException) -> bool:
-    """Return True when ``exc`` looks like the iceberg view referencing a
+    """Return True when ``exc`` looks like the storage view referencing a
     buffer parquet the commit cycle has already swept.
 
     Mirror of :func:`backend.repositories._base._is_stale_view_error` —
@@ -1803,7 +1803,7 @@ def is_stale_view_error(exc: BaseException) -> bool:
     importing through the repositories layer (would invert the
     architecture). The repositories alias still resolves the same way;
     new sites should import :func:`is_stale_view_error` directly from
-    :mod:`backend.core.iceberg`.
+    :mod:`backend.core.storage`.
     """
     msg = str(exc)
     return (
@@ -1820,7 +1820,7 @@ def execute_with_stale_view_retry(con, source: dict, fn, *args, table_name="logs
     On a :func:`is_stale_view_error`-shaped failure, bust the cached view
     SQL via :func:`clear_source_caches` (keep_snapshot_cache=True, same
     pattern QueryRunner.execute uses), force-rebind the view via
-    :func:`update_iceberg_view`, then re-invoke ``fn`` once.
+    :func:`update_storage_view`, then re-invoke ``fn`` once.
 
     Non-stale errors propagate immediately. Second-attempt failures
     (including non-stale ones) propagate too — the caller decides
@@ -1840,7 +1840,7 @@ def execute_with_stale_view_retry(con, source: dict, fn, *args, table_name="logs
 
     def _recover(_exc: BaseException) -> None:
         _core_mod.clear_source_caches(source.get("name", "default"), keep_snapshot_cache=True)
-        _core_mod.update_iceberg_view(con, source, force=True, target_table=table_name)
+        _core_mod.update_storage_view(con, source, force=True, target_table=table_name)
 
     return retry_call(
         lambda: fn(con, *args, **kwargs),
@@ -1893,7 +1893,7 @@ def inject_view_debug(debug_list: list, source: dict):
         debug_list.insert(
             0,
             {
-                "sql": _compact_sql_for_debug(f"-- DuckDB Iceberg View Resolution [{mode}] --\n{stats['sql']}"),
+                "sql": _compact_sql_for_debug(f"-- DuckDB Storage View Resolution [{mode}] --\n{stats['sql']}"),
                 "time_ms": stats["time_ms"],
                 "engine": "DuckDB",
             },
@@ -1949,7 +1949,7 @@ def _existing_union_cols(con, committed_parts: list[str], buf_probe_path: str | 
             desc = con.execute(f"SELECT * FROM ({part}) LIMIT 0").description or []
             cols.update(d[0] for d in desc)
         except Exception as e:
-            logger.info("[iceberg] view column probe failed for committed part: %s", e)
+            logger.info("[storage] view column probe failed for committed part: %s", e)
     if buf_probe_path:
         try:
             desc = (
@@ -1960,7 +1960,7 @@ def _existing_union_cols(con, committed_parts: list[str], buf_probe_path: str | 
             )
             cols.update(d[0] for d in desc)
         except Exception as e:
-            logger.info("[iceberg] view column probe failed for buffer parquet %s: %s", buf_probe_path, e)
+            logger.info("[storage] view column probe failed for buffer parquet %s: %s", buf_probe_path, e)
     return cols
 
 
@@ -2078,8 +2078,8 @@ def _try_fast_path_view(con, source: dict, target_table: str = "logs") -> bool:
             buf_files = _core_mod.buffer_files(source)
     buf_set = frozenset(buf_files)
 
-    # DuckLake-aware staleness token (was: the pyiceberg metadata_location
-    # from iceberg_catalog.db, which never matched the slow path's cached
+    # DuckLake-aware staleness token (the old metadata_location
+    # pointer never matched the slow path's cached
     # literal post-DuckLake — every read paid the RLock + full rebuild,
     # the 12s+ page-load class regression this fast path exists to avoid).
     metadata_loc = _ducklake_view_token(con)
@@ -2177,7 +2177,7 @@ def _try_fast_path_view(con, source: dict, target_table: str = "logs") -> bool:
             )
             cached = _view_cache[cache_key]
         except Exception as e:
-            logger.warning("[iceberg] Incremental fast-path reconstruction failed: %s", e)
+            logger.warning("[storage] Incremental fast-path reconstruction failed: %s", e)
             return False
 
     if cached is None:
@@ -2202,7 +2202,7 @@ def _try_fast_path_view(con, source: dict, target_table: str = "logs") -> bool:
             try:
                 con.execute(exec_sql)
             except Exception as e:
-                logger.warning("[iceberg] fast-path view re-bind failed for %s: %s", source_key, e)
+                logger.warning("[storage] fast-path view re-bind failed for %s: %s", source_key, e)
                 return False
             _set_conn_state(con, **{fp_key: target_fp})
 
@@ -2230,9 +2230,9 @@ def _rebuild_locked(con, source: dict, source_key: str, target_table: str = "log
         _rebuild_signals[cache_key] = ev
     try:
         try:
-            _core_mod._update_iceberg_view_locked(con, source, target_table=target_table, force=force)
+            _core_mod._update_storage_view_locked(con, source, target_table=target_table, force=force)
         except TypeError:
-            _core_mod._update_iceberg_view_locked(con, source)
+            _core_mod._update_storage_view_locked(con, source)
     finally:
         ev.set()
         with _rebuild_signals_lock:
@@ -2240,10 +2240,10 @@ def _rebuild_locked(con, source: dict, source_key: str, target_table: str = "log
                 del _rebuild_signals[cache_key]
 
 
-def update_iceberg_view(
+def update_storage_view(
     con, source: dict, lock_timeout: float = 5.0, force: bool = False, target_table: str = "logs"
 ) -> None:
-    """Refresh the per-service DuckDB view over the Iceberg table + buffer.
+    """Refresh the per-service DuckDB view over the DuckLake table + buffer.
 
     ``lock_timeout`` (default 5s) caps how long we wait on the per-service
     RLock that ingest also acquires for buffer commits. Prior default was
@@ -2267,8 +2267,8 @@ def update_iceberg_view(
     """
     source_key = source.get("name", "default")
     if source_key.endswith("::rum") and target_table == "logs":
-        update_iceberg_view(con, source, lock_timeout=lock_timeout, force=force, target_table="client_vitals")
-        update_iceberg_view(con, source, lock_timeout=lock_timeout, force=force, target_table="client_errors")
+        update_storage_view(con, source, lock_timeout=lock_timeout, force=force, target_table="client_vitals")
+        update_storage_view(con, source, lock_timeout=lock_timeout, force=force, target_table="client_errors")
         return
 
     cache_key = f"{source_key}::{target_table}" if target_table != "logs" else source_key
@@ -2306,19 +2306,19 @@ def update_iceberg_view(
                 try:
                     con.execute(cached[3])
                 except Exception:
-                    logger.debug("update_iceberg_view: con.execute failed (ignored)", exc_info=True)
+                    logger.debug("update_storage_view: con.execute failed (ignored)", exc_info=True)
                 return
             if not force and _persistent_view_exists(con, source, target_table=target_table):
                 return
             logger.info(
-                "[iceberg] %s: cache empty and no persistent view for %s; extending lock "
+                "[storage] %s: cache empty and no persistent view for %s; extending lock "
                 "wait to avoid 'table not found' on caller",
                 source_key,
                 target_table,
             )
             if not lock.acquire(timeout=60.0):
                 logger.warning(
-                    "[iceberg] %s: extended 60s lock wait timed out; view %s rebuild deferred",
+                    "[storage] %s: extended 60s lock wait timed out; view %s rebuild deferred",
                     source_key,
                     target_table,
                 )
@@ -2335,8 +2335,8 @@ def update_iceberg_view(
 
 
 def _persistent_view_exists(con, source: dict, target_table: str = "logs") -> bool:
-    """Return True if the per-service Iceberg view already exists on this
-    connection's database. Used by ``update_iceberg_view`` to skip the
+    """Return True if the per-service storage view already exists on this
+    connection's database. Used by ``update_storage_view`` to skip the
     extended lock wait when the caller can already query the view (even
     if it's slightly stale)."""
     try:
@@ -2356,7 +2356,7 @@ def _persistent_view_exists(con, source: dict, target_table: str = "logs") -> bo
         return False
 
 
-def _update_iceberg_view_locked(con, source: dict, target_table: str = "logs", force: bool = False) -> None:
+def _update_storage_view_locked(con, source: dict, target_table: str = "logs", force: bool = False) -> None:
 
     t_start = time.time()
     view_name = _view_target_name(source, target_table)
@@ -2372,7 +2372,7 @@ def _update_iceberg_view_locked(con, source: dict, target_table: str = "logs", f
         ).fetchone()
         is_read_only = bool(res and res[0])
     except Exception as e:
-        logger.error("[iceberg] duckdb_databases probe failed: %s", e)
+        logger.error("[storage] duckdb_databases probe failed: %s", e)
 
     # Only attach "lake" if it isn't already attached on this connection,
     # and match the connection's real read-only mode when we do. Blindly
@@ -2442,7 +2442,7 @@ def _update_iceberg_view_locked(con, source: dict, target_table: str = "logs", f
         try:
             con.execute(f"DROP VIEW IF EXISTS temp.main.{view_name}")
         except Exception:
-            logger.debug("_update_iceberg_view_locked: drop temp view %s failed (ignored)", view_name, exc_info=True)
+            logger.debug("_update_storage_view_locked: drop temp view %s failed (ignored)", view_name, exc_info=True)
         create_stmt = f"CREATE OR REPLACE VIEW {view_name} AS {final_sql}"
 
     try:
@@ -2452,18 +2452,18 @@ def _update_iceberg_view_locked(con, source: dict, target_table: str = "logs", f
             try:
                 con.rollback()
             except Exception:
-                logger.debug("_update_iceberg_view_locked: rollback failed (ignored)", exc_info=True)
+                logger.debug("_update_storage_view_locked: rollback failed (ignored)", exc_info=True)
             try:
                 con.execute(create_stmt)
             except Exception:
                 try:
                     con.execute(f"CREATE OR REPLACE TEMP VIEW {view_name} AS {final_sql}")
                 except Exception as fallback_err:
-                    logger.error("[iceberg] Failed to create view %s: %s", view_name, fallback_err)
+                    logger.error("[storage] Failed to create view %s: %s", view_name, fallback_err)
                     if durable_serving:
                         raise
         else:
-            logger.error("[iceberg] Failed to create view %s: %s", view_name, e)
+            logger.error("[storage] Failed to create view %s: %s", view_name, e)
             if durable_serving:
                 raise
 
@@ -2488,20 +2488,20 @@ def _update_iceberg_view_locked(con, source: dict, target_table: str = "logs", f
         fp_key = f"fast_path_view_fp_{target_table}"
         _set_conn_state(con, **{fp_key: (token, frozenset(buf_files), schema_fp, variant_fp, target_table)})
     except Exception:
-        logger.debug("_update_iceberg_view_locked: _set_conn_state failed (ignored)", exc_info=True)
+        logger.debug("_update_storage_view_locked: _set_conn_state failed (ignored)", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
 # Admin / UI metadata
 
-# A-3 (CacheRegistry): register every iceberg cache so the test
+# A-3 (CacheRegistry): register every storage cache so the test
 # harness can drain them centrally via CacheRegistry.clear_all().
-_CacheRegistry.register("iceberg._view_cache", _view_cache)
+_CacheRegistry.register("storage._view_cache", _view_cache)
 
 manifest = sys.modules[__name__]
 view = sys.modules[__name__]
-sys.modules["backend.core.iceberg.manifest"] = sys.modules[__name__]
-sys.modules["backend.core.iceberg.view"] = sys.modules[__name__]
+sys.modules["backend.core.storage.manifest"] = sys.modules[__name__]
+sys.modules["backend.core.storage.view"] = sys.modules[__name__]
 
 # ── Local tiered Parquet compaction (folded from local_compaction.py) ──
 
@@ -2701,7 +2701,7 @@ def compact_local_partitions(
     # phase so concurrent dashboard queries via the view-build path
     # don't race with our delete-then-rename and hit FileNotFoundError /
     # IO Error mid-glob. Architecture-review Finding #3.
-    from backend.core.iceberg._core import _get_service_lock
+    from backend.core.storage._core import _get_service_lock
 
     service_key = source.get("name", "default")
     publish_lock = _get_service_lock(service_key)
@@ -3284,7 +3284,7 @@ def _compact_single_partition(
     try:
         paths_sql = ", ".join(f"'{escape_sql_literal(p)}'" for p in paths)
         # Strip the computed `timestamp_hour` / `dt` columns from output
-        # if they exist in input files. Iceberg's view-build re-adds them
+        # if they exist in input files. The storage view-build re-adds them
         # via `SELECT *, strftime(...) AS timestamp_hour` and would error
         # with a duplicate-column UNION ALL BY NAME on a merged file
         # that already contained them.
@@ -3424,25 +3424,25 @@ _CacheRegistry.register("core.local_compaction._COMPACTION_STATS_CACHE", _COMPAC
 buffer = sys.modules[__name__]
 local_compaction = sys.modules[__name__]
 for _mod_name in (
-    "backend.core.iceberg.manifest",
-    "backend.core.iceberg.view",
-    "backend.core.iceberg.buffer",
-    "backend.core.iceberg._ducklake",
+    "backend.core.storage.manifest",
+    "backend.core.storage.view",
+    "backend.core.storage.buffer",
+    "backend.core.storage._ducklake",
     "backend.core.local_compaction",
 ):
     sys.modules[_mod_name] = sys.modules[__name__]
-if "backend.core.iceberg" in sys.modules:
-    _ice_pkg = sys.modules["backend.core.iceberg"]
+if "backend.core.storage" in sys.modules:
+    _ice_pkg = sys.modules["backend.core.storage"]
     for _attr in ("manifest", "view", "buffer", "_ducklake"):
         setattr(_ice_pkg, _attr, sys.modules[__name__])
 if "backend.core" in sys.modules:
     setattr(sys.modules["backend.core"], "local_compaction", sys.modules[__name__])
 if "backend" in sys.modules and hasattr(sys.modules["backend"], "_MODULE_ALIASES"):
     for _mod_name in (
-        "backend.core.iceberg.manifest",
-        "backend.core.iceberg.view",
-        "backend.core.iceberg.buffer",
-        "backend.core.iceberg._ducklake",
+        "backend.core.storage.manifest",
+        "backend.core.storage.view",
+        "backend.core.storage.buffer",
+        "backend.core.storage._ducklake",
         "backend.core.local_compaction",
     ):
         sys.modules["backend"]._MODULE_ALIASES[_mod_name] = __name__

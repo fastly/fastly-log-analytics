@@ -167,7 +167,7 @@ def _build_direct_active_hour_session_sql(
     cutoff_epoch = live_start.timestamp() - 300.0
 
     try:
-        from backend.core.iceberg.buffer import _tombstoned_parquet_paths
+        from backend.core.storage.buffer import _tombstoned_parquet_paths
 
         tombstoned = _tombstoned_parquet_paths(buf_dir)
     except Exception:
@@ -198,7 +198,7 @@ def _build_direct_active_hour_session_sql(
 
     lake_table: str | None = None
     try:
-        from backend.core.iceberg._ducklake import ducklake_table_name
+        from backend.core.storage._ducklake import ducklake_table_name
 
         lake_tname = ducklake_table_name(src)
         row = con.execute(
@@ -1237,7 +1237,7 @@ def query_logs(service_id: str, sql: str, params: tuple = ()) -> list[dict]:
     """Execute ``sql`` against the per-service logs view and return ``list[dict]``."""
     from backend import config as svcconfig
     from backend.core.duckdb import get_connection, get_source_for_service
-    from backend.core.iceberg import execute_with_stale_view_retry
+    from backend.core.storage import execute_with_stale_view_retry
     from backend.repositories._base import _compact_sql_for_debug
     from backend.utils.telemetry import get_queries
 

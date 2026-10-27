@@ -38,8 +38,8 @@ from starlette.responses import JSONResponse, StreamingResponse
 
 from backend import config as svcconfig
 from backend.core import duckdb as _ddb
-from backend.core import iceberg as _ic
 from backend.core import metadata as metadata_db
+from backend.core import storage as _ic
 from backend.core.duckdb import log_usage_calls, purge_usage_log
 from backend.core.metadata import usage_log_db
 from backend.models import common as common_models

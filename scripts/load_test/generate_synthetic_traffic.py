@@ -34,7 +34,7 @@ for p in [Path.cwd(), Path("/app"), Path(__file__).resolve().parent.parent.paren
         sys.path.insert(0, str(p))
 
 from backend.config import list_configs, load_config  # noqa: E402
-from backend.core.iceberg import (  # noqa: E402
+from backend.core.storage import (  # noqa: E402
     _buffer_dir,
     commit_buffer,
     get_arrow_schema,

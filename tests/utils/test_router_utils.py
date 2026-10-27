@@ -16,8 +16,8 @@ from unittest.mock import MagicMock, patch
 import duckdb
 import httpx
 import pytest
-from backend.core.iceberg.view import configure_duckdb_s3
 from backend.core.retry import retry_call
+from backend.core.storage.view import configure_duckdb_s3
 from backend.utils.auth import analyst_allowed_services, mask_ips_for, require_owned_row
 from backend.utils.http import make_client
 from backend.utils.sql_validator import (
@@ -36,8 +36,8 @@ from sse_starlette.sse import EventSourceResponse
 from backend import config as config_mod
 from backend.config import service_id_from_source
 from backend.core import duckdb as core_duckdb
-from backend.core.iceberg import execute_with_stale_view_retry, is_stale_view_error
 from backend.core.realtime import poller as poller_mod
+from backend.core.storage import execute_with_stale_view_retry, is_stale_view_error
 from backend.repositories._base import QueryRunner
 from backend.utils import router_utils
 from backend.utils import valkey_publisher as vp
@@ -1324,8 +1324,8 @@ def test_service_id_from_source(src, override, prefer_name, expected):
 
 # ── Merged from tests/utils/test_query_retries.py ───────────────────────────
 #
-# From test_iceberg_self_heal.py:
-# Tests for the iceberg.execute_with_stale_view_retry helper.
+# From the former self-heal test module:
+# Tests for the storage.execute_with_stale_view_retry helper.
 # The helper exists so background-job code paths (rdns_cache discovery,
 # rollups DESCRIBE) — which open raw DuckDB connections instead of going
 # through QueryRunner — can recover from the same buffer-deletion race
@@ -1372,10 +1372,10 @@ class TestIsStaleViewError:
 
 
 @contextmanager
-def _patch_iceberg_caches():
+def _patch_storage_caches():
     with (
-        patch("backend.core.iceberg._core.clear_source_caches") as mock_clear,
-        patch("backend.core.iceberg._core.update_iceberg_view") as mock_update,
+        patch("backend.core.storage._core.clear_source_caches") as mock_clear,
+        patch("backend.core.storage._core.update_storage_view") as mock_update,
     ):
         yield mock_clear, mock_update
 
@@ -1384,7 +1384,7 @@ class TestExecuteWithStaleViewRetry:
     def test_passthrough_when_fn_succeeds(self) -> None:
         """No retry / no cache bust when the first call succeeds."""
         con, fn = MagicMock(), MagicMock(return_value="ok")
-        with _patch_iceberg_caches() as (mock_clear, mock_update):
+        with _patch_storage_caches() as (mock_clear, mock_update):
             assert execute_with_stale_view_retry(con, {"name": "svc-a"}, fn) == "ok"
         fn.assert_called_once_with(con)
         mock_clear.assert_not_called()
@@ -1399,7 +1399,7 @@ class TestExecuteWithStaleViewRetry:
                 ["row1", "row2"],
             ]
         )
-        with _patch_iceberg_caches() as (mock_clear, mock_update):
+        with _patch_storage_caches() as (mock_clear, mock_update):
             assert execute_with_stale_view_retry(con, src, fn) == ["row1", "row2"]
         assert fn.call_count == 2 and all(call.args[0] is con for call in fn.call_args_list)
         mock_clear.assert_called_once_with("svc-b", keep_snapshot_cache=True)
@@ -1408,7 +1408,7 @@ class TestExecuteWithStaleViewRetry:
     def test_non_stale_error_propagates_without_retry(self) -> None:
         """A non-stale error must surface immediately — don't waste a rebind on a real failure."""
         con, fn = MagicMock(), MagicMock(side_effect=ValueError("bad SQL"))
-        with _patch_iceberg_caches() as (mock_clear, mock_update), pytest.raises(ValueError, match="bad SQL"):
+        with _patch_storage_caches() as (mock_clear, mock_update), pytest.raises(ValueError, match="bad SQL"):
             execute_with_stale_view_retry(con, {"name": "svc-c"}, fn)
         assert fn.call_count == 1
         mock_clear.assert_not_called()
@@ -1417,21 +1417,21 @@ class TestExecuteWithStaleViewRetry:
     def test_second_attempt_failure_propagates(self) -> None:
         """If the retry itself fails, propagate — caller chooses fallback (log + skip vs raise)."""
         con, fn = MagicMock(), MagicMock(side_effect=[Exception("No files found"), RuntimeError("still broken")])
-        with _patch_iceberg_caches(), pytest.raises(RuntimeError, match="still broken"):
+        with _patch_storage_caches(), pytest.raises(RuntimeError, match="still broken"):
             execute_with_stale_view_retry(con, {"name": "svc-d"}, fn)
         assert fn.call_count == 2
 
     def test_passes_through_extra_args_and_kwargs(self) -> None:
         """The helper must forward *args and **kwargs to ``fn``."""
         con, fn = MagicMock(), MagicMock(return_value=42)
-        with _patch_iceberg_caches():
+        with _patch_storage_caches():
             assert execute_with_stale_view_retry(con, {"name": "svc-e"}, fn, "a", 1, key="value") == 42
         fn.assert_called_once_with(con, "a", 1, key="value")
 
     def test_default_source_key_when_name_missing(self) -> None:
         """``src`` without a ``name`` key falls back to ``"default"`` for the cache-bust call."""
         con, fn = MagicMock(), MagicMock(side_effect=[Exception("No files found"), "ok"])
-        with _patch_iceberg_caches() as (mock_clear, _):
+        with _patch_storage_caches() as (mock_clear, _):
             assert execute_with_stale_view_retry(con, {}, fn) == "ok"
         mock_clear.assert_called_once_with("default", keep_snapshot_cache=True)
 
@@ -1777,7 +1777,7 @@ def _runner(side_effects: list) -> QueryRunner:
 )
 def test_execute_with_retry_cases(effects, refresh_err, expected_out, expected_refreshes, expected_calls):
     runner = _runner(effects)
-    with patch("backend.core.iceberg.update_iceberg_view", side_effect=refresh_err) as refresh:
+    with patch("backend.core.storage.update_storage_view", side_effect=refresh_err) as refresh:
         assert runner.execute_with_retry("SELECT 1") == expected_out
     assert refresh.call_count == expected_refreshes
     assert runner.con.execute.call_count == expected_calls
@@ -1785,7 +1785,7 @@ def test_execute_with_retry_cases(effects, refresh_err, expected_out, expected_r
 
 def test_execute_with_retry_non_stale_raises_without_refresh():
     runner = _runner([RuntimeError("syntax")])
-    with patch("backend.core.iceberg.update_iceberg_view") as refresh, pytest.raises(RuntimeError, match="syntax"):
+    with patch("backend.core.storage.update_storage_view") as refresh, pytest.raises(RuntimeError, match="syntax"):
         runner.execute_with_retry("SELECT 1")
     refresh.assert_not_called()
 
@@ -1801,7 +1801,7 @@ def test_execute_with_retry_non_stale_raises_without_refresh():
 )
 def test_create_temp_table_cases(effects, refresh_err, expected_out, expected_refreshes):
     runner = _runner(effects)
-    with patch("backend.core.iceberg.update_iceberg_view", side_effect=refresh_err) as refresh:
+    with patch("backend.core.storage.update_storage_view", side_effect=refresh_err) as refresh:
         assert runner.create_temp_table("CREATE TEMP TABLE t AS SELECT 1") is expected_out
     assert refresh.call_count == expected_refreshes
 

@@ -216,7 +216,7 @@ def test_ensure_persistent_view_always_rebuilds_at_startup():
     writer_con = MagicMock()
     with (
         patch("backend.core.duckdb.get_connection", return_value=writer_con) as mock_get_conn,
-        patch("backend.core.iceberg.update_iceberg_view") as mock_update,
+        patch("backend.core.storage.update_storage_view") as mock_update,
     ):
         _ensure_persistent_view("svc-1", fake_src)
 
@@ -231,7 +231,7 @@ def test_ensure_persistent_view_closes_writer_on_update_failure():
     writer_con = MagicMock()
     with (
         patch("backend.core.duckdb.get_connection", return_value=writer_con),
-        patch("backend.core.iceberg.update_iceberg_view", side_effect=RuntimeError("catalog corrupt")),
+        patch("backend.core.storage.update_storage_view", side_effect=RuntimeError("catalog corrupt")),
     ):
         _ensure_persistent_view("svc-1", {"name": "svc-1"})
     writer_con.close.assert_called_once()
@@ -1989,12 +1989,12 @@ from scripts.check_environment_health import (
 
 from backend import cron_progress
 from backend import request_metrics_observer as module
-from backend.core import iceberg as ice
 from backend.core import ingest as ing
 from backend.core import metadata as metadata_db
+from backend.core import storage as ice
 from backend.core.duckdb import _cache_dir
-from backend.core.iceberg import _ducklake as _dl
-from backend.core.iceberg import buffer as buffer_mod
+from backend.core.storage import _ducklake as _dl
+from backend.core.storage import buffer as buffer_mod
 from backend.main import app
 from backend.repositories._base import _safe_table
 from backend.repositories.dashboard import _dashboard_cache, get_aggregates
@@ -2077,7 +2077,7 @@ def _make_log_batch(n: int = 20, *, ip_octet: int = 0, path_prefix: str | None =
 
 
 def _seed_and_commit(src: dict, n: int, fname: str) -> dict:
-    ice.init_iceberg_table(src)
+    ice.init_storage_table(src)
     ice.write_to_buffer(src, _make_log_batch(n=n), fname)
     return ice.commit_buffer(src)
 
@@ -2085,7 +2085,7 @@ def _seed_and_commit(src: dict, n: int, fname: str) -> dict:
 def test_e2e_buffer_to_commit_produces_queryable_snapshot(pipeline_env):
     """Full lifecycle: write buffer parquet -> commit -> update DuckDB view -> query."""
     src = pipeline_env["src"]
-    assert ice.init_iceberg_table(src) is not None
+    assert ice.init_storage_table(src) is not None
     ice.write_to_buffer(src, _make_log_batch(n=20), "batch_test_0.parquet")
     assert len(ice.buffer_files(src)) == 1
 
@@ -2097,7 +2097,7 @@ def test_e2e_buffer_to_commit_produces_queryable_snapshot(pipeline_env):
 
     _simulate_sync(src, pipeline_env["warehouse"], pipeline_env["cache"])
     con = duckdb.connect(":memory:")
-    ice.update_iceberg_view(con, src)
+    ice.update_storage_view(con, src)
     row = con.execute(f"SELECT COUNT(*) FROM {_safe_table(src['name'])}").fetchone()
     assert row[0] == 20
 
@@ -2108,7 +2108,7 @@ def test_e2e_aggregates_via_full_pipeline(pipeline_env):
     _seed_and_commit(src, 15, "batch_agg_0.parquet")
     _simulate_sync(src, pipeline_env["warehouse"], pipeline_env["cache"])
     con = duckdb.connect(":memory:")
-    ice.update_iceberg_view(con, src)
+    ice.update_storage_view(con, src)
 
     _dashboard_cache.clear()
     out = get_aggregates(
@@ -2124,7 +2124,7 @@ def test_e2e_insights_via_full_pipeline(pipeline_env):
     _seed_and_commit(src, 30, "batch_insights_0.parquet")
     _simulate_sync(src, pipeline_env["warehouse"], pipeline_env["cache"])
     con = duckdb.connect(":memory:")
-    ice.update_iceberg_view(con, src)
+    ice.update_storage_view(con, src)
 
     _insights_cache.clear()
     with patch("backend.utils.pop_utils.get_pop_lat_lon_map", return_value={"LAX": (33.94, -118.4)}):
@@ -2137,13 +2137,13 @@ def test_e2e_insights_via_full_pipeline(pipeline_env):
 def test_commit_buffer_does_no_redundant_catalog_work_per_call(pipeline_env, monkeypatch):
     """Single-chunk commit attaches DuckLake RW once and does not re-enter catalog init."""
     src = pipeline_env["src"]
-    ice.init_iceberg_table(src)
+    ice.init_storage_table(src)
     ice.write_to_buffer(src, _make_log_batch(n=5), "batch_load_pin_0.parquet")
 
     counts = {"public": 0, "locked": 0, "write_attach": 0}
     real_public, real_locked, real_write_conn = (
-        ice.init_iceberg_table,
-        ice._init_iceberg_table_locked,
+        ice.init_storage_table,
+        ice._init_storage_table_locked,
         buffer_mod._ducklake_write_connection,
     )
 
@@ -2159,8 +2159,8 @@ def test_commit_buffer_does_no_redundant_catalog_work_per_call(pipeline_env, mon
         counts["write_attach"] += 1
         return real_write_conn(source)
 
-    monkeypatch.setattr(ice, "init_iceberg_table", counting_public)
-    monkeypatch.setattr(ice, "_init_iceberg_table_locked", counting_locked)
+    monkeypatch.setattr(ice, "init_storage_table", counting_public)
+    monkeypatch.setattr(ice, "_init_storage_table_locked", counting_locked)
     monkeypatch.setattr(buffer_mod, "_ducklake_write_connection", counting_write_conn)
 
     result = ice.commit_buffer(src)
@@ -2171,7 +2171,7 @@ def test_commit_buffer_does_no_redundant_catalog_work_per_call(pipeline_env, mon
 def test_e2e_empty_buffer_commit_is_noop(pipeline_env):
     """commit_buffer with no buffer files is a clean no-op."""
     src = pipeline_env["src"]
-    ice.init_iceberg_table(src)
+    ice.init_storage_table(src)
     result = ice.commit_buffer(src)
     assert (result["files_committed"], result["rows_committed"], result["snapshot_id"]) == (0, 0, None)
 
@@ -2185,7 +2185,7 @@ def test_e2e_two_commits_append_rather_than_overwrite(pipeline_env):
 
     _simulate_sync(src, pipeline_env["warehouse"], pipeline_env["cache"])
     con = duckdb.connect(":memory:")
-    ice.update_iceberg_view(con, src)
+    ice.update_storage_view(con, src)
     row = con.execute(f"SELECT COUNT(*) FROM {_safe_table(src['name'])}").fetchone()
     assert row[0] == 22
 
@@ -2251,7 +2251,7 @@ def test_full_pipeline_including_raw_gzip_ingest(s3_mock, fos_source, monkeypatc
             gz.write(("\n".join(json.dumps(r) for r in rows) + "\n").encode())
         s3_mock.put_object(Bucket=fos_source["bucket"], Key=key, Body=body.getvalue())
 
-    ice.init_iceberg_table(fos_source)
+    ice.init_storage_table(fos_source)
     events = list(ing.ingest(source=fos_source))
     done = next((e for e in events if e["type"] == "done"), None)
     assert done is not None
@@ -2266,7 +2266,7 @@ def test_full_pipeline_including_raw_gzip_ingest(s3_mock, fos_source, monkeypatc
 
     _simulate_sync(fos_source, warehouse_path, cache_path)
     con = duckdb.connect(":memory:")
-    ice.update_iceberg_view(con, fos_source)
+    ice.update_storage_view(con, fos_source)
 
     view_name = _safe_table(fos_source["name"])
     (count,) = con.execute(f"SELECT COUNT(*) FROM {view_name}").fetchone()
@@ -2297,7 +2297,7 @@ def test_e2e_readonly_dashboard_query_path(pipeline_env):
     _simulate_sync(src, pipeline_env["warehouse"], pipeline_env["cache"])
 
     rw = duckdb.connect(db_path)
-    ice.update_iceberg_view(rw, src)
+    ice.update_storage_view(rw, src)
     view_name = _safe_table(src["name"])
     assert rw.execute(f"SELECT COUNT(*) FROM {view_name}").fetchone()[0] == 8
     rw.execute(f"CREATE OR REPLACE VIEW {view_name} AS SELECT NULL::INTEGER AS x WHERE false")
@@ -2305,7 +2305,7 @@ def test_e2e_readonly_dashboard_query_path(pipeline_env):
 
     ro = duckdb.connect(db_path, read_only=True)
     try:
-        ice.update_iceberg_view(ro, src)
+        ice.update_storage_view(ro, src)
         assert ro.execute(f"SELECT COUNT(*) FROM {view_name}").fetchone()[0] == 8
         _dashboard_cache.clear()
         out = get_aggregates(
@@ -2331,7 +2331,7 @@ def test_e2e_readonly_dashboard_cold_cache_path(pipeline_env):
     _simulate_sync(src, pipeline_env["warehouse"], pipeline_env["cache"])
 
     rw = duckdb.connect(db_path)
-    ice.update_iceberg_view(rw, src)
+    ice.update_storage_view(rw, src)
     view_name = _safe_table(src["name"])
     assert rw.execute(f"SELECT COUNT(*) FROM {view_name}").fetchone()[0] == 8
     rw.close()
@@ -2340,7 +2340,7 @@ def test_e2e_readonly_dashboard_cold_cache_path(pipeline_env):
 
     ro = duckdb.connect(db_path, read_only=True)
     try:
-        ice.update_iceberg_view(ro, src)
+        ice.update_storage_view(ro, src)
         assert ro.execute(f"SELECT COUNT(*) FROM {view_name}").fetchone()[0] == 8
         _dashboard_cache.clear()
         out = get_aggregates(
@@ -2412,11 +2412,11 @@ def _simulate_sync_one(source: dict, warehouse_path: str) -> None:
             shutil.copy2(sp, dst)
 
 
-def test_concurrent_iceberg_commits_two_services_no_cross_contamination(two_service_env):
+def test_concurrent_storage_commits_two_services_no_cross_contamination(two_service_env):
     """Two services run buffer-write + commit concurrently without cross-tenant contamination."""
     src_a, src_b = two_service_env["src_a"], two_service_env["src_b"]
-    ice.init_iceberg_table(src_a)
-    ice.init_iceberg_table(src_b)
+    ice.init_storage_table(src_a)
+    ice.init_storage_table(src_b)
     ice.write_to_buffer(src_a, _make_log_batch(n=12, ip_octet=1, path_prefix="alpha"), "svc_a.parquet")
     ice.write_to_buffer(src_b, _make_log_batch(n=18, ip_octet=2, path_prefix="bravo"), "svc_b.parquet")
 
@@ -2456,8 +2456,8 @@ def test_concurrent_iceberg_commits_two_services_no_cross_contamination(two_serv
     _simulate_sync_one(src_a, two_service_env["warehouses"]["svc_a"])
     _simulate_sync_one(src_b, two_service_env["warehouses"]["svc_b"])
     con_a, con_b = duckdb.connect(":memory:"), duckdb.connect(":memory:")
-    ice.update_iceberg_view(con_a, src_a)
-    ice.update_iceberg_view(con_b, src_b)
+    ice.update_storage_view(con_a, src_a)
+    ice.update_storage_view(con_b, src_b)
 
     view_a, view_b = _safe_table(src_a["name"]), _safe_table(src_b["name"])
     assert con_a.execute(f"SELECT COUNT(*) FROM {view_a}").fetchone()[0] == 12

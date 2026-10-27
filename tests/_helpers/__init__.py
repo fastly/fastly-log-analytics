@@ -370,18 +370,18 @@ class DuckLakeLedgerEnv:
             patch("backend.core.duckdb.get_source_for_service", return_value=self.src),
             patch("backend.core.ingest._get_fos_client", return_value=self.fos),
             patch("backend.core.ingest._download_chunk_to_local", side_effect=self.download),
-            patch("backend.core.iceberg._ducklake._ducklake_attach", side_effect=self.attach),
+            patch("backend.core.storage._ducklake._ducklake_attach", side_effect=self.attach),
             patch("backend.core.ingest._configure_fos"),
             patch("backend.core.duckdb._configure_fos"),
             patch("backend.core.duckdb.get_memory_connection", side_effect=lambda _src: duckdb.connect()),
             patch("backend.config.HOT_S3_ENDPOINT", False),
         ]
         if self.table_name is not None:
-            patches.append(patch("backend.core.iceberg._ducklake.ducklake_table_name", return_value=self.table_name))
+            patches.append(patch("backend.core.storage._ducklake.ducklake_table_name", return_value=self.table_name))
         else:
             patches.append(
                 patch(
-                    "backend.core.iceberg._ducklake.ducklake_table_name",
+                    "backend.core.storage._ducklake.ducklake_table_name",
                     side_effect=lambda src, table_name="logs": table_name,
                 )
             )
@@ -841,9 +841,9 @@ def build_writer_patches(
         patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
         patch(safe_table_target, return_value=table),
         patch("backend.core.duckdb.get_connection", side_effect=lambda *a, **k: con_factory()),
-        patch("backend.core.iceberg.view._get_service_lock", noop_lock),
+        patch("backend.core.storage.view._get_service_lock", noop_lock),
         patch(
-            "backend.core.iceberg.execute_with_stale_view_retry",
+            "backend.core.storage.execute_with_stale_view_retry",
             side_effect=lambda c, _src, fn: fn(c),
         ),
     )

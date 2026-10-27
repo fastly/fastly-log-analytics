@@ -10,7 +10,7 @@ PATTERN='strptime\(|fromisoformat\(|replace\(tzinfo=(UTC|timezone\.utc)'
 BASELINE='
 backend/core/clickhouse.py 2
 backend/core/duckdb.py 1
-backend/core/iceberg/_core.py 2
+backend/core/storage/_core.py 2
 backend/core/ingest.py 3
 backend/core/metadata/usage_log.py 2
 backend/core/rollups/recompute.py 1

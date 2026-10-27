@@ -329,7 +329,7 @@ def test_custom_field_patch_missing_field_returns_404():
     assert response.status_code == 404
 
 
-def test_custom_field_patch_rejects_type_change_when_field_in_iceberg():
+def test_custom_field_patch_rejects_type_change_when_field_in_storage():
     with _mutate_cfg_ctx(
         _cfg_with_field(),
         patch("backend.provision.validate_log_format", return_value=[]),
@@ -347,7 +347,7 @@ def test_custom_field_patch_rejects_type_change_when_field_in_iceberg():
     assert saved == {}
 
 
-def test_custom_field_patch_allows_type_change_before_iceberg_write():
+def test_custom_field_patch_allows_type_change_before_storage_write():
     with _mutate_cfg_ctx(
         _cfg_with_field(),
         patch("backend.provision.validate_log_format", return_value=[]),

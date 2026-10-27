@@ -26,13 +26,13 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 from backend.core.faro_versions import DEFAULT_FARO_VERSION
-from backend.core.iceberg._ducklake import _ducklake_attach, ducklake_table_name
-from backend.core.iceberg.buffer import _commit_buffer_impl
-from backend.core.iceberg.rum_schema import CLIENT_VITALS_ARROW_SCHEMA
 from backend.core.local_compaction import compact_local_partitions
 from backend.core.metadata.cron_log import CronLeaseHeldError
 from backend.core.query_attribution import current_attribution, derive_from_process_context
 from backend.core.query_registry import query_registry
+from backend.core.storage._ducklake import _ducklake_attach, ducklake_table_name
+from backend.core.storage.buffer import _commit_buffer_impl
+from backend.core.storage.rum_schema import CLIENT_VITALS_ARROW_SCHEMA
 from backend.cron.decorators import CronHeartbeat
 from backend.cron.jobs.metric_snapshot import (
     _run_metric_snapshot,
@@ -55,15 +55,15 @@ from backend.core import duckdb as _db
 from backend.core import duckdb as duckdb_mod
 from backend.core import duckdb_pool as _pool
 from backend.core import duckdb_recycle as _recycle
-from backend.core import iceberg as iceberg_mod
 from backend.core import metadata as metadata_db
 from backend.core import metric_snapshots
 from backend.core import rum_ingest as rum_ingest_mod
-from backend.core.iceberg import buffer as buffer_mod
+from backend.core import storage as storage_mod
 from backend.core.ingest import sweep_rum_ledger_once
 from backend.core.metadata import pg_connection as pgc
 from backend.core.metadata import usage_log_db
 from backend.core.metadata.base import get_con
+from backend.core.storage import buffer as buffer_mod
 from backend.cron import decorators
 from backend.cron import scheduler as sched
 from backend.cron.jobs import compaction as expire
@@ -285,7 +285,7 @@ def mock_orchestration_env(monkeypatch):
         mock_con.execute.return_value.fetchall.return_value = []
         yield mock_con
 
-    import backend.core.iceberg._ducklake as _dl
+    import backend.core.storage._ducklake as _dl
 
     monkeypatch.setattr("backend.core.duckdb.get_connection", mock_get_connection)
     monkeypatch.setattr("backend.core.rollups.rum.recompute_rum_aggregates", MagicMock())
@@ -845,7 +845,7 @@ def _setup_rum_ingest_logs_env(monkeypatch, *, run_id: int, new_files: list[str]
         "backend.core.ingest._parse_rum_beacon_file",
         lambda p, sid: ([{"pathname": "/", "metric_name": "pageview", "metric_value": 1.0}], [], []),
     )
-    monkeypatch.setattr("backend.core.iceberg.write_to_buffer", MagicMock())
+    monkeypatch.setattr("backend.core.storage.write_to_buffer", MagicMock())
     monkeypatch.setattr("backend.core.metadata.insert_ingested_files", MagicMock())
     return log_calls, download_chunks
 
@@ -1166,7 +1166,7 @@ def test_rum_commit_lifecycle_contracts(scenario, monkeypatch, mock_orchestratio
             raise OSError("Transient FOS S3 error on errors commit")
         return {"files_committed": 2, "rows_committed": 15}
 
-    monkeypatch.setattr("backend.core.iceberg.commit_buffer", mock_commit)
+    monkeypatch.setattr("backend.core.storage.commit_buffer", mock_commit)
     monkeypatch.setattr(
         "backend.core.rollups.rum.rum_count_and_latest", lambda con: (60, datetime(2026, 10, 11, 14, 30, tzinfo=UTC))
     )
@@ -1279,12 +1279,12 @@ def test_rum_commit_aggregates_self_heal_on_stale_lake(monkeypatch):
 
     _setup_rum_commit_env(monkeypatch, run_id=1004)
     monkeypatch.setattr(
-        "backend.core.iceberg.commit_buffer",
+        "backend.core.storage.commit_buffer",
         lambda src, table_name="logs", **kw: {"files_committed": 1, "rows_committed": 5},
     )
     monkeypatch.setattr("backend.core.rollups.rum.recompute_rum_aggregates", flaky_recompute)
     monkeypatch.setattr(
-        "backend.core.iceberg.execute_with_stale_view_retry", lambda con, source, fn, *a, **kw: _retry_once(con, fn)
+        "backend.core.storage.execute_with_stale_view_retry", lambda con, source, fn, *a, **kw: _retry_once(con, fn)
     )
     rum_commit_mod._run_rum_commit.__wrapped__(_RUM_COMMIT_SERVICE_ID)
     assert recompute_calls["n"] == 2
@@ -1838,13 +1838,13 @@ def test_check_disk_space_does_not_block_on_probe_failure(tmp_path):
     ],
 )
 def test_check_buffer_backlog_returns_empty_when_healthy(stats):
-    with patch("backend.core.iceberg.buffer_backlog_stats", return_value=stats):
+    with patch("backend.core.storage.buffer_backlog_stats", return_value=stats):
         assert _check_buffer_backlog({"name": "svc"}, "svc", commit_interval_mins=5) == ""
 
 
 def test_check_buffer_backlog_warns_when_file_count_exceeds_threshold():
     with patch(
-        "backend.core.iceberg.buffer_backlog_stats",
+        "backend.core.storage.buffer_backlog_stats",
         return_value={"file_count": 250, "total_bytes": 1_000_000, "oldest_age_seconds": 30, "oldest_path": "/x"},
     ):
         suffix = _check_buffer_backlog({"name": "svc"}, "svc", commit_interval_mins=5)
@@ -1853,7 +1853,7 @@ def test_check_buffer_backlog_warns_when_file_count_exceeds_threshold():
 
 def test_check_buffer_backlog_warns_when_oldest_age_exceeds_scaled_threshold():
     with patch(
-        "backend.core.iceberg.buffer_backlog_stats",
+        "backend.core.storage.buffer_backlog_stats",
         return_value={"file_count": 10, "total_bytes": 1000, "oldest_age_seconds": 30 * 60, "oldest_path": "/x"},
     ):
         suffix = _check_buffer_backlog({"name": "svc"}, "svc", commit_interval_mins=5)
@@ -1862,7 +1862,7 @@ def test_check_buffer_backlog_warns_when_oldest_age_exceeds_scaled_threshold():
 
 def test_check_buffer_backlog_warns_on_total_bytes():
     with patch(
-        "backend.core.iceberg.buffer_backlog_stats",
+        "backend.core.storage.buffer_backlog_stats",
         return_value={"file_count": 10, "total_bytes": sched._BACKLOG_BYTES_WARN + 1, "oldest_age_seconds": 0},
     ):
         out = _check_buffer_backlog({"name": "s"}, "s", 5)
@@ -1870,7 +1870,7 @@ def test_check_buffer_backlog_warns_on_total_bytes():
 
 
 def test_check_buffer_backlog_never_raises_on_probe_failure():
-    with patch("backend.core.iceberg.buffer_backlog_stats", side_effect=OSError("disk gone")):
+    with patch("backend.core.storage.buffer_backlog_stats", side_effect=OSError("disk gone")):
         assert _check_buffer_backlog({"name": "svc"}, "svc", commit_interval_mins=5) == ""
 
 
@@ -2491,7 +2491,7 @@ def test_returns_when_source_missing(monkeypatch):
 def test_skips_when_start_cron_run_raises(monkeypatch, stub_source, stub_cron_log):
     stub_cron_log["start"].side_effect = CronLeaseHeldError("already running")
     maint = MagicMock()
-    monkeypatch.setattr("backend.core.iceberg.run_cloud_maintenance", maint)
+    monkeypatch.setattr("backend.core.storage.run_cloud_maintenance", maint)
     expire._run_expire_snapshots.__wrapped__("svc-1")
     maint.assert_not_called()
     stub_cron_log["log"].assert_not_called()
@@ -2499,7 +2499,7 @@ def test_skips_when_start_cron_run_raises(monkeypatch, stub_source, stub_cron_lo
 
 def test_success_logs_summary_with_each_metric(monkeypatch, stub_source, stub_cron_log):
     monkeypatch.setattr(
-        "backend.core.iceberg.run_cloud_maintenance",
+        "backend.core.storage.run_cloud_maintenance",
         MagicMock(return_value={"snapshots_expired": 5, "orphan_files_deleted": 12, "data_files_kept": 100}),
     )
     expire._run_expire_snapshots.__wrapped__("svc-1")
@@ -2512,7 +2512,7 @@ def test_success_logs_summary_with_each_metric(monkeypatch, stub_source, stub_cr
 
 def test_success_with_subtask_errors_logs_warning(monkeypatch, stub_source, stub_cron_log):
     monkeypatch.setattr(
-        "backend.core.iceberg.run_cloud_maintenance",
+        "backend.core.storage.run_cloud_maintenance",
         MagicMock(
             return_value={
                 "snapshots_expired": 3,
@@ -2530,7 +2530,7 @@ def test_success_with_subtask_errors_logs_warning(monkeypatch, stub_source, stub
 
 def test_catalog_load_error_logs_error(monkeypatch, stub_source, stub_cron_log):
     monkeypatch.setattr(
-        "backend.core.iceberg.run_cloud_maintenance",
+        "backend.core.storage.run_cloud_maintenance",
         MagicMock(return_value={"error": "catalog unreachable"}),
     )
     expire._run_expire_snapshots.__wrapped__("svc-1")
@@ -2541,7 +2541,7 @@ def test_catalog_load_error_logs_error(monkeypatch, stub_source, stub_cron_log):
 
 def test_unexpected_exception_logged_as_error(monkeypatch, stub_source, stub_cron_log):
     monkeypatch.setattr(
-        "backend.core.iceberg.run_cloud_maintenance",
+        "backend.core.storage.run_cloud_maintenance",
         MagicMock(side_effect=ConnectionError("S3 timeout")),
     )
     expire._run_expire_snapshots.__wrapped__("svc-1")
@@ -2596,7 +2596,7 @@ def test_old_file_cleanup_count_survives_snapshot_count_failures(caplog):
             result.fetchall.return_value = [("deleted.parquet",)]
             return result
 
-    caplog.set_level("INFO", logger="backend.core.iceberg._core")
+    caplog.set_level("INFO", logger="backend.core.storage._core")
     result = buffer_mod._ducklake_expire_snapshots(Connection(), {"name": "svc"}, 7)
     assert result["data_files_cleaned"] == 1 and "snapshot_expiry_error" in result
     assert any("unlinked 1 file(s)" in record.getMessage() for record in caplog.records)
@@ -2715,7 +2715,7 @@ def test_expire_cron_persists_unlinked_file_count_and_metric_summary(monkeypatch
         lambda *args, **kwargs: logged.append({"args": args, "kwargs": kwargs}),
     )
     monkeypatch.setattr(
-        "backend.core.iceberg.run_cloud_maintenance",
+        "backend.core.storage.run_cloud_maintenance",
         lambda _source: {
             "data_rows_deleted": 3,
             "rum_log_rows_deleted": 1,
@@ -2744,7 +2744,7 @@ def test_expire_finalizes_cron_lease_when_progress_fails(monkeypatch, failure_st
     monkeypatch.setattr("backend.core.duckdb.start_cron_run", lambda *_args: 44)
     monkeypatch.setattr("backend.core.duckdb.log_cron_run", lambda *args, **kwargs: None)
     monkeypatch.setattr("backend.core.duckdb.finalize_cron_run_if_running", lambda *args: finalized.append(args))
-    monkeypatch.setattr("backend.core.iceberg.run_cloud_maintenance", lambda _source: {"snapshots_expired_count": 0})
+    monkeypatch.setattr("backend.core.storage.run_cloud_maintenance", lambda _source: {"snapshots_expired_count": 0})
     _stub_progress_and_duration(monkeypatch)
 
     def fail_progress(*_args, **_kwargs):
@@ -2778,7 +2778,7 @@ def test_expire_cron_context_attributes_queries_and_flushes_usage(monkeypatch):
         observed["attribution"] = derive_from_process_context(context)
         return {"snapshots_expired_count": 0}
 
-    monkeypatch.setattr("backend.core.iceberg.run_cloud_maintenance", run_maintenance)
+    monkeypatch.setattr("backend.core.storage.run_cloud_maintenance", run_maintenance)
     monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda *_args: False)
     monkeypatch.setattr("backend.utils.telemetry.start_call_tracking", lambda: None)
     monkeypatch.setattr(
@@ -2838,7 +2838,7 @@ def test_expire_politeness_gate_applies_to_cron_but_manual_trigger_bypasses(monk
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda _sid: src)
     monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda *_args: True)
     maintenance = MagicMock(return_value={"snapshots_expired_count": 0})
-    monkeypatch.setattr("backend.core.iceberg.run_cloud_maintenance", maintenance)
+    monkeypatch.setattr("backend.core.storage.run_cloud_maintenance", maintenance)
 
     deferred = expire._run_expire_snapshots.__wrapped__("svc-expire-contract")
     assert deferred["status"] == "deferred"
@@ -2861,7 +2861,7 @@ def test_expire_runner_skips_when_another_service_run_holds_the_lease(monkeypatc
         "backend.core.duckdb.start_cron_run", MagicMock(side_effect=CronLeaseHeldError("already running"))
     )
     maintenance = MagicMock()
-    monkeypatch.setattr("backend.core.iceberg.run_cloud_maintenance", maintenance)
+    monkeypatch.setattr("backend.core.storage.run_cloud_maintenance", maintenance)
 
     result = expire._run_expire_snapshots.__wrapped__("svc-expire-contract", manual=True)
     assert result["status"] == "skipped" and "already running" in result["summary"]
@@ -2879,7 +2879,7 @@ def test_nonfatal_step_error_is_recorded_as_warning(monkeypatch):
         lambda *args, **kwargs: logged.append({"args": args, "kwargs": kwargs}),
     )
     monkeypatch.setattr(
-        "backend.core.iceberg.run_cloud_maintenance",
+        "backend.core.storage.run_cloud_maintenance",
         lambda _source: {
             "retention_deleted_rows": 2,
             "snapshots_expired": 0,
@@ -2914,11 +2914,11 @@ def test_dev_no_crons_blocks_expire_registration_and_execution(monkeypatch, tmp_
     assert f"expire_{service_id}" not in scheduler._job_ids
 
     monkeypatch.setattr("backend.core.duckdb.start_cron_run", MagicMock())
-    monkeypatch.setattr("backend.core.iceberg.run_cloud_maintenance", MagicMock())
+    monkeypatch.setattr("backend.core.storage.run_cloud_maintenance", MagicMock())
     skipped = expire._run_expire_snapshots.__wrapped__(service_id, manual=True)
     assert skipped["status"] == "skipped" and "FLA_DEV_NO_CRONS=1" in skipped["summary"]
     duckdb_mod.start_cron_run.assert_not_called()
-    iceberg_mod.run_cloud_maintenance.assert_not_called()
+    storage_mod.run_cloud_maintenance.assert_not_called()
 
 
 def test_registers_expire_on_the_serving_scheduler(monkeypatch, tmp_path):
@@ -3000,7 +3000,7 @@ class TestOptimizeJob:
     def test_skips_when_start_cron_run_raises(self, monkeypatch, stub_source, stub_cron_envelope):
         stub_cron_envelope["start"].side_effect = CronLeaseHeldError("already running")
         opt = MagicMock()
-        monkeypatch.setattr("backend.core.iceberg.optimize_table", opt)
+        monkeypatch.setattr("backend.core.storage.optimize_table", opt)
         optimize._run_optimize.__wrapped__("svc-1")
         opt.assert_not_called()
         stub_cron_envelope["log"].assert_not_called()
@@ -3008,7 +3008,7 @@ class TestOptimizeJob:
 
     def test_success_records_rewritten_and_added_counts(self, monkeypatch, stub_source, stub_cron_envelope):
         monkeypatch.setattr(
-            "backend.core.iceberg.optimize_table",
+            "backend.core.storage.optimize_table",
             MagicMock(return_value={"files_rewritten": 12, "files_added": 3, "eligible_partitions": 2}),
         )
         optimize._run_optimize.__wrapped__("svc-1")
@@ -3020,7 +3020,7 @@ class TestOptimizeJob:
 
     def test_partition_errors_with_files_added_logs_warning(self, monkeypatch, stub_source, stub_cron_envelope):
         monkeypatch.setattr(
-            "backend.core.iceberg.optimize_table",
+            "backend.core.storage.optimize_table",
             MagicMock(
                 return_value={
                     "files_rewritten": 8,
@@ -3037,7 +3037,7 @@ class TestOptimizeJob:
 
     def test_partition_errors_with_zero_files_added_logs_error(self, monkeypatch, stub_source, stub_cron_envelope):
         monkeypatch.setattr(
-            "backend.core.iceberg.optimize_table",
+            "backend.core.storage.optimize_table",
             MagicMock(
                 return_value={
                     "files_rewritten": 0,
@@ -3053,14 +3053,14 @@ class TestOptimizeJob:
         assert "(1 more)" in kwargs["error_message"]
 
     def test_top_level_error_key_logs_error(self, monkeypatch, stub_source, stub_cron_envelope):
-        monkeypatch.setattr("backend.core.iceberg.optimize_table", MagicMock(return_value={"error": "schema mismatch"}))
+        monkeypatch.setattr("backend.core.storage.optimize_table", MagicMock(return_value={"error": "schema mismatch"}))
         optimize._run_optimize.__wrapped__("svc-1")
         args, kwargs = stub_cron_envelope["log"].call_args
         assert args[3] == "error" and "schema mismatch" in kwargs["error_message"]
 
     def test_unexpected_exception_logged_and_end_progress_fires(self, monkeypatch, stub_source, stub_cron_envelope):
         monkeypatch.setattr(
-            "backend.core.iceberg.optimize_table",
+            "backend.core.storage.optimize_table",
             MagicMock(side_effect=RuntimeError("manifest read failed")),
         )
         optimize._run_optimize.__wrapped__("svc-1")
@@ -3091,7 +3091,7 @@ class TestOptimizeJob:
                 patch("backend.core.duckdb.start_cron_run", return_value=101),
                 patch("backend.core.duckdb.log_cron_run", side_effect=fake_log_cron_run),
                 patch(
-                    "backend.core.iceberg.optimize_table",
+                    "backend.core.storage.optimize_table",
                     return_value={
                         "files_rewritten": 42,
                         "files_added": 4,
@@ -3161,7 +3161,7 @@ class TestOptimizeJob:
 
         caplog.set_level(logging.WARNING)
         mock_opt = MagicMock()
-        monkeypatch.setattr("backend.core.iceberg.optimize_table", mock_opt)
+        monkeypatch.setattr("backend.core.storage.optimize_table", mock_opt)
         res = optimize._run_optimize.__wrapped__(service_id)
         assert res is not None and res.get("status") == "skipped"
         mock_opt.assert_not_called()
@@ -3171,7 +3171,7 @@ class TestOptimizeJob:
         service_id = optimize_test_source["service_id"]
         with (
             patch("backend.utils.active_requests.should_defer_cron", return_value=True),
-            patch("backend.core.iceberg.optimize_table") as mock_opt,
+            patch("backend.core.storage.optimize_table") as mock_opt,
         ):
             res = optimize._run_optimize.__wrapped__(service_id, manual=False)
             assert res is not None and res.get("status") == "deferred"
@@ -3191,7 +3191,7 @@ class TestOptimizeJob:
         service_id = optimize_test_source["service_id"]
         with (
             patch("backend.core.duckdb.start_cron_run", side_effect=CronLeaseHeldError("already running")),
-            patch("backend.core.iceberg.optimize_table") as mock_opt,
+            patch("backend.core.storage.optimize_table") as mock_opt,
         ):
             res = optimize._run_optimize.__wrapped__(service_id)
             assert res is not None and res.get("status") == "skipped"
@@ -3744,7 +3744,7 @@ def test_metric_snapshot_samples_vitals(monkeypatch):
     )
     monkeypatch.setattr("backend.core.query_registry.query_registry.summary", lambda: {"active_total": 3})
     monkeypatch.setattr(
-        "backend.core.iceberg._ducklake.get_admission_stats",
+        "backend.core.storage._ducklake.get_admission_stats",
         lambda: {"svc_test": {"acquisitions": 2.0, "wait_ms_total": 40.0, "hold_ms_total": 100.0, "timeouts": 0.0}},
     )
     monkeypatch.setattr("backend.celery_status.celery_queue_depths", lambda: ({"q.ingest": 5}, True))

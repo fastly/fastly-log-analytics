@@ -29281,7 +29281,7 @@
           "admin"
         ],
         "summary": "Optimize Now",
-        "description": "Trigger an immediate Iceberg table optimize (compaction) pass.\nBypasses the nightly cron schedule for ad-hoc cleanup. Returns the\noptimize_table result dict (files_rewritten / files_added / etc).\nWrites through to FOS \u2014 use ``/admin/local-compact-now`` for the\nfree local-only equivalent.",
+        "description": "Trigger an immediate DuckLake table optimize (compaction) pass.\nBypasses the nightly cron schedule for ad-hoc cleanup. Returns the\noptimize_table result dict (files_rewritten / files_added / etc).\nWrites through to FOS \u2014 use ``/admin/local-compact-now`` for the\nfree local-only equivalent.",
         "operationId": "optimize_now_api_admin_optimize_now_post",
         "parameters": [
           {
@@ -35550,7 +35550,7 @@
           "admin"
         ],
         "summary": "Iceberg Info Endpoint",
-        "description": "Return Iceberg table metadata: snapshots, data files, size, buffer status.",
+        "description": "Return DuckLake table metadata: snapshots, data files, size, buffer status.",
         "operationId": "iceberg_info_endpoint_api_admin_iceberg_info_get",
         "parameters": [
           {
@@ -35743,7 +35743,7 @@
           "admin"
         ],
         "summary": "Iceberg Calendar Endpoint",
-        "description": "Return per-date data file counts from Iceberg partition metadata.",
+        "description": "Return per-date data file counts from DuckLake file metadata.",
         "operationId": "iceberg_calendar_endpoint_api_admin_iceberg_calendar_get",
         "parameters": [
           {
@@ -36486,7 +36486,7 @@
           "admin"
         ],
         "summary": "Reset Logs Endpoint",
-        "description": "Permanently delete this service's log data (cloud + local) over SSE.\n\nWipes the cloud Iceberg log table, the local DuckDB file + cache, and\nthe SQLite ingestion ledgers, then re-initializes an empty, queryable\n0-state. Preserves the service's configuration: saved views, alerts,\nsource registration, audit history, and scoring labels/audit. See\n``backend.core.reset.reset_service_logs`` for the full sequence.\n\nFails closed before any work starts: 403 if this service isn't\nread_write (defense-in-depth \u2014 ``RemoteAccessMiddleware`` already blocks\n``/api/admin/*`` for remote analysts), and 400 if ``confirm`` doesn't\nmatch the resolved service id.",
+        "description": "Permanently delete this service's log data (cloud + local) over SSE.\n\nWipes the DuckLake log table, the local DuckDB file + cache, and\nthe SQLite ingestion ledgers, then re-initializes an empty, queryable\n0-state. Preserves the service's configuration: saved views, alerts,\nsource registration, audit history, and scoring labels/audit. See\n``backend.core.reset.reset_service_logs`` for the full sequence.\n\nFails closed before any work starts: 403 if this service isn't\nread_write (defense-in-depth \u2014 ``RemoteAccessMiddleware`` already blocks\n``/api/admin/*`` for remote analysts), and 400 if ``confirm`` doesn't\nmatch the resolved service id.",
         "operationId": "reset_logs_endpoint_api_admin_reset_logs_post",
         "parameters": [
           {
@@ -36672,7 +36672,7 @@
           "admin"
         ],
         "summary": "Reset Rum Endpoint",
-        "description": "Permanently delete this service's RUM telemetry data (cloud + local) over SSE.\n\nWipes the cloud Iceberg RUM tables and the local RUM DuckDB file and cache\nwhile leaving logs data completely untouched.",
+        "description": "Permanently delete this service's RUM telemetry data (cloud + local) over SSE.\n\nWipes the DuckLake RUM tables and the local RUM DuckDB file and cache\nwhile leaving logs data completely untouched.",
         "operationId": "reset_rum_endpoint_api_admin_reset_rum_post",
         "parameters": [
           {

@@ -2089,7 +2089,7 @@ def _response_cache_key(*args, **kwargs) -> str:
 
 
 def is_stale_view_error(exc: BaseException) -> bool:
-    from backend.core.iceberg._core import is_stale_view_error as _is_stale_view_error
+    from backend.core.storage._core import is_stale_view_error as _is_stale_view_error
 
     return _is_stale_view_error(exc)
 
@@ -2633,10 +2633,10 @@ def _run_with_rum_view_retry(con, source: dict | None, fn):
 
     def _recover(_exc: BaseException) -> None:
         if source is not None:
-            from backend.core.iceberg import view as iceberg_view
+            from backend.core.storage import view as storage_view
 
-            iceberg_view.clear_source_caches(source.get("name", "default"), keep_snapshot_cache=True)
-            iceberg_view.update_iceberg_view(con, source, force=True)
+            storage_view.clear_source_caches(source.get("name", "default"), keep_snapshot_cache=True)
+            storage_view.update_storage_view(con, source, force=True)
         _prune_missing_files_from_rum_views(con)
 
     return retry_call(fn, retry_on=is_stale_view_error, attempts=3, before_retry=_recover)

@@ -381,7 +381,7 @@ def test_rebuild_local_view_endpoint_clears_caches_and_rebuilds_in_background():
     client = TestClient(app)
     try:
         with (
-            patch("backend.core.iceberg.clear_source_caches") as mock_clear,
+            patch("backend.core.storage.clear_source_caches") as mock_clear,
             patch("backend.cron.jobs.sync.refresh_view_and_warm_pool") as mock_refresh,
             patch("backend.core.duckdb.refresh_config_status") as mock_status,
             patch("backend.repositories.dashboard.invalidate_service") as mock_invalidate,
@@ -1102,8 +1102,8 @@ class TestLocalCompactContract:
                     time.sleep(0.005)
 
         with (
-            patch("backend.core.iceberg.view.update_iceberg_view", lambda *a, **k: None),
-            patch("backend.core.iceberg.update_iceberg_view", lambda *a, **k: None),
+            patch("backend.core.storage.view.update_storage_view", lambda *a, **k: None),
+            patch("backend.core.storage.update_storage_view", lambda *a, **k: None),
         ):
             thread = threading.Thread(target=reader_loop, daemon=True)
             thread.start()

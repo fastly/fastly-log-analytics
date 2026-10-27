@@ -1128,7 +1128,7 @@ def test_admin_state_key_with_empty_prefix():
 
 
 def test_admin_state_key_with_prefix_strips_slashes():
-    """``/customer1/`` → ``customer1/iceberg/...`` (slashes stripped
+    """``/customer1/`` → ``customer1/meta/...`` (slashes stripped
     from both ends). Prevents double-slash keys when admins paste a
     prefix with trailing slashes."""
     from backend.state_sync import get_admin_state_key

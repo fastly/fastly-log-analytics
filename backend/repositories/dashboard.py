@@ -1413,7 +1413,7 @@ def _run_validated_query(
 
     _debug_queries: list[dict] = []
     if src:
-        from backend.core.iceberg import inject_view_debug
+        from backend.core.storage import inject_view_debug
 
         inject_view_debug(_debug_queries, src)
 

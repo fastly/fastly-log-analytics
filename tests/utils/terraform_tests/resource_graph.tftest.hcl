@@ -51,7 +51,7 @@ run "cdn_proxy_has_required_cdn_snippets" {
   command = plan
 
   # The CDN snippets are what fix the negative-cache-CAS trap, race
-  # condition generation, and the iceberg metadata pointer TTL — pinned
+  # condition generation, and the SWR shield disable — pinned
   # in the codebase memories. If any of these stop being emitted, we
   # regress to known production bugs.
   assert {

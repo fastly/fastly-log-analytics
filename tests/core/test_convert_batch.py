@@ -382,7 +382,7 @@ def test_convert_batch_downloads_outside_admission_lock(tmp_path):
         return got, {v: k for k, v in got.items()}
 
     with _batch_env(service_id, tmp_path, _download):
-        with patch("backend.core.iceberg._ducklake.ducklake_write_admission", _tracking_admission):
+        with patch("backend.core.storage._ducklake.ducklake_write_admission", _tracking_admission):
             summary = convert_batch_objects(service_id, keys, "w-dl")
 
     assert summary["committed"] == 4, summary
@@ -1690,7 +1690,7 @@ def test_recover_in_flight_promotes_when_buffer_exists(tmp_path):
     buf_dir = tmp_path / "buffer"
     buf_dir.mkdir()
     (buf_dir / "batch_present.parquet").write_bytes(b"PAR1stub")
-    with patch("backend.core.iceberg._buffer_dir", return_value=str(buf_dir)):
+    with patch("backend.core.storage._buffer_dir", return_value=str(buf_dir)):
         result = ingest._recover_in_flight({"name": sid})
     assert result == {"promoted": 1, "dropped": 0, "rows_recovered": 125}
     assert metadata_db.get_ingested_filenames(sid) == {"s3://b/x.gz", "s3://b/y.gz"}
@@ -1702,14 +1702,14 @@ def test_recover_in_flight_drops_when_buffer_missing(tmp_path):
     metadata_db.record_in_flight(sid, "batch_missing.parquet", [("s3://b/q.gz", 10, 100)])
     buf_dir = tmp_path / "buffer"
     buf_dir.mkdir()
-    with patch("backend.core.iceberg._buffer_dir", return_value=str(buf_dir)):
+    with patch("backend.core.storage._buffer_dir", return_value=str(buf_dir)):
         result = ingest._recover_in_flight({"name": sid})
     assert result["promoted"] == 0 and result["dropped"] == 1
     assert metadata_db.get_ingested_filenames(sid) == set() and metadata_db.list_in_flight(sid) == []
 
 
 def test_recover_in_flight_is_noop_when_no_pending(tmp_path):
-    with patch("backend.core.iceberg._buffer_dir", return_value=str(tmp_path)):
+    with patch("backend.core.storage._buffer_dir", return_value=str(tmp_path)):
         assert ingest._recover_in_flight({"name": "svc-recover-empty"}) == {
             "promoted": 0,
             "dropped": 0,
@@ -1724,7 +1724,7 @@ def test_recover_in_flight_handles_mixed_state(tmp_path):
     buf_dir = tmp_path / "buffer"
     buf_dir.mkdir()
     (buf_dir / "batch_here.parquet").write_bytes(b"PAR1stub")
-    with patch("backend.core.iceberg._buffer_dir", return_value=str(buf_dir)):
+    with patch("backend.core.storage._buffer_dir", return_value=str(buf_dir)):
         result = ingest._recover_in_flight({"name": sid})
     assert result == {"promoted": 1, "dropped": 1, "rows_recovered": 5}
     assert metadata_db.get_ingested_filenames(sid) == {"a.gz"} and metadata_db.list_in_flight(sid) == []
@@ -1744,7 +1744,7 @@ def test_recover_in_flight_survives_buffer_dir_missing(tmp_path):
     metadata_db.record_in_flight(sid, "batch_nodir.parquet", [("a.gz", 1, 1)])
     missing_dir = str(tmp_path / "does_not_exist" / "buffer")
     assert not os.path.exists(missing_dir)
-    with patch("backend.core.iceberg._buffer_dir", return_value=missing_dir):
+    with patch("backend.core.storage._buffer_dir", return_value=missing_dir):
         result = ingest._recover_in_flight({"name": sid})
     assert result["dropped"] == 1 and result["promoted"] == 0
 

@@ -1671,7 +1671,7 @@ def _discover_new_ips_gen(max_new: int = 500, days: int = 30):
             con = get_connection(src, read_only=True)
             try:
                 from backend.core.duckdb import _safe_table_name
-                from backend.core.iceberg import execute_with_stale_view_retry
+                from backend.core.storage import execute_with_stale_view_retry
 
                 # Check if this source has an ip column
                 table_name = _safe_table_name(src["name"])

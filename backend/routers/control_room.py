@@ -426,7 +426,7 @@ async def realtime_stream(
 
 def _recent_standard_errors(source: dict, service_id: str) -> list[dict]:
     from backend.core import duckdb as _db
-    from backend.core.iceberg import execute_with_stale_view_retry
+    from backend.core.storage import execute_with_stale_view_retry
     from backend.repositories._base import _safe_table
 
     con = _db.get_connection(source=source, read_only=True)
@@ -612,7 +612,7 @@ async def control_room_correlate(
         )
 
     def _query():
-        from backend.core.iceberg import execute_with_stale_view_retry
+        from backend.core.storage import execute_with_stale_view_retry
 
         con = _db.get_connection(source=source, read_only=True)
         try:
@@ -1632,9 +1632,9 @@ def usage_current_storage(
                 iceberg_info_success = True
             else:
                 try:
-                    from backend.core import iceberg as db_iceberg
+                    from backend.core import storage as db_storage
 
-                    iceberg_info = db_iceberg.get_table_info(src)
+                    iceberg_info = db_storage.get_table_info(src)
                     if not iceberg_info.get("error"):
                         iceberg_bytes = iceberg_info.get("size_bytes", 0)
                         iceberg_files = iceberg_info.get("data_files", 0)
@@ -1891,7 +1891,7 @@ def usage_log_activity(
 
     # Dropped the Depends(get_con) — repo reads metadata SQLite only, never
     # touched the DuckDB connection. Saves one get_connection() lookup
-    # + update_iceberg_view rebind per call.
+    # + update_storage_view rebind per call.
     res = repo.get_log_activity(source, start_str, end_str, by)
 
     # Fetch Fastly API stats for the logging service to compare generated vs processed
@@ -1994,7 +1994,7 @@ def usage_rum_breakdown(
     global_rates = svcconfig.load_usage_logging_config()
     class_a_rate = float(global_rates.get("class_a_rate_per_1k", 0.005))
 
-    # Query RUM beacon count by date from metadata DB using the new DuckDB/Iceberg ingestion tracking
+    # Query RUM beacon count by date from metadata DB using the ingestion tracking
     try:
         start_date = start_str.split("T")[0]
         end_date = end_str.split("T")[0]

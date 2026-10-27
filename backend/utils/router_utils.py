@@ -122,7 +122,7 @@ def start_or_resume_cron(
 
     Consolidates the 3 hand-rolled copies of this routine across
     ``backend.routers.admin.ingest`` (sync) and
-    ``backend.routers.admin.iceberg`` (commit). Each used to duplicate the
+    ``backend.routers.admin.compaction`` (commit). Each used to duplicate the
     same ``try: start_cron_run -> spawn thread -> return {ok}; except
     RuntimeError: scan list_active_runs -> return {ok, in_progress_msg};
     else: raise HTTPException(503)`` shape with only the task name +

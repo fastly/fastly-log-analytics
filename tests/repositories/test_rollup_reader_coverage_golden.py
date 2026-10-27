@@ -1967,9 +1967,9 @@ def _build_time_series_bundles(con, src, hours: list[str], table: str = "logs") 
     with (
         patch("backend.core.rollups._common._safe_table_for", return_value=table),
         patch("backend.core.duckdb.get_connection", return_value=_NonClosing(con)),
-        patch("backend.core.iceberg.view._get_service_lock", _noop_lock),
+        patch("backend.core.storage.view._get_service_lock", _noop_lock),
         patch(
-            "backend.core.iceberg.execute_with_stale_view_retry",
+            "backend.core.storage.execute_with_stale_view_retry",
             side_effect=lambda c, _src, fn: fn(c),
         ),
     ):
@@ -2451,8 +2451,8 @@ def _build_vbts_bundles(con, src, hours, table="logs_vbts"):
     with (
         patch("backend.core.rollups._common._safe_table_for", return_value=table),
         patch("backend.core.duckdb.get_connection", return_value=_NonClosing(con)),
-        patch("backend.core.iceberg.view._get_service_lock", _noop_lock),
-        patch("backend.core.iceberg.execute_with_stale_view_retry", side_effect=lambda c, _s, fn: fn(c)),
+        patch("backend.core.storage.view._get_service_lock", _noop_lock),
+        patch("backend.core.storage.execute_with_stale_view_retry", side_effect=lambda c, _s, fn: fn(c)),
     ):
         return verified_bots_ts.build_verified_bots_ts_bundles(src["service_id"], src, hours)
 
@@ -2545,8 +2545,8 @@ def _build_origin_bundles(con, src, hours, table="logs_origin"):
     with (
         patch("backend.core.rollups._common._safe_table_for", return_value=table),
         patch("backend.core.duckdb.get_connection", return_value=_NonClosing(con)),
-        patch("backend.core.iceberg.view._get_service_lock", _noop_lock),
-        patch("backend.core.iceberg.execute_with_stale_view_retry", side_effect=lambda c, _s, fn: fn(c)),
+        patch("backend.core.storage.view._get_service_lock", _noop_lock),
+        patch("backend.core.storage.execute_with_stale_view_retry", side_effect=lambda c, _s, fn: fn(c)),
     ):
         return origin_summary.build_origin_summary_bundles(src["service_id"], src, hours)
 
@@ -2658,7 +2658,7 @@ def test_time_series_caller_gates_rollup_on_no_filters():
 def _build_rollup(module_path: str, fn_name: str, con, src, hours: list[str], table: str) -> int:
     """Run any rollup writer ``module.fn(service_id, src, hours)`` against the
     shared in-memory connection (writer's ``con.close()`` is a no-op via the
-    proxy; ``_safe_table_for`` and the iceberg view lock are patched)."""
+    proxy; ``_safe_table_for`` and the storage view lock are patched)."""
     import importlib
     from unittest.mock import patch
 
@@ -2666,8 +2666,8 @@ def _build_rollup(module_path: str, fn_name: str, con, src, hours: list[str], ta
     with (
         patch("backend.core.rollups._common._safe_table_for", return_value=table),
         patch("backend.core.duckdb.get_connection", return_value=_NonClosing(con)),
-        patch("backend.core.iceberg.view._get_service_lock", _noop_lock),
-        patch("backend.core.iceberg.execute_with_stale_view_retry", side_effect=lambda c, _s, fn: fn(c)),
+        patch("backend.core.storage.view._get_service_lock", _noop_lock),
+        patch("backend.core.storage.execute_with_stale_view_retry", side_effect=lambda c, _s, fn: fn(c)),
     ):
         return getattr(mod, fn_name)(src["service_id"], src, hours)
 
@@ -3018,8 +3018,8 @@ def _build_ip_spread(con, src, table: str = "logs", fields=("ja4",)) -> None:
 
     with (
         patch("backend.core.duckdb.get_connection", return_value=_NonClosing(con)),
-        patch("backend.core.iceberg.view._get_service_lock", _noop_lock),
-        patch("backend.core.iceberg.execute_with_stale_view_retry", side_effect=lambda c, _s, fn: fn(c)),
+        patch("backend.core.storage.view._get_service_lock", _noop_lock),
+        patch("backend.core.storage.execute_with_stale_view_retry", side_effect=lambda c, _s, fn: fn(c)),
     ):
         recompute._run_ip_spread_per_field(src["service_id"], src, table, "1=1", list(fields))
 

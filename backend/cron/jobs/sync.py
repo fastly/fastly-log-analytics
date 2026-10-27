@@ -1,7 +1,7 @@
 """Ingest-class cron jobs.
 
   * ``_run_service_cron`` — per-tick ingest of new raw .gz files from FOS
-    into the local buffer (does NOT commit to Iceberg).
+    into the local buffer (does NOT commit to DuckLake).
   * ``_run_full_sweep`` — daily catch-net that LISTs the full raw/request/ prefix
     to pick up late-arriving files outside the incremental window.
   * ``_run_gap_heal`` — periodic gap detector that triggers a full sweep
@@ -84,7 +84,7 @@ def refresh_view_and_warm_pool(
     log_prefix: str,
     progress_log: Callable[[dict], None] | None = None,
 ) -> None:
-    """Force-refresh the Iceberg DuckDB view and warm the connection pool.
+    """Force-refresh the storage DuckDB view and warm the connection pool.
 
     Called on the cron writer thread after a commit or a sync tick so the
     next request-path checkout finds a pre-bound view (avoiding the
@@ -98,12 +98,12 @@ def refresh_view_and_warm_pool(
     """
     t0 = time.time()
     try:
-        from backend.core import iceberg as _ice
+        from backend.core import storage as _storage
         from backend.core.duckdb import get_connection as _get_conn
         from backend.core.duckdb_pool import warm_pool_for_service as _warm
 
         with closing(_get_conn(source=source, read_only=True)) as con_v:
-            _ice.update_iceberg_view(con_v, source, force=True)
+            _storage.update_storage_view(con_v, source, force=True)
             _warm(service_id, source)
         if progress_log is not None:
             progress_log(
@@ -842,9 +842,9 @@ def _run_full_sweep(
                     pass
             else:
                 try:
-                    from backend.core import iceberg as db_iceberg
+                    from backend.core import storage as db_storage
 
-                    buf_files = int(db_iceberg.buffer_backlog_stats(src).get("file_count", 0) or 0)
+                    buf_files = int(db_storage.buffer_backlog_stats(src).get("file_count", 0) or 0)
                     if buf_files > 2_000:
                         effective_max_files = min(effective_max_files, 5_000)
                         effective_max_seconds = min(effective_max_seconds, 300)
@@ -1095,7 +1095,7 @@ _CacheRegistry.register("cron.jobs.sync._GAP_HEAL_LAST_TRIGGER", _GAP_HEAL_LAST_
 
 @cron_task("cron_commit", job_name="commit")
 def _run_commit(service_id: str, force: bool = False, run_id: int | None = None) -> None:
-    """Commit the local buffer to the shared Iceberg table in FOS."""
+    """Commit the local buffer to the DuckLake table."""
     from backend.core.duckdb import get_source_for_service
 
     cfg = svcconfig.load_config(service_id)
@@ -1170,13 +1170,13 @@ def _run_commit(service_id: str, force: bool = False, run_id: int | None = None)
             run_id,
             service_id,
             job_name="commit",
-            event={"type": "status", "message": "Committing local buffer to Iceberg snapshot..."},
+            event={"type": "status", "message": "Committing local buffer to a DuckLake snapshot..."},
         )
 
         try:
-            from backend.core import iceberg as db_iceberg
+            from backend.core import storage as db_storage
 
-            result = db_iceberg.commit_buffer(
+            result = db_storage.commit_buffer(
                 src,
                 progress_callback=lambda t, m: _log_and_add_progress(
                     run_id, service_id, job_name="commit", event={"type": t, "message": m}
@@ -1664,8 +1664,8 @@ def _run_rum_ledger_sweep(service_id: str, run_id: int | None = None) -> None:
 
 @cron_task("cron_rum_commit", job_name="rum_commit")
 def _run_rum_commit(service_id: str, force: bool = False, run_id: int | None = None, **kwargs) -> None:
-    """Compact RUM tables from DuckDB cache to Iceberg/FOS."""
-    from backend.core import iceberg as db_iceberg
+    """Compact RUM tables from DuckDB cache to DuckLake."""
+    from backend.core import storage as db_storage
     from backend.core.duckdb import _cache_dir as _commit_cache_dir
     from backend.core.duckdb import get_source_for_service
     from backend.cron.scheduler import _check_disk_space
@@ -1685,7 +1685,7 @@ def _run_rum_commit(service_id: str, force: bool = False, run_id: int | None = N
         committed_rows = 0
         err: str | None = None
         try:
-            res = db_iceberg.commit_buffer(src, table_name=table_name)
+            res = db_storage.commit_buffer(src, table_name=table_name)
             err = _buffer_result_error(res)
             if res.get("files_committed", 0) > 0:
                 committed_rows = res.get("rows_committed", 0)
@@ -1733,13 +1733,13 @@ def _run_rum_commit(service_id: str, force: bool = False, run_id: int | None = N
                 # Update/recompute precomputed RUM aggregates
                 try:
                     from backend.core.duckdb import get_connection, rum_source_for
-                    from backend.core.iceberg import execute_with_stale_view_retry
-                    from backend.core.iceberg._ducklake import _ducklake_attach
                     from backend.core.rollups.rum import (
                         backfill_missing_rum_aggregates,
                         recompute_rum_aggregates,
                         rum_count_and_latest,
                     )
+                    from backend.core.storage import execute_with_stale_view_retry
+                    from backend.core.storage._ducklake import _ducklake_attach
 
                     rum_src = rum_source_for(src)
                     with closing(get_connection(rum_src, read_only=False)) as rum_con:

@@ -1,4 +1,4 @@
-"""Tests for DuckLake / Iceberg buffer, view, schema, cloud-write locks, catalog helpers, and local compaction."""
+"""Tests for DuckLake buffer, view, schema, cloud-write locks, catalog helpers, and local compaction."""
 
 from __future__ import annotations
 
@@ -20,7 +20,9 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 from backend.core._log_fields_data import LOG_FIELD_CATALOG
-from backend.core.iceberg._ducklake import (
+from backend.core.local_compaction import _compact_single_partition
+from backend.core.rollups.time_series import build_time_series_bundles
+from backend.core.storage._ducklake import (
     DuckLakeAdmissionTimeout,
     _ducklake_attach,
     _reset_for_tests,
@@ -28,24 +30,22 @@ from backend.core.iceberg._ducklake import (
     ducklake_write_admission,
     get_admission_stats,
 )
-from backend.core.iceberg.buffer import _commit_buffer_impl, _ducklake_write_connection, buffer_files
-from backend.core.iceberg.manifest import ducklake_table_exists, get_snapshot_calendar, get_table_info
-from backend.core.iceberg.view import _get_service_lock, _source_variant_fp
-from backend.core.local_compaction import _compact_single_partition
-from backend.core.rollups.time_series import build_time_series_bundles
+from backend.core.storage.buffer import _commit_buffer_impl, _ducklake_write_connection, buffer_files
+from backend.core.storage.manifest import ducklake_table_exists, get_snapshot_calendar, get_table_info
+from backend.core.storage.view import _get_service_lock, _source_variant_fp
 from tests._helpers.sources import make_source
 
 from backend import config as svcconfig
 from backend.core import duckdb as db
-from backend.core import iceberg
 from backend.core import local_compaction as lc
 from backend.core import reset as reset_mod
+from backend.core import storage
 from backend.core.duckdb import get_connection
 from backend.core.duckdb_pool import _Pool
-from backend.core.iceberg import _core
-from backend.core.iceberg import _ducklake as ducklake
-from backend.core.iceberg import buffer as buffer_mod
 from backend.core.ingest import get_catalog_field_ids
+from backend.core.storage import _core
+from backend.core.storage import _ducklake as ducklake
+from backend.core.storage import buffer as buffer_mod
 
 _make_source = partial(make_source, kind="lake", buffer_dir=True)
 
@@ -217,8 +217,8 @@ def _proxy_commit_connection(monkeypatch, reject_insert):
 
 def test_align_to_schema():
     table = pa.table({"timestamp": [1714819200], "ip": ["1.1.1.1"], "extra_field": ["hidden"]})
-    aligned = iceberg._align_to_schema(table)
-    arrow_schema = iceberg.get_arrow_schema()
+    aligned = storage._align_to_schema(table)
+    arrow_schema = storage.get_arrow_schema()
     assert len(aligned.schema) == len(arrow_schema)
     assert "timestamp" in aligned.column_names and "ip" in aligned.column_names
     assert "extra_field" not in aligned.column_names
@@ -227,8 +227,8 @@ def test_align_to_schema():
 
 @pytest.mark.parametrize("cfg", [None, {}, {"custom_fields": []}])
 def test_get_arrow_schema_no_custom_fields(cfg):
-    base_schema = iceberg.get_arrow_schema()
-    schema = iceberg.get_arrow_schema(cfg)
+    base_schema = storage.get_arrow_schema()
+    schema = storage.get_arrow_schema(cfg)
     assert isinstance(schema, pa.Schema) and schema == base_schema
     field_names = {f.name for f in schema}
     assert "timestamp" in field_names and "status" in field_names
@@ -245,7 +245,7 @@ def test_get_arrow_schema_no_custom_fields(cfg):
 )
 def test_get_arrow_schema_custom_field_types(field_name, duckdb_type, expected_pa_type):
     config = {"custom_fields": [{"name": field_name, "duckdb_type": duckdb_type, "enabled": True}]}
-    schema = iceberg.get_arrow_schema(config)
+    schema = storage.get_arrow_schema(config)
     field_names = [f.name for f in schema]
     assert field_name in field_names
     assert field_names.index(field_name) > field_names.index("timestamp")
@@ -260,27 +260,27 @@ def test_get_arrow_schema_enabled_vs_disabled_and_sort_order():
             {
                 "name": "zzz_last",
                 "duckdb_type": "VARCHAR",
-                "iceberg_type": "string",
+                "storage_type": "string",
                 "vcl_log_expression": "X",
                 "enabled": True,
             },
             {
                 "name": "aaa_first",
                 "duckdb_type": "VARCHAR",
-                "iceberg_type": "string",
+                "storage_type": "string",
                 "vcl_log_expression": "X",
                 "enabled": True,
             },
             {
                 "name": "inactive_field",
                 "duckdb_type": "VARCHAR",
-                "iceberg_type": "string",
+                "storage_type": "string",
                 "vcl_log_expression": "X",
                 "enabled": False,
             },
         ],
     }
-    schema = iceberg.get_arrow_schema(config)
+    schema = storage.get_arrow_schema(config)
     field_names = [f.name for f in schema]
     assert "aaa_first" in field_names and "zzz_last" in field_names
     assert "inactive_field" not in field_names
@@ -293,28 +293,28 @@ def test_field_order_covers_ingest_storage_fields():
     assert not (storage_ids - order_names)
     internal_ids = {f["id"] for f in LOG_FIELD_CATALOG if f.get("group") == "INTERNAL"}
     assert not (order_names - storage_ids - (_core._RESERVED_FIELD_SLOTS | internal_ids))
-    schema_names = {f.name for f in iceberg.get_arrow_schema()}
+    schema_names = {f.name for f in storage.get_arrow_schema()}
     assert not (storage_ids - schema_names)
 
 
 # --- Catalog Initialization & View Contention Tests ---
 
 
-def test_init_iceberg_table_attaches_catalog_without_creating_table(tmp_path):
+def test_init_storage_table_attaches_catalog_without_creating_table(tmp_path):
     source = _ducklake_source(tmp_path, "init")
-    assert iceberg.init_iceberg_table(source) is True
-    assert iceberg.init_iceberg_table(source, create=True) is True
+    assert storage.init_storage_table(source) is True
+    assert storage.init_storage_table(source, create=True) is True
     assert ducklake_table_exists(source) is False
 
 
-def test_init_iceberg_table_returns_none_when_catalog_unattachable(tmp_path):
+def test_init_storage_table_returns_none_when_catalog_unattachable(tmp_path):
     source = _ducklake_source(tmp_path, "initfail")
     fake_con = MagicMock()
     with (
         patch("backend.core.duckdb.get_connection", return_value=fake_con),
-        patch("backend.core.iceberg._ducklake._ducklake_attach", return_value=False),
+        patch("backend.core.storage._ducklake._ducklake_attach", return_value=False),
     ):
-        assert iceberg.init_iceberg_table(source) is None
+        assert storage.init_storage_table(source) is None
     fake_con.close.assert_called_once()
 
 
@@ -348,25 +348,25 @@ def test_duckdb_databases_readonly_detection_against_real_connection(tmp_path):
         ("lock-contention-persistent-view-svc", (1,), 5.0, 0.2, 0),
     ],
 )
-def test_update_iceberg_view_lock_contention(
+def test_update_storage_view_lock_contention(
     monkeypatch, source_key, persisted_row, hold_s, lock_timeout, expected_calls
 ):
-    iceberg._view_cache.pop(source_key, None)
-    iceberg._service_locks.pop(source_key, None)
+    storage._view_cache.pop(source_key, None)
+    storage._service_locks.pop(source_key, None)
     source = {"name": source_key}
     locked_calls: list = []
-    monkeypatch.setattr(iceberg, "_update_iceberg_view_locked", lambda con, src: locked_calls.append((con, src)))
+    monkeypatch.setattr(storage, "_update_storage_view_locked", lambda con, src: locked_calls.append((con, src)))
 
-    lock = iceberg._get_service_lock(source_key)
+    lock = storage._get_service_lock(source_key)
     fake_con = MagicMock()
     fake_con.execute.return_value.fetchone.return_value = persisted_row
     try:
         with _hold_lock_in_thread(lock, wait_s=hold_s):
-            iceberg.update_iceberg_view(fake_con, source, lock_timeout=lock_timeout)
+            storage.update_storage_view(fake_con, source, lock_timeout=lock_timeout)
         assert len(locked_calls) == expected_calls
     finally:
-        iceberg._view_cache.pop(source_key, None)
-        iceberg._service_locks.pop(source_key, None)
+        storage._view_cache.pop(source_key, None)
+        storage._service_locks.pop(source_key, None)
 
 
 def test_source_variant_fp_changes_when_time_range_or_cron_changes():
@@ -391,7 +391,7 @@ def test_source_variant_fp_changes_when_time_range_or_cron_changes():
 def test_optimize_table_hostile_service_id_cannot_break_out_of_call_literal(monkeypatch):
     executed = _recording_write_connection(monkeypatch)
     source = {"name": "svc", "service_id": "O'Brien'); DROP TABLE lake.logs;--"}
-    iceberg.optimize_table(source, table_name="logs")
+    storage.optimize_table(source, table_name="logs")
 
     calls = [q for q in executed if q.startswith("CALL ducklake_merge_adjacent_files")]
     assert calls
@@ -408,7 +408,7 @@ def test_optimize_table_compacts_schema_evolved_files(tmp_path):
     _write_buffer_parquet(source, "batch_new_schema.parquet", rows=2, offset=10, extra={"edge_sid": "evolved"})
     assert _commit_buffer_impl(source)["rows_committed"] == 2
 
-    result = iceberg.optimize_table(source)
+    result = storage.optimize_table(source)
     assert not result.get("error") and result["partition_errors"] == []
 
     con = get_connection(source)
@@ -421,7 +421,7 @@ def test_optimize_table_compacts_schema_evolved_files(tmp_path):
 
 def test_optimize_table_merge_failure_is_recorded_not_retried_and_rewrite_still_runs(monkeypatch):
     executed = _recording_write_connection(monkeypatch, fail_on="ducklake_merge_adjacent_files")
-    result = iceberg.optimize_table({"name": "svc", "service_id": "svc-opt"}, table_name="logs")
+    result = storage.optimize_table({"name": "svc", "service_id": "svc-opt"}, table_name="logs")
 
     merges = [q for q in executed if "ducklake_merge_adjacent_files" in q and q.endswith("'logs_svc_opt')")]
     rewrites = [q for q in executed if "ducklake_rewrite_data_files" in q and q.endswith("'logs_svc_opt')")]
@@ -465,8 +465,8 @@ def test_commit_buffer_calls_impl_when_lock_free(monkeypatch, fos_source):
 
 
 def test_reset_excludes_a_concurrent_commit_attempt(monkeypatch, s3_mock, fos_source):
-    monkeypatch.setattr("backend.core.iceberg._core.init_iceberg_table", MagicMock())
-    monkeypatch.setattr("backend.core.iceberg.view.update_iceberg_view", MagicMock())
+    monkeypatch.setattr("backend.core.storage._core.init_storage_table", MagicMock())
+    monkeypatch.setattr("backend.core.storage.view.update_storage_view", MagicMock())
     monkeypatch.setattr("backend.core.duckdb.get_connection", MagicMock())
     monkeypatch.setattr(buffer_mod, "_CLOUD_WRITE_LOCK_TIMEOUT_S", 0.2)
 
@@ -516,15 +516,15 @@ def test_reset_excludes_a_concurrent_commit_attempt(monkeypatch, s3_mock, fos_so
 
 def test_buffer_dir(tmp_path):
     with patch("backend.core.duckdb._cache_dir", return_value="cache/test-svc"):
-        assert iceberg._buffer_dir({"name": "test-svc"}) == "cache/test-svc/buffer"
+        assert storage._buffer_dir({"name": "test-svc"}) == "cache/test-svc/buffer"
     with patch("backend.core.duckdb._cache_dir", return_value=str(tmp_path)):
-        assert iceberg._buffer_dir({"name": "svc"}) == str(tmp_path / "buffer")
+        assert storage._buffer_dir({"name": "svc"}) == str(tmp_path / "buffer")
 
 
 def test_tombstone_buffer_files_writes_sidecar_marker_and_leaves_parquet(tmp_path):
     src, paths = _make_buffer(tmp_path, "batch_A.parquet", "batch_B.parquet")
     with patch("backend.core.duckdb._cache_dir", return_value=str(tmp_path)):
-        tombstoned = iceberg.tombstone_buffer_files(src, paths, ts=1717_000_000)
+        tombstoned = storage.tombstone_buffer_files(src, paths, ts=1717_000_000)
     assert tombstoned == paths
     for p in paths:
         assert os.path.exists(p) and os.path.exists(p + ".consumed-1717000000")
@@ -551,16 +551,16 @@ def test_tombstone_buffer_files_logs_and_skips_without_unlinking_on_failure(tmp_
         patch("backend.core.duckdb._cache_dir", return_value=str(tmp_path)),
         patch("builtins.open", side_effect=_selective_boom),
     ):
-        tombstoned = iceberg.tombstone_buffer_files(src, paths, ts=ts)
+        tombstoned = storage.tombstone_buffer_files(src, paths, ts=ts)
     assert os.path.exists(paths[0]) and paths[0] not in tombstoned
 
 
 def test_buffer_files_excludes_tombstoned_parquets_and_markers(tmp_path):
     src, paths = _make_buffer(tmp_path, "batch_keep.parquet", "batch_consumed.parquet")
     with patch("backend.core.duckdb._cache_dir", return_value=str(tmp_path)):
-        iceberg.tombstone_buffer_files(src, [paths[1]], ts=1717_000_000)
+        storage.tombstone_buffer_files(src, [paths[1]], ts=1717_000_000)
         assert os.path.exists(paths[1] + ".consumed-1717000000")
-        listing = iceberg.buffer_files(src)
+        listing = storage.buffer_files(src)
     assert listing == [paths[0]] and all(not entry.endswith("1717000000") for entry in listing)
 
 
@@ -571,8 +571,8 @@ def test_buffer_files_excludes_tombstoned_parquets_and_markers(tmp_path):
 def test_sweep_tombstoned_buffer_files_grace_window(tmp_path, batch_name, now, expected_swept, should_exist):
     src, paths = _make_buffer(tmp_path, batch_name)
     with patch("backend.core.duckdb._cache_dir", return_value=str(tmp_path)):
-        iceberg.tombstone_buffer_files(src, paths, ts=2_000_000_000)
-        swept = iceberg.sweep_tombstoned_buffer_files(src, grace_seconds=60, now=now)
+        storage.tombstone_buffer_files(src, paths, ts=2_000_000_000)
+        swept = storage.sweep_tombstoned_buffer_files(src, grace_seconds=60, now=now)
     assert swept == expected_swept
     assert os.path.exists(paths[0]) is should_exist
     assert os.path.exists(paths[0] + ".consumed-2000000000") is should_exist
@@ -584,7 +584,7 @@ def test_sweep_tolerates_malformed_marker_filenames(tmp_path):
     (buf / "batch_X.parquet.consumed-notanumber").write_bytes(b"")
     (buf / "batch_X.parquet.consumed-").write_bytes(b"")
     with patch("backend.core.duckdb._cache_dir", return_value=str(tmp_path)):
-        assert iceberg.sweep_tombstoned_buffer_files(src, grace_seconds=60, now=2_000_000_000) == 0
+        assert storage.sweep_tombstoned_buffer_files(src, grace_seconds=60, now=2_000_000_000) == 0
 
 
 def test_tombstone_then_query_race_keeps_parquet_readable_during_grace(tmp_path):
@@ -598,10 +598,10 @@ def test_tombstone_then_query_race_keeps_parquet_readable_during_grace(tmp_path)
     try:
         with patch("backend.core.duckdb._cache_dir", return_value=str(tmp_path)):
             con.execute(f"CREATE OR REPLACE VIEW race_view AS SELECT * FROM read_parquet('{parquet_path}')")
-            iceberg.tombstone_buffer_files(src, [parquet_path], ts=2_000_000_000)
+            storage.tombstone_buffer_files(src, [parquet_path], ts=2_000_000_000)
             assert con.execute("SELECT count(*) FROM race_view").fetchone() == (3,)
-            assert iceberg.buffer_files(src) == []
-            swept = iceberg.sweep_tombstoned_buffer_files(src, grace_seconds=60, now=2_000_000_090)
+            assert storage.buffer_files(src) == []
+            swept = storage.sweep_tombstoned_buffer_files(src, grace_seconds=60, now=2_000_000_090)
             assert swept == 1 and not os.path.exists(parquet_path)
     finally:
         con.close()
@@ -611,16 +611,16 @@ def test_tombstone_then_query_race_keeps_parquet_readable_during_grace(tmp_path)
 
 
 def test_clear_and_invalidate_service_caches():
-    iceberg._view_cache["test-svc"] = ("loc", set(), (), "sql", 1.0, True)
-    iceberg.clear_source_caches("test-svc")
-    assert "test-svc" not in iceberg._view_cache
-    iceberg.clear_source_caches("never-seen-svc")
+    storage._view_cache["test-svc"] = ("loc", set(), (), "sql", 1.0, True)
+    storage.clear_source_caches("test-svc")
+    assert "test-svc" not in storage._view_cache
+    storage.clear_source_caches("never-seen-svc")
 
     src = {"name": "inv-test-svc", "bucket": "inv-test-bucket", "prefix": ""}
     _core._view_cache[src["name"]] = ("loc", set(), (), "sql", 1.0, True)
-    iceberg.invalidate_service_caches(src)
+    storage.invalidate_service_caches(src)
     assert src["name"] not in _core._view_cache
-    iceberg.invalidate_service_caches({"name": "never-seen", "bucket": "nb", "prefix": ""})
+    storage.invalidate_service_caches({"name": "never-seen", "bucket": "nb", "prefix": ""})
 
 
 def test_get_service_lock_identity_and_isolation():
@@ -629,9 +629,9 @@ def test_get_service_lock_identity_and_isolation():
 
 
 def test_get_last_view_stats():
-    iceberg._view_cache.pop("never-seen", None)
-    assert iceberg.get_last_view_stats({"name": "never-seen"}) == {}
-    iceberg._view_cache["test-svc-stats"] = (
+    storage._view_cache.pop("never-seen", None)
+    assert storage.get_last_view_stats({"name": "never-seen"}) == {}
+    storage._view_cache["test-svc-stats"] = (
         "metadata_loc",
         frozenset(),
         ("col1", "col2"),
@@ -639,7 +639,7 @@ def test_get_last_view_stats():
         12.3,
         True,
     )
-    assert iceberg.get_last_view_stats({"name": "test-svc-stats"}) == {
+    assert storage.get_last_view_stats({"name": "test-svc-stats"}) == {
         "sql": "CREATE VIEW x AS ...",
         "time_ms": 12.3,
         "was_fast_path": True,
@@ -651,17 +651,17 @@ def test_get_last_view_stats():
     [("test-svc-inject", True, 5.0, "FAST PATH"), ("test-svc-slow", False, 50.0, "SLOW PATH")],
 )
 def test_inject_view_debug_prepends_formatted_row(svc_name, was_fast_path, time_ms, expected_label):
-    iceberg._view_cache[svc_name] = ("loc", frozenset(), (), "SELECT 1", time_ms, was_fast_path)
+    storage._view_cache[svc_name] = ("loc", frozenset(), (), "SELECT 1", time_ms, was_fast_path)
     debug_list = [{"sql": "user query", "time_ms": 100}]
-    iceberg.inject_view_debug(debug_list, {"name": svc_name})
+    storage.inject_view_debug(debug_list, {"name": svc_name})
     assert "View Resolution" in debug_list[0]["sql"] and expected_label in debug_list[0]["sql"]
     assert debug_list[1]["sql"] == "user query"
 
 
 def test_inject_view_debug_is_noop_when_no_cached_stats():
-    iceberg._view_cache.pop("never-seen-inject", None)
+    storage._view_cache.pop("never-seen-inject", None)
     debug_list = [{"sql": "user query", "time_ms": 100}]
-    iceberg.inject_view_debug(debug_list, {"name": "never-seen-inject"})
+    storage.inject_view_debug(debug_list, {"name": "never-seen-inject"})
     assert debug_list == [{"sql": "user query", "time_ms": 100}]
 
 
@@ -714,11 +714,11 @@ def test_write_to_buffer_creates_dir_and_uses_zstd_level_1(tmp_path):
     fake_table = pa.table({"timestamp": pa.array([], type=pa.timestamp("us", tz="UTC"))})
     with (
         patch("backend.core.duckdb._cache_dir", return_value=str(target)),
-        patch("backend.core.iceberg._align_to_schema", return_value=fake_table),
-        patch("backend.core.iceberg.buffer.pq.write_table") as mock_write,
+        patch("backend.core.storage._align_to_schema", return_value=fake_table),
+        patch("backend.core.storage.buffer.pq.write_table") as mock_write,
         patch("os.rename"),
     ):
-        out = iceberg.write_to_buffer({"name": "svc"}, fake_table, "x.parquet")
+        out = storage.write_to_buffer({"name": "svc"}, fake_table, "x.parquet")
     assert (target / "buffer").exists() and out == str(target / "buffer" / "x.parquet")
     mock_write.assert_called_once()
     _, kwargs = mock_write.call_args
@@ -728,9 +728,9 @@ def test_write_to_buffer_creates_dir_and_uses_zstd_level_1(tmp_path):
 def test_commit_buffer_returns_zero_summary_when_no_buffer_files(tmp_path):
     with (
         patch("backend.core.duckdb._cache_dir", return_value=str(tmp_path)),
-        patch("backend.core.iceberg._init_iceberg_table_locked") as mock_init,
+        patch("backend.core.storage._init_storage_table_locked") as mock_init,
     ):
-        out = iceberg.commit_buffer({"name": "svc"})
+        out = storage.commit_buffer({"name": "svc"})
     assert out == {"files_committed": 0, "rows_committed": 0, "snapshot_id": None, "quarantined_files": 0}
     mock_init.assert_not_called()
 
@@ -743,7 +743,7 @@ def test_quarantine_buffer_file_moves_with_sidecar_and_handles_collision(tmp_pat
     bad.write_bytes(b"not a parquet file")
 
     with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root / "bkt")):
-        new_path = iceberg._quarantine_buffer_file({"name": "svc"}, str(bad), RuntimeError("parquet footer is invalid"))
+        new_path = storage._quarantine_buffer_file({"name": "svc"}, str(bad), RuntimeError("parquet footer is invalid"))
 
     assert new_path is not None and ".quarantine" in new_path
     assert not bad.exists() and os.path.exists(new_path)
@@ -756,11 +756,11 @@ def test_quarantine_buffer_file_moves_with_sidecar_and_handles_collision(tmp_pat
     bad1 = buffer_dir / "batch_x.parquet"
     bad1.write_bytes(b"first bad")
     with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root / "bkt")):
-        p1 = iceberg._quarantine_buffer_file({"name": "svc"}, str(bad1), ValueError("first"))
+        p1 = storage._quarantine_buffer_file({"name": "svc"}, str(bad1), ValueError("first"))
     bad2 = buffer_dir / "batch_x.parquet"
     bad2.write_bytes(b"second bad")
     with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root / "bkt")):
-        p2 = iceberg._quarantine_buffer_file({"name": "svc"}, str(bad2), ValueError("second"))
+        p2 = storage._quarantine_buffer_file({"name": "svc"}, str(bad2), ValueError("second"))
     assert p1 != p2 and os.path.exists(p1) and os.path.exists(p2)
 
 
@@ -771,7 +771,7 @@ def test_commit_buffer_quarantines_unreadable_files_and_ignores_on_next_run(tmp_
     bad = buffer_dir / "batch_bad.parquet"
     bad.write_bytes(b"definitely not parquet")
 
-    result = iceberg.commit_buffer(source)
+    result = storage.commit_buffer(source)
     assert result["files_committed"] == 1 and result["quarantined_files"] == 1 and result["rows_committed"] == 3
     assert _lake_row_count(source) == 3
     assert good.exists() and len(list(good.parent.glob(good.name + ".consumed-*"))) == 1
@@ -781,7 +781,7 @@ def test_commit_buffer_quarantines_unreadable_files_and_ignores_on_next_run(tmp_
     assert len(list(quarantine_dir.glob("*.parquet.json"))) == 1
 
     _write_buffer_parquet(source, "batch_good_2.parquet", rows=1, offset=10)
-    second = iceberg.commit_buffer(source)
+    second = storage.commit_buffer(source)
     assert second["quarantined_files"] == 0 and second["files_committed"] == 1 and _lake_row_count(source) == 4
 
 
@@ -798,17 +798,17 @@ def test_commit_buffer_chunks_commits_when_files_exceed_chunk_size(tmp_path, mon
     source = _ducklake_source(tmp_path, "ck")
     paths = [_write_buffer_parquet(source, f"batch_{i:02d}.parquet", rows=1, offset=i) for i in range(7)]
 
-    result = iceberg.commit_buffer(source)
+    result = storage.commit_buffer(source)
     assert attaches["n"] == 3 and result["files_committed"] == 7 and result["rows_committed"] == 7
     assert _lake_row_count(source) == 7
     for p in paths:
         assert list(p.parent.glob(p.name + ".consumed-*"))
-    assert iceberg.buffer_files(source) == []
+    assert storage.buffer_files(source) == []
 
 
 def test_buffer_backlog_stats_empty_and_populated(tmp_path):
     with patch("backend.core.duckdb._cache_dir", return_value=str(tmp_path / "empty")):
-        assert iceberg.buffer_backlog_stats({"name": "svc"}) == {
+        assert storage.buffer_backlog_stats({"name": "svc"}) == {
             "file_count": 0,
             "total_bytes": 0,
             "oldest_age_seconds": 0,
@@ -825,7 +825,7 @@ def test_buffer_backlog_stats_empty_and_populated(tmp_path):
     os.utime(str(f1), (past, past))
 
     with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
-        stats = iceberg.buffer_backlog_stats({"name": "svc"})
+        stats = storage.buffer_backlog_stats({"name": "svc"})
     assert stats["file_count"] == 2 and stats["total_bytes"] == 300
     assert stats["oldest_age_seconds"] >= 590 and stats["oldest_path"] == str(f1)
 
@@ -953,7 +953,7 @@ def test_drop_service_ducklake_state_drops_real_tables_and_files(monkeypatch, tm
     import psycopg
 
     import backend.core.duckdb as core_duckdb
-    from backend.core.iceberg._core import _resolve_catalog_dsn, ducklake_table_name
+    from backend.core.storage._core import _resolve_catalog_dsn, ducklake_table_name
 
     data_dir = tmp_path / "data"
     monkeypatch.setattr(ducklake.config, "DUCKLAKE_DATA_PATH", str(data_dir))
@@ -1032,9 +1032,9 @@ def test_durable_serving_mode(monkeypatch, tmp_path):
 
     with (
         patch("backend.core.duckdb._configure_fos"),
-        patch("backend.core.iceberg.configure_duckdb_s3"),
-        patch("backend.core.iceberg._ducklake._ducklake_attach", return_value=True),
-        patch("backend.core.iceberg.update_iceberg_view"),
+        patch("backend.core.storage.configure_duckdb_s3"),
+        patch("backend.core.storage._ducklake._ducklake_attach", return_value=True),
+        patch("backend.core.storage.update_storage_view"),
     ):
         con = db.get_connection(source=source, read_only=True, skip_view_update=False)
     try:

@@ -22,9 +22,9 @@ _os.environ.setdefault("DEBUG_RESPONSES_FORCE_INCLUDE", "1")
 
 
 # Silence the "--- Logging error --- ValueError: I/O operation on closed file"
-# tracebacks that pytest's capture plugin provokes. The iceberg
+# tracebacks that pytest's capture plugin provokes. The storage
 # ``_write_table_summary_async`` background daemon thread (backend/core/
-# iceberg/_core.py) keeps running its metadata scan + ``logger.info(...)``
+# storage/_core.py) keeps running its metadata scan + ``logger.info(...)``
 # after the test that spawned it has finished; by then pytest has already
 # closed that test item's captured stderr, so the StreamHandler's
 # ``stream.write`` raises and ``logging.Handler.handleError`` prints a
@@ -226,7 +226,7 @@ def _close_telemetry_proxy_at_session_end():
     session teardown.
 
     The proxy is a process-lifetime singleton: ``start_proxy_server`` is lazy
-    and idempotent (FastAPI lifespan, DuckDB httpfs, and PyIceberg all call it),
+    and idempotent (FastAPI lifespan, DuckDB httpfs, and the DuckLake extension all call it),
     so a given xdist worker starts at most one ``aiohttp.ClientSession`` and
     never stops it — in production that's fine, the process just exits. Under
     pytest the worker's interpreter shuts down *after* pytest has torn down its
@@ -488,7 +488,7 @@ def _reset_module_caches():
     """Reset module-level caches between tests.
 
     Several modules cache state at import scope (schema metadata, FOS client,
-    iceberg views/snapshots, source registration). Across tests using the
+    storage views/snapshots, source registration). Across tests using the
     same source name with different in-memory DuckDB connections, that cache
     leaks and produces order-dependent failures — surfaced by
     ``pytest-randomly`` (Milestone A, task 0.3).
@@ -498,7 +498,7 @@ def _reset_module_caches():
     means they no longer have to.
     """
     # A-3: drain every cache registered via
-    # backend.utils.bounded_cache.CacheRegistry. The iceberg, duckdb,
+    # backend.utils.bounded_cache.CacheRegistry. The storage, duckdb,
     # dashboard, and network modules all register their caches at
     # module load — this single call replaces the long enumeration
     # the R-1 work expanded. New module-level caches that ship with a
@@ -637,7 +637,7 @@ MOCK_SERVICE_ID = "test-service-id"
 #
 # A single shared S3 mock replaces the four ad-hoc boto3-mocking idioms that
 # accumulated across the suite. Tests that need a "real" S3 endpoint to
-# exercise ingest/iceberg/state_sync paths should depend on `s3_mock` for the
+# exercise ingest/storage/state_sync paths should depend on `s3_mock` for the
 # bucket and `fos_source` for a source dict shaped like the real config.
 
 

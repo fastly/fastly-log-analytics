@@ -395,7 +395,7 @@ def test_rollups_safe_ident_rejects_trailing_newline():
 
 
 def test_lake_ident_rejects_trailing_newline():
-    from backend.core.iceberg.buffer import _lake_ident
+    from backend.core.storage.buffer import _lake_ident
 
     assert _lake_ident("client_vitals") == "client_vitals"
     with pytest.raises(ValueError):
@@ -410,7 +410,7 @@ def test_lake_ident_rejects_trailing_newline():
     ],
 )
 def test_ducklake_idents_reject_trailing_newline(call):
-    from backend.core.iceberg import _ducklake
+    from backend.core.storage import _ducklake
 
     with pytest.raises(ValueError, match="invalid ducklake"):
         call(_ducklake)

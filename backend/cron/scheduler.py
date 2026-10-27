@@ -553,9 +553,9 @@ _BACKLOG_BYTES_WARN = 1 * 1024 * 1024 * 1024
 
 def _check_buffer_backlog(src: dict, service_id: str, commit_interval_mins: int) -> str:
     try:
-        from backend.core import iceberg as db_iceberg
+        from backend.core import storage as db_storage
 
-        stats = db_iceberg.buffer_backlog_stats(src)
+        stats = db_storage.buffer_backlog_stats(src)
     except Exception as e:
         logger.warning("[scheduler] %s: buffer backlog probe failed: %s", service_id, e)
         return ""

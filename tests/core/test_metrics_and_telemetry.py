@@ -90,7 +90,7 @@ sys.modules.setdefault("backend.core.sql_safety", _duckdb_mod)
 if not hasattr(sys.modules["backend.utils.telemetry"], "sanitize_log_Url"):
     sys.modules["backend.utils.telemetry"].sanitize_log_Url = _redact_error_text  # type: ignore[attr-defined]
 sys.modules.setdefault("backend.main", SimpleNamespace(app=FastAPI()))  # type: ignore[arg-type]
-from backend.core.iceberg._core import _ducklake_attach, ducklake_table_name  # noqa: E402
+from backend.core.storage._core import _ducklake_attach, ducklake_table_name  # noqa: E402
 
 # ── Section 1: Metric Expressions & Null Default Helpers ─────────────────────
 
@@ -1047,7 +1047,7 @@ def test_durable_metrics_failure_legacy_refresh_and_lock_coalescing(durable_metr
     monkeypatch.setattr(
         "backend.core.duckdb.get_sync_status", MagicMock(side_effect=AssertionError("local/stale stats path called"))
     )
-    monkeypatch.setattr("backend.core.iceberg.get_table_info", lambda src: {})
+    monkeypatch.setattr("backend.core.storage.get_table_info", lambda src: {})
     monkeypatch.setattr("backend.repositories.usage.get_edge_ratio", lambda *a: (None, None))
     refresh_config_status(source["name"], include_top_values=False)
     assert config.get_status(source["name"])["request"]["total_rows"] == 1

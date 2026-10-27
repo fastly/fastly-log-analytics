@@ -776,17 +776,17 @@ def _committed_duckdb_field_types(src: dict) -> dict[str, str]:
         con.close()
 
 
-def _check_iceberg_type_lock(
+def _check_storage_type_lock(
     service_id: str, field_name: str, new_duckdb_type: str | None = None, new_value_type: str | None = None
 ) -> None:
     """Ensure we don't mutate the core type of an existing field in the committed table."""
-    from backend.core import iceberg as _iceberg
+    from backend.core import storage as _storage
 
     src = _db.get_source_for_service(service_id)
     if not src or src.get("storage_mode", "cloud") == "local":
         return
     try:
-        duckdb_to_arrow = getattr(_iceberg, "_DUCKDB_TO_ARROW", {})
+        duckdb_to_arrow = getattr(_storage, "_DUCKDB_TO_ARROW", {})
         existing_duckdb_type = _committed_duckdb_field_types(src).get(field_name)
         if existing_duckdb_type and new_duckdb_type:
             current_mapped = duckdb_to_arrow.get(existing_duckdb_type.upper(), existing_duckdb_type.upper())
@@ -814,7 +814,7 @@ def _check_iceberg_type_lock(
         ) from e
 
 
-def _locked_iceberg_field_names(src: dict | None, *, error_lead: str, error_tail: str) -> set[str]:
+def _locked_storage_field_names(src: dict | None, *, error_lead: str, error_tail: str) -> set[str]:
     """Return committed DuckLake/DuckDB-schema field names for ``src``; fail closed (503) on error."""
     if not src or src.get("storage_mode", "cloud") == "local":
         return set()
@@ -899,7 +899,7 @@ def api_create_custom_field(request: Request, service_id: str, body: CustomField
     cfg, lf, existing = _load_modifiable_custom_fields(
         request, service_id, field_dict.get("name", ""), "created manually"
     )
-    _check_iceberg_type_lock(
+    _check_storage_type_lock(
         service_id, field_dict["name"], field_dict.get("duckdb_type"), field_dict.get("value_type")
     )
     now = datetime.now(UTC).isoformat()
@@ -922,7 +922,7 @@ def api_update_custom_field(request: Request, service_id: str, field_name: str, 
     )
     if changing_type:
         src = _db.get_source_for_service(service_id)
-        schema_fields = _locked_iceberg_field_names(
+        schema_fields = _locked_storage_field_names(
             src,
             error_lead=f"Could not verify the committed schema for '{field_name}'",
             error_tail="the change was not applied. Please retry.",
@@ -1020,7 +1020,7 @@ def api_import_custom_fields(request: Request, service_id: str, body: CustomFiel
     fields_to_import = body.custom_fields
     lf = lf_module.get_lf_config(cfg)
     existing_map = {cf["name"]: cf for cf in lf.get("custom_fields", [])}
-    locked_field_names = _locked_iceberg_field_names(
+    locked_field_names = _locked_storage_field_names(
         _db.get_source_for_service(service_id),
         error_lead="Could not verify committed fields for import",
         error_tail="no changes were applied. Please retry.",
@@ -1454,12 +1454,12 @@ def provision_teardown(req: Request, body: ProvisionTeardownRequest | None = Non
                         yield _sse("status", f"Warning: Failed to update cron jobs: {e}")
 
                 try:
-                    from backend.core import iceberg as db_iceberg
+                    from backend.core import storage as db_storage
 
                     _cache_src = svcconfig.config_to_source(svc_cfg) if svc_cfg else {"name": sid}
-                    db_iceberg.invalidate_service_caches(_cache_src)
+                    db_storage.invalidate_service_caches(_cache_src)
                 except Exception:
-                    logger.debug("stream: db_iceberg.invalidate_service_caches failed (ignored)", exc_info=True)
+                    logger.debug("stream: db_storage.invalidate_service_caches failed (ignored)", exc_info=True)
 
                 _invalidate_service_credentials(sid)
 
@@ -2230,7 +2230,7 @@ def _startup_stub_response(request: Request) -> BootstrapResponse:
     (``backend.main._background_startup``) is still draining.
 
     Fields that depend on that warm-up (the real ``services`` list, per-service
-    ``schema``/``settings``, anything sourced from Iceberg/DuckDB) are withheld
+    ``schema``/``settings``, anything sourced from DuckLake/DuckDB) are withheld
     here — they stay `[]`/`None` until ``startup_complete`` flips.
     """
     from backend.core.request_telemetry import collection_enabled as _web_vitals_enabled
@@ -2593,7 +2593,7 @@ def _bootstrap_sync(
                 # RUM metrics from DuckDB RUM views
                 try:
                     from backend.core.duckdb import rum_source_for
-                    from backend.core.iceberg import execute_with_stale_view_retry
+                    from backend.core.storage import execute_with_stale_view_retry
                     from backend.deps import _ConnectionHolder
 
                     rum_source = rum_source_for(active_src)

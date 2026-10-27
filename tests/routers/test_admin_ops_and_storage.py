@@ -534,14 +534,14 @@ def test_apply_failure_sanitized_and_analyst_path_b_rejected(boundary, monkeypat
 
 def test_optimize_now_local_compact_and_compaction_stats_endpoints(client):
     fake_result = {"files_rewritten": 4, "files_added": 1, "bytes_rewritten": 12345}
-    with patch("backend.core.iceberg.optimize_table", return_value=fake_result) as m:
+    with patch("backend.core.storage.optimize_table", return_value=fake_result) as m:
         resp = client.post("/api/admin/optimize-now")
     assert resp.status_code == 200
     body = resp.json()
     assert body["files_rewritten"] == 4 and body["files_added"] == 1 and body["bytes_rewritten"] == 12345
     assert m.call_args.kwargs.get("min_files_per_partition") is None
 
-    with patch("backend.core.iceberg.optimize_table", return_value={"files_rewritten": 0}) as m2:
+    with patch("backend.core.storage.optimize_table", return_value={"files_rewritten": 0}) as m2:
         resp2 = client.post("/api/admin/optimize-now?min_files=1")
     assert resp2.status_code == 200 and m2.call_args.kwargs.get("min_files_per_partition") == 1
 
@@ -1525,7 +1525,7 @@ def test_background_task_endpoints_return_existing_run_when_already_running(
 def test_tree_endpoints_pass_correct_root_and_return_children(
     client, endpoint: str, expected_root: str, child_name: str, child_size: int
 ):
-    """Raw and iceberg tree endpoints pass their respective ``root`` and return ``nodes``."""
+    """Raw and storage tree endpoints pass their respective ``root`` and return ``nodes``."""
     fake_result = {"children": [{"name": child_name, "size": child_size, "type": "directory"}]}
     with patch("backend.core.duckdb.get_raw_tree_node", return_value=fake_result) as mock_get:
         resp = client.get(endpoint, headers=SVC_HEADERS)

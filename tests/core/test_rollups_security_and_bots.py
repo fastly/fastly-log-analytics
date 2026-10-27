@@ -94,7 +94,7 @@ def _writer_ctx(cache_root, table: str, con_fn, db_path: str | None = None):
 def _compact_ctx(cache_root):
     with (
         patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
-        patch("backend.core.iceberg.view._get_service_lock", _noop_lock),
+        patch("backend.core.storage.view._get_service_lock", _noop_lock),
     ):
         yield
 
@@ -1020,7 +1020,7 @@ class TestRollupsSecurityProxies:
 
         with (
             patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
-            patch("backend.core.iceberg.view._get_service_lock", _noop_lock),
+            patch("backend.core.storage.view._get_service_lock", _noop_lock),
         ):
             assert day_bundles.compact_security_proxies_closed_days_to_daily("svc-sp-6", src) == 3
 
@@ -1228,7 +1228,7 @@ class TestRollupsVerifiedBotsTs:
 
         with (
             patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
-            patch("backend.core.iceberg.view._get_service_lock", _noop_lock),
+            patch("backend.core.storage.view._get_service_lock", _noop_lock),
         ):
             assert rollups.compact_verified_bots_ts_closed_days_to_daily("svc-vbts-cd", src) == 1
 
@@ -1253,7 +1253,7 @@ class TestRollupsVerifiedBotsTs:
 
         with (
             patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
-            patch("backend.core.iceberg.view._get_service_lock", _noop_lock),
+            patch("backend.core.storage.view._get_service_lock", _noop_lock),
         ):
             assert (
                 rollups.compact_verified_bots_ts_closed_days_to_daily(
