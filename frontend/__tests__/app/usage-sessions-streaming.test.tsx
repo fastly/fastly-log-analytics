@@ -322,6 +322,25 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
     expect(screen.getByText(/Partial estimate — storage cost excluded\./)).toBeInTheDocument()
   })
 
+  test('storage breakdown itemizes cloud-copy deletions and expired archive inside Deleted (Still Billed)', async () => {
+    mockGet.mockImplementation(async (path: string) => {
+      if (path === '/api/usage/current-storage') {
+        return {
+          data: {
+            live_bytes: 0, live_files: 0, quarantine_bytes: 0, total_billed_bytes: 0, total_billed_gb_hours: 0,
+            total_files: 0, total_bytes: 0, start: '', end: '',
+            deleted_bytes: 3 * 1024 ** 3, cloud_copy_deleted_bytes: 2 * 1024 ** 3, archive_expired_bytes: 1024 ** 3,
+          },
+        } as never
+      }
+      return undefined
+    })
+    renderWithQuery(<UsagePage />, { queryClient })
+    expect(await screen.findByText('of which cloud-copy and compaction deletions:')).toBeInTheDocument()
+    expect(screen.getByText('of which expired High-Scale archive:')).toBeInTheDocument()
+    expect(screen.getByText('2 GB')).toBeInTheDocument()
+  })
+
   test('sessions page mounts and renders title', () => {
     renderWithQuery(<SessionsPage />, { queryClient })
     expect(screen.getByText('User Sessions')).toBeInTheDocument()
