@@ -2005,7 +2005,7 @@ async def _handle_request_inner(request: web.Request) -> web.StreamResponse:
             _submit_log_write(service_id, row, process_context)
 
             # Cost guardrail: dashboard reads MUST NOT hit FOS directly.
-            # Warn loudly so the regression class (the iceberg_scan vs
+            # Warn loudly so the regression class (the former remote-scan vs
             # read_parquet incident) is visible. Do not block — visibility
             # over enforcement until Phase 3 wires clients to the proxy.
             # Health check probes (e.g. /api/admin/health-snapshot) intentionally test

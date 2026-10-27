@@ -11,7 +11,7 @@ dependencies = [
     # Pin to the 1.5 line specifically. Pre-1.3 ships without the
     # canonical ``.to_arrow_table()`` method on DuckDBPyConnection
     # (only the now-deprecated ``.fetch_arrow_table()`` alias), so
-    # ingest.py / iceberg/buffer.py / rollups/recompute.py — which all
+    # ingest.py / storage/_core.py / rollups/recompute.py — which all
     # use ``.to_arrow_table()`` — silently break on a dev box that
     # resolved an older version. Prod docker has consistently shipped
     # 1.5.x; matching that here closes the dev/prod drift window.

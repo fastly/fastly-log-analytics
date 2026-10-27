@@ -124,7 +124,6 @@ _MODULE_ALIASES: dict[str, str] = {
     "backend.high_scale.rum_recovery": "backend.high_scale.rum",
     "backend.high_scale.rum_ingest": "backend.high_scale.ingest_controller",
     "backend.cron.lifecycle": "backend.cron.scheduler",
-    "backend.routers.admin.iceberg": "backend.routers.admin.compaction",
     "backend.routers.admin_queries": "backend.routers.admin.admin_queries",
     "backend.models.network": "backend.models.analytics",
     "backend.models.provision": "backend.models.common",
