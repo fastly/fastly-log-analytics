@@ -594,7 +594,12 @@ class PgConnectionWrapper:
         wrap = PgCursorWrapper(cur)
         if id_col is not None:
             res = cur.fetchone()
-            wrap._lastrowid = res[0] if isinstance(res, tuple | list) else (res[id_col] if res else None)
+            if isinstance(res, tuple | list):
+                wrap._lastrowid = res[0]
+            elif res:
+                wrap._lastrowid = res[id_col]
+            else:
+                wrap._lastrowid = None
         return wrap
 
     def executemany(self, sql: str, seq_of_params: list[Any]):
@@ -1142,7 +1147,6 @@ _SCHEMA = [
 
 # ── Postgres schema DDL & boot-time ensure (folded from pg_schema.py) ─────────
 
-import sys as _sys  # noqa: E402
 import time as _t  # noqa: E402
 from collections.abc import Callable  # noqa: E402
 from typing import Any  # noqa: E402
@@ -1905,25 +1909,38 @@ def get_source_for_service(service_id: str | None = None) -> dict[str, Any] | No
 
 _JSON_DICT_ADAPTER: TypeAdapter[dict[str, Any]] = TypeAdapter(dict[str, Any])
 _JSON_LIST_ADAPTER: TypeAdapter[list[Any]] = TypeAdapter(list[Any])
-_StrOrEmpty = Annotated[str, BeforeValidator(lambda v: str(v) if v is not None else "")]
-_JsonDict = Annotated[
-    dict[str, Any],
-    BeforeValidator(
-        lambda v: _JSON_DICT_ADAPTER.validate_json(v or "{}") if isinstance(v, (str, bytes)) else (v or {})
-    ),
-]
-_JsonList = Annotated[
-    list[Any],
-    BeforeValidator(
-        lambda v: (_JSON_LIST_ADAPTER.validate_json(v) if isinstance(v, (str, bytes)) else list(v)) if v else []
-    ),
-]
-_JsonOptList = Annotated[
-    list[Any] | None,
-    BeforeValidator(
-        lambda v: (_JSON_LIST_ADAPTER.validate_json(v) if isinstance(v, (str, bytes)) else list(v)) if v else None
-    ),
-]
+
+
+def _coerce_str_or_empty(v: Any) -> str:
+    return str(v) if v is not None else ""
+
+
+def _coerce_json_dict(v: Any) -> dict[str, Any]:
+    if isinstance(v, (str, bytes)):
+        return _JSON_DICT_ADAPTER.validate_json(v or "{}")
+    return v or {}
+
+
+def _coerce_json_list(v: Any) -> list[Any]:
+    if not v:
+        return []
+    if isinstance(v, (str, bytes)):
+        return _JSON_LIST_ADAPTER.validate_json(v)
+    return list(v)
+
+
+def _coerce_json_opt_list(v: Any) -> list[Any] | None:
+    if not v:
+        return None
+    if isinstance(v, (str, bytes)):
+        return _JSON_LIST_ADAPTER.validate_json(v)
+    return list(v)
+
+
+_StrOrEmpty = Annotated[str, BeforeValidator(_coerce_str_or_empty)]
+_JsonDict = Annotated[dict[str, Any], BeforeValidator(_coerce_json_dict)]
+_JsonList = Annotated[list[Any], BeforeValidator(_coerce_json_list)]
+_JsonOptList = Annotated[list[Any] | None, BeforeValidator(_coerce_json_opt_list)]
 
 
 class _AuditLogRow(BaseModel):
@@ -2554,16 +2571,29 @@ def export_admin_state(service_id: str):
         logger.warning(f"[state_sync] Failed to export admin state: {e}")
 
 
-_self = _sys.modules[__name__]
-_sys.modules["backend.state_sync"] = _self
-_sys.modules.setdefault("backend.core.metadata.alerts", _self)
-if "backend" in _sys.modules:
-    setattr(_sys.modules["backend"], "state_sync", _self)
-    if hasattr(_sys.modules["backend"], "_MODULE_ALIASES"):
-        _sys.modules["backend"]._MODULE_ALIASES.update(
+_self = sys.modules[__name__]
+_METADATA_BASE_ALIASES = (
+    "backend.core.metadata.pg_schema",
+    "backend.core.metadata.reconciliation",
+    "backend.core.metadata.state",
+    "backend.core.metadata.alerts",
+    "backend.core.metadata.asn_cache",
+    "backend.core.metadata.views",
+    "backend.state_sync",
+)
+for _mod_name in _METADATA_BASE_ALIASES:
+    sys.modules[_mod_name] = _self
+if "backend.core.metadata" in sys.modules:
+    _meta_pkg = sys.modules["backend.core.metadata"]
+    for _attr in ("pg_schema", "reconciliation", "state", "alerts", "asn_cache", "views"):
+        setattr(_meta_pkg, _attr, _self)
+if "backend" in sys.modules:
+    setattr(sys.modules["backend"], "state_sync", _self)
+    if hasattr(sys.modules["backend"], "_MODULE_ALIASES"):
+        for _mod_name in _METADATA_BASE_ALIASES:
+            sys.modules["backend"]._MODULE_ALIASES[_mod_name] = __name__
+        sys.modules["backend"]._MODULE_ALIASES.update(
             {
-                "backend.state_sync": __name__,
-                "backend.core.metadata.alerts": __name__,
                 "backend.utils.ngwaf": "backend.core.rollups.security_dims",
                 "backend.core.rollups.ngwaf_bots": "backend.core.rollups.security_dims",
                 "backend.core.rollups.hour_bundles": "backend.core.rollups.day_bundles",
@@ -2575,32 +2605,3 @@ if "backend" in _sys.modules:
                 "backend.scoring.matrix": "backend.scoring",
             }
         )
-
-_self = sys.modules[__name__]
-for _mod_name in (
-    "backend.core.metadata.pg_schema",
-    "backend.core.metadata.reconciliation",
-    "backend.core.metadata.state",
-    "backend.core.metadata.alerts",
-    "backend.core.metadata.asn_cache",
-    "backend.core.metadata.views",
-    "backend.state_sync",
-):
-    sys.modules[_mod_name] = _self
-if "backend.core.metadata" in sys.modules:
-    _meta_pkg = sys.modules["backend.core.metadata"]
-    for _attr in ("pg_schema", "reconciliation", "state", "alerts", "asn_cache", "views"):
-        setattr(_meta_pkg, _attr, _self)
-if "backend" in sys.modules:
-    setattr(sys.modules["backend"], "state_sync", _self)
-    if hasattr(sys.modules["backend"], "_MODULE_ALIASES"):
-        for _mod_name in (
-            "backend.core.metadata.pg_schema",
-            "backend.core.metadata.reconciliation",
-            "backend.core.metadata.state",
-            "backend.core.metadata.alerts",
-            "backend.core.metadata.asn_cache",
-            "backend.core.metadata.views",
-            "backend.state_sync",
-        ):
-            sys.modules["backend"]._MODULE_ALIASES[_mod_name] = __name__

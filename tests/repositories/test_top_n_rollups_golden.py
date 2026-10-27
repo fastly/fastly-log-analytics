@@ -510,6 +510,7 @@ def test_first_heal_warning_fires_on_a_freshly_booted_host(tmp_path: Path, monke
 
 # ── IP spread rollups golden + unit tests (merged from test_ip_spread_rollups_golden.py) ──
 
+from backend.core.rollups._common import IP_SPREAD_BUNDLE_FILENAME  # noqa: E402
 from backend.repositories.top_n_rollups import (  # noqa: E402
     IpSpreadPlan,
     TopNWindow,
@@ -519,8 +520,6 @@ from backend.repositories.top_n_rollups import (  # noqa: E402
     spread_meta,
 )
 from backend.utils.hll import HyperLogLog  # noqa: E402
-
-from backend.core.rollups._common import IP_SPREAD_BUNDLE_FILENAME  # noqa: E402
 
 IP_SPREAD_GOLDEN_PATH = Path(__file__).parent / "golden" / "ip_spread_rollups.json"
 IP_SPREAD_FIELDS = ["country", "ua"]
@@ -2740,9 +2739,6 @@ from backend.core.share_db.validation import apply_pii_policy
 from backend.high_scale.archive_models import ServingWatermark
 from backend.high_scale.registry_bootstrap import HighScaleService
 from backend.models.dashboard import AggregatesRequest, FieldValuesRequest, RawRequest
-from backend.repositories.cmcd import get_cmcd_aggregates
-from backend.repositories.performance import get_performance_aggregates
-from backend.repositories.query import _ANALYST_WINDOW_VIEW, MAX_QUERY_ROWS, execute_query, get_presets
 
 from backend import config as svcconfig
 from backend.core import duckdb as db_core
@@ -2761,6 +2757,7 @@ from backend.repositories import _base as repo_base
 from backend.repositories import dashboard as dash
 from backend.repositories import query as q
 from backend.repositories._base import _safe_table
+from backend.repositories.cmcd import get_cmcd_aggregates
 from backend.repositories.dashboard import (
     DASHBOARD_CACHE_TTL,
     FIELDS,
@@ -2769,6 +2766,8 @@ from backend.repositories.dashboard import (
     get_field_values,
     get_raw_df,
 )
+from backend.repositories.performance import get_performance_aggregates
+from backend.repositories.query import _ANALYST_WINDOW_VIEW, MAX_QUERY_ROWS, execute_query, get_presets
 from backend.utils import bot_sources, rdns_cache
 from backend.utils.telemetry import set_page_load_id
 from tests._helpers.duckdb_fixtures import generate_mock_logs, insert_mock_logs
@@ -3046,6 +3045,155 @@ def test_get_field_values_validation_and_country_and_cache(in_memory_duckdb, tes
         (tmp_path / "top_values.json").write_text(_json.dumps({"country": [{"value": "ZZ", "count": 999}]}))
         out_cached = get_field_values(in_memory_duckdb, test_service_source, "country", "", 10, None, None, {})
         assert out_cached["values"][0]["value"] == "ZZ"
+
+
+@pytest.mark.parametrize(
+    ("start_time", "end_time", "filters", "expected"),
+    [
+        ("2026-01-02T00:00:00Z", "2026-01-02T23:59:59Z", {}, {"GET": 1, "POST": 1}),
+        ("2026-01-02T00:00:00Z", None, {}, {"GET": 1, "POST": 1, "DELETE": 1}),
+        (None, "2026-01-02T23:59:59Z", {}, {"GET": 2, "POST": 1}),
+        (None, None, {"country": FilterSpec(mode="include", values=["US"])}, {"GET": 2}),
+        (
+            None,
+            None,
+            {
+                "country": FilterSpec(mode="include", values=["GB"]),
+                "method": FilterSpec(mode="include", values=["GET"]),
+            },
+            {"POST": 1, "DELETE": 1},
+        ),
+    ],
+)
+def test_get_field_values_scoped_requests_ignore_sample_cache(
+    in_memory_duckdb, test_service_source, tmp_path, start_time, end_time, filters, expected
+):
+    table_name = _empty_logs_table(in_memory_duckdb, test_service_source)
+    in_memory_duckdb.executemany(
+        f"""INSERT INTO {table_name} (timestamp, "method", country, ip, url)
+            VALUES (?, ?, ?, '192.0.2.1', '/fixture')""",
+        [
+            ("2026-01-01T12:00:00Z", "GET", "US"),
+            ("2026-01-02T12:00:00Z", "GET", "US"),
+            ("2026-01-02T12:00:00Z", "POST", "GB"),
+            ("2026-01-03T12:00:00Z", "DELETE", "GB"),
+        ],
+    )
+    (tmp_path / "top_values.json").write_text(_json.dumps({"method": [{"value": "CACHED_ONLY", "count": 999}]}))
+    with patch("backend.core.duckdb._cache_dir", return_value=str(tmp_path)):
+        result = get_field_values(
+            in_memory_duckdb, test_service_source, "method", "", 10, start_time, end_time, filters
+        )
+    assert {row["value"]: row["count"] for row in result["values"]} == expected
+
+
+@pytest.mark.parametrize("now", ["2026-10-27T03:30:00Z", "2026-10-27T05:30:00Z"])
+@pytest.mark.parametrize("missing_hour", [False, True])
+@pytest.mark.parametrize(
+    ("start", "end"),
+    [("02:03", "03:03"), ("02:00", "03:00"), ("02:03", "02:40"), ("02:00", "04:00"), ("03:01", "03:03")],
+)
+def test_dashboard_country_rollups_match_scoped_filter_at_hour_boundaries(
+    in_memory_duckdb, test_service_source, tmp_path, monkeypatch, now, start, end, missing_hour
+):
+    table = _empty_logs_table(in_memory_duckdb, test_service_source)
+    in_memory_duckdb.executemany(
+        f"INSERT INTO {table} (timestamp, country, ip, url, waf_sig) VALUES (?, ?, '192.0.2.1', '/fixture', 'A, B')",
+        [
+            (f"2026-10-27T{stamp}:00Z", country)
+            for stamp, country in [
+                ("02:00", "US"),
+                ("02:02", "US"),
+                ("02:03", "US"),
+                ("02:30", "CA"),
+                ("03:00", "US"),
+                ("03:02", "US"),
+                ("03:03", "US"),
+                ("03:03", "US"),
+                ("03:04", "US"),
+                ("03:59", "CA"),
+                ("04:00", "US"),
+            ]
+        ],
+    )
+    monkeypatch.setattr(db_core, "_cache_dir", lambda _src: str(tmp_path))
+    monkeypatch.setattr(rr, "rollups_present", lambda _src: True)
+    monkeypatch.setattr(QueryRunner, "_create_active_hour_temp_direct", lambda *args, **kwargs: None)
+    for hour in ("02", "03"):
+        if missing_hour and hour == "03":
+            continue
+        directory = tmp_path / "rollups" / "hour_bundled" / f"hour=2026-10-27-{hour}"
+        directory.mkdir(parents=True)
+        in_memory_duckdb.execute(
+            f"""COPY (
+                WITH events AS (SELECT * FROM {table} WHERE strftime(timestamp, '%H') = ?)
+                SELECT 'country' AS field, country AS value, count(*) AS count FROM events GROUP BY country
+                UNION ALL
+                SELECT 'waf_sig_ind', trim(signal), count(*)
+                FROM (SELECT unnest(string_split(waf_sig, ',')) AS signal FROM events)
+                GROUP BY 2
+            ) TO ? (FORMAT PARQUET)""",
+            [str(directory / "all_fields.parquet"), hour],
+        )
+    kwargs = dict(
+        con=in_memory_duckdb,
+        src=test_service_source,
+        start_time=f"2026-10-27T{start}:00Z",
+        end_time=f"2026-10-27T{end}:00Z",
+        chart_interval="1 minute",
+        chart_metric="requests",
+        fields_filter=["country", "waf_sig_ind"],
+        include_time_series=False,
+        include_conn_requests=False,
+    )
+    with time_machine.travel(now, tick=False):
+        initial = get_aggregates(filters={}, **kwargs)
+        filtered = get_aggregates(filters={"country": FilterSpec(mode="include", values=["US"])}, **kwargs)
+    initial_us = next(row["count"] for row in initial["data"]["country"]["top"] if row["value"] == "US")
+    assert initial_us == filtered["total_rows"]
+    assert {row["country"]: row["count"] for row in initial["map_data"]}["US"] == initial_us
+    assert {row["value"]: row["count"] for row in initial["data"]["waf_sig_ind"]["top"]} == {
+        "A": initial["total_rows"],
+        "B": initial["total_rows"],
+    }
+    if start == "02:00" and end in ("03:00", "04:00"):
+        assert any("read_parquet" in row["sql"] for row in initial["debug_queries"])
+
+
+@pytest.mark.parametrize("failed_read", ["rollup", "boundary", "active"])
+def test_dashboard_exact_top_n_propagates_read_failures(
+    in_memory_duckdb, test_service_source, tmp_path, monkeypatch, failed_read
+):
+    table = _empty_logs_table(in_memory_duckdb, test_service_source)
+    directory = tmp_path / "rollups" / "hour_bundled" / "hour=2026-10-27-02"
+    directory.mkdir(parents=True)
+    in_memory_duckdb.execute(
+        "COPY (SELECT 'country' AS field, 'US' AS value, 1::BIGINT AS count) TO ? (FORMAT PARQUET)",
+        [str(directory / "all_fields.parquet")],
+    )
+    monkeypatch.setattr(db_core, "_cache_dir", lambda _src: str(tmp_path))
+    runner = QueryRunner(in_memory_duckdb, test_service_source)
+    execute = runner.execute
+
+    def fail_execute(sql, *args, **kwargs):
+        if (failed_read == "rollup" and "read_parquet" in sql) or (
+            failed_read == "boundary" and "SELECT * FROM" in sql
+        ):
+            raise duckdb.IOException("fixture read failure")
+        return execute(sql, *args, **kwargs)
+
+    def fail_active(*args, **kwargs):
+        raise duckdb.IOException("fixture read failure")
+
+    monkeypatch.setattr(runner, "execute", fail_execute)
+    monkeypatch.setattr(
+        runner, "_create_active_hour_temp_direct", fail_active if failed_read == "active" else lambda *a, **k: None
+    )
+    with (
+        time_machine.travel("2026-10-27T03:30:00Z", tick=False),
+        pytest.raises(duckdb.IOException, match="fixture read failure"),
+    ):
+        runner.execute_top_n_rollups(["country"], "2026-10-27T02:00:00Z", "2026-10-27T03:03:00Z", exact_window=True)
 
 
 def test_get_field_values_bot_name_and_asn_search(in_memory_duckdb, test_service_source, tmp_path):

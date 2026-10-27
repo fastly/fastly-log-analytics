@@ -158,9 +158,8 @@ def test_detector_flags_the_known_bad_shapes_and_accepts_safe_ones():
 def test_analyst_reachable_routes_return_no_raw_exception_text():
     """Route-table tripwire: every non-blocked (analyst-reachable) route handler is clean, and any allow-listed
     handler that analysts can reach must be an authored-validation exception."""
-    from backend.utils.remote_access import _is_blocked_path
-
     from backend.main import app
+    from backend.utils.remote_access import _is_blocked_path
 
     reachable: dict[str, set[str]] = {}
     for route in app.routes:
@@ -873,7 +872,6 @@ def test_admin_paths_blocked_for_analyst(probe_session, path):
 
 # ── Merged from tests/security/test_adversarial_ast_pii_redaction.py ──
 
-from backend.utils.remote_access import RemoteAccessMiddleware
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -881,6 +879,7 @@ from backend.core import share_db
 from backend.repositories.query import execute_query
 from backend.routers import share_admin, share_auth
 from backend.utils import tunnel
+from backend.utils.remote_access import RemoteAccessMiddleware
 
 RAW_IP = "198.51.100.42"
 RAW_SESSION = "deadbeefcafe1234567890abcdef"

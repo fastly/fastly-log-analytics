@@ -17,6 +17,7 @@ from backend.repositories._base import (
     _safe_table,
     record_duckdb_query,
 )
+from backend.repositories.utils.response_shaping import build_query_response_envelope
 from backend.utils.bounded_cache import BoundedTTLCache
 from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry
 from backend.utils.date_utils import parse_iso_utc
@@ -293,21 +294,17 @@ def _run_validated_query(
         records = mask_ip_values(records)
     timer.mark("serialize_json", _t_serialize)
 
-    resp: dict[str, Any] = {
-        "columns": columns,
-        "data": records,
-        "row_count": len(records),
-        "total_rows": total_rows,
-        "truncated": truncated,
-        "elapsed_ms": int(elapsed_ms),
-        "debug_queries": _debug_queries,
-        "_debug_queries": _debug_queries,
-        "debug_calls": get_tracked_calls(),
-        "section_timings": section_timings,
-    }
-    if explain_plan is not None:
-        resp["explain_plan"] = explain_plan
-    return resp
+    return build_query_response_envelope(
+        columns=columns,
+        data=records,
+        total_rows=total_rows,
+        truncated=truncated,
+        elapsed_ms=elapsed_ms,
+        debug_queries=_debug_queries,
+        debug_calls=get_tracked_calls(),
+        section_timings=section_timings,
+        explain_plan=explain_plan,
+    )
 
 
 def get_presets(src: dict | None, con: duckdb.DuckDBPyConnection | None = None) -> list[dict]:

@@ -159,6 +159,35 @@ async def dashboard_bundle(
         # wedge. Mirrors the non-high-scale branch's off-loop execution below.
         return await asyncio.to_thread(high_scale_bundle, high_scale_service, req, start_time, end_time)
 
+    sections = _expand_sections(req.sections)
+    its, icr, imd, itn = _resolve_aggregate_flags(req, sections)
+    want_aggregates = sections is None or bool(sections & {"core", "topten"})
+    want_bots = sections is None or "bots" in sections
+    aggregate_kwargs: dict[str, Any] = {
+        "start_time": start_time,
+        "end_time": end_time,
+        "filters": req.filters,
+        "chart_interval": req.chart_interval,
+        "chart_metric": req.chart_metric,
+        "fields_filter": req.fields,
+        "include_time_series": its,
+        "include_conn_requests": icr,
+        "include_map_data": imd,
+        "include_top_n": itn,
+    }
+    cached_aggregates = None
+    cached_bots = None
+    t_cache = time.perf_counter()
+    if want_aggregates and getattr(repo.get_aggregates, "__module__", "") == "backend.repositories.dashboard":
+        cached_aggregates = repo.peek_aggregates(src=ctx.source, **aggregate_kwargs)
+    if want_bots and getattr(security_repo.get_top_bots, "__module__", "") == "backend.repositories.security":
+        cached_bots = security_repo.peek_top_bots(
+            src=ctx.source, start_time=start_time, end_time=end_time, filters=req.filters
+        )
+    timer.mark("bundle:cache_lookup", t_cache)
+    if (not want_aggregates or cached_aggregates is not None) and (not want_bots or cached_bots is not None):
+        return _assemble_dashboard_bundle_response(cached_aggregates, cached_bots, section_timings)
+
     # Resolve the primary pooled connection OFF the asyncio event loop. The
     # first ``ctx.con`` access performs a BLOCKING pool checkout (DuckLake
     # attach + Iceberg view rebuild + up-to-max_wait lock retry); passed as an
@@ -186,29 +215,8 @@ async def dashboard_bundle(
     await ctx.prewarm_con()
     timer.mark("bundle:primary_checkout", t_prewarm)
 
-    sections = _expand_sections(req.sections)
-    its, icr, imd, itn = _resolve_aggregate_flags(req, sections)
-    # ``sections=None`` preserves the pre-selector contract (both branches
-    # fire). Otherwise only run the aggregates branch when ``core`` OR
-    # ``topten`` is requested, and only run top_bots when ``bots`` is.
-    want_aggregates = sections is None or bool(sections & {"core", "topten"})
-    want_bots = sections is None or "bots" in sections
-
     def _run_aggregates(con) -> Any:
-        return repo.get_aggregates(
-            con=con,
-            src=ctx.source,
-            start_time=start_time,
-            end_time=end_time,
-            filters=req.filters,
-            chart_interval=req.chart_interval,
-            chart_metric=req.chart_metric,
-            fields_filter=req.fields,
-            include_time_series=its,
-            include_conn_requests=icr,
-            include_map_data=imd,
-            include_top_n=itn,
-        )
+        return repo.get_aggregates(con=con, src=ctx.source, **aggregate_kwargs)
 
     # The dashboard ALWAYS shows the two bot cards (Fastly Bots + NGWAF
     # Verified Bots), independent of which other top-N cards the lazy

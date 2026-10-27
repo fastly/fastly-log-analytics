@@ -25,9 +25,9 @@ from io import BytesIO
 from unittest.mock import MagicMock
 
 import botocore.exceptions
-from backend.core.faro_versions import DEFAULT_FARO_VERSION
 
 from backend import config as svcconfig
+from backend.core.faro_versions import DEFAULT_FARO_VERSION
 from backend.provision import fos_setup
 from backend.provision.fastly_api import _CDN_NO_CACHE_404_SNIPPET_NAME, _CDN_SNIPPETS
 from backend.provision.fos_setup import object_storage_enabled, product_enabled

@@ -246,16 +246,6 @@ if isinstance(_aliases, dict):
             "backend.models.dashboard": "backend.models.analytics",
             "backend.models.security": "backend.models.analytics",
             "backend.models.sessions": "backend.models.analytics",
-            "backend.repositories._sql.rum": "backend.repositories.rum",
-            "backend.repositories._sql.security": "backend.repositories.security",
-            "backend.repositories._sql.alerts": "backend.repositories.assets",
-            "backend.repositories._sql.query": "backend.repositories.dashboard",
-            "backend.repositories.utils.filters": "backend.repositories._base",
-            "backend.repositories.query": "backend.repositories.dashboard",
-            "backend.repositories.alerts": "backend.repositories.assets",
-            "backend.repositories.audit": "backend.repositories.assets",
-            "backend.routers.alerts": "backend.routers.control_room",
-            "backend.routers.audit": "backend.routers.control_room",
         }
     )
 

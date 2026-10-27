@@ -22,8 +22,14 @@ from backend.repositories.utils.response_cache import (
     digest_cache_key,
     serialize_filters_for_key,
 )
+from backend.repositories.utils.response_shaping import (
+    CMCD_TS_DEFAULTS,
+    empty_cmcd_aggregates,
+    enrich_asn_rows,
+    opt_float,
+    pad_timeseries_buckets,
+)
 from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry
-from backend.utils.date_utils import parse_iso_utc
 
 OVERVIEW = """
     WITH base_metrics AS (
@@ -226,12 +232,11 @@ def _compute_cmcd_aggregates(
     timer.mark("get_schema_cols", _t, activity="overhead", current_execution=True)
 
     if not actual_cols or _CMCD_REQUIRED_COL not in actual_cols:
-        return {
-            "available": _CMCD_REQUIRED_COL in actual_cols if actual_cols else False,
-            "has_data": False,
-            "section_timings": section_timings,
+        return empty_cmcd_aggregates(
+            available=_CMCD_REQUIRED_COL in actual_cols if actual_cols else False,
+            section_timings=section_timings,
             **runner.telemetry(),
-        }
+        )
 
     cached = _memo.get(cache_key)
     if cached is not None:
@@ -421,7 +426,7 @@ def _compute_cmcd_aggregates(
                         end_time,
                         bucket_seconds,
                         sessions_ts_dict,
-                        {"concurrent_sessions": 0, "rebuffer_session_pct": None, "new_sessions": 0},
+                        CMCD_TS_DEFAULTS["sessions_ts"],
                     )
                 if want_ts["buffer_health_ts"]:
                     buffer_health_dict = {
@@ -437,7 +442,7 @@ def _compute_cmcd_aggregates(
                         end_time,
                         bucket_seconds,
                         buffer_health_dict,
-                        {"p50_buffer": None, "p95_buffer": None, "starvation_rate": None},
+                        CMCD_TS_DEFAULTS["buffer_health_ts"],
                     )
                 if want_ts["bitrate_ts"]:
                     bitrate_dict = {
@@ -452,7 +457,7 @@ def _compute_cmcd_aggregates(
                         end_time,
                         bucket_seconds,
                         bitrate_dict,
-                        {"avg_bitrate": None, "utilization_ratio": None},
+                        CMCD_TS_DEFAULTS["bitrate_ts"],
                     )
                 if want_ts["throughput_ts"]:
                     throughput_dict = {
@@ -468,7 +473,7 @@ def _compute_cmcd_aggregates(
                         end_time,
                         bucket_seconds,
                         throughput_dict,
-                        {"p50": None, "p95": None, "p99": None},
+                        CMCD_TS_DEFAULTS["throughput_ts"],
                     )
                 if want_ts["startup_ts"]:
                     startup_dict = {
@@ -482,7 +487,7 @@ def _compute_cmcd_aggregates(
                         end_time,
                         bucket_seconds,
                         startup_dict,
-                        {"startup_ratio": None},
+                        CMCD_TS_DEFAULTS["startup_ts"],
                     )
             else:
                 if want_ts["sessions_ts"]:
@@ -559,23 +564,21 @@ def _compute_cmcd_aggregates(
                 top_n=top_n,
             )
             rows = runner.execute(sql).fetchall()
-            from backend.core import duckdb as _db
-
-            asn_list = [int(r[0]) for r in rows if str(r[0]).isdigit()]
-            asn_names = _db.get_asn_names(src["name"], asn_list)
-            results["rebuffer_by_asn"] = [
-                {
-                    "asn": r[0],
-                    "label": _db.format_asn_label(int(r[0]), asn_names.get(int(r[0]), ""))
-                    if str(r[0]).isdigit()
-                    else str(r[0]),
-                    "rebuffer_rate": _round_val(r[1]),
-                    "session_count": r[2],
-                    "avg_bitrate": _round_val(r[3]),
-                    "avg_buffer_length": _round_val(r[4]),
-                }
-                for r in rows
-            ]
+            results["rebuffer_by_asn"] = enrich_asn_rows(
+                [
+                    {
+                        "asn": r[0],
+                        "label": "",
+                        "rebuffer_rate": _round_val(r[1]),
+                        "session_count": r[2],
+                        "avg_bitrate": _round_val(r[3]),
+                        "avg_buffer_length": _round_val(r[4]),
+                    }
+                    for r in rows
+                ],
+                src["name"],
+                asn_key="asn",
+            )
             timer.mark("rebuffer_by_asn", _t, source="live", activity="compute", current_execution=True)
 
         # ── Object Type + Streaming Format (combined scan) ────────────────
@@ -633,9 +636,7 @@ def _rebuffer_rate_expr(has_bs: bool) -> str:
 
 
 def _round_val(v: Any) -> Any:
-    if v is None:
-        return None
-    return round(float(v), 2)
+    return opt_float(v, 2)
 
 
 def _pad_timeseries(
@@ -645,35 +646,7 @@ def _pad_timeseries(
     db_rows_dict: dict[str, dict[str, Any]],
     default_vals: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    if not start_time or not end_time:
-        return sorted([{"bucket": k, **v} for k, v in db_rows_dict.items()], key=lambda x: x["bucket"])
-
-    import datetime
-    from datetime import UTC
-
-    st = parse_iso_utc(start_time)
-    et = parse_iso_utc(end_time)
-    if st is None or et is None:
-        return sorted([{"bucket": k, **v} for k, v in db_rows_dict.items()], key=lambda x: x["bucket"])
-
-    st_epoch = int(st.timestamp())
-    st_aligned = st_epoch - (st_epoch % bucket_seconds)
-    st_dt = datetime.datetime.fromtimestamp(st_aligned, tz=UTC)
-
-    et_epoch = int(et.timestamp())
-    et_aligned = et_epoch - (et_epoch % bucket_seconds)
-    et_dt = datetime.datetime.fromtimestamp(et_aligned, tz=UTC)
-
-    padded = []
-    curr = st_dt
-    while curr <= et_dt:
-        bucket_str = curr.strftime("%Y-%m-%d %H:%M:%S")
-        if bucket_str in db_rows_dict:
-            padded.append({"bucket": bucket_str, **db_rows_dict[bucket_str]})
-        else:
-            padded.append({"bucket": bucket_str, **default_vals})
-        curr += datetime.timedelta(seconds=bucket_seconds)
-    return padded
+    return pad_timeseries_buckets(start_time, end_time, bucket_seconds, db_rows_dict, default_vals)
 
 
 _CacheRegistry.register("cmcd._response_cache", _response_cache)

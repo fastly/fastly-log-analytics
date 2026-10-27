@@ -26,8 +26,6 @@ from backend.core.query_registry import query_registry
 from backend.cron_progress import _run_metadata
 from backend.deps import get_con, get_service_id, get_source, require_admin
 from backend.routers.admin_queries import _admin_id_from_request
-from backend.routers.usage import _extract_fos_ops, _fastly_api
-from backend.utils.remote_access import _is_blocked_path
 from backend.utils.telemetry_response_middleware import TelemetryResponseBodyMiddleware
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
@@ -46,6 +44,8 @@ from backend.routers.admin import (
     _stream_from_worker,
 )
 from backend.routers.admin import clickhouse as api
+from backend.routers.usage import _extract_fos_ops, _fastly_api
+from backend.utils.remote_access import _is_blocked_path
 from tests._helpers.config_fakes import fake_mutate_config as _fake_mutate
 from tests._helpers.sources import TinyFos
 from tests._helpers.wire import wait_until

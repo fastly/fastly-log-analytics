@@ -14,13 +14,17 @@ from fastapi import HTTPException
 
 from backend.core.metric_expressions import sum_or_zero
 from backend.models.common import FiltersDict
-from backend.repositories._base import QueryRunner, SectionTimer, _safe_table, empty_schema_response
+from backend.repositories._base import QueryRunner, SectionTimer, _safe_table
 from backend.repositories.utils.filters import build_where_clause, calc_offset
 from backend.repositories.utils.response_cache import (
     ResponseMemo,
     bucket_time_to_minute,
     digest_cache_key,
     serialize_filters_for_key,
+)
+from backend.repositories.utils.response_shaping import (
+    build_asn_label_map,
+    empty_sessions_response,
 )
 from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry
 from backend.utils.sql_validator import escape_sql_literal
@@ -405,13 +409,7 @@ def _sessions_envelope(
 
 def _build_asn_label_map(sessions: list[dict], src: dict) -> dict[int, str]:
     """Return ``{asn_int: 'AS<n> Name'}`` for every ASN appearing in ``sessions``."""
-    asn_ints = sorted({int(sess["asn"]) for sess in sessions if sess.get("asn") is not None})
-    if not asn_ints:
-        return {}
-    from backend.core import duckdb as _db
-
-    asn_names = _db.get_asn_names(src["name"], asn_ints)
-    return {asn: _db.format_asn_label(asn, asn_names.get(asn, "")) for asn in asn_ints}
+    return build_asn_label_map(src["name"], (sess.get("asn") for sess in sessions if sess.get("asn") is not None))
 
 
 def _get_sessions_from_rollup(
@@ -710,9 +708,7 @@ def get_sessions(
             raise ValueError("Sessions view is limited to 7 days. Please narrow your date range.")
 
     def _empty_resp(cols: set[str]) -> dict:
-        return empty_schema_response(
-            sessions=[],
-            total=0,
+        return empty_sessions_response(
             page=page,
             limit=limit,
             **_schema_cap_flags(cols),

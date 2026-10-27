@@ -22,7 +22,6 @@ from backend.core.share_db.settings import get_setting, set_setting
 from backend.deps import get_con, get_service_id, get_source, require_admin, require_service_access
 from backend.high_scale.archive_models import ServingWatermark
 from backend.scoring.labels import ALLOWED_LABELS
-from backend.utils.remote_access import RemoteAccessMiddleware, _is_blocked_path
 from backend.utils.tunnel.manager import AnalystSession, get_tunnel_manager
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
@@ -58,6 +57,7 @@ from backend.routers.control_room import TAB_STUBS
 from backend.routers.services import core as services_core_router
 from backend.scoring import labels as _labels
 from backend.utils import sqlite_profiler, telemetry, tunnel
+from backend.utils.remote_access import RemoteAccessMiddleware, _is_blocked_path
 from backend.utils.telemetry import set_page_load_id
 from tests._helpers.config_fakes import fake_mutate_config
 from tests._helpers.duckdb_fixtures import generate_mock_logs, insert_mock_logs

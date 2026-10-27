@@ -6,8 +6,6 @@ import logging
 import sys as _sys
 import time as _time
 from collections.abc import Callable
-from datetime import UTC
-from datetime import datetime as _datetime
 from typing import Any
 
 import duckdb
@@ -27,6 +25,21 @@ from backend.repositories.utils.response_cache import (
     coalesce,
     digest_cache_key,
     serialize_filters_for_key,
+)
+from backend.repositories.utils.response_shaping import (
+    avg_bucket_health_score,
+    build_asn_speed_mix,
+    build_network_asn_leaderboard,
+    clamp_bucket_seconds,
+    compute_network_global_summary,
+    compute_network_health_score,
+    deduplicate_metro_leaderboard,
+    empty_network_quality,
+    empty_transport_metrics,
+    generate_epoch_aligned_buckets,
+    opt_float,
+    parse_metro_code,
+    shape_protocol_distribution,
 )
 from backend.utils.countries import format_city_label
 
@@ -301,29 +314,8 @@ def _has_signal(payload: dict[str, Any]) -> bool:
     return any(payload.get(k) for k in ("heatmap", "map_buckets", "leaderboard", "metro_leaderboard", "cities"))
 
 
-def _avg_hs(buckets_data: dict, keys: list[str]) -> float | None:
-    """Average health_score over a set of bucket keys, or None if no data."""
-    scores = [
-        buckets_data[b].get("health_score")
-        for b in keys
-        if b in buckets_data and buckets_data[b].get("health_score") is not None
-    ]
-    return round(sum(scores) / len(scores), 1) if scores else None
-
-
-def _health_score(
-    throughput_bps: float | None,
-    rtt_congestion_us: float | None,
-    avg_ploss: float | None,
-    rtt_jitter_us: float | None,
-    error_pct: float | None,
-) -> float:
-    pkt = min((avg_ploss or 0) / 0.05, 1.0) if avg_ploss is not None else 0
-    cong = min((rtt_congestion_us or 0) / 200_000, 1.0) if rtt_congestion_us is not None else 0
-    jitter = min((rtt_jitter_us or 0) / 100_000, 1.0) if rtt_jitter_us is not None else 0
-    err = min((error_pct or 0) / 10.0, 1.0) if error_pct is not None else 0
-    weighted = pkt * 0.40 + cong * 0.30 + jitter * 0.20 + err * 0.10
-    return round((1.0 - weighted) * 100, 1)
+_avg_hs = avg_bucket_health_score
+_health_score = compute_network_health_score
 
 
 def _rtt_congestion_expr() -> str:
@@ -335,11 +327,7 @@ def _bucket_str(val: Any) -> str:
     return val.isoformat().replace("+00:00", "") if hasattr(val, "isoformat") else str(val)
 
 
-def _opt_float(val: Any, ndigits: int | None = None) -> float | None:
-    if val is None:
-        return None
-    f = float(val)
-    return round(f, ndigits) if ndigits is not None else f
+_opt_float = opt_float
 
 
 def _get_schema_cols_cached(src: dict, table_name: str, get_runner: Callable[[], QueryRunner]) -> set[str]:
@@ -456,9 +444,7 @@ def get_health(
         if start_time and end_time:
             _st0 = _parse_iso_utc(start_time)
             _et0 = _parse_iso_utc(end_time)
-            if _st0 is not None and _et0 is not None:
-                span_secs = max(1, int((_et0 - _st0).total_seconds()))
-                bucket_seconds = max(bucket_seconds, span_secs // 8640)
+            bucket_seconds = clamp_bucket_seconds(bucket_seconds, _st0, _et0)
     except Exception:
         logger.debug("get_health: step failed (ignored)", exc_info=True)
 
@@ -681,19 +667,9 @@ def get_health(
 
         # Generate the complete sequence of buckets from start_time to end_time
         # at bucket_seconds intervals so that there are no gaps in the animation playback.
-        all_buckets_list: list[str] = []
-        if _st0 is not None and _et0 is not None:
-            _st_epoch = int(_st0.timestamp())
-            _st_floored = (_st_epoch // bucket_seconds) * bucket_seconds
-            _et_epoch = int(_et0.timestamp())
-            _et_floored = (_et_epoch // bucket_seconds) * bucket_seconds
-
-            curr = _st_floored
-            # Generate up to _et_floored (inclusive of the last bucket within the window)
-            while curr <= _et_floored:
-                bucket_str = _datetime.fromtimestamp(curr, tz=UTC).replace(tzinfo=None).isoformat()
-                all_buckets_list.append(bucket_str)
-                curr += bucket_seconds
+        all_buckets_list: list[str] = (
+            generate_epoch_aligned_buckets(_st0, _et0, bucket_seconds) if _st0 is not None and _et0 is not None else []
+        )
 
         if not all_buckets_list:
             # Fallback to sparse buckets present in the query results
@@ -751,15 +727,7 @@ def get_health(
                 timer.mark("speed_distribution_query", _t, source="live", activity="compute", current_execution=True)
             else:
                 speed_rows = []  # skip-temp path + speed rollup missed → no fallback
-            asn_speed_rows: dict[int, list[tuple]] = {}
-            for r in speed_rows:
-                rows_for_asn = asn_speed_rows.setdefault(int(r[0]), [])
-                if len(rows_for_asn) < 5:
-                    rows_for_asn.append((r[1], r[2]))
-            for asn_v, rows in asn_speed_rows.items():
-                total = sum(cnt for _, cnt in rows)
-                if total > 0:
-                    asn_speed_mix[asn_v] = {cs: round(cnt / total, 3) for cs, cnt in rows}
+            asn_speed_mix = build_asn_speed_mix((r[0], r[1], r[2]) for r in speed_rows)
 
         asn_names_map = _db.get_asn_names(src["name"], top_asns)
 
@@ -875,22 +843,7 @@ def get_health(
                 )
 
             # Deduplicate by display name (same city can appear with and without metro code)
-            seen: dict[str, dict] = {}
-            for entry in metro_leaderboard:
-                key = entry["city"]
-                if key in seen:
-                    prev = seen[key]
-                    prev_reqs = prev["total_reqs"]
-                    new_reqs = entry["total_reqs"]
-                    total = prev_reqs + new_reqs
-                    if prev["health_score"] is not None and entry["health_score"] is not None:
-                        prev["health_score"] = round(
-                            (prev["health_score"] * prev_reqs + entry["health_score"] * new_reqs) / total, 1
-                        )
-                    prev["total_reqs"] = total
-                else:
-                    seen[key] = dict(entry)
-            metro_leaderboard = sorted(seen.values(), key=lambda x: x["total_reqs"], reverse=True)
+            metro_leaderboard = deduplicate_metro_leaderboard(metro_leaderboard)
 
         # ── P95/P99 RTT per ASN (bulk) ─────────────────────────────────────
         # Try the per-hour network_rtt rollup first for unfiltered windows
@@ -935,88 +888,27 @@ def get_health(
             # else: skip-temp path + RTT rollup missed → leave asn_rtt_pct empty
 
         # ── ASN leaderboard ────────────────────────────────────────────────
-        leaderboard: list[dict] = []
-        for asn in top_asns:
-            name = asn_names_map.get(asn) or f"AS{asn}"
-            label = _db.format_asn_label(asn, name)
-            buckets_data = asn_bucket_data.get(asn, {})
-            if not buckets_data:
-                continue
-
-            latest_bucket = max(buckets_data)
-            latest = buckets_data[latest_bucket]
-            hs_now = latest.get("health_score")
-
-            hs_1h = hs_now
-            hs_1w = hs_now
-            if len(all_buckets) > 1:
-                n_buckets_1h = max(1, 3600 // bucket_seconds)
-                sorted_buckets = sorted(buckets_data)
-
-                early = sorted_buckets[: max(1, len(sorted_buckets) // 4)]
-                hs_1w = _avg_hs(buckets_data, early)
-                mid = sorted_buckets[max(0, len(sorted_buckets) - n_buckets_1h) :]
-                hs_1h = _avg_hs(buckets_data, mid)
-
-            trend = "stable"
-            if hs_now is not None and hs_1h is not None:
-                delta = hs_now - hs_1h
-                if delta < -5:
-                    trend = "degrading"
-                elif delta > 5:
-                    trend = "improving"
-
-            rtt_pct = asn_rtt_pct.get(asn, {})
-            leaderboard.append(
-                {
-                    "asn": asn,
-                    "label": label,
-                    "health_score_now": hs_now,
-                    "health_score_1h_ago": hs_1h,
-                    "health_score_1w_ago": hs_1w,
-                    "trend": trend,
-                    "total_reqs": all_asns_seen.get(asn, 0),
-                    "c_speed_mix": asn_speed_mix.get(asn, {}),
-                    "p95_rtt_us": rtt_pct.get("p95_rtt_us"),
-                    "p99_rtt_us": rtt_pct.get("p99_rtt_us"),
-                }
-            )
+        asn_labels = {asn: _db.format_asn_label(asn, asn_names_map.get(asn) or f"AS{asn}") for asn in top_asns}
+        leaderboard = build_network_asn_leaderboard(
+            top_asns=top_asns,
+            asn_bucket_data=asn_bucket_data,
+            all_buckets=all_buckets,
+            bucket_seconds=bucket_seconds,
+            all_asns_seen=all_asns_seen,
+            asn_speed_mix=asn_speed_mix,
+            asn_rtt_pct=asn_rtt_pct,
+            asn_labels=asn_labels,
+        )
 
         # ── Global summary ─────────────────────────────────────────────────
-        all_hs = [le["health_score_now"] for le in leaderboard if le["health_score_now"] is not None]
-        global_hs = round(sum(all_hs) / len(all_hs), 1) if all_hs else 0
-
-        all_rtt: list[float] = []
-        total_reqs = 0
-        for r in heatmap_rows:
-            if r[3] is not None:
-                all_rtt.append(float(r[3]))
-            total_reqs += int(r[9])
-
-        avg_rtt_ms = round(sum(all_rtt) / len(all_rtt) / 1000.0, 1) if all_rtt else 0
-
-        worst_asn = None
-        if leaderboard:
-            significant = [le for le in leaderboard if le["total_reqs"] > total_reqs * 0.01]
-            if significant:
-                worst = min(
-                    significant, key=lambda le: le["health_score_now"] if le["health_score_now"] is not None else 100
-                )
-                worst_asn = {"label": worst["label"], "score": worst["health_score_now"]}
-
-        worst_country = None
-        if has_country and map_buckets:
-            for b in reversed(map_buckets):
-                cities_in_b = b.get("cities") or []
-                sig_countries = [c for c in cities_in_b if c.get("reqs", 0) >= 1]
-                if sig_countries:
-                    wc = min(sig_countries, key=lambda c: c["health_score"] if c["health_score"] is not None else 100)
-                    idx = wc.get("city_idx", -1)
-                    city_entry = cities_list[idx] if 0 <= idx < len(cities_list) else None
-                    city_name = city_entry["name"] if city_entry else ""
-                    label = format_city_label(city_name, wc["country"])
-                    worst_country = {"label": label, "score": wc["health_score"]}
-                    break
+        summary_dict = compute_network_global_summary(
+            leaderboard=leaderboard,
+            rtt_values=[float(r[3]) for r in heatmap_rows if r[3] is not None],
+            total_reqs=sum(int(r[9]) for r in heatmap_rows),
+            map_buckets=map_buckets if has_country else [],
+            cities_list=cities_list,
+            zero_as_int=True,
+        )
 
         payload: dict[str, Any] = {
             "available": True,
@@ -1034,16 +926,7 @@ def get_health(
             ("cities", cities_list),
             ("leaderboard", leaderboard),
             ("metro_leaderboard", metro_leaderboard),
-            (
-                "summary",
-                {
-                    "global_health_score": global_hs,
-                    "avg_rtt_ms": avg_rtt_ms,
-                    "total_reqs": total_reqs,
-                    "worst_asn": worst_asn,
-                    "worst_country": worst_country,
-                },
-            ),
+            ("summary", summary_dict),
         ):
             if _want(sec_key):
                 payload[sec_key] = sec_val
@@ -1056,27 +939,11 @@ def get_health(
             _drop_temp_table(get_runner(), temp_table, "get_health")
 
 
-def _parse_metro_code(metro_raw: Any) -> int | None:
-    if metro_raw is None:
-        return None
-    try:
-        return int(float(metro_raw))
-    except (ValueError, TypeError):
-        return None
+_parse_metro_code = parse_metro_code
 
 
 def _empty_quality_payload(region_country: str, runner: QueryRunner) -> dict[str, Any]:
-    return {
-        "available": False,
-        "by_country": [],
-        "by_asn": [],
-        "by_region": [],
-        "region_country": region_country,
-        "by_pop": [],
-        "scatter": [],
-        "countries": [],
-        **runner.telemetry(),
-    }
+    return empty_network_quality(region_country=region_country, **runner.telemetry())
 
 
 def get_quality(
@@ -1247,22 +1114,12 @@ def get_transport_metrics(
     missing_fields = [f for f in optional_fields if f not in actual_cols]
     has_transport_data = len(missing_fields) < len(optional_fields)
 
-    default_resp = {
-        "has_transport_data": has_transport_data,
-        "tcp_rtt_p50_ms": None,
-        "tcp_rtt_p90_ms": None,
-        "tcp_rtt_p95_ms": None,
-        "tcp_rtt_p99_ms": None,
-        "retrans_rate_pct": None,
-        "packet_loss_pct": None,
-        "delivery_rate_mbps": None,
-        "bandwidth_bytes": 0,
-        "total_requests": 0,
-        "protocol_distribution": [],
-        "missing_fields": missing_fields,
-        "section_timings": timer.entries,
+    default_resp = empty_transport_metrics(
+        has_transport_data=has_transport_data,
+        missing_fields=missing_fields,
+        section_timings=timer.entries,
         **get_runner().telemetry(),
-    }
+    )
 
     try:
         get_runner().execute(f"SELECT 1 FROM {table_name} LIMIT 1")
@@ -1343,15 +1200,10 @@ def get_transport_metrics(
         try:
             proto_rows = get_runner().execute(proto_sql, params).fetchall()
             timer.mark("protocol_distribution", _t1, source="live", activity="compute", current_execution=True)
-            sum_proto_reqs = sum(r[1] for r in proto_rows) or total_requests or 1
-            protocol_distribution = [
-                {
-                    "protocol": str(r[0]),
-                    "requests": int(r[1]),
-                    "share_pct": round(int(r[1]) * 100.0 / sum_proto_reqs, 2),
-                }
-                for r in proto_rows
-            ]
+            protocol_distribution = shape_protocol_distribution(
+                ((r[0], r[1]) for r in proto_rows),
+                total_requests=total_requests,
+            )
         except Exception as e:
             logger.warning("Failed to query protocol distribution: %s", e)
 

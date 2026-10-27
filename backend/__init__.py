@@ -41,20 +41,12 @@ _MODULE_ALIASES: dict[str, str] = {
     "backend.high_scale.exports": "backend.high_scale.archive",
     "backend.high_scale.archive_writer": "backend.high_scale.archive",
     "backend.high_scale.performance_projection": "backend.high_scale.query_service",
-    # Round 15 Group 4 — backend/models/, backend/services/, backend/utils/
+    # Round 15 Group 4 — backend/models/, backend/utils/
     "backend.models.rum": "backend.models.analytics",
     "backend.models._base": "backend.models.common",
     "backend.models.high_scale": "backend.models.admin",
     "backend.models.admin_status": "backend.models.admin",
     "backend.models.sessions": "backend.models.analytics",
-    "backend.services.service_manager": "backend.utils.router_utils",
-    "backend.utils.pop_utils": "backend.utils.router_utils",
-    "backend.utils.dir_size": "backend.utils.router_utils",
-    "backend.utils.sse": "backend.utils.router_utils",
-    "backend.utils.error_utils": "backend.utils.router_utils",
-    "backend.utils.pii_masking": "backend.utils.router_utils",
-    "backend.utils.rate_limit": "backend.utils.router_utils",
-    "backend.utils.auth": "backend.utils.router_utils",
     "backend.utils.cache_registry": "backend.utils.bounded_cache",
     "backend.utils.atomic_write": "backend.utils.telemetry",
     "backend.utils.fastly_auth": "backend.core.log_fields",
@@ -63,7 +55,6 @@ _MODULE_ALIASES: dict[str, str] = {
     # Round 16 — Repositories & Routers
     "backend.repositories.audit": "backend.repositories.assets",
     "backend.repositories.insights_helpers": "backend.repositories.insights",
-    "backend.routers.audit": "backend.routers.control_room",
     "backend.routers.debug": "backend.routers.bootstrap",
     "backend.routers.sessions": "backend.routers.session_scoring",
     "backend.routers.share_sso": "backend.routers.share_admin",
@@ -75,16 +66,8 @@ _MODULE_ALIASES: dict[str, str] = {
     "backend.utils.valkey_publisher": "backend.utils.telemetry",
     "backend.utils.vcl_safety": "backend.core.log_fields",
     "backend.system_metrics_sampler": "backend.routers.admin.health",
-    "backend.routers.admin.sync_status": "backend.routers.admin.health",
-    "backend.routers.admin._helpers": "backend.routers.admin.health",
-    "backend.routers.admin._router": "backend.routers.admin.health",
-    "backend.routers.admin.clickhouse": "backend.routers.admin.health",
-    "backend.routers.admin.events": "backend.routers.admin.health",
     "backend.scoring.scorer": "backend.scoring",
     "backend.scoring.normalize": "backend.scoring",
-    "backend.cron.jobs._common": "backend.cron.jobs.sync",
-    "backend.cron.jobs.commit": "backend.cron.jobs.sync",
-    "backend.cron.jobs.rum_ledger": "backend.cron.jobs.sync",
     "backend.core.fastly.mock_fixtures": "backend.core.fastly.client",
     "backend.core.rollups.perf_latency": "backend.core.rollups.origin_dims",
     "backend.core.rollups.perf_dims": "backend.core.rollups.origin_dims",
@@ -98,12 +81,10 @@ _MODULE_ALIASES: dict[str, str] = {
     # Round 25 — Backend <300-Line Module Consolidation
     "backend.core.query_attribution": "backend.core.request_telemetry",
     "backend.core.request_metrics": "backend.core.request_telemetry",
-    "backend.core.metric_snapshots": "backend.cron.jobs.metadata",
-    "backend.core.duckdb_recycle": "backend.cron.jobs.metadata",
-    "backend.cron.jobs.duckdb_recycle": "backend.cron.jobs.metadata",
+    "backend.core.metric_snapshots": "backend.cron.jobs.metric_snapshots",
+    "backend.core.duckdb_recycle": "backend.cron.jobs.duckdb_recycle",
     "backend.core.metadata.slow_queries": "backend.core.metadata.usage_log",
     "backend.cron.decorators": "backend.cron.scheduler",
-    "backend.cron.jobs.rum_commit": "backend.cron.jobs.sync",
     "backend.scoring.labels": "backend.scoring",
     "backend.scoring.fixtures": "backend.scoring",
     "backend.scoring.matrix": "backend.scoring",
@@ -143,12 +124,8 @@ _MODULE_ALIASES: dict[str, str] = {
     "backend.high_scale.rum_recovery": "backend.high_scale.rum",
     "backend.high_scale.rum_ingest": "backend.high_scale.ingest_controller",
     "backend.cron.lifecycle": "backend.cron.scheduler",
-    "backend.cron.jobs.insights_prewarmer": "backend.cron.jobs.metadata",
-    "backend.routers.admin.downloads": "backend.routers.admin.compaction",
-    "backend.routers.admin.quarantine": "backend.routers.admin.compaction",
-    "backend.routers.admin.bot_sources": "backend.routers.admin.compaction",
     "backend.routers.admin.iceberg": "backend.routers.admin.compaction",
-    "backend.routers.admin_queries": "backend.routers.admin.health",
+    "backend.routers.admin_queries": "backend.routers.admin.admin_queries",
     "backend.models.network": "backend.models.analytics",
     "backend.models.provision": "backend.models.common",
     "backend.models.service": "backend.models.common",
@@ -167,7 +144,7 @@ _MODULE_ALIASES: dict[str, str] = {
     "backend.core.metadata.reconciliation": "backend.core.metadata.base",
     "backend.core.storage.manifest": "backend.core.storage._core",
     "backend.cron_progress": "backend.cron.scheduler",
-    "backend.cron.jobs.metric_snapshot": "backend.cron.jobs.metadata",
+    "backend.cron.jobs.metric_snapshot": "backend.cron.jobs.metric_snapshots",
     "backend.celery_status": "backend.celery_app",
     "backend.core.rollups.partial_hour": "backend.core.rollups.day_bundles",
     "backend.core.rollups.wellknown_bots": "backend.core.rollups.security_dims",
@@ -184,7 +161,6 @@ _MODULE_ALIASES: dict[str, str] = {
     "backend.high_scale.disk_sampler": "backend.high_scale.archive",
     "backend.high_scale.retention_watermark": "backend.high_scale.archive",
     "backend.high_scale.aggregate_batch": "backend.high_scale.ingest_controller",
-    "backend.core.faro_versions": "backend.core.ingest",
     "backend.core.clickhouse_manifest": "backend.core.clickhouse",
     "backend.provision.session_scoring_vcl": "backend.provision.session_scoring_orchestrator",
     "backend.provision.declarative.state": "backend.provision.declarative.reconciler",
@@ -192,7 +168,6 @@ _MODULE_ALIASES: dict[str, str] = {
     # Round 49 — Backend <650-Line Module Consolidation
     "backend.repositories._sql.rum": "backend.repositories.rum",
     "backend.repositories._sql.security": "backend.repositories.security",
-    "backend.utils.countries": "backend.utils.router_utils",
     "backend.deps": "backend.core.request_context",
     "backend.core.query_instrumentation": "backend.core.request_telemetry",
     "backend.core.clickhouse_publication": "backend.core.clickhouse",
@@ -204,7 +179,6 @@ _MODULE_ALIASES: dict[str, str] = {
     "backend.core.rollups.rum": "backend.core.rollups.recompute",
     "backend.models.session_scoring": "backend.models.analytics",
     "backend.models.dashboard": "backend.models.analytics",
-    "backend.routers.alerts": "backend.routers.control_room",
     "backend.repositories.alerts": "backend.repositories.assets",
     # Round 61 — Backend <850-Line Module Consolidation
     "backend.utils.sql_validator": "backend.core.duckdb",
@@ -221,12 +195,6 @@ _MODULE_ALIASES: dict[str, str] = {
     "backend.models.insights": "backend.models.analytics",
     "backend.models.services": "backend.models.common",
     "backend.scoring.features": "backend.scoring",
-    "backend.routers.usage": "backend.routers.control_room",
-    "backend.routers.admin.high_scale": "backend.routers.admin.health",
-    "backend.routers.admin.ingest": "backend.routers.admin.compaction",
-    "backend.cron.jobs.compaction": "backend.cron.jobs.metadata",
-    "backend.cron.jobs.maintenance": "backend.cron.jobs.metadata",
-    "backend.cron.jobs.rum_sync": "backend.cron.jobs.sync",
     "backend.repositories.session_scoring": "backend.repositories.sessions",
     "backend.repositories.rollup_coverage": "backend.core.rollups.recompute",
     "backend.high_scale.orchestration": "backend.high_scale.ingest_controller",
@@ -238,10 +206,7 @@ _MODULE_ALIASES: dict[str, str] = {
     "backend.core.local_compaction": "backend.core.storage._core",
     "backend.core.storage.buffer": "backend.core.storage._core",
     "backend.utils.telemetry_proxy": "backend.utils.telemetry",
-    "backend.routers.high_scale": "backend.routers.admin.compaction",
-    "backend.routers.admin.log_accounting": "backend.routers.admin.health",
-    "backend.core.rum_ingest": "backend.core.ingest",
-    "backend.utils.remote_access": "backend.utils.router_utils",
+    "backend.routers.high_scale": "backend.routers.admin.high_scale",
     "backend.high_scale.insight_queries": "backend.high_scale.insights",
 }
 
@@ -268,21 +233,30 @@ class _AliasLoader(importlib.abc.MetaPathFinder, importlib.abc.ExecutionLoader):
         spec = importlib.machinery.PathFinder.find_spec(target_name)
         return target_name, (spec.origin if spec else None)
 
+    def _has_real_file(self, fullname: str) -> bool:
+        if not fullname.startswith("backend."):
+            return False
+        rel_parts = fullname.split(".")[1:]
+        candidate_py = os.path.join(_BACKEND_DIR, *rel_parts) + ".py"
+        candidate_init = os.path.join(_BACKEND_DIR, *rel_parts, "__init__.py")
+        return os.path.isfile(candidate_py) or os.path.isfile(candidate_init)
+
     def find_spec(
         self,
         fullname: str,
         path: Sequence[str] | None = None,
         target: types.ModuleType | None = None,
     ) -> importlib.machinery.ModuleSpec | None:
-        if fullname == "backend.services":
-            return importlib.machinery.ModuleSpec(fullname, self, is_package=True)
+        if self._has_real_file(fullname):
+            _MODULE_ALIASES.pop(fullname, None)
+            return None
         if fullname in _MODULE_ALIASES:
             _, origin = self._resolve_origin(fullname)
             return importlib.machinery.ModuleSpec(fullname, self, origin=origin)
         return None
 
     def is_package(self, fullname: str) -> bool:
-        return fullname == "backend.services"
+        return False
 
     def get_filename(self, fullname: str) -> str:
         _, origin = self._resolve_origin(fullname)
@@ -301,10 +275,6 @@ class _AliasLoader(importlib.abc.MetaPathFinder, importlib.abc.ExecutionLoader):
         return None
 
     def create_module(self, spec: importlib.machinery.ModuleSpec) -> types.ModuleType | None:
-        if spec.name == "backend.services":
-            mod = types.ModuleType("backend.services")
-            mod.__path__ = []
-            return mod
         target_name = _MODULE_ALIASES[spec.name]
         mod = importlib.import_module(target_name)
         if target_name not in self._canon_specs and not isinstance(getattr(mod, "__loader__", None), _AliasLoader):
@@ -317,16 +287,6 @@ class _AliasLoader(importlib.abc.MetaPathFinder, importlib.abc.ExecutionLoader):
         return mod
 
     def exec_module(self, module: types.ModuleType) -> None:
-        if module.__name__ == "backend.services":
-            target = importlib.import_module("backend.utils.router_utils")
-            module.service_manager = target  # type: ignore[attr-defined]
-            module.delete_service_Cascade = target.delete_service_Cascade  # type: ignore[attr-defined]
-            sys.modules["backend.services"] = module
-            sys.modules["backend.services.service_manager"] = target
-            parent_mod = sys.modules.get("backend")
-            if parent_mod is not None:
-                setattr(parent_mod, "services", module)
-            return
         requested_name = module.__name__
         canon_name = _MODULE_ALIASES.get(requested_name, requested_name)
         module.__name__ = canon_name
@@ -335,8 +295,11 @@ class _AliasLoader(importlib.abc.MetaPathFinder, importlib.abc.ExecutionLoader):
             canon_spec.loader = self
             module.__spec__ = canon_spec
         module.__loader__ = self
-        for alias, target_name in _MODULE_ALIASES.items():
+        for alias, target_name in list(_MODULE_ALIASES.items()):
             if target_name == canon_name:
+                if self._has_real_file(alias):
+                    _MODULE_ALIASES.pop(alias, None)
+                    continue
                 sys.modules[alias] = module
                 parent_name, _, child_name = alias.rpartition(".")
                 parent_mod = sys.modules.get(parent_name)

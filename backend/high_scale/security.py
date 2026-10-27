@@ -25,7 +25,6 @@ from backend.high_scale._common import build_clickhouse_filters as _build_clickh
 from backend.high_scale._common import (
     text as _text,
 )
-from backend.high_scale.network import _flt
 from backend.models.dashboard import SecurityAggregatesResponse, SecurityTopBotsResponse
 from backend.repositories.security import _BOT_UA_CLASSIFY_LIMIT, classify_ua_counts, summarize_wellknown_bot_rows
 from backend.repositories.utils.response_cache import (
@@ -35,6 +34,12 @@ from backend.repositories.utils.response_cache import (
     client_cache_token,
     digest_cache_key,
     serialize_filters_for_key,
+)
+from backend.repositories.utils.response_shaping import (
+    finish_security_proxies,
+)
+from backend.repositories.utils.response_shaping import (
+    opt_float as _flt,
 )
 from backend.utils.bounded_cache import CacheRegistry
 from backend.utils.date_utils import safe_iso
@@ -562,32 +567,10 @@ def _proxies(service: HighScaleService, scope: _Scope, mask_ips: bool) -> dict[s
         ]
 
     stat = stats[0] if stats else {}
-    quality_total = sum(int(r["count"]) for r in quality_rows)
-    traffic_quality = (
-        [{"label": str(r["type"]), "value": round(int(r["count"]) / quality_total * 100, 1)} for r in quality_rows]
-        if quality_total > 0
-        else []
-    )
-
-    from backend.core.duckdb import get_asn_names
-
-    asns = {int(r["asn"]) for r in (*isp_rows, *client_rows) if r.get("asn") is not None}
-    asn_names = get_asn_names(scope.service_id, sorted(asns))
-
-    def _asn_name(asn: int | None) -> str:
-        return asn_names.get(asn) or (f"AS{asn}" if asn else "Unknown ISP")
-
-    suspicious_isps = [
+    raw_clients = [
         {
-            "isp": _asn_name(asn := (int(r["asn"]) if r.get("asn") is not None else None)),
-            "asn": asn,
-            "count": int(r["count"]),
-        }
-        for r in isp_rows
-    ]
-    active_clients = [
-        {
-            "ip": _maybe_mask(r["ip"], mask_ips),
+            "ip": r["ip"],
+            "asn": r.get("asn"),
             "rtt_min_ms": round(float(r["rtt_min_ms"]), 2),
             "tcp_rtt_ms": _flt(r["tcp_rtt_ms"], 2),
             "distance_km": _flt(r["distance_km"], 1),
@@ -600,18 +583,10 @@ def _proxies(service: HighScaleService, scope: _Scope, mask_ips: bool) -> dict[s
             "risk_level": r["risk_level"],
             "country": r["country"] or None,
             "city": r["city"] or None,
-            "asn_name": _asn_name(int(r["asn"]) if r.get("asn") is not None else None),
         }
         for r in client_rows
     ]
-    return {
-        "active_proxies_count": int(stat.get("active_proxies_count", 0)),
-        "tunnel_requests_count": int(stat.get("total_requests_count", 0)),
-        "distance_mismatches_count": int(stat.get("distance_mismatches_count", 0)),
-        "traffic_quality": traffic_quality,
-        "suspicious_isps": suspicious_isps,
-        "active_clients": active_clients,
-    }
+    return finish_security_proxies(scope.service_id, stat, quality_rows, isp_rows, raw_clients, mask_ips)
 
 
 def get_proxies_data(

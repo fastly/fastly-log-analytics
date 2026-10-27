@@ -6,6 +6,7 @@ import sys
 import time
 
 import aiodns
+import cachetools
 import pytricia
 
 """Bot source cache — fetch, store, and match against known bot registries."""
@@ -163,17 +164,17 @@ _CACHE_DIR = Path("data/cache/bot_sources")
 # ── Matcher cache ─────────────────────────────────────────────────────────────
 # Rebuilt lazily when cache files change on disk.
 _matcher_lock = threading.Lock()
-_matcher_cache: dict = {}  # keys: "fn", "mtime"
+_matcher_cache: cachetools.LRUCache[str, Any] = cachetools.LRUCache(maxsize=16)  # keys: "fn", "mtime"
 
 # mtime-revalidated cache for parsed source envelopes. load_source is hit
 # by every get_bot_regex_pattern / get_bot_by_id call (dashboard +
 # security repos) and the JSON files are megabytes — the parse cost was
 # adding up.
-_source_cache: dict[str, tuple[int, list[dict]]] = {}
+_source_cache: cachetools.LRUCache[str, tuple[int, list[dict]]] = cachetools.LRUCache(maxsize=64)
 _source_cache_lock = threading.Lock()
 
 # Pre-compiled IP network feeds for high-performance IP-based bot matching.
-_compiled_ip_feeds: dict = {}
+_compiled_ip_feeds: cachetools.LRUCache[str, Any] = cachetools.LRUCache(maxsize=32)
 _compiled_ip_feeds_lock = threading.Lock()
 
 
@@ -194,7 +195,9 @@ def _cache_mtime() -> float:
 # Content-hash version cache, revalidated against the source files' mtime.
 # The mtime stat is cheap (hot path); the SHA is recomputed only when a file
 # is rewritten (a refresh) and re-hashes IDENTICAL content to the SAME value.
-_version_cache: dict = {"mtime": None, "version": None}
+_version_cache: cachetools.LRUCache[str, Any] = cachetools.LRUCache(maxsize=16)
+_version_cache["mtime"] = None
+_version_cache["version"] = None
 _version_cache_lock = threading.Lock()
 
 

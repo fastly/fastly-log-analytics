@@ -13,7 +13,6 @@ from backend.high_scale._common import (
     parse_time_window,
     range_value,
     request_filter_clauses,
-    resolve_asn_display_labels,
     visible_fact_clauses,
 )
 from backend.models.analytics import SessionDetailRequest, SessionsRequest
@@ -22,6 +21,10 @@ from backend.repositories.utils.response_cache import (
     bucket_time_to_minute,
     client_cache_token,
     digest_cache_key,
+)
+from backend.repositories.utils.response_shaping import (
+    build_asn_label_map,
+    empty_sessions_response,
 )
 from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry
 
@@ -231,7 +234,7 @@ _FILTERED = """
     WHERE (({streaming_only:UInt8} = 0) OR is_streaming = 1)
       AND (({flagged_only:UInt8} = 0) OR flagged = 1)
 """
-_asn_label_map = resolve_asn_display_labels
+_asn_label_map = build_asn_label_map
 
 
 def _as_dt(val: Any) -> datetime | None:
@@ -417,18 +420,20 @@ def sessions_endpoint(
         sessions.append(session)
     asns = sorted({int(session["asn"]) for session in sessions if session.get("asn") is not None})
     result = {
+        **empty_sessions_response(
+            page=req.page,
+            limit=req.limit,
+            has_rtt=bool(first.get("any_rtt")),
+            has_ja4=bool(first.get("any_ja4")),
+            has_edge=bool(first.get("any_edge")),
+            has_edge_sid=bool(first.get("any_edge_sid")),
+            has_cmcd=bool(first.get("any_cmcd")),
+            min_reqs_flag=min_reqs_flag,
+            min_4xx_pct_flag=min_4xx_pct_flag,
+        ),
         "sessions": sessions,
         "asn_names": _asn_label_map(service.service_id, asns) if asns else {},
         "total": total,
-        "page": req.page,
-        "limit": req.limit,
-        "has_rtt": bool(first.get("any_rtt")),
-        "has_ja4": bool(first.get("any_ja4")),
-        "has_edge": bool(first.get("any_edge")),
-        "has_edge_sid": bool(first.get("any_edge_sid")),
-        "has_cmcd": bool(first.get("any_cmcd")),
-        "min_reqs_flag": min_reqs_flag,
-        "min_4xx_pct_flag": min_4xx_pct_flag,
     }
     _sessions_memo.put(memo_key, result)
     return result

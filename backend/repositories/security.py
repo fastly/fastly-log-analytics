@@ -18,6 +18,7 @@ from backend import config as svcconfig
 from backend.core.metric_expressions import coalesce
 from backend.models.common import FiltersDict
 from backend.models.dashboard import ReaderCoverage
+from backend.repositories import dashboard as _dashboard_repo
 from backend.repositories._base import (
     QueryRunner,
     SectionTimer,
@@ -27,6 +28,13 @@ from backend.repositories._base import (
     ensure_ngwaf_bots_materialized,
     safe_iso,
     time_bucket_select,
+)
+from backend.repositories.utils.response_shaping import (
+    SECURITY_SECTION_DEFAULTS,
+    empty_security_aggregates,
+    empty_security_proxies,
+    finish_security_proxies,
+    parse_asn_int,
 )
 
 TOP_UAS_BY_COUNT = """
@@ -325,20 +333,7 @@ _TEMP_COL_ORDER = (
     "country",
     "city",
 )
-_SECTION_DEFAULTS = (
-    ("verified_bots_ts", True),
-    ("ngwaf_verified_bots", True),
-    ("ngwaf_verified_bots_ts", True),
-    ("wellknown_bots", True),
-    ("bot_efficiency", True),
-    ("tls_fingerprints", True),
-    ("fingerprint_coverage", False),
-    ("req_size_dist", True),
-    ("top_ips_header", True),
-    ("ipv6_adoption", True),
-    ("proxy_dist", True),
-    ("conn_reuse_dist", True),
-)
+_SECTION_DEFAULTS = SECURITY_SECTION_DEFAULTS
 
 
 def _window_eligible_for_rollup(start_time: str | None, end_time: str | None) -> bool:
@@ -668,22 +663,14 @@ def summarize_bot_efficiency_rows(rows: list[tuple[str, str, int, int]]) -> list
     return results[:25]
 
 
-def get_top_bots(
-    con: duckdb.DuckDBPyConnection,
+def _top_bots_cache_key(
     src: dict,
     start_time: str | None,
     end_time: str | None,
     filters: FiltersDict,
-    n: int = 10,
+    n: int,
     shared_temp_table: str | None = None,
-    parent_runner: QueryRunner | None = None,
-) -> dict:
-    from backend.repositories import dashboard as _dashboard_repo
-
-    timer = SectionTimer()
-    section_timings = timer.entries
-    source_name = src["name"]
-    cache_key: str | None = None
+) -> str | None:
     if (
         _dashboard_repo.DASHBOARD_CACHE_TTL > 0
         and start_time is not None
@@ -699,13 +686,39 @@ def get_top_bots(
             },
             separators=(",", ":"),
         )
-        cache_key = f"top_bots:{_hashlib.sha256(_key_payload.encode()).hexdigest()}:{source_name}"
-        cached_entry = _dashboard_repo._dashboard_cache.get(cache_key)
-        if cached_entry is not None:
-            _cached_at, cached_res = cached_entry
-            return cache_result(
-                cached_res, state="hit", ttl_seconds=_dashboard_repo._dashboard_cache.ttl, prewarmer=False
-            )
+        return f"top_bots:{_hashlib.sha256(_key_payload.encode()).hexdigest()}:{src['name']}"
+    return None
+
+
+def peek_top_bots(
+    src: dict,
+    start_time: str | None,
+    end_time: str | None,
+    filters: FiltersDict,
+    n: int = 10,
+) -> dict | None:
+    key = _top_bots_cache_key(src, start_time, end_time, filters, n)
+    return _dashboard_repo._lookup_dashboard_cache(key) if key is not None else None
+
+
+def get_top_bots(
+    con: duckdb.DuckDBPyConnection,
+    src: dict,
+    start_time: str | None,
+    end_time: str | None,
+    filters: FiltersDict,
+    n: int = 10,
+    shared_temp_table: str | None = None,
+    parent_runner: QueryRunner | None = None,
+) -> dict:
+    timer = SectionTimer()
+    section_timings = timer.entries
+    source_name = src["name"]
+    cache_key = _top_bots_cache_key(src, start_time, end_time, filters, n, shared_temp_table)
+    if cache_key is not None:
+        cached = _dashboard_repo._lookup_dashboard_cache(cache_key)
+        if cached is not None:
+            return cached
     table_name = _safe_table(source_name)
     runner = parent_runner if parent_runner is not None else QueryRunner(con, src)
 
@@ -908,15 +921,7 @@ def get_security_aggregates(
         actual_cols = runner.get_schema_cols()
         timer.mark("get_schema_cols", _t, activity="overhead", current_execution=True)
         if not actual_cols:
-            return {
-                "tls_fingerprints": [],
-                "req_size_dist": [],
-                "ipv6_adoption": [],
-                "proxy_dist": [],
-                "conn_reuse_dist": [],
-                "section_timings": section_timings,
-                **runner.telemetry(),
-            }
+            return empty_security_aggregates(section_timings=section_timings, **runner.telemetry())
         _t = _time.perf_counter()
         params, where_clause = build_where_clause(start_time, end_time, filters, actual_cols, inline_params=True)
         timer.mark("build_where_clause", _t, activity="overhead", current_execution=True)
@@ -1534,80 +1539,9 @@ def _build_security_response(
     return results
 
 
-def _empty_proxies_payload() -> dict[str, Any]:
-    return {
-        "active_proxies_count": 0,
-        "tunnel_requests_count": 0,
-        "distance_mismatches_count": 0,
-        "traffic_quality": [],
-        "suspicious_isps": [],
-        "active_clients": [],
-    }
-
-
-def _parse_asn_int(asn_val: Any) -> int | None:
-    if asn_val is None:
-        return None
-    try:
-        return int(asn_val)
-    except (ValueError, TypeError):
-        return None
-
-
-def _finish_proxies(
-    source_name: str,
-    stats: dict[str, Any],
-    quality_rows: list[tuple[Any, Any]],
-    raw_isps: list[dict[str, Any]],
-    raw_clients: list[dict[str, Any]],
-    mask_ips: bool,
-) -> dict[str, Any]:
-    traffic_quality = []
-    if quality_rows:
-        total_count = sum(int(r[1] or 0) for r in quality_rows)
-        if total_count > 0:
-            for row_type, row_count in quality_rows:
-                label = str(row_type if row_type is not None else "Unknown")
-                item_count = float(row_count or 0)
-                value = round((item_count / total_count) * 100, 1)
-                traffic_quality.append({"label": label, "value": value})
-    asns_to_resolve = {
-        asn_int for row in (*raw_isps, *raw_clients) if (asn_int := _parse_asn_int(row.get("asn"))) is not None
-    }
-    from backend.core.duckdb import get_asn_names
-
-    asn_names = get_asn_names(source_name, list(asns_to_resolve))
-
-    def _asn_display(asn_int: int | None) -> str:
-        return asn_names.get(asn_int) or (f"AS{asn_int}" if asn_int else "Unknown ISP")
-
-    suspicious_isps = [
-        {
-            "isp": _asn_display(asn_int := _parse_asn_int(row.get("asn"))),
-            "asn": asn_int,
-            "count": int(row.get("count", 0)),
-        }
-        for row in raw_isps
-    ]
-    active_clients = []
-    if mask_ips:
-        from backend.core.share_db.validation import mask_ip
-    for row in raw_clients:
-        asn_int = _parse_asn_int(row.get("asn"))
-        client_item = {**row}
-        if mask_ips and client_item.get("ip"):
-            client_item["ip"] = mask_ip(str(client_item["ip"]))
-        client_item["asn_name"] = _asn_display(asn_int)
-        client_item.pop("asn", None)
-        active_clients.append(client_item)
-    return {
-        "active_proxies_count": int(stats.get("active_proxies_count", 0)),
-        "tunnel_requests_count": int(stats.get("total_requests_count", 0)),
-        "distance_mismatches_count": int(stats.get("distance_mismatches_count", 0)),
-        "traffic_quality": traffic_quality,
-        "suspicious_isps": suspicious_isps,
-        "active_clients": active_clients,
-    }
+_empty_proxies_payload = empty_security_proxies
+_parse_asn_int = parse_asn_int
+_finish_proxies = finish_security_proxies
 
 
 def get_security_proxies(

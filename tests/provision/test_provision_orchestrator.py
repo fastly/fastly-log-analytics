@@ -13,11 +13,11 @@ import httpx
 import pytest
 import vcr
 from backend.core.metadata.cron_log import CronLeaseHeldError
-from backend.core.rum_ingest import DEFAULT_FARO_VERSION
 
 from backend import config as svcconfig
 from backend.core.fastly.client import fastly as real_fastly
 from backend.core.log_fields import resolve_enabled_fields
+from backend.core.rum_ingest import DEFAULT_FARO_VERSION
 from backend.provision import orchestrator, rum_assets
 from backend.provision.declarative.reconciler import FeatureState, generate_consolidated_snippet
 from backend.provision.orchestrator import _reject_unsafe_fos_component

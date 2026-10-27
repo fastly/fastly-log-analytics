@@ -29,6 +29,13 @@ from backend.repositories.insights import InsightDefinition, registry  # noqa: F
 from backend.repositories.utils.response_cache import (
     bucket_time_to_minute,
 )
+from backend.repositories.utils.response_shaping import (
+    build_cache_collapse_breakdown,
+    build_insight_asn_context,
+    build_insights_envelope,
+    select_insight_bucket_interval,
+    shape_cache_collapse_timeline_point,
+)
 from backend.utils.bounded_cache import BoundedTTLCache
 from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry
 from backend.utils.date_utils import parse_iso_utc
@@ -1204,12 +1211,7 @@ def _failure_message(exc: Exception) -> str:
 def _asn_context(service_id: str, rows: list[tuple[Any, ...]], insight_id: str) -> dict[str, Any]:
     if not rows or not any(marker in insight_id for marker in _ASN_INSIGHT_MARKERS):
         return {}
-    from backend.core import duckdb as _db
-
-    context: dict[str, Any] = {"asn_names": _db.get_asn_names(service_id, [row[0] for row in rows if row])}
-    if "metro" in insight_id:
-        context["dma_map"] = _db._get_dma_map()
-    return context
+    return build_insight_asn_context(service_id, rows, insight_id, include_dma="metro" in insight_id)
 
 
 def insights_endpoint(
@@ -1343,34 +1345,24 @@ def insights_endpoint(
         futures = [pool.submit(contextvars.copy_context().run, lambda pair=pair: run(*pair)) for pair in candidates]
         cards = [future.result() for future in futures]
     computed_at = now.isoformat()
-    payload = {
-        "insights": cards,
-        "window_start": window_start.isoformat(),
-        "window_end": computed_at,
-        "baseline_start": baseline_start.isoformat(),
-        "baseline_end": window_start.isoformat(),
-        "computed_at": computed_at,
-        "window_hours": window_hours,
-        "baseline_hours": baseline_hours,
-        "window_total_requests": window_total,
-    }
+    payload = build_insights_envelope(
+        cards,
+        window_start=window_start.isoformat(),
+        window_end=computed_at,
+        baseline_start=baseline_start.isoformat(),
+        baseline_end=window_start.isoformat(),
+        computed_at=computed_at,
+        window_hours=window_hours,
+        baseline_hours=baseline_hours,
+        window_total_requests=window_total,
+    )
     if use_cache and not any(c.get("severity") == "error" for c in cards):
         _INSIGHTS_CACHE[cache_key] = payload
     return InsightsResponse.with_telemetry(**payload)
 
 
 def _bucket_interval(total_hours: float) -> str:
-    if total_hours <= 2:
-        return "INTERVAL 1 MINUTE"
-    if total_hours <= 12:
-        return "INTERVAL 5 MINUTE"
-    if total_hours <= 48:
-        return "INTERVAL 15 MINUTE"
-    if total_hours <= 168:
-        return "INTERVAL 1 HOUR"
-    if total_hours <= 720:
-        return "INTERVAL 4 HOUR"
-    return "INTERVAL 1 DAY"
+    return select_insight_bucket_interval(total_hours, clickhouse=True)
 
 
 def cache_collapse_detail_endpoint(
@@ -1423,20 +1415,16 @@ def cache_collapse_detail_endpoint(
         "GROUP BY bucket ORDER BY bucket ASC",
         params,
     )
-    timeline = []
-    for row in timeline_rows:
-        real_hits, misses = int(row["real_hits"] or 0), int(row["misses"] or 0)
-        cacheable = real_hits + misses
-        timeline.append(
-            {
-                "bucket": _iso_or_empty(row["bucket"]),
-                "expected_hits": float(cacheable * b_rate),
-                "real_hits": real_hits,
-                "misses": misses,
-                "total_requests": int(row["total_requests"] or 0),
-                "hit_rate": float(real_hits / cacheable) if cacheable else 0.0,
-            }
+    timeline = [
+        shape_cache_collapse_timeline_point(
+            _iso_or_empty(row["bucket"]),
+            row["total_requests"],
+            row["real_hits"],
+            row["misses"],
+            b_rate,
         )
+        for row in timeline_rows
+    ]
     miss_rows = service.client.execute(
         "/* insight:cache_collapse_misses */ SELECT event_timestamp AS timestamp, "
         f"{cache} AS cache, custom_fields['pop'] AS pop, client_ip AS ip, toInt32OrNull(custom_fields['status']) AS status "
@@ -1458,12 +1446,7 @@ def cache_collapse_detail_endpoint(
         has_data=bool(w_total + b_total),
         timeline=timeline,
         recent_misses=recent_misses,
-        breakdown={
-            "hits": w_hits,
-            "misses": w_miss,
-            "passes": w_pass,
-            "other": max(0, w_total - w_hits - w_miss - w_pass),
-        },
+        breakdown=build_cache_collapse_breakdown(w_hits, w_miss, w_pass, w_total),
         baseline_hit_rate=float(b_rate) * 100,
         window_hit_rate=float(w_rate) * 100,
         baseline_pass_rate=float(b_pass / b_total) * 100 if b_total else 0.0,

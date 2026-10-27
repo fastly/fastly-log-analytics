@@ -1151,13 +1151,13 @@ from backend.core.metadata.cron_log import (
     start_cron_run,
 )
 from backend.cron_progress import _progress, _run_metadata, end_progress, start_progress
-from backend.services import service_manager
-from backend.services.service_manager import _get_dir_stats
 from fastapi.testclient import TestClient
 
 from backend.main import app
 from backend.routers.services import core as _core
 from backend.routers.services import cron as _cron_router
+from backend.services import service_manager
+from backend.services.service_manager import _get_dir_stats
 
 _SVC_HEADERS = {"x-fastly-service-id": MOCK_SERVICE_ID}
 

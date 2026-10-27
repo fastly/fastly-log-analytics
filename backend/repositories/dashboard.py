@@ -38,6 +38,12 @@ from backend.repositories.utils.response_cache import (
     coalesced_cache_result,
     serialize_filters_for_key,
 )
+from backend.repositories.utils.response_shaping import (
+    empty_dashboard_aggregates,
+    format_asn_display_label,
+    parse_asn_int,
+    resolve_asn_names_map,
+)
 from backend.utils.sql_validator import escape_sql_literal
 from backend.utils.telemetry import log_once_per
 
@@ -458,17 +464,7 @@ def _compute_dashboard_aggregates(
     interval = "1 minute"
 
     def _empty_envelope() -> dict[str, Any]:
-        return {
-            "data": {f: {"top": [], "total": 0} for f in fields},
-            "time_series": [],
-            "map_data": [],
-            "where_clause": "1=1",
-            "interval": interval,
-            "metric": "requests",
-            "total_rows": 0,
-            "total_rows_total": 0,
-            **runner.telemetry(),
-        }
+        return empty_dashboard_aggregates(fields, interval=interval, **runner.telemetry())
 
     actual_cols = timer.call("get_schema_cols", runner.get_schema_cols)
     if not actual_cols:
@@ -738,6 +734,7 @@ def _compute_dashboard_aggregates(
                     _phase_log=section_timings,
                     actual_cols=list(actual_cols),
                     schema_types=schema_types,
+                    exact_window=start_time is not None and end_time is not None,
                 ),
             )
             for f_name, _f_val, f_count in all_top_res:
@@ -753,15 +750,13 @@ def _compute_dashboard_aggregates(
                 results[field] = {"top": [], "total": field_totals.get(field, 0)}
 
             asn_list = [
-                int(f_val)
+                asn_int
                 for f_name, f_val, _ in all_top_res
-                if f_name == "asn" and f_val is not None and str(f_val).isdigit()
+                if f_name == "asn" and (asn_int := parse_asn_int(f_val)) is not None
             ]
             asn_names = {}
             if asn_list:
-                from backend.core import duckdb as _db
-
-                asn_names = timer.call("asn_names_lookup", lambda: _db.get_asn_names(src["name"], asn_list))
+                asn_names = timer.call("asn_names_lookup", lambda: resolve_asn_names_map(src["name"], asn_list))
 
             _PANEL_LIMIT = 10
             _panel_count: dict[str, int] = {}
@@ -769,11 +764,8 @@ def _compute_dashboard_aggregates(
                 if f_val == "__other__" or _panel_count.get(f_name, 0) >= _PANEL_LIMIT:
                     continue
                 entry = {"value": f_val, "count": f_count}
-                if f_name == "asn" and f_val is not None and str(f_val).isdigit():
-                    from backend.core import duckdb as _db
-
-                    asn_int = int(f_val)
-                    entry["label"] = _db.format_asn_label(asn_int, asn_names.get(asn_int, ""))
+                if f_name == "asn" and (asn_int := parse_asn_int(f_val)) is not None:
+                    entry["label"] = format_asn_display_label(asn_int, asn_names)
 
                 results[f_name]["top"].append(entry)
                 _panel_count[f_name] = _panel_count.get(f_name, 0) + 1
@@ -1050,8 +1042,8 @@ def get_field_values(
     def _resp(vals: list) -> dict:
         return {"values": vals, "field": field, **runner.telemetry()}
 
-    # Try top-values cache first (no-search path only)
-    if not search:
+    # The reservoir sample has no time or filter scope.
+    if not search and start_time is None and end_time is None and not filters:
         try:
             from backend.core.duckdb import _cache_dir
 

@@ -19,7 +19,6 @@ from backend.core.query_attribution import current_attribution
 from backend.core.query_instrumentation import InstrumentedDuckDBConnection
 from backend.core.query_registry import _HISTORY_CAP, Attribution, QueryRegistry, query_registry
 from backend.cron.decorators import global_job
-from backend.utils.remote_access import _new_request_id
 from fastapi import FastAPI, HTTPException
 from starlette.requests import Request
 
@@ -41,6 +40,7 @@ from backend.main import (
     telemetry_middleware,
 )
 from backend.repositories._base import QueryRunner
+from backend.utils.remote_access import _new_request_id
 
 # ── Shared Helpers ───────────────────────────────────────────────────────────
 

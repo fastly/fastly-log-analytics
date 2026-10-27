@@ -26,6 +26,13 @@ from backend.repositories.utils.response_cache import (
     digest_cache_key,
     serialize_filters_for_key,
 )
+from backend.repositories.utils.response_shaping import (
+    PERF_SECTION_DEFAULTS,
+    WATERFALL_KEYS,
+    empty_performance_aggregates,
+    shape_performance_asn_rows,
+    shape_waterfall_avg,
+)
 from backend.utils.bounded_cache import CacheRegistry
 
 
@@ -156,13 +163,7 @@ def peek_performance_aggregates(
 
 
 _PERF_TEMP_COL_ORDER = ("url", "asn", "ttfb", "elapsed", "cache", "ttl", "ottfb", "ottlb")
-_PERF_SECTION_DEFAULTS: dict[str, Any] = {
-    "top_urls": [],
-    "top_asns": [],
-    "ttl_dist": [],
-    "scatter": [],
-    "waterfall": {},
-}
+_PERF_SECTION_DEFAULTS: dict[str, Any] = PERF_SECTION_DEFAULTS
 
 
 def get_performance_aggregates(
@@ -212,11 +213,7 @@ def _compute_performance_aggregates(
     actual_cols = runner.get_schema_cols()
     timer.mark("get_schema_cols", _t, activity="overhead", current_execution=True)
     if not actual_cols:
-        return {
-            **{k: ([] if isinstance(v, list) else {}) for k, v in _PERF_SECTION_DEFAULTS.items()},
-            "section_timings": section_timings,
-            **runner.telemetry(),
-        }
+        return empty_performance_aggregates(section_timings=section_timings, **runner.telemetry())
 
     _t = time.perf_counter()
     params, where_clause = build_where_clause(start_time, end_time, filters, actual_cols, inline_params=True)
@@ -225,20 +222,8 @@ def _compute_performance_aggregates(
     sort_idx = {"avg": 3, "p50": 4, "p95": 5, "p99": 6}.get(sort_by, 6)
 
     def _resolve_asns(asn_res: list) -> list[dict]:
-        from backend.core import duckdb as _db
-
         labels_started = time.perf_counter()
-        asn_list = [int(r[0]) for r in asn_res if str(r[0]).isdigit()]
-        asn_names = _db.get_asn_names(src["name"], asn_list)
-        out: list[dict] = []
-        for r in asn_res:
-            asn_val = int(r[0]) if str(r[0]).isdigit() else r[0]
-            label = (
-                _db.format_asn_label(asn_val, asn_names.get(asn_val, "")) if isinstance(asn_val, int) else str(asn_val)
-            )
-            out.append(
-                {"asn": asn_val, "label": label, "requests": r[1], "avg": r[2], "p50": r[3], "p95": r[4], "p99": r[5]}
-            )
+        out = shape_performance_asn_rows(src["name"], asn_res)
         timer.mark("performance.asn_labels", labels_started, activity="overhead", current_execution=True)
         return out
 
@@ -397,17 +382,16 @@ def _compute_performance_aggregates(
             )
             combined_rows = runner.execute(combined_q, q_params).fetchall()
             scatter: list[dict] = []
-            _wf_keys = ("edge_processing", "origin_wait", "origin_download", "client_download")
-            waterfall_avg = dict.fromkeys(_wf_keys, 0.0)
+            waterfall_payload = shape_waterfall_avg(None)
             for r in combined_rows:
                 if r[0] == "s":
                     scatter.append({"origin": r[1], "edge": r[2], "cache": r[3]})
                 else:
-                    waterfall_avg = {k: float(r[i + 4] or 0.0) for i, k in enumerate(_wf_keys)}
+                    waterfall_payload = shape_waterfall_avg({k: r[i + 4] for i, k in enumerate(WATERFALL_KEYS)})
             if _want_scatter:
                 results["scatter"] = scatter
             if _want_waterfall:
-                results["waterfall"] = {"avg": waterfall_avg}
+                results["waterfall"] = waterfall_payload
             timer.mark("scatter_waterfall_query", _t, source="live", activity="compute", current_execution=True)
     finally:
         _drop_temp_table(runner, temp_table, "get_performance_aggregates")

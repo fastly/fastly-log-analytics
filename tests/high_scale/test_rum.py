@@ -1126,7 +1126,6 @@ from backend.core.fastly.rum_provisioning import (
 )
 from backend.core.metadata.quarantine import list_quarantine_evidence
 from backend.core.quarantine import read_evidence
-from backend.core.rum_ingest import ingest_rum_logs
 from backend.utils.vcl_validator import lint_vcl
 from tests._helpers.ledger import (
     DuckLakeLedgerEnv,
@@ -1148,6 +1147,7 @@ from backend.core.ingest import (
     discover_rum_prefix,
     sweep_rum_ledger_once,
 )
+from backend.core.rum_ingest import ingest_rum_logs
 
 SERVICE_ID = "test-rum-ledger-edges"
 BUCKET = "test-bucket"
@@ -2437,14 +2437,13 @@ import base64
 import os
 import tarfile
 
+from backend.core import faro_versions
 from backend.core.faro_versions import (
     _BUNDLE_MEMBER_NAME,
     _is_stable_numeric,
     fetch_available_faro_versions,
     fetch_faro_bundle,
 )
-
-from backend.core import faro_versions
 
 TARBALL_URL = "https://registry.npmjs.org/@grafana/faro-web-sdk/-/faro-web-sdk-2.9.0.tgz"
 
