@@ -511,7 +511,7 @@ test.describe('Performance Page Contract (/performance)', () => {
     shellCheck: async (page) => {
       await expect(page.getByRole('button', { name: /24h|1h|7d|last/i }).first()).toBeVisible({ timeout: 10_000 })
       for (const label of ['End-to-End Latency Waterfall (Average)', 'Slowest URLs', 'Slowest Networks', 'Cache TTL Distribution', 'Origin vs Edge Processing (ms)']) {
-        await expect(page.getByText(label).locator('visible=true')).toBeVisible({ timeout: 15_000 })
+        await expect(page.getByText(label, { exact: true }).locator('visible=true')).toBeVisible({ timeout: 15_000 })
       }
     },
     dataContract: {

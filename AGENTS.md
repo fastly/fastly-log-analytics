@@ -1264,6 +1264,11 @@ In Next.js App Router, `<RootLayout>` (`StoreHydrator`, `useBootstrap`, `useAdmi
 2. `useAdminEventStream` (`SSE_SYNC_STATUS`, `SSE_USAGE_COST`) or fast local queries (`useSystemMetrics`, `useBotSources`, `useQuarantineSummary`, `useShareSettings`, `useSyncStatus`) can populate React Query / Zustand caches before the route's first client render.
 If a route component reads `activeServiceId` or non-SSR-seeded query data directly during its initial render, the client's first hydration pass will render populated DOM (e.g. `?service=xyz` hrefs, populated tables, or live metrics) where SSR rendered `null` or a skeleton, triggering `Minified React error #418` in `e2e/hydration-smoke.spec.ts`. Always gate `activeServiceId` (when not backed by a URL param) and non-SSR-seeded query/SSE data on `const mounted = useMounted()` so the first client pass matches SSR HTML byte-for-byte.
 
+Clock-derived chart labels need the same gate. Control Room's `Date.now()` labels
+can cross a second between server render and hydration, including in the
+screen-reader table even though Plotly itself is client-only. Build those traces
+only after `useMounted()`; the widget regression hydrates across a clock boundary.
+
 ### 47. Pin both halves of a DuckLake-plus-buffer view to the same commit boundary
 
 The buffer branch captures fixed Parquet paths, so the committed DuckLake branch
