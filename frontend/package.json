@@ -81,7 +81,7 @@
     "eslint-config-next": "16.4.2",
     "jsdom": "^30.0.1",
     "knip": "^6.32.2",
-    "msw": "^2.15.0",
+    "msw": "^3.0.3",
     "openapi-typescript": "^7",
     "tailwindcss": "^4.2.4",
     "topojson-server": "^3.0.1",
