@@ -3158,6 +3158,13 @@ def test_dashboard_country_rollups_match_scoped_filter_at_hour_boundaries(
     }
     if start == "02:00" and end in ("03:00", "04:00"):
         assert any("read_parquet" in row["sql"] for row in initial["debug_queries"])
+    assert not any("strftime(timestamp, '%Y-%m-%d-%H') IN" in row["sql"] for row in initial["debug_queries"])
+    raw_table_queries = [
+        row["sql"]
+        for row in initial["debug_queries"]
+        if f"FROM {table}" in row["sql"] or f"FROM ({table})" in row["sql"]
+    ]
+    assert len(raw_table_queries) <= 2
 
 
 @pytest.mark.parametrize("failed_read", ["rollup", "boundary", "active"])
