@@ -15,7 +15,7 @@ from backend.core.metadata.ingest_log import (
     get_quarantine_evidence_summary,
     list_quarantine_evidence,
 )
-from backend.deps import get_source, require_admin
+from backend.core.request_context import get_source, require_admin
 from backend.models.admin import (
     QuarantineDeleteResponse,
     QuarantineEvidenceItem,

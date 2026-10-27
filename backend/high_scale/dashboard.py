@@ -6,7 +6,7 @@ import sys
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from backend.core.high_scale_sections import HighScaleSections
+from backend.core.request_telemetry import HighScaleSections
 from backend.high_scale._common import (
     _FIELD_DIMENSIONS,
     _column,
@@ -22,7 +22,7 @@ from backend.high_scale.aggregate_query import (
     query_clickhouse_aggregate,
     query_clickhouse_aggregates_batch,
 )
-from backend.models.dashboard import (
+from backend.models.analytics import (
     AggregatesRequest,
 )
 from backend.repositories.utils.response_cache import (
@@ -46,8 +46,7 @@ import concurrent.futures
 import os
 from functools import partial
 
-from backend.models.common import ResponseCacheObservation
-from backend.models.dashboard import (
+from backend.models.analytics import (
     AggregatesResponse,
     FieldAggregate,
     FieldTopEntry,
@@ -57,6 +56,7 @@ from backend.models.dashboard import (
     RawRequest,
     TimeSeriesPoint,
 )
+from backend.models.common import ResponseCacheObservation
 from backend.repositories.utils.response_cache import cache_result
 from backend.utils.bounded_cache import CacheRegistry
 from backend.utils.date_utils import safe_iso
@@ -146,7 +146,7 @@ def header_metrics(service: HighScaleService) -> dict[str, Any]:
     req_sync: str | None = None
     rum_sync: str | None = None
     try:
-        from backend.core.metadata.cron_log import latest_cron_per_task
+        from backend.core.metadata.usage_log import latest_cron_per_task
 
         latest_crons = latest_cron_per_task(service.service_id)
         req_sync = max(

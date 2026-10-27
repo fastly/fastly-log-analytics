@@ -22,6 +22,7 @@ import threading
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import duckdb
 import psycopg
@@ -29,7 +30,7 @@ from botocore.exceptions import ClientError
 
 from backend.config import is_high_scale_mode
 from backend.core.metadata.usage_log import record_cloud_copy_deletion
-from backend.utils.sql_validator import escape_sql_literal
+from backend.core.sql_validator import escape_sql_literal
 from backend.utils.telemetry import log_once_per
 
 logger = logging.getLogger(__name__)
@@ -249,14 +250,7 @@ def _rebuild_ingest_index(con, service_id: str, name: str, ident: str) -> int:
 
 
 def restore_admin_state(source: dict) -> int:
-    """Re-save the saved views from the ``meta/admin_state.json`` snapshot; returns how many were restored.
-
-    The snapshot is exported after every settings change, so after a full loss it is the only copy of the saved views
-    (the audit log and custom fields in it are history and config, not restored). Views are keyed by id, so this is
-    idempotent.
-    """
-    from types import SimpleNamespace
-
+    """Restore saved views idempotently from the admin-state snapshot."""
     from backend.core.duckdb import _get_fos_client
     from backend.core.metadata.base import get_admin_state_key, save_view
 

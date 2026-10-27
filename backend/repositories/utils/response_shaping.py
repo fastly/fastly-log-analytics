@@ -194,7 +194,7 @@ def finish_security_proxies(
 
     active_clients: list[dict[str, Any]] = []
     if mask_ips:
-        from backend.core.share_db.validation import mask_ip
+        from backend.core.share_db import mask_ip
     for row in client_list:
         asn_int = parse_asn_int(row.get("asn"))
         client_item = {**row}
@@ -1230,14 +1230,449 @@ def shape_cache_collapse_timeline_point(
     }
 
 
+def shape_origin_summary(
+    total_misses: Any,
+    total_passes: Any,
+    ottfb_p50_ms: Any,
+    ottfb_p75_ms: Any,
+    ottfb_p95_ms: Any,
+    ottfb_p99_ms: Any,
+    *,
+    ottlb_p50_ms: Any = None,
+    ottlb_p95_ms: Any = None,
+    cdn_overhead_p50_ms: Any = None,
+    origin_error_rate: Any = None,
+    obytes_p50: Any = None,
+    ndigits: int | None = None,
+    **extra: Any,
+) -> dict[str, Any]:
+    """Build a normalized Origin ``summary`` payload across DuckDB and ClickHouse."""
+    return {
+        "has_data": True,
+        "total_misses": int(total_misses) if total_misses is not None else None,
+        "total_passes": int(total_passes) if total_passes is not None else None,
+        "ottfb_p50_ms": opt_float(ottfb_p50_ms, ndigits),
+        "ottfb_p75_ms": opt_float(ottfb_p75_ms, ndigits),
+        "ottfb_p95_ms": opt_float(ottfb_p95_ms, ndigits),
+        "ottfb_p99_ms": opt_float(ottfb_p99_ms, ndigits),
+        "ottlb_p50_ms": opt_float(ottlb_p50_ms, ndigits),
+        "ottlb_p95_ms": opt_float(ottlb_p95_ms, ndigits),
+        "cdn_overhead_p50_ms": opt_float(cdn_overhead_p50_ms, ndigits),
+        "origin_error_rate": opt_float(origin_error_rate, ndigits),
+        "obytes_p50": obytes_p50,
+        **extra,
+    }
+
+
+def shape_origin_slow_url_row(
+    url: Any,
+    requests: Any,
+    p50_ms: Any,
+    p95_ms: Any,
+    p99_ms: Any,
+    *,
+    ndigits: int | None = None,
+) -> dict[str, Any]:
+    """Format a single Origin slow-URL row."""
+    return {
+        "url": url,
+        "requests": int(requests or 0),
+        "p50_ms": opt_float(p50_ms, ndigits),
+        "p95_ms": opt_float(p95_ms, ndigits),
+        "p99_ms": opt_float(p99_ms, ndigits),
+    }
+
+
+def shape_origin_slow_urls_response(
+    rows: Sequence[Any],
+    **extra: Any,
+) -> dict[str, Any]:
+    """Wrap Origin slow-URL rows (tuples or dicts) in the standard response envelope."""
+    if rows and not isinstance(rows[0], Mapping):
+        return shape_keyed_rows(rows, ("url", "requests", "p50_ms", "p95_ms", "p99_ms"), **extra)
+    return {"has_data": bool(rows), "rows": list(rows), **extra}
+
+
+def shape_origin_path_row(
+    edge: Any,
+    requests: Any,
+    p50_ms: Any,
+    p95_ms: Any,
+    *,
+    ndigits: int | None = None,
+) -> dict[str, Any]:
+    """Format a single Origin path-breakdown row."""
+    return {
+        "edge": edge,
+        "requests": int(requests or 0),
+        "p50_ms": opt_float(p50_ms, ndigits),
+        "p95_ms": opt_float(p95_ms, ndigits),
+    }
+
+
+def shape_origin_path_breakdown(
+    rows: Sequence[Any],
+    *,
+    shielding_detected: bool | None = None,
+    **extra: Any,
+) -> dict[str, Any]:
+    """Wrap Origin path-breakdown rows (tuples or dicts) in the standard response envelope."""
+    if rows and not isinstance(rows[0], Mapping):
+        detected = any(r[0] is False for r in rows) if shielding_detected is None else shielding_detected
+        return shape_keyed_rows(rows, ("edge", "requests", "p50_ms", "p95_ms"), shielding_detected=detected, **extra)
+    detected = any(r.get("edge") is False for r in rows) if shielding_detected is None else shielding_detected
+    return {"has_data": bool(rows), "shielding_detected": bool(detected), "rows": list(rows), **extra}
+
+
+def shape_origin_ip_health_row(
+    oip: Any,
+    requests: Any,
+    p50_ms: Any,
+    p95_ms: Any,
+    error_pct: Any,
+    *,
+    ndigits: int | None = None,
+) -> dict[str, Any]:
+    """Format a single Origin IP health row."""
+    return {
+        "oip": oip,
+        "requests": int(requests or 0),
+        "p50_ms": opt_float(p50_ms, ndigits),
+        "p95_ms": opt_float(p95_ms, ndigits),
+        "error_pct": opt_float(error_pct, ndigits) if error_pct is not None else 0.0,
+    }
+
+
+def shape_origin_ip_health_response(
+    rows: Sequence[Any],
+    *,
+    has_data: bool | None = None,
+    **extra: Any,
+) -> dict[str, Any]:
+    """Wrap Origin IP health rows (tuples or dicts) in the standard response envelope."""
+    if rows and not isinstance(rows[0], Mapping):
+        return shape_keyed_rows(rows, ("oip", "requests", "p50_ms", "p95_ms", "error_pct"), **extra)
+    return {
+        "has_data": bool(rows) if has_data is None else bool(has_data),
+        "rows": list(rows),
+        **extra,
+    }
+
+
+def shape_origin_status_row(status: Any, count: Any, pct: Any) -> dict[str, Any]:
+    """Format a single Origin status breakdown row."""
+    return {
+        "status": int(status),
+        "count": int(count or 0),
+        "pct": round(float_or_zero(pct), 2),
+    }
+
+
+PERF_TTL_BUCKETS: tuple[tuple[int, str], ...] = (
+    (0, "0s"),
+    (10, "<10s"),
+    (30, "<30s"),
+    (60, "<1m"),
+    (300, "<5m"),
+    (600, "<10m"),
+    (1800, "<30m"),
+    (3600, "<1h"),
+    (10800, "<3h"),
+    (21600, "<6h"),
+    (43200, "<12h"),
+    (86400, "<1d"),
+    (259200, "<3d"),
+    (604800, "<1w"),
+    (1209600, "<2w"),
+    (2592000, "<30d"),
+    (7776000, "<90d"),
+    (31536000, "<1y"),
+)
+PERF_TTL_LAST_BUCKET = ">1y"
+
+
+def shape_perf_ttl_dist_rows(rows: Iterable[Any]) -> list[dict[str, Any]]:
+    """Normalize Performance TTL distribution rows from tuples or dicts."""
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        if isinstance(r, Mapping):
+            out.append({"bucket": r["bucket"], "count": int(r["count"])})
+        else:
+            out.append({"bucket": r[0], "count": r[1]})
+    return out
+
+
+def shape_perf_top_url_row(
+    row: Any,
+    *,
+    normalize_float: bool = False,
+) -> dict[str, Any]:
+    """Format a single Performance top-URL latency breakdown row from a tuple or mapping."""
+    if isinstance(row, Mapping):
+        url = row.get("url", row.get("value"))
+        if normalize_float:
+            return {"url": url, **shape_latency_percentiles(row)}
+        return {
+            "url": url,
+            "requests": row.get("requests", row.get("req_count")),
+            "avg": row.get("avg", row.get("avg_ms")),
+            "p50": row.get("p50", row.get("p50_ms")),
+            "p95": row.get("p95", row.get("p95_ms")),
+            "p99": row.get("p99", row.get("p99_ms")),
+        }
+    return {
+        "url": row[0],
+        "requests": row[1],
+        "avg": row[2],
+        "p50": row[3],
+        "p95": row[4],
+        "p99": row[5],
+    }
+
+
+def shape_perf_scatter_row(
+    origin_ms: Any,
+    edge_ms: Any,
+    cache: Any,
+    *,
+    coerce_float: bool = False,
+) -> dict[str, Any]:
+    """Format a single Performance origin-vs-edge latency scatter sample row."""
+    if coerce_float:
+        return {
+            "origin": float_or_zero(origin_ms),
+            "edge": float_or_zero(edge_ms),
+            "cache": cache or None,
+        }
+    return {
+        "origin": origin_ms,
+        "edge": edge_ms,
+        "cache": cache,
+    }
+
+
+def shape_perf_latency_row(
+    value: Any,
+    requests: Any,
+    avg_ms: Any,
+    p50_ms: Any,
+    p95_ms: Any,
+    p99_ms: Any,
+) -> dict[str, Any]:
+    """Format a single Performance latency breakdown row."""
+    return {
+        "value": str(value) if value is not None else "Unknown",
+        "requests": int(requests or 0),
+        "avg_ms": round(float_or_zero(avg_ms), 2),
+        "p50_ms": round(float_or_zero(p50_ms), 2),
+        "p95_ms": round(float_or_zero(p95_ms), 2),
+        "p99_ms": round(float_or_zero(p99_ms), 2),
+    }
+
+
+SECURITY_REQ_HEADER_BUCKETS: tuple[tuple[int, str], ...] = (
+    (256, "0-256B"),
+    (512, "256-512B"),
+    (768, "512-768B"),
+    (1024, "768B-1KB"),
+    (1536, "1-1.5KB"),
+    (2048, "1.5-2KB"),
+    (3072, "2-3KB"),
+    (4096, "3-4KB"),
+    (6144, "4-6KB"),
+    (8192, "6-8KB"),
+    (12288, "8-12KB"),
+    (16384, "12-16KB"),
+    (24576, "16-24KB"),
+    (32768, "24-32KB"),
+)
+SECURITY_REQ_HEADER_LAST = ">32KB"
+
+SECURITY_CONN_REUSE_BUCKETS: tuple[tuple[int, str], ...] = (
+    (1, "1 (None)"),
+    (5, "2-5"),
+    (20, "6-20"),
+    (100, "21-100"),
+)
+SECURITY_CONN_REUSE_LAST = ">100"
+
+
+def shape_security_bucket_rows(rows: Iterable[Any]) -> list[dict[str, Any]]:
+    """Normalize Security bucket distribution rows from tuples or dicts."""
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        if isinstance(r, Mapping):
+            out.append({"bucket": r["bucket"], "count": int(r["count"])})
+        else:
+            out.append({"bucket": r[0], "count": r[1]})
+    return out
+
+
+def shape_security_fingerprint_row(
+    fingerprint: Any,
+    ip_count: Any,
+    request_count: Any,
+) -> dict[str, Any]:
+    """Format a single Security JA3/JA4/H2 fingerprint cardinality row."""
+    return {
+        "fingerprint": fingerprint,
+        "ip_count": int(ip_count or 0),
+        "request_count": int(request_count or 0),
+    }
+
+
+def shape_security_top_ip_header_row(
+    ip: Any,
+    max_header: Any,
+    *,
+    mask_ips: bool = False,
+) -> dict[str, Any]:
+    """Format a single Security top-IP header size row with optional IP masking."""
+    ip_val = ip
+    if mask_ips and ip_val:
+        from backend.core.share_db import mask_ip
+
+        ip_val = mask_ip(str(ip_val))
+    return {"ip": ip_val, "max_header": int(max_header) if max_header is not None else max_header}
+
+
+def shape_security_ngwaf_bot_row(
+    bot_name: Any,
+    wellknown_bot_name: Any,
+    category: Any,
+    request_count: Any,
+) -> dict[str, Any]:
+    """Format a single Security NGWAF bot detection row."""
+    return {
+        "bot_name": bot_name,
+        "wellknown_bot_name": wellknown_bot_name or None,
+        "category": category or None,
+        "request_count": int(request_count or 0),
+    }
+
+
+def shape_security_ngwaf_top_bot_row(
+    name: Any,
+    category: Any,
+    request_count: Any,
+) -> dict[str, Any]:
+    """Format a single Security NGWAF top-bot summary row."""
+    return {
+        "name": name,
+        "category": category or None,
+        "request_count": int(request_count or 0),
+    }
+
+
+def shape_security_threat_intel_row(
+    tls_fingerprint: Any,
+    requests: Any,
+    top_country: Any,
+    matched_waf_rules_count: Any,
+    bot_percentage: Any,
+    is_anonymized_proxy: Any,
+) -> dict[str, Any]:
+    """Format a single Security threat-intelligence row."""
+    return {
+        "tls_fingerprint": tls_fingerprint,
+        "requests": int(requests or 0),
+        "top_country": top_country or "Unknown",
+        "matched_waf_rules_count": int(matched_waf_rules_count or 0),
+        "bot_percentage": float(bot_percentage or 0.0),
+        "is_anonymized_proxy": bool(int(is_anonymized_proxy)) if is_anonymized_proxy is not None else False,
+    }
+
+
+SESSIONS_SORTABLE_COLUMNS: frozenset[str] = frozenset(
+    {
+        "session_start",
+        "session_end",
+        "req_count",
+        "edge_count",
+        "shield_count",
+        "unique_urls",
+        "median_rtt_ms",
+        "total_bytes",
+    }
+)
+SESSIONS_DEFAULT_MIN_REQS_FLAG = 1000
+SESSIONS_DEFAULT_MIN_4XX_PCT_FLAG = 20.0
+
+
+def normalize_sessions_sort(sort_by: str, sort_dir: str) -> tuple[str, str]:
+    """Validate and normalize session list sort column and direction."""
+    col = sort_by if sort_by in SESSIONS_SORTABLE_COLUMNS else "session_start"
+    direction = "ASC" if str(sort_dir).upper() == "ASC" else "DESC"
+    return col, direction
+
+
+def shape_sessions_envelope(
+    sessions: list[dict[str, Any]],
+    *,
+    total: int,
+    page: int,
+    limit: int,
+    has_rtt: bool = False,
+    has_ja4: bool = False,
+    has_edge: bool = False,
+    has_edge_sid: bool = False,
+    has_cmcd: bool = False,
+    min_reqs_flag: int = SESSIONS_DEFAULT_MIN_REQS_FLAG,
+    min_4xx_pct_flag: float = SESSIONS_DEFAULT_MIN_4XX_PCT_FLAG,
+    asn_names: dict[int, str] | None = None,
+    service_id: str | None = None,
+    asn_label_resolver: Any = None,
+    section_timings: list[Any] | None = None,
+    telemetry: dict[str, Any] | None = None,
+    rollup_served: bool = False,
+) -> dict[str, Any]:
+    """Build the standard Sessions paginated response envelope shared by DuckDB and ClickHouse."""
+    if asn_names is None:
+        resolver = asn_label_resolver or build_asn_label_map
+        asns = sorted({int(s["asn"]) for s in sessions if s.get("asn") is not None})
+        asn_names = resolver(service_id or "", asns) if (asns and service_id) else {}
+    res: dict[str, Any] = {
+        **empty_sessions_response(
+            page=page,
+            limit=limit,
+            has_rtt=bool(has_rtt),
+            has_ja4=bool(has_ja4),
+            has_edge=bool(has_edge),
+            has_edge_sid=bool(has_edge_sid),
+            has_cmcd=bool(has_cmcd),
+            min_reqs_flag=min_reqs_flag,
+            min_4xx_pct_flag=min_4xx_pct_flag,
+        ),
+        "sessions": sessions,
+        "asn_names": asn_names,
+        "total": total,
+    }
+    if section_timings is not None:
+        res["section_timings"] = section_timings
+    if rollup_served:
+        res["_rollup_served"] = True
+    if telemetry:
+        res.update(telemetry)
+    return res
+
+
 __all__ = [
     "CHART_INTERVAL_SECONDS",
     "CMCD_TS_DEFAULTS",
     "INSIGHT_BUCKET_INTERVALS",
     "ORIGIN_SUMMARY_KEYS",
     "PERF_SECTION_DEFAULTS",
+    "PERF_TTL_BUCKETS",
+    "PERF_TTL_LAST_BUCKET",
+    "SECURITY_CONN_REUSE_BUCKETS",
+    "SECURITY_CONN_REUSE_LAST",
     "SECURITY_EMPTY_CORE_SECTIONS",
+    "SECURITY_REQ_HEADER_BUCKETS",
+    "SECURITY_REQ_HEADER_LAST",
     "SECURITY_SECTION_DEFAULTS",
+    "SESSIONS_DEFAULT_MIN_4XX_PCT_FLAG",
+    "SESSIONS_DEFAULT_MIN_REQS_FLAG",
+    "SESSIONS_SORTABLE_COLUMNS",
     "WATERFALL_KEYS",
     "avg_bucket_health_score",
     "build_asn_label_map",
@@ -1272,6 +1707,7 @@ __all__ = [
     "haversine_km",
     "is_pop_latency_elevated",
     "normalize_chart_interval",
+    "normalize_sessions_sort",
     "opt_float",
     "pad_timeseries_buckets",
     "parse_asn_int",
@@ -1281,9 +1717,28 @@ __all__ = [
     "shape_cache_collapse_timeline_point",
     "shape_keyed_rows",
     "shape_latency_percentiles",
+    "shape_origin_ip_health_response",
+    "shape_origin_ip_health_row",
+    "shape_origin_path_breakdown",
+    "shape_origin_path_row",
+    "shape_origin_slow_url_row",
+    "shape_origin_slow_urls_response",
+    "shape_origin_status_row",
+    "shape_origin_summary",
+    "shape_perf_latency_row",
+    "shape_perf_scatter_row",
+    "shape_perf_top_url_row",
+    "shape_perf_ttl_dist_rows",
     "shape_performance_asn_rows",
     "shape_pop_latency_rows",
     "shape_protocol_distribution",
+    "shape_security_bucket_rows",
+    "shape_security_fingerprint_row",
+    "shape_security_ngwaf_bot_row",
+    "shape_security_ngwaf_top_bot_row",
+    "shape_security_threat_intel_row",
+    "shape_security_top_ip_header_row",
+    "shape_sessions_envelope",
     "shape_status_code_rows",
     "shape_waterfall_avg",
     "us_to_ms",

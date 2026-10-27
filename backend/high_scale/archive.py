@@ -31,7 +31,7 @@ from cachetools import LRUCache
 
 from backend.core.clickhouse import CLICKHOUSE_HIGH_SCALE_TABLES, get_clickhouse_client
 from backend.core.clickhouse import ClickHouseClient as HttpClickHouseClient
-from backend.utils.structlog_config import atomic_temp_path, atomic_write_json
+from backend.utils.telemetry import atomic_temp_path, atomic_write_json
 
 logger = structlog.get_logger(__name__)
 
@@ -2131,8 +2131,6 @@ def _read_manifest_rows(manifest: ArchiveManifest, archive: ArchivePublication) 
 def _batch_from_rows(
     batch_id: str, manifest: ArchiveManifest, rows: tuple[dict[str, Any], ...], *, domain: str | None = None
 ):
-    from backend.high_scale.publication import HighScaleBatch
-
     return HighScaleBatch(
         batch_id,
         _manifest_service_id(manifest),
@@ -2144,24 +2142,6 @@ def _batch_from_rows(
 
 _self_mod = sys.modules[__name__]
 _hs_pkg = sys.modules.get("backend.high_scale")
-for _alias in (
-    "archive_models",
-    "archive_publication",
-    "archive_writer",
-    "models",
-    "disk_sampler",
-    "retention_watermark",
-    "publication",
-    "schema",
-    "_batch_adapter_base",
-    "historical_jobs",
-    "exports",
-    "replay",
-):
-    sys.modules[f"backend.high_scale.{_alias}"] = _self_mod
-    if _hs_pkg is not None:
-        setattr(_hs_pkg, _alias, _self_mod)
-
 from backend.high_scale._common import range_value  # noqa: E402
 from backend.high_scale.cmcd import project_cmcd  # noqa: E402
 from backend.high_scale.origin import build_origin_projection_rows  # noqa: E402

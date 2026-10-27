@@ -252,11 +252,6 @@ def draft_version(
         raise
 
 
-# Register module aliases BEFORE importing sibling provision modules that depend on utils
-sys.modules["backend.provision.utils"] = sys.modules[__name__]
-sys.modules["backend.provision.log_paths"] = sys.modules[__name__]
-sys.modules["backend.provision.draft_version"] = sys.modules[__name__]
-
 from backend.core.fastly.client import SHIELD_MAP, fastly, find_service_by_name, parse_period  # noqa: E402
 from backend.provision.fastly_api import (  # noqa: E402
     account_has_rate_limiting,
@@ -461,7 +456,7 @@ def handle_teardown(args):
 def handle_reset_logs(args):
     banner("Fastly Log Analysis — Delete Data")
     from backend import config as svcconfig
-    from backend.core.metadata.reconciliation import is_ingested_files_dedup_active
+    from backend.core.metadata.base import is_ingested_files_dedup_active
     from backend.core.reset import reset_service_logs
     from backend.cron.scheduler import get_scheduler
 
@@ -544,7 +539,7 @@ def handle_update_logs(args):
 
     service_id, cfg, _ = _resolve_cli_service_and_token(args, require_token=False)
 
-    from backend.core import field_registry as lf
+    from backend.core import log_fields as lf
 
     new_lf_config = (
         _build_log_fields_config(args)
@@ -677,7 +672,7 @@ def handle_disable_scoring(args):
 
 def handle_list_groups(args):
     from backend import config as svcconfig
-    from backend.core import field_registry as lf
+    from backend.core import log_fields as lf
 
     existing_cfg = (
         svcconfig.load_config(args.service_id).get("log_fields", {}) if getattr(args, "service_id", None) else {}
@@ -692,7 +687,7 @@ def handle_list_groups(args):
 
 
 def handle_list_fields(args):
-    from backend.core import field_registry as lf
+    from backend.core import log_fields as lf
 
     print(f"\n  {'Field':<20} {'Group':<6} {'Type':<12} {'Bytes':>6}    Description")
     for f in lf.LOG_FIELD_CATALOG:
@@ -836,8 +831,7 @@ def cmd_restore_data(
     result = restore_from_cloud(source, progress=info)
     ok(
         f"Restored {result['remote_files']} cloud file(s): {result['downloaded']} downloaded, "
-        f"{result['registered']} registered, {result['reindexed']} raw object(s) re-indexed, "
-        f"{result['views_restored']} saved view(s) restored."
+        f"{result['registered']} registered, {result['reindexed']} raw object(s) re-indexed."
     )
 
 

@@ -83,7 +83,7 @@ def _reconcile_faro_bundle(service_id: str, run_id: int | None) -> bool:
     import asyncio
 
     from backend.core.faro_versions import DEFAULT_FARO_VERSION
-    from backend.cron_progress import add_progress
+    from backend.cron.scheduler import add_progress
     from backend.provision.rum_assets import (
         detect_faro_version_change,
         download_and_upload_faro,
@@ -214,7 +214,7 @@ def _run_rum_sync(service_id: str, **kwargs) -> None:
     pass_max_seconds = 20 if not is_manual else 240
 
     from backend.core import metadata
-    from backend.cron_progress import add_progress
+    from backend.cron.scheduler import add_progress
 
     ingest_fn = _resolve_sync_hook("ingest_rum_logs", ingest_rum_logs, _orig_ingest_rum_logs)
     reconcile_fn = _resolve_sync_hook("_reconcile_faro_bundle", _reconcile_faro_bundle, _orig_reconcile_faro_bundle)

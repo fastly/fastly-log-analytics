@@ -56,7 +56,7 @@ if TYPE_CHECKING:
 
     import duckdb
 
-    from backend.high_scale.registry_bootstrap import HighScaleService
+    from backend.high_scale.ingest_controller import HighScaleService
     from backend.utils.remote_access import TimeBounds
 
 from collections.abc import Iterator
@@ -68,7 +68,7 @@ from backend import config as svcconfig
 from backend.config import SERVICE_ID_PATTERN
 from backend.core import duckdb as db
 from backend.core.duckdb import DBBusyError, get_connection
-from backend.utils.structlog_config import redact_error_text
+from backend.utils.telemetry import redact_error_text
 
 # Ensure the root project directory (parent of backend/) is on sys.path so
 # that the backend package is importable.
@@ -424,7 +424,7 @@ class RequestContext:
         The registry import is deferred so handlers on the standard DuckDB path never load
         the ClickHouse stack; each handler still lazily imports its own ``hs_*`` function.
         """
-        from backend.high_scale.registry_bootstrap import get_high_scale_service_registry
+        from backend.high_scale.ingest_controller import get_high_scale_service_registry
 
         return get_high_scale_service_registry().resolve(self.service_id)
 
@@ -687,17 +687,3 @@ def verify_session_token(token: str, service_id: str = "") -> tuple[str, str | N
         return ip, ja4
     except SessionTokenError:
         return None
-
-
-_this_module = sys.modules[__name__]
-sys.modules["backend.core.session_token"] = _this_module
-_core_pkg = sys.modules.get("backend.core")
-if _core_pkg is not None:
-    setattr(_core_pkg, "session_token", _this_module)
-
-sys.modules["backend.deps"] = _this_module
-_backend_pkg = sys.modules.get("backend")
-if _backend_pkg is not None:
-    setattr(_backend_pkg, "deps", _this_module)
-    if hasattr(_backend_pkg, "_MODULE_ALIASES"):
-        _backend_pkg._MODULE_ALIASES["backend.deps"] = "backend.core.request_context"

@@ -19,22 +19,11 @@ import psycopg
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
-from backend.core._log_fields_data import LOG_FIELD_CATALOG
 from backend.core.local_compaction import _compact_single_partition
-from backend.core.rollups.time_series import build_time_series_bundles
-from backend.core.storage._ducklake import (
-    DuckLakeAdmissionTimeout,
-    _ducklake_attach,
-    _reset_for_tests,
-    ducklake_table_name,
-    ducklake_write_admission,
-    get_admission_stats,
-)
-from backend.core.storage.buffer import _commit_buffer_impl, _ducklake_write_connection, buffer_files
-from backend.core.storage.manifest import ducklake_table_exists, get_snapshot_calendar, get_table_info
-from backend.core.storage.view import _get_service_lock, _source_variant_fp
 from tests._helpers.sources import make_source
 
+import backend.core.storage._core as buffer_mod
+import backend.core.storage._core as ducklake
 from backend import config as svcconfig
 from backend.core import duckdb as db
 from backend.core import local_compaction as lc
@@ -43,9 +32,25 @@ from backend.core import storage
 from backend.core.duckdb import get_connection
 from backend.core.duckdb_pool import _Pool
 from backend.core.ingest import get_catalog_field_ids
+from backend.core.log_fields import LOG_FIELD_CATALOG
+from backend.core.rollups.recompute import build_time_series_bundles
 from backend.core.storage import _core
-from backend.core.storage import _ducklake as ducklake
-from backend.core.storage import buffer as buffer_mod
+from backend.core.storage._core import (
+    DuckLakeAdmissionTimeout,
+    _commit_buffer_impl,
+    _ducklake_attach,
+    _ducklake_write_connection,
+    _get_service_lock,
+    _reset_for_tests,
+    _source_variant_fp,
+    buffer_files,
+    ducklake_table_exists,
+    ducklake_table_name,
+    ducklake_write_admission,
+    get_admission_stats,
+    get_snapshot_calendar,
+    get_table_info,
+)
 
 _make_source = partial(make_source, kind="lake", buffer_dir=True)
 
@@ -312,7 +317,7 @@ def test_init_storage_table_returns_none_when_catalog_unattachable(tmp_path):
     fake_con = MagicMock()
     with (
         patch("backend.core.duckdb.get_connection", return_value=fake_con),
-        patch("backend.core.storage._ducklake._ducklake_attach", return_value=False),
+        patch("backend.core.storage._core._ducklake_attach", return_value=False),
     ):
         assert storage.init_storage_table(source) is None
     fake_con.close.assert_called_once()
@@ -466,7 +471,7 @@ def test_commit_buffer_calls_impl_when_lock_free(monkeypatch, fos_source):
 
 def test_reset_excludes_a_concurrent_commit_attempt(monkeypatch, s3_mock, fos_source):
     monkeypatch.setattr("backend.core.storage._core.init_storage_table", MagicMock())
-    monkeypatch.setattr("backend.core.storage.view.update_storage_view", MagicMock())
+    monkeypatch.setattr("backend.core.storage._core.update_storage_view", MagicMock())
     monkeypatch.setattr("backend.core.duckdb.get_connection", MagicMock())
     monkeypatch.setattr(buffer_mod, "_CLOUD_WRITE_LOCK_TIMEOUT_S", 0.2)
 
@@ -715,7 +720,7 @@ def test_write_to_buffer_creates_dir_and_uses_zstd_level_1(tmp_path):
     with (
         patch("backend.core.duckdb._cache_dir", return_value=str(target)),
         patch("backend.core.storage._align_to_schema", return_value=fake_table),
-        patch("backend.core.storage.buffer.pq.write_table") as mock_write,
+        patch("backend.core.storage._core.pq.write_table") as mock_write,
         patch("os.rename"),
     ):
         out = storage.write_to_buffer({"name": "svc"}, fake_table, "x.parquet")
@@ -878,7 +883,7 @@ def test_postgres_admission_fair_lock_and_timeout():
         def fetchone(self):
             return (True,)
 
-    with patch("backend.core.metadata.pg_connection.get_pg_thread_connection", return_value=Cursor()):
+    with patch("backend.core.metadata.base.get_pg_thread_connection", return_value=Cursor()):
         with ducklake_write_admission("admission-postgres", timeout_s=0.2):
             pass
 
@@ -890,7 +895,7 @@ def test_postgres_admission_fair_lock_and_timeout():
     assert acq_idx < rel_idx and calls[acq_idx][1][0] == calls[rel_idx][1][0]
 
     calls.clear()
-    with patch("backend.core.metadata.pg_connection.get_pg_thread_connection", return_value=Cursor(fail_lock=True)):
+    with patch("backend.core.metadata.base.get_pg_thread_connection", return_value=Cursor(fail_lock=True)):
         with pytest.raises(DuckLakeAdmissionTimeout), ducklake_write_admission("admission-pg-timeout", timeout_s=0.1):
             pass
     assert any(s == "SET lock_timeout = 0" for s in [c[0] for c in calls])
@@ -1033,7 +1038,7 @@ def test_durable_serving_mode(monkeypatch, tmp_path):
     with (
         patch("backend.core.duckdb._configure_fos"),
         patch("backend.core.storage.configure_duckdb_s3"),
-        patch("backend.core.storage._ducklake._ducklake_attach", return_value=True),
+        patch("backend.core.storage._core._ducklake_attach", return_value=True),
         patch("backend.core.storage.update_storage_view"),
     ):
         con = db.get_connection(source=source, read_only=True, skip_view_update=False)
@@ -1675,18 +1680,19 @@ import logging
 import sqlite3
 
 import pytest
-from backend.core.metadata.cron_log import (
+
+import backend.core.metadata as metadata_db
+import backend.core.metadata.base as pgc
+import backend.core.metadata.base as reconciliation
+import backend.core.metadata.usage_log as usage_log_db
+import backend.core.request_telemetry as query_registry
+from backend.core import duckdb as _db
+from backend.core.metadata.usage_log import (
     _decode_outcome_counters,
     _normalize_outcome_counters,
+    _usage_class_predicate,
     record_ingest_object_outcome,
 )
-
-from backend.core import duckdb as _db
-from backend.core import metadata as metadata_db
-from backend.core import query_registry
-from backend.core.metadata import pg_connection as pgc
-from backend.core.metadata import reconciliation, usage_log_db
-from backend.core.metadata.usage_log import _usage_class_predicate
 from backend.core.rum_ingest import ingest_rum_logs
 from backend.utils.date_utils import iso_z
 
@@ -3138,12 +3144,36 @@ def test_restore_adopts_the_copy_so_later_pushes_can_mirror_it(monkeypatch, tmp_
         con.close()
 
 
-def test_expiry_bills_the_bytes_of_high_scale_files_when_the_cleanup_unlinks_them(monkeypatch, tmp_path):
+@pytest.fixture
+def _fresh_catalog_dsn(_pg_worker_schema):
+    from urllib.parse import urlsplit, urlunsplit
+
+    parts = urlsplit(ducklake.config.DUCKLAKE_CATALOG)
+    worker_db, admin = _pg_worker_schema
+    fresh_name = f"{worker_db}_fresh_catalog"
+    fresh_dsn = urlunsplit((parts.scheme, parts.netloc, "/" + fresh_name, parts.query, ""))
+    if not admin.execute("SELECT 1 FROM pg_database WHERE datname = %s", (fresh_name,)).fetchone():
+        admin.execute(f'CREATE DATABASE "{fresh_name}"')
+    with psycopg.connect(fresh_dsn, autocommit=True) as catalog:
+        catalog.execute("DROP SCHEMA IF EXISTS public CASCADE")
+        catalog.execute("CREATE SCHEMA public")
+        try:
+            yield fresh_dsn
+        finally:
+            # DROP DATABASE waits on a checkpoint; the worker's exclusive slot permits reuse.
+            catalog.execute("DROP SCHEMA public CASCADE")
+            catalog.execute("CREATE SCHEMA public")
+
+
+def test_expiry_bills_the_bytes_of_high_scale_files_when_the_cleanup_unlinks_them(
+    monkeypatch, tmp_path, _fresh_catalog_dsn
+):
     from backend.core.metadata.usage_log import clear_usage_log, cloud_copy_deleted_bytes_in_billing_window
     from backend.core.storage import _core
     from backend.core.storage._core import ducklake_table_name
 
     monkeypatch.setattr(ducklake.config, "DUCKLAKE_DATA_PATH", str(tmp_path / "data"))
+    monkeypatch.setattr(ducklake.config, "DUCKLAKE_CATALOG", _fresh_catalog_dsn)
     monkeypatch.delenv("DUCKLAKE_EXTENSION_PATH", raising=False)
     src = {"service_id": "svc_hs_billing", "name": "svc_hs_billing", "bucket": "test-bucket"}
     clear_usage_log("svc_hs_billing")
@@ -3155,8 +3185,7 @@ def test_expiry_bills_the_bytes_of_high_scale_files_when_the_cleanup_unlinks_the
         con.execute(f'CREATE TABLE lake."{table}" AS SELECT i AS a FROM range(0, 100) t(i)')
         con.execute(f'INSERT INTO lake."{table}" SELECT i FROM range(100, 200) t(i)')
         before = {os.path.basename(str(p)): p.stat().st_size for p in (tmp_path / "data").rglob("*.parquet")}
-        con.execute(f"CALL ducklake_merge_adjacent_files('lake', '{table}')")  # schedules the two original files
-        # Pretend the data root is FOS: the object size comes from a (stubbed) HEAD on the unlinked file's key.
+        con.execute(f"CALL ducklake_merge_adjacent_files('lake', '{table}')")
         monkeypatch.setattr(_core, "_remote_data_path", lambda _s: True)
         monkeypatch.setattr(
             _core, "_resolve_data_path", lambda _s, _sid: "s3://test-bucket/" + str(tmp_path / "data").lstrip("/") + "/"
@@ -3197,7 +3226,7 @@ def test_restore_brings_back_saved_views_from_the_admin_state_snapshot(monkeypat
         metadata_db.delete_view("svc_cloud", "view-1")
         assert backup.restore_from_cloud(src)["views_restored"] == 1
         assert [v["name"] for v in metadata_db.list_views("svc_cloud")] == ["Errors today"]
-        backup.restore_from_cloud(src)  # idempotent: the view is saved again, not duplicated
+        backup.restore_from_cloud(src)
         assert len(metadata_db.list_views("svc_cloud")) == 1
         metadata_db.delete_view("svc_cloud", "view-1")
         con = duckdb.connect()
@@ -3207,37 +3236,32 @@ def test_restore_brings_back_saved_views_from_the_admin_state_snapshot(monkeypat
         con.close()
 
 
-def test_a_fresh_real_catalog_never_deletes_the_old_backup(monkeypatch, tmp_path, s3_mock):
-    """The full-loss scenario with two real Postgres catalogs: a restarted app must leave the old copy alone."""
-    import uuid
-    from urllib.parse import urlsplit, urlunsplit
-
-    backup, src, table, con = _cloud_env(monkeypatch, tmp_path)
+def test_a_fresh_real_catalog_never_deletes_the_old_backup(monkeypatch, tmp_path, s3_mock, _fresh_catalog_dsn):
+    """A second real catalog must preserve the first catalog's cloud copy."""
     old_dsn = ducklake.config.DUCKLAKE_CATALOG
-    parts = urlsplit(old_dsn)
-    fresh_name = f"ducklake_fresh_{uuid.uuid4().hex[:8]}"
-    fresh_dsn = urlunsplit((parts.scheme, parts.netloc, "/" + fresh_name, parts.query, ""))
-    admin = psycopg.connect(old_dsn, autocommit=True)
+    backup, src, table, con = _cloud_env(monkeypatch, tmp_path)
     con_b = None
     try:
         backup.push_to_cloud(src)
+        old_identity = backup._catalog_identity(src)
         old_keys = _keys(s3_mock)
         assert len(old_keys) == 2 and "pfx/ducklake/_catalog.json" in _keys(s3_mock, data_only=False)
         con.execute(f'DROP TABLE lake."{table}"')
         con.close()
-        time.sleep(1.2)  # the new catalog must be created after the old copy was written
-        admin.execute(f"CREATE DATABASE {fresh_name}")
-        monkeypatch.setattr(ducklake.config, "DUCKLAKE_CATALOG", fresh_dsn)
+        time.sleep(1.2)
+        monkeypatch.setattr(ducklake.config, "DUCKLAKE_CATALOG", _fresh_catalog_dsn)
         monkeypatch.setattr(ducklake.config, "DUCKLAKE_DATA_PATH", str(tmp_path / "data_fresh"))
         con_b = duckdb.connect()
         assert ducklake._ducklake_attach(con_b, src, read_only=False)
         con_b.execute(f"CREATE TABLE lake.\"{table}\" AS SELECT i AS a, 'z'::VARCHAR AS b FROM range(0, 10) t(i)")
+        new_identity = backup._catalog_identity(src)
+        assert old_identity is not None and new_identity is not None
+        assert new_identity[0] != old_identity[0]
 
         result = backup.push_to_cloud(src)
         assert result["adopted"] is False and result["deleted"] == 0 and result["foreign"] == 2
         assert set(old_keys) <= set(_keys(s3_mock)), "the old copy must survive a fresh catalog"
         assert result["uploaded"] == 1, "the new data still uploads beside the old copy"
-        # Restoring brings the old data back and adopts the copy for the new catalog.
         con_b.close()
         con_b = None
         restored = backup.restore_from_cloud(src)
@@ -3245,6 +3269,5 @@ def test_a_fresh_real_catalog_never_deletes_the_old_backup(monkeypatch, tmp_path
     finally:
         if con_b is not None:
             con_b.close()
+        con.close()
         monkeypatch.setattr(ducklake.config, "DUCKLAKE_CATALOG", old_dsn)
-        admin.execute(f"DROP DATABASE IF EXISTS {fresh_name} WITH (FORCE)")
-        admin.close()

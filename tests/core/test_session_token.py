@@ -5,9 +5,9 @@ from __future__ import annotations
 import threading
 
 import pytest
-from backend.core.session_token import SessionTokenError, open_session_token, seal_session_token
 
-from backend.core import session_token as _st_mod
+import backend.core.request_context as _st_mod
+from backend.core.request_context import SessionTokenError, open_session_token, seal_session_token
 
 
 def _run_barrier_threads(n: int, fn) -> None:

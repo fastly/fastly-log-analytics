@@ -6,15 +6,14 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from backend.core.request_context import RequestContext, build_request_context
-from backend.deps import ServiceId, get_service_id
-from backend.models._base import DEFAULT_ERROR_RESPONSES
-from backend.models.dashboard import (
+from backend.core.request_context import RequestContext, ServiceId, build_request_context, get_service_id
+from backend.models.analytics import (
     PresetQuery,
     QueryRequest,
     QueryResponse,
     QuerySchemaResponse,
 )
+from backend.models.common import DEFAULT_ERROR_RESPONSES
 from backend.repositories import query as query_repo
 from backend.repositories.query import get_cached_presets, set_cached_presets
 from backend.utils.auth import mask_ips_for
@@ -59,7 +58,7 @@ def query_endpoint(
         query_client = None
         query_tables = None
         if analyst_session is not None:
-            from backend.high_scale.console_access import get_console_clients
+            from backend.high_scale.postgres_control import get_console_clients
 
             try:
                 console = get_console_clients().client_for(
@@ -119,7 +118,7 @@ def query_endpoint(
 
     if req.dataset != "logs":
         from backend.core.duckdb import rum_source_for
-        from backend.deps import _ConnectionHolder
+        from backend.core.request_context import _ConnectionHolder
 
         rum_source = rum_source_for(ctx.source)
         holder = _ConnectionHolder(rum_source, read_only=True)
@@ -191,7 +190,7 @@ def query_schema_endpoint(
     del service_id
     from backend import config as svcconfig
     from backend.core import duckdb as _db
-    from backend.high_scale.registry_bootstrap import get_high_scale_service_registry
+    from backend.high_scale.ingest_controller import get_high_scale_service_registry
 
     name = ctx.source["name"]
     status = svcconfig.get_status(name) or {}

@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 import os
 import shutil
-import sys
 import time
 import uuid
 from collections.abc import Callable
@@ -11,7 +10,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from backend.utils.sql_validator import escape_sql_literal
+from backend.core.sql_validator import escape_sql_literal
 from backend.utils.telemetry import parse_day_key_strict, parse_hour_key_strict
 
 if TYPE_CHECKING:
@@ -840,7 +839,7 @@ def retire_compacted_hour_bundles(
     lookback_days: int | None = 30,
 ) -> tuple[int, int]:
     from backend.core.duckdb import get_memory_connection
-    from backend.core.storage.view import _get_service_lock
+    from backend.core.storage._core import _get_service_lock
 
     bundled_root = _day_bundled_root(source)
     hour_bundled_root = _hour_bundled_root(source)
@@ -1232,7 +1231,7 @@ def _list_new_source_files(source: dict, hour: str, watermark: float) -> list[st
     cache_dir = _cache_dir(source)
     dirs = [os.path.join(cache_dir, "buffer"), os.path.join(cache_dir, "data", f"timestamp_hour={hour}")]
     try:
-        from backend.core.storage.buffer import _tombstoned_parquet_paths
+        from backend.core.storage._core import _tombstoned_parquet_paths
 
         tombstoned = _tombstoned_parquet_paths(os.path.join(cache_dir, "buffer"))
     except Exception:
@@ -1258,7 +1257,7 @@ def _list_new_source_files(source: dict, hour: str, watermark: float) -> list[st
 
 
 def merge_partial_hour(service_id: str, source: dict, fields: list[str]) -> dict:
-    from backend.core.storage.view import _get_service_lock
+    from backend.core.storage._core import _get_service_lock
 
     lock_key = source.get("name", service_id)
     with _get_service_lock(lock_key):
@@ -1391,7 +1390,7 @@ def _merge_partial_hour_locked(service_id: str, source: dict, fields: list[str])
 
 
 def gc_stale_partial_hours(source: dict, max_age_hours: int = 2) -> int:
-    from backend.core.storage.view import _get_service_lock
+    from backend.core.storage._core import _get_service_lock
 
     lock_key = source.get("name", source.get("service_id", "default"))
     with _get_service_lock(lock_key):
@@ -1420,7 +1419,3 @@ def gc_stale_partial_hours(source: dict, max_age_hours: int = 2) -> int:
             except OSError as e:
                 logger.warning("[partial_hour] failed to GC stale hour=%s: %s", hour, e)
         return removed
-
-
-sys.modules["backend.core.rollups.hour_bundles"] = sys.modules[__name__]
-sys.modules["backend.core.rollups.partial_hour"] = sys.modules[__name__]

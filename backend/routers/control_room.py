@@ -19,12 +19,12 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sse_starlette.sse import EventSourceResponse
 
-from backend.core.share_db.validation import mask_ip
-from backend.deps import ServiceId, require_admin, require_service_access
+from backend.core.request_context import ServiceId, require_admin, require_service_access
+from backend.core.share_db import mask_ip
 from backend.high_scale.aggregate_query import AggregateRequest, query_clickhouse_aggregate
-from backend.high_scale.registry_bootstrap import HighScaleServiceRegistryProtocol, get_high_scale_service_registry
-from backend.models._base import DEFAULT_ERROR_RESPONSES
+from backend.high_scale.ingest_controller import HighScaleServiceRegistryProtocol, get_high_scale_service_registry
 from backend.models.common import (
+    DEFAULT_ERROR_RESPONSES,
     ControlRoomActionResponse,
     ControlRoomTabResponse,
     CorrelateRequest,
@@ -464,7 +464,7 @@ async def control_room_correlate(
 ) -> dict[str, Any]:
     """Top-N breakdown by a log field within a recent time window."""
     from backend.core import duckdb as _db
-    from backend.core import field_registry
+    from backend.core import log_fields as field_registry
     from backend.repositories._base import _safe_table
 
     field_def = field_registry.try_get(body.dimension)

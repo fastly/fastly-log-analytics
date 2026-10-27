@@ -13,11 +13,10 @@ from cachetools import TTLCache
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.concurrency import run_in_threadpool
 
-from backend.deps import get_con, get_service_id, get_source
-from backend.models._base import DEFAULT_ERROR_RESPONSES
-from backend.models.admin_actions import PageTelemetryResponse
-from backend.models.analytics import InsightsAvailabilityResponse
+from backend.core.request_context import get_con, get_service_id, get_source
+from backend.models.analytics import InsightsAvailabilityResponse, PageTelemetryResponse
 from backend.models.common import (
+    DEFAULT_ERROR_RESPONSES,
     BootstrapResponse,
     ClearSqliteResponse,
     DebugStateResponse,
@@ -28,7 +27,7 @@ from backend.models.common import (
 from backend.repositories import assets as service_stats_repo
 from backend.repositories import rum as rum_repo
 from backend.repositories._base import SectionTimer
-from backend.utils import sqlite_profiler
+from backend.utils import telemetry as sqlite_profiler
 from backend.utils.auth import mask_ips_for, require_service_in_scope
 from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry
 from backend.utils.router_utils import query_errors
@@ -328,7 +327,7 @@ def _bootstrap_sync(
             return
         if not valid_active_id:
             return
-        from backend.sync_status_snapshot import compute_sync_status_cached
+        from backend.cron.scheduler import compute_sync_status_cached
 
         sync_status_payload = compute_sync_status_cached(valid_active_id)
 
@@ -385,7 +384,7 @@ def _bootstrap_sync(
             return
 
         from backend import config as svcconfig
-        from backend.sync_status_snapshot import compute_sync_status_cached
+        from backend.cron.scheduler import compute_sync_status_cached
 
         # Reuse the live snapshot already computed for the admin bootstrap
         # payload. The config status is refreshed by discovery asynchronously
@@ -436,13 +435,13 @@ def _bootstrap_sync(
             request_last_sync = None
 
             try:
-                from backend.core.metadata.cron_log import latest_cron_per_task
+                from backend.core.metadata.usage_log import latest_cron_per_task
 
                 # RUM metrics from DuckDB RUM views
                 try:
                     from backend.core.duckdb import rum_source_for
+                    from backend.core.request_context import _ConnectionHolder
                     from backend.core.storage import execute_with_stale_view_retry
-                    from backend.deps import _ConnectionHolder
 
                     rum_source = rum_source_for(active_src)
                     with _ConnectionHolder(rum_source, read_only=True) as rum_con:
@@ -630,7 +629,7 @@ def _bootstrap_sync(
         if not valid_active_id:
             return
         try:
-            from backend.core.metadata.cron_log import get_cron_runs
+            from backend.core.metadata.usage_log import get_cron_runs
 
             total, entries = get_cron_runs(valid_active_id, page=1, per_page=10, with_total=False)
             cron_runs_first_page_payload = {
@@ -653,7 +652,7 @@ def _bootstrap_sync(
         if not valid_active_id:
             return
         try:
-            from backend.core.metadata.cron_log import latest_cron_per_task
+            from backend.core.metadata.usage_log import latest_cron_per_task
 
             # 'sync' kept as the pre-v3-rename fallback for pre-upgrade history.
             per_task = latest_cron_per_task(valid_active_id)
@@ -679,7 +678,7 @@ def _bootstrap_sync(
         if not valid_active_id:
             return
         try:
-            from backend.scoring import labels as _labels
+            import backend.scoring as _labels
 
             scoring_labels_payload = {
                 "labels": _labels.list_labels(valid_active_id, limit=500),
@@ -704,7 +703,7 @@ def _bootstrap_sync(
     def _resolve_views() -> list[dict]:
         if not valid_active_id:
             return []
-        from backend.repositories import alerts as _views_repo
+        from backend.repositories import assets as _views_repo
 
         try:
             return _views_repo.get_views(valid_active_id)
@@ -725,7 +724,7 @@ def _bootstrap_sync(
     if analyst_session is not None:
         response_services = [{k: v for k, v in svc.items() if k != "ngwaf_workspace_id"} for svc in services]
         if mask_ips_for(analyst_session):
-            from backend.core.share_db.validation import apply_pii_policy
+            from backend.core.share_db import apply_pii_policy
 
             schema = apply_pii_policy(schema, {"mask_ips": True})
             response_services = apply_pii_policy(response_services, {"mask_ips": True})
@@ -790,7 +789,7 @@ def schema_endpoint(
     raw_schema = cached_status["schema"] if (cached_status and "schema" in cached_status) else get_schema(con, source)
     analyst_session = getattr(request.state, "analyst_session", None)
     if mask_ips_for(analyst_session):
-        from backend.core.share_db.validation import apply_pii_policy
+        from backend.core.share_db import apply_pii_policy
 
         raw_schema = apply_pii_policy(raw_schema, {"mask_ips": True})
     return {"schema": raw_schema, "table_name": _safe_table_name(source["name"])}
@@ -806,7 +805,7 @@ def _compute_log_fields_catalog(service_id: str | None) -> dict:
     Caller is responsible for analyst-scope enforcement on ``service_id``
     before invoking — this helper trusts the caller.
     """
-    from backend.core import field_registry as fr
+    from backend.core import log_fields as fr
     from backend.core import log_fields as lf
 
     field_limits: dict = {}
@@ -978,6 +977,3 @@ def get_page_telemetry_endpoint(
         return {"queries": [], "sections": [], "calls": []}
 
     return usage_log.get_page_telemetry(sid, page_load_id)
-
-
-sys.modules["backend.routers.debug"] = sys.modules[__name__]

@@ -7,7 +7,6 @@ import importlib
 import logging
 import os
 import re
-import sys
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -25,27 +24,25 @@ from backend.celery_app import (
 from backend.core import duckdb as _db_mod
 from backend.core import duckdb_pool as _pool
 from backend.core import metadata as _meta_mod
+from backend.core.request_context import require_admin
 from backend.core.request_telemetry import query_registry
 from backend.core.share_db.settings import get_setting, set_setting
-from backend.deps import require_admin
+from backend.cron.scheduler import compute_sync_status_cached  # noqa: F401
 from backend.models.admin import (
+    CeleryStatusResponse,
     DebugSettingsResponse,
     DebugSettingsUpdateBody,
-    HealthSnapshotResponse,
-    MetricHistoryBatchResponse,
-)
-from backend.models.admin_actions import (
-    DuckdbRecycleResponse,
-    VclHealthResponse,
-)
-from backend.models.admin_status import (
-    CeleryStatusResponse,
     DuckdbStatusResponse,
+    HealthSnapshotResponse,
     IngestLedgerActionRequest,
     IngestLedgerActionResponse,
     IngestLedgerListResponse,
+    MetricHistoryBatchResponse,
 )
-from backend.sync_status_snapshot import compute_sync_status_cached  # noqa: F401
+from backend.models.analytics import (
+    DuckdbRecycleResponse,
+    VclHealthResponse,
+)
 from backend.utils.bounded_cache import BoundedTTLCache
 from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry
 from backend.utils.date_utils import parse_relative_time_window
@@ -75,11 +72,11 @@ logger = logging.getLogger(__name__)
 
 
 def _get_recycle_mod() -> Any:
-    return importlib.import_module("backend.core.duckdb_recycle")
+    return importlib.import_module("backend.cron.jobs.duckdb_recycle")
 
 
 def _get_metric_snapshots_mod() -> Any:
-    return importlib.import_module("backend.core.metric_snapshots")
+    return importlib.import_module("backend.cron.jobs.metric_snapshots")
 
 
 def __getattr__(name: str) -> Any:
@@ -204,8 +201,7 @@ def _sample_metadata_storage(service_id: str | None) -> dict[str, Any] | None:
 
 
 def _sample_system_jobs() -> dict[str, Any]:
-    from backend.cron.decorators import get_system_job_status
-    from backend.cron.scheduler import get_scheduler
+    from backend.cron.scheduler import get_scheduler, get_system_job_status
 
     statuses = get_system_job_status()
     job_labels = {
@@ -299,7 +295,7 @@ def health_snapshot(probe_fos: bool = False) -> dict[str, Any]:
 
     # ── In-flight cron runs ──────────────────────────────────────────
     try:
-        from backend.cron_progress import list_active_runs
+        from backend.cron.scheduler import list_active_runs
 
         in_flight = []
         for entry in list_active_runs():
@@ -355,7 +351,7 @@ def health_snapshot(probe_fos: bool = False) -> dict[str, Any]:
     # ── Recent cron failures (SRE-03) ────────────────────────────────
     try:
         from backend import config as _svcconfig
-        from backend.core.metadata.cron_log import latest_cron_per_task
+        from backend.core.metadata.usage_log import latest_cron_per_task
 
         failures: list[dict[str, Any]] = []
         for sid in _svcconfig.list_service_ids():
@@ -387,7 +383,7 @@ def health_snapshot(probe_fos: bool = False) -> dict[str, Any]:
     # ── Effective observability mode (SRE-20) ────────────────────────
     try:
         from backend.core.request_telemetry import effective_exporter
-        from backend.utils.structlog_config import effective_format
+        from backend.utils.telemetry import effective_format
 
         out["observability"] = {
             "log_format": effective_format(),
@@ -449,7 +445,7 @@ def health_snapshot(probe_fos: bool = False) -> dict[str, Any]:
         if _hs_cfg.is_high_scale_mode():
             from dataclasses import asdict
 
-            from backend.high_scale.archive_models import (
+            from backend.high_scale.archive import (
                 disk_snapshot_payload,
                 topology_from_environment,
             )
@@ -476,7 +472,7 @@ def api_vcl_health(service_id: str | None = Query(default=None)) -> VclHealthRes
     service_id = require_service_id(service_id)
     try:
         from backend import config as svcconfig
-        from backend.provision.declarative import fastly_integration
+        from backend.provision.declarative import reconciler as fastly_integration
 
         cfg = svcconfig.load_config(service_id)
         if not cfg:
@@ -785,12 +781,3 @@ def raw_bucket_counts(
     q = RAW_BUCKET_COUNTS.format(unit=unit, fmt=fmt, table_name=table_name, start_iso=start_iso, end_iso=end_iso)
     with track_query(con, q, [], "log_accounting.raw_bucket_counts") as cur:
         return list(cur.fetchall())
-
-
-sys.modules["backend.system_metrics_sampler"] = sys.modules[__name__]
-sys.modules["backend.routers.admin.system_metrics"] = sys.modules[__name__]
-if "backend.routers.admin" in sys.modules:
-    setattr(sys.modules["backend.routers.admin"], "system_metrics", sys.modules[__name__])
-if "backend" in sys.modules and hasattr(sys.modules["backend"], "_MODULE_ALIASES"):
-    sys.modules["backend"]._MODULE_ALIASES["backend.system_metrics_sampler"] = __name__
-    sys.modules["backend"]._MODULE_ALIASES["backend.routers.admin.system_metrics"] = __name__

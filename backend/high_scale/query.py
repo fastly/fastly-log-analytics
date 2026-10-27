@@ -7,7 +7,6 @@ import gzip
 import json
 import math
 import re
-import sys
 import time
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
@@ -17,22 +16,22 @@ from urllib.parse import parse_qs, urlparse
 
 import duckdb
 
-from backend.core.field_registry import DuckType, try_get
-from backend.core.share_db.validation import IP_FAMILY_KEYS, SESSION_ID_KEYS, mask_ip_values
+from backend.core.log_fields import DuckType, try_get
+from backend.core.share_db import IP_FAMILY_KEYS, SESSION_ID_KEYS, mask_ip_values
+from backend.core.sql_validator import SAFE_IDENT_RE, SQLValidationError, validate_user_sql
 from backend.high_scale._common import _FIELD_DIMENSIONS
 from backend.high_scale._common import range_value as _range_value
-from backend.high_scale.archive import ArchiveSourceObject
-from backend.high_scale.publication import (
+from backend.high_scale.archive import (
+    ArchiveSourceObject,
     build_event_id,
     build_request_event_id,
     build_rum_event_id,
     row_matches_serving_domain,
 )
-from backend.models.dashboard import QueryRequest as DashboardQueryRequest
+from backend.models.analytics import QueryRequest as DashboardQueryRequest
 from backend.repositories._base import SectionTimer, _compact_sql_for_debug, _safe_table
 from backend.repositories.query import MAX_QUERY_ROWS
 from backend.repositories.utils.response_shaping import build_query_response_envelope
-from backend.utils.sql_validator import SAFE_IDENT_RE, SQLValidationError, validate_user_sql
 from backend.utils.telemetry import get_tracked_calls
 
 if TYPE_CHECKING:
@@ -676,10 +675,3 @@ def query_endpoint(
         debug_calls=get_tracked_calls(),
         section_timings=section_timings,
     )
-
-
-_self_mod = sys.modules[__name__]
-sys.modules["backend.high_scale.decoder"] = _self_mod
-if (_hs_pkg := sys.modules.get("backend.high_scale")) is not None:
-    setattr(_hs_pkg, "query", _self_mod)
-    setattr(_hs_pkg, "decoder", _self_mod)

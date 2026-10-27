@@ -24,9 +24,9 @@ from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
-from backend.utils.atomic_write import atomic_write_json
 from backend.utils.date_utils import iso_z_now
 from backend.utils.http import http_get_text
+from backend.utils.telemetry import atomic_write_json
 
 logger = logging.getLogger(__name__)
 
@@ -1758,13 +1758,3 @@ def _discover_new_ips(max_new: int = 500, days: int = 30) -> int:
         if event["type"] == "count":
             count = event["count"]
     return count
-
-
-_self_mod = sys.modules[__name__]
-sys.modules["backend.utils.rdns_cache"] = _self_mod
-_utils_pkg = sys.modules.get("backend.utils")
-if _utils_pkg is not None:
-    setattr(_utils_pkg, "rdns_cache", _self_mod)
-_backend_pkg = sys.modules.get("backend")
-if _backend_pkg is not None and hasattr(_backend_pkg, "_MODULE_ALIASES"):
-    _backend_pkg._MODULE_ALIASES["backend.utils.rdns_cache"] = __name__

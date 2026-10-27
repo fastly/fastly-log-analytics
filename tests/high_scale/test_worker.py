@@ -7,11 +7,11 @@ from threading import Event
 from unittest.mock import MagicMock, patch
 
 import pytest
-from backend.core.clickhouse_schema import maintain_clickhouse_system_tables
-from backend.high_scale.archive_models import HighScaleConfig, TopologyProfile, from_environment
-from backend.high_scale.orchestration import PageRun
 
+from backend.core.clickhouse import maintain_clickhouse_system_tables
 from backend.high_scale import worker
+from backend.high_scale.archive import HighScaleConfig, TopologyProfile, from_environment
+from backend.high_scale.ingest_controller import PageRun
 from backend.high_scale.worker import (
     FairPageSelector,
     HighScaleWorkerLoop,
@@ -176,7 +176,7 @@ def test_config_validation_accepts_every_profile_the_topology_module_builds() ->
 
 def test_validation_follows_the_topology_module_not_a_duplicated_name_list() -> None:
     sentinel = TopologyProfile("sentinel", 1, 1, True, False, 1)
-    with patch("backend.high_scale.models.build_topology_profile", return_value=sentinel):
+    with patch("backend.high_scale.archive.build_topology_profile", return_value=sentinel):
         assert _config("anything").topology_profile() is sentinel
         _config("anything").validate()
 
@@ -271,7 +271,7 @@ def test_worker_run_once_continues_when_maintenance_fails(caplog: pytest.LogCapt
     mock_client.execute.side_effect = RuntimeError("HTTP 413")
 
     with (
-        patch("backend.core.clickhouse_client.get_clickhouse_client", return_value=mock_client),
+        patch("backend.core.clickhouse.get_clickhouse_client", return_value=mock_client),
         patch("backend.utils.telemetry.run_usage_log_cleanup", return_value=None),
         caplog.at_level(logging.DEBUG),
     ):

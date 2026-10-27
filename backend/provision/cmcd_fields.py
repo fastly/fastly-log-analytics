@@ -2,12 +2,7 @@
 
 from __future__ import annotations
 
-import sys
 from typing import Any
-
-_backend_pkg = sys.modules.get("backend")
-if _backend_pkg is not None and hasattr(_backend_pkg, "_MODULE_ALIASES"):
-    _backend_pkg._MODULE_ALIASES.pop("backend.provision.cmcd_fields", None)
 
 _CMCD_CUSTOM_FIELDS: list[dict[str, Any]] = [
     {

@@ -33,25 +33,6 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
 
-_backend_pkg = sys.modules.get("backend")
-if _backend_pkg is not None and hasattr(_backend_pkg, "_MODULE_ALIASES"):
-    for _restored_mod in (
-        "backend.utils.bounded_cache",
-        "backend.utils.hll",
-        "backend.utils.time_window",
-        "backend.utils.http",
-        "backend.core.retry",
-        "backend.utils.date_utils",
-        "backend.utils.terraform_gen",
-    ):
-        _backend_pkg._MODULE_ALIASES.pop(_restored_mod, None)
-        _existing = sys.modules.get(_restored_mod)
-        if _existing is not None and not (getattr(_existing, "__file__", None) or "").endswith(
-            f"{_restored_mod.rsplit('.', 1)[-1]}.py"
-        ):
-            del sys.modules[_restored_mod]
-    _backend_pkg._MODULE_ALIASES["backend.utils.cache_registry"] = "backend.utils.bounded_cache"
-
 from backend.core.retry import retry_call as retry_call
 from backend.utils.bounded_cache import (
     _MISSING as _MISSING,
@@ -264,7 +245,7 @@ def process_context_scope(name: str):
     prev_attribution = None
     attribution_set = False
     try:
-        from backend.core.query_attribution import current_attribution, derive_from_process_context
+        from backend.core.request_telemetry import current_attribution, derive_from_process_context
 
         attribution = derive_from_process_context(name)
         if attribution is not None:
@@ -285,7 +266,7 @@ def process_context_scope(name: str):
             _PROCESS_CONTEXT.set(None)
         if attribution_set:
             try:
-                from backend.core.query_attribution import current_attribution
+                from backend.core.request_telemetry import current_attribution
 
                 current_attribution.set(prev_attribution)
             except Exception:
@@ -334,7 +315,7 @@ def _query_iothread_calls_from_usage_log() -> list[dict]:
         sid = svcconfig.get_active_service_id()
         if not sid:
             return []
-        from backend.core.metadata import usage_log_db as _usage_log_db
+        from backend.core.metadata import usage_log as _usage_log_db
 
         start_iso = iso_z(datetime.fromtimestamp(start_ts, UTC))
         try:
@@ -2256,27 +2237,3 @@ def _reset_for_tests() -> None:
     _LOOP = None
     _SESSION = None
     _READY.clear()
-
-
-_FOLDED_TELEMETRY_SUBMODULES: tuple[str, ...] = (
-    "sqlite_profiler",
-    "valkey_publisher",
-    "log_throttle",
-    "usage_logger",
-    "telemetry_response_middleware",
-    "active_requests",
-    "structlog_config",
-    "atomic_write",
-    "error_redaction",
-    "telemetry_proxy",
-)
-_this_telemetry_mod = sys.modules[__name__]
-_utils_pkg = sys.modules.get("backend.utils")
-for _submod_name in _FOLDED_TELEMETRY_SUBMODULES:
-    sys.modules[f"backend.utils.{_submod_name}"] = _this_telemetry_mod
-    if _utils_pkg is not None:
-        setattr(_utils_pkg, _submod_name, _this_telemetry_mod)
-if _backend_pkg is not None and hasattr(_backend_pkg, "_MODULE_ALIASES"):
-    _backend_pkg._MODULE_ALIASES.update(
-        {f"backend.utils.{_submod_name}": "backend.utils.telemetry" for _submod_name in _FOLDED_TELEMETRY_SUBMODULES}
-    )

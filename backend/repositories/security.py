@@ -15,9 +15,9 @@ from typing import Any
 import duckdb
 
 from backend import config as svcconfig
-from backend.core.metric_expressions import coalesce
+from backend.core.log_fields import coalesce
+from backend.models.analytics import ReaderCoverage
 from backend.models.common import FiltersDict
-from backend.models.dashboard import ReaderCoverage
 from backend.repositories import dashboard as _dashboard_repo
 from backend.repositories._base import (
     QueryRunner,
@@ -35,6 +35,10 @@ from backend.repositories.utils.response_shaping import (
     empty_security_proxies,
     finish_security_proxies,
     parse_asn_int,
+    shape_security_fingerprint_row,
+    shape_security_ngwaf_bot_row,
+    shape_security_ngwaf_top_bot_row,
+    shape_security_top_ip_header_row,
 )
 
 TOP_UAS_BY_COUNT = """
@@ -252,7 +256,7 @@ def threat_intel_sql(table_name: str, cols: set[str]) -> str:
 
 
 SQL = sys.modules[__name__]
-sys.modules["backend.repositories._sql.security"] = SQL
+from backend.core.duckdb import escape_sql_literal
 from backend.repositories.utils.filters import build_where_clause
 from backend.repositories.utils.response_cache import (
     ResponseMemo,
@@ -263,7 +267,6 @@ from backend.repositories.utils.response_cache import (
 )
 from backend.utils.bounded_cache import CacheRegistry
 from backend.utils.date_utils import parse_window
-from backend.utils.sql_validator import escape_sql_literal
 
 _logger = logging.getLogger(__name__)
 _SECURITY_CACHE_TTL = float(os.getenv("SECURITY_CACHE_TTL_SECONDS", "30"))
@@ -350,7 +353,7 @@ def _window_eligible_for_rollup(start_time: str | None, end_time: str | None) ->
 
 
 def _has_rollup_coverage(src: dict, field: str, start_time: str | None, end_time: str | None) -> bool:
-    from backend.repositories.rollup_coverage import enumerate_closed_hour_field_rollups
+    from backend.core.rollups.recompute import enumerate_closed_hour_field_rollups
 
     w = enumerate_closed_hour_field_rollups(src, field, start_time, end_time, stop_on_first=True)
     return bool(w and (w.bundled_paths or w.per_field_paths))
@@ -365,7 +368,7 @@ def _ipv6_per_hour_from_rollups(
     actual_cols: list[str] | None = None,
 ) -> list[dict] | None:
     from backend.core.rollups._common import _safe_table_for
-    from backend.repositories.rollup_coverage import enumerate_closed_hour_field_rollups
+    from backend.core.rollups.recompute import enumerate_closed_hour_field_rollups
 
     w = enumerate_closed_hour_field_rollups(src, "is_ipv6", start_time, end_time)
     if w is None or (not w.bundled_paths and not w.per_field_paths):
@@ -488,8 +491,7 @@ _RDNS_ENQUEUE_LIMIT = int(os.getenv("SECURITY_RDNS_ENQUEUE_LIMIT", "500"))
 def summarize_wellknown_bot_rows(rows: list) -> list[dict]:
     if not rows:
         return []
-    from backend.utils.bot_sources import build_matcher
-    from backend.utils.rdns_cache import classify, enqueue, get_hostnames
+    from backend.utils.bot_sources import build_matcher, classify, enqueue, get_hostnames
 
     match_ua = build_matcher()
     bot_agg: dict[str, dict] = {}
@@ -805,7 +807,7 @@ def get_top_bots(
             join_outcome = "error"
             try:
                 res = (runner.execute(q, q_params) if q_params is not None else runner.execute(q)).fetchall()
-                out = [{"name": r[0], "category": r[1], "request_count": r[2]} for r in res]
+                out = [shape_security_ngwaf_top_bot_row(r[0], r[1], r[2]) for r in res]
                 join_outcome = "success"
                 return out
             except Exception as e:
@@ -1119,7 +1121,7 @@ def _build_security_response(
                         ip_count = int(ip_spread.get((col, value), 0))
                         if ip_count > 0:
                             has_nonzero_ip_count = True
-                        candidate_rows.append({"fingerprint": value, "ip_count": ip_count, "request_count": count})
+                        candidate_rows.append(shape_security_fingerprint_row(value, ip_count, count))
                     if not has_nonzero_ip_count:
                         continue
                     results[result_key] = candidate_rows
@@ -1370,12 +1372,7 @@ def _build_security_response(
                     results["ngwaf_verified_bots"] = _live_fetch(
                         SQL.NGWAF_VERIFIED_BOTS.format(temp_table=temp_table),
                         "ngwaf_verified_bots",
-                        lambda r: {
-                            "bot_name": r[0],
-                            "wellknown_bot_name": r[1],
-                            "category": r[2],
-                            "request_count": r[3],
-                        },
+                        lambda r: shape_security_ngwaf_bot_row(r[0], r[1], r[2], r[3]),
                     )
                 if "ngwaf_verified_bots_ts" in live_sections:
                     results["ngwaf_verified_bots_ts"] = _live_fetch(
@@ -1396,7 +1393,7 @@ def _build_security_response(
                 results[result_key] = _live_fetch(
                     SQL.FINGERPRINT_TOP_N.format(col=col, temp_table=temp_table),
                     result_key,
-                    lambda r: {"fingerprint": r[0], "ip_count": r[1], "request_count": r[2]},
+                    lambda r: shape_security_fingerprint_row(r[0], r[1], r[2]),
                 )
         if "fingerprint_coverage" in live_sections and temp_table:
             fingerprint_coverage: dict[str, float] = {}
@@ -1529,10 +1526,8 @@ def _build_security_response(
     if _want("proxies") and "active_proxies_count" not in results:
         results.update(_empty_proxies_payload())
     if mask_ips and "top_ips_header" in results and results["top_ips_header"]:
-        from backend.core.share_db.validation import mask_ip
-
         results["top_ips_header"] = [
-            {"ip": mask_ip(str(r["ip"])) if r.get("ip") else r.get("ip"), "max_header": r.get("max_header")}
+            shape_security_top_ip_header_row(r.get("ip"), r.get("max_header"), mask_ips=True)
             for r in results["top_ips_header"]
         ]
     results["section_timings"] = section_timings

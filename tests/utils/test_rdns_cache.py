@@ -1,4 +1,4 @@
-"""Tests for backend.utils.rdns_cache.
+"""Tests for backend.utils.bot_sources.
 
 Covers the pure helpers (``_is_ip_in_cidrs``, ``classify``) and the
 public cache API (``enqueue``, ``get_hostname``, ``get_stats``) against
@@ -16,7 +16,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import aiodns
 import pytest
 
-from backend.utils import rdns_cache
+import backend.utils.bot_sources as rdns_cache
 
 
 @pytest.fixture()
@@ -354,8 +354,8 @@ def test_enrich_batch_resolves_pending_ips():
     }
 
     with (
-        patch("backend.utils.rdns_cache._do_lookup", side_effect=lambda ip: fake_lookups[ip]),
-        patch("backend.utils.rdns_cache._discover_new_ips", return_value=0),
+        patch("backend.utils.bot_sources._do_lookup", side_effect=lambda ip: fake_lookups[ip]),
+        patch("backend.utils.bot_sources._discover_new_ips", return_value=0),
     ):
         summary = rdns_cache.enrich_batch(limit=10)
 
@@ -373,10 +373,10 @@ def test_enrich_batch_counts_errors_separately():
 
     with (
         patch(
-            "backend.utils.rdns_cache._do_lookup",
+            "backend.utils.bot_sources._do_lookup",
             return_value=(None, "nxdomain", False),
         ),
-        patch("backend.utils.rdns_cache._discover_new_ips", return_value=0),
+        patch("backend.utils.bot_sources._discover_new_ips", return_value=0),
     ):
         summary = rdns_cache.enrich_batch(limit=10)
 
@@ -390,7 +390,7 @@ def test_enrich_batch_stamps_last_enrichment_timestamp():
     cron stamps it so the admin UI can show "Last refreshed: N
     minutes ago"."""
     rdns_cache._last_enrichment_at = None
-    with patch("backend.utils.rdns_cache._discover_new_ips", return_value=0):
+    with patch("backend.utils.bot_sources._discover_new_ips", return_value=0):
         rdns_cache.enrich_batch(limit=10)
 
     assert rdns_cache._last_enrichment_at is not None
@@ -407,10 +407,10 @@ def test_enrich_batch_swallows_discovery_exception():
 
     with (
         patch(
-            "backend.utils.rdns_cache._do_lookup",
+            "backend.utils.bot_sources._do_lookup",
             return_value=("ok.example.com", "resolved", True),
         ),
-        patch("backend.utils.rdns_cache._discover_new_ips", side_effect=RuntimeError("S3 down")),
+        patch("backend.utils.bot_sources._discover_new_ips", side_effect=RuntimeError("S3 down")),
     ):
         summary = rdns_cache.enrich_batch(limit=10)
 
@@ -423,7 +423,7 @@ def test_enrich_batch_no_op_when_nothing_pending():
     """No pending IPs + discovery returns 0 → all-zero summary, no
     log spam. Pinned because the cron runs every 5 minutes and we
     don't want it logging at INFO level when there's nothing to do."""
-    with patch("backend.utils.rdns_cache._discover_new_ips", return_value=0):
+    with patch("backend.utils.bot_sources._discover_new_ips", return_value=0):
         summary = rdns_cache.enrich_batch(limit=10)
 
     assert summary == {"resolved": 0, "errors": 0, "discovered": 0, "batch_limit": 10}
@@ -523,7 +523,7 @@ def test_maybe_reap_swallows_exceptions():
     """A reap failure must never take down the every-5-min enrichment
     cron — same swallow-and-log posture as the discovery pass."""
     rdns_cache._last_reap_monotonic = None
-    with patch("backend.utils.rdns_cache._reap_stale_rows", side_effect=RuntimeError("db locked")):
+    with patch("backend.utils.bot_sources._reap_stale_rows", side_effect=RuntimeError("db locked")):
         rdns_cache._maybe_reap_stale_rows()  # must not raise
 
 
@@ -582,15 +582,15 @@ def test_get_hostnames_returns_cached_resolution_after_enrichment():
 
     with (
         patch(
-            "backend.utils.rdns_cache._do_lookup",
+            "backend.utils.bot_sources._do_lookup",
             return_value=("known.example.com", "resolved", True),
         ),
-        patch("backend.utils.rdns_cache._discover_new_ips", return_value=0),
+        patch("backend.utils.bot_sources._discover_new_ips", return_value=0),
     ):
         rdns_cache.enrich_batch(limit=10)
 
     # Now query — should NOT trigger another lookup
-    with patch("backend.utils.rdns_cache._do_lookup") as mock_lookup:
+    with patch("backend.utils.bot_sources._do_lookup") as mock_lookup:
         host, status, fcrdns = rdns_cache.get_hostnames(["1.1.1.1"])["1.1.1.1"]
 
     assert host == "known.example.com"
@@ -606,7 +606,7 @@ def test_get_hostnames_returns_cached_resolution_after_enrichment():
 def test_get_hostnames_enqueues_and_returns_empty_when_read_con_unavailable():
     """If ``_read_con`` returns None (DB file missing or unreadable),
     the helper still enqueues the IP as pending and returns an empty dict."""
-    with patch("backend.utils.rdns_cache._read_con", return_value=None):
+    with patch("backend.utils.bot_sources._read_con", return_value=None):
         res = rdns_cache.get_hostnames(["9.9.9.9"])
     assert res == {}
 
@@ -639,8 +639,8 @@ def test_enrich_batch_refreshes_stale_entries():
         return ("refreshed.example.com", "resolved", True)
 
     with (
-        patch("backend.utils.rdns_cache._do_lookup", side_effect=fake_lookup),
-        patch("backend.utils.rdns_cache._discover_new_ips", return_value=0),
+        patch("backend.utils.bot_sources._do_lookup", side_effect=fake_lookup),
+        patch("backend.utils.bot_sources._discover_new_ips", return_value=0),
     ):
         rdns_cache.enrich_batch(limit=10)
 
@@ -715,8 +715,8 @@ def test_discover_new_ips_gen_scans_source_and_emits_log_on_found_ips():
         patch("backend.config.list_configs", return_value=[{"service_id": "svc-1"}]),
         patch("backend.core.duckdb.get_source_for_service", return_value=fake_src),
         patch("backend.core.duckdb.get_connection", return_value=fake_con),
-        patch("backend.utils.rdns_cache._write_con", return_value=fake_write_con),
-        patch("backend.utils.rdns_cache.enqueue") as mock_enqueue,
+        patch("backend.utils.bot_sources._write_con", return_value=fake_write_con),
+        patch("backend.utils.bot_sources.enqueue") as mock_enqueue,
     ):
         events = list(rdns_cache._discover_new_ips_gen(max_new=10))
 
@@ -749,7 +749,7 @@ def test_discover_new_ips_gen_skips_sources_without_ip_column():
         patch("backend.config.list_configs", return_value=[{"service_id": "svc-2"}]),
         patch("backend.core.duckdb.get_source_for_service", return_value=fake_src),
         patch("backend.core.duckdb.get_connection", return_value=fake_con),
-        patch("backend.utils.rdns_cache.enqueue") as mock_enqueue,
+        patch("backend.utils.bot_sources.enqueue") as mock_enqueue,
     ):
         events = list(rdns_cache._discover_new_ips_gen(max_new=10))
 
@@ -868,7 +868,7 @@ def test_resolve_batch_async_runs_concurrently_and_returns_map():
     async def fake_lookup(ip, resolver, semaphore):
         return fake_lookups[ip]
 
-    with patch("backend.utils.rdns_cache._do_lookup_async", side_effect=fake_lookup):
+    with patch("backend.utils.bot_sources._do_lookup_async", side_effect=fake_lookup):
         results = asyncio.run(rdns_cache._resolve_batch_async(list(fake_lookups)))
 
     assert results == fake_lookups
@@ -883,7 +883,7 @@ def test_resolve_batch_async_swallows_exceptions_into_error_status():
             raise RuntimeError("boom")
         return ("ok.example.com", "resolved", True)
 
-    with patch("backend.utils.rdns_cache._do_lookup_async", side_effect=fake_lookup):
+    with patch("backend.utils.bot_sources._do_lookup_async", side_effect=fake_lookup):
         results = asyncio.run(rdns_cache._resolve_batch_async(["1.1.1.1", "2.2.2.2"]))
 
     assert results["1.1.1.1"] == (None, "error", False)
@@ -1594,7 +1594,7 @@ def test_enrich_bot_metadata_adds_bot_name_column_with_match():
 
     df = pd.DataFrame({"ua": ["Googlebot/2.1"], "ip": ["1.2.3.4"]})
     with patch(
-        "backend.utils.rdns_cache.get_hostnames",
+        "backend.utils.bot_sources.get_hostnames",
         return_value={"1.2.3.4": ("crawl-1-2-3-4.googlebot.com", "ok", True)},
     ):
         bot_sources.enrich_bot_metadata(df)
@@ -1785,7 +1785,8 @@ def test_enrich_bot_metadata_hybrid_ua_and_ip_match():
         patch.object(bot_sources, "BOT_SOURCES", fake_sources),
         patch("backend.utils.bot_sources._cache_mtime", return_value=123.45),
         patch(
-            "backend.utils.rdns_cache.get_hostnames", return_value={"10.80.0.5": ("crawl.google.com", "resolved", True)}
+            "backend.utils.bot_sources.get_hostnames",
+            return_value={"10.80.0.5": ("crawl.google.com", "resolved", True)},
         ),
     ):
         bot_sources._compiled_ip_feeds.clear()

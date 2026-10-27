@@ -28,11 +28,11 @@
  * @vitest-environment node
  */
 import createClient from 'openapi-fetch'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 
 import type { paths } from '@/types/api.generated'
 
-import { CONTRACT_API_BASE, startBackend, stopBackend } from '../helpers/msw/handlers'
+import { backendTestEnvironment, CONTRACT_API_BASE, startBackend, stopBackend } from '../helpers/msw/handlers'
 
 const client = createClient<paths>({ baseUrl: CONTRACT_API_BASE })
 
@@ -45,6 +45,18 @@ afterAll(async () => {
 })
 
 describe('frontend → backend HTTP contract', () => {
+  it('preserves explicit uv isolation for the backend subprocess', () => {
+    vi.stubEnv('UV_NO_CACHE', '1')
+    vi.stubEnv('UV_PROJECT_ENVIRONMENT', '/tmp/fla-test-venv')
+    try {
+      const env = backendTestEnvironment('/tmp/fla-test-sandbox')
+      expect(env.UV_NO_CACHE).toBe('1')
+      expect(env.UV_PROJECT_ENVIRONMENT).toBe('/tmp/fla-test-venv')
+    } finally {
+      vi.unstubAllEnvs()
+    }
+  })
+
   // ── Meta + health ────────────────────────────────────────────────
   it('GET /api/health returns {status: string}', async () => {
     const { data, error, response } = await client.GET('/api/health')

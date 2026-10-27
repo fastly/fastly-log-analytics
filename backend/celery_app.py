@@ -17,7 +17,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import sys as _sys
 import threading
 import time
 from collections import defaultdict, deque
@@ -66,7 +65,7 @@ app.conf.update(
         "backend.cron.jobs.compaction",
         "backend.cron.jobs.metadata",
         "backend.cron.jobs.insights_prewarmer",
-        "backend.cron.jobs.metric_snapshot",
+        "backend.cron.jobs.metric_snapshots",
         "backend.cron.jobs.rum_sync",
         "backend.cron.jobs.rum_commit",
     ],
@@ -81,7 +80,7 @@ def _configure_worker_logging(**_kwargs):
     """Workers share the backend's structlog format so their logs carry the
     same processors/fields as the API process (and log shipping filters
     keep working)."""
-    from backend.utils.structlog_config import configure_structlog
+    from backend.utils.telemetry import configure_structlog
 
     configure_structlog()
 
@@ -90,7 +89,7 @@ def _configure_worker_logging(**_kwargs):
 def _worker_process_init(**_kwargs):
     # Re-run per forked child (prefork pool) — signal handlers registered in
     # the parent don't carry logging config into children.
-    from backend.utils.structlog_config import configure_structlog
+    from backend.utils.telemetry import configure_structlog
 
     configure_structlog()
 
@@ -333,7 +332,7 @@ def inprocess_active_runs_entries() -> list[dict[str, Any]]:
     """Return currently executing in-process cron runs from cron_progress."""
     out: list[dict[str, Any]] = []
     try:
-        from backend.cron_progress import list_active_runs
+        from backend.cron.scheduler import list_active_runs
 
         for item in list_active_runs():
             run_id = item.get("run_id")
@@ -734,21 +733,3 @@ async def sample_celery_status_cached():
         _cache["value"] = value
         _cache["at"] = time.monotonic()
         return value
-
-
-_self_mod = _sys.modules[__name__]
-for _alias in (
-    "backend.celery_queue",
-    "backend.celery_status",
-    "backend.celery_status_sampler",
-    "backend._in_process_publisher",
-    "backend.sync_status_publisher",
-):
-    _sys.modules[_alias] = _self_mod
-if "backend" in _sys.modules:
-    _backend_pkg = _sys.modules["backend"]
-    _backend_pkg.celery_queue = _self_mod  # type: ignore[attr-defined]
-    _backend_pkg.celery_status = _self_mod  # type: ignore[attr-defined]
-    _backend_pkg.celery_status_sampler = _self_mod  # type: ignore[attr-defined]
-    _backend_pkg._in_process_publisher = _self_mod  # type: ignore[attr-defined]
-    _backend_pkg.sync_status_publisher = _self_mod  # type: ignore[attr-defined]

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os as _os
-import sys
 from enum import StrEnum
 from typing import Annotated, Any, Literal
 
@@ -178,12 +177,6 @@ DEFAULT_ERROR_RESPONSES: dict[int | str, dict] = {
     502: {"model": ErrorEnvelope, "description": "Upstream error"},
     503: {"model": ErrorEnvelope, "description": "Service unavailable"},
 }
-
-_self_mod = sys.modules[__name__]
-sys.modules["backend.models._base"] = _self_mod
-_models_pkg = sys.modules.get("backend.models")
-if _models_pkg is not None:
-    setattr(_models_pkg, "_base", _self_mod)
 
 
 class LogFieldCatalogEntry(WireSafeModel):
@@ -587,17 +580,7 @@ class LastSyncInfo(WireSafeModel):
     duration_s: float | None = None
 
 
-for _early_m in (
-    "backend.models._base",
-    "backend.models.services",
-    "backend.models.provision",
-    "backend.models.service",
-    "backend.models.custom_fields",
-    "backend.models.views",
-    "backend.models.audit",
-):
-    sys.modules[_early_m] = sys.modules[__name__]
-from backend.core.log_fields import VALID_NAME_RE  # noqa: E402
+from backend.core.catalog import VALID_NAME_RE  # noqa: E402
 
 
 class CronSettingsPartial(BaseModel):
@@ -1384,10 +1367,10 @@ from backend.models.admin import (  # noqa: E402
     SyncStatusResponse,
 )
 from backend.models.analytics import (  # noqa: E402
+    ScoringLabelsListResponse,  # noqa: E402
     SlowQueriesCountResponse,
     SummaryResponse,
 )
-from backend.models.session_scoring import ScoringLabelsListResponse  # noqa: E402
 
 
 class SavedView(WireSafeModel):
@@ -1698,26 +1681,3 @@ def __getattr__(name: str) -> Any:
 
         return _admin_act_models.PageTelemetryResponse
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-
-
-_self_mod = sys.modules[__name__]
-_models_pkg = sys.modules.get("backend.models")
-for _alias in (
-    "_base",
-    "alerts",
-    "bootstrap",
-    "control_room",
-    "share",
-    "usage",
-    "services",
-    "provision",
-    "service",
-    "custom_fields",
-    "views",
-    "audit",
-):
-    sys.modules[f"backend.models.{_alias}"] = _self_mod
-    if _models_pkg is not None:
-        setattr(_models_pkg, _alias, _self_mod)
-    if "backend" in sys.modules and hasattr(sys.modules["backend"], "_MODULE_ALIASES"):
-        sys.modules["backend"]._MODULE_ALIASES[f"backend.models.{_alias}"] = __name__

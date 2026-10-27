@@ -13,7 +13,7 @@ from datetime import UTC, datetime, timedelta
 from functools import partial
 from typing import TYPE_CHECKING, Any
 
-from backend.core.high_scale_sections import HighScaleSections
+from backend.core.request_telemetry import HighScaleSections
 from backend.high_scale._common import (
     bucket as _bucket,
 )
@@ -43,8 +43,7 @@ if TYPE_CHECKING:
     from backend.high_scale.ingest_controller import HighScaleService
 
 from backend.high_scale._common import optional_int as _finite_int
-from backend.models.common import SectionTimingEntry
-from backend.models.network import (
+from backend.models.analytics import (
     NetworkBundleRequest,
     NetworkBundleResponse,
     NetworkCityEntry,
@@ -53,6 +52,7 @@ from backend.models.network import (
     NetworkQualityRequest,
     NetworkQualityResponse,
     NetworkWorstEntry,
+    OriginShieldingAnalysisResponse,
     PopHealthItem,
     PopHealthListResponse,
     ShieldingAnalysis,
@@ -60,7 +60,7 @@ from backend.models.network import (
     TransportMetrics,
     TransportProtocolShare,
 )
-from backend.models.origin import OriginShieldingAnalysisResponse
+from backend.models.common import SectionTimingEntry
 from backend.repositories.utils.response_shaping import (
     build_asn_speed_mix,
     build_network_asn_leaderboard,
@@ -699,11 +699,12 @@ def get_transport_metrics(
     r: Mapping[str, Any] = rows[0] if rows else {}
     total_requests = int(r.get("total_reqs") or 0)
     missing_fields = [f for f in _TRANSPORT_FIELDS if not int(r.get(f"seen_{f}") or 0)] if total_requests > 0 else []
+    _transport_vals: dict[str, Any] = {attr: _flt(r.get(col), nd) for attr, col, nd in _TRANSPORT_ROUND_SPECS}
     return TransportMetrics(
         **cache_result({}, state="bypass", prewarmer=False),
         section_timings=[SectionTimingEntry.model_validate(t) for t in trace.timings()],
         has_transport_data=len(missing_fields) < len(_TRANSPORT_FIELDS),
-        **{attr: _flt(r.get(col), nd) for attr, col, nd in _TRANSPORT_ROUND_SPECS},
+        **_transport_vals,
         bandwidth_bytes=int(r.get("total_bytes") or 0),
         total_requests=total_requests,
         protocol_distribution=[

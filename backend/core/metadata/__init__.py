@@ -171,41 +171,6 @@ class _ShimModule(ModuleType):
 
 
 sys.modules[__name__].__class__ = _ShimModule
-for _sub in ("state", "alerts", "asn_cache", "views", "pg_schema", "reconciliation", "pg_connection"):
-    setattr(sys.modules[__name__], _sub, _base)
-    sys.modules[f"{__name__}.{_sub}"] = _base
-sys.modules["backend.state_sync"] = _base
-for _sub in ("cron_log", "usage_log_db", "slow_queries"):
-    setattr(sys.modules[__name__], _sub, _usage_log)
-    sys.modules[f"{__name__}.{_sub}"] = _usage_log
-setattr(sys.modules[__name__], "quarantine", _ingest_log)
-sys.modules[f"{__name__}.quarantine"] = _ingest_log
-_backend_pkg = sys.modules.get("backend")
-if _backend_pkg is not None:
-    setattr(_backend_pkg, "state_sync", _base)
-    if hasattr(_backend_pkg, "_MODULE_ALIASES"):
-        _backend_pkg._MODULE_ALIASES.update(
-            {
-                "backend.core.query_attribution": "backend.core.request_telemetry",
-                "backend.core.request_metrics": "backend.core.request_telemetry",
-                "backend.request_metrics_observer": "backend.core.request_telemetry",
-                "backend.core.metric_snapshots": "backend.cron.jobs.metadata",
-                "backend.core.duckdb_recycle": "backend.cron.jobs.metadata",
-                "backend.cron.jobs.duckdb_recycle": "backend.cron.jobs.metadata",
-                "backend.core.metadata.cron_log": "backend.core.metadata.usage_log",
-                "backend.core.metadata.slow_queries": "backend.core.metadata.usage_log",
-                "backend.core.metadata.state": "backend.core.metadata.base",
-                "backend.core.metadata.alerts": "backend.core.metadata.base",
-                "backend.core.metadata.asn_cache": "backend.core.metadata.base",
-                "backend.core.metadata.views": "backend.core.metadata.base",
-                "backend.state_sync": "backend.core.metadata.base",
-                "backend.core.metadata.pg_schema": "backend.core.metadata.base",
-                "backend.core.metadata.reconciliation": "backend.core.metadata.base",
-                "backend.core.metadata.pg_connection": "backend.core.metadata.base",
-                "backend.cron.decorators": "backend.cron.scheduler",
-                "backend.cron.jobs.rum_commit": "backend.cron.jobs.sync",
-            }
-        )
 
 
 __all__ = [

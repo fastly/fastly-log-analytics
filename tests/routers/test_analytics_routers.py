@@ -16,21 +16,18 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import duckdb
 import pytest
-from backend.deps import get_con, get_source
-from backend.models.insights import InsightsRequest
-from backend.models.performance import AssetsRequest
-from backend.models.security import SecurityAggregatesResponse
 from fastapi import FastAPI
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 from starlette.routing import Mount
 
+import backend.core.metadata as metadata_db
 from backend import config as svcconfig
-from backend.core import metadata as metadata_db
 from backend.core.duckdb import _clear_schema_cache
 from backend.core.log_fields import LOG_FIELD_CATALOG
-from backend.core.request_context import build_request_context
+from backend.core.request_context import build_request_context, get_con, get_source
 from backend.core.rollups import NETWORK_SUMMARY_BUNDLE_FILENAME, OVERVIEW_BUNDLE_FILENAME, _hour_bundled_root
+from backend.models.analytics import AssetsRequest, InsightsRequest, SecurityAggregatesResponse
 from backend.repositories import dashboard as dashboard_repo
 from backend.repositories._base import QueryRunner, _safe_table, _schema_cols_cache
 from backend.utils import bot_sources
@@ -141,7 +138,7 @@ def _seed_security_table(con, src) -> None:
 def _register_high_scale(monkeypatch, test_service_source):
     service = SimpleNamespace(service_id=test_service_source["service_id"])
     monkeypatch.setattr(
-        "backend.high_scale.registry_bootstrap.get_high_scale_service_registry",
+        "backend.high_scale.ingest_controller.get_high_scale_service_registry",
         lambda: SimpleNamespace(resolve=MagicMock(return_value=service)),
     )
     return service
@@ -1043,7 +1040,7 @@ ANALYTICS_ROUTES = [
 @pytest.fixture
 def bare_client(monkeypatch):
     if "backend.core.fastly.ngwaf" not in sys.modules:
-        from backend.models.provision import NgwafWorkspacesResponse
+        from backend.models.common import NgwafWorkspacesResponse
 
         monkeypatch.setitem(
             sys.modules, "backend.core.fastly.ngwaf", SimpleNamespace(NgwafWorkspacesResponse=NgwafWorkspacesResponse)
@@ -1297,7 +1294,7 @@ def test_assets_aggregates_post_get_and_populated_logs(client, in_memory_duckdb,
 
 
 def test_assets_aggregates_high_scale():
-    from backend.high_scale.assets import assets_aggregates
+    from backend.high_scale.ingest_controller import assets_aggregates
 
     calls: list[tuple[str, dict]] = []
     d1 = {"asset_type": "JavaScript/CSS", "cache_status": "HIT", "content_encoding_norm": "br"}
@@ -1588,7 +1585,7 @@ def test_list_all_alerts_role_scoping(client, allowed, expect_other):
     with (
         patch("backend.routers.alerts._analyst_allowed_services", return_value=allowed),
         patch(
-            "backend.repositories.alerts.svcconfig.list_configs",
+            "backend.repositories.assets.svcconfig.list_configs",
             return_value=[{"service_id": _SERVICE_ID}, {"service_id": other_id}],
         ),
     ):
@@ -1607,7 +1604,7 @@ def test_list_all_alerts_role_scoping(client, allowed, expect_other):
     ],
 )
 def test_alert_and_view_missing_service_id_returns_400(client, method, path, json_body):
-    from backend.deps import get_service_id
+    from backend.core.request_context import get_service_id
 
     app.dependency_overrides[get_service_id] = lambda: None
     try:
@@ -1627,7 +1624,7 @@ def test_alert_and_view_missing_service_id_returns_400(client, method, path, jso
     ],
 )
 def test_alert_and_view_analyst_not_authorized_returns_403(client, kind, method, suffix, json_body):
-    from backend.deps import get_service_id
+    from backend.core.request_context import get_service_id
 
     other_id = "other-service-id"
     other_hdr = {"x-fastly-service-id": other_id}
@@ -1644,7 +1641,7 @@ def test_alert_and_view_analyst_not_authorized_returns_403(client, kind, method,
             patch("backend.routers.alerts._analyst_allowed_services", return_value={_SERVICE_ID}),
             patch("backend.utils.auth.analyst_allowed_services", return_value={_SERVICE_ID}),
             patch(
-                "backend.repositories.alerts.svcconfig.list_configs",
+                "backend.repositories.assets.svcconfig.list_configs",
                 return_value=[{"service_id": _SERVICE_ID}, {"service_id": other_id}],
             ),
         ):

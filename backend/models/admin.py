@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import sys
 from datetime import datetime
 from typing import Annotated, Any, Literal, Self
 
@@ -1662,14 +1661,3 @@ class SharingDeployResponse(BaseModel):
 class SharingTeardownRequest(BaseModel):
     service_id: str
     token_override: str | None = None
-
-
-_self_mod = sys.modules[__name__]
-sys.modules["backend.models.high_scale"] = _self_mod
-sys.modules["backend.models.admin_status"] = _self_mod
-sys.modules["backend.models.share_admin"] = _self_mod
-_models_pkg = sys.modules.get("backend.models")
-if _models_pkg is not None:
-    setattr(_models_pkg, "high_scale", _self_mod)
-    setattr(_models_pkg, "admin_status", _self_mod)
-    setattr(_models_pkg, "share_admin", _self_mod)

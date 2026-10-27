@@ -610,7 +610,7 @@ def make_test_archive_manifest(
     archive_epoch: int = 1,
 ):
     """Build an ``(ArchiveManifest, artifact_bytes)`` pair for ``rows``."""
-    from backend.high_scale.archive_models import ArchiveArtifact, ArchiveManifest, ArchiveSourceObject
+    from backend.high_scale.archive import ArchiveArtifact, ArchiveManifest, ArchiveSourceObject
 
     artifact_bytes = make_archive_parquet_bytes(rows)
     source = ArchiveSourceObject(service_id, domain, f"raw/{domain}/{manifest_id}.gz", "sha256:source", 4, "v1")
@@ -661,7 +661,7 @@ class ReplayClickHouseClient:
         self.insert_calls: list[str] = []
 
     def insert(self, batch):
-        from backend.high_scale.publication import InsertReceipt
+        from backend.high_scale.archive import InsertReceipt
 
         if any(needle in batch.batch_id for needle in self._fail_on):
             raise RuntimeError(f"simulated insert failure for {batch.batch_id}")

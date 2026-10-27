@@ -63,7 +63,7 @@ def is_insights_active(service_id: str, src: dict | None = None, *, idle_minutes
 
 
 def _running_ingest(service_id: str) -> str | None:
-    from backend.cron_progress import active_task_for_service
+    from backend.cron.scheduler import active_task_for_service
 
     return active_task_for_service(service_id, _INGEST_TASKS)
 
@@ -110,8 +110,8 @@ def _run_insights_prewarmer(service_id: str) -> None:
     from backend import config as svcconfig
     from backend.core.duckdb import get_connection, get_source_for_service
     from backend.repositories.insights import get_insights
-    from backend.utils.active_requests import should_defer_cron, yield_to_api
     from backend.utils.remote_access import resolve_analyst_insights_clamp
+    from backend.utils.telemetry import should_defer_cron, yield_to_api
     from backend.utils.time_window import history_hours_from_earliest, pick_insights_default
     from backend.utils.tunnel import get_tunnel_manager
 

@@ -16,34 +16,6 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
-from backend.high_scale.archive_models import ServingWatermark
-from backend.high_scale.registry_bootstrap import HighScaleService
-from backend.models.dashboard import AggregatesResponse, SessionDetailRequest, SessionDetailResponse
-from backend.models.insights import InsightCard, InsightsResponse
-from backend.models.network import NetworkHealthResponse, NetworkQualityResponse
-from backend.models.origin import (
-    OriginAggregatesResponse,
-    OriginDrilldownResponse,
-    OriginIpHealthResponse,
-    OriginPathBreakdownResponse,
-    OriginPopLatencyResponse,
-    OriginShieldingAnalysisResponse,
-    OriginSlowUrlsResponse,
-    OriginStatusCodesResponse,
-    OriginSummaryResponse,
-    OriginTimeseriesResponse,
-)
-from backend.models.performance import (
-    CmcdAggregatesResponse,
-    CmcdRequest,
-    IOFormatConversionPair,
-    IOOpportunityRow,
-    PerformanceAggregatesResponse,
-    TopBotRow,
-    WafSignalRow,
-)
-from backend.models.security import SecurityAggregatesRequest, SecurityAggregatesResponse, SecurityTopBotsResponse
-from backend.provision.declarative.state import FeatureState
 from pydantic import AliasChoices
 from tests._helpers.duckdb_fixtures import generate_mock_logs, insert_mock_logs
 from tests._helpers.wire import assert_rows_wire_identical, assert_sections_wire_identical, wire
@@ -57,13 +29,45 @@ from backend.core.log_fields import LOG_FIELD_CATALOG
 from backend.high_scale import network as hs_network
 from backend.high_scale import performance as hs_performance
 from backend.high_scale import security as hs_security
+from backend.high_scale.archive import ServingWatermark
 from backend.high_scale.cmcd import cmcd_aggregates as hs_cmcd_aggregates
+from backend.high_scale.ingest_controller import HighScaleService
 from backend.high_scale.insights import insights_endpoint as hs_insights_endpoint
 from backend.high_scale.origin import aggregates as hs_aggregates
 from backend.high_scale.security import security_aggregates as hs_security_aggregates
 from backend.high_scale.sessions import sessions_detail as hs_sessions_detail
+from backend.models.analytics import (
+    AggregatesResponse,
+    CmcdAggregatesResponse,
+    CmcdRequest,
+    InsightCard,
+    InsightsResponse,
+    IOFormatConversionPair,
+    IOOpportunityRow,
+    NetworkHealthResponse,
+    NetworkQualityResponse,
+    OriginAggregatesResponse,
+    OriginDrilldownResponse,
+    OriginIpHealthResponse,
+    OriginPathBreakdownResponse,
+    OriginPopLatencyResponse,
+    OriginShieldingAnalysisResponse,
+    OriginSlowUrlsResponse,
+    OriginStatusCodesResponse,
+    OriginSummaryResponse,
+    OriginTimeseriesResponse,
+    PerformanceAggregatesResponse,
+    SecurityAggregatesRequest,
+    SecurityAggregatesResponse,
+    SecurityTopBotsResponse,
+    SessionDetailRequest,
+    SessionDetailResponse,
+    TopBotRow,
+    WafSignalRow,
+)
 from backend.models.common import BaseResponse, DebugCall, DebugQuery
 from backend.provision.cmcd_fields import _CMCD_CUSTOM_FIELDS
+from backend.provision.declarative.reconciler import FeatureState
 from backend.repositories import origin as origin_mod
 from backend.repositories._base import _safe_table
 from backend.repositories.cmcd import _response_cache, get_cmcd_aggregates
@@ -1305,8 +1309,8 @@ class TestWireSecurity:
                 return_value=lambda ua: (entry,) if "Googlebot" in (ua or "") else (),
             ),
             patch("backend.utils.bot_sources.get_bot_regex_pattern", return_value=None),
-            patch("backend.utils.rdns_cache.get_hostnames", return_value={}),
-            patch("backend.utils.rdns_cache.enqueue"),
+            patch("backend.utils.bot_sources.get_hostnames", return_value={}),
+            patch("backend.utils.bot_sources.enqueue"),
         ):
             res = get_security_aggregates(
                 con=in_memory_duckdb,

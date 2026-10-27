@@ -11,14 +11,14 @@ from fastapi.responses import StreamingResponse
 
 from backend.core.request_context import RequestContext, build_request_context
 from backend.core.storage import execute_with_stale_view_retry
-from backend.models._base import DEFAULT_ERROR_RESPONSES
-from backend.models.dashboard import (
+from backend.models.analytics import (
     SecurityAggregatesRequest,
     SecurityAggregatesResponse,
     SecuritySectionName,
     ThreatIntelItem,
     ThreatIntelListResponse,
 )
+from backend.models.common import DEFAULT_ERROR_RESPONSES
 from backend.repositories import network as network_repo
 from backend.repositories import security as security_repo
 from backend.repositories._base import _safe_table

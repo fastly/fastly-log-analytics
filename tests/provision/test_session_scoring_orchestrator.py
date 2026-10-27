@@ -10,14 +10,6 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
-from backend.provision.session_scoring_vcl import (
-    DEFAULT_ASSET_EXT_REGEX,
-    SCORING_DELIVER_NAME,
-    SCORING_FETCH_NAME,
-    SCORING_RECV_NAME,
-    scoring_snippet_names,
-)
-from backend.scoring.matrix import serialize_kv
 from typer.testing import CliRunner
 
 from backend import config as svcconfig
@@ -31,7 +23,15 @@ from backend.provision.cmcd_fields import (
     system_feature_flags,
 )
 from backend.provision.declarative.reconciler import ReconciliationResult
-from backend.provision.session_scoring_orchestrator import _SCORING_FIELD_NAMES
+from backend.provision.session_scoring_orchestrator import (
+    _SCORING_FIELD_NAMES,
+    DEFAULT_ASSET_EXT_REGEX,
+    SCORING_DELIVER_NAME,
+    SCORING_FETCH_NAME,
+    SCORING_RECV_NAME,
+    scoring_snippet_names,
+)
+from backend.scoring import serialize_kv
 from tests._helpers.config_fakes import (
     config_lock_held as _lock_held,
 )
@@ -143,7 +143,7 @@ def test_scoring_custom_fields_and_removal_helpers():
             return {}
 
         fm = MagicMock(side_effect=_snip_se)
-        with patch.object(sso, "fastly", fm), patch("backend.core.fastly.service.fastly", fm):
+        with patch.object(sso, "fastly", fm), patch("backend.core.fastly.client.fastly", fm):
             sso._remove_scoring_snippets(LOG_SVC, 200, TOKEN)
         deletes = [c for c in fm.call_args_list if c.args[0] == "DELETE"]
         assert len(deletes) == 1 and SCORING_RECV_NAME.replace(" ", "%20") in deletes[0].args[1]
@@ -174,7 +174,7 @@ def test_enable_scoring_stages_identity_and_overrides():
         patch.object(sso, "_deploy_wasm_package", return_value={"sha": "deadbeef_pkg_sha", "version": 7}) as wasm_mock,
         patch.object(sso, "_write_matrix_to_kv") as kv_mock,
         patch.object(sso, "fastly", fastly_mock),
-        patch("backend.core.fastly.service.fastly", fastly_mock),
+        patch("backend.core.fastly.client.fastly", fastly_mock),
         patch("backend.provision.declarative.reconciler.reconcile_vcl_state") as reconcile_mock,
     ):
         reconcile_mock.return_value = ReconciliationResult(service_id=LOG_SVC, activated_version=101)
@@ -220,7 +220,7 @@ def test_enable_scoring_stages_identity_and_overrides():
         patch.object(sso, "_write_matrix_to_kv"),
         patch.object(sso, "_publish_scoring_fos_side_effects"),
         patch.object(sso, "fastly", shared_v8),
-        patch("backend.core.fastly.service.fastly", shared_v8),
+        patch("backend.core.fastly.client.fastly", shared_v8),
         patch(
             "backend.provision.declarative.reconciler.reconcile_vcl_state",
             return_value=ReconciliationResult(service_id=LOG_SVC, activated_version=None),
@@ -253,8 +253,8 @@ def test_enable_scoring_secret_healing_status_cb_and_rollback():
             patch.object(sso, "_deploy_wasm_package"),
             patch.object(sso, "_write_matrix_to_kv"),
             patch.object(sso, "fastly", fm),
-            patch("backend.core.fastly.service.fastly", fm),
-            patch("backend.provision.declarative.fastly_integration.fastly", fm),
+            patch("backend.core.fastly.client.fastly", fm),
+            patch("backend.provision.declarative.reconciler.fastly", fm),
             patch("backend.core.fastly.client.fastly", fm),
         ):
             sso.enable_scoring(LOG_SVC, TOKEN, status_cb=cb)
@@ -293,7 +293,7 @@ def test_enable_scoring_secret_healing_status_cb_and_rollback():
         patch.object(sso, "_deploy_wasm_package"),
         patch.object(sso, "_write_matrix_to_kv"),
         patch.object(sso, "fastly", fm_rb),
-        patch("backend.core.fastly.service.fastly", fm_rb),
+        patch("backend.core.fastly.client.fastly", fm_rb),
         patch(
             "backend.provision.declarative.reconciler.reconcile_vcl_state",
             side_effect=RuntimeError("Validation failed"),
@@ -367,7 +367,7 @@ def test_disable_and_teardown_scoring():
         patch.object(sso.svcconfig, "load_config", return_value=cfg),
         patch.object(sso.svcconfig, "_save_config_unlocked", side_effect=lambda _s, c, **_k: saved.append(dict(c))),
         patch.object(sso, "fastly", fm_dis),
-        patch("backend.core.fastly.service.fastly", fm_dis),
+        patch("backend.core.fastly.client.fastly", fm_dis),
         patch.object(sso, "delete_scoring_service", return_value=[]) as del_mock,
         patch.object(sso, "_delete_scoring_matrix_from_fos") as fos_mock,
     ):
@@ -395,7 +395,7 @@ def test_disable_and_teardown_scoring():
     fm_td = MagicMock(side_effect=_td_se)
     with (
         patch.object(sso, "fastly", fm_td),
-        patch("backend.core.fastly.service.fastly", fm_td),
+        patch("backend.core.fastly.client.fastly", fm_td),
         patch.object(sso, "delete_scoring_service", side_effect=lambda *_a, **_k: order.append("delete") or []),
     ):
         assert sso.teardown_scoring_resources(LOG_SVC, _scoring_meta_full(), TOKEN) == []
@@ -404,7 +404,7 @@ def test_disable_and_teardown_scoring():
     fm_503 = MagicMock(side_effect=RuntimeError("Fastly 503 on version probe"))
     with (
         patch.object(sso, "fastly", fm_503),
-        patch("backend.core.fastly.service.fastly", fm_503),
+        patch("backend.core.fastly.client.fastly", fm_503),
         patch.object(sso, "delete_scoring_service", return_value=[]) as del_503,
     ):
         assert sso.teardown_scoring_resources(LOG_SVC, _scoring_meta_full(), TOKEN) == []
@@ -421,7 +421,7 @@ def test_tenant_matrix_and_wasm_deploy(tmp_path, monkeypatch):
     raw_calls = []
     for fos_val in (None, {"vocab_size": 0}):
         with (
-            patch("backend.state_sync.fetch_matrix_from_fos", return_value=fos_val),
+            patch("backend.core.metadata.base.fetch_matrix_from_fos", return_value=fos_val),
             patch.object(sso, "fastly_raw", side_effect=lambda *a, **_k: raw_calls.append(a)),
         ):
             assert sso._resolve_tenant_matrix_for_deploy(LOG_SVC) is None
@@ -429,13 +429,15 @@ def test_tenant_matrix_and_wasm_deploy(tmp_path, monkeypatch):
     assert raw_calls == []
 
     # Fetches from FOS when local missing
-    with patch("backend.state_sync.fetch_matrix_from_fos", return_value={"vocab_size": 11, "version": "fos-1"}) as mf:
+    with patch(
+        "backend.core.metadata.base.fetch_matrix_from_fos", return_value={"vocab_size": 11, "version": "fos-1"}
+    ) as mf:
         resolved = sso._resolve_tenant_matrix_for_deploy(LOG_SVC)
     assert resolved == sso._tenant_matrix_path(LOG_SVC) and mf.call_count == 1
 
     # Local wins without FOS round-trip & writes KV
     resolved.write_text(json.dumps({"vocab_size": 5, "version": "tenant-only"}))
-    with patch("backend.state_sync.fetch_matrix_from_fos") as mf2:
+    with patch("backend.core.metadata.base.fetch_matrix_from_fos") as mf2:
         assert sso._resolve_tenant_matrix_for_deploy(LOG_SVC) == resolved
     mf2.assert_not_called()
 
@@ -477,7 +479,7 @@ def test_tenant_matrix_and_wasm_deploy(tmp_path, monkeypatch):
     raw_w = MagicMock(return_value={})
     with (
         patch.object(sso, "fastly", fm_w),
-        patch("backend.core.fastly.service.fastly", fm_w),
+        patch("backend.core.fastly.client.fastly", fm_w),
         patch.object(sso, "fastly_raw", raw_w),
     ):
         res_up = sso._deploy_wasm_package(SCORE_SVC, "MATRIX_STORE", TOKEN)
@@ -528,7 +530,7 @@ def test_update_scoring_settings_matrix(fn, arg_name, custom_val, reset_val, res
         patch.object(sso.svcconfig, "load_config", return_value={"service_id": LOG_SVC, "scoring": {"enabled": True}}),
         patch.object(sso.svcconfig, "_save_config_unlocked", side_effect=save_mock),
         patch.object(sso, "fastly", fm),
-        patch("backend.core.fastly.service.fastly", fm),
+        patch("backend.core.fastly.client.fastly", fm),
     ):
         res = fn(LOG_SVC, TOKEN, **{arg_name: custom_val})
     assert (res["logging_service_active_version"], res["is_default"], res[res_key]) == (301, False, custom_val)
@@ -542,7 +544,7 @@ def test_update_scoring_settings_matrix(fn, arg_name, custom_val, reset_val, res
         ),
         patch.object(sso.svcconfig, "_save_config_unlocked", side_effect=save_mock),
         patch.object(sso, "fastly", fm),
-        patch("backend.core.fastly.service.fastly", fm),
+        patch("backend.core.fastly.client.fastly", fm),
     ):
         res_def = fn(LOG_SVC, TOKEN, **{arg_name: reset_val})
     assert (res_def["is_default"], res_def[res_key]) == (True, default_val)
@@ -553,7 +555,7 @@ def test_update_scoring_settings_matrix(fn, arg_name, custom_val, reset_val, res
         patch.object(sso.svcconfig, "load_config", return_value={"service_id": LOG_SVC, "scoring": {"enabled": True}}),
         patch.object(sso.svcconfig, "_save_config_unlocked"),
         patch.object(sso, "fastly", fm_fail),
-        patch("backend.core.fastly.service.fastly", fm_fail),
+        patch("backend.core.fastly.client.fastly", fm_fail),
         pytest.raises(RuntimeError, match="Validation failed"),
     ):
         fn(LOG_SVC, TOKEN, **{arg_name: custom_val})
@@ -571,7 +573,7 @@ def test_update_recv_exclusion_regex_raises_when_no_active_version():
         patch.object(sso.svcconfig, "load_config", return_value={"service_id": LOG_SVC, "scoring": {"enabled": True}}),
         patch.object(sso.svcconfig, "_save_config_unlocked"),
         patch.object(sso, "fastly", fm),
-        patch("backend.core.fastly.service.fastly", fm),
+        patch("backend.core.fastly.client.fastly", fm),
         pytest.raises(RuntimeError, match="no active version"),
     ):
         sso.update_recv_exclusion_regex(LOG_SVC, TOKEN, new_regex="^/$")
@@ -648,11 +650,11 @@ def _run_disable(fake: _Fastly, *, delete_mock=None):
         patch.object(sso.svcconfig, "load_config", return_value=cfg),
         patch.object(sso.svcconfig, "_save_config_unlocked"),
         patch.object(sso, "fastly", fake),
-        patch("backend.core.fastly.service.fastly", fake),
+        patch("backend.core.fastly.client.fastly", fake),
         patch.object(sso, "delete_scoring_service", delete_mock),
         patch.object(sso, "_delete_scoring_matrix_from_fos"),
         patch.object(sso, "_publish_scoring_fos_side_effects"),
-        patch("backend.state_sync.export_admin_state"),
+        patch("backend.core.metadata.base.export_admin_state"),
     ):
         return sso.disable_scoring(LOG_SVC, TOKEN)
 
@@ -680,7 +682,7 @@ def test_disable_call_order_and_rollback(caplog):
 
     fake_rb_fail = _Fastly(validate_ok=False, rollback_raises=True)
     with (
-        caplog.at_level(logging.WARNING, logger="backend.provision.draft_version"),
+        caplog.at_level(logging.WARNING, logger="backend.provision"),
         pytest.raises(RuntimeError, match="Validation failed"),
     ):
         _run_disable(fake_rb_fail)
@@ -693,7 +695,7 @@ def test_teardown_call_order():
     del_ok = MagicMock(return_value=[])
     with (
         patch.object(sso, "fastly", fake_ok),
-        patch("backend.core.fastly.service.fastly", fake_ok),
+        patch("backend.core.fastly.client.fastly", fake_ok),
         patch.object(sso, "delete_scoring_service", del_ok),
     ):
         assert sso.teardown_scoring_resources(LOG_SVC, meta, TOKEN) == []
@@ -708,7 +710,7 @@ def test_teardown_call_order():
     msgs: list[str] = []
     with (
         patch.object(sso, "fastly", fake_fail),
-        patch("backend.core.fastly.service.fastly", fake_fail),
+        patch("backend.core.fastly.client.fastly", fake_fail),
         patch.object(sso, "delete_scoring_service", del_fail),
         pytest.raises(RuntimeError, match="Aborting scoring teardown"),
     ):
@@ -733,7 +735,7 @@ def test_swap_call_order_and_failures(fn, kwargs, capsys, caplog):
             ),
             patch.object(sso.svcconfig, "_save_config_unlocked"),
             patch.object(sso, "fastly", fake),
-            patch("backend.core.fastly.service.fastly", fake),
+            patch("backend.core.fastly.client.fastly", fake),
         ):
             return fn(LOG_SVC, TOKEN, **kwargs)
 
@@ -755,7 +757,7 @@ def test_swap_call_order_and_failures(fn, kwargs, capsys, caplog):
 
     fake_rb = _Fastly(active=300, clone_number=301, validate_ok=False, rollback_raises=True)
     with (
-        caplog.at_level(logging.WARNING, logger="backend.provision.draft_version"),
+        caplog.at_level(logging.WARNING, logger="backend.provision"),
         pytest.raises(RuntimeError, match="Validation failed"),
     ):
         _run_swap(fake_rb)
@@ -768,7 +770,7 @@ def test_swap_clone_failure_reactivates_previous_version():
         patch.object(sso.svcconfig, "load_config", return_value={"service_id": LOG_SVC, "scoring": {"enabled": True}}),
         patch.object(sso.svcconfig, "_save_config_unlocked"),
         patch.object(sso, "fastly", fake),
-        patch("backend.core.fastly.service.fastly", fake),
+        patch("backend.core.fastly.client.fastly", fake),
         pytest.raises(RuntimeError, match="edit rejected"),
     ):
         sso.update_recv_exclusion_regex(LOG_SVC, TOKEN, new_regex="^/x$")
@@ -784,7 +786,7 @@ def test_wasm_deploy_call_order(tmp_path):
         with (
             patch.object(sso, "_SCORER_PACKAGE", pkg),
             patch.object(sso, "fastly", fake),
-            patch("backend.core.fastly.service.fastly", fake),
+            patch("backend.core.fastly.client.fastly", fake),
             patch.object(sso, "fastly_raw", raw),
         ):
             return sso._deploy_wasm_package(SCORE_SVC, matrix_store, TOKEN)
@@ -855,7 +857,7 @@ def test_remove_endpoint_call_order(caplog):
 
     fake_rb = _Fastly(active=10, clone_number=11, validate_ok=False, rollback_raises=True)
     with (
-        caplog.at_level(logging.WARNING, logger="backend.provision.draft_version"),
+        caplog.at_level(logging.WARNING, logger="backend.provision"),
         pytest.raises(RuntimeError, match="Validation failed"),
     ):
         _run_rm(fake_rb)
@@ -1264,13 +1266,13 @@ def test_session_scoring_config_merge_and_lock_release():
         patch.object(sso, "_remove_scoring_backend"),
         patch.object(sso, "ensure_vcl_snippet"),
         patch.object(sso, "fastly", MagicMock(return_value={})),
-        patch("backend.core.fastly.service.list_s3_endpoints", return_value=[]),
+        patch("backend.core.fastly.client.list_s3_endpoints", return_value=[]),
         patch("backend.provision.fastly_api.generate_capture_vcl", return_value={"recv": ""}),
         patch.object(
             sso, "delete_scoring_service", side_effect=lambda *_a, **_k: (_concurrent_write(compute_key="kept"), [])[1]
         ),
         patch.object(sso, "_delete_scoring_matrix_from_fos"),
-        patch("backend.state_sync.export_admin_state"),
+        patch("backend.core.metadata.base.export_admin_state"),
     ):
         sso.disable_scoring(_MERGE_SID, TOKEN)
     saved_dis = _persisted()
@@ -1761,7 +1763,7 @@ def test_handle_update_logs_dry_run_prints_format_and_returns(capsys):
     with (
         patch("backend.config.list_service_ids", return_value=["svc"]),
         patch("backend.config.load_config", return_value={"log_fields": {"groups": ["A"]}}),
-        patch("backend.core.field_registry.generate_log_format", return_value="EXPECTED_LOG_FORMAT"),
+        patch("backend.core.log_fields.generate_log_format", return_value="EXPECTED_LOG_FORMAT"),
         patch("backend.provision.cli.update_logging_endpoint") as mock_update,
     ):
         cli.handle_update_logs(_args(service_id="svc", dry_run=True))
@@ -1794,7 +1796,7 @@ def test_handle_update_logs_pushes_to_fastly_and_persists_config():
         ),
         patch("backend.provision.cli.write_service_config", side_effect=lambda c: write_calls.append(c)),
         patch("backend.provision.cli.update_logging_endpoint", side_effect=_record_update),
-        patch("backend.core.field_registry.format_hash", return_value="hash123"),
+        patch("backend.core.log_fields.format_hash", return_value="hash123"),
     ):
         cli.handle_update_logs(_args(service_id="svc"))
 
@@ -1841,7 +1843,7 @@ def test_handle_update_logs_preserves_scoring_custom_fields_on_preset_swap():
         ),
         patch("backend.provision.cli.write_service_config", side_effect=lambda c: write_calls.append(c)),
         patch("backend.provision.cli.update_logging_endpoint", side_effect=_record_update),
-        patch("backend.core.field_registry.format_hash", return_value="h"),
+        patch("backend.core.log_fields.format_hash", return_value="h"),
     ):
         # --preset triggers the rebuild path (the bug-bait branch). Without
         # the merge guard, the persisted cfg's custom_fields would be empty.

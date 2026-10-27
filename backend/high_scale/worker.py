@@ -15,18 +15,20 @@ from typing import TYPE_CHECKING, Any
 
 from backend import config as app_config
 from backend.core.clickhouse import ClickHouseClient
-from backend.high_scale.archive import ArchivePublication, S3ObjectStore, from_environment
+from backend.high_scale.archive import (
+    ArchivePublication,
+    ClickHouseBatchAdapter,
+    ClickHousePublication,
+    PostgresBatchManifestStore,
+    S3ObjectStore,
+    from_environment,
+)
 from backend.high_scale.postgres_control import (
     DeletionController,
     HighScaleArchiveExpirer,
     HighScaleDeletionSweeper,
     PostgresControlPlane,
     PostgresDeletionLedger,
-)
-from backend.high_scale.publication import (
-    ClickHouseBatchAdapter,
-    ClickHousePublication,
-    PostgresBatchManifestStore,
 )
 
 if TYPE_CHECKING:
@@ -230,8 +232,7 @@ class HighScaleWorkerLoop:
             except Exception:
                 _worker_logger.debug("periodic usage log cleanup failed", extra={"service_id": service_id})
         try:
-            from backend.core.clickhouse_client import get_clickhouse_client
-            from backend.core.clickhouse_schema import maintain_clickhouse_system_tables
+            from backend.core.clickhouse import get_clickhouse_client, maintain_clickhouse_system_tables
 
             client = get_clickhouse_client()
             if client is not None:

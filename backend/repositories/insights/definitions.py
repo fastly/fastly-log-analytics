@@ -4,7 +4,7 @@ import sys as _sys
 from typing import Any
 
 from backend.core.metric_expressions import coalesce
-from backend.core.share_db.validation import mask_ip
+from backend.core.share_db import mask_ip
 from backend.repositories.insights import InsightCategory, InsightDefinition, registry
 from backend.utils.countries import format_city_label
 

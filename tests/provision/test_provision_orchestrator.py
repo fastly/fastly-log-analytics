@@ -12,11 +12,11 @@ from unittest.mock import MagicMock, patch
 import httpx
 import pytest
 import vcr
-from backend.core.metadata.cron_log import CronLeaseHeldError
 
 from backend import config as svcconfig
 from backend.core.fastly.client import fastly as real_fastly
 from backend.core.log_fields import resolve_enabled_fields
+from backend.core.metadata.usage_log import CronLeaseHeldError
 from backend.core.rum_ingest import DEFAULT_FARO_VERSION
 from backend.provision import orchestrator, rum_assets
 from backend.provision.declarative.reconciler import FeatureState, generate_consolidated_snippet
@@ -784,37 +784,39 @@ def test_fos_path_safety_and_reconciler_edge_cases(tmp_path, monkeypatch):
         next(orchestrator.ensure_logging_via_reconciler({}, "tok"))
 
     with (
-        patch("backend.provision.declarative.state.FeatureState.from_config", side_effect=KeyError("missing_field")),
+        patch(
+            "backend.provision.declarative.reconciler.FeatureState.from_config", side_effect=KeyError("missing_field")
+        ),
         patch("backend.config.duckdb_path", return_value=str(tmp_path / "db.duckdb")),
     ):
         with pytest.raises(RuntimeError, match="Invalid feature state configuration"):
             next(orchestrator.ensure_logging_via_reconciler({"logging_service_id": "svc-test"}, "tok"))
 
     with (
-        patch("backend.provision.declarative.state.FeatureState.from_config", return_value=None),
+        patch("backend.provision.declarative.reconciler.FeatureState.from_config", return_value=None),
         patch("backend.provision.orchestrator.reconcile_vcl_state", side_effect=RuntimeError("VCL validation failed")),
     ):
         with pytest.raises(RuntimeError, match="VCL reconciliation failed"):
             next(orchestrator.ensure_logging_via_reconciler({"logging_service_id": "svc-test"}, "tok"))
 
     with (
-        patch("backend.provision.declarative.state.FeatureState.from_config", return_value=None),
+        patch("backend.provision.declarative.reconciler.FeatureState.from_config", return_value=None),
         patch(
             "backend.provision.orchestrator.reconcile_vcl_state",
             return_value=type("Result", (), {"activated_version": None})(),
         ),
-        patch("backend.core.fastly.service.get_active_version", return_value=None),
+        patch("backend.core.fastly.client.get_active_version", return_value=None),
     ):
         with pytest.raises(RuntimeError, match="has no active version"):
             next(orchestrator.ensure_logging_via_reconciler({"logging_service_id": "svc-test"}, "tok"))
 
     with (
-        patch("backend.provision.declarative.state.FeatureState.from_config", return_value=None),
+        patch("backend.provision.declarative.reconciler.FeatureState.from_config", return_value=None),
         patch(
             "backend.provision.orchestrator.reconcile_vcl_state",
             return_value=type("Result", (), {"activated_version": None})(),
         ),
-        patch("backend.core.fastly.service.get_active_version", return_value=42),
+        patch("backend.core.fastly.client.get_active_version", return_value=42),
     ):
         assert orchestrator.ensure_logging_via_reconciler({"logging_service_id": "svc-test"}, "tok") == 42
 
@@ -923,8 +925,9 @@ def test_provision_partial_failure_at_step_7_and_early_config_persist(tmp_path, 
 import inspect
 from datetime import UTC, datetime
 
-from backend.core.fastly.rum_provisioning import RUM_ASSET_FETCH_NAME, generate_rum_asset_fetch_vcl
-from backend.provision.utils import (
+from backend.core.fastly.client import RUM_ASSET_FETCH_NAME, generate_rum_asset_fetch_vcl
+from backend.provision import cmcd_fields as orch
+from backend.provision.cli import (
     ANALYTICS_LOG_LAYOUT,
     VclBuilder,
     analytics_log_path,
@@ -934,8 +937,6 @@ from backend.provision.utils import (
     rum_log_path,
     rum_minute_list_prefix,
 )
-
-from backend.provision import cmcd_fields as orch
 from backend.provision.cmcd_fields import _CMCD_FIELD_NAMES, reconcile_cmcd_custom_fields
 from backend.provision.fastly_api import delete_remote_frontend, deploy_remote_frontend
 
@@ -964,8 +965,7 @@ def test_vcl_builder_and_cmcd_fields_and_log_paths():
 
 
 def test_producers_use_canonical_layout_and_rum_asset_routing():
-    import backend.provision.declarative.generators as gen
-
+    import backend.provision.declarative.reconciler as gen
     import backend.provision.fastly_api as fa
     import backend.routers.services.core as sc
 
@@ -1098,7 +1098,7 @@ def test_draft_version_lifecycle_and_options(caplog):
         assert ("PUT", f"/service/{SID}/version/9/activate") not in fake_vfail.calls
         assert (("PUT", f"/service/{SID}/version/5/activate") in fake_vfail.calls) is expect_rb
 
-    with caplog.at_level(logging.WARNING, logger="backend.provision.draft_version"):
+    with caplog.at_level(logging.WARNING, logger="backend.provision"):
         with pytest.raises(ValueError, match="original"):
             with draft_version(SID, "t", base_version=5, call=_Fastly(rollback_raises=True)):
                 raise ValueError("original")
@@ -2039,16 +2039,14 @@ def test_cli_restore_data_runs_the_cloud_restore_for_the_service():
     from backend.provision.cli import app
 
     src = {"service_id": "svc-r", "name": "svc-r", "bucket": "bkt"}
-    result = {"remote_files": 4, "downloaded": 3, "registered": 4, "reindexed": 7, "views_restored": 2}
+    result = {"remote_files": 4, "downloaded": 3, "registered": 4, "reindexed": 7}
     with (
         patch("backend.core.duckdb.get_source_for_service", return_value=src),
         patch("backend.core.storage.backup.restore_from_cloud", return_value=result) as restore,
     ):
         out = CliRunner().invoke(app, ["restore-data", "--service-id", "svc-r"])
     assert (
-        out.exit_code == 0
-        and "4 cloud file(s): 3 downloaded, 4 registered, 7 raw object(s) re-indexed, 2 saved view(s) restored"
-        in out.output
+        out.exit_code == 0 and "4 cloud file(s): 3 downloaded, 4 registered, 7 raw object(s) re-indexed" in out.output
     )
     assert restore.call_args.args[0] == src
 

@@ -11,8 +11,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal
 
-from backend.core.high_scale_sections import HighScaleSections, clickhouse_source
-from backend.core.share_db.validation import mask_ip
+from backend.core.request_telemetry import HighScaleSections, clickhouse_source
+from backend.core.share_db import mask_ip
 from backend.high_scale._common import (
     _bucket_case,
     parse_time_window,
@@ -25,7 +25,7 @@ from backend.high_scale._common import build_clickhouse_filters as _build_clickh
 from backend.high_scale._common import (
     text as _text,
 )
-from backend.models.dashboard import SecurityAggregatesResponse, SecurityTopBotsResponse
+from backend.models.analytics import SecurityAggregatesResponse, SecurityTopBotsResponse
 from backend.repositories.security import _BOT_UA_CLASSIFY_LIMIT, classify_ua_counts, summarize_wellknown_bot_rows
 from backend.repositories.utils.response_cache import (
     ResponseMemo,
@@ -36,7 +36,17 @@ from backend.repositories.utils.response_cache import (
     serialize_filters_for_key,
 )
 from backend.repositories.utils.response_shaping import (
+    SECURITY_CONN_REUSE_BUCKETS,
+    SECURITY_CONN_REUSE_LAST,
+    SECURITY_REQ_HEADER_BUCKETS,
+    SECURITY_REQ_HEADER_LAST,
     finish_security_proxies,
+    shape_security_bucket_rows,
+    shape_security_fingerprint_row,
+    shape_security_ngwaf_bot_row,
+    shape_security_ngwaf_top_bot_row,
+    shape_security_threat_intel_row,
+    shape_security_top_ip_header_row,
 )
 from backend.repositories.utils.response_shaping import (
     opt_float as _flt,
@@ -52,17 +62,10 @@ CacheRegistry.register("hs_security_aggregates_memo", _security_memo.cache)
 
 _WHERE = "__WHERE__"
 
-_REQ_HEADER_BUCKETS = tuple(
-    (int(k), v)
-    for k, v in (
-        s.split(":")
-        for s in "256:0-256B 512:256-512B 768:512-768B 1024:768B-1KB 1536:1-1.5KB 2048:1.5-2KB 3072:2-3KB "
-        "4096:3-4KB 6144:4-6KB 8192:6-8KB 12288:8-12KB 16384:12-16KB 24576:16-24KB 32768:24-32KB".split()
-    )
-)
-_REQ_HEADER_LAST = ">32KB"
-_CONN_REUSE_BUCKETS = ((1, "1 (None)"), (5, "2-5"), (20, "6-20"), (100, "21-100"))
-_CONN_REUSE_LAST = ">100"
+_REQ_HEADER_BUCKETS = SECURITY_REQ_HEADER_BUCKETS
+_REQ_HEADER_LAST = SECURITY_REQ_HEADER_LAST
+_CONN_REUSE_BUCKETS = SECURITY_CONN_REUSE_BUCKETS
+_CONN_REUSE_LAST = SECURITY_CONN_REUSE_LAST
 
 from backend.utils.pop_utils import _effective_pop_lat_lon_map
 
@@ -137,7 +140,7 @@ def _bucket_seconds(req: Any) -> int:
 
 
 def _bucket_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [{"bucket": r["bucket"], "count": int(r["count"])} for r in rows]
+    return shape_security_bucket_rows(rows)
 
 
 def _tls_fingerprints(service: HighScaleService, scope: _Scope) -> list[dict[str, Any]]:
@@ -149,10 +152,7 @@ def _tls_fingerprints(service: HighScaleService, scope: _Scope) -> list[dict[str
         "FROM request_facts WHERE __WHERE__ AND custom_fields['tls_ciphers_sha'] != '' "
         "GROUP BY fingerprint ORDER BY request_count DESC LIMIT 20",
     )
-    return [
-        {"fingerprint": r["fingerprint"], "ip_count": int(r["ip_count"]), "request_count": int(r["request_count"])}
-        for r in rows
-    ]
+    return [shape_security_fingerprint_row(r["fingerprint"], r["ip_count"], r["request_count"]) for r in rows]
 
 
 def _fingerprint_coverage(service: HighScaleService, scope: _Scope) -> dict[str, float]:
@@ -190,7 +190,7 @@ def _top_ips_header(service: HighScaleService, scope: _Scope, mask_ips: bool) ->
         "(SELECT client_ip, toUInt64OrNull(custom_fields['req_header_bytes']) AS h FROM request_facts "
         "WHERE __WHERE__ AND client_ip != '') WHERE h IS NOT NULL GROUP BY ip ORDER BY max_header DESC LIMIT 10",
     )
-    return [{"ip": _maybe_mask(r["ip"], mask_ips), "max_header": int(r["max_header"])} for r in rows]
+    return [shape_security_top_ip_header_row(r["ip"], r["max_header"], mask_ips=mask_ips) for r in rows]
 
 
 def _conn_reuse_dist(service: HighScaleService, scope: _Scope) -> list[dict[str, Any]]:
@@ -267,12 +267,7 @@ def _ngwaf_summary(service: HighScaleService, scope: _Scope, limit: int | None =
 
 def _ngwaf_verified_bots(service: HighScaleService, scope: _Scope) -> list[dict[str, Any]]:
     return [
-        {
-            "bot_name": r["bot_name"],
-            "wellknown_bot_name": r["wk_name"] or None,
-            "category": r["bot_cat"] or None,
-            "request_count": int(r["request_count"]),
-        }
+        shape_security_ngwaf_bot_row(r["bot_name"], r["wk_name"], r["bot_cat"], r["request_count"])
         for r in _ngwaf_summary(service, scope)
     ]
 
@@ -487,7 +482,7 @@ def _top_bots(service: HighScaleService, scope: _Scope, n: int = 10) -> dict[str
     return {
         "bots": classify_ua_counts([(r["ua"], int(r["cnt"])) for r in ua_rows], n),
         "ngwaf_bots": [
-            {"name": r["bot_name"], "category": r["bot_cat"] or None, "request_count": int(r["request_count"])}
+            shape_security_ngwaf_top_bot_row(r["bot_name"], r["bot_cat"], r["request_count"])
             for r in _ngwaf_summary(service, scope, limit=n)
         ],
     }
@@ -616,14 +611,14 @@ def get_security_threat_intel(
     )
     return {
         "data": [
-            {
-                "tls_fingerprint": r["tls_fingerprint"],
-                "requests": int(r["requests"]),
-                "top_country": r["top_country"] or "Unknown",
-                "matched_waf_rules_count": int(r["matched_waf_rules_count"]),
-                "bot_percentage": float(r["bot_percentage"] or 0.0),
-                "is_anonymized_proxy": bool(int(r["is_anonymized_proxy"])),
-            }
+            shape_security_threat_intel_row(
+                r["tls_fingerprint"],
+                r["requests"],
+                r["top_country"],
+                r["matched_waf_rules_count"],
+                r["bot_percentage"],
+                r["is_anonymized_proxy"],
+            )
             for r in rows
         ]
     }

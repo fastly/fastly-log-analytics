@@ -11,13 +11,13 @@ from fastapi import APIRouter, Depends
 from backend.core.request_context import RequestContext, build_request_context
 from backend.core.storage import execute_with_stale_view_retry
 from backend.cron.jobs.insights_prewarmer import record_insights_request
-from backend.models._base import DEFAULT_ERROR_RESPONSES
 from backend.models.analytics import (
     CacheCollapseDetailRequest,
     CacheCollapseDetailResponse,
     InsightsRequest,
     InsightsResponse,
 )
+from backend.models.common import DEFAULT_ERROR_RESPONSES
 from backend.repositories import insights as insights_repo
 from backend.utils.auth import mask_ips_for
 from backend.utils.remote_access import analyst_clamp_cache_key

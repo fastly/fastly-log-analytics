@@ -102,7 +102,7 @@ def _teardown_patches(sid: str = "svc-1", *, teardown_fn=_fake_perform_teardown,
         patch("backend.provision.perform_teardown", side_effect=teardown_fn),
         patch("backend.provision._sync_crontab"),
         patch("backend.cron.scheduler.get_scheduler"),
-        patch("backend.utils.fastly_auth.fastly", side_effect=fastly_fn or _auth_fastly_ok(sid)),
+        patch("backend.core.log_fields.fastly", side_effect=fastly_fn or _auth_fastly_ok(sid)),
     ):
         yield
 
@@ -272,7 +272,7 @@ def test_destructive_teardown_with_read_only_scope_rejected(isolated_configs_dir
         assert path == "/tokens/self"
         return {"id": "tok_ro", "user_id": "u", "scope": "global:read", "services": []}
 
-    with patch("backend.utils.fastly_auth.fastly", side_effect=_fake_fastly), TestClient(app) as client:
+    with patch("backend.core.log_fields.fastly", side_effect=_fake_fastly), TestClient(app) as client:
         r = client.post("/api/provision/teardown", json=_destructive_payload(sid, token="ro-token"))
     assert r.status_code == 401
     assert r.json()["detail"]["error"] == "insufficient_scope"
@@ -284,7 +284,7 @@ def test_destructive_teardown_with_purge_scope_rejected(isolated_configs_dir):
     sid = "svc-auth-3"
     _seed_cfg(sid)
     fastly_fn = _auth_fastly_ok(sid, scope="purge_select purge_all")
-    with patch("backend.utils.fastly_auth.fastly", side_effect=fastly_fn), TestClient(app) as client:
+    with patch("backend.core.log_fields.fastly", side_effect=fastly_fn), TestClient(app) as client:
         r = client.post("/api/provision/teardown", json=_destructive_payload(sid, token="purge-token"))
     assert r.status_code == 401
     assert r.json()["detail"]["error"] == "insufficient_scope"
@@ -296,7 +296,7 @@ def test_destructive_teardown_token_bound_to_wrong_service_rejected(isolated_con
     sid = "svc-auth-4"
     _seed_cfg(sid)
     fastly_fn = _auth_fastly_ok(sid, services=["different-svc"])
-    with patch("backend.utils.fastly_auth.fastly", side_effect=fastly_fn), TestClient(app) as client:
+    with patch("backend.core.log_fields.fastly", side_effect=fastly_fn), TestClient(app) as client:
         r = client.post("/api/provision/teardown", json=_destructive_payload(sid, token="bound-token"))
     assert r.status_code == 401
     assert r.json()["detail"]["error"] == "service_not_authorized"
@@ -343,7 +343,7 @@ def test_destructive_teardown_fastly_unreachable_rejects(isolated_configs_dir):
     sid = "svc-auth-8"
     _seed_cfg(sid)
     with (
-        patch("backend.utils.fastly_auth.fastly", side_effect=RuntimeError("Network error on GET /tokens/self")),
+        patch("backend.core.log_fields.fastly", side_effect=RuntimeError("Network error on GET /tokens/self")),
         TestClient(app) as client,
     ):
         r = client.post("/api/provision/teardown", json=_destructive_payload(sid, token="any"))
@@ -368,7 +368,7 @@ def test_destructive_teardown_tenant_mismatch_rejected(isolated_configs_dir):
     sid = "svc-auth-tenant-mismatch"
     _seed_cfg(sid)
     fastly_fn = _auth_fastly_ok(sid, "cust-ATTACKER", service_customer_id="cust-VICTIM")
-    with patch("backend.utils.fastly_auth.fastly", side_effect=fastly_fn), TestClient(app) as client:
+    with patch("backend.core.log_fields.fastly", side_effect=fastly_fn), TestClient(app) as client:
         r = client.post("/api/provision/teardown", json=_destructive_payload(sid, token="cross-tenant-token"))
     assert r.status_code == 401
     assert r.json()["detail"]["error"] == "tenant_mismatch"
@@ -747,7 +747,7 @@ def test_set_ngwaf_workspace_saves_body_and_ignores_query_param():
         patch("backend.config.load_config", return_value=cfg_with_key),
         patch("backend.config.mutate_config", side_effect=fake_mutate),
         patch("backend.provision._sync_crontab"),
-        patch("backend.utils.fastly_auth.validate_destructive_token") as mock_validate,
+        patch("backend.core.log_fields.validate_destructive_token") as mock_validate,
     ):
         resp = _client().patch(
             "/api/provision/services/svc123/ngwaf-workspace?token=test-stored-key",
@@ -789,7 +789,7 @@ def test_set_ngwaf_workspace_auth_rejections(query, cfg_key, fastly_effect, expe
         patch("backend.config.load_config", return_value=cfg),
         patch("backend.config.save_config"),
         patch("backend.provision._sync_crontab"),
-        patch("backend.utils.fastly_auth.fastly", **fastly_kw),
+        patch("backend.core.log_fields.fastly", **fastly_kw),
     ):
         resp = _client().patch(
             f"/api/provision/services/svc123/ngwaf-workspace{query}",
@@ -805,7 +805,7 @@ def test_ngwaf_workspaces_listing_variants():
     ro_data = {"id": "tok-id", "scope": "global:read", "services": [], "customer_id": "cust-T"}
     with (
         patch("backend.config.load_config", return_value=cfg_ro),
-        patch("backend.utils.fastly_auth.fastly", return_value=ro_data),
+        patch("backend.core.log_fields.fastly", return_value=ro_data),
     ):
         r_ro = _client().get(
             "/api/provision/ngwaf-workspaces",
@@ -833,7 +833,7 @@ def test_ngwaf_workspaces_listing_variants():
             "urllib.request.urlopen",
             return_value=_mock_resp(b'{"data": [{"id": "ws-1", "name": "Prod"}, {"id": "ws-2", "name": "Staging"}]}'),
         ),
-        patch("backend.utils.fastly_auth.validate_destructive_token") as mock_val,
+        patch("backend.core.log_fields.validate_destructive_token") as mock_val,
     ):
         r_data = _client().get("/api/provision/ngwaf-workspaces", params={"service_id": "svc", "token": "tok"})
         assert r_data.status_code == 200
@@ -854,7 +854,7 @@ def test_ngwaf_workspaces_listing_variants():
             "urllib.request.urlopen",
             return_value=_mock_resp(b'{"workspaces": [{"id": "ws-old", "attributes": {"name": "OldShape"}}]}'),
         ),
-        patch("backend.utils.fastly_auth.validate_destructive_token"),
+        patch("backend.core.log_fields.validate_destructive_token"),
     ):
         r_old = _client().get("/api/provision/ngwaf-workspaces", params={"service_id": "svc", "token": "tok"})
         assert r_old.json()["workspaces"][0]["name"] == "OldShape"
@@ -863,7 +863,7 @@ def test_ngwaf_workspaces_listing_variants():
         patch("backend.config.get_fastly_api_key", return_value="tok"),
         patch("urllib.request.urlopen", return_value=_mock_resp(b'{"data": []}')),
         patch("backend.provision.fastly", return_value={"id": "tok-id", "name": "automation"}),
-        patch("backend.utils.fastly_auth.validate_destructive_token"),
+        patch("backend.core.log_fields.validate_destructive_token"),
     ):
         r_empty = _client().get("/api/provision/ngwaf-workspaces", params={"service_id": "svc", "token": "tok"})
         assert r_empty.json()["workspaces"] == []
@@ -879,7 +879,7 @@ def test_ngwaf_workspaces_listing_variants():
     with (
         patch("backend.config.get_fastly_api_key", return_value="bad-tok"),
         patch("urllib.request.urlopen", side_effect=err_401),
-        patch("backend.utils.fastly_auth.validate_destructive_token"),
+        patch("backend.core.log_fields.validate_destructive_token"),
     ):
         r_401 = _client().get("/api/provision/ngwaf-workspaces", params={"service_id": "svc", "token": "bad-tok"})
         assert r_401.status_code == 400
@@ -1128,7 +1128,7 @@ def test_ingest_validation_and_key_flows(tmp_path, monkeypatch):
     with (
         patch("backend.utils.pop_utils.fetch_pop_locations"),
         patch("backend.provision.parse_period", side_effect=ValueError("unknown period: fortnight")),
-        patch("backend.utils.fastly_auth.fastly", side_effect=_auth_fastly_ok("svc")),
+        patch("backend.core.log_fields.fastly", side_effect=_auth_fastly_ok("svc")),
     ):
         r_period = _client().post(
             "/api/provision/ingest",
@@ -1145,7 +1145,7 @@ def test_ingest_validation_and_key_flows(tmp_path, monkeypatch):
         patch("backend.provision.ensure_fos_access_key", return_value=new_key) as mock_ensure,
         patch("backend.provision.write_service_config") as mock_write,
         patch("backend.provision._sync_crontab"),
-        patch("backend.utils.fastly_auth.fastly", side_effect=_auth_fastly_ok("svc-1")),
+        patch("backend.core.log_fields.fastly", side_effect=_auth_fastly_ok("svc-1")),
     ):
         r_new = _client().post(
             "/api/provision/ingest",
@@ -1161,7 +1161,7 @@ def test_ingest_validation_and_key_flows(tmp_path, monkeypatch):
         patch("backend.provision.parse_period", side_effect=lambda x: 60),
         patch("backend.provision.find_fos_key", return_value=None),
         patch("backend.provision.ensure_fos_access_key", side_effect=RuntimeError("rate limited")),
-        patch("backend.utils.fastly_auth.fastly", side_effect=_auth_fastly_ok("svc-1")),
+        patch("backend.core.log_fields.fastly", side_effect=_auth_fastly_ok("svc-1")),
     ):
         r_err = _client().post(
             "/api/provision/ingest",
@@ -1177,7 +1177,7 @@ def test_ingest_validation_and_key_flows(tmp_path, monkeypatch):
         patch("backend.provision.ensure_fos_access_key") as mock_ensure2,
         patch("backend.provision.write_service_config"),
         patch("backend.provision._sync_crontab"),
-        patch("backend.utils.fastly_auth.fastly", side_effect=_auth_fastly_ok("svc-1")),
+        patch("backend.core.log_fields.fastly", side_effect=_auth_fastly_ok("svc-1")),
     ):
         r_prov = _client().post(
             "/api/provision/ingest",
@@ -1222,7 +1222,7 @@ def test_ingest_rerun_preserves_faro_pin_and_cdn_secret(tmp_path, monkeypatch):
         ),
         patch("backend.provision.write_service_config", side_effect=lambda st: captured.update(state=st)),
         patch("backend.provision._sync_crontab"),
-        patch("backend.utils.fastly_auth.fastly", side_effect=_auth_fastly_ok("svc-1")),
+        patch("backend.core.log_fields.fastly", side_effect=_auth_fastly_ok("svc-1")),
     ):
         base_req = {"token": "t", "service_id": "svc-1", "fos_bucket_name": "b", "rum_enabled": True}
         resp = _client().post("/api/provision/ingest", json=base_req)
@@ -1461,7 +1461,7 @@ def test_teardown_endpoint_flows():
             return_value=iter([{"type": "status", "message": "removed s3 bucket"}]),
         ),
         patch("backend.core.duckdb.reload_default_source"),
-        patch("backend.utils.fastly_auth.fastly", side_effect=_auth_fastly_ok("svc", "cust-X")),
+        patch("backend.core.log_fields.fastly", side_effect=_auth_fastly_ok("svc", "cust-X")),
     ):
         resp = _client().post(
             "/api/provision/teardown",
@@ -1485,7 +1485,7 @@ def test_teardown_endpoint_flows():
         patch("backend.core.storage.clear_source_caches"),
         patch("backend.provision.perform_teardown", side_effect=_boom),
         patch("backend.core.duckdb.reload_default_source"),
-        patch("backend.utils.fastly_auth.fastly", side_effect=_auth_fastly_ok("svc", "cust-X")),
+        patch("backend.core.log_fields.fastly", side_effect=_auth_fastly_ok("svc", "cust-X")),
     ):
         resp_err = _client().post(
             "/api/provision/teardown",

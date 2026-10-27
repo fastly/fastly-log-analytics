@@ -142,7 +142,7 @@ def make_transport(
 
 def configure_registry(monkeypatch, tmp_path, *, enabled: bool = True, allowed_hd: str | None = None, extra=None):
     """Write a one-provider registry file + env creds and turn the feature on."""
-    from backend.core.oauth import registry
+    import backend.core.oauth as registry
 
     entry = {
         "display_name": "Google Workspace",

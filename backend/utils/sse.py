@@ -134,7 +134,7 @@ def stream_iac_reconcile(
     logger_obj: Any = None,
 ) -> EventSourceResponse:
     """Stream ``reconcile_infrastructure`` events via ``run_with_events`` as SSE JSON frames."""
-    from backend.provision.declarative.iac_reconciler import reconcile_infrastructure
+    from backend.provision.declarative.reconciler import reconcile_infrastructure
     from backend.provision.orchestrator import run_with_events
 
     def _stream() -> Iterator[str]:

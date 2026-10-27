@@ -10,7 +10,7 @@ PATTERN='COALESCE\('
 BASELINE='
 backend/core/rollups/origin_dims.py 5
 backend/core/rollups/recompute.py 11
-backend/repositories/_base.py 4
+backend/repositories/rollup_executor.py 4
 backend/repositories/assets.py 2
 backend/repositories/insights/repository.py 1
 backend/repositories/network.py 3

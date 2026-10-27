@@ -28,8 +28,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 import vcr
 
+import backend.core.fastly.client as service
 from backend.core.fastly import client as fastly_client
-from backend.core.fastly import service
 
 # ── Merged from tests/core/test_fastly_client.py ──
 CASSETTE_DIR = os.path.join(os.path.dirname(__file__), "..", "cassettes")
@@ -412,7 +412,7 @@ def seeded_metadata_db():
 
     Returns the service_id (which keys the per-service metadata file).
     """
-    from backend.core import metadata as metadata_db
+    import backend.core.metadata as metadata_db
 
     service_id = "svc1"
     metadata_db.insert_ingested_files(
@@ -465,7 +465,7 @@ def test_backfill_is_idempotent_end_to_end(_enabled, seeded_metadata_db):
     assert third == 0
 
     # usage_log lives in its own SQLite file post-2026-06-12.
-    from backend.core.metadata import usage_log_db
+    import backend.core.metadata.usage_log as usage_log_db
 
     con = usage_log_db.get_con(seeded_metadata_db)
     total = con.execute("SELECT count(*) FROM usage_log WHERE function_name = 'fastly.edge'").fetchone()[0]
@@ -489,8 +489,8 @@ def test_backfill_incremental_skips_already_backfilled_files(_enabled, seeded_me
     an empty list — the NOT EXISTS filter prunes already-backfilled files at the
     SQL level, so we don't even pay the dedup IN-clause cost.
     """
+    import backend.core.metadata as metadata_db
     from backend.core import duckdb as _db
-    from backend.core import metadata as metadata_db
 
     first = _db.backfill_fastly_edge_writes({"name": seeded_metadata_db})
     assert first == 3
@@ -523,8 +523,8 @@ def test_unbackfilled_lookup_scopes_usage_log_to_candidate_files(seeded_metadata
     1h ``since`` window holds a few hundred files; fetching the whole URL set
     cost ~5 s per log_discovery tick and delayed the next LIST.
     """
-    from backend.core import metadata as metadata_db
-    from backend.core.metadata import usage_log_db
+    import backend.core.metadata as metadata_db
+    import backend.core.metadata.usage_log as usage_log_db
 
     real_open = usage_log_db.open_readonly
     fetched: list[int] = []
@@ -728,7 +728,7 @@ def test_mock_mode_makes_no_network_calls(monkeypatch):
 
 
 def test_ngwaf_verified_bots_paged_uses_cursor_pagination():
-    from backend.utils.ngwaf import fetch_verified_bots_paged
+    from backend.core.rollups.security_dims import fetch_verified_bots_paged
 
     bot = {"id": "r1", "timestamp": "2026-10-01T00:00:00Z", "signals": [{"id": "VERIFIED-BOT", "value": "Googlebot"}]}
     f = _pages(
@@ -752,7 +752,7 @@ def test_get_active_version_returns_active_number():
         {"number": 7, "active": True},
         {"number": 3, "active": False},
     ]
-    with patch("backend.core.fastly.service.fastly", return_value=fake_versions):
+    with patch("backend.core.fastly.client.fastly", return_value=fake_versions):
         assert service.get_active_version("svc-1", "tkn") == 7
 
 
@@ -761,7 +761,7 @@ def test_get_active_version_returns_none_when_no_active():
     None. Pinned because raising would block re-provisioning and the
     wizard relies on this distinction to render a "configure first"
     state."""
-    with patch("backend.core.fastly.service.fastly", return_value=[{"number": 1, "active": False}]):
+    with patch("backend.core.fastly.client.fastly", return_value=[{"number": 1, "active": False}]):
         assert service.get_active_version("svc-1", "tkn") is None
 
 
@@ -769,7 +769,7 @@ def test_get_active_version_returns_none_on_api_error():
     """RuntimeError (401, 404, network) → None. Pinned because the
     teardown path calls this on best-effort basis; raising would
     leave half-provisioned services dangling."""
-    with patch("backend.core.fastly.service.fastly", side_effect=RuntimeError("401")):
+    with patch("backend.core.fastly.client.fastly", side_effect=RuntimeError("401")):
         assert service.get_active_version("svc-1", "tkn") is None
 
 
@@ -778,7 +778,7 @@ def test_get_active_version_returns_first_active_when_multiple():
     first wins. Pinned to lock the precedence — flipping it would
     cause the wizard to read from the wrong version."""
     fake = [{"number": 5, "active": True}, {"number": 9, "active": True}]
-    with patch("backend.core.fastly.service.fastly", return_value=fake):
+    with patch("backend.core.fastly.client.fastly", return_value=fake):
         assert service.get_active_version("svc-1", "tkn") == 5
 
 
@@ -787,7 +787,7 @@ def test_get_generated_vcl_returns_content():
     the content string. Pinned because the proactive rate-limit detector reads
     the account-level ``ratelimit_opt_in`` pragma out of this body."""
     vcl = "sub vcl_recv {\n  pragma optional_param ratelimit_opt_in true;\n}\n"
-    with patch("backend.core.fastly.service.fastly", return_value={"content": vcl, "version": 5}):
+    with patch("backend.core.fastly.client.fastly", return_value={"content": vcl, "version": 5}):
         assert service.get_generated_vcl("svc-1", 5, "tkn") == vcl
 
 
@@ -800,7 +800,7 @@ def test_get_generated_vcl_pins_endpoint_path():
         calls.append((method, path))
         return {"content": "x"}
 
-    with patch("backend.core.fastly.service.fastly", side_effect=fake):
+    with patch("backend.core.fastly.client.fastly", side_effect=fake):
         service.get_generated_vcl("svc-9", 42, "tkn")
     assert calls == [("GET", "/service/svc-9/version/42/generated_vcl")]
 
@@ -808,17 +808,17 @@ def test_get_generated_vcl_pins_endpoint_path():
 def test_get_generated_vcl_returns_none_on_api_error():
     """RuntimeError (Compute/wasm services 404 here, plus 401/network) → None.
     The detector treats None as 'undetermined' and falls through."""
-    with patch("backend.core.fastly.service.fastly", side_effect=RuntimeError("404")):
+    with patch("backend.core.fastly.client.fastly", side_effect=RuntimeError("404")):
         assert service.get_generated_vcl("svc-1", 1, "tkn") is None
 
 
 def test_get_generated_vcl_returns_none_on_empty_or_nondict():
     """Empty content or a non-dict response → None (no crash)."""
-    with patch("backend.core.fastly.service.fastly", return_value={"content": ""}):
+    with patch("backend.core.fastly.client.fastly", return_value={"content": ""}):
         assert service.get_generated_vcl("svc-1", 1, "tkn") is None
-    with patch("backend.core.fastly.service.fastly", return_value={}):
+    with patch("backend.core.fastly.client.fastly", return_value={}):
         assert service.get_generated_vcl("svc-1", 1, "tkn") is None
-    with patch("backend.core.fastly.service.fastly", return_value="not-a-dict"):
+    with patch("backend.core.fastly.client.fastly", return_value="not-a-dict"):
         assert service.get_generated_vcl("svc-1", 1, "tkn") is None
 
 
@@ -827,17 +827,17 @@ def test_find_service_by_name_returns_match():
         {"id": "svc-a", "name": "Production"},
         {"id": "svc-b", "name": "Staging"},
     ]
-    with patch("backend.core.fastly.service.fastly", return_value=services):
+    with patch("backend.core.fastly.client.fastly", return_value=services):
         assert service.find_service_by_name("Staging", "tkn")["id"] == "svc-b"
 
 
 def test_find_service_by_name_returns_none_for_unknown():
-    with patch("backend.core.fastly.service.fastly", return_value=[]):
+    with patch("backend.core.fastly.client.fastly", return_value=[]):
         assert service.find_service_by_name("ghost", "tkn") is None
 
 
 def test_find_service_by_name_returns_none_on_error():
-    with patch("backend.core.fastly.service.fastly", side_effect=RuntimeError("403")):
+    with patch("backend.core.fastly.client.fastly", side_effect=RuntimeError("403")):
         assert service.find_service_by_name("anything", "tkn") is None
 
 
@@ -846,13 +846,13 @@ def test_find_condition_iterates_and_matches_by_name():
         {"name": "Cond-A", "statement": 'req.url == "/"'},
         {"name": "Cond-B", "statement": 'req.method == "POST"'},
     ]
-    with patch("backend.core.fastly.service.fastly", return_value=conditions):
+    with patch("backend.core.fastly.client.fastly", return_value=conditions):
         out = service.find_condition("Cond-B", "svc-1", 5, "tkn")
     assert out["statement"] == 'req.method == "POST"'
 
 
 def test_find_condition_returns_none_when_no_match():
-    with patch("backend.core.fastly.service.fastly", return_value=[]):
+    with patch("backend.core.fastly.client.fastly", return_value=[]):
         assert service.find_condition("absent", "svc-1", 5, "tkn") is None
 
 
@@ -867,7 +867,7 @@ def test_ensure_condition_creates_when_absent():
             return []  # no existing
         return {"id": "new"}
 
-    with patch("backend.core.fastly.service.fastly", side_effect=_spy):
+    with patch("backend.core.fastly.client.fastly", side_effect=_spy):
         service.ensure_condition("My Cond", 'req.url ~ "/"', "REQUEST", "svc-1", 5, "tkn")
 
     methods = [c[0] for c in calls]
@@ -886,7 +886,7 @@ def test_ensure_condition_noops_when_statement_and_type_match():
         calls.append(method)
         return [existing]  # GET returns the existing match
 
-    with patch("backend.core.fastly.service.fastly", side_effect=_spy):
+    with patch("backend.core.fastly.client.fastly", side_effect=_spy):
         out = service.ensure_condition("X", "S", "REQUEST", "svc-1", 5, "tkn")
 
     assert out == existing
@@ -908,7 +908,7 @@ def test_ensure_condition_updates_when_statement_changes():
             return [existing]
         return {"id": "updated"}
 
-    with patch("backend.core.fastly.service.fastly", side_effect=_spy):
+    with patch("backend.core.fastly.client.fastly", side_effect=_spy):
         service.ensure_condition("X", "NEW", "REQUEST", "svc-1", 5, "tkn")
 
     put_calls = [c for c in calls if c[0] == "PUT"]
@@ -928,7 +928,7 @@ def test_ensure_condition_url_encodes_condition_name():
             return [existing]
         return {}
 
-    with patch("backend.core.fastly.service.fastly", side_effect=_spy):
+    with patch("backend.core.fastly.client.fastly", side_effect=_spy):
         service.ensure_condition("Path / With % Spaces", "NEW", "REQ", "svc-1", 5, "tkn")
 
     put_path = next(c[1] for c in calls if c[0] == "PUT")
@@ -941,7 +941,7 @@ def test_ensure_condition_url_encodes_condition_name():
 
 def test_list_s3_endpoints_returns_names_list():
     fake = [{"name": "logs-fos"}, {"name": "audit-logs"}]
-    with patch("backend.core.fastly.service.fastly", return_value=fake):
+    with patch("backend.core.fastly.client.fastly", return_value=fake):
         assert service.list_s3_endpoints("svc", 5, "tkn") == ["logs-fos", "audit-logs"]
 
 
@@ -949,18 +949,18 @@ def test_list_s3_endpoints_returns_empty_on_error():
     """RuntimeError → empty list. Pinned because the cron's
     teardown-detector reads this to know what to remove; a raise
     would abort the whole teardown."""
-    with patch("backend.core.fastly.service.fastly", side_effect=RuntimeError("404")):
+    with patch("backend.core.fastly.client.fastly", side_effect=RuntimeError("404")):
         assert service.list_s3_endpoints("svc", 5, "tkn") == []
 
 
 def test_list_vcl_snippets_returns_names_list():
     fake = [{"name": "init"}, {"name": "recv"}]
-    with patch("backend.core.fastly.service.fastly", return_value=fake):
+    with patch("backend.core.fastly.client.fastly", return_value=fake):
         assert service.list_vcl_snippets("svc", 5, "tkn") == ["init", "recv"]
 
 
 def test_list_vcl_snippets_returns_empty_on_error():
-    with patch("backend.core.fastly.service.fastly", side_effect=RuntimeError("403")):
+    with patch("backend.core.fastly.client.fastly", side_effect=RuntimeError("403")):
         assert service.list_vcl_snippets("svc", 5, "tkn") == []
 
 
@@ -973,7 +973,7 @@ def test_ensure_vcl_snippet_creates_when_absent():
             return []
         return {"id": "snip-new"}
 
-    with patch("backend.core.fastly.service.fastly", side_effect=_spy):
+    with patch("backend.core.fastly.client.fastly", side_effect=_spy):
         service.ensure_vcl_snippet("my-snip", "init", "set req.x = 1;", 100, "svc", 5, "tkn")
 
     methods = [c[0] for c in calls]
@@ -995,7 +995,7 @@ def test_ensure_vcl_snippet_noops_when_all_fields_match():
         calls.append(method)
         return [existing]
 
-    with patch("backend.core.fastly.service.fastly", side_effect=_spy):
+    with patch("backend.core.fastly.client.fastly", side_effect=_spy):
         out = service.ensure_vcl_snippet("x", "init", "C", 100, "svc", 5, "tkn")
 
     assert out == existing
@@ -1016,7 +1016,7 @@ def test_ensure_vcl_snippet_updates_when_content_changes():
             return [existing]
         return {}
 
-    with patch("backend.core.fastly.service.fastly", side_effect=_spy):
+    with patch("backend.core.fastly.client.fastly", side_effect=_spy):
         service.ensure_vcl_snippet("x", "init", "NEW", 100, "svc", 5, "tkn")
 
     put_calls = [c for c in calls if c[0] == "PUT"]
@@ -1033,7 +1033,7 @@ def test_ensure_vcl_snippet_updates_when_priority_changes():
             return [existing]
         return {}
 
-    with patch("backend.core.fastly.service.fastly", side_effect=_spy):
+    with patch("backend.core.fastly.client.fastly", side_effect=_spy):
         service.ensure_vcl_snippet("x", "init", "C", 200, "svc", 5, "tkn")
 
     assert "PUT" in calls
@@ -1050,7 +1050,7 @@ def test_ensure_vcl_snippet_url_encodes_snippet_name():
             return [existing]
         return {}
 
-    with patch("backend.core.fastly.service.fastly", side_effect=_spy):
+    with patch("backend.core.fastly.client.fastly", side_effect=_spy):
         service.ensure_vcl_snippet("edge / case", "init", "NEW", 100, "svc", 5, "tkn")
 
     put_path = next(c[1] for c in calls if c[0] == "PUT")
@@ -1069,7 +1069,7 @@ def test_ensure_vcl_snippet_creates_on_get_failure():
             raise RuntimeError("404")
         return {"id": "new"}
 
-    with patch("backend.core.fastly.service.fastly", side_effect=_spy):
+    with patch("backend.core.fastly.client.fastly", side_effect=_spy):
         service.ensure_vcl_snippet("x", "init", "C", 100, "svc", 5, "tkn")
 
     assert "POST" in calls
@@ -1091,7 +1091,8 @@ Covers:
 import asyncio
 
 import pytest
-from backend.core.realtime.transform import error_tick_payload, gap_tick_payload, transform_rt_response
+
+from backend.core.realtime import error_tick_payload, gap_tick_payload, transform_rt_response
 
 
 # ── Merged from tests/core/test_realtime_poller.py ──
@@ -1364,8 +1365,8 @@ def test_poller_fetch_without_credentials_skips_network(monkeypatch):
     the live API with garbage credentials (that caused a 403 retry storm that
     cascaded into unrelated E2E page-load timeouts).
     """
+    import backend.core.realtime as poller_mod
     from backend import config as config_mod
-    from backend.core.realtime import poller as poller_mod
 
     monkeypatch.setattr(config_mod, "get_fastly_api_key", lambda service_id: None)
     monkeypatch.setattr(config_mod, "get_fastly_logging_service_id", lambda service_id: None)
@@ -1384,8 +1385,8 @@ def test_poller_fetch_without_credentials_skips_network(monkeypatch):
 @pytest.mark.asyncio
 async def test_poller_starts_and_suspends(monkeypatch):
     """Poller starts on ensure_polling, suspends after 2 idle cycles."""
+    import backend.core.realtime as poller_mod
     from backend.core.realtime import RealtimeMetricsPublisher
-    from backend.core.realtime import poller as poller_mod
 
     test_publisher = RealtimeMetricsPublisher()
     test_publisher.bind_loop(asyncio.get_running_loop())
@@ -1429,8 +1430,8 @@ async def test_cursor_advances(monkeypatch):
     """Cursor from RT response is used in subsequent polls."""
     import threading
 
+    import backend.core.realtime as poller_mod
     from backend.core.realtime import RealtimeMetricsPublisher
-    from backend.core.realtime import poller as poller_mod
 
     test_publisher = RealtimeMetricsPublisher()
     test_publisher.bind_loop(asyncio.get_running_loop())

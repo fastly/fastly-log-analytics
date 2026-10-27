@@ -12,7 +12,8 @@ from typing import Any
 import duckdb
 from fastapi import HTTPException
 
-from backend.core.metric_expressions import sum_or_zero
+from backend.core.duckdb import escape_sql_literal
+from backend.core.log_fields import sum_or_zero
 from backend.models.common import FiltersDict
 from backend.repositories._base import QueryRunner, SectionTimer, _safe_table
 from backend.repositories.utils.filters import build_where_clause, calc_offset
@@ -23,11 +24,14 @@ from backend.repositories.utils.response_cache import (
     serialize_filters_for_key,
 )
 from backend.repositories.utils.response_shaping import (
+    SESSIONS_DEFAULT_MIN_4XX_PCT_FLAG,
+    SESSIONS_DEFAULT_MIN_REQS_FLAG,
+    SESSIONS_SORTABLE_COLUMNS,
     build_asn_label_map,
     empty_sessions_response,
+    shape_sessions_envelope,
 )
 from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry
-from backend.utils.sql_validator import escape_sql_literal
 
 # ── Sessions CTE pipeline ────────────────────────────────────────────────────
 
@@ -106,7 +110,7 @@ _CacheRegistry.register("sessions._response_cache", _response_cache)
 def _collect_sessions_rollup_paths(src: dict, st: datetime, et: datetime) -> tuple[list[str], bool] | None:
     """Enumerate per-hour sessions.parquet files covering ``[st, et)``."""
     from backend.core.rollups import SESSIONS_BUNDLE_FILENAME, _hour_bundled_root
-    from backend.repositories.rollup_coverage import collect_hourly_bundle_paths
+    from backend.core.rollups.recompute import collect_hourly_bundle_paths
 
     bundled_root = _hour_bundled_root(src)
     if not os.path.isdir(bundled_root):
@@ -171,7 +175,7 @@ def _build_direct_active_hour_session_sql(
     cutoff_epoch = live_start.timestamp() - 300.0
 
     try:
-        from backend.core.storage.buffer import _tombstoned_parquet_paths
+        from backend.core.storage._core import _tombstoned_parquet_paths
 
         tombstoned = _tombstoned_parquet_paths(buf_dir)
     except Exception:
@@ -202,7 +206,7 @@ def _build_direct_active_hour_session_sql(
 
     lake_table: str | None = None
     try:
-        from backend.core.storage._ducklake import ducklake_table_name
+        from backend.core.storage._core import ducklake_table_name
 
         lake_tname = ducklake_table_name(src)
         row = con.execute(
@@ -338,7 +342,7 @@ def _build_rollup_filter_sql(rollup_filters: FiltersDict | None) -> str:
     return (" AND " + " AND ".join(parts)) if parts else ""
 
 
-def _schema_cap_flags(actual_cols: set[str]) -> dict[str, bool]:
+def _schema_cap_flags(actual_cols: set[str]) -> dict[str, Any]:
     return {
         "has_rtt": "tcp_rtt" in actual_cols,
         "has_ja4": "ja4" in actual_cols,
@@ -390,21 +394,19 @@ def _sessions_envelope(
     *,
     rollup_served: bool = False,
 ) -> dict:
-    res = {
-        "sessions": sessions,
-        "asn_names": _build_asn_label_map(sessions, src),
-        "total": total,
-        "page": page,
-        "limit": limit,
+    return shape_sessions_envelope(
+        sessions,
+        total=total,
+        page=page,
+        limit=limit,
         **_schema_cap_flags(actual_cols),
-        "min_reqs_flag": min_reqs_flag,
-        "min_4xx_pct_flag": min_4xx_pct_flag,
-        "section_timings": section_timings,
-    }
-    if rollup_served:
-        res["_rollup_served"] = True
-    res.update(telemetry)
-    return res
+        min_reqs_flag=min_reqs_flag,
+        min_4xx_pct_flag=min_4xx_pct_flag,
+        asn_names=_build_asn_label_map(sessions, src),
+        section_timings=section_timings,
+        telemetry=telemetry,
+        rollup_served=rollup_served,
+    )
 
 
 def _build_asn_label_map(sessions: list[dict], src: dict) -> dict[int, str]:
@@ -688,9 +690,9 @@ def get_sessions(
     streaming_only: bool = False,
 ) -> dict:
     if min_reqs_flag is None:
-        min_reqs_flag = 1000
+        min_reqs_flag = SESSIONS_DEFAULT_MIN_REQS_FLAG
     if min_4xx_pct_flag is None:
-        min_4xx_pct_flag = 20.0
+        min_4xx_pct_flag = SESSIONS_DEFAULT_MIN_4XX_PCT_FLAG
 
     timer = SectionTimer()
     section_timings = timer.entries
@@ -845,17 +847,7 @@ def get_sessions(
         post_conditions.append("streaming_reqs > 0")
     flagged_filter = ("WHERE " + " AND ".join(post_conditions)) if post_conditions else ""
 
-    valid_sorts = {
-        "session_start",
-        "session_end",
-        "req_count",
-        "edge_count",
-        "shield_count",
-        "unique_urls",
-        "median_rtt_ms",
-        "total_bytes",
-    }
-    if sort_by not in valid_sorts:
+    if sort_by not in SESSIONS_SORTABLE_COLUMNS:
         sort_by = "session_start"
 
     # Single CTE pipeline: filter → window functions → aggregation.
@@ -1225,8 +1217,6 @@ THRESHOLD_PREVIEW_UNLABELED = """
             """
 
 sql_scoring: Any = _sys.modules[__name__]
-_sys.modules["backend.repositories._sql.session_scoring"] = _sys.modules[__name__]
-_sys.modules["backend.repositories.session_scoring"] = _sys.modules[__name__]
 
 
 def query_logs(service_id: str, sql: str, params: tuple = ()) -> list[dict]:

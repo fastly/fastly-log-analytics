@@ -18,7 +18,7 @@ from collections.abc import Callable, Iterable, Iterator, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
-from backend.utils.sql_validator import escape_sql_literal, is_safe_ident
+from backend.core.sql_validator import escape_sql_literal, is_safe_ident
 from backend.utils.telemetry import parse_hour_key, parse_hour_key_strict
 
 if TYPE_CHECKING:
@@ -116,7 +116,7 @@ def _get_fields(src: dict) -> list[str]:
     tuple this used to filter against, so it slipped through as an "actual"
     field). See AGENTS.md Trap #40.
     """
-    from backend.core.field_registry import try_get
+    from backend.core.log_fields import try_get
     from backend.repositories.dashboard import _VIRTUAL_FIELDS, FIELDS
 
     def _is_unbacked_derived(code: str) -> bool:
@@ -172,7 +172,7 @@ def publish_temp_parquet(
     before_replace_under_lock: Callable[[], bool] | None = None,
 ) -> bool:
     """Atomically replace ``tmp_path`` onto ``dst_path`` under the service view lock."""
-    from backend.core.storage.view import _get_service_lock
+    from backend.core.storage._core import _get_service_lock
 
     try:
         with _get_service_lock(lock_key):

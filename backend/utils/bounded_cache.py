@@ -2,26 +2,12 @@
 
 from __future__ import annotations
 
-import sys
 import threading
 import time
 from collections.abc import Iterator
 from typing import Any
 
 import cachetools
-
-_backend_pkg = sys.modules.get("backend")
-if _backend_pkg is not None and hasattr(_backend_pkg, "_MODULE_ALIASES"):
-    for _unfolded in (
-        "backend.utils.bounded_cache",
-        "backend.utils.hll",
-        "backend.utils.time_window",
-        "backend.utils.http",
-        "backend.core.retry",
-        "backend.utils.date_utils",
-    ):
-        _backend_pkg._MODULE_ALIASES.pop(_unfolded, None)
-    _backend_pkg._MODULE_ALIASES["backend.utils.cache_registry"] = "backend.utils.bounded_cache"
 
 _MISSING = object()
 
@@ -169,12 +155,6 @@ class CacheRegistry:
         with cls._lock:
             cls._entries.clear()
 
-
-_this_mod = sys.modules[__name__]
-sys.modules["backend.utils.cache_registry"] = _this_mod
-_utils_pkg = sys.modules.get("backend.utils")
-if _utils_pkg is not None:
-    setattr(_utils_pkg, "cache_registry", _this_mod)
 
 __all__ = [
     "BoundedCache",

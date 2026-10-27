@@ -370,18 +370,18 @@ class DuckLakeLedgerEnv:
             patch("backend.core.duckdb.get_source_for_service", return_value=self.src),
             patch("backend.core.ingest._get_fos_client", return_value=self.fos),
             patch("backend.core.ingest._download_chunk_to_local", side_effect=self.download),
-            patch("backend.core.storage._ducklake._ducklake_attach", side_effect=self.attach),
+            patch("backend.core.storage._core._ducklake_attach", side_effect=self.attach),
             patch("backend.core.ingest._configure_fos"),
             patch("backend.core.duckdb._configure_fos"),
             patch("backend.core.duckdb.get_memory_connection", side_effect=lambda _src: duckdb.connect()),
             patch("backend.config.HOT_S3_ENDPOINT", False),
         ]
         if self.table_name is not None:
-            patches.append(patch("backend.core.storage._ducklake.ducklake_table_name", return_value=self.table_name))
+            patches.append(patch("backend.core.storage._core.ducklake_table_name", return_value=self.table_name))
         else:
             patches.append(
                 patch(
-                    "backend.core.storage._ducklake.ducklake_table_name",
+                    "backend.core.storage._core.ducklake_table_name",
                     side_effect=lambda src, table_name="logs": table_name,
                 )
             )
@@ -464,7 +464,7 @@ def fetch_metric_snapshot_history(
     task: str | None = None,
 ) -> list[dict[str, Any]]:
     """Test helper wrapping ``metric_snapshots.get_batch`` for a single metric."""
-    from backend.core import metric_snapshots
+    from backend.cron.jobs import metric_snapshots
 
     batch = metric_snapshots.get_batch(since=since)
     parts = [metric]
@@ -841,7 +841,7 @@ def build_writer_patches(
         patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
         patch(safe_table_target, return_value=table),
         patch("backend.core.duckdb.get_connection", side_effect=lambda *a, **k: con_factory()),
-        patch("backend.core.storage.view._get_service_lock", noop_lock),
+        patch("backend.core.storage._core._get_service_lock", noop_lock),
         patch(
             "backend.core.storage.execute_with_stale_view_retry",
             side_effect=lambda c, _src, fn: fn(c),
@@ -1136,7 +1136,9 @@ def setup_temp_rum_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     duckdb_pool.reset_pool_for_service("test_service")
     duckdb_pool.reset_pool_for_service("test_service_rum")
     monkeypatch.setattr("backend.core.request_context._resolve_source", lambda service_id, read_only=False: mock_source)
-    monkeypatch.setattr("backend.deps._resolve_source_or_400", lambda service_id, read_only=False: mock_source)
+    monkeypatch.setattr(
+        "backend.core.request_context._resolve_source_or_400", lambda service_id, read_only=False: mock_source
+    )
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda service_id: mock_source)
 
     return rum_db_path

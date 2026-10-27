@@ -13,19 +13,18 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any, cast
 
-from backend.core.clickhouse_client import ClickHouseClient
-from backend.high_scale.aggregate_batch_adapter import AggregateBatchAdapter
-from backend.high_scale.publication import (
+from backend import config as app_config
+from backend.core.clickhouse import ClickHouseClient
+from backend.high_scale.archive import (
     ClickHouseBatchAdapter,
     ClickHousePublication,
     PostgresBatchManifestStore,
 )
-from backend.high_scale.registry_bootstrap import (
+from backend.high_scale.ingest_controller import (
+    AggregateBatchAdapter,
     get_high_scale_service_registry,
     register_high_scale_services_from_environment,
 )
-
-from backend import config as app_config
 from backend.high_scale.postgres_control import PostgresControlPlane
 from backend.high_scale.recovery import (
     RecoveryCapacityMeasurement,

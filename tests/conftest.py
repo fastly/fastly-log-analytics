@@ -188,7 +188,8 @@ def pytest_sessionstart(session):  # noqa: ARG001 — pytest hook signature
 
 import duckdb
 import pytest
-from backend.deps import get_con
+
+from backend.core.request_context import get_con
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -240,7 +241,7 @@ def _close_telemetry_proxy_at_session_end():
     """
     yield
     try:
-        from backend.utils import telemetry_proxy
+        import backend.utils.telemetry as telemetry_proxy
 
         telemetry_proxy.stop_proxy_server()
     except Exception:
@@ -265,7 +266,7 @@ def _pg_worker_schema():
     The process claims an exclusive database slot (see below), resets it,
     points ``METADATA_DSN`` / ``DUCKLAKE_CATALOG`` at it, then runs the real
     schema bootstrap
-    (:func:`backend.core.metadata.pg_schema.ensure_pg_schema`) against it.
+    (:func:`backend.core.metadata.base.ensure_pg_schema`) against it.
     Two workers — or two concurrent pytest runs — therefore never see each
     other's rows, and share nothing but the underlying server.
 
@@ -276,7 +277,8 @@ def _pg_worker_schema():
     """
     import psycopg
 
-    from backend.core.metadata import pg_connection, pg_schema
+    import backend.core.metadata.base as pg_connection
+    import backend.core.metadata.base as pg_schema
 
     base_dsn = _os.environ.get(
         "METADATA_DSN",
@@ -391,8 +393,8 @@ def isolate_metadata_db(tmp_path, monkeypatch, _pg_worker_schema):
     import os
     from pathlib import Path
 
+    import backend.core.metadata as metadata_db
     from backend import config as svcconfig
-    from backend.core import metadata as metadata_db
 
     sandbox_data = Path(tmp_path) / "data"
     sandbox_services = sandbox_data / "services"
@@ -410,7 +412,7 @@ def isolate_metadata_db(tmp_path, monkeypatch, _pg_worker_schema):
         d.mkdir(parents=True, exist_ok=True)
 
     try:
-        from backend.core.metadata import pg_connection
+        import backend.core.metadata.base as pg_connection
 
         _pg_con = pg_connection.get_pg_thread_connection()
         # Truncate only the tables that hold rows: a TRUNCATE recreates every listed relation, and
@@ -433,12 +435,12 @@ def isolate_metadata_db(tmp_path, monkeypatch, _pg_worker_schema):
     metadata_db._clear_ingested_filenames_cache()
 
     # ``usage_log_db.db_path`` still derives from its own ``_DATA_DIR`` binding.
-    from backend.core.metadata import usage_log_db as _usage_log_db
-    from backend.core.share_db import connection as _share_db_connection
+    import backend.core.metadata.usage_log as _usage_log_db
+    import backend.core.share_db as _share_db_connection
 
     monkeypatch.setattr(_usage_log_db, "_DATA_DIR", str(sandbox_services))
 
-    from backend.core import metric_snapshots as _metric_snapshots
+    import backend.cron.jobs.metric_snapshots as _metric_snapshots
 
     monkeypatch.setattr(svcconfig, "DATA_DIR", sandbox_data)
     monkeypatch.setattr(svcconfig, "SERVICES_DATA_DIR", sandbox_services)
@@ -592,10 +594,9 @@ def make_test_request_context(
 
 @pytest.fixture
 def client(in_memory_duckdb, test_service_source):
-    from backend.deps import get_service_id, get_source
     from fastapi.testclient import TestClient
 
-    from backend.core.request_context import build_request_context
+    from backend.core.request_context import build_request_context, get_service_id, get_source
     from backend.main import app
 
     app.dependency_overrides[get_con] = lambda: in_memory_duckdb
@@ -729,9 +730,8 @@ def isolated_configs_dir(tmp_path, monkeypatch):
 
 @pytest.fixture
 def override_source():
-    """Override ``backend.deps.get_source`` with a default read-write test source."""
-    from backend.deps import get_source
-
+    """Override ``backend.core.request_context.get_source`` with a default read-write test source."""
+    from backend.core.request_context import get_source
     from backend.main import app
 
     src = {
@@ -752,8 +752,8 @@ def _reset_oauth_caches(request: pytest.FixtureRequest):
     if "remote_access" not in request.node.nodeid:
         yield
         return
-    from backend.core.oauth import client as oidc
-    from backend.core.oauth import registry
+    import backend.core.oauth as oidc
+    import backend.core.oauth as registry
 
     registry.reset_cache_for_tests()
     oidc.reset_caches_for_tests()

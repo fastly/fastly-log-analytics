@@ -162,7 +162,7 @@ def get_assets_aggregates(
 
     import uuid as _uuid
 
-    from backend.high_scale.assets import compute_summary_from_dims
+    from backend.high_scale.ingest_controller import compute_summary_from_dims
 
     temp_table: str | None = f"t_{_uuid.uuid4().hex}"
 

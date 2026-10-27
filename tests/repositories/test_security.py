@@ -14,9 +14,9 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 import time_machine
-from backend.models.security import SecurityTopBotsResponse
-from backend.repositories._sql.security import GET_SECURITY_PROXIES_COMBINED
 
+import backend.repositories.security as SQL
+from backend.models.analytics import SecurityTopBotsResponse
 from backend.models.common import FilterSpec
 from backend.repositories import _base, security
 from backend.repositories import dashboard as dashboard_repo
@@ -29,8 +29,7 @@ from backend.repositories._base import (
     optional_col,
     safe_iso,
 )
-from backend.repositories._sql import security as SQL
-from backend.repositories.security import get_security_aggregates, get_top_bots
+from backend.repositories.security import GET_SECURITY_PROXIES_COMBINED, get_security_aggregates, get_top_bots
 from backend.utils.hll import HyperLogLog
 from scripts.lib.section_measurements import describe_response
 from tests._helpers.duckdb_fixtures import generate_mock_logs, insert_mock_logs
@@ -254,9 +253,9 @@ def test_security_aggregates_wellknown_bots_regex_and_fallback(
     with (
         patch("backend.utils.bot_sources.get_bot_regex_pattern", return_value=pattern),
         patch("backend.utils.bot_sources.build_matcher", return_value=lambda _ua: matched),
-        patch("backend.utils.rdns_cache.get_hostnames", return_value={}),
-        patch("backend.utils.rdns_cache.classify", return_value="unverified_pending"),
-        patch("backend.utils.rdns_cache.enqueue"),
+        patch("backend.utils.bot_sources.get_hostnames", return_value={}),
+        patch("backend.utils.bot_sources.classify", return_value="unverified_pending"),
+        patch("backend.utils.bot_sources.enqueue"),
     ):
         result = get_security_aggregates(
             con=in_memory_duckdb, src=test_service_source, start_time=None, end_time=None, filters={}
@@ -1826,7 +1825,7 @@ class TestExecuteTopNBatchPerFieldLimits:
     def test_execute_top_n_rollups_partial_hour_merge_and_no_double_count(
         self, in_memory_duckdb, test_service_source, tmp_path, monkeypatch, seed_pre_watermark_de
     ):
-        from backend.core.rollups import partial_hour as ph
+        import backend.core.rollups.day_bundles as ph
 
         frozen_now = datetime(2026, 6, 20, 10, 20, 0, tzinfo=UTC)
         active_dt = datetime(2026, 6, 20, 10, 0, 0, tzinfo=UTC)
@@ -2264,7 +2263,7 @@ class TestExecuteTopNBatchPerFieldLimits:
     def test_execute_top_n_rollups_heal_cap_and_failure_and_sentinel(
         self, in_memory_duckdb, test_service_source, tmp_path, monkeypatch
     ):
-        from backend.core.rollups.hour_bundles import stamp_empty_hour_sentinels
+        from backend.core.rollups.day_bundles import stamp_empty_hour_sentinels
 
         active_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
         beyond_cap_dt = active_dt - timedelta(hours=_base._MISSING_HOUR_HEAL_CAP + 2)

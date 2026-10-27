@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import sys as _sys
 
 from backend.core.storage.backup import schedule_cloud_push
 from backend.cron.scheduler import (
@@ -23,8 +22,8 @@ def _run_metadata_cleanup(service_id: str) -> None:
     from backend import config as svcconfig
     from backend.core.duckdb import get_source_for_service
     from backend.core.metadata import cleanup_metadata
-    from backend.cron.decorators import dev_mode_no_crons
-    from backend.utils.active_requests import should_defer_cron
+    from backend.cron.scheduler import dev_mode_no_crons
+    from backend.utils.telemetry import should_defer_cron
 
     label = f"{JOB_COLORS.get('metadata_cleanup', '')}[metadata_cleanup]{RESET_COLOR}"
     if dev_mode_no_crons():
@@ -88,7 +87,7 @@ def _run_expire_snapshots(service_id: str, *, manual: bool = False) -> dict:
     from backend.core import storage as db_storage
     from backend.core.duckdb import get_source_for_service
     from backend.cron.scheduler import dev_mode_no_crons
-    from backend.utils.active_requests import should_defer_cron
+    from backend.utils.telemetry import should_defer_cron
 
     if dev_mode_no_crons():
         return {"status": "skipped", "service_id": service_id, "summary": "FLA_DEV_NO_CRONS=1"}
@@ -167,9 +166,9 @@ def _run_expire_snapshots(service_id: str, *, manual: bool = False) -> dict:
 def _run_optimize(service_id: str, manual: bool = False) -> dict | None:
     from backend.core import storage as db_storage
     from backend.core.duckdb import get_source_for_service
-    from backend.cron.decorators import dev_mode_no_crons
     from backend.cron.jobs.sync import publish_sync_status_safe
-    from backend.utils.active_requests import should_defer_cron
+    from backend.cron.scheduler import dev_mode_no_crons
+    from backend.utils.telemetry import should_defer_cron
 
     if not manual and dev_mode_no_crons():
         logger.warning("🚫 [scheduler] %s: FLA_DEV_NO_CRONS=1 — optimize refused.", service_id)
@@ -250,13 +249,6 @@ def _run_optimize(service_id: str, manual: bool = False) -> dict | None:
     logger.info("🏁  \x1b[92m[optimize]\x1b[0m %s: Optimize job finished.", _display)
     return outcome
 
-
-_self_mod = _sys.modules[__name__]
-_sys.modules["backend.cron.jobs.optimize"] = _self_mod
-_sys.modules["backend.cron.jobs.expire"] = _self_mod
-if (_jobs_pkg := _sys.modules.get("backend.cron.jobs")) is not None:
-    _jobs_pkg.optimize = _self_mod  # type: ignore[attr-defined]
-    _jobs_pkg.expire = _self_mod  # type: ignore[attr-defined]
 
 __all__ = [
     "_run_expire_snapshots",

@@ -10,7 +10,7 @@ from typing import Any
 from fastapi import Depends, HTTPException, Query, Response
 
 from backend.core.fastly.client import api_key_or_mock
-from backend.deps import get_source
+from backend.core.request_context import get_source
 from backend.models.admin import (
     LogAccountingBucket,
     LogAccountingResponse,
@@ -106,9 +106,9 @@ def _try_row_counts_from_rollup(
     """Read hourly request counts from the overview rollup parquet."""
     import os
 
+    from backend.core.request_context import _ConnectionHolder
     from backend.core.rollups import OVERVIEW_BUNDLE_FILENAME, _hour_bundled_root
-    from backend.deps import _ConnectionHolder
-    from backend.repositories.rollup_coverage import collect_hourly_bundle_paths
+    from backend.core.rollups.rollup_coverage import collect_hourly_bundle_paths
 
     bundled_root = _hour_bundled_root(source)
     if not os.path.isdir(bundled_root):
@@ -147,7 +147,7 @@ def _try_row_counts_from_rollup(
 
         from backend.core import duckdb as _ddb
         from backend.core.duckdb import escape_sql_literal
-        from backend.core.storage.buffer import buffer_files
+        from backend.core.storage._core import buffer_files
 
         active_hour_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
         live_start = max(start, active_hour_dt)
@@ -188,7 +188,7 @@ def _raw_row_counts(
 ) -> dict[str, int]:
     """Full raw-parquet scan fallback for row counts."""
     from backend.core import duckdb as _ddb
-    from backend.deps import _ConnectionHolder
+    from backend.core.request_context import _ConnectionHolder
 
     table_name = _ddb._safe_table_name(source["name"])
     start_iso = start.strftime("%Y-%m-%d %H:%M:%S")

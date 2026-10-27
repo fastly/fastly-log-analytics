@@ -16,23 +16,29 @@ from sse_starlette.sse import EventSourceResponse
 from backend import config as svcconfig
 from backend.core.duckdb import rum_source_for
 from backend.core.faro_versions import DEFAULT_FARO_VERSION, fetch_available_faro_versions, get_faro_versions_cached
-from backend.core.request_context import RequestContext, build_request_context
-from backend.core.storage import execute_with_stale_view_retry
-from backend.deps import _ConnectionHolder, get_service_id, require_admin, require_service_access
-from backend.models._base import DEFAULT_ERROR_RESPONSES
-from backend.models.provision import (
-    RumDisableRequest,
-    RumEnableRequest,
-    RumSettingsUpdateRequest,
-    RumUpgradeRequest,
-    RumVersionsResponse,
+from backend.core.request_context import (
+    RequestContext,
+    _ConnectionHolder,
+    build_request_context,
+    get_service_id,
+    require_admin,
+    require_service_access,
 )
-from backend.models.rum import (
+from backend.core.storage import execute_with_stale_view_retry
+from backend.models.analytics import (
     RumAnalyticsResponse,
     RumBeaconHealthResponse,
     RumLiveEventItem,
     RumSettingsUpdateResponse,
     RumStatusResponse,
+)
+from backend.models.common import (
+    DEFAULT_ERROR_RESPONSES,
+    RumDisableRequest,
+    RumEnableRequest,
+    RumSettingsUpdateRequest,
+    RumUpgradeRequest,
+    RumVersionsResponse,
 )
 from backend.provision.orchestrator import run_with_events
 from backend.provision.rum_orchestrator_v2 import (

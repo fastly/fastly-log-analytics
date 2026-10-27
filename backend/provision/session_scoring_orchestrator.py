@@ -6,7 +6,7 @@ import datetime as _dt
 import hashlib
 import json
 import logging
-import sys as _sys
+import secrets
 import urllib.parse
 from collections.abc import Callable
 from pathlib import Path
@@ -14,11 +14,6 @@ from typing import Any
 
 from backend import config as svcconfig
 from backend.core.fastly.client import ensure_vcl_snippet, fastly, fastly_raw, get_active_version, list_vcl_snippets
-
-_sys.modules["backend.provision.session_scoring_vcl"] = _sys.modules[__name__]
-_sys.modules["backend.provision.session_scoring_setup"] = _sys.modules[__name__]
-import secrets
-
 from backend.provision.orchestrator import product_enabled
 
 COMPUTE_MANAGE_URL = "https://manage.fastly.com/products/compute"
@@ -448,7 +443,7 @@ def delete_scoring_service(
     return failed
 
 
-from backend.provision.utils import BOLD, _c, draft_version, fail, info, ok, rollback_to_version, warn
+from backend.provision.cli import BOLD, _c, draft_version, fail, info, ok, rollback_to_version, warn
 
 logger = logging.getLogger(__name__)
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -469,7 +464,7 @@ def _resolve_tenant_matrix_for_deploy(logging_service_id: str) -> Path | None:
     if tenant_path.exists():
         return tenant_path
     try:
-        from backend.state_sync import fetch_matrix_from_fos
+        from backend.core.metadata.base import fetch_matrix_from_fos
 
         matrix = fetch_matrix_from_fos(logging_service_id)
     except Exception:
@@ -737,7 +732,7 @@ def _write_matrix_to_kv(matrix_store_id: str, logging_service_id: str, token: st
         return
     import json as _json
 
-    from backend.scoring.matrix import serialize_kv
+    from backend.scoring import serialize_kv
 
     with matrix_path.open() as f:
         data = serialize_kv(_json.load(f))
@@ -813,14 +808,14 @@ def _remove_scoring_custom_fields(cfg: dict) -> dict:
 def _publish_scoring_fos_side_effects(logging_service_id: str) -> None:
     """Best-effort republish of the custom_fields list (admin_state.json) + the     trained matrix to FOS so read-only analyst hosts converge on the next     import tick. Never fatal — both legs swallow their own errors. Called on     both the deploy and the redeploy-no-op paths so a skipped redeploy still     keeps FOS consistent."""
     try:
-        from backend.state_sync import export_admin_state
+        from backend.core.metadata.base import export_admin_state
 
         export_admin_state(logging_service_id)
         ok("Published custom_fields to FOS admin_state.json")
     except Exception as exc:
         warn(f"Could not export admin_state to FOS (non-fatal): {exc}")
     try:
-        from backend.state_sync import publish_matrix_to_fos
+        from backend.core.metadata.base import publish_matrix_to_fos
 
         tenant_matrix_path = _tenant_matrix_path(logging_service_id)
         if tenant_matrix_path.exists():
@@ -843,7 +838,7 @@ def _delete_scoring_matrix_from_fos(logging_service_id: str) -> None:
     try:
         from backend.core.duckdb import _get_fos_client, get_source_for_service
         from backend.core.ingest import _delete_objects_robust
-        from backend.state_sync import get_scoring_matrix_key
+        from backend.core.metadata.base import get_scoring_matrix_key
 
         source = get_source_for_service(logging_service_id)
         if not source:
@@ -1066,7 +1061,7 @@ def disable_scoring(logging_service_id: str, token: str, *, status_cb=None) -> N
     # ── Stage 6: clear the scoring block from config. ──────────────────────
     svcconfig.mutate_config(logging_service_id, lambda target: target.pop("scoring", None))
     try:
-        from backend.state_sync import export_admin_state
+        from backend.core.metadata.base import export_admin_state
 
         export_admin_state(logging_service_id)
     except Exception as exc:
@@ -1194,8 +1189,6 @@ def _update_live_scoring_snippet(
 
 def update_recv_exclusion_regex(logging_service_id: str, token: str, *, new_regex: str) -> dict[str, Any]:
     """Re-publish ONLY the recv VCL snippet with a new exclusion regex."""
-    from backend.provision.session_scoring_vcl import DEFAULT_ASSET_EXT_REGEX, recv_snippet, resolve_exclude_url_regex
-
     cleaned = (new_regex or "").strip()
     effective_regex = resolve_exclude_url_regex(cleaned or None)
     is_default = effective_regex == DEFAULT_ASSET_EXT_REGEX
@@ -1220,12 +1213,6 @@ def update_recv_exclusion_regex(logging_service_id: str, token: str, *, new_rege
 
 def update_enforce_status_code(logging_service_id: str, token: str, *, new_status_code: int | None) -> dict[str, Any]:
     """Re-publish ONLY the enforce VCL snippet with a new status code."""
-    from backend.provision.session_scoring_vcl import (
-        DEFAULT_ENFORCE_STATUS_CODE,
-        enforce_snippet,
-        resolve_enforce_status_code,
-    )
-
     effective_code = resolve_enforce_status_code(new_status_code)
     is_default = effective_code == DEFAULT_ENFORCE_STATUS_CODE
     new_enforce_body = enforce_snippet(effective_code)
@@ -1293,7 +1280,7 @@ failure) sets ``req.http.x-edge-score:score = "0"`` and
 normally to origin and the log line still has populated score fields
 (vs. NULLs that look like a misconfiguration).
 """
-from backend.utils.vcl_utils import VclSafetyError, validate_quoted_literal
+from backend.core.vcl_generator import VclSafetyError, validate_quoted_literal
 
 
 def _assert_vcl_string_safe(value: str, *, field: str, allow_backslash: bool = False) -> str:
@@ -1631,16 +1618,3 @@ def scoring_snippet_names() -> list[str]:
         SCORING_MISS_NAME,
         SCORING_ENFORCE_NAME,
     ]
-
-
-_self_mod = _sys.modules[__name__]
-for _ss_alias in ("session_scoring_vcl", "session_scoring_setup"):
-    _sys.modules[f"backend.provision.{_ss_alias}"] = _self_mod
-_prov_pkg = _sys.modules.get("backend.provision")
-if _prov_pkg is not None:
-    for _ss_alias in ("session_scoring_vcl", "session_scoring_setup"):
-        setattr(_prov_pkg, _ss_alias, _self_mod)
-_backend_pkg = _sys.modules.get("backend")
-if _backend_pkg is not None and hasattr(_backend_pkg, "_MODULE_ALIASES"):
-    for _ss_alias in ("session_scoring_vcl", "session_scoring_setup"):
-        _backend_pkg._MODULE_ALIASES.setdefault(f"backend.provision.{_ss_alias}", __name__)

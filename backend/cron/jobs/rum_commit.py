@@ -29,7 +29,7 @@ def _run_rum_commit(service_id: str, force: bool = False, run_id: int | None = N
     from backend.core import storage as db_storage
     from backend.core.duckdb import _cache_dir as _commit_cache_dir
     from backend.core.duckdb import get_source_for_service
-    from backend.utils.telemetry_proxy import _BOTO3_CALLER_HINT
+    from backend.utils.telemetry import _BOTO3_CALLER_HINT
 
     cfg = svcconfig.load_config(service_id)
     if not cfg:
@@ -97,13 +97,13 @@ def _run_rum_commit(service_id: str, force: bool = False, run_id: int | None = N
                 # Update/recompute precomputed RUM aggregates
                 try:
                     from backend.core.duckdb import get_connection, rum_source_for
-                    from backend.core.rollups.rum import (
+                    from backend.core.rollups.recompute import (
                         backfill_missing_rum_aggregates,
                         recompute_rum_aggregates,
                         rum_count_and_latest,
                     )
                     from backend.core.storage import execute_with_stale_view_retry
-                    from backend.core.storage._ducklake import _ducklake_attach
+                    from backend.core.storage._core import _ducklake_attach
 
                     rum_src = rum_source_for(src)
                     with closing(get_connection(rum_src, read_only=False)) as rum_con:

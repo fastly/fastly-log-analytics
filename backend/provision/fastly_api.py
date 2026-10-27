@@ -7,8 +7,9 @@ import sys
 import urllib.parse
 from typing import Any
 
-from backend.core import field_registry as fc
-from backend.core import field_registry as lf
+from backend.core import log_fields as fc
+from backend.core import log_fields as lf
+from backend.core import vcl_generator as vcl_utils
 from backend.core.fastly.client import (
     _FARO_VERSION_RE,
     _RUM_PATH_PREDICATE,
@@ -34,7 +35,6 @@ from backend.core.fastly.client import (
     validate_rum_custom_condition,
 )
 from backend.provision.cli import BOLD, VclBuilder, _c, draft_version, fail, info, ok, warn
-from backend.utils import vcl_utils
 
 __all__ = [
     "FASTLY_LOG_FIELDS",
@@ -265,7 +265,7 @@ def generate_capture_vcl(
         scrub_lines.append("  }")
 
     if scoring_enabled:
-        from backend.provision.session_scoring_vcl import SCORING_BACKEND_VCL_NAME, resolve_exclude_url_regex
+        from backend.provision.session_scoring_orchestrator import SCORING_BACKEND_VCL_NAME, resolve_exclude_url_regex
 
         effective_regex = resolve_exclude_url_regex(scoring_exclude_url_regex)
         scrub_lines.extend(
@@ -750,7 +750,7 @@ def remove_logging_endpoint(
     """Safely remove the logging endpoint + all analytics-owned VCL from the active version."""
     from backend.provision.declarative.reconciler import MANAGED_BACKEND_NAMES, MANAGED_DICTIONARY_NAMES
     from backend.provision.orchestrator import cmcd_snippet_names
-    from backend.provision.session_scoring_vcl import scoring_snippet_names
+    from backend.provision.session_scoring_orchestrator import scoring_snippet_names
 
     info(f"Checking active version of service {_c(BOLD, service_id)}…")
     if status_cb:

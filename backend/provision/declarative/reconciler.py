@@ -278,16 +278,7 @@ def config_changed(before: dict[str, Any], after: dict[str, Any]) -> bool:
     return has_flat_keys and before != after
 
 
-_self_state_mod = sys.modules[__name__]
-for _alias in ("state", "config_migration", "diff", "generators", "fastly_integration", "iac_reconciler"):
-    sys.modules[f"backend.provision.declarative.{_alias}"] = _self_state_mod
-if (_decl_pkg := sys.modules.get("backend.provision.declarative")) is not None:
-    for _alias in ("state", "config_migration", "diff", "generators", "fastly_integration", "iac_reconciler"):
-        setattr(_decl_pkg, _alias, _self_state_mod)
-if (_backend_pkg := sys.modules.get("backend")) is not None and hasattr(_backend_pkg, "_MODULE_ALIASES"):
-    _backend_pkg._MODULE_ALIASES.setdefault("backend.provision.declarative.state", __name__)
-    _backend_pkg._MODULE_ALIASES.setdefault("backend.provision.declarative.config_migration", __name__)
-fastly_integration = _self_state_mod
+fastly_integration = sys.modules[__name__]
 
 
 def upload_rum_tracker_js(*args: Any, **kwargs: Any) -> dict[str, Any]:
@@ -805,7 +796,7 @@ def reconcile_cdn_service_state(
     if not cdn_service_id:
         if status_cb:
             status_cb(f"⏳ Finding existing CDN service named '{cdn_service_name}'...")
-        from backend.core.fastly import service as _fastly_service
+        from backend.core.fastly import client as _fastly_service
 
         _find_fn = (
             _fastly_service.find_service_by_name
@@ -1007,20 +998,20 @@ def reconcile_cdn_service_state(
     return result
 
 
-from backend.core.fastly.rum_provisioning import (  # noqa: E402
+from backend.core.fastly.client import (  # noqa: E402
     RUM_ASSET_FETCH_NAME,
     RUM_FARO_FETCH_NAME,
     generate_rum_asset_fetch_vcl,
     generate_rum_recv_parts,
     generate_rum_vcl,
 )
-from backend.provision import utils as log_paths  # noqa: E402
+from backend.provision import cli as log_paths  # noqa: E402
+from backend.provision.cli import VclBuilder  # noqa: E402
 from backend.provision.fastly_api import generate_capture_vcl  # noqa: E402
 from backend.provision.session_scoring_orchestrator import (  # noqa: E402
     SCORING_BACKEND_API_NAME,
     generate_scoring_vcl,
 )
-from backend.provision.utils import VclBuilder  # noqa: E402
 
 
 def _state_log_fields_dict(state: FeatureState) -> dict[str, Any]:
@@ -1137,7 +1128,7 @@ def generate_consolidated_snippet(state: FeatureState, subroutine: str) -> str:
             ]
         )
     if state.scoring.enabled:
-        from backend.provision.session_scoring_vcl import SCORING_BACKEND_VCL_NAME, resolve_exclude_url_regex
+        from backend.provision.session_scoring_orchestrator import SCORING_BACKEND_VCL_NAME, resolve_exclude_url_regex
 
         effective_regex = resolve_exclude_url_regex(state.scoring.exclude_url_regex)
         rum_asset_guard = (
@@ -1171,7 +1162,7 @@ def generate_consolidated_snippet(state: FeatureState, subroutine: str) -> str:
         body = VclBuilder.join_lines(edge_first_hop_statements)
         sections.append(f"if (req.restarts == 0 && fastly.ff.visits_this_service == 0) {{\n{body}\n}}")
     if state.rum_enabled:
-        from backend.core.fastly.utils import SHIELD_MAP
+        from backend.core.fastly.client import SHIELD_MAP
 
         shield_pop = state.cdn_shield or SHIELD_MAP.get(state.fos_region, "iad-va-us")
         sections.append(generate_rum_asset_fetch_vcl(shield_pop, state.faro_version)[RUM_ASSET_FETCH_NAME])
@@ -1238,7 +1229,7 @@ def _generate_rum_section_vcl(state: FeatureState, subroutine: str) -> str:
     """Section 5: RUM (if enabled, includes Phase 1 + Phase 3 asset-fetch)."""
     if not state.rum_enabled:
         return ""
-    from backend.core.fastly.utils import SHIELD_MAP
+    from backend.core.fastly.client import SHIELD_MAP
 
     rum_vcl_dict = generate_rum_vcl(state.service_id, state.faro_version)
     shield_pop = state.cdn_shield or SHIELD_MAP.get(state.fos_region, "iad-va-us")
@@ -1253,7 +1244,7 @@ def _generate_rum_section_vcl(state: FeatureState, subroutine: str) -> str:
     if subroutine == "vcl_miss":
         return f"# Section 5: RUM ({subroutine})\n{asset_fetch_dict['RUM - Asset fetch SigV4 signing']}"
     if subroutine == "vcl_error":
-        from backend.core.fastly.rum_provisioning import _generate_vcl_error_handler
+        from backend.core.fastly.client import _generate_vcl_error_handler
 
         return f"# Section 5: RUM ({subroutine})\n{_generate_vcl_error_handler()}"
     if subroutine == "vcl_fetch":
@@ -1347,7 +1338,7 @@ def desired_backends(state: FeatureState) -> list[Backend]:
             )
         )
     if state.rum_enabled:
-        from backend.core.fastly.utils import SHIELD_MAP
+        from backend.core.fastly.client import SHIELD_MAP
 
         shield_pop = state.cdn_shield or SHIELD_MAP.get(state.fos_region, "iad-va-us")
         backends.append(
@@ -2116,7 +2107,7 @@ def build_desired_state(logging_service_id: str, token: str) -> UnifiedDesiredSt
     kv_stores: dict[str, DeclarativeKVStore] = {}
     if state.scoring.enabled:
         from backend.provision.session_scoring_orchestrator import _resolve_tenant_matrix_for_deploy
-        from backend.scoring.matrix import serialize_kv
+        from backend.scoring import serialize_kv
 
         store_name = MATRIX_STORE_NAME_TEMPLATE.format(sid=logging_service_id)
         compute_scorer = DeclarativeComputeService(

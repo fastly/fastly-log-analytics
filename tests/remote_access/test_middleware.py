@@ -9,20 +9,19 @@ import re
 from unittest.mock import MagicMock, PropertyMock, patch
 
 import pytest
-from backend.core.share_db.validation import IP_FAMILY_KEYS, SESSION_ID_KEYS, _mask_ip_scalar, apply_pii_policy, mask_ip
-from backend.utils.telemetry_response_middleware import TelemetryResponseBodyMiddleware
-from backend.utils.tunnel.manager import AnalystSession, get_tunnel_manager
 from fastapi import FastAPI, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import StreamingResponse
 from fastapi.testclient import TestClient
 from starlette.requests import Request as StarletteRequest
 
+import backend.routers.share_admin as share_auth
 from backend.core import share_db
 from backend.core.request_context import build_request_context
+from backend.core.share_db import IP_FAMILY_KEYS, SESSION_ID_KEYS, _mask_ip_scalar, apply_pii_policy, mask_ip
 from backend.main import app as _main_app
 from backend.repositories.utils.filters import normalize_filter_key
-from backend.routers import admin, provision, query, rum, services, share_admin, share_auth
+from backend.routers import admin, provision, query, rum, services, share_admin
 from backend.routers.session_scoring import _finalize_cached
 from backend.routers.share_admin import build_share_live_payload, build_share_status
 from backend.utils import telemetry, tunnel
@@ -36,6 +35,8 @@ from backend.utils.remote_access import (
     is_request_remote,
     validate_admin_gateway_config,
 )
+from backend.utils.telemetry import TelemetryResponseBodyMiddleware
+from backend.utils.tunnel import AnalystSession, get_tunnel_manager
 from tests.conftest import override_request_context
 from tests.remote_access import conftest as H
 
@@ -1041,7 +1042,7 @@ def _strip(payload: dict, *, query: str = "disabled", api: str = "disabled") -> 
     resp = StreamingResponse(_gen(), media_type="application/json")
     resp.headers["content-type"] = "application/json"
     settings = {"query_debug_visibility": query, "api_call_debug_visibility": api}
-    with patch("backend.core.share_db.settings.get_setting", side_effect=lambda k, d=None: settings.get(k, d)):
+    with patch("backend.core.share_db.get_setting", side_effect=lambda k, d=None: settings.get(k, d)):
         out = asyncio.run(_strip_analyst_envelope(resp))
     return json.loads(out.body)
 
@@ -1788,7 +1789,7 @@ def test_on_demand_session_rehydration(share_routes_client):
 
 
 def test_login_rate_limiting_and_audit_email_sanitization(share_routes_client):
-    from backend.routers.share_auth import _safe_audit_email
+    from backend.routers.share_admin import _safe_audit_email
 
     # L3: audit email sanitization
     assert _safe_audit_email("a@b.com") == "a@b.com"

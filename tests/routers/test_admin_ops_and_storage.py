@@ -19,23 +19,20 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
-from backend.core.clickhouse_publication import PAYLOAD_COLUMNS, FosArtifacts
-from backend.core.metadata.cron_log import CronLeaseHeldError
-from backend.core.query_attribution import Attribution, current_attribution
-from backend.core.query_registry import query_registry
-from backend.cron_progress import _run_metadata
-from backend.deps import get_con, get_service_id, get_source, require_admin
-from backend.routers.admin_queries import _admin_id_from_request
-from backend.utils.telemetry_response_middleware import TelemetryResponseBodyMiddleware
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
+import backend.routers.admin.admin_queries as mod
 from backend import config as _svc_config
 from backend.core import metadata as _meta
-from backend.core import metric_snapshots
+from backend.core.clickhouse import PAYLOAD_COLUMNS, FosArtifacts
 from backend.core.duckdb import DBBusyError
+from backend.core.metadata.usage_log import CronLeaseHeldError
+from backend.core.request_context import get_con, get_service_id, get_source, require_admin
+from backend.core.request_telemetry import Attribution, current_attribution, query_registry
+from backend.cron.jobs import metric_snapshots
+from backend.cron.scheduler import _run_metadata
 from backend.main import app
-from backend.routers import admin_queries as mod
 from backend.routers.admin import (
     ClientDisconnected,
     _fetch_file_to_zip,
@@ -44,8 +41,10 @@ from backend.routers.admin import (
     _stream_from_worker,
 )
 from backend.routers.admin import clickhouse as api
+from backend.routers.admin.admin_queries import _admin_id_from_request
 from backend.routers.usage import _extract_fos_ops, _fastly_api
 from backend.utils.remote_access import _is_blocked_path
+from backend.utils.telemetry import TelemetryResponseBodyMiddleware
 from tests._helpers.config_fakes import fake_mutate_config as _fake_mutate
 from tests._helpers.sources import TinyFos
 from tests._helpers.wire import wait_until
@@ -124,7 +123,7 @@ def test_high_scale_celery_status_full_payload(client):
     svcs = [{"service_id": "svc-a"}, {"service_id": "svc-b"}]
     with _patches(
         ("backend.celery_app.app.control.inspect", mock_i),
-        ("backend.celery_queue._get_redis", _mock_redis(queues)),
+        ("backend.celery_app._get_redis", _mock_redis(queues)),
         ("backend.config.list_configs", svcs),
         ("backend.core.metadata.base.get_con", {"side_effect": _fake_get_con}),
     ):
@@ -144,7 +143,7 @@ def test_standard_mode_idle_and_unreachable_broker_fallbacks(client):
     mock_i.registered.return_value = mock_i.scheduled.return_value = {}
     with _patches(
         ("backend.celery_app.app.control.inspect", mock_i),
-        ("backend.celery_queue._get_redis", _mock_redis({})),
+        ("backend.celery_app._get_redis", _mock_redis({})),
         ("backend.config.list_configs", []),
     ):
         resp = client.get("/api/admin/celery/status")
@@ -157,7 +156,7 @@ def test_standard_mode_idle_and_unreachable_broker_fallbacks(client):
     broken_redis.scan_iter.side_effect = ConnectionError("Valkey connection refused")
     with _patches(
         ("backend.celery_app.app.control.inspect", {"side_effect": RuntimeError("Broker connection timeout")}),
-        ("backend.celery_queue._get_redis", broken_redis),
+        ("backend.celery_app._get_redis", broken_redis),
         ("backend.config.list_configs", []),
     ):
         resp2 = client.get("/api/admin/celery/status")
@@ -177,13 +176,13 @@ def test_standard_mode_inprocess_scheduler_and_metric_history(client):
     err = ConnectionError("Celery broker not configured in standard mode")
     std_summary = {"ingested_files": 420, "quarantined_items": 1}
     with _patches(
-        ("backend.celery_queue._get_redis", {"side_effect": err}),
+        ("backend.celery_app._get_redis", {"side_effect": err}),
         ("backend.config.is_high_scale_mode", False),
         ("backend.config.list_configs", [{"service_id": "svc-a"}]),
         ("backend.cron.scheduler.get_scheduler", fake_scheduler),
-        ("backend.celery_status.inprocess_active_runs_entries", active_entry),
-        ("backend.celery_status.standard_ingest_summary", std_summary),
-        ("backend.celery_status.ingest_ledger_summary", {"committed": 420, "quarantined": 1}),
+        ("backend.celery_app.inprocess_active_runs_entries", active_entry),
+        ("backend.celery_app.standard_ingest_summary", std_summary),
+        ("backend.celery_app.ingest_ledger_summary", {"committed": 420, "quarantined": 1}),
     ):
         resp = client.get("/api/admin/celery/status")
         assert resp.status_code == 200
@@ -288,8 +287,7 @@ def test_list_retry_and_purge_ingest_ledger_entries(client):
 
 
 def test_task_routes_and_worker_queues_coverage():
-    from backend.celery_status import KNOWN_QUEUES
-
+    from backend.celery_app import KNOWN_QUEUES
     from backend.celery_app import app as celery_app
 
     for mod_name in celery_app.conf.include:
@@ -458,7 +456,7 @@ def test_apply_uses_real_loader_and_publication_without_fos_writes(boundary, mon
     writes = fos.puts
     monkeypatch.setattr(api, "FosArtifacts", lambda source: objects)
     monkeypatch.setattr(api.config, "config_to_source", lambda config: {})
-    monkeypatch.setattr("backend.core.clickhouse_publication.target_identity", lambda client: "target")
+    monkeypatch.setattr("backend.core.clickhouse.target_identity", lambda client: "target")
     store.begin_generation.return_value = "new-generation"
     store.generation.return_value = {"target_identity": "target", "dataset_id": "dataset"}
     store.dataset.return_value = dataset
@@ -702,7 +700,7 @@ def test_backfill_bundle_rollups_and_rebuild_time_series_rollups(client):
 
     with (
         patch.multiple("backend.core.rollups", **{n: MagicMock(return_value=v) for n, v in values.items()}),
-        patch("backend.core.rollups.rum.recompute_rum_aggregates", MagicMock()),
+        patch("backend.core.rollups.recompute.recompute_rum_aggregates", MagicMock()),
         patch("backend.core.duckdb.get_connection", mock_get_connection),
     ):
         resp = client.post("/api/admin/backfill-bundle-rollups")
@@ -860,23 +858,23 @@ def test_quarantine_routes_list_summary_download_purge_and_rbac(client, override
 
     raw_bytes = b'{"invalid":"\x00\xff"}\r\n'
     dl_item = {"id": 7, "file_path": "7.dat", "byte_length": len(raw_bytes), "original_key": "raw/request/batch.log.gz"}
-    with patch("backend.core.quarantine.read_evidence", return_value=(dl_item, BytesIO(raw_bytes))):
+    with patch("backend.core.metadata.ingest_log.read_evidence", return_value=(dl_item, BytesIO(raw_bytes))):
         resp_dl = client.get("/api/admin/quarantine/download/7")
     assert resp_dl.status_code == 200 and resp_dl.content == raw_bytes
     assert resp_dl.headers["content-disposition"] == 'attachment; filename="quarantine-item-7.dat"'
 
-    with patch("backend.core.quarantine.read_evidence", return_value=None):
+    with patch("backend.core.metadata.ingest_log.read_evidence", return_value=None):
         resp_404 = client.get("/api/admin/quarantine/download/999")
     assert resp_404.status_code == 404 and resp_404.json()["detail"]["error"] == "quarantine_not_found"
 
     big_item = {"id": 7, "file_path": "7.dat", "byte_length": 50 * 1024 * 1024 + 1}
-    with patch("backend.core.quarantine.read_evidence", return_value=(big_item, BytesIO(b"unused"))):
+    with patch("backend.core.metadata.ingest_log.read_evidence", return_value=(big_item, BytesIO(b"unused"))):
         assert client.get("/api/admin/quarantine/download/7").status_code == 413
 
     for item_id, expected in ((7, {"purged": 1}), (None, {"purged": 3})):
         with (
             patch("backend.routers.admin.quarantine.get_quarantine_evidence", return_value={"id": item_id}),
-            patch("backend.core.quarantine.purge_evidence", return_value=expected) as purge,
+            patch("backend.core.metadata.ingest_log.purge_evidence", return_value=expected) as purge,
         ):
             q = "" if item_id is None else f"?item_id={item_id}"
             resp_p = client.post(f"/api/admin/quarantine/purge{q}")
@@ -1004,7 +1002,7 @@ class TestQueryMonitorAndSlowQueries:
 
         mod._cancel_history.clear()
         try:
-            with patch("backend.routers.admin_queries.time.monotonic", return_value=1000.0):
+            with patch("backend.routers.admin.admin_queries.time.monotonic", return_value=1000.0):
                 statuses = [client.post("/api/admin/queries/9999999/cancel").status_code for _ in range(11)]
             assert statuses[-1] == 429
         finally:
@@ -1115,7 +1113,7 @@ def log_accounting_source():
 
 @pytest.fixture
 def log_accounting_client(log_accounting_source, in_memory_duckdb):
-    from backend.deps import get_con as dep_get_con
+    from backend.core.request_context import get_con as dep_get_con
 
     app.dependency_overrides[dep_get_con] = lambda: in_memory_duckdb
     app.dependency_overrides[get_source] = lambda: log_accounting_source
@@ -1240,7 +1238,7 @@ def test_usage_log_query_export_delete_and_system_jobs(mock_ul_cfg):
     sched_obj.get_job.side_effect = lambda jid: fake_job if jid == "bot_data_refresh" else None
     job_st = {"bot_data_refresh": {"last_run_at": "2026-06-01T10:00:00Z", "status": "ok", "duration_s": 1.25}}
     with (
-        patch("backend.cron.decorators.get_system_job_status", return_value=job_st),
+        patch("backend.cron.scheduler.get_system_job_status", return_value=job_st),
         patch("backend.cron.scheduler.get_scheduler", return_value=sched_obj),
         TestClient(app) as c,
     ):
@@ -1283,7 +1281,7 @@ def test_usage_prefill_operations_and_rum_breakdown(client, tmp_path, monkeypatc
     try:
         with _patches(
             ("backend.routers.usage.get_fastly_api_key", "api-tok"),
-            ("backend.core.fastly.service.get_active_version", None),
+            ("backend.core.fastly.client.get_active_version", None),
             ("backend.routers.usage._fastly_api", {"data": [row_d]}),
         ):
             r_pre = client.get("/api/usage/prefill", headers={"x-fastly-service-id": MOCK_SERVICE_ID})
@@ -1515,7 +1513,7 @@ def test_background_task_endpoints_start_job(
 
     with (
         patch("backend.core.duckdb.start_cron_run", side_effect=fake_start_cron_run),
-        patch("backend.cron_progress.start_progress"),
+        patch("backend.cron.scheduler.start_progress"),
         patch(target_patch),
         patch("backend.repositories.dashboard.invalidate_service"),
     ):
@@ -2229,7 +2227,7 @@ def test_sync_status_returns_status_with_duckdb_size_and_ngwaf(client, tmp_path,
             return_value={"local_rows": 100, "fos_total": 5, "ingested": 4, "fos_new": 1, "busy": False},
         ),
         patch("backend.core.duckdb._cache_dir", return_value=str(cache_dir)),
-        patch("backend.cron_progress.get_latest_progress_for_service", return_value=None),
+        patch("backend.cron.scheduler.get_latest_progress_for_service", return_value=None),
         patch("backend.config.load_config", return_value={"ngwaf_workspace_id": "ws-123"}),
     ):
         resp = client.get("/api/sync-status")
@@ -2259,7 +2257,7 @@ def test_sync_status_marks_busy_when_active_run_exists(client, tmp_path, test_se
             return_value={"local_rows": 0, "fos_total": 0, "ingested": 0, "fos_new": 0, "busy": False},
         ),
         patch("backend.core.duckdb._cache_dir", return_value=str(tmp_path / "missing-cache")),
-        patch("backend.cron_progress.get_latest_progress_for_service", return_value=active),
+        patch("backend.cron.scheduler.get_latest_progress_for_service", return_value=active),
         patch("backend.config.load_config", return_value={}),
     ):
         resp = client.get("/api/sync-status")

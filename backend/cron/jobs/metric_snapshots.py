@@ -318,7 +318,7 @@ def _sample_active_queries() -> int:
 def _sample_ducklake_admission() -> int:
     count = 0
     try:
-        from backend.core.storage._ducklake import get_admission_stats
+        from backend.core.storage._core import get_admission_stats
 
         for service_id, stats in get_admission_stats().items():
             acquisitions = stats.get("acquisitions", 0.0)
@@ -374,7 +374,7 @@ def _sample_os_vitals() -> int:
 def _sample_celery_queues() -> int:
     count = 0
     try:
-        from backend.celery_status import KNOWN_QUEUES, celery_queue_depths
+        from backend.celery_app import KNOWN_QUEUES, celery_queue_depths
 
         queues, broker_reachable = celery_queue_depths()
         if _safe_record("celery_broker_reachable", 1.0 if broker_reachable else 0.0):
@@ -395,7 +395,7 @@ def _sample_celery_queues() -> int:
 def _sample_ingest_ledger() -> int:
     count = 0
     try:
-        from backend.celery_status import ingest_ledger_summary
+        from backend.celery_app import ingest_ledger_summary
 
         for status, count_val in ingest_ledger_summary().items():
             if _safe_record(f"ingest_ledger_{status}", float(count_val)):
@@ -494,7 +494,7 @@ def _sample_high_scale_disk() -> int:
     count = 0
     try:
         from backend.core.clickhouse import get_clickhouse_client
-        from backend.high_scale.archive_models import MODE_LEVELS, sample_disk_state
+        from backend.high_scale.archive import MODE_LEVELS, sample_disk_state
 
         client = get_clickhouse_client()
         if client is None:
@@ -570,12 +570,3 @@ def _run_metric_snapshot() -> str:
         )
     )
     return f"sampled={total} metrics"
-
-
-_self_mod = _sys.modules[__name__]
-_sys.modules["backend.core.metric_snapshots"] = _self_mod
-_sys.modules["backend.cron.jobs.metric_snapshot"] = _self_mod
-if (_core_pkg := _sys.modules.get("backend.core")) is not None:
-    _core_pkg.metric_snapshots = _self_mod  # type: ignore[attr-defined]
-if (_jobs_pkg := _sys.modules.get("backend.cron.jobs")) is not None:
-    _jobs_pkg.metric_snapshot = _self_mod  # type: ignore[attr-defined]

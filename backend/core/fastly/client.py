@@ -5,7 +5,6 @@ import logging
 import os
 import re
 import secrets
-import sys as _sys
 import time
 import urllib.error
 import urllib.parse
@@ -1127,10 +1126,3 @@ def ensure_vcl_snippet(
     except RuntimeError:
         pass
     return fastly("POST", f"/service/{service_id}/version/{version}/snippet", payload, token=token)
-
-
-_sys.modules["backend.core.fastly.utils"] = _sys.modules[__name__]
-_sys.modules["backend.core.fastly.rum_provisioning"] = _sys.modules[__name__]
-_sys.modules.setdefault("backend.core.fastly.api", _sys.modules[__name__])
-_sys.modules.setdefault("backend.core.fastly.service", _sys.modules[__name__])
-_sys.modules.setdefault("backend.core.fastly.mock_fixtures", _sys.modules[__name__])

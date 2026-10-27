@@ -7,8 +7,7 @@ import logging
 from fastapi import APIRouter, Request
 
 from backend.core import request_telemetry as web_vitals_store
-from backend.models._base import DEFAULT_ERROR_RESPONSES
-from backend.models.common import OkResponse, UxEventPayload, WebVitalsPayload
+from backend.models.common import DEFAULT_ERROR_RESPONSES, OkResponse, UxEventPayload, WebVitalsPayload
 from backend.utils.date_utils import iso_z_now
 
 web_vitals_logger = logging.getLogger("backend.web_vitals")

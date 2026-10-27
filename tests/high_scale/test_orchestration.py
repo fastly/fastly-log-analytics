@@ -12,39 +12,43 @@ from uuid import UUID, uuid4
 
 import boto3
 import pytest
-from backend.high_scale.archive_models import ArchiveArtifact, ArchiveManifest, ArchiveSourceObject
-from backend.high_scale.archive_publication import ArchivePublication, InMemoryObjectStore, PublicationState
-from backend.high_scale.archive_writer import write_batch_archive_checkpoint
-from backend.high_scale.orchestration import HighScaleWorkerCoordinator
-from backend.high_scale.publication import (
+from botocore.stub import Stubber
+from psycopg_pool import ConnectionPool
+
+from backend.high_scale._common import KeysetCursor, raw_query_producer
+from backend.high_scale.archive import (
     _DOMAIN_COLUMNS,
+    ArchiveArtifact,
+    ArchiveManifest,
+    ArchivePublication,
+    ArchiveSourceObject,
     BatchManifest,
     ClickHouseBatchAdapter,
     ClickHousePublication,
     HighScaleBatch,
     InMemoryBatchManifestStore,
+    InMemoryObjectStore,
     InsertReceipt,
     PartialInsert,
     PostgresBatchManifestStore,
+    PublicationState,
     PublicationStatus,
     _rows_for_domain,
     row_matches_serving_domain,
+    write_batch_archive_checkpoint,
 )
-from backend.high_scale.source_discovery import (
+from backend.high_scale.ingest_controller import (
     INITIAL_SOURCE_CURSOR,
     MAX_SOURCE_PAGE_SIZE,
     RUM_REINSPECTION_INTERVAL,
     TERMINAL_SOURCE_CURSOR_PREFIX,
+    HighScaleWorkerCoordinator,
     S3SourceObjectLister,
     S3SourceObjectReader,
     SourceObjectDescriptor,
     SourceObjectMissingError,
     SourceObjectPage,
 )
-from botocore.stub import Stubber
-from psycopg_pool import ConnectionPool
-
-from backend.high_scale._common import KeysetCursor, raw_query_producer
 from backend.high_scale.postgres_control import PostgresControlPlane
 from tests.high_scale.conftest import (
     HighScaleLedger,

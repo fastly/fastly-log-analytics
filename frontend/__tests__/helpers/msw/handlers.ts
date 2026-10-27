@@ -473,7 +473,7 @@ export const server = setupServer(...handlers)
 const PORT = 13003
 const HOST = '127.0.0.1'
 export const CONTRACT_API_BASE = `http://${HOST}:${PORT}`
-const HOST_ENV_KEYS = ['PATH', 'HOME', 'USER', 'LOGNAME', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TZ', 'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'PATHEXT'] as const
+const HOST_ENV_KEYS = ['PATH', 'HOME', 'USER', 'LOGNAME', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TZ', 'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'PATHEXT', 'UV_NO_CACHE', 'UV_PROJECT_ENVIRONMENT'] as const
 
 interface MockOAuth {
   backendPort: number

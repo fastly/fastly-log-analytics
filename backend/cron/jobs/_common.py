@@ -164,8 +164,8 @@ def has_sufficient_disk_space(
 def publish_sync_status_safe(service_id: str, log_label: str = "scheduler") -> None:
     """Compute and publish the cached sync-status SSE snapshot for ``service_id`` (best-effort)."""
     try:
-        from backend.sync_status_publisher import publisher as _sync_status_publisher
-        from backend.sync_status_snapshot import compute_sync_status_cached
+        from backend.celery_app import publisher as _sync_status_publisher
+        from backend.cron.scheduler import compute_sync_status_cached
 
         if (snapshot := compute_sync_status_cached(service_id)) is not None:
             _sync_status_publisher.publish(service_id, snapshot)
@@ -261,7 +261,7 @@ def _finish_post_ingest_view_and_rollups(
     already_published: bool = False,
 ) -> None:
     if done_event.get("rows_inserted", 0) > 0 and not already_published:
-        from backend.utils.active_requests import yield_to_api
+        from backend.utils.telemetry import yield_to_api
 
         yield_to_api()
         refresh_fn = _resolve_sync_hook(

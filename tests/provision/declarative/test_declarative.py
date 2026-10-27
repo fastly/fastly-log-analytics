@@ -8,46 +8,25 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
-from backend.provision.declarative.diff import (
-    Backend,
-    DiffResult,
-    LoggingEndpoint,
-    ServiceDictionary,
-    VCLSnippet,
-    compute_diff,
-)
-from backend.provision.declarative.generators import (
-    desired_backends,
-    desired_logging_endpoints,
-    desired_snippets,
-    generate_consolidated_snippet,
-    generate_log_format,
-    logging_service_snippets,
-)
-from backend.provision.declarative.iac_reconciler import (
-    DeclarativeComputeService,
-    build_desired_state,
-    discover_current_state,
-    reconcile_infrastructure,
-    verify_compute_scorer_readiness,
-)
-from backend.provision.declarative.state import (
-    CmcdConfig,
-    FeatureState,
-    LogFieldsConfig,
-    ScoringConfig,
-    config_changed,
-    migrate_config,
-)
 from fastapi.testclient import TestClient
 
+import backend.core.metadata as metadata_db
+import backend.provision.declarative.reconciler as fi
 from backend import config as svcconfig
-from backend.core import metadata as metadata_db
 from backend.main import app
-from backend.provision.declarative import fastly_integration as fi
 from backend.provision.declarative import reconciler
 from backend.provision.declarative.reconciler import (
     MANAGED_BACKEND_NAMES,
+    Backend,
+    CmcdConfig,
+    DeclarativeComputeService,
+    DiffResult,
+    FeatureState,
+    LogFieldsConfig,
+    LoggingEndpoint,
+    ScoringConfig,
+    ServiceDictionary,
+    VCLSnippet,
     VclValidationError,
     _apply_diff,
     _bootstrap_featurestate_from_fastly,
@@ -57,8 +36,21 @@ from backend.provision.declarative.reconciler import (
     _is_legacy_snippet,
     _purge_rum_surrogate_key,
     _record_reconcile_audit,
+    build_desired_state,
+    compute_diff,
+    config_changed,
+    desired_backends,
+    desired_logging_endpoints,
+    desired_snippets,
+    discover_current_state,
+    generate_consolidated_snippet,
+    generate_log_format,
+    logging_service_snippets,
+    migrate_config,
     reconcile_cdn_service_state,
+    reconcile_infrastructure,
     reconcile_vcl_state,
+    verify_compute_scorer_readiness,
 )
 from backend.provision.session_scoring_orchestrator import _SCORING_FIELD_NAMES
 
@@ -228,7 +220,7 @@ def mock_config_dir(tmp_path, monkeypatch):
 
 
 class TestIaCReconciler:
-    @patch("backend.provision.declarative.iac_reconciler._SCORER_PACKAGE")
+    @patch("backend.provision.declarative.reconciler._SCORER_PACKAGE")
     @patch("backend.provision.session_scoring_orchestrator._resolve_tenant_matrix_for_deploy")
     def test_build_desired_state_scoring_disabled(self, mock_resolve_matrix, mock_scorer_pkg, mock_config_dir):
         cfg = {"service_id": "srv_123", "log_period": 60, "sample_rate": 100, "scoring": {"enabled": False}}
@@ -237,7 +229,7 @@ class TestIaCReconciler:
         assert desired.service_id == "srv_123" and desired.compute_scorer is None and len(desired.kv_stores) == 0
         assert desired.vcl_service.name == "Fastly Log Analytics"
 
-    @patch("backend.scoring.matrix.serialize_kv")
+    @patch("backend.scoring.serialize_kv")
     @patch("backend.provision.session_scoring_orchestrator._resolve_tenant_matrix_for_deploy")
     def test_build_desired_state_scoring_enabled(
         self, mock_resolve_matrix, mock_serialize_kv, mock_config_dir, tmp_path
@@ -260,8 +252,8 @@ class TestIaCReconciler:
         assert desired.compute_scorer.domains == ["fos-srv123-session-scorer.edgecompute.app"]
         assert desired.kv_stores["scoring_matrix_srv_123"].keys["matrix"] == b"serialized-matrix".hex()
 
-    @patch("backend.provision.declarative.iac_reconciler._find_kv_store")
-    @patch("backend.provision.declarative.iac_reconciler.find_service_by_name")
+    @patch("backend.provision.declarative.reconciler._find_kv_store")
+    @patch("backend.provision.declarative.reconciler.find_service_by_name")
     def test_discover_current_state(self, mock_find_service, mock_find_kv):
         mock_find_kv.return_value = {"id": "kv_abc", "name": "scoring_matrix_srv_123"}
         mock_find_service.return_value = {"id": "compute_123", "name": "Session Scoring Service for srv_123"}
@@ -270,7 +262,7 @@ class TestIaCReconciler:
         assert current["compute_scorer"]["id"] == "compute_123"
 
     @patch("httpx.get")
-    @patch("backend.provision.declarative.iac_reconciler.time.sleep")
+    @patch("backend.provision.declarative.reconciler.time.sleep")
     def test_verify_readiness_probe_retries_and_succeeds(self, mock_sleep, mock_get):
         compute_def = DeclarativeComputeService(
             name="test-scorer", package_path="path/to/pkg", domains=["test-scorer.edgecompute.app"]
@@ -285,12 +277,12 @@ class TestIaCReconciler:
         assert mock_get.call_count == 3
         status_cb.assert_any_call("✅ Compute Scorer is hot (status 401).")
 
-    @patch("backend.provision.declarative.iac_reconciler.reconcile_vcl_state")
-    @patch("backend.provision.declarative.iac_reconciler.verify_compute_scorer_readiness")
-    @patch("backend.provision.declarative.iac_reconciler._deploy_wasm_package")
-    @patch("backend.provision.declarative.iac_reconciler._write_matrix_to_kv")
-    @patch("backend.provision.declarative.iac_reconciler.ensure_scoring_service")
-    @patch("backend.provision.declarative.iac_reconciler.discover_current_state")
+    @patch("backend.provision.declarative.reconciler.reconcile_vcl_state")
+    @patch("backend.provision.declarative.reconciler.verify_compute_scorer_readiness")
+    @patch("backend.provision.declarative.reconciler._deploy_wasm_package")
+    @patch("backend.provision.declarative.reconciler._write_matrix_to_kv")
+    @patch("backend.provision.declarative.reconciler.ensure_scoring_service")
+    @patch("backend.provision.declarative.reconciler.discover_current_state")
     def test_reconcile_infrastructure_enables_scoring_transactional_success(
         self,
         mock_discover,
@@ -326,9 +318,9 @@ class TestIaCReconciler:
         mock_verify_readiness.assert_called_once()
         mock_reconcile_vcl.assert_called_once_with("srv_123", "token", dry_run=False, status_cb=status_cb)
 
-    @patch("backend.provision.declarative.iac_reconciler.reconcile_vcl_state")
-    @patch("backend.provision.declarative.iac_reconciler.ensure_scoring_service")
-    @patch("backend.provision.declarative.iac_reconciler.discover_current_state")
+    @patch("backend.provision.declarative.reconciler.reconcile_vcl_state")
+    @patch("backend.provision.declarative.reconciler.ensure_scoring_service")
+    @patch("backend.provision.declarative.reconciler.discover_current_state")
     def test_reconcile_infrastructure_transactional_rollback_on_failure(
         self, mock_discover, mock_ensure_scoring_svc, mock_reconcile_vcl, mock_config_dir
     ):
@@ -347,9 +339,9 @@ class TestIaCReconciler:
             reconcile_infrastructure("srv_123", "token", dry_run=False, status_cb=MagicMock())
         assert json.loads(config_file.read_text()) == original_cfg
 
-    @patch("backend.provision.declarative.iac_reconciler.delete_scoring_service")
-    @patch("backend.provision.declarative.iac_reconciler.reconcile_vcl_state")
-    @patch("backend.provision.declarative.iac_reconciler.discover_current_state")
+    @patch("backend.provision.declarative.reconciler.delete_scoring_service")
+    @patch("backend.provision.declarative.reconciler.reconcile_vcl_state")
+    @patch("backend.provision.declarative.reconciler.discover_current_state")
     def test_reconcile_infrastructure_disables_scoring_reverse_topological_teardown(
         self, mock_discover, mock_reconcile_vcl, mock_delete_scoring_svc, mock_config_dir
     ):
@@ -371,7 +363,7 @@ class TestIaCReconciler:
             "compute_scorer": {"id": "compute_srv_id", "name": "Session Scoring Service for srv_123"},
         }
         status_cb = MagicMock()
-        with patch("backend.provision.declarative.iac_reconciler.time.sleep") as mock_sleep:
+        with patch("backend.provision.declarative.reconciler.time.sleep") as mock_sleep:
             reconcile_infrastructure("srv_123", "token", dry_run=False, status_cb=status_cb)
             mock_sleep.assert_any_call(5.0)
 
@@ -392,7 +384,7 @@ class TestIaCReconciler:
 SID = "srv_123"
 
 
-MOD = "backend.provision.declarative.iac_reconciler"
+MOD = "backend.provision.declarative.reconciler"
 
 
 SCORING_FIELD = {"name": sorted(_SCORING_FIELD_NAMES)[0], "duckdb_type": "VARCHAR", "enabled": True}
@@ -668,7 +660,7 @@ class TestRoutersIaC:
 
     @patch("backend.provision.fastly_api.service_has_scoring_pragmas", return_value=True)
     @patch("backend.routers.session_scoring.resolve_fastly_token", return_value="fake_token")
-    @patch("backend.provision.declarative.iac_reconciler.reconcile_infrastructure")
+    @patch("backend.provision.declarative.reconciler.reconcile_infrastructure")
     def test_scoring_enable_route(self, mock_reconcile, mock_resolve, mock_pragmas, mock_config_dir):
         updated_cfg = self._post_route(
             mock_config_dir,
@@ -682,7 +674,7 @@ class TestRoutersIaC:
         assert mock_reconcile.call_args[0][:2] == ("srv_123", "fake_token")
 
     @patch("backend.routers.session_scoring.resolve_fastly_token", return_value="fake_token")
-    @patch("backend.provision.declarative.iac_reconciler.reconcile_infrastructure")
+    @patch("backend.provision.declarative.reconciler.reconcile_infrastructure")
     def test_scoring_disable_route(self, mock_reconcile, mock_resolve, mock_config_dir):
         updated_cfg = self._post_route(
             mock_config_dir,
@@ -696,7 +688,7 @@ class TestRoutersIaC:
         assert mock_reconcile.call_args[0][:2] == ("srv_123", "fake_token")
 
     @patch("backend.routers.performance._resolve_token", return_value="fake_token")
-    @patch("backend.provision.declarative.iac_reconciler.reconcile_infrastructure")
+    @patch("backend.provision.declarative.reconciler.reconcile_infrastructure")
     def test_cmcd_enable_route(self, mock_reconcile, mock_resolve, mock_config_dir):
         updated_cfg = self._post_route(
             mock_config_dir,
@@ -715,7 +707,7 @@ class TestRoutersIaC:
         assert mock_reconcile.call_args[0][:2] == ("srv_123", "fake_token")
 
     @patch("backend.routers.performance._resolve_token", return_value="fake_token")
-    @patch("backend.provision.declarative.iac_reconciler.reconcile_infrastructure")
+    @patch("backend.provision.declarative.reconciler.reconcile_infrastructure")
     def test_cmcd_disable_route(self, mock_reconcile, mock_resolve, mock_config_dir):
         updated_cfg = self._post_route(
             mock_config_dir,
@@ -1280,7 +1272,7 @@ class TestCloneActiveVersionComment:
 
 
 class TestCdnReconciliation:
-    @patch("backend.core.fastly.service.find_service_by_name", return_value={"id": "cdn_svc_created"})
+    @patch("backend.core.fastly.client.find_service_by_name", return_value={"id": "cdn_svc_created"})
     @patch("backend.provision.declarative.reconciler._fetch_snippets", return_value=[])
     @patch("backend.provision.declarative.reconciler._fetch_backends", return_value=[])
     @patch("backend.provision.declarative.reconciler._fetch_dictionaries", return_value=[])

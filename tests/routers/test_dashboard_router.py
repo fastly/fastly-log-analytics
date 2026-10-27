@@ -16,22 +16,22 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import backend.high_scale.registry_bootstrap as hsreg
 import duckdb
 import pandas as pd
 import pytest
 import time_machine
-from backend.models.dashboard import AggregatesRequest, QueryRequest
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 import backend.high_scale.dashboard as hsd
+import backend.high_scale.ingest_controller as hsreg
 import backend.routers.dashboard as dash
 from backend.core import request_telemetry as web_vitals_store
 from backend.core.duckdb_pool import _PoolBusy
 from backend.core.request_context import RequestContext, build_request_context
 from backend.main import app
+from backend.models.analytics import AggregatesRequest, QueryRequest
 from backend.provision.rum_orchestrator_v2 import upgrade_faro_version
 from backend.repositories import security as security_repo
 from backend.routers import rum as rum_router
@@ -65,8 +65,8 @@ def forbidden_clickhouse(monkeypatch):
     monkeypatch.setenv("CLICKHOUSE_ENABLED", "true")
     adapter = MagicMock(side_effect=AssertionError("archived evaluator reached from dashboard"))
     ch_client = MagicMock(side_effect=AssertionError("ClickHouse client reached from dashboard"))
-    monkeypatch.setattr("backend.core.clickhouse_client.get_clickhouse_client", ch_client)
-    monkeypatch.setattr("backend.core.clickhouse_client.ClickHouseClient.execute", ch_client)
+    monkeypatch.setattr("backend.core.clickhouse.get_clickhouse_client", ch_client)
+    monkeypatch.setattr("backend.core.clickhouse.ClickHouseClient.execute", ch_client)
     yield adapter, ch_client
     adapter.assert_not_called()
     ch_client.assert_not_called()
@@ -670,7 +670,7 @@ def test_admin_and_analyst_query_window_and_mask_forwarding(client, in_memory_du
 
 
 def test_presets_source_resolution_and_no_connection_acquired(client):
-    with patch("backend.deps.svcconfig.get_active_service_id", return_value=None):
+    with patch("backend.core.request_context.svcconfig.get_active_service_id", return_value=None):
         resp_no_svc = client.get("/api/presets")
     assert resp_no_svc.status_code == 200 and resp_no_svc.json() == []
 
@@ -777,7 +777,7 @@ def test_query_high_scale_validates_ast_and_masks_ips(client, monkeypatch):
     )
     fake_hs_service = SimpleNamespace(service_id=MOCK_SERVICE_ID, client=fake_hs_client)
     with patch(
-        "backend.high_scale.registry_bootstrap.get_high_scale_service_registry",
+        "backend.high_scale.ingest_controller.get_high_scale_service_registry",
         return_value=SimpleNamespace(resolve=lambda sid: fake_hs_service),
     ):
         drop_resp = client.post("/api/query", headers=_Q_HEADERS, json={"sql": "DROP TABLE logs"})
@@ -829,7 +829,7 @@ def test_query_high_scale_is_closed_to_analysts_until_clickhouse_enforces_the_bo
         ),
     )
     with patch(
-        "backend.high_scale.registry_bootstrap.get_high_scale_service_registry",
+        "backend.high_scale.ingest_controller.get_high_scale_service_registry",
         return_value=SimpleNamespace(resolve=lambda sid: fake_hs_service),
     ):
         resp = client.post("/api/query", headers=_Q_HEADERS, json={"sql": "SELECT count(*) FROM logs"})
@@ -855,10 +855,10 @@ def _analyst_on_high_scale(client, in_memory_duckdb, test_service_source, main_c
     )
     with (
         patch(
-            "backend.high_scale.registry_bootstrap.get_high_scale_service_registry",
+            "backend.high_scale.ingest_controller.get_high_scale_service_registry",
             return_value=SimpleNamespace(resolve=lambda sid: fake_hs_service),
         ),
-        patch("backend.high_scale.console_access.get_console_clients", return_value=console),
+        patch("backend.high_scale.postgres_control.get_console_clients", return_value=console),
     ):
         return client.post("/api/query", headers=_Q_HEADERS, json={"sql": "SELECT count(*) AS n FROM logs"})
 
@@ -973,11 +973,11 @@ def test_the_console_picks_the_masked_identity_unless_the_invite_explicitly_disa
     hs_service = SimpleNamespace(service_id=MOCK_SERVICE_ID, client=SimpleNamespace(execute=lambda *a, **k: []))
     with (
         patch(
-            "backend.high_scale.registry_bootstrap.get_high_scale_service_registry",
+            "backend.high_scale.ingest_controller.get_high_scale_service_registry",
             return_value=SimpleNamespace(resolve=lambda sid: hs_service),
         ),
         patch(
-            "backend.high_scale.console_access.get_console_clients",
+            "backend.high_scale.postgres_control.get_console_clients",
             return_value=SimpleNamespace(client_for=client_for),
         ),
     ):
@@ -1042,7 +1042,7 @@ def skip_view_update(request):
     if request.node.name in ("test_rum_analytics_cold_start_readonly", "test_rum_live_buffer_unlink_race_self_heals"):
         yield None
     else:
-        with patch("backend.core.storage.view.update_storage_view") as mock:
+        with patch("backend.core.storage._core.update_storage_view") as mock:
             yield mock
 
 
@@ -1469,7 +1469,7 @@ def test_rum_analytics_serves_without_in_request_recompute(setup_temp_rum_db, wi
         return real_get_connection(*args, **kwargs)
 
     with (
-        patch("backend.core.rollups.rum.recompute_rum_aggregates") as mock_recompute,
+        patch("backend.core.rollups.recompute.recompute_rum_aggregates") as mock_recompute,
         patch.object(_duckdb_mod, "get_connection", side_effect=_spy_get_connection),
     ):
         response = client.get(f"/api/services/{service_id}/rum/analytics?start_time={start}&end_time={end}")
@@ -1613,7 +1613,7 @@ def test_analyst_request_outside_invite_window_is_clamped(setup_temp_rum_db) -> 
 
 @pytest.mark.usefixtures("skip_view_update")
 def test_rum_analytics_cold_start_readonly(tmp_path):
-    from backend.core.storage.view import update_storage_view
+    from backend.core.storage._core import update_storage_view
 
     temp_db_path = tmp_path / "cold_start.rum.duckdb"
     duckdb.connect(str(temp_db_path)).close()
@@ -1633,9 +1633,8 @@ def test_rum_analytics_cold_start_readonly(tmp_path):
 
 @pytest.mark.usefixtures("skip_view_update")
 def test_rum_live_buffer_unlink_race_self_heals(tmp_path, monkeypatch) -> None:
-    from backend.core.storage.view import clear_source_caches, update_storage_view
-
     from backend.core import duckdb as db_mod
+    from backend.core.storage._core import clear_source_caches, update_storage_view
     from backend.repositories import rum as rum_repo
 
     monkeypatch.setattr(db_mod, "_cache_dir", lambda s: str(tmp_path / "cache" / s.get("bucket", "default")))
@@ -1732,7 +1731,7 @@ def test_rum_live_buffer_unlink_race_self_heals(tmp_path, monkeypatch) -> None:
 
 @pytest.mark.usefixtures("skip_view_update")
 def test_rum_long_window_merges_live_active_hour_tail_without_double_counting(setup_temp_rum_db) -> None:
-    from backend.core.rollups.rum import recompute_rum_aggregates
+    from backend.core.rollups.recompute import recompute_rum_aggregates
 
     service_id = "test_service_long_window_live_tail"
     now = datetime.datetime.now(datetime.UTC).replace(minute=30, second=0, microsecond=0)
@@ -1995,9 +1994,8 @@ def _check_golden(name: str, body: Any) -> None:
     ],
 )
 def test_rum_golden_contracts(setup_temp_rum_db, case: str) -> None:
-    from backend.core.rollups.rum import recompute_rum_aggregates
-
     import backend.core.duckdb_pool as duckdb_pool
+    from backend.core.rollups.recompute import recompute_rum_aggregates
 
     base = f"/api/services/{_GOLDEN_SERVICE_ID}/rum"
     if case == "analytics_empty":
@@ -2150,8 +2148,9 @@ def test_web_vitals_payload_validation(payload: dict, expected_status: int):
 
 
 def test_web_vitals_collection_and_page_telemetry(monkeypatch, tmp_path, caplog):
+    import backend.core.metadata.usage_log as usage_log_db
     from backend import config as svcconfig
-    from backend.core.metadata import usage_log, usage_log_db
+    from backend.core.metadata import usage_log
 
     sink = tmp_path / "web_vitals.jsonl"
     monkeypatch.setattr(web_vitals_store, "LOG_PATH", sink)

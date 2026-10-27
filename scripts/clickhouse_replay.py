@@ -8,20 +8,20 @@ import json
 import sys
 from dataclasses import asdict
 
-from backend.core.clickhouse_client import ClickHouseClient, close_clickhouse_client
-from backend.core.clickhouse_manifest import PgManifest
-from backend.core.clickhouse_publication import (
+import backend.core.metadata.base as pg_connection
+from backend import config
+from backend import config as app_config
+from backend.core.clickhouse import (
     MAX_BATCH_ROWS,
     MAX_DATASET_ROWS,
+    ClickHouseClient,
     FosArtifacts,
+    PgManifest,
+    close_clickhouse_client,
     full_rebuild,
     replay_unpublished,
     utc,
 )
-
-from backend import config
-from backend import config as app_config
-from backend.core.metadata import pg_connection
 from backend.core.request_telemetry import force_flush
 from backend.utils.telemetry import flush_usage_log
 

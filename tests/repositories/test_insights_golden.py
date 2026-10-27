@@ -16,13 +16,12 @@ from unittest.mock import MagicMock, patch
 
 import duckdb
 import pytest
-from backend.core.field_registry import INSIGHT_DEFINITIONS
-from backend.core.share_db.validation import mask_ip
-from backend.models.insights import InsightsRequest, InsightsResponse
 
-from backend.core.log_fields import LOG_FIELD_CATALOG
+import backend.repositories.insights.definitions as SQL
+from backend.core.log_fields import INSIGHT_DEFINITIONS, LOG_FIELD_CATALOG
+from backend.core.share_db import mask_ip
+from backend.models.analytics import InsightsRequest, InsightsResponse
 from backend.repositories._base import _safe_table
-from backend.repositories._sql import insights as SQL
 from backend.repositories.insights import (
     InsightCategory,
     InsightDefinition,

@@ -18,16 +18,18 @@ import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
-from backend.core.metadata.cron_log import CronLeaseHeldError
-from backend.deps import get_service_id, get_source, require_admin
 from starlette.testclient import TestClient
 
+import backend.core.metadata as metadata_db
+import backend.core.metadata.base as reconciliation
+import backend.core.metadata.usage_log as usage_log_db
+import backend.core.rollups.day_bundles as ph
+import backend.utils.bot_sources as rdns_cache
 from backend.core import duckdb as _db
 from backend.core import local_compaction as lc
-from backend.core import metadata as metadata_db
 from backend.core import share_db
-from backend.core.metadata import reconciliation, usage_log_db
-from backend.core.rollups import partial_hour as ph
+from backend.core.metadata.usage_log import CronLeaseHeldError
+from backend.core.request_context import get_service_id, get_source, require_admin
 from backend.cron.jobs import compaction
 from backend.cron.jobs import metadata as metadata_job
 from backend.cron.jobs.compaction import (
@@ -46,7 +48,6 @@ from backend.cron.jobs.metadata import (
 from backend.cron.scheduler import TASK_MAP, Scheduler, partial_hour_merge_interval_sec
 from backend.main import app
 from backend.repositories._base import _LIVE_TOPN_SKIP_FIELDS, QueryRunner
-from backend.utils import rdns_cache
 from backend.utils.date_utils import iso_z
 
 metadata = metadata_job
@@ -163,10 +164,10 @@ def _patch_cleanup_progress_mocks(monkeypatch, run_id: int = 999):
     )
     monkeypatch.setattr("backend.core.duckdb.start_cron_run", MagicMock(return_value=run_id))
     monkeypatch.setattr("backend.core.duckdb.log_cron_run", log_cron)
-    monkeypatch.setattr("backend.core.metric_snapshots.purge_old", purge_mock)
-    monkeypatch.setattr("backend.cron_progress.start_progress", start_prog)
-    monkeypatch.setattr("backend.cron_progress.end_progress", end_prog)
-    monkeypatch.setattr("backend.cron_progress.cleanup_progress_and_reap", MagicMock())
+    monkeypatch.setattr("backend.cron.jobs.metric_snapshots.purge_old", purge_mock)
+    monkeypatch.setattr("backend.cron.scheduler.start_progress", start_prog)
+    monkeypatch.setattr("backend.cron.scheduler.end_progress", end_prog)
+    monkeypatch.setattr("backend.cron.scheduler.cleanup_progress_and_reap", MagicMock())
     monkeypatch.setattr("backend.cron.jobs._common.finalize_cron_duration", finalize_dur)
     return start_prog, end_prog, finalize_dur, log_cron, purge_mock
 
@@ -190,16 +191,16 @@ def test_metadata_cleanup_skip_gates_and_zero_fos_calls(monkeypatch, mc_contract
 
     # 2. Politeness deferral skips execution
     monkeypatch.delenv("FLA_DEV_NO_CRONS", raising=False)
-    monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", MagicMock(return_value=True))
+    monkeypatch.setattr("backend.utils.telemetry.should_defer_cron", MagicMock(return_value=True))
     metadata_job._run_metadata_cleanup(sid)
     start_cron.assert_not_called()
 
     # 3. Lease held skips without logging row
-    monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", MagicMock(return_value=False))
+    monkeypatch.setattr("backend.utils.telemetry.should_defer_cron", MagicMock(return_value=False))
     monkeypatch.setattr("backend.core.duckdb.start_cron_run", MagicMock(side_effect=CronLeaseHeldError("held")))
     log_cron, end_prog = MagicMock(), MagicMock()
     monkeypatch.setattr("backend.core.duckdb.log_cron_run", log_cron)
-    monkeypatch.setattr("backend.cron_progress.end_progress", end_prog)
+    monkeypatch.setattr("backend.cron.scheduler.end_progress", end_prog)
     _run_metadata_cleanup(sid)
     log_cron.assert_not_called()
     cleanup_mock.assert_not_called()
@@ -439,9 +440,9 @@ def test_rebuild_local_view_endpoint_clears_caches_and_rebuilds_in_background():
 )
 def test_run_bot_data_refresh_outcomes(dev_mode, fake_results, expected_status, expected_substr):
     with (
-        patch("backend.cron.decorators.dev_mode_no_crons", return_value=dev_mode),
+        patch("backend.cron.scheduler.dev_mode_no_crons", return_value=dev_mode),
         patch("backend.utils.bot_sources.refresh_all_sources", return_value=fake_results) as mock_refresh,
-        patch("backend.cron.decorators.record_job_run") as mock_record,
+        patch("backend.cron.scheduler.record_job_run") as mock_record,
     ):
         _run_bot_data_refresh()
     if dev_mode:
@@ -488,20 +489,20 @@ def _ngwaf_sync_env(
     fetch_kwargs = {"side_effect": fetch_side_effect} if fetch_side_effect else {"return_value": fetch_ret or []}
 
     with (
-        patch("backend.cron.decorators.dev_mode_no_crons", return_value=False),
+        patch("backend.cron.scheduler.dev_mode_no_crons", return_value=False),
         patch("backend.config.load_config", return_value=fake_cfg),
         patch("backend.config.get_ngwaf_workspace_id", return_value="ws_123"),
         patch("backend.core.duckdb.get_source_for_service", return_value=mock_src),
         patch("backend.core.duckdb.start_cron_run", **start_kwargs),
         patch("backend.core.duckdb.log_cron_run") as mock_log,
-        patch("backend.utils.ngwaf.get_last_timestamp", return_value=last_ts),
-        patch("backend.utils.ngwaf.update_sync_watermark") as mock_update_wm,
-        patch("backend.utils.ngwaf.fetch_verified_bots_paged", **fetch_kwargs) as mock_fetch,
-        patch("backend.utils.ngwaf.upsert_bots") as mock_upsert,
-        patch("backend.utils.ngwaf.cleanup_old_bots", return_value=0),
+        patch("backend.core.rollups.security_dims.get_last_timestamp", return_value=last_ts),
+        patch("backend.core.rollups.security_dims.update_sync_watermark") as mock_update_wm,
+        patch("backend.core.rollups.security_dims.fetch_verified_bots_paged", **fetch_kwargs) as mock_fetch,
+        patch("backend.core.rollups.security_dims.upsert_bots") as mock_upsert,
+        patch("backend.core.rollups.security_dims.cleanup_old_bots", return_value=0),
         patch("backend.cron.scheduler.get_scheduler", return_value=mock_sched),
-        patch("backend.cron_progress.start_progress") as mock_start_prog,
-        patch("backend.cron_progress.end_progress") as mock_end_prog,
+        patch("backend.cron.scheduler.start_progress") as mock_start_prog,
+        patch("backend.cron.scheduler.end_progress") as mock_end_prog,
         patch("backend.cron.jobs._common.finalize_cron_duration") as mock_finalize,
     ):
         yield {
@@ -520,7 +521,7 @@ def _ngwaf_sync_env(
 def test_ngwaf_sync_lifecycle_adaptive_rescheduling_and_errors(fake_cfg):
     # Dev mode skip
     with (
-        patch("backend.cron.decorators.dev_mode_no_crons", return_value=True),
+        patch("backend.cron.scheduler.dev_mode_no_crons", return_value=True),
         patch("backend.config.load_config") as mock_load,
     ):
         _run_ngwaf_bot_sync("test_service")
@@ -606,7 +607,7 @@ def test_admin_ngwaf_endpoints(fake_cfg):
         patch("backend.config.get_ngwaf_workspace_id", return_value="ws_123"),
         patch("backend.cron.jobs.metadata._run_ngwaf_bot_sync") as mock_run,
         patch(
-            "backend.utils.ngwaf.get_cache_stats",
+            "backend.core.rollups.security_dims.get_cache_stats",
             return_value={"total_cached_bots": 42, "workspaces": {"ws_123": "2026-09-01T00:00:00Z"}, "top_bots": {}},
         ),
     ):
@@ -633,9 +634,9 @@ def test_admin_ngwaf_endpoints(fake_cfg):
 )
 def test_run_rdns_enrichment_outcomes(dev_mode, fake_summary, expected_status, expected_substr):
     with (
-        patch("backend.cron.decorators.dev_mode_no_crons", return_value=dev_mode),
-        patch("backend.utils.rdns_cache.enrich_batch", return_value=fake_summary) as mock_enrich,
-        patch("backend.cron.decorators.record_job_run") as mock_record,
+        patch("backend.cron.scheduler.dev_mode_no_crons", return_value=dev_mode),
+        patch("backend.utils.bot_sources.enrich_batch", return_value=fake_summary) as mock_enrich,
+        patch("backend.cron.scheduler.record_job_run") as mock_record,
     ):
         _run_rdns_enrichment()
     if dev_mode:
@@ -649,11 +650,11 @@ def test_run_rdns_enrichment_outcomes(dev_mode, fake_summary, expected_status, e
 )
 def test_enrich_batch_dynamic_and_explicit_sizing(pending_count, expected_batch_limit):
     with (
-        patch("backend.utils.rdns_cache._get_pending_count", return_value=pending_count) as mock_count,
-        patch("backend.utils.rdns_cache._select_ips_with_status", return_value=[]) as mock_select,
-        patch("backend.utils.rdns_cache._select_stale_ips", return_value=[]),
-        patch("backend.utils.rdns_cache._discover_new_ips", return_value=0),
-        patch("backend.utils.rdns_cache._maybe_reap_stale_rows"),
+        patch("backend.utils.bot_sources._get_pending_count", return_value=pending_count) as mock_count,
+        patch("backend.utils.bot_sources._select_ips_with_status", return_value=[]) as mock_select,
+        patch("backend.utils.bot_sources._select_stale_ips", return_value=[]),
+        patch("backend.utils.bot_sources._discover_new_ips", return_value=0),
+        patch("backend.utils.bot_sources._maybe_reap_stale_rows"),
     ):
         assert rdns_cache.enrich_batch()["batch_limit"] == expected_batch_limit
         if pending_count == 0:
@@ -666,13 +667,13 @@ def test_enrich_batch_dynamic_and_explicit_sizing(pending_count, expected_batch_
 def test_admin_rdns_endpoints_and_maintenance_executor_routing():
     client = TestClient(app)
     fake_summary = {"resolved": 5, "errors": 0, "discovered": 2, "batch_limit": 200}
-    with patch("backend.utils.rdns_cache.enrich_batch", return_value=fake_summary) as mock_enrich:
+    with patch("backend.utils.bot_sources.enrich_batch", return_value=fake_summary) as mock_enrich:
         resp = client.post("/api/admin/rdns/enrich?limit=50")
         assert resp.status_code == 200 and resp.json()["summary"] == fake_summary
         mock_enrich.assert_called_once_with(limit=50)
 
     fake_stats = {"total": 1200, "pending": 45, "last_enrichment_at": "2026-09-21T00:00:00Z"}
-    with patch("backend.utils.rdns_cache.get_stats", return_value=fake_stats):
+    with patch("backend.utils.bot_sources.get_stats", return_value=fake_stats):
         resp_stats = client.get("/api/admin/rdns/stats")
         assert resp_stats.status_code == 200 and resp_stats.json()["stats"] == fake_stats
 
@@ -769,7 +770,7 @@ def test_share_audit_purge_job_and_admin_endpoints(test_share_db):
     )
 
     with (
-        patch("backend.cron.decorators.dev_mode_no_crons", return_value=True),
+        patch("backend.cron.scheduler.dev_mode_no_crons", return_value=True),
         patch("backend.core.share_db.purge_old_audit_logs") as mock_audit2,
     ):
         res_skip = _run_share_audit_purge.__wrapped__()
@@ -830,9 +831,9 @@ def stub_progress(monkeypatch) -> dict[str, MagicMock]:
     monkeypatch.setattr("backend.core.duckdb.start_cron_run", MagicMock(return_value=42))
     monkeypatch.setattr("backend.core.duckdb.log_cron_run", MagicMock())
     mocks = {k: MagicMock() for k in ("start_progress", "end_progress", "cleanup", "log_event")}
-    monkeypatch.setattr("backend.cron_progress.start_progress", mocks["start_progress"])
-    monkeypatch.setattr("backend.cron_progress.end_progress", mocks["end_progress"])
-    monkeypatch.setattr("backend.cron_progress.cleanup_progress_and_reap", mocks["cleanup"])
+    monkeypatch.setattr("backend.cron.scheduler.start_progress", mocks["start_progress"])
+    monkeypatch.setattr("backend.cron.scheduler.end_progress", mocks["end_progress"])
+    monkeypatch.setattr("backend.cron.scheduler.cleanup_progress_and_reap", mocks["cleanup"])
     monkeypatch.setattr("backend.cron.scheduler._log_and_add_progress", mocks["log_event"])
     monkeypatch.setattr("backend.cron.scheduler._extract_log_text", lambda rid: "")
     return mocks
@@ -998,8 +999,8 @@ def mock_service_env(tmp_path, monkeypatch):
     }
     monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda s: s.get("_test_cache_root", str(cache_root)))
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: src if sid == service_id else None)
-    monkeypatch.setattr("backend.deps.get_service_id", lambda request=None: service_id)
-    monkeypatch.setattr("backend.deps.get_source", lambda service_id=None: src)
+    monkeypatch.setattr("backend.core.request_context.get_service_id", lambda request=None: service_id)
+    monkeypatch.setattr("backend.core.request_context.get_source", lambda service_id=None: src)
     monkeypatch.setattr("backend.core.local_compaction._DAILY_TIER_AGE_DAYS", 365)
     monkeypatch.setattr("backend.core.local_compaction._WEEKLY_TIER_AGE_DAYS", 365)
     return {"service_id": service_id, "source": src, "data_dir": str(data_dir), "cache_root": str(cache_root)}
@@ -1102,7 +1103,7 @@ class TestLocalCompactContract:
                     time.sleep(0.005)
 
         with (
-            patch("backend.core.storage.view.update_storage_view", lambda *a, **k: None),
+            patch("backend.core.storage._core.update_storage_view", lambda *a, **k: None),
             patch("backend.core.storage.update_storage_view", lambda *a, **k: None),
         ):
             thread = threading.Thread(target=reader_loop, daemon=True)
@@ -1208,7 +1209,7 @@ def test_rollup_compact_contract_full_lifecycle(contract_service_source, client,
     )
     monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda s: cache_root)
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda s_id: src if s_id == sid else None)
-    monkeypatch.setattr("backend.deps.get_source", lambda: src)
+    monkeypatch.setattr("backend.core.request_context.get_source", lambda: src)
     monkeypatch.setattr(
         "backend.core.rollups.backfill_missing_hour_bundles", lambda *a, **k: {"missing": 0, "bundled": 0}
     )
@@ -1290,17 +1291,17 @@ def test_rollup_compact_gates_and_subsystems(contract_service_source, client, mo
     )
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda s_id: src if s_id == sid else None)
     monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda s: cache_root)
-    monkeypatch.setattr("backend.deps.get_source", lambda: src)
+    monkeypatch.setattr("backend.core.request_context.get_source", lambda: src)
 
     # 1. Politeness gate
-    monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda task, s_id: True)
+    monkeypatch.setattr("backend.utils.telemetry.should_defer_cron", lambda task, s_id: True)
     res = _run_rollup_compact_daily.__wrapped__(sid, manual=False)
     assert res["status"] == "deferred" and "active" in res["summary"].lower()
     _mock_rollups(monkeypatch)
     assert _run_rollup_compact_daily.__wrapped__(sid, manual=True)["status"] == "success"
 
     # 2. Zero FOS egress
-    monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda task, s_id: False)
+    monkeypatch.setattr("backend.utils.telemetry.should_defer_cron", lambda task, s_id: False)
     mock_fos = MagicMock(side_effect=AssertionError("FOS client invoked"))
     monkeypatch.setattr("backend.core.duckdb._get_fos_client", mock_fos)
     assert _run_rollup_compact_daily.__wrapped__(sid, manual=True)["status"] == "success"
@@ -1468,11 +1469,11 @@ class TestRollupHealContract:
         sid, heal_mock, _ = self._setup_heal(
             monkeypatch, contract_service_source, heal_return={"missing": 0, "rebuilt_fields": 0, "bundled": 0}
         )
-        monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda task, s_id: True)
+        monkeypatch.setattr("backend.utils.telemetry.should_defer_cron", lambda task, s_id: True)
         assert _run_rollup_hour_heal.__wrapped__(sid, manual=False)["status"] == "deferred"
         heal_mock.assert_not_called()
         assert _run_rollup_hour_heal.__wrapped__(sid, manual=True)["status"] == "success"
-        monkeypatch.setattr("backend.utils.active_requests.should_defer_cron", lambda task, s_id: False)
+        monkeypatch.setattr("backend.utils.telemetry.should_defer_cron", lambda task, s_id: False)
 
         # 4. Zero FOS egress
         boto_mock = MagicMock(side_effect=AssertionError("Outbound FOS network call forbidden"))
@@ -1529,7 +1530,7 @@ class TestRollupHealContract:
         mark_ready_mock.assert_called_once_with(sid)
 
     def test_admin_trigger_and_inspection_parity(self, contract_service_source, monkeypatch):
-        from backend.deps import get_source
+        from backend.core.request_context import get_source
 
         src = contract_service_source
         sid, _, _ = self._setup_heal(
@@ -1558,8 +1559,8 @@ class TestRollupHealContract:
                     monkeypatch.setattr(f"backend.core.rollups.{fn_name}", lambda *a, **k: 0)
             monkeypatch.setattr("backend.core.rollups._common.backfill_missing_bundles", lambda *a, **k: 0)
             monkeypatch.setattr("backend.core.duckdb.get_connection", lambda *a, **k: MagicMock())
-            monkeypatch.setattr("backend.core.rollups.rum.recompute_rum_aggregates", lambda *a, **k: None)
-            monkeypatch.setattr("backend.core.rollups.rum.table_exists", lambda *a, **k: False)
+            monkeypatch.setattr("backend.core.rollups.recompute.recompute_rum_aggregates", lambda *a, **k: None)
+            monkeypatch.setattr("backend.core.rollups.recompute.table_exists", lambda *a, **k: False)
 
             data4 = client.post("/api/admin/backfill-bundle-rollups", headers={"x-service-id": sid}).json()
             assert "slow_urls" in data4 and "origin_summary" in data4
@@ -1575,18 +1576,18 @@ def _partial_hour_merge_ctx(monkeypatch, fields: list[str], *, new_files: int = 
     fake_src = {"service_id": "svc-a", "name": "svc-a"}
     monkeypatch.setattr("backend.repositories.dashboard.FIELDS", fields)
     with (
-        patch("backend.utils.active_requests.should_defer_cron", return_value=False),
+        patch("backend.utils.telemetry.should_defer_cron", return_value=False),
         patch("backend.core.duckdb.get_source_for_service", return_value=fake_src),
         patch("backend.core.duckdb.start_cron_run", return_value="run-1"),
         patch("backend.core.duckdb.log_cron_run") as mock_log,
-        patch("backend.cron_progress.cleanup_progress_and_reap"),
-        patch("backend.cron_progress.start_progress"),
-        patch("backend.cron_progress.end_progress"),
+        patch("backend.cron.scheduler.cleanup_progress_and_reap"),
+        patch("backend.cron.scheduler.start_progress"),
+        patch("backend.cron.scheduler.end_progress"),
         patch(
-            "backend.core.rollups.partial_hour.merge_partial_hour",
+            "backend.core.rollups.day_bundles.merge_partial_hour",
             return_value={"hour": "2026-09-09-14", "new_files": new_files, "duration_ms": duration_ms},
         ) as mock_merge,
-        patch("backend.core.rollups.partial_hour.gc_stale_partial_hours", return_value=0),
+        patch("backend.core.rollups.day_bundles.gc_stale_partial_hours", return_value=0),
         patch("backend.core.rollups._common.mark_rollup_coverage_ready") as mock_mark,
         patch("backend.core.metadata.delete_cron_run") as mock_delete,
     ):
@@ -1618,7 +1619,7 @@ def test_run_partial_hour_merge_keeps_cron_runs_row_and_defers(monkeypatch, new_
     mocks["delete"].assert_not_called()
 
     with (
-        patch("backend.utils.active_requests.should_defer_cron", return_value=True),
+        patch("backend.utils.telemetry.should_defer_cron", return_value=True),
         patch("backend.core.duckdb.start_cron_run") as mock_start,
     ):
         _run_partial_hour_merge("svc-a")
@@ -1660,8 +1661,8 @@ def mock_ph_env(tmp_path, monkeypatch):
     }
     monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda s: s.get("_test_cache_root", str(cache_root)))
     monkeypatch.setattr("backend.core.duckdb.get_source_for_service", lambda sid: src if sid == service_id else None)
-    monkeypatch.setattr("backend.deps.get_service_id", lambda request=None: service_id)
-    monkeypatch.setattr("backend.deps.get_source", lambda service_id=None: src)
+    monkeypatch.setattr("backend.core.request_context.get_service_id", lambda request=None: service_id)
+    monkeypatch.setattr("backend.core.request_context.get_source", lambda service_id=None: src)
     return {
         "service_id": service_id,
         "source": src,

@@ -33,9 +33,9 @@ from unittest.mock import patch
 import duckdb
 import pytest
 
+import backend.core.rollups.recompute as rollup_coverage
 from backend.core import rollups as rr
 from backend.core.rollups import _common as rollup_common
-from backend.repositories import rollup_coverage
 from backend.repositories._base import QueryRunner
 from backend.routers.network import _fetch_pop_health_data
 from backend.utils.date_utils import parse_iso_utc
@@ -785,21 +785,21 @@ from typing import NoReturn
 from unittest.mock import MagicMock
 
 import time_machine
-from backend.models.dashboard import (
+
+import backend.core.rollups.recompute as coverage
+from backend import config as svcconfig
+from backend.core.rollups.recompute import (
+    collect_hourly_bundle_paths,
+    heal_where_clause,
+    plan_time_series_rollup_window,
+)
+from backend.models.analytics import (
     HourlyRollupCoverage,
     ReaderCoverage,
     RollupPathCoverage,
     ScalarRollupCoverage,
     TopNRollupCoverage,
 )
-from backend.repositories.rollup_coverage import (
-    collect_hourly_bundle_paths,
-    heal_where_clause,
-    plan_time_series_rollup_window,
-)
-
-from backend import config as svcconfig
-from backend.repositories import rollup_coverage as coverage
 from backend.repositories.top_n_rollups import (
     SchemaSeeds,
     TopNPaths,
@@ -1622,12 +1622,12 @@ def test_partial_hour_adjusted_live_start_and_durable_hourly_bundle(tmp_path):
     window_end = datetime(2027, 1, 1, tzinfo=UTC)
 
     with (
-        patch("backend.core.rollups.partial_hour.read_partial_hour_watermark", return_value=watermark_dt.timestamp()),
+        patch("backend.core.rollups.day_bundles.read_partial_hour_watermark", return_value=watermark_dt.timestamp()),
         patch(
-            "backend.core.rollups.partial_hour.read_partial_hour_all_fields",
+            "backend.core.rollups.day_bundles.read_partial_hour_all_fields",
             return_value=[("country", "US", 42)],
         ),
-        patch("backend.core.rollups.partial_hour.read_partial_hour_total", return_value=42),
+        patch("backend.core.rollups.day_bundles.read_partial_hour_total", return_value=42),
     ):
         runner = QueryRunner.__new__(QueryRunner)
         runner.src = {"service_id": "svc-a", "name": "svc-a"}
@@ -1647,7 +1647,7 @@ def test_partial_hour_adjusted_live_start_and_durable_hourly_bundle(tmp_path):
     src = {"service_id": "svc-durable", "name": "svc-durable", "deployment_mode": "high_scale"}
     with (
         patch("backend.config.is_durable_serving_mode", return_value=True),
-        patch("backend.repositories.rollup_coverage.cached_listdir", return_value=[]) as mock_listdir,
+        patch("backend.core.rollups.recompute.cached_listdir", return_value=[]) as mock_listdir,
     ):
         assert rollup_coverage.collect_hourly_bundle_paths(src, None, None, str(tmp_path), "x.parquet") is None
         mock_listdir.assert_not_called()
@@ -1655,7 +1655,7 @@ def test_partial_hour_adjusted_live_start_and_durable_hourly_bundle(tmp_path):
     rr.mark_rollup_coverage_ready("svc-durable")
     with (
         patch("backend.config.is_durable_serving_mode", return_value=True),
-        patch("backend.repositories.rollup_coverage.cached_listdir", return_value=[]) as mock_listdir,
+        patch("backend.core.rollups.recompute.cached_listdir", return_value=[]) as mock_listdir,
     ):
         rollup_coverage.collect_hourly_bundle_paths(
             src,
@@ -1881,9 +1881,9 @@ def test_durable_network_health_and_log_activity_ducklake_fallback(monkeypatch, 
 
     with (
         patch("backend.core.duckdb.get_connection", return_value=con_mock),
-        patch("backend.repositories.usage._log_activity_fallback") as local_fallback,
+        patch("backend.repositories.assets._log_activity_fallback") as local_fallback,
     ):
-        from backend.repositories.usage import get_log_activity
+        from backend.repositories.assets import get_log_activity
 
         act_res = get_log_activity(_durable_source(), "2026-09-06T00:00:00Z", "2026-09-07T00:00:00Z", "hour")
 
@@ -1962,12 +1962,12 @@ def _build_time_series_bundles(con, src, hours: list[str], table: str = "logs") 
     """Run the REAL ``build_time_series_bundles`` writer against ``table``."""
     from unittest.mock import patch
 
-    from backend.core.rollups import time_series
+    import backend.core.rollups.recompute as time_series
 
     with (
         patch("backend.core.rollups._common._safe_table_for", return_value=table),
         patch("backend.core.duckdb.get_connection", return_value=_NonClosing(con)),
-        patch("backend.core.storage.view._get_service_lock", _noop_lock),
+        patch("backend.core.storage._core._get_service_lock", _noop_lock),
         patch(
             "backend.core.storage.execute_with_stale_view_retry",
             side_effect=lambda c, _src, fn: fn(c),
@@ -2446,12 +2446,12 @@ def _seed_vbts_table(con, rows, table="logs_vbts"):
 def _build_vbts_bundles(con, src, hours, table="logs_vbts"):
     from unittest.mock import patch
 
-    from backend.core.rollups import verified_bots_ts
+    import backend.core.rollups.security_dims as verified_bots_ts
 
     with (
         patch("backend.core.rollups._common._safe_table_for", return_value=table),
         patch("backend.core.duckdb.get_connection", return_value=_NonClosing(con)),
-        patch("backend.core.storage.view._get_service_lock", _noop_lock),
+        patch("backend.core.storage._core._get_service_lock", _noop_lock),
         patch("backend.core.storage.execute_with_stale_view_retry", side_effect=lambda c, _s, fn: fn(c)),
     ):
         return verified_bots_ts.build_verified_bots_ts_bundles(src["service_id"], src, hours)
@@ -2540,12 +2540,12 @@ def _seed_origin_table(con, rows, table="logs_origin"):
 def _build_origin_bundles(con, src, hours, table="logs_origin"):
     from unittest.mock import patch
 
-    from backend.core.rollups import origin_summary
+    import backend.core.rollups.origin_dims as origin_summary
 
     with (
         patch("backend.core.rollups._common._safe_table_for", return_value=table),
         patch("backend.core.duckdb.get_connection", return_value=_NonClosing(con)),
-        patch("backend.core.storage.view._get_service_lock", _noop_lock),
+        patch("backend.core.storage._core._get_service_lock", _noop_lock),
         patch("backend.core.storage.execute_with_stale_view_retry", side_effect=lambda c, _s, fn: fn(c)),
     ):
         return origin_summary.build_origin_summary_bundles(src["service_id"], src, hours)
@@ -2666,7 +2666,7 @@ def _build_rollup(module_path: str, fn_name: str, con, src, hours: list[str], ta
     with (
         patch("backend.core.rollups._common._safe_table_for", return_value=table),
         patch("backend.core.duckdb.get_connection", return_value=_NonClosing(con)),
-        patch("backend.core.storage.view._get_service_lock", _noop_lock),
+        patch("backend.core.storage._core._get_service_lock", _noop_lock),
         patch("backend.core.storage.execute_with_stale_view_retry", side_effect=lambda c, _s, fn: fn(c)),
     ):
         return getattr(mod, fn_name)(src["service_id"], src, hours)
@@ -2712,7 +2712,7 @@ def test_network_speed_closed_window_exact_counts_agree(tmp_path):
 
     assert (
         _build_rollup(
-            "backend.core.rollups.network",
+            "backend.core.rollups.origin_dims",
             "build_network_speed_bundles",
             con,
             src,
@@ -2762,7 +2762,12 @@ def test_slow_urls_closed_window_exact_requests_agree(tmp_path):
 
     assert (
         _build_rollup(
-            "backend.core.rollups.slow_urls", "build_slow_urls_bundles", con, src, _hours_between(start, end), "logs_su"
+            "backend.core.rollups.origin_dims",
+            "build_slow_urls_bundles",
+            con,
+            src,
+            _hours_between(start, end),
+            "logs_su",
         )
         > 0
     )
@@ -2805,7 +2810,7 @@ def test_perf_latency_closed_window_exact_requests_and_avg_agree(tmp_path):
 
     assert (
         _build_rollup(
-            "backend.core.rollups.perf_latency",
+            "backend.core.rollups.origin_dims",
             "build_perf_latency_bundles",
             con,
             src,
@@ -2868,7 +2873,7 @@ def test_network_rtt_closed_window_path_and_ballpark(tmp_path):
 
     assert (
         _build_rollup(
-            "backend.core.rollups.network",
+            "backend.core.rollups.origin_dims",
             "build_network_rtt_bundles",
             con,
             src,
@@ -2901,7 +2906,7 @@ def test_network_rtt_closed_window_path_and_ballpark(tmp_path):
 
 
 def _build_session_bundles(con, src, hours, table="logs_sess"):
-    return _build_rollup("backend.core.rollups.sessions", "build_session_bundles", con, src, hours, table)
+    return _build_rollup("backend.core.rollups.recompute", "build_session_bundles", con, src, hours, table)
 
 
 def test_sessions_seam_exact_aggregates_agree(tmp_path, frozen_clock):
@@ -3018,7 +3023,7 @@ def _build_ip_spread(con, src, table: str = "logs", fields=("ja4",)) -> None:
 
     with (
         patch("backend.core.duckdb.get_connection", return_value=_NonClosing(con)),
-        patch("backend.core.storage.view._get_service_lock", _noop_lock),
+        patch("backend.core.storage._core._get_service_lock", _noop_lock),
         patch("backend.core.storage.execute_with_stale_view_retry", side_effect=lambda c, _s, fn: fn(c)),
     ):
         recompute._run_ip_spread_per_field(src["service_id"], src, table, "1=1", list(fields))

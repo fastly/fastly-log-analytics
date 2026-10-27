@@ -12,11 +12,11 @@ from typing import Any, cast
 from fastapi import Depends, HTTPException, Query, Request
 from sse_starlette.sse import EventSourceResponse
 
-import backend.celery_status_sampler as celery_status_sampler
-from backend.cron_runs_publisher import publisher as cron_runs_publisher
-from backend.deps import get_service_id
-from backend.sync_status_publisher import publisher as sync_status_publisher
-from backend.sync_status_snapshot import compute_sync_status_cached
+import backend.celery_app as celery_status_sampler
+from backend.celery_app import publisher as sync_status_publisher
+from backend.core.request_context import get_service_id
+from backend.cron.scheduler import compute_sync_status_cached
+from backend.cron.scheduler import publisher as cron_runs_publisher
 from backend.utils.router_utils import make_error
 from backend.utils.sse import iter_with_disconnect_ping, sse_response
 

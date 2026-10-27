@@ -58,20 +58,19 @@ from __future__ import annotations
 import logging
 import math
 import os
-import sys
 import uuid
 from collections.abc import Generator
 from datetime import UTC, datetime, timedelta
 
 from backend.core.fastly.client import fastly_paginate
-from backend.core.metadata.pg_connection import (
+from backend.core.metadata.base import (
     get_pg_readonly_connection,
     get_pg_thread_connection,
 )
 from backend.core.metric_expressions import coalesce, sum_or_zero
+from backend.core.sql_validator import escape_sql_literal
 from backend.utils.date_utils import iso_z, iso_z_now, parse_hour_key_strict, parse_iso_utc
 from backend.utils.pop_utils import build_pop_haversine_case_sql
-from backend.utils.sql_validator import escape_sql_literal
 
 from ._common import (
     NGWAF_BOTS_BUNDLE_FILENAME,
@@ -479,7 +478,7 @@ def _read_ngwaf_bots_as_values_sql(db_path: str | None = None) -> str | None:
             logger.warning("[rollups] failed reading ngwaf_bots test cache at %s: %s", db_path, e)
             return None
     else:
-        from backend.core.metadata import pg_connection
+        from backend.core.metadata import base as pg_connection
 
         try:
             pconn = pg_connection.get_pg_readonly_connection()
@@ -958,7 +957,7 @@ def recompute_wellknown_bots_rollup(
     if not hours:
         return 0
 
-    from backend.core.storage.view import _get_service_lock
+    from backend.core.storage._core import _get_service_lock
     from backend.utils.bot_sources import get_bot_regex_pattern, get_pattern_set_version
 
     version = get_pattern_set_version()
@@ -1065,7 +1064,7 @@ def backfill_wellknown_bots_rollup(
 ) -> int:
     """Self-heal the wellknown_bots rollup tree against the CURRENT
     ``pattern_set_version``: rebuild what it can, drop what it can't."""
-    from backend.core.storage.view import _get_service_lock
+    from backend.core.storage._core import _get_service_lock
     from backend.utils.bot_sources import get_pattern_set_version
 
     version = get_pattern_set_version()
@@ -1286,15 +1285,3 @@ def _parse_iso_to_hour(iso: str) -> datetime | None:
     except ValueError:
         return None
     return dt.replace(minute=0, second=0, microsecond=0)
-
-
-for _legacy_mod in (
-    "backend.core.rollups.security_proxies",
-    "backend.core.rollups.verified_bots_ts",
-    "backend.core.rollups.ngwaf_bots",
-    "backend.core.rollups.wellknown_bots",
-    "backend.utils.ngwaf",
-):
-    sys.modules[_legacy_mod] = sys.modules[__name__]
-if "backend.utils" in sys.modules:
-    setattr(sys.modules["backend.utils"], "ngwaf", sys.modules[__name__])

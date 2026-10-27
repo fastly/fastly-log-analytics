@@ -10,10 +10,8 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from backend.config import get_fastly_api_key
-from backend.core.fastly.client import api_key_or_mock
-from backend.core.fastly.utils import FASTLY_LOG_FIELDS
-from backend.deps import get_source
-from backend.models._base import DEFAULT_ERROR_RESPONSES
+from backend.core.fastly.client import FASTLY_LOG_FIELDS, api_key_or_mock
+from backend.core.request_context import get_source
 from backend.models.admin import (
     CurrentStorageResponse,
     PrefillRatesResponse,
@@ -24,6 +22,7 @@ from backend.models.admin import (
     UsageOperationsResponse,
     UsageRumBreakdownResponse,
 )
+from backend.models.common import DEFAULT_ERROR_RESPONSES
 from backend.repositories import assets as repo
 from backend.repositories._base import SectionTimer
 from backend.utils.bounded_cache import BoundedTTLCache

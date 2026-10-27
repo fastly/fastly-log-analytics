@@ -13,16 +13,16 @@ from typing import Any, cast
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sse_starlette.sse import EventSourceResponse
 
+from backend.celery_app import publisher as sync_status_publisher
 from backend.core import duckdb as _db_mod
-from backend.deps import get_service_id, get_source
-from backend.models._base import DEFAULT_ERROR_RESPONSES
+from backend.core.request_context import get_service_id, get_source
+from backend.cron.scheduler import compute_sync_status_cached
 from backend.models.admin import (
     IngestedFilesResponse,
     LogExtentsResponse,
     SyncStatusResponse,
 )
-from backend.sync_status_publisher import publisher as sync_status_publisher
-from backend.sync_status_snapshot import compute_sync_status_cached
+from backend.models.common import DEFAULT_ERROR_RESPONSES
 from backend.utils.dir_size import _get_dir_size
 from backend.utils.router_utils import (
     make_error,
@@ -73,7 +73,7 @@ def sync_status(
         return resp_empty
 
     try:
-        from backend.high_scale.registry_bootstrap import get_high_scale_service_registry
+        from backend.high_scale.ingest_controller import get_high_scale_service_registry
 
         compute_fn = _resolve_compute_sync_status_cached()
         high_scale_service = get_high_scale_service_registry().resolve(service_id)
@@ -105,7 +105,7 @@ def sync_status(
         status["duckdb_size_bytes"] = db_size + cache_size
         status["duckdb_exists"] = db_exists
 
-        from backend.cron_progress import get_latest_progress_for_service
+        from backend.cron.scheduler import get_latest_progress_for_service
 
         active_run = get_latest_progress_for_service(service_id)
         if active_run:

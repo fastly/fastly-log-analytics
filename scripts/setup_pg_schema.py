@@ -1,6 +1,6 @@
 """Create the unified Postgres metadata schema (METADATA_DSN).
 
-The DDL itself lives in ``backend.core.metadata.pg_schema`` so this
+The DDL itself lives in ``backend.core.metadata.base`` so this
 script and the boot-time ``ensure_pg_schema()`` apply exactly the same
 statements. Safe to re-run: every statement is ``IF NOT EXISTS``-style
 and nothing is dropped — an existing, populated database is left intact.
@@ -16,8 +16,7 @@ hand.
 import os
 import sys
 
-from backend.core.metadata.pg_connection import get_pg_pool
-from backend.core.metadata.pg_schema import apply_pg_schema
+from backend.core.metadata.base import apply_pg_schema, get_pg_pool
 
 
 def setup() -> None:

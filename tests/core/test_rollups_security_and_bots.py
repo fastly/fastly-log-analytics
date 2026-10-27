@@ -15,26 +15,6 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 import vcr
-from backend.core.metadata.cron_log import CronLeaseHeldError
-from backend.core.rollups.ngwaf_bots import _purge_stale_ngwaf_bots_parquets
-from backend.repositories._sql.security import (
-    BOT_EFFICIENCY,
-    CONN_REUSE_DIST,
-    FINGERPRINT_COVERAGE_BULK,
-    GET_SECURITY_PROXIES_COMBINED,
-    REQ_HEADER_SIZE_DIST,
-    TOP_IPS_BY_MAX_HEADER,
-)
-from backend.utils.ngwaf import (
-    _extract_bot_record,
-    _get_relative_time_range,
-    cleanup_old_bots,
-    fetch_verified_bots_paged,
-    get_cache_stats,
-    get_last_timestamp,
-    oldest_unenriched_timestamp,
-    upsert_bots,
-)
 from tests._helpers.rollups import (
     build_writer_patches as _build_patches,
 )
@@ -63,18 +43,41 @@ from tests._helpers.rollups import (
     yesterday_iso as _yesterday_iso,
 )
 
+import backend.core.metadata.base as pg_connection
+import backend.core.rollups.security_dims as nb
+import backend.core.rollups.security_dims as security_proxies
+import backend.core.rollups.security_dims as verified_bots_ts
+import backend.core.rollups.security_dims as wellknown_bots
+import backend.repositories.security as SQL
 from backend.core import rollups
-from backend.core.metadata import pg_connection
-from backend.core.rollups import day_bundles, security_dims, security_proxies, verified_bots_ts, wellknown_bots
-from backend.core.rollups import ngwaf_bots as nb
+from backend.core.metadata.usage_log import CronLeaseHeldError
+from backend.core.rollups import day_bundles, security_dims
 from backend.core.rollups.day_bundles import (
     compact_ngwaf_bots_closed_days_to_daily,
     compact_ngwaf_bots_ts_closed_days_to_daily,
 )
+from backend.core.rollups.security_dims import (
+    _extract_bot_record,
+    _get_relative_time_range,
+    _purge_stale_ngwaf_bots_parquets,
+    cleanup_old_bots,
+    fetch_verified_bots_paged,
+    get_cache_stats,
+    get_last_timestamp,
+    oldest_unenriched_timestamp,
+    upsert_bots,
+)
 from backend.repositories._base import QueryRunner, attach_ngwaf_cache, ensure_ngwaf_bots_materialized, safe_iso
-from backend.repositories._sql import security as SQL
 from backend.repositories.dashboard import CONN_REQUESTS_BUCKET
-from backend.repositories.security import _build_security_response
+from backend.repositories.security import (
+    BOT_EFFICIENCY,
+    CONN_REUSE_DIST,
+    FINGERPRINT_COVERAGE_BULK,
+    GET_SECURITY_PROXIES_COMBINED,
+    REQ_HEADER_SIZE_DIST,
+    TOP_IPS_BY_MAX_HEADER,
+    _build_security_response,
+)
 
 # ── Merged from tests/core/test_rollups_ngwaf_bots.py ──
 
@@ -94,7 +97,7 @@ def _writer_ctx(cache_root, table: str, con_fn, db_path: str | None = None):
 def _compact_ctx(cache_root):
     with (
         patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
-        patch("backend.core.storage.view._get_service_lock", _noop_lock),
+        patch("backend.core.storage._core._get_service_lock", _noop_lock),
     ):
         yield
 
@@ -1020,7 +1023,7 @@ class TestRollupsSecurityProxies:
 
         with (
             patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
-            patch("backend.core.storage.view._get_service_lock", _noop_lock),
+            patch("backend.core.storage._core._get_service_lock", _noop_lock),
         ):
             assert day_bundles.compact_security_proxies_closed_days_to_daily("svc-sp-6", src) == 3
 
@@ -1228,7 +1231,7 @@ class TestRollupsVerifiedBotsTs:
 
         with (
             patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
-            patch("backend.core.storage.view._get_service_lock", _noop_lock),
+            patch("backend.core.storage._core._get_service_lock", _noop_lock),
         ):
             assert rollups.compact_verified_bots_ts_closed_days_to_daily("svc-vbts-cd", src) == 1
 
@@ -1253,7 +1256,7 @@ class TestRollupsVerifiedBotsTs:
 
         with (
             patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
-            patch("backend.core.storage.view._get_service_lock", _noop_lock),
+            patch("backend.core.storage._core._get_service_lock", _noop_lock),
         ):
             assert (
                 rollups.compact_verified_bots_ts_closed_days_to_daily(

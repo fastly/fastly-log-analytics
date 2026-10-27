@@ -1,13 +1,10 @@
 from __future__ import annotations
 
-import sys
-
-sys.modules["backend.models.insights"] = sys.modules[__name__]
 from typing import Annotated, Any, Literal
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_serializer, model_validator
 
-from backend.models._base import JsonAny, JsonDict, JsonRows, PassthroughModel, ScalarCell, SchemaColumn, WireSafeModel
+from backend.models.common import JsonAny, JsonDict, JsonRows, PassthroughModel, ScalarCell, SchemaColumn, WireSafeModel
 
 
 def _aliased_optional_field(name: str) -> Any:
@@ -219,35 +216,6 @@ class HealthResponse(WireSafeModel):
     version: str
     services: list[HealthServiceState] | None = None
 
-
-_self_mod = sys.modules[__name__]
-_models_pkg = sys.modules.get("backend.models")
-for _submod in (
-    "admin_actions",
-    "origin",
-    "network",
-    "performance",
-    "rum",
-    "session_scoring",
-    "dashboard",
-    "security",
-    "sessions",
-):
-    sys.modules[f"backend.models.{_submod}"] = _self_mod
-    if _models_pkg is not None:
-        setattr(_models_pkg, _submod, _self_mod)
-del _submod
-_backend_pkg = sys.modules.get("backend")
-_aliases = getattr(_backend_pkg, "_MODULE_ALIASES", None)
-if isinstance(_aliases, dict):
-    _aliases.update(
-        {
-            "backend.models.session_scoring": "backend.models.analytics",
-            "backend.models.dashboard": "backend.models.analytics",
-            "backend.models.security": "backend.models.analytics",
-            "backend.models.sessions": "backend.models.analytics",
-        }
-    )
 
 from backend.models.common import (  # noqa: E402
     BaseResponse,

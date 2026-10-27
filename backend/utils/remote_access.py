@@ -19,7 +19,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 
 from backend.core import share_db
-from backend.core.share_db.validation import IP_FAMILY_KEYS, SESSION_ID_KEYS
+from backend.core.share_db import IP_FAMILY_KEYS, SESSION_ID_KEYS
 from backend.utils.auth import (
     ANALYST_PENDING_SESSION_COOKIE,
     ANALYST_SESSION_COOKIE,
@@ -423,7 +423,7 @@ async def _strip_analyst_envelope(
                 data.pop(k)
                 changed = True
     if pii_policy is not None:
-        from backend.core.share_db.validation import apply_pii_policy
+        from backend.core.share_db import apply_pii_policy
 
         masked = apply_pii_policy(data, pii_policy)
         if masked is not data:
@@ -658,8 +658,8 @@ class RemoteAccessMiddleware(BaseHTTPMiddleware):
             return _error_json(401, "unauthenticated")
         if getattr(session, "tos_pending", False):
             return _error_json(403, "tos_pending")
-        from backend.core.query_attribution import Attribution as _Attr
-        from backend.core.query_attribution import current_attribution as _cur_attr
+        from backend.core.request_telemetry import Attribution as _Attr
+        from backend.core.request_telemetry import current_attribution as _cur_attr
 
         _cur_attr.set(
             _Attr.analyst(

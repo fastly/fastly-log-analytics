@@ -6,7 +6,6 @@ import gc
 import logging
 import os
 import signal
-import sys as _sys
 import time
 
 from backend import config as svcconfig
@@ -236,9 +235,3 @@ def run_duckdb_recycle() -> str:
     elif threshold == 0:
         _maybe_adjust_recycle_schedule(expedite=False)
     return res
-
-
-_self_mod = _sys.modules[__name__]
-_sys.modules["backend.core.duckdb_recycle"] = _self_mod
-if (_core_pkg := _sys.modules.get("backend.core")) is not None:
-    _core_pkg.duckdb_recycle = _self_mod  # type: ignore[attr-defined]

@@ -563,7 +563,7 @@ def _run_with_rum_view_retry(con, source: dict | None, fn):
 
     def _recover(_exc: BaseException) -> None:
         if source is not None:
-            from backend.core.storage import view as storage_view
+            from backend.core.storage import _core as storage_view
 
             storage_view.clear_source_caches(source.get("name", "default"), keep_snapshot_cache=True)
             storage_view.update_storage_view(con, source, force=True)
@@ -626,7 +626,7 @@ def _fetch_rum_analytics_once(
     params: list,
     raw_window_max_s: int,
 ) -> dict[str, Any]:
-    from backend.core.rollups.rum import table_exists
+    from backend.core.rollups.recompute import table_exists
 
     use_rollup = False
     prefer_raw_window = False

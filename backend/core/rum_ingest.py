@@ -10,7 +10,6 @@ import sys as _sys
 import tempfile
 import time
 from collections.abc import Generator
-from datetime import datetime
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
@@ -32,9 +31,9 @@ from backend.core.ingest import (
     _sum_evidence_counts,
     _sweep_ledger_common,
 )
-from backend.core.metadata.cron_log import finalize_cron_run_if_running, log_cron_run, start_cron_run
-from backend.core.rollups.rum import backfill_missing_rum_aggregates, recompute_rum_aggregates  # noqa: F401
-from backend.utils.date_utils import ensure_utc
+from backend.core.metadata.usage_log import finalize_cron_run_if_running, log_cron_run, start_cron_run
+from backend.core.rollups.recompute import backfill_missing_rum_aggregates, recompute_rum_aggregates  # noqa: F401
+from backend.utils.date_utils import parse_iso_utc
 from backend.utils.telemetry import log_once_per
 
 logger = logging.getLogger(__name__)
@@ -165,10 +164,9 @@ def _parse_rum_line(log_data: dict, service_id: str) -> tuple[list[dict], list[d
     received_at = log_data.get("timestamp")
     if not received_at:
         raise ValueError("missing_timestamp")
-    try:
-        dt = ensure_utc(datetime.fromisoformat(received_at))
-    except Exception as e:
-        raise ValueError(f"invalid_timestamp: {e}") from e
+    dt = parse_iso_utc(received_at) if isinstance(received_at, str) else None
+    if dt is None:
+        raise ValueError(f"invalid_timestamp: {received_at!r}")
     city_val = log_data.get("city") or log_data.get("geo_city") or ""
     region_val = log_data.get("region") or log_data.get("geo_region") or ""
     country_val = log_data.get("country") or log_data.get("geo_country_code") or ""
@@ -365,7 +363,7 @@ def _quarantine_rum_corrupt_lines(
     *,
     local_file: str,
 ) -> dict[str, int]:
-    from backend.core.quarantine import capture_evidence
+    from backend.core.metadata.ingest_log import capture_evidence
 
     service_id = src.get("service_id") or src.get("name", "")
     prefix_path = src.get("prefix", "").strip("/")

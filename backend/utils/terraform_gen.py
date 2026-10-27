@@ -3,15 +3,10 @@
 from __future__ import annotations
 
 import json
-import sys
 from typing import Any
 
-_backend_pkg = sys.modules.get("backend")
-if _backend_pkg is not None and hasattr(_backend_pkg, "_MODULE_ALIASES"):
-    _backend_pkg._MODULE_ALIASES.pop("backend.utils.terraform_gen", None)
-
 from backend.config import is_rum_enabled  # noqa: E402
-from backend.core.fastly.utils import load_vcl  # noqa: E402
+from backend.core.fastly.client import load_vcl  # noqa: E402
 from backend.provision.declarative.reconciler import (  # noqa: E402
     FeatureState,
     desired_backends,

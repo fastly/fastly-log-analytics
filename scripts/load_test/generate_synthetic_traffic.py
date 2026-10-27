@@ -5,7 +5,7 @@ Supports:
   1. --target local: Writes synthetic Parquet batches into `cache/{bucket}/buffer/`
      and optionally calls `commit_buffer` to materialize DuckLake snapshots.
   2. --target fos: Generates gzipped NDJSON chunks conforming to
-     `backend/provision/log_paths.py` and uploads them to FOS object storage.
+     `backend/provision/cli.py` and uploads them to FOS object storage.
   3. --target clickhouse / --with-clickhouse: Directly seeds ClickHouse
      fact tables (`request_facts`) and registers publication batches.
 
@@ -176,7 +176,7 @@ def run_target_fos(
     upload_workers: int = 8,
 ) -> int:
     """Generates gzipped NDJSON and uploads directly to FOS object storage with rate pacing & background uploads."""
-    from backend.provision.log_paths import minute_list_prefix
+    from backend.provision.cli import minute_list_prefix
 
     bucket = src.get("s3_bucket") or src.get("fos_bucket")
     if not bucket:
@@ -310,8 +310,8 @@ def run_target_clickhouse(
     """Generates synthetic log records and inserts them directly into ClickHouse."""
     from uuid import uuid4
 
-    from backend.core.clickhouse_client import ClickHouseClient, get_clickhouse_client
-    from backend.high_scale.publication import ClickHouseBatchAdapter, HighScaleBatch, install_clickhouse_schema
+    from backend.core.clickhouse import ClickHouseClient, get_clickhouse_client
+    from backend.high_scale.archive import ClickHouseBatchAdapter, HighScaleBatch, install_clickhouse_schema
 
     if clickhouse_host:
         os.environ["CLICKHOUSE_HOST"] = clickhouse_host

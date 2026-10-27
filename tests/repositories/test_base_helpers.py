@@ -16,8 +16,9 @@ import pytest
 from hypothesis import HealthCheck, assume, given, settings
 from hypothesis import strategies as st
 
+import backend.core.rollups.recompute as rollup_coverage
 from backend.models.common import BaseResponse, FilterSpec
-from backend.repositories import _base, rollup_coverage
+from backend.repositories import _base
 from backend.repositories._base import (
     CANONICAL_METRICS,
     VALID_CHART_INTERVALS,
@@ -305,7 +306,7 @@ def test_attach_ngwaf_cache_reads_postgres_not_a_stale_default_sqlite_file(monke
         def close(self):
             pass
 
-    monkeypatch.setattr("backend.core.metadata.pg_connection.get_pg_readonly_connection", lambda: _Pg())
+    monkeypatch.setattr("backend.core.metadata.base.get_pg_readonly_connection", lambda: _Pg())
     con = duckdb.connect(":memory:")
     try:
         with attach_ngwaf_cache(con, schema_cols=["waf_req_id"], alias="ng_pg") as attached:

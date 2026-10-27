@@ -803,15 +803,6 @@ def stop_clickhouse_observer() -> None:
         _observer._log_error("shutdown", exc)
 
 
-_this_module = sys.modules[__name__]
-sys.modules["backend.core.clickhouse_observer"] = _this_module
-sys.modules["backend.core.clickhouse_metrics"] = _this_module
-_core_pkg = sys.modules.get("backend.core")
-if _core_pkg is not None:
-    setattr(_core_pkg, "clickhouse_observer", _this_module)
-    setattr(_core_pkg, "clickhouse_metrics", _this_module)
-
-
 """Transactional Postgres manifest; never use the SQLite-shaped commit shim."""
 
 
@@ -828,7 +819,7 @@ from backend.core.metadata.base import get_pg_pool
 logger = structlog.get_logger(__name__)
 
 
-from backend.core.metadata import pg_connection
+from backend.core.metadata import base as pg_connection
 
 CLICKHOUSE_SCHEMA_VERSION = 2
 
@@ -1228,7 +1219,6 @@ class PgManifest:
 
 import hashlib
 import logging
-import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from urllib.parse import urlsplit
@@ -1239,7 +1229,7 @@ import structlog
 from botocore.exceptions import ClientError
 
 from backend.core.duckdb import _get_fos_client
-from backend.core.metadata.pg_schema import CLICKHOUSE_CONTROL_DDL
+from backend.core.metadata.base import CLICKHOUSE_CONTROL_DDL
 from backend.utils.telemetry import ensure_utc, parse_iso_utc
 
 __all__ = [
@@ -1376,7 +1366,7 @@ def main() -> None:
         create_clickhouse_schema(client)
 
         try:
-            from backend.high_scale.publication import install_clickhouse_schema
+            from backend.high_scale.archive import install_clickhouse_schema
 
             install_clickhouse_schema()
         except ImportError:
@@ -1387,10 +1377,6 @@ def main() -> None:
         client.close()
         if pg_connection.is_postgres():
             pg_connection.get_pg_pool().close()
-
-
-if "backend.core" in sys.modules:
-    setattr(sys.modules["backend.core"], "clickhouse_schema", sys.modules[__name__])
 
 
 def _ensure_manifest_symbols() -> None:
@@ -1797,22 +1783,5 @@ def __getattr__(name: str):
 _self_mod = sys.modules[__name__]
 _core_pkg = sys.modules.get("backend.core")
 _backend_pkg = sys.modules.get("backend")
-for _ch_alias in (
-    "clickhouse_client",
-    "clickhouse_observer",
-    "clickhouse_metrics",
-    "clickhouse_rows",
-    "clickhouse_manifest",
-    "clickhouse_publication",
-    "clickhouse_schema",
-):
-    if _ch_alias != "clickhouse_schema":
-        sys.modules[f"backend.core.{_ch_alias}"] = _self_mod
-    if _core_pkg is not None:
-        setattr(_core_pkg, _ch_alias, _self_mod)
-    if _backend_pkg is not None and hasattr(_backend_pkg, "_MODULE_ALIASES"):
-        _backend_pkg._MODULE_ALIASES[f"backend.core.{_ch_alias}"] = __name__
-
-
 if __name__ == "__main__":
     main()

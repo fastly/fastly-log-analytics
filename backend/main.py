@@ -49,8 +49,8 @@ from contextlib import asynccontextmanager
 # import. bridge_uvicorn_loggers() (called from lifespan startup, which runs
 # after uvicorn's logging setup) re-points them at root so access lines render
 # through the same chain — see its docstring for the boot-line caveat.
-from backend.models.admin_actions import HealthResponse
-from backend.utils.structlog_config import bridge_uvicorn_loggers, configure_structlog  # noqa: E402
+from backend.models.analytics import HealthResponse
+from backend.utils.telemetry import bridge_uvicorn_loggers, configure_structlog  # noqa: E402
 
 configure_structlog()
 logging.getLogger("apscheduler").setLevel(logging.WARNING)
@@ -87,11 +87,12 @@ from datetime import UTC, datetime
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 
 from backend import config as svcconfig
-from backend.core import clickhouse_client, request_telemetry
-from backend.core import clickhouse_client as clickhouse_observer
+from backend.core import clickhouse as clickhouse_client
+from backend.core import clickhouse as clickhouse_observer
 from backend.core import duckdb as _db
-from backend.high_scale import console_access
-from backend.high_scale.registry_bootstrap import (
+from backend.core import request_telemetry
+from backend.high_scale import postgres_control as console_access
+from backend.high_scale.ingest_controller import (
     get_high_scale_service_registry,
     register_high_scale_services_from_environment,
 )
@@ -243,8 +244,8 @@ def _ensure_scoring_matrix():
     try:
         import json as _json
 
+        from backend.core.metadata.base import fetch_matrix_from_fos
         from backend.provision.session_scoring_orchestrator import _tenant_matrix_path
-        from backend.state_sync import fetch_matrix_from_fos
 
         for cfg in svcconfig.list_configs():
             if not (cfg.get("scoring") or {}).get("enabled"):
@@ -374,7 +375,7 @@ def _migrate_config_on_startup() -> None:
     import json
     from pathlib import Path
 
-    from backend.provision.declarative.state import config_changed, migrate_config
+    from backend.provision.declarative.reconciler import config_changed, migrate_config
 
     config_dir = Path(svcconfig.CONFIGS_DIR)
     if not config_dir.exists():
@@ -472,7 +473,7 @@ def _enforce_proxy_headers_configured() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Own ClickHouse cleanup even if a later startup/shutdown step raises."""
-    from backend.request_metrics_observer import observer as request_metrics_observer
+    from backend.core.request_telemetry import observer as request_metrics_observer
 
     try:
         async with _application_lifespan(app):
@@ -492,10 +493,10 @@ async def lifespan(app: FastAPI):
 @asynccontextmanager
 async def _application_lifespan(app: FastAPI):
     """Startup / shutdown lifecycle."""
+    from backend.celery_app import publisher as _sync_status_publisher
     from backend.core.realtime.publisher import publisher as _rt_publisher
     from backend.cron.scheduler import get_scheduler
-    from backend.cron_runs_publisher import publisher as _cron_runs_publisher
-    from backend.sync_status_publisher import publisher as _sync_status_publisher
+    from backend.cron.scheduler import publisher as _cron_runs_publisher
 
     # Bind all in-process SSE publishers to this loop so worker threads
     # can fan tick-updates out to connected subscribers via
@@ -578,7 +579,7 @@ async def _application_lifespan(app: FastAPI):
     # start moves the ~hundreds-of-ms port bind out of the first request's
     # latency.
     try:
-        from backend.utils import telemetry_proxy
+        from backend.utils import telemetry as telemetry_proxy
 
         telemetry_proxy.start_proxy_server()
     except Exception as e:
@@ -794,18 +795,18 @@ async def telemetry_middleware(request: Request, call_next):
     no longer reach this layer, so they no longer pollute usage_log with
     admin-scoped rows.
     """
+    import backend.scoring as _scoring_labels
     from backend import config as svcconfig
-    from backend.core.query_attribution import (
+    from backend.core.request_telemetry import (
         Attribution as _Attribution,
     )
-    from backend.core.query_attribution import (
+    from backend.core.request_telemetry import (
         current_attribution as _current_attribution,
     )
-    from backend.scoring import labels as _scoring_labels
-    from backend.utils.active_requests import (
+    from backend.utils.telemetry import (
         decrement_active_requests as _dec_active_requests,
     )
-    from backend.utils.active_requests import (
+    from backend.utils.telemetry import (
         increment_active_requests as _inc_active_requests,
     )
     from backend.utils.telemetry import process_context_scope, start_call_tracking
@@ -898,7 +899,7 @@ async def telemetry_middleware(request: Request, call_next):
                     request, "_stream_consumed", False
                 ):
                     if await request.is_disconnected():
-                        from backend.core.query_registry import query_registry as _qr
+                        from backend.core.request_telemetry import query_registry as _qr
 
                         _qr.cancel_for_key(cancel_key)
                         return
@@ -917,7 +918,7 @@ async def telemetry_middleware(request: Request, call_next):
             # statements it already started keep running in worker threads, each holding a scarce pool slot; every
             # further reload would add another orphan until the pool saturates ("pool for <svc> saturated at 4").
             # Interrupt this request's queries (and only this request's) so the slots free immediately.
-            from backend.core.query_registry import query_registry as _qr
+            from backend.core.request_telemetry import query_registry as _qr
 
             try:
                 _qr.cancel_for_key(cancel_key)
@@ -988,7 +989,7 @@ app.add_middleware(RemoteAccessMiddleware)
 # INVARIANT: TelemetryResponseBodyMiddleware inside Compress, outside
 # RemoteAccess (see ADR-04). Reads uncompressed JSON bodies to inject
 # debug fields; gated on DEBUG_RESPONSES.
-from backend.utils.telemetry_response_middleware import TelemetryResponseBodyMiddleware  # noqa: E402
+from backend.utils.telemetry import TelemetryResponseBodyMiddleware  # noqa: E402
 
 app.add_middleware(TelemetryResponseBodyMiddleware)
 
@@ -1041,13 +1042,12 @@ assert_middleware_order(app)
 
 # ── Routers ───────────────────────────────────────────────────────────────────
 
-from backend.models._base import DEFAULT_ERROR_RESPONSES  # noqa: E402
+from backend.models.common import DEFAULT_ERROR_RESPONSES  # noqa: E402
 from backend.routers import (
     alerts,
     audit,
     control_room,
     dashboard,
-    high_scale,
     insights,
     network,
     origin,
@@ -1057,6 +1057,7 @@ from backend.routers import (
     security,
     session_scoring,
 )
+from backend.routers.admin import high_scale
 
 app.include_router(dashboard.router)
 app.include_router(origin.router)

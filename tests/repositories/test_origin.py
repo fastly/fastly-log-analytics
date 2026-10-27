@@ -13,10 +13,10 @@ from unittest.mock import MagicMock, patch
 
 import duckdb
 import pytest
-from backend.models.network import NetworkHealthSummary, NetworkWorstEntry
 
 from backend.core.duckdb import _clear_schema_cache
 from backend.core.rollups._common import NETWORK_GEO_BUNDLE_FILENAME, NETWORK_HEATMAP_BUNDLE_FILENAME
+from backend.models.analytics import NetworkHealthSummary, NetworkWorstEntry
 from backend.models.common import FilterSpec
 from backend.repositories import origin
 from backend.repositories import origin as origin_mod
@@ -1059,7 +1059,7 @@ def _seed_full_rollup_coverage(cache_root: str, base_rows: list[dict], hour_toke
         patch("backend.core.duckdb._cache_dir", return_value=cache_root),
         patch("backend.core.rollups._common._safe_table_for", return_value=_rollup_base_table()),
         patch("backend.core.duckdb.get_connection", side_effect=lambda *a, **k: _fresh_con()),
-        patch("backend.core.storage.view._get_service_lock", _noop_lock),
+        patch("backend.core.storage._core._get_service_lock", _noop_lock),
         patch("backend.core.storage.execute_with_stale_view_retry", side_effect=lambda c, _src, fn: fn(c)),
     ):
         rollups.build_origin_summary_bundles(sid, src, hour_tokens)
@@ -1992,7 +1992,7 @@ class TestBuildNetworkHeatmapBundles:
         assert expected.issubset(cols)
 
     def test_skip_active_hour_token_is_filtered(self, tmp_path):
-        from backend.core.rollups.network_health_heatmap import build_network_heatmap_bundles
+        from backend.core.rollups.origin_dims import build_network_heatmap_bundles
 
         active_hour = datetime.now(UTC).strftime("%Y-%m-%d-%H")
         cache_dir = tmp_path / "cache" / "test_svc"

@@ -20,30 +20,30 @@ from uuid import uuid4
 import boto3
 import httpx
 import pytest
-from backend.core.clickhouse_client import ClickHouseClient
-from backend.high_scale.archive_models import ServingWatermark
-from backend.high_scale.orchestration import HighScaleWorkerCoordinator
-from backend.high_scale.publication import (
-    rum_environment,
-    rum_error_position,
-)
-from backend.high_scale.registry_bootstrap import HighScaleService
-from backend.high_scale.source_discovery import (
-    INITIAL_SOURCE_CURSOR,
-    RUM_REINSPECTION_INTERVAL,
-    TERMINAL_SOURCE_CURSOR_PREFIX,
-    S3SourceObjectLister,
-    SourceObjectDescriptor,
-    SourceObjectMissingError,
-    SourceObjectPage,
-)
 from botocore.stub import Stubber
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from psycopg_pool import ConnectionPool
 
 from backend.config import ClickHouseConfig
+from backend.core.clickhouse import ClickHouseClient
 from backend.core.request_context import build_request_context
+from backend.high_scale.archive import (
+    ServingWatermark,
+    rum_environment,
+    rum_error_position,
+)
+from backend.high_scale.ingest_controller import (
+    INITIAL_SOURCE_CURSOR,
+    RUM_REINSPECTION_INTERVAL,
+    TERMINAL_SOURCE_CURSOR_PREFIX,
+    HighScaleService,
+    HighScaleWorkerCoordinator,
+    S3SourceObjectLister,
+    SourceObjectDescriptor,
+    SourceObjectMissingError,
+    SourceObjectPage,
+)
 from backend.high_scale.postgres_control import PostgresControlPlane
 from backend.high_scale.rum import parse_rum_filters, rum_analytics, rum_live_events
 from backend.routers import rum as rum_router
@@ -1113,7 +1113,18 @@ from contextlib import contextmanager
 
 import duckdb
 import pytest
-from backend.core.fastly.rum_provisioning import (
+from tests._helpers.ledger import (
+    DuckLakeLedgerEnv,
+    attacher,
+    clear_ledger,
+    download_stub,
+    lake_reader,
+    seed_discovered,
+)
+
+import backend.core.metadata.ingest_log as quarantine
+from backend.core import ingest as ingest_mod
+from backend.core.fastly.client import (
     RUM_ASSET_FETCH_NAME,
     RUM_DELIVER_SET_COOKIE_NAME,
     RUM_FARO_FETCH_NAME,
@@ -1124,20 +1135,6 @@ from backend.core.fastly.rum_provisioning import (
     generate_rum_vcl,
     validate_rum_custom_condition,
 )
-from backend.core.metadata.quarantine import list_quarantine_evidence
-from backend.core.quarantine import read_evidence
-from backend.utils.vcl_validator import lint_vcl
-from tests._helpers.ledger import (
-    DuckLakeLedgerEnv,
-    attacher,
-    clear_ledger,
-    download_stub,
-    lake_reader,
-    seed_discovered,
-)
-
-from backend.core import ingest as ingest_mod
-from backend.core import quarantine
 from backend.core.ingest import (
     LEDGER_RECLAIM_AFTER_S,
     _parse_rum_beacon_file,
@@ -1147,6 +1144,8 @@ from backend.core.ingest import (
     discover_rum_prefix,
     sweep_rum_ledger_once,
 )
+from backend.core.log_fields import lint_vcl
+from backend.core.metadata.ingest_log import list_quarantine_evidence, read_evidence
 from backend.core.rum_ingest import ingest_rum_logs
 
 SERVICE_ID = "test-rum-ledger-edges"
@@ -1231,9 +1230,9 @@ def _discover_or_sweep_env(
     cfg = {"service_id": service_id} if config is _DEFAULT else config
     src = {"name": "test", "bucket": BUCKET} if source is _DEFAULT else source
     q_patch = (
-        patch("backend.celery_status.celery_queue_depths", side_effect=queue_depths)
+        patch("backend.celery_app.celery_queue_depths", side_effect=queue_depths)
         if isinstance(queue_depths, Exception)
-        else patch("backend.celery_status.celery_queue_depths", return_value=queue_depths)
+        else patch("backend.celery_app.celery_queue_depths", return_value=queue_depths)
     )
     with (
         patch("backend.config.load_config", return_value=cfg),
@@ -1393,7 +1392,9 @@ def test_ingest_rum_logs_success(rum_ingest_env, capture_failure):
             events = list(ingest_rum_logs("test_service"))
         capture = None
     else:
-        with patch("backend.core.quarantine.capture_evidence", return_value={"id": 1, "cap_evictions": 0}) as capture:
+        with patch(
+            "backend.core.metadata.ingest_log.capture_evidence", return_value={"id": 1, "cap_evictions": 0}
+        ) as capture:
             events = list(ingest_rum_logs("test_service"))
 
     assert events == [("started", 123), ("file_done", "rum_log_0.json.gz", 1), ("done", 1)]
@@ -1844,7 +1845,7 @@ def test_convert_rum_object_quarantines_malformed_line_and_commits_valid_rows(tm
     with (
         _rum_env(tmp_path, download_stub({f"s3://{BUCKET}/{object_key}": str(raw_file)}), fos=fos_mock) as attach,
         patch(
-            "backend.core.quarantine.capture_evidence",
+            "backend.core.metadata.ingest_log.capture_evidence",
             return_value={"id": 1, "cap_evictions": 0, "quarantine_capture_failures": 0},
         ) as capture,
     ):
@@ -1906,7 +1907,7 @@ def test_convert_rum_object_uses_ducklake_detach_in_finally(tmp_path):
     _write_gz(raw, [VITALS_LINE])
     with (
         _rum_env(tmp_path, download_stub({f"s3://{BUCKET}/{object_key}": str(raw)})),
-        patch("backend.core.storage._ducklake._ducklake_detach") as mock_detach,
+        patch("backend.core.storage._core._ducklake_detach") as mock_detach,
     ):
         assert convert_batch_rum_objects(SERVICE_ID, [object_key], "w1")["committed"] == 1
         assert mock_detach.called
@@ -1948,7 +1949,7 @@ def test_convert_rum_object_commits_valid_rows_despite_side_effect_failures(tmp_
 
     ctx = (
         patch(
-            "backend.core.quarantine.capture_evidence",
+            "backend.core.metadata.ingest_log.capture_evidence",
             return_value={"id": 0, "cap_evictions": 0, "quarantine_capture_failures": 1},
         )
         if failure_mode == "quarantine_return_fail"
@@ -2064,7 +2065,7 @@ def test_quarantine_rum_corrupt_lines_captures_and_validates_prefix(tmp_path):
     corrupt = [("{bad one", "invalid_json"), ('{"a":1}', "parse_error: nope")]
 
     with patch(
-        "backend.core.quarantine.capture_evidence",
+        "backend.core.metadata.ingest_log.capture_evidence",
         return_value={"id": 1, "cap_evictions": 0, "quarantine_capture_failures": 0},
     ) as capture:
         result = _quarantine_rum_corrupt_lines(fos, src, object_key, corrupt, valid_count=7, local_file=str(local_file))
@@ -2402,7 +2403,7 @@ def test_falco_lints_rum_asset_fetch_snippets(faro_version, snip_id, subroutine)
 
 
 def test_falco_missing_binary_and_custom_conditions(monkeypatch):
-    monkeypatch.setattr("backend.utils.vcl_validator._falco_binary", lambda: None)
+    monkeypatch.setattr("backend.core.log_fields._falco_binary", lambda: None)
     res = lint_vcl("if (true) {}", wrap_subroutine=None)
     assert res.skipped is True and res.ok is True
 

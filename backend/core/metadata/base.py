@@ -35,11 +35,6 @@ import psycopg
 from psycopg_pool import ConnectionPool
 
 pg_connection: Any = sys.modules[__name__]
-sys.modules["backend.core.metadata.pg_connection"] = sys.modules[__name__]
-if "backend.core.metadata" in sys.modules:
-    setattr(sys.modules["backend.core.metadata"], "pg_connection", sys.modules[__name__])
-if "backend" in sys.modules and hasattr(sys.modules["backend"], "_MODULE_ALIASES"):
-    sys.modules["backend"]._MODULE_ALIASES["backend.core.metadata.pg_connection"] = __name__
 
 _pool: ConnectionPool | None = globals().get("_pool")
 
@@ -574,7 +569,7 @@ class PgConnectionWrapper:
     def _execute(self, sql: str, params: Any = None):
         import time
 
-        from backend.utils.sqlite_profiler import _live_deregister, _live_register, _record
+        from backend.utils.telemetry import _live_deregister, _live_register, _record
 
         cur = self._get_cursor()
         rewritten_sql = _rewrite_sql(sql)
@@ -609,7 +604,7 @@ class PgConnectionWrapper:
     def _executemany(self, sql: str, seq_of_params: list[Any]):
         import time
 
-        from backend.utils.sqlite_profiler import _live_deregister, _live_register, _record
+        from backend.utils.telemetry import _live_deregister, _live_register, _record
 
         cur = self._get_cursor()
         rewritten_sql = _rewrite_sql(sql)
@@ -2547,7 +2542,7 @@ def export_admin_state(service_id: str):
         cfg = svcconfig.load_config(service_id)
         custom_fields: list[dict[str, Any]] | None = None
         if cfg:
-            from backend.core import field_registry as _lf
+            from backend.core import log_fields as _lf
 
             lf = _lf.get_lf_config(cfg)
             custom_fields = lf.get("custom_fields", [])
@@ -2569,39 +2564,3 @@ def export_admin_state(service_id: str):
         logger.debug(f"[state_sync] Exported admin state to {key}")
     except Exception as e:
         logger.warning(f"[state_sync] Failed to export admin state: {e}")
-
-
-_self = sys.modules[__name__]
-_METADATA_BASE_ALIASES = (
-    "backend.core.metadata.pg_schema",
-    "backend.core.metadata.reconciliation",
-    "backend.core.metadata.state",
-    "backend.core.metadata.alerts",
-    "backend.core.metadata.asn_cache",
-    "backend.core.metadata.views",
-    "backend.state_sync",
-)
-for _mod_name in _METADATA_BASE_ALIASES:
-    sys.modules[_mod_name] = _self
-if "backend.core.metadata" in sys.modules:
-    _meta_pkg = sys.modules["backend.core.metadata"]
-    for _attr in ("pg_schema", "reconciliation", "state", "alerts", "asn_cache", "views"):
-        setattr(_meta_pkg, _attr, _self)
-if "backend" in sys.modules:
-    setattr(sys.modules["backend"], "state_sync", _self)
-    if hasattr(sys.modules["backend"], "_MODULE_ALIASES"):
-        for _mod_name in _METADATA_BASE_ALIASES:
-            sys.modules["backend"]._MODULE_ALIASES[_mod_name] = __name__
-        sys.modules["backend"]._MODULE_ALIASES.update(
-            {
-                "backend.utils.ngwaf": "backend.core.rollups.security_dims",
-                "backend.core.rollups.ngwaf_bots": "backend.core.rollups.security_dims",
-                "backend.core.rollups.hour_bundles": "backend.core.rollups.day_bundles",
-                "backend.core.rollups.time_series": "backend.core.rollups.recompute",
-                "backend.core.rollups.overview": "backend.core.rollups.recompute",
-                "backend.core.rollups.sessions": "backend.core.rollups.recompute",
-                "backend.core._log_fields_data": "backend.core.log_fields",
-                "backend.scoring.evaluate": "backend.scoring",
-                "backend.scoring.matrix": "backend.scoring",
-            }
-        )

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from fastapi import HTTPException, Query
 
@@ -76,8 +77,8 @@ def refresh_pop_locations(
 def trigger_ngwaf_sync_endpoint(service_id: str) -> NgwafSyncResponse:
     """Trigger manual NGWAF bot sync for a service."""
     from backend import config as svcconfig
+    from backend.core.rollups.security_dims import get_cache_stats
     from backend.cron.jobs.metadata import _run_ngwaf_bot_sync
-    from backend.utils.ngwaf import get_cache_stats
 
     load_service_config(service_id)
 
@@ -95,7 +96,7 @@ def get_ngwaf_status_endpoint(
 ) -> NgwafStatusResponse:
     """Return NGWAF cache statistics and workspace sync watermarks."""
     from backend import config as svcconfig
-    from backend.utils.ngwaf import get_cache_stats
+    from backend.core.rollups.security_dims import get_cache_stats
 
     stats = get_cache_stats()
     if service_id:
@@ -157,7 +158,7 @@ def trigger_rdns_enrich_endpoint(
     """Trigger manual rDNS enrichment batch."""
     from backend.utils.bot_sources import enrich_batch
 
-    summary = enrich_batch(limit=limit)
+    summary: Any = enrich_batch(limit=limit)
     return RdnsEnrichResponse(ok=True, summary=summary)
 
 

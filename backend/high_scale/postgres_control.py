@@ -10,7 +10,6 @@ import json
 import logging
 import os
 import re
-import sys
 import threading
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -23,18 +22,19 @@ from psycopg_pool import ConnectionPool
 
 from backend import config
 from backend.core.clickhouse import ClickHouseClient
-from backend.core.metadata.pg_connection import get_pg_pool
-from backend.core.share_db.validation import IP_FAMILY_KEYS, SESSION_ID_KEYS
-from backend.high_scale.archive_models import (
+from backend.core.metadata.base import get_pg_pool
+from backend.core.share_db import IP_FAMILY_KEYS, SESSION_ID_KEYS
+from backend.high_scale.archive import (
     ArchiveArtifact,
     ArchiveManifest,
+    ArchivePublication,
     ArchiveSourceEntry,
     ArchiveSourceObject,
     ArchiveState,
+    ObjectStore,
     validate_archive_transition,
 )
-from backend.high_scale.archive_publication import ArchivePublication, ObjectStore
-from backend.high_scale.orchestration import INITIAL_SOURCE_CURSOR, RUM_SOURCE_DOMAINS
+from backend.high_scale.ingest_controller import INITIAL_SOURCE_CURSOR, RUM_SOURCE_DOMAINS
 
 logger = logging.getLogger(__name__)
 SCHEMA_DDL = """
@@ -595,7 +595,7 @@ class PostgresControlPlane:
             )
 
     def get_batch_manifest(self, batch_id: str) -> Any | None:
-        from backend.high_scale.publication import BatchManifest, PublicationStatus
+        from backend.high_scale.archive import BatchManifest, PublicationStatus
 
         _require_text(batch_id, "batch_id")
         with self.transaction(read_only=True) as connection:
@@ -1802,16 +1802,3 @@ class HighScaleDeletionSweeper:
             except ValueError:
                 skipped += len(keys)
         return DeletionSweepResult(deleted, skipped)
-
-
-_self_mod = sys.modules[__name__]
-for _alias_name in ("console_access", "deletion", "admin_plane"):
-    sys.modules[f"backend.high_scale.{_alias_name}"] = _self_mod
-_hs_pkg = sys.modules.get("backend.high_scale")
-if _hs_pkg is not None:
-    for _alias_name in ("console_access", "deletion", "admin_plane"):
-        setattr(_hs_pkg, _alias_name, _self_mod)
-_backend_pkg = sys.modules.get("backend")
-if _backend_pkg is not None and hasattr(_backend_pkg, "_MODULE_ALIASES"):
-    for _alias_name in ("console_access", "deletion", "admin_plane"):
-        _backend_pkg._MODULE_ALIASES[f"backend.high_scale.{_alias_name}"] = __name__

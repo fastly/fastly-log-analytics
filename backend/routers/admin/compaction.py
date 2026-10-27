@@ -9,9 +9,9 @@ from typing import Any, Literal
 
 from fastapi import Depends, HTTPException, Query
 
+from backend.core.request_context import get_source, require_admin
 from backend.core.rollups import day_bundles as _day_bundles
-from backend.core.rollups.time_series import build_time_series_bundles
-from backend.deps import get_source, require_admin
+from backend.core.rollups.time_series_rollups import build_time_series_bundles
 from backend.models.admin import (
     BackfillBundleRollupsResponse,
     CompactionStatsResponse,
@@ -34,7 +34,7 @@ from backend.models.admin import (
     StorageTableInfoResponse,
     SyncStartResponse,
 )
-from backend.models.admin_actions import StorageCalendarResponse
+from backend.models.analytics import StorageCalendarResponse
 from backend.utils.date_utils import parse_day_key_strict, parse_hour_key_strict
 from backend.utils.router_utils import (
     make_error,
@@ -127,7 +127,7 @@ def backfill_bundle_rollups(source: dict[str, Any] = Depends(get_source)) -> Bac
         backfill_missing_bundles,
     )
     from backend.core.rollups.recompute import ADMIN_BACKFILLS, DAY_COMPACTORS
-    from backend.core.rollups.time_series import build_session_bundles
+    from backend.core.rollups.session_rollups import build_session_bundles
 
     sid = service_id_from_source(source)
     n_ts = backfill_missing_bundles(
@@ -158,7 +158,7 @@ def backfill_bundle_rollups(source: dict[str, Any] = Depends(get_source)) -> Bac
         from contextlib import closing
 
         from backend.core.duckdb import get_connection, rum_source_for
-        from backend.core.rollups.rum import recompute_rum_aggregates, table_exists
+        from backend.core.rollups.recompute import recompute_rum_aggregates, table_exists
         from backend.repositories import rum as rum_repo
 
         rum_src = rum_source_for(source)
@@ -251,7 +251,7 @@ def consolidate_rollups(source: dict[str, Any] = Depends(get_source)) -> Consoli
         compact_closed_days_to_daily,
     )
     from backend.core.rollups._common import _ip_spread_root
-    from backend.core.rollups.hour_bundles import bundle_hours_ip_spread
+    from backend.core.rollups.day_bundles import bundle_hours_ip_spread
     from backend.core.rollups.recompute import cleanup_old_rollups
 
     sid = service_id_from_source(source)
@@ -473,7 +473,7 @@ def partial_hour_merge_now(
     """Trigger an immediate partial-hour merge tick for the active UTC hour."""
     sid = service_id_from_source(source, service_id)
     from backend.core.log_fields import derived
-    from backend.core.rollups.partial_hour import gc_stale_partial_hours, merge_partial_hour
+    from backend.core.rollups.day_bundles import gc_stale_partial_hours, merge_partial_hour
     from backend.repositories._base import _LIVE_TOPN_SKIP_FIELDS
     from backend.repositories.dashboard import FIELDS
 
@@ -507,7 +507,7 @@ def partial_hour_status(
     source: dict[str, Any] = Depends(get_source),
 ) -> PartialHourStatusResponse:
     """Inspect the status of the current active hour's partial rollup."""
-    from backend.core.rollups.partial_hour import (
+    from backend.core.rollups.day_bundles import (
         _all_fields_path,
         read_partial_hour_total,
         read_partial_hour_watermark,
@@ -797,7 +797,7 @@ def _stream_reset_sse(
 @router.post("/admin/reset-logs", dependencies=[Depends(require_json_content_type)])
 def reset_logs_endpoint(body: ResetLogsRequest, source: dict[str, Any] = Depends(get_source)) -> Any:
     """Permanently delete this service's log data (cloud + local) over SSE."""
-    from backend.core.duckdb import reset_service_logs
+    from backend.core.reset import reset_service_logs
 
     return _stream_reset_sse(
         body,
@@ -811,7 +811,7 @@ def reset_logs_endpoint(body: ResetLogsRequest, source: dict[str, Any] = Depends
 @router.post("/admin/reset-rum", dependencies=[Depends(require_json_content_type)])
 def reset_rum_endpoint(body: ResetLogsRequest, source: dict[str, Any] = Depends(get_source)) -> Any:
     """Permanently delete this service's RUM telemetry data (cloud + local) over SSE."""
-    from backend.core.duckdb import reset_service_rum
+    from backend.core.reset import reset_service_rum
 
     return _stream_reset_sse(body, source, reset_service_rum, "RUM")
 

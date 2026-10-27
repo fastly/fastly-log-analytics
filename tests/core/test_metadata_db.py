@@ -16,21 +16,24 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import time_machine
-from backend.core.metadata.cron_log import start_cron_run
-from backend.core.metadata.quarantine import (
+
+import backend.core.metadata as metadata_db
+import backend.core.metadata.base as pg_connection
+import backend.core.metadata.base as pg_schema
+import backend.core.metadata.ingest_log as quarantine
+import backend.core.metadata.usage_log as usage_log_db
+from backend import celery_app, config, main
+from backend.core import share_db as share_db_connection
+from backend.core.metadata import base, ingest_log, usage_log
+from backend.core.metadata.base import InvalidServiceIdError, get_con
+from backend.core.metadata.ingest_log import (
     delete_quarantine_evidence,
     get_quarantine_evidence,
     get_quarantine_evidence_summary,
     get_quarantine_storage_total,
     list_quarantine_evidence,
 )
-
-from backend import celery_app, config, main
-from backend.core import metadata as metadata_db
-from backend.core import quarantine
-from backend.core import share_db as share_db_connection
-from backend.core.metadata import base, ingest_log, pg_connection, pg_schema, usage_log, usage_log_db
-from backend.core.metadata.base import InvalidServiceIdError, get_con
+from backend.core.metadata.usage_log import start_cron_run
 from backend.utils.date_utils import iso_z_now
 
 
@@ -1099,13 +1102,13 @@ def test_export_does_not_include_alerts():
     s3_mock.put_object.side_effect = capture_put
 
     with (
-        patch("backend.state_sync.get_source_for_service", return_value=source),
-        patch("backend.state_sync._get_fos_client", return_value=s3_mock),
-        patch("backend.state_sync.svcconfig.load_config", return_value=cfg_mock),
+        patch("backend.core.metadata.base.get_source_for_service", return_value=source),
+        patch("backend.core.metadata.base._get_fos_client", return_value=s3_mock),
+        patch("backend.core.metadata.base.svcconfig.load_config", return_value=cfg_mock),
         # The metadata_db autouse fixture isolates per-service SQLite to tmp_path,
         # so list_views / export_audit all hit a fresh empty file.
     ):
-        from backend.state_sync import export_admin_state
+        from backend.core.metadata.base import export_admin_state
 
         export_admin_state("svc1")
 
@@ -1121,7 +1124,7 @@ def test_export_does_not_include_alerts():
 def test_admin_state_key_with_empty_prefix():
     """Bare prefix → ``meta/admin_state.json`` (no leading slash).
     Pinned because a leading slash breaks S3 listing semantics."""
-    from backend.state_sync import get_admin_state_key
+    from backend.core.metadata.base import get_admin_state_key
 
     key = get_admin_state_key({"prefix": ""})
     assert key == "meta/admin_state.json"
@@ -1131,7 +1134,7 @@ def test_admin_state_key_with_prefix_strips_slashes():
     """``/customer1/`` → ``customer1/meta/...`` (slashes stripped
     from both ends). Prevents double-slash keys when admins paste a
     prefix with trailing slashes."""
-    from backend.state_sync import get_admin_state_key
+    from backend.core.metadata.base import get_admin_state_key
 
     key = get_admin_state_key({"prefix": "/customer1/"})
     assert key == "customer1/meta/admin_state.json"
@@ -1159,10 +1162,10 @@ def test_export_skips_when_source_not_found():
     service that was just torn down; we must not raise."""
     s3 = MagicMock()
     with (
-        patch("backend.state_sync.get_source_for_service", return_value=None),
-        patch("backend.state_sync._get_fos_client", return_value=s3),
+        patch("backend.core.metadata.base.get_source_for_service", return_value=None),
+        patch("backend.core.metadata.base._get_fos_client", return_value=s3),
     ):
-        from backend.state_sync import export_admin_state
+        from backend.core.metadata.base import export_admin_state
 
         export_admin_state("ghost-svc")
 
@@ -1174,10 +1177,10 @@ def test_export_swallows_unexpected_exceptions():
     logged — export is best-effort, called from request handlers that
     shouldn't 500 because the state mirror failed."""
     with (
-        patch("backend.state_sync.get_source_for_service", return_value=_src()),
-        patch("backend.state_sync._get_fos_client", side_effect=RuntimeError("S3 broken")),
+        patch("backend.core.metadata.base.get_source_for_service", return_value=_src()),
+        patch("backend.core.metadata.base._get_fos_client", side_effect=RuntimeError("S3 broken")),
     ):
-        from backend.state_sync import export_admin_state
+        from backend.core.metadata.base import export_admin_state
 
         # Must not raise
         export_admin_state("svc1")
@@ -1196,11 +1199,11 @@ def test_export_omits_custom_fields_when_config_missing():
     s3.put_object.side_effect = capture_put
 
     with (
-        patch("backend.state_sync.get_source_for_service", return_value=_src()),
-        patch("backend.state_sync._get_fos_client", return_value=s3),
-        patch("backend.state_sync.svcconfig.load_config", return_value=None),
+        patch("backend.core.metadata.base.get_source_for_service", return_value=_src()),
+        patch("backend.core.metadata.base._get_fos_client", return_value=s3),
+        patch("backend.core.metadata.base.svcconfig.load_config", return_value=None),
     ):
-        from backend.state_sync import export_admin_state
+        from backend.core.metadata.base import export_admin_state
 
         export_admin_state("svc1")
 
@@ -1226,7 +1229,7 @@ def test_cdn_get_builds_url_with_secret_query_param():
         patch("urllib.request.urlopen", return_value=cm) as mock_open,
         patch("backend.utils.telemetry.record_cdn_call"),
     ):
-        from backend.state_sync import _cdn_get
+        from backend.core.metadata.base import _cdn_get
 
         body = _cdn_get(src, "meta/admin_state.json")
 
@@ -1252,7 +1255,7 @@ def test_cdn_get_records_telemetry_with_byte_count():
         patch("urllib.request.urlopen", return_value=cm),
         patch("backend.utils.telemetry.record_cdn_call") as mock_record,
     ):
-        from backend.state_sync import _cdn_get
+        from backend.core.metadata.base import _cdn_get
 
         _cdn_get(src, "some/key.json")
 
@@ -1263,7 +1266,7 @@ def test_cdn_get_records_telemetry_with_byte_count():
 
 def test_get_scoring_matrix_key_construction():
     """scoring_matrix.json lives next to admin_state.json under meta/."""
-    from backend.state_sync import get_scoring_matrix_key
+    from backend.core.metadata.base import get_scoring_matrix_key
 
     assert get_scoring_matrix_key({"prefix": ""}) == "meta/scoring_matrix.json"
     assert get_scoring_matrix_key({"prefix": "/c1/"}) == "c1/meta/scoring_matrix.json"
@@ -1280,10 +1283,10 @@ def test_publish_matrix_uploads_to_meta():
     s3.put_object.side_effect = capture_put
 
     with (
-        patch("backend.state_sync.get_source_for_service", return_value=_src()),
-        patch("backend.state_sync._get_fos_client", return_value=s3),
+        patch("backend.core.metadata.base.get_source_for_service", return_value=_src()),
+        patch("backend.core.metadata.base._get_fos_client", return_value=s3),
     ):
-        from backend.state_sync import publish_matrix_to_fos
+        from backend.core.metadata.base import publish_matrix_to_fos
 
         publish_matrix_to_fos("svc1", {"version": "2026-06-03-a", "counts": {"/": {"/login": 5}}})
 
@@ -1304,10 +1307,10 @@ def test_fetch_matrix_returns_none_on_no_such_key():
     s3.get_object.side_effect = _NoSuchKey("missing")
 
     with (
-        patch("backend.state_sync.get_source_for_service", return_value=_src()),
-        patch("backend.state_sync._get_fos_client", return_value=s3),
+        patch("backend.core.metadata.base.get_source_for_service", return_value=_src()),
+        patch("backend.core.metadata.base._get_fos_client", return_value=s3),
     ):
-        from backend.state_sync import fetch_matrix_from_fos
+        from backend.core.metadata.base import fetch_matrix_from_fos
 
         assert fetch_matrix_from_fos("svc1") is None
 
@@ -1318,7 +1321,7 @@ def test_fetch_matrix_returns_none_on_no_such_key():
 def test_get_scoring_matrix_history_key_with_empty_prefix():
     """Historical matrices live next to scoring_matrix.json under a
     scoring_matrix_history/ subdir keyed by version string."""
-    from backend.state_sync import get_scoring_matrix_history_key
+    from backend.core.metadata.base import get_scoring_matrix_history_key
 
     key = get_scoring_matrix_history_key({"prefix": ""}, "2026-06-03-a")
     assert key == "meta/scoring_matrix_history/2026-06-03-a.json"
@@ -1328,7 +1331,7 @@ def test_get_scoring_matrix_history_key_strips_prefix_slashes():
     """Mirrors get_admin_state_key/get_scoring_matrix_key: slashes are
     stripped from both ends of the customer prefix to prevent double-slash
     keys when an admin pastes ``/customer1/`` in the source config."""
-    from backend.state_sync import get_scoring_matrix_history_key
+    from backend.core.metadata.base import get_scoring_matrix_history_key
 
     key = get_scoring_matrix_history_key({"prefix": "/customer1/"}, "v7")
     assert key == "customer1/meta/scoring_matrix_history/v7.json"
@@ -1337,8 +1340,8 @@ def test_get_scoring_matrix_history_key_strips_prefix_slashes():
 def test_list_scoring_matrix_versions_returns_empty_when_source_missing():
     """Same shape as the other matrix helpers: unknown service id → []
     (not None, not raise) so the routes layer can render an empty table."""
-    with patch("backend.state_sync.get_source_for_service", return_value=None):
-        from backend.state_sync import list_scoring_matrix_versions
+    with patch("backend.core.metadata.base.get_source_for_service", return_value=None):
+        from backend.core.metadata.base import list_scoring_matrix_versions
 
         assert list_scoring_matrix_versions("ghost-svc") == []
 
@@ -1380,10 +1383,10 @@ def test_list_scoring_matrix_versions_sorts_descending_by_last_modified():
     s3.get_paginator.return_value = paginator
 
     with (
-        patch("backend.state_sync.get_source_for_service", return_value=_src()),
-        patch("backend.state_sync._get_fos_client", return_value=s3),
+        patch("backend.core.metadata.base.get_source_for_service", return_value=_src()),
+        patch("backend.core.metadata.base._get_fos_client", return_value=s3),
     ):
-        from backend.state_sync import list_scoring_matrix_versions
+        from backend.core.metadata.base import list_scoring_matrix_versions
 
         rows = list_scoring_matrix_versions("svc1")
 
@@ -1407,10 +1410,10 @@ def test_list_scoring_matrix_versions_swallows_s3_errors():
     s3.get_paginator.side_effect = RuntimeError("S3 down")
 
     with (
-        patch("backend.state_sync.get_source_for_service", return_value=_src()),
-        patch("backend.state_sync._get_fos_client", return_value=s3),
+        patch("backend.core.metadata.base.get_source_for_service", return_value=_src()),
+        patch("backend.core.metadata.base._get_fos_client", return_value=s3),
     ):
-        from backend.state_sync import list_scoring_matrix_versions
+        from backend.core.metadata.base import list_scoring_matrix_versions
 
         assert list_scoring_matrix_versions("svc1") == []
 
@@ -1424,10 +1427,10 @@ def test_restore_scoring_matrix_version_returns_none_when_version_missing():
     s3.head_object.side_effect = Exception("NoSuchKey")
 
     with (
-        patch("backend.state_sync.get_source_for_service", return_value=_src()),
-        patch("backend.state_sync._get_fos_client", return_value=s3),
+        patch("backend.core.metadata.base.get_source_for_service", return_value=_src()),
+        patch("backend.core.metadata.base._get_fos_client", return_value=s3),
     ):
-        from backend.state_sync import restore_scoring_matrix_version
+        from backend.core.metadata.base import restore_scoring_matrix_version
 
         assert restore_scoring_matrix_version("svc1", "missing-version") is None
     s3.copy_object.assert_not_called()
@@ -1441,10 +1444,10 @@ def test_restore_scoring_matrix_version_happy_path():
     s3.head_object.return_value = {"ContentLength": 2048}
 
     with (
-        patch("backend.state_sync.get_source_for_service", return_value=_src()),
-        patch("backend.state_sync._get_fos_client", return_value=s3),
+        patch("backend.core.metadata.base.get_source_for_service", return_value=_src()),
+        patch("backend.core.metadata.base._get_fos_client", return_value=s3),
     ):
-        from backend.state_sync import restore_scoring_matrix_version
+        from backend.core.metadata.base import restore_scoring_matrix_version
 
         result = restore_scoring_matrix_version("svc1", "v7")
 
@@ -1476,10 +1479,10 @@ def test_publish_matrix_snapshots_prior_before_overwriting():
     s3.get_object.return_value = {"Body": MagicMock(read=MagicMock(return_value=prior_bytes))}
 
     with (
-        patch("backend.state_sync.get_source_for_service", return_value=_src()),
-        patch("backend.state_sync._get_fos_client", return_value=s3),
+        patch("backend.core.metadata.base.get_source_for_service", return_value=_src()),
+        patch("backend.core.metadata.base._get_fos_client", return_value=s3),
     ):
-        from backend.state_sync import publish_matrix_to_fos
+        from backend.core.metadata.base import publish_matrix_to_fos
 
         publish_matrix_to_fos("svc1", {"version": "new-v2", "counts": {}})
 
@@ -1515,13 +1518,13 @@ def test_restore_scoring_matrix_version_snapshots_live_before_restore():
     s3.head_object.return_value = {"ContentLength": 1024}  # historical version exists
 
     with (
-        patch("backend.state_sync.get_source_for_service", return_value=_src()),
-        patch("backend.state_sync._get_fos_client", return_value=s3),
+        patch("backend.core.metadata.base.get_source_for_service", return_value=_src()),
+        patch("backend.core.metadata.base._get_fos_client", return_value=s3),
         # Pin time.time() so the snapshot key is deterministic and the
         # ordering assertion below can reference an exact key string.
-        patch("backend.state_sync.time.time", return_value=1717420800.0),
+        patch("backend.core.metadata.base.time.time", return_value=1717420800.0),
     ):
-        from backend.state_sync import restore_scoring_matrix_version
+        from backend.core.metadata.base import restore_scoring_matrix_version
 
         result = restore_scoring_matrix_version("svc1", "v7")
 
@@ -1566,10 +1569,10 @@ def test_restore_scoring_matrix_version_proceeds_when_snapshot_fails():
     ]
 
     with (
-        patch("backend.state_sync.get_source_for_service", return_value=_src()),
-        patch("backend.state_sync._get_fos_client", return_value=s3),
+        patch("backend.core.metadata.base.get_source_for_service", return_value=_src()),
+        patch("backend.core.metadata.base._get_fos_client", return_value=s3),
     ):
-        from backend.state_sync import restore_scoring_matrix_version
+        from backend.core.metadata.base import restore_scoring_matrix_version
 
         result = restore_scoring_matrix_version("svc1", "v7")
 
@@ -1587,7 +1590,7 @@ def test_cdn_get_blocks_invalid_redirects():
     import pytest
 
     src = {"bucket": "test", "cdn_url": "https://cdn-test.fastly.net"}
-    from backend.state_sync import _cdn_get
+    from backend.core.metadata.base import _cdn_get
 
     captured_handler = None
 

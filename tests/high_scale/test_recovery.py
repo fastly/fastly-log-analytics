@@ -14,36 +14,42 @@ from unittest.mock import MagicMock
 
 import psycopg
 import pytest
-from backend.high_scale.archive_models import ArchiveArtifact, ArchiveManifest, ArchiveSourceObject
-from backend.high_scale.archive_publication import (
-    ArchivePublication,
-    InMemoryObjectStore,
-    write_batch_archive_checkpoint,
-)
-from backend.high_scale.decoder import decode_source_object
-from backend.high_scale.publication import (
+from structlog.testing import capture_logs
+
+import backend.core.clickhouse as clickhouse_client
+import backend.high_scale.archive as pub_mod
+import backend.high_scale.ingest_controller as registry_bootstrap
+import backend.high_scale.recovery as rum_recovery
+from backend import config
+from backend.core.rum_ingest import extract_metrics_from_faro_payload
+from backend.high_scale import postgres_control
+from backend.high_scale.archive import (
     _DOMAIN_COLUMNS,
+    ArchiveArtifact,
+    ArchiveManifest,
+    ArchivePublication,
+    ArchiveSourceObject,
     ClickHousePublication,
     InMemoryBatchManifestStore,
+    InMemoryObjectStore,
     InsertReceipt,
     PartialInsert,
     _batch_uuid,
     _event_uuid,
     _rows_for_domain,
+    replay_manifest,
+    replay_performance_projections,
+    write_batch_archive_checkpoint,
 )
-from backend.high_scale.replay import replay_manifest, replay_performance_projections
-from backend.high_scale.rum_recovery import RumRecoveryBatchAdapter, _content, execute_rum_recovery, plan_rum_recovery
-from structlog.testing import capture_logs
-
-from backend import config
-from backend.core import clickhouse_client
-from backend.core.rum_ingest import extract_metrics_from_faro_payload
-from backend.high_scale import postgres_control, registry_bootstrap, rum_recovery
-from backend.high_scale import publication as pub_mod
+from backend.high_scale.query import decode_source_object
 from backend.high_scale.recovery import (
     RecoveryCapacityMeasurement,
     RecoveryReport,
+    RumRecoveryBatchAdapter,
+    _content,
     evaluate_recovery_capacity,
+    execute_rum_recovery,
+    plan_rum_recovery,
     purge_cmcd_projections,
     purge_origin_projections,
     purge_rum_facts,
@@ -76,8 +82,7 @@ _TREND_KEYS = ("bucket", "lcp", "cls", "views", "pageviews", "interactions", "er
 import tempfile
 from dataclasses import replace
 
-from backend.high_scale.publication import HighScaleBatch, PublicationStatus
-
+from backend.high_scale.archive import HighScaleBatch, PublicationStatus
 from backend.high_scale.recovery import replay_origin_projections
 
 # ── Merged from tests/high_scale/test_recovery.py ──

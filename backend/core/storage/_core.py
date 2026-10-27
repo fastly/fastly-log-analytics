@@ -15,11 +15,13 @@ from contextlib import contextmanager
 from datetime import datetime
 from typing import Any
 
+import psycopg
 import pyarrow as pa
 
 from backend import config
 from backend.core.duckdb import escape_sql_literal, require_safe_ident
 from backend.core.log_fields import LOG_FIELD_CATALOG
+from backend.core.metadata.usage_log import record_cloud_copy_deletion
 
 _C, _R = "\x1b[36m", "\x1b[0m"
 _ICE = f"🧊 {_C}[storage]{_R}"
@@ -611,7 +613,7 @@ from datetime import UTC, timedelta
 
 import pyarrow.parquet as pq  # noqa: E402
 
-from backend.core.query_instrumentation import InstrumentedDuckDBConnection  # noqa: E402
+from backend.core.request_telemetry import InstrumentedDuckDBConnection  # noqa: E402
 
 _core_mod = sys.modules[__name__]
 _TOMBSTONE_SUFFIX = ".consumed-"
@@ -1150,13 +1152,7 @@ def _fos_object_size(source: dict, bucket: str, key: str) -> int:
 
 
 def _scheduled_file_sizes(source: dict, cutoff: datetime) -> dict[str, int]:
-    """Size by file name of this service's FOS files DuckLake has scheduled for deletion and the cleanup will unlink.
-
-    DuckLake keeps only a path once it schedules a file (a merge or rewrite schedules the replaced files at once), so the
-    size is read from FOS just before the cleanup deletes the object.
-    """
-    import psycopg
-
+    """Read sizes before cleanup unlinks this service's scheduled FOS files."""
     dsn = _resolve_catalog_dsn(source.get("service_id") or source.get("name"))
     if not dsn:
         return {}
@@ -1214,7 +1210,7 @@ def _ducklake_expire_snapshots(con, source: dict, keep_snapshot_days: int) -> di
     billing_id = str(source.get("service_id") or source.get("name"))
     sizes: dict[str, int] = {}
     if _remote_data_path(source):
-        # FOS bills a deleted object for 30 days; read the sizes before the cleanup unlinks them.
+        # FOS's minimum billing period continues after deletion.
         try:
             sizes = _scheduled_file_sizes(source, cutoff)
         except Exception:
@@ -1224,8 +1220,6 @@ def _ducklake_expire_snapshots(con, source: dict, keep_snapshot_days: int) -> di
         out["data_files_cleaned"] = len(cleaned)
         if sizes and cleaned:
             try:
-                from backend.core.metadata.usage_log import record_cloud_copy_deletion
-
                 names = [os.path.basename(str(r[0])) for r in cleaned]
                 billed = sum(sizes.get(n, 0) for n in names)
                 record_cloud_copy_deletion(billing_id, billed, len(names))
@@ -1915,7 +1909,7 @@ def clear_source_caches(source_key: str, *, keep_snapshot_cache: bool = False) -
 
     if not keep_snapshot_cache:
         try:
-            from backend.core._duckdb_status import clear_ducklake_stats_cache
+            from backend.core.duckdb_status import clear_ducklake_stats_cache
 
             clear_ducklake_stats_cache(base_key)
         except Exception:
@@ -3493,11 +3487,4 @@ if "backend.core.storage" in sys.modules:
 if "backend.core" in sys.modules:
     setattr(sys.modules["backend.core"], "local_compaction", sys.modules[__name__])
 if "backend" in sys.modules and hasattr(sys.modules["backend"], "_MODULE_ALIASES"):
-    for _mod_name in (
-        "backend.core.storage.manifest",
-        "backend.core.storage.view",
-        "backend.core.storage.buffer",
-        "backend.core.storage._ducklake",
-        "backend.core.local_compaction",
-    ):
-        sys.modules["backend"]._MODULE_ALIASES[_mod_name] = __name__
+    sys.modules["backend"]._MODULE_ALIASES["backend.core.local_compaction"] = __name__

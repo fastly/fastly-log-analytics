@@ -436,7 +436,7 @@ def error_tick_payload(last_good: dict | None = None) -> dict:
 
 import types
 
-from backend._in_process_publisher import _InProcessPublisher
+from backend.celery_app import _InProcessPublisher
 from backend.config import SSE_BACKPLANE
 
 BUFFER_SIZE = 120
@@ -678,18 +678,4 @@ poller = RealtimePoller()
 poller.__dict__.update({k: v for k, v in sys.modules[__name__].__dict__.items() if not k.startswith("__")})
 poller.__dict__["poller"] = poller
 poller.__dict__["RealtimePoller"] = RealtimePoller
-
-
-_self = sys.modules[__name__]
-for _sub in ("transform", "models"):
-    sys.modules[f"{__name__}.{_sub}"] = _self
-    setattr(_self, _sub, _self)
-sys.modules[f"{__name__}.poller"] = _self
-setattr(_self, "manager", _self)
-sys.modules["backend.utils.pop_coords"] = _self
-if "backend.utils" in sys.modules:
-    setattr(sys.modules["backend.utils"], "pop_coords", _self)
-if "backend" in sys.modules and hasattr(sys.modules["backend"], "_MODULE_ALIASES"):
-    for _sub in ("transform", "poller", "models"):
-        sys.modules["backend"]._MODULE_ALIASES[f"backend.core.realtime.{_sub}"] = __name__
-    sys.modules["backend"]._MODULE_ALIASES["backend.utils.pop_coords"] = __name__
+setattr(sys.modules[__name__], "manager", sys.modules[__name__])

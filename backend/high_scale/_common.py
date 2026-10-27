@@ -8,7 +8,6 @@ import hmac
 import json
 import math
 import re
-import sys
 from collections import Counter
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
@@ -461,5 +460,3 @@ _FIELD_DIMENSIONS: dict[str, str] = {
     "io_input_format": "io_input_format",
     "io_output_format": "io_output_format",
 }
-
-sys.modules["backend.high_scale._filters"] = sys.modules[__name__]
