@@ -862,11 +862,10 @@ class QueryRunner:
         _phase("rolled_res", (time.perf_counter() - _t_rolled) * 1000)
         schema = _SchemaSeeds(actual_cols, schema_types)
         if exact_window:
-            real_fields = [field for field in safe_fields if field not in _VIRTUAL_FIELD_BACKING]
             _t_live = time.perf_counter()
             live_res, partial_rows = self._top_n_live_active_hour(
                 win,
-                real_fields,
+                safe_fields,
                 base_table,
                 pre_merge_limit,
                 pre_merge_per_field_limits,
@@ -874,6 +873,7 @@ class QueryRunner:
                 _phase,
                 observation=observed,
                 fail_on_error=True,
+                compute_virtual=True,
             )
             _phase("live_active_hour", (time.perf_counter() - _t_live) * 1000)
             missing_hours = _find_unrolled_hours(
@@ -881,11 +881,19 @@ class QueryRunner:
             )
             _t_raw = time.perf_counter()
             raw_res = self._top_n_exact_window_rows(
-                win, missing_hours, safe_fields, base_table, pre_merge_limit, pre_merge_per_field_limits, schema
+                win,
+                missing_hours,
+                safe_fields,
+                base_table,
+                pre_merge_limit,
+                pre_merge_per_field_limits,
+                schema,
+                active_virtual_covered=not bool(partial_rows),
             )
             _phase("raw_boundaries", (time.perf_counter() - _t_raw) * 1000)
             if missing_hours:
                 observed.closed_hour_heal = "used"
+            real_fields = [field for field in safe_fields if field not in _VIRTUAL_FIELD_BACKING]
             top_results, _ = _truncate_top_n(
                 _fold_rows(rolled_res, raw_res, live_res, [row for row in partial_rows if row[0] in real_fields]),
                 fields,
@@ -955,6 +963,8 @@ class QueryRunner:
         limit: int,
         per_field_limits: dict[str, int] | None,
         schema: _SchemaSeeds,
+        *,
+        active_virtual_covered: bool = True,
     ) -> list[tuple]:
         raw_hours = set(missing_hours)
         for bound in (win.st_dt, win.et_dt):
@@ -962,30 +972,96 @@ class QueryRunner:
                 hour = bound.replace(minute=0, second=0, microsecond=0)
                 if hour < win.active_dt and bound != hour:
                     raw_hours.add(hour.strftime("%Y-%m-%d-%H"))
-        where = _heal_where_clause(sorted(raw_hours), win.st_dt, win.et_dt) if raw_hours else "FALSE"
-        virtual_where = where
-        if (win.et_dt is None or win.et_dt > win.active_dt) and (win.st_dt is None or win.st_dt < win.active_dt_end):
-            virtual_where = _heal_where_clause(sorted(raw_hours | {win.active_str}), win.st_dt, win.et_dt)
+        ranges: list[tuple[datetime, datetime, bool]] = []
+        for h in sorted(raw_hours):
+            h_start = parse_hour_key_strict(h)
+            h_end = h_start + timedelta(hours=1)
+            seg_start = max(h_start, win.st_dt) if win.st_dt is not None else h_start
+            seg_end = min(h_end, win.et_dt) if win.et_dt is not None else h_end
+            if seg_start >= seg_end:
+                continue
+            if ranges and ranges[-1][1] == seg_start and not ranges[-1][2]:
+                ranges[-1] = (ranges[-1][0], seg_end, False)
+            else:
+                ranges.append((seg_start, seg_end, False))
         # Dashboard raw reads include the endpoint; hourly aggregates are half-open.
-        if win.et_dt is not None:
-            where = f"({where}) OR timestamp = TIMESTAMPTZ '{win.et_dt.isoformat()}'"
-            virtual_where = f"({virtual_where}) OR timestamp = TIMESTAMPTZ '{win.et_dt.isoformat()}'"
-        if where == "FALSE" and virtual_where == "FALSE":
+        if win.et_dt is not None and (win.st_dt is None or win.et_dt >= win.st_dt):
+            if ranges and ranges[-1][1] == win.et_dt:
+                ranges[-1] = (ranges[-1][0], win.et_dt, True)
+            else:
+                ranges.append((win.et_dt, win.et_dt, True))
+        if not ranges:
             return []
         schema.ensure(self.get_schema_cols, lambda: {c["name"]: c["type"] for c in _get_schema(self.con, self.src)})
-        scoped_table = f"(SELECT * FROM {base_table} WHERE {where})"
-        real_fields = [f for f in fields if f in schema.cols]
-        rows, _ = self.execute_top_n_batch(
-            real_fields, scoped_table, schema.cols, schema.types, limit=limit, per_field_limits=per_field_limits
-        )
-        for field in fields:
-            backing = _VIRTUAL_FIELD_BACKING.get(field)
-            if backing is None or backing not in schema.cols:
-                continue
-            query = _build_virtual_field_copy_query(base_table, field, backing, virtual_where)
-            rows.extend(
-                self.execute(f"SELECT field, value, SUM(count) AS c FROM ({query}) GROUP BY field, value").fetchall()
-            )
+        real_fields = [f for f in fields if f in schema.cols and f not in _VIRTUAL_FIELD_BACKING]
+        virtual_pairs = [
+            (f, b) for f in fields if (b := _VIRTUAL_FIELD_BACKING.get(f)) is not None and b in schema.cols
+        ]
+        if not real_fields and not virtual_pairs:
+            return []
+        proj_cols: list[str] = []
+        if virtual_pairs and "timestamp" in schema.cols:
+            proj_cols.append("timestamp")
+        for f in real_fields:
+            if f not in proj_cols:
+                proj_cols.append(f)
+        for _, b in virtual_pairs:
+            if b not in proj_cols:
+                proj_cols.append(b)
+        cols_sql = ", ".join(_quote_ident(c) for c in proj_cols) if proj_cols else "*"
+        branches = [
+            f"SELECT {cols_sql} FROM (SELECT * FROM {base_table} WHERE "
+            f"timestamp >= TIMESTAMPTZ '{r_start.isoformat()}' "
+            f"AND timestamp {'<=' if inc else '<'} TIMESTAMPTZ '{r_end.isoformat()}')"
+            for r_start, r_end, inc in ranges
+        ]
+        tmp_name = f"t_exact_boundary_{_uuid.uuid4().hex}"
+        self.execute(f"CREATE TEMP TABLE {tmp_name} AS {' UNION ALL '.join(branches)}")
+        rows: list[tuple] = []
+        try:
+            n_rows = self.execute(f'SELECT COUNT(*) FROM "{tmp_name}"').fetchone()[0]
+            if n_rows > 0:
+                if real_fields:
+                    batch_rows, _ = self.execute_top_n_batch(
+                        real_fields,
+                        tmp_name,
+                        schema.cols,
+                        schema.types,
+                        limit=limit,
+                        per_field_limits=per_field_limits,
+                    )
+                    rows.extend(batch_rows)
+                if virtual_pairs:
+                    v_queries = [
+                        _build_virtual_field_copy_query(f'"{tmp_name}"', v_field, backing, "1=1")
+                        for v_field, backing in virtual_pairs
+                    ]
+                    v_union = " UNION ALL ".join(f"({q})" for q in v_queries)
+                    rows.extend(
+                        self.execute(
+                            f"SELECT field, value, SUM(count) AS c FROM ({v_union}) GROUP BY field, value"
+                        ).fetchall()
+                    )
+        finally:
+            _drop_temp_table(self, tmp_name, "_top_n_exact_window_rows")
+        if not active_virtual_covered and virtual_pairs:
+            live_start = max(win.active_dt, win.st_dt) if win.st_dt else win.active_dt
+            live_end = min(win.active_dt_end, win.et_dt) if win.et_dt else win.active_dt_end
+            if live_start < live_end:
+                active_where = (
+                    f"timestamp >= TIMESTAMPTZ '{live_start.isoformat()}' "
+                    f"AND timestamp < TIMESTAMPTZ '{live_end.isoformat()}'"
+                )
+                v_queries = [
+                    _build_virtual_field_copy_query(base_table, v_field, backing, active_where)
+                    for v_field, backing in virtual_pairs
+                ]
+                v_union = " UNION ALL ".join(f"({q})" for q in v_queries)
+                rows.extend(
+                    self.execute(
+                        f"SELECT field, value, SUM(count) AS c FROM ({v_union}) GROUP BY field, value"
+                    ).fetchall()
+                )
         return rows
 
     def _top_n_live_active_hour(
@@ -1000,6 +1076,7 @@ class QueryRunner:
         *,
         observation: ReaderCoverage | None = None,
         fail_on_error: bool = False,
+        compute_virtual: bool = False,
     ) -> tuple[list[tuple], list[tuple]]:
         st_dt, et_dt, active_dt = win.st_dt, win.et_dt, win.active_dt
         live_res: list[tuple] = []
@@ -1014,6 +1091,11 @@ class QueryRunner:
             schema.ensure(self.get_schema_cols, lambda: {c["name"]: c["type"] for c in _get_schema(self.con, self.src)})
             actual_cols, schema_types = schema.cols, schema.types
             live_topn_fields = _live_topn_fields(safe_fields, _LIVE_TOPN_SKIP_FIELDS, self.src.get("log_fields"))
+            virtual_pairs = (
+                [(f, b) for f in safe_fields if (b := _VIRTUAL_FIELD_BACKING.get(f)) is not None and b in actual_cols]
+                if compute_virtual
+                else []
+            )
             live_start, partial_rows, _partial_total = self._partial_hour_adjusted_live_start(
                 live_start, win.active_str, live_end
             )
@@ -1022,18 +1104,22 @@ class QueryRunner:
                 observation.live_start, observation.live_end = live_start.isoformat(), live_end.isoformat()
                 observation.live_top_up = "unavailable"
             _t_lt = time.perf_counter()
-            temp_proj_fields = (
-                live_topn_fields + ["waf_req_id"]
-                if "waf_req_id" in actual_cols and "waf_req_id" not in live_topn_fields
-                else live_topn_fields
-            )
+            temp_proj_fields = list(live_topn_fields)
+            if "waf_req_id" in actual_cols and "waf_req_id" not in temp_proj_fields:
+                temp_proj_fields.append("waf_req_id")
+            if virtual_pairs:
+                if "timestamp" in actual_cols and "timestamp" not in temp_proj_fields:
+                    temp_proj_fields.append("timestamp")
+                for _, bcol in virtual_pairs:
+                    if bcol not in temp_proj_fields:
+                        temp_proj_fields.append(bcol)
             tmp_name = self._create_active_hour_temp_direct(temp_proj_fields, actual_cols, live_start, live_end)
             if tmp_name == "__empty__":
                 tmp_name = None
                 if observation is not None:
                     observation.live_top_up = "empty"
             elif tmp_name is None:
-                tmp_name = self.create_filtered_temp_table(live_topn_fields, actual_cols, base_table, live_where)
+                tmp_name = self.create_filtered_temp_table(temp_proj_fields, actual_cols, base_table, live_where)
                 if observation is not None and tmp_name:
                     observation.live_top_up = "view_fallback"
             elif observation is not None:
@@ -1051,8 +1137,10 @@ class QueryRunner:
                     if observation is not None and _n_live == 0:
                         observation.live_top_up = "empty"
                     if _n_live > 0:
-                        live_fields = [f for f in live_topn_fields if f in actual_cols]
-                        if observation is not None and not live_fields:
+                        live_fields = [
+                            f for f in live_topn_fields if f in actual_cols and f not in _VIRTUAL_FIELD_BACKING
+                        ]
+                        if observation is not None and not live_fields and not virtual_pairs:
                             observation.live_top_up = "missing_column"
                         if live_fields:
                             _t_lb = time.perf_counter()
@@ -1067,6 +1155,19 @@ class QueryRunner:
                             if observation is not None and observation.live_top_up == "unverified":
                                 observation.live_top_up = "used"
                             _phase("live_active_hour:batch", (time.perf_counter() - _t_lb) * 1000)
+                        if virtual_pairs and not partial_rows:
+                            v_queries = [
+                                _build_virtual_field_copy_query(f'"{tmp_name}"', v_field, backing, "1=1")
+                                for v_field, backing in virtual_pairs
+                            ]
+                            v_union = " UNION ALL ".join(f"({q})" for q in v_queries)
+                            live_res.extend(
+                                self.execute(
+                                    f"SELECT field, value, SUM(count) AS c FROM ({v_union}) GROUP BY field, value"
+                                ).fetchall()
+                            )
+                            if observation is not None and observation.live_top_up == "unverified":
+                                observation.live_top_up = "used"
                 finally:
                     self.release_active_direct_temp(tmp_name)
         except duckdb.InterruptException:

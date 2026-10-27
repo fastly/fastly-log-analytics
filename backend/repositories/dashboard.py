@@ -577,7 +577,11 @@ def _compute_dashboard_aggregates(
             if use_rollups:
                 try:
                     _count_proj = (
-                        fields
+                        [
+                            *fields,
+                            "country",
+                            *[bcol for v, bcol in _VIRTUAL_BACKING.items() if v in fields],
+                        ]
                         if include_top_n
                         else [
                             "conn_requests",
