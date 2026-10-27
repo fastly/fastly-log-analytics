@@ -2040,13 +2040,15 @@ def test_cli_restore_data_runs_the_cloud_restore_for_the_service():
     from backend.provision.cli import app
 
     src = {"service_id": "svc-r", "name": "svc-r", "bucket": "bkt"}
-    result = {"remote_files": 4, "downloaded": 3, "registered": 4}
+    result = {"remote_files": 4, "downloaded": 3, "registered": 4, "reindexed": 7}
     with (
         patch("backend.core.duckdb.get_source_for_service", return_value=src),
         patch("backend.core.storage.backup.restore_from_cloud", return_value=result) as restore,
     ):
         out = CliRunner().invoke(app, ["restore-data", "--service-id", "svc-r"])
-    assert out.exit_code == 0 and "4 cloud file(s): 3 downloaded, 4 registered" in out.output
+    assert (
+        out.exit_code == 0 and "4 cloud file(s): 3 downloaded, 4 registered, 7 raw object(s) re-indexed" in out.output
+    )
     assert restore.call_args.args[0] == src
 
     with patch("backend.core.duckdb.get_source_for_service", return_value=None):

@@ -835,7 +835,8 @@ def cmd_restore_data(
         raise typer.BadParameter(f"No configured service {service_id!r}", param_hint="--service-id")
     result = restore_from_cloud(source, progress=info)
     ok(
-        f"Restored {result['remote_files']} cloud file(s): {result['downloaded']} downloaded, {result['registered']} registered."
+        f"Restored {result['remote_files']} cloud file(s): {result['downloaded']} downloaded, "
+        f"{result['registered']} registered, {result['reindexed']} raw object(s) re-indexed."
     )
 
 

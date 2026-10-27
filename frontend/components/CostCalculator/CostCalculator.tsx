@@ -33,6 +33,8 @@ export const BILLING_ZONE_DESCRIPTIONS: Record<BillingZone, string> = {
   Global: "All POPs throughout Fastly's entire global network ($0.18/GB).",
 }
 
+export type DeploymentMode = 'standard' | 'high_scale'
+
 export interface CalcState {
   reqDay: number
   sampleRate: number
@@ -50,6 +52,8 @@ export interface CalcState {
   retentionDays: number
   deleteLogs: boolean
   compactionEnabled: boolean
+  deploymentMode: DeploymentMode
+  archiveBatchObjects: number
   rateA: number
   rateB: number
   rateStorage: number
@@ -59,7 +63,7 @@ export interface CalcState {
 }
 
 type CalcAction =
-  | { type: 'SET'; key: keyof CalcState; value: number | boolean | BillingZone }
+  | { type: 'SET'; key: keyof CalcState; value: number | boolean | BillingZone | DeploymentMode }
   | { type: 'SET_ZONE'; zone: BillingZone }
   | { type: 'PREFILL'; prefill: PrefillResponse }
   | { type: 'AUTO_NODES' }
@@ -70,7 +74,7 @@ export const DEFAULTS: CalcState = {
   logNodes: 1, userEditedNodes: false,
   logsChecksPerDay: 2,
   cdnEnabled: true, retentionDays: 90, deleteLogs: true,
-  compactionEnabled: true,
+  compactionEnabled: true, deploymentMode: 'standard', archiveBatchObjects: 100,
   rateA: 0.005, rateB: 0.001, rateStorage: 0.02, rateEgress: 0.12, minDays: 30,
   billingZone: 'MBZ200',
 }
@@ -199,13 +203,17 @@ export function calculate(s: CalcState): CalcResults {
   // Committed DuckLake Parquet is pushed to FOS after each commit (the cloud copy used to rebuild local data).
   const minChargeHours = s.minDays * 24
   const rawPqFilesPerDay = parquetFilesPerSync * syncsPerDay
-  const objectsPerDay = logFilesPerDay + rawPqFilesPerDay
+  // High-Scale also archives each page of raw objects as one Parquet artifact plus a manifest and a commit marker.
+  const highScale = s.deploymentMode === 'high_scale'
+  const archivePagesPerDay = highScale ? Math.ceil(logFilesPerDay / Math.max(1, s.archiveBatchObjects)) : 0
+  const archiveObjectsPerDay = archivePagesPerDay * 3
+  const objectsPerDay = logFilesPerDay + rawPqFilesPerDay + archiveObjectsPerDay
 
   const logSteadyStateDays = s.deleteLogs ? syncHrs / 24 : s.retentionDays
   const billedLogDays = Math.max(logSteadyStateDays, s.minDays)
   const billedPqDays = Math.max(s.retentionDays, s.minDays)
 
-  const objectsBilled = (logFilesPerDay * billedLogDays) + (rawPqFilesPerDay * billedPqDays)
+  const objectsBilled = (logFilesPerDay * billedLogDays) + (rawPqFilesPerDay * billedPqDays) + (archiveObjectsPerDay * billedPqDays)
 
   const ingestSeconds = Math.max(10, Math.floor(s.logPeriod / 2))
   const ingestsPerMonth = ((24 * 60 * 60) / ingestSeconds) * 30
@@ -218,10 +226,11 @@ export function calculate(s: CalcState): CalcResults {
   const duckLakeParquetClassA = parquetFilesPerMonth + (s.compactionEnabled ? 30 + parquetFilesPerMonth : 0)
   const classAPerMonth =
     logFilesPerMonth + listOpsClassA + classALogsPage +
-    stateSyncClassA + rumBeaconsMonth + duckLakeParquetClassA
+    stateSyncClassA + rumBeaconsMonth + duckLakeParquetClassA + archivePagesPerDay * 30 * 3
 
   // Queries read local data, so FOS reads are the raw .gz ingest only (restores are rare and not modelled).
-  const classBPerMonth = logFilesPerMonth
+  // Each archive publish is read back to verify the artifact, manifest and commit marker.
+  const classBPerMonth = logFilesPerMonth + archivePagesPerDay * 30 * 3
 
   const logGBPerFile = logSizeKB / (1024 * 1024)
   const logActualH = s.deleteLogs ? Math.max(1, syncHrs) : s.retentionDays * 24
@@ -232,12 +241,14 @@ export function calculate(s: CalcState): CalcResults {
   const pqBilledH = Math.max(pqActualH, minChargeHours)
   const duckLakeDataGBMonths = (parquetFilesPerMonth * parquetGBPerFile * pqBilledH) / 720
   const rumParquetGBMonths = (s.rumBeaconsDay * 30 * 1024 / 4) / (1024 * 1024 * 1024)
-  const totalGBStored = rawLogGBMonths + duckLakeDataGBMonths + rumParquetGBMonths
+  const archiveGBMonths = highScale ? (totalBytesPerMonth / 4 / (1024 * 1024 * 1024)) * (pqBilledH / 720) : 0
+  const totalGBStored = rawLogGBMonths + duckLakeDataGBMonths + rumParquetGBMonths + archiveGBMonths
 
   const storageTiers: CalcResults['storageTiers'] = []
   if (rawLogGBMonths > 0) storageTiers.push({ label: 'Raw logs', gbMonths: rawLogGBMonths, flagged: logBilledH > logActualH })
   if (duckLakeDataGBMonths > 0) storageTiers.push({ label: 'DuckLake data', gbMonths: duckLakeDataGBMonths, flagged: pqBilledH > pqActualH })
   if (rumParquetGBMonths > 0) storageTiers.push({ label: 'RUM data', gbMonths: rumParquetGBMonths, flagged: false })
+  if (archiveGBMonths > 0) storageTiers.push({ label: 'High-Scale archive', gbMonths: archiveGBMonths, flagged: pqBilledH > pqActualH })
 
   // With a CDN fronting FOS, the raw .gz objects read during ingest are the egress.
   const cdnEgressGB = s.cdnEnabled ? totalGzBytesPerMonth / (1024 * 1024 * 1024) : 0
@@ -328,7 +339,7 @@ export function ResultRow({ label, detail, cost, highlight }: {
 interface InputsProps {
   s: CalcState
   r: CalcResults
-  set: (key: keyof CalcState) => (value: number | boolean) => void
+  set: (key: keyof CalcState) => (value: number | boolean | DeploymentMode) => void
 }
 
 export function Inputs({ s, r, set }: InputsProps) {
@@ -357,6 +368,17 @@ export function Inputs({ s, r, set }: InputsProps) {
         <Row label='Log file period (seconds)' tooltip="How often Fastly closes and uploads a log file. Controlled by the Fastly logging configuration.">
           <NumInput value={s.logPeriod} onChange={set('logPeriod')} min={1} />
         </Row>
+        <Row label='Deployment mode' tooltip="High-Scale also writes an archive Parquet artifact per batch of raw log objects to FOS (modelled at about a quarter of the uncompressed log volume, kept for the retention period).">
+          <select aria-label="Deployment mode" value={s.deploymentMode} onChange={(e) => set('deploymentMode')(e.target.value as DeploymentMode)} className="h-8 rounded-md border bg-background px-2 text-xs">
+            <option value="standard">Standard</option>
+            <option value="high_scale">High-Scale</option>
+          </select>
+        </Row>
+        {s.deploymentMode === 'high_scale' && (
+          <Row label='Raw objects per archive batch' tooltip="Source objects the High-Scale worker merges into one archive artifact (HIGH_SCALE_PAGE_SIZE, default 100). Each batch costs 3 writes (artifact, manifest, commit marker) and 3 verification reads.">
+            <NumInput value={s.archiveBatchObjects} onChange={set('archiveBatchObjects')} min={1} max={500} />
+          </Row>
+        )}
         <Row label='Cloud Commit Interval (minutes)' tooltip="How often the local buffer is committed to DuckLake and the new Parquet files are pushed to FOS (e.g., 5).">
           <NumInput value={s.commitMins} onChange={set('commitMins')} min={1} />
         </Row>
@@ -668,7 +690,7 @@ export function CostCalculator({ prefillData, prefillNote }: CostCalculatorProps
     if (prefillData) dispatch({ type: 'PREFILL', prefill: prefillData })
   }, [prefillData])
 
-  const set = (key: keyof CalcState) => (value: number | boolean) => dispatch({ type: 'SET', key, value })
+  const set = (key: keyof CalcState) => (value: number | boolean | DeploymentMode) => dispatch({ type: 'SET', key, value })
   const setZone = (zone: BillingZone) => dispatch({ type: 'SET_ZONE', zone })
   const r = useMemo(() => calculate(s), [s])
 

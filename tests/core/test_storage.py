@@ -2902,8 +2902,12 @@ def _cloud_env(monkeypatch, tmp_path):
     con = duckdb.connect()
     assert ducklake._ducklake_attach(con, src, read_only=False)
     con.execute(f'DROP TABLE IF EXISTS lake."{table}"')
-    con.execute(f"CREATE TABLE lake.\"{table}\" AS SELECT i AS a, 'x'::VARCHAR AS b FROM range(0, 100) t(i)")
-    con.execute(f"INSERT INTO lake.\"{table}\" SELECT i, 'y' FROM range(100, 200) t(i)")
+    con.execute(
+        f"CREATE TABLE lake.\"{table}\" AS SELECT i AS a, 'x'::VARCHAR AS b, 's3://test-bucket/raw/request/year=2026/f1.gz' AS _source_file FROM range(0, 100) t(i)"
+    )
+    con.execute(
+        f"INSERT INTO lake.\"{table}\" SELECT i, 'y', 's3://test-bucket/raw/request/year=2026/f2.gz' FROM range(100, 200) t(i)"
+    )
     return backup, src, table, con
 
 
@@ -2972,6 +2976,13 @@ def test_restore_from_cloud_rebuilds_lost_local_data(monkeypatch, tmp_path, s3_m
 
         result = backup.restore_from_cloud(src)
         assert result["downloaded"] == 2 and result["registered"] == (2 if lose_catalog else 0)
+        assert result["reindexed"] == 2
+        from backend.core.metadata.ingest_log import get_ingested_filenames
+
+        assert get_ingested_filenames("svc_cloud") == {
+            "s3://test-bucket/raw/request/year=2026/f1.gz",
+            "s3://test-bucket/raw/request/year=2026/f2.gz",
+        }
 
         con = duckdb.connect()
         assert ducklake._ducklake_attach(con, src, read_only=False)

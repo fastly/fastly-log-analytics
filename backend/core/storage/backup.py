@@ -152,11 +152,32 @@ def _normalize(path: str) -> str:
     return path if path.startswith(("s3://", "http://", "https://")) else os.path.realpath(path)
 
 
+def _rebuild_ingest_index(con, service_id: str, name: str, ident: str) -> int:
+    """Re-record every raw object whose rows are in the restored table, so discovery does not ingest it again.
+
+    ``ingested_files`` lives in Postgres and is lost together with the catalog; each row carries the raw object it
+    came from in ``_source_file``. Objects that produced no rows are not recoverable and are simply re-read.
+    """
+    from backend.core.metadata.ingest_log import insert_ingested_files
+
+    try:
+        rows = con.execute(
+            f"SELECT _source_file, count(*) FROM {ident} WHERE _source_file IS NOT NULL GROUP BY 1"
+        ).fetchall()
+    except Exception:
+        return 0
+    for i in range(0, len(rows), _ADD_BATCH * 5):
+        insert_ingested_files(service_id, [(f, int(n), None) for f, n in rows[i : i + _ADD_BATCH * 5]], table_name=name)
+    return len(rows)
+
+
 def restore_from_cloud(source: dict, progress: Callable[[str], None] | None = None) -> dict:
     """Rebuild local DuckLake data from the FOS copy: download missing files, then register them in DuckLake.
 
     Works with an intact catalog (only the local files are gone) and with an empty one (a fresh Postgres):
-    tables are created from the Parquet schema and the files added without rewriting them.
+    tables are created from the Parquet schema and the files added without rewriting them. The Postgres
+    ``ingested_files`` index is rebuilt from the restored rows' ``_source_file`` so raw objects still in the bucket are
+    not ingested twice.
     """
     from backend.core.duckdb import _get_fos_client
     from backend.core.storage._core import _ducklake_attach, clear_source_caches, ducklake_table_name
@@ -180,7 +201,7 @@ def restore_from_cloud(source: dict, progress: Callable[[str], None] | None = No
         downloaded += 1
     say(f"Downloaded {downloaded} of {len(remote)} files from FOS")
 
-    registered = 0
+    registered = reindexed = 0
     con = duckdb.connect(":memory:")
     try:
         if not _ducklake_attach(con, source, read_only=False):
@@ -210,7 +231,8 @@ def restore_from_cloud(source: dict, progress: Callable[[str], None] | None = No
                 )
             registered += len(missing)
             say(f"{name}: registered {len(missing)} file(s)")
+            reindexed += _rebuild_ingest_index(con, _service_id(source), name, ident)
     finally:
         con.close()
     clear_source_caches(source.get("name", "default"))
-    return {"downloaded": downloaded, "registered": registered, "remote_files": len(remote)}
+    return {"downloaded": downloaded, "registered": registered, "remote_files": len(remote), "reindexed": reindexed}

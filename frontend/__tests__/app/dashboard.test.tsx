@@ -1257,6 +1257,20 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
       expect(rumTier?.gbMonths).toBeCloseTo(0.071525, 4)
     })
 
+    test('High-Scale adds the archive Parquet storage tier and its write and verification requests', () => {
+      const standard = calculate(DEFAULTS)
+      const highScale = calculate({ ...DEFAULTS, deploymentMode: 'high_scale' })
+      expect(standard.storageTiers.find(t => t.label === 'High-Scale archive')).toBeUndefined()
+      const archive = highScale.storageTiers.find(t => t.label === 'High-Scale archive')
+      expect(archive?.gbMonths).toBeGreaterThan(0)
+      expect(highScale.totalGBStored).toBeCloseTo(standard.totalGBStored + (archive?.gbMonths ?? 0), 6)
+      const pagesPerMonth = Math.ceil(((86400 / DEFAULTS.logPeriod) * DEFAULTS.logNodes) / DEFAULTS.archiveBatchObjects) * 30
+      expect(highScale.classAPerMonth - standard.classAPerMonth).toBeCloseTo(pagesPerMonth * 3, 6)
+      expect(highScale.classBPerMonth - standard.classBPerMonth).toBeCloseTo(pagesPerMonth * 3, 6)
+      expect(calculate({ ...DEFAULTS, deploymentMode: 'high_scale', archiveBatchObjects: 500 }).classAPerMonth)
+        .toBeLessThan(highScale.classAPerMonth)
+    })
+
     test('reducer PREFILL handles rum_beacons_per_day correctly', () => {
       const prefill = makePrefill({
         rum_beacons_per_day: 5000, requests_per_day: 1000000, edge_requests_per_day: 800000,
