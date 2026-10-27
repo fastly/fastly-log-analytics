@@ -725,7 +725,6 @@ def get_connection(
         from backend.core.storage._core import _ducklake_attach
 
         storage.configure_duckdb_s3(con)
-        con.execute("SET unsafe_enable_version_guessing=true;")
         if not _ducklake_attach(con, src, read_only=True):
             raise RuntimeError("failed to attach DuckLake catalog")
     except Exception:

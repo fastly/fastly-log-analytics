@@ -137,8 +137,8 @@ def _push_worker(service_id: str, source: dict, tables: tuple[str, ...]) -> None
                 result = push_to_cloud(source, tables)
             if result.get("uploaded") or result.get("deleted"):
                 logger.info("[cloud-push] %s: %s", service_id, result)
-        except Exception:
-            logger.warning("[cloud-push] %s: push to FOS failed; the next commit retries", service_id, exc_info=True)
+        except Exception as exc:
+            logger.warning("[cloud-push] %s: push to FOS failed (%s); the next commit retries", service_id, exc)
         with _lock:
             nxt = _pending.pop(service_id, None)
             if nxt is None:
