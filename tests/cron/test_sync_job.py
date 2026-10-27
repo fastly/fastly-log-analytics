@@ -2129,3 +2129,87 @@ def test_sweep_ledger_reclaim_and_queue_depth_guard(monkeypatch, queue_depth, ex
         assert "object_key NOT LIKE ?" in update_stmts[0][0] and "raw/rum/%" in update_stmts[0][1]
     else:
         mock_convert.assert_not_called()
+
+
+def test_list_fos_files_minute_prefixes_scanned_oldest_first():
+    from backend.core.ingest.discovery import list_fos_files
+
+    listed_prefixes: list[str] = []
+
+    class FakePaginator:
+        def paginate(self, **kwargs):
+            prefix = kwargs["Prefix"]
+            listed_prefixes.append(prefix)
+            return [{"Contents": [{"Key": f"{prefix}file.gz", "Size": 128}]}]
+
+    class FakeFos:
+        def get_paginator(self, _op, caller_hint=None):
+            return FakePaginator()
+
+    gen = list_fos_files(
+        {"bucket": "bkt", "prefix": ""},
+        already_ingested={"s3://bkt/raw/request/year=2026/month=01/day=01/hour=00/minute=00/old.gz"},
+        incremental_only=True,
+        delete_after=False,
+        max_files=50,
+        elapsed_fn=lambda: "[0.0s]",
+        fos_client=FakeFos(),
+    )
+    res: dict[str, Any] = {}
+    try:
+        while True:
+            next(gen)
+    except StopIteration as stop:
+        res = stop.value
+
+    assert len(listed_prefixes) == 5
+    assert listed_prefixes == sorted(listed_prefixes)
+    assert res["new_files"] == sorted(res["new_files"])
+
+
+def test_adaptive_ingest_due_batch_followup_polls_once_when_first_pass_empty(monkeypatch):
+    pass_results = iter([0, 2, 0])
+    sleeps: list[float] = []
+    published: list[str] = []
+
+    def ingest_fn(**_kwargs):
+        count = next(pass_results)
+        yield {"type": "done", "new_files": count, "rows_inserted": count * 10}
+
+    monkeypatch.setattr(sync_mod.time, "sleep", sleeps.append)
+    events = list(
+        sync_mod._ingest_with_adaptive_followups(
+            ingest_fn,
+            adaptive=True,
+            after_pass=lambda: published.append("publish"),
+            empty_first_pass_followup_delay_s=1.5,
+        )
+    )
+    done = events[-1]
+    assert sleeps == [1.5, 0.5]
+    assert published == ["publish"]
+    assert (done["new_files"], done["rows_inserted"]) == (2, 20)
+
+
+def test_is_batch_due_true_only_within_active_flush_window(monkeypatch):
+    now = datetime.now(UTC)
+    monkeypatch.setattr("backend.config.get_status", lambda _sid: None)
+    assert sync_mod._is_batch_due("svc-1", {"log_period": 10}) is False
+
+    monkeypatch.setattr(
+        "backend.config.get_status",
+        lambda _sid: {"request": {"latest_log_at": (now - timedelta(seconds=2)).isoformat()}},
+    )
+    assert sync_mod._is_batch_due("svc-1", {"log_period": 10}) is False
+
+    monkeypatch.setattr(
+        "backend.config.get_status",
+        lambda _sid: {"request": {"latest_log_at": (now - timedelta(seconds=12)).isoformat()}},
+    )
+    assert sync_mod._is_batch_due("svc-1", {"log_period": 10}) is True
+
+    monkeypatch.setattr(
+        "backend.config.get_status",
+        lambda _sid: {"request": {"latest_log_at": (now - timedelta(seconds=120)).isoformat()}},
+    )
+    assert sync_mod._is_batch_due("svc-1", {"log_period": 10}) is False

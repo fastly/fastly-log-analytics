@@ -88,9 +88,11 @@ def refresh_view_and_warm_pool(
     t0 = time.time()
     try:
         from backend.core import storage as _storage
+        from backend.core.duckdb import clear_ducklake_stats_cache as _clear_stats
         from backend.core.duckdb import get_connection as _get_conn
         from backend.core.duckdb_pool import warm_pool_for_service as _warm
 
+        _clear_stats(service_id)
         with closing(_get_conn(source=source, read_only=True)) as con_v:
             _storage.update_storage_view(con_v, source, force=True)
             _warm(service_id, source)
@@ -290,6 +292,7 @@ def _ingest_with_adaptive_followups(
     *,
     adaptive: bool,
     after_pass: Callable[[], None] | None = None,
+    empty_first_pass_followup_delay_s: float = 0.0,
     **ingest_kwargs,
 ) -> Iterator[dict]:
     from backend.core.ingest import _new_object_outcome
@@ -313,7 +316,7 @@ def _ingest_with_adaptive_followups(
     while True:
         if pass_number:
             hit_cap = bool(max_files and pass_new_files >= max_files)
-            sleep_time = 0.0 if hit_cap else 0.5
+            sleep_time = empty_first_pass_followup_delay_s if pass_new_files == 0 else (0.0 if hit_cap else 0.5)
             effective_deadline_s = backlog_deadline_s if hit_cap else adaptive_deadline_s
             if not adaptive or pass_number >= 3 or time.monotonic() - started + sleep_time > effective_deadline_s:
                 break
@@ -351,7 +354,9 @@ def _ingest_with_adaptive_followups(
             if event.get("type") == "error":
                 return
 
-        if not pass_done or pass_new_files == 0:
+        if not pass_done:
+            return
+        if pass_new_files == 0 and not (adaptive and pass_number == 0 and empty_first_pass_followup_delay_s > 0):
             return
         pass_number += 1
 

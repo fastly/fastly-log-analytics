@@ -289,7 +289,7 @@ def list_fos_files(  # fmt: skip
         scan_batches: list[dict[str, Any]] = []
         if use_minute_prefixes:
             prefix_fn = rum_minute_list_prefix if norm_subpath == "raw/rum" else minute_list_prefix
-            for i in range(5):
+            for i in range(4, -1, -1):
                 min_sub = prefix_fn(now_utc - timedelta(minutes=i))
                 scan_batches.append(
                     {"Bucket": src["bucket"], "Prefix": f"{prefix_path}/{min_sub}" if prefix_path else min_sub}
@@ -344,6 +344,8 @@ def list_fos_files(  # fmt: skip
                     break
             if max_files and len(new_files) >= max_files:
                 break
+        if use_minute_prefixes and len(new_files) > 1:
+            new_files.sort()
         if max_files and len(new_files) > max_files:
             new_files = new_files[:max_files]
     except Exception as e:

@@ -53,6 +53,7 @@ from backend.cron.scheduler import (
     dev_mode_no_crons,  # noqa: F401
 )
 from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry
+from backend.utils.date_utils import parse_iso_utc
 
 if TYPE_CHECKING:
     from backend.cron.jobs._common import (
@@ -167,6 +168,23 @@ def schedule_post_ingest_rollups(service_id: str, src: dict[str, Any], hours: se
     worker.start()
 
 
+def _is_batch_due(service_id: str, cfg: dict[str, Any] | None = None) -> bool:
+    """Return True when a periodic Fastly log batch is actively expected to land in FOS."""
+    status = svcconfig.get_status(service_id)
+    if not isinstance(status, dict):
+        return False
+    req_status = status.get("request")
+    latest_str = (
+        req_status.get("latest_log_at") if isinstance(req_status, dict) else status.get("latest_log_at")
+    ) or status.get("latest_available_file_at")
+    latest_dt = parse_iso_utc(latest_str) if isinstance(latest_str, str) else None
+    if latest_dt is None:
+        return False
+    age_s = (datetime.now(UTC) - latest_dt).total_seconds()
+    log_period = max(5, int((cfg or {}).get("log_period", 10) or 10))
+    return bool(max(6.0, log_period - 3.0) <= age_s <= max(35.0, log_period * 3.5))
+
+
 @cron_task("cron.log_discovery", job_name="log_discovery")
 def _run_log_discovery_cron(
     service_id: str,
@@ -233,21 +251,22 @@ def _run_log_discovery_cron(
                 try:
                     discovered = 0
                     adaptive = sync_cfg.get("polling_mode", "adaptive") == "adaptive" and not is_manual
+                    due_batch = adaptive and _is_batch_due(service_id, cfg)
                     poll_started = time.monotonic()
                     for poll_index in range(3):
                         if poll_index:
-                            if not adaptive or poll_index > 2 or time.monotonic() - poll_started + 3 > 20:
+                            if not adaptive or poll_index > 2 or time.monotonic() - poll_started + 1.5 > 20:
                                 break
-                            time.sleep(3)
+                            time.sleep(1.5)
                         now = datetime.now(UTC)
                         pass_discovered = sum(
                             discover_prefix(
                                 service_id, prefix_subpath=minute_list_prefix(now - timedelta(minutes=i)), run_id=run_id
                             )
-                            for i in range(5)
+                            for i in range(4, -1, -1)
                         )
                         discovered += pass_discovered
-                        if pass_discovered == 0:
+                        if pass_discovered == 0 and not (poll_index == 0 and due_batch):
                             break
                     run.success(
                         f"Discovered {discovered} new file(s); dispatched to ingest workers"
@@ -288,6 +307,7 @@ def _run_log_discovery_cron(
             done_event: dict = {}
             ingest_outcomes = _new_object_outcome(processed=0)
             processed_files = inserted_rows = corrupt_rows = published_pass_rows = 0
+            already_published = False
             max_incremental_files = int(os.environ.get("INGEST_INCREMENTAL_MAX_FILES", "500"))
             pass_max_files = max_incremental_files if not is_manual else 5000
             pass_max_seconds = 20 if not is_manual else 240
@@ -330,9 +350,15 @@ def _run_log_discovery_cron(
                     _common._ingest_with_adaptive_followups,
                     _orig_ingest_with_adaptive_followups,
                 )
+                adaptive_enabled = sync_cfg.get("polling_mode", "adaptive") == "adaptive" and not is_manual
+                followup_kw = (
+                    {"empty_first_pass_followup_delay_s": 1.5}
+                    if adaptive_enabled and _is_batch_due(service_id, cfg)
+                    else {}
+                )
                 for event in adaptive_fn(
                     ingest,
-                    adaptive=sync_cfg.get("polling_mode", "adaptive") == "adaptive" and not is_manual,
+                    adaptive=adaptive_enabled,
                     after_pass=_publish_pass_rows,
                     source=src,
                     delete_after=delete_after,
@@ -341,6 +367,7 @@ def _run_log_discovery_cron(
                     start_time=start_time,
                     end_time=end_time,
                     incremental_only=not is_manual,
+                    **followup_kw,
                 ):
                     _log_and_add_progress(run_id, service_id, job_name="log_discovery", event=event)
                     ev_type = event.get("type")
@@ -350,6 +377,7 @@ def _run_log_discovery_cron(
                         corrupt_rows = event.get("total_corrupt", corrupt_rows)
                     elif ev_type == "done":
                         done_event = event
+                        inserted_rows = event.get("rows_inserted", inserted_rows)
                         ingest_outcomes = event.get("outcome_counters", ingest_outcomes)
                     elif ev_type == "error":
                         summary = "Ingestion failed" + (
@@ -473,13 +501,18 @@ def _run_log_discovery_cron(
                     run_id, service_id, job_name="log_discovery", event={"type": "error", "message": str(e)}
                 )
 
-    # ── 2. Refresh cached status & invalidate dashboard cache ────────────────
+    # ── 2. Refresh cached status, invalidate dashboard cache & publish SSE ───
     from backend.utils.telemetry import should_defer_cron
 
     do_heavy_refresh = (
         False if (not force and should_defer_cron("log_discovery", service_id)) else _claim_heavy_refresh(service_id)
     ) or bool(force)
-    if bool(done_event.get("rows_inserted", 0) > 0 or do_heavy_refresh or force):
+    needs_status_publish = bool(
+        (done_event.get("rows_inserted", 0) > 0 and not already_published)
+        or (do_heavy_refresh and not already_published)
+        or force
+    )
+    if needs_status_publish:
         if (sync_enabled or force) and run_id is not None:
             _progress_status(
                 f"Refreshing sync status {'+ filter suggestions' if do_heavy_refresh else '(header only)'}..."
@@ -489,15 +522,9 @@ def _run_log_discovery_cron(
             refresh_config_status(service_id, include_top_values=False)
         except Exception:
             pass
-        publish_fn = _resolve_sync_hook(
-            "publish_sync_status_safe", _common.publish_sync_status_safe, _orig_publish_sync_status_safe
-        )
-        publish_fn(service_id, "scheduler")
-        if run_id is not None:
-            _progress_status(f"refresh_config_status: {int((time.time() - _t0) * 1000)}ms")
 
-    # ── 3. Invalidate dashboard cache immediately before heavy refresh ────────
-    _t0 = time.time()
+    # ── 3. Invalidate dashboard cache before publishing SSE / heavy refresh ──
+    _t_inv = time.time()
     _invalidated = 0
     try:
         from backend.repositories.dashboard import DASHBOARD_CACHE_TTL, _dashboard_cache, invalidate_service
@@ -508,8 +535,17 @@ def _run_log_discovery_cron(
             invalidate_service(src_name)
     except Exception:
         pass
+
+    if needs_status_publish:
+        publish_fn = _resolve_sync_hook(
+            "publish_sync_status_safe", _common.publish_sync_status_safe, _orig_publish_sync_status_safe
+        )
+        publish_fn(service_id, "scheduler")
+        if run_id is not None:
+            _progress_status(f"refresh_config_status: {int((time.time() - _t0) * 1000)}ms")
+
     if run_id is not None and _invalidated:
-        _progress_status(f"dashboard cache invalidate ({_invalidated} keys): {int((time.time() - _t0) * 1000)}ms")
+        _progress_status(f"dashboard cache invalidate ({_invalidated} keys): {int((time.time() - _t_inv) * 1000)}ms")
 
     if do_heavy_refresh:
         _t0 = time.time()

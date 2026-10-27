@@ -308,7 +308,7 @@ def build_worker_from_environment() -> HighScaleWorkerLoop:
     page_size = int(os.getenv("HIGH_SCALE_PAGE_SIZE", "100"))
     lease_seconds = float(os.getenv("HIGH_SCALE_LEASE_SECONDS", "300"))
     object_concurrency = int(os.getenv("HIGH_SCALE_OBJECT_CONCURRENCY", "4"))
-    interval_seconds = float(os.getenv("HIGH_SCALE_WORKER_INTERVAL_SECONDS", "5"))
+    interval_seconds = float(os.getenv("HIGH_SCALE_WORKER_INTERVAL_SECONDS", "2"))
     domains = tuple(_csv_env("HIGH_SCALE_DOMAINS") or ("request", "rum_vitals", "rum_errors"))
     control = PostgresControlPlane()
     control.create_schema()

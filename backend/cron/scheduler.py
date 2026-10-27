@@ -922,7 +922,7 @@ class Scheduler:
                     _run_service_cron,
                     "interval",
                     seconds=interval_seconds,
-                    jitter=2 if interval_seconds >= 5 else 1,
+                    jitter=None if interval_seconds <= 15 else 2,
                     start_date=None,
                     args=[service_id],
                     id=job_id,
