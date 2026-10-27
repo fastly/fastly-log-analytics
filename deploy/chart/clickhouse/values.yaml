@@ -36,7 +36,7 @@ keeper:
   persistence:
     enabled: true
     size: 10Gi
-    storageClass: ""
+    storageClass: "hd-base-ext4"
   resources:
     requests:
       cpu: 500m
@@ -60,7 +60,7 @@ config:
 persistence:
   enabled: true
   size: 100Gi
-  storageClass: ""
+  storageClass: "hd-base-ext4"
 
 resources:
   requests:

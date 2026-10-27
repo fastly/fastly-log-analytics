@@ -8,6 +8,7 @@ metadata:
   name: postgres-data
 spec:
   accessModes: ["ReadWriteOnce"]
+  storageClassName: hd-base-ext4
   resources:
     requests:
       storage: 10Gi

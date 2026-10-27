@@ -32,7 +32,7 @@ applies to the stateless frontend only.
 
 ## Prerequisites
 
-`sync` mode needs only a cluster with a ReadWriteOnce StorageClass. A bare
+`sync` mode needs only a cluster with a ReadWriteOnce StorageClass (`persistence.storageClassName`, default `hd-base-ext4`). A bare
 `helm install` with no `--set` flags works:
 
 ```sh

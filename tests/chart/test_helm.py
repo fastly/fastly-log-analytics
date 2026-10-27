@@ -98,6 +98,11 @@ def test_helm_template():
     assert "Deployment" in kinds
     assert "Service" in kinds
     assert "Ingress" in kinds
+    assert "PersistentVolumeClaim" in kinds
+
+    pvc = next(doc for doc in docs if doc["kind"] == "PersistentVolumeClaim")
+    assert pvc["spec"]["storageClassName"] == "hd-base-ext4"
+    assert pvc["spec"]["resources"]["requests"]["storage"] == "20Gi"
 
     assert _deployment(docs, "backend")["spec"]["replicas"] == 1
 
@@ -527,6 +532,9 @@ def test_clickhouse_single_node_default_renders():
     shard0 = sts_docs[0]
     assert shard0["metadata"]["name"] == "test-release-clickhouse-shard-0"
     assert shard0["spec"]["replicas"] == 1
+    vct = shard0["spec"]["volumeClaimTemplates"][0]["spec"]
+    assert vct["storageClassName"] == "hd-base-ext4"
+    assert vct["resources"]["requests"]["storage"] == "100Gi"
 
     # No keeper resources rendered
     assert not any("keeper" in doc["metadata"]["name"] for doc in docs)
@@ -564,6 +572,9 @@ def test_clickhouse_clustered_2x2_renders_shards_replicas_keeper_macros():
     # Keeper StatefulSet with 3 replicas and Headless Service
     keeper_sts = next(doc for doc in docs if doc["kind"] == "StatefulSet" and "keeper" in doc["metadata"]["name"])
     assert keeper_sts["spec"]["replicas"] == 3
+    keeper_vct = keeper_sts["spec"]["volumeClaimTemplates"][0]["spec"]
+    assert keeper_vct["storageClassName"] == "hd-base-ext4"
+    assert keeper_vct["resources"]["requests"]["storage"] == "10Gi"
     assert any(doc["kind"] == "Service" and "keeper" in doc["metadata"]["name"] for doc in docs)
 
     # Remote servers config references shards and keeper

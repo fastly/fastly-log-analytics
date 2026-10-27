@@ -638,12 +638,13 @@ def test_private_helm_receivers_are_bounded_persistent_and_have_no_grafana() -> 
     receivers = [doc for name, doc in deployments.items() if name.endswith(("-prometheus", "-tempo"))]
     assert len(receivers) == 2
     assert not any(name.endswith(("-grafana", "-exporter")) for name in deployments)
-    assert (
-        len(
-            [doc for doc in docs if doc["kind"] == "PersistentVolumeClaim" and "-telemetry-" in doc["metadata"]["name"]]
-        )
-        == 2
-    )
+    telemetry_pvcs = [
+        doc for doc in docs if doc["kind"] == "PersistentVolumeClaim" and "-telemetry-" in doc["metadata"]["name"]
+    ]
+    assert len(telemetry_pvcs) == 2
+    for pvc in telemetry_pvcs:
+        assert pvc["spec"]["storageClassName"] == "hd-base-ext4"
+        assert pvc["spec"]["resources"]["requests"]["storage"] == "6Gi"
     for receiver in receivers:
         spec = receiver["spec"]
         assert spec["strategy"]["type"] == "Recreate"
