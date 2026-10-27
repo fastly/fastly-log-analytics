@@ -767,8 +767,9 @@ async function isClickHouseEnabledForEnv(page: Page): Promise<boolean> {
 test.describe('Page Spec: /admin/clickhouse (Admin ClickHouse Replay & Cluster Operations)', () => {
   test('1. Route accessibility, ServerFooter, ClickHouse layout mount, zero-CLS reservations & warm-load budget', async ({ page }) => {
     const enabled = await isClickHouseEnabledForEnv(page)
+    expect([200, 404]).toContain((await page.goto('/admin/clickhouse'))?.status())
     await page.addInitScript(clsInitScript)
-    const status = (await page.goto('/admin/clickhouse', { waitUntil: 'domcontentloaded' }))?.status() ?? 0
+    const status = (await page.reload({ waitUntil: 'domcontentloaded' }))?.status() ?? 0
     expect([200, 404]).toContain(status)
     if (!enabled || status === 404) {
       await expect(page.getByTestId('admin-clickhouse-root')).toHaveCount(0)

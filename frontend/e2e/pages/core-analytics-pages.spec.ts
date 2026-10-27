@@ -184,11 +184,12 @@ test.describe('SQL Query Pad Page Contract (/query)', () => {
 
   test('6. Client-side CSV export trigger', async ({ page }) => {
     await page.goto('/query?q=' + encodeURIComponent('SELECT count(*) AS total_count FROM logs'))
-    await expect(page.locator('[data-testid="query-page-root"]')).toBeVisible({ timeout: 30_000 })
-    await page.locator('[data-testid="query-run-btn"]').click()
-    await expect(page.locator('[data-testid="query-results-table"]')).toBeVisible({ timeout: 20_000 })
+    const main = page.getByRole('main')
+    await expect(main.getByTestId('query-page-root')).toBeVisible({ timeout: 30_000 })
+    await main.getByTestId('query-run-btn').click()
+    await expect(main.getByTestId('query-results-table')).toBeVisible({ timeout: 20_000 })
 
-    const exportBtn = page.locator('[data-testid="query-csv-export-btn"]')
+    const exportBtn = main.getByTestId('query-csv-export-btn')
     await expect(exportBtn).toBeVisible({ timeout: 10_000 })
     const downloadPromise = page.waitForEvent('download')
     await exportBtn.click()
@@ -342,8 +343,9 @@ test.describe('User Sessions Explorer Page Contract (/sessions)', () => {
 
   test('5. Row detail inspection dialog with session metadata', async ({ page }) => {
     await page.goto('/sessions')
-    await expect(page.locator('[data-testid="sessions-table-container"]')).toBeVisible({ timeout: 30_000 })
-    const tableRows = page.locator('[data-testid="sessions-table-container"] tbody tr')
+    const table = page.getByRole('main').getByTestId('sessions-table-container')
+    await expect(table).toBeVisible({ timeout: 30_000 })
+    const tableRows = table.locator('tbody tr')
     await expect(tableRows.first()).toContainText(/\d{1,3}(\.\d{1,3}){3}|[0-9a-f:]{6,}/i, { timeout: 30_000 })
 
     if ((await tableRows.count()) > 0) {

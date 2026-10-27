@@ -95,7 +95,7 @@ function callerCell<T extends AttributedRow>({ row }: { row: Row<T> }) {
       title={`${attr.caller_qualname}\n${attr.caller_file}`}
     >
       <div className="truncate">{attr.caller_qualname}</div>
-      <div className="truncate text-[10px] opacity-60">{attr.caller_file}</div>
+      <div className="truncate text-[10px]">{attr.caller_file}</div>
     </div>
   )
 }
@@ -149,9 +149,7 @@ function activeDurationCell({ row }: { row: Row<ActiveOrPromotedRow> }) {
   const stuck = !promoted && !isCancelled && r.duration_ms >= STUCK_LIVE_MS
   return (
     <span
-      className={`inline-flex items-center gap-1.5 font-mono ${durationColor(r.duration_ms)} ${
-        promoted ? 'opacity-60' : ''
-      } ${stuck ? 'animate-pulse font-bold' : ''}`}
+      className={`inline-flex items-center gap-1.5 font-mono ${durationColor(r.duration_ms)} ${stuck ? 'animate-pulse font-bold' : ''}`}
       title={
         stuck
           ? `Live query running for ${formatDurationMs(r.duration_ms)} — investigate`
@@ -370,9 +368,9 @@ export function ActiveTable({
         row._expandedChild
           ? 'bg-muted/30 border-l-2 border-l-muted-foreground/30'
           : row._completed
-            ? 'opacity-60'
+            ? 'bg-muted/30'
             : row.cancelled_at !== null
-              ? 'opacity-50'
+              ? 'bg-muted/50'
               : 'bg-primary/5 border-l-2 border-l-primary/60'
       }
       emptyMessage="No active queries. Long-running queries will appear here in real time."
