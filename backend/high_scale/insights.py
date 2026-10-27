@@ -4,19 +4,15 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from backend.high_scale.ingest_controller import HighScaleService
 
 import contextvars
-import urllib.parse
-from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 
 from backend.core.clickhouse import ClickHouseError
-from backend.core.share_db import mask_ip
 from backend.high_scale._common import (
     build_clickhouse_filters,
     visible_fact_clauses,
@@ -24,20 +20,50 @@ from backend.high_scale._common import (
 from backend.high_scale._common import format_iso_utc_or_empty as _iso_or_empty
 from backend.models.analytics import CacheCollapseDetailResponse, InsightsResponse
 from backend.repositories.insights import InsightDefinition, registry  # noqa: F401  (registers the detections)
-from backend.repositories.insights.definitions import NEW_PROBES
-from backend.repositories.utils.response_cache import (
-    bucket_time_to_minute,
+from backend.repositories.insights.shaping import (
+    AUTH_PATHS as _AUTH_PATHS,  # noqa: F401
+)
+from backend.repositories.insights.shaping import (
+    AUTH_REGEX,
+    BOT_UA_REGEX,
+    COMPRESSIBLE_REGEX,
+    PROBE_REGEX,
+    build_error_insight_card,
+    build_insufficient_baseline_card,
+    compute_available_history_hours,
+    evaluate_insight_severity,
+    resolve_clamp_cache_key,
+    shape_cache_collapse_detail,
+    shape_insight_card_from_rows,
+)
+from backend.repositories.insights.shaping import (
+    BOT_UA_TOKENS as _BOT_UA_TOKENS,  # noqa: F401
+)
+from backend.repositories.insights.shaping import (
+    COMPRESSIBLE_EXTENSIONS as _COMPRESSIBLE_EXTENSIONS,  # noqa: F401
+)
+from backend.repositories.insights.shaping import (
+    build_insight_card as _card,  # noqa: F401
+)
+from backend.repositories.insights.shaping import (
+    clamp_insight_window as _window,
+)
+from backend.repositories.insights.shaping import (
+    fingerprint_column as _fingerprint_column,
+)
+from backend.repositories.insights.shaping import (
+    format_insight_summary as _summary,  # noqa: F401
+)
+from backend.repositories.insights.shaping import (
+    make_investigate_url_builder as _make_investigate_url,
 )
 from backend.repositories.utils.response_shaping import (
-    build_cache_collapse_breakdown,
     build_insight_asn_context,
     build_insights_envelope,
     select_insight_bucket_interval,
-    shape_cache_collapse_timeline_point,
 )
 from backend.utils.bounded_cache import BoundedTTLCache
 from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry
-from backend.utils.date_utils import parse_iso_utc
 
 # DuckDB column name -> ClickHouse expression over request_facts.
 COLUMNS: dict[str, str] = {
@@ -94,60 +120,6 @@ COLUMNS: dict[str, str] = {
         "arrayMap(s -> trim(BOTH ' ' FROM s), splitByChar(',', custom_fields['waf_sig']))))"
     ),
 }
-
-_COMPRESSIBLE_EXTENSIONS = (".js", ".css", ".html", ".json", ".svg", ".xml", ".txt")
-_AUTH_PATHS = (
-    "login",
-    "signin",
-    "sign-in",
-    "log-in",
-    "auth",
-    "oauth",
-    "openid",
-    "token",
-    "sso",
-    "saml",
-    "session",
-    "account",
-    "password",
-    "passwd",
-    "passwrd",
-    "credential",
-    "wp-login",
-    "xmlrpc",
-    "mfa",
-    "otp",
-    "2fa",
-    "verify",
-)
-_BOT_UA_TOKENS = (
-    "googlebot",
-    "bingbot",
-    "slurp",
-    "duckduckbot",
-    "baiduspider",
-    "yandexbot",
-    "applebot",
-    "uptimerobot",
-    "pingdom",
-    "statuscake",
-    "datadoghq",
-    "newrelic",
-    "ahrefsbot",
-    "semrushbot",
-    "gptbot",
-    "claudebot",
-    "ccbot",
-    "facebookexternalhit",
-    "bot",
-    "crawler",
-    "spider",
-    "monitor",
-)
-PROBE_REGEX = "(?i)" + "|".join(re.escape(path) for path in NEW_PROBES)
-AUTH_REGEX = "(?i)" + "|".join(re.escape(path) for path in _AUTH_PATHS)
-BOT_UA_REGEX = "(?i)" + "|".join(re.escape(token) for token in _BOT_UA_TOKENS)
-COMPRESSIBLE_REGEX = "(?i)" + "|".join(re.escape(ext) for ext in _COMPRESSIBLE_EXTENSIONS)
 
 _HIT = "startsWith(cache, 'HIT')"
 _CACHEABLE = "(startsWith(cache, 'HIT') OR startsWith(cache, 'MISS'))"
@@ -1099,25 +1071,6 @@ _INSIGHTS_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=200, ttl_seconds=300)
 _CacheRegistry.register("high_scale.insights._INSIGHTS_CACHE", _INSIGHTS_CACHE)
 
 
-def _window(
-    window_hours: float, baseline_hours: float, clamp_start: str | None, clamp_end: str | None
-) -> tuple[datetime, datetime, datetime]:
-    """``(baseline_start, window_start, now)``, honouring the analyst clamp exactly like the standard path."""
-    now = datetime.now(UTC)
-    if clamp_end:
-        ceiling = parse_iso_utc(clamp_end)
-        if ceiling and ceiling < now:
-            now = ceiling
-    window_start = now - timedelta(hours=window_hours)
-    baseline_start = now - timedelta(hours=baseline_hours + window_hours)
-    if clamp_start:
-        floor = parse_iso_utc(clamp_start)
-        if floor:
-            baseline_start = max(baseline_start, floor)
-            window_start = max(window_start, floor)
-    return baseline_start, window_start, now
-
-
 def _base_sql(detection: Detection, insight_id: str) -> str:
     projection = ", ".join(f"{COLUMNS[column]} AS {column}" for column in detection.columns)
     lower = "{window_start:DateTime64(3)}" if detection.window_only else "{baseline_start:DateTime64(3)}"
@@ -1130,13 +1083,6 @@ def _base_sql(detection: Detection, insight_id: str) -> str:
         f"FROM request_facts WHERE {scope} AND event_timestamp >= {lower} "
         f"AND event_timestamp <= {{window_end:DateTime64(3)}}{row_filter}) {detection.sql}"
     )
-
-
-def _fingerprint_column(present: set[str]) -> str | None:
-    for column in ("ja4", "ja3"):
-        if column in present:
-            return column
-    return None
 
 
 def _detection_for(insight_id: str, present: set[str]) -> Detection | None:
@@ -1160,47 +1106,8 @@ def _detection_for(insight_id: str, present: set[str]) -> Detection | None:
     return DETECTIONS.get(insight_id)
 
 
-def _make_investigate_url(
-    service_id: str, window_start: datetime, now: datetime
-) -> Callable[[dict[str, Any] | None], str]:
-    def build(filters: dict[str, Any] | None = None) -> str:
-        pairs: list[tuple[str, str]] = [
-            ("service", service_id),
-            ("start", window_start.isoformat()),
-            ("end", now.isoformat()),
-        ]
-        pairs.extend((f"filter_{column}", str(value)) for column, value in (filters or {}).items() if value is not None)
-        return "/dashboard?" + urllib.parse.urlencode(pairs)
-
-    return build
-
-
 def _severity(items: list[dict[str, Any]]) -> str:
-    if not items:
-        return "clean"
-    return "critical" if any(item.get("severity") == "critical" for item in items) else "warning"
-
-
-def _summary(definition: InsightDefinition, items: list[dict[str, Any]]) -> str:
-    if not items:
-        return f"No {definition.title.lower()} detected"
-    if definition.id == "error_spikes":
-        return f"{len(items)} URLs with elevated server error rates"
-    if definition.id == "botnet_grouping":
-        return f"{len(items)} fingerprints with suspicious IP spread"
-    return f"{len(items)} anomalies detected"
-
-
-def _card(definition: InsightDefinition, severity: str, summary: str, items: list[dict[str, Any]]) -> dict[str, Any]:
-    return {
-        "id": definition.id,
-        "title": definition.title,
-        "description": definition.description,
-        "category": str(definition.category),
-        "severity": severity,
-        "summary": summary,
-        "items": items,
-    }
+    return evaluate_insight_severity(None, items)
 
 
 def _failure_message(exc: Exception) -> str:
@@ -1226,12 +1133,7 @@ def insights_endpoint(
     baseline_hours = float(req.baseline_hours)
     req_filters = getattr(req, "filters", None)
     filter_clause, filter_params = build_clickhouse_filters(req_filters) if req_filters else ("", {})
-    if clamp_cache_key is not None:
-        key_clamp = clamp_cache_key
-    elif clamp_start or clamp_end:
-        key_clamp = f"{bucket_time_to_minute(clamp_start) or ''}:{bucket_time_to_minute(clamp_end) or ''}"
-    else:
-        key_clamp = ""
+    key_clamp = resolve_clamp_cache_key(clamp_start, clamp_end, clamp_cache_key)
     cache_key = (
         service.service_id,
         id(service.client),
@@ -1288,12 +1190,7 @@ def insights_endpoint(
         sample = fut_sample.result()
     earliest = history[0].get("earliest") if history else None
     window_total = int(history[0].get("window_total") or 0) if history else 0
-    earliest_dt = parse_iso_utc(earliest) if isinstance(earliest, str) else earliest
-    if isinstance(earliest_dt, datetime):
-        earliest_dt = earliest_dt.astimezone(UTC) if earliest_dt.tzinfo else earliest_dt.replace(tzinfo=UTC)
-        history_hours = (now - earliest_dt).total_seconds() / 3600.0
-    else:
-        history_hours = 0.0
+    history_hours = compute_available_history_hours(now, earliest)
     present = set(_BASE_FIELDS)
     present.update(sample[0].get("fields") or [] if sample else [])
     fingerprint = _fingerprint_column(present) or "ja3"
@@ -1301,12 +1198,13 @@ def insights_endpoint(
 
     def run(definition: InsightDefinition, detection: Detection) -> dict[str, Any]:
         if detection.needs_baseline and history_hours < baseline_hours:
-            available = max(0.1, round(history_hours, 1))
-            return _card(
-                definition,
-                "info",
-                f"Requires {int(baseline_hours)}h of historical data (only {available}h available)",
-                [],
+            return build_insufficient_baseline_card(
+                definition.id,
+                definition.title,
+                definition.description,
+                str(definition.category),
+                baseline_hours,
+                history_hours,
             )
         try:
             sql = _base_sql(detection, definition.id)
@@ -1316,24 +1214,25 @@ def insights_endpoint(
                     f"AND event_timestamp <= {{window_end:DateTime64(3)}} AND ({filter_clause})",
                 )
             rows = [tuple(row.values()) for row in service.client.execute(sql, params)]
-            context = {
-                "window_hours": window_hours,
-                "baseline_hours": baseline_hours,
-                "fp_col": fingerprint,
-                "actual_cols": sorted(present),
-                "mask_ips": mask_ips,
-                **_asn_context(service.service_id, rows, definition.id),
-            }
-            items: list[dict[str, Any]] = []
-            for row in rows:
-                item = definition.row_processor(row, definition, context) if definition.row_processor else {}
-                if "investigate_url" not in item:
-                    item["investigate_url"] = make_investigate_url(item.get("meta", {}).get("filters"))
-                items.append(item)
+            return shape_insight_card_from_rows(
+                definition,
+                rows,
+                service_id=service.service_id,
+                window_hours=window_hours,
+                baseline_hours=baseline_hours,
+                fp_col=fingerprint,
+                actual_cols=sorted(present),
+                mask_ips=mask_ips,
+                investigate_url_builder=make_investigate_url,
+            )
         except Exception as exc:
-            return _card(definition, "error", f"Query failed: {_failure_message(exc)}", [])
-        severity = definition.severity_logic(items) if items and definition.severity_logic else _severity(items)
-        return _card(definition, severity, _summary(definition, items), items)
+            return build_error_insight_card(
+                definition.id,
+                definition.title,
+                str(definition.category),
+                _failure_message(exc),
+                description=definition.description,
+            )
 
     candidates: list[tuple[InsightDefinition, Detection]] = []
     for definition in registry.get_all():
@@ -1388,7 +1287,7 @@ def cache_collapse_detail_endpoint(
     }
     cache = "custom_fields['cache']"
     hit, miss, passed = (f"startsWith({cache}, '{kind}')" for kind in ("HIT", "MISS", "PASS"))
-    rates = service.client.execute(
+    rates_row = service.client.execute(
         "/* insight:cache_collapse_rates */ SELECT "
         f"countIf(is_w AND {hit}) AS w_hits, countIf(is_w AND {miss}) AS w_miss, "
         f"countIf(is_w AND {passed}) AS w_pass, countIf(is_w) AS w_total, "
@@ -1399,13 +1298,10 @@ def cache_collapse_detail_endpoint(
         f"FROM request_facts WHERE {scope})",
         params,
     )[0]
-    w_hits, w_miss, w_pass, w_total, b_hits, b_miss, b_pass, b_total = (
-        int(rates[key] or 0)
+    rates = tuple(
+        int(rates_row[key] or 0)
         for key in ("w_hits", "w_miss", "w_pass", "w_total", "b_hits", "b_miss", "b_pass", "b_total")
     )
-    w_cacheable, b_cacheable = w_hits + w_miss, b_hits + b_miss
-    w_rate = w_hits / w_cacheable if w_cacheable else 0.0
-    b_rate = b_hits / b_cacheable if b_cacheable else 0.0
     timeline_rows = service.client.execute(
         "/* insight:cache_collapse_timeline */ SELECT "
         f"toStartOfInterval(event_timestamp, {_bucket_interval(window_hours + baseline_hours)}) AS bucket, "
@@ -1414,40 +1310,20 @@ def cache_collapse_detail_endpoint(
         "GROUP BY bucket ORDER BY bucket ASC",
         params,
     )
-    timeline = [
-        shape_cache_collapse_timeline_point(
-            _iso_or_empty(row["bucket"]),
-            row["total_requests"],
-            row["real_hits"],
-            row["misses"],
-            b_rate,
-        )
-        for row in timeline_rows
-    ]
     miss_rows = service.client.execute(
         "/* insight:cache_collapse_misses */ SELECT event_timestamp AS timestamp, "
         f"{cache} AS cache, custom_fields['pop'] AS pop, client_ip AS ip, toInt32OrNull(custom_fields['status']) AS status "
         f"FROM request_facts WHERE {scope} AND {miss} ORDER BY event_timestamp DESC LIMIT 50",
         params,
     )
-    recent_misses = [
-        {
-            "timestamp": _iso_or_empty(row["timestamp"]),
-            "cache": row.get("cache") or "UNKNOWN",
-            "pop": row.get("pop") or None,
-            "ip": mask_ip(row["ip"]) if mask_ips and row.get("ip") else row.get("ip"),
-            "status": int(row["status"]) if row.get("status") is not None else None,
-        }
-        for row in miss_rows
-    ]
     return CacheCollapseDetailResponse.with_telemetry(
-        url=req.url,
-        has_data=bool(w_total + b_total),
-        timeline=timeline,
-        recent_misses=recent_misses,
-        breakdown=build_cache_collapse_breakdown(w_hits, w_miss, w_pass, w_total),
-        baseline_hit_rate=float(b_rate) * 100,
-        window_hit_rate=float(w_rate) * 100,
-        baseline_pass_rate=float(b_pass / b_total) * 100 if b_total else 0.0,
-        window_pass_rate=float(w_pass / w_total) * 100 if w_total else 0.0,
+        **shape_cache_collapse_detail(
+            req.url,
+            rates,  # type: ignore[arg-type]
+            timeline_rows,
+            miss_rows,
+            mask_ips=mask_ips,
+            include_has_data=True,
+            iso_formatter=_iso_or_empty,
+        )
     )
