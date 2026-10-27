@@ -98,7 +98,7 @@ dependencies = [
     # `python -m backend.provision.cli` exposes a real --help.
     "rich>=13.7",
     "typer>=0.12",
-    "authlib>=1.7.2",
+    "authlib>=1.9.0",
     "joserfc>=1.7.1",
     "psycopg[binary]>=3.3.4",
     "psycopg-pool>=3.3.1",
