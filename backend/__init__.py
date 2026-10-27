@@ -370,16 +370,18 @@ class _AliasLoader(importlib.abc.MetaPathFinder, importlib.abc.ExecutionLoader):
             if parent_mod is not None:
                 setattr(parent_mod, "services", module)
             return
-        canon_name = _MODULE_ALIASES.get(module.__name__, module.__name__)
+        requested_name = module.__name__
+        canon_name = _MODULE_ALIASES.get(requested_name, requested_name)
         module.__name__ = canon_name
-        canon_spec, canon_loader = self._canon_specs.get(canon_name, (None, None))
+        canon_spec, _canon_loader = self._canon_specs.get(canon_name, (None, None))
         if canon_spec is not None:
+            canon_spec.loader = self
             module.__spec__ = canon_spec
-        if canon_loader is not None:
-            module.__loader__ = canon_loader
+        module.__loader__ = self
         for alias, target_name in _MODULE_ALIASES.items():
             if target_name == canon_name:
-                sys.modules[alias] = module
+                if alias != "backend.high_scale.worker" or alias == requested_name:
+                    sys.modules[alias] = module
                 parent_name, _, child_name = alias.rpartition(".")
                 parent_mod = sys.modules.get(parent_name)
                 if parent_mod is not None:

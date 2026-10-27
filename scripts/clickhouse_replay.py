@@ -142,6 +142,7 @@ def recover(manifest_prefix: str, *, apply: bool, approve_digest: str | None) ->
     from backend.high_scale.rum_recovery import RumRecoveryBatchAdapter, execute_rum_recovery, plan_rum_recovery
     from psycopg.rows import dict_row
 
+    from backend.core import clickhouse_client
     from backend.high_scale.postgres_control import _archive_from_row
 
     if not re.fullmatch(r"[0-9a-f]{8,64}", manifest_prefix):
@@ -151,7 +152,7 @@ def recover(manifest_prefix: str, *, apply: bool, approve_digest: str | None) ->
     settings = config.load_clickhouse_config()
     if settings is None:
         raise ValueError("configured ClickHouse required")
-    client = ClickHouseClient(replace(settings, query_timeout_s=min(settings.query_timeout_s, 5)))
+    client = clickhouse_client.ClickHouseClient(replace(settings, query_timeout_s=min(settings.query_timeout_s, 5)))
     limits = {
         "max_rows_to_read": "100000",
         "read_overflow_mode": "throw",
