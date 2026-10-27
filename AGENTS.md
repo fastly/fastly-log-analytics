@@ -51,7 +51,7 @@ User-facing pitch + features list lives in [README.md](README.md). This file doc
 | Raw logs | `s3://{bucket}/{prefix}/raw/request/**/*.gz` and `.../raw/rum/**/*.gz` | Immutable gzipped request and RUM JSON from Fastly; v3 services use these roots exclusively |
 | Local buffer | `cache/{bucket}/` | Transient Parquet between ingest and commit |
 | DuckLake table | Catalog: Postgres DSN (`DUCKLAKE_CATALOG`, required across all deployment modes — see [ADR-22](docs/adr/22-postgres-only-metadata.md)); data: local disk under `/app/data/services/{service_id}/ducklake/` | Long-term, transactional storage powered by DuckDB's DuckLake extension. All queried parquet data is stored locally on NVMe/SSD disk for instant analytical queries with 0 network latency. FOS / S3 serves as the edge ingress destination for raw `.gz` logs as well as the durable cloud backup/sync store for periodic commits (every `commit_interval_mins`), archive Parquet, and synchronized admin state. |
-| Admin state | `s3://{bucket}/{prefix}/iceberg/meta/admin_state.json` | log_format_history, audit_logs, views, custom_fields (no alerts — alerts are per-instance). Path predates the DuckLake cutover; unaffected since it was never part of the Iceberg/DuckLake commit-path catalog. |
+| Admin state | `s3://{bucket}/{prefix}/meta/admin_state.json` | log_format_history, audit_logs, views, custom_fields (no alerts — alerts are per-instance). Moved from `iceberg/meta/` in v3.0.0-beta4 (no read fallback; re-provision). The scoring matrix and its history live beside it under `meta/`. |
 | DuckDB | `data/services/{service_id}.duckdb` | Per-service analytical engine **only**: session-scoped `logs` view + temp tables |
 | Metadata & State DB | PostgreSQL 16 (`METADATA_DSN`, mandatory across all modes — see [ADR-22](docs/adr/22-postgres-only-metadata.md)) | Unified relational store: `alerts`, `views`, `audit_logs`, `cron_runs`, `sources`, `ingested_files`, `asn_names`, `slow_queries`, `usage_log`, `usage_log_hourly_summary`, `remote_invites`, `remote_sessions`, `remote_share_audit_logs`, `share_settings`, `share_tos_versions`, `ngwaf_bots`, and `rdns` |
 | Service configs | `configs/{logging_service_id}.json` | Credentials, settings, log_fields config |
@@ -228,7 +228,7 @@ The prewarmer is **demand-driven**: `/api/insights` and `/api/insights/cache-col
 - **Reproducible local profiler**: Run `uv run python scripts/dev/profile_insights.py` to benchmark cold/warm p50/p95 wall + process CPU times and per-phase/per-detection timings against a deterministic synthetic 30-day dataset (`tests/repositories/test_insights_golden.py` enforces zero behavior drift across all 51 registered definitions).
 
 ### State Sync ([backend/state_sync.py](backend/state_sync.py))
-`export_admin_state` writes `audit_logs` + `views` from PostgreSQL metadata, plus `log_format_history` + `custom_fields` from the config JSON, to `{prefix}/iceberg/meta/admin_state.json`. **Alerts are not synced** — each instance maintains its own. Only `read_write` services export.
+`export_admin_state` writes `audit_logs` + `views` from PostgreSQL metadata, plus `log_format_history` + `custom_fields` from the config JSON, to `{prefix}/meta/admin_state.json`. **Alerts are not synced** — each instance maintains its own. Only `read_write` services export.
 
 ### FOS Usage Logging ([backend/utils/usage_logger.py](backend/utils/usage_logger.py), [backend/core/metadata/usage_log.py](backend/core/metadata/usage_log.py))
 Every FOS Class A/B op and CDN download recorded to PostgreSQL `usage_log` table for cost analysis.

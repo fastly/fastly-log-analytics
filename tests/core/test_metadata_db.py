@@ -1119,12 +1119,12 @@ def test_export_does_not_include_alerts():
 
 
 def test_admin_state_key_with_empty_prefix():
-    """Bare prefix → ``iceberg/meta/admin_state.json`` (no leading slash).
+    """Bare prefix → ``meta/admin_state.json`` (no leading slash).
     Pinned because a leading slash breaks S3 listing semantics."""
     from backend.state_sync import get_admin_state_key
 
     key = get_admin_state_key({"prefix": ""})
-    assert key == "iceberg/meta/admin_state.json"
+    assert key == "meta/admin_state.json"
 
 
 def test_admin_state_key_with_prefix_strips_slashes():
@@ -1134,7 +1134,7 @@ def test_admin_state_key_with_prefix_strips_slashes():
     from backend.state_sync import get_admin_state_key
 
     key = get_admin_state_key({"prefix": "/customer1/"})
-    assert key == "customer1/iceberg/meta/admin_state.json"
+    assert key == "customer1/meta/admin_state.json"
 
 
 # ── export_admin_state: early-return branches ────────────────────────────────
@@ -1228,11 +1228,11 @@ def test_cdn_get_builds_url_with_secret_query_param():
     ):
         from backend.state_sync import _cdn_get
 
-        body = _cdn_get(src, "iceberg/meta/admin_state.json")
+        body = _cdn_get(src, "meta/admin_state.json")
 
     assert body == b"payload"
     req = mock_open.call_args[0][0]
-    assert req.full_url == "https://cdn-test.fastly.net/iceberg/meta/admin_state.json?key=topsecret"
+    assert req.full_url == "https://cdn-test.fastly.net/meta/admin_state.json?key=topsecret"
 
 
 def test_cdn_get_records_telemetry_with_byte_count():
@@ -1262,14 +1262,14 @@ def test_cdn_get_records_telemetry_with_byte_count():
 
 
 def test_get_scoring_matrix_key_construction():
-    """scoring_matrix.json lives next to admin_state.json under iceberg/meta/."""
+    """scoring_matrix.json lives next to admin_state.json under meta/."""
     from backend.state_sync import get_scoring_matrix_key
 
-    assert get_scoring_matrix_key({"prefix": ""}) == "iceberg/meta/scoring_matrix.json"
-    assert get_scoring_matrix_key({"prefix": "/c1/"}) == "c1/iceberg/meta/scoring_matrix.json"
+    assert get_scoring_matrix_key({"prefix": ""}) == "meta/scoring_matrix.json"
+    assert get_scoring_matrix_key({"prefix": "/c1/"}) == "c1/meta/scoring_matrix.json"
 
 
-def test_publish_matrix_uploads_to_iceberg_meta():
+def test_publish_matrix_uploads_to_meta():
     s3 = MagicMock()
     captured: dict = {}
 
@@ -1287,7 +1287,7 @@ def test_publish_matrix_uploads_to_iceberg_meta():
 
         publish_matrix_to_fos("svc1", {"version": "2026-06-03-a", "counts": {"/": {"/login": 5}}})
 
-    assert captured["key"] == "iceberg/meta/scoring_matrix.json"
+    assert captured["key"] == "meta/scoring_matrix.json"
     assert captured["body"]["version"] == "2026-06-03-a"
 
 
@@ -1321,7 +1321,7 @@ def test_get_scoring_matrix_history_key_with_empty_prefix():
     from backend.state_sync import get_scoring_matrix_history_key
 
     key = get_scoring_matrix_history_key({"prefix": ""}, "2026-06-03-a")
-    assert key == "iceberg/meta/scoring_matrix_history/2026-06-03-a.json"
+    assert key == "meta/scoring_matrix_history/2026-06-03-a.json"
 
 
 def test_get_scoring_matrix_history_key_strips_prefix_slashes():
@@ -1331,7 +1331,7 @@ def test_get_scoring_matrix_history_key_strips_prefix_slashes():
     from backend.state_sync import get_scoring_matrix_history_key
 
     key = get_scoring_matrix_history_key({"prefix": "/customer1/"}, "v7")
-    assert key == "customer1/iceberg/meta/scoring_matrix_history/v7.json"
+    assert key == "customer1/meta/scoring_matrix_history/v7.json"
 
 
 def test_list_scoring_matrix_versions_returns_empty_when_source_missing():
@@ -1358,7 +1358,7 @@ def test_list_scoring_matrix_versions_sorts_descending_by_last_modified():
 
     def _obj(version: str, ts_iso: str, size: int = 1024) -> dict:
         return {
-            "Key": f"iceberg/meta/scoring_matrix_history/{version}.json",
+            "Key": f"meta/scoring_matrix_history/{version}.json",
             "Size": size,
             "LastModified": _dt.datetime.fromisoformat(ts_iso),
         }
@@ -1388,13 +1388,13 @@ def test_list_scoring_matrix_versions_sorts_descending_by_last_modified():
         rows = list_scoring_matrix_versions("svc1")
 
     # The paginator must be invoked against the bucket + the history prefix.
-    paginator.paginate.assert_called_once_with(Bucket="bkt", Prefix="iceberg/meta/scoring_matrix_history/")
+    paginator.paginate.assert_called_once_with(Bucket="bkt", Prefix="meta/scoring_matrix_history/")
     assert [r["version"] for r in rows] == ["v4", "v3", "v2", "v1"], (
         "list_scoring_matrix_versions must sort by last_modified DESC"
     )
     # Spot-check the shape of one row so a future refactor that drops a field
     # (e.g. size_bytes) is caught here too.
-    assert rows[0]["key"] == "iceberg/meta/scoring_matrix_history/v4.json"
+    assert rows[0]["key"] == "meta/scoring_matrix_history/v4.json"
     assert rows[0]["size_bytes"] == 1024
     assert rows[0]["last_modified"] == "2026-06-04T10:00:00+00:00"
 
@@ -1455,10 +1455,10 @@ def test_restore_scoring_matrix_version_happy_path():
     # The last copy_object call must target the current matrix key, with
     # the historical version as the CopySource.
     final_copy = s3.copy_object.call_args_list[-1]
-    assert final_copy.kwargs["Key"] == "iceberg/meta/scoring_matrix.json"
+    assert final_copy.kwargs["Key"] == "meta/scoring_matrix.json"
     assert final_copy.kwargs["CopySource"] == {
         "Bucket": "bkt",
-        "Key": "iceberg/meta/scoring_matrix_history/v7.json",
+        "Key": "meta/scoring_matrix_history/v7.json",
     }
 
 
@@ -1490,12 +1490,12 @@ def test_publish_matrix_snapshots_prior_before_overwriting():
     # First put writes the PRIOR bytes to the history slot, keyed by the
     # prior matrix's version string.
     history_call = put_calls[0]
-    assert history_call.kwargs["Key"] == "iceberg/meta/scoring_matrix_history/old-v1.json"
+    assert history_call.kwargs["Key"] == "meta/scoring_matrix_history/old-v1.json"
     assert history_call.kwargs["Body"] == prior_bytes
 
     # Second put writes the NEW matrix to the live key.
     current_call = put_calls[1]
-    assert current_call.kwargs["Key"] == "iceberg/meta/scoring_matrix.json"
+    assert current_call.kwargs["Key"] == "meta/scoring_matrix.json"
     assert json.loads(current_call.kwargs["Body"].decode("utf-8"))["version"] == "new-v2"
 
 
@@ -1532,21 +1532,21 @@ def test_restore_scoring_matrix_version_snapshots_live_before_restore():
 
     # FIRST copy_object: snapshot current matrix to pre-restore-{epoch_ms}.
     snapshot_call = copy_calls[0]
-    expected_snapshot_key = f"iceberg/meta/scoring_matrix_history/pre-restore-{int(1717420800.0 * 1000)}.json"
+    expected_snapshot_key = f"meta/scoring_matrix_history/pre-restore-{int(1717420800.0 * 1000)}.json"
     assert snapshot_call.kwargs["Key"] == expected_snapshot_key, (
         "first copy_object must write the pre-restore snapshot, not the restore itself"
     )
     assert snapshot_call.kwargs["CopySource"] == {
         "Bucket": "bkt",
-        "Key": "iceberg/meta/scoring_matrix.json",
+        "Key": "meta/scoring_matrix.json",
     }
 
     # SECOND copy_object: historical version → current key.
     restore_call = copy_calls[1]
-    assert restore_call.kwargs["Key"] == "iceberg/meta/scoring_matrix.json"
+    assert restore_call.kwargs["Key"] == "meta/scoring_matrix.json"
     assert restore_call.kwargs["CopySource"] == {
         "Bucket": "bkt",
-        "Key": "iceberg/meta/scoring_matrix_history/v7.json",
+        "Key": "meta/scoring_matrix_history/v7.json",
     }
 
 

@@ -2317,36 +2317,35 @@ def update_alert_last_triggered(service_id: str, alert_id: str, triggered_ts: st
 # ── FOS Admin State & Scoring Matrix Sync (folded from backend.state_sync) ────
 
 
-def _iceberg_meta_prefix(source: dict) -> str:
-    """Return the ``iceberg/meta/`` (or ``<prefix>/iceberg/meta/``) prefix
+def _meta_prefix(source: dict) -> str:
+    """Return the ``meta/`` (or ``<prefix>/meta/``) prefix
     under which admin_state, scoring matrix, and scoring matrix history
     live. Shared so the four key-builder helpers don't drift from each
     other on the prefix-resolution rule."""
     base_prefix = source.get("prefix", "").strip("/")
-    iceberg_root = f"{base_prefix}/iceberg" if base_prefix else "iceberg"
-    return f"{iceberg_root}/meta/"
+    return f"{base_prefix}/meta/" if base_prefix else "meta/"
 
 
 def get_admin_state_key(source: dict) -> str:
-    return f"{_iceberg_meta_prefix(source)}admin_state.json"
+    return f"{_meta_prefix(source)}admin_state.json"
 
 
 def get_scoring_matrix_key(source: dict) -> str:
     """FOS key for the trained scoring matrix JSON."""
-    return f"{_iceberg_meta_prefix(source)}scoring_matrix.json"
+    return f"{_meta_prefix(source)}scoring_matrix.json"
 
 
 def get_scoring_matrix_history_key(source: dict, version: str) -> str:
     """FOS key for a historical (pre-overwrite) scoring matrix."""
-    return f"{_iceberg_meta_prefix(source)}scoring_matrix_history/{version}.json"
+    return f"{_meta_prefix(source)}scoring_matrix_history/{version}.json"
 
 
 def list_scoring_matrix_versions(service_id: str) -> list[dict]:
-    """List archived matrix versions under iceberg/meta/scoring_matrix_history/."""
+    """List archived matrix versions under meta/scoring_matrix_history/."""
     source = get_source_for_service(service_id)
     if not source:
         return []
-    prefix = f"{_iceberg_meta_prefix(source)}scoring_matrix_history/"
+    prefix = f"{_meta_prefix(source)}scoring_matrix_history/"
     try:
         s3 = _get_fos_client(source)
         out: list[dict] = []

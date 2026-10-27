@@ -850,7 +850,7 @@ def _delete_scoring_matrix_from_fos(logging_service_id: str) -> None:
             return
         s3 = _get_fos_client(source)
         bucket = source["bucket"]
-        current_key = get_scoring_matrix_key(source)  # {prefix}/iceberg/meta/scoring_matrix.json
+        current_key = get_scoring_matrix_key(source)  # {prefix}/meta/scoring_matrix.json
         keys = [current_key]
         history_prefix = f"{current_key.rsplit('/', 1)[0]}/scoring_matrix_history/"
         try:

@@ -329,7 +329,7 @@
         set req.url = querystring.sort(req.url);
       
         # Never cache admin_state.json — it changes on every mutation
-        if (req.url ~ "/iceberg/meta/admin_state\.json$") {
+        if (req.url ~ "/meta/admin_state\.json$") {
           return(pass);
         }
       

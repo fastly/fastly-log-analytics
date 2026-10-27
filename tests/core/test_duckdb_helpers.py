@@ -2963,7 +2963,7 @@ def test_purge_ducklake_remote_dirs_only_deletes_the_named_table(root, expected_
         f"{base}logs_svc__client_vitals/sibling2.parquet",
         f"{base}main/logs_svc_other/other.parquet",
         f"{base}main/logs_other/other.parquet",
-        "iceberg/meta/admin_state.json",
+        "meta/admin_state.json",
     ]
     total, deleted, _ = _run_purge(root, "logs_svc", keys)
     assert sorted(deleted) == expected_deleted and total == 2

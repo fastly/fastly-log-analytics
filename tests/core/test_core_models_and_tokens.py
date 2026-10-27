@@ -799,7 +799,7 @@ def test_wipes_operational_preserves_config_and_meta(s3_mock, fos_source, fake_s
     for k, body in [
         (lake_key, b"x"),
         (other_tenant_key, b"y"),
-        ("iceberg/meta/admin_state.json", b"{}"),
+        ("meta/admin_state.json", b"{}"),
         ("errors/bad.bad.jsonl", b"bad"),
         (raw_key, b"raw"),
     ]:
@@ -823,7 +823,7 @@ def test_wipes_operational_preserves_config_and_meta(s3_mock, fos_source, fake_s
     keys = {o["Key"] for o in s3_mock.list_objects_v2(Bucket="test-bucket").get("Contents", [])}
     assert lake_key not in keys and "errors/bad.bad.jsonl" not in keys
     assert other_tenant_key in keys, "reset must only purge this service's DuckLake table directory"
-    assert "iceberg/meta/admin_state.json" in keys and raw_key in keys
+    assert "meta/admin_state.json" in keys and raw_key in keys
     assert fake_scheduler.call_count >= 2
     assert svcconfig.load_config(MOCK_SERVICE_ID)["provisioning"]["cron_sync"]["enabled"] is True
 
@@ -958,11 +958,11 @@ def _drain(gen):
         ),
         (
             [
-                {"Contents": [{"Key": "iceberg/meta/admin_state.json"}]},
+                {"Contents": [{"Key": "meta/admin_state.json"}]},
                 {"Contents": []},
                 {"Contents": [{"Key": "iceberg/data/x.parquet"}]},
             ],
-            "iceberg/meta/",
+            "meta/",
             [["iceberg/data/x.parquet"]],
             1,
             ["Deleted 1 thing(s) so far..."],

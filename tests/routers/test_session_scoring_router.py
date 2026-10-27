@@ -898,7 +898,7 @@ def test_matrix_versions_list_and_restore(client, with_config, monkeypatch, tmp_
     fake_versions = [
         {
             "version": v,
-            "key": f"iceberg/meta/scoring_matrix_history/{v}.json",
+            "key": f"meta/scoring_matrix_history/{v}.json",
             "size_bytes": 4000,
             "last_modified": f"{v[:10]}T10:00:00+00:00",
         }
