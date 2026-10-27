@@ -336,8 +336,8 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
       return undefined
     })
     renderWithQuery(<UsagePage />, { queryClient })
-    expect(await screen.findByText('of which cloud-copy and compaction deletions:')).toBeInTheDocument()
-    expect(screen.getByText('of which expired High-Scale archive:')).toBeInTheDocument()
+    expect(await screen.findByText('↳ Cloud copy & compaction:')).toBeInTheDocument()
+    expect(screen.getByText('↳ Expired archive:')).toBeInTheDocument()
     expect(screen.getByText('2 GB')).toBeInTheDocument()
   })
 

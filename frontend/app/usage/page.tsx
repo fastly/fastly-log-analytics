@@ -371,10 +371,10 @@ function UsagePageContent({
         value: <strong>{formatBytes(storage?.deleted_bytes ?? 0)}</strong>,
       },
       ...((storage?.cloud_copy_deleted_bytes ?? 0) > 0
-        ? [{ id: 'deleted-cloud-copy', rowClassName: 'pl-4 text-xs text-amber-700 dark:text-amber-500', label: <span>of which cloud-copy and compaction deletions:</span>, value: <strong>{formatBytes(storage?.cloud_copy_deleted_bytes ?? 0)}</strong> }]
+        ? [{ id: 'deleted-cloud-copy', rowClassName: 'text-amber-700/80 dark:text-amber-500/80', label: <span>↳ Cloud copy &amp; compaction:</span>, value: <strong>{formatBytes(storage?.cloud_copy_deleted_bytes ?? 0)}</strong> }]
         : []),
       ...((storage?.archive_expired_bytes ?? 0) > 0
-        ? [{ id: 'deleted-archive', rowClassName: 'pl-4 text-xs text-amber-700 dark:text-amber-500', label: <span>of which expired High-Scale archive:</span>, value: <strong>{formatBytes(storage?.archive_expired_bytes ?? 0)}</strong> }]
+        ? [{ id: 'deleted-archive', rowClassName: 'text-amber-700/80 dark:text-amber-500/80', label: <span>↳ Expired archive:</span>, value: <strong>{formatBytes(storage?.archive_expired_bytes ?? 0)}</strong> }]
         : []),
     ],
     [storage?.live_bytes, storage?.rum_bytes, storage?.regular_log_bytes, storage?.quarantine_bytes, storage?.deleted_bytes, storage?.cloud_copy_deleted_bytes, storage?.archive_expired_bytes, storage?.archive_bytes, storage?.archive_objects],
