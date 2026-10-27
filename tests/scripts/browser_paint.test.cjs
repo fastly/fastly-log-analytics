@@ -1,5 +1,10 @@
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const vm = require('node:vm');
+const { createRequire } = require('node:module');
 const { chromium } = require('../../frontend/node_modules/playwright');
 const { measurePaintedAction } = require('../../scripts/lib/section_measurements.cjs');
 
@@ -21,6 +26,55 @@ const options = {
   ],
   timeoutMs: 2000,
 };
+
+test('the pilot scrolls a lazy-card ancestor before arming painted-action observation', async t => {
+  const page = await fixture(t, `<section id="lazy-card" style="margin-top:2000px;height:250px"></section>
+    <script>
+      const card = document.querySelector('#lazy-card');
+      const observer = new IntersectionObserver(entries => {
+        if (!entries.some(entry => entry.isIntersecting)) return;
+        observer.disconnect();
+        card.innerHTML = '<button id="search">Search methods</button><div id="results" style="display:flex;flex-direction:column"></div>';
+        document.querySelector('#search').onclick = () => {
+          document.querySelector('#results').innerHTML = '<h2 id="feedback">Search methods</h2>';
+          setTimeout(() => {
+            document.querySelector('#results').insertAdjacentHTML('beforeend', '<span id="method">GET</span>');
+          }, 180);
+        };
+      });
+      observer.observe(card);
+    </script>`);
+  assert.equal(await page.locator('#search').count(), 0);
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'analyst-paint-cli-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const script = require.resolve('../../scripts/dev/check_analyst_lifecycle.cjs');
+  const load = createRequire(script);
+  const sandbox = {
+    module: { exports: {} },
+    process: { stdout: { write() {} } },
+    require(name) {
+      if (name === '../lib/analyst_fixture.cjs') {
+        return { async withAnalystUsers(_options, work) { await work([{ page }]); } };
+      }
+      return load(name);
+    },
+  };
+  vm.runInNewContext(fs.readFileSync(script, 'utf8'), sandbox, { filename: script });
+  const output = path.join(directory, 'evidence.json');
+  await sandbox.module.exports.main([
+    '--environment', 'remote-standard', '--admin-origin', 'https://admin.example.com',
+    '--analyst-origin', 'https://analyst.example.com', '--service-id', 'service-test',
+    '--role', 'masked', '--users', '1', '--output', output,
+    '--paint-scroll-selector', '#lazy-card', '--paint-target', '#search',
+    '--paint-feedback-selector', '#feedback', '--paint-feedback-text', 'Search methods',
+    '--paint-result-selector', '#method', '--paint-result-text', 'GET', '--paint-timeout-ms', '2000',
+  ]);
+  const report = JSON.parse(fs.readFileSync(output, 'utf8'));
+  assert.equal(report.painted_action.feedback.status, 'observed', JSON.stringify(report.painted_action));
+  assert.equal(report.painted_action.results.status, 'observed', JSON.stringify(report.painted_action));
+  assert.equal(report.painted_action.qualification, 'incomplete');
+  assert.equal(await page.locator('[elementtiming]').count(), 0);
+});
 
 test('meaningful text paint precedes delayed results, including every requested panel', async t => {
   const page = await fixture(t, `<button id="apply">Apply</button><div id="content"></div>

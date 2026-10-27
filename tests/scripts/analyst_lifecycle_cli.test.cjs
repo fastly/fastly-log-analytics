@@ -67,6 +67,7 @@ test('parsePaintOptions returns null when no painted-action target is supplied',
 });
 
 test('parsePaintOptions rejects paint flags supplied without a target', () => {
+  assert.equal(parsePaintOptions({ 'paint-scroll-selector': '#section-request-cards' }), INVALID_PAINT);
   assert.equal(parsePaintOptions({ 'paint-result-selector': ['tr'] }), INVALID_PAINT);
   assert.equal(parsePaintOptions({ 'paint-result-text': ['42'] }), INVALID_PAINT);
   assert.equal(parsePaintOptions({ 'paint-feedback-selector': '.toast' }), INVALID_PAINT);
@@ -117,6 +118,17 @@ test('parsePaintOptions validates event type and timeout bounds', () => {
   for (const bad of ['0', '-1', '60001', 'abc']) {
     assert.equal(parsePaintOptions({ ...base, 'paint-timeout-ms': bad }), INVALID_PAINT);
   }
+});
+
+test('paint preparation accepts an explicit scroll ancestor but rejects an empty selector', () => {
+  const values = {
+    'paint-target': 'button.apply-filter',
+    'paint-feedback-selector': '.toast', 'paint-feedback-text': 'Filter applied',
+    'paint-result-selector': ['tbody tr'], 'paint-result-text': ['42'],
+    'paint-scroll-selector': '#section-request-cards',
+  };
+  assert.equal(parsePaintOptions(values).scrollSelector, '#section-request-cards');
+  assert.equal(parsePaintOptions({ ...values, 'paint-scroll-selector': ' ' }), INVALID_PAINT);
 });
 
 test('parameters folds a valid painted-action request into options and rejects a malformed one', () => {

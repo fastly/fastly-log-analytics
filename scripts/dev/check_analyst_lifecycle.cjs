@@ -10,6 +10,7 @@ function parameters(argv) {
     journal: { type: 'string' }, output: { type: 'string' }, recover: { type: 'boolean', default: false },
     help: { type: 'boolean', default: false },
     'paint-target': { type: 'string' },
+    'paint-scroll-selector': { type: 'string' },
     'paint-feedback-selector': { type: 'string' }, 'paint-feedback-text': { type: 'string' },
     'paint-result-selector': { type: 'string', multiple: true }, 'paint-result-text': { type: 'string', multiple: true },
     'paint-event-type': { type: 'string' }, 'paint-timeout-ms': { type: 'string' },
@@ -48,7 +49,7 @@ function parsePaintOptions(values) {
   const target = values['paint-target'];
   const resultSelectors = values['paint-result-selector'] || [];
   const resultTexts = values['paint-result-text'] || [];
-  const paintKeys = ['paint-feedback-selector', 'paint-feedback-text', 'paint-event-type', 'paint-timeout-ms'];
+  const paintKeys = ['paint-scroll-selector', 'paint-feedback-selector', 'paint-feedback-text', 'paint-event-type', 'paint-timeout-ms'];
   if (!target) {
     if (resultSelectors.length || resultTexts.length || paintKeys.some(key => values[key] !== undefined)) {
       return INVALID_PAINT;
@@ -67,11 +68,14 @@ function parsePaintOptions(values) {
     timeoutMs = Number(values['paint-timeout-ms']);
     if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > 60000) return INVALID_PAINT;
   }
+  const scrollSelector = values['paint-scroll-selector'];
+  if (scrollSelector !== undefined && !scrollSelector.trim()) return INVALID_PAINT;
   return {
     target,
     feedback: { selector: feedbackSelector, text: feedbackText },
     results: resultSelectors.map((selector, index) => ({ selector, text: resultTexts[index] })),
     eventType, timeoutMs,
+    ...(scrollSelector === undefined ? {} : { scrollSelector }),
   };
 }
 
@@ -89,7 +93,7 @@ function writeEvidence(file, evidence) {
 async function main(argv = process.argv.slice(2)) {
   const options = parameters(argv);
   if (options.help) {
-    process.stdout.write('Usage: node scripts/dev/check_analyst_lifecycle.cjs --environment remote-standard|local-standard|remote-high-scale --admin-origin HTTPS_ORIGIN --analyst-origin HTTPS_ORIGIN --service-id SERVICE_ID --role masked|unmasked [--users 1|2|5] [--journal PRIVATE_JSONL] [--output PRIVATE_JSON]\nRecovery: supply the same origins/service/environment with --recover --journal PRIVATE_JSONL\nOptional painted-action sample (observed-only, qualification stays incomplete):\n  --paint-target SELECTOR --paint-feedback-selector SELECTOR --paint-feedback-text TEXT\n  --paint-result-selector SELECTOR --paint-result-text TEXT (repeat the pair for each required panel)\n  [--paint-event-type click|keydown] [--paint-timeout-ms 1..60000]\nThis checks disposable analyst lifecycle and scope only; performance qualification remains incomplete.\n');
+    process.stdout.write('Usage: node scripts/dev/check_analyst_lifecycle.cjs --environment remote-standard|local-standard|remote-high-scale --admin-origin HTTPS_ORIGIN --analyst-origin HTTPS_ORIGIN --service-id SERVICE_ID --role masked|unmasked [--users 1|2|5] [--journal PRIVATE_JSONL] [--output PRIVATE_JSON]\nRecovery: supply the same origins/service/environment with --recover --journal PRIVATE_JSONL\nOptional painted-action sample (observed-only, qualification stays incomplete):\n  --paint-target SELECTOR --paint-feedback-selector SELECTOR --paint-feedback-text TEXT\n  --paint-result-selector SELECTOR --paint-result-text TEXT (repeat the pair for each required panel)\n  [--paint-scroll-selector SELECTOR] [--paint-event-type click|keydown] [--paint-timeout-ms 1..60000]\nThis checks disposable analyst lifecycle and scope only; performance qualification remains incomplete.\n');
     return;
   }
   const { chromium, request } = require('../../frontend/node_modules/@playwright/test');
@@ -110,6 +114,10 @@ async function main(argv = process.argv.slice(2)) {
         if (options.paint) {
           const { measurePaintedAction } = require('../lib/section_measurements.cjs');
           const page = users[0].page;
+          if (options.paint.scrollSelector) {
+            await page.locator(options.paint.scrollSelector).scrollIntoViewIfNeeded();
+          }
+          await page.locator(options.paint.target).scrollIntoViewIfNeeded();
           const sample = await measurePaintedAction(page, options.paint, async () => {
             if (options.paint.eventType === 'keydown') {
               await page.locator(options.paint.target).press('Enter');
