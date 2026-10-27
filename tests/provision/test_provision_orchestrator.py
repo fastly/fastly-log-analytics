@@ -12,12 +12,12 @@ from unittest.mock import MagicMock, patch
 import httpx
 import pytest
 import vcr
+from backend.core.metadata.cron_log import CronLeaseHeldError
+from backend.core.rum_ingest import DEFAULT_FARO_VERSION
 
 from backend import config as svcconfig
 from backend.core.fastly.client import fastly as real_fastly
 from backend.core.log_fields import resolve_enabled_fields
-from backend.core.metadata.cron_log import CronLeaseHeldError
-from backend.core.rum_ingest import DEFAULT_FARO_VERSION
 from backend.provision import orchestrator, rum_assets
 from backend.provision.declarative.reconciler import FeatureState, generate_consolidated_snippet
 from backend.provision.orchestrator import _reject_unsafe_fos_component
@@ -351,6 +351,34 @@ def test_cleanup_local_data_variants(tmp_path, monkeypatch):
     ):
         orchestrator.cleanup_local_data("svc", bucket="test-bucket", remove_data=True)
     assert not cache_dir.exists()
+
+
+def test_cleanup_local_data_drops_ducklake_state_only_with_remove_data(tmp_path):
+    with (
+        patch("backend.config.config_path", return_value=str(tmp_path / "no.json")),
+        patch("backend.config.duckdb_path", return_value=str(tmp_path / "no.duckdb")),
+        patch("backend.core.metadata.teardown"),
+        patch("backend.core.duckdb.drop_service_ducklake_state", return_value={"tables_dropped": 3}) as drop,
+        patch("backend.provision.orchestrator._sync_crontab"),
+    ):
+        orchestrator.cleanup_local_data("svc", remove_data=False)
+        drop.assert_not_called()
+        orchestrator.cleanup_local_data("svc", remove_data=True)
+    drop.assert_called_once_with("svc")
+
+
+def test_cleanup_local_data_continues_when_ducklake_cleanup_fails(tmp_path):
+    db = tmp_path / "x.duckdb"
+    db.write_text("")
+    with (
+        patch("backend.config.config_path", return_value=str(tmp_path / "no.json")),
+        patch("backend.config.duckdb_path", return_value=str(db)),
+        patch("backend.core.metadata.teardown"),
+        patch("backend.core.duckdb.drop_service_ducklake_state", side_effect=RuntimeError("catalog down")),
+        patch("backend.provision.orchestrator._sync_crontab"),
+    ):
+        orchestrator.cleanup_local_data("svc", remove_data=True)
+    assert not db.exists()
 
 
 def test_analyst_invite_and_sync_crontab(monkeypatch):
@@ -1272,7 +1300,6 @@ import logging
 import re
 from unittest.mock import AsyncMock
 
-from backend.cron.jobs import rum_sync as rum_sync_mod
 from backend.provision.rum_assets import (
     cleanup_old_faro_versions,
     detect_faro_version_change,
@@ -1288,6 +1315,8 @@ from backend.provision.rum_orchestrator_v2 import (
     rum_vcl_fingerprint,
     upgrade_faro_version,
 )
+
+from backend.cron.jobs import rum_sync as rum_sync_mod
 from tests._helpers.config_fakes import (
     config_lock_held as _lock_held,
 )

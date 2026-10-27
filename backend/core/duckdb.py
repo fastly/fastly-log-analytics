@@ -1847,6 +1847,26 @@ def _wipe_ducklake_table_dirs(ducklake_root: str, tbl: str) -> Generator[dict]:
                 shutil.rmtree(sub, ignore_errors=True)
 
 
+def _purge_ducklake_remote_dirs(
+    fos_client, ducklake_root: str, tbl: str, source_bucket: str, delete_fn
+) -> Generator[dict, None, int]:
+    """Delete a table's DuckLake data files from FOS when DATA_PATH is an ``s3://`` root (High-Scale)."""
+    if not ducklake_root.startswith("s3://"):
+        return 0
+    bucket, _, key = ducklake_root[len("s3://") :].partition("/")
+    if bucket != source_bucket:
+        yield {
+            "type": "status",
+            "message": f"Skipping cloud DuckLake purge: data path bucket {bucket!r} is not this service's bucket.",
+        }
+        return 0
+    base = f"{key.rstrip('/')}/" if key.strip("/") else ""
+    deleted = 0
+    for sub in (f"{base}main/{tbl}/", f"{base}{tbl}/"):
+        deleted += yield from _purge_prefix(fos_client, bucket, sub, delete_fn, label=f"object(s) under {sub}")
+    return deleted
+
+
 def _drain_and_wipe_db_files(db_path: str, pool_key: str, wipe_msg: str) -> Generator[dict, None, dict]:
     from backend.core import duckdb_pool as _pool
 
@@ -1893,6 +1913,60 @@ def _reinit_ducklake_tables(
         con2.close()
 
 
+def drop_service_ducklake_state(service_id: str) -> dict[str, int]:
+    """Teardown helper: drop a service's DuckLake tables and delete its local DuckLake data files.
+
+    The catalog may be shared across services, so only this service's tables are dropped (never a
+    catalog-wide snapshot expiry). Dropped tables stop appearing in the catalog; their history rows
+    are removed by the scheduled snapshot expiry. Remote (``s3://``) data is removed by the FOS
+    bucket or prefix deletion that teardown already offers.
+
+    Raises ``RuntimeError`` when the catalog cannot be attached or a drop fails, and leaves local
+    files in place in that case so the catalog never points at deleted data.
+    """
+    from backend.core.iceberg._core import _resolve_data_path, ducklake_table_name
+    from backend.core.iceberg._ducklake import _ducklake_attach
+
+    if not (source := sys.modules[__name__].get_source_for_service(service_id)):
+        return {"tables_dropped": 0, "local_dirs_removed": 0}
+    tables = ("logs", *_RUM_TABLES)
+    dropped, errors = 0, []
+    con = duckdb.connect(":memory:")
+    try:
+        if not _ducklake_attach(con, source, read_only=False):
+            raise RuntimeError(f"could not attach the DuckLake catalog for service {service_id!r}")
+        for t_name in tables:
+            try:
+                con.execute(f'DROP TABLE IF EXISTS lake."{ducklake_table_name(source, t_name)}"')
+                dropped += 1
+            except Exception as exc:
+                errors.append(f"{t_name}: {exc}")
+    finally:
+        con.close()
+    if errors:
+        raise RuntimeError(f"DuckLake table drop failed for service {service_id!r}: {'; '.join(errors)}")
+    root = _resolve_data_path(source, service_id)
+    removed = 0
+    if not root.startswith(("s3://", "http://", "https://")):
+        service_lake_dir = svcconfig.SERVICES_DATA_DIR / str(service_id) / "ducklake"
+        if os.path.abspath(root) == os.path.abspath(service_lake_dir):
+            if service_lake_dir.exists():
+                shutil.rmtree(service_lake_dir, ignore_errors=True)
+                removed += 1
+            try:
+                service_lake_dir.parent.rmdir()
+            except OSError:
+                pass
+        else:
+            for t_name in tables:
+                tbl = ducklake_table_name(source, t_name)
+                existing = [d for d in (os.path.join(root, "main", tbl), os.path.join(root, tbl)) if os.path.exists(d)]
+                for _ in _wipe_ducklake_table_dirs(root, tbl):
+                    pass
+                removed += len(existing)
+    return {"tables_dropped": dropped, "local_dirs_removed": removed}
+
+
 def _purge_clickhouse_tables_gen(
     service_id: str, tables_and_clauses: list[tuple[str, str]], start_msg: str, done_prefix: str, err_label: str
 ) -> Generator[dict]:
@@ -1918,8 +1992,8 @@ def reset_service_logs(
 ) -> Iterator[dict]:  # fmt: skip
     from backend.core import duckdb_pool as _pool
     from backend.core import metadata as metadata_db
-    from backend.core.iceberg._core import _get_service_lock, clear_source_caches
-    from backend.core.iceberg._ducklake import _default_data_path, ducklake_table_name
+    from backend.core.iceberg._core import _get_service_lock, _resolve_data_path, clear_source_caches
+    from backend.core.iceberg._ducklake import ducklake_table_name
     from backend.core.ingest import _delete_objects_robust
     from backend.core.metadata.reconciliation import is_ingested_files_dedup_active
 
@@ -1927,6 +2001,7 @@ def reset_service_logs(
     if not (source := _db.get_source_for_service(service_id)):
         raise ValueError(f"No service found with id {service_id!r}")
     service_key = source.get("name", service_id)
+    ducklake_root = _resolve_data_path(source, service_id)
     db_path = os.path.abspath(source.get("duckdb_path") or svcconfig.duckdb_path(service_id))
     lock = _get_service_lock(service_key)
     if not lock.acquire(timeout=_LOCK_TIMEOUT_S):
@@ -1975,20 +2050,19 @@ def reset_service_logs(
                 if os.path.exists(cache_dir):
                     shutil.rmtree(cache_dir, ignore_errors=True)
                 yield {"type": "status", "message": f"Removed {removed:,} local cache file(s)."}
-            yield from _wipe_ducklake_table_dirs(
-                svcconfig.DUCKLAKE_DATA_PATH or _default_data_path(source), ducklake_table_name(source, "logs")
-            )
+            yield from _wipe_ducklake_table_dirs(ducklake_root, ducklake_table_name(source, "logs"))
         finally:
             _pool.end_drain_pools(retired_pools or [service_key])
             _db.set_recycle_barrier(db_path, False)
 
-        yield {"type": "status", "message": "Purging cloud Iceberg log table..."}
+        yield {"type": "status", "message": "Purging cloud DuckLake log data..."}
         fos, bucket, prefix = _db._get_fos_client(source), source.get("bucket", ""), source.get("prefix", "")
         pfx = f"{prefix}/" if prefix else ""
-        deleted = yield from _purge_prefix(
-            fos, bucket, f"{pfx}iceberg/default/logs/", _delete_objects_robust, label="object(s) under iceberg/default/logs/"
+        deleted = yield from _purge_ducklake_remote_dirs(
+            fos, ducklake_root, ducklake_table_name(source, "logs"), bucket, _delete_objects_robust,
         )  # fmt: skip
-        yield {"type": "status", "message": f"Deleted {deleted:,} object(s) under iceberg/default/logs/."}
+        if deleted:
+            yield {"type": "status", "message": f"Deleted {deleted:,} cloud DuckLake data object(s)."}
         if deleted_errors := (
             yield from _purge_prefix(
                 fos, bucket, f"{pfx}errors/", _delete_objects_robust, label="quarantined object(s) under errors/"
@@ -2079,14 +2153,15 @@ def reset_service_rum(
 ) -> Iterator[dict]:  # fmt: skip
     from backend.core import duckdb_pool as _pool
     from backend.core import metadata as metadata_db
-    from backend.core.iceberg._core import _get_service_lock, clear_source_caches
-    from backend.core.iceberg._ducklake import _default_data_path, ducklake_table_name
+    from backend.core.iceberg._core import _get_service_lock, _resolve_data_path, clear_source_caches
+    from backend.core.iceberg._ducklake import ducklake_table_name
     from backend.core.ingest import _delete_objects_robust
 
     _db = sys.modules[__name__]
     if not (source := _db.get_source_for_service(service_id)):
         raise ValueError(f"No service found with id {service_id!r}")
     service_key, rum_source = source.get("name", service_id), _db.rum_source_for(source)
+    ducklake_root = _resolve_data_path(source, service_id)
     rum_db_path, rum_service_key = os.path.abspath(rum_source["duckdb_path"]), f"{service_key}::rum"
     lock = _get_service_lock(service_key)
     if not lock.acquire(timeout=_LOCK_TIMEOUT_S):
@@ -2119,10 +2194,7 @@ def reset_service_rum(
                 rum_db_path, rum_service_key, "Wiping local RUM database..."
             )
             yield {"type": "status", "message": "Wiping local RUM cache & buffer..."}
-            rum_cache_dir, ducklake_root = (
-                _db._cache_dir(source),
-                svcconfig.DUCKLAKE_DATA_PATH or _default_data_path(source),
-            )
+            rum_cache_dir = _db._cache_dir(source)
             for t_name in _RUM_TABLES:
                 if os.path.exists(data_dir := os.path.join(rum_cache_dir, f"data_{t_name}")):
                     removed = yield from _remove_tree_with_progress(data_dir)
@@ -2135,15 +2207,15 @@ def reset_service_rum(
             _pool.end_drain_pools(retired_rum_pools or [rum_service_key])
             _db.set_recycle_barrier(rum_db_path, False)
 
-        yield {"type": "status", "message": "Purging cloud Iceberg RUM tables..."}
+        yield {"type": "status", "message": "Purging cloud DuckLake RUM data..."}
         fos, bucket, prefix = _db._get_fos_client(source), source.get("bucket", ""), source.get("prefix", "")
         pfx = f"{prefix}/" if prefix else ""
         for t_name in _RUM_TABLES:
-            deleted = yield from _purge_prefix(
-                fos, bucket, f"{pfx}iceberg/default/{t_name}/", _delete_objects_robust,
-                label=f"object(s) under iceberg/default/{t_name}/",
-            )  # fmt: skip
-            yield {"type": "status", "message": f"Deleted {deleted:,} cloud object(s) for RUM {t_name}."}
+            deleted = yield from _purge_ducklake_remote_dirs(
+                fos, ducklake_root, ducklake_table_name(source, t_name), bucket, _delete_objects_robust
+            )
+            if deleted:
+                yield {"type": "status", "message": f"Deleted {deleted:,} cloud object(s) for RUM {t_name}."}
         if delete_raw_logs:
             deleted_rum = yield from _purge_prefix(
                 fos, bucket, f"{pfx}raw/rum/", _delete_objects_robust, label="RUM raw object(s) under raw/rum/"

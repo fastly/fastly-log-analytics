@@ -834,8 +834,8 @@ function RebuildLocalViewButton() {
     <>
       <Button variant="outline" size="sm" onClick={() => setConfirmOpen(true)}><CloudDownload className="h-3 w-3 mr-1.5" />Rebuild Local View</Button>
       <ConfirmDialog
-        open={confirmOpen} onOpenChange={setConfirmOpen} title="Rebuild local view from cloud?"
-        description={<>Clears local Iceberg caches and re-pulls metadata + parquet from FOS via CDN. Un-committed buffer data is preserved. This can take a minute on large tables.{error && <span className="block mt-2 text-xs text-red-500">{error}</span>}</>}
+        open={confirmOpen} onOpenChange={setConfirmOpen} title="Rebuild local view?"
+        description={<>Clears the local view caches and rebuilds the DuckDB view over the DuckLake table. Un-committed buffer data is preserved. This can take a minute on large tables.{error && <span className="block mt-2 text-xs text-red-500">{error}</span>}</>}
         confirmLabel="Rebuild" isPending={busy} onConfirm={rebuild}
       />
     </>
@@ -913,7 +913,7 @@ export function BotSourcesPanel() {
       <div className="space-y-3 pt-2">
         <Label className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Maintenance</Label>
         <div className="flex flex-wrap gap-2"><RebuildLocalViewButton /></div>
-        <p className="text-[11px] text-muted-foreground">Drops local caches and re-pulls Iceberg metadata + parquet from FOS via CDN. The local buffer (un-committed data) is left alone.</p>
+        <p className="text-[11px] text-muted-foreground">Clears the local view caches and rebuilds the DuckDB view. The local buffer (un-committed data) is left alone.</p>
       </div>
       <SystemJobsStrip />
     </div>

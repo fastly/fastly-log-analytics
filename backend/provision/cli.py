@@ -475,9 +475,9 @@ def handle_reset_logs(args):
     if not args.yes:
         blank()
         print(f"  {_c(YLW + BOLD, 'The following will be permanently deleted:')}")
-        print(f"  {_c(DIM, 'Cloud Iceberg log table (iceberg/, except iceberg/meta/)')}")
+        print(f"  {_c(DIM, 'Cloud DuckLake log data (ducklake/ in FOS, High-Scale only)')}")
         print(f"  {_c(DIM, 'Quarantined-file copies (errors/)')}")
-        print(f"  {_c(DIM, 'Local DuckDB analytical database + cache')}")
+        print(f"  {_c(DIM, 'Local DuckLake data, DuckDB analytical database + cache')}")
         print(f"  {_c(DIM, 'Local ingestion dedup indexes')}")
         if args.delete_raw:
             print(f"  {_c(YLW + BOLD, 'Raw .gz request logs in cloud storage (raw/request/)')}")

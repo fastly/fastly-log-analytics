@@ -775,7 +775,13 @@ def fake_scheduler():
 
 
 @pytest.mark.usefixtures("_stub_iceberg_catalog")
-def test_wipes_operational_preserves_config_and_meta(s3_mock, fos_source, fake_scheduler):
+def test_wipes_operational_preserves_config_and_meta(s3_mock, fos_source, fake_scheduler, monkeypatch):
+    from backend.core.iceberg._core import ducklake_table_name
+
+    monkeypatch.setattr(svcconfig, "DUCKLAKE_DATA_PATH", "s3://test-bucket/ducklake/")
+    monkeypatch.setenv("ALLOW_REMOTE_S3_PARQUET_SCAN", "1")
+    lake_key = f"ducklake/main/{ducklake_table_name(fos_source, 'logs')}/data/foo.parquet"
+    other_tenant_key = "ducklake/main/logs_other_service/data/keep.parquet"
     _save_config()
     _seed_metadata_rows()
     evidence = quarantine.capture_evidence(
@@ -792,7 +798,8 @@ def test_wipes_operational_preserves_config_and_meta(s3_mock, fos_source, fake_s
     assert evidence_path.exists()
     raw_key = "raw/request/year=2026/month=01/day=01/hour=00/minute=00/log.gz"
     for k, body in [
-        ("iceberg/default/logs/data/foo.parquet", b"x"),
+        (lake_key, b"x"),
+        (other_tenant_key, b"y"),
         ("iceberg/meta/admin_state.json", b"{}"),
         ("errors/bad.bad.jsonl", b"bad"),
         (raw_key, b"raw"),
@@ -815,10 +822,50 @@ def test_wipes_operational_preserves_config_and_meta(s3_mock, fos_source, fake_s
         assert _table_count(table) == 1, f"{table} should have 1 row"
 
     keys = {o["Key"] for o in s3_mock.list_objects_v2(Bucket="test-bucket").get("Contents", [])}
-    assert "iceberg/default/logs/data/foo.parquet" not in keys and "errors/bad.bad.jsonl" not in keys
+    assert lake_key not in keys and "errors/bad.bad.jsonl" not in keys
+    assert other_tenant_key in keys, "reset must only purge this service's DuckLake table directory"
     assert "iceberg/meta/admin_state.json" in keys and raw_key in keys
     assert fake_scheduler.call_count >= 2
     assert svcconfig.load_config(MOCK_SERVICE_ID)["provisioning"]["cron_sync"]["enabled"] is True
+
+
+@pytest.mark.usefixtures("_stub_iceberg_catalog")
+def test_reset_rum_purges_only_this_services_rum_ducklake_data(s3_mock, fos_source, fake_scheduler, monkeypatch):
+    from backend.core.iceberg._core import ducklake_table_name
+
+    monkeypatch.setattr(svcconfig, "DUCKLAKE_DATA_PATH", "s3://test-bucket/ducklake/")
+    monkeypatch.setenv("ALLOW_REMOTE_S3_PARQUET_SCAN", "1")
+    _save_config()
+    rum_keys = {
+        t: f"ducklake/main/{ducklake_table_name(fos_source, t)}/part.parquet"
+        for t in ("client_vitals", "client_errors")
+    }
+    survivors = {
+        f"ducklake/main/{ducklake_table_name(fos_source, 'logs')}/part.parquet",
+        "ducklake/main/logs_other_service__client_vitals/part.parquet",
+    }
+    for key in (*rum_keys.values(), *survivors):
+        s3_mock.put_object(Bucket="test-bucket", Key=key, Body=b"x")
+
+    events = list(reset_mod.reset_service_rum(MOCK_SERVICE_ID, reload_scheduler=fake_scheduler))
+    assert events[-1]["type"] == "done"
+    keys = {o["Key"] for o in s3_mock.list_objects_v2(Bucket="test-bucket").get("Contents", [])}
+    assert not keys & set(rum_keys.values())
+    assert survivors <= keys, "RUM reset must not touch request-log or other tenants' DuckLake data"
+
+
+@pytest.mark.usefixtures("_stub_iceberg_catalog")
+def test_reset_logs_skips_cloud_purge_when_data_path_is_another_bucket(
+    s3_mock, fos_source, fake_scheduler, monkeypatch
+):
+    monkeypatch.setattr(svcconfig, "DUCKLAKE_DATA_PATH", "s3://some-other-bucket/ducklake/")
+    monkeypatch.setenv("ALLOW_REMOTE_S3_PARQUET_SCAN", "1")
+    _save_config()
+    s3_mock.put_object(Bucket="test-bucket", Key="ducklake/main/anything/part.parquet", Body=b"x")
+    events = list(reset_mod.reset_service_logs(MOCK_SERVICE_ID, reload_scheduler=fake_scheduler))
+    assert any("Skipping cloud DuckLake purge" in e.get("message", "") for e in events)
+    keys = {o["Key"] for o in s3_mock.list_objects_v2(Bucket="test-bucket").get("Contents", [])}
+    assert "ducklake/main/anything/part.parquet" in keys
 
 
 @pytest.mark.usefixtures("_stub_iceberg_catalog")
@@ -868,7 +915,7 @@ def test_concurrent_reset_is_excluded_by_service_lock(monkeypatch, s3_mock, fos_
 @pytest.mark.usefixtures("_stub_iceberg_catalog")
 def test_error_mid_reset_still_resumes_scheduler_and_releases_lock(monkeypatch, s3_mock, fos_source, fake_scheduler):
     _save_config()
-    s3_mock.put_object(Bucket="test-bucket", Key="iceberg/default/logs/data/foo.parquet", Body=b"x")
+    s3_mock.put_object(Bucket="test-bucket", Key="errors/foo.bad.jsonl", Body=b"x")
     monkeypatch.setattr(
         "backend.core.ingest._delete_objects_robust", MagicMock(side_effect=RuntimeError("FOS unreachable"))
     )

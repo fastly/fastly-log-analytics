@@ -1227,7 +1227,7 @@ def provision(cfg: dict, _resume_from_state: bool = False):
         step(8, total, "Finalizing configuration")
         write_service_config(state)
         if is_mock_mode():
-            yield {"type": "status", "message": "⚠ Skipping Iceberg initialization in mock mode."}
+            yield {"type": "status", "message": "⚠ Skipping DuckLake initialization in mock mode."}
             yield {"type": "progress", "current": 8, "total": total}
             yield {"type": "done", "message": "🎉 Provisioning complete!"}
             return
@@ -1239,17 +1239,17 @@ def provision(cfg: dict, _resume_from_state: bool = False):
             if not src:
                 logger.warning(
                     "[provision] %s: no source resolved after config write — "
-                    "Iceberg table will be created lazily on the first commit",
+                    "DuckLake table will be created lazily on the first commit",
                     state.get("logging_service_id"),
                 )
-                warn("Iceberg table not initialized yet (no source resolved) — created on first commit")
+                warn("DuckLake table not initialized yet (no source resolved) — created on first commit")
                 yield {
                     "type": "status",
-                    "message": "⚠ Iceberg table not initialized yet (no source resolved) — "
+                    "message": "⚠ DuckLake table not initialized yet (no source resolved) — "
                     "it will be created on the first commit.",
                 }
             else:
-                yield {"type": "status", "message": "🧊 Initializing Iceberg table in Fastly Object Storage..."}
+                yield {"type": "status", "message": "🧊 Initializing DuckLake table..."}
                 from tenacity import Retrying, retry_if_exception_type, stop_after_attempt
 
                 _ICE_INIT_ATTEMPTS = 3
@@ -1275,16 +1275,16 @@ def provision(cfg: dict, _resume_from_state: bool = False):
                 except Exception as e:
                     ice_exc = e
                 if ice_exc is None:
-                    ok("Iceberg table ready")
-                    yield {"type": "status", "message": "✓ Iceberg table ready."}
+                    ok("DuckLake table ready")
+                    yield {"type": "status", "message": "✓ DuckLake table ready."}
                 else:
                     logger.error(
-                        "[provision] Iceberg table init failed after %d attempt(s) (deferred to first commit)",
+                        "[provision] DuckLake table init failed after %d attempt(s) (deferred to first commit)",
                         _ICE_INIT_ATTEMPTS,
                         exc_info=ice_exc,
                     )
-                    warn(f"Iceberg table init deferred to first commit: {ice_exc}")
-                    yield {"type": "status", "message": f"⚠ Iceberg table init deferred to first commit: {ice_exc}"}
+                    warn(f"DuckLake table init deferred to first commit: {ice_exc}")
+                    yield {"type": "status", "message": f"⚠ DuckLake table init deferred to first commit: {ice_exc}"}
                 c = db.get_connection(source=src)
                 initial_lf = state.get("log_fields", {})
                 if initial_lf:
@@ -1301,7 +1301,7 @@ def provision(cfg: dict, _resume_from_state: bool = False):
                     metadata_db.record_audit(src["name"], "log_format_change", details, actor="provisioning")
                 c.close()
         except Exception:
-            logger.exception("[provision] post-provision Iceberg/audit step failed (non-fatal)")
+            logger.exception("[provision] post-provision DuckLake/audit step failed (non-fatal)")
         yield {"type": "progress", "current": 8, "total": total}
         yield {"type": "done", "message": "🎉 Provisioning complete!"}
     except _PreflightError as e:
@@ -1449,10 +1449,39 @@ def perform_teardown(state: dict, token: str, opts: dict | None = None):
         }
 
 
+_DUCKLAKE_DROP_TIMEOUT_S = 60.0
+
+
+def _drop_ducklake_state_bounded(service_id: str) -> None:
+    """Drop the service's DuckLake tables and local data, never blocking teardown on a hung catalog."""
+    from backend.core.duckdb import drop_service_ducklake_state
+
+    outcome: dict[str, Any] = {}
+
+    def _run() -> None:
+        try:
+            outcome["result"] = drop_service_ducklake_state(service_id)
+        except Exception as exc:
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=_run, name=f"teardown-ducklake-{service_id}", daemon=True)
+    worker.start()
+    worker.join(_DUCKLAKE_DROP_TIMEOUT_S)
+    if worker.is_alive():
+        warn(f"DuckLake cleanup for {service_id} timed out after {_DUCKLAKE_DROP_TIMEOUT_S:.0f}s; local data kept")
+    elif "error" in outcome:
+        warn(f"DuckLake cleanup for {service_id} failed: {outcome['error']}")
+    else:
+        result = outcome["result"]
+        ok(f"Dropped {result['tables_dropped']} DuckLake table(s) and removed local DuckLake data")
+
+
 def cleanup_local_data(service_id: str, bucket: str = None, remove_data: bool = False):
     """Remove local config files, database, and cache associated with a service."""
     from backend import config as svcconfig
 
+    if service_id and remove_data:
+        _drop_ducklake_state_bounded(service_id)
     if service_id:
         cfg_path = svcconfig.config_path(service_id)
         if os.path.exists(cfg_path):

@@ -496,7 +496,7 @@ def test_reset_excludes_a_concurrent_commit_attempt(monkeypatch, s3_mock, fos_so
         return 0
 
     monkeypatch.setattr("backend.core.ingest._delete_objects_robust", _slow_delete)
-    s3_mock.put_object(Bucket=fos_source["bucket"], Key="iceberg/default/logs/data/foo.parquet", Body=b"x")
+    s3_mock.put_object(Bucket=fos_source["bucket"], Key="errors/foo.bad.jsonl", Body=b"x")
     impl = MagicMock()
     monkeypatch.setattr(buffer_mod, "_commit_buffer_impl", impl)
 
@@ -952,6 +952,45 @@ def test_ducklake_attach_extension_options(monkeypatch, tmp_path):
         )
     finally:
         con.close()
+
+
+def test_drop_service_ducklake_state_drops_real_tables_and_files(monkeypatch, tmp_path):
+    import backend.core.duckdb as core_duckdb
+    from backend.core.iceberg._core import ducklake_table_name
+
+    data_dir = tmp_path / "data"
+    monkeypatch.setattr(ducklake.config, "DUCKLAKE_CATALOG", f"ducklake:{tmp_path / 'lake.ducklake'}")
+    monkeypatch.setattr(ducklake.config, "DUCKLAKE_DATA_PATH", str(data_dir))
+    monkeypatch.delenv("DUCKLAKE_EXTENSION_PATH", raising=False)
+    mine, other = {"service_id": "svc_drop", "name": "svc_drop"}, {"service_id": "svc_keep", "name": "svc_keep"}
+    names = {ducklake_table_name(mine, t) for t in ("logs", "client_vitals", "client_errors")}
+    keep = ducklake_table_name(other, "logs")
+    con = duckdb.connect()
+    try:
+        assert ducklake._ducklake_attach(con, mine, read_only=False)
+        for name in (*names, keep):
+            con.execute(f'CREATE TABLE lake."{name}" AS SELECT i AS a FROM range(100) t(i)')
+        assert list(data_dir.rglob("*.parquet"))
+    finally:
+        con.close()
+
+    with patch.object(core_duckdb, "get_source_for_service", return_value=mine):
+        result = core_duckdb.drop_service_ducklake_state("svc_drop")
+    assert result["tables_dropped"] == 3
+
+    con = duckdb.connect()
+    try:
+        assert ducklake._ducklake_attach(con, mine, read_only=False)
+        remaining = {
+            r[0] for r in con.execute("SELECT table_name FROM duckdb_tables() WHERE database_name = 'lake'").fetchall()
+        }
+        con.execute(f'DROP TABLE IF EXISTS lake."{keep}"')
+    finally:
+        con.close()
+    assert not names & remaining, "the torn-down service's tables are dropped"
+    assert keep in remaining, "other services' tables survive"
+    assert not any(p.parent.name in names for p in data_dir.rglob("*.parquet"))
+    assert any(p.parent.name == keep for p in data_dir.rglob("*.parquet")), "other services' data files survive"
 
 
 @pytest.mark.usefixtures("reset_admission_state")

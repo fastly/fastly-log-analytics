@@ -2827,3 +2827,157 @@ def test_bench_escape_sql_literal_typical(benchmark):
 @pytest.mark.benchmark
 def test_bench_escape_sql_literal_with_quotes(benchmark):
     assert "''" in benchmark(escape_sql_literal, "raw/2026-05-15/O'Brien's-bucket/file.gz")
+
+
+def test_drop_service_ducklake_state_drops_tables_and_removes_local_dir(tmp_path, monkeypatch):
+    from backend import config as svcconfig
+    from backend.core.iceberg._core import ducklake_table_name
+
+    source = {"service_id": "svc", "name": "svc"}
+    lake_dir = tmp_path / "svc" / "ducklake" / "main" / ducklake_table_name(source, "logs")
+    lake_dir.mkdir(parents=True)
+    (lake_dir / "part.parquet").write_text("x")
+    other_dir = tmp_path / "other" / "ducklake"
+    other_dir.mkdir(parents=True)
+    monkeypatch.setattr(svcconfig, "SERVICES_DATA_DIR", tmp_path)
+    monkeypatch.setattr(svcconfig, "DUCKLAKE_DATA_PATH", None)
+    fake_con = MagicMock()
+    with (
+        patch.object(d, "get_source_for_service", return_value=source),
+        patch.object(d.duckdb, "connect", return_value=fake_con),
+        patch("backend.core.iceberg._ducklake._ducklake_attach", return_value=True),
+    ):
+        result = d.drop_service_ducklake_state("svc")
+
+    statements = [c.args[0] for c in fake_con.execute.call_args_list]
+    assert statements == [
+        f'DROP TABLE IF EXISTS lake."{ducklake_table_name(source, t)}"'
+        for t in ("logs", "client_vitals", "client_errors")
+    ]
+    assert result == {"tables_dropped": 3, "local_dirs_removed": 1}
+    assert not (tmp_path / "svc").exists()
+    assert other_dir.exists(), "another service's DuckLake data must survive"
+    fake_con.close.assert_called_once()
+
+
+def test_drop_service_ducklake_state_unknown_service_is_noop():
+    with patch.object(d, "get_source_for_service", return_value=None):
+        assert d.drop_service_ducklake_state("missing") == {"tables_dropped": 0, "local_dirs_removed": 0}
+
+
+def test_drop_service_ducklake_state_attach_failure_raises_and_keeps_local_files(tmp_path, monkeypatch):
+    from backend import config as svcconfig
+
+    lake_dir = tmp_path / "svc" / "ducklake"
+    lake_dir.mkdir(parents=True)
+    (lake_dir / "part.parquet").write_text("x")
+    monkeypatch.setattr(svcconfig, "SERVICES_DATA_DIR", tmp_path)
+    monkeypatch.setattr(svcconfig, "DUCKLAKE_DATA_PATH", None)
+    fake_con = MagicMock()
+    with (
+        patch.object(d, "get_source_for_service", return_value={"service_id": "svc", "name": "svc"}),
+        patch.object(d.duckdb, "connect", return_value=fake_con),
+        patch("backend.core.iceberg._ducklake._ducklake_attach", return_value=False),
+        pytest.raises(RuntimeError, match="could not attach"),
+    ):
+        d.drop_service_ducklake_state("svc")
+    fake_con.execute.assert_not_called()
+    fake_con.close.assert_called_once()
+    assert (lake_dir / "part.parquet").exists(), "catalog still references these files"
+
+
+def test_drop_service_ducklake_state_drop_failure_raises_and_keeps_local_files(tmp_path, monkeypatch):
+    from backend import config as svcconfig
+
+    lake_dir = tmp_path / "svc" / "ducklake"
+    lake_dir.mkdir(parents=True)
+    (lake_dir / "part.parquet").write_text("x")
+    monkeypatch.setattr(svcconfig, "SERVICES_DATA_DIR", tmp_path)
+    monkeypatch.setattr(svcconfig, "DUCKLAKE_DATA_PATH", None)
+    fake_con = MagicMock()
+    fake_con.execute.side_effect = [None, RuntimeError("catalog locked"), None]
+    with (
+        patch.object(d, "get_source_for_service", return_value={"service_id": "svc", "name": "svc"}),
+        patch.object(d.duckdb, "connect", return_value=fake_con),
+        patch("backend.core.iceberg._ducklake._ducklake_attach", return_value=True),
+        pytest.raises(RuntimeError, match="client_vitals: catalog locked"),
+    ):
+        d.drop_service_ducklake_state("svc")
+    assert fake_con.execute.call_count == 3, "every table drop is attempted before failing"
+    assert (lake_dir / "part.parquet").exists()
+
+
+def test_drop_service_ducklake_state_blocked_remote_root_uses_the_writers_local_fallback(tmp_path, monkeypatch):
+    """The storage guard makes writers fall back to local disk; teardown must clean the same place."""
+    from backend import config as svcconfig
+
+    lake_dir = tmp_path / "svc" / "ducklake"
+    lake_dir.mkdir(parents=True)
+    (lake_dir / "part.parquet").write_text("x")
+    monkeypatch.setattr(svcconfig, "SERVICES_DATA_DIR", tmp_path)
+    monkeypatch.setattr(svcconfig, "DUCKLAKE_DATA_PATH", "s3://elsewhere/ducklake/")
+    monkeypatch.setattr(svcconfig, "DEPLOYMENT_MODE", "standard")
+    monkeypatch.delenv("ALLOW_REMOTE_S3_PARQUET_SCAN", raising=False)
+    with (
+        patch.object(d, "get_source_for_service", return_value={"service_id": "svc", "name": "svc"}),
+        patch.object(d.duckdb, "connect", return_value=MagicMock()),
+        patch("backend.core.iceberg._ducklake._ducklake_attach", return_value=True),
+    ):
+        result = d.drop_service_ducklake_state("svc")
+    assert result["local_dirs_removed"] == 1 and not lake_dir.exists()
+
+
+class _KeyStorePaginator:
+    def __init__(self, keys):
+        self._keys = keys
+
+    def paginate(self, Bucket, Prefix):
+        return [{"Contents": [{"Key": k} for k in sorted(self._keys) if k.startswith(Prefix)]}]
+
+
+def _run_purge(root, tbl, keys, bucket="b"):
+    fos = MagicMock()
+    fos.get_paginator.return_value = _KeyStorePaginator(keys)
+    deleted = []
+
+    def delete_fn(_fos, _bucket, batch):
+        deleted.extend(batch)
+        return len(batch)
+
+    gen = d._purge_ducklake_remote_dirs(fos, root, tbl, bucket, delete_fn)
+    messages = []
+    try:
+        while True:
+            messages.append(next(gen))
+    except StopIteration as stop:
+        return stop.value, deleted, messages
+
+
+@pytest.mark.parametrize(
+    ("root", "expected_deleted"),
+    [
+        ("s3://b/pfx/ducklake/", ["pfx/ducklake/logs_svc/f2.parquet", "pfx/ducklake/main/logs_svc/f1.parquet"]),
+        ("s3://b/pfx/ducklake", ["pfx/ducklake/logs_svc/f2.parquet", "pfx/ducklake/main/logs_svc/f1.parquet"]),
+        ("s3://b/", ["logs_svc/f2.parquet", "main/logs_svc/f1.parquet"]),
+    ],
+)
+def test_purge_ducklake_remote_dirs_only_deletes_the_named_table(root, expected_deleted):
+    base = root[len("s3://b/") :].rstrip("/")
+    base = f"{base}/" if base else ""
+    keys = [
+        f"{base}main/logs_svc/f1.parquet",
+        f"{base}logs_svc/f2.parquet",
+        f"{base}main/logs_svc__client_vitals/sibling.parquet",
+        f"{base}logs_svc__client_vitals/sibling2.parquet",
+        f"{base}main/logs_svc_other/other.parquet",
+        f"{base}main/logs_other/other.parquet",
+        "iceberg/meta/admin_state.json",
+    ]
+    total, deleted, _ = _run_purge(root, "logs_svc", keys)
+    assert sorted(deleted) == expected_deleted and total == 2
+
+
+def test_purge_ducklake_remote_dirs_skips_foreign_bucket_and_local_roots():
+    total, deleted, messages = _run_purge("s3://elsewhere/ducklake/", "logs_svc", ["main/logs_svc/f.parquet"])
+    assert (total, deleted) == (0, []) and "Skipping cloud DuckLake purge" in messages[0]["message"]
+    assert _run_purge("/local/ducklake", "logs_svc", ["main/logs_svc/f.parquet"]) == (0, [], [])
