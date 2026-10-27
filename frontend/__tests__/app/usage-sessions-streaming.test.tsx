@@ -247,7 +247,7 @@ let errorSpy: ReturnType<typeof spyOnConsoleError>
 function makePrefill(overrides: Partial<PrefillResponse>): PrefillResponse {
   return {
     _is_cached: false, data_days: 7, commit_interval_mins: 5, sample_rate: 100, edge_only: false,
-    compaction_enabled: true, delete_after: false, log_retention_days: 90, billing_zone: null, ...overrides,
+    compaction_enabled: true, delete_after: false, log_retention_days: 90, rum_retention_days: 90, deployment_mode: 'standard', billing_zone: null, ...overrides,
   }
 }
 
@@ -371,11 +371,17 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
     test('correctly calculates RUM beacon costs and storage when rumBeaconsDay is set', () => {
       const results = calculate({ ...DEFAULTS, rumBeaconsDay: 10000 })
       expect(results.rumBeaconsMonth).toBe(300000)
-      expect(results.rumParquetGBMonths).toBeCloseTo(0.071525, 4)
-      expect(results.costRum).toBeCloseTo(1.50143, 4)
+      // RUM storage follows the RUM retention: 90 days is three times the 30-day monthly volume.
+      expect(results.rumParquetGBMonths).toBeCloseTo(0.071525 * 3, 4)
+      expect(results.costRum).toBeCloseTo(1.5 + 0.071525 * 3 * 0.02, 4)
       const rumTier = results.storageTiers.find(t => t.label === 'RUM data')
       expect(rumTier).toBeDefined()
-      expect(rumTier?.gbMonths).toBeCloseTo(0.071525, 4)
+      expect(rumTier?.gbMonths).toBeCloseTo(0.071525 * 3, 4)
+      // A shorter RUM retention shrinks RUM storage but not the request data.
+      const short = calculate({ ...DEFAULTS, rumBeaconsDay: 10000, rumRetentionDays: 30 })
+      expect(short.rumParquetGBMonths).toBeCloseTo(0.071525, 4)
+      expect(short.storageTiers.find(t => t.label === 'DuckLake data')?.gbMonths)
+        .toBeCloseTo(results.storageTiers.find(t => t.label === 'DuckLake data')?.gbMonths ?? 0, 6)
     })
 
     test('High-Scale adds the archive Parquet tier sized from the measured per-artifact and per-row bytes', () => {
@@ -394,6 +400,42 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
       const busyPages = Math.ceil(busyFiles / Math.min(DEFAULTS.archiveBatchObjects, (busyFiles * 20) / 86400))
       expect(busy.classAPerMonth - calculate({ ...DEFAULTS, logNodes: 60 }).classAPerMonth).toBeCloseTo(busyPages * 30 * 3, 6)
       expect(busyPages).toBeLessThan(busyFiles)
+    })
+
+    test('PREFILL takes the service retention settings and deployment mode; 0 means keep forever', () => {
+      const prefilled = reducer(DEFAULTS, {
+        type: 'PREFILL',
+        prefill: makePrefill({ log_retention_days: 14, rum_retention_days: 7, deployment_mode: 'high_scale' }),
+      })
+      expect([prefilled.retentionDays, prefilled.rumRetentionDays, prefilled.deploymentMode]).toEqual([14, 7, 'high_scale'])
+      const forever = reducer(DEFAULTS, {
+        type: 'PREFILL',
+        prefill: makePrefill({ log_retention_days: 0, rum_retention_days: 0, deployment_mode: 'standard' }),
+      })
+      expect([forever.retentionDays, forever.rumRetentionDays, forever.deploymentMode]).toEqual([365, 365, 'standard'])
+    })
+
+    test('the High-Scale archive is billed for the retention window plus the one-day margin, per domain', () => {
+      const base = { ...DEFAULTS, deploymentMode: 'high_scale' as const, rumBeaconsDay: 10000, minDays: 1 }
+      const archiveGB = (state: typeof base, label: string) =>
+        calculate(state).storageTiers.find(t => t.label === label)?.gbMonths ?? 0
+      // Request archive scales with the request retention (+1 day) and ignores RUM retention.
+      const req30 = archiveGB({ ...base, retentionDays: 30 }, 'High-Scale archive')
+      const req7 = archiveGB({ ...base, retentionDays: 7 }, 'High-Scale archive')
+      expect(req30 / req7).toBeCloseTo(31 / 8, 6)
+      expect(archiveGB({ ...base, retentionDays: 30, rumRetentionDays: 3 }, 'High-Scale archive')).toBeCloseTo(req30, 9)
+      // RUM archive scales with the RUM retention (+1 day) and ignores the request retention.
+      const rum30 = archiveGB({ ...base, rumRetentionDays: 30 }, 'High-Scale RUM archive')
+      const rum7 = archiveGB({ ...base, rumRetentionDays: 7 }, 'High-Scale RUM archive')
+      expect(rum30).toBeGreaterThan(0)
+      expect(rum30 / rum7).toBeCloseTo(31 / 8, 6)
+      expect(archiveGB({ ...base, retentionDays: 5, rumRetentionDays: 30 }, 'High-Scale RUM archive')).toBeCloseTo(rum30, 9)
+      // The FOS 30-day minimum floors a short window.
+      const floored = calculate({ ...base, minDays: 30, retentionDays: 3 })
+      expect(floored.storageTiers.find(t => t.label === 'High-Scale archive')?.flagged).toBe(true)
+      // Standard keeps no archive and no RUM archive.
+      const standard = calculate({ ...DEFAULTS, rumBeaconsDay: 10000 })
+      expect(standard.storageTiers.some(t => t.label.includes('archive'))).toBe(false)
     })
 
     test('reducer PREFILL handles rum_beacons_per_day correctly', () => {

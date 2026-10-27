@@ -807,6 +807,24 @@ class PostgresControlPlane:
             ).fetchall()
             return tuple(_archive_from_row(row).manifest for row in rows)
 
+    def archive_storage_summary(self, service_id: str) -> dict[str, int]:
+        """FOS footprint of a service's archive: live bytes and objects, and bytes expired in the last 30 days.
+
+        Each non-expired manifest is three objects (artifact, manifest, commit marker). FOS bills a deleted object
+        for 30 days, so recently expired artifacts still count towards the bill.
+        """
+        _require_text(service_id, "service_id")
+        with self.transaction(read_only=True) as connection:
+            row = connection.execute(
+                "SELECT "
+                "coalesce(sum(artifact_size) FILTER (WHERE archive_expired_at IS NULL), 0), "
+                "count(*) FILTER (WHERE archive_expired_at IS NULL), "
+                "coalesce(sum(artifact_size) FILTER (WHERE archive_expired_at > clock_timestamp() - interval '30 days'), 0) "
+                "FROM high_scale_archive_manifests WHERE service_id = %s AND state <> 'artifact_uploading'",
+                (service_id,),
+            ).fetchone()
+        return {"live_bytes": int(row[0]), "live_objects": int(row[1]) * 3, "expired_30d_bytes": int(row[2])}
+
     def mark_archive_expired(self, manifest_id: str) -> None:
         _require_text(manifest_id, "manifest_id")
         with self.transaction() as connection:

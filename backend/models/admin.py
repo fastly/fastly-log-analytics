@@ -808,7 +808,9 @@ class _PrefillRatesBase(_BillingRatesMixin, BaseResponse):
     edge_only: bool = False
     compaction_enabled: bool = True
     delete_after: bool = True
-    log_retention_days: int = 90
+    log_retention_days: int = 30
+    rum_retention_days: int = 30
+    deployment_mode: str = "standard"
     avg_nodes_per_flush: int | None = None
     min_billed_days: int | None = None
     billing_zone: str | None = "MBZ200"
@@ -835,6 +837,9 @@ class CurrentStorageResponse(BaseResponse):
     quarantine_bytes: int = 0
     total_billed_bytes: int
     total_billed_gb_hours: float
+    archive_bytes: int = 0
+    archive_objects: int = 0
+    archive_expired_bytes: int = 0
     total_files: int
     total_bytes: int
     start: str

@@ -60167,6 +60167,21 @@
             "type": "number",
             "title": "Total Billed Gb Hours"
           },
+          "archive_bytes": {
+            "type": "integer",
+            "title": "Archive Bytes",
+            "default": 0
+          },
+          "archive_objects": {
+            "type": "integer",
+            "title": "Archive Objects",
+            "default": 0
+          },
+          "archive_expired_bytes": {
+            "type": "integer",
+            "title": "Archive Expired Bytes",
+            "default": 0
+          },
           "total_files": {
             "type": "integer",
             "title": "Total Files"
@@ -79324,7 +79339,17 @@
           "log_retention_days": {
             "type": "integer",
             "title": "Log Retention Days",
-            "default": 90
+            "default": 30
+          },
+          "rum_retention_days": {
+            "type": "integer",
+            "title": "Rum Retention Days",
+            "default": 30
+          },
+          "deployment_mode": {
+            "type": "string",
+            "title": "Deployment Mode",
+            "default": "standard"
           },
           "avg_nodes_per_flush": {
             "anyOf": [
@@ -79529,7 +79554,17 @@
           "log_retention_days": {
             "type": "integer",
             "title": "Log Retention Days",
-            "default": 90
+            "default": 30
+          },
+          "rum_retention_days": {
+            "type": "integer",
+            "title": "Rum Retention Days",
+            "default": 30
+          },
+          "deployment_mode": {
+            "type": "string",
+            "title": "Deployment Mode",
+            "default": "standard"
           },
           "avg_nodes_per_flush": {
             "anyOf": [

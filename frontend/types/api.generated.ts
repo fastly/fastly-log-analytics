@@ -8458,6 +8458,21 @@ export interface components {
             total_billed_bytes: number;
             /** Total Billed Gb Hours */
             total_billed_gb_hours: number;
+            /**
+             * Archive Bytes
+             * @default 0
+             */
+            archive_bytes: number;
+            /**
+             * Archive Objects
+             * @default 0
+             */
+            archive_objects: number;
+            /**
+             * Archive Expired Bytes
+             * @default 0
+             */
+            archive_expired_bytes: number;
             /** Total Files */
             total_files: number;
             /** Total Bytes */
@@ -14977,9 +14992,19 @@ export interface components {
             delete_after: boolean;
             /**
              * Log Retention Days
-             * @default 90
+             * @default 30
              */
             log_retention_days: number;
+            /**
+             * Rum Retention Days
+             * @default 30
+             */
+            rum_retention_days: number;
+            /**
+             * Deployment Mode
+             * @default standard
+             */
+            deployment_mode: string;
             /** Avg Nodes Per Flush */
             avg_nodes_per_flush?: number | null;
         };
@@ -15058,9 +15083,19 @@ export interface components {
             delete_after: boolean;
             /**
              * Log Retention Days
-             * @default 90
+             * @default 30
              */
             log_retention_days: number;
+            /**
+             * Rum Retention Days
+             * @default 30
+             */
+            rum_retention_days: number;
+            /**
+             * Deployment Mode
+             * @default standard
+             */
+            deployment_mode: string;
             /** Avg Nodes Per Flush */
             avg_nodes_per_flush?: number | null;
             /** Requests Per Day */
