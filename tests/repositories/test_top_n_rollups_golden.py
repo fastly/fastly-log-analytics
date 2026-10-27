@@ -3096,6 +3096,16 @@ def test_get_field_values_scoped_requests_ignore_sample_cache(
 def test_dashboard_country_rollups_match_scoped_filter_at_hour_boundaries(
     in_memory_duckdb, test_service_source, tmp_path, monkeypatch, now, start, end, missing_hour
 ):
+    top_n_queries = []
+    execute_top_n_rollups = QueryRunner.execute_top_n_rollups
+
+    def capture_top_n_queries(runner, *args, **kwargs):
+        before = len(runner.debug_queries)
+        result = execute_top_n_rollups(runner, *args, **kwargs)
+        top_n_queries.extend(runner.debug_queries[before:])
+        return result
+
+    monkeypatch.setattr(QueryRunner, "execute_top_n_rollups", capture_top_n_queries)
     table = _empty_logs_table(in_memory_duckdb, test_service_source)
     in_memory_duckdb.executemany(
         f"INSERT INTO {table} (timestamp, country, ip, url, waf_sig) VALUES (?, ?, '192.0.2.1', '/fixture', 'A, B')",
@@ -3158,11 +3168,10 @@ def test_dashboard_country_rollups_match_scoped_filter_at_hour_boundaries(
     }
     if start == "02:00" and end in ("03:00", "04:00"):
         assert any("read_parquet" in row["sql"] for row in initial["debug_queries"])
-    assert not any("strftime(timestamp, '%Y-%m-%d-%H') IN" in row["sql"] for row in initial["debug_queries"])
+    assert top_n_queries
+    assert not any("strftime(timestamp, '%Y-%m-%d-%H') IN" in row["sql"] for row in top_n_queries)
     raw_table_queries = [
-        row["sql"]
-        for row in initial["debug_queries"]
-        if f"FROM {table}" in row["sql"] or f"FROM ({table})" in row["sql"]
+        row["sql"] for row in top_n_queries if f"FROM {table}" in row["sql"] or f"FROM ({table})" in row["sql"]
     ]
     assert len(raw_table_queries) <= 2
 
