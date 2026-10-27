@@ -26,7 +26,6 @@ from backend.cron.jobs.compaction import (
     _run_rollup_hour_heal,
 )
 from backend.deps import get_service_id, get_source, require_admin
-from backend.utils.date_utils import iso_z
 from starlette.testclient import TestClient
 
 from backend.core import duckdb as _db
@@ -48,6 +47,7 @@ from backend.cron.scheduler import TASK_MAP, Scheduler, partial_hour_merge_inter
 from backend.main import app
 from backend.repositories._base import _LIVE_TOPN_SKIP_FIELDS, QueryRunner
 from backend.utils import rdns_cache
+from backend.utils.date_utils import iso_z
 
 metadata = metadata_job
 

@@ -16,10 +16,8 @@ from unittest.mock import MagicMock, patch
 import duckdb
 import httpx
 import pytest
-from backend.core.retry import retry_call
 from backend.core.storage.view import configure_duckdb_s3
 from backend.utils.auth import analyst_allowed_services, mask_ips_for, require_owned_row
-from backend.utils.http import make_client
 from backend.utils.sql_validator import (
     _ALLOWED_TABLE_FUNCTIONS,
     MAX_INPUT_BYTES,
@@ -37,10 +35,12 @@ from backend import config as config_mod
 from backend.config import service_id_from_source
 from backend.core import duckdb as core_duckdb
 from backend.core.realtime import poller as poller_mod
+from backend.core.retry import retry_call
 from backend.core.storage import execute_with_stale_view_retry, is_stale_view_error
 from backend.repositories._base import QueryRunner
 from backend.utils import router_utils
 from backend.utils import valkey_publisher as vp
+from backend.utils.http import make_client
 from backend.utils.router_utils import (
     SSE_PASSTHROUGH_HEADERS,
     require_fastly_token,

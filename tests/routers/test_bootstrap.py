@@ -21,7 +21,6 @@ from backend.core.realtime.transform import error_tick_payload
 from backend.core.share_db.settings import get_setting, set_setting
 from backend.deps import get_con, get_service_id, get_source, require_admin, require_service_access
 from backend.high_scale.archive_models import ServingWatermark
-from backend.routers.bootstrap import _bootstrap_sync, _compute_log_fields_catalog, _startup_stub_response
 from backend.scoring.labels import ALLOWED_LABELS
 from backend.utils.remote_access import RemoteAccessMiddleware, _is_blocked_path
 from backend.utils.tunnel.manager import AnalystSession, get_tunnel_manager
@@ -54,6 +53,7 @@ from backend.routers import bootstrap, share_admin
 from backend.routers import control_room as cr_mod
 from backend.routers import session_scoring as session_scoring_router
 from backend.routers import session_scoring_admin as scoring_admin
+from backend.routers.bootstrap import _bootstrap_sync, _compute_log_fields_catalog, _startup_stub_response
 from backend.routers.control_room import TAB_STUBS
 from backend.routers.services import core as services_core_router
 from backend.scoring import labels as _labels

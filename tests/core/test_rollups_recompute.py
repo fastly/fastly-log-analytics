@@ -366,9 +366,8 @@ def test_run_ip_spread_per_field_writes_partitioned_parquet_with_hll(tmp_path):
     produces a per-(field, hour) parquet under
     ``rollups/hour_ip_spread/field=X/hour=Y/`` with an HLL BLOB whose
     deserialized count is within HLL error of the input's true distinct."""
-    from backend.utils.hll import HyperLogLog
-
     from backend.core.rollups import recompute
+    from backend.utils.hll import HyperLogLog
 
     cache_root = tmp_path / "cache"
     cache_root.mkdir()

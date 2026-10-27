@@ -191,7 +191,7 @@ def _mock_teardown_env(
         patch("backend.provision.orchestrator.delete_cdn_service", side_effect=delete_cdn_se) as m_cdn,
         patch("backend.provision.orchestrator.ensure_fos_access_key", return_value=_fos_key("T")),
         patch("backend.provision.orchestrator.delete_fos_access_key") as m_key,
-        patch("backend.provision.orchestrator.fastly", **fastly_kw) as m_fastly,
+        patch("backend.provision.fos_setup.fastly", **fastly_kw) as m_fastly,
         patch("backend.provision.session_scoring_orchestrator.teardown_scoring_resources", **scoring_kw) as m_score,
     ):
         yield {
@@ -924,7 +924,6 @@ import inspect
 from datetime import UTC, datetime
 
 from backend.core.fastly.rum_provisioning import RUM_ASSET_FETCH_NAME, generate_rum_asset_fetch_vcl
-from backend.provision.cmcd_fields import _CMCD_FIELD_NAMES, reconcile_cmcd_custom_fields
 from backend.provision.utils import (
     ANALYTICS_LOG_LAYOUT,
     VclBuilder,
@@ -937,6 +936,7 @@ from backend.provision.utils import (
 )
 
 from backend.provision import cmcd_fields as orch
+from backend.provision.cmcd_fields import _CMCD_FIELD_NAMES, reconcile_cmcd_custom_fields
 from backend.provision.fastly_api import delete_remote_frontend, deploy_remote_frontend
 
 
@@ -965,9 +965,9 @@ def test_vcl_builder_and_cmcd_fields_and_log_paths():
 
 def test_producers_use_canonical_layout_and_rum_asset_routing():
     import backend.provision.declarative.generators as gen
-    import backend.routers.services.core as sc
 
     import backend.provision.fastly_api as fa
+    import backend.routers.services.core as sc
 
     for mod in (gen, fa, sc):
         src = inspect.getsource(mod)
@@ -1235,6 +1235,7 @@ import logging
 import re
 from unittest.mock import AsyncMock
 
+from backend.cron.jobs import rum_sync as rum_sync_mod
 from backend.provision.rum_assets import (
     cleanup_old_faro_versions,
     detect_faro_version_change,
@@ -1250,8 +1251,6 @@ from backend.provision.rum_orchestrator_v2 import (
     rum_vcl_fingerprint,
     upgrade_faro_version,
 )
-
-from backend.cron.jobs import rum_sync as rum_sync_mod
 from tests._helpers.config_fakes import (
     config_lock_held as _lock_held,
 )

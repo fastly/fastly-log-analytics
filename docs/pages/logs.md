@@ -25,7 +25,7 @@ The **Data Management** page (`/logs`) is the operational hub for inspecting and
 - **Primary Route:** `/logs`
 - **Supported Query Parameters:**
   - `service` (optional string): Target `service_id` for SSR hydration (`fetchCronRunsServerSide(serviceId)` in [`frontend/lib/ssr/logs.ts`](../../frontend/lib/ssr/logs.ts)) and initial client selection.
-  - `tab` (optional string, default `'cron'`): Initial active tab (`cron`, `service_history`, `ingestion`, `iceberg`, `metadata_storage`, `raw`, or `schema`).
+  - `tab` (optional string, default `'cron'`): Initial active tab (`cron`, `service_history`, `ingestion`, `storage`, `metadata_storage`, `raw`, or `schema`).
 
 ---
 
@@ -33,7 +33,7 @@ The **Data Management** page (`/logs`) is the operational hub for inspecting and
 
 | Role | Access Level | Data Redaction & Capabilities |
 |---|---|---|
-| **Admin (`read_write`)** | Full Control | Full access to all 7 tabs (`cron`, `service_history`, `ingestion`, `iceberg`, `metadata_storage`, `raw`, `schema`), `QuickActionsBar` triggers (`Import Logs`, `Sync from Cloud`, `Commit Buffer`, `NGWAF Bot Sync`, `View Recent Logs`), cron history purge (`DELETE /api/cron-runs`), ingested file deletion (`DELETE /api/admin/ingested-files`), and DuckLake maintenance triggers (`compact`, `optimize`, `expire-snapshots`, `metadata-cleanup`). |
+| **Admin (`read_write`)** | Full Control | Full access to all 7 tabs (`cron`, `service_history`, `ingestion`, `storage`, `metadata_storage`, `raw`, `schema`), `QuickActionsBar` triggers (`Import Logs`, `Sync from Cloud`, `Commit Buffer`, `NGWAF Bot Sync`, `View Recent Logs`), cron history purge (`DELETE /api/cron-runs`), ingested file deletion (`DELETE /api/admin/ingested-files`), and DuckLake maintenance triggers (`compact`, `optimize`, `expire-snapshots`, `metadata-cleanup`). |
 | **Analyst (Remote Share)** | Blocked (`403 Forbidden` / Redirect) | Hidden from sidebar navigation (`shareAnalystVisible: false` in [`AppLayout.tsx`](../../frontend/components/AppLayout.tsx)). Navigating directly to `/logs` renders an accessible polite status banner (`"This page is not available for your account. Redirecting to the dashboard."`) and redirects to `/dashboard`. All backing endpoints (`/api/cron-runs`, `/api/cron-schedule`, `/api/audit-logs`, `/api/admin/*`) are blocked by `RemoteAccessGuardMiddleware` (`403 admin_only`). |
 
 ---
@@ -45,7 +45,7 @@ The **Data Management** page (`/logs`) is the operational hub for inspecting and
 | **Cron Runs (`cron`)** | Reads `cron_runs` from PostgreSQL (`METADATA_DSN`) and live APScheduler job metadata (`log_discovery`, `commit`, `local_compact`, `rollup_heal`, `rollup_compact`, `optimize`, `expire`, `full_sync`, `gap_heal`, `rum_sync`, `rum_commit`, `metadata_sync`, `metadata_cleanup`, `alerts_evaluation`). | Reads `cron_runs` from PostgreSQL (`METADATA_DSN`) and High-Scale scheduler/Celery jobs (`discover_new_files`, `ledger_sweep`, `expire_snapshots`, `metadata_cleanup`, `alerts_evaluation`, etc.). |
 | **Service History (`service_history`)** | Reads per-service `audit_logs` from PostgreSQL (`METADATA_DSN`), synced to FOS `admin_state.json`. | Reads per-service `audit_logs` from shared PostgreSQL (`METADATA_DSN`). |
 | **Ingestion History (`ingestion`)** | Lists and filters `ingested_files` from PostgreSQL (`METADATA_DSN`); supports deleting rows so `.gz` files are re-ingested on the next discovery sweep. | Lists `ingested_files` / `ingest_ledger` state from PostgreSQL (`METADATA_DSN`). |
-| **DuckLake Storage (`iceberg`)** | Inspects DuckLake snapshot metadata, local compaction status, and Parquet file tree via `DUCKLAKE_CATALOG` and local/FOS storage. | Inspects shared PostgreSQL DuckLake catalog (`DUCKLAKE_CATALOG`) and durable cloud storage Parquet tree. |
+| **DuckLake Storage (`storage`)** | Inspects DuckLake snapshot metadata, local compaction status, and Parquet file tree via `DUCKLAKE_CATALOG` and local/FOS storage. | Inspects shared PostgreSQL DuckLake catalog (`DUCKLAKE_CATALOG`) and durable cloud storage Parquet tree. |
 | **Metadata Storage (`metadata_storage`)** | Queries PostgreSQL (`pg_total_relation_size`) and per-service row counts across operational tables (`ingested_files`, `usage_log`, `cron_runs`, `slow_queries`, `audit_logs`, etc.); triggers `metadata_cleanup`. | Queries shared PostgreSQL (`METADATA_DSN`) table sizes and row counts; triggers `metadata_cleanup`. |
 | **Available Logs (`raw`)** | Streams hierarchical S3/FOS prefix tree (`raw/request/`, `raw/rum/`) with date-range filtering and ZIP/single-file download. | Streams hierarchical S3/FOS prefix tree from cloud object storage. |
 | **DuckDB Schema (`schema`)** | Executes `DESCRIBE logs` against the per-service DuckDB connection (stitching DuckLake + local Parquet buffer) and caches schema metadata. | Executes `DESCRIBE logs` against the serving engine / DuckLake view. |
@@ -67,10 +67,10 @@ The **Data Management** page (`/logs`) is the operational hub for inspecting and
 5. `GET /api/schema` ([`backend/routers/services/core.py`](../../backend/routers/services/core.py)):
    - Returns column names, DuckDB types, and nullability for the `logs` analytical table/view (`SchemaTab`).
 6. DuckLake & Storage Inspection Endpoints ([`backend/routers/admin/`](../../backend/routers/admin/)):
-   - `GET /api/admin/iceberg-status` (`StorageStatus` card)
+   - `GET /api/admin/storage-info` (`StorageStatus` card)
    - `GET /api/admin/storage-calendar` (`StorageCalendar` daily heatmap)
    - `GET /api/admin/compaction-status` (local Parquet compaction metrics)
-   - `GET /api/admin/tree/iceberg` & `GET /api/admin/tree/raw` (`FileBrowser` lazy directory trees)
+   - `GET /api/admin/storage-tree` & `GET /api/admin/tree/raw` (`FileBrowser` lazy directory trees)
    - `GET /api/admin/metadata-storage` & `POST /api/admin/metadata-cleanup` (`MetadataStorageCard`)
 7. Interactive Action & SSE Streaming Endpoints:
    - `POST /api/admin/ingest-logs` & `GET /api/cron-runs/{run_id}/stream` (manual log discovery & SSE stream)
@@ -96,7 +96,7 @@ The **Data Management** page (`/logs`) is the operational hub for inspecting and
   1. **Cron Runs (`cron`):** `CronTab` (`CronScheduleSection` collapsible schedule overview + filterable `cron_runs` table by task & status, live elapsed duration counter for `running` jobs, and `Purge History` action).
   2. **Service History (`service_history`):** `ServiceHistoryTab` displaying chronological configuration and lifecycle audit events with action badges (`provision`, `update_settings`, `commit`, `sync`, etc.).
   3. **Ingestion History (`ingestion`, Admin-only):** `IngestionTab` with substring search, multi-select checkboxes, and `Delete Selected` (removes entries from `ingested_files` so they re-ingest on next sync).
-  4. **DuckLake Storage (`iceberg`, lazy-mounted):** `StorageStatus` + `StorageCalendar` + `FileBrowser(type="iceberg")` for browsing committed Parquet partitions and snapshots.
+  4. **DuckLake Storage (`storage`, lazy-mounted):** `StorageStatus` + `StorageCalendar` + `FileBrowser(type="storage")` for browsing committed Parquet partitions and snapshots.
   5. **Metadata Storage (`metadata_storage`, Admin-only, lazy-mounted):** `MetadataStorageCard` showing PostgreSQL table row counts, disk bytes, retention windows, and a `Run Cleanup Now` trigger.
   6. **Available Logs (`raw`, Admin-only, lazy-mounted):** `FileBrowser(type="raw")` with date-range picker and bulk ZIP / single-file download from FOS `raw/`.
   7. **DuckDB Schema (`schema`, lazy-mounted):** `SchemaTab` listing all columns and data types in the active `logs` view with instant column search.

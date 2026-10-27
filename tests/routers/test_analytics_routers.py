@@ -20,8 +20,6 @@ from backend.deps import get_con, get_source
 from backend.models.insights import InsightsRequest
 from backend.models.performance import AssetsRequest
 from backend.models.security import SecurityAggregatesResponse
-from backend.utils.bounded_cache import CacheRegistry
-from backend.utils.date_utils import iso_z
 from backend.utils.remote_access import _ANALYST_ALLOWED_WRITE_PREFIXES, TimeBounds
 from fastapi import FastAPI
 from fastapi.routing import APIRoute
@@ -38,6 +36,8 @@ from backend.repositories import dashboard as dashboard_repo
 from backend.repositories._base import QueryRunner, _safe_table, _schema_cols_cache
 from backend.utils import bot_sources
 from backend.utils import telemetry as telemetry_mod
+from backend.utils.bounded_cache import CacheRegistry
+from backend.utils.date_utils import iso_z
 from tests._helpers.duckdb_fixtures import generate_mock_logs, insert_mock_logs
 from tests.conftest import MOCK_SERVICE_ID, override_request_context
 

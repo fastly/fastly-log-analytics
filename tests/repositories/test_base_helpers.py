@@ -13,10 +13,6 @@ from unittest.mock import MagicMock, patch
 
 import duckdb
 import pytest
-from backend.repositories.cmcd import _response_cache_key as _cmcd_key_fn
-from backend.repositories.performance import get_performance_aggregates
-from backend.repositories.utils.filters import build_where_clause
-from backend.repositories.utils.response_cache import ResponseMemo, coalesce
 from hypothesis import HealthCheck, assume, given, settings
 from hypothesis import strategies as st
 
@@ -41,8 +37,12 @@ from backend.repositories._base import (
     should_self_heal_stale_view,
     time_bucket_select,
 )
+from backend.repositories.cmcd import _response_cache_key as _cmcd_key_fn
 from backend.repositories.dashboard import get_aggregates
+from backend.repositories.performance import get_performance_aggregates
 from backend.repositories.utils import response_cache as rc
+from backend.repositories.utils.filters import build_where_clause
+from backend.repositories.utils.response_cache import ResponseMemo, coalesce
 from tests._helpers.duckdb_fixtures import generate_mock_logs, insert_mock_logs, make_seeded_logs_con
 from tests.conftest import MOCK_SERVICE_ID
 

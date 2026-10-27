@@ -32,13 +32,13 @@ from unittest.mock import patch
 
 import duckdb
 import pytest
-from backend.routers.network import _fetch_pop_health_data
-from backend.utils.date_utils import parse_iso_utc
 
 from backend.core import rollups as rr
 from backend.core.rollups import _common as rollup_common
 from backend.repositories import rollup_coverage
 from backend.repositories._base import QueryRunner
+from backend.routers.network import _fetch_pop_health_data
+from backend.utils.date_utils import parse_iso_utc
 from tests._helpers.rollups import ALL_FIELDS, build_rollup_golden_layout
 from tests._helpers.rollups import RollupGoldenLayout as Layout
 from tests._helpers.sources import make_source
@@ -797,6 +797,9 @@ from backend.repositories.rollup_coverage import (
     heal_where_clause,
     plan_time_series_rollup_window,
 )
+
+from backend import config as svcconfig
+from backend.repositories import rollup_coverage as coverage
 from backend.repositories.top_n_rollups import (
     SchemaSeeds,
     TopNPaths,
@@ -809,9 +812,6 @@ from backend.repositories.top_n_rollups import (
     qualify_limit_expr,
     truncate_top_n,
 )
-
-from backend import config as svcconfig
-from backend.repositories import rollup_coverage as coverage
 
 START = datetime(2026, 1, 1, tzinfo=UTC)
 

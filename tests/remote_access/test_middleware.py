@@ -10,7 +10,6 @@ from unittest.mock import MagicMock, PropertyMock, patch
 
 import pytest
 from backend.core.share_db.validation import IP_FAMILY_KEYS, SESSION_ID_KEYS, _mask_ip_scalar, apply_pii_policy, mask_ip
-from backend.repositories.utils.filters import normalize_filter_key
 from backend.utils.remote_access import (
     _ANALYST_ALLOWED_WRITE_PREFIXES,
     _PII_FORBIDDEN_FILTER_COLS,
@@ -32,6 +31,7 @@ from starlette.requests import Request as StarletteRequest
 from backend.core import share_db
 from backend.core.request_context import build_request_context
 from backend.main import app as _main_app
+from backend.repositories.utils.filters import normalize_filter_key
 from backend.routers import admin, provision, query, rum, services, share_admin, share_auth
 from backend.routers.session_scoring import _finalize_cached
 from backend.routers.share_admin import build_share_live_payload, build_share_status

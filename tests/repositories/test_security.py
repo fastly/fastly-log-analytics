@@ -16,7 +16,6 @@ import pytest
 import time_machine
 from backend.models.security import SecurityTopBotsResponse
 from backend.repositories._sql.security import GET_SECURITY_PROXIES_COMBINED
-from backend.utils.hll import HyperLogLog
 
 from backend.models.common import FilterSpec
 from backend.repositories import _base, security
@@ -31,6 +30,7 @@ from backend.repositories._base import (
 )
 from backend.repositories._sql import security as SQL
 from backend.repositories.security import get_security_aggregates, get_top_bots
+from backend.utils.hll import HyperLogLog
 from scripts.lib.section_measurements import describe_response
 from tests._helpers.duckdb_fixtures import generate_mock_logs, insert_mock_logs
 

@@ -17,8 +17,6 @@ _MODULE_ALIASES: dict[str, str] = {
     "scripts.lib.admin_tls": "scripts.lib.environments",
     "scripts.lib.observability_ui": "scripts.lib.readiness",
     "scripts.dev.profile_insights": "scripts.lib.section_measurements",
-    "scripts.recover_high_scale_rum": "scripts.clickhouse_replay",
-    "scripts.backfill_high_scale": "scripts.clickhouse_replay",
 }
 
 

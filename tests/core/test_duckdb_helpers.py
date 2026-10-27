@@ -21,7 +21,6 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 from backend.core.storage.view import _get_service_lock
-from backend.utils.date_utils import safe_iso as _safe_iso
 
 import backend.core.duckdb as d
 import backend.core.duckdb as duckdb_mod
@@ -82,6 +81,7 @@ from backend.core.duckdb_pool import (
     warm_pool_for_service,
 )
 from backend.core.log_fields import LOG_FIELD_CATALOG
+from backend.utils.date_utils import safe_iso as _safe_iso
 
 
 # ── Pure Helpers & Wrappers ──
@@ -1114,12 +1114,12 @@ from backend.core._duckdb_status import (
     update_top_values,
 )
 from backend.core.rollups.rum import rum_count_and_latest
-from backend.utils.bounded_cache import BoundedTTLCache
-from backend.utils.date_utils import safe_iso
 
 from backend.core import _duckdb_status
 from backend.core import duckdb as _db
 from backend.core import metadata as metadata_db
+from backend.utils.bounded_cache import BoundedTTLCache
+from backend.utils.date_utils import safe_iso
 
 
 class _StubRow:
@@ -2663,8 +2663,9 @@ def test_discard_idle_reset_and_reuse_only():
 
 import multiprocessing
 
-from backend.utils.hll import HyperLogLog
 from backend.utils.sql_validator import escape_sql_literal
+
+from backend.utils.hll import HyperLogLog
 
 
 def _fake_src(service_id="svc-perf"):

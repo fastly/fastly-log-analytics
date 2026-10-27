@@ -24,7 +24,6 @@ from backend.core.metadata.quarantine import (
     get_quarantine_storage_total,
     list_quarantine_evidence,
 )
-from backend.utils.date_utils import iso_z_now
 
 from backend import celery_app, config, main
 from backend.core import metadata as metadata_db
@@ -32,6 +31,7 @@ from backend.core import quarantine
 from backend.core import share_db as share_db_connection
 from backend.core.metadata import base, ingest_log, pg_connection, pg_schema, usage_log, usage_log_db
 from backend.core.metadata.base import InvalidServiceIdError, get_con
+from backend.utils.date_utils import iso_z_now
 
 
 def test_start_cron_run_leases():

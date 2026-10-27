@@ -16,29 +16,29 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import backend.high_scale.dashboard as hsd
 import backend.high_scale.registry_bootstrap as hsreg
 import duckdb
 import pandas as pd
 import pytest
 import time_machine
 from backend.models.dashboard import AggregatesRequest, QueryRequest
-from backend.provision.rum_orchestrator_v2 import upgrade_faro_version
-from backend.routers.query import _redact_paths
-from backend.routers.rum import router as _rum_api_router
-from backend.utils.date_utils import iso_z, parse_iso_utc
 from backend.utils.remote_access import TimeBounds, _is_blocked_path, get_analyst_time_bounds
-from backend.utils.time_window import resolve_window
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
+import backend.high_scale.dashboard as hsd
 import backend.routers.dashboard as dash
 from backend.core import request_telemetry as web_vitals_store
 from backend.core.duckdb_pool import _PoolBusy
 from backend.core.request_context import RequestContext, build_request_context
 from backend.main import app
+from backend.provision.rum_orchestrator_v2 import upgrade_faro_version
 from backend.routers import rum as rum_router
+from backend.routers.query import _redact_paths
+from backend.routers.rum import router as _rum_api_router
+from backend.utils.date_utils import iso_z, parse_iso_utc
+from backend.utils.time_window import resolve_window
 from tests._helpers.config_fakes import mutate_via_save
 from tests._helpers.rum import insert_rum_beacons as _insert_beacons
 from tests._helpers.rum import setup_temp_rum_db

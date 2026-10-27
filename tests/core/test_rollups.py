@@ -17,7 +17,6 @@ import pyarrow.parquet as pq
 import pytest
 from backend.core.metadata.cron_log import CronLeaseHeldError
 from backend.core.rollups.hour_bundles import bundle_hours_ip_spread
-from backend.utils.hll import HyperLogLog
 from tests._helpers.rollups import build_writer_patches, write_hour_bundle, writer_patches
 from tests._helpers.rollups import noop_lock as _noop_lock
 from tests._helpers.rollups import past_hour as _past_hour
@@ -32,6 +31,7 @@ from backend.core.rollups.day_bundles import _link_day_bundle_alias
 from backend.core.rollups.recompute import ADMIN_BACKFILLS, DAY_COMPACTORS, _bundle_metadata
 from backend.cron.jobs import compaction as sch
 from backend.repositories._base import QueryRunner
+from backend.utils.hll import HyperLogLog
 
 # ── From test_rollup_readiness.py ──
 

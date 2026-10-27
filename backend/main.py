@@ -1046,14 +1046,27 @@ from backend.routers import (
     control_room,
     dashboard,
     high_scale,
+    insights,
+    network,
+    origin,
+    performance,
+    query,
+    rum,
+    security,
     session_scoring,
 )
 
 alerts = control_room
 
 app.include_router(dashboard.router)
+app.include_router(origin.router)
+app.include_router(network.router)
+app.include_router(security.router)
+app.include_router(rum.router)
+app.include_router(query.router)
+app.include_router(performance.router)
 app.include_router(high_scale.router)
-app.include_router(dashboard.insights_router)
+app.include_router(insights.router)
 app.include_router(session_scoring.sessions_router)
 app.include_router(alerts.views_router)
 app.include_router(alerts.alerts_router)
@@ -1062,12 +1075,16 @@ app.include_router(control_room.router)
 from backend.routers import (  # noqa: E402
     admin,
     bootstrap,
+    provision,
     services,
     share_admin,
     usage,
+    web_vitals,
 )
 
 app.include_router(services.router)
+app.include_router(provision.router)
+app.include_router(bootstrap.router)
 app.include_router(usage.usage_router)
 app.include_router(admin.router)
 # Analyst-safe sync-status siblings carry the neutral "meta" tag (not the
@@ -1076,6 +1093,7 @@ app.include_router(admin.sync_status.meta_router)
 app.include_router(share_admin.sharing_domain_router)
 app.include_router(session_scoring.router)
 app.include_router(bootstrap.debug_router)
+app.include_router(web_vitals.router)
 app.include_router(share_admin.router)
 # E2E/dev-only in-process mock OIDC provider — mounted ONLY when OAUTH_MOCK_IDP=1
 # so it never appears in the OpenAPI schema or in production.

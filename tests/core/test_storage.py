@@ -1681,7 +1681,6 @@ from backend.core.metadata.cron_log import (
     record_ingest_object_outcome,
 )
 from backend.core.rum_ingest import ingest_rum_logs
-from backend.utils.date_utils import iso_z
 
 from backend.core import duckdb as _db
 from backend.core import metadata as metadata_db
@@ -1689,6 +1688,7 @@ from backend.core import query_registry
 from backend.core.metadata import pg_connection as pgc
 from backend.core.metadata import reconciliation, usage_log_db
 from backend.core.metadata.usage_log import _usage_class_predicate
+from backend.utils.date_utils import iso_z
 
 
 @pytest.fixture

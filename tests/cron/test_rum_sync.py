@@ -46,7 +46,6 @@ from backend.cron.jobs.metric_snapshot import (
 )
 from backend.cron.lifecycle import record_skip_row
 from backend.deps import get_service_id, get_source, require_admin
-from backend.provision.rum_orchestrator_v2 import rum_vcl_fingerprint
 from fastapi import HTTPException
 from starlette.testclient import TestClient
 from tests._helpers.config_fakes import fetch_metric_snapshot_history as _get_history
@@ -84,6 +83,7 @@ from backend.cron.scheduler import (
     dev_mode_no_crons,
 )
 from backend.main import app
+from backend.provision.rum_orchestrator_v2 import rum_vcl_fingerprint
 from backend.utils.telemetry import get_process_context, process_context_scope
 from tests.cron.conftest import (
     assert_manual_trigger_non_admin_rejected,

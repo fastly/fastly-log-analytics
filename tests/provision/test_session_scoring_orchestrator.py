@@ -10,12 +10,6 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
-from backend.provision.cmcd_fields import (
-    _CMCD_FIELD_NAMES,
-    reconcile_cfg_system_custom_fields,
-    reconcile_system_custom_fields,
-    system_feature_flags,
-)
 from backend.provision.session_scoring_vcl import (
     DEFAULT_ASSET_EXT_REGEX,
     SCORING_DELIVER_NAME,
@@ -30,6 +24,12 @@ from backend import config as svcconfig
 from backend.provision import cli, fastly_api, orchestrator
 from backend.provision import session_scoring_orchestrator as sso
 from backend.provision.cli import app
+from backend.provision.cmcd_fields import (
+    _CMCD_FIELD_NAMES,
+    reconcile_cfg_system_custom_fields,
+    reconcile_system_custom_fields,
+    system_feature_flags,
+)
 from backend.provision.declarative.reconciler import ReconciliationResult
 from backend.provision.session_scoring_orchestrator import _SCORING_FIELD_NAMES
 from tests._helpers.config_fakes import (

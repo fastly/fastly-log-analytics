@@ -9,7 +9,7 @@ from typing import Any, Literal
 
 from fastapi import Depends, HTTPException, Query
 
-from backend.core.rollups.day_bundles import rebuild_time_series_days
+from backend.core.rollups import day_bundles as _day_bundles
 from backend.core.rollups.time_series import build_time_series_bundles
 from backend.deps import get_source, require_admin
 from backend.models.admin import (
@@ -249,7 +249,7 @@ def rebuild_time_series_rollups(
     rebuilt_days = 0
     if payload.days:
         try:
-            rebuilt_days = rebuild_time_series_days(sid, source, payload.days)
+            rebuilt_days = _day_bundles.rebuild_time_series_days(sid, source, payload.days)
         except RuntimeError as exc:
             logger.error("time_series_day_rebuild_failed", exc_info=True)
             raise HTTPException(status_code=500, detail=make_error("time_series_day_rebuild_failed")) from exc

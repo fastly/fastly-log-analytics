@@ -1,35 +1,48 @@
-"""FastAPI router package with backward-compatible submodule resolution."""
+"""FastAPI routers package with compatibility aliases for consolidated router modules."""
 
-from __future__ import annotations
+import contextlib
+import importlib
+import sys
+from typing import TYPE_CHECKING
 
-import importlib as _importlib
-import sys as _sys
-from typing import Any
+if TYPE_CHECKING:
+    from backend.routers import bootstrap as debug  # noqa: F401
+    from backend.routers import control_room as alerts  # noqa: F401
+    from backend.routers import control_room as usage  # noqa: F401
+    from backend.routers import share_admin as share_auth  # noqa: F401
+    from backend.routers import share_admin as share_oauth  # noqa: F401
+    from backend.routers.admin import compaction as high_scale  # noqa: F401
+
+# Unregister any consolidated router aliases from backend._MODULE_ALIASES so
+# standard Python module resolution finds the dedicated files in backend/routers/.
+_backend_mod = sys.modules.get("backend")
+_global_aliases = getattr(_backend_mod, "_MODULE_ALIASES", None)
+if isinstance(_global_aliases, dict):
+    for _unwound_router in (
+        "backend.routers.origin",
+        "backend.routers.network",
+        "backend.routers.security",
+        "backend.routers.rum",
+        "backend.routers.web_vitals",
+        "backend.routers.query",
+        "backend.routers.performance",
+        "backend.routers.insights",
+        "backend.routers.provision",
+        "backend.routers.bootstrap",
+        "backend.routers.services.core",
+        "backend.routers.debug",
+    ):
+        _global_aliases.pop(_unwound_router, None)
 
 _ROUTER_ALIASES: dict[str, str] = {
-    "backend.routers.origin": "backend.routers.dashboard",
-    "backend.routers.network": "backend.routers.dashboard",
-    "backend.routers.security": "backend.routers.dashboard",
-    "backend.routers.rum": "backend.routers.dashboard",
-    "backend.routers.web_vitals": "backend.routers.dashboard",
-    "backend.routers.query": "backend.routers.dashboard",
-    "backend.routers.performance": "backend.routers.dashboard",
     "backend.routers.alerts": "backend.routers.control_room",
     "backend.routers.usage": "backend.routers.control_room",
     "backend.routers.share_auth": "backend.routers.share_admin",
     "backend.routers.share_oauth": "backend.routers.share_admin",
+    "backend.routers.debug": "backend.routers.bootstrap",
 }
 
-_backend_mod = _sys.modules.get("backend")
-if _backend_mod is not None and hasattr(_backend_mod, "_MODULE_ALIASES"):
-    _backend_mod._MODULE_ALIASES.update(_ROUTER_ALIASES)
-
-
-def __getattr__(name: str) -> Any:
-    full = f"{__name__}.{name}"
-    if full in _ROUTER_ALIASES:
-        mod = _importlib.import_module(_ROUTER_ALIASES[full])
-        _sys.modules[full] = mod
-        globals()[name] = mod
-        return mod
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+for _alias, _target in _ROUTER_ALIASES.items():
+    if _alias not in sys.modules:
+        with contextlib.suppress(Exception):
+            sys.modules[_alias] = importlib.import_module(_target)

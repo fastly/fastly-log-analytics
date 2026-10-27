@@ -11,7 +11,7 @@ dependencies = [
     # Pin to the 1.5 line specifically. Pre-1.3 ships without the
     # canonical ``.to_arrow_table()`` method on DuckDBPyConnection
     # (only the now-deprecated ``.fetch_arrow_table()`` alias), so
-    # ingest.py / storage/_core.py / rollups/recompute.py — which all
+    # ingest.py / iceberg/buffer.py / rollups/recompute.py — which all
     # use ``.to_arrow_table()`` — silently break on a dev box that
     # resolved an older version. Prod docker has consistently shipped
     # 1.5.x; matching that here closes the dev/prod drift window.
@@ -384,7 +384,6 @@ module = [
     "backend.core.rollups.sessions",
     "backend.core.rollups.day_bundles",
     "backend.core.rollups.recompute",
-    "backend.routers.admin.log_accounting",
     "backend.routers.admin.health",
 ]
 disallow_untyped_defs = true
@@ -445,21 +444,11 @@ root_package = "backend"
 name = "Routers are independent of each other"
 type = "independence"
 modules = ["backend.routers.*"]
-# Baselined pre-existing cross-router edges. Each entry is a real
-# direct or transitive import; the goal of this contract is to
-# PREVENT NEW cross-router coupling, not to demand a refactor of
-# existing wiring. If a future commit adds a new edge, lint-imports
-# fails with a readable diff — fix or whitelist with a why-comment.
 ignore_imports = [
-    # Direct admin re-exports — bootstrap surfaces an admin helper via
-    # the bootstrap route.
-    "backend.routers.services -> backend.routers.admin",
     # backend.cron.jobs.sync's gap-heal detector reuses the admin router's
     # compute_log_accounting (sync.py `from backend.routers.admin import
     # compute_log_accounting`). Extracting log accounting out of the router
-    # package is the next refactor; for now, allow that single edge. (The
-    # sync-status snapshot edge that used to sit beside it moved to
-    # backend/sync_status_snapshot.py and needs no allowance.)
+    # package is the next refactor; for now, allow that single edge.
     "backend.cron.jobs.sync -> backend.routers.admin",
 ]
 
@@ -468,3 +457,6 @@ name = "Core does not depend on routers"
 type = "forbidden"
 source_modules = ["backend.core"]
 forbidden_modules = ["backend.routers"]
+ignore_imports = [
+    "backend.cron.jobs.sync -> backend.routers.admin",
+]

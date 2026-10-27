@@ -17,12 +17,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from backend.high_scale.archive_models import ServingWatermark
-from backend.high_scale.cmcd import cmcd_aggregates as hs_cmcd_aggregates
-from backend.high_scale.insights import insights_endpoint as hs_insights_endpoint
-from backend.high_scale.origin import aggregates as hs_aggregates
 from backend.high_scale.registry_bootstrap import HighScaleService
-from backend.high_scale.security import security_aggregates as hs_security_aggregates
-from backend.high_scale.sessions import sessions_detail as hs_sessions_detail
 from backend.models.dashboard import AggregatesResponse, SessionDetailRequest, SessionDetailResponse
 from backend.models.insights import InsightCard, InsightsResponse
 from backend.models.network import NetworkHealthResponse, NetworkQualityResponse
@@ -48,10 +43,7 @@ from backend.models.performance import (
     WafSignalRow,
 )
 from backend.models.security import SecurityAggregatesRequest, SecurityAggregatesResponse, SecurityTopBotsResponse
-from backend.provision.cmcd_fields import _CMCD_CUSTOM_FIELDS
 from backend.provision.declarative.state import FeatureState
-from backend.repositories.cmcd import _response_cache, get_cmcd_aggregates
-from backend.repositories.performance import get_performance_aggregates
 from pydantic import AliasChoices
 from tests._helpers.duckdb_fixtures import generate_mock_logs, insert_mock_logs
 from tests._helpers.wire import assert_rows_wire_identical, assert_sections_wire_identical, wire
@@ -65,9 +57,16 @@ from backend.core.log_fields import LOG_FIELD_CATALOG
 from backend.high_scale import network as hs_network
 from backend.high_scale import performance as hs_performance
 from backend.high_scale import security as hs_security
+from backend.high_scale.cmcd import cmcd_aggregates as hs_cmcd_aggregates
+from backend.high_scale.insights import insights_endpoint as hs_insights_endpoint
+from backend.high_scale.origin import aggregates as hs_aggregates
+from backend.high_scale.security import security_aggregates as hs_security_aggregates
+from backend.high_scale.sessions import sessions_detail as hs_sessions_detail
 from backend.models.common import BaseResponse, DebugCall, DebugQuery
+from backend.provision.cmcd_fields import _CMCD_CUSTOM_FIELDS
 from backend.repositories import origin as origin_mod
 from backend.repositories._base import _safe_table
+from backend.repositories.cmcd import _response_cache, get_cmcd_aggregates
 from backend.repositories.dashboard import get_aggregates as dash_aggs
 from backend.repositories.insights import _insights_cache, get_insights, registry
 from backend.repositories.network import get_health, get_quality
@@ -81,6 +80,7 @@ from backend.repositories.origin import (
     get_summary,
     get_timeseries,
 )
+from backend.repositories.performance import get_performance_aggregates
 from backend.repositories.security import get_security_aggregates, get_security_proxies, get_top_bots
 from backend.repositories.sessions import get_session_detail
 from backend.repositories.value import get_summary as get_value_summary
