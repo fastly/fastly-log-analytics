@@ -28,6 +28,7 @@ import psycopg
 from botocore.exceptions import ClientError
 
 from backend.config import is_high_scale_mode
+from backend.core.metadata.usage_log import record_cloud_copy_deletion
 from backend.utils.sql_validator import escape_sql_literal
 from backend.utils.telemetry import log_once_per
 
@@ -125,7 +126,7 @@ def push_to_cloud(source: dict) -> dict:
     identity = _catalog_identity(source)
     marker = _read_marker(client, bucket, marker_key)
     adopted = identity is not None and marker is not None and marker.get("catalog_uuid") == identity[0]
-    uploaded = deleted = uploaded_bytes = foreign = 0
+    uploaded = deleted = uploaded_bytes = foreign = deleted_bytes = 0
     con = duckdb.connect(":memory:")
     try:
         if not _ducklake_attach(con, source, read_only=True):
@@ -158,8 +159,16 @@ def push_to_cloud(source: dict) -> dict:
                 batch = stale[i : i + _DELETE_BATCH]
                 client.delete_objects(Bucket=bucket, Delete={"Objects": [{"Key": k} for k in batch], "Quiet": True})
                 deleted += len(batch)
+                deleted_bytes += sum(remote[k][0] for k in batch)
     finally:
         con.close()
+    if deleted:
+        try:
+            record_cloud_copy_deletion(_service_id(source), deleted_bytes, deleted)
+        except Exception:
+            logger.warning(
+                "[cloud-push] %s: could not record deleted bytes for billing", _service_id(source), exc_info=True
+            )
     if identity is not None and not adopted:
         if foreign == 0:
             _write_marker(client, bucket, marker_key, identity[0])
@@ -175,6 +184,7 @@ def push_to_cloud(source: dict) -> dict:
         "uploaded": uploaded,
         "uploaded_bytes": uploaded_bytes,
         "deleted": deleted,
+        "deleted_bytes": deleted_bytes,
         "foreign": foreign,
         "adopted": adopted,
     }

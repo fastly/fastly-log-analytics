@@ -1627,3 +1627,36 @@ def test_cdn_get_blocks_invalid_redirects():
     with pytest.raises(urllib.error.URLError) as excinfo:
         handler_inst.redirect_request(req_mock, None, 302, "Found", {}, "http://169.254.169.254/")
     assert "Redirected to an invalid URL" in str(excinfo.value)
+
+
+def test_cloud_copy_deletions_bill_for_thirty_days_and_old_rows_are_pruned():
+    from datetime import UTC, datetime, timedelta
+
+    from backend.core.metadata.base import get_con
+    from backend.core.metadata.usage_log import (
+        clear_usage_log,
+        cloud_copy_deleted_bytes_in_billing_window,
+        record_cloud_copy_deletion,
+    )
+    from backend.utils.date_utils import iso_z
+
+    svc = "svc-cloud-copy-deletions"
+    clear_usage_log(svc)
+    con = get_con(svc)
+    old = iso_z(datetime.now(UTC) - timedelta(days=40))
+    inside = iso_z(datetime.now(UTC) - timedelta(days=10))
+    con.execute(
+        "INSERT INTO cloud_copy_deletions (service_id, deleted_at, bytes, objects) VALUES (?, ?, 700, 7), (?, ?, 300, 3)",
+        (svc, old, svc, inside),
+    )
+    con.commit()
+    # 40-day-old deletions are past the FOS minimum and no longer bill; recent ones still do.
+    assert cloud_copy_deleted_bytes_in_billing_window(svc) == 300
+    record_cloud_copy_deletion(svc, 1000, 4)
+    record_cloud_copy_deletion(svc, 0, 0)
+    assert cloud_copy_deleted_bytes_in_billing_window(svc) == 1300
+    assert con.execute("SELECT count(*) FROM cloud_copy_deletions WHERE service_id = ?", (svc,)).fetchone()[0] == 2, (
+        "rows past the billing window are pruned on insert"
+    )
+    clear_usage_log(svc)
+    assert cloud_copy_deleted_bytes_in_billing_window(svc) == 0

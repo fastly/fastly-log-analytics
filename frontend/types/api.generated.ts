@@ -8473,6 +8473,11 @@ export interface components {
              * @default 0
              */
             archive_expired_bytes: number;
+            /**
+             * Cloud Copy Deleted Bytes
+             * @default 0
+             */
+            cloud_copy_deleted_bytes: number;
             /** Total Files */
             total_files: number;
             /** Total Bytes */

@@ -840,6 +840,7 @@ class CurrentStorageResponse(BaseResponse):
     archive_bytes: int = 0
     archive_objects: int = 0
     archive_expired_bytes: int = 0
+    cloud_copy_deleted_bytes: int = 0
     total_files: int
     total_bytes: int
     start: str

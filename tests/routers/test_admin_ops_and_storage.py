@@ -1354,6 +1354,7 @@ def test_current_storage_counts_the_high_scale_archive_and_recently_expired_arti
             patch("backend.routers.usage.repo.get_storage_stats", return_value={"total_files": 0, "total_bytes": 0}),
             patch("backend.config.load_config", return_value={}),
             patch("backend.config.is_high_scale_mode", return_value=high_scale),
+            patch("backend.core.metadata.usage_log.cloud_copy_deleted_bytes_in_billing_window", return_value=3_000),
             patch(
                 "backend.high_scale.postgres_control.PostgresControlPlane.archive_storage_summary", return_value=summary
             ) as mock_summary,
@@ -1368,12 +1369,15 @@ def test_current_storage_counts_the_high_scale_archive_and_recently_expired_arti
                 2_000_000,
             )
             assert body["live_bytes"] == 1000 + 5_000_000 and body["live_files"] == 2 + 30
-            assert body["deleted_bytes"] == 2_000_000, "expired artifacts stay billed for the FOS 30-day minimum"
-            assert body["total_billed_bytes"] == 1000 + 5_000_000 + 2_000_000
+            assert body["deleted_bytes"] == 2_000_000 + 3_000, (
+                "expired artifacts stay billed for the FOS 30-day minimum"
+            )
+            assert body["total_billed_bytes"] == 1000 + 5_000_000 + 2_000_000 + 3_000
         else:
             assert (body["archive_bytes"], body["archive_objects"], body["archive_expired_bytes"]) == (0, 0, 0)
-            assert body["total_billed_bytes"] == 1000
+            assert body["total_billed_bytes"] == 1000 + 3_000
             mock_summary.assert_not_called()
+        assert body["cloud_copy_deleted_bytes"] == 3_000, "cloud-copy deletions stay billed for 30 days"
     finally:
         app.dependency_overrides.pop(get_source, None)
         _STORAGE_INSPECTION_CACHE.pop(("svc-archive-usage", "b", ""), None)

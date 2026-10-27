@@ -421,18 +421,34 @@ def usage_current_storage(
             except Exception:
                 logger.debug("usage_current_storage: archive summary failed (ignored)", exc_info=True)
 
+        # Standard's cloud copy deletes superseded and expired files; FOS bills each for 30 days after deletion.
+        cloud_copy_deleted_bytes = 0
+        try:
+            from backend.core.metadata.usage_log import cloud_copy_deleted_bytes_in_billing_window
+
+            cloud_copy_deleted_bytes = cloud_copy_deleted_bytes_in_billing_window(src["name"])
+        except Exception:
+            logger.debug("usage_current_storage: cloud copy deletions failed (ignored)", exc_info=True)
+
         regular_log_bytes = total_bytes - rum_bytes
 
         if delete_after:
             live_bytes = storage_bytes + quarantine_bytes + archive_bytes
             live_files = storage_files + archive_objects
-            deleted_bytes = total_bytes + archive_expired_bytes
+            deleted_bytes = total_bytes + archive_expired_bytes + cloud_copy_deleted_bytes
         else:
             live_bytes = total_bytes + storage_bytes + quarantine_bytes + archive_bytes
             live_files = total_files + storage_files + archive_objects
-            deleted_bytes = archive_expired_bytes
+            deleted_bytes = archive_expired_bytes + cloud_copy_deleted_bytes
 
-        billed_bytes = total_bytes + storage_bytes + quarantine_bytes + archive_bytes + archive_expired_bytes
+        billed_bytes = (
+            total_bytes
+            + storage_bytes
+            + quarantine_bytes
+            + archive_bytes
+            + archive_expired_bytes
+            + cloud_copy_deleted_bytes
+        )
         billed_gb = billed_bytes / (1024 * 1024 * 1024)
         gb_hours = billed_gb * (MIN_BILLING_DAYS * 24)
 
@@ -447,6 +463,7 @@ def usage_current_storage(
             archive_bytes=archive_bytes,
             archive_objects=archive_objects,
             archive_expired_bytes=archive_expired_bytes,
+            cloud_copy_deleted_bytes=cloud_copy_deleted_bytes,
             total_files=total_files,
             total_bytes=total_bytes,
             rum_bytes=rum_bytes,

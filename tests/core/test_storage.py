@@ -2932,6 +2932,11 @@ def test_push_to_cloud_uploads_live_files_and_removes_compacted_ones(monkeypatch
         merged = backup.push_to_cloud(src)
         assert merged["uploaded"] == 1 and merged["deleted"] == 2
         assert len(_keys(s3_mock)) == 1
+        # The two superseded files keep billing for 30 days after deletion, so their bytes are recorded.
+        from backend.core.metadata.usage_log import cloud_copy_deleted_bytes_in_billing_window
+
+        assert merged["deleted_bytes"] > 0
+        assert cloud_copy_deleted_bytes_in_billing_window("svc_cloud") == merged["deleted_bytes"]
     finally:
         con.execute(f'DROP TABLE IF EXISTS lake."{table}"')
         con.close()

@@ -60182,6 +60182,11 @@
             "title": "Archive Expired Bytes",
             "default": 0
           },
+          "cloud_copy_deleted_bytes": {
+            "type": "integer",
+            "title": "Cloud Copy Deleted Bytes",
+            "default": 0
+          },
           "total_files": {
             "type": "integer",
             "title": "Total Files"
