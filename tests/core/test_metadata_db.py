@@ -19,6 +19,7 @@ from unittest.mock import MagicMock, patch
 import backend.state_sync as state_sync_module
 import pytest
 import time_machine
+from backend.core.metadata.cron_log import start_cron_run
 from backend.core.metadata.quarantine import (
     delete_quarantine_evidence,
     get_quarantine_evidence,
@@ -35,7 +36,6 @@ from backend.core import quarantine
 from backend.core import share_db as share_db_connection
 from backend.core.metadata import base, ingest_log, pg_connection, pg_schema, state, usage_log, usage_log_db
 from backend.core.metadata.base import InvalidServiceIdError, get_con
-from backend.core.metadata.cron_log import start_cron_run
 
 
 def test_start_cron_run_leases():

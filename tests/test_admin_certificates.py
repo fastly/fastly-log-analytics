@@ -831,11 +831,11 @@ def test_admin_host_spoof_rejected_after_phase0_fix():
     """Security regression test: a remote peer (uvicorn rewrote
     request.client.host to a public IP via --proxy-headers) sending
     `Host: localhost` must NOT be treated as local-admin."""
+    from backend.utils.remote_access import is_request_remote
     from fastapi import FastAPI
     from starlette.requests import Request
 
     from backend.utils import tunnel
-    from backend.utils.remote_access import is_request_remote
 
     # Reset tunnel manager to ensure we don't accidentally honor the x-remote-analyst
     # fallback during this test.

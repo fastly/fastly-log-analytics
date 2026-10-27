@@ -18,6 +18,7 @@ import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from backend.core.metadata.cron_log import CronLeaseHeldError
 from backend.cron.jobs.compaction import (
     _call_with_lookback,
     _run_partial_hour_merge,
@@ -34,7 +35,6 @@ from backend.core import local_compaction as lc
 from backend.core import metadata as metadata_db
 from backend.core import share_db
 from backend.core.metadata import reconciliation, usage_log_db
-from backend.core.metadata.cron_log import CronLeaseHeldError
 from backend.core.rollups import partial_hour as ph
 from backend.cron.jobs import compaction
 from backend.cron.jobs import metadata as metadata_job

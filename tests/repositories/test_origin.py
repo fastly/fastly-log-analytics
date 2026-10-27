@@ -15,6 +15,7 @@ import duckdb
 import pytest
 from backend.models.network import NetworkHealthSummary, NetworkWorstEntry
 from backend.utils.countries import format_city_label
+from backend.utils.remote_access import MAX_ANALYST_QUERY_SPAN, _time_bounds_from_params
 from backend.utils.time_window import invite_clamp_fingerprint, resolve_window
 
 from backend.core.duckdb import _clear_schema_cache
@@ -45,7 +46,6 @@ from backend.repositories.origin import (
     get_summary,
     get_timeseries,
 )
-from backend.utils.remote_access import MAX_ANALYST_QUERY_SPAN, _time_bounds_from_params
 from scripts.lib.section_measurements import describe_response
 from tests._helpers.duckdb_fixtures import generate_mock_logs, insert_mock_logs
 from tests._helpers.rollups import noop_lock as _noop_lock

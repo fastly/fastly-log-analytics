@@ -983,6 +983,7 @@ import botocore.exceptions
 import duckdb
 import pytest
 from backend.core.iceberg._ducklake import ducklake_table_name
+from backend.core.metadata.cron_log import OUTCOME_COUNTER_KEYS, record_ingest_object_outcome, start_cron_run
 from backend.utils.sql_validator import escape_sql_literal
 from tests._helpers.ledger import DuckLakeLedgerEnv, clear_ledger, lake_reader
 from tests._helpers.ledger import attacher as _attacher
@@ -1004,7 +1005,6 @@ from backend.core.ingest import (
     merge_lake_files,
     sweep_ledger_once,
 )
-from backend.core.metadata.cron_log import OUTCOME_COUNTER_KEYS, record_ingest_object_outcome, start_cron_run
 from backend.core.metadata.ingest_log import get_ingested_files_status_summary
 
 

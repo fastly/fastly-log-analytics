@@ -15,6 +15,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 import vcr
+from backend.core.metadata.cron_log import CronLeaseHeldError
 from backend.core.rollups.ngwaf_bots import _purge_stale_ngwaf_bots_parquets
 from backend.repositories._sql.security import (
     BOT_EFFICIENCY,
@@ -64,7 +65,6 @@ from tests._helpers.rollups import (
 
 from backend.core import rollups
 from backend.core.metadata import pg_connection
-from backend.core.metadata.cron_log import CronLeaseHeldError
 from backend.core.rollups import day_bundles, security_dims, security_proxies, verified_bots_ts, wellknown_bots
 from backend.core.rollups import ngwaf_bots as nb
 from backend.core.rollups.day_bundles import (

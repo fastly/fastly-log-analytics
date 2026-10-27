@@ -15,6 +15,7 @@ import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from backend.core.metadata.cron_log import CronLeaseHeldError
 from backend.core.rollups.hour_bundles import bundle_hours_ip_spread
 from backend.utils.hll import HyperLogLog
 from tests._helpers.rollups import build_writer_patches, write_hour_bundle, writer_patches
@@ -24,7 +25,6 @@ from tests._helpers.sources import make_source
 
 from backend.core import rollups
 from backend.core import rollups as rr
-from backend.core.metadata.cron_log import CronLeaseHeldError
 from backend.core.rollups import day_bundles, rollups_present
 from backend.core.rollups import partial_hour as ph
 from backend.core.rollups._common import DAY_BUNDLE_TOP_K, parquet_zstd_target, unlink_quiet, wavg

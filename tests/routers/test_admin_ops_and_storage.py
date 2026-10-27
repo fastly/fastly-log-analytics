@@ -20,12 +20,14 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from backend.core.clickhouse_publication import PAYLOAD_COLUMNS, FosArtifacts
+from backend.core.metadata.cron_log import CronLeaseHeldError
 from backend.core.query_attribution import Attribution, current_attribution
 from backend.core.query_registry import query_registry
 from backend.cron_progress import _run_metadata
 from backend.deps import get_con, get_service_id, get_source, require_admin
 from backend.routers.admin_queries import _admin_id_from_request
 from backend.routers.usage import _extract_fos_ops, _fastly_api
+from backend.utils.remote_access import _is_blocked_path
 from backend.utils.telemetry_response_middleware import TelemetryResponseBodyMiddleware
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
@@ -34,7 +36,6 @@ from backend import config as _svc_config
 from backend.core import metadata as _meta
 from backend.core import metric_snapshots
 from backend.core.duckdb import DBBusyError
-from backend.core.metadata.cron_log import CronLeaseHeldError
 from backend.main import app
 from backend.routers import admin_queries as mod
 from backend.routers.admin import (
@@ -45,7 +46,6 @@ from backend.routers.admin import (
     _stream_from_worker,
 )
 from backend.routers.admin import clickhouse as api
-from backend.utils.remote_access import _is_blocked_path
 from tests._helpers.config_fakes import fake_mutate_config as _fake_mutate
 from tests._helpers.sources import TinyFos
 from tests._helpers.wire import wait_until

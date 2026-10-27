@@ -16,6 +16,7 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
+from backend.core.metadata.cron_log import CronLeaseHeldError
 from backend.deps import get_service_id, get_source, require_admin
 from fastapi import HTTPException
 from starlette.testclient import TestClient
@@ -24,7 +25,6 @@ from tests._helpers.config_fakes import fake_mutate_config
 from backend.core import metadata as metadata_db
 from backend.core.ingest import sweep_ledger_once
 from backend.core.metadata import usage_log_db
-from backend.core.metadata.cron_log import CronLeaseHeldError
 from backend.cron.jobs import commit
 from backend.cron.jobs import rum_ledger as ledger_mod
 from backend.cron.jobs import sync as sync_mod

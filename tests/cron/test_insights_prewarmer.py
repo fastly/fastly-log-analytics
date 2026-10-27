@@ -21,8 +21,8 @@ import logging
 from unittest.mock import MagicMock
 
 import pytest
-
 from backend.core.metadata.cron_log import CronLeaseHeldError
+
 from backend.cron.jobs import insights_prewarmer
 
 

@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 import botocore.exceptions
 import pytest
+from backend.core.metadata.cron_log import CronLeaseHeldError
 from backend.models.services import CronSettingsPartial
 from backend.provision.cmcd_fields import _CMCD_FIELD_NAMES
 from fastapi.testclient import TestClient
@@ -18,7 +19,6 @@ from pydantic import ValidationError
 from backend import config
 from backend.core import log_fields as lf_module
 from backend.core import metadata as metadata_db
-from backend.core.metadata.cron_log import CronLeaseHeldError
 from backend.main import app
 from backend.provision import fastly_api
 from backend.routers.services import core as services_core
@@ -1190,16 +1190,16 @@ import time
 from unittest.mock import MagicMock, patch
 
 import pytest
-from backend.cron_progress import _progress, _run_metadata, end_progress, start_progress
-from backend.services import service_manager
-from backend.services.service_manager import _get_dir_stats
-from fastapi.testclient import TestClient
-
 from backend.core.metadata.cron_log import (
     finalize_cron_run_if_running,
     log_cron_run,
     start_cron_run,
 )
+from backend.cron_progress import _progress, _run_metadata, end_progress, start_progress
+from backend.services import service_manager
+from backend.services.service_manager import _get_dir_stats
+from fastapi.testclient import TestClient
+
 from backend.main import app
 from backend.routers.services import core as _core
 from backend.routers.services import cron as _cron_router

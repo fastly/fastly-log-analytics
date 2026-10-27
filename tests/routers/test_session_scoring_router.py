@@ -19,6 +19,7 @@ from backend.routers.session_scoring_admin import _build_l2_enforce_block
 from backend.scoring.evaluate import EvaluationResult
 from backend.scoring.matrix import MatrixStats, TransitionMatrix
 from backend.utils.date_utils import parse_iso_utc
+from backend.utils.remote_access import _is_blocked_path
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
@@ -32,7 +33,6 @@ from backend.routers import session_scoring_admin as _admin
 from backend.routers import session_scoring_admin as _ssa
 from backend.routers.session_scoring import router as scoring_router
 from backend.scoring import labels as _labels
-from backend.utils.remote_access import _is_blocked_path
 from tests._helpers.config_fakes import mutate_via_save
 from tests._helpers.duckdb_fixtures import generate_mock_logs, insert_mock_logs
 from tests.conftest import MOCK_SERVICE_ID, override_request_context
