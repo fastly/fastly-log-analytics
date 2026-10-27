@@ -2911,23 +2911,25 @@ def _cloud_env(monkeypatch, tmp_path):
     return backup, src, table, con
 
 
-def _keys(client, prefix="pfx/ducklake/"):
+def _keys(client, prefix="pfx/ducklake/", data_only=True):
     pages = client.get_paginator("list_objects_v2").paginate(Bucket="test-bucket", Prefix=prefix)
-    return sorted(o["Key"] for p in pages for o in p.get("Contents", ()))
+    keys = sorted(o["Key"] for p in pages for o in p.get("Contents", ()))
+    return [k for k in keys if "/main/" in k] if data_only else keys
 
 
 def test_push_to_cloud_uploads_live_files_and_removes_compacted_ones(monkeypatch, tmp_path, s3_mock):
     backup, src, table, con = _cloud_env(monkeypatch, tmp_path)
     try:
-        first = backup.push_to_cloud(src, ("logs",))
+        first = backup.push_to_cloud(src)
         assert first["uploaded"] == 2 and first["deleted"] == 0
         assert len(_keys(s3_mock)) == 2 and all(f"/main/{table}/" in k for k in _keys(s3_mock))
-        assert backup.push_to_cloud(src, ("logs",)) == {"uploaded": 0, "uploaded_bytes": 0, "deleted": 0}
+        quiet = backup.push_to_cloud(src)
+        assert (quiet["uploaded"], quiet["deleted"], quiet["foreign"], quiet["adopted"]) == (0, 0, 0, True)
 
         con.execute(f"CALL ducklake_merge_adjacent_files('lake', '{table}')")
         con.execute("CALL ducklake_expire_snapshots('lake', older_than => now() + INTERVAL 1 DAY)")
         con.execute("CALL ducklake_cleanup_old_files('lake', cleanup_all => true)")
-        merged = backup.push_to_cloud(src, ("logs",))
+        merged = backup.push_to_cloud(src)
         assert merged["uploaded"] == 1 and merged["deleted"] == 2
         assert len(_keys(s3_mock)) == 1
     finally:
@@ -2938,11 +2940,11 @@ def test_push_to_cloud_uploads_live_files_and_removes_compacted_ones(monkeypatch
 def test_push_to_cloud_never_deletes_when_the_catalog_reports_no_live_files(monkeypatch, tmp_path, s3_mock):
     backup, src, table, con = _cloud_env(monkeypatch, tmp_path)
     try:
-        backup.push_to_cloud(src, ("logs",))
+        backup.push_to_cloud(src)
         before = _keys(s3_mock)
         con.execute(f'DROP TABLE lake."{table}"')
         con.execute(f'CREATE TABLE lake."{table}" (a BIGINT, b VARCHAR)')
-        result = backup.push_to_cloud(src, ("logs",))
+        result = backup.push_to_cloud(src)
         assert result["deleted"] == 0 and _keys(s3_mock) == before
     finally:
         con.execute(f'DROP TABLE IF EXISTS lake."{table}"')
@@ -2967,7 +2969,7 @@ def test_restore_from_cloud_rebuilds_lost_local_data(monkeypatch, tmp_path, s3_m
 
     backup, src, table, con = _cloud_env(monkeypatch, tmp_path)
     try:
-        backup.push_to_cloud(src, ("logs",))
+        backup.push_to_cloud(src)
         con.execute(f'DROP TABLE lake."{table}"') if lose_catalog else None
         con.close()
         if lose_catalog:
@@ -2999,8 +3001,8 @@ def test_schedule_cloud_push_is_single_flight_and_coalesces_requests(monkeypatch
 
     started, release, calls = threading.Event(), threading.Event(), []
 
-    def fake_push(source, tables):
-        calls.append(tables)
+    def fake_push(source):
+        calls.append(source)
         started.set()
         release.wait(5)
         return {}
@@ -3009,15 +3011,15 @@ def test_schedule_cloud_push_is_single_flight_and_coalesces_requests(monkeypatch
     monkeypatch.delenv("FLA_DEV_NO_CRONS", raising=False)
     monkeypatch.setattr(backup, "is_high_scale_mode", lambda _src: False)
     src = {"service_id": "svc_coalesce", "name": "svc_coalesce", "bucket": "b"}
-    backup.schedule_cloud_push(src, ("logs",))
+    backup.schedule_cloud_push(src)
     assert started.wait(5)
-    backup.schedule_cloud_push(src, ("client_vitals",))
-    backup.schedule_cloud_push(src, ("client_errors", "client_vitals"))
+    backup.schedule_cloud_push(src)
+    backup.schedule_cloud_push(src)
     release.set()
     deadline = time.time() + 5
     while time.time() < deadline and "svc_coalesce" in backup._running:
         time.sleep(0.02)
-    assert calls == [("logs",), ("client_vitals", "client_errors")]
+    assert len(calls) == 2
 
 
 def test_schedule_cloud_push_does_nothing_without_a_bucket_or_in_dev_no_crons(monkeypatch):
@@ -3031,3 +3033,101 @@ def test_schedule_cloud_push_does_nothing_without_a_bucket_or_in_dev_no_crons(mo
     monkeypatch.setenv("FLA_DEV_NO_CRONS", "1")
     backup.schedule_cloud_push({"service_id": "s", "name": "s", "bucket": "b"})
     assert ran == [] and not backup._running
+
+
+# ── Cloud copy adoption: never delete a backup the current catalog did not write ──
+
+
+def _put_remote(client, key, body=b"old-parquet"):
+    client.put_object(Bucket="test-bucket", Key=key, Body=body)
+
+
+def test_push_never_deletes_a_copy_that_predates_the_catalog(monkeypatch, tmp_path, s3_mock):
+    from datetime import UTC, datetime, timedelta
+
+    backup, src, table, con = _cloud_env(monkeypatch, tmp_path)
+    try:
+        old = [f"pfx/ducklake/main/{table}/old-{i}.parquet" for i in range(3)]
+        for key in old:
+            _put_remote(s3_mock, key)
+        uuid = backup._catalog_identity(src)[0]
+        # A catalog created after those objects were written: the whole old backup looks foreign to it.
+        monkeypatch.setattr(backup, "_catalog_identity", lambda _s: (uuid, datetime.now(UTC) + timedelta(hours=1)))
+        result = backup.push_to_cloud(src)
+        assert result["deleted"] == 0 and result["foreign"] == 3 and result["adopted"] is False
+        assert set(old) <= set(_keys(s3_mock)), "the old backup must survive"
+        assert "pfx/ducklake/_catalog.json" not in _keys(s3_mock, data_only=False), "a foreign copy is not adopted"
+        # More commits and compaction in the fresh catalog still must not touch the old files.
+        con.execute(f"CALL ducklake_merge_adjacent_files('lake', '{table}')")
+        con.execute("CALL ducklake_expire_snapshots('lake', older_than => now() + INTERVAL 1 DAY)")
+        con.execute("CALL ducklake_cleanup_old_files('lake', cleanup_all => true)")
+        assert backup.push_to_cloud(src)["deleted"] == 0 and set(old) <= set(_keys(s3_mock))
+    finally:
+        con.execute(f'DROP TABLE IF EXISTS lake."{table}"')
+        con.close()
+
+
+def test_push_adopts_a_copy_that_only_holds_this_catalogs_files_and_then_mirrors(monkeypatch, tmp_path, s3_mock):
+    backup, src, table, con = _cloud_env(monkeypatch, tmp_path)
+    try:
+        stray = f"pfx/ducklake/main/{table}/stray.parquet"
+        _put_remote(s3_mock, stray)  # newer than the catalog's oldest snapshot, not live: this catalog's garbage
+        result = backup.push_to_cloud(src)
+        assert result["deleted"] == 1 and result["foreign"] == 0 and result["adopted"] is True
+        assert stray not in _keys(s3_mock) and "pfx/ducklake/_catalog.json" in _keys(s3_mock, data_only=False)
+        # Adopted: later garbage is removed with no age condition.
+        late = f"pfx/ducklake/main/{table}/late.parquet"
+        _put_remote(s3_mock, late)
+        from datetime import UTC, datetime, timedelta
+
+        uuid = backup._catalog_identity(src)[0]
+        monkeypatch.setattr(backup, "_catalog_identity", lambda _s: (uuid, datetime.now(UTC) + timedelta(hours=1)))
+        assert backup.push_to_cloud(src)["deleted"] == 1 and late not in _keys(s3_mock)
+    finally:
+        con.execute(f'DROP TABLE IF EXISTS lake."{table}"')
+        con.close()
+
+
+def test_a_marker_for_another_catalog_does_not_count_as_adoption(monkeypatch, tmp_path, s3_mock):
+    import json
+    from datetime import UTC, datetime, timedelta
+
+    backup, src, table, con = _cloud_env(monkeypatch, tmp_path)
+    try:
+        s3_mock.put_object(
+            Bucket="test-bucket", Key="pfx/ducklake/_catalog.json", Body=json.dumps({"catalog_uuid": "someone-else"})
+        )
+        old = f"pfx/ducklake/main/{table}/old.parquet"
+        _put_remote(s3_mock, old)
+        uuid = backup._catalog_identity(src)[0]
+        monkeypatch.setattr(backup, "_catalog_identity", lambda _s: (uuid, datetime.now(UTC) + timedelta(hours=1)))
+        result = backup.push_to_cloud(src)
+        assert result["adopted"] is False and result["deleted"] == 0 and old in _keys(s3_mock)
+    finally:
+        con.execute(f'DROP TABLE IF EXISTS lake."{table}"')
+        con.close()
+
+
+def test_restore_adopts_the_copy_so_later_pushes_can_mirror_it(monkeypatch, tmp_path, s3_mock):
+    import json
+    import shutil
+    from datetime import UTC, datetime, timedelta
+
+    backup, src, table, con = _cloud_env(monkeypatch, tmp_path)
+    try:
+        backup.push_to_cloud(src)
+        con.close()
+        shutil.rmtree(tmp_path / "data")
+        backup.restore_from_cloud(src)
+        marker = json.loads(s3_mock.get_object(Bucket="test-bucket", Key="pfx/ducklake/_catalog.json")["Body"].read())
+        uuid = backup._catalog_identity(src)[0]
+        assert marker["catalog_uuid"] == uuid
+        _put_remote(s3_mock, f"pfx/ducklake/main/{table}/superseded.parquet")
+        monkeypatch.setattr(backup, "_catalog_identity", lambda _s: (uuid, datetime.now(UTC) + timedelta(hours=1)))
+        result = backup.push_to_cloud(src)
+        assert result["adopted"] is True and result["deleted"] == 1
+        con = duckdb.connect()
+        assert ducklake._ducklake_attach(con, src, read_only=False)
+    finally:
+        con.execute(f'DROP TABLE IF EXISTS lake."{table}"')
+        con.close()
