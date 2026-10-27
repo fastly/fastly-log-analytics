@@ -836,7 +836,8 @@ def cmd_restore_data(
     result = restore_from_cloud(source, progress=info)
     ok(
         f"Restored {result['remote_files']} cloud file(s): {result['downloaded']} downloaded, "
-        f"{result['registered']} registered, {result['reindexed']} raw object(s) re-indexed."
+        f"{result['registered']} registered, {result['reindexed']} raw object(s) re-indexed, "
+        f"{result['views_restored']} saved view(s) restored."
     )
 
 

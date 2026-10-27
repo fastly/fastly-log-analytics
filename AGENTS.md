@@ -1350,6 +1350,8 @@ Standard keeps DuckLake Parquet on local disk and the catalog in Postgres. The c
 - **Restore** (`restore-data` CLI, `restore_from_cloud`) downloads missing files, creates absent tables from the Parquet schema and registers files with `ducklake_add_data_files`, which is not idempotent: it skips files `ducklake_list_files` already lists. It also rebuilds the Postgres `ingested_files` index from each restored row's `_source_file`, so raw `.gz` still in the bucket are not ingested twice; other operational metadata (cron history, usage log) is not restored, and raw objects that produced no rows are simply read again.
 - **Window of exposure:** data ingested since the last successful push exists only locally. The push cost model is in the Usage page calculator (Class A per file, 30-day minimum billing on rewritten files).
 
+`restore-data` also restores saved views from `meta/admin_state.json` (`restore_admin_state`; audit logs and format history stay export-only). High-Scale compaction/retention deletions are billed as still-stored: `_ducklake_expire_snapshots` reads the sizes of FOS files DuckLake scheduled for deletion (`ducklake_files_scheduled_for_deletion`, which keeps no size) via HEAD before `ducklake_cleanup_old_files` unlinks them, then records them with `record_cloud_copy_deletion`. `test_a_fresh_real_catalog_never_deletes_the_old_backup` pins adoption against a second real Postgres catalog.
+
 ### 51. Field-picker reservoir samples have no request scope
 
 `top_values.json` is an unbounded reservoir sample. `get_field_values` may use
