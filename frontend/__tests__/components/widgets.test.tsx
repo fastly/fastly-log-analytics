@@ -10,6 +10,8 @@ import { http, HttpResponse } from 'msw'
 import { QueryClient, type QueryCacheNotifyEvent } from '@tanstack/react-query'
 import { axe } from 'vitest-axe'
 import React, { type ComponentProps, type ReactNode } from 'react'
+import { renderToString } from 'react-dom/server'
+import * as bootstrapHooks from '@/hooks/useBootstrap'
 import type { CellContext, ColumnDef } from '@tanstack/react-table'
 import type { components } from '@/types/api.generated'
 import type { PlotlyConfig, PlotlyGraphDiv, PlotlyLayout, PlotlyRelayoutEvent, PlotlyTrace } from '@/types/api'
@@ -241,6 +243,7 @@ import { LogSyncSection } from '@/components/CronSettingsModal/CronSettingsModal
 import LogsClient, { CronLiveLog, QuickActionsBar, SchemaTab, CRON_EXPLANATIONS, CRON_DISPLAY_NAMES, CRON_GROUPS } from '@/app/logs/_sections/LogsClient'
 import { DataTable, DataTableReadonly, DateTimeCell, FilterValueCell, buildDashboardFilterUrl, makeLatencyColumns, type LatencyRow } from '@/components/DataTable'
 import { BotSourcesPanel } from '@/app/control-room/_sections/ControlRoomClient'
+import { RealtimeChart } from '@/app/control-room/_sections/ControlRoomWidgets'
 import {
   GlobalHealthHelp, AvgRttHelp, WorstAsnHelp, WorstRegionHelp, HeatmapHelp,
   AsnLeaderboardHelp, MetroLeaderboardHelp, ShieldingHelp,
@@ -1661,6 +1664,30 @@ describe('TimeSeriesChart, ScorerSeries, PlotlyChart, TrafficChart, CardGrid, Fi
   describe('PlotlyChart, ChartA11yTable & tracesToTable', () => {
     beforeEach(() => {
       mocks.useRealPlotly = true
+    })
+
+    it('hydrates realtime chart labels across a server/browser clock boundary', async () => {
+      const actual = await vi.importActual<typeof import('@/hooks/useBootstrap')>('@/hooks/useBootstrap')
+      const mounted = vi.spyOn(bootstrapHooks, 'useMounted').mockImplementation(actual.useMounted)
+      const now = Date.UTC(2026, 9, 27, 12, 0, 0)
+      const clock = vi.spyOn(Date, 'now').mockReturnValue(now)
+      const onRecoverableError = vi.fn()
+      const container = document.createElement('div')
+      const chart = <RealtimeChart title="Realtime requests" traces={[{ name: 'Requests/s', y: [1, 2], color: '#123456' }]} />
+      try {
+        container.innerHTML = renderToString(chart)
+        clock.mockReturnValue(now + 1000)
+        const view = render(chart, { container, hydrate: true, onRecoverableError })
+        expect(onRecoverableError).not.toHaveBeenCalled()
+        const table = within(container).getByRole('table', { name: 'Realtime requests' })
+        expect(within(table).getAllByRole('row')).toHaveLength(3)
+        expect(table).toHaveTextContent('Requests/s')
+        view.unmount()
+      } finally {
+        clock.mockRestore()
+        mounted.mockRestore()
+        container.remove()
+      }
     })
 
     it('withholds Plot until IntersectionObserver fires, or renders immediately when IO is unavailable', async () => {

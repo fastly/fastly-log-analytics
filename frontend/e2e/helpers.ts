@@ -323,16 +323,20 @@ export async function assertWarmClsAndFcp(
 
 export async function assertManualRefreshAttribution(
   page: Page,
-  opts: { url: string; readyLocator: Locator; refreshLocator: Locator; requestFilter: (url: string) => boolean },
+  opts: { url: string; readyLocator: Locator; refreshLocator: Locator; requestFilter: (url: string) => boolean; ssrQueryKey?: string },
 ) {
   const tracked: Array<{ url: string; pageLoadId: string | null }> = []
   page.on('request', (req) => {
     if (opts.requestFilter(req.url())) tracked.push({ url: req.url(), pageLoadId: req.headers()['x-page-load-id'] ?? null })
   })
-  await page.goto(opts.url, { waitUntil: 'domcontentloaded' })
+  const response = await page.goto(opts.url, { waitUntil: 'domcontentloaded' })
   await expect(opts.readyLocator).toBeVisible({ timeout: 30_000 })
-  await expect.poll(() => tracked.length, { timeout: 25_000 }).toBeGreaterThanOrEqual(1)
-  expect(tracked[0].pageLoadId).toBeTruthy()
+  if (opts.ssrQueryKey) {
+    expect(await response?.text()).toContain(opts.ssrQueryKey)
+  } else {
+    await expect.poll(() => tracked.length, { timeout: 25_000 }).toBeGreaterThanOrEqual(1)
+    expect(tracked[0].pageLoadId).toBeTruthy()
+  }
 
   const before = tracked.length
   await expect(opts.refreshLocator).toBeVisible({ timeout: 15_000 })
@@ -346,7 +350,7 @@ export async function assertManualRefreshAttribution(
       { timeout: 15_000, intervals: [250, 500, 1000] },
     )
     .toBeGreaterThan(before)
-  expect(tracked.some((r) => Boolean(r.pageLoadId))).toBe(true)
+  expect(tracked.slice(before).every((r) => Boolean(r.pageLoadId))).toBe(true)
   await expect(opts.readyLocator).toBeVisible()
 }
 

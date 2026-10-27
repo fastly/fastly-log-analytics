@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { Suspense } from "react";
 import { Inter } from "next/font/google";
 import { cookies, headers } from "next/headers";
 import { QueryClient, dehydrate } from "@tanstack/react-query";
@@ -167,7 +168,11 @@ export default async function RootLayout({
               initialCollapsed={initialSidebarCollapsed}
               ssrActiveServiceId={sid}
               ssrIsRumEnabled={isRumEnabled}
-              serverFooter={<ServerFooter />}
+              serverFooter={
+                <Suspense fallback={<div aria-hidden="true" className="mt-12 h-[50px]" />}>
+                  <ServerFooter />
+                </Suspense>
+              }
             >
               <ErrorBoundaryWithRouteReset>{children}</ErrorBoundaryWithRouteReset>
             </AppLayout>

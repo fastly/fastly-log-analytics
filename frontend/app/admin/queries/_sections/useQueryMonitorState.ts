@@ -107,10 +107,10 @@ export function useDocumentVisible(): boolean {
 }
 
 export function durationColor(ms: number): string {
-  if (ms < 500) return 'text-emerald-600 dark:text-emerald-400'
-  if (ms < 2000) return 'text-amber-600 dark:text-amber-400'
-  if (ms < 10_000) return 'text-orange-600 dark:text-orange-400'
-  return 'text-red-600 dark:text-red-400'
+  if (ms < 500) return 'text-emerald-700 dark:text-emerald-400'
+  if (ms < 2000) return 'text-amber-700 dark:text-amber-400'
+  if (ms < 10_000) return 'text-orange-700 dark:text-orange-400'
+  return 'text-red-700 dark:text-red-400'
 }
 
 export function formatDurationMs(ms: number): string {

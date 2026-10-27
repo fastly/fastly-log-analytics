@@ -3142,3 +3142,132 @@ def test_restore_adopts_the_copy_so_later_pushes_can_mirror_it(monkeypatch, tmp_
     finally:
         con.execute(f'DROP TABLE IF EXISTS lake."{table}"')
         con.close()
+
+
+@pytest.fixture
+def _fresh_catalog_dsn(_pg_worker_schema):
+    from urllib.parse import urlsplit, urlunsplit
+
+    parts = urlsplit(ducklake.config.DUCKLAKE_CATALOG)
+    worker_db, admin = _pg_worker_schema
+    fresh_name = f"{worker_db}_fresh_catalog"
+    fresh_dsn = urlunsplit((parts.scheme, parts.netloc, "/" + fresh_name, parts.query, ""))
+    if not admin.execute("SELECT 1 FROM pg_database WHERE datname = %s", (fresh_name,)).fetchone():
+        admin.execute(f'CREATE DATABASE "{fresh_name}"')
+    with psycopg.connect(fresh_dsn, autocommit=True) as catalog:
+        catalog.execute("DROP SCHEMA IF EXISTS public CASCADE")
+        catalog.execute("CREATE SCHEMA public")
+        try:
+            yield fresh_dsn
+        finally:
+            # DROP DATABASE waits on a checkpoint; the worker's exclusive slot permits reuse.
+            catalog.execute("DROP SCHEMA public CASCADE")
+            catalog.execute("CREATE SCHEMA public")
+
+
+def test_expiry_bills_the_bytes_of_high_scale_files_when_the_cleanup_unlinks_them(
+    monkeypatch, tmp_path, _fresh_catalog_dsn
+):
+    from backend.core.metadata.usage_log import clear_usage_log, cloud_copy_deleted_bytes_in_billing_window
+    from backend.core.storage import _core
+    from backend.core.storage._core import ducklake_table_name
+
+    monkeypatch.setattr(ducklake.config, "DUCKLAKE_DATA_PATH", str(tmp_path / "data"))
+    monkeypatch.setattr(ducklake.config, "DUCKLAKE_CATALOG", _fresh_catalog_dsn)
+    monkeypatch.delenv("DUCKLAKE_EXTENSION_PATH", raising=False)
+    src = {"service_id": "svc_hs_billing", "name": "svc_hs_billing", "bucket": "test-bucket"}
+    clear_usage_log("svc_hs_billing")
+    table = ducklake_table_name(src, "logs")
+    con = duckdb.connect()
+    try:
+        assert ducklake._ducklake_attach(con, src, read_only=False)
+        con.execute(f'DROP TABLE IF EXISTS lake."{table}"')
+        con.execute(f'CREATE TABLE lake."{table}" AS SELECT i AS a FROM range(0, 100) t(i)')
+        con.execute(f'INSERT INTO lake."{table}" SELECT i FROM range(100, 200) t(i)')
+        before = {os.path.basename(str(p)): p.stat().st_size for p in (tmp_path / "data").rglob("*.parquet")}
+        con.execute(f"CALL ducklake_merge_adjacent_files('lake', '{table}')")
+        monkeypatch.setattr(_core, "_remote_data_path", lambda _s: True)
+        monkeypatch.setattr(
+            _core, "_resolve_data_path", lambda _s, _sid: "s3://test-bucket/" + str(tmp_path / "data").lstrip("/") + "/"
+        )
+        monkeypatch.setattr(_core, "_fos_object_size", lambda _s, _b, key: before.get(os.path.basename(key), 0))
+        time.sleep(0.2)
+        out = _core._ducklake_expire_snapshots(con, src, keep_snapshot_days=0)
+        assert out["data_files_cleaned"] == 2
+        assert out["fos_deleted_bytes_billed"] == sum(before.values())
+        assert cloud_copy_deleted_bytes_in_billing_window("svc_hs_billing") == sum(before.values())
+    finally:
+        con.execute(f'DROP TABLE IF EXISTS lake."{table}"')
+        con.close()
+        clear_usage_log("svc_hs_billing")
+
+
+def test_restore_brings_back_saved_views_from_the_admin_state_snapshot(monkeypatch, tmp_path, s3_mock):
+    import json
+    import shutil
+
+    from backend.core import metadata as metadata_db
+
+    backup, src, table, con = _cloud_env(monkeypatch, tmp_path)
+    try:
+        backup.push_to_cloud(src)
+        con.close()
+        shutil.rmtree(tmp_path / "data")
+        view = {
+            "id": "view-1",
+            "name": "Errors today",
+            "filters_json": "{}",
+            "time_range_type": "relative",
+            "page": "dashboard",
+        }
+        s3_mock.put_object(
+            Bucket="test-bucket", Key="pfx/meta/admin_state.json", Body=json.dumps({"_views": [view, {"id": "x"}]})
+        )
+        metadata_db.delete_view("svc_cloud", "view-1")
+        assert backup.restore_from_cloud(src)["views_restored"] == 1
+        assert [v["name"] for v in metadata_db.list_views("svc_cloud")] == ["Errors today"]
+        backup.restore_from_cloud(src)
+        assert len(metadata_db.list_views("svc_cloud")) == 1
+        metadata_db.delete_view("svc_cloud", "view-1")
+        con = duckdb.connect()
+        assert ducklake._ducklake_attach(con, src, read_only=False)
+    finally:
+        con.execute(f'DROP TABLE IF EXISTS lake."{table}"')
+        con.close()
+
+
+def test_a_fresh_real_catalog_never_deletes_the_old_backup(monkeypatch, tmp_path, s3_mock, _fresh_catalog_dsn):
+    """A second real catalog must preserve the first catalog's cloud copy."""
+    old_dsn = ducklake.config.DUCKLAKE_CATALOG
+    backup, src, table, con = _cloud_env(monkeypatch, tmp_path)
+    con_b = None
+    try:
+        backup.push_to_cloud(src)
+        old_identity = backup._catalog_identity(src)
+        old_keys = _keys(s3_mock)
+        assert len(old_keys) == 2 and "pfx/ducklake/_catalog.json" in _keys(s3_mock, data_only=False)
+        con.execute(f'DROP TABLE lake."{table}"')
+        con.close()
+        time.sleep(1.2)
+        monkeypatch.setattr(ducklake.config, "DUCKLAKE_CATALOG", _fresh_catalog_dsn)
+        monkeypatch.setattr(ducklake.config, "DUCKLAKE_DATA_PATH", str(tmp_path / "data_fresh"))
+        con_b = duckdb.connect()
+        assert ducklake._ducklake_attach(con_b, src, read_only=False)
+        con_b.execute(f"CREATE TABLE lake.\"{table}\" AS SELECT i AS a, 'z'::VARCHAR AS b FROM range(0, 10) t(i)")
+        new_identity = backup._catalog_identity(src)
+        assert old_identity is not None and new_identity is not None
+        assert new_identity[0] != old_identity[0]
+
+        result = backup.push_to_cloud(src)
+        assert result["adopted"] is False and result["deleted"] == 0 and result["foreign"] == 2
+        assert set(old_keys) <= set(_keys(s3_mock)), "the old copy must survive a fresh catalog"
+        assert result["uploaded"] == 1, "the new data still uploads beside the old copy"
+        con_b.close()
+        con_b = None
+        restored = backup.restore_from_cloud(src)
+        assert restored["registered"] == 2 and backup.push_to_cloud(src)["adopted"] is True
+    finally:
+        if con_b is not None:
+            con_b.close()
+        con.close()
+        monkeypatch.setattr(ducklake.config, "DUCKLAKE_CATALOG", old_dsn)

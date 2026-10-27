@@ -405,9 +405,39 @@ async function gotoSettled(page: Page, route: string) {
 
 for (const route of CLEAN_ROUTES) {
   test(`no WCAG 2.1 AA violations on ${route}`, async ({ page }) => {
+    if (route === '/admin/queries') {
+      await page.route('**/api/admin/queries?*', async (request) => {
+        const now = Date.now() / 1000
+        const attribution = {
+          kind: 'admin', label: 'Administrator query', principal_id: 'test-admin',
+          caller_qualname: 'dashboard.aggregates', caller_file: 'backend/routers/dashboard.py:42',
+          request_path: '/api/dashboard/aggregates', request_id: 'test-request',
+          cron_job: null, cron_run_id: null, pool_slot: null,
+        }
+        await request.fulfill({ json: {
+          last_seq: 2,
+          active: [{
+            query_id: 1, db_type: 'DuckDB', sql_preview: 'SELECT 1', sql_len: 8,
+            service_id: null, started_at_utc: now - 1, duration_ms: 24,
+            cancellable: true, cancelled_at: now, attribution,
+          }],
+          completed: [{
+            query_id: 2, db_type: 'DuckDB', sql_preview: 'SELECT 2', sql_len: 8,
+            service_id: null, started_at_utc: now - 1, ended_at_utc: now,
+            duration_ms: 24, outcome: 'ok', error_type: null, error_message: null,
+            peak_memory_mb: null, attribution,
+          }],
+        } })
+      })
+    }
     await gotoSettled(page, route)
     await page.locator('main').first().waitFor({ state: 'visible', timeout: 30_000 })
     await page.waitForTimeout(3_000)
+    if (route === '/admin/queries') {
+      const active = page.getByRole('main').getByTestId('admin-queries-active-reservation')
+      await expect(active.getByText('✓ done', { exact: true })).toBeVisible()
+      await expect(active.getByText('cancelling…', { exact: true })).toBeVisible()
+    }
     await assertNoWcagViolations(page, ['.recharts-wrapper'])
   })
 }
@@ -511,7 +541,7 @@ test.describe('Performance Page Contract (/performance)', () => {
     shellCheck: async (page) => {
       await expect(page.getByRole('button', { name: /24h|1h|7d|last/i }).first()).toBeVisible({ timeout: 10_000 })
       for (const label of ['End-to-End Latency Waterfall (Average)', 'Slowest URLs', 'Slowest Networks', 'Cache TTL Distribution', 'Origin vs Edge Processing (ms)']) {
-        await expect(page.getByText(label).locator('visible=true')).toBeVisible({ timeout: 15_000 })
+        await expect(page.getByText(label, { exact: true }).locator('visible=true')).toBeVisible({ timeout: 15_000 })
       }
     },
     dataContract: {

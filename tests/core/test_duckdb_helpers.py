@@ -25,6 +25,7 @@ import backend.core.duckdb as duckdb_mod
 import backend.cron.jobs.duckdb_recycle as rec
 from backend.core import duckdb_pool
 from backend.core import duckdb_pool as _pool
+from backend.core import reset as reset_mod
 from backend.core import storage as _storage
 from backend.core.duckdb import (
     DBBusyError,
@@ -2864,9 +2865,9 @@ def test_drop_service_ducklake_state_drops_tables_and_removes_local_dir(tmp_path
         patch.object(d, "get_source_for_service", return_value=source),
         patch.object(d.duckdb, "connect", return_value=fake_con),
         patch("backend.core.storage._core._ducklake_attach", return_value=True),
-        patch.object(d, "_purge_dropped_catalog_rows", return_value=7) as purge,
+        patch.object(reset_mod, "_purge_dropped_catalog_rows", return_value=7) as purge,
     ):
-        result = d.drop_service_ducklake_state("svc")
+        result = reset_mod.drop_service_ducklake_state("svc")
 
     statements = [c.args[0] for c in fake_con.execute.call_args_list]
     expected_tables = [ducklake_table_name(source, t) for t in ("logs", "client_vitals", "client_errors")]
@@ -2880,7 +2881,7 @@ def test_drop_service_ducklake_state_drops_tables_and_removes_local_dir(tmp_path
 
 def test_drop_service_ducklake_state_unknown_service_is_noop():
     with patch.object(d, "get_source_for_service", return_value=None):
-        assert d.drop_service_ducklake_state("missing") == {"tables_dropped": 0, "local_dirs_removed": 0}
+        assert reset_mod.drop_service_ducklake_state("missing") == {"tables_dropped": 0, "local_dirs_removed": 0}
 
 
 def test_drop_service_ducklake_state_attach_failure_raises_and_keeps_local_files(tmp_path, monkeypatch):
@@ -2898,7 +2899,7 @@ def test_drop_service_ducklake_state_attach_failure_raises_and_keeps_local_files
         patch("backend.core.storage._core._ducklake_attach", return_value=False),
         pytest.raises(RuntimeError, match="could not attach"),
     ):
-        d.drop_service_ducklake_state("svc")
+        reset_mod.drop_service_ducklake_state("svc")
     fake_con.execute.assert_not_called()
     fake_con.close.assert_called_once()
     assert (lake_dir / "part.parquet").exists(), "catalog still references these files"
@@ -2920,7 +2921,7 @@ def test_drop_service_ducklake_state_drop_failure_raises_and_keeps_local_files(t
         patch("backend.core.storage._core._ducklake_attach", return_value=True),
         pytest.raises(RuntimeError, match="client_vitals: catalog locked"),
     ):
-        d.drop_service_ducklake_state("svc")
+        reset_mod.drop_service_ducklake_state("svc")
     assert fake_con.execute.call_count == 3, "every table drop is attempted before failing"
     assert (lake_dir / "part.parquet").exists()
 
@@ -2940,8 +2941,12 @@ def test_drop_service_ducklake_state_blocked_remote_root_uses_the_writers_local_
         patch.object(d, "get_source_for_service", return_value={"service_id": "svc", "name": "svc"}),
         patch.object(d.duckdb, "connect", return_value=MagicMock()),
         patch("backend.core.storage._core._ducklake_attach", return_value=True),
+        patch.object(
+            reset_mod.psycopg, "connect", side_effect=AssertionError("mocked catalog must not open PostgreSQL")
+        ),
+        patch.object(reset_mod, "_purge_dropped_catalog_rows", return_value=0),
     ):
-        result = d.drop_service_ducklake_state("svc")
+        result = reset_mod.drop_service_ducklake_state("svc")
     assert result["local_dirs_removed"] == 1 and not lake_dir.exists()
 
 
@@ -2962,7 +2967,7 @@ def _run_purge(root, tbl, keys, bucket="b", prefix=""):
         deleted.extend(batch)
         return len(batch)
 
-    gen = d._purge_ducklake_remote_dirs(fos, root, tbl, bucket, delete_fn, prefix)
+    gen = reset_mod._purge_ducklake_remote_dirs(fos, root, tbl, bucket, delete_fn, prefix)
     messages = []
     try:
         while True:

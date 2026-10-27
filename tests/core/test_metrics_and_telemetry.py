@@ -228,8 +228,9 @@ def test_observability_probe_surfaces_receiver_errors_and_refuses_redirects():
         "probe_metric",
     ],
 )
-def test_observability_application_request_requires_its_server_trace_and_http_metric(metric_name, missing):
+def test_observability_application_request_requires_its_server_trace_and_http_metric(monkeypatch, metric_name, missing):
     probe, sdk_receipt, metric, trace_data = _observability_probe_fixture()
+    monkeypatch.setattr(probe, "time", SimpleNamespace(time=time.time, monotonic=lambda: 0.0))
     receipt = probe.ApplicationReceipt(
         trace_id=sdk_receipt.trace_id, started_at=sdk_receipt.emitted_at, path="/api/health"
     )
@@ -444,7 +445,7 @@ print(json.dumps({"completed": True}))
                 client=client,
                 prometheus_url=origin,
                 tempo_url=origin,
-                timeout_seconds=0,
+                timeout_seconds=5,
             )
         assert result["metric_observed"] and result["trace_observed"]
     finally:

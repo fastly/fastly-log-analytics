@@ -22,6 +22,7 @@ import threading
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import duckdb
 import psycopg
@@ -248,6 +249,38 @@ def _rebuild_ingest_index(con, service_id: str, name: str, ident: str) -> int:
     return len(rows)
 
 
+def restore_admin_state(source: dict) -> int:
+    """Restore saved views idempotently from the admin-state snapshot."""
+    from backend.core.duckdb import _get_fos_client
+    from backend.core.metadata.base import get_admin_state_key, save_view
+
+    if not source.get("bucket"):
+        return 0
+    try:
+        body = json.loads(
+            _get_fos_client(source).get_object(Bucket=source["bucket"], Key=get_admin_state_key(source))["Body"].read()
+        )
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") in ("NoSuchKey", "404", "NotFound"):
+            return 0
+        raise
+    restored = 0
+    for view in body.get("_views") or []:
+        if not view.get("name"):
+            continue
+        save_view(
+            _service_id(source),
+            SimpleNamespace(
+                **{
+                    k: view.get(k)
+                    for k in ("id", "name", "filters_json", "time_range_type", "start_time", "end_time", "page")
+                }
+            ),
+        )
+        restored += 1
+    return restored
+
+
 def restore_from_cloud(source: dict, progress: Callable[[str], None] | None = None) -> dict:
     """Rebuild local DuckLake data from the FOS copy: download missing files, then register them in DuckLake.
 
@@ -315,5 +348,17 @@ def restore_from_cloud(source: dict, progress: Callable[[str], None] | None = No
     identity = _catalog_identity(source)
     if identity is not None:
         _write_marker(client, bucket, key_root + _MARKER_NAME, identity[0])
+    views = 0
+    try:
+        views = restore_admin_state(source)
+        say(f"Restored {views} saved view(s) from the admin state snapshot")
+    except Exception as exc:
+        logger.warning("[restore] %s: could not restore saved views: %s", _service_id(source), exc)
     clear_source_caches(source.get("name", "default"))
-    return {"downloaded": downloaded, "registered": registered, "remote_files": len(remote), "reindexed": reindexed}
+    return {
+        "downloaded": downloaded,
+        "registered": registered,
+        "remote_files": len(remote),
+        "reindexed": reindexed,
+        "views_restored": views,
+    }

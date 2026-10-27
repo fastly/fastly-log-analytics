@@ -12,6 +12,7 @@ import { Alert, AlertDescription } from '@/components/ui/alert'
 import { HelpDialog } from '@/components/ui/confirm-dialog'
 import { PlotlyChart } from '@/components/PlotlyChart'
 import { useSSE, useNowMs, type SSELine } from '@/hooks/useSSE'
+import { useMounted } from '@/hooks/useBootstrap'
 import { adminJson, adminJsonResult, getPageLoadId } from '@/lib/api'
 import { useServiceStore } from '@/stores/filterStore'
 import { formatCount, formatDate, buildServiceHref, cn } from '@/lib/utils'
@@ -306,8 +307,10 @@ export function RealtimeChart({
   yAxisSuffix,
   y2AxisSuffix,
 }: RealtimeChartProps) {
+  const mounted = useMounted()
   const pointCount = traces[0]?.y.length ?? CHART_WINDOW
   const data = useMemo(() => {
+    if (!mounted) return []
     const labels = makeTimeLabels(pointCount)
     return traces.map((trace) => ({
       type: 'bar' as const,
@@ -318,7 +321,7 @@ export function RealtimeChart({
       yaxis: trace.yaxis || 'y',
       hovertemplate: `%{x} · %{y:,.4~g}<extra>${trace.name}</extra>`,
     }))
-  }, [traces, pointCount])
+  }, [mounted, traces, pointCount])
 
   const hasLegend = traces.length > 1
   const layout = useMemo(() => {

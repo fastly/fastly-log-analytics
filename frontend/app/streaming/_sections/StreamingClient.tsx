@@ -21,7 +21,6 @@ import {
   OBJECT_TYPE_LABELS,
   STREAMING_FORMAT_LABELS,
   STREAMING_INFO,
-  STREAM_TYPE_LABELS,
 } from './StreamingConstants'
 import { StreamingChartsGrid } from './StreamingChartsGrid'
 

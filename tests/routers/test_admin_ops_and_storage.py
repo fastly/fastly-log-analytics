@@ -1032,7 +1032,8 @@ class TestQueryMonitorAndSlowQueries:
         query_registry.deregister(qid, error=RuntimeError("Query interrupted"))
         assert any(a["event_type"] == "query_cancelled" for a in _meta.list_audit(svc_id, limit=20))
 
-    def test_list_count_and_clear_slow_queries(self, client):
+    def test_list_count_and_clear_slow_queries(self, client, monkeypatch):
+        monkeypatch.setattr("backend.core.request_telemetry._SLOW_QUERY_PERSIST_DISABLED", True)
         svc_id = "test_svc_slow_queries_crud"
         prev_override = client.app.dependency_overrides.get(get_service_id)
         client.app.dependency_overrides[get_service_id] = lambda: svc_id

@@ -7,19 +7,20 @@ cd "$SCRIPT_DIR/.."
 source "$SCRIPT_DIR/lib/ratchet_common.sh"
 
 PATTERN='strptime\(|fromisoformat\(|replace\(tzinfo=(UTC|timezone\.utc)'
+# 002e76e8: _parse_rum_line moved byte-for-byte from ingest.py to rum_ingest.py;
+# transfer its one existing date-parse site, keeping their combined allowance at 3.
+# 04759853: usage and insight shaping moved owners; transfer 2 + 1 existing sites.
+# 6a474cc4: discovery.py now owns the remaining two request-ingest parse sites.
 BASELINE='
 backend/core/clickhouse.py 2
 backend/core/duckdb.py 1
 backend/core/storage/_core.py 2
-backend/core/ingest.py 3
 backend/core/ingest/discovery.py 2
-backend/core/ingest/writer.py 1
 backend/core/metadata/fos_usage.py 2
-backend/core/metadata/usage_log.py 2
 backend/core/rollups/recompute.py 1
 backend/core/rollups/security_dims.py 1
+backend/core/rum_ingest.py 1
 backend/repositories/assets.py 1
-backend/repositories/insights/repository.py 1
 backend/repositories/insights/shaping.py 1
 backend/repositories/rum.py 1
 backend/repositories/security.py 1
