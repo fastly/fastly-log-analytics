@@ -17,7 +17,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from backend.utils.date_utils import parse_iso_utc
+from backend.utils.date_utils import ensure_utc, parse_iso_utc
 
 # ── 1. ASN Label Enrichment ──────────────────────────────────────────────────
 
@@ -324,7 +324,7 @@ def _coerce_utc_datetime(value: str | datetime | None) -> datetime | None:
     if value is None:
         return None
     if isinstance(value, datetime):
-        return value.astimezone(UTC) if value.tzinfo is not None else value.replace(tzinfo=UTC)
+        return ensure_utc(value)
     return parse_iso_utc(value)
 
 

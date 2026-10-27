@@ -10,9 +10,11 @@ ALLOWLIST=(
   "backend/core/fastly/client.py"
   "backend/routers/provision.py"
   "backend/routers/services/__init__.py"
-  "backend/routers/admin/health.py"
+  # 002e76e8: _fetch_file_to_zip moved byte-for-byte from admin/health.py.
+  "backend/routers/admin/_helpers.py"
   "backend/routers/admin/high_scale.py"
-  "backend/routers/admin/compaction.py"
+  # 002e76e8: download_file moved byte-for-byte from admin/compaction.py.
+  "backend/routers/admin/downloads.py"
   "backend/routers/admin/ingest.py"
   "backend/core/storage/_core.py"
   "backend/core/metadata/state.py"

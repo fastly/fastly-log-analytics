@@ -7,6 +7,9 @@ cd "$REPO_ROOT"
 # shellcheck source=scripts/lib/ratchet_common.sh
 source "$SCRIPT_DIR/lib/ratchet_common.sh"
 
+# 002e76e8: transfer the three SSE feeder loops from admin/health.py to events.py.
+# Loop ASTs are unchanged apart from sampler hook/import-reference replacements;
+# exception handling, sleep intervals and retry behavior retain the same allowance.
 BASELINE='
 backend/config.py 2
 backend/core/_duckdb_status.py 1
@@ -18,7 +21,7 @@ backend/provision/declarative/iac_reconciler.py 1
 backend/provision/declarative/reconciler.py 1
 backend/provision/fos_setup.py 1
 backend/provision/orchestrator.py 2
-backend/routers/admin/health.py 3
+backend/routers/admin/events.py 3
 backend/routers/admin/high_scale.py 3
 backend/routers/admin/compaction.py 3
 backend/routers/control_room.py 1
