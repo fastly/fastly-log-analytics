@@ -1,19 +1,12 @@
 from __future__ import annotations  # noqa: I001
 import contextlib
-import hashlib
-import heapq
-import itertools
-import json
 import logging
-import math
 import os
 import re
 import sys as _sys
-import threading
 import time
 import uuid as _uuid
-from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass, field as _dc_field, field as dc_field
+from collections.abc import Callable, Iterable
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal
 import duckdb
@@ -23,7 +16,6 @@ from backend.core.field_registry import Group, in_group
 from backend.core.retry import retry_call
 from backend.core.rollups._common import (
     DAY_BUNDLE_FILENAME,
-    IP_SPREAD_BUNDLE_FILENAME,
     NETWORK_GEO_BUNDLE_FILENAME,
     NETWORK_HEATMAP_BUNDLE_FILENAME,
     NETWORK_QUALITY_ASN_FILENAME,
@@ -68,8 +60,6 @@ from backend.models.dashboard import (
 from backend.repositories import rollup_coverage
 from backend.repositories.rollup_coverage import (
     MISSING_HOUR_HEAL_CAP as _MISSING_HOUR_HEAL_CAP,
-    CoverageIndex,
-    cached_listdir,
     collect_day_prefer_paths,
     collect_hour_paths_with_floor,
     durable_serving_blocked,
@@ -78,482 +68,59 @@ from backend.repositories.rollup_coverage import (
     plan_hourly_read,
     plan_time_series_rollup_window,
 )
-from backend.utils.bounded_cache import BoundedTTLCache, CacheRegistry, CacheRegistry as _CacheRegistry
+from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry
 from backend.utils.date_utils import parse_day_key_strict, parse_hour_key_strict, parse_iso_utc, safe_iso  # noqa: F401 — re-export
-from backend.utils.hll import HyperLogLog
 from backend.utils.sql_validator import escape_sql_literal
-from backend.utils.telemetry import get_queries, get_tracked_calls, log_once_per
+from backend.utils.telemetry import log_once_per
 
 if TYPE_CHECKING:
-    from backend.models.common import FiltersDict
+    pass
 _logger = logging.getLogger(__name__)
-_CLIENT_TOKEN_COUNTER = itertools.count(1)
-_MEMO_COUNTER = itertools.count(1)
-_registry_lock = threading.Lock()
-_registry: dict[str, _InFlight] = {}
+_backend_mod = _sys.modules.get("backend")
+if _backend_mod is not None and hasattr(_backend_mod, "_MODULE_ALIASES"):
+    for _alias_key in (
+        "backend.repositories.utils.response_cache",
+        "backend.repositories.utils.filters",
+        "backend.repositories.top_n_rollups",
+    ):
+        _backend_mod._MODULE_ALIASES.pop(_alias_key, None)
+
+from backend.repositories.utils.filters import (  # noqa: E402, F401
+    _SAFE_COL_RE,
+    FilterBuilder,
+    FilterClause,
+    SqlFragment,
+    _get_utc_date_str,
+    _get_utc_hour_str,
+    _lookup_ngwaf_waf_req_ids,
+    build_geo_select_clause,
+    build_where_clause,
+    calc_offset,
+    filter_spec_attr,
+    normalize_filter_key,
+)
+from backend.repositories.utils.response_cache import (  # noqa: E402, F401
+    _CLIENT_TOKEN_COUNTER,
+    _MEMO_COUNTER,
+    _NEVER_CACHE,
+    ResponseMemo,
+    SingleFlightGroup,
+    _analytics_compute_group,
+    _InFlight,
+    _registry,
+    _registry_lock,
+    bucket_time_to_minute,
+    cache_get,
+    cache_put,
+    cache_result,
+    client_cache_token,
+    coalesce,
+    coalesced_cache_result,
+    digest_cache_key,
+    get_analytics_compute_group,
+    serialize_filters_for_key,
+)
 
-
-class _InFlight[T]:
-    __slots__ = ("event", "result", "error")
-
-    def __init__(self) -> None:
-        self.event = threading.Event()
-        self.result: T | None = None
-        self.error: BaseException | None = None
-
-
-def coalesce[T](key: str, build: Callable[[], T]) -> tuple[T, bool]:
-    with _registry_lock:
-        existing = _registry.get(key)
-        if existing is not None:
-            slot, is_leader = existing, False
-        else:
-            slot = _registry[key] = _InFlight()
-            is_leader = True
-    if not is_leader:
-        slot.event.wait()
-        if slot.error is not None:
-            if type(slot.error).__name__ == "InterruptException":
-                return coalesce(key, build)
-            raise slot.error
-        return slot.result, False  # type: ignore[return-value]
-    try:
-        slot.result = result = build()
-        return result, True
-    except BaseException as e:
-        slot.error = e
-        raise
-    finally:
-        with _registry_lock:
-            if _registry.get(key) is slot:
-                del _registry[key]
-        slot.event.set()
-
-
-class SingleFlightGroup:
-    def coalesce[T](self, key: str, build: Callable[[], T]) -> tuple[T, bool]:
-        return coalesce(key, build)
-
-
-_analytics_compute_group = SingleFlightGroup()
-
-
-def get_analytics_compute_group() -> SingleFlightGroup:
-    return _analytics_compute_group
-
-
-def client_cache_token(client: Any) -> int:
-    if client is None:
-        return 0
-    tok = getattr(client, "_hs_cache_token", None)
-    if tok is None:
-        tok = next(_CLIENT_TOKEN_COUNTER)
-        try:
-            object.__setattr__(client, "_hs_cache_token", tok)
-        except Exception:
-            tok = id(client)
-    return int(tok)
-
-
-_NEVER_CACHE = ("debug_queries", "debug_calls", "is_cached", "_is_cached", "response_cache", "_response_cache")
-
-
-def cache_result(
-    payload: dict,
-    *,
-    state: Literal["hit", "miss", "bypass", "unknown"],
-    ttl_seconds: float | None = None,
-    prewarmer: bool | None = None,
-    single_flight_role: Literal["leader", "follower"] | None = None,
-    wait_ms: float | None = None,
-) -> dict:
-    observation: dict[str, Any] = {"state": state}
-    if ttl_seconds is not None:
-        observation["ttl_seconds"] = float(ttl_seconds)
-    observation["prewarmer"] = prewarmer
-    if single_flight_role is not None:
-        observation["single_flight"] = single_flight_role
-    if wait_ms is not None:
-        observation["wait_ms"] = float(wait_ms)
-    result = {key: value for key, value in payload.items() if key not in {"response_cache", "_is_cached"}}
-    return {**result, "is_cached": state == "hit", "_response_cache": observation}
-
-
-def coalesced_cache_result(
-    key: str, build: Callable[[], dict], *, ttl_seconds: float, prewarmer: bool | None = None
-) -> dict:
-    started = time.perf_counter()
-    payload, leader = coalesce(key, build)
-    if not leader:
-        return cache_result(
-            payload,
-            state="unknown",
-            ttl_seconds=ttl_seconds,
-            prewarmer=prewarmer,
-            single_flight_role="follower",
-            wait_ms=(time.perf_counter() - started) * 1000,
-        )
-    state: Literal["hit", "miss"] = (
-        "hit" if payload.get("is_cached") is True or payload.get("_is_cached") is True else "miss"
-    )
-    return cache_result(payload, state=state, ttl_seconds=ttl_seconds, prewarmer=prewarmer, single_flight_role="leader")
-
-
-def serialize_filters_for_key(filters: FiltersDict | None) -> dict[str, tuple[Any, list[str]]]:
-    return {
-        k: (filter_spec_attr(v, "mode"), sorted(str(x) for x in (filter_spec_attr(v, "values") or [])))
-        for k, v in sorted((filters or {}).items())
-    }
-
-
-def digest_cache_key(payload: dict, src: dict) -> str:
-    body = json.dumps(payload, separators=(",", ":"), default=str)
-    svc = src.get("name") or src.get("service_id") or ""
-    return hashlib.sha256(f"{body}:{svc}".encode()).hexdigest()
-
-
-def bucket_time_to_minute(ts: str | None) -> str | None:
-    return ts if not ts or len(ts) < 16 else ts[:16]
-
-
-def cache_get(cache: BoundedTTLCache, key: str, *, prewarmer: bool | None = None) -> dict | None:
-    cached = cache.get(key)
-    return None if cached is None else cache_result(cached, state="hit", ttl_seconds=cache.ttl, prewarmer=prewarmer)
-
-
-def cache_put(cache: BoundedTTLCache, key: str, value: dict, *, strip: tuple[str, ...] = ()) -> None:
-    drop = set(_NEVER_CACHE) | set(strip)
-    cache[key] = {k: v for k, v in value.items() if k not in drop}
-
-
-class ResponseMemo:
-    def __init__(self, *, ttl: float = 30.0, maxsize: int = 256, prewarmer: bool | None = None) -> None:
-        self.cache: BoundedTTLCache = BoundedTTLCache(maxsize=maxsize, ttl_seconds=ttl)
-        self._telemetry_cache: BoundedTTLCache = BoundedTTLCache(maxsize=maxsize, ttl_seconds=ttl)
-        CacheRegistry.register(f"response_memo.telemetry.{next(_MEMO_COUNTER)}", self._telemetry_cache)
-        self.prewarmer = prewarmer
-
-    def get(self, key: str) -> dict | None:
-        return cache_get(self.cache, key, prewarmer=self.prewarmer)
-
-    def coalesce(self, key: str, build: Callable[[], dict]) -> dict:
-        return coalesced_cache_result(key, build, ttl_seconds=self.cache.ttl, prewarmer=self.prewarmer)
-
-    def result(self, payload: dict, *, state: Literal["miss", "bypass"]) -> dict:
-        return cache_result(
-            payload, state=state, ttl_seconds=self.cache.ttl if state == "miss" else None, prewarmer=self.prewarmer
-        )
-
-    def get_with_telemetry(self, key: str) -> dict | None:
-        cached = self.get(key)
-        if cached is None:
-            return None
-        if telem := self._telemetry_cache.get(key):
-            cached["debug_queries"] = [q.copy() if isinstance(q, dict) else q for q in telem.get("debug_queries", [])]
-            cached["debug_calls"] = [c.copy() if isinstance(c, dict) else c for c in telem.get("debug_calls", [])]
-        return cached
-
-    def put(self, key: str, value: dict, *, strip: tuple[str, ...] = ()) -> None:
-        cache_put(self.cache, key, value, strip=strip)
-        dq, dc = value.get("debug_queries"), value.get("debug_calls")
-        if dq is None and dc is None:
-            dq, dc = get_queries(), get_tracked_calls()
-        if dq or dc:
-            cached_queries = [{**q, "is_cached": True} if isinstance(q, dict) else q for q in (dq or [])]
-            self._telemetry_cache[key] = {"debug_queries": cached_queries, "debug_calls": list(dc or [])}
-        else:
-            self._telemetry_cache.pop(key, None)
-
-    def check(self, key: str, runner: QueryRunner) -> dict | None:
-        cached = self.get(key)
-        return None if cached is None else {**cached, **runner.telemetry(), "is_cached": True}
-
-    def store(self, key: str, payload: dict, runner: QueryRunner) -> dict:
-        self.put(key, payload)
-        return self.result({**payload, **runner.telemetry()}, state="miss")
-
-
-@dataclass(frozen=True, slots=True)
-class SqlFragment:
-    sql: str
-    params: dict[str, Any] = _dc_field(default_factory=dict)
-
-    def __str__(self) -> str:
-        return self.sql
-
-
-@dataclass(frozen=True, slots=True)
-class FilterClause:
-    sql: str
-    params: list[Any] = _dc_field(default_factory=list)
-
-    def as_tuple(self) -> tuple[str, list[Any]]:
-        return self.sql, list(self.params)
-
-
-class FilterBuilder:
-    def __init__(self, clauses: list[str] | None = None, params: list[Any] | None = None) -> None:
-        self.clauses: list[str] = list(clauses or [])
-        self.params: list[Any] = list(params or [])
-
-    def add(self, clause: str, *values: Any) -> FilterBuilder:
-        if clause:
-            self.clauses.append(clause)
-            self.params.extend(values)
-        return self
-
-    def build(self, default: str = "1=1") -> tuple[str, list[Any]]:
-        return (" AND ".join(self.clauses) if self.clauses else default), list(self.params)
-
-
-_SAFE_COL_RE = re.compile(r"[^\w]")
-
-
-def _lookup_ngwaf_waf_req_ids(bot_names: list[str], db_path: str | None = None) -> list[str]:
-    if not bot_names:
-        return []
-    q = f"SELECT waf_req_id FROM ngwaf_bots WHERE bot_name IN ({', '.join('?' for _ in bot_names)})"
-    if db_path and os.path.exists(db_path):
-        import sqlite3
-
-        try:
-            with contextlib.closing(sqlite3.connect(db_path, timeout=5)) as con:
-                return [r[0] for r in con.execute(q, bot_names).fetchall()]
-        except Exception as e:
-            _logger.warning("[build_where_clause] ngwaf_bots test cache lookup failed: %s", e)
-            return []
-    from backend.core.metadata import pg_connection
-
-    try:
-        with contextlib.closing(pg_connection.get_pg_readonly_connection()) as pconn:
-            rows = pconn.execute(q, bot_names).fetchall()
-    except Exception as e:
-        _logger.warning("[build_where_clause] ngwaf_bots cache lookup failed: %s", e)
-        return []
-    return [r["waf_req_id"] if isinstance(r, dict) else r[0] for r in rows]
-
-
-def filter_spec_attr(spec: Any, attr: str) -> Any:
-    return spec.get(attr) if isinstance(spec, dict) else getattr(spec, attr, None)
-
-
-def normalize_filter_key(filter_key: str) -> str:
-    col = filter_key
-    for prefix in ("xfilter_", "filter_"):
-        if col.startswith(prefix):
-            col = col[len(prefix) :]
-            break
-    return _SAFE_COL_RE.sub("", re.sub(r"_\d+$", "", col)).lower()
-
-
-def _get_utc_date_str(iso_str: str) -> str:
-    d = parse_iso_utc(iso_str)
-    return d.strftime("%Y-%m-%d") if d else str(iso_str)[:10]
-
-
-def _get_utc_hour_str(iso_str: str) -> str:
-    d = parse_iso_utc(iso_str)
-    return d.strftime("%Y-%m-%d-%H") if d else str(iso_str)[:13].replace(" ", "-").replace("T", "-")
-
-
-def build_where_clause(
-    start_time: str | None,
-    end_time: str | None,
-    filters: FiltersDict,
-    actual_cols: list[str] | None = None,
-    inline_params: bool = False,
-    partition_pruning: bool = False,
-    exclude_invalid_ips: bool = True,
-) -> tuple[list[Any], str]:
-    conditions: list[str] = []
-    params: list[Any] = []
-    if exclude_invalid_ips and actual_cols is not None and "ip" in actual_cols:
-        conditions.append("ip IS NOT NULL AND ip != ''")
-    if exclude_invalid_ips and actual_cols is not None and "url" in actual_cols:
-        conditions.append("url != '/rum-beacon' AND url NOT LIKE '/rum-beacon' || chr(63) || '%'")
-
-    def _add_param(val: Any) -> str:
-        if inline_params:
-            if isinstance(val, str):
-                cleaned = "".join(ch for ch in val if ch == "\t" or ch == "\n" or ord(ch) >= 0x20)
-                return f"'{cleaned.replace('`', '').replace(chr(39), chr(39) + chr(39))}'"
-            return str(val)
-        params.append(val)
-        return "?"
-
-    for bound, op in ((start_time, ">="), (end_time, "<=")):
-        if bound:
-            conditions.append(f"timestamp {op} CAST({_add_param(bound)} AS TIMESTAMPTZ)")
-            if partition_pruning:
-                d_str, h_str = _get_utc_date_str(bound), _get_utc_hour_str(bound)
-                if len(d_str) == 10 and (actual_cols is None or "dt" in actual_cols):
-                    conditions.append(f"dt {op} {_add_param(d_str)}")
-                if len(h_str) == 13 and (actual_cols is None or "timestamp_hour" in actual_cols):
-                    conditions.append(f"timestamp_hour {op} {_add_param(h_str)}")
-    for filter_key, spec in filters.items():
-        col = normalize_filter_key(filter_key)
-        clean_col = _SAFE_COL_RE.sub("", col)  # strip anything non-word
-        is_signals_individual = col == "waf_sig_ind"
-        is_bot_name, is_ngwaf_bot_name, is_tunnel_requests = (
-            col == "_bot_name",
-            col == "_ngwaf_bot_name",
-            col == "_tunnel_requests",
-        )
-        sql_col = "waf_sig" if is_signals_individual else clean_col
-        mode = filter_spec_attr(spec, "mode") or "include"
-        values = filter_spec_attr(spec, "values") or []
-        if (
-            actual_cols is not None
-            and sql_col not in actual_cols
-            and not (is_bot_name or is_ngwaf_bot_name or is_tunnel_requests or is_signals_individual)
-        ):
-            if sql_col in ("browser", "os", "device") or mode != "exclude":
-                conditions.append("FALSE")
-            continue
-        values = [v for v in values if not (isinstance(v, str) and v.strip() == "")]
-        if not values:
-            continue
-        non_none = [v for v in values if v is not None]
-        none_vals = [v for v in values if v is None]
-        parts: list[str] = []
-        not_prefix = "NOT " if mode == "exclude" else ""
-        if is_bot_name:
-            try:
-                from backend.utils.bot_sources import get_bot_by_id
-            except ImportError:
-                continue
-            for bot_id in non_none:
-                bot = get_bot_by_id(str(bot_id))
-                if bot is None:
-                    continue
-                if bot.get("type") == "ip" or "cidrs" in bot.get("verification", {}):
-                    if actual_cols is not None and "ip" not in actual_cols:
-                        continue
-                    cidrs = bot.get("verification", {}).get("cidrs", [])
-                    if not cidrs:
-                        continue
-                    cidr_conditions = []
-                    import ipaddress
-
-                    for c in cidrs:
-                        try:
-                            net_obj = ipaddress.ip_network(c, strict=False)
-                            if isinstance(net_obj, ipaddress.IPv4Network):
-                                lower_int, upper_int = int(net_obj.network_address), int(net_obj.broadcast_address)
-                                ip_int_sql = (
-                                    "(CAST(string_split(ip, '.')[1] AS BIGINT) * 16777216 + "
-                                    "CAST(string_split(ip, '.')[2] AS BIGINT) * 65536 + "
-                                    "CAST(string_split(ip, '.')[3] AS BIGINT) * 256 + "
-                                    "CAST(string_split(ip, '.')[4] AS BIGINT))"
-                                )
-                                cidr_conditions.append(
-                                    f"(NOT (ip LIKE '%:%') AND len(string_split(ip, '.')) = 4 AND {ip_int_sql} >= {lower_int} AND {ip_int_sql} <= {upper_int})"
-                                )
-                        except ValueError:
-                            continue
-                    if cidr_conditions:
-                        parts.append(f"{not_prefix}({' OR '.join(cidr_conditions)})")
-                else:
-                    if actual_cols is not None and "ua" not in actual_cols:
-                        _logger.warning("[build_where_clause] _bot_name filter skipped: 'ua' not in schema")
-                        continue
-                    raw_patterns = bot.get("pattern", {}).get("accepted", [])
-                    if not raw_patterns:
-                        continue
-                    safe_regex = escape_sql_literal("|".join(raw_patterns))
-                    parts.append(f"{not_prefix}regexp_matches(ua, '(?i){safe_regex}')")
-        elif is_ngwaf_bot_name:
-            if actual_cols is not None and "waf_req_id" not in actual_cols:
-                _logger.warning("[build_where_clause] _ngwaf_bot_name filter skipped: 'waf_req_id' not in schema")
-                continue
-            bot_names = [str(v) for v in non_none if v]
-            if bot_names:
-                from backend import config as svcconfig
-
-                waf_req_ids = _lookup_ngwaf_waf_req_ids(bot_names, db_path=svcconfig.ngwaf_sqlite_cache_override())
-                if waf_req_ids:
-                    parts.append(f"waf_req_id {not_prefix}IN ({', '.join(_add_param(v) for v in waf_req_ids)})")
-                elif mode != "exclude":
-                    parts.append("FALSE")
-        elif is_tunnel_requests:
-            if actual_cols is not None and not all(
-                c in actual_cols for c in ["pop", "lat", "lon", "rtt_min", "tcp_rtt"]
-            ):
-                _logger.warning("[build_where_clause] _tunnel_requests filter skipped: required columns not in schema")
-                parts.append("TRUE" if mode == "exclude" else "FALSE")
-            else:
-                from backend.utils.pop_utils import build_pop_haversine_case_sql
-
-                pop_distance_case = build_pop_haversine_case_sql()
-                cond = f"""
-                (
-                    ({pop_distance_case} > ((rtt_min / 1000.0) * 100.0 + 150.0))
-                    OR
-                    (tcp_rtt > 0 AND (CAST(rtt_min AS DOUBLE) / tcp_rtt) < 0.1)
-                )
-                """
-                parts.append(f"NOT ({cond})" if mode == "exclude" else cond)
-        elif is_signals_individual:
-            for v in non_none:
-                parts.append(f"{not_prefix}list_contains(string_split({sql_col}, ','), {_add_param(str(v).strip())})")
-        else:
-            if non_none:
-                exact_vals = [v for v in non_none if not (isinstance(v, str) and "*" in v)]
-                wildcard_vals = [v for v in non_none if isinstance(v, str) and "*" in v]
-                sub_parts = []
-                from backend.core import field_registry
-
-                field = field_registry.try_get(clean_col)
-                is_varchar = field is not None and field.duck_type == field_registry.DuckType.VARCHAR
-                col_varchar = clean_col if is_varchar else f"CAST({clean_col} AS VARCHAR)"
-                if exact_vals:
-                    placeholders = ", ".join(_add_param(str(v)) for v in exact_vals)
-                    lhs = (
-                        f"CAST(CAST(ROUND({clean_col}) AS INTEGER) AS VARCHAR)"
-                        if not is_varchar and clean_col in ("age", "ttl")
-                        else col_varchar
-                    )
-                    sub_parts.append(f"{lhs} {not_prefix}IN ({placeholders})")
-                for w in wildcard_vals:
-                    w_like = w.replace("*", "%")
-                    if inline_params:
-                        w_like = "".join(ch for ch in w_like if 0x20 <= ord(ch) < 0x7F)
-                    sub_parts.append(f"{col_varchar} {not_prefix}ILIKE {_add_param(w_like)}")
-                if sub_parts:
-                    parts.append(f"({(' AND ' if mode == 'exclude' else ' OR ').join(sub_parts)})")
-            if none_vals:
-                parts.append(f"{clean_col} {'IS NOT NULL' if mode == 'exclude' else 'IS NULL'}")
-        if parts:
-            joiner = " AND " if (is_signals_individual or mode == "exclude") else " OR "
-            conditions.append(f"({joiner.join(parts)})")
-    return params, (" AND ".join(conditions) if conditions else "1=1")
-
-
-def build_geo_select_clause(actual_cols: list[str]) -> tuple[str, str, str, str]:
-    loc_cols, label_expr, country_sel, region_sel, sel_cols = '"city"', '"city"', "NULL", "NULL", ['"city"']
-    if actual_cols:
-        if "region" in actual_cols:
-            sel_cols.append('"region"')
-            region_sel = '"region"'
-        if "country" in actual_cols:
-            sel_cols.append('"country"')
-            country_sel = '"country"'
-    if len(sel_cols) > 1:
-        loc_cols = ", ".join(sel_cols)
-        label_expr = f"concat({", ', ', ".join(sel_cols)})"
-    return loc_cols, label_expr, country_sel, region_sel
-
-
-def calc_offset(page: int, limit: int) -> int:
-    return (max(1, page) - 1) * limit
-
-
-_sys.modules.setdefault("backend.repositories.utils.response_cache", _sys.modules[__name__])
-_sys.modules["backend.repositories.utils.filters"] = _sys.modules[__name__]
-_repo_utils_pkg = _sys.modules.get("backend.repositories.utils")
-if _repo_utils_pkg is not None:
-    _repo_utils_pkg.response_cache = _sys.modules[__name__]  # type: ignore[attr-defined]
-    _repo_utils_pkg.filters = _sys.modules[__name__]  # type: ignore[attr-defined]
 _EMPTY_ROLLUP_WARN_TS: dict[tuple[str, str], float] = {}
 _EMPTY_ROLLUP_WARN_INTERVAL_S = 300.0
 _MISSING_HOUR_HEAL_WARN_TS: dict[str, float] = {}
@@ -3388,514 +2955,32 @@ _CacheRegistry.register("repositories._base._schema_cols_cache", _schema_cols_ca
 _CacheRegistry.register("repositories._base._EMPTY_ROLLUP_WARN_TS", _EMPTY_ROLLUP_WARN_TS)
 _CacheRegistry.register("repositories._base._MISSING_HOUR_HEAL_WARN_TS", _MISSING_HOUR_HEAL_WARN_TS)
 
-# ── Folded from backend/repositories/top_n_rollups.py ────────────────────────
-TopNRow = tuple[str, Any, int]
-_EDGE_PREFIXES = ("cmcd_", "edge_", "rum_")
-
-
-def live_topn_fields(
-    safe_fields: Iterable[str], skip_fields: frozenset[str], log_fields: Mapping[str, Any] | None
-) -> list[str]:
-    """Fields that get a live (non-rolled) top-up, in ``safe_fields`` order."""
-    custom_fields = {
-        cf["name"]
-        for cf in (log_fields or {}).get("custom_fields", [])
-        if cf.get("enabled", True) and cf.get("show_in_dashboard", True)
-    }
-    return [
-        f
-        for f in safe_fields
-        if f not in skip_fields
-        and not ((f.startswith(_EDGE_PREFIXES) or f == "fastly_req_id") and f not in custom_fields)
-    ]
-
-
-def fold_rows(*row_sets: Iterable[TopNRow]) -> dict[str, dict[Any, int]]:
-    """Sum ``(field, value, count)`` rows from every set into one bucket per field."""
-    by_field: dict[str, dict[Any, int]] = {}
-    for rows in row_sets:
-        for fld, value, count in rows:
-            bucket = by_field.setdefault(fld, {})
-            bucket[value] = bucket.get(value, 0) + count
-    return by_field
-
-
-def truncate_top_n(
-    by_field: Mapping[str, Mapping[Any, int]],
-    fields: Iterable[str],
-    limit: int,
-    per_field_limits: Mapping[str, int] | None,
-) -> tuple[list[TopNRow], list[str]]:
-    """Top rows per requested field, plus the requested fields with no rows."""
-    pfl = per_field_limits or {}
-    top_results: list[TopNRow] = []
-    empty: list[str] = []
-    for field in fields:
-        bucket = by_field.get(field)
-        if not bucket:
-            empty.append(field)
-            continue
-        field_limit = pfl.get(field, limit)
-        items = bucket.items()
-        top_items = (
-            heapq.nlargest(field_limit, items, key=lambda x: x[1])
-            if field_limit < len(bucket)
-            else sorted(items, key=lambda x: x[1], reverse=True)
-        )
-        top_results.extend((field, val, count) for val, count in top_items)
-    return top_results, empty
-
-
-@dataclass
-class SchemaSeeds:
-    """Lazily resolved column list + column types, shared by the live and heal steps."""
-
-    cols_seed: list[str] | None = None
-    types_seed: dict[str, str] | None = None
-    cols: list[str] = dc_field(default_factory=list)
-    types: dict[str, str] = dc_field(default_factory=dict)
-
-    def ensure(self, get_cols: Callable[[], list[str]], get_types: Callable[[], dict[str, str]]) -> None:
-        """Fill ``cols`` then ``types`` if still unset (columns first: a failing         column lookup must not trigger the types lookup)."""
-        if not self.cols:
-            self.cols = self.cols_seed if self.cols_seed is not None else get_cols()
-        if not self.types:
-            self.types = self.types_seed if self.types_seed is not None else get_types()
-
-
-@dataclass
-class TopNPaths:
-    """Parquet files one top-N read hands to DuckDB, one list per source shape."""
-
-    day_paths: list[str] = dc_field(default_factory=list)
-    hour_paths: list[str] = dc_field(default_factory=list)
-    bundled_hour_paths: list[str] = dc_field(default_factory=list)
-    bundled_day_paths: list[str] = dc_field(default_factory=list)
-
-    def __bool__(self) -> bool:
-        return bool(self.day_paths or self.hour_paths or self.bundled_hour_paths or self.bundled_day_paths)
-
-
-def qualify_limit_expr(safe_fields: Iterable[str], limit: int, per_field_limits: Mapping[str, int] | None) -> str:
-    """SQL expression for the per-field ``QUALIFY`` cutoff."""
-    wanted = set(safe_fields)
-    pfl = {f: v for f, v in (per_field_limits or {}).items() if f in wanted}
-    if not pfl:
-        return str(int(limit))
-    whens = " ".join(f"WHEN '{f.replace(chr(39), chr(39) * 2)}' THEN {int(v)}" for f, v in pfl.items())
-    return f"CASE field {whens} ELSE {int(limit)} END"
-
-
-def build_rolled_sql(
-    paths: TopNPaths, safe_fields: list[str], limit: int, per_field_limits: Mapping[str, int] | None
-) -> str | None:
-    """The rolled-parquet top-N query, or ``None`` when there is nothing to read."""
-    if not paths:
-        return None
-    field_in_list = ", ".join("'" + escape_sql_literal(f) + "'" for f in safe_fields)
-    select = "SELECT field, value, CAST(count AS BIGINT) AS count "
-    branches: list[str] = [
-        f"{select}FROM read_parquet([{quote_path_list(t)}], hive_partitioning=1)"
-        for t in (paths.day_paths, paths.hour_paths)
-        if t
-    ] + [
-        f"{select}FROM read_parquet([{quote_path_list(b)}], hive_partitioning=0) WHERE field IN ({field_in_list})"
-        for b in (paths.bundled_hour_paths, paths.bundled_day_paths)
-        if b
-    ]
-    return (
-        "SELECT field, value, SUM(count) AS c FROM ("
-        + " UNION ALL ".join(branches)
-        + f") GROUP BY field, value QUALIFY ROW_NUMBER() OVER (PARTITION BY field ORDER BY c DESC) <= {qualify_limit_expr(safe_fields, limit, per_field_limits)}"
-    )
-
-
-@dataclass(frozen=True)
-class TopNWindow:
-    """One request's window in the hour/day keys the rollup tree is named by."""
-
-    st_dt: datetime | None
-    et_dt: datetime | None
-    active_dt: datetime
-    active_dt_end: datetime
-    active_str: str
-    st_floor: str | None
-    et_floor: str | None
-
-    @classmethod
-    def build(cls, st_dt: datetime | None, et_dt: datetime | None, now: datetime) -> TopNWindow:
-        active_dt = now.replace(minute=0, second=0, microsecond=0)
-        return cls(
-            st_dt,
-            et_dt,
-            active_dt,
-            active_dt + timedelta(hours=1),
-            active_dt.strftime("%Y-%m-%d-%H"),
-            st_dt.strftime("%Y-%m-%d-%H") if st_dt else None,
-            (et_dt - timedelta(microseconds=1)).strftime("%Y-%m-%d-%H") if et_dt else None,
-        )
-
-    def day_fully_in_window(self, day_str: str) -> bool:
-        """Whether a per-day file's whole 24 h lies inside the request window."""
-        try:
-            day_start = parse_day_key_strict(day_str)
-        except ValueError:
-            return False
-        if self.st_dt and self.st_dt > day_start:
-            return False
-        return not (self.et_dt and self.et_dt < day_start + timedelta(days=1))
-
-    def day_in_range(self, day: str) -> bool:
-        """Day key is not before the first / after the last window day."""
-        if self.st_floor and day < self.st_floor[:10]:
-            return False
-        return not (self.et_floor and day > self.et_floor[:10])
-
-    def hour_in_range(self, hour: str) -> bool:
-        """Closed hour key inside ``[st_floor, et_floor]`` (the active hour is excluded)."""
-        if (self.st_floor and hour < self.st_floor) or (self.et_floor and hour > self.et_floor):
-            return False
-        return hour < self.active_str
-
-
-@dataclass
-class TopNPlan:
-    """What the filesystem walk found for one window."""
-
-    paths: TopNPaths
-    bundled_hours: set[str]
-    bundled_days: set[str]
-    days_with_day_files_any: set[str]
-    per_field_hours_seen: set[str]
-    day_root: str
-    bundled_day_root: str
-
-
-def _has_real_parquet(directory: str) -> bool:
-    return any(f.endswith(".parquet") and not f.startswith(".tmp_") for f in cached_listdir(directory))
-
-
-def _day_covered_by_any_field(
-    day_root: str, safe_fields: list[str], win: TopNWindow, days_with_day_files_any: set[str]
-) -> set[str]:
-    """Closed, fully-in-window days where at least one field has a usable day file."""
-    covered: set[str] = set()
-    active_day = win.active_str[:10]
-    for field in safe_fields:
-        field_day_dir = os.path.join(day_root, f"field={field}")
-        if not os.path.isdir(field_day_dir):
-            continue
-        for day_entry in cached_listdir(field_day_dir):
-            if not day_entry.startswith("day="):
-                continue
-            day = day_entry[len("day=") :]
-            if len(day) != 10:
-                continue
-            days_with_day_files_any.add(day)
-            if day in covered or day >= active_day or not win.day_in_range(day) or not win.day_fully_in_window(day):
-                continue
-            if _has_real_parquet(os.path.join(field_day_dir, day_entry)):
-                covered.add(day)
-    return covered
-
-
-def _bundled_day_files(
-    bundled_day_root: str, win: TopNWindow, days_with_day_files_any: set[str]
-) -> tuple[list[str], set[str]]:
-    """Per-day bundles (one parquet holding every field) usable for this window."""
-    paths: list[str] = []
-    days: set[str] = set()
-    if not os.path.isdir(bundled_day_root):
-        return paths, days
-    active_day = win.active_str[:10]
-    for entry in cached_listdir(bundled_day_root):
-        b_day, bundle_path = None, None
-        if entry.startswith("day="):
-            cand_day = entry[len("day=") :]
-            if len(cand_day) == 10:
-                cand1 = os.path.join(bundled_day_root, entry, "all_fields.parquet")
-                cand2 = os.path.join(bundled_day_root, entry, f"day_bundle_{cand_day}.parquet")
-                if os.path.isfile(cand1):
-                    b_day, bundle_path = cand_day, cand1
-                elif os.path.isfile(cand2):
-                    b_day, bundle_path = cand_day, cand2
-        elif entry.startswith("day_bundle_") and entry.endswith(".parquet"):
-            cand_day = entry[len("day_bundle_") : -len(".parquet")]
-            if len(cand_day) == 10:
-                cand = os.path.join(bundled_day_root, entry)
-                if os.path.isfile(cand):
-                    b_day, bundle_path = cand_day, cand
-        if not b_day or not bundle_path:
-            continue
-        days_with_day_files_any.add(b_day)
-        if b_day >= active_day or not win.day_in_range(b_day) or not win.day_fully_in_window(b_day) or b_day in days:
-            continue
-        paths.append(bundle_path)
-        days.add(b_day)
-    return paths, days
-
-
-def _bundled_hour_files(
-    bundled_hour_root: str, win: TopNWindow, bundled_days: set[str], day_covered_by_any_field: set[str]
-) -> tuple[list[str], set[str]]:
-    """Per-hour bundles for closed in-window hours not already served by a day file."""
-    paths: list[str] = []
-    hours: set[str] = set()
-    if not os.path.isdir(bundled_hour_root):
-        return paths, hours
-    for hour_entry in cached_listdir(bundled_hour_root):
-        if not hour_entry.startswith("hour="):
-            continue
-        hour = hour_entry[len("hour=") :]
-        if not win.hour_in_range(hour) or hour[:10] in bundled_days or hour[:10] in day_covered_by_any_field:
-            continue
-        bundle_path = os.path.join(bundled_hour_root, hour_entry, "all_fields.parquet")
-        if os.path.isfile(bundle_path):
-            paths.append(bundle_path)
-            hours.add(hour)
-    return paths, hours
-
-
-def _per_field_files(
-    safe_fields: list[str],
-    day_root: str,
-    hour_root: str,
-    win: TopNWindow,
-    bundled_days: set[str],
-    bundled_hours: set[str],
-    out: TopNPaths,
-) -> set[str]:
-    """Per-field day files, then per-field hour files for what they don't cover."""
-    active_day = win.active_str[:10]
-    active_str, st_floor, et_floor = win.active_str, win.st_floor, win.et_floor
-    hours_seen: set[str] = set()
-    for field in safe_fields:
-        field_hour_dir, field_day_dir = (
-            os.path.join(hour_root, f"field={field}"),
-            os.path.join(day_root, f"field={field}"),
-        )
-        if not os.path.isdir(field_hour_dir):
-            continue
-        covered_days: set[str] = set(bundled_days)
-        if os.path.isdir(field_day_dir):
-            for day_entry in cached_listdir(field_day_dir):
-                if not day_entry.startswith("day="):
-                    continue
-                day = day_entry[len("day=") :]
-                if (
-                    len(day) != 10
-                    or day in bundled_days
-                    or day >= active_day
-                    or not win.day_in_range(day)
-                    or not win.day_fully_in_window(day)
-                ):
-                    continue
-                day_dir = os.path.join(field_day_dir, day_entry)
-                for fname in cached_listdir(day_dir):
-                    if fname.endswith(".parquet") and not fname.startswith(".tmp_"):
-                        out.day_paths.append(os.path.join(day_dir, fname))
-                        covered_days.add(day)
-        for hour_entry in cached_listdir(field_hour_dir):
-            if not hour_entry.startswith("hour="):
-                continue
-            hour = hour_entry[len("hour=") :]
-            if (st_floor and hour < st_floor) or (et_floor and hour > et_floor) or hour >= active_str:
-                continue
-            if hour[:10] in covered_days or hour in bundled_hours:
-                continue
-            hour_dir = os.path.join(field_hour_dir, hour_entry)
-            for fname in cached_listdir(hour_dir):
-                if fname.endswith(".parquet"):
-                    out.hour_paths.append(os.path.join(hour_dir, fname))
-                    hours_seen.add(hour)
-    return hours_seen
-
-
-def _day_has_real_rollup(plan: TopNPlan, safe_fields: list[str], day: str) -> bool:
-    """Whether ``day`` really was day-compacted (a bundle, or a field day dir holding a parquet)."""
-    if os.path.isfile(os.path.join(plan.bundled_day_root, f"day={day}", "all_fields.parquet")):
-        return True
-    return any(
-        os.path.isdir(d := os.path.join(plan.day_root, f"field={field}", f"day={day}")) and _has_real_parquet(d)
-        for field in safe_fields
-    )
-
-
-def find_unrolled_hours(
-    plan: TopNPlan,
-    win: TopNWindow,
-    safe_fields: list[str],
-    heal_cap: int,
-    *,
-    observation: TopNRollupCoverage | None = None,
-) -> list[str]:
-    """Closed in-window hours with no rollup coverage, which the caller live-queries."""
-    floor = (
-        max(win.active_dt - timedelta(hours=heal_cap), win.st_dt)
-        if win.st_dt
-        else win.active_dt - timedelta(hours=heal_cap)
-    )
-    candidates = CoverageIndex.build(floor, win.et_dt or win.active_dt, now=win.active_dt).closed_hours
-    day_compacted: dict[str, bool] = {}
-    missing: list[str] = []
-    compacted_skips = 0
-    if observation is not None:
-        observation.heal_horizon_hours, observation.heal_candidates = heal_cap, len(candidates)
-        if observation.closed_hours is not None:
-            observation.outside_heal_horizon_hours = max(0, observation.closed_hours - len(candidates))
-    for hour in candidates:
-        if hour in plan.bundled_hours or hour in plan.per_field_hours_seen:
-            continue
-        day = hour[:10]
-        if day in plan.days_with_day_files_any:
-            if day not in day_compacted:
-                day_compacted[day] = _day_has_real_rollup(plan, safe_fields, day)
-            if day_compacted[day]:
-                compacted_skips += 1
-                continue
-        missing.append(hour)
-    if observation is not None:
-        observation.heal_missing_hours, observation.compacted_hours_skipped = len(missing), compacted_skips
-    return missing
-
-
-def plan_top_n_paths(
-    cache_dir: str, safe_fields: list[str], win: TopNWindow, *, observation: TopNRollupCoverage | None = None
-) -> TopNPlan:
-    """Enumerate the exact parquet files a top-N read needs for ``win``."""
-    rollups = os.path.join(cache_dir, "rollups")
-    day_root, hour_root, bundled_day_root = (
-        os.path.join(rollups, "day"),
-        os.path.join(rollups, "hour"),
-        os.path.join(rollups, "day_bundled"),
-    )
-    days_with_day_files_any: set[str] = set()
-    covered_by_any_field = _day_covered_by_any_field(day_root, safe_fields, win, days_with_day_files_any)
-    bundled_day_paths, bundled_days = _bundled_day_files(bundled_day_root, win, days_with_day_files_any)
-    bundled_hour_paths, bundled_hours = _bundled_hour_files(
-        os.path.join(rollups, "hour_bundled"), win, bundled_days, covered_by_any_field
-    )
-    paths = TopNPaths(bundled_hour_paths=bundled_hour_paths, bundled_day_paths=bundled_day_paths)
-    hours_seen = _per_field_files(safe_fields, day_root, hour_root, win, bundled_days, bundled_hours, paths)
-    if observation is not None:
-        observation.active_hour_start = win.active_dt.isoformat()
-        observation.bundled_day_files, observation.bundled_hour_files = (
-            len(paths.bundled_day_paths),
-            len(paths.bundled_hour_paths),
-        )
-        observation.per_field_day_files, observation.per_field_hour_files = len(paths.day_paths), len(paths.hour_paths)
-        selected_days = bundled_days | {
-            os.path.basename(os.path.dirname(path)).removeprefix("day=") for path in paths.day_paths
-        }
-        observation.any_field_covered_hours = len(selected_days) * 24 + len(
-            {hour for hour in bundled_hours | hours_seen if hour[:10] not in selected_days}
-        )
-        if win.st_dt is not None and win.et_dt is not None:
-            start = win.st_dt.replace(minute=0, second=0, microsecond=0)
-            observation.closed_hours = max(0, math.ceil((min(win.et_dt, win.active_dt) - start).total_seconds() / 3600))
-    return TopNPlan(paths, bundled_hours, bundled_days, days_with_day_files_any, hours_seen, day_root, bundled_day_root)
-
-
-@dataclass
-class IpSpreadPlan:
-    """Files covering one window, in the two layouts the writer produces."""
-
-    bundled_paths: list[str] = dc_field(default_factory=list)
-    bundled_hours: set[str] = dc_field(default_factory=set)
-    per_field_paths: list[str] = dc_field(default_factory=list)
-    per_field_hours_by_field: dict[str, set[str]] = dc_field(default_factory=dict)
-
-    def __bool__(self) -> bool:
-        return bool(self.bundled_paths or self.per_field_paths)
-
-
-def plan_ip_spread_paths(
-    bundled_hour_root: str, per_field_root: str, safe_fields: list[str], win: TopNWindow
-) -> IpSpreadPlan | None:
-    """Plan an ip-spread read of ``win``, or ``None`` if neither tree exists yet."""
-    if not os.path.isdir(per_field_root) and not os.path.isdir(bundled_hour_root):
-        return None
-    plan = IpSpreadPlan(per_field_hours_by_field={f: set() for f in safe_fields})
-    if os.path.isdir(bundled_hour_root):
-        with contextlib.suppress(OSError):
-            for entry in os.listdir(bundled_hour_root):
-                if entry.startswith("hour=") and win.hour_in_range(hour := entry[len("hour=") :]):
-                    bundle_path = os.path.join(bundled_hour_root, entry, IP_SPREAD_BUNDLE_FILENAME)
-                    if os.path.isfile(bundle_path):
-                        plan.bundled_paths.append(bundle_path)
-                        plan.bundled_hours.add(hour)
-    if os.path.isdir(per_field_root):
-        wanted = set(safe_fields)
-        with contextlib.suppress(OSError):
-            for field_entry in os.listdir(per_field_root):
-                if not field_entry.startswith("field=") or (fld := field_entry[len("field=") :]) not in wanted:
-                    continue
-                field_dir = os.path.join(per_field_root, field_entry)
-                with contextlib.suppress(OSError):
-                    for hour_entry in os.listdir(field_dir):
-                        if not hour_entry.startswith("hour="):
-                            continue
-                        hour = hour_entry[len("hour=") :]
-                        if not win.hour_in_range(hour) or hour in plan.bundled_hours:
-                            continue
-                        hour_dir = os.path.join(field_dir, hour_entry)
-                        for fname in os.listdir(hour_dir):
-                            if fname.endswith(".parquet") and not fname.startswith(".tmp_"):
-                                plan.per_field_paths.append(os.path.join(hour_dir, fname))
-                                plan.per_field_hours_by_field[fld].add(hour)
-    return plan
-
-
-def build_ip_spread_sql(plan: IpSpreadPlan, safe_fields: list[str]) -> str:
-    """UNION ALL of at most two SELECT branches, filtered to the requested fields."""
-    field_filter = "(" + ", ".join("'" + escape_sql_literal(f) + "'" for f in safe_fields) + ")"
-    select = "SELECT field, value, ip_sketch, sample_capped "
-    branches: list[str] = [
-        f"{select}FROM read_parquet([{quote_path_list(paths)}], hive_partitioning={hp}) WHERE field IN {field_filter}"
-        for paths, hp in ((plan.bundled_paths, 0), (plan.per_field_paths, 1))
-        if paths
-    ]
-    return " UNION ALL ".join(f"({b})" for b in branches)
-
-
-def fold_sketches(
-    rows: Iterable[tuple[str, str, object, object]],
-) -> tuple[dict[tuple[str, str], HyperLogLog], dict[tuple[str, str], bool]]:
-    """Merge the per-hour sketches by ``(field, value)``."""
-    merged: dict[tuple[str, str], HyperLogLog] = {}
-    any_capped: dict[tuple[str, str], bool] = {}
-    for fld, value, sketch_bytes, capped in rows:
-        if not isinstance(sketch_bytes, (bytes, bytearray)) or not sketch_bytes:
-            continue
-        try:
-            hll = HyperLogLog.from_bytes(sketch_bytes)
-        except ValueError:
-            continue
-        key = (fld, value)
-        if key not in merged:
-            merged[key] = HyperLogLog(precision=hll.precision)
-            any_capped[key] = bool(capped)
-        else:
-            any_capped[key] = any_capped[key] or bool(capped)
-        with contextlib.suppress(ValueError):
-            merged[key].merge(hll)
-    return merged, any_capped
-
-
-def spread_meta(safe_fields: list[str], plan: IpSpreadPlan, any_capped: dict[tuple[str, str], bool]) -> dict[str, dict]:
-    """Per-field coverage hints so callers need not re-walk the filesystem."""
-    capped_by_field: dict[str, int] = {f: 0 for f in safe_fields}
-    for (fld, _value), capped in any_capped.items():
-        if capped:
-            capped_by_field[fld] = capped_by_field.get(fld, 0) + 1
-    return {
-        f: {
-            "coverage_hours": len(plan.bundled_hours | plan.per_field_hours_by_field.get(f, set())),
-            "capped_values": capped_by_field.get(f, 0),
-        }
-        for f in safe_fields
-    }
-
+from backend.repositories.top_n_rollups import (  # noqa: E402, F401
+    _EDGE_PREFIXES,
+    IpSpreadPlan,
+    SchemaSeeds,
+    TopNPaths,
+    TopNPlan,
+    TopNRow,
+    TopNWindow,
+    _bundled_day_files,
+    _bundled_hour_files,
+    _day_covered_by_any_field,
+    _day_has_real_rollup,
+    _has_real_parquet,
+    _per_field_files,
+    build_ip_spread_sql,
+    build_rolled_sql,
+    find_unrolled_hours,
+    fold_rows,
+    fold_sketches,
+    live_topn_fields,
+    plan_ip_spread_paths,
+    plan_top_n_paths,
+    qualify_limit_expr,
+    spread_meta,
+    truncate_top_n,
+)
 
 _SchemaSeeds = SchemaSeeds
 _TopNWindow = TopNWindow
@@ -3909,5 +2994,4 @@ _plan_ip_spread_paths = plan_ip_spread_paths
 _plan_top_n_paths = plan_top_n_paths
 _spread_meta = spread_meta
 _truncate_top_n = truncate_top_n
-_sys.modules["backend.repositories.top_n_rollups"] = _sys.modules[__name__]
-_sys.modules["backend.repositories.ip_spread_rollups"] = _sys.modules[__name__]
+_sys.modules["backend.repositories.ip_spread_rollups"] = _sys.modules["backend.repositories.top_n_rollups"]

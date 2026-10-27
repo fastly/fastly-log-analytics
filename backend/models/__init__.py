@@ -35,7 +35,6 @@ if isinstance(_aliases, dict):
         {
             "backend.routers.admin.downloads": "backend.routers.admin.compaction",
             "backend.routers.admin_queries": "backend.routers.admin.health",
-            "backend.routers.performance": "backend.routers.dashboard",
             "backend.models.network": "backend.models.analytics",
             "backend.models.performance": "backend.models.analytics",
             "backend.models.rum": "backend.models.analytics",
@@ -46,7 +45,6 @@ if isinstance(_aliases, dict):
             "backend.models.service": "backend.models.common",
             "backend.provision.utils": "backend.provision.cli",
             "backend.provision.declarative.iac_reconciler": "backend.provision.declarative.reconciler",
-            "backend.provision.cmcd_fields": "backend.provision.orchestrator",
             "backend.core.fastly.rum_provisioning": "backend.core.fastly.client",
             "backend.core.fastly.utils": "backend.core.fastly.client",
             "backend.core.fastly.api": "backend.core.fastly.client",

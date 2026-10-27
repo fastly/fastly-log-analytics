@@ -26,7 +26,6 @@ import pyarrow.parquet as pq
 import pytest
 import yarl
 from aiohttp import web
-from backend.utils.hll import DEFAULT_PRECISION, SERIALIZATION_VERSION, HyperLogLog, _alpha
 from backend.utils.telemetry_response_middleware import TelemetryResponseBodyMiddleware, _reconstruct
 from botocore import UNSIGNED
 from botocore.config import Config
@@ -47,6 +46,7 @@ from backend.models.common import BaseResponse
 from backend.utils import sqlite_profiler, telemetry_proxy
 from backend.utils import telemetry as _t
 from backend.utils import telemetry as tlm
+from backend.utils.hll import DEFAULT_PRECISION, SERIALIZATION_VERSION, HyperLogLog, _alpha
 from backend.utils.telemetry import (
     _CALLS,
     _LATEST_PROCESS_CONTEXT_LOCK,
@@ -2202,7 +2202,7 @@ def test_configure_fos_concurrent_no_write_write_conflict(proxy_server, tmp_path
         except Exception as e:
             errors.append(e)
 
-    with ThreadPoolExecutor(max_workers=16) as ex:
+    with duckdb.connect(db_path) as _keep_attached, ThreadPoolExecutor(max_workers=16) as ex:
         list(ex.map(_worker, range(32)))
     assert not errors
 

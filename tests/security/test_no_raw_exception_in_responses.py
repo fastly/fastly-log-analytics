@@ -35,8 +35,8 @@ _EXC_PARAMS = {"e", "exc", "err", "error", "exception"}
 PARSE = "validation: parse_period ValueError, authored text, admin-only provisioning"
 SHARE = "validation: share_db authored ValueError/typed errors, admin-only share management"
 ALLOWED: dict[tuple[str, str], str] = {
-    ("backend/routers/services/__init__.py", "provision_execute"): PARSE,
-    ("backend/routers/services/__init__.py", "provision_ingest"): PARSE,
+    ("backend/routers/provision.py", "provision_execute"): PARSE,
+    ("backend/routers/provision.py", "provision_ingest"): PARSE,
     (
         "backend/routers/session_scoring.py",
         "scoring_labels_create",
@@ -873,12 +873,12 @@ def test_admin_paths_blocked_for_analyst(probe_session, path):
 
 # ── Merged from tests/security/test_adversarial_ast_pii_redaction.py ──
 
-from backend.repositories.query import execute_query
 from backend.utils.remote_access import RemoteAccessMiddleware
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from backend.core import share_db
+from backend.repositories.query import execute_query
 from backend.routers import share_admin, share_auth
 from backend.utils import tunnel
 
