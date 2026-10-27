@@ -926,6 +926,32 @@ def test_private_runner_clean_source_export_freezes_invoked_entrypoint() -> None
     assert source.index(snapshot) < source.index('exec bash "$FLA_EXPORT_DIR/scripts/dev/deploy_test_all.sh"')
 
 
+def test_private_runner_receiver_apply_failure_retains_private_exit_and_stderr(tmp_path, monkeypatch) -> None:
+    program = _private_observability_python("FLA_HS_OBSERVABILITY")
+    real_run = subprocess.run
+    (tmp_path / "relics").mkdir()
+    changes = []
+
+    def run(command, **kwargs):
+        if command[0] == "helm":
+            return real_run(command, cwd=ROOT, **kwargs)
+        if command[1:3] == ["apply", "-f"]:
+            if kwargs.get("check"):
+                raise subprocess.CalledProcessError(1, command, stderr="fixture admission refusal")
+            return subprocess.CompletedProcess(command, 1, stdout="", stderr="fixture admission refusal")
+        changes.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(sys, "argv", ["runner", "fixture", str(tmp_path)])
+    with pytest.raises(SystemExit, match="private diagnostic"):
+        exec(compile(program, "<private-hs-apply-failure>", "exec"), {})
+    evidence = tmp_path / "relics/observability-hs-apply.json"
+    assert evidence.stat().st_mode & 0o777 == 0o600
+    assert json.loads(evidence.read_text()) == {"exit_code": 1, "stderr": "fixture admission refusal"}
+    assert not any(command[1:3] in (["set", "env"], ["rollout", "restart"]) for command in changes)
+
+
 def test_metrics_ui_receiver_mismatch_never_runs_browser_or_publishes_link(tmp_path, monkeypatch) -> None:
     from datetime import UTC, datetime
     from uuid import uuid4
