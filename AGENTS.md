@@ -260,6 +260,12 @@ Per-service LIFO pool replaces per-request `duckdb.connect()` + S3 / DuckLake se
 
 **Pool wait observability** — `_Pool.acquire` records every checkout's wall-clock wait time to (a) the OTel `app.thread_wait_ms` histogram tagged `{outcome: reused | created | timeout, waited: true | false, service}` for off-box analysis via `docker compose logs backend | grep app.thread_wait_ms`, AND (b) a bounded in-process ring buffer (~1024 samples per service) consumed by `Pool.stats().wait` (p50/p95/p99/max/mean). `GET /api/admin/health-snapshot` exposes the per-service stats (plus `saturated_rejects_total` / `drain_rejects_total` pool-reject counters and the last-warmed timestamp); the `SystemHealthCard` on `/admin` renders top-level Pool wait p95 / Pool in-use / idle cards plus an expandable per-service table. ADR-03 escalation rule: p95 > 50ms ⇒ consider separate-process cron isolation; > 200ms flags red. Both paths are non-blocking (try/except around the recorder) so instrumentation can never break a checkout.
 
+The thresholded slow-checkout log separates `queue_admission_ms` from
+`reused_attach_ms` and `view_prepare_ms`, or `fresh_build_ms` for a new
+connection. `acquire_total_ms` includes setup; it is not evidence of queue
+saturation. Unexecuted phases are `None`, and fresh-build internals remain
+unsplit. `DUCKDB_POOL_SLOW_CHECKOUT_MS=0` disables this extra phase collection.
+
 **OOM safeguards.** Two backstops bound process RSS independently of the pool. (1) [backend/core/memory_guard.py](backend/core/memory_guard.py) — an opt-in process-level guard (`BACKEND_GRACEFUL_RESTART_RSS_MB`) that, on crossing the ceiling, converts a destructive cgroup OOM-`SIGKILL` into a graceful self-restart (SIGTERM → uvicorn drains → `restart: unless-stopped`). (2) The `duckdb_recycle` cron drains + recycles the pool to free DuckDB's object cache (`DUCKDB_RECYCLE_INTERVAL_MIN`, off by default). The historical unbounded-RSS leak that motivated both was ultimately a **SQLite** connection leak — the per-tick cron watchdog built a throwaway `ThreadPoolExecutor` each tick, orphaning the `check_same_thread` `ThreadLocalPool` connection it opened; [backend/core/sqlite_pool.py](backend/core/sqlite_pool.py) now reaps connections whose owning thread has exited (swept on cold-open), and the watchdog reuses one bounded executor.
 
 ### Hourly Top-N Rollups ([backend/core/rollups/](backend/core/rollups/), [scripts/backfill_rollups.py](scripts/backfill_rollups.py))
@@ -1396,6 +1402,16 @@ Existing any-field coverage and bounded gap-healing limits still apply; this
 does not establish complete historical coverage. Real-DuckDB cases in
 `tests/repositories/test_top_n_rollups_golden.py` compare country, map and virtual
 counts across active/closed transitions, including a missing hourly bundle.
+
+### 53. Dashboard component cache keys must preserve exact window bounds
+
+Standard dashboard aggregate and top-bot cache keys retain seconds and fractions
+in both bounds. Minute-truncating explicit bounds lets different event windows
+reuse each other's results even when the underlying SQL is correctly scoped.
+Relative-window quantization belongs to request-window resolution, not the
+component cache key. Keep identical-window hits, existing eligibility, TTL and
+ingest invalidation unchanged; the same-minute collision regressions cover both
+components.
 
 ### Bounded ClickHouse diagnostic index (ADR-20)
 

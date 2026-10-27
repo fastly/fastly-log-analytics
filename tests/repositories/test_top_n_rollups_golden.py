@@ -2821,6 +2821,240 @@ def test_filtered_dashboard_and_empty_and_populated_aggregates(in_memory_duckdb,
     assert len(result["debug_queries"]) > 0 and "sql" in result["debug_queries"][0]
 
 
+@pytest.mark.parametrize("field_selection", ["omitted", "null", "explicit"])
+def test_filtered_dashboard_virtual_expansions_preserve_scoped_counts(
+    in_memory_duckdb, test_service_source, monkeypatch, field_selection
+) -> None:
+    """All-fields CSV panels preserve bounds, token multiplicity and masking."""
+    monkeypatch.setattr(dash, "DASHBOARD_CACHE_TTL", 0)
+    table = _empty_logs_table(in_memory_duckdb, test_service_source)
+    in_memory_duckdb.execute(f"ALTER TABLE {table} ADD COLUMN edge_score_reason VARCHAR")
+    in_memory_duckdb.executemany(
+        f"""INSERT INTO {table}
+            (timestamp, country, ip, ua, url, conn_requests, waf_sig, edge_score_reason)
+            VALUES (?, ?, '192.0.2.1', 'fixture-agent', '/fixture', 1, ?, ?)""",
+        [
+            ("2026-10-27T20:45:59.999Z", "US", "BEFORE", "before"),
+            ("2026-10-27T20:46:00Z", "US", " A, A, B, , ", " bot, slow,bot "),
+            ("2026-10-27T20:47:00Z", "US", " A, A, B, , ", " bot, slow,bot "),
+            ("2026-10-27T20:48:00Z", "US", None, ""),
+            ("2026-10-27T21:46:00Z", "US", ", C, ", " slow, "),
+            ("2026-10-27T21:46:00.001Z", "US", "AFTER", "after"),
+            ("2026-10-27T20:49:00Z", "CA", "FILTERED", "filtered"),
+        ],
+    )
+    queries: list[tuple[str, list]] = []
+    execute = QueryRunner.execute
+
+    def capture_execute(runner: QueryRunner, sql: str, params: list | None = None) -> Any:
+        queries.append((sql, list(params or [])))
+        return execute(runner, sql, params)
+
+    monkeypatch.setattr(QueryRunner, "execute", capture_execute)
+    options: dict[str, Any] = {}
+    if field_selection == "null":
+        options = dict(
+            fields_filter=None,
+            include_time_series=None,
+            include_conn_requests=None,
+            include_map_data=None,
+            include_top_n=None,
+        )
+    elif field_selection == "explicit":
+        options["fields_filter"] = ["country", "ip", "ua", "url", "waf_sig_ind", "edge_score_reason_ind"]
+    result = get_aggregates(
+        in_memory_duckdb,
+        test_service_source,
+        "2026-10-27T20:46:00Z",
+        "2026-10-27T21:46:00Z",
+        {"country": FilterSpec(mode="include", values=["US"])},
+        "1 minute",
+        "requests",
+        **options,
+    )
+    assert result["total_rows"] == 4 and result["total_rows_total"] == 7
+    assert sum(point["value"] for point in result["time_series"]) == 4
+    assert result["map_data"] == [{"country": "US", "count": 4}]
+    assert result["data"]["country"] == {"top": [{"value": "US", "count": 4}], "total": 4}
+    assert result["data"]["conn_requests"] == {"top": [{"value": "1", "count": 4}], "total": 4}
+    for field, counts in (
+        ("waf_sig_ind", {"A": 4, "B": 2, "C": 1}),
+        ("edge_score_reason_ind", {"bot": 4, "slow": 3}),
+    ):
+        assert {row["value"]: row["count"] for row in result["data"][field]["top"]} == counts
+        assert result["data"][field]["total"] == 7
+    if field_selection != "explicit":
+        assert set(FIELDS) <= result["data"].keys()
+    masked = apply_pii_policy(result, {"mask_ips": True})
+    assert masked["data"]["ip"]["top"][0]["value"] != "192.0.2.1"
+    for field in ("ua", "url", "country", "waf_sig_ind", "edge_score_reason_ind"):
+        assert masked["data"][field] == result["data"][field]
+    assert masked["time_series"] == result["time_series"] and masked["map_data"] == result["map_data"]
+
+    creates = [sql for sql, _ in queries if sql.startswith("CREATE TEMP TABLE")]
+    assert len(creates) == 1
+    temp = creates[0].split()[3]
+    assert f"FROM {table} WHERE" in creates[0]
+    assert (
+        in_memory_duckdb.execute("SELECT count(*) FROM duckdb_tables() WHERE table_name = ?", [temp]).fetchone()[0] == 0
+    )
+    expansions = [(sql, params) for sql, params in queries if "unnest(string_split(" in sql]
+    assert len(expansions) == 2
+    for sql, params in expansions:
+        if f"FROM {temp}" in sql:
+            assert f"FROM {table}" not in sql
+            assert "AND 1=1" in sql and params == []
+        else:
+            assert f"FROM {table}" in sql
+
+
+@pytest.mark.parametrize(
+    "metric", ["requests", "p95_latency", "hit_rate", "throughput", "req_size", "ttfb", "5xx", "4xx"]
+)
+def test_filtered_dashboard_all_fields_prunes_unrendered_columns_without_losing_dependencies(
+    monkeypatch, metric
+) -> None:
+    """Use only real in-memory DuckDB; no service, metadata or root fixtures."""
+    monkeypatch.setattr(dash, "DASHBOARD_CACHE_TTL", 0)
+    monkeypatch.setattr(svcconfig, "get_status", lambda _name: {})
+    monkeypatch.setattr(svcconfig, "is_durable_serving_mode", lambda _src: False)
+    src = {
+        "name": f"dashboard_width_{dash.uuid.uuid4().hex}",
+        "log_fields": {
+            "custom_fields": [
+                {"name": "shown_custom"},
+                {"name": "hidden_custom", "show_in_dashboard": False},
+                {"name": "disabled_custom", "enabled": False},
+            ]
+        },
+    }
+    table = _safe_table(src["name"])
+    create = QueryRunner.create_temp_table
+    temp_columns: list[set[str]] = []
+    count_queries: list[str] = []
+    execute = QueryRunner.execute
+
+    def capture_create(runner: QueryRunner, sql: str, params: list | None = None) -> bool:
+        created = create(runner, sql, params)
+        if created:
+            temp_columns.append({row[0] for row in runner.con.execute(f"DESCRIBE {sql.split()[3]}").fetchall()})
+        return created
+
+    def capture_execute(runner: QueryRunner, sql: str, params: list | None = None) -> Any:
+        if sql.upper().startswith("SELECT COUNT(*)"):
+            count_queries.append(sql)
+        return execute(runner, sql, params)
+
+    monkeypatch.setattr(QueryRunner, "create_temp_table", capture_create)
+    monkeypatch.setattr(QueryRunner, "execute", capture_execute)
+    with duckdb.connect(":memory:") as con:
+        con.execute(
+            f"""CREATE TABLE {table} AS SELECT
+                TIMESTAMPTZ '2026-01-01T00:01:00Z' AS timestamp, 'US' AS country,
+                '192.0.2.1' AS ip, 'fixture-agent' AS ua, '/fixture' AS url, 200 AS status,
+                1000.0 AS elapsed, 0.1 AS ttfb, 'HIT' AS cache, 100 AS resp_bytes,
+                10 AS req_header_bytes, 20 AS req_bytes, 1 AS conn_requests,
+                'A,A,B' AS waf_sig, 'bot,bot' AS edge_score_reason,
+                'unused-request-id' AS rid, 10.0 AS lat, 'unused-source' AS _source_file,
+                'shown' AS shown_custom,
+                CASE WHEN range = 2 THEN 'drop' ELSE 'keep' END AS hidden_custom,
+                'unused' AS disabled_custom FROM range(3)"""
+        )
+        result = get_aggregates(
+            con,
+            src,
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:02:00Z",
+            {"hidden_custom": FilterSpec(mode="include", values=["keep"])},
+            "1 minute",
+            metric,
+        )
+        original_cols = {row[0] for row in con.execute(f"DESCRIBE {table}").fetchall()}
+    assert {"rid", "lat", "_source_file", "hidden_custom", "disabled_custom"} <= original_cols
+    assert result["total_rows"] == 2 and result["total_rows_total"] == 3
+    assert result["metric"] == metric and len(result["time_series"]) == 1
+    expected_chart = {
+        "requests": 2,
+        "p95_latency": 1,
+        "hit_rate": 100,
+        "throughput": 100000,
+        "req_size": 30,
+        "ttfb": 100,
+        "5xx": 0,
+        "4xx": 0,
+    }
+    assert result["time_series"][0]["value"] == pytest.approx(expected_chart[metric])
+    assert result["map_data"] == [{"country": "US", "count": 2}]
+    assert result["data"]["shown_custom"] == {"top": [{"value": "shown", "count": 2}], "total": 2}
+    assert result["data"]["waf_sig_ind"]["total"] == 6 and result["data"]["edge_score_reason_ind"]["total"] == 4
+    assert result["data"]["rid"] == result["data"]["lat"] == {"top": [], "total": 0}
+    assert not {"hidden_custom", "disabled_custom", "_source_file"} & result["data"].keys()
+    assert len(temp_columns) == 1
+    assert {
+        "timestamp",
+        "country",
+        "ip",
+        "ua",
+        "url",
+        "status",
+        "elapsed",
+        "ttfb",
+        "cache",
+        "resp_bytes",
+        "req_header_bytes",
+        "req_bytes",
+        "conn_requests",
+        "waf_sig",
+        "edge_score_reason",
+        "shown_custom",
+    } <= temp_columns[0]
+    assert not {"rid", "lat", "_source_file", "hidden_custom", "disabled_custom"} & temp_columns[0]
+    assert count_queries and all("count(rid)" not in sql and "count(lat)" not in sql for sql in count_queries)
+
+
+def test_dashboard_virtual_expansions_keep_raw_fallback_without_temp(
+    in_memory_duckdb, test_service_source, monkeypatch
+) -> None:
+    """A rollup miss still uses the original inclusive bounds when no temp exists."""
+    monkeypatch.setattr(dash, "DASHBOARD_CACHE_TTL", 0)
+    monkeypatch.setattr(rr, "rollups_present", lambda _src: True)
+    monkeypatch.setattr(QueryRunner, "execute_top_n_rollups", lambda *a, **k: ([], []))
+    monkeypatch.setattr(QueryRunner, "try_count_from_rollup", lambda *a, **k: None)
+    monkeypatch.setattr(QueryRunner, "try_virtual_field_top_n_from_rollup", lambda *a, **k: None)
+    table = _empty_logs_table(in_memory_duckdb, test_service_source)
+    in_memory_duckdb.execute(f"ALTER TABLE {table} ADD COLUMN edge_score_reason VARCHAR")
+    in_memory_duckdb.executemany(
+        f"""INSERT INTO {table} (timestamp, country, ip, url, waf_sig, edge_score_reason)
+            VALUES (?, 'US', '192.0.2.1', '/fixture', ?, ?)""",
+        [
+            ("2026-10-27T20:45:59.999Z", "BEFORE", "before"),
+            ("2026-10-27T20:46:00Z", "A,A", "bot"),
+            ("2026-10-27T21:46:00Z", "B", "slow,slow"),
+            ("2026-10-27T21:46:00.001Z", "AFTER", "after"),
+        ],
+    )
+    result = get_aggregates(
+        in_memory_duckdb,
+        test_service_source,
+        "2026-10-27T20:46:00Z",
+        "2026-10-27T21:46:00Z",
+        {},
+        "1 minute",
+        "requests",
+        fields_filter=["waf_sig_ind", "edge_score_reason_ind"],
+        include_time_series=False,
+        include_conn_requests=False,
+        include_map_data=False,
+    )
+    assert result["total_rows"] == 2
+    for field, counts in (("waf_sig_ind", {"A": 2, "B": 1}), ("edge_score_reason_ind", {"slow": 2, "bot": 1})):
+        assert {row["value"]: row["count"] for row in result["data"][field]["top"]} == counts
+        assert result["data"][field]["total"] == 3
+    assert not any("CREATE TEMP TABLE" in row["sql"] for row in result["debug_queries"])
+    expansions = [row["sql"] for row in result["debug_queries"] if "unnest(string_split(" in row["sql"]]
+    assert len(expansions) == 2 and all(f"FROM {table}" in sql for sql in expansions)
+
+
 @pytest.mark.parametrize(
     "metric,expected_metric",
     [
@@ -2962,6 +3196,61 @@ def test_get_aggregates_result_is_cached(in_memory_duckdb, test_service_source):
     r1 = get_aggregates(in_memory_duckdb, test_service_source, None, None, {}, "1 minute", "requests")
     r2 = get_aggregates(in_memory_duckdb, test_service_source, None, None, {}, "1 minute", "requests")
     assert r2.get("is_cached") is True and r1["total_rows"] == r2["total_rows"]
+
+
+@pytest.mark.parametrize(
+    ("start", "end", "other_start", "other_end"),
+    [
+        ("2026-01-01T00:00:00Z", "2026-01-01T00:01:59Z", "2026-01-01T00:00:01Z", "2026-01-01T00:01:59Z"),
+        ("2026-01-01T00:00:00Z", "2026-01-01T00:01:59Z", "2026-01-01T00:00:00Z", "2026-01-01T00:01:58Z"),
+        (
+            "2026-01-01T00:00:00.000001Z",
+            "2026-01-01T00:01:59.999998Z",
+            "2026-01-01T00:00:00.000002Z",
+            "2026-01-01T00:01:59.999998Z",
+        ),
+        (
+            "2026-01-01T00:00:00.000001Z",
+            "2026-01-01T00:01:59.999998Z",
+            "2026-01-01T00:00:00.000001Z",
+            "2026-01-01T00:01:59.999999Z",
+        ),
+    ],
+)
+def test_dashboard_cache_preserves_exact_bounds_and_reuses_identical_window(
+    monkeypatch, start, end, other_start, other_end
+) -> None:
+    """Cache get/peek must not alias second- or microsecond-distinct windows."""
+    monkeypatch.setattr(dash, "DASHBOARD_CACHE_TTL", 30)
+    monkeypatch.setattr(dash, "_dashboard_cache", dash.BoundedTTLCache(maxsize=10, ttl_seconds=30))
+    src = {"name": "dashboard_exact_window", "service_id": "test-dashboard-exact-window"}
+    calls: list[tuple[str, str]] = []
+
+    def compute(**kwargs: Any) -> dict:
+        calls.append((kwargs["start_time"], kwargs["end_time"]))
+        payload = {"total_rows": len(calls), "time_series": [], "map_data": [], "data": {}}
+        dash._dashboard_cache[kwargs["cache_key"]] = (kwargs["now"], payload)
+        return payload
+
+    def no_connection() -> Any:
+        pytest.fail("Cache-only characterization must not acquire a connection")
+
+    monkeypatch.setattr(dash, "_compute_dashboard_aggregates", compute)
+    key_args = dict(src=src, filters={}, chart_interval="1 minute", chart_metric="requests")
+    first_key = dash._dashboard_cache_key(start_time=start, end_time=end, **key_args)
+    other_key = dash._dashboard_cache_key(start_time=other_start, end_time=other_end, **key_args)
+    assert first_key != other_key
+    assert first_key == dash._dashboard_cache_key(start_time=start, end_time=end, **key_args)
+    first = get_aggregates(con=no_connection, start_time=start, end_time=end, **key_args)
+    assert first["total_rows"] == 1
+    assert dash.peek_aggregates(start_time=other_start, end_time=other_end, **key_args) is None
+    second = get_aggregates(con=no_connection, start_time=other_start, end_time=other_end, **key_args)
+    assert second["total_rows"] == 2
+    repeated = get_aggregates(con=no_connection, start_time=start, end_time=end, **key_args)
+    peeked = dash.peek_aggregates(start_time=start, end_time=end, **key_args)
+    assert repeated["is_cached"] is True and repeated["total_rows"] == 1
+    assert peeked is not None and peeked["is_cached"] is True and peeked["total_rows"] == 1
+    assert calls == [(start, end), (other_start, other_end)]
 
 
 def test_get_raw_df_and_add_bot_columns(in_memory_duckdb, test_service_source):

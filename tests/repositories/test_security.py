@@ -30,6 +30,7 @@ from backend.repositories._base import (
     safe_iso,
 )
 from backend.repositories.security import GET_SECURITY_PROXIES_COMBINED, get_security_aggregates, get_top_bots
+from backend.utils.bounded_cache import BoundedTTLCache
 from backend.utils.hll import HyperLogLog
 from scripts.lib.section_measurements import describe_response
 from tests._helpers.duckdb_fixtures import generate_mock_logs, insert_mock_logs
@@ -92,6 +93,60 @@ def test_top_bots_cache_peek_matches_real_reader_and_preserves_scope(
     with pytest.raises(AssertionError, match="cache opened a reader"):
         get_top_bots(con=None, shared_temp_table="external_temp", **kwargs)
     monkeypatch.setattr(dashboard_repo, "DASHBOARD_CACHE_TTL", 0)
+    assert security.peek_top_bots(**kwargs) is None
+
+
+@pytest.mark.parametrize(
+    ("bound", "different_time"),
+    [
+        ("start_time", "2026-10-27T20:46:06.100000Z"),
+        ("start_time", "2026-10-27T20:46:05.100001Z"),
+        ("end_time", "2026-10-27T21:46:11.100000Z"),
+        ("end_time", "2026-10-27T21:46:10.100001Z"),
+    ],
+)
+def test_top_bots_cache_preserves_exact_bounds(
+    monkeypatch: pytest.MonkeyPatch, bound: str, different_time: str
+) -> None:
+    # Local replacement, not a clear/mutation of the shared module cache.
+    cache = BoundedTTLCache(maxsize=10, ttl_seconds=30)
+    monkeypatch.setattr(dashboard_repo, "_dashboard_cache", cache)
+    monkeypatch.setattr(dashboard_repo, "DASHBOARD_CACHE_TTL", 30)
+    reader = MagicMock(side_effect=AssertionError("cache miss opened a reader"))
+    monkeypatch.setattr(security, "QueryRunner", reader)
+    kwargs: dict[str, Any] = {
+        "src": {"name": "exact_bot_window"},
+        "start_time": "2026-10-27T20:46:05.100000Z",
+        "end_time": "2026-10-27T21:46:10.100000Z",
+        "filters": {},
+        "n": 3,
+    }
+    key = security._top_bots_cache_key(**kwargs)
+    assert key is not None
+    original = {"bots": [{"id": "original-window", "request_count": 5}], "ngwaf_bots": []}
+    cache[key] = (0.0, original)
+    assert get_top_bots(con=None, **kwargs)["bots"] == original["bots"]
+    reader.assert_not_called()
+
+    different = {**kwargs, bound: different_time}
+    different_key = security._top_bots_cache_key(**different)
+    assert different_key is not None and different_key != key
+    assert security.peek_top_bots(**different) is None
+    with pytest.raises(AssertionError, match="cache miss opened a reader"):
+        get_top_bots(con=None, **different)
+    other = {"bots": [{"id": "different-window", "request_count": 2}], "ngwaf_bots": []}
+    cache[different_key] = (0.0, other)
+    assert get_top_bots(con=None, **different)["bots"] == other["bots"]
+    assert get_top_bots(con=None, **kwargs)["bots"] == original["bots"]
+    cached = security.peek_top_bots(**kwargs)
+    assert cached is not None and cached["_response_cache"]["state"] == "hit"
+
+    for missing in ({"start_time": None}, {"end_time": None}, {"start_time": None, "end_time": None}):
+        assert security._top_bots_cache_key(**{**kwargs, **missing}) is None
+        assert security.peek_top_bots(**{**kwargs, **missing}) is None
+    assert security._top_bots_cache_key(**kwargs, shared_temp_table="external_temp") is None
+    monkeypatch.setattr(dashboard_repo, "DASHBOARD_CACHE_TTL", 0)
+    assert security._top_bots_cache_key(**kwargs) is None
     assert security.peek_top_bots(**kwargs) is None
 
 

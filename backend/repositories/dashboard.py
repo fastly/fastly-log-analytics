@@ -34,7 +34,6 @@ from backend.repositories._base import (
 )
 from backend.repositories.utils.filters import build_where_clause
 from backend.repositories.utils.response_cache import (
-    bucket_time_to_minute,
     cache_result,
     coalesced_cache_result,
     serialize_filters_for_key,
@@ -261,8 +260,9 @@ def _dashboard_cache_key(
     source_name = src["name"]
     _key_payload = json.dumps(
         {
-            "s": bucket_time_to_minute(start_time),
-            "e": bucket_time_to_minute(end_time),
+            # Resolved bounds include seconds/fractions that change the exact scan window.
+            "s": start_time,
+            "e": end_time,
             "f": serialize_filters_for_key(filters),
             "ci": chart_interval,
             "cm": chart_metric,
@@ -485,7 +485,9 @@ def _compute_dashboard_aggregates(
             if (bcol := _VIRTUAL_BACKING[field]) in actual_cols:
                 needed_cols.add(f'"{bcol}"')
             continue
-        if field in actual_cols:
+        # Non-card fields keep their empty response entries; metrics/backings
+        # are projected separately below/above rather than copied for unused totals.
+        if field in actual_cols and field not in NON_TOP_N_FIELDS:
             needed_cols.add(f'"{field}"')
 
     for mc in [
@@ -628,7 +630,7 @@ def _compute_dashboard_aggregates(
             valid_fields: list[str] = []
             if include_top_n:
                 for field in fields:
-                    if field in _VIRTUAL_FIELDS:
+                    if field in _VIRTUAL_FIELDS or field in NON_TOP_N_FIELDS:
                         continue
                     if field in actual_cols:
                         count_cols.append(f"count({field})")

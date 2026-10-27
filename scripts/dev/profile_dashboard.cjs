@@ -126,12 +126,15 @@ async function browserMetrics(cdp) {
 }
 
 function metricDelta(before, after) {
-  for (const key of ['TaskDuration', 'ScriptDuration', 'LayoutDuration', 'RecalcStyleDuration']) {
+  const keys = ['TaskDuration', 'ScriptDuration', 'LayoutDuration', 'RecalcStyleDuration'];
+  for (const key of keys) {
     check(Number.isFinite(before[key]) && Number.isFinite(after[key]), 'renderer_metric_missing');
   }
+  const reset = keys.some(key => after[key] < before[key])
+    || (Number.isFinite(before.NavigationStart) && Number.isFinite(after.NavigationStart)
+      && before.NavigationStart !== after.NavigationStart);
   return Object.fromEntries(
-    ['TaskDuration', 'ScriptDuration', 'LayoutDuration', 'RecalcStyleDuration']
-      .map(key => [key, (after[key] - before[key]) * 1000]),
+    keys.map(key => [key, reset ? null : (after[key] - before[key]) * 1000]),
   );
 }
 
@@ -266,7 +269,8 @@ These are result-assertion wall times, not paint timings or INP. Plotly data tot
 were checked against response series; neither visibility nor data assertions prove
 correct pixels were painted. Event Timing observes entries at least 16 ms only.
 Layout-shift sums are not session-window CLS. Renderer duration metrics overlap;
-do not sum them or infer backend CPU.
+do not sum them or infer backend CPU. Navigation-spanning or reset renderer
+counters are unavailable (null), not negative CPU time or fabricated zeros.
 
 Each condition has n=1. Traced then control is confounded by order, cache and
 network conditions, not an overhead estimate or a before/after improvement.

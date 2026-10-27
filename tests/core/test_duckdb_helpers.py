@@ -6,6 +6,7 @@ import collections
 import gc
 import json
 import os
+import queue
 import tempfile
 import threading
 import time
@@ -2608,6 +2609,73 @@ def test_slow_checkout_logging(caplog, monkeypatch):
             with checkout_connection({"name": "heavy-checkout"}, max_wait=2.0, label="/api/cron-runs"):
                 pass
             assert not [r for r in caplog.records if "slow checkout" in r.getMessage()]
+            assert (pool.acquire.call_args.kwargs["checkout_timings"] is None) == (thresh == "0")
+
+
+@pytest.mark.parametrize("checkout_path", ["reused", "skip_view", "fresh"])
+def test_slow_checkout_phase_diagnostics(caplog, monkeypatch, checkout_path: str) -> None:
+    # Deterministic phase delays: admission 7ms, attach 100ms, view 200ms,
+    # or fresh build 300ms. No sleeps, database opens or OTel exporter needed.
+    clock = [100.0]
+
+    def advance(seconds: float) -> None:
+        clock[0] += seconds
+
+    monkeypatch.setattr(duckdb_pool.time, "monotonic", lambda: clock[0])
+    monkeypatch.setenv("DUCKDB_CONNECTION_POOL", "1")
+    monkeypatch.setenv("DUCKDB_POOL_SLOW_CHECKOUT_MS", "1")
+    pool = _Pool("phase-checkout", max_size=1)
+    con = _mock_conn()
+
+    def take_idle() -> MagicMock:
+        advance(0.007)
+        if checkout_path == "fresh":
+            raise queue.Empty
+        return con
+
+    def attach(*args: object, **kwargs: object) -> bool:
+        advance(0.1)
+        return True
+
+    def prepare(*args: object, **kwargs: object) -> MagicMock:
+        advance(0.2)
+        return con
+
+    def build(*args: object, **kwargs: object) -> MagicMock:
+        advance(0.3)
+        return con
+
+    with (
+        patch.object(duckdb_pool, "_get_pool", return_value=pool),
+        patch.object(duckdb_pool, "_instrument", side_effect=lambda raw, **_: raw),
+        patch.object(pool._idle, "get_nowait", side_effect=take_idle),
+        patch.object(pool, "_record_wait_telemetry") as queue_wait,
+        patch.object(pool, "_prepare_checkout", side_effect=prepare) as view,
+        patch.object(pool, "_stamp_fingerprint"),
+        patch.object(pool, "release"),
+        patch("backend.core.storage._core._ducklake_attach", side_effect=attach) as attachment,
+        patch("backend.core.duckdb.get_connection", side_effect=build),
+        patch.object(duckdb_pool, "_pool_conn_memory_limit", return_value=None),
+        caplog.at_level("WARNING", logger="backend.core.duckdb_pool"),
+    ):
+        with checkout_connection({"name": "phase-checkout"}, skip_view_update=checkout_path == "skip_view"):
+            pass
+
+    assert queue_wait.call_args.args[0] == pytest.approx(7.0)
+    messages = [r.getMessage() for r in caplog.records if "slow checkout" in r.getMessage()]
+    assert len(messages) == 1
+    message = messages[0]
+    assert "queue_admission_ms=7.0" in message
+    assert "acquire_total_ms=" in message and "pool_wait_ms=" not in message
+    if checkout_path == "fresh":
+        assert "reused_attach_ms=None view_prepare_ms=None fresh_build_ms=300.0" in message
+        attachment.assert_not_called()
+        view.assert_not_called()
+    else:
+        expected_view = "None" if checkout_path == "skip_view" else "200.0"
+        assert f"reused_attach_ms=100.0 view_prepare_ms={expected_view} fresh_build_ms=None" in message
+        attachment.assert_called_once()
+        assert view.call_count == (checkout_path != "skip_view")
 
 
 # ── discard_idle, reset_pool_for_service & reuse_only ────────────────

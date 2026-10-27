@@ -68,6 +68,19 @@ test('renderer measurements preserve separate durations and reject missing evide
   assert.throws(() => metricDelta({}, after), /renderer_metric_missing/);
 });
 
+test('renderer measurements are unavailable across navigation or counter resets', () => {
+  const before = { NavigationStart: 10, TaskDuration: 1, ScriptDuration: 0.1,
+    LayoutDuration: 0.2, RecalcStyleDuration: 0.3 };
+  const unavailable = { TaskDuration: null, ScriptDuration: null,
+    LayoutDuration: null, RecalcStyleDuration: null };
+  assert.deepEqual(metricDelta(before, { ...before, TaskDuration: 0.5 }), unavailable);
+  assert.deepEqual(metricDelta(before, { ...before, NavigationStart: 11,
+    TaskDuration: 2, ScriptDuration: 1, LayoutDuration: 1, RecalcStyleDuration: 1 }), unavailable);
+  assert.deepEqual(metricDelta(before, { ...before }), {
+    TaskDuration: 0, ScriptDuration: 0, LayoutDuration: 0, RecalcStyleDuration: 0,
+  });
+});
+
 test('pilot report flags cross-path count mismatches without exporting raw private evidence', () => {
   const sample = {
     role: 'admin', traced: true, load_asserted_ms: 100, filter_asserted_ms: 200,

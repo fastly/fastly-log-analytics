@@ -253,6 +253,7 @@ class _Pool:
         *,
         skip_view_update: bool = False,
         reuse_only: bool = False,
+        checkout_timings: dict[str, float] | None = None,
     ) -> duckdb.DuckDBPyConnection:
         t_acquire_start = time.monotonic()
         deadline = t_acquire_start + max_wait
@@ -295,8 +296,11 @@ class _Pool:
                 waited = True
                 self._cond.wait(timeout=remaining)
 
+        queue_admission_ms = (time.monotonic() - t_acquire_start) * 1000.0
+        if checkout_timings is not None:
+            checkout_timings["queue_admission_ms"] = round(queue_admission_ms, 2)
         self._record_wait_telemetry(
-            (time.monotonic() - t_acquire_start) * 1000.0,
+            queue_admission_ms,
             "reused" if reused_con is not None else "created",
             waited=waited,
         )
@@ -305,11 +309,22 @@ class _Pool:
         if reused_con is not None:
             from backend.core.storage._core import _ducklake_attach
 
+            t_attach = time.monotonic() if checkout_timings is not None else 0.0
             if not _ducklake_attach(reused_con, src, read_only=True):
                 self._discard(reused_con)
                 raise RuntimeError("Failed to re-attach DuckLake")
-            return reused_con if skip_view_update else self._prepare_checkout(reused_con, src)
+            if checkout_timings is not None:
+                checkout_timings["reused_attach_ms"] = round((time.monotonic() - t_attach) * 1000.0, 2)
+            if skip_view_update:
+                return reused_con
+            t_prepare = time.monotonic() if checkout_timings is not None else 0.0
+            prepared = self._prepare_checkout(reused_con, src)
+            if checkout_timings is not None:
+                # Includes fingerprint validation and any view refresh, not just lock wait.
+                checkout_timings["view_prepare_ms"] = round((time.monotonic() - t_prepare) * 1000.0, 2)
+            return prepared
 
+        t_build = time.monotonic() if checkout_timings is not None else 0.0
         try:
             from backend.core.duckdb import get_connection
 
@@ -327,6 +342,9 @@ class _Pool:
                         e,
                     )
             self._stamp_fingerprint(con, src)
+            if checkout_timings is not None:
+                # get_connection owns connect/configure/attach/view; internals are not split here.
+                checkout_timings["fresh_build_ms"] = round((time.monotonic() - t_build) * 1000.0, 2)
             return con
         except Exception:
             with self._cond:
@@ -606,27 +624,36 @@ def checkout_connection(
     if heavy:
         pool.acquire_heavy_slot(max_wait)
     t_slot = time.monotonic()
+    threshold = _slow_checkout_ms()
+    # Request-local only: no shared last-checkout state, extra locks or unbounded samples.
+    checkout_timings: dict[str, float] | None = {} if threshold else None
     try:
         raw_con = pool.acquire(
             src,
             max_wait=max(0.0, heavy_deadline - time.monotonic()) if heavy else max_wait,
             skip_view_update=skip_view_update,
             reuse_only=reuse_only,
+            checkout_timings=checkout_timings,
         )
     except BaseException:
         if heavy:
             pool.release_heavy_slot()
         raise
     t_done = time.monotonic()
-    threshold = _slow_checkout_ms()
     if threshold and (t_done - t_start) * 1000.0 >= threshold:
         logger.warning(
-            "[pool] slow checkout: service=%s route=%s heavy=%s slot_wait_ms=%d pool_wait_ms=%d open=%d idle=%d heavy_in_use=%d/%d",
+            "[pool] slow checkout: service=%s route=%s heavy=%s slot_wait_ms=%d acquire_total_ms=%d "
+            "queue_admission_ms=%s reused_attach_ms=%s view_prepare_ms=%s fresh_build_ms=%s "
+            "open=%d idle=%d heavy_in_use=%d/%d",
             service_key,
             label,
             heavy,
             (t_slot - t_start) * 1000,
             (t_done - t_slot) * 1000,
+            (checkout_timings or {}).get("queue_admission_ms"),
+            (checkout_timings or {}).get("reused_attach_ms"),
+            (checkout_timings or {}).get("view_prepare_ms"),
+            (checkout_timings or {}).get("fresh_build_ms"),
             pool._in_use,
             pool._idle.qsize(),
             pool._heavy_in_use,
