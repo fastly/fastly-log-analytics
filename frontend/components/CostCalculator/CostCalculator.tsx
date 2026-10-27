@@ -45,6 +45,8 @@ const RUM_ARCHIVE_FIXED_BYTES = 22_500
 const RUM_ARCHIVE_BYTES_PER_ROW = 350
 const ARCHIVE_RETENTION_MARGIN_DAYS = 1
 const ARCHIVE_TICK_SECONDS = 20
+// RUM beacons land as small raw objects: Elevation dev measured 7,104 RUM objects a day for 16,250 beacon rows.
+const RUM_OBJECTS_PER_BEACON = 0.44
 // A retention of 0 means keep forever; steady-state storage then has no bound, so model a year.
 const KEEP_FOREVER_DAYS = 365
 
@@ -226,8 +228,8 @@ export function calculate(s: CalcState): CalcResults {
   const objectsPerTick = (logFilesPerDay * ARCHIVE_TICK_SECONDS) / 86400
   const archivePagesPerDay = highScale ? Math.ceil(logFilesPerDay / Math.min(Math.max(1, s.archiveBatchObjects), Math.max(1, objectsPerTick))) : 0
   const archiveObjectsPerDay = archivePagesPerDay * 3
-  // RUM archive: one artifact per page of RUM objects, which arrive on the same cadence as the request logs.
-  const rumObjectsPerDay = s.rumBeaconsDay > 0 ? Math.min(logFilesPerDay, s.rumBeaconsDay) : 0
+  // RUM archive: one artifact per page of RUM objects, and RUM objects follow the beacon volume, not the log cadence.
+  const rumObjectsPerDay = s.rumBeaconsDay * RUM_OBJECTS_PER_BEACON
   const rumPagesPerDay = highScale && rumObjectsPerDay > 0
     ? Math.ceil(rumObjectsPerDay / Math.min(Math.max(1, s.archiveBatchObjects), Math.max(1, (rumObjectsPerDay * ARCHIVE_TICK_SECONDS) / 86400)))
     : 0
