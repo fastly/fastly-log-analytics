@@ -1844,3 +1844,81 @@ def test_private_report_requires_its_private_url_prefix(private_report):
         urlopen(f"{origin.removesuffix('/private-test/')}/index.html", timeout=5)
     assert error.value.code == 404
     error.value.close()
+
+
+@pytest.mark.parametrize("signal", ["warning", "WARN", "failed", "unauthorized", "fatal", "critical"])
+def test_deploy_log_monitor_captures_warning_and_failure_signals(signal):
+    source = (ROOT / "scripts/lib/deploy_common.sh").read_text()
+    monitor = source.split("start_log_monitor() {", 1)[1].split("\nemit_deploy_report_script()", 1)[0]
+    patterns = re.findall(r'grep --line-buffered -E -i "([^"]+)"', monitor)
+    assert len(patterns) == 7
+    for pattern in patterns:
+        result = subprocess.run(
+            ["grep", "-E", "-i", pattern],
+            input=f"2026-01-01T00:00:01Z [{signal}] test connection unavailable\n",
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        assert result.returncode == 0, f"capture filter omitted {signal}"
+
+
+def test_private_runner_keeps_watch_capture_until_exit_report(tmp_path):
+    source = _private_observability_runner_source()
+    cleanup = source.split("on_exit_cleanup() {", 1)[1].split("\n}\n", 1)[0]
+    # The watch snapshot must still exist when the final EXIT report copies it.
+    assert 'rm -f "$LOG_MONITOR_TEMP"' in cleanup
+    assert cleanup.index("save_deploy_report") < cleanup.index('rm -f "$LOG_MONITOR_TEMP"')
+    assert source.count('rm -f "$LOG_MONITOR_TEMP"') == 1
+
+    report_dir = tmp_path / "report"
+    (report_dir / "logs").mkdir(parents=True)
+    capture = tmp_path / "watch.log"
+    capture.write_text("[Local Standard/backend] [warning] test connection unavailable\n")
+    copy_statement = next(line for line in source.splitlines() if "monitored_errors.log" in line and "cp " in line)
+    result = subprocess.run(
+        ["bash", "-ec", copy_statement + '\nrm -f "$LOG_MONITOR_TEMP"'],
+        env={**os.environ, "REPORT_DIR": str(report_dir), "LOG_MONITOR_TEMP": str(capture)},
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode == 0
+    assert not capture.exists()
+    assert "[warning] test connection unavailable" in (report_dir / "logs/monitored_errors.log").read_text()
+
+
+def test_deploy_report_missing_watch_snapshot_is_not_a_clean_scan():
+    source = (ROOT / "scripts/lib/deploy_common.sh").read_text()
+    script = source.split("emit_deploy_report_script() {", 1)[1].split("cat <<EOF\n", 1)[1].split("\nEOF", 1)[0]
+    script = script.removeprefix("  <script>").split("</script>", 1)[0].replace("${status}", "SUCCESS")
+    program = """
+const vm = require('node:vm');
+const pre = { innerHTML: 'monitor pending' };
+const count = { textContent: '' };
+const context = {
+  document: {
+    addEventListener() {},
+    getElementById(id) { return id === 'monitored-errors-log' ? pre : count; }
+  },
+  window: {}, setInterval() {}, setTimeout() {},
+  fetch: async () => ({ ok: false, status: 404 })
+};
+vm.createContext(context);
+vm.runInContext(SOURCE, context);
+(async () => {
+  await context.updateLogPre('monitored-errors-log', 'logs/monitored_errors.log');
+  process.stdout.write(JSON.stringify({ text: pre.textContent || pre.innerHTML, count: count.textContent }));
+})().catch(error => { console.error(error); process.exitCode = 1; });
+"""
+    result = subprocess.run(
+        ["node", "-e", program.replace("SOURCE", json.dumps(script))],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    body = json.loads(result.stdout)
+    assert "unavailable" in body["text"].lower()
+    assert "zero exceptions" not in body["text"].lower()
+    assert "unavailable" in body["count"].lower()

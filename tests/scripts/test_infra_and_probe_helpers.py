@@ -930,6 +930,45 @@ def test_verify_canonical_runner_propagates_no_traffic(no_traffic: str) -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    ("observed", "environment", "ok"),
+    [
+        ("abc123def456", "local", True),
+        ("abc123def456", "gce", True),
+        ("abc123def456", "elevation", True),
+        ("def456abc123", "local", False),
+        ("unknown", "gce", False),
+        ("abc123def456extra", "local", False),
+        ("", "elevation", False),
+    ],
+)
+def test_verify_footer_revision_is_exact_and_emits_receipt(observed, environment, ok):
+    source = _src()
+    block = source.split("    const footerText =", 1)[1].split("    if (expectedArch", 1)[0]
+    block = "const footerText =" + block
+    result = _verify_node(
+        "const vm = require('node:vm');\n"
+        + f"const observed = {json.dumps(observed)}, environment = {json.dumps(environment)};\n"
+        + f"const block = {json.dumps(block)};\n"
+        + r"""
+const logs = [];
+const execution = vm.runInNewContext('(async () => {' + block + '})()', {
+  page: {evaluate: async () => observed ? 'Admin View commit:' + observed : 'Admin View'},
+  browser: {}, actualExpectedCommit: 'abc123def456', expectedEnv: environment,
+  failAndExit: async (_browser, ...messages) => { throw Error(messages.join(' ')); },
+  console: {log: (...args) => logs.push(args.join(' '))},
+});
+execution.then(() => process.stdout.write(JSON.stringify({ok: true, logs})),
+  error => process.stdout.write(JSON.stringify({ok: false, error: error.message, logs})));
+"""
+    )
+    assert result["ok"] is ok
+    if ok:
+        assert any("expected=abc123def456 observed=abc123def456" in line for line in result["logs"])
+    else:
+        assert not result["logs"]
+
+
 # ── Merged from tests/scripts/test_section_measurements.py ──
 
 from copy import deepcopy

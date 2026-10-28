@@ -314,7 +314,9 @@ async function verifyAnalyticsRouteWithPlotly(browser, adminTlsOptions, certific
     if (!(await hasVisiblePlotlyChart(page))) await failAndExit(browser, `❌ [Playwright Chart Verification] Verification Failed: No visible Plotly charts found on the dashboard page!`);
 
     const footerText = await page.evaluate(() => document.querySelector('footer')?.innerText || '');
-    if (!footerText.includes(`commit:${actualExpectedCommit}`) && !(expectedEnv === "gce" && footerText.includes("commit:unknown"))) await failAndExit(browser, `❌ [Playwright Commit Verification] Verification Failed: Expected active commit hash: 'commit:${actualExpectedCommit}'`);
+    const observedCommit = footerText.match(/\bcommit:([^\s•]+)/)?.[1] || null;
+    if (!actualExpectedCommit || actualExpectedCommit === 'unknown' || observedCommit !== actualExpectedCommit) await failAndExit(browser, `❌ [Playwright Commit Verification] Verification Failed: expected=${actualExpectedCommit} observed=${observedCommit ?? 'missing'}`);
+    console.log(`[Revision] Verified: expected=${actualExpectedCommit} observed=${observedCommit}`);
     if (expectedArch && !footerText.toLowerCase().includes(expectedArch.toLowerCase())) await failAndExit(browser, `[Dashboard] Verification Failed: Expected architecture '${expectedArch}' not found in footer.`);
     if (expectedEnv && !footerText.toLowerCase().includes(expectedEnv.toLowerCase())) {
       if (!(expectedEnv.toLowerCase() === "elevation" && (footerText.toLowerCase().includes("elevation") || footerText.toLowerCase().includes("gce")))) await failAndExit(browser, `[Dashboard] Verification Failed: Expected environment '${expectedEnv}' not found in footer.`);

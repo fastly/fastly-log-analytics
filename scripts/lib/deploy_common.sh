@@ -469,14 +469,14 @@ start_log_monitor() {
   LOG_MONITOR_TEMP=$(mktemp)
   export LOG_MONITOR_TEMP
   (
-    docker compose logs -f --tail=0 backend 2>/dev/null | grep --line-buffered -E -i "error|exception|traceback|fatal|critical" | grep --line-buffered -v -E -i "Logging errors to|control-room/error-stream|/rum/errors|overcommit|telemetry-proxy|SSR upstream timeout|ducklake advisory lock timed out.*attempt 1|['\"]errors['\"]:[[:space:]]*0|snapshot-id probe failed|lake not attached|and [0-9]+ errors files|metadata pointer unreadable for .*client_errors|enrich_batch complete|REFUSING .*rollback|already running for this service|legacy adoption FAILED" | sed -u 's/^/[Local Standard\/backend] /' >> "$LOG_MONITOR_TEMP" &
-    docker compose logs -f --tail=0 frontend 2>/dev/null | grep --line-buffered -E -i "error|exception|traceback|fatal|critical" | grep --line-buffered -v -E -i "SSR upstream timeout|fetch failed; falling back to client fetch" | sed -u 's/^/[Local Standard\/frontend] /' >> "$LOG_MONITOR_TEMP" &
-    docker compose logs -f --tail=0 caddy 2>/dev/null | grep --line-buffered -E -i "error|exception|traceback|fatal|critical" | grep --line-buffered -v -E -i "context canceled|incomplete response|use of closed network connection" | sed -u 's/^/[Local Standard\/caddy] /' >> "$LOG_MONITOR_TEMP" &
+    docker compose logs -f --tail=0 backend 2>/dev/null | grep --line-buffered -E -i "error|exception|traceback|failed|unauthorized|warn|fatal|critical" | grep --line-buffered -v -E -i "Logging errors to|control-room/error-stream|/rum/errors|overcommit|telemetry-proxy|SSR upstream timeout|ducklake advisory lock timed out.*attempt 1|['\"]errors['\"]:[[:space:]]*0|snapshot-id probe failed|lake not attached|and [0-9]+ errors files|metadata pointer unreadable for .*client_errors|enrich_batch complete|REFUSING .*rollback|already running for this service|legacy adoption FAILED" | sed -u 's/^/[Local Standard\/backend] /' >> "$LOG_MONITOR_TEMP" &
+    docker compose logs -f --tail=0 frontend 2>/dev/null | grep --line-buffered -E -i "error|exception|traceback|failed|unauthorized|warn|fatal|critical" | grep --line-buffered -v -E -i "SSR upstream timeout|fetch failed; falling back to client fetch" | sed -u 's/^/[Local Standard\/frontend] /' >> "$LOG_MONITOR_TEMP" &
+    docker compose logs -f --tail=0 caddy 2>/dev/null | grep --line-buffered -E -i "error|exception|traceback|failed|unauthorized|warn|fatal|critical" | grep --line-buffered -v -E -i "context canceled|incomplete response|use of closed network connection" | sed -u 's/^/[Local Standard\/caddy] /' >> "$LOG_MONITOR_TEMP" &
     sleep 6
-    tail -f -n 0 "${REPORT_DIR}/logs/remote_std_backend.log" 2>/dev/null | grep --line-buffered -E -i "error|exception|traceback|fatal|critical" | grep --line-buffered -v -E -i "control-room/error-stream|/rum/errors|telemetry-proxy|SSR upstream timeout|['\"]errors['\"]:[[:space:]]*0|snapshot-id probe failed|lake not attached|and [0-9]+ errors files|metadata pointer unreadable for .*client_errors|enrich_batch complete|REFUSING .*rollback|already running for this service|legacy adoption FAILED" | sed -u 's/^/[Remote Standard\/backend] /' >> "$LOG_MONITOR_TEMP" &
-    tail -f -n 0 "${REPORT_DIR}/logs/remote_std_frontend.log" 2>/dev/null | grep --line-buffered -E -i "error|exception|traceback|fatal|critical" | grep --line-buffered -v -E -i "ECONNREFUSED 127.0.0.1:8000|SSR upstream timeout|fetch failed; falling back to client fetch" | sed -u 's/^/[Remote Standard\/frontend] /' >> "$LOG_MONITOR_TEMP" &
-    tail -f -n 0 "${REPORT_DIR}/logs/remote_hs_backend.log" 2>/dev/null | grep --line-buffered -E -i "error|exception|traceback|fatal|critical" | grep --line-buffered -v -E -i "control-room/error-stream|/rum/errors|telemetry-proxy|SSR upstream timeout|snapshot-id probe failed|lake not attached|and [0-9]+ errors files|metadata pointer unreadable for .*client_errors|enrich_batch complete|REFUSING .*rollback|clickhouse.operation.*status_code=404|subscription to .* lost.*reconnecting|already running for this service|read tcp .* connection reset by peer" | sed -u 's/^/[Remote High-Scale\/backend] /' >> "$LOG_MONITOR_TEMP" &
-    tail -f -n 0 "${REPORT_DIR}/logs/remote_hs_frontend.log" 2>/dev/null | grep --line-buffered -E -i "error|exception|traceback|fatal|critical" | grep --line-buffered -v -E -i "ECONNREFUSED 127.0.0.1:8000|socket hang up|SSR upstream timeout|fetch failed; falling back to client fetch|read tcp .* connection reset by peer" | sed -u 's/^/[Remote High-Scale\/frontend] /' >> "$LOG_MONITOR_TEMP" &
+    tail -f -n 0 "${REPORT_DIR}/logs/remote_std_backend.log" 2>/dev/null | grep --line-buffered -E -i "error|exception|traceback|failed|unauthorized|warn|fatal|critical" | grep --line-buffered -v -E -i "control-room/error-stream|/rum/errors|telemetry-proxy|SSR upstream timeout|['\"]errors['\"]:[[:space:]]*0|snapshot-id probe failed|lake not attached|and [0-9]+ errors files|metadata pointer unreadable for .*client_errors|enrich_batch complete|REFUSING .*rollback|already running for this service|legacy adoption FAILED" | sed -u 's/^/[Remote Standard\/backend] /' >> "$LOG_MONITOR_TEMP" &
+    tail -f -n 0 "${REPORT_DIR}/logs/remote_std_frontend.log" 2>/dev/null | grep --line-buffered -E -i "error|exception|traceback|failed|unauthorized|warn|fatal|critical" | grep --line-buffered -v -E -i "ECONNREFUSED 127.0.0.1:8000|SSR upstream timeout|fetch failed; falling back to client fetch" | sed -u 's/^/[Remote Standard\/frontend] /' >> "$LOG_MONITOR_TEMP" &
+    tail -f -n 0 "${REPORT_DIR}/logs/remote_hs_backend.log" 2>/dev/null | grep --line-buffered -E -i "error|exception|traceback|failed|unauthorized|warn|fatal|critical" | grep --line-buffered -v -E -i "control-room/error-stream|/rum/errors|telemetry-proxy|SSR upstream timeout|snapshot-id probe failed|lake not attached|and [0-9]+ errors files|metadata pointer unreadable for .*client_errors|enrich_batch complete|REFUSING .*rollback|clickhouse.operation.*status_code=404|subscription to .* lost.*reconnecting|already running for this service|read tcp .* connection reset by peer" | sed -u 's/^/[Remote High-Scale\/backend] /' >> "$LOG_MONITOR_TEMP" &
+    tail -f -n 0 "${REPORT_DIR}/logs/remote_hs_frontend.log" 2>/dev/null | grep --line-buffered -E -i "error|exception|traceback|failed|unauthorized|warn|fatal|critical" | grep --line-buffered -v -E -i "ECONNREFUSED 127.0.0.1:8000|socket hang up|SSR upstream timeout|fetch failed; falling back to client fetch|read tcp .* connection reset by peer" | sed -u 's/^/[Remote High-Scale\/frontend] /' >> "$LOG_MONITOR_TEMP" &
     while true; do sleep 1; done
   ) &
   export MONITOR_BG_PID=$!
@@ -549,7 +549,14 @@ emit_deploy_report_script() {
     async function updateLogPre(id, logPath) {
       try {
         const headRes = await fetchWithRetry(() => fetch(logPath, { method: 'HEAD', cache: 'no-store' }), 2);
-        if (!headRes.ok) return;
+        if (!headRes.ok) {
+          if (id === 'monitored-errors-log') {
+            const pre = document.getElementById(id);
+            if (pre) pre.textContent = 'Watch capture unavailable; raw container logs may cover a different window.';
+            document.getElementById('filtered-errors-count').textContent = 'Watch capture unavailable';
+          }
+          return;
+        }
         const newLen = headRes.headers.get('Content-Length'), pre = document.getElementById(id);
         if (!pre || !newLen || pre.getAttribute('data-last-len') === newLen) return;
         const sel = window.getSelection();
