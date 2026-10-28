@@ -8,6 +8,7 @@ import inspect
 import json
 import logging
 import os
+import threading
 import time as _time
 import typing
 from datetime import UTC
@@ -20,7 +21,7 @@ import duckdb
 import pandas as pd
 import pytest
 import time_machine
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
@@ -382,6 +383,147 @@ def test_bundle_parallel_checkout_and_fallbacks(client, stub_aggregates, stub_to
         if error_cls is None:
             mock_cm.__enter__.assert_called_once()
             mock_cm.__exit__.assert_called_once()
+
+
+@pytest.mark.parametrize("error_cls", [None, _PoolBusy, RuntimeError])
+def test_bundle_starts_aggregates_during_second_checkout(
+    client, stub_aggregates, stub_top_bots, monkeypatch, error_cls
+):
+    aggregate_started = threading.Event()
+    aggregate_finished = threading.Event()
+    overlap = []
+    second_con = object()
+    cm = MagicMock()
+
+    def enter():
+        overlap.append(aggregate_started.wait(timeout=1))
+        if error_cls is not None:
+            raise error_cls("second checkout unavailable")
+        return second_con
+
+    def aggregates(**kwargs):
+        aggregate_started.set()
+        aggregate_finished.set()
+        return stub_aggregates.return_value
+
+    def bots(**kwargs):
+        assert aggregate_finished.is_set() or kwargs["con"] is second_con
+        assert (kwargs["con"] is second_con) is (error_cls is None)
+        return stub_top_bots.return_value
+
+    cm.__enter__.side_effect = enter
+    stub_aggregates.side_effect = aggregates
+    stub_top_bots.side_effect = bots
+    monkeypatch.setattr("backend.core.duckdb_pool.checkout_connection", lambda *args, **kwargs: cm)
+
+    response = client.post("/api/dashboard/bundle", json=_BUNDLE_BODY)
+
+    assert response.status_code == 200
+    assert overlap == [True]
+    assert response.json()["aggregates"]["total_rows"] == 100
+    assert response.json()["top_bots"]["bots"] == stub_top_bots.return_value["bots"]
+    assert cm.__exit__.call_count == (1 if error_cls is None else 0)
+
+
+async def test_bundle_cancellation_drains_checkout_and_both_workers(monkeypatch, stub_aggregates, stub_top_bots):
+    checkout_started = threading.Event()
+    release_checkout = threading.Event()
+    aggregate_started = threading.Event()
+    release_aggregate = threading.Event()
+    bots_started = threading.Event()
+    release_bots = threading.Event()
+    cm = MagicMock()
+    second_con = object()
+    ctx = SimpleNamespace(
+        source={"name": "bundle_cancel", "service_id": "bundle_cancel"},
+        high_scale=None,
+        con=object(),
+        resolve_window=MagicMock(return_value=(_BUNDLE_BODY["start_time"], _BUNDLE_BODY["end_time"])),
+        prewarm_con=AsyncMock(),
+    )
+
+    def enter():
+        checkout_started.set()
+        assert release_checkout.wait(timeout=5)
+        return second_con
+
+    def aggregates(**kwargs):
+        aggregate_started.set()
+        assert release_aggregate.wait(timeout=5)
+        return stub_aggregates.return_value
+
+    def bots(**kwargs):
+        assert kwargs["con"] is second_con
+        bots_started.set()
+        assert release_bots.wait(timeout=5)
+        return stub_top_bots.return_value
+
+    cm.__enter__.side_effect = enter
+    stub_aggregates.side_effect = aggregates
+    stub_top_bots.side_effect = bots
+    monkeypatch.setattr("backend.core.duckdb_pool.checkout_connection", lambda *args, **kwargs: cm)
+    task = asyncio.create_task(dash.dashboard_bundle(AggregatesRequest(**_BUNDLE_BODY), ctx))
+    try:
+        assert await asyncio.to_thread(checkout_started.wait, 2)
+        assert await asyncio.to_thread(aggregate_started.wait, 2)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        cm.__exit__.assert_not_called()
+        release_checkout.set()
+        assert await asyncio.to_thread(bots_started.wait, 2)
+        assert not task.done()
+        cm.__exit__.assert_not_called()
+    finally:
+        release_checkout.set()
+        release_bots.set()
+        release_aggregate.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    cm.__exit__.assert_called_once()
+
+
+async def test_bundle_aggregate_error_waits_for_bots_before_returning_connection(
+    monkeypatch, stub_aggregates, stub_top_bots
+):
+    bots_started = threading.Event()
+    release_bots = threading.Event()
+    aggregate_failed = threading.Event()
+    cm = MagicMock()
+    ctx = SimpleNamespace(
+        source={"name": "bundle_error", "service_id": "bundle_error"},
+        high_scale=None,
+        con=object(),
+        resolve_window=MagicMock(return_value=(_BUNDLE_BODY["start_time"], _BUNDLE_BODY["end_time"])),
+        prewarm_con=AsyncMock(),
+    )
+
+    def aggregates(**kwargs):
+        assert bots_started.wait(timeout=5)
+        aggregate_failed.set()
+        raise RuntimeError("aggregate failed")
+
+    def bots(**kwargs):
+        bots_started.set()
+        assert release_bots.wait(timeout=5)
+        return stub_top_bots.return_value
+
+    stub_aggregates.side_effect = aggregates
+    stub_top_bots.side_effect = bots
+    monkeypatch.setattr("backend.core.duckdb_pool.checkout_connection", lambda *args, **kwargs: cm)
+    task = asyncio.create_task(dash.dashboard_bundle(AggregatesRequest(**_BUNDLE_BODY), ctx))
+    try:
+        assert await asyncio.to_thread(aggregate_failed.wait, 2)
+        await asyncio.sleep(0)
+        assert not task.done()
+        cm.__exit__.assert_not_called()
+    finally:
+        release_bots.set()
+        with pytest.raises(HTTPException) as exc_info:
+            await task
+        assert exc_info.value.detail["error"] == "unhandled_error"
+        assert exc_info.value.__cause__.args == ("aggregate failed",)
+    cm.__exit__.assert_called_once()
 
 
 @pytest.mark.parametrize("sections", [None, ["core"], ["bots"]])

@@ -107,8 +107,9 @@ The system supports three distinct operational personas across the Dashboard:
   }
   ```
 - **Concurrency & Shielding:**
-  - `aggregates` runs on `ctx.con`.
-  - `top_bots` checks out a 2nd pool connection with a 200ms timeout (`asyncio.shield`), falling back to sequential execution on `ctx.con` under pool saturation.
+  - `aggregates` starts on `ctx.con` while `top_bots` checks out an idle second pool connection (`reuse_only=True`, 200ms admission bound). Checkout preparation may take longer; it does not block aggregate startup or build a fresh connection.
+  - If second checkout fails, bots waits for aggregates before using `ctx.con`; connection-local temporary tables are never shared between the two connections.
+  - The shielded gather drains checkout and both workers on cancellation or branch failure before the request dependency releases the primary connection. The second connection is released only after its bots worker finishes. Checkout and branch wall times overlap and must not be summed.
 - **Response Structure (`BundleResponse`):**
   - `aggregates`:
     - `data`: Dictionary mapping field names (`ip`, `asn`, `status`, etc.) to `{ top: [{value, count, label}], total: int }`.

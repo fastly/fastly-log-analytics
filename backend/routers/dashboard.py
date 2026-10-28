@@ -262,120 +262,67 @@ async def dashboard_bundle(
             timer.mark("bundle:top_bots", t1)
         return _assemble_dashboard_bundle_response(aggregates, top_bots, section_timings)
 
-    # Two-branch path (preserves the F015-hardened gather + second_cm
-    # guard untouched). ``sections=None`` and ``sections=['core','bots']``
-    # both land here.
-    # Try to acquire a 2nd pooled connection for parallel execution.
-    # reuse_only: hand back an already-idle conn if one is instantly
-    # available, else raise _PoolBusy at once and fall back to serial. It
-    # must never build fresh — an admitted cold build holds a slot while it
-    # stalls in the serialized DuckLake attach, and concurrent second-
-    # checkouts then drain the pool and 503 every request (prod 2026-10-01,
-    # Local Std; py-spy showed all 8 slots stuck in get_connection). The
-    # best-effort parallel win is simply skipped under contention.
-    second_cm = None
-    second_con = None
-    parallel = False
-
-    def _checkout_second():
+    def _checkout_second() -> tuple[Any, Any]:
+        # Never build a second connection: cold parallel checkouts can
+        # exhaust the pool while waiting for the serialized DuckLake attach.
         cm = checkout_connection(ctx.source, max_wait=0.2, reuse_only=True)
         return cm, cm.__enter__()
 
-    # Shield checkout to prevent connection leaks if client cancels mid-flight
-    checkout_result = []
-
-    async def _shielded_checkout():
-        res = await asyncio.to_thread(_checkout_second)
-        checkout_result.append(res)
+    async def _aggregates_branch() -> Any:
+        t = time.perf_counter()
+        res = await asyncio.to_thread(_run_aggregates, ctx.con)
+        timer.mark("bundle:aggregates", t)
         return res
 
-    t_second_checkout = time.perf_counter()
-    try:
-        await asyncio.shield(_shielded_checkout())
-        if checkout_result:
-            second_cm, second_con = checkout_result[0]
-            parallel = True
-    except _PoolBusy:
+    aggregate_task = asyncio.create_task(_aggregates_branch())
+
+    async def _top_bots_branch() -> dict[str, Any]:
         second_cm = None
         second_con = None
-    except Exception:
-        if checkout_result:
-            second_cm, _ = checkout_result[0]
-        if second_cm is not None:
-            try:
-                second_cm.__exit__(None, None, None)
-            except Exception:
-                logger.debug("dashboard_bundle: second_cm.__exit__ failed (ignored)", exc_info=True)
-        second_cm = None
-        second_con = None
-    finally:
-        timer.mark("bundle:second_checkout", t_second_checkout)
+        t_second_checkout = time.perf_counter()
+        try:
+            second_cm, second_con = await asyncio.to_thread(_checkout_second)
+        except _PoolBusy:
+            pass
+        except Exception:
+            logger.debug("dashboard_bundle: second checkout failed; using serial fallback", exc_info=True)
+        finally:
+            timer.mark("bundle:second_checkout", t_second_checkout)
 
-    if parallel:
-        # Two-connection concurrent path. Wrap each repo call in
-        # ``asyncio.to_thread`` so the synchronous DuckDB execute()
-        # calls run in worker threads, then await both via gather.
-        # Per-branch timing is captured inside each thread so the
-        # section_timings reflect the wall-time each query took (not
-        # the gather wall-clock), preserving the prior shape.
-        async def _aggregates_branch() -> Any:
-            t = time.perf_counter()
-            res = await asyncio.to_thread(_run_aggregates, ctx.con)
-            timer.mark("bundle:aggregates", t)
-            return res
-
-        async def _top_bots_branch() -> dict[str, Any]:
+        try:
+            if second_cm is None:
+                # Fallback shares the primary connection, so its aggregate
+                # worker must finish before the bots query can use it.
+                await aggregate_task
+                second_con = ctx.con
             t = time.perf_counter()
             res = await asyncio.to_thread(_run_top_bots, second_con)
             timer.mark("bundle:top_bots", t)
             return res
-
-        if second_cm is None:  # ``parallel`` guarantees it
-            raise RuntimeError("parallel bundle path is missing its second connection")
-        try:
-            # return_exceptions=True forces gather() to wait for BOTH
-            # threads to finish before returning, even if one raises or
-            # the client cancels mid-flight. The prior implementation
-            # propagated the exception immediately, letting the finally
-            # block return ``second_con`` to the pool while
-            # _top_bots_branch's worker thread was still executing
-            # against it — and DuckDB connections are not safe for
-            # concurrent use. The next checkout would either deadlock on
-            # the internal mutex (8 leaked-active connections exhaust
-            # DUCKDB_POOL_MAX_SIZE → persistent DoS) or, if the mutex
-            # were bypassed, corrupt the DuckDB process memory.
-            # (F015, audit run 7ba15352)
-            gather_task = asyncio.gather(
-                _aggregates_branch(),
-                _top_bots_branch(),
-                return_exceptions=True,
-            )
-            try:
-                results = await asyncio.shield(gather_task)
-            except asyncio.CancelledError:
-                await gather_task
-                raise
-            aggregates, top_bots = results
-            if isinstance(aggregates, BaseException):
-                raise aggregates
-            if isinstance(top_bots, BaseException):
-                raise top_bots
         finally:
-            cm_to_exit = second_cm
-            if cm_to_exit is None and checkout_result:
-                cm_to_exit, _ = checkout_result[0]
-            if cm_to_exit is not None:
+            if second_cm is not None:
                 try:
-                    cm_to_exit.__exit__(None, None, None)
+                    second_cm.__exit__(None, None, None)
                 except Exception:
-                    logger.debug("dashboard_bundle: cm_to_exit.__exit__ failed (ignored)", exc_info=True)
-    else:
-        t0 = time.perf_counter()
-        aggregates = await _shielded_to_thread(_run_aggregates, ctx.con)
-        timer.mark("bundle:aggregates", t0)
-        t1 = time.perf_counter()
-        top_bots = await _shielded_to_thread(_run_top_bots, ctx.con)
-        timer.mark("bundle:top_bots", t1)
+                    logger.debug("dashboard_bundle: second_cm.__exit__ failed (ignored)", exc_info=True)
+
+    # F015: drain both workers AND the second checkout before cancellation
+    # unwinds the request dependency and returns the primary connection.
+    gather_task = asyncio.gather(
+        aggregate_task,
+        _top_bots_branch(),
+        return_exceptions=True,
+    )
+    try:
+        results = await asyncio.shield(gather_task)
+    except asyncio.CancelledError:
+        await gather_task
+        raise
+    aggregates, top_bots = results
+    if isinstance(aggregates, BaseException):
+        raise aggregates
+    if isinstance(top_bots, BaseException):
+        raise top_bots
     return _assemble_dashboard_bundle_response(aggregates, top_bots, section_timings)
 
 
