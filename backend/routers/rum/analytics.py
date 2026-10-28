@@ -1,72 +1,39 @@
-"""Real User Monitoring (RUM) router — provisioning, analytics, live events, and JS assets."""
+"""RUM analytics, beacon health, and live events endpoints."""
 
 from __future__ import annotations
 
 import asyncio
 import datetime as _dt_mod
-import json
 import logging
 import os
 from types import SimpleNamespace
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query, Request, Response
-from sse_starlette.sse import EventSourceResponse
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from backend import config as svcconfig
 from backend.core.duckdb import rum_source_for
-from backend.core.faro_versions import DEFAULT_FARO_VERSION, fetch_available_faro_versions, get_faro_versions_cached
 from backend.core.request_context import (
     RequestContext,
     _ConnectionHolder,
     build_request_context,
-    get_service_id,
-    require_admin,
-    require_service_access,
 )
 from backend.core.storage import execute_with_stale_view_retry
 from backend.models.analytics import (
     RumAnalyticsResponse,
     RumBeaconHealthResponse,
     RumLiveEventItem,
-    RumSettingsUpdateResponse,
-    RumStatusResponse,
-)
-from backend.models.common import (
-    DEFAULT_ERROR_RESPONSES,
-    RumDisableRequest,
-    RumEnableRequest,
-    RumSettingsUpdateRequest,
-    RumUpgradeRequest,
-    RumVersionsResponse,
-)
-from backend.provision.orchestrator import run_with_events
-from backend.provision.rum_orchestrator_v2 import (
-    disable_rum,
-    enable_rum,
-    legacy_rum_vcl_fingerprint,
-    rum_vcl_fingerprint,
-    upgrade_faro_version,
 )
 from backend.repositories import rum as rum_repo
 from backend.repositories.utils.response_cache import bucket_time_to_minute, digest_cache_key
+from backend.routers.rum.provisioning import _normalize_sec
 from backend.utils.bounded_cache import BoundedTTLCache, CacheRegistry
 from backend.utils.date_utils import iso_z, parse_iso_utc
-from backend.utils.router_utils import (
-    correlation_id,
-    load_service_config,
-    make_error,
-    raise_internal,
-    require_fastly_token,
-    stored_fastly_token,
-)
-from backend.utils.sse import sse_response
+from backend.utils.router_utils import correlation_id, make_error
 
 logger = logging.getLogger(__name__)
 
 repo = rum_repo
-
-_RUM_SETTING_KEYS = ("capture_vitals", "capture_performance", "capture_errors", "capture_events", "custom_condition")
 
 # Short/recent RUM windows (<= this span) are served directly from the
 # already-attached read connection via a raw client_vitals/client_errors scan,
@@ -77,479 +44,7 @@ _RUM_FILTERS_MESSAGE = (
     "filters must be a JSON object over browser, os, device, country, pathname, city, region, pop or tls"
 )
 
-rum_router = APIRouter(prefix="/api/services", tags=["rum"], responses=DEFAULT_ERROR_RESPONSES)
-
-# APIRouter without a prefix for serving dynamic JS assets and ingesting beacons
-asset_router = APIRouter(tags=["rum-assets"], responses=DEFAULT_ERROR_RESPONSES)
-
-router = APIRouter()
-
-_FARO_BUNDLE_CACHE: dict[str, bytes] = {}
-CacheRegistry.register("rum._FARO_BUNDLE_CACHE", _FARO_BUNDLE_CACHE)
-
-
-@asset_router.api_route(
-    "/rum-beacon",
-    methods=["GET", "POST", "HEAD", "OPTIONS"],
-    include_in_schema=False,
-)
-async def receive_rum_beacon_fallback() -> Response:
-    """No-op 204 endpoint when `/rum-beacon` reaches the origin directly (local dev / direct tunnel)."""
-    return Response(status_code=204)
-
-
-def _resolve_rum_js_service_id(request: Request, service_id: str | None) -> str | None:
-    """Resolve active service ID from query param, header, cookie, or default configured service."""
-    sid = service_id
-    if not sid:
-        sid = request.headers.get("x-service-id")
-    if not sid:
-        sid = request.cookies.get("active_service_id")
-
-    if sid and not svcconfig.load_config(sid):
-        sid = None
-
-    if not sid:
-        sid = svcconfig.get_active_service_id(fallback_to_first=True)
-    return sid
-
-
-@asset_router.get("/js/rum.js")
-async def get_rum_tracker(request: Request, service_id: str | None = None):
-    def _build_tracker() -> tuple[str | None, str | None]:
-        sid = _resolve_rum_js_service_id(request, service_id)
-        if not sid:
-            return None, None
-        from backend.provision.rum_assets import generate_rum_tracker_js
-
-        return sid, generate_rum_tracker_js(sid)
-
-    try:
-        sid, js_code = await asyncio.to_thread(_build_tracker)
-    except Exception as e:
-        logger.error("Failed to generate dynamic RUM tracker JS: %s", e, exc_info=True)
-        return Response(
-            content="/* Error generating tracker JS */",
-            media_type="application/javascript",
-            headers={"Cache-Control": "private, no-cache, must-revalidate"},
-        )
-
-    if not sid or js_code is None:
-        return Response(
-            content="/* RUM tracker disabled (no active services) */",
-            media_type="application/javascript",
-            headers={"Cache-Control": "private, no-cache, must-revalidate"},
-        )
-
-    return Response(
-        content=js_code,
-        media_type="application/javascript",
-        headers={"Cache-Control": "private, no-cache, must-revalidate"},
-    )
-
-
-@asset_router.get("/js/faro-sdk.js")
-async def get_faro_sdk(request: Request, service_id: str | None = None):
-    sid = _resolve_rum_js_service_id(request, service_id)
-
-    version = DEFAULT_FARO_VERSION
-    if sid:
-        cfg = svcconfig.load_config(sid)
-        if cfg and "rum" in cfg:
-            version = cfg["rum"].get("faro_version") or DEFAULT_FARO_VERSION
-
-    if version in _FARO_BUNDLE_CACHE:
-        bundle_bytes = _FARO_BUNDLE_CACHE[version]
-    else:
-        from backend.core.faro_versions import fetch_faro_bundle
-
-        try:
-            bundle_bytes = await fetch_faro_bundle(version)
-            _FARO_BUNDLE_CACHE[version] = bundle_bytes
-        except Exception as e:
-            logger.error(f"Failed to fetch Faro bundle for version {version}: {e}")
-            if _FARO_BUNDLE_CACHE:
-                fallback_ver = list(_FARO_BUNDLE_CACHE.keys())[0]
-                bundle_bytes = _FARO_BUNDLE_CACHE[fallback_ver]
-            else:
-                raise_internal(
-                    logger,
-                    e,
-                    code="faro_sdk_fetch_failed",
-                    status=502,
-                    message="Failed to fetch Faro SDK",
-                    request=request,
-                )
-
-    return Response(
-        content=bundle_bytes,
-        media_type="application/javascript",
-        headers={"Cache-Control": "public, max-age=86400, stale-while-revalidate=3600"},
-    )
-
-
-def _reload_rum_scheduler_and_cfg(service_id: str, action: str) -> dict[str, Any]:
-    """Reload the scheduler after RUM enable/disable and return the updated service config."""
-    try:
-        from backend.cron.scheduler import get_scheduler
-
-        get_scheduler().reload()
-    except Exception as se:
-        logger.error(f"[rum] Failed to reload scheduler after {action}: {se}")
-    return svcconfig.load_config(service_id) or {}
-
-
-def _normalize_sec(val: float | int | None) -> float | None:
-    """Convert a metric value to seconds rounded to 2 decimal places when > 20ms."""
-    if val is None:
-        return None
-    return round(val / 1000.0, 2) if val > 20 else round(val, 2)
-
-
-@rum_router.post("/{service_id}/rum/enable", dependencies=[Depends(require_admin)])
-async def enable_rum_handler(
-    service_id: str = Path(...),
-    body: RumEnableRequest | None = None,
-) -> EventSourceResponse:
-    """Enable RUM for a service (admin-only, SSE stream)."""
-    body = body or RumEnableRequest()
-    token = body.token
-
-    cfg = load_service_config(service_id)
-
-    stored_token = stored_fastly_token(cfg)
-    if not token:
-        token = stored_token
-
-    if not token:
-        raise HTTPException(status_code=400, detail={"error": "Fastly API token is required to enable RUM."})
-
-    if token != stored_token:
-        cfg["fastly_api_key"] = token
-        svcconfig.mutate_config(service_id, lambda c: c.__setitem__("fastly_api_key", token))
-
-    latest_faro_version = None
-    try:
-        available_versions = await fetch_available_faro_versions()
-        if available_versions:
-            latest_faro_version = available_versions[0]
-    except Exception as e:
-        logger.warning(f"Could not fetch latest Faro version dynamically, falling back to DEFAULT_FARO_VERSION: {e}")
-
-    def stream():
-        yield json.dumps({"type": "status", "message": f"Enabling Real User Monitoring (RUM) for {service_id}..."})
-        try:
-            for event in run_with_events(
-                enable_rum,
-                service_id,
-                token,
-                activate=body.activate,
-                faro_version=latest_faro_version,
-                raise_on_error=True,
-            ):
-                yield json.dumps(event)
-
-            updated_cfg = _reload_rum_scheduler_and_cfg(service_id, "enable")
-            yield json.dumps(
-                {
-                    "type": "done",
-                    "message": "Real User Monitoring (RUM) enabled successfully!"
-                    if body.activate
-                    else "Real User Monitoring (RUM) draft configuration compiled and validated successfully!",
-                    "rum": {
-                        "enabled": svcconfig.is_rum_enabled(updated_cfg),
-                        "enabled_at": updated_cfg.get("rum_enabled_at", ""),
-                    },
-                }
-            )
-        except Exception as e:
-            yield json.dumps({"type": "error", "message": str(e)})
-
-    return sse_response(stream())
-
-
-@rum_router.post("/{service_id}/rum/disable", dependencies=[Depends(require_admin)])
-async def disable_rum_handler(
-    service_id: str = Path(...),
-    body: RumDisableRequest | None = None,
-) -> EventSourceResponse:
-    """Disable RUM for a service (admin-only, SSE stream)."""
-    body = body or RumDisableRequest()
-    token = require_fastly_token(service_id, body.token)
-
-    def stream():
-        yield json.dumps({"type": "status", "message": f"Disabling Real User Monitoring (RUM) for {service_id}..."})
-        try:
-            for event in run_with_events(
-                disable_rum,
-                service_id,
-                token,
-                remove_cloud_files=body.remove_cloud_files,
-                remove_bucket=body.remove_bucket,
-                activate=body.activate,
-                raise_on_error=True,
-            ):
-                yield json.dumps(event)
-
-            updated_cfg = _reload_rum_scheduler_and_cfg(service_id, "disable")
-            yield json.dumps(
-                {
-                    "type": "done",
-                    "message": "Real User Monitoring (RUM) disabled successfully!"
-                    if body.activate
-                    else "Real User Monitoring (RUM) draft configuration compiled and validated successfully!",
-                    "rum": {
-                        "enabled": svcconfig.is_rum_enabled(updated_cfg),
-                    },
-                }
-            )
-        except Exception as e:
-            yield json.dumps({"type": "error", "message": str(e)})
-
-    return sse_response(stream())
-
-
-def _require_rum_status_access(
-    request: Request,
-    service_id: str | None = Depends(get_service_id),
-) -> str | None:
-    analyst_session = getattr(getattr(request, "state", None), "analyst_session", None)
-    if analyst_session is None:
-        return service_id
-    raw_service_ids = getattr(analyst_session, "service_ids", None)
-    if raw_service_ids is None or isinstance(raw_service_ids, (list, tuple, set, frozenset)):
-        if hasattr(request, "path_params"):
-            return require_service_access(request, service_id)
-        allowed = set(raw_service_ids or [])
-        if service_id not in allowed:
-            raise HTTPException(
-                status_code=403,
-                detail={"error": "service_not_authorized", "service": service_id},
-            )
-    return service_id
-
-
-def _rum_status_sync(request: Request, service_id: str) -> dict[str, Any]:
-    _require_rum_status_access(request, service_id)
-    cfg = svcconfig.load_config(service_id) or {}
-    rum_cfg = cfg.get("rum") or {}
-
-    enabled = svcconfig.is_rum_enabled(cfg)
-    enabled_at = cfg.get("rum_enabled_at") or rum_cfg.get("enabled_at")
-
-    analyst_session = getattr(request.state, "analyst_session", None)
-    if analyst_session is not None:
-        return {"enabled": enabled, "enabled_at": enabled_at}
-
-    deployed_sha = cfg.get("rum_vcl_sha") or rum_cfg.get("deployed_vcl_sha")
-    current_sha = rum_vcl_fingerprint(service_id)
-
-    if enabled and not deployed_sha:
-        deployed_sha = current_sha
-
-    vcl_drift = deployed_sha != current_sha if enabled else False
-
-    if enabled and vcl_drift and deployed_sha == legacy_rum_vcl_fingerprint(service_id):
-        vcl_drift = False
-        deployed_sha = current_sha
-        cfg["rum_vcl_sha"] = current_sha
-        svcconfig.mutate_config(service_id, lambda c: c.__setitem__("rum_vcl_sha", current_sha))
-
-    return {
-        "enabled": enabled,
-        "enabled_at": enabled_at,
-        "deployed_vcl_sha": deployed_sha,
-        "current_vcl_sha": current_sha,
-        "vcl_drift": vcl_drift,
-        "capture_vitals": rum_cfg.get("capture_vitals", True),
-        "capture_performance": rum_cfg.get("capture_performance", True),
-        "capture_errors": rum_cfg.get("capture_errors", True),
-        "capture_events": rum_cfg.get("capture_events", True),
-        "custom_condition": rum_cfg.get("custom_condition", ""),
-    }
-
-
-@rum_router.get("/{service_id}/rum/status", response_model=RumStatusResponse, response_model_exclude_unset=True)
-async def rum_status(
-    request: Request,
-    service_id: str = Path(...),
-    _access: str | None = Depends(_require_rum_status_access),
-) -> dict[str, Any]:
-    """Get RUM enable/disable status and VCL drift detection."""
-    return await asyncio.to_thread(_rum_status_sync, request, service_id)
-
-
-@rum_router.get(
-    "/{service_id}/rum/versions",
-    response_model=RumVersionsResponse,
-    response_model_exclude_unset=True,
-    dependencies=[Depends(require_admin)],
-)
-async def rum_versions(service_id: str = Path(...)) -> RumVersionsResponse:
-    """List available Faro Web SDK versions + the pinned/latest state (admin-only)."""
-    cfg = svcconfig.load_config(service_id) or {}
-    rum_cfg = cfg.get("rum") or {}
-    current = rum_cfg.get("faro_version")
-
-    available = await get_faro_versions_cached()
-
-    latest = available[0] if available else None
-    update_available = bool(current and latest and current != latest)
-
-    return RumVersionsResponse(
-        available=available,
-        current=current,
-        latest=latest,
-        update_available=update_available,
-    )
-
-
-@rum_router.post("/{service_id}/rum/upgrade", dependencies=[Depends(require_admin)])
-async def upgrade_rum_handler(
-    service_id: str = Path(...),
-    body: RumUpgradeRequest = Body(...),
-) -> EventSourceResponse:
-    """Upgrade the pinned Faro Web SDK version for a service (admin-only, SSE stream)."""
-    token = require_fastly_token(service_id, body.token)
-
-    try:
-        available = await fetch_available_faro_versions()
-    except ValueError as e:
-        raise_internal(
-            logger,
-            e,
-            code="faro_registry_unavailable",
-            status=503,
-            message="Faro version registry unavailable",
-        )
-
-    if body.version not in available:
-        raise HTTPException(
-            status_code=400,
-            detail=make_error("unknown_faro_version", f"Unknown Faro Web SDK version: {body.version}"),
-        )
-
-    def stream():
-        yield json.dumps(
-            {"type": "status", "message": f"Upgrading Faro Web SDK to v{body.version} for {service_id}..."}
-        )
-        try:
-            for event in run_with_events(
-                upgrade_faro_version,
-                service_id,
-                body.version,
-                token,
-                activate=body.activate,
-                raise_on_error=True,
-            ):
-                yield json.dumps(event)
-
-            updated_cfg = svcconfig.load_config(service_id) or {}
-            updated_rum_cfg = updated_cfg.get("rum") or {}
-            yield json.dumps(
-                {
-                    "type": "done",
-                    "message": f"Faro Web SDK upgraded to v{body.version} successfully!"
-                    if body.activate
-                    else "Faro Web SDK upgrade draft compiled and validated successfully!",
-                    "rum": {
-                        "faro_version": updated_rum_cfg.get("faro_version"),
-                    },
-                }
-            )
-        except Exception as e:
-            yield json.dumps({"type": "error", "message": str(e)})
-
-    return sse_response(stream())
-
-
-@rum_router.post(
-    "/{service_id}/rum/settings",
-    response_model=RumSettingsUpdateResponse,
-    response_model_exclude_unset=True,
-    dependencies=[Depends(require_admin)],
-)
-def update_rum_settings(
-    service_id: str = Path(...),
-    body: RumSettingsUpdateRequest = Body(...),
-) -> dict[str, Any]:
-    """Update RUM capture settings and re-deploy rum-tracker.js (admin-only)."""
-    cfg = load_service_config(service_id)
-
-    import copy
-
-    original_cfg = copy.deepcopy(cfg)
-
-    def _apply_settings(c: dict) -> None:
-        rum_block = c.setdefault("rum", {})
-        rum_block["capture_vitals"] = body.capture_vitals
-        rum_block["capture_performance"] = body.capture_performance
-        rum_block["capture_errors"] = body.capture_errors
-        rum_block["capture_events"] = body.capture_events
-        rum_block["custom_condition"] = body.custom_condition
-
-    def _roll_back_settings(c: dict) -> None:
-        original_rum = original_cfg.get("rum") or {}
-        rum_block = c.setdefault("rum", {})
-        for key in _RUM_SETTING_KEYS:
-            if key in original_rum:
-                rum_block[key] = original_rum[key]
-            else:
-                rum_block.pop(key, None)
-
-    svcconfig.mutate_config(service_id, _apply_settings)
-
-    token = require_fastly_token(service_id, body.token)
-
-    from backend.provision.rum_assets import upload_rum_tracker_js
-
-    try:
-        res = upload_rum_tracker_js(service_id, token, overwrite=True)
-    except Exception as e:
-        try:
-            svcconfig.mutate_config(service_id, _roll_back_settings)
-        except Exception as rollback_err:
-            logger.error(f"Failed to rollback service config for {service_id}: {rollback_err}")
-        raise_internal(
-            logger,
-            e,
-            code="rum_tracker_upload_failed",
-            message="Failed to upload RUM tracker wrapper to FOS",
-        )
-
-    orig_rum = original_cfg.get("rum") or {}
-    rum_was_enabled = svcconfig.is_rum_enabled(original_cfg)
-    condition_changed = orig_rum.get("custom_condition") != body.custom_condition
-
-    needs_reconciliation = not rum_was_enabled or condition_changed
-
-    if needs_reconciliation:
-        from backend.provision.declarative.reconciler import reconcile_vcl_state
-
-        try:
-            reconcile_vcl_state(service_id, token, dry_run=False, activate=True)
-        except Exception as e:
-            try:
-                svcconfig.mutate_config(service_id, _roll_back_settings)
-            except Exception as rollback_err:
-                logger.error(f"Failed to rollback service config for {service_id}: {rollback_err}")
-            raise_internal(
-                logger,
-                e,
-                code="rum_reconcile_failed",
-                message="Failed to reconcile and deploy updated RUM conditions to Fastly",
-            )
-    else:
-        logger.info(
-            f"[rum] Bypassing Fastly VCL reconciliation for service {service_id} "
-            "because RUM is already enabled and custom_condition is unchanged."
-        )
-
-    return {
-        "ok": True,
-        "message": "RUM capture settings updated, wrapper re-deployed, and Fastly configuration reconciled!",
-        "skipped": res.get("skipped", False),
-    }
+rum_analytics_router = APIRouter()
 
 
 def _inject_telemetry(res: dict) -> dict:
@@ -661,7 +156,7 @@ def _rum_beacon_health_sync(ctx: RequestContext) -> dict[str, Any]:
         }
 
 
-@rum_router.get(
+@rum_analytics_router.get(
     "/{service_id}/rum/beacon-health", response_model=RumBeaconHealthResponse, response_model_exclude_unset=True
 )
 async def rum_beacon_health(
@@ -672,7 +167,9 @@ async def rum_beacon_health(
     return _inject_telemetry(await asyncio.to_thread(_rum_beacon_health_sync, ctx))
 
 
-@rum_router.get("/{service_id}/rum/analytics", response_model=RumAnalyticsResponse, response_model_exclude_unset=True)
+@rum_analytics_router.get(
+    "/{service_id}/rum/analytics", response_model=RumAnalyticsResponse, response_model_exclude_unset=True
+)
 async def rum_analytics(
     request: Request,
     start_time: str | None = Query(None),
@@ -956,7 +453,7 @@ _live_events_cache: BoundedTTLCache = BoundedTTLCache(maxsize=128, ttl_seconds=1
 CacheRegistry.register("rum._live_events_cache", _live_events_cache)
 
 
-@rum_router.get("/{service_id}/rum/live-events", response_model=list[RumLiveEventItem])
+@rum_analytics_router.get("/{service_id}/rum/live-events", response_model=list[RumLiveEventItem])
 async def rum_live_events(
     start_time: str | None = None,
     end_time: str | None = None,
@@ -1147,7 +644,3 @@ async def rum_live_events(
     except Exception as e:
         logger.error(f"[rum] Failed to fetch live events for {service_id}: {e}")
         return []
-
-
-router.include_router(rum_router)
-router.include_router(asset_router)

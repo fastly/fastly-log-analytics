@@ -53,7 +53,7 @@ _SQL_CALL = re.compile(
     r"\.execute\(|\.executemany\(|\.fetchall\(|\.fetchone\(|track_query\(|\bDESCRIBE\s+\{|"
     r"[\"'`]\s*(SELECT|INSERT INTO|DELETE FROM|UPDATE\s+\w+\s+SET|CREATE\s+(TEMP\s+)?TABLE|WITH\s+\w+\s+AS)\b"
 )
-_INLINE_SQL_EXEMPT_ROUTERS = {"admin/compaction.py", "admin/health.py", "control_room.py"}
+_INLINE_SQL_EXEMPT_ROUTERS = {"admin/compaction.py", "admin/health.py", "control_room.py", "root_system.py"}
 
 
 def test_no_inline_sql_in_routers() -> None:
@@ -291,6 +291,7 @@ ALLOWED_STRING_DETAILS: set[tuple[int, str]] = {
     (400, "RUM sync is only supported in standard deployment mode."),
     (403, "Read-only services cannot run RUM discovery."),
     (400, "RUM discovery is only supported under high-scale mode."),
+    (501, "Prometheus client not installed"),
 }
 HELPER_FUNCS = frozenset({"bad_request", "not_found", "validation_failed", "make_error"})
 

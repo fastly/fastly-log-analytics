@@ -76,6 +76,10 @@ class InsightsRegistry:
 # Singleton registry instance
 registry: InsightsRegistry = InsightsRegistry()
 
+from backend.utils.module_shim import install_shim_module  # noqa: E402
+
+from . import repository as _repository  # noqa: E402
+from . import rollup_fastpath as _rollup_fastpath
 from .repository import _insights_cache, check_insights_cache, get_cache_collapse_detail, get_insights  # noqa: E402
 from .shaping import (  # noqa: E402
     build_error_insight_card,
@@ -124,3 +128,5 @@ __all__ = [
     "shape_cache_collapse_recent_misses",
     "shape_insight_card_from_rows",
 ]
+
+install_shim_module(__name__, (_repository, _rollup_fastpath))

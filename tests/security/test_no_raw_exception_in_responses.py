@@ -46,15 +46,15 @@ ALLOWED: dict[tuple[str, str], str] = {
         "scoring_labels_update",
     ): "validation: labels.ALLOWED_LABELS ValueError, authored",
     (
-        "backend/main.py",
+        "backend/routers/root_system.py",
         "_invalid_service_id_handler",
     ): "validation: 422 body echoing the authored invalid-service-id ValueError",
-    ("backend/routers/share_admin.py", "share_start"): SHARE,
-    ("backend/routers/share_admin.py", "create_invite"): SHARE,
-    ("backend/routers/share_admin.py", "update_invite_pii"): SHARE,
-    ("backend/routers/share_admin.py", "update_invite_passcode"): SHARE,
-    ("backend/routers/share_admin.py", "backup_import"): SHARE,
-    ("backend/routers/share_admin.py", "gdpr_erase"): SHARE,
+    ("backend/routers/share_admin/tunnel_routes.py", "share_start"): SHARE,
+    ("backend/routers/share_admin/invites.py", "create_invite"): SHARE,
+    ("backend/routers/share_admin/invites.py", "update_invite_pii"): SHARE,
+    ("backend/routers/share_admin/invites.py", "update_invite_passcode"): SHARE,
+    ("backend/routers/share_admin/sessions_and_tos.py", "backup_import"): SHARE,
+    ("backend/routers/share_admin/sessions_and_tos.py", "gdpr_erase"): SHARE,
 }
 
 

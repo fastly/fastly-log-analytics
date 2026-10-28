@@ -19,8 +19,11 @@ Submodules:
 - :mod:`.partial_hour` — active-hour incremental rollup accumulator and reader.
 - :mod:`.recompute` — per-tick recompute + one-shot backfill + cleanup +
   the shared per-field COPY driver + RUM aggregate rollups.
-- :mod:`.origin_dims` — origin, network, and performance rollup writers.
-- :mod:`.security_dims` — security, NGWAF bots, and well-known bots rollup writers.
+- :mod:`.origin_dims` — origin and performance rollup writers.
+- :mod:`.network_dims` — POP health and network dimension rollup writers.
+- :mod:`.security_dims` — security and NGWAF bots rollup writers.
+- :mod:`.security_bots` — Fastly NGWAF API client, bot cache helpers, and
+  well-known bots rollup writers/readers.
 """
 
 from __future__ import annotations
@@ -32,11 +35,13 @@ from . import (
     bundle_builder,
     day_bundles,
     day_compaction_sql,
+    network_dims,
     origin_dims,
     overview_rollups,
     partial_hour,
     recompute,
     rollup_coverage,
+    security_bots,
     security_dims,
     session_rollups,
     time_series_rollups,
@@ -325,9 +330,11 @@ __all__ = [
     "bundle_builder",
     "day_bundles",
     "day_compaction_sql",
+    "network_dims",
     "partial_hour",
     "rollup_coverage",
     "overview_rollups",
+    "security_bots",
     "session_rollups",
     "time_series_rollups",
 ]
@@ -339,11 +346,13 @@ install_shim_module(
         bundle_builder,
         day_bundles,
         day_compaction_sql,
+        network_dims,
         partial_hour,
         origin_dims,
         overview_rollups,
         recompute,
         rollup_coverage,
+        security_bots,
         security_dims,
         session_rollups,
         time_series_rollups,

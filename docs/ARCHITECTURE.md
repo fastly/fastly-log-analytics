@@ -164,10 +164,14 @@ Both modes share a single backend code path — `ShareStartPayload.use_tunnel=Fa
 
 ### Module layout
 
-The tunnel manager and share-DB are split into cohesive packages:
+The tunnel manager, share-DB, and share/RUM/entrypoint routers and analytical evaluators are split into cohesive packages:
 
 - [`backend/utils/tunnel/`](../backend/utils/tunnel/) — `manager.py` owns the `TunnelManager` singleton (direct-mode lifecycle, sever-all panic), `session.py` holds `AnalystSession`, `rate_limiter.py` is the sliding-window `_LoginRateLimiter`, `state.py` persists `tunnel_state.json`, `fingerprint.py` computes the session fingerprint.
 - [`backend/core/share_db/__init__.py`](../backend/core/share_db/__init__.py) — consolidates `invites.py` and `validation.py` (with `sys.modules` aliases) alongside connection/schema/tos/settings/sessions/audit/passcode (argon2id hashing with a back-compat scrypt verify branch and rehash-on-login upgrade).
+- [`backend/routers/share_admin/`](../backend/routers/share_admin/) — splits live-share admin endpoints into `invites.py`, `sessions_and_tos.py`, and `tunnel_routes.py`, re-exported via `install_shim_module`.
+- [`backend/routers/rum/`](../backend/routers/rum/) — splits RUM endpoints into `beacon_ingest.py`, `provisioning.py`, and `analytics.py`, re-exported via `install_shim_module`.
+- [`backend/main.py`](../backend/main.py), [`backend/core/lifespan.py`](../backend/core/lifespan.py), & [`backend/routers/root_system.py`](../backend/routers/root_system.py) — separates FastAPI lifespan/worker bootstrap (`lifespan.py`) and root/middleware/health endpoints (`root_system.py`) from the ASGI app entrypoint (`main.py`), re-exported via `install_shim_module`.
+- [`backend/repositories/insights/`](../backend/repositories/insights/), [`backend/high_scale/insights/`](../backend/high_scale/insights/), & [`backend/core/rollups/`](../backend/core/rollups/) — separates DuckDB insights rollup fast-path (`rollup_fastpath.py`) from coalesced full-scan (`repository.py`), ClickHouse insights SQL templates (`sql_queries.py`) from row evaluation (`evaluator.py`), and dimension rollups into `origin_dims.py`, `network_dims.py`, `security_dims.py`, and `security_bots.py`.
 
 ### Security Isolation Layers
 *   **Middleware Enforcement:** The `RemoteAccessMiddleware` intercepts any request coming from shared endpoints, strictly blocking administrative endpoints (such as configurations, deletion paths, and credentials) while rate-limiting asset scraping. The Caddyfile + compose + middleware trust topology is asserted in pytest so a regression that re-opens the bypass class trips CI.
