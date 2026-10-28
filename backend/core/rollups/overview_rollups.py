@@ -28,6 +28,8 @@ def build_overview_bundles(service_id: str, source: dict, hours: list[str]) -> i
             return None
 
         has_cache = "cache" in cols
+        ottfb_ms = metric_expressions.coalesce("CAST(ottfb AS DOUBLE) / 1000.0", "0.0") if "ottfb" in cols else "0.0"
+        ottlb_ms = metric_expressions.coalesce("CAST(ottlb AS DOUBLE) / 1000.0", "0.0") if "ottlb" in cols else "0.0"
         select_parts: list[str] = [
             "CAST(COUNT(*) AS BIGINT) AS requests",
             *(
@@ -107,10 +109,10 @@ def build_overview_bundles(service_id: str, source: dict, hours: list[str]) -> i
             *(
                 (
                     "CAST(COUNT(*) FILTER (WHERE ttfb IS NOT NULL AND elapsed IS NOT NULL) AS BIGINT) AS waterfall_count",
-                    f"CAST(COALESCE(SUM(GREATEST(0.0, (CAST(ttfb AS DOUBLE) * 1000.0) - ({'COALESCE(CAST(ottfb AS DOUBLE) / 1000.0, 0.0)' if 'ottfb' in cols else '0.0'}))) FILTER (WHERE ttfb IS NOT NULL AND elapsed IS NOT NULL), 0.0) AS DOUBLE) AS edge_processing_sum",
-                    f"CAST(COALESCE(SUM({'COALESCE(CAST(ottfb AS DOUBLE) / 1000.0, 0.0)' if 'ottfb' in cols else '0.0'}) FILTER (WHERE ttfb IS NOT NULL AND elapsed IS NOT NULL), 0.0) AS DOUBLE) AS origin_wait_sum",
-                    f"CAST(COALESCE(SUM(GREATEST(0.0, ({'COALESCE(CAST(ottlb AS DOUBLE) / 1000.0, 0.0)' if 'ottlb' in cols else '0.0'}) - ({'COALESCE(CAST(ottfb AS DOUBLE) / 1000.0, 0.0)' if 'ottfb' in cols else '0.0'}))) FILTER (WHERE ttfb IS NOT NULL AND elapsed IS NOT NULL), 0.0) AS DOUBLE) AS origin_download_sum",
-                    f"CAST(COALESCE(SUM(GREATEST(0.0, (CAST(elapsed AS DOUBLE) / 1000.0) - GREATEST({'COALESCE(CAST(ottlb AS DOUBLE) / 1000.0, 0.0)' if 'ottlb' in cols else '0.0'}, CAST(ttfb AS DOUBLE) * 1000.0))) FILTER (WHERE ttfb IS NOT NULL AND elapsed IS NOT NULL), 0.0) AS DOUBLE) AS client_download_sum",
+                    f"CAST({metric_expressions.sum_or_zero(f'GREATEST(0.0, (CAST(ttfb AS DOUBLE) * 1000.0) - ({ottfb_ms}))', zero='0.0', where='ttfb IS NOT NULL AND elapsed IS NOT NULL')} AS DOUBLE) AS edge_processing_sum",
+                    f"CAST({metric_expressions.sum_or_zero(ottfb_ms, zero='0.0', where='ttfb IS NOT NULL AND elapsed IS NOT NULL')} AS DOUBLE) AS origin_wait_sum",
+                    f"CAST({metric_expressions.sum_or_zero(f'GREATEST(0.0, ({ottlb_ms}) - ({ottfb_ms}))', zero='0.0', where='ttfb IS NOT NULL AND elapsed IS NOT NULL')} AS DOUBLE) AS origin_download_sum",
+                    f"CAST({metric_expressions.sum_or_zero(f'GREATEST(0.0, (CAST(elapsed AS DOUBLE) / 1000.0) - GREATEST({ottlb_ms}, CAST(ttfb AS DOUBLE) * 1000.0))', zero='0.0', where='ttfb IS NOT NULL AND elapsed IS NOT NULL')} AS DOUBLE) AS client_download_sum",
                 )
                 if "ttfb" in cols and "elapsed" in cols
                 else (

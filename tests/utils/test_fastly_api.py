@@ -1807,15 +1807,17 @@ def test_pop_and_clear():
     assert len(cache) == 0 and all(f"k{i}" not in cache for i in range(5))
 
 
-def test_lazy_reap_fires_after_n_writes():
-    cache = BoundedTTLCache(maxsize=10_000, ttl_seconds=0.05)
-    for i in range(50):
-        cache[f"expired_{i}"] = i
-    time.sleep(0.40)
-    for i in range(100):
-        cache[f"fresh_{i}"] = i
-    assert all(f"expired_{i}" not in cache for i in range(50))
-    assert all(cache[f"fresh_{i}"] == i for i in range(100))
+def test_lazy_reap_fires_after_n_writes() -> None:
+    with patch("backend.utils.bounded_cache.time") as clock:
+        clock.monotonic.return_value = 10.0
+        cache = BoundedTTLCache(maxsize=10_000, ttl_seconds=0.05)
+        for i in range(50):
+            cache[f"expired_{i}"] = i
+        clock.monotonic.return_value = 10.4
+        for i in range(100):
+            cache[f"fresh_{i}"] = i
+        assert all(f"expired_{i}" not in cache for i in range(50))
+        assert all(cache[f"fresh_{i}"] == i for i in range(100))
 
 
 def test_iteration_snapshot_invalid_args_and_tuple_values():

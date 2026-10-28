@@ -1015,7 +1015,7 @@ class _ScalarsRollupMixin:
         ov_cols = {str(r[0]) for r in desc_rows}
         if "waterfall_count" in ov_cols:
             wf_row = self._exec_rollup(
-                f"SELECT CAST(COALESCE(SUM(waterfall_count), 0) AS BIGINT), "
+                f"SELECT CAST({metric_expressions.sum_or_zero('waterfall_count')} AS BIGINT), "
                 f"       SUM(edge_processing_sum) / NULLIF(SUM(waterfall_count), 0), "
                 f"       SUM(origin_wait_sum) / NULLIF(SUM(waterfall_count), 0), "
                 f"       SUM(origin_download_sum) / NULLIF(SUM(waterfall_count), 0), "
@@ -1062,11 +1062,11 @@ class _ScalarsRollupMixin:
             return None
         ts_sql = quote_path_list(ts_paths)
         ov_row = self._exec_rollup(
-            f"SELECT CAST(COALESCE(SUM(requests), 0) AS BIGINT), "
-            f"       COALESCE(SUM(hit_elapsed_sum), 0.0), "
-            f"       CAST(COALESCE(SUM(hit_elapsed_count), 0) AS BIGINT), "
-            f"       COALESCE(SUM(miss_elapsed_sum), 0.0), "
-            f"       CAST(COALESCE(SUM(miss_elapsed_count), 0) AS BIGINT) "
+            f"SELECT CAST({metric_expressions.sum_or_zero('requests')} AS BIGINT), "
+            f"       {metric_expressions.sum_or_zero('hit_elapsed_sum', zero='0.0')}, "
+            f"       CAST({metric_expressions.sum_or_zero('hit_elapsed_count')} AS BIGINT), "
+            f"       {metric_expressions.sum_or_zero('miss_elapsed_sum', zero='0.0')}, "
+            f"       CAST({metric_expressions.sum_or_zero('miss_elapsed_count')} AS BIGINT) "
             f"FROM read_parquet([{ov_sql}], union_by_name=true)",
             tag="perf_waterfall_ov_fallback",
             fetchone=True,
@@ -1084,7 +1084,7 @@ class _ScalarsRollupMixin:
         avg_miss_el_ms = (miss_el_sum / miss_el_cnt) / 1000.0 if miss_el_cnt > 0 else avg_elapsed_ms
 
         ts_row = self._exec_rollup(
-            f"SELECT COALESCE(SUM(ttfb_sum), 0.0), CAST(COALESCE(SUM(ttfb_count), 0) AS BIGINT) "
+            f"SELECT {metric_expressions.sum_or_zero('ttfb_sum', zero='0.0')}, CAST({metric_expressions.sum_or_zero('ttfb_count')} AS BIGINT) "
             f"FROM read_parquet([{ts_sql}], union_by_name=true)",
             tag="perf_waterfall_ts_fallback",
             fetchone=True,
@@ -1102,9 +1102,9 @@ class _ScalarsRollupMixin:
                 os_sql = quote_path_list(os_paths)
                 os_row = self._exec_rollup(
                     f"SELECT SUM(ottfb_p50_us * lat_us_count) / NULLIF(SUM(lat_us_count), 0), "
-                    f"       CAST(COALESCE(SUM(lat_us_count), 0) AS BIGINT), "
+                    f"       CAST({metric_expressions.sum_or_zero('lat_us_count')} AS BIGINT), "
                     f"       SUM(ottlb_p50_us * ottlb_count) / NULLIF(SUM(ottlb_count), 0), "
-                    f"       CAST(COALESCE(SUM(ottlb_count), 0) AS BIGINT) "
+                    f"       CAST({metric_expressions.sum_or_zero('ottlb_count')} AS BIGINT) "
                     f"FROM read_parquet([{os_sql}], union_by_name=true)",
                     tag="perf_waterfall_os_fallback",
                     fetchone=True,
@@ -1123,7 +1123,7 @@ class _ScalarsRollupMixin:
         scatter_fb: list[dict[str, Any]] = []
         sc_fb_rows = self._exec_rollup(
             f"SELECT (ttfb_sum / ttfb_count) * 1000.0 AS origin_ms, "
-            f"       CASE WHEN COALESCE(hits, 0) * 2 >= COALESCE(requests, 0) THEN 'HIT' ELSE 'MISS' END AS cache "
+            f"       CASE WHEN {metric_expressions.coalesce('hits', '0')} * 2 >= {metric_expressions.coalesce('requests', '0')} THEN 'HIT' ELSE 'MISS' END AS cache "
             f"FROM read_parquet([{ts_sql}], union_by_name=true) "
             f"WHERE ttfb_count > 0 "
             f"ORDER BY bucket DESC LIMIT 300",
