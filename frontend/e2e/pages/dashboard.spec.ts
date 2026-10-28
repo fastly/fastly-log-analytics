@@ -210,7 +210,8 @@ test('an unconfigured service never shows NGWAF cards, even with saved selection
 test.describe('Alerts & Notifications Page Contract (/alerts)', () => {
   test('1. Route accessibility, environment indicator, zero-CLS containers & warm-load budget', async ({ page }) => {
     await assertRouteAndFooter(page, '/alerts', /Alerts/i)
-    for (const id of ['alerts-page-root', 'alerts-summary-grid', 'alerts-list-card']) await expect(page.locator(`[data-testid="${id}"]`)).toBeVisible({ timeout: 15_000 })
+    const main = page.getByRole('main')
+    for (const id of ['alerts-page-root', 'alerts-summary-grid', 'alerts-list-card']) await expect(main.getByTestId(id)).toBeVisible({ timeout: 15_000 })
     await assertIntrinsicCount(page, 2)
     await assertWarmPerfBudget(page, '/alerts', { settleMs: 800, checkLcp: false })
   })
