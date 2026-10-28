@@ -94,8 +94,8 @@ def is_heavy_route(route_template: str | None) -> bool:
 
 
 def _slow_checkout_ms() -> float:
-    """Checkouts that wait at least this long are logged (0 disables; default 500 ms)."""
-    return _env_float("DUCKDB_POOL_SLOW_CHECKOUT_MS", 500.0)
+    """Checkouts that wait at least this long are logged (0 disables; default 2500 ms)."""
+    return _env_float("DUCKDB_POOL_SLOW_CHECKOUT_MS", 2500.0)
 
 
 def _pool_conn_memory_limit() -> str | None:

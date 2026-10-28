@@ -50,7 +50,7 @@ import sys  # noqa: E402
 from backend.utils.telemetry import configure_structlog  # noqa: E402
 
 configure_structlog()
-logging.getLogger("apscheduler").setLevel(logging.WARNING)
+logging.getLogger("apscheduler").setLevel(logging.ERROR)
 logging.getLogger("urllib3.connectionpool").setLevel(logging.ERROR)
 
 # Prevent OpenTelemetry FastAPI instrumentation from crashing on fastapi.routing._IncludedRouter
@@ -65,7 +65,6 @@ except Exception:
 logger = logging.getLogger("backend.main")
 
 from fastapi import FastAPI  # noqa: E402
-from fastapi.responses import ORJSONResponse  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 
 # ── Path setup ────────────────────────────────────────────────────────────────
@@ -112,7 +111,6 @@ app = FastAPI(
         "Serves the Next.js frontend and exposes an OpenAPI spec at /openapi.json."
     ),
     lifespan=lifespan,
-    default_response_class=ORJSONResponse,
 )
 
 configure_root_system(app)

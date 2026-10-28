@@ -20,6 +20,7 @@ from backend import config
 from backend.core.duckdb import escape_sql_literal, require_safe_ident
 from backend.core.log_fields import LOG_FIELD_CATALOG
 from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry
+from backend.utils.telemetry import log_once_per
 
 _C, _R = "\x1b[36m", "\x1b[0m"
 _ICE = f"🧊 {_C}[storage]{_R}"
@@ -381,12 +382,13 @@ def _resolve_data_path(source: dict, service_id: object) -> str:
                 local_fallback,
             )
             return local_fallback
-        logger.warning(
-            "⚠️ [storage-guard] Remote S3 DuckLake parquet scan is actively allowed via ALLOW_REMOTE_S3_PARQUET_SCAN=1 "
-            "(service=%s, data_path=%s). Queries will incur S3 network latency.",
-            service_id,
-            data_path,
-        )
+        if not config.is_high_scale_mode(source) and log_once_per(f"storage_guard_remote_s3:{service_id}", 300):
+            logger.warning(
+                "⚠️ [storage-guard] Remote S3 DuckLake parquet scan is actively allowed via ALLOW_REMOTE_S3_PARQUET_SCAN=1 "
+                "(service=%s, data_path=%s). Queries will incur S3 network latency.",
+                service_id,
+                data_path,
+            )
     return data_path
 
 
