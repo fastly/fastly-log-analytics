@@ -1445,6 +1445,19 @@ commands. The generator regression executes both fetch and XHR-triggered
 flushes and checks that every unrolled POST retains keepalive. The native
 `sendBeacon` path is separate and unchanged.
 
+### 55. Filtered dashboard signals must reuse the materialized target
+
+The filtered dashboard already copies requested CSV backing columns into its
+connection-local temporary table. WAF-signal and scoring-reason expansions must
+read that current query target, not rescan the original storage view with the
+same filters. The unfiltered rollup path creates no temp, so its missing-rollup
+fallback still uses the original table and exact inclusive bounds.
+
+Keep duplicate-token counts, blank/null handling and masking unchanged. The
+omitted/null/explicit-field cases in `test_top_n_rollups_golden.py` enforce temp
+reuse; the no-temp fallback case pins the raw path. Do not share these temporary
+tables with the parallel bots connection.
+
 ### Bounded ClickHouse diagnostic index (ADR-20)
 
 `backend/core/clickhouse_{manifest,publication,rows,export}.py` (`clickhouse_schema` folded into `clickhouse_publication.py`) implements

@@ -12,6 +12,8 @@ source "$SCRIPT_DIR/lib/ratchet_common.sh"
 # exception handling, sleep intervals and retry behavior retain the same allowance.
 # 88e3f468 moved the unchanged _pool_query_watchdog into request_telemetry/query_registry.py;
 # transfer its existing one-loop allowance without retaining the deleted module entry.
+# bef84c8d moved unchanged ValkeyPublisher.subscribe from telemetry/metrics.py
+# to telemetry/log_flusher.py; relocate its existing one-loop allowance.
 BASELINE='
 backend/config.py 2
 backend/core/_duckdb_status.py 1
@@ -31,7 +33,7 @@ backend/routers/provision.py 1
 backend/routers/services/__init__.py 2
 backend/routers/services/crud.py 1
 backend/utils/telemetry.py 1
-backend/utils/telemetry/metrics.py 1
+backend/utils/telemetry/log_flusher.py 1
 '
 
 run_ast_ratchet \

@@ -9,6 +9,7 @@ source "$SCRIPT_DIR/lib/ratchet_common.sh"
 PATTERN='COALESCE\('
 # 88e3f468 moved unchanged BOT_EFFICIENCY SQL from security.py to security/sql.py.
 # Transfer its one matching line and retire the stale 35-line allowance.
+# bef84c8d moved the unchanged sessions rollup expression into sessions/rollup_reader.py.
 BASELINE='
 backend/core/rollups/origin_dims.py 5
 backend/core/rollups/recompute.py 11
@@ -19,7 +20,7 @@ backend/repositories/network.py 3
 backend/repositories/origin.py 24
 backend/repositories/rum.py 28
 backend/repositories/security/sql.py 1
-backend/repositories/sessions.py 1
+backend/repositories/sessions/rollup_reader.py 1
 '
 
 run_regex_ratchet \

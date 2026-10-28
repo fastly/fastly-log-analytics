@@ -934,7 +934,14 @@ def test_get_insights_basic_cache_and_models(in_memory_duckdb, test_service_sour
 def test_get_insights_custom_definition_and_error_handling(in_memory_duckdb, test_service_source, monkeypatch):
     table_name = _safe_table(test_service_source["name"])
     _create_full_catalog_table(in_memory_duckdb, table_name)
-    insert_mock_logs(in_memory_duckdb, table_name, generate_mock_logs(test_service_source, num_logs=30, hours_ago=30))
+    now = datetime.now(UTC)
+    in_memory_duckdb.executemany(
+        f'INSERT INTO {table_name} ("timestamp", "url") VALUES (?, ?)',
+        [
+            ((now - timedelta(hours=24, minutes=30)).isoformat(), "/baseline"),
+            ((now - timedelta(minutes=10)).isoformat(), "/custom"),
+        ],
+    )
 
     def _proc(row: Any, definition: Any, context: Any) -> dict[str, Any]:
         return {"label": str(row[0]), "current_val": float(row[1]), "severity": "warning"}

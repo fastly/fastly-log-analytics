@@ -799,11 +799,11 @@ def _compute_dashboard_aggregates(
                     return
             q = SQL.VIRTUAL_FIELD_EXPLODED_TOP_N.format(
                 backing_col=backing_col,
-                table_name=orig_table_name,
-                where_clause=orig_where_clause,
+                table_name=table_name,
+                where_clause=where_clause,
                 requests_metric=CANONICAL_METRICS["requests"],
             )
-            res = runner.execute(q, orig_params).fetchall()
+            res = runner.execute(q, params).fetchall()
             if res:
                 results[virtual_id] = {
                     "top": [{"value": r[0], "count": r[1]} for r in res],

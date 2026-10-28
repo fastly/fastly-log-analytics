@@ -2901,11 +2901,8 @@ def test_filtered_dashboard_virtual_expansions_preserve_scoped_counts(
     expansions = [(sql, params) for sql, params in queries if "unnest(string_split(" in sql]
     assert len(expansions) == 2
     for sql, params in expansions:
-        if f"FROM {temp}" in sql:
-            assert f"FROM {table}" not in sql
-            assert "AND 1=1" in sql and params == []
-        else:
-            assert f"FROM {table}" in sql
+        assert f"FROM {temp}" in sql and f"FROM {table}" not in sql
+        assert "AND 1=1" in sql and params == []
 
 
 @pytest.mark.parametrize(

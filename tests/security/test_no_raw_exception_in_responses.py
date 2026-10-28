@@ -300,9 +300,12 @@ def test_backend_has_no_assert_statements():
 
 
 def test_reconciler_whitelist_guard_survives_python_optimize():
+    import inspect
+
     from backend.provision.declarative import reconciler
 
-    src = Path(reconciler.__file__).read_text()
+    # Follow the canonical mutation implementation, not its compatibility shim.
+    src = inspect.getsource(reconciler._apply_diff)
     assert "MANAGED_BACKEND_NAMES" in src
     assert "MANAGED_DICTIONARY_NAMES" in src
     tree = ast.parse(src)
