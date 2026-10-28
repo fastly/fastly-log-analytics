@@ -535,10 +535,13 @@ def install_boto3_proxy_hook(client, source: dict) -> None:
     _CDN_OPS = {"getobject", "headobject"}
 
     def _inject(request, event_name: str = "", **_kwargs):
+        hint = _BOTO3_CALLER_HINT.get()
         try:
-            from backend.utils.telemetry import get_process_context_with_fallback
+            from backend.utils.telemetry import get_process_context, get_process_context_with_fallback
 
-            ctx = get_process_context_with_fallback() or ""
+            ctx = get_process_context() or ""
+            if not ctx and hint not in ("ingest_download", "ingest_scan"):
+                ctx = get_process_context_with_fallback() or ""
         except Exception:
             ctx = ""
         op = event_name.rsplit(".", 1)[-1].lower() if event_name else "unknown"
@@ -551,7 +554,6 @@ def install_boto3_proxy_hook(client, source: dict) -> None:
             request.headers["X-Fos-Target"] = native_target
 
         request.headers["X-Telemetry-Service-Id"] = service_id
-        hint = _BOTO3_CALLER_HINT.get()
         request.headers["X-Telemetry-Caller"] = hint if hint else f"boto3.{op}"
         if not ctx:
             import threading as _threading

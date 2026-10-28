@@ -1,4 +1,5 @@
 import concurrent.futures
+import contextvars
 import hashlib
 import logging
 import math
@@ -552,7 +553,11 @@ def ingest(  # fmt: skip
                 if chunk_keys:
                     try:
                         future = _delete_executor.submit(
-                            _delete_objects_robust_with_failures, fos_client, src["bucket"], chunk_keys
+                            contextvars.copy_context().run,
+                            _delete_objects_robust_with_failures,
+                            fos_client,
+                            src["bucket"],
+                            chunk_keys,
                         )
                         _pending_deletes.append((future, set(chunk_keys)))
                         yield {

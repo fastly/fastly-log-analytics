@@ -1,4 +1,5 @@
 import concurrent.futures
+import contextvars
 import itertools
 import logging
 import os
@@ -175,7 +176,9 @@ def _delete_objects_robust_with_failures(fos_client, bucket: str, keys: list[str
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=min(32, len(keys)), thread_name_prefix="fos_del"
         ) as del_ex:
-            for fut in concurrent.futures.as_completed({del_ex.submit(_delete_single_key, k): k for k in keys}):
+            for fut in concurrent.futures.as_completed(
+                {del_ex.submit(contextvars.copy_context().run, _delete_single_key, k): k for k in keys}
+            ):
                 k, ok, err_s = fut.result()
                 if ok:
                     deleted_count += 1
@@ -214,7 +217,7 @@ def _download_chunk_to_local(fos_client, s3_paths: list[str], tmpdir: str) -> tu
     with concurrent.futures.ThreadPoolExecutor(
         max_workers=min(64, max(16, len(s3_paths))), thread_name_prefix="ingest_dl"
     ) as ex:
-        futures = {ex.submit(_download_one, p): p for p in s3_paths}
+        futures = {ex.submit(contextvars.copy_context().run, _download_one, p): p for p in s3_paths}
         for fut in concurrent.futures.as_completed(futures):
             try:
                 s3, local = fut.result()

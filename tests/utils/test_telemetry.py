@@ -2292,3 +2292,64 @@ def test_upstream_timeout_env_var_override():
         else:
             os.environ["FOS_PROXY_UPSTREAM_TIMEOUT_S"] = original
         importlib.reload(telemetry_proxy)
+
+
+def test_download_chunk_to_local_propagates_process_context_to_worker_threads(tmp_path):
+    from backend.core.ingest.discovery import _download_chunk_to_local
+
+    seen_contexts: list[str | None] = []
+    client = _FakeBoto3Client()
+    telemetry_proxy.install_boto3_proxy_hook(client, _cdn_source())
+
+    class _MockFosClient:
+        def get_object(self, *, Bucket: str, Key: str):
+            hdrs = client.invoke(method="GET", event_name="before-send.s3.GetObject")
+            seen_contexts.append(hdrs.get("X-Telemetry-Context"))
+            return {"Body": io.BytesIO(b"payload")}
+
+    # Simulate an unrelated API request setting _LATEST_PROCESS_CONTEXT on another thread
+    with tlm._LATEST_PROCESS_CONTEXT_LOCK:
+        prev_latest = tlm._LATEST_PROCESS_CONTEXT
+        tlm._LATEST_PROCESS_CONTEXT = "api:POST /api/network-health"
+    try:
+        with tlm.process_context_scope("cron:log_discovery"):
+            # Override _LATEST_PROCESS_CONTEXT mid-flight as if an API request arrived after cron started
+            with tlm._LATEST_PROCESS_CONTEXT_LOCK:
+                tlm._LATEST_PROCESS_CONTEXT = "api:POST /api/network-health"
+            s3_to_local, _ = _download_chunk_to_local(
+                _MockFosClient(),
+                ["s3://bucket/raw/request/a.log.gz", "s3://bucket/raw/request/b.log.gz"],
+                str(tmp_path),
+            )
+    finally:
+        with tlm._LATEST_PROCESS_CONTEXT_LOCK:
+            tlm._LATEST_PROCESS_CONTEXT = prev_latest
+
+    assert len(s3_to_local) == 2
+    assert seen_contexts == ["cron:log_discovery", "cron:log_discovery"]
+
+
+def test_configure_fos_updates_secret_when_process_context_changes(proxy_server):
+    source = {
+        "name": "phase3a-ctx-fp",
+        "service_id": "phase3a-ctx-fp",
+        "fos_native_endpoint": "us-east-1.object.fastlystorage.app",
+        "endpoint": "us-east-1.object.fastlystorage.app",
+        "access_key_id": "AKIA-phase3a",
+        "secret_access_key": "secret-phase3a",
+        "region": "us-east-1",
+    }
+    con = duckdb.connect(":memory:")
+    try:
+        with tlm.process_context_scope("api:GET /api/bootstrap"):
+            _ddb._configure_fos(con, source)
+            sec1 = con.execute("SELECT secret_string FROM duckdb_secrets() WHERE name='fos_proxy'").fetchone()[0]
+        assert "api:GET /api/bootstrap" in sec1
+
+        with tlm.process_context_scope("cron:rollup_recompute"):
+            _ddb._configure_fos(con, source)
+            sec2 = con.execute("SELECT secret_string FROM duckdb_secrets() WHERE name='fos_proxy'").fetchone()[0]
+        assert "cron:rollup_recompute" in sec2
+        assert "api:GET /api/bootstrap" not in sec2
+    finally:
+        con.close()

@@ -479,7 +479,7 @@ def _ducklake_attach(con, source: dict, read_only: bool = False) -> bool:
                 if attached:
                     return True
             except Exception:
-                pass
+                logger.debug("_ducklake_attach: fast-path duckdb_databases probe failed (ignored)", exc_info=True)
     if not _acquire_attach_lock(
         service_id,
         f"timed out after {_ATTACH_LOCK_TIMEOUT_S:.0f}s waiting for the process-wide attach lock — "

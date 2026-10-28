@@ -243,7 +243,7 @@ def _safe_table_name(name: str) -> str:
 
 _httpfs_lock = threading.Lock()
 _fos_proxy_secret_lock = threading.Lock()
-_fos_secret_fingerprints: weakref.WeakKeyDictionary[duckdb.DuckDBPyConnection, tuple[str, str, str, str]] = (
+_fos_secret_fingerprints: weakref.WeakKeyDictionary[duckdb.DuckDBPyConnection, tuple[str, ...]] = (
     weakref.WeakKeyDictionary()
 )
 
@@ -284,7 +284,8 @@ def _configure_fos(con: duckdb.DuckDBPyConnection, source: dict):
         "X-Telemetry-Service-Id": source.get("service_id") or source.get("name", "default"),
         "X-Telemetry-Caller": "duckdb.httpfs",
     }
-    if ctx := (get_process_context() or ""):
+    ctx = get_process_context() or ""
+    if ctx:
         headers["X-Telemetry-Context"] = ctx
     if target_host != source.get("fos_native_endpoint") and source.get("cdn_secret"):
         headers["x-fastly-key"] = source["cdn_secret"]
@@ -295,7 +296,7 @@ def _configure_fos(con: duckdb.DuckDBPyConnection, source: dict):
     )
     ak, sk, reg = source.get("access_key_id") or "", source.get("secret_access_key") or "", source.get("region") or ""
     secret_params = [ak, sk, reg, proxy_ep, *headers.values()]
-    fp = (ak, sk, reg, proxy_ep)
+    fp = (ak, sk, reg, proxy_ep, ctx)
     with _fos_proxy_secret_lock:
         if _fos_secret_fingerprints.get(con) != fp:
 
