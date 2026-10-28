@@ -319,13 +319,20 @@ def test_security_aggregates_wellknown_bots_regex_and_fallback(
 
 
 @pytest.mark.parametrize("with_ip_spread,fp_val", [(True, "rollup-served-fp"), (False, "live-served-fp")])
+@time_machine.travel("2026-10-28T00:59:59Z", tick=False)
 def test_security_aggregates_fingerprints_rollup_and_live_fallback(
     in_memory_duckdb, test_service_source, tmp_path, monkeypatch, with_ip_spread, fp_val
 ):
     cache_root = _use_cache_root(tmp_path, monkeypatch)
-    _seed_logs(in_memory_duckdb, test_service_source, num_logs=20, tls_ciphers_sha=fp_val)
     closed_hour = _seed_count_rollup(cache_root, "tls_ciphers_sha", hours_back=2, value_counts={fp_val: 42})
     closed_hour_dt = datetime.strptime(closed_hour, "%Y-%m-%d-%H").replace(tzinfo=UTC)
+    _seed_logs(
+        in_memory_duckdb,
+        test_service_source,
+        num_logs=20,
+        tls_ciphers_sha=fp_val,
+        timestamp=(closed_hour_dt + timedelta(minutes=30)).isoformat(),
+    )
     if with_ip_spread:
         hll = HyperLogLog()
         hll.update([f"10.0.0.{i}" for i in range(7)])
@@ -348,8 +355,7 @@ def test_security_aggregates_fingerprints_rollup_and_live_fallback(
     )
     by_value = {fp["fingerprint"]: fp for fp in result["tls_fingerprints"]}
     assert by_value[fp_val]["ip_count"] > 0
-    if with_ip_spread:
-        assert by_value[fp_val]["request_count"] == 42
+    assert by_value[fp_val]["request_count"] == (42 if with_ip_spread else 20)
     assert any("count(DISTINCT ip)" in s and '"tls_ciphers_sha"' in s for s in sqls) is (not with_ip_spread)
 
 
