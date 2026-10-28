@@ -502,6 +502,11 @@ emit_deploy_report_script() {
     function applyMonitoredErrorsFilter(shouldScroll) {
       const pre = document.getElementById('monitored-errors-log');
       if (!pre) return;
+      if (window.monitoredErrorsCaptureAvailable !== true) {
+        pre.textContent = 'Watch capture unavailable; raw container logs may cover a different window.';
+        document.getElementById('filtered-errors-count').textContent = 'Watch capture unavailable';
+        return;
+      }
       const text = window.rawMonitoredErrors || '';
       const filterEnv = document.getElementById('filter-env').value;
       const filterContainer = document.getElementById('filter-container').value;
@@ -551,9 +556,8 @@ emit_deploy_report_script() {
         const headRes = await fetchWithRetry(() => fetch(logPath, { method: 'HEAD', cache: 'no-store' }), 2);
         if (!headRes.ok) {
           if (id === 'monitored-errors-log') {
-            const pre = document.getElementById(id);
-            if (pre) pre.textContent = 'Watch capture unavailable; raw container logs may cover a different window.';
-            document.getElementById('filtered-errors-count').textContent = 'Watch capture unavailable';
+            window.monitoredErrorsCaptureAvailable = false;
+            applyMonitoredErrorsFilter(false);
           }
           return;
         }
@@ -564,7 +568,7 @@ emit_deploy_report_script() {
         const res = await fetchWithRetry(() => fetch(logPath, { cache: 'no-store' }), 2);
         if (!res.ok) return;
         const text = await res.text(), wasAtBottom = pre.scrollHeight - pre.clientHeight <= pre.scrollTop + 30;
-        if (id === 'monitored-errors-log') { window.rawMonitoredErrors = text; applyMonitoredErrorsFilter(wasAtBottom); }
+        if (id === 'monitored-errors-log') { window.monitoredErrorsCaptureAvailable = true; window.rawMonitoredErrors = text; applyMonitoredErrorsFilter(wasAtBottom); }
         else { pre.innerHTML = ansiToHtml(text); if (wasAtBottom) pre.scrollTop = pre.scrollHeight; }
         pre.setAttribute('data-last-len', newLen);
       } catch (e) {}

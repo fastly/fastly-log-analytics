@@ -1888,18 +1888,27 @@ def test_private_runner_keeps_watch_capture_until_exit_report(tmp_path):
     assert "[warning] test connection unavailable" in (report_dir / "logs/monitored_errors.log").read_text()
 
 
-def test_deploy_report_missing_watch_snapshot_is_not_a_clean_scan():
+@pytest.mark.parametrize("refilter", [False, True])
+def test_deploy_report_missing_watch_snapshot_is_not_a_clean_scan(refilter):
     source = (ROOT / "scripts/lib/deploy_common.sh").read_text()
     script = source.split("emit_deploy_report_script() {", 1)[1].split("cat <<EOF\n", 1)[1].split("\nEOF", 1)[0]
     script = script.removeprefix("  <script>").split("</script>", 1)[0].replace("${status}", "SUCCESS")
     program = """
 const vm = require('node:vm');
-const pre = { innerHTML: 'monitor pending' };
+const pre = {
+  innerHTML: 'monitor pending',
+  get textContent() { return this.innerHTML; },
+  set textContent(value) { this.innerHTML = value; }
+};
 const count = { textContent: '' };
 const context = {
   document: {
     addEventListener() {},
-    getElementById(id) { return id === 'monitored-errors-log' ? pre : count; }
+    getElementById(id) {
+      if (id === 'monitored-errors-log') return pre;
+      if (id === 'filtered-errors-count') return count;
+      return { value: id === 'filter-search' ? '' : 'all' };
+    }
   },
   window: {}, setInterval() {}, setTimeout() {},
   fetch: async () => ({ ok: false, status: 404 })
@@ -1908,11 +1917,12 @@ vm.createContext(context);
 vm.runInContext(SOURCE, context);
 (async () => {
   await context.updateLogPre('monitored-errors-log', 'logs/monitored_errors.log');
+  if (REFILTER) context.applyMonitoredErrorsFilter(false);
   process.stdout.write(JSON.stringify({ text: pre.textContent || pre.innerHTML, count: count.textContent }));
 })().catch(error => { console.error(error); process.exitCode = 1; });
 """
     result = subprocess.run(
-        ["node", "-e", program.replace("SOURCE", json.dumps(script))],
+        ["node", "-e", program.replace("SOURCE", json.dumps(script)).replace("REFILTER", json.dumps(refilter))],
         capture_output=True,
         text=True,
         timeout=10,
