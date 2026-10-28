@@ -478,36 +478,61 @@ def _compute_dashboard_aggregates(
 
     # Build temp table with only needed columns
     needed_cols: set[str] = set()
-    if "timestamp" in actual_cols:
-        needed_cols.add('"timestamp"')
-    for field in fields:
+    for field in fields if include_top_n else []:
         if field in _VIRTUAL_BACKING:
             if (bcol := _VIRTUAL_BACKING[field]) in actual_cols:
                 needed_cols.add(f'"{bcol}"')
             continue
-        # Non-card fields keep their empty response entries; metrics/backings
-        # are projected separately below/above rather than copied for unused totals.
+        # Non-card fields keep empty response entries without unused totals.
         if field in actual_cols and field not in NON_TOP_N_FIELDS:
             needed_cols.add(f'"{field}"')
 
-    for mc in [
-        "resp_bytes",
-        "elapsed",
-        "status",
-        "cache",
-        "resp_state",
-        "req_header_bytes",
-        "req_bytes",
-        "ttfb",
-        "server_region",
-        "tls_ciphers_sha",
-        "is_ipv6",
-        "conn_requests",
-    ]:
-        if mc in actual_cols:
-            needed_cols.add(f'"{mc}"')
+    if include_map_data and "country" in actual_cols:
+        needed_cols.add('"country"')
+    if include_conn_requests and "conn_requests" in actual_cols:
+        needed_cols.add('"conn_requests"')
 
-    cols_str = ", ".join(needed_cols) if needed_cols else "*"
+    raw_chart_metric = "requests"
+    value_expr = CANONICAL_METRICS["requests"]
+    extra_where = ""
+    if include_time_series and "timestamp" in actual_cols and _selected_aggregates is None:
+        needed_cols.add('"timestamp"')
+        metric_cols: set[str] = set()
+        if chart_metric in ("5xx", "4xx") and "status" in actual_cols:
+            raw_chart_metric = chart_metric
+            metric_cols.add("status")
+            value_expr = CANONICAL_METRICS[f"{chart_metric}_rate"]
+        elif chart_metric == "hit_rate" and ("cache" in actual_cols or "resp_state" in actual_cols):
+            raw_chart_metric = "hit_rate"
+            cache_col = "cache" if "cache" in actual_cols else "resp_state"
+            metric_cols.add(cache_col)
+            value_expr = CANONICAL_METRICS["hit_rate"].format(cache_col=f'"{cache_col}"')
+        elif chart_metric.endswith("_latency") and ("elapsed" in actual_cols or "elapsed_us" in actual_cols):
+            raw_chart_metric = chart_metric
+            metric_cols.add("elapsed")
+            percentile = 0.50 if chart_metric.startswith("p50") else (0.99 if chart_metric.startswith("p99") else 0.95)
+            value_expr = percentile_ms_expr("elapsed", percentile)
+            extra_where = " AND elapsed IS NOT NULL"
+        elif chart_metric == "throughput" and "resp_bytes" in actual_cols and "elapsed" in actual_cols:
+            raw_chart_metric = "throughput"
+            metric_cols.update(("cache", "elapsed", "resp_bytes"))
+            value_expr = CANONICAL_METRICS["throughput"].format(
+                cache_col="cache", elapsed_col="elapsed", resp_bytes_col="resp_bytes"
+            )
+        elif chart_metric == "req_size" and any(c in actual_cols for c in ("req_header_bytes", "req_bytes")):
+            raw_chart_metric = "req_size"
+            metric_cols.update(c for c in ("req_header_bytes", "req_bytes") if c in actual_cols)
+            value_expr = CANONICAL_METRICS["req_size"].format(
+                header_bytes_col='"req_header_bytes"' if "req_header_bytes" in actual_cols else "0",
+                req_bytes_col="req_bytes" if "req_bytes" in actual_cols else "0",
+            )
+        elif chart_metric == "ttfb" and "ttfb" in actual_cols:
+            raw_chart_metric = "ttfb"
+            metric_cols.add("ttfb")
+            value_expr = CANONICAL_METRICS["ttfb_ms"]
+        needed_cols.update(f'"{column}"' for column in metric_cols if column in actual_cols)
+
+    cols_str = ", ".join(sorted(needed_cols)) if needed_cols else "1"
     from backend.core.rollups import rollups_present
     from backend.core.rollups.rollup_coverage import durable_serving_blocked
 
@@ -850,9 +875,6 @@ def _compute_dashboard_aggregates(
             interval = chart_interval
         elif include_time_series and "timestamp" in actual_cols:
             interval = safe_interval(chart_interval, default=interval)
-            sql_cache = "cache"
-            sql_elapsed = "elapsed"
-
             rollup_metric_ok = chart_metric in QueryRunner._TS_ROLLUP_METRIC_PARTS
             rollup_col_ok = (
                 chart_metric == "requests"
@@ -879,40 +901,7 @@ def _compute_dashboard_aggregates(
                     _skip_raw_time_series = True
 
             if not _skip_raw_time_series:
-                extra_where = ""
-                if chart_metric in ("5xx", "4xx") and "status" in actual_cols:
-                    chart_metric_out = chart_metric
-                    value_expr = CANONICAL_METRICS[f"{chart_metric}_rate"]
-                elif chart_metric == "hit_rate" and ("cache" in actual_cols or "resp_state" in actual_cols):
-                    chart_metric_out = "hit_rate"
-                    cache_col = '"cache"' if "cache" in actual_cols else '"resp_state"'
-                    value_expr = CANONICAL_METRICS["hit_rate"].format(cache_col=cache_col)
-                elif chart_metric.endswith("_latency") and ("elapsed" in actual_cols or "elapsed_us" in actual_cols):
-                    chart_metric_out = chart_metric
-                    percentile = (
-                        0.50 if chart_metric.startswith("p50") else (0.99 if chart_metric.startswith("p99") else 0.95)
-                    )
-                    value_expr = percentile_ms_expr(sql_elapsed, percentile)
-                    extra_where = f" AND {sql_elapsed} IS NOT NULL"
-                elif chart_metric == "throughput" and "resp_bytes" in actual_cols and "elapsed" in actual_cols:
-                    chart_metric_out = "throughput"
-                    value_expr = CANONICAL_METRICS["throughput"].format(
-                        cache_col=sql_cache,
-                        elapsed_col="elapsed",
-                        resp_bytes_col="resp_bytes",
-                    )
-                elif chart_metric == "req_size" and any(c in actual_cols for c in ["req_header_bytes", "req_bytes"]):
-                    chart_metric_out = "req_size"
-                    value_expr = CANONICAL_METRICS["req_size"].format(
-                        header_bytes_col='"req_header_bytes"' if "req_header_bytes" in actual_cols else "0",
-                        req_bytes_col="req_bytes" if "req_bytes" in actual_cols else "0",
-                    )
-                elif chart_metric == "ttfb" and "ttfb" in actual_cols:
-                    chart_metric_out = "ttfb"
-                    value_expr = CANONICAL_METRICS["ttfb_ms"]
-                else:
-                    chart_metric_out = "requests"
-                    value_expr = CANONICAL_METRICS["requests"]
+                chart_metric_out = raw_chart_metric
                 ts_q = SQL.TIME_SERIES.format(
                     time_bucket_select=time_bucket_select(interval),
                     value_expr=value_expr,

@@ -1461,6 +1461,14 @@ omitted/null/explicit-field cases in `test_top_n_rollups_golden.py` enforce temp
 reuse; the no-temp fallback case pins the raw path. Do not share these temporary
 tables with the parallel bots connection.
 
+Projection follows enabled downstream consumers, not source predicates. Keep
+requested card/backing columns only for top-N, country independently for the map,
+connection counts for the histogram, and timestamp plus the selected chart SQL's
+inputs for time series. Resolve chart inputs alongside its expression so fallback
+metrics cannot drift from the projection. Count-only requests project a constant;
+never restore `SELECT *` when no downstream column is needed. The canonical
+dashboard golden suite covers section demand, metric fallbacks and exact counts.
+
 ### Bounded ClickHouse diagnostic index (ADR-20)
 
 `backend/core/clickhouse_{manifest,publication,rows,export}.py` (`clickhouse_schema` folded into `clickhouse_publication.py`) implements
