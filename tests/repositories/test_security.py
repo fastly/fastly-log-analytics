@@ -1999,11 +1999,7 @@ class TestExecuteTopNBatchPerFieldLimits:
 
     def test_live_topn_skip_fields_are_not_rendered_dashboard_panels(self):
         repo_root = Path(__file__).resolve().parents[2]
-        sections_dir = repo_root / "frontend" / "app" / "dashboard" / "_sections"
-        categories_ts = sections_dir / "categories.ts"
-        target_file = (
-            categories_ts if categories_ts.is_file() else repo_root / "frontend" / "hooks" / "useDashboardCards.ts"
-        )
+        target_file = repo_root / "frontend" / "hooks" / "useDashboardCardDefinitions.ts"
         assert target_file.is_file()
         text = target_file.read_text()
         rendered: set[str] = set()

@@ -289,7 +289,8 @@ def generate_rum_tracker_js(service_id: str, beacon_endpoint: str = "/rum-beacon
         originalFetch.call(window, cleanBeaconUrl, {{
           method: 'POST',
           headers: {{ 'Content-Type': 'text/plain' }},
-          body: ''
+          body: '',
+          keepalive: true
         }}).catch(function() {{}});
       }}
     }});

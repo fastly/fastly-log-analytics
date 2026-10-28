@@ -1430,6 +1430,19 @@ component cache key. Keep identical-window hits, existing eligibility, TTL and
 ingest invalidation unchanged; the same-minute collision regressions cover both
 components.
 
+### 54. RUM fetch flushes must survive document dismissal
+
+The generated tracker unrolls queued Faro events into empty-body POSTs. Its
+fetch path needs `keepalive: true`: navigation can otherwise cancel the old
+document's requests before they reach the server. This can also leave Chromium
+Fetch interception IDs invalid, failing a guarded browser capture without an
+origin rejection. The same error alone does not establish that cause.
+
+Keep the origin guard fail-closed; do not ignore cancelled interception
+commands. The generator regression executes both fetch and XHR-triggered
+flushes and checks that every unrolled POST retains keepalive. The native
+`sendBeacon` path is separate and unchanged.
+
 ### Bounded ClickHouse diagnostic index (ADR-20)
 
 `backend/core/clickhouse_{manifest,publication,rows,export}.py` (`clickhouse_schema` folded into `clickhouse_publication.py`) implements

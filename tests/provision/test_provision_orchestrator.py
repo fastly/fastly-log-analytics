@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -1464,6 +1465,58 @@ def test_generate_rum_tracker_js_invariants():
     assert "Faro.ErrorsInstrumentation" in js and "if (Faro.ErrorInstrumentation)" not in js
     assert "new Faro.ErrorInstrumentation()" not in js and "no error instrumentation export found" in js
     assert "script.src = '/js/faro-sdk.js';" in js and not re.search(r"https?://", js)
+
+
+@pytest.mark.parametrize("transport", ["fetch", "xhr"])
+def test_generated_rum_flush_keeps_fetches_alive(monkeypatch, transport: str) -> None:
+    monkeypatch.setattr(svcconfig, "load_config", lambda _sid: {})
+    program = r"""
+const fs = require('node:fs');
+const vm = require('node:vm');
+const calls = [];
+let config;
+function XMLHttpRequest() {}
+XMLHttpRequest.prototype.open = function() {};
+XMLHttpRequest.prototype.send = function() { throw new Error('Unexpected Faro transport'); };
+const window = {
+  location: { pathname: '/dashboard' },
+  fetch: async (url, options) => { calls.push({ url, options }); },
+  Faro: {
+    ErrorsInstrumentation: class {},
+    initializeFaro: value => { config = value; },
+  },
+};
+const sandbox = {
+  window, XMLHttpRequest, console, Response, setTimeout,
+  document: { cookie: 'rum_cid=fixture-client' },
+  navigator: { sendBeacon() { throw new Error('Unexpected beacon transport'); } },
+};
+vm.runInNewContext(fs.readFileSync(0, 'utf8'), sandbox);
+config.beforeSend({
+  type: 'measurement',
+  payload: { type: 'web-vitals', values: { LCP: 1200, FCP: 800, CLS: 0.1, INP: 50, TTFB: 25 } },
+});
+if (process.argv[1] === 'fetch') {
+  window.fetch('/rum-beacon', { method: 'POST' });
+} else {
+  const xhr = new XMLHttpRequest();
+  xhr.open('POST', '/rum-beacon');
+  xhr.send('');
+}
+process.stdout.write(JSON.stringify(calls));
+"""
+    result = subprocess.run(
+        ["node", "-e", program, transport],
+        input=generate_rum_tracker_js("svc_test"),
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=10,
+    )
+    calls = json.loads(result.stdout)
+    assert len(calls) == 5
+    assert all(call["options"]["method"] == "POST" and call["options"]["body"] == "" for call in calls)
+    assert all(call["options"].get("keepalive") is True for call in calls)
 
 
 def test_faro_tracker_readiness_and_upload_gates(monkeypatch, mock_fos, caplog):

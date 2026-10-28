@@ -10,13 +10,15 @@ source "$SCRIPT_DIR/lib/ratchet_common.sh"
 # 002e76e8: transfer the three SSE feeder loops from admin/health.py to events.py.
 # Loop ASTs are unchanged apart from sampler hook/import-reference replacements;
 # exception handling, sleep intervals and retry behavior retain the same allowance.
+# 88e3f468 moved the unchanged _pool_query_watchdog into request_telemetry/query_registry.py;
+# transfer its existing one-loop allowance without retaining the deleted module entry.
 BASELINE='
 backend/config.py 2
 backend/core/_duckdb_status.py 1
 backend/core/duckdb.py 1
 backend/core/storage/_core.py 1
 backend/core/query_registry.py 1
-backend/core/request_telemetry.py 1
+backend/core/request_telemetry/query_registry.py 1
 backend/provision/declarative/iac_reconciler.py 1
 backend/provision/declarative/reconciler.py 1
 backend/provision/fos_setup.py 1
