@@ -2906,7 +2906,19 @@ def test_filtered_dashboard_virtual_expansions_preserve_scoped_counts(
 
 
 @pytest.mark.parametrize(
-    "metric", ["requests", "p95_latency", "hit_rate", "throughput", "req_size", "ttfb", "5xx", "4xx"]
+    "metric",
+    [
+        "requests",
+        "p50_latency",
+        "p95_latency",
+        "p99_latency",
+        "hit_rate",
+        "throughput",
+        "req_size",
+        "ttfb",
+        "5xx",
+        "4xx",
+    ],
 )
 def test_filtered_dashboard_all_fields_prunes_unrendered_columns_without_losing_dependencies(
     monkeypatch, metric
@@ -2972,7 +2984,9 @@ def test_filtered_dashboard_all_fields_prunes_unrendered_columns_without_losing_
     assert result["metric"] == metric and len(result["time_series"]) == 1
     expected_chart = {
         "requests": 2,
+        "p50_latency": 1,
         "p95_latency": 1,
+        "p99_latency": 1,
         "hit_rate": 100,
         "throughput": 100000,
         "req_size": 30,
@@ -2987,26 +3001,109 @@ def test_filtered_dashboard_all_fields_prunes_unrendered_columns_without_losing_
     assert result["data"]["rid"] == result["data"]["lat"] == {"top": [], "total": 0}
     assert not {"hidden_custom", "disabled_custom", "_source_file"} & result["data"].keys()
     assert len(temp_columns) == 1
-    assert {
+    card_columns = {
         "timestamp",
         "country",
         "ip",
         "ua",
         "url",
         "status",
-        "elapsed",
-        "ttfb",
         "cache",
-        "resp_bytes",
-        "req_header_bytes",
-        "req_bytes",
         "conn_requests",
         "waf_sig",
         "edge_score_reason",
         "shown_custom",
-    } <= temp_columns[0]
+    }
+    metric_columns = {
+        "p50_latency": {"elapsed"},
+        "p95_latency": {"elapsed"},
+        "p99_latency": {"elapsed"},
+        "throughput": {"elapsed", "resp_bytes"},
+        "req_size": {"req_header_bytes", "req_bytes"},
+        "ttfb": {"ttfb"},
+    }
+    assert temp_columns == [card_columns | metric_columns.get(metric, set())]
     assert not {"rid", "lat", "_source_file", "hidden_custom", "disabled_custom"} & temp_columns[0]
     assert count_queries and all("count(rid)" not in sql and "count(lat)" not in sql for sql in count_queries)
+
+
+@pytest.mark.parametrize(
+    "metric,removed,sections,expected_columns,expected_value,expected_metric",
+    [
+        ("requests", (), (), set(), None, "requests"),
+        ("throughput", (), (), set(), None, "requests"),
+        ("requests", (), ("map",), {"country"}, None, "requests"),
+        ("requests", (), ("conn",), {"conn_requests"}, None, "requests"),
+        ("requests", (), ("cards",), {"waf_sig", "edge_score_reason"}, None, "requests"),
+        ("requests", (), ("chart",), {"timestamp"}, 3, "requests"),
+        ("hit_rate", ("cache",), ("chart",), {"timestamp", "resp_state"}, 100, "hit_rate"),
+        ("hit_rate", ("cache", "resp_state"), ("chart",), {"timestamp"}, 3, "requests"),
+        ("5xx", ("status",), ("chart",), {"timestamp"}, 3, "requests"),
+        ("p95_latency", ("elapsed",), ("chart",), {"timestamp"}, 3, "requests"),
+        ("throughput", ("elapsed",), ("chart",), {"timestamp"}, 3, "requests"),
+        ("throughput", (), ("chart",), {"timestamp", "cache", "elapsed", "resp_bytes"}, 100000, "throughput"),
+        ("req_size", ("req_bytes",), ("chart",), {"timestamp", "req_header_bytes"}, 10, "req_size"),
+        ("req_size", ("req_header_bytes",), ("chart",), {"timestamp", "req_bytes"}, 20, "req_size"),
+        ("req_size", ("req_header_bytes", "req_bytes"), ("chart",), {"timestamp"}, 3, "requests"),
+        ("ttfb", ("ttfb",), ("chart",), {"timestamp"}, 3, "requests"),
+    ],
+)
+def test_filtered_dashboard_projection_follows_enabled_consumers(
+    monkeypatch, metric, removed, sections, expected_columns, expected_value, expected_metric
+) -> None:
+    monkeypatch.setattr(dash, "DASHBOARD_CACHE_TTL", 0)
+    monkeypatch.setattr(svcconfig, "get_status", lambda _name: {})
+    monkeypatch.setattr(svcconfig, "is_durable_serving_mode", lambda _src: False)
+    src = {"name": f"dashboard_demand_{dash.uuid.uuid4().hex}"}
+    table = _safe_table(src["name"])
+    create = QueryRunner.create_temp_table
+    temp_columns: list[set[str]] = []
+
+    def capture_create(runner: QueryRunner, sql: str, params: list | None = None) -> bool:
+        created = create(runner, sql, params)
+        if created:
+            temp_columns.append({row[0] for row in runner.con.execute(f"DESCRIBE {sql.split()[3]}").fetchall()})
+        return created
+
+    monkeypatch.setattr(QueryRunner, "create_temp_table", capture_create)
+    with duckdb.connect(":memory:") as con:
+        con.execute(
+            f"""CREATE TABLE {table} AS SELECT
+                TIMESTAMPTZ '2026-01-01T00:00:00Z' + range * INTERVAL '1 minute' AS timestamp,
+                'US' AS country, 200 AS status, 'HIT' AS cache, 'HIT' AS resp_state,
+                1000.0 AS elapsed, 0.1 AS ttfb, 100 AS resp_bytes,
+                10 AS req_header_bytes, 20 AS req_bytes, 1 AS conn_requests,
+                'A,A,B' AS waf_sig, 'bot,bot' AS edge_score_reason,
+                CASE WHEN range = 2 THEN 'drop' ELSE 'keep' END AS server_region,
+                'unused' AS tls_ciphers_sha, true AS is_ipv6 FROM range(7)"""
+        )
+        for column in removed:
+            con.execute(f'ALTER TABLE {table} DROP COLUMN "{column}"')
+        result = get_aggregates(
+            con,
+            src,
+            "2026-01-01T00:01:00Z",
+            "2026-01-01T00:04:00Z",
+            {"server_region": FilterSpec(mode="include", values=["keep"])},
+            "1 hour",
+            metric,
+            fields_filter=["waf_sig_ind", "edge_score_reason_ind"],
+            include_time_series="chart" in sections,
+            include_conn_requests="conn" in sections,
+            include_map_data="map" in sections,
+            include_top_n="cards" in sections,
+        )
+    assert len(temp_columns) == 1
+    assert temp_columns[0] == (expected_columns or {"1"})
+    assert result["total_rows"] == 3 and result["total_rows_total"] == 7
+    assert result["metric"] == expected_metric
+    assert [point["value"] for point in result["time_series"]] == (
+        [pytest.approx(expected_value)] if "chart" in sections else []
+    )
+    assert result["map_data"] == ([{"country": "US", "count": 3}] if "map" in sections else [])
+    assert result["data"]["conn_requests"]["total"] == (3 if "conn" in sections else 0)
+    assert result["data"]["waf_sig_ind"]["total"] == (9 if "cards" in sections else 0)
+    assert result["data"]["edge_score_reason_ind"]["total"] == (6 if "cards" in sections else 0)
 
 
 def test_dashboard_virtual_expansions_keep_raw_fallback_without_temp(
