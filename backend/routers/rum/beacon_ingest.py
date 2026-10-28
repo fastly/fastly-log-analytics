@@ -10,7 +10,7 @@ from fastapi import APIRouter, Request, Response
 from backend import config as svcconfig
 from backend.core.faro_versions import DEFAULT_FARO_VERSION
 from backend.models.common import DEFAULT_ERROR_RESPONSES
-from backend.utils.bounded_cache import CacheRegistry
+from backend.utils.bounded_cache import BoundedTTLCache, CacheRegistry
 from backend.utils.router_utils import raise_internal
 
 logger = logging.getLogger(__name__)
@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 # APIRouter without a prefix for serving dynamic JS assets and ingesting beacons
 asset_router = APIRouter(tags=["rum-assets"], responses=DEFAULT_ERROR_RESPONSES)
 
-_FARO_BUNDLE_CACHE: dict[str, bytes] = {}
+_FARO_BUNDLE_CACHE: BoundedTTLCache[str, bytes] = BoundedTTLCache(maxsize=16, ttl_seconds=86400.0)
 CacheRegistry.register("rum._FARO_BUNDLE_CACHE", _FARO_BUNDLE_CACHE)
 
 

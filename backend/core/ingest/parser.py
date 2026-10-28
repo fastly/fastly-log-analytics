@@ -1,8 +1,9 @@
 import gzip
-import json
 import logging
 import re
 from typing import Any
+
+import orjson
 
 from backend.core import log_fields as fc
 from backend.core.duckdb import escape_sql_literal
@@ -152,9 +153,9 @@ def _scan_invalid_gzip_lines(paths: list[str]) -> list[tuple[str, str]]:
                 if not raw_line.strip():
                     continue
                 try:
-                    row = json.loads(raw_line)
+                    row = orjson.loads(raw_line)
                     is_valid = isinstance(row, dict) and bool(row.get("timestamp"))
-                except (json.JSONDecodeError, UnicodeDecodeError):
+                except (orjson.JSONDecodeError, UnicodeDecodeError, ValueError):
                     is_valid = False
                 if not is_valid:
                     invalid_rows.append((path, raw_line.decode("utf-8", errors="replace").rstrip("\r\n")))
@@ -208,10 +209,10 @@ def _quarantine_convert_corrupt_lines(
                 category = None
                 error_text = ""
                 try:
-                    parsed = json.loads(stripped)
+                    parsed = orjson.loads(stripped)
                     if not isinstance(parsed, dict) or not parsed.get("timestamp"):
                         category, error_text = "missing_timestamp", "record has no timestamp"
-                except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
+                except (orjson.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
                     category, error_text = "invalid_json", str(exc)[:2000]
                 if category is not None:
                     evidence_results.append(

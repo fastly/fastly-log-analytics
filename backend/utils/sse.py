@@ -27,19 +27,23 @@ async def iter_with_disconnect_ping[T](
     ping_seconds: float = 15,
 ) -> AsyncIterator[T]:
     """Yield each payload from ``source`` until the request disconnects."""
+    from contextlib import suppress
+
     aiter = source.__aiter__()
     pending: asyncio.Future[T] | None = None
     try:
         while True:
             if pending is None:
                 pending = asyncio.ensure_future(aiter.__anext__())
-            try:
-                payload = await asyncio.wait_for(asyncio.shield(pending), timeout=ping_seconds)
-            except TimeoutError:
+            done, _ = await asyncio.wait({pending}, timeout=ping_seconds)
+            if not done:
                 if await request.is_disconnected():
                     return
                 continue
+            try:
+                payload = pending.result()
             except StopAsyncIteration:
+                pending = None
                 return
             pending = None
             if await request.is_disconnected():
@@ -48,6 +52,12 @@ async def iter_with_disconnect_ping[T](
     finally:
         if pending is not None and not pending.done():
             pending.cancel()
+            with suppress(asyncio.CancelledError, StopAsyncIteration):
+                await pending
+        aclose = getattr(aiter, "aclose", None)
+        if callable(aclose):
+            with suppress(Exception):
+                await aclose()
 
 
 class ClientDisconnected(Exception):

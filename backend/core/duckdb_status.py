@@ -15,7 +15,7 @@ import duckdb
 
 from backend import config as svcconfig
 from backend.core.sql_validator import escape_sql_literal
-from backend.utils.bounded_cache import BoundedTTLCache
+from backend.utils.bounded_cache import BoundedLRUCache, BoundedTTLCache
 from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry
 from backend.utils.telemetry import log_once_per, parse_iso_utc
 from backend.utils.telemetry import safe_iso as _safe_iso
@@ -156,11 +156,11 @@ def finalize_cron_run_if_running(
         return False
 
 
-_data_stats_cache: dict[str, tuple[tuple, int, Any, Any]] = {}
+_data_stats_cache: BoundedLRUCache[str, tuple[tuple, int, Any, Any]] = BoundedLRUCache(maxsize=256)
 _data_stats_cache_lock = threading.Lock()
-_top_values_cache: dict[str, tuple] = {}
+_top_values_cache: BoundedLRUCache[str, tuple] = BoundedLRUCache(maxsize=256)
 _top_values_cache_lock = threading.Lock()
-_ducklake_stats_cache: dict[tuple[str, str], tuple[int, int, Any, Any]] = {}
+_ducklake_stats_cache: BoundedLRUCache[tuple[str, str], tuple[int, int, Any, Any]] = BoundedLRUCache(maxsize=256)
 _ducklake_stats_cache_lock = threading.Lock()
 
 
@@ -901,6 +901,8 @@ def purge_usage_log(source: dict):
 
 
 _CacheRegistry.register("core._duckdb_status._schema_cache", _schema_cache)
+_CacheRegistry.register("core._duckdb_status._data_stats_cache", _data_stats_cache)
+_CacheRegistry.register("core._duckdb_status._top_values_cache", _top_values_cache)
 
 
 class _DucklakeStatsCacheAdapter:

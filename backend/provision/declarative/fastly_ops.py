@@ -58,9 +58,6 @@ class FileLock:
         if self._lock is not None:
             with suppress(OSError):
                 self._lock.release()
-        with suppress(OSError):
-            if self.lock_path.exists():
-                self.lock_path.unlink()
 
 
 def acquire_vcl_lock(service_id: str, timeout_sec: int = 300) -> FileLock:

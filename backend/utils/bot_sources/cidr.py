@@ -197,14 +197,14 @@ def match_ip_to_bot_source(ip: str) -> str | None:
     """Return the first matching IP-based bot source ID for ``ip`` using pytricia tries, or None."""
     if not ip:
         return None
-    parsed = parse_ip_int_version(ip)
-    if parsed is None:
-        return None
-    _ip_int, version = parsed
     ip_feeds = _get_compiled_ip_feeds()
     feed_tries = _get_feed_tries(ip_feeds)
-    for feed_id, (v4_trie, v6_trie) in feed_tries.items():
-        trie = v4_trie if version == 4 else v6_trie
-        if len(trie) > 0 and ip in trie:
-            return feed_id
+    is_v6 = ":" in ip
+    try:
+        for feed_id, (v4_trie, v6_trie) in feed_tries.items():
+            trie = v6_trie if is_v6 else v4_trie
+            if len(trie) > 0 and ip in trie:
+                return feed_id
+    except (ValueError, KeyError):
+        return None
     return None

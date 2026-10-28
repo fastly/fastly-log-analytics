@@ -41,7 +41,7 @@ from typing import Any, Final, Literal
 from urllib.parse import unquote, urlsplit
 
 from backend.core.metadata import get_con
-from backend.utils.bounded_cache import CacheRegistry
+from backend.utils.bounded_cache import BoundedTTLCache, CacheRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -237,7 +237,9 @@ Label = Literal["good", "bad", "neutral"]
 ALLOWED_LABELS: frozenset[str] = frozenset({"good", "bad", "neutral"})
 
 _LABEL_COUNTS_TTL_S = 30.0
-_LABEL_COUNTS_CACHE: dict[str, tuple[float, dict[str, int]]] = {}
+_LABEL_COUNTS_CACHE: BoundedTTLCache[str, tuple[float, dict[str, int]]] = BoundedTTLCache(
+    maxsize=128, ttl_seconds=_LABEL_COUNTS_TTL_S
+)
 CacheRegistry.register("scoring.labels._LABEL_COUNTS_CACHE", _LABEL_COUNTS_CACHE)
 
 _REQUEST_LABELS_CACHE: ContextVar[dict | None] = ContextVar("_REQUEST_LABELS_CACHE", default=None)

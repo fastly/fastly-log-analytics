@@ -23,7 +23,7 @@ from backend.core.metadata.pg_pool import (
 from backend.core.metadata.pg_pool import (
     get_con_readonly as open_readonly,
 )
-from backend.utils.date_utils import iso_z, iso_z_now
+from backend.utils.date_utils import iso_z, iso_z_now, parse_iso_utc
 
 logger = logging.getLogger(__name__)
 
@@ -355,9 +355,8 @@ def reconcile_fastly_stats(
         rec = _HourlyStatsRecordModel.model_validate(raw_rec)
         if not rec.hour_iso:
             continue
-        try:
-            start_dt = datetime.strptime(rec.hour_iso.replace("Z", "+0000"), "%Y-%m-%dT%H:%M:%S%z")
-        except (ValueError, AttributeError):
+        start_dt = parse_iso_utc(rec.hour_iso)
+        if start_dt is None:
             continue
         start_str = iso_z(start_dt)
         by_hour[start_str] = {

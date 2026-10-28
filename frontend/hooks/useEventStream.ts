@@ -11,6 +11,7 @@ import {
   type SyncStatus,
   type EventStreamRequest,
   parseSSEFrames,
+  extractSSEFrameData,
 } from './sseStreamAppliers'
 
 // ── Event Stream Transport & Hooks ───────────────────────────────────────────
@@ -141,8 +142,7 @@ export function useEventStream(
               safeSetState('open')
             },
             onFrame: (frame) => {
-              const dataLine = frame.split('\n').find((l) => l.startsWith('data:'))
-              const raw = dataLine?.slice('data:'.length).trim()
+              const raw = extractSSEFrameData(frame)
               if (raw) emitEvent(raw)
             },
           })

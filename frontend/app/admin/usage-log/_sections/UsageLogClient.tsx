@@ -1,6 +1,6 @@
 'use client'
 
-import React, { Suspense, useState, useMemo, useEffect } from 'react'
+import React, { Suspense, useState, useMemo } from 'react'
 import { useQuery, keepPreviousData } from '@tanstack/react-query'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { parseAsString, useQueryStates } from 'nuqs'
@@ -35,6 +35,11 @@ export const usageLogUrlParsers = {
 
 function useSafeUsageLogQueryParams() {
   const searchParams = useSearchParams()
+  const [overrides, setOverrides] = useState<{
+    category?: string
+    event_type?: string
+    source?: string
+  }>({})
   let nuqsParams: {
     service: string | null
     category: string | null
@@ -56,12 +61,36 @@ function useSafeUsageLogQueryParams() {
   } catch {
     // Fallback when rendered outside NuqsAdapter in unit tests
   }
+  const updateParams = (patch: Partial<{ category: string; event_type: string; source: string }>) => {
+    setOverrides((prev) => ({ ...prev, ...patch }))
+    if (setNuqsParams) {
+      const nuqsPatch: Partial<{
+        category: string | null
+        event_type: string | null
+        source: string | null
+      }> = {}
+      if ('category' in patch) nuqsPatch.category = patch.category || null
+      if ('event_type' in patch) nuqsPatch.event_type = patch.event_type || null
+      if ('source' in patch) nuqsPatch.source = patch.source || null
+      void setNuqsParams(nuqsPatch)
+    }
+  }
   return {
     service: nuqsParams?.service ?? searchParams?.get('service') ?? undefined,
-    category: nuqsParams?.category ?? searchParams?.get('category') ?? '',
-    event_type: nuqsParams?.event_type ?? searchParams?.get('event_type') ?? '',
-    source: nuqsParams?.source ?? searchParams?.get('source') ?? '',
+    category: overrides.category ?? nuqsParams?.category ?? searchParams?.get('category') ?? '',
+    event_type: overrides.event_type ?? nuqsParams?.event_type ?? searchParams?.get('event_type') ?? '',
+    source: overrides.source ?? nuqsParams?.source ?? searchParams?.get('source') ?? '',
     setNuqsParams,
+    updateParams,
+  }
+}
+
+function computeUsageWindow(presetHours: number, initialNowMs?: number) {
+  const refMs = initialNowMs ?? Date.now()
+  const nowFlooredMs = Math.floor(refMs / 60_000) * 60_000
+  return {
+    start: toQueryDate(new Date(nowFlooredMs - presetHours * 3600 * 1000)),
+    end: toQueryDate(new Date(nowFlooredMs)),
   }
 }
 
@@ -79,70 +108,49 @@ export function UsageLogClient({ initialServiceId, initialNowMs }: UsageLogClien
   const mounted = useMounted()
 
   const [preset, setPreset] = useState<number>(24)
-  const [usageType, setUsageTypeState] = useState(() => urlParams.category)
-  const [processFilter, setProcessFilterState] = useState(() => urlParams.source)
-  const [operationFilter, setOperationFilterState] = useState(() => urlParams.event_type)
+  const usageType = urlParams.category
+  const processFilter = urlParams.source
+  const operationFilter = urlParams.event_type
   const [purgeOpen, setPurgeOpen] = useState(false)
   const [purging, setPurging] = useState(false)
 
-  const setUsageType = (v: string) => {
-    setUsageTypeState(v)
-    if (urlParams.setNuqsParams) void urlParams.setNuqsParams({ category: v || null })
-  }
-  const setOperationFilter = (v: string) => {
-    setOperationFilterState(v)
-    if (urlParams.setNuqsParams) void urlParams.setNuqsParams({ event_type: v || null })
-  }
-  const setProcessFilter = (v: string) => {
-    setProcessFilterState(v)
-    if (urlParams.setNuqsParams) void urlParams.setNuqsParams({ source: v || null })
-  }
+  const setUsageType = (v: string) => urlParams.updateParams({ category: v })
+  const setOperationFilter = (v: string) => urlParams.updateParams({ event_type: v })
+  const setProcessFilter = (v: string) => urlParams.updateParams({ source: v })
 
-  const [now, setNow] = useState(() => (initialNowMs ? new Date(initialNowMs) : new Date()))
-  useEffect(() => {
-    const tick = () => setNow(new Date())
-    let id: ReturnType<typeof setInterval> | null = null
-    const start = (tickNow: boolean) => {
-      if (id !== null) return
-      if (tickNow) tick()
-      id = setInterval(tick, 30_000)
-    }
-    const stop = () => {
-      if (id !== null) {
-        clearInterval(id)
-        id = null
-      }
-    }
-    const onVis = () => (document.visibilityState === 'visible' ? start(true) : stop())
-    if (document.visibilityState === 'visible') start(false)
-    document.addEventListener('visibilitychange', onVis)
-    return () => {
-      document.removeEventListener('visibilitychange', onVis)
-      stop()
-    }
-  }, [])
-
-  const nowFlooredMs = Math.floor(now.getTime() / 60_000) * 60_000
-  const startTime = useMemo(() => toQueryDate(new Date(nowFlooredMs - preset * 3600 * 1000)), [preset, nowFlooredMs])
-  const endTime = useMemo(() => toQueryDate(new Date(nowFlooredMs)), [nowFlooredMs])
-
-  const baseQuery = {
-    service_id: activeServiceId || '',
-    start: startTime,
-    end: endTime,
+  const filterParams = {
     ...(usageType ? { usage_type: usageType } : {}),
     ...(processFilter ? { process_context: processFilter } : {}),
     ...(operationFilter ? { operation_type: operationFilter } : {}),
   }
 
-  const exportParams = new URLSearchParams({ ...baseQuery, page_size: '500' })
+  const { start: exportStart, end: exportEnd } = useMemo(
+    () => computeUsageWindow(preset, initialNowMs),
+    [preset, initialNowMs],
+  )
+  const exportParams = new URLSearchParams({
+    service_id: activeServiceId || '',
+    start: exportStart,
+    end: exportEnd,
+    ...filterParams,
+    page_size: '500',
+  })
 
   const makeUsageQueryOpts = (kind: 'head' | 'full', pageSize: number, enabled: boolean) => ({
-    queryKey: ['usage-log', kind, activeServiceId, startTime, endTime, usageType, processFilter, operationFilter],
+    queryKey: ['usage-log', kind, activeServiceId, preset, usageType, processFilter, operationFilter],
     queryFn: async ({ signal }: { signal: AbortSignal }) => {
+      const { start, end } = computeUsageWindow(preset, initialNowMs)
       const { data, error } = await client.GET('/api/admin/usage-log', {
         signal,
-        params: { query: { ...baseQuery, page_size: pageSize } },
+        params: {
+          query: {
+            service_id: activeServiceId || '',
+            start,
+            end,
+            ...filterParams,
+            page_size: pageSize,
+          },
+        },
       })
       if (error) throw new Error(extractApiError(error))
       return data as UsageLogResponse
@@ -208,10 +216,7 @@ export function UsageLogClient({ initialServiceId, initialNowMs }: UsageLogClien
             data-testid="admin-usage-log-refresh-btn"
             variant="outline"
             size="sm"
-            onClick={() => {
-              setNow(new Date())
-              refetch()
-            }}
+            onClick={refetch}
             disabled={isFetching}
           >
             <RefreshCw className={`h-3.5 w-3.5 mr-1.5 ${isFetching ? 'animate-spin' : ''}`} />

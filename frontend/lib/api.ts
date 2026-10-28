@@ -112,10 +112,72 @@ function stampClientContextHeaders(headers: Headers): string | null {
   return sid;
 }
 
-export function adminFetch(input: string | URL | Request, init: RequestInit = {}): Promise<Response> {
+const SESSION_DEAD_403_ERRORS = new Set(["fingerprint_mismatch", "ip_not_whitelisted", "unauthenticated"]);
+
+function redirectToShareLoginIfSessionDead(): void {
+  if (typeof window === "undefined") return;
+  if (window.location.pathname.startsWith("/share-login")) return;
+  try {
+    if (!useSessionRoleStore.getState().isRemoteAnalyst) return;
+  } catch {
+    /* store unavailable */
+  }
+  const returnTo = `${window.location.pathname}${window.location.search}`;
+  window.location.replace(`/share-login?return=${encodeURIComponent(returnTo)}`);
+}
+
+export function handleApiStatusSideEffects(
+  status: number,
+  bodyOrError: unknown,
+  method?: string,
+): { msg: string; isBusy503: boolean; isDead403: boolean; alreadyHandled: boolean } {
+  let error: unknown = bodyOrError;
+  if (typeof bodyOrError === "string") {
+    const trimmed = bodyOrError.trim();
+    if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+      try {
+        error = JSON.parse(trimmed);
+      } catch {
+        error = { message: trimmed || "An unknown error occurred" };
+      }
+    } else {
+      error = { message: trimmed || "An unknown error occurred" };
+    }
+  } else if (bodyOrError == null) {
+    error = { message: "An unknown error occurred" };
+  }
+
+  const msg = extractApiError(error);
+  const errorCode =
+    (error as { detail?: { error?: string }; error?: string })?.detail?.error ??
+    (error as { error?: string })?.error;
+  const isDead403 =
+    status === 403 && typeof errorCode === "string" && SESSION_DEAD_403_ERRORS.has(errorCode);
+  if (status === 401 || isDead403) redirectToShareLoginIfSessionDead();
+  if (status === 403 && msg === "read_only") showReadOnlyToast();
+  const isBusy503 = status === 503 && (error as { detail?: { busy?: boolean } })?.detail?.busy === true;
+  if (isBusy503) showBusyToast();
+  const upperMethod = method?.toUpperCase();
+  const isMutation = upperMethod === "PUT" || upperMethod === "PATCH" || upperMethod === "DELETE";
+  const alreadyHandled =
+    (status === 403 && msg === "read_only") || isBusy503 || status === 401 || isDead403;
+  if (isMutation && !alreadyHandled) showToast(msg || "Request failed", "error");
+  return { msg, isBusy503, isDead403, alreadyHandled };
+}
+
+async function rawAdminFetch(input: string | URL | Request, init: RequestInit = {}): Promise<Response> {
   const headers = new Headers(init.headers ?? {});
   stampClientContextHeaders(headers);
   return fetch(input, { ...init, headers });
+}
+
+export async function adminFetch(input: string | URL | Request, init: RequestInit = {}): Promise<Response> {
+  const r = await rawAdminFetch(input, init);
+  if (!r.ok) {
+    const errorText = typeof r.clone === "function" ? await r.clone().text().catch(() => "") : "";
+    handleApiStatusSideEffects(r.status, errorText, init.method);
+  }
+  return r;
 }
 
 type JsonOf<P extends keyof paths, M extends "get" | "post" = "get"> = paths[P] extends {
@@ -148,14 +210,16 @@ export async function adminJsonResult<P extends keyof paths, T = JsonOf<P>, M ex
   init: RequestInit = {},
   ..._parity: ParityArgs<T, JsonOf<P, M>>
 ): Promise<AdminJsonResult<T>> {
-  const r = await adminFetch(url, init);
+  const r = await rawAdminFetch(url, init);
   if (!r.ok) {
+    const errorText = await r.text().catch(() => "");
+    handleApiStatusSideEffects(r.status, errorText, init.method);
     return {
       ok: false,
       status: r.status,
       statusText: r.statusText,
       data: null,
-      errorText: await r.text().catch(() => ""),
+      errorText,
     };
   }
   return { ok: true, status: r.status, data: (await r.json()) as T };
@@ -197,20 +261,6 @@ const SERVICELESS_PATH_PREFIXES = [
   "/rum/versions",
 ];
 
-const SESSION_DEAD_403_ERRORS = new Set(["fingerprint_mismatch", "ip_not_whitelisted", "unauthenticated"]);
-
-function redirectToShareLoginIfSessionDead(): void {
-  if (typeof window === "undefined") return;
-  if (window.location.pathname.startsWith("/share-login")) return;
-  try {
-    if (!useSessionRoleStore.getState().isRemoteAnalyst) return;
-  } catch {
-    /* store unavailable */
-  }
-  const returnTo = `${window.location.pathname}${window.location.search}`;
-  window.location.replace(`/share-login?return=${encodeURIComponent(returnTo)}`);
-}
-
 client.use({
   async onRequest({ request }) {
     const activeServiceId = stampClientContextHeaders(request.headers);
@@ -233,21 +283,7 @@ client.use({
     }
     if (!response.ok) {
       const error = await response.json().catch(() => ({ message: "An unknown error occurred" }));
-      const msg = extractApiError(error);
-      const errorCode =
-        (error as { detail?: { error?: string }; error?: string })?.detail?.error ??
-        (error as { error?: string })?.error;
-      const isDead403 =
-        response.status === 403 && typeof errorCode === "string" && SESSION_DEAD_403_ERRORS.has(errorCode);
-      if (response.status === 401 || isDead403) redirectToShareLoginIfSessionDead();
-      if (response.status === 403 && msg === "read_only") showReadOnlyToast();
-      const isBusy503 = response.status === 503 && (error as { detail?: { busy?: boolean } })?.detail?.busy === true;
-      if (isBusy503) showBusyToast();
-      const method = request.method?.toUpperCase();
-      const isMutation = method === "PUT" || method === "PATCH" || method === "DELETE";
-      const alreadyHandled =
-        (response.status === 403 && msg === "read_only") || isBusy503 || response.status === 401 || isDead403;
-      if (isMutation && !alreadyHandled) showToast(msg || "Request failed", "error");
+      const { msg, isBusy503 } = handleApiStatusSideEffects(response.status, error, request.method);
       const err = new Error(msg) as Error & { status?: number; response?: { status: number }; busy?: boolean };
       err.status = response.status;
       err.response = { status: response.status };

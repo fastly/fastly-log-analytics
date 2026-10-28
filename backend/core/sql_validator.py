@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import re
+import threading
 import time
 from dataclasses import dataclass
 from typing import Any, NoReturn
@@ -136,15 +137,26 @@ def get_memory_connection() -> duckdb.DuckDBPyConnection:
     return _db.get_memory_connection()
 
 
+_parser_con: duckdb.DuckDBPyConnection | None = None
+_parser_con_lock = threading.RLock()
+
+
+def get_parser_connection() -> duckdb.DuckDBPyConnection:
+    """Return a cached thread-safe in-memory DuckDB connection for AST parsing."""
+    global _parser_con
+    with _parser_con_lock:
+        if _parser_con is None:
+            _parser_con = duckdb.connect(":memory:")
+        return _parser_con
+
+
 def _enumerate_table_functions() -> frozenset[str]:
     try:
-        con = duckdb.connect(":memory:")
-        try:
+        with _parser_con_lock:
+            con = get_parser_connection()
             rows = con.execute(
                 "SELECT DISTINCT function_name FROM duckdb_functions() WHERE function_type = 'table'"
             ).fetchall()
-        finally:
-            con.close()
         if names := {r[0].lower() for r in rows if r and isinstance(r[0], str)}:
             return frozenset(names | _BASELINE_TABLE_FUNCTIONS)
     except Exception:
@@ -185,7 +197,7 @@ def _reject(sql: str, reason: str, message: str, session_id: str | None, service
 def validate_user_sql(
     sql: str,
     *,
-    parser_con: duckdb.DuckDBPyConnection,
+    parser_con: duckdb.DuckDBPyConnection | None = None,
     session_id: str | None = None,
     service_id: str | None = None,
     allowed_tables: frozenset[str] | None = None,
@@ -375,10 +387,14 @@ def apply_user_query_limits(
 
 
 def _parse_single_select_node(
-    sql: str, parser_con: duckdb.DuckDBPyConnection, *, allow_multi: bool = False
+    sql: str, parser_con: duckdb.DuckDBPyConnection | None = None, *, allow_multi: bool = False
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None, str | None, str | None]:
     try:
-        row = parser_con.execute("SELECT json_serialize_sql(?)", [sql]).fetchone()
+        if parser_con is None:
+            with _parser_con_lock:
+                row = get_parser_connection().execute("SELECT json_serialize_sql(?)", [sql]).fetchone()
+        else:
+            row = parser_con.execute("SELECT json_serialize_sql(?)", [sql]).fetchone()
     except Exception as exc:
         return None, None, "parse_error", f"SQL parse failed: {exc}"
     if not row or row[0] is None:
@@ -416,7 +432,7 @@ def _parse_single_select_node(
     return parsed, node, None, None
 
 
-def is_simple_select_statement(sql: str, *, parser_con: duckdb.DuckDBPyConnection) -> bool:
+def is_simple_select_statement(sql: str, *, parser_con: duckdb.DuckDBPyConnection | None = None) -> bool:
     _parsed, node, err_code, _err_msg = _parse_single_select_node(sql, parser_con, allow_multi=True)
     return err_code is None and node is not None
 

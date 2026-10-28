@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import random
 import time
 from collections.abc import Callable
 
 import tenacity
+from tenacity.wait import wait_base, wait_exponential, wait_fixed, wait_random
 
 
 def retry_call[T](
@@ -26,13 +26,16 @@ def retry_call[T](
     if attempts < 1:
         raise ValueError("attempts must be >= 1")
 
-    def _wait(retry_state: tenacity.RetryCallState) -> float:
-        delay = base_delay * (multiplier ** (retry_state.attempt_number - 1))
-        if max_delay is not None:
-            delay = min(delay, max_delay)
-        if jitter:
-            delay += random.uniform(0, jitter)
-        return max(delay, 0.0)
+    if base_delay > 0:
+        wait_strategy: wait_base = wait_exponential(
+            multiplier=base_delay,
+            exp_base=multiplier,
+            max=max_delay if max_delay is not None else float("inf"),
+        )
+    else:
+        wait_strategy = wait_fixed(0.0)
+    if jitter > 0:
+        wait_strategy = wait_strategy + wait_random(0.0, jitter)
 
     def _before_sleep(retry_state: tenacity.RetryCallState) -> None:
         if before_retry is None:
@@ -48,7 +51,7 @@ def retry_call[T](
     retrying = tenacity.Retrying(
         retry=tenacity.retry_if_exception(retry_on),
         stop=stop,
-        wait=_wait,
+        wait=wait_strategy,
         before_sleep=_before_sleep if before_retry is not None else None,
         reraise=True,
         sleep=sleep,

@@ -1,6 +1,7 @@
 'use client'
 
-import { useState, useEffect, useMemo, useCallback } from 'react'
+import { useEffect, useMemo, useCallback } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import { useSSE, type SSELine } from '@/hooks/useSSE'
 import { adminJsonResult, getPageLoadId } from '@/lib/api'
 import { useServiceStore } from '@/stores/filterStore'
@@ -175,7 +176,10 @@ function parseErrorEvent(line: SSELine): ErrorEvent | null {
 }
 
 export function useErrorStream(): { connected: boolean; events: ErrorEvent[] } {
-  const { lines, status, start, reset } = useSSE({ maxLines: 500 })
+  const { lines, status, start, reset } = useSSE<ErrorEvent>({
+    maxLines: 500,
+    transform: parseErrorEvent,
+  })
   const activeServiceId = useServiceStore((s) => s.activeServiceId)
 
   useEffect(() => {
@@ -192,8 +196,7 @@ export function useErrorStream(): { connected: boolean; events: ErrorEvent[] } {
   const events = useMemo(() => {
     const seen = new Set<string>()
     return lines
-      .map(parseErrorEvent)
-      .filter((e): e is ErrorEvent => e !== null && !seen.has(e.event_id) && !!seen.add(e.event_id))
+      .filter((e) => !seen.has(e.event_id) && !!seen.add(e.event_id))
       .slice(-20)
   }, [lines])
 
@@ -224,52 +227,54 @@ function isTick(t: unknown): t is MetricsTick {
 }
 
 export function useRealtimeStream(): RealtimeStreamState {
-  const { lines, status, start, reset } = useSSE({ maxLines: 600 })
+  const { lines, status, start, reset } = useSSE<MetricsTick>({
+    maxLines: 600,
+    transform: parseMetricsTick,
+  })
   const activeServiceId = useServiceStore((s) => s.activeServiceId)
-  const [seed, setSeed] = useState<{ ticks: MetricsTick[]; timestamps: Set<string> }>({
-    ticks: [],
-    timestamps: new Set(),
+
+  const { data: seed } = useQuery({
+    queryKey: ['realtime-seed', activeServiceId],
+    queryFn: async ({ signal }) => {
+      let seedTicks: MetricsTick[] = []
+      try {
+        const res = await adminJsonResult(
+          '/api/services/{service_id}/realtime-seed',
+          `/api/services/${activeServiceId}/realtime-seed`,
+          { signal },
+        )
+        if (res.ok) seedTicks = ((res.data.ticks ?? []) as unknown[]).filter(isTick)
+      } catch {
+        /* Seed is best-effort */
+      }
+      return {
+        ticks: seedTicks,
+        timestamps: new Set(seedTicks.map((t) => t.timestamp)),
+      }
+    },
+    enabled: !!activeServiceId,
+    staleTime: Infinity,
   })
 
   useEffect(() => {
     if (!activeServiceId) return
-    const ac = new AbortController()
     const pageLoadId = getPageLoadId()
     start(
       `/api/services/${activeServiceId}/realtime-stream`,
       undefined,
       pageLoadId ? { 'X-Page-Load-ID': pageLoadId } : undefined,
     )
-    ;(async () => {
-      let seedTicks: MetricsTick[] = []
-      try {
-        const res = await adminJsonResult(
-          '/api/services/{service_id}/realtime-seed',
-          `/api/services/${activeServiceId}/realtime-seed`,
-          { signal: ac.signal },
-        )
-        if (res.ok) seedTicks = ((res.data.ticks ?? []) as unknown[]).filter(isTick)
-      } catch {
-        /* Seed is best-effort */
-      }
-      if (!ac.signal.aborted) {
-        setSeed({ ticks: seedTicks, timestamps: new Set(seedTicks.map((t) => t.timestamp)) })
-      }
-    })()
-    return () => {
-      ac.abort()
-      reset()
-      setSeed({ ticks: [], timestamps: new Set() })
-    }
+    return () => reset()
   }, [activeServiceId, start, reset])
 
-  const allTicks = useMemo(
-    () => [
-      ...seed.ticks,
-      ...lines.map(parseMetricsTick).filter((t): t is MetricsTick => t !== null && !seed.timestamps.has(t.timestamp)),
-    ],
-    [lines, seed],
-  )
+  const allTicks = useMemo(() => {
+    const seedTicks = seed?.ticks ?? []
+    const seedTimestamps = seed?.timestamps
+    if (!seedTimestamps || seedTimestamps.size === 0) {
+      return seedTicks.length === 0 ? lines : [...seedTicks, ...lines]
+    }
+    return [...seedTicks, ...lines.filter((t) => !seedTimestamps.has(t.timestamp))]
+  }, [lines, seed])
   const latestTick = allTicks.length > 0 ? allTicks[allTicks.length - 1] : null
   return {
     connected: status === 'streaming',

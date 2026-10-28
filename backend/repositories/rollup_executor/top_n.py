@@ -920,19 +920,9 @@ class _TopNRollupMixin:
         if paths is None:
             return None
         paths_sql = quote_path_list(paths)
-        rows = self._exec_rollup(
-            "SELECT value, CAST(SUM(count) AS BIGINT) AS c "
-            f"FROM read_parquet([{paths_sql}], hive_partitioning=0) "
-            "WHERE field = ? GROUP BY value ORDER BY c DESC",
-            [virtual_id],
-            tag="virtual_field_top_n_rollup",
-        )
-        if rows is None:
-            return None
-        counts: dict[str, int] = {}
-        for value, count in rows:
-            counts[str(value)] = counts.get(str(value), 0) + int(count or 0)
         _active_dt, live_start, live_end = _active_hour_overlap(st, et)
+        rows: list[tuple] | None = None
+        used_combined_live = False
         if live_start < live_end:
             cols = actual_cols if actual_cols is not None else self.get_schema_cols()
             if backing_col in cols:
@@ -942,26 +932,41 @@ class _TopNRollupMixin:
                 if tmp is None:
                     return None
                 try:
-                    live_rows = self.execute(
-                        f"SELECT trim(signal) AS value, COUNT(*) AS c "
+                    rows = self._exec_rollup(
+                        "SELECT value, CAST(SUM(c) AS BIGINT) AS total_c FROM ("
+                        "SELECT value, CAST(SUM(count) AS BIGINT) AS c "
+                        f"FROM read_parquet([{paths_sql}], hive_partitioning=0) "
+                        "WHERE field = ? GROUP BY value "
+                        "UNION ALL "
+                        "SELECT trim(signal) AS value, COUNT(*) AS c "
                         f"FROM (SELECT unnest(string_split(\"{backing_col}\", ',')) AS signal "
                         f'FROM "{tmp}" WHERE "{backing_col}" IS NOT NULL AND "{backing_col}" != \'\') '
                         "WHERE trim(signal) != '' GROUP BY value"
-                    ).fetchall()
-                except duckdb.InterruptException:
-                    raise
-                except duckdb.Error:
-                    return None
+                        ") GROUP BY value ORDER BY total_c DESC",
+                        [virtual_id],
+                        tag="virtual_field_top_n_rollup",
+                    )
+                    used_combined_live = True
                 finally:
                     self.release_active_direct_temp(tmp)
-                for value, count in live_rows:
-                    counts[str(value)] = counts.get(str(value), 0) + int(count or 0)
-        total = sum(counts.values())
-        top = [
-            {"value": value, "count": count}
-            for value, count in sorted(counts.items(), key=lambda item: item[1], reverse=True)
-            if value != "__other__"
-        ][:10]
+        if not used_combined_live:
+            rows = self._exec_rollup(
+                "SELECT value, CAST(SUM(count) AS BIGINT) AS c "
+                f"FROM read_parquet([{paths_sql}], hive_partitioning=0) "
+                "WHERE field = ? GROUP BY value ORDER BY c DESC",
+                [virtual_id],
+                tag="virtual_field_top_n_rollup",
+            )
+        if rows is None:
+            return None
+        total = 0
+        top: list[dict[str, Any]] = []
+        for value, count in rows:
+            c_val = int(count or 0)
+            str_val = str(value)
+            total += c_val
+            if str_val != "__other__" and len(top) < 10:
+                top.append({"value": str_val, "count": c_val})
         return {"top": top, "total": total}
 
     def _fetch_active_hour_live_rows(

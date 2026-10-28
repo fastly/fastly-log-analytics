@@ -258,6 +258,7 @@ export function useQueryMonitorUrlState(defaultSlowMs: number) {
 
 const JUST_FINISHED_WINDOW_S = 10
 const SLOW_QUERIES_MAX = 30
+const EMPTY_COMPLETED: CompletedRow[] = []
 
 export function matchesQueryRowFilters(
   r: Pick<CompletedRow, 'db_type' | 'sql_preview' | 'attribution'>,
@@ -284,6 +285,7 @@ export function useFilteredActive({
   slowThresholdMs,
   groupCrons,
   expandedRunIds,
+  paused = false,
 }: {
   snapshot: SnapshotResponse | undefined
   search: string
@@ -292,19 +294,38 @@ export function useFilteredActive({
   slowThresholdMs: number
   groupCrons: boolean
   expandedRunIds: ReadonlySet<string>
+  paused?: boolean
 }): {
   justFinished: CompletedRow[]
   filteredActive: ActiveOrPromotedRow[]
   completed: GroupedCompletedRow[]
   slowQueries: GroupedCompletedRow[]
 } {
-  const nowMs = useNowMs()
+  const maxEndedAtUtc = React.useMemo(() => {
+    let max = 0
+    for (const c of snapshot?.completed ?? []) {
+      if (c.ended_at_utc > max) max = c.ended_at_utc
+    }
+    return max
+  }, [snapshot?.completed])
+
+  const [settledMaxEndedAt, setSettledMaxEndedAt] = React.useState(0)
+  const hasActive = (snapshot?.active?.length ?? 0) > 0
+  const hasUnsettledCompleted = maxEndedAtUtc > settledMaxEndedAt
+  const nowMs = useNowMs(!paused && (hasActive || hasUnsettledCompleted))
+
+  if (hasUnsettledCompleted && nowMs > 0 && nowMs / 1000 - JUST_FINISHED_WINDOW_S > maxEndedAtUtc) {
+    setSettledMaxEndedAt(maxEndedAtUtc)
+  }
+
   const q = search.trim().toLowerCase()
 
   const justFinished = React.useMemo(() => {
+    if (!hasUnsettledCompleted) return EMPTY_COMPLETED
     const cutoff = nowMs / 1000 - JUST_FINISHED_WINDOW_S
-    return (snapshot?.completed ?? []).filter((c) => c.ended_at_utc >= cutoff)
-  }, [snapshot, nowMs])
+    const rows = (snapshot?.completed ?? []).filter((c) => c.ended_at_utc >= cutoff)
+    return rows.length > 0 ? rows : EMPTY_COMPLETED
+  }, [snapshot?.completed, nowMs, hasUnsettledCompleted])
 
   const slowQueries = React.useMemo(() => {
     const filtered = (snapshot?.completed ?? []).filter(

@@ -16,6 +16,7 @@ from urllib.parse import urlsplit
 from uuid import uuid4
 
 import httpx
+import orjson
 import pyarrow as pa
 import pyarrow.parquet as pq
 import structlog
@@ -144,9 +145,19 @@ class ClickHouseClient:
         if not rows:
             return
         try:
-            content = "".join(
-                json.dumps(row, default=_json_value, allow_nan=False, ensure_ascii=False) + "\n" for row in rows
-            ).encode("utf-8")
+            chunks: list[bytes] = []
+            for row in rows:
+                for v in row:
+                    if isinstance(v, float) and not math.isfinite(v):
+                        raise ValueError("invalid ClickHouse insert value")
+                chunks.append(
+                    orjson.dumps(
+                        row,
+                        default=_json_value,
+                        option=orjson.OPT_APPEND_NEWLINE | orjson.OPT_PASSTHROUGH_DATETIME,
+                    )
+                )
+            content = b"".join(chunks)
         except (ValueError, TypeError, UnicodeError):
             raise ValueError("invalid ClickHouse insert value") from None
         quoted_columns = ", ".join(f"`{c}`" for c in columns)

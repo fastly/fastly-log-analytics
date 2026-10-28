@@ -38,6 +38,7 @@ from backend.models.analytics import (
 from backend.models.common import OkResponse
 from backend.utils.bounded_cache import BoundedTTLCache
 from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry
+from backend.utils.rate_limit import SlidingWindowLimiter
 from backend.utils.router_utils import (
     make_error,
     not_found,
@@ -69,23 +70,26 @@ def _ensure_enabled() -> None:
 
 _CANCEL_RATE_PER_SEC = 10
 _CANCEL_WINDOW_S = 1.0
-_cancel_history: BoundedTTLCache = BoundedTTLCache(maxsize=1024, ttl_seconds=60.0)
+_cancel_limiter = SlidingWindowLimiter(
+    window_s=_CANCEL_WINDOW_S,
+    max_keys=1024,
+    clock=lambda: time.monotonic(),
+)
+
+
+class _CancelHistoryCache(BoundedTTLCache[str, deque[float]]):
+    def clear(self) -> None:
+        super().clear()
+        with _cancel_limiter._lock:
+            _cancel_limiter._events.clear()
+            _cancel_limiter._locks.clear()
+
+
+_cancel_history: BoundedTTLCache = _CancelHistoryCache(maxsize=1024, ttl_seconds=60.0)
 
 
 def _check_cancel_rate(admin_id: str) -> bool:
-    now = time.monotonic()
-    history: deque[float] | None = _cancel_history.get(admin_id)
-    if history is None:
-        history = deque(maxlen=_CANCEL_RATE_PER_SEC * 2)
-    cutoff = now - _CANCEL_WINDOW_S
-    while history and history[0] < cutoff:
-        history.popleft()
-    if len(history) >= _CANCEL_RATE_PER_SEC:
-        _cancel_history[admin_id] = history
-        return False
-    history.append(now)
-    _cancel_history[admin_id] = history
-    return True
+    return _cancel_limiter.try_acquire(admin_id, max_events=_CANCEL_RATE_PER_SEC)
 
 
 def _admin_id_from_request(request: Request) -> str:

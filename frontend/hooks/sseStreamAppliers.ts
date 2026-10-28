@@ -52,6 +52,19 @@ export function parseSSEFrames(buffer: string): { frames: string[]; remainder: s
   return { frames: parts.slice(0, -1), remainder: parts.at(-1) ?? '' }
 }
 
+export function extractSSEFrameData(frame: string): string | null {
+  const dataLines: string[] = []
+  for (const line of frame.split(/\r?\n|\r/)) {
+    const stripped = line.trimStart()
+    if (stripped.startsWith('data:')) {
+      dataLines.push(stripped.replace(/^data:\s?/, ''))
+    }
+  }
+  if (dataLines.length === 0) return null
+  const joined = dataLines.join('\n').trim()
+  return joined.length > 0 ? joined : null
+}
+
 // ── Admin Stream Cache Appliers ──────────────────────────────────────────────
 
 export function applySyncStatus(qc: QueryClient, serviceId: string | null, data: unknown): void {

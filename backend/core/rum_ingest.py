@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import gzip
-import json
 import logging
 import os
 import sys as _sys
@@ -13,6 +12,7 @@ from collections.abc import Generator
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+import orjson
 import pyarrow as pa
 
 from backend.celery_app import app
@@ -232,9 +232,9 @@ def _parse_rum_line(log_data: dict, service_id: str) -> tuple[list[dict], list[d
     extracted_metrics: list[dict] = []
     if raw_body:
         try:
-            payload = json.loads(raw_body)
+            payload = orjson.loads(raw_body)
             if isinstance(payload, str):
-                payload = json.loads(payload)
+                payload = orjson.loads(payload)
             if isinstance(payload, dict):
                 extracted_metrics = extract_metrics_from_faro_payload(payload, log_data)
         except Exception:
@@ -313,41 +313,57 @@ def _parse_rum_line(log_data: dict, service_id: str) -> tuple[list[dict], list[d
     return vitals_rows, errors_rows
 
 
+_PRECOLLECTED_CORRUPT_RECORDS: dict[int, tuple[list[tuple[str, str]], str, list[tuple[int, int, bytes, str]]]] = {}
+
+
 def _parse_rum_beacon_file(local_path: str, service_id: str) -> tuple[list[dict], list[dict], list[tuple[str, str]]]:
     vitals_rows: list[dict] = []
     errors_rows: list[dict] = []
     corrupt_lines: list[tuple[str, str]] = []
-    with gzip.open(local_path, "rt", encoding="utf-8") as f:
-        for line in f:
-            stripped = line.strip()
-            if not stripped:
+    corrupt_records: list[tuple[int, int, bytes, str]] = []
+    byte_offset = 0
+    with gzip.open(local_path, "rb") as f:
+        for ordinal, raw_line in enumerate(f, start=1):
+            current_offset = byte_offset
+            byte_offset += len(raw_line)
+            stripped_bytes = raw_line.strip()
+            if not stripped_bytes:
                 continue
             try:
-                log_data = json.loads(stripped)
-            except (json.JSONDecodeError, ValueError):
+                log_data = orjson.loads(stripped_bytes)
+            except (orjson.JSONDecodeError, ValueError):
+                stripped = stripped_bytes.decode("utf-8", errors="replace")
                 corrupt_lines.append((stripped, "invalid_json"))
+                corrupt_records.append((ordinal, current_offset, raw_line, "invalid_json"))
                 continue
             try:
                 parsed = _parse_rum_line(log_data, service_id)
             except Exception as e:
+                stripped = stripped_bytes.decode("utf-8", errors="replace")
                 msg = str(e)
                 if msg == "missing_timestamp":
-                    corrupt_lines.append((stripped, "missing_timestamp"))
+                    reason = "missing_timestamp"
                 elif msg.startswith("invalid_timestamp"):
-                    corrupt_lines.append(
-                        (stripped, f"invalid_timestamp: {msg.removeprefix('invalid_timestamp: ')}"[:200])
-                    )
+                    reason = f"invalid_timestamp: {msg.removeprefix('invalid_timestamp: ')}"[:200]
                 else:
-                    corrupt_lines.append((stripped, f"parse_error: {e}"[:200]))
+                    reason = f"parse_error: {e}"[:200]
+                corrupt_lines.append((stripped, reason))
+                corrupt_records.append((ordinal, current_offset, raw_line, reason))
                 continue
             if parsed is None:
                 continue
             v_rows, e_rows = parsed
             if not v_rows and not e_rows:
+                stripped = stripped_bytes.decode("utf-8", errors="replace")
                 corrupt_lines.append((stripped, "empty_beacon_payload"))
+                corrupt_records.append((ordinal, current_offset, raw_line, "empty_beacon_payload"))
                 continue
             vitals_rows.extend(v_rows)
             errors_rows.extend(e_rows)
+    if corrupt_records:
+        if len(_PRECOLLECTED_CORRUPT_RECORDS) >= 64:
+            _PRECOLLECTED_CORRUPT_RECORDS.pop(next(iter(_PRECOLLECTED_CORRUPT_RECORDS)), None)
+        _PRECOLLECTED_CORRUPT_RECORDS[id(corrupt_lines)] = (corrupt_lines, local_path, corrupt_records)
     return vitals_rows, errors_rows, corrupt_lines
 
 
@@ -362,8 +378,18 @@ def _quarantine_rum_corrupt_lines(
     valid_count: int,
     *,
     local_file: str,
+    precollected_corrupt: list[tuple[int, int, bytes, str]] | None = None,
 ) -> dict[str, int]:
     from backend.core.metadata.ingest_log import capture_evidence
+
+    pre_entry = _PRECOLLECTED_CORRUPT_RECORDS.pop(id(corrupt_lines), None)
+    if (
+        precollected_corrupt is None
+        and pre_entry is not None
+        and pre_entry[0] is corrupt_lines
+        and pre_entry[1] == local_file
+    ):
+        precollected_corrupt = pre_entry[2]
 
     service_id = src.get("service_id") or src.get("name", "")
     prefix_path = src.get("prefix", "").strip("/")
@@ -375,21 +401,9 @@ def _quarantine_rum_corrupt_lines(
             "cap_evictions": 0,
             "quarantine_capture_failures": len(corrupt_lines),
         }
-    occurrences: dict[str, list[str]] = {}
-    for line, reason in corrupt_lines:
-        occurrences.setdefault(line, []).append(reason)
-    offsets: dict[str, int] = {}
     evidence_results = []
-    byte_offset = 0
-    with gzip.open(local_file, "rb") as raw:
-        for ordinal, raw_line in enumerate(raw, start=1):
-            stripped = raw_line.strip().decode("utf-8", errors="replace")
-            current_offset = byte_offset
-            byte_offset += len(raw_line)
-            if not occurrences.get(stripped):
-                continue
-            reason = occurrences[stripped][offsets.get(stripped, 0)]
-            offsets[stripped] = offsets.get(stripped, 0) + 1
+    if precollected_corrupt is not None:
+        for ordinal, current_offset, raw_line, reason in precollected_corrupt:
             evidence_results.append(
                 capture_evidence(
                     service_id,
@@ -402,6 +416,33 @@ def _quarantine_rum_corrupt_lines(
                     error_text=reason,
                 )
             )
+    else:
+        occurrences: dict[str, list[str]] = {}
+        for line, reason in corrupt_lines:
+            occurrences.setdefault(line, []).append(reason)
+        offsets: dict[str, int] = {}
+        byte_offset = 0
+        with gzip.open(local_file, "rb") as raw:
+            for ordinal, raw_line in enumerate(raw, start=1):
+                stripped = raw_line.strip().decode("utf-8", errors="replace")
+                current_offset = byte_offset
+                byte_offset += len(raw_line)
+                if not occurrences.get(stripped):
+                    continue
+                reason = occurrences[stripped][offsets.get(stripped, 0)]
+                offsets[stripped] = offsets.get(stripped, 0) + 1
+                evidence_results.append(
+                    capture_evidence(
+                        service_id,
+                        "rum",
+                        object_key,
+                        raw_line,
+                        line_ordinal=ordinal,
+                        byte_offset=current_offset,
+                        error_category=reason.partition(":")[0],
+                        error_text=reason,
+                    )
+                )
     counts = _sum_evidence_counts(evidence_results, extra_failures=len(corrupt_lines) - len(evidence_results))
     if counts["quarantine_capture_failures"]:
         logger.error(

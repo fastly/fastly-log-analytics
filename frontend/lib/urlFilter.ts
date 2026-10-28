@@ -68,6 +68,28 @@ export function rangeLabelToHours(label: string): number | null {
   return !Number.isFinite(n) || n <= 0 ? null : m[2] === 'm' ? n / 60 : m[2] === 'd' ? n * 24 : n
 }
 
+export function applyUrlFiltersJsonToStore(
+  qsFilters: string | null | undefined,
+  store: Pick<ReturnType<typeof useFilterStore.getState>, 'clearFilters' | 'addFilter'> = useFilterStore.getState(),
+): boolean {
+  if (!qsFilters) return false
+  try {
+    const parsed = JSON.parse(qsFilters) as FiltersPayload
+    if (parsed && typeof parsed === 'object') {
+      store.clearFilters()
+      for (const [rawCol, spec] of Object.entries(parsed)) {
+        if (!spec || !Array.isArray(spec.values)) continue
+        const col = rawCol.replace(/_\d+$/, '')
+        for (const v of spec.values) store.addFilter(col, String(v), spec.mode === 'exclude' ? 'exclude' : 'include')
+      }
+      return true
+    }
+  } catch {
+    /* ignore */
+  }
+  return false
+}
+
 export function hydrateFilterStoreFromUrl(): void {
   if (hydrated || typeof window === 'undefined') return
   hydrated = true
@@ -88,22 +110,7 @@ export function hydrateFilterStoreFromUrl(): void {
     store.setRange(qsStart, qsEnd)
     touchedRange = true
   }
-  if (qsFilters) {
-    try {
-      const parsed = JSON.parse(qsFilters) as FiltersPayload
-      if (parsed && typeof parsed === 'object') {
-        store.clearFilters()
-        touchedFilters = true
-        for (const [rawCol, spec] of Object.entries(parsed)) {
-          if (!spec || !Array.isArray(spec.values)) continue
-          const col = rawCol.replace(/_\d+$/, '')
-          for (const v of spec.values) store.addFilter(col, String(v), spec.mode === 'exclude' ? 'exclude' : 'include')
-        }
-      }
-    } catch {
-      /* ignore */
-    }
-  }
+  touchedFilters = applyUrlFiltersJsonToStore(qsFilters, store)
   if (!touchedFilters) {
     let cleared = false
     params.forEach((value, key) => {

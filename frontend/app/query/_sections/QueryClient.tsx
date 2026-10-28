@@ -20,10 +20,9 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Play, Search, AlertCircle, Database, Terminal } from 'lucide-react'
 import { NoServiceSelected } from '@/components/ReportLayout'
 import { PageHeader } from '@/components/ui/confirm-dialog'
-import { downloadAsCsv } from '@/lib/utils'
+import { applyUrlFiltersJsonToStore, downloadAsCsv } from '@/lib/utils'
 import { Skeleton } from '@/components/ui/skeleton'
 import { buildStructuredSql } from '@/lib/sqlBuilder'
-import type { FiltersPayload } from '@/types/api'
 import type { components } from '@/types/api.generated'
 import {
   CodeEditor,
@@ -82,27 +81,14 @@ function applyDeepLinkToFilterStore(
   qsFilters: string | null,
 ): boolean {
   if (typeof window === 'undefined') return false
-  const { setRange, clearFilters, addFilter } = useFilterStore.getState()
+  const store = useFilterStore.getState()
   let mutated = false
   if (qsStart && qsEnd) {
-    setRange(qsStart, qsEnd)
+    store.setRange(qsStart, qsEnd)
     mutated = true
   }
-  if (qsFilters) {
-    try {
-      const parsed = JSON.parse(qsFilters) as FiltersPayload
-      if (parsed && typeof parsed === 'object') {
-        clearFilters()
-        for (const [rawCol, spec] of Object.entries(parsed)) {
-          if (!spec || !Array.isArray(spec.values)) continue
-          const col = rawCol.replace(/_\d+$/, '')
-          for (const v of spec.values) addFilter(col, String(v), spec.mode === 'exclude' ? 'exclude' : 'include')
-        }
-        mutated = true
-      }
-    } catch {
-      /* ignore */
-    }
+  if (applyUrlFiltersJsonToStore(qsFilters, store)) {
+    mutated = true
   }
   return mutated
 }

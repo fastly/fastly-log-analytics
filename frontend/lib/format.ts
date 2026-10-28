@@ -274,9 +274,15 @@ export function formatDeterministicUTC(iso: string | null | undefined): string {
   try {
     const d = new Date(iso)
     if (isNaN(d.getTime())) return iso
-    const datePart = getDateTimeFormat('en-US', { timeZone: 'UTC', year: 'numeric', month: 'short', day: 'numeric' }).format(d)
-    const timePart = getDateTimeFormat('en-US', { timeZone: 'UTC', hour: '2-digit', minute: '2-digit' }).format(d)
-    return `${datePart}, ${timePart} UTC`
+    const formatted = getDateTimeFormat('en-US', {
+      timeZone: 'UTC',
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    }).format(d)
+    return `${formatted} UTC`
   } catch {
     return iso
   }

@@ -303,7 +303,6 @@ export function TopFlaggedTable({ serviceId, sinceHours = 24 }: TopFlaggedTableP
       <DataTable
         columns={columns}
         data={filteredData}
-        searchKey="url"
         initialSorting={[{ id: 'timestamp', desc: true }]}
         hideToolbar
         columnVisibility={visibility}

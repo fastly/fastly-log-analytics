@@ -35,32 +35,32 @@ export function useFilterUrlWriteback(): void {
   const filterPayload = useFilterPayload()
 
   useEffect(() => {
+    if (typeof window === 'undefined') return
+    const params = new URLSearchParams(window.location.search)
+    const hasUrlRange = Boolean(
+      (params.get('range') && rangeLabelToHours(params.get('range')!) !== null) ||
+        (params.get('start_time') && params.get('end_time')),
+    )
+
     _resetUrlHydrationFlag()
     hydrateFilterStoreFromUrl()
 
-    if (typeof window !== 'undefined') {
-      const params = new URLSearchParams(window.location.search)
-      const qsStart = params.get('start_time')
-      const qsEnd = params.get('end_time')
-      const qsRange = params.get('range')
+    if (!hasUrlRange) {
+      const store = useFilterStore.getState()
+      const now = new Date()
+      const activeRange = store.relativeRange
 
-      if (!qsStart && !qsEnd) {
-        const store = useFilterStore.getState()
-        const now = new Date()
-        const activeRange = qsRange || store.relativeRange
-
-        if (activeRange) {
-          const hours = rangeLabelToHours(activeRange)
-          if (hours !== null) {
-            const start = new Date(now.getTime() - hours * 3600 * 1000).toISOString()
-            store.setRelativeRange(activeRange, start, now.toISOString())
-          }
-        } else if (store.isAutoRange && (!store.startTime || !store.endTime)) {
-          useFilterStore.setState({
-            startTime: new Date(now.getTime() - 24 * 3600 * 1000).toISOString(),
-            endTime: now.toISOString(),
-          })
+      if (activeRange) {
+        const hours = rangeLabelToHours(activeRange)
+        if (hours !== null) {
+          const start = new Date(now.getTime() - hours * 3600 * 1000).toISOString()
+          store.setRelativeRange(activeRange, start, now.toISOString())
         }
+      } else if (store.isAutoRange && (!store.startTime || !store.endTime)) {
+        useFilterStore.setState({
+          startTime: new Date(now.getTime() - 24 * 3600 * 1000).toISOString(),
+          endTime: now.toISOString(),
+        })
       }
     }
   }, [pathname])

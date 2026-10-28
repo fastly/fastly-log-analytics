@@ -18,17 +18,7 @@ from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry
 
 logger = logging.getLogger(__name__)
 
-
-class _BotBoundedTTLCache(BoundedTTLCache):
-    """BoundedTTLCache with dict-equality support (e.g. ``cache == {}``)."""
-
-    def __eq__(self, other: object) -> bool:
-        if isinstance(other, dict):
-            if len(self) != len(other):
-                return False
-            marker = object()
-            return all(k in self and self.get(k, marker) == v for k, v in other.items())
-        return super().__eq__(other)
+_BotBoundedTTLCache = BoundedTTLCache
 
 
 BOT_SOURCES: list[dict] = [
@@ -94,17 +84,17 @@ _CACHE_DIR = Path("data/cache/bot_sources")
 # ── Matcher cache ─────────────────────────────────────────────────────────────
 # Rebuilt lazily when cache files change on disk.
 _matcher_lock = threading.Lock()
-_matcher_cache: BoundedTTLCache = _BotBoundedTTLCache(maxsize=16, ttl_seconds=86400.0)  # keys: "fn", "mtime"
+_matcher_cache: BoundedTTLCache = BoundedTTLCache(maxsize=16, ttl_seconds=86400.0)  # keys: "fn", "mtime"
 
 # mtime-revalidated cache for parsed source envelopes. load_source is hit
 # by every get_bot_regex_pattern / get_bot_by_id call (dashboard +
 # security repos) and the JSON files are megabytes — the parse cost was
 # adding up.
-_source_cache: BoundedTTLCache = _BotBoundedTTLCache(maxsize=64, ttl_seconds=86400.0)
+_source_cache: BoundedTTLCache = BoundedTTLCache(maxsize=64, ttl_seconds=86400.0)
 _source_cache_lock = threading.Lock()
 
 # Pre-compiled IP network feeds for high-performance IP-based bot matching.
-_compiled_ip_feeds: BoundedTTLCache = _BotBoundedTTLCache(maxsize=32, ttl_seconds=86400.0)
+_compiled_ip_feeds: BoundedTTLCache = BoundedTTLCache(maxsize=32, ttl_seconds=86400.0)
 _compiled_ip_feeds_lock = threading.Lock()
 
 
@@ -125,7 +115,7 @@ def _cache_mtime() -> float:
 # Content-hash version cache, revalidated against the source files' mtime.
 # The mtime stat is cheap (hot path); the SHA is recomputed only when a file
 # is rewritten (a refresh) and re-hashes IDENTICAL content to the SAME value.
-_version_cache: BoundedTTLCache = _BotBoundedTTLCache(maxsize=16, ttl_seconds=86400.0)
+_version_cache: BoundedTTLCache = BoundedTTLCache(maxsize=16, ttl_seconds=86400.0)
 _version_cache_lock = threading.Lock()
 
 
@@ -545,15 +535,13 @@ def enrich_bot_metadata(df: Any) -> None:
             if ip_str in ip_feed_cache:
                 return ip_feed_cache[ip_str]
             matched_feed: str | None = None
+            is_v6 = ":" in ip_str
             try:
-                parsed = parse_ip_int_version(ip_str)
-                if parsed is not None:
-                    _ip_int, version = parsed
-                    for feed_id, (v4_trie, v6_trie) in feed_tries.items():
-                        trie = v4_trie if version == 4 else v6_trie
-                        if len(trie) > 0 and ip_str in trie:
-                            matched_feed = feed_id
-                            break
+                for feed_id, (v4_trie, v6_trie) in feed_tries.items():
+                    trie = v6_trie if is_v6 else v4_trie
+                    if len(trie) > 0 and ip_str in trie:
+                        matched_feed = feed_id
+                        break
             except Exception:
                 logger.debug("enrich_bot_metadata: step failed (ignored)", exc_info=True)
             ip_feed_cache[ip_str] = matched_feed
@@ -639,6 +627,7 @@ _DOMAIN_STEM_RE = re.compile(r"^(?:https?://)?(?:www\.)?([^/.:;\s]+)", re.IGNORE
 _SEED_PATH = Path(__file__).resolve().parent.parent / "well_known_bots_seed.json"
 _seed_entries_cache: list[dict] | None = None
 _seed_matcher_fn: Callable[[str], tuple[dict, ...]] | None = None
+_bot_display_index: tuple[int, dict[str, str], list[tuple[str, str]]] | None = None
 _seed_lock = threading.RLock()
 
 
@@ -678,6 +667,32 @@ def build_well_known_bots_matcher() -> Callable[[str], tuple[dict, ...]]:
         return _seed_matcher_fn
 
 
+def _get_bot_display_index(catalog: list[dict]) -> tuple[dict[str, str], list[tuple[str, str]]]:
+    global _bot_display_index
+    cat_id = id(catalog)
+    cached = _bot_display_index
+    if cached is not None and cached[0] == cat_id:
+        return cached[1], cached[2]
+    exact_map: dict[str, str] = {}
+    substring_pairs: list[tuple[str, str]] = []
+    for entry in catalog:
+        bot_id = entry.get("id", "")
+        if not bot_id:
+            continue
+        title = bot_id.replace("-", " ").title()
+        bid_low = bot_id.lower()
+        if bid_low not in exact_map:
+            exact_map[bid_low] = title
+        for alias in entry.get("aliases") or []:
+            a_low = alias.lower()
+            if a_low not in exact_map:
+                exact_map[a_low] = title
+        for pat in (entry.get("pattern") or {}).get("accepted") or []:
+            substring_pairs.append((pat.lower(), title))
+    _bot_display_index = (cat_id, exact_map, substring_pairs)
+    return exact_map, substring_pairs
+
+
 def resolve_bot_display_name(token_or_ua: str | None, default: str = "Other Bot") -> str:
     """Resolve an extracted bot UA token or full UA string to a human-readable display name.
 
@@ -702,15 +717,12 @@ def resolve_bot_display_name(token_or_ua: str | None, default: str = "Other Bot"
             return bot_id.replace("-", " ").title()
     raw_low = raw.lower().strip("/._- ")
     if raw_low:
-        for entry in load_well_known_bots_catalog():
-            bot_id = entry.get("id", "")
-            if not bot_id:
-                continue
-            if raw_low == bot_id.lower() or any(raw_low == a.lower() for a in entry.get("aliases") or []):
-                return bot_id.replace("-", " ").title()
-            for pat in (entry.get("pattern") or {}).get("accepted") or []:
-                if raw_low in pat.lower():
-                    return bot_id.replace("-", " ").title()
+        exact_map, substring_pairs = _get_bot_display_index(load_well_known_bots_catalog())
+        if raw_low in exact_map:
+            return exact_map[raw_low]
+        for pat_low, title in substring_pairs:
+            if raw_low in pat_low:
+                return title
     cleaned = raw.strip("/._- ")
     if not cleaned:
         return default

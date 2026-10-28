@@ -16,7 +16,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
-import cachetools
 import httpx
 from authlib.common.security import generate_token
 from authlib.integrations.base_client.errors import OAuthError
@@ -29,6 +28,8 @@ from joserfc.errors import ExpiredTokenError, InvalidClaimError, JoseError, Miss
 from joserfc.jwk import KeySet
 
 from backend.config import SYSTEM_DATA_DIR
+from backend.utils.bounded_cache import BoundedLRUCache
+from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry
 
 logger = logging.getLogger(__name__)
 # ── Provider Registry ────────────────────────────────────────────────────────
@@ -278,11 +279,15 @@ class _JwksCacheEntry:
     last_refetch_at: float
 
 
-_metadata_cache: cachetools.LRUCache[str, _MetadataCacheEntry] = cachetools.LRUCache(maxsize=128)
-_jwks_cache: cachetools.LRUCache[str, _JwksCacheEntry] = cachetools.LRUCache(maxsize=128)
-_jwks_locks: dict[str, threading.Lock] = {}
+_metadata_cache: BoundedLRUCache[str, _MetadataCacheEntry] = BoundedLRUCache(maxsize=128)
+_jwks_cache: BoundedLRUCache[str, _JwksCacheEntry] = BoundedLRUCache(maxsize=128)
+_jwks_locks: BoundedLRUCache[str, threading.Lock] = BoundedLRUCache(maxsize=128)
 _cache_lock = threading.Lock()
 _test_transport: httpx.BaseTransport | None = None
+
+_CacheRegistry.register("core.oauth._metadata_cache", _metadata_cache)
+_CacheRegistry.register("core.oauth._jwks_cache", _jwks_cache)
+_CacheRegistry.register("core.oauth._jwks_locks", _jwks_locks)
 
 
 def set_test_transport(transport: httpx.BaseTransport | None) -> None:

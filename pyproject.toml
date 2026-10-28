@@ -110,6 +110,7 @@ dependencies = [
     "datasketch>=1.6.5",
     "pytricia>=1.0.2",
     "python-statemachine>=2.3.6",
+    "orjson>=3.10.0",
 ]
 
 [dependency-groups]

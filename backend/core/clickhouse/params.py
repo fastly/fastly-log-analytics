@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import math
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from ipaddress import IPv4Address, IPv6Address
 from typing import Any
 from uuid import UUID
+
+import orjson
 
 from backend.core.clickhouse.constants import (
     _DDL_PASSWORD,
@@ -98,7 +99,10 @@ def canonical_row(row: dict[str, Any]) -> tuple:
 
 
 def canonical_bytes(row: tuple) -> bytes:
-    return (json.dumps(row, ensure_ascii=False, separators=(",", ":"), allow_nan=False) + "\n").encode()
+    for v in row:
+        if isinstance(v, float) and not math.isfinite(v):
+            raise ValueError("Out of range float values are not JSON compliant")
+    return orjson.dumps(row, option=orjson.OPT_APPEND_NEWLINE)
 
 
 def digest_rows(rows: Any) -> str:

@@ -125,6 +125,7 @@ from backend.core.sql_validator import (  # noqa: F401
     require_safe_ident,
     validate_user_sql,
 )
+from backend.utils.bounded_cache import BoundedLRUCache
 from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry
 from backend.utils.telemetry import HyperLogLog as HyperLogLog
 from backend.utils.telemetry import retry_call
@@ -314,7 +315,7 @@ def _configure_fos(con: duckdb.DuckDBPyConnection, source: dict):
         con.execute("SET http_keep_alive = false;")
 
 
-_fos_client_cache: dict[tuple[str, str, str, str], Any] = {}
+_fos_client_cache: BoundedLRUCache[tuple[str, str, str, str], Any] = BoundedLRUCache(maxsize=128)
 _fos_client_lock = threading.Lock()
 
 
@@ -766,8 +767,6 @@ def get_connection(
                         "Try again in a few seconds."
                     ) from e
                 wait_s = min(delay, remaining)
-                if wait_s <= 0:
-                    time.sleep(0)
                 delay = min(delay * _LOCK_RETRY_MULTIPLIER, _LOCK_RETRY_MAX_DELAY)
                 raise _LockConflict(wait_s) from e
     if con is None:

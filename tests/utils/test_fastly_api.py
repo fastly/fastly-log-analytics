@@ -1677,7 +1677,7 @@ import backend.utils.tunnel as _session_mod
 from backend.core.metadata import base
 from backend.core.rollups._common import parse_hour_token
 from backend.utils import remote_access, tunnel
-from backend.utils.bounded_cache import BoundedTTLCache, CacheRegistry
+from backend.utils.bounded_cache import BoundedLRUCache, BoundedTTLCache, CacheRegistry
 from backend.utils.date_utils import (
     _parse_dt,
     ensure_utc,
@@ -1862,6 +1862,24 @@ def test_thread_safety_under_concurrent_writes():
     for t in threads:
         t.join()
     assert not errors and len(cache) <= 200
+
+
+def test_bounded_lru_cache_operations_and_eviction():
+    with pytest.raises(ValueError):
+        BoundedLRUCache(maxsize=0)
+    cache: BoundedLRUCache[str, int] = BoundedLRUCache(maxsize=2, name="test_lru")
+    cache.set("a", 1)
+    cache.put("b", 2)
+    assert cache["a"] == 1
+    cache["c"] = 3
+    assert "b" not in cache and cache.keys() == ["a", "c"]
+    assert cache.setdefault("a", 99) == 1
+    assert cache.setdefault("d", 4) == 4
+    assert cache.delete("c") is False
+    assert cache.delete("a") is True
+    assert "BoundedLRUCache" in repr(cache)
+    cache.clear()
+    assert len(cache) == 0
 
 
 # ── CacheRegistry ────────────────────────────────────────────────────────────

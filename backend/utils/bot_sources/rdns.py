@@ -8,6 +8,7 @@ import socket
 import sys
 import threading
 import time
+from datetime import UTC, datetime, timedelta
 
 import aiodns
 
@@ -252,12 +253,14 @@ async def _resolve_batch_async(ips: list[str]) -> dict[str, tuple[str | None, st
 def _bulk_update_sync(records: list[tuple[str | None, str, int, str, str]]) -> None:
     if not records:
         return
+    sql = "UPDATE rdns SET hostname=?, status=?, fcrdns_verified=?, looked_up_at=? WHERE ip=?"
     con = _write_con()
     try:
-        con.executemany(
-            "UPDATE rdns SET hostname=?, status=?, fcrdns_verified=?, looked_up_at=? WHERE ip=?",
-            records,
-        )
+        if hasattr(con, "executemany"):
+            con.executemany(sql, records)
+        else:
+            for rec in records:
+                con.execute(sql, rec)
         con.commit()
     finally:
         con.close()
@@ -356,9 +359,10 @@ def _reap_stale_rows() -> dict:
     with _write_lock:
         con = _write_con()
         try:
+            cutoff_iso = (datetime.now(UTC) - timedelta(days=int(_STALE_ROW_RETENTION_DAYS))).isoformat()
             cur = con.execute(
-                "DELETE FROM rdns WHERE status IN ('nxdomain', 'error') AND looked_up_at < datetime('now', ?)",
-                (f"-{_STALE_ROW_RETENTION_DAYS} days",),
+                "DELETE FROM rdns WHERE status IN ('nxdomain', 'error') AND looked_up_at < ?",
+                (cutoff_iso,),
             )
             stale_deleted = cur.rowcount
 
@@ -549,12 +553,13 @@ def _select_stale_ips(*, limit: int) -> list[tuple[str]]:
     with _write_lock:
         con = _write_con()
         try:
+            cutoff_iso = (datetime.now(UTC) - timedelta(hours=48)).isoformat()
             return con.execute(
                 """SELECT ip FROM rdns
                    WHERE status != 'pending'
-                     AND looked_up_at < datetime('now', '-48 hours')
+                     AND looked_up_at < ?
                    LIMIT ?""",
-                (limit,),
+                (cutoff_iso, limit),
             ).fetchall()
         finally:
             con.close()

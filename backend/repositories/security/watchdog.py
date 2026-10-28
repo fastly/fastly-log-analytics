@@ -273,13 +273,16 @@ def summarize_wellknown_bot_rows(rows: list) -> list[dict]:
     return sorted_bots
 
 
+_VOWEL_TABLE = str.maketrans("", "", "aeiou")
+
+
 def _stems_match(bot_stem: str, ref_stem: str) -> bool:
     if not bot_stem or not ref_stem:
         return False
     if bot_stem == ref_stem:
         return True
-    b_cons = "".join(ch for ch in bot_stem if ch not in "aeiou")
-    r_cons = "".join(ch for ch in ref_stem if ch not in "aeiou")
+    b_cons = bot_stem.translate(_VOWEL_TABLE)
+    r_cons = ref_stem.translate(_VOWEL_TABLE)
     if len(b_cons) >= 3 and b_cons == r_cons:
         return True
     return len(bot_stem) >= 3 and len(ref_stem) >= 3 and (bot_stem in ref_stem or ref_stem in bot_stem)

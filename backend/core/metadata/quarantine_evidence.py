@@ -255,10 +255,17 @@ def _service_lock(service_id: str) -> Iterator[None]:
     with _service_locks_guard:
         lock = _service_locks.setdefault(service_id, threading.RLock())
     with lock:
-        with pg_connection.get_pg_pool().connection() as con:
-            with con.transaction():
-                con.execute("SELECT pg_advisory_xact_lock(%s)", (_advisory_key(service_id),))
+        pool = pg_connection.get_pg_pool()
+        wrapper = get_con(service_id) if hasattr(pool, "getconn") else None
+        if wrapper is not None and hasattr(wrapper, "transaction") and hasattr(wrapper, "_conn"):
+            with wrapper.transaction():
+                wrapper._conn.execute("SELECT pg_advisory_xact_lock(%s)", (_advisory_key(service_id),))
                 yield
+        else:
+            with pool.connection() as con:
+                with con.transaction():
+                    con.execute("SELECT pg_advisory_xact_lock(%s)", (_advisory_key(service_id),))
+                    yield
 
 
 _quarantine_file_lock = _service_lock

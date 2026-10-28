@@ -17,7 +17,7 @@ from backend.core.rollups.rollup_coverage import CoverageIndex, cached_listdir
 from backend.core.sql_validator import escape_sql_literal
 from backend.models.analytics import TopNRollupCoverage
 from backend.utils.date_utils import parse_day_key_strict
-from backend.utils.hll import HyperLogLog
+from backend.utils.hll import SERIALIZATION_VERSION, HyperLogLog
 
 TopNRow = tuple[str, Any, int]
 _EDGE_PREFIXES = ("cmcd_", "edge_", "rum_")
@@ -492,23 +492,29 @@ def fold_sketches(
     rows: Iterable[tuple[str, str, object, object]],
 ) -> tuple[dict[tuple[str, str], HyperLogLog], dict[tuple[str, str], bool]]:
     """Merge the per-hour sketches by ``(field, value)``."""
-    merged: dict[tuple[str, str], HyperLogLog] = {}
+    grouped_blobs: dict[tuple[str, str], list[bytes | bytearray]] = {}
+    grouped_precision: dict[tuple[str, str], int] = {}
     any_capped: dict[tuple[str, str], bool] = {}
     for fld, value, sketch_bytes, capped in rows:
-        if not isinstance(sketch_bytes, (bytes, bytearray)) or not sketch_bytes:
+        if not isinstance(sketch_bytes, (bytes, bytearray)) or len(sketch_bytes) < 2:
             continue
-        try:
-            hll = HyperLogLog.from_bytes(sketch_bytes)
-        except ValueError:
+        version, precision = sketch_bytes[0], sketch_bytes[1]
+        if version != SERIALIZATION_VERSION or not (4 <= precision <= 16) or len(sketch_bytes) != 2 + (1 << precision):
             continue
         key = (fld, value)
-        if key not in merged:
-            merged[key] = HyperLogLog(precision=hll.precision)
+        if key not in grouped_blobs:
+            grouped_precision[key] = precision
+            grouped_blobs[key] = [sketch_bytes]
             any_capped[key] = bool(capped)
         else:
             any_capped[key] = any_capped[key] or bool(capped)
-        with contextlib.suppress(ValueError):
-            merged[key].merge(hll)
+            if precision == grouped_precision[key]:
+                grouped_blobs[key].append(sketch_bytes)
+    merged: dict[tuple[str, str], HyperLogLog] = {
+        key: hll
+        for key, blobs in grouped_blobs.items()
+        if (hll := HyperLogLog.merge_bytes(blobs, precision=grouped_precision[key])) is not None
+    }
     return merged, any_capped
 
 

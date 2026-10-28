@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import queue
+import random
 import sys
 import threading
 import time
@@ -125,7 +126,7 @@ class ValkeyPublisher:
                 raise
             except Exception as e:
                 _log_rate_limited("subscribe", "[valkey] subscription to %s lost (%s); reconnecting", channel, e)
-                await asyncio.sleep(backoff)
+                await asyncio.sleep(backoff * random.uniform(0.8, 1.2))
                 backoff = min(backoff * 2, 15.0)
             finally:
                 try:

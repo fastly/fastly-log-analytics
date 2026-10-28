@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any
 
 from backend.utils.date_utils import ensure_utc, parse_iso_utc
@@ -151,22 +151,25 @@ def pad_timeseries_buckets(
 
     st_epoch = int(st.timestamp())
     st_aligned = st_epoch - (st_epoch % bucket_seconds)
-    st_dt = datetime.fromtimestamp(st_aligned, tz=UTC)
 
     et_epoch = int(et.timestamp())
     et_aligned = et_epoch - (et_epoch % bucket_seconds)
-    et_dt = datetime.fromtimestamp(et_aligned, tz=UTC)
+    if et_aligned < st_aligned:
+        return []
+
+    has_callables = any(callable(v) for v in default_vals.values())
+    static_defaults = None if has_callables else dict(default_vals)
 
     padded: list[dict[str, Any]] = []
-    curr = st_dt
-    step = timedelta(seconds=bucket_seconds)
-    while curr <= et_dt:
-        bucket_str = curr.strftime(bucket_fmt)
-        if bucket_str in rows_by_bucket:
-            padded.append({"bucket": bucket_str, **rows_by_bucket[bucket_str]})
+    for ts in range(st_aligned, et_aligned + 1, bucket_seconds):
+        bucket_str = datetime.fromtimestamp(ts, tz=UTC).strftime(bucket_fmt)
+        existing = rows_by_bucket.get(bucket_str)
+        if existing is not None:
+            padded.append({"bucket": bucket_str, **existing})
+        elif static_defaults is not None:
+            padded.append({"bucket": bucket_str, **static_defaults})
         else:
-            padded.append({"bucket": bucket_str, **default_vals})
-        curr += step
+            padded.append({"bucket": bucket_str, **{k: (v() if callable(v) else v) for k, v in default_vals.items()}})
     return padded
 
 

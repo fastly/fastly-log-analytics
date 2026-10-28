@@ -48,7 +48,7 @@ from filelock import Timeout as _FileLockTimeout
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_validator
 from tenacity import Retrying, retry_if_exception_type, stop_after_attempt, wait_fixed
 
-from backend.utils.bounded_cache import BoundedTTLCache
+from backend.utils.bounded_cache import BoundedLRUCache
 from backend.utils.telemetry import atomic_write_json
 
 try:
@@ -188,7 +188,7 @@ def load_clickhouse_provisioner_config() -> ClickHouseConfig | None:
 
 # Cache for Fastly service names: {service_id: {"name": str, "fetched_at": float}}
 _NAME_CACHE_TTL = 300  # 5 minutes
-_name_cache: BoundedTTLCache = BoundedTTLCache(maxsize=256, ttl_seconds=_NAME_CACHE_TTL)
+_name_cache: BoundedLRUCache[str, dict[str, Any]] = BoundedLRUCache(maxsize=256)
 _name_cache_lock = threading.Lock()
 _name_refresh_in_flight: set[str] = set()
 _name_refresh_lock = threading.Lock()

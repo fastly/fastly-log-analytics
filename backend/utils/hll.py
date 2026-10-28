@@ -8,10 +8,13 @@ import struct
 from collections.abc import Iterable
 from typing import Any
 
+import numpy as np
+
 DEFAULT_PRECISION = 8
 SERIALIZATION_VERSION = 1
 _HASH_BITS = 64
 HLL_SKETCH_NAMES: tuple[str, ...] = ("hll_sketch",)
+_POW2_NEG: tuple[float, ...] = tuple(2.0**-i for i in range(65))
 
 
 def _alpha(m: int) -> float:
@@ -34,12 +37,8 @@ def _hash64(item: str | bytes) -> int:
 def _leading_zero_count(value: int, width_bits: int) -> int:
     if value == 0:
         return width_bits
-    rank = 1
-    msb = 1 << (width_bits - 1)
-    while (value & msb) == 0 and rank < width_bits:
-        rank += 1
-        value <<= 1
-    return rank
+    bl = value.bit_length()
+    return width_bits if bl <= 1 else (width_bits + 1 - bl)
 
 
 class HyperLogLog:
@@ -76,12 +75,12 @@ class HyperLogLog:
 
     def count(self) -> int:
         m = self._m
-        raw_sum = sum(2.0**-b for b in self._buckets)
+        raw_sum = sum(_POW2_NEG[b] for b in self._buckets)
         if raw_sum == 0.0:
             return m
         estimate = _alpha(m) * m * m / raw_sum
         if estimate <= 2.5 * m:
-            zeros = sum(1 for b in self._buckets if b == 0)
+            zeros = self._buckets.count(0)
             if zeros > 0:
                 estimate = m * math.log(m / zeros)
         if estimate > (1 << 64) / 30.0:
@@ -91,9 +90,31 @@ class HyperLogLog:
     def merge(self, other: HyperLogLog) -> None:
         if other._p != self._p:
             raise ValueError(f"merge precision mismatch: self.p={self._p} vs other.p={other._p}")
-        for i in range(self._m):
-            if other._buckets[i] > self._buckets[i]:
-                self._buckets[i] = other._buckets[i]
+        self_arr = np.frombuffer(self._buckets, dtype=np.uint8)
+        other_arr = np.frombuffer(other._buckets, dtype=np.uint8)
+        np.maximum(self_arr, other_arr, out=self_arr)
+
+    @classmethod
+    def merge_bytes(cls, blobs: Iterable[bytes | bytearray], precision: int = DEFAULT_PRECISION) -> HyperLogLog | None:
+        expected_len = 2 + (1 << precision)
+        valid = [
+            b
+            for b in blobs
+            if isinstance(b, (bytes, bytearray))
+            and len(b) == expected_len
+            and b[0] == SERIALIZATION_VERSION
+            and b[1] == precision
+        ]
+        if not valid:
+            return None
+        sketch = cls(precision=precision)
+        if len(valid) == 1:
+            sketch._buckets = bytearray(valid[0][2:])
+            return sketch
+        buf = b"".join(bytes(b[2:]) for b in valid)
+        arr = np.frombuffer(buf, dtype=np.uint8).reshape(len(valid), 1 << precision)
+        sketch._buckets = bytearray(arr.max(axis=0).tobytes())
+        return sketch
 
     def to_bytes(self) -> bytes:
         return bytes([SERIALIZATION_VERSION, self._p]) + bytes(self._buckets)

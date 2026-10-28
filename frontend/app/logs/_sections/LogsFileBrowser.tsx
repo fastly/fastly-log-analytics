@@ -388,25 +388,23 @@ function Node({ node, prefix, level, type, forceExpand }: TreeProps & { node: Tr
           </span>
         )}
         {node.mtime && (
-          <TooltipProvider>
-            <Tooltip>
-              <TooltipTrigger
-                render={
-                  <span
-                    tabIndex={0}
-                    role="button"
-                    aria-label="Show full modified timestamp"
-                    className="hidden sm:inline-block text-xs text-muted-foreground w-[120px] text-right truncate rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                  >
-                    {relative(node.mtime)}
-                  </span>
-                }
-              />
-              <TooltipContent className="text-xs">
-                {full(node.mtime)} {abbr()}
-              </TooltipContent>
-            </Tooltip>
-          </TooltipProvider>
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <span
+                  tabIndex={0}
+                  role="button"
+                  aria-label="Show full modified timestamp"
+                  className="hidden sm:inline-block text-xs text-muted-foreground w-[120px] text-right truncate rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                >
+                  {relative(node.mtime)}
+                </span>
+              }
+            />
+            <TooltipContent className="text-xs">
+              {full(node.mtime)} {abbr()}
+            </TooltipContent>
+          </Tooltip>
         )}
         <div className="w-20 flex items-center justify-end gap-2">
           {node.sync_status === 'synced' && (
@@ -540,7 +538,9 @@ export function FileBrowser({ type }: { type: 'storage' | 'raw' }) {
         </div>
       </div>
       <div className="p-2 overflow-x-auto min-w-[500px]">
-        <Tree prefix="" level={0} type={type} forceExpand={forceExpand} />
+        <TooltipProvider>
+          <Tree prefix="" level={0} type={type} forceExpand={forceExpand} />
+        </TooltipProvider>
       </div>
     </div>
   )

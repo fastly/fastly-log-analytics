@@ -217,6 +217,7 @@ export function QueryMonitorPage() {
     slowThresholdMs,
     groupCrons,
     expandedRunIds,
+    paused,
   })
 
   const filteredHistoricalRows = React.useMemo(() => {

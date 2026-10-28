@@ -336,10 +336,12 @@ class HighScaleBatch:
 
     @cached_property
     def digest(self) -> str:
-        payload = "\n".join(
-            json.dumps(row, sort_keys=True, separators=(",", ":"), ensure_ascii=False) for row in self.rows
-        )
-        return f"sha256:{hashlib.sha256(payload.encode()).hexdigest()}"
+        h = hashlib.sha256()
+        for i, row in enumerate(self.rows):
+            if i > 0:
+                h.update(b"\n")
+            h.update(json.dumps(row, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
+        return f"sha256:{h.hexdigest()}"
 
 
 @dataclass(frozen=True)

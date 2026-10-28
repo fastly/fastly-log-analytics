@@ -172,11 +172,10 @@ export function useAnalystHeartbeat({
   failuresBeforeOverlay = DEFAULT_FAILURES,
 }: HeartbeatOptions) {
   const router = useRouter()
-  const [isTerminated, setIsTerminated] = React.useState(false)
   const [disconnected, setDisconnected] = React.useState(false)
 
   React.useEffect(() => {
-    if (!enabled || isTerminated) return
+    if (!enabled) return
     if (typeof window === 'undefined') return
 
     let timer: ReturnType<typeof setInterval> | null = null
@@ -184,7 +183,7 @@ export function useAnalystHeartbeat({
     let consecutiveFailures = 0
 
     const tick = async () => {
-      if (cancelled || isTerminated) return
+      if (cancelled) return
       if (document.hidden) return
       if (msSinceLastInteraction() < idleAfterMs) return
       try {
@@ -192,7 +191,6 @@ export function useAnalystHeartbeat({
         if (res.status === 401 || res.status === 403) {
           cancelled = true
           if (timer) clearInterval(timer)
-          setIsTerminated(true)
           router.replace('/share-login')
           return
         }
@@ -216,7 +214,7 @@ export function useAnalystHeartbeat({
       cancelled = true
       if (timer) clearInterval(timer)
     }
-  }, [enabled, isTerminated, idleAfterMs, intervalMs, failuresBeforeOverlay, router])
+  }, [enabled, idleAfterMs, intervalMs, failuresBeforeOverlay, router])
 
   return { disconnected }
 }

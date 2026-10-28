@@ -7,17 +7,16 @@ import threading
 import time
 from collections.abc import Callable, MutableMapping
 
-import cachetools
-
+from backend.utils.bounded_cache import BoundedLRUCache
 from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry
 
-_DIR_SIZE_CACHE: cachetools.LRUCache[str, tuple[float, int]] = cachetools.LRUCache(maxsize=4096)
-_DIR_STATS_CACHE: cachetools.LRUCache[str, tuple[float, int, int]] = cachetools.LRUCache(maxsize=4096)
+_DIR_SIZE_CACHE: BoundedLRUCache[str, tuple[float, int]] = BoundedLRUCache(maxsize=4096)
+_DIR_STATS_CACHE: BoundedLRUCache[str, tuple[float, int, int]] = BoundedLRUCache(maxsize=4096)
 _DIR_SIZE_TTL_S = 120.0
 
 _dir_size_lock = threading.Lock()
 _dir_size_refresh_in_flight: set[str] = set()
-_dir_size_cold_locks: cachetools.LRUCache[str, threading.Lock] = cachetools.LRUCache(maxsize=4096)
+_dir_size_cold_locks: BoundedLRUCache[str, threading.Lock] = BoundedLRUCache(maxsize=4096)
 _dir_size_cold_locks_meta_lock = threading.Lock()
 
 

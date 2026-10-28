@@ -1,12 +1,13 @@
 import concurrent.futures
 import hashlib
-import json
 import logging
 import math
 import os
 import tempfile
 import time
 from typing import Any
+
+import orjson
 
 from backend.core import metadata as metadata_db
 from backend.core import storage
@@ -69,6 +70,10 @@ from backend.utils.module_shim import install_shim_module
 from backend.utils.telemetry import yield_to_api
 
 logger = logging.getLogger("backend.core.ingest")
+
+_REWRITE_STAGING_FILENAME_SQL = (
+    "UPDATE _ingest_staging SET filename = m.s3 FROM _ingest_path_map AS m WHERE _ingest_staging.filename = m.local"
+)
 
 
 def _export_staging_arrow(mem_con: Any) -> Any:
@@ -349,9 +354,7 @@ def ingest(  # fmt: skip
                     mem_con.execute(
                         f"CREATE TEMP TABLE _ingest_path_map AS SELECT * FROM (VALUES {path_map_rows}) AS t(local, s3)"
                     )
-                    mem_con.execute(
-                        "UPDATE _ingest_staging SET filename = COALESCE((SELECT s3 FROM _ingest_path_map WHERE local = _ingest_staging.filename), filename)"
-                    )
+                    mem_con.execute(_REWRITE_STAGING_FILENAME_SQL)
                 count_map.update(
                     dict(mem_con.execute("SELECT filename, count(*) FROM _ingest_staging GROUP BY 1").fetchall())
                 )
@@ -404,17 +407,19 @@ def ingest(  # fmt: skip
                                 bad_rows = _scan_invalid_gzip_lines(corrupt_read_paths)
                             repaired_by_fname: dict[str, list] = {}
                             truly_corrupt: list[tuple[str, str, str]] = []
+                            corrupt_s3_files: set[str] = set()
                             for fname, raw_line in bad_rows:
                                 fname = local_to_s3.get(fname, fname)
+                                corrupt_s3_files.add(fname)
                                 if raw_line is None:
                                     continue
                                 repaired = _EMPTY_VALUE_RE.sub(":null", raw_line.strip())
                                 try:
-                                    if json.loads(repaired).get("timestamp"):
+                                    if orjson.loads(repaired).get("timestamp"):
                                         repaired_by_fname.setdefault(fname, []).append(repaired)
                                         continue
                                     truly_corrupt.append((fname, raw_line, "missing_timestamp"))
-                                except (json.JSONDecodeError, ValueError):
+                                except (orjson.JSONDecodeError, ValueError):
                                     truly_corrupt.append((fname, raw_line, "invalid_json"))
                             partial_paths.update(fname for fname, _raw_line, _reason in truly_corrupt)
                             if repaired_by_fname:
@@ -443,7 +448,12 @@ def ingest(  # fmt: skip
                                 total_corrupt_details.append(
                                     f"[{fname.split('?')[0].split('/')[-1]}] {raw_line.strip()[:2000]}"
                                 )
-                            _chunk_corrupt_s3_paths, _chunk_truly_corrupt = corrupt_s3_paths, truly_corrupt
+                            _chunk_corrupt_s3_paths = (
+                                [p for p in corrupt_s3_paths if p in corrupt_s3_files]
+                                if corrupt_s3_files
+                                else list(corrupt_s3_paths)
+                            )
+                            _chunk_truly_corrupt = truly_corrupt
                     except Exception as e:
                         err_str = str(e)
                         if any(
@@ -692,6 +702,7 @@ def merge_lake_files(service_id: str) -> None:
 
 
 __all__ = [
+    "_REWRITE_STAGING_FILENAME_SQL",
     "_celery_ingest_scope",
     "_claim_and_resolve_batch_source",
     "_cleanup_batch_resources",

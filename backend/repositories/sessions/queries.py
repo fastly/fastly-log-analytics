@@ -427,11 +427,21 @@ def get_session_detail(
     q = f"SELECT * FROM {table_name} WHERE {where} ORDER BY timestamp ASC LIMIT 500"
     rows = runner.execute(q, p).fetchall()
     col_names = [desc[0] for desc in con.description]
+    iso_cols: list[str] = []
+    for idx, name in enumerate(col_names):
+        for r in rows:
+            val = r[idx]
+            if val is not None:
+                if hasattr(val, "isoformat"):
+                    iso_cols.append(name)
+                break
     records = [dict(zip(col_names, r)) for r in rows]
-    for rec in records:
-        for k, v in rec.items():
-            if hasattr(v, "isoformat"):
-                rec[k] = v.isoformat()
+    if iso_cols:
+        for rec in records:
+            for k in iso_cols:
+                v = rec[k]
+                if v is not None:
+                    rec[k] = v.isoformat()
 
     res = {"data": records, "columns": col_names, **runner.telemetry()}
     if cache_key is not None:

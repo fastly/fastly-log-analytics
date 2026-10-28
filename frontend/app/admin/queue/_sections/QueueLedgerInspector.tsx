@@ -2,7 +2,7 @@
 
 import React from 'react'
 import { AlertTriangle, CheckCircle2, RotateCcw, Trash2 } from 'lucide-react'
-import { formatLocalDateTime } from '@/lib/utils'
+import { formatBytes, formatLocalDateTime } from '@/lib/utils'
 import {
   flexRender,
   getCoreRowModel,
@@ -26,13 +26,6 @@ import {
   type LedgerStatusFilter,
   VALID_LEDGER_STATUSES,
 } from './QueueOverviewPanels'
-
-function formatLedgerBytes(bytes: number | null | undefined): string | null {
-  if (bytes == null || bytes <= 0) return null
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`
-}
 
 export function LedgerEntriesTable({
   items,
@@ -90,7 +83,7 @@ export function LedgerEntriesTable({
         header: 'Object Key & Error Details',
         cell: ({ row }) => {
           const item = row.original
-          const sizeLabel = formatLedgerBytes(item.size_bytes)
+          const sizeLabel = item.size_bytes != null && item.size_bytes > 0 ? formatBytes(item.size_bytes) : null
           return (
             <>
               <div className="font-mono text-xs break-all text-foreground">

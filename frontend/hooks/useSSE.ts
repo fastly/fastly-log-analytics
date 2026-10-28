@@ -3,7 +3,7 @@
 import { useState, useCallback, useRef, useEffect } from 'react'
 import { buildServiceHref } from '@/lib/utils'
 import { useServiceStore } from '@/stores/filterStore'
-import { buildStreamRequest } from './sseStreamAppliers'
+import { buildStreamRequest, extractSSEFrameData } from './sseStreamAppliers'
 import { runEventStream } from './useEventStream'
 
 export * from './sseStreamAppliers'
@@ -22,14 +22,21 @@ export interface SSELine {
   [key: string]: unknown
 }
 
-export function useSSE({ maxLines }: { maxLines?: number } = {}) {
-  const [lines, setLines] = useState<SSELine[]>([])
+export interface UseSSEOptions<T = SSELine> {
+  maxLines?: number
+  transform?: (line: SSELine) => T | null
+}
+
+export function useSSE<T = SSELine>({ maxLines, transform }: UseSSEOptions<T> = {}) {
+  const [lines, setLines] = useState<T[]>([])
   const [status, setStatus] = useState<SSEStatus>('idle')
   const [error, setError] = useState<string | null>(null)
   const abortRef = useRef<AbortController | null>(null)
   const requestIdRef = useRef<number>(0)
   const mountedRef = useRef<boolean>(true)
   const lineSeqRef = useRef<number>(0)
+  const transformRef = useRef(transform)
+  transformRef.current = transform
 
   const stop = useCallback(() => {
     if (abortRef.current) {
@@ -77,9 +84,8 @@ export function useSSE({ maxLines }: { maxLines?: number } = {}) {
           signal: abort.signal,
           isActive,
           onFrame: (frame) => {
-            const part = frame.trim()
-            if (!part.startsWith('data:')) return
-            const dataStr = part.replace(/^data:\s*/, '')
+            const dataStr = extractSSEFrameData(frame)
+            if (!dataStr) return
             let data: SSELine
             try {
               data = JSON.parse(dataStr) as SSELine
@@ -95,11 +101,14 @@ export function useSSE({ maxLines }: { maxLines?: number } = {}) {
               finalError = typeof data.message === 'string' ? data.message : 'Unknown error'
             }
             if (mountedRef.current) {
-              const stamped = { ...data, _id: ++lineSeqRef.current }
-              setLines((prev) => {
-                const next = [...prev, stamped]
-                return maxLines && next.length > maxLines ? next.slice(next.length - maxLines) : next
-              })
+              const stamped: SSELine = { ...data, _id: ++lineSeqRef.current }
+              const transformed = transformRef.current ? transformRef.current(stamped) : (stamped as unknown as T)
+              if (transformed !== null) {
+                setLines((prev) => {
+                  const next = [...prev, transformed]
+                  return maxLines && next.length > maxLines ? next.slice(next.length - maxLines) : next
+                })
+              }
               if (finalStatus) {
                 setStatus(finalStatus)
                 if (finalError) setError(finalError)
