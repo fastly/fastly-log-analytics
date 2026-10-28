@@ -11,6 +11,7 @@ from collections.abc import Callable, Generator, Iterator
 
 import duckdb
 import psycopg
+from tenacity import Retrying, retry_if_result, wait_fixed
 
 from backend import config as svcconfig
 from backend.core.metadata.ingest_log import purge_evidence
@@ -102,9 +103,14 @@ def _drain_and_wipe_db_files(db_path: str, pool_key: str, wipe_msg: str) -> Gene
     _pool.wait_pools_drained(retired, _DRAIN_TIMEOUT_S)
     gc.collect()
     deadline = time.monotonic() + _DRAIN_GRACE_S
-    while _db.live_connection_count(db_path) > 0 and time.monotonic() < deadline:
-        time.sleep(0.05)
-        gc.collect()
+    if _db.live_connection_count(db_path) > 0 and time.monotonic() < deadline:
+        Retrying(
+            retry=retry_if_result(lambda count: count > 0),
+            stop=lambda _rs: time.monotonic() >= deadline,
+            wait=wait_fixed(0.05),
+            sleep=lambda s: time.sleep(s),
+            retry_error_callback=lambda _rs: 0,
+        )(lambda: (gc.collect(), _db.live_connection_count(db_path))[1])
     yield {"type": "status", "message": wipe_msg}
     for f in (db_path, db_path + ".wal", db_path + ".shm"):
         if os.path.exists(f):

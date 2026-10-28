@@ -9,7 +9,6 @@ import time
 from datetime import datetime
 
 import duckdb
-from cachetools import TTLCache
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.concurrency import run_in_threadpool
 
@@ -29,6 +28,7 @@ from backend.repositories import rum as rum_repo
 from backend.repositories._base import SectionTimer
 from backend.utils import telemetry as sqlite_profiler
 from backend.utils.auth import mask_ips_for, require_service_in_scope
+from backend.utils.bounded_cache import BoundedTTLCache
 from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry
 from backend.utils.router_utils import query_errors
 
@@ -51,14 +51,14 @@ bootstrap_router = router
 # admin-shaped body. Keyed by active service_id — the loopback admin is a
 # single identity.
 _BOOTSTRAP_CACHE_TTL_S = 3.0
-_bootstrap_cache: TTLCache = TTLCache(maxsize=128, ttl=_BOOTSTRAP_CACHE_TTL_S)
+_bootstrap_cache: BoundedTTLCache = BoundedTTLCache(maxsize=128, ttl_seconds=_BOOTSTRAP_CACHE_TTL_S)
 _bootstrap_inflight: dict[str, asyncio.Future] = {}
 
 # SRE-X: Service-level cache for the expensive real-time DuckDB/SQLite queries
 # inside header_badge_and_extents. Caps the query overhead on cold page loads
 # and remote analyst requests (which don't hit the short-TTL _bootstrap_cache).
 _HEADER_BADGE_CACHE_TTL_S = 30.0
-_header_badge_cache: TTLCache = TTLCache(maxsize=256, ttl=_HEADER_BADGE_CACHE_TTL_S)
+_header_badge_cache: BoundedTTLCache = BoundedTTLCache(maxsize=256, ttl_seconds=_HEADER_BADGE_CACHE_TTL_S)
 
 _CacheRegistry.register("routers.bootstrap._bootstrap_cache", _bootstrap_cache)
 _CacheRegistry.register("routers.bootstrap._bootstrap_inflight", _bootstrap_inflight)

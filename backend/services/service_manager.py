@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import os
 import threading
-from collections.abc import MutableMapping
 from typing import Any
 
 import backend.utils.dir_size as _dir_size_mod
 from backend import config as svcconfig
 from backend.core import duckdb as _db
+from backend.utils.bounded_cache import BoundedTTLCache
 from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry
 from backend.utils.dir_size import (
     _DEFAULT_WALK_DIR_STATS,
@@ -29,7 +29,7 @@ from backend.utils.dir_size import (
 )
 
 _DIR_STATS_TTL_SEC = 300.0
-_dir_stats_cache: MutableMapping[str, tuple[float, int, int]] = _shared_dir_stats_cache
+_dir_stats_cache: Any = BoundedTTLCache(maxsize=4096, ttl_seconds=_DIR_STATS_TTL_SEC)
 _dir_stats_lock = _shared_dir_size_lock
 _dir_stats_refresh_in_flight: set[str] = set()
 

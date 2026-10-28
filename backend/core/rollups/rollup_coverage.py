@@ -5,16 +5,15 @@ from __future__ import annotations
 import os
 import sys
 import threading
-import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pyarrow.parquet as pq
-from cachetools import TTLCache
 
 from backend import config as svcconfig
 from backend.models.analytics import HourlyRollupCoverage, ReaderCoverage, RollupPathCoverage, ScalarRollupCoverage
+from backend.utils.bounded_cache import BoundedTTLCache
 from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry
 from backend.utils.date_utils import parse_hour_key_strict, parse_window
 
@@ -36,9 +35,7 @@ MISSING_HOUR_HEAL_CAP = 48
 LISTDIR_CACHE_TTL_S = 60.0
 LISTDIR_CACHE_MAX_ENTRIES = 32768
 _listdir_cache_lock = threading.Lock()
-_listdir_cache: TTLCache[str, list[str]] = TTLCache(
-    maxsize=LISTDIR_CACHE_MAX_ENTRIES, ttl=LISTDIR_CACHE_TTL_S, timer=time.monotonic
-)
+_listdir_cache: BoundedTTLCache = BoundedTTLCache(maxsize=LISTDIR_CACHE_MAX_ENTRIES, ttl_seconds=LISTDIR_CACHE_TTL_S)
 _CacheRegistry.register("repositories.rollup_coverage._listdir_cache", _listdir_cache)
 
 

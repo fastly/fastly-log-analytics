@@ -14,6 +14,7 @@ from contextlib import contextmanager
 from typing import Any
 
 import pyarrow as pa
+import tenacity
 
 from backend import config
 from backend.core.duckdb import escape_sql_literal, require_safe_ident
@@ -525,68 +526,88 @@ def _ducklake_attach(con, source: dict, read_only: bool = False) -> bool:
         ro = ", READ_ONLY" if read_only else ""
         base_opts = f"DATA_PATH '{escape_sql_literal(data_path)}', OVERRIDE_DATA_PATH TRUE, DATA_INLINING_ROW_LIMIT 0"
         attach_sql = f"ATTACH 'ducklake:{escape_sql_literal(dsn)}' AS lake ({base_opts}{ro});"
-        for attempt in range(_ATTACH_CONFLICT_RETRY_ATTEMPTS):
-            try:
-                con.execute(attach_sql)
-                break
-            except Exception as e:
-                msg = str(e).lower()
-                if read_only and attempt == 0 and ("does not exist" in msg or "explicitly disabled" in msg):
+
+        class _AttachRetry(Exception):
+            pass
+
+        try:
+            for attempt_ctx in tenacity.Retrying(
+                stop=tenacity.stop_after_attempt(_ATTACH_CONFLICT_RETRY_ATTEMPTS),
+                retry=tenacity.retry_if_exception_type(_AttachRetry),
+                wait=tenacity.wait_fixed(0),
+                sleep=lambda _s: None,
+                reraise=True,
+            ):
+                with attempt_ctx:
+                    attempt = attempt_ctx.retry_state.attempt_number - 1
                     try:
-                        con.execute(f"ATTACH 'ducklake:{escape_sql_literal(dsn)}' AS __lake_init ({base_opts});")
-                        _detach_unlocked(con, ("__lake_init",), ignore_errors=False)
-                        continue
-                    except Exception as init_err:
-                        if "already attached" not in str(init_err) and "already exists" not in str(init_err):
-                            logger.info(
-                                "[ducklake] %s: could not pre-create catalog for read-only attach: %s",
-                                service_id,
-                                init_err,
-                            )
-                if "unique file handle conflict" in msg or "already attached by database" in msg:
-                    _detach_unlocked(con, ("lake", "__ducklake_metadata_lake"))
-                    if attempt < _ATTACH_CONFLICT_RETRY_ATTEMPTS - 1:
-                        lock_held = _sleep_releasing_attach_lock(service_id, "a file-handle conflict")
-                        if not lock_held:
-                            return False
-                        continue
-                    logger.warning(
-                        "[ducklake] %s: failed to attach ducklake catalog after %d attempts over ~%.0fs "
-                        "(zombie lock timeout): %s",
-                        service_id,
-                        _ATTACH_CONFLICT_RETRY_ATTEMPTS,
-                        _ATTACH_CONFLICT_RETRY_ATTEMPTS * _ATTACH_CONFLICT_RETRY_SLEEP_S,
-                        e,
-                    )
-                    return False
-                if ("database with name" in msg and "already exists" in msg) or ("already attached" in msg):
-                    try:
-                        row = con.execute(
-                            "SELECT readonly FROM duckdb_databases() WHERE database_name = 'lake'"
-                        ).fetchone()
-                        if row and bool(row[0]) == read_only:
-                            return True
-                        if row:
+                        con.execute(attach_sql)
+                    except Exception as e:
+                        msg = str(e).lower()
+                        if read_only and attempt == 0 and ("does not exist" in msg or "explicitly disabled" in msg):
                             try:
-                                _detach_unlocked(con, ("lake",), ignore_errors=False)
-                                if attempt < _ATTACH_CONFLICT_RETRY_ATTEMPTS - 1:
-                                    lock_held = _sleep_releasing_attach_lock(service_id, "a mode mismatch")
-                                    if not lock_held:
-                                        return False
-                                    continue
-                            except Exception as detach_err:
-                                logger.warning(
-                                    "[ducklake] %s: failed to detach mismatched lake catalog: %s",
-                                    service_id,
-                                    detach_err,
+                                con.execute(
+                                    f"ATTACH 'ducklake:{escape_sql_literal(dsn)}' AS __lake_init ({base_opts});"
                                 )
-                                return False
-                    except Exception:
-                        logger.debug("_ducklake_attach: step failed (ignored)", exc_info=True)
-                    return False
-                logger.warning("[ducklake] %s: failed to attach ducklake catalog: %s", service_id, e)
-                return False
-        else:
+                                _detach_unlocked(con, ("__lake_init",), ignore_errors=False)
+                                raise _AttachRetry() from e
+                            except _AttachRetry:
+                                raise
+                            except Exception as init_err:
+                                if "already attached" not in str(init_err) and "already exists" not in str(init_err):
+                                    logger.info(
+                                        "[ducklake] %s: could not pre-create catalog for read-only attach: %s",
+                                        service_id,
+                                        init_err,
+                                    )
+                        if "unique file handle conflict" in msg or "already attached by database" in msg:
+                            _detach_unlocked(con, ("lake", "__ducklake_metadata_lake"))
+                            if attempt < _ATTACH_CONFLICT_RETRY_ATTEMPTS - 1:
+                                lock_held = _sleep_releasing_attach_lock(service_id, "a file-handle conflict")
+                                if not lock_held:
+                                    return False
+                                raise _AttachRetry() from e
+                            logger.warning(
+                                "[ducklake] %s: failed to attach ducklake catalog after %d attempts over ~%.0fs "
+                                "(zombie lock timeout): %s",
+                                service_id,
+                                _ATTACH_CONFLICT_RETRY_ATTEMPTS,
+                                _ATTACH_CONFLICT_RETRY_ATTEMPTS * _ATTACH_CONFLICT_RETRY_SLEEP_S,
+                                e,
+                            )
+                            return False
+                        if ("database with name" in msg and "already exists" in msg) or ("already attached" in msg):
+                            try:
+                                row = con.execute(
+                                    "SELECT readonly FROM duckdb_databases() WHERE database_name = 'lake'"
+                                ).fetchone()
+                                if row and bool(row[0]) == read_only:
+                                    return True
+                                if row:
+                                    try:
+                                        _detach_unlocked(con, ("lake",), ignore_errors=False)
+                                        if attempt < _ATTACH_CONFLICT_RETRY_ATTEMPTS - 1:
+                                            lock_held = _sleep_releasing_attach_lock(service_id, "a mode mismatch")
+                                            if not lock_held:
+                                                return False
+                                            raise _AttachRetry() from e
+                                    except _AttachRetry:
+                                        raise
+                                    except Exception as detach_err:
+                                        logger.warning(
+                                            "[ducklake] %s: failed to detach mismatched lake catalog: %s",
+                                            service_id,
+                                            detach_err,
+                                        )
+                                        return False
+                            except _AttachRetry:
+                                raise
+                            except Exception:
+                                logger.debug("_ducklake_attach: step failed (ignored)", exc_info=True)
+                            return False
+                        logger.warning("[ducklake] %s: failed to attach ducklake catalog: %s", service_id, e)
+                        return False
+        except _AttachRetry:
             logger.warning("[ducklake] %s: failed to attach ducklake catalog (retries exhausted)", service_id)
             return False
 

@@ -22,6 +22,8 @@ from backend.models.common import (
     ServicesListResponse,
 )
 from backend.utils.auth import require_service_in_scope
+from backend.utils.bounded_cache import BoundedTTLCache
+from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry
 from backend.utils.router_utils import (
     load_service_config,
     make_error,
@@ -36,7 +38,8 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 _CRON_SCHEDULE_TTL = 5.0
-_cron_schedule_cache: dict[str, tuple[float, dict]] = {}
+_cron_schedule_cache: BoundedTTLCache = BoundedTTLCache(maxsize=256, ttl_seconds=_CRON_SCHEDULE_TTL)
+_CacheRegistry.register("services.core._cron_schedule_cache", _cron_schedule_cache)
 
 # Whitelisted fields safe to surface to a remote analyst on GET /api/services.
 _ANALYST_SAFE_SERVICE_FIELDS = frozenset({"service_id", "name", "is_active"})
@@ -243,8 +246,12 @@ def api_cron_schedule(source: dict = Depends(get_source)):
     service_id = source["name"]
     now_mono = time.monotonic()
     cached = _cron_schedule_cache.get(service_id)
-    if cached is not None and (now_mono - cached[0]) < _CRON_SCHEDULE_TTL:
-        return cached[1]
+    if cached is not None:
+        if isinstance(cached, tuple) and len(cached) == 2 and isinstance(cached[0], (int, float)):
+            if (now_mono - cached[0]) < _CRON_SCHEDULE_TTL:
+                return cached[1]
+        else:
+            return cached
     payload = build_cron_schedule_payload(source)
     _cron_schedule_cache[service_id] = (now_mono, payload)
     return payload

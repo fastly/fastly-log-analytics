@@ -18,6 +18,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
+from tenacity import Retrying, retry_if_exception_type, stop_after_attempt, wait_fixed
 
 from backend.core.fastly.client import validate_rum_custom_condition
 from backend.models.admin import ProvisionService
@@ -356,19 +357,20 @@ def provision_teardown(req: Request, body: ProvisionTeardownRequest | None = Non
                 if src_mock["bucket"]:
                     svc_cache_dir = _db._cache_dir(src_mock)
                     if os.path.exists(svc_cache_dir):
-                        rmtree_err = None
-                        for _attempt in range(6):
-                            try:
-                                shutil.rmtree(svc_cache_dir)
-                                rmtree_err = None
-                                break
-                            except FileNotFoundError:
-                                rmtree_err = None
-                                break
-                            except OSError as e:
-                                rmtree_err = e
-                                time.sleep(0.5)
-                        if rmtree_err is not None:
+                        try:
+                            for attempt in Retrying(
+                                stop=stop_after_attempt(6),
+                                wait=wait_fixed(0.5),
+                                retry=retry_if_exception_type(OSError),
+                                sleep=lambda s: time.sleep(s),
+                                reraise=True,
+                            ):
+                                with attempt:
+                                    try:
+                                        shutil.rmtree(svc_cache_dir)
+                                    except FileNotFoundError:
+                                        pass
+                        except OSError as rmtree_err:
                             yield _sse("status", f"Warning: could not remove cache dir: {rmtree_err}")
 
                 if sid:

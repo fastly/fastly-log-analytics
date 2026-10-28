@@ -10,6 +10,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import tenacity
+
 from backend.core.sql_validator import escape_sql_literal
 from backend.utils.telemetry import parse_day_key_strict, parse_hour_key_strict
 
@@ -1185,20 +1187,30 @@ def _read_partial_hour_parquet[T](
         finally:
             tmp_con.close()
 
+    def _is_transient_read_error(exc: BaseException) -> bool:
+        return is_stale_view_error(exc) or "Cannot open file" in str(exc) or "No such file" in str(exc)
+
+    attempt_num = 0
     try:
-        return _run_once()
-    except Exception as e:
-        if is_stale_view_error(e) or "Cannot open file" in str(e) or "No such file" in str(e):
-            time.sleep(0.01)
-            try:
+        for attempt in tenacity.Retrying(
+            stop=tenacity.stop_after_attempt(2),
+            wait=tenacity.wait_fixed(0.01),
+            retry=tenacity.retry_if_exception(_is_transient_read_error),
+            sleep=lambda s: time.sleep(s),
+            reraise=True,
+        ):
+            with attempt:
+                attempt_num = attempt.retry_state.attempt_number
                 return _run_once()
-            except Exception as e2:
-                logger.warning("[partial_hour] Retry %s failed on %s: %s", err_label, path, e2)
-                return default
+    except Exception as e:
+        if attempt_num > 1:
+            logger.warning("[partial_hour] Retry %s failed on %s: %s", err_label, path, e)
+            return default
         logger.warning("[partial_hour] Failed %s on %s: %s", err_label, path, e)
         if any(err in str(e).lower() for err in ("corrupt", "not a parquet file", "bad magic number", "footer")):
             unlink_quiet(path)
         return default
+    return default
 
 
 def read_partial_hour_all_fields(

@@ -25,6 +25,7 @@ from typing import Any
 
 import boto3
 import duckdb
+import tenacity
 from botocore import UNSIGNED
 from botocore.config import Config
 
@@ -719,40 +720,58 @@ def get_connection(
     connect_path = ":memory:" if durable_serving else db_path
     con, delay, deadline = None, _LOCK_RETRY_INITIAL_DELAY, time.monotonic() + max_wait
     _barrier_wait(db_path)
-    while True:
-        try:
-            if read_only and not durable_serving and not os.path.exists(db_path):
-                try:
-                    _duckdb_connect(db_path, read_only=False).close()
-                except Exception:
-                    logger.debug("get_connection: _duckdb_connect failed (ignored)", exc_info=True)
-            con = _duckdb_connect(connect_path, read_only=False)
-            _register_live_connection(con, db_path)
-            break
-        except Exception as e:
-            err_str = str(e).lower()
-            if any(m in err_str for m in _CORRUPTION_MARKERS) and not read_only and not durable_serving:
-                logger.error(f"[duckdb] Database corruption detected for {db_path}: {e}")
-                logger.info(f"[duckdb] Attempting stateless recovery by deleting corrupted database: {db_path}")
-                for f in (db_path, db_path + ".wal"):
-                    if os.path.exists(f):
-                        try:
-                            os.remove(f)
-                        except Exception as rm_e:
-                            logger.error(f"[duckdb] Failed to remove corrupted file {f}: {rm_e}")
-                continue
-            if not ("conflict" in err_str or "locked" in err_str or "different configuration" in err_str):
-                raise e
-            if (remaining := deadline - time.monotonic()) <= 0:
-                context = _lock_context(src, db_path, read_only)
-                logger.error("duckdb_connection_lock_timeout %s", context, exc_info=True)
-                raise DBBusyError(
-                    f"Database is locked by another process (path={db_path}, pid={os.getpid()}, read_only={read_only}, "
-                    f"deployment_mode={context['deployment_mode']}, catalog_mode={context['catalog_mode']}). "
-                    "Try again in a few seconds."
-                ) from e
-            time.sleep(min(delay, remaining))
-            delay = min(delay * _LOCK_RETRY_MULTIPLIER, _LOCK_RETRY_MAX_DELAY)
+
+    class _CorruptRecovered(Exception):
+        pass
+
+    class _LockConflict(Exception):
+        def __init__(self, wait_s: float) -> None:
+            self.wait_s = wait_s
+
+    for attempt in tenacity.Retrying(
+        retry=tenacity.retry_if_exception_type((_CorruptRecovered, _LockConflict)),
+        wait=lambda rs: float(getattr(rs.outcome.exception(), "wait_s", 0.0)) if rs.outcome else 0.0,
+        sleep=lambda s: time.sleep(s) if s > 0 else None,
+        reraise=True,
+    ):
+        with attempt:
+            try:
+                if read_only and not durable_serving and not os.path.exists(db_path):
+                    try:
+                        _duckdb_connect(db_path, read_only=False).close()
+                    except Exception:
+                        logger.debug("get_connection: _duckdb_connect failed (ignored)", exc_info=True)
+                con = _duckdb_connect(connect_path, read_only=False)
+                _register_live_connection(con, db_path)
+            except Exception as e:
+                err_str = str(e).lower()
+                if any(m in err_str for m in _CORRUPTION_MARKERS) and not read_only and not durable_serving:
+                    logger.error(f"[duckdb] Database corruption detected for {db_path}: {e}")
+                    logger.info(f"[duckdb] Attempting stateless recovery by deleting corrupted database: {db_path}")
+                    for f in (db_path, db_path + ".wal"):
+                        if os.path.exists(f):
+                            try:
+                                os.remove(f)
+                            except Exception as rm_e:
+                                logger.error(f"[duckdb] Failed to remove corrupted file {f}: {rm_e}")
+                    raise _CorruptRecovered() from e
+                if not ("conflict" in err_str or "locked" in err_str or "different configuration" in err_str):
+                    raise
+                if (remaining := deadline - time.monotonic()) <= 0:
+                    context = _lock_context(src, db_path, read_only)
+                    logger.error("duckdb_connection_lock_timeout %s", context, exc_info=True)
+                    raise DBBusyError(
+                        f"Database is locked by another process (path={db_path}, pid={os.getpid()}, read_only={read_only}, "
+                        f"deployment_mode={context['deployment_mode']}, catalog_mode={context['catalog_mode']}). "
+                        "Try again in a few seconds."
+                    ) from e
+                wait_s = min(delay, remaining)
+                if wait_s <= 0:
+                    time.sleep(0)
+                delay = min(delay * _LOCK_RETRY_MULTIPLIER, _LOCK_RETRY_MAX_DELAY)
+                raise _LockConflict(wait_s) from e
+    if con is None:
+        raise RuntimeError("DuckDB connection was not established")
     limit = (
         (DUCKDB_POOL_CONN_MEMORY_LIMIT or DUCKDB_MEMORY_LIMIT)
         if durable_serving

@@ -10,6 +10,9 @@ import threading
 from collections.abc import Callable
 from typing import Any
 
+from backend.utils.bounded_cache import BoundedTTLCache
+from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry
+
 logger = logging.getLogger(__name__)
 
 CACHE_FILE = "cache/pop_locations.json"
@@ -21,11 +24,15 @@ _DEFAULT_POP_COORDS: dict[str, tuple[float, float]] = {
 }
 _SAFE_POP_CODE_RE = re.compile(r"^[A-Z0-9_]+$")
 
-_lat_lon_cache: tuple[int, dict] | None = None
+_POP_CACHE_TTL_S = 300.0
+_lat_lon_cache: BoundedTTLCache | tuple[int, dict] | None = BoundedTTLCache(maxsize=16, ttl_seconds=_POP_CACHE_TTL_S)
 _lat_lon_cache_lock = threading.Lock()
 
-_loc_cache: tuple[int, dict] | None = None
+_loc_cache: BoundedTTLCache | tuple[int, dict] | None = BoundedTTLCache(maxsize=16, ttl_seconds=_POP_CACHE_TTL_S)
 _loc_cache_lock = threading.Lock()
+
+_CacheRegistry.register("utils.pop_utils._lat_lon_cache", _lat_lon_cache)
+_CacheRegistry.register("utils.pop_utils._loc_cache", _loc_cache)
 
 
 def fetch_pop_locations(api_key: str) -> bool:
@@ -65,7 +72,11 @@ def _load_mtime_cached(slot: str, lock: threading.Lock, builder: Callable[[list[
     except FileNotFoundError:
         return {}
 
-    cached = globals()[slot]
+    cache_obj = globals()[slot]
+    if isinstance(cache_obj, (BoundedTTLCache, dict)):
+        cached = cache_obj.get(CACHE_FILE)
+    else:
+        cached = cache_obj
     if cached is not None and cached[0] == mtime_ns:
         return cached[1]
 
@@ -75,7 +86,11 @@ def _load_mtime_cached(slot: str, lock: threading.Lock, builder: Callable[[list[
 
     result = builder(resp_data)
     with lock:
-        globals()[slot] = (mtime_ns, result)
+        target = globals()[slot]
+        if isinstance(target, (BoundedTTLCache, dict)):
+            target[CACHE_FILE] = (mtime_ns, result)
+        else:
+            globals()[slot] = (mtime_ns, result)
     return result
 
 
