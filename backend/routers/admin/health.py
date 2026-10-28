@@ -233,6 +233,7 @@ def _sample_system_jobs() -> dict[str, Any]:
 
 
 _CacheRegistry.register("routers.admin.health._cache", _cache)
+_CacheRegistry.register("routers.admin.health._locks", _locks)
 
 _MAX_LOOKBACK_DAYS = 30
 _VALID_WINDOW_RE = re.compile(r"^[1-9]\d*[mhd]\Z", re.IGNORECASE)

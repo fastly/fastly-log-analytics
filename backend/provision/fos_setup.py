@@ -312,17 +312,19 @@ def delete_fos_bucket(
             wait_time = 2 if attempt <= 6 else 5
             if status_cb:
                 status_cb(f"⏳ Bucket not empty (attempt {attempt}/{max_attempts}), retrying in {wait_time}s...")
-            time.sleep(wait_time)
-            empty_bucket()
 
         try:
             for attempt in Retrying(
                 stop=stop_after_attempt(max_attempts),
+                wait=lambda rs: 2 if rs.attempt_number <= 6 else 5,
                 retry=retry_if_exception(_is_bucket_not_empty),
                 before_sleep=_before_sleep,
+                sleep=lambda s: time.sleep(s),
                 reraise=True,
             ):
                 with attempt:
+                    if attempt.retry_state.attempt_number > 1:
+                        empty_bucket()
                     s3.delete_bucket(Bucket=name)
                     ok("FOS bucket deleted")
                     if status_cb:

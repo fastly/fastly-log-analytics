@@ -9,6 +9,14 @@ function getNumberFormat(locale?: string, options?: Intl.NumberFormatOptions): I
   return fmt
 }
 
+function formatDecimal(n: number, minDigits: number, maxDigits = minDigits): string {
+  return getNumberFormat('en-US', {
+    minimumFractionDigits: minDigits,
+    maximumFractionDigits: maxDigits,
+    useGrouping: false,
+  }).format(n)
+}
+
 const _dtFmtCache = new Map<string, Intl.DateTimeFormat>()
 function getDateTimeFormat(locale: string | undefined, options: Intl.DateTimeFormatOptions): Intl.DateTimeFormat {
   const key = `${locale ?? ''}|${JSON.stringify(options)}`
@@ -32,7 +40,7 @@ export function formatBytes(bytes: number): string {
     value /= 1024
     i++
   }
-  return `${parseFloat(value.toFixed(2))} ${BYTE_UNITS[i]}`
+  return `${formatDecimal(value, 0, 2)} ${BYTE_UNITS[i]}`
 }
 
 export function formatBytesTiered(
@@ -42,9 +50,9 @@ export function formatBytesTiered(
   const { maxUnit = 'MB', nullText = '–' } = options
   if (bytes == null) return nullText
   if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-  if (maxUnit === 'MB' || bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`
-  return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`
+  if (bytes < 1024 * 1024) return `${formatDecimal(bytes / 1024, 1)} KB`
+  if (maxUnit === 'MB' || bytes < 1024 * 1024 * 1024) return `${formatDecimal(bytes / 1024 / 1024, 1)} MB`
+  return `${formatDecimal(bytes / 1024 / 1024 / 1024, 2)} GB`
 }
 
 export interface ElapsedOptions {
@@ -72,7 +80,7 @@ export function formatElapsed(seconds: number | null | undefined, options: Elaps
   if (seconds == null || Number.isNaN(seconds)) return fallback
   const r = rounding === 'round' ? Math.round : Math.floor
   const unit = (v: number, digits: number | undefined, label: string) =>
-    `${digits ? v.toFixed(digits) : r(v)}${label}${suffix}`
+    `${digits ? formatDecimal(v, digits) : r(v)}${label}${suffix}`
   if (justNowBelow !== undefined && seconds < justNowBelow) return 'just now'
   if (seconds < minutesFrom) return unit(seconds, fractionDigits.seconds, 's')
   if (seconds < hoursFrom) return unit(seconds / 60, fractionDigits.minutes, 'm')
@@ -105,14 +113,14 @@ export function resolveCountryName(code: string): string {
 }
 
 export function formatCompactCount(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`
-  return n >= 1_000 ? `${(n / 1_000).toFixed(1).replace(/\.0$/, '')}k` : String(n)
+  if (n >= 1_000_000) return `${formatDecimal(n / 1_000_000, 0, 1)}M`
+  return n >= 1_000 ? `${formatDecimal(n / 1_000, 0, 1)}k` : String(n)
 }
 
 export function formatAbbreviatedCount(n: number, millionDecimals = 1): string {
-  if (n >= 1e9) return `${(n / 1e9).toFixed(millionDecimals)}B`
-  if (n >= 1e6) return `${(n / 1e6).toFixed(millionDecimals)}M`
-  return n >= 1e3 ? `${(n / 1e3).toFixed(1)}K` : formatCount(n)
+  if (n >= 1e9) return `${formatDecimal(n / 1e9, millionDecimals)}B`
+  if (n >= 1e6) return `${formatDecimal(n / 1e6, millionDecimals)}M`
+  return n >= 1e3 ? `${formatDecimal(n / 1e3, 1)}K` : formatCount(n)
 }
 
 export function formatCount(n: number, options?: Intl.NumberFormatOptions): string {
@@ -132,20 +140,24 @@ export function formatValue(field: string | undefined, value: string | number | 
   if (field === 'city') return str.toLowerCase().replace(/(^|[^\w])(\w)/g, (m) => m.toUpperCase())
   if (field === 'proto' || field === 'tls') {
     const num = Number(value)
-    if (!isNaN(num)) return parseFloat(num.toFixed(1)).toString()
+    if (!isNaN(num)) return formatDecimal(num, 0, 1)
   }
   return str
 }
 
-export function formatCurrency(amount: number): string {
-  return amount >= 1000
-    ? `$${(amount / 1000).toFixed(1).replace(/\.0$/, '')}k`
-    : `$${amount.toFixed(amount >= 1 ? 2 : 4)}`
+export function formatUSD(n: number, options?: { subDollarDigits?: number }): string {
+  if (n >= 1000) return getNumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(Math.round(n))
+  const digits = n >= 1 ? 2 : (options?.subDollarDigits ?? 4)
+  return getNumberFormat('en-US', {
+    style: 'currency',
+    currency: 'USD',
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits,
+  }).format(n)
 }
 
-export function formatUSD(n: number, options?: { subDollarDigits?: number }): string {
-  if (n >= 1000) return `$${getNumberFormat('en-US', { maximumFractionDigits: 0 }).format(Number(n.toFixed(0)))}`
-  return `$${n.toFixed(n >= 1 ? 2 : (options?.subDollarDigits ?? 4))}`
+export function formatCurrency(amount: number): string {
+  return amount >= 1000 ? `$${formatDecimal(amount / 1000, 0, 1)}k` : formatUSD(amount)
 }
 
 export function calculateDelta(current: number, previous: number | undefined): number | null {
@@ -153,15 +165,21 @@ export function calculateDelta(current: number, previous: number | undefined): n
 }
 
 export function formatPercent(ratio: number, options?: { decimals?: number }): string {
-  return `${(ratio * 100).toFixed(options?.decimals ?? 1)}%`
+  const digits = options?.decimals ?? 1
+  return getNumberFormat('en-US', {
+    style: 'percent',
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits,
+    useGrouping: false,
+  }).format(ratio)
 }
 
 export function formatPctValue(v: number | null | undefined, decimals?: number): string {
-  return v == null ? '—' : `${decimals != null ? v.toFixed(decimals) : v}%`
+  return v == null ? '—' : `${decimals != null ? formatDecimal(v, decimals) : v}%`
 }
 
 export function formatMs(v: number | null | undefined, decimals = 1, unit = ' ms'): string {
-  return v == null ? '—' : `${v.toFixed(decimals)}${unit}`
+  return v == null ? '—' : `${formatDecimal(v, decimals)}${unit}`
 }
 
 export function toUTCDate(date: string | Date): Date {
@@ -266,7 +284,7 @@ export function formatDeterministicUTC(iso: string | null | undefined): string {
 
 export function formatBucket(iso: string, tz: string): string {
   if (!iso) return ''
-  const d = new Date(/(?:Z|[+-]\d{2}:?\d{2})$/i.test(iso) ? iso : `${iso}Z`)
+  const d = toUTCDate(iso)
   if (isNaN(d.getTime())) return iso
   return getDateTimeFormat('en-US', {
     timeZone: tz,
@@ -280,7 +298,7 @@ export function formatBucket(iso: string, tz: string): string {
 }
 
 export function toQueryDate(d: Date): string {
-  return `${d.toISOString().slice(0, 19)}Z`
+  return formatInTimeZone(d, 'UTC', "yyyy-MM-dd'T'HH:mm:ss'Z'")
 }
 
 export function formatDateTime(isoString: string | null | undefined, timeZone?: string): string {

@@ -1,0 +1,790 @@
+"""Bot source registry, cache metadata, UA pattern matchers, and well-known bots seed catalog."""
+
+from __future__ import annotations
+
+import functools
+import hashlib
+import json
+import logging
+import re
+import sys
+import threading
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any
+
+from backend.utils.bounded_cache import BoundedTTLCache
+from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry
+
+logger = logging.getLogger(__name__)
+
+
+class _BotBoundedTTLCache(BoundedTTLCache):
+    """BoundedTTLCache with dict-equality support (e.g. ``cache == {}``)."""
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, dict):
+            if len(self) != len(other):
+                return False
+            marker = object()
+            return all(k in self and self.get(k, marker) == v for k, v in other.items())
+        return super().__eq__(other)
+
+
+BOT_SOURCES: list[dict] = [
+    {
+        "id": "well-known-bots",
+        "name": "Well-Known Bots (arcjet)",
+        "url": "https://raw.githubusercontent.com/arcjet/well-known-bots/main/well-known-bots.json",
+        "enabled": True,
+        "type": "ua",
+    },
+    {
+        "id": "tor-exit-nodes",
+        "name": "Tor Exit Nodes (Official)",
+        "url": "https://check.torproject.org/torbulkexitlist",
+        "enabled": True,
+        "type": "ip",
+        "category": "anonymizer",
+    },
+    {
+        "id": "ipsum-blocklist",
+        "name": "IPsum Malicious IP List",
+        "url": "https://raw.githubusercontent.com/stamparm/ipsum/master/ipsum.txt",
+        "enabled": True,
+        "type": "ip",
+        "category": "malicious_ip",
+    },
+    {
+        "id": "aws-ip-ranges",
+        "name": "AWS IP Ranges",
+        "url": "https://ip-ranges.amazonaws.com/ip-ranges.json",
+        "enabled": True,
+        "type": "ip",
+        "category": "cloud_infra",
+    },
+    {
+        "id": "gcp-ip-ranges",
+        "name": "GCP IP Ranges",
+        "url": "https://www.gstatic.com/ipranges/cloud.json",
+        "enabled": True,
+        "type": "ip",
+        "category": "cloud_infra",
+    },
+]
+
+CATEGORY_LABELS: dict[str, str] = {
+    "search_engine": "Search Engine",
+    "ai_crawler": "AI Crawler",
+    "ai_assistant": "AI Assistant",
+    "ai_agent": "AI Agent",
+    "monitoring": "Monitoring",
+    "social_preview": "Social Preview",
+    "seo_analytics": "SEO & Analytics",
+    "archiver": "Archiver",
+    "feed_fetcher": "Feed Fetcher",
+    "anonymizer": "Anonymizer",
+    "malicious_ip": "Malicious IP",
+    "cloud_infra": "Cloud Infrastructure",
+    "other": "Other Bot",
+}
+
+_CACHE_DIR = Path("data/cache/bot_sources")
+
+# ── Matcher cache ─────────────────────────────────────────────────────────────
+# Rebuilt lazily when cache files change on disk.
+_matcher_lock = threading.Lock()
+_matcher_cache: BoundedTTLCache = _BotBoundedTTLCache(maxsize=16, ttl_seconds=86400.0)  # keys: "fn", "mtime"
+
+# mtime-revalidated cache for parsed source envelopes. load_source is hit
+# by every get_bot_regex_pattern / get_bot_by_id call (dashboard +
+# security repos) and the JSON files are megabytes — the parse cost was
+# adding up.
+_source_cache: BoundedTTLCache = _BotBoundedTTLCache(maxsize=64, ttl_seconds=86400.0)
+_source_cache_lock = threading.Lock()
+
+# Pre-compiled IP network feeds for high-performance IP-based bot matching.
+_compiled_ip_feeds: BoundedTTLCache = _BotBoundedTTLCache(maxsize=32, ttl_seconds=86400.0)
+_compiled_ip_feeds_lock = threading.Lock()
+
+
+def _cache_path(source_id: str) -> Path:
+    return _CACHE_DIR / f"{source_id}.json"
+
+
+def _cache_mtime() -> float:
+    """Return the latest mtime across all source cache files."""
+    ts = 0.0
+    for src in BOT_SOURCES:
+        p = _cache_path(src["id"])
+        if p.exists():
+            ts = max(ts, p.stat().st_mtime)
+    return ts
+
+
+# Content-hash version cache, revalidated against the source files' mtime.
+# The mtime stat is cheap (hot path); the SHA is recomputed only when a file
+# is rewritten (a refresh) and re-hashes IDENTICAL content to the SAME value.
+_version_cache: BoundedTTLCache = _BotBoundedTTLCache(maxsize=16, ttl_seconds=86400.0)
+_version_cache_lock = threading.Lock()
+
+
+def get_pattern_set_version() -> str:
+    """Return a version string keyed to the bot pattern set CONTENT.
+
+    A SHA of the source JSON bytes — NOT the file mtime. The wellknown_bots
+    rollup reader requires a single version across the request window; an
+    mtime-based version bumped on every (typically no-op) daily re-fetch made
+    every multi-day window mixed-version → the rollup never served and the
+    request path stayed on the live regex + its all-rows temp. Hashing the
+    content keeps the version stable across identical re-fetches while still
+    changing when the patterns ACTUALLY change (so a real pattern update still
+    invalidates stale rollups → reader falls back to live for those hours).
+
+    Used by the wellknown_bots rollup to stamp each materialised row.
+    Empty string means no source files exist yet (writer should skip).
+
+    Cached against the latest source mtime so the hot path is a stat, not a
+    multi-MB re-hash; identical content re-hashes to the same value on refresh.
+    """
+    ts = _cache_mtime()
+    if ts == 0.0:
+        return ""
+    if _version_cache.get("mtime") == ts and _version_cache.get("version"):
+        return _version_cache["version"]
+    with _version_cache_lock:
+        if _version_cache.get("mtime") == ts and _version_cache.get("version"):
+            return _version_cache["version"]
+        h = hashlib.sha256()
+        for src in sorted(BOT_SOURCES, key=lambda s: s["id"]):
+            p = _cache_path(src["id"])
+            try:
+                h.update(src["id"].encode())
+                h.update(b"\0")
+                h.update(p.read_bytes())
+            except OSError:
+                continue
+        version = f"v{h.hexdigest()[:16]}"
+        _version_cache["mtime"] = ts
+        _version_cache["version"] = version
+        return version
+
+
+def load_source(source_id: str) -> list[dict]:
+    """Return cached entries for a source, or [] if not yet fetched.
+
+    Result is memoized and revalidated by the cache file's st_mtime_ns.
+    fetch_and_cache_source overwrites the file in place, which bumps the
+    mtime — so a real refresh invalidates without explicit signalling.
+    """
+    p = _cache_path(source_id)
+    try:
+        mtime_ns = p.stat().st_mtime_ns
+    except FileNotFoundError:
+        return []
+
+    cached = _source_cache.get(source_id)
+    if cached is not None and cached[0] == mtime_ns:
+        return cached[1]
+
+    try:
+        entries = json.loads(p.read_text()).get("entries", [])
+    except Exception:
+        return []
+
+    with _source_cache_lock:
+        _source_cache[source_id] = (mtime_ns, entries)
+    return entries
+
+
+def get_all_sources_meta() -> list[dict]:
+    """Return metadata for all sources (envelope only, no full entries)."""
+    result = []
+    for src in BOT_SOURCES:
+        p = _cache_path(src["id"])
+        meta: dict = {
+            "id": src["id"],
+            "name": src["name"],
+            "url": src["url"],
+            "enabled": src["enabled"],
+            "last_updated": None,
+            "entry_count": None,
+        }
+        if p.exists():
+            try:
+                envelope = json.loads(p.read_text())
+                meta["last_updated"] = envelope.get("last_updated")
+                meta["entry_count"] = envelope.get("entry_count")
+            except Exception:
+                logger.debug("get_all_sources_meta: step failed (ignored)", exc_info=True)
+        result.append(meta)
+    return result
+
+
+def get_bot_by_id(bot_id: str) -> dict | None:
+    """Look up a single bot entry by id across all enabled sources."""
+    for src in BOT_SOURCES:
+        if not src["enabled"]:
+            continue
+        for entry in load_source(src["id"]):
+            if entry.get("id") == bot_id:
+                return entry
+    return None
+
+
+# ── Pattern utilities ─────────────────────────────────────────────────────────
+
+_LITERAL_ESCAPES = frozenset(r"\/.,-_+:; ")
+
+
+def extract_literal_substring(pattern: str) -> str | None:
+    """Return the longest literal substring from a regex pattern.
+
+    Used to build ILIKE pre-filters that are faster than regexp_matches().
+    E.g. 'Googlebot\\/.*' → 'Googlebot/', 'compatible; bingbot\\/2\\.0' → 'bingbot/2.0'
+    """
+    i = 0
+    n = len(pattern)
+    current: list[str] = []
+    best = ""
+
+    def _commit():
+        nonlocal best
+        s = "".join(current).strip()
+        if len(s) > len(best):
+            best = s
+        current.clear()
+
+    while i < n:
+        c = pattern[i]
+        if c == "\\" and i + 1 < n:
+            nxt = pattern[i + 1]
+            if nxt in _LITERAL_ESCAPES:
+                current.append(nxt)
+            else:
+                _commit()  # \d, \w etc. break a literal run
+            i += 2
+        elif c == "[":
+            # Skip entire character class [...]
+            _commit()
+            depth = 1
+            i += 1
+            while i < n and depth > 0:
+                if pattern[i] == "]":
+                    depth -= 1
+                elif pattern[i] == "[":
+                    depth += 1
+                i += 1
+        elif c in "(){}*+?^$|":
+            _commit()
+            i += 1
+        else:
+            current.append(c)
+            i += 1
+
+    _commit()
+    return best if len(best) >= 4 else None
+
+
+def _extract_strict_required_literal(pattern: str) -> str | None:
+    """Extract the longest required lowercase literal of length >= 3 from *pattern*.
+
+    Conservative: ignores tokens inside ``(...)`` or complex ``[...]`` classes,
+    pops any character immediately followed by ``?``, ``*``, or ``{``, and returns
+    ``None`` if a top-level ``|`` alternation is present. Supports two-character
+    case classes like ``[wW]`` since matching is case-insensitive.
+    """
+    n = len(pattern)
+    i = 0
+    paren_depth = 0
+    current: list[str] = []
+    best = ""
+
+    def _commit() -> None:
+        nonlocal best
+        s = "".join(current)
+        if len(s) > len(best):
+            best = s
+        current.clear()
+
+    while i < n:
+        c = pattern[i]
+        if c == "\\" and i + 1 < n:
+            nxt = pattern[i + 1]
+            if paren_depth == 0 and nxt in _LITERAL_ESCAPES:
+                current.append(nxt.lower())
+            else:
+                _commit()
+            i += 2
+            if i < n and pattern[i] in "?*{":
+                if current:
+                    current.pop()
+                _commit()
+            continue
+        if c == "[":
+            end = pattern.find("]", i + 1)
+            if end != -1 and paren_depth == 0:
+                cls_body = pattern[i + 1 : end]
+                if len(cls_body) == 2 and cls_body[0].lower() == cls_body[1].lower() and cls_body[0].isalpha():
+                    ch = cls_body[0].lower()
+                    i = end + 1
+                    if i < n and pattern[i] in "?*{":
+                        _commit()
+                    else:
+                        current.append(ch)
+                    continue
+            _commit()
+            i = (end + 1) if end != -1 else (i + 1)
+            continue
+        if c == "(":
+            _commit()
+            paren_depth += 1
+            i += 1
+            continue
+        if c == ")":
+            _commit()
+            paren_depth = max(0, paren_depth - 1)
+            i += 1
+            continue
+        if paren_depth > 0:
+            i += 1
+            continue
+        if c == "|":
+            return None
+        if c in "?*{":
+            if current:
+                current.pop()
+            _commit()
+            if c == "{":
+                end = pattern.find("}", i + 1)
+                i = (end + 1) if end != -1 else (i + 1)
+            else:
+                i += 1
+            continue
+        if c in "+^$.":
+            _commit()
+            i += 1
+            continue
+        if i + 1 < n and pattern[i + 1] in "?*{":
+            _commit()
+            i += 1
+            continue
+        current.append(c.lower())
+        i += 1
+
+    _commit()
+    return best if len(best) >= 3 else None
+
+
+def _build_indexed_ua_matcher(entries: list[dict]) -> tuple[Callable[[str], tuple[dict, ...]], int]:
+    """Compile a 3-gram prefix-indexed UA matcher over *entries*.
+
+    Instead of testing all ~800 compiled regexes sequentially for every distinct
+    User-Agent string, each pattern with a required >= 3-char literal is indexed
+    by its first 3 lowercase characters. At lookup time only patterns whose 3-gram
+    prefix appears in ``ua.lower()`` and whose full required literal is a substring
+    of ``ua.lower()`` have ``pat.search(ua)`` invoked (~30x faster on 2,000 UAs).
+    """
+    by_gram3: dict[str, list[tuple[str, int, dict, re.Pattern]]] = {}
+    always_check: list[tuple[int, dict, list[re.Pattern]]] = []
+    entry_count = 0
+
+    for idx, entry in enumerate(entries):
+        raw_patterns = (entry.get("pattern") or {}).get("accepted") or []
+        pats_all: list[re.Pattern] = []
+        fallback_pats: list[re.Pattern] = []
+        for rp in raw_patterns:
+            try:
+                pat = re.compile(rp, re.IGNORECASE)
+            except re.error as e:
+                logger.debug("[bot_sources] Bad pattern %r in %s: %s", rp, entry.get("id"), e)
+                continue
+            pats_all.append(pat)
+            lit = _extract_strict_required_literal(rp)
+            if lit is not None:
+                by_gram3.setdefault(lit[:3], []).append((lit, idx, entry, pat))
+            else:
+                fallback_pats.append(pat)
+        if pats_all:
+            entry_count += 1
+        if fallback_pats:
+            always_check.append((idx, entry, fallback_pats))
+
+    gram_keys = frozenset(by_gram3.keys())
+
+    @functools.lru_cache(maxsize=10_000)
+    def _match_ua(ua: str) -> tuple[dict, ...]:
+        if not ua:
+            return ()
+        ua_l = ua.lower()
+        n = len(ua_l)
+        matched_by_idx: dict[int, dict] = {}
+        if n >= 3:
+            seen_grams = {ua_l[i : i + 3] for i in range(n - 2)} & gram_keys
+            for g in seen_grams:
+                for lit, idx, entry, pat in by_gram3[g]:
+                    if idx not in matched_by_idx and lit in ua_l and pat.search(ua):
+                        matched_by_idx[idx] = entry
+        for idx, entry, pats in always_check:
+            if idx not in matched_by_idx:
+                for pat in pats:
+                    if pat.search(ua):
+                        matched_by_idx[idx] = entry
+                        break
+        if not matched_by_idx:
+            return ()
+        return tuple(matched_by_idx[k] for k in sorted(matched_by_idx))
+
+    return _match_ua, entry_count
+
+
+# ── Matcher ───────────────────────────────────────────────────────────────────
+
+
+def build_matcher() -> Callable[[str], tuple[dict, ...]]:
+    """Return a cached UA matcher. Rebuilds when source cache files change.
+
+    The returned function is internally lru_cached — UA strings in log data
+    follow a heavy power-law distribution so repeated lookups are near-free.
+    The matcher returns a tuple (immutable + hashable, plays nicely with
+    ``functools.lru_cache``); callers iterate it.
+    """
+    current_mtime = _cache_mtime()
+
+    with _matcher_lock:
+        if _matcher_cache.get("mtime") == current_mtime and "fn" in _matcher_cache:
+            return _matcher_cache["fn"]
+
+        entries: list[dict] = []
+        for src in BOT_SOURCES:
+            if not src["enabled"]:
+                continue
+            entries.extend(load_source(src["id"]))
+
+        _match_ua, entry_count = _build_indexed_ua_matcher(entries)
+
+        _matcher_cache["fn"] = _match_ua
+        _matcher_cache["mtime"] = current_mtime
+        logger.info("👾 \x1b[36m[bots]\x1b[0m Rebuilt matcher from %d bot entries", entry_count)
+        return _match_ua
+
+
+def get_ilike_prefilter_literals() -> list[str]:
+    """Return literal substrings from all enabled bot patterns for ILIKE pre-filtering."""
+    seen: set[str] = set()
+    result: list[str] = []
+    for src in BOT_SOURCES:
+        if not src["enabled"]:
+            continue
+        for entry in load_source(src["id"]):
+            for rp in entry.get("pattern", {}).get("accepted", []):
+                lit = extract_literal_substring(rp)
+                if lit and lit.lower() not in seen:
+                    seen.add(lit.lower())
+                    result.append(lit)
+    return result
+
+
+def get_bot_regex_pattern(limit: int = 500) -> str | None:
+    """Return a case-insensitive regex pattern matching known bot literals.
+
+    Used for high-performance DuckDB filtering via regexp_matches().
+    Alternation in RE2 is significantly faster than long OR chains of ILIKE.
+    """
+    literals = get_ilike_prefilter_literals()
+    if not literals:
+        return None
+
+    # Sort by length descending for better matching behavior
+    literals = sorted(literals, key=len, reverse=True)[:limit]
+
+    # Escape each literal for regex use and combine into a single alternation pattern
+    # (?i) makes the RE2 engine perform case-insensitive matching
+    return "(?i)" + "|".join(re.escape(lit) for lit in literals)
+
+
+def enrich_bot_metadata(df: Any) -> None:
+    """
+    Unified enrichment for virtual bot fields (_bot_name, _ngwaf_bot_name).
+    Modifies the DataFrame in-place.
+    """
+    if df.empty:
+        return
+
+    # 1. Arcjet/Well-Known Bot Matching & IP feed matching
+    if "ua" in df.columns and "ip" in df.columns:
+        match_ua = build_matcher()
+        # Deduplicate (ua, ip) pairs across the DataFrame so 50k rows with a few hundred
+        # unique pairs only execute UA matching, IP pytricia lookup, and rDNS classification
+        # once per unique pair instead of O(N * M).
+        ua_matches_cache: dict[str, tuple[dict, ...]] = {}
+        row_keys: list[tuple[str, str]] = []
+        candidate_ips_set: set[str] = set()
+        for ua_val, ip_val in zip(df["ua"], df["ip"]):
+            ua_str = str(ua_val) if ua_val else ""
+            ip_str = str(ip_val) if ip_val else ""
+            row_keys.append((ua_str, ip_str))
+            matches = ua_matches_cache.get(ua_str)
+            if matches is None:
+                matches = match_ua(ua_str)
+                ua_matches_cache[ua_str] = matches
+            if matches and ip_str:
+                candidate_ips_set.add(ip_str)
+        hostnames = get_hostnames(list(candidate_ips_set))
+
+        # Pre-compiled IP ranges + pytricia tries for O(1) radix-tree lookup
+        ip_feeds = _get_compiled_ip_feeds()
+        feed_tries = _get_feed_tries(ip_feeds)
+        feed_name_by_id = {s["id"]: s["name"] for s in BOT_SOURCES}
+        ip_feed_cache: dict[str, str | None] = {}
+        pair_label_cache: dict[tuple[str, str], str] = {}
+
+        def _match_ip_feed(ip_str: str) -> str | None:
+            if not ip_str:
+                return None
+            if ip_str in ip_feed_cache:
+                return ip_feed_cache[ip_str]
+            matched_feed: str | None = None
+            try:
+                parsed = parse_ip_int_version(ip_str)
+                if parsed is not None:
+                    _ip_int, version = parsed
+                    for feed_id, (v4_trie, v6_trie) in feed_tries.items():
+                        trie = v4_trie if version == 4 else v6_trie
+                        if len(trie) > 0 and ip_str in trie:
+                            matched_feed = feed_id
+                            break
+            except Exception:
+                logger.debug("enrich_bot_metadata: step failed (ignored)", exc_info=True)
+            ip_feed_cache[ip_str] = matched_feed
+            return matched_feed
+
+        bot_names: list[str] = []
+        for key in row_keys:
+            cached_label = pair_label_cache.get(key)
+            if cached_label is not None:
+                bot_names.append(cached_label)
+                continue
+
+            ua_str, ip_str = key
+            matches = ua_matches_cache[ua_str]
+            matched_feed = _match_ip_feed(ip_str)
+
+            if not matches:
+                if matched_feed:
+                    feed_name = feed_name_by_id.get(matched_feed, matched_feed)
+                    label = f"{feed_name} (IP-Match)"
+                else:
+                    label = "null"
+                pair_label_cache[key] = label
+                bot_names.append(label)
+                continue
+
+            entry = matches[0]
+            bot_name = entry.get("name", entry.get("id", "unknown"))
+            hostname, status, fcrdns_verified = hostnames.get(ip_str, (None, "pending", False))
+
+            verification = entry.get("verification", {})
+            verification_domains = verification.get("domains", [])
+            verification_cidrs = verification.get("cidrs", [])
+            state = classify(ip_str, hostname, status, fcrdns_verified, verification_domains, verification_cidrs)
+
+            if matched_feed:
+                feed_name = feed_name_by_id.get(matched_feed, matched_feed)
+                label = f"{bot_name} ({state}, {feed_name})"
+            else:
+                label = f"{bot_name} ({state})"
+            pair_label_cache[key] = label
+            bot_names.append(label)
+        df["_bot_name"] = bot_names
+
+    # 2. NG-WAF Verified Bot Enrichment
+    if "waf_req_id" in df.columns:
+        from backend.core.metadata import base as pg_connection
+
+        # Normalize each waf_req_id once: None for missing/sentinel
+        # values, str(x) otherwise. Deduplicate the IN-list while keeping per-row output aligned.
+        norm = [None if (x is None or str(x) in ("None", "nan", "")) else str(x) for x in df["waf_req_id"]]
+        waf_ids = list(dict.fromkeys(n for n in norm if n))
+        if not waf_ids:
+            df["_ngwaf_bot_name"] = None
+        else:
+            try:
+                pconn = pg_connection.get_pg_readonly_connection()
+                try:
+                    placeholders = ",".join("?" for _ in waf_ids)
+                    cur = pconn.execute(
+                        f"SELECT waf_req_id, bot_name FROM ngwaf_bots WHERE waf_req_id IN ({placeholders})",
+                        waf_ids,
+                    )
+                    rows = cur.fetchall()
+                finally:
+                    pconn.close()
+                bot_map = {
+                    (r["waf_req_id"] if isinstance(r, dict) else r[0]): (r["bot_name"] if isinstance(r, dict) else r[1])
+                    for r in rows
+                }
+                df["_ngwaf_bot_name"] = [bot_map.get(n) if n else None for n in norm]
+            except Exception:
+                df["_ngwaf_bot_name"] = None
+
+
+_BOT_TOKEN_SUFFIX_RE = re.compile(
+    r"(-searchbot|-assistbot|-externalagent|-externalfetcher|-extended|-user|"
+    r"searchbot|assistbot|externalagent|externalfetcher|extended|crawler|spider|"
+    r"slurp|archiver|scraper|preview|other|bot).*$",
+    re.IGNORECASE,
+)
+_DOMAIN_STEM_RE = re.compile(r"^(?:https?://)?(?:www\.)?([^/.:;\s]+)", re.IGNORECASE)
+_SEED_PATH = Path(__file__).resolve().parent.parent / "well_known_bots_seed.json"
+_seed_entries_cache: list[dict] | None = None
+_seed_matcher_fn: Callable[[str], tuple[dict, ...]] | None = None
+_seed_lock = threading.RLock()
+
+
+def load_well_known_bots_catalog() -> list[dict]:
+    """Return cached well-known-bots entries, falling back to the bundled seed catalog
+    when the runtime cache has not yet been fetched (e.g. fresh startup or CI)."""
+    live = load_source("well-known-bots")
+    if live:
+        return live
+    global _seed_entries_cache
+    if _seed_entries_cache is not None:
+        return _seed_entries_cache
+    with _seed_lock:
+        if _seed_entries_cache is None:
+            try:
+                _seed_entries_cache = json.loads(_SEED_PATH.read_text(encoding="utf-8"))
+            except Exception:
+                _seed_entries_cache = []
+            if (pkg := sys.modules.get("backend.utils.bot_sources")) is not None:
+                object.__setattr__(pkg, "_seed_entries_cache", _seed_entries_cache)
+        return _seed_entries_cache
+
+
+def build_well_known_bots_matcher() -> Callable[[str], tuple[dict, ...]]:
+    """Return the live UA matcher when cached sources exist on disk, otherwise a
+    compiled matcher over the bundled well-known-bots seed catalog."""
+    if load_source("well-known-bots"):
+        return build_matcher()
+    global _seed_matcher_fn
+    if _seed_matcher_fn is not None:
+        return _seed_matcher_fn
+    with _seed_lock:
+        if _seed_matcher_fn is None:
+            _seed_matcher_fn, _ = _build_indexed_ua_matcher(load_well_known_bots_catalog())
+            if (pkg := sys.modules.get("backend.utils.bot_sources")) is not None:
+                object.__setattr__(pkg, "_seed_matcher_fn", _seed_matcher_fn)
+        return _seed_matcher_fn
+
+
+def resolve_bot_display_name(token_or_ua: str | None, default: str = "Other Bot") -> str:
+    """Resolve an extracted bot UA token or full UA string to a human-readable display name.
+
+    Uses the well-known-bots catalog matcher first (`entry["id"]` title-cased, matching
+    `classify_ua_counts` and `summarize_wellknown_bot_rows`), falling back to a cleaned
+    title-cased form of the extracted token when the bot is not in the catalog.
+    """
+    raw = (token_or_ua or "").strip()
+    if not raw:
+        return default
+    matcher = build_well_known_bots_matcher()
+    matches = (
+        matcher(raw)
+        or matcher(f"Mozilla/5.0 (compatible; {raw}/2.0)")
+        or matcher(f"Mozilla/5.0 (compatible; {raw}/1.0)")
+        or matcher(f"Mozilla/5.0 (compatible; {raw}/0.1)")
+        or matcher(f"{raw}/1.0")
+    )
+    if matches:
+        bot_id = matches[0].get("id", "")
+        if bot_id:
+            return bot_id.replace("-", " ").title()
+    raw_low = raw.lower().strip("/._- ")
+    if raw_low:
+        for entry in load_well_known_bots_catalog():
+            bot_id = entry.get("id", "")
+            if not bot_id:
+                continue
+            if raw_low == bot_id.lower() or any(raw_low == a.lower() for a in entry.get("aliases") or []):
+                return bot_id.replace("-", " ").title()
+            for pat in (entry.get("pattern") or {}).get("accepted") or []:
+                if raw_low in pat.lower():
+                    return bot_id.replace("-", " ").title()
+    cleaned = raw.strip("/._- ")
+    if not cleaned:
+        return default
+    return cleaned.replace("-", " ").replace("_", " ").title()
+
+
+def extract_entry_referral_stems(entry: dict[str, Any]) -> set[str]:
+    """Extract normalized domain/token stems for a well-known-bots catalog entry."""
+    stems: set[str] = set()
+    bot_id = (entry.get("id") or "").lower()
+    if bot_id:
+        vendor_prefix = bot_id.split("-")[0]
+        if len(vendor_prefix) >= 3:
+            stems.add(vendor_prefix)
+    url = entry.get("url") or ""
+    if url:
+        m = _DOMAIN_STEM_RE.search(url)
+        if m and len(m.group(1)) >= 3:
+            stems.add(m.group(1).lower())
+    for dom in (entry.get("verification") or {}).get("domains") or []:
+        parts = [
+            p
+            for p in dom.lower().strip(".").split(".")
+            if p
+            not in {
+                "com",
+                "org",
+                "net",
+                "io",
+                "ai",
+                "co",
+                "uk",
+                "ru",
+                "cn",
+                "de",
+                "jp",
+                "fr",
+                "crawl",
+                "search",
+                "bot",
+                "spider",
+            }
+        ]
+        for p in parts:
+            if len(p) >= 3:
+                stems.add(p)
+    for pat in (entry.get("pattern") or {}).get("accepted") or []:
+        lit = extract_literal_substring(pat) or pat
+        tok = lit.split("/")[0].split("\\")[0].strip("^$()[]{}+*?.,; ").lower()
+        stem = _BOT_TOKEN_SUFFIX_RE.sub("", tok).strip("-_.")
+        if len(stem) >= 3:
+            stems.add(stem)
+    for pat in (entry.get("instances") or {}).get("accepted") or []:
+        tok = pat.split("/")[0].split("\\")[0].strip("^$()[]{}+*?.,; ").lower()
+        stem = _BOT_TOKEN_SUFFIX_RE.sub("", tok).strip("-_.")
+        if len(stem) >= 3:
+            stems.add(stem)
+    return stems
+
+
+# R-1: drain the matcher + source caches between tests. Both are
+# mtime-revalidated in prod but tests use a sandboxed FS that doesn't
+# share inodes across runs — leaks would surface as cross-test
+# matcher state.
+_CacheRegistry.register("utils.bot_sources._matcher_cache", _matcher_cache)
+_CacheRegistry.register("utils.bot_sources._source_cache", _source_cache)
+_CacheRegistry.register("utils.bot_sources._compiled_ip_feeds", _compiled_ip_feeds)
+_CacheRegistry.register("utils.bot_sources._version_cache", _version_cache)
+
+# Populated by package __init__.py after submodules load (avoids circular import)
+_get_compiled_ip_feeds: Any = None
+_get_feed_intervals: Any = None
+_get_feed_tries: Any = None
+ip_int_in_intervals: Any = None
+parse_ip_int_version: Any = None
+classify: Any = None
+get_hostnames: Any = None

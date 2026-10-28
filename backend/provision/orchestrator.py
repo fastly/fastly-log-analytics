@@ -598,14 +598,16 @@ def provision(cfg: dict, _resume_from_state: bool = False):
                 }
             else:
                 yield {"type": "status", "message": "🧊 Initializing DuckLake table..."}
-                from tenacity import Retrying, retry_if_exception_type, stop_after_attempt
+                from tenacity import Retrying, retry_if_exception_type, stop_after_attempt, wait_incrementing
 
                 _ICE_INIT_ATTEMPTS = 3
                 ice_exc: Exception | None = None
                 try:
                     for attempt in Retrying(
                         stop=stop_after_attempt(_ICE_INIT_ATTEMPTS),
+                        wait=wait_incrementing(start=1.5, increment=1.5),
                         retry=retry_if_exception_type(OSError),
+                        sleep=lambda s: time.sleep(s),
                         reraise=True,
                     ):
                         with attempt:
@@ -618,7 +620,6 @@ def provision(cfg: dict, _resume_from_state: bool = False):
                                         f"(attempt {idx - 1}/{_ICE_INIT_ATTEMPTS}); retrying…"
                                     ),
                                 }
-                                time.sleep(1.5 * (idx - 1))
                             db_storage.init_storage_table(src)
                 except Exception as e:
                     ice_exc = e

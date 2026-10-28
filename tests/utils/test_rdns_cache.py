@@ -1797,3 +1797,35 @@ def test_enrich_bot_metadata_hybrid_ua_and_ip_match():
 
     assert "_bot_name" in df.columns
     assert df["_bot_name"][0] == "Googlebot (verified, AWS IP Ranges)"
+
+
+def test_bot_sources_package_submodules_and_pytricia_matching():
+    """Verify the decomposed bot_sources package submodules, BoundedTTLCache instances,
+    and pytricia-backed match_ip_to_bot_source."""
+    import ipaddress
+
+    from backend.routers.admin import admin_queries
+    from backend.utils.bot_sources import cidr, fetcher, rdns, registry
+    from backend.utils.bounded_cache import BoundedTTLCache
+
+    assert isinstance(bot_sources._matcher_cache, BoundedTTLCache)
+    assert isinstance(bot_sources._source_cache, BoundedTTLCache)
+    assert isinstance(bot_sources._compiled_ip_feeds, BoundedTTLCache)
+    assert isinstance(bot_sources._version_cache, BoundedTTLCache)
+    assert isinstance(admin_queries._cancel_history, BoundedTTLCache)
+
+    assert registry.CATEGORY_LABELS["search_engine"] == "Search Engine"
+    assert fetcher.fetch_bot_source is fetcher.fetch_and_cache_source
+    assert fetcher.sync_all_bot_sources is fetcher.refresh_all_sources
+    assert rdns.classify is bot_sources.classify
+
+    mock_feeds = {
+        "tor-exit-nodes": [ipaddress.ip_network("185.220.101.0/24")],
+        "aws-ip-ranges": [ipaddress.ip_network("2600:1f00::/24")],
+    }
+    with patch("backend.utils.bot_sources._get_compiled_ip_feeds", return_value=mock_feeds):
+        assert cidr.match_ip_to_bot_source("185.220.101.42") == "tor-exit-nodes"
+        assert cidr.match_ip_to_bot_source("2600:1f00::1") == "aws-ip-ranges"
+        assert cidr.match_ip_to_bot_source("8.8.8.8") is None
+        assert cidr.match_ip_to_bot_source("not-an-ip") is None
+        assert cidr.match_ip_to_bot_source("") is None

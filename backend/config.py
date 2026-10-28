@@ -335,7 +335,7 @@ def load_config(service_id: str | None) -> dict | None:
         stop=stop_after_attempt(5),
         wait=wait_fixed(0.05),
         retry=retry_if_exception_type((json.JSONDecodeError, PermissionError, OSError)),
-        sleep=time.sleep,
+        sleep=lambda s: time.sleep(s),
         reraise=True,
     ):
         with attempt:

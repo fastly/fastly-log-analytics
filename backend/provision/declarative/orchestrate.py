@@ -611,7 +611,7 @@ def verify_compute_scorer_readiness(
         stop=stop_after_attempt(max_retries),
         wait=wait_exponential(multiplier=1.0, exp_base=1.5, min=1.0, max=5.0),
         retry=retry_if_exception_type(Exception),
-        sleep=time.sleep,
+        sleep=lambda s: time.sleep(s),
         reraise=False,
     ):
         with attempt:

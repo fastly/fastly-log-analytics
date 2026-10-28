@@ -36,6 +36,7 @@ from backend.models.analytics import (
     SummaryResponse,
 )
 from backend.models.common import OkResponse
+from backend.utils.bounded_cache import BoundedTTLCache
 from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry
 from backend.utils.router_utils import (
     make_error,
@@ -68,18 +69,22 @@ def _ensure_enabled() -> None:
 
 _CANCEL_RATE_PER_SEC = 10
 _CANCEL_WINDOW_S = 1.0
-_cancel_history: dict[str, deque[float]] = {}
+_cancel_history: BoundedTTLCache = BoundedTTLCache(maxsize=1024, ttl_seconds=60.0)
 
 
 def _check_cancel_rate(admin_id: str) -> bool:
     now = time.monotonic()
-    history = _cancel_history.setdefault(admin_id, deque(maxlen=_CANCEL_RATE_PER_SEC * 2))
+    history: deque[float] | None = _cancel_history.get(admin_id)
+    if history is None:
+        history = deque(maxlen=_CANCEL_RATE_PER_SEC * 2)
     cutoff = now - _CANCEL_WINDOW_S
     while history and history[0] < cutoff:
         history.popleft()
     if len(history) >= _CANCEL_RATE_PER_SEC:
+        _cancel_history[admin_id] = history
         return False
     history.append(now)
+    _cancel_history[admin_id] = history
     return True
 
 

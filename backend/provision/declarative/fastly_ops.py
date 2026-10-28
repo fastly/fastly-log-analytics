@@ -43,46 +43,57 @@ def upload_rum_tracker_js(*args: Any, **kwargs: Any) -> dict[str, Any]:
 
 
 class FileLock:
-    """Simple file-based lock for concurrency control."""
+    """File-based lock for concurrency control backed by ``filelock.SoftFileLock``."""
 
-    def __init__(self, lock_path: Path) -> None:
+    def __init__(self, lock_path: Path, _lock: Any | None = None) -> None:
         self.lock_path = lock_path
+        self._lock = _lock
 
     def __enter__(self) -> FileLock:
         return self
 
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
-        if self.lock_path.exists():
-            self.lock_path.unlink()
+        from contextlib import suppress
+
+        if self._lock is not None:
+            with suppress(OSError):
+                self._lock.release()
+        with suppress(OSError):
+            if self.lock_path.exists():
+                self.lock_path.unlink()
 
 
 def acquire_vcl_lock(service_id: str, timeout_sec: int = 300) -> FileLock:
     """Acquire a file-based lock for reconciliation."""
     from contextlib import suppress
 
+    from filelock import SoftFileLock
+    from filelock import Timeout as _FileLockTimeout
     from tenacity import Retrying, retry_if_exception_type, wait_exponential
 
     lock_path = Path(f"data/services/{service_id}.vcl.lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
+    stale_seconds = float(os.getenv("FASTLY_VCL_LOCK_STALE_SECONDS", "300"))
+    flock = SoftFileLock(str(lock_path), thread_local=False)
     start = time.time()
     for attempt in Retrying(
         wait=wait_exponential(multiplier=0.1, exp_base=1.5, min=0.1, max=1.0),
-        retry=retry_if_exception_type(FileExistsError),
-        sleep=time.sleep,
+        retry=retry_if_exception_type(_FileLockTimeout),
+        sleep=lambda s: time.sleep(s),
         reraise=True,
     ):
         with attempt:
+            with suppress(FileNotFoundError, OSError):
+                if time.time() - lock_path.stat().st_mtime > stale_seconds:
+                    lock_path.unlink(missing_ok=True)
             try:
-                fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-                os.write(fd, f"{os.getpid()} {int(time.time())}".encode())
-                os.close(fd)
-                return FileLock(lock_path)
-            except FileExistsError:
+                flock.acquire(timeout=0)
+                with suppress(OSError):
+                    lock_path.write_text(f"{os.getpid()} {int(time.time())}")
+                return FileLock(lock_path, _lock=flock)
+            except _FileLockTimeout:
                 if (elapsed := time.time() - start) > timeout_sec:
-                    raise LockAcquisitionTimeout(service_id, elapsed)
-                with suppress(FileNotFoundError):
-                    if time.time() - lock_path.stat().st_mtime > 300:
-                        lock_path.unlink(missing_ok=True)
+                    raise LockAcquisitionTimeout(service_id, elapsed) from None
                 raise
     raise LockAcquisitionTimeout(service_id, time.time() - start)
 
