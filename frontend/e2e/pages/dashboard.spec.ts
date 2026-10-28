@@ -298,7 +298,7 @@ test.describe('Usage & Cost Estimator Page Contract (/usage)', () => {
   test('4. Core stat cards, charts, Cost Estimator, and Billing Zone switching', async ({ page }) => {
     await gotoHeading(page, '/usage', 'System Usage')
     for (const label of ['Storage Impact (Period)', 'Class A Ops (period)', 'Class B Ops (period)', 'Estimated Incurred Cost', 'FOS Operations', 'CDN Bandwidth', 'Estimated Cost', 'Log Activity (Processed)', 'Cost Estimator']) {
-      await expect(page.getByText(label)).toBeVisible({ timeout: 15_000 })
+      await expect(page.getByRole('main').getByText(label)).toBeVisible({ timeout: 15_000 })
     }
     await page.getByText('Cost Estimator').scrollIntoViewIfNeeded()
     for (const [zone, rate] of [['MBZ100', '$0.08 / GB'], ['Global', '$0.18 / GB'], ['MBZ200', '$0.12 / GB']] as const) {
