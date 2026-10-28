@@ -2,7 +2,7 @@
 
 import * as React from "react"
 import { z } from "zod"
-import { getCoreRowModel, useReactTable, type ColumnDef } from "@tanstack/react-table"
+import { flexRender, getCoreRowModel, useReactTable, type ColumnDef } from "@tanstack/react-table"
 import { QRCodeCanvas } from "qrcode.react"
 import { Check, Copy, Eye, EyeOff, KeyRound, Loader2, Pencil, Plus, QrCode, Trash2 } from "lucide-react"
 
@@ -176,17 +176,222 @@ export function InvitationsPanel({ status, onRefresh, onError, onViewAuditLogs }
     void copy(buildShareCard(invite, status?.public_url ?? null, services))
   }
 
-  const inviteColumns = React.useMemo<ColumnDef<Invite>[]>(
-    () => [
-      { id: 'name', cell: ({ row }) => row.original.name },
-      { id: 'email', cell: ({ row }) => row.original.email },
-      { id: 'last_login_at', cell: ({ row }) => row.original.last_login_at },
-      { id: 'services', cell: ({ row }) => row.original.service_ids },
-      { id: 'expires_at', cell: ({ row }) => row.original.expires_at },
-      { id: 'actions', cell: ({ row }) => row.original.id },
-    ],
-    [],
-  )
+  const inviteColumns: ColumnDef<Invite>[] = [
+    {
+      id: 'name',
+      cell: ({ row }) => {
+        const invite = row.original
+        const online = onlineInviteIds.has(invite.id)
+        return (
+          <>
+            <div className="flex items-center gap-1.5">
+              {online && (
+                <span
+                  className="h-2 w-2 rounded-full bg-emerald-500 shrink-0 animate-pulse"
+                  role="img"
+                  title="Online now (has an active session)"
+                  aria-label="Online now"
+                />
+              )}
+              <span>{invite.name}</span>
+              <Badge
+                variant="outline"
+                className="text-[10px] font-normal"
+                title={invite.auth_method === 'oauth' ? 'Signs in via SSO / OIDC' : 'Signs in with a passcode'}
+              >
+                {invite.auth_method === 'oauth'
+                  ? `SSO${invite.oauth_provider ? ` · ${invite.oauth_provider}` : ''}`
+                  : 'Passcode'}
+              </Badge>
+              {invite.allow_concurrent_sessions && (
+                <Badge variant="outline" className="text-[10px] font-normal" title="Multiple people can use this link at the same time">
+                  Shared
+                </Badge>
+              )}
+            </div>
+            {onViewAuditLogs && (
+              <button
+                type="button"
+                onClick={() => onViewAuditLogs(invite.email)}
+                aria-label={`View audit logs for ${invite.email}`}
+                className="text-[10px] text-primary hover:underline block mt-0.5 text-left font-normal"
+              >
+                view audit logs
+              </button>
+            )}
+          </>
+        )
+      },
+    },
+    {
+      id: 'email',
+      cell: ({ row }) => row.original.email,
+    },
+    {
+      id: 'last_login_at',
+      cell: ({ row }) =>
+        row.original.last_login_at ? (
+          formatDeterministicUTC(row.original.last_login_at)
+        ) : (
+          <span className="text-muted-foreground">Never</span>
+        ),
+    },
+    {
+      id: 'services',
+      cell: ({ row }) => (
+        <div className="flex flex-col gap-1 items-start">
+          {(row.original.service_ids || []).map((s: string) => {
+            const nm = svcNameById.get(s)
+            return (
+              <Badge key={s} variant="secondary" className="text-[10px]" title={nm ? `${nm} (${s})` : s}>
+                {nm ? (
+                  <>
+                    {nm} <span className="opacity-60">({s})</span>
+                  </>
+                ) : (
+                  s
+                )}
+              </Badge>
+            )
+          })}
+        </div>
+      ),
+    },
+    {
+      id: 'expires_at',
+      cell: ({ row }) => formatDeterministicUTC(row.original.expires_at),
+    },
+    {
+      id: 'actions',
+      cell: ({ row }) => {
+        const invite = row.original
+        return (
+          <>
+            <Button size="sm" variant="ghost" onClick={() => handleCopyShareCard(invite)} title="Copy share card">
+              {copied && lastCopiedInviteId === invite.id ? <Check className="h-3 w-3 text-emerald-500" /> : <Copy className="h-3 w-3" />}
+            </Button>
+            <Popover open={qrInviteId === invite.id} onOpenChange={(o) => setQrInviteId(o ? invite.id : null)}>
+              <PopoverTrigger
+                render={(props: React.ComponentPropsWithRef<'button'>) => (
+                  <Button {...props} size="sm" variant="ghost" title="QR code" disabled={!status?.public_url}>
+                    <QrCode className="h-3 w-3" />
+                  </Button>
+                )}
+              />
+              <PopoverContent className="w-56 items-center text-center">
+                <div className="text-xs font-semibold">{invite.name || invite.email}</div>
+                {status?.public_url ? (
+                  <>
+                    <QRCodeCanvas value={`${status.public_url}/share-login`} size={180} className="mx-auto" aria-label={`QR code for ${invite.email}`} />
+                    <div className="text-[10px] text-muted-foreground break-all font-mono">{status.public_url}/share-login</div>
+                  </>
+                ) : (
+                  <div className="text-xs text-muted-foreground">Start sharing to generate a QR.</div>
+                )}
+              </PopoverContent>
+            </Popover>
+            <Popover open={editingServicesFor === invite.id} onOpenChange={(o) => (o ? openEditServices(invite) : setEditingServicesFor(null))}>
+              <PopoverTrigger
+                render={(props: React.ComponentPropsWithRef<'button'>) => (
+                  <Button {...props} size="sm" variant="ghost" title="Edit invite (services, privacy, shared logins)">
+                    <Pencil className="h-3 w-3" />
+                  </Button>
+                )}
+              />
+              <PopoverContent className="w-72">
+                <div className="text-xs font-semibold mb-1">Authorized services</div>
+                <div className="space-y-1 max-h-48 overflow-y-auto">
+                  {services.map((svc) => {
+                    const checked = editingServicesDraft.includes(svc.service_id)
+                    return (
+                      <label key={svc.service_id} className="flex items-center gap-2 text-sm cursor-pointer">
+                        <Checkbox
+                          checked={checked}
+                          onCheckedChange={(v) =>
+                            setEditingServicesDraft((prev) =>
+                              v ? [...prev, svc.service_id] : prev.filter((id) => id !== svc.service_id),
+                            )
+                          }
+                        />
+                        <span className="truncate">{svc.name}</span>
+                      </label>
+                    )
+                  })}
+                  {!services.length && <p className="text-xs text-muted-foreground">No services available.</p>}
+                </div>
+                <label className="flex items-center gap-2 text-sm cursor-pointer pt-2 mt-2 border-t">
+                  <Checkbox checked={editingMaskIps} onCheckedChange={(v) => setEditingMaskIps(!!v)} />
+                  <span>Anonymize client IPs (mask PII)</span>
+                </label>
+                <label className="flex items-center gap-2 text-sm cursor-pointer pt-2 mt-2 border-t">
+                  <Checkbox checked={editingAllowConcurrent} onCheckedChange={(v) => setEditingAllowConcurrent(!!v)} />
+                  <span>Allow shared logins (multiple people at once)</span>
+                </label>
+                <div className="flex justify-end gap-1 pt-2 border-t">
+                  <Button size="sm" variant="ghost" onClick={() => setEditingServicesFor(null)} disabled={savingServices}>
+                    Cancel
+                  </Button>
+                  <Button size="sm" onClick={() => handleSaveServices(invite.id)} disabled={savingServices}>
+                    {savingServices && <Loader2 className="h-3 w-3 mr-1 animate-spin" />}
+                    Save
+                  </Button>
+                </div>
+              </PopoverContent>
+            </Popover>
+            {invite.auth_method !== 'oauth' && (
+              <Popover open={editingPasscodeFor === invite.id} onOpenChange={(o) => (o ? openEditPasscode(invite) : setEditingPasscodeFor(null))}>
+                <PopoverTrigger
+                  render={(props: React.ComponentPropsWithRef<'button'>) => (
+                    <Button {...props} size="sm" variant="ghost" title="Update passcode (re-send share card afterwards)">
+                      {passcodeSavedFor === invite.id ? <Check className="h-3 w-3 text-emerald-500" /> : <KeyRound className="h-3 w-3" />}
+                    </Button>
+                  )}
+                />
+                <PopoverContent className="w-72">
+                  <div className="text-xs font-semibold mb-1">New passcode</div>
+                  <div className="text-[10px] text-muted-foreground mb-2">
+                    Sessions using the old passcode keep working until they expire — but new logins will need the new one.
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <input
+                      type={passcodeVisible ? 'text' : 'password'}
+                      className="flex h-8 w-full rounded border border-input bg-background px-2 py-1 text-xs"
+                      value={passcodeDraft}
+                      onChange={(e) => { setPasscodeDraft(e.target.value); setPasscodeError(null) }}
+                      placeholder="e.g. ocean-breeze-cabin-42"
+                      autoFocus
+                    />
+                    <Button size="sm" variant="ghost" type="button" onClick={() => setPasscodeVisible((v) => !v)} title={passcodeVisible ? 'Hide' : 'Show'}>
+                      {passcodeVisible ? <EyeOff className="h-3 w-3" /> : <Eye className="h-3 w-3" />}
+                    </Button>
+                  </div>
+                  {passcodeError && <div className="text-[11px] text-destructive pt-1">{passcodeError}</div>}
+                  <div className="flex justify-end gap-1 pt-2 border-t mt-2">
+                    <Button size="sm" variant="ghost" onClick={() => setEditingPasscodeFor(null)} disabled={savingPasscode}>
+                      Cancel
+                    </Button>
+                    <Button size="sm" onClick={() => handleSavePasscode(invite.id)} disabled={savingPasscode || !passcodeDraft}>
+                      {savingPasscode && <Loader2 className="h-3 w-3 mr-1 animate-spin" />}
+                      Save
+                    </Button>
+                  </div>
+                </PopoverContent>
+              </Popover>
+            )}
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => handleRevokeInvite(invite.id)}
+              disabled={busy}
+              title="Delete invite (boots any active sessions)"
+            >
+              <Trash2 className="h-3 w-3 text-destructive" />
+            </Button>
+          </>
+        )
+      },
+    },
+  ]
   const inviteTable = useReactTable({ data: sorted, columns: inviteColumns, getCoreRowModel: getCoreRowModel() })
 
   return (
@@ -211,190 +416,27 @@ export function InvitationsPanel({ status, onRefresh, onError, onViewAuditLogs }
           </TableRow>
         </TableHeader>
         <TableBody>
-          {inviteTable.getRowModel().rows.map((tableRow) => {
-            const invite = tableRow.original
-            const online = onlineInviteIds.has(invite.id)
-            return (
-              <TableRow key={invite.id}>
-                <TableCell className="font-medium">
-                  <div className="flex items-center gap-1.5">
-                    {online && (
-                      <span
-                        className="h-2 w-2 rounded-full bg-emerald-500 shrink-0 animate-pulse"
-                        role="img"
-                        title="Online now (has an active session)"
-                        aria-label="Online now"
-                      />
-                    )}
-                    <span>{invite.name}</span>
-                    <Badge
-                      variant="outline"
-                      className="text-[10px] font-normal"
-                      title={invite.auth_method === 'oauth' ? 'Signs in via SSO / OIDC' : 'Signs in with a passcode'}
-                    >
-                      {invite.auth_method === 'oauth'
-                        ? `SSO${invite.oauth_provider ? ` · ${invite.oauth_provider}` : ''}`
-                        : 'Passcode'}
-                    </Badge>
-                    {invite.allow_concurrent_sessions && (
-                      <Badge variant="outline" className="text-[10px] font-normal" title="Multiple people can use this link at the same time">
-                        Shared
-                      </Badge>
-                    )}
-                  </div>
-                  {onViewAuditLogs && (
-                    <button
-                      type="button"
-                      onClick={() => onViewAuditLogs(invite.email)}
-                      aria-label={`View audit logs for ${invite.email}`}
-                      className="text-[10px] text-primary hover:underline block mt-0.5 text-left font-normal"
-                    >
-                      view audit logs
-                    </button>
-                  )}
-                </TableCell>
-                <TableCell className="text-xs">{invite.email}</TableCell>
-                <TableCell className="text-xs whitespace-nowrap">
-                  {invite.last_login_at ? formatDeterministicUTC(invite.last_login_at) : <span className="text-muted-foreground">Never</span>}
-                </TableCell>
-                <TableCell className="text-xs">
-                  <div className="flex flex-col gap-1 items-start">
-                    {(invite.service_ids || []).map((s: string) => {
-                      const nm = svcNameById.get(s)
-                      return (
-                        <Badge key={s} variant="secondary" className="text-[10px]" title={nm ? `${nm} (${s})` : s}>
-                          {nm ? <>{nm} <span className="opacity-60">({s})</span></> : s}
-                        </Badge>
-                      )
-                    })}
-                  </div>
-                </TableCell>
-                <TableCell className="text-xs">{formatDeterministicUTC(invite.expires_at)}</TableCell>
-                <TableCell className="text-right space-x-1">
-                  <Button size="sm" variant="ghost" onClick={() => handleCopyShareCard(invite)} title="Copy share card">
-                    {copied && lastCopiedInviteId === invite.id ? <Check className="h-3 w-3 text-emerald-500" /> : <Copy className="h-3 w-3" />}
-                  </Button>
-                  <Popover open={qrInviteId === invite.id} onOpenChange={(o) => setQrInviteId(o ? invite.id : null)}>
-                    <PopoverTrigger
-                      render={(props: React.ComponentPropsWithRef<'button'>) => (
-                        <Button {...props} size="sm" variant="ghost" title="QR code" disabled={!status?.public_url}>
-                          <QrCode className="h-3 w-3" />
-                        </Button>
-                      )}
-                    />
-                    <PopoverContent className="w-56 items-center text-center">
-                      <div className="text-xs font-semibold">{invite.name || invite.email}</div>
-                      {status?.public_url ? (
-                        <>
-                          <QRCodeCanvas value={`${status.public_url}/share-login`} size={180} className="mx-auto" aria-label={`QR code for ${invite.email}`} />
-                          <div className="text-[10px] text-muted-foreground break-all font-mono">{status.public_url}/share-login</div>
-                        </>
-                      ) : (
-                        <div className="text-xs text-muted-foreground">Start sharing to generate a QR.</div>
-                      )}
-                    </PopoverContent>
-                  </Popover>
-                  <Popover open={editingServicesFor === invite.id} onOpenChange={(o) => (o ? openEditServices(invite) : setEditingServicesFor(null))}>
-                    <PopoverTrigger
-                      render={(props: React.ComponentPropsWithRef<'button'>) => (
-                        <Button {...props} size="sm" variant="ghost" title="Edit invite (services, privacy, shared logins)">
-                          <Pencil className="h-3 w-3" />
-                        </Button>
-                      )}
-                    />
-                    <PopoverContent className="w-72">
-                      <div className="text-xs font-semibold mb-1">Authorized services</div>
-                      <div className="space-y-1 max-h-48 overflow-y-auto">
-                        {services.map((svc) => {
-                          const checked = editingServicesDraft.includes(svc.service_id)
-                          return (
-                            <label key={svc.service_id} className="flex items-center gap-2 text-sm cursor-pointer">
-                              <Checkbox
-                                checked={checked}
-                                onCheckedChange={(v) =>
-                                  setEditingServicesDraft((prev) =>
-                                    v ? [...prev, svc.service_id] : prev.filter((id) => id !== svc.service_id),
-                                  )
-                                }
-                              />
-                              <span className="truncate">{svc.name}</span>
-                            </label>
-                          )
-                        })}
-                        {!services.length && <p className="text-xs text-muted-foreground">No services available.</p>}
-                      </div>
-                      <label className="flex items-center gap-2 text-sm cursor-pointer pt-2 mt-2 border-t">
-                        <Checkbox checked={editingMaskIps} onCheckedChange={(v) => setEditingMaskIps(!!v)} />
-                        <span>Anonymize client IPs (mask PII)</span>
-                      </label>
-                      <label className="flex items-center gap-2 text-sm cursor-pointer pt-2 mt-2 border-t">
-                        <Checkbox checked={editingAllowConcurrent} onCheckedChange={(v) => setEditingAllowConcurrent(!!v)} />
-                        <span>Allow shared logins (multiple people at once)</span>
-                      </label>
-                      <div className="flex justify-end gap-1 pt-2 border-t">
-                        <Button size="sm" variant="ghost" onClick={() => setEditingServicesFor(null)} disabled={savingServices}>
-                          Cancel
-                        </Button>
-                        <Button size="sm" onClick={() => handleSaveServices(invite.id)} disabled={savingServices}>
-                          {savingServices && <Loader2 className="h-3 w-3 mr-1 animate-spin" />}
-                          Save
-                        </Button>
-                      </div>
-                    </PopoverContent>
-                  </Popover>
-                  {invite.auth_method !== 'oauth' && (
-                    <Popover open={editingPasscodeFor === invite.id} onOpenChange={(o) => (o ? openEditPasscode(invite) : setEditingPasscodeFor(null))}>
-                      <PopoverTrigger
-                        render={(props: React.ComponentPropsWithRef<'button'>) => (
-                          <Button {...props} size="sm" variant="ghost" title="Update passcode (re-send share card afterwards)">
-                            {passcodeSavedFor === invite.id ? <Check className="h-3 w-3 text-emerald-500" /> : <KeyRound className="h-3 w-3" />}
-                          </Button>
-                        )}
-                      />
-                      <PopoverContent className="w-72">
-                        <div className="text-xs font-semibold mb-1">New passcode</div>
-                        <div className="text-[10px] text-muted-foreground mb-2">
-                          Sessions using the old passcode keep working until they expire — but new logins will need the new one.
-                        </div>
-                        <div className="flex items-center gap-1">
-                          <input
-                            type={passcodeVisible ? 'text' : 'password'}
-                            className="flex h-8 w-full rounded border border-input bg-background px-2 py-1 text-xs"
-                            value={passcodeDraft}
-                            onChange={(e) => { setPasscodeDraft(e.target.value); setPasscodeError(null) }}
-                            placeholder="e.g. ocean-breeze-cabin-42"
-                            autoFocus
-                          />
-                          <Button size="sm" variant="ghost" type="button" onClick={() => setPasscodeVisible((v) => !v)} title={passcodeVisible ? 'Hide' : 'Show'}>
-                            {passcodeVisible ? <EyeOff className="h-3 w-3" /> : <Eye className="h-3 w-3" />}
-                          </Button>
-                        </div>
-                        {passcodeError && <div className="text-[11px] text-destructive pt-1">{passcodeError}</div>}
-                        <div className="flex justify-end gap-1 pt-2 border-t mt-2">
-                          <Button size="sm" variant="ghost" onClick={() => setEditingPasscodeFor(null)} disabled={savingPasscode}>
-                            Cancel
-                          </Button>
-                          <Button size="sm" onClick={() => handleSavePasscode(invite.id)} disabled={savingPasscode || !passcodeDraft}>
-                            {savingPasscode && <Loader2 className="h-3 w-3 mr-1 animate-spin" />}
-                            Save
-                          </Button>
-                        </div>
-                      </PopoverContent>
-                    </Popover>
-                  )}
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={() => handleRevokeInvite(invite.id)}
-                    disabled={busy}
-                    title="Delete invite (boots any active sessions)"
-                  >
-                    <Trash2 className="h-3 w-3 text-destructive" />
-                  </Button>
-                </TableCell>
-              </TableRow>
-            )
-          })}
+          {inviteTable.getRowModel().rows.map((tableRow) => (
+            <TableRow key={tableRow.original.id}>
+              {tableRow.getVisibleCells().map((cell) => {
+                const cellClass =
+                  cell.column.id === 'name'
+                    ? 'font-medium'
+                    : cell.column.id === 'last_login_at'
+                      ? 'text-xs whitespace-nowrap'
+                      : cell.column.id === 'actions'
+                        ? 'text-right space-x-1'
+                        : 'text-xs'
+                return (
+                  <TableCell key={cell.id} className={cellClass}>
+                    {typeof cell.column.columnDef.cell === 'function'
+                      ? cell.column.columnDef.cell(cell.getContext())
+                      : flexRender(cell.column.columnDef.cell, cell.getContext())}
+                  </TableCell>
+                )
+              })}
+            </TableRow>
+          ))}
           {!invites.length && (
             <TableRow>
               <TableCell colSpan={6} className="text-center text-xs text-muted-foreground">No invitations yet.</TableCell>

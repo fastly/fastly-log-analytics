@@ -451,15 +451,15 @@ start_container_log_tailers() {
   ( sleep 5; while true; do "${GCE_SSH[@]}" --command "cd ~/app && docker compose logs -f --tail=0 frontend" >> "${REPORT_DIR}/logs/remote_std_frontend.log" 2>&1 || true; sleep 2; done ) &
   export REMOTE_STD_FRONTEND_BG_PID=$!
   echo "=== Remote High-Scale (Elevation) Container Logs Started ===" > "${REPORT_DIR}/logs/remote_hs_backend.log"
-  ( sleep 10; last_pod=""; while true; do
+  ( sleep 10; while true; do
       pod="$(kubectl get pods -n "$K8S_NAMESPACE" -l app.kubernetes.io/component=backend -o jsonpath='{.items[?(@.status.phase=="Running")].metadata.name}' 2>/dev/null | awk '{print $1}')"
-      if [[ -n "$pod" && "$pod" != "$last_pod" ]]; then last_pod="$pod"; kubectl logs -f --tail=0 "$pod" -n "$K8S_NAMESPACE" -c backend >> "${REPORT_DIR}/logs/remote_hs_backend.log" 2>&1 || true; else sleep 2; fi
+      if [[ -n "$pod" ]]; then kubectl logs -f --tail=0 "$pod" -n "$K8S_NAMESPACE" -c backend >> "${REPORT_DIR}/logs/remote_hs_backend.log" 2>&1 || true; sleep 1; else sleep 2; fi
     done ) &
   export REMOTE_HS_BG_PID=$!
   echo "=== Remote High-Scale (Elevation) Frontend Logs Started ===" > "${REPORT_DIR}/logs/remote_hs_frontend.log"
-  ( sleep 10; last_pod=""; while true; do
+  ( sleep 10; while true; do
       pod="$(kubectl get pods -n "$K8S_NAMESPACE" -l app.kubernetes.io/component=frontend -o jsonpath='{.items[?(@.status.phase=="Running")].metadata.name}' 2>/dev/null | awk '{print $1}')"
-      if [[ -n "$pod" && "$pod" != "$last_pod" ]]; then last_pod="$pod"; kubectl logs -f --tail=0 "$pod" -n "$K8S_NAMESPACE" >> "${REPORT_DIR}/logs/remote_hs_frontend.log" 2>&1 || true; else sleep 2; fi
+      if [[ -n "$pod" ]]; then kubectl logs -f --tail=0 "$pod" -n "$K8S_NAMESPACE" >> "${REPORT_DIR}/logs/remote_hs_frontend.log" 2>&1 || true; sleep 1; else sleep 2; fi
     done ) &
   export REMOTE_HS_FRONTEND_BG_PID=$!
 }
@@ -481,8 +481,8 @@ start_log_monitor() {
     docker compose logs -f --tail=0 caddy 2>/dev/null | grep --line-buffered -E -i "error|exception|traceback|failed|unauthorized|warn|fatal|critical" | grep --line-buffered -v -E -i "context canceled|incomplete response|use of closed network connection" | sed -u 's/^/[Local Standard\/caddy] /' | tee -a "${REPORT_DIR}/logs/monitored_errors.log" >> "$LOG_MONITOR_TEMP" &
     tail -f -n +1 "${REPORT_DIR}/logs/remote_std_backend.log" 2>/dev/null | grep --line-buffered -E -i "error|exception|traceback|failed|unauthorized|warn|fatal|critical" | grep --line-buffered -v -E -i "control-room/error-stream|/rum/errors|telemetry-proxy|SSR upstream timeout|['\"]errors['\"]:[[:space:]]*0|snapshot-id probe failed|lake not attached|and [0-9]+ errors files|metadata pointer unreadable for .*client_errors|enrich_batch complete|REFUSING .*rollback|already running for this service|legacy adoption FAILED" | sed -u 's/^/[Remote Standard\/backend] /' | tee -a "${REPORT_DIR}/logs/monitored_errors.log" >> "$LOG_MONITOR_TEMP" &
     tail -f -n +1 "${REPORT_DIR}/logs/remote_std_frontend.log" 2>/dev/null | grep --line-buffered -E -i "error|exception|traceback|failed|unauthorized|warn|fatal|critical" | grep --line-buffered -v -E -i "ECONNREFUSED 127.0.0.1:8000|SSR upstream timeout|fetch failed; falling back to client fetch" | sed -u 's/^/[Remote Standard\/frontend] /' | tee -a "${REPORT_DIR}/logs/monitored_errors.log" >> "$LOG_MONITOR_TEMP" &
-    tail -f -n +1 "${REPORT_DIR}/logs/remote_hs_backend.log" 2>/dev/null | grep --line-buffered -E -i "error|exception|traceback|failed|unauthorized|warn|fatal|critical" | grep --line-buffered -v -E -i "control-room/error-stream|/rum/errors|telemetry-proxy|SSR upstream timeout|snapshot-id probe failed|lake not attached|and [0-9]+ errors files|metadata pointer unreadable for .*client_errors|enrich_batch complete|REFUSING .*rollback|clickhouse.operation.*status_code=404|subscription to .* lost.*reconnecting|already running for this service|read tcp .* connection reset by peer" | sed -u 's/^/[Remote High-Scale\/backend] /' | tee -a "${REPORT_DIR}/logs/monitored_errors.log" >> "$LOG_MONITOR_TEMP" &
-    tail -f -n +1 "${REPORT_DIR}/logs/remote_hs_frontend.log" 2>/dev/null | grep --line-buffered -E -i "error|exception|traceback|failed|unauthorized|warn|fatal|critical" | grep --line-buffered -v -E -i "ECONNREFUSED 127.0.0.1:8000|socket hang up|SSR upstream timeout|fetch failed; falling back to client fetch|read tcp .* connection reset by peer" | sed -u 's/^/[Remote High-Scale\/frontend] /' | tee -a "${REPORT_DIR}/logs/monitored_errors.log" >> "$LOG_MONITOR_TEMP" &
+    tail -f -n +1 "${REPORT_DIR}/logs/remote_hs_backend.log" 2>/dev/null | grep --line-buffered -E -i "error|exception|traceback|failed|unauthorized|warn|fatal|critical" | grep --line-buffered -v -E -i "control-room/error-stream|/rum/errors|telemetry-proxy|SSR upstream timeout|snapshot-id probe failed|lake not attached|and [0-9]+ errors files|metadata pointer unreadable for .*client_errors|enrich_batch complete|REFUSING .*rollback|clickhouse.operation.*status_code=404|subscription to .* lost.*reconnecting|already running for this service|read tcp .* connection reset by peer|http2: client connection lost" | sed -u 's/^/[Remote High-Scale\/backend] /' | tee -a "${REPORT_DIR}/logs/monitored_errors.log" >> "$LOG_MONITOR_TEMP" &
+    tail -f -n +1 "${REPORT_DIR}/logs/remote_hs_frontend.log" 2>/dev/null | grep --line-buffered -E -i "error|exception|traceback|failed|unauthorized|warn|fatal|critical" | grep --line-buffered -v -E -i "ECONNREFUSED 127.0.0.1:8000|socket hang up|SSR upstream timeout|fetch failed; falling back to client fetch|read tcp .* connection reset by peer|http2: client connection lost" | sed -u 's/^/[Remote High-Scale\/frontend] /' | tee -a "${REPORT_DIR}/logs/monitored_errors.log" >> "$LOG_MONITOR_TEMP" &
     while true; do sleep 1; done
   ) &
   export MONITOR_BG_PID=$!

@@ -2,6 +2,7 @@
 
 import React, { useEffect, useRef } from 'react'
 import { Database, RefreshCw, Loader2, ChevronDown, X } from 'lucide-react'
+import { useVirtualizer } from '@tanstack/react-virtual'
 import { cn } from '@/lib/utils'
 import { useSSE, useDateFormat } from '@/hooks/useSSE'
 import type { CronRun } from './useLogsPageState'
@@ -46,6 +47,13 @@ export function CronLiveLog({
   }, [status, onDone, runId])
 
   const recentLines = singleLine ? lines.slice(-1) : terminalMode ? lines : lines.slice(-2)
+  const scrollParentRef = useRef<HTMLDivElement>(null)
+  const rowVirtualizer = useVirtualizer({
+    count: terminalMode && !singleLine ? recentLines.length : 0,
+    getScrollElement: () => scrollParentRef.current,
+    estimateSize: () => 22,
+    overscan: 20,
+  })
   const renderLine = (line: (typeof lines)[number], truncateAt80: boolean) => {
     let text =
       (line.message as string) ||
@@ -131,15 +139,20 @@ export function CronLiveLog({
     )
   }
 
+  const virtualItems = terminalMode ? rowVirtualizer.getVirtualItems() : []
+  const displayLines =
+    virtualItems.length > 0 ? virtualItems.map((v) => ({ line: recentLines[v.index], index: v.index })) : recentLines.map((line, index) => ({ line, index }))
+
   return (
     <div
+      ref={scrollParentRef}
       role="log"
       aria-live="polite"
       aria-atomic="false"
       aria-label={terminalMode ? 'Cron job output stream' : 'Recent cron output'}
       className={
         terminalMode
-          ? 'flex flex-col gap-1.5 w-full font-mono text-xs leading-relaxed text-zinc-200'
+          ? 'flex flex-col gap-1.5 w-full font-mono text-xs leading-relaxed text-zinc-200 max-h-[360px] overflow-y-auto'
           : 'flex flex-col gap-0.5 mt-1.5 bg-background/50 border border-border/50 p-2 rounded text-[10px] font-mono text-muted-foreground w-[280px] max-w-sm overflow-hidden'
       }
     >
@@ -148,7 +161,7 @@ export function CronLiveLog({
           [SESSION INITIATED AT: {full(startedAt)} {abbr()}]
         </div>
       )}
-      {recentLines.map((line, i) => {
+      {displayLines.map(({ line, index: i }) => {
         const { text, node } = renderLine(line, false)
         return (
           <div

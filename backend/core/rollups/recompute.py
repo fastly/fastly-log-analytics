@@ -657,6 +657,18 @@ def _run_per_field_copy(
         if cols is None:
             return
 
+        scan_table, scan_where = table_ident, where_sql
+        if not owns_con:
+            from backend.core.rollups.bundle_builder import _SHARED_ROLLUP_SESSION
+
+            session = _SHARED_ROLLUP_SESSION.get()
+            if session is not None and session.source is source:
+                scan_table, scan_where = session.materialize_slice(
+                    table_ident,
+                    where_sql,
+                    logger=logger,
+                )
+
         for field in fields:
             if not _is_safe_ident(field):
                 logger.warning("[rollups] skipping unsafe field name: %r", field)
@@ -673,9 +685,9 @@ def _run_per_field_copy(
             os.makedirs(tmp_field_dir, exist_ok=True)
 
             inner = (
-                _build_virtual_field_copy_query(table_ident, field, backing_col, where_sql)
+                _build_virtual_field_copy_query(scan_table, field, backing_col, scan_where)
                 if backing_col is not None
-                else _build_copy_query(table_ident, field, where_sql)
+                else _build_copy_query(scan_table, field, scan_where)
             )
             query = (
                 f"COPY ({inner}) TO '{tmp_field_dir}' "
@@ -724,6 +736,18 @@ def _run_ip_spread_per_field(
         if cols is None or "ip" not in cols:
             return
 
+        scan_table, scan_where = table_ident, where_sql
+        if not owns_con:
+            from backend.core.rollups.bundle_builder import _SHARED_ROLLUP_SESSION
+
+            session = _SHARED_ROLLUP_SESSION.get()
+            if session is not None and session.source is source:
+                scan_table, scan_where = session.materialize_slice(
+                    table_ident,
+                    where_sql,
+                    logger=logger,
+                )
+
         for field in fields:
             if not _is_safe_ident(field):
                 logger.warning("[rollups] ip_spread: skipping unsafe field name: %r", field)
@@ -731,7 +755,7 @@ def _run_ip_spread_per_field(
             if field in _VIRTUAL_FIELD_BACKING or field not in cols:
                 continue
 
-            select_sql = _build_ip_spread_select_query(table_ident, field, where_sql)
+            select_sql = _build_ip_spread_select_query(scan_table, field, scan_where)
             try:
                 arrow_table = execute_with_stale_view_retry(
                     con, source, lambda c: c.execute(select_sql).to_arrow_table()

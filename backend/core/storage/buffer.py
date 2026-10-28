@@ -253,9 +253,13 @@ def _commit_one_chunk(
 
     with _ducklake_write_connection(source) as con:
 
-        def _commit_paths(paths: list[str]) -> None:
+        def _commit_paths(paths: list[str]) -> int:
             paths_sql = ", ".join(f"'{escape_sql_literal(p)}'" for p in paths)
             scan_sql = f"read_parquet([{paths_sql}], union_by_name=true)"
+            row_count_res = con.execute(
+                f"SELECT COALESCE(SUM(num_rows), 0) FROM parquet_file_metadata([{paths_sql}])"
+            ).fetchone()
+            batch_rows = int(row_count_res[0]) if row_count_res and row_count_res[0] is not None else 0
             con.execute(f"CREATE TABLE IF NOT EXISTS {lake_ident} AS SELECT * FROM {scan_sql} LIMIT 0")
             table_cols: set[str] = set()
             try:
@@ -302,10 +306,10 @@ def _commit_one_chunk(
             except Exception as e:
                 con.execute("ROLLBACK")
                 raise e
+            return batch_rows
 
         try:
-            batch_rows = sum(pq.read_metadata(p).num_rows for p in files)
-            _commit_paths(files)
+            batch_rows = _commit_paths(files)
             rows_committed, committed_paths = batch_rows, list(files)
         except Exception as batch_err:
             logger.warning(

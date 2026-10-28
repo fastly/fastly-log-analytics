@@ -65,6 +65,7 @@ except Exception:
 logger = logging.getLogger("backend.main")
 
 from fastapi import FastAPI  # noqa: E402
+from fastapi.responses import ORJSONResponse  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 
 # ── Path setup ────────────────────────────────────────────────────────────────
@@ -111,6 +112,7 @@ app = FastAPI(
         "Serves the Next.js frontend and exposes an OpenAPI spec at /openapi.json."
     ),
     lifespan=lifespan,
+    default_response_class=ORJSONResponse,
 )
 
 configure_root_system(app)

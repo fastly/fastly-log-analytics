@@ -2197,3 +2197,61 @@ def test_writers_match_golden(tmp_path: Path) -> None:
             )
             diff = "\n".join(list(lines)[:60])
             raise AssertionError(f"phase {name!r} drifted from golden\n{detail}\n{diff}")
+
+
+@pytest.mark.usefixtures("frozen_clock")
+def test_shared_rollup_session_materializes_slice_once_across_per_field_and_ip_spread(
+    tmp_path: Path,
+) -> None:
+    """Inside shared_rollup_session, _run_per_field_copy and _run_ip_spread_per_field
+    materialize the touched-hours slice once into a session temp table and reuse it across
+    all per-field COPY queries instead of rescanning the base logs table 40 times."""
+    cache_root = tmp_path / "cache"
+    cache_root.mkdir()
+    src = {"name": "svc-slice"}
+    _, hour_dt = _past_hour(2)
+    table = "logs_svc_slice"
+
+    con = _make_table_with_rows(table, hour_dt, [("1.1.1.1", "US"), ("2.2.2.2", "JP")])
+    where_sql = (
+        f"timestamp >= '{(hour_dt - timedelta(minutes=1)).isoformat()}' "
+        f"AND timestamp < '{(hour_dt + timedelta(hours=1)).isoformat()}'"
+    )
+    executed_sql: list[str] = []
+
+    class _SpyCon:
+        def __init__(self, inner: duckdb.DuckDBPyConnection) -> None:
+            self._inner = inner
+
+        def execute(self, sql: str, *args: Any, **kwargs: Any) -> Any:
+            executed_sql.append(sql)
+            return self._inner.execute(sql, *args, **kwargs)
+
+        def close(self) -> None:
+            pass
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self._inner, name)
+
+    spy_con = _SpyCon(con)
+    with (
+        patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
+        patch("backend.core.duckdb.get_connection", return_value=spy_con),
+        patch("backend.core.storage._core._get_service_lock", _noop_lock),
+        patch(
+            "backend.core.storage.execute_with_stale_view_retry",
+            side_effect=lambda c, _src, fn: fn(c),
+        ),
+        rollups.shared_rollup_session(src),
+    ):
+        rollups._run_per_field_copy("svc-slice", src, table, where_sql, ["ip", "country"])
+        rollups.recompute._run_ip_spread_per_field("svc-slice", src, table, where_sql, ["ip", "country"])
+    con.close()
+
+    create_slice_stmts = [s for s in executed_sql if "CREATE OR REPLACE TEMP TABLE _rollup_slice_0" in s]
+    assert len(create_slice_stmts) == 1
+    copy_stmts = [s for s in executed_sql if s.lstrip().startswith("COPY (")]
+    assert len(copy_stmts) == 2
+    assert all("FROM _rollup_slice_0" in s for s in copy_stmts)
+    slice_scans = [s for s in executed_sql if "FROM _rollup_slice_0" in s]
+    assert len(slice_scans) == 4

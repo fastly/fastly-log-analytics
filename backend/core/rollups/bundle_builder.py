@@ -508,12 +508,14 @@ def build_per_hour_bundles(
 
 
 class _SharedRollupSession:
-    """Lazy per-tick cache for the read-only DuckDB connection and DESCRIBE columns."""
+    """Lazy per-tick cache for the read-only DuckDB connection, DESCRIBE columns,
+    and materialized touched-hours temp slices."""
 
     def __init__(self, source: dict[str, Any]) -> None:
         self.source = source
         self.con: duckdb.DuckDBPyConnection | None = None
         self.cols_by_table: dict[str, set[str] | None] = {}
+        self.slices_by_key: dict[tuple[str, str], tuple[str, str]] = {}
 
     def acquire(
         self,
@@ -536,12 +538,50 @@ class _SharedRollupSession:
             )
         return self.con, self.cols_by_table[table_ident]
 
+    def materialize_slice(
+        self,
+        table_ident: str,
+        where_sql: str,
+        *,
+        logger: logging.Logger,
+    ) -> tuple[str, str]:
+        """Materialize ``SELECT * FROM {table_ident} WHERE {where_sql}`` into a
+        session-scoped temp table once so per-field rollup writers scan the
+        in-memory slice instead of re-scanning the underlying view 40×."""
+        key = (table_ident, where_sql)
+        if key in self.slices_by_key:
+            return self.slices_by_key[key]
+        if self.con is None:
+            return table_ident, where_sql
+        from backend.core.storage import execute_with_stale_view_retry
+
+        slice_ident = f"_rollup_slice_{len(self.slices_by_key)}"
+        try:
+            execute_with_stale_view_retry(
+                self.con,
+                self.source,
+                lambda c: c.execute(
+                    f"CREATE OR REPLACE TEMP TABLE {slice_ident} AS SELECT * FROM {table_ident} WHERE {where_sql}"
+                ),
+            )
+            res = (slice_ident, "1=1")
+        except Exception as e:  # noqa: BLE001
+            logger.debug("[rollups] temp slice materialization skipped (%s); scanning %s directly", e, table_ident)
+            res = (table_ident, where_sql)
+        self.slices_by_key[key] = res
+        return res
+
     def close(self) -> None:
         if self.con is not None:
             try:
+                for slice_ident, _ in self.slices_by_key.values():
+                    if slice_ident.startswith("_rollup_slice_"):
+                        with contextlib.suppress(Exception):
+                            self.con.execute(f"DROP TABLE IF EXISTS temp.main.{slice_ident}")
                 self.con.close()
             finally:
                 self.con = None
+                self.slices_by_key.clear()
 
 
 _SHARED_ROLLUP_SESSION: contextvars.ContextVar[_SharedRollupSession | None] = contextvars.ContextVar(

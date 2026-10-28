@@ -28,6 +28,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/comp
 import { DataTableReadonly, ColumnVisibilityDropdown } from '@/components/DataTable'
 import { Input } from '@/components/ui/input'
 import type { ColumnDef } from '@tanstack/react-table'
+import { useVirtualizer } from '@tanstack/react-virtual'
 import type { components } from '@/types/api.generated'
 import type { CronRun } from './useLogsPageState'
 
@@ -464,6 +465,15 @@ function Tree({ prefix, level, type, forceExpand }: TreeProps) {
     },
     enabled: !!activeServiceId,
   })
+  const nodes = data?.nodes ?? []
+  const parentRef = React.useRef<HTMLDivElement>(null)
+  const shouldVirtualize = nodes.length > 50 && forceExpand !== true
+  const rowVirtualizer = useVirtualizer({
+    count: shouldVirtualize ? nodes.length : 0,
+    getScrollElement: () => parentRef.current,
+    estimateSize: () => 36,
+    overscan: 15,
+  })
 
   if (isLoading) {
     return (
@@ -482,16 +492,42 @@ function Tree({ prefix, level, type, forceExpand }: TreeProps) {
       </div>
     )
   }
-  if (data.nodes.length === 0) {
+  if (nodes.length === 0) {
     return (
       <div className="py-2 text-xs text-muted-foreground italic" style={{ paddingLeft: `${level * 16 + 32}px` }}>
         Empty directory
       </div>
     )
   }
+  const virtualItems = shouldVirtualize ? rowVirtualizer.getVirtualItems() : []
+  if (shouldVirtualize && virtualItems.length > 0) {
+    return (
+      <div ref={parentRef} className="max-h-[420px] overflow-y-auto">
+        <div style={{ height: `${rowVirtualizer.getTotalSize()}px`, position: 'relative' }}>
+          {virtualItems.map((vItem) => {
+            const node = nodes[vItem.index]
+            return (
+              <div
+                key={node.name}
+                style={{
+                  position: 'absolute',
+                  top: 0,
+                  left: 0,
+                  width: '100%',
+                  transform: `translateY(${vItem.start}px)`,
+                }}
+              >
+                <Node node={node} prefix={prefix} level={level} type={type} forceExpand={forceExpand} />
+              </div>
+            )
+          })}
+        </div>
+      </div>
+    )
+  }
   return (
-    <div className="flex flex-col">
-      {data.nodes.map((node: TreeNode) => (
+    <div ref={parentRef} className="flex flex-col">
+      {nodes.map((node: TreeNode) => (
         <Node key={node.name} node={node} prefix={prefix} level={level} type={type} forceExpand={forceExpand} />
       ))}
     </div>

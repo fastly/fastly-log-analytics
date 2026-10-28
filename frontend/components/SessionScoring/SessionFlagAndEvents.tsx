@@ -4,6 +4,7 @@ import React from 'react'
 import { useMutation } from '@tanstack/react-query'
 import { Activity, ChevronRight, Flag, Loader2 } from 'lucide-react'
 import { ColumnDef, flexRender, getCoreRowModel, useReactTable } from '@tanstack/react-table'
+import { useVirtualizer } from '@tanstack/react-virtual'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -301,6 +302,22 @@ export function SessionEventsDialog({ serviceId, sid, label, trigger }: SessionE
     columns: EVENT_COLUMNS,
     getCoreRowModel: getCoreRowModel(),
   })
+  const tableRows = eventsTable.getRowModel().rows
+  const scrollParentRef = React.useRef<HTMLDivElement>(null)
+  const rowVirtualizer = useVirtualizer({
+    count: tableRows.length,
+    getScrollElement: () => scrollParentRef.current,
+    estimateSize: () => 56,
+    overscan: 10,
+  })
+  const virtualItems = rowVirtualizer.getVirtualItems()
+  const visibleRows =
+    virtualItems.length > 0 ? virtualItems.map((v) => tableRows[v.index]) : tableRows
+  const paddingTop = virtualItems.length > 0 ? (virtualItems[0]?.start ?? 0) : 0
+  const paddingBottom =
+    virtualItems.length > 0
+      ? rowVirtualizer.getTotalSize() - (virtualItems[virtualItems.length - 1]?.end ?? 0)
+      : 0
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
@@ -341,7 +358,7 @@ export function SessionEventsDialog({ serviceId, sid, label, trigger }: SessionE
             transitions are the ones the matrix flagged as unusual.
           </DialogDescription>
         </DialogHeader>
-        <div className="flex-1 overflow-y-auto -mx-6 px-6">
+        <div ref={scrollParentRef} className="flex-1 overflow-y-auto -mx-6 px-6">
           {isLoading && (
             <div className="space-y-2" role="status" aria-busy="true">
               <span className="sr-only">Loading session events</span>
@@ -368,7 +385,12 @@ export function SessionEventsDialog({ serviceId, sid, label, trigger }: SessionE
               </div>
               <Table className="text-xs">
                 <TableBody>
-                  {eventsTable.getRowModel().rows.map((row) => (
+                  {paddingTop > 0 && (
+                    <TableRow aria-hidden="true">
+                      <TableCell colSpan={EVENT_COLUMNS.length} style={{ height: `${paddingTop}px`, padding: 0 }} />
+                    </TableRow>
+                  )}
+                  {visibleRows.map((row) => (
                     <TableRow key={row.original.key} className="align-top">
                       {row.getVisibleCells().map((cell) => (
                         <TableCell key={cell.id} className="py-2">
@@ -377,6 +399,11 @@ export function SessionEventsDialog({ serviceId, sid, label, trigger }: SessionE
                       ))}
                     </TableRow>
                   ))}
+                  {paddingBottom > 0 && (
+                    <TableRow aria-hidden="true">
+                      <TableCell colSpan={EVENT_COLUMNS.length} style={{ height: `${paddingBottom}px`, padding: 0 }} />
+                    </TableRow>
+                  )}
                 </TableBody>
               </Table>
             </div>
