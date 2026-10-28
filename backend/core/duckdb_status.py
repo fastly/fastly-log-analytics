@@ -762,7 +762,7 @@ def get_asn_names(service_id: str, asns: list) -> dict:
                     host, port = getattr(c, "host", None), getattr(c, "port", None)
                     if isinstance(host, str) and isinstance(port, int):
                         c.socket = sock = socket.create_connection((host, port), timeout=2.0)
-                        c.file = sock.makefile("r", encoding="utf-8", errors="replace")
+                        c.file = sock.makefile("rw", encoding="utf-8", errors="replace")
                     else:
                         orig_connect()
                         sock_obj = getattr(c, "socket", None)
