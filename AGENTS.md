@@ -1329,6 +1329,15 @@ recompute all 24 closed UTC hours from retained events and publish the daily
 replacement only after complete success. Keep intermediate repair outputs away
 from the normal compactor; a failed repair must leave the existing day intact.
 
+Per-field hourly files and all-fields hourly bundles are alternative copies of
+the same `(field, hour)`, not additive inputs. They can coexist during a refresh
+or after cleanup fails. Daily top-N compaction selects the newer complete copy
+by mtime, with the bundle winning ties, rather than summing both. Keep every
+partition of a selected per-field hour. A bundle covers only the fields it
+actually contains; its presence must not discard another field's hourly files.
+The overlap and source-selection regressions live in `tests/core/test_rollups.py`.
+This prevents new double-counting but does not repair previously saved days.
+
 ### 48. A shared `raw/rum/` object belongs to one domain but carries both
 
 High-scale `rum_vitals` and `rum_errors` discovery both list `raw/rum/`. The

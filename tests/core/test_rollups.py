@@ -1502,6 +1502,78 @@ def test_compact_unions_per_field_hour_and_bundled_hour_sources(tmp_path):
     assert _query_mem(f"SELECT value, count FROM read_parquet('{method_day}')") == [("POST", 1000)]
 
 
+@pytest.mark.parametrize("relative_paths", [False, True])
+def test_compact_does_not_count_an_hour_twice_when_both_tiers_exist(tmp_path, monkeypatch, relative_paths):
+    cache_root = tmp_path / "cache-root"
+    cache_root.mkdir()
+    monkeypatch.chdir(tmp_path)
+    rows = [{"field": "country", "value": "US", "count": 3602}]
+    _write_hour_rollup(str(cache_root), "country", "2026-06-04-01", rows)
+    _write_hour_bundle(str(cache_root), "2026-06-04-01", rows)
+    _write_hour_bundle(str(cache_root), "2026-06-04-02", [{"field": "country", "value": "US", "count": 1938}])
+
+    cache_dir = os.path.relpath(cache_root) if relative_paths else str(cache_root)
+    with patch("backend.core.duckdb._cache_dir", return_value=cache_dir):
+        rollups.compact_closed_days_to_daily("svc-compact-overlap", {"name": "svc-compact-overlap"})
+
+    day_file = cache_root / "rollups" / "day" / "field=country" / "day=2026-06-04" / "compacted.parquet"
+    assert _query_mem(f"SELECT value, count FROM read_parquet('{day_file}')") == [("US", 5540)]
+
+
+@pytest.mark.parametrize(
+    ("per_field_mtime", "bundle_mtime", "expected"),
+    [
+        (10, 20, [("DE", 5), ("US", 40)]),
+        (20, 10, [("CA", 20), ("GB", 3), ("US", 50)]),
+        (20, 20, [("DE", 5), ("US", 40)]),
+    ],
+)
+def test_compact_selects_the_newest_complete_field_hour(tmp_path, per_field_mtime, bundle_mtime, expected):
+    cache_root = tmp_path / "cache-root"
+    cache_root.mkdir()
+    per_field = _write_hour_rollup(
+        str(cache_root),
+        "country",
+        "2026-06-04-01",
+        [{"field": "country", "value": "US", "count": 50}, {"field": "country", "value": "CA", "count": 20}],
+    )
+    bundle = _write_hour_bundle(
+        str(cache_root),
+        "2026-06-04-01",
+        [{"field": "country", "value": "US", "count": 40}, {"field": "country", "value": "DE", "count": 5}],
+    )
+    second_part = _write_hour_rollup(
+        str(cache_root), "country", "2026-06-04-01", [{"field": "country", "value": "GB", "count": 3}]
+    )
+    os.utime(per_field, (per_field_mtime, per_field_mtime))
+    os.utime(second_part, (per_field_mtime - 1, per_field_mtime - 1))
+    os.utime(bundle, (bundle_mtime, bundle_mtime))
+
+    with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
+        rollups.compact_closed_days_to_daily("svc-compact-newest", {"name": "svc-compact-newest"})
+
+    day_file = cache_root / "rollups" / "day" / "field=country" / "day=2026-06-04" / "compacted.parquet"
+    assert _query_mem(f"SELECT value, count FROM read_parquet('{day_file}') ORDER BY value") == expected
+
+
+def test_compact_keeps_per_field_hours_absent_from_the_same_hour_bundle(tmp_path):
+    cache_root = tmp_path / "cache-root"
+    cache_root.mkdir()
+    per_field = _write_hour_rollup(
+        str(cache_root), "method", "2026-06-04-01", [{"field": "method", "value": "POST", "count": 500}]
+    )
+    bundle = _write_hour_bundle(str(cache_root), "2026-06-04-01", [{"field": "country", "value": "US", "count": 200}])
+    os.utime(per_field, (10, 10))
+    os.utime(bundle, (20, 20))
+
+    with patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)):
+        rollups.compact_closed_days_to_daily("svc-compact-fields", {"name": "svc-compact-fields"})
+
+    for field, expected in (("method", [("POST", 500)]), ("country", [("US", 200)])):
+        day_file = cache_root / "rollups" / "day" / f"field={field}" / "day=2026-06-04" / "compacted.parquet"
+        assert _query_mem(f"SELECT value, count FROM read_parquet('{day_file}')") == expected
+
+
 def test_backfill_missing_hour_bundles_detects_gaps_via_view(tmp_path, monkeypatch):
     cache_root = tmp_path / "cache-root"
     cache_root.mkdir()

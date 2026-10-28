@@ -324,6 +324,7 @@ def compact_closed_days_to_daily(
     con = get_memory_connection()
     try:
         field_set: set[str] = set()
+        bundle_fields: dict[str, set[str]] = {}
         try:
             for entry in os.listdir(hour_root):
                 if entry.startswith("field="):
@@ -336,11 +337,15 @@ def compact_closed_days_to_daily(
             all_bundle_paths = sorted({p for paths in hour_bundled_by_day.values() for p in paths})
             try:
                 paths_sql = quote_path_list(all_bundle_paths)
-                for (f,) in con.execute(f"SELECT DISTINCT field FROM read_parquet([{paths_sql}])").fetchall():
+                for f, path in con.execute(
+                    f"SELECT DISTINCT field, filename FROM read_parquet([{paths_sql}], filename=1)"
+                ).fetchall():
                     if isinstance(f, str) and _is_safe_ident(f):
                         field_set.add(f)
-            except duckdb.Error:
-                pass
+                        bundle_fields.setdefault(path, set()).add(f)
+            except duckdb.Error as e:
+                logger.warning("[rollups] %s: could not inspect hourly bundles for day compaction: %s", service_id, e)
+                return 0
         for field in sorted(field_set):
             field_entry = f"field={field}"
             field_hour_dir = os.path.join(hour_root, field_entry)
@@ -379,12 +384,32 @@ def compact_closed_days_to_daily(
                 day_file = os.path.join(day_dir, "compacted.parquet")
                 all_source_paths = hour_paths + bundled_paths
                 try:
+                    source_mtimes = {p: os.path.getmtime(p) for p in all_source_paths}
+                except OSError as e:
+                    logger.warning(
+                        "[rollups] %s: day-compact source unavailable for %s/%s: %s", service_id, field, day, e
+                    )
+                    continue
+                try:
                     day_mtime = os.path.getmtime(day_file)
-                    max_hour_mtime = max(os.path.getmtime(p) for p in all_source_paths)
+                    max_hour_mtime = max(source_mtimes.values())
                     if day_mtime >= max_hour_mtime:
                         continue
                 except OSError:
                     pass  # day file missing → rebuild
+                per_field_hours: dict[str, list[str]] = {}
+                for path in hour_paths:
+                    per_field_hours.setdefault(os.path.basename(os.path.dirname(path)), []).append(path)
+                hour_paths = []
+                superseded_bundles: set[str] = set()
+                for hour_entry, paths in per_field_hours.items():
+                    bundle_path = os.path.join(bundled_hour_root_path, hour_entry, "all_fields.parquet")
+                    if bundle_path in source_mtimes and field in bundle_fields.get(bundle_path, set()):
+                        if source_mtimes[bundle_path] >= max(source_mtimes[p] for p in paths):
+                            continue
+                        superseded_bundles.add(bundle_path)
+                    hour_paths.extend(paths)
+                bundled_paths = [p for p in bundled_paths if p not in superseded_bundles]
                 tmp_file = os.path.join(day_dir, f".tmp_{uuid.uuid4().hex[:12]}.parquet")
                 os.makedirs(day_dir, exist_ok=True)
                 branches = []
