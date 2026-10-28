@@ -1471,3 +1471,41 @@ def test_correlated_runner_rejects_unsafe_limits_before_io(monkeypatch, kwargs):
         freshness.measure_correlated_freshness(
             {"service_id": "svc", "backend_url": "https://admin.example.test"}, "https://edge.example.test/", **kwargs
         )
+
+
+def test_print_active_scorecard_verified_and_ended_span_guard(capsys):
+    from backend.core.request_telemetry.tracker import RequestTelemetry
+
+    freshness.print_active_scorecard(
+        [
+            {
+                "name": "Local Standard",
+                "deployment_mode": "standard",
+                "qualification": "verified",
+                "active_benchmark": {
+                    "header_lag": {"min": 1.0, "max": 3.0, "avg": 2.0, "p95": 3.0},
+                    "dashboard_lag": {"avg": 2.5},
+                    "requests_sent": 300,
+                    "target_status": "WITHIN TARGET",
+                    "request_event_latency_s": 2.0,
+                    "rum_lag_s": 4.1,
+                    "clock_uncertainty_s": 0.01,
+                },
+            }
+        ]
+    )
+    out = capsys.readouterr().out
+    assert "Qualification verified: request/RUM event latency and clock uncertainty measured" in out
+    assert "Local Standard: req=2.0s rum=4.1s clock=±0.01s" in out
+
+    class _EndedSpan:
+        def is_recording(self) -> bool:
+            return False
+
+        def set_attribute(self, *_a, **_kw) -> None:
+            raise AssertionError("set_attribute called on ended span")
+
+    rt = RequestTelemetry("GET", "/api/health")
+    rt._root_span = _EndedSpan()  # type: ignore[assignment]
+    rt.end_request(200)
+    assert rt._root_span is None

@@ -543,7 +543,7 @@ def compute_lag_statistics(
 
 def print_active_scorecard(results: list[dict[str, Any]]) -> None:
     print(
-        f"\n{'=' * 110}\n                      REQUEST WATERMARK RECENCY SCORECARD (DIAGNOSTIC ONLY)\n{'=' * 110}\n{'Environment':<28} │ {'Mode':<11} │ {'Min Lag':<8} │ {'Max Lag':<8} │ {'Avg Lag':<8} │ {'P95 Lag':<8} │ {'Dash Avg':<9} │ {'Requests':<9} │ {'Target Status':<15}\n{'-' * 28}─┼─{'-' * 11}─┼─{'-' * 8}─┼─{'-' * 8}─┼─{'-' * 8}─┼─{'-' * 8}─┼─{'-' * 9}─┼─{'-' * 9}─┼─{'-' * 15}",
+        f"\n{'=' * 110}\n                      REQUEST WATERMARK RECENCY SCORECARD (ACTIVE TRAFFIC)\n{'=' * 110}\n{'Environment':<28} │ {'Mode':<11} │ {'Min Lag':<8} │ {'Max Lag':<8} │ {'Avg Lag':<8} │ {'P95 Lag':<8} │ {'Dash Avg':<9} │ {'Requests':<9} │ {'Target Status':<15}\n{'-' * 28}─┼─{'-' * 11}─┼─{'-' * 8}─┼─{'-' * 8}─┼─{'-' * 8}─┼─{'-' * 8}─┼─{'-' * 9}─┼─{'-' * 9}─┼─{'-' * 15}",
         flush=True,
     )
     for r in results:
@@ -557,10 +557,21 @@ def print_active_scorecard(results: list[dict[str, Any]]) -> None:
             f"{r['name']:<28} │ {r.get('deployment_mode', '—'):<11} │ {fmt(hl, 'min'):>8} │ {fmt(hl, 'max'):>8} │ {fmt(hl, 'avg'):>8} │ {fmt(hl, 'p95'):>8} │ {fmt(dl, 'avg'):>9} │ {bench.get('requests_sent', 0):>9,} │ {bench.get('target_status', '—'):<15}",
             flush=True,
         )
-    print(
-        f"Qualification incomplete: request/RUM event latency and clock uncertainty are unverified.\n{'=' * 110}\n",
-        flush=True,
-    )
+    valid = [r for r in results if "error" not in r]
+    if valid and all(r.get("qualification") == "verified" for r in valid):
+        summary = ", ".join(
+            f"{r['name']}: req={r['active_benchmark'].get('request_event_latency_s')}s rum={r['active_benchmark'].get('rum_lag_s')}s clock=±{r['active_benchmark'].get('clock_uncertainty_s')}s"
+            for r in valid
+        )
+        print(
+            f"Qualification verified: request/RUM event latency and clock uncertainty measured ({summary}).\n{'=' * 110}\n",
+            flush=True,
+        )
+    else:
+        print(
+            f"Qualification incomplete: request/RUM event latency and clock uncertainty are unverified.\n{'=' * 110}\n",
+            flush=True,
+        )
 
 
 def print_burst_scorecard(results: list[dict[str, Any]]) -> None:

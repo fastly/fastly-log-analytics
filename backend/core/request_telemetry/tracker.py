@@ -73,12 +73,13 @@ class RequestTelemetry:
         """Attach final attributes and close the root span if owned by this instance."""
         if self._root_span is None:
             return
-        if status_code is not None:
-            self._root_span.set_attribute("http.status_code", int(status_code))
-        self._root_span.set_attribute("app.is_cached", bool(self.is_cached))
-        self._root_span.set_attribute("app.total_ms", round((time.monotonic() - self._t_start) * 1000, 2))
-        if self._owns_root_span:
-            self._root_span.end()
+        if self._root_span.is_recording():
+            if status_code is not None:
+                self._root_span.set_attribute("http.status_code", int(status_code))
+            self._root_span.set_attribute("app.is_cached", bool(self.is_cached))
+            self._root_span.set_attribute("app.total_ms", round((time.monotonic() - self._t_start) * 1000, 2))
+            if self._owns_root_span:
+                self._root_span.end()
         self._root_span = None
         try:
             if get_page_load_id():

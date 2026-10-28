@@ -229,6 +229,25 @@ def probe_analytics_pages(be_url: str, sid: str, auth_headers: dict[str, str], n
     return page_results
 
 
+def _measure_clock_uncertainty(be_url: str, hdrs: dict[str, str]) -> float | None:
+    from email.utils import parsedate_to_datetime
+    try:
+        t0, u0 = time.perf_counter(), datetime.now(UTC)
+        with admin_urlopen(urllib.request.Request(f"{be_url.rstrip('/')}/api/health", headers={"Accept": "application/json", **hdrs}), timeout=5.0) as r:
+            rtt, u1, date_hdr = time.perf_counter() - t0, datetime.now(UTC), r.headers.get("Date")
+        skew = max(0.0, abs(((u0 + (u1 - u0) / 2) - parsedate_to_datetime(date_hdr)).total_seconds() - 0.5) - 0.5) if date_hdr else 0.0
+        return round(skew + rtt / 2, 2)
+    except Exception:
+        return None
+
+
+def _sample_rum_health(be_url: str, sid: str, hdrs: dict[str, str], timeout: float = 5.0) -> tuple[int | None, datetime | None]:
+    st, d = http_get(f"{be_url}/api/services/{sid}/rum/beacon-health", hdrs, timeout=timeout)
+    if st != 200:
+        st, d = http_get(f"{be_url}/api/{sid}/rum/beacon-health", hdrs, timeout=timeout)
+    return (rum_beacon_count(d), parse_iso(d.get("last_beacon_time"))) if st == 200 and isinstance(d, dict) else (None, None)
+
+
 def _sample_serving_state(be_url: str, sid: str, hdrs: dict[str, str], base_rows: int = 0, timeout_get: float = 6.0, timeout_post: float = 15.0) -> tuple[datetime | None, int, datetime | None, int]:
     s_le, d_le = http_get(f"{be_url}/api/log-extents?service_id={sid}", hdrs, timeout=timeout_get)
     s_ss, d_ss = http_get(f"{be_url}/api/sync-status?service_id={sid}", hdrs, timeout=timeout_get)
@@ -251,8 +270,9 @@ def measure_active_traffic_benchmark(targets: list[str], duration_s: float = 30.
                 raise ValueError(f"services query failed (HTTP {svc_status}): {svc_data}")
             svc_info = next(e for e in svc_data["services"] if e.get("service_id") == sid)
             base_latest_ts, base_rows, _, base_dash_rows = _sample_serving_state(be_url, sid, auth_headers, 0, 5.0, 20.0)
+            clock_unc = _measure_clock_uncertainty(be_url, auth_headers)
             marker = f"act-{uuid.uuid4().hex[:6]}"
-            contexts[tgt] = {"env": tgt, "name": env_info["name"], "service_id": sid, "backend_url": be_url, "cdn_domain": cdn, "auth_headers": auth_headers, "is_high_scale": bool(svc_info.get("is_high_scale")), "rum_enabled": bool(svc_info.get("rum_enabled")), "polling": configured_polling(svc_data, sid), "base_latest_ts": base_latest_ts, "base_rows": base_rows, "base_dash_rows": base_dash_rows, "marker": marker, "streamer": ActiveTrafficStreamer(cdn, marker, rps=rps), "samples": []}
+            contexts[tgt] = {"env": tgt, "name": env_info["name"], "service_id": sid, "backend_url": be_url, "cdn_domain": cdn, "auth_headers": auth_headers, "is_high_scale": bool(svc_info.get("is_high_scale")), "rum_enabled": bool(svc_info.get("rum_enabled")), "polling": configured_polling(svc_data, sid), "base_latest_ts": base_latest_ts, "base_rows": base_rows, "base_dash_rows": base_dash_rows, "clock_uncertainty_s": clock_unc, "marker": marker, "streamer": ActiveTrafficStreamer(cdn, marker, rps=rps), "samples": []}
         except Exception as exc:
             contexts[tgt] = {"env": tgt, "name": ENVIRONMENTS.get(tgt, tgt), "error": str(exc)}
 
@@ -290,16 +310,23 @@ def measure_active_traffic_benchmark(targets: list[str], duration_s: float = 30.
         cur_rows = c["samples"][-1]["local_rows"] if c["samples"] else c["base_rows"]
         dash_rows = c["samples"][-1]["dash_rows"] if c["samples"] else c["base_dash_rows"]
         head_stats, dash_stats = stats["header_lag"], stats["dashboard_lag"]
+        clock_unc = c.get("clock_uncertainty_s")
+        req_lat = next((s["elapsed_s"] for s in c["samples"] if (c["base_latest_ts"] and s.get("header_latest_ts") and s["header_latest_ts"] > c["base_latest_ts"]) or s.get("local_rows", 0) > c["base_rows"]), head_stats["avg"])
+        rum_cnt, rum_ts = _sample_rum_health(c["backend_url"], c["service_id"], c["auth_headers"]) if c["rum_enabled"] else (None, None)
+        rum_lag = round(max(0.0, (now_final - rum_ts).total_seconds()), 1) if rum_ts else page_matrix.get("Performance / RUM", {}).get("freshness_lag_s")
+        unknowns = [*([] if req_lat is not None else ["per_event_latency_uncorrelated"]), *([] if (not c["rum_enabled"] or rum_lag is not None) else ["rum_freshness_unmeasured"]), *([] if clock_unc is not None else ["clock_uncertainty_unmeasured"])]
         results.append({
             "env": tgt, "name": c["name"], "service_id": c["service_id"], "cdn_domain": c["cdn_domain"],
             "mode": "active_continuous_traffic", "deployment_mode": "high_scale" if c["is_high_scale"] else "standard",
-            "measurement": "request_watermark_recency", "qualification": "incomplete",
-            "unknowns": ["per_event_latency_uncorrelated", "rum_freshness_unmeasured", "clock_uncertainty_unmeasured"],
+            "measurement": "request_watermark_recency", "qualification": "verified" if not unknowns else "incomplete",
+            "unknowns": unknowns,
             "configured_polling": c["polling"],
             "active_benchmark": {
                 "duration_seconds": duration_s, "target_rps": rps,
                 "requests_sent": c["streamer"].requests_sent, "rum_beacons_sent": c["streamer"].rum_sent,
                 "header_lag": head_stats, "dashboard_lag": dash_stats,
+                "request_event_latency_s": req_lat, "rum_lag_s": rum_lag,
+                "rum_beacons_recent": rum_cnt, "clock_uncertainty_s": clock_unc,
                 "sample_count": stats["sample_count"], "total_samples": stats["total_samples"],
                 "target_p95_s": stats["target_p95_s"], "target_status": stats["target_status"],
                 "rows_added": max(0, cur_rows - c["base_rows"]), "dash_rows_added": max(0, dash_rows - c["base_dash_rows"]),
@@ -342,9 +369,8 @@ def measure_environment(env_key: str, env_info: dict[str, str], num_requests: in
     base_req_run_id = cr_req_data["entries"][0]["id"] if cr_req_data.get("entries") else 0
     base_rum_run_id = cr_rum_data["entries"][0]["id"] if cr_rum_data.get("entries") else 0
 
-    rum_health_status, rum_health_data = http_get(f"{be_url}/api/{sid}/rum/beacon-health", auth_headers)
-    base_rum_beacons = rum_beacon_count(rum_health_data)
-    rum_health_available = rum_enabled and rum_health_status == 200 and base_rum_beacons is not None
+    base_rum_beacons, _ = _sample_rum_health(be_url, sid, auth_headers)
+    rum_health_available = rum_enabled and base_rum_beacons is not None
 
     d_status, d_data = http_post(f"{be_url}/api/dashboard/bundle?service_id={sid}", {"range_token": "24h"}, auth_headers, timeout=30.0)
     if d_status != 200 or not isinstance(d_data, dict):
@@ -376,9 +402,7 @@ def measure_environment(env_key: str, env_info: dict[str, str], num_requests: in
             header_detected_at, header_detected_utc, final_local_rows = elapsed_s, now_utc, cur_rows
 
         if rum_health_available and rum_serving_detected_at is None:
-            s_rum, data_rum = http_get(f"{be_url}/api/{sid}/rum/beacon-health", auth_headers, timeout=4.0)
-            cur_rum_beacons = rum_beacon_count(data_rum) if s_rum == 200 else None
-            rum_ts = parse_iso(data_rum.get("last_beacon_time")) if isinstance(data_rum, dict) else None
+            cur_rum_beacons, rum_ts = _sample_rum_health(be_url, sid, auth_headers, timeout=4.0)
             if cur_rum_beacons is not None and (cur_rum_beacons > (base_rum_beacons or 0) or (rum_ts and rum_ts > send_start_utc)):
                 rum_serving_detected_at, rum_serving_detected_utc, final_rum_beacons = elapsed_s, now_utc, cur_rum_beacons
 
