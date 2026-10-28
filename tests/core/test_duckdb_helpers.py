@@ -3078,3 +3078,23 @@ def test_purge_ducklake_remote_dirs_removes_the_cloud_copy_of_local_data(prefix,
     keys = [f"{base}main/logs_svc/f1.parquet", f"{base}main/logs_svc__client_vitals/other.parquet", "raw/request/x.gz"]
     total, deleted, _ = _run_purge("/local/ducklake", "logs_svc", keys, prefix=prefix)
     assert deleted == [f"{base}main/logs_svc/f1.parquet"] and total == 1
+
+
+def test_prepare_checkout_tries_fast_path_view_before_full_update():
+    pool = _Pool(service_key="test_fast_rebind", max_size=1)
+    mc = _mock_conn()
+    _set_conn_state(mc, view_fingerprint=("old_sql", "old_hash"), buffer_mtime=10.0)
+    pool._idle.put_nowait(mc)
+    pool._in_use = 1
+    fresh_entry = ("CREATE OR REPLACE VIEW logs AS SELECT 1", ("v1",), "src_fp", 100.0)
+    with (
+        patch.dict("backend.core.storage._core._view_cache", {"test_fast_rebind": fresh_entry}, clear=False),
+        patch("backend.core.storage._core._try_fast_path_view", return_value=True) as mock_fast,
+        patch("backend.core.storage._core.update_storage_view") as mock_uiv,
+        patch("backend.core.duckdb_pool._safe_buffer_mtime", return_value=20.0),
+    ):
+        assert pool.acquire(src={"name": "test_fast_rebind", "bucket": "b"}, max_wait=0.5) is mc
+    mock_fast.assert_called_once()
+    mock_uiv.assert_not_called()
+    assert _get_conn_state(mc, "view_fingerprint") == fresh_entry
+    assert _get_conn_state(mc, "buffer_mtime") == 20.0

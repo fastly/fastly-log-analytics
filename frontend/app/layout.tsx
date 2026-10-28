@@ -16,7 +16,7 @@ import { queryKeys, seedBootstrapDependentCaches } from "@/lib/api";
 import { fetchBootstrapServerSide } from '@/lib/ssr/upstream';
 import { shouldLoadRumScript } from "@/lib/ssr/upstream";
 
-const inter = Inter({ subsets: ["latin"] });
+const inter = Inter({ subsets: ["latin"], display: "swap", preload: false });
 
 export const metadata: Metadata = {
   title: "Fastly Log Analytics",

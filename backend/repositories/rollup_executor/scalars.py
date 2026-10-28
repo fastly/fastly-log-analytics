@@ -20,6 +20,7 @@ from backend.core.rollups._common import (
     ORIGIN_PATH_BUNDLE_FILENAME,
     ORIGIN_POP_BUNDLE_FILENAME,
     ORIGIN_SUMMARY_BUNDLE_FILENAME,
+    OVERVIEW_BUNDLE_FILENAME,
     PERF_TOP_ASNS_BUNDLE_FILENAME,
     PERF_TOP_URLS_BUNDLE_FILENAME,
     PERF_TTL_DIST_BUNDLE_FILENAME,
@@ -32,6 +33,7 @@ from backend.core.rollups._common import (
     SECURITY_PROXY_QUALITY_BUNDLE_FILENAME,
     SECURITY_REQ_SIZE_BUNDLE_FILENAME,
     SLOW_URLS_BUNDLE_FILENAME,
+    TIME_SERIES_BUNDLE_FILENAME,
     quote_path_list,
 )
 from backend.core.rollups.recompute import (
@@ -985,6 +987,167 @@ class _ScalarsRollupMixin:
         sql = f"SELECT bucket, CAST(SUM(count) AS BIGINT) AS count FROM read_parquet([{paths_sql}]) GROUP BY bucket ORDER BY MIN(min_ttl)"
         rows = self._exec_rollup(sql, tag="perf_ttl_dist_rollup")
         return [{"bucket": r[0], "count": int(r[1])} for r in rows] if rows is not None else None
+
+    def try_perf_waterfall_from_rollup(
+        self,
+        start_time: str | None,
+        end_time: str | None,
+        *,
+        has_filters: bool,
+        actual_cols: set[str] | list[str] | None = None,
+    ) -> dict[str, Any] | None:
+        from backend.repositories.utils.response_shaping import shape_perf_scatter_row, shape_waterfall_avg
+
+        win = self._eligible_rollup_window(start_time, end_time, has_filters=has_filters)
+        if win is None:
+            return None
+        st, et = win
+        ov_paths = self._collect_rollup_paths(st, et, OVERVIEW_BUNDLE_FILENAME)
+        if not ov_paths:
+            return None
+        ov_sql = quote_path_list(ov_paths)
+        desc_rows = self._exec_rollup(
+            f"DESCRIBE SELECT * FROM read_parquet([{ov_sql}], union_by_name=true)",
+            tag="perf_waterfall_schema",
+        )
+        if not desc_rows:
+            return None
+        ov_cols = {str(r[0]) for r in desc_rows}
+        if "waterfall_count" in ov_cols:
+            wf_row = self._exec_rollup(
+                f"SELECT CAST(COALESCE(SUM(waterfall_count), 0) AS BIGINT), "
+                f"       SUM(edge_processing_sum) / NULLIF(SUM(waterfall_count), 0), "
+                f"       SUM(origin_wait_sum) / NULLIF(SUM(waterfall_count), 0), "
+                f"       SUM(origin_download_sum) / NULLIF(SUM(waterfall_count), 0), "
+                f"       SUM(client_download_sum) / NULLIF(SUM(waterfall_count), 0) "
+                f"FROM read_parquet([{ov_sql}], union_by_name=true)",
+                tag="perf_waterfall_rollup",
+                fetchone=True,
+            )
+            if wf_row is not None and wf_row[0] is not None and int(wf_row[0]) > 0:
+                scatter: list[dict[str, Any]] = []
+                if {"hit_ttfb_sum", "hit_ttfb_count", "miss_ttfb_sum", "miss_ttfb_count"}.issubset(ov_cols):
+                    sc_rows = self._exec_rollup(
+                        f"SELECT (hit_ttfb_sum / hit_ttfb_count) * 1000.0 AS origin_ms, "
+                        f"       GREATEST(0.0, (hit_elapsed_sum / hit_elapsed_count) / 1000.0 - (hit_ttfb_sum / hit_ttfb_count) * 1000.0) AS edge_ms, "
+                        f"       'HIT' AS cache "
+                        f"FROM read_parquet([{ov_sql}], union_by_name=true) "
+                        f"WHERE hit_ttfb_count > 0 AND hit_elapsed_count > 0 "
+                        f"UNION ALL "
+                        f"SELECT (miss_ttfb_sum / miss_ttfb_count) * 1000.0 AS origin_ms, "
+                        f"       GREATEST(0.0, (miss_elapsed_sum / miss_elapsed_count) / 1000.0 - (miss_ttfb_sum / miss_ttfb_count) * 1000.0) AS edge_ms, "
+                        f"       'MISS' AS cache "
+                        f"FROM read_parquet([{ov_sql}], union_by_name=true) "
+                        f"WHERE miss_ttfb_count > 0 AND miss_elapsed_count > 0 "
+                        f"LIMIT 300",
+                        tag="perf_scatter_rollup",
+                    )
+                    if sc_rows:
+                        scatter = [shape_perf_scatter_row(r[0], r[1], r[2]) for r in sc_rows]
+                return {
+                    "waterfall": shape_waterfall_avg(
+                        {
+                            "edge_processing": wf_row[1],
+                            "origin_wait": wf_row[2],
+                            "origin_download": wf_row[3],
+                            "client_download": wf_row[4],
+                        }
+                    ),
+                    "scatter": scatter,
+                    "_approx": True,
+                }
+
+        ts_paths = self._collect_rollup_paths(st, et, TIME_SERIES_BUNDLE_FILENAME)
+        if not ts_paths:
+            return None
+        ts_sql = quote_path_list(ts_paths)
+        ov_row = self._exec_rollup(
+            f"SELECT CAST(COALESCE(SUM(requests), 0) AS BIGINT), "
+            f"       COALESCE(SUM(hit_elapsed_sum), 0.0), "
+            f"       CAST(COALESCE(SUM(hit_elapsed_count), 0) AS BIGINT), "
+            f"       COALESCE(SUM(miss_elapsed_sum), 0.0), "
+            f"       CAST(COALESCE(SUM(miss_elapsed_count), 0) AS BIGINT) "
+            f"FROM read_parquet([{ov_sql}], union_by_name=true)",
+            tag="perf_waterfall_ov_fallback",
+            fetchone=True,
+        )
+        if ov_row is None or ov_row[0] is None or int(ov_row[0]) <= 0:
+            return None
+        total_reqs = int(ov_row[0])
+        hit_el_sum = float(ov_row[1] or 0.0)
+        hit_el_cnt = int(ov_row[2] or 0)
+        miss_el_sum = float(ov_row[3] or 0.0)
+        miss_el_cnt = int(ov_row[4] or 0)
+        total_el_cnt = hit_el_cnt + miss_el_cnt
+        avg_elapsed_ms = ((hit_el_sum + miss_el_sum) / total_el_cnt) / 1000.0 if total_el_cnt > 0 else 0.0
+        avg_hit_el_ms = (hit_el_sum / hit_el_cnt) / 1000.0 if hit_el_cnt > 0 else avg_elapsed_ms
+        avg_miss_el_ms = (miss_el_sum / miss_el_cnt) / 1000.0 if miss_el_cnt > 0 else avg_elapsed_ms
+
+        ts_row = self._exec_rollup(
+            f"SELECT COALESCE(SUM(ttfb_sum), 0.0), CAST(COALESCE(SUM(ttfb_count), 0) AS BIGINT) "
+            f"FROM read_parquet([{ts_sql}], union_by_name=true)",
+            tag="perf_waterfall_ts_fallback",
+            fetchone=True,
+        )
+        if ts_row is None or ts_row[1] is None or int(ts_row[1]) <= 0:
+            return None
+        avg_ttfb_ms = (float(ts_row[0] or 0.0) / int(ts_row[1])) * 1000.0
+
+        cols_set = set(actual_cols) if actual_cols is not None else set()
+        avg_ottfb_ms = 0.0
+        avg_ottlb_ms = 0.0
+        if "ottfb" in cols_set or "ottlb" in cols_set:
+            os_paths = self._collect_rollup_paths(st, et, ORIGIN_SUMMARY_BUNDLE_FILENAME)
+            if os_paths:
+                os_sql = quote_path_list(os_paths)
+                os_row = self._exec_rollup(
+                    f"SELECT SUM(ottfb_p50_us * lat_us_count) / NULLIF(SUM(lat_us_count), 0), "
+                    f"       CAST(COALESCE(SUM(lat_us_count), 0) AS BIGINT), "
+                    f"       SUM(ottlb_p50_us * ottlb_count) / NULLIF(SUM(ottlb_count), 0), "
+                    f"       CAST(COALESCE(SUM(ottlb_count), 0) AS BIGINT) "
+                    f"FROM read_parquet([{os_sql}], union_by_name=true)",
+                    tag="perf_waterfall_os_fallback",
+                    fetchone=True,
+                )
+                if os_row is not None:
+                    if "ottfb" in cols_set and os_row[0] is not None and int(os_row[1] or 0) > 0:
+                        avg_ottfb_ms = (float(os_row[0]) / 1000.0) * min(1.0, int(os_row[1]) / total_reqs)
+                    if "ottlb" in cols_set and os_row[2] is not None and int(os_row[3] or 0) > 0:
+                        avg_ottlb_ms = (float(os_row[2]) / 1000.0) * min(1.0, int(os_row[3]) / total_reqs)
+
+        origin_wait = max(0.0, avg_ottfb_ms)
+        origin_download = max(0.0, avg_ottlb_ms - avg_ottfb_ms)
+        edge_processing = max(0.0, avg_ttfb_ms - avg_ottfb_ms)
+        client_download = max(0.0, avg_elapsed_ms - max(avg_ottlb_ms, avg_ttfb_ms))
+
+        scatter_fb: list[dict[str, Any]] = []
+        sc_fb_rows = self._exec_rollup(
+            f"SELECT (ttfb_sum / ttfb_count) * 1000.0 AS origin_ms, "
+            f"       CASE WHEN COALESCE(hits, 0) * 2 >= COALESCE(requests, 0) THEN 'HIT' ELSE 'MISS' END AS cache "
+            f"FROM read_parquet([{ts_sql}], union_by_name=true) "
+            f"WHERE ttfb_count > 0 "
+            f"ORDER BY bucket DESC LIMIT 300",
+            tag="perf_scatter_ts_fallback",
+        )
+        if sc_fb_rows:
+            for orig_ms_raw, cache_lbl in sc_fb_rows:
+                orig_ms = float(orig_ms_raw or 0.0)
+                base_el = avg_hit_el_ms if cache_lbl == "HIT" else avg_miss_el_ms
+                edge_ms = max(0.0, base_el - orig_ms)
+                scatter_fb.append(shape_perf_scatter_row(orig_ms, edge_ms, str(cache_lbl)))
+
+        return {
+            "waterfall": shape_waterfall_avg(
+                {
+                    "edge_processing": edge_processing,
+                    "origin_wait": origin_wait,
+                    "origin_download": origin_download,
+                    "client_download": client_download,
+                }
+            ),
+            "scatter": scatter_fb,
+            "_approx": True,
+        }
 
     def try_pop_health_from_rollup(
         self, start_time: str | None, end_time: str | None, *, has_filters: bool

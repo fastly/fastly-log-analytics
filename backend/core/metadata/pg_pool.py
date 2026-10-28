@@ -120,6 +120,7 @@ def get_pg_pool() -> ConnectionPool:
             min_size=min_size,
             max_size=max_size,
             timeout=float(os.environ.get("METADATA_PG_POOL_TIMEOUT", "30")),
+            open=True,
         )
         setattr(sys.modules[__name__], "_pool", _pool)
     return _pool

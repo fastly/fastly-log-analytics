@@ -296,7 +296,25 @@ def _compute_performance_aggregates(
     _want_scatter, _want_waterfall = _want("scatter"), _want("waterfall")
     _want_scatter_waterfall = _want_scatter or _want_waterfall
     if _want_scatter_waterfall and "ttfb" in actual_cols and "elapsed" in actual_cols:
-        if live_sections:
+        t0_sw = time.perf_counter()
+        rolled_sw = runner.try_perf_waterfall_from_rollup(
+            start_time, end_time, has_filters=bool(filters), actual_cols=actual_cols
+        )
+        timer.mark(
+            "scatter_waterfall_rollup",
+            t0_sw,
+            source="rollup",
+            activity="compute" if rolled_sw is not None else "overhead",
+            current_execution=True,
+            outcome="served" if rolled_sw is not None else "fallback",
+        )
+        if rolled_sw is not None:
+            if _want_scatter:
+                results["scatter"] = rolled_sw["scatter"]
+            if _want_waterfall:
+                results["waterfall"] = rolled_sw["waterfall"]
+            results["approx"] = True
+        elif live_sections:
             _need("scatter_waterfall", {"ttfb", "elapsed", "cache", "ottfb", "ottlb"})
         else:
             live_sections.add("scatter_waterfall")

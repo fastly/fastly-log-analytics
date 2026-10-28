@@ -3270,3 +3270,27 @@ def test_a_fresh_real_catalog_never_deletes_the_old_backup(monkeypatch, tmp_path
             con_b.close()
         con.close()
         monkeypatch.setattr(ducklake.config, "DUCKLAKE_CATALOG", old_dsn)
+
+
+def test_ducklake_attach_read_only_fast_path_skips_probe_within_ttl(monkeypatch, tmp_path):
+    from backend.core.duckdb_pool import _get_conn_state
+
+    src = _make_source(tmp_path, f"svc_ro_fast_{uuid.uuid4().hex[:6]}")
+    rw = duckdb.connect()
+    ro = duckdb.connect()
+    try:
+        assert ducklake._ducklake_attach(rw, src, read_only=False) is True
+        assert ducklake._ducklake_attach(ro, src, read_only=True) is True
+        assert isinstance(_get_conn_state(ro, "lake_probed_at"), float)
+
+        with patch.object(ducklake, "_probe_lake_usable", side_effect=AssertionError("should be skipped")) as mock_p:
+            assert ducklake._ducklake_attach(ro, src, read_only=True) is True
+            mock_p.assert_not_called()
+
+        ducklake._ducklake_detach(ro)
+        assert _get_conn_state(ro, "lake_probed_at") is None
+        assert ducklake._ducklake_attach(ro, src, read_only=True) is True
+        assert isinstance(_get_conn_state(ro, "lake_probed_at"), float)
+    finally:
+        ro.close()
+        rw.close()

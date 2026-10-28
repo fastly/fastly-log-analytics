@@ -1663,3 +1663,26 @@ def test_cloud_copy_deletions_bill_for_thirty_days_and_old_rows_are_pruned():
     )
     clear_usage_log(svc)
     assert cloud_copy_deleted_bytes_in_billing_window(svc) == 0
+
+
+def test_get_pg_pool_passes_open_true_explicitly():
+    import backend.core.metadata.pg_pool as pg_pool_mod
+
+    orig_pool = pg_pool_mod._pool
+    captured_kwargs: dict = {}
+
+    class _FakePool:
+        def __init__(self, **kwargs):
+            captured_kwargs.update(kwargs)
+
+        def close(self, timeout=1.0):
+            pass
+
+    try:
+        setattr(pg_pool_mod, "_pool", None)
+        with patch.object(pg_pool_mod, "ConnectionPool", _FakePool):
+            pool = pg_pool_mod.get_pg_pool()
+            assert isinstance(pool, _FakePool)
+            assert captured_kwargs.get("open") is True
+    finally:
+        setattr(pg_pool_mod, "_pool", orig_pool)

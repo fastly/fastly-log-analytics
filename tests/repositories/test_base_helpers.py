@@ -1776,3 +1776,71 @@ class TestEmptyIpExclusion:
         )
         result = _run(in_memory_duckdb, test_service_source, {})
         assert result["total_rows"] == 2
+
+
+class TestPerformanceWaterfallRollupFastPath:
+    def test_unfiltered_performance_aggregates_serves_waterfall_from_rollup(self, tmp_path, monkeypatch):
+        from backend.core.rollups import origin_dims, overview_rollups
+        from backend.repositories.performance import _perf_memo
+        from tests._helpers.rollups import writer_patches
+
+        _perf_memo.cache.clear()
+        _schema_cols_cache.clear()
+        src = {"name": "svc_perf_wf", "bucket": "b_perf_wf", "_cache_dir_override": str(tmp_path)}
+        monkeypatch.setattr("backend.core.duckdb._cache_dir", lambda _s: str(tmp_path))
+
+        con = duckdb.connect()
+        table = _safe_table(src["name"])
+        con.execute(
+            f"CREATE TABLE {table} ("
+            "timestamp TIMESTAMPTZ, url VARCHAR, asn BIGINT, ttfb DOUBLE, elapsed DOUBLE, "
+            "cache VARCHAR, ttl BIGINT, ottfb DOUBLE, ottlb DOUBLE, resp_bytes BIGINT)"
+        )
+        hours = [f"2026-07-01-{h:02d}" for h in range(24)]
+        for h in range(24):
+            ts = f"2026-07-01T{h:02d}:15:00Z"
+            for _ in range(6):
+                con.execute(
+                    f"INSERT INTO {table} VALUES (?, '/p', 15169, 0.020, 45000.0, 'HIT', 3600, 0.0, 0.0, 1024)",
+                    [ts],
+                )
+            for _ in range(6):
+                con.execute(
+                    f"INSERT INTO {table} VALUES (?, '/m', 13335, 0.080, 120000.0, 'MISS', 60, 50000.0, 70000.0, 2048)",
+                    [ts],
+                )
+
+        class _NoCloseCon:
+            def __init__(self, inner):
+                self._inner = inner
+
+            def __getattr__(self, name):
+                return getattr(self._inner, name)
+
+            def close(self):
+                pass
+
+        with writer_patches(tmp_path, table, _NoCloseCon(con)):
+            assert overview_rollups.build_overview_bundles("svc_perf_wf", src, hours) == 24
+            assert origin_dims.build_perf_dims_bundles("svc_perf_wf", src, hours) >= 24
+            assert origin_dims.build_perf_latency_bundles("svc_perf_wf", src, hours) >= 24
+
+            res = get_performance_aggregates(
+                con,
+                src,
+                "2026-07-01T00:00:00Z",
+                "2026-07-02T00:00:00Z",
+                {},
+            )
+        assert res.get("approx") is True
+        wf_avg = res["waterfall"]["avg"]
+        assert wf_avg["edge_processing"] == pytest.approx(25.0, rel=1e-2)
+        assert wf_avg["origin_wait"] == pytest.approx(25.0, rel=1e-2)
+        assert wf_avg["origin_download"] == pytest.approx(10.0, rel=1e-2)
+        assert wf_avg["client_download"] == pytest.approx(32.5, rel=1e-2)
+        assert len(res["scatter"]) > 0
+        timings = {e["section"]: e for e in res["section_timings"]}
+        assert timings["scatter_waterfall_rollup"]["outcome"] == "served"
+        assert "perf:temp_skipped" in timings
+        assert "scatter_waterfall_query" not in timings
+        con.close()

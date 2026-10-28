@@ -405,7 +405,14 @@ def _sleep_releasing_attach_lock(service_id: object, reason: str) -> bool:
     return _acquire_attach_lock(service_id, f"timed out re-acquiring the attach lock while retrying after {reason}")
 
 
+_LAKE_PROBE_TTL_S = float(os.getenv("DUCKLAKE_PROBE_TTL_SECONDS", "30"))
+
+
 def _detach_unlocked(con, aliases: tuple[str, ...] = ("lake",), *, ignore_errors: bool = True) -> None:
+    if "lake" in aliases:
+        from backend.core.duckdb_pool import _set_conn_state
+
+        _set_conn_state(con, lake_probed_at=None)
     for alias in aliases:
         try:
             con.execute(f"DETACH {alias}")
@@ -450,11 +457,29 @@ def _load_ducklake_extension(con, service_id: object) -> bool:
 
 def _ducklake_attach(con, source: dict, read_only: bool = False) -> bool:
     """Attach the DuckLake catalog for ``source`` as ``lake`` on ``con``."""
+    from backend.core.duckdb_pool import _get_conn_state, _set_conn_state
+
     service_id = source.get("service_id") or source.get("name", "default")
     dsn = _resolve_catalog_dsn(service_id)
     if not dsn:
         return False
     data_path = _resolve_data_path(source, service_id)
+    if read_only:
+        probed_at = _get_conn_state(con, "lake_probed_at")
+        if (
+            isinstance(probed_at, (int, float))
+            and (time.monotonic() - probed_at) < _LAKE_PROBE_TTL_S
+            and _get_conn_state(con, "lake_dsn") == dsn
+            and _get_conn_state(con, "lake_data_path") == data_path
+        ):
+            try:
+                attached = con.execute(
+                    "SELECT readonly FROM duckdb_databases() WHERE database_name = 'lake'"
+                ).fetchone()
+                if attached:
+                    return True
+            except Exception:
+                pass
     if not _acquire_attach_lock(
         service_id,
         f"timed out after {_ATTACH_LOCK_TIMEOUT_S:.0f}s waiting for the process-wide attach lock — "
@@ -483,12 +508,14 @@ def _ducklake_attach(con, source: dict, read_only: bool = False) -> bool:
                         probe_err,
                     )
                     return False
+                _set_conn_state(con, lake_probed_at=time.monotonic(), lake_dsn=dsn, lake_data_path=data_path)
                 return True
             if existing_ro == read_only:
                 probe_err = _probe_lake_usable(con)
                 if probe_err is None:
                     if not read_only:
                         _apply_target_file_size(con)
+                    _set_conn_state(con, lake_probed_at=time.monotonic(), lake_dsn=dsn, lake_data_path=data_path)
                     return True
                 try:
                     _detach_unlocked(con, ("lake",), ignore_errors=False)
@@ -584,6 +611,9 @@ def _ducklake_attach(con, source: dict, read_only: bool = False) -> bool:
                                     "SELECT readonly FROM duckdb_databases() WHERE database_name = 'lake'"
                                 ).fetchone()
                                 if row and bool(row[0]) == read_only:
+                                    _set_conn_state(
+                                        con, lake_probed_at=time.monotonic(), lake_dsn=dsn, lake_data_path=data_path
+                                    )
                                     return True
                                 if row:
                                     try:
@@ -615,6 +645,7 @@ def _ducklake_attach(con, source: dict, read_only: bool = False) -> bool:
 
         if not read_only:
             _apply_target_file_size(con)
+        _set_conn_state(con, lake_probed_at=time.monotonic(), lake_dsn=dsn, lake_data_path=data_path)
         return True
     finally:
         if lock_held:

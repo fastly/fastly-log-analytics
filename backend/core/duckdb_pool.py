@@ -459,15 +459,25 @@ class _Pool:
             from backend.core.storage import _core as storage_view
 
             current = self._current_view_fp()
+            current_mtime = _safe_buffer_mtime(src)
             if (
                 current is not None
                 and current == _get_conn_state(con, "view_fingerprint")
-                and _safe_buffer_mtime(src) == _get_conn_state(con, "buffer_mtime")
+                and current_mtime == _get_conn_state(con, "buffer_mtime")
             ):
                 return con
             t_rebind_start = time.monotonic()
             try:
-                storage_view.update_storage_view(con, src, lock_timeout=_pool_api_rebind_lock_timeout_s())
+                fast_ok = False
+                if current is not None:
+                    if self.service_key.endswith("::rum"):
+                        fast_ok = storage_view._try_fast_path_view(
+                            con, src, target_table="client_vitals"
+                        ) and storage_view._try_fast_path_view(con, src, target_table="client_errors")
+                    else:
+                        fast_ok = storage_view._try_fast_path_view(con, src)
+                if not fast_ok:
+                    storage_view.update_storage_view(con, src, lock_timeout=_pool_api_rebind_lock_timeout_s())
             finally:
                 self._record_rebind_wait_sample((time.monotonic() - t_rebind_start) * 1000.0)
             self._stamp_fingerprint(con, src)
