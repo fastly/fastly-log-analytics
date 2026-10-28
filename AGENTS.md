@@ -1407,6 +1407,16 @@ does not establish complete historical coverage. Real-DuckDB cases in
 `tests/repositories/test_top_n_rollups_golden.py` compare country, map and virtual
 counts across active/closed transitions, including a missing hourly bundle.
 
+A selected stored-rollup file can disappear between directory listing and
+execution. Refreshing the storage view cannot repair SQL containing those
+explicit paths. On a missing-file error naming a selected rollup, discard the
+entire stored plan and read the complete scoped raw window, including virtual
+fields and the inclusive endpoint; never merge a surviving partial plan.
+Unrelated I/O failures, permissions, cancellation and raw-fallback failures
+still propagate. The same golden suite covers stale listings and removal after
+selection. This recovery does not repair retained rollups or prove why a file
+disappeared.
+
 ### 53. Dashboard component cache keys must preserve exact window bounds
 
 Standard dashboard aggregate and top-bot cache keys retain seconds and fractions

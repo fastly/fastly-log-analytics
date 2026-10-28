@@ -482,10 +482,40 @@ class _TopNRollupMixin:
                 observed.top_n_plan.rolled_read = "used"
             except duckdb.InterruptException:
                 raise
-            except Exception:
+            except Exception as exc:
                 observed.top_n_plan.rolled_read = "failed"
                 if exact_window:
-                    raise
+                    observed.outcome = "read_failed"
+                    missing_selected_file = (
+                        isinstance(exc, duckdb.IOException)
+                        and any(marker in str(exc) for marker in ("No files found", "No such file or directory"))
+                        and any(
+                            path in str(exc)
+                            for paths in (day_paths, hour_paths, bundled_hour_paths, bundled_day_paths)
+                            for path in paths
+                        )
+                    )
+                    if not missing_selected_file or st_dt is None or et_dt is None:
+                        raise
+                    # The stored plan is no longer usable. Do not retry its paths or
+                    # merge a partial answer with live/heal slices: read the whole scope.
+                    _phase("rolled_res", (time.perf_counter() - _t_rolled) * 1000)
+                    _logger.info("[top_n_rollups] selected file missing; using exact full-window raw fallback")
+                    _t_raw = time.perf_counter()
+                    raw_res = self._top_n_exact_window_rows(
+                        win,
+                        [],
+                        safe_fields,
+                        base_table,
+                        pre_merge_limit,
+                        pre_merge_per_field_limits,
+                        _SchemaSeeds(actual_cols, schema_types),
+                        full_window=True,
+                    )
+                    _phase("raw_fallback", (time.perf_counter() - _t_raw) * 1000)
+                    top_results, _ = _truncate_top_n(_fold_rows(raw_res), fields, limit, per_field_limits)
+                    observed.outcome = "served"
+                    return top_results, fields
                 rolled_res = []
         _phase("rolled_res", (time.perf_counter() - _t_rolled) * 1000)
         schema = _SchemaSeeds(actual_cols, schema_types)
@@ -593,6 +623,7 @@ class _TopNRollupMixin:
         schema: _SchemaSeeds,
         *,
         active_virtual_covered: bool = True,
+        full_window: bool = False,
     ) -> list[tuple]:
         raw_hours = set(missing_hours)
         for bound in (win.st_dt, win.et_dt):
@@ -618,6 +649,10 @@ class _TopNRollupMixin:
                 ranges[-1] = (ranges[-1][0], win.et_dt, True)
             else:
                 ranges.append((win.et_dt, win.et_dt, True))
+        if full_window:
+            if win.st_dt is None or win.et_dt is None:
+                raise ValueError("Full-window top-N fallback requires both bounds")
+            ranges = [(win.st_dt, win.et_dt, True)]
         if not ranges:
             return []
         schema.ensure(self.get_schema_cols, lambda: {c["name"]: c["type"] for c in _get_schema(self.con, self.src)})

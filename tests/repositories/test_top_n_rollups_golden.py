@@ -3470,7 +3470,106 @@ def test_dashboard_country_rollups_match_scoped_filter_at_hour_boundaries(
     assert len(raw_table_queries) <= 2
 
 
-@pytest.mark.parametrize("failed_read", ["rollup", "boundary", "active"])
+@pytest.mark.parametrize("now", ["2026-10-27T03:30:00Z", "2026-10-27T05:30:00Z"])
+@pytest.mark.parametrize(
+    ("layout", "race"),
+    [
+        ("per_field_hour", "cached_listing"),
+        ("per_field_hour", "after_selection"),
+        ("bundled_hour", "after_selection"),
+        ("bundled_day", "after_selection"),
+    ],
+)
+def test_dashboard_missing_stored_rollup_matches_full_scoped_raw(
+    in_memory_duckdb, test_service_source, tmp_path, monkeypatch, now, layout, race
+):
+    table = _empty_logs_table(in_memory_duckdb, test_service_source)
+    start, end = "2026-10-24T02:03:00.125Z", "2026-10-27T03:03:00.250Z"
+    in_memory_duckdb.executemany(
+        f"INSERT INTO {table} (timestamp, country, ip, url, waf_sig) VALUES (?, ?, '192.0.2.1', '/fixture', 'A, B')",
+        [
+            ("2026-10-24T02:03:00.124Z", "US"),
+            (start, "US"),
+            ("2026-10-24T02:30:00Z", "CA"),
+            ("2026-10-25T02:00:00Z", "US"),
+            ("2026-10-25T02:30:00Z", "CA"),
+            ("2026-10-26T02:30:00Z", "CA"),
+            ("2026-10-27T02:30:00Z", "US"),
+            ("2026-10-27T03:00:00Z", "CA"),
+            (end, "US"),
+            (end, "US"),
+            ("2026-10-27T03:03:00.251Z", "US"),
+        ],
+    )
+    if layout == "per_field_hour":
+        vanished = tmp_path / "rollups/hour/field=country/hour=2026-10-25-02/part.parquet"
+    elif layout == "bundled_hour":
+        vanished = tmp_path / "rollups/hour_bundled/hour=2026-10-25-02/all_fields.parquet"
+    else:
+        vanished = tmp_path / "rollups/day_bundled/day=2026-10-25/all_fields.parquet"
+    survivor = tmp_path / "rollups/hour_bundled/hour=2026-10-26-02/all_fields.parquet"
+    for path, day in [(vanished, "2026-10-25"), (survivor, "2026-10-26")]:
+        path.parent.mkdir(parents=True)
+        in_memory_duckdb.execute(
+            f"""COPY (
+                WITH events AS (SELECT * FROM {table} WHERE CAST(timestamp AS DATE) = DATE '{day}')
+                SELECT 'country' AS field, country AS value, count(*) AS count FROM events GROUP BY country
+            ) TO ? (FORMAT PARQUET)""",
+            [str(path)],
+        )
+    monkeypatch.setattr(db_core, "_cache_dir", lambda _src: str(tmp_path))
+    monkeypatch.setattr(rr, "rollups_present", lambda _src: True)
+    monkeypatch.setattr(QueryRunner, "_create_active_hour_temp_direct", lambda *args, **kwargs: None)
+    # Keep the existing unchanged-SQL retry local: no storage view or catalog setup.
+    refreshes = []
+    monkeypatch.setattr(_base, "_refresh_stale_view", lambda *args: refreshes.append(True))
+    build_sql = _base._build_rolled_sql
+    selected = []
+
+    def remove_selected_file(paths, *args, **kwargs):
+        assert str(vanished) in paths.hour_paths + paths.bundled_hour_paths + paths.bundled_day_paths
+        selected.append(True)
+        sql = build_sql(paths, *args, **kwargs)
+        if race == "after_selection":
+            assert vanished.is_file()
+            vanished.unlink()
+        return sql
+
+    monkeypatch.setattr(_base, "_build_rolled_sql", remove_selected_file)
+    if race == "cached_listing":
+        assert vanished.name in rollup_coverage.cached_listdir(str(vanished.parent))
+        vanished.unlink()
+    expected = dict(
+        in_memory_duckdb.execute(
+            f"SELECT country, COUNT(*) FROM {table} WHERE timestamp >= ? AND timestamp <= ? GROUP BY country",
+            [start, end],
+        ).fetchall()
+    )
+    assert expected == {"US": 5, "CA": 4}
+    with time_machine.travel(now, tick=False):
+        result = get_aggregates(
+            in_memory_duckdb,
+            test_service_source,
+            start,
+            end,
+            {},
+            "1 minute",
+            "requests",
+            fields_filter=["country", "waf_sig_ind"],
+            include_time_series=False,
+            include_conn_requests=False,
+        )
+    assert selected and refreshes
+    assert survivor.is_file()
+    assert {row["value"]: row["count"] for row in result["data"]["country"]["top"]} == expected
+    assert {row["country"]: row["count"] for row in result["map_data"]} == expected
+    assert result["total_rows"] == sum(expected.values())
+    assert {row["value"]: row["count"] for row in result["data"]["waf_sig_ind"]["top"]} == {"A": 9, "B": 9}
+
+
+@pytest.mark.parametrize(
+    "failed_read", ["rollup", "boundary", "active", "unrelated_missing", "permission", "raw_fallback", "interrupt"]
+)
 def test_dashboard_exact_top_n_propagates_read_failures(
     in_memory_duckdb, test_service_source, tmp_path, monkeypatch, failed_read
 ):
@@ -3482,12 +3581,24 @@ def test_dashboard_exact_top_n_propagates_read_failures(
         [str(directory / "all_fields.parquet")],
     )
     monkeypatch.setattr(db_core, "_cache_dir", lambda _src: str(tmp_path))
+    monkeypatch.setattr(_base, "_refresh_stale_view", lambda *args: None)
     runner = QueryRunner(in_memory_duckdb, test_service_source)
     execute = runner.execute
 
     def fail_execute(sql, *args, **kwargs):
+        if "read_parquet" in sql:
+            if failed_read == "unrelated_missing":
+                raise duckdb.IOException('No files found that match "/unrelated.parquet": fixture read failure')
+            if failed_read == "permission":
+                raise duckdb.IOException(
+                    f'Cannot open file "{directory / "all_fields.parquet"}": Permission denied: fixture read failure'
+                )
+            if failed_read == "interrupt":
+                raise duckdb.InterruptException("fixture read failure")
+            if failed_read == "raw_fallback":
+                (directory / "all_fields.parquet").unlink()
         if (failed_read == "rollup" and "read_parquet" in sql) or (
-            failed_read == "boundary" and "SELECT * FROM" in sql
+            failed_read in ("boundary", "raw_fallback") and "SELECT * FROM" in sql
         ):
             raise duckdb.IOException("fixture read failure")
         return execute(sql, *args, **kwargs)
@@ -3501,7 +3612,10 @@ def test_dashboard_exact_top_n_propagates_read_failures(
     )
     with (
         time_machine.travel("2026-10-27T03:30:00Z", tick=False),
-        pytest.raises(duckdb.IOException, match="fixture read failure"),
+        pytest.raises(
+            duckdb.InterruptException if failed_read == "interrupt" else duckdb.IOException,
+            match="fixture read failure",
+        ),
     ):
         runner.execute_top_n_rollups(["country"], "2026-10-27T02:00:00Z", "2026-10-27T03:03:00Z", exact_window=True)
 
