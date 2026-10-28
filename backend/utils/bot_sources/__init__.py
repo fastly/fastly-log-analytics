@@ -6,13 +6,13 @@ import ipaddress  # noqa: F401
 import socket  # noqa: F401
 import sys
 import time  # noqa: F401
-import types
 
 import aiodns  # noqa: F401
 import pytricia  # noqa: F401
 
 from backend.utils.date_utils import iso_z_now  # noqa: F401
 from backend.utils.http import http_get_text  # noqa: F401
+from backend.utils.module_shim import install_shim_module
 from backend.utils.telemetry import atomic_write_json  # noqa: F401
 
 from . import cidr as _cidr
@@ -203,7 +203,6 @@ __all__ = [
 
 _self = sys.modules[__name__]
 _ALL_MODULES = (_self, _registry, _cidr, _rdns, _fetcher)
-_syncing = False
 
 _registry._get_compiled_ip_feeds = _get_compiled_ip_feeds
 _registry._get_feed_intervals = _get_feed_intervals
@@ -213,23 +212,4 @@ _registry.parse_ip_int_version = parse_ip_int_version
 _registry.classify = classify
 _registry.get_hostnames = get_hostnames
 
-
-class _ShimModule(types.ModuleType):
-    """Propagate attribute mutations across the bot_sources package and its submodules."""
-
-    def __setattr__(self, name: str, value: object) -> None:
-        global _syncing
-        super().__setattr__(name, value)
-        if _syncing or name.startswith("__"):
-            return
-        _syncing = True
-        try:
-            for mod in _ALL_MODULES:
-                if mod is not self and (mod is _self or name in mod.__dict__):
-                    object.__setattr__(mod, name, value)
-        finally:
-            _syncing = False
-
-
-for _mod in _ALL_MODULES:
-    _mod.__class__ = _ShimModule
+_ShimModule = install_shim_module(__name__, _ALL_MODULES, only_existing_attrs=True)

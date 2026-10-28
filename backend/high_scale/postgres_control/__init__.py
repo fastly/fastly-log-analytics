@@ -38,7 +38,6 @@ from backend.high_scale.ingest_controller import INITIAL_SOURCE_CURSOR, RUM_SOUR
 
 logger = logging.getLogger("backend.high_scale.postgres_control")
 import sys
-import types
 
 from backend.high_scale.postgres_control import console_access as _console_access_mod
 from backend.high_scale.postgres_control import control_plane as _control_plane_mod
@@ -107,25 +106,10 @@ from backend.high_scale.postgres_control.deletion import (
     ReplayLeaseChecker,
     _configured_domain_retention,
 )
+from backend.utils.module_shim import install_shim_module
 
 _SUBMODULES = (_control_plane_mod, _console_access_mod, _deletion_mod)
-
-
-class _ShimModule(types.ModuleType):
-    def __setattr__(self, name: str, value: object) -> None:
-        super().__setattr__(name, value)
-        if name.startswith("__") and name.endswith("__"):
-            return
-        pkg = sys.modules.get("backend.high_scale.postgres_control")
-        if pkg is not None and pkg is not self:
-            types.ModuleType.__setattr__(pkg, name, value)
-        for mod in _SUBMODULES:
-            if mod is not self:
-                types.ModuleType.__setattr__(mod, name, value)
-
-
-for _mod in (sys.modules[__name__], *_SUBMODULES):
-    _mod.__class__ = _ShimModule
+_ShimModule = install_shim_module(__name__, _SUBMODULES)
 
 __all__ = [
     "contextlib",

@@ -102,6 +102,7 @@ from backend.repositories.top_n_rollups import (  # noqa: F401
 from backend.repositories.utils.response_shaping import us_to_ms as _us_to_ms
 from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry
 from backend.utils.date_utils import parse_day_key_strict, parse_hour_key_strict, parse_iso_utc, safe_iso  # noqa: F401
+from backend.utils.module_shim import install_shim_module
 from backend.utils.telemetry import log_once_per
 
 from . import scalars as _scalars_mod
@@ -148,19 +149,4 @@ _SUBMODULES = (
     _scalars_mod,
 )
 
-
-class _ShimModule(_types.ModuleType):
-    """Propagate monkeypatch attributes across rollup_executor package and submodules."""
-
-    def __setattr__(self, name: str, value: object) -> None:
-        super().__setattr__(name, value)
-        if name.startswith("__") and name.endswith("__"):
-            return
-        for mod in _SUBMODULES:
-            if hasattr(mod, name):
-                object.__setattr__(mod, name, value)
-
-
-_self_mod = _sys.modules[__name__]
-if not isinstance(_self_mod, _ShimModule):
-    _self_mod.__class__ = _ShimModule
+_ShimModule = install_shim_module(__name__, _SUBMODULES, only_existing_attrs=True)

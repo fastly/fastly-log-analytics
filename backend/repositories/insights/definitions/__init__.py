@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import re  # noqa: F401
 import sys as _sys
-import types as _types
 from typing import Any
 
 from backend.core.metric_expressions import coalesce  # noqa: F401
@@ -171,6 +170,7 @@ from backend.repositories.insights.definitions.traffic import (
     ua_monoculture_processor,
 )
 from backend.utils.countries import format_city_label  # noqa: F401
+from backend.utils.module_shim import install_shim_module
 
 _ORIGINAL_REGISTRATION_ORDER = (
     "error_spikes",
@@ -233,19 +233,6 @@ for _k, _v in registry._definitions.items():
 registry._definitions.clear()
 registry._definitions.update(_ordered)
 
-
-class _ShimModule(_types.ModuleType):
-    """Propagate attribute monkeypatches across the definitions package."""
-
-    def __setattr__(self, name: str, value: object) -> None:
-        super().__setattr__(name, value)
-        if name.startswith("__") and name.endswith("__"):
-            return
-        for mod in _SUBMODULES:
-            if mod is not self and hasattr(mod, name):
-                _types.ModuleType.__setattr__(mod, name, value)
-
-
 _SUBMODULES = (
     _sys.modules[__name__],
     sql_coalesced,
@@ -254,8 +241,7 @@ _SUBMODULES = (
     performance,
     security,
 )
-for _m in _SUBMODULES:
-    _m.__class__ = _ShimModule
+_ShimModule = install_shim_module(__name__, _SUBMODULES, only_existing_attrs=True)
 
 SQL: Any = _sys.modules[__name__]
 _sys.modules["backend.repositories._sql.insights"] = _sys.modules[__name__]

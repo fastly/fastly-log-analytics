@@ -8,7 +8,6 @@ import logging
 import os
 import sys
 import tempfile
-import types
 from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -142,6 +141,7 @@ from backend.repositories.utils.response_cache import (
     serialize_filters_for_key,
 )
 from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry
+from backend.utils.module_shim import install_shim_module
 
 logger = logging.getLogger("backend.high_scale.ingest_controller")
 _SUBMODULES = (_service_mod, _coordinator_mod)
@@ -256,23 +256,7 @@ def __getattr__(name: str) -> Any:
 
 
 orchestration = sys.modules[__name__]
-
-
-class _ShimModule(types.ModuleType):
-    def __setattr__(self, name: str, value: object) -> None:
-        super().__setattr__(name, value)
-        if name.startswith("__") and name.endswith("__"):
-            return
-        pkg = sys.modules.get("backend.high_scale.ingest_controller")
-        if pkg is not None and pkg is not self:
-            types.ModuleType.__setattr__(pkg, name, value)
-        for mod in _SUBMODULES:
-            if mod is not self:
-                types.ModuleType.__setattr__(mod, name, value)
-
-
-for _mod in (sys.modules[__name__], *_SUBMODULES):
-    _mod.__class__ = _ShimModule
+_ShimModule = install_shim_module(__name__, _SUBMODULES)
 
 __all__ = [
     "contextvars",

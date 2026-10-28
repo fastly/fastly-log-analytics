@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import sys
-import types
-from typing import Any
+from types import ModuleType
 
 import backend.config as svcconfig
 from backend.core.fastly.client import (
@@ -111,6 +109,7 @@ from backend.provision.session_scoring.wasm_deploy import (
     scoring_snippet_names,
     shipped_scorer_identity,
 )
+from backend.utils.module_shim import install_shim_module
 
 __all__ = [
     "BOLD",
@@ -217,20 +216,11 @@ __all__ = [
     "warn",
 ]
 
-_SUBMODULES = (_stores, _wasm_deploy, _orchestrate)
-
-
-class _ShimModule(types.ModuleType):
-    """Propagates monkeypatch.setattr across session_scoring submodules and shim."""
-
-    def __setattr__(self, name: str, value: Any) -> None:
-        super().__setattr__(name, value)
-        for mod in _SUBMODULES:
-            if hasattr(mod, name):
-                object.__setattr__(mod, name, value)
-        shim = sys.modules.get("backend.provision.session_scoring_orchestrator")
-        if shim is not None and shim is not self:
-            types.ModuleType.__setattr__(shim, name, value)
-
-
-sys.modules[__name__].__class__ = _ShimModule
+_SUBMODULES: tuple[ModuleType, ...] = (_stores, _wasm_deploy, _orchestrate)
+_ShimModule = install_shim_module(
+    __name__,
+    _SUBMODULES,
+    only_existing_attrs=True,
+    extra_module_names=("backend.provision.session_scoring_orchestrator",),
+    always_sync_targets=("backend.provision.session_scoring_orchestrator",),
+)

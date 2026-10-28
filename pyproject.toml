@@ -379,8 +379,11 @@ module = [
     # opt-in; new files in these packages inherit the stricter checks
     # automatically.
     "backend.core.rollups._common",
+    "backend.core.rollups.bundle_builder",
     "backend.core.rollups.session_rollups",
     "backend.core.rollups.day_bundles",
+    "backend.core.rollups.day_compaction_sql",
+    "backend.core.rollups.partial_hour",
     "backend.core.rollups.recompute",
     "backend.routers.admin.health",
 ]

@@ -31,11 +31,10 @@ from cachetools import LRUCache
 
 from backend.core.clickhouse import CLICKHOUSE_HIGH_SCALE_TABLES, get_clickhouse_client
 from backend.core.clickhouse import ClickHouseClient as HttpClickHouseClient
+from backend.utils.module_shim import install_shim_module
 from backend.utils.telemetry import atomic_temp_path, atomic_write_json
 
 logger = structlog.get_logger("backend.high_scale.archive")
-
-import types
 
 from backend.high_scale._common import range_value
 from backend.high_scale.archive import clickhouse_batch as _clickhouse_batch_mod
@@ -206,22 +205,7 @@ for _k, _v in (
 ):
     setattr(_jobs_mod, _k, _v)
 
-
-class _ShimModule(types.ModuleType):
-    def __setattr__(self, name: str, value: object) -> None:
-        super().__setattr__(name, value)
-        if name.startswith("__") and name.endswith("__"):
-            return
-        pkg = sys.modules.get("backend.high_scale.archive")
-        if pkg is not None and pkg is not self:
-            types.ModuleType.__setattr__(pkg, name, value)
-        for mod in _SUBMODULES:
-            if mod is not self:
-                types.ModuleType.__setattr__(mod, name, value)
-
-
-for _mod in (sys.modules[__name__], *_SUBMODULES):
-    _mod.__class__ = _ShimModule
+_ShimModule = install_shim_module(__name__, _SUBMODULES)
 
 _self_mod = sys.modules[__name__]
 

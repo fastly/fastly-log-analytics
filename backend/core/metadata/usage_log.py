@@ -229,3 +229,21 @@ __all__ = [
     "threading",
     "update_cron_duration",
 ]
+
+from backend.core.metadata import (  # noqa: E402
+    cron_runs as _cron_runs,
+)
+from backend.core.metadata import (  # noqa: E402
+    fos_usage as _fos_usage,
+)
+from backend.core.metadata import (  # noqa: E402
+    slow_queries_db as _slow_queries_db,
+)
+from backend.utils.module_shim import install_shim_module  # noqa: E402
+
+install_shim_module(
+    __name__,
+    (_fos_usage, _slow_queries_db, _cron_runs, pg_connection),
+    only_existing_attrs=True,
+    sync_filter=lambda src, dst, name, _val: not (name == "_SCHEMA" and dst is _fos_usage and src is not _fos_usage),
+)

@@ -6,10 +6,6 @@ All implementation now lives in :mod:`backend.provision.session_scoring`
 
 from __future__ import annotations
 
-import sys
-import types
-from typing import Any
-
 import backend.provision.session_scoring as _pkg
 from backend.provision.session_scoring import (  # noqa: F401
     _ENFORCE_STATUS_CODE_MAX,
@@ -117,17 +113,11 @@ from backend.provision.session_scoring import (  # noqa: F401
     validate_quoted_literal,
     warn,
 )
+from backend.utils.module_shim import install_shim_module
 
-
-class _ShimModule(types.ModuleType):
-    """Propagates monkeypatch.setattr across session_scoring_orchestrator and package submodules."""
-
-    def __setattr__(self, name: str, value: Any) -> None:
-        super().__setattr__(name, value)
-        types.ModuleType.__setattr__(_pkg, name, value)
-        for mod in _SUBMODULES:
-            if hasattr(mod, name):
-                object.__setattr__(mod, name, value)
-
-
-sys.modules[__name__].__class__ = _ShimModule
+_ShimModule = install_shim_module(
+    __name__,
+    (_pkg, *_SUBMODULES),
+    only_existing_attrs=True,
+    always_sync_targets=(_pkg,),
+)

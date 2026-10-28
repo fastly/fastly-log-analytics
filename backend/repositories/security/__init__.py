@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 import sys
 import time as _time
-import types
 
 from backend import config as svcconfig
 from backend.core.duckdb import escape_sql_literal
@@ -99,6 +98,7 @@ from backend.repositories.utils.response_shaping import (
 )
 from backend.utils.bounded_cache import BoundedTTLCache, CacheRegistry
 from backend.utils.date_utils import parse_window
+from backend.utils.module_shim import install_shim_module
 
 _logger = logging.getLogger(__name__)
 SQL = sys.modules[__name__]
@@ -192,25 +192,5 @@ __all__ = [
 
 _self = sys.modules[__name__]
 _SUBMODULES = (_sql_mod, _watchdog_mod, _aggregates_mod)
-
-for _k, _v in list(_self.__dict__.items()):
-    if not _k.startswith("__"):
-        for _mod in _SUBMODULES:
-            _mod.__dict__.setdefault(_k, _v)
-
 _SYNC_MODULES = (_self, *_SUBMODULES)
-
-
-class _ShimModule(types.ModuleType):
-    """Module proxy that synchronizes attribute assignments across security submodules."""
-
-    def __setattr__(self, name: str, value: object) -> None:
-        super().__setattr__(name, value)
-        if not name.startswith("__"):
-            for mod in _SYNC_MODULES:
-                if mod is not self:
-                    types.ModuleType.__setattr__(mod, name, value)
-
-
-for _mod in _SYNC_MODULES:
-    _mod.__class__ = _ShimModule
+_ShimModule = install_shim_module(__name__, _SUBMODULES, seed_submodules_from_root=True)

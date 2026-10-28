@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import sys
 import time
-import types
 from typing import Any
 
 import httpx
@@ -105,6 +104,7 @@ from backend.core.metadata import base as pg_connection
 from backend.core.metadata.base import CLICKHOUSE_CONTROL_DDL, get_pg_pool
 from backend.core.request_telemetry import current_clickhouse_scope, get_meter, query_registry
 from backend.utils.bounded_cache import BoundedTTLCache, CacheRegistry
+from backend.utils.module_shim import install_shim_module
 from backend.utils.telemetry import _QUERIES, ensure_utc, get_queries, parse_iso_utc, record_call
 
 logger = structlog.get_logger(__name__)
@@ -151,27 +151,7 @@ for _attr_name, _attr_val in list(_self.__dict__.items()):
         for _mod in (constants, params, client, health):
             _mod.__dict__[_attr_name] = _attr_val
 
-
-class _ShimModule(types.ModuleType):
-    """Module proxy that synchronizes monkeypatched attributes across clickhouse submodules."""
-
-    def __setattr__(self, name: str, value: Any) -> None:
-        super().__setattr__(name, value)
-        if name not in _SKIP_ATTRS:
-            for mod in _SYNC_MODULES:
-                if mod is not self:
-                    mod.__dict__[name] = value
-
-    def __delattr__(self, name: str) -> None:
-        super().__delattr__(name)
-        if name not in _SKIP_ATTRS:
-            for mod in _SYNC_MODULES:
-                if mod is not self and name in mod.__dict__:
-                    del mod.__dict__[name]
-
-
-for _mod in _SYNC_MODULES:
-    _mod.__class__ = _ShimModule
+_ShimModule = install_shim_module(__name__, _SYNC_MODULES, skip_attrs=_SKIP_ATTRS)
 
 
 __all__ = [

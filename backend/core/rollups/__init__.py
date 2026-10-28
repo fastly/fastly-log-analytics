@@ -4,6 +4,8 @@ Submodules:
 
 - :mod:`._common` — constants, validators, paths, query builders, atomic
   marker IO. Imported by every other sub-module.
+- :mod:`.bundle_builder` — generic multi-spec per-hour/day bundle writers,
+  partition publishing, and shared DuckDB rollup session management.
 - :mod:`.time_series_rollups` — per-hour 1-minute time_series.parquet bundles.
 - :mod:`.overview_rollups` — per-hour overview.parquet bundles + backfill.
 - :mod:`.session_rollups` — per-hour per-(ip, ja4) sessions.parquet bundles.
@@ -12,6 +14,9 @@ Submodules:
 - :mod:`.day_bundles` — combine per-field hour/day parquets into
   ``hour_bundled/hour=H/all_fields.parquet`` and
   ``day_bundled/day=D/all_fields.parquet`` + closed-day compactor.
+- :mod:`.day_compaction_sql` — domain closed-day compaction SQL builders and
+  compactor definitions.
+- :mod:`.partial_hour` — active-hour incremental rollup accumulator and reader.
 - :mod:`.recompute` — per-tick recompute + one-shot backfill + cleanup +
   the shared per-field COPY driver + RUM aggregate rollups.
 - :mod:`.origin_dims` — origin, network, and performance rollup writers.
@@ -20,10 +25,16 @@ Submodules:
 
 from __future__ import annotations
 
+from backend.utils.module_shim import install_shim_module
+
 from . import (
+    _common,
+    bundle_builder,
     day_bundles,
+    day_compaction_sql,
     origin_dims,
     overview_rollups,
+    partial_hour,
     recompute,
     rollup_coverage,
     security_dims,
@@ -34,7 +45,6 @@ from . import (
 network = origin_dims
 perf_latency = origin_dims
 hour_bundles = day_bundles
-partial_hour = day_bundles
 time_series = time_series_rollups
 rum = recompute
 spec = recompute
@@ -311,8 +321,32 @@ __all__ = [
     "_get_fields",
     "_run_per_field_copy",
     "_cleanup_per_field_after_bundle",
+    "_common",
+    "bundle_builder",
+    "day_bundles",
+    "day_compaction_sql",
+    "partial_hour",
     "rollup_coverage",
     "overview_rollups",
     "session_rollups",
     "time_series_rollups",
 ]
+
+install_shim_module(
+    __name__,
+    (
+        _common,
+        bundle_builder,
+        day_bundles,
+        day_compaction_sql,
+        partial_hour,
+        origin_dims,
+        overview_rollups,
+        recompute,
+        rollup_coverage,
+        security_dims,
+        session_rollups,
+        time_series_rollups,
+    ),
+    only_existing_attrs=True,
+)

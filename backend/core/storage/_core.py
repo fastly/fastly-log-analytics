@@ -211,6 +211,7 @@ from backend.core.storage.view import (
 from backend.utils.bounded_cache import BoundedTTLCache
 from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry
 from backend.utils.date_utils import parse_day_key_strict
+from backend.utils.module_shim import _ShimModule, install_shim_module
 
 logger = logging.getLogger(__name__)
 
@@ -250,64 +251,21 @@ _MODULE_LOCAL_ATTRS = frozenset(
     }
 )
 
-
-class _SyncedStorageModule(_types.ModuleType):
-    """ModuleType subclass that propagates attribute changes across storage submodules."""
-
-    def __setattr__(self, name: str, value: object) -> None:
-        object.__setattr__(self, name, value)
-        if name.startswith("__") or name in _MODULE_LOCAL_ATTRS:
-            return
-        if getattr(_SYNC_GUARD, "active", False):
-            return
-        _SYNC_GUARD.active = True
-        try:
-            for mod in _SYNCED_MODULES:
-                if mod is not self:
-                    object.__setattr__(mod, name, value)
-        finally:
-            _SYNC_GUARD.active = False
-
-    def __delattr__(self, name: str) -> None:
-        try:
-            object.__delattr__(self, name)
-        except AttributeError:
-            pass
-        if name.startswith("__") or name in _MODULE_LOCAL_ATTRS:
-            return
-        if getattr(_SYNC_GUARD, "active", False):
-            return
-        _SYNC_GUARD.active = True
-        try:
-            for mod in _SYNCED_MODULES:
-                if mod is not self and name in mod.__dict__:
-                    try:
-                        object.__delattr__(mod, name)
-                    except AttributeError:
-                        pass
-        finally:
-            _SYNC_GUARD.active = False
+_SyncedStorageModule = _ShimModule
 
 
 def register_storage_module(mod: _types.ModuleType) -> None:
     """Register ``mod`` to share attribute state with all storage modules in-place."""
     if mod not in _SYNCED_MODULES:
-        if not isinstance(mod, _SyncedStorageModule):
-            mod.__class__ = _SyncedStorageModule
         _SYNCED_MODULES.append(mod)
-    for other in list(_SYNCED_MODULES):
-        if other is mod:
-            continue
-        for k, v in list(other.__dict__.items()):
-            if k.startswith("__") or k in _MODULE_LOCAL_ATTRS:
-                continue
-            if k not in mod.__dict__:
-                mod.__dict__[k] = v
-        for k, v in list(mod.__dict__.items()):
-            if k.startswith("__") or k in _MODULE_LOCAL_ATTRS:
-                continue
-            if k not in other.__dict__:
-                other.__dict__[k] = v
+    for existing in _SYNCED_MODULES:
+        existing.__dict__.pop("__shim_rules__", None)
+    install_shim_module(
+        mod.__name__,
+        _SYNCED_MODULES,
+        skip_attrs=_MODULE_LOCAL_ATTRS,
+        bidirectional_seed=True,
+    )
 
 
 for _mod in (

@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import sys as _sys
-import types as _types
-from typing import Any
 
 from backend.models.admin.health_and_sync import (
     MAX_PAGE_SIZE,
@@ -186,6 +184,7 @@ from backend.models.admin.sharing import (
     TosDocument,
     WordphraseResponse,
 )
+from backend.utils.module_shim import install_shim_module
 
 _SUBMODULES = (
     _sys.modules[__name__],
@@ -195,19 +194,7 @@ _SUBMODULES = (
     _sys.modules[f"{__name__}.sharing"],
 )
 
-
-class _ShimModule(_types.ModuleType):
-    """Propagates attribute monkeypatches across all admin model submodules."""
-
-    def __setattr__(self, name: str, value: Any) -> None:
-        super().__setattr__(name, value)
-        for mod in _SUBMODULES:
-            if mod is not self and name in mod.__dict__:
-                _types.ModuleType.__setattr__(mod, name, value)
-
-
-for _mod in _SUBMODULES:
-    _mod.__class__ = _ShimModule
+_ShimModule = install_shim_module(__name__, _SUBMODULES, only_existing_attrs=True)
 
 
 __all__ = [

@@ -10,7 +10,6 @@ import os
 import re
 import sys
 import time
-import types
 import urllib.parse
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -146,6 +145,7 @@ from backend.provision.session_scoring_orchestrator import (
     generate_scoring_vcl,
     scorer_vcl_fingerprint,
 )
+from backend.utils.module_shim import install_shim_module
 
 fastly_integration: Any = sys.modules[__name__]
 logger = logging.getLogger(__name__)
@@ -175,27 +175,13 @@ _SKIP_SHIM_ATTRS = frozenset(
 
 for _mod in (models, vcl_builder, fastly_ops, orchestrate):
     _mod.__dict__["fastly_integration"] = _self
-    for _k, _v in list(_self.__dict__.items()):
-        if _k not in _SKIP_SHIM_ATTRS and not _k.startswith("__"):
-            _mod.__dict__.setdefault(_k, _v)
 
-
-class _ShimModule(types.ModuleType):
-    def __getattr__(self, name: str) -> Any:
-        if name not in self.__dict__:
-            raise AttributeError(f"module {self.__name__!r} has no attribute {name!r}")
-        return self.__dict__[name]
-
-    def __setattr__(self, name: str, value: Any) -> None:
-        super().__setattr__(name, value)
-        if name not in _SKIP_SHIM_ATTRS:
-            for mod in _SYNC_MODULES:
-                if mod is not self:
-                    mod.__dict__[name] = value
-
-
-for _mod in _SYNC_MODULES:
-    _mod.__class__ = _ShimModule
+_ShimModule = install_shim_module(
+    __name__,
+    _SYNC_MODULES,
+    seed_submodules_from_root=True,
+    skip_attrs=_SKIP_SHIM_ATTRS,
+)
 
 __all__ = [
     "MANAGED_BACKEND_NAMES",

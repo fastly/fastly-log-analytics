@@ -1,7 +1,6 @@
 import concurrent.futures  # noqa: F401
 import gzip as gzip
 import hashlib as hashlib
-import importlib
 import itertools as itertools
 import json as json
 import logging
@@ -19,8 +18,7 @@ from collections.abc import Callable as Callable
 from datetime import UTC as UTC
 from datetime import datetime as datetime
 from datetime import timedelta as timedelta
-from types import ModuleType
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import backend.core as _core_pkg
 from backend.celery_app import app
@@ -37,7 +35,7 @@ from backend.core.duckdb import (
     _load_httpfs,  # noqa: F401  re-exported for test monkey-patching
     escape_sql_literal,
 )
-from backend.core.ingest import discovery, parser, writer
+from backend.core.ingest import batch_worker, discovery, parser, writer
 from backend.core.ingest.discovery import (
     _DASH_KEY_RE,
     _FASTLY_FNAME_TS_RE,
@@ -128,6 +126,7 @@ from backend.core.ingest.writer import (
 )
 from backend.core.log_fields import LOG_FIELD_CATALOG
 from backend.core.metadata import ingest_log as _quarantine_mod
+from backend.utils.module_shim import install_shim_module
 from backend.utils.telemetry import yield_to_api
 
 _core_pkg.quarantine = _quarantine_mod  # type: ignore[attr-defined]
@@ -288,7 +287,7 @@ _DELEGATED_INGEST_ATTRS: dict[str, str] = {
     "sweep_rum_ledger_once": "backend.core.rum_ingest",
 }
 
-_SUBMODULES = (discovery, parser, writer)
+_SUBMODULES = (discovery, parser, writer, batch_worker)
 _SKIP_SHIM_ATTRS = frozenset(
     {
         "__name__",
@@ -311,57 +310,16 @@ _SKIP_SHIM_ATTRS = frozenset(
     }
 )
 
-
-class _ShimModule(ModuleType):
-    """Module proxy keeping attribute patches synced across ingest submodules and delegated modules."""
-
-    _orig_delegated: dict[str, Any] = {}
-
-    def __getattr__(self, name: str) -> Any:
-        if (mod_name := _DELEGATED_INGEST_ATTRS.get(name)) is not None:
-            return getattr(importlib.import_module(mod_name), name)
-        raise AttributeError(f"module {self.__name__!r} has no attribute {name!r}")
-
-    def __setattr__(self, name: str, value: Any) -> None:
-        if (mod_name := _DELEGATED_INGEST_ATTRS.get(name)) is not None:
-            mod = importlib.import_module(mod_name)
-            if name not in self._orig_delegated:
-                self._orig_delegated[name] = getattr(mod, name)
-            setattr(mod, name, value)
-            if value is self._orig_delegated.get(name):
-                self._orig_delegated.pop(name, None)
-                for m in _SYNC_MODULES:
-                    m.__dict__.pop(name, None)
-                return
-        super().__setattr__(name, value)
-        if not getattr(self, "_SHIM_INITIALIZED", False) or name in _SKIP_SHIM_ATTRS:
-            return
-        for mod in _SYNC_MODULES:
-            if mod is not self and (name in mod.__dict__ or mod is sys.modules.get(__name__)):
-                mod.__dict__[name] = value
-
-    def __delattr__(self, name: str) -> None:
-        if (mod_name := _DELEGATED_INGEST_ATTRS.get(name)) is not None and name in self._orig_delegated:
-            mod = importlib.import_module(mod_name)
-            setattr(mod, name, self._orig_delegated.pop(name))
-            for m in _SYNC_MODULES:
-                m.__dict__.pop(name, None)
-            return
-        super().__delattr__(name)
-
-
+_SYNC_MODULES = (sys.modules[__name__], *_SUBMODULES)
+_ShimModule = install_shim_module(
+    __name__,
+    _SUBMODULES,
+    skip_attrs=_SKIP_SHIM_ATTRS,
+    delegated_attrs=_DELEGATED_INGEST_ATTRS,
+    seed_submodules_from_root=True,
+    only_existing_attrs=True,
+)
 _IngestModule = _ShimModule
-
-_self = sys.modules[__name__]
-_SYNC_MODULES = (_self, *_SUBMODULES)
-for _mod in _SUBMODULES:
-    for _k, _v in list(_self.__dict__.items()):
-        if _k not in _SKIP_SHIM_ATTRS and not _k.startswith("__"):
-            _mod.__dict__.setdefault(_k, _v)
-for _mod in _SYNC_MODULES:
-    if not isinstance(_mod, _ShimModule):
-        _mod.__class__ = _ShimModule
-    _mod.__dict__["_SHIM_INITIALIZED"] = True
 
 __all__ = [
     "INGEST_CHUNK_SIZE",

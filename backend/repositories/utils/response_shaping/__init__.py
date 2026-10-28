@@ -11,8 +11,6 @@ a single source of truth for:
 from __future__ import annotations
 
 import math as math  # noqa: F401
-import sys as _sys
-import types as _types
 from collections.abc import Callable, Iterable, Mapping, Sequence  # noqa: F401
 from datetime import UTC, datetime, timedelta  # noqa: F401
 from typing import TYPE_CHECKING, Any
@@ -114,6 +112,7 @@ from backend.repositories.utils.response_shaping.time_buckets import (
     select_insight_bucket_interval,
 )
 from backend.utils.date_utils import ensure_utc, parse_iso_utc  # noqa: F401
+from backend.utils.module_shim import install_shim_module
 
 _asn_mod.float_or_zero = float_or_zero
 
@@ -175,22 +174,7 @@ _SUBMODULES = (
     _domains_mod,
 )
 
-
-class _ShimModule(_types.ModuleType):
-    """Propagate monkeypatch attributes across response_shaping package and submodules."""
-
-    def __setattr__(self, name: str, value: object) -> None:
-        super().__setattr__(name, value)
-        if name.startswith("__") and name.endswith("__"):
-            return
-        for mod in _SUBMODULES:
-            if hasattr(mod, name):
-                object.__setattr__(mod, name, value)
-
-
-_self_mod = _sys.modules[__name__]
-if not isinstance(_self_mod, _ShimModule):
-    _self_mod.__class__ = _ShimModule
+_ShimModule = install_shim_module(__name__, _SUBMODULES, only_existing_attrs=True)
 
 
 __all__ = [

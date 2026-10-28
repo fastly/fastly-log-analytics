@@ -2,10 +2,6 @@
 
 from __future__ import annotations
 
-import sys
-import types
-from typing import Any
-
 from backend.core.request_telemetry import (
     instruments,
     middleware,
@@ -189,6 +185,7 @@ from backend.core.request_telemetry.tracker import (  # noqa: F401
     publisher,
     refresh_durable_request_metrics,
 )
+from backend.utils.module_shim import install_shim_module
 
 _SYNC_MODULES = (
     instruments,
@@ -206,29 +203,10 @@ _DELEGATED_ATTRS = {
     "_metric_cancelled_total": _query_registry_mod,
 }
 
-
-class _ShimModule(types.ModuleType):
-    """Module proxy that forwards monkeypatch attributes into domain submodules."""
-
-    def __getattribute__(self, name: str) -> Any:
-        delegated = _DELEGATED_ATTRS.get(name)
-        if delegated is not None:
-            return getattr(delegated, name)
-        return super().__getattribute__(name)
-
-    def __getattr__(self, name: str) -> Any:
-        for mod in _SYNC_MODULES:
-            if hasattr(mod, name):
-                return getattr(mod, name)
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-
-    def __setattr__(self, name: str, value: Any) -> None:
-        super().__setattr__(name, value)
-        for mod in _SYNC_MODULES:
-            if hasattr(mod, name):
-                setattr(mod, name, value)
-
-
-_self = sys.modules[__name__]
-if not isinstance(_self, _ShimModule):
-    _self.__class__ = _ShimModule
+_ShimModule = install_shim_module(
+    __name__,
+    _SYNC_MODULES,
+    install_on_submodules=False,
+    only_existing_attrs=True,
+    delegated_attrs=_DELEGATED_ATTRS,
+)

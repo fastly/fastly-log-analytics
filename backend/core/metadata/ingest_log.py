@@ -8,18 +8,12 @@ join against ``usage_log`` (for the unbackfilled-edge-files sweep).
 
 from __future__ import annotations
 
-import hashlib
-import json
 import logging
-import os
-import threading
-from collections.abc import Iterator
-from contextlib import contextmanager
-from pathlib import Path
-from typing import Any, BinaryIO
+from typing import Any
 
 from backend import config
 from backend.core.metadata import base as pg_connection
+from backend.core.metadata import quarantine_evidence as _quarantine_evidence
 from backend.core.metadata.base import (
     _ingested_filenames_cache,
     _ingested_filenames_cache_lock,
@@ -27,6 +21,40 @@ from backend.core.metadata.base import (
     get_con,
     get_con_readonly,
 )
+from backend.core.metadata.quarantine_evidence import (
+    _MAX_ERROR_TEXT_LENGTH,
+    _QUARANTINE_EVIDENCE_COLUMNS,
+    _RUM_TABLES_SQL,
+    QUARANTINE_ITEM_CAP,
+    _advisory_key,
+    _capture_evidence_locked,
+    _evidence_dir,
+    _evidence_path,
+    _quarantine_file_lock,
+    _quarantine_root,
+    _service_lock,
+    _service_locks,
+    _service_locks_guard,
+    _unlink_evidence,
+    capture_evidence,
+    clear_in_flight,
+    count_quarantine_evidence,
+    delete_quarantine_evidence,
+    get_node_count_avg,
+    get_quarantine_evidence,
+    get_quarantine_evidence_summary,
+    get_quarantine_storage_total,
+    get_quarantine_summary,
+    get_rum_beacons_avg_per_day,
+    get_rum_beacons_by_date,
+    insert_quarantine_evidence,
+    list_in_flight,
+    list_quarantine_evidence,
+    purge_evidence,
+    read_evidence,
+    record_in_flight,
+)
+from backend.utils.module_shim import install_shim_module
 from backend.utils.telemetry import atomic_write_bytes
 
 logger = logging.getLogger(__name__)
@@ -140,11 +168,7 @@ def list_ingested_files(service_id: str, limit: int = 10000) -> list[dict]:
     ]
 
 
-def _query_ingested_files_aggregate(
-    con: Any,
-    service_id: str,
-    table_name: str | None = None,
-) -> dict[str, Any]:
+def _query_ingested_files_aggregate(con: Any, service_id: str, table_name: str | None = None) -> dict[str, Any]:
     """Run the aggregate + latest-filename queries against ``ingested_files``."""
     where_sql = "WHERE source_name = ?"
     params: tuple[Any, ...] = (service_id,)
@@ -152,16 +176,9 @@ def _query_ingested_files_aggregate(
         where_sql += " AND table_name = ?"
         params = (service_id, table_name)
     agg = con.execute(
-        f"""
-        SELECT
-            COUNT(*)                           AS file_count,
-            COALESCE(SUM(row_count), 0)        AS total_rows,
-            COALESCE(SUM(file_size_bytes), 0)  AS total_bytes,
-            COUNT(file_size_bytes)             AS count_with_bytes,
-            MAX(ingested_at)                   AS last_ingested
-        FROM ingested_files
-        {where_sql}
-        """,
+        f"SELECT COUNT(*) AS file_count, COALESCE(SUM(row_count), 0) AS total_rows, "
+        f"COALESCE(SUM(file_size_bytes), 0) AS total_bytes, COUNT(file_size_bytes) AS count_with_bytes, "
+        f"MAX(ingested_at) AS last_ingested FROM ingested_files {where_sql}",
         params,
     ).fetchone()
     # Order chronologically by extracting the timestamp following '.gz' in the filename
@@ -189,17 +206,12 @@ def _bootstrap_ingested_files_summary(con: Any, service_id: str) -> dict:
     """
     summary = _query_ingested_files_aggregate(con, service_id)
     con.execute(
-        """INSERT INTO ingested_files_summary AS summary
-               (source_name, file_count, total_rows, total_bytes,
-                count_with_bytes, latest_file_name, last_ingested)
-           VALUES (?, ?, ?, ?, ?, ?, ?)
-           ON CONFLICT(source_name) DO UPDATE SET
-               file_count = excluded.file_count,
-               total_rows = excluded.total_rows,
-               total_bytes = excluded.total_bytes,
-               count_with_bytes = excluded.count_with_bytes,
-               latest_file_name = excluded.latest_file_name,
-               last_ingested = excluded.last_ingested""",
+        "INSERT INTO ingested_files_summary AS summary "
+        "(source_name, file_count, total_rows, total_bytes, count_with_bytes, latest_file_name, last_ingested) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(source_name) DO UPDATE SET "
+        "file_count = excluded.file_count, total_rows = excluded.total_rows, total_bytes = excluded.total_bytes, "
+        "count_with_bytes = excluded.count_with_bytes, latest_file_name = excluded.latest_file_name, "
+        "last_ingested = excluded.last_ingested",
         (
             service_id,
             summary["file_count"],
@@ -248,8 +260,7 @@ def get_ingested_files_status_summary(service_id: str, table_name: str = "logs")
         return _query_ingested_files_aggregate(con, service_id, table_name=table_name)
 
     row = con.execute(
-        "SELECT file_count, total_rows, total_bytes, count_with_bytes, "
-        "       latest_file_name, last_ingested "
+        "SELECT file_count, total_rows, total_bytes, count_with_bytes, latest_file_name, last_ingested "
         "FROM ingested_files_summary WHERE source_name = ?",
         (service_id,),
     ).fetchone()
@@ -303,44 +314,28 @@ def get_log_accounting_counts(
     """
     import contextlib
 
-    start_date = sql_start[:10]
-    end_date = sql_end[:10]
-    sql_start_space = sql_start.replace("T", " ")
-    sql_end_space = sql_end.replace("T", " ")
+    start_date, end_date = sql_start[:10], sql_end[:10]
+    sql_start_space, sql_end_space = sql_start.replace("T", " "), sql_end.replace("T", " ")
     date_pattern_check = " ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'"
 
     # Optimize fast arm SELECT expression and parameters based on width
-    fast_params: tuple[int, ...]
-    if width == 10:
-        fast_bucket_expr = "file_date"
-        fast_params = ()
-    else:
-        fast_bucket_expr = "substr(file_name, instr(file_name, 'T') - 10, ?)"
-        fast_params = (width,)
+    fast_params: tuple[int, ...] = () if width == 10 else (width,)
+    fast_bucket_expr = "file_date" if width == 10 else "substr(file_name, instr(file_name, 'T') - 10, ?)"
 
     # Optimize slow arm bucket CASE expression and parameters based on width
     slow_params: tuple[int, ...]
     if width == 10:
-        slow_bucket_expr = """
-              CASE
-                WHEN file_date IS NOT NULL THEN file_date
-                WHEN ingested_at IS NOT NULL THEN substr(replace(ingested_at, ' ', 'T'), 1, 10)
-                ELSE NULL
-              END
-        """
+        slow_bucket_expr = (
+            "CASE WHEN file_date IS NOT NULL THEN file_date "
+            "WHEN ingested_at IS NOT NULL THEN substr(replace(ingested_at, ' ', 'T'), 1, 10) ELSE NULL END"
+        )
         slow_params = ()
     else:
-        slow_bucket_expr = f"""
-              CASE
-                WHEN instr(file_name, 'T') >= 11
-                 AND substr(file_name, instr(file_name, 'T') - 10, 10)
-                     {date_pattern_check}
-                THEN substr(file_name, instr(file_name, 'T') - 10, ?)
-                WHEN ingested_at IS NOT NULL
-                THEN substr(replace(ingested_at, ' ', 'T'), 1, ?)
-                ELSE NULL
-              END
-        """
+        slow_bucket_expr = (
+            f"CASE WHEN instr(file_name, 'T') >= 11 AND substr(file_name, instr(file_name, 'T') - 10, 10)"
+            f"{date_pattern_check} THEN substr(file_name, instr(file_name, 'T') - 10, ?) "
+            "WHEN ingested_at IS NOT NULL THEN substr(replace(ingested_at, ' ', 'T'), 1, ?) ELSE NULL END"
+        )
         slow_params = (width, width)
 
     query = f"""
@@ -348,43 +343,37 @@ def get_log_accounting_counts(
             -- Fast arm: file_date index range scan. file_date IS NOT NULL
             -- implies the basename matches the canonical Fastly pattern
             -- per _migration_002, so the bucket substr/column will always succeed.
-            SELECT {fast_bucket_expr} AS bucket,
-                   sum(row_count) AS rc,
-                   count(*)       AS fc
+            SELECT {fast_bucket_expr} AS bucket, sum(row_count) AS rc, count(*) AS fc
             FROM ingested_files
-            WHERE source_name = ?
-              AND file_date IS NOT NULL
-              AND file_date >= ? AND file_date <= ?
-              AND file_name != '__seeding_attempted__'
+            WHERE source_name = ? AND file_date IS NOT NULL
+              AND file_date >= ? AND file_date <= ? AND file_name != '__seeding_attempted__'
             GROUP BY 1
             UNION ALL
             -- Slow arm: rows without a parseable basename (file_date NULL).
             -- Keeps the full CASE so the ingested_at fallback continues
             -- to count test fixtures + legacy uploads.
             -- Removing INDEXED BY allows SQLite to naturally use the optimal index on ingested_at.
-            SELECT
-              {slow_bucket_expr} AS bucket,
-              sum(row_count) AS rc,
-              count(*)       AS fc
+            SELECT {slow_bucket_expr} AS bucket, sum(row_count) AS rc, count(*) AS fc
             FROM ingested_files
-            WHERE source_name = ?
-              AND file_date IS NULL
-              AND ingested_at >= ?
-              AND ingested_at <= ?
-              AND file_name != '__seeding_attempted__'
+            WHERE source_name = ? AND file_date IS NULL
+              AND ingested_at >= ? AND ingested_at <= ? AND file_name != '__seeding_attempted__'
             GROUP BY 1
         ) AS combined
         GROUP BY bucket
         HAVING bucket IS NOT NULL AND bucket >= ? AND bucket <= ?
     """
-
     params = (
-        fast_params
-        + (service_id, start_date, end_date)
-        + slow_params
-        + (service_id, sql_start_space, sql_end_space, start_bucket, end_bucket)
+        *fast_params,
+        service_id,
+        start_date,
+        end_date,
+        *slow_params,
+        service_id,
+        sql_start_space,
+        sql_end_space,
+        start_bucket,
+        end_bucket,
     )
-
     with contextlib.closing(get_con_readonly(service_id)) as con:
         rows = con.execute(query, params).fetchall()
     return {r["bucket"]: (int(r["rows"] or 0), int(r["files"] or 0)) for r in rows}
@@ -400,11 +389,8 @@ def get_storage_stats_window(service_id: str, start_str: str, end_str: str) -> t
     """
     con = get_con(service_id)
     row = con.execute(
-        """SELECT count(*) AS n, coalesce(sum(file_size_bytes), 0) AS bytes
-           FROM ingested_files
-           WHERE source_name = ?
-             AND ingested_at >= ?
-             AND ingested_at <= ?""",
+        "SELECT count(*) AS n, coalesce(sum(file_size_bytes), 0) AS bytes FROM ingested_files "
+        "WHERE source_name = ? AND ingested_at >= ? AND ingested_at <= ?",
         (service_id, start_str, end_str),
     ).fetchone()
     if not row:
@@ -438,23 +424,14 @@ def list_unbackfilled_fastly_edge_files(
     con = get_con(service_id)
     if since is None:
         rows = con.execute(
-            """
-            SELECT file_name, ingested_at, row_count, file_size_bytes
-            FROM ingested_files
-            WHERE source_name = ?
-              AND file_name != '__seeding_attempted__'
-            """,
+            "SELECT file_name, ingested_at, row_count, file_size_bytes FROM ingested_files "
+            "WHERE source_name = ? AND file_name != '__seeding_attempted__'",
             (service_id,),
         ).fetchall()
     else:
         rows = con.execute(
-            """
-            SELECT file_name, ingested_at, row_count, file_size_bytes
-            FROM ingested_files
-            WHERE source_name = ?
-              AND ingested_at >= ?
-              AND file_name != '__seeding_attempted__'
-            """,
+            "SELECT file_name, ingested_at, row_count, file_size_bytes FROM ingested_files "
+            "WHERE source_name = ? AND ingested_at >= ? AND file_name != '__seeding_attempted__'",
             (service_id, since),
         ).fetchall()
 
@@ -514,11 +491,8 @@ def get_latest_ingest_ts(service_id: str) -> str | None:
     "caught up at the moment we tried to seed"."""
     con = get_con(service_id)
     row = con.execute(
-        """
-        SELECT max(ingested_at) AS latest
-        FROM ingested_files
-        WHERE source_name = ? AND file_name != '__seeding_attempted__'
-        """,
+        "SELECT max(ingested_at) AS latest FROM ingested_files "
+        "WHERE source_name = ? AND file_name != '__seeding_attempted__'",
         (service_id,),
     ).fetchone()
     if not row or not row["latest"]:
@@ -544,11 +518,8 @@ def get_latest_reconciliation_ts(service_id: str) -> str | None:
         return None
     try:
         row = con.execute(
-            """
-            SELECT max(timestamp) AS latest
-            FROM usage_log
-            WHERE service_id = ? AND function_name = 'fastly.reconciliation'
-            """,
+            "SELECT max(timestamp) AS latest FROM usage_log "
+            "WHERE service_id = ? AND function_name = 'fastly.reconciliation'",
             (service_id,),
         ).fetchone()
     finally:
@@ -576,13 +547,7 @@ def insert_ingested_files(service_id: str, rows: list[tuple[str, int, int | None
     # already had a million rows (first insert after upgrade on a populated
     # service). The bootstrap commits in its own statement; the delta update
     # below then correctly adds this batch on top.
-    if (
-        con.execute(
-            "SELECT 1 FROM ingested_files_summary WHERE source_name = ?",
-            (service_id,),
-        ).fetchone()
-        is None
-    ):
+    if con.execute("SELECT 1 FROM ingested_files_summary WHERE source_name = ?", (service_id,)).fetchone() is None:
         _bootstrap_ingested_files_summary(con, service_id)
 
     # Snapshot existing values for rows that already exist, so we can compute
@@ -600,10 +565,7 @@ def insert_ingested_files(service_id: str, rows: list[tuple[str, int, int | None
         ).fetchall():
             existing[r["file_name"]] = (r["row_count"], r["file_size_bytes"])
 
-    file_count_delta = 0
-    rows_delta = 0
-    bytes_delta = 0
-    count_with_bytes_delta = 0
+    file_count_delta = rows_delta = bytes_delta = count_with_bytes_delta = 0
     # Find the file with the maximum chronological timestamp embedded after '.gz'
     latest_file_name = None
     max_ts = ""
@@ -624,8 +586,7 @@ def insert_ingested_files(service_id: str, rows: list[tuple[str, int, int | None
             old_rc, old_sz = existing[fn]
             rows_delta += (rc or 0) - (old_rc or 0)
             bytes_delta += (sz or 0) - (old_sz or 0)
-            had_size = old_sz is not None
-            has_size = sz is not None
+            had_size, has_size = old_sz is not None, sz is not None
             if has_size and not had_size:
                 count_with_bytes_delta += 1
             elif had_size and not has_size:
@@ -653,25 +614,22 @@ def insert_ingested_files(service_id: str, rows: list[tuple[str, int, int | None
     now_str = con.execute("SELECT datetime('now')").fetchone()[0]
     con.execute(
         """INSERT INTO ingested_files_summary AS summary
-               (source_name, file_count, total_rows, total_bytes,
-                count_with_bytes, latest_file_name, last_ingested)
+               (source_name, file_count, total_rows, total_bytes, count_with_bytes, latest_file_name, last_ingested)
            VALUES (?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(source_name) DO UPDATE SET
                file_count       = summary.file_count + excluded.file_count,
-               total_rows      = summary.total_rows + excluded.total_rows,
+               total_rows       = summary.total_rows + excluded.total_rows,
                total_bytes      = summary.total_bytes + excluded.total_bytes,
                count_with_bytes = summary.count_with_bytes + excluded.count_with_bytes,
                latest_file_name = CASE
                    WHEN summary.latest_file_name IS NULL OR
                         substr(excluded.latest_file_name, instr(excluded.latest_file_name, '.gz') + 3, 19) >
-                        substr(summary.latest_file_name,
-                               instr(summary.latest_file_name, '.gz') + 3, 19)
+                        substr(summary.latest_file_name, instr(summary.latest_file_name, '.gz') + 3, 19)
                        THEN excluded.latest_file_name
                    ELSE summary.latest_file_name
                END,
                last_ingested = CASE
-                   WHEN summary.last_ingested IS NULL OR
-                        excluded.last_ingested > summary.last_ingested
+                   WHEN summary.last_ingested IS NULL OR excluded.last_ingested > summary.last_ingested
                        THEN excluded.last_ingested
                    ELSE summary.last_ingested
                END""",
@@ -698,75 +656,13 @@ def insert_ingested_files(service_id: str, rows: list[tuple[str, int, int | None
             cached.update(file_names)
 
 
-def record_in_flight(
-    service_id: str,
-    buffer_filename: str,
-    rows: list[tuple[str, int, int | None]],
-    table_name: str = "logs",
-) -> None:
-    """Persist the (file_name, row_count, file_size) tuples that BELONG to a
-    buffer Parquet, BEFORE the Parquet is written.
-
-    On crash recovery, ``list_in_flight`` returns these tuples so the sweep
-    can promote them into ``ingested_files`` without re-parsing the buffer.
-    Upsert semantics: a re-run of the same chunk (same deterministic
-    buffer filename) overwrites the prior manifest — never raises.
-    """
-    con = get_con(service_id)
-    con.execute(
-        """INSERT INTO ingest_in_flight (buffer_filename, source_name, files_json, started_at, table_name)
-           VALUES (?, ?, ?, datetime('now'), ?)
-           ON CONFLICT(buffer_filename, table_name) DO UPDATE SET
-               source_name = excluded.source_name,
-               files_json = excluded.files_json,
-               started_at = excluded.started_at""",
-        (buffer_filename, service_id, json.dumps(rows), table_name),
-    )
-    con.commit()
-
-
-def clear_in_flight(service_id: str, buffer_filename: str, table_name: str = "logs") -> None:
-    """Drop the in_flight row for ``buffer_filename`` after its files have
-    been committed to ``ingested_files``. Idempotent."""
-    con = get_con(service_id)
-    con.execute(
-        "DELETE FROM ingest_in_flight WHERE source_name = ? AND buffer_filename = ? AND table_name = ?",
-        (service_id, buffer_filename, table_name),
-    )
-    con.commit()
-
-
-def list_in_flight(service_id: str, table_name: str = "logs") -> list[tuple[str, list[tuple[str, int, int | None]]]]:
-    """Return [(buffer_filename, [(file_name, row_count, file_size), ...]), ...]
-    for every pending row belonging to this service. Used by the crash-
-    recovery sweep at the start of every ingest tick."""
-    con = get_con(service_id)
-    rows = con.execute(
-        "SELECT buffer_filename, files_json FROM ingest_in_flight WHERE source_name = ? AND table_name = ?",
-        (service_id, table_name),
-    ).fetchall()
-    out: list[tuple[str, list[tuple[str, int, int | None]]]] = []
-    for r in rows:
-        try:
-            tuples = [tuple(t) for t in json.loads(r["files_json"] or "[]")]
-        except (json.JSONDecodeError, TypeError):
-            tuples = []
-        out.append((r["buffer_filename"], tuples))
-    return out
-
-
 def get_log_activity(service_id: str, start_iso: str, end_iso: str, by: str) -> dict:
     """Return time-bucketed log activity (rows + bytes ingested per bucket).
 
     SQLite has no DATE_TRUNC, so we bucket via SUBSTR on the ISO timestamp.
     Used by /api/usage/log-activity.
     """
-    width_map = {
-        "second": 19,  # YYYY-MM-DDTHH:MM:SS
-        "minute": 16,  # YYYY-MM-DDTHH:MM
-        "hour": 13,  # YYYY-MM-DDTHH
-        "day": 10,  # YYYY-MM-DD
-    }
+    width_map = {"second": 19, "minute": 16, "hour": 13, "day": 10}
     width = width_map.get(by, 13)
 
     con = get_con(service_id)
@@ -780,571 +676,99 @@ def get_log_activity(service_id: str, start_iso: str, end_iso: str, by: str) -> 
     # buckets keep the original shape because file_date has only date
     # granularity.
     if by == "day":
-        start_date = start_iso[:10]
-        end_date = end_iso[:10]
+        start_date, end_date = start_iso[:10], end_iso[:10]
         rows = con.execute(
-            """
-            SELECT bucket, sum(rc) AS rc, sum(bs) AS bs FROM (
-                SELECT CAST(file_date AS text) AS bucket,
-                       sum(row_count) AS rc,
-                       sum(file_size_bytes) AS bs
+            """SELECT bucket, sum(rc) AS rc, sum(bs) AS bs FROM (
+                SELECT CAST(file_date AS text) AS bucket, sum(row_count) AS rc, sum(file_size_bytes) AS bs
                 FROM ingested_files
-                WHERE source_name = ?
-                  AND file_date IS NOT NULL
-                  AND file_date >= ?
-                  AND file_date <= ?
-                  AND file_name != '__seeding_attempted__'
+                WHERE source_name = ? AND file_date IS NOT NULL
+                  AND file_date >= ? AND file_date <= ? AND file_name != '__seeding_attempted__'
                 GROUP BY file_date
                 UNION ALL
                 SELECT substr(replace(ingested_at, ' ', 'T'), 1, 10) AS bucket,
-                       sum(row_count) AS rc,
-                       sum(file_size_bytes) AS bs
+                       sum(row_count) AS rc, sum(file_size_bytes) AS bs
                 FROM ingested_files
-                WHERE source_name = ?
-                  AND file_date IS NULL
-                  AND file_name != '__seeding_attempted__'
-                  AND ingested_at >= ?
-                  AND ingested_at <= ?
+                WHERE source_name = ? AND file_date IS NULL AND file_name != '__seeding_attempted__'
+                  AND ingested_at >= ? AND ingested_at <= ?
                 GROUP BY bucket
-            ) AS combined
-            GROUP BY bucket ORDER BY bucket
-            """,
+            ) AS combined GROUP BY bucket ORDER BY bucket""",
             (service_id, start_date, end_date, service_id, start_iso, end_iso),
         ).fetchall()
     else:
         rows = con.execute(
-            f"""
-            SELECT substr(replace(ingested_at, ' ', 'T'), 1, {width}) AS bucket,
-                   sum(row_count) AS rc,
-                   sum(file_size_bytes) AS bs
-            FROM ingested_files
-            WHERE source_name = ?
-              AND file_name != '__seeding_attempted__'
-              AND ingested_at >= ?
-              AND ingested_at <= ?
-            GROUP BY bucket ORDER BY bucket
-            """,
+            f"""SELECT substr(replace(ingested_at, ' ', 'T'), 1, {width}) AS bucket,
+                       sum(row_count) AS rc, sum(file_size_bytes) AS bs
+                FROM ingested_files
+                WHERE source_name = ? AND file_name != '__seeding_attempted__'
+                  AND ingested_at >= ? AND ingested_at <= ?
+                GROUP BY bucket ORDER BY bucket""",
             (service_id, start_iso, end_iso),
         ).fetchall()
 
     def _normalize(bucket: str) -> str:
-        if by == "hour":
-            return bucket + ":00"
-        if by == "minute" and len(bucket) == 16:
-            return bucket
-        if by == "day":
-            return bucket
-        return bucket
+        return bucket + ":00" if by == "hour" else bucket
 
     points: list[dict] = []
-    total_rows = 0
-    total_bytes = 0
+    total_rows = total_bytes = 0
     for r in rows:
         if r["bucket"] is None:
             continue
-        rc = int(r["rc"] or 0)
-        bs = int(r["bs"] or 0)
+        rc, bs = int(r["rc"] or 0), int(r["bs"] or 0)
         points.append({"time": _normalize(str(r["bucket"])), "row_count": rc, "bytes": bs})
         total_rows += rc
         total_bytes += bs
-    return {
-        "data": points,
-        "total_rows": total_rows,
-        "total_bytes": total_bytes,
-        "granularity": by,
-    }
+    return {"data": points, "total_rows": total_rows, "total_bytes": total_bytes, "granularity": by}
 
 
-def get_node_count_avg(service_id: str) -> float | None:
-    """Average number of files-per-flush, derived from the basename timestamp.
+__all__ = [
+    "QUARANTINE_ITEM_CAP",
+    "_MAX_ERROR_TEXT_LENGTH",
+    "_QUARANTINE_EVIDENCE_COLUMNS",
+    "_RUM_TABLES_SQL",
+    "_advisory_key",
+    "_bootstrap_ingested_files_summary",
+    "_capture_evidence_locked",
+    "_evidence_dir",
+    "_evidence_path",
+    "_quarantine_file_lock",
+    "_quarantine_root",
+    "_query_ingested_files_aggregate",
+    "_service_lock",
+    "_service_locks",
+    "_service_locks_guard",
+    "_unlink_evidence",
+    "atomic_write_bytes",
+    "capture_evidence",
+    "clear_in_flight",
+    "config",
+    "count_quarantine_evidence",
+    "delete_quarantine_evidence",
+    "get_ingested_filenames",
+    "get_ingested_files_status_summary",
+    "get_latest_ingest_ts",
+    "get_latest_reconciliation_ts",
+    "get_log_accounting_counts",
+    "get_log_activity",
+    "get_node_count_avg",
+    "get_quarantine_evidence",
+    "get_quarantine_evidence_summary",
+    "get_quarantine_storage_total",
+    "get_quarantine_summary",
+    "get_reclaimable_strand_filenames",
+    "get_rum_beacons_avg_per_day",
+    "get_rum_beacons_by_date",
+    "get_storage_stats_window",
+    "insert_ingested_files",
+    "insert_quarantine_evidence",
+    "list_in_flight",
+    "list_ingested_files",
+    "list_quarantine_evidence",
+    "list_unbackfilled_fastly_edge_files",
+    "pg_connection",
+    "purge_evidence",
+    "read_evidence",
+    "recompute_ingested_files_summary",
+    "record_in_flight",
+]
 
-    Used by routers/usage.py prefill estimator. The basename always starts with
-    YYYY-MM-DDTHH:MM:SS — the first 'T' in the path is always the timestamp T
-    (bucket/prefix segments are lowercase + numeric). Grouping by that 19-char
-    substring is equivalent to the prior Python regex over file_name, but runs
-    entirely in SQLite instead of dragging every row across the boundary.
-
-    Fast/slow split (mirrors ``get_log_accounting_counts``): the fast arm
-    filters on ``file_date IS NOT NULL``, which is covered by the composite
-    ``idx_ingested_files_source_date`` index — lets SQLite walk only the
-    canonical-basename rows directly via the index instead of scanning the
-    full source partition and per-row evaluating ``instr(file_name, 'T')``.
-    The slow arm keeps the ``instr`` guard for rows with NULL file_date
-    (legacy / test / ad-hoc backfills) so the average stays semantically
-    equivalent to the pre-change behavior.
-    """
-    con = get_con(service_id)
-    row = con.execute(
-        """SELECT avg(c) AS avg_c FROM (
-               -- Fast arm: file_date IS NOT NULL implies the basename matches
-               -- the canonical Fastly pattern per _migration_002, so the
-               -- substr group-by always succeeds without an instr() guard.
-               SELECT count(*) AS c
-               FROM ingested_files
-               WHERE source_name = ?
-                 AND file_date IS NOT NULL
-               GROUP BY substr(file_name, strpos(file_name, 'T') - 10, 19)
-               UNION ALL
-               -- Slow arm: rows without a parseable basename. Typically
-               -- zero rows in prod but kept so test fixtures + legacy
-               -- uploads still contribute to the average.
-               SELECT count(*) AS c
-               FROM ingested_files
-               WHERE source_name = ?
-                 AND file_date IS NULL
-                 AND strpos(file_name, 'T') >= 11
-               GROUP BY substr(file_name, strpos(file_name, 'T') - 10, 19)
-           ) AS combined""",
-        (service_id, service_id),
-    ).fetchone()
-    if not row or row["avg_c"] is None:
-        return None
-    return float(row["avg_c"])
-
-
-_RUM_TABLES_SQL = "table_name IN ('client_vitals', 'client_errors')"
-
-
-def get_rum_beacons_avg_per_day(service_id: str) -> float | None:
-    """Mean of per-day RUM beacon rows (client_vitals + client_errors) in ``ingested_files``."""
-    con = get_con(service_id)
-    row = con.execute(
-        f"""
-        SELECT AVG(daily_beacons) FROM (
-            SELECT SUM(row_count) as daily_beacons
-            FROM ingested_files
-            WHERE source_name = ?
-              AND {_RUM_TABLES_SQL}
-            GROUP BY file_date
-        ) sub
-        """,
-        (service_id,),
-    ).fetchone()
-    val = row[0]
-    return float(val) if val is not None else None
-
-
-def get_rum_beacons_by_date(service_id: str, start_date: str, end_date: str) -> dict[str, int]:
-    """``{file_date: beacon_rows}`` for RUM tables in ``[start_date, end_date)``."""
-    con = get_con(service_id)
-    rows = con.execute(
-        f"""
-        SELECT
-            file_date as date,
-            SUM(row_count) as beacon_count
-        FROM ingested_files
-        WHERE source_name = ?
-          AND {_RUM_TABLES_SQL}
-          AND file_date >= ? AND file_date < ?
-        GROUP BY file_date
-        ORDER BY date
-        """,
-        (service_id, start_date, end_date),
-    ).fetchall()
-    return {str(row["date"]): row["beacon_count"] for row in rows if row["date"]}
-
-
-# ---------------------------------------------------------------------------
-# Quarantined-file tracking (folded from backend.core.metadata.quarantine)
-# ---------------------------------------------------------------------------
-
-
-def get_quarantine_storage_total(service_id: str) -> int:
-    con = get_con(service_id)
-    row = con.execute(
-        "SELECT coalesce(sum(error_size_bytes), 0) FROM quarantined_files WHERE service_id = ?", (service_id,)
-    ).fetchone()
-    return int(row[0]) if row else 0
-
-
-def insert_quarantine_evidence(
-    service_id: str,
-    source_type: str,
-    original_key: str,
-    *,
-    line_ordinal: int | None,
-    byte_offset: int | None,
-    byte_length: int,
-    error_category: str,
-    error_text: str,
-    sha256: str,
-) -> int:
-    con = get_con(service_id)
-    row = con.execute(
-        """
-        INSERT INTO quarantine_evidence
-            (service_id, source_type, original_key, line_ordinal, byte_offset,
-             byte_length, error_category, error_text, sha256, file_path)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '')
-        RETURNING id
-        """,
-        (
-            service_id,
-            source_type,
-            original_key,
-            line_ordinal,
-            byte_offset,
-            byte_length,
-            error_category,
-            error_text,
-            sha256,
-        ),
-    ).fetchone()
-    if row is None:
-        raise RuntimeError("quarantine evidence insert returned no item id")
-    item_id = int(row[0])
-    try:
-        con.execute(
-            "UPDATE quarantine_evidence SET file_path = ? WHERE service_id = ? AND id = ?",
-            (f"{item_id}.dat", service_id, item_id),
-        )
-        con.commit()
-    except Exception:
-        con.execute("DELETE FROM quarantine_evidence WHERE service_id = ? AND id = ?", (service_id, item_id))
-        con.commit()
-        raise
-    return item_id
-
-
-def get_quarantine_evidence(service_id: str, item_id: int) -> dict[str, Any] | None:
-    con = get_con(service_id)
-    row = con.execute(
-        """
-        SELECT id, service_id, source_type, original_key, line_ordinal,
-               byte_offset, byte_length, error_category, error_text, sha256,
-               file_path, quarantined_at
-        FROM quarantine_evidence
-        WHERE service_id = ? AND id = ?
-        """,
-        (service_id, item_id),
-    ).fetchone()
-    if row is None:
-        return None
-    names = (
-        "id",
-        "service_id",
-        "source_type",
-        "original_key",
-        "line_ordinal",
-        "byte_offset",
-        "byte_length",
-        "error_category",
-        "error_text",
-        "sha256",
-        "file_path",
-        "quarantined_at",
-    )
-    return dict(zip(names, row, strict=True))
-
-
-def list_quarantine_evidence(
-    service_id: str,
-    limit: int = 100,
-    offset: int = 0,
-    *,
-    oldest_first: bool = False,
-    error_category: str | None = None,
-    source_type: str | None = None,
-) -> list[dict[str, Any]]:
-    con = get_con(service_id)
-    order = "ASC" if oldest_first else "DESC"
-    query = """
-        SELECT id, service_id, source_type, original_key, line_ordinal,
-               byte_offset, byte_length, error_category, error_text, sha256,
-               file_path, quarantined_at
-        FROM quarantine_evidence
-        WHERE service_id = ?
-    """
-    params: list[object] = [service_id]
-    if error_category is not None:
-        query += " AND error_category = ?"
-        params.append(error_category)
-    if source_type is not None:
-        query += " AND source_type = ?"
-        params.append(source_type)
-    query += f" ORDER BY quarantined_at {order}, id {order} LIMIT ? OFFSET ?"
-    params.extend((limit, offset))
-    rows = con.execute(query, params).fetchall()
-    names = (
-        "id",
-        "service_id",
-        "source_type",
-        "original_key",
-        "line_ordinal",
-        "byte_offset",
-        "byte_length",
-        "error_category",
-        "error_text",
-        "sha256",
-        "file_path",
-        "quarantined_at",
-    )
-    return [dict(zip(names, row, strict=True)) for row in rows]
-
-
-def count_quarantine_evidence(
-    service_id: str,
-    *,
-    error_category: str | None = None,
-    source_type: str | None = None,
-) -> int:
-    con = get_con(service_id)
-    query = "SELECT count(*) FROM quarantine_evidence WHERE service_id = ?"
-    params: list[object] = [service_id]
-    if error_category is not None:
-        query += " AND error_category = ?"
-        params.append(error_category)
-    if source_type is not None:
-        query += " AND source_type = ?"
-        params.append(source_type)
-    row = con.execute(query, params).fetchone()
-    return int(row[0]) if row else 0
-
-
-def get_quarantine_evidence_summary(service_id: str) -> dict[str, Any]:
-    con = get_con(service_id)
-    row = con.execute(
-        """
-        SELECT count(*), coalesce(sum(byte_length), 0), min(quarantined_at), max(quarantined_at)
-        FROM quarantine_evidence
-        WHERE service_id = ?
-        """,
-        (service_id,),
-    ).fetchone()
-    grouped = con.execute(
-        """
-        SELECT source_type, error_category, count(*)
-        FROM quarantine_evidence
-        WHERE service_id = ?
-        GROUP BY source_type, error_category
-        """,
-        (service_id,),
-    ).fetchall()
-    categories: dict[str, int] = {}
-    source_counts = {"request": 0, "rum": 0}
-    for source_type, category, count in grouped:
-        source_counts[source_type] = source_counts.get(source_type, 0) + count
-        categories[category] = categories.get(category, 0) + count
-    return {
-        "total_items": row[0],
-        "total_bytes": row[1],
-        "oldest_at": str(row[2]) if row[2] is not None else None,
-        "newest_at": str(row[3]) if row[3] is not None else None,
-        "request_items": source_counts["request"],
-        "rum_items": source_counts["rum"],
-        "category_counts": categories,
-    }
-
-
-def delete_quarantine_evidence(service_id: str, ids: list[int] | None = None) -> int:
-    con = get_con(service_id)
-    if ids is None:
-        cur = con.execute("DELETE FROM quarantine_evidence WHERE service_id = ?", (service_id,))
-    elif ids:
-        placeholders = ", ".join("?" * len(ids))
-        cur = con.execute(
-            f"DELETE FROM quarantine_evidence WHERE service_id = ? AND id IN ({placeholders})",
-            [service_id, *ids],
-        )
-    else:
-        return 0
-    con.commit()
-    return int(cur.rowcount)
-
-
-# ---------------------------------------------------------------------------
-# Exact-byte local evidence storage (folded from backend.core.quarantine)
-# ---------------------------------------------------------------------------
-
-QUARANTINE_ITEM_CAP = 1_000
-_MAX_ERROR_TEXT_LENGTH = 2_000
-_service_locks: dict[str, threading.RLock] = {}
-_service_locks_guard = threading.Lock()
-
-
-def _evidence_dir(service_id: str) -> Path:
-    services_root = config.SERVICES_DATA_DIR.resolve()
-    service_root = (services_root / service_id).resolve()
-    if not service_root.is_relative_to(services_root):
-        raise ValueError("service_id resolves outside the services data directory")
-    evidence_dir = (service_root / "quarantine").resolve()
-    if not evidence_dir.is_relative_to(service_root):
-        raise ValueError("quarantine directory resolves outside the service data directory")
-    evidence_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-    os.chmod(evidence_dir, 0o700)
-    return evidence_dir
-
-
-def _evidence_path(service_id: str, item_id: int) -> Path:
-    if item_id <= 0:
-        raise ValueError("item_id must be positive")
-    return _evidence_dir(service_id) / f"{item_id}.dat"
-
-
-def _advisory_key(service_id: str) -> int:
-    value = int.from_bytes(hashlib.sha256(b"fla-quarantine:" + service_id.encode()).digest()[:8], "big")
-    return value - (1 << 64) if value >= (1 << 63) else value
-
-
-@contextmanager
-def _service_lock(service_id: str) -> Iterator[None]:
-    with _service_locks_guard:
-        lock = _service_locks.setdefault(service_id, threading.RLock())
-    with lock:
-        with pg_connection.get_pg_pool().connection() as con:
-            with con.transaction():
-                con.execute("SELECT pg_advisory_xact_lock(%s)", (_advisory_key(service_id),))
-                yield
-
-
-def _unlink_evidence(service_id: str, item: dict[str, Any]) -> bool:
-    item_id = int(item["id"])
-    expected_name = f"{item_id}.dat"
-    if item["file_path"] != expected_name:
-        logger.error(
-            "quarantine.evidence.invalid_path",
-            extra={"service_id": service_id, "item_id": item_id},
-        )
-        return False
-    path = _evidence_path(service_id, item_id)
-    try:
-        path.unlink(missing_ok=True)
-        return True
-    except OSError:
-        logger.exception(
-            "quarantine.evidence.unlink_failed",
-            extra={"service_id": service_id, "item_id": item_id},
-        )
-        return False
-
-
-def capture_evidence(
-    service_id: str,
-    source_type: str,
-    original_key: str,
-    payload: bytes,
-    *,
-    line_ordinal: int | None,
-    byte_offset: int | None,
-    error_category: str,
-    error_text: str,
-) -> dict[str, int | str]:
-    if source_type not in {"request", "rum"}:
-        raise ValueError("source_type must be 'request' or 'rum'")
-    if not isinstance(payload, bytes):
-        raise TypeError("payload must be bytes")
-    if line_ordinal is not None and line_ordinal < 1:
-        raise ValueError("line_ordinal must be positive when provided")
-    if byte_offset is not None and byte_offset < 0:
-        raise ValueError("byte_offset must be non-negative when provided")
-
-    try:
-        with _service_lock(service_id):
-            return _capture_evidence_locked(
-                service_id,
-                source_type,
-                original_key,
-                payload,
-                line_ordinal=line_ordinal,
-                byte_offset=byte_offset,
-                error_category=error_category,
-                error_text=error_text,
-            )
-    except Exception:
-        logger.exception(
-            "quarantine.evidence.lock_failed",
-            extra={"service_id": service_id, "source_type": source_type, "original_key": original_key},
-        )
-        return {"id": 0, "cap_evictions": 0, "quarantine_capture_failures": 1}
-
-
-def _capture_evidence_locked(
-    service_id: str,
-    source_type: str,
-    original_key: str,
-    payload: bytes,
-    *,
-    line_ordinal: int | None,
-    byte_offset: int | None,
-    error_category: str,
-    error_text: str,
-) -> dict[str, int | str]:
-    item_id: int | None = None
-    final_path: Path | None = None
-    try:
-        evidence_dir = _evidence_dir(service_id)
-        item_id = insert_quarantine_evidence(
-            service_id,
-            source_type,
-            original_key,
-            line_ordinal=line_ordinal,
-            byte_offset=byte_offset,
-            byte_length=len(payload),
-            error_category=error_category,
-            error_text=error_text[:_MAX_ERROR_TEXT_LENGTH],
-            sha256=hashlib.sha256(payload).hexdigest(),
-        )
-        final_path = evidence_dir / f"{item_id}.dat"
-        atomic_write_bytes(final_path, payload, prefix=".capture-", fsync=True)
-
-        rows = list_quarantine_evidence(service_id, limit=QUARANTINE_ITEM_CAP + 1, oldest_first=True)
-        evicted = rows[: max(0, len(rows) - QUARANTINE_ITEM_CAP)]
-        for item in evicted:
-            if not _unlink_evidence(service_id, item):
-                raise OSError(f"could not delete quarantine evidence {item['id']}")
-        evicted_count = delete_quarantine_evidence(service_id, [int(item["id"]) for item in evicted])
-        return {
-            "id": item_id,
-            "cap_evictions": evicted_count,
-            "quarantine_capture_failures": 0,
-        }
-    except Exception:
-        logger.exception(
-            "quarantine.evidence.capture_failed",
-            extra={"service_id": service_id, "source_type": source_type, "original_key": original_key},
-        )
-        if item_id is not None:
-            try:
-                delete_quarantine_evidence(service_id, [item_id])
-            except Exception:
-                logger.exception(
-                    "quarantine.evidence.metadata_cleanup_failed",
-                    extra={"service_id": service_id, "item_id": item_id},
-                )
-        if final_path is not None:
-            try:
-                final_path.unlink(missing_ok=True)
-            except OSError:
-                logger.exception(
-                    "quarantine.evidence.file_cleanup_failed",
-                    extra={"service_id": service_id, "item_id": item_id},
-                )
-        return {"id": 0, "cap_evictions": 0, "quarantine_capture_failures": 1}
-
-
-def read_evidence(service_id: str, item_id: int) -> tuple[dict[str, Any], BinaryIO] | None:
-    item = get_quarantine_evidence(service_id, item_id)
-    if item is None:
-        return None
-    path = _evidence_path(service_id, item_id)
-    if item["file_path"] != path.name:
-        raise ValueError(f"invalid evidence path for item {item_id}")
-    try:
-        return item, path.open("rb")
-    except OSError:
-        logger.exception("quarantine.evidence.read_failed", extra={"service_id": service_id, "item_id": item_id})
-        raise
-
-
-def purge_evidence(service_id: str, item_id: int | None = None) -> dict[str, int]:
-    with _service_lock(service_id):
-        if item_id is None:
-            items = list_quarantine_evidence(service_id, limit=2**31 - 1)
-        else:
-            item = get_quarantine_evidence(service_id, item_id)
-            items = [item] if item is not None else []
-        for item in items:
-            if not _unlink_evidence(service_id, item):
-                raise OSError(f"could not delete quarantine evidence {item['id']}")
-        purged = delete_quarantine_evidence(service_id, [int(item["id"]) for item in items])
-        return {"purged": purged}
+install_shim_module(__name__, (_quarantine_evidence,), bidirectional_seed=True)

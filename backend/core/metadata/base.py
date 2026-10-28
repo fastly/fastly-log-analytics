@@ -319,3 +319,26 @@ __all__ = [
     "upsert_asn_names",
     "urllib",
 ]
+
+from backend.core.metadata import (  # noqa: E402
+    admin_state as _admin_state,
+)
+from backend.core.metadata import (  # noqa: E402
+    alerts_db as _alerts_db,
+)
+from backend.core.metadata import (  # noqa: E402
+    pg_pool as _pg_pool,
+)
+from backend.core.metadata import (  # noqa: E402
+    pg_schema as _pg_schema,
+)
+from backend.core.metadata import (  # noqa: E402
+    state_sync as _state_sync,
+)
+from backend.utils.module_shim import install_shim_module  # noqa: E402
+
+install_shim_module(
+    __name__,
+    (_pg_pool, _pg_schema, _admin_state, _alerts_db, _state_sync),
+    only_existing_attrs=True,
+)

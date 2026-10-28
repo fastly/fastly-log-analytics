@@ -12,16 +12,15 @@ autocommit=True pool), shared across every service that thread touches — see
 
 This package is decomposed into concern-specific submodules (``pg_pool``,
 ``pg_schema``, ``admin_state``, ``alerts_db``, ``state_sync``, ``fos_usage``,
-``slow_queries_db``, ``cron_runs``, ``ingest_log``, ``ingest_ledger``) with
-thin re-export shims at ``base`` and ``usage_log``. Writes to shared state
-attributes are mirrored across ``metadata``, ``base``, ``usage_log``, and the
-underlying submodules via the ``_ShimModule`` proxy installed below.
+``slow_queries_db``, ``cron_runs``, ``ingest_log``, ``quarantine_evidence``,
+``ingest_ledger``) with thin re-export shims at ``base`` and ``usage_log``.
+Writes to shared state attributes are mirrored across ``metadata``, ``base``,
+``usage_log``, and the underlying submodules via ``install_shim_module``.
 """
 
 from __future__ import annotations
 
 import sys
-from types import ModuleType
 
 from backend.core.metadata import (
     admin_state as _admin_state,
@@ -48,6 +47,9 @@ from backend.core.metadata import (
     pg_schema as _pg_schema,
 )
 from backend.core.metadata import (
+    quarantine_evidence as _quarantine_evidence,
+)
+from backend.core.metadata import (
     slow_queries_db as _slow_queries_db,
 )
 from backend.core.metadata import (
@@ -56,6 +58,7 @@ from backend.core.metadata import (
 from backend.core.metadata import (
     usage_log as _usage_log,
 )
+from backend.utils.module_shim import install_shim_module
 
 state = _base
 alerts = _base
@@ -108,8 +111,12 @@ from backend.core.metadata.base import (
 
 # Ingested-files tracking + activity reporting + quarantined-file tracking.
 from backend.core.metadata.ingest_log import (
+    QUARANTINE_ITEM_CAP,
     _bootstrap_ingested_files_summary,
+    capture_evidence,
     clear_in_flight,
+    count_quarantine_evidence,
+    delete_quarantine_evidence,
     get_ingested_filenames,
     get_ingested_files_status_summary,
     get_latest_ingest_ts,
@@ -117,15 +124,22 @@ from backend.core.metadata.ingest_log import (
     get_log_accounting_counts,
     get_log_activity,
     get_node_count_avg,
+    get_quarantine_evidence,
+    get_quarantine_evidence_summary,
     get_quarantine_storage_total,
+    get_quarantine_summary,
     get_reclaimable_strand_filenames,
     get_rum_beacons_avg_per_day,
     get_rum_beacons_by_date,
     get_storage_stats_window,
     insert_ingested_files,
+    insert_quarantine_evidence,
     list_in_flight,
     list_ingested_files,
+    list_quarantine_evidence,
     list_unbackfilled_fastly_edge_files,
+    purge_evidence,
+    read_evidence,
     recompute_ingested_files_summary,
     record_in_flight,
 )
@@ -177,60 +191,20 @@ _ALL_SYNC_MODULES = (
     _slow_queries_db,
     _cron_runs,
     _ingest_log,
+    _quarantine_evidence,
 )
 
-_PROPAGATING = False
-
-
-class _ShimModule(ModuleType):
-    """Mirror writes for shared state across ``metadata``, ``base``, ``usage_log``,
-    and the decomposed submodules so ``monkeypatch.setattr`` on any of them
-    updates the live bindings in the implementation modules.
-    """
-
-    def __setattr__(self, name: str, value: object) -> None:
-        global _PROPAGATING
-        super().__setattr__(name, value)
-        if _PROPAGATING or name.startswith("__"):
-            return
-        _PROPAGATING = True
-        try:
-            for mod in _ALL_SYNC_MODULES:
-                if mod is not self and (
-                    name in mod.__dict__
-                    or (mod is _base and self in (_pg_pool, _pg_schema, _admin_state, _alerts_db, _state_sync))
-                    or (mod is _usage_log and self in (_fos_usage, _slow_queries_db, _cron_runs))
-                ):
-                    # Special care: do not overwrite fos_usage._SCHEMA when pg_schema._SCHEMA changes
-                    if name == "_SCHEMA" and mod is _fos_usage and self is not _fos_usage:
-                        continue
-                    ModuleType.__setattr__(mod, name, value)
-        finally:
-            _PROPAGATING = False
-
-    def __delattr__(self, name: str) -> None:
-        global _PROPAGATING
-        super().__delattr__(name)
-        if _PROPAGATING or name.startswith("__"):
-            return
-        _PROPAGATING = True
-        try:
-            for mod in _ALL_SYNC_MODULES:
-                if mod is not self and name in mod.__dict__:
-                    try:
-                        ModuleType.__delattr__(mod, name)
-                    except AttributeError:
-                        pass
-        finally:
-            _PROPAGATING = False
-
-
-for _mod in _ALL_SYNC_MODULES:
-    _mod.__class__ = _ShimModule
+_ShimModule = install_shim_module(
+    __name__,
+    _ALL_SYNC_MODULES[1:],
+    only_existing_attrs=True,
+    sync_filter=lambda src, dst, name, _val: not (name == "_SCHEMA" and dst is _fos_usage and src is not _fos_usage),
+)
 
 
 __all__ = [
     "DEFAULT_METADATA_RETENTION",
+    "QUARANTINE_ITEM_CAP",
     "_CLEANUP_TABLES",
     "_DATA_DIR",
     "_FILE_DATE_RE",
@@ -244,17 +218,20 @@ __all__ = [
     "_query_usage_log_aggregate_rollup",
     "adaptive_stale_minutes",
     "asn_ints_for_search",
+    "capture_evidence",
     "cleanup_metadata",
     "clear_in_flight",
     "clear_slow_queries",
     "clear_usage_log",
     "close_all_connections",
     "count_alerts",
+    "count_quarantine_evidence",
     "count_slow_queries",
     "cron_busy",
     "db_path",
     "delete_alert",
     "delete_cron_run",
+    "delete_quarantine_evidence",
     "delete_view",
     "export_audit",
     "finalize_cron_run_if_running",
@@ -273,13 +250,17 @@ __all__ = [
     "get_log_activity",
     "get_metadata_storage_stats",
     "get_node_count_avg",
+    "get_quarantine_evidence",
+    "get_quarantine_evidence_summary",
     "get_quarantine_storage_total",
+    "get_quarantine_summary",
     "get_reclaimable_strand_filenames",
     "get_rum_beacons_avg_per_day",
     "get_rum_beacons_by_date",
     "get_storage_stats_window",
     "get_usage_logs",
     "insert_ingested_files",
+    "insert_quarantine_evidence",
     "insert_slow_query",
     "is_ingested_files_dedup_active",
     "iter_usage_logs_chunks",
@@ -289,6 +270,7 @@ __all__ = [
     "list_audit",
     "list_in_flight",
     "list_ingested_files",
+    "list_quarantine_evidence",
     "list_scoring_audit",
     "list_slow_queries",
     "list_unbackfilled_fastly_edge_files",
@@ -298,7 +280,9 @@ __all__ = [
     "log_usage_calls",
     "lookup_asn_names",
     "purge_cron_runs",
+    "purge_evidence",
     "purge_usage_log",
+    "read_evidence",
     "reap_running_cron_runs",
     "recompute_ingested_files_summary",
     "reconcile_fastly_stats",
