@@ -3,10 +3,11 @@
 FROM caddy:2.11.7-builder@sha256:c4cd20eaa0b69112fd5d4f721ffc9671687e1d5d0b155c8620cf7546dbef94c0 AS falco-builder
 ARG FALCO_VERSION=2.3.0
 RUN apk add --no-cache --upgrade 'ca-certificates>=20261020-r0' 'ca-certificates-bundle>=20261020-r0'
-RUN go mod download "github.com/ysugimoto/falco@v${FALCO_VERSION}" \
-    && cd "$(go env GOPATH)/pkg/mod/github.com/ysugimoto/falco@v${FALCO_VERSION}" \
+RUN wget -qO- "https://github.com/ysugimoto/falco/archive/refs/tags/v${FALCO_VERSION}.tar.gz" | tar -xz -C /tmp \
+    && cd "/tmp/falco-${FALCO_VERSION}" \
     && CGO_ENABLED=0 go build -mod=readonly \
     -ldflags "-X main.version=${FALCO_VERSION}" -o /usr/local/bin/falco ./cmd/falco \
+    && rm -rf "/tmp/falco-${FALCO_VERSION}" \
     && falco --version
 
 # --- Build Stage ---
