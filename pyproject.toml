@@ -1,6 +1,6 @@
 [project]
 name = "fastly-log-analytics"
-version = "2.4.1"
+version = "3.0.0rc1"
 description = "Interactive log analytics for Fastly logs stored in Fastly Object Storage, powered by DuckDB"
 # The codebase uses PEP 695 type-parameter syntax (``def foo[T]``) and
 # ``from datetime import UTC``, which require 3.12 and 3.11 respectively; the
@@ -11,13 +11,13 @@ dependencies = [
     # Pin to the 1.5 line specifically. Pre-1.3 ships without the
     # canonical ``.to_arrow_table()`` method on DuckDBPyConnection
     # (only the now-deprecated ``.fetch_arrow_table()`` alias), so
-    # ingest.py / iceberg/buffer.py / rollups/recompute.py — which all
+    # ingest.py / storage/_core.py / rollups/recompute.py — which all
     # use ``.to_arrow_table()`` — silently break on a dev box that
     # resolved an older version. Prod docker has consistently shipped
     # 1.5.x; matching that here closes the dev/prod drift window.
-    # Upper-bound at <2 because the 2.x major hasn't released yet and
-    # may include further API renames we'd want to audit before adopting.
-    "duckdb>=1.5,<2",
+    # 1.5.6 fixes empty-UNION window finalization (duckdb/duckdb#25713).
+    # Keep the 2.x API changes out until separately audited.
+    "duckdb>=1.5.6,<2",
     "python-dotenv>=1.0",
     "boto3>=1.34",
     "cymruwhois>=1.6",
@@ -25,7 +25,6 @@ dependencies = [
     "uvicorn[standard]>=0.32",
     "pydantic>=2.9",
     "apscheduler>=3.10,<4",
-    "pyiceberg[s3fs,pyarrow,sql-sqlite]>=0.8",
     # Floor at 23.0.1 — the fix for CVE-2026-25087. uv.lock already pins a
     # clean version; this raises the declared floor so Dependabot stops
     # flagging the <23.0.1 range.
@@ -68,41 +67,43 @@ dependencies = [
     "starlette-compress>=1.7",
     "sse-starlette>=2.1",
     "cachetools>=6.2",
-    # v2.0 Phase 1: OpenTelemetry + structlog replace the four fragmented
-    # custom telemetry surfaces. Phase
-    # ships with the console exporter only; adding Jaeger/Tempo/etc. is a
-    # post-v2.0 deploy-config decision (no SaaS subscription).
+    "filelock>=3.16",
+    # OpenTelemetry + structlog provide structured telemetry across backend
+    # and workers. Default exporter is 'none'; set OTEL_EXPORTER=console or
+    # OTEL_EXPORTER=otlp (see .env.example).
     "opentelemetry-api>=1.27",
     "opentelemetry-sdk>=1.27",
     "opentelemetry-instrumentation-fastapi>=0.48b0",
     "opentelemetry-instrumentation-botocore>=0.48b0",
     "opentelemetry-instrumentation-aiohttp-client>=0.48b0",
     "structlog>=24.4",
-    # v2.0 Phase 1.4a: aiodns + aiosqlite implement concurrent reverse DNS
-    # with FCrDNS verification and a single-transaction bulk SQLite write.
-    # aiosqlite is scoped to
-    # rdns_cache.py only — every other SQLite call site stays sync.
+    # aiodns implements concurrent reverse DNS with FCrDNS verification.
     "aiodns>=3.2",
-    "aiosqlite>=0.20",
-    # v2.0 Phase 3: tenacity provides standardized declarative retry
-    # decorators replacing fragile custom try/except loops in
-    # provision/fastly_api.py + utils/ngwaf.py + SQLite write paths.
+    # tenacity provides standardized declarative retry decorators for
+    # provision/fastly_api.py, utils/ngwaf.py, and storage/metadata paths.
     "tenacity>=9.0",
     # argon2-cffi provides argon2id passcode hashing per OWASP 2026
-    # guidance. Used by backend.core.share_db.passcode for new invite
-    # passcode hashes; the legacy scrypt verify branch stays in place so
-    # pre-cutover hashes keep working until each user next logs in
-    # (transparent rehash-on-login upgrades them to argon2id).
+    # guidance. Used by backend.core.share_db for invite passcode
+    # hashes (rehash-on-login when the cost parameters change).
     "argon2-cffi>=23.1",
-    # Phase 10.5: rich + typer power the provision CLI. rich.console
-    # owns the ANSI emit + colour markup for backend/provision/utils.py
+    # rich + typer power the provision CLI. rich.console
+    # owns the ANSI emit + colour markup for backend/provision/cli.py
     # (the public info/ok/warn/fail helpers); typer wraps the handler
     # functions in backend/provision/cli.py as subcommands so
     # `python -m backend.provision.cli` exposes a real --help.
     "rich>=13.7",
     "typer>=0.12",
-    "authlib>=1.7.2",
+    "authlib>=1.9.0",
     "joserfc>=1.7.1",
+    "psycopg[binary]>=3.3.4",
+    "psycopg-pool>=3.3.1",
+    "celery[redis]>=5.6.3",
+    "redis>=6.4.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.27",
+    "opentelemetry-exporter-prometheus>=0.63b1",
+    "prometheus-client>=0.26.0",
+    "pytricia>=1.0.2",
+    "orjson>=3.10.0",
 ]
 
 [dependency-groups]
@@ -111,9 +112,6 @@ dev = [
     "pytest-cov>=5.0",
     "httpx>=0.28",
     "mypy>=1.15",
-    # mypy-baseline pins pre-existing errors so pre-commit + CI fail only
-    # on net-new errors.
-    "mypy-baseline>=0.7",
     "types-python-dateutil",
     "ruff>=0.11",
     "pre-commit>=4.0",
@@ -156,14 +154,14 @@ dev = [
     # which measure end-to-end query latency at scale — pytest-benchmark
     # measures per-call cost on the pure-Python helpers those queries
     # build on (HLL.add / count / merge / serialize, table-name + SQL-
-    # literal sanitizers). Run with `uv run pytest tests/perf/test_benchmarks_micro.py
+    # literal sanitizers). Run with `uv run pytest tests/perf/test_benchmarks.py
     # --benchmark-only` to see throughput; the suite skips the timing
     # collection in regular runs (autouse opt-out via marker).
     "pytest-benchmark>=4.0",
     # bandit: pattern-based Python security scan. Used by
     # ``make security-scan-bandit`` at HIGH severity only — the MEDIUM
     # tier's B608 (string-built SQL) is dominated by false positives
-    # the codebase defends against via backend/utils/sql_validator.py +
+    # the codebase defends against via backend/core/sql_validator.py +
     # escape_sql_literal, which bandit can't see. The HIGH tier catches
     # real issues (weak-hash misuse, eval/exec, shell=True).
     "bandit>=1.9",
@@ -172,8 +170,7 @@ dev = [
     # (DEP002), and missing declared deps (DEP001). Configured under
     # [tool.deptry] below — runtime-only deps (uvicorn CLI, pytz for
     # DuckDB ICU, python-dotenv, python-multipart for FastAPI form
-    # parsing) get DEP002 ignores; s3fs+fsspec are first-class imports
-    # served by the ``pyiceberg[s3fs]`` extra so DEP003 ignores them.
+    # parsing) get DEP002 ignores.
     "deptry>=0.20",
     # time-machine: deterministic time travel for tests. Enables
     # tests that assert on time boundaries (cron orphan threshold,
@@ -207,22 +204,21 @@ extend_exclude = ["tests/.*", "scripts/.*", "scratch/.*"]
 #   pytz:            DuckDB ICU loads it at runtime for TIMESTAMP TZ
 #                    (regression of the 2026-05 dedup; do NOT drop)
 #   python-multipart: FastAPI form-data parser, never imported directly
-DEP002 = ["python-dotenv", "uvicorn", "pytz", "python-multipart"]
+DEP002 = ["python-dotenv", "uvicorn", "pytz", "python-multipart", "anyio"]
 # DEP003 — direct import of a transitive dep. The codebase imports
 # these on purpose; they're guaranteed by the listed first-class deps:
 #   botocore:  via boto3
 #   yarl:      via aiohttp (used by telemetry_proxy URL parsing)
-#   dateutil:  via pandas (used for ISO-8601 parsing in iceberg sync)
-#   s3fs:      via pyiceberg[s3fs] extra
-#   fsspec:    via s3fs
+#   dateutil:  via pandas (used for ISO-8601 parsing)
+#   numpy:     via pandas/pyarrow (used by utils/hll.py register arrays)
 # (starlette removed 2026-06-17 — promoted to a direct dep above to
 # pin >=1.3.1 for Dependabot #19/#20.)
-DEP003 = ["botocore", "yarl", "dateutil", "s3fs", "fsspec"]
+DEP003 = ["botocore", "yarl", "dateutil", "numpy"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # Worker cap: -n auto spawns cpu_count() workers, and each worker re-imports
-# the full backend (DuckDB, pyiceberg, boto3, fastapi) at ~500 MB resident.
+# the full backend (DuckDB, boto3, fastapi) at ~500 MB resident.
 # On an 8-10 core Mac that's 4-5 GB just for pytest workers, which combined
 # with `make ci -j2` running vitest in parallel was pushing 16 GB Macs into
 # swap. -n 4 caps the worker pool at 4 regardless of CPU count.
@@ -247,23 +243,17 @@ timeout = 60
 # method requires the main thread and breaks pytest-xdist.
 timeout_method = "thread"
 markers = [
-    # Tests deriving from a (since-removed) audit-findings/ fix or covering a security
-    # invariant the v2.0 cleanup must not silently regress. CI asserts the
-    # count is monotonically >= the Phase 0 baseline so a refactor can't
-    # delete coverage of a verified fix without surfacing the change.
-    # Phase 0 floor: 24 marked tests (derives from the 24 verified findings).
+    # Tests covering a verified security fix or invariant that refactors must
+    # not silently regress. CI asserts the count is monotonically >= the
+    # baseline so a refactor can't delete coverage of a verified fix without
+    # surfacing the change.
     "security_regression: tests covering a verified security fix; CI gates on count",
     "slow: tests intentionally excluded from the fast default suite — run with `pytest -m slow`",
+    "postgres_integration: tests requiring HIGH_SCALE_POSTGRES_TEST_DSN",
     "terraform_cli: tests that shell out to the real terraform binary (heavyweight subprocess; run serially in their own step, excluded from the -n auto pool)",
+    "flaky_quarantine: tests that are occasionally flaky under parallel contention; skipped in standard CI runs and run only on demand/scheduled crons",
 ]
-# Test-only suppression: FastAPI's TestClient runs requests in worker
-# threads that open metadata_db SQLite connections. Most of them are
-# closed by close_all_connections() in tests/conftest.py, but a handful
-# slip past — typically because the request raises mid-flight and the
-# thread dies with a still-pooled connection. SQLite tolerates this
-# (no transactions are lost; WAL handles unclean shutdown) and the
-# production code holds its connections for the process lifetime, so
-# this is a test-fixture artefact, not a production resource leak.
+# Test-only warning suppressions for third-party and test-runner noise:
 filterwarnings = [
     # GATE-02: a misspelled marker applied via @pytest.mark.<typo> only WARNS
     # under pytest 9's --strict-markers (which still gates -m EXPR typos), so a
@@ -296,7 +286,7 @@ filterwarnings = [
     # DuckDB deprecated ``fetch_record_batch()`` in favour of
     # ``to_arrow_reader()``. We still instrument it by name in
     # query_instrumentation._READER_METHODS because callers may use either,
-    # and tests/core/test_query_instrumentation.py deliberately exercises the
+    # and tests/core/test_metrics_and_telemetry.py deliberately exercises the
     # deprecated path to pin that the wrapper defers deregistration until the
     # reader drains. The deprecation is DuckDB's, not ours to fix.
     "ignore:fetch_record_batch.. is deprecated:DeprecationWarning",
@@ -371,28 +361,17 @@ ignore_errors = true
 # inherit the stricter checks automatically.
 [[tool.mypy.overrides]]
 module = [
-    "backend.core.query_registry",
-    "backend.core.query_instrumentation",
-    "backend.core.query_attribution",
-    "backend.core.metadata.reconciliation",
-    "backend.cron.jobs.compaction",
-    "backend.repositories.session_scoring",
-    "backend.routers.admin_queries",
-    "backend.utils.tunnel.state",
     # v2.0 final wave (2026-06-12): post-split modules with fresh test
     # coverage. Each verified clean under the strict flags below before
     # opt-in; new files in these packages inherit the stricter checks
     # automatically.
     "backend.core.rollups._common",
-    "backend.core.rollups.sessions",
-    "backend.core.rollups.time_series",
+    "backend.core.rollups.bundle_builder",
+    "backend.core.rollups.session_rollups",
     "backend.core.rollups.day_bundles",
-    "backend.core.rollups.hour_bundles",
+    "backend.core.rollups.day_compaction_sql",
+    "backend.core.rollups.partial_hour",
     "backend.core.rollups.recompute",
-    "backend.core.rollups.wellknown_bots",
-    "backend.routers.admin.ingest",
-    "backend.routers.admin.log_accounting",
-    "backend.routers.admin.sync_status",
     "backend.routers.admin.health",
 ]
 disallow_untyped_defs = true
@@ -427,7 +406,6 @@ ignore = [
 # CLI tools and one-off scripts legitimately print to stdout.
 "scripts/*" = ["T201"]
 "backend/provision/cli.py" = ["T201"]
-"backend/provision/utils.py" = ["T201"]
 # Tests can print benchmark timings, debug dumps, etc. — not production code.
 "tests/*" = ["T201"]
 
@@ -453,40 +431,12 @@ root_package = "backend"
 name = "Routers are independent of each other"
 type = "independence"
 modules = ["backend.routers.*"]
-# Baselined pre-existing cross-router edges. Each entry is a real
-# direct or transitive import; the goal of this contract is to
-# PREVENT NEW cross-router coupling, not to demand a refactor of
-# existing wiring. If a future commit adds a new edge, lint-imports
-# fails with a readable diff — fix or whitelist with a why-comment.
 ignore_imports = [
-    # Direct admin re-exports — admin_usage extends the admin router
-    # and bootstrap surfaces an admin helper via the bootstrap route.
-    "backend.routers.admin_usage -> backend.routers.admin",
-    "backend.routers.bootstrap -> backend.routers.admin",
-    # Saved-views ↔ alerts both rely on _state_sync (cross-tenant
-    # propagation helper; deliberately not a router).
-    "backend.routers.alerts -> backend.routers._state_sync",
-    "backend.routers.views -> backend.routers._state_sync",
-    # Session scoring's admin variant + user variant share helpers.
-    "backend.routers.session_scoring -> backend.routers.session_scoring_admin",
-    "backend.routers.session_scoring_admin -> backend.routers.session_scoring",
-    # Via backend.cron.jobs.sync, which
-    # legitimately imports from the admin router (the iceberg-commit +
-    # sync flushes share that admin path). Treating the cron job module
-    # as router-free is the next refactor; for now, allow the indirect
-    # coupling. import-linter matches edges by EXACT module name, so the
-    # bare-package edge (sync.py:853 `from backend.routers.admin import …`)
-    # and the submodule edge (sync.py:412 `from
-    # backend.routers.admin.sync_status import compute_sync_status_cached`)
-    # must each be listed — the package entry alone does not suppress the
-    # submodule import.
+    # backend.cron.jobs.sync's gap-heal detector reuses the admin router's
+    # compute_log_accounting (sync.py `from backend.routers.admin import
+    # compute_log_accounting`). Extracting log accounting out of the router
+    # package is the next refactor; for now, allow that single edge.
     "backend.cron.jobs.sync -> backend.routers.admin",
-    "backend.cron.jobs.sync -> backend.routers.admin.sync_status",
-    # The system-metrics sampler reuses admin_queries' _ensure_enabled()
-    # feature gate (system_metrics_sampler.py:71,81, lazy imports). The
-    # sampler is a backend-only collector reached via the admin router;
-    # the resulting edge is admin → sampler → admin_queries.
-    "backend.system_metrics_sampler -> backend.routers.admin_queries",
 ]
 
 [[tool.importlinter.contracts]]
@@ -494,3 +444,6 @@ name = "Core does not depend on routers"
 type = "forbidden"
 source_modules = ["backend.core"]
 forbidden_modules = ["backend.routers"]
+ignore_imports = [
+    "backend.cron.jobs.sync -> backend.routers.admin",
+]

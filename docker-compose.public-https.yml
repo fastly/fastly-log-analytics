@@ -1,0 +1,19 @@
+# Optional Local Standard public TLS listener; NOT a production overlay.
+# Combine with docker-compose.yml and docker-compose.admin-mtls.yml.
+# Operator-local .env supplies the exact host and a trusted server certificate
+# bundle (server.crt/server.key). The base HTTP-only quickstart stays unchanged.
+services:
+  backend:
+    # The backend owns Caddy's shared network namespace. Loopback by default;
+    # publishing a wider interface is an explicit operator decision.
+    ports:
+      - "${LOCAL_PUBLIC_LISTEN_IP:-127.0.0.1}:${LOCAL_PUBLIC_PORT:-443}:443"
+  caddy:
+    environment:
+      - LOCAL_PUBLIC_HOST=${LOCAL_PUBLIC_HOST:?set the exact public HTTPS hostname or IP}
+      - ADMIN_GATEWAY_REQUIRED=${ADMIN_GATEWAY_REQUIRED:?set 1 for enforced admin mTLS}
+    volumes:
+      - ./caddy/local-public-https.caddy:/etc/caddy/public-https/listener.caddy:ro
+      - ${LOCAL_PUBLIC_CERT_DIR:?set an operator-owned trusted server certificate directory}:/certs/public:ro
+    depends_on:
+      - admin-gateway

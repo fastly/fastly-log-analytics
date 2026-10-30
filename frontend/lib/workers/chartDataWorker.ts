@@ -11,7 +11,7 @@
 // hiddenCategories is a `Set<string>` in the caller; structured-clone
 // preserves Sets across postMessage so we re-use the same shape.
 
-import { buildTrafficData, type BuildTrafficDataParams } from '@/app/dashboard/_sections/chartHelpers'
+import { buildTrafficData, type BuildTrafficDataParams } from '@/lib/utils'
 
 self.addEventListener('message', (event: MessageEvent<BuildTrafficDataParams>) => {
   try {

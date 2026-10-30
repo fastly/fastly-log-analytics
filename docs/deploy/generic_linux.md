@@ -30,9 +30,7 @@ the same as every other platform; only the host-provisioning steps differ.
 - **No metadata service guarantees**: bare-metal and most VPS providers do
   not expose a `169.254.169.254` metadata endpoint. Even when they do
   (DigitalOcean droplets have one), it typically returns only network
-  configuration, never credentials. The backend's SSRF gates in
-  `backend/models/lake.py` and `backend/utils/remote_access.py` still
-  block outbound requests to the link-local range as defense in depth.
+  configuration, never credentials. The application never reads from the metadata service.
 - **Firewall**: use `ufw` (Debian/Ubuntu) or the provider's network
   firewall. Required rules:
   - `tcp/443` from Fastly's published v4 CIDR ranges (see `Caddyfile`)
@@ -99,7 +97,7 @@ Either way:
 
 ```sh
 sudo chown -R $USER:$USER /mnt/app-data
-mkdir -p /mnt/app-data/{data,cache,configs}
+mkdir -p /mnt/app-data/{data,cache,configs,postgres}
 ```
 
 ## 4. Caddy / SSL
@@ -123,8 +121,11 @@ DNS-01 is the recommended path on bare metal — you do not have to open port
 cd /mnt/app-data
 git clone https://github.com/fastly/fastly-log-analytics.git
 cd fastly-log-analytics
+# Create .env from .env.example and set DUCKLAKE_PG_PASSWORD.
 # Copy configs from your local dev box or restore from a backup bucket.
-docker compose up -d --build
+# The backend runs as UID/GID 1000: make data/, cache/, and configs/ writable
+# by that user (sudo chown -R 1000:1000 /mnt/app-data/{data,cache,configs}).
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
 ```
 
 The repeat-deploy flow is the platform-agnostic `restart.sh` pattern:
@@ -135,9 +136,16 @@ The repeat-deploy flow is the platform-agnostic `restart.sh` pattern:
 set -euo pipefail
 cd /mnt/app-data/fastly-log-analytics
 git pull
-docker compose up -d --build
-sleep 10
-curl -fsS http://localhost:8000/api/health
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+for i in $(seq 1 100); do
+  if curl -fsS 'http://localhost:8000/api/health?deep=1' 2>/dev/null | grep -q '^{"status":"ok"'; then
+    echo "backend warm after $((i * 15))s"
+    exit 0
+  fi
+  sleep 15
+done
+echo "backend did not report ready within 25 min" >&2
+exit 1
 ```
 
 After a force-push to the deploy branch, pre-flight with
@@ -157,8 +165,8 @@ Wants=network-online.target
 Type=oneshot
 RemainAfterExit=yes
 WorkingDirectory=/mnt/app-data/fastly-log-analytics
-ExecStart=/usr/bin/docker compose up -d
-ExecStop=/usr/bin/docker compose down
+ExecStart=/usr/bin/docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+ExecStop=/usr/bin/docker compose -f docker-compose.yml -f docker-compose.prod.yml down
 
 [Install]
 WantedBy=multi-user.target
@@ -220,15 +228,12 @@ docker compose logs --tail 100 frontend
 docker compose logs --tail 100 caddy | jq 'select(.status >= 400)'
 ```
 
-To reach `/admin` securely with full HTTP/2 (multiplexing) support to prevent browser connection starvation when opening multiple tabs, forward the secure Caddy port `8443` from your laptop:
+To reach `/admin`, forward the frontend port over SSH (the tunneled connection presents a loopback address):
 
 ```sh
-ssh -L 8443:127.0.0.1:8443 <user>@<vm-ip>
-# then browse to https://localhost:8443/admin
+ssh -L 3000:127.0.0.1:3000 <user>@<vm-ip>
+# then browse to http://localhost:3000/admin
 ```
-
-> [!NOTE]
-> Since this uses Caddy's internal self-signed TLS certificates for local loopback verification, your browser will display a certificate warning when you first visit `https://localhost:8443`. It is completely safe to bypass this warning (click "Advanced" -> "Proceed to localhost"), as the connection is running entirely inside your encrypted SSH tunnel.
 
 The frontend middleware sees no `X-Proxied-By-Caddy` header on the tunneled
 connection (which presents a loopback IP) and serves `/admin`.

@@ -1,81 +1,44 @@
 'use client'
 
 import React from 'react'
-import { useMounted } from '@/hooks/useMounted'
-import dynamic from 'next/dynamic'
-import { useTimezone } from '@/hooks/useTimezone'
-import { useColumnVisibility } from '@/hooks/useColumnVisibility'
-import { useFieldLabel } from '@/hooks/useFieldLabel'
-import { useTimeLayout } from '@/lib/chart-helpers'
-import { useServiceQuery } from '@/hooks/useServiceQuery'
-import { useFilterStore } from '@/stores/filterStore'
-import { quantizeAnchor } from '@/lib/time-window'
-import { resolveRangeWire } from '@/lib/range-wire'
+import { parseAsStringLiteral, useQueryState } from 'nuqs'
+import { useTimezone, useColumnVisibility } from '@/hooks/useSSE'
+import { useFieldLabel } from '@/hooks/useBootstrap'
+import { useTimeLayout } from '@/lib/utils'
+import { useAnalyticsReportQuery, useReportRangeAnchor } from '@/hooks/useDashboardCards'
 import { ReportLayout } from '@/components/ReportLayout'
-import { Skeleton } from '@/components/ui/skeleton'
-import { client } from '@/lib/api'
+import { client, extractApiError } from '@/lib/api'
 import { Shield } from 'lucide-react'
-import { BotsSection } from './BotsSection'
-import { ProxyWatchdogSection } from './ProxyWatchdogSection'
-import { ThreatIntelPanel } from '@/components/security/ThreatIntelPanel'
-import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs"
-// HeaderAnomaliesSection + NetworkSection sit below the first-paint
-// fold (BotsSection is the anchor). They consume their OWN per-section
-// fetch, so deferring their JS parse + React mount until after the first
-// commit lets the bots cards above paint without competing for the main
-// thread on ~2 Plotly mounts each.
-const HeaderAnomaliesSection = dynamic(
-  () => import('./HeaderAnomaliesSection').then(m => ({ default: m.HeaderAnomaliesSection })),
-  { ssr: false, loading: () => <Skeleton className="h-80 w-full" /> },
-)
-const NetworkSection = dynamic(
-  () => import('./NetworkSection').then(m => ({ default: m.NetworkSection })),
-  { ssr: false, loading: () => <Skeleton className="h-80 w-full" /> },
-)
+import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
 import type { components } from '@/types/api.generated'
+import { BotsSection, type SecurityData } from './BotsSection'
+import { ProxyWatchdogSection } from './ProxyWatchdogSection'
+import { ThreatIntelPanel, HeaderAnomaliesSection, NetworkSection } from './ThreatIntelSection'
 
-type SecurityData = components['schemas']['SecurityAggregatesResponse']
+export { BotsSection } from './BotsSection'
+export { ProxyWatchdogSection } from './ProxyWatchdogSection'
+export { ThreatIntelPanel, HeaderAnomaliesSection, NetworkSection } from './ThreatIntelSection'
 
-// Per-section field lists. The backend gates each section block on
-// `sections is None or 'name' in sections`; passing only the names a
-// given React section needs keeps the other section blocks from
-// running. The fingerprint cards + fingerprint_coverage are bundled
-// together because security.py:858 reuses a shared scan for them; the
-// two ngwaf_verified_bots* fields share a per-conn ngwaf_cache ATTACH.
-// BotsSection currently renders the fingerprint cards, so they live
-// in its request rather than HeaderAnomaliesSection's.
+const SECURITY_TABS = ['waf-activity', 'threat-intel', 'proxy-watchdog'] as const
+const securityTabParser = parseAsStringLiteral(SECURITY_TABS).withDefault('waf-activity')
+
+// MUST stay in lockstep with SECURITY_SSR_SECTIONS in lib/ssr/security.ts
 type SecuritySections = NonNullable<components['schemas']['SecurityAggregatesRequest']['sections']>
-const BOTS_SECTIONS: SecuritySections = [
+const SECURITY_SECTIONS: SecuritySections = [
   'ngwaf_verified_bots',
   'ngwaf_verified_bots_ts',
   'wellknown_bots',
+  'bot_efficiency',
   'tls_fingerprints',
   'fingerprint_coverage',
+  'req_size_dist',
+  'top_ips_header',
+  'ipv6_adoption',
+  'proxy_dist',
+  'conn_reuse_dist',
+  'proxies',
 ]
-const HEADER_ANOMALIES_SECTIONS: SecuritySections = ['req_size_dist', 'top_ips_header']
-const NETWORK_SECTIONS: SecuritySections = ['ipv6_adoption', 'proxy_dist', 'conn_reuse_dist']
-// Union of all three section groups — fetched in a single POST so the page
-// makes one /api/security/aggregates call instead of three concurrent ones.
-// On the 4-core prod VM, three parallel DuckDB scans oversubscribe the cores
-// (see memory: cpu-bound queries don't parallelize there); one combined scan
-// avoids that contention. Trade-off vs. the prior split: the three sections
-// now share a single loading state (no progressive above-the-fold paint) and
-// a single error boundary.
-//
-// MUST stay in lockstep with SECURITY_SSR_SECTIONS in lib/ssr/security.ts —
-// the section list is part of the SSR-seed query key, so a divergence here
-// would miss the dehydrated cache and double-fetch on first paint.
-const SECURITY_SECTIONS: SecuritySections = [...BOTS_SECTIONS, ...HEADER_ANOMALIES_SECTIONS, ...NETWORK_SECTIONS]
 
-// Lifted out of the ReportLayout render-prop so useTimeLayout + useServiceQuery
-// live at the top of a STABLE component instead of being called inside the
-// `{(ctx) => { …hooks… }}` callback. Mirrors InsightsBody (app/insights/
-// page.tsx) and DashboardBody. ReportLayout currently calls children(...)
-// unconditionally so the in-callback hooks were safe today, but the moment a
-// conditional/early-return appears above them (ReportShell's `!isReady`
-// placeholder/toggle re-render path can hit one) React's hook order changes
-// across renders and throws #310 ("Rendered fewer/more hooks than the
-// previous render"). Hooks at the top of a dedicated child are immune.
 type SecurityFilters = components['schemas']['SecurityAggregatesRequest']['filters']
 
 interface SecurityBodyProps {
@@ -90,18 +53,6 @@ interface SecurityBodyProps {
   relativeRange: string | null
   isAutoRange: boolean
   anchor: string
-  fingerprintVisibility: ReturnType<typeof useColumnVisibility>[0]
-  setFingerprintVisibility: ReturnType<typeof useColumnVisibility>[1]
-  onFingerprintVisChange: ReturnType<typeof useColumnVisibility>[2]
-  topIpVisibility: ReturnType<typeof useColumnVisibility>[0]
-  setTopIpVisibility: ReturnType<typeof useColumnVisibility>[1]
-  onTopIpVisChange: ReturnType<typeof useColumnVisibility>[2]
-  botVisibility: ReturnType<typeof useColumnVisibility>[0]
-  setBotVisibility: ReturnType<typeof useColumnVisibility>[1]
-  onBotVisChange: ReturnType<typeof useColumnVisibility>[2]
-  ngwafBotVisibility: ReturnType<typeof useColumnVisibility>[0]
-  setNgwafBotVisibility: ReturnType<typeof useColumnVisibility>[1]
-  onNgwafBotVisChange: ReturnType<typeof useColumnVisibility>[2]
 }
 
 function SecurityBody({
@@ -116,78 +67,44 @@ function SecurityBody({
   relativeRange,
   isAutoRange,
   anchor,
-  fingerprintVisibility,
-  setFingerprintVisibility,
-  onFingerprintVisChange,
-  topIpVisibility,
-  setTopIpVisibility,
-  onTopIpVisChange,
-  botVisibility,
-  setBotVisibility,
-  onBotVisChange,
-  ngwafBotVisibility,
-  setNgwafBotVisibility,
-  onNgwafBotVisChange,
 }: SecurityBodyProps) {
   const commonTimeLayout = useTimeLayout(startTime, endTime, timezone)
+  const [activeTab, setActiveTab] = useQueryState('tab', securityTabParser)
+  const [fingerprintVisibility, setFingerprintVisibility, onFingerprintVisChange] = useColumnVisibility()
+  const [topIpVisibility, setTopIpVisibility, onTopIpVisChange] = useColumnVisibility()
+  const [botVisibility, setBotVisibility, onBotVisChange] = useColumnVisibility()
+  const [botEfficiencyVisibility, setBotEfficiencyVisibility, onBotEfficiencyVisChange] = useColumnVisibility()
+  const [ngwafBotVisibility, setNgwafBotVisibility] = useColumnVisibility()
 
-  const [activeTab, setActiveTab] = React.useState('waf-activity')
-
-  // Single combined query for all three section groups (see SECURITY_SECTIONS).
-  // One POST → one DuckDB scan, shared loading/error.
-  //
-  // SSR-seed key contract (lib/ssr/security.ts + app/security/page.tsx): in token
-  // mode keys on the SERVER-REPRODUCIBLE (rangeKey, anchor) pair instead of the
-  // client-now()-anchored start/end, so the seed byte-matches and paints from
-  // cache. On a cold load rangeKey is "24h". A custom absolute range instead keys
-  // on "abs:<start>|<end>" and sends the explicit bounds, so it scans exactly
-  // what the chart x-axis (startTime/endTime) displays.
-  const { rangeKey, rangeBody } = resolveRangeWire({ relativeRange, isAutoRange, startTime, endTime, anchor })
-  const securityQuery = useServiceQuery<SecurityData | undefined>(
-    ['security', 'aggregates', activeServiceId, rangeKey, anchor, filterPayload, bucketSeconds],
-    async ({ signal }) => {
+  const securityQuery = useAnalyticsReportQuery<SecurityData | undefined>({
+    namespace: ['security', 'aggregates'],
+    serviceId: activeServiceId,
+    filterPayload,
+    range: { relativeRange, isAutoRange, startTime, endTime, anchor },
+    keyParts: [bucketSeconds],
+    queryFn: async ({ rangeBody, signal }) => {
       const { data, error } = await client.POST('/api/security/aggregates', {
         signal,
-        body: {
-          // Token mode → {range_token, anchor}; custom mode → {start_time,
-          // end_time} (backend uses these when range_token is absent).
-          filters: filterPayload,
-          bucket_seconds: bucketSeconds,
-          sections: SECURITY_SECTIONS,
-          ...rangeBody,
-        },
+        body: { filters: filterPayload, bucket_seconds: bucketSeconds, sections: SECURITY_SECTIONS, ...rangeBody },
       })
-      if (error) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        throw new Error((error as any)?.detail || (error as any)?.message || "Failed to fetch security aggregates")
-      }
+      if (error) throw new Error(extractApiError(error))
       return data
     },
-  )
+  })
 
-  const proxiesQuery = useServiceQuery<components['schemas']['SecurityProxiesResponse'] | undefined>(
-    ['security', 'proxies', activeServiceId, rangeKey, anchor, filterPayload],
-    async ({ signal }) => {
-      const { data, error } = await client.POST('/api/security/proxies', {
-        signal,
-        body: {
-          filters: filterPayload,
-          ...rangeBody,
-        },
-      })
-      if (error) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        throw new Error((error as any)?.detail || (error as any)?.message || "Failed to fetch security proxies")
-      }
-      return data
-    },
-    {
-      enabled: activeTab === 'proxy-watchdog' && !!activeServiceId,
-    }
-  )
+  const qCommon = {
+    data: securityQuery.data,
+    isLoading: securityQuery.isLoading,
+    isFetching: securityQuery.isFetching,
+    error: securityQuery.error ?? null,
+  }
 
   return (
-    <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-6">
+    <Tabs
+      value={activeTab}
+      onValueChange={(v) => void setActiveTab(v as (typeof SECURITY_TABS)[number])}
+      className="space-y-6"
+    >
       <TabsList className="grid grid-cols-3 max-w-[600px]">
         <TabsTrigger value="waf-activity">WAF Activity</TabsTrigger>
         <TabsTrigger value="threat-intel">Threat Intelligence</TabsTrigger>
@@ -196,10 +113,7 @@ function SecurityBody({
 
       <TabsContent value="waf-activity" className="space-y-6">
         <BotsSection
-          data={securityQuery.data}
-          isLoading={securityQuery.isLoading}
-          isFetching={securityQuery.isFetching}
-          error={securityQuery.error ?? null}
+          {...qCommon}
           intervalButtons={intervalButtons}
           bucketSeconds={bucketSeconds}
           timezone={timezone}
@@ -207,47 +121,36 @@ function SecurityBody({
           getFieldLabel={getFieldLabel}
           ngwafBotVisibility={ngwafBotVisibility}
           setNgwafBotVisibility={setNgwafBotVisibility}
-          onNgwafBotVisChange={onNgwafBotVisChange}
+          onNgwafBotVisChange={(id, vis) => setNgwafBotVisibility((prev) => ({ ...prev, [id]: vis }))}
           botVisibility={botVisibility}
           setBotVisibility={setBotVisibility}
           onBotVisChange={onBotVisChange}
+          botEfficiencyVisibility={botEfficiencyVisibility}
+          setBotEfficiencyVisibility={setBotEfficiencyVisibility}
+          onBotEfficiencyVisChange={onBotEfficiencyVisChange}
           fingerprintVisibility={fingerprintVisibility}
           setFingerprintVisibility={setFingerprintVisibility}
           onFingerprintVisChange={onFingerprintVisChange}
         />
         <HeaderAnomaliesSection
-          data={securityQuery.data}
-          isLoading={securityQuery.isLoading}
-          isFetching={securityQuery.isFetching}
-          error={securityQuery.error ?? null}
+          {...qCommon}
           getFieldLabel={getFieldLabel}
           topIpVisibility={topIpVisibility}
           setTopIpVisibility={setTopIpVisibility}
           onTopIpVisChange={onTopIpVisChange}
         />
-        <NetworkSection
-          data={securityQuery.data}
-          isLoading={securityQuery.isLoading}
-          isFetching={securityQuery.isFetching}
-          error={securityQuery.error ?? null}
-          timezone={timezone}
-          commonTimeLayout={commonTimeLayout}
-        />
+        <NetworkSection {...qCommon} timezone={timezone} commonTimeLayout={commonTimeLayout} />
       </TabsContent>
 
       <TabsContent value="threat-intel">
-        <ThreatIntelPanel
-          serviceId={activeServiceId}
-          startTime={startTime}
-          endTime={endTime}
-        />
+        <ThreatIntelPanel serviceId={activeServiceId} startTime={startTime} endTime={endTime} />
       </TabsContent>
 
       <TabsContent value="proxy-watchdog">
         <ProxyWatchdogSection
-          data={proxiesQuery.data}
-          isLoading={proxiesQuery.isLoading}
-          error={proxiesQuery.error ?? null}
+          data={securityQuery.data}
+          isLoading={securityQuery.isLoading}
+          error={securityQuery.error ?? null}
           startTime={startTime}
           endTime={endTime}
           activeServiceId={activeServiceId}
@@ -260,34 +163,7 @@ function SecurityBody({
 export default function SecurityClient({ nowServerStr }: { nowServerStr?: string }) {
   const getFieldLabel = useFieldLabel()
   const timezone = useTimezone()
-
-  // Time-range wire inputs (lib/range-wire.ts; resolved in SecurityBody where
-  // startTime/endTime are available). A quick-preset pill / the cold-load default
-  // → a server-reproducible token ("24h"), matching the hard-clamped chart x-axis
-  // AND keeping the SSR seed key byte-matched. A custom absolute range
-  // (relativeRange null + isAutoRange false) → the explicit start/end bounds, so
-  // it scans exactly what it displays.
-  const mounted = useMounted()
-
-  const relativeRange = useFilterStore((s) => s.relativeRange)
-  const isAutoRange = useFilterStore((s) => s.isAutoRange)
-  const storeEndTime = useFilterStore((s) => s.endTime)
-  // Anchor the keyed path to the SELECTED window's end, not to mount time: a
-  // preset clicked in a long-lived tab re-anchors at click time so the scan
-  // matches the hard-clamped x-axis (a mount-pinned anchor could leave the
-  // short 1h..12h presets fully disjoint from the display). Memoized on endTime
-  // so a re-render can't advance the key; cold-load endTime ≈ mount now, so the
-  // SSR seed (same 60s floor, quantizeAnchor ≡ backend quantize_anchor) still
-  // byte-matches within the quantum.
-  const anchor = React.useMemo(() => {
-    const baseStr = (!mounted && nowServerStr) ? nowServerStr : storeEndTime
-    return quantizeAnchor(baseStr)
-  }, [storeEndTime, nowServerStr, mounted])
-
-  const [fingerprintVisibility, setFingerprintVisibility, onFingerprintVisChange] = useColumnVisibility()
-  const [topIpVisibility, setTopIpVisibility, onTopIpVisChange] = useColumnVisibility()
-  const [botVisibility, setBotVisibility, onBotVisChange] = useColumnVisibility()
-  const [ngwafBotVisibility, setNgwafBotVisibility, onNgwafBotVisChange] = useColumnVisibility()
+  const { relativeRange, isAutoRange, anchor } = useReportRangeAnchor(nowServerStr)
 
   return (
     <ReportLayout
@@ -295,31 +171,14 @@ export default function SecurityClient({ nowServerStr }: { nowServerStr?: string
       description="Monitor TLS health, identify bot fingerprints, and detect request anomalies."
       icon={Shield}
     >
-      {({ startTime, endTime, activeServiceId, filterPayload, bucketSeconds, intervalButtons }) => (
+      {(props) => (
         <SecurityBody
-          startTime={startTime}
-          endTime={endTime}
-          activeServiceId={activeServiceId}
-          filterPayload={filterPayload}
-          bucketSeconds={bucketSeconds}
-          intervalButtons={intervalButtons}
+          {...props}
           timezone={timezone}
           getFieldLabel={getFieldLabel}
           relativeRange={relativeRange}
           isAutoRange={isAutoRange}
           anchor={anchor}
-          fingerprintVisibility={fingerprintVisibility}
-          setFingerprintVisibility={setFingerprintVisibility}
-          onFingerprintVisChange={onFingerprintVisChange}
-          topIpVisibility={topIpVisibility}
-          setTopIpVisibility={setTopIpVisibility}
-          onTopIpVisChange={onTopIpVisChange}
-          botVisibility={botVisibility}
-          setBotVisibility={setBotVisibility}
-          onBotVisChange={onBotVisChange}
-          ngwafBotVisibility={ngwafBotVisibility}
-          setNgwafBotVisibility={setNgwafBotVisibility}
-          onNgwafBotVisChange={onNgwafBotVisChange}
         />
       )}
     </ReportLayout>

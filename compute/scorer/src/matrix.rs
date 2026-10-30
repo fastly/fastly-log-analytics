@@ -1,9 +1,9 @@
 //! Transition-matrix loader (FSM1 binary, served from a Fastly KV Store).
 //!
-//! The matrix is produced by `scripts/scoring/train.py` (JSON on disk / FOS for
+//! The matrix is produced by `backend/scoring::build_matrix` (JSON on disk / FOS for
 //! Python eval) and pushed to a Fastly **KV Store** (resource-link name
 //! `scoring_matrix`, key `matrix`) in a compact binary form — `FSM1` — by the
-//! backend's KV writers (`backend/scoring/matrix.py::serialize_kv`). We fetch +
+//! backend's KV writers (`backend/scoring::serialize_kv`). We fetch +
 //! decode it lazily on first use and cache it for the Wasm instance lifetime.
 //!
 //! Why binary (not JSON as before): the matrix is sparse (~38 K nonzero pairs
@@ -23,7 +23,7 @@
 //! Wire format (little-endian) — MUST stay byte-for-byte in lockstep with the
 //! Python encoder `serialize_kv`. The cross-language fixture
 //! (`tests::parse_fsm1_cross_lang_fixture` here ↔ `test_serialize_kv_byte_exact`
-//! in `tests/scoring/test_matrix.py`) pins the exact bytes.
+//! in `tests/scoring/test_scorer_parity_and_vectors.py`) pins the exact bytes.
 //!
 //! ```text
 //!   magic[4]="FSM1" | fmt_ver u8=1 | vocab_size u32 | n_routes u32 |
@@ -286,7 +286,7 @@ pub fn load_matrix() -> Option<&'static TransitionMatrix> {
 #[cfg(test)]
 mod test_support {
     //! FSM1 encoder used only by tests — mirrors `serialize_kv` in
-    //! `backend/scoring/matrix.py` so test matrices round-trip through the real
+    //! `backend/scoring/__init__.py` so test matrices round-trip through the real
     //! parser.
     use super::*;
     use std::collections::BTreeMap;

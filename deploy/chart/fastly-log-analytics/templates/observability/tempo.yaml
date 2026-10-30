@@ -1,0 +1,110 @@
+{{- $private := .Values.global.privateObservability.enabled }}
+{{- if or .Values.observability.enabled $private }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "fastly-log-analytics.fullname" . }}-tempo-config
+data:
+  tempo.yml: |-
+{{- if $private }}
+{{ .Files.Get "files/observability/tempo-private.yml" | indent 4 }}
+{{- else }}
+{{ .Files.Get "files/observability/tempo.yml" | indent 4 }}
+{{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "fastly-log-analytics.fullname" . }}-tempo
+  labels:
+    app.kubernetes.io/name: {{ include "fastly-log-analytics.name" . }}-tempo
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  replicas: 1
+  {{- if $private }}
+  strategy:
+    type: Recreate
+  {{- end }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "fastly-log-analytics.name" . }}-tempo
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        {{- if $private }}
+        fla.fastly.com/private-receiver: tempo
+        {{- end }}
+        app.kubernetes.io/name: {{ include "fastly-log-analytics.name" . }}-tempo
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      {{- if $private }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+      {{- end }}
+      containers:
+        - name: tempo
+          image: {{ .Values.observability.tempo.image | quote }}
+          args: ["-config.file=/etc/tempo/tempo.yml"]
+          {{- if $private }}
+          env:
+            - name: GOMEMLIMIT
+              value: 384MiB
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          {{- end }}
+          ports:
+            - name: otlp-http
+              containerPort: 4318
+            - name: http
+              containerPort: 3200
+          volumeMounts:
+            - name: config
+              mountPath: /etc/tempo
+            - name: data
+              mountPath: /var/tempo
+            {{- if $private }}
+            - name: tmp
+              mountPath: /tmp
+            {{- end }}
+          resources:
+            {{- toYaml .Values.observability.resources | nindent 12 }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "fastly-log-analytics.fullname" . }}-tempo-config
+        - name: data
+          {{- if $private }}
+          persistentVolumeClaim:
+            claimName: {{ include "fastly-log-analytics.fullname" . }}-telemetry-tempo
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  # Bare "tempo" -- see the prometheus Service's naming note (same reason:
+  # backend/worker OTEL_EXPORTER_OTLP_TRACES_ENDPOINT below resolves it).
+  name: tempo
+spec:
+  selector:
+    app.kubernetes.io/name: {{ include "fastly-log-analytics.name" . }}-tempo
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - name: otlp-http
+      port: 4318
+      targetPort: otlp-http
+    - name: http
+      port: 3200
+      targetPort: http
+{{- end }}

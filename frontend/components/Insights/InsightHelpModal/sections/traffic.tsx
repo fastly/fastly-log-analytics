@@ -1,15 +1,15 @@
 import React from 'react'
 import {
-  ShieldAlert,
   Globe,
   Activity,
-  TrendingUp,
   AlertTriangle,
-  Building2,
-  Database,
   BarChart,
+  Database,
+  ShieldAlert,
+  TrendingUp,
+  Building2,
 } from 'lucide-react'
-import type { InsightContent } from '../types'
+import type { InsightContent } from '../../types'
 
 export function getTrafficContent(id: string): InsightContent | null {
   switch (id) {
