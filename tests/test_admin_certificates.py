@@ -520,11 +520,11 @@ def gateway_image():
 def test_upstream_caddy_filecap_cannot_exec_with_all_capabilities_dropped(gateway_image):
     # Root-cause pin: the official binary's cap_net_bind_service file capability
     # is outside the empty bounding set, so the kernel refuses exec outright.
-    upstream = _docker("run", "--rm", *HARDENING, "caddy:2.11.4-alpine", "caddy", "version", check=False)
+    upstream = _docker("run", "--rm", *HARDENING, "caddy:2.11.7-alpine", "caddy", "version", check=False)
     assert upstream.returncode != 0
     assert b"operation not permitted" in upstream.stderr + upstream.stdout
     stripped = _docker("run", "--rm", *HARDENING, gateway_image, "caddy", "version")
-    assert stripped.stdout.startswith(b"v2.11.4")
+    assert stripped.stdout.startswith(b"v2.11.7")
 
 
 @pytest.fixture(scope="module")

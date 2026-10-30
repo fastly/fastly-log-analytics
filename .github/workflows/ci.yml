@@ -215,6 +215,10 @@ jobs:
             exit 1
           fi
 
+      - name: Prepare admin gateway image cache
+        # Compile the Go runtime before pytest's per-test timeout starts.
+        run: docker build -q deploy/admin-gateway
+
       - name: Tests (pytest with coverage)
         env:
           FALCO_REQUIRED: "1"
