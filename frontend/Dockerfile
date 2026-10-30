@@ -1,10 +1,14 @@
 # --- Build Stage ---
 # node:24-slim
-FROM node:24-slim@sha256:55fb5f5a527ea2c5c4a95f963e48ef90aa38c7b346054fdc8ee9957a2b55d205 AS builder
+FROM node:24-slim@sha256:c86ecead9e55a5210ac1727de38a4ca840bf03dcaf34dc9749addbf383b1920c AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends 'ca-certificates=20250419~deb12u2' \
+    && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' ca-certificates)" ge '20250419~deb12u2' \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# No apt deps required: every package in package-lock.json with an install
+# No build deps required: every package in package-lock.json with an install
 # script ships prebuilt linux binaries (sharp via @img/sharp-libvips-linux-*,
 # unrs-resolver via @unrs/resolver-binding-linux-*-gnu) or is darwin-only
 # (fsevents). If a future dep needs node-gyp, reinstate `python3 make g++`.
@@ -42,7 +46,11 @@ RUN --mount=type=cache,target=/app/.next/cache npx next build
 
 # --- Production Stage ---
 # node:24-slim
-FROM node:24-slim@sha256:55fb5f5a527ea2c5c4a95f963e48ef90aa38c7b346054fdc8ee9957a2b55d205 AS runner
+FROM node:24-slim@sha256:c86ecead9e55a5210ac1727de38a4ca840bf03dcaf34dc9749addbf383b1920c AS runner
+
+RUN apt-get update && apt-get install -y --no-install-recommends 'ca-certificates=20250419~deb12u2' \
+    && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' ca-certificates)" ge '20250419~deb12u2' \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
