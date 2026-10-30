@@ -19,489 +19,392 @@
 
 from __future__ import annotations
 
+import importlib
 import logging
+import sys as _sys
 import time
+from types import ModuleType
+from typing import Any
 
-from backend.cron.decorators import cron_task
+from backend import config as svcconfig
+from backend.core import duckdb as _db  # noqa: F401
 from backend.cron.scheduler import (
     _display_label,
-    _extract_log_text,
-    _log_and_add_progress,
+    cron_run,
+    cron_task,
+    record_skip_row,
 )
 
 logger = logging.getLogger("backend.scheduler")
 
 
-@cron_task("local_compact")
-def _run_local_compact(service_id: str) -> None:
-    """Frequent job: merge small parquet files in the LOCAL CACHE only.
+def _ledger_touched_hours(service_id: str, lookback_s: float) -> set[str]:
+    import re
 
-    Does NOT touch FOS — only rewrites files inside cache/<bucket>/data/
-    so DuckDB's view-glob picks up fewer files at query time. Free in
-    terms of FOS cost (no 30-day-minimum penalty), so we can run it
-    aggressively (every 2 min) without billing impact.
+    from backend.core.metadata.base import get_con
 
-    Distinct from ``_run_optimize`` which writes through PyIceberg and
-    DOES update FOS.
-    """
-    from backend.core import local_compaction as _lc
-    from backend.core.duckdb import get_source_for_service, log_cron_run, start_cron_run
-    from backend.utils.active_requests import should_defer_cron
-
-    # Active-request gate (perf #84): cache compaction holds the DuckDB
-    # write lock for hundreds of ms — defer when API requests are in flight.
-    if should_defer_cron("local_compact", service_id):
-        return
-
-    src = get_source_for_service(service_id)
-    if src is None:
-        return
-
-    try:
-        run_id = start_cron_run(src, "local_compact")
-    except RuntimeError as e:
-        logger.info("⏭️  \x1b[96m[local-compact]\x1b[0m %s: skipping — %s", service_id, str(e))
-        return
-
-    from backend.cron_progress import cleanup_progress_and_reap, end_progress, start_progress
-
-    cleanup_progress_and_reap()
-    start_progress(run_id, service_id=service_id, task="local_compact")
-    _display = _display_label(src, service_id)
-    logger.info("▶️  \x1b[96m[local-compact]\x1b[0m %s: Local compaction started.", _display)
-    _log_and_add_progress(
-        run_id,
-        service_id,
-        job_name="local_compact",
-        event={"type": "status", "message": "Scanning local cache partitions..."},
+    rows = (
+        get_con(service_id)
+        .execute(
+            "SELECT DISTINCT object_key FROM ingest_ledger WHERE service_id = ? AND committed_at >= ?",
+            (service_id, time.time() - lookback_s),
+        )
+        .fetchall()
     )
+    return {
+        f"{m.group(1)}-{m.group(2)}-{m.group(3)}-{m.group(4)}"
+        for (key,) in rows
+        if (m := re.search(r"year=(\d{4})/month=(\d{2})/day=(\d{2})/hour=(\d{2})", key))
+    }
 
-    start_time = time.time()
-    try:
+
+@cron_task("local_compact", job_name="local_compact")
+def _run_local_compact(service_id: str) -> None:
+    from backend.core import storage as _lc  # type: ignore[attr-defined]
+    from backend.core.duckdb import get_source_for_service
+    from backend.utils.telemetry import should_defer_cron
+
+    if should_defer_cron("local_compact", service_id) or (src := get_source_for_service(service_id)) is None:
+        return
+    with cron_run(
+        service_id,
+        "local_compact",
+        source=src,
+        skip_log_prefix="local-compact",
+        error_summary="local compaction failed",
+    ) as run:
+        if not run.ok:
+            return
+        _display = _display_label(src, service_id)
+        logger.info("🏎️  \x1b[96m[local-compact]\x1b[0m %s: Local compaction started.", _display)
+        run.log_progress({"type": "status", "message": "Scanning local cache partitions..."})
         result = _lc.compact_local_partitions(src)
-        duration = time.time() - start_time
         errors = result.get("errors") or []
-        merged = result.get("files_merged", 0)
-        removed = result.get("files_removed", 0)
-        partitions = result.get("partitions_compacted", 0)
-        summary = (
-            f"Compacted {partitions} partition(s): merged {merged} small file(s) into "
-            f"{partitions} (removed {removed} originals)"
+        merged, removed, partitions = (
+            result.get("files_merged", 0),
+            result.get("files_removed", 0),
+            result.get("partitions_compacted", 0),
         )
+        summary = f"Compacted {partitions} partition(s): merged {merged} small file(s) into {partitions} (removed {removed} originals)"
+        if svcconfig.is_high_scale_mode(src):
+            try:
+                if rollup_hours := _ledger_touched_hours(service_id, lookback_s=15 * 60):
+                    from backend.core.rollups.recompute import recompute_touched_hours
+
+                    recompute_touched_hours(service_id, src, rollup_hours)
+                    summary += f"; rollups recomputed for {len(rollup_hours)} ledger hour(s)"
+            except Exception as e:
+                errors = list(errors) + [f"high-scale rollup recompute failed: {e}"]
+                logger.warning("[local-compact] %s: celery rollup recompute failed: %s", service_id, e)
         if errors:
-            err_preview = "\n".join(errors[:3])
-            if len(errors) > 3:
-                err_preview += f"\n... ({len(errors) - 3} more)"
-            status = "warning"
+            err_preview = "\n".join(errors[:3]) + (f"\n... ({len(errors) - 3} more)" if len(errors) > 3 else "")
             summary += f" — {len(errors)} partition error(s)"
+            run.warn(summary, error_message=err_preview, files_downloaded=merged)
         else:
-            err_preview = None
-            status = "success"
-        log_cron_run(
-            src,
-            "local_compact",
-            duration,
-            status,
-            files_downloaded=merged,
-            summary=summary,
-            error_message=err_preview,
-            run_id=run_id,
-            log_output=_extract_log_text(run_id),
-        )
-        _log_and_add_progress(
-            run_id,
-            service_id,
-            job_name="local_compact",
-            event={"type": "status", "message": summary},
-        )
-        logger.info("⏹️  \x1b[96m[local-compact]\x1b[0m %s: %s in %.2fs", _display, summary, duration)
-    except Exception as e:
-        duration = time.time() - start_time
-        log_cron_run(
-            src,
-            "local_compact",
-            duration,
-            "error",
-            error_message=str(e),
-            summary="local compaction failed",
-            run_id=run_id,
-            log_output=_extract_log_text(run_id),
-        )
-        _log_and_add_progress(run_id, service_id, job_name="local_compact", event={"type": "error", "message": str(e)})
-        logger.exception("[scheduler] %s: local_compact failed: %s", service_id, e)
-    finally:
-        end_progress(run_id)
+            run.success(summary, files_downloaded=merged)
+        run.log_progress({"type": "status", "message": summary})
+        logger.info("🏁  \x1b[96m[local-compact]\x1b[0m %s: %s in %.2fs", _display, summary, run.elapsed())
 
 
-@cron_task("rollup_hour_heal")
-def _run_rollup_hour_heal(service_id: str) -> None:
-    """Hourly job: rebuild hour bundles for closed hours the per-sync
-    recompute missed.
-
-    ``recompute_touched_hours`` excludes the active hour, so a closed hour
-    only gets its rollup when a LATER sync batch ingests rows stamped
-    inside it. Bursty services (burst ends mid-hour, all rows delivered
-    before the boundary) never retrigger — diagnosed 2026-07-06 as top-N
-    cards silently missing every closed hour of the current day on the
-    low-traffic service. Reuses the idempotent
-    ``backfill_missing_hour_bundles`` self-heal with a 1-day lookback:
-    one listdir + one GROUP-BY-hour view scan when nothing is missing,
-    so the steady-state tick is cheap. The daily compaction job keeps
-    its 30-day deep pass.
-
-    LOCAL-only writes (rollup parquet under cache/) — no FOS traffic, so
-    it is safe under the dev kill switch alongside local_compact /
-    rollup_compact.
-    """
-    from backend.core.duckdb import get_source_for_service, log_cron_run, start_cron_run
+@cron_task("rollup_hour_heal", job_name="rollup_hour_heal")
+def _run_rollup_hour_heal(service_id: str, manual: bool = False, run_id: int | None = None) -> dict:
+    from backend.core.duckdb import get_source_for_service
     from backend.core.rollups import backfill_missing_hour_bundles
-    from backend.utils.active_requests import should_defer_cron
+    from backend.core.rollups._common import _hour_bundled_root
+    from backend.cron.jobs.sync import has_sufficient_disk_space
+    from backend.utils.telemetry import should_defer_cron
 
-    # The heal's view scan + per-field COPY are CPU-bound; defer when API
-    # requests are in flight (same politeness gate as local_compact).
-    if should_defer_cron("rollup_hour_heal", service_id):
-        return
-
-    src = get_source_for_service(service_id)
-    if src is None:
-        return
-
-    try:
-        run_id = start_cron_run(src, "rollup_hour_heal")
-    except RuntimeError as e:
-        logger.info("⏭️  [rollup-heal] %s: skipping — %s", service_id, str(e))
-        return
-
-    from backend.cron_progress import cleanup_progress_and_reap, end_progress, start_progress
-
-    cleanup_progress_and_reap()
-    start_progress(run_id, service_id=service_id, task="rollup_hour_heal")
+    if not manual and should_defer_cron("rollup_hour_heal", service_id):
+        logger.info("⏸️  [rollup-heal] %s: deferring due to active user queries", service_id)
+        return {"status": "deferred", "service_id": service_id, "summary": "Deferred due to active queries"}
+    if (src := get_source_for_service(service_id)) is None:
+        return {"status": "error", "service_id": service_id, "summary": "Source not found"}
+    ok_disk, msg = has_sufficient_disk_space(_hour_bundled_root(src), "rollup-heal", service_id)
+    if not ok_disk:
+        record_skip_row(
+            src, "rollup_hour_heal", "Skipped due to low disk space", status="warning", error_message=msg, run_id=run_id
+        )
+        return {"status": "warning", "service_id": service_id, "summary": msg}
     _display = _display_label(src, service_id)
+    outcome: dict = {}
+    with cron_run(
+        service_id,
+        "rollup_hour_heal",
+        source=src,
+        run_id=run_id,
+        error_summary="hour-bundle self-heal failed",
+        error_result=lambda exc: {
+            "status": "error",
+            "service_id": service_id,
+            "error_message": str(exc),
+            "summary": "hour-bundle self-heal failed",
+            "duration_s": run.elapsed(),
+            "run_id": run.run_id,
+        },
+        skip_log_prefix="rollup-heal",
+    ) as run:
+        if run.skipped:
+            return {"status": "skipped", "service_id": service_id, "summary": run.skip_reason}
+        if run.aborted:
+            return dict(run.result or {})
+        durable_mode = svcconfig.is_durable_serving_mode(src)
+        if durable_mode:
+            from backend.core.rollups._common import rollup_coverage_ready
 
-    start_time = time.time()
-    try:
-        heal = backfill_missing_hour_bundles(service_id, src, lookback_days=1)
-        duration = time.time() - start_time
+            coverage_ready = rollup_coverage_ready(service_id)
+        else:
+            coverage_ready = True
+        lookback_days = 2
+        heal = backfill_missing_hour_bundles(
+            service_id,
+            src,
+            lookback_days=lookback_days,
+            max_missing_hours=1 if durable_mode and not coverage_ready else None,
+        )
+        if not durable_mode:
+            try:
+                from backend.core.rollups import backfill_security_proxies_bundles, backfill_wellknown_bots_rollup
+
+                backfill_wellknown_bots_rollup(service_id, src)
+                backfill_security_proxies_bundles(service_id, src)
+            except Exception as sec_heal_err:
+                logger.warning(
+                    "[rollup-heal] %s: security rollup self-heal skipped/failed: %s", service_id, sec_heal_err
+                )
+        try:
+            cfg = svcconfig.load_config(service_id) or {}
+            if cfg.get("rum", {}).get("enabled") and not durable_mode:
+                from contextlib import closing
+
+                from backend.core.duckdb import get_connection, rum_source_for
+                from backend.core.rollups.recompute import backfill_missing_rum_aggregates
+                from backend.core.storage import execute_with_stale_view_retry
+                from backend.core.storage._core import _ducklake_attach
+
+                rum_src = rum_source_for(src)
+                with closing(get_connection(rum_src, read_only=False)) as rum_con:
+                    try:
+                        _ducklake_attach(rum_con, src, read_only=True)
+                    except Exception:
+                        pass
+                    execute_with_stale_view_retry(
+                        rum_con,
+                        rum_src,
+                        lambda c: backfill_missing_rum_aggregates(c, service_id, lookback_days=30),
+                        table_name="client_vitals",
+                    )
+        except Exception as rum_heal_err:
+            logger.warning("[rollup-heal] %s: RUM aggregate self-heal skipped/failed: %s", service_id, rum_heal_err)
+        if durable_mode and not coverage_ready and heal.get("coverage_verified", False):
+            try:
+                from backend.core.rollups._common import mark_rollup_coverage_ready
+
+                mark_rollup_coverage_ready(service_id)
+            except Exception as e:
+                logger.warning("[rollup-heal] %s: could not mark rollup coverage ready: %s", service_id, e)
         summary = (
             f"Healed {heal.get('missing', 0)} missing hour(s): "
             f"{heal.get('rebuilt_fields', 0)} field rollup(s) rebuilt, "
             f"{heal.get('bundled', 0)} hour(s) bundled, "
             f"{heal.get('stamped_empty', 0)} empty hour(s) stamped"
         )
-        log_cron_run(
-            src,
-            "rollup_hour_heal",
-            duration,
-            "success",
-            summary=summary,
-            run_id=run_id,
-            log_output=_extract_log_text(run_id),
-        )
+        duration = run.elapsed()
+        run.success(summary)
         if heal.get("missing", 0) or heal.get("stamped_empty", 0):
-            logger.info("⏹️  [rollup-heal] %s: %s in %.2fs", _display, summary, duration)
-    except Exception as e:
-        duration = time.time() - start_time
-        log_cron_run(
-            src,
-            "rollup_hour_heal",
-            duration,
-            "error",
-            error_message=str(e),
-            summary="hour-bundle self-heal failed",
-            run_id=run_id,
-            log_output=_extract_log_text(run_id),
-        )
-        _log_and_add_progress(
-            run_id, service_id, job_name="rollup_hour_heal", event={"type": "error", "message": str(e)}
-        )
-        logger.exception("[scheduler] %s: rollup_hour_heal failed: %s", service_id, e)
-    finally:
-        end_progress(run_id)
+            logger.info("🏁  [rollup-heal] %s: %s in %.2fs", _display, summary, duration)
+        outcome = {
+            "status": "success",
+            "service_id": service_id,
+            "missing": heal.get("missing", 0),
+            "rebuilt_fields": heal.get("rebuilt_fields", 0),
+            "bundled": heal.get("bundled", 0),
+            "stamped_empty": heal.get("stamped_empty", 0),
+            "coverage_verified": heal.get("coverage_verified", False),
+            "duration_s": duration,
+            "summary": summary,
+            "run_id": run.run_id,
+        }
+    return run.result if run.result is not None else outcome
 
 
-@cron_task("rollup_compact_daily")
-def _run_rollup_compact_daily(service_id: str) -> None:
-    """Daily job: consolidate closed-day per-hour rollup parquet into per-day files.
+def _call_with_lookback(fn: Any, *args: Any, lookback_days: int = 30) -> Any:
+    return fn(*args, lookback_days=lookback_days)
 
-    Reduces file-open overhead on 7-day dashboard queries from ~1500 files
-    to ~30. Reader automatically falls back to per-hour when per-day is
-    missing, so this is purely additive.
-    """
-    from backend.core.duckdb import get_source_for_service, log_cron_run, start_cron_run
+
+@cron_task("rollup_compact_daily", job_name="rollup_compact_daily")
+def _run_rollup_compact_daily(service_id: str, manual: bool = False, run_id: int | None = None) -> dict:
+    from backend.core import rollups
+    from backend.core.duckdb import get_source_for_service
     from backend.core.rollups import (
         backfill_day_bundles,
         backfill_missing_hour_bundles,
         backfill_missing_hour_ip_spread,
         compact_closed_days_to_daily,
-        compact_network_rtt_closed_days_to_daily,
-        compact_network_speed_closed_days_to_daily,
-        compact_ngwaf_bots_closed_days_to_daily,
-        compact_origin_dims_closed_days_to_daily,
-        compact_origin_latency_ts_closed_days_to_daily,
-        compact_origin_summary_closed_days_to_daily,
-        compact_overview_closed_days_to_daily,
-        compact_perf_latency_closed_days_to_daily,
-        compact_security_dims_closed_days_to_daily,
-        compact_verified_bots_ts_closed_days_to_daily,
+        retire_compacted_hour_bundles,
     )
+    from backend.core.rollups._common import _day_bundled_root
+    from backend.core.rollups.recompute import DAY_COMPACTORS, cleanup_old_rollups
+    from backend.cron.jobs.sync import has_sufficient_disk_space
+    from backend.utils.telemetry import should_defer_cron
 
-    src = get_source_for_service(service_id)
-    if src is None:
-        return
-
-    try:
-        run_id = start_cron_run(src, "rollup_compact_daily")
-    except RuntimeError as e:
-        logger.info("⏭️  [rollup-compact] %s: skipping — %s", service_id, str(e))
-        return
-
+    if not manual and should_defer_cron("rollup_compact", service_id):
+        logger.info("⏸️  [rollup-compact] %s: deferring due to active user queries", service_id)
+        return {"status": "deferred", "service_id": service_id, "summary": "Deferred due to active queries"}
+    if (src := get_source_for_service(service_id)) is None:
+        return {"status": "error", "service_id": service_id, "summary": "Source not found"}
+    ok_disk, msg = has_sufficient_disk_space(_day_bundled_root(src), "rollup-compact", service_id)
+    if not ok_disk:
+        record_skip_row(
+            src,
+            "rollup_compact_daily",
+            "Skipped due to low disk space",
+            status="warning",
+            error_message=msg,
+            run_id=run_id,
+        )
+        return {"status": "warning", "service_id": service_id, "summary": msg}
     _display = _display_label(src, service_id)
-    logger.info("▶️  [rollup-compact] %s: Daily rollup compaction started.", _display)
-
-    start_time = time.time()
-    try:
-        # Self-heal pass FIRST: any closed hour where the iceberg view
-        # has rows but no hour_bundled file exists (ingest's
-        # "touched_hours" report under-reported, the recompute fired
-        # before the iceberg commit landed, etc.) gets rebuilt here.
-        # Surfaced 2026-06-15 as a multi-percent POST undercount on
-        # the dashboard method panel — 18 hours over 30 days were
-        # silently missing. Best-effort: a failure leaves the
-        # compaction pass to run anyway against whatever bundles do
-        # exist.
+    outcome: dict = {}
+    with cron_run(
+        service_id,
+        "rollup_compact_daily",
+        source=src,
+        run_id=run_id,
+        error_summary="Daily rollup compaction failed",
+        error_result=lambda exc: {
+            "status": "error",
+            "service_id": service_id,
+            "summary": str(exc),
+            "errors": [str(exc)],
+        },
+        include_log_output=False,
+        progress_task="rollup_compact",
+        skip_log_prefix="rollup-compact",
+    ) as run:
+        if run.skipped:
+            return {"status": "skipped", "service_id": service_id, "summary": run.skip_reason}
+        if run.aborted:
+            return dict(run.result) if run.result is not None else outcome
+        logger.info("🏎️  [rollup-compact] %s: Daily rollup compaction started.", _display)
+        subsystem_errors: list[str] = []
+        for label, fn in (
+            ("missing_hour_bundles", backfill_missing_hour_bundles),
+            ("ip_spread", backfill_missing_hour_ip_spread),
+        ):
+            try:
+                _call_with_lookback(fn, service_id, src, lookback_days=30)
+            except Exception as e:
+                subsystem_errors.append(f"{label}: {e}")
+                logger.warning("[rollup-compact] %s: %s self-heal failed: %s", _display, label, e)
+        rebuilt = _call_with_lookback(compact_closed_days_to_daily, service_id, src, lookback_days=30)
         try:
-            heal = backfill_missing_hour_bundles(service_id, src, lookback_days=30)
+            bundled = _call_with_lookback(backfill_day_bundles, service_id, src, lookback_days=30)
         except Exception as e:
-            logger.warning(
-                "[rollup-compact] %s: missing-hour self-heal failed (compaction continues): %s",
-                _display,
-                e,
-            )
-            heal = {"missing": 0, "bundled": 0}
-
-        # IP-spread self-heal: closed hours that have the count bundle
-        # but no all_fields_ip.parquet (the common case after #3 ships
-        # to a service whose count rollup was already backfilled).
-        # Bounded by the same 30-day lookback as the count heal so a
-        # one-time backfill can't run away on a long-lived service.
-        try:
-            ip_heal = backfill_missing_hour_ip_spread(service_id, src, lookback_days=30)
-            if ip_heal.get("missing", 0) > 0:
-                logger.info(
-                    "🔁 [rollup-compact] %s: ip_spread self-heal rebuilt %d/%d hours",
-                    _display,
-                    ip_heal.get("rebuilt", 0),
-                    ip_heal.get("missing", 0),
-                )
-        except Exception as e:
-            logger.warning(
-                "[rollup-compact] %s: ip_spread self-heal failed (compaction continues): %s",
-                _display,
-                e,
-            )
-
-        rebuilt = compact_closed_days_to_daily(service_id, src)
-        # After per-field per-day files are fresh, bundle them across
-        # fields so the dashboard reader opens 1 file per day instead
-        # of ~40. backfill_day_bundles is idempotent (skips up-to-date
-        # bundles via mtime) so running it on every compact tick is
-        # cheap when no new per-field days landed. Best-effort —
-        # bundle failure degrades to per-field reading, which still
-        # works correctly.
-        try:
-            bundled = backfill_day_bundles(service_id, src)
-        except Exception as e:
-            logger.warning(
-                "[rollup-compact] %s: day-bundle backfill failed (per-field still serves): %s",
-                _display,
-                e,
-            )
+            subsystem_errors.append(f"day_bundles: {e}")
+            logger.warning("[rollup-compact] %s: day-bundle backfill failed: %s", _display, e)
             bundled = 0
-        # Origin-summary per-day compaction: takes the 24 per-hour
-        # origin_summary.parquet files in hour_bundled and writes a
-        # single per-day file in day_bundled/day=YYYY-MM-DD/. The
-        # /api/origin/aggregates summary panel reader prefers day-files
-        # when present and falls back to per-hour otherwise, so this is
-        # purely additive — the file-open overhead drop is the win
-        # (3.2 s → ~200 ms on a 30 d window's cold reads on prod cloud
-        # disk, per the 2026-06-16 measurement). Idempotent (mtime-
-        # gated); best-effort failure leaves the panel on the per-hour
-        # path.
+        for spec in DAY_COMPACTORS:
+            try:
+                _call_with_lookback(getattr(rollups, spec.compactor), service_id, src, lookback_days=30)
+            except Exception as e:
+                subsystem_errors.append(f"{spec.label}: {e}")
+                logger.warning("[rollup-compact] %s: %s failed: %s", _display, spec.label, e)
+        retired_files, retired_bytes = 0, 0
         try:
-            origin_summary_compacted = compact_origin_summary_closed_days_to_daily(service_id, src)
-        except Exception as e:
-            logger.warning(
-                "[rollup-compact] %s: origin_summary day-compact failed (per-hour still serves): %s",
-                _display,
-                e,
+            retired_files, retired_bytes = _call_with_lookback(
+                retire_compacted_hour_bundles, service_id, src, lookback_days=30
             )
-            origin_summary_compacted = 0
-
-        # network_rtt per-day compaction: collapses 24 per-hour
-        # rtt_percentiles parquets into 1 per-day file so the
-        # /api/network-health rtt_percentiles_query rollup reader opens
-        # ~30 files on a 30 d window instead of 720. Same mtime-gated
-        # idempotent pattern; failure leaves the panel on per-hour.
+        except Exception as e:
+            subsystem_errors.append(f"retirement: {e}")
+            logger.warning("[rollup-compact] %s: retirement failed: %s", _display, e)
         try:
-            network_rtt_compacted = compact_network_rtt_closed_days_to_daily(service_id, src)
+            retention_months = int(src.get("rollup_retention_months", 12))
+            max_age_days = int(src.get("rollups_days", retention_months * 30))
+            if max_age_days > 0:
+                cleanup_old_rollups(service_id, src, max_age_days=max_age_days, hour_bundle_max_age_days=14)
         except Exception as e:
-            logger.warning(
-                "[rollup-compact] %s: network_rtt day-compact failed (per-hour still serves): %s",
-                _display,
-                e,
-            )
-            network_rtt_compacted = 0
-
-        # network_speed per-day compaction: same shape as network_rtt
-        # but the per-day row is a pure GROUP BY (asn, c_speed) SUM.
-        try:
-            network_speed_compacted = compact_network_speed_closed_days_to_daily(service_id, src)
-        except Exception as e:
-            logger.warning(
-                "[rollup-compact] %s: network_speed day-compact failed (per-hour still serves): %s",
-                _display,
-                e,
-            )
-            network_speed_compacted = 0
-
-        # verified_bots_ts per-day compaction: same shape as network_speed
-        # but PRESERVES the minute (bucket_ts) dimension because the panel
-        # is a time series (GROUP BY bucket_ts, bot_type).
-        try:
-            vbts_compacted = compact_verified_bots_ts_closed_days_to_daily(service_id, src)
-        except Exception as e:
-            logger.warning(
-                "[rollup-compact] %s: verified_bots_ts day-compact failed (per-hour still serves): %s",
-                _display,
-                e,
-            )
-            vbts_compacted = 0
-
-        # perf_latency per-day compaction: top_urls + top_asns latency
-        # leaderboards (request-weighted percentile merge + re-cap top-K).
-        try:
-            perf_compacted = compact_perf_latency_closed_days_to_daily(service_id, src)
-        except Exception as e:
-            logger.warning(
-                "[rollup-compact] %s: perf_latency day-compact failed (per-hour still serves): %s",
-                _display,
-                e,
-            )
-            perf_compacted = 0
-
-        # origin_dims per-day compaction: pop / oip / edge latency dimensions
-        # (request-weighted percentile merge; oip SUMs exact 5xx/total counts;
-        # pop/oip re-cap top-K). Same mtime-gated idempotent pattern; failure
-        # leaves those panels on per-hour.
-        try:
-            origin_dims_compacted = compact_origin_dims_closed_days_to_daily(service_id, src)
-        except Exception as e:
-            logger.warning(
-                "[rollup-compact] %s: origin_dims day-compact failed (per-hour still serves): %s",
-                _display,
-                e,
-            )
-            origin_dims_compacted = 0
-
-        # origin_latency_ts per-day compaction: minute-granular origin-latency
-        # percentile time series. Same shape as verified_bots_ts — PRESERVES
-        # the minute (bucket_ts) dimension because the panel is a time series.
-        # Same mtime-gated idempotent pattern; failure leaves it on per-hour.
-        try:
-            origin_latency_ts_compacted = compact_origin_latency_ts_closed_days_to_daily(service_id, src)
-        except Exception as e:
-            logger.warning(
-                "[rollup-compact] %s: origin_latency_ts day-compact failed (per-hour still serves): %s",
-                _display,
-                e,
-            )
-            origin_latency_ts_compacted = 0
-
-        # security_dims per-day compaction: req_size / conn_reuse (bucket SUM +
-        # MIN-of-MIN), topips (MAX-of-MAX re-cap), cov (one-row SUM). EXACT
-        # merges — no _approx. Same mtime-gated idempotent pattern; failure
-        # leaves those panels on per-hour.
-        try:
-            security_dims_compacted = compact_security_dims_closed_days_to_daily(service_id, src)
-        except Exception as e:
-            logger.warning(
-                "[rollup-compact] %s: security_dims day-compact failed (per-hour still serves): %s",
-                _display,
-                e,
-            )
-            security_dims_compacted = 0
-
-        # ngwaf_bots per-day compaction: (bot_name, category) SUM(count) —
-        # EXACT merge, no cap. Same mtime-gated idempotent pattern; failure
-        # leaves the panel on per-hour files.
-        try:
-            ngwaf_bots_compacted = compact_ngwaf_bots_closed_days_to_daily(service_id, src)
-        except Exception as e:
-            logger.warning(
-                "[rollup-compact] %s: ngwaf_bots day-compact failed (per-hour still serves): %s",
-                _display,
-                e,
-            )
-            ngwaf_bots_compacted = 0
-
-        # overview per-day compaction: preserves hour_start granularity
-        # (24 rows) so the reader can re-bucket to sub-day intervals.
-        # All columns SUM-aggregatable. Same best-effort pattern.
-        try:
-            overview_compacted = compact_overview_closed_days_to_daily(service_id, src)
-        except Exception as e:
-            logger.warning(
-                "[rollup-compact] %s: overview day-compact failed (per-hour still serves): %s",
-                _display,
-                e,
-            )
-            overview_compacted = 0
-        duration = time.time() - start_time
-        # Pass run_id so log_cron_run UPDATEs the 'running' row that
-        # start_cron_run inserted (instead of orphaning it and inserting
-        # a fresh terminal row). The same fix applies to the error
-        # branch below — without run_id pass-through both branches
-        # leave the original 'running' row stuck forever.
-        heal_summary = (
-            f"; healed {heal['bundled']}/{heal['missing']} missing hour bundle(s)" if heal.get("missing") else ""
+            logger.warning("[rollup-compact] %s: cleanup pass failed: %s", _display, e)
+        summary = (
+            f"Rebuilt {rebuilt} (field, day) file(s); bundled {bundled} day(s); "
+            f"retired {retired_files} hourly file(s) ({retired_bytes / 1024:.1f}KB)."
         )
-        os_summary = f"; compacted {origin_summary_compacted} origin_summary day(s)" if origin_summary_compacted else ""
-        nr_summary = f"; compacted {network_rtt_compacted} network_rtt day(s)" if network_rtt_compacted else ""
-        ns_summary = f"; compacted {network_speed_compacted} network_speed day(s)" if network_speed_compacted else ""
-        vbts_summary = f"; compacted {vbts_compacted} verified_bots_ts day(s)" if vbts_compacted else ""
-        perf_summary = f"; compacted {perf_compacted} perf_latency day(s)" if perf_compacted else ""
-        od_summary = f"; compacted {origin_dims_compacted} origin_dims day(s)" if origin_dims_compacted else ""
-        olts_summary = (
-            f"; compacted {origin_latency_ts_compacted} origin_latency_ts day(s)" if origin_latency_ts_compacted else ""
-        )
-        sd_summary = f"; compacted {security_dims_compacted} security_dims day(s)" if security_dims_compacted else ""
-        nb_summary = f"; compacted {ngwaf_bots_compacted} ngwaf_bots day(s)" if ngwaf_bots_compacted else ""
-        ov_summary = f"; compacted {overview_compacted} overview day(s)" if overview_compacted else ""
-        log_cron_run(
-            src,
-            "rollup_compact_daily",
-            duration,
-            "success",
-            summary=f"Rebuilt {rebuilt} (field, day) file(s); bundled {bundled} day(s){os_summary}{nr_summary}{ns_summary}{vbts_summary}{perf_summary}{od_summary}{olts_summary}{sd_summary}{nb_summary}{ov_summary}{heal_summary}.",
-            run_id=run_id,
-        )
-        logger.info(
-            "⏹️  [rollup-compact] %s: Compacted %d (field, day), bundled %d day(s), healed %d/%d hour bundle(s) in %.1fs.",
-            _display,
-            rebuilt,
-            bundled,
-            heal.get("bundled", 0),
-            heal.get("missing", 0),
-            duration,
-        )
-    except Exception as e:
-        duration = time.time() - start_time
-        log_cron_run(
-            src,
-            "rollup_compact_daily",
-            duration,
-            "error",
-            error_message=str(e),
-            run_id=run_id,
-        )
-        logger.exception("[rollup-compact] %s: Daily rollup compaction failed: %s", _display, e)
+        status = "warning" if subsystem_errors else "success"
+        run.record(status, summary=summary, error_message="; ".join(subsystem_errors) if subsystem_errors else None)
+        outcome = {
+            "status": status,
+            "service_id": service_id,
+            "rebuilt": rebuilt,
+            "bundled": bundled,
+            "retired_files": retired_files,
+            "retired_bytes": retired_bytes,
+            "duration_s": round(run.elapsed(), 2),
+            "summary": summary,
+            "errors": subsystem_errors if subsystem_errors else None,
+        }
+    return run.result if run.result is not None else outcome
+
+
+@cron_task("partial_hour_merge", job_name="partial_hour_merge")
+def _run_partial_hour_merge(service_id: str) -> None:
+    from backend.core.duckdb import get_source_for_service
+    from backend.core.log_fields import derived
+    from backend.core.rollups.day_bundles import gc_stale_partial_hours, merge_partial_hour
+    from backend.repositories._base import _LIVE_TOPN_SKIP_FIELDS
+    from backend.repositories.dashboard import FIELDS
+    from backend.utils.telemetry import should_defer_cron
+
+    if should_defer_cron("partial_hour_merge", service_id) or (src := get_source_for_service(service_id)) is None:
+        return
+    with cron_run(
+        service_id,
+        "partial_hour_merge",
+        source=src,
+        skip_log_prefix="partial-hour",
+        error_summary="partial-hour merge failed",
+    ) as run:
+        if run.skipped:
+            return
+        logger.info("🕐  [partial-hour] %s: partial-hour merge started.", _display_label(src, service_id))
+        derived_fields = {f.code for f in derived()}
+        merge_fields = [f for f in FIELDS if f not in _LIVE_TOPN_SKIP_FIELDS and f not in derived_fields]
+        stats = merge_partial_hour(service_id, src, merge_fields)
+        removed = gc_stale_partial_hours(src)
+        summary = f"Merged {stats['new_files']} new file(s) into hour={stats['hour']}; GC'd {removed} stale hour(s)"
+        run.success(summary)
+        if stats["new_files"]:
+            run.log_progress({"type": "status", "message": summary})
+
+
+_MAINTENANCE_ATTRS = frozenset(
+    {
+        "_run_metadata_cleanup",
+        "_run_expire_snapshots",
+        "_run_optimize",
+        "schedule_cloud_push",
+    }
+)
+
+
+class _CompactionModule(ModuleType):
+    def __getattr__(self, name: str) -> Any:
+        if name in _MAINTENANCE_ATTRS:
+            maint = importlib.import_module("backend.cron.jobs.maintenance")
+            return getattr(maint, name)
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name in _MAINTENANCE_ATTRS:
+            maint = importlib.import_module("backend.cron.jobs.maintenance")
+            setattr(maint, name, value)
+            return
+        super().__setattr__(name, value)
+
+    def __delattr__(self, name: str) -> None:
+        if name in _MAINTENANCE_ATTRS:
+            maint = importlib.import_module("backend.cron.jobs.maintenance")
+            delattr(maint, name)
+            return
+        super().__delattr__(name)
+
+
+_sys.modules[__name__].__class__ = _CompactionModule

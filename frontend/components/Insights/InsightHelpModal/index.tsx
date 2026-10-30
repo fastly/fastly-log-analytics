@@ -8,15 +8,26 @@ import {
 } from '@/components/ui/dialog'
 import { Badge } from '@/components/ui/badge'
 import { Globe } from 'lucide-react'
-import type { InsightContent, InsightHelpModalProps } from './types'
 import { getSecurityContent } from './sections/security'
-import { getCacheContent } from './sections/cache'
-import { getErrorsContent } from './sections/errors'
+import {
+  getOptimizationContent,
+  getDefaultContent,
+  getErrorsContent,
+  getCacheContent,
+} from './sections/errorsAndCache'
 import { getTrafficContent } from './sections/traffic'
 import { getPerformanceContent } from './sections/performance'
-import { getOptimizationContent, getDefaultContent } from './sections/optimization'
+import type { InsightContent, InsightHelpModalProps } from '../types'
 
-export type { InsightHelpModalProps } from './types'
+export {
+  getSecurityContent,
+  getOptimizationContent,
+  getDefaultContent,
+  getErrorsContent,
+  getCacheContent,
+  getTrafficContent,
+  getPerformanceContent,
+}
 
 function getContent(id: string): InsightContent {
   return (

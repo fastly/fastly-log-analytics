@@ -12,18 +12,58 @@
  * and the contract suite (13003) so all three can run side-by-side
  * during local iteration.
  */
-import { spawn, type ChildProcess } from 'node:child_process'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { execFileSync, spawn, type ChildProcess } from 'node:child_process'
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { E2E_BACKEND_PORT, E2E_FRONTEND_PORT } from '../playwright.config'
+import { backendTestEnvironment } from '../__tests__/helpers/msw/handlers'
 
 const HOST = '127.0.0.1'
 
+function _seedSyntheticLogs(sandbox: string, configsDir: string, repoRoot: string): void {
+  try {
+    const cfgPath = join(configsDir, 'svc-playwright-e2e.json')
+    execFileSync(
+      'uv',
+      [
+        'run',
+        '--project',
+        repoRoot,
+        'python',
+        join(repoRoot, 'scripts', 'load_test', 'generate_synthetic_traffic.py'),
+        '--target',
+        'local',
+        '--rows',
+        '750',
+        // 36h of history: Insights detectors need a full 24h baseline plus the
+        // analysis window (a 24h seed reports "only 24.0h available").
+        '--span-hours',
+        '36',
+        '--scenario',
+        'diurnal',
+        '--no-commit',
+        '--config',
+        cfgPath,
+      ],
+      {
+        cwd: sandbox,
+        stdio: 'pipe',
+      },
+    )
+    console.log('[e2e] seeded 750 rows (36h span) of synthetic traffic into sandbox buffer')
+  } catch (err: unknown) {
+    const e = err as { stdout?: Buffer | string; stderr?: Buffer | string; message?: string }
+    const out = e.stdout ? e.stdout.toString() : ''
+    const errOut = e.stderr ? e.stderr.toString() : ''
+    throw new Error(`[e2e] failed to seed synthetic traffic into sandbox buffer:\n${errOut || out || e.message || String(err)}`)
+  }
+}
+
 async function poll(url: string, timeoutMs = 180_000): Promise<void> {
   // Default 180s: the playwright config webServer timeout is 120s for the
-  // FRONTEND, but the BACKEND boot cost (DuckDB init + httpfs load + Iceberg
+  // FRONTEND, but the BACKEND boot cost (DuckDB init + httpfs load + DuckLake
   // catalog open + every router import) is the lion's share of cold-start.
   // The prior 60s default failed on slow CI runners with the misleading
   // 'backend never returned 200' before the frontend even got a chance to
@@ -54,6 +94,18 @@ function _seedDefaultServiceConfig(configsDir: string): void {
   // Write one mock service config so /api/bootstrap surfaces a service
   // and the dashboard journeys have an active selection on first paint.
   // All fields use safe placeholder values — never any real Fastly IDs.
+  //
+  // `fastly_api_key` / `cdn_service_id` are deliberately left EMPTY rather
+  // than fabricated placeholder strings: they were previously truthy fakes
+  // ('mock-fastly-key' / 'mock-cdn-svc'), which passed `config.get_fastly_api_key`
+  // / `get_fastly_logging_service_id`'s truthiness checks and caused Control
+  // Room's RT poller (`backend/core/realtime/`) to
+  // make real HTTPS calls to rt.fastly.com with garbage credentials — a
+  // 403-retry storm across every parallel WebKit worker. Leaving them empty
+  // hits the poller's existing honest `if not api_key or not fastly_service_id:
+  // return None` short-circuit, same as any real service with no Fastly
+  // credentials configured yet. No spec in this suite depends on these two
+  // fields being truthy for `svc-playwright-e2e`.
   const sid = 'svc-playwright-e2e'
   const config = {
     service_id: sid,
@@ -62,16 +114,66 @@ function _seedDefaultServiceConfig(configsDir: string): void {
     fos_region: 'us-east-1',
     fos_access_key_id: 'AKIA_MOCK',
     fos_secret_access_key: 'SECRET_MOCK',
-    fastly_api_key: 'mock-fastly-key',
-    cdn_service_id: 'mock-cdn-svc',
+    fastly_api_key: '',
+    cdn_service_id: '',
     cdn_secret: 'mock-cdn-secret',
-    access_level: 'read_write',
     provisioning: { endpoint_name: 'Mock Logger' },
+    // Cron-written storage totals (FLA_DEV_NO_CRONS=1 means no cron ever
+    // writes them here). With both present, GET /api/usage/current-storage
+    // uses them instead of falling back to a live FOS ListObjectsV2 scan
+    // against the mock bucket, which only logged `FOS Scan failed ... 400`
+    // on every /usage page load. The sandbox has no committed DuckLake data.
+    status: { storage_bytes: 0, storage_files: 0 },
+    log_fields: {
+      schema_version: 2,
+      preset: 'recommended',
+      groups: ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'METRICS', 'VIRTUAL'],
+    },
   }
   writeFileSync(join(configsDir, `${sid}.json`), JSON.stringify(config, null, 2))
 }
 
+/**
+ * Optional second service config that points Control Room's RT poller at a
+ * REAL Fastly service instead of synthesizing fake tick data. Opt-in only,
+ * via env vars the operator exports locally before `make e2e` — never
+ * committed, never a CI secret (E2E does not run in GitHub Actions).
+ *
+ * `get_fastly_api_key` / `get_fastly_logging_service_id` (backend/config.py)
+ * read the config's own `service_id` field as the Fastly service ID sent to
+ * rt.fastly.com, so this seeds a config file whose `service_id` IS the real
+ * Fastly service ID — separate from the shared `svc-playwright-e2e` fixture
+ * used by every other spec, so this stays purely additive and opt-in.
+ *
+ * When unset, `control-room.spec.ts` falls back to `svc-playwright-e2e`,
+ * whose fake credentials are absent from the poller's config lookup path —
+ * see `_fetch_realtime`'s `if not api_key or not fastly_service_id: return
+ * None` short-circuit — so it never calls rt.fastly.com with garbage
+ * credentials (the prior 403-retry-storm bug) and never fabricates data.
+ */
+function _seedRealRtServiceConfig(configsDir: string): void {
+  const apiKey = process.env.E2E_REAL_RT_FASTLY_API_KEY
+  const serviceId = process.env.E2E_REAL_RT_FASTLY_SERVICE_ID
+  if (!apiKey || !serviceId) return
+
+  const config = {
+    service_id: serviceId,
+    service_name: 'Playwright E2E Control Room (real RT)',
+    fos_bucket: 'mock-bucket',
+    fos_region: 'us-east-1',
+    fos_access_key_id: 'AKIA_MOCK',
+    fos_secret_access_key: 'SECRET_MOCK',
+    fastly_api_key: apiKey,
+    cdn_service_id: serviceId,
+    cdn_secret: 'mock-cdn-secret',
+    provisioning: { endpoint_name: 'Mock Logger' },
+  }
+  writeFileSync(join(configsDir, `${serviceId}.json`), JSON.stringify(config, null, 2))
+  console.log(`[e2e] seeded real-RT service config for ${serviceId} (E2E_REAL_RT_FASTLY_* set)`)
+}
+
 async function globalSetup() {
+  const repoRoot = join(__dirname, '..', '..')
   sandbox = mkdtempSync(join(tmpdir(), 'fla-playwright-'))
   const configsDir = join(sandbox, 'configs')
   const dataDir = join(sandbox, 'data')
@@ -79,16 +181,11 @@ async function globalSetup() {
   // the configs file before the backend boots and reads them.
   // node:fs.mkdirSync would be one way; the launcher creates the dir
   // first via mkdir(parents=True), so we mirror that here.
-  const fs = await import('node:fs')
-  fs.mkdirSync(configsDir, { recursive: true })
-  fs.mkdirSync(dataDir, { recursive: true })
-  // The share DB resolves its dir from REMOTE_SHARE_DB_DIR (default literal
-  // ``data/system``) — it does NOT honor CONTRACT_DATA_DIR's svcconfig patch —
-  // so without this the e2e backend would read/write the developer's REAL
-  // remote_share.db. Sandbox it explicitly.
-  const shareDbDir = join(dataDir, 'system')
-  fs.mkdirSync(shareDbDir, { recursive: true })
+  mkdirSync(configsDir, { recursive: true })
+  mkdirSync(dataDir, { recursive: true })
   _seedDefaultServiceConfig(configsDir)
+  _seedRealRtServiceConfig(configsDir)
+  _seedSyntheticLogs(sandbox, configsDir, repoRoot)
 
   // Wire the analyst-OAuth feature against the in-process mock IdP (all on
   // 127.0.0.1, no network). The registry points discovery at the backend's own
@@ -106,12 +203,12 @@ async function globalSetup() {
     }),
   )
 
-  const repoRoot = join(__dirname, '..', '..')
-
   proc = spawn(
     'uv',
     [
       'run',
+      '--project',
+      repoRoot,
       'python',
       'scripts/run_contract_backend.py',
       '--host',
@@ -122,21 +219,12 @@ async function globalSetup() {
     {
       cwd: repoRoot,
       env: {
-        ...process.env,
-        DEBUG_RESPONSES: 'true',
-        FASTLY_MOCK_MODE: '1',
-        CONTRACT_CONFIGS_DIR: configsDir,
-        CONTRACT_DATA_DIR: dataDir,
-        // Isolate the share DB from the developer's real data/system (see above).
-        REMOTE_SHARE_DB_DIR: shareDbDir,
-        // Analyst OAuth against the in-process mock IdP.
-        OAUTH_MOCK_IDP: '1',
-        OAUTH_MOCK_IDP_ISSUER: `http://${HOST}:${E2E_BACKEND_PORT}/mock-idp`,
-        OAUTH_PROVIDERS_CONFIG_PATH: oauthRegistryPath,
-        OAUTH_FLOW_STATE_SECRET: 'e2e-oauth-flow-state-secret-0123456789',
-        OAUTH_GOOGLE_CLIENT_ID: 'e2e-mock-client-id',
-        OAUTH_GOOGLE_CLIENT_SECRET: 'e2e-mock-client-secret',
-        OAUTH_REDIRECT_BASE: `http://${HOST}:${E2E_FRONTEND_PORT}`,
+        CONTRACT_STREAMING_FIXTURES: '1',
+        ...backendTestEnvironment(sandbox, {
+          backendPort: E2E_BACKEND_PORT,
+          frontendPort: E2E_FRONTEND_PORT,
+          registryPath: oauthRegistryPath,
+        }),
       },
       stdio: ['ignore', 'pipe', 'pipe'],
       // Detach so the child doesn't share our TTY signal group.

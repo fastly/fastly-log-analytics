@@ -1,8 +1,13 @@
-# Deploy to Google Compute Engine
+# Single-VM Docker deployment (Google Compute Engine example)
 
-This runbook formalizes the current production deploy flow on GCE. The same
-docker compose stack runs unchanged on AWS / Azure / bare metal; only the
-host-provisioning steps differ.
+This guide deploys the Docker Compose stack on one VM, using GCE as the worked
+example. The same stack runs unchanged on AWS / Azure / bare metal; only the
+host-provisioning steps differ. Production uses `docker-compose.yml` plus the
+`docker-compose.prod.yml` overlay (host networking, loopback-only binds,
+PostgreSQL 16 bound to `127.0.0.1`, anti-spoofing proxy settings), not a plain
+`docker compose up`. Set `DUCKLAKE_PG_PASSWORD` in your environment or `.env`
+before the first start; the built-in default is a development value (PostgreSQL is
+bound to loopback only, but do not rely on that).
 
 ## 1. Host provisioning
 
@@ -20,10 +25,8 @@ host-provisioning steps differ.
   software but a separate disk lets you snapshot data without snapshotting
   the OS.
 - **Metadata service**: GCE's metadata service lives at `169.254.169.254`
-  (the same link-local IP as AWS and Azure). The backend's SSRF probe in
-  `backend/models/lake.py` and `backend/utils/remote_access.py` blocks
-  outbound requests to this address from any code path. **Do not** disable
-  the SSRF gates.
+  (the same link-local IP as AWS and Azure). The application never reads from the
+  metadata service; restrict host-process access to it at the VM level.
 - **Firewall rules** (VPC firewall, applied via tags):
   - `tcp/443` from Fastly's published v4 CIDR ranges (see `Caddyfile`)
   - `tcp/80` from Fastly's published v4 CIDR ranges (origin pulls)
@@ -63,12 +66,12 @@ echo "UUID=$(sudo blkid -s UUID -o value /dev/sdb) /mnt/app-data ext4 defaults,n
   | sudo tee -a /etc/fstab
 
 sudo chown -R $USER:$USER /mnt/app-data
-mkdir -p /mnt/app-data/{data,cache,configs}
+mkdir -p /mnt/app-data/{data,cache,configs,postgres}
 ```
 
-Either edit `docker-compose.yml` to point its volumes at `/mnt/app-data`, or
-keep the repo at `/mnt/app-data/fastly-log-analytics` so the relative `./data`
-paths already resolve to the persistent disk.
+`docker-compose.prod.yml` bind-mounts `/mnt/app-data/{configs,data,cache,postgres}`
+directly into the `backend` and `postgres` containers (overriding the relative
+paths in `docker-compose.yml`), so `/mnt/app-data` must exist at that path.
 
 ## 4. Caddy / SSL
 
@@ -88,12 +91,13 @@ custom Caddy image and set `CLOUDFLARE_API_TOKEN` in the env file.
 cd /mnt/app-data
 git clone https://github.com/fastly/fastly-log-analytics.git
 cd fastly-log-analytics
-# Copy configs from your local dev box or restore from a GCS backup.
-docker compose up -d --build
+# Create .env from .env.example and set DUCKLAKE_PG_PASSWORD.
+# The backend runs as UID/GID 1000: make data/, cache/, configs/ and the
+# postgres directory writable by that user (sudo chown -R 1000:1000 ...).
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
 ```
 
-The repeat-deploy flow is the existing `~/restart.sh` pattern (canonicalized
-here so it works on every platform).
+For repeat deploys, use a small restart script like the one below (it works on every platform).
 
 **Do not use a bare `docker compose up -d --build` for a redeploy.** It takes
 the whole stack down, including Caddy — and Caddy is both the sole ingress and
@@ -120,7 +124,7 @@ that page. Three specifics make the difference between ~45 s of downtime and
 
 ```sh
 #!/usr/bin/env bash
-# ~/restart.sh on the VM
+# restart.sh on the VM (save it yourself; it is not part of the repo)
 set -uo pipefail
 cd /mnt/app-data/fastly-log-analytics
 COMPOSE=(docker compose -f docker-compose.yml -f docker-compose.prod.yml)
@@ -155,7 +159,7 @@ fi
 # 4. Poll the SAME readiness signal as the Docker healthcheck in
 # docker-compose.prod.yml — NOT `curl .../api/health`, which returns 200 the
 # moment the HTTP server binds and so reports "ready" within seconds while the
-# per-service warm-up loop (backend/main.py:_background_startup) still has
+# per-service warm-up loop (`_background_startup` in `backend/core/lifespan.py`) still has
 # 15-20 min to run. Check the response BODY for the top-level "status":"ok".
 echo "site is serving; waiting for warm-up (can take 15-20 min, safe to Ctrl-C)..."
 for i in $(seq 1 100); do  # 100 * 15s = 25 min budget, matches compose start_period
@@ -178,7 +182,7 @@ reconnects on its own once the backend is back.
 
 ```sh
 git fetch && git reset --hard origin/<branch>
-~/restart.sh
+./restart.sh
 ```
 
 The browser needs a hard-refresh after a frontend rebuild — Caddy and the
@@ -198,8 +202,8 @@ Wants=network-online.target
 Type=oneshot
 RemainAfterExit=yes
 WorkingDirectory=/mnt/app-data/fastly-log-analytics
-ExecStart=/usr/bin/docker compose up -d
-ExecStop=/usr/bin/docker compose down
+ExecStart=/usr/bin/docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+ExecStop=/usr/bin/docker compose -f docker-compose.yml -f docker-compose.prod.yml down
 
 [Install]
 WantedBy=multi-user.target
@@ -212,8 +216,11 @@ sudo systemctl enable --now fastly-log-analytics
 
 ## 6. Secrets management
 
-The backend reads Fastly Object Storage credentials from environment variables.
-Three options, in order of preference:
+The stack reads database and auth secrets (`DUCKLAKE_PG_PASSWORD`, `METADATA_DSN`,
+`DUCKLAKE_CATALOG`, `ADMIN_SHARED_SECRET`, `OAUTH_*`) from environment variables,
+while per-service Fastly Object Storage credentials live in `configs/{service_id}.json`
+(and the PostgreSQL metadata store).
+Three options for managing VM environment secrets, in order of preference:
 
 1. **Google Secret Manager** + a wrapper script that exports the values before
    `docker compose up`. The instance's default service account needs
@@ -250,80 +257,20 @@ docker compose logs --tail 100 frontend
 docker compose logs --tail 100 caddy | jq 'select(.status >= 400)'
 ```
 
-To reach `/admin` securely with full HTTP/2 (multiplexing) support to prevent browser connection starvation when opening multiple tabs, forward the secure Caddy port `8443` from your laptop:
+To reach `/admin`, forward the frontend port over SSH (the tunneled connection presents a loopback address):
 
 ```sh
-ssh -L 8443:127.0.0.1:8443 <user>@<instance-external-ip>
-# then browse to https://localhost:8443/admin
+ssh -L 3000:127.0.0.1:3000 <user>@<instance-external-ip>
+# then browse to http://localhost:3000/admin
 ```
-
-> [!NOTE]
-> Since this uses Caddy's internal self-signed TLS certificates for local loopback verification, your browser will display a certificate warning when you first visit `https://localhost:8443`. It is completely safe to bypass this warning (click "Advanced" -> "Proceed to localhost"), as the connection is running entirely inside your encrypted SSH tunnel.
 
 The frontend middleware sees no `X-Proxied-By-Caddy` header on the tunneled
 connection (which presents a loopback IP) and serves `/admin`.
 
-## 8. RUM: pin the self-hosted Faro Web SDK version
+## 8. RUM: self-hosted Faro Web SDK version
 
-Before self-hosting, the RUM tracker loaded the Faro Web SDK from jsDelivr
-with a floating `@^1` range — which resolved to `1.19.0` as of that writing.
-That CDN load no longer exists in any form: the generated tracker JS
-(`backend/provision/rum_assets.py::generate_rum_tracker_js`) unconditionally
-loads the Faro SDK from `/js/faro-sdk.js` — a relative, first-party path on
-the service's own domain, served from FOS via the RUM asset-fetch VCL. There
-is no CDN fallback and no code path that can produce one.
+The generated RUM tracker (`backend/provision/rum_assets.py`, `generate_rum_tracker_js`) always loads the Faro Web SDK from `/js/faro-sdk.js`, a first-party path on the service's own domain served from FOS by the RUM asset VCL. There is no CDN fallback, so enabling RUM always downloads, integrity-verifies and uploads a bundle to the service's FOS bucket.
 
-Because of that, RUM can no longer be enabled without a self-hosted bundle
-behind `/js/faro-sdk.js`. `enable_rum()` pins an explicit version
-(`cfg["rum"]["faro_version"]`) when given one, and otherwise defaults to
-`backend.core.faro_versions.DEFAULT_FARO_VERSION` (currently `2.10.0`,
-npm's `dist-tags.latest` as of this task) — enabling RUM always downloads,
-integrity-verifies, and uploads a bundle to the service's FOS bucket.
-A service that was enabled *before* this default existed and still has no
-`faro_version` self-heals on its next RUM sync cron tick: the cron adopts
-`DEFAULT_FARO_VERSION`, uploads the bundle, persists the pin, AND
-reconciles the service's deployed VCL so the `/js/faro-sdk.js` route
-(previously absent — that service's VCL was generated with
-`faro_version=None`) actually goes live. All of that happens automatically;
-it never depends on this script being run manually.
+`cfg["rum"]["faro_version"]` pins the version; when unset it defaults to `DEFAULT_FARO_VERSION` in `backend/core/faro_versions.py`. A service enabled before a pin existed adopts the default on its next RUM sync tick, which uploads the bundle, persists the pin and reconciles the deployed VCL.
 
-**What this script is for**: pin a service to a *specific* version instead
-of the default — a known-good version that won't move when the default
-changes, or rolling back to an older one.
-
-**When to run it**: any time you want to move a service to a specific
-version outside of the admin UI's upgrade flow. You do not need to run it
-just to "turn on" self-hosting — enabling RUM already does that
-automatically.
-
-```sh
-# Pins to 2.10.0 (current npm dist-tags.latest) by default:
-scripts/pin-rum-faro-version.sh <service_id>
-
-# Pin to an explicit version instead:
-scripts/pin-rum-faro-version.sh <service_id> 2.10.0
-scripts/pin-rum-faro-version.sh <service_id> 1.19.0
-```
-
-Replace `<service_id>` with the real Fastly logging service ID — never
-commit that ID into this repo (it's public). The script is idempotent (a
-repeat run against an already-correct pin is a no-op), writes atomically,
-refuses to run if the config is missing or not valid JSON, and never
-touches sibling keys under `cfg["rum"]` — `faro_content_hash` and
-`faro_fos_etag_md5` are owned by the reconcile cron, and clobbering them
-would make the cron think the bundle it already uploaded is stale and
-re-upload it on every tick.
-
-Pinning only updates the config value. To actually fetch and upload the
-bundle for the new version, either:
-
-- wait for the RUM reconcile cron's next tick, which detects the version
-  mismatch and uploads the pinned version automatically, or
-- use the admin RUM page's upgrade flow (`/admin/rum`) to trigger it
-  immediately and watch progress live via its SSE log stream.
-
-**Moving between versions later**: the admin RUM page is the normal path —
-it shows the currently deployed version, lets you pick a target from the
-available versions list, and streams upload/reconcile progress. Use this
-script only when you need to set the pin from outside that UI (e.g.
-scripting a fresh-VM bring-up, or recovering a config by hand).
+**Changing versions:** use the admin RUM page (`/admin/rum`): it shows the deployed version, lets you pick a target from the available versions and streams upload/reconcile progress. Never edit `faro_content_hash` or `faro_fos_etag_md5` by hand; the reconcile step owns them, and clobbering them makes it re-upload the bundle on every tick.

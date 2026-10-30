@@ -121,6 +121,19 @@ def main():
         ["osv-scanner", "scan", "-r", ".", "--format", "json"], capture_output=True, text=True, check=False
     )
 
+    if json_result.stderr:
+        stderr_lower = json_result.stderr.lower()
+        if any(tok in stderr_lower for tok in ("error", "failed", "timeout", "unreachable", "network", "dial tcp")):
+            print(f"⚠️  osv-scanner reported stderr warning/error:\n{json_result.stderr.strip()}", file=sys.stderr)
+
+    # osv-scanner exit codes: 0 = no vulns, 1 = vulns found, >1 = scanner/network/config error
+    if json_result.returncode > 1 and not json_result.stdout.strip():
+        print(
+            f"Error: osv-scanner exited with code {json_result.returncode} without JSON output.",
+            file=sys.stderr,
+        )
+        sys.exit(json_result.returncode)
+
     try:
         data = json.loads(json_result.stdout)
     except json.JSONDecodeError:

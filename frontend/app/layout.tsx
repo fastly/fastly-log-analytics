@@ -1,23 +1,22 @@
 import type { Metadata } from "next";
+import { Suspense } from "react";
 import { Inter } from "next/font/google";
 import { cookies, headers } from "next/headers";
 import { QueryClient, dehydrate } from "@tanstack/react-query";
 import type { DehydratedState } from "@tanstack/react-query";
 import "./globals.css";
 import "maplibre-gl/dist/maplibre-gl.css";
-import QueryProvider from "@/components/QueryProvider";
-import ThemeProvider from "@/components/ThemeProvider";
+import QueryProvider, { ReloadLoopGuard, StoreHydrator, WebVitalsReporter } from "@/components/QueryProvider";
+import { ThemeProvider } from "next-themes";
 import { AppLayout } from "@/components/AppLayout";
-import { HydrateAdminToken } from "@/components/HydrateAdminToken";
-import { StoreHydrator } from "@/components/StoreHydrator";
-import { SIDEBAR_COLLAPSED_COOKIE } from "@/lib/sidebar-cookie";
-import { ErrorBoundaryWithRouteReset } from "@/components/ErrorBoundary";
-import { ReloadLoopGuard } from "@/components/ReloadLoopGuard";
-import { WebVitalsReporter } from "@/components/WebVitalsReporter/WebVitalsReporter";
-import { queryKeys } from "@/lib/query-keys";
-import { fetchBootstrapServerSide } from "@/lib/ssr/bootstrap";
+import { ServerFooter } from "@/components/ServerFooter";
+import { SIDEBAR_COLLAPSED_COOKIE } from "@/lib/utils";
+import { ErrorBoundaryWithRouteReset } from "@/components/AnalyticsCard";
+import { queryKeys, seedBootstrapDependentCaches } from "@/lib/api";
+import { fetchBootstrapServerSide } from '@/lib/ssr/upstream';
+import { shouldLoadRumScript } from "@/lib/ssr/upstream";
 
-const inter = Inter({ subsets: ["latin"] });
+const inter = Inter({ subsets: ["latin"], display: "swap", preload: false });
 
 export const metadata: Metadata = {
   title: "Fastly Log Analytics",
@@ -32,18 +31,6 @@ export const metadata: Metadata = {
 // optimization — that trade-off is reversed now that the layout has
 // real per-request work to do.
 export const dynamic = "force-dynamic";
-
-function generateScriptHash(serviceId: string | null): string {
-  if (!serviceId) return "";
-  const input = `${serviceId}-rum-v1`;
-  let hash = 0;
-  for (let i = 0; i < input.length; i++) {
-    const char = input.charCodeAt(i);
-    hash = (hash << 5) - hash + char;
-    hash = hash & hash; // Convert to 32bit integer
-  }
-  return Math.abs(hash).toString(16).substring(0, 8);
-}
 
 export default async function RootLayout({
   children,
@@ -75,7 +62,8 @@ export default async function RootLayout({
   // its own injected <script>/<link> tags; we have to pass it manually to
   // next-themes (its theme-bootstrap inline script doesn't read the
   // header) so the strict script-src nonce policy doesn't drop it.
-  const nonce = (await headers()).get("x-nonce") ?? undefined;
+  const requestHeaders = await headers();
+  const nonce = requestHeaders.get("x-nonce") ?? undefined;
 
   // Per-request SSR fetch of /api/bootstrap. Pre-seeds React Query so
   // useBootstrap (and every hook that reads bootstrap.* via
@@ -102,70 +90,40 @@ export default async function RootLayout({
   if (bootstrap) {
     const client = new QueryClient();
     client.setQueryData(queryKeys.bootstrap(), bootstrap);
-    // Mirror the dependent-cache seeds from useBootstrap.queryFn so
-    // hooks gated on the bootstrap status flip find their slice in
-    // cache too. Key shapes live at frontend/hooks/useBootstrap.ts.
-    sid = (bootstrap as { active_service_id?: string | null })?.active_service_id ?? null;
-    if (sid) {
-      const b = bootstrap as Record<string, unknown>;
-      if (Array.isArray(b.views)) {
-        client.setQueryData(["views", sid], b.views);
-      }
-      if (b.log_fields_catalog) {
-        client.setQueryData(["log-fields-catalog", sid], b.log_fields_catalog);
-      }
-      client.setQueryData(["sync-status", sid], b.sync_status ?? null);
-      if (b.log_extents) {
-        client.setQueryData(["log-extents", sid], b.log_extents);
-      }
-      client.setQueryData(["last-sync", sid], b.last_sync ?? null);
-      const schemaList = b.schema as unknown[] | undefined;
-      const tableName = b.table_name as string | undefined;
-      if (Array.isArray(schemaList) && schemaList.length > 0 && typeof tableName === "string") {
-        client.setQueryData(["admin", "schema", sid], { schema: schemaList, table_name: tableName });
-      }
-      if (b.cron_runs_first_page) {
-        client.setQueryData(["admin", "cron-logs-recent", sid], b.cron_runs_first_page);
-      }
-      if (b.scoring_labels) {
-        client.setQueryData(["scoring-labels", sid], b.scoring_labels);
-      }
+    // Mirror the dependent-cache seeds from useBootstrap.queryFn via shared
+    // seedBootstrapDependentCaches so hooks gated on the bootstrap status flip
+    // find their slice in cache too.
+    seedBootstrapDependentCaches(client, bootstrap);
+    sid = bootstrap.active_service_id ?? null;
+    const services = bootstrap.services;
+    if (Array.isArray(services) && sid) {
+      const activeSvc = services.find((s) => s.service_id === sid);
+      isRumEnabled = !!activeSvc?.rum_enabled;
     }
-    const services = (bootstrap as Record<string, unknown>)?.services;
-    if (Array.isArray(services)) {
-      client.setQueryData(["services"], { services, _section_timings: [] });
-      if (sid) {
-        const activeSvc = services.find((s) => (s as Record<string, unknown>).service_id === sid) as Record<string, unknown> | undefined;
-        isRumEnabled = !!activeSvc?.rum_enabled;
-      }
-    }
-    // P1#5 (perf audit): the SSR share_status seed is removed. Bootstrap no
-    // longer carries share_status (build_share_status cost ~2.1s and sat on
-    // this admin SSR first-paint path). A direct load of /admin/share
-    // refetches GET /api/admin/share/status on mount (page.tsx's
-    // SHARE_STATUS_QUERY_KEY useQuery), so it self-populates with one
-    // round-trip — only the share page pays it, and only on direct load.
-    // The small global share_banner stays on the bootstrap response for the
-    // header.
     dehydratedState = dehydrate(client);
   }
+  const loadRumScript = shouldLoadRumScript({
+    host: requestHeaders.get("host"),
+    proxiedByCaddy: requestHeaders.get("x-proxied-by-caddy") === "true",
+    rumEnabled: isRumEnabled,
+  });
 
   return (
     <html lang="en" suppressHydrationWarning>
       <head>
-        {/* world.geojson preload + plotly modulepreload both moved out of
-            this root layout. world.geojson lives in <AppLayout> (emits
+        {/* world.topo.json preload + plotly modulepreload both moved out of
+            this root layout. world.topo.json lives in <AppLayout> (emits
             only on map-using routes /dashboard, /network); plotly chunk
             loads on-demand via <PlotlyPrewarm> on chart-bearing routes.
             Removing the always-on global emits saves ~400KB raw / ~150KB
             gzip of bandwidth on every non-chart page (/share-login,
             /admin/*, /alerts, /usage, /logs). See P-1 / P-2 in the
             2026-06-15 audit. */}
-        <script
-          src="/js/rum.js"
-          nonce={nonce}
-          async
-        />
+        {/* RUM collector script only when the active service has RUM
+            enabled — an unconditional emit makes every page load proxy
+            /js/rum.js to the backend, which fails (ECONNRESET log spam)
+            or 404s on services without RUM. */}
+        {loadRumScript && <script src="/js/rum.js" nonce={nonce} async />}
       </head>
       <body className={`${inter.className} antialiased`} suppressHydrationWarning>
         {/* Skip-to-content link: first focusable element, visually hidden
@@ -192,14 +150,6 @@ export default async function RootLayout({
               tripped state also halts the WebVitals POSTs that flooded RUM. */}
           <ReloadLoopGuard>
           <QueryProvider dehydratedState={dehydratedState}>
-            {/* One-shot store hydrator — renders before any sibling so
-                the admin-token Zustand store is populated synchronously
-                during render, BEFORE ServicesTable / OperationsOverview
-                etc. mount their useQuery callbacks. Without this the
-                SSR-pre-hydrated bootstrap cache short-circuits the
-                queryFn that would otherwise call setToken, leaving the
-                store empty on the very first render. */}
-            <HydrateAdminToken token={(bootstrap as { settings?: { admin_token?: string | null } } | null)?.settings?.admin_token ?? null} />
             {/* Rehydrate the persisted Zustand stores (service / timezone /
                 debug) AFTER mount. They use persist({ skipHydration:true })
                 so the first client render matches the server's default
@@ -218,6 +168,11 @@ export default async function RootLayout({
               initialCollapsed={initialSidebarCollapsed}
               ssrActiveServiceId={sid}
               ssrIsRumEnabled={isRumEnabled}
+              serverFooter={
+                <Suspense fallback={<div aria-hidden="true" className="mt-12 h-[50px]" />}>
+                  <ServerFooter />
+                </Suspense>
+              }
             >
               <ErrorBoundaryWithRouteReset>{children}</ErrorBoundaryWithRouteReset>
             </AppLayout>

@@ -1,36 +1,18 @@
-"""Tests for backend.utils.terraform_gen.generate_terraform.
-
-This module ships ``.tf.json`` files that customers run ``terraform apply``
-against. A malformed file means a broken customer infra deploy, so the
-suite focuses on:
-
-- Output is valid JSON and passes ``terraform fmt -check`` (canonical formatting).
-- Output is byte-identical across repeated calls (idempotent).
-- Custom fields produce matching ``capture_snippets/*.vcl`` files.
-- User-supplied strings (bucket, endpoint_name, custom_condition) flow through
-  ``json.dumps`` so quote / backslash / newline injection is structurally
-  impossible. The remaining Terraform-template prefix (``${``, ``%{``) is
-  still escaped explicitly — covered by :func:`test_template_prefix_escape`.
-
-``terraform validate`` requires provider downloads (network). It's run when
-``TERRAFORM_VALIDATE=1`` is set in the environment (CI), and skipped
-otherwise so the suite stays fast and offline-friendly locally.
-
-5b.3a migrated the generator from f-string HCL to ``.tf.json`` (Terraform's
-JSON config syntax). The output filenames carry the ``.tf.json`` suffix;
-Terraform accepts ``.tf`` and ``.tf.json`` interchangeably in the same
-module.
-"""
+"""Unit and CLI integration tests for Terraform configuration generation."""
 
 from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
+from pathlib import Path
 
 import pytest
+from filelock import FileLock
 
+from backend import config as svcconfig
 from backend.utils.terraform_gen import generate_terraform
 
 TERRAFORM_INSTALLED = shutil.which("terraform") is not None
@@ -42,6 +24,16 @@ if TFLINT_REQUIRED and not TFLINT_INSTALLED:
     raise RuntimeError(
         "TFLINT_REQUIRED=1 but the tflint binary is not on PATH. Install tflint or unset TFLINT_REQUIRED to allow skipping."
     )
+
+TFTEST_DIR = Path(__file__).parent / "terraform_tests"
+
+
+@pytest.fixture(autouse=True)
+def _isolate_configs_dir(tmp_path, monkeypatch):
+    """Redirect svcconfig.CONFIGS_DIR to tmp_path so tests never write into repo configs/."""
+    cfg_dir = tmp_path / "configs"
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(svcconfig, "CONFIGS_DIR", cfg_dir)
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -72,13 +64,15 @@ def _baseline_cfg() -> dict:
     }
 
 
-def _write_files(out: dict[str, str], dest: str) -> None:
+def _write_files(out: dict[str, str], dest: str | Path) -> None:
     """Write generator output to ``dest``, mirroring the zip-export layout."""
+    dest_path = os.fspath(dest)
     for fname, content in out.items():
         if fname == "instructions":
             continue
-        full = os.path.join(dest, fname)
-        os.makedirs(os.path.dirname(full), exist_ok=True) if "/" in fname else None
+        full = os.path.join(dest_path, fname)
+        if "/" in fname:
+            os.makedirs(os.path.dirname(full), exist_ok=True)
         with open(full, "w") as f:
             f.write(content)
 
@@ -98,14 +92,12 @@ def test_returns_expected_files():
         "instructions",
     }
     assert expected.issubset(out.keys()), f"Missing files: {expected - set(out.keys())}"
-    # Snippet files prefixed by their phase
     snippet_files = [f for f in out if f.startswith("capture_snippets/")]
     assert snippet_files, "Expected at least one capture snippet"
 
 
 def test_every_tf_json_file_parses_as_json():
-    """The generator must emit syntactically valid JSON. Catches accidental
-    f-string holdovers, missing commas, or stray HCL constructs."""
+    """The generator must emit syntactically valid JSON."""
     out = generate_terraform(_baseline_cfg(), "AKIA", "sec")
     for fname, content in out.items():
         if not fname.endswith(".tf.json"):
@@ -118,13 +110,7 @@ def test_every_tf_json_file_parses_as_json():
 
 
 def test_versions_tf_pins_fastly_and_aws_providers_by_major():
-    """versions.tf.json must pin the Fastly and AWS providers with the
-    pessimistic operator so a major-version bump from either provider
-    (Fastly v6, AWS v7) doesn't silently break customer apply.
-
-    If you intentionally bump the major, update this test deliberately AND
-    the matching scaffold in test_baseline_output_passes_terraform_validate.
-    """
+    """versions.tf.json must pin the Fastly and AWS providers with the pessimistic operator."""
     out = generate_terraform(_baseline_cfg(), "AKIA", "sec")
     assert "versions.tf.json" in out
 
@@ -135,16 +121,12 @@ def test_versions_tf_pins_fastly_and_aws_providers_by_major():
     providers = tf_block["required_providers"]
     assert providers["aws"]["source"] == "hashicorp/aws"
     assert providers["fastly"]["source"] == "fastly/fastly"
-    # Pessimistic constraint is the contract. >= or no operator would let a
-    # major bump through. Test both providers explicitly.
     assert providers["aws"]["version"] == "~> 5.0", (
         f"expected '~> 5.0' on aws to gate major bumps; got {providers['aws']['version']!r}"
     )
     assert providers["fastly"]["version"] == "~> 5.0", (
         f"expected '~> 5.0' on fastly to gate major bumps; got {providers['fastly']['version']!r}"
     )
-    # Belt-and-braces: exactly TWO required providers — no accidental third
-    # undeclared source slipping in.
     assert set(providers.keys()) == {"aws", "fastly"}
 
 
@@ -153,9 +135,6 @@ def test_baseline_output_passes_terraform_fmt(tmp_path):
     out = generate_terraform(_baseline_cfg(), "AKIA", "sec")
     _write_files(out, str(tmp_path))
 
-    # Terraform fmt understands .tf.json (it normalises trailing newlines /
-    # 2-space indent). Using a relative target sidesteps the macOS
-    # /private/-prefix path confusion documented at the prior HCL revision.
     r = subprocess.run(
         ["terraform", "fmt", "-check", "-recursive", "."],
         cwd=str(tmp_path),
@@ -167,13 +146,6 @@ def test_baseline_output_passes_terraform_fmt(tmp_path):
     )
 
 
-# Shares the `tf_provider_cache.lock` with the slower resource-graph
-# `terraform test`; under `-n auto` this test can block on that lock long
-# enough to blow the default 60s pytest-timeout (which `os._exit()`s the worker
-# and loses its coverage). Headroom for lock-wait + its own init/validate.
-# Heavyweight real-terraform subprocess: run in the dedicated serial (`-n 0`,
-# un-niced) test-ci step, excluded from the niced `-n auto` pool where its
-# xdist worker hard-crashed (see Makefile/ci.yml split).
 @pytest.mark.terraform_cli
 @pytest.mark.timeout(300)
 @pytest.mark.skipif(
@@ -184,18 +156,12 @@ def test_baseline_output_passes_terraform_validate(tmp_path):
     out = generate_terraform(_baseline_cfg(), "AKIA", "sec")
     _write_files(out, str(tmp_path))
 
-    # The generator emits its own versions.tf.json with pinned providers.
-    # Only the provider *configuration* needs stubbing for init/validate.
     (tmp_path / "_providers.tf").write_text(
         """
 provider "aws"    { region = "us-east-1" }
 provider "fastly" { api_key = "stub" }
 """
     )
-
-    from pathlib import Path
-
-    from filelock import FileLock
 
     cache_dir = Path(__file__).parents[2] / "cache" / "tf_provider_cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -225,25 +191,7 @@ provider "fastly" { api_key = "stub" }
 
 @pytest.mark.skipif(not TFLINT_INSTALLED, reason="tflint not on PATH")
 def test_baseline_output_passes_tflint(tmp_path):
-    """tflint static analysis on the generated .tf.json bundle.
-
-    ``terraform validate`` catches syntactic and schema-level errors;
-    tflint adds provider-specific best-practice checks (deprecated
-    arguments, unused-decl, mis-typed values) that the official
-    validator misses. Lives behind a binary-presence skip.
-
-    COVHON-01: this is **local-opt-in only** — CI does NOT install tflint, so
-    this test never runs there (unlike the falco VCL tests, which CI installs
-    and gates via FALCO_REQUIRED). The earlier docstring claimed CI ran it;
-    that was false. To actually gate on it, add a tflint install step to
-    .github/workflows/ci.yml (mirror the falco curl-binary step) plus a
-    TFLINT_REQUIRED collection guard — note tflint needs a ``.tflint.hcl``
-    plugin config to load the Fastly provider rules, or it runs core rules only.
-
-    Install locally:
-        curl -sSL https://github.com/terraform-linters/tflint/releases/latest/download/tflint_darwin_arm64.zip \\
-            -o /tmp/tflint.zip && unzip /tmp/tflint.zip -d /usr/local/bin
-    """
+    """tflint static analysis on the generated .tf.json bundle."""
     out = generate_terraform(_baseline_cfg(), "AKIA", "sec")
     _write_files(out, str(tmp_path))
 
@@ -261,8 +209,6 @@ def test_baseline_output_passes_tflint(tmp_path):
         capture_output=True,
         text=True,
     )
-    # tflint returns 0 on no issues, 2 on issues found (per its docs).
-    # rc==1 is "tool error" — treat that as a hard fail too.
     assert r.returncode == 0, (
         f"tflint reported issues on generated terraform output:\n"
         f"rc={r.returncode}\nstdout:\n{r.stdout}\nstderr:\n{r.stderr}"
@@ -273,26 +219,11 @@ def test_baseline_output_passes_tflint(tmp_path):
 
 
 def test_output_is_byte_identical_across_calls():
-    """The same cfg must produce the same files. Catches non-deterministic
-    ordering (e.g. set iteration), timestamps, random IDs.
-
-    Exception: ``cdn_proxy.vcl`` embeds a per-load fallback secret
-    generated by ``secrets.token_hex(32)`` inside ``load_vcl``. This is
-    intentional — the fallback only matters when the ``cdn_auth``
-    dictionary is unprovisioned, and a fresh random value per
-    provisioning ensures the unprovisioned state fails closed instead
-    of accepting an attacker-controlled empty key. Mask the 64-hex-char
-    fallback string out of the diff so we still catch every OTHER
-    accidental source of non-determinism.
-    """
-    import re as _re
-
+    """The same cfg must produce the same files (masking per-load random fallback secret)."""
     out1 = generate_terraform(_baseline_cfg(), "AKIA", "sec")
     out2 = generate_terraform(_baseline_cfg(), "AKIA", "sec")
     assert out1.keys() == out2.keys()
-    # 64 lowercase-hex chars = ``secrets.token_hex(32)`` output; replace
-    # both sides with a placeholder before comparing.
-    hex64 = _re.compile(r"\b[0-9a-f]{64}\b")
+    hex64 = re.compile(r"\b[0-9a-f]{64}\b")
     for fname in out1:
         a = hex64.sub("<HEX64>", out1[fname])
         b = hex64.sub("<HEX64>", out2[fname])
@@ -330,11 +261,8 @@ def test_custom_field_emits_matching_capture_snippet():
     ]
     out = generate_terraform(cfg, "AKIA", "sec")
 
-    # The recv snippet should reference the field name (it's the edge stage)
     recv = out.get("capture_snippets/recv.vcl", "")
     assert "x_env" in recv, f"Expected 'x_env' in recv snippet, got: {recv[:200]!r}"
-
-    # log_format.vcl should declare it
     assert '"x_env"' in out["log_format.vcl"]
 
 
@@ -354,7 +282,6 @@ def test_custom_origin_field_emits_in_deliver_phase():
         }
     ]
     out = generate_terraform(cfg, "AKIA", "sec")
-    # Origin fields land in the fetch (capture) and deliver (promote) snippets
     assert "bereq_x" in out.get("capture_snippets/fetch.vcl", ""), "origin field missing from fetch snippet"
     assert "bereq_x" in out.get("capture_snippets/deliver.vcl", ""), "origin field missing from deliver snippet"
 
@@ -364,11 +291,8 @@ def test_custom_origin_field_emits_in_deliver_phase():
 
 @pytest.mark.skipif(not TERRAFORM_INSTALLED, reason="terraform binary not on PATH")
 @pytest.mark.parametrize(
-    "field,value",
+    ("field", "value"),
     [
-        # Strings the generator splices into JSON string values. JSON encoding
-        # owns quote/backslash/newline; the test confirms the integration
-        # actually parses + that ``terraform fmt`` accepts the result.
         ("fos_bucket_name", 'b"; rm -rf /; #'),
         ("endpoint_name", 'name"; resource "extra" "x" {} #'),
         ("cdn_service_name", 'svc\\name with "quotes"'),
@@ -378,21 +302,16 @@ def test_custom_origin_field_emits_in_deliver_phase():
     ],
 )
 def test_injection_does_not_break_terraform_fmt(tmp_path, field, value):
-    """User-supplied strings flow into JSON string values. ``json.dumps``
-    handles every escape it owns (quote, backslash, control bytes) so the
-    file MUST always parse, regardless of what the attacker passes."""
+    """User-supplied strings flow into JSON string values and must never break JSON/terraform syntax."""
     cfg = _baseline_cfg()
     cfg[field] = value
     out = generate_terraform(cfg, "AKIA", "sec")
     _write_files(out, str(tmp_path))
 
-    # The .tf.json files must parse as JSON unconditionally.
     for fname, content in out.items():
         if fname.endswith(".tf.json"):
-            json.loads(content)  # raises on failure
+            json.loads(content)
 
-    # Use `terraform fmt` (not -check) — it parses the file. If the
-    # injection broke JSON syntax it would error with a non-zero rc.
     r = subprocess.run(
         ["terraform", "fmt", "-recursive", "."],
         cwd=str(tmp_path),
@@ -405,52 +324,21 @@ def test_injection_does_not_break_terraform_fmt(tmp_path, field, value):
 
 
 def test_template_prefix_escape_is_applied_to_user_input():
-    """JSON encoding doesn't escape Terraform's ``${`` / ``%{`` template
-    syntax (Terraform interprets these inside string values even in JSON
-    config). The generator must convert them to ``$${`` / ``%%{`` for any
-    user-supplied value so attacker input can't trigger interpolation.
-
-    Replaces the prior HCL-specific test that asserted literal byte
-    sequences from the old escape regex; the JSON path's only remaining
-    template-prefix concern is the ``$``/``%`` doubling."""
+    """The generator must convert ${ / %{ to $${ / %%{ for any user-supplied value."""
     cfg = _baseline_cfg()
-    # The region flows into multiple files (fos_host derivation in
-    # cdn_proxy.tf.json, dictionary items, etc.). If unescaped, the
-    # ``${file("/etc/passwd")}`` would expand at apply time.
     cfg["fos_region"] = 'us-east-1${file("/etc/passwd")}%{ if true }x%{ endif }'
     out = generate_terraform(cfg, "AKIA", "sec")
 
-    # Must appear in the rendered files with the doubled prefixes.
     cdn = json.loads(out["cdn_proxy.tf.json"])
     items = cdn["resource"]["fastly_service_dictionary_items"]["fos_credentials"]["items"]
     assert items["region"].startswith('us-east-1$${file("/etc/passwd")}%%{ if true }x%%{ endif }')
 
-    # And the raw original prefix must NOT appear anywhere in any rendered
-    # .tf.json file (defense in depth — catches a future field that
-    # forgets to call the escape helper). The doubled forms (``$${`` /
-    # ``%%{``) contain the raw forms as substrings, so check that what
-    # appears is ONLY the doubled form (raw count == doubled count).
     for fname, content in out.items():
         if not fname.endswith(".tf.json"):
             continue
-        raw_dollar = content.count("${")
-        doubled_dollar = content.count("$${")
-        # Authored Terraform-interpolation refs in the generator itself
-        # (e.g. ``${aws_s3_bucket.fos_bucket.bucket}``) use raw ``${``
-        # intentionally — those aren't doubled. Count user-input-derived
-        # raw forms by subtracting the doubled count's contribution.
-        unescaped_dollar = raw_dollar - doubled_dollar
-        # All authored refs in cdn_proxy.tf.json + logging_service.tf.json
-        # are accounted for; an attacker-injected ${file()} would push this
-        # over the authored baseline. The strict check: the attacker
-        # payload ``${file("/etc/passwd")}`` must not be present as a
-        # standalone substring (i.e. not immediately preceded by ``$``).
         assert '$${file("/etc/passwd")}' in content or '${file("/etc/passwd")}' not in content, (
             f"unescaped ${{file()}} reached {fname} — template-prefix escape missing"
         )
-        # %{ directives have no authored counterpart in the generator —
-        # any raw ``%{`` is automatically suspect. Count: raw must equal
-        # doubled (every ``%{`` in the file must be part of a ``%%{``).
         raw_pct = content.count("%{")
         doubled_pct = content.count("%%{")
         assert raw_pct == doubled_pct, (
@@ -460,8 +348,7 @@ def test_template_prefix_escape_is_applied_to_user_input():
 
 
 def test_quotes_in_user_input_are_json_escaped():
-    """A bucket name with a double-quote MUST land in the JSON output as
-    ``\\\"`` (JSON escape), not be stripped or corrupted."""
+    """A bucket name with a double-quote MUST land in the JSON output as JSON-escaped."""
     cfg = _baseline_cfg()
     cfg["fos_bucket_name"] = 'bucket"with"quotes'
     out = generate_terraform(cfg, "AKIA", "sec")
@@ -473,28 +360,76 @@ def test_quotes_in_user_input_are_json_escaped():
 
 
 def test_baseline_output_matches_snapshot(snapshot):
-    """Snapshot the full set of generated files for the baseline cfg.
-
-    ``terraform fmt`` + ``terraform validate`` already catch syntax
-    breakage; this snapshot catches SEMANTIC drift — a resource name
-    renamed, a label removed, a default region changed. The diff in a
-    snapshot update review is the audit trail for any generator change.
-
-    Refresh with::
-
-        uv run pytest tests/utils/test_terraform_gen.py \
-            --snapshot-update
-
-    …then read the diff line-by-line before committing.
-
-    Scrubs the per-load ``secrets.token_hex(32)`` fallback secret
-    embedded in cdn_proxy.vcl (see test_output_is_byte_identical_across_calls
-    for the rationale) so the snapshot stays stable across runs.
-    """
-    import re as _re
-
+    """Snapshot the full set of generated files for the baseline cfg."""
     out = generate_terraform(_baseline_cfg(), "AKIATESTSTABLE", "test-secret-stable")
 
-    hex64 = _re.compile(r"\b[0-9a-f]{64}\b")
+    hex64 = re.compile(r"\b[0-9a-f]{64}\b")
     snapshot_view = {fname: hex64.sub("<HEX64>", content) for fname, content in sorted(out.items())}
     assert snapshot_view == snapshot
+
+
+# ── Resource-graph assertions via terraform test ─────────────────────────────
+
+
+@pytest.mark.terraform_cli
+@pytest.mark.timeout(300)
+@pytest.mark.skipif(
+    not (TERRAFORM_INSTALLED and RUN_VALIDATE),
+    reason="set TERRAFORM_VALIDATE=1 + install terraform to run resource-graph assertions",
+)
+def test_resource_graph_assertions_via_terraform_test(tmp_path):
+    out = generate_terraform(_baseline_cfg(), "AKIA_TEST_KEY", "secret_test_value")
+    _write_files(out, tmp_path)
+
+    (tmp_path / "_providers.tf").write_text(
+        """
+provider "aws" {
+  region                      = "us-east-1"
+  access_key                  = "AKIA_TEST_KEY"
+  secret_key                  = "secret_test_value"
+  skip_credentials_validation = true
+  skip_region_validation      = true
+  skip_requesting_account_id  = true
+  skip_metadata_api_check     = true
+}
+
+provider "fastly" {
+  api_key = "fastly-test-key"
+}
+"""
+    )
+
+    shutil.copy(TFTEST_DIR / "resource_graph.tftest.hcl", tmp_path / "resource_graph.tftest.hcl")
+
+    cache_dir = Path(__file__).parents[2] / "cache" / "tf_provider_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    env = os.environ.copy()
+    env["TF_PLUGIN_CACHE_DIR"] = str(cache_dir)
+
+    lock_path = cache_dir.parent / "tf_provider_cache.lock"
+    with FileLock(str(lock_path)):
+        init = subprocess.run(
+            ["terraform", "init", "-backend=false", "-input=false", "-no-color"],
+            cwd=str(tmp_path),
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        assert init.returncode == 0, f"terraform init failed:\n{init.stdout}\n{init.stderr}"
+
+        test = subprocess.run(
+            ["terraform", "test", "-no-color"],
+            cwd=str(tmp_path),
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        assert test.returncode == 0, (
+            f"terraform test failed (resource-graph assertion broke):\n"
+            f"--- stdout ---\n{test.stdout}\n"
+            f"--- stderr ---\n{test.stderr}"
+        )
+
+    assert "fail" not in test.stdout.lower() or "0 failed" in test.stdout.lower(), (
+        f"unexpected failure in terraform test output:\n{test.stdout}"
+    )

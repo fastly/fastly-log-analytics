@@ -11,7 +11,7 @@ import { FileQuestion } from 'lucide-react'
 
 export default function NotFound() {
   return (
-    <div className="flex flex-1 items-center justify-center p-6">
+    <div className="flex flex-1 items-center justify-center p-6 min-h-[820px]">
       <div className="flex w-full max-w-md flex-col items-start gap-3 rounded-lg border bg-card p-6">
         <div className="flex items-center gap-2 text-muted-foreground">
           <FileQuestion className="h-5 w-5" aria-hidden="true" />

@@ -7,12 +7,12 @@ Config file schema:
 {
     "service_id": "abcdefg12345abcdef1234",   # Fastly logging service ID (matches filename)
     "name": "My Production Site",               # Human-readable label (from Fastly API)
-    "access_level": "read_write",               # "read_write" or "read_only"
     "fos_endpoint": "us-east-1.object.fastlystorage.app",
     "fos_access_key_id": "...",
     "fos_secret_access_key": "...",
     "fos_bucket": "...",
     "fos_prefix": "",
+    "raw_layout_version": 3,
     "fos_region": "us-east-1",
     "cdn_url": "https://...",
     "cdn_secret": "...",
@@ -25,15 +25,38 @@ Config file schema:
 }
 """
 
+import contextlib
 import copy
+import dataclasses
 import json
+import logging
+import math
 import os
 import re
 import sys
-import tempfile
 import threading
 import time
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from ipaddress import ip_address
 from pathlib import Path
+from typing import Annotated, Any
+
+from cachetools import LRUCache
+from filelock import FileLock
+from filelock import Timeout as _FileLockTimeout
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_validator
+from tenacity import Retrying, retry_if_exception_type, stop_after_attempt, wait_fixed
+
+from backend.utils.bounded_cache import BoundedLRUCache
+from backend.utils.telemetry import atomic_write_json
+
+try:
+    import fcntl
+except ImportError:  # non-POSIX
+    fcntl = None  # type: ignore[assignment]
+
+logger = logging.getLogger(__name__)
 
 _ROOT_DIR = Path(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -46,12 +69,129 @@ NGWAF_DATA_DIR = DATA_DIR / "ngwaf"
 CACHE_DATA_DIR = DATA_DIR / "cache"
 SYSTEM_DATA_DIR = DATA_DIR / "system"
 
+# Deployment topology is deployment-wide rather than per-service. Define this
+# before the default source is built so config_to_source() can safely include
+# it during module import.
+DEPLOYMENT_MODE = os.getenv("DEPLOYMENT_MODE", "standard").strip().lower()
+
+
+@dataclass(frozen=True)
+class ClickHouseConfig:
+    """Deployment-only HTTP settings; loaded at startup, never from service JSON."""
+
+    host: str
+    port: int
+    database: str
+    user: str
+    password: str = field(repr=False)
+    secure: bool = True
+    connect_timeout_s: float = 5.0
+    query_timeout_s: float = 30.0
+    insert_timeout_s: float = 30.0
+    pool_timeout_s: float = 30.0
+    pool_max_size: int = 24
+
+
+def _clickhouse_bool(name: str, default: str) -> bool:
+    raw = os.getenv(name, default).strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be a boolean")
+
+
+def _clickhouse_number(name: str, default: float, maximum: float, *, integer: bool = False):
+    try:
+        raw = os.getenv(name, str(default))
+        value = int(raw) if integer else float(raw)
+        if math.isfinite(value) and (1 if integer else 0.01) <= value <= maximum:
+            return value
+    except (ValueError, OverflowError):
+        pass
+    raise ValueError(f"{name} must be finite and between {1 if integer else 0.01} and {maximum}")
+
+
+def load_clickhouse_config() -> ClickHouseConfig | None:
+    """CLICKHOUSE_ENABLED is opt-in; disabled mode ignores all other settings.
+
+    Enabled mode requires HOST (bare DNS/IP), DATABASE and USER. SECURE defaults
+    to true (verified HTTPS, port 8443; HTTP uses 8123). A missing PASSWORD is
+    permitted only for explicitly insecure loopback test instances. Operators
+    must opt into SECURE=false for a trusted private-network HTTP deployment.
+    CONNECT/POOL_TIMEOUT_S are 0.01..60; QUERY/INSERT_TIMEOUT_S 0.01..300;
+    POOL_MAX_SIZE is 1..64. Environment changes require a process restart.
+    """
+    if os.getenv("DEPLOYMENT_MODE", "").strip().lower() == "standard":
+        return None
+    if not _clickhouse_bool("CLICKHOUSE_ENABLED", "false"):
+        return None
+    required = {}
+    for key in ("HOST", "DATABASE", "USER"):
+        value = os.getenv(f"CLICKHOUSE_{key}", "").strip()
+        if not value:
+            raise ValueError(f"CLICKHOUSE_{key} is required when enabled")
+        required[key] = value
+    host = required["HOST"]
+    loopback = host in ("localhost", "clickhouse")
+    if not loopback:
+        try:
+            loopback = ip_address(host).is_loopback
+        except ValueError:
+            if len(host) > 253 or not all(
+                re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", label) for label in host.split(".")
+            ):
+                raise ValueError("CLICKHOUSE_HOST must be a bare hostname or IP address") from None
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,127}", required["DATABASE"]):
+        raise ValueError("CLICKHOUSE_DATABASE must be a simple identifier")
+    if not re.fullmatch(r"[A-Za-z0-9_.@-]{1,128}", required["USER"]):
+        raise ValueError("CLICKHOUSE_USER contains unsupported characters")
+    secure = _clickhouse_bool("CLICKHOUSE_SECURE", "true")
+    password = os.getenv("CLICKHOUSE_PASSWORD", "")
+    if not password.strip() and (secure or not loopback):
+        raise ValueError("CLICKHOUSE_PASSWORD is required except for explicit HTTP loopback tests")
+    query_timeout = _clickhouse_number("CLICKHOUSE_QUERY_TIMEOUT_S", 30, 300)
+    return ClickHouseConfig(
+        host=host,
+        port=_clickhouse_number("CLICKHOUSE_PORT", 8443 if secure else 8123, 65535, integer=True),
+        database=required["DATABASE"],
+        user=required["USER"],
+        password=password,
+        secure=secure,
+        connect_timeout_s=_clickhouse_number("CLICKHOUSE_CONNECT_TIMEOUT_S", 5, 60),
+        query_timeout_s=query_timeout,
+        insert_timeout_s=_clickhouse_number("CLICKHOUSE_INSERT_TIMEOUT_S", query_timeout, 300),
+        pool_timeout_s=_clickhouse_number("CLICKHOUSE_POOL_TIMEOUT_S", 30, 60),
+        pool_max_size=_clickhouse_number("CLICKHOUSE_POOL_MAX_SIZE", 24, 64, integer=True),
+    )
+
+
+def load_clickhouse_provisioner_config() -> ClickHouseConfig | None:
+    """Credentials for the startup-only ClickHouse provisioner, or None to provision as the application user.
+
+    Creating users, profiles and views needs access management, which the long-running application user should
+    not hold (anything that can run SQL as it could then mint users). CLICKHOUSE_PROVISION_USER/PASSWORD name a
+    separate account used only during startup provisioning and then closed; every other connection setting is
+    shared with the application's own CLICKHOUSE_* configuration.
+    """
+    app = load_clickhouse_config()
+    user = os.getenv("CLICKHOUSE_PROVISION_USER", "").strip()
+    if app is None or not user:
+        return None
+    if not re.fullmatch(r"[A-Za-z0-9_.@-]{1,128}", user):
+        raise ValueError("CLICKHOUSE_PROVISION_USER contains unsupported characters")
+    password = os.getenv("CLICKHOUSE_PROVISION_PASSWORD", "")
+    if not password.strip() and (app.secure or app.host not in ("localhost", "clickhouse")):
+        raise ValueError("CLICKHOUSE_PROVISION_PASSWORD is required except for explicit HTTP loopback tests")
+    return dataclasses.replace(app, user=user, password=password)
+
+
 # Cache for Fastly service names: {service_id: {"name": str, "fetched_at": float}}
-_name_cache: dict = {}
+_NAME_CACHE_TTL = 300  # 5 minutes
+_name_cache: BoundedLRUCache[str, dict[str, Any]] = BoundedLRUCache(maxsize=256)
 _name_cache_lock = threading.Lock()
 _name_refresh_in_flight: set[str] = set()
 _name_refresh_lock = threading.Lock()
-_NAME_CACHE_TTL = 300  # 5 minutes
 
 # Cache for parsed configs: {service_id: (mtime_ns, parsed_dict)}.
 # Revalidated by stat() on each load_config call AND explicitly invalidated
@@ -59,7 +199,7 @@ _NAME_CACHE_TTL = 300  # 5 minutes
 # produce identical st_mtime_ns for two writes within the same microsecond.
 # Hot paths (sync-status polls, every cron tick, every dashboard request)
 # hit this enough that skipping the open+read on the no-change path adds up.
-_config_cache: dict[str, tuple[int, dict]] = {}
+_config_cache: LRUCache[str, tuple[int, dict]] = LRUCache(maxsize=256)
 _config_cache_lock = threading.Lock()
 
 # Path-keyed memo for _ensure_dirs(). Called from every list_configs /
@@ -68,15 +208,49 @@ _config_cache_lock = threading.Lock()
 # get fresh entries because the tmp_path is a different Path object.
 _ensured_dirs: set[Path] = set()
 
+# Cache for list_service_ids(). The configs directory's st_mtime_ns bumps on
+# every file create/delete/rename — exactly the set-of-configs change this
+# cares about (file *content* edits don't matter here) — so one stat()
+# revalidates a cached result and skips the full glob + pathlib stem-parse.
+# telemetry_middleware runs list_service_ids() on the event loop for every
+# request via get_active_service_id(); under shared-host disk contention that
+# glob stalled the loop for seconds (batch-drained health timeouts). Also
+# explicitly invalidated in save_config as a backstop for
+# same-microsecond mtime_ns collisions.
+_service_ids_cache: tuple[Path, int, list[str]] | None = None
+_service_ids_cache_lock = threading.Lock()
+
+
+def _invalidate_service_ids_cache() -> None:
+    global _service_ids_cache
+    with _service_ids_cache_lock:
+        _service_ids_cache = None
+
+
+def _seed_configs_if_needed():
+    seed_dir_str = os.getenv("CONFIGS_SEED_DIR", "/app/seed_configs")
+    seed_dir = Path(seed_dir_str)
+    if seed_dir.is_dir() and CONFIGS_DIR.is_dir():
+        import shutil
+
+        for f in seed_dir.glob("*.json"):
+            dest = CONFIGS_DIR / f.name
+            if not dest.exists():
+                try:
+                    shutil.copy2(f, dest)
+                    logger.info("Seeded service config %s into %s", f.name, dest)
+                except Exception as e:
+                    logger.warning("Could not seed config %s: %s", f.name, e)
+
 
 def _ensure_dirs():
     dirs = (CONFIGS_DIR, DATA_DIR, SERVICES_DATA_DIR, NGWAF_DATA_DIR, CACHE_DATA_DIR, SYSTEM_DATA_DIR)
     missing = [d for d in dirs if d not in _ensured_dirs]
-    if not missing:
-        return
-    for d in missing:
-        d.mkdir(exist_ok=True)
-        _ensured_dirs.add(d)
+    if missing:
+        for d in missing:
+            d.mkdir(exist_ok=True)
+            _ensured_dirs.add(d)
+    _seed_configs_if_needed()
 
 
 # Alphabet shared with backend.deps.ServiceId. Public so the FastAPI
@@ -110,7 +284,7 @@ def _validate_service_id(service_id: str) -> str:
             f"invalid service_id length {len(service_id) if service_id else 0}: "
             f"1..{_SERVICE_ID_MAX_LEN} characters required (security)"
         )
-    if not _SERVICE_ID_RE.match(service_id):
+    if not _SERVICE_ID_RE.fullmatch(service_id):
         raise ValueError(f"invalid service_id {service_id!r}: must be alphanumeric / dash / underscore (security)")
     return service_id
 
@@ -134,8 +308,8 @@ def load_config(service_id: str | None) -> dict | None:
     are picked up on the next call without explicit invalidation.
 
     Returns ``None`` (not a raised exception) for invalid service IDs,
-    including ``None`` itself — several call sites in the iceberg/
-    submodules pass ``src.get("name")`` (typed as ``Any | None``) and
+    including ``None`` itself — several call sites in the core/storage/
+    package pass ``src.get("name")`` (typed as ``Any | None``) and
     rely on the None response to mean "no config". Security's validation
     in ``config_path`` is still what blocks path-traversal; this just
     makes the helper friendlier at call sites that don't pre-validate.
@@ -151,51 +325,163 @@ def load_config(service_id: str | None) -> dict | None:
     except FileNotFoundError:
         return None
 
-    cached = _config_cache.get(service_id)
-    if cached is not None and cached[0] == mtime_ns:
-        return copy.deepcopy(cached[1])
+    with _config_cache_lock:
+        cached = _config_cache.get(service_id)
+        if cached is not None and cached[0] == mtime_ns:
+            return copy.deepcopy(cached[1])
 
-    with open(path, "rb") as f:
-        raw = f.read()
-    parsed = json.loads(raw)
+    # Robust VirtioFS mid-write desynchronization retry loop
+    parsed = None
+    for attempt in Retrying(
+        stop=stop_after_attempt(5),
+        wait=wait_fixed(0.05),
+        retry=retry_if_exception_type((json.JSONDecodeError, PermissionError, OSError)),
+        sleep=lambda s: time.sleep(s),
+        reraise=True,
+    ):
+        with attempt:
+            parsed = json.loads(path.read_bytes())
+
+    if parsed is None:
+        raise ValueError(f"Config file must contain a JSON object: {path}")
+
     with _config_cache_lock:
         _config_cache[service_id] = (mtime_ns, parsed)
     return copy.deepcopy(parsed)
 
 
 def _atomic_write_json(path, data: dict) -> None:
-    """Write ``data`` to ``path`` atomically (unique tmp file + os.replace).
+    """Write ``data`` to ``path`` atomically (unique tmp file + os.replace)."""
+    atomic_write_json(path, data, indent=2, fallback_in_place_errnos={13, 16})
 
-    Shared by :func:`save_config` and :func:`save_usage_logging_config`,
-    which used to paste identical mkstemp / fdopen / json.dump / os.replace
-    blocks. Uses a UNIQUE tmp file (per-call random suffix) so concurrent
-    callers cannot clobber each other's tmp file mid-write. The shared-tmp
-    variant produced corrupted JSON (a stray ``}`` appended to the rendered
-    file) and bricked the backend on next read; we hit it twice in one
-    debugging session before fixing.
-    """
-    fd, tmp_path = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(data, f, indent=2)
-        os.replace(tmp_path, path)
-    except Exception:
+
+class ConfigLockTimeout(TimeoutError):
+    """The per-service config lock could not be acquired within ``_LOCK_TIMEOUT_S``."""
+
+
+class CidSaltReadError(RuntimeError):
+    """The persisted config exists but could not be read, so the cid salt cannot be verified."""
+
+
+_LOCK_TIMEOUT_S = 5.0
+_LOCK_BACKOFF_START_S = 0.005
+
+_lock_state = threading.local()
+_lock_degraded = False
+_lock_degraded_lock = threading.Lock()
+
+
+def config_lock_degraded() -> bool:
+    """True once this process has had to run a config write without the cross-process lock."""
+    return _lock_degraded
+
+
+def _mark_lock_degraded(service_id: str, err: BaseException) -> None:
+    global _lock_degraded
+    with _lock_degraded_lock:
+        first = not _lock_degraded
+        _lock_degraded = True
+    if first:
+        logger.error(
+            "config_lock_degraded service_id=%s: cross-process config locking is unavailable (%s); config "
+            "read-modify-write is NOT serialized across processes until this is fixed",
+            service_id,
+            err,
+        )
+
+
+@contextlib.contextmanager
+def config_lock(service_id: str):
+    """Cross-process exclusive lock for read-modify-write of one service config."""
+    _ensure_dirs()
+    sid = _validate_service_id(service_id)
+    held: dict[str, int] = _lock_state.__dict__.setdefault("held", {})
+    if held.get(sid, 0) > 0:
+        held[sid] += 1
         try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-        raise
+            yield
+        finally:
+            held[sid] -= 1
+        return
+
+    lock_path = CONFIGS_DIR / f".{sid}.lock"
+    flock = FileLock(str(lock_path), thread_local=False)
+    acquired = False
+    if fcntl is None:
+        _mark_lock_degraded(service_id, RuntimeError("fcntl unavailable"))
+    else:
+        try:
+            flock.acquire(timeout=_LOCK_TIMEOUT_S, poll_interval=_LOCK_BACKOFF_START_S)
+            acquired = True
+        except _FileLockTimeout:
+            raise ConfigLockTimeout(
+                f"timed out after {_LOCK_TIMEOUT_S:.0f}s waiting for the config lock of service {service_id}"
+            ) from None
+        except OSError as e:
+            _mark_lock_degraded(service_id, e)
+    held[sid] = 1
+    try:
+        yield
+    finally:
+        held.pop(sid, None)
+        if acquired:
+            flock.release()
 
 
-def save_config(service_id: str, cfg: dict):
-    """Write a service config atomically. See :func:`_atomic_write_json`."""
+def _read_config_fresh(service_id: str) -> dict | None:
+    """``load_config`` that bypasses the in-process cache (another process may have written)."""
+    with _config_cache_lock:
+        _config_cache.pop(service_id, None)
+    return load_config(service_id)
+
+
+def _disk_cid_salt(service_id: str) -> str | None:
+    try:
+        disk = _read_config_fresh(service_id)
+    except (OSError, ValueError) as e:
+        if config_path(service_id).exists():
+            # A transient read failure must not look like "no salt yet": minting one would silently re-key every cid.
+            raise CidSaltReadError(f"cannot read existing config for {service_id}; refusing to save: {e}") from e
+        return None
+    rum = disk.get("rum") if disk else None
+    salt = rum.get("cid_salt") if isinstance(rum, dict) else None
+    return salt if isinstance(salt, str) and salt else None
+
+
+def _save_config_unlocked(service_id: str, cfg: dict, *, allow_cid_salt_change: bool = False):
     global _cdn_service_id_map
     _ensure_dirs()
     if "created_at" not in cfg or not cfg["created_at"]:
         import datetime as _dt
 
         cfg["created_at"] = _dt.datetime.now(_dt.UTC).isoformat()
-    _atomic_write_json(config_path(service_id), cfg)
+    # The cid salt is write-once: pseudonymous cids are keyed on it, so a stale
+    # writer replacing cfg["rum"] wholesale (or a racing first-save) must never
+    # re-key them. Adopt the persisted salt; mint one only when none exists yet.
+    existing_salt = None if allow_cid_salt_change else _disk_cid_salt(service_id)
+    rum = cfg.get("rum")
+    if existing_salt:
+        if not isinstance(rum, dict):
+            rum = {}
+            cfg["rum"] = rum
+        if rum.get("cid_salt") != existing_salt:
+            if rum.get("cid_salt"):
+                logger.warning("cid_salt_overwrite_blocked service_id=%s", service_id)
+            rum["cid_salt"] = existing_salt
+    elif not (isinstance(rum, dict) and rum.get("cid_salt")):
+        import secrets
+
+        if not isinstance(rum, dict):
+            rum = {}
+            cfg["rum"] = rum
+        rum["cid_salt"] = secrets.token_hex(32)
+    try:
+        _atomic_write_json(config_path(service_id), cfg)
+    except (OSError, PermissionError) as e:
+        if getattr(e, "errno", None) == 30 or "read-only" in str(e).lower():
+            logger.warning("save_config_skipped_read_only_fs service_id=%s: %s", service_id, e)
+            return
+        raise
     # Invalidate the load_config cache. The cache uses st_mtime_ns as its
     # revalidation key, which is normally fine — but on Linux ext4/tmpfs two
     # os.replace() calls within the same microsecond can produce identical
@@ -206,19 +492,53 @@ def save_config(service_id: str, cfg: dict):
     with _config_cache_lock:
         _config_cache.pop(service_id, None)
     _cdn_service_id_map = None
+    _invalidate_service_ids_cache()
+
+
+def save_config(service_id: str, cfg: dict):
+    """Write a service config atomically. See :func:`_atomic_write_json`."""
+    with config_lock(service_id):
+        _save_config_unlocked(service_id, cfg)
+
+
+def mutate_config(
+    service_id: str, mutate: Callable[[dict], None], *, allow_cid_salt_change: bool = False
+) -> dict | None:
+    """Locked read-modify-write: fresh-load, apply ``mutate`` in place, save.
+
+    Returns the saved config, or ``None`` when the service has no config.
+    Use for partial edits so a concurrent writer's changes are not clobbered.
+    ``allow_cid_salt_change`` is reserved for ``backend.core.duckdb.rotate_cid_salt``; every other
+    writer has the persisted cid salt re-adopted.
+    """
+    with config_lock(service_id):
+        cfg = _read_config_fresh(service_id)
+        if cfg is None:
+            return None
+        mutate(cfg)
+        _save_config_unlocked(service_id, cfg, allow_cid_salt_change=allow_cid_salt_change)
+        return cfg
+
+
+def snapshot_config(service_id: str) -> str | None:
+    """Raw persisted config text (``None`` when absent)."""
+    with config_lock(service_id):
+        try:
+            return config_path(service_id).read_text()
+        except FileNotFoundError:
+            return None
 
 
 def update_status(service_id: str, status: dict):
     """Partially update the 'status' section of a service config."""
-    cfg = load_config(service_id)
-    if not cfg:
-        return
 
-    current_status = cfg.get("status", {})
-    current_status.update(status)
-    current_status["updated_at"] = time.time()
-    cfg["status"] = current_status
-    save_config(service_id, cfg)
+    def _apply(cfg: dict) -> None:
+        current_status = cfg.get("status", {})
+        current_status.update(status)
+        current_status["updated_at"] = time.time()
+        cfg["status"] = current_status
+
+    mutate_config(service_id, _apply)
 
 
 def get_status(service_id: str) -> dict:
@@ -227,17 +547,6 @@ def get_status(service_id: str) -> dict:
     if not cfg:
         return {}
     return cfg.get("status", {})
-
-
-def delete_config(service_id: str):
-    """Remove a service config file."""
-    global _cdn_service_id_map
-    path = config_path(service_id)
-    if path.exists():
-        path.unlink()
-    _cdn_service_id_map = None
-    with _config_cache_lock:
-        _config_cache.pop(service_id, None)
 
 
 _cdn_service_id_map: dict[str, str] | None = None
@@ -259,9 +568,26 @@ def get_cdn_service_id_map() -> dict[str, str]:
 
 
 def list_service_ids() -> list[str]:
-    """Return all configured service IDs (sorted)."""
+    """Return all configured service IDs (sorted).
+
+    Hot path: called per request by telemetry_middleware via
+    get_active_service_id(). Revalidated by the configs dir's mtime so the
+    steady-state call is a single stat() instead of a loop-blocking glob.
+    """
+    global _service_ids_cache
     _ensure_dirs()
-    return sorted(p.stem for p in CONFIGS_DIR.glob("*.json"))
+    try:
+        dir_mtime = CONFIGS_DIR.stat().st_mtime_ns
+    except FileNotFoundError:
+        return []
+    with _service_ids_cache_lock:
+        cached = _service_ids_cache
+    if cached is not None and cached[0] == CONFIGS_DIR and cached[1] == dir_mtime:
+        return list(cached[2])
+    ids = sorted(p.stem for p in CONFIGS_DIR.glob("*.json"))
+    with _service_ids_cache_lock:
+        _service_ids_cache = (CONFIGS_DIR, dir_mtime, ids)
+    return list(ids)
 
 
 def list_configs() -> list[dict]:
@@ -282,61 +608,62 @@ def get_active_service_id(fallback_to_first: bool = True) -> str | None:
     return ids[0] if fallback_to_first else None
 
 
+class _SourceConfigModel(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    name: Any = Field("default", validation_alias="service_id")
+    service_id: Any = "default"
+    service_name: Any = Field("", validation_alias="name")
+    endpoint: Any = ""
+    fos_native_endpoint: Any = Field(None, validation_alias="fos_endpoint")
+    access_key_id: Any = Field("", validation_alias="fos_access_key_id")
+    secret_access_key: Any = Field("", validation_alias="fos_secret_access_key")
+    bucket: Any = Field("", validation_alias="fos_bucket")
+    prefix: str = ""
+    region: Any = Field("us-east-1", validation_alias="fos_region")
+    cdn_url: Any = ""
+    cdn_secret: Any = ""
+    cdn_service_id: Any = ""
+    logging_service_id: Any = Field("", validation_alias="service_id")
+    duckdb_path: str = ""
+    deployment_mode: str = DEPLOYMENT_MODE
+    storage_mode: Any = "cloud"
+    log_period: int = 60
+    log_fields: Annotated[dict[str, Any], BeforeValidator(lambda v: dict(v) if v else {})] = Field(default_factory=dict)
+    provisioning: dict[str, Any] = Field(default_factory=dict)
+    rum_enabled: bool = False
+    rum: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _finalize(self) -> "_SourceConfigModel":
+        # Native FOS endpoint — used by boto3 for ListObjectsV2/PutObject/DeleteObject
+        # etc. The CDN VCL only proxies GET/HEAD on object keys, not bucket-listing
+        # requests, so writes and lists must go direct.
+        if "fos_native_endpoint" not in self.model_fields_set:
+            self.fos_native_endpoint = f"{self.region}.object.fastlystorage.app"
+        # Prefer CDN URL as the S3 endpoint for DuckDB httpfs reads (parquet GETs)
+        # so we benefit from caching and free egress.
+        self.endpoint = (
+            self.cdn_url.replace("https://", "").replace("http://", "").split("/")[0]
+            if self.cdn_url
+            else self.fos_native_endpoint
+        )
+        if self.log_fields and "format_hash" not in self.log_fields:
+            with contextlib.suppress(Exception):
+                from backend.core import log_fields as lf_module
+
+                self.log_fields["format_hash"] = lf_module.format_hash(self.log_fields)
+        return self
+
+
 def config_to_source(cfg: dict) -> dict:
     """Convert a service config dict to the db.py 'source' dict format."""
     actual_db_path = duckdb_path(cfg.get("service_id", "default"))
-
-    region = cfg.get("fos_region", "us-east-1")
-
-    # Native FOS endpoint — used by boto3 for ListObjectsV2/PutObject/DeleteObject
-    # etc. The CDN VCL only proxies GET/HEAD on object keys, not bucket-listing
-    # requests, so writes and lists must go direct.
-    native_endpoint = cfg.get("fos_endpoint", f"{region}.object.fastlystorage.app")
-
-    # Prefer CDN URL as the S3 endpoint for DuckDB httpfs reads (parquet GETs)
-    # so we benefit from caching and free egress.
-    cdn_url = cfg.get("cdn_url")
-    if cdn_url:
-        endpoint = cdn_url.replace("https://", "").replace("http://", "").split("/")[0]
-    else:
-        endpoint = native_endpoint
-
-    prov = cfg.get("provisioning", {})
-
-    log_fields = cfg.get("log_fields") or {}
-    if log_fields and "format_hash" not in log_fields:
-        try:
-            from backend.core import log_fields as lf_module
-
-            log_fields = dict(log_fields)
-            log_fields["format_hash"] = lf_module.format_hash(log_fields)
-        except Exception:
-            pass
-
-    return {
-        "name": cfg.get("service_id", "default"),
-        "service_id": cfg.get("service_id", "default"),
-        "service_name": cfg.get("name", ""),
-        "endpoint": endpoint,
-        "fos_native_endpoint": native_endpoint,
-        "access_key_id": cfg.get("fos_access_key_id", ""),
-        "secret_access_key": cfg.get("fos_secret_access_key", ""),
-        "bucket": cfg.get("fos_bucket", ""),
-        "prefix": cfg.get("fos_prefix", ""),
-        "region": region,
-        "cdn_url": cfg.get("cdn_url", ""),
-        "cdn_secret": cfg.get("cdn_secret", ""),
-        "cdn_service_id": cfg.get("cdn_service_id", ""),
-        "logging_service_id": cfg.get("service_id", ""),
-        "duckdb_path": actual_db_path,
-        "access_level": cfg.get("access_level", "read_write"),
-        "storage_mode": cfg.get("storage_mode", "cloud"),
-        "log_period": int(cfg.get("log_period", 60)),
-        "log_fields": log_fields,
-        "provisioning": prov,
-        "rum_enabled": cfg.get("rum_enabled", False) or (cfg.get("rum") or {}).get("enabled", False),
-        "rum": cfg.get("rum", {}),
-    }
+    out = _SourceConfigModel.model_validate(cfg).model_dump()
+    out["duckdb_path"] = actual_db_path
+    out["deployment_mode"] = DEPLOYMENT_MODE
+    out["rum_enabled"] = is_rum_enabled(cfg)
+    return out
 
 
 def fetch_service_name(service_id: str, api_key: str) -> str | None:
@@ -430,6 +757,7 @@ def refresh_all_service_names(configs: list[dict], _sync: bool = False) -> dict[
             if entry and (now - entry["fetched_at"]) < _NAME_CACHE_TTL:
                 name_map[sid] = entry["name"]
             else:
+                name_map[sid] = entry["name"] if entry else (cfg.get("name") or sid)
                 misses.append(cfg)
 
     if not misses:
@@ -457,14 +785,6 @@ def refresh_all_service_names(configs: list[dict], _sync: bool = False) -> dict[
     with _name_refresh_lock:
         for cfg in misses:
             sid = cfg.get("service_id", "")
-            entry = _name_cache.get(sid)
-            best_effort = sid
-            if entry:
-                best_effort = entry["name"]
-            elif cfg.get("name"):
-                best_effort = cfg["name"]
-            name_map[sid] = best_effort
-
             if sid not in _name_refresh_in_flight:
                 _name_refresh_in_flight.add(sid)
                 to_schedule.append((sid, cfg.get("fastly_api_key")))
@@ -506,6 +826,21 @@ def _get_cfg_field(field: str, service_id: str | None, default):
     return default
 
 
+def is_rum_enabled(cfg: dict | None) -> bool:
+    """Whether RUM is enabled for a service config.
+
+    ``cfg["rum"]["enabled"]`` wins whenever it is present and not ``None``; the root
+    ``cfg["rum_enabled"]`` is only consulted otherwise. This is the precedence the scheduler
+    and the RUM cron jobs use, so every status/health surface must use it too.
+    """
+    cfg = cfg or {}
+    rum = cfg.get("rum")
+    enabled = rum.get("enabled") if isinstance(rum, dict) else None
+    if enabled is not None:
+        return bool(enabled)
+    return bool(cfg.get("rum_enabled", False))
+
+
 def get_fastly_api_key(service_id: str | None = None) -> str:
     """Return the Fastly API key for a service (or the active service)."""
     return _get_cfg_field("fastly_api_key", service_id, "")
@@ -521,11 +856,6 @@ def get_fastly_logging_service_id(service_id: str | None = None) -> str:
     return _get_cfg_field("service_id", service_id, "")
 
 
-def ngwaf_db_path() -> str:
-    """Return the path to the shared NGWAF bot cache SQLite file."""
-    return str(DATA_DIR / "ngwaf_bot_cache.db")
-
-
 def get_ngwaf_workspace_id(service_id: str) -> str | None:
     """Return the ngwaf_workspace_id for a service, or None if not configured."""
     return _get_cfg_field("ngwaf_workspace_id", service_id, None) or None
@@ -535,19 +865,25 @@ def get_ngwaf_workspace_id(service_id: str) -> str | None:
 
 _USAGE_LOGGING_CONFIG_PATH = SYSTEM_DATA_DIR / "usage_logging.json"
 
-_USAGE_LOGGING_DEFAULTS: dict = {
-    "enabled": False,
-    "retention_days": 30,
-    "class_a_rate_per_1k": 0.005,
-    "class_b_rate_per_10k": 0.01,
-    "cdn_egress_rate_per_gb": 0.12,
-    "storage_rate_per_gb_month": 0.02,
-    "min_billed_days": 30,
+
+class _UsageLoggingConfigModel(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    enabled: bool = False
+    retention_days: int = 30
+    class_a_rate_per_1k: float = 0.005
+    class_b_rate_per_10k: float = 0.01
+    cdn_egress_rate_per_gb: float = 0.12
+    storage_rate_per_gb_month: float = 0.02
+    min_billed_days: int = 30
+    billing_zone: str = "MBZ200"
     # When true, every DuckDB connection enables HTTP-only structured logging
     # so we can record httpfs FOS GETs (parquet scans) as Class B ops. Adds
     # tiny per-query overhead (one in-memory log scan + truncate at close).
-    "track_duckdb_httpfs": True,
-}
+    track_duckdb_httpfs: bool = True
+
+
+_USAGE_LOGGING_DEFAULTS: dict = _UsageLoggingConfigModel().model_dump()
 
 
 def load_usage_logging_config() -> dict:
@@ -555,9 +891,7 @@ def load_usage_logging_config() -> dict:
     _ensure_dirs()
     if _USAGE_LOGGING_CONFIG_PATH.exists():
         try:
-            with open(_USAGE_LOGGING_CONFIG_PATH) as f:
-                stored = json.load(f)
-            return {**_USAGE_LOGGING_DEFAULTS, **stored}
+            return _UsageLoggingConfigModel.model_validate_json(_USAGE_LOGGING_CONFIG_PATH.read_bytes()).model_dump()
         except Exception:
             pass
     return dict(_USAGE_LOGGING_DEFAULTS)
@@ -580,7 +914,148 @@ def is_usage_logging_enabled() -> bool:
     return load_usage_logging_config().get("enabled", False)
 
 
-from backend.utils.cache_registry import CacheRegistry as _CacheRegistry  # noqa: E402
+from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry  # noqa: E402
+
+
+class _ConfigScalarCaches:
+    @staticmethod
+    def clear() -> None:
+        global _cdn_service_id_map
+        _cdn_service_id_map = None
+        _invalidate_service_ids_cache()
+
 
 _CacheRegistry.register("config._name_cache", _name_cache)
 _CacheRegistry.register("config._name_refresh_in_flight", _name_refresh_in_flight)
+_CacheRegistry.register("config._config_cache", _config_cache)
+_CacheRegistry.register("config._scalar_caches", _ConfigScalarCaches())
+
+# Cloud / Scalability Overrides (Phase 2+)
+CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", "")
+DUCKLAKE_CATALOG = os.getenv("DUCKLAKE_CATALOG", "")
+DUCKLAKE_DATA_PATH = os.getenv("DUCKLAKE_DATA_PATH", "")
+HOT_S3_ENDPOINT = os.getenv("HOT_S3_ENDPOINT", "")
+HOT_S3_KEY = os.getenv("HOT_S3_KEY", "")
+HOT_S3_SECRET = os.getenv("HOT_S3_SECRET", "")
+
+
+def _default_sse_backplane() -> str:
+    if explicit := os.getenv("SSE_BACKPLANE"):
+        return explicit.strip()
+    return "valkey" if (DEPLOYMENT_MODE == "high_scale" or bool(CELERY_BROKER_URL)) else "local"
+
+
+SSE_BACKPLANE = _default_sse_backplane()
+
+
+def high_scale_shared_source_enabled(cfg: dict | None) -> bool:
+    """Return whether this service's raw request/RUM stream is shared with an
+    out-of-band high-scale consumer (``provisioning.cron_sync.high_scale_shared_source``).
+
+    While this is set, the high-scale archive deletion controller
+    (``backend/high_scale/archive/jobs.py``) is the sole raw-deletion authority for
+    this service's stream — every legacy raw-deletion path (standard sync's
+    ``delete_after``, celery-mode ``finalize_committed_raw``, RUM cleanup) must
+    stand down regardless of its own ``delete_after`` setting. See
+    ``resolve_raw_delete_after``, the single place that enforces this.
+    """
+    return bool((cfg or {}).get("provisioning", {}).get("cron_sync", {}).get("high_scale_shared_source", False))
+
+
+def resolve_raw_delete_after(cfg: dict | None, requested: bool | None = None) -> bool:
+    """Resolve the effective delete_after decision for raw FOS objects.
+
+    ``requested`` lets a caller pass an explicit override the way a cron
+    argument normally would; ``None`` falls back to the configured
+    ``provisioning.cron_sync.delete_after`` (default True). A high-scale
+    shared source always forces this to False — see
+    ``high_scale_shared_source_enabled`` — because raw-deletion authority for
+    that stream belongs to the high-scale deletion controller, not legacy sync.
+    """
+    if high_scale_shared_source_enabled(cfg):
+        return False
+    if requested is not None:
+        return bool(requested)
+    return bool((cfg or {}).get("provisioning", {}).get("cron_sync", {}).get("delete_after", True))
+
+
+def is_high_scale_mode(source: dict | None = None) -> bool:
+    """Return whether the deployment uses the high-scale ClickHouse topology."""
+    mode = (source or {}).get("deployment_mode") or DEPLOYMENT_MODE
+    if mode == "high_scale":
+        return True
+    if mode == "standard":
+        return False
+    return os.getenv("HIGH_SCALE_ENABLED", "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def is_durable_serving_mode(source: dict | None = None) -> bool:
+    """Return whether serving must use durable shared state only.
+
+    The durable serving mode is used in high-scale topology with a Postgres
+    DuckLake catalog. Sync/file mode keeps its existing native per-service
+    DuckDB file and local-buffer behavior.
+    """
+    return is_high_scale_mode(source) and DUCKLAKE_CATALOG.startswith(("postgres://", "postgresql://"))
+
+
+def validate_deployment_mode() -> None:
+    """Fail fast on incoherent deployment configuration.
+
+    Allowed modes are 'standard' and 'high_scale'.
+    DEPLOYMENT_MODE=high_throughput has been completely removed.
+    Both modes require DUCKLAKE_CATALOG and METADATA_DSN to be Postgres DSNs per ADR-22.
+    """
+    if DEPLOYMENT_MODE == "high_throughput":
+        raise RuntimeError("DEPLOYMENT_MODE=high_throughput has been removed; use 'standard' or 'high_scale'")
+    if DEPLOYMENT_MODE not in {"standard", "high_scale"}:
+        raise RuntimeError(f"DEPLOYMENT_MODE must be either 'standard' or 'high_scale'; got {DEPLOYMENT_MODE!r}")
+    if not DUCKLAKE_CATALOG.startswith(("postgres://", "postgresql://")):
+        raise RuntimeError(
+            f"DEPLOYMENT_MODE={DEPLOYMENT_MODE} requires DUCKLAKE_CATALOG to be a Postgres DSN — "
+            "a DuckDB-file catalog is single-process and cannot serve concurrent "
+            "worker writers plus backend readers (torn merges corrupt the catalog). "
+            f"Got: {DUCKLAKE_CATALOG!r}"
+        )
+    metadata_dsn = os.getenv("METADATA_DSN", "")
+    if not metadata_dsn.startswith(("postgres://", "postgresql://")):
+        raise RuntimeError(
+            f"DEPLOYMENT_MODE={DEPLOYMENT_MODE} requires METADATA_DSN to be a Postgres DSN — "
+            "per-service SQLite metadata is a pod-local file, so the cron lease "
+            "(job_runs), the ingest ledger, and the ingested-file manifest would "
+            "each be private to one process: every worker would re-discover and "
+            "re-convert the same objects and no lease could serialize them. A "
+            "shared multi-writer metadata database (Postgres DSN) is REQUIRED. "
+            f"Got: {metadata_dsn!r}"
+        )
+
+
+def service_id_from_source(
+    source: dict | None,
+    service_id: str | None = None,
+    *,
+    prefer_name: bool = False,
+) -> str:
+    """Resolve ``service_id`` from an explicit override or the ``source`` dict."""
+    if service_id:
+        return service_id
+    if not source:
+        return ""
+    if prefer_name:
+        return source.get("name") or source.get("service_id") or ""
+    return source.get("service_id") or source.get("name") or ""
+
+
+def path_within_dir(base_dir: str, candidate: str) -> bool:
+    """Return ``True`` iff ``candidate`` resolves to a path inside ``base_dir``."""
+    base_real = os.path.realpath(base_dir)
+    candidate_real = os.path.realpath(candidate)
+    try:
+        return os.path.commonpath([base_real, candidate_real]) == base_real
+    except ValueError:
+        return False

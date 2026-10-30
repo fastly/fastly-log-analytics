@@ -1,0 +1,472 @@
+'use client'
+
+import React, { useEffect, useRef, useState, useSyncExternalStore } from 'react'
+import * as maplibregl from 'maplibre-gl'
+import { useTheme } from 'next-themes'
+import { DashboardMapData } from '@/types/api'
+import countryMapData from '@/lib/country-codes.json'
+import { formatCompactCount, resolveCountryName, formatCount } from '@/lib/utils'
+import {
+  NORMALIZE_COUNTRY,
+  countryFill,
+  useMapResize,
+  createMapAvailabilityStore,
+  addCountryBaseLayer,
+  updateCountryBaseLayerTheme,
+  createBaseMap,
+  removeMapTabStops,
+} from './types'
+
+const alpha3ToAlpha2: Record<string, string> = {}
+Object.entries(countryMapData as Record<string, string>).forEach(([a2, a3]) => {
+  alpha3ToAlpha2[a3.toUpperCase()] = a2.toUpperCase()
+})
+
+export interface ChoroplethMapProps {
+  data: DashboardMapData[]
+  className?: string
+  onCountryClick?: (country: string) => void
+}
+
+interface TooltipState {
+  x: number
+  y: number
+  name: string
+  count: number
+}
+
+function focusCountryList(node: HTMLUListElement | null) {
+  node?.focus()
+}
+
+function CountryList({
+  rows,
+  onPick,
+  onClose,
+}: {
+  rows: DashboardMapData[]
+  onPick: (country: string) => void
+  onClose: () => void
+}) {
+  const [activeIndex, setActiveIndex] = useState(0)
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLUListElement>) => {
+    switch (e.key) {
+      case 'ArrowDown':
+        e.preventDefault()
+        setActiveIndex((i) => (i + 1) % rows.length)
+        break
+      case 'ArrowUp':
+        e.preventDefault()
+        setActiveIndex((i) => (i - 1 + rows.length) % rows.length)
+        break
+      case 'Home':
+        e.preventDefault()
+        setActiveIndex(0)
+        break
+      case 'End':
+        e.preventDefault()
+        setActiveIndex(rows.length - 1)
+        break
+      case 'Escape':
+        e.preventDefault()
+        onClose()
+        break
+      case 'Enter':
+      case ' ':
+        e.preventDefault()
+        onPick(rows[activeIndex].country)
+        break
+    }
+  }
+
+  return (
+    <ul
+      ref={focusCountryList}
+      id="choropleth-country-listbox"
+      role="listbox"
+      tabIndex={0}
+      aria-label="Countries by request count — use arrow keys to navigate, Enter to filter"
+      aria-activedescendant={`choropleth-country-option-${activeIndex}`}
+      onKeyDown={handleKeyDown}
+      onClick={(e) => {
+        const country = (e.target as HTMLElement).closest<HTMLElement>('[role="option"]')?.dataset.country
+        if (country !== undefined) onPick(country)
+      }}
+      className="mt-1 max-h-72 w-64 overflow-y-auto bg-popover/95 backdrop-blur-sm border rounded-md shadow-lg text-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+    >
+      {rows.map((d, i) => (
+        <li
+          key={d.country}
+          id={`choropleth-country-option-${i}`}
+          role="option"
+          aria-selected={i === activeIndex}
+          data-country={d.country}
+          onMouseEnter={() => setActiveIndex(i)}
+          className={`flex items-center justify-between gap-3 px-3 py-1.5 cursor-pointer ${i === activeIndex ? 'bg-accent text-accent-foreground' : ''}`}
+        >
+          <span className="truncate">
+            <span className="text-muted-foreground tabular-nums mr-2">{i + 1}.</span>
+            {resolveCountryName(d.country)}
+          </span>
+          <span className="text-muted-foreground tabular-nums">{formatCount(d.count)}</span>
+        </li>
+      ))}
+    </ul>
+  )
+}
+
+export const ChoroplethMap = React.memo(function ChoroplethMap({
+  data,
+  className = '',
+  onCountryClick,
+}: ChoroplethMapProps) {
+  const mapContainer = useRef<HTMLDivElement>(null)
+  const map = useRef<maplibregl.Map | null>(null)
+  const { theme } = useTheme()
+  const isDarkRef = useRef(theme === 'dark')
+  useEffect(() => {
+    isDarkRef.current = theme === 'dark'
+  }, [theme])
+
+  const [tooltip, setTooltip] = useState<TooltipState | null>(null)
+  // WebGL-unavailable fallback (headless / locked-down browser). MapLibre's
+  // constructor throws `webglcontextcreationerror` when no GL context can be
+  // created; left unguarded that throw propagates out of the mount effect into
+  // the route error boundary (app/error.tsx). The sr-only table + keyboard
+  // picker below render the same data, so we degrade to a placeholder instead.
+  // MapLibre is an external resource: subscribe to its initialization result
+  // without synchronously setting React state in the mount effect. SSR always
+  // sees the same initial snapshot; only the browser initializes WebGL.
+  const [mapAvailability] = useState(createMapAvailabilityStore)
+  const mapError = useSyncExternalStore(
+    mapAvailability.subscribe,
+    mapAvailability.getSnapshot,
+    mapAvailability.getServerSnapshot,
+  )
+  // A-2 (a11y / WCAG 2.1.1 Keyboard): the MapLibre canvas exposes nothing
+  // to keyboard users — mousemove tooltips and click-to-filter were
+  // mouse-only. The sr-only table (A-1) gives screen-reader users the data;
+  // this picker gives sighted keyboard users an equivalent on-demand
+  // listbox. Toggle button lives top-left so it stays clear of the Legend
+  // (bottom-left) and NavigationControl (top-right).
+  const [pickerOpen, setPickerOpen] = useState(false)
+  const pickerToggleRef = useRef<HTMLButtonElement>(null)
+  const dataMapRef = useRef<Map<string, number>>(new Map())
+  // Reverse lookup: GeoJSON-feature name → alpha-2 country code. Built from
+  // the data array (whose .country IS the alpha-2 code), so it stays in sync
+  // with whatever the backend actually returns. Avoids depending on the
+  // GeoJSON feature id (MapLibre can drop string ids in click events) or on
+  // country-codes.json being complete (it has 168 codes vs 180 features).
+  const nameToCodeRef = useRef<Map<string, string>>(new Map())
+  const onCountryClickRef = useRef(onCountryClick)
+  useEffect(() => {
+    onCountryClickRef.current = onCountryClick
+  }, [onCountryClick])
+
+  useEffect(() => {
+    if (!mapContainer.current) return
+
+    if (!map.current) {
+      try {
+        map.current = createBaseMap(maplibregl, mapContainer.current, {
+          renderWorldCopies: false,
+          zoom: 0.5,
+          lockRotation: true,
+          showCompass: false,
+          // Don't hijack page scroll: a plain mousewheel scrolls the PAGE; only
+          // ⌘/Ctrl + wheel (or the +/- buttons) zooms the map. (cooperative gestures)
+          cooperativeGestures: true,
+        })
+
+        requestAnimationFrame(() => {
+          map.current?.resize()
+        })
+
+        map.current.on('load', () => {
+          if (!map.current) return
+
+          removeMapTabStops(mapContainer.current)
+
+          addCountryBaseLayer(map.current, { isDark: isDarkRef.current })
+
+          // Hover events. Previously wrapped in a rAF-throttle helper, but
+          // Turbopack's minifier was inlining the throttle's closures as
+          // bare outer-scope assignments that collided with the click
+          // handler's `e` parameter — the mousemove handler silently never
+          // fired in prod while click on the same layer worked fine.
+          // Re-throttle inline if the per-frame setState becomes a profile
+          // hot spot; today's setTooltip is cheap enough to run unthrottled.
+          map.current.on('mousemove', 'countries', (e: maplibregl.MapLayerMouseEvent) => {
+            if (e.features && e.features.length > 0) {
+              const feature = e.features[0]
+              const name = feature.properties?.name
+              const count = dataMapRef.current.get(name) || 0
+
+              setTooltip({
+                x: Math.min(e.point.x + 15, (mapContainer.current?.clientWidth || 500) - 160),
+                y: Math.min(e.point.y + 15, (mapContainer.current?.clientHeight || 300) - 80),
+                name,
+                count,
+              })
+              if (map.current) map.current.getCanvas().style.cursor = 'pointer'
+            }
+          })
+
+          map.current.on('mouseleave', 'countries', () => {
+            setTooltip(null)
+            if (map.current) map.current.getCanvas().style.cursor = ''
+          })
+
+          map.current.on('click', 'countries', (e) => {
+            if (e.features && e.features.length > 0) {
+              const feature = e.features[0]
+              const name = feature.properties.name as string
+              // Prefer the data-derived name→code map (always alpha-2 matching
+              // what the backend filter expects); fall back to the GeoJSON
+              // feature id's alpha-3 lookup, then to the name as a last resort.
+              const id = feature.id as string | undefined
+              const code = nameToCodeRef.current.get(name) || (id ? alpha3ToAlpha2[id.toUpperCase()] : null)
+              onCountryClickRef.current?.(code || name)
+            }
+          })
+        })
+      } catch {
+        // WebGL unavailable (headless / locked-down browser). The sr-only
+        // table + keyboard picker below still render the data; show a
+        // placeholder instead of throwing into the route error boundary.
+        map.current = null
+        mapAvailability.reportUnavailable()
+      }
+    }
+
+    return () => {
+      map.current?.remove()
+      map.current = null
+    }
+  }, [mapAvailability])
+
+  useEffect(() => {
+    if (!map.current) return
+    updateCountryBaseLayerTheme(map.current, theme === 'dark')
+    if (!data) return
+
+    // Update data map for hover lookups + reverse map for click-to-code.
+    const newDataMap = new Map<string, number>()
+    const newNameToCode = new Map<string, string>()
+    data.forEach((d) => {
+      const englishName = resolveCountryName(d.country)
+      const countryName = NORMALIZE_COUNTRY[englishName] || englishName
+      newDataMap.set(countryName, d.count)
+      if (d.country) newNameToCode.set(countryName, d.country.toUpperCase())
+    })
+    dataMapRef.current = newDataMap
+    nameToCodeRef.current = newNameToCode
+
+    let pendingStyleDataHandler: (() => void) | null = null
+
+    const updateData = () => {
+      if (!map.current?.getLayer('countries')) {
+        // Layer not added yet — the init effect's 'load' handler adds
+        // it. Listen for 'styledata' (fires whenever layers/sources
+        // change) and retry.
+        if (pendingStyleDataHandler) {
+          map.current?.off('styledata', pendingStyleDataHandler)
+        }
+        const onStyleData = () => {
+          if (map.current?.getLayer('countries')) {
+            map.current.off('styledata', onStyleData)
+            pendingStyleDataHandler = null
+            map.current.resize()
+            updateData()
+          }
+        }
+        pendingStyleDataHandler = onStyleData
+        map.current?.on('styledata', onStyleData)
+        return
+      }
+
+      if (!data.length) {
+        map.current.setPaintProperty('countries', 'fill-color', countryFill(theme === 'dark'))
+        map.current.resize()
+        return
+      }
+
+      const max = Math.max(...data.map((d) => d.count))
+      if (!(max > 0)) {
+        map.current.setPaintProperty('countries', 'fill-color', countryFill(theme === 'dark'))
+        map.current.resize()
+        return
+      }
+      const [first, ...others] = data.map((d): [string, string] => {
+        const intensity = 0.2 + (d.count / max) * 0.8
+        const englishName = resolveCountryName(d.country)
+        return [NORMALIZE_COUNTRY[englishName] || englishName, `rgba(59, 130, 246, ${intensity})`]
+      })
+
+      const matchExpression: maplibregl.ExpressionSpecification = [
+        'match',
+        ['get', 'name'],
+        first[0],
+        first[1],
+        ...others.flat(),
+        countryFill(theme === 'dark'),
+      ]
+      map.current.setPaintProperty('countries', 'fill-color', matchExpression)
+      map.current.resize()
+    }
+
+    updateData()
+
+    return () => {
+      if (pendingStyleDataHandler) {
+        map.current?.off('styledata', pendingStyleDataHandler)
+        pendingStyleDataHandler = null
+      }
+    }
+  }, [data, theme])
+
+  const maxCount = data.length > 0 ? Math.max(...data.map((d) => d.count)) : 0
+
+  // a11y: derive a screen-reader summary + full sorted table from the same data
+  // the visual layer uses. The map is a <canvas> with no inherent semantics
+  // (mirrors the PlotlyChart / ChartA11yTable pattern). Sort once here and
+  // reuse for both the aria-label top-5 and the sr-only table.
+  const sortedForA11y = React.useMemo(() => {
+    if (!data || data.length === 0) return []
+    return [...data].filter((d) => d && d.country).sort((a, b) => b.count - a.count)
+  }, [data])
+
+  const ariaLabel = React.useMemo(() => {
+    if (sortedForA11y.length === 0) {
+      return 'World map of requests by country. No data available.'
+    }
+    const top = sortedForA11y.slice(0, 5)
+    const topPart = top.map((d) => `${resolveCountryName(d.country)} ${formatCompactCount(d.count)}`).join(', ')
+    return `World map of requests by country, showing top countries: ${topPart}.`
+  }, [sortedForA11y])
+
+  // Cap the sr-only table at 50 rows to avoid SR-user fatigue on long-tail
+  // datasets. The aria-label still summarizes the top 5 above.
+  // Shared with the A-2 keyboard picker so both surfaces stay in sync.
+  const tableRows = React.useMemo(() => sortedForA11y.slice(0, 50), [sortedForA11y])
+
+  const closePicker = () => {
+    setPickerOpen(false)
+    // requestAnimationFrame lets React's render flush before we move focus,
+    // otherwise the toggle button may not be focusable yet on re-render.
+    requestAnimationFrame(() => pickerToggleRef.current?.focus())
+  }
+
+  useMapResize(map, mapContainer)
+
+  return (
+    <div
+      className={`relative min-h-[300px] w-full h-full rounded-lg overflow-hidden bg-background ${className}`}
+      // role="group" (not "img"): the wrapper holds the interactive MapLibre
+      // controls + the sr-only data table below, so it can't be an "img"
+      // (axe: nested-interactive — an img must not contain focusable
+      // descendants). group is a structural role that legitimately groups
+      // interactive content under the aria-label.
+      role="group"
+      aria-label={ariaLabel}
+    >
+      {mapError ? (
+        <div
+          className="absolute inset-0 flex items-center justify-center px-4 text-center text-xs text-muted-foreground"
+          aria-hidden="true"
+        >
+          Interactive map unavailable in this browser. See the country list below.
+        </div>
+      ) : (
+        <div ref={mapContainer} className="absolute inset-0 w-full h-full min-h-[300px]" aria-hidden="true" />
+      )}
+
+      {/* Screen-reader-only data table. The MapLibre canvas exposes nothing
+          to assistive tech, so this sibling renders the same data as a real
+          navigable table. Hidden visually via Tailwind's `sr-only`. */}
+      <table className="sr-only">
+        <caption>
+          {tableRows.length > 0
+            ? `Country traffic data — ${tableRows.length} countries shown${sortedForA11y.length > tableRows.length ? ` of ${sortedForA11y.length} total` : ''}.`
+            : 'Country traffic data — no countries available.'}
+        </caption>
+        <thead>
+          <tr>
+            <th scope="col">Rank</th>
+            <th scope="col">Country</th>
+            <th scope="col">Requests</th>
+          </tr>
+        </thead>
+        <tbody>
+          {tableRows.map((d, i) => (
+            <tr key={d.country}>
+              <td>{i + 1}</td>
+              <td>{resolveCountryName(d.country)}</td>
+              <td>{formatCount(d.count)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+
+      {/* A-2 keyboard picker: on-demand visible listbox for sighted keyboard
+          users. Mirrors the sr-only table (same tableRows source) so all
+          three a11y surfaces — aria-label summary, sr-only table, this
+          picker — stay in sync. Toggle is top-3 left-3 to avoid the legend
+          (bottom-left) and NavigationControl (top-right). */}
+      {tableRows.length > 0 && (
+        <div className="absolute top-3 left-3 z-20">
+          <button
+            ref={pickerToggleRef}
+            type="button"
+            onClick={() => setPickerOpen((o) => !o)}
+            aria-expanded={pickerOpen}
+            aria-haspopup="listbox"
+            aria-controls="choropleth-country-listbox"
+            className="bg-background/95 backdrop-blur-sm border rounded-md px-3 py-1.5 text-xs font-medium shadow-md hover:bg-accent focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1"
+          >
+            {pickerOpen ? 'Hide countries' : 'Browse countries'}
+          </button>
+          {pickerOpen && (
+            <CountryList
+              // A changed row count resets selection before the next paint,
+              // without an effect that can briefly expose an invalid index.
+              key={tableRows.length}
+              rows={tableRows}
+              onPick={(country) => {
+                onCountryClickRef.current?.(country)
+                closePicker()
+              }}
+              onClose={closePicker}
+            />
+          )}
+        </div>
+      )}
+
+      {/* Tooltip */}
+      {tooltip && (
+        <div
+          className="absolute z-50 pointer-events-none bg-popover/95 backdrop-blur-sm border shadow-lg rounded-md px-3 py-2 text-sm transition-opacity"
+          style={{
+            left: tooltip.x,
+            top: tooltip.y,
+          }}
+        >
+          <div className="font-semibold text-foreground">{tooltip.name}</div>
+          <div className="text-muted-foreground">{formatCount(tooltip.count)} requests</div>
+        </div>
+      )}
+
+      {/* Legend */}
+      {data.length > 0 && (
+        <div className="absolute bottom-4 left-4 bg-background/95 backdrop-blur-sm border rounded-md p-3 shadow-md text-xs pointer-events-none z-10">
+          <div className="font-medium text-foreground mb-2">Traffic Intensity</div>
+          <div className="flex items-center gap-3">
+            <span className="text-muted-foreground font-medium">0</span>
+            <div className="w-32 h-2.5 rounded-full bg-gradient-to-r from-[rgba(59,130,246,0.2)] to-[rgba(59,130,246,1)] ring-1 ring-black/5 dark:ring-white/10" />
+            <span className="text-muted-foreground font-medium">{formatCompactCount(maxCount)}</span>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+})

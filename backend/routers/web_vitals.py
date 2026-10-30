@@ -1,65 +1,22 @@
-"""Client-side Web Vitals collector.
-
-Accepts the metric payloads the `web-vitals` library emits in the browser
-(LCP / INP / CLS / FCP / TTFB / etc.). When collection is enabled it logs
-each metric via structlog (so log aggregation can slice perf by route /
-metric / rating) AND appends it to a JSONL sink for offline analysis by
-``scripts/analyze_web_vitals.py``.
-
-Collection is opt-in via the ``WEB_VITALS_COLLECT`` env var (default off);
-see ``backend/core/web_vitals_store.py``. The frontend mirrors that flag
-through ``/api/bootstrap`` and skips sending entirely when it's off, so a
-disabled deployment sees zero web-vitals traffic. This endpoint re-checks
-the flag as the authoritative gate in case a stale client still POSTs.
-
-Auth: analyst-safe — the SPA mounts the reporter for every session,
-including share-mode analysts. The endpoint is added to
-``_ANALYST_ALLOWED_WRITE_PREFIXES`` in ``backend/utils/remote_access.py``.
-
-Volume: ~5 metrics per page load per user. Cheap append path; no
-rate-limit needed at the current scale. If a tenant ever ramps to
-thousands of concurrent analysts, this is the natural place to add a
-token-bucket per ``analyst_session_id``.
-"""
+"""Web Vitals and UX event telemetry endpoints."""
 
 from __future__ import annotations
 
 import logging
-from typing import Literal
 
 from fastapi import APIRouter, Request
-from pydantic import BaseModel, Field
 
-from backend.core import web_vitals_store
-from backend.models.errors import DEFAULT_ERROR_RESPONSES
+from backend.core import request_telemetry as web_vitals_store
+from backend.models.common import DEFAULT_ERROR_RESPONSES, OkResponse, UxEventPayload, WebVitalsPayload
 from backend.utils.date_utils import iso_z_now
 
-logger = logging.getLogger("backend.web_vitals")
+web_vitals_logger = logging.getLogger("backend.web_vitals")
+ux_logger = logging.getLogger("backend.ux_events")
 
-router = APIRouter(prefix="/api/web-vitals", tags=["web-vitals"], responses=DEFAULT_ERROR_RESPONSES)
-
-
-class WebVitalsPayload(BaseModel):
-    """Mirrors the web-vitals SDK metric shape (v5 API).
-
-    Field names match the JS Metric object so the frontend can pass it
-    through without reshape. ``rating`` is computed by the SDK against
-    Google's good/needs-improvement/poor thresholds.
-    """
-
-    # ``id`` is a stable per-page-load id the SDK uses for delta updates
-    # (CLS / INP keep updating the same metric throughout a page's life).
-    id: str = Field(..., max_length=120)
-    name: Literal["CLS", "FCP", "FID", "INP", "LCP", "TTFB"]
-    value: float
-    rating: Literal["good", "needs-improvement", "poor"]
-    # Optional context.
-    pathname: str | None = Field(default=None, max_length=300)
-    navigation_type: str | None = Field(default=None, max_length=40)
-    delta: float | None = None
+router = APIRouter(prefix="/api", responses=DEFAULT_ERROR_RESPONSES)
 
 
-@router.post("")
+@router.post("/web-vitals", tags=["web-vitals"], response_model=OkResponse, response_model_exclude_unset=True)
 def report_web_vitals(payload: WebVitalsPayload, request: Request) -> dict:
     """Record one Web Vitals metric event. Returns ``{"ok": true}``.
 
@@ -71,12 +28,10 @@ def report_web_vitals(payload: WebVitalsPayload, request: Request) -> dict:
     if not web_vitals_store.collection_enabled():
         return {"ok": True}
 
-    # ``request.state.analyst_session`` is populated by
-    # RemoteAccessMiddleware for share-mode callers and is None for admin.
     analyst_session = getattr(request.state, "analyst_session", None)
     cohort = "analyst" if analyst_session is not None else "admin"
 
-    logger.info(
+    web_vitals_logger.info(
         "web_vitals",
         extra={
             "web_vitals_name": payload.name,
@@ -90,7 +45,6 @@ def report_web_vitals(payload: WebVitalsPayload, request: Request) -> dict:
         },
     )
 
-    # Persist for offline analysis. Keys are flat + analyzer-friendly.
     web_vitals_store.append_sample(
         {
             "ts": iso_z_now(),
@@ -103,5 +57,27 @@ def report_web_vitals(payload: WebVitalsPayload, request: Request) -> dict:
             "delta": payload.delta,
             "cohort": cohort,
         }
+    )
+    return {"ok": True}
+
+
+@router.post("/ux-events", tags=["ux-events"], response_model=OkResponse, response_model_exclude_unset=True)
+def report_ux_event(payload: UxEventPayload, request: Request) -> dict:
+    """Log one UX event. Returns ``{"ok": true}``.
+
+    Same structlog-extra shape as web_vitals so log slicing patterns
+    transfer (filter by cohort / pathname / event)."""
+    analyst_session = getattr(request.state, "analyst_session", None)
+    cohort = "analyst" if analyst_session is not None else "admin"
+
+    ux_logger.info(
+        "ux_event",
+        extra={
+            "ux_event": payload.event,
+            "ux_pathname": payload.pathname,
+            "ux_component_id": payload.component_id,
+            "ux_details": payload.details,
+            "ux_cohort": cohort,
+        },
     )
     return {"ok": True}
