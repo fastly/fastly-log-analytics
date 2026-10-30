@@ -84,7 +84,7 @@ services:
     mem_limit: 12g
     memswap_limit: 12g
     # Without an explicit ulimit, Docker inherits the daemon default (often
-    # 1024 soft). DuckDB parallel Iceberg scans open one fd per parquet file;
+    # 1024 soft). DuckDB parallel DuckLake scans open one fd per parquet file;
     # a populated service with 1k+ files hits the limit and throws
     # "Too many open files". main.py bumps the soft limit at startup via
     # resource.setrlimit, but that call silently no-ops when Docker's hard
@@ -101,7 +101,7 @@ services:
       # being UNSET (pre-fix it silently overrode this value with
       # ``int(physical_ram * 0.6)`` ≈ 9-10GB on the 16GB VM, which left
       # too little headroom and caused recurring host OOM-kills).
-      # 6GB chosen so: DuckDB 6 + Python/pyiceberg/aiohttp working set
+      # 6GB chosen so: DuckDB 6 + Python/aiohttp working set
       # ~3 + scoring/cache working set ~2 = ~11GB < 12GB container cap
       # < 16GB host. Bump only after confirming RSS plateaus below 9GB.
       - DUCKDB_MEMORY_LIMIT=6GB
@@ -124,30 +124,34 @@ services:
       # startup assertion in backend/main.py still has a signal to detect
       # the unsafe state via this companion variable.
       - UVICORN_FORWARDED_ALLOW_IPS=127.0.0.1
-      # Pass through DEBUG_RESPONSES from the host environment (typically
-      # set via the .env file next to this compose file, which Compose
-      # auto-loads for variable substitution). When unset it expands to
-      # the literal empty string and the gate in backend/models/common.py
-      # (`_debug_responses_enabled`) returns False — same as if the var
-      # were never set. Plain `- DEBUG_RESPONSES` (no value) would also
-      # work but the explicit substitution makes the source obvious.
-      - DEBUG_RESPONSES=${DEBUG_RESPONSES:-}
-      # Pre-acquire 4 pool conns per service at startup so the first
-      # /api/origin/aggregates request finds idle slots — the three
-      # extras' max_wait=0.2s deadline doesn't cover a cold conn build
-      # (~150 ms each), which silently falls back to serial on a cold
-      # pool. With this on, startup pays ~600 ms per service one time
-      # and the first composite request parallelizes cleanly.
+      # Pass through DEBUG_RESPONSES from the host environment (defaults to true).
+      - DEBUG_RESPONSES=${DEBUG_RESPONSES:-true}
+      # Pre-warm our upgraded 4-connection pool at startup to eliminate cold-start paint delays.
       - DUCKDB_POOL_WARM_AT_BOOT=true
-      # Cap concurrent pool connections per service. The prod VM is 4 cores,
-      # so the default of 8 oversubscribes (8 conns x up-to-4 DuckDB threads)
-      # AND raises peak RSS — each in-flight query holds uncounted httpfs read
-      # buffers + object-cache growth outside DUCKDB_MEMORY_LIMIT. Lowering to
-      # 4 cuts peak memory and, crucially, lets the recycle drain the pool to
-      # in_use==0 quickly so it can actually destroy+rebuild the instance and
-      # free the leaked cache (an undrainable pool => recycle returns
-      # 'incomplete' and frees nothing => OOM). See [[backend-oom-restart-loop]].
+      # Bound request concurrency to the memory envelope of this 4-core,
+      # 16GB single-host deployment. Cold connections are preferable to
+      # repeated OOM restarts and first-byte timeouts.
       - DUCKDB_POOL_MAX_SIZE=4
+      # Cap pooled connections independently; httpfs and object-cache
+      # allocations are not fully represented by DuckDB's memory accounting
+      # (measured 2026-10-05: the configured ceiling reports as ~366MiB
+      # usable against a 512MB cap, ~28% eaten by that unaccounted
+      # overhead). 512MB was too tight for a single wide rollup query
+      # (ip_spread/ngwaf_bots) under dashboard+cron overlap -> real
+      # OutOfMemoryException, even though the container was only at 13% of
+      # its 12GB cap (1.57GB RSS) -- the bottleneck was this per-connection
+      # ceiling, not host/container capacity. 1GB x 4 pooled connections
+      # worst-case = 4GB, still well under the 6/11/12GB budget above.
+      # Note: in DuckDB, `SET max_memory` modifies the database-instance-wide
+      # buffer manager ceiling (shared across all connections to the same
+      # file-backed `.duckdb` instance). Setting 1GB here starved the shared
+      # file-backed buffer manager to 953.6 MiB when dashboard filtered scans
+      # overlapped background rollup crons. Default to 6GB (matching
+      # DUCKDB_MEMORY_LIMIT) while still allowing override for durable_serving.
+      - DUCKDB_POOL_CONN_MEMORY_LIMIT=${DUCKDB_POOL_CONN_MEMORY_LIMIT:-6GB}
+      # Optional emergency switch for the local active-hour optimization.
+      # Readers fall back to the existing live scan when this is disabled.
+      - PARTIAL_HOUR_MERGE_ENABLED=${PARTIAL_HOUR_MERGE_ENABLED:-true}
       # Periodic DuckDB instance recycle (backend/core/duckdb_recycle.py).
       # DuckDB's enable_object_cache caches parquet metadata keyed by
       # filename and never evicts deleted files; under continuous buffer +
@@ -204,25 +208,23 @@ services:
       # gating. Set the value in the VM-side .env file (it isn't repo-
       # safe — fastly-log-analytics is a public repo).
       - CORS_ORIGINS=${CORS_ORIGINS:-}
-      # Shared-secret admin gate (Phase Q). When SET in the VM .env, the
-      # backend's remote_access middleware refuses admin-branch requests
-      # whose X-Admin-Token doesn't match. When UNSET / empty the
-      # middleware is a no-op so this passthrough is safe to ship with
-      # the env absent. The actual secret lives in the VM .env (it isn't
-      # repo-safe — fastly-log-analytics is a public repo).
-      - ADMIN_SHARED_SECRET=${ADMIN_SHARED_SECRET:-}
       # Real-User-Monitoring (Web Vitals) collection. OFF by default for
       # every install — collection is opt-in (see
       # backend/core/web_vitals_store.py). Enable it on a SPECIFIC machine by
       # setting WEB_VITALS_COLLECT=1 in the VM-side .env file (not repo-
-      # tracked), the same passthrough pattern CORS_ORIGINS /
-      # ADMIN_SHARED_SECRET use. Unset/empty here resolves to the code's
-      # default-off path, so a fresh clone never collects until its operator
-      # explicitly opts in. Enabled samples land in
+      # tracked), the same passthrough pattern CORS_ORIGINS uses. Unset/empty
+      # here resolves to the code's default-off path, so a fresh clone never
+      # collects until its operator explicitly opts in. Enabled samples land in
       # /app/data/system/web_vitals.jsonl for scripts/analyze_web_vitals.py.
       - WEB_VITALS_COLLECT=${WEB_VITALS_COLLECT:-}
+      # OpenTelemetry export is opt-in. Keep the production default at
+      # `none`; an operator enabling OTLP must provide both destinations in
+      # the VM-local .env. No endpoint or credentials belong in this file.
+      - OTEL_EXPORTER=${OTEL_EXPORTER:-none}
+      - OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=${OTEL_EXPORTER_OTLP_METRICS_ENDPOINT:-}
+      - OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:-}
       # Analyst OAuth/OIDC login (opt-in; same VM-.env passthrough pattern as
-      # ADMIN_SHARED_SECRET). ALL empty by default → the feature stays OFF: it is
+      # CORS_ORIGINS). ALL empty by default → the feature stays OFF: it is
       # inert unless OAUTH_FLOW_STATE_SECRET is set AND a provider is configured
       # in the gitignored registry (default /app/data/system/oauth_providers.json,
       # i.e. /mnt/app-data/data/system/ on the host). The client_id/secret are the
@@ -235,6 +237,12 @@ services:
       - OAUTH_REDIRECT_BASE=${OAUTH_REDIRECT_BASE:-}
       # SSO-exclusive deployments only: set to 0 to disable passcode login.
       - SHARE_PASSCODE_LOGIN_ENABLED=${SHARE_PASSCODE_LOGIN_ENABLED:-}
+      # PostgreSQL standard metadata + DuckLake catalog (unified v3 storage).
+      # Points to the local Postgres container on loopback with fallback password.
+      - DUCKLAKE_CATALOG=postgresql://fla:${DUCKLAKE_PG_PASSWORD:-fla_local_dev}@127.0.0.1:5432/ducklake
+      - METADATA_DSN=postgresql://fla:${DUCKLAKE_PG_PASSWORD:-fla_local_dev}@127.0.0.1:5432/ducklake
+    depends_on:
+      - postgres
     volumes: !override
       - /mnt/app-data/configs:/app/configs
       - /mnt/app-data/data:/app/data
@@ -287,11 +295,8 @@ services:
       # HOSTNAME=0.0.0.0).
       - HOSTNAME=127.0.0.1
       - API_PROXY_URL=http://127.0.0.1:8000
-      # SSR helpers in lib/ssr/*.ts inject this on the loopback upstream
-      # fetch when the backend's admin-token gate is active (Phase Q).
-      # Same passthrough rationale as the backend block — empty = no-op
-      # on the SSR fetch.
-      - ADMIN_SHARED_SECRET=${ADMIN_SHARED_SECRET:-}
+      - COMMIT_HASH=${COMMIT_HASH:-unknown}
+      - ENV_NAME=gce
 
   caddy:
     # Custom build with the caddy-ratelimit plugin (see caddy/Dockerfile).
@@ -323,6 +328,27 @@ services:
       - caddy_config:/config
     depends_on:
       - frontend
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    network_mode: host
+    ports: !reset []
+    networks: !reset []
+    logging: *prod-logging
+    # Security: bind to loopback ONLY — not reachable on public or VPC interfaces.
+    command: ["postgres", "-c", "listen_addresses=127.0.0.1"]
+    environment:
+      - POSTGRES_USER=fla
+      - POSTGRES_PASSWORD=${DUCKLAKE_PG_PASSWORD:-fla_local_dev}
+      - POSTGRES_DB=ducklake
+    volumes: !override
+      - /mnt/app-data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U fla -d ducklake"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
 volumes:
   caddy_data:

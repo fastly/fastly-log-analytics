@@ -1,145 +1,92 @@
-"""Unit tests for the opaque AES-GCM session-reference token codec.
-
-Pins the seal/open round-trip and — critically — that a tampered, wrong-service,
-or wrong-key token is rejected (raises ``SessionTokenError``) rather than
-silently decoding to attacker-chosen values. The detail endpoint relies on this:
-an opaque token that an analyst can't forge or invert is what lets a PII-masking
-analyst drill into a session without ever holding the real IP.
-"""
+"""Unit tests for opaque AES-GCM session tokens."""
 
 from __future__ import annotations
 
+import threading
+
 import pytest
 
-from backend.core import session_token as st
-from backend.core.session_token import SessionTokenError, open_session_token, seal_session_token
+import backend.core.request_context as _st_mod
+from backend.core.request_context import SessionTokenError, open_session_token, seal_session_token
 
 
-@pytest.fixture
-def fixed_key(monkeypatch):
-    """Pin a deterministic key (SESSION_TOKEN_SECRET) and reset the module
-    cache so the test controls key material. Resets again on teardown so the
-    cached ephemeral key doesn't leak across tests."""
-    monkeypatch.setenv("SESSION_TOKEN_SECRET", "unit-test-secret-A")
-    st._key = None
-    yield
-    st._key = None
+def _run_barrier_threads(n: int, fn) -> None:
+    barrier = threading.Barrier(n)
 
+    def _worker(idx: int) -> None:
+        barrier.wait()
+        fn(idx)
 
-def _rekey(monkeypatch, secret: str) -> None:
-    monkeypatch.setenv("SESSION_TOKEN_SECRET", secret)
-    st._key = None
-
-
-def test_round_trip(fixed_key):
-    token = seal_session_token(
-        "203.0.113.7", "ja4abc", "2026-06-29T00:00:00+00:00", "2026-06-29T00:30:00+00:00", service_id="svcA"
-    )
-    ip, ja4, start, end = open_session_token(token, service_id="svcA")
-    assert ip == "203.0.113.7"
-    assert ja4 == "ja4abc"
-    assert start == "2026-06-29T00:00:00+00:00"
-    assert end == "2026-06-29T00:30:00+00:00"
-
-
-def test_round_trip_null_ja4(fixed_key):
-    """ja4 is often absent — it must round-trip as None, not the string 'None'
-    or '' (the detail SQL treats None as 'don't filter on ja4')."""
-    token = seal_session_token(
-        "203.0.113.7", None, "2026-06-29T00:00:00+00:00", "2026-06-29T00:30:00+00:00", service_id="svcA"
-    )
-    ip, ja4, _start, _end = open_session_token(token, service_id="svcA")
-    assert ip == "203.0.113.7"
-    assert ja4 is None
-
-
-def test_token_is_opaque_not_derivable_from_ip(fixed_key):
-    """The token must not be a plain function of the IP — it must not contain
-    the IP in cleartext (else masking is trivially reversible)."""
-    ip = "198.51.100.23"
-    token = seal_session_token(
-        ip, "ja4abc", "2026-06-29T00:00:00+00:00", "2026-06-29T00:30:00+00:00", service_id="svcA"
-    )
-    assert ip not in token
-    # last octet (the masked part) must not be recoverable from the token text
-    assert ".23" not in token
-
-
-def test_tampered_token_rejected(fixed_key):
-    token = seal_session_token(
-        "203.0.113.7", "ja4abc", "2026-06-29T00:00:00+00:00", "2026-06-29T00:30:00+00:00", service_id="svcA"
-    )
-    # Flip a character in the ciphertext body (last char is inside the GCM tag).
-    tampered = token[:-1] + ("A" if token[-1] != "A" else "B")
-    with pytest.raises(SessionTokenError):
-        open_session_token(tampered, service_id="svcA")
-
-
-def test_wrong_service_aad_rejected(fixed_key):
-    """A token minted for svcA must not open under svcB (cross-service replay)."""
-    token = seal_session_token(
-        "203.0.113.7", "ja4abc", "2026-06-29T00:00:00+00:00", "2026-06-29T00:30:00+00:00", service_id="svcA"
-    )
-    with pytest.raises(SessionTokenError):
-        open_session_token(token, service_id="svcB")
-
-
-def test_wrong_key_rejected(fixed_key, monkeypatch):
-    """A token sealed under one key (e.g. before a restart) fails to open under
-    a different key — the caller surfaces a 'reload the page' 400."""
-    token = seal_session_token(
-        "203.0.113.7", "ja4abc", "2026-06-29T00:00:00+00:00", "2026-06-29T00:30:00+00:00", service_id="svcA"
-    )
-    _rekey(monkeypatch, "unit-test-secret-B")
-    with pytest.raises(SessionTokenError):
-        open_session_token(token, service_id="svcA")
-
-
-def test_malformed_token_rejected(fixed_key):
-    with pytest.raises(SessionTokenError):
-        open_session_token("not-a-valid-token!!!", service_id="svcA")
-    with pytest.raises(SessionTokenError):
-        open_session_token("", service_id="svcA")
-
-
-def test_concurrent_first_resolve_yields_single_key(monkeypatch):
-    """Under the ephemeral default (no SESSION_TOKEN_SECRET), many threads all
-    hitting the very first key resolution at once must converge on ONE key.
-
-    Without the double-checked lock in ``_resolve_key`` each racing thread could
-    generate its own random key and clobber the module global, so a token sealed
-    by one thread would fail to open in another (a spurious SessionTokenError).
-    We seal in every thread and confirm each token opens under the finally
-    resolved key — i.e. all threads saw the same key.
-    """
-    import threading
-
-    monkeypatch.delenv("SESSION_TOKEN_SECRET", raising=False)
-    st._key = None
-
-    barrier = threading.Barrier(16)
-    tokens: list[str] = []
-    tokens_lock = threading.Lock()
-
-    def _worker() -> None:
-        barrier.wait()  # maximise the odds all threads race the None check together
-        tok = seal_session_token(
-            "203.0.113.7", "ja4abc", "2026-06-29T00:00:00+00:00", "2026-06-29T00:30:00+00:00", service_id="svcA"
-        )
-        with tokens_lock:
-            tokens.append(tok)
-
-    threads = [threading.Thread(target=_worker) for _ in range(16)]
+    threads = [threading.Thread(target=_worker, args=(i,)) for i in range(n)]
     for t in threads:
         t.start()
     for t in threads:
         t.join()
 
-    # Every token — regardless of which thread minted it — must open under the
-    # single surviving process key. A torn init would leave some unopenable.
-    assert len(tokens) == 16
-    for tok in tokens:
-        ip, _ja4, _start, _end = open_session_token(tok, service_id="svcA")
-        assert ip == "203.0.113.7"
 
-    st._key = None
+@pytest.fixture
+def fixed_key(monkeypatch):
+    monkeypatch.setenv("SESSION_TOKEN_SECRET", "unit-test-secret-A")
+    _st_mod._key = None
+    yield
+    _st_mod._key = None
+
+
+def _seal(ip: str = "203.0.113.7", ja4: str | None = "ja4abc", svc: str = "svcA") -> str:
+    return seal_session_token(
+        ip,
+        ja4,
+        "2026-06-29T00:00:00+00:00",
+        "2026-06-29T00:30:00+00:00",
+        service_id=svc,
+    )
+
+
+def test_session_token_round_trip_and_opacity_and_rejections(fixed_key, monkeypatch):
+    assert open_session_token(_seal(), service_id="svcA") == (
+        "203.0.113.7",
+        "ja4abc",
+        "2026-06-29T00:00:00+00:00",
+        "2026-06-29T00:30:00+00:00",
+    )
+    ip, ja4, _, _ = open_session_token(_seal(ja4=None), service_id="svcA")
+    assert ip == "203.0.113.7"
+    assert ja4 is None
+
+    tok = _seal(ip="198.51.100.23")
+    assert "198.51.100.23" not in tok
+    assert ".23" not in tok
+
+    token = _seal()
+    tampered = token[:-1] + ("A" if token[-1] != "A" else "B")
+    invalid_cases = (
+        (tampered, "svcA"),
+        (token, "svcB"),
+        ("not-a-valid-token!!!", "svcA"),
+        ("", "svcA"),
+    )
+    for bad_tok, svc in invalid_cases:
+        with pytest.raises(SessionTokenError):
+            open_session_token(bad_tok, service_id=svc)
+
+    monkeypatch.setenv("SESSION_TOKEN_SECRET", "unit-test-secret-B")
+    _st_mod._key = None
+    with pytest.raises(SessionTokenError):
+        open_session_token(token, service_id="svcA")
+
+
+def test_concurrent_first_resolve_yields_single_key(monkeypatch):
+    monkeypatch.delenv("SESSION_TOKEN_SECRET", raising=False)
+    _st_mod._key = None
+    tokens: list[str] = []
+    tokens_lock = threading.Lock()
+
+    def _seal_and_record(_idx: int) -> None:
+        tok = _seal()
+        with tokens_lock:
+            tokens.append(tok)
+
+    _run_barrier_threads(16, _seal_and_record)
+    assert len(tokens) == 16
+    assert all(open_session_token(t, service_id="svcA")[0] == "203.0.113.7" for t in tokens)
+    _st_mod._key = None

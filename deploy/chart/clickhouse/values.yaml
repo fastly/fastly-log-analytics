@@ -1,0 +1,76 @@
+shards: 1
+replicas: 1
+
+image:
+  repository: clickhouse/clickhouse-server
+  tag: "26.9.1"
+  pullPolicy: IfNotPresent
+
+auth:
+  username: fla_user
+  password: fla_password_123
+  database: fastly_log_analytics
+  existingSecret: ""
+  # Whether the application user (auth.username) may manage access (CREATE USER, GRANT, ...). It defaults to true
+  # for compatibility, so the app can provision the analyst-console identities itself. Prefer false together with
+  # provisioner.enabled: a user that can run SQL should not be able to mint users.
+  accessManagement: true
+
+# A separate account used only during backend startup to provision the per-service analyst-console identities
+# (docs/runbooks/high-scale-analyst-console.md). It holds access management plus SELECT / CREATE VIEW / DROP VIEW
+# WITH GRANT OPTION on the application database, and nothing else. Point the backend at it with
+# CLICKHOUSE_PROVISION_USER / CLICKHOUSE_PROVISION_PASSWORD. The password lives in the auth secret under
+# CLICKHOUSE_PROVISIONER_PASSWORD (add that key yourself when auth.existingSecret is used).
+provisioner:
+  enabled: false
+  username: fla_provisioner
+  password: ""
+
+keeper:
+  enabled: false
+  replicas: 3
+  image:
+    repository: clickhouse/clickhouse-keeper
+    tag: "26.9.1"
+    pullPolicy: IfNotPresent
+  persistence:
+    enabled: true
+    size: 10Gi
+    storageClass: ""
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: "1"
+      memory: 2Gi
+
+config:
+  replicatedDeduplicationWindow: 10000
+  replicatedDeduplicationWindowSeconds: 86400
+  disableSystemLogs:
+    - trace_log
+    - processors_profile_log
+  systemLogsTtl: "event_date + INTERVAL 1 DAY"
+  logger:
+    level: information
+    size: 1000M
+    count: 10
+
+persistence:
+  enabled: true
+  size: 100Gi
+  storageClass: ""
+
+resources:
+  requests:
+    cpu: "1"
+    memory: 2Gi
+  limits:
+    cpu: "2"
+    memory: 4Gi
+
+service:
+  type: ClusterIP
+  httpPort: 8123
+  tcpPort: 9000

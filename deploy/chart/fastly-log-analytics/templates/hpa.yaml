@@ -1,0 +1,38 @@
+{{/*
+There is deliberately NO backend HorizontalPodAutoscaler here.
+
+The backend serving tier cannot run more than one pod: the per-service
+DuckDB file is process-exclusive, so a second pod sharing the PVC gets
+`Could not set lock on file` and returns 503 on every data request. It is
+also not offered behind its own flag, because no value of that flag works.
+See docs/adr/18-serving-tier-single-pod.md.
+
+`autoscaling.enabled` previously gated this HPA and the worker KEDA
+ScaledObject together, so enabling worker autoscaling — the one thing that
+IS scalable — also scaled the backend to maxReplicas. It now gates worker
+autoscaling (templates/keda.yaml) and the stateless frontend below.
+*/}}
+{{- if .Values.autoscaling.enabled }}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "fastly-log-analytics.fullname" . }}-frontend
+  labels:
+    app.kubernetes.io/name: {{ include "fastly-log-analytics.name" . }}-frontend
+    helm.sh/chart: {{ include "fastly-log-analytics.chart" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "fastly-log-analytics.fullname" . }}-frontend
+  minReplicas: {{ .Values.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.autoscaling.targetCPUUtilizationPercentage }}
+{{- end }}

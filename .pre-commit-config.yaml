@@ -10,22 +10,16 @@ repos:
         args: [--fix]
       - id: ruff-format
 
-  # mypy runs via the project's own uv env (matches what CI runs) and is
-  # piped through mypy-baseline so pre-existing errors stay accepted and
-  # only NET-NEW errors fail the commit. The baseline lives in
-  # mypy-baseline.txt at the repo root; refresh it after a burndown PR with
-  #   uv run mypy backend/ 2>&1 | uv run mypy-baseline sync
-  # and commit the updated file.
+  # mypy runs via the project's own uv env (matches what CI runs).
   - repo: local
     hooks:
       - id: mypy
-        name: mypy (full backend/, filtered through mypy-baseline)
+        name: mypy (full backend/)
         language: system
         # Always check the whole backend/ tree, not just changed files —
-        # per-file mypy only visits a partial import graph, which makes
-        # mypy-baseline report unrelated baseline entries as "fixed" and
-        # exit non-zero. Cost: ~10s per commit; benefit: matches CI exactly.
-        entry: bash -c 'uv run mypy backend/ 2>&1 | uv run mypy-baseline filter'
+        # per-file mypy only visits a partial import graph.
+        # Cost: ~10s per commit; benefit: matches CI exactly.
+        entry: uv run mypy backend/
         files: '^backend/.*\.py$'
         pass_filenames: false
 
@@ -42,13 +36,24 @@ repos:
         # openapi-typescript emits openapi.json without a trailing newline;
         # end-of-file-fixer adds one, then the next regen-openapi run
         # strips it. Excluding the generated artifact breaks the cycle.
-        exclude: '^frontend/openapi\.json$'
+        # MapLibre assets are byte-for-byte copies from locked maplibre-gl/dist
+        # via frontend/package.json postinstall/dev/build, also without EOF newlines.
+        exclude: '^frontend/(openapi\.json|public/maplibre-gl-(shared|worker)\.mjs)$'
       - id: check-yaml
         # Docker Compose Override files use !reset / !override custom YAML
         # tags that PyYAML's default loader doesn't recognize. The compose
         # spec validates them at compose-time; the check-yaml hook would
-        # falsely flag them here.
-        exclude: '^docker-compose\.prod\.yml$'
+        # falsely flag them here. A dedicated syntax-only hook below checks
+        # just these known tagged Compose files without constructing objects.
+        # Helm templates are Go templates, not
+        # parseable YAML — `make deploy-validate` (helm lint/template)
+        # validates those.
+        exclude: '^(docker-compose\.(prod|admin-mtls\.prod)\.yml|deploy/chart/.*/templates/.*)$'
+      - id: check-yaml
+        alias: check-compose-tagged-yaml
+        name: Check tagged Compose YAML syntax
+        args: [--unsafe]
+        files: '^docker-compose\.(prod|admin-mtls\.prod)\.yml$'
       - id: check-json
       - id: check-merge-conflict
       - id: debug-statements

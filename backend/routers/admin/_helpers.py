@@ -1,12 +1,4 @@
-"""Shared helpers for the admin router package.
-
-Houses the streaming-zip plumbing (`_QueueFile`, `_AbortableQueue`,
-`ClientDisconnected`, `_stream_from_worker`, `_fetch_file_to_zip`) and
-the source resolver (`_resolve_source`) used by ingest + download
-endpoints.
-
-Re-exported from ``backend.routers.admin`` for external test compat.
-"""
+"""Shared helper utilities for admin router submodules."""
 
 from __future__ import annotations
 
@@ -15,13 +7,19 @@ import queue
 import zipfile
 from typing import Any
 
+from backend.utils.sse import (  # noqa: F401
+    ClientDisconnected,
+    _AbortableQueue,
+    _stream_from_worker,
+)
+
 logger = logging.getLogger(__name__)
 
 
 class _QueueFile:
     """File-like wrapper around a queue.Queue for streaming ZIP generation."""
 
-    def __init__(self, q: queue.Queue):
+    def __init__(self, q: queue.Queue[bytes | None]) -> None:
         self.q = q
         self.offset = 0
 
@@ -31,56 +29,11 @@ class _QueueFile:
         self.offset += n
         return n
 
-    def flush(self):
+    def flush(self) -> None:
         pass
 
-    def tell(self):
+    def tell(self) -> int:
         return self.offset
-
-
-class ClientDisconnected(Exception):
-    """Raised when the client disconnects during a streaming response."""
-
-    pass
-
-
-class _AbortableQueue(queue.Queue):
-    def __init__(self, maxsize=0):
-        super().__init__(maxsize)
-        self.aborted = False
-
-    def put(self, item, block=True, timeout=None):
-        if self.aborted:
-            if item is None:
-                return
-            raise ClientDisconnected("Client disconnected during streaming")
-        super().put(item, block, timeout)
-
-
-def _stream_from_worker(worker: Any) -> Any:
-    """Run *worker(q)* in a daemon thread and yield the bytes it puts into the queue."""
-    import contextvars
-    import threading
-
-    q: _AbortableQueue = _AbortableQueue(maxsize=10)
-    # Copy the request's context (process_context, _CALLS list) so any
-    # record_call() inside the worker thread lands in the same _usage_log batch.
-    ctx = contextvars.copy_context()
-    thread = threading.Thread(target=lambda: ctx.run(worker, q), daemon=True)
-    thread.start()
-    try:
-        while True:
-            chunk = q.get()
-            if chunk is None:
-                break
-            yield chunk
-    finally:
-        q.aborted = True
-        while True:
-            try:
-                q.get_nowait()
-            except queue.Empty:
-                break
 
 
 def stream_zip(
@@ -88,42 +41,22 @@ def stream_zip(
     service_name: str,
     populate: Any,
 ) -> Any:
-    """Run a streaming ZIP producer in a daemon thread.
+    """Run a streaming ZIP producer in a daemon thread."""
 
-    Shared envelope previously inlined as ``zip_worker(q)`` in every
-    download endpoint:
-      - start_call_tracking() so this worker thread owns a fresh _CALLS
-        list (the request middleware has already flushed by the time the
-        worker runs);
-      - process_context_scope(context_label) so the fsspec iothread
-        fallback isn't wiped by a concurrent scope exit on another
-        thread (see _initialize_service for context);
-      - try/except around ``populate(zf)`` catches Exception (which the
-        existing handlers RELY on to swallow ClientDisconnected and
-        keep the response stream sane);
-      - flush_usage_log(service_name) on the way out so the worker
-        thread's recorded calls land in the usage_log batch.
-
-    ``populate(zf)`` is the caller's content callback — receives an
-    already-open zipfile.ZipFile and writes entries into it. Caller
-    does not need to handle the queue or the lifecycle.
-    """
-
-    def zip_worker(q: queue.Queue):
+    def zip_worker(q: queue.Queue[bytes | None]) -> None:
+        from backend.utils.telemetry import (
+            flush_usage_log as _flush,
+        )
         from backend.utils.telemetry import (
             process_context_scope as _pcs,
         )
         from backend.utils.telemetry import (
             start_call_tracking as _sct,
         )
-        from backend.utils.usage_logger import flush_usage_log as _flush
 
         _sct()
         with _pcs(context_label):
             try:
-                # _QueueFile is a stream-shaped duck type the zipfile
-                # stubs don't recognise; cast keeps the call site
-                # type-safe at the boundary without changing runtime.
                 from typing import cast as _cast
 
                 with zipfile.ZipFile(_cast(Any, _QueueFile(q)), "w", compression=zipfile.ZIP_DEFLATED) as zf:
@@ -134,26 +67,22 @@ def stream_zip(
                 try:
                     _flush(service_name)
                 except Exception:
-                    pass
+                    logger.debug("zip_worker: _flush failed (ignored)", exc_info=True)
                 q.put(None)
 
     return _stream_from_worker(zip_worker)
 
 
 def _fetch_file_to_zip(
-    source: dict,
-    fos_client,
+    source: dict[str, Any],
+    fos_client: Any,
     cdn: str,
     key: str,
     arcname: str,
     zf: zipfile.ZipFile,
     caller: str,
 ) -> bool:
-    """Fetch a single S3 key into the zip via CDN with fallback to direct FOS.
-
-    Returns True on success. Failures are printed and return False so the
-    caller can decide whether to abort or continue with the next file.
-    """
+    """Fetch a single S3 key into the zip via CDN with fallback to direct FOS."""
     import time as _t
     import urllib.parse
     import urllib.request
@@ -193,9 +122,6 @@ def _fetch_file_to_zip(
             logger.warning("CDN fetch failed for %s, falling back to FOS", key, exc_info=True)
 
     try:
-        # fos_client MUST be from _get_fos_client() so the telemetry proxy
-        # captures this read. Don't swap in a raw boto3.client(...) — that
-        # silently drops the usage_log row.
         resp = fos_client.get_object(Bucket=source["bucket"], Key=key)
         with zf.open(arcname, "w", force_zip64=True) as dest:
             body = resp["Body"]
@@ -212,15 +138,31 @@ def _fetch_file_to_zip(
         return False
 
 
-def _resolve_source(source_name: str) -> dict:
-    from backend import config as svcconfig
-    from backend.core.duckdb import _DEFAULT_SOURCE
+def attach_debug_db_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
+    """Attach ``_debug_sqlite`` and ``_debug_postgres`` when debug responses are enabled."""
+    from backend.models.common import _debug_responses_enabled
 
-    if source_name == "default":
-        return _DEFAULT_SOURCE
-    cfg = svcconfig.load_config(source_name)
-    if cfg:
-        from backend import config as _sc
+    if _debug_responses_enabled():
+        from backend.utils.telemetry import get_sqlite_queries
 
-        return {**_DEFAULT_SOURCE, **_sc.config_to_source(cfg)}
-    return _DEFAULT_SOURCE
+        ds = list(get_sqlite_queries())
+        payload["_debug_sqlite"] = ds
+        payload["_debug_postgres"] = ds
+    return payload
+
+
+def service_id_from_source(
+    source: dict[str, Any],
+    service_id: str | None = None,
+    *,
+    prefer_name: bool = False,
+) -> str:
+    """Resolve ``service_id`` from an explicit override or the ``source`` dict."""
+    if service_id:
+        return service_id
+    if prefer_name:
+        return str(source.get("name") or source.get("service_id") or "")
+    return str(source.get("service_id") or source.get("name") or "")
+
+
+from backend.core.request_context import _resolve_source as _resolve_source

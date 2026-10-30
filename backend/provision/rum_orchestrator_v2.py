@@ -1,34 +1,44 @@
-"""Refactored RUM orchestration using declarative reconciliation (Phase 2).
-
-Instead of imperatively mutating VCL snippets, we now:
-1. Update the config file
-2. Call reconcile_vcl_state() to apply the desired state
-3. Return the result
-
-This eliminates state collisions and orphaned assets.
-"""
-
-from __future__ import annotations
+"""Single-service RUM v2 orchestrator."""
 
 import asyncio
 import datetime as _dt
+import hashlib
+import json
 import logging
 from typing import Any
 
 from backend import config as svcconfig
 from backend.core.faro_versions import DEFAULT_FARO_VERSION
-from backend.core.fastly.rum_provisioning import _assert_faro_version_safe
+from backend.core.fastly.client import (
+    SHIELD_MAP,
+    _assert_faro_version_safe,
+    generate_rum_asset_fetch_vcl,
+    generate_rum_vcl,
+)
+from backend.provision.cli import BOLD, _c, fail, info, ok, warn
 from backend.provision.declarative.reconciler import reconcile_vcl_state
-from backend.provision.fos_setup import ensure_fos_bucket  # noqa: F401
-from backend.provision.rum_assets import cleanup_old_faro_versions, download_and_upload_faro, upload_rum_tracker_js
-from backend.provision.utils import BOLD, _c, fail, info, ok, warn
+from backend.provision.rum_assets import (
+    cleanup_old_faro_versions,
+    download_and_upload_faro,
+    upload_rum_tracker_js,
+)
 
 logger = logging.getLogger(__name__)
-
 
 # RUM custom-field definitions the orchestrator adds/removes when enabling/disabling.
 # Kept as a single source of truth so disable_rum can find them by name to undo cleanly.
 _RUM_CUSTOM_FIELDS: list[dict[str, Any]] = [
+    {
+        "name": "service_id",
+        "label": "Service ID",
+        "description": "Fastly Service ID handling the request.",
+        "vcl_log_expression": "req.service_id",
+        "collection_stage": "beacon",
+        "duckdb_type": "VARCHAR",
+        "value_type": "string",
+        "bytes_estimate": 22,
+        "enabled": True,
+    },
     {
         "name": "rum_cid",
         "label": "RUM Session ID",
@@ -226,18 +236,6 @@ _RUM_CUSTOM_FIELDS: list[dict[str, Any]] = [
 _RUM_FIELD_NAMES = {cf["name"] for cf in _RUM_CUSTOM_FIELDS}
 
 
-def merge_rum_custom_fields(custom_fields: list[dict] | None) -> list[dict]:
-    """Return ``custom_fields`` with the canonical RUM fields re-applied.
-
-    Drops any existing entries whose name collides with a RUM field, then
-    appends fresh copies of ``_RUM_CUSTOM_FIELDS`` (code is the source of truth).
-    """
-    if not isinstance(custom_fields, list):
-        custom_fields = []
-    kept = [cf for cf in custom_fields if isinstance(cf, dict) and cf.get("name") not in _RUM_FIELD_NAMES]
-    return kept + [dict(cf) for cf in _RUM_CUSTOM_FIELDS]
-
-
 def rum_vcl_fingerprint(logging_service_id: str, cfg: dict[str, Any] | None = None) -> str:
     """Content hash of the RUM VCL the current generator produces for this service.
 
@@ -264,53 +262,17 @@ def rum_vcl_fingerprint(logging_service_id: str, cfg: dict[str, Any] | None = No
             just want "what would today's generator produce for this
             service's current on-disk config" (e.g. ``/rum/status``) omit it.
     """
-    import hashlib
-    import json
-
-    from backend.core.fastly.rum_provisioning import generate_rum_asset_fetch_vcl, generate_rum_vcl
-
     if cfg is None:
         cfg = svcconfig.load_config(logging_service_id) or {}
     rum_raw = cfg.get("rum")
     rum_cfg = rum_raw if isinstance(rum_raw, dict) else {}
     faro_version = rum_cfg.get("faro_version")
 
-    shield_pop = cfg.get("cdn_shield") or ""
-    if not shield_pop:
-        from backend.core.fastly.utils import SHIELD_MAP
-
-        shield_pop = SHIELD_MAP.get(cfg.get("fos_region", "us-east-1"), "iad-va-us")
-
-    snippets = generate_rum_vcl(logging_service_id, faro_version)
-    snippets.update(generate_rum_asset_fetch_vcl(shield_pop, faro_version))
-    return hashlib.sha256(json.dumps(snippets, sort_keys=True).encode()).hexdigest()
-
-
-def legacy_rum_vcl_fingerprint(logging_service_id: str) -> str:
-    """Reproduce the pre-F-4 ``rum_vcl_fingerprint`` algorithm.
-
-    Used purely to migrate a ``rum_vcl_sha`` stored before the F-4 fix
-    (#2 audit finding on top of F-4): the old algorithm hashed only the
-    Phase 1 (recv beacon + deliver cookie) snippets and never passed
-    ``faro_version`` into the generator (it always used the implicit
-    default, ``None``) — so for a given ``logging_service_id`` it produces
-    the SAME hash regardless of the actual pinned Faro version or shield
-    config. Every service enabled/upgraded before F-4 shipped has this
-    stale, permanently-non-matching value sitting in ``rum_vcl_sha``, which
-    would otherwise false-positive ``vcl_drift`` forever — including
-    immediately after a correct reconcile — since the new algorithm's
-    output can never equal it again.
-
-    ``/rum/status`` uses this to recognize "this stored sha predates F-4"
-    (an exact match, not a heuristic) and migrate it to the current
-    algorithm's output instead of reporting permanent false drift.
-    """
-    import hashlib
-    import json
-
-    from backend.core.fastly.rum_provisioning import generate_rum_vcl
-
-    snippets = generate_rum_vcl(logging_service_id)
+    shield_pop = cfg.get("cdn_shield") or SHIELD_MAP.get(cfg.get("fos_region", "us-east-1"), "iad-va-us")
+    snippets = {
+        **generate_rum_vcl(logging_service_id, faro_version),
+        **generate_rum_asset_fetch_vcl(shield_pop, faro_version),
+    }
     return hashlib.sha256(json.dumps(snippets, sort_keys=True).encode()).hexdigest()
 
 
@@ -324,6 +286,24 @@ def _set_faro_version(cfg: dict[str, Any], version: str | None) -> None:
     cfg["rum"] = rum_cfg
 
 
+_FARO_PIN_KEYS = ("faro_version", "faro_content_hash", "faro_fos_etag_md5")
+
+
+def _restore_faro_pin(cfg: dict[str, Any], previous_rum_cfg: dict[str, Any]) -> None:
+    """Put back only the Faro pin keys (``_FARO_PIN_KEYS``) from ``previous_rum_cfg``, in place.
+
+    The other ``cfg["rum"]`` keys (notably the write-once ``cid_salt``) belong to other writers
+    and are left exactly as found.
+    """
+    rum_cfg = dict(cfg.get("rum") or {})
+    for key in _FARO_PIN_KEYS:
+        if key in previous_rum_cfg:
+            rum_cfg[key] = previous_rum_cfg[key]
+        else:
+            rum_cfg.pop(key, None)
+    cfg["rum"] = rum_cfg
+
+
 def _purge_faro_surrogate_key(logging_service_id: str, token: str) -> None:
     """Fire-and-forget surrogate-key purge on the logging service after a Faro bundle upload.
 
@@ -334,9 +314,7 @@ def _purge_faro_surrogate_key(logging_service_id: str, token: str) -> None:
     which is deployed to the instrumented *logging* service by
     ``reconcile_vcl_state(logging_service_id, ...)`` — it never exists on
     the CDN service, so a purge targeting the CDN service can never match
-    anything. This mirrors (and previously miscopied) the CDN-purge
-    precedent in ``backend.core.iceberg._core._purge_surrogate_key``, where
-    the CDN service IS the correct target for a different, unrelated key.
+    anything.
 
     Deliberately duplicated (not imported) from
     ``backend.cron.jobs.rum_sync._faro_purge_surrogate_key`` — provision code
@@ -464,9 +442,7 @@ def enable_rum(
 
     # Step 3: Update config to enable RUM (+ pin faro_version if given)
     previous_rum_cfg = dict(cfg.get("rum") or {})
-
-    cfg["rum_enabled"] = True
-    cfg["rum_enabled_at"] = _dt.datetime.now(_dt.UTC).isoformat()
+    enabled_at = _dt.datetime.now(_dt.UTC).isoformat()
 
     # Persist the pinned version BEFORE reconciling so the generator (which
     # reads cfg["rum"]["faro_version"]) sees it. If anything below fails, the
@@ -474,32 +450,30 @@ def enable_rum(
     # version that isn't actually deployed. Always pinned now — there is no
     # more "enabled but unpinned" state, since the tracker's unconditional
     # /js/faro-sdk.js load requires a bundle to always be behind that path.
-    _set_faro_version(cfg, resolved_faro_version)
+    def _apply_enable(target: dict[str, Any]) -> None:
+        target["rum_enabled"] = True
+        target["rum_enabled_at"] = enabled_at
+        _set_faro_version(target, resolved_faro_version)
+        # Computed AFTER faro_version is set above: rum_vcl_fingerprint's hash
+        # depends on the pinned version (F-4 fix), so it must be derived from
+        # the state about to be deployed, not a read from before the version was set.
+        target["rum_vcl_sha"] = rum_vcl_fingerprint(logging_service_id, target)
 
-    # Computed AFTER faro_version is set above: rum_vcl_fingerprint's hash
-    # depends on the pinned version (F-4 fix), so it must be derived from
-    # THIS in-memory cfg (not a stale on-disk read from before the version
-    # was set) to reflect the state about to be deployed.
-    cfg["rum_vcl_sha"] = rum_vcl_fingerprint(logging_service_id, cfg)
-
-    # Save updated config
-    svcconfig.save_config(logging_service_id, cfg)
+    # Only the keys this flow owns are written, on a fresh read under the config lock.
+    if svcconfig.mutate_config(logging_service_id, _apply_enable) is None:
+        raise RuntimeError(f"No config found for logging service {logging_service_id}")
     ok("Config updated: rum_enabled=True, rum_vcl_sha saved")
 
     def _rollback_config() -> None:
-        # Reload from disk first (mirrors upgrade_faro_version's rollback):
-        # a step between here and the save above (e.g. download_and_upload_faro)
-        # may have written its own config changes that the stale in-memory
-        # `cfg` wouldn't reflect. Mutate `cfg` in place (rather than rebind it)
-        # so its declared type stays non-Optional for mypy's benefit.
-        latest = svcconfig.load_config(logging_service_id)
-        if latest is not None:
-            cfg.clear()
-            cfg.update(latest)
-        cfg["rum_enabled"] = False
-        cfg.pop("rum_vcl_sha", None)
-        cfg["rum"] = dict(previous_rum_cfg)
-        svcconfig.save_config(logging_service_id, cfg)
+        # Undo only what _apply_enable wrote. A step between the save above and here
+        # (download_and_upload_faro) or a concurrent writer may have changed other
+        # keys, which a whole-config restore would erase.
+        def _undo(target: dict[str, Any]) -> None:
+            target["rum_enabled"] = False
+            target.pop("rum_vcl_sha", None)
+            _restore_faro_pin(target, previous_rum_cfg)
+
+        svcconfig.mutate_config(logging_service_id, _undo)
 
     # Step 4: Upload the pinned Faro Web SDK bundle to FOS (blocks RUM enable
     # if it fails) so the VCL the reconciler is about to deploy routes
@@ -569,7 +543,7 @@ def enable_rum(
 
     return {
         "logging_service_active_version": result.activated_version or result.draft_version,
-        "enabled_at": cfg.get("rum_enabled_at", ""),
+        "enabled_at": enabled_at,
         "activated": result.activated_version is not None,
     }
 
@@ -656,9 +630,7 @@ def upgrade_faro_version(
         # config must not claim a version whose VCL isn't actually deployed.
         # Restore the whole previous rum block (not just faro_version) so a
         # stale faro_content_hash from the failed upgrade can't linger either.
-        cfg = svcconfig.load_config(logging_service_id) or cfg
-        cfg["rum"] = dict(previous_rum_cfg)
-        svcconfig.save_config(logging_service_id, cfg)
+        svcconfig.mutate_config(logging_service_id, lambda target: _restore_faro_pin(target, previous_rum_cfg))
         fail(f"Reconciliation failed: {e}")
         raise
 
@@ -679,9 +651,11 @@ def upgrade_faro_version(
     # cleanup below (F-6): with activate=False the live VCL still serves the
     # old version, so the stored fingerprint must keep reflecting that.
     if result.activated_version is not None:
-        cfg = svcconfig.load_config(logging_service_id) or cfg
-        cfg["rum_vcl_sha"] = rum_vcl_fingerprint(logging_service_id, cfg)
-        svcconfig.save_config(logging_service_id, cfg)
+
+        def _refresh_sha(target: dict[str, Any]) -> None:
+            target["rum_vcl_sha"] = rum_vcl_fingerprint(logging_service_id, target)
+
+        svcconfig.mutate_config(logging_service_id, _refresh_sha)
 
     # Step 3: Best-effort purge of the cached bundle so the edge stops
     # serving the old version. A purge failure is a warning, never an
@@ -760,9 +734,11 @@ def disable_rum(
         }
 
     # Step 2: Update config to disable RUM
-    cfg["rum_enabled"] = False
-    cfg.pop("rum_vcl_sha", None)
-    svcconfig.save_config(logging_service_id, cfg)
+    def _apply_disable(target: dict[str, Any]) -> None:
+        target["rum_enabled"] = False
+        target.pop("rum_vcl_sha", None)
+
+    svcconfig.mutate_config(logging_service_id, _apply_disable)
     ok("Config updated: rum_enabled=False, rum_vcl_sha cleared")
 
     # Step 3: Delete JS from FOS (NON-BLOCKING)
@@ -787,10 +763,12 @@ def disable_rum(
     try:
         result = reconcile_vcl_state(logging_service_id, token, dry_run=False, status_cb=status_cb, activate=activate)
     except Exception as e:
-        # Rollback config
-        cfg["rum_enabled"] = True
-        cfg["rum_vcl_sha"] = rum_vcl_fingerprint(logging_service_id, cfg)
-        svcconfig.save_config(logging_service_id, cfg)
+        # Rollback only the keys _apply_disable wrote
+        def _undo_disable(target: dict[str, Any]) -> None:
+            target["rum_enabled"] = True
+            target["rum_vcl_sha"] = rum_vcl_fingerprint(logging_service_id, target)
+
+        svcconfig.mutate_config(logging_service_id, _undo_disable)
         fail(f"Reconciliation failed: {e}")
         raise
 
@@ -812,7 +790,7 @@ def disable_rum(
             from backend.provision.fos_setup import delete_fos_prefix
 
             prefix = cfg.get("fos_prefix", "")
-            rum_prefix = f"{prefix.strip('/')}/rum/raw/" if prefix else "rum/raw/"
+            rum_prefix = f"{prefix.strip('/')}/raw/rum/" if prefix else "raw/rum/"
             if status_cb:
                 status_cb("⏳ Deleting RUM cloud files...")
             delete_fos_prefix(
@@ -856,38 +834,4 @@ def disable_rum(
     return {
         "logging_service_active_version": result.activated_version or result.draft_version,
         "deactivated": result.activated_version is not None,
-    }
-
-
-def get_rum_status(logging_service_id: str, token: str) -> dict[str, Any]:
-    """Get RUM status for a logging service.
-
-    Checks if RUM is enabled in config and detects any drift from Fastly.
-
-    Args:
-        logging_service_id: Fastly service ID.
-        token: Fastly API token.
-
-    Returns:
-        {
-            "enabled": bool (in config),
-            "enabled_at": str (ISO timestamp, or empty),
-            "last_activated_version": int,
-            "drift_detected": bool (config != Fastly),
-        }
-    """
-    cfg = svcconfig.load_config(logging_service_id)
-    if not cfg:
-        return {
-            "enabled": False,
-            "enabled_at": "",
-            "last_activated_version": None,
-            "drift_detected": False,
-        }
-
-    return {
-        "enabled": cfg.get("rum_enabled", False),
-        "enabled_at": cfg.get("rum_enabled_at", ""),
-        "last_activated_version": cfg.get("last_activated_version"),
-        "drift_detected": False,  # TODO: Implement drift detection
     }

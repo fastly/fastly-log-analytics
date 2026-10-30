@@ -1,0 +1,46 @@
+# Namespace-private single-replica diagnostic receiver. No metrics-generator.
+server:
+  http_listen_port: 3200
+  grpc_listen_address: 127.0.0.1
+  grpc_listen_port: 9095
+memberlist:
+  bind_addr: ["127.0.0.1"]
+  advertise_addr: 127.0.0.1
+usage_report:
+  reporting_enabled: false
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        http:
+          endpoint: 0.0.0.0:4318
+ingester:
+  lifecycler:
+    address: 127.0.0.1
+    ring:
+      kvstore:
+        store: inmemory
+      replication_factor: 1
+  max_block_bytes: 10485760
+  max_block_duration: 5m
+compactor:
+  compaction:
+    block_retention: 24h
+storage:
+  trace:
+    backend: local
+    local:
+      path: /var/tempo/blocks
+    wal:
+      path: /var/tempo/wal
+    pool:
+      max_workers: 4
+      queue_depth: 100
+overrides:
+  defaults:
+    ingestion:
+      rate_limit_bytes: 1000000
+      burst_size_bytes: 2000000
+      max_traces_per_user: 1000
+    global:
+      max_bytes_per_trace: 1000000

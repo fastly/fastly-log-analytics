@@ -1,7 +1,10 @@
 # ADR-03 — Tenancy
 
-**Status:** Accepted (Phase 0)
-**Decided by:** v2.0 cleanup planning
+**Status:** Accepted (tenancy rules); storage references superseded by [ADR-14](14-ducklake-replacement.md)
+
+> [!NOTE]
+> The Iceberg/PyIceberg references below describe the earlier design. Storage is DuckLake ([ADR-14](14-ducklake-replacement.md)); `backend/core/iceberg/` (removed) was replaced by `backend/core/storage/`.
+**Decided by:** Engineering retrospective
 **Supersedes:** the "tenancy is whatever each route remembered to enforce" pattern
 
 ## Context
@@ -43,7 +46,7 @@ Phase 6 splits the pool: API requests use the read pool; cron jobs use a dedicat
 
 - Phase 2 (RequestContext) and Phase 6 (cron isolation) jointly close the tenancy gap.
 - The `_read_only` private-attribute trick is structurally eliminated by ADR-02; this ADR makes its security guarantee load-bearing in a different way.
-- `tests/routers/test_cross_tenant_scope.py` keeps every existing assertion and gets new ones tagged `@pytest.mark.security_regression`.
+- `tests/routers/test_cross_tenant_scope.py` (test removed) keeps every existing assertion and gets new ones tagged `@pytest.mark.security_regression`.
 - Per-service slug-named views (e.g., per-tenant rollup view identifiers) get reviewed in Phase 4 carve-up to confirm identifier collisions can't become tenancy bugs (UUIDs or service-id hashes instead of slugs).
 - The security-regression count baseline (Phase 0.8, originally derived from the since-removed `audit-findings/` folder) protects the 24 verified fixes against silent regression during refactor.
 

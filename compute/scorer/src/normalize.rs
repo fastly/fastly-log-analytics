@@ -69,7 +69,7 @@ const CATEGORY_MAP: &[(&str, &str)] = &[
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Route {
     pub path: String,
-    pub category: String,
+    pub category: &'static str,
 }
 
 fn strip_query(url: &str) -> &str {
@@ -150,9 +150,8 @@ fn looks_like_id(segment: &str) -> bool {
 }
 
 fn category_for(first_segment: &str) -> &'static str {
-    let lower = first_segment.to_ascii_lowercase();
     for (k, v) in CATEGORY_MAP {
-        if *k == lower {
+        if k.eq_ignore_ascii_case(first_segment) {
             return v;
         }
     }
@@ -273,7 +272,7 @@ pub fn normalize(url: &str) -> Route {
     if decoded.is_empty() || decoded == "/" {
         return Route {
             path: "/".to_string(),
-            category: "home".to_string(),
+            category: "home",
         };
     }
     // posixpath.normpath equivalent: collapse `.`, `..`, and empty segments on
@@ -292,7 +291,7 @@ pub fn normalize(url: &str) -> Route {
     if norm_segments.is_empty() {
         return Route {
             path: "/".to_string(),
-            category: "home".to_string(),
+            category: "home",
         };
     }
 
@@ -311,7 +310,7 @@ pub fn normalize(url: &str) -> Route {
         })
         .collect();
     let canonical = format!("/{}", normalized.join("/"));
-    let category = category_for(&raw_segments[0]).to_string();
+    let category = category_for(&raw_segments[0]);
     Route {
         path: canonical,
         category,

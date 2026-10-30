@@ -1,34 +1,70 @@
 import React from 'react'
 import { SystemHealthCard } from "@/components/SystemHealthCard"
-import { PageHeader } from '@/components/ui/page-header'
+import { PageHeader } from '@/components/ui/confirm-dialog'
 
-import { ServicesTable } from './_sections/ServicesTable'
-import { GlobalSettings, PricingSettings } from './_sections/GlobalSettings'
-import { OperationsOverview } from './_sections/OperationsOverview'
-import { QuarantineSection } from './_sections/QuarantineSection'
-import { AdminPrefetchLinks } from './AdminPrefetchLinks'
+import { OperationsOverview, AdminPrefetchLinks, ServicesTable, GlobalSettings, PricingSettings } from './_sections/OperationsOverview'
+import { QuarantineSection } from '@/app/control-room/_sections/ControlRoomClient'
+
+export const dynamic = 'force-dynamic'
 
 export default function AdminPage() {
+  const rawMode = (process.env.DEPLOYMENT_MODE || '').trim().toLowerCase()
+  const isHighScale =
+    rawMode === 'standard'
+      ? false
+      : rawMode === 'high_scale' ||
+        ['1', 'true', 'yes', 'on'].includes((process.env.HIGH_SCALE_ENABLED || '').trim().toLowerCase())
+
   return (
-    <div className="space-y-6">
+    <div className="space-y-6" data-testid="admin-overview-root">
       <PageHeader
         title="Admin"
         description="Manage your global settings, Fastly services, and log ingestion pipelines."
       >
-        <AdminPrefetchLinks />
+        <AdminPrefetchLinks isHighScale={isHighScale} />
       </PageHeader>
 
-      <OperationsOverview />
+      <div
+        data-testid="admin-operations-reservation"
+        className="min-h-[108px] [contain-intrinsic-size:auto_108px]"
+      >
+        <OperationsOverview />
+      </div>
 
-      <ServicesTable />
+      <div
+        data-testid="admin-services-reservation"
+        className="min-h-[296px] [contain-intrinsic-size:auto_296px]"
+      >
+        <ServicesTable />
+      </div>
 
-      <SystemHealthCard />
+      <div
+        data-testid="admin-health-reservation"
+        className="min-h-[280px] [contain-intrinsic-size:auto_280px]"
+      >
+        <SystemHealthCard />
+      </div>
 
-      <QuarantineSection />
+      <div
+        data-testid="admin-quarantine-reservation"
+        className="min-h-[120px] [contain-intrinsic-size:auto_120px]"
+      >
+        <QuarantineSection />
+      </div>
 
-      <GlobalSettings />
+      <div
+        data-testid="admin-global-settings-reservation"
+        className="min-h-[240px] [contain-intrinsic-size:auto_240px]"
+      >
+        <GlobalSettings />
+      </div>
 
-      <PricingSettings />
+      <div
+        data-testid="admin-pricing-reservation"
+        className="min-h-[220px] [contain-intrinsic-size:auto_220px]"
+      >
+        <PricingSettings />
+      </div>
     </div>
   )
 }

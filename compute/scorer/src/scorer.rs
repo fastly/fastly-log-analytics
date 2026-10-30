@@ -360,10 +360,10 @@ mod tests {
         }
     }
 
-    fn r(path: &str, category: &str) -> Route {
+    fn r(path: &str, category: &'static str) -> Route {
         Route {
             path: path.to_string(),
-            category: category.to_string(),
+            category,
         }
     }
 

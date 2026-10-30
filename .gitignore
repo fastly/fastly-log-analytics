@@ -1,4 +1,5 @@
 .env
+.env.deploy.local
 setup-state.json
 *.duckdb
 *.duckdb.wal
@@ -8,6 +9,7 @@ setup-state.json
 # ignored by the blanket rule above.
 !/configs/.gitkeep
 /data/*
+!/data/.gitkeep
 /data/system/*
 __pycache__/
 *.pyc
@@ -18,11 +20,15 @@ dist/
 *.log
 *.cron.lock
 /cache/*
-.claude/*
+!/cache/.gitkeep
+.claude/
+.agents/
+.trail/
 gemini.md
 SYSTEM.md
 DEPLOYMENT.md
 local-docs/*
+pending-docs/*
 .superpowers/
 docs/superpowers/
 docs/plans/
@@ -48,10 +54,14 @@ node_modules/
 .swival/
 /audit-findings/
 
+# ChatGPT
+.codex/
+
 # Ad-hoc debug screenshots dropped at the repo root by browser-driven
 # verification sessions. Intentional docs/assets/*.png are tracked; these
 # root-level ones are throwaway.
 /test_*.png
+/screenshot.png
 
 # Ad-hoc lint/test output dumps
 frontend/*_out.txt
@@ -78,34 +88,22 @@ compute/scorer/matrix_*.json
 # Rust build artifacts.
 compute/scorer/target/
 compute/scorer/bin/
-# Ignore the pkg build dir EXCEPT the committed, matrix-less Wasm package the
-# backend ships in its image and deploys via the Fastly API (no toolchain on
-# the VM). Rebuild with `make scorer-package` and recommit on scorer changes.
-compute/scorer/pkg/*
-!compute/scorer/pkg/session-scorer.tar.gz
+compute/scorer/pkg/
 
 # Per-deployment secrets: AES cookie keys, deploy-time IDs the service files
 # might reference. NEVER commit.
 .scoring/
 .aider*
 
-# Snapshot of the GCE VM's restart script — drift-prone copy that also
-# leaks VM name/zone/mount paths. The canonical version lives on the VM
-# at ~/restart.sh; this local copy is for reference only.
+# Local operator script snapshots (never committed).
 /scripts/restart.sh.deployed
 
-# Ad-hoc working directory for local profiling — HAR captures, per-page JSON
-# summaries, query trace dumps. The reusable harness scripts (profile.js,
-# split_per_page.py) live here for now; treat the whole tree as throwaway.
+# Local profiling and performance-audit working directories.
 /scratch/
-
-# Performance-audit campaign artifacts: HAR captures, per-sample telemetry,
-# aggregated p50/p95/p99 summaries, per-page reports + improvement plans.
-# Throwaway — regenerable by re-running scratch/perf_audit.mjs.
 /performance-report/
 
 # Architectural baseline-metrics snapshots from scripts/baseline_metrics.sh
-# (make baseline). Generated, throwaway — regenerable any time.
+# (make baseline).
 /.metrics/
 
 # Local-only VS Code config (file-watcher / Pylance excludes for the
@@ -120,3 +118,31 @@ compute/scorer/pkg/*
 # Separate Next.js dev cache for the Playwright dev server (port 13004)
 # so its lockfile doesn't collide with the dev shell on 13002.
 /frontend/.next-e2e/
+frontend/tsconfig.tsbuildinfo
+
+# editor/backup debris
+*.bak
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/
+configs-hs/
+/scripts/dev/deploy_test_all.sh
+/reports/
+
+# Per-developer agent tooling (untracked; see AGENTS.md / CLAUDE.md for shared instructions)
+/.mcp.json
+/.ignore
+/.github/copilot-instructions.md
+/Current_Project_State_and_Current_Goals.md
+
+# Playwright output when e2e is run from the repo root
+/test-results/
+/artifacts/
+.tmp/
+.playwright-cli/
+/.streaming-test-artifacts
+
+# pytest-benchmark default output dir
+.benchmarks/
+# stray DuckLake test artifact dir
+catalog_test.db.files/

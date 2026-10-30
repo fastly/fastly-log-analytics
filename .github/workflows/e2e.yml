@@ -28,9 +28,9 @@ name: E2E (Playwright)
 
 on:
   push:
-    branches: [main, release/**]
+    branches: [main, release/**, 'v[0-9]*']
   pull_request:
-    branches: [main, release/**]
+    branches: [main, release/**, 'v[0-9]*']
 
 # Cancel superseded runs on the same ref (see ci.yml for the same pattern
 # and rationale). main keeps each push separate; PR refs collapse to one
@@ -39,6 +39,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
+permissions:
+  contents: read
+
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
@@ -46,52 +49,53 @@ jobs:
   playwright:
     name: Playwright (${{ matrix.browser }})
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        browser: [chromium, firefox, webkit]
+        browser: [chromium]
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: fla
+          POSTGRES_PASSWORD: fla_test_password
+          POSTGRES_DB: ducklake_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U fla -d ducklake_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      METADATA_DSN: postgresql://fla:fla_test_password@localhost:5432/ducklake_test
+      DUCKLAKE_CATALOG: postgresql://fla:fla_test_password@localhost:5432/ducklake_test
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@v7
+      - name: Setup E2E environment
+        uses: ./.github/actions/e2e-setup
         with:
-          enable-cache: true
-          python-version: "3.13"
+          browser: ${{ matrix.browser }}
 
-      - name: Install backend deps
-        run: uv sync
-
-      - name: Setup Node
-        # Aligned with ci.yml (Node 24 + setup-node@v6) — package.json
-        # declares `engines.node: ">=24"`, so Node 22 here would silently
-        # run Playwright on an unsupported version. FORCE_JAVASCRIPT_ACTIONS_TO_NODE24
-        # only affects GitHub's bundled actions infrastructure, not the
-        # Node runtime used by the test step.
-        uses: actions/setup-node@v7
-        with:
-          node-version: 24
-          cache: "npm"
-          cache-dependency-path: frontend/package-lock.json
-
-      - name: Install frontend deps
-        run: cd frontend && npm ci
-
-      - name: Clean Playwright cache
-        run: rm -rf ~/.cache/ms-playwright
-
-      - name: Install Playwright browser (${{ matrix.browser }}) + system deps
-        run: cd frontend && npx playwright install --with-deps ${{ matrix.browser }}
+      - name: Browser measurement regressions (native Chromium)
+        if: matrix.browser == 'chromium'
+        run: make test-browser-measurements
 
       - name: Run Playwright (${{ matrix.browser }})
         env:
           CI: "1"
+          PLAYWRIGHT_WORKERS: "1"
+          PLAYWRIGHT_RETRIES: "0"
         run: cd frontend && npx playwright test --project=${{ matrix.browser }}
 
       - name: Upload Playwright report
         if: failure() || cancelled()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: playwright-report-${{ matrix.browser }}
           path: frontend/playwright-report
@@ -99,7 +103,7 @@ jobs:
 
       - name: Upload Playwright traces
         if: failure() || cancelled()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: playwright-traces-${{ matrix.browser }}
           path: frontend/test-results

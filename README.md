@@ -1,10 +1,13 @@
 # Fastly Log Analytics
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+![Version: 3.0.0-rc1](https://img.shields.io/badge/version-3.0.0--rc1-blue.svg)
 
 A self-hosted dashboard for searching, filtering, and visualizing request-level Fastly logs streamed to [Fastly Object Storage](https://www.fastly.com/documentation/guides/platform/object-storage/working-with-object-storage/).
 
 Fastly's [historical stats](https://www.fastly.com/documentation/reference/api/metrics-stats/historical-stats/) give you aggregates. When you need to drill into individual requests — by IP, URL, status, WAF signal, or any field you log — Fastly's [real-time log streaming](https://www.fastly.com/documentation/guides/integrations/streaming-logs/about-fastlys-realtime-log-streaming-features/) makes the raw data available, but you still need somewhere to put it and something to query it with. This project fills that gap using only Fastly products. Costs are limited to Fastly Object Storage [class operations](https://www.fastly.com/documentation/guides/platform/object-storage/working-with-object-storage/#using-the-s3-compatible-api) and [storage](https://docs.fastly.com/products/object-storage#billing) — no third-party logging vendor required.
+
+> **Coming from v2?** There is no upgrade path. Tear down your services on v2, install v3 fresh, and re-provision (see [docs/MIGRATION_v3.0.0_GUIDE.md](docs/MIGRATION_v3.0.0_GUIDE.md)). This is a release candidate (3.0.0-rc1).
 
 ### 📺 Watch the install walkthrough
 
@@ -21,7 +24,7 @@ You'll need:
 - A **Fastly account** with permission to create [services](https://www.fastly.com/documentation/guides/getting-started/services/about-services/) and Object Storage buckets
 - **Object Storage enabled** on the account — it's a separately activated product, not on by default
 - At least one **VCL service** to stream logs from
-- **Docker** (recommended) — or Python 3.12+ and Node.js 24+ for a manual install
+- **Docker** (recommended) — or Python 3.12+, Node.js 24+ and a **PostgreSQL 16** server for a manual install
 - *Optional:* a Fastly API token with the **Billing** permission to power the [Usage & Cost page](docs/features.md#usage--cost-page)
 - *Optional:* [`falco`](https://github.com/ysugimoto/falco) to validate VCL during provisioning (highly recommended; the app degrades gracefully without it)
 - *Optional:* **Rust 1.90+** with the `wasm32-wasip1` target (`rustup target add wasm32-wasip1`) — only needed if you plan to rebuild the [Session Scoring](docs/session_scoring_runbook.md) Compute Wasm scorer from source
@@ -30,13 +33,32 @@ You'll need:
 
 ## Server Specifications
 
-When running as a shared server (Path B), the host machine should meet these minimums:
+When running as a shared server (remote sharing), the host machine should meet these minimums:
 
 - **RAM:** 16 GB
 - **CPU:** 2 vCPUs
-- **Disk:** 40 GB minimum — the Next.js build alone needs ~1 GB and the Iceberg cache grows with log volume; 25 GB is sufficient for light use but can fill during `next build`
+- **Disk:** 40 GB minimum — the Next.js build alone needs ~1 GB and the local DuckLake data and cache grow with log volume; 25 GB is sufficient for light use but can fill during `next build`
 - **Swap:** 4 GB minimum, 8 GB preferred — the backend holds large DuckDB query buffers in memory; swap prevents OOM kills during peak analytical load
-- **Open file descriptors:** set the host (and Docker) `nofile` limit to at least 65536 — DuckDB parallel Iceberg scans open one file descriptor per Parquet file; the default Docker limit (~1024) causes `Too many open files` errors on large services. The production overlay (`docker-compose.prod.yml`) sets this automatically.
+- **Open file descriptors:** set the host (and Docker) `nofile` limit to at least 65536 — DuckDB parallel DuckLake scans open one file descriptor per Parquet file; the default Docker limit (~1024) causes `Too many open files` errors on large services. The production overlay (`docker-compose.prod.yml`) sets this automatically.
+
+---
+
+## Deployment Architectures & Throughput Sizing
+
+Fastly Log Analytics supports two primary deployment topologies sized for different log volumes:
+
+| Architecture | Intended Log Throughput | Backend Engine | Ingest Topology | Best For |
+|---|---|---|---|---|
+| **Standard Architecture** | **Up to 5,000 – 10,000 logged RPS** | DuckDB + DuckLake | Synchronous APScheduler crons + single-VM buffer | Single-instance VM or Docker Compose deployments, dev/staging environments, or moderate production services |
+| **High-Scale Architecture** | **50,000 sustained logged RPS** *(burst to 100,000+ RPS)* | ClickHouse | Distributed Celery workers + PostgreSQL Ingest Ledger | Kubernetes clusters, multi-container deployments, and high-volume enterprise services |
+
+> [!NOTE]
+> **Edge Traffic vs. Logged Throughput:**
+> Sizing figures represent the volume of **logged records streamed to Fastly Object Storage**, *not* your service's total CDN edge traffic. Fastly services handling tens or hundreds of thousands of edge requests per second can comfortably use either architecture by leveraging Fastly VCL log conditions:
+> - **Sampling:** Stream 1-in-10 (`randombool(1, 10)`) or 1-in-50 requests for statistical sampling of high-volume traffic.
+> - **Conditional Logging:** Log only requests meeting specific criteria (e.g., HTTP errors `resp.status >= 400`, backend origin fetches, requests with origin latency above a threshold, or security/WAF events).
+>
+> As performance optimizations continue to evolve, these throughput guidelines will be updated with each release.
 
 ---
 
@@ -50,6 +72,8 @@ docker compose up --build
 
 > Requires Docker Compose v2 (the `docker compose` subcommand). The standalone `docker-compose` v1 binary reached end-of-life in 2023 and isn't shipped with current Docker installs.
 
+This local stack includes PostgreSQL 16 and is meant for evaluation and development. Production deployments use `docker-compose.yml` plus the `docker-compose.prod.yml` overlay rather than a plain `docker compose up` (see [docs/deploy/](docs/deploy/README.md)).
+
 Open **http://localhost** and follow the provisioning wizard. The wizard creates your Object Storage bucket, access keys, a CDN-fronting service, and the logging endpoint on the VCL service you select.
 
 > The stack is fronted by Caddy on port **80** (a single ingress, mirroring production). A friendlier alias **http://fastly.localhost** works with no setup — browsers resolve `*.localhost` to `127.0.0.1`. For a custom name like **http://fastly.analytics**, add `127.0.0.1 fastly.analytics` to your hosts file.
@@ -60,43 +84,24 @@ For manual install (no Docker), see [Manual Installation](#manual-installation).
 
 ## How It Works
 
-The **admin** runs the provisioning wizard to set up a Fastly Object Storage bucket, deploy a CDN-fronting service for cheap log reads, and attach a structured JSON logging endpoint to a chosen VCL service. Once that's in place, the app continuously ingests new `.gz` log files from the bucket into an Apache Iceberg table.
+The **admin** runs the provisioning wizard to set up a Fastly Object Storage bucket, deploy a CDN-fronting service for cheap log reads, and attach a structured JSON logging endpoint to a chosen VCL service. Once that's in place, the app continuously ingests new `.gz` log files from the bucket into a DuckLake table.
 
 ![Provisioning Process](docs/assets/provisioning.png)
 
 ![ETL Process](docs/assets/etl.png)
 
-Once the data lake is healthy, you can collaborate with teammates using two different approaches depending on your hosting setup and security needs:
+Once the data lake is healthy, you can collaborate with teammates by sharing the live dashboard:
 
 ![Sharing Process](docs/assets/sharing.png)
 
-| Model | Path A: Independent Copy | Path B: Live Shared Server |
-| :--- | :--- | :--- |
-| **Analyst Setup** | Runs their own local copy of the app | Standard web browser only |
-| **Admin Setup** | **Offline-friendly.** Your laptop/server can go offline. | **Always-on.** Your machine hosts the active web server. |
-| **Data Source** | Analyst queries FOS bucket directly | Analyst queries the Admin's database over HTTP |
-| **Credential Sharing** | Shares read-only FOS bucket keys | **Zero keys shared.** Admin handles all credentials. |
-| **Best For** | Long-term analysts, laptop-only admins. | Quick screen-shares & non-technical associates. |
-
 ---
 
-### Path A: Independent Copy (Direct Bucket Access)
-
-The analyst runs their own independent copy of the app on their laptop or server. They use a read-only credential package to sync and query the Fastly Object Storage bucket directly.
-
-#### How it works:
-1. **Admin:** Click **Invite Analyst** in your dashboard. The app packages your FOS bucket name, region, and a set of read-only access keys into a secure JSON string. Send this JSON securely to your teammate.
-2. **Analyst:** Start your own copy of the app (e.g., using `docker compose`), select **Join Service** on the setup screen, and paste the JSON config.
-3. Your teammate's app automatically configures itself in `read_only` mode and syncs directly from the bucket. *Note: Because only the Admin's machine runs the active raw log ingestion pipeline, if the admin is offline, no new logs will be written to the database (though the analyst can still query all historical data). Once the admin is back online, the analyst's dashboard will automatically sync the newly committed logs.*
-
----
-
-### Path B: Live Shared Server (Web-Accessible Host)
+### Live Shared Server (Web-Accessible Host)
 
 You run the application as a central web-accessible server on a dedicated VM (or a laptop reachable at its own hostname / IP). Your associates connect using a standard web browser and sign in with a passcode — or, if you configure an OAuth/OIDC identity provider, with single sign-on.
 
 #### How it works:
-1. **Admin:** Click **Share Dashboard** in your dashboard. The sharing manager prompts for your server's public URL — a custom domain or IP that the analyst can reach over HTTPS. (The previous SSH-reverse-tunnel mode via `localhost.run` was removed in v2.0; production deployments use direct-mode against a real public endpoint.)
+1. **Admin:** Click **Share Dashboard** in your dashboard. The sharing manager prompts for your server's public URL — a custom domain or IP that the analyst can reach over HTTPS.
 2. **Admin:** Mint an analyst invitation in the sharing manager by specifying their name, an optional IP allowlist, and either a passcode or (with an OAuth/OIDC provider configured) their email for single sign-on. Invites are single-seat by default; a per-invite toggle allows shared logins. Give them the public URL (and passcode, if used).
 3. **Analyst:** Open the shared link in a standard browser, accept the Terms of Service, enter the passcode or sign in with your identity provider, and view the live read-only dashboard. All database queries are executed securely on your host server. You can revoke access or **Sever All Access** instantly.
 
@@ -104,20 +109,21 @@ You run the application as a central web-accessible server on a dedicated VM (or
 
 ## Features
 
-- **Apache Iceberg data lake** — ACID-compliant log storage in FOS, safe for concurrent readers and writers
+- **DuckLake storage** — ACID-compliant log storage with a PostgreSQL catalog; parquet on local disk (Standard) or in FOS (High-Scale)
 - **Automated provisioning** — wizard creates the bucket, access keys, CDN-fronting service, and logging endpoint
 - **CDN-accelerated reads** — every FOS read goes through a Fastly service to minimize egress and maximize caching
 - **Crash-safe ingestion** — buffered locally, atomically committed; interrupted imports never corrupt the table
+- **Retention and storage maintenance** — configurable request/RUM retention, DuckLake snapshot expiry, and local cache/rollup cleanup with admin-triggered runs; see the [`expire` job specification](docs/cron/jobs/expire.md)
 - **Schema evolution** — new and missing JSON fields handled gracefully; corrupt lines isolated and surfaced
 - **Log sampling** — optionally log a random percentage of requests to manage cost on high-traffic services
 - **Multi-source support** — analyze logs from multiple services side by side
 - **Interactive dashboards** — traffic over time, global request map, top-N aggregations, raw log viewer with click-to-filter
-- **Insights** — automated anomaly detection, 45 detections organized into traffic, security, network, edge, and origin tabs with severity indicators (error spikes, regional surges, botnet IP-spread, content-discovery scans, session harvesting, scripted-traffic cadence, WAF signal changes, cache regressions, latency, and more)
+- **Insights** — automated anomaly detection, 51 detections organized into traffic, security, network, edge, and origin tabs with severity indicators (error spikes, regional surges, botnet IP-spread, content-discovery scans, session harvesting, scripted-traffic cadence, WAF signal changes, cache regressions, latency, and more)
 - **Usage & Cost** — live storage breakdown, FOS operation counts, period totals, interactive cost estimator
 - **Log field configuration** — built-in field groups (HTTP, network, geo, TLS, NGWAF) plus custom VCL expressions
 - **Alerts** — threshold-based, webhook-delivered
 - **Live dashboard sharing** — direct-mode via your own hostname or IP, with per-analyst invites (passcode or OAuth/OIDC single sign-on), IP allowlisting, optional client-IP anonymization, and instant revoke
-- **Control room** — real-time operational dashboard with live metrics from rt.fastly.com at 1-second cadence across nine tabs (overview, performance, origin, security, network, sessions, cost, insights, admin health), with rolling bar charts, KPI cards, PoP traffic heatmap, contextual help, and drill-down time windows
+- **Control room** — real-time operational dashboard with live metrics from rt.fastly.com at 1-second cadence across six tabs (summary, CDN & caching, security, performance, network, admin), with rolling bar charts, KPI cards, PoP traffic heatmap, contextual help, and drill-down time windows
 - **Service summary** — executive view of the value Fastly delivers: cache hit ratio, offload, WAF blocks, bot mitigation, TLS adoption, latency percentiles, and Image Optimizer savings in a single tabbed page
 - **Streaming analytics** — CMCD (Common Media Client Data) dashboard for services with v1 or v2 streaming-log fields enabled, showing buffer health, bitrate, throughput, concurrent sessions, and per-session detail drill-down with auto-refresh
 - **Ingest error quarantine** — corrupt or unparseable log lines are isolated, classified, and surfaced in the admin UI with export/download, instead of silently dropped
@@ -138,6 +144,12 @@ If you'd rather not use Docker:
 # Recommended: install uv if you don't have it
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
+# PostgreSQL 16 must be running. Create a database and user, then set the
+# PostgreSQL URI connection strings (both must start with postgresql:// or
+# postgres:// and may share one database; see .env.example):
+#   export METADATA_DSN=postgresql://USER:PASS@127.0.0.1:5432/ducklake
+#   export DUCKLAKE_CATALOG=postgresql://USER:PASS@127.0.0.1:5432/ducklake
+
 # Backend dependencies
 uv sync
 
@@ -155,7 +167,7 @@ Then open **http://localhost:3000**.
 
 ### CLI provisioning (alternative to the wizard)
 
-If you have a [Fastly API token](https://www.fastly.com/documentation/guides/account-info/user-and-account-management/using-api-tokens/) with **Superuser** permissions (provisioning creates new services, which an Engineer token can't do), you can provision from the command line:
+If you have a [Fastly API token](https://www.fastly.com/documentation/guides/account-info/user-and-account-management/using-api-tokens/) with **Superuser** permissions (provisioning creates new services, which an Engineer token can't do), you can provision from the command line (with `METADATA_DSN` and `DUCKLAKE_CATALOG` exported in your shell, or via `docker compose exec backend`):
 
 ```bash
 # Guided
@@ -164,11 +176,11 @@ uv run python -m backend.provision.cli provision
 # Non-interactive
 uv run python -m backend.provision.cli provision --token <YOUR_TOKEN> --service-id <ID> --yes
 
-# Teardown
-uv run python -m backend.provision.cli teardown --service-id <ID> --yes
+# Teardown (include --remove-data with --yes to also remove local data and catalog rows)
+uv run python -m backend.provision.cli teardown --service-id <ID> --remove-data --yes
 ```
 
-Common flags: `--region us-east-1`, `--bucket <name>`, `--prefix <path>`, `--sample-rate 100`, `--period "1 minute"`, `--cdn-prefix <subdomain>`, `--remove-data` (on teardown), `-y` / `--yes` (accept defaults). Provisioning auto-rolls back on failure to leave your Fastly account clean.
+Common flags: `--region us-east-1`, `--bucket <name>`, `--sample-rate 100`, `--period "1 minute"`, `--cdn-prefix <subdomain>`, `--remove-data` (on teardown), `-y` / `--yes` (accept defaults). Provisioning auto-rolls back on failure to leave your Fastly account clean.
 
 ### Bring your own bucket
 
@@ -198,6 +210,7 @@ To route FOS reads through a Fastly CDN service (for free egress and edge cachin
 
 ```bash
 make install         # uv sync + frontend npm ci
+make fast-ci         # smoke gate (~1-2m): linters + typechecks + focused unit/contract tests
 make ci              # full gate: lint + format + typecheck + tests (back + front) + security scans
 make dev             # backend + frontend with hot reload (./run.sh --dev)
 make test            # backend pytest only
@@ -221,7 +234,7 @@ The Next.js frontend uses a typed API client generated from the FastAPI OpenAPI 
 cd frontend && npm run gen:types
 ```
 
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the system design, and [AGENTS.md](AGENTS.md) for the deeper contributor/agent notes — canonical patterns and the (extensive) list of known traps.
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the system design, and [CONTRIBUTOR_GUIDE.md](CONTRIBUTOR_GUIDE.md) for the deeper contributor notes: canonical patterns and the list of known traps.
 
 ---
 

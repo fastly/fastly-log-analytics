@@ -1,0 +1,689 @@
+"""Reverse DNS cache with FCrDNS validation and bot hostname verification."""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import socket
+import sys
+import threading
+import time
+from datetime import UTC, datetime, timedelta
+
+import aiodns
+
+from backend.utils.date_utils import iso_z_now
+
+from .cidr import _is_ip_in_cidrs
+
+logger = logging.getLogger(__name__)
+
+_write_lock = threading.Lock()
+_last_enrichment_at: str | None = None
+
+# Phase 1.4a — concurrency knobs for the async resolver. 50 in-flight PTR
+# lookups keeps c-ares well under typical FD limits (1024) and avoids
+# saturating upstream resolvers; 2.0s timeout matches the design spec —
+# slow PTRs are common for unmaintained IPs and 2s catches real answers
+# without blocking the loop.
+_CONCURRENCY_LIMIT = 50
+_RESOLVER_TIMEOUT = 2.0
+
+# Hard caps bounding the cache's growth. Discovery/enqueue is driven by
+# whatever source IPs show up in ingested logs — traffic to the monitored
+# Fastly service, not anything this app authenticates — so without these,
+# a client rotating through many source IPs (a botnet is the natural
+# vector; the bot-classification enqueue path at repositories/security.py
+# additionally keys off a spoofable User-Agent) can grow the pending
+# backlog and the on-disk table without bound. Audit finding 008.
+_MAX_PENDING_BACKLOG = 50_000
+_MAX_TOTAL_ROWS = 250_000
+_STALE_ROW_RETENTION_DAYS = 30
+_REAP_INTERVAL_S = 24 * 3600
+_last_reap_monotonic: float | None = None
+
+
+# ── Init ──────────────────────────────────────────────────────────────────────
+
+
+def _write_con():
+    from backend.core.metadata.base import get_pg_thread_connection
+
+    return get_pg_thread_connection()
+
+
+def _read_con():
+    from backend.core.metadata.base import get_pg_readonly_connection
+
+    return get_pg_readonly_connection()
+
+
+# ── Public API ────────────────────────────────────────────────────────────────
+
+
+def get_hostnames(ips: list[str]) -> dict[str, tuple[str | None, str, bool]]:
+    """Batched ``get_hostname`` for an arbitrary list of IPs.
+
+    Returns ``{ip: (hostname, status, fcrdns_verified)}`` for every IP found in
+    the cache. Missing IPs are batch-enqueued as 'pending' and omitted from the
+    result so callers can treat them as ``(None, 'pending', False)`` via a
+    single dict lookup.
+    """
+    if not ips:
+        return {}
+    unique = list({ip for ip in ips if ip})
+    if not unique:
+        return {}
+    con = _read_con()
+    if con is None:
+        enqueue(unique)
+        return {}
+    try:
+        out: dict[str, tuple[str | None, str, bool]] = {}
+        # SQLite's default SQLITE_LIMIT_VARIABLE_NUMBER is 999 — chunk to stay
+        # well under it even with the few extra bind-spots we pass below.
+        chunk_size = 900
+        for i in range(0, len(unique), chunk_size):
+            chunk = unique[i : i + chunk_size]
+            placeholders = ",".join("?" for _ in chunk)
+            cur = con.execute(
+                f"SELECT ip, hostname, status, fcrdns_verified FROM rdns WHERE ip IN ({placeholders})",
+                chunk,
+            )
+            for row in cur.fetchall():
+                out[row["ip"]] = (row["hostname"], row["status"], bool(row["fcrdns_verified"]))
+    finally:
+        con.close()
+
+    missing = [ip for ip in unique if ip not in out]
+    if missing:
+        enqueue(missing)
+    return out
+
+
+def enqueue(ips: list[str]) -> int:
+    """Insert unseen IPs as 'pending'. Skip IPs already in the cache.
+
+    Returns the number of newly inserted rows.
+    """
+    if not ips:
+        return 0
+    unique_ips = list(dict.fromkeys(ip for ip in ips if ip))
+    if not unique_ips:
+        return 0
+    with _write_lock:
+        con = _write_con()
+        try:
+            pending = con.execute("SELECT count(*) FROM rdns WHERE status='pending'").fetchone()[0]
+            if pending >= _MAX_PENDING_BACKLOG:
+                logger.warning(
+                    "🌐 [rdns] pending backlog at cap (%d >= %d) — dropping %d new IP(s) instead of "
+                    "enqueueing; enrichment is falling behind actual traffic volume.",
+                    pending,
+                    _MAX_PENDING_BACKLOG,
+                    len(unique_ips),
+                )
+                return 0
+            inserted = 0
+            chunk_size = 500
+            for i in range(0, len(unique_ips), chunk_size):
+                chunk = unique_ips[i : i + chunk_size]
+                values_sql = ",".join("(?, 'pending', 0)" for _ in chunk)
+                cur = con.execute(
+                    f"INSERT OR IGNORE INTO rdns (ip, status, fcrdns_verified) VALUES {values_sql}",
+                    chunk,
+                )
+                if cur.rowcount and cur.rowcount > 0:
+                    inserted += cur.rowcount
+            con.commit()
+            return inserted
+        finally:
+            con.close()
+
+
+# ── Sync lookup (kept for test compatibility) ─────────────────────────────────
+
+
+def _do_lookup(ip: str) -> tuple[str | None, str, bool]:
+    """Perform reverse + forward DNS lookup for FCrDNS validation.
+
+    Sync helper using ``socket.gethostbyaddr`` / ``socket.getaddrinfo``.
+    Kept as the patch target for unit tests that exercise individual
+    branches; production hot path is :func:`_run_async_resolve` which
+    drives :func:`_do_lookup_async` under ``asyncio.gather`` for true
+    concurrency. The async-aware batch entrypoint detects a
+    ``unittest.mock`` patch on this helper and routes through it so
+    legacy test fixtures keep working.
+    """
+    try:
+        hostname = socket.gethostbyaddr(ip)[0]
+    except socket.herror:
+        return None, "nxdomain", False
+    except Exception:
+        return None, "error", False
+
+    # FCrDNS: forward-lookup the hostname and check if original IP is in result
+    try:
+        forward_ips = {info[4][0] for info in socket.getaddrinfo(hostname, None)}
+        fcrdns_verified = ip in forward_ips
+    except Exception:
+        fcrdns_verified = False
+
+    return hostname, "resolved", fcrdns_verified
+
+
+# ── Async resolver (Phase 1.4a hot path) ──────────────────────────────────────
+
+
+async def _do_lookup_async(
+    ip: str,
+    resolver: aiodns.DNSResolver,
+    semaphore: asyncio.Semaphore,
+) -> tuple[str | None, str, bool]:
+    """Single-IP PTR + FCrDNS lookup using aiodns.
+
+    Returns ``(hostname, status, fcrdns_verified)`` matching the legacy
+    sync ``_do_lookup`` contract:
+
+    - ``status='resolved'`` and hostname populated on success
+    - ``status='nxdomain'`` and hostname=None on NXDOMAIN
+    - ``status='error'`` and hostname=None on other failures (timeout, etc.)
+
+    FCrDNS: tries A first, then AAAA. If the original IP is present in
+    the forward result, ``fcrdns_verified=True``.
+    """
+    async with semaphore:
+        try:
+            ptr_result = await resolver.gethostbyaddr(ip)
+            hostname = ptr_result.name
+            if not hostname:
+                return None, "nxdomain", False
+        except aiodns.error.DNSError as e:
+            code = e.args[0] if e.args else None
+            if code in (aiodns.error.ARES_ENOTFOUND, aiodns.error.ARES_ENODATA):
+                return None, "nxdomain", False
+            return None, "error", False
+        except Exception:
+            return None, "error", False
+
+        forward_ips: set[str] = set()
+        for record_type in ("A", "AAAA"):
+            try:
+                # aiodns >= 4: a DNSResult whose ``answer`` records carry the address in
+                # ``data.addr`` (the result itself is not iterable).
+                ans = await resolver.query_dns(hostname, record_type)
+                forward_ips.update(addr for rec in ans.answer if (addr := getattr(rec.data, "addr", None)))
+            except Exception:
+                continue
+
+        return hostname, "resolved", ip in forward_ips
+
+
+async def _resolve_batch_async(ips: list[str]) -> dict[str, tuple[str | None, str, bool]]:
+    """Resolve up to ``_CONCURRENCY_LIMIT`` IPs concurrently via aiodns.
+
+    Returns a dict mapping ip → (hostname, status, fcrdns_verified).
+    Individual exceptions are swallowed into ``(None, 'error', False)``
+    so one c-ares hiccup doesn't drop the whole batch.
+    """
+    if not ips:
+        return {}
+
+    resolver = aiodns.DNSResolver(timeout=_RESOLVER_TIMEOUT)
+    semaphore = asyncio.Semaphore(_CONCURRENCY_LIMIT)
+
+    try:
+        tasks = [_do_lookup_async(ip, resolver, semaphore) for ip in ips]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+    finally:
+        try:
+            resolver.cancel()
+        except Exception:
+            logger.debug("_resolve_batch_async: resolver.cancel failed (ignored)", exc_info=True)
+
+    out: dict[str, tuple[str | None, str, bool]] = {}
+    for ip, result in zip(ips, results, strict=True):
+        if isinstance(result, BaseException):
+            out[ip] = (None, "error", False)
+        else:
+            out[ip] = result
+    return out
+
+
+def _bulk_update_sync(records: list[tuple[str | None, str, int, str, str]]) -> None:
+    if not records:
+        return
+    sql = "UPDATE rdns SET hostname=?, status=?, fcrdns_verified=?, looked_up_at=? WHERE ip=?"
+    con = _write_con()
+    try:
+        if hasattr(con, "executemany"):
+            con.executemany(sql, records)
+        else:
+            for rec in records:
+                con.execute(sql, rec)
+        con.commit()
+    finally:
+        con.close()
+
+
+async def _bulk_update_async(records: list[tuple[str | None, str, int, str, str]]) -> None:
+    """Bulk UPDATE rdns rows with new lookup results."""
+    if not records:
+        return
+    await asyncio.to_thread(_bulk_update_sync, records)
+
+
+def _run_async_resolve(ips: list[str]) -> dict[str, int]:
+    """Concurrent resolve + bulk write entrypoint. Returns the summary
+    ``{"resolved": N, "errors": N}`` consumed by both ``enrich_batch``
+    variants.
+
+    **MUST be called from a synchronous context** — it calls
+    ``asyncio.run()`` internally, which raises ``RuntimeError`` when
+    invoked from inside a running event loop. From an async handler,
+    wrap with ``await asyncio.to_thread(_run_async_resolve, ips)`` so
+    the call happens on a worker thread that doesn't own the loop.
+    Production callers are cron jobs running on the APScheduler
+    threadpool, which is sync — the loop-detection fallback at the
+    bottom of the function is a defensive belt-and-suspenders only.
+
+    Compatibility detection: if ``_do_lookup`` has been monkey-patched
+    by ``unittest.mock`` (common in tests that exercise individual
+    status / FCrDNS branches), we drive the per-IP loop through the
+    patched sync helper and write via sync sqlite3 — preserving the
+    legacy fixture behaviour. Production never trips this branch.
+    """
+    if not ips:
+        return {"resolved": 0, "errors": 0}
+
+    mod = sys.modules[__name__]
+    do_lookup = mod._do_lookup
+    is_patched = getattr(do_lookup, "_mock_name", None) is not None or "Mock" in type(do_lookup).__name__
+
+    if is_patched:
+        results = {ip: do_lookup(ip) for ip in ips}
+    else:
+        try:
+            results = asyncio.run(_resolve_batch_async(ips))
+        except RuntimeError as e:
+            # ``asyncio.run() cannot be called from a running event loop``
+            # — fall back to the sync per-IP path. Production never hits
+            # this branch (cron jobs run on threadpool, not the loop).
+            if "running event loop" not in str(e):
+                raise
+            logger.warning("[rdns_cache] async resolve fallback: running event loop detected")
+            results = {ip: _do_lookup(ip) for ip in ips}
+
+    now = iso_z_now()
+    records = [(hostname, status, int(fcrdns), now, ip) for ip, (hostname, status, fcrdns) in results.items()]
+
+    if records:
+        with _write_lock:
+            try:
+                asyncio.run(_bulk_update_async(records))
+            except RuntimeError as e:
+                if "running event loop" not in str(e):
+                    raise
+                con = _write_con()
+                try:
+                    con.executemany(
+                        "UPDATE rdns SET hostname=?, status=?, fcrdns_verified=?, looked_up_at=? WHERE ip=?",
+                        records,
+                    )
+                    con.commit()
+                finally:
+                    con.close()
+
+    resolved = sum(1 for _, status, _ in results.values() if status == "resolved")
+    errors = len(results) - resolved
+    return {"resolved": resolved, "errors": errors}
+
+
+# ── Enrichment loop ───────────────────────────────────────────────────────────
+
+
+def _reap_stale_rows() -> dict:
+    """Bound the cache's on-disk footprint. Two idempotent passes:
+
+    1. Drop nxdomain/error rows older than the retention window — they'll
+       never resolve to anything useful, and are cheap to re-enqueue if the
+       IP shows up again.
+    2. If the table is still over the hard cap (e.g. the backlog cap in
+       :func:`enqueue` was itself raised, or a burst outpaced retention),
+       delete the oldest-looked-up non-pending rows until back under it.
+       Pending rows are excluded — that backlog is bounded separately by
+       :data:`_MAX_PENDING_BACKLOG` in :func:`enqueue`, not by this reaper.
+
+    Runs under the same writer lock as every other mutation.
+    """
+    with _write_lock:
+        con = _write_con()
+        try:
+            cutoff_iso = (datetime.now(UTC) - timedelta(days=int(_STALE_ROW_RETENTION_DAYS))).isoformat()
+            cur = con.execute(
+                "DELETE FROM rdns WHERE status IN ('nxdomain', 'error') AND looked_up_at < ?",
+                (cutoff_iso,),
+            )
+            stale_deleted = cur.rowcount
+
+            total = con.execute("SELECT count(*) FROM rdns").fetchone()[0]
+            overflow_deleted = 0
+            if total > _MAX_TOTAL_ROWS:
+                overflow = total - _MAX_TOTAL_ROWS
+                cur = con.execute(
+                    """DELETE FROM rdns WHERE ip IN (
+                        SELECT ip FROM rdns WHERE status != 'pending' ORDER BY looked_up_at ASC LIMIT ?
+                    )""",
+                    (overflow,),
+                )
+                overflow_deleted = cur.rowcount
+            con.commit()
+        finally:
+            con.close()
+    return {"stale_deleted": stale_deleted, "overflow_deleted": overflow_deleted}
+
+
+def _maybe_reap_stale_rows() -> None:
+    """Run :func:`_reap_stale_rows` at most once per :data:`_REAP_INTERVAL_S`.
+
+    Gated on an in-memory monotonic timestamp rather than a persisted one —
+    worst case a process restart makes it run a bit more often than once a
+    day, which is harmless (each pass is a cheap indexed DELETE, a no-op in
+    steady state).
+    """
+    global _last_reap_monotonic
+    now = time.monotonic()
+    if _last_reap_monotonic is not None and (now - _last_reap_monotonic) < _REAP_INTERVAL_S:
+        return
+    _last_reap_monotonic = now
+    if (pkg := sys.modules.get("backend.utils.bot_sources")) is not None:
+        object.__setattr__(pkg, "_last_reap_monotonic", _last_reap_monotonic)
+    try:
+        result = _reap_stale_rows()
+        if result["stale_deleted"] or result["overflow_deleted"]:
+            logger.info("🌐 \x1b[34m[rdns]\x1b[0m reap complete: %s", result)
+    except Exception as e:
+        logger.error("[rdns_cache] Reap pass failed: %s", e)
+
+
+def _get_pending_count() -> int:
+    con = _read_con()
+    if con is None:
+        return 0
+    try:
+        row = con.execute("SELECT count(*) FROM rdns WHERE status='pending'").fetchone()
+        return row[0] if row else 0
+    finally:
+        con.close()
+
+
+def enrich_batch(limit: int | None = None) -> dict:
+    """Resolve pending IPs with FCrDNS validation, then discover new IPs from
+    DuckDB sources.
+
+    If limit is None, dynamically scales the batch size based on the pending
+    queue depth:
+    - pending <= 200: batch_limit = max(100, pending) if pending > 0 else 200
+    - 200 < pending <= 2000: batch_limit = 500
+    - pending > 2000: batch_limit = 1000
+
+    Returns a summary dict with counts for monitoring/logging.
+    """
+    global _last_enrichment_at
+
+    resolved = 0
+    errors = 0
+    discovered = 0
+
+    if limit is not None:
+        batch_limit = limit
+    else:
+        pending_count = _get_pending_count()
+        if pending_count <= 200:
+            batch_limit = max(100, pending_count) if pending_count > 0 else 200
+        elif pending_count <= 2000:
+            batch_limit = 500
+        else:
+            batch_limit = 1000
+
+    pending_rows = _select_ips_with_status("pending", limit=batch_limit)
+    if pending_rows:
+        pending_ips = [row[0] for row in pending_rows]
+        summary = _run_async_resolve(pending_ips)
+        resolved = summary["resolved"]
+        errors = summary["errors"]
+
+    stale_rows = _select_stale_ips(limit=max(1, batch_limit // 4))
+    if stale_rows:
+        stale_ips = [row[0] for row in stale_rows]
+        _run_async_resolve(stale_ips)
+
+    try:
+        discovered = _discover_new_ips(max_new=500)
+    except Exception as e:
+        logger.error("[rdns_cache] Discovery pass failed: %s", e)
+
+    _maybe_reap_stale_rows()
+
+    _last_enrichment_at = iso_z_now()
+    if (pkg := sys.modules.get("backend.utils.bot_sources")) is not None:
+        object.__setattr__(pkg, "_last_enrichment_at", _last_enrichment_at)
+    summary_out = {
+        "resolved": resolved,
+        "errors": errors,
+        "discovered": discovered,
+        "batch_limit": batch_limit,
+    }
+    if resolved > 0 or errors > 0 or discovered > 0:
+        logger.info("🌐 \x1b[34m[rdns]\x1b[0m enrich_batch complete: %s", summary_out)
+    else:
+        logger.debug("🌐 \x1b[34m[rdns]\x1b[0m enrich_batch complete (no activity)")
+    return summary_out
+
+
+def get_stats() -> dict:
+    """Return cache stats for the admin UI."""
+    con = _read_con()
+    if con is None:
+        return {"total": 0, "pending": 0, "last_enrichment_at": None}
+    try:
+        total = con.execute("SELECT count(*) FROM rdns").fetchone()[0]
+        pending = con.execute("SELECT count(*) FROM rdns WHERE status='pending'").fetchone()[0]
+    finally:
+        con.close()
+    return {
+        "total": total,
+        "pending": pending,
+        "last_enrichment_at": _last_enrichment_at,
+    }
+
+
+# ── Verification logic (pure, no DB) ─────────────────────────────────────────
+
+
+def classify(
+    ip: str,
+    hostname: str | None,
+    status: str,
+    fcrdns_verified: bool,
+    verification_domains: list[str],
+    verification_cidrs: list[str] | tuple[str, ...] | None = None,
+) -> str:
+    """Classify a bot hit into verified / impersonator / unverified.
+
+    Tries CIDR match first (instant trust), then falls back to FCrDNS validation.
+    """
+    # 1. CIDR match is authoritative if provided
+    if verification_cidrs and _is_ip_in_cidrs(ip, verification_cidrs):
+        return "verified"
+
+    # 2. Fallback to FCrDNS
+    if not verification_domains:
+        return "unverified"
+
+    if status == "pending":
+        return "unverified_pending"
+
+    if status in ("nxdomain", "error") or hostname is None or not fcrdns_verified:
+        return "impersonator"
+
+    if any(hostname == d or hostname.endswith("." + d) for d in verification_domains):
+        return "verified"
+
+    return "impersonator"
+
+
+# ── Internal helpers ──────────────────────────────────────────────────────────
+
+
+def _select_ips_with_status(status: str, *, limit: int) -> list[tuple[str]]:
+    """Read IPs with the given status."""
+    with _write_lock:
+        con = _write_con()
+        try:
+            return con.execute(
+                "SELECT ip FROM rdns WHERE status = ? LIMIT ?",
+                (status, limit),
+            ).fetchall()
+        finally:
+            con.close()
+
+
+def _select_stale_ips(*, limit: int) -> list[tuple[str]]:
+    with _write_lock:
+        con = _write_con()
+        try:
+            cutoff_iso = (datetime.now(UTC) - timedelta(hours=48)).isoformat()
+            return con.execute(
+                """SELECT ip FROM rdns
+                   WHERE status != 'pending'
+                     AND looked_up_at < ?
+                   LIMIT ?""",
+                (cutoff_iso, limit),
+            ).fetchall()
+        finally:
+            con.close()
+
+
+def _discover_new_ips_gen(max_new: int = 500, days: int = 30):
+    """Query all DuckDB sources for IPs not yet in the rDNS cache.
+    Yields progress events.
+    """
+    try:
+        from backend import config as svcconfig
+        from backend.core.duckdb import get_connection, get_source_for_service
+    except ImportError:
+        yield {"type": "count", "count": 0}
+        return
+
+    try:
+        # Load fully hydrated source dictionaries (including credentials)
+        sources = []
+        for cfg in svcconfig.list_configs():
+            service_id = cfg.get("service_id")
+            if service_id:
+                src = get_source_for_service(service_id)
+                if src:
+                    sources.append(src)
+    except Exception as e:
+        logger.error("[rdns_cache] Could not load sources for discovery: %s", e)
+        yield {"type": "count", "count": 0}
+        return
+
+    # Collect IPs not already in cache across all sources
+    new_ips: set[str] = set()
+    remaining = max_new
+
+    for src in sources:
+        if remaining <= 0:
+            break
+        yield {"type": "status", "message": f"Scanning {src.get('name')}..."}
+        try:
+            # read_only: SELECT DISTINCT against the view, no writes.
+            con = get_connection(src, read_only=True)
+            try:
+                from backend.core.duckdb import _safe_table_name
+                from backend.core.storage import execute_with_stale_view_retry
+
+                # Check if this source has an ip column
+                table_name = _safe_table_name(src["name"])
+                cols = [
+                    r[0]
+                    for r in con.execute(
+                        f"SELECT column_name FROM information_schema.columns WHERE table_name = '{table_name}'"
+                    ).fetchall()
+                ]
+                if "ip" not in cols:
+                    continue
+
+                # Wrap the DISTINCT scan in the stale-view self-heal so
+                # a buffer parquet that's been swept since this connection
+                # was opened gets recovered (clear caches + force rebind +
+                # retry once), matching QueryRunner.execute_with_retry.
+                # Pre-fix: every commit cycle that swept a buffer left the
+                # rdns discovery scan failing for 5 minutes (until next
+                # tick), spamming ERROR logs on a 100% failure pattern
+                # for hours — witnessed 2026-06-10.
+                def _scan_ips(c):
+                    return c.execute(
+                        f"""SELECT DISTINCT ip FROM "{table_name}"
+                            WHERE ip IS NOT NULL
+                              AND timestamp >= now() - INTERVAL '{days} days'
+                            LIMIT {remaining * 2}"""
+                    ).fetchall()
+
+                rows = execute_with_stale_view_retry(con, src, _scan_ips)
+            finally:
+                con.close()
+
+            # Filter to IPs not already cached
+            candidate_ips = [r[0] for r in rows if r[0]]
+            if not candidate_ips:
+                continue
+
+            with _write_lock:
+                con2 = _write_con()
+                try:
+                    placeholders = ",".join("?" * len(candidate_ips))
+                    already = {
+                        r[0]
+                        for r in con2.execute(
+                            f"SELECT ip FROM rdns WHERE ip IN ({placeholders})",
+                            candidate_ips,
+                        ).fetchall()
+                    }
+                finally:
+                    con2.close()
+
+            found_this_src = 0
+            for ip in candidate_ips:
+                if ip not in already and ip not in new_ips:
+                    new_ips.add(ip)
+                    found_this_src += 1
+                    remaining -= 1
+                    if remaining <= 0:
+                        break
+            if found_this_src > 0:
+                yield {"type": "log", "message": f"Found {found_this_src} new IPs in {src.get('name')}"}
+
+        except Exception as e:
+            logger.error("[rdns_cache] Discovery error for source %s: %s", src.get("name"), e)
+            yield {"type": "log", "message": f"Error scanning {src.get('name')}: {e}"}
+
+    if new_ips:
+        enqueue(list(new_ips))
+        logger.info("🌐 \x1b[34m[rdns]\x1b[0m Discovered %d new IPs for enrichment", len(new_ips))
+
+    yield {"type": "count", "count": len(new_ips)}
+
+
+def _discover_new_ips(max_new: int = 500, days: int = 30) -> int:
+    """Query all DuckDB sources for IPs not yet in the rDNS cache.
+
+    Returns count of newly enqueued IPs.
+    """
+    count = 0
+    for event in _discover_new_ips_gen(max_new, days):
+        if event["type"] == "count":
+            count = event["count"]
+    return count

@@ -3,13 +3,15 @@
 import * as React from "react"
 import * as SliderPrimitive from "@radix-ui/react-slider"
 
-import { cn } from "@/lib/utils"
+import { cn, keyByOccurrence } from "@/lib/utils"
 
 const Slider = React.forwardRef<
   React.ElementRef<typeof SliderPrimitive.Root>,
   React.ComponentPropsWithoutRef<typeof SliderPrimitive.Root>
 >(({ className, ...props }, ref) => {
-  const { "aria-valuetext": ariaValuetext, ...rootProps } = props as any
+  const { "aria-valuetext": ariaValuetext, ...rootProps } = props
+  const thumbCount = Array.isArray(props.value) ? props.value.length : Array.isArray(props.defaultValue) ? props.defaultValue.length : 1
+  const thumbs = keyByOccurrence(Array.from({ length: thumbCount }, () => "thumb"), String)
   return (
     <SliderPrimitive.Root
       ref={ref}
@@ -22,13 +24,13 @@ const Slider = React.forwardRef<
       <SliderPrimitive.Track className="relative h-1.5 w-full grow overflow-hidden rounded-full bg-secondary">
         <SliderPrimitive.Range className="absolute h-full bg-primary" />
       </SliderPrimitive.Track>
-      {Array.from({ length: Array.isArray(props.value) ? props.value.length : Array.isArray(props.defaultValue) ? props.defaultValue.length : 1 }).map((_, i) => (
+      {thumbs.map(({ key }) => (
         // Radix puts role="slider" on the Thumb, so the accessible name must live
         // here — Root's aria-label does not propagate to it. Additive: thumbs are
         // named only when the caller passes aria-label/aria-labelledby, so existing
         // unnamed sliders are unchanged.
         <SliderPrimitive.Thumb
-          key={i}
+          key={key}
           aria-label={props['aria-label']}
           aria-labelledby={props['aria-labelledby']}
           aria-valuetext={ariaValuetext}

@@ -1,73 +1,216 @@
-"""Recompute / backfill / cleanup for per-field per-hour rollups.
-
-Holds the cron-triggered ``recompute_touched_hours`` (called after every
-ingest tick), the one-shot ``backfill_rollups``
-(boot + new-custom-field path), and ``cleanup_old_rollups`` (daily retention
-trim).
-
-The shared write core (``_run_per_field_copy``) lives here too — it's the
-single COPY-PARTITION_BY path both recompute and backfill funnel through.
-"""
+"""Recompute / backfill / cleanup orchestrator for per-field per-hour and RUM rollups."""
 
 from __future__ import annotations
 
 import logging
+import math
 import os
 import shutil
+import sys
+import threading
+import types
+import uuid
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
+import pyarrow as pa
+import pyarrow.parquet as pq
+
+from backend.utils.date_utils import parse_day_key_strict
+from backend.utils.telemetry import ensure_utc
+
+from . import overview_rollups as _overview_mod
+from . import rollup_coverage as _coverage_mod
+from . import session_rollups as _session_mod
+from . import time_series_rollups as _ts_mod
 from ._common import (
     _VIRTUAL_FIELD_BACKING,
     IP_SAMPLE_CAP,
+    IP_SPREAD_BUNDLE_FILENAME,
+    TIME_SERIES_BUNDLE_FILENAME,
     _build_copy_query,
     _build_ip_spread_select_query,
     _build_virtual_field_copy_query,
+    _day_bundled_root,
+    _day_rollups_root,
     _get_fields,
+    _hour_bundled_root,
     _ip_spread_root,
     _is_safe_ident,
-    _load_markers,
     _publish_field_partitions,
     _rollups_root,
     _safe_table_for,
-    _save_markers,
-    describe_columns,
+    acquire_rollup_connection_and_cols,
     parse_hour_token,
+    quote_path_list,
+    shared_rollup_session,
 )
-from .hour_bundles import bundle_hours, bundle_hours_ip_spread
-from .network_health_geo import build_network_geo_bundles
-from .network_health_heatmap import build_network_heatmap_bundles
-from .network_rtt import build_network_rtt_bundles
-from .network_speed import build_network_speed_bundles
-from .network_summary import build_network_summary_bundles
-from .ngwaf_bots import build_ngwaf_bots_bundles
-from .origin_dims import build_origin_dims_bundles
-from .origin_latency_ts import build_origin_latency_ts_bundles
-from .origin_summary import build_origin_summary_bundles
-from .overview import build_overview_bundles
-from .perf_dims import build_perf_dims_bundles
-from .perf_latency import build_perf_latency_bundles
-from .security_dims import build_security_dims_bundles
-from .sessions import build_session_bundles
-from .slow_urls import build_slow_urls_bundles
-from .time_series import build_time_series_bundles
-from .verified_bots_ts import build_verified_bots_ts_bundles
+from .day_bundles import bundle_hours, bundle_hours_ip_spread, stamp_empty_hour_sentinels
+from .origin_dims import (  # noqa: F401
+    build_network_geo_bundles,
+    build_network_heatmap_bundles,
+    build_network_quality_bundles,
+    build_network_rtt_bundles,
+    build_network_speed_bundles,
+    build_network_summary_bundles,
+    build_origin_dims_bundles,
+    build_origin_latency_ts_bundles,
+    build_origin_summary_bundles,
+    build_perf_dims_bundles,
+    build_perf_latency_bundles,
+    build_pop_health_bundles,
+    build_slow_urls_bundles,
+)
+from .overview_rollups import (  # noqa: F401
+    _HIT_STATES,
+    backfill_overview_bundles,
+    build_overview_bundles,
+)
+from .rollup_coverage import (  # noqa: F401
+    ALL_FIELDS_FILENAME,
+    LISTDIR_CACHE_MAX_ENTRIES,
+    LISTDIR_CACHE_TTL_S,
+    MIN_CLOSED_HOUR_COVERAGE,
+    MISSING_HOUR_HEAL_CAP,
+    BundleProbe,
+    ClosedHourFieldRollupWindow,
+    CoverageIndex,
+    HourlyReadPlan,
+    TimeSeriesRollupWindowPlan,
+    _day_bundle_file,
+    _empty_parquet,
+    _finalize_scalar_coverage,
+    _listdir_cache,
+    _listdir_cache_lock,
+    _missing_hours,
+    _per_field_hours,
+    _walk_hourly_bundles,
+    cached_listdir,
+    collect_day_prefer_paths,
+    collect_hour_paths_with_floor,
+    collect_hourly_bundle_paths,
+    durable_serving_blocked,
+    eligible_window,
+    enumerate_closed_hour_field_rollups,
+    heal_where_clause,
+    meets_coverage_floor,
+    plan_hourly_read,
+    plan_time_series_rollup_window,
+    rc_service_id,
+    validated_daily_reference_minutes,
+)
+from .security_dims import (  # noqa: F401
+    build_ngwaf_bots_bundles,
+    build_ngwaf_bots_ts_bundles,
+    build_security_dims_bundles,
+    build_security_proxies_bundles,
+    build_verified_bots_ts_bundles,
+    recompute_wellknown_bots_rollup,
+)
+from .session_rollups import build_session_bundles  # noqa: F401
+from .time_series_rollups import build_time_series_bundles  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
 
-def recompute_touched_hours(service_id: str, source: dict, hours: set[str]) -> None:
-    """Recompute rollups for all dashboard fields across the given hours.
+@dataclass(frozen=True)
+class RollupSpec:
+    """A best-effort per-hour rollup writer."""
 
-    Excludes the active (current UTC) hour — the dashboard serves the
-    in-progress hour live off the base table. One COPY query per field
-    handles all touched hours via PARTITION_BY, so the work is O(fields)
-    not O(fields × hours).
+    label: str
+    builder: str
+    fallback: str = "raw scan"
 
-    After the per-field rebuild completes, bundles each touched hour's
-    per-field parquets into a single bundled file under
-    ``rollups/hour_bundled/hour=H/all_fields.parquet`` so the dashboard
-    reader can open one file per hour instead of ~40 per-field files.
-    """
+
+HOUR_WRITERS: tuple[RollupSpec, ...] = (
+    RollupSpec("time_series", "build_time_series_bundles"),
+    RollupSpec("sessions", "build_session_bundles"),
+    RollupSpec("slow_urls", "build_slow_urls_bundles"),
+    RollupSpec("origin_summary", "build_origin_summary_bundles"),
+    RollupSpec("network_rtt", "build_network_rtt_bundles"),
+    RollupSpec("network_speed", "build_network_speed_bundles"),
+    RollupSpec("network_quality", "build_network_quality_bundles"),
+    RollupSpec("network_heatmap", "build_network_heatmap_bundles"),
+    RollupSpec("network_geo", "build_network_geo_bundles"),
+    RollupSpec("verified_bots_ts", "build_verified_bots_ts_bundles"),
+    RollupSpec("perf_latency", "build_perf_latency_bundles"),
+    RollupSpec("pop_health", "build_pop_health_bundles"),
+    RollupSpec("origin_dims", "build_origin_dims_bundles"),
+    RollupSpec("origin_latency_ts", "build_origin_latency_ts_bundles"),
+    RollupSpec("security_dims", "build_security_dims_bundles"),
+    RollupSpec("security_proxies", "build_security_proxies_bundles"),
+    RollupSpec("perf_dims", "build_perf_dims_bundles"),
+    RollupSpec("ngwaf_bots", "build_ngwaf_bots_bundles", fallback="direct join"),
+    RollupSpec("ngwaf_bots_ts", "build_ngwaf_bots_ts_bundles", fallback="direct join"),
+    RollupSpec("overview", "build_overview_bundles"),
+    RollupSpec("network_summary", "build_network_summary_bundles"),
+    RollupSpec("wellknown_bots", "recompute_wellknown_bots_rollup"),
+)
+
+
+@dataclass(frozen=True)
+class DayCompactorSpec:
+    """A closed-day compactor run by the daily ``rollup_compact`` cron and the admin backfill."""
+
+    label: str
+    compactor: str
+    admin_key: str | None = None
+
+
+DAY_COMPACTORS: tuple[DayCompactorSpec, ...] = (
+    DayCompactorSpec("origin_summary", "compact_origin_summary_closed_days_to_daily", "origin_summary_days"),
+    DayCompactorSpec("network_rtt", "compact_network_rtt_closed_days_to_daily", "network_rtt_days"),
+    DayCompactorSpec("network_speed", "compact_network_speed_closed_days_to_daily", "network_speed_days"),
+    DayCompactorSpec("network_quality", "compact_network_quality_closed_days_to_daily", "network_quality_days"),
+    DayCompactorSpec("verified_bots_ts", "compact_verified_bots_ts_closed_days_to_daily", "verified_bots_ts_days"),
+    DayCompactorSpec("perf_latency", "compact_perf_latency_closed_days_to_daily", "perf_latency_days"),
+    DayCompactorSpec("origin_dims", "compact_origin_dims_closed_days_to_daily", "origin_dims_days"),
+    DayCompactorSpec("origin_latency_ts", "compact_origin_latency_ts_closed_days_to_daily", "origin_latency_ts_days"),
+    DayCompactorSpec("security_dims", "compact_security_dims_closed_days_to_daily", "security_dims_days"),
+    DayCompactorSpec("security_proxies", "compact_security_proxies_closed_days_to_daily", "security_proxies_days"),
+    DayCompactorSpec("perf_dims", "compact_perf_dims_closed_days_to_daily", "perf_ttl_dist_days"),
+    DayCompactorSpec("ngwaf_bots", "compact_ngwaf_bots_closed_days_to_daily", "ngwaf_bots_days"),
+    DayCompactorSpec("ngwaf_bots_ts", "compact_ngwaf_bots_ts_closed_days_to_daily", "ngwaf_bots_ts_days"),
+    DayCompactorSpec("overview", "compact_overview_closed_days_to_daily", "overview_days"),
+    DayCompactorSpec("time_series", "compact_time_series_closed_days_to_daily"),
+    DayCompactorSpec("pop_health", "compact_pop_health_closed_days_to_daily"),
+)
+
+ADMIN_BACKFILLS: tuple[tuple[str, str], ...] = (
+    ("slow_urls", "backfill_slow_urls_bundles"),
+    ("origin_summary", "backfill_origin_summary_bundles"),
+    ("origin_dims", "backfill_origin_dims_bundles"),
+    ("origin_latency_ts", "backfill_origin_latency_ts_bundles"),
+    ("network_rtt", "backfill_network_rtt_bundles"),
+    ("network_speed", "backfill_network_speed_bundles"),
+    ("network_quality", "backfill_network_quality_bundles"),
+    ("network_heatmap", "backfill_network_heatmap_bundles"),
+    ("network_geo", "backfill_network_geo_bundles"),
+    ("verified_bots_ts", "backfill_verified_bots_ts_bundles"),
+    ("perf_latency", "backfill_perf_latency_bundles"),
+    ("pop_health", "backfill_pop_health_bundles"),
+    ("security_dims", "backfill_security_dims_bundles"),
+    ("security_proxies", "backfill_security_proxies_bundles"),
+    ("perf_ttl_dist", "backfill_perf_dims_bundles"),
+    ("wellknown_bots", "backfill_wellknown_bots_rollup"),
+    ("ngwaf_bots", "backfill_ngwaf_bots_bundles"),
+    ("ngwaf_bots_ts", "backfill_ngwaf_bots_ts_bundles"),
+    ("overview", "backfill_overview_bundles"),
+    ("network_summary", "backfill_network_summary_bundles"),
+)
+
+
+def recompute_touched_hours(
+    service_id: str,
+    source: dict,
+    hours: set[str],
+    *,
+    expected_vectors: dict[str, list[tuple[str, str, int]]] | None = None,
+    expected_fields: list[str] | None = None,
+) -> None:
+    """Recompute rollups and per-hour bundles for all dashboard fields across *hours*."""
     if not hours:
         return
 
@@ -88,389 +231,286 @@ def recompute_touched_hours(service_id: str, source: dict, hours: set[str]) -> N
     if not table_ident:
         return
 
-    min_start = min(dt for _, dt in parsed)
-    max_end = max(dt for _, dt in parsed) + timedelta(hours=1)
-    hour_list_sql = ", ".join(f"'{h}'" for h, _ in parsed)
-    where_sql = (
-        f"timestamp >= '{min_start.isoformat()}' "
-        f"AND timestamp < '{max_end.isoformat()}' "
-        f"AND strftime(timestamp, '%Y-%m-%d-%H') IN ({hour_list_sql})"
-    )
+    touched_hours = sorted(h for h, _ in parsed)
+    where_sql = heal_where_clause(touched_hours, None, None)
     fields_to_rollup = _get_fields(source)
-    _run_per_field_copy(service_id, source, table_ident, where_sql, fields_to_rollup)
-
-    # IP-spread rollup runs alongside the count rollup so the security
-    # fingerprint cards can serve cross-hour distinct-IP estimates from
-    # rollups without an ip column in the per-request temp scan.
-    # Best-effort: a failure here doesn't block the count rollup or
-    # the bundles below; the reader falls back to the live temp scan
-    # when ip_spread.parquet is missing.
-    try:
-        _run_ip_spread_per_field(service_id, source, table_ident, where_sql, fields_to_rollup)
-    except Exception as e:
-        logger.warning(
-            "[rollups] %s: ip_spread per-field write failed (count rollup unaffected): %s",
+    with shared_rollup_session(source):
+        core_fields_complete = _run_per_field_copy(
             service_id,
-            e,
+            source,
+            table_ident,
+            where_sql,
+            fields_to_rollup,
+            replace_hours=touched_hours,
+            require_fields={"country", "method", "status", "pop"},
         )
 
-    # Bundle the touched hours so the dashboard reader can open one
-    # file per hour instead of N per-field files. Best-effort: if
-    # bundling fails, the per-field files still serve correctly via
-    # the reader's fallback path.
-    touched_hours = [h for h, _ in parsed]
-    try:
-        bundle_hours(service_id, source, touched_hours)
-    except Exception as e:
-        logger.warning("[rollups] %s: hour bundling failed (per-field still serves): %s", service_id, e)
+        try:
+            _run_ip_spread_per_field(service_id, source, table_ident, where_sql, fields_to_rollup)
+        except Exception as e:
+            logger.warning(
+                "[rollups] %s: ip_spread per-field write failed (count rollup unaffected): %s",
+                service_id,
+                e,
+            )
 
-    # IP-spread bundle runs alongside the count bundle. Best-effort:
-    # a failure here leaves per-field ip_spread parquets intact and
-    # the reader's per-field path serves until the next bundling tick.
+        if core_fields_complete:
+            try:
+                if expected_vectors is None or expected_fields is None:
+                    bundle_hours(service_id, source, touched_hours)
+                else:
+                    bundle_hours(
+                        service_id,
+                        source,
+                        touched_hours,
+                        expected_vectors=expected_vectors,
+                        expected_fields=expected_fields,
+                    )
+            except Exception as e:
+                logger.warning("[rollups] %s: hour bundling failed (per-field still serves): %s", service_id, e)
+        else:
+            logger.warning(
+                "[rollups] %s: all-fields bundle retained because a core field COPY failed",
+                service_id,
+            )
+
+        try:
+            bundle_hours_ip_spread(service_id, source, touched_hours)
+        except Exception as e:
+            logger.warning(
+                "[rollups] %s: ip_spread hour bundling failed (per-field ip_spread still serves): %s",
+                service_id,
+                e,
+            )
+
+        for spec in HOUR_WRITERS:
+            try:
+                getattr(sys.modules[__name__], spec.builder)(service_id, source, touched_hours)
+            except Exception as e:
+                logger.warning(
+                    "[rollups] %s: %s bundle failed (%s will serve): %s",
+                    service_id,
+                    spec.label,
+                    spec.fallback,
+                    e,
+                )
+
+
+def _bundle_metadata(path: str) -> pq.FileMetaData | None:
+    """Return readable metadata for a valid all-fields bundle."""
+    if not os.path.isfile(path):
+        return None
     try:
-        bundle_hours_ip_spread(service_id, source, touched_hours)
-    except Exception as e:
-        logger.warning(
-            "[rollups] %s: ip_spread hour bundling failed (per-field ip_spread still serves): %s",
-            service_id,
-            e,
+        metadata = pq.read_metadata(path)
+    except (OSError, ValueError, pa.ArrowException):
+        return None
+    if not {"field", "value", "count"}.issubset(metadata.schema.names):
+        return None
+    return metadata
+
+
+def _bundle_has_rows(path: str) -> bool:
+    """Return whether an all-fields bundle is a non-empty data bundle."""
+    metadata = _bundle_metadata(path)
+    return metadata is not None and metadata.num_rows > 0
+
+
+def _hour_vectors_from_raw(
+    con: Any,
+    view_name: str,
+    hours: list[str],
+    fields: list[str],
+) -> dict[str, list[tuple[str, str, int]]]:
+    if not hours or not fields:
+        return {hour: [] for hour in hours}
+    hour_ranges = []
+    for hour in hours:
+        hour_start = parse_hour_token(hour)
+        if hour_start is None:
+            raise ValueError(f"invalid candidate hour: {hour}")
+        hour_ranges.append(
+            f"(timestamp >= TIMESTAMPTZ '{hour_start.isoformat()}' AND "
+            f"timestamp < TIMESTAMPTZ '{(hour_start + timedelta(hours=1)).isoformat()}')"
         )
-
-    # Time-series rollups for the dashboard chart. Same best-effort
-    # contract: if the build fails, the dashboard falls back to a raw
-    # scan for the affected hours.
-    try:
-        build_time_series_bundles(service_id, source, touched_hours)
-    except Exception as e:
-        logger.warning(
-            "[rollups] %s: time_series bundle failed (raw scan will serve): %s",
-            service_id,
-            e,
-        )
-
-    # Sessions rollups for /api/sessions. Best-effort: if the build
-    # fails, the sessions endpoint falls back to a raw window-function
-    # scan for any hours that lack a sessions.parquet.
-    try:
-        build_session_bundles(service_id, source, touched_hours)
-    except Exception as e:
-        logger.warning(
-            "[rollups] %s: sessions bundle failed (raw scan will serve): %s",
-            service_id,
-            e,
-        )
-
-    # Slow-URLs rollups for the /origin slow_urls panel. Same best-effort
-    # contract: a failure here leaves the panel on its raw TEMP-table
-    # path for the affected hours.
-    try:
-        build_slow_urls_bundles(service_id, source, touched_hours)
-    except Exception as e:
-        logger.warning(
-            "[rollups] %s: slow_urls bundle failed (raw scan will serve): %s",
-            service_id,
-            e,
-        )
-
-    # Origin-summary rollup for the /origin summary card. Same posture.
-    try:
-        build_origin_summary_bundles(service_id, source, touched_hours)
-    except Exception as e:
-        logger.warning(
-            "[rollups] %s: origin_summary bundle failed (raw scan will serve): %s",
-            service_id,
-            e,
-        )
-
-    # Network-RTT per-ASN rollup for the /api/network-health
-    # rtt_percentiles_query panel (5.2 s on prod 30 d before this
-    # rollup). Same best-effort contract — a failure leaves the panel
-    # on its raw TEMP-table path for the affected hours.
-    try:
-        build_network_rtt_bundles(service_id, source, touched_hours)
-    except Exception as e:
-        logger.warning(
-            "[rollups] %s: network_rtt bundle failed (raw scan will serve): %s",
-            service_id,
-            e,
-        )
-
-    # Network-speed per-ASN per-c_speed distribution rollup for the
-    # /api/network-health speed_distribution_query panel (2.9 s on
-    # prod 30 d before this rollup). Exact counts SUM across hours —
-    # no _approx flag. Same best-effort contract.
-    try:
-        build_network_speed_bundles(service_id, source, touched_hours)
-    except Exception as e:
-        logger.warning(
-            "[rollups] %s: network_speed bundle failed (raw scan will serve): %s",
-            service_id,
-            e,
-        )
-
-    # Per-ASN heatmap metrics rollup for /api/network-health's heatmap +
-    # leaderboard + summary + buckets sections (all blocked by the 2–4 s
-    # create_filtered_temp_table on 30 d windows). Enables the skip-temp
-    # guard in get_health() when the geo rollup also hits. Same best-effort
-    # contract — a failure leaves those sections on the raw TEMP-table path.
-    try:
-        build_network_heatmap_bundles(service_id, source, touched_hours)
-    except Exception as e:
-        logger.warning(
-            "[rollups] %s: network_heatmap bundle failed (raw scan will serve): %s",
-            service_id,
-            e,
-        )
-
-    # Per-geocell metrics rollup for /api/network-health's map_buckets +
-    # cities + metro_leaderboard sections. Together with the heatmap rollup
-    # above, enables the skip-temp guard in get_health(). Same best-effort
-    # contract — a failure leaves those sections on the raw TEMP-table path.
-    try:
-        build_network_geo_bundles(service_id, source, touched_hours)
-    except Exception as e:
-        logger.warning(
-            "[rollups] %s: network_geo bundle failed (raw scan will serve): %s",
-            service_id,
-            e,
-        )
-
-    # Verified-bot minute-granular time-series rollup for the
-    # /api/security/aggregates verified_bots_ts panel (~1.2 s on prod
-    # 30 d before this rollup). Exact counts SUM across hours; the
-    # reader re-buckets from minute granularity and fills the active
-    # hour live. Same best-effort contract.
-    try:
-        build_verified_bots_ts_bundles(service_id, source, touched_hours)
-    except Exception as e:
-        logger.warning(
-            "[rollups] %s: verified_bots_ts bundle failed (raw scan will serve): %s",
-            service_id,
-            e,
-        )
-
-    # Per-hour top-N url/asn latency rollups for /api/performance/aggregates'
-    # top_urls (~1.45 s) + top_asns (~0.77 s) panels. Same per-dimension
-    # percentile-over-window shape as slow_urls; reader request-weight-
-    # averages + re-ranks by sort_by. Same best-effort contract.
-    try:
-        build_perf_latency_bundles(service_id, source, touched_hours)
-    except Exception as e:
-        logger.warning(
-            "[rollups] %s: perf_latency bundle failed (raw scan will serve): %s",
-            service_id,
-            e,
-        )
-
-    # Per-hour origin-dimension percentile rollups (pop / oip / edge) for
-    # /api/origin/aggregates' pop_latency + ip_health + path_breakdown panels.
-    # Same per-dimension percentile-over-window shape as slow_urls; reader
-    # request-weight-averages (error_pct stays exact via carried counts).
-    # Same best-effort contract — a failure leaves those panels on the raw
-    # TEMP-table path for the affected hours.
-    try:
-        build_origin_dims_bundles(service_id, source, touched_hours)
-    except Exception as e:
-        logger.warning(
-            "[rollups] %s: origin_dims bundle failed (raw scan will serve): %s",
-            service_id,
-            e,
-        )
-
-    # Per-hour MINUTE-granular origin-latency-percentile time-series rollup for
-    # /api/origin/aggregates' timeseries panel (the temp_table_create driver —
-    # this is the last section to roll up, enabling the skip-temp guard). Hybrid
-    # shape: time-series re-bucket (like verified_bots_ts) + request-weighted
-    # percentile merge (like slow_urls); counts exact, percentiles _approx.
-    # Same best-effort contract — a failure leaves the panel on the raw
-    # TEMP-table path for the affected hours.
-    try:
-        build_origin_latency_ts_bundles(service_id, source, touched_hours)
-    except Exception as e:
-        logger.warning(
-            "[rollups] %s: origin_latency_ts bundle failed (raw scan will serve): %s",
-            service_id,
-            e,
-        )
-
-    # Per-hour security-dimension rollups (req_size / conn_reuse / topips / cov)
-    # for /api/security/aggregates' equivalent panels (each an all-rows live
-    # scan today). EXACT counts/MAX SUM/merge across hours — no _approx flag.
-    # Same best-effort contract — a failure leaves those panels on the raw
-    # TEMP-table path for the affected hours.
-    try:
-        build_security_dims_bundles(service_id, source, touched_hours)
-    except Exception as e:
-        logger.warning(
-            "[rollups] %s: security_dims bundle failed (raw scan will serve): %s",
-            service_id,
-            e,
-        )
-
-    # Per-hour performance-dimension rollup (ttl_dist) for
-    # /api/performance/aggregates' ttl_dist histogram panel (an all-rows live
-    # scan today). EXACT counts SUM + MIN-of-MIN across hours — no _approx flag.
-    # Same best-effort contract — a failure leaves that panel on the raw
-    # TEMP-table path for the affected hours.
-    try:
-        build_perf_dims_bundles(service_id, source, touched_hours)
-    except Exception as e:
-        logger.warning(
-            "[rollups] %s: perf_dims bundle failed (raw scan will serve): %s",
-            service_id,
-            e,
-        )
-
-    # Per-hour NGWAF-bots rollup (waf_req_id ⨝ ngwaf_bot_cache aggregated at
-    # write time) for get_top_bots' ngwaf_bots panel. EXACT SUM across hours.
-    # Same best-effort contract — a failure leaves the panel on the direct
-    # base-table join for the affected hours.
-    try:
-        build_ngwaf_bots_bundles(service_id, source, touched_hours)
-    except Exception as e:
-        logger.warning(
-            "[rollups] %s: ngwaf_bots bundle failed (direct join will serve): %s",
-            service_id,
-            e,
-        )
-
-    # Per-hour overview rollup for /api/value/summary's combined
-    # overview + caching sections. All SUM-aggregatable — no _approx.
-    # Same best-effort contract — a failure leaves the summary page
-    # on its raw GROUP BY scan for the affected hours.
-    try:
-        build_overview_bundles(service_id, source, touched_hours)
-    except Exception as e:
-        logger.warning(
-            "[rollups] %s: overview bundle failed (raw scan will serve): %s",
-            service_id,
-            e,
-        )
-
-    try:
-        build_network_summary_bundles(service_id, source, touched_hours)
-    except Exception as e:
-        logger.warning(
-            "[rollups] %s: network_summary bundle failed (raw scan will serve): %s",
-            service_id,
-            e,
-        )
+    where_sql = "(" + " OR ".join(hour_ranges) + ")"
+    expected_sql = " UNION ALL ".join(f"({_build_copy_query(view_name, field, where_sql)})" for field in fields)
+    expected_rows = con.execute(
+        "SELECT hour, field, value, CAST(count AS BIGINT) AS count "
+        f"FROM ({expected_sql}) ORDER BY hour, field, value, count"
+    ).fetchall()
+    expected_by_hour: dict[str, list[tuple[str, str, int]]] = {hour: [] for hour in hours}
+    for hour, field, value, count in expected_rows:
+        if hour in expected_by_hour:
+            expected_by_hour[hour].append((field, value, count))
+    return expected_by_hour
 
 
-def backfill_rollups(service_id: str, source: dict, fields: list[str] | None = None) -> None:
-    """One-shot bulk build for all historical hours up to (but not including)
-    the current hour.
+def _hour_vectors_from_bundle(
+    con: Any,
+    bundle_paths: dict[str, str],
+    fields: list[str],
+) -> dict[str, list[tuple[str, str, int]]]:
+    if not bundle_paths or not fields:
+        return {hour: [] for hour in bundle_paths}
+    field_list = ", ".join(f"'{field}'" for field in fields)
+    paths_sql = quote_path_list(list(bundle_paths.values()))
+    actual_rows = con.execute(
+        "SELECT regexp_extract(filename, 'hour=([0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]{2})', 1) AS hour, "
+        "field, value, CAST(count AS BIGINT) AS count "
+        f"FROM read_parquet([{paths_sql}], filename=true, hive_partitioning=false) "
+        f"WHERE field IN ({field_list}) ORDER BY hour, field, value, count"
+    ).fetchall()
+    actual_by_hour: dict[str, list[tuple[str, str, int]]] = {hour: [] for hour in bundle_paths}
+    for hour, field, value, count in actual_rows:
+        if hour in actual_by_hour:
+            actual_by_hour[hour].append((field, value, count))
+    return actual_by_hour
 
-    ``fields``: if provided, only backfills the given subset (used when a
-    new custom field is added).
-    Defaults to all eligible fields.
-    """
-    table_ident = _safe_table_for(source)
-    if not table_ident:
-        return
 
-    target_fields = fields if fields is not None else _get_fields(source)
-    if not target_fields:
-        return
+def _stale_hour_bundle_vectors(
+    con: Any,
+    view_name: str,
+    bundle_paths: dict[str, str],
+    fields: list[str],
+) -> set[str]:
+    """Compare saved Top-K rows with the canonical raw writer in two bounded scans."""
+    if not bundle_paths or not fields:
+        return set()
+    expected_by_hour = _hour_vectors_from_raw(con, view_name, list(bundle_paths), fields)
+    actual_by_hour = _hour_vectors_from_bundle(con, bundle_paths, fields)
+    return {hour for hour in bundle_paths if expected_by_hour[hour] != actual_by_hour[hour]}
 
-    dt_end = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
-    where_sql = f"timestamp < '{dt_end.isoformat()}'"
-    _run_per_field_copy(service_id, source, table_ident, where_sql, target_fields)
 
-    # IP-spread companion to the count rollup — see _run_ip_spread_per_field
-    # for why this can't run as a pure SQL COPY. Best-effort; the count
-    # rollup completing successfully is the primary contract of this
-    # call, and the IP-spread reader has its own fallback when files are
-    # missing.
-    try:
-        _run_ip_spread_per_field(service_id, source, table_ident, where_sql, target_fields)
-    except Exception as e:
-        logger.warning(
-            "[rollups] %s: backfill ip_spread per-field write failed (count rollup unaffected): %s",
-            service_id,
-            e,
-        )
+def _daily_covered_hours(
+    con: Any,
+    source: dict,
+    start: datetime,
+    end: datetime,
+    raw_counts: dict[str, int],
+    required_fields: set[str],
+) -> set[str]:
+    """Recognize retired hours only with readable, complete daily evidence."""
+    import duckdb
 
-    # Stamp completion in the markers file so _ensure_rollups can detect
-    # which fields still need a backfill on next startup / cfg change.
-    markers = _load_markers(source)
-    stamp = datetime.now(UTC).isoformat()
-    for f in target_fields:
-        markers[f] = stamp
-    _save_markers(source, markers)
+    covered: set[str] = set()
+    root = _day_bundled_root(source)
+    for day, hours in CoverageIndex.build(start, end, now=end).by_day().items():
+        # A current-day aggregate cannot establish closed-day coverage.
+        if day >= end.strftime("%Y-%m-%d"):
+            continue
+        bundle = _day_bundle_file(root, day, ALL_FIELDS_FILENAME)
+        reference = _day_bundle_file(root, day, TIME_SERIES_BUNDLE_FILENAME)
+        if bundle is None or reference is None or _bundle_metadata(bundle) is None:
+            continue
+        try:
+            minutes = validated_daily_reference_minutes(con, reference, parse_day_key_strict(day))
+            counts: dict[str, int] = {}
+            for bucket, requests in minutes.items():
+                hour = bucket.strftime("%Y-%m-%d-%H")
+                counts[hour] = counts.get(hour, 0) + requests
+            if any(raw_counts.get(hour, 0) != counts.get(hour, 0) for hour in hours):
+                continue
+            rows = con.execute(
+                f"SELECT field, SUM(count), MIN(count), COUNT(count), COUNT(*) "
+                f"FROM read_parquet([{quote_path_list([bundle])}], hive_partitioning=false) GROUP BY field"
+            ).fetchall()
+            if any(
+                field is None or minimum is None or minimum < 0 or nonnull != n or not math.isfinite(total)
+                for field, total, minimum, nonnull, n in rows
+            ):
+                continue
+            totals = {field: total for field, total, *_ in rows}
+            total_requests = sum(minutes.values())
+            if total_requests and not required_fields.issubset(totals):
+                continue
+            # The low-cardinality core fields carry every request. IP is
+            # Top-K capped, so its total is not an independent count oracle.
+            if any(totals.get(field, 0) != total_requests for field in required_fields - {"ip"}):
+                continue
+            if total_requests and not rows:
+                continue
+        except (duckdb.Error, OSError, RuntimeError, ValueError) as exc:
+            logger.debug("[rollups] daily coverage rejected day=%s: %s", day, exc)
+            continue
+        covered.update(hours)
+    return covered
 
 
 def backfill_missing_hour_bundles(
     service_id: str,
     source: dict,
     lookback_days: int = 30,
-) -> dict[str, int]:
-    """Self-heal pass: find closed hours where the iceberg view has rows
-    but no ``hour_bundled/`` file exists, then rebuild per-field rollups
-    + bundle for those hours.
-
-    The ``recompute_touched_hours`` hot path is driven by the ingest
-    pipeline's "touched hours" set — if ingest under-reports (sync delay,
-    a retried ingest commit that landed AFTER the recompute fired for
-    that hour, the hour was never seen as touched at all), the per-field
-    rollup never gets written and the hour_bundler then silently skips
-    the hour ("no per-field files exist (nothing to bundle)"). The
-    dashboard's reader has no fallback path — those rows just disappear
-    from top-N panels.
-
-    This driver checks for that gap directly against the iceberg view
-    and runs the rebuild via the same code path the cron tick uses. Safe
-    to call on every daily compaction tick — idempotent (no-op when the
-    bundle tree is complete).
-
-    Returns a summary dict: ``{"missing": N, "rebuilt_fields": F,
-    "bundled": B, "stamped_empty": E}`` so callers can log a concise
-    progress line. ``stamped_empty`` counts zero-row closed hours that
-    received an empty sentinel bundle (see
-    :func:`~backend.core.rollups.hour_bundles.stamp_empty_hour_sentinels`)
-    so the reader can tell verified-empty apart from writer-gap.
-    """
+    max_missing_hours: int | None = None,
+) -> dict[str, int | bool]:
+    """Rebuild closed hours with raw rows and neither hourly nor valid daily coverage."""
     import duckdb as _ddb
 
-    from backend.core.iceberg import update_iceberg_view
-    from backend.core.rollups._common import _hour_bundled_root
+    from backend.core.storage import update_storage_view
 
     bundled_root = _hour_bundled_root(source)
     existing: set[str] = set()
+    invalid_bundles: set[str] = set()
+    repair_hours: set[str] = set()
     if os.path.isdir(bundled_root):
         try:
             for e in os.listdir(bundled_root):
                 if e.startswith("hour="):
-                    existing.add(e[len("hour=") :])
+                    hour = e[len("hour=") :]
+                    bundle_path = os.path.join(bundled_root, e, "all_fields.parquet")
+                    if os.path.isfile(bundle_path):
+                        metadata = _bundle_metadata(bundle_path)
+                        if metadata is None:
+                            invalid_bundles.add(hour)
+                        elif metadata.num_rows > 0:
+                            existing.add(hour)
         except OSError:
             pass
 
     active = datetime.now(UTC).strftime("%Y-%m-%d-%H")
     end_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
     start_dt = end_dt - timedelta(days=lookback_days)
+    daily_covered: set[str] = set()
 
-    # Discover hours with data via the iceberg view. We use the view (not
-    # the per-service .duckdb file directly) so this runs concurrently
-    # with uvicorn's RW connection on that file — backed by a fresh
-    # in-memory DuckDB connection that holds no persistent state.
+    def _coverage_complete() -> bool:
+        cur = start_dt
+        while cur < end_dt:
+            hour = cur.strftime("%Y-%m-%d-%H")
+            cur += timedelta(hours=1)
+            if hour >= active:
+                break
+            if (
+                hour not in daily_covered
+                and _bundle_metadata(os.path.join(bundled_root, f"hour={hour}", "all_fields.parquet")) is None
+            ):
+                return False
+        return True
+
     con = _ddb.connect(":memory:")
-    from backend.core.duckdb import _configure_fos
-
-    _configure_fos(con, source)
     try:
-        update_iceberg_view(con, source)
-        # The view's actual SQL identifier is set by update_iceberg_view
-        # — query through ``information_schema`` to find it rather than
-        # guess (the name is derived from source["name"]/svc_name, not
-        # source["service_id"]).
+        con.execute("SET TimeZone='UTC'")
+        from backend.core.duckdb import _configure_fos, _safe_table_name
+
+        _configure_fos(con, source)
+        update_storage_view(con, source)
+        from backend import config as svcconfig
+
+        if svcconfig.is_durable_serving_mode(source):
+            lake_row = con.execute("SELECT 1 FROM duckdb_databases() WHERE database_name = 'lake' LIMIT 1").fetchone()
+            if lake_row is None:
+                logger.warning(
+                    "[rollups] %s: backfill_missing_hour_bundles could not attach DuckLake catalog",
+                    service_id,
+                )
+                return {"missing": 0, "rebuilt_fields": 0, "bundled": 0, "coverage_verified": False}
+
+        view_name = _safe_table_name(source.get("name") or service_id)
         view_row = con.execute(
-            "SELECT table_name FROM information_schema.tables WHERE table_name LIKE 'logs_%' LIMIT 1"
+            "SELECT table_name FROM information_schema.tables WHERE table_name = ?",
+            [view_name],
         ).fetchone()
-        if view_row is None:
-            return {"missing": 0, "rebuilt_fields": 0, "bundled": 0}
+        if view_row is None or not _is_safe_ident(view_row[0]):
+            return {"missing": 0, "rebuilt_fields": 0, "bundled": 0, "coverage_verified": False}
         view_name = view_row[0]
-        if not _is_safe_ident(view_name):
-            return {"missing": 0, "rebuilt_fields": 0, "bundled": 0}
         try:
             rows = con.execute(
                 f"SELECT strftime(timestamp, '%Y-%m-%d-%H') AS h, COUNT(*) AS n "
@@ -480,28 +520,117 @@ def backfill_missing_hour_bundles(
             ).fetchall()
         except _ddb.Error as e:
             logger.warning("[rollups] %s: backfill_missing_hour_bundles view query failed: %s", service_id, e)
-            return {"missing": 0, "rebuilt_fields": 0, "bundled": 0}
+            return {"missing": 0, "rebuilt_fields": 0, "bundled": 0, "coverage_verified": False}
 
-        missing = sorted(h for h, _ in rows if h < active and h not in existing)
+        in_window_with_data = {h for h, _ in rows if h < active}
+        repair_hours.update(invalid_bundles & in_window_with_data)
+        try:
+            view_cols = {
+                r[0]
+                for r in con.execute(
+                    "SELECT column_name FROM information_schema.columns WHERE table_name = ?", [view_name]
+                ).fetchall()
+            }
+        except _ddb.Error as e:
+            logger.warning("[rollups] %s: hourly bundle schema validation failed: %s", service_id, e)
+            return {"missing": 0, "rebuilt_fields": 0, "bundled": 0, "coverage_verified": False}
+        required_bundle_fields = sorted(view_cols & {"ip", "status", "method", "pop"})
+        vector_fields = sorted(view_cols & {"country", "ip", "status", "method", "pop"})
+        if view_cols:
+            daily_covered = _daily_covered_hours(con, source, start_dt, end_dt, dict(rows), set(required_bundle_fields))
+        candidate_existing = sorted(existing & in_window_with_data)
+        if candidate_existing:
+            if required_bundle_fields:
+                bundle_paths: list[str] = []
+                candidate_hours: list[str] = []
+                for h in candidate_existing:
+                    bp = os.path.join(bundled_root, f"hour={h}", "all_fields.parquet")
+                    if os.path.isfile(bp):
+                        bundle_paths.append(bp)
+                        candidate_hours.append(h)
+                if bundle_paths:
+                    try:
+                        paths_sql = quote_path_list(bundle_paths)
+                        req_in = ", ".join(f"'{f}'" for f in required_bundle_fields)
+                        complete_rows = con.execute(
+                            f"SELECT regexp_extract(filename, 'hour=([0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}}-[0-9]{{2}})', 1) AS h "
+                            f"FROM read_parquet([{paths_sql}], filename=true, hive_partitioning=0) "
+                            f"WHERE field IN ({req_in}) "
+                            f"GROUP BY 1 "
+                            f"HAVING COUNT(DISTINCT field) >= {len(required_bundle_fields)}"
+                        ).fetchall()
+                        complete_hours = {r[0] for r in complete_rows if r and r[0]}
+                        incomplete_hours = set(candidate_hours) - complete_hours
+                        if incomplete_hours:
+                            logger.info(
+                                "[rollups] %s: backfill_missing_hour_bundles found %d incomplete hour bundle(s) missing core fields %s: %s",
+                                service_id,
+                                len(incomplete_hours),
+                                required_bundle_fields,
+                                sorted(incomplete_hours)[:10],
+                            )
+                            existing -= incomplete_hours
+                            repair_hours.update(incomplete_hours)
+                    except _ddb.Error as e:
+                        logger.warning(
+                            "[rollups] %s: hourly bundle completeness validation failed: %s",
+                            service_id,
+                            e,
+                        )
+                        return {
+                            "missing": 0,
+                            "rebuilt_fields": 0,
+                            "bundled": 0,
+                            "coverage_verified": False,
+                        }
+                if vector_fields and candidate_hours:
+                    candidate_paths = {
+                        h: os.path.join(bundled_root, f"hour={h}", "all_fields.parquet") for h in candidate_hours
+                    }
+                    try:
+                        stale_hours = _stale_hour_bundle_vectors(con, view_name, candidate_paths, vector_fields)
+                    except _ddb.Error as e:
+                        logger.warning("[rollups] %s: hourly bundle vector validation failed: %s", service_id, e)
+                        return {
+                            "missing": 0,
+                            "rebuilt_fields": 0,
+                            "bundled": 0,
+                            "coverage_verified": False,
+                        }
+                    if stale_hours:
+                        logger.info(
+                            "[rollups] %s: backfill_missing_hour_bundles found %d stale hour vector(s): %s",
+                            service_id,
+                            len(stale_hours),
+                            sorted(stale_hours)[:10],
+                        )
+                        existing -= stale_hours
+                        repair_hours.update(stale_hours)
 
-        # Closed hours with genuinely ZERO rows can never acquire coverage
-        # through the data-driven writers (the HAVING n > 0 above never
-        # surfaces them) — stamp those with an empty sentinel bundle so the
-        # reader's missing-hour live heal doesn't classify them as writer
-        # gaps and re-scan them on every request forever.
+        missing = sorted(h for h, _ in rows if h < active and h not in existing and h not in daily_covered)
+        if max_missing_hours is not None:
+            if max_missing_hours < 1:
+                raise ValueError("max_missing_hours must be positive")
+            missing = missing[:max_missing_hours]
+
         with_data = {h for h, _ in rows}
         empty_hours: list[str] = []
         cur = start_dt
         while cur < end_dt:
             h = cur.strftime("%Y-%m-%d-%H")
             cur += timedelta(hours=1)
-            if h >= active or h in existing or h in with_data:
+            if h >= active or h in existing or h in with_data or h in daily_covered:
                 continue
             empty_hours.append(h)
 
         if not missing and not empty_hours:
-            return {"missing": 0, "rebuilt_fields": 0, "bundled": 0, "stamped_empty": 0}
-
+            return {
+                "missing": 0,
+                "rebuilt_fields": 0,
+                "bundled": 0,
+                "stamped_empty": 0,
+                "coverage_verified": _coverage_complete(),
+            }
         if missing:
             logger.info(
                 "[rollups] %s: backfill_missing_hour_bundles found %d hour(s) missing bundles: %s",
@@ -509,43 +638,129 @@ def backfill_missing_hour_bundles(
                 len(missing),
                 missing[:10] + (["…"] if len(missing) > 10 else []),
             )
-
-        # Reuse recompute_touched_hours so the full per-field write +
-        # post-write bundle pipeline runs. recompute_touched_hours
-        # opens its own RO connection on the per-service .duckdb file,
-        # which contends with uvicorn — close ours first.
     finally:
         con.close()
 
-    from backend.core.rollups.hour_bundles import stamp_empty_hour_sentinels
+    missing_hours = set(missing)
+    repair_hours.intersection_update(missing_hours)
+    ordinary_missing = missing_hours - repair_hours
+    verified_repair_hours: set[str] = set()
+    if repair_hours:
+        from backend.core.storage.catalog import DuckLakeAdmissionTimeout, ducklake_write_admission
+
+        try:
+            with ducklake_write_admission(service_id):
+                table_ident = _safe_table_for(source)
+                if not table_ident:
+                    raise RuntimeError("safe raw view name unavailable for stale-hour repair")
+                with shared_rollup_session(source) as session:
+                    repair_con, _ = session.acquire(
+                        table_ident,
+                        logger=logger,
+                        log_label="stale-hour repair source",
+                    )
+                    expected_raw_counts = {h: int(n) for h, n in rows if h in repair_hours}
+                    repair_ranges = []
+                    for hour in sorted(repair_hours):
+                        hour_start = parse_hour_token(hour)
+                        if hour_start is None:
+                            raise ValueError(f"invalid repair hour: {hour}")
+                        repair_ranges.append(
+                            f"(timestamp >= TIMESTAMPTZ '{hour_start.isoformat()}' AND "
+                            f"timestamp < TIMESTAMPTZ '{(hour_start + timedelta(hours=1)).isoformat()}')"
+                        )
+                    repair_rows = repair_con.execute(
+                        f"SELECT strftime(timestamp, '%Y-%m-%d-%H') AS h, COUNT(*) AS n "
+                        f"FROM {table_ident} WHERE ({' OR '.join(repair_ranges)}) GROUP BY 1"
+                    ).fetchall()
+                    repair_raw_counts = {h: int(n) for h, n in repair_rows}
+                    if repair_raw_counts != expected_raw_counts:
+                        raise RuntimeError("raw request counts changed before stale-hour repair")
+                    if vector_fields:
+                        expected_vectors = _hour_vectors_from_raw(
+                            repair_con,
+                            table_ident,
+                            sorted(repair_hours),
+                            vector_fields,
+                        )
+                        recompute_touched_hours(
+                            service_id,
+                            source,
+                            repair_hours,
+                            expected_vectors=expected_vectors,
+                            expected_fields=vector_fields,
+                        )
+                        repair_paths = {
+                            h: os.path.join(bundled_root, f"hour={h}", "all_fields.parquet") for h in repair_hours
+                        }
+                        try:
+                            actual_vectors = _hour_vectors_from_bundle(repair_con, repair_paths, vector_fields)
+                        except _ddb.Error:
+                            actual_vectors = {}
+                        verified_repair_hours = {
+                            hour for hour in repair_hours if actual_vectors.get(hour) == expected_vectors.get(hour)
+                        }
+                    else:
+                        recompute_touched_hours(service_id, source, repair_hours)
+        except DuckLakeAdmissionTimeout as e:
+            logger.warning(
+                "[rollups] %s: stale-hour repair deferred because writer admission is unavailable: %s",
+                service_id,
+                e,
+            )
+            return {
+                "missing": len(missing),
+                "rebuilt_fields": 0,
+                "bundled": 0,
+                "stamped_empty": 0,
+                "coverage_verified": False,
+            }
+        except (_ddb.Error, RuntimeError, ValueError) as e:
+            logger.warning(
+                "[rollups] %s: stale-hour repair validation failed; existing bundles retained: %s",
+                service_id,
+                e,
+            )
+            return {
+                "missing": len(missing),
+                "rebuilt_fields": 0,
+                "bundled": 0,
+                "stamped_empty": 0,
+                "coverage_verified": False,
+            }
 
     stamped = stamp_empty_hour_sentinels(service_id, source, empty_hours)
-    if not missing:
-        return {"missing": 0, "rebuilt_fields": 0, "bundled": 0, "stamped_empty": stamped}
+    if ordinary_missing:
+        recompute_touched_hours(service_id, source, ordinary_missing)
 
-    recompute_touched_hours(service_id, source, set(missing))
+    rebuilt_hours = repair_hours | ordinary_missing
+    if not rebuilt_hours:
+        return {
+            "missing": 0,
+            "rebuilt_fields": 0,
+            "bundled": 0,
+            "stamped_empty": stamped,
+            "coverage_verified": _coverage_complete(),
+        }
 
-    # Verify how many bundles materialised. (recompute_touched_hours
-    # bundles internally, but a per-hour COPY can yield 0 rows for a
-    # field that genuinely has no values in that hour — leaving the
-    # bundle un-written for that hour. The count below is what's on
-    # disk after the call.)
     bundled_now = 0
-    missing_set = set(missing)
     if os.path.isdir(bundled_root):
         try:
             for entry in os.listdir(bundled_root):
-                if entry.startswith("hour=") and entry[len("hour=") :] in missing_set:
-                    if os.path.isfile(os.path.join(bundled_root, entry, "all_fields.parquet")):
+                if entry.startswith("hour=") and entry[len("hour=") :] in rebuilt_hours:
+                    if _bundle_metadata(os.path.join(bundled_root, entry, "all_fields.parquet")) is not None:
+                        if entry[len("hour=") :] in repair_hours and entry[len("hour=") :] not in verified_repair_hours:
+                            continue
                         bundled_now += 1
         except OSError:
             pass
 
     return {
-        "missing": len(missing),
+        "missing": len(rebuilt_hours),
         "rebuilt_fields": len(_get_fields(source)),
         "bundled": bundled_now,
         "stamped_empty": stamped,
+        "coverage_verified": _coverage_complete() and not (repair_hours - verified_repair_hours),
     }
 
 
@@ -554,34 +769,9 @@ def backfill_missing_hour_ip_spread(
     source: dict,
     lookback_days: int = 30,
 ) -> dict[str, int]:
-    """Self-heal pass for the IP-spread bundle tree.
-
-    The IP-spread rollup shipped after the count rollup was already
-    backfilled for most services, so a daily-compaction tick on a
-    pre-existing service will discover closed hours where
-    ``rollups/hour_bundled/hour=H/all_fields.parquet`` exists but
-    ``all_fields_ip.parquet`` does NOT. Walks the bundled-hour tree,
-    finds those hours, and re-runs :func:`recompute_touched_hours`
-    against them — which writes per-field ip_spread parquets AND
-    bundles them in one pass.
-
-    Bounded by ``lookback_days`` (default 30) so a one-time backfill
-    can't run away on a long-lived service. Idempotent — already-
-    populated hours are skipped via the ``all_fields_ip.parquet``
-    presence check.
-
-    Returns ``{"missing": N, "rebuilt": M}``. ``rebuilt`` is the
-    count we asked recompute to rebuild; the actual per-hour parquet
-    count depends on which fields had data, which the count rollup
-    already tracks (and which doesn't affect the bundle's existence).
-    """
-    from backend.core.rollups._common import IP_SPREAD_BUNDLE_FILENAME, _hour_bundled_root
-
+    """Self-heal pass for the IP-spread bundle tree."""
     bundled_root = _hour_bundled_root(source)
     if not os.path.isdir(bundled_root):
-        # No bundle tree yet — backfill_missing_hour_bundles will create
-        # the initial bundles + ip_spread on its next pass; nothing to
-        # heal independently here.
         return {"missing": 0, "rebuilt": 0}
 
     end_dt = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
@@ -594,12 +784,9 @@ def backfill_missing_hour_ip_spread(
                 continue
             hour = entry[len("hour=") :]
             parsed = parse_hour_token(hour)
-            if parsed is None:
+            if parsed is None or parsed < start_dt or parsed >= end_dt:
                 continue
-            if parsed < start_dt or parsed >= end_dt:
-                continue
-            ip_bundle = os.path.join(bundled_root, entry, IP_SPREAD_BUNDLE_FILENAME)
-            if not os.path.isfile(ip_bundle):
+            if not os.path.isfile(os.path.join(bundled_root, entry, IP_SPREAD_BUNDLE_FILENAME)):
                 missing.append(hour)
     except OSError:
         return {"missing": 0, "rebuilt": 0}
@@ -613,53 +800,111 @@ def backfill_missing_hour_ip_spread(
         len(missing),
         missing[:10] + (["…"] if len(missing) > 10 else []),
     )
-
-    # Re-trigger the full recompute for these hours. That writes per-
-    # field count + ip_spread, then bundles both — covers both the
-    # case where ip_spread was never built and the case where the
-    # bundle is missing but per-field ip_spread exists (idempotent
-    # re-bundle is cheap).
     recompute_touched_hours(service_id, source, set(missing))
-
     return {"missing": len(missing), "rebuilt": len(missing)}
 
 
-def cleanup_old_rollups(service_id: str, source: dict, max_age_days: int) -> int:
-    """Delete per-hour rollup directories older than ``max_age_days``.
+def _prune_partition_dirs(
+    parent_dir: str,
+    cutoff_str: str,
+    prefix: str,
+    *,
+    should_delete: Callable[[str], bool] | None = None,
+) -> int:
+    """Remove ``<prefix><token>`` child directories under *parent_dir* older than *cutoff_str*."""
+    deleted = 0
+    for entry in os.listdir(parent_dir):
+        if not entry.startswith(prefix):
+            continue
+        token = entry[len(prefix) :]
+        if should_delete(token) if should_delete is not None else token < cutoff_str:
+            target_dir = os.path.join(parent_dir, entry)
+            try:
+                shutil.rmtree(target_dir)
+                deleted += 1
+            except OSError as e:
+                logger.warning("[rollups] could not delete %s: %s", target_dir, e)
+    return deleted
 
-    ``max_age_days <= 0`` disables cleanup (keep everything). Returns the
-    number of hour-dirs deleted. Safe to call concurrently with the
-    writers because we only ever delete hours STRICTLY older than the
-    cutoff — current and just-written hours are never candidates.
-    """
+
+def cleanup_old_rollups(
+    service_id: str,
+    source: dict,
+    max_age_days: int,
+    *,
+    hour_bundle_max_age_days: int | None = None,
+) -> int:
+    """Delete per-hour and per-day rollup directories older than retention limits."""
     if max_age_days <= 0:
-        return 0
-    rollup_root = _rollups_root(source)
-    if not os.path.isdir(rollup_root):
         return 0
 
     cutoff = (datetime.now(UTC) - timedelta(days=max_age_days)).strftime("%Y-%m-%d-%H")
+    day_cutoff = cutoff[:10]
+    hour_cutoff = (
+        (datetime.now(UTC) - timedelta(days=hour_bundle_max_age_days)).strftime("%Y-%m-%d-%H")
+        if hour_bundle_max_age_days and hour_bundle_max_age_days > 0
+        else cutoff
+    )
+
     deleted = 0
-    try:
-        for field_entry in os.listdir(rollup_root):
-            if not field_entry.startswith("field="):
-                continue
-            field_dir = os.path.join(rollup_root, field_entry)
-            for hour_entry in os.listdir(field_dir):
-                if not hour_entry.startswith("hour="):
-                    continue
-                hour = hour_entry[len("hour=") :]
-                # String compare works because the format is fixed-width
-                # YYYY-MM-DD-HH which sorts lexicographically by time.
-                if hour < cutoff:
-                    hour_dir = os.path.join(field_dir, hour_entry)
+    for root_dir, walk_label in ((_rollups_root(source), "hour"), (_ip_spread_root(source), "ip_spread")):
+        if not os.path.isdir(root_dir):
+            continue
+        try:
+            for field_entry in os.listdir(root_dir):
+                if field_entry.startswith("field="):
                     try:
-                        shutil.rmtree(hour_dir)
-                        deleted += 1
-                    except OSError as e:
-                        logger.warning("[rollups] could not delete %s: %s", hour_dir, e)
-    except OSError as e:
-        logger.warning("[rollups] cleanup walk failed for %s: %s", service_id, e)
+                        deleted += _prune_partition_dirs(os.path.join(root_dir, field_entry), hour_cutoff, "hour=")
+                    except OSError:
+                        continue
+        except OSError as e:
+            logger.warning("[rollups] cleanup walk failed for %s (%s): %s", service_id, walk_label, e)
+
+    day_bundled_root = _day_bundled_root(source)
+    if os.path.isdir(day_bundled_root):
+        try:
+            deleted += _prune_partition_dirs(day_bundled_root, day_cutoff, "day=")
+        except OSError as e:
+            logger.warning("[rollups] cleanup walk failed for %s (day_bundled): %s", service_id, e)
+
+    day_root = _day_rollups_root(source)
+    if os.path.isdir(day_root):
+        try:
+            for field_entry in os.listdir(day_root):
+                if field_entry.startswith("field="):
+                    try:
+                        deleted += _prune_partition_dirs(
+                            os.path.join(day_root, field_entry),
+                            day_cutoff,
+                            "day=",
+                            should_delete=lambda day: (
+                                os.path.isfile(os.path.join(day_bundled_root, f"day={day}", "all_fields.parquet"))
+                                or day < day_cutoff
+                            ),
+                        )
+                    except OSError:
+                        continue
+        except OSError as e:
+            logger.warning("[rollups] cleanup walk failed for %s (day): %s", service_id, e)
+
+    hour_bundled_root = _hour_bundled_root(source)
+    if os.path.isdir(hour_bundled_root):
+        try:
+            deleted += _prune_partition_dirs(
+                hour_bundled_root,
+                cutoff,
+                "hour=",
+                should_delete=lambda hour: (
+                    (
+                        os.path.isfile(os.path.join(day_bundled_root, f"day={hour[:10]}", "all_fields.parquet"))
+                        and hour < hour_cutoff
+                    )
+                    or hour < cutoff
+                ),
+            )
+        except OSError as e:
+            logger.warning("[rollups] cleanup walk failed for %s (hour_bundled): %s", service_id, e)
+
     return deleted
 
 
@@ -669,38 +914,49 @@ def _run_per_field_copy(
     table_ident: str,
     where_sql: str,
     fields: list[str],
-) -> None:
-    """Shared core of recompute_touched_hours and backfill_rollups.
-
-    One COPY query per field, writing to a per-field temp directory via
-    PARTITION_BY (field, hour), then publishing each hour-dir under the
-    per-service iceberg lock.
-    """
-    import duckdb
-
-    from backend.core.duckdb import _cache_dir, get_connection
-    from backend.core.iceberg.view import _get_service_lock
+    *,
+    replace_hours: list[str] | None = None,
+    require_fields: set[str] | None = None,
+) -> bool:
+    """Shared core of recompute_touched_hours and backfill_rollups."""
+    from backend.core.duckdb import _cache_dir
+    from backend.core.storage import execute_with_stale_view_retry
+    from backend.core.storage._core import _get_service_lock
 
     cache_root = _cache_dir(source)
     rollups_dir = _rollups_root(source)
     os.makedirs(rollups_dir, exist_ok=True)
     lock_key = source.get("name", "default")
 
-    con = get_connection(source=source, read_only=True)
+    con, cols, owns_con = acquire_rollup_connection_and_cols(
+        source,
+        table_ident,
+        logger=logger,
+        log_label="could not describe",
+    )
     try:
-        cols = describe_columns(con, source, table_ident, logger=logger, log_label="could not describe")
         if cols is None:
-            return
+            return not require_fields
+        required_fields = (require_fields or set()) & cols
+        fields_to_copy = list(dict.fromkeys([*fields, *sorted(required_fields)]))
+        failed_required_fields: set[str] = set()
 
-        for field in fields:
+        scan_table, scan_where = table_ident, where_sql
+        if not owns_con:
+            from backend.core.rollups.bundle_builder import _SHARED_ROLLUP_SESSION
+
+            session = _SHARED_ROLLUP_SESSION.get()
+            if session is not None and session.source is source:
+                scan_table, scan_where = session.materialize_slice(
+                    table_ident,
+                    where_sql,
+                    logger=logger,
+                )
+
+        for field in fields_to_copy:
             if not _is_safe_ident(field):
-                # Belt-and-suspenders — _get_fields already filters, but
-                # defend against direct callers passing raw names.
                 logger.warning("[rollups] skipping unsafe field name: %r", field)
                 continue
-            # Virtual fields rollup the unnested CSV column instead of the
-            # column itself — skip-test on the BACKING column, not the
-            # virtual name (which never exists in the table schema).
             backing_col = _VIRTUAL_FIELD_BACKING.get(field)
             if backing_col is not None:
                 if backing_col not in cols or not _is_safe_ident(backing_col):
@@ -708,30 +964,35 @@ def _run_per_field_copy(
             elif field not in cols:
                 continue
 
-            tmp_field_dir = os.path.join(cache_root, "rollups", "tmp", field)
+            tmp_field_dir = os.path.join(cache_root, "rollups", "tmp", f"{field}_{uuid.uuid4().hex[:8]}")
             shutil.rmtree(tmp_field_dir, ignore_errors=True)
             os.makedirs(tmp_field_dir, exist_ok=True)
 
-            if backing_col is not None:
-                inner = _build_virtual_field_copy_query(table_ident, field, backing_col, where_sql)
-            else:
-                inner = _build_copy_query(table_ident, field, where_sql)
+            inner = (
+                _build_virtual_field_copy_query(scan_table, field, backing_col, scan_where)
+                if backing_col is not None
+                else _build_copy_query(scan_table, field, scan_where)
+            )
             query = (
                 f"COPY ({inner}) TO '{tmp_field_dir}' "
                 "(FORMAT PARQUET, PARTITION_BY (field, hour), OVERWRITE_OR_IGNORE, COMPRESSION ZSTD)"
             )
             try:
-                con.execute(query)
-            except duckdb.Error as e:
+                execute_with_stale_view_retry(con, source, lambda c: c.execute(query))
+            except Exception as e:  # noqa: BLE001
                 logger.warning("[rollups] %s: COPY failed for field=%s: %s", service_id, field, e)
+                if field in required_fields:
+                    failed_required_fields.add(field)
                 shutil.rmtree(tmp_field_dir, ignore_errors=True)
                 continue
 
             with _get_service_lock(lock_key):
-                _publish_field_partitions(tmp_field_dir, rollups_dir, field)
+                _publish_field_partitions(tmp_field_dir, rollups_dir, field, hours=replace_hours)
             shutil.rmtree(tmp_field_dir, ignore_errors=True)
+        return not failed_required_fields
     finally:
-        con.close()
+        if owns_con:
+            con.close()
 
 
 def _run_ip_spread_per_field(
@@ -741,33 +1002,10 @@ def _run_ip_spread_per_field(
     where_sql: str,
     fields: list[str],
 ) -> None:
-    """Build the per-(field, hour, value) HLL IP-spread parquets.
-
-    Parallel writer to :func:`_run_per_field_copy` for the count rollup.
-    Differs in that it can't run as a pure SQL ``COPY`` — DuckDB 1.5.3
-    doesn't expose HyperLogLog sketches as values, so the writer pulls
-    each ``(field, hour, value, ip_sample, ip_count_observed)`` row
-    into Python via Arrow, builds the sketch with
-    :class:`backend.utils.hll.HyperLogLog`, then writes the sketch
-    bytes + observed count + cap flag back out as parquet via
-    pyarrow's ``write_to_dataset``. The output tree mirrors the count
-    rollup's hive layout (``field=X/hour=Y/<file>.parquet``) so the
-    same ``_publish_field_partitions`` helper publishes both atomically
-    under the per-service iceberg lock.
-
-    Skips entirely when the table has no ``ip`` column or the
-    field-list doesn't intersect the schema; virtual fields are
-    skipped here too (the IP-spread question only makes sense for raw
-    indexed columns, not the unnested CSV virtual fields). A failure
-    on one field logs + continues so the rest of the fields still
-    publish on the same cron tick.
-    """
-    import duckdb
-    import pyarrow as pa
-    import pyarrow.parquet as pq
-
-    from backend.core.duckdb import _cache_dir, get_connection
-    from backend.core.iceberg.view import _get_service_lock
+    """Build the per-(field, hour, value) HLL IP-spread parquets."""
+    from backend.core.duckdb import _cache_dir
+    from backend.core.storage import execute_with_stale_view_retry
+    from backend.core.storage._core import _get_service_lock
     from backend.utils.hll import HyperLogLog
 
     cache_root = _cache_dir(source)
@@ -775,48 +1013,42 @@ def _run_ip_spread_per_field(
     os.makedirs(ip_spread_dir, exist_ok=True)
     lock_key = source.get("name", "default")
 
-    con = get_connection(source=source, read_only=True)
+    con, cols, owns_con = acquire_rollup_connection_and_cols(
+        source,
+        table_ident,
+        logger=logger,
+        log_label="ip_spread describe",
+    )
     try:
-        cols = describe_columns(con, source, table_ident, logger=logger, log_label="ip_spread describe")
-        if cols is None:
+        if cols is None or "ip" not in cols:
             return
-        if "ip" not in cols:
-            # Schema doesn't carry ip — no IP-spread to build. The
-            # security FE handles this case today (the fingerprint
-            # cards return empty when "ip" isn't present); the
-            # rollup writer's silence is the right signal.
-            return
+
+        scan_table, scan_where = table_ident, where_sql
+        if not owns_con:
+            from backend.core.rollups.bundle_builder import _SHARED_ROLLUP_SESSION
+
+            session = _SHARED_ROLLUP_SESSION.get()
+            if session is not None and session.source is source:
+                scan_table, scan_where = session.materialize_slice(
+                    table_ident,
+                    where_sql,
+                    logger=logger,
+                )
 
         for field in fields:
             if not _is_safe_ident(field):
                 logger.warning("[rollups] ip_spread: skipping unsafe field name: %r", field)
                 continue
-            # Virtual fields wouldn't add value here — the unnested
-            # signals (waf_sig elements, etc.) don't have a 1:1 IP
-            # relationship the way raw fingerprint columns do, so
-            # skip them and let the count rollup cover them alone.
-            if field in _VIRTUAL_FIELD_BACKING:
-                continue
-            if field not in cols:
+            if field in _VIRTUAL_FIELD_BACKING or field not in cols:
                 continue
 
-            select_sql = _build_ip_spread_select_query(table_ident, field, where_sql)
+            select_sql = _build_ip_spread_select_query(scan_table, field, scan_where)
             try:
-                # ``.to_arrow_table()`` materializes the whole result
-                # set as a pyarrow.Table; ``.arrow()`` returns a
-                # streaming RecordBatchReader (no ``num_rows`` attr).
-                # We need num_rows + column slicing below, so the
-                # eager path is the right pick. ``fetch_arrow_table``
-                # is the legacy alias of the same call and emits a
-                # DeprecationWarning under DuckDB 1.5+.
-                arrow_table = con.execute(select_sql).to_arrow_table()
-            except duckdb.Error as e:
-                logger.warning(
-                    "[rollups] %s: ip_spread SELECT failed for field=%s: %s",
-                    service_id,
-                    field,
-                    e,
+                arrow_table = execute_with_stale_view_retry(
+                    con, source, lambda c: c.execute(select_sql).to_arrow_table()
                 )
+            except Exception as e:  # noqa: BLE001
+                logger.warning("[rollups] %s: ip_spread SELECT failed for field=%s: %s", service_id, field, e)
                 continue
 
             if arrow_table.num_rows == 0:
@@ -831,9 +1063,6 @@ def _run_ip_spread_per_field(
                 hll = HyperLogLog()
                 if ip_list:
                     for ip in ip_list:
-                        # array_agg(DISTINCT) skips NULLs in DuckDB but
-                        # be defensive — a future ip-normalisation pass
-                        # might leave empty strings or accidental Nones.
                         if ip:
                             hll.add(ip)
                 sketch_blobs.append(hll.to_bytes())
@@ -850,14 +1079,10 @@ def _run_ip_spread_per_field(
                 }
             )
 
-            tmp_field_dir = os.path.join(cache_root, "rollups", "tmp_ip", field)
+            tmp_field_dir = os.path.join(cache_root, "rollups", "tmp_ip", f"{field}_{uuid.uuid4().hex[:8]}")
             shutil.rmtree(tmp_field_dir, ignore_errors=True)
             os.makedirs(tmp_field_dir, exist_ok=True)
             try:
-                # partition_cols drops the (field, hour) values from the
-                # parquet data files — they live in the hive path only,
-                # which matches how the reader will read them via
-                # read_parquet(..., hive_partitioning=1).
                 pq.write_to_dataset(
                     output,
                     root_path=tmp_field_dir,
@@ -866,12 +1091,7 @@ def _run_ip_spread_per_field(
                     existing_data_behavior="overwrite_or_ignore",
                 )
             except Exception as e:
-                logger.warning(
-                    "[rollups] %s: ip_spread parquet write failed for field=%s: %s",
-                    service_id,
-                    field,
-                    e,
-                )
+                logger.warning("[rollups] %s: ip_spread parquet write failed for field=%s: %s", service_id, field, e)
                 shutil.rmtree(tmp_field_dir, ignore_errors=True)
                 continue
 
@@ -879,4 +1099,344 @@ def _run_ip_spread_per_field(
                 _publish_field_partitions(tmp_field_dir, ip_spread_dir, field)
             shutil.rmtree(tmp_field_dir, ignore_errors=True)
     finally:
-        con.close()
+        if owns_con:
+            con.close()
+
+
+# ── RUM rollup writers ───────────────────────────────────────────────────────
+
+_RECOMPUTE_LOCKS: dict[str, threading.Lock] = {}
+_RECOMPUTE_LOCKS_GUARD = threading.Lock()
+
+
+def _recompute_lock(service_id: str) -> threading.Lock:
+    with _RECOMPUTE_LOCKS_GUARD:
+        return _RECOMPUTE_LOCKS.setdefault(service_id, threading.Lock())
+
+
+def _normalize_hour_dt(dt_val: datetime) -> datetime:
+    """Normalize a datetime to an hour boundary, converting aware timestamps to UTC."""
+    if getattr(dt_val, "tzinfo", None) is not None:
+        dt_val = dt_val.astimezone(UTC)
+    return dt_val.replace(minute=0, second=0, microsecond=0)
+
+
+def table_exists(con: Any, table_name: str) -> bool:
+    try:
+        con.execute(f"SELECT 1 FROM {table_name} LIMIT 1")
+        return True
+    except Exception:
+        return False
+
+
+def _rum_raw_latest(con: Any) -> Any:
+    """MAX(timestamp) across the raw RUM beacon tables, or ``None``."""
+    ts_list = []
+    for tbl in ("client_vitals", "client_errors"):
+        try:
+            row = con.execute(f"SELECT MAX(timestamp) FROM {tbl}").fetchone()
+        except Exception:
+            continue
+        if row and row[0]:
+            ts_list.append(row[0])
+    return max(ts_list) if ts_list else None
+
+
+def rum_count_and_latest(con: Any) -> tuple[int, Any]:
+    """Return ``(beacon_count, latest_timestamp)`` for the RUM store."""
+    if table_exists(con, "rum_vitals_aggregates") and table_exists(con, "rum_error_aggregates"):
+        try:
+            v_res = con.execute(
+                "SELECT SUM(event_count) FROM rum_vitals_aggregates "
+                "WHERE dimension = 'total' AND value IN ('pageviews', 'interactions')"
+            ).fetchone()
+            v_cnt = v_res[0] if v_res and v_res[0] is not None else 0
+            e_res = con.execute("SELECT SUM(error_count) FROM rum_error_aggregates").fetchone()
+            e_cnt = e_res[0] if e_res and e_res[0] is not None else 0
+            cnt = int(v_cnt) + int(e_cnt)
+            if cnt > 0:
+                return cnt, _rum_raw_latest(con)
+        except Exception:
+            logger.debug("rum_count_and_latest: step failed (ignored)", exc_info=True)
+
+    distinct_id = "hash(COALESCE(NULLIF(req_id, ''), concat(cid, '_', CAST(epoch(timestamp) AS BIGINT))))"
+    cnt = 0
+    for tbl in ("client_vitals", "client_errors"):
+        try:
+            row = con.execute(f"SELECT COUNT(DISTINCT {distinct_id}) FROM {tbl}").fetchone()
+        except Exception:
+            continue
+        cnt += int(row[0]) if row and row[0] else 0
+    return cnt, _rum_raw_latest(con)
+
+
+def recompute_rum_aggregates(con: Any, service_id: str, hours: list[datetime] | list[str] | None = None) -> None:
+    """Ensure RUM aggregate tables exist, find active hours, and update them idempotently."""
+    with _recompute_lock(service_id):
+        _recompute_rum_aggregates_locked(con, service_id, hours)
+
+
+def _recompute_rum_aggregates_locked(con: Any, service_id: str, hours: list[datetime] | list[str] | None) -> None:
+    logger.info("[rum_rollups] Ensuring RUM aggregate schemas exist...")
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS rum_vitals_aggregates (
+            service_id VARCHAR, bucket_start TIMESTAMPTZ, dimension VARCHAR, value VARCHAR,
+            event_count BIGINT, value_sum DOUBLE, good_count BIGINT, ni_count BIGINT,
+            poor_count BIGINT, p50_value DOUBLE, p75_value DOUBLE, p99_value DOUBLE
+        )
+    """)
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS rum_error_aggregates (
+            service_id VARCHAR, bucket_start TIMESTAMPTZ, dimension VARCHAR, value VARCHAR,
+            error_count BIGINT
+        )
+    """)
+
+    has_vitals = table_exists(con, "client_vitals")
+    has_errors = table_exists(con, "client_errors")
+    if not has_vitals and not has_errors:
+        logger.info("[rum_rollups] %s: No client_vitals or client_errors table found. Skipping.", service_id)
+        return
+
+    hours_set: set[datetime] = set()
+    if hours is not None:
+        for h in hours:
+            if isinstance(h, str):
+                try:
+                    hours_set.add(_normalize_hour_dt(datetime.fromisoformat(h.replace("Z", "+00:00"))))
+                except ValueError:
+                    pass
+            elif isinstance(h, datetime):
+                hours_set.add(_normalize_hour_dt(h))
+    else:
+        for tbl, present in (("client_vitals", has_vitals), ("client_errors", has_errors)):
+            if present:
+                try:
+                    res = con.execute(
+                        f"SELECT DISTINCT DATE_TRUNC('hour', timestamp) FROM {tbl} WHERE timestamp IS NOT NULL"
+                    ).fetchall()
+                    for r in res:
+                        if r[0]:
+                            hours_set.add(_normalize_hour_dt(r[0]) if isinstance(r[0], datetime) else r[0])
+                except Exception as e:
+                    logger.warning("[rum_rollups] Failed to query active hours from %s: %s", tbl, e)
+
+    if not hours_set:
+        logger.info("[rum_rollups] %s: No active RUM data hours found. Skipping.", service_id)
+        return
+
+    if any(getattr(h, "tzinfo", None) is not None for h in hours_set):
+        hours_set = {ensure_utc(h) for h in hours_set}
+
+    hours_list = sorted(hours_set)
+    hours_str = ", ".join(f"TIMESTAMPTZ '{h.isoformat()}'" for h in hours_list)
+    logger.info(
+        "[rum_rollups] %s: Recomputing aggregates for %d hours: %s",
+        service_id,
+        len(hours_list),
+        [h.isoformat() for h in hours_list],
+    )
+
+    con.execute(
+        f"DELETE FROM rum_vitals_aggregates WHERE service_id = ? AND bucket_start IN ({hours_str})", [service_id]
+    )
+    con.execute(
+        f"DELETE FROM rum_error_aggregates WHERE service_id = ? AND bucket_start IN ({hours_str})", [service_id]
+    )
+
+    distinct_id = "hash(COALESCE(NULLIF(req_id, ''), concat(cid, '_', CAST(epoch(timestamp) AS BIGINT))))"
+
+    if has_vitals:
+
+        def _v_dim(
+            dim: str,
+            val_expr: str,
+            evt_expr: str,
+            *,
+            group_col: str,
+            val_sum: str = "0.0",
+            good: str = "0",
+            ni: str = "0",
+            poor: str = "0",
+            p50: str = "0.0",
+            p75: str = "0.0",
+            p99: str = "0.0",
+            extra_where: str = "",
+        ) -> str:
+            return (
+                f"SELECT ? AS service_id, DATE_TRUNC('hour', timestamp) AS bucket_start, "
+                f"'{dim}' AS dimension, {val_expr} AS value, {evt_expr} AS event_count, "
+                f"{val_sum} AS value_sum, {good} AS good_count, {ni} AS ni_count, {poor} AS poor_count, "
+                f"{p50} AS p50_value, {p75} AS p75_value, {p99} AS p99_value "
+                f"FROM client_vitals WHERE DATE_TRUNC('hour', timestamp) IN ({hours_str}){extra_where} "
+                f"GROUP BY bucket_start, {group_col}"
+            )
+
+        p75_expr = "CAST(PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY metric_value) AS DOUBLE)"
+        vitals_selects = [
+            _v_dim(
+                "total",
+                "CASE WHEN metric_name LIKE 'event_%' THEN 'interactions' ELSE 'pageviews' END",
+                f"COUNT(DISTINCT {distinct_id})",
+                group_col="value",
+            ),
+            _v_dim(
+                "metric_name",
+                "metric_name",
+                "COUNT(*)",
+                group_col="metric_name",
+                val_sum="CAST(COALESCE(SUM(metric_value), 0.0) AS DOUBLE)",
+                good="COUNT(*) FILTER (WHERE metric_rating = 'good')",
+                ni="COUNT(*) FILTER (WHERE metric_rating = 'needs_improvement')",
+                poor="COUNT(*) FILTER (WHERE metric_rating = 'poor')",
+                p50="CAST(MEDIAN(metric_value) AS DOUBLE)",
+                p75=p75_expr,
+                p99="CAST(PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY metric_value) AS DOUBLE)",
+            ),
+            _v_dim("browser", "COALESCE(browser, 'Unknown')", f"COUNT(DISTINCT {distinct_id})", group_col="browser"),
+            _v_dim("os", "COALESCE(os, 'Unknown')", f"COUNT(DISTINCT {distinct_id})", group_col="os"),
+            _v_dim("device", "COALESCE(device, 'Unknown')", f"COUNT(DISTINCT {distinct_id})", group_col="device"),
+            _v_dim(
+                "pathname",
+                "pathname",
+                f"COUNT(DISTINCT {distinct_id})",
+                group_col="pathname",
+                extra_where=" AND pathname IS NOT NULL",
+            ),
+            _v_dim(
+                "path_metric_load",
+                "pathname",
+                "COUNT(*)",
+                group_col="pathname",
+                val_sum="CAST(COALESCE(SUM(metric_value), 0.0) AS DOUBLE)",
+                extra_where=" AND pathname IS NOT NULL AND metric_name IN ('duration', 'pageLoadTime', 'load_time', 'pageLoad', 'LCP', 'lcp', 'ttfb', 'TTFB', 'fcp', 'FCP')",
+            ),
+            _v_dim(
+                "path_metric_lcp",
+                "pathname",
+                "COUNT(*)",
+                group_col="pathname",
+                p75=p75_expr,
+                extra_where=" AND pathname IS NOT NULL AND metric_name IN ('LCP', 'lcp')",
+            ),
+            _v_dim(
+                "path_metric_cls",
+                "pathname",
+                "COUNT(*)",
+                group_col="pathname",
+                p75=p75_expr,
+                extra_where=" AND pathname IS NOT NULL AND metric_name IN ('CLS', 'cls')",
+            ),
+        ]
+        con.execute(
+            "INSERT INTO rum_vitals_aggregates\n" + "\nUNION ALL\n".join(vitals_selects),
+            [service_id] * 9,
+        )
+
+    if has_errors:
+        con.execute(
+            f"""
+            INSERT INTO rum_error_aggregates
+            SELECT ? AS service_id, DATE_TRUNC('hour', timestamp) AS bucket_start, 'total' AS dimension,
+                   'errors' AS value, COUNT(DISTINCT {distinct_id}) AS error_count
+            FROM client_errors WHERE DATE_TRUNC('hour', timestamp) IN ({hours_str}) GROUP BY bucket_start
+            UNION ALL
+            SELECT ? AS service_id, DATE_TRUNC('hour', timestamp) AS bucket_start, 'pathname' AS dimension,
+                   pathname AS value, COUNT(DISTINCT {distinct_id}) AS error_count
+            FROM client_errors WHERE DATE_TRUNC('hour', timestamp) IN ({hours_str}) AND pathname IS NOT NULL
+            GROUP BY bucket_start, pathname
+            UNION ALL
+            SELECT ? AS service_id, DATE_TRUNC('hour', timestamp) AS bucket_start, 'exception' AS dimension,
+                   concat(COALESCE(error_message, ''), '|', COALESCE(error_file, ''), '|', CAST(COALESCE(error_line, 0) AS VARCHAR), '|', CAST(COALESCE(error_col, 0) AS VARCHAR)) AS value,
+                   COUNT(*) AS error_count
+            FROM client_errors WHERE DATE_TRUNC('hour', timestamp) IN ({hours_str}) GROUP BY bucket_start, value
+        """,
+            [service_id] * 3,
+        )
+
+    union_parts = [
+        f"SELECT timestamp, {distinct_id} AS distinct_id FROM {tbl} WHERE DATE_TRUNC('hour', timestamp) IN ({hours_str})"
+        for tbl, present in (("client_vitals", has_vitals), ("client_errors", has_errors))
+        if present
+    ]
+    con.execute(
+        f"""
+        INSERT INTO rum_vitals_aggregates
+        SELECT ? AS service_id, DATE_TRUNC('hour', timestamp) AS bucket_start, 'total' AS dimension,
+               'total_beacons' AS value, COUNT(DISTINCT distinct_id) AS event_count,
+               0.0 AS value_sum, 0 AS good_count, 0 AS ni_count, 0 AS poor_count,
+               0.0 AS p50_value, 0.0 AS p75_value, 0.0 AS p99_value
+        FROM ({" UNION ALL ".join(union_parts)}) GROUP BY bucket_start
+        """,
+        [service_id],
+    )
+    logger.info("[rum_rollups] %s: RUM aggregates successfully updated for %d hours", service_id, len(hours_list))
+
+
+def backfill_missing_rum_aggregates(
+    con: Any,
+    service_id: str,
+    lookback_days: int = 30,
+) -> list[datetime]:
+    """Detect and heal hours in client_vitals / client_errors lacking a single total_beacons row."""
+    has_vitals = table_exists(con, "client_vitals")
+    has_errors = table_exists(con, "client_errors")
+    if not has_vitals and not has_errors:
+        return []
+
+    cutoff = datetime.now(UTC) - timedelta(days=max(1, int(lookback_days)))
+    raw_parts: list[str] = []
+    params: list[object] = []
+    for tbl, present in (("client_vitals", has_vitals), ("client_errors", has_errors)):
+        if present:
+            raw_parts.append(
+                f"SELECT DISTINCT DATE_TRUNC('hour', timestamp) AS bucket_start FROM {tbl} WHERE timestamp IS NOT NULL AND timestamp >= ?"
+            )
+            params.append(cutoff)
+
+    raw_union = " UNION ".join(raw_parts)
+    if table_exists(con, "rum_vitals_aggregates"):
+        sql = f"""
+            SELECT DISTINCT r.bucket_start FROM ({raw_union}) r
+            WHERE r.bucket_start IS NOT NULL
+              AND (SELECT COUNT(*) FROM rum_vitals_aggregates a
+                   WHERE a.service_id = ? AND a.bucket_start = r.bucket_start AND a.value = 'total_beacons') <> 1
+            ORDER BY r.bucket_start ASC
+        """
+        rows = con.execute(sql, [*params, service_id]).fetchall()
+    else:
+        sql = f"SELECT DISTINCT r.bucket_start FROM ({raw_union}) r WHERE r.bucket_start IS NOT NULL ORDER BY r.bucket_start ASC"
+        rows = con.execute(sql, params).fetchall()
+
+    missing_hours: list[datetime] = []
+    for r in rows:
+        if r and r[0] is not None:
+            dt_val = r[0]
+            missing_hours.append(_normalize_hour_dt(dt_val) if isinstance(dt_val, datetime) else dt_val)
+
+    if missing_hours:
+        logger.info(
+            "[rum_rollups] %s: Healing %d RUM aggregate hour(s) with a missing or duplicated total_beacons row (lookback=%dd)",
+            service_id,
+            len(missing_hours),
+            lookback_days,
+        )
+        recompute_rum_aggregates(con, service_id, hours=missing_hours)
+
+    return missing_hours
+
+
+_SUBMODULES = (_ts_mod, _overview_mod, _session_mod, _coverage_mod)
+
+
+class _RollupsRecomputeShimModule(types.ModuleType):
+    """Forwards attribute assignments on ``backend.core.rollups.recompute`` to extracted submodules."""
+
+    def __setattr__(self, name: str, value: object) -> None:
+        super().__setattr__(name, value)
+        for mod in _SUBMODULES:
+            if name in mod.__dict__:
+                setattr(mod, name, value)
+
+
+sys.modules[__name__].__class__ = _RollupsRecomputeShimModule
