@@ -32,6 +32,7 @@ dependencies = [
     "pyarrow>=23.0.1",
     "pandas>=2.3.3",
     "httpx>=0.28.1",
+    "certifi>=2026.10.23",
     # Floor at 4.14.2 to clear GHSA-82r6-8w77-94w6 (TLSStream IDNA
     # certificate-spoofing vulnerability).
     "anyio>=4.14.2",
