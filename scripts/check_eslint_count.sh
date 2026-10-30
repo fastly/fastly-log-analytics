@@ -6,7 +6,7 @@ cd "$SCRIPT_DIR/../frontend"
 # shellcheck source=scripts/lib/ratchet_common.sh
 source "$SCRIPT_DIR/lib/ratchet_common.sh"
 
-CEILING=9
+CEILING=0
 SCOPE=(app components hooks lib stores)
 TEST_CEILING=0
 TEST_SCOPE=(__tests__ e2e vitest.setup.ts)

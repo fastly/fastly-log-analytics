@@ -1451,7 +1451,6 @@ import builtins
 import math
 import random
 import re
-import sys as _sys
 from types import SimpleNamespace
 from uuid import UUID
 
@@ -3175,9 +3174,3 @@ def test_all_cmcd_tasks_preserve_request_and_page_correlation() -> None:
         assert section["server_cpu_ms"] is None
     ts_section = timings[next(row["section_id"] for row in client.scopes if row["section"] == "cmcd.timeseries")]
     assert ts_section["executor_dispatch"] == "thread_pool" and current_clickhouse_scope()["section_id"] is None
-
-
-_security_cases = SimpleNamespace(START=START, END=END, _Client=_Client, _service=_service, _req=_req)
-_cmcd_cases = SimpleNamespace(START=START_cmcd, END=END_cmcd, _Client=_Client_cmcd, _request=_request, _run=_run)
-_sys.modules.setdefault("tests.high_scale.test_security", _security_cases)  # type: ignore[arg-type]
-_sys.modules.setdefault("tests.high_scale.test_cmcd", _cmcd_cases)  # type: ignore[arg-type]

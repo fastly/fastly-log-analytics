@@ -41,7 +41,6 @@ paths = [
     '''^tests/utils/test_router_utils\.py$''',                   # blocked-function NAMES (folded from test_sql_validator.py)
     '''^tests/remote_access/test_oauth(_.*)?\.py$''',            # OAuth tests — fake flow-state/client secrets
     '''^tests/remote_access/oauth_helpers\.py$''',               # OAuth test harness — fake client id/secret
-    '''^scripts/dev/measure_e2e_freshness\.py$''',               # dev harness auth secret fallback
 
     # Documentation: release notes and runbooks may reference example
     # tokens / credentials in prose.

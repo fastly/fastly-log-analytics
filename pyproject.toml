@@ -205,7 +205,7 @@ extend_exclude = ["tests/.*", "scripts/.*", "scratch/.*"]
 #   pytz:            DuckDB ICU loads it at runtime for TIMESTAMP TZ
 #                    (regression of the 2026-05 dedup; do NOT drop)
 #   python-multipart: FastAPI form-data parser, never imported directly
-DEP002 = ["python-dotenv", "uvicorn", "pytz", "python-multipart", "anyio"]
+DEP002 = ["python-dotenv", "uvicorn", "pytz", "python-multipart", "anyio", "certifi"]
 # DEP003 — direct import of a transitive dep. The codebase imports
 # these on purpose; they're guaranteed by the listed first-class deps:
 #   botocore:  via boto3
