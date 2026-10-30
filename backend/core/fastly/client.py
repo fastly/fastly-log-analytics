@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 import secrets
 import time
@@ -14,6 +13,8 @@ from typing import Annotated, Any, Literal
 
 import tenacity
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, field_validator
+
+from backend.utils.runtime_modes import mock_mode_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -620,7 +621,7 @@ def generate_rum_asset_fetch_vcl(shield_pop: str = "iad-va-us", faro_version: st
 
 def is_mock_mode() -> bool:
     """Single-source check the gated callers read on every request."""
-    return os.environ.get("FASTLY_MOCK_MODE") == "1"
+    return mock_mode_enabled("FASTLY_MOCK_MODE")
 
 
 def api_key_or_mock(key: str) -> str:

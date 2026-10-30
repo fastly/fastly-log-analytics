@@ -32,6 +32,7 @@ from backend.models.admin import (
 from backend.models.common import DEFAULT_ERROR_RESPONSES, OkMessageResponse, OkResponse
 from backend.provision.fastly_api import delete_remote_frontend, deploy_remote_frontend
 from backend.utils.remote_access import client_ip
+from backend.utils.runtime_modes import mock_mode_enabled
 from backend.utils.tunnel import build_share_live_payload, get_tunnel_manager
 
 logger = logging.getLogger(__name__)
@@ -235,7 +236,7 @@ _key: RSAKey | None = None
 
 
 def mock_idp_enabled() -> bool:
-    return os.getenv("OAUTH_MOCK_IDP") == "1"
+    return mock_mode_enabled("OAUTH_MOCK_IDP")
 
 
 def _signing_key() -> RSAKey:

@@ -62,11 +62,13 @@ from backend.high_scale.sessions import sessions_detail, sessions_endpoint
 from backend.models.analytics import (
     AggregatesRequest,
     CacheCollapseDetailRequest,
+    FieldValuesRequest,
     InsightsRequest,
     NetworkBundleRequest,
     NetworkHealthRequest,
     NetworkQualityRequest,
     PerformanceAggregatesResponse,
+    RawRequest,
     SecurityTopBotsResponse,
     SessionDetailRequest,
     SessionsRequest,
@@ -291,6 +293,48 @@ def test_dashboard_cache_invalidates_when_request_watermark_advances() -> None:
     refreshed = dashboard.aggregates(advanced_service, req, start, end)
     assert refreshed.response_cache.state == "miss" and len(client.calls) > calls_before
     assert refreshed.latest_log_at == "2026-01-02T00:05:00+00:00"
+
+
+@pytest.mark.parametrize("empty_first", [False, True])
+def test_dashboard_cache_keeps_empty_and_default_field_selections_distinct(empty_first: bool) -> None:
+    service, client = _recording_service()
+    selections = [[], None] if empty_first else [None, []]
+    for fields in selections:
+        req = AggregatesRequest(fields=fields, sections=["topten"])
+        response = dashboard.aggregates(service, req, *_WINDOW)
+        assert bool(response.data) is (fields is None)
+        assert response.response_cache.state == "miss"
+        count = len(client.calls)
+        repeat = dashboard.aggregates(service, req, *_WINDOW)
+        assert repeat.response_cache.state == "hit" and len(client.calls) == count
+        assert repeat.data == response.data
+
+
+@pytest.mark.parametrize("reader", ["field_values", "raw_df"])
+@pytest.mark.parametrize(
+    ("start", "end"),
+    [
+        ("2026-01-01T01:00:00Z", "2026-01-01T02:00:00Z"),
+        ("2026-01-01T01:00:00.001Z", "2026-01-01T02:00:00.001Z"),
+        (None, "2026-01-01T02:00:00Z"),
+        ("2026-01-01T01:00:00Z", None),
+    ],
+)
+def test_dashboard_fact_readers_preserve_exact_bounds(reader: str, start: str | None, end: str | None) -> None:
+    service, client = _net_service()
+    if reader == "field_values":
+        dashboard.field_values(service, FieldValuesRequest(field="country", search="US"), start, end)
+    else:
+        dashboard.raw_df(service, RawRequest(), start, end)
+    ((sql, params),) = client.calls
+    assert params["service_id"] == service.service_id
+    assert "high_scale_batch_publications FINAL" in sql
+    if start is not None:
+        assert "event_timestamp >= {start:DateTime64(3)}" in sql
+        assert params["start"] == datetime.fromisoformat(start)
+    if end is not None:
+        assert "event_timestamp < {end_upper:DateTime64(3)}" in sql
+        assert params["end_upper"] == datetime.fromisoformat(end)
 
 
 class _ScopeClient:

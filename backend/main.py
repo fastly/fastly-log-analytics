@@ -75,6 +75,10 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
+from backend.utils.runtime_modes import validate_mock_modes  # noqa: E402
+
+validate_mock_modes()
+
 from backend.core import lifespan as _lifespan  # noqa: E402
 from backend.core.lifespan import lifespan  # noqa: E402
 from backend.routers import (  # noqa: E402

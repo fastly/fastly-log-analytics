@@ -10,7 +10,6 @@ from backend.core.request_telemetry import HighScaleSections
 from backend.high_scale._common import (
     _FIELD_DIMENSIONS,
     _column,
-    inclusive_minute_end,
     request_filter_clauses,
     visible_fact_clauses,
 )
@@ -472,7 +471,7 @@ def dashboard_aggregates(
                 "f": serialize_filters_for_key(raw_filters),
                 "ci": norm_interval,
                 "cm": req.chart_metric,
-                "fl": sorted(req.fields) if req.fields else None,
+                "fl": sorted(req.fields) if req.fields is not None else None,
                 "sec": sorted(req.sections) if req.sections else None,
                 "its": req.include_time_series,
                 "icr": req.include_conn_requests,
@@ -644,11 +643,12 @@ def field_values(
     sql_col = _column(key, params, "target_field")
     clauses = [*visible_fact_clauses("request"), *filter_clauses, f"{sql_col} != ''"]
 
-    if start is not None and end is not None:
-        end_upper = inclusive_minute_end(end)
+    if start is not None:
         clauses.append("event_timestamp >= {start:DateTime64(3)}")
+        params["start"] = start
+    if end is not None:
         clauses.append("event_timestamp < {end_upper:DateTime64(3)}")
-        params.update({"start": start, "end_upper": end_upper})
+        params["end_upper"] = end
 
     if req.search:
         params["search_pat"] = f"%{req.search}%"
@@ -690,11 +690,12 @@ def raw_df(
 
     start = _range_value(start_time)
     end = _range_value(end_time)
-    if start is not None and end is not None:
-        end_upper = inclusive_minute_end(end)
+    if start is not None:
         clauses.append("event_timestamp >= {start:DateTime64(3)}")
+        params["start"] = start
+    if end is not None:
         clauses.append("event_timestamp < {end_upper:DateTime64(3)}")
-        params.update({"start": start, "end_upper": end_upper})
+        params["end_upper"] = end
 
     where_clause = " AND ".join(clauses)
     rows = service.client.execute(
