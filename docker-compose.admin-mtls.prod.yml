@@ -1,0 +1,10 @@
+# Apply AFTER base + prod + admin-mtls overlays for the host-network VM.
+# Keep the public Caddy service and its caddy-ratelimit image unchanged.
+services:
+  backend:
+    ports: !reset []
+  admin-gateway:
+    network_mode: host
+    environment:
+      - ADMIN_GATEWAY_PORT=${ADMIN_GATEWAY_PORT:-9443}
+      - ADMIN_GATEWAY_BIND=${ADMIN_GATEWAY_LISTEN_IP:-127.0.0.1}

@@ -1,7 +1,7 @@
 """Control Room router — Phase 1: passive observation with real data.
 
 Overview and Cost tabs are backed by the rt.fastly.com polling stream.
-Log-field-audit and correlator endpoints provide DuckDB-driven data.
+Correlator and error-stream endpoints provide DuckDB/ClickHouse-driven data.
 Mutation endpoints remain 501 stubs.
 """
 
@@ -10,25 +10,156 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
-from fastapi import APIRouter, Depends, Request
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sse_starlette.sse import EventSourceResponse
 
-from backend.core.metadata.state import list_audit, record_audit
-from backend.deps import ServiceId, require_admin, require_service_access
-from backend.models.errors import DEFAULT_ERROR_RESPONSES
-from backend.utils.router_utils import SSE_PASSTHROUGH_HEADERS, query_errors
+from backend.core.request_context import ServiceId, require_admin, require_service_access
+from backend.core.share_db import mask_ip
+from backend.high_scale.aggregate_query import AggregateRequest, query_clickhouse_aggregate
+from backend.high_scale.ingest_controller import HighScaleServiceRegistryProtocol, get_high_scale_service_registry
+from backend.models.common import (
+    DEFAULT_ERROR_RESPONSES,
+    ControlRoomActionResponse,
+    ControlRoomTabResponse,
+    CorrelateRequest,
+    CorrelateResponse,
+    CorrelatorFreshness,
+    CorrelatorTopRow,
+    MutationStub,
+    RealtimeSeedResponse,
+)
+from backend.repositories._base import record_duckdb_query
+from backend.utils.auth import mask_ips_for
+from backend.utils.router_utils import query_errors
+from backend.utils.sse import sse_response
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["control-room"], responses=DEFAULT_ERROR_RESPONSES)
+control_room_router = router
+
+RECENT_STANDARD_ERRORS = """
+SELECT
+    md5(concat_ws('|', CAST(timestamp AS VARCHAR), CAST(status AS VARCHAR),
+                  COALESCE(url, ''), COALESCE(pop, ''), COALESCE(ip, ''),
+                  CAST(row_number() OVER (
+                      ORDER BY timestamp DESC, status, url, pop, ip
+                  ) AS VARCHAR))) AS event_id,
+    timestamp,
+    TRY_CAST(status AS INTEGER) AS status,
+    COALESCE(url, '') AS url,
+    COALESCE(pop, '') AS pop,
+    COALESCE(ip, '') AS client_ip
+FROM {view}
+WHERE timestamp >= now() - INTERVAL 2 MINUTE
+  AND TRY_CAST(status AS INTEGER) BETWEEN 400 AND 599
+ORDER BY timestamp DESC
+LIMIT 20
+"""
+
+# ClickHouse (high-scale) dialect; ``{service_id:String}`` is a ClickHouse bind parameter, not a format field.
+RECENT_HIGH_SCALE_ERRORS = """
+SELECT
+    toString(event_id) AS event_id,
+    event_timestamp AS timestamp,
+    toInt32OrZero(custom_fields['status']) AS status,
+    url,
+    custom_fields['pop'] AS pop,
+    client_ip
+FROM request_facts
+WHERE service_id={service_id:String}
+  AND event_timestamp >= now() - INTERVAL 2 MINUTE
+  AND toInt32OrZero(custom_fields['status']) BETWEEN 400 AND 599
+  AND publication_state = 'visible'
+ORDER BY event_timestamp DESC
+LIMIT 20
+"""
+
+CORRELATE_TOP_VALUES = """
+SELECT {col} AS value, COUNT(*) AS count
+FROM {view}
+WHERE timestamp >= ?
+GROUP BY 1
+ORDER BY 2 DESC
+LIMIT ?
+"""
+
+LATEST_TIMESTAMP_WINDOWED = "SELECT MAX(timestamp) AS latest FROM {view} WHERE timestamp >= ?"
+
+LATEST_TIMESTAMP = "SELECT MAX(timestamp) AS latest FROM {view}"
+
+
+def recent_standard_error_events(con: Any, view_name: str, *, service_id: str | None = None) -> list[dict[str, Any]]:
+    """Last-2-minute 4xx/5xx events (max 20, newest first) from the standard-mode request view."""
+    q = RECENT_STANDARD_ERRORS.format(view=view_name)
+    t0 = time.perf_counter()
+    rows = con.execute(q).fetchall()
+    record_duckdb_query(q, round((time.perf_counter() - t0) * 1000, 2), service_id=service_id)
+    return [
+        {
+            "event_id": str(row[0]),
+            "timestamp": row[1].isoformat(),
+            "status": int(row[2]),
+            "url": str(row[3]),
+            "pop": str(row[4]),
+            "client_ip": str(row[5]),
+        }
+        for row in rows
+    ]
+
+
+def recent_high_scale_error_events(client: Any, service_id: str) -> list[dict[str, Any]]:
+    """Last-2-minute 4xx/5xx events (max 20, newest first) for a high-scale (ClickHouse) service."""
+    rows = client.execute(RECENT_HIGH_SCALE_ERRORS, {"service_id": service_id})
+    return [
+        {
+            "event_id": str(row["event_id"]),
+            "timestamp": row["timestamp"].isoformat(),
+            "status": int(row["status"]),
+            "url": str(row.get("url") or ""),
+            "pop": str(row.get("pop") or ""),
+            "client_ip": str(row.get("client_ip") or ""),
+        }
+        for row in rows
+    ]
+
+
+def correlate_top_values(
+    con: Any,
+    view_name: str,
+    col: str,
+    since: datetime,
+    limit: int,
+    *,
+    service_id: str | None = None,
+) -> tuple[list[Any], Any]:
+    """``(top [(value, count)] since ``since``, MAX(timestamp) row)`` for one allow-listed column."""
+    q_top = CORRELATE_TOP_VALUES.format(col=col, view=view_name)
+    t0 = time.perf_counter()
+    rows = con.execute(q_top, [since, limit]).fetchall()
+    record_duckdb_query(q_top, round((time.perf_counter() - t0) * 1000, 2), service_id=service_id)
+
+    q_fresh = LATEST_TIMESTAMP_WINDOWED.format(view=view_name)
+    t1 = time.perf_counter()
+    freshness_row = con.execute(q_fresh, [since]).fetchone()
+    record_duckdb_query(q_fresh, round((time.perf_counter() - t1) * 1000, 2), service_id=service_id)
+
+    if (not freshness_row or freshness_row[0] is None) and not rows:
+        q_fallback = LATEST_TIMESTAMP.format(view=view_name)
+        t2 = time.perf_counter()
+        freshness_row = con.execute(q_fallback).fetchone()
+        record_duckdb_query(q_fallback, round((time.perf_counter() - t2) * 1000, 2), service_id=service_id)
+    return rows, freshness_row
+
 
 # ── Canned tab responses ────────────────────────────────────────────────────
 
-TAB_STUBS: dict[str, dict] = {
+TAB_STUBS: dict[str, dict[str, Any]] = {
     "overview": {
         "tab": "overview",
         "status": "live",
@@ -89,106 +220,74 @@ TAB_STUBS: dict[str, dict] = {
 }
 
 
-# ── Tab data endpoints (read) ────────────────────────────────────────────────
-
-
-@router.get("/services/{service_id}/control-room/{tab}")
-@query_errors()
-def control_room_tab(
-    tab: str,
-    service_id: ServiceId,
-):
-    """Return data for a control-room tab."""
-    if tab not in TAB_STUBS:
-        from fastapi import HTTPException
-
-        raise HTTPException(status_code=404, detail={"error": "unknown_tab", "tab": tab})
-    return TAB_STUBS[tab]
-
-
 # ── Mutation endpoints (admin-only, 501 stubs) ───────────────────────────────
 
 
-class MutationStub(BaseModel):
-    """Generic request body for Phase 0 mutation stubs."""
-
-    action: str = ""
-    payload: dict = {}
-
-
-@router.post("/services/{service_id}/control-room/mitigations")
+@control_room_router.post("/services/{service_id}/control-room/mitigations", response_model=ControlRoomActionResponse)
 @query_errors()
 def control_room_mitigations(
     body: MutationStub,
     service_id: ServiceId,
     _admin: None = Depends(require_admin),
     _access: str | None = Depends(require_service_access),
-):
+) -> ControlRoomActionResponse:
     """Block/tarpit mitigation actions (Phase 0 stub)."""
-    from fastapi import HTTPException
-
     raise HTTPException(
         status_code=501, detail={"error": "not_implemented", "message": "Mitigations not yet implemented."}
     )
 
 
-@router.post("/services/{service_id}/control-room/rules")
+@control_room_router.post("/services/{service_id}/control-room/rules", response_model=ControlRoomActionResponse)
 @query_errors()
 def control_room_rules(
     body: MutationStub,
     service_id: ServiceId,
     _admin: None = Depends(require_admin),
     _access: str | None = Depends(require_service_access),
-):
+) -> ControlRoomActionResponse:
     """Create rules (Phase 0 stub)."""
-    from fastapi import HTTPException
-
     raise HTTPException(status_code=501, detail={"error": "not_implemented", "message": "Rules not yet implemented."})
 
 
-@router.post("/services/{service_id}/control-room/allowlist")
+@control_room_router.post("/services/{service_id}/control-room/allowlist", response_model=ControlRoomActionResponse)
 @query_errors()
 def control_room_allowlist(
     body: MutationStub,
     service_id: ServiceId,
     _admin: None = Depends(require_admin),
     _access: str | None = Depends(require_service_access),
-):
+) -> ControlRoomActionResponse:
     """Manage allowlist (Phase 0 stub)."""
-    from fastapi import HTTPException
-
     raise HTTPException(
         status_code=501, detail={"error": "not_implemented", "message": "Allowlist not yet implemented."}
     )
 
 
-@router.post("/services/{service_id}/control-room/big-red-button")
+@control_room_router.post(
+    "/services/{service_id}/control-room/big-red-button", response_model=ControlRoomActionResponse
+)
 @query_errors()
 def control_room_big_red_button(
     body: MutationStub,
     service_id: ServiceId,
     _admin: None = Depends(require_admin),
     _access: str | None = Depends(require_service_access),
-):
+) -> ControlRoomActionResponse:
     """Emergency disable (Phase 0 stub)."""
-    from fastapi import HTTPException
-
     raise HTTPException(
         status_code=501, detail={"error": "not_implemented", "message": "Big red button not yet implemented."}
     )
 
 
-@router.post("/services/{service_id}/control-room/cost-governor")
+@control_room_router.post("/services/{service_id}/control-room/cost-governor", response_model=ControlRoomActionResponse)
 @query_errors()
 def control_room_cost_governor(
     body: MutationStub,
     service_id: ServiceId,
     _admin: None = Depends(require_admin),
     _access: str | None = Depends(require_service_access),
-):
+) -> ControlRoomActionResponse:
     """Cost kill switch (Phase 0 stub)."""
-    from fastapi import HTTPException
-
     raise HTTPException(
         status_code=501, detail={"error": "not_implemented", "message": "Cost governor not yet implemented."}
     )
@@ -197,26 +296,20 @@ def control_room_cost_governor(
 # ── Realtime seed (REST) ────────────────────────────────────────────────────
 
 
-def _fetch_seed_ticks(service_id: str, count: int = 60) -> list[dict]:
-    """Fetch historical per-second ticks directly from the RT API.
-
-    Bypasses the poller thread entirely — no threading coordination needed.
-    """
+def _fetch_seed_ticks(service_id: str, count: int = 60) -> list[dict[str, Any]]:
+    """Fetch historical per-second ticks directly from the RT API."""
     from backend import config
-    from backend.core.realtime.transform import transform_single_second
+    from backend.core.realtime import transform_single_second
 
     api_key = config.get_fastly_api_key(service_id)
-    fastly_service_id = config.get_fastly_logging_service_id(service_id)
+    fastly_service_id = config.get_fastly_service_id(service_id)
     if not api_key or not fastly_service_id:
         return []
 
-    import requests as req_lib
+    from backend.core.fastly.client import fastly_rt
 
-    url = f"https://rt.fastly.com/v1/channel/{fastly_service_id}/ts/h?limit=120"
     try:
-        resp = req_lib.get(url, headers={"Fastly-Key": api_key}, timeout=10)
-        resp.raise_for_status()
-        rt_json = resp.json()
+        rt_json = fastly_rt(f"/v1/channel/{fastly_service_id}/ts/h?limit=120", token=api_key)
     except Exception:
         logger.warning("RT seed fetch failed for %s", service_id)
         return []
@@ -238,42 +331,42 @@ def _fetch_seed_ticks(service_id: str, count: int = 60) -> list[dict]:
     return ticks[-count:]
 
 
-@router.get("/services/{service_id}/realtime-seed")
+@control_room_router.get(
+    "/services/{service_id}/realtime-seed", response_model=RealtimeSeedResponse, response_model_exclude_unset=True
+)
 @query_errors()
 async def realtime_seed(
     service_id: ServiceId,
-):
+    _access: str | None = Depends(require_service_access),
+) -> RealtimeSeedResponse:
     """Return the last 60 metrics ticks for instant chart hydration."""
-    from backend.core.realtime.poller import poller
+    from backend.core.realtime import poller
     from backend.core.realtime.publisher import publisher as rt_publisher
 
-    ticks = rt_publisher.get_recent_ticks(service_id, count=60)
+    ticks = await asyncio.to_thread(rt_publisher.get_recent_ticks, service_id, 60)
     if len(ticks) >= 60:
-        return {"ticks": ticks}
+        return RealtimeSeedResponse(ticks=ticks)
 
     ticks = await asyncio.to_thread(_fetch_seed_ticks, service_id)
 
     poller.ensure_polling(service_id)
 
-    return {"ticks": ticks}
+    return RealtimeSeedResponse(ticks=ticks)
 
 
 # ── SSE real-time stream ─────────────────────────────────────────────────────
 
 
-@router.get("/services/{service_id}/realtime-stream")
+@control_room_router.get("/services/{service_id}/realtime-stream")
 async def realtime_stream(
     request: Request,
     service_id: ServiceId,
+    _access: str | None = Depends(require_service_access),
 ) -> EventSourceResponse:
-    """Real-time metrics stream powered by rt.fastly.com polling.
-
-    Emits ``metrics_tick`` events with live counters. The poller starts
-    on first subscriber connect and suspends when all subscribers disconnect.
-    """
-    from backend.core.realtime.poller import poller
+    """Real-time metrics stream powered by rt.fastly.com polling."""
+    from backend.core.realtime import poller
     from backend.core.realtime.publisher import publisher as rt_publisher
-    from backend.utils.sse_subscription import iter_with_disconnect_ping
+    from backend.utils.sse import iter_with_disconnect_ping
 
     poller.ensure_polling(service_id)
 
@@ -281,77 +374,97 @@ async def realtime_stream(
         async for payload in iter_with_disconnect_ping(rt_publisher.subscribe(service_id), request, ping_seconds=15):
             yield json.dumps(payload)
 
-    return EventSourceResponse(stream(), ping=5, headers=SSE_PASSTHROUGH_HEADERS)
+    return sse_response(stream())
 
 
-# ── Log-field-audit endpoint ────────────────────────────────────────────────
-
-FEATURE_REQUIRED_FIELDS: dict[str, list[str]] = {
-    "Dashboard": ["status", "cache_status", "url", "method"],
-    "Performance": ["time_elapsed", "time_to_first_byte"],
-    "Origin": ["is_cacheable", "origin_host"],
-    "Security": ["client_ip", "geo_country", "user_agent"],
-    "Sessions": ["session_id", "url"],
-    "Network": ["pop", "geo_country"],
-    "Insights": ["status", "url", "client_ip", "user_agent"],
-}
+# ── Recent error stream ─────────────────────────────────────────────────────
 
 
-@router.get("/services/{service_id}/log-field-audit")
-@query_errors()
-def log_field_audit(
+def _recent_standard_errors(source: dict[str, Any], service_id: str) -> list[dict[str, Any]]:
+    from backend.core import duckdb as _db
+    from backend.core.storage import execute_with_stale_view_retry
+    from backend.repositories._base import _safe_table
+
+    con = _db.get_connection(source=source, read_only=True)
+    try:
+        view_name = _safe_table(service_id.replace("-", "_"))
+        return execute_with_stale_view_retry(
+            con,
+            source,
+            recent_standard_error_events,
+            view_name,
+            service_id=service_id,
+        )
+    finally:
+        con.close()
+
+
+def _recent_high_scale_errors(service: Any) -> list[dict[str, Any]]:
+    return recent_high_scale_error_events(service.client, service.service_id)
+
+
+def _mask_error_events(events: list[dict[str, Any]], request: Request) -> list[dict[str, Any]]:
+    if not mask_ips_for(getattr(request.state, "analyst_session", None)):
+        return events
+    return [{**event, "client_ip": mask_ip(event["client_ip"])} for event in events]
+
+
+@control_room_router.get("/services/{service_id}/control-room/error-stream")
+async def control_room_error_stream(
+    request: Request,
     service_id: ServiceId,
     _access: str | None = Depends(require_service_access),
-):
-    """Check which log fields are enabled and which features they support."""
-    from backend import config as svcconfig
-    from backend.core.log_fields import resolve_enabled_fields
+    registry: HighScaleServiceRegistryProtocol = Depends(get_high_scale_service_registry),
+) -> EventSourceResponse:
+    """Stream bounded recent 4xx/5xx request events."""
+    from backend.core import duckdb as _db
 
-    cfg = svcconfig.load_config(service_id)
-    log_fields_cfg: dict | None = cfg.get("log_fields") if cfg else None
-    enabled = resolve_enabled_fields(log_fields_cfg or {})
-    enabled_ids = {f if isinstance(f, str) else f.get("id", f) for f in enabled}
+    source = await asyncio.to_thread(_db.get_source_for_service, service_id)
+    high_scale_service = registry.resolve(service_id)
 
-    features = []
-    for feature_name, required in FEATURE_REQUIRED_FIELDS.items():
-        missing = [f for f in required if f not in enabled_ids]
-        features.append(
-            {
-                "name": feature_name,
-                "required_fields": required,
-                "status": "ok" if not missing else "missing_fields",
-                "missing_fields": missing,
-            }
-        )
+    async def stream() -> AsyncIterator[dict[str, Any]]:
+        seen: set[str] = set()
+        while not await request.is_disconnected():
+            try:
+                if high_scale_service is not None:
+                    events = await asyncio.to_thread(_recent_high_scale_errors, high_scale_service)
+                elif source is not None:
+                    events = await asyncio.to_thread(_recent_standard_errors, source, service_id)
+                else:
+                    events = []
+                for event in reversed(_mask_error_events(events, request)):
+                    event_id = event["event_id"]
+                    if event_id in seen:
+                        continue
+                    seen.add(event_id)
+                    if len(seen) > 200:
+                        seen = set(list(seen)[-100:])
+                    yield {"event": "error_event", "data": json.dumps(event)}
+            except Exception:
+                logger.warning("Control Room error stream query failed for %s", service_id, exc_info=True)
+            await asyncio.sleep(2)
 
-    return {
-        "service_id": service_id,
-        "enabled_fields": sorted(enabled_ids),
-        "features": features,
-    }
+    return sse_response(stream())
 
 
 # ── Correlator endpoint ─────────────────────────────────────────────────────
 
 
-class CorrelateRequest(BaseModel):
-    dimension: str
-    window_minutes: int = Field(default=5, ge=1, le=60)
-    limit: int = Field(default=10, ge=1, le=100)
-
-
-@router.post("/services/{service_id}/control-room/correlate")
+@control_room_router.post(
+    "/services/{service_id}/control-room/correlate", response_model=CorrelateResponse, response_model_exclude_unset=True
+)
 @query_errors()
 async def control_room_correlate(
     body: CorrelateRequest,
     service_id: ServiceId,
+    request: Request,
     _access: str | None = Depends(require_service_access),
-):
+    registry: HighScaleServiceRegistryProtocol = Depends(get_high_scale_service_registry),
+) -> dict[str, Any]:
     """Top-N breakdown by a log field within a recent time window."""
-    from fastapi import HTTPException
-
     from backend.core import duckdb as _db
-    from backend.core import field_registry
+    from backend.core import log_fields as field_registry
+    from backend.repositories._base import _safe_table
 
     field_def = field_registry.try_get(body.dimension)
     if field_def is None:
@@ -360,33 +473,63 @@ async def control_room_correlate(
             detail={"error": "unknown_dimension", "dimension": body.dimension},
         )
 
-    source = _db.get_source_for_service(service_id)
+    col = field_def.code
+    window_minutes = body.window_minutes
+    limit = body.limit
+
+    high_scale_service = registry.resolve(service_id)
+    if high_scale_service is not None:
+        start = datetime.now(UTC) - timedelta(minutes=window_minutes)
+        aggregate_dimension = "client_ip" if col == "ip" else col
+        response = await asyncio.to_thread(
+            query_clickhouse_aggregate,
+            high_scale_service.client,
+            AggregateRequest(
+                service_id=service_id,
+                domain="request",
+                start=start,
+                end=datetime.now(UTC),
+                dimension=aggregate_dimension,
+            ),
+            watermark=high_scale_service.watermark_for("request"),
+        )
+        top_values = list(response.top_values)[:limit]
+        if col == "ip" and mask_ips_for(getattr(request.state, "analyst_session", None)):
+            top_values = [(mask_ip(value), count) for value, count in top_values]
+        return CorrelateResponse(
+            dimension=body.dimension,
+            top=[CorrelatorTopRow(value=value, count=count) for value, count in top_values],
+            freshness=CorrelatorFreshness(
+                latest_log_at=(
+                    response.watermark.coverage_end.isoformat() if response.watermark.coverage_end else None
+                ),
+                lag_seconds=int(response.freshness_lag_seconds),
+            ),
+        ).model_dump()
+
+    source = await asyncio.to_thread(_db.get_source_for_service, service_id)
     if source is None:
         raise HTTPException(
             status_code=404,
             detail={"error": "no_data_source", "service_id": service_id},
         )
 
-    col = field_def.code
-    window_minutes = body.window_minutes
-    limit = body.limit
+    def _query() -> tuple[list[Any], Any]:
+        from backend.core.storage import execute_with_stale_view_retry
 
-    def _query():
         con = _db.get_connection(source=source, read_only=True)
         try:
-            view_name = f"logs_{service_id.replace('-', '_')}"
-            result = con.execute(
-                f"""
-                SELECT {col} AS value, COUNT(*) AS count
-                FROM {view_name}
-                WHERE timestamp >= NOW() - INTERVAL '{window_minutes} minutes'
-                GROUP BY 1
-                ORDER BY 2 DESC
-                LIMIT {limit}
-                """,
-            ).fetchall()
-            freshness_row = con.execute(f"SELECT MAX(timestamp) AS latest FROM {view_name}").fetchone()
-            return result, freshness_row
+            view_name = _safe_table(service_id.replace("-", "_"))
+            return execute_with_stale_view_retry(
+                con,
+                source,
+                correlate_top_values,
+                view_name,
+                col,
+                datetime.now(UTC) - timedelta(minutes=window_minutes),
+                limit,
+                service_id=service_id,
+            )
         finally:
             con.close()
 
@@ -397,59 +540,60 @@ async def control_room_correlate(
     if latest_log_at:
         lag_seconds = max(0, int((datetime.now(UTC) - latest_log_at).total_seconds()))
 
-    return {
-        "dimension": body.dimension,
-        "top": [{"value": str(r[0]), "count": r[1]} for r in rows],
-        "freshness": {
-            "latest_log_at": latest_log_at.isoformat() if latest_log_at else None,
-            "lag_seconds": lag_seconds,
-        },
-    }
+    top_items = [CorrelatorTopRow(value=str(r[0]), count=r[1]) for r in rows]
+    if col == "ip" and mask_ips_for(getattr(request.state, "analyst_session", None)):
+        top_items = [CorrelatorTopRow(value=mask_ip(str(item.value or "")), count=item.count) for item in top_items]
+
+    return CorrelateResponse(
+        dimension=body.dimension,
+        top=top_items,
+        freshness=CorrelatorFreshness(
+            latest_log_at=latest_log_at.isoformat() if latest_log_at else None,
+            lag_seconds=lag_seconds,
+        ),
+    ).model_dump()
 
 
-# ── Onboarding wizard ────────────────────────────────────────────────────────
+# ── Tab data endpoints (read) — registered AFTER static /control-room/* paths ─
 
 
-class WizardStepRequest(BaseModel):
-    """Request body for recording a wizard step completion."""
-
-    step: str
-    details: dict = {}
-
-
-@router.get("/services/{service_id}/control-room/wizard/state")
+@control_room_router.get(
+    "/services/{service_id}/control-room/{tab}",
+    response_model=ControlRoomTabResponse,
+    response_model_exclude_unset=True,
+)
 @query_errors()
-def wizard_state(
+def control_room_tab(
+    tab: str,
     service_id: ServiceId,
     _access: str | None = Depends(require_service_access),
-):
-    """Return current wizard state from audit log."""
-    entries = list_audit(service_id, limit=100)
-    wizard_entries = [e for e in entries if e.get("event_type", "").startswith("wizard_")]
-    completed_steps = [
-        e["event_type"].replace("wizard_step_", "")
-        for e in wizard_entries
-        if e["event_type"].startswith("wizard_step_")
-    ]
-    return {
-        "service_id": service_id,
-        "completed_steps": completed_steps,
-        "is_complete": any(e["event_type"] == "wizard_complete" for e in wizard_entries),
-    }
+) -> ControlRoomTabResponse:
+    """Return data for a control-room tab."""
+    if tab not in TAB_STUBS:
+        raise HTTPException(status_code=404, detail={"error": "unknown_tab", "tab": tab})
+    return ControlRoomTabResponse(**TAB_STUBS[tab])
 
 
-@router.post("/services/{service_id}/control-room/wizard/step")
-@query_errors()
-def wizard_step(
-    body: WizardStepRequest,
-    service_id: ServiceId,
-    _access: str | None = Depends(require_service_access),
-):
-    """Record a wizard step completion via audit log."""
-    record_audit(
-        service_id=service_id,
-        event_type=f"wizard_step_{body.step}",
-        details=body.details,
-        actor="control_room_wizard",
-    )
-    return {"recorded": True, "step": body.step}
+__all__ = [
+    "CORRELATE_TOP_VALUES",
+    "LATEST_TIMESTAMP",
+    "LATEST_TIMESTAMP_WINDOWED",
+    "RECENT_HIGH_SCALE_ERRORS",
+    "RECENT_STANDARD_ERRORS",
+    "TAB_STUBS",
+    "control_room_allowlist",
+    "control_room_big_red_button",
+    "control_room_correlate",
+    "control_room_cost_governor",
+    "control_room_error_stream",
+    "control_room_mitigations",
+    "control_room_router",
+    "control_room_rules",
+    "control_room_tab",
+    "correlate_top_values",
+    "realtime_seed",
+    "realtime_stream",
+    "recent_high_scale_error_events",
+    "recent_standard_error_events",
+    "router",
+]

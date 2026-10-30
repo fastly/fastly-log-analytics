@@ -1,7 +1,10 @@
 # ADR-07 — Per-Feature Performance & Cost Budgets
 
-**Status:** Accepted (2026-06-10)
-**Decided by:** v2.0 cleanup retrospective (2026-06-10)
+**Status:** Accepted (storage references updated to DuckLake per [ADR-14](14-ducklake-replacement.md))
+
+> [!NOTE]
+> The Iceberg/PyIceberg references below describe the earlier design. Storage is DuckLake now ([ADR-14](14-ducklake-replacement.md)); `backend/core/iceberg/` (removed) was replaced by `backend/core/storage/`.
+**Decided by:** Engineering retrospective
 
 ## 1. Context & Motivation
 

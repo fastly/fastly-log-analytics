@@ -1,130 +1,91 @@
+"""Network router — network health, quality, POP health, and bundle endpoints."""
+
 from __future__ import annotations
 
 import logging
+import time
 from datetime import UTC, datetime, timedelta
-from typing import Literal
+from typing import Any
 
-from fastapi import APIRouter, Depends, Query
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException, Query
 
-from backend import config as svcconfig
 from backend.core.request_context import RequestContext, build_request_context
-from backend.models.common import BaseResponse, FilteredRequest, Limit100, Seconds14400
-from backend.models.errors import DEFAULT_ERROR_RESPONSES
-from backend.models.network import NetworkHealthResponse, NetworkQualityResponse
-from backend.repositories import network as repo
-from backend.repositories._base import _safe_table
+from backend.core.storage import execute_with_stale_view_retry
+from backend.models.analytics import (
+    NetworkBundleRequest,
+    NetworkBundleResponse,
+    NetworkHealthRequest,
+    NetworkHealthResponse,
+    NetworkQualityRequest,
+    NetworkQualityResponse,
+    NetworkSectionName,
+    PopHealthItem,
+    PopHealthListResponse,
+    TransportMetrics,
+)
+from backend.models.common import DEFAULT_ERROR_RESPONSES
+from backend.repositories import network as network_repo
+from backend.repositories._base import SectionTimer, _safe_table
+from backend.repositories.utils.response_cache import cache_result
 from backend.utils.auth import mask_ips_for
+from backend.utils.date_utils import parse_iso_utc
 from backend.utils.router_utils import make_section_expander, query_errors
-from backend.utils.telemetry import track_query
+from backend.utils.telemetry import process_context_scope
 from backend.utils.time_window import (
     invite_clamp_fingerprint,
     is_valid_range_token,
     quantize_anchor,
-    resolve_window,
 )
 
 logger = logging.getLogger(__name__)
 
+repo = network_repo
+
 router = APIRouter(prefix="/api", tags=["network"], responses=DEFAULT_ERROR_RESPONSES)
-# Section selector — names mirror NetworkHealthResponse fields one-to-one so
-# the FE can request a subset and the per-card React Query hooks each pull
-# only what they render. Two coupling groups:
-#   - CORE_SECTIONS share the per-request network temp table
-#   - SHIELDING_SECTIONS hit the origin code path (different temp). Splitting
-#     this out is the slice 2 audit win — shielding is the slowest/most-likely
-#     -empty card and today it blocks heatmap render because everything ships
-#     in one response.
-SectionName = Literal[
-    "summary",
-    "heatmap",
-    "buckets",
-    "leaderboard",
-    "metro_leaderboard",
-    "cities",
-    "map_buckets",
-    "shielding_analysis",
-]
+network_router = router
 
 CORE_SECTIONS: frozenset[str] = frozenset(
     {"summary", "heatmap", "buckets", "leaderboard", "metro_leaderboard", "cities", "map_buckets"}
 )
 SHIELDING_SECTIONS: frozenset[str] = frozenset({"shielding_analysis"})
 
-# No coupling — every network section is independent.
-_expand_sections = make_section_expander(SectionName)
+_expand_network_sections = make_section_expander(NetworkSectionName)
 
 
-class NetworkHealthRequest(FilteredRequest):
-    metric: str = "health_score"
-    bucket_seconds: Seconds14400 = 300
-    top_n: Limit100 = 30
-    map_asn: str = "all"
-    sections: list[SectionName] | None = None
-    # Relative-range wire contract (additive, optional). When ``range_token`` is
-    # a recognized token, the server RESOLVES the scan window itself from
-    # (token, anchor) — it does NOT trust FE-supplied ``start_time``/``end_time``
-    # on this path — and the (token, quantized_anchor, invite-clamp fingerprint)
-    # triple stabilizes the response-memo key so an analyst loading across
-    # rolling minutes gets a cache HIT instead of recomputing the 30d pipeline.
-    # Absent / unknown token → the legacy anchor-faithful absolute-bounds path.
-    # See backend/utils/time_window.py + the spec for the security rationale.
-    range_token: str | None = None
-    anchor: str | None = None
-
-
-class NetworkQualityRequest(FilteredRequest):
-    region_country: str = "US"
-
-
-@router.post("/network-health", response_model=NetworkHealthResponse)
-@query_errors()
-def network_health(
-    req: NetworkHealthRequest,
-    ctx: RequestContext = Depends(build_request_context),
-):
-    # ── Relative-range keyed path ───────────────────────────────────────────
-    # When the caller sends a recognized ``range_token``, the SERVER resolves
-    # the scan window from (token, quantized anchor) — we do NOT trust the
-    # FE-supplied absolute start/end here, so a crafted body can't poison a
-    # token+anchor cache entry with an arbitrary window. The resolved bounds are
-    # still passed through ctx.clamp so the invite ceiling is enforced
-    # regardless of token (an analyst can't widen past their invite by picking
-    # "30d"). The (token, quantized_anchor, invite_clamp_fingerprint) triple is
-    # then handed to get_health to STABILIZE the response-memo key across rolling
-    # minutes — the network 30d analyst-cliff fix. An absent/unknown token falls
-    # through to the legacy anchor-faithful absolute-bounds path unchanged.
-    keyed_range_token: str | None = None
-    keyed_anchor: str | None = None
-    invite_fp: str | None = None
+def _resolve_network_window(
+    req: NetworkHealthRequest | NetworkQualityRequest | NetworkBundleRequest,
+    ctx: RequestContext,
+) -> tuple[str | None, str | None, str | None, str | None, str | None]:
+    """Resolve and clamp the time window + cache-key tokens for network endpoints."""
+    start_time, end_time = ctx.resolve_window(req)
     if is_valid_range_token(req.range_token):
-        # earliest_log_at drives the "auto" adaptive default; sourced from the
-        # service's persisted status snapshot (same field /api/log-extents and
-        # the bootstrap payload read — no DuckDB connection, no cron contention).
-        earliest_log_at = svcconfig.get_status(ctx.source["name"]).get("earliest_log_at")
-        resolved_start, resolved_end = resolve_window(req.range_token, req.anchor, earliest_log_at=earliest_log_at)
-        start_time, end_time = ctx.clamp(resolved_start, resolved_end)
-        keyed_range_token = req.range_token
-        keyed_anchor = quantize_anchor(req.anchor)
-        invite_fp = invite_clamp_fingerprint(ctx.analyst_session)
-    else:
-        start_time, end_time = ctx.clamp(req.start_time, req.end_time)
-    sections = _expand_sections(req.sections)
-    # mask_ips partitions the get_health response cache (masked vs unmasked).
-    # network-health emits no IP today so this is belt-and-braces; it keeps the
-    # cache key uniform with insights and prevents a future IP-bearing field
-    # from leaking an unmasked entry to a masking analyst.
-    mask_ips = mask_ips_for(ctx.analyst_session)
+        return (
+            start_time,
+            end_time,
+            req.range_token,
+            quantize_anchor(req.anchor),
+            invite_clamp_fingerprint(ctx.analyst_session),
+        )
+    return start_time, end_time, None, None, None
 
-    # When the caller requests ONLY shielding, skip the network temp
-    # materialization entirely — get_health's ~13s 30d temp create is wasted
-    # work if no core section is wanted.
-    want_core = sections is None or bool(sections & CORE_SECTIONS)
-    want_shielding = sections is None or bool(sections & SHIELDING_SECTIONS)
 
+def _execute_network_health_section(
+    req: NetworkHealthRequest | NetworkBundleRequest,
+    ctx: RequestContext,
+    *,
+    start_time: str | None,
+    end_time: str | None,
+    sections: set[str] | None,
+    want_core: bool,
+    want_shielding: bool,
+    mask_ips: bool,
+    keyed_range_token: str | None,
+    keyed_anchor: str | None,
+    invite_fp: str | None,
+) -> dict[str, Any]:
     if want_core:
-        res = repo.get_health(
-            con=ctx.con,
+        res = network_repo.get_health(
+            con_factory=ctx.con_factory(),
             src=ctx.source,
             start_time=start_time,
             end_time=end_time,
@@ -140,8 +101,10 @@ def network_health(
             invite_clamp_fingerprint=invite_fp,
         )
     else:
-        res = {"available": True}
+        res = cache_result({"available": True}, state="bypass", prewarmer=False)
 
+    if "_response_cache" in res:
+        res["_response_cache"] = {**res["_response_cache"], "scope": "self"}
     if want_shielding:
         try:
             from backend.repositories import origin as _origin
@@ -155,19 +118,48 @@ def network_health(
             )
             shielding = {k: v for k, v in shielding.items() if not k.startswith("debug_")}
             res["shielding_analysis"] = shielding
+        except HTTPException:
+            raise
         except Exception:
-            # Do NOT swallow silently: a real failure here (e.g. a SQL
-            # regression in get_shielding_analysis) used to be
-            # indistinguishable from "no shield data" — the card grid just
-            # vanished and nothing surfaced in monitoring. Log it with a
-            # stack trace and return an explicit error sentinel so the
-            # frontend renders an "analysis unavailable" state instead of a
-            # misleading empty one. (shielding audit 2026-06-30 M2)
             logger.exception(
                 "shielding_analysis failed for service=%s",
                 ctx.source.get("name"),
             )
             res["shielding_analysis"] = {"has_data": False, "error": True, "rows": []}
+    return res
+
+
+@router.post("/network-health", response_model=NetworkHealthResponse)
+@query_errors()
+def network_health(
+    req: NetworkHealthRequest,
+    ctx: RequestContext = Depends(build_request_context),
+):
+    start_time, end_time, keyed_range_token, keyed_anchor, invite_fp = _resolve_network_window(req, ctx)
+
+    high_scale_service = ctx.high_scale
+    if high_scale_service is not None:
+        from backend.high_scale.network import network_health as hs_network_health
+
+        return hs_network_health(high_scale_service, req, start_time, end_time)
+    sections = _expand_network_sections(req.sections)
+    mask_ips = mask_ips_for(ctx.analyst_session)
+
+    want_core = sections is None or bool(sections & CORE_SECTIONS)
+    want_shielding = sections is None or bool(sections & SHIELDING_SECTIONS)
+    res = _execute_network_health_section(
+        req,
+        ctx,
+        start_time=start_time,
+        end_time=end_time,
+        sections=sections,
+        want_core=want_core,
+        want_shielding=want_shielding,
+        mask_ips=mask_ips,
+        keyed_range_token=keyed_range_token,
+        keyed_anchor=keyed_anchor,
+        invite_fp=invite_fp,
+    )
     return NetworkHealthResponse.with_telemetry(**res)
 
 
@@ -177,64 +169,77 @@ def network_quality(
     req: NetworkQualityRequest,
     ctx: RequestContext = Depends(build_request_context),
 ):
-    start_time, end_time = ctx.clamp(req.start_time, req.end_time)
-    res = repo.get_quality(
-        con=ctx.con,
+    start_time, end_time = ctx.resolve_window(req)
+
+    high_scale_service = ctx.high_scale
+    if high_scale_service is not None:
+        from backend.high_scale.network import network_quality as hs_network_quality
+
+        return hs_network_quality(high_scale_service, req, start_time, end_time)
+    res = network_repo.get_quality(
+        con_factory=ctx.con_factory(),
         src=ctx.source,
         start_time=start_time,
         end_time=end_time,
         filters=req.filters,
         region_country=req.region_country,
     )
-    return NetworkQualityResponse.with_telemetry(**res)
+    return NetworkQualityResponse.with_telemetry(**cache_result(res, state="bypass", prewarmer=False))
 
 
-class PopHealthItem(BaseModel):
-    pop: str
-    requests: int
-    errors: int
-    error_rate: float
-    p50_rtt_us: float | None
-    p95_ttfb_ms: float | None
-    cache_hit_rate: float
-    bandwidth_bytes: int
+def _fetch_pop_health_data(
+    con: Any,
+    source: dict[str, Any],
+    start_time_dt: datetime,
+    end_time_dt: datetime,
+) -> tuple[list[PopHealthItem], bool, dict[str, Any]]:
+    table_name = _safe_table(source["name"])
+    from backend.repositories._base import QueryRunner
 
-
-class PopHealthListResponse(BaseResponse):
-    data: list[PopHealthItem]
-
-
-@router.get("/network/pop-health", response_model=PopHealthListResponse)
-def get_pop_health(
-    ctx: RequestContext = Depends(build_request_context),
-    start_time: datetime | None = Query(default=None),
-    end_time: datetime | None = Query(default=None),
-):
-    """Aggregate edge-routing and cache metrics across Fastly POP locations."""
-    table_name = _safe_table(ctx.source["name"])
-    time_filter = "WHERE timestamp >= ? AND timestamp <= ?"
-    params = [start_time or (datetime.now(UTC) - timedelta(hours=24)), end_time or datetime.now(UTC)]
-
-    query = f"""
-        SELECT
-            pop,
-            COUNT(*) AS requests,
-            COUNT(*) FILTER (WHERE status >= 400 OR status = 0) AS errors,
-            ROUND(COUNT(*) FILTER (WHERE status >= 400 OR status = 0) * 100.0 / COUNT(*), 2) AS error_rate,
-            approx_quantile(tcp_rtt, 0.5) AS p50_rtt_us,
-            approx_quantile(ttfb, 0.95) AS p95_ttfb_ms,
-            ROUND(COUNT(*) FILTER (WHERE cache IN ('HIT', 'HIT-STALE')) * 100.0 / COUNT(*), 2) AS cache_hit_rate,
-            SUM(resp_bytes) AS bandwidth_bytes
-        FROM {table_name}
-        {time_filter} AND pop IS NOT NULL AND pop != ''
-        GROUP BY pop
-        ORDER BY requests DESC
-    """
+    runner = QueryRunner(con, source)
+    timer = SectionTimer()
+    started = time.perf_counter()
+    rolled = runner.try_pop_health_from_rollup(
+        start_time_dt.isoformat(),
+        end_time_dt.isoformat(),
+        has_filters=False,
+    )
+    timer.mark(
+        "pop_health_rollup",
+        started,
+        source="rollup",
+        activity="compute" if rolled is not None else "overhead",
+        current_execution=True,
+        outcome="served" if rolled is not None else "fallback",
+    )
+    observation = cache_result({"section_timings": timer.entries}, state="bypass", prewarmer=False)
 
     data = []
-    with track_query(ctx.con, query, params, "pop_health") as cursor:
-        for row in cursor.fetchall():
+    if rolled is not None:
+        for row in rolled:
+            reqs = row[1]
+            errs = row[2]
+            hits = row[3]
             data.append(
+                PopHealthItem(
+                    pop=row[0],
+                    requests=reqs,
+                    errors=errs,
+                    error_rate=round(errs * 100.0 / reqs, 2) if reqs else 0.0,
+                    p50_rtt_us=row[5],
+                    p95_ttfb_ms=row[6],
+                    cache_hit_rate=round(hits * 100.0 / reqs, 2) if reqs else 0.0,
+                    bandwidth_bytes=row[4] or 0,
+                )
+            )
+        data.sort(key=lambda x: x.requests, reverse=True)
+        return data, True, observation
+    else:
+        st_param = start_time_dt if start_time_dt.tzinfo is not None else start_time_dt.replace(tzinfo=UTC)
+        et_param = end_time_dt if end_time_dt.tzinfo is not None else end_time_dt.replace(tzinfo=UTC)
+
+        def _run_fallback(c):
+            return [
                 PopHealthItem(
                     pop=row[0],
                     requests=row[1],
@@ -245,6 +250,178 @@ def get_pop_health(
                     cache_hit_rate=row[6],
                     bandwidth_bytes=row[7] or 0,
                 )
-            )
+                for row in network_repo.get_pop_health_rows(c, table_name, st_param, et_param)
+            ]
 
-    return PopHealthListResponse.with_telemetry(data=data)
+        started = time.perf_counter()
+        data = execute_with_stale_view_retry(con, source, _run_fallback)
+        timer.mark("pop_health", started, source="live", activity="compute", current_execution=True, outcome="served")
+        return data, False, observation
+
+
+@router.get("/network/pop-health", response_model=PopHealthListResponse)
+def get_pop_health(
+    ctx: RequestContext = Depends(build_request_context),
+    start_time: datetime | None = Query(default=None),
+    end_time: datetime | None = Query(default=None),
+):
+    """Aggregate edge-routing and cache metrics across Fastly POP locations."""
+    clamped_start, clamped_end = ctx.clamp(
+        start_time.isoformat() if start_time is not None else None,
+        end_time.isoformat() if end_time is not None else None,
+    )
+    clamped_start_dt = parse_iso_utc(clamped_start) if clamped_start else start_time
+    clamped_end_dt = parse_iso_utc(clamped_end) if clamped_end else end_time
+    high_scale_service = ctx.high_scale
+    if high_scale_service is not None:
+        from backend.high_scale.network import get_pop_health as hs_get_pop_health
+
+        return hs_get_pop_health(high_scale_service, clamped_start_dt, clamped_end_dt)
+
+    start_time_dt = clamped_start_dt or (datetime.now(UTC) - timedelta(hours=24))
+    end_time_dt = clamped_end_dt or datetime.now(UTC)
+    data, is_approx, observation = _fetch_pop_health_data(ctx.con, ctx.source, start_time_dt, end_time_dt)
+    return PopHealthListResponse.with_telemetry(data=data, approximate=is_approx, **observation)
+
+
+def _network_bundle_impl(
+    req: NetworkBundleRequest,
+    ctx: RequestContext,
+) -> NetworkBundleResponse:
+    with process_context_scope("network:bundle"):
+        start_time, end_time, keyed_range_token, keyed_anchor, invite_fp = _resolve_network_window(req, ctx)
+
+        high_scale_service = ctx.high_scale
+        if high_scale_service is not None:
+            from backend.high_scale.network import network_bundle as hs_network_bundle
+
+            return hs_network_bundle(high_scale_service, req, start_time, end_time)
+
+        sections = _expand_network_sections(req.sections) if req.sections else None
+        mask_ips = mask_ips_for(ctx.analyst_session)
+
+        want_health = (
+            sections is None
+            or "health" in sections
+            or any(s in CORE_SECTIONS or s in SHIELDING_SECTIONS for s in sections)
+        )
+        bundle_dq: list = []
+        bundle_dc: list = []
+        health_resp = None
+        if want_health:
+            want_core = sections is None or "health" in sections or bool(sections & CORE_SECTIONS)
+            want_shielding = sections is None or "health" in sections or bool(sections & SHIELDING_SECTIONS)
+            res = _execute_network_health_section(
+                req,
+                ctx,
+                start_time=start_time,
+                end_time=end_time,
+                sections=sections,
+                want_core=want_core,
+                want_shielding=want_shielding,
+                mask_ips=mask_ips,
+                keyed_range_token=keyed_range_token,
+                keyed_anchor=keyed_anchor,
+                invite_fp=invite_fp,
+            )
+            bundle_dq.extend(res.get("debug_queries") or [])
+            bundle_dc.extend(res.get("debug_calls") or [])
+            health_resp = NetworkHealthResponse.with_telemetry(**res)
+
+        want_quality = sections is None or "quality" in sections
+        quality_resp = None
+        if want_quality:
+            q_res = network_repo.get_quality(
+                con_factory=ctx.con_factory(),
+                src=ctx.source,
+                start_time=start_time,
+                end_time=end_time,
+                filters=req.filters,
+                region_country=req.region_country,
+            )
+            bundle_dq.extend(q_res.get("debug_queries") or [])
+            bundle_dc.extend(q_res.get("debug_calls") or [])
+            quality_resp = NetworkQualityResponse.with_telemetry(**cache_result(q_res, state="bypass", prewarmer=False))
+
+        want_pop_health = sections is None or "pop_health" in sections
+        pop_health_items: list[PopHealthItem] | None = None
+        pop_observation = None
+        if want_pop_health:
+            try:
+                st_dt = (
+                    datetime.fromisoformat(start_time.replace("Z", "+00:00"))
+                    if start_time
+                    else (datetime.now(UTC) - timedelta(hours=24))
+                )
+            except Exception:
+                st_dt = datetime.now(UTC) - timedelta(hours=24)
+            try:
+                et_dt = datetime.fromisoformat(end_time.replace("Z", "+00:00")) if end_time else datetime.now(UTC)
+            except Exception:
+                et_dt = datetime.now(UTC)
+            pop_health_items, _, pop_observation = _fetch_pop_health_data(ctx.con, ctx.source, st_dt, et_dt)
+
+        want_transport = sections is None or "transport" in sections
+        transport_resp = None
+        if want_transport:
+            t_res = network_repo.get_transport_metrics(
+                con_factory=ctx.con_factory(),
+                src=ctx.source,
+                start_time=start_time,
+                end_time=end_time,
+                filters=req.filters,
+            )
+            bundle_dq.extend(t_res.get("debug_queries") or [])
+            bundle_dc.extend(t_res.get("debug_calls") or [])
+            transport_resp = TransportMetrics(**cache_result(t_res, state="bypass", prewarmer=False))
+
+        return NetworkBundleResponse.with_telemetry(
+            **cache_result({}, state="bypass", prewarmer=False),
+            available=True,
+            component_observations={"pop_health": pop_observation} if pop_observation is not None else None,
+            health=health_resp,
+            quality=quality_resp,
+            pop_health=pop_health_items,
+            transport=transport_resp,
+            debug_queries=bundle_dq,
+            debug_calls=bundle_dc,
+        )
+
+
+@router.post("/network/bundle", response_model=NetworkBundleResponse)
+@query_errors()
+def network_bundle(
+    req: NetworkBundleRequest,
+    ctx: RequestContext = Depends(build_request_context),
+):
+    return _network_bundle_impl(req, ctx)
+
+
+@router.get("/network/bundle", response_model=NetworkBundleResponse)
+@query_errors()
+def network_bundle_get(
+    start_time: str | None = None,
+    end_time: str | None = None,
+    range_token: str | None = None,
+    anchor: str | None = None,
+    metric: str = "health_score",
+    bucket_seconds: int = 300,
+    top_n: int = 30,
+    map_asn: str = "all",
+    region_country: str = "US",
+    sections: list[NetworkSectionName] | None = Query(default=None),
+    ctx: RequestContext = Depends(build_request_context),
+):
+    req = NetworkBundleRequest(
+        start_time=start_time,
+        end_time=end_time,
+        range_token=range_token,
+        anchor=anchor,
+        metric=metric,
+        bucket_seconds=bucket_seconds,
+        top_n=top_n,
+        map_asn=map_asn,
+        region_country=region_country,
+        sections=sections,
+    )
+    return _network_bundle_impl(req, ctx)

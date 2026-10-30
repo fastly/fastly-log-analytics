@@ -1,15 +1,17 @@
 # syntax=docker/dockerfile:1.4
 
+# Reuse the gateway's pinned Go 1.27.3 toolchain rather than an older release binary.
 FROM caddy:2.11.7-builder@sha256:c4cd20eaa0b69112fd5d4f721ffc9671687e1d5d0b155c8620cf7546dbef94c0 AS falco-builder
 ARG FALCO_VERSION=2.3.0
 RUN apk add --no-cache --upgrade 'ca-certificates>=20261020-r0' 'ca-certificates-bundle>=20261020-r0'
-RUN go mod download "github.com/ysugimoto/falco@v${FALCO_VERSION}" \
-    && cd "$(go env GOPATH)/pkg/mod/github.com/ysugimoto/falco@v${FALCO_VERSION}" \
-    && CGO_ENABLED=0 go build -mod=readonly \
+RUN wget -qO- "https://github.com/ysugimoto/falco/archive/refs/tags/v${FALCO_VERSION}.tar.gz" | tar -xz -C /tmp \
+    && CGO_ENABLED=0 go build -C "/tmp/falco-${FALCO_VERSION}" -mod=readonly \
     -ldflags "-X main.version=${FALCO_VERSION}" -o /usr/local/bin/falco ./cmd/falco \
+    && rm -rf "/tmp/falco-${FALCO_VERSION}" \
     && falco --version
 
 # --- Build Stage ---
+# python:3.13-slim-bookworm
 FROM python:3.13-slim-bookworm@sha256:281d39ff02e3b389401586134ff9e6572954687822a58055ec07a60ded4e0b7f AS builder
 
 # Install build dependencies
@@ -48,7 +50,55 @@ COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --no-dev --frozen --no-install-project
 
+# Pre-install DuckDB's platform-specific extensions while the build
+# environment has network access. Runtime pods may not be able to reach
+# extensions.duckdb.org, especially on local ARM64 Kubernetes clusters.
+RUN /app/.venv/bin/python -c \
+    "import duckdb; con = duckdb.connect(); [con.execute(f'INSTALL {name}') for name in ('ducklake', 'httpfs', 'parquet')]; con.close()"
+
+# --- Session scorer (Fastly Compute Wasm) ---
+# Built from source here so every image carries a package matching its own
+# commit; compute/scorer/pkg/ is gitignored and a hand-built tarball goes stale
+# or goes missing on any host that only does a git checkout. Local non-Docker
+# dev builds the same artifact with `make scorer-package`.
+# rust:1.90-slim-bookworm (matches compute/scorer/rust-toolchain.toml)
+FROM rust:1.90-slim-bookworm@sha256:64232e656c058f4468e8d024e990acff04f0fd5a5c0a88a574dc37773d7325c9 AS scorer-builder
+
+ARG TARGETARCH
+ARG FASTLY_CLI_VERSION=16.1.0
+ARG FASTLY_CLI_SHA256_AMD64=48e8b1dcf9fbe44c21fac06e32c3f9f670c1e9c611776199bfe61990e6dbe7ad
+ARG FASTLY_CLI_SHA256_ARM64=89f7f06e5f9fe5c2aa8e3f8dd45213caae4797bc41534ecdead04131d82baa0e
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl ca-certificates binaryen \
+    && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' ca-certificates)" ge '20250419~deb12u2' \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN set -eu; \
+    case "${TARGETARCH:-amd64}" in \
+      amd64) sha="$FASTLY_CLI_SHA256_AMD64" ;; \
+      arm64) sha="$FASTLY_CLI_SHA256_ARM64" ;; \
+      *) echo "unsupported arch ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL -o /tmp/fastly.tgz "https://github.com/fastly/cli/releases/download/v${FASTLY_CLI_VERSION}/fastly_v${FASTLY_CLI_VERSION}_linux-${TARGETARCH:-amd64}.tar.gz"; \
+    echo "${sha}  /tmp/fastly.tgz" | sha256sum -c -; \
+    tar -xzf /tmp/fastly.tgz -C /usr/local/bin fastly; \
+    rm /tmp/fastly.tgz
+
+WORKDIR /src/compute/scorer
+COPY compute/scorer/rust-toolchain.toml compute/scorer/Cargo.toml compute/scorer/Cargo.lock compute/scorer/fastly.toml ./
+COPY compute/scorer/src ./src
+COPY compute/scorer/fixtures ./fixtures
+
+# Cache mounts keep the cargo registry and incremental target dir across
+# builds; the final tarball is copied out of the mount before it ends.
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/src/compute/scorer/target \
+    fastly compute build --auto-yes \
+    && cp pkg/session-scorer.tar.gz /session-scorer.tar.gz
+
 # --- Production Stage ---
+# python:3.13-slim-bookworm
 FROM python:3.13-slim-bookworm@sha256:281d39ff02e3b389401586134ff9e6572954687822a58055ec07a60ded4e0b7f AS runner
 
 # Set environment variables
@@ -60,11 +110,10 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-# Install runtime dependencies (curl for healthcheck, tar for falco install).
+# Install runtime dependencies (curl for healthcheck, libjemalloc2 for memory management).
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
-    tar \
     libjemalloc2 \
     && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' ca-certificates)" ge '20250419~deb12u2' \
     && rm -rf /var/lib/apt/lists/*
@@ -80,6 +129,7 @@ RUN python -m pip install --no-cache-dir --upgrade pip==26.2.2
 # harmless-but-noisy "cannot be preloaded: ignored" on arm64. bookworm ships jemalloc 5.3.
 RUN LD_PRELOAD=libjemalloc.so.2 python3 -c "print('jemalloc preload OK')"
 
+# Falco binary copied from builder stage (no tar or download tools needed at runtime)
 COPY --from=falco-builder /usr/local/bin/falco /usr/local/bin/falco
 
 # Create a non-root runtime user so a foothold in the FastAPI process
@@ -111,29 +161,23 @@ RUN mkdir -p /app/configs /app/data /app/cache /app/compute/scorer \
 
 # Copy the virtual environment from the builder
 COPY --from=builder --chown=app:app /app/.venv /app/.venv
+COPY --from=builder --chown=app:app /root/.duckdb /home/app/.duckdb
 
-# Copy only the necessary backend files and root modules
-# This avoids pulling in the entire frontend/ directory
-COPY --chown=app:app backend/ ./backend/
+# Copy static assets, configuration, and helper scripts first.
+# Placing these before backend/ preserves Docker layer caching across application code changes.
 COPY --chown=app:app pyproject.toml README.md uv.lock ./
-COPY --chown=app:app scripts/generate_openapi.py scripts/
-
-# Include the default empty scoring matrix. The trained matrix.json is
-# a build artifact (gitignored, produced by scripts/scoring/train.py)
-# so we can't bake it in at image build time. The backend's _load_matrix()
-# prefers matrix.json if present (operator dropped it in via a volume
-# mount or post-build copy) and falls back to matrix.default.json so
-# the /scoring/evaluation endpoint returns a meaningful "no signal"
-# response instead of erroring out.
+COPY --chown=app:app scripts/generate_openapi.py scripts/clickhouse_replay.py scripts/
+# The optional delivery probe runs through the real container SDK/environment;
+# production has no ./scripts bind mount. Copy only this public diagnostic CLI.
+COPY --chown=app:app scripts/dev/verify_observability.py scripts/dev/
 COPY --chown=app:app compute/scorer/matrix.default.json ./compute/scorer/matrix.default.json
+COPY --from=scorer-builder --chown=app:app /session-scorer.tar.gz ./compute/scorer/pkg/session-scorer.tar.gz
 
-# Prebuilt, matrix-less scorer Wasm package. enable_scoring uploads this to
-# the customer's Compute service via the Fastly API (no Rust/Fastly-CLI
-# toolchain in this image). Committed + rebuilt off-VM via `make scorer-package`.
-COPY --chown=app:app compute/scorer/pkg/session-scorer.tar.gz ./compute/scorer/pkg/session-scorer.tar.gz
+# Copy backend application source
+COPY --chown=app:app backend/ ./backend/
 
 # Route allocations through jemalloc so memory freed when a DuckDB instance is
-# recycled (backend.core.duckdb_recycle) is actually returned to the OS. Under
+# recycled (backend.cron.jobs.duckdb_recycle) is actually returned to the OS. Under
 # stock glibc malloc the freed object-cache pages stay in per-arena free lists
 # and RSS never drops, so the 12g container still OOMed even after the recycle
 # reached zero live connections (verified prod 2026-06-21: recycle logged
@@ -146,6 +190,10 @@ ENV LD_PRELOAD=libjemalloc.so.2 \
     MALLOC_CONF=background_thread:true,dirty_decay_ms:5000,muzzy_decay_ms:5000
 
 USER app
+
+# Default container healthcheck
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+    CMD curl -f http://localhost:8000/api/health || exit 1
 
 # Expose the backend port
 EXPOSE 8000

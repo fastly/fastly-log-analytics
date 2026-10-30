@@ -1,14 +1,14 @@
 'use client'
 
 import React from 'react'
-import { useServiceQuery } from '@/hooks/useServiceQuery'
-import { client, extractApiError } from '@/lib/api'
-import { formatBytes, formatCompactCount } from '@/lib/format'
+import { useServiceQuery } from '@/hooks/useDashboardCards'
+import { client, extractApiError, unwrapClient } from "@/lib/api";
+import { formatBytes, formatCompactCount, formatCount, cn } from "@/lib/utils";
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { Activity, ShieldAlert, Globe, Wifi, Zap, Percent, HardDrive, AlertTriangle } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
-import { cn } from '@/lib/utils'
+import type { components } from '@/types/api.generated'
 import {
   Dialog,
   DialogContent,
@@ -17,15 +17,31 @@ import {
   DialogDescription,
 } from '@/components/ui/dialog'
 
-export interface PopHealthItem {
-  pop: string
-  requests: number
-  errors: number
-  error_rate: number
-  p50_rtt_us: number | null
-  p95_ttfb_ms: number | null
-  cache_hit_rate: number
-  bandwidth_bytes: number
+const SKELETON_IDS = Array.from({ length: 16 }, (_, i) => `pop-skeleton-${i}`)
+
+const POP_HEALTH_THRESHOLDS = {
+  degradedErrorPct: 2.0,
+  criticalErrorPct: 5.0,
+  degradedTtfbMs: 400,
+  criticalTtfbMs: 800,
+} as const
+
+type PopHealthItem = components['schemas']['PopHealthItem']
+
+function classifyPopHealth(pop: PopHealthItem): 'critical' | 'degraded' | 'healthy' {
+  if (
+    pop.error_rate > POP_HEALTH_THRESHOLDS.criticalErrorPct ||
+    Boolean(pop.p95_ttfb_ms && pop.p95_ttfb_ms > POP_HEALTH_THRESHOLDS.criticalTtfbMs)
+  ) {
+    return 'critical'
+  }
+  if (
+    pop.error_rate > POP_HEALTH_THRESHOLDS.degradedErrorPct ||
+    Boolean(pop.p95_ttfb_ms && pop.p95_ttfb_ms > POP_HEALTH_THRESHOLDS.degradedTtfbMs)
+  ) {
+    return 'degraded'
+  }
+  return 'healthy'
 }
 
 interface PopHealthHeatmapProps {
@@ -41,16 +57,18 @@ export function PopHealthHeatmap({ serviceId, startTime, endTime }: PopHealthHea
   const popHealthQuery = useServiceQuery<PopHealthItem[]>(
     ['network', 'pop-health', serviceId, startTime, endTime],
     async ({ signal }) => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const { data } = await client.GET('/api/network/pop-health' as any, {
-        signal,
-        params: {
-          query: {
-            start_time: startTime ?? undefined,
-            end_time: endTime ?? undefined,
+      const data = await unwrapClient(
+        client.GET('/api/network/pop-health', {
+          signal,
+          params: {
+            query: {
+              start_time: startTime ?? undefined,
+              end_time: endTime ?? undefined,
+            },
           },
-        },
-      })
+        }),
+        'Failed to load PoP health data',
+      )
       return data?.data ?? []
     }
   )
@@ -66,7 +84,7 @@ export function PopHealthHeatmap({ serviceId, startTime, endTime }: PopHealthHea
 
   if (isLoading) {
     return (
-      <Card className="shadow-md">
+      <Card className="shadow-md [contain-intrinsic-size:280px] [content-visibility:auto]">
         <CardHeader>
           <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
             <div className="space-y-1">
@@ -79,9 +97,8 @@ export function PopHealthHeatmap({ serviceId, startTime, endTime }: PopHealthHea
         </CardHeader>
         <CardContent>
           <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 gap-3">
-            {Array.from({ length: 16 }).map((_, i) => (
-              // eslint-disable-next-line react/no-array-index-key
-              <div key={i} className="h-20 rounded-lg bg-muted/40 animate-pulse border border-muted/50" />
+            {SKELETON_IDS.map((id) => (
+              <div key={id} className="h-20 rounded-lg bg-muted/40 animate-pulse border border-muted/50" />
             ))}
           </div>
         </CardContent>
@@ -91,7 +108,7 @@ export function PopHealthHeatmap({ serviceId, startTime, endTime }: PopHealthHea
 
   if (error) {
     return (
-      <Card className="shadow-md border-destructive/20 bg-destructive/5">
+      <Card className="shadow-md border-destructive/20 bg-destructive/5 [contain-intrinsic-size:280px] [content-visibility:auto]">
         <CardHeader>
           <CardTitle className="text-lg font-bold text-destructive flex items-center gap-2">
             <AlertTriangle className="h-5 w-5" />
@@ -107,7 +124,7 @@ export function PopHealthHeatmap({ serviceId, startTime, endTime }: PopHealthHea
 
   if (items.length === 0) {
     return (
-      <Card className="shadow-md">
+      <Card className="shadow-md [contain-intrinsic-size:280px] [content-visibility:auto]">
         <CardHeader>
           <CardTitle className="text-lg font-bold flex items-center gap-2">
             <Globe className="h-5 w-5 text-muted-foreground" />
@@ -123,7 +140,7 @@ export function PopHealthHeatmap({ serviceId, startTime, endTime }: PopHealthHea
   }
 
   return (
-    <Card className="shadow-md transition-all duration-300">
+    <Card className="shadow-md transition-all duration-300 [contain-intrinsic-size:280px] [content-visibility:auto]">
       <CardHeader className="border-b bg-muted/15">
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
           <div className="space-y-1">
@@ -148,15 +165,15 @@ export function PopHealthHeatmap({ serviceId, startTime, endTime }: PopHealthHea
         <TooltipProvider delay={100}>
           <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 gap-3">
             {items.map((pop) => {
-              const hasHighErrors = pop.error_rate > 5.0
-              const hasHighLatency = !!(pop.p95_ttfb_ms && pop.p95_ttfb_ms > 400)
-              const isCritical = pop.error_rate > 15.0
+              const healthState = classifyPopHealth(pop)
+              const isCritical = healthState === 'critical'
+              const isDegraded = healthState === 'degraded'
 
               let borderClass = 'border-green-500/20 dark:border-green-400/10'
               let bgClass = 'bg-green-500/5 hover:bg-green-500/10 text-green-700 dark:text-green-400'
               let dotClass = 'bg-green-500'
 
-              if (hasHighErrors || hasHighLatency) {
+              if (isDegraded) {
                 borderClass = 'border-amber-500/30 dark:border-amber-400/20'
                 bgClass = 'bg-amber-500/5 hover:bg-amber-500/10 text-amber-700 dark:text-amber-400'
                 dotClass = 'bg-amber-500'
@@ -170,32 +187,34 @@ export function PopHealthHeatmap({ serviceId, startTime, endTime }: PopHealthHea
 
               return (
                 <Tooltip key={pop.pop}>
-                  <TooltipTrigger asChild>
-                    <button
-                      type="button"
-                      onClick={() => setSelectedPop(pop)}
-                      className={cn(
-                        'p-3 rounded-lg border flex flex-col items-center justify-between gap-1 text-center w-full bg-transparent font-normal',
-                        'hover:scale-[1.03] active:scale-[0.98] transition-all duration-200 cursor-pointer select-none shadow-sm',
-                        borderClass,
-                        bgClass
-                      )}
-                    >
-                      <div className="flex items-center gap-1.5">
-                        <span className={cn('h-2 w-2 rounded-full animate-pulse', dotClass)} />
-                        <span className="font-extrabold text-sm tracking-widest text-foreground font-mono">
-                          {pop.pop.toUpperCase()}
-                        </span>
-                      </div>
-                      <div className="w-full flex flex-col items-center mt-1">
-                        <span className="text-[10px] text-muted-foreground/90 font-medium font-mono tabular-nums">
-                          {formatCompactCount(pop.requests)} reqs
-                        </span>
-                        <span className="text-[10px] font-semibold text-foreground/80 font-mono mt-0.5">
-                          {pop.cache_hit_rate.toFixed(1)}% Hit
-                        </span>
-                      </div>
-                    </button>
+                  <TooltipTrigger
+                    render={
+                      <button
+                        type="button"
+                        onClick={() => setSelectedPop(pop)}
+                        className={cn(
+                          'p-3 rounded-lg border flex flex-col items-center justify-between gap-1 text-center w-full bg-transparent font-normal',
+                          'hover:scale-[1.03] active:scale-[0.98] transition-all duration-200 cursor-pointer select-none shadow-sm',
+                          borderClass,
+                          bgClass
+                        )}
+                      />
+                    }
+                  >
+                    <div className="flex items-center gap-1.5">
+                      <span className={cn('h-2 w-2 rounded-full animate-pulse', dotClass)} />
+                      <span className="font-extrabold text-sm tracking-widest text-foreground font-mono">
+                        {pop.pop.toUpperCase()}
+                      </span>
+                    </div>
+                    <div className="w-full flex flex-col items-center mt-1">
+                      <span className="text-[10px] text-muted-foreground/90 font-medium font-mono tabular-nums">
+                        {formatCompactCount(pop.requests)} reqs
+                      </span>
+                      <span className="text-[10px] font-semibold text-foreground/80 font-mono mt-0.5">
+                        {pop.cache_hit_rate.toFixed(1)}% Hit
+                      </span>
+                    </div>
                   </TooltipTrigger>
                   <TooltipContent className="p-0 border border-muted bg-popover text-popover-foreground shadow-xl rounded-lg w-64 overflow-hidden">
                     <div className="bg-muted/50 border-b border-muted px-3 py-2 flex items-center justify-between">
@@ -204,7 +223,7 @@ export function PopHealthHeatmap({ serviceId, startTime, endTime }: PopHealthHea
                         <span className="font-bold text-sm tracking-wider uppercase font-mono">{pop.pop}</span>
                       </div>
                       <Badge variant="outline" className="text-[10px] py-0 px-1.5 uppercase bg-background font-semibold">
-                        {isCritical ? 'Critical' : (hasHighErrors || hasHighLatency) ? 'Degraded' : 'Healthy'}
+                        {isCritical ? 'Critical' : isDegraded ? 'Degraded' : 'Healthy'}
                       </Badge>
                     </div>
                     <div className="p-3 text-xs space-y-2">
@@ -214,7 +233,7 @@ export function PopHealthHeatmap({ serviceId, startTime, endTime }: PopHealthHea
                             <Activity className="h-3 w-3" /> Requests
                           </span>
                           <span className="font-bold text-foreground font-mono mt-0.5">
-                            {pop.requests.toLocaleString()}
+                            {formatCount(pop.requests)}
                           </span>
                         </div>
                         <div className="flex flex-col">
@@ -276,9 +295,9 @@ export function PopHealthHeatmap({ serviceId, startTime, endTime }: PopHealthHea
                       <span
                         className={cn(
                           'h-2.5 w-2.5 rounded-full animate-pulse',
-                          selectedPop.error_rate > 5 || (selectedPop.p95_ttfb_ms && selectedPop.p95_ttfb_ms > 800)
+                          classifyPopHealth(selectedPop) === 'critical'
                             ? 'bg-red-500'
-                            : selectedPop.error_rate > 2 || (selectedPop.p95_ttfb_ms && selectedPop.p95_ttfb_ms > 400)
+                            : classifyPopHealth(selectedPop) === 'degraded'
                             ? 'bg-amber-500'
                             : 'bg-green-500'
                         )}
@@ -291,16 +310,16 @@ export function PopHealthHeatmap({ serviceId, startTime, endTime }: PopHealthHea
                       variant="outline"
                       className={cn(
                         'font-bold py-0.5 px-2.5 uppercase font-sans text-xs',
-                        selectedPop.error_rate > 5 || (selectedPop.p95_ttfb_ms && selectedPop.p95_ttfb_ms > 800)
+                        classifyPopHealth(selectedPop) === 'critical'
                           ? 'border-red-500/30 bg-red-500/5 text-red-500'
-                          : selectedPop.error_rate > 2 || (selectedPop.p95_ttfb_ms && selectedPop.p95_ttfb_ms > 400)
+                          : classifyPopHealth(selectedPop) === 'degraded'
                           ? 'border-amber-500/30 bg-amber-500/5 text-amber-500'
                           : 'border-green-500/30 bg-green-500/5 text-green-500'
                       )}
                     >
-                      {selectedPop.error_rate > 5 || (selectedPop.p95_ttfb_ms && selectedPop.p95_ttfb_ms > 800)
+                      {classifyPopHealth(selectedPop) === 'critical'
                         ? 'Critical'
-                        : selectedPop.error_rate > 2 || (selectedPop.p95_ttfb_ms && selectedPop.p95_ttfb_ms > 400)
+                        : classifyPopHealth(selectedPop) === 'degraded'
                         ? 'Degraded'
                         : 'Healthy'}
                     </Badge>
@@ -318,7 +337,7 @@ export function PopHealthHeatmap({ serviceId, startTime, endTime }: PopHealthHea
                     </span>
                     <div className="mt-2.5">
                       <div className="text-xl font-mono font-black tracking-tight text-foreground">
-                        {selectedPop.requests.toLocaleString()}
+                        {formatCount(selectedPop.requests)}
                       </div>
                       <span className="text-[10px] text-muted-foreground/90 font-medium block mt-1">
                         Routes <strong className="font-mono text-foreground">{((selectedPop.requests / (totalRequests || 1)) * 100).toFixed(2)}%</strong> of total edge traffic.
@@ -336,8 +355,8 @@ export function PopHealthHeatmap({ serviceId, startTime, endTime }: PopHealthHea
                         {selectedPop.cache_hit_rate.toFixed(2)}%
                       </div>
                       <div className="text-[10px] text-muted-foreground/90 font-medium mt-1 space-y-0.5 font-mono">
-                        <div>Hits: {Math.round(selectedPop.requests * selectedPop.cache_hit_rate / 100).toLocaleString()}</div>
-                        <div>Misses: {Math.round(selectedPop.requests * (100 - selectedPop.cache_hit_rate) / 100).toLocaleString()}</div>
+                        <div>Hits: {formatCount(Math.round(selectedPop.requests * selectedPop.cache_hit_rate / 100))}</div>
+                        <div>Misses: {formatCount(Math.round(selectedPop.requests * (100 - selectedPop.cache_hit_rate) / 100))}</div>
                       </div>
                     </div>
                   </div>
@@ -372,7 +391,7 @@ export function PopHealthHeatmap({ serviceId, startTime, endTime }: PopHealthHea
                         {selectedPop.error_rate.toFixed(2)}%
                       </div>
                       <span className="text-[10px] text-muted-foreground/90 font-medium block mt-1">
-                        Total Failed Reqs: <strong className="font-mono text-foreground">{Math.round(selectedPop.requests * selectedPop.error_rate / 100).toLocaleString()}</strong>
+                        Total Failed Reqs: <strong className="font-mono text-foreground">{formatCount(Math.round(selectedPop.requests * selectedPop.error_rate / 100))}</strong>
                       </span>
                     </div>
                   </div>
@@ -426,11 +445,11 @@ export function PopHealthHeatmap({ serviceId, startTime, endTime }: PopHealthHea
                     Regional Edge Diagnostic Health
                   </span>
                   <p className="text-xs text-muted-foreground mt-1.5 leading-relaxed">
-                    {selectedPop.error_rate > 5 || (selectedPop.p95_ttfb_ms && selectedPop.p95_ttfb_ms > 800) ? (
+                    {classifyPopHealth(selectedPop) === 'critical' ? (
                       <span className="text-destructive font-semibold">
                         CRITICAL: High error rates or excessive latency detected. This POP is experiencing degraded local connectivity or origin shield failures. Prompt diagnostic investigation is recommended.
                       </span>
-                    ) : selectedPop.error_rate > 2 || (selectedPop.p95_ttfb_ms && selectedPop.p95_ttfb_ms > 400) ? (
+                    ) : classifyPopHealth(selectedPop) === 'degraded' ? (
                       <span className="text-amber-500 font-semibold">
                         DEGRADED: Regional metrics indicate slow-downs. Handshake times or backend origin latency is higher than typical baseline averages. Continue to monitor alert channels.
                       </span>

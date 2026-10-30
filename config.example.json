@@ -1,7 +1,6 @@
 {
   "service_id": "YOUR_LOGGING_SERVICE_ID",
   "name": "My Production Site",
-  "access_level": "read_write",
 
   "fos_endpoint": "us-east-1.object.fastlystorage.app",
   "fos_region": "us-east-1",

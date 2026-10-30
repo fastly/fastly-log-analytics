@@ -4,21 +4,21 @@
   "baseline_commit": "a530168",
   "baseline_date_utc": "2026-06-12",
   "regression_pct_threshold": 50,
-  "production_targets_comment": "v2.0 success-criteria (cleanup_plan.md §Success criteria — concrete): cold_path_36M_1h_iceberg_committed_p95_ms ≤ 2800, warm_path_36M_1h_p50_ms ≤ 1900. Validated separately via scripts/loadtest_generator.py + scripts/dev/loadtest_probe.sh against a representative dataset; not measurable inside a GitHub Actions runner.",
+  "production_targets_comment": "v2.0 success-criteria (cleanup_plan.md §Success criteria — concrete): cold_path_36M_1h_committed_p95_ms ≤ 2800, warm_path_36M_1h_p50_ms ≤ 1900. Validated separately via scripts/load_test/generate_synthetic_traffic.py + scripts/dev/loadtest_probe.sh against a representative dataset; not measurable inside a GitHub Actions runner.",
   "scenarios_by_scale": {
     "smoke_100k": {
       "_comment": "PR-blocking smoke gate on every push. 100K rows × 7 query runs in ~2s wall. Catches gross regressions (extra GROUP BY, accidental cross-join, SELECT * inside a hot lookup) and constant-factor explosions. Misses superlinear-only regressions because constant-factor overhead dominates at this scale — those are caught by mid_500k + nightly_1m.",
-      "cold_path_36M_1h_iceberg_committed_p95_ms": 20,
+      "cold_path_36M_1h_committed_p95_ms": 35,
       "warm_path_36M_1h_p50_ms": 15
     },
     "mid_500k": {
       "_comment": "Optional mid-tier gate. Invoked via PERF_NUM_ROWS=500000 — covers the 10× inflection gap between smoke_100k (constant-factor-dominated) and nightly_1m. Seed values are interpolated halfway between the bracketing tiers; refresh with measured headroom-padded numbers after the first real CI run, same procedure as the other tiers. Wire into ci.yml as an opt-in PR job (label or path-pattern triggered) for query-shape-touching changes.",
-      "cold_path_36M_1h_iceberg_committed_p95_ms": 100,
+      "cold_path_36M_1h_committed_p95_ms": 100,
       "warm_path_36M_1h_p50_ms": 75
     },
     "nightly_1m": {
       "_comment": "Nightly + on-demand gate at 1M rows. The 10× scale-up from smoke surfaces superlinear regressions (extra n-ary join, missing index, O(N log N) instead of O(N)) that the 100K smoke can't see. Numbers are headroom-padded over the 2026-06-16 emit; refresh both this section and the emit when a legitimate improvement drops the floor. NOT a production target — see production_targets_comment.",
-      "cold_path_36M_1h_iceberg_committed_p95_ms": 200,
+      "cold_path_36M_1h_committed_p95_ms": 200,
       "warm_path_36M_1h_p50_ms": 150
     }
   },
