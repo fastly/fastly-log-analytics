@@ -26,8 +26,8 @@ const config: KnipConfig = {
   entry: [
     'app/**/{page,layout,loading,error,not-found,route,template,default,global-error}.{ts,tsx}',
     'next.config.{js,mjs,ts}',
-    'tests/**/*.{ts,tsx}',
     '__tests__/**/*.{test,spec}.{ts,tsx}',
+    '__tests__/helpers/**/*.{ts,tsx}',
     'e2e/**/*.{ts,tsx}',
     'scripts/**/*.{js,mjs,ts}',
   ],

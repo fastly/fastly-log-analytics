@@ -1,18 +1,555 @@
+'use client'
+
 import * as React from 'react'
+import { useQuery } from '@tanstack/react-query'
+import { useRouter, useSearchParams } from 'next/navigation'
+import { useForm } from 'react-hook-form'
+import { zodResolver } from '@hookform/resolvers/zod'
+import { z } from 'zod'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Button } from '@/components/ui/button'
+import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Suspense } from 'react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import { KeyRound } from 'lucide-react'
-import { ShareLoginForm } from './ShareLoginForm'
+import { Eye, EyeOff, KeyRound, Loader2, AlertTriangle, Check } from 'lucide-react'
+import type { components } from '@/types/api.generated'
+import { analystFetch } from '@/hooks/useBootstrap'
+
+type LoginResponse = components['schemas']['ShareLoginResponse']
+type AuthConfig = components['schemas']['AuthConfigResponse']
+type ClaimResponse = components['schemas']['ShareClaimResponse']
+type TosPayload = components['schemas']['TosDocument']
+
+// Presence only: the native `required` / type="email" constraints on the
+// inputs own the user-facing validation copy (browser bubble). The schema is
+// the backstop so a blank value can never reach the login endpoint.
+const loginSchema = z.object({
+  email: z.string().min(1),
+  passcode: z.string().min(1),
+})
+
+type LoginValues = z.infer<typeof loginSchema>
+
+// Fixed code→copy allowlist for ?oauth_error=<code>. The raw param is NEVER
+// rendered (reflected-content hygiene on an unauth page) — an unknown code
+// falls back to the generic message. Kept deliberately non-enumerating: the
+// "not_invited" copy is identical for uninvited AND sub/provider mismatch
+// (design §2.9 / §5.2).
+const OAUTH_ERROR_COPY: Record<string, string> = {
+  unverified_email: "Your account's email isn't verified. Contact your admin.",
+  not_invited:
+    "This account isn't invited to a dashboard. Ask the dashboard owner for an invitation.",
+  wrong_domain: 'Please use your organization account.',
+  idp_unavailable: 'Sign-in is temporarily unavailable. Try again, or sign in with a passcode.',
+}
+const OAUTH_ERROR_DEFAULT = 'Sign-in failed. Please try again.'
+
+// Cap the post-login redirect to in-app paths only. Without this,
+// ?return=//evil.example/ or ?next=//evil.example/ would relative-resolve
+// to evil.example via window.location.assign, turning the login screen into
+// an open redirector. Any value not starting with a single forward slash falls
+// back to the server-suggested redirect.
+export function safeReturnTarget(raw: string | null | undefined): string | null {
+  if (!raw) return null
+  // Strip whitespace before the prefix check. The browser removes embedded
+  // tabs/newlines/CRs when resolving a URL, so `/\t/evil.com` would slip past
+  // an exact-prefix blocklist and then resolve to the protocol-relative
+  // `//evil.com`. Normalizing first collapses those smuggled forms back into
+  // the `//` / `/\` shapes the blocklist already rejects.
+  const normalized = raw.replace(/\s/g, '')
+  if (!normalized.startsWith('/')) return null
+  if (normalized.startsWith('//') || normalized.startsWith('/\\')) return null
+  if (normalized.startsWith('/share-login')) return null
+  return raw
+}
+
+export function ShareLoginForm() {
+  const router = useRouter()
+  const searchParams = useSearchParams()
+  const returnTarget = safeReturnTarget(searchParams.get('return') ?? searchParams.get('next'))
+  const inviteToken = searchParams.get('token') ?? searchParams.get('invite')
+  const oauthErrorCode = searchParams.get('oauth_error')
+  const { register, handleSubmit, getValues, setValue } = useForm<LoginValues>({
+    resolver: zodResolver(loginSchema),
+    defaultValues: { email: '', passcode: '' },
+  })
+  const { ref: emailFieldRef, ...emailField } = register('email')
+  const [reveal, setReveal] = React.useState(false)
+  const [busy, setBusy] = React.useState(false)
+  const [oauthError] = React.useState<string | null>(() =>
+    oauthErrorCode ? (OAUTH_ERROR_COPY[oauthErrorCode] ?? OAUTH_ERROR_DEFAULT) : null,
+  )
+  const [loginError, setError] = React.useState<string | null>()
+  const [retryAfter, setRetryAfter] = React.useState<number | null>(null)
+  const [redirecting, setRedirecting] = React.useState<string | null>(null)
+  const emailInputRef = React.useRef<HTMLInputElement>(null)
+  // Ref (not `busy`) so two submits in the same tick can't both pass the guard.
+  const inFlightRef = React.useRef(false)
+  const errorAlertRef = React.useRef<HTMLDivElement>(null)
+
+  // Fetch the unauthenticated auth-config on mount to learn which modes to show.
+  // 'loading' → render contextual zero-CLS skeleton; 'failed' → fail OPEN to the passcode form.
+  const authConfigQuery = useQuery<AuthConfig>({
+    queryKey: ['share-auth-config'],
+    retry: false,
+    queryFn: async () => {
+      const res = await analystFetch('/api/share/auth-config')
+      if (!res.ok) throw new Error(`status ${res.status}`)
+      return (await res.json()) as AuthConfig
+    },
+  })
+  const config = authConfigQuery.data ?? null
+  // Validate optional ?token= or ?invite= query parameter via /api/share/claim/{token}
+  const claimQuery = useQuery<{ expired: boolean; data: ClaimResponse | null }>({
+    queryKey: ['share-invite-claim', inviteToken],
+    enabled: Boolean(inviteToken),
+    retry: false,
+    queryFn: async () => {
+      const res = await analystFetch(`/api/share/claim/${encodeURIComponent(inviteToken!)}`, {
+        method: 'POST',
+      })
+      if (res.status === 404 || res.status === 410) {
+        return { expired: true, data: null }
+      }
+      if (!res.ok) return { expired: false, data: null }
+      const data = (await res.json()) as ClaimResponse
+      return { expired: false, data }
+    },
+  })
+  const isInitialLoading = authConfigQuery.isLoading || (Boolean(inviteToken) && claimQuery.isLoading)
+  const configState: 'loading' | 'loaded' | 'failed' = isInitialLoading
+    ? 'loading'
+    : authConfigQuery.isError
+      ? 'failed'
+      : 'loaded'
+  const claimedInvite = claimQuery.data?.data ?? null
+  const error = loginError !== undefined
+    ? loginError
+    : claimQuery.data?.expired
+      ? 'This invitation link has expired or is no longer valid.'
+      : oauthError
+
+  React.useEffect(() => {
+    const claimedEmail = claimQuery.data?.data?.email
+    if (claimedEmail) {
+      setValue('email', getValues('email') || claimedEmail)
+    }
+  }, [claimQuery.data, getValues, setValue])
+
+  const providers = config?.providers ?? []
+  // Fail-open: on a config fetch failure, offer the passcode form.
+  const passcodeEnabled = configState === 'failed' ? true : (config?.passcode_enabled ?? true)
+  const showProviders = configState === 'loaded' && providers.length > 0
+  const showPasscode = configState === 'failed' || (configState === 'loaded' && passcodeEnabled)
+  const showLockout = configState === 'loaded' && !passcodeEnabled && providers.length === 0
+  const showDivider = showProviders && showPasscode
+
+  // Countdown for rate-limit lockouts.
+  React.useEffect(() => {
+    if (retryAfter == null || retryAfter <= 0) return
+    const t = setTimeout(() => setRetryAfter((s) => (s == null ? null : s - 1)), 1000)
+    return () => clearTimeout(t)
+  }, [retryAfter])
+
+  // Auto-focus the email field once the passcode form is actually shown so
+  // keyboard users land on the first input.
+  React.useEffect(() => {
+    if (showPasscode) emailInputRef.current?.focus()
+  }, [showPasscode])
+
+  // Move focus to the error alert when one appears so SR users hear it
+  // and keyboard users immediately know where they are.
+  React.useEffect(() => {
+    if (error) errorAlertRef.current?.focus()
+  }, [error])
+
+  const startSso = (providerId: string) => {
+    setRedirecting(providerId)
+    const q = new URLSearchParams({ provider: providerId })
+    if (returnTarget) q.set('return', returnTarget)
+    window.location.assign(`/api/share/oauth/authorize?${q.toString()}`)
+  }
+
+  const handleLogin = handleSubmit(async ({ email, passcode }) => {
+    setError(null)
+    setBusy(true)
+    try {
+      // Raw fetch (not typed `client`): the share-login UX needs per-status
+      // branching (429 rate-limit countdown, 403 IP-whitelist, 401 invalid,
+      // 503 capacity) and a relative URL so the request flows through the
+      // Next.js proxy in remote-analyst mode. The typed client's middleware
+      // throws on any non-OK response, collapsing those distinctions.
+      const res = await analystFetch('/api/share/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, passcode }),
+      })
+      const body = await res.json().catch(() => null)
+      if (res.status === 429) {
+        const retry =
+          body?.detail?.retry_after_s ?? Number(res.headers.get('Retry-After') || 60)
+        setRetryAfter(retry)
+        setError('Too many failed attempts — temporarily locked out.')
+        return
+      }
+      if (res.status === 403) {
+        setError(
+          body?.detail?.error === 'ip_not_whitelisted'
+            ? 'Your IP address is not on the approved list for this invitation.'
+            : 'Access is currently blocked.',
+        )
+        return
+      }
+      if (res.status === 401) {
+        setError('Invalid email or passcode.')
+        return
+      }
+      if (res.status === 503) {
+        setError('The dashboard is at capacity. Try again shortly.')
+        return
+      }
+      if (!res.ok) {
+        setError(body?.detail?.error || `Login failed (HTTP ${res.status}).`)
+        return
+      }
+      const data = body as LoginResponse
+      if (data.tos_pending) {
+        // /share-login/acknowledge still uses bootstrap, but its own
+        // useEffect fetches heartbeat first which is unauth — no stale
+        // cache concern. Client-side push is fine here. Preserve the
+        // return param so the TOS acknowledge can bounce them back.
+        const ack = returnTarget
+          ? `/share-login/acknowledge?return=${encodeURIComponent(returnTarget)}`
+          : '/share-login/acknowledge'
+        router.push(ack)
+      } else {
+        // E-3: honor the ?return= / ?next= param set by the 401-redirect fetch
+        // middleware in lib/api.ts so the analyst lands back on the
+        // page they were viewing before their session died. Falls back
+        // to the server-suggested redirect, then /dashboard.
+        // Hard reload to bypass the React Query bootstrap cache that was
+        // populated BEFORE the session cookie was set (otherwise AppLayout
+        // sees stale needs_login=true and bounces back here).
+        window.location.assign(returnTarget ?? data.redirect ?? '/dashboard')
+      }
+    } catch (err) {
+      setError(err instanceof Error && err.message ? err.message : 'Network error reaching the server.')
+    } finally {
+      setBusy(false)
+    }
+  })
+
+  return (
+    <div
+      data-testid="share-login-form-container"
+      className="space-y-4 min-h-[240px] [contain-intrinsic-size:auto_240px] [content-visibility:auto]"
+    >
+      {configState === 'loading' && (
+        <div
+          data-testid="share-login-loading-skeleton"
+          role="status"
+          aria-live="polite"
+          className="min-h-[200px] [contain-intrinsic-size:auto_200px] [content-visibility:auto] flex flex-col justify-center items-center gap-3 py-6 text-xs text-muted-foreground"
+        >
+          <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+          <span>Verifying share session &amp; security policies...</span>
+        </div>
+      )}
+
+      {configState !== 'loading' && claimedInvite && (
+        <div
+          data-testid="share-login-invite-banner"
+          className="rounded-md border border-border/60 bg-muted/40 px-3 py-2 text-xs text-muted-foreground"
+        >
+          Invitation verified for <span className="font-medium text-foreground">{claimedInvite.name || claimedInvite.email}</span>
+        </div>
+      )}
+
+      {configState !== 'loading' && error && (
+        <Alert variant="destructive" ref={errorAlertRef} tabIndex={-1} data-testid="share-login-error-alert">
+          <AlertTriangle className="h-4 w-4" />
+          <AlertDescription>
+            {error}
+            {retryAfter && retryAfter > 0 ? ` Retry in ${retryAfter}s.` : ''}
+          </AlertDescription>
+        </Alert>
+      )}
+
+      {/* Escape hatch for the wrong-account case — the SSO buttons already force
+          the account chooser (prompt=select_account), so point a stuck analyst
+          at them (design §5.2). */}
+      {showProviders &&
+        (oauthErrorCode === 'not_invited' || oauthErrorCode === 'wrong_domain') && (
+          <p className="text-xs text-muted-foreground text-center">
+            Signed in with the wrong account? Use a sign-in button below — you can pick a
+            different account.
+          </p>
+        )}
+
+      {showProviders && (
+        <div className="space-y-2" data-testid="share-login-sso-providers">
+          {providers.map((p) => (
+            <Button
+              key={p.id}
+              type="button"
+              variant="outline"
+              className="w-full"
+              disabled={redirecting != null}
+              onClick={() => startSso(p.id)}
+            >
+              {redirecting === p.id && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+              Sign in with {p.display_name}
+            </Button>
+          ))}
+        </div>
+      )}
+
+      {showDivider && (
+        <div className="relative flex items-center py-1" aria-hidden="true">
+          <div className="flex-grow border-t" />
+          <span className="mx-3 text-xs text-muted-foreground">OR</span>
+          <div className="flex-grow border-t" />
+        </div>
+      )}
+
+      {showLockout && (
+        <p className="text-sm text-muted-foreground text-center" data-testid="share-login-lockout-notice">
+          Sign-in is not configured for this dashboard. Contact the dashboard owner.
+        </p>
+      )}
+
+      {showPasscode && (
+        <form
+          method="post"
+          onSubmit={async (e) => {
+            if (inFlightRef.current) {
+              e.preventDefault()
+              return
+            }
+            inFlightRef.current = true
+            try {
+              await handleLogin(e)
+            } finally {
+              inFlightRef.current = false
+            }
+          }}
+          data-testid="share-login-form"
+          className="space-y-4 [contain-intrinsic-size:auto_200px] [content-visibility:auto]"
+        >
+          <div
+            data-testid="share-login-fields"
+            className={
+              busy
+                ? 'space-y-4 opacity-40 pointer-events-none transition-opacity'
+                : 'space-y-4 transition-opacity'
+            }
+          >
+            <div className="space-y-1">
+              <Label htmlFor="email" className="text-xs">Email</Label>
+              <Input
+                id="email"
+                {...emailField}
+                ref={(el) => {
+                  emailFieldRef(el)
+                  emailInputRef.current = el
+                }}
+                type="email"
+                autoComplete="email"
+                required
+                disabled={busy}
+              />
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="passcode" className="text-xs">Passcode</Label>
+              <div className="flex items-center gap-2">
+                <Input
+                  id="passcode"
+                  type={reveal ? 'text' : 'password'}
+                  autoComplete="current-password"
+                  required
+                  {...register('passcode')}
+                  disabled={busy}
+                />
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  onClick={() => setReveal((r) => !r)}
+                  aria-label={reveal ? 'Hide passcode' : 'Reveal passcode'}
+                >
+                  {reveal ? <EyeOff className="h-4 w-4" aria-hidden="true" /> : <Eye className="h-4 w-4" aria-hidden="true" />}
+                </Button>
+              </div>
+            </div>
+          </div>
+
+          <Button
+            type="submit"
+            className="w-full"
+            disabled={busy || (retryAfter != null && retryAfter > 0)}
+          >
+            {busy && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+            Sign in
+          </Button>
+
+          <p className="text-[11px] text-muted-foreground text-center">
+            Upon signing in, you will be prompted to review and agree to the Terms of Access before viewing the dashboard.
+          </p>
+        </form>
+      )}
+    </div>
+  )
+}
+
+interface AcknowledgeButtonProps {
+  version: string
+  returnTo?: string
+}
+
+export function AcknowledgeButton({ version, returnTo }: AcknowledgeButtonProps) {
+  const [busy, setBusy] = React.useState(false)
+  const [error, setError] = React.useState<string | null>(null)
+  const errorAlertRef = React.useRef<HTMLDivElement>(null)
+
+  React.useEffect(() => {
+    if (error) errorAlertRef.current?.focus()
+  }, [error])
+
+  const accept = async () => {
+    setBusy(true)
+    setError(null)
+    try {
+      const res = await analystFetch('/api/share/acknowledge', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ version }),
+      })
+      if (!res.ok) {
+        const body = await res.json().catch(() => null)
+        setError(body?.detail?.error || `Acknowledgment failed (${res.status}).`)
+        return
+      }
+      const search = typeof window !== 'undefined' ? new URLSearchParams(window.location.search) : null
+      const safeTarget = safeReturnTarget(
+        returnTo ?? search?.get('return') ?? search?.get('next'),
+      )
+      window.location.assign(safeTarget ?? '/dashboard')
+    } catch (err) {
+      setError(err instanceof Error && err.message ? err.message : 'Network error.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div
+      data-testid="share-acknowledge-actions"
+      className={busy ? 'space-y-4 opacity-40 pointer-events-none transition-opacity' : 'space-y-4 transition-opacity'}
+    >
+      {error && (
+        <Alert variant="destructive" ref={errorAlertRef} tabIndex={-1} data-testid="share-acknowledge-error">
+          <AlertTriangle className="h-4 w-4" />
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
+      )}
+      <div className="flex justify-end">
+        <Button onClick={accept} disabled={busy} data-testid="share-acknowledge-submit">
+          {busy ? (
+            <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+          ) : (
+            <Check className="h-4 w-4 mr-2" />
+          )}
+          I acknowledge
+        </Button>
+      </div>
+    </div>
+  )
+}
+
+export function AcknowledgeFallback() {
+  const router = useRouter()
+  const [tos, setTos] = React.useState<TosPayload | null>(null)
+  const [error, setError] = React.useState<string | null>(null)
+  const errorAlertRef = React.useRef<HTMLDivElement>(null)
+
+  React.useEffect(() => {
+    if (error) errorAlertRef.current?.focus()
+  }, [error])
+
+  React.useEffect(() => {
+    let cancelled = false
+    analystFetch('/api/share/tos')
+      .then(async (res) => {
+        if (cancelled) return
+        if (res.status === 401) {
+          router.replace('/share-login')
+          return
+        }
+        if (!res.ok) {
+          setError(`Could not load the terms (HTTP ${res.status}).`)
+          return
+        }
+        const body = (await res.json()) as TosPayload
+        setTos({ version: body.version, text: body.text })
+      })
+      .catch(() => {
+        if (!cancelled) setError('Could not reach the server.')
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [router])
+
+  return (
+    <div
+      data-testid="share-acknowledge-fallback"
+      className="space-y-4 min-h-[140px] [contain-intrinsic-size:auto_140px] [content-visibility:auto]"
+    >
+      {error && (
+        <Alert variant="destructive" ref={errorAlertRef} tabIndex={-1}>
+          <AlertTriangle className="h-4 w-4" />
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
+      )}
+      {tos ? (
+        <>
+          <p className="text-sm leading-relaxed text-muted-foreground">{tos.text}</p>
+          <AcknowledgeButton version={tos.version} />
+        </>
+      ) : (
+        !error && (
+          <div
+            role="status"
+            data-testid="share-acknowledge-loading"
+            className="min-h-[120px] [contain-intrinsic-size:auto_120px] [content-visibility:auto] flex flex-col items-center justify-center gap-2 text-xs text-muted-foreground"
+          >
+            <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+            <span>Verifying share session &amp; security policies...</span>
+            <span className="sr-only">Loading the terms…</span>
+          </div>
+        )
+      )}
+    </div>
+  )
+}
+
 
 export default function ShareLoginPage() {
   return (
-    <div className="min-h-screen flex justify-center bg-muted/40 p-6 pt-20">
+    <div
+      data-testid="share-login-page"
+      className="min-h-screen flex justify-center bg-muted/40 p-6 pt-20"
+    >
       {/* A-15 (WCAG 1.3.1 / 2.4.6): CardTitle below is a styled <div>, so
           this page would otherwise have zero headings. Sr-only <h1> gives
           screen-reader heading nav a landing spot without affecting the
           visual design. */}
       <h1 className="sr-only">Analyst sign-in</h1>
-      <Card className="w-full max-w-md">
+      <Card
+        data-testid="share-login-card"
+        className="w-full max-w-md self-start min-h-[380px] [contain-intrinsic-size:auto_380px] [content-visibility:auto]"
+      >
         <CardHeader className="space-y-2">
           <CardTitle className="flex items-center gap-2 text-xl">
             <KeyRound className="h-5 w-5" />
@@ -24,12 +561,27 @@ export default function ShareLoginPage() {
             you don&apos;t have an invite, ask the dashboard owner to send you one.
           </p>
         </CardHeader>
-        <CardContent>
-          {/* ShareLoginForm reads ?oauth_error / ?return via useSearchParams,
-              which forces a client bailout — boundary it so prefetch/loading.tsx
-              behavior is preserved (design §5.2). No fixed-height fallback →
-              avoid CLS while the search params resolve. */}
-          <Suspense fallback={null}>
+        <CardContent
+          data-testid="share-login-card-content"
+          className="min-h-[240px] [contain-intrinsic-size:auto_240px] [content-visibility:auto]"
+        >
+          {/* ShareLoginForm reads ?oauth_error / ?return / ?next / ?token via
+              useSearchParams, which forces a client bailout — boundary it so
+              prefetch/loading.tsx behavior is preserved (design §5.2).
+              Matching min-h-[240px] fallback avoids CLS while search params resolve. */}
+          <Suspense
+            fallback={
+              <div
+                data-testid="share-login-suspense-fallback"
+                role="status"
+                aria-live="polite"
+                className="min-h-[240px] [contain-intrinsic-size:auto_240px] [content-visibility:auto] flex flex-col justify-center items-center gap-2 text-xs text-muted-foreground"
+              >
+                <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+                <span>Verifying share session &amp; security policies...</span>
+              </div>
+            }
+          >
             <ShareLoginForm />
           </Suspense>
         </CardContent>

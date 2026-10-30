@@ -1,0 +1,9 @@
+{
+  "_is_cached": false,
+  "beacon_fire_rate": 0,
+  "enabled": false,
+  "last_beacon_time": null,
+  "message": "RUM not enabled for this service",
+  "recent_beacons": 0,
+  "setup_complete": false
+}

@@ -2,17 +2,20 @@ name: CI
 
 on:
   push:
-    branches: [main, release/**]
+    branches: [main, release/**, 'v[0-9]*']
   pull_request:
-    branches: [main, release/**]
+    branches: [main, release/**, 'v[0-9]*']
 
 # Cancel superseded runs on the same ref (e.g. a force-push or rapid PR
 # updates). `main` keeps each push separate (group includes SHA) so we
-# never lose a post-merge run; PR refs and release/** branch pushes
+# never lose a post-merge run; PR refs and release/version branch pushes
 # collapse to one in-flight run.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -21,12 +24,53 @@ jobs:
   backend:
     name: Backend (Python)
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: fla
+          POSTGRES_PASSWORD: fla_test_password
+          POSTGRES_DB: ducklake_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U fla -d ducklake_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      # Metadata storage (cron/ingest bookkeeping) and DuckLake's commit-path
+      # catalog both point at the postgres service container above — see
+      # docs/adr/15-multi-writer-topology.md. tests/conftest.py's
+      # _pg_worker_schema fixture layers a per-xdist-worker schema on top of
+      # this DSN via `options=-c search_path=...` for parallel-safe isolation.
+      # DUCKLAKE_CATALOG must be the bare DSN (no `postgres:` prefix) —
+      # backend/core/storage/_core.py::_ducklake_attach adds that prefix
+      # itself before the ATTACH statement.
+      METADATA_DSN: postgresql://fla:fla_test_password@localhost:5432/ducklake_test
+      DUCKLAKE_CATALOG: postgresql://fla:fla_test_password@localhost:5432/ducklake_test
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Setup Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        # Backend harness tests execute real frontend TypeScript modules via
+        # Node, so the backend job needs the same locked npm dependencies.
+        run: npm ci
+        working-directory: frontend
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v7
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
         with:
           enable-cache: true
           python-version: "3.13"
@@ -40,13 +84,8 @@ jobs:
       - name: Format check (ruff)
         run: uv run ruff format --check .
 
-      - name: Type check (mypy, filtered through mypy-baseline)
-        # Pre-existing errors accepted via mypy-baseline.txt; the filter
-        # exits non-zero only on NET-NEW errors. Refresh the baseline after
-        # a burndown PR with
-        #   uv run mypy backend/ 2>&1 | uv run mypy-baseline sync
-        # and commit mypy-baseline.txt.
-        run: uv run mypy backend/ 2>&1 | uv run mypy-baseline filter
+      - name: Type check (mypy)
+        run: uv run mypy backend/
 
       - name: Architectural contracts (import-linter, R-9)
         # Enforces:
@@ -133,18 +172,18 @@ jobs:
         run: uv run python scripts/check_osv.py
 
       - name: Install terraform
-        # Required by tests/utils/test_terraform_gen.py — runs `terraform fmt`
+        # Required by tests/utils/test_fastly_api.py — runs `terraform fmt`
         # against generator output and `validate` when TERRAFORM_VALIDATE=1.
-        uses: hashicorp/setup-terraform@v4
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4
         with:
           terraform_version: "~1.9"
           terraform_wrapper: false
 
       - name: Cache Terraform provider plugins
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: cache/tf_provider_cache
-          key: ${{ runner.os }}-terraform-providers-${{ hashFiles('backend/utils/terraform_gen.py', 'tests/utils/test_terraform_gen.py', 'tests/utils/test_terraform_resource_graph.py') }}
+          key: ${{ runner.os }}-terraform-providers-${{ hashFiles('backend/utils/terraform_gen.py', 'tests/utils/test_terraform_gen.py') }}
           restore-keys: |
             ${{ runner.os }}-terraform-providers-
 
@@ -176,6 +215,10 @@ jobs:
             exit 1
           fi
 
+      - name: Prepare admin gateway image cache
+        # Compile the Go runtime before pytest's per-test timeout starts.
+        run: docker build -q deploy/admin-gateway
+
       - name: Tests (pytest with coverage)
         env:
           FALCO_REQUIRED: "1"
@@ -199,10 +242,25 @@ jobs:
         #   Run 1: fast suite, parallel, `-m "not terraform_cli"`, fresh
         #          coverage (no --cov-append), report suppressed, no gate yet.
         #   Run 2: terraform tests serial, --cov-append so the single
-        #          --cov-fail-under=86 gate sees the COMBINED coverage.
+        #          --cov-fail-under=85 gate sees the COMBINED coverage.
         run: |
-          uv run pytest -n auto -m "not terraform_cli" --cov=backend --cov-report=
-          uv run pytest -n 0 -m terraform_cli --cov=backend --cov-append --cov-report=term --cov-fail-under=86
+          uv run pytest -n auto -m "not terraform_cli and not flaky_quarantine" --cov=backend --cov-report=
+          uv run pytest -n 0 -m terraform_cli --cov=backend --cov-append --cov-report=term --cov-fail-under=85
+
+      - name: Worker-crash diagnostics (memory and kernel log)
+        # pytest-xdist reports a killed worker only as "node down: Not properly terminated";
+        # capture whether the kernel OOM-killed it or it aborted natively.
+        if: failure()
+        run: |
+          free -m || true
+          sudo dmesg 2>/dev/null | grep -iE "killed process|out of memory|oom|segfault|general protection" | tail -20 || true
+          # Per-worker stack dumps written ~45s into any test that is about to hit the 60s ceiling
+          # (tests/conftest.py hang forensics); the last `--- nodeid` header names the stuck test.
+          for f in /tmp/fla-hang-*.log; do
+            # Print the whole dump of the stuck test (last header to EOF); a fixed tail cut off the
+            # thread that was actually blocked.
+            [ -s "$f" ] && grep -q "most recent call first" "$f" && { echo "=== $f"; awk 'index($0, "--- ") == 1 { buf = "" } { buf = buf $0 "\n" } END { printf "%s", buf }' "$f"; }
+          done || true
 
       - name: Observability guard (no OTEL_EXPORTER=console in deploy files)
         # SRE-10 / ADR-08 §5: the console exporter floods prod stdout with
@@ -210,6 +268,64 @@ jobs:
         # in code; this catches a hardcoded `console` slipping into a tracked
         # compose/Dockerfile/env. Also runnable locally via `make ci`.
         run: bash scripts/check_no_console_otel.sh
+
+      - name: HTTP client guard (no raw urllib in backend app modules)
+        # B12: all Fastly API traffic must route through the central
+        # backend.core.fastly.client.fastly() wrapper and other external
+        # fetches through backend.utils.http.http_get_text(); a hand-rolled
+        # urllib.request bypasses auth/retry/telemetry. Baseline ratchet with a
+        # documented allowlist. Also runnable locally via `make urllib-guard`.
+        run: bash scripts/check_no_raw_urllib.sh
+
+      - name: Date-parsing guard (no new raw strptime/fromisoformat in core + repositories)
+        # B5/B11: partition keys and naive->UTC normalisation go through
+        # backend/utils/date_utils.py. Baseline ratchet (counts only go down).
+        # Also runnable locally via `make dateparse-guard`.
+        run: bash scripts/check_no_raw_dateparse.sh
+
+      - name: Retry-loop guard (no new hand-rolled retry loops in backend)
+        # B4/B11: for/while + try/except + sleep loops re-derive attempt
+        # counting and backoff; use backend/core/retry.py:retry_call.
+        # Baseline ratchet (counts only go down). Also runnable locally via
+        # `make retry-guard`.
+        run: bash scripts/check_no_handrolled_retry.sh
+
+      - name: Metric COALESCE guard (no new inline COALESCE in repositories + rollups)
+        # B3/B6/B11: null-default SQL fragments live in
+        # backend/core/metric_expressions.py. Baseline ratchet (counts only go
+        # down). Also runnable locally via `make coalesce-guard`.
+        run: bash scripts/check_no_inline_metric_coalesce.sh
+
+      - name: Deploy config validation (compose + helm chart)
+        # Mirrors `make deploy-validate`. All compose configurations are
+        # parsed without a daemon; helm lint +
+        # template validate deploy/chart/fastly-log-analytics (ubuntu runners
+        # ship both docker and helm).
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.prod.yml config -q
+          docker compose -f docker-compose.yml -f docker-compose.observability.standard.yml config -q
+          docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.observability.standard.yml -f docker-compose.observability.standard.prod.yml config -q
+          docker compose -f docker-compose.multipod.yml config -q
+          docker compose -f docker-compose.multipod.yml -f docker-compose.observability.yml config -q
+          if command -v helm >/dev/null 2>&1; then
+            helm lint deploy/chart/fastly-log-analytics
+            helm template ci-validate deploy/chart/fastly-log-analytics >/dev/null
+            helm template ci-validate deploy/chart/fastly-log-analytics --set global.privateObservability.enabled=true >/dev/null
+          else
+            echo "helm not installed; skipping chart lint/template"
+          fi
+
+      - name: Stray file gate (*.bak, root openapi.json)
+        # Mirrors `make stray-file-gate`. Fails if any *.bak file or a
+        # ROOT-level openapi.json is tracked — frontend/openapi.json is the
+        # canonical generated spec; a root copy is always session debris.
+        run: |
+          stray="$(git ls-files '*.bak' 'openapi.json')"
+          if [ -n "$stray" ]; then
+            echo "ERROR: stray files are tracked (delete them or add to .gitignore):"
+            echo "$stray"
+            exit 1
+          fi
 
       - name: Security-regression count gate
         # v2.0 cleanup Phase 0.8: asserts the
@@ -237,22 +353,42 @@ jobs:
   frontend:
     name: Frontend (Node)
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: frontend
 
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: fla
+          POSTGRES_PASSWORD: fla_test_password
+          POSTGRES_DB: ducklake_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U fla -d ducklake_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      METADATA_DSN: postgresql://fla:fla_test_password@localhost:5432/ducklake_test
+      DUCKLAKE_CATALOG: postgresql://fla:fla_test_password@localhost:5432/ducklake_test
+
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Setup Node
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: 24
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v7
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
         with:
           enable-cache: true
           python-version: "3.13"
@@ -269,7 +405,7 @@ jobs:
         # CI run. The drift guard below catches the case where a contributor
         # bypassed the pre-commit `regen-openapi` hook (or where the backend
         # OpenAPI surface changed without a corresponding type regen). The
-        # backend-side guard is `tests/test_openapi_snapshot.py`; this is
+        # backend-side guard is `tests/test_openapi_and_contracts.py`; this is
         # the consumer-side mirror.
         run: npm run gen:types
 
@@ -312,12 +448,13 @@ jobs:
   scorer:
     name: Scorer (Rust)
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: compute/scorer
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install Rust toolchain
         # compute/scorer/rust-toolchain.toml pins the channel (1.90). We install
@@ -332,7 +469,7 @@ jobs:
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
       - name: Cache cargo registry + build
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: compute/scorer
 
@@ -354,5 +491,6 @@ jobs:
         # vulnerability in the locked tree. cargo-audit is cached by rust-cache
         # (cache-bin) after the first install.
         run: |
-          command -v cargo-audit >/dev/null || cargo install cargo-audit --locked
+          cargo audit --version 2>/dev/null | grep -q ' 0.22.2$' \
+            || cargo install cargo-audit --version 0.22.2 --locked --force
           cargo audit

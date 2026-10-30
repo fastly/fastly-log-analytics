@@ -1,18 +1,21 @@
 # ADR-02 — Request Lifecycle
 
-**Status:** Accepted (Phase 0)
-**Decided by:** v2.0 cleanup planning
+**Status:** Accepted
+
+> [!NOTE]
+> The Iceberg/PyIceberg references below describe the earlier design. Storage is DuckLake now ([ADR-14](14-ducklake-replacement.md)); `backend/core/iceberg/` (removed) was replaced by `backend/core/storage/`.
+**Decided by:** Engineering retrospective
 **Supersedes:** `AnalyticsDeps` bundle + standalone `require_service_access` calls (backend/deps.py)
 
 ## Context
 
 Today's request handling is fragmented across:
 
-- **`AnalyticsDeps`** (`backend/deps.py:177`) — a dataclass-shaped bundle of `(service_id, source, con, read_only, …)` built by a FastAPI dependency
-- **`require_service_access`** (`backend/deps.py:200`) — standalone tenancy check, separately called from many routes
-- **`_meta_con`** parallel path (`backend/deps.py:233`) — a metadata-only connection variant carried alongside the read pool
+- **`AnalyticsDeps`** (`backend/deps.py:177` (removed)) — a dataclass-shaped bundle of `(service_id, source, con, read_only, …)` built by a FastAPI dependency
+- **`require_service_access`** (`backend/deps.py:200` (removed)) — standalone tenancy check, separately called from many routes
+- **`_meta_con`** parallel path (`backend/deps.py:233` (removed)) — a metadata-only connection variant carried alongside the read pool
 - **Ad-hoc temp tables** — per-window temps built by the first repository that needs them, recomputed by later repositories in the same request
-- **`_read_only` private attribute trick** (`backend/deps.py:84-92`) — security-load-bearing guard that exists *only* because FastAPI converts primitive-typed dep params into query params, which would expose `read_only=False` to attackers
+- **`_read_only` private attribute trick** (`backend/deps.py:84-92` (removed)) — security-load-bearing guard that exists *only* because FastAPI converts primitive-typed dep params into query params, which would expose `read_only=False` to attackers
 - **`process_context_scope` vs `set_process_context`** — two slightly different ways to install per-request state into the iothread mirror
 
 Every router has to know the difference. New routes get one of these wrong roughly half the time.
@@ -49,8 +52,8 @@ Rules:
 
 ## Consequences
 
-- `AnalyticsDeps` was aliased to `RequestContext` through Phases 2–7 for backward compat; the alias was removed at the Phase 8 hard cutover (**done** — pinned by `tests/test_deps.py::test_analytics_deps_symbol_removed`).
-- The `_meta_con` parallel path was dropped in Phase 8 (**done** — pinned by `tests/test_deps.py::test_get_meta_con_symbol_removed`): the Phase 4 storage carve-up means metadata queries no longer pay the Iceberg view cost; they share the same connection.
+- `AnalyticsDeps` was aliased to `RequestContext` through Phases 2–7 for backward compat; the alias was removed at the Phase 8 hard cutover (**done**).
+- The `_meta_con` parallel path was dropped in Phase 8 (**done**): the Phase 4 storage carve-up means metadata queries no longer pay the Iceberg view cost; they share the same connection.
 - Phase 2 migrates routers in order: dashboard → query → security → alerts/network/performance/origin/sessions/insights/views/bootstrap. Admin / provision / share routers stay on the old shape until Phase 5b (different connection pattern).
 - The `_read_only` private-attribute pattern (and its security regression test) is structurally eliminated; tests asserting it become dead.
 

@@ -1,8 +1,13 @@
 # ADR-01 — Storage Model
 
-**Status:** Accepted (Phase 0)
-**Decided by:** v2.0 cleanup planning
+**Status:** Partially Superseded (Amended by [ADR-14](14-ducklake-replacement.md) & [ADR-21](21-high-scale-serving-architecture.md))
+**Decided by:** Engineering retrospective
 **Supersedes:** implicit storage model that grew over the perf-improvement branch
+
+> [!NOTE]
+> **Architectural Amendments (v3.0):**
+> - **DuckLake Cutover ([ADR-14](14-ducklake-replacement.md)):** The commit-path durable catalog replaced PyIceberg with DuckLake. Raw logs stream to Fastly Object Storage (FOS), are transformed into Parquet in the local buffer, and commit to DuckLake.
+> - **High-Scale Data Plane ([ADR-21](21-high-scale-serving-architecture.md)):** In `DEPLOYMENT_MODE=high_scale`, ingest micro-batches directly to ClickHouse and writes durable FOS archive Parquet. Serving queries ClickHouse directly or uses ephemeral in-memory DuckDB reading durable DuckLake state. The live-buffer tier and rollups-as-query-optimization pattern remain active in standard mode.
 
 ## Context
 
@@ -33,8 +38,8 @@ For local development, Iceberg writes go to a `file://` warehouse on the dev mac
 
 ## Consequences
 
-- Phase 4 carves `backend/core/iceberg.py` along this decision: separate `view`, `catalog`, `warehouse`, `manifest`, `fs` modules. The "what tier" confusion goes away because there are only two tiers.
-- `local-compaction outputs survive Iceberg orphan-cleanup` (existing trap, verified by `tests/core/test_local_compaction.py::test_compaction_outputs_survive_iceberg_sync_orphan_cleanup`) stays a load-bearing invariant. Phase 4.6 re-asserts it after the carve-up.
+- Phase 4 carves `backend/core/iceberg.py` (removed) along this decision: separate `view`, `catalog`, `warehouse`, `manifest`, `fs` modules. The "what tier" confusion goes away because there are only two tiers.
+- `local-compaction outputs survive Iceberg orphan-cleanup` (existing trap) stays a load-bearing invariant. Phase 4.6 re-asserts it after the carve-up.
 - Orphan-file cleanup for Iceberg/FOS stays out of scope pending the upstream pyiceberg work (PR #3361).
 - Rollup catch-up is a query-rewrite concern, not a tier-promotion concern.
 

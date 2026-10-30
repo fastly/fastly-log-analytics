@@ -1,9 +1,11 @@
 import { HydrationBoundary } from '@tanstack/react-query'
 
-import { fetchBootstrapServerSide } from '@/lib/ssr/bootstrap'
-import { fetchInsightsServerSide } from '@/lib/ssr/insights'
-import { firstParam, seedDehydratedState } from '@/lib/ssr/seed'
-import InsightsClient from './_sections/InsightsClient'
+import { fetchBootstrapServerSide } from '@/lib/ssr/upstream'
+import { fetchInsightsServerSide } from '@/lib/ssr/upstream'
+import { firstParam, resolveServerServiceId, seedDehydratedState } from '@/lib/ssr/upstream'
+import { queryKeys } from "@/lib/api"
+import { InsightsClient } from '@/components/Insights'
+export { InsightsClient } from '@/components/Insights'
 
 // Per-request RSC shell for /insights. Pre-fetches the DEFAULT insights
 // selection server-side and dehydrates it so the anomaly cards render from
@@ -34,17 +36,28 @@ export const dynamic = 'force-dynamic'
 export default async function InsightsPage({
   searchParams,
 }: {
-  searchParams: Promise<{ service?: string | string[] }>
+  searchParams: Promise<{
+    service?: string | string[]
+    tab?: string | string[]
+    window?: string | string[]
+    baseline?: string | string[]
+  }>
 }) {
   const params = await searchParams
   const bootstrap = await fetchBootstrapServerSide()
-  const serviceId =
-    firstParam(params.service) ??
-    (bootstrap as { active_service_id?: string | null } | null)?.active_service_id ??
-    undefined
-  const logExtents = (bootstrap as { log_extents?: unknown } | null)?.log_extents
+  const serviceId = resolveServerServiceId(params, bootstrap)
+  const logExtents = bootstrap?.log_extents
 
-  const seed = await fetchInsightsServerSide(serviceId, logExtents)
+  const initialTab = firstParam(params.tab)
+  const initialWindow = firstParam(params.window)
+  const initialBaseline = firstParam(params.baseline)
+
+  const seed = await fetchInsightsServerSide(
+    serviceId,
+    logExtents,
+    initialWindow,
+    initialBaseline,
+  )
 
   // Seed under the EXACT client key. seedDehydratedState returns null when
   // seed is null, so a failed prefetch degrades to the client-fetch path.
@@ -54,10 +67,22 @@ export default async function InsightsPage({
         seed.data,
       )
     : null
+  const extentsState = serviceId && serviceId === bootstrap?.active_service_id && logExtents
+    ? seedDehydratedState(queryKeys.logExtents(serviceId), logExtents)
+    : null
 
   return (
-    <HydrationBoundary state={dehydratedState}>
-      <InsightsClient />
+    <HydrationBoundary
+      state={{
+        mutations: [],
+        queries: [...(extentsState?.queries ?? []), ...(dehydratedState?.queries ?? [])],
+      }}
+    >
+      <InsightsClient
+        initialTab={initialTab}
+        initialWindow={initialWindow}
+        initialBaseline={initialBaseline}
+      />
     </HydrationBoundary>
   )
 }

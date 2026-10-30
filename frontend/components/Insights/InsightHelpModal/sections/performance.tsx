@@ -1,13 +1,13 @@
 import React from 'react'
 import {
   Zap,
+  Info,
   Activity,
   Clock,
   TrendingUp,
-  Info,
   Network,
 } from 'lucide-react'
-import type { InsightContent } from '../types'
+import type { InsightContent } from '../../types'
 
 export function getPerformanceContent(id: string): InsightContent | null {
   switch (id) {

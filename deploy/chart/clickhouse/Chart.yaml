@@ -1,0 +1,6 @@
+apiVersion: v2
+name: clickhouse
+description: ClickHouse chart supporting single-node and multi-shard/multi-replica with Keeper
+type: application
+version: 0.1.0
+appVersion: "26.9.1"

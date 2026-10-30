@@ -51,7 +51,7 @@ run "cdn_proxy_has_required_cdn_snippets" {
   command = plan
 
   # The CDN snippets are what fix the negative-cache-CAS trap, race
-  # condition generation, and the iceberg metadata pointer TTL — pinned
+  # condition generation, and the SWR shield disable — pinned
   # in the codebase memories. If any of these stop being emitted, we
   # regress to known production bugs.
   assert {
@@ -61,15 +61,6 @@ run "cdn_proxy_has_required_cdn_snippets" {
       if s.name == "cdn-no-cache-404"
     ]) == 1
     error_message = "cdn-no-cache-404 snippet missing — see Fastly negative-cache CAS trap"
-  }
-
-  assert {
-    condition = length([
-      for s in fastly_service_vcl.cdn_proxy.snippet :
-      s
-      if s.name == "iceberg-metadata-pointer-ttl"
-    ]) == 1
-    error_message = "iceberg-metadata-pointer-ttl snippet missing"
   }
 
   assert {

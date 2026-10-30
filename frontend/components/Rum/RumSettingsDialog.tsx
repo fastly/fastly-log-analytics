@@ -1,37 +1,30 @@
 'use client'
 
 import React, { useState, useEffect, useRef, useMemo } from 'react'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { formatBytes } from '@/lib/format'
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogFooter
-} from '@/components/ui/dialog'
+import { useForm } from 'react-hook-form'
+import { zodResolver } from '@hookform/resolvers/zod'
+import { z } from 'zod'
+import { useQueryClient } from '@tanstack/react-query'
+import { formatBytes } from "@/lib/utils";
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
 import { Input } from '@/components/ui/input'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
 import { ArrowRight, Settings2, Sparkles } from 'lucide-react'
+import { RumVersionPicker } from '@/components/ProvisionWizard/ProvisionWizard'
 import { useSSE, type SSELine } from '@/hooks/useSSE'
-import { SSEProgressView } from '@/components/SSEModal'
-import { cn } from '@/lib/utils'
-import { adminFetch } from '@/lib/api'
-import {
-  panelDialogContent,
-  panelDialogFooter,
-  panelDialogHeaderSolid,
-} from '@/lib/panel-dialog'
+import { useDerivedState, useOpenGeneration } from '@/hooks/useSSE'
+import { SSEActionDialogShell, SSEExecutionSection } from '@/components/SSEModal'
+import { adminFetch, queryKeys } from "@/lib/api";
+import { useRumStatus } from '@/hooks/useDashboardCards'
+
+export {
+  EnableRumDialog,
+  DisableRumDialog,
+  type EnableRumDialogProps,
+  type DisableRumDialogProps,
+} from './RumLifecycleDialogs'
 
 const RUM_FIELDS = [
   { name: 'rum_cid', bytes: 12, categories: ['base'] },
@@ -63,7 +56,25 @@ interface RumSettingsDialogProps {
   onComplete?: () => void
 }
 
-export function RumSettingsDialog({
+/**
+ * Remounts the body on every open so toggles, logs and execution state start fresh
+ * without an effect that resets state.
+ */
+export function RumSettingsDialog(props: RumSettingsDialogProps) {
+  const { open } = props
+  const generation = useOpenGeneration(open)
+  return <RumSettingsDialogBody key={generation} {...props} />
+}
+
+const rumSettingsSchema = z.object({
+  capture_vitals: z.boolean(),
+  capture_performance: z.boolean(),
+  capture_errors: z.boolean(),
+  capture_events: z.boolean(),
+  custom_condition: z.string(),
+})
+
+function RumSettingsDialogBody({
   serviceId,
   open,
   onOpenChange,
@@ -74,16 +85,31 @@ export function RumSettingsDialog({
 }: RumSettingsDialogProps) {
   const queryClient = useQueryClient()
   const [isExecuting, setIsExecuting] = useState(false)
-  const [selectedVersion, setSelectedVersion] = useState<string>(
+  const [selectedVersion, setSelectedVersion] = useDerivedState<string>(
     currentVersion ?? latestVersion ?? availableVersions[0] ?? ''
   )
+  const form = useForm<z.infer<typeof rumSettingsSchema>>({
+    resolver: zodResolver(rumSettingsSchema),
+    defaultValues: {
+      capture_vitals: true,
+      capture_performance: true,
+      capture_errors: true,
+      capture_events: true,
+      custom_condition: '',
+    },
+  })
 
   // Local settings toggles
-  const [captureVitals, setCaptureVitals] = useState(true)
-  const [capturePerformance, setCapturePerformance] = useState(true)
-  const [captureErrors, setCaptureErrors] = useState(true)
-  const [captureEvents, setCaptureEvents] = useState(true)
-  const [customCondition, setCustomCondition] = useState('')
+  const [captureVitals, setCaptureVitalsState] = useState(true)
+  const [capturePerformance, setCapturePerformanceState] = useState(true)
+  const [captureErrors, setCaptureErrorsState] = useState(true)
+  const [captureEvents, setCaptureEventsState] = useState(true)
+  const [customCondition, setCustomConditionState] = useState('')
+  const setCaptureVitals = (v: boolean) => { setCaptureVitalsState(v); form.setValue('capture_vitals', v) }
+  const setCapturePerformance = (v: boolean) => { setCapturePerformanceState(v); form.setValue('capture_performance', v) }
+  const setCaptureErrors = (v: boolean) => { setCaptureErrorsState(v); form.setValue('capture_errors', v) }
+  const setCaptureEvents = (v: boolean) => { setCaptureEventsState(v); form.setValue('capture_events', v) }
+  const setCustomCondition = (v: string) => { setCustomConditionState(v); form.setValue('custom_condition', v) }
 
   // Local log lines to show during synchronous settings saving
   const [localLogs, setLocalLogs] = useState<string[]>([])
@@ -116,54 +142,19 @@ export function RumSettingsDialog({
   }, [captureVitals, capturePerformance, captureErrors, captureEvents])
 
   // Fetch full status which includes capture toggles
-  const { data: statusData, isLoading: isStatusLoading } = useQuery({
-    queryKey: ['rum-status', serviceId],
-    queryFn: async () => {
-      if (!serviceId) return null
-      const res = await adminFetch(`/api/services/${serviceId}/rum/status`)
-      return res.ok ? res.json() : null
-    },
-    enabled: !!serviceId && open,
-  })
+  const { data: statusData, isLoading: isStatusLoading } = useRumStatus(serviceId, { enabled: open })
 
-  const initializedRef = useRef<string | null>(null)
+  const [initializedServiceId, setInitializedServiceId] = useState<string | null>(null)
+  if (statusData && !statusData.unauthorized && serviceId && initializedServiceId !== serviceId) {
+    setInitializedServiceId(serviceId)
+    setCaptureVitals(statusData.capture_vitals ?? true)
+    setCapturePerformance(statusData.capture_performance ?? true)
+    setCaptureErrors(statusData.capture_errors ?? true)
+    setCaptureEvents(statusData.capture_events ?? true)
+    setCustomCondition(statusData.custom_condition ?? '')
+  }
 
-  // Set initial toggles when loaded
-  useEffect(() => {
-    if (statusData && serviceId && initializedRef.current !== serviceId) {
-      setCaptureVitals(statusData.capture_vitals ?? true)
-      setCapturePerformance(statusData.capture_performance ?? true)
-      setCaptureErrors(statusData.capture_errors ?? true)
-      setCaptureEvents(statusData.capture_events ?? true)
-      setCustomCondition(statusData.custom_condition ?? '')
-      initializedRef.current = serviceId
-    }
-  }, [statusData, serviceId])
-
-  const { lines: sseLines, status: sseStatus, error: sseError, start: sseStart, stop: sseStop, reset: sseReset } = useSSE()
-
-  // Reset open props when modal opens
-  useEffect(() => {
-    if (open) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      setSelectedVersion(currentVersion ?? latestVersion ?? availableVersions[0] ?? '')
-      setLocalLogs([])
-      setSyncStatus('idle')
-      setSyncError(null)
-      initializedRef.current = null
-    }
-  }, [open, currentVersion, latestVersion, availableVersions])
-
-  // Clean up state on close
-  useEffect(() => {
-    if (!open) {
-      const id = setTimeout(() => {
-        setIsExecuting(false)
-        sseReset()
-      }, 300)
-      return () => clearTimeout(id)
-    }
-  }, [open, sseReset])
+  const { lines: sseLines, status: sseStatus, error: sseError, start: sseStart, stop: sseStop } = useSSE()
 
   // Invalidate queries when done
   useEffect(() => {
@@ -171,8 +162,8 @@ export function RumSettingsDialog({
     if (isDone && !completedRef.current) {
       completedRef.current = true
       onComplete?.()
-      queryClient.invalidateQueries({ queryKey: ['rum-status', serviceId] })
-      queryClient.invalidateQueries({ queryKey: ['rum-versions', serviceId] })
+      queryClient.invalidateQueries({ queryKey: queryKeys.rumStatus(serviceId) })
+      queryClient.invalidateQueries({ queryKey: queryKeys.rumVersions(serviceId) })
     }
     if (!isDone) {
       completedRef.current = false
@@ -193,16 +184,17 @@ export function RumSettingsDialog({
 
     try {
       // 1. Save settings toggles synchronously first
+      const payload = {
+        capture_vitals: captureVitals,
+        capture_performance: capturePerformance,
+        capture_errors: captureErrors,
+        capture_events: captureEvents,
+        custom_condition: customCondition,
+      }
       const settingsRes = await adminFetch(`/api/services/${serviceId}/rum/settings`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          capture_vitals: captureVitals,
-          capture_performance: capturePerformance,
-          capture_errors: captureErrors,
-          capture_events: captureEvents,
-          custom_condition: customCondition,
-        }),
+        body: JSON.stringify(payload),
       })
 
       if (!settingsRes.ok) {
@@ -242,11 +234,6 @@ export function RumSettingsDialog({
     }
   }
 
-  const handleClose = (isOpen: boolean) => {
-    if (sseStatus === 'streaming' || syncStatus === 'streaming') return
-    onOpenChange(isOpen)
-  }
-
   // Combine local sync logs with SSE upgrade log streams
   const displayedLines: SSELine[] = [
     ...localLogs.map((log, index) => ({
@@ -260,226 +247,178 @@ export function RumSettingsDialog({
   const currentError = selectedVersion !== currentVersion ? (sseError || syncError) : syncError
 
   return (
-    <Dialog open={open} onOpenChange={handleClose}>
-      <DialogContent className={cn("sm:max-w-xl", panelDialogContent)} showCloseButton={currentStatus !== 'streaming'}>
-        <DialogHeader className={panelDialogHeaderSolid}>
-          <div className="flex items-center justify-between w-full">
-            <DialogTitle className="flex items-center gap-2 text-primary text-xl font-bold">
-              <Settings2 className="h-6 w-6 text-primary" />
-              RUM Tracking Settings
-            </DialogTitle>
-            {!isExecuting && !isStatusLoading && (
-              <div className="text-xs font-mono text-muted-foreground bg-muted/50 px-2.5 py-1 rounded-md border shrink-0">
-                Est. ~{formatBytes(estimatedBytes)} / line
-              </div>
-            )}
+    <SSEActionDialogShell
+      open={open}
+      onOpenChange={onOpenChange}
+      reloadOnDone={false}
+      status={currentStatus}
+      onStop={selectedVersion !== currentVersion ? sseStop : undefined}
+      stopDisabled={selectedVersion === currentVersion}
+      isExecuting={isExecuting}
+      titleClassName="text-primary"
+      title={
+        <>
+          <Settings2 className="h-6 w-6 text-primary" />
+          RUM Tracking Settings
+        </>
+      }
+      headerRight={
+        !isExecuting && !isStatusLoading ? (
+          <div className="text-xs font-mono text-muted-foreground bg-muted/50 px-2.5 py-1 rounded-md border shrink-0">
+            Est. ~{formatBytes(estimatedBytes)} / line
           </div>
-        </DialogHeader>
+        ) : undefined
+      }
+      executionSection={
+        <SSEExecutionSection
+          title="Applying RUM Settings"
+          subtitle="Configuring capture options and publishing the revised tracking wrapper to Object Storage..."
+          lines={displayedLines}
+          status={currentStatus}
+          error={currentError}
+          heightClassName="h-[300px]"
+          progressLabel="Task Log"
+          doneMessage={
+            selectedVersion !== currentVersion
+              ? `Faro Web SDK upgraded to v${selectedVersion} and RUM capture settings updated successfully!`
+              : "RUM capture settings and tracker JS wrapper updated successfully!"
+          }
+        />
+      }
+      confirmButton={
+        <Button
+          variant="default"
+          className="h-10 px-8 font-bold bg-primary hover:bg-primary/90"
+          onClick={handleExecute}
+          disabled={noVersions || isNoOp || isStatusLoading}
+        >
+          Apply Settings
+        </Button>
+      }
+      doneLabel="Close"
+      idleOrErrorLabel="Close"
+    >
+      <div className="p-8 space-y-6">
+        <Alert className="border-blue-300 bg-blue-50/60 dark:bg-blue-950/20 text-blue-900 dark:text-blue-300">
+          <Sparkles className="h-4 w-4 text-blue-600 dark:text-blue-400" />
+          <AlertTitle className="text-sm font-bold">Custom Client-Side Telemetry</AlertTitle>
+          <AlertDescription className="text-[13px] ml-1 font-medium mt-1">
+            Adjust which classes of browser-side events are unrolled and recorded. Deployed updates apply to newly loaded page sessions instantly.
+          </AlertDescription>
+        </Alert>
 
-        <div className="flex-1 overflow-y-auto min-h-0">
-          {isExecuting ? (
-            <div className="p-8 space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
-              <div className="text-center space-y-2">
-                <h3 className="text-lg font-semibold tracking-tight">Applying RUM Settings</h3>
-                <p className="text-sm text-muted-foreground">
-                  Configuring capture options and publishing the revised tracking wrapper to Object Storage...
-                </p>
-              </div>
+        {/* RUM capture toggles section */}
+        <div className="space-y-4 rounded-lg border bg-muted/20 p-5">
+          <h4 className="text-xs font-bold uppercase tracking-wider text-muted-foreground">Capture Rules</h4>
 
-              <SSEProgressView
-                lines={displayedLines}
-                status={currentStatus}
-                error={currentError}
-                className="h-[300px]"
-                progressLabel="Task Log"
-                doneMessage={
-                  selectedVersion !== currentVersion
-                    ? `Faro Web SDK upgraded to v${selectedVersion} and RUM capture settings updated successfully!`
-                    : "RUM capture settings and tracker JS wrapper updated successfully!"
-                }
-              />
-            </div>
+          {isStatusLoading ? (
+            <div className="text-xs text-muted-foreground animate-pulse py-4 text-center">Loading current settings...</div>
           ) : (
-            <div className="p-8 space-y-6">
-              <Alert className="border-blue-300 bg-blue-50/60 dark:bg-blue-950/20 text-blue-900 dark:text-blue-300">
-                <Sparkles className="h-4 w-4 text-blue-600 dark:text-blue-400" />
-                <AlertTitle className="text-sm font-bold">Custom Client-Side Telemetry</AlertTitle>
-                <AlertDescription className="text-[13px] ml-1 font-medium mt-1">
-                  Adjust which classes of browser-side events are unrolled and recorded. Deployed updates apply to newly loaded page sessions instantly.
-                </AlertDescription>
-              </Alert>
-
-              {/* RUM capture toggles section */}
-              <div className="space-y-4 rounded-lg border bg-muted/20 p-5">
-                <h4 className="text-xs font-bold uppercase tracking-wider text-muted-foreground">Capture Rules</h4>
-
-                {isStatusLoading ? (
-                  <div className="text-xs text-muted-foreground animate-pulse py-4 text-center">Loading current settings...</div>
-                ) : (
-                  <div className="space-y-4">
-                    <div className="flex items-start justify-between gap-4">
-                      <div className="space-y-1">
-                        <Label htmlFor="toggle-vitals" className="text-sm font-semibold leading-none cursor-pointer">Core Web Vitals</Label>
-                        <p className="text-xs text-muted-foreground">Track page paint, shift, and response metrics (LCP, CLS, INP, FCP).</p>
-                      </div>
-                      <Switch
-                        id="toggle-vitals"
-                        checked={captureVitals}
-                        onCheckedChange={setCaptureVitals}
-                        size="default"
-                      />
-                    </div>
-
-                    <div className="flex items-start justify-between gap-4 border-t pt-4">
-                      <div className="space-y-1">
-                        <Label htmlFor="toggle-perf" className="text-sm font-semibold leading-none cursor-pointer">Performance Timings</Label>
-                        <p className="text-xs text-muted-foreground">Record navigation timelines and page load/rendering budgets.</p>
-                      </div>
-                      <Switch
-                        id="toggle-perf"
-                        checked={capturePerformance}
-                        onCheckedChange={setCapturePerformance}
-                        size="default"
-                      />
-                    </div>
-
-                    <div className="flex items-start justify-between gap-4 border-t pt-4">
-                      <div className="space-y-1">
-                        <Label htmlFor="toggle-errors" className="text-sm font-semibold leading-none cursor-pointer">JavaScript Errors</Label>
-                        <p className="text-xs text-muted-foreground">Capture uncaught script exceptions and runtime crash details.</p>
-                      </div>
-                      <Switch
-                        id="toggle-errors"
-                        checked={captureErrors}
-                        onCheckedChange={setCaptureErrors}
-                        size="default"
-                      />
-                    </div>
-
-                    <div className="flex items-start justify-between gap-4 border-t pt-4">
-                      <div className="space-y-1">
-                        <Label htmlFor="toggle-events" className="text-sm font-semibold leading-none cursor-pointer">Custom Events</Label>
-                        <p className="text-xs text-muted-foreground">Record standard button clicks, user sessions, and custom events.</p>
-                      </div>
-                      <Switch
-                        id="toggle-events"
-                        checked={captureEvents}
-                        onCheckedChange={setCaptureEvents}
-                        size="default"
-                      />
-                    </div>
-                  </div>
-                )}
+            <div className="space-y-4">
+              <div className="flex items-start justify-between gap-4">
+                <div className="space-y-1">
+                  <Label htmlFor="toggle-vitals" className="text-sm font-semibold leading-none cursor-pointer">Core Web Vitals</Label>
+                  <p className="text-xs text-muted-foreground">Track page paint, shift, and response metrics (LCP, CLS, INP, FCP).</p>
+                </div>
+                <Switch
+                  id="toggle-vitals"
+                  checked={captureVitals}
+                  onCheckedChange={setCaptureVitals}
+                  size="default"
+                />
               </div>
 
-              {/* Optional RUM VCL Condition */}
-              <div className="space-y-4 rounded-lg border bg-muted/20 p-5">
-                <h4 className="text-xs font-bold uppercase tracking-wider text-muted-foreground">RUM Routing Exclusions</h4>
-                <div className="space-y-2">
-                  <div className="space-y-1">
-                    <Label htmlFor="rum-custom-condition" className="text-sm font-semibold leading-none">
-                      Optional Log Condition
-                    </Label>
-                    <p className="text-xs text-muted-foreground leading-normal">
-                      An additional VCL condition, AND-ed onto{" "}
-                      <code>req.url.path == &quot;/rum-beacon&quot;</code>. It is evaluated on the beacon
-                      request itself, so <strong>a condition on <code>req.url.path</code> can never work</strong> —
-                      the path is always <code>/rum-beacon</code>, making it either always true (a no-op) or
-                      always false (which silently disables all RUM logging). The page URL lives in the beacon&apos;s
-                      POST body, which VCL cannot read; filter by page in the tracker instead. Useful here:
-                      client, geo, or header predicates, e.g.{" "}
-                      <code>client.geo.country_code != &quot;US&quot;</code>. Strings must use double quotes.
-                    </p>
-                  </div>
-                  <Input
-                    id="rum-custom-condition"
-                    placeholder='e.g. req.http.User-Agent !~ "(bot|crawler)"'
-                    value={customCondition}
-                    onChange={(e) => setCustomCondition(e.target.value)}
-                    className="h-9 font-mono text-xs mt-2"
-                  />
+              <div className="flex items-start justify-between gap-4 border-t pt-4">
+                <div className="space-y-1">
+                  <Label htmlFor="toggle-perf" className="text-sm font-semibold leading-none cursor-pointer">Performance Timings</Label>
+                  <p className="text-xs text-muted-foreground">Record navigation timelines and page load/rendering budgets.</p>
                 </div>
+                <Switch
+                  id="toggle-perf"
+                  checked={capturePerformance}
+                  onCheckedChange={setCapturePerformance}
+                  size="default"
+                />
               </div>
 
-              {/* Version picker section */}
-              <div className="space-y-4 border-t pt-5">
-                <div className="space-y-1.5">
-                  <div className="flex items-center justify-between mb-2">
-                    <Label htmlFor="upgrade-faro-version" className="text-xs font-bold uppercase tracking-wider text-muted-foreground">
-                      Faro Web SDK Version
-                    </Label>
-                    <a
-                      href="https://github.com/grafana/faro-web-sdk/releases"
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-xs text-primary hover:underline flex items-center gap-1 font-semibold"
-                    >
-                      Release Notes &rarr;
-                    </a>
-                  </div>
-                  <Select value={selectedVersion} onValueChange={(v) => setSelectedVersion(v ?? '')}>
-                    <SelectTrigger
-                      id="upgrade-faro-version"
-                      className="h-9 text-sm w-full"
-                      aria-label="Target Faro Web SDK version"
-                    >
-                      <SelectValue placeholder="Select a version" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {availableVersions.map((v) => {
-                        const tags = [v === latestVersion && 'latest', v === currentVersion && 'current'].filter(Boolean)
-                        return (
-                          <SelectItem key={v} value={v}>
-                            {v}
-                            {tags.length > 0 ? ` (${tags.join(', ')})` : ''}
-                          </SelectItem>
-                        )
-                      })}
-                    </SelectContent>
-                  </Select>
+              <div className="flex items-start justify-between gap-4 border-t pt-4">
+                <div className="space-y-1">
+                  <Label htmlFor="toggle-errors" className="text-sm font-semibold leading-none cursor-pointer">JavaScript Errors</Label>
+                  <p className="text-xs text-muted-foreground">Capture uncaught script exceptions and runtime crash details.</p>
                 </div>
+                <Switch
+                  id="toggle-errors"
+                  checked={captureErrors}
+                  onCheckedChange={setCaptureErrors}
+                  size="default"
+                />
+              </div>
 
-                {selectedVersion !== currentVersion && (
-                  <div className="flex items-center justify-center gap-3 rounded-md bg-muted/40 border p-4 text-sm font-mono animate-in fade-in duration-300">
-                    <span className="text-muted-foreground">{currentVersion ?? 'unpinned'}</span>
-                    <ArrowRight className="h-4 w-4 text-muted-foreground shrink-0" />
-                    <span className="font-semibold text-primary">{selectedVersion || '—'}</span>
-                  </div>
-                )}
+              <div className="flex items-start justify-between gap-4 border-t pt-4">
+                <div className="space-y-1">
+                  <Label htmlFor="toggle-events" className="text-sm font-semibold leading-none cursor-pointer">Custom Events</Label>
+                  <p className="text-xs text-muted-foreground">Record standard button clicks, user sessions, and custom events.</p>
+                </div>
+                <Switch
+                  id="toggle-events"
+                  checked={captureEvents}
+                  onCheckedChange={setCaptureEvents}
+                  size="default"
+                />
               </div>
             </div>
           )}
         </div>
 
-        <DialogFooter className={panelDialogFooter}>
-          {!isExecuting ? (
-            <>
-              <Button variant="ghost" onClick={() => onOpenChange(false)} className="h-10 px-6 text-xs">Cancel</Button>
-              <Button
-                variant="default"
-                className="h-10 px-8 font-bold bg-primary hover:bg-primary/90"
-                onClick={handleExecute}
-                disabled={noVersions || isNoOp || isStatusLoading}
-              >
-                Apply Settings
-              </Button>
-            </>
-          ) : (
-            <>
-              {currentStatus !== 'streaming' && (
-                <Button variant="outline" onClick={() => handleClose(false)} className="h-10 px-6">
-                  Close
-                </Button>
-              )}
-              {currentStatus === 'streaming' && (
-                <Button variant="outline" onClick={selectedVersion !== currentVersion ? sseStop : undefined} disabled={selectedVersion === currentVersion} className="h-10 px-6">
-                  Stop
-                </Button>
-              )}
-            </>
+        {/* Optional RUM VCL Condition */}
+        <div className="space-y-4 rounded-lg border bg-muted/20 p-5">
+          <h4 className="text-xs font-bold uppercase tracking-wider text-muted-foreground">RUM Routing Exclusions</h4>
+          <div className="space-y-2">
+            <div className="space-y-1">
+              <Label htmlFor="rum-custom-condition" className="text-sm font-semibold leading-none">
+                Optional Log Condition
+              </Label>
+              <p className="text-xs text-muted-foreground leading-normal">
+                An additional VCL condition, AND-ed onto{" "}
+                <code>req.url.path == &quot;/rum-beacon&quot;</code>. It is evaluated on the beacon
+                request itself, so <strong>a condition on <code>req.url.path</code> can never work</strong> —
+                the path is always <code>/rum-beacon</code>, making it either always true (a no-op) or
+                always false (which silently disables all RUM logging). The page URL lives in the beacon&apos;s
+                POST body, which VCL cannot read; filter by page in the tracker instead. Useful here:
+                client, geo, or header predicates, e.g.{" "}
+                <code>client.geo.country_code != &quot;US&quot;</code>. Strings must use double quotes.
+              </p>
+            </div>
+            <Input
+              id="rum-custom-condition"
+              placeholder='e.g. req.http.User-Agent !~ "(bot|crawler)"'
+              value={customCondition}
+              onChange={(e) => setCustomCondition(e.target.value)}
+              className="h-9 font-mono text-xs mt-2"
+            />
+          </div>
+        </div>
+
+        {/* Version picker section */}
+        <div className="space-y-4 border-t pt-5">
+          <RumVersionPicker
+            serviceId={serviceId}
+            value={selectedVersion || null}
+            onChange={(v) => setSelectedVersion(v ?? '')}
+            availableVersions={availableVersions}
+            currentVersion={currentVersion}
+            latestVersion={latestVersion}
+          />
+
+          {selectedVersion !== currentVersion && (
+            <div className="flex items-center justify-center gap-3 rounded-md bg-muted/40 border p-4 text-sm font-mono animate-in fade-in duration-300">
+              <span className="text-muted-foreground">{currentVersion ?? 'unpinned'}</span>
+              <ArrowRight className="h-4 w-4 text-muted-foreground shrink-0" />
+              <span className="font-semibold text-primary">{selectedVersion || '—'}</span>
+            </div>
           )}
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+        </div>
+      </div>
+    </SSEActionDialogShell>
   )
 }

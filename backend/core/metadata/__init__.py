@@ -1,357 +1,299 @@
-"""Per-service operational metadata store, backed by SQLite.
+"""Per-service operational metadata store, backed by Postgres.
 
-DuckDB is reserved for analytical queries over Iceberg log data. Everything
+DuckDB is reserved for analytical queries over DuckLake log data. Everything
 else — alerts, saved views, audit logs, ingested-file dedup tracking, cron run
 history, ASN name cache, source registration, FOS/CDN usage telemetry — lives
-here, in a per-service SQLite file at ``data/services/{service_id}.metadata.db``.
+here, in a single shared Postgres database (``METADATA_DSN``), with every
+service-scoped table carrying a ``service_id`` column.
 
-Why per-service: SQLite's writer lock is per-file even in WAL mode. With many
-services ingesting concurrently, a single global file would serialise every
-ingest's `ingested_files` write. Per-file isolation also makes service
-teardown a single ``rm`` and bounds blast radius on corruption.
+Concurrency model: one pooled connection per thread (``pg_pool``'s
+autocommit=True pool), shared across every service that thread touches — see
+:mod:`backend.core.metadata.pg_pool` for the full rationale.
 
-Concurrency model: thread-local connections (sqlite3 connections are not
-thread-safe) keyed by ``(thread, service_id)``. WAL + ``synchronous=NORMAL``
-gives readers freedom from writer locks within a single file.
-
-This package is the carved successor to the historical
-``backend.core.metadata_db`` monolith. The functions are split across
-concern-specific submodules (``base``, ``alerts``, ``views``, ``state``,
-``ingest_log``, ``cron_log``, ``asn_cache``, ``usage_log``,
-``reconciliation``) and re-exported here. Writes to shared state attributes
-(``_DATA_DIR``, ``_initialized``, ``_local``, etc.) are mirrored onto
-``metadata.base`` via the ``_ShimModule`` proxy installed below — required
-because tests and ``state_sync`` use ``monkeypatch.setattr(metadata, "X", ...)``
-and expect the live ``get_con`` bindings to swap.
+This package is decomposed into concern-specific submodules (``pg_pool``,
+``pg_schema``, ``admin_state``, ``alerts_db``, ``state_sync``, ``fos_usage``,
+``slow_queries_db``, ``cron_runs``, ``ingest_log``, ``quarantine_evidence``,
+``ingest_ledger``) with thin re-export shims at ``base`` and ``usage_log``.
+Writes to shared state attributes are mirrored across ``metadata``, ``base``,
+``usage_log``, and the underlying submodules via ``install_shim_module``.
 """
 
 from __future__ import annotations
 
 import sys
-from types import ModuleType
 
-from backend.core.metadata import base as _base
-
-# Alerts CRUD.
-from backend.core.metadata.alerts import (
-    count_alerts,
-    delete_alert,
-    list_alerts,
-    list_alerts_cross_service,
-    save_alert,
-    toggle_alert,
-    update_alert_last_triggered,
+from backend.core.metadata import (
+    admin_state as _admin_state,
 )
-
-# ASN-name cache.
-from backend.core.metadata.asn_cache import (
-    asn_ints_for_search,
-    lookup_asn_names,
-    upsert_asn_names,
+from backend.core.metadata import (
+    alerts_db as _alerts_db,
 )
+from backend.core.metadata import (
+    base as _base,
+)
+from backend.core.metadata import (
+    cron_runs as _cron_runs,
+)
+from backend.core.metadata import (
+    fos_usage as _fos_usage,
+)
+from backend.core.metadata import (
+    ingest_log as _ingest_log,
+)
+from backend.core.metadata import (
+    pg_pool as _pg_pool,
+)
+from backend.core.metadata import (
+    pg_schema as _pg_schema,
+)
+from backend.core.metadata import (
+    quarantine_evidence as _quarantine_evidence,
+)
+from backend.core.metadata import (
+    slow_queries_db as _slow_queries_db,
+)
+from backend.core.metadata import (
+    state_sync as _state_sync,
+)
+from backend.core.metadata import (
+    usage_log as _usage_log,
+)
+from backend.utils.module_shim import install_shim_module
 
-# Base: connection management, schema, dedup cache, parse helpers.
+state = _base
+alerts = _base
+asn_cache = _base
+views = _base
+cron_log = _usage_log
+usage_log_db = _usage_log
+quarantine = _ingest_log
+pg_schema = _base
+reconciliation = _base
+pg_connection = _base
+
+# Base: connection management, schema, dedup cache, parse helpers, state/alerts/views/audit.
 from backend.core.metadata.base import (
-    _DATA_DIR,
+    _CLEANUP_TABLES,
     _FILE_DATE_RE,
-    _ORPHAN_THRESHOLD_MINS,
     _SCHEMA,
-    _TASK_ORPHAN_THRESHOLD_MINS,
-    _all_connections,
-    _all_connections_lock,
+    _STATS_TABLES,
     _clear_ingested_filenames_cache,
     _ingested_filenames_cache,
     _ingested_filenames_cache_lock,
-    _init_lock,
-    _init_schema,
-    _initialized,
-    _local,
     _parse_file_date,
+    asn_ints_for_search,
+    cleanup_metadata,
     close_all_connections,
-    db_path,
+    count_alerts,
+    delete_alert,
+    delete_view,
+    export_audit,
+    get_audit_logs,
     get_con,
     get_con_readonly,
+    get_metadata_storage_stats,
+    is_ingested_files_dedup_active,
+    list_alerts,
+    list_alerts_cross_service,
+    list_audit,
+    list_views,
+    lookup_asn_names,
+    record_audit,
+    save_alert,
+    save_view,
     teardown,
+    toggle_alert,
+    update_alert_last_triggered,
+    upsert_asn_names,
 )
 
-# Cron run history + scoring audit.
-from backend.core.metadata.cron_log import (
-    adaptive_stale_minutes,
-    cron_busy,
-    cron_summary_for_tasks,
-    delete_cron_run,
-    finalize_cron_run_if_running,
-    get_cron_run_result,
-    get_cron_run_status,
-    get_cron_runs,
-    latest_cron_per_task,
-    list_scoring_audit,
-    log_cron_run,
-    prune_scoring_audit,
-    purge_cron_runs,
-    reap_running_cron_runs,
-    record_scoring_audit,
-    start_cron_run,
-    update_cron_duration,
-)
-
-# Ingested-files tracking + activity reporting.
+# Ingested-files tracking + activity reporting + quarantined-file tracking.
 from backend.core.metadata.ingest_log import (
+    QUARANTINE_ITEM_CAP,
     _bootstrap_ingested_files_summary,
+    capture_evidence,
     clear_in_flight,
-    filter_uncommitted_buffers,
+    count_quarantine_evidence,
+    delete_quarantine_evidence,
     get_ingested_filenames,
     get_ingested_files_status_summary,
     get_latest_ingest_ts,
     get_latest_reconciliation_ts,
-    get_locally_compacted_basenames,
     get_log_accounting_counts,
     get_log_activity,
     get_node_count_avg,
-    get_reclaimable_strand_filenames,
-    get_storage_stats_window,
-    insert_ingested_files,
-    list_committed_basenames,
-    list_in_flight,
-    list_ingested_files,
-    list_ingested_files_for_status,
-    list_unbackfilled_fastly_edge_files,
-    mark_buffers_committed,
-    purge_committed_buffer_rows,
-    recompute_ingested_files_summary,
-    record_in_flight,
-    register_locally_compacted,
-)
-
-# Quarantined-file tracking (corrupt/invalid ingest files copied to errors/).
-from backend.core.metadata.quarantine import (
-    delete_quarantined_rows,
-    get_expired_quarantined_files,
+    get_quarantine_evidence,
+    get_quarantine_evidence_summary,
     get_quarantine_storage_total,
     get_quarantine_summary,
-    get_quarantined_file_by_id,
-    insert_quarantined_file,
-    list_quarantined_files,
+    get_reclaimable_strand_filenames,
+    get_rum_beacons_avg_per_day,
+    get_rum_beacons_by_date,
+    get_rum_storage_stats_window,
+    get_storage_stats_window,
+    insert_ingested_files,
+    insert_quarantine_evidence,
+    list_in_flight,
+    list_ingested_files,
+    list_quarantine_evidence,
+    list_unbackfilled_fastly_edge_files,
+    purge_evidence,
+    read_evidence,
+    recompute_ingested_files_summary,
+    record_in_flight,
 )
 
-# Metadata cleanup + storage stats.
-from backend.core.metadata.reconciliation import (
-    _CLEANUP_TABLES,
-    _STATS_TABLES,
-    cleanup_metadata,
-    get_metadata_storage_stats,
-    is_ingested_files_dedup_active,
-)
-
-# Persistent slow-SQL history (extends the in-memory query_registry ring
-# buffer with durable per-service storage so the Notable Slow Queries
-# panel can show history beyond the 2000-entry / restart window).
-from backend.core.metadata.slow_queries import (
-    count_slow_queries,
-    flush_slow_query_buffer,
-    insert_slow_query,
-    list_slow_queries,
-    purge_old_slow_queries,
-    slow_queries_storage_stats,
-)
-
-# Audit log + applied data migration tracking.
-from backend.core.metadata.state import (
-    export_audit,
-    get_audit_logs,
-    list_audit,
-    merge_audit_for_service,
-    record_audit,
-    replace_audit_for_service,
-)
-
-# Source registry + usage telemetry.
+# Source registry + usage telemetry + persistent slow-SQL history + cron run history.
 from backend.core.metadata.usage_log import (
     DEFAULT_METADATA_RETENTION,
     _query_usage_log_aggregate_rollup,
+    adaptive_stale_minutes,
+    clear_slow_queries,
     clear_usage_log,
-    get_source_by_name,
+    count_slow_queries,
+    cron_busy,
+    delete_cron_run,
+    finalize_cron_run_if_running,
+    flush_slow_query_buffer,
+    get_cron_run_result,
+    get_cron_run_status,
+    get_cron_runs,
     get_usage_logs,
+    insert_slow_query,
     iter_usage_logs_chunks,
+    latest_cron_per_task,
+    list_scoring_audit,
+    list_slow_queries,
+    log_cron_run,
     log_synthetic_usage,
     log_usage_calls,
+    purge_cron_runs,
     purge_usage_log,
+    reap_running_cron_runs,
     reconcile_fastly_stats,
+    record_scoring_audit,
     register_source,
+    start_cron_run,
+    update_cron_duration,
 )
 
-# Saved-dashboard-view CRUD.
-from backend.core.metadata.views import (
-    delete_view,
-    list_views,
-    replace_views_for_service,
-    save_view,
-    upsert_views_for_service,
+_ALL_SYNC_MODULES = (
+    sys.modules[__name__],
+    _base,
+    _usage_log,
+    _pg_pool,
+    _pg_schema,
+    _admin_state,
+    _alerts_db,
+    _state_sync,
+    _fos_usage,
+    _slow_queries_db,
+    _cron_runs,
+    _ingest_log,
+    _quarantine_evidence,
 )
 
-
-class _ShimModule(ModuleType):
-    """Mirror writes for shared state into ``metadata.base``.
-
-    ``_DATA_DIR`` / ``_initialized`` / ``_local`` etc. are owned by
-    ``metadata.base``. Tests and ``state_sync`` use
-    ``setattr(metadata, "_DATA_DIR", ...)`` (directly or via
-    ``monkeypatch.setattr``) and expect the live ``get_con`` bindings to
-    swap. Without this proxy, the write would only rebind the package's
-    re-export, leaving ``base`` reading the un-patched value.
-    """
-
-    _MIRRORED_TO_BASE = frozenset(
-        {
-            "_DATA_DIR",
-            "_initialized",
-            "_local",
-            "_init_lock",
-            "_init_schema",
-            "_SCHEMA",
-            "_all_connections",
-            "_all_connections_lock",
-            "_ingested_filenames_cache",
-            "_ingested_filenames_cache_lock",
-            "_FILE_DATE_RE",
-            "_ORPHAN_THRESHOLD_MINS",
-            "_TASK_ORPHAN_THRESHOLD_MINS",
-            "_parse_file_date",
-        }
-    )
-
-    def __setattr__(self, name: str, value) -> None:
-        if name in self._MIRRORED_TO_BASE:
-            setattr(_base, name, value)
-        super().__setattr__(name, value)
-
-
-sys.modules[__name__].__class__ = _ShimModule
+_ShimModule = install_shim_module(
+    __name__,
+    _ALL_SYNC_MODULES[1:],
+    only_existing_attrs=True,
+    sync_filter=lambda src, dst, name, _val: not (name == "_SCHEMA" and dst is _fos_usage and src is not _fos_usage),
+)
 
 
 __all__ = [
-    # Connection / schema (public)
-    "db_path",
-    "get_con",
-    "get_con_readonly",
-    "close_all_connections",
-    "teardown",
-    # Alerts
-    "list_alerts",
-    "list_alerts_cross_service",
-    "count_alerts",
-    "save_alert",
-    "toggle_alert",
-    "delete_alert",
-    "update_alert_last_triggered",
-    # Views
-    "list_views",
-    "save_view",
-    "delete_view",
-    "replace_views_for_service",
-    "upsert_views_for_service",
-    # Audit + data migration tracking
-    "record_audit",
-    "list_audit",
-    "get_audit_logs",
-    "export_audit",
-    "replace_audit_for_service",
-    "merge_audit_for_service",
-    # Ingested files
-    "get_ingested_filenames",
-    "get_reclaimable_strand_filenames",
-    "list_ingested_files",
-    "list_ingested_files_for_status",
-    "get_ingested_files_status_summary",
-    "get_log_accounting_counts",
-    "get_storage_stats_window",
-    "list_unbackfilled_fastly_edge_files",
-    "get_latest_ingest_ts",
-    "get_latest_reconciliation_ts",
-    "register_locally_compacted",
-    "get_locally_compacted_basenames",
-    "insert_ingested_files",
-    "record_in_flight",
-    "clear_in_flight",
-    "list_in_flight",
-    "filter_uncommitted_buffers",
-    "list_committed_basenames",
-    "mark_buffers_committed",
-    "purge_committed_buffer_rows",
-    "get_log_activity",
-    "get_node_count_avg",
-    # Persistent slow-SQL history
-    "flush_slow_query_buffer",
-    "insert_slow_query",
-    "list_slow_queries",
-    "count_slow_queries",
-    "purge_old_slow_queries",
-    "slow_queries_storage_stats",
-    # Cron runs
-    "start_cron_run",
-    "log_cron_run",
-    "finalize_cron_run_if_running",
-    "update_cron_duration",
-    "delete_cron_run",
-    "purge_cron_runs",
-    "record_scoring_audit",
-    "list_scoring_audit",
-    "prune_scoring_audit",
-    "get_cron_run_result",
-    "get_cron_run_status",
-    "get_cron_runs",
-    "latest_cron_per_task",
-    "reap_running_cron_runs",
-    "cron_busy",
-    "cron_summary_for_tasks",
-    "adaptive_stale_minutes",
-    # ASN cache
-    "lookup_asn_names",
-    "upsert_asn_names",
-    "asn_ints_for_search",
-    # Sources
-    "register_source",
-    "get_source_by_name",
-    # Usage log
-    "log_usage_calls",
-    "log_synthetic_usage",
-    "reconcile_fastly_stats",
-    "purge_usage_log",
-    "clear_usage_log",
-    "get_usage_logs",
-    "iter_usage_logs_chunks",
     "DEFAULT_METADATA_RETENTION",
-    # Reconciliation / cleanup
-    "get_metadata_storage_stats",
-    "is_ingested_files_dedup_active",
-    "cleanup_metadata",
-    # Module-level state hooks used by tests + state_sync
-    "_clear_ingested_filenames_cache",
-    "_DATA_DIR",
-    "_initialized",
-    "_local",
-    "_init_lock",
-    "_init_schema",
+    "QUARANTINE_ITEM_CAP",
+    "_CLEANUP_TABLES",
+    "_FILE_DATE_RE",
     "_SCHEMA",
-    "_all_connections",
-    "_all_connections_lock",
+    "_STATS_TABLES",
+    "_bootstrap_ingested_files_summary",
+    "_clear_ingested_filenames_cache",
     "_ingested_filenames_cache",
     "_ingested_filenames_cache_lock",
     "_parse_file_date",
-    "_FILE_DATE_RE",
-    "_ORPHAN_THRESHOLD_MINS",
-    "_TASK_ORPHAN_THRESHOLD_MINS",
-    "_bootstrap_ingested_files_summary",
-    "recompute_ingested_files_summary",
     "_query_usage_log_aggregate_rollup",
-    "_STATS_TABLES",
-    "_CLEANUP_TABLES",
-    # Quarantine
-    "insert_quarantined_file",
-    "list_quarantined_files",
-    "get_quarantine_summary",
-    "get_quarantined_file_by_id",
-    "get_expired_quarantined_files",
+    "adaptive_stale_minutes",
+    "asn_ints_for_search",
+    "capture_evidence",
+    "cleanup_metadata",
+    "clear_in_flight",
+    "clear_slow_queries",
+    "clear_usage_log",
+    "close_all_connections",
+    "count_alerts",
+    "count_quarantine_evidence",
+    "count_slow_queries",
+    "cron_busy",
+    "delete_alert",
+    "delete_cron_run",
+    "delete_quarantine_evidence",
+    "delete_view",
+    "export_audit",
+    "finalize_cron_run_if_running",
+    "flush_slow_query_buffer",
+    "get_audit_logs",
+    "get_con",
+    "get_con_readonly",
+    "get_cron_run_result",
+    "get_cron_run_status",
+    "get_cron_runs",
+    "get_ingested_filenames",
+    "get_ingested_files_status_summary",
+    "get_latest_ingest_ts",
+    "get_latest_reconciliation_ts",
+    "get_log_accounting_counts",
+    "get_log_activity",
+    "get_metadata_storage_stats",
+    "get_node_count_avg",
+    "get_quarantine_evidence",
+    "get_quarantine_evidence_summary",
     "get_quarantine_storage_total",
-    "delete_quarantined_rows",
+    "get_quarantine_summary",
+    "get_reclaimable_strand_filenames",
+    "get_rum_beacons_avg_per_day",
+    "get_rum_beacons_by_date",
+    "get_rum_storage_stats_window",
+    "get_storage_stats_window",
+    "get_usage_logs",
+    "insert_ingested_files",
+    "insert_quarantine_evidence",
+    "insert_slow_query",
+    "is_ingested_files_dedup_active",
+    "iter_usage_logs_chunks",
+    "latest_cron_per_task",
+    "list_alerts",
+    "list_alerts_cross_service",
+    "list_audit",
+    "list_in_flight",
+    "list_ingested_files",
+    "list_quarantine_evidence",
+    "list_scoring_audit",
+    "list_slow_queries",
+    "list_unbackfilled_fastly_edge_files",
+    "list_views",
+    "log_cron_run",
+    "log_synthetic_usage",
+    "log_usage_calls",
+    "lookup_asn_names",
+    "purge_cron_runs",
+    "purge_evidence",
+    "purge_usage_log",
+    "read_evidence",
+    "reap_running_cron_runs",
+    "recompute_ingested_files_summary",
+    "reconcile_fastly_stats",
+    "record_audit",
+    "record_in_flight",
+    "record_scoring_audit",
+    "register_source",
+    "save_alert",
+    "save_view",
+    "start_cron_run",
+    "teardown",
+    "toggle_alert",
+    "update_alert_last_triggered",
+    "update_cron_duration",
+    "upsert_asn_names",
 ]

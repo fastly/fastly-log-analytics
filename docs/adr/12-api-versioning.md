@@ -1,11 +1,11 @@
 # ADR-12 — API Versioning Doctrine
 
-**Status:** Accepted (2026-06-10)
-**Decided by:** v2.0 cleanup retrospective (2026-06-10)
+**Status:** Accepted
+**Decided by:** Engineering retrospective
 
 ## 1. Context & Motivation
 
-The HTTP surface is `/api/*` with no `/api/v1/` prefix. Semantic versioning lives on the app object (`app.version='2.3.0'` in [backend/main.py](../../backend/main.py)). The typed frontend client is openapi-typescript-generated from FastAPI's OpenAPI schema, with the pre-commit `regen-openapi` hook gating drift.
+The HTTP surface is `/api/*` with no `/api/v1/` prefix. Semantic versioning lives on the app object (`app.version='3.0.0-rc1'` in [backend/main.py](../../backend/main.py)). The typed frontend client is openapi-typescript-generated from FastAPI's OpenAPI schema, with the pre-commit `regen-openapi` hook gating drift.
 
 The system is internally self-consistent but has no written rule for what counts as breaking. The 2026-06-10 sessions surfaced two related signals: (a) `/api/sync-status?skip_fos=true` was used as a soft-versioning mechanism (query-param "give me less"), and it failed because the underlying middleware 403'd analysts entirely regardless of the param; (b) the chosen fix was a sibling endpoint `/api/log-extents` rather than a versioned variant of `/api/sync-status`. That decision is the doctrine, but it lives in a session note rather than an ADR.
 
@@ -105,7 +105,7 @@ The most subtle versioning rule we have. Encoded in middleware via `_ANALYST_BLO
 | Backend model field renamed; `regen-openapi` updates the generated client; frontend code still references the old name | TypeScript build fails at the next pre-commit (`typecheck-frontend` hook) or in CI. Recovery: rename frontend usages, re-commit. |
 | Endpoint removed without deprecation warning | Frontend build fails when openapi types update. Recovery: revert OR ship the frontend swap in the same PR. |
 | Composite endpoint shipped while old per-card endpoints removed | Same as above — caught by typecheck. |
-| Admin endpoint accidentally accessible to analysts | Security regression. Caught by `tests/routers/test_rbac_audit_fixes.py` + `tests/routers/test_cross_tenant_scope.py`. Add to `_ANALYST_BLOCKED_SUBPATHS` if missing. |
+| Admin endpoint accidentally accessible to analysts | Security regression. Caught by `tests/routers/test_rbac_audit_fixes.py` (test removed) + `tests/routers/test_cross_tenant_scope.py` (test removed). Add to `_ANALYST_BLOCKED_SUBPATHS` if missing. |
 | Analyst endpoint accidentally locked to admin only | Frontend stops working for analysts. Recovery: review `_ANALYST_BLOCKED_SUBPATHS` and undo the inclusion. |
 | External integrator depending on undocumented behavior | Out of contract. Document the behavior or revert if it's a security/privacy regression. |
 | `openapi.json` has a trailing newline mismatch with what `gen:types` produces | Pre-commit loop. Already resolved: openapi.json excluded from end-of-file-fixer. |

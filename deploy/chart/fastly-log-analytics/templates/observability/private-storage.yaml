@@ -1,0 +1,17 @@
+{{- if .Values.global.privateObservability.enabled }}
+{{- range $name, $size := dict "prometheus" .Values.global.privateObservability.prometheusStorage "tempo" .Values.global.privateObservability.tempoStorage }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "fastly-log-analytics.fullname" $ }}-telemetry-{{ $name }}
+spec:
+  accessModes: [ReadWriteOnce]
+  {{- with $.Values.global.privateObservability.storageClassName }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ $size }}
+---
+{{- end }}
+{{- end }}

@@ -9,11 +9,8 @@
 # What gets backed up
 # -------------------
 # Per ADR-13 §2.1, service config JSON on the VM is the ONE piece of
-# VM-disk state that's NOT recoverable from FOS. Iceberg data files /
-# manifests / metadata.json all live in the FOS bucket (durable);
-# metadata.db, the DuckDB cache, and the iceberg catalog SQLite are all
-# rebuildable from FOS on a fresh VM. Service configs are not — they
-# contain FOS credentials, CDN secrets, log-field config, and ingest
+# VM-disk state that's NOT recoverable from FOS. It
+# contains FOS credentials, CDN secrets, log-field config, and ingest
 # schedules. Losing them means re-provisioning each service from operator
 # memory.
 #
@@ -69,6 +66,9 @@
 
 set -euo pipefail
 
+# shellcheck source=scripts/lib/gce_ssh.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/gce_ssh.sh"
+
 # Required configuration — fail fast with a useful message if unset.
 : "${BACKUP_BUCKET:?Set BACKUP_BUCKET to a GCS bucket URI, e.g. gs://my-backups}"
 : "${BACKUP_INSTANCE:?Set BACKUP_INSTANCE to the GCE instance name}"
@@ -101,10 +101,10 @@ fi
 #    typically root-owned 0600 — they contain FOS credentials) and stream
 #    the tarball back. tar-over-SSH is faster + atomic vs scp on a dir.
 echo "[backup] streaming ${BACKUP_INSTANCE}:${BACKUP_CONFIGS_DIR}/ -> ${TMP_TAR}"
-gcloud compute ssh "${BACKUP_INSTANCE}" --zone="${BACKUP_ZONE}" --command="\
-  set -e; \
-  cd \$(dirname ${BACKUP_CONFIGS_DIR}); \
-  sudo tar czf - \$(basename ${BACKUP_CONFIGS_DIR})" \
+# shellcheck disable=SC2016 # $1 is expanded by the remote bash, not here
+gce_ssh_script "${BACKUP_INSTANCE}" "${BACKUP_ZONE}" -- \
+  'set -e; cd "$(dirname "$1")"; sudo tar czf - "$(basename "$1")"' \
+  "${BACKUP_CONFIGS_DIR}" \
   > "${TMP_TAR}"
 
 SIZE=$(wc -c < "${TMP_TAR}" | tr -d ' ')
@@ -134,9 +134,9 @@ if [ -n "${BACKUP_MARKER_VM_PATH:-}" ]; then
   NOW_ISO=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   MARKER_JSON="{\"at\":\"${NOW_ISO}\",\"remote\":\"${GCS_PATH}\"}"
   echo "[backup] writing freshness marker -> ${BACKUP_INSTANCE}:${BACKUP_MARKER_VM_PATH}"
-  gcloud compute ssh "${BACKUP_INSTANCE}" --zone="${BACKUP_ZONE}" --command="\
-    set -e; \
-    sudo mkdir -p \$(dirname '${BACKUP_MARKER_VM_PATH}'); \
-    printf '%s' '${MARKER_JSON}' | sudo tee '${BACKUP_MARKER_VM_PATH}' >/dev/null"
+  # shellcheck disable=SC2016 # $1/$2 are expanded by the remote bash, not here
+  gce_ssh_script "${BACKUP_INSTANCE}" "${BACKUP_ZONE}" -- \
+    'set -e; sudo mkdir -p "$(dirname "$1")"; printf "%s" "$2" | sudo tee "$1" >/dev/null' \
+    "${BACKUP_MARKER_VM_PATH}" "${MARKER_JSON}"
 fi
 echo "[backup] done."

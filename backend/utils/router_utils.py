@@ -11,13 +11,177 @@
 from __future__ import annotations
 
 import logging
-import uuid
-from collections.abc import Callable, Collection
-from functools import wraps
-from logging import Logger
-from typing import Any, NoReturn, get_args
+import threading
+from collections.abc import Callable, Collection, Mapping
+from typing import Any, get_args
 
 from fastapi import HTTPException, Request
+
+from backend import config as svcconfig
+from backend.config import path_within_dir, service_id_from_source
+from backend.models.admin import SyncStartResponse
+from backend.services.service_manager import (
+    _DIR_STATS_TTL_SEC,
+    _dir_stats_cache,
+    _dir_stats_lock,
+    _dir_stats_refresh_in_flight,
+    _get_dir_stats,
+    _shared_dir_size_cache,
+    _shared_dir_size_lock,
+    _shared_dir_stats_cache,
+    get_enriched_services,
+)
+from backend.utils.auth import (
+    ANALYST_PENDING_SESSION_COOKIE,
+    ANALYST_SESSION_COOKIE,
+    analyst_allowed_services,
+    analyst_cookie_is_secure,
+    mask_ips_for,
+    require_owned_row,
+    require_service_in_scope,
+    safe_audit_email,
+    set_analyst_session_cookies,
+)
+from backend.utils.countries import (
+    COUNTRY_MAP,
+    format_city_label,
+)
+from backend.utils.dir_size import (
+    _DEFAULT_WALK_DIR_STATS,
+    _DIR_SIZE_CACHE,
+    _DIR_SIZE_TTL_S,
+    _DIR_STATS_CACHE,
+    _dir_size_cold_locks,
+    _dir_size_cold_locks_meta_lock,
+    _dir_size_lock,
+    _dir_size_refresh_in_flight,
+    _get_dir_size,
+    _refresh_dir_size_background,
+    _schedule_dir_walk,
+    _walk_dir_stats,
+    get_dir_stats_swr,
+    walk_dir_stats,
+)
+from backend.utils.error_utils import (
+    _handle_query_error,
+    bad_request,
+    correlation_id,
+    current_request_id,
+    make_error,
+    not_found,
+    query_errors,
+    raise_internal,
+    validation_failed,
+)
+from backend.utils.pii_masking import (
+    _MIN_SALT_LEN,
+    _SENSITIVE_HEADERS,
+    ABS_PATH_RE,
+    CID_SALT_LITERAL_RE,
+    REDACTED,
+    _known_salts,
+    _obfuscate_header,
+    _salts_lock,
+    format_debug_request,
+    redact_error_text,
+    register_salt,
+    scrub_secrets,
+)
+from backend.utils.pop_utils import (
+    _DEFAULT_POP_COORDS,
+    _SAFE_POP_CODE_RE,
+    CACHE_FILE,
+    _build_pop_case_sql,
+    _effective_pop_lat_lon_map,
+    _haversine_sql_expr,
+    _lat_lon_cache,
+    _load_mtime_cached,
+    _loc_cache,
+    build_pop_haversine_case_sql,
+    build_pop_lat_case_sql,
+    build_pop_lon_case_sql,
+    fetch_pop_locations,
+    get_pop_lat_lon_map,
+    get_pop_location_map,
+    get_pop_locations,
+)
+from backend.utils.rate_limit import (
+    SlidingWindowLimiter,
+    SlidingWindowRateLimiter,
+    _StaticAssetLimiter,
+)
+from backend.utils.remote_access import (
+    _ANALYST_ALLOWED_WRITE_PREFIXES,
+    _ANALYST_BLOCKED_PREFIXES,
+    _ANALYST_BLOCKED_RUM_SUFFIXES,
+    _ANALYST_BLOCKED_SCORING_SUFFIXES,
+    _ANALYST_BLOCKED_SUBPATH_REGEX,
+    _ANALYST_BLOCKED_SUBPATHS,
+    _ANALYST_SSE_ALLOWLIST,
+    _API_DEBUG_KEYS,
+    _BODY_INSPECT_ATTR,
+    _BODY_INSPECT_UNSET,
+    _LOCAL_ADMIN_CIDRS_ENV,
+    _LOCAL_HOST_ALLOWLIST,
+    _PATH_SERVICE_PATTERNS,
+    _PII_FORBIDDEN_FILTER_COLS,
+    _QUERY_DEBUG_KEYS,
+    _TELEMETRY_IDLE_EXEMPT_PREFIXES,
+    _UNAUTH_ANALYST_PATHS,
+    ADMIN_GATEWAY_HEADER,
+    BODY_INSPECT_MAX_BYTES,
+    MAX_ANALYST_QUERY_SPAN,
+    RemoteAccessMiddleware,
+    TimeBounds,
+    _allowed_remote_hosts,
+    _analyst_api_limiter,
+    _body_field_param,
+    _body_filter_keys,
+    _body_service_ids,
+    _check_rate_limit,
+    _drain_request_body,
+    _enforce_service_and_pii_scope,
+    _error_json,
+    _host_base,
+    _in_local_allowlist,
+    _inspect_request_body,
+    _is_blocked_path,
+    _is_private_or_loopback,
+    _is_sse_route,
+    _local_admin_cidrs_cache,
+    _local_admin_networks,
+    _local_host_allowed,
+    _log_access,
+    _new_request_id,
+    _origin_allowed,
+    _path_service_ids,
+    _rebuild_response,
+    _remote_host_allowed,
+    _static_limiter,
+    _strip_analyst_envelope,
+    _time_bounds_from_params,
+    admin_gateway_required,
+    analyst_clamp_cache_key,
+    analyst_debug_visibility,
+    apply_response_hardening,
+    authenticated_admin_gateway,
+    clamp_or_400,
+    client_ip,
+    get_analyst_time_bounds,
+    is_request_remote,
+    resolve_analyst_insights_clamp,
+    validate_admin_gateway_config,
+)
+from backend.utils.sse import (
+    SSE_PASSTHROUGH_HEADERS,
+    ClientDisconnected,
+    _AbortableQueue,
+    _stream_from_worker,
+    iter_with_disconnect_ping,
+    sse_response,
+    stream_iac_reconcile,
+    stream_sse_from_worker,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -32,44 +196,12 @@ def require_json_content_type(req: Request) -> None:
     "simple"; application/json is not), blocking the silent-invocation
     vector. Runs as a ``Depends()`` so it fires before FastAPI's body
     parser — otherwise a malformed text/plain body returns 422 from the
-    parser and the explicit 415 never executes. Mirrors
-    ``routers.provision._require_json_content_type`` (kept separate there
-    to avoid a cross-router import; this copy is for other routers)."""
+    parser and the explicit 415 never executes."""
     if not (req.headers.get("content-type") or "").startswith("application/json"):
         raise HTTPException(
             status_code=415,
             detail=make_error("unsupported_media_type", "Content-Type must be application/json"),
         )
-
-
-# ── SSE pass-through headers ────────────────────────────────────────────────
-#
-# Apply to every EventSourceResponse so intermediaries forward chunks as
-# soon as the backend yields them, rather than buffering until the
-# stream closes (which for SSE is never).
-#
-#  - ``Surrogate-Control: no-store`` is the Fastly-respected hint that
-#    bypasses Varnish-shield caching. Without it, Fastly buffered our
-#    analyst SSE responses indefinitely: client fetch never received
-#    headers, the browser-side hook sat on "starting" forever, and the
-#    "Latest Log" header badge never updated for analyst sessions
-#    (observed 2026-06-15 via the Fastly URL — non-stream
-#    /api/log-extents returned 200 instantly, /api/log-extents/stream
-#    never delivered a single chunk).
-#  - ``Cache-Control: private, no-store, no-transform`` — ``no-transform``
-#    discourages proxies from re-compressing the body, which is a
-#    different reason intermediaries hold onto chunks. ``no-store``
-#    plus ``private`` keeps cookied SSE bodies out of any cache.
-#  - ``X-Accel-Buffering: no`` — nginx/Caddy hint. Caddy already streams
-#    SSE correctly via ``flush_interval -1`` in the Caddyfile, but we
-#    set the header anyway in case the deployment topology changes.
-#
-# Pass via ``EventSourceResponse(stream(), ping=5, headers=SSE_PASSTHROUGH_HEADERS)``.
-SSE_PASSTHROUGH_HEADERS: dict[str, str] = {
-    "Surrogate-Control": "no-store",
-    "Cache-Control": "private, no-store, no-transform",
-    "X-Accel-Buffering": "no",
-}
 
 
 def start_or_resume_cron(
@@ -85,17 +217,15 @@ def start_or_resume_cron(
     in progress; surface 503 with ``busy: True`` if neither path matches.
 
     Consolidates the 3 hand-rolled copies of this routine across
-    ``backend.routers.admin.ingest`` (metadata_sync + sync) and
-    ``backend.routers.admin.iceberg`` (commit). Each used to duplicate the
+    ``backend.routers.admin.ingest`` (sync) and
+    ``backend.routers.admin.compaction`` (commit). Each used to duplicate the
     same ``try: start_cron_run -> spawn thread -> return {ok}; except
     RuntimeError: scan list_active_runs -> return {ok, in_progress_msg};
     else: raise HTTPException(503)`` shape with only the task name +
     target kwargs varying.
     """
-    import threading
-
     from backend.core.duckdb import start_cron_run
-    from backend.cron_progress import list_active_runs, start_progress
+    from backend.cron.scheduler import list_active_runs, start_progress
 
     service_id = source["name"]
     try:
@@ -112,7 +242,50 @@ def start_or_resume_cron(
         for entry in list_active_runs():
             if entry.get("service_id") == service_id and entry.get("task") == task:
                 return {"ok": True, "message": in_progress_msg, "run_id": entry["run_id"]}
-        raise HTTPException(status_code=503, detail=make_error("cron_busy", str(e), busy=True)) from e
+        logger.warning("cron_busy task=%s service_id=%s: %s", task, service_id, e)
+        raise HTTPException(
+            status_code=503,
+            detail=make_error("cron_busy", "A run for this task is already in progress", busy=True),
+        ) from e
+
+
+def run_admin_cron_trigger(
+    source: dict[str, Any],
+    task_name: str,
+    target_fn: Any,
+    *,
+    target_kwargs: dict[str, Any] | None = None,
+    success_msg: str,
+    in_progress_msg: str,
+    invalidate_cache: bool = True,
+    require_high_scale: bool = False,
+    high_scale_detail: Any = None,
+    precheck: Callable[[], None] | None = None,
+) -> SyncStartResponse:
+    """Shared execution wrapper for manual admin cron trigger routes."""
+    if require_high_scale and not svcconfig.is_high_scale_mode(source):
+        raise HTTPException(
+            status_code=400,
+            detail=high_scale_detail or f"{task_name} is only supported under high-scale mode.",
+        )
+
+    if precheck is not None:
+        precheck()
+
+    if invalidate_cache:
+        from backend.repositories.dashboard import invalidate_service
+
+        invalidate_service(source["name"])
+
+    res = start_or_resume_cron(
+        source,
+        task_name,
+        target_fn,
+        target_kwargs=target_kwargs,
+        success_msg=success_msg,
+        in_progress_msg=in_progress_msg,
+    )
+    return SyncStartResponse(**res)
 
 
 def load_service_config(service_id: str) -> dict:
@@ -131,8 +304,6 @@ def load_service_config(service_id: str) -> dict:
     "service must exist or 404" path that is the common case in
     request-time routes.
     """
-    from backend import config as svcconfig
-
     cfg = svcconfig.load_config(service_id)
     if not cfg:
         # Keep the exact ``detail={"error": "Service not found"}`` shape
@@ -142,86 +313,77 @@ def load_service_config(service_id: str) -> dict:
     return cfg
 
 
-# ── Standardised error-envelope helpers ───────────────────────────────────────
-#
-# Convention: every router error response carries ``detail = {"error":
-# <machine-readable code>, ...}`` so the frontend's ``extractApiError`` can
-# pattern-match on the ``error`` field rather than substring-matching on
-# free-text. Use these helpers on every HTTPException site so the shape
-# stays uniform across the 18-router surface.
+def load_service_config_or_503(service_id: str) -> dict:
+    """Load a service's config, raising 503 on read error or 404 if missing."""
+    try:
+        cfg = svcconfig.load_config(service_id)
+    except Exception:
+        raise HTTPException(
+            503, detail=make_error("service_unavailable", "Service configuration unavailable")
+        ) from None
+    if not cfg:
+        raise HTTPException(404, detail=make_error("service_not_found", "Service not found"))
+    return cfg
 
 
-def bad_request(code: str) -> dict[str, str]:
-    """Envelope for a 400 ``{"error": code}``. Pair with
-    ``raise HTTPException(status_code=400, detail=bad_request("..."))``."""
-    return {"error": code}
+def mutate_service_config(service_id: str, mutate: Callable[[dict], None]) -> dict:
+    """Locked read-modify-write of a service config, or :class:`HTTPException` 404.
 
-
-def not_found(code: str = "not_found") -> dict[str, str]:
-    """Envelope for a 404 ``{"error": code}``. ``code`` defaults to the
-    generic ``"not_found"`` for resources that have no domain-specific code."""
-    return {"error": code}
-
-
-def validation_failed(code: str, messages: list[str]) -> dict:
-    """Envelope for a 422 ``{"error": code, "messages": [...]}``. Use when a
-    request fails domain validation that Pydantic can't express."""
-    return {"error": code, "messages": messages}
-
-
-def make_error(
-    code: str,
-    message: str | None = None,
-    *,
-    error_id: str | None = None,
-    **extras: object,
-) -> dict[str, object]:
-    """Build the unified error-envelope detail dict.
-
-    Shape: ``{"error": code[, "message": ..., "error_id": ..., **extras]}``.
-    ``None`` fields are omitted so the wire payload doesn't carry empty
-    keys. Pair with::
-
-        raise HTTPException(status_code=400, detail=make_error("bad_input", str(exc)))
-
-    ``code`` is the machine-readable identifier the frontend pattern-matches
-    on; ``message`` carries the human-readable detail (safe-to-echo
-    exception text from controlled call sites — e.g. ``parse_period``
-    ValueError). For exceptions that may leak internal state (DuckDB file
-    paths, upstream API bodies) use :func:`raise_internal` instead, which
-    logs server-side and returns only an ``error_id``."""
-    detail: dict[str, object] = {"error": code}
-    if message is not None:
-        detail["message"] = message
-    if error_id is not None:
-        detail["error_id"] = error_id
-    detail.update(extras)
-    return detail
-
-
-def raise_internal(
-    log: Logger,
-    exc: BaseException,
-    *,
-    code: str = "request_failed",
-    status: int = 500,
-) -> NoReturn:
-    """Log the full exception server-side; raise a generic ``HTTPException``
-    that does NOT echo the original exception message to the client.
-
-    Use at except sites that previously did
-    ``raise HTTPException(status_code=500, detail={"error": str(e)})`` —
-    that pattern leaks upstream API response bodies (e.g. Fastly error
-    text interpolated by ``backend.core.fastly.client.fastly()``) to the
-    caller. ``error_id`` lets operators correlate a client report with
-    the matching server-log line.
+    The write counterpart of :func:`load_service_config`: applies ``mutate`` to a fresh copy
+    under :func:`backend.config.mutate_config` (so a concurrent writer's keys are not
+    clobbered) and returns the saved config.
     """
-    error_id = uuid.uuid4().hex[:8]
-    log.exception("%s [error_id=%s]", code, error_id)
-    raise HTTPException(
-        status_code=status,
-        detail={"error": code, "error_id": error_id},
-    ) from exc
+    saved = svcconfig.mutate_config(service_id, mutate)
+    if saved is None:
+        raise HTTPException(status_code=404, detail={"error": "Service not found"})
+    return saved
+
+
+def stored_fastly_token(cfg: Mapping[str, Any] | None) -> str:
+    """The ``fastly_api_key`` stored in an already-loaded service config, stripped; ``""`` if absent.
+
+    The single read of that field for routers that already hold ``cfg``. Never logs the value and
+    never falls back to another service's key.
+    """
+    if not cfg:
+        return ""
+    return str(cfg.get("fastly_api_key") or "").strip()
+
+
+def resolve_fastly_token(service_id: str, override: str | None = "") -> str:
+    """Lenient token resolution: ``override`` if given, else the service config's stored
+    ``fastly_api_key``, else ``""`` (callers raise their own error on empty).
+
+    Reads the config for exactly ``service_id`` — it never falls back to the *active* service's key
+    (unlike ``config.get_fastly_api_key``), so an empty or unknown id can't borrow another service's
+    credential. The token value is never logged.
+    """
+    if override:
+        return override
+    return stored_fastly_token(svcconfig.load_config(service_id))
+
+
+def require_fastly_token(service_id: str, override: str | None = "") -> str:
+    """Strict token resolution: ``override`` if given, else the stored key — 404 when the service has no
+    config, 400 when it has no key. Error bodies match the RUM endpoints' historical ones."""
+    if override:
+        return override
+    cfg = svcconfig.load_config(service_id)
+    if not cfg:
+        raise HTTPException(status_code=404, detail={"error": f"No config for service {service_id}"})
+    token = stored_fastly_token(cfg)
+    if not token:
+        raise HTTPException(status_code=400, detail={"error": f"No Fastly API key for service {service_id}"})
+    return token
+
+
+def require_service_id(service_id: str | None) -> str:
+    """Return ``service_id``, or raise the canonical 400 ``service_id_required``
+    envelope when it is missing or empty. Every route that needs a service and
+    did not get one answers with this, never FastAPI's 422 validation body."""
+    if not service_id:
+        raise HTTPException(status_code=400, detail=make_error("service_id_required"))
+    return service_id
 
 
 # ── Section-selector validation ───────────────────────────────────────────────
@@ -296,108 +458,222 @@ def make_section_expander(
     return _expand
 
 
-# ── Debug request formatting ──────────────────────────────────────────────────
+def sync_admin_state(service_id: str | None) -> None:
+    """Fire-and-forget admin state export after alert/view mutations.
 
-_SENSITIVE_HEADERS = frozenset({"fastly-key", "authorization", "x-api-key", "x-api-token"})
+    Also nudges the scheduler so that toggling alert count between 0 and >0
+    immediately registers or removes the alerts evaluation cron — otherwise
+    a user who just created their first alert would wait until the next
+    process restart for evaluation to start.
 
-
-def _obfuscate_header(name: str, value: str) -> str:
-    if name.lower() in _SENSITIVE_HEADERS:
-        return f"***{value[-4:]}" if len(value) >= 4 else "***"
-    return value
-
-
-def format_debug_request(
-    method: str,
-    url: str,
-    headers: dict[str, str] | None = None,
-    query: dict[str, str] | None = None,
-) -> str:
-    """Return a human-readable representation of an outbound request for debug output.
-
-    Sensitive header values (API keys, auth tokens) are obfuscated.
+    Swallows all exceptions so a sync failure never breaks the primary request.
     """
-    lines = ["--- Request ---", f"{method} {url}"]
-    if headers:
-        for k, v in headers.items():
-            lines.append(f"  {k}: {_obfuscate_header(k, v)}")
-    if query:
-        parts = [f"{k}={_obfuscate_header(k, v)}" for k, v in query.items()]
-        lines.append(f"  QueryString: {'&'.join(parts)}")
-    return "\n".join(lines)
+    if not service_id:
+        return
+    try:
+        from backend.core.metadata.base import export_admin_state
+
+        export_admin_state(service_id)
+    except Exception:
+        logger.warning("sync_admin_state: export_admin_state failed (ignored)", exc_info=True)
+    try:
+        from backend.cron.scheduler import get_scheduler
+
+        get_scheduler().reload()
+    except Exception:
+        logger.warning("sync_admin_state: get_scheduler failed (ignored)", exc_info=True)
 
 
-# ``sync_admin_state`` moved to ``backend.routers._state_sync`` — its two
-# transitive imports (state_sync, scheduler) sit above ``utils`` in the
-# layering, and the only callers are routers anyway.
+def run_cached_repo_endpoint(
+    ctx,
+    *,
+    repo_module: str,
+    get_fn,
+    peek_fn,
+    kwargs: dict,
+    wrap=None,
+    on_response=None,
+):
+    """Run a repository aggregate endpoint with peek-before-checkout caching.
 
-
-def query_errors(status_code: int = 400):
-    """Decorator that maps unhandled exceptions to the unified error envelope.
-
-    Three branches:
-
-    * ``ValueError`` → 400 ``make_error("bad_request", str(e))``. The
-      human-readable text rides on ``detail.message`` where
-      ``extractApiError`` reads it as the user-facing string. Use
-      ``ValueError`` from inside the handler whenever the message is
-      safe to echo (validated input, period parsing, etc.).
-    * ``LookupError`` → 404 ``make_error("not_found", str(e))`` — same
-      shape, different code.
-    * Any other ``Exception`` → ``raise_internal``: logs the full
-      traceback server-side (operator triage) and returns ``{"error":
-      "unhandled_error", "error_id": "..."}`` so upstream API bodies,
-      DuckDB internals, and stack-trace text never reach the client.
-
-    Wearers of the decorator no longer need to think about which exception
-    text is safe to echo: the catch-all path collapses to a generic code +
-    correlation id, and the typed branches put the message under
-    ``detail.message`` instead of the machine-code slot.
-
-    Usage::
-
-        @router.post("/my-endpoint")
-        @query_errors()
-        def my_endpoint(req: MyRequest, con=Depends(get_con)):
-            return repo.do_stuff(con, req)
+    When ``get_fn`` has not been monkeypatched away from ``repo_module``, peeks
+    the cache before checking out a pooled DuckDB connection.
     """
+    is_real_repo = getattr(get_fn, "__module__", "") == repo_module
+    if is_real_repo:
+        cached = peek_fn(src=ctx.source, **kwargs)
+        if cached is not None:
+            if on_response is not None:
+                on_response()
+            return wrap(cached) if wrap is not None else cached
+    res = get_fn(
+        con=ctx.con_or_factory(force_eager=not is_real_repo),
+        src=ctx.source,
+        **kwargs,
+    )
+    if on_response is not None:
+        on_response()
+    return wrap(res) if wrap is not None else res
 
-    def decorator(fn):
-        import asyncio
 
-        if asyncio.iscoroutinefunction(fn):
-            # Async handler: await the coroutine and apply the same
-            # exception-mapping. Necessary so an ``async def`` route can
-            # still wear @query_errors and gather concurrent I/O (e.g.
-            # M4 — Fastly call parallelisation in usage.py::prefill).
-            @wraps(fn)
-            async def async_wrapper(*args, **kwargs):
-                try:
-                    return await fn(*args, **kwargs)
-                except HTTPException:
-                    raise
-                except ValueError as e:
-                    raise HTTPException(status_code=400, detail=make_error("bad_request", str(e)))
-                except LookupError as e:
-                    raise HTTPException(status_code=404, detail=make_error("not_found", str(e)))
-                except Exception as e:
-                    raise_internal(logger, e, code="unhandled_error", status=status_code)
-
-            return async_wrapper
-
-        @wraps(fn)
-        def wrapper(*args, **kwargs):
-            try:
-                return fn(*args, **kwargs)
-            except HTTPException:
-                raise
-            except ValueError as e:
-                raise HTTPException(status_code=400, detail=make_error("bad_request", str(e)))
-            except LookupError as e:
-                raise HTTPException(status_code=404, detail=make_error("not_found", str(e)))
-            except Exception as e:
-                raise_internal(logger, e, code="unhandled_error", status=status_code)
-
-        return wrapper
-
-    return decorator
+__all__ = [
+    "ABS_PATH_RE",
+    "ADMIN_GATEWAY_HEADER",
+    "ANALYST_PENDING_SESSION_COOKIE",
+    "ANALYST_SESSION_COOKIE",
+    "BODY_INSPECT_MAX_BYTES",
+    "CACHE_FILE",
+    "CID_SALT_LITERAL_RE",
+    "COUNTRY_MAP",
+    "ClientDisconnected",
+    "MAX_ANALYST_QUERY_SPAN",
+    "REDACTED",
+    "RemoteAccessMiddleware",
+    "SSE_PASSTHROUGH_HEADERS",
+    "SlidingWindowLimiter",
+    "SlidingWindowRateLimiter",
+    "SyncStartResponse",
+    "TimeBounds",
+    "_ANALYST_ALLOWED_WRITE_PREFIXES",
+    "_ANALYST_BLOCKED_PREFIXES",
+    "_ANALYST_BLOCKED_RUM_SUFFIXES",
+    "_ANALYST_BLOCKED_SCORING_SUFFIXES",
+    "_ANALYST_BLOCKED_SUBPATHS",
+    "_ANALYST_BLOCKED_SUBPATH_REGEX",
+    "_ANALYST_SSE_ALLOWLIST",
+    "_API_DEBUG_KEYS",
+    "_AbortableQueue",
+    "_BODY_INSPECT_ATTR",
+    "_BODY_INSPECT_UNSET",
+    "_DEFAULT_POP_COORDS",
+    "_DEFAULT_WALK_DIR_STATS",
+    "_DIR_SIZE_CACHE",
+    "_DIR_SIZE_TTL_S",
+    "_DIR_STATS_CACHE",
+    "_DIR_STATS_TTL_SEC",
+    "_LOCAL_ADMIN_CIDRS_ENV",
+    "_LOCAL_HOST_ALLOWLIST",
+    "_MIN_SALT_LEN",
+    "_PATH_SERVICE_PATTERNS",
+    "_PII_FORBIDDEN_FILTER_COLS",
+    "_QUERY_DEBUG_KEYS",
+    "_SAFE_POP_CODE_RE",
+    "_SENSITIVE_HEADERS",
+    "_StaticAssetLimiter",
+    "_TELEMETRY_IDLE_EXEMPT_PREFIXES",
+    "_UNAUTH_ANALYST_PATHS",
+    "_allowed_remote_hosts",
+    "_analyst_api_limiter",
+    "_body_field_param",
+    "_body_filter_keys",
+    "_body_service_ids",
+    "_build_pop_case_sql",
+    "_check_rate_limit",
+    "_dir_size_cold_locks",
+    "_dir_size_cold_locks_meta_lock",
+    "_dir_size_lock",
+    "_dir_size_refresh_in_flight",
+    "_dir_stats_cache",
+    "_dir_stats_lock",
+    "_dir_stats_refresh_in_flight",
+    "_drain_request_body",
+    "_effective_pop_lat_lon_map",
+    "_enforce_service_and_pii_scope",
+    "_error_json",
+    "_get_dir_size",
+    "_get_dir_stats",
+    "_handle_query_error",
+    "_haversine_sql_expr",
+    "_host_base",
+    "_in_local_allowlist",
+    "_inspect_request_body",
+    "_is_blocked_path",
+    "_is_private_or_loopback",
+    "_is_sse_route",
+    "_known_salts",
+    "_lat_lon_cache",
+    "_load_mtime_cached",
+    "_loc_cache",
+    "_local_admin_cidrs_cache",
+    "_local_admin_networks",
+    "_local_host_allowed",
+    "_log_access",
+    "_new_request_id",
+    "_obfuscate_header",
+    "_origin_allowed",
+    "_path_service_ids",
+    "_rebuild_response",
+    "_refresh_dir_size_background",
+    "_remote_host_allowed",
+    "_salts_lock",
+    "_schedule_dir_walk",
+    "_shared_dir_size_cache",
+    "_shared_dir_size_lock",
+    "_shared_dir_stats_cache",
+    "_static_limiter",
+    "_stream_from_worker",
+    "_strip_analyst_envelope",
+    "_time_bounds_from_params",
+    "_walk_dir_stats",
+    "admin_gateway_required",
+    "analyst_allowed_services",
+    "analyst_clamp_cache_key",
+    "analyst_cookie_is_secure",
+    "analyst_debug_visibility",
+    "apply_response_hardening",
+    "authenticated_admin_gateway",
+    "bad_request",
+    "build_pop_haversine_case_sql",
+    "build_pop_lat_case_sql",
+    "build_pop_lon_case_sql",
+    "clamp_or_400",
+    "client_ip",
+    "correlation_id",
+    "current_request_id",
+    "expand_sections",
+    "fetch_pop_locations",
+    "format_city_label",
+    "format_debug_request",
+    "get_analyst_time_bounds",
+    "get_dir_stats_swr",
+    "get_enriched_services",
+    "get_pop_lat_lon_map",
+    "get_pop_location_map",
+    "get_pop_locations",
+    "is_request_remote",
+    "iter_with_disconnect_ping",
+    "load_service_config",
+    "load_service_config_or_503",
+    "make_error",
+    "make_section_expander",
+    "mask_ips_for",
+    "mutate_service_config",
+    "not_found",
+    "path_within_dir",
+    "query_errors",
+    "raise_internal",
+    "redact_error_text",
+    "register_salt",
+    "require_fastly_token",
+    "require_json_content_type",
+    "require_owned_row",
+    "require_service_id",
+    "require_service_in_scope",
+    "resolve_analyst_insights_clamp",
+    "resolve_fastly_token",
+    "run_admin_cron_trigger",
+    "run_cached_repo_endpoint",
+    "safe_audit_email",
+    "scrub_secrets",
+    "service_id_from_source",
+    "set_analyst_session_cookies",
+    "sse_response",
+    "start_or_resume_cron",
+    "stored_fastly_token",
+    "stream_iac_reconcile",
+    "stream_sse_from_worker",
+    "sync_admin_state",
+    "validate_admin_gateway_config",
+    "validation_failed",
+    "walk_dir_stats",
+]

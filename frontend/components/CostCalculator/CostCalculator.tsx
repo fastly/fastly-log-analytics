@@ -1,39 +1,475 @@
 'use client'
 
 import React, { useEffect, useMemo, useReducer } from 'react'
-import { reducer, DEFAULTS, calculate } from './calc'
-import type { CalcState } from './calc'
-import { Inputs } from './Inputs'
-import { Pricing } from './Pricing'
-import { Results } from './Results'
+import { useRouter } from 'next/navigation'
+import { flexRender, getCoreRowModel, useReactTable, type ColumnDef } from '@tanstack/react-table'
+import { cn, buildServiceHref, formatBytes, formatUSD } from "@/lib/utils"
+import { useServiceStore } from '@/stores/filterStore'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Switch } from '@/components/ui/switch'
+import { Table, TableBody, TableCell, TableRow } from '@/components/ui/table'
+import { LabelWithInfo } from '@/components/ui/confirm-dialog'
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '@/components/ui/tooltip'
+import {
+  type PrefillResponse,
+  type BillingZone,
+  BILLING_ZONE_RATES,
+  BILLING_ZONE_DESCRIPTIONS,
+  type DeploymentMode,
+  type CalcState,
+  type CalcAction,
+  DEFAULTS,
+  reducer,
+  type CalcResults,
+  calculate,
+  fmtN,
+} from './costCalculatorModel'
 
-// ─── Main Component ───────────────────────────────────────────────────────────
-
-interface CostCalculatorProps {
-  prefillData?: any
-  prefillNote?: string
-  overrideBytesPerLine?: number
+export {
+  type PrefillResponse,
+  type BillingZone,
+  BILLING_ZONE_RATES,
+  BILLING_ZONE_DESCRIPTIONS,
+  type DeploymentMode,
+  type CalcState,
+  type CalcAction,
+  DEFAULTS,
+  reducer,
+  type CalcResults,
+  calculate,
+  fmtN,
 }
 
-export function CostCalculator({ prefillData, prefillNote, overrideBytesPerLine }: CostCalculatorProps) {
+function hasAccessibleName(el: React.ReactElement): boolean {
+  const p = el.props as { 'aria-label'?: unknown; 'aria-labelledby'?: unknown }
+  return p['aria-label'] != null || p['aria-labelledby'] != null
+}
+
+export function Row({ label, children, muted, tooltip }: { label: string; children: React.ReactNode; muted?: boolean; tooltip?: string }) {
+  const labelledChild =
+    React.isValidElement(children) && !hasAccessibleName(children)
+      ? React.cloneElement(children as React.ReactElement<{ 'aria-label'?: string }>, { 'aria-label': label })
+      : children
+  return (
+    <div className={cn('flex items-center justify-between py-1.5 border-b border-border/40 last:border-0 gap-4', muted && 'opacity-60')}>
+      <LabelWithInfo
+        label={label}
+        info={tooltip}
+        className="gap-1.5 text-sm text-muted-foreground flex-1 leading-tight"
+        labelClassName="text-sm font-normal leading-tight"
+      />
+      <div className='flex-shrink-0'>{labelledChild}</div>
+    </div>
+  )
+}
+
+export function NumInput({ id, value, onChange, step, min, max, wide, 'aria-label': ariaLabel }: {
+  id?: string; value: number; onChange: (v: number) => void
+  step?: number; min?: number; max?: number; wide?: boolean
+  'aria-label'?: string
+}) {
+  return (
+    <Input
+      id={id}
+      aria-label={ariaLabel}
+      type='number'
+      value={value}
+      step={step ?? 1}
+      min={min ?? 0}
+      max={max}
+      onChange={(e) => { const v = parseFloat(e.target.value); if (!isNaN(v)) onChange(v) }}
+      className={cn('text-right h-7 text-sm', wide ? 'w-32' : 'w-24')}
+    />
+  )
+}
+
+export function ReadOnlyValue({ value, wide }: { value: string | number; wide?: boolean }) {
+  return (
+    <div className={cn('text-right h-7 text-sm flex items-center justify-end px-3 rounded-md bg-muted/40 border border-transparent font-mono tabular-nums text-muted-foreground', wide ? 'w-32' : 'w-24')}>
+      {value}
+    </div>
+  )
+}
+
+export function ResultRow({ label, detail, cost, highlight }: {
+  label: string; detail?: string; cost: string; highlight?: boolean
+}) {
+  return (
+    <div className={cn('flex items-center justify-between py-2 border-b border-border/40 last:border-0', highlight && 'border-t-2 border-border pt-3 mt-2')}>
+      <div>
+        <div className={cn('text-sm font-medium', highlight && 'text-base')}>{label}</div>
+        {detail && <div className='text-xs text-muted-foreground mt-0.5'>{detail}</div>}
+      </div>
+      <div className={cn('font-bold tabular-nums', highlight ? 'text-xl text-emerald-500' : 'text-sm')}>{cost}</div>
+    </div>
+  )
+}
+
+interface InputsProps {
+  s: CalcState
+  r: CalcResults
+  set: (key: keyof CalcState) => (value: number | boolean | DeploymentMode) => void
+}
+
+export function Inputs({ s, r, set }: InputsProps) {
+  const activeServiceId = useServiceStore((st) => st.activeServiceId)
+  return (
+    <section>
+      <h3 className='text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-3'>Your Traffic &amp; Config</h3>
+      <div className='space-y-0'>
+        <Row label='Total requests per day' tooltip="Total requests your Fastly service handles per day (including both Edge and Shield).">
+          <NumInput value={s.reqDay} onChange={set('reqDay')} wide />
+        </Row>
+        <Row label='Log sample rate (%)' tooltip="Percentage of requests logged. 100 = all requests, 1 = 1% of requests.">
+          <NumInput value={s.sampleRate} onChange={set('sampleRate')} min={1} max={100} />
+        </Row>
+        <Row label='Estimated RUM Beacons / day' tooltip="Estimated beacons collected by Real User Monitoring (RUM) scripts on client browsers. Each beacon generates 1 Class A FOS write.">
+          <NumInput value={s.rumBeaconsDay} onChange={set('rumBeaconsDay')} wide />
+        </Row>
+        <Row label='Edge-only logging' tooltip="Only log requests handled by the Edge, omitting Shield requests. This uses the 'Edge requests per day' volume for calculation.">
+          <Switch aria-label="Edge-only logging" checked={s.edgeOnly} onCheckedChange={set('edgeOnly')} />
+        </Row>
+        {s.edgeOnly && (
+          <Row label='Edge requests per day' tooltip="Total requests handled directly by the Edge (excluding Shield requests). If 'Edge only logging' is enabled, this lower volume is used to calculate costs.">
+            <NumInput value={s.edgeReqDay} onChange={set('edgeReqDay')} wide />
+          </Row>
+        )}
+        <Row label='Log file period (seconds)' tooltip="How often Fastly closes and uploads a log file. Controlled by the Fastly logging configuration.">
+          <NumInput value={s.logPeriod} onChange={set('logPeriod')} min={1} />
+        </Row>
+        <Row label='Deployment mode' tooltip="High-Scale also writes an archive Parquet artifact per page of raw log objects to FOS: about 33 KB fixed plus 417 bytes per row (measured on a dev High-Scale deployment). The worker deletes archive artifacts a day after the data retention window.">
+          <select aria-label="Deployment mode" value={s.deploymentMode} onChange={(e) => set('deploymentMode')(e.target.value as DeploymentMode)} className="h-8 rounded-md border bg-background px-2 text-xs">
+            <option value="standard">Standard</option>
+            <option value="high_scale">High-Scale</option>
+          </select>
+        </Row>
+        {s.deploymentMode === 'high_scale' && (
+          <Row label='Raw objects per archive batch' tooltip="Upper bound of source objects per archive artifact (HIGH_SCALE_PAGE_SIZE, default 100). Quiet services archive about one object per page. Each page costs 3 writes (artifact, manifest, commit marker) and 3 verification reads.">
+            <NumInput value={s.archiveBatchObjects} onChange={set('archiveBatchObjects')} min={1} max={500} />
+          </Row>
+        )}
+        <Row label='Cloud Commit Interval (minutes)' tooltip="How often the local buffer is committed to DuckLake and the new Parquet files are pushed to FOS (e.g., 5).">
+          <NumInput value={s.commitMins} onChange={set('commitMins')} min={1} />
+        </Row>
+        <Row label='Average bytes per log line' tooltip="The average uncompressed bytes per request based on your selected fields. Used to calculate storage sizes.">
+          <NumInput value={s.bytesPerLine} onChange={set('bytesPerLine')} min={1} />
+        </Row>
+        <Row label='Parquet target size (MB)' tooltip="Target file size for the nightly DuckLake compaction. Larger targets mean fewer rewritten objects (and lower FOS storage cost in High-Scale).">
+          <NumInput value={s.parquetMB} onChange={set('parquetMB')} min={1} />
+        </Row>
+        <Row label='Log nodes / fan-out' tooltip="Estimated number of Fastly aggregators/cache nodes flushing per period. Higher traffic = more nodes.">
+          <NumInput value={s.logNodes} onChange={set('logNodes')} min={1} max={72} />
+        </Row>
+        <Row label='Manual log checks per day' tooltip="Each click of 'Refresh' on the Ingestion tab performs 1 Class A list operation against FOS.">
+          <NumInput value={s.logsChecksPerDay} onChange={set('logsChecksPerDay')} />
+        </Row>
+        <Row label='CDN fronting FOS reads' tooltip="Use a Fastly CDN service to cache reads from Fastly Object Storage, reducing Class B operations.">
+          <Switch aria-label="CDN fronting FOS reads" checked={s.cdnEnabled} onCheckedChange={set('cdnEnabled')} />
+        </Row>
+        <Row label='Data retention (days)' tooltip="The service's data retention. Request data, its cloud copy and (High-Scale) its archive artifacts are deleted after this many days (archive a day later). A retention of 0 keeps data forever and is modelled as a year here. Deleted objects are still billed for the 30-day FOS minimum.">
+          <NumInput value={s.retentionDays} onChange={set('retentionDays')} min={1} />
+        </Row>
+        <Row label='RUM retention (days)' tooltip="The service's RUM retention, which can differ from the request retention. It sizes RUM storage and, in High-Scale, the RUM archive artifacts.">
+          <NumInput value={s.rumRetentionDays} onChange={set('rumRetentionDays')} min={1} />
+        </Row>
+        <Row label='Auto-delete raw .gz logs after ingest' tooltip="Delete raw .gz log files once they are committed to DuckLake. They are still billed for the FOS minimum 30 days, but this prevents redundant long-term storage.">
+          <Switch aria-label="Auto-delete raw .gz logs after ingest" checked={s.deleteLogs} onCheckedChange={set('deleteLogs')} />
+        </Row>
+        <Row label='DuckLake compaction enabled' tooltip="Periodically rewrite and merge small Parquet files into larger ones. The merged files are pushed to FOS and the replaced ones deleted (30-day minimum billing applies).">
+          <Switch aria-label="DuckLake compaction enabled" checked={s.compactionEnabled} onCheckedChange={set('compactionEnabled')} />
+        </Row>
+      </div>
+
+      <div className='mt-4 p-3 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 rounded-md space-y-2'>
+        <div className='text-xs font-semibold text-amber-700 dark:text-amber-400'>Minimum Charge per Object</div>
+        <Row label='Min. days billed per object (even if deleted early)'>
+          <ReadOnlyValue value={s.minDays} />
+        </Row>
+        <div className='text-[11px] text-amber-700/80 dark:text-amber-500/80'>
+          Edit on the <a href={buildServiceHref('/admin', activeServiceId)} className='underline font-medium hover:text-amber-900 dark:hover:text-amber-300'>admin page</a>.
+        </div>
+        <div className='text-xs text-amber-600 dark:text-amber-500 space-y-0.5'>
+          <div>Objects created/day: <strong>{fmtN(Math.round(r.objectsPerDay))}</strong></div>
+          <div>Sustained billed footprint (30d): <strong>{fmtN(Math.round(r.objectsBilled))}</strong> objects</div>
+        </div>
+      </div>
+    </section>
+  )
+}
+
+interface PricingProps {
+  s: CalcState
+  setZone?: (zone: BillingZone) => void
+}
+
+const OPS_SECTIONS = [
+  {
+    title: 'Class A (writes & lists)',
+    cls: 'py-1 font-semibold text-blue-600 dark:text-blue-400',
+    rowCls: 'pl-3 py-0.5',
+    valCls: 'text-right',
+    rows: [
+      ['Fastly writes each log file', '1 op/file'],
+      ['Raw Parquet upload per sync', '1 op/file'],
+      ['List during sync (per 1,000 objects)', '1 op/page'],
+      ['Manual log checks (LIST)', '1 op/check'],
+      ['Admin sync state to FOS', '1 op/sync'],
+    ],
+  },
+  {
+    title: 'DuckLake Cloud Copy (if compaction enabled)',
+    cls: 'py-1 font-semibold text-blue-500 dark:text-blue-300 italic',
+    rowCls: 'pl-3 py-0.5 text-muted-foreground/70',
+    valCls: 'text-right text-muted-foreground/70',
+    rows: [
+      ['DuckLake commit (append data)', '1 op/sync'],
+      ['Table optimization (rewrite)', '1 op/file'],
+      ['Weekly snapshot expiry', '1 op/week'],
+    ],
+  },
+  {
+    title: 'Class B (reads)',
+    cls: 'py-1 mt-2 font-semibold text-amber-600 dark:text-amber-400',
+    rowCls: 'pl-3 py-0.5',
+    valCls: 'text-right',
+    rows: [
+      ['Read each .gz during ingest', '1 op/file'],
+    ],
+  },
+  {
+    title: 'Egress (Transfer Out)',
+    cls: 'py-1 mt-2 font-semibold text-orange-600 dark:text-orange-400',
+    rowCls: 'pl-3 py-0.5',
+    valCls: 'text-right',
+    rows: [
+      ['Raw .gz logs read via the CDN during ingest', 'compressed log volume'],
+    ],
+  },
+] as const
+
+type OpsSectionFlatRow =
+  | { kind: 'header'; key: string; title: string; cls: string }
+  | { kind: 'row'; key: string; label: string; value: string; rowCls: string; valCls: string }
+
+function OpsSectionsTable() {
+  const data = useMemo<OpsSectionFlatRow[]>(() => {
+    const out: OpsSectionFlatRow[] = []
+    for (const sec of OPS_SECTIONS) {
+      out.push({ kind: 'header', key: `hdr-${sec.title}`, title: sec.title, cls: sec.cls })
+      for (const [l, r] of sec.rows) {
+        out.push({ kind: 'row', key: `${sec.title}-${l}`, label: l, value: r, rowCls: sec.rowCls, valCls: sec.valCls })
+      }
+    }
+    return out
+  }, [])
+  const columns = useMemo<ColumnDef<OpsSectionFlatRow>[]>(
+    () => [
+      { id: 'label', cell: ({ row }) => (row.original.kind === 'header' ? row.original.title : row.original.label) },
+      { id: 'value', cell: ({ row }) => (row.original.kind === 'row' ? row.original.value : null) },
+    ],
+    [],
+  )
+  const table = useReactTable({ data, columns, getCoreRowModel: getCoreRowModel() })
+  return (
+    <Table className='w-full text-xs text-muted-foreground'>
+      <TableBody>
+        {table.getRowModel().rows.map((row) => {
+          const item = row.original
+          if (item.kind === 'header') {
+            return (
+              <TableRow key={item.key}>
+                <TableCell colSpan={2} className={item.cls}>{item.title}</TableCell>
+              </TableRow>
+            )
+          }
+          const cells = row.getVisibleCells()
+          return (
+            <TableRow key={item.key}>
+              <TableCell className={item.rowCls}>{flexRender(cells[0].column.columnDef.cell, cells[0].getContext())}</TableCell>
+              <TableCell className={item.valCls}>{flexRender(cells[1].column.columnDef.cell, cells[1].getContext())}</TableCell>
+            </TableRow>
+          )
+        })}
+      </TableBody>
+    </Table>
+  )
+}
+
+export function Pricing({ s, setZone }: PricingProps) {
+  const router = useRouter()
+  const activeServiceId = useServiceStore((st) => st.activeServiceId)
+  return (
+    <>
+      <section>
+        <div className="flex items-center justify-between mb-3">
+          <h3 className='text-xs font-semibold text-muted-foreground uppercase tracking-wider'>Pricing (per 1,000 ops)</h3>
+          <Button
+            variant="link"
+            size="sm"
+            className="h-7 p-0 text-[10px] uppercase font-bold text-primary"
+            onClick={() => router.push(buildServiceHref('/admin', activeServiceId))}
+          >
+            Edit in Admin
+          </Button>
+        </div>
+
+        <div className="mb-4 space-y-2 p-3 bg-muted/40 rounded-lg border border-border/50">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">
+              Delivery Billing Zone
+            </span>
+            <span className="text-xs font-semibold text-primary">
+              ${s.rateEgress.toFixed(2)} / GB
+            </span>
+          </div>
+          <div className="grid grid-cols-3 gap-1.5 p-1 bg-muted/80 rounded-md">
+            {(['MBZ100', 'MBZ200', 'Global'] as const).map((zone) => {
+              const isSelected = s.billingZone === zone
+              return (
+                <TooltipProvider key={zone}>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <button
+                        type="button"
+                        onClick={() => setZone?.(zone)}
+                        className={cn(
+                          'px-2.5 py-1.5 text-xs font-medium rounded transition-all text-center',
+                          isSelected
+                            ? 'bg-background text-foreground shadow-sm font-semibold'
+                            : 'text-muted-foreground hover:text-foreground hover:bg-background/50'
+                        )}
+                        aria-pressed={isSelected}
+                      >
+                        {zone}
+                      </button>
+                    </TooltipTrigger>
+                    <TooltipContent side="top" className="max-w-[260px] text-xs">
+                      <p className="font-semibold mb-1">{zone} (${BILLING_ZONE_RATES[zone].toFixed(2)}/GB)</p>
+                      <p>{BILLING_ZONE_DESCRIPTIONS[zone]}</p>
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
+              )
+            })}
+          </div>
+          <p className="text-[11px] text-muted-foreground leading-normal">
+            {BILLING_ZONE_DESCRIPTIONS[s.billingZone || 'MBZ200']}
+          </p>
+        </div>
+
+        <div className='space-y-0'>
+          <Row label='Class A rate (writes, lists)'><ReadOnlyValue value={s.rateA} /></Row>
+          <Row label='Class B rate (reads/downloads)'><ReadOnlyValue value={s.rateB} /></Row>
+          <Row label='Storage rate (per GB/month)'><ReadOnlyValue value={s.rateStorage} /></Row>
+          <Row label='CDN egress rate (per GB)'><ReadOnlyValue value={s.rateEgress} /></Row>
+        </div>
+        <div className='mt-2 text-[11px] text-muted-foreground'>
+          Rates are global defaults. Update them on the <a href={buildServiceHref('/admin', activeServiceId)} className='underline font-medium hover:text-foreground'>admin page</a>.
+        </div>
+      </section>
+
+      <section>
+        <h3 className='text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-3'>What generates operations</h3>
+        <div className='overflow-x-auto'>
+          <OpsSectionsTable />
+        </div>
+      </section>
+    </>
+  )
+}
+
+interface ResultsProps {
+  s: CalcState
+  r: CalcResults
+}
+
+export function Results({ s, r }: ResultsProps) {
+  return (
+    <div className='bg-muted/30 border rounded-lg p-5'>
+      <h3 className='text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-4'>Monthly Estimate Breakdown</h3>
+      <div className='space-y-0'>
+        <ResultRow
+          label='Class A Operations (writes, lists)'
+          detail={`${fmtN(Math.round(r.classAPerMonth))} ops @ $${s.rateA}/1k`}
+          cost={formatUSD(r.costA)}
+        />
+        <ResultRow
+          label='Class B Operations (reads)'
+          detail={`${fmtN(Math.round(r.classBPerMonth))} ops @ $${s.rateB}/1k`}
+          cost={formatUSD(r.costB)}
+        />
+        <ResultRow
+          label='Storage (GB-months billed)'
+          detail={r.storageTiers.map(t => `${t.label}: ${Math.max(0.001, t.gbMonths).toFixed(3)} GB-mo${t.flagged ? '*' : ''}`).join(' · ')}
+          cost={formatUSD(r.costStorage)}
+        />
+        <ResultRow
+          label='CDN Egress'
+          detail={`${r.cdnEgressGB.toFixed(3)} GB`}
+          cost={formatUSD(r.costEgress)}
+        />
+        {s.rumBeaconsDay > 0 && (
+          <ResultRow
+            label='Real User Monitoring (RUM) Cost Portion'
+            detail={`${fmtN(Math.round(r.rumBeaconsMonth))} beacons · ${Math.max(0.001, r.rumParquetGBMonths).toFixed(3)} GB RUM storage (included in Class A & Storage above)`}
+            cost={formatUSD(r.costRum)}
+          />
+        )}
+        <ResultRow
+          label='Total Estimated Monthly Cost'
+          cost={formatUSD(r.totalCost)}
+          highlight
+        />
+      </div>
+
+      <div className='mt-5 pt-4 border-t border-border/40'>
+        <h4 className='text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-3'>Volume Estimates</h4>
+        <div className='grid grid-cols-2 gap-x-6 gap-y-1'>
+          {[
+            ['Est. log line size (uncompressed)', s.bytesPerLine + ' B'],
+            ['Logged requests / month', fmtN(Math.round(r.reqDayEffective * 30))],
+            ['Raw volume / month (uncompressed)', formatBytes(r.totalBytesPerMonth)],
+            ['Est. volume / month (.gz compressed)', formatBytes(r.totalGzBytesPerMonth)],
+            ['Log files written / month', fmtN(Math.round(r.logFilesPerMonth))],
+            ['DuckLake data files pushed to FOS / month', fmtN(Math.round(r.parquetFilesPerMonth))],
+            ['Billed footprint (30d min)', fmtN(Math.round(r.objectsBilled)) + ' objects'],
+            ['Syncs / month', fmtN(Math.round(r.syncsPerMonth))],
+            ...(s.rumBeaconsDay > 0 ? [
+              ['RUM beacons / month', fmtN(Math.round(r.rumBeaconsMonth))],
+              ['RUM footprint / month', Math.max(0.001, r.rumParquetGBMonths).toFixed(3) + ' GB-mo'],
+            ] : []),
+          ].map(([label, value]) => (
+            <div key={label} className='flex justify-between text-xs py-0.5'>
+              <span className='text-muted-foreground'>{label}</span>
+              <span className='font-medium tabular-nums'>{value}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+interface CostCalculatorProps {
+  prefillData?: PrefillResponse
+  prefillNote?: string
+}
+
+export function CostCalculator({ prefillData, prefillNote }: CostCalculatorProps) {
   const [s, dispatch] = useReducer(reducer, DEFAULTS)
 
   useEffect(() => {
-    if (prefillData && !prefillData.error) {
-      dispatch({ type: 'PREFILL', prefill: prefillData })
-    }
+    if (prefillData) dispatch({ type: 'PREFILL', prefill: prefillData })
   }, [prefillData])
 
-  useEffect(() => {
-    if (overrideBytesPerLine !== undefined && overrideBytesPerLine > 0) {
-      dispatch({ type: 'SET', key: 'bytesPerLine', value: overrideBytesPerLine })
-    }
-  }, [overrideBytesPerLine])
-
-  const set = (key: keyof CalcState) => (value: number | boolean) => {
-    dispatch({ type: 'SET', key, value })
-  }
-
+  const set = (key: keyof CalcState) => (value: number | boolean | DeploymentMode) => dispatch({ type: 'SET', key, value })
+  const setZone = (zone: BillingZone) => dispatch({ type: 'SET_ZONE', zone })
   const r = useMemo(() => calculate(s), [s])
 
   return (
@@ -45,18 +481,14 @@ export function CostCalculator({ prefillData, prefillNote, overrideBytesPerLine 
       )}
 
       <div className='grid grid-cols-1 lg:grid-cols-2 gap-8'>
-        {/* ── Left: Inputs ── */}
         <div className='space-y-6'>
           <Inputs s={s} r={r} set={set} />
         </div>
-
-        {/* ── Right: Pricing + What generates ops ── */}
         <div className='space-y-6'>
-          <Pricing s={s} />
+          <Pricing s={s} setZone={setZone} />
         </div>
       </div>
 
-      {/* ── Results ── */}
       <Results s={s} r={r} />
 
       <p className='text-xs text-muted-foreground leading-relaxed'>

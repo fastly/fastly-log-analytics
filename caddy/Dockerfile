@@ -1,10 +1,12 @@
 # Custom Caddy build that includes the caddy-ratelimit plugin.
 # Used by docker-compose.prod.yml.
 
+# caddy:2.11.7-builder (Go 1.27.3)
 FROM caddy:2.11.7-builder@sha256:c4cd20eaa0b69112fd5d4f721ffc9671687e1d5d0b155c8620cf7546dbef94c0 AS builder
 RUN apk add --no-cache --upgrade 'ca-certificates>=20261020-r0' 'ca-certificates-bundle>=20261020-r0'
 RUN xcaddy build v2.11.7 --with github.com/mholt/caddy-ratelimit
 
+# caddy:2.11.7-alpine
 FROM caddy:2.11.7-alpine@sha256:e70b164da81ef698b3ad19af799ea6086ce6d9e48ed4079eb9fe26f6fbf14ee5
 RUN apk add --no-cache --upgrade 'ca-certificates>=20261020-r0' 'ca-certificates-bundle>=20261020-r0'
 COPY --from=builder /usr/bin/caddy /usr/bin/caddy
