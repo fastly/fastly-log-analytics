@@ -17,7 +17,7 @@ dependencies = [
     # 1.5.x; matching that here closes the dev/prod drift window.
     # Upper-bound at <2 because the 2.x major hasn't released yet and
     # may include further API renames we'd want to audit before adopting.
-    "duckdb>=1.5,<2",
+    "duckdb>=1.5,<3",
     "python-dotenv>=1.0",
     "boto3>=1.34",
     "cymruwhois>=1.6",
