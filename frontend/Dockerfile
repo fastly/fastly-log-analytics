@@ -2,7 +2,11 @@
 
 # --- OpenAPI Schema Generation Stage ---
 # Needs the Python backend to introspect FastAPI routes and emit openapi.json.
-FROM python:3.13-slim-bookworm AS api-schema
+FROM python:3.13-slim-bookworm@sha256:281d39ff02e3b389401586134ff9e6572954687822a58055ec07a60ded4e0b7f AS api-schema
+
+RUN apt-get update && apt-get install -y --no-install-recommends 'ca-certificates=20250419~deb12u2' \
+    && rm -rf /var/lib/apt/lists/*
+RUN python -m pip install --no-cache-dir --upgrade pip==26.2.2
 
 COPY --from=ghcr.io/astral-sh/uv:0.6.14 /uv /uvx /bin/
 
@@ -21,11 +25,14 @@ COPY scripts/generate_openapi.py ./scripts/
 RUN uv run python3 scripts/generate_openapi.py openapi.json
 
 # --- Build Stage ---
-FROM node:24-slim@sha256:55fb5f5a527ea2c5c4a95f963e48ef90aa38c7b346054fdc8ee9957a2b55d205 AS builder
+FROM node:24-slim@sha256:c86ecead9e55a5210ac1727de38a4ca840bf03dcaf34dc9749addbf383b1920c AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends 'ca-certificates=20250419~deb12u2' \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# No apt deps required: every package in package-lock.json with an install
+# No build deps required: every package in package-lock.json with an install
 # script ships prebuilt linux binaries (sharp via @img/sharp-libvips-linux-*,
 # unrs-resolver via @unrs/resolver-binding-linux-*-gnu) or is darwin-only
 # (fsevents). If a future dep needs node-gyp, reinstate `python3 make g++`.
@@ -69,7 +76,10 @@ ENV NEXT_TELEMETRY_DISABLED=1
 RUN --mount=type=cache,target=/app/.next/cache npx next build
 
 # --- Production Stage ---
-FROM node:24-slim@sha256:55fb5f5a527ea2c5c4a95f963e48ef90aa38c7b346054fdc8ee9957a2b55d205 AS runner
+FROM node:24-slim@sha256:c86ecead9e55a5210ac1727de38a4ca840bf03dcaf34dc9749addbf383b1920c AS runner
+
+RUN apt-get update && apt-get install -y --no-install-recommends 'ca-certificates=20250419~deb12u2' \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 

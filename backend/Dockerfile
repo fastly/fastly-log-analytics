@@ -1,13 +1,26 @@
 # syntax=docker/dockerfile:1.4
 
+FROM caddy:2.11.7-builder@sha256:c4cd20eaa0b69112fd5d4f721ffc9671687e1d5d0b155c8620cf7546dbef94c0 AS falco-builder
+ARG FALCO_VERSION=2.3.0
+RUN apk add --no-cache --upgrade 'ca-certificates>=20261020-r0' 'ca-certificates-bundle>=20261020-r0'
+RUN go mod download "github.com/ysugimoto/falco@v${FALCO_VERSION}" \
+    && cd "$(go env GOPATH)/pkg/mod/github.com/ysugimoto/falco@v${FALCO_VERSION}" \
+    && CGO_ENABLED=0 go build -mod=readonly \
+    -ldflags "-X main.version=${FALCO_VERSION}" -o /usr/local/bin/falco ./cmd/falco \
+    && falco --version
+
 # --- Build Stage ---
-FROM python:3.13-slim-bookworm AS builder
+FROM python:3.13-slim-bookworm@sha256:281d39ff02e3b389401586134ff9e6572954687822a58055ec07a60ded4e0b7f AS builder
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
+    ca-certificates \
     curl \
+    && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' ca-certificates)" ge '20250419~deb12u2' \
     && rm -rf /var/lib/apt/lists/*
+
+RUN python -m pip install --no-cache-dir --upgrade pip==26.2.2
 
 # Install uv
 COPY --from=ghcr.io/astral-sh/uv:0.6.14 /uv /uvx /bin/
@@ -36,7 +49,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --no-dev --frozen --no-install-project
 
 # --- Production Stage ---
-FROM python:3.13-slim-bookworm AS runner
+FROM python:3.13-slim-bookworm@sha256:281d39ff02e3b389401586134ff9e6572954687822a58055ec07a60ded4e0b7f AS runner
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1 \
@@ -49,10 +62,14 @@ WORKDIR /app
 
 # Install runtime dependencies (curl for healthcheck, tar for falco install).
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
     curl \
     tar \
     libjemalloc2 \
+    && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' ca-certificates)" ge '20250419~deb12u2' \
     && rm -rf /var/lib/apt/lists/*
+
+RUN python -m pip install --no-cache-dir --upgrade pip==26.2.2
 
 # Verify the jemalloc preload resolves at build time, so a broken setup fails
 # the BUILD instead of warning on every process at container start (LD_PRELOAD
@@ -63,27 +80,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # harmless-but-noisy "cannot be preloaded: ignored" on arm64. bookworm ships jemalloc 5.3.
 RUN LD_PRELOAD=libjemalloc.so.2 python3 -c "print('jemalloc preload OK')"
 
-# Falco — Fastly VCL static analyser (github.com/ysugimoto/falco).
-# Used by backend.utils.vcl_validator to lint the scoring recv snippet
-# before publishing a custom URL-exclusion regex. Required in
-# production: a missing binary triggers the validator's hard-fail
-# branch when SCORING_REQUIRE_FALCO=1 is set on the backend service.
-#
-# Pin to a specific release so a future falco-side change doesn't
-# surprise us; bump when you actively want a new version.
-ARG FALCO_VERSION=2.3.0
-RUN set -eux; \
-    arch="$(dpkg --print-architecture)"; \
-    case "$arch" in \
-        amd64|arm64) falco_arch="$arch" ;; \
-        *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
-    esac; \
-    url="https://github.com/ysugimoto/falco/releases/download/v${FALCO_VERSION}/falco-linux-${falco_arch}.tar.gz"; \
-    curl -fsSL -o /tmp/falco.tar.gz "$url"; \
-    tar -xzf /tmp/falco.tar.gz -C /usr/local/bin/; \
-    chmod +x /usr/local/bin/falco; \
-    rm /tmp/falco.tar.gz; \
-    falco --version
+COPY --from=falco-builder /usr/local/bin/falco /usr/local/bin/falco
 
 # Create a non-root runtime user so a foothold in the FastAPI process
 # can't write outside its mounts. UID/GID 1000 matches the host owner
