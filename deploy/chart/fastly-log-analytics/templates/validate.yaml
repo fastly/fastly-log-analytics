@@ -1,0 +1,53 @@
+{{/*
+Template-time coherence gates for the deployment topology.
+*/}}
+{{- if and .Values.global.privateObservability.enabled .Values.observability.enabled -}}
+{{- fail "Select either global.privateObservability.enabled or the legacy full observability.enabled stack, not both." -}}
+{{- end -}}
+{{- if and .Values.global.privateObservability.enabled .Values.otel.exporter -}}
+{{- fail "Private receivers require chart-managed OTLP settings; unset explicit otel.exporter." -}}
+{{- end -}}
+{{- $mode := .Values.config.deploymentMode | default "" -}}
+{{- if eq $mode "high_throughput" -}}
+{{- fail "config.deploymentMode=high_throughput has been removed; use \"standard\" or \"high_scale\"." -}}
+{{- end -}}
+{{- if not (has $mode (list "standard" "high_scale")) -}}
+{{- fail (printf "config.deploymentMode must be \"standard\" or \"high_scale\"; got %q." $mode) -}}
+{{- end -}}
+{{- $otelExporter := .Values.otel.exporter | default "" -}}
+{{- if and $otelExporter (not (has $otelExporter (list "none" "prometheus" "otlp"))) -}}
+{{- fail "otel.exporter must be empty (chart default), \"none\", \"prometheus\", or \"otlp\"; console export is not allowed in deployment." -}}
+{{- end -}}
+{{- if eq $otelExporter "otlp" -}}
+{{- $metricsEndpoint := required "otel.exporter=otlp requires an operator-provided otel.metricsEndpoint." .Values.otel.metricsEndpoint -}}
+{{- $tracesEndpoint := required "otel.exporter=otlp requires an operator-provided otel.tracesEndpoint." .Values.otel.tracesEndpoint -}}
+{{- end -}}
+{{- if not (has (.Values.config.sseBackplane | default "") (list "local" "valkey")) -}}
+{{- fail (printf "config.sseBackplane must be \"local\" or \"valkey\"; got %q." (.Values.config.sseBackplane | default "")) -}}
+{{- end -}}
+{{- $hasBroker := or .Values.secrets.existingSecret .Values.secrets.celeryBrokerUrl -}}
+{{- if and (eq .Values.config.sseBackplane "valkey") (not $hasBroker) -}}
+{{- fail "config.sseBackplane=valkey requires a broker URL: set secrets.celeryBrokerUrl or secrets.existingSecret." -}}
+{{- end -}}
+{{- if .Values.config.ducklakeCatalog -}}
+{{- if not (or (hasPrefix "postgres://" .Values.config.ducklakeCatalog) (hasPrefix "postgresql://" .Values.config.ducklakeCatalog)) -}}
+{{- fail (printf "config.ducklakeCatalog must be a Postgres DSN (postgres:// or postgresql://) per ADR-22; got %q." .Values.config.ducklakeCatalog) -}}
+{{- end -}}
+{{- end -}}
+{{- if .Values.secrets.metadataDsn -}}
+{{- if not (or (hasPrefix "postgres://" .Values.secrets.metadataDsn) (hasPrefix "postgresql://" .Values.secrets.metadataDsn)) -}}
+{{- fail (printf "secrets.metadataDsn must be a Postgres DSN (postgres:// or postgresql://) per ADR-22; got %q." .Values.secrets.metadataDsn) -}}
+{{- end -}}
+{{- end -}}
+{{- $catalog := required (printf "config.deploymentMode=%s requires config.ducklakeCatalog to be a Postgres DSN (postgres:// or postgresql://)." $mode) .Values.config.ducklakeCatalog -}}
+{{- if not .Values.secrets.existingSecret -}}
+{{- $dsn := required (printf "config.deploymentMode=%s requires a shared Postgres metadata database; set secrets.metadataDsn or secrets.existingSecret." $mode) .Values.secrets.metadataDsn -}}
+{{- end -}}
+{{- if .Values.adminGateway.enabled }}
+{{- if not .Values.adminGateway.existingSecret }}
+{{- fail "adminGateway.existingSecret is required when adminGateway.enabled=true" }}
+{{- end }}
+{{- if or (not (regexMatch "^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?[.])*[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$" .Values.adminGateway.host)) (gt (len .Values.adminGateway.host) 253) }}
+{{- fail "adminGateway.host must be one explicit DNS hostname without wildcard, scheme or port" }}
+{{- end }}
+{{- end }}

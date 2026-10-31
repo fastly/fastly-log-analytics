@@ -2,94 +2,86 @@
 
 import React from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import dynamic from 'next/dynamic'
-import { client } from '@/lib/api'
-import { cronCacheBust } from '@/lib/cron-cache-bust'
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import {
-  Database,
-  HardDrive,
-  History,
-  FileCode,
-  Archive,
-  ClipboardList,
-} from 'lucide-react'
-import { NoServiceSelected } from '@/components/NoServiceSelected'
-import { useBootstrapResolved } from '@/hooks/useIsDataReady'
+import { client, unwrapClient } from '@/lib/api'
+import { cronCacheBust } from '@/hooks/useSSE'
+import { PageHeader } from '@/components/ui/confirm-dialog'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { Database, HardDrive, History, FileCode, Archive, ClipboardList } from 'lucide-react'
+import { NoServiceSelected } from '@/components/ReportLayout'
+import { useBootstrapResolved } from '@/hooks/useBootstrap'
 import { ScrollArea } from '@/components/ui/scroll-area'
-import { SyncFromCloudModal } from '@/components/SyncFromCloudModal/SyncFromCloudModal'
-import { ingestedFilesColumns } from '@/lib/table-columns'
-import { PageHeader } from '@/components/ui/page-header'
+import { BackfillRangeModal } from '@/components/SyncStatusBadge/SyncStatusBadge'
+import { ingestedFilesColumns } from '@/components/DataTable'
+import Loading from '../loading'
+import { ControlledSSEModal as SSEModal } from '@/components/SSEModal'
+import { StorageStatus, StorageCalendar, MetadataStorageCard } from '@/components/SessionScoring/StoragePanels'
+import { useLogsPageState, type CronRun, type CatalogMaps } from './useLogsPageState'
+import {
+  CRON_EXPLANATIONS,
+  CRON_DISPLAY_NAMES,
+  CRON_GROUPS,
+  CronScheduleBox,
+  CronTab,
+  useCronColumns,
+  CronLiveLog,
+  FloatingOperationsDock,
+} from './LogsCronTab'
+import { useAuditColumns, ServiceHistoryTab } from './LogsAuditTab'
+import { SchemaTab, IngestionTab, QuickActionsBar, FileBrowser } from './LogsFileBrowser'
 
-import { useLogsPageState } from '../_state'
-import { useCronColumns } from './CronColumns'
-import { useAuditColumns } from './AuditColumns'
-import { FloatingOperationsDock } from './FloatingOperationsDock'
-import { QuickActionsBar } from './QuickActionsBar'
-import { CronTab } from './CronTab'
-import { ServiceHistoryTab } from './ServiceHistoryTab'
-import { IngestionTab } from './IngestionTab'
-import { SSEModal } from './SSEModal'
+export {
+  useLogsPageState,
+  CRON_EXPLANATIONS,
+  CRON_DISPLAY_NAMES,
+  CRON_GROUPS,
+  CronScheduleBox,
+  CronTab,
+  useCronColumns,
+  CronLiveLog,
+  FloatingOperationsDock,
+  useAuditColumns,
+  ServiceHistoryTab,
+  SchemaTab,
+  IngestionTab,
+  QuickActionsBar,
+  FileBrowser,
+}
+export type { CronRun, CatalogMaps }
 
-// Lazy-mount the heavy tab content. Cron + ServiceHistory + Ingestion
-// are the default landing tabs; the four below only matter when the
-// operator clicks into them. ``ssr: false`` skips the SSR pass — none
-// of them render server-side anyway (they hit DuckDB and S3 client-
-// side via React Query hooks).
-const FileBrowser = dynamic(
-  () => import('@/components/FileBrowser/FileBrowser').then(m => m.FileBrowser),
-  { ssr: false },
-)
-const IcebergStatus = dynamic(
-  () => import('@/components/IcebergStatus/IcebergStatus').then(m => m.IcebergStatus),
-  { ssr: false },
-)
-const IcebergCalendar = dynamic(
-  () => import('@/components/IcebergStatus/IcebergCalendar').then(m => m.IcebergCalendar),
-  { ssr: false },
-)
-const MetadataStorageCard = dynamic(
-  () => import('@/components/MetadataStorageCard').then(m => m.MetadataStorageCard),
-  { ssr: false },
-)
-const SchemaTab = dynamic(
-  () => import('./SchemaTab').then(m => m.SchemaTab),
-  { ssr: false },
-)
+const LOG_TABS = [
+  { value: 'cron', label: 'Cron Runs', icon: History },
+  { value: 'service_history', label: 'Service History', icon: ClipboardList },
+  { value: 'ingestion', label: 'Ingestion History', icon: Database },
+  { value: 'storage', label: 'DuckLake Storage', icon: Archive },
+  { value: 'metadata_storage', label: 'Metadata Storage', icon: HardDrive },
+  { value: 'raw', label: 'Available Logs', icon: FileCode },
+  { value: 'schema', label: 'DuckDB Schema', icon: FileCode },
+] as const
 
-export default function LogsClient() {
-  const s = useLogsPageState()
+export default function LogsClient({ initialTab }: { initialTab?: string } = {}) {
+  const s = useLogsPageState(initialTab)
   const queryClient = useQueryClient()
   const bootstrapResolved = useBootstrapResolved()
-
   const auditColumns = useAuditColumns(s.catalogMaps)
-  const cronColumns = useCronColumns(s.isAnalyst)
+  const cronColumns = useCronColumns()
 
-  // Suppress the NoServiceSelected fallback until bootstrap has
-  // resolved — otherwise a cold load with empty localStorage flashes
-  // the fallback for one render tick before HydrationBoundary or the
-  // client-side useBootstrap fetch lands the active_service_id into
-  // the React Query cache that useEffectiveServiceId (now used inside
-  // useLogsPageState) reads from.
   if (!s.activeServiceId && bootstrapResolved) {
-    return <NoServiceSelected icon={Database} message="Please select a service from the header to access admin controls." />
+    return (
+      <NoServiceSelected
+        icon={Database}
+        message="Please select a service from the header to access admin controls."
+      />
+    )
   }
-  if (!s.activeServiceId) {
-    // Bootstrap in flight — render nothing rather than flash the
-    // fallback. The page will re-render with real content as soon as
-    // bootstrap commits.
-    return null
-  }
+  if (!s.activeServiceId) return <Loading />
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 min-h-[820px]">
       <PageHeader
         title="Data Management"
         description="Monitor and manage log ingestion history and active data syncs."
       />
-
       <QuickActionsBar
-        isAnalyst={s.isAnalyst}
         status={s.status}
         activeServiceId={s.activeServiceId}
         recentCrons={s.recentCrons}
@@ -104,40 +96,16 @@ export default function LogsClient() {
         setSelectedConsoleJobId={s.setSelectedConsoleJobId}
         setConsoleOpen={s.setConsoleOpen}
       />
-
       <Tabs value={s.activeTab} onValueChange={s.handleTabChange} className="w-full">
         <ScrollArea className="w-full max-w-full overflow-hidden">
           <TabsList className="w-full flex">
-            <TabsTrigger value="cron" className="flex-1 flex items-center justify-center gap-2 text-xs">
-              <History className="h-4 w-4" /> Cron Runs
-            </TabsTrigger>
-            <TabsTrigger value="service_history" className="flex-1 flex items-center justify-center gap-2 text-xs">
-              <ClipboardList className="h-4 w-4" /> Service History
-            </TabsTrigger>
-            {!s.isAnalyst && (
-              <TabsTrigger value="ingestion" className="flex-1 flex items-center justify-center gap-2 text-xs">
-                <Database className="h-4 w-4" /> Ingestion History
+            {LOG_TABS.map(({ value, label, icon: Icon }) => (
+              <TabsTrigger key={value} value={value} className="flex-1 flex items-center justify-center gap-2 text-xs">
+                <Icon className="h-4 w-4" /> {label}
               </TabsTrigger>
-            )}
-            <TabsTrigger value="iceberg" className="flex-1 flex items-center justify-center gap-2 text-xs">
-              <Archive className="h-4 w-4" /> Iceberg Storage
-            </TabsTrigger>
-            {!s.isAnalyst && (
-              <TabsTrigger value="metadata_storage" className="flex-1 flex items-center justify-center gap-2 text-xs">
-                <HardDrive className="h-4 w-4" /> Metadata Storage
-              </TabsTrigger>
-            )}
-            {!s.isAnalyst && (
-              <TabsTrigger value="raw" className="flex-1 flex items-center justify-center gap-2 text-xs">
-                <FileCode className="h-4 w-4" /> Available Logs
-              </TabsTrigger>
-            )}
-            <TabsTrigger value="schema" className="flex-1 flex items-center justify-center gap-2 text-xs">
-              <FileCode className="h-4 w-4" /> DuckDB Schema
-            </TabsTrigger>
+            ))}
           </TabsList>
         </ScrollArea>
-
         <TabsContent value="cron" className="mt-4 border rounded-lg overflow-hidden bg-card">
           <CronTab
             cronColumns={cronColumns}
@@ -145,11 +113,12 @@ export default function LogsClient() {
             isLoadingCron={s.isLoadingCron}
             isFetchingCron={s.isFetchingCron}
             orderedSchedules={s.orderedSchedules}
+            isLoadingSchedule={s.isLoadingSchedule}
             taskFilter={s.taskFilter}
             setTaskFilter={s.setTaskFilter}
             statusFilter={s.statusFilter}
             setStatusFilter={s.setStatusFilter}
-            isAnalyst={s.isAnalyst}
+            status={s.status}
             activeServiceId={s.activeServiceId}
             setDisplayedJobs={s.setDisplayedJobs}
             setSelectedConsoleJobId={s.setSelectedConsoleJobId}
@@ -159,7 +128,6 @@ export default function LogsClient() {
             purgeMutation={s.purgeMutation}
           />
         </TabsContent>
-
         <TabsContent value="service_history" className="mt-4 border rounded-lg overflow-hidden bg-card">
           <ServiceHistoryTab
             auditColumns={auditColumns}
@@ -171,7 +139,6 @@ export default function LogsClient() {
             activeServiceId={s.activeServiceId}
           />
         </TabsContent>
-
         <TabsContent value="ingestion" className="mt-4 border rounded-lg overflow-hidden bg-card">
           <IngestionTab
             ingestedColumns={ingestedFilesColumns}
@@ -179,74 +146,65 @@ export default function LogsClient() {
             isLoadingIngested={s.isLoadingIngested}
           />
         </TabsContent>
-
-        {/* Gate the dynamic-imported tabs on activeTab so the bundled
-         * chunks defer until the user actually clicks in. Radix' default
-         * is render-all (CSS-hide non-active), which would mount every
-         * panel on the cron landing — defeating the dynamic() split. */}
-        <TabsContent value="iceberg" className="mt-4 space-y-4">
-          {s.activeTab === 'iceberg' && (
+        <TabsContent value="storage" className="mt-4 space-y-4">
+          {s.activeTab === 'storage' && (
             <>
-              <IcebergStatus accessLevel={s.status?.access_level ?? undefined} />
-              <IcebergCalendar />
-
+              <StorageStatus />
+              <StorageCalendar />
               <div className="border rounded-lg overflow-hidden bg-card">
                 <div className="p-4 border-b">
-                  <h3 className="text-sm font-medium">Iceberg Data Lake Layout</h3>
-                  <p className="text-xs text-muted-foreground mt-1">Direct view into the Iceberg metadata and data files in Object Storage.</p>
+                  <h3 className="text-sm font-medium">DuckLake Data Layout</h3>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    Direct view of the DuckLake Parquet data files (the local data directory in Standard, Object Storage
+                    in High-Scale).
+                  </p>
                 </div>
-                <div className="p-0">
-                  <FileBrowser type="iceberg" />
-                </div>
+                <FileBrowser type="storage" />
               </div>
             </>
           )}
         </TabsContent>
-
         <TabsContent value="metadata_storage" className="mt-4 space-y-4">
           {s.activeTab === 'metadata_storage' && <MetadataStorageCard />}
         </TabsContent>
-
         <TabsContent value="raw" className="mt-4 border rounded-lg overflow-hidden bg-card">
           {s.activeTab === 'raw' && (
             <>
               <div className="p-4 border-b">
                 <h3 className="text-sm font-medium">Available Logs</h3>
-                <p className="text-xs text-muted-foreground mt-1">Raw .gz files delivered by Fastly waiting to be processed.</p>
+                <p className="text-xs text-muted-foreground mt-1">
+                  Raw .gz files delivered by Fastly waiting to be processed.
+                </p>
               </div>
-              <div className="p-0">
-                <FileBrowser type="raw" />
-              </div>
+              <FileBrowser type="raw" />
             </>
           )}
         </TabsContent>
-
         <TabsContent value="schema" className="mt-4 border rounded-lg overflow-hidden bg-card">
           {s.activeTab === 'schema' && <SchemaTab schemaData={s.schemaData} isLoadingSchema={s.isLoadingSchema} />}
         </TabsContent>
       </Tabs>
-
-      <SyncFromCloudModal
+      <BackfillRangeModal
         open={s.isSyncModalOpen}
         onOpenChange={s.setIsSyncModalOpen}
         onStartSync={async (range) => {
-          const apiRange = range ? { start_time: range.start, end_time: range.end } : {}
           try {
-            const { data } = await client.POST("/api/admin/ingest-logs", {
-              params: { query: apiRange }
-            })
-            s.setSseTitle('Syncing from Cloud')
-            s.setSseDescription('Fetching latest snapshots and downloading new data files from the cloud...')
+            const data = await unwrapClient(
+              client.POST('/api/admin/ingest-logs', {
+                params: { query: { start_time: range.start, end_time: range.end } },
+              }),
+            )
+            s.setSseTitle('Backfilling Logs')
+            s.setSseDescription('Re-importing raw logs for the selected window...')
             s.setIsSSEModalOpen(true)
             s.reset()
-            s.start(`/api/cron-runs/${(data as any)?.run_id}/stream`)
+            s.start(`/api/cron-runs/${data?.run_id}/stream`)
             cronCacheBust(queryClient, s.activeServiceId)
           } catch (e) {
             console.error(e)
           }
         }}
       />
-
       <SSEModal
         isSSEModalOpen={s.isSSEModalOpen}
         setIsSSEModalOpen={s.setIsSSEModalOpen}
@@ -257,7 +215,6 @@ export default function LogsClient() {
         lines={s.lines}
         stop={s.stop}
       />
-
       <FloatingOperationsDock
         displayedJobs={s.displayedJobs}
         setDisplayedJobs={s.setDisplayedJobs}
@@ -266,8 +223,6 @@ export default function LogsClient() {
         selectedJobId={s.selectedConsoleJobId}
         setSelectedJobId={s.setSelectedConsoleJobId}
         onDismiss={s.removeDisplayedJob}
-        backgroundCronToast={s.backgroundCronToast}
-        setBackgroundCronToast={s.setBackgroundCronToast}
       />
     </div>
   )

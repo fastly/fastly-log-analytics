@@ -6,7 +6,7 @@ Day-2 operations for the session-scoring subsystem (v1.1.0). Aimed at the on-cal
 | :--- | :--- |
 | **Subsystem version** | v1.1.0 |
 | **Surface area** | `/admin/session-scoring` (UI) · `/api/services/{svc}/scoring/*` (API) |
-| **Storage** | `backend/metadata.db` (audit log) · Fastly Object Storage (`scoring_matrix_history/{version}.json` version history) · Fastly **KV Store** (`scoring_matrix`, key `matrix` — the live L2 matrix the edge scorer reads at runtime) · Compute ConfigStore (`scoring_config`: `enforce_threshold`, `l2_enforce_enabled`, `l2_enabled_at`) |
+| **Storage** | PostgreSQL metadata (`METADATA_DSN`, `scoring_audit` table) · Fastly Object Storage (`scoring_matrix_history/{version}.json` version history) · Fastly **KV Store** (`scoring_matrix`, key `matrix` — the live L2 matrix the edge scorer reads at runtime) · Compute ConfigStore (`scoring_config`: `enforce_threshold`, `l2_enforce_enabled`, `l2_enabled_at`) |
 | **Edge components** | 6 VCL snippets (recv / pass / fetch / deliver / miss / enforce) + scorer Wasm service |
 | **Audit scope** | Per-host; not mirrored via `state_sync` |
 
@@ -72,7 +72,7 @@ What gets torn down: VCL snippets removed, custom fields unregistered, scorer Wa
 
 What is **preserved per-host** (intentionally):
 
-- The `scoring_audit` table for this service in `metadata.db` — every prior mutation stays queryable.
+- The `scoring_audit` table for this service in PostgreSQL (`METADATA_DSN`) — every prior mutation stays queryable.
 - Matrix history under `scoring_matrix_history/` in the FOS bucket — re-enabling later can restore a prior version.
 
 If you need a hard wipe, delete the `scoring_audit` rows manually and remove the `scoring_matrix_history/{*}.json` objects from the bucket. Do this only when you're sure no compliance or forensics need them.
@@ -201,7 +201,7 @@ curl -sS "$HOST/api/services/$SVC/scoring/audit?limit=200" \
 
 **What's recorded.** Every mutation: enable, disable, threshold commit/clear, enforcement set/cleared, retrain, key rotation, matrix restore. Each row has the actor, timestamp, and a structured payload describing the before/after state.
 
-**Per-host scope.** The audit log lives in this host's `metadata.db` and is **not** mirrored via `state_sync`. If the same logical service is operated from multiple admin hosts (e.g. a primary and a hot-standby), each host has its own independent audit log. For a complete history, query each host and merge by timestamp.
+**Per-database scope.** The audit log lives in PostgreSQL (`METADATA_DSN`, `scoring_audit` table) and is **not** mirrored to FOS via `state_sync`. If the same logical service is operated from multiple independent deployments that do not share a `METADATA_DSN`, each deployment has its own independent audit log. For a complete history across separate databases, query each and merge by timestamp.
 
 ---
 
@@ -262,7 +262,7 @@ If `MATRIX_LOAD_FAIL_COUNT` is non-zero, the scorer can't read the matrix from t
   | POST | `/api/services/{svc}/scoring/enable` | Provision scoring on a service |
   | POST | `/api/services/{svc}/scoring/disable` | Tear down scoring (audit preserved) |
   | GET | `/api/services/{svc}/scoring/status` | Installation + health snapshot |
-  | GET | `/api/services/{svc}/scoring/labels` | Score labels (good / suspicious / bad bands) |
+  | POST / DELETE | `/api/services/{svc}/scoring/labels` | Create or delete ground-truth session labels (read via `/scoring/evaluate` or `/scoring/flagged`) |
   | GET | `/api/services/{svc}/scoring/top-flagged` | Highest-scoring sessions in window |
   | GET | `/api/services/{svc}/scoring/score-distribution` | Histogram for ThresholdSlider |
   | GET | `/api/services/{svc}/scoring/compliance-breakdown` | Cookie compliance counters |
@@ -281,7 +281,7 @@ If `MATRIX_LOAD_FAIL_COUNT` is non-zero, the scorer can't read the matrix from t
   | GET / PUT / POST | `/api/services/{svc}/scoring/exclude-regex` | URL exclusion regex for the recv snippet (`/validate` dry-runs it) |
 
 - **Custom log fields** added by enable: see `docs/features.md` for the full schema and the field-group toggles.
-- **Architecture notes.** L1 (cookie + timing) + L2 (PageRank transition matrix) → 0–100 score. AES-encrypted cookie state with rotating `sid`; 30-minute idle timeout; 24-hour hard cap. See `backend/scoring/scorer.py` + `compute/scorer/src/scorer.rs` for the implementation.
+- **Architecture notes.** L1 (cookie + timing) + L2 (PageRank transition matrix) → 0–100 score. AES-encrypted cookie state with rotating `sid`; 30-minute idle timeout; 24-hour hard cap. See `backend/scoring/__init__.py` + `compute/scorer/src/scorer.rs` for the implementation.
 - **L2 enforcement (operator opt-in).** Layer 2's transition-matrix sub-score (`edge_score_l2`) is computed and logged on every request, but it contributes **nothing** to the enforced score until an operator explicitly opts in — there is no automatic, time-based ramp. Turn it on per-service with the **Enforce L2** switch on `/admin/session-scoring` (or `PUT /api/services/{svc}/scoring/l2-enforce?confirm=true` with `{"enabled": true}`). On opt-in the scorer stamps an `l2_enabled_at` anchor and L2's weight fades in linearly from 0 to full over **3 days** (so a still-thin matrix can't over-flag the moment you flip it); disabling returns L2 to observe-only, and a later re-enable restarts the 3-day fade-in. Both `l2_enforce_enabled` and `l2_enabled_at` live in the `scoring_config` ConfigStore and are derived server-side — never from client headers. If you opt a service in while threshold enforcement is on, re-check the threshold before you flip the switch: sessions can score higher once L2 starts counting.
 - **Security headers.** The `recv` snippet unsets eight client-controllable `X-Edge-*` headers before any scoring logic runs — clients cannot spoof scores or compliance state.
 - **DDoS boundary.** `fastly.ddos_detected` bypasses the Compute scorer entirely; under attack, Fastly's upstream gate handles it.

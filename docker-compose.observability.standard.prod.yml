@@ -1,0 +1,7 @@
+# Merge LAST, after base + prod + optional admin/HTTPS + Standard observability.
+# Do not use the multipod observability overlay with production host networking.
+services:
+  prometheus:
+    network_mode: host
+  tempo:
+    network_mode: host

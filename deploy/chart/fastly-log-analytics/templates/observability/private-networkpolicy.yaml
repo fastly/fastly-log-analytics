@@ -1,0 +1,26 @@
+{{- if .Values.global.privateObservability.enabled }}
+# No public receiver/query ingress. Only pods in this namespace may reach
+# these ClusterIP services. Kubernetes administration supplies port-forward.
+{{- range $name, $ports := dict "prometheus" (list 9090) "tempo" (list 4318 3200) }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "fastly-log-analytics.fullname" $ }}-telemetry-{{ $name }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "fastly-log-analytics.name" $ }}-{{ $name }}
+      app.kubernetes.io/instance: {{ $.Release.Name }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector: {}
+      ports:
+        {{- range $ports }}
+        - protocol: TCP
+          port: {{ . }}
+        {{- end }}
+  egress: []
+---
+{{- end }}
+{{- end }}

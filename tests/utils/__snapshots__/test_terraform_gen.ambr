@@ -122,12 +122,6 @@
                   "type": "fetch"
                 },
                 {
-                  "content": "${file(\"${path.module}/cdn_snippets/iceberg_metadata_pointer_ttl.vcl\")}",
-                  "name": "iceberg-metadata-pointer-ttl",
-                  "priority": 10,
-                  "type": "fetch"
-                },
-                {
                   "content": "${file(\"${path.module}/cdn_snippets/cdn_swr_shield_disable.vcl\")}",
                   "name": "cdn-swr-shield-disable",
                   "priority": 10,
@@ -335,7 +329,7 @@
         set req.url = querystring.sort(req.url);
       
         # Never cache admin_state.json — it changes on every mutation
-        if (req.url ~ "/iceberg/meta/admin_state\.json$") {
+        if (req.url ~ "/meta/admin_state\.json$") {
           return(pass);
         }
       
@@ -477,20 +471,6 @@
           set req.max_stale_while_revalidate = 0s;
         }
     ''',
-    'cdn_snippets/iceberg_metadata_pointer_ttl.vcl': '''
-        if (req.url ~ "metadata_location\.txt($|\?)") {
-          set beresp.http.Surrogate-Key = "iceberg-metadata-pointer";
-          set beresp.ttl = 10s;
-          set beresp.stale_while_revalidate = 5s;
-          set beresp.stale_if_error = 60s;
-        }
-        if (req.url ~ "table_summary\.json($|\?)") {
-          set beresp.http.Surrogate-Key = "iceberg-table-summary";
-          set beresp.ttl = 300s;
-          set beresp.stale_while_revalidate = 60s;
-          set beresp.stale_if_error = 3600s;
-        }
-    ''',
     'fos.tf.json': '''
       {
         "resource": {
@@ -543,7 +523,7 @@
       4. Run `terraform init` and `terraform apply` to deploy the changes.
   
     ''',
-    'log_format.vcl': '{"timestamp":"%{strftime(\\{"%Y-%m-%dT%H:%M:%S%z"\\},time.start)}V","ip":"%{json.escape(if(req.http.x-fos-edge-data:ip != "", req.http.x-fos-edge-data:ip, req.http.Fastly-Client-IP))}V","status":%{if(resp.status > 0, "" + resp.status, "null")}V,"elapsed":%{if(time.elapsed.usec != "", time.elapsed.usec, "null")}V,"cache":"%{json.escape(fastly_info.state)}V","resp_bytes":%{if(resp.bytes_written > 0, "" + resp.bytes_written, "0")}V,"host":"%{json.escape(substr(if(req.http.x-fos-edge-data:host != "", req.http.x-fos-edge-data:host, req.http.Host), 0, 512))}V","url":"%{json.escape(substr(req.url, 0, 333))}V","method":"%{json.escape(substr(req.method, 0, 128))}V","proto":"%{if(req.proto != "", regsub(req.proto, "^HTTP/", ""), "")}V","ua":"%{json.escape(substr(if(req.http.x-fos-edge-data:ua != "", req.http.x-fos-edge-data:ua, req.http.User-Agent), 0, 166))}V","referer":"%{json.escape(substr(if(req.http.x-fos-edge-data:referer != "", req.http.x-fos-edge-data:referer, req.http.Referer), 0, 166))}V","req_bytes":%{if(req.http.Content-Length ~ "^[0-9]+$", req.http.Content-Length, "0")}V,"req_header_bytes":%{if(req.header_bytes_read > 0, "" + req.header_bytes_read, "0")}V,"resp_header_content_encoding":"%{json.escape(resp.http.Content-Encoding)}V"}',
+    'log_format.vcl': '{"timestamp":"%{strftime(\\{"%Y-%m-%dT%H:%M:%S%z"\\},time.start)}V","ip":"%{json.escape(if(req.http.x-fos-edge-data:ip != "", req.http.x-fos-edge-data:ip, if(req.http.Fastly-Client-IP != "", req.http.Fastly-Client-IP, client.ip)))}V","status":%{if(resp.status > 0, "" + resp.status, "null")}V,"elapsed":%{if(time.elapsed.usec != "", time.elapsed.usec, "null")}V,"cache":"%{json.escape(fastly_info.state)}V","resp_bytes":%{if(resp.bytes_written > 0, "" + resp.bytes_written, "0")}V,"host":"%{json.escape(substr(if(req.http.x-fos-edge-data:host != "", req.http.x-fos-edge-data:host, req.http.Host), 0, 512))}V","url":"%{json.escape(substr(req.url, 0, 333))}V","method":"%{json.escape(substr(req.method, 0, 128))}V","proto":"%{if(req.proto != "", regsub(req.proto, "^HTTP/", ""), "")}V","ua":"%{json.escape(substr(if(req.http.x-fos-edge-data:ua != "", req.http.x-fos-edge-data:ua, req.http.User-Agent), 0, 166))}V","referer":"%{json.escape(substr(if(req.http.x-fos-edge-data:referer != "", req.http.x-fos-edge-data:referer, req.http.Referer), 0, 166))}V","req_bytes":%{if(req.http.Content-Length ~ "^[0-9]+$", req.http.Content-Length, "0")}V,"req_header_bytes":%{if(req.header_bytes_read > 0, "" + req.header_bytes_read, "0")}V,"resp_header_content_encoding":"%{json.escape(resp.http.Content-Encoding)}V"}',
     'logging_service.tf.json': '''
       {
         "resource": {
@@ -570,7 +550,7 @@
                   "gzip_level": 9,
                   "message_type": "blank",
                   "name": "Fastly Log Analytics",
-                  "path": "logs/raw/%Y/%m/%d/%H/analytics_log_%M.json.gz",
+                  "path": "raw/request/year=%Y/month=%m/day=%d/hour=%H/minute=%M/",
                   "period": 60,
                   "response_condition": "Log Sampling - fastly_log_analysis",
                   "s3_access_key": "AKIATESTSTABLE",

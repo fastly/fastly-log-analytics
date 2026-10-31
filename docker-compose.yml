@@ -12,9 +12,14 @@
 # production (docker-compose.prod.yml) overrides this to network_mode: host.
 services:
   backend:
+    image: fastly-log-analytics-backend:latest
     build:
       context: .
       dockerfile: backend/Dockerfile
+    # Run tini as PID 1 so orphaned children are reaped. uvicorn is not an
+    # init: a zombie child makes `docker stop` fail ("PID is zombie and can
+    # not be killed"), aborting force-recreate and the deploy under set -e.
+    init: true
     restart: unless-stopped
     # Give the backend up to 75s to drain on SIGTERM before Docker SIGKILLs.
     # Pairs with _bounded_scheduler_shutdown in backend/main.py (60s scheduler
@@ -31,16 +36,31 @@ services:
       - "80:80"
     volumes:
       - ./configs:/app/configs
-      - ./data:/app/data
-      - ./cache:/app/cache
+      - backend-cache:/app/cache
+      - ./scripts:/app/scripts
+      - backend-data:/app/data
     environment:
       - PYTHONUNBUFFERED=1
-      - DUCKDB_MEMORY_LIMIT=4GB
+      - DUCKDB_MEMORY_LIMIT=2GB
+      # Bound per-op DuckDB parallelism on the shared Colima host. Unset,
+      # DUCKDB_THREADS defaults to min(cpu,8)=6 and the pool to 8, so
+      # in-process ingest/rollup/compaction/insights-prewarmer crons fan out
+      # to ~48 CPU-bound threads; two local stacks then drive load to ~100 on
+      # 6 cores and starve the single-threaded serving loop (health times out
+      # at 20s+). Caps leave headroom so serving stays responsive while crons
+      # grind. (.env sets these but compose uses an explicit env list, not
+      # env_file, so they never reached the container.)
+      - DUCKDB_THREADS=2
+      - DUCKDB_POOL_MAX_SIZE=4
+      - DUCKDB_RECYCLE_INTERVAL_MIN=5
+      - DUCKDB_RECYCLE_RSS_THRESHOLD_MB=2500
       # Friendly local hostnames added to the backend's Host allowlist
       # (localhost / 127.0.0.1 are allowed by default). fastly.localhost
       # auto-resolves to 127.0.0.1 in browsers; fastly.analytics needs a
       # /etc/hosts entry (see README). See backend/utils/remote_access.py.
       - LOCAL_HOSTS=${LOCAL_HOSTS:-fastly.localhost,fastly.analytics}
+      - ADMIN_GATEWAY_SECRET=${ADMIN_GATEWAY_SECRET:-}
+      - ADMIN_GATEWAY_REQUIRED=${ADMIN_GATEWAY_REQUIRED:-}
       # Caddy is the single ingress and connects to the backend over loopback
       # (shared netns, 127.0.0.1:8000) — same posture as docker-compose.prod.yml.
       # uvicorn's default --proxy-headers/--forwarded-allow-ips=127.0.0.1 already
@@ -50,20 +70,35 @@ services:
       # prod-only) so a localhost run still boots if someone removes them.
       - TRUSTED_PROXY_IPS=127.0.0.1
       - UVICORN_FORWARDED_ALLOW_IPS=127.0.0.1
+      # Admin trust for this containerized topology: nothing reaches the
+      # backend over loopback here (operator traffic lands as the docker
+      # gateway IP), so the isolated compose subnet is declared admin-trusted.
+      - LOCAL_ADMIN_CIDRS=172.29.0.0/16
+      - FLA_PRODUCTION=${FLA_PRODUCTION:-0}
+      - DEBUG_RESPONSES=${DEBUG_RESPONSES:-true}
+      - DUCKLAKE_CATALOG=postgresql://fla:${DUCKLAKE_PG_PASSWORD:-fla_local_dev}@postgres:5432/ducklake
+      - METADATA_DSN=postgresql://fla:${DUCKLAKE_PG_PASSWORD:-fla_local_dev}@postgres:5432/ducklake
+    depends_on:
+      postgres:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 15s
+      # Cold start imports the full DuckLake stack (pyarrow, pandas,
+      # duckdb) and takes ~107s idle, more
+      # under the deploy's double-stack + build load. 45s falsely marked the
+      # still-importing backend unhealthy, aborting `docker compose up` (and
+      # the whole deploy under set -e). prod uses 25m for the same reason.
+      start_period: 300s
     networks:
       - app-network
 
   frontend:
-    build:
-      context: .
-      dockerfile: frontend/Dockerfile
-    restart: unless-stopped
+    extends:
+      file: docker-compose.common.yml
+      service: frontend
     # Share the backend's network namespace so the frontend's SSR fetches and
     # the Next.js /api rewrite reach the backend on loopback (127.0.0.1:8000) —
     # the address the backend trusts as local admin. No `ports`/`networks` here:
@@ -73,13 +108,18 @@ services:
       # Loopback in the shared namespace (NOT backend:8000 — a service-name
       # address would resolve to the bridge IP and be classified remote → 400).
       - API_PROXY_URL=http://127.0.0.1:8000
+      - ADMIN_GATEWAY_SECRET=${ADMIN_GATEWAY_SECRET:-}
+      - ADMIN_GATEWAY_REQUIRED=${ADMIN_GATEWAY_REQUIRED:-}
+      - COMMIT_HASH=${COMMIT_HASH:-unknown}
+      - ENV_NAME=local-standard
     depends_on:
       backend:
         condition: service_healthy
 
   caddy:
-    image: caddy:2-alpine
-    restart: unless-stopped
+    extends:
+      file: docker-compose.common.yml
+      service: caddy
     # Also joins the backend's namespace: Caddy proxies to 127.0.0.1:3000
     # (frontend) and 127.0.0.1:8000 (backend) over that shared loopback.
     network_mode: "service:backend"
@@ -88,6 +128,26 @@ services:
     depends_on:
       - frontend
 
+  postgres:
+    extends:
+      file: docker-compose.common.yml
+      service: postgres
+    image: postgres:16-alpine
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      timeout: 5s
+    networks:
+      - app-network
+
 networks:
   app-network:
     driver: bridge
+    ipam:
+      config:
+        - subnet: 172.29.0.0/16
+
+volumes:
+  backend-data:
+  backend-cache:
+  postgres-data:

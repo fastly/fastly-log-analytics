@@ -120,8 +120,17 @@ fn score_request(req: &Request) -> Response {
 
     // ── Header inputs (VCL fills these before Compute is invoked). ───────────
     let service_id = req.get_header_str(SERVICE_ID_HEADER).unwrap_or("default");
-    let prev_route_raw = req.get_header_str(PREV_ROUTE_HEADER);
-    let prev_anchor_raw = req.get_header_str(PREV_ANCHOR_HEADER);
+    // Read the host clock once at request entry: feeds `t0` (nanosecond start
+    // for X-Edge-Score-Exec-Us), `now_secs` (cookie expiry + replay window),
+    // and `load_l2_days_since_optin` (L2 fade-in ramp age).
+    // Fail CLOSED on a clock read failure. A zero `now_secs` would silently
+    // disable BOTH the cookie expiration check and replay detection.
+    let entry_now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("WASI clock must not fail — now_secs=0 disables cookie expiry + replay detection");
+    let t0 = entry_now.as_nanos();
+    let now_secs: u32 = entry_now.as_secs() as u32;
+
     // Layer-2 enforcement gate. L2 joins the *enforced* combined score only when
     // an operator has explicitly opted in (l2_enforce_enabled="1"); on opt-in it
     // fades in over L2_RAMP_DAYS from the l2_enabled_at anchor. Both are
@@ -141,7 +150,7 @@ fn score_request(req: &Request) -> Response {
         .unwrap_or(false);
     let l2_days_since_optin: f64 = config_store
         .as_ref()
-        .map(load_l2_days_since_optin)
+        .map(|dict| load_l2_days_since_optin(dict, u64::from(now_secs)))
         .unwrap_or(0.0);
 
     // Cheap toggle: flip the `debug_logging_enabled` key in the
@@ -153,18 +162,9 @@ fn score_request(req: &Request) -> Response {
         .as_ref()
         .map(debug_logging_enabled)
         .unwrap_or(false);
-    // Wall-clock at scorer entry, in nanoseconds. Diffed against a read
-    // taken just before we return to get this request's Wasm execution
-    // time. Captured UNCONDITIONALLY now (was debug-gated) because it is
-    // emitted on every 200 as the X-Edge-Score-Exec-Us header → VCL →
-    // edge_score_exec_us, giving operators compute-only latency distinct
-    // from the edge-observed round-trip. SystemTime::now() is already on
-    // the hot path (now_secs below), so this adds nothing measurable.
-    let t0 = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
     if debug {
+        let prev_route_raw = req.get_header_str(PREV_ROUTE_HEADER);
+        let prev_anchor_raw = req.get_header_str(PREV_ANCHOR_HEADER);
         dbg_log(&format!(
             "incoming: url={} service={} prev_route={:?} prev_anchor={:?} l2_enforce_enabled={} l2_days_since_optin={}",
             req.get_url_str(),
@@ -201,25 +201,6 @@ fn score_request(req: &Request) -> Response {
     let inbound_cookie = req
         .get_header_str("cookie")
         .and_then(|h| extract_cookie_value(h, COOKIE_NAME));
-
-    // Compute "now" UP FRONT so we can reject expired cookies BEFORE we hand
-    // their state into the scorer. Pre-fix (audit finding 009), expiration
-    // was only evaluated at the bottom of this function when minting the
-    // replacement cookie — meaning an attacker who replayed an expired
-    // low-score cookie got scored against the trusted historical state and
-    // bypassed enforcement thresholds.
-    // Fail CLOSED on a clock read failure. The pre-fix `.unwrap_or(0)` made
-    // now_secs = 0, which silently disabled BOTH the cookie expiration check
-    // (`idle`/`age` saturating-sub to 0 → never expired) and replay detection
-    // (`now_secs - first_seen` → 0, never over the window), letting a replayed
-    // expired low-score cookie be scored against trusted historical state.
-    // We panic instead (panic=abort → request fails closed), mirroring the
-    // getrandom decision in `random_nonce` below: on wasm32-wasip1 SystemTime
-    // is a reliable host function and this branch is unreachable in practice.
-    let now_secs: u32 = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as u32)
-        .expect("WASI clock must not fail — now_secs=0 disables cookie expiry + replay detection");
 
     let (state, compliance) = match inbound_cookie {
         None => (None, "missing"),
@@ -295,24 +276,17 @@ fn score_request(req: &Request) -> Response {
             path: s.prev_route_path.clone(),
             // L2 transition lookup only uses path; category is unused.
             // Leaving empty avoids re-running the full normalize() pass.
-            category: String::new(),
+            category: "",
         });
-    // The skip-gram anchor is treated exactly like prev_route above: it is
-    // NOT taken from the unauthenticated X-Edge-Prev-Anchor header. A client
-    // could otherwise supply a SEEN high-probability anchor route; because the
-    // L2 transition prob is `direct_p.max(anchor_p * BETA)` (scorer.rs), a
-    // client-chosen anchor can only RAISE trans_prob and thus DEPRESS the L2
-    // sequence-anomaly score — the same evasion class closed for prev_route in
-    // audit F009. There is no trusted server-side source for the anchor today
-    // (it is not carried in the sealed cookie state), so it stays None and the
-    // skip-gram self-disables, matching the safe-by-default L2 fallback. The
-    // `prev_anchor_raw` binding survives only for the debug log so operators
-    // can see what the client tried to send.
-    let prev_anchor: Option<normalize::Route> = None;
+    // The skip-gram anchor is treated-like prev_route above: it is NOT taken
+    // from the unauthenticated X-Edge-Prev-Anchor header (audit F009). There is
+    // no trusted server-side source for the anchor today (it is not carried in
+    // the sealed cookie state), so `prev_anchor_route` is passed as `None`
+    // below and the skip-gram self-disables.
 
     // ── Score. ───────────────────────────────────────────────────────────────
     // Lazy matrix load: L2 only fires when there's a trusted previous-route
-    // signal (the sealed-cookie prev_route; prev_anchor is forced None above).
+    // signal (the sealed-cookie prev_route).
     // Cookie-missing requests — the large majority — never use the matrix, so
     // skip the ~1.8MB KV fetch entirely for them. The fetch (and its cold-start
     // cost) was pushing the scorer round-trip past the timeout budget and
@@ -320,7 +294,7 @@ fn score_request(req: &Request) -> Response {
     // still serving the matrix (cached per-instance) to L2-eligible requests.
     // Behaviour is unchanged: with prev_route None, L2 has no transition to
     // score regardless of whether the matrix is loaded.
-    let needs_matrix = prev_route.is_some() || prev_anchor.is_some();
+    let needs_matrix = prev_route.is_some();
     let matrix = if needs_matrix { matrix::load_matrix() } else { None };
     if needs_matrix && matrix.is_none() {
         // We needed the matrix but it's unlinked/empty/unparseable. L2
@@ -333,7 +307,7 @@ fn score_request(req: &Request) -> Response {
         cookie_compliance: compliance,
         current_route: &current_route,
         prev_route: prev_route.as_ref(),
-        prev_anchor_route: prev_anchor.as_ref(),
+        prev_anchor_route: None,
         matrix,
         l2_enforce_enabled,
         l2_days_since_optin,
@@ -415,7 +389,7 @@ fn score_request(req: &Request) -> Response {
     if debug {
         let current_dt_secs = state
             .as_ref()
-            .map(|s| now_secs.saturating_sub(s.last_ts).min(3600))
+            .map(|s| now_secs.saturating_sub(s.last_ts))
             .unwrap_or(0);
 
         dbg_log(&format!(
@@ -514,7 +488,7 @@ fn load_l2_enforce_enabled(dict: &ConfigStore) -> bool {
 /// key, clock read failure, future anchor). age 0.0 → optin_ramp_weight 0 → L2
 /// contributes nothing until the fade-in advances — so a service whose anchor is
 /// missing (flag never set) or just-stamped scores L2 as observe-only.
-fn load_l2_days_since_optin(dict: &ConfigStore) -> f64 {
+fn load_l2_days_since_optin(dict: &ConfigStore, now: u64) -> f64 {
     let raw = match dict.get(L2_ENABLED_AT_KEY) {
         Some(v) => v,
         None => return 0.0,
@@ -523,10 +497,6 @@ fn load_l2_days_since_optin(dict: &ConfigStore) -> f64 {
         Ok(n) => n,
         Err(_) => return 0.0,
     };
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
     if now <= enabled_at {
         // Anchor in the future (clock skew / mis-seed) → treat as just-opted-in
         // → fade-in keeps L2 weight at 0 rather than over-trusting it.
@@ -648,14 +618,7 @@ fn load_keys(keys: Option<&ConfigStore>) -> Result<(Vec<u8>, Option<Vec<u8>>), E
 }
 
 fn hex_decode(s: &str) -> Result<Vec<u8>, Error> {
-    if !s.len().is_multiple_of(2) {
-        return Err(Error::msg("hex key has odd length"));
-    }
-    (0..s.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i + 2], 16))
-        .collect::<Result<Vec<u8>, _>>()
-        .map_err(|_| Error::msg("invalid hex in key"))
+    hex::decode(s).map_err(|_| Error::msg("invalid hex in key"))
 }
 
 /// Pull a single named cookie value out of a `Cookie:` header. Minimal —
@@ -763,6 +726,24 @@ fn session_expired(s: &cookie::SessionState, now_secs: u32) -> bool {
     idle > SESSION_IDLE_EXPIRE_S || age > SESSION_HARD_CAP_S
 }
 
+fn fresh_session_state(
+    score: u8,
+    prev_route_path: String,
+    now_secs: u32,
+) -> cookie::SessionState {
+    cookie::SessionState {
+        v: cookie::SCHEMA_VERSION,
+        sid: new_random_sid(),
+        seq: 1,
+        sum_dt: 0,
+        sum_dt_sq: 0,
+        last_ts: now_secs,
+        score,
+        issued_at: now_secs,
+        prev_route_path,
+    }
+}
+
 fn update_state(
     prev: Option<cookie::SessionState>,
     result: &scorer::ScoreResult,
@@ -779,34 +760,16 @@ fn update_state(
             // their window) and a data-hygiene feature (long-running
             // sessions stop biasing the variance estimator).
             if session_expired(&s, now_secs) {
-                return cookie::SessionState {
-                    v: cookie::SCHEMA_VERSION,
-                    sid: new_random_sid(),
-                    seq: 1,
-                    sum_dt: 0,
-                    sum_dt_sq: 0,
-                    last_ts: now_secs,
-                    score: result.score,
-                    issued_at: now_secs,
-                    prev_route_path,
-                };
+                return fresh_session_state(result.score, prev_route_path, now_secs);
             }
             let new_seq = s.seq.saturating_add(1);
-            // Δt since the previous request in this session. Clamp at a
-            // 1-hour ceiling to bound the impact of long-idle sessions
-            // on the variance estimator (the L2 transition matrix
-            // already discounts inactivity differently). saturating_sub
-            // protects against clock skew where last_ts > now_secs.
-            let dt_secs: u32 = idle.min(3600);
+            // Δt since the previous request in this session. `session_expired`
+            // above already bounds `idle <= SESSION_IDLE_EXPIRE_S` (1800s).
+            // `saturating_sub` protects against clock skew where last_ts > now_secs.
+            let dt_secs: u32 = idle;
             let dt64 = u64::from(dt_secs);
-            let mut new_sum_dt = s.sum_dt;
-            let mut new_sum_dt_sq = s.sum_dt_sq;
-            if s.seq >= 20 {
-                new_sum_dt -= new_sum_dt / 20;
-                new_sum_dt_sq -= new_sum_dt_sq / 20;
-            }
-            let new_sum_dt = new_sum_dt.saturating_add(dt_secs);
-            let new_sum_dt_sq = new_sum_dt_sq.saturating_add(dt64.saturating_mul(dt64));
+            let new_sum_dt = s.sum_dt.saturating_add(dt_secs);
+            let new_sum_dt_sq = s.sum_dt_sq.saturating_add(dt64.saturating_mul(dt64));
             cookie::SessionState {
                 v: cookie::SCHEMA_VERSION,
                 sid: s.sid,
@@ -819,17 +782,7 @@ fn update_state(
                 prev_route_path,
             }
         }
-        None => cookie::SessionState {
-            v: cookie::SCHEMA_VERSION,
-            sid: new_random_sid(),
-            seq: 1,
-            sum_dt: 0,
-            sum_dt_sq: 0,
-            last_ts: now_secs,
-            score: result.score,
-            issued_at: now_secs,
-            prev_route_path,
-        },
+        None => fresh_session_state(result.score, prev_route_path, now_secs),
     }
 }
 

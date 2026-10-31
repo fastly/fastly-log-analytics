@@ -1,5 +1,8 @@
 import os as _os
 
+# Force OTEL_EXPORTER=none in test environments to avoid blocking/timeouts on shutdown
+_os.environ["OTEL_EXPORTER"] = "none"
+
 # 038: enable the telemetry overlay in API responses for the test
 # environment so existing assertions on ``_debug_queries`` /
 # ``_debug_calls`` keep passing. Production reads the env at
@@ -19,9 +22,8 @@ _os.environ.setdefault("DEBUG_RESPONSES_FORCE_INCLUDE", "1")
 
 
 # Silence the "--- Logging error --- ValueError: I/O operation on closed file"
-# tracebacks that pytest's capture plugin provokes. The iceberg
-# ``_write_table_summary_async`` background daemon thread (backend/core/
-# iceberg/_core.py) keeps running its metadata scan + ``logger.info(...)``
+# tracebacks that pytest's capture plugin provokes. Background storage/startup
+# daemon threads (backend/core/storage/) may keep running a metadata scan + ``logger.info(...)``
 # after the test that spawned it has finished; by then pytest has already
 # closed that test item's captured stderr, so the StreamHandler's
 # ``stream.write`` raises and ``logging.Handler.handleError`` prints a
@@ -36,59 +38,11 @@ import logging as _logging
 _logging.raiseExceptions = False
 
 
-# Same daemon-thread root cause as the logging block above: the
-# ``_write_table_summary_async`` thread opens a pyiceberg SqlCatalog, whose
-# sqlite3 connection GCs *unclosed* after the spawning test finishes (the pool's
-# close_all() deliberately leaves live foreign-thread handles alone — closing a
-# sqlite handle from another live thread segfaults; see
-# backend/core/sqlite_pool.py::ThreadLocalPool.close_all). pyproject's
-# ``filterwarnings`` already ignores this ResourceWarning, but that filter is
-# only active INSIDE a test's warning-filter context; pytest's
-# ``unraisableexception`` plugin runs ``gc.collect()`` BETWEEN tests, outside
-# that context, so the "unclosed database" warning leaks to the console. Install
-# the same ignore at the process level so it also covers the inter-test gc path.
-# Benign: production holds its connections for the whole process lifetime.
-import warnings as _warnings
-
-_warnings.filterwarnings("ignore", message="unclosed database", category=ResourceWarning)
-
-
 # NOTE: the historical ``backend.scheduler`` compat shim (and the
 # session-start pre-import that defended its binding order under
 # pytest-randomly) was retired 2026-07-06 — every caller and test patch
 # now targets the real homes under ``backend.cron.*`` directly, so the
 # shim-binding pollution class no longer exists.
-
-
-def pytest_configure(config):
-    """Stop pytest 9's ``unraisableexception`` plugin from FORCE-running
-    ``gc.collect()`` at session end (per xdist worker).
-
-    That forced collection is the *only* thing that surfaces the benign
-    "unclosed database" ResourceWarning from pyiceberg's cached ``SqlCatalog``:
-    a catalog evicted from ``_catalog_cache`` becomes cyclic garbage, and the
-    plugin's ``gc_collect_harder`` reaps it from inside a
-    ``catch_warnings(record=True)`` context whose ``simplefilter("always")``
-    overrides Python's *default* ``ignore::ResourceWarning`` — at a point where
-    the pyproject / line-53 "unclosed database" filters are no longer applied.
-    Every surfaced warning is sourced to ``unraisableexception.py:33
-    gc.collect()`` precisely because of this forced pass.
-
-    Left to natural collection (a later auto-gc inside a test's filter context,
-    or interpreter shutdown), those connections are reaped under filters where
-    ResourceWarning is ignored — silent. ``sys.unraisablehook`` stays installed,
-    so genuine unraisable exceptions are still caught when they occur; we only
-    skip the *extra forced* gc passes. ``gc_collect_iterations`` is a documented,
-    overridable stash key (pytest marks it "not a simple constant ... to allow
-    pytester to override it"). Guarded so a future pytest that renames/removes
-    the key degrades to the line-53 filter rather than failing collection.
-    """
-    try:
-        from _pytest.unraisableexception import gc_collect_iterations_key
-
-        config.stash[gc_collect_iterations_key] = 0
-    except Exception:
-        pass
 
 
 def _cassette_recorded_at(path) -> float | None:
@@ -103,7 +57,7 @@ def _cassette_recorded_at(path) -> float | None:
 
     try:
         with open(path, encoding="utf-8") as f:
-            head = f.read(2048)
+            head = f.read()
     except OSError:
         return None
     m = re.search(r"^recorded_at:\s*['\"]?([0-9T:\-+.Z]+)['\"]?$", head, re.MULTILINE)
@@ -114,6 +68,43 @@ def _cassette_recorded_at(path) -> float | None:
         return _dt.datetime.fromisoformat(raw).timestamp()
     except ValueError:
         return None
+
+
+# ── Hang forensics ───────────────────────────────────────────────────────────
+import pytest as _pytest_for_hooks  # noqa: E402 - hook decorators below; `pytest` itself is imported later
+
+# pytest-timeout's "thread" method kills the whole xdist worker (os._exit) when a test passes the
+# 60s ceiling, and the stack dump it writes dies with the worker — CI then shows only
+# "worker crashed". Dump every thread's stack to a per-worker file shortly BEFORE that, so the next
+# CI failure names the blocked frame (the CI "Worker-crash diagnostics" step prints these files).
+_HANG_DUMP_AFTER_S = float(_os.environ.get("FLA_HANG_DUMP_AFTER_S", "45"))
+_hang_log = None
+
+
+def _hang_log_file():
+    global _hang_log
+    if _hang_log is None:
+        import tempfile
+
+        path = _os.path.join(tempfile.gettempdir(), f"fla-hang-{_os.getpid()}.log")
+        _hang_log = open(path, "a", buffering=1)  # noqa: SIM115 - lives for the worker's lifetime
+    return _hang_log
+
+
+@_pytest_for_hooks.hookimpl(tryfirst=True)
+def pytest_runtest_setup(item):
+    import faulthandler
+
+    log = _hang_log_file()
+    log.write(f"--- {item.nodeid}\n")
+    faulthandler.dump_traceback_later(_HANG_DUMP_AFTER_S, repeat=False, file=log)
+
+
+@_pytest_for_hooks.hookimpl(trylast=True)
+def pytest_runtest_teardown(item, nextitem):  # noqa: ARG001 — pytest hook signature
+    import faulthandler
+
+    faulthandler.cancel_dump_traceback_later()
 
 
 def pytest_sessionstart(session):  # noqa: ARG001 — pytest hook signature
@@ -197,13 +188,13 @@ def pytest_sessionstart(session):  # noqa: ARG001 — pytest hook signature
 import duckdb
 import pytest
 
-from backend.deps import get_con
+from backend.core.request_context import get_con
 
 
 @pytest.fixture(scope="session", autouse=True)
 def _seed_random():
     """Seed Python's stdlib RNG so unseeded callers (notably
-    ``tests/utils/mock_data.py``) are reproducible.
+    ``tests/_helpers/duckdb_fixtures.py``) are reproducible.
 
     Per-test code that explicitly seeds its own ``random.Random()`` (hypothesis,
     fuzz suites) is unaffected — those create their own Random instances.
@@ -235,7 +226,7 @@ def _close_telemetry_proxy_at_session_end():
     session teardown.
 
     The proxy is a process-lifetime singleton: ``start_proxy_server`` is lazy
-    and idempotent (FastAPI lifespan, DuckDB httpfs, and PyIceberg all call it),
+    and idempotent (FastAPI lifespan, DuckDB httpfs, and the DuckLake extension all call it),
     so a given xdist worker starts at most one ``aiohttp.ClientSession`` and
     never stops it — in production that's fine, the process just exits. Under
     pytest the worker's interpreter shuts down *after* pytest has torn down its
@@ -249,7 +240,7 @@ def _close_telemetry_proxy_at_session_end():
     """
     yield
     try:
-        from backend.utils import telemetry_proxy
+        import backend.utils.telemetry as telemetry_proxy
 
         telemetry_proxy.stop_proxy_server()
     except Exception:
@@ -264,13 +255,130 @@ def reset_telemetry():
     start_call_tracking()
 
 
+_PG_SLOT_LOCK_BASE = 0x464C4100
+
+
+@pytest.fixture(scope="session")
+def _pg_worker_schema():
+    """Give this pytest process its own Postgres database for metadata storage.
+
+    The process claims an exclusive database slot (see below), resets it,
+    points ``METADATA_DSN`` / ``DUCKLAKE_CATALOG`` at it, then runs the real
+    schema bootstrap
+    (:func:`backend.core.metadata.base.ensure_pg_schema`) against it.
+    Two workers — or two concurrent pytest runs — therefore never see each
+    other's rows, and share nothing but the underlying server.
+
+    Runs once per worker process, before any test in that worker touches
+    metadata — the pool in ``pg_connection`` is a lazy module-level
+    singleton created on first ``get_pg_pool()`` call, so ``METADATA_DSN``
+    must be set before that first call happens anywhere in this process.
+    """
+    import psycopg
+
+    import backend.core.metadata.base as pg_connection
+    import backend.core.metadata.base as pg_schema
+
+    base_dsn = _os.environ.get(
+        "METADATA_DSN",
+        "postgresql://fla:fla_test_password@localhost:5432/ducklake_test",
+    )
+    from urllib.parse import urlparse, urlunparse
+
+    parsed = urlparse(base_dsn)
+    maint_dsn = urlunparse(parsed._replace(path="/postgres"))
+
+    import time
+
+    admin_conn = psycopg.connect(maint_dsn, autocommit=True)
+    # Claim a database slot with a session-level advisory lock (released when the
+    # connection closes, even if the process dies). Naming the database after the
+    # xdist worker id alone made two concurrent pytest runs (parallel agents,
+    # ``make ci`` beside a quick loop) share ``ducklake_test_gw0`` and wipe each
+    # other's live connections; slots are exclusive per live process instead.
+    # Slots are reset in place, never dropped: DROP DATABASE waits on a forced
+    # checkpoint, which stalls for minutes on a busy server.
+    slot = 0
+    while not admin_conn.execute("SELECT pg_try_advisory_lock(%s)", (_PG_SLOT_LOCK_BASE + slot,)).fetchone()[0]:
+        slot += 1
+    worker_db = f"ducklake_test_slot{slot}"
+    if not admin_conn.execute("SELECT 1 FROM pg_database WHERE datname = %s", (worker_db,)).fetchone():
+        # CREATE DATABASE clones template1 and fails with ObjectInUse while another
+        # session is cloning it; wait that out.
+        deadline = time.monotonic() + 60
+        while True:
+            try:
+                admin_conn.execute(f'CREATE DATABASE "{worker_db}"')
+                break
+            except psycopg.errors.ObjectInUse:
+                if time.monotonic() > deadline:
+                    raise
+                time.sleep(0.25)
+
+    worker_dsn = urlunparse(parsed._replace(path=f"/{worker_db}"))
+    with psycopg.connect(worker_dsn, autocommit=True) as reset_conn:
+        for (schema,) in reset_conn.execute(
+            "SELECT nspname FROM pg_namespace WHERE nspname NOT LIKE 'pg\\_%' AND nspname <> 'information_schema'"
+        ).fetchall():
+            reset_conn.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+        reset_conn.execute("CREATE SCHEMA public")
+
+    _os.environ["METADATA_DSN"] = worker_dsn
+    _os.environ["DUCKLAKE_CATALOG"] = worker_dsn
+
+    pg_schema.ensure_pg_schema(force=True)
+
+    yield worker_db, admin_conn
+
+    pg_connection.close_all_pg_connections()
+    pg_connection.reset_pg_pool_for_tests()
+    admin_conn.close()
+
+
+_PER_TEST_RESET_TABLES = (
+    "ingest_ledger",
+    "ingested_files",
+    "ingested_files_summary",
+    "quarantined_files",
+    "quarantine_evidence",
+    "job_runs",
+    "cron_runs",
+    "audit_logs",
+    "views",
+    "alerts",
+    "scoring_labels",
+    "scoring_audit",
+    "asn_names",
+    "usage_log",
+    "usage_log_hourly_summary",
+    "cloud_copy_deletions",
+    "metric_snapshots",
+    "slow_queries",
+    "ingest_in_flight",
+    "ngwaf_bots",
+    "ngwaf_sync_state",
+    "rdns",
+    "sources",
+    "remote_sessions",
+    "remote_invite_claim_tokens",
+    "invite_services",
+    "remote_invites",
+    "remote_share_audit_logs",
+    "share_settings",
+)
+
+
 @pytest.fixture(autouse=True)
-def isolate_metadata_db(tmp_path, monkeypatch):
-    """Point metadata_db AND service-config data dirs at a per-test sandbox.
+def isolate_metadata_db(tmp_path, monkeypatch, _pg_worker_schema):
+    """Point metadata storage at this worker's isolated Postgres schema, and
+    service-config/DuckDB data dirs at a per-test sandbox.
 
     Operational metadata (alerts, views, audit, cron, sources, ingested_files,
-    asn_names, usage_log) all live in per-service SQLite at
-    ``data/services/{id}.metadata.db``.
+    asn_names, usage_log, share_db) lives in Postgres, scoped to this xdist
+    worker's own schema by :func:`_pg_worker_schema` — replacing the historical
+    per-service SQLite file at ``data/services/{id}.metadata.db`` (see ADR-15,
+    reversed by the SQLite -> Postgres metadata migration this fixture is
+    part of).
 
     The analytical DuckDB file lives at ``data/services/{id}.duckdb`` and is
     located via :func:`backend.config.duckdb_path` (which reads
@@ -281,10 +389,11 @@ def isolate_metadata_db(tmp_path, monkeypatch):
     ``test-service-id.duckdb``, etc. Patch the four config-level DATA paths
     in parallel so the whole tree is sandboxed.
     """
+    import os
     from pathlib import Path
 
+    import backend.core.metadata as metadata_db
     from backend import config as svcconfig
-    from backend.core import metadata as metadata_db
 
     sandbox_data = Path(tmp_path) / "data"
     sandbox_services = sandbox_data / "services"
@@ -301,53 +410,39 @@ def isolate_metadata_db(tmp_path, monkeypatch):
     for d in (sandbox_data, sandbox_services, sandbox_configs, sandbox_ngwaf, sandbox_cache, sandbox_system):
         d.mkdir(parents=True, exist_ok=True)
 
-    monkeypatch.setattr(metadata_db, "_DATA_DIR", str(sandbox_services))
-    monkeypatch.setattr(metadata_db, "_initialized", set())
-    monkeypatch.setattr(metadata_db, "_local", __import__("threading").local())
+    try:
+        import backend.core.metadata.base as pg_connection
+
+        _pg_con = pg_connection.get_pg_thread_connection()
+        # Truncate only the tables that hold rows: a TRUNCATE recreates every listed relation, and
+        # doing all of them per test across N xdist workers made each reset take seconds.
+        _dirty = [
+            r[0]
+            for r in _pg_con.execute(
+                " UNION ALL ".join(f"SELECT '{t}' WHERE EXISTS (SELECT 1 FROM {t})" for t in _PER_TEST_RESET_TABLES)
+            ).fetchall()
+        ]
+        if _dirty:
+            _pg_con.execute(f"TRUNCATE TABLE {', '.join(_dirty)} CASCADE")
+        _pg_con.commit()
+    except Exception:
+        try:
+            _pg_con.rollback()
+        except Exception:
+            pass
+
     metadata_db._clear_ingested_filenames_cache()
 
-    # Per-service usage_log lives in its own SQLite file post-2026-06-12;
-    # it shares ``_DATA_DIR`` with metadata.db but uses its own thread-
-    # local pool + initialised-paths set, so isolate those too. Without
-    # this a test would either (a) collide on a real-disk file because
-    # _DATA_DIR was already cached, or (b) leak thread-local connections
-    # across test runs and emit ResourceWarning on shutdown.
-    from backend.core.metadata import usage_log_db as _usage_log_db
-
-    monkeypatch.setattr(_usage_log_db, "_DATA_DIR", str(sandbox_services))
-    monkeypatch.setattr(_usage_log_db, "_initialized", set())
-    monkeypatch.setattr(_usage_log_db, "_local", __import__("threading").local())
-
-    # Sandbox share_db connection pool and directory
-    from backend.core.share_db import connection as _share_db_connection
-
-    monkeypatch.setattr(_share_db_connection, "_DATA_DIR", str(sandbox_system))
-    monkeypatch.setattr(_share_db_connection, "_initialized", set())
-    monkeypatch.setattr(_share_db_connection, "_local", __import__("threading").local())
-
-    # system_metrics.db (operational-vital snapshots) lives in
-    # ``data/system/system_metrics.db``. Redirect to the sandbox so tests
-    # can't leak rows into the real-disk file across runs.
-    from backend.core import metric_snapshots as _metric_snapshots
-
-    monkeypatch.setattr(_metric_snapshots, "_DATA_DIR", str(sandbox_system))
-    monkeypatch.setattr(_metric_snapshots, "_initialized", False)
-    monkeypatch.setattr(_metric_snapshots, "_local", __import__("threading").local())
-
-    # rdns_cache hardcodes a RELATIVE _DB_PATH (data/cache/rdns_cache.db)
-    # decoupled from svcconfig.CACHE_DATA_DIR, so redirect it explicitly to
-    # the per-test sandbox. Otherwise every xdist worker process shares the
-    # one real-disk file → cross-process WAL contention ("database is
-    # locked") and leaked rows in the repo tree.
-    from backend.utils import rdns_cache as _rdns_cache
-
-    monkeypatch.setattr(_rdns_cache, "_DB_PATH", Path(sandbox_cache) / "rdns_cache.db")
+    import backend.core.metadata.usage_log as _usage_log_db
+    import backend.core.share_db as _share_db_connection
+    import backend.cron.jobs.metric_snapshots as _metric_snapshots
 
     monkeypatch.setattr(svcconfig, "DATA_DIR", sandbox_data)
     monkeypatch.setattr(svcconfig, "SERVICES_DATA_DIR", sandbox_services)
     monkeypatch.setattr(svcconfig, "CONFIGS_DIR", sandbox_configs)
     monkeypatch.setattr(svcconfig, "NGWAF_DATA_DIR", sandbox_ngwaf)
     monkeypatch.setattr(svcconfig, "CACHE_DATA_DIR", sandbox_cache)
+    monkeypatch.setattr(svcconfig, "DUCKLAKE_CATALOG", os.environ["DUCKLAKE_CATALOG"])
     monkeypatch.setattr(svcconfig, "SYSTEM_DATA_DIR", sandbox_system)
     # ``_ensured_dirs`` is a per-path memo for the mkdir storm — must be
     # cleared so _ensure_dirs() actually creates the new sandbox dirs.
@@ -359,8 +454,6 @@ def isolate_metadata_db(tmp_path, monkeypatch):
     # ``my-bucket``, ``test-bucket`` directories into the repo root.
     # Redirect to the per-test sandbox while preserving the
     # ``_cache_dir_override`` escape hatch and the ``bucket`` shape.
-    import os as _os
-
     from backend.core import duckdb as _bk_duckdb
 
     sandbox_cache_root = sandbox_data / "cache"
@@ -369,7 +462,7 @@ def isolate_metadata_db(tmp_path, monkeypatch):
         if "_cache_dir_override" in source:
             return source["_cache_dir_override"]
         bucket = (source.get("bucket") or source.get("fos_bucket") or "default").strip()
-        return _os.path.join(str(sandbox_cache_root), bucket)
+        return os.path.join(str(sandbox_cache_root), bucket)
 
     monkeypatch.setattr(_bk_duckdb, "_cache_dir", _sandboxed_cache_dir)
 
@@ -378,6 +471,10 @@ def isolate_metadata_db(tmp_path, monkeypatch):
     # spawns worker threads that open their own thread-local connections,
     # invisible to this fixture's ``_local``. Without this drain, those
     # connections live until GC and emit ResourceWarning at process exit.
+    # Postgres-aware: ``metadata_db.close_all_connections()`` (and the
+    # share_db one) dispatch to ``pg_connection.close_all_pg_connections()``
+    # under ``METADATA_DSN`` — same call, now returns pool connections
+    # instead of closing SQLite file handles.
     metadata_db.close_all_connections()
     _metric_snapshots.close_all_connections()
     _usage_log_db.close_all_connections()
@@ -389,7 +486,7 @@ def _reset_module_caches():
     """Reset module-level caches between tests.
 
     Several modules cache state at import scope (schema metadata, FOS client,
-    iceberg views/snapshots, source registration). Across tests using the
+    storage views/snapshots, source registration). Across tests using the
     same source name with different in-memory DuckDB connections, that cache
     leaks and produces order-dependent failures — surfaced by
     ``pytest-randomly`` (Milestone A, task 0.3).
@@ -398,22 +495,16 @@ def _reset_module_caches():
     ``test_dashboard.py``) used to clear these inline. Clearing once here
     means they no longer have to.
     """
-    from backend.core import iceberg as _ic
-
     # A-3: drain every cache registered via
-    # backend.utils.cache_registry.CacheRegistry. The iceberg, duckdb,
+    # backend.utils.bounded_cache.CacheRegistry. The storage, duckdb,
     # dashboard, and network modules all register their caches at
     # module load — this single call replaces the long enumeration
     # the R-1 work expanded. New module-level caches that ship with a
     # register() call are picked up automatically.
-    from backend.utils.cache_registry import CacheRegistry
+    from backend.utils.bounded_cache import CacheRegistry
 
     CacheRegistry.clear_all()
 
-    # Non-cache module globals the registry can't help with: a counter
-    # and a class-reference that need explicit reset between tests.
-    _ic._sql_load_table_real_calls["n"] = 0
-    _ic._FOS_CATALOG_CLASS = None
     # All previously hand-cleared module caches (_logging_settings_cache,
     # _enforce_threshold_cache, active_requests._active_count via the
     # _ActiveRequestsResetAdapter) now register with CacheRegistry from
@@ -421,6 +512,9 @@ def _reset_module_caches():
     # above drains them. New module-level caches that ship with a
     # register() call are picked up automatically.
     yield
+    from backend.main import app
+
+    app.dependency_overrides.clear()
 
 
 @pytest.fixture
@@ -435,7 +529,9 @@ def in_memory_duckdb():
     con.close()
 
 
-def override_request_context(*, source, con, session=None, path="/test", time_bounds=None):
+def override_request_context(*, source, con=None, _con_override=None, session=None, path="/test", time_bounds=None):
+    if _con_override is not None:
+        con = _con_override
     """Return a ``build_request_context`` override that yields a RequestContext
     wired to ``source``/``con`` (read-only). Mirrors what the ``client`` fixture
     installs; router tests use it to inject a custom source or an analyst
@@ -453,7 +549,7 @@ def override_request_context(*, source, con, session=None, path="/test", time_bo
         yield RequestContext(
             service_id=source["service_id"],
             source=source,
-            con=con,
+            _con_override=con,
             telemetry=RequestTelemetry(request_method="POST", request_path=path),
             analyst_session=session,
             read_only=True,
@@ -463,15 +559,41 @@ def override_request_context(*, source, con, session=None, path="/test", time_bo
     return _override
 
 
+def make_test_request_context(
+    con=None,
+    *,
+    service_id: str = "test-service-id",
+    source: dict | None = None,
+    session=None,
+    read_only: bool = True,
+    path: str = "/test",
+    time_bounds=None,
+    holder=None,
+):
+    """Construct a RequestContext for direct repository/router handler unit tests."""
+    from backend.core.request_context import RequestContext
+    from backend.core.request_telemetry import RequestTelemetry
+
+    resolved_source = source or {"name": "test_service", "service_id": service_id}
+    return RequestContext(
+        service_id=resolved_source.get("service_id", service_id),
+        source=resolved_source,
+        _con_override=con,
+        _holder=holder,
+        telemetry=RequestTelemetry(request_method="POST", request_path=path),
+        analyst_session=session,
+        read_only=read_only,
+        time_bounds=time_bounds,
+    )
+
+
 @pytest.fixture
 def client(in_memory_duckdb, test_service_source):
     from fastapi.testclient import TestClient
 
-    from backend.core.request_context import build_request_context
-    from backend.deps import get_service_id, get_source
+    from backend.core.request_context import build_request_context, get_service_id, get_source
     from backend.main import app
 
-    app.dependency_overrides[get_con] = lambda: in_memory_duckdb
     app.dependency_overrides[get_con] = lambda: in_memory_duckdb
     app.dependency_overrides[get_source] = lambda: test_service_source
     # ``get_service_id`` resolves from query/header/active-config. Under the
@@ -512,7 +634,7 @@ MOCK_SERVICE_ID = "test-service-id"
 #
 # A single shared S3 mock replaces the four ad-hoc boto3-mocking idioms that
 # accumulated across the suite. Tests that need a "real" S3 endpoint to
-# exercise ingest/iceberg/state_sync paths should depend on `s3_mock` for the
+# exercise ingest/storage/state_sync paths should depend on `s3_mock` for the
 # bucket and `fos_source` for a source dict shaped like the real config.
 
 
@@ -565,6 +687,75 @@ def fos_source(s3_mock):
         "fos_native_endpoint": "us-east-1.object.fastlystorage.app",
         "access_key_id": "test-key",
         "secret_access_key": "test-secret",
-        "access_level": "read_write",
         "storage_mode": "cloud",
     }
+
+
+# Deterministic "now" for the active-hour seam tests: hour 12 (so "today" has a
+# closed hour to merge — kills the UTC-hour-00 skip) and minute 10 (so a 20-min
+# active window ends at :30, comfortably inside the hour — kills the latent
+# hour-rollover flake). The date is arbitrary; the in-memory harness has no
+# real-time dependency (bundles live in tmp; queries use seeded timestamps).
+_FROZEN_NOW = "2026-06-15 12:10:00+00:00"
+
+
+@pytest.fixture
+def frozen_clock():
+    """Freeze ``datetime.now`` (incl. the reader's function-local import) at
+    :data:`_FROZEN_NOW` so the closed/active-hour seam is deterministic."""
+    import time_machine
+
+    with time_machine.travel(_FROZEN_NOW, tick=False) as traveller:
+        yield traveller
+
+
+@pytest.fixture
+def isolated_configs_dir(tmp_path, monkeypatch):
+    """Redirect ``backend.config.CONFIGS_DIR`` and ``DATA_DIR`` to ``tmp_path``."""
+    from backend import config as svcconfig
+
+    cfg_dir = tmp_path / "configs"
+    cfg_dir.mkdir(exist_ok=True)
+    monkeypatch.setattr(svcconfig, "CONFIGS_DIR", cfg_dir)
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(exist_ok=True)
+    monkeypatch.setattr(svcconfig, "DATA_DIR", data_dir)
+    return cfg_dir
+
+
+@pytest.fixture
+def override_source():
+    """Override ``backend.core.request_context.get_source`` with a default read-write test source."""
+    from backend.core.request_context import get_source
+    from backend.main import app
+
+    src = {
+        "service_id": "service123",
+        "name": "service123",
+        "bucket": "test-bucket",
+        "prefix": "raw_prefix",
+        "cdn_url": "",
+    }
+    app.dependency_overrides[get_source] = lambda: src
+    yield src
+    app.dependency_overrides.clear()
+
+
+@pytest.fixture(autouse=True)
+def _reset_oauth_caches(request: pytest.FixtureRequest):
+    """Reset OIDC discovery/JWKS and provider registry caches around remote_access tests."""
+    if "remote_access" not in request.node.nodeid:
+        yield
+        return
+    import backend.core.oauth as oidc
+    import backend.core.oauth as registry
+
+    registry.reset_cache_for_tests()
+    oidc.reset_caches_for_tests()
+    yield
+    oidc.set_test_transport(None)
+    registry.reset_cache_for_tests()
+    oidc.reset_caches_for_tests()
+
+
+from tests._helpers.config_fakes import with_config  # noqa: E402, F401

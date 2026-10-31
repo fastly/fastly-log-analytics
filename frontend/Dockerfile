@@ -1,33 +1,9 @@
-# syntax=docker/dockerfile:1.4
-
-# --- OpenAPI Schema Generation Stage ---
-# Needs the Python backend to introspect FastAPI routes and emit openapi.json.
-FROM python:3.13-slim-bookworm@sha256:281d39ff02e3b389401586134ff9e6572954687822a58055ec07a60ded4e0b7f AS api-schema
-
-RUN apt-get update && apt-get install -y --no-install-recommends 'ca-certificates=20250419~deb12u2' \
-    && rm -rf /var/lib/apt/lists/*
-RUN python -m pip install --no-cache-dir --upgrade pip==26.2.2
-
-COPY --from=ghcr.io/astral-sh/uv:0.6.14 /uv /uvx /bin/
-
-WORKDIR /app
-
-ENV UV_LINK_MODE=copy
-ENV UV_HTTP_TIMEOUT=300
-
-COPY pyproject.toml uv.lock ./
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --no-dev --frozen --no-install-project
-
-COPY backend/ ./backend/
-COPY scripts/generate_openapi.py ./scripts/
-
-RUN uv run python3 scripts/generate_openapi.py openapi.json
-
 # --- Build Stage ---
+# node:24-slim
 FROM node:24-slim@sha256:c86ecead9e55a5210ac1727de38a4ca840bf03dcaf34dc9749addbf383b1920c AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends 'ca-certificates=20250419~deb12u2' \
+    && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' ca-certificates)" ge '20250419~deb12u2' \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -37,6 +13,8 @@ WORKDIR /app
 # unrs-resolver via @unrs/resolver-binding-linux-*-gnu) or is darwin-only
 # (fsevents). If a future dep needs node-gyp, reinstate `python3 make g++`.
 
+ENV NODE_OPTIONS="--max_old_space_size=4096"
+ENV NEXT_MEMORY_LIMIT=4096
 COPY frontend/package.json frontend/package-lock.json ./
 # Cache mount keeps npm's tarball cache across builds — entries are keyed by the
 # SHA-512 integrity hash from package-lock.json and verified before extraction,
@@ -44,18 +22,9 @@ COPY frontend/package.json frontend/package-lock.json ./
 # still rebuilt from scratch by `npm ci`.
 RUN --mount=type=cache,target=/root/.npm npm ci
 
+# Copy frontend source including pre-generated openapi.json and types/api.generated.ts
+# (kept in sync and drift-checked by pre-commit and CI).
 COPY frontend/ .
-
-# Generate TypeScript types from the schema produced in the previous stage.
-# Security: openapi.json is copied into the final image layer and is
-# served by Next.js (used by client-side type generation + occasional
-# debug fetches). Keep it free of embedded credentials, example tokens,
-# or internal-only hostnames. The schema is built from FastAPI route
-# definitions only — no values flow in from running services — but if
-# you ever add an ``example=`` to a Pydantic model, double-check it
-# before merging.
-COPY --from=api-schema /app/openapi.json ./openapi.json
-RUN npx openapi-typescript openapi.json -o types/api.generated.ts
 
 ENV NEXT_TELEMETRY_DISABLED=1
 
@@ -76,9 +45,11 @@ ENV NEXT_TELEMETRY_DISABLED=1
 RUN --mount=type=cache,target=/app/.next/cache npx next build
 
 # --- Production Stage ---
+# node:24-slim
 FROM node:24-slim@sha256:c86ecead9e55a5210ac1727de38a4ca840bf03dcaf34dc9749addbf383b1920c AS runner
 
 RUN apt-get update && apt-get install -y --no-install-recommends 'ca-certificates=20250419~deb12u2' \
+    && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' ca-certificates)" ge '20250419~deb12u2' \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -100,6 +71,11 @@ RUN if [ -d "app" ]; then \
       rm -rf app && \
       chown -R nextjs:nodejs . ; \
     fi
+
+# Next.js may persist prerender results after startup. The standalone output
+# does not include the build-time filesystem cache, so create a writable
+# runtime cache directory explicitly before dropping privileges.
+RUN mkdir -p .next/cache && chown -R nextjs:nodejs .next
 
 USER nextjs
 

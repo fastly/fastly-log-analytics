@@ -3,7 +3,7 @@
 
 This document provides a detailed technical overview of how the dashboard and ingest system are architected, how data flows through the application, and the internal design patterns used to maintain high performance, atomic crash safety, and strong security.
 
-Two acronyms recur throughout: **FOS** = Fastly Object Storage (the S3-compatible bucket where raw logs and the Iceberg table live), and **NGWAF** = Fastly's Next-Gen WAF.
+Two acronyms recur throughout: **FOS** = Fastly Object Storage (the S3-compatible bucket where raw logs land), and **NGWAF** = Fastly's Next-Gen WAF.
 
 Architectural decisions are recorded under [`docs/adr/`](adr/) — see the [ADR index](adr/README.md) for the full list.
 
@@ -15,95 +15,104 @@ The system uses a layered storage architecture to optimize for real-time query s
 
 | Layer | Location / Connection | Purpose |
 |---|---|---|
-| **Raw Logs** | `s3://{bucket}/{prefix}/raw/**/*.gz` | Immutable gzipped JSON logs streamed directly from Fastly logging endpoints. |
+| **Raw Logs** | `s3://{bucket}/{prefix}/raw/request/**/*.gz` and `.../raw/rum/**/*.gz` | Immutable gzipped request and RUM JSON logs streamed directly from Fastly logging endpoints. v3 services use these roots exclusively; v2 services must be torn down and reprovisioned. |
 | **Local Buffer** | `cache/{bucket}/` | Transient Parquet files stored locally during active ingestion before commit. |
-| **Iceberg Table** | `s3://{bucket}/{prefix}/iceberg/` | Long-term, hourly partitioned storage powered by Apache Iceberg. |
-| **Admin State** | `s3://{bucket}/{prefix}/iceberg/meta/admin_state.json` | Replicated metadata: views, custom fields, audit logs, and log format history. |
-| **DuckDB Engine** | `data/services/{service_id}.duckdb` | Per-service analytical query engine (compiles temporary tables and unified `logs` view). |
-| **Service Metadata** | `data/services/{service_id}.metadata.db` | Per-service SQLite (WAL mode): stores local alerts, views, crons, and ingested file manifests. |
-| **NGWAF Bot Cache** | `data/ngwaf/ngwaf_bot_cache.db` | Shared SQLite database caching known verified bots from Fastly's NGWAF API. |
-| **Live Share State** | `data/system/remote_share.db` | Central SQLite database managing invitations, active shared sessions, and audit records. |
+| **DuckLake Table** | Catalog: Postgres DSN (`DUCKLAKE_CATALOG`, required in all modes — see [ADR-22](adr/22-postgres-only-metadata.md)); data: local disk under `/app/data/services/{service_id}/ducklake/` | Long-term transactional storage powered by DuckDB's DuckLake extension. All queried Parquet is local on NVMe/SSD for zero-latency scans. FOS is the raw-log ingress and the durable cloud copy: in Standard mode, [`backend/core/storage/backup.py`](../backend/core/storage/backup.py) pushes catalog-live Parquet to `{prefix}/ducklake/<path>` after every commit, and `python -m backend.provision.cli restore-data --service-id <id>` rebuilds local data from it ([AGENTS.md Trap #50](../AGENTS.md#50-the-standard-mode-cloud-copy-is-the-only-off-box-copy-of-committed-data)). |
+| **Admin State** | `s3://{bucket}/{prefix}/meta/admin_state.json` | Replicated metadata: `log_format_history`, `audit_logs`, `views`, `custom_fields` (not alerts — alerts are per-instance). Scoring matrix and history live beside it under `meta/`. |
+| **DuckDB Engine** | `data/services/{service_id}.duckdb` | Per-service analytical query engine (session-scoped `logs` view and temporary tables). |
+| **Metadata & State Store** | PostgreSQL 16 (`METADATA_DSN`, mandatory across all deployment modes — see [ADR-22](adr/22-postgres-only-metadata.md)) | Stores `alerts`, `views`, `audit_logs`, `cron_runs`, `sources`, `ingested_files`, `asn_names`, `slow_queries`, `usage_log`, `usage_log_hourly_summary`, `remote_invites`, `remote_sessions`, `remote_share_audit_logs`, `share_settings`, `share_tos_versions`, `ngwaf_bots`, `rdns`, and other operational state (schema in [`backend/core/metadata/pg_schema.py`](../backend/core/metadata/pg_schema.py)). |
+| **Service Configs** | `configs/{logging_service_id}.json` | Credentials, settings, and `log_fields` configuration (gitignored). |
 
-### Module layout
+### Module layout & shared helpers
 
-Storage subsystems live as cohesive packages rather than monoliths:
-
-- **Iceberg engine** — [`backend/core/iceberg/`](../backend/core/iceberg/): `_core.py` holds the read/write/commit/optimize/expire paths; `fs.py` holds the `FosS3FileSystem` / `CachedS3FileSystem` filesystem subclasses.
-- **Per-service metadata** — [`backend/core/metadata/`](../backend/core/metadata/): one SQLite submodule per concern (`base`, `alerts`, `views`, `ingest_log`, `cron_log`, `asn_cache`, `usage_log`, `slow_queries`, `reconciliation`, `state`).
-
-Each package's `__init__.py` re-exports the full public surface for backward compatibility; the import-shim mechanics are documented in [AGENTS.md](../AGENTS.md) and [MONKEYPATCHES.md](../MONKEYPATCHES.md).
+The full backend package map and cross-cutting shared helpers (`cron_run`, `draft_version`, `mutate_config` / `cid_salt`, `escape_sql_literal`, `retry_call`, `BoundedTTLCache`, `date_utils`, `make_error` / `sse_response` / `WireSafeModel`) are cataloged in [AGENTS.md](../AGENTS.md#package-map) and [AGENTS.md §Shared Helpers](../AGENTS.md#shared-helpers).
 
 ### The Unified Logs View
-To provide real-time query speed without waiting for Iceberg table commits, the DuckDB `logs` view dynamically stitches the committed Iceberg table and the local transient Parquet buffers together. Callers run analytical queries against the `logs` view without needing to worry about the underlying storage state.
+To provide real-time query speed without waiting for a commit, the DuckDB `logs` view dynamically stitches the committed DuckLake table and the local transient Parquet buffers together. Callers run analytical queries against the `logs` view without needing to worry about the underlying storage state. With `DEPLOYMENT_MODE=high_scale`, serving uses ClickHouse (or ephemeral in-memory DuckDB over durable state) and never opens native service files or local buffers. `DEPLOYMENT_MODE=standard` (default) keeps synchronous ingest and file-backed serving. Both modes require `METADATA_DSN` and `DUCKLAKE_CATALOG`.
+
+### Local-only Parquet compaction
+Implemented in [`backend/core/storage/compaction.py`](../backend/core/storage/compaction.py) to keep dashboard scans fast without FOS write cost:
+1. `local_compact` scans local cache dirs every 2 minutes (`LOCAL_COMPACT_INTERVAL_MIN`) and merges small hourly files into size-capped Parquet (default ≤ 256 MB) to preserve DuckDB parallelism.
+2. A compact-on-sync thread merges immediately after a raw sync that produced multiple files.
+3. Partitions older than 1 day (`LOCAL_COMPACT_DAILY_TIER_DAYS`) bin-pack into `daily_YYYY-MM-DD_<uuid>.parquet`; daily files older than 30 days bin-pack into `weekly/weekly_YYYY-WXX_<uuid>.parquet`. All files are capped at `_MAX_PARTITION_BYTES`.
+
+Use local compaction for hot-tier dashboard performance; use `optimize` ([`docs/cron/jobs/optimize.md`](cron/jobs/optimize.md)) when compaction must also be reflected in FOS. Code that walks the local cache and deletes files not in a catalog must skip `compacted_*.parquet`, `daily/`, and `weekly/`.
+
+### Health probe
+`GET /api/health` is cheap liveness. `GET /api/health?deep=1` also verifies per-service ingest freshness (`max(ingested_at) FROM ingested_files` and the latest terminal `log_discovery` cron run) and returns 503 when any service is `degraded`: last ingest older than `stale_minutes` (default 30, widened per service to its own historical p95 gap between non-empty ingests so a low-traffic service's quiet periods don't false-positive), last discovery errored, a discovery row stuck in `status='running'` past `_STUCK_SYNC_RUNNING_MINS`, or the latest `commit` errored. Celery mode additionally derives freshness from `ingest_ledger` ([ADR-16](adr/16-ingest-ledger.md)). Postgres-only, never FOS or Fastly; safe for a load balancer. Deep health requires authentication when `ADMIN_GATEWAY_REQUIRED=1`.
 
 ---
 
 ## 2. Ingest Pipeline & Atomic Guarantees
 
-Ingestion is scheduled using APScheduler. It performs active sync, commit, optimization, and expiration cycles on a per-service level:
+There are two supported deployment modes selected by `DEPLOYMENT_MODE`: `standard` (synchronous DuckDB + DuckLake ingest) and `high_scale` (ClickHouse and dedicated micro-batching workers).
+
+### Default mode: per-service APScheduler
+
+The original model: one in-process `BackgroundScheduler` job per service performs sync, commit, compaction, optimization, and expiration on a fixed interval. This is the whole system for single-pod deployments and remains the default.
 
 ```mermaid
 graph TD
     A[Fastly Object Storage] -->|Gzipped Logs| B(Sync Cron Job)
     B -->|Convert & Stage| C[Local Parquet Buffer]
-    C -->|Commit Interval| D[Iceberg Hour-Partitioned Table]
+    C -->|Commit Interval| D[DuckLake Table]
     C & D -->|Stitched Logs View| E[DuckDB Analytical Engine]
 ```
 
-### Scheduler module layout
+**Atomic Manifest & Crash Recovery** (write-ahead registry pattern, unchanged from earlier releases):
 
-The APScheduler lifecycle, watchdog wrapper, and per-job bodies live as cohesive submodules under [`backend/cron/`](../backend/cron/): `scheduler.py` owns the `BackgroundScheduler` lifecycle and `_sync_jobs()` reload, `decorators.py` owns the `@cron_task` decorator (telemetry context + usage-log flush + watchdog hard-cap), and `jobs/` holds one file per job family (`sync.py`, `commit.py`, `compaction.py`, `optimize.py`, `expire.py`, `metadata.py`).
-
-### Atomic Manifest & Crash Recovery
-To guarantee exactly-once processing and avoid duplicating data during interrupted log transfers, the system uses a write-ahead registry pattern:
-
-1.  **In-Flight Recording:** Before writing any staged Parquet files, a per-service SQLite table `ingest_in_flight` records the source filename, unique hash, and row counts.
+1.  **In-Flight Recording:** Before writing any staged Parquet files, a PostgreSQL table `ingest_in_flight` records the source filename, unique hash, and row counts.
 2.  **Deterministic Buffering:** Staged Parquet files are named deterministically based on a SHA-256 hash of their sorted content (`batch_{sha256[:16]}.parquet`). If an ingest restarts or crashes mid-way, duplicate writes naturally overwrite the same file instead of creating redundant rows.
 3.  **Commit Promotion:** Once the Parquet buffer is written successfully, the database transfers the records into `ingested_files` and clears the `ingest_in_flight` table.
 4.  **Idempotent Auto-Recovery:** Upon any startup or tick cycle, the ingest system inspects left-over entries in the in-flight table. If the corresponding buffer exists, it is promoted; otherwise, it is dropped and queued for clean re-download on the next LIST tick.
 
+### High-Scale Data Plane (`DEPLOYMENT_MODE=high_scale`)
+
+For horizontally-scaled ingestion in Kubernetes clusters, `DEPLOYMENT_MODE=high_scale` uses ClickHouse (`backend/high_scale/`) and dedicated micro-batching workers (`backend/high_scale/worker.py`). In High-Scale mode RUM beacon discovery runs as `rum_discovery_{id}` with `ledger_rum_sweep_{id}` as its crash net (see [docs/cron/](cron/README.md) and [ADR-16](adr/16-ingest-ledger.md)).
+
+### High-Scale Request Logs Architecture (ADR-21)
+
+For high-volume services, the high-scale data plane (`backend/high_scale/`) ingests with dedicated workers and serves from ClickHouse, with strict durability and isolation guarantees (see the [high-scale runbooks](runbooks/high-scale-capacity-and-recovery.md)):
+
+```mermaid
+graph TD
+    A[Fastly Object Storage] -->|Gzipped Logs| W[High-Scale Worker Page Loop]
+    W -->|Concurrent Arrow Decode| M[In-Memory Record Batches]
+    M -->|1. Write & Verify Parquet Artifact| FOS["FOS Archive Storage (Authority)"]
+    M -->|2. Register batch manifest| PG[(PostgreSQL Control Plane)]
+    M -->|3. Bulk INSERT pending rows| CH[(ClickHouse Cluster)]
+    M -->|4. Publish gate: pending -> visible| CH
+    W -->|5. Acknowledge batch sources| PG
+    CH -->|Low-Latency Analytics| S[FastAPI Serving Tier]
+```
+
+1. **FOS Archive as Canonical Authority:** FOS archive Parquet is the sole source of durable truth. All ClickHouse tables, projections, and aggregate rollups can be reconstructed 100% from the archive manifests without retaining or re-fetching raw `.gz` logs.
+2. **Batched Page Pipeline:** Ingestion processes pages of objects (`HIGH_SCALE_PAGE_SIZE`, default 100) concurrently in Arrow memory, writing a single merged Parquet archive to FOS per page. This amortizes the per-object PUT and checksum-verification overhead across the whole page.
+3. **Fenced Cursors:** Per-service, per-domain discovery cursors live in Postgres (`high_scale_source_cursors`, `high_scale_partition_cursors`) under an owner epoch, so worker replicas cannot advance a cursor they no longer own.
+4. **Order of Operations & Publication Gate:** Execution strictly enforces: Archive Write → Checksum Verify → Manifest Commit → Bulk ClickHouse INSERT (`pending`) → Count Check & Visibility Gate (`visible`) → Postgres Batch Acknowledge. Readers query only `visible` rows; row-count mismatches or uncommitted writes are never exposed.
+5. **Decoupled Batch Deletion:** Source deletions are queued and processed asynchronously using a verified manifest cache (`batch_{manifest_id}`), guaranteeing retention cleanup without stalling the ingest tick.
+
 ---
 
-## 3. VCL Log Format & Modular Field Groups
 
-The log formatting engine generates a highly optimized single-line JSON structure compiled to valid VCL. To balance diagnostic detail with Fastly's `FASTLY_LOG_FORMAT_SAFE_MAX` size restriction (~8,000 characters), variables are split into twelve configurable groups (A through L):
+## 3. VCL Log Format & Custom Fields
 
-*   **Group A:** Request Identity (Client IP, User Agent, TLS Details)
-*   **Group B:** Cache Deep-Dive (Hits, Misses, Cache State, TTL)
-*   **Group C:** Infrastructure (Server ID, POP Location)
-*   **Group D/E:** Geolocation (Country, Region, Lat/Long, ASN)
-*   **Group F/G:** Network Quality (TCP RTT, Bandwidth, Jitter)
-*   **Group H/I:** Security (JA3 TLS Fingerprinting, Proxy / Tor Detection)
-*   **Group J:** WAF/NGWAF Integration (Signals, Risk Scores)
-*   **Group K:** HTTP/3 QUIC Metrics
-*   **Group L:** Origin Performance Metrics (TTFB, Backend response times)
+Generated by `generate_log_format()` in [`backend/core/vcl_generator.py`](../backend/core/vcl_generator.py) from the registry in [`backend/core/catalog.py`](../backend/core/catalog.py) (`LOG_FIELD_CATALOG`, groups; presets in `presets.py`). Output is a single-line JSON VCL string. For the full catalog of field groups (`A`–`M` plus always-on Core HTTP), see [docs/features.md](features.md#vcl-log-format--field-groups). A `METRICS` pseudo-group holds chart-metric-only synthetic fields ([AGENTS.md Trap #40](../AGENTS.md#40-metrics-group-catalog-fields-have-no-real-column--exclude-them-from-every-per-field-rollup-writer)).
 
-Admins can also define custom log fields using arbitrary VCL expressions. Each custom expression is validated using the [`falco`](https://github.com/ysugimoto/falco) VCL linter if installed, fallback-matching regular expressions otherwise.
+- `format_hash` — SHA-256 of the generated format; detects drift between deployed VCL and local config.
+- `FASTLY_LOG_FORMAT_SAFE_MAX` (default 12,000 chars, env-overridable; Fastly's own limit is ~16 KiB) is enforced before deployment.
+- `default_off` fields (e.g. `cookie_session`, group H) are excluded from `resolve_enabled_fields` even when their group is enabled; they need explicit per-field opt-in.
+- `generate_capture_vcl()` in [`backend/provision/fastly_api.py`](../backend/provision/fastly_api.py) injects per-hook code (`recv`, `miss`, `pass`, `fetch`, `error`, `deliver`) populating log variables. The captured `ip` prefers a non-empty operator-set `req.http.Fastly-Client-IP` and falls back to `client.ip`; a priority `-100` recv snippet scrubs a client-forged `Fastly-Client-IP` at the true edge. Edge-hop detection is `fastly.ff.visits_this_service == 0`, a per-hop value a client cannot forge.
+- `log_format_history` records format changes with before/after group lists, added/removed fields, and actor.
+- **Custom fields:** Admins define VCL fields appended to the log format (`configs/{service_id}.json` → `log_fields.custom_fields[]`, schema v2; API `/api/services/{service_id}/custom-fields` in [`backend/routers/services/custom_fields.py`](../backend/routers/services/custom_fields.py)). Each custom expression is validated using the [`falco`](https://github.com/ysugimoto/falco) VCL linter when installed, falling back to regex checks otherwise.
 
 ---
 
 ## 4. Live Dashboard Sharing Architecture
 
-The **Share Dashboard** feature allows administrators to invite read-only analysts to collaborate on log views. Rather than copying log files, the system exposes a secure, read-only session that feeds from the administrator's running analytical engine.
+The **Share Dashboard** feature allows administrators to invite read-only analysts to collaborate on log views over an HTTPS `public_endpoint` (direct hostname or direct IP) without copying log files or exposing storage credentials.
 
-Two direct-mode connectivity topologies are supported (the SSH-reverse-tunnel via localhost.run was removed in v2.0):
-
-```text
-1) Direct Hostname:      [Analyst] -> (https://logs.domain.com) --------> [Admin Instance]
-2) Direct IP Address:    [Analyst] -> (https://IP:Port) ----------------> [Admin Instance]
-```
-
-Both modes share a single backend code path — `ShareStartPayload.use_tunnel=False` plus a `public_endpoint=<https URL>` that the admin supplies. The UI mode selector is presentational; the backend only enforces that `public_endpoint` starts with `https://` (the analyst session cookies need `secure=true`).
-
-### Module layout
-
-The tunnel manager and share-DB are split into cohesive packages:
-
-- [`backend/utils/tunnel/`](../backend/utils/tunnel/) — `manager.py` owns the `TunnelManager` singleton (direct-mode lifecycle, sever-all panic), `session.py` holds `AnalystSession`, `rate_limiter.py` is the sliding-window `_LoginRateLimiter`, `state.py` persists `tunnel_state.json`, `fingerprint.py` computes the session fingerprint.
-- [`backend/core/share_db/`](../backend/core/share_db/) — `connection.py` (pool + corruption self-heal with quarantine), `schema.py` (own MIGRATIONS dict + `apply_pending` + `PRAGMA user_version`), `invites.py`, `sessions.py`, `audit.py`, `passcode.py` (argon2id hashing with a back-compat scrypt verify branch and rehash-on-login upgrade), `tos.py`, `settings.py`, `validation.py`.
-
-### Security Isolation Layers
-*   **Middleware Enforcement:** The `RemoteAccessMiddleware` intercepts any request coming from shared endpoints, strictly blocking administrative endpoints (such as configurations, deletion paths, and credentials) while rate-limiting asset scraping. The Caddyfile + compose + middleware trust topology is asserted in pytest so a regression that re-opens the bypass class trips CI.
-*   **Argon2id Passcodes:** Analyst invites are protected by cryptographically secure, random passcodes hashed at rest with argon2id (the 2026 OWASP recommendation). Hashes minted before the cutover still verify via scrypt and are transparently upgraded on the analyst's next login.
-*   **Brute-Force Prevention:** Failed access attempts are tracked. 5 failures within 60 seconds triggers a temporary IP-level lockout.
-*   **Immediate Severance:** Admins can instantly revoke specific invites or execute a **Sever All Access** panic, instantly evicting active sessions.
+For the full admin and analyst specifications, endpoints, OAuth/OIDC login flow, `RemoteAccessMiddleware` isolation, and idle-timeout activity model, see:
+- [docs/pages/admin/share.md](pages/admin/share.md) — Admin sharing control plane, invite/session management, OAuth/OIDC provider configuration, and security isolation layers.
+- [docs/pages/share-login.md](pages/share-login.md) — Analyst authentication, claim links, and Terms of Service flow.
+- [SECURITY.md](../SECURITY.md) — Role-based access control and PII masking policies.

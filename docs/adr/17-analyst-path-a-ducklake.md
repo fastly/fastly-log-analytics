@@ -1,0 +1,41 @@
+# ADR-17 — Analyst Path A Under DuckLake (Open Gap)
+
+**Status:** Withdrawn. Analyst Path A was removed in v3 and is not planned to return.
+**Decided by:** v3 scalability review
+
+> **Withdrawn.** Analyst Path A (the independent-instance analyst join) was removed entirely in v3, including `generate-viewer-key`, the wizard join mode, the `metadata_sync` cron job, and the read-only `access_level` service setting. It cannot work against DuckLake in any topology: Standard keeps parquet on the admin's local disk and the catalog in Postgres, so a read-only bucket credential reaches neither. Remote sharing (live shared instance) is the only analyst access model. The record below is kept as history.
+
+## Context
+
+AGENTS.md defines two analyst collaboration modes. Path A — "independent instance" — is the durable one: an analyst is issued **read-only FOS credentials** (`generate-viewer-key`) and runs their *own copy of the application*, joining via a JSON-config flow (`GET /api/provision/join`, `InviteAnalystDialog`, ProvisionWizard "join" mode). It is explicitly designed to work even when the admin's own process isn't running — the analyst's instance is self-sufficient once it has bucket credentials.
+
+That self-sufficiency was a property of the pyiceberg catalog, not an accident. Pyiceberg's `SqlCatalog` here is a *local* SQLite file, rehydrated by reading `metadata.json` pointer files that live inside the FOS bucket itself (`_refresh_local_catalog_metadata`). Anyone with read access to the bucket can reconstruct the full catalog state — table schema, snapshot history, manifest/data-file listing — with no dependency on any service the admin runs. That is exactly what Path A needs.
+
+DuckLake does not have this property. Its catalog metadata — schema, snapshot chain, file listing, and (per [ADR-14](14-ducklake-replacement.md)) inlined rows not yet flushed to parquet — lives in the PostgreSQL backend `DUCKLAKE_CATALOG` points at (mandatory across all deployment modes per [ADR-22](22-postgres-only-metadata.md); see also [ADR-15](15-multi-writer-topology.md)), which is not discoverable from FOS bucket contents alone. **A Path-A analyst instance holding only read-only FOS credentials today has no way to discover DuckLake table or snapshot state at all.** This was verified by grep, not assumed: nothing in `backend/routers/services/core.py`, `backend/routers/provision.py`, or `backend/provision/*.py` references `DUCKLAKE_CATALOG` or DuckLake in any form — the join flow was never touched by the DuckLake migration.
+
+This is a genuine regression for any service running celery mode / DuckLake with an active Path-A analyst, not a cosmetic gap: an independent-instance analyst against such a service would see an empty or permanently-stale lake.
+
+## Decision
+
+Path A is explicitly rejected when `DEPLOYMENT_MODE=high_scale`. The viewer-key producer returns a clear conflict response instead of issuing credentials that cannot produce a usable independent analyst instance. The CLI uses the same guard. Path B remains available because it reads through the already-running serving process.
+
+Path A remains available for the synchronous topology for backward compatibility with existing FOS/metadata-pointer deployments. A future FOS-resident DuckLake catalog export may restore Path A for scalable deployments, but it requires the validation spike described above before changing this gate.
+
+Any future independent-join endpoint must reuse the same topology guard so copied or stale payloads cannot silently enter an unsupported flow.
+
+## Consequences
+
+- Scalable services now fail closed at invite creation instead of creating a misleading FOS-only invite.
+- The frontend can surface the backend error and direct operators to Path B.
+- Existing synchronous Path A deployments and live shared-instance Path B access are unchanged.
+
+## Out of scope
+
+- Implementing a FOS-resident DuckLake catalog export.
+- Removing or changing Path B.
+
+## Options considered
+
+1. **Grant Path-A analysts a scoped read-only Postgres role**, delivered alongside FOS credentials in the join payload (extend `generate-viewer-key` to also mint a Postgres role scoped to that service's rows). Rejected as the primary recommendation: it reintroduces exactly the liveness dependency Path A exists to avoid — "works even when the admin's instance can't stay running" implicitly assumed a runnable, admin-independent *catalog*, not just admin-independent *storage*. A live Postgres control-plane database becomes a new single point of failure for a mode whose whole purpose is not having one. It's also a materially larger security surface: today a leaked Path-A credential exposes bucket-read on log data; a leaked Postgres role would expose the shared metadata database directly.
+2. **A periodically-exported, FOS-resident, file-based DuckLake catalog per service**, refreshed on some cadence (e.g. after every N commits or every compaction pass) and attached read-only by the Path-A instance directly from its S3 path. This restores the "everything the analyst needs is discoverable from the bucket" property Path A depends on, at the cost of the analyst seeing data as-of the last export rather than live. **This is the direction this ADR recommends**, but it is unvalidated: it is not yet confirmed that DuckDB's `ducklake` extension can attach a file-based catalog directly from an `s3://` path in read-only mode while a separate writer (Postgres-backed) is actively committing against the *same underlying data files* — the catalog and the data path are two different concerns, and the export would need to reference the same parquet files the live catalog already wrote, not a copy. This needs a spike against a real multi-writer setup before it's treated as validated.
+3. **Do nothing; Path A is admin-only until this is resolved.** Not desirable long-term, but is the honest current state, and better documented than left silent.

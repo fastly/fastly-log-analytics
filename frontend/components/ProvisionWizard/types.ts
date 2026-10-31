@@ -1,12 +1,15 @@
-import type React from "react";
-import type { useMutation, useQueryClient } from "@tanstack/react-query";
-import type { Service } from "@/stores/serviceStore";
-import type { SSELine, SSEStatus } from "@/hooks/useSSE";
-import type { components } from "@/types/api.generated";
+import type React from 'react'
+import type { useMutation, useQueryClient } from '@tanstack/react-query'
+import type { Service } from '@/stores/filterStore'
+import type { SSELine, SSEStatus } from '@/hooks/useSSE'
+import type { Schema } from '@/types/api'
 
-export type ProvisionService = components["schemas"]["ProvisionService"];
+export type ProvisionService = Schema<"ProvisionService">
+export type LogFieldsCatalog = Schema<"LogFieldsCatalogResponse">
+export type LogFieldsConfig = Schema<"LogFieldsConfig">
+export type ValidateResponse = Schema<"ProvisionValidateResponse">
 
-export const WIZARD_DRAFT_VERSION = 1;
+export const WIZARD_DRAFT_VERSION = 2
 
 export type Step =
   | "mode"
@@ -18,60 +21,54 @@ export type Step =
   | "fields"
   | "execute"
   | "terraform"
-  | "join"
-  | "analyze"
-  | "settings"
-  | "confirm";
+  | "connect"
 
-export type WizardMode = "provision" | "join" | "ingest" | null;
-
-export type FosStatus = "idle" | "checking" | "success" | "error";
-
-export type DomainStatus = "idle" | "checking" | "available" | "taken" | "error";
-
-export type JoinPhase = "form" | "connecting" | "importing" | "done";
+export type WizardMode = "provision" | "ingest" | null
+export type FosStatus = "idle" | "checking" | "success" | "error"
+export type DomainStatus = "idle" | "checking" | "available" | "taken" | "error"
+export type SetupPhase = "form" | "done"
 
 export interface TokenInfo {
-  id: string;
-  name: string;
-  type: "user" | "automation";
+  id: string
+  name: string
+  type: "user" | "automation"
 }
 
 export interface ProvisionConfig {
-  endpoint_name: string;
-  fos_region: string;
-  fos_endpoint: string;
-  fos_bucket_name: string;
-  fos_prefix: string;
-  fos_access_key: string;
-  fos_secret_key: string;
-  sample_rate: number;
-  edge_only: boolean;
-  custom_condition: string;
-  log_period: number;
-  cdn_service_name: string;
-  cdn_prefix: string;
-  cdn_shield: string;
-  cdn_url: string;
-  cdn_secret: string;
-  enable_cron_sync: boolean;
-  delete_after: boolean;
-  commit_interval_mins: number;
-  enable_cron_compact: boolean;
-  log_fields: any;
-  ngwaf_workspace_id: string;
-  cmcd_enabled: boolean;
-  cmcd_mode: string;
-  cmcd_version: number;
-  logging_enabled: boolean;
-  rum_enabled: boolean;
-  log_retention_days: number;
-  rum_retention_days: number;
-  rum_custom_condition: string;
-  // Pinned Faro Web SDK version chosen in the RUM version picker
-  // (StorageStep). null = unpinned — the backend serves whatever is
-  // currently pinned on the service, or nothing if RUM was never enabled.
-  faro_version: string | null;
+  endpoint_name: string
+  fos_region: string
+  fos_endpoint: string
+  fos_bucket_name: string
+  fos_prefix: string
+  fos_access_key: string
+  fos_secret_key: string
+  sample_rate: number
+  edge_only: boolean
+  custom_condition: string
+  log_period: number
+  cdn_service_name: string
+  cdn_prefix: string
+  cdn_shield: string
+  cdn_url: string
+  cdn_secret: string
+  enable_cron_sync: boolean
+  delete_after: boolean
+  commit_interval_mins: number
+  enable_cron_compact: boolean
+  log_fields: LogFieldsConfig
+  ngwaf_workspace_id: string
+  cmcd_enabled: boolean
+  cmcd_mode: string
+  cmcd_version: number
+  logging_enabled: boolean
+  rum_enabled: boolean
+  rum_log_period: number
+  log_retention_days: number
+  rum_retention_days: number
+  cache_retention_days: number
+  rollup_retention_months: number
+  rum_custom_condition: string
+  faro_version: string | null
 }
 
 export const INITIAL_CONFIG: ProvisionConfig = {
@@ -86,6 +83,7 @@ export const INITIAL_CONFIG: ProvisionConfig = {
   edge_only: true,
   custom_condition: "",
   log_period: 60,
+  rum_log_period: 300,
   cdn_service_name: "",
   cdn_prefix: "",
   cdn_shield: "iad-va-us",
@@ -95,7 +93,7 @@ export const INITIAL_CONFIG: ProvisionConfig = {
   delete_after: true,
   commit_interval_mins: 5,
   enable_cron_compact: true,
-  log_fields: { groups: [], field_overrides: {} } as any,
+  log_fields: { groups: [], field_overrides: {} },
   ngwaf_workspace_id: "",
   cmcd_enabled: false,
   cmcd_mode: "query_string",
@@ -104,253 +102,121 @@ export const INITIAL_CONFIG: ProvisionConfig = {
   rum_enabled: false,
   log_retention_days: 30,
   rum_retention_days: 30,
+  cache_retention_days: 14,
+  rollup_retention_months: 12,
   rum_custom_condition: "",
   faro_version: null,
-};
-
-export type PersistedConfig = Omit<
-  ProvisionConfig,
-  "fos_access_key" | "fos_secret_key" | "cdn_secret"
->;
-
-export interface WizardDraft {
-  version: number;
-  draftId: string;
-  mode: Exclude<WizardMode, null>;
-  step: Step;
-  currentStep: Step;
-  selectedServiceId: string | null;
-  selectedServiceName: string | null;
-  selectedCdnServiceId: string | null;
-  selectedCdnServiceName: string | null;
-  tokenInfo: TokenInfo | null;
-  config: PersistedConfig;
-  importMode: "all" | "range";
-  importRange: { start: string; end: string };
-  syncEnabled: boolean;
-  syncIntervalMins: string;
-  icebergMetadataLocation: string;
-  updatedAt: string;
-  createdAt: string;
 }
 
-// Mapping from Fastly Object Storage region to Fastly Shield POP
-export const SHIELD_MAP: Record<string, string> = {
-  "us-east-1": "iad-va-us", // Ashburn, VA
-  "us-west": "bfi-wa-us", // Seattle, WA (BFI)
-  "us-central-1": "chi-il-us", // Chicago, IL (CHI)
-  "eu-central-1": "frankfurt-de", // Frankfurt, Germany
-  "eu-south-1": "mxp-milan-it", // Milan, Italy
-  "eu-west-1": "mxp-paris-fr", // Paris, France
-  "uk-east-1": "london-uk", // London, UK
-  "jp-central-1": "nrt-tokyo-jp", // Tokyo, Japan (NRT)
-  "au-east-1": "sydney-au", // Sydney, Australia
-};
+export type PersistedConfig = Omit<ProvisionConfig, "fos_access_key" | "fos_secret_key" | "cdn_secret">
 
-export const REGION_LABELS: Record<string, string> = {
-  "us-east-1": "US East (Ashburn)",
-  "us-west": "US West (Seattle)",
-  "us-central-1": "US Central (Chicago)",
-  "eu-central-1": "EU Central (Frankfurt)",
-  "eu-south-1": "EU South (Milan)",
-  "eu-west-1": "EU West (Paris)",
-  "uk-east-1": "UK East (London)",
-  "jp-central-1": "JP Central (Tokyo)",
-  "au-east-1": "AU East (Sydney)",
-};
-
-export const SHIELD_LABELS: Record<string, string> = {
-  none: "None",
-  "iad-va-us": "IAD (Ashburn)",
-  "bfi-wa-us": "BFI (Seattle)",
-  "chi-il-us": "CHI (Chicago)",
-  "frankfurt-de": "FRA (Frankfurt)",
-  "mxp-milan-it": "MXP (Milan)",
-  "mxp-paris-fr": "MXP (Paris)",
-  "london-uk": "LHR (London)",
-  "nrt-tokyo-jp": "NRT (Tokyo)",
-  "sydney-au": "SYD (Sydney)",
-};
+export interface WizardDraft {
+  version: number
+  draftId: string
+  mode: Exclude<WizardMode, null>
+  step: Step
+  currentStep: Step
+  selectedServiceId: string | null
+  selectedServiceName: string | null
+  selectedCdnServiceId: string | null
+  selectedCdnServiceName: string | null
+  tokenInfo: TokenInfo | null
+  config: PersistedConfig
+  updatedAt: string
+  createdAt: string
+}
 
 export function getStepsForMode(
   mode: WizardMode,
-  config?: { logging_enabled?: boolean }
+  config?: { logging_enabled?: boolean },
 ): { id: Step; label: string }[] {
-  if (mode === "join") {
-    return [
-      { id: "mode", label: "Role" },
-      { id: "join", label: "Connect" },
-      { id: "analyze", label: "Analyze" },
-      { id: "settings", label: "Settings" },
-      { id: "confirm", label: "Confirm" },
-    ];
-  }
-
-  const steps = [
-    { id: "mode" as Step, label: "Role" },
-    { id: "token" as Step, label: "Auth" },
-    { id: "service" as Step, label: "Service" },
-    { id: "features" as Step, label: "Features" },
-    { id: "storage" as Step, label: "Storage" },
-  ];
-
+  const steps: { id: Step; label: string }[] = [
+    { id: "mode", label: "Role" },
+    { id: "token", label: "Auth" },
+    { id: "service", label: "Service" },
+  ]
+  if (mode === "ingest") steps.push({ id: "connect", label: "Connect" })
+  steps.push({ id: "features", label: "Features" }, { id: "storage", label: "Storage" })
   if (!config || config.logging_enabled !== false) {
-    steps.push(
-      { id: "ngwaf" as Step, label: "NGWAF" },
-      { id: "fields" as Step, label: "Log Fields" }
-    );
+    steps.push({ id: "ngwaf", label: "NGWAF" }, { id: "fields", label: "Log Fields" })
   }
-
-  steps.push({ id: "execute" as Step, label: "Review" });
-  return steps;
+  steps.push({ id: "execute", label: "Review" })
+  return steps
 }
 
-export const PERIOD_LABELS: Record<string, string> = {
-  "1": "1 second",
-  "5": "5 seconds",
-  "10": "10 seconds",
-  "20": "20 seconds",
-  "30": "30 seconds",
-  "60": "1 minute",
-  "120": "2 minutes",
-  "300": "5 minutes",
-};
-
 export interface ProvisionWizardProps {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
+  open: boolean
+  onOpenChange: (open: boolean) => void
 }
 
 export interface WizardState {
-  // Stores
-  setActiveServiceId: (id: string) => void;
-  setServices: (services: Service[]) => void;
-  services: Service[];
-  timezone: string;
-  queryClient: ReturnType<typeof useQueryClient>;
-
-  // Step state
-  step: Step;
-  setStep: (s: Step) => void;
-  mode: WizardMode;
-  setMode: (m: WizardMode) => void;
-
-  // Token / Service
-  token: string;
-  setToken: (t: string) => void;
-  tokenInfo: TokenInfo | null;
-  search: string;
-  setSearch: (s: string) => void;
-  selectedService: ProvisionService | null;
-  setSelectedService: (s: ProvisionService | null) => void;
-  selectedCdnService: ProvisionService | null;
-  setSelectedCdnService: (s: ProvisionService | null) => void;
-
-  // Provision / Deploy
-  isDeploying: boolean;
-  fosStatus: FosStatus;
-  fosError: string;
-  terraformFiles: Record<string, string>;
-  selectedTfFile: string;
-  setSelectedTfFile: (f: string) => void;
-  isFetchingTerraform: boolean;
-  configStatus: {
-    logging_service: { ok: boolean; details: string };
-    cdn_service: { ok: boolean; details: string };
-  } | null;
-  isCheckingConfig: boolean;
-  handleCheckConfig: () => Promise<void>;
-
-  // NGWAF
-  ngwafWorkspaces: { id: string; name: string }[];
-  ngwafFetching: boolean;
-  ngwafFetchError: string;
-  ngwafDebugRaw: string;
-
-  // Analyst Flow
-  lakeInfo: any;
-  isAnalyzing: boolean;
-  importMode: "all" | "range";
-  setImportMode: (m: "all" | "range") => void;
-  importRange: { start: string; end: string };
-  setImportRange: React.Dispatch<
-    React.SetStateAction<{ start: string; end: string }>
-  >;
-  syncEnabled: boolean;
-  setSyncEnabled: (b: boolean) => void;
-
-  // SSE
-  lines: SSELine[];
-  status: SSEStatus;
-  isDone: boolean;
-  sseError: string | null;
-  stop: () => void;
-
-  // Modal
-  handleModalClose: (isOpen: boolean) => void;
-  onOpenChange: (open: boolean) => void;
-
-  // Config
-  config: ProvisionConfig;
-  setConfig: React.Dispatch<React.SetStateAction<ProvisionConfig>>;
-
-  // Catalog
-  catalog: any;
-  isLoadingCatalog: boolean;
-
-  // Field helpers
-  toggleGroup: (groupId: string, checked: boolean) => void;
-  toggleField: (
-    fieldId: string,
-    checked: boolean,
-    defaultEnabledByGroup: boolean,
-  ) => void;
-  updateFieldLimit: (fieldId: string, limit?: number) => void;
-  togglePreset: (presetGroups: string[]) => void;
-  isPresetActive: (groups: string[]) => boolean;
-  estimatedBytes: number;
-
-  // Services list
-  servicesData: any;
-  servicesError: Error | null;
-  isLoadingServices: boolean;
-  filteredServices: any[];
-
-  // Handlers
-  handleTokenSubmit: () => Promise<void>;
-  validateMutation: ReturnType<typeof useMutation<any, any, string>>;
-  handleServiceSelect: (service: ProvisionService) => void;
-  handleCheckFos: (vals?: {
-    bucket?: string;
-    region?: string;
-    access_key?: string;
-    secret_key?: string;
-  }) => Promise<void>;
-  checkDomain: (prefix: string) => Promise<void>;
-  domainStatus: DomainStatus;
-  domainMessage: string;
-
-  // Join flow
-  joinPhase: JoinPhase;
-  joinedServiceId: string;
-  syncIntervalMins: string;
-  setSyncIntervalMins: (s: string) => void;
-  icebergMetadataLocation: string;
-  setIcebergMetadataLocation: (s: string) => void;
-  estimatedImportSize: number;
-  handleAnalyzeLake: () => Promise<void>;
-  handleJoin: () => void;
-  handleFinishJoin: () => void;
-
-  handleDeploy: () => void;
-  fetchTerraformPreview: () => Promise<void>;
-  handleExportTerraform: () => Promise<void>;
-  handleAdminIngest: () => Promise<void>;
-
-  STEPS: { id: Step; label: string }[];
-
-  // U-7 Resume-from-failure
-  pendingDraft: WizardDraft | null;
-  resumeDraft: () => void;
-  discardDraft: () => void;
+  setActiveServiceId: (id: string) => void
+  setServices: (services: Service[]) => void
+  services: Service[]
+  timezone: string
+  queryClient: ReturnType<typeof useQueryClient>
+  step: Step
+  setStep: (s: Step) => void
+  mode: WizardMode
+  setMode: (m: WizardMode) => void
+  token: string
+  setToken: (t: string) => void
+  tokenInfo: TokenInfo | null
+  search: string
+  setSearch: (s: string) => void
+  selectedService: ProvisionService | null
+  setSelectedService: (s: ProvisionService | null) => void
+  selectedCdnService: ProvisionService | null
+  setSelectedCdnService: (s: ProvisionService | null) => void
+  isDeploying: boolean
+  fosStatus: FosStatus
+  fosError: string
+  terraformFiles: Record<string, string>
+  selectedTfFile: string
+  setSelectedTfFile: (f: string) => void
+  isFetchingTerraform: boolean
+  configStatus: Schema<"ProvisionCheckConfigResponse"> | null
+  isCheckingConfig: boolean
+  handleCheckConfig: () => Promise<void>
+  ngwafWorkspaces: { id: string; name: string }[]
+  ngwafFetching: boolean
+  ngwafFetchError: string
+  ngwafDebugRaw: string
+  lines: SSELine[]
+  status: SSEStatus
+  isDone: boolean
+  sseError: string | null
+  stop: () => void
+  handleModalClose: (isOpen: boolean) => void
+  onOpenChange: (open: boolean) => void
+  config: ProvisionConfig
+  setConfig: React.Dispatch<React.SetStateAction<ProvisionConfig>>
+  catalog: LogFieldsCatalog | undefined
+  isLoadingCatalog: boolean
+  toggleGroup: (groupId: string, checked: boolean) => void
+  toggleField: (fieldId: string, checked: boolean, defaultEnabledByGroup: boolean) => void
+  updateFieldLimit: (fieldId: string, limit?: number) => void
+  togglePreset: (presetGroups: string[]) => void
+  isPresetActive: (groups: string[]) => boolean
+  estimatedBytes: number
+  servicesData: ProvisionService[] | undefined
+  servicesError: Error | null
+  isLoadingServices: boolean
+  filteredServices: ProvisionService[]
+  handleTokenSubmit: () => Promise<void>
+  validateMutation: ReturnType<typeof useMutation<ValidateResponse | undefined, Error, string>>
+  handleServiceSelect: (service: ProvisionService) => void
+  handleCheckFos: (vals?: { bucket?: string; region?: string; access_key?: string; secret_key?: string }) => Promise<void>
+  checkDomain: (prefix: string) => Promise<void>
+  domainStatus: DomainStatus
+  domainMessage: string
+  setupPhase: SetupPhase
+  handleDeploy: () => void
+  fetchTerraformPreview: () => Promise<void>
+  handleExportTerraform: () => Promise<void>
+  handleAdminIngest: () => Promise<void>
+  STEPS: { id: Step; label: string }[]
+  pendingDraft: WizardDraft | null
+  resumeDraft: () => void
+  discardDraft: () => void
 }
