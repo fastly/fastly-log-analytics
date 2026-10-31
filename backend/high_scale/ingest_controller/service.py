@@ -67,7 +67,6 @@ from backend.high_scale.archive import (
 from backend.models.analytics import AssetsAggregatesResponse, AssetsRequest
 from backend.repositories.utils.response_cache import (
     ResponseMemo,
-    bucket_time_to_minute,
     digest_cache_key,
     serialize_filters_for_key,
 )
@@ -606,8 +605,8 @@ def assets_aggregates(
     cache_key = digest_cache_key(
         {
             "svc": service.service_id,
-            "s": bucket_time_to_minute(start_time),
-            "e": bucket_time_to_minute(end_time),
+            "s": start_dt.isoformat() if start_time else None,
+            "e": end_dt.isoformat() if end_time else None,
             "f": serialize_filters_for_key(req.filters),
         },
         {"name": service.service_id},

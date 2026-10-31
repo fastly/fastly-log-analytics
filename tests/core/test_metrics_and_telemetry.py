@@ -776,6 +776,80 @@ def test_route_request_context_tenancy(get_kwargs, expected_status, expected_jso
     assert (r.json() == expected_json) if expected_status == 200 else (r.json()["detail"]["error"] == expected_json)
 
 
+@pytest.mark.security_regression
+def test_enforce_service_access_checks_path_query_and_header_params():
+    sess = SimpleNamespace(service_ids=["svc-a"])
+    for kwargs in (
+        {"path_params": {"service_id": "svc-b"}},
+        {"query_params": {"service_id": "svc-b"}},
+        {"headers": {"x-service-id": "svc-b"}},
+        {"path_params": {"service_id": "svc-b"}, "query_params": {"service_id": "svc-a"}},
+    ):
+        req = SimpleNamespace(state=SimpleNamespace(analyst_session=sess), **kwargs)
+        with pytest.raises(HTTPException) as exc:
+            _enforce_service_access(req, "svc-a")
+        assert exc.value.status_code == 403 and exc.value.detail["error"] == "service_not_authorized"
+
+    req_ok = SimpleNamespace(
+        state=SimpleNamespace(analyst_session=sess),
+        path_params={"service_id": "svc-a"},
+        query_params={"service_id": "svc-a"},
+        headers={"x-service-id": "svc-a"},
+    )
+    assert _enforce_service_access(req_ok, None) == "svc-a"
+
+
+def test_build_request_context_records_http_exception_status_code():
+    request = MagicMock(state=SimpleNamespace(analyst_session=None), method="GET")
+    request.url.path = "/api/test"
+    request.scope = {}
+    with (
+        patch(
+            "backend.core.request_context._resolve_source",
+            return_value={"name": "svc-1", "endpoint_url": "http://localhost"},
+        ),
+        patch.object(RequestTelemetry, "end_request") as mock_end,
+    ):
+        gen = rc.build_request_context(request, service_id="svc-1")
+        _ = next(gen)
+        with pytest.raises(HTTPException):
+            gen.throw(HTTPException(status_code=503, detail="busy"))
+    assert mock_end.call_args_list[0].kwargs.get("status_code") == 503
+
+
+@pytest.mark.security_regression
+def test_analyst_service_scope_enforced_on_sync_extents_presets_and_scoring_events():
+    from backend.routers.admin import sync_status as sync_status_mod
+    from backend.routers.query import router as query_router
+    from backend.routers.session_scoring import router as scoring_router
+
+    sub_app = FastAPI()
+
+    @sub_app.middleware("http")
+    async def install_analyst(request: FRequest, call_next):
+        request.state.analyst_session = SimpleNamespace(service_ids=["svc-a"])
+        return await call_next(request)
+
+    sub_app.include_router(sync_status_mod.router)
+    sub_app.include_router(sync_status_mod.meta_router)
+    sub_app.include_router(query_router)
+    sub_app.include_router(scoring_router)
+
+    client = TestClient(sub_app)
+    for path in (
+        "/api/sync-status?service_id=svc-b",
+        "/api/log-extents?service_id=svc-b",
+        "/api/log-extents/stream?service_id=svc-b",
+        "/api/presets?service_id=svc-b",
+        "/api/services/svc-b/scoring/sessions/deadbeef1234/events",
+    ):
+        resp = client.get(path)
+        assert resp.status_code == 403, f"Expected 403 for {path}, got {resp.status_code}: {resp.text}"
+        body = resp.json()
+        detail = body.get("detail", body)
+        assert detail.get("error") == "service_not_authorized"
+
+
 @pytest.mark.parametrize(("mode", "svc_key"), [("cancel", "svc-cancel"), ("error", "svc-err")])
 def test_request_context_pool_checkout_lifecycle(monkeypatch, mode: str, svc_key: str):
     pool = duckdb_pool._Pool(service_key=svc_key, max_size=2)

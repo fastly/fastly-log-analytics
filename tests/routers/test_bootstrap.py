@@ -2195,3 +2195,64 @@ def test_schema_endpoint_durable_mode_uses_catalog_without_duckdb_con(client, te
         resp2 = client.get("/api/schema", headers=_SVC_HDR)
         assert resp2.status_code == 200
     _clear_schema_cache()
+
+
+def test_correlate_filters_to_4xx_5xx_error_cohort_in_standard_and_high_scale(in_memory_duckdb):
+    in_memory_duckdb.execute("CREATE TABLE logs_cr_err_test (timestamp TIMESTAMPTZ, url VARCHAR, status INTEGER)")
+    ts = datetime(2026, 10, 20, 11, 30, tzinfo=UTC)
+    in_memory_duckdb.executemany(
+        "INSERT INTO logs_cr_err_test VALUES (?, ?, ?)",
+        [
+            (ts, "/ok", 200),
+            (ts, "/ok", 200),
+            (ts, "/redir", 302),
+            (ts, "/notfound", 404),
+            (ts, "/notfound", 404),
+            (ts, "/notfound", 404),
+            (ts, "/boom", 503),
+        ],
+    )
+    try:
+        rows, latest_ts = cr_mod.correlate_top_values(
+            in_memory_duckdb,
+            "logs_cr_err_test",
+            "url",
+            datetime(2026, 10, 20, 11, 0, tzinfo=UTC),
+            10,
+            service_id="svc_cr",
+        )
+        assert rows == [("/notfound", 3), ("/boom", 1)]
+        assert latest_ts is not None
+    finally:
+        in_memory_duckdb.execute("DROP TABLE IF EXISTS logs_cr_err_test")
+
+    captured_ch: list[tuple[str, dict]] = []
+
+    class _HSClient:
+        def execute(self, sql: str, params: dict | None = None):
+            captured_ch.append((sql, params or {}))
+            return [{"value": "/notfound", "aggregate_count": 3}, {"value": "/boom", "aggregate_count": 1}]
+
+    hs_svc = SimpleNamespace(
+        service_id=MOCK_SERVICE_ID,
+        client=_HSClient(),
+        watermark_for=lambda _dom: SimpleNamespace(coverage_end=ts, validate=lambda: None),
+    )
+    fake_reg = SimpleNamespace(resolve=lambda sid: hs_svc if sid == MOCK_SERVICE_ID else None)
+    resp = asyncio.run(
+        cr_mod.control_room_correlate(
+            service_id=MOCK_SERVICE_ID,
+            body=cr_mod.CorrelateRequest(dimension="url", window_minutes=15, limit=10),
+            request=SimpleNamespace(state=SimpleNamespace(analyst_session=None)),  # type: ignore[arg-type]
+            registry=fake_reg,  # type: ignore[arg-type]
+        )
+    )
+    assert resp["top"] == [
+        {"value": "/notfound", "count": 3},
+        {"value": "/boom", "count": 1},
+    ]
+    top_sql, top_params = captured_ch[0]
+    assert "FROM request_facts" in top_sql
+    assert "toInt32OrZero(custom_fields['status']) BETWEEN 400 AND 599" in top_sql
+    assert "high_scale_batch_publications FINAL" in top_sql and "publication_state='visible'" in top_sql
+    assert top_params["service_id"] == MOCK_SERVICE_ID and top_params["limit"] == 10

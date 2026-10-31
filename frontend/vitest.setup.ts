@@ -88,13 +88,26 @@ expect.extend(matchers)
 // ([lib/api.ts](./lib/api.ts)). If we hadn't patched fetch yet, the
 // captured reference would be the unpatched original and MSW would never
 // see those requests.
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]'])
+
 server.listen({
   onUnhandledRequest(request, print) {
-    const url = new URL(request.url)
+    let url: URL
+    try {
+      url = new URL(request.url)
+    } catch {
+      // Relative URL without a base origin in a test stub.
+      return
+    }
+    // Reject any unhandled request to a non-loopback (external) host.
+    if (!LOOPBACK_HOSTS.has(url.hostname)) {
+      print.error()
+      return
+    }
     // Backend base URL = 127.0.0.1:8000 (see ``handlers.ts``). Any
-    // other localhost port belongs to a test-owned http server (the
-    // SSR helper tests stand one up on a random port); let those
-    // through untouched.
+    // other loopback port belongs to a test-owned http server (the
+    // SSR helper tests stand one up on a random port) or jsdom's
+    // relative-URL origin; let those through untouched.
     const isBackendBase = url.hostname === '127.0.0.1' && url.port === '8000'
     if (!isBackendBase) return
     print.error()

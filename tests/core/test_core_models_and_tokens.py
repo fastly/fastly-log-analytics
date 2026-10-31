@@ -889,6 +889,21 @@ def test_rum_pause_and_restore_flags():
     assert _pause_rum_flags(cfg3) is None and cfg3 == {"rum": {}}
 
 
+@pytest.mark.usefixtures("_stub_storage_catalog")
+def test_clickhouse_purge_failure_propagates_instead_of_emitting_done(monkeypatch, s3_mock, fos_source, fake_scheduler):
+    _save_config()
+    fake_ch = MagicMock()
+    fake_ch.execute.side_effect = RuntimeError("ClickHouse mutation failed")
+    monkeypatch.setattr("backend.config.is_high_scale_mode", lambda _src: True)
+    monkeypatch.setattr("backend.core.clickhouse.get_clickhouse_client", lambda: fake_ch)
+
+    events = []
+    with pytest.raises(RuntimeError, match="Failed to purge ClickHouse tables"):
+        for ev in reset_mod.reset_service_logs(MOCK_SERVICE_ID, reload_scheduler=fake_scheduler):
+            events.append(ev)
+    assert all(ev.get("type") != "done" for ev in events)
+
+
 # ── Merged from tests/services/test_service_manager.py ──
 
 

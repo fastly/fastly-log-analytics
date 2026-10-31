@@ -70,32 +70,49 @@ class _AbortableQueue(queue.Queue):
         self.aborted = False
 
     def put(self, item: Any, block: bool = True, timeout: float | None = None) -> None:
-        if self.aborted:
-            if item is None:
+        if item is None:
+            if self.aborted:
+                from contextlib import suppress
+
+                with suppress(queue.Full):
+                    super().put(None, block=False)
                 return
+            super().put(None, block=block, timeout=timeout)
+            return
+        if self.aborted:
             raise ClientDisconnected("Client disconnected during streaming")
         super().put(item, block, timeout)
 
+    def abort(self) -> None:
+        self.aborted = True
+        while True:
+            try:
+                self.get_nowait()
+            except queue.Empty:
+                break
+        self.put(None, block=False)
 
-def _stream_from_worker(worker: Callable[[_AbortableQueue], Any], *, maxsize: int = 10) -> Generator[Any]:
+
+def _stream_from_worker(
+    worker: Callable[[_AbortableQueue], Any],
+    *,
+    maxsize: int = 10,
+    q: _AbortableQueue | None = None,
+) -> Generator[Any]:
     """Run *worker(q)* in a daemon thread and yield items it puts into the queue until ``None``."""
-    q: _AbortableQueue = _AbortableQueue(maxsize=maxsize)
+    if q is None:
+        q = _AbortableQueue(maxsize=maxsize)
     ctx = contextvars.copy_context()
     thread = threading.Thread(target=lambda: ctx.run(worker, q), daemon=True)
     thread.start()
     try:
         while True:
             chunk = q.get()
-            if chunk is None:
+            if chunk is None or q.aborted:
                 break
             yield chunk
     finally:
-        q.aborted = True
-        while True:
-            try:
-                q.get_nowait()
-            except queue.Empty:
-                break
+        q.abort()
 
 
 def stream_sse_from_worker(
@@ -105,24 +122,36 @@ def stream_sse_from_worker(
     maxsize: int = 0,
 ) -> EventSourceResponse:
     """Run *worker(q)* in a background daemon thread via ``_stream_from_worker`` and stream JSON SSE frames."""
+    from contextlib import suppress
 
     def _safe_worker(q: _AbortableQueue) -> None:
         try:
             worker(q)
+        except ClientDisconnected:
+            pass
         finally:
             q.put(None)
 
     async def _stream() -> AsyncIterator[str]:
-        gen = _stream_from_worker(_safe_worker, maxsize=maxsize)
+        q: _AbortableQueue = _AbortableQueue(maxsize=maxsize)
+        gen = _stream_from_worker(_safe_worker, maxsize=maxsize, q=q)
         sentinel = object()
+        next_task: asyncio.Task[Any] | None = None
         try:
             while True:
-                event = await asyncio.to_thread(next, gen, sentinel)
+                next_task = asyncio.create_task(asyncio.to_thread(next, gen, sentinel))
+                event = await next_task
+                next_task = None
                 if event is sentinel:
                     break
                 yield event if isinstance(event, str) else json.dumps(event)
         finally:
-            gen.close()
+            q.abort()
+            if next_task is not None and not next_task.done():
+                with suppress(Exception):
+                    await asyncio.wait({next_task}, timeout=1.0)
+            with suppress(ValueError, RuntimeError):
+                gen.close()
 
     return sse_response(_stream(), ping=ping)
 

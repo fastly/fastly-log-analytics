@@ -77,7 +77,7 @@ function buildServiceColumns(deps: ServiceColumnDeps): ColumnDef<ServiceConfig>[
                 {files > 0 && (
                   <Button variant="ghost" size="icon" aria-label="Download local cache as ZIP" className="h-4 w-4 p-0 ml-0.5 hover:bg-transparent text-muted-foreground hover:text-primary transition-colors" title="Download local cache as ZIP" onClick={(e) => {
                     e.stopPropagation(); const sid = row.original.service_id
-                    void adminFetch(`/api/download-all?service_id=${encodeURIComponent(sid)}&include=local`).then(async (res) => { if (res.ok) downloadBlob(await res.blob(), `${sid}_local_cache.zip`) })
+                    void adminFetch(`/api/download-all?service_id=${encodeURIComponent(sid)}&include=local`).then(async (res) => { if (res.ok) downloadBlob(await res.blob(), `${sid}_local_cache.zip`) }).catch(() => {})
                   }}><CloudDownload className="h-3 w-3" /></Button>
                 )}
               </span>

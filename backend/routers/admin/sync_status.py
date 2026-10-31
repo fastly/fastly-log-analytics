@@ -15,7 +15,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from backend.celery_app import publisher as sync_status_publisher
 from backend.core import duckdb as _db_mod
-from backend.core.request_context import get_service_id, get_source
+from backend.core.request_context import get_service_id, get_source, require_service_access
 from backend.cron.scheduler import compute_sync_status_cached
 from backend.models.admin import (
     IngestedFilesResponse,
@@ -60,6 +60,7 @@ def sync_status(
     service_id: str | None = Depends(get_service_id),
     skip_fos: bool = Query(default=False),
     force: bool = Query(default=False),
+    _scope: str | None = Depends(require_service_access),
 ) -> SyncStatusResponse:
     from backend import config as svcconfig
     from backend.utils.telemetry import clear_queries
@@ -129,7 +130,10 @@ def sync_status(
 
 
 @meta_router.get("/log-extents", response_model=LogExtentsResponse)
-def log_extents(service_id: str | None = Depends(get_service_id)) -> LogExtentsResponse:
+def log_extents(
+    service_id: str | None = Depends(get_service_id),
+    _scope: str | None = Depends(require_service_access),
+) -> LogExtentsResponse:
     """Return only the earliest/latest log timestamps for the FilterBar."""
     from backend import config as svcconfig
 
@@ -162,6 +166,7 @@ def log_extents(service_id: str | None = Depends(get_service_id)) -> LogExtentsR
 async def log_extents_stream(
     request: Request,
     service_id: str | None = Depends(get_service_id),
+    _scope: str | None = Depends(require_service_access),
 ) -> EventSourceResponse:
     """Analyst-safe SSE projection of the cached sync-status snapshot."""
     service_id = require_service_id(service_id)

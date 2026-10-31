@@ -68,12 +68,11 @@ services:
     - LOCAL_ADMIN_CIDRS=172.28.0.0/16
     - CELERY_BROKER_URL=redis://valkey:6379/0
     - DEPLOYMENT_MODE=high_scale
-    # Celery/multipod mode also REQUIRES shared metadata: per-service SQLite
-    # is a pod-local file, so the cron lease / ingest ledger / ingested-file
-    # manifest would each be private to one process. This stack only ever
-    # "worked" on SQLite because backend and worker share the ./data bind
-    # mount on one host — that is not a topology, it is a coincidence.
-    # validate_deployment_mode() now refuses to boot celery mode without it.
+    - FLA_PRODUCTION=${FLA_PRODUCTION:-0}
+    # All operational metadata (cron leases, ingest ledger, ingested-file
+    # manifests, alerts, views, usage logs) lives in shared PostgreSQL 16
+    # (ADR-22). validate_deployment_mode() requires METADATA_DSN across all
+    # backend and worker pods.
     # Same Postgres instance and database as the DuckLake catalog above:
     # separate table namespaces, one container to run locally. They are
     # separate concerns and nothing in the code assumes they coincide.
@@ -94,8 +93,8 @@ services:
     stop_grace_period: 75s
     volumes:
     - ./configs:/app/configs
-    # Keep pod-local SQLite usage logs and disposable caches out of the
-    # host sync topology. Durable ingest state is Postgres/DuckLake/FOS.
+    # Keep pod-local staging files and disposable caches out of the
+    # host sync topology. All durable metadata and ingest state is in Postgres/DuckLake/FOS.
     - multipod-data:/app/data
     - multipod-cache:/app/cache
   caddy:
@@ -127,7 +126,7 @@ services:
     extends:
       file: docker-compose.common.yml
       service: postgres
-    image: postgres:17-alpine
+    image: postgres:16-alpine
     # max_connections raised from the default 100: the metadata pool is sized
     # per PROCESS (METADATA_PG_POOL_MAX, default 32) and backend + worker
     # each hold their own, while DuckLake's catalog connections draw on
@@ -163,13 +162,10 @@ services:
   metadata-schema-init:
     image: *backend-image
     build: *backend-build
-    # One-shot: NOTHING creates the Postgres metadata schema at runtime.
-    # metadata/base.py wires _init_schema as the SQLite pool's schema_fn
-    # only, so SQLite self-initializes on first use and Postgres does not —
-    # without this step the stack boots clean and then fails every metadata
-    # query with `relation "cron_runs" does not exist`. Idempotent (every
-    # statement is CREATE ... IF NOT EXISTS and nothing is dropped), so it
-    # re-runs harmlessly on each `up` against a populated database.
+    # One-shot: initializes the PostgreSQL 16 metadata schema before backend
+    # and worker pods start serving traffic. Idempotent (every statement is
+    # CREATE ... IF NOT EXISTS and nothing is dropped), so it re-runs
+    # harmlessly on each `up` against a populated database.
     command: ["python", "scripts/setup_pg_schema.py"]
     depends_on:
       postgres:
@@ -185,9 +181,8 @@ services:
       disable: true
     restart: "no"
     volumes:
-    # The runtime image only ships scripts/generate_openapi.py; mount the
-    # rest rather than growing the production image for a local-dev-only
-    # bootstrap step.
+    # scripts/setup_pg_schema.py is also baked into the runtime image; mounting
+    # ./scripts here keeps local-dev edits immediately visible without rebuild.
     - ./scripts:/app/scripts:ro
 
   worker:
@@ -223,6 +218,7 @@ services:
     # Cron/ingest bodies execute here and gate on DEPLOYMENT_MODE; SSE progress
     # events publish through the valkey backplane.
     - DEPLOYMENT_MODE=high_scale
+    - FLA_PRODUCTION=${FLA_PRODUCTION:-0}
     - *ducklake-catalog
     # Shared metadata — same rationale as the backend service above.
     - *metadata-dsn

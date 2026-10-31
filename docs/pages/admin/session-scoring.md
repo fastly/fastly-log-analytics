@@ -1,6 +1,6 @@
 # Session Scoring (`/admin/session-scoring`)
 
-Admin console for edge session scoring: a 0 to 100 risk score per request that combines cookie and timing signals (L1) with a PageRank route-transition matrix (L2). The Rust scorer in [`compute/scorer/`](../../../compute/scorer/) runs on Fastly Compute and reads the matrix from a KV store at runtime. Operational background is in the [session scoring runbook](../../session_scoring_runbook.md).
+Admin console for edge session scoring: a 0 to 100 risk score per request that combines cookie and timing signals (L1) with a Laplace-smoothed direct route-transition anomaly matrix (L2, with anchor skip-grams disabled). The Rust scorer in [`compute/scorer/`](../../../compute/scorer/) runs on Fastly Compute and reads the matrix from a KV store at runtime. Operational background is in the [session scoring runbook](../../session_scoring_runbook.md).
 
 Source: [`frontend/app/admin/session-scoring/page.tsx`](../../../frontend/app/admin/session-scoring/page.tsx) and [`frontend/components/SessionScoring/`](../../../frontend/components/SessionScoring/) (status, threshold slider, exclude-regex, matrix versions, labels, health, evaluation and top-flagged components).
 

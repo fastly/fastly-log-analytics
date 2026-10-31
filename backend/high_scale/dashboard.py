@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import sys
-from datetime import datetime
+from collections.abc import Iterable, Mapping
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from backend.core.request_telemetry import HighScaleSections
@@ -343,7 +344,7 @@ def _filtered_aggregates(
     if start is not None and end is not None:
         end_upper = end
         clauses.append("event_timestamp >= {start:DateTime64(3)}")
-        clauses.append("event_timestamp < {end_upper:DateTime64(3)}")
+        clauses.append("event_timestamp <= {end_upper:DateTime64(3)}")
         params.update({"start": start, "end_upper": end_upper})
 
     where_clause = " AND ".join(clauses)
@@ -403,6 +404,88 @@ def _filtered_aggregates(
         earliest_log_at=_watermark_extent(request_watermark.coverage_start),
         latest_log_at=_watermark_extent(request_watermark.coverage_end),
     )
+
+
+def _extract_fact_field_value(row: Mapping[str, Any], field: str) -> str:
+    col_name = _FIELD_DIMENSIONS[field]
+    if col_name in {"client_ip", "country", "url", "cmcd"}:
+        return str(row.get(col_name) or "")
+    cf = row.get("custom_fields")
+    raw_val = str(cf.get(col_name) or "") if isinstance(cf, Mapping) else str(row.get(col_name) or "")
+    if not raw_val:
+        return ""
+    if col_name in {"age", "ttl"}:
+        try:
+            return str(int(round(float(raw_val))))
+        except (ValueError, TypeError):
+            return "0"
+    return raw_val
+
+
+def _exact_end_fact_rows(
+    service: HighScaleService,
+    start: datetime | None,
+    end: datetime | None,
+    fields: Iterable[str] = (),
+) -> list[dict[str, Any]]:
+    if end is None or (start is not None and end < start):
+        return []
+    unique_fields = [f for f in dict.fromkeys(fields) if f in _FIELD_DIMENSIONS]
+    select_cols = ["event_timestamp AS exact_end_ts"]
+    for f in unique_fields:
+        select_cols.append(f"{_field_sql_column(f)} AS f_{f}")
+    clauses = [*visible_fact_clauses("request"), "event_timestamp = {end_exact:DateTime64(3)}"]
+    params: dict[str, Any] = {"service_id": service.service_id, "end_exact": end}
+    if start is not None:
+        clauses.append("event_timestamp >= {start:DateTime64(3)}")
+        params["start"] = start
+    try:
+        rows = service.client.execute(
+            f"SELECT {', '.join(select_cols)} FROM request_facts WHERE {' AND '.join(clauses)}",
+            params,
+        )
+    except Exception:
+        return []
+    matched: list[dict[str, Any]] = []
+    for r in rows or []:
+        if not isinstance(r, Mapping):
+            continue
+        if "exact_end_ts" in r:
+            matched.append(dict(r))
+        elif "event_timestamp" in r:
+            raw_ts = r["event_timestamp"]
+            ts = raw_ts if isinstance(raw_ts, datetime) else _range_value(str(raw_ts))
+            if ts == end:
+                matched.append(dict(r))
+    return matched
+
+
+def _bucket_start_for_interval(ts: datetime, norm_interval: str) -> datetime:
+    dt = ts.astimezone(UTC)
+    if norm_interval == "1 second":
+        return dt.replace(microsecond=0)
+    if norm_interval == "5 minutes":
+        return dt.replace(minute=(dt.minute // 5) * 5, second=0, microsecond=0)
+    if norm_interval == "1 hour":
+        return dt.replace(minute=0, second=0, microsecond=0)
+    if norm_interval == "1 day":
+        return dt.replace(hour=0, minute=0, second=0, microsecond=0)
+    return dt.replace(second=0, microsecond=0)
+
+
+def _merge_top_values_with_exact_end(
+    base_top: Iterable[tuple[str, int]], exact_rows: list[dict[str, Any]], field: str, limit: int = 10
+) -> list[tuple[str, int]]:
+    counts: dict[str, int] = {str(val): int(cnt) for val, cnt in base_top}
+    alias_key = f"f_{field}"
+    for row in exact_rows:
+        if alias_key in row:
+            val = str(row.get(alias_key) or "")
+        else:
+            val = _extract_fact_field_value(row, field)
+        if val != "":
+            counts[val] = counts.get(val, 0) + 1
+    return sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:limit]
 
 
 def _aggregates_batch(
@@ -499,25 +582,45 @@ def dashboard_aggregates(
     all_fields_to_query = list(fields_to_query)
     if "url" not in all_fields_to_query:
         all_fields_to_query.append("url")
-    responses = trace.run(
+    responses, exact_end_rows = trace.run(
         "aggregates_batch",
-        lambda: _aggregates_batch(
-            service, start_time=start_time, end_time=end_time, fields=all_fields_to_query, watermark=request_watermark
+        lambda: (
+            _aggregates_batch(
+                service,
+                start_time=start_time,
+                end_time=end_time,
+                fields=all_fields_to_query,
+                watermark=request_watermark,
+            ),
+            _exact_end_fact_rows(service, start, end, all_fields_to_query),
         ),
         source="projection",
     )
-    total = responses["url"]
+    extra_end_count = len(exact_end_rows)
+    total_request_count = responses["url"].request_count + extra_end_count
 
     data = {
         field: FieldAggregate(
-            top=[FieldTopEntry(value=value, count=count) for value, count in responses[field].top_values],
-            total=responses[field].request_count,
+            top=[
+                FieldTopEntry(value=value, count=count)
+                for value, count in (
+                    _merge_top_values_with_exact_end(responses[field].top_values, exact_end_rows, field)
+                    if extra_end_count
+                    else responses[field].top_values
+                )
+            ],
+            total=responses[field].request_count + extra_end_count,
         )
         for field in top_fields
     }
     map_response = responses.get("country")
+    map_top_values = (
+        _merge_top_values_with_exact_end(map_response.top_values, exact_end_rows, "country")
+        if map_response is not None and extra_end_count
+        else (map_response.top_values if map_response is not None else ())
+    )
     map_data = (
-        [MapPoint(country=value, count=count) for value, count in map_response.top_values]
+        [MapPoint(country=value, count=count) for value, count in map_top_values]
         if want_map and map_response is not None
         else []
     )
@@ -531,7 +634,7 @@ def dashboard_aggregates(
         if start is not None and end is not None:
             end_upper = end
             clauses.append("event_timestamp >= {start:DateTime64(3)}")
-            clauses.append("event_timestamp < {end_upper:DateTime64(3)}")
+            clauses.append("event_timestamp <= {end_upper:DateTime64(3)}")
             params.update({"start": start, "end_upper": end_upper})
         time_series = trace.run(
             "time_series",
@@ -544,6 +647,20 @@ def dashboard_aggregates(
         time_series = trace.run(
             "time_series", lambda: _time_series(service, start_time, end_time, norm_interval), source="projection"
         )
+        if extra_end_count and end is not None:
+            end_bucket_dt = _bucket_start_for_interval(end, norm_interval)
+            end_bucket_iso = safe_iso(end_bucket_dt) or end_bucket_dt.isoformat()
+            merged_ts: list[TimeSeriesPoint] = []
+            matched_bucket = False
+            for pt in time_series:
+                if pt.time == end_bucket_iso:
+                    merged_ts.append(TimeSeriesPoint(time=pt.time, value=float(pt.value) + float(extra_end_count)))
+                    matched_bucket = True
+                else:
+                    merged_ts.append(pt)
+            if not matched_bucket:
+                merged_ts.append(TimeSeriesPoint(time=end_bucket_iso, value=float(extra_end_count)))
+            time_series = merged_ts
     resp = AggregatesResponse.with_telemetry(
         data=data,
         time_series=time_series,
@@ -552,8 +669,8 @@ def dashboard_aggregates(
         section_timings=trace.timings(),
         interval=norm_interval,
         metric=req.chart_metric,
-        total_rows=total.request_count,
-        total_rows_total=total.request_count,
+        total_rows=total_request_count,
+        total_rows_total=total_request_count,
         earliest_log_at=_watermark_extent(request_watermark.coverage_start),
         latest_log_at=_watermark_extent(request_watermark.coverage_end),
     )
@@ -620,7 +737,12 @@ def field_values(
     start = _range_value(start_time)
     end = _range_value(end_time)
 
-    if not req.search and not filter_clauses and key in _FIELD_DIMENSIONS:
+    partial_minutes = (
+        start is not None
+        and end is not None
+        and any(bound.second != 0 or bound.microsecond != 0 for bound in (start, end))
+    )
+    if not req.search and not filter_clauses and key in _FIELD_DIMENSIONS and not partial_minutes:
         agg = _aggregate(
             service,
             start_time=start_time,
@@ -628,7 +750,13 @@ def field_values(
             dimension=_FIELD_DIMENSIONS[key],
             watermark=service.watermark_for("request"),
         )
-        vals: list[dict[str, Any]] = [{"value": str(val), "count": int(cnt)} for val, cnt in agg.top_values[:limit]]
+        exact_end_rows = _exact_end_fact_rows(service, start, end, [key])
+        merged_top = (
+            _merge_top_values_with_exact_end(agg.top_values, exact_end_rows, key, limit=limit)
+            if exact_end_rows
+            else agg.top_values[:limit]
+        )
+        vals: list[dict[str, Any]] = [{"value": str(val), "count": int(cnt)} for val, cnt in merged_top]
         if key == "asn" and vals:
             try:
                 enrich_asn_rows(vals, service.service_id, asn_key="value")
@@ -647,7 +775,7 @@ def field_values(
         clauses.append("event_timestamp >= {start:DateTime64(3)}")
         params["start"] = start
     if end is not None:
-        clauses.append("event_timestamp < {end_upper:DateTime64(3)}")
+        clauses.append("event_timestamp <= {end_upper:DateTime64(3)}")
         params["end_upper"] = end
 
     if req.search:
@@ -694,7 +822,7 @@ def raw_df(
         clauses.append("event_timestamp >= {start:DateTime64(3)}")
         params["start"] = start
     if end is not None:
-        clauses.append("event_timestamp < {end_upper:DateTime64(3)}")
+        clauses.append("event_timestamp <= {end_upper:DateTime64(3)}")
         params["end_upper"] = end
 
     where_clause = " AND ".join(clauses)

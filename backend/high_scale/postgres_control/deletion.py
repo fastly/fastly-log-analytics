@@ -305,24 +305,6 @@ class HighScaleDeletionSweeper:
         return result
 
     def _sweep_sources(self, *, service_id: str, limit: int = 100, now: datetime | None = None) -> DeletionSweepResult:
-        is_mock = hasattr(self._controller, "_mock_return_value") or type(self._controller).__name__ == "MagicMock"
-        if (
-            is_mock
-            and hasattr(self._controller, "delete_source")
-            and getattr(self._controller.delete_source, "side_effect", None) is not None
-        ):
-            deleted = skipped = 0
-            for source in self._control.deletable_sources(service_id, limit=limit):
-                if not getattr(source, "archive_manifest_id", None):
-                    continue
-                record = self._control.archive_manifest(source.archive_manifest_id)
-                try:
-                    self._controller.delete_source(record.manifest, current_owner_epoch=record.owner_epoch, now=now)
-                except ValueError:
-                    skipped += 1
-                else:
-                    deleted += 1
-            return DeletionSweepResult(deleted, skipped)
         manifest_to_keys: dict[str, list[str]] = {}
         for source in self._control.deletable_sources(service_id, limit=limit):
             manifest_id = getattr(source, "archive_manifest_id", None)

@@ -63,6 +63,7 @@ HEALTHY: dict[str, tuple[int, Any]] = {
     "GET /api/bootstrap": (200, {"active_service_id": "svc1"}),
     "POST /api/dashboard/bundle?service_id=nonexistent_tenant_xyz": (404, {"error": "nope"}),
     "GET /api/share/auth-config": (200, {"passcode_enabled": True}),
+    "GET /api/services": (401, {"error": "unauthenticated"}),
 }
 
 
@@ -234,12 +235,36 @@ def test_rbac_ok_and_failure_modes(probe_stub: Stub) -> None:
     assert (result.auth_config_ok, result.unauth_analyst_blocked, result.unauth_analyst_code, result.error) == (
         True,
         True,
-        200,
+        401,
         None,
     )
     headers = next(h for line, h, _ in probe_stub.seen if line == "GET /api/share/auth-config")
     assert headers["X-Remote-Analyst"] == "1"
+    svc_headers = next(h for line, h, _ in probe_stub.seen if line == "GET /api/services")
+    assert svc_headers["X-Remote-Analyst"] == "1"
+    assert "X-Admin-Gateway-Token" not in svc_headers
 
+    probe_stub.routes["GET /api/services"] = (403, {"error": "forbidden"})
+    r403 = health.check_rbac(probe_stub.target(), timeout_s=5)
+    assert (r403.auth_config_ok, r403.unauth_analyst_blocked, r403.unauth_analyst_code, r403.error) == (
+        True,
+        True,
+        403,
+        None,
+    )
+
+    probe_stub.routes["GET /api/services"] = (200, {"services": []})
+    r_breach = health.check_rbac(probe_stub.target(), timeout_s=5)
+    assert (r_breach.auth_config_ok, r_breach.unauth_analyst_blocked, r_breach.unauth_analyst_code) == (
+        True,
+        False,
+        200,
+    )
+    assert (
+        r_breach.error == "RBAC breach: unauthenticated analyst on /api/services returned HTTP 200 (expected 401/403)"
+    )
+
+    probe_stub.routes["GET /api/services"] = (401, {"error": "unauthenticated"})
     probe_stub.routes["GET /api/share/auth-config"] = (200, {"other": 1})
     r1 = health.check_rbac(probe_stub.target(), timeout_s=5)
     assert r1.auth_config_ok is False and r1.unauth_analyst_blocked is True
@@ -263,7 +288,7 @@ def test_main_text_and_json_reports_golden(
     assert _run_main(monkeypatch, probe_stub.target("stub-env")) == 0
     out = re.sub(r"\d+\.\dms", "<lat>", capsys.readouterr().out)
     assert out.splitlines()[6:] == [
-        "stub-env               | PASS (200) | svc1 (OK)              | PASS (404)  | PASS (200) | <lat>",
+        "stub-env               | PASS (200) | svc1 (OK)              | PASS (404)  | PASS (401) | <lat>",
         "=" * 96,
         "ALL TARGET ENVIRONMENTS HEALTHY, TENANCY VERIFIED & RBAC ENFORCED!",
         "=" * 96,
@@ -286,7 +311,7 @@ def test_main_text_and_json_reports_golden(
         "tenancy_rejection_code": 404,
         "rbac_auth_config_ok": True,
         "rbac_unauth_blocked": True,
-        "rbac_unauth_code": 200,
+        "rbac_unauth_code": 401,
         "error": None,
         "remediation": None,
     }
@@ -699,6 +724,116 @@ def test_cvss3_base_score_rejects_v4_vector(osv):
 )
 def test_severity_for_vuln_resolution(osv, vuln, expected):
     assert osv.severity_for_vuln(vuln) == expected
+
+
+@pytest.mark.parametrize(
+    ("returncode", "stdout", "expected_rc"),
+    [
+        (0, '{"results": []}', 0),
+        (2, '{"results": []}', 1),
+        (127, '{"results": [{"packages": [{"package": {"name": "pkg"}, "vulnerabilities": []}]}]}', 1),
+        (-1, '{"results": []}', 1),
+        (1, "", 1),
+        (1, "not-json", 1),
+        (1, "[]", 1),
+        (
+            1,
+            json.dumps(
+                {
+                    "results": [
+                        {
+                            "source": {"path": "uv.lock"},
+                            "packages": [
+                                {
+                                    "package": {"name": "foo", "version": "1.0"},
+                                    "vulnerabilities": [{"id": "CVE-1", "database_specific": {"severity": "HIGH"}}],
+                                }
+                            ],
+                        }
+                    ]
+                }
+            ),
+            0,
+        ),
+        (
+            1,
+            json.dumps(
+                {
+                    "results": [
+                        {
+                            "source": {"path": "uv.lock"},
+                            "packages": [
+                                {
+                                    "package": {"name": "foo", "version": "1.0"},
+                                    "vulnerabilities": [{"id": "CVE-2", "database_specific": {"severity": "CRITICAL"}}],
+                                }
+                            ],
+                        }
+                    ]
+                }
+            ),
+            1,
+        ),
+    ],
+)
+def test_check_osv_main_exit_code_and_json_handling(
+    osv, monkeypatch: pytest.MonkeyPatch, returncode: int, stdout: str, expected_rc: int
+) -> None:
+    monkeypatch.setattr(
+        osv.subprocess,
+        "run",
+        lambda *_a, **_kw: subprocess.CompletedProcess(
+            args=["osv-scanner"], returncode=returncode, stdout=stdout, stderr="scanner stderr"
+        ),
+    )
+    with pytest.raises(SystemExit) as excinfo:
+        osv.main()
+    if expected_rc == 0:
+        assert excinfo.value.code == 0
+    else:
+        assert excinfo.value.code not in (0, None)
+
+
+def test_deploy_common_fallback_ssh_requires_verified_host_key(tmp_path: Path) -> None:
+    deploy_common = REPO / "scripts" / "lib" / "deploy_common.sh"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    args_file = tmp_path / "ssh_args.txt"
+    for tool in ("gcloud", "ssh", "scp"):
+        stub = bin_dir / tool
+        if tool == "gcloud":
+            stub.write_text("#!/usr/bin/env bash\nexit 1\n")
+        else:
+            stub.write_text(f'#!/usr/bin/env bash\nprintf "%s\\n" "$@" > "{args_file}"\nexit 0\n')
+        stub.chmod(0o755)
+
+    empty_home = tmp_path / "home"
+    (empty_home / ".ssh").mkdir(parents=True)
+
+    base_env = {
+        "PATH": f"{bin_dir}:/usr/bin:/bin",
+        "HOME": str(empty_home),
+        "GCE_VM_NAME": "vm-test",
+        "GCE_ZONE": "us-central1-a",
+        "GCE_PROJECT": "proj-test",
+        "GCE_VM_SSH": "user@203.0.113.10",
+        "FLA_BOUNDED_RUN": "0",
+        "GCE_ADMIN_BOOTSTRAP": "0",
+    }
+    script = f'source "{deploy_common}" && setup_deploy_gce_ssh && "${{GCE_SSH[@]}}" --command "echo hello"'
+    res_missing = subprocess.run(["bash", "-c", script], env=base_env, text=True, capture_output=True, check=False)
+    assert res_missing.returncode != 0
+    assert "no trusted known_hosts file found" in res_missing.stderr
+
+    known_hosts = tmp_path / "known_hosts"
+    known_hosts.write_text("203.0.113.10 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest\n")
+    env_with_kh = {**base_env, "GCE_SSH_KNOWN_HOSTS": str(known_hosts)}
+    res_ok = subprocess.run(["bash", "-c", script], env=env_with_kh, text=True, capture_output=True, check=False)
+    assert res_ok.returncode == 0, res_ok.stderr
+    recorded = args_file.read_text().splitlines()
+    assert "StrictHostKeyChecking=yes" in recorded
+    assert "StrictHostKeyChecking=no" not in recorded
+    assert f"UserKnownHostsFile={known_hosts}" in recorded
 
 
 # ── Merged from test_port_forward.py ──────────────────────────────────────────────────────

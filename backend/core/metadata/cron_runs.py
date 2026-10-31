@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import statistics
+import time
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 
@@ -118,6 +119,9 @@ def _publish_cron_run_change(
         logger.exception("[cron_log] cron-runs SSE publish failed for %s/%s", service_id, task)
 
 
+_JOB_RUNS_RETENTION_S = 7 * 86400
+
+
 def start_cron_run(service_id: str, task: str) -> int:
     import time
 
@@ -177,6 +181,11 @@ def start_cron_run(service_id: str, task: str) -> int:
         if not lease_cur.rowcount:
             con.commit()
             raise CronLeaseHeldError(f"Task '{task}' is already running for this service.")
+
+        con.execute(
+            "DELETE FROM job_runs WHERE service_id = ? AND status != 'running' AND started_at < ?",
+            (service_id, now - _JOB_RUNS_RETENTION_S),
+        )
 
         cur = con.execute(
             "INSERT INTO cron_runs (service_id, task, started_at, duration_s, status, parquet_keys) "
@@ -671,6 +680,16 @@ def purge_cron_runs(
         params.append(cutoff)
     where_sql = ("WHERE " + " AND ".join(where)) if where else ""
     con.execute(f"DELETE FROM cron_runs {where_sql}", params)
+
+    job_where: list[str] = ["service_id = ?", "status != 'running'"]
+    job_params: list = [service_id]
+    if task and task != "all":
+        job_where.append("job_name = ?")
+        job_params.append(task)
+    if days is not None:
+        job_where.append("started_at < ?")
+        job_params.append(time.time() - days * 86400)
+    con.execute(f"DELETE FROM job_runs WHERE {' AND '.join(job_where)}", job_params)
     con.commit()
 
 

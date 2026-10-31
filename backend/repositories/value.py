@@ -29,7 +29,6 @@ from backend.repositories._base import (
 from backend.repositories.utils.filters import build_where_clause
 from backend.repositories.utils.response_cache import (
     ResponseMemo,
-    bucket_time_to_minute,
     digest_cache_key,
     serialize_filters_for_key,
 )
@@ -43,6 +42,18 @@ CacheRegistry.register("value._IO_STATS_CACHE", _IO_STATS_CACHE)
 
 _value_memo = ResponseMemo(ttl=60.0, maxsize=128, prewarmer=False)
 CacheRegistry.register("value_summary_memo", _value_memo.cache)
+
+
+def _value_cache_bound(ts: str | None) -> str | None:
+    if not ts:
+        return None
+    try:
+        from backend.utils.date_utils import parse_iso_utc
+
+        parsed = parse_iso_utc(str(ts))
+        return parsed.isoformat() if parsed is not None else str(ts).strip()
+    except (ValueError, TypeError):
+        return str(ts).strip()
 
 
 def _active_value_memo_key(
@@ -59,8 +70,8 @@ def _active_value_memo_key(
     return digest_cache_key(
         {
             "ep": "value_summary",
-            "s": bucket_time_to_minute(start_time),
-            "e": bucket_time_to_minute(end_time),
+            "s": _value_cache_bound(start_time),
+            "e": _value_cache_bound(end_time),
             "f": serialize_filters_for_key(filters),
             "ci": chart_interval,
             "sec": sorted(sections) if sections is not None else None,

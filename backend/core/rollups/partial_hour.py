@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 
 import tenacity
 
+from backend.core.duckdb import escape_sql_literal
 from backend.utils.telemetry import parse_hour_key_strict
 
 if TYPE_CHECKING:
@@ -122,7 +123,8 @@ def read_partial_hour_all_fields(
     source: dict, hour: str, con: duckdb.DuckDBPyConnection | None = None
 ) -> list[tuple[str, str, int]]:
     path = _all_fields_path(source, hour)
-    sql = f"SELECT field, value, count FROM read_parquet('{path}') WHERE field != '{TOTAL_FIELD}'"
+    safe_path = escape_sql_literal(str(path))
+    sql = f"SELECT field, value, count FROM read_parquet('{safe_path}') WHERE field != '{TOTAL_FIELD}'"
 
     def _query(c: duckdb.DuckDBPyConnection) -> list[tuple[str, str, int]]:
         rows = c.execute(sql).fetchall()
@@ -133,7 +135,8 @@ def read_partial_hour_all_fields(
 
 def read_partial_hour_total(source: dict, hour: str, con: duckdb.DuckDBPyConnection | None = None) -> int:
     path = _all_fields_path(source, hour)
-    sql = f"SELECT count FROM read_parquet('{path}') WHERE field = '{TOTAL_FIELD}' AND value = '' LIMIT 1"
+    safe_path = escape_sql_literal(str(path))
+    sql = f"SELECT count FROM read_parquet('{safe_path}') WHERE field = '{TOTAL_FIELD}' AND value = '' LIMIT 1"
 
     def _query(c: duckdb.DuckDBPyConnection) -> int:
         row = c.execute(sql).fetchone()
@@ -191,7 +194,8 @@ def _merge_partial_hour_locked(service_id: str, source: dict, fields: list[str])
     if os.path.isfile(existing_path):
         probe_con = get_memory_connection()
         try:
-            probe_con.execute(f"SELECT 1 FROM read_parquet('{existing_path}') LIMIT 1")
+            safe_existing = escape_sql_literal(str(existing_path))
+            probe_con.execute(f"SELECT 1 FROM read_parquet('{safe_existing}') LIMIT 1")
         except Exception as e:
             logger.warning(
                 "[partial_hour] %s: existing partial-hour file %s is corrupt or unreadable (%s); "

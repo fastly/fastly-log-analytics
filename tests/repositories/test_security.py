@@ -2445,3 +2445,26 @@ class TestActiveHourDirectTempSchemaDriftAndTombstones:
         assert in_memory_duckdb.execute(f'SELECT COUNT(*) FROM "{tmp}"').fetchone()[0] == 5
         assert runner._last_active_direct_n_files == 2
         in_memory_duckdb.execute(f'DROP TABLE IF EXISTS "{tmp}"')
+
+
+def test_standard_repo_memo_keys_preserve_subminute_bounds() -> None:
+    from backend.repositories import assets as assets_repo
+    from backend.repositories import value as value_repo
+    from backend.repositories.security import aggregates as sec_agg_repo
+
+    src = {"name": "submin_svc", "service_id": "submin_svc"}
+    s1 = "2026-09-14T10:00:05Z"
+    e1 = "2026-09-14T10:00:30Z"
+    e2 = "2026-09-14T10:00:55Z"
+
+    k_assets_1 = assets_repo._build_cache_key(src, s1, e1, {})
+    k_assets_2 = assets_repo._build_cache_key(src, s1, e2, {})
+    assert k_assets_1 != k_assets_2
+
+    k_sec_1 = sec_agg_repo._security_memo_key(src, s1, e1, {})
+    k_sec_2 = sec_agg_repo._security_memo_key(src, s1, e2, {})
+    assert k_sec_1 is not None and k_sec_2 is not None and k_sec_1 != k_sec_2
+
+    k_val_1 = value_repo._active_value_memo_key(src, s1, e1, {})
+    k_val_2 = value_repo._active_value_memo_key(src, s1, e2, {})
+    assert k_val_1 is not None and k_val_2 is not None and k_val_1 != k_val_2

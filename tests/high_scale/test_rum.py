@@ -990,7 +990,7 @@ def _make_coord_mocks(src_cursor: str, reinspect_state: tuple[str, int], page: S
     )
     control.source_cursor_for.return_value = src_cursor
     control.source_reinspection_state_for.return_value = reinspect_state
-    control.claim_sources_batch.return_value = ()
+    control.claim_sources_batch = MagicMock(return_value=())
     control.expired_claims.return_value = ()
     lister = MagicMock()
     lister.list_source_objects.return_value = page
@@ -2893,3 +2893,51 @@ async def test_cached_versions_serves_stale_or_empty_on_error(monkeypatch):
     faro_versions._versions_cache = (0.0, ["2.10.0", "2.9.0"])
     monkeypatch.setattr(faro_versions, "fetch_available_faro_versions", _boom)
     assert await faro_versions.get_faro_versions_cached() == ["2.10.0", "2.9.0"]
+
+
+def test_rum_beacon_health_enforces_15m_recency_and_counts_error_only_beacons() -> None:
+    from backend.high_scale.rum import rum_beacon_health
+
+    observed = datetime(2026, 9, 1, 12, 0, tzinfo=UTC)
+    expected_cutoff = observed - timedelta(minutes=15)
+
+    class StaleOnlyClient:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict[str, Any]]] = []
+
+        def execute(self, sql: str, params: dict | None = None) -> list[dict]:
+            self.calls.append((sql, params or {}))
+            return [{"c": 5, "last_ts": observed - timedelta(minutes=30)}]
+
+    stale_client = StaleOnlyClient()
+    stale_health = rum_beacon_health(service_for(stale_client), now=observed)
+    assert stale_health["has_data"] is False
+    assert stale_health["beacons"] == 0 and stale_health["recent_beacons"] == 0
+    assert stale_health["setup_complete"] is False and stale_health["last_beacon_time"] is None
+    agg_sql, agg_params = stale_client.calls[0]
+    assert agg_params["cutoff"] == expected_cutoff and agg_params["service_id"] == "TestRum"
+    assert "rum_vitals_aggregates" in agg_sql and "rum_error_aggregates" in agg_sql
+    assert "bucket_start >= {cutoff:DateTime64(3, 'UTC')}" in agg_sql
+
+    class ErrorOnlyFactFallbackClient:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict[str, Any]]] = []
+
+        def execute(self, sql: str, params: dict | None = None) -> list[dict]:
+            self.calls.append((sql, params or {}))
+            if "rum_vitals_aggregates" in sql:
+                return [{"c": 0, "last_ts": None}]
+            if "rum_error_facts" in sql:
+                return [{"c": 4, "last_ts": observed - timedelta(minutes=3)}]
+            return []
+
+    err_client = ErrorOnlyFactFallbackClient()
+    err_health = rum_beacon_health(service_for(err_client), now=observed)
+    assert err_health["has_data"] is True
+    assert err_health["beacons"] == 4 and err_health["recent_beacons"] == 4
+    assert err_health["setup_complete"] is True
+    assert err_health["last_beacon_time"] == "2026-09-01T11:57:00Z"
+    facts_sql, facts_params = err_client.calls[1]
+    assert "rum_vitals_facts" in facts_sql and "rum_error_facts" in facts_sql
+    assert "domain='rum_vitals'" in facts_sql and "domain='rum_errors'" in facts_sql
+    assert facts_params["cutoff"] == expected_cutoff

@@ -77,8 +77,7 @@ from backend.models.analytics import (
 from backend.models.common import FilterSpec
 from backend.repositories.insights import registry
 from backend.utils.telemetry import get_page_load_id, set_page_load_id
-from tests.high_scale import test_cmcd as cmcd_cases
-from tests.high_scale import test_security as security_cases
+from tests.high_scale import test_ingest_controller as ingest_cases
 
 
 class _Client:
@@ -218,16 +217,16 @@ def test_filters_the_fact_table_cannot_express_raise(key: str) -> None:
 
 def test_high_scale_cache_observations_do_not_execute_the_repeat() -> None:
     perf_client = _PerfClient()
-    sec_client = security_cases._Client()
-    sec_svc, sec_req = security_cases._service(sec_client), security_cases._req()
-    cmcd_client = cmcd_cases._Client()
+    sec_client = ingest_cases._Client()
+    sec_svc, sec_req = ingest_cases._service(sec_client), ingest_cases._req()
+    cmcd_client = ingest_cases._Client_cmcd()
     dash_svc, dash_client = _recording_service()
     dash_req = AggregatesRequest(fields=["url"], include_time_series=False)
     for calls, run, is_model in (
         (perf_client.calls, lambda: _run_perf(perf_client, sections={"waterfall"}), True),
-        (sec_client.calls, lambda: security.security_aggregates(sec_svc, sec_req, security_cases.START, security_cases.END, sections={"ipv6_adoption"}), True),
-        (sec_client.calls, lambda: security.top_bots(sec_svc, sec_req, security_cases.START, security_cases.END), True),
-        (cmcd_client.calls, lambda: cmcd_cases._run(cmcd_client, sections={"overview"}), False),
+        (sec_client.calls, lambda: security.security_aggregates(sec_svc, sec_req, ingest_cases.START, ingest_cases.END, sections={"ipv6_adoption"}), True),
+        (sec_client.calls, lambda: security.top_bots(sec_svc, sec_req, ingest_cases.START, ingest_cases.END), True),
+        (cmcd_client.calls, lambda: ingest_cases._run(cmcd_client, sections={"overview"}), False),
         (dash_client.calls, lambda: dashboard.aggregates(dash_svc, dash_req, "2026-01-01T00:00:00Z", "2026-01-02T00:00:00Z"), True),
     ):  # fmt: skip
         first = run()
@@ -333,7 +332,7 @@ def test_dashboard_fact_readers_preserve_exact_bounds(reader: str, start: str | 
         assert "event_timestamp >= {start:DateTime64(3)}" in sql
         assert params["start"] == datetime.fromisoformat(start)
     if end is not None:
-        assert "event_timestamp < {end_upper:DateTime64(3)}" in sql
+        assert "event_timestamp <= {end_upper:DateTime64(3)}" in sql
         assert params["end_upper"] == datetime.fromisoformat(end)
 
 
@@ -696,7 +695,7 @@ def test_dashboard_matches_exact_half_open_facts(event_window, entrypoint) -> No
     client = service.client
     expected = client.db.execute(
         "SELECT count(*) FROM request_facts WHERE service_id = 'svc' AND publication_state = 'visible' "
-        "AND batch_id = 'facts' AND event_timestamp >= ? AND event_timestamp < ?",
+        "AND batch_id = 'facts' AND event_timestamp >= ? AND event_timestamp <= ?",
         (client.stamp(start), client.stamp(end)),
     ).fetchone()[0]
 
@@ -1612,7 +1611,7 @@ def test_unfiltered_subminute_windows_use_scoped_facts(start_time: str, end_time
     for sql, params in client.calls:
         assert "FROM request_facts" in sql and "high_scale_batch_publications FINAL" in sql
         assert (
-            "event_timestamp >= {start:DateTime64(3)}" in sql and "event_timestamp < {end_upper:DateTime64(3)}" in sql
+            "event_timestamp >= {start:DateTime64(3)}" in sql and "event_timestamp <= {end_upper:DateTime64(3)}" in sql
         )
         assert params["service_id"] == "svc" and params["start"] == start and params["end_upper"] == end
     assert all(row["source"] == "fact" for row in response.section_timings if row["activity"] != "overhead")
@@ -2500,3 +2499,168 @@ def test_request_facts_emulation_caches_schema_extents_and_response(monkeypatch:
     assert len(first.rows) == 2
     assert second.is_cached is True
     con.close()
+
+
+def test_high_scale_readers_subminute_windows_do_not_collide_in_memo_cache() -> None:
+    from backend.high_scale import cmcd as hs_cmcd
+    from backend.high_scale.ingest_controller import service as hs_service
+    from backend.models.analytics import SecurityAggregatesRequest
+
+    hs_cmcd._memo.cache.clear()
+    hs_performance._perf_memo.cache.clear()
+    hs_security._security_memo.cache.clear()
+    hs_service._memo.cache.clear()
+
+    w1 = ("2026-09-14T10:00:05Z", "2026-09-14T10:00:30Z")
+    w2 = ("2026-09-14T10:00:05Z", "2026-09-14T10:00:55Z")
+
+    class _SubminuteClient:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict[str, Any]]] = []
+
+        def execute(self, sql: str, params: dict | None = None) -> list[dict]:
+            self.calls.append((sql, params or {}))
+            if "cmcd:probe" in sql:
+                return [{"events": 0}]
+            return []
+
+    client = _SubminuteClient()
+    svc = HighScaleService(
+        service_id="svc-submin",
+        client=client,
+        cursor_secret=b"secret",
+        request_watermark=ServingWatermark("svc-submin", "request", 1, None, None, None, None, None, True),
+    )
+
+    cmcd_req = SimpleNamespace(filters=None, sections=["overview"], bucket_seconds=300, top_n=10)
+    r_cmcd_1 = hs_cmcd.cmcd_aggregates(svc, cmcd_req, *w1, {"overview"}, False)
+    r_cmcd_2 = hs_cmcd.cmcd_aggregates(svc, cmcd_req, *w2, {"overview"}, False)
+    assert r_cmcd_1["_response_cache"]["state"] == "miss"
+    assert r_cmcd_2["_response_cache"]["state"] == "miss"
+
+    r_perf_1 = hs_performance.performance_aggregates(svc, SimpleNamespace(filters={}), *w1, sections={"summary"})
+    r_perf_2 = hs_performance.performance_aggregates(svc, SimpleNamespace(filters={}), *w2, sections={"summary"})
+    assert r_perf_1.response_cache.state == "miss"
+    assert r_perf_2.response_cache.state == "miss"
+
+    r_sec_1 = hs_security.security_aggregates(svc, SecurityAggregatesRequest(sections=["tls_fingerprints"]), *w1)
+    r_sec_2 = hs_security.security_aggregates(svc, SecurityAggregatesRequest(sections=["tls_fingerprints"]), *w2)
+    assert r_sec_1.response_cache.state == "miss"
+    assert r_sec_2.response_cache.state == "miss"
+
+    calls_before_assets = len(client.calls)
+    hs_service.assets_aggregates(svc, SimpleNamespace(filters={}), *w1)
+    calls_after_w1 = len(client.calls)
+    hs_service.assets_aggregates(svc, SimpleNamespace(filters={}), *w2)
+    calls_after_w2 = len(client.calls)
+    assert calls_after_w1 > calls_before_assets
+    assert calls_after_w2 > calls_after_w1
+
+
+def test_dashboard_includes_exact_end_time_without_overcounting_later_minute_events() -> None:
+    start = datetime(2026, 10, 23, 0, 20, 0, tzinfo=UTC)
+    end = datetime(2026, 10, 23, 0, 21, 0, tzinfo=UTC)
+    client = PredicateClient(
+        [
+            start,
+            start + timedelta(seconds=30),
+            end,
+            end + timedelta(seconds=15),
+        ]
+    )
+    try:
+        service = HighScaleService(
+            service_id="svc",
+            client=client,
+            cursor_secret=b"secret",
+            request_watermark=ServingWatermark("svc", "request", 1, start, end, None, None, None, True),
+        )
+        res = aggregates(
+            service,
+            AggregatesRequest(
+                fields=["url", "country"],
+                sections=["core", "topten"],
+                chart_metric="requests",
+                chart_interval="1 minute",
+            ),
+            start.isoformat(),
+            end.isoformat(),
+        )
+        assert res.total_rows == res.total_rows_total == 3
+        assert res.data["url"].total == 3 and sum(r.count for r in res.data["url"].top) == 3
+        assert sum(r.count for r in res.map_data) == 3
+        assert sum(r.value for r in res.time_series) == 3
+
+        fv = dashboard.field_values(
+            service,
+            FieldValuesRequest(field="url", limit=10),
+            start.isoformat(),
+            end.isoformat(),
+        )
+        assert sum(v.count for v in fv.values) == 3
+    finally:
+        client.db.close()
+
+
+def test_request_facts_emulation_paginates_tied_timestamps_without_skipping_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import duckdb
+
+    from backend.routers.admin import compaction, high_scale
+    from backend.routers.admin.high_scale import HighScaleRequestFactRequest
+
+    compaction._EMULATION_SCHEMA_CACHE.clear()
+    compaction._EMULATION_EXTENTS_CACHE.clear()
+    compaction._EMULATION_CURSOR_TIE_CACHE.clear()
+    high_scale._REQUEST_FACTS_CACHE.clear()
+    monkeypatch.setattr("backend.config.get_status", lambda sid: {})
+
+    con = duckdb.connect(":memory:")
+    try:
+        con.execute(
+            "CREATE TABLE logs ("
+            "timestamp TIMESTAMPTZ, year VARCHAR, month VARCHAR, day VARCHAR, hour VARCHAR, "
+            "country VARCHAR, client_ip VARCHAR, url VARCHAR, status INTEGER, pop VARCHAR, host VARCHAR)"
+        )
+        con.execute(
+            "INSERT INTO logs VALUES "
+            "('2026-10-25T12:00:00Z', '2026', '10', '25', '12', 'US', '203.0.113.1', '/u1', 200, 'IAD', 'ex.com'), "
+            "('2026-10-25T12:00:00Z', '2026', '10', '25', '12', 'US', '203.0.113.2', '/u2', 200, 'IAD', 'ex.com'), "
+            "('2026-10-25T12:00:00Z', '2026', '10', '25', '12', 'US', '203.0.113.3', '/u3', 200, 'IAD', 'ex.com'), "
+            "('2026-10-25T12:00:00Z', '2026', '10', '25', '12', 'US', '203.0.113.4', '/u4', 200, 'IAD', 'ex.com')"
+        )
+        t0 = datetime(2026, 10, 1, tzinfo=UTC)
+        t1 = datetime(2026, 10, 28, tzinfo=UTC)
+        ctx = SimpleNamespace(
+            service_id="svc-tied",
+            source={"name": "logs"},
+            con=con,
+            analyst_session=None,
+        )
+        registry = SimpleNamespace(resolve=lambda _sid: None)
+        collected_urls: list[str] = []
+        cursor: str | None = None
+        with patch("backend.routers.admin.high_scale._clamp_and_parse_window", return_value=(t0, t1)):
+            for _ in range(3):
+                req = HighScaleRequestFactRequest(
+                    start_time="2026-10-01T00:00:00Z",
+                    end_time="2026-10-28T00:00:00Z",
+                    limit=2,
+                    cursor=cursor,
+                    emulate_standard=True,
+                )
+                page = high_scale._execute_request_facts_query(
+                    ctx,  # type: ignore[arg-type]
+                    req,
+                    registry,  # type: ignore[arg-type]
+                    allow_standard_emulation=True,
+                    default_window_if_missing=False,
+                )
+                collected_urls.extend(r["url"] for r in page.rows)
+                cursor = page.next_cursor
+                if not cursor:
+                    break
+        assert sorted(collected_urls) == ["/u1", "/u2", "/u3", "/u4"]
+    finally:
+        con.close()

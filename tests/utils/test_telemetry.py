@@ -989,6 +989,21 @@ class TestTelemetryResponseMiddleware:
         monkeypatch.delenv("DEBUG_RESPONSES_FORCE_INCLUDE", raising=False)
         assert TestClient(_build_app()).get("/plain-dict").json() == {"foo": 1, "bar": "two"}
 
+    def test_skips_json_loads_for_large_clean_payloads_when_debug_off(self, monkeypatch):
+        """When debug telemetry is off, responses without _debug_* markers must not be parsed with json.loads."""
+        import backend.core.request_telemetry.middleware as mw_mod
+
+        monkeypatch.delenv("DEBUG_RESPONSES_FORCE_INCLUDE", raising=False)
+        app = FastAPI()
+        large_items = [{"idx": i, "val": "x" * 200} for i in range(200)]
+        app.get("/large-clean")(lambda: {"items": large_items})
+        app.add_middleware(TelemetryResponseBodyMiddleware)
+
+        with patch.object(mw_mod.json, "loads", side_effect=AssertionError("json.loads must not be called")):
+            resp = TestClient(app).get("/large-clean")
+        assert resp.status_code == 200
+        assert len(resp.json()["items"]) == 200
+
     def test_get_queries_failure_passes_through_original_body(self, monkeypatch):
         monkeypatch.setattr(telemetry, "get_queries", lambda: (_ for _ in ()).throw(RuntimeError("collector broken")))
         body = TestClient(_build_app()).get("/plain-dict").json()

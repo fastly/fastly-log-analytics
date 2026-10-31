@@ -1892,18 +1892,50 @@ def test_put_without_confirm_rejected(seeded_service):
 
 
 def test_put_without_token_rejected(seeded_service):
-    with TestClient(app) as c:
+    cfg = svcconfig.load_config(_SERVICE_ID)
+    cfg.pop("fastly_api_key", None)
+    svcconfig.save_config(_SERVICE_ID, cfg)
+
+    with (
+        TestClient(app) as c,
+        patch("backend.provision.session_scoring_orchestrator.update_recv_exclusion_regex") as mock_upd,
+    ):
         r = c.put(
             f"/api/services/{_SERVICE_ID}/scoring/exclude-regex",
             params={"confirm": "true"},
             json={"regex": r"\.css$"},
         )
-    # _resolve_token falls back to stored fastly_api_key only when the
-    # caller passes empty; here we explicitly omit token and the cfg
-    # DOES have fastly_api_key, so this should actually proceed past
-    # auth and only fail at the orchestrator (which we haven't stubbed).
-    # The "no token" path requires the stored key also missing.
-    assert r.status_code != 200  # some downstream failure expected
+    assert r.status_code == 400
+    assert "token" in r.json()["detail"]["error"].lower()
+    mock_upd.assert_not_called()
+
+
+def test_put_uses_stored_token_fallback_when_token_omitted(seeded_service):
+    fake_result = {
+        "effective_regex": r"\.css$",
+        "is_default": False,
+        "logging_service_active_version": 9,
+    }
+    with (
+        TestClient(app) as c,
+        patch.dict("os.environ", {"SCORING_REQUIRE_FALCO": "0"}),
+        patch(
+            "backend.provision.session_scoring_orchestrator.update_recv_exclusion_regex",
+            return_value=fake_result,
+        ) as mock_upd,
+        patch("backend.core.metadata.record_scoring_audit"),
+    ):
+        r = c.put(
+            f"/api/services/{_SERVICE_ID}/scoring/exclude-regex",
+            params={"confirm": "true"},
+            json={"regex": r"\.css$"},
+        )
+    assert r.status_code == 200, r.text
+    mock_upd.assert_called_once()
+    assert (
+        mock_upd.call_args.kwargs.get("fastly_api_key") == "stored-test-key"
+        or "stored-test-key" in mock_upd.call_args.args
+    )
 
 
 def test_put_with_disallowed_quote_rejected(seeded_service):

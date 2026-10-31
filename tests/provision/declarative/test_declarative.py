@@ -1108,6 +1108,33 @@ class TestVarDeconfliction:
             )
             assert "declare local var.fosAccessKey STRING;" in snippet_recv.body
 
+    def test_apply_diff_propagates_condition_update_failure(self):
+        endpoint = LoggingEndpoint(
+            name="Fastly Log Analytics - Request Logs",
+            endpoint_type="s3",
+            path="/raw/",
+            period=60,
+            response_condition="log_analytics_condition",
+            format_string="{}",
+            placement="none",
+            response_object_name="",
+        )
+        with (
+            patch("backend.provision.declarative.reconciler.fastly_integration"),
+            patch(
+                "backend.core.fastly.client.ensure_condition",
+                side_effect=RuntimeError("Fastly condition API 500"),
+            ),
+            pytest.raises(RuntimeError, match="Fastly condition API 500"),
+        ):
+            _apply_diff(
+                service_id="srv_test",
+                token="token",
+                draft_version=1,
+                diff=DiffResult(),
+                desired_endpoints=[endpoint],
+            )
+
 
 class TestCloneActiveVersionComment:
     @patch("backend.provision.declarative.reconciler.fastly_integration.fetch_active_version", return_value=1)

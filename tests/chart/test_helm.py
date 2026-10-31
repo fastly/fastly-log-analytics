@@ -31,6 +31,11 @@ CHART = "./deploy/chart/fastly-log-analytics/"
 
 _PG = "postgresql://fla:pw@postgres:5432/ducklake"
 
+STANDARD = (
+    f"config.ducklakeCatalog={_PG}",
+    f"secrets.metadataDsn={_PG}",
+)
+
 # The minimum an operator must supply to select the scaled topology. Kept as
 # one constant so a new requirement shows up as one edit here rather than as
 # a scatter of --set flags.
@@ -92,7 +97,7 @@ def _autoscaler_targets(docs: list[dict]) -> set[str]:
 
 
 def test_helm_template():
-    docs = _render()
+    docs = _render(*STANDARD)
 
     kinds = [doc["kind"] for doc in docs]
     assert "Deployment" in kinds
@@ -108,11 +113,9 @@ def test_helm_template():
 
 
 def test_default_values_render_a_self_contained_install():
-    """A `helm install` with no --set flags must be deployable as rendered:
-    single-node ingest, no Postgres, no broker, no Celery pods. The failure
-    this pins is the shipped-defaults CrashLoop — celery mode with both
-    required DSNs empty."""
-    docs = _render()
+    """Standard mode with Postgres DSNs renders single-node ingest, no broker,
+    and no Celery worker pods."""
+    docs = _render(*STANDARD)
     env = _env(_deployment(docs, "backend"))
 
     assert env["DEPLOYMENT_MODE"]["value"] == "standard"
@@ -120,12 +123,12 @@ def test_default_values_render_a_self_contained_install():
     assert "SERVING_MODE" not in env
     assert env["SSE_BACKPLANE"]["value"] == "local"
 
-    # No datastore wiring at all: an empty DUCKLAKE_CATALOG or a secretKeyRef
-    # into a Secret that was never templated is exactly how this broke.
-    assert "DUCKLAKE_CATALOG" not in env
-    assert "CELERY_BROKER_URL" not in env
-    assert "METADATA_DSN" not in env
-    assert not [doc for doc in docs if doc["kind"] == "Secret"]
+    assert env["DUCKLAKE_CATALOG"]["value"] == _PG
+    assert "CELERY_BROKER_URL" in env
+    assert env["METADATA_DSN"]["valueFrom"]["secretKeyRef"]["optional"] is False
+    secret = next(doc for doc in docs if doc["kind"] == "Secret")
+    assert secret["stringData"]["METADATA_DSN"] == _PG
+    assert "CELERY_BROKER_URL" not in secret["stringData"]
 
     # No worker pods to sit in CrashLoopBackOff against a broker that
     # the default install does not have.
@@ -133,27 +136,40 @@ def test_default_values_render_a_self_contained_install():
     assert not [name for name in names if "worker" in name], names
 
 
+def test_standard_without_postgres_dsns_fails_at_template_time():
+    """ADR-22 requires Postgres DSNs in standard mode too."""
+    stderr = _render_error()
+    assert "config.ducklakeCatalog" in stderr
+    assert "postgresql://" in stderr
+
+    stderr = _render_error(f"config.ducklakeCatalog={_PG}")
+    assert "secrets.metadataDsn" in stderr
+    assert "secrets.existingSecret" in stderr
+
+
 def _assert_boot_gate_would_pass(docs: list[dict]) -> None:
     """Mirror of backend/config.py::validate_deployment_mode() over the rendered
     pod specs. The real gate runs in the backend lifespan AND in
-    worker_process_init, so every pod carrying DEPLOYMENT_MODE=high_scale has to
-    satisfy it or it CrashLoops."""
+    worker_process_init, so every pod carrying DEPLOYMENT_MODE=standard or
+    high_scale has to satisfy it or it CrashLoops."""
     for doc in docs:
         if doc["kind"] != "Deployment":
             continue
         env = _env(doc)
-        if env.get("DEPLOYMENT_MODE", {}).get("value") != "high_scale":
+        mode = env.get("DEPLOYMENT_MODE", {}).get("value")
+        if mode not in ("standard", "high_scale"):
             continue
         name = doc["metadata"]["name"]
         assert "INGEST_MODE" not in env, name
         assert "SERVING_MODE" not in env, name
         assert env["DUCKLAKE_CATALOG"]["value"].startswith(("postgres://", "postgresql://")), name
         assert "METADATA_DSN" in env, name
-        assert "CELERY_BROKER_URL" in env, name
+        if mode == "high_scale":
+            assert "CELERY_BROKER_URL" in env, name
 
 
 def test_no_rendered_pod_would_fail_the_app_boot_gate():
-    _assert_boot_gate_would_pass(_render())
+    _assert_boot_gate_would_pass(_render(*STANDARD))
     _assert_boot_gate_would_pass(_render(*CELERY))
 
 
@@ -308,7 +324,7 @@ def test_otlp_exporter_requires_both_operator_destinations():
 
 
 def test_custom_local_hosts_appends_to_backend_hosts():
-    docs = _render("config.localHosts=backend-svc\\,frontend-svc")
+    docs = _render(*STANDARD, "config.localHosts=backend-svc\\,frontend-svc")
     env = _env(_deployment(docs, "backend"))
     assert "backend-svc,frontend-svc" in env["LOCAL_HOSTS"]["value"]
     assert "test-release-fastly-log-analytics-backend" in env["LOCAL_HOSTS"]["value"]
@@ -332,7 +348,7 @@ def test_existing_secret_satisfies_the_dsn_requirement():
 
 
 def test_backend_cannot_exceed_one_replica_under_default_values():
-    docs = _render()
+    docs = _render(*STANDARD)
     backend = _deployment(docs, "backend")
 
     assert backend["spec"]["replicas"] == 1
@@ -344,7 +360,7 @@ def test_backend_cannot_exceed_one_replica_under_default_values():
 def test_backend_stays_single_pod_when_autoscaling_and_replicacount_are_raised():
     """The exact footgun this pins: an operator enables autoscaling to scale
     the worker fleet and bumps replicaCount, and the backend must not move."""
-    docs = _render("autoscaling.enabled=true", "replicaCount=5", "autoscaling.minReplicas=3")
+    docs = _render(*STANDARD, "autoscaling.enabled=true", "replicaCount=5", "autoscaling.minReplicas=3")
     backend = _deployment(docs, "backend")
 
     assert backend["spec"]["replicas"] == 1
@@ -376,7 +392,7 @@ def test_worker_autoscaling_still_works():
 def test_no_worker_scaledobject_without_a_worker_fleet():
     """In sync mode there is no worker Deployment, so a ScaledObject would
     target a workload that does not exist."""
-    docs = _render("autoscaling.enabled=true")
+    docs = _render(*STANDARD, "autoscaling.enabled=true")
 
     assert not [doc for doc in docs if doc["kind"] == "ScaledObject"]
     assert all("worker" not in name for name in _autoscaler_targets(docs))
@@ -387,6 +403,8 @@ def test_no_worker_scaledobject_without_a_worker_fleet():
 
 def _high_scale_docs(*extra: str) -> list[dict]:
     return _render(
+        f"config.ducklakeCatalog={_PG}",
+        "secrets.existingSecret=fla-connections",
         "highScale.enabled=true",
         "highScale.sharedState.existingClaim=shared-app-state",
         *extra,
@@ -394,7 +412,7 @@ def _high_scale_docs(*extra: str) -> list[dict]:
 
 
 def test_high_scale_is_disabled_without_opt_in():
-    docs = _render()
+    docs = _render(*STANDARD)
     assert not [doc for doc in docs if "high-scale" in doc["metadata"]["name"]]
     assert {doc["metadata"]["name"] for doc in docs if doc["kind"] == "Deployment"} == {
         "test-release-fastly-log-analytics-backend",
@@ -403,7 +421,7 @@ def test_high_scale_is_disabled_without_opt_in():
 
 
 def test_high_scale_rejects_missing_shared_storage():
-    error = _render_error("highScale.enabled=true")
+    error = _render_error(*STANDARD, "highScale.enabled=true")
     assert "require sharedState.existingClaim" in error
 
 
@@ -475,6 +493,7 @@ def test_high_scale_ingest_runs_continuous_worker_without_placeholder_workloads(
 
 def test_high_scale_rejects_unimplemented_workload_without_command():
     error = _render_error(
+        *STANDARD,
         "highScale.enabled=true",
         "highScale.workloads.archive.enabled=true",
         "highScale.secret.existingName=fla-high-scale-connections",
@@ -517,9 +536,16 @@ def _render_clickhouse_error(*set_args: str) -> str:
     return result.stderr
 
 
+def test_clickhouse_requires_password_or_existing_secret():
+    """Default render without auth.password or auth.existingSecret fails closed."""
+    assert "auth.password is required when auth.existingSecret is unset" in _render_clickhouse_error()
+    docs = _render_clickhouse("auth.existingSecret=precreated-ch-auth")
+    assert not [doc for doc in docs if doc["kind"] == "Secret"]
+
+
 def test_clickhouse_single_node_default_renders():
     """Single-node default renders StatefulSet, config, secret, service, macros."""
-    docs = _render_clickhouse()
+    docs = _render_clickhouse("auth.password=test_password")
     kinds = [doc["kind"] for doc in docs]
     assert "StatefulSet" in kinds
     assert "Service" in kinds
@@ -561,7 +587,7 @@ def test_clickhouse_single_node_default_renders():
 
 def test_clickhouse_clustered_2x2_renders_shards_replicas_keeper_macros():
     """2-shard x 2-replica values file renders correct macros, Keeper, and dedup-window settings."""
-    docs = _render_clickhouse("shards=2", "replicas=2", "keeper.enabled=true")
+    docs = _render_clickhouse("auth.password=test_password", "shards=2", "replicas=2", "keeper.enabled=true")
 
     # 2 ClickHouse StatefulSets (one per shard) each with 2 replicas
     ch_sts = [doc for doc in docs if doc["kind"] == "StatefulSet" and "shard" in doc["metadata"]["name"]]
@@ -605,12 +631,14 @@ def test_clickhouse_clustered_2x2_renders_shards_replicas_keeper_macros():
 
 def test_clickhouse_rejects_invalid_topology():
     """Bad shard/replica combinations fail at helm template."""
-    assert "shards must be at least 1" in _render_clickhouse_error("shards=0")
-    assert "replicas must be at least 1" in _render_clickhouse_error("replicas=0")
+    assert "shards must be at least 1" in _render_clickhouse_error("auth.password=test_password", "shards=0")
+    assert "replicas must be at least 1" in _render_clickhouse_error("auth.password=test_password", "replicas=0")
     assert "clustering requires keeper.enabled=true" in _render_clickhouse_error(
-        "shards=2", "replicas=2", "keeper.enabled=false"
+        "auth.password=test_password", "shards=2", "replicas=2", "keeper.enabled=false"
     )
-    assert "keeper.replicas must be at least 1" in _render_clickhouse_error("keeper.enabled=true", "keeper.replicas=0")
+    assert "keeper.replicas must be at least 1" in _render_clickhouse_error(
+        "auth.password=test_password", "keeper.enabled=true", "keeper.replicas=0"
+    )
 
 
 # ── Merged from tests/chart/test_admin_gateway.py ──
@@ -704,11 +732,12 @@ def test_internal_lb_active_gateway_keeps_original_tls_contract():
 
 
 def test_app_default_is_unchanged_and_mtls_wires_both_containers():
-    normal = render(APP, ())
+    normal = render(APP, STANDARD)
     assert not any("public-gateway" in doc.get("metadata", {}).get("name", "") for doc in normal)
     docs = render(
         APP,
         (
+            *STANDARD,
             "adminGateway.enabled=true",
             "adminGateway.existingSecret=operator-gateway",
             "adminGateway.host=admin.example.com",
@@ -751,6 +780,7 @@ def test_every_emptydir_is_size_capped_for_admission_policies():
         render(
             APP,
             (
+                *STANDARD,
                 "adminGateway.enabled=true",
                 "adminGateway.existingSecret=operator-gateway",
                 "adminGateway.host=admin.example.com",
@@ -777,6 +807,7 @@ def test_gateway_image_is_required_in_both_charts():
     render(
         APP,
         (
+            *STANDARD,
             "adminGateway.enabled=true",
             "adminGateway.existingSecret=operator-gateway",
             "adminGateway.host=admin.example.com",

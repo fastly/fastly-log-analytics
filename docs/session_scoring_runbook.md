@@ -262,7 +262,7 @@ If `MATRIX_LOAD_FAIL_COUNT` is non-zero, the scorer can't read the matrix from t
   | POST | `/api/services/{svc}/scoring/enable` | Provision scoring on a service |
   | POST | `/api/services/{svc}/scoring/disable` | Tear down scoring (audit preserved) |
   | GET | `/api/services/{svc}/scoring/status` | Installation + health snapshot |
-  | GET | `/api/services/{svc}/scoring/labels` | Score labels (good / suspicious / bad bands) |
+  | POST / DELETE | `/api/services/{svc}/scoring/labels` | Create or delete ground-truth session labels (read via `/scoring/evaluate` or `/scoring/flagged`) |
   | GET | `/api/services/{svc}/scoring/top-flagged` | Highest-scoring sessions in window |
   | GET | `/api/services/{svc}/scoring/score-distribution` | Histogram for ThresholdSlider |
   | GET | `/api/services/{svc}/scoring/compliance-breakdown` | Cookie compliance counters |

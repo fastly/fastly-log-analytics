@@ -20,7 +20,6 @@ from sse_starlette.sse import EventSourceResponse
 
 from backend.core.request_context import ServiceId, require_admin, require_service_access
 from backend.core.share_db import mask_ip
-from backend.high_scale.aggregate_query import AggregateRequest, query_clickhouse_aggregate
 from backend.high_scale.ingest_controller import HighScaleServiceRegistryProtocol, get_high_scale_service_registry
 from backend.models.common import (
     DEFAULT_ERROR_RESPONSES,
@@ -84,9 +83,26 @@ CORRELATE_TOP_VALUES = """
 SELECT {col} AS value, COUNT(*) AS count
 FROM {view}
 WHERE timestamp >= ?
+  AND TRY_CAST(status AS INTEGER) BETWEEN 400 AND 599
 GROUP BY 1
 ORDER BY 2 DESC
 LIMIT ?
+"""
+
+HIGH_SCALE_CORRELATE_TOP_VALUES = """
+SELECT
+    toString({dim_expr}) AS value,
+    count() AS aggregate_count
+FROM request_facts
+WHERE service_id={service_id:String}
+  AND event_timestamp >= {start:DateTime64(3)}
+  AND event_timestamp <= {end:DateTime64(3)}
+  AND toInt32OrZero(custom_fields['status']) BETWEEN 400 AND 599
+  AND {fence}
+GROUP BY value
+HAVING value != ''
+ORDER BY aggregate_count DESC, value ASC
+LIMIT {limit:UInt32}
 """
 
 LATEST_TIMESTAMP_WINDOWED = "SELECT MAX(timestamp) AS latest FROM {view} WHERE timestamp >= ?"
@@ -479,31 +495,47 @@ async def control_room_correlate(
 
     high_scale_service = registry.resolve(service_id)
     if high_scale_service is not None:
-        start = datetime.now(UTC) - timedelta(minutes=window_minutes)
+        from backend.high_scale._common import visible_publication_fence_sql
+        from backend.high_scale.aggregate_query import _FACT_DIMENSION_EXPRESSIONS
+
+        now_utc = datetime.now(UTC)
+        start = now_utc - timedelta(minutes=window_minutes)
         aggregate_dimension = "client_ip" if col == "ip" else col
-        response = await asyncio.to_thread(
-            query_clickhouse_aggregate,
-            high_scale_service.client,
-            AggregateRequest(
-                service_id=service_id,
-                domain="request",
-                start=start,
-                end=datetime.now(UTC),
-                dimension=aggregate_dimension,
-            ),
-            watermark=high_scale_service.watermark_for("request"),
+        dim_expr = _FACT_DIMENSION_EXPRESSIONS["request"].get(
+            aggregate_dimension,
+            "custom_fields[{dimension:String}]",
         )
-        top_values = list(response.top_values)[:limit]
+        watermark = high_scale_service.watermark_for("request")
+        watermark.validate()
+        sql = HIGH_SCALE_CORRELATE_TOP_VALUES.replace("{dim_expr}", dim_expr).replace(
+            "{fence}", visible_publication_fence_sql("request")
+        )
+        params: dict[str, Any] = {
+            "service_id": service_id,
+            "dimension": aggregate_dimension,
+            "start": start,
+            "end": now_utc,
+            "limit": int(limit),
+        }
+        hs_rows = await asyncio.to_thread(high_scale_service.client.execute, sql, params)
+        top_values = [
+            (str(row["value"]), max(0, int(row.get("aggregate_count") or row.get("count") or 0)))
+            for row in hs_rows
+            if str(row.get("value") or "") != ""
+        ][:limit]
         if col == "ip" and mask_ips_for(getattr(request.state, "analyst_session", None)):
             top_values = [(mask_ip(value), count) for value, count in top_values]
+        freshness_lag = (
+            max(0.0, (now_utc - watermark.coverage_end.astimezone(UTC)).total_seconds())
+            if watermark.coverage_end is not None
+            else 0.0
+        )
         return CorrelateResponse(
             dimension=body.dimension,
             top=[CorrelatorTopRow(value=value, count=count) for value, count in top_values],
             freshness=CorrelatorFreshness(
-                latest_log_at=(
-                    response.watermark.coverage_end.isoformat() if response.watermark.coverage_end else None
-                ),
-                lag_seconds=int(response.freshness_lag_seconds),
+                latest_log_at=(watermark.coverage_end.isoformat() if watermark.coverage_end else None),
+                lag_seconds=int(freshness_lag),
             ),
         ).model_dump()
 

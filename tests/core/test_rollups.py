@@ -2455,6 +2455,78 @@ def test_bundle_days_preserves_unmodified_fields_from_existing_bundle(tmp_path):
     assert ("ip", "107.170.164.220", 500) in rows and ("url", "/new", 250) in rows and ("url", "/old", 100) not in rows
 
 
+def test_bundle_days_and_hours_retain_existing_bundle_on_preservation_query_failure(tmp_path):
+    cache_root = tmp_path / "cache"
+    cache_root.mkdir()
+    src = {"name": "svc-preserve-fail"}
+    day = _past_day(2)
+    hour = "2026-05-15-10"
+    _write_per_field_day(str(cache_root), "ip", day, [("107.170.164.220", 500)])
+    _write_per_field_day(str(cache_root), "url", day, [("/old", 100)])
+    _write_per_field_hour(str(cache_root), "ip", hour, [{"value": "107.170.164.220", "count": 500}])
+    _write_per_field_hour(str(cache_root), "url", hour, [{"value": "/old", "count": 100}])
+
+    with (
+        patch("backend.core.duckdb._cache_dir", return_value=str(cache_root)),
+        patch("backend.core.storage._core._get_service_lock", _noop_lock),
+    ):
+        assert day_bundles.bundle_days("svc-preserve-fail", src, [day]) == 1
+        assert rollups.bundle_hours("svc-preserve-fail", src, [hour]) == 1
+
+        # Remove per-field 'ip' files so only 'url' per-field input exists alongside the multi-field bundle
+        shutil.rmtree(cache_root / "rollups" / "day" / "field=ip")
+        shutil.rmtree(cache_root / "rollups" / "hour" / "field=ip")
+
+        new_day_p = _write_per_field_day(str(cache_root), "url", day, [("/new", 250)])
+        os.utime(new_day_p, (time.time() + 60, time.time() + 60))
+        new_hour_p = _write_per_field_hour(str(cache_root), "url", hour, [{"value": "/new", "count": 250}])
+        os.utime(new_hour_p, (time.time() + 60, time.time() + 60))
+
+        # Force the preservation COPY query (which contains WHERE field NOT IN) to raise duckdb.Error
+        real_connect = duckdb.connect
+
+        class _ProxyCon:
+            def __init__(self, inner):
+                self._inner = inner
+
+            def execute(self, sql, *args, **kwargs):
+                if "WHERE field NOT IN" in sql:
+                    raise duckdb.Error("simulated preservation query failure")
+                return self._inner.execute(sql, *args, **kwargs)
+
+            def __enter__(self):
+                self._inner.__enter__()
+                return self
+
+            def __exit__(self, *exc):
+                return self._inner.__exit__(*exc)
+
+            def __getattr__(self, name):
+                return getattr(self._inner, name)
+
+        with patch("duckdb.connect", side_effect=lambda *a, **k: _ProxyCon(real_connect(*a, **k))):
+            assert day_bundles.bundle_days("svc-preserve-fail", src, [day]) == 0
+            assert rollups.bundle_hours("svc-preserve-fail", src, [hour]) == 0
+
+    day_bundle = cache_root / "rollups" / "day_bundled" / f"day={day}" / "all_fields.parquet"
+    hour_bundle = cache_root / "rollups" / "hour_bundled" / f"hour={hour}" / "all_fields.parquet"
+    day_rows = set(
+        zip(
+            pq.read_table(str(day_bundle))["field"].to_pylist(),
+            pq.read_table(str(day_bundle))["value"].to_pylist(),
+        )
+    )
+    hour_rows = set(
+        zip(
+            pq.read_table(str(hour_bundle))["field"].to_pylist(),
+            pq.read_table(str(hour_bundle))["value"].to_pylist(),
+        )
+    )
+    assert ("ip", "107.170.164.220") in day_rows and ("url", "/old") in day_rows
+    assert ("ip", "107.170.164.220") in hour_rows and ("url", "/old") in hour_rows
+    assert Path(new_day_p).exists() and Path(new_hour_p).exists()
+
+
 def test_bundle_days_skips_active_day(tmp_path):
     cache_root = tmp_path / "cache"
     cache_root.mkdir()

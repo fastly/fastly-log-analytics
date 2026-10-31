@@ -30,11 +30,11 @@
          ingestion volume: `system.parts` showed the real data tables
          (request_aggregates, request_facts, rum_*_aggregates) in the low
          single-digit MB, while ClickHouse's own internal text_log/
-         asynchronous_metric_log tables held millions of rows. Keep this
-         Keep merge_tree sizing in sync with docker-compose.clickhouse-prototype.yml's
-         cpus/mem_limit and with resource_limits.xml's background_pool_size/
-         max_concurrent_queries (resource_limits.xml is the single owner of
-         background_pool_size and background_merges_mutations_concurrency_ratio). -->
+         asynchronous_metric_log tables held millions of rows. Keep merge_tree
+         sizing in sync with docker-compose.multipod.yml's cpus/mem_limit and
+         with resource_limits.xml's background_pool_size/max_concurrent_queries
+         (resource_limits.xml is the single owner of background_pool_size and
+         background_merges_mutations_concurrency_ratio). -->
 
     <merge_tree>
         <!-- Merge sizing for the 8G container, doubled from the prior 6G

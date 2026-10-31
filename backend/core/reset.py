@@ -237,7 +237,7 @@ def _purge_clickhouse_tables_gen(
             yield {"type": "status", "message": f"{done_prefix} {len(tables_and_clauses)} ClickHouse table(s)."}
     except Exception as e:
         logger.error("Failed to purge %s: %s", err_label, e)
-        yield {"type": "status", "message": f"Warning: Failed to purge {err_label}: {e}"}
+        raise RuntimeError(f"Failed to purge {err_label}: {e}") from e
 
 
 def reset_service_logs(

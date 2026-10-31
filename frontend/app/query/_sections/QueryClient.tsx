@@ -23,6 +23,7 @@ import { PageHeader } from '@/components/ui/confirm-dialog'
 import { applyUrlFiltersJsonToStore, downloadAsCsv } from '@/lib/utils'
 import { Skeleton } from '@/components/ui/skeleton'
 import { buildStructuredSql } from '@/lib/sqlBuilder'
+import { parseJsonAsync } from '@/lib/workers/parseJson'
 import type { components } from '@/types/api.generated'
 import {
   CodeEditor,
@@ -219,7 +220,7 @@ function QueryPageInner() {
         throw new Error(errorBodyMessage(error as ErrorBody) || 'Query execution failed')
       }
       if (!data) throw new Error('No data')
-      return typeof data !== 'string' ? (data as QueryResponse) : (JSON.parse(data) as QueryResponse)
+      return typeof data !== 'string' ? (data as QueryResponse) : await parseJsonAsync<QueryResponse>(data)
     },
   })
 

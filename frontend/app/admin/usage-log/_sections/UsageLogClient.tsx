@@ -241,7 +241,7 @@ export function UsageLogClient(props?: UsageLogClientProps) {
               e.preventDefault()
               void adminFetch(exportUrl).then(async (res) => {
                 if (res.ok) downloadBlob(await res.blob(), 'usage_log.csv')
-              })
+              }).catch(() => {})
             }}
             className={buttonVariants({ variant: 'outline', size: 'sm' })}
           >

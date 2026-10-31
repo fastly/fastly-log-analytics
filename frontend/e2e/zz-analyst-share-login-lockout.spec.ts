@@ -90,8 +90,22 @@ test.describe('analyst share-login', () => {
 // Folded from e2e/pages/share-login.spec.ts
 // ═══════════════════════════════════════════════════════════════════════════
 
+function isLocalPlaywrightTarget(baseURL?: string): boolean {
+  const raw = baseURL || process.env.PLAYWRIGHT_BASE_URL || 'http://127.0.0.1:3002'
+  try {
+    const { hostname } = new URL(raw)
+    return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1' || hostname === '[::1]'
+  } catch {
+    return false
+  }
+}
+
 test.describe('Analyst Share Login Page Contract (/share-login)', () => {
-  test.beforeEach(async ({ request }) => {
+  test.beforeEach(async ({ request, baseURL }) => {
+    test.skip(
+      !isLocalPlaywrightTarget(baseURL),
+      'Skipping destructive share state reset against non-local PLAYWRIGHT_BASE_URL',
+    )
     await request.post('/api/admin/share/stop').catch(() => {})
   })
 

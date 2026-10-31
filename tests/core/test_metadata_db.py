@@ -1716,3 +1716,110 @@ def test_get_pg_pool_passes_open_true_explicitly():
             assert captured_kwargs.get("open") is True
     finally:
         setattr(pg_pool_mod, "_pool", orig_pool)
+
+
+def test_job_runs_terminal_pruning_preserves_active_leases():
+    from backend.core.metadata.cron_runs import purge_cron_runs
+
+    sid = "svc-job-runs-prune"
+    con = get_con(sid)
+    now = time.time()
+    con.execute("DELETE FROM job_runs WHERE service_id = ?", (sid,))
+    con.execute(
+        "INSERT INTO job_runs (service_id, job_name, status, started_at, heartbeat_at, lease_ttl_s) "
+        "VALUES (?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?)",
+        (
+            sid,
+            "old_done",
+            "completed",
+            now - 10 * 86400,
+            now - 10 * 86400,
+            60,
+            sid,
+            "recent_fail",
+            "failed",
+            now - 3600,
+            now - 3600,
+            60,
+            sid,
+            "active_lease",
+            "running",
+            now - 30,
+            now,
+            60,
+        ),
+    )
+
+    run_id = start_cron_run(sid, "new_lease")
+    assert run_id > 0
+
+    rows = con.execute("SELECT job_name, status FROM job_runs WHERE service_id = ?", (sid,)).fetchall()
+    by_task = {r["job_name"]: r["status"] for r in rows}
+    assert "old_done" not in by_task
+    assert by_task["recent_fail"] == "failed"
+    assert by_task["active_lease"] == "running"
+    assert by_task["new_lease"] == "running"
+
+    purge_cron_runs(sid, days=0)
+    rows_after = con.execute("SELECT job_name, status FROM job_runs WHERE service_id = ?", (sid,)).fetchall()
+    by_task_after = {r["job_name"]: r["status"] for r in rows_after}
+    assert "recent_fail" not in by_task_after
+    assert by_task_after["active_lease"] == "running"
+    assert by_task_after["new_lease"] == "running"
+
+
+def test_fos_usage_atomic_rollback_on_summary_failure():
+    from backend.core.metadata import fos_usage
+
+    sid = "svc-fos-usage-atomic"
+    con = get_con(sid)
+    con.execute("DELETE FROM usage_log WHERE service_id = ?", (sid,))
+    con.execute("DELETE FROM usage_log_hourly_summary WHERE service_id = ?", (sid,))
+
+    with patch.object(fos_usage, "_upsert_hourly_summary", side_effect=RuntimeError("summary boom")):
+        fos_usage.log_usage_calls(sid, [{"method": "ListObjectsV2", "bytes": 123}])
+
+    raw_cnt = con.execute("SELECT COUNT(*) FROM usage_log WHERE service_id = ?", (sid,)).fetchone()[0]
+    assert raw_cnt == 0
+
+
+def test_ingest_log_atomic_rollback_and_rum_summary_isolation():
+    sid = "svc-ingest-atomic-rum"
+    con = get_con(sid)
+    con.execute("DELETE FROM ingested_files WHERE source_name = ?", (sid,))
+    con.execute("DELETE FROM ingested_files_summary WHERE source_name = ?", (sid,))
+
+    orig_execute = con.execute
+
+    def _fail_on_summary_insert(sql: str, params=()):
+        if "INSERT INTO ingested_files_summary AS summary" in sql:
+            raise RuntimeError("simulated summary upsert failure")
+        return orig_execute(sql, params)
+
+    with (
+        patch("backend.core.metadata.ingest_log.get_con", return_value=con),
+        patch.object(con, "execute", side_effect=_fail_on_summary_insert),
+        pytest.raises(RuntimeError, match="simulated summary upsert failure"),
+    ):
+        ingest_log.insert_ingested_files(sid, [("s3://b/2026-01-01T00:00:00.000-a.gz", 10, 100)], table_name="logs")
+
+    # Transaction rolled back: ingested_files must not retain the orphaned row
+    cnt = orig_execute("SELECT COUNT(*) FROM ingested_files WHERE source_name = ?", (sid,)).fetchone()[0]
+    assert cnt == 0
+
+    # Retry succeeds and records full delta in summary
+    ingest_log.insert_ingested_files(sid, [("s3://b/2026-01-01T00:00:00.000-a.gz", 10, 100)], table_name="logs")
+    # RUM writes must not pollute the request-log summary
+    ingest_log.insert_ingested_files(sid, [("s3://b/2026-01-02T00:00:00.000-rum.gz", 999, 5000)], table_name="rum")
+
+    summary = ingest_log.get_ingested_files_status_summary(sid)
+    assert summary["file_count"] == 1
+    assert summary["total_rows"] == 10
+    assert summary["total_bytes"] == 100
+    assert summary["latest_file_name"] == "s3://b/2026-01-01T00:00:00.000-a.gz"
+
+    recomputed = ingest_log.recompute_ingested_files_summary(con, sid)
+    assert recomputed["file_count"] == 1
+    assert recomputed["total_rows"] == 10
+    assert recomputed["total_bytes"] == 100
+    assert recomputed["latest_file_name"] == "s3://b/2026-01-01T00:00:00.000-a.gz"

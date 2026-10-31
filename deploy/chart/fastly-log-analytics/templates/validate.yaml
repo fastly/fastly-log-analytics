@@ -39,11 +39,9 @@ Template-time coherence gates for the deployment topology.
 {{- fail (printf "secrets.metadataDsn must be a Postgres DSN (postgres:// or postgresql://) per ADR-22; got %q." .Values.secrets.metadataDsn) -}}
 {{- end -}}
 {{- end -}}
-{{- if eq $mode "high_scale" -}}
-{{- $catalog := required "config.deploymentMode=high_scale requires config.ducklakeCatalog to be a Postgres DSN (postgres:// or postgresql://)." .Values.config.ducklakeCatalog -}}
+{{- $catalog := required (printf "config.deploymentMode=%s requires config.ducklakeCatalog to be a Postgres DSN (postgres:// or postgresql://)." $mode) .Values.config.ducklakeCatalog -}}
 {{- if not .Values.secrets.existingSecret -}}
-{{- $dsn := required "config.deploymentMode=high_scale requires a shared Postgres metadata database; set secrets.metadataDsn or secrets.existingSecret." .Values.secrets.metadataDsn -}}
-{{- end -}}
+{{- $dsn := required (printf "config.deploymentMode=%s requires a shared Postgres metadata database; set secrets.metadataDsn or secrets.existingSecret." $mode) .Values.secrets.metadataDsn -}}
 {{- end -}}
 {{- if .Values.adminGateway.enabled }}
 {{- if not .Values.adminGateway.existingSecret }}

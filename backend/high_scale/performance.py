@@ -23,11 +23,11 @@ from backend.high_scale._common import build_published_facts_where as _facts_whe
 from backend.high_scale._common import build_published_projection_where as _where
 from backend.high_scale._common import finite_float as _finite_float
 from backend.high_scale._common import percentiles as _percentiles
+from backend.high_scale._common import range_value as _range_value
 from backend.high_scale._common import text as _text
 from backend.models.analytics import PerformanceAggregatesResponse
 from backend.repositories.utils.response_cache import (
     ResponseMemo,
-    bucket_time_to_minute,
     client_cache_token,
     digest_cache_key,
     serialize_filters_for_key,
@@ -385,13 +385,15 @@ def performance_aggregates(
     sort_column = _SORT_COLUMNS.get(sort_by, "p99_ms")
     cache_key: str | None = None
     if _HS_PERF_CACHE_TTL > 0 and start_time is not None and end_time is not None:
+        start_bound = _range_value(start_time)
+        end_bound = _range_value(end_time)
         cache_key = digest_cache_key(
             {
                 "ep": "hs_performance_aggregates",
                 "svc": service.service_id,
                 "cid": client_cache_token(service.client),
-                "s": bucket_time_to_minute(start_time),
-                "e": bucket_time_to_minute(end_time),
+                "s": start_bound.isoformat() if start_bound is not None else str(start_time).strip(),
+                "e": end_bound.isoformat() if end_bound is not None else str(end_time).strip(),
                 "f": serialize_filters_for_key(filters),
                 "sb": sort_by,
                 "sec": sorted(wanted),

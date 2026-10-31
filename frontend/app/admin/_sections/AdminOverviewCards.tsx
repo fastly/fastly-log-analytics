@@ -38,9 +38,11 @@ export function AdminPrefetchLinks({ isHighScale }: { isHighScale?: boolean } = 
     else if (key === 'clickhouse' && activeServiceId) queryClient.prefetchQuery({
       queryKey: queryKeys.admin.clickhouseStatus(activeServiceId),
       queryFn: async ({ signal }) => {
-        const { data, response } = await client.GET('/api/admin/clickhouse/status', { params: { query: { service_id: activeServiceId } }, signal })
-        if (!response.ok && response.status !== 503) throw new Error(`status ${response.status}`)
-        return data
+        try {
+          return await unwrapClient(client.GET('/api/admin/clickhouse/status', { params: { query: { service_id: activeServiceId } }, signal }))
+        } catch {
+          return null
+        }
       },
     })
   }

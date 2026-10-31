@@ -8,7 +8,7 @@ image:
 
 auth:
   username: fla_user
-  password: fla_password_123
+  password: ""
   database: fastly_log_analytics
   existingSecret: ""
   # Whether the application user (auth.username) may manage access (CREATE USER, GRANT, ...). It defaults to true

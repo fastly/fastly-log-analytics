@@ -199,14 +199,15 @@ def check_tenancy(target: EnvironmentTarget, timeout_s: float = 5.0) -> TenancyR
 
 def check_rbac(target: EnvironmentTarget, timeout_s: float = 5.0) -> RbacResult:
     probe_fn = _env_attr("probe", probe)
+    analyst_headers = {
+        "User-Agent": "FLA-RbacCheck/1.0",
+        "X-Remote-Analyst": "1",
+        "Connection": "close",
+    }
     result = probe_fn(
         f"{target.backend_url}/api/share/auth-config",
         timeout=timeout_s,
-        headers={
-            "User-Agent": "FLA-RbacCheck/1.0",
-            "X-Remote-Analyst": "1",
-            "Connection": "close",
-        },
+        headers=analyst_headers,
     )
     auth_config_ok = False
     error = result.error
@@ -225,12 +226,33 @@ def check_rbac(target: EnvironmentTarget, timeout_s: float = 5.0) -> RbacResult:
             error=f"Failed to query /api/share/auth-config: {error}",
         )
 
-    err_msg = None if auth_config_ok else "Auth config endpoint failed or returned unexpected payload"
+    protected = probe_fn(
+        f"{target.backend_url}/api/services",
+        timeout=timeout_s,
+        headers=analyst_headers,
+    )
+    if protected.status is None:
+        return RbacResult(
+            target=target,
+            auth_config_ok=auth_config_ok,
+            unauth_analyst_blocked=False,
+            unauth_analyst_code=None,
+            error=f"Failed to query protected endpoint /api/services: {protected.error}",
+        )
+    unauth_code = protected.status
+    unauth_blocked = unauth_code in (401, 403)
+    err_msg: str | None = None
+    if not auth_config_ok:
+        err_msg = "Auth config endpoint failed or returned unexpected payload"
+    elif not unauth_blocked:
+        err_msg = (
+            f"RBAC breach: unauthenticated analyst on /api/services returned HTTP {unauth_code} (expected 401/403)"
+        )
     return RbacResult(
         target=target,
         auth_config_ok=auth_config_ok,
-        unauth_analyst_blocked=True,
-        unauth_analyst_code=200,
+        unauth_analyst_blocked=unauth_blocked,
+        unauth_analyst_code=unauth_code,
         error=err_msg,
     )
 

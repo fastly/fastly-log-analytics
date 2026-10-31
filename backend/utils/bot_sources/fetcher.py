@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
+import socket
+import urllib.parse
+
+import httpx
 
 from backend.utils.date_utils import iso_z_now
-from backend.utils.http import http_get_text
+from backend.utils.http import _DEFAULT_UA
 from backend.utils.telemetry import atomic_write_json
 
 from .registry import (
@@ -24,6 +29,103 @@ from .registry import (
 )
 
 logger = logging.getLogger(__name__)
+
+_MAX_FEED_BYTES = 10 * 1024 * 1024  # 10 MiB
+_MAX_REDIRECTS = 5
+_REDIRECT_STATUSES = {301, 302, 303, 307, 308}
+
+
+def _is_disallowed_ip(ip_str: str) -> bool:
+    ip = ipaddress.ip_address(ip_str)
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    return ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_unspecified or ip.is_reserved
+
+
+def _validate_feed_url(url: str) -> str:
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme.lower() != "https":
+        raise ValueError(f"Disallowed bot feed URL scheme {parsed.scheme!r}; only 'https' is permitted")
+    if parsed.username or parsed.password:
+        raise ValueError("Bot feed URL must not contain credentials")
+    hostname = parsed.hostname
+    if not hostname:
+        raise ValueError("Bot feed URL is missing a hostname")
+    port = parsed.port or 443
+
+    try:
+        ipaddress.ip_address(hostname)
+    except ValueError:
+        pass
+    else:
+        if _is_disallowed_ip(hostname):
+            raise ValueError(f"Bot feed URL points to disallowed IP address {hostname}")
+
+    try:
+        addr_infos = socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)
+    except socket.gaierror as exc:
+        raise ValueError(f"Failed to resolve bot feed hostname {hostname!r}: {exc}") from exc
+
+    if not addr_infos:
+        raise ValueError(f"No addresses resolved for bot feed hostname {hostname!r}")
+
+    for _family, _type, _proto, _canonname, sockaddr in addr_infos:
+        resolved_ip = str(sockaddr[0])
+        if "%" in resolved_ip:
+            resolved_ip = resolved_ip.split("%", 1)[0]
+        if _is_disallowed_ip(resolved_ip):
+            raise ValueError(f"Bot feed hostname {hostname!r} resolved to disallowed IP address {resolved_ip}")
+
+    return url
+
+
+def http_get_text(
+    url: str,
+    *,
+    headers: dict[str, str] | None = None,
+    timeout: float = 30.0,
+    max_bytes: int = _MAX_FEED_BYTES,
+) -> str:
+    """Fetch an HTTPS bot feed URL with SSRF validation on initial and redirect hops and bounded body read."""
+    hdrs = {"User-Agent": _DEFAULT_UA}
+    if headers:
+        hdrs.update(headers)
+
+    current_url = _validate_feed_url(url)
+    with httpx.Client(timeout=timeout, follow_redirects=False) as client:
+        for _hop in range(_MAX_REDIRECTS + 1):
+            with client.stream("GET", current_url, headers=hdrs) as resp:
+                if resp.status_code in _REDIRECT_STATUSES:
+                    location = resp.headers.get("location")
+                    if not location:
+                        raise ValueError(f"Redirect response {resp.status_code} missing Location header")
+                    next_url = urllib.parse.urljoin(current_url, location)
+                    current_url = _validate_feed_url(next_url)
+                    continue
+
+                resp.raise_for_status()
+                content_length = resp.headers.get("content-length")
+                if content_length is not None:
+                    try:
+                        parsed_len = int(content_length)
+                    except ValueError:
+                        parsed_len = 0
+                    if parsed_len > max_bytes:
+                        raise ValueError(
+                            f"Bot feed response Content-Length ({parsed_len}) exceeds max_bytes ({max_bytes})"
+                        )
+                chunks: list[bytes] = []
+                total = 0
+                for chunk in resp.iter_bytes():
+                    total += len(chunk)
+                    if total > max_bytes:
+                        raise ValueError(f"Bot feed response body exceeded max_bytes ({max_bytes})")
+                    chunks.append(chunk)
+                raw_bytes = b"".join(chunks)
+                encoding = resp.encoding or "utf-8"
+                return raw_bytes.decode(encoding, errors="replace")
+
+    raise ValueError(f"Too many redirects (>{_MAX_REDIRECTS}) fetching bot feed {url!r}")
 
 
 def fetch_external_cidrs(source_config: dict) -> list[str]:

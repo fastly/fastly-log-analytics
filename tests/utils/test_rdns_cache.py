@@ -1829,3 +1829,105 @@ def test_bot_sources_package_submodules_and_pytricia_matching():
         assert cidr.match_ip_to_bot_source("8.8.8.8") is None
         assert cidr.match_ip_to_bot_source("not-an-ip") is None
         assert cidr.match_ip_to_bot_source("") is None
+
+
+@pytest.mark.parametrize(
+    "bad_url",
+    [
+        "http://example.com/ips.json",
+        "file:///etc/passwd",
+        "ftp://example.com/ips.txt",
+        "https:///no-host",
+        "https://127.0.0.1/ips.json",
+        "https://[::1]/ips.json",
+        "https://[::ffff:127.0.0.1]/ips.json",
+        "https://10.0.0.1/ips.json",
+        "https://192.168.1.1/ips.json",
+        "https://169.254.169.254/latest/meta-data/",
+    ],
+)
+def test_validate_feed_url_rejects_disallowed_schemes_and_literal_ips(bad_url: str):
+    from backend.utils.bot_sources.fetcher import _validate_feed_url
+
+    with pytest.raises(ValueError):
+        _validate_feed_url(bad_url)
+
+
+@pytest.mark.parametrize(
+    "resolved_ip",
+    [
+        "127.0.0.1",
+        "::1",
+        "::ffff:127.0.0.1",
+        "10.1.2.3",
+        "172.16.0.1",
+        "192.168.0.1",
+        "169.254.169.254",
+        "0.0.0.0",
+        "224.0.0.1",
+    ],
+)
+def test_validate_feed_url_rejects_dns_resolved_internal_addresses(resolved_ip: str):
+    from backend.utils.bot_sources.fetcher import _validate_feed_url
+
+    family = socket.AF_INET6 if ":" in resolved_ip else socket.AF_INET
+    addrinfo = [(family, socket.SOCK_STREAM, 6, "", (resolved_ip, 443))]
+    with patch("backend.utils.bot_sources.fetcher.socket.getaddrinfo", return_value=addrinfo):
+        with pytest.raises(ValueError, match="disallowed IP address"):
+            _validate_feed_url("https://feeds.example.com/ips.json")
+
+
+def test_http_get_text_rejects_redirect_to_loopback_before_following():
+    import httpx
+
+    from backend.utils.bot_sources.fetcher import http_get_text
+
+    def fake_getaddrinfo(host, port, *args, **kwargs):
+        if host == "feeds.example.com":
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))]
+        if host == "internal.example.com":
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 443))]
+        raise AssertionError(f"Unexpected host lookup: {host}")
+
+    requests_seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests_seen.append(str(request.url))
+        return httpx.Response(302, headers={"Location": "https://internal.example.com/secret"})
+
+    transport = httpx.MockTransport(handler)
+    real_client = httpx.Client
+
+    with (
+        patch("backend.utils.bot_sources.fetcher.socket.getaddrinfo", side_effect=fake_getaddrinfo),
+        patch(
+            "backend.utils.bot_sources.fetcher.httpx.Client",
+            side_effect=lambda **kw: real_client(transport=transport, **kw),
+        ),
+    ):
+        with pytest.raises(ValueError, match="disallowed IP address"):
+            http_get_text("https://feeds.example.com/ips.json")
+
+    assert requests_seen == ["https://feeds.example.com/ips.json"]
+
+
+def test_http_get_text_bounds_response_body_size():
+    import httpx
+
+    from backend.utils.bot_sources.fetcher import http_get_text
+
+    addrinfo = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))]
+    transport = httpx.MockTransport(
+        lambda _req: httpx.Response(200, content=b"x" * 101, headers={"Content-Length": "101"})
+    )
+    real_client = httpx.Client
+
+    with (
+        patch("backend.utils.bot_sources.fetcher.socket.getaddrinfo", return_value=addrinfo),
+        patch(
+            "backend.utils.bot_sources.fetcher.httpx.Client",
+            side_effect=lambda **kw: real_client(transport=transport, **kw),
+        ),
+    ):
+        with pytest.raises(ValueError, match="max_bytes"):
+            http_get_text("https://feeds.example.com/ips.json", max_bytes=100)

@@ -7,19 +7,23 @@ Status of every route under `app/` — rendering mode (CSR / RSC / hybrid), data
 | Route | Render mode | Cold-load data path | URL state model | Notes |
 |---|---|---|---|---|
 | `/` | CSR redirect | n/a | n/a | Redirects to `/dashboard` |
-| `/dashboard` | CSR client page | SSR'd `/api/bootstrap` (root layout) → React Query cache → client `useDashboardBundle` for the chart/top-bots | `?service=` (nuqs), `?start_time=`, `?end_time=`, `?range=`, `?metric=`, `?interval=` (legacy `useViewMetricUrlSync`) | Highest-traffic route. SSR'd bootstrap puts share-banner, sync-status, log-extents, log-fields-catalog in first paint. Bundle is async-aware (Web Worker for n>2000 rows) |
+| `/dashboard` | Hybrid RSC + CSR client page | SSR'd `/api/bootstrap` (root layout) + server `nowServerStr` → React Query cache → client `useDashboardBundle` for the chart/top-bots | `?service=` (nuqs), `?start_time=`, `?end_time=`, `?range=`, `?metric=`, `?interval=` (legacy `useViewMetricUrlSync`) | Highest-traffic route. SSR'd bootstrap puts share-banner, sync-status, log-extents, log-fields-catalog in first paint. Bundle is async-aware (Web Worker for n>2000 rows) |
 | `/network` | CSR client page | SSR'd bootstrap → client `useReportConfig` for network aggregates | `?service=`, `?start_time=`, `?end_time=` | NetworkMap reads `world.geojson` via fetch — gzipped 102 KB, `max-age=86400, immutable` on Fastly |
 | `/origin` | CSR client page | SSR'd bootstrap → client per-section queries | `?service=`, `?start_time=`, `?end_time=` | |
 | `/performance` | CSR client page | SSR'd bootstrap → client per-section queries | `?service=`, `?start_time=`, `?end_time=` | |
-| `/security` | CSR client page | SSR'd bootstrap → client per-section queries | `?service=`, `?start_time=`, `?end_time=`, `?filters=` | |
+| `/security` | Hybrid RSC + CSR client page | SSR'd bootstrap + `apiSsrFetch` security bundle (`<HydrationBoundary>`) → client `SecurityClient` | `?service=`, `?start_time=`, `?end_time=`, `?filters=` | |
 | `/sessions` | CSR client page | SSR'd bootstrap → client `useServiceQuery('sessions')` | `?service=`, `?start_time=`, `?end_time=` | |
-| `/insights` | CSR client page | SSR'd bootstrap → client `useInsights` | `?service=` | |
+| `/insights` | Hybrid RSC + CSR client page | SSR'd bootstrap + `apiSsrFetch` insights (`<HydrationBoundary>`) → client `InsightsClient` | `?service=` | |
+| `/assets-shield` | Hybrid RSC + CSR client page | SSR'd bootstrap + `apiSsrFetch` assets-shield (`<HydrationBoundary>`) → client `AssetsShieldClient` | `?service=`, `?start_time=`, `?end_time=`, `?filters=` | |
+| `/streaming` | Hybrid RSC + CSR client page | SSR'd bootstrap + `apiSsrFetch` streaming (`<HydrationBoundary>`) → client `StreamingClient` | `?service=`, `?start_time=`, `?end_time=`, `?filters=` | |
 | `/query` | CSR client page | SSR'd bootstrap → client SQL editor + per-run query | `?service=`, `?mode=raw\|structured`, `?start_time=`, `?end_time=`, `?range=`, `?filters=`, `?q=` (raw mode) | Raw mode owns `?mode`/`?q` via direct `router.replace` (not nuqs yet); structured-mode filter/range params now mirror the other ReportLayout pages via `useFilterUrlWriteback` so URLs are shareable |
 | `/charts` | CSR client page | SSR'd bootstrap → client `useReportConfig` | `?service=`, `?start_time=`, `?end_time=`, `?metric=`, `?compare=` | |
-| `/alerts` | CSR client page | SSR'd bootstrap → client `useAlerts` | `?service=` | |
-| `/logs` | CSR client page (admin) | SSR'd bootstrap → client `useLogsPageState` (tabs + file browser) | `?service=`, `?tab=` | Admin-only — blocked at `/api/services/{id}/lake-info` etc. via `_ANALYST_BLOCKED_SUBPATH_REGEX` |
+| `/alerts` | Hybrid RSC + CSR client page | SSR'd bootstrap + `apiSsrFetch` alerts (`<HydrationBoundary>`) → client `AlertsClient` | `?service=` | |
+| `/logs` | Hybrid RSC + CSR client page (admin) | SSR'd bootstrap + `apiSsrFetch` logs state (`<HydrationBoundary>`) → client `LogsClient` | `?service=`, `?tab=` | Admin-only — blocked at `/api/services/{id}/lake-info` etc. via `_ANALYST_BLOCKED_SUBPATH_REGEX` |
 | `/usage` | CSR client page (admin) | SSR'd bootstrap → client `usePrefill` | n/a (no service scope) | Admin-only |
-| `/admin` | CSR client page (admin) | SSR'd bootstrap → admin endpoints | n/a | Admin-only — `proxy.ts` blocks remote visitors via `X-Proxied-By-Caddy` |
+| `/admin` | Hybrid RSC + CSR client page (admin) | SSR'd bootstrap + `apiSsrFetch` admin overview (`<HydrationBoundary>`) → client `AdminClient` | n/a | Admin-only — `proxy.ts` blocks remote visitors via `X-Proxied-By-Caddy` |
+| `/admin/rum` | Hybrid RSC + CSR client page (admin) | SSR'd bootstrap + `apiSsrFetch` RUM analytics (`<HydrationBoundary>`) → client `RumClient` | `?service=` | |
+| `/admin/trends` | Hybrid RSC + CSR client page (admin) | SSR'd bootstrap + `apiSsrFetch` trends (`<HydrationBoundary>`) → client `TrendsClient` | n/a | |
 | `/admin/share` | CSR client page (admin) | SSR'd bootstrap → admin share endpoints | n/a | |
 | `/admin/usage-log` | CSR client page (admin) | SSR'd bootstrap → client `useUsageLog` | n/a | |
 | `/admin/session-scoring` | CSR client page (admin) | SSR'd bootstrap → admin scoring endpoints | n/a | |
@@ -54,9 +58,9 @@ The serviceStore migration is intentionally scoped tight: `useUrlServiceSync` is
 
 ## SSR Bootstrap Pre-Fetch & Hydration Invariants
 
-Implemented across [`app/layout.tsx`](../app/layout.tsx), [`lib/apiSsrProxy.ts`](../lib/apiSsrProxy.ts), and [`lib/ssr/upstream.ts`](../lib/ssr/upstream.ts):
+Implemented across [`app/layout.tsx`](../app/layout.tsx), [`lib/api.ts`](../lib/api.ts), and [`lib/ssr/upstream.ts`](../lib/ssr/upstream.ts):
 
-1. **Use `node:http.request`, not `fetch()`.** Node's `fetch()` always rewrites `Host` from the URL; the backend's `_remote_host_allowed` gate rejects remote-classified requests whose `Host` isn't the public endpoint, so the SSR fetch would silently fall through to the client (or misclassify a remote request as admin-from-loopback). Copy the `rawRequest` pattern in [`lib/apiSsrProxy.ts`](../lib/apiSsrProxy.ts).
+1. **Use `node:http.request`, not `fetch()`.** Node's `fetch()` always rewrites `Host` from the URL; the backend's `_remote_host_allowed` gate rejects remote-classified requests whose `Host` isn't the public endpoint, so the SSR fetch would silently fall through to the client (or misclassify a remote request as admin-from-loopback). Copy the `rawRequest` pattern in [`lib/api.ts`](../lib/api.ts) and [`lib/ssr/upstream.ts`](../lib/ssr/upstream.ts).
 2. **Trust topology is `X-Remote-Analyst: 1`, not `X-Proxied-By-Caddy`.** SSR reaches the backend over loopback, and `is_request_remote` classifies on `request.client.host` first, so a forwarded Caddy marker is ignored and the backend would return the **admin** payload into public HTML. Forward `X-Remote-Analyst: 1` (honored on loopback, gated on `tunnel_manager.is_sharing_active()`) only when the inbound request carries `X-Proxied-By-Caddy`; otherwise the admin SSH-tunnel path is mis-classified as analyst.
 3. **Always wrap in try/catch + a bounded timeout (5 s) and return `null` on failure.** SSR errors must never break a page; the layout falls back to client fetch.
 4. **`export const dynamic = "force-dynamic"` is required** in any layout/page doing a per-request SSR fetch through an imported helper that calls `cookies()`/`headers()`. Next's static analysis detects only direct calls in the component file; otherwise the route is built statically when the backend isn't reachable and the dehydrated state is permanently empty.

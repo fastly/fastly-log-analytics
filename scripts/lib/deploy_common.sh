@@ -60,6 +60,7 @@ setup_deploy_gce_ssh() {
     GCE_SSH_FALLBACK_SCRIPT=$(mktemp "${TMPDIR:-/tmp}/fla_gce_ssh.XXXXXX")
     cat << 'EOF' > "$GCE_SSH_FALLBACK_SCRIPT"
 #!/usr/bin/env bash
+set -euo pipefail
 args=(); cmd=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -70,10 +71,24 @@ done
 key_args=()
 [[ -f "$HOME/.ssh/google_compute_engine" ]] && key_args=(-i "$HOME/.ssh/google_compute_engine")
 [[ "${FLA_BOUNDED_RUN:-0}" == "1" ]] && key_args+=(-o ControlMaster=no -o ControlPath=none)
-if [[ -n "$cmd" ]]; then
-  exec ssh "${key_args[@]}" -o BatchMode=yes -o StrictHostKeyChecking=no "${GCE_VM_SSH}" "${args[@]}" "$cmd"
+known_hosts_args=()
+if [[ -n "${GCE_SSH_KNOWN_HOSTS:-}" ]]; then
+  [[ -s "$GCE_SSH_KNOWN_HOSTS" ]] || { echo "GCE fallback SSH: known_hosts file '$GCE_SSH_KNOWN_HOSTS' missing or empty; refusing unverified connection" >&2; exit 1; }
+  known_hosts_args=(-o "UserKnownHostsFile=$GCE_SSH_KNOWN_HOSTS")
+elif [[ -s "$HOME/.ssh/google_compute_known_hosts" && -s "$HOME/.ssh/known_hosts" ]]; then
+  known_hosts_args=(-o "UserKnownHostsFile=$HOME/.ssh/google_compute_known_hosts $HOME/.ssh/known_hosts")
+elif [[ -s "$HOME/.ssh/google_compute_known_hosts" ]]; then
+  known_hosts_args=(-o "UserKnownHostsFile=$HOME/.ssh/google_compute_known_hosts")
+elif [[ -s "$HOME/.ssh/known_hosts" ]]; then
+  known_hosts_args=(-o "UserKnownHostsFile=$HOME/.ssh/known_hosts")
 else
-  exec ssh "${key_args[@]}" -o BatchMode=yes -o StrictHostKeyChecking=no "${GCE_VM_SSH}" "${args[@]}"
+  echo "GCE fallback SSH: no trusted known_hosts file found; refusing unverified connection" >&2
+  exit 1
+fi
+if [[ -n "$cmd" ]]; then
+  exec ssh ${key_args[@]+"${key_args[@]}"} "${known_hosts_args[@]}" -o BatchMode=yes -o StrictHostKeyChecking=yes "${GCE_VM_SSH}" ${args[@]+"${args[@]}"} "$cmd"
+else
+  exec ssh ${key_args[@]+"${key_args[@]}"} "${known_hosts_args[@]}" -o BatchMode=yes -o StrictHostKeyChecking=yes "${GCE_VM_SSH}" ${args[@]+"${args[@]}"}
 fi
 EOF
     chmod +x "$GCE_SSH_FALLBACK_SCRIPT"

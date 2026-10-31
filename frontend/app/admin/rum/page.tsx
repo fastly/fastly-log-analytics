@@ -14,6 +14,8 @@ import { PageHeader } from '@/components/ui/confirm-dialog';
 import { RumStatusPanel } from '@/app/rum/page';
 import { RumPanelFallback } from './loading';
 
+export const dynamic = 'force-dynamic';
+
 export const metadata: Metadata = {
   title: 'RUM Configuration',
 };

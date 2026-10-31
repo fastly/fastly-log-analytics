@@ -965,7 +965,7 @@ class _TopNRollupMixin:
                 "[top_n_rollups] live-healing %d un-rolled closed hour(s) for service=%r "
                 "(%s..%s) — expected when the writer is <1 heal tick behind; persistent "
                 "occurrences mean the rollup_heal cron is failing (check cron_runs), and "
-                "gaps older than %dh need the daily deep pass or scripts/backfill_rollups.py",
+                "gaps older than %dh need the daily rollup_backfill cron (30-day deep pass) or an admin cron trigger",
                 len(missing_hours),
                 _svc_key,
                 missing_hours[0],

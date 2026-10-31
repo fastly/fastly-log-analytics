@@ -405,7 +405,7 @@ export function SystemHealthCard() {
             <p className="mt-1 text-[11px] sm:text-[10px] text-muted-foreground">
               Wait-time samples over the last ~1024 checkouts per service. ADR-03 escalation threshold: p95 &gt; 50ms ⇒ consider separate-process cron isolation.
               503s = pool-saturation rejects (SRE-12); Warmed = last writer-driven view rebuild (SRE-16).
-              Same samples stream to OTel ``app.thread_wait_ms`` for off-box analysis.
+              Same samples stream to OTel <code>app.thread_wait_ms</code> for off-box analysis.
             </p>
           </div>
         </details>

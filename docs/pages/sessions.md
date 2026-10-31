@@ -2,7 +2,7 @@
 
 Request-level sessions reconstructed from the logs, with filtering, operator flagging and a per-session inspector.
 
-Source: [`frontend/app/sessions/`](../../frontend/app/sessions/) (`page.tsx` re-exports `_sections/SessionsClient.tsx` and `SessionsTable.tsx`), inspector in [`frontend/components/SessionDetailModal.tsx`](../../frontend/components/SessionDetailModal.tsx), flagging UI in [`frontend/components/SessionScoring/`](../../frontend/components/SessionScoring/). Built on `ReportLayout`; not SSR-seeded.
+Source: [`frontend/app/sessions/`](../../frontend/app/sessions/) (`page.tsx` re-exports `_sections/SessionsClient.tsx` and `SessionsTable.tsx`), inspector in [`frontend/components/SessionDetailModal/index.tsx`](../../frontend/components/SessionDetailModal/index.tsx), flagging UI in [`frontend/components/SessionScoring/`](../../frontend/components/SessionScoring/). Built on `ReportLayout`; not SSR-seeded.
 
 ## How sessions are formed
 

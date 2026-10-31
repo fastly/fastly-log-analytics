@@ -693,6 +693,7 @@ def scoring_session_events(
     since_days: int = Query(default=30, ge=1, le=90),
 ) -> dict:
     """Return the event timeline for a single session (up to 500 events)."""
+    _enforce_scoring_service_scope(request, service_id)
     ts_pred, disc = _scoring_time_window(request, int(since_days) * 24)
     grouped = _fetch_session_events(
         service_id, [sid], since_days=since_days, ts_predicate=(ts_pred if disc is not None else None)

@@ -20,7 +20,6 @@ from backend.repositories._base import (
     SectionTimer,
     _compact_sql_for_debug,
     _safe_table,
-    bucket_time_to_minute,
     digest_cache_key,
     empty_schema_response,
     record_duckdb_query,
@@ -63,6 +62,18 @@ _ALERT_ROLLUP_METRICS: dict[str, str] = {
 }
 
 
+def _assets_cache_bound(ts: str | None) -> str | None:
+    if not ts:
+        return None
+    try:
+        from backend.utils.date_utils import parse_iso_utc
+
+        parsed = parse_iso_utc(str(ts))
+        return parsed.isoformat() if parsed is not None else str(ts).strip()
+    except (ValueError, TypeError):
+        return str(ts).strip()
+
+
 def _build_cache_key(
     src: dict,
     start_time: str | None,
@@ -71,8 +82,8 @@ def _build_cache_key(
 ) -> str:
     return digest_cache_key(
         {
-            "s": bucket_time_to_minute(start_time),
-            "e": bucket_time_to_minute(end_time),
+            "s": _assets_cache_bound(start_time),
+            "e": _assets_cache_bound(end_time),
             "f": serialize_filters_for_key(filters),
         },
         src,

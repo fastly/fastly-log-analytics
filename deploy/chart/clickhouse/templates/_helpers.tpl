@@ -56,6 +56,9 @@ Secret name
 Validate topology settings
 */}}
 {{- define "clickhouse.validate" -}}
+{{- if and (not .Values.auth.existingSecret) (not .Values.auth.password) }}
+{{- fail "auth.password is required when auth.existingSecret is unset" }}
+{{- end }}
 {{- if lt (int .Values.shards) 1 }}
 {{- fail "shards must be at least 1" }}
 {{- end }}

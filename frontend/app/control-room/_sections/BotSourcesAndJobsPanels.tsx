@@ -314,7 +314,7 @@ export function BotSourcesPanel() {
             onClick={() =>
               void adminFetch('/api/admin/rdns/export').then(async (res) => {
                 if (res.ok) downloadBlob(await res.blob(), 'rdns_cache.csv')
-              })
+              }).catch(() => {})
             }
             title="Download rDNS Cache as CSV"
           >

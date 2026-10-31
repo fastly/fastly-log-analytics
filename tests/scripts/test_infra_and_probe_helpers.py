@@ -2459,3 +2459,102 @@ def test_section_query_correlation_missing_flags_uncorrelated_current_fact_secti
     correlated = describe_response(correlated_payload)
     assert "section_query_correlation_missing" not in correlated["gaps"]
     assert "PRIVATE" not in json.dumps(correlated)
+
+
+def test_generate_synthetic_traffic_rejects_nonpositive_arguments(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """E5: Nonpositive file_rows / batch_size or negative rows must fail before side effects."""
+    from datetime import timedelta
+
+    from scripts.load_test import generate_synthetic_traffic
+
+    now = datetime(2026, 8, 5, 12, 0, 0, tzinfo=UTC)
+    start_dt = now - timedelta(hours=1)
+    src = {"service_id": "svc-test", "name": "svc-test"}
+
+    for bad_kwargs in (
+        {"rows": -1, "batch_size": 100, "file_rows": 100},
+        {"rows": 100, "batch_size": 0, "file_rows": 100},
+        {"rows": 100, "batch_size": -5, "file_rows": 100},
+        {"rows": 100, "batch_size": 100, "file_rows": 0},
+        {"rows": 100, "batch_size": 100, "file_rows": -10},
+    ):
+        with pytest.raises(ValueError, match="must be"):
+            generate_synthetic_traffic.run_target_local(
+                src=src,
+                scenario="diurnal",
+                rows=bad_kwargs["rows"],
+                start_dt=start_dt,
+                end_dt=now,
+                batch_size=bad_kwargs["batch_size"],
+                file_rows=bad_kwargs["file_rows"],
+                seed=42,
+                commit=False,
+                clean=False,
+                dry_run=True,
+                rate_rps=0,
+                burst_rps=0,
+                burst_duration=30,
+                burst_interval=120,
+            )
+
+    for bad_kwargs in (
+        {"rows": -1, "batch_size": 100},
+        {"rows": 100, "batch_size": 0},
+        {"rows": 100, "batch_size": -5},
+    ):
+        with pytest.raises(ValueError, match="must be"):
+            generate_synthetic_traffic.run_target_fos(
+                src=src,
+                scenario="diurnal",
+                rows=bad_kwargs["rows"],
+                start_dt=start_dt,
+                end_dt=now,
+                batch_size=bad_kwargs["batch_size"],
+                seed=42,
+                dry_run=True,
+                rate_rps=0,
+                burst_rps=0,
+                burst_duration=30,
+                burst_interval=120,
+                upload_workers=1,
+            )
+
+        with pytest.raises(ValueError, match="must be"):
+            generate_synthetic_traffic.run_target_clickhouse(
+                src=src,
+                scenario="diurnal",
+                rows=bad_kwargs["rows"],
+                start_dt=start_dt,
+                end_dt=now,
+                batch_size=bad_kwargs["batch_size"],
+                seed=42,
+                dry_run=True,
+                clickhouse_host="127.0.0.1",
+                clickhouse_port=8123,
+                clickhouse_database="default",
+                clickhouse_user="default",
+                clickhouse_password="",
+                rate_rps=0,
+                burst_rps=0,
+                burst_duration=30,
+                burst_interval=120,
+            )
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "generate_synthetic_traffic.py",
+            "--target",
+            "local",
+            "--rows",
+            "100",
+            "--file-rows",
+            "0",
+        ],
+    )
+    with pytest.raises(SystemExit) as exc_info:
+        generate_synthetic_traffic.main()
+    assert exc_info.value.code == 2

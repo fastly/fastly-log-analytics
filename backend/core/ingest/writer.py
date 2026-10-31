@@ -294,10 +294,10 @@ def _ingest_unlocked(  # fmt: skip
     log_fields_config = cfg.get("log_fields", {}) if cfg else None
     columns_sql = get_ingest_columns_sql(log_fields_config)
     try:
-        from backend.core.duckdb import get_memory_connection
+        from backend.core.duckdb import _ensure_threads, get_memory_connection
 
         mem_con = get_memory_connection(src)
-        mem_con.execute(f"SET threads = {os.cpu_count() or 4};")
+        _ensure_threads(mem_con, os.cpu_count() or 4)
         try:
             mem_con.execute("SET force_download = true;")
         except Exception as _fd_err:

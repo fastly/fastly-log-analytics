@@ -773,8 +773,8 @@ def test_coordinator_batch_page_processes_50_objects() -> None:
     control = MagicMock()
     control.owner.return_value = MagicMock(current_owner="high_scale", owner_epoch=1, source_cursor="cursor-0")
     control.source_cursor_for.return_value = "cursor-0"
-    control.claim_sources_batch.return_value = tuple(
-        MagicMock(object_key=d.object_key, checksum=d.checksum, claimed=True) for d in descriptors
+    control.claim_sources_batch = MagicMock(
+        return_value=tuple(MagicMock(object_key=d.object_key, checksum=d.checksum, claimed=True) for d in descriptors)
     )
 
     controller = MagicMock()
@@ -860,8 +860,8 @@ def test_coordinator_batch_page_partial_failure_holds_cursor() -> None:
     control = MagicMock()
     control.owner.return_value = MagicMock(current_owner="high_scale", owner_epoch=1, source_cursor="cursor-0")
     control.source_cursor_for.return_value = "cursor-0"
-    control.claim_sources_batch.return_value = tuple(
-        MagicMock(object_key=d.object_key, checksum=d.checksum, claimed=True) for d in descriptors
+    control.claim_sources_batch = MagicMock(
+        return_value=tuple(MagicMock(object_key=d.object_key, checksum=d.checksum, claimed=True) for d in descriptors)
     )
 
     controller = MagicMock()
@@ -3174,3 +3174,29 @@ def test_all_cmcd_tasks_preserve_request_and_page_correlation() -> None:
         assert section["server_cpu_ms"] is None
     ts_section = timings[next(row["section_id"] for row in client.scopes if row["section"] == "cmcd.timeseries")]
     assert ts_section["executor_dispatch"] == "thread_pool" and current_clickhouse_scope()["section_id"] is None
+
+
+@pytest.mark.usefixtures("_asn_names")
+@pytest.mark.parametrize("fail_domain", ["cmcd", "request_aggregate"])
+def test_derived_aggregate_or_cmcd_publication_failure_holds_source_acknowledgement(fail_domain: str) -> None:
+    import backend.high_scale.ingest_controller.coordinator as coord_mod
+
+    assert not hasattr(coord_mod, "_mock_children")
+
+    clickhouse = _ClickHouse_cmcd(fail_domains=(fail_domain,))
+    ownership = OwnershipStore()
+    ownership.initialize("svc", owner="high_scale", source_cursor="cursor-0")
+    controller = HighScaleIngestController(
+        ownership=ownership,
+        ledger=HighScaleLedger(),
+        archive=ArchivePublication(InMemoryObjectStore()),
+        serving=ClickHousePublication(InMemoryBatchManifestStore(), clickhouse),
+        aggregates=ClickHousePublication(InMemoryBatchManifestStore(), clickhouse),
+        worker_id="worker-1",
+        deletion_grace_seconds=60,
+    )
+    result = _ingest_cmcd(controller, _CMCD_LINE)
+    assert result.publication.rows_visible == 1
+    assert result.derived_publication_complete is False
+    ledger_entry = controller._ledger.source("svc", "raw/request/one.gz")
+    assert ledger_entry is not None and ledger_entry.status == "discovered" and ledger_entry.last_error

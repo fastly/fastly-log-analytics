@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 from pydantic import TypeAdapter, ValidationError
 
 from backend.high_scale._common import (
+    _row_timestamp,
     format_iso_utc_or_empty,
     parse_time_window,
     range_value,
@@ -72,7 +73,12 @@ def _filter_clauses(filters: Mapping[str, Any] | None) -> tuple[list[str], dict[
     return clauses, params
 
 
-def rum_beacon_health(service: HighScaleService, *, source: dict[str, Any] | None = None) -> dict[str, Any]:
+def rum_beacon_health(
+    service: HighScaleService,
+    *,
+    source: dict[str, Any] | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
     if isinstance(source, dict) and (
         (isinstance(source.get("rum"), dict) and source["rum"].get("enabled") is False)
         or source.get("rum_enabled") is False
@@ -88,21 +94,48 @@ def rum_beacon_health(service: HighScaleService, *, source: dict[str, Any] | Non
             "message": "RUM is not enabled for this service.",
         }
 
+    observed = (now or datetime.now(UTC)).astimezone(UTC)
+    cutoff = observed - timedelta(minutes=15)
+    params = {"service_id": service.service_id, "cutoff": cutoff}
+    agg_sql = (
+        "SELECT sum(c) as c, max(last_ts) as last_ts FROM ("
+        "SELECT sum(event_count) as c, max(bucket_start) as last_ts FROM rum_vitals_aggregates "
+        f"WHERE service_id = {{service_id:String}} AND dimension = 'metric_name' "
+        f"AND bucket_start >= {{cutoff:DateTime64(3, 'UTC')}} AND {visible_publication_fence_sql('rum_vitals_aggregate')} "
+        "UNION ALL "
+        "SELECT sum(error_count) as c, max(bucket_start) as last_ts FROM rum_error_aggregates "
+        f"WHERE service_id = {{service_id:String}} AND dimension = 'error_message' "
+        f"AND bucket_start >= {{cutoff:DateTime64(3, 'UTC')}} AND {visible_publication_fence_sql('rum_errors_aggregate')}"
+        ")"
+    )
+    facts_sql = (
+        "SELECT sum(c) as c, max(last_ts) as last_ts FROM ("
+        "SELECT count() as c, max(event_timestamp) as last_ts FROM rum_vitals_facts "
+        f"WHERE service_id = {{service_id:String}} "
+        f"AND event_timestamp >= {{cutoff:DateTime64(3, 'UTC')}} AND {visible_publication_fence_sql('rum_vitals')} "
+        "UNION ALL "
+        "SELECT count() as c, max(event_timestamp) as last_ts FROM rum_error_facts "
+        f"WHERE service_id = {{service_id:String}} "
+        f"AND event_timestamp >= {{cutoff:DateTime64(3, 'UTC')}} AND {visible_publication_fence_sql('rum_errors')}"
+        ")"
+    )
     try:
-        res = service.client.execute(
-            "SELECT sum(event_count) as c, max(bucket_start) as last_ts FROM rum_vitals_aggregates "
-            f"WHERE service_id = {{service_id:String}} AND dimension = 'metric_name' AND {visible_publication_fence_sql('rum_vitals_aggregate')}",
-            {"service_id": service.service_id},
-        )
+        res = service.client.execute(agg_sql, params)
+        row = res[0] if res else {}
+        if int(row.get("c") or 0) == 0:
+            fact_res = service.client.execute(facts_sql, params)
+            if fact_res and int(fact_res[0].get("c") or 0) > 0:
+                row = fact_res[0]
     except Exception:
-        res = service.client.execute(
-            "SELECT count() as c, max(event_timestamp) as last_ts FROM rum_vitals_facts "
-            f"WHERE service_id = {{service_id:String}} AND {visible_publication_fence_sql('rum_vitals')}",
-            {"service_id": service.service_id},
-        )
-    row = res[0] if res else {}
+        res = service.client.execute(facts_sql, params)
+        row = res[0] if res else {}
+
     beacons = int(row.get("c") or 0)
-    last_ts = row.get("last_ts") if beacons > 0 else None
+    raw_last_ts = row.get("last_ts") if beacons > 0 else None
+    parsed_last_ts = _row_timestamp({"timestamp": raw_last_ts}) if raw_last_ts is not None else None
+    if parsed_last_ts is not None and parsed_last_ts < cutoff:
+        beacons = 0
+    last_ts = raw_last_ts if beacons > 0 else None
     has_data = beacons > 0
     if has_data:
         message = f"RUM is working! Received {beacons} beacon(s) in the last 15 minutes."

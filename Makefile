@@ -261,7 +261,7 @@ fast-ci:
 # Native Chromium measurement regressions; reuses the E2E Playwright install.
 # Serialize files so timing-sensitive paint tests do not contend for browsers.
 test-browser-measurements:
-	node --test --test-concurrency=1 tests/scripts/section_measurements.test.cjs tests/scripts/browser_paint.test.cjs tests/scripts/composited_results.test.cjs
+	node --test --test-concurrency=1 tests/scripts/section_measurements.test.cjs tests/scripts/browser_paint.test.cjs tests/scripts/composited_results.test.cjs tests/scripts/dashboard_card_paint.test.cjs tests/scripts/dashboard_map_paint.test.cjs
 
 # Playwright E2E — runs fast Chromium smoke suite by default (2 workers, retries: 0).
 # Avoids re-installing node_modules / browsers unless missing.
@@ -338,10 +338,6 @@ coalesce-guard:
 # Grafana/Prometheus/Tempo and their exporters.
 COMPOSE_STACK := -f docker-compose.multipod.yml -f docker-compose.observability.yml
 
-# Explicit loopback/configuration/consent arguments are required by the driver.
-.PHONY: clickhouse-prototype-benchmark
-clickhouse-prototype-benchmark:
-	uv run python -m tests.load.clickhouse_serving_benchmark $(BENCHMARK_ARGS)
 # App services whose image bakes in the source tree. Only configs/, data/ and
 # cache/ are bind-mounted, so a .py edit is invisible until the image is
 # rebuilt — `stack-restart` rebuilds these, `stack-up` does not.
@@ -351,6 +347,11 @@ clickhouse-prototype-benchmark:
 # the backend's. Omitting it meant `up` started it from a stale image and it
 # died with ModuleNotFoundError on a module that had just been added.
 COMPOSE_APP := backend worker frontend metadata-schema-init
+
+# Explicit loopback/configuration/consent arguments are required by the driver.
+.PHONY: clickhouse-prototype-benchmark
+clickhouse-prototype-benchmark:
+	uv run python -m tests.load.clickhouse_serving_benchmark $(BENCHMARK_ARGS)
 
 # Rebuild the app images and recreate those containers. Use after ANY code
 # change. --force-recreate is what picks up new images and changed env.
@@ -403,9 +404,9 @@ deploy-validate:
 	docker compose -f docker-compose.multipod.yml config -q
 	docker compose -f docker-compose.multipod.yml -f docker-compose.observability.yml config -q
 	@if command -v helm >/dev/null 2>&1; then \
-		helm lint deploy/chart/fastly-log-analytics && \
-		helm template ci-validate deploy/chart/fastly-log-analytics >/dev/null && \
-		helm template ci-validate deploy/chart/fastly-log-analytics --set global.privateObservability.enabled=true >/dev/null; \
+		helm lint deploy/chart/fastly-log-analytics --set config.ducklakeCatalog=postgresql://fla:pw@postgres:5432/ducklake --set secrets.metadataDsn=postgresql://fla:pw@postgres:5432/ducklake && \
+		helm template ci-validate deploy/chart/fastly-log-analytics --set config.ducklakeCatalog=postgresql://fla:pw@postgres:5432/ducklake --set secrets.metadataDsn=postgresql://fla:pw@postgres:5432/ducklake >/dev/null && \
+		helm template ci-validate deploy/chart/fastly-log-analytics --set global.privateObservability.enabled=true --set config.ducklakeCatalog=postgresql://fla:pw@postgres:5432/ducklake --set secrets.metadataDsn=postgresql://fla:pw@postgres:5432/ducklake >/dev/null; \
 	else \
 		echo "helm not installed; skipping chart lint/template"; \
 	fi

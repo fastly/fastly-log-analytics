@@ -1999,3 +1999,73 @@ def test_get_log_activity_falls_back_to_service_id_when_name_missing():
 
     assert mock_get.call_args.args[0] == "id_only_svc"
     assert mock_get.call_args.args[3] == "hour"
+
+
+def test_get_sessions_subminute_windows_do_not_collide_in_memo_cache(in_memory_duckdb, test_service_source):
+    from backend.repositories.sessions import queries as sess_queries
+
+    sess_queries._memo.cache.clear()
+    table_name = _safe_table(test_service_source["name"])
+    logs = generate_mock_logs(test_service_source, num_logs=1, hours_ago=1)
+    logs[0]["ip"] = "198.51.100.44"
+    logs[0]["timestamp"] = "2026-09-14T10:00:45Z"
+    insert_mock_logs(in_memory_duckdb, table_name, logs)
+    _clear_schema_cache()
+
+    res_early = get_sessions(
+        con=in_memory_duckdb,
+        src=test_service_source,
+        **_sessions_kwargs(
+            start_time="2026-09-14T10:00:05Z",
+            end_time="2026-09-14T10:00:30Z",
+        ),
+    )
+    res_late = get_sessions(
+        con=in_memory_duckdb,
+        src=test_service_source,
+        **_sessions_kwargs(
+            start_time="2026-09-14T10:00:05Z",
+            end_time="2026-09-14T10:00:55Z",
+        ),
+    )
+    assert res_early["total"] == 0
+    assert res_late["total"] == 1 and res_late["sessions"][0]["ip"] == "198.51.100.44"
+
+
+def test_streaming_only_bypasses_hourly_rollup_for_exact_30m_gap_sessionization(
+    in_memory_duckdb, rollup_source, monkeypatch
+):
+    from backend.repositories.sessions import queries as sess_queries
+
+    sess_queries._memo.cache.clear()
+    table_name = _safe_table(rollup_source["name"])
+    logs = generate_mock_logs(rollup_source, num_logs=2, hours_ago=1)
+    logs[0]["ip"] = "198.51.100.77"
+    logs[0]["timestamp"] = "2026-09-14T10:01:00Z"
+    logs[1]["ip"] = "198.51.100.77"
+    logs[1]["timestamp"] = "2026-09-14T10:50:00Z"
+    insert_mock_logs(in_memory_duckdb, table_name, logs)
+    in_memory_duckdb.execute(f'ALTER TABLE {table_name} ADD COLUMN "cmcd_sid" VARCHAR')
+    in_memory_duckdb.execute(
+        f'UPDATE {table_name} SET "cmcd_sid" = ? WHERE "timestamp" = ?',
+        ["stream-sess-1", datetime(2026, 9, 14, 10, 1, 0, tzinfo=UTC)],
+    )
+    _clear_schema_cache()
+
+    def _fail_if_rollup_called(**kwargs):
+        raise AssertionError("streaming_only must bypass _get_sessions_from_rollup")
+
+    monkeypatch.setattr(sess_queries, "_get_sessions_from_rollup", _fail_if_rollup_called)
+
+    res = get_sessions(
+        con=in_memory_duckdb,
+        src=rollup_source,
+        **_sessions_kwargs(
+            start_time="2026-09-14T08:00:00Z",
+            end_time="2026-09-14T16:00:00Z",
+            streaming_only=True,
+        ),
+    )
+    assert res["total"] == 1
+    assert res["sessions"][0]["ip"] == "198.51.100.77"
+    assert res["sessions"][0]["req_count"] == 1

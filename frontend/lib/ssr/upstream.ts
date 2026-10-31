@@ -123,21 +123,6 @@ export async function fetchPerformanceServerSide(
   })
 }
 
-type RumStatusResponse = Schema<'RumStatusResponse'>
-
-export async function fetchRumStatusServerSide(
-  serviceId: string | undefined,
-): Promise<RumStatusResponse | null> {
-  if (!serviceId) return null
-
-  const path = `/api/services/${encodeURIComponent(serviceId)}/rum/status`
-
-  return parseSsrJson<RumStatusResponse>(
-    await ssrUpstreamGet({ path, logPrefix: 'ssr/rum-status' }),
-    'ssr/rum-status',
-  )
-}
-
 const STREAMING_SSR_DEFAULTS = {
   bucketSeconds: 300,
   topN: 30,

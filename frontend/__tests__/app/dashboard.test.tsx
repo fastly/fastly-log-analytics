@@ -741,6 +741,75 @@ describe('Query Explorer page', () => {
     expect(state.endTime).toBe('2026-02-01T06:00:00Z')
     expect(state.filters.map((f) => [f.column, f.value, f.mode])).toEqual([['status', '500', 'exclude'], ['status', '503', 'exclude']])
   })
+
+  test('offloads large (>= 100,000 char) JSON query responses to Web Worker and falls back on Worker error', async () => {
+    const { parseJsonAsync } = await import('@/lib/workers/parseJson')
+    const origWorker = globalThis.Worker
+    const postedPayloads: string[] = []
+    const terminated = vi.fn()
+    class MockSuccessWorker {
+      onmessage: ((e: MessageEvent) => void) | null = null
+      onerror: ((e: ErrorEvent) => void) | null = null
+      postMessage(raw: string) {
+        postedPayloads.push(raw)
+        queueMicrotask(() => {
+          this.onmessage?.({ data: { success: true, data: JSON.parse(raw) } } as MessageEvent)
+        })
+      }
+      terminate = terminated
+    }
+    globalThis.Worker = MockSuccessWorker as unknown as typeof Worker
+    try {
+      const small = JSON.stringify({ columns: ['url'], data: [{ url: '/small' }], total_rows: 1, elapsed_ms: 2 })
+      const smallParsed = await parseJsonAsync<{ total_rows: number }>(small)
+      expect(smallParsed.total_rows).toBe(1)
+      expect(postedPayloads).toHaveLength(0)
+
+      const largeJson = JSON.stringify({
+        columns: ['url'],
+        data: [{ url: '/large-worker-row' }],
+        total_rows: 1,
+        elapsed_ms: 12,
+        _pad: 'x'.repeat(100_500),
+      })
+      expect(largeJson.length).toBeGreaterThanOrEqual(100_000)
+
+      mockGet.mockResolvedValue({
+        data: {
+          schema: [
+            { name: 'timestamp', type: 'TIMESTAMP' },
+            { name: 'url', type: 'VARCHAR' },
+          ],
+          fields: [],
+        },
+      })
+      mockPost.mockResolvedValue({ data: largeJson })
+      window.history.replaceState({}, '', '/query?q=SELECT%20url%20FROM%20logs&mode=raw')
+      const user = userEvent.setup()
+      renderWithNuqs(<QueryPage />)
+      await user.click(await screen.findByRole('button', { name: /run query/i }))
+      expect(await screen.findByText('/large-worker-row')).toBeInTheDocument()
+      expect(postedPayloads).toHaveLength(1)
+      expect(terminated).toHaveBeenCalledOnce()
+
+      class MockFailingWorker {
+        onmessage: ((e: MessageEvent) => void) | null = null
+        onerror: ((e: ErrorEvent) => void) | null = null
+        postMessage() {
+          queueMicrotask(() => {
+            this.onerror?.(new ErrorEvent('error', { message: 'worker crashed' }))
+          })
+        }
+        terminate = vi.fn()
+      }
+      globalThis.Worker = MockFailingWorker as unknown as typeof Worker
+      const fallbackParsed = await parseJsonAsync<{ total_rows: number }>(largeJson)
+      expect(fallbackParsed.total_rows).toBe(1)
+    } finally {
+      if (origWorker === undefined) Reflect.deleteProperty(globalThis, 'Worker')
+      else globalThis.Worker = origWorker
+    }
+  })
 })
 
 describe('UI primitives & a11y', () => {
@@ -943,6 +1012,21 @@ describe('backend harness child isolation', () => {
     } finally {
       await contract.stopBackend()
     }
+  })
+
+  it('requires isolated test database names on explicit contract test Postgres DSN overrides', async () => {
+    const contract = await import('../helpers/msw/handlers')
+    vi.stubEnv('FLA_CONTRACT_TEST_METADATA_POSTGRES_DSN', 'postgresql://fla:pw@localhost:5432/fla_production')
+    expect(() => contract.backendTestEnvironment('/tmp/data')).toThrow(/isolated test database/i)
+
+    vi.stubEnv('FLA_CONTRACT_TEST_METADATA_POSTGRES_DSN', 'postgresql://fla:pw@localhost:5432/test_fla_contract')
+    vi.stubEnv('FLA_CONTRACT_TEST_CATALOG_POSTGRES_DSN', 'postgresql://fla:pw@localhost:5432/ducklake_live')
+    expect(() => contract.backendTestEnvironment('/tmp/data')).toThrow(/isolated test database/i)
+
+    vi.stubEnv('FLA_CONTRACT_TEST_CATALOG_POSTGRES_DSN', 'postgresql://fla:pw@localhost:5432/ducklake_contract_test')
+    const validEnv = contract.backendTestEnvironment('/tmp/data')
+    expect(validEnv.METADATA_DSN).toBe('postgresql://fla:pw@localhost:5432/test_fla_contract')
+    expect(validEnv.DUCKLAKE_CATALOG).toBe('postgresql://fla:pw@localhost:5432/ducklake_contract_test')
   })
 })
 

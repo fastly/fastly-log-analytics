@@ -10,9 +10,9 @@ from typing import TYPE_CHECKING, Any
 from backend.core.request_telemetry import HighScaleSections
 from backend.high_scale._common import (
     parse_time_window,
+    range_value,
 )
 from backend.repositories.utils.response_cache import (
-    bucket_time_to_minute,
     client_cache_token,
     digest_cache_key,
     serialize_filters_for_key,
@@ -199,6 +199,15 @@ def _sessions_ts(rows: Iterable[dict[str, Any]], new_sessions: Mapping[str, int]
     }
 
 
+def _cmcd_cache_bound(ts: str | None) -> str | None:
+    if not ts:
+        return None
+    try:
+        return range_value(ts).isoformat()
+    except (ValueError, TypeError):
+        return str(ts).strip()
+
+
 def cmcd_aggregates(
     service: HighScaleService,
     req: CmcdRequest,
@@ -212,8 +221,8 @@ def cmcd_aggregates(
         {
             "ep": "hs_cmcd_aggregates",
             "cid": client_cache_token(service.client),
-            "s": bucket_time_to_minute(start_time),
-            "e": bucket_time_to_minute(end_time),
+            "s": _cmcd_cache_bound(start_time),
+            "e": _cmcd_cache_bound(end_time),
             "b": int(req.bucket_seconds),
             "n": int(req.top_n),
             "sec": sorted(str(s) for s in sections) if sections else None,

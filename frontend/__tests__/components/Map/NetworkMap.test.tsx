@@ -417,10 +417,13 @@ describe('useMapData', () => {
     expect(result.current.setTooltip).toHaveBeenCalledWith(null)
   })
 
-  it('computes fallback throughput_bps coloring when throughput_bps is absent from wire city objects', () => {
+  it('renders neutral/unavailable coloring instead of synthesizing from health_score when throughput_bps is absent', () => {
     const data = {
       bucket_seconds: 3600,
-      cities: [{ name: 'Boston', lat: 42.36, lon: -71.06 }],
+      cities: [
+        { name: 'Boston', lat: 42.36, lon: -71.06 },
+        { name: 'Munich', lat: 48.1, lon: 11.6 },
+      ],
       map_buckets: [
         {
           bucket_idx: 0,
@@ -430,12 +433,32 @@ describe('useMapData', () => {
               city_idx: 0, country: 'US', metro_code: 506, health_score: 95,
               rtt_med_us: 40_000, avg_ploss: 0.001, error_pct: 0.5, reqs: 10000,
             },
+            {
+              city_idx: 1, country: 'DE', health_score: 95,
+              rtt_med_us: 40_000, avg_ploss: 0.001, error_pct: 0.5, reqs: 5000,
+            },
           ],
         },
       ],
     }
-    const { result } = renderHook(() => useMapDataHarness({ data, metric: 'throughput_bps' }))
+    const { result, rerender } = renderHook(
+      ({ m }: { m: string }) => useMapDataHarness({ data, metric: m }),
+      { initialProps: { m: 'health_score' } },
+    )
+    const mockMap = result.current.map.current!
+    const paintSpy = vi.spyOn(mockMap, 'setPaintProperty')
+    rerender({ m: 'throughput_bps' })
     expect(result.current.dmaDataRef.current[506]).toMatchObject({ city: 'Boston', country: 'US', reqs: 10000 })
+    expect(result.current.dmaDataRef.current[506].throughput_bps).toBeUndefined()
+    expect(paintSpy).toHaveBeenCalledWith('countries', 'fill-color', '#e4e4e7')
+    const heatmapSource = mockMap.getSource('heatmap') as unknown as { data: { features: Array<{ properties: Record<string, unknown> }> } }
+    expect(heatmapSource.data.features).toHaveLength(1)
+    expect(heatmapSource.data.features[0].properties).toMatchObject({
+      city: 'Munich',
+      country: 'DE',
+      color: 'transparent',
+      throughput_bps: undefined,
+    })
   })
 })
 

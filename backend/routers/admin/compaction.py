@@ -56,6 +56,8 @@ _EMULATION_SCHEMA_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=128, ttl_seco
 CacheRegistry.register("compaction._EMULATION_SCHEMA_CACHE", _EMULATION_SCHEMA_CACHE)
 _EMULATION_EXTENTS_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=128, ttl_seconds=30.0)
 CacheRegistry.register("compaction._EMULATION_EXTENTS_CACHE", _EMULATION_EXTENTS_CACHE)
+_EMULATION_CURSOR_TIE_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=2048, ttl_seconds=900.0)
+CacheRegistry.register("compaction._EMULATION_CURSOR_TIE_CACHE", _EMULATION_CURSOR_TIE_CACHE)
 
 
 def _require_closed_rollup_day(day: str) -> None:
@@ -957,6 +959,54 @@ def build_partition_filter_clauses(start_iso: str, end_iso: str, col_names: set[
     return clauses, params
 
 
+def _tuple_tie_key(tup: tuple[Any, ...]) -> str:
+    return "|".join(
+        [
+            str(tup[3] or ""),
+            str(tup[2] or ""),
+            str(tup[1] or ""),
+            str(tup[4] or ""),
+            str(tup[5] or ""),
+            str(tup[6] or ""),
+        ]
+    )
+
+
+def _normalize_emulation_ts_iso(val: object) -> str:
+    from backend.utils.date_utils import iso_z
+
+    if isinstance(val, datetime):
+        return iso_z(val)
+    if val is None:
+        return ""
+    s = str(val)
+    if s.endswith("+00:00"):
+        return s[:-6] + "Z"
+    return s
+
+
+def _extract_cursor_event_id(cursor_token: str | None) -> str | None:
+    if not cursor_token:
+        return None
+    raw = str(cursor_token).strip()
+    if not raw:
+        return None
+    if "." in raw:
+        try:
+            import base64
+            import json
+
+            payload_b64 = raw.split(".", 1)[0]
+            padded = payload_b64 + "=" * (-len(payload_b64) % 4)
+            payload = json.loads(base64.urlsafe_b64decode(padded))
+            ev_id = payload.get("event_id")
+            if isinstance(ev_id, str) and ev_id:
+                return ev_id
+        except Exception:
+            return raw
+    return raw
+
+
 def fetch_request_facts_emulation(
     con: Any,
     candidate_tables: list[str],
@@ -966,8 +1016,11 @@ def fetch_request_facts_emulation(
     end: datetime,
     cursor_ts: Any,
     service_id: str | None = None,
+    cursor_tie_breaker: str | None = None,
 ) -> tuple[list[tuple[Any, ...]], Any, Any]:
     """``(page rows + 1 lookahead, coverage_start, coverage_end)`` from the first candidate table with a schema."""
+    import uuid
+
     from backend.utils.date_utils import iso_z
     from backend.utils.telemetry import track_query
 
@@ -1012,14 +1065,51 @@ def fetch_request_facts_emulation(
         "pop" if "pop" in col_names else "'' AS pop",
         "host" if "host" in col_names else "'' AS host",
     ]
+    url_tie = "COALESCE(CAST(url AS VARCHAR), '')" if "url" in col_names else "''"
+    ip_tie = "COALESCE(CAST(client_ip AS VARCHAR), '')" if "client_ip" in col_names else "''"
+    country_tie = f"COALESCE(CAST({country_col} AS VARCHAR), '')" if country_col else "''"
+    status_tie = "COALESCE(CAST(status AS VARCHAR), '')" if "status" in col_names else "''"
+    pop_tie = "COALESCE(CAST(pop AS VARCHAR), '')" if "pop" in col_names else "''"
+    host_tie = "COALESCE(CAST(host AS VARCHAR), '')" if "host" in col_names else "''"
+    tie_expr = f"concat_ws('|', {url_tie}, {ip_tie}, {country_tie}, {status_tie}, {pop_tie}, {host_tie})"
+
     effective_start = max(start, cursor_ts) if isinstance(cursor_ts, datetime) else start
     part_clauses, part_params = build_partition_filter_clauses(iso_z(effective_start), iso_z(end), col_names)
     where_parts = [*part_clauses, "timestamp >= ?", "timestamp <= ?"]
     params: list[object] = [*part_params, start, end]
 
+    cursor_event_id = _extract_cursor_event_id(getattr(req, "cursor", None))
+    cached_tie_entry = (
+        _EMULATION_CURSOR_TIE_CACHE.get((service_id or "", cursor_event_id)) if cursor_event_id is not None else None
+    )
+    skip_same_tie = 0
+    resolved_tie_breaker = cursor_tie_breaker
+    use_inclusive_tie = False
+    fallback_match_event_id: str | None = None
+
     if cursor_ts is not None:
-        where_parts.append("timestamp > ?")
-        params.append(cursor_ts)
+        if cached_tie_entry is not None:
+            resolved_tie_breaker, skip_same_tie, use_inclusive_tie = cached_tie_entry
+            if use_inclusive_tie:
+                where_parts.append(f"(timestamp > ? OR (timestamp = ? AND {tie_expr} >= ?))")
+                params.extend([cursor_ts, cursor_ts, resolved_tie_breaker])
+            else:
+                where_parts.append(f"(timestamp > ? OR (timestamp = ? AND {tie_expr} > ?))")
+                params.extend([cursor_ts, cursor_ts, resolved_tie_breaker])
+        elif resolved_tie_breaker is not None:
+            where_parts.append(f"(timestamp > ? OR (timestamp = ? AND {tie_expr} > ?))")
+            params.extend([cursor_ts, cursor_ts, resolved_tie_breaker])
+        elif cursor_event_id is not None:
+            if "|" in cursor_event_id:
+                where_parts.append(f"(timestamp > ? OR (timestamp = ? AND {tie_expr} > ?))")
+                params.extend([cursor_ts, cursor_ts, cursor_event_id])
+            else:
+                fallback_match_event_id = cursor_event_id
+                where_parts.append(f"(timestamp > ? OR (timestamp = ? AND {tie_expr} >= ?))")
+                params.extend([cursor_ts, cursor_ts, ""])
+        else:
+            where_parts.append("timestamp > ?")
+            params.append(cursor_ts)
 
     if req.country is not None and str(req.country).strip():
         if country_col:
@@ -1061,16 +1151,84 @@ def fetch_request_facts_emulation(
         if b_val != "duckdb-emulation":
             return [], None, None
 
-    limit_plus_one = int(req.limit) + 1
+    page_limit = int(req.limit)
+    limit_plus_one = page_limit + 1
+    sql_limit = (
+        limit_plus_one + skip_same_tie
+        if use_inclusive_tie
+        else (max(limit_plus_one * 4, 64) if fallback_match_event_id is not None else limit_plus_one)
+    )
     request_sql = (
         f"SELECT {', '.join(select_exprs)} "
         f"FROM {table} "
         f"WHERE {' AND '.join(where_parts)} "
-        f"ORDER BY timestamp ASC "
-        f"LIMIT {limit_plus_one}"
+        f"ORDER BY timestamp ASC, {tie_expr} ASC "
+        f"LIMIT {sql_limit}"
     )
     with track_query(con, request_sql, params, "high_scale.request_facts_emulation") as cur:
         fetched = cur.fetchall()
+
+    cursor_ts_iso = _normalize_emulation_ts_iso(cursor_ts) if cursor_ts is not None else None
+    if use_inclusive_tie and skip_same_tie > 0 and resolved_tie_breaker is not None and cursor_ts_iso is not None:
+        remaining_skip = skip_same_tie
+        filtered_rows: list[tuple[Any, ...]] = []
+        for row_tup in fetched:
+            if (
+                remaining_skip > 0
+                and _normalize_emulation_ts_iso(row_tup[0]) == cursor_ts_iso
+                and _tuple_tie_key(row_tup) == resolved_tie_breaker
+            ):
+                remaining_skip -= 1
+                continue
+            filtered_rows.append(row_tup)
+        fetched = filtered_rows[:limit_plus_one]
+    elif fallback_match_event_id is not None and cursor_ts_iso is not None:
+        match_pos: int | None = None
+        for pos, row_tup in enumerate(fetched):
+            if _normalize_emulation_ts_iso(row_tup[0]) != cursor_ts_iso:
+                break
+            cand_id = str(
+                uuid.uuid5(
+                    uuid.NAMESPACE_OID,
+                    f"{service_id or ''}|{cursor_ts_iso}|{page_limit - 1}|{row_tup[3] or ''}",
+                )
+            )
+            if cand_id == fallback_match_event_id:
+                match_pos = pos
+                break
+        if match_pos is not None:
+            fetched = fetched[match_pos + 1 : match_pos + 1 + limit_plus_one]
+        else:
+            fetched = [r for r in fetched if _normalize_emulation_ts_iso(r[0]) != cursor_ts_iso][:limit_plus_one]
+
+    if len(fetched) > page_limit and page_limit > 0:
+        page_tuples = fetched[:page_limit]
+        last_tup = page_tuples[-1]
+        next_tup = fetched[page_limit]
+        last_ts_iso = _normalize_emulation_ts_iso(last_tup[0])
+        last_tie = _tuple_tie_key(last_tup)
+        next_ts_iso = _normalize_emulation_ts_iso(next_tup[0])
+        next_tie = _tuple_tie_key(next_tup)
+        same_tie_on_page = sum(
+            1 for r in page_tuples if _normalize_emulation_ts_iso(r[0]) == last_ts_iso and _tuple_tie_key(r) == last_tie
+        )
+        prior_same_tie = (
+            skip_same_tie
+            if (use_inclusive_tie and cursor_ts_iso == last_ts_iso and resolved_tie_breaker == last_tie)
+            else 0
+        )
+        needs_inclusive = next_ts_iso == last_ts_iso and next_tie == last_tie
+        last_ev_id = str(
+            uuid.uuid5(
+                uuid.NAMESPACE_OID,
+                f"{service_id or ''}|{last_ts_iso}|{page_limit - 1}|{last_tup[3] or ''}",
+            )
+        )
+        _EMULATION_CURSOR_TIE_CACHE[(service_id or "", last_ev_id)] = (
+            last_tie,
+            prior_same_tie + same_tie_on_page,
+            needs_inclusive,
+        )
 
     cov_start = None
     cov_end = None

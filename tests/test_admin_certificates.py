@@ -248,11 +248,18 @@ def run_gateway(pki, host: str, bundle: Path, name: str):
             pytest.fail("Caddy readiness timed out")
         yield port, env
     finally:
-        process.terminate()
-        _, logs = process.communicate(timeout=10)
-        upstream.shutdown()
-        upstream.server_close()
-        thread.join(timeout=5)
+        logs = ""
+        try:
+            process.terminate()
+            try:
+                _, logs = process.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                _, logs = process.communicate(timeout=5)
+        finally:
+            upstream.shutdown()
+            upstream.server_close()
+            thread.join(timeout=5)
         # No gateway credential in Caddy startup/runtime logs.
         assert env["ADMIN_GATEWAY_SECRET"] not in logs
 

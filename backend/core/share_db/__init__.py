@@ -927,7 +927,10 @@ class _BackupInviteModel(BaseModel):
     created_at: Annotated[str, BeforeValidator(lambda v: v or iso_z_now())] = Field(default_factory=iso_z_now)
     revoked: Annotated[int, BeforeValidator(lambda v: int(v or 0))] = 0
     tos_accepted_at: str | None = None
-    tos_version: int | None = None
+    tos_version: Annotated[
+        str | None,
+        BeforeValidator(lambda v: str(v) if isinstance(v, int) and not isinstance(v, bool) else v),
+    ] = None
     allow_concurrent_sessions: Annotated[int, BeforeValidator(lambda v: int(v or 0))] = 0
     auth_method: Annotated[str, BeforeValidator(lambda v: v or "passcode")] = "passcode"
     oauth_provider: str | None = None

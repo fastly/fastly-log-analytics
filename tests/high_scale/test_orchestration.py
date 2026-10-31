@@ -1008,7 +1008,7 @@ def _reinspection_harness(
     control.source_cursor_for.return_value = forward_cursor
     control.source_reinspection_state_for.return_value = reinspection_state
     control.discover_source.return_value = SimpleNamespace(status="discovered")
-    control.claim_sources_batch.return_value = tuple(SimpleNamespace(object_key=k) for k in claimed_keys)
+    control.claim_sources_batch = MagicMock(return_value=tuple(SimpleNamespace(object_key=k) for k in claimed_keys))
     control.expired_claims.return_value = ()
     control.advance_source_cursor = MagicMock()
     lister, reader, controller = MagicMock(), MagicMock(), MagicMock()
@@ -2797,15 +2797,23 @@ def test_sweeper_deletes_eligible_sources_and_skips_ineligible_ones() -> None:
     now = datetime(2026, 9, 5, tzinfo=UTC)
     first, second = _manifest_for("first", now=now), _manifest_for("second", now=now)
     control = _SweepControl(
-        sources=[MagicMock(archive_manifest_id="first"), MagicMock(archive_manifest_id="second"), MagicMock(archive_manifest_id=None)],
+        sources=[
+            MagicMock(archive_manifest_id="first", object_key="raw/1.gz"),
+            MagicMock(archive_manifest_id="second", object_key="raw/2.gz"),
+            MagicMock(archive_manifest_id=None, object_key="raw/3.gz"),
+        ],
         manifests={"first": _ManifestRecord(first, 3), "second": _ManifestRecord(second, 3)},
     )
     controller = MagicMock()
-    controller.delete_source.side_effect = [None, ValueError("source deletion grace period has not elapsed")]
+    controller.delete_manifest_sources.side_effect = [
+        ["raw/1.gz"],
+        ValueError("source deletion grace period has not elapsed"),
+    ]
     result = HighScaleDeletionSweeper(control=control, controller=controller).sweep(service_id="svc", now=now)
     assert result == DeletionSweepResult(deleted=1, skipped=1)
-    assert controller.delete_source.call_args_list == [
-        call(first, current_owner_epoch=3, now=now), call(second, current_owner_epoch=3, now=now)
+    assert controller.delete_manifest_sources.call_args_list == [
+        call(first, current_owner_epoch=3, source_keys=["raw/1.gz"], now=now),
+        call(second, current_owner_epoch=3, source_keys=["raw/2.gz"], now=now),
     ]
 
 
@@ -3314,6 +3322,8 @@ CHART_SECRET = b"chart-secret-" + b"z" * 32
 
 def _render(*sets: str) -> list[dict]:
     args = ["helm", "template", "t", CHART]
+    if not any(s.startswith(("auth.password=", "auth.existingSecret=")) for s in sets):
+        args += ["--set", "auth.password=apppw"]
     for item in sets:
         args += ["--set", item]
     rendered = subprocess.run(args, check=True, capture_output=True, text=True).stdout

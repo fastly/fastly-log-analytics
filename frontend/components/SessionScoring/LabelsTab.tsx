@@ -40,10 +40,11 @@ export function useScoringLabels(
   const q = useQuery({
     queryKey: queryKeys.scoringLabels(serviceId),
     enabled: enabled && !!serviceId,
-    queryFn: async () =>
+    queryFn: async ({ signal }) =>
       unwrapClient(
         client.GET('/api/services/{service_id}/scoring/labels', {
           params: { path: { service_id: serviceId } },
+          signal,
         }),
       ),
     staleTime: 5 * 60_000,
@@ -172,6 +173,15 @@ function LabelActions({
   )
 }
 
+function invalidateLabelEvaluationCaches(qc: ReturnType<typeof useQueryClient>, serviceId: string) {
+  qc.invalidateQueries({ queryKey: queryKeys.scoringLabels(serviceId) })
+  qc.invalidateQueries({ queryKey: ['scoring-evaluation', serviceId] })
+  qc.invalidateQueries({ queryKey: ['scoring-curves', serviceId] })
+  qc.invalidateQueries({ queryKey: ['scoring-evaluation-per-reason', serviceId] })
+  qc.invalidateQueries({ queryKey: ['scoring-per-reason-auc', serviceId] })
+  qc.invalidateQueries({ queryKey: ['scoring-analytics-composite', serviceId] })
+}
+
 export function LabelsTab({ serviceId }: { serviceId: string }) {
   const qc = useQueryClient()
   const [error, setError] = React.useState('')
@@ -189,7 +199,7 @@ export function LabelsTab({ serviceId }: { serviceId: string }) {
             body: { label, notes },
           }),
         )
-        qc.invalidateQueries({ queryKey: queryKeys.scoringLabels(serviceId) })
+        invalidateLabelEvaluationCaches(qc, serviceId)
         return true
       } catch (e) {
         setError(extractApiError(e) || 'Failed to update label')
@@ -217,7 +227,7 @@ export function LabelsTab({ serviceId }: { serviceId: string }) {
             params: { path: { service_id: serviceId, label_id: id } },
           }),
         )
-        qc.invalidateQueries({ queryKey: queryKeys.scoringLabels(serviceId) })
+        invalidateLabelEvaluationCaches(qc, serviceId)
       },
       errorMessage: (e) => extractApiError(e) || 'Failed to delete label',
     })

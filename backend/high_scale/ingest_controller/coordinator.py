@@ -92,6 +92,7 @@ class BatchIngestResult:
     total_events: int
     quarantined_events: int
     sources_count: int
+    derived_publication_complete: bool = True
 
 
 class HighScaleControlPlane(Protocol):
@@ -347,49 +348,68 @@ class HighScaleIngestController:
             )
         else:
             publication = PublicationResult(batch_id, PublicationStatus.VISIBLE, 0, False)
-        self._publish_aggregates_batch(service_id, domain, manifest.manifest_id, owner.owner_epoch, all_events)
+        agg_ok, agg_err = self._publish_aggregates_batch(
+            service_id, domain, manifest.manifest_id, owner.owner_epoch, all_events
+        )
+        cmcd_ok, cmcd_err = True, None
         if domain == "request":
-            self._publish_cmcd_projection(
+            cmcd_ok, cmcd_err = self._publish_cmcd_projection(
                 service_id,
                 build_batch_id_from_manifest_id(f"{manifest.manifest_id}:cmcd"),
                 owner.owner_epoch,
                 all_events,
             )
         sibling = _RUM_SIBLING_DOMAIN.get(domain)
+        sibling_ok, sibling_err = True, None
         if sibling is not None and sibling_events:
             sibling_batch_id = build_batch_id_from_manifest_id(f"{manifest.manifest_id}:{sibling}")
             self._serving.publish(
                 HighScaleBatch(sibling_batch_id, service_id, sibling, str(owner.owner_epoch), tuple(sibling_events))
             )
-            self._publish_aggregates_batch(service_id, sibling, manifest.manifest_id, owner.owner_epoch, sibling_events)
+            sibling_ok, sibling_err = self._publish_aggregates_batch(
+                service_id, sibling, manifest.manifest_id, owner.owner_epoch, sibling_events
+            )
+        derived_ok = agg_ok and cmcd_ok and sibling_ok
+        derived_err = agg_err or cmcd_err or sibling_err or "derived publication failed"
         object_keys = tuple(desc.object_key for desc, _ in sources_payloads)
         if self._control is not None:
-            self._control.acknowledge_sources_batch(
-                service_id,
-                object_keys,
-                manifest_id=manifest.manifest_id,
-                expected_owner_epoch=owner.owner_epoch,
-                next_cursor=next_cursor,
-                domain=domain,
-                partition_id=partition_id,
-            )
+            if derived_ok:
+                self._control.acknowledge_sources_batch(
+                    service_id,
+                    object_keys,
+                    manifest_id=manifest.manifest_id,
+                    expected_owner_epoch=owner.owner_epoch,
+                    next_cursor=next_cursor,
+                    domain=domain,
+                    partition_id=partition_id,
+                )
         else:
             for desc, _ in sources_payloads:
                 cur_src = self._ledger.source(service_id, desc.object_key)
                 gen = cur_src.lease_generation if cur_src is not None else 1
                 if cur_src is None or cur_src.status != "acknowledged":
-                    self._ledger.mark_appended(service_id, desc.object_key, gen)
-                    self._ledger.mark_archived(
-                        service_id, desc.object_key, gen, manifest.manifest_id, owner.owner_epoch
-                    )
-                    self._ledger.acknowledge(service_id, desc.object_key, manifest.manifest_id)
-        return BatchIngestResult(manifest, publication, total_accepted, total_quarantined, len(sources_payloads))
+                    if derived_ok:
+                        self._ledger.mark_appended(service_id, desc.object_key, gen)
+                        self._ledger.mark_archived(
+                            service_id, desc.object_key, gen, manifest.manifest_id, owner.owner_epoch
+                        )
+                        self._ledger.acknowledge(service_id, desc.object_key, manifest.manifest_id)
+                    elif hasattr(self._ledger, "mark_failed") and cur_src is not None and cur_src.status == "claimed":
+                        self._ledger.mark_failed(service_id, desc.object_key, gen, derived_err)
+        return BatchIngestResult(
+            manifest,
+            publication,
+            total_accepted,
+            total_quarantined,
+            len(sources_payloads),
+            derived_publication_complete=derived_ok,
+        )
 
     def _publish_aggregates_batch(
         self, service_id: str, domain: str, manifest_id: str, owner_epoch: int, events: Sequence[dict[str, Any]]
-    ) -> None:
+    ) -> tuple[bool, str | None]:
         if self._aggregates is None or not events:
-            return
+            return True, None
         try:
             event_tuple: tuple[dict[str, Any], ...] = tuple(events)
             counts = compute_dimension_counts(domain, event_tuple)
@@ -415,16 +435,18 @@ class HighScaleIngestController:
                     if rows:
                         sub_id = build_batch_id_from_manifest_id(f"{manifest_id}:{sub_domain}")
                         self._aggregates.publish(HighScaleBatch(sub_id, service_id, sub_domain, str(owner_epoch), rows))
-        except Exception:
+            return True, None
+        except Exception as exc:
             logger.exception(
                 "high-scale batch aggregate publish failed",
                 extra={"service_id": service_id, "domain": domain, "manifest_id": manifest_id},
             )
+            return False, str(exc)
 
     def _publish_cmcd_projection(
         self, service_id: str, batch_id: str, owner_epoch: int, events: Sequence[dict[str, Any]]
-    ) -> None:
-        """Best-effort CMCD projection of request events carrying CMCD fields."""
+    ) -> tuple[bool, str | None]:
+        """Publish CMCD projection rows for request events carrying CMCD fields."""
         try:
             rows: list[dict[str, Any]] = []
             skipped = 0
@@ -445,10 +467,12 @@ class HighScaleIngestController:
                 )
             if rows:
                 self._serving.publish(HighScaleBatch(batch_id, service_id, "cmcd", str(owner_epoch), tuple(rows)))
-        except Exception:
+            return True, None
+        except Exception as exc:
             logger.exception(
                 "high-scale cmcd projection publish failed", extra={"service_id": service_id, "batch_id": batch_id}
             )
+            return False, str(exc)
 
     def _publish_control_manifest(self, manifest: ArchiveManifest, owner_epoch: int) -> None:
         if self._control is None:
@@ -841,7 +865,6 @@ class HighScaleWorkerCoordinator:
             if self._control is not None and (
                 getattr(type(self._control), "claim_sources_batch", None) is not None
                 or "claim_sources_batch" in vars(self._control)
-                or "claim_sources_batch" in getattr(self._control, "_mock_children", {})
             ):
                 claims = getattr(self._control, "claim_sources_batch")(
                     service_id,
@@ -940,7 +963,10 @@ class HighScaleWorkerCoordinator:
                             next_cursor=None if failed > 0 or page.reinspection_page else next_cursor,
                             now=now,
                         )
-                        processed += batch_res.sources_count
+                        if getattr(batch_res, "derived_publication_complete", True):
+                            processed += batch_res.sources_count
+                        else:
+                            failed += len(valid_payloads)
                     except Exception as exc:
                         logger.exception(
                             "high-scale batch ingest failed",

@@ -11,7 +11,6 @@ import aiodns  # noqa: F401
 import pytricia  # noqa: F401
 
 from backend.utils.date_utils import iso_z_now  # noqa: F401
-from backend.utils.http import http_get_text  # noqa: F401
 from backend.utils.module_shim import install_shim_module
 from backend.utils.telemetry import atomic_write_json  # noqa: F401
 
@@ -37,9 +36,11 @@ from .cidr import (
 )
 from .fetcher import (
     _atomic_write_cache,
+    _validate_feed_url,
     fetch_and_cache_source,
     fetch_bot_source,
     fetch_external_cidrs,
+    http_get_text,
     refresh_all_sources,
     sync_all_bot_sources,
 )
@@ -166,6 +167,7 @@ __all__ = [
     "_select_stale_ips",
     "_source_cache",
     "_source_cache_lock",
+    "_validate_feed_url",
     "_version_cache",
     "_version_cache_lock",
     "_write_con",
@@ -190,6 +192,7 @@ __all__ = [
     "get_ilike_prefilter_literals",
     "get_pattern_set_version",
     "get_stats",
+    "http_get_text",
     "ip_in_ranges",
     "ip_int_in_intervals",
     "load_source",

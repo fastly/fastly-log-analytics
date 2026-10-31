@@ -148,12 +148,8 @@ def _do_lookup(ip: str) -> tuple[str | None, str, bool]:
     """Perform reverse + forward DNS lookup for FCrDNS validation.
 
     Sync helper using ``socket.gethostbyaddr`` / ``socket.getaddrinfo``.
-    Kept as the patch target for unit tests that exercise individual
-    branches; production hot path is :func:`_run_async_resolve` which
-    drives :func:`_do_lookup_async` under ``asyncio.gather`` for true
-    concurrency. The async-aware batch entrypoint detects a
-    ``unittest.mock`` patch on this helper and routes through it so
-    legacy test fixtures keep working.
+    Production hot path is :func:`_run_async_resolve` which drives
+    :func:`_do_lookup_async` under ``asyncio.gather`` for true concurrency.
     """
     try:
         hostname = socket.gethostbyaddr(ip)[0]
@@ -170,6 +166,9 @@ def _do_lookup(ip: str) -> tuple[str | None, str, bool]:
         fcrdns_verified = False
 
     return hostname, "resolved", fcrdns_verified
+
+
+_DEFAULT_DO_LOOKUP = _do_lookup
 
 
 # ── Async resolver (Phase 1.4a hot path) ──────────────────────────────────────
@@ -286,21 +285,13 @@ def _run_async_resolve(ips: list[str]) -> dict[str, int]:
     Production callers are cron jobs running on the APScheduler
     threadpool, which is sync — the loop-detection fallback at the
     bottom of the function is a defensive belt-and-suspenders only.
-
-    Compatibility detection: if ``_do_lookup`` has been monkey-patched
-    by ``unittest.mock`` (common in tests that exercise individual
-    status / FCrDNS branches), we drive the per-IP loop through the
-    patched sync helper and write via sync sqlite3 — preserving the
-    legacy fixture behaviour. Production never trips this branch.
     """
     if not ips:
         return {"resolved": 0, "errors": 0}
 
     mod = sys.modules[__name__]
     do_lookup = mod._do_lookup
-    is_patched = getattr(do_lookup, "_mock_name", None) is not None or "Mock" in type(do_lookup).__name__
-
-    if is_patched:
+    if do_lookup is not _DEFAULT_DO_LOOKUP:
         results = {ip: do_lookup(ip) for ip in ips}
     else:
         try:

@@ -75,12 +75,12 @@ export function invalidateServiceScoringQueries(queryClient: QueryClient, servic
 
 export function useScoringQuery<TData>(
   queryKey: QueryKey,
-  fn: () => Promise<{ data?: TData; error?: unknown; response: Response }>,
+  fn: (signal?: AbortSignal) => Promise<{ data?: TData; error?: unknown; response: Response }>,
   options?: Omit<UseQueryOptions<TData, Error>, 'queryKey' | 'queryFn'>,
 ) {
   return useQuery<TData, Error>({
     queryKey,
-    queryFn: () => unwrapClient(fn()),
+    queryFn: ({ signal }) => unwrapClient(fn(signal)),
     staleTime: 60_000,
     ...options,
   })
@@ -115,9 +115,10 @@ export function scorerHourlyLayout(perMinute: boolean, yTitle: string, showlegen
 }
 
 export function useScorerTimeseries(serviceId: string, sinceHours: number) {
-  return useScoringQuery(['scoring-latency-timeseries', serviceId, sinceHours], () =>
+  return useScoringQuery(['scoring-latency-timeseries', serviceId, sinceHours], (signal) =>
     client.GET('/api/services/{service_id}/scoring/latency-timeseries', {
       params: { path: { service_id: serviceId }, query: { since_hours: sinceHours } },
+      signal,
     }),
   )
 }

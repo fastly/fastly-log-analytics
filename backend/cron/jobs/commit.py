@@ -172,7 +172,7 @@ def _run_commit(service_id: str, force: bool = False, run_id: int | None = None)
                     )
                     refresh_status_fn(service_id, src)
                 except Exception as e:
-                    progress_fn(run_id, service_id, job_name="commit", event={"type": "warning", "message": e})
+                    progress_fn(run_id, service_id, job_name="commit", event={"type": "warning", "message": str(e)})
                 spawn_compact_fn = _resolve_sync_hook(
                     "_spawn_local_compaction", _spawn_local_compaction, _orig_spawn_local_compaction
                 )

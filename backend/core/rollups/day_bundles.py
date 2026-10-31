@@ -199,17 +199,16 @@ def bundle_days(service_id: str, source: dict, days: list[str]) -> int:
                 con.execute(query)
             except duckdb.Error as e:
                 if query != plain_query:
-                    unlink_quiet(tmp_path)
-                    try:
-                        con.execute(plain_query)
-                    except duckdb.Error as e2:
-                        logger.warning("[rollups] %s: day-bundle COPY failed for day=%s: %s", service_id, day, e2)
-                        unlink_quiet(tmp_path)
-                        continue
+                    logger.warning(
+                        "[rollups] %s: day-bundle preservation COPY failed for day=%s (retaining existing bundle): %s",
+                        service_id,
+                        day,
+                        e,
+                    )
                 else:
                     logger.warning("[rollups] %s: day-bundle COPY failed for day=%s: %s", service_id, day, e)
-                    unlink_quiet(tmp_path)
-                    continue
+                unlink_quiet(tmp_path)
+                continue
 
             def _link_aliases(
                 _bp: str = bundle_path,
@@ -563,7 +562,8 @@ def retire_compacted_hour_bundles(
             if not valid_path:
                 continue
             try:
-                res = con.execute(f"SELECT count(*) FROM read_parquet('{valid_path}')").fetchone()
+                safe_valid = escape_sql_literal(str(valid_path))
+                res = con.execute(f"SELECT count(*) FROM read_parquet('{safe_valid}')").fetchone()
                 row_cnt = res[0] if res else 0
                 if not row_cnt or row_cnt <= 0:
                     continue
@@ -690,17 +690,17 @@ def _bundle_per_field_hours_impl(
                 con.execute(query)
             except duckdb.Error as e:
                 if query != plain_query:
-                    unlink_quiet(tmp_path)
-                    try:
-                        con.execute(plain_query)
-                    except duckdb.Error as e2:
-                        logger.warning("[rollups] %s: %s COPY failed for hour=%s: %s", service_id, err_label, hour, e2)
-                        unlink_quiet(tmp_path)
-                        continue
+                    logger.warning(
+                        "[rollups] %s: %s preservation COPY failed for hour=%s (retaining existing bundle): %s",
+                        service_id,
+                        err_label,
+                        hour,
+                        e,
+                    )
                 else:
                     logger.warning("[rollups] %s: %s COPY failed for hour=%s: %s", service_id, err_label, hour, e)
-                    unlink_quiet(tmp_path)
-                    continue
+                unlink_quiet(tmp_path)
+                continue
 
             if expected_vectors is not None and expected_fields is not None:
                 try:

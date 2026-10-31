@@ -207,7 +207,7 @@ import { InvitationsPanel } from '@/components/share-dashboard/InvitationsPanel'
 import { CreateInviteDialog } from '@/components/share-dashboard/CreateInviteDialog'
 import { useTableSort, type ShareStatus, type SortAccessors } from '@/components/share-dashboard/SharingControlPanel'
 import { StatusPanel, L2EnforcementCard } from '@/components/SessionScoring/StatusPanel'
-import { LabelsTab, AuditLogTab, MatrixVersionsCard } from '@/components/SessionScoring/ScoringAdminPanels'
+import { LabelsTab, AuditLogTab, MatrixVersionsCard, useScorerTimeseries } from '@/components/SessionScoring/ScoringAdminPanels'
 
 stubMatchMedia()
 window.HTMLElement.prototype.scrollIntoView = vi.fn()
@@ -822,11 +822,21 @@ describe('SessionScoring Admin Panels: StatusPanel, AuditLogTab, MatrixVersionsC
         labels: [{ id: 'l1', sid: 'sid-abc', label: 'bad', notes: 'orig', sample_url: '/x', sample_ip: '1.2.3.4', updated_at: '2026-10-01T00:00:00Z' }],
         counts: { good: 0, neutral: 0, bad: 1 },
       })),
+      http.patch(`${API_BASE}/api/services/:service_id/scoring/labels/:label_id`, () => HttpResponse.json({ ok: true })),
+      http.get(`${API_BASE}/api/services/:service_id/scoring/latency-timeseries`, () => HttpResponse.json({ rows: [], granularity: 'hour' })),
     )
 
-    const { unmount: uAudit } = renderWithQuery(<AuditLogTab serviceId={SVC} />)
+    function ScorerTsProbe() {
+      useScorerTimeseries(SVC, 24)
+      return null
+    }
+    const { unmount: uAudit } = renderWithQuery(<><AuditLogTab serviceId={SVC} /><ScorerTsProbe /></>)
     expect(await screen.findByText('retrain')).toBeTruthy()
     expect(screen.getByText('{"a":1}')).toBeTruthy()
+    expect(clientGetSpy).toHaveBeenCalledWith(
+      '/api/services/{service_id}/scoring/latency-timeseries',
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    )
     uAudit()
 
     const { unmount: uMatrix } = renderWithQuery(<MatrixVersionsCard serviceId={SVC} />)
@@ -837,13 +847,27 @@ describe('SessionScoring Admin Panels: StatusPanel, AuditLogTab, MatrixVersionsC
     uMatrix()
 
     const user = userEvent.setup()
-    const { unmount: uLabels } = renderWithQuery(<LabelsTab serviceId={SVC} />)
+    const { queryClient: labelsQc, unmount: uLabels } = renderWithQuery(<LabelsTab serviceId={SVC} />)
+    const invalidateSpy = vi.spyOn(labelsQc, 'invalidateQueries')
     expect(await screen.findByText('sid-abc')).toBeTruthy()
+    expect(clientGetSpy).toHaveBeenCalledWith(
+      '/api/services/{service_id}/scoring/labels',
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    )
     await user.click(screen.getByRole('button', { name: 'Edit label' }))
     const notes = await screen.findByPlaceholderText('Notes (optional)')
     await user.clear(notes)
     await user.type(notes, 'hello')
     await waitFor(() => expect((screen.getByPlaceholderText('Notes (optional)') as HTMLTextAreaElement).value).toBe('hello'))
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() => {
+      expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['scoring-labels', SVC] })
+      expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['scoring-evaluation', SVC] })
+      expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['scoring-curves', SVC] })
+      expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['scoring-evaluation-per-reason', SVC] })
+      expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['scoring-per-reason-auc', SVC] })
+      expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['scoring-analytics-composite', SVC] })
+    })
     uLabels()
 
     server.use(

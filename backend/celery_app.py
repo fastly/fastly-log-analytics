@@ -97,7 +97,9 @@ def _worker_process_init(**_kwargs):
     # file-based DuckLake catalog) instead of degrading invisibly — same
     # guard the backend lifespan runs.
     from backend.config import validate_deployment_mode
+    from backend.utils.runtime_modes import validate_mock_modes
 
+    validate_mock_modes()
     validate_deployment_mode()
 
     # Start Prometheus metrics server for worker if configured

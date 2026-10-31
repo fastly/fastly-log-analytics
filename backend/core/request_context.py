@@ -271,6 +271,26 @@ def get_con(source: dict = Depends(get_source)) -> Iterator[duckdb.DuckDBPyConne
 # ── Tenant-scope enforcement (security) ─────────────
 
 
+def _resolve_candidate_service_id(raw_sid: str) -> str:
+    if svcconfig.load_config(raw_sid):
+        return raw_sid
+    return svcconfig.get_cdn_service_id_map().get(raw_sid, raw_sid)
+
+
+def _request_service_candidates(request: Request) -> list[str]:
+    path_params = getattr(request, "path_params", None) or {}
+    query_params = getattr(request, "query_params", None) or {}
+    headers = getattr(request, "headers", None) or {}
+    raw_candidates = (
+        path_params.get("service_id"),
+        query_params.get("service_id"),
+        query_params.get("service"),
+        headers.get("x-service-id"),
+        headers.get("x-fastly-service-id"),
+    )
+    return [c for c in raw_candidates if c]
+
+
 def require_service_access(
     request: Request,
     service_id: str | None = Depends(get_service_id),
@@ -292,6 +312,15 @@ def require_service_access(
     if analyst_session is None:
         return service_id  # admin / local — unrestricted
     allowed = set(analyst_session.service_ids or [])
+    for raw_sid in _request_service_candidates(request):
+        res_sid = _resolve_candidate_service_id(raw_sid)
+        if res_sid not in allowed:
+            raise HTTPException(
+                status_code=403,
+                detail={"error": "service_not_authorized", "service": raw_sid},
+            )
+        if service_id is None:
+            service_id = res_sid
     if service_id is None:
         # Analyst calls with no explicit service must default to one of their
         # scoped services. Return the first one (or None if invite is empty).
@@ -301,17 +330,6 @@ def require_service_access(
             status_code=403,
             detail={"error": "service_not_authorized", "service": service_id},
         )
-
-    path_sid = request.path_params.get("service_id")
-    if path_sid:
-        res_path_sid = path_sid
-        if not svcconfig.load_config(path_sid):
-            res_path_sid = svcconfig.get_cdn_service_id_map().get(path_sid, path_sid)
-        if res_path_sid not in allowed:
-            raise HTTPException(
-                status_code=403,
-                detail={"error": "service_not_authorized", "service": path_sid},
-            )
 
     return service_id
 
@@ -328,9 +346,6 @@ def require_admin(request: Request) -> None:
             status_code=403,
             detail={"error": "admin_only", "message": "This operation requires admin access."},
         )
-
-
-logger = logging.getLogger(__name__)
 
 
 class RangeWindowRequest(Protocol):
@@ -465,8 +480,11 @@ def _enforce_service_access(
     Returns the validated service_id (never None — empty/missing raises 400
     so the route never has to None-check).
     """
+    candidates = _request_service_candidates(request)
     analyst_session = getattr(request.state, "analyst_session", None)
     if analyst_session is None:
+        if not service_id and candidates:
+            service_id = _resolve_candidate_service_id(candidates[0])
         if not service_id:
             raise HTTPException(
                 status_code=400,
@@ -475,6 +493,15 @@ def _enforce_service_access(
         return service_id
 
     allowed = set(analyst_session.service_ids or [])
+    for raw_sid in candidates:
+        res_sid = _resolve_candidate_service_id(raw_sid)
+        if res_sid not in allowed:
+            raise HTTPException(
+                status_code=403,
+                detail={"error": "service_not_authorized", "service": raw_sid},
+            )
+        if service_id is None:
+            service_id = res_sid
     if service_id is None:
         # Analyst calls with no explicit service default to the first of
         # their scoped services. Mirrors require_service_access semantics.
@@ -550,16 +577,13 @@ def build_request_context(
     # Park the context on request.state so downstream non-route
     # code (middleware, error handlers) can read it.
     request.state.ctx = ctx
-    import sys
 
     try:
         yield ctx
-    except HTTPException:
-        telemetry.end_request(status_code=400)
+    except HTTPException as exc:
+        telemetry.end_request(status_code=exc.status_code)
         raise
     finally:
-        import sys
-
         try:
             holder.__exit__(*sys.exc_info())
         except Exception:

@@ -50,16 +50,16 @@ const eslintConfig = defineConfig([
   globalIgnores([
     // Default ignores of eslint-config-next:
     ".next/**",
+    ".next-*/**",
     "out/**",
     "build/**",
     "public/**",
     "next-env.d.ts",
     // Build / generated / report output a bare `eslint .` would otherwise
-    // lint as if it were source — minified chunks under `.next-e2e/`
-    // (the Playwright dist tree) and instrumented files under `coverage/`
-    // produced ~21k bogus problems incl. rules-of-hooks false positives in
-    // vendor code. Keep these out so the lint gate sees only real source.
-    ".next-e2e/**",
+    // lint as if it were source — instrumented files under `coverage/`
+    // and Playwright output directories produce thousands of bogus problems
+    // incl. rules-of-hooks false positives in vendor code. Keep these out
+    // so the lint gate sees only real source.
     "coverage/**",
     "playwright-report/**",
     "test-results/**",

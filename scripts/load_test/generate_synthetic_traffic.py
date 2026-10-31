@@ -69,6 +69,15 @@ def _sleep_for_rate(n: int, target_rps: int, b_t0: float) -> None:
             time.sleep(target_batch_sec - b_dur)
 
 
+def _validate_generation_args(*, rows: int, batch_size: int, file_rows: int | None = None) -> None:
+    if rows < 0:
+        raise ValueError(f"rows must be >= 0 (got {rows})")
+    if batch_size <= 0:
+        raise ValueError(f"batch_size must be > 0 (got {batch_size})")
+    if file_rows is not None and file_rows <= 0:
+        raise ValueError(f"file_rows must be > 0 (got {file_rows})")
+
+
 def run_target_local(
     src: dict[str, Any],
     scenario: str,
@@ -87,6 +96,7 @@ def run_target_local(
     burst_interval: int = 120,
 ) -> int:
     """Writes Parquet directly to local buffer and optionally commits to DuckLake."""
+    _validate_generation_args(rows=rows, batch_size=batch_size, file_rows=file_rows)
     buf_dir = _buffer_dir(src)
     os.makedirs(buf_dir, exist_ok=True)
 
@@ -176,6 +186,7 @@ def run_target_fos(
     upload_workers: int = 8,
 ) -> int:
     """Generates gzipped NDJSON and uploads directly to FOS object storage with rate pacing & background uploads."""
+    _validate_generation_args(rows=rows, batch_size=batch_size)
     from backend.provision.cli import minute_list_prefix
 
     bucket = src.get("s3_bucket") or src.get("fos_bucket")
@@ -308,6 +319,7 @@ def run_target_clickhouse(
     burst_interval: int = 120,
 ) -> int:
     """Generates synthetic log records and inserts them directly into ClickHouse."""
+    _validate_generation_args(rows=rows, batch_size=batch_size)
     from uuid import uuid4
 
     from backend.core.clickhouse import ClickHouseClient, get_clickhouse_client
@@ -440,6 +452,14 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true", help="Preview generation without writing files or uploading.")
 
     args = parser.parse_args()
+    try:
+        _validate_generation_args(
+            rows=args.rows,
+            batch_size=args.batch_size,
+            file_rows=args.file_rows if args.target == "local" else None,
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
 
     src = None
     if args.config:

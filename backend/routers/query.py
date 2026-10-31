@@ -6,7 +6,13 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from backend.core.request_context import RequestContext, ServiceId, build_request_context, get_service_id
+from backend.core.request_context import (
+    RequestContext,
+    ServiceId,
+    build_request_context,
+    get_service_id,
+    require_service_access,
+)
 from backend.models.analytics import (
     PresetQuery,
     QueryRequest,
@@ -219,7 +225,10 @@ def query_schema_endpoint(
 
 
 @router.get("/presets", response_model=list[PresetQuery], response_model_exclude_unset=True)
-def presets_endpoint(service_id: str | None = Depends(get_service_id)):
+def presets_endpoint(
+    service_id: str | None = Depends(get_service_id),
+    _scope: str | None = Depends(require_service_access),
+):
     from backend.core import duckdb as _db
 
     if not service_id:

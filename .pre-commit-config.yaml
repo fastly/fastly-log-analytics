@@ -100,7 +100,7 @@ repos:
 
       # Run the Rust scorer's native unit tests before pushing a change to
       # compute/scorer/. The Python suite only pins the cross-language *tables*
-      # (tests/scoring/test_scorer_parity_and_vectors.py); the cargo `#[test]`s pin the
+      # (tests/scoring/test_scorer.py); the cargo `#[test]`s pin the
       # normalize/cookie/matrix LOGIC + session-expiry boundaries that no Python
       # test exercises. Pre-push (not per-commit) keeps the compile off the hot
       # path; `files:` scopes it to scorer changes; skips with a notice if cargo

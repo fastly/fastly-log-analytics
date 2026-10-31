@@ -224,13 +224,13 @@ run_deploy_wasm() {
     echo "       run POST /api/session-scoring/retrain (or backend.scoring.build_matrix) to produce $MATRIX_PATH" >&2
     exit 2
   fi
-  VOCAB=$(python3 -c "import json; print(json.load(open('$MATRIX_PATH')).get('vocab_size', 0))")
+  VOCAB=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("vocab_size", 0))' "$MATRIX_PATH")
   if [ "$VOCAB" -eq 0 ]; then
     echo "error: matrix at $MATRIX_PATH is empty (vocab_size=0)" >&2
     echo "       deploy refused. Train against a real fixture first." >&2
     exit 3
   fi
-  VERSION=$(python3 -c "import json; print(json.load(open('$MATRIX_PATH')).get('version', '?'))")
+  VERSION=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("version", "?"))' "$MATRIX_PATH")
   echo "[deploy_wasm] trained matrix present: version=$VERSION vocab_size=$VOCAB (served via KV, not embedded)"
   TMP_WORKSPACE="$(mktemp -d)"
   trap 'rm -rf "$TMP_WORKSPACE"' EXIT INT TERM

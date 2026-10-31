@@ -502,19 +502,39 @@ interface MockOAuth {
   registryPath: string
 }
 
+const DEFAULT_CONTRACT_TEST_POSTGRES_DSN = 'postgresql://fla:fla_test_password@localhost:5432/ducklake_test'
+
+function assertIsolatedTestPostgresDsn(dsn: string, envName: string): string {
+  let parsed: URL
+  try {
+    parsed = new URL(dsn)
+  } catch {
+    throw new Error(`${envName} must be a valid PostgreSQL URL targeting an isolated test database, got: ${dsn}`)
+  }
+  const dbName = parsed.pathname.replace(/^\/+/, '')
+  if (!dbName || !/^(test_.+|.+_test)$/i.test(dbName)) {
+    throw new Error(
+      `${envName} must target an isolated test database (test_* or *_test), got database "${dbName || '<empty>'}" in ${dsn}`,
+    )
+  }
+  return dsn
+}
+
 export function backendTestEnvironment(sandboxDir: string, oauth?: MockOAuth): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { NODE_ENV: 'test' }
   for (const key of HOST_ENV_KEYS) {
     if (process.env[key] !== undefined) env[key] = process.env[key]
   }
-  const metaDsn =
+  const rawMetaDsn =
+    process.env.FLA_CONTRACT_TEST_METADATA_POSTGRES_DSN ||
     process.env.TEST_METADATA_DSN ||
-    (process.env.METADATA_DSN && !process.env.METADATA_DSN.includes('example.invalid')
-      ? process.env.METADATA_DSN
-      : 'postgresql://fla:fla_test_password@localhost:5432/ducklake_test')
-  const duckCatalog =
+    DEFAULT_CONTRACT_TEST_POSTGRES_DSN
+  const metaDsn = assertIsolatedTestPostgresDsn(rawMetaDsn, 'FLA_CONTRACT_TEST_METADATA_POSTGRES_DSN')
+  const rawDuckCatalog =
+    process.env.FLA_CONTRACT_TEST_CATALOG_POSTGRES_DSN ||
     process.env.TEST_DUCKLAKE_CATALOG ||
-    (process.env.DUCKLAKE_CATALOG && !process.env.DUCKLAKE_CATALOG.includes('example.invalid') ? process.env.DUCKLAKE_CATALOG : metaDsn)
+    metaDsn
+  const duckCatalog = assertIsolatedTestPostgresDsn(rawDuckCatalog, 'FLA_CONTRACT_TEST_CATALOG_POSTGRES_DSN')
 
   Object.assign(env, {
     UV_NO_CACHE: '1',

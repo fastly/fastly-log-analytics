@@ -213,14 +213,16 @@ def log_usage_calls(service_id: str, calls: list[dict], process_context: str | N
             summary_map[key][1] += op_bytes or 0
 
     try:
-        con.executemany(
-            "INSERT INTO usage_log "
-            "(timestamp, service_id, operation_class, operation_type, url, status, "
-            " duration_ms, function_name, process_context, bytes) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            rows,
-        )
-        _upsert_hourly_summary(con, summary_map, now)
+        tx_ctx = con.transaction() if hasattr(con, "transaction") else con
+        with tx_ctx:
+            con.executemany(
+                "INSERT INTO usage_log "
+                "(timestamp, service_id, operation_class, operation_type, url, status, "
+                " duration_ms, function_name, process_context, bytes) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                rows,
+            )
+            _upsert_hourly_summary(con, summary_map, now)
         con.commit()
     except Exception as e:
         logger.error("[metadata_db] Failed to log usage calls: %s", e)
@@ -285,14 +287,16 @@ def log_synthetic_usage(service_id: str, calls: list[dict]) -> int:
     if not new_rows:
         return 0
     try:
-        con.executemany(
-            "INSERT INTO usage_log "
-            "(timestamp, service_id, operation_class, operation_type, url, status, "
-            " duration_ms, function_name, process_context, bytes) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            new_rows,
-        )
-        _upsert_hourly_summary(con, summary_map, now_iso)
+        tx_ctx = con.transaction() if hasattr(con, "transaction") else con
+        with tx_ctx:
+            con.executemany(
+                "INSERT INTO usage_log "
+                "(timestamp, service_id, operation_class, operation_type, url, status, "
+                " duration_ms, function_name, process_context, bytes) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                new_rows,
+            )
+            _upsert_hourly_summary(con, summary_map, now_iso)
         con.commit()
         return len(new_rows)
     except Exception as e:
@@ -402,92 +406,93 @@ def reconcile_fastly_stats(
 
     # Wipe prior reconciliation rows in the window in a single range delete
     # spanning both classes, then insert one row per (hour, class) gap > 0.
-    con.execute(
-        """
-        DELETE FROM usage_log
-        WHERE service_id = ? AND operation_class IN ('A', 'B')
-          AND timestamp >= ? AND timestamp < ?
-          AND function_name = 'fastly.reconciliation'
-        """,
-        (service_id, window_start, window_end),
-    )
-
-    now_iso = iso_z_now()
-    if deletes_to_adjust:
-        adjust_params = [
-            (
-                int(r["c"] or 0),
-                int(r["b"] or 0),
-                now_iso,
-                service_id,
-                r["hour"],
-                r["operation_class"],
-                r["operation_type"],
-            )
-            for r in deletes_to_adjust
-        ]
-        con.executemany(
-            """
-            UPDATE usage_log_hourly_summary
-            SET count = count - ?,
-                bytes = bytes - ?,
-                last_updated = ?
-            WHERE service_id = ?
-              AND hour = ?
-              AND operation_class = ?
-              AND operation_type = ?
-            """,
-            adjust_params,
-        )
-
     written = 0
-    insert_rows: list[tuple] = []
-    for hour_start, classes in by_hour.items():
-        hour_prefix = hour_start[:13]  # "YYYY-MM-DDTHH"
-        for op_class, fastly_count in classes.items():
-            local_sum = local_sums.get((op_class, hour_prefix), 0)
-            gap = fastly_count - local_sum
-            if gap > 0:
-                insert_rows.append(
-                    (
-                        hour_start,
-                        service_id,
-                        op_class,
-                        f"RECONCILE_{op_class}",
-                        f"fastly://stats/aggregate/{hour_start}",
-                        "OK",
-                        0.0,
-                        "fastly.reconciliation",
-                        "fastly:reconciliation",
-                        None,
-                        gap,
-                    )
-                )
-                written += 1
-
-    if insert_rows:
-        con.executemany(
+    with con.transaction():
+        con.execute(
             """
-            INSERT INTO usage_log
-            (timestamp, service_id, operation_class, operation_type, url, status,
-             duration_ms, function_name, process_context, bytes, count)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            DELETE FROM usage_log
+            WHERE service_id = ? AND operation_class IN ('A', 'B')
+              AND timestamp >= ? AND timestamp < ?
+              AND function_name = 'fastly.reconciliation'
             """,
-            insert_rows,
+            (service_id, window_start, window_end),
         )
-        summary_map: dict[tuple[str, str, str, str], list[int]] = {}
-        for r in insert_rows:
-            ts = r[0]
-            hr = ts[:13]
-            op_class = r[2]
-            op_type = r[3]
-            gap_count = r[10]
-            key = (service_id, hr, op_class, op_type)
-            if key not in summary_map:
-                summary_map[key] = [0, 0]
-            summary_map[key][0] += gap_count
 
-        _upsert_hourly_summary(con, summary_map, now_iso)
+        now_iso = iso_z_now()
+        if deletes_to_adjust:
+            adjust_params = [
+                (
+                    int(r["c"] or 0),
+                    int(r["b"] or 0),
+                    now_iso,
+                    service_id,
+                    r["hour"],
+                    r["operation_class"],
+                    r["operation_type"],
+                )
+                for r in deletes_to_adjust
+            ]
+            con.executemany(
+                """
+                UPDATE usage_log_hourly_summary
+                SET count = count - ?,
+                    bytes = bytes - ?,
+                    last_updated = ?
+                WHERE service_id = ?
+                  AND hour = ?
+                  AND operation_class = ?
+                  AND operation_type = ?
+                """,
+                adjust_params,
+            )
+
+        insert_rows: list[tuple] = []
+        for hour_start, classes in by_hour.items():
+            hour_prefix = hour_start[:13]  # "YYYY-MM-DDTHH"
+            for op_class, fastly_count in classes.items():
+                local_sum = local_sums.get((op_class, hour_prefix), 0)
+                gap = fastly_count - local_sum
+                if gap > 0:
+                    insert_rows.append(
+                        (
+                            hour_start,
+                            service_id,
+                            op_class,
+                            f"RECONCILE_{op_class}",
+                            f"fastly://stats/aggregate/{hour_start}",
+                            "OK",
+                            0.0,
+                            "fastly.reconciliation",
+                            "fastly:reconciliation",
+                            None,
+                            gap,
+                        )
+                    )
+                    written += 1
+
+        if insert_rows:
+            con.executemany(
+                """
+                INSERT INTO usage_log
+                (timestamp, service_id, operation_class, operation_type, url, status,
+                 duration_ms, function_name, process_context, bytes, count)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                insert_rows,
+            )
+            summary_map: dict[tuple[str, str, str, str], list[int]] = {}
+            for r in insert_rows:
+                ts = r[0]
+                hr = ts[:13]
+                op_class = r[2]
+                op_type = r[3]
+                gap_count = r[10]
+                key = (service_id, hr, op_class, op_type)
+                if key not in summary_map:
+                    summary_map[key] = [0, 0]
+                summary_map[key][0] += gap_count
+
+            _upsert_hourly_summary(con, summary_map, now_iso)
     con.commit()
     return written
 

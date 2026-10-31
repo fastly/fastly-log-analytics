@@ -25,4 +25,4 @@ Admin and analyst both load the page. An analyst's IPs are masked per invite; th
 
 ## Tests
 
-No test targets this page specifically. Related coverage: [`tests/core/test_session_token.py`](../../tests/core/test_session_token.py) and [`tests/repositories/test_sessions.py`](../../tests/repositories/test_sessions.py).
+Covered by [`frontend/__tests__/app/sessions-stream.test.tsx`](../../frontend/__tests__/app/sessions-stream.test.tsx), [`tests/core/test_session_token.py`](../../tests/core/test_session_token.py), and [`tests/repositories/test_sessions.py`](../../tests/repositories/test_sessions.py).

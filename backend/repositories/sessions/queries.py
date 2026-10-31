@@ -22,7 +22,6 @@ from backend.repositories.sessions.rollup_reader import (
 from backend.repositories.utils.filters import build_where_clause, calc_offset
 from backend.repositories.utils.response_cache import (
     ResponseMemo,
-    bucket_time_to_minute,
     digest_cache_key,
     serialize_filters_for_key,
 )
@@ -162,12 +161,23 @@ def get_sessions(
     params, where_clause = build_where_clause(start_time, end_time, filters, list(actual_cols), partition_pruning=True)
     timer.mark("build_where_clause", _t)
 
+    def _sessions_cache_bound(ts: str | None) -> str | None:
+        if not ts:
+            return None
+        try:
+            from backend.utils.date_utils import parse_iso_utc
+
+            parsed = parse_iso_utc(str(ts))
+            return parsed.isoformat() if parsed is not None else str(ts).strip()
+        except (ValueError, TypeError):
+            return str(ts).strip()
+
     has_partition_cols = "dt" in actual_cols or "timestamp_hour" in actual_cols
     cache_key: str = digest_cache_key(
         {
             "op": "sessions",
-            "s": bucket_time_to_minute(start_time),
-            "e": bucket_time_to_minute(end_time),
+            "s": _sessions_cache_bound(start_time),
+            "e": _sessions_cache_bound(end_time),
             "f": serialize_filters_for_key(filters),
             "p": page,
             "l": limit,
@@ -198,7 +208,7 @@ def get_sessions(
 
     # Sessions-rollup fast path for windows > 1h with rollup-compatible filters (country, asn).
     _ROLLUP_FILTERABLE = {"country", "asn"}
-    if start_time and end_time and (not streaming_only or has_cmcd) and all(k in _ROLLUP_FILTERABLE for k in filters):
+    if start_time and end_time and not streaming_only and all(k in _ROLLUP_FILTERABLE for k in filters):
         try:
             from backend.utils.date_utils import parse_iso_utc
 

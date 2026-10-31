@@ -491,6 +491,7 @@ export function AcknowledgeFallback() {
           return
         }
         const body = (await res.json()) as TosPayload
+        if (cancelled) return
         setTos({ version: body.version, text: body.text })
       })
       .catch(() => {

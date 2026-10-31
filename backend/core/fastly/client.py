@@ -621,7 +621,7 @@ def generate_rum_asset_fetch_vcl(shield_pop: str = "iad-va-us", faro_version: st
 
 def is_mock_mode() -> bool:
     """Single-source check the gated callers read on every request."""
-    return mock_mode_enabled("FASTLY_MOCK_MODE")
+    return mock_mode_enabled("FASTLY_MOCK_MODE") or mock_mode_enabled("FASTLY_API_MOCK")
 
 
 def api_key_or_mock(key: str) -> str:

@@ -697,6 +697,26 @@ def test_backup_round_trip_preserves_allow_concurrent_sessions(monkeypatch, tmp_
     assert restored and restored[0]["allow_concurrent_sessions"] is True
 
 
+def test_backup_round_trip_with_string_tos_version_v1():
+    inv = share_db.create_remote_invite(
+        name="TosUser",
+        email="tos@corp.com",
+        passcode="ocean-breeze-cabin-42",
+        expires_at_utc=None,
+        ip_whitelist=None,
+        service_ids=["svcA"],
+    )
+    share_db.mark_tos_accepted(inv["id"], "v1")
+    blob = share_db.export_backup("very-long-strong-passphrase")
+
+    con = share_db.get_global_share_con()
+    con.execute("DELETE FROM remote_invites")
+    con.commit()
+    share_db.import_backup(blob, "very-long-strong-passphrase")
+    restored = [r for r in share_db.get_remote_invites() if r["email"] == "tos@corp.com"]
+    assert restored and restored[0]["tos_version"] == "v1"
+
+
 # ── Audit logs ──────────────────────────────────────────────────────────────
 
 

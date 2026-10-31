@@ -74,6 +74,7 @@ services:
       # backend over loopback here (operator traffic lands as the docker
       # gateway IP), so the isolated compose subnet is declared admin-trusted.
       - LOCAL_ADMIN_CIDRS=172.29.0.0/16
+      - FLA_PRODUCTION=${FLA_PRODUCTION:-0}
       - DEBUG_RESPONSES=${DEBUG_RESPONSES:-true}
       - DUCKLAKE_CATALOG=postgresql://fla:${DUCKLAKE_PG_PASSWORD:-fla_local_dev}@postgres:5432/ducklake
       - METADATA_DSN=postgresql://fla:${DUCKLAKE_PG_PASSWORD:-fla_local_dev}@postgres:5432/ducklake

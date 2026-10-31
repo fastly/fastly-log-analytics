@@ -22,10 +22,7 @@ const A2_TO_A3: Record<string, string> = countryMapData
 
 function cityMetric(c: MapCity, metric: string): number | null {
   const v = (c as Record<string, unknown>)[metric]
-  if (typeof v === 'number') return v
-  if (metric === 'throughput_bps' && typeof c.health_score === 'number') {
-    return c.health_score >= 90 ? 150_000_000 : c.health_score >= 70 ? 50_000_000 : c.health_score >= 50 ? 5_000_000 : 500_000
-  }
+  if (typeof v === 'number' && Number.isFinite(v)) return v
   return null
 }
 
@@ -279,6 +276,7 @@ export function useMapData({ map, dmaDataRef, data, bucketIdx, metric, isDark, s
               rtt_med_us: c.rtt_med_us,
               avg_ploss: c.avg_ploss,
               error_pct: c.error_pct,
+              throughput_bps: c.throughput_bps,
             },
           })
         }

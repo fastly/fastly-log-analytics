@@ -18,10 +18,12 @@ from backend.high_scale.archive import (
     ProjectionReplayResult,
     _batch_from_rows,
     _load_manifest_request_events,
+    _read_manifest_rows,
     replay_cmcd_projections,
     replay_manifest,
     replay_origin_projections,
     replay_performance_projections,
+    row_matches_serving_domain,
 )
 
 
@@ -135,6 +137,7 @@ def rebuild_serving_state_from_fos(
     warm_window: timedelta = timedelta(days=30),
     rebuild_id: str | None = None,
     capacity: RecoveryCapacityMeasurement | None = None,
+    aggregates_publication: ClickHousePublication | None = None,
 ) -> RecoveryReport:
     if recent_window <= timedelta(0):
         raise ValueError("recent_window must be positive")
@@ -149,9 +152,19 @@ def rebuild_serving_state_from_fos(
     recent_manifests = _sorted(catalog.manifests_covering(service_id, domain, recent_start, observed))
     warm_manifests = _sorted(catalog.manifests_covering(service_id, domain, warm_start, recent_start))
     recent_rows, recent_replayed, recent_errors = _replay_all(
-        recent_manifests, archive, publication, resolved_rebuild_id
+        recent_manifests,
+        archive,
+        publication,
+        resolved_rebuild_id,
+        aggregates_publication=aggregates_publication,
     )
-    warm_rows, warm_replayed, warm_errors = _replay_all(warm_manifests, archive, publication, resolved_rebuild_id)
+    warm_rows, warm_replayed, warm_errors = _replay_all(
+        warm_manifests,
+        archive,
+        publication,
+        resolved_rebuild_id,
+        aggregates_publication=aggregates_publication,
+    )
     triage_available, warm_available = not recent_errors, not warm_errors
     recovery_claim_valid = (
         None if capacity_report is None else capacity_report.feasible and triage_available and warm_available
@@ -411,19 +424,91 @@ def _sorted(manifests: tuple[ArchiveManifest, ...]) -> tuple[ArchiveManifest, ..
     return tuple(sorted(manifests, key=lambda manifest: manifest.coverage_start))
 
 
+def _replay_derived_projections(
+    manifest: ArchiveManifest,
+    archive: ArchivePublication,
+    publication: ClickHousePublication,
+    aggregates_publication: ClickHousePublication,
+    rebuild_id: str,
+) -> None:
+    from backend.high_scale.ingest_controller import _enrich_high_scale_ngwaf_bots
+    from backend.high_scale.ingest_controller.service import DIMENSIONS_BY_DOMAIN, compute_dimension_counts
+    from backend.high_scale.network import build_network_projection_rows
+    from backend.high_scale.origin import build_origin_projection_rows
+    from backend.high_scale.performance import build_performance_projection_rows
+    from backend.high_scale.security import build_security_projection_rows
+
+    raw_rows = _read_manifest_rows(manifest, archive)
+    event_rows = tuple(
+        r
+        for r in raw_rows
+        if r.get("_record_kind") in (None, "event")
+        and r.get("timestamp")
+        and row_matches_serving_domain(manifest.domain, r)
+    )
+    if not event_rows:
+        return
+    if manifest.domain == "request":
+        _enrich_high_scale_ngwaf_bots(event_rows)
+    if manifest.domain in DIMENSIONS_BY_DOMAIN:
+        counts = compute_dimension_counts(manifest.domain, event_rows)
+        if counts:
+            aggregates_publication.publish(
+                _batch_from_rows(
+                    f"rebuild:{rebuild_id}:{manifest.manifest_id}:{manifest.domain}_aggregate",
+                    manifest,
+                    counts,
+                    domain=f"{manifest.domain}_aggregate",
+                )
+            )
+    if manifest.domain == "request":
+        origin_proj = build_origin_projection_rows(event_rows)
+        perf_proj = build_performance_projection_rows(event_rows)
+        security_proj = build_security_projection_rows(event_rows)
+        network_proj = build_network_projection_rows(event_rows)
+        for sub_domain, sub_rows in (
+            ("origin_summary", origin_proj.summary_rows),
+            ("origin_dimensions", origin_proj.dimension_rows),
+            ("performance_dimensions", perf_proj.dimension_rows),
+            ("performance_summary", perf_proj.summary_rows),
+            ("performance_scatter", perf_proj.scatter_rows),
+            ("security_dimensions", security_proj.dimension_rows),
+            ("network_dimensions", network_proj.dimension_rows),
+        ):
+            if sub_rows:
+                aggregates_publication.publish(
+                    _batch_from_rows(
+                        f"rebuild:{rebuild_id}:{manifest.manifest_id}:{sub_domain}",
+                        manifest,
+                        sub_rows,
+                        domain=sub_domain,
+                    )
+                )
+        replay_cmcd_projections(
+            manifest,
+            archive,
+            publication,
+            rebuild_id=rebuild_id,
+        )
+
+
 def _replay_all(
     manifests: tuple[ArchiveManifest, ...],
     archive: ArchivePublication,
     publication: ClickHousePublication,
     rebuild_id: str,
+    *,
+    aggregates_publication: ClickHousePublication | None = None,
 ) -> tuple[int, int, list[str]]:
     rows = replayed = 0
     errors: list[str] = []
+    agg_pub = aggregates_publication if aggregates_publication is not None else publication
     for manifest in manifests:
         try:
             result = replay_manifest(
                 manifest, archive, publication, batch_id=f"rebuild:{rebuild_id}:{manifest.manifest_id}"
             )
+            _replay_derived_projections(manifest, archive, publication, agg_pub, rebuild_id)
         except Exception as exc:
             errors.append(f"manifest {manifest.manifest_id} failed to replay: {exc}")
             continue

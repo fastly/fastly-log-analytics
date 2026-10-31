@@ -167,7 +167,7 @@ COPY --from=builder --chown=app:app /root/.duckdb /home/app/.duckdb
 # Copy static assets, configuration, and helper scripts first.
 # Placing these before backend/ preserves Docker layer caching across application code changes.
 COPY --chown=app:app pyproject.toml README.md uv.lock ./
-COPY --chown=app:app scripts/generate_openapi.py scripts/clickhouse_replay.py scripts/
+COPY --chown=app:app scripts/generate_openapi.py scripts/clickhouse_replay.py scripts/backfill_high_scale.py scripts/setup_pg_schema.py scripts/
 # The optional delivery probe runs through the real container SDK/environment;
 # production has no ./scripts bind mount. Copy only this public diagnostic CLI.
 COPY --chown=app:app scripts/dev/verify_observability.py scripts/dev/

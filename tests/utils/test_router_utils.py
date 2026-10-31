@@ -458,6 +458,49 @@ def test_routers_build_sse_only_via_sse_response():
     assert offenders == []
 
 
+def test_stream_sse_from_worker_disconnect_while_blocked_in_next_gen():
+    from backend.utils.sse import ClientDisconnected, stream_sse_from_worker
+
+    async def _run():
+        worker_blocked = threading.Event()
+        release_worker = threading.Event()
+        captured_q = []
+        disconnected_seen = threading.Event()
+
+        def _blocking_worker(q):
+            captured_q.append(q)
+            q.put({"step": 1})
+            worker_blocked.set()
+            release_worker.wait(timeout=2.0)
+            try:
+                q.put({"step": 2})
+            except ClientDisconnected:
+                disconnected_seen.set()
+                raise
+
+        resp = stream_sse_from_worker(_blocking_worker)
+        aiter = resp.body_iterator.__aiter__()
+        first = await aiter.__anext__()
+        assert json.loads(first) == {"step": 1}
+
+        # Start second __anext__ so the executor thread blocks inside next(gen) -> q.get()
+        pending_next = asyncio.create_task(aiter.__anext__())
+        await asyncio.sleep(0.05)
+        assert worker_blocked.is_set()
+
+        # Simulate client disconnect canceling the blocked consumer and closing the async generator
+        pending_next.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await pending_next
+        await aiter.aclose()
+
+        assert captured_q and captured_q[0].aborted is True
+        release_worker.set()
+        assert await asyncio.to_thread(disconnected_seen.wait, 1.0) is True
+
+    asyncio.run(_run())
+
+
 # ── Merged from test_auth.py ──────────────────────────────────────────────
 
 

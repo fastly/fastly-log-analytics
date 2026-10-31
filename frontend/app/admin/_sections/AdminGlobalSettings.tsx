@@ -131,7 +131,7 @@ export function DiagnosticsPanel() {
           <div className="min-w-0 space-y-0.5">
             <Label id={p.id} className="text-sm font-medium">{p.title}</Label>
             <p className="text-xs text-muted-foreground">{p.desc}</p>
-            {!debugBackendOn && <p className="text-[11px] text-amber-500" title={debugDisabledTooltip}>Disabled — backend ``DEBUG_RESPONSES`` env is off.</p>}
+            {!debugBackendOn && <p className="text-[11px] text-amber-500" title={debugDisabledTooltip}>Disabled — backend <code>DEBUG_RESPONSES</code> env is off.</p>}
           </div>
           <div className="flex items-center justify-end mt-auto" title={debugDisabledTooltip}>
             <Select value={p.value} onValueChange={p.onChange} disabled={!debugBackendOn || isSettingsLoading || updateSettingsMutation.isPending}>

@@ -615,7 +615,8 @@ def _apply_diff(
                 token=token,
             )
         except Exception as e:
-            logging.warning(f"WARNING: Failed to ensure {name}: {e}")
+            logging.error(f"Failed to ensure required condition {name}: {e}")
+            raise
 
     if any(ep.response_condition == "log_analytics_condition" for ep in desired_endpoints):
         if status_cb:

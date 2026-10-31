@@ -12,7 +12,7 @@ from botocore.credentials import Credentials
 
 from backend import config as svcconfig
 from backend.core.faro_versions import fetch_faro_bundle
-from backend.core.fastly.client import region_endpoint
+from backend.core.fastly.client import is_mock_mode, region_endpoint
 from backend.utils.http import make_client
 
 logger = logging.getLogger(__name__)
@@ -552,7 +552,7 @@ def upload_rum_tracker_js(
     # security use of the hash, just matching S3's ETag semantics.
     local_md5 = hashlib.md5(js_bytes, usedforsecurity=False).hexdigest()
 
-    if bucket != "mock_bucket":
+    if not (is_mock_mode() and bucket == "mock_bucket"):
         try:
             # Check if file already exists and is up to date via HEAD request
             with make_client() as client:
@@ -598,7 +598,7 @@ def upload_rum_tracker_js(
     }
 
     try:
-        if bucket == "mock_bucket":
+        if is_mock_mode() and bucket == "mock_bucket":
             ok(f"[MOCK] Mock uploaded RUM tracker JS ({len(js_bytes)} bytes) to {fos_key}")
             if status_cb:
                 status_cb(f"✅ RUM tracker JS uploaded ({len(js_bytes)} bytes)")
@@ -806,7 +806,7 @@ async def download_and_upload_faro(
         status_cb(f"⏳ Uploading Faro Web SDK v{version}…")
 
     try:
-        if bucket == "mock_bucket":
+        if is_mock_mode() and bucket == "mock_bucket":
             ok(f"[MOCK] Mock uploaded Faro Web SDK v{version} ({len(bundle)} bytes) to {fos_key}")
             if status_cb:
                 status_cb(f"✅ Faro Web SDK v{version} uploaded ({len(bundle)} bytes)")

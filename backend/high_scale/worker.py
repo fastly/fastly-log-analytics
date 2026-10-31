@@ -278,7 +278,9 @@ def build_worker_from_environment() -> HighScaleWorkerLoop:
         S3SourceObjectLister,
         S3SourceObjectReader,
     )
+    from backend.utils.runtime_modes import validate_mock_modes
 
+    validate_mock_modes()
     high_scale_config = from_environment()
     if not high_scale_config.enabled:
         raise RuntimeError("high-scale worker requires HIGH_SCALE_ENABLED=1")

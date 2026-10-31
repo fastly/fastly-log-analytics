@@ -291,7 +291,7 @@ export function WebVitalsReporter() {
         if (res.status === 401 || res.status === 403) {
           disabledRef.current = true
         }
-      })
+      }).catch(() => {})
     } catch {
       // Telemetry is fire-and-forget; never let a failed report break
       // the page that triggered it.

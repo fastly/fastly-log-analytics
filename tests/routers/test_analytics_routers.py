@@ -1319,8 +1319,11 @@ def test_assets_aggregates_high_scale():
     assert (res1.asset_type_breakdown[0].cache_hit_ratio, res1.asset_type_breakdown[0].compression_rate) == (0.8, 0.8)
     assert len(res1.large_uncompressed_assets) == 1 and len(res1.low_ttl_assets) == 1 and len(calls) == 2
 
-    res2 = assets_aggregates(svc, req, "2026-08-19T12:00:30Z", "2026-08-19T13:00:45Z")  # type: ignore[arg-type]
+    res2 = assets_aggregates(svc, req, "2026-08-19T12:00:00+00:00", "2026-08-19T13:00:00.000000Z")  # type: ignore[arg-type]
     assert res2.is_cached is True and len(calls) == 2
+
+    res3 = assets_aggregates(svc, req, "2026-08-19T12:00:30Z", "2026-08-19T13:00:45Z")  # type: ignore[arg-type]
+    assert res3.is_cached is False and len(calls) == 4
 
 
 # ── Merged from tests/routers/test_alerts_and_views.py ──

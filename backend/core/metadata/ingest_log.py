@@ -204,7 +204,7 @@ def _bootstrap_ingested_files_summary(con: Any, service_id: str) -> dict:
     ``get_ingested_files_status_summary`` calls are O(1) lookups against the
     rollup row. Called from the summary getter when the rollup is missing.
     """
-    summary = _query_ingested_files_aggregate(con, service_id)
+    summary = _query_ingested_files_aggregate(con, service_id, table_name="logs")
     con.execute(
         "INSERT INTO ingested_files_summary AS summary "
         "(source_name, file_count, total_rows, total_bytes, count_with_bytes, latest_file_name, last_ingested) "
@@ -552,108 +552,115 @@ def insert_ingested_files(service_id: str, rows: list[tuple[str, int, int | None
     if not rows:
         return
     con = get_con(service_id)
-
-    # Bootstrap the rollup if missing — without this, the delta UPSERT below
-    # would seed the rollup with only THIS batch's counts when ingested_files
-    # already had a million rows (first insert after upgrade on a populated
-    # service). The bootstrap commits in its own statement; the delta update
-    # below then correctly adds this batch on top.
-    if con.execute("SELECT 1 FROM ingested_files_summary WHERE source_name = ?", (service_id,)).fetchone() is None:
-        _bootstrap_ingested_files_summary(con, service_id)
-
-    # Snapshot existing values for rows that already exist, so we can compute
-    # accurate (new - old) deltas for the rollup even when this batch upserts.
     file_names = [fn for fn, _, _ in rows]
-    existing: dict[str, tuple[int | None, int | None]] = {}
-    chunk = 500  # SQLite default expression-tree depth allows ~1000 params
-    for i in range(0, len(file_names), chunk):
-        batch = file_names[i : i + chunk]
-        placeholders = ",".join(["?"] * len(batch))
-        for r in con.execute(
-            f"SELECT file_name, row_count, file_size_bytes FROM ingested_files "
-            f"WHERE source_name = ? AND table_name = ? AND file_name IN ({placeholders})",
-            (service_id, table_name, *batch),
-        ).fetchall():
-            existing[r["file_name"]] = (r["row_count"], r["file_size_bytes"])
 
-    file_count_delta = rows_delta = bytes_delta = count_with_bytes_delta = 0
-    # Find the file with the maximum chronological timestamp embedded after '.gz'
-    latest_file_name = None
-    max_ts = ""
-    import re
+    tx_ctx = con.transaction() if hasattr(con, "transaction") else con
+    with tx_ctx:
+        if table_name == "logs":
+            # Bootstrap the rollup if missing — without this, the delta UPSERT below
+            # would seed the rollup with only THIS batch's counts when ingested_files
+            # already had a million rows (first insert after upgrade on a populated
+            # service).
+            if (
+                con.execute("SELECT 1 FROM ingested_files_summary WHERE source_name = ?", (service_id,)).fetchone()
+                is None
+            ):
+                _bootstrap_ingested_files_summary(con, service_id)
 
-    pat = re.compile(r"(\d{4}-\d{2}-\d{2})[T-](\d{2}[:.-]\d{2}[:.-]\d{2})")
-    for fn in file_names:
-        m = pat.search(fn.split("/")[-1])
-        if m:
-            ts = f"{m.group(1)}T{m.group(2).replace('-', ':').replace('.', ':')}"
-            if ts > max_ts:
-                max_ts = ts
-                latest_file_name = fn
-    if latest_file_name is None:
-        latest_file_name = max(file_names)
-    for fn, rc, sz in rows:
-        if fn in existing:
-            old_rc, old_sz = existing[fn]
-            rows_delta += (rc or 0) - (old_rc or 0)
-            bytes_delta += (sz or 0) - (old_sz or 0)
-            had_size, has_size = old_sz is not None, sz is not None
-            if has_size and not had_size:
-                count_with_bytes_delta += 1
-            elif had_size and not has_size:
-                count_with_bytes_delta -= 1
-        else:
-            file_count_delta += 1
-            rows_delta += rc or 0
-            bytes_delta += sz or 0
-            if sz is not None:
-                count_with_bytes_delta += 1
+            # Snapshot existing values for rows that already exist, so we can compute
+            # accurate (new - old) deltas for the rollup even when this batch upserts.
+            existing: dict[str, tuple[int | None, int | None]] = {}
+            chunk = 500  # SQLite default expression-tree depth allows ~1000 params
+            for i in range(0, len(file_names), chunk):
+                batch = file_names[i : i + chunk]
+                placeholders = ",".join(["?"] * len(batch))
+                for r in con.execute(
+                    f"SELECT file_name, row_count, file_size_bytes FROM ingested_files "
+                    f"WHERE source_name = ? AND table_name = ? AND file_name IN ({placeholders})",
+                    (service_id, table_name, *batch),
+                ).fetchall():
+                    existing[r["file_name"]] = (r["row_count"], r["file_size_bytes"])
 
-    con.executemany(
-        """INSERT INTO ingested_files (file_name, source_name, row_count, file_size_bytes, file_date, table_name)
-           VALUES (?, ?, ?, ?, ?, ?)
-           ON CONFLICT(file_name, source_name, table_name) DO UPDATE SET
-               row_count = excluded.row_count,
-               file_size_bytes = excluded.file_size_bytes,
-               file_date = COALESCE(ingested_files.file_date, excluded.file_date)""",
-        [(fn, service_id, rc, sz, _parse_file_date(fn), table_name) for (fn, rc, sz) in rows],
-    )
-    # Postgres needs an explicit target alias to disambiguate the aggregate
-    # row from EXCLUDED.
-    # Use the just-applied DB clock so last_ingested matches the row's
-    # ingested_at default (datetime('now')) — keeps the rollup honest.
-    now_str = con.execute("SELECT datetime('now')").fetchone()[0]
-    con.execute(
-        """INSERT INTO ingested_files_summary AS summary
-               (source_name, file_count, total_rows, total_bytes, count_with_bytes, latest_file_name, last_ingested)
-           VALUES (?, ?, ?, ?, ?, ?, ?)
-           ON CONFLICT(source_name) DO UPDATE SET
-               file_count       = summary.file_count + excluded.file_count,
-               total_rows       = summary.total_rows + excluded.total_rows,
-               total_bytes      = summary.total_bytes + excluded.total_bytes,
-               count_with_bytes = summary.count_with_bytes + excluded.count_with_bytes,
-               latest_file_name = CASE
-                   WHEN summary.latest_file_name IS NULL OR
-                        substr(excluded.latest_file_name, instr(excluded.latest_file_name, '.gz') + 3, 19) >
-                        substr(summary.latest_file_name, instr(summary.latest_file_name, '.gz') + 3, 19)
-                       THEN excluded.latest_file_name
-                   ELSE summary.latest_file_name
-               END,
-               last_ingested = CASE
-                   WHEN summary.last_ingested IS NULL OR excluded.last_ingested > summary.last_ingested
-                       THEN excluded.last_ingested
-                   ELSE summary.last_ingested
-               END""",
-        (
-            service_id,
-            file_count_delta,
-            rows_delta,
-            bytes_delta,
-            count_with_bytes_delta,
-            latest_file_name,
-            now_str,
-        ),
-    )
+            file_count_delta = rows_delta = bytes_delta = count_with_bytes_delta = 0
+            # Find the file with the maximum chronological timestamp embedded after '.gz'
+            latest_file_name = None
+            max_ts = ""
+            import re
+
+            pat = re.compile(r"(\d{4}-\d{2}-\d{2})[T-](\d{2}[:.-]\d{2}[:.-]\d{2})")
+            for fn in file_names:
+                m = pat.search(fn.split("/")[-1])
+                if m:
+                    ts = f"{m.group(1)}T{m.group(2).replace('-', ':').replace('.', ':')}"
+                    if ts > max_ts:
+                        max_ts = ts
+                        latest_file_name = fn
+            if latest_file_name is None:
+                latest_file_name = max(file_names)
+            for fn, rc, sz in rows:
+                if fn in existing:
+                    old_rc, old_sz = existing[fn]
+                    rows_delta += (rc or 0) - (old_rc or 0)
+                    bytes_delta += (sz or 0) - (old_sz or 0)
+                    had_size, has_size = old_sz is not None, sz is not None
+                    if has_size and not had_size:
+                        count_with_bytes_delta += 1
+                    elif had_size and not has_size:
+                        count_with_bytes_delta -= 1
+                else:
+                    file_count_delta += 1
+                    rows_delta += rc or 0
+                    bytes_delta += sz or 0
+                    if sz is not None:
+                        count_with_bytes_delta += 1
+
+        con.executemany(
+            """INSERT INTO ingested_files (file_name, source_name, row_count, file_size_bytes, file_date, table_name)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT(file_name, source_name, table_name) DO UPDATE SET
+                   row_count = excluded.row_count,
+                   file_size_bytes = excluded.file_size_bytes,
+                   file_date = COALESCE(ingested_files.file_date, excluded.file_date)""",
+            [(fn, service_id, rc, sz, _parse_file_date(fn), table_name) for (fn, rc, sz) in rows],
+        )
+
+        if table_name == "logs":
+            # Postgres needs an explicit target alias to disambiguate the aggregate
+            # row from EXCLUDED.
+            # Use the just-applied DB clock so last_ingested matches the row's
+            # ingested_at default (datetime('now')) — keeps the rollup honest.
+            now_str = con.execute("SELECT datetime('now')").fetchone()[0]
+            con.execute(
+                """INSERT INTO ingested_files_summary AS summary
+                       (source_name, file_count, total_rows, total_bytes, count_with_bytes, latest_file_name, last_ingested)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(source_name) DO UPDATE SET
+                       file_count       = summary.file_count + excluded.file_count,
+                       total_rows       = summary.total_rows + excluded.total_rows,
+                       total_bytes      = summary.total_bytes + excluded.total_bytes,
+                       count_with_bytes = summary.count_with_bytes + excluded.count_with_bytes,
+                       latest_file_name = CASE
+                           WHEN summary.latest_file_name IS NULL OR
+                                substr(excluded.latest_file_name, instr(excluded.latest_file_name, '.gz') + 3, 19) >
+                                substr(summary.latest_file_name, instr(summary.latest_file_name, '.gz') + 3, 19)
+                               THEN excluded.latest_file_name
+                           ELSE summary.latest_file_name
+                       END,
+                       last_ingested = CASE
+                           WHEN summary.last_ingested IS NULL OR excluded.last_ingested > summary.last_ingested
+                               THEN excluded.last_ingested
+                           ELSE summary.last_ingested
+                       END""",
+                (
+                    service_id,
+                    file_count_delta,
+                    rows_delta,
+                    bytes_delta,
+                    count_with_bytes_delta,
+                    latest_file_name,
+                    now_str,
+                ),
+            )
     con.commit()
 
     # Keep the dedup cache in sync. Only extend if the cache is already

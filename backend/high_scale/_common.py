@@ -169,6 +169,19 @@ class ArchiveManifestCatalog(Protocol):
     ) -> tuple[ArchiveManifest, ...]: ...
 
 
+_OPAQUE_ARCHIVE_KEYS = frozenset({"raw_json", "raw_line_base64", "raw_line", "_record_kind", "raw_payload"})
+
+
+def _sanitize_archive_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    cleaned = {k: v for k, v in row.items() if k not in _OPAQUE_ARCHIVE_KEYS}
+    if "_record_kind" in row and cleaned.get("reason") is None:
+        cleaned.pop("reason", None)
+    custom_fields = cleaned.get("custom_fields")
+    if isinstance(custom_fields, Mapping):
+        cleaned["custom_fields"] = {k: v for k, v in custom_fields.items() if k not in _OPAQUE_ARCHIVE_KEYS}
+    return cleaned
+
+
 def raw_query_producer(
     catalog: ArchiveManifestCatalog,
     archive: ArchivePublication,
@@ -185,9 +198,16 @@ def raw_query_producer(
         for manifest in manifests:
             table = pq.read_table(pa.BufferReader(archive.read_artifact(manifest)))
             for row in table.to_pylist():
-                timestamp = _row_timestamp(row)
-                if timestamp is None or (start <= timestamp < end):
-                    yield row
+                if row.get("_record_kind") not in (None, "event"):
+                    continue
+                if row.get("raw_line_base64") not in (None, "") or row.get("raw_line") not in (None, ""):
+                    continue
+                try:
+                    timestamp = _row_timestamp(row)
+                except (ValueError, TypeError):
+                    continue
+                if timestamp is not None and start <= timestamp < end:
+                    yield _sanitize_archive_row(row)
 
     return _produce
 
@@ -195,8 +215,8 @@ def raw_query_producer(
 def _row_timestamp(row: Mapping[str, Any]) -> datetime | None:
     value = row.get("timestamp")
     if isinstance(value, datetime):
-        return value.astimezone(UTC)
-    if isinstance(value, str):
+        return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+    if isinstance(value, str) and value.strip():
         return range_value(value).astimezone(UTC)
     return None
 

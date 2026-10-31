@@ -37,7 +37,6 @@ from backend.repositories.security.watchdog import (
 from backend.repositories.utils.filters import build_where_clause
 from backend.repositories.utils.response_cache import (
     ResponseMemo,
-    bucket_time_to_minute,
     digest_cache_key,
     serialize_filters_for_key,
 )
@@ -82,6 +81,18 @@ _TEMP_COL_ORDER = (
 _SECTION_DEFAULTS = SECURITY_SECTION_DEFAULTS
 
 
+def _security_cache_bound(ts: str | None) -> str | None:
+    if not ts:
+        return None
+    try:
+        from backend.utils.date_utils import parse_iso_utc
+
+        parsed = parse_iso_utc(str(ts))
+        return parsed.isoformat() if parsed is not None else str(ts).strip()
+    except (ValueError, TypeError):
+        return str(ts).strip()
+
+
 def _security_memo_key(
     src: dict,
     start_time: str | None,
@@ -93,8 +104,8 @@ def _security_memo_key(
 ) -> str:
     payload = {
         "ep": "security_aggregates",
-        "s": bucket_time_to_minute(start_time),
-        "e": bucket_time_to_minute(end_time),
+        "s": _security_cache_bound(start_time),
+        "e": _security_cache_bound(end_time),
         "f": serialize_filters_for_key(filters),
         "b": int(bucket_seconds),
         "sec": sorted(sections) if sections is not None else None,

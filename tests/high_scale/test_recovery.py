@@ -804,4 +804,98 @@ def test_archive_only_recovery_catalog_tiered_rebuild() -> None:
     assert proj_report.full_rebuild_complete and proj_report.manifests_replayed == 2 and proj_report.rows_replayed > 0
 
 
-# ── Merged from tests/high_scale/test_console_access_integration.py ──
+def test_raw_query_producer_excludes_dead_letter_and_strips_opaque_fields_for_masked_analyst() -> None:
+    from backend.core.share_db import mask_ip_values
+    from backend.high_scale._common import raw_query_producer
+
+    rows = (
+        {
+            "event_id": "ev-ok",
+            "_record_kind": "event",
+            "timestamp": "2026-09-14T11:30:00Z",
+            "ip": "192.0.2.55",
+            "raw_json": '{"ip":"192.0.2.55","session_id":"secret-sid"}',
+            "raw_payload": '{"ip":"192.0.2.55"}',
+            "raw_line_base64": None,
+            "raw_line": None,
+        },
+        {
+            "event_id": "ev-dead-1",
+            "_record_kind": "dead_letter",
+            "timestamp": "",
+            "raw_line_base64": "eyJpcCI6IjE5Mi4wLjIuOTkifQ==",
+        },
+        {
+            "event_id": "ev-dead-2",
+            "timestamp": "2026-09-14T11:31:00Z",
+            "raw_line": '{"ip":"192.0.2.88"}',
+        },
+        {
+            "event_id": "ev-bad-ts",
+            "timestamp": "not-a-timestamp",
+            "ip": "192.0.2.77",
+        },
+        {
+            "event_id": "ev-out-of-window",
+            "timestamp": "2026-09-14T10:00:00Z",
+            "ip": "192.0.2.66",
+        },
+    )
+    rec = _manifest("archive-dl-1", NOW - timedelta(hours=1), NOW, rows)
+    catalog, archive, _, _ = _pub_env(rec)
+    produce = raw_query_producer(
+        catalog,
+        archive,
+        service_id="svc",
+        domain="request",
+        start=datetime(2026, 9, 14, 11, 0, tzinfo=UTC),
+        end=datetime(2026, 9, 14, 12, 0, tzinfo=UTC),
+    )
+    produced_rows = list(produce())
+    assert len(produced_rows) == 1
+    (only_row,) = produced_rows
+    assert only_row["event_id"] == "ev-ok"
+    for opaque_key in ("raw_json", "raw_line_base64", "raw_line", "_record_kind", "raw_payload"):
+        assert opaque_key not in only_row
+    masked = mask_ip_values([dict(only_row)])[0]
+    serialized = json.dumps(masked)
+    assert "192.0.2.55" not in serialized and "secret-sid" not in serialized
+
+
+def test_rebuild_serving_state_from_fos_reconciles_derived_projections() -> None:
+    events = (
+        {
+            "event_id": "ev-cmcd-1",
+            "service_id": "svc",
+            "timestamp": "2026-09-14T11:30:00Z",
+            "status": 200,
+            "url": "/seg/1.m4s",
+            "country": "US",
+            "pop": "IAD",
+            "cache": "MISS",
+            "origin_latency": 120,
+            "elapsed": 100000,
+            "ttfb": 50,
+            "ttlb": 100,
+            "waf_action": "block",
+            "_ngwaf_bot_name": "googlebot",
+            "cmcd": {"br": "1500", "sid": "sess-1"},
+        },
+    )
+    rec = _manifest("derived-rec-1", NOW - timedelta(hours=1), NOW - timedelta(minutes=30), events)
+    ch_client = _MockClickHouseClient()
+    catalog, archive, publication, _ = _pub_env(rec, client=ch_client)
+    report = rebuild_serving_state_from_fos(
+        catalog, archive, publication, service_id="svc", domain="request", now=NOW, rebuild_id="r-derived"
+    )
+    assert report.full_rebuild_complete is True
+    domains = {b.domain for b in ch_client.batches}
+    assert {
+        "request",
+        "request_aggregate",
+        "origin_summary",
+        "performance_summary",
+        "security_dimensions",
+        "network_dimensions",
+        "cmcd",
+    }.issubset(domains)
