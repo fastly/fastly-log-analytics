@@ -173,13 +173,14 @@ function LabelActions({
   )
 }
 
-function invalidateLabelEvaluationCaches(qc: ReturnType<typeof useQueryClient>, serviceId: string) {
+export function invalidateLabelEvaluationCaches(qc: ReturnType<typeof useQueryClient>, serviceId: string) {
   qc.invalidateQueries({ queryKey: queryKeys.scoringLabels(serviceId) })
   qc.invalidateQueries({ queryKey: ['scoring-evaluation', serviceId] })
   qc.invalidateQueries({ queryKey: ['scoring-curves', serviceId] })
   qc.invalidateQueries({ queryKey: ['scoring-evaluation-per-reason', serviceId] })
   qc.invalidateQueries({ queryKey: ['scoring-per-reason-auc', serviceId] })
   qc.invalidateQueries({ queryKey: ['scoring-analytics-composite', serviceId] })
+  qc.invalidateQueries({ queryKey: ['scoring-threshold-preview', serviceId] })
 }
 
 export function LabelsTab({ serviceId }: { serviceId: string }) {

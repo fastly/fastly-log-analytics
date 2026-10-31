@@ -483,7 +483,7 @@ canonical diagnostics pass. Keep host-management SSH.
 
 ### Per-environment diagnostic identities
 
-`scripts.lib.admin_tls` reads `ADMIN_GATEWAY_ENDPOINTS`, an operator-local JSON
+`scripts.lib.admin_mtls` reads `ADMIN_GATEWAY_ENDPOINTS`, an operator-local JSON
 mapping from `local-standard`, `remote-standard` or
 `remote-high-scale` to objects with exactly `origin`, `cert`, `key`, and `ca`.
 Each `origin` is an explicit HTTPS origin; paths point at operator-owned files.

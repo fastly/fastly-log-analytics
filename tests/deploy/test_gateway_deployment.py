@@ -1083,7 +1083,7 @@ def test_public_gateway_strips_both_admin_credentials_and_keeps_analyst_marker(t
     if not shutil.which("caddy"):
         if os.getenv("ADMIN_MTLS_TEST_REQUIRED") == "1":
             pytest.fail("Missing validation tool: caddy >=2.8 (install explicitly)")
-        pytest.skip("Optional Caddy runtime not installed; scripts/validate_admin_gateway.sh requires it")
+        pytest.skip("Optional Caddy runtime not installed; scripts/perf_gate.sh --validate-admin-gateway requires it")
     rendered = subprocess.run(
         [
             "helm",

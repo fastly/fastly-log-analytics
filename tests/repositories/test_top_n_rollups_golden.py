@@ -6142,3 +6142,51 @@ def test_cid_salt_hash_parity_and_redaction_channels(raw_con, tmp_path):
         raw_con.execute("SELECT count(*) FROM duckdb_tables() WHERE table_name = '_analyst_cid_salt'").fetchone()[0]
         == 0
     )
+
+
+def test_cmcd_aggregates_response_cache_hit(con):
+    from backend.repositories import cmcd as cmcd_repo
+
+    cmcd_repo._memo.cache.clear()
+    rows = [
+        (_T0, "s1", False, 100, "v", "US", 1),
+        (_T0, "s1", True, 300, "v", "US", 1),
+    ]
+    src = _make_table(con, "cmcd_cache_hit", rows)
+    first = get_cmcd_aggregates(con, src, "2026-10-21T00:00:00Z", "2026-10-22T00:00:00Z", {}, sections={"overview"})
+    assert first.get("is_cached") is not True
+    assert first["overview"]["active_sessions"] == 1
+
+    second = get_cmcd_aggregates(con, src, "2026-10-21T00:00:00Z", "2026-10-22T00:00:00Z", {}, sections={"overview"})
+    assert second["is_cached"] is True
+    assert second["section_timings"] == []
+    assert second["debug_queries"] == []
+    assert second["overview"] == first["overview"]
+
+
+def test_cmcd_and_vcl_service_scope_rbac(client):
+    from types import SimpleNamespace
+
+    from starlette.requests import Request
+
+    from backend.routers.performance import cmcd_disable, cmcd_enable, cmcd_status
+    from backend.routers.services.vcl import api_service_log_fields_get, api_service_logging_settings
+
+    analyst = SimpleNamespace(
+        session_id="sess-1",
+        email="analyst@example.com",
+        role="analyst",
+        service_ids=["svc-allowed"],
+    )
+    req = Request({"type": "http", "method": "GET", "path": "/", "headers": []})
+    req.state.analyst_session = analyst
+
+    for fn in (cmcd_status, api_service_logging_settings, api_service_log_fields_get):
+        with pytest.raises(Exception) as exc_info:
+            fn(service_id="svc-forbidden", request=req)
+        assert getattr(exc_info.value, "status_code", None) == 403
+
+    for mut_fn in (cmcd_enable, cmcd_disable):
+        with pytest.raises(Exception) as exc_mut:
+            mut_fn(service_id="svc-allowed", request=req)
+        assert getattr(exc_mut.value, "status_code", None) == 403

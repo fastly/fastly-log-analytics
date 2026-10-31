@@ -17,13 +17,12 @@ from dataclasses import dataclass
 from dataclasses import field as _dc_field
 
 from backend.core.request_telemetry import HighScaleSections
-from backend.high_scale._common import _FIELD_DIMENSIONS
+from backend.high_scale._common import _FIELD_DIMENSIONS, normalize_cache_bound
 from backend.high_scale._common import bucket as _bucket
 from backend.high_scale._common import build_published_facts_where as _facts_where
 from backend.high_scale._common import build_published_projection_where as _where
 from backend.high_scale._common import finite_float as _finite_float
 from backend.high_scale._common import percentiles as _percentiles
-from backend.high_scale._common import range_value as _range_value
 from backend.high_scale._common import text as _text
 from backend.models.analytics import PerformanceAggregatesResponse
 from backend.repositories.utils.response_cache import (
@@ -384,16 +383,16 @@ def performance_aggregates(
     sort_by = getattr(req, "sort_by", "p99")
     sort_column = _SORT_COLUMNS.get(sort_by, "p99_ms")
     cache_key: str | None = None
-    if _HS_PERF_CACHE_TTL > 0 and start_time is not None and end_time is not None:
-        start_bound = _range_value(start_time)
-        end_bound = _range_value(end_time)
+    norm_start = normalize_cache_bound(start_time)
+    norm_end = normalize_cache_bound(end_time)
+    if _HS_PERF_CACHE_TTL > 0 and norm_start is not None and norm_end is not None:
         cache_key = digest_cache_key(
             {
                 "ep": "hs_performance_aggregates",
                 "svc": service.service_id,
                 "cid": client_cache_token(service.client),
-                "s": start_bound.isoformat() if start_bound is not None else str(start_time).strip(),
-                "e": end_bound.isoformat() if end_bound is not None else str(end_time).strip(),
+                "s": norm_start,
+                "e": norm_end,
                 "f": serialize_filters_for_key(filters),
                 "sb": sort_by,
                 "sec": sorted(wanted),

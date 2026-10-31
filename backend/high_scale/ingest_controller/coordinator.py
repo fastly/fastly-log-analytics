@@ -363,12 +363,20 @@ class HighScaleIngestController:
         sibling_ok, sibling_err = True, None
         if sibling is not None and sibling_events:
             sibling_batch_id = build_batch_id_from_manifest_id(f"{manifest.manifest_id}:{sibling}")
-            self._serving.publish(
-                HighScaleBatch(sibling_batch_id, service_id, sibling, str(owner.owner_epoch), tuple(sibling_events))
-            )
-            sibling_ok, sibling_err = self._publish_aggregates_batch(
-                service_id, sibling, manifest.manifest_id, owner.owner_epoch, sibling_events
-            )
+            try:
+                self._serving.publish(
+                    HighScaleBatch(sibling_batch_id, service_id, sibling, str(owner.owner_epoch), tuple(sibling_events))
+                )
+            except Exception as exc:
+                logger.exception(
+                    "high-scale RUM sibling fact publication failed",
+                    extra={"service_id": service_id, "domain": sibling, "manifest_id": manifest.manifest_id},
+                )
+                sibling_ok, sibling_err = False, str(exc)
+            else:
+                sibling_ok, sibling_err = self._publish_aggregates_batch(
+                    service_id, sibling, manifest.manifest_id, owner.owner_epoch, sibling_events
+                )
         derived_ok = agg_ok and cmcd_ok and sibling_ok
         derived_err = agg_err or cmcd_err or sibling_err or "derived publication failed"
         object_keys = tuple(desc.object_key for desc, _ in sources_payloads)
@@ -382,6 +390,13 @@ class HighScaleIngestController:
                     next_cursor=next_cursor,
                     domain=domain,
                     partition_id=partition_id,
+                )
+            elif hasattr(self._control, "fail_sources_batch"):
+                self._control.fail_sources_batch(
+                    service_id,
+                    object_keys,
+                    expected_owner_epoch=owner.owner_epoch,
+                    error=derived_err,
                 )
         else:
             for desc, _ in sources_payloads:
@@ -972,7 +987,17 @@ class HighScaleWorkerCoordinator:
                             "high-scale batch ingest failed",
                             extra={"service_id": service_id, "domain": domain, "count": len(valid_payloads)},
                         )
-                        if self._control is None and hasattr(self._ledger, "mark_failed"):
+                        if self._control is not None and hasattr(self._control, "fail_sources_batch"):
+                            try:
+                                self._control.fail_sources_batch(
+                                    service_id,
+                                    tuple(src.object_key for src, _ in valid_payloads),
+                                    expected_owner_epoch=epoch,
+                                    error=str(exc),
+                                )
+                            except Exception:
+                                logger.debug("fail_sources_batch after ingest_batch error failed", exc_info=True)
+                        elif self._control is None and hasattr(self._ledger, "mark_failed"):
                             for src, _ in valid_payloads:
                                 cur = self._ledger.source(service_id, src.object_key)
                                 if cur is not None:

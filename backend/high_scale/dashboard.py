@@ -11,6 +11,7 @@ from backend.core.request_telemetry import HighScaleSections
 from backend.high_scale._common import (
     _FIELD_DIMENSIONS,
     _column,
+    normalize_cache_bound,
     request_filter_clauses,
     visible_fact_clauses,
 )
@@ -539,7 +540,7 @@ def dashboard_aggregates(
     trace = HighScaleSections(service.service_id, "dashboard")
     request_watermark = trace.run("watermark", lambda: service.watermark_for("request"), activity="overhead")
     cache_key: str | None = None
-    if _HS_DASHBOARD_CACHE_TTL > 0 and start_time is not None and end_time is not None:
+    if _HS_DASHBOARD_CACHE_TTL > 0 and start is not None and end is not None:
         raw_filters = (
             req.filters.model_dump() if req.filters and hasattr(req.filters, "model_dump") else (req.filters or {})
         )
@@ -549,8 +550,8 @@ def dashboard_aggregates(
                 "svc": service.service_id,
                 "cid": client_cache_token(service.client),
                 "wm": (_watermark_extent(request_watermark.coverage_end), request_watermark.last_visible_event_id),
-                "s": start.isoformat() if start is not None else None,
-                "e": end.isoformat() if end is not None else None,
+                "s": normalize_cache_bound(start),
+                "e": normalize_cache_bound(end),
                 "f": serialize_filters_for_key(raw_filters),
                 "ci": norm_interval,
                 "cm": req.chart_metric,

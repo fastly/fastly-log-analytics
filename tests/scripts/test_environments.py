@@ -1671,3 +1671,26 @@ def test_print_active_scorecard_verified_and_ended_span_guard(capsys):
     rt._root_span = _EndedSpan()  # type: ignore[assignment]
     rt.end_request(200)
     assert rt._root_span is None
+
+
+def test_env_probes_first_import_order_and_main_entrypoint():
+    import subprocess
+    import sys
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import scripts.lib.env_probes as p; "
+                "import scripts.lib.environments as e; "
+                "assert 'local-standard' in p.ENVIRONMENTS; "
+                "assert p.ENVIRONMENTS is e.ENVIRONMENTS; "
+                "assert callable(p.health_main)"
+            ),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr

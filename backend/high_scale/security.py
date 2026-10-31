@@ -15,6 +15,7 @@ from backend.core.request_telemetry import HighScaleSections, clickhouse_source
 from backend.core.share_db import mask_ip
 from backend.high_scale._common import (
     _bucket_case,
+    normalize_cache_bound,
     parse_time_window,
     visible_publication_fence_sql,
 )
@@ -22,9 +23,6 @@ from backend.high_scale._common import (
     bucket as _bucket,
 )
 from backend.high_scale._common import build_clickhouse_filters as _build_clickhouse_filters
-from backend.high_scale._common import (
-    range_value as _range_value,
-)
 from backend.high_scale._common import (
     text as _text,
 )
@@ -387,16 +385,12 @@ def security_aggregates(
     mask_ips: bool = False,
 ) -> SecurityAggregatesResponse:
     bucket_seconds = _bucket_seconds(req)
-    start_bound = _range_value(start_time)
-    end_bound = _range_value(end_time)
     memo_key = digest_cache_key(
         {
             "ep": "hs_security_aggregates",
             "cid": client_cache_token(service.client),
-            "s": start_bound.isoformat()
-            if start_bound is not None
-            else (str(start_time).strip() if start_time else None),
-            "e": end_bound.isoformat() if end_bound is not None else (str(end_time).strip() if end_time else None),
+            "s": normalize_cache_bound(start_time),
+            "e": normalize_cache_bound(end_time),
             "f": serialize_filters_for_key(getattr(req, "filters", None) or {}),
             "b": int(bucket_seconds),
             "sec": sorted(sections) if sections is not None else None,

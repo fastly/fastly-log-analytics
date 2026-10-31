@@ -99,6 +99,12 @@ export function TopFlaggedTable({ serviceId, sinceHours = 24 }: TopFlaggedTableP
   const onFlagged = React.useCallback(() => {
     qc.invalidateQueries({ queryKey: queryKeys.scoringLabels(serviceId) })
     qc.invalidateQueries({ queryKey: ['scoring-top-flagged', serviceId] })
+    qc.invalidateQueries({ queryKey: ['scoring-evaluation', serviceId] })
+    qc.invalidateQueries({ queryKey: ['scoring-curves', serviceId] })
+    qc.invalidateQueries({ queryKey: ['scoring-evaluation-per-reason', serviceId] })
+    qc.invalidateQueries({ queryKey: ['scoring-per-reason-auc', serviceId] })
+    qc.invalidateQueries({ queryKey: ['scoring-analytics-composite', serviceId] })
+    qc.invalidateQueries({ queryKey: ['scoring-threshold-preview', serviceId] })
   }, [qc, serviceId])
 
   // Distinct compliance values present in the result — populates the

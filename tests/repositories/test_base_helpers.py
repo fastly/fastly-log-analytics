@@ -1815,3 +1815,39 @@ class TestPerformanceWaterfallRollupFastPath:
         assert "perf:temp_skipped" in timings
         assert "scatter_waterfall_query" not in timings
         con.close()
+
+
+def test_schema_cols_cache_and_origin_latency_expr_helpers(monkeypatch):
+    from backend.repositories import _base as base_mod
+
+    base_mod._schema_cols_cache.clear()
+    src = {"name": "svc_sc", "service_id": "svc_sc", "log_fields": {"format_hash": "h123"}}
+    assert base_mod._schema_cols_cache_key(src) == ("svc_sc", "h123")
+    assert base_mod._schema_cols_cache_key({"name": "svc_sc"}) is None
+
+    schema_seq = [
+        [{"name": "timestamp"}],
+        [{"name": "timestamp"}, {"name": "status"}, {"name": "url"}],
+    ]
+    refreshed: list[str] = []
+    monkeypatch.setattr(base_mod, "_get_schema", lambda _c, _s: schema_seq.pop(0) if schema_seq else [])
+    monkeypatch.setattr(base_mod, "_refresh_stale_view", lambda _c, s: refreshed.append(s["name"]))
+
+    con = duckdb.connect(":memory:")
+    try:
+        runner = QueryRunner(con, src)
+        cols = runner.get_schema_cols()
+        assert cols == ["timestamp", "status", "url"]
+        assert refreshed == ["svc_sc"]
+        # Second call hits _schema_cols_cache without calling _get_schema again
+        runner2 = QueryRunner(con, src)
+        assert runner2.get_schema_cols() == ["timestamp", "status", "url"]
+    finally:
+        con.close()
+
+    assert "PERCENTILE_CONT(0.95)" in base_mod.percentile_ms_expr("elapsed", 0.95, approx=False)
+    assert "approx_quantile(elapsed, 0.5)" in base_mod.percentile_ms_expr("elapsed", 0.5, approx=True)
+    assert "date_trunc('hour'" in base_mod.fast_utc_bucket_select("1 hour")
+    assert "time_bucket(INTERVAL '1 second'" in base_mod.fast_utc_bucket_select("1 second")
+    assert base_mod.empty_schema_response(items=[]) == {"has_data": False, "total": 0, "items": []}
+    assert base_mod.origin_latency_us_expr({"ottfb", "ottlb"}) == '"ottfb"'

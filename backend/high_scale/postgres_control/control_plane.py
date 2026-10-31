@@ -848,6 +848,27 @@ class PostgresControlPlane:
                 if partition_id == "default":
                     _upsert_domain_cursor(connection, service_id, domain, next_cursor)
 
+    def fail_sources_batch(
+        self,
+        service_id: str,
+        object_keys: Sequence[str],
+        *,
+        expected_owner_epoch: int,
+        error: str,
+    ) -> None:
+        _require_texts(service_id=service_id, error=error)
+        if expected_owner_epoch <= 0:
+            raise ValueError("owner epoch must be positive")
+        with self.transaction() as connection:
+            self._fenced_owner(connection, service_id, expected_owner_epoch=expected_owner_epoch)
+            if object_keys:
+                connection.execute(
+                    "UPDATE high_scale_source_objects SET status='discovered', owner=NULL, lease_until=NULL, "
+                    "last_error=%s, updated_at=clock_timestamp() "
+                    "WHERE service_id=%s AND object_key = ANY(%s) AND status='claimed' AND owner_epoch=%s",
+                    (error, service_id, list(object_keys), expected_owner_epoch),
+                )
+
     def authorize_source_delete(
         self,
         service_id: str,

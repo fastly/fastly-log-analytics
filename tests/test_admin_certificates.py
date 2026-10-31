@@ -208,7 +208,7 @@ def run_gateway(pki, host: str, bundle: Path, name: str):
     if not shutil.which("caddy"):
         if os.getenv("ADMIN_MTLS_TEST_REQUIRED") == "1":
             pytest.fail("Missing validation tool: caddy >=2.8 (install explicitly)")
-        pytest.skip("Optional Caddy runtime not installed; scripts/validate_admin_gateway.sh requires it")
+        pytest.skip("Optional Caddy runtime not installed; scripts/perf_gate.sh --validate-admin-gateway requires it")
     upstream = ThreadingHTTPServer(("127.0.0.1", 0), Echo)
     thread = threading.Thread(target=upstream.serve_forever, daemon=True)
     thread.start()
@@ -515,7 +515,7 @@ def gateway_image():
     if not shutil.which("docker") or _docker("info", check=False).returncode != 0:
         if os.getenv("ADMIN_MTLS_TEST_REQUIRED") == "1":
             pytest.fail("Missing validation tool: running docker daemon (start it explicitly)")
-        pytest.skip("Docker daemon unavailable; scripts/validate_admin_gateway.sh requires it")
+        pytest.skip("Docker daemon unavailable; scripts/perf_gate.sh --validate-admin-gateway requires it")
     tag = f"fla-admin-gateway-test:{os.getpid()}"
     _docker("build", "-q", "-t", tag, str(IMAGE_CONTEXT))
     try:

@@ -43,14 +43,35 @@ def sketch(values: list[float]) -> tuple[list[float], list[int]]:
 
 
 @overload
-def range_value(value: str) -> datetime: ...
+def range_value(value: str | datetime) -> datetime: ...
 @overload
 def range_value(value: None) -> None: ...
-def range_value(value: str | None) -> datetime | None:
+def range_value(value: str | datetime | None) -> datetime | None:
     """Parse an ISO-8601 bound as-is: ``Z`` becomes ``+00:00``; naive input stays naive."""
     if value is None:
         return None
-    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if isinstance(value, datetime):
+        return value
+    stripped = str(value).strip()
+    if not stripped:
+        return None
+    return datetime.fromisoformat(stripped.replace("Z", "+00:00"))
+
+
+def normalize_cache_bound(value: str | datetime | None) -> str | None:
+    """Return a canonical ISO-8601 cache-key bound without raising on empty or malformed input."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.isoformat()
+    stripped = str(value).strip()
+    if not stripped:
+        return None
+    try:
+        parsed = range_value(stripped)
+        return parsed.isoformat() if parsed is not None else None
+    except (ValueError, TypeError):
+        return stripped
 
 
 def bucket(value: object) -> datetime | None:

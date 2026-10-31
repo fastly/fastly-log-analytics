@@ -1907,3 +1907,36 @@ def test_get_insights_insufficient_baseline_skips_coalesced_scans(in_memory_duck
     by_id = {i["id"]: i for i in res["insights"]}
     assert by_id["error_spikes"]["severity"] == "info"
     assert "historical data" in by_id["error_spikes"]["summary"].lower()
+
+
+def test_insights_cache_hit_and_resilience_fallbacks(in_memory_duckdb, test_service_source):
+    from backend.models.analytics import InsightsResponse
+    from backend.repositories import _base as _base_mod
+
+    table_name = _safe_table(test_service_source["name"])
+    _create_full_schema_table(in_memory_duckdb, table_name)
+    _insights_cache.clear()
+
+    out1 = get_insights(in_memory_duckdb, test_service_source, window_hours=1, baseline_hours=24)
+    out2 = get_insights(in_memory_duckdb, test_service_source, window_hours=1, baseline_hours=24)
+    assert out1.get("is_cached") is not True
+    assert out2.get("is_cached") is True
+    assert InsightsResponse(**out1).model_dump(by_alias=True)["_is_cached"] is False
+    assert InsightsResponse(**out2).model_dump(by_alias=True)["_is_cached"] is True
+
+    _insights_cache.clear()
+    with patch("backend.repositories._base.QueryRunner.create_temp_table", return_value=False):
+        fallback_res = get_insights(in_memory_duckdb, test_service_source, window_hours=1, baseline_hours=1)
+    assert isinstance(fallback_res["insights"], list)
+
+    real_execute = _base_mod.QueryRunner.execute
+
+    def _faux_execute(self, query, params=None):
+        if isinstance(query, str) and "count(*)" in query.lower() and "WHERE timestamp >= CAST(?" in query:
+            raise RuntimeError("simulated count failure")
+        return real_execute(self, query, params) if params is not None else real_execute(self, query)
+
+    _insights_cache.clear()
+    with patch.object(_base_mod.QueryRunner, "execute", _faux_execute):
+        count_err_res = get_insights(in_memory_duckdb, test_service_source, window_hours=1, baseline_hours=1)
+    assert count_err_res["window_total_requests"] == 0

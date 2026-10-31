@@ -245,18 +245,21 @@ from scripts.lib.admin_mtls import (  # noqa: E402
     is_admin_url,
     validate_admin_tls_config,
 )
-from scripts.lib.env_probes import (  # noqa: E402
-    ENVIRONMENTS,
-    EnvironmentTarget,
-    HealthResult,
-    RbacResult,
-    TenancyResult,
-    check_backend_health,
-    check_rbac,
-    check_tenancy,
-    health_main,
-    probe,
-)
+
+_env_probes_mod = sys.modules.get("scripts.lib.env_probes")
+if _env_probes_mod is None or hasattr(_env_probes_mod, "ENVIRONMENTS"):
+    from scripts.lib.env_probes import (  # noqa: E402
+        ENVIRONMENTS,
+        EnvironmentTarget,
+        HealthResult,
+        RbacResult,
+        TenancyResult,
+        check_backend_health,
+        check_rbac,
+        check_tenancy,
+        health_main,
+        probe,
+    )
 from scripts.lib.k8s_gce import (  # noqa: E402
     _POLL_INTERVAL,
     _TAIL_BYTES,

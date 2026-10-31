@@ -152,7 +152,8 @@ export function useWizardEffects(args: WizardEffectsArgs) {
     setNgwafFetching(true)
     client
       .GET("/api/provision/ngwaf-workspaces", {
-        params: { query: { service_id: selectedService.id, token: token || undefined } },
+        params: { query: { service_id: selectedService.id } },
+        headers: token ? { Authorization: `Bearer ${token}` } : undefined,
       })
       .then((r) => {
         if (r.error) {

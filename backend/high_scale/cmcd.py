@@ -9,8 +9,8 @@ from typing import TYPE_CHECKING, Any
 
 from backend.core.request_telemetry import HighScaleSections
 from backend.high_scale._common import (
+    normalize_cache_bound,
     parse_time_window,
-    range_value,
 )
 from backend.repositories.utils.response_cache import (
     client_cache_token,
@@ -199,13 +199,7 @@ def _sessions_ts(rows: Iterable[dict[str, Any]], new_sessions: Mapping[str, int]
     }
 
 
-def _cmcd_cache_bound(ts: str | None) -> str | None:
-    if not ts:
-        return None
-    try:
-        return range_value(ts).isoformat()
-    except (ValueError, TypeError):
-        return str(ts).strip()
+_cmcd_cache_bound = normalize_cache_bound
 
 
 def cmcd_aggregates(

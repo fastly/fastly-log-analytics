@@ -37,9 +37,23 @@ _REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 
 def _is_disallowed_ip(ip_str: str) -> bool:
     ip = ipaddress.ip_address(ip_str)
-    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
-        ip = ip.ipv4_mapped
-    return ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_unspecified or ip.is_reserved
+    if isinstance(ip, ipaddress.IPv6Address):
+        if ip.ipv4_mapped is not None:
+            ip = ip.ipv4_mapped
+        elif ip.sixtofour is not None:
+            ip = ip.sixtofour
+        elif ip.teredo is not None:
+            server_ip, client_ip = ip.teredo
+            return _is_disallowed_ip(str(server_ip)) or _is_disallowed_ip(str(client_ip))
+    return (
+        not ip.is_global
+        or ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_multicast
+        or ip.is_unspecified
+        or ip.is_reserved
+    )
 
 
 def _validate_feed_url(url: str) -> str:
@@ -51,6 +65,8 @@ def _validate_feed_url(url: str) -> str:
     hostname = parsed.hostname
     if not hostname:
         raise ValueError("Bot feed URL is missing a hostname")
+    if "%" in hostname or "%" in (parsed.netloc or ""):
+        raise ValueError("Bot feed URL hostname must not contain zone identifiers or percent-encoding")
     port = parsed.port or 443
 
     try:
@@ -92,9 +108,16 @@ def http_get_text(
         hdrs.update(headers)
 
     current_url = _validate_feed_url(url)
-    with httpx.Client(timeout=timeout, follow_redirects=False) as client:
+    with httpx.Client(timeout=timeout, follow_redirects=False, trust_env=False) as client:
         for _hop in range(_MAX_REDIRECTS + 1):
             with client.stream("GET", current_url, headers=hdrs) as resp:
+                network_stream = resp.extensions.get("network_stream") if hasattr(resp, "extensions") else None
+                if network_stream is not None and hasattr(network_stream, "get_extra_info"):
+                    server_addr = network_stream.get_extra_info("server_addr")
+                    if isinstance(server_addr, tuple) and server_addr:
+                        peer_ip = str(server_addr[0]).split("%", 1)[0]
+                        if _is_disallowed_ip(peer_ip):
+                            raise ValueError(f"Bot feed connection peer resolved to disallowed IP address {peer_ip}")
                 if resp.status_code in _REDIRECT_STATUSES:
                     location = resp.headers.get("location")
                     if not location:

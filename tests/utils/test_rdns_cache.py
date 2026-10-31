@@ -1863,6 +1863,11 @@ def test_validate_feed_url_rejects_disallowed_schemes_and_literal_ips(bad_url: s
         "172.16.0.1",
         "192.168.0.1",
         "169.254.169.254",
+        "100.64.0.1",
+        "192.0.2.1",
+        "198.18.0.1",
+        "2002:7f00:1::1",
+        "2001:0000:4136:e378:8000:63bf:ffff:fdd2",
         "0.0.0.0",
         "224.0.0.1",
     ],
@@ -1875,6 +1880,38 @@ def test_validate_feed_url_rejects_dns_resolved_internal_addresses(resolved_ip: 
     with patch("backend.utils.bot_sources.fetcher.socket.getaddrinfo", return_value=addrinfo):
         with pytest.raises(ValueError, match="disallowed IP address"):
             _validate_feed_url("https://feeds.example.com/ips.json")
+
+
+def test_validate_feed_url_rejects_zone_id_and_peer_ip_rebind():
+    import httpx
+
+    from backend.utils.bot_sources.fetcher import _validate_feed_url, http_get_text
+
+    for zoned_url in ("https://[fe80::1%25eth0]/ips.json", "https://feeds.example.com%25eth0/ips.json"):
+        with pytest.raises(ValueError):
+            _validate_feed_url(zoned_url)
+
+    class _FakeNetworkStream:
+        def get_extra_info(self, key: str):
+            if key == "server_addr":
+                return ("127.0.0.1", 443)
+            return None
+
+    addrinfo = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))]
+    transport = httpx.MockTransport(
+        lambda _req: httpx.Response(200, text="ok", extensions={"network_stream": _FakeNetworkStream()})
+    )
+    real_client = httpx.Client
+
+    with (
+        patch("backend.utils.bot_sources.fetcher.socket.getaddrinfo", return_value=addrinfo),
+        patch(
+            "backend.utils.bot_sources.fetcher.httpx.Client",
+            side_effect=lambda **kw: real_client(transport=transport, **kw),
+        ),
+    ):
+        with pytest.raises(ValueError, match="peer resolved to disallowed IP address"):
+            http_get_text("https://feeds.example.com/ips.json")
 
 
 def test_http_get_text_rejects_redirect_to_loopback_before_following():

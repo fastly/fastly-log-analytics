@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Path
+from fastapi import APIRouter, Depends, HTTPException, Path, Request
 
 from backend.core.request_context import RequestContext, build_request_context
 from backend.models.analytics import (
@@ -25,7 +25,7 @@ from backend.repositories import assets as assets_repo
 from backend.repositories import cmcd as cmcd_repo
 from backend.repositories import performance as perf_repo
 from backend.repositories import value as value_repo
-from backend.utils.auth import mask_ips_for
+from backend.utils.auth import analyst_allowed_services, mask_ips_for, require_service_in_scope
 from backend.utils.router_utils import (
     make_section_expander,
     query_errors,
@@ -224,10 +224,12 @@ def value_summary(
     response_model_exclude_unset=True,
 )
 def cmcd_status(
+    request: Request,
     service_id: str = Path(..., description="Logging service ID"),
 ) -> dict:
     from backend import config as svcconfig
 
+    require_service_in_scope(request, service_id)
     cfg = svcconfig.load_config(service_id)
     if not cfg:
         raise HTTPException(status_code=404, detail={"error": f"No config for service {service_id}"})
@@ -244,9 +246,13 @@ def cmcd_status(
 
 @router.post("/services/{service_id}/cmcd/enable", tags=["cmcd-admin"])
 def cmcd_enable(
+    request: Request,
     service_id: str = Path(..., description="Logging service ID"),
     body: CmcdEnableBody | None = None,
 ):
+    require_service_in_scope(request, service_id)
+    if analyst_allowed_services(request) is not None:
+        raise HTTPException(status_code=403, detail={"error": "admin_only"})
     token = body.token if body else ""
     mode = body.mode if body else "query_string"
     version = body.version if body else 1
@@ -294,9 +300,13 @@ def cmcd_enable(
 
 @router.post("/services/{service_id}/cmcd/disable", tags=["cmcd-admin"])
 def cmcd_disable(
+    request: Request,
     service_id: str = Path(..., description="Logging service ID"),
     body: CmcdDisableBody | None = None,
 ):
+    require_service_in_scope(request, service_id)
+    if analyst_allowed_services(request) is not None:
+        raise HTTPException(status_code=403, detail={"error": "admin_only"})
     token = body.token if body else ""
     resolved_token = _resolve_token(service_id, token)
     if not resolved_token:

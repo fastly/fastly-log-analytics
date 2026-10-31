@@ -97,16 +97,30 @@ def validate_webhook_url(url: str) -> str:
     except ValueError:
         ip = None
 
-    if ip is not None and (
-        ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved or ip.is_unspecified
-    ):
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "error": "invalid_webhook_url",
-                "message": f"Webhook target IP '{host}' is in a restricted range (SSRF protection).",
-            },
-        )
+    if ip is not None:
+        if isinstance(ip, ipaddress.IPv6Address):
+            if ip.ipv4_mapped is not None:
+                ip = ip.ipv4_mapped
+            elif ip.sixtofour is not None:
+                ip = ip.sixtofour
+            elif ip.teredo is not None:
+                ip = ip.teredo[1] if ip.teredo[0].is_global else ip.teredo[0]
+        if (
+            not ip.is_global
+            or ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_multicast
+            or ip.is_reserved
+            or ip.is_unspecified
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "invalid_webhook_url",
+                    "message": f"Webhook target IP '{host}' is in a restricted range (SSRF protection).",
+                },
+            )
     return cleaned
 
 

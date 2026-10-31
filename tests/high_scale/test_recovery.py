@@ -899,3 +899,174 @@ def test_rebuild_serving_state_from_fos_reconciles_derived_projections() -> None
         "network_dimensions",
         "cmcd",
     }.issubset(domains)
+
+
+def test_high_scale_common_range_value_and_normalize_cache_bound() -> None:
+    from backend.high_scale._common import normalize_cache_bound, range_value
+
+    dt = datetime(2026, 9, 14, 11, 30, 45, tzinfo=UTC)
+    assert range_value(None) is None
+    assert range_value("") is None
+    assert range_value("   ") is None
+    assert range_value(dt) == dt
+    assert range_value("2026-09-14T11:30:45Z") == dt
+
+    assert normalize_cache_bound(None) is None
+    assert normalize_cache_bound("") is None
+    assert normalize_cache_bound("   ") is None
+    assert normalize_cache_bound(dt) == "2026-09-14T11:30:45+00:00"
+    assert normalize_cache_bound("2026-09-14T11:30:45Z") == "2026-09-14T11:30:45+00:00"
+    assert normalize_cache_bound("not-a-valid-iso") == "not-a-valid-iso"
+
+
+def test_rebuild_rum_facts_from_fos_auto_wraps_aggregate_batch_adapter() -> None:
+    from backend.high_scale.archive.clickhouse_batch import ClickHouseBatchAdapter
+    from backend.high_scale.recovery import rebuild_rum_facts_from_fos
+
+    class _ColumnAwareHttpClickHouse:
+        def __init__(self) -> None:
+            self.inserts: list[tuple[str, list[str], list[tuple]]] = []
+            self.publications: dict[str, dict] = {}
+            self.rows: dict[str, list[tuple]] = {}
+
+        def execute(self, sql: str, params: dict | None = None) -> list[dict]:
+            params = params or {}
+            if "high_scale_batch_publications" in sql:
+                row = self.publications.get(str(params["batch_id"]))
+                return [] if row is None else [row]
+            if "SELECT count()" in sql:
+                return [{"row_count": len(self.rows.get(str(params["batch_id"]), []))}]
+            return []
+
+        def insert_rows(self, table: str, columns: list[str], rows: list[tuple]) -> None:
+            self.inserts.append((table, columns, rows))
+            if table == "high_scale_batch_publications":
+                self.publications[str(rows[0][0])] = dict(zip(columns, rows[0], strict=True))
+            else:
+                b_idx = columns.index("batch_id")
+                self.rows.setdefault(str(rows[0][b_idx]), []).extend(rows)
+
+        def delete_batch_rows(self, table: str, batch_id: str) -> None:
+            self.rows.pop(str(batch_id), None)
+
+    vitals_events = (
+        {
+            "event_id": "rum-vital-1",
+            "service_id": "svc",
+            "timestamp": "2026-09-14T11:30:00Z",
+            "source_object_key": "raw/rum/vitals-1.gz",
+            "source_object_version": "sha256:rum-1",
+            "line_ordinal": 0,
+            "transform_version": "normalize.v1",
+            "metric_name": "LCP",
+            "metric_value": 1.25,
+            "metric_rating": "good",
+            "url": "/home",
+            "country": "US",
+            "device": "desktop",
+        },
+    )
+    rec = _manifest(
+        "rum-rec-1", NOW - timedelta(hours=1), NOW - timedelta(minutes=30), vitals_events, domain="rum_vitals"
+    )
+    http_ch = _ColumnAwareHttpClickHouse()
+    batch_adapter = ClickHouseBatchAdapter(http_ch)
+    catalog, archive, _, _ = _pub_env(rec)
+    pub = ClickHousePublication(InMemoryBatchManifestStore(), batch_adapter)
+
+    report = rebuild_rum_facts_from_fos(
+        catalog, archive, pub, service_id="svc", domain="rum_vitals", now=NOW, rebuild_id="r-rum-auto"
+    )
+    assert report.full_rebuild_complete is True
+    inserted_tables = [table for table, _, _ in http_ch.inserts]
+    assert "rum_vitals_facts" in inserted_tables
+    assert "rum_vitals_aggregates" in inserted_tables
+
+
+def test_ingest_batch_rum_sibling_failure_records_fail_sources_batch() -> None:
+    from backend.high_scale.archive import ArchiveState
+    from backend.high_scale.ingest_controller import HighScaleIngestController, SourceObjectDescriptor
+
+    archive = ArchivePublication(InMemoryObjectStore())
+    ch_client = _MockClickHouseClient()
+    base_pub = ClickHousePublication(InMemoryBatchManifestStore(), ch_client)
+
+    class _FailingSiblingPub:
+        def __init__(self, inner: ClickHousePublication) -> None:
+            self._inner = inner
+
+        def publish(self, batch):
+            if batch.domain == "rum_errors":
+                raise RuntimeError("simulated rum_errors clickhouse outage")
+            return self._inner.publish(batch)
+
+        def __getattr__(self, name: str):
+            return getattr(self._inner, name)
+
+    failed_calls: list[tuple] = []
+
+    class _FakeControl:
+        def owner(self, service_id: str):
+            return SimpleNamespace(current_owner="high_scale", owner_epoch=7)
+
+        def record_source_counts(self, *_a, **_kw):
+            return None
+
+        def archive_manifest(self, _mid: str):
+            raise KeyError(_mid)
+
+        def register_archive_manifest(self, manifest, *, owner_epoch, state=ArchiveState.MANIFEST_COMMITTED):
+            return SimpleNamespace(manifest=manifest, state=ArchiveState.MANIFEST_COMMITTED)
+
+        def transition_archive_manifest(self, *_a, **_kw):
+            return None
+
+        def fail_sources_batch(self, service_id, object_keys, error, *, expected_owner_epoch):
+            failed_calls.append((service_id, tuple(object_keys), error, expected_owner_epoch))
+            return []
+
+    controller = HighScaleIngestController(
+        control_plane=_FakeControl(),  # type: ignore[arg-type]
+        archive=archive,
+        serving=_FailingSiblingPub(base_pub),  # type: ignore[arg-type]
+        worker_id="worker-test",
+    )
+    src_desc = SourceObjectDescriptor(
+        object_key="raw/rum_vitals/obj1.log",
+        checksum="sha256:rum1",
+        size_bytes=128,
+        version="v1",
+    )
+    payload = (
+        json.dumps(
+            {
+                "timestamp": "2026-09-14T11:52:00Z",
+                "rum_type": "vital",
+                "rum_metric_name": "LCP",
+                "rum_metric_value": 1200.0,
+                "url": "/home",
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "timestamp": "2026-09-14T11:53:00Z",
+                "rum_type": "error",
+                "rum_error_message": "ReferenceError: x is not defined",
+                "url": "/home",
+            }
+        )
+        + "\n"
+    ).encode("utf-8")
+
+    outcome = controller.ingest_batch(
+        service_id="svc",
+        domain="rum_vitals",
+        sources_payloads=((src_desc, payload),),
+        now=NOW,
+    )
+    assert outcome.derived_publication_complete is False
+    assert len(failed_calls) == 1
+    svc_id, keys, err, epoch = failed_calls[0]
+    assert svc_id == "svc" and keys == ("raw/rum_vitals/obj1.log",) and epoch == 7
+    assert "rum_errors" in err

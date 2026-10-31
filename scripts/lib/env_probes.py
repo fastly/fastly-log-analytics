@@ -10,6 +10,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
+sys.modules.setdefault("scripts.lib.env_probes", sys.modules[__name__])
+
 from scripts.lib.environments import (
     ENVIRONMENT_SPECS,
     add_common_args,
@@ -400,3 +402,13 @@ __all__ = [
     "health_main",
     "probe",
 ]
+
+_env_parent = sys.modules.get("scripts.lib.environments")
+if _env_parent is not None:
+    for _export_name in __all__:
+        if not hasattr(_env_parent, _export_name):
+            setattr(_env_parent, _export_name, globals()[_export_name])
+
+
+if __name__ == "__main__":
+    sys.exit(health_main())

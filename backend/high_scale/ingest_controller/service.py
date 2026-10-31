@@ -605,8 +605,8 @@ def assets_aggregates(
     cache_key = digest_cache_key(
         {
             "svc": service.service_id,
-            "s": start_dt.isoformat() if start_time else None,
-            "e": end_dt.isoformat() if end_time else None,
+            "s": start_dt.isoformat(),
+            "e": end_dt.isoformat(),
             "f": serialize_filters_for_key(req.filters),
         },
         {"name": service.service_id},

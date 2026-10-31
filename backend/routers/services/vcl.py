@@ -80,7 +80,8 @@ def _validate_log_format_version(candidate_lf: dict) -> None:
 
 @router.get("/services/{service_id}/logging-settings", response_model=LoggingSettingsResponse)
 @query_errors(500, code="logging_settings_save_failed", logger_obj=logger)
-def api_service_logging_settings(service_id: str):
+def api_service_logging_settings(request: Request, service_id: str):
+    require_service_in_scope(request, service_id)
     timer = SectionTimer()
     cached_fields = _logging_settings_cache.get(service_id)
     if cached_fields is not None:
@@ -139,7 +140,8 @@ def api_service_logging_settings(service_id: str):
 
 
 @router.get("/services/{service_id}/log-fields", response_model=LogFieldsResponse)
-def api_service_log_fields_get(service_id: str):
+def api_service_log_fields_get(request: Request, service_id: str):
+    require_service_in_scope(request, service_id)
     cfg = load_service_config(service_id)
     log_fields_config = lf_module.get_lf_config(cfg)
     if not log_fields_config.get("groups"):

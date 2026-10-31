@@ -225,6 +225,7 @@ def rebuild_rum_facts_from_fos(
     window: timedelta = timedelta(days=30),
     rebuild_id: str | None = None,
     capacity: RecoveryCapacityMeasurement | None = None,
+    aggregates_publication: ClickHousePublication | None = None,
 ) -> RecoveryReport:
     """Replay one RUM domain over ``window`` (newest day first) through the fact writer."""
     if domain not in _RUM_FACT_TABLES:
@@ -240,6 +241,7 @@ def rebuild_rum_facts_from_fos(
         warm_window=window,
         rebuild_id=rebuild_id,
         capacity=capacity,
+        aggregates_publication=aggregates_publication,
     )
 
 
@@ -502,7 +504,17 @@ def _replay_all(
 ) -> tuple[int, int, list[str]]:
     rows = replayed = 0
     errors: list[str] = []
-    agg_pub = aggregates_publication if aggregates_publication is not None else publication
+    if aggregates_publication is not None:
+        agg_pub = aggregates_publication
+    else:
+        from backend.high_scale.archive import ClickHouseBatchAdapter
+        from backend.high_scale.ingest_controller.service import AggregateBatchAdapter
+
+        client = getattr(publication, "_client", None)
+        if isinstance(client, ClickHouseBatchAdapter) and not isinstance(client, AggregateBatchAdapter):
+            agg_pub = ClickHousePublication(publication._manifests, AggregateBatchAdapter(client._client))
+        else:
+            agg_pub = publication
     for manifest in manifests:
         try:
             result = replay_manifest(
