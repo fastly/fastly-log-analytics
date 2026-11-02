@@ -97,6 +97,29 @@ async def test_sync_status_channel_wraps_initial_and_published(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_sync_status_channel_polls_when_publisher_idle(monkeypatch):
+    snapshots = iter(
+        [
+            {"local_rows": 10, "latest_log_at": "2026-11-02T21:00:00Z"},
+            {"local_rows": 10, "latest_log_at": "2026-11-02T21:00:00Z"},
+            {"local_rows": 25, "latest_log_at": "2026-11-02T21:00:05Z"},
+        ]
+    )
+    monkeypatch.setattr(ev, "compute_sync_status_cached", lambda _sid: next(snapshots))
+    monkeypatch.setattr(ev, "_SYNC_STATUS_SAMPLE_INTERVAL_SECONDS", 0.01)
+
+    async def _idle_subscribe(_svc):
+        await asyncio.sleep(60)
+        yield {}
+
+    monkeypatch.setattr(ev.sync_status_publisher, "subscribe", _idle_subscribe)
+    frames = await _drive("sync-status", "svc-hs-poll", n_frames=2)
+    assert frames[0]["data"]["local_rows"] == 10
+    assert frames[1]["data"]["local_rows"] == 25
+    assert frames[1]["data"]["latest_log_at"] == "2026-11-02T21:00:05Z"
+
+
+@pytest.mark.asyncio
 async def test_system_metrics_channel_wraps_sample(monkeypatch):
     bundle = {"health_snapshot": {"vcpus": 4}, "slow_queries_count": None}
 

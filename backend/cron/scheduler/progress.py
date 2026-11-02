@@ -225,7 +225,9 @@ def compute_sync_status_cached(service_id: str | None) -> dict | None:
                     if req_sync is None or ts > req_sync:
                         req_sync = ts
             if req_sync and metrics.get("request"):
-                metrics["request"]["last_sync_at"] = req_sync
+                existing_req = metrics["request"].get("last_sync_at")
+                if not existing_req or str(req_sync) > str(existing_req):
+                    metrics["request"]["last_sync_at"] = req_sync
             rum_sync = None
             for t in ("rum_discovery", "rum_sync", "ledger_rum_sweep"):
                 if t in latest_crons and latest_crons[t].get("started_at"):
@@ -233,7 +235,9 @@ def compute_sync_status_cached(service_id: str | None) -> dict | None:
                     if rum_sync is None or ts > rum_sync:
                         rum_sync = ts
             if rum_sync and metrics.get("rum"):
-                metrics["rum"]["last_sync_at"] = rum_sync
+                existing_rum = metrics["rum"].get("last_sync_at")
+                if not existing_rum or str(rum_sync) > str(existing_rum):
+                    metrics["rum"]["last_sync_at"] = rum_sync
         except Exception:
             pass
         return {

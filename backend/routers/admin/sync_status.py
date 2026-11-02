@@ -186,13 +186,41 @@ async def log_extents_stream(
         initial = _project(await asyncio.to_thread(compute_fn, service_id))
         if initial is not None:
             yield json.dumps(initial)
+        last_projected = initial
 
-        async for payload in iter_with_disconnect_ping(
-            sync_status_publisher.subscribe(service_id), request, ping_seconds=15
-        ):
-            projected = _project(payload)
-            if projected is not None:
-                yield json.dumps(projected)
+        out_q: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=16)
+
+        async def _sub_feeder() -> None:
+            async for payload in sync_status_publisher.subscribe(service_id):
+                projected = _project(payload)
+                if projected is not None:
+                    await out_q.put(projected)
+
+        async def _poll_feeder() -> None:
+            while True:
+                await asyncio.sleep(5.0)
+                try:
+                    snap = await asyncio.to_thread(_resolve_compute_sync_status_cached(), service_id)
+                except Exception:
+                    continue
+                projected = _project(snap)
+                if projected is not None:
+                    await out_q.put(projected)
+
+        async def _q_iter() -> AsyncIterator[dict[str, Any]]:
+            while True:
+                yield await out_q.get()
+
+        tasks = [asyncio.ensure_future(_sub_feeder()), asyncio.ensure_future(_poll_feeder())]
+        try:
+            async for projected in iter_with_disconnect_ping(_q_iter(), request, ping_seconds=15):
+                if projected != last_projected:
+                    last_projected = projected
+                    yield json.dumps(projected)
+        finally:
+            for t in tasks:
+                t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     return cast(EventSourceResponse, sse_response(stream()))
 

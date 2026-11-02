@@ -178,6 +178,25 @@ def header_metrics(service: HighScaleService) -> dict[str, Any]:
     except Exception:
         pass
 
+    try:
+        from backend.core.metadata.base import get_con
+
+        con = get_con(service.service_id)
+        cursor_rows = con.execute(
+            "SELECT domain, MAX(updated_at) FROM high_scale_source_cursors WHERE service_id = ? GROUP BY domain",
+            (service.service_id,),
+        ).fetchall()
+        for dom, updated_at in cursor_rows:
+            ts_iso = _normalize_extent_iso(updated_at)
+            if not ts_iso:
+                continue
+            if dom == "request":
+                req_sync = max(req_sync, ts_iso) if req_sync else ts_iso
+            elif str(dom).startswith("rum"):
+                rum_sync = max(rum_sync, ts_iso) if rum_sync else ts_iso
+    except Exception:
+        pass
+
     return {
         "request": {
             "earliest_log_at": request_earliest,

@@ -336,6 +336,7 @@ class Scheduler:
         )
         from backend.cron.jobs.sync import _run_commit, _run_full_sweep, _run_gap_heal, _run_rum_commit, _run_rum_sync
         from backend.cron.jobs.sync import _run_log_discovery_cron as _run_service_cron
+        from backend.high_scale.ingest_controller import get_high_scale_service_registry
 
         configs = svcconfig.list_configs()
         seen_ids: set[str] = set()
@@ -347,6 +348,7 @@ class Scheduler:
             if not src or not is_configured(src):
                 logger.warning("[scheduler] %s: service not fully configured, skipping jobs.", service_id)
                 continue
+            is_clickhouse_hs = get_high_scale_service_registry().resolve(service_id) is not None
             prov = cfg.get("provisioning", {})
             sync_cfg = prov.get("cron_sync", {})
             if not sync_cfg.get("enabled", True):
@@ -359,221 +361,230 @@ class Scheduler:
             else:
                 interval_seconds = max(5, log_period // 2 if log_period >= 60 else log_period)
             commit_interval_mins = max(1, int(sync_cfg.get("commit_interval_mins", 5)))
-            job_id = f"log_discovery_{service_id}"
-            seen_ids.add(job_id)
-            if job_id in self._job_ids:
-                try:
-                    job = self._sched.get_job(job_id)
-                    if job:
-                        job.reschedule("interval", seconds=interval_seconds)
-                        logger.info(
-                            "[scheduler] Rescheduled log_discovery job %s to every %ds.", job_id, interval_seconds
-                        )
-                except Exception as e:
-                    logger.error("[scheduler] Failed to reschedule sync job %s: %s", job_id, e)
+            if is_clickhouse_hs:
+                logger.info(
+                    "⏭️  [scheduler] Skipping legacy DuckLake ingest/compaction crons for ClickHouse high-scale service %s.",
+                    service_id,
+                )
             else:
-                self._add_job(
-                    _run_service_cron,
+                job_id = f"log_discovery_{service_id}"
+                seen_ids.add(job_id)
+                if job_id in self._job_ids:
+                    try:
+                        job = self._sched.get_job(job_id)
+                        if job:
+                            job.reschedule("interval", seconds=interval_seconds)
+                            logger.info(
+                                "[scheduler] Rescheduled log_discovery job %s to every %ds.", job_id, interval_seconds
+                            )
+                    except Exception as e:
+                        logger.error("[scheduler] Failed to reschedule sync job %s: %s", job_id, e)
+                else:
+                    self._add_job(
+                        _run_service_cron,
+                        "interval",
+                        seconds=interval_seconds,
+                        jitter=None if interval_seconds <= 15 else 2,
+                        start_date=None,
+                        args=[service_id],
+                        id=job_id,
+                        max_instances=1,
+                        coalesce=True,
+                        misfire_grace_time=60,
+                    )
+                    self._job_ids[job_id] = job_id
+                    logger.info("🔄 [scheduler] Registered log_discovery job %s (every %ds).", job_id, interval_seconds)
+                commit_job_id = f"commit_{service_id}"
+                self._register_reschedulable_job(
+                    commit_job_id,
+                    _run_commit,
                     "interval",
-                    seconds=interval_seconds,
-                    jitter=None if interval_seconds <= 15 else 2,
-                    start_date=None,
+                    seen_ids,
+                    "📦 [scheduler] Registered commit job %s (every %dm).",
+                    commit_job_id,
+                    commit_interval_mins,
+                    minutes=commit_interval_mins,
+                    jitter=30,
                     args=[service_id],
-                    id=job_id,
-                    max_instances=1,
-                    coalesce=True,
-                    misfire_grace_time=60,
+                    misfire_grace_time=commit_interval_mins * 60,
                 )
-                self._job_ids[job_id] = job_id
-                logger.info("🔄 [scheduler] Registered log_discovery job %s (every %ds).", job_id, interval_seconds)
-            commit_job_id = f"commit_{service_id}"
-            self._register_reschedulable_job(
-                commit_job_id,
-                _run_commit,
-                "interval",
-                seen_ids,
-                "📦 [scheduler] Registered commit job %s (every %dm).",
-                commit_job_id,
-                commit_interval_mins,
-                minutes=commit_interval_mins,
-                jitter=30,
-                args=[service_id],
-                misfire_grace_time=commit_interval_mins * 60,
-            )
-            if svcconfig.is_high_scale_mode(src):
-                from backend.cron.jobs.sync import _run_ledger_sweep
+                if svcconfig.is_high_scale_mode(src):
+                    from backend.cron.jobs.sync import _run_ledger_sweep
 
-                sweep_cfg = prov.get("cron_ledger_sweep", {})
-                if sweep_cfg.get("enabled", True):
-                    sweep_interval_mins = max(1, int(sweep_cfg.get("interval_minutes", 15)))
-                    sweep_job_id = f"ledger_sweep_{service_id}"
+                    sweep_cfg = prov.get("cron_ledger_sweep", {})
+                    if sweep_cfg.get("enabled", True):
+                        sweep_interval_mins = max(1, int(sweep_cfg.get("interval_minutes", 15)))
+                        sweep_job_id = f"ledger_sweep_{service_id}"
+                        self._register_reschedulable_job(
+                            sweep_job_id,
+                            _run_ledger_sweep,
+                            "interval",
+                            seen_ids,
+                            "🧹 [scheduler] Registered ledger_sweep job %s (every %dm).",
+                            sweep_job_id,
+                            sweep_interval_mins,
+                            minutes=sweep_interval_mins,
+                            args=[service_id],
+                            misfire_grace_time=300,
+                        )
+                rum_cfg = cfg.get("rum")
+                rum_cfg = rum_cfg if isinstance(rum_cfg, dict) else {}
+                rum_enabled = svcconfig.is_rum_enabled(cfg)
+                if rum_enabled and svcconfig.is_high_scale_mode(src):
+                    from backend.cron.jobs.sync import _run_rum_discovery_cron, _run_rum_ledger_sweep
+
+                    rum_disc_interval_secs = _resolve_rum_sync_interval(rum_cfg, cfg, interval_seconds)
+                    rum_disc_job_id = f"rum_discovery_{service_id}"
                     self._register_reschedulable_job(
-                        sweep_job_id,
-                        _run_ledger_sweep,
+                        rum_disc_job_id,
+                        _run_rum_discovery_cron,
                         "interval",
                         seen_ids,
-                        "🧹 [scheduler] Registered ledger_sweep job %s (every %dm).",
-                        sweep_job_id,
-                        sweep_interval_mins,
-                        minutes=sweep_interval_mins,
+                        "[scheduler] Registered RUM discovery job %s (every %ds).",
+                        rum_disc_job_id,
+                        rum_disc_interval_secs,
+                        seconds=rum_disc_interval_secs,
                         args=[service_id],
-                        misfire_grace_time=300,
+                        misfire_grace_time=60,
                     )
-            rum_cfg = cfg.get("rum")
-            rum_cfg = rum_cfg if isinstance(rum_cfg, dict) else {}
-            rum_enabled = svcconfig.is_rum_enabled(cfg)
-            if rum_enabled and svcconfig.is_high_scale_mode(src):
-                from backend.cron.jobs.sync import _run_rum_discovery_cron, _run_rum_ledger_sweep
-
-                rum_disc_interval_secs = _resolve_rum_sync_interval(rum_cfg, cfg, interval_seconds)
-                rum_disc_job_id = f"rum_discovery_{service_id}"
-                self._register_reschedulable_job(
-                    rum_disc_job_id,
-                    _run_rum_discovery_cron,
-                    "interval",
-                    seen_ids,
-                    "[scheduler] Registered RUM discovery job %s (every %ds).",
-                    rum_disc_job_id,
-                    rum_disc_interval_secs,
-                    seconds=rum_disc_interval_secs,
-                    args=[service_id],
-                    misfire_grace_time=60,
-                )
-                rum_sweep_cfg = prov.get("cron_ledger_rum_sweep") or prov.get("cron_rum_ledger_sweep") or {}
-                if rum_sweep_cfg.get("enabled", True):
-                    rum_sweep_interval_mins = max(1, int(rum_sweep_cfg.get("interval_minutes", 15)))
-                    rum_sweep_job_id = f"ledger_rum_sweep_{service_id}"
+                    rum_sweep_cfg = prov.get("cron_ledger_rum_sweep") or prov.get("cron_rum_ledger_sweep") or {}
+                    if rum_sweep_cfg.get("enabled", True):
+                        rum_sweep_interval_mins = max(1, int(rum_sweep_cfg.get("interval_minutes", 15)))
+                        rum_sweep_job_id = f"ledger_rum_sweep_{service_id}"
+                        self._register_reschedulable_job(
+                            rum_sweep_job_id,
+                            _run_rum_ledger_sweep,
+                            "interval",
+                            seen_ids,
+                            "🧹 [scheduler] Registered ledger_rum_sweep job %s (every %dm).",
+                            rum_sweep_job_id,
+                            rum_sweep_interval_mins,
+                            minutes=rum_sweep_interval_mins,
+                            args=[service_id],
+                            misfire_grace_time=300,
+                        )
+                elif rum_enabled:
+                    rum_sync_interval_secs = _resolve_rum_sync_interval(rum_cfg, cfg, interval_seconds)
+                    rum_sync_job_id = f"rum_sync_{service_id}"
                     self._register_reschedulable_job(
-                        rum_sweep_job_id,
-                        _run_rum_ledger_sweep,
+                        rum_sync_job_id,
+                        _run_rum_sync,
                         "interval",
                         seen_ids,
-                        "🧹 [scheduler] Registered ledger_rum_sweep job %s (every %dm).",
-                        rum_sweep_job_id,
-                        rum_sweep_interval_mins,
-                        minutes=rum_sweep_interval_mins,
+                        "[scheduler] Registered RUM sync job %s (every %ds).",
+                        rum_sync_job_id,
+                        rum_sync_interval_secs,
+                        seconds=rum_sync_interval_secs,
                         args=[service_id],
-                        misfire_grace_time=300,
+                        misfire_grace_time=60,
                     )
-            elif rum_enabled:
-                rum_sync_interval_secs = _resolve_rum_sync_interval(rum_cfg, cfg, interval_seconds)
-                rum_sync_job_id = f"rum_sync_{service_id}"
-                self._register_reschedulable_job(
-                    rum_sync_job_id,
-                    _run_rum_sync,
-                    "interval",
-                    seen_ids,
-                    "[scheduler] Registered RUM sync job %s (every %ds).",
-                    rum_sync_job_id,
-                    rum_sync_interval_secs,
-                    seconds=rum_sync_interval_secs,
-                    args=[service_id],
-                    misfire_grace_time=60,
-                )
-                rum_commit_interval_mins = max(1, int(rum_cfg.get("commit_interval_mins", 1)))
-                rum_commit_job_id = f"rum_commit_{service_id}"
-                self._register_reschedulable_job(
-                    rum_commit_job_id,
-                    _run_rum_commit,
-                    "interval",
-                    seen_ids,
-                    "[scheduler] Registered RUM commit job %s (every %dm).",
-                    rum_commit_job_id,
-                    rum_commit_interval_mins,
-                    minutes=rum_commit_interval_mins,
-                    args=[service_id],
-                    misfire_grace_time=60,
-                )
+                    rum_commit_interval_mins = max(1, int(rum_cfg.get("commit_interval_mins", 1)))
+                    rum_commit_job_id = f"rum_commit_{service_id}"
+                    self._register_reschedulable_job(
+                        rum_commit_job_id,
+                        _run_rum_commit,
+                        "interval",
+                        seen_ids,
+                        "[scheduler] Registered RUM commit job %s (every %dm).",
+                        rum_commit_job_id,
+                        rum_commit_interval_mins,
+                        minutes=rum_commit_interval_mins,
+                        args=[service_id],
+                        misfire_grace_time=60,
+                    )
             alerts_cfg = prov.get("cron_alerts", {})
             alerts_enabled = alerts_cfg.get("enabled", True)
             alerts_seconds = int(alerts_cfg.get("interval_seconds") or log_period)
             self._register_alerts_evaluation_job(service_id, alerts_seconds, seen_ids, enabled=alerts_enabled)
-            full_sweep_cfg = prov.get("cron_full_sweep", {})
-            if full_sweep_cfg.get("enabled", True):
-                full_job_id = f"full_sync_{service_id}"
-                cron_hours = str(full_sweep_cfg.get("cron_hours", "3,9,15,21"))
-                cron_minute = int(full_sweep_cfg.get("cron_minute", 30))
-                self._register_reschedulable_job(
-                    full_job_id,
-                    _run_full_sweep,
-                    "cron",
-                    seen_ids,
-                    "🔍 [scheduler] Registered full-sweep job %s (hours: %s at :%02d UTC).",
-                    full_job_id,
-                    cron_hours,
-                    cron_minute,
-                    hour=cron_hours,
-                    minute=cron_minute,
-                    args=[service_id],
-                    misfire_grace_time=3600,
-                )
-            heal_cfg = prov.get("cron_gap_heal", {})
-            has_logging_svc = bool(cfg.get("logging_service_id") or cfg.get("service_id"))
-            if heal_cfg.get("enabled", True) and has_logging_svc:
-                heal_job_id = f"gap_heal_{service_id}"
-                interval_mins = int(heal_cfg.get("interval_minutes", 30))
-                self._register_reschedulable_job(
-                    heal_job_id,
-                    _run_gap_heal,
-                    "interval",
-                    seen_ids,
-                    "🩹 [scheduler] Registered gap-heal job %s (every %d min).",
-                    heal_job_id,
-                    interval_mins,
-                    minutes=interval_mins,
-                    args=[service_id],
-                    misfire_grace_time=600,
-                )
-            compact_cfg = prov.get("cron_compact", {})
-            if compact_cfg.get("enabled", True):
-                opt_job_id = f"optimize_{service_id}"
-                self._register_once_job(
-                    opt_job_id,
-                    _run_optimize,
-                    "cron",
-                    seen_ids,
-                    "⚙️  [scheduler] Registered optimize job %s (daily 04:00 UTC). Local compact handles ongoing dashboard perf — this is just FOS-side housekeeping.",
-                    opt_job_id,
-                    hour=4,
-                    minute=0,
-                    args=[service_id],
-                    misfire_grace_time=3600,
-                )
-            self._sync_local_compaction_jobs(service_id, cfg, seen_ids=seen_ids, dev_local=False)
-            self._register_insights_prewarmer_job(service_id, seen_ids, prov)
-            if compact_cfg.get("enabled", True) and not dev_mode_no_crons():
-                exp_job_id = f"expire_{service_id}"
-                seen_ids.add(exp_job_id)
-                expire_interval_mins = max(5, int(sync_cfg.get("expire_interval_mins", 60)))
-                if exp_job_id not in self._job_ids:
-                    self._add_job(
-                        _run_expire_snapshots,
-                        "interval",
-                        minutes=expire_interval_mins,
-                        jitter=60,
+            if not is_clickhouse_hs:
+                full_sweep_cfg = prov.get("cron_full_sweep", {})
+                if full_sweep_cfg.get("enabled", True):
+                    full_job_id = f"full_sync_{service_id}"
+                    cron_hours = str(full_sweep_cfg.get("cron_hours", "3,9,15,21"))
+                    cron_minute = int(full_sweep_cfg.get("cron_minute", 30))
+                    self._register_reschedulable_job(
+                        full_job_id,
+                        _run_full_sweep,
+                        "cron",
+                        seen_ids,
+                        "🔍 [scheduler] Registered full-sweep job %s (hours: %s at :%02d UTC).",
+                        full_job_id,
+                        cron_hours,
+                        cron_minute,
+                        hour=cron_hours,
+                        minute=cron_minute,
                         args=[service_id],
-                        id=exp_job_id,
-                        max_instances=1,
-                        coalesce=True,
                         misfire_grace_time=3600,
                     )
-                    self._job_ids[exp_job_id] = exp_job_id
-                    logger.info(
-                        "🗑️  [scheduler] Registered expire-snapshots job %s (every %dm).",
-                        exp_job_id,
-                        expire_interval_mins,
+                heal_cfg = prov.get("cron_gap_heal", {})
+                has_logging_svc = bool(cfg.get("logging_service_id") or cfg.get("service_id"))
+                if heal_cfg.get("enabled", True) and has_logging_svc:
+                    heal_job_id = f"gap_heal_{service_id}"
+                    interval_mins = int(heal_cfg.get("interval_minutes", 30))
+                    self._register_reschedulable_job(
+                        heal_job_id,
+                        _run_gap_heal,
+                        "interval",
+                        seen_ids,
+                        "🩹 [scheduler] Registered gap-heal job %s (every %d min).",
+                        heal_job_id,
+                        interval_mins,
+                        minutes=interval_mins,
+                        args=[service_id],
+                        misfire_grace_time=600,
                     )
-                else:
-                    job = self._sched.get_job(exp_job_id)
-                    if job is not None:
-                        existing = getattr(getattr(job, "trigger", None), "interval", None)
-                        if existing is None or int(existing.total_seconds()) != expire_interval_mins * 60:
-                            job.reschedule("interval", minutes=expire_interval_mins)
-                            logger.info(
-                                "🗑️  [scheduler] Rescheduled expire-snapshots job %s to every %dm.",
-                                exp_job_id,
-                                expire_interval_mins,
-                            )
+                compact_cfg = prov.get("cron_compact", {})
+                if compact_cfg.get("enabled", True):
+                    opt_job_id = f"optimize_{service_id}"
+                    self._register_once_job(
+                        opt_job_id,
+                        _run_optimize,
+                        "cron",
+                        seen_ids,
+                        "⚙️  [scheduler] Registered optimize job %s (daily 04:00 UTC). Local compact handles ongoing dashboard perf — this is just FOS-side housekeeping.",
+                        opt_job_id,
+                        hour=4,
+                        minute=0,
+                        args=[service_id],
+                        misfire_grace_time=3600,
+                    )
+                self._sync_local_compaction_jobs(service_id, cfg, seen_ids=seen_ids, dev_local=False)
+            self._register_insights_prewarmer_job(service_id, seen_ids, prov)
+            if not is_clickhouse_hs:
+                compact_cfg = prov.get("cron_compact", {})
+                if compact_cfg.get("enabled", True) and not dev_mode_no_crons():
+                    exp_job_id = f"expire_{service_id}"
+                    seen_ids.add(exp_job_id)
+                    expire_interval_mins = max(5, int(sync_cfg.get("expire_interval_mins", 60)))
+                    if exp_job_id not in self._job_ids:
+                        self._add_job(
+                            _run_expire_snapshots,
+                            "interval",
+                            minutes=expire_interval_mins,
+                            jitter=60,
+                            args=[service_id],
+                            id=exp_job_id,
+                            max_instances=1,
+                            coalesce=True,
+                            misfire_grace_time=3600,
+                        )
+                        self._job_ids[exp_job_id] = exp_job_id
+                        logger.info(
+                            "🗑️  [scheduler] Registered expire-snapshots job %s (every %dm).",
+                            exp_job_id,
+                            expire_interval_mins,
+                        )
+                    else:
+                        job = self._sched.get_job(exp_job_id)
+                        if job is not None:
+                            existing = getattr(getattr(job, "trigger", None), "interval", None)
+                            if existing is None or int(existing.total_seconds()) != expire_interval_mins * 60:
+                                job.reschedule("interval", minutes=expire_interval_mins)
+                                logger.info(
+                                    "🗑️  [scheduler] Rescheduled expire-snapshots job %s to every %dm.",
+                                    exp_job_id,
+                                    expire_interval_mins,
+                                )
             if svcconfig.get_ngwaf_workspace_id(service_id):
                 ngwaf_interval_mins = max(1, int(prov.get("cron_ngwaf", {}).get("interval_mins", 5)))
                 ngwaf_job_id = f"ngwaf_sync_{service_id}"

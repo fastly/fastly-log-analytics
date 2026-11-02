@@ -408,6 +408,7 @@ def run_target_fos(
             b_t0 = time.monotonic()
             target_rps, mode_str = _step_pacing(b_t0 - t0, rate_rps, burst_rps, burst_duration, burst_interval)
             now_utc = datetime.now(UTC)
+            end_ms = max(end_ms, int(now_utc.timestamp() * 1000))
             prefix = (src.get("s3_prefix") or src.get("fos_prefix") or "").strip("/")
             min_prefix = minute_list_prefix(now_utc)
             base_dir = f"{prefix}/{min_prefix}" if prefix else min_prefix

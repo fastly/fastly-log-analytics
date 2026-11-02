@@ -649,6 +649,10 @@ def finalize_committed_raw(service_id: str, batch_size: int = 10_000) -> dict:
     from backend import config as svcconfig
     from backend.core.duckdb import get_source_for_service
     from backend.core.metadata.base import get_con
+    from backend.high_scale.ingest_controller import get_high_scale_service_registry
+
+    if get_high_scale_service_registry().resolve(service_id) is not None:
+        return {"deleted": 0, "eligible": 0, "delete_after": False}
 
     cfg = svcconfig.load_config(service_id) or {}
     delete_after = svcconfig.resolve_raw_delete_after(cfg)
