@@ -45,6 +45,49 @@ COUNTRY_GEO_MAP = {
 }
 
 POPS = ["IAD", "LHR", "NRT", "SYD", "SFO", "FRA", "CDG", "SIN", "ORD", "DFW", "AMS", "HKG", "JFK", "LAX", "MIA", "SEA", "DEN", "ATL", "BOS", "YYZ"]
+POP_WAVE_POPS = [
+    "IAD", "LHR", "NRT", "SYD", "SFO", "FRA", "CDG", "SIN", "ORD", "DFW",
+    "AMS", "HKG", "JFK", "LAX", "MIA", "SEA", "DEN", "ATL", "BOS", "YYZ",
+    "MAD", "MXP", "ARN", "ICN", "GRU", "BOM", "JNB", "ZRH", "WAW", "DUB",
+    "SJC", "EWR",
+]
+_IP_POOL_SIZE = 254 * 254
+_VECTOR_POOLS: dict[str, Any] = {}
+
+
+def build_pop_wave_weights(pop_count: int) -> tuple[list[str], list[float]]:
+    """Return ``(pops, weights)`` with Zipf-like edge traffic distribution across ``pop_count`` POPs."""
+    if pop_count <= 0:
+        raise ValueError(f"pop_count must be > 0 (got {pop_count})")
+    pops = [
+        POP_WAVE_POPS[i] if i < len(POP_WAVE_POPS) else f"P{i:02d}"
+        for i in range(pop_count)
+    ]
+    raw_weights = [1.0 / ((i + 1) ** 0.75) for i in range(pop_count)]
+    total = sum(raw_weights)
+    return pops, [w / total for w in raw_weights]
+
+
+def _ensure_vector_pools() -> dict[str, Any]:
+    if not _VECTOR_POOLS:
+        import numpy as np
+
+        _VECTOR_POOLS["ip"] = np.array(
+            [f"198.51.{(i // 254) & 0xFF}.{i % 254 + 1}" for i in range(_IP_POOL_SIZE)],
+            dtype=object,
+        )
+        _VECTOR_POOLS["ja3"] = np.array([f"ja3-{i:04x}" for i in range(250)], dtype=object)
+        _VECTOR_POOLS["ja4"] = np.array([f"ja4-{i:04x}" for i in range(250)], dtype=object)
+        _VECTOR_POOLS["sess"] = np.array([f"sess_{i:08x}" for i in range(500)], dtype=object)
+        _VECTOR_POOLS["countries"] = np.array(COUNTRIES, dtype=object)
+        _VECTOR_POOLS["cities"] = np.array([COUNTRY_GEO_MAP[c]["city"] for c in COUNTRIES], dtype=object)
+        _VECTOR_POOLS["metros"] = np.array([COUNTRY_GEO_MAP[c]["metro"] for c in COUNTRIES], dtype=object)
+        _VECTOR_POOLS["lats"] = np.array([COUNTRY_GEO_MAP[c]["lat"] for c in COUNTRIES], dtype=np.float64)
+        _VECTOR_POOLS["lons"] = np.array([COUNTRY_GEO_MAP[c]["lon"] for c in COUNTRIES], dtype=np.float64)
+        _VECTOR_POOLS["regions"] = np.array([COUNTRY_GEO_MAP[c]["region"] for c in COUNTRIES], dtype=object)
+        _VECTOR_POOLS["urls"] = np.array(URL_PATHS, dtype=object)
+        _VECTOR_POOLS["uas"] = np.array(USER_AGENTS, dtype=object)
+    return _VECTOR_POOLS
 HOSTS = ["www.example.com", "api.example.com", "assets.example.com"]
 HOST_WEIGHTS = [0.75, 0.20, 0.05]
 METHODS = ["GET", "POST", "HEAD", "OPTIONS", "PUT", "DELETE"]
@@ -81,10 +124,19 @@ URL_PATHS = [
 ]
 
 
-def generate_columns(n: int, start_ms: int, end_ms: int, scenario: str, rng: np.random.Generator) -> dict[str, Any]:
+def generate_columns(
+    n: int,
+    start_ms: int,
+    end_ms: int,
+    scenario: str,
+    rng: np.random.Generator,
+    *,
+    pop_override: str | None = None,
+) -> dict[str, Any]:
     """Generate realistic columnar data for n log events."""
     import numpy as np
 
+    pools = _ensure_vector_pools()
     span_ms = max(end_ms - start_ms, 1)
     u = rng.uniform(0, 1, size=n)
     if scenario == "diurnal":
@@ -106,29 +158,22 @@ def generate_columns(n: int, start_ms: int, end_ms: int, scenario: str, rng: np.
     host = rng.choice(HOSTS, size=n, p=HOST_WEIGHTS)
     method = rng.choice(METHODS, size=n, p=METHOD_WEIGHTS)
     proto = rng.choice(PROTOCOLS, size=n, p=PROTO_WEIGHTS)
-    country = rng.choice(COUNTRIES, size=n, p=COUNTRY_WEIGHTS)
-    pop = rng.choice(POPS, size=n)
+    country_idx = rng.choice(len(COUNTRIES), size=n, p=COUNTRY_WEIGHTS)
+    country = pools["countries"][country_idx]
+    pop = np.full(n, pop_override, dtype=object) if pop_override else rng.choice(POPS, size=n)
 
-    city_list, metro_list, lat_list, lon_list, region_list = [], [], [], [], []
-    for c in country:
-        geo = COUNTRY_GEO_MAP.get(c, {"city": "Unknown", "metro": "000", "lat": 0.0, "lon": 0.0, "region": "XX"})
-        j_lat, j_lon = rng.uniform(-0.15, 0.15), rng.uniform(-0.15, 0.15)
-        city_list.append(geo["city"])
-        metro_list.append(geo["metro"])
-        lat_list.append(geo["lat"] + j_lat)
-        lon_list.append(geo["lon"] + j_lon)
-        region_list.append(geo["region"])
-
-    city, metro = np.array(city_list, dtype=object), np.array(metro_list, dtype=object)
-    lat, lon = np.array(lat_list, dtype=np.float64), np.array(lon_list, dtype=np.float64)
-    region = np.array(region_list, dtype=object)
+    city = pools["cities"][country_idx]
+    metro = pools["metros"][country_idx]
+    lat = pools["lats"][country_idx] + rng.uniform(-0.15, 0.15, size=n)
+    lon = pools["lons"][country_idx] + rng.uniform(-0.15, 0.15, size=n)
+    region = pools["regions"][country_idx]
 
     url_idx = rng.integers(0, len(URL_PATHS), size=n)
-    url = np.array([URL_PATHS[i] for i in url_idx], dtype=object)
-    ip_int = rng.integers(1, 254 * 254 * 254, size=n)
-    ip = np.array([f"198.51.{(i // 254) & 0xFF}.{i % 254 + 1}" for i in ip_int], dtype=object)
+    url = pools["urls"][url_idx]
+    ip_int = rng.integers(0, _IP_POOL_SIZE, size=n)
+    ip = pools["ip"][ip_int]
     ua_idx = rng.integers(0, len(USER_AGENTS), size=n)
-    ua = np.array([USER_AGENTS[i] for i in ua_idx], dtype=object)
+    ua = pools["uas"][ua_idx]
     asn = rng.integers(1000, 65000, size=n, dtype=np.int32)
 
     if scenario == "origin-5xx-outage":
@@ -200,9 +245,9 @@ def generate_columns(n: int, start_ms: int, end_ms: int, scenario: str, rng: np.
     resp_bytes = np.clip(rng.lognormal(mean=np.log(8_000), sigma=1.5, size=n).astype(np.int64), 100, 25_000_000)
     req_bytes = np.clip(rng.lognormal(mean=np.log(1_000), sigma=0.8, size=n).astype(np.int64), 40, 500_000)
     ttl = rng.choice([0, 300, 3600, 86400], size=n, p=[0.25, 0.35, 0.30, 0.10]).astype(np.int32)
-    ja3 = np.array([f"ja3-{i % 250:04x}" for i in ip_int], dtype=object)
-    ja4 = np.array([f"ja4-{i % 250:04x}" for i in ip_int], dtype=object)
-    cookie_session = np.array([f"sess_{i % 500:08x}" for i in ip_int], dtype=object)
+    ja3 = pools["ja3"][ip_int % 250]
+    ja4 = pools["ja4"][ip_int % 250]
+    cookie_session = pools["sess"][ip_int % 500]
 
     bot_cat = rng.choice(BOT_CATEGORIES, size=n)
     is_bot = rng.random(n) < (0.80 if scenario == "bot-scrape" else 0.12)
@@ -219,7 +264,7 @@ def generate_columns(n: int, start_ms: int, end_ms: int, scenario: str, rng: np.
         "city": city, "metro": metro, "lat": lat, "lon": lon, "region": region,
         "tcp_rtt": tcp_rtt, "rtt_min": rtt_min, "rtt_var": rtt_var, "ploss": ploss,
         "ja3": ja3, "ja4": ja4, "cookie_session": cookie_session, "bot_category": bot_category,
-        "waf_signal": waf_signal, "_source_file": np.array([f"synthetic://gen/{int(time.time())}"] * n, dtype=object),
+        "waf_signal": waf_signal, "_source_file": np.full(n, f"synthetic://gen/{int(time.time())}", dtype=object),
     }
 
 

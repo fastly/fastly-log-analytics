@@ -18,16 +18,23 @@ import argparse
 import gzip
 import io
 import json
+import math
 import os
+import random
 import sys
 import time
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, ThreadPoolExecutor, wait
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pyarrow.parquet as pq
+
+try:
+    import orjson as _orjson
+except ImportError:  # pragma: no cover
+    _orjson = None  # type: ignore[assignment]
 
 for p in [Path.cwd(), Path("/app"), Path(__file__).resolve().parent.parent.parent]:
     if str(p) not in sys.path:
@@ -39,8 +46,16 @@ from backend.core.storage import (  # noqa: E402
     commit_buffer,
     get_arrow_schema,
 )
-from scripts.lib.log_factory import cols_to_arrow_table as _cols_to_arrow_table  # noqa: E402
-from scripts.lib.log_factory import generate_columns as _generate_batch_data  # noqa: E402
+from scripts.lib.log_factory import (  # noqa: E402
+    build_pop_wave_weights,
+    generate_rum_records,
+)
+from scripts.lib.log_factory import (
+    cols_to_arrow_table as _cols_to_arrow_table,
+)
+from scripts.lib.log_factory import (
+    generate_columns as _generate_batch_data,
+)
 
 # fmt: off
 
@@ -69,13 +84,126 @@ def _sleep_for_rate(n: int, target_rps: int, b_t0: float) -> None:
             time.sleep(target_batch_sec - b_dur)
 
 
-def _validate_generation_args(*, rows: int, batch_size: int, file_rows: int | None = None) -> None:
+def _validate_generation_args(
+    *,
+    rows: int,
+    batch_size: int,
+    file_rows: int | None = None,
+    compression: str = "zstd",
+    pop_count: int = 20,
+    log_period: int = 10,
+    gen_workers: int = 1,
+    upload_workers: int = 8,
+    rum_ratio: float = 0.0,
+) -> None:
     if rows < 0:
         raise ValueError(f"rows must be >= 0 (got {rows})")
     if batch_size <= 0:
         raise ValueError(f"batch_size must be > 0 (got {batch_size})")
     if file_rows is not None and file_rows <= 0:
         raise ValueError(f"file_rows must be > 0 (got {file_rows})")
+    if compression not in {"zstd", "gzip"}:
+        raise ValueError(f"compression must be 'zstd' or 'gzip' (got {compression!r})")
+    if pop_count <= 0:
+        raise ValueError(f"pop_count must be > 0 (got {pop_count})")
+    if log_period <= 0:
+        raise ValueError(f"log_period must be > 0 (got {log_period})")
+    if gen_workers <= 0:
+        raise ValueError(f"gen_workers must be > 0 (got {gen_workers})")
+    if upload_workers <= 0:
+        raise ValueError(f"upload_workers must be > 0 (got {upload_workers})")
+    if not (0.0 <= rum_ratio <= 1.0):
+        raise ValueError(f"rum_ratio must be between 0.0 and 1.0 (got {rum_ratio})")
+
+
+def _compress_ndjson(raw_bytes: bytes, compression: str) -> tuple[bytes, str, str]:
+    """Compress raw NDJSON bytes and return ``(compressed_bytes, ext, content_type)``."""
+    if compression == "zstd":
+        import zstandard as zstd
+
+        cctx = zstd.ZstdCompressor(level=1)
+        return cctx.compress(raw_bytes), "zst", "application/zstd"
+    if compression == "gzip":
+        gz_buf = io.BytesIO()
+        with gzip.GzipFile(fileobj=gz_buf, mode="wb", compresslevel=1) as gz:
+            gz.write(raw_bytes)
+        return gz_buf.getvalue(), "gz", "application/gzip"
+    raise ValueError(f"Unsupported compression {compression!r}")
+
+
+def _serialize_record_bytes(record: dict[str, Any]) -> bytes:
+    if _orjson is not None:
+        return _orjson.dumps(record)
+    return json.dumps(record, default=str, separators=(",", ":")).encode("utf-8")
+
+
+def _build_fos_chunk_worker(
+    n: int,
+    start_ms: int,
+    end_ms: int,
+    scenario: str,
+    seed: int,
+    compression: str = "zstd",
+    pop_override: str | None = None,
+) -> tuple[bytes, int, str, str]:
+    """Generate and compress a single FOS request-log NDJSON chunk (picklable for ProcessPoolExecutor)."""
+    rng = np.random.default_rng(seed)
+    cols = _generate_batch_data(n, start_ms, end_ms, scenario, rng, pop_override=pop_override)
+    ts_iso = np.datetime_as_string(
+        (cols["timestamp"] // 1_000_000).astype("datetime64[s]"),
+        unit="s",
+        timezone="UTC",
+    ).tolist()
+    keys = [k for k in cols if k not in ("_source_file", "timestamp")]
+    cols_py = {k: cols[k].tolist() if hasattr(cols[k], "tolist") else cols[k] for k in keys}
+    line_buffers = []
+    for i in range(n):
+        rec = {k: cols_py[k][i] for k in keys}
+        rec["timestamp"] = ts_iso[i]
+        line_buffers.append(_serialize_record_bytes(rec))
+    raw_bytes = b"\n".join(line_buffers)
+    compressed, ext, content_type = _compress_ndjson(raw_bytes, compression)
+    return compressed, n, ext, content_type
+
+
+def _build_fos_rum_chunk_worker(
+    service_id: str,
+    n: int,
+    now_iso: str,
+    seed: int,
+    compression: str = "zstd",
+) -> tuple[bytes, int, str, str]:
+    """Generate and compress a single FOS RUM-beacon NDJSON chunk."""
+    now_dt = datetime.fromisoformat(now_iso)
+    py_rng = random.Random(seed)
+    records = generate_rum_records(service_id, n, now_dt, rng=py_rng)
+    raw_bytes = b"\n".join(_serialize_record_bytes(rec) for rec in records)
+    compressed, ext, content_type = _compress_ndjson(raw_bytes, compression)
+    return compressed, n, ext, content_type
+
+
+def _allocate_pop_wave_chunks(
+    total_rows: int,
+    pop_count: int,
+    max_chunk_rows: int,
+) -> list[tuple[str, int]]:
+    """Distribute ``total_rows`` across ``pop_count`` POPs with Zipf weights, splitting chunks above ``max_chunk_rows``."""
+    pops, weights = build_pop_wave_weights(pop_count)
+    exact = [total_rows * w for w in weights]
+    counts = [int(math.floor(x)) for x in exact]
+    remainder = total_rows - sum(counts)
+    if remainder > 0:
+        order = sorted(range(pop_count), key=lambda idx: exact[idx] - counts[idx], reverse=True)
+        for idx in order[:remainder]:
+            counts[idx] += 1
+    chunks: list[tuple[str, int]] = []
+    for pop, pop_rows in zip(pops, counts, strict=True):
+        rem = pop_rows
+        while rem > 0:
+            take = min(max_chunk_rows, rem)
+            chunks.append((pop, take))
+            rem -= take
+    return chunks
 
 
 def run_target_local(
@@ -184,102 +312,178 @@ def run_target_fos(
     burst_duration: int = 30,
     burst_interval: int = 120,
     upload_workers: int = 8,
+    compression: str = "zstd",
+    gen_workers: int = 1,
+    simulate_pops: bool = False,
+    pop_count: int = 20,
+    log_period: int = 10,
+    rum_ratio: float = 0.0,
 ) -> int:
-    """Generates gzipped NDJSON and uploads directly to FOS object storage with rate pacing & background uploads."""
-    _validate_generation_args(rows=rows, batch_size=batch_size)
-    from backend.provision.cli import minute_list_prefix
+    """Generates compressed NDJSON (.log.zst or .log.gz) and uploads to FOS with optional POP-wave simulation."""
+    _validate_generation_args(
+        rows=rows,
+        batch_size=batch_size,
+        compression=compression,
+        pop_count=pop_count,
+        log_period=log_period,
+        gen_workers=gen_workers,
+        upload_workers=upload_workers,
+        rum_ratio=rum_ratio,
+    )
+    from backend.provision.cli import minute_list_prefix, rum_minute_list_prefix
 
     bucket = src.get("s3_bucket") or src.get("fos_bucket")
     if not bucket:
         print("ERROR: Service config does not specify an s3_bucket / fos_bucket", file=sys.stderr)
         return 1
 
-    import boto3
-    from botocore.config import Config
+    s3_client: Any = None
+    if not dry_run:
+        import boto3
+        from botocore.config import Config
 
-    endpoint = src.get("s3_endpoint") or src.get("fos_endpoint")
-    if endpoint and not endpoint.startswith(("http://", "https://")):
-        endpoint = f"https://{endpoint}"
-    key_id = src.get("s3_access_key") or src.get("fos_access_key_id")
-    secret_key = src.get("s3_secret_key") or src.get("fos_secret_access_key")
+        endpoint = src.get("s3_endpoint") or src.get("fos_endpoint")
+        if endpoint and not endpoint.startswith(("http://", "https://")):
+            endpoint = f"https://{endpoint}"
+        key_id = src.get("s3_access_key") or src.get("fos_access_key_id")
+        secret_key = src.get("s3_secret_key") or src.get("fos_secret_access_key")
 
-    s3_client = boto3.client(
-        "s3",
-        endpoint_url=endpoint,
-        aws_access_key_id=key_id,
-        aws_secret_access_key=secret_key,
-        config=Config(
-            signature_version="s3v4",
-            max_pool_connections=max(25, upload_workers * 2),
-            # botocore >=1.36 streaming trailer checksums are rejected by FOS
-            request_checksum_calculation="when_required",
-        ),
-    )
+        s3_client = boto3.client(
+            "s3",
+            endpoint_url=endpoint,
+            aws_access_key_id=key_id,
+            aws_secret_access_key=secret_key,
+            config=Config(
+                signature_version="s3v4",
+                max_pool_connections=max(25, upload_workers * 2),
+                # botocore >=1.36 streaming trailer checksums are rejected by FOS
+                request_checksum_calculation="when_required",
+            ),
+        )
 
+    service_id = str(src.get("service_id") or "default_service")
     start_ms, end_ms = int(start_dt.timestamp() * 1000), int(end_dt.timestamp() * 1000)
-    rng = np.random.default_rng(seed)
 
     print(
         f"Generating and uploading {rows:,} raw log records [{scenario}] to FOS\n"
         f"  Bucket: {bucket}\n"
-        f"  Service: {src.get('service_id')}\n"
+        f"  Service: {service_id}\n"
         f"  Window: {start_dt.isoformat()} -> {end_dt.isoformat()}\n"
-        f"  Upload Workers: {upload_workers}\n"
+        f"  Compression: {compression} | Gen Workers: {gen_workers} | Upload Workers: {upload_workers}\n"
+        f"  POP Simulation: {'enabled' if simulate_pops else 'disabled'} "
+        f"(pops={pop_count}, period={log_period}s, rum_ratio={rum_ratio})\n"
         f"  Pacing: {_pacing_desc(rate_rps, burst_rps, burst_duration, burst_interval)}"
     )
 
-    rows_remaining, file_idx, total_bytes_uploaded, total_rows_emitted = rows, 0, 0, 0
+    rows_remaining, file_idx, wave_idx = rows, 0, 0
+    total_bytes_uploaded, total_rows_emitted, total_rum_rows_emitted = 0, 0, 0
     t0 = time.monotonic()
     upload_pool = ThreadPoolExecutor(max_workers=upload_workers) if not dry_run else None
+    gen_pool = ProcessPoolExecutor(max_workers=gen_workers) if gen_workers > 1 else None
     pending_uploads: set[Any] = set()
 
-    def _upload_task(bucket_name: str, key_name: str, payload: bytes) -> int:
-        s3_client.put_object(Bucket=bucket_name, Key=key_name, Body=payload, ContentType="application/gzip")
+    def _upload_task(bucket_name: str, key_name: str, payload: bytes, content_type: str) -> int:
+        assert s3_client is not None
+        s3_client.put_object(Bucket=bucket_name, Key=key_name, Body=payload, ContentType=content_type)
         return len(payload)
+
+    def _enqueue_upload(s3_key: str, payload: bytes, content_type: str, row_count: int, mode_str: str) -> None:
+        nonlocal pending_uploads, total_bytes_uploaded
+        if dry_run:
+            total_bytes_uploaded += len(payload)
+            print(
+                f"  [dry-run] [{mode_str}] {row_count:,} rows -> s3://{bucket}/{s3_key} ({len(payload):,} bytes)"
+            )
+            return
+        assert upload_pool is not None
+        if len(pending_uploads) >= upload_workers * 3:
+            done, pending_uploads = wait(pending_uploads, return_when=FIRST_COMPLETED)
+            for fut in done:
+                total_bytes_uploaded += fut.result()
+        pending_uploads.add(upload_pool.submit(_upload_task, bucket, s3_key, payload, content_type))
 
     try:
         while rows_remaining > 0:
             b_t0 = time.monotonic()
             target_rps, mode_str = _step_pacing(b_t0 - t0, rate_rps, burst_rps, burst_duration, burst_interval)
-            n = min(batch_size, rows_remaining)
-            cols = _generate_batch_data(n, start_ms, end_ms, scenario, rng)
-
-            cols_py = {k: cols[k].tolist() if hasattr(cols[k], "tolist") else cols[k] for k in cols}
-            keys = [k for k in cols_py if k != "_source_file"]
-            ts_list = cols_py["timestamp"]
-            lines = []
-            for i in range(n):
-                record = {k: cols_py[k][i] for k in keys}
-                record["timestamp"] = datetime.fromtimestamp(ts_list[i] / 1_000_000, tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-                lines.append(json.dumps(record, default=str))
-
-            gz_buf = io.BytesIO()
-            with gzip.GzipFile(fileobj=gz_buf, mode="wb", compresslevel=1) as gz:
-                gz.write("\n".join(lines).encode("utf-8"))
-            gz_bytes = gz_buf.getvalue()
-
             now_utc = datetime.now(UTC)
             prefix = (src.get("s3_prefix") or src.get("fos_prefix") or "").strip("/")
             min_prefix = minute_list_prefix(now_utc)
             base_dir = f"{prefix}/{min_prefix}" if prefix else min_prefix
-            s3_key = f"{base_dir}{src.get('service_id')}_{now_utc.strftime('%Y%m%dT%H%M%SZ')}_{file_idx:04d}.log.gz"
+            ts_slug = now_utc.strftime("%Y-%m-%dT%H:%M:%S.000")
 
-            if dry_run:
-                total_bytes_uploaded += len(gz_bytes)
-                print(f"  [dry-run] [{mode_str}] File {file_idx:04d}: {n:,} rows -> s3://{bucket}/{s3_key} ({len(gz_bytes):,} bytes)")
+            if simulate_pops:
+                if target_rps > 0:
+                    wave_rows = min(rows_remaining, max(1, target_rps * log_period))
+                else:
+                    wave_rows = min(rows_remaining, max(batch_size, batch_size * min(pop_count, max(1, gen_workers))))
+                pop_chunks = _allocate_pop_wave_chunks(wave_rows, pop_count, batch_size)
+                specs = [
+                    (
+                        chunk_rows,
+                        start_ms,
+                        end_ms,
+                        scenario,
+                        seed + file_idx + idx + 1,
+                        compression,
+                        pop_code,
+                    )
+                    for idx, (pop_code, chunk_rows) in enumerate(pop_chunks)
+                ]
             else:
-                assert upload_pool is not None
-                if len(pending_uploads) >= upload_workers * 2:
-                    done, pending_uploads = wait(pending_uploads, return_when=FIRST_COMPLETED)
-                    for fut in done:
-                        total_bytes_uploaded += fut.result()
-                pending_uploads.add(upload_pool.submit(_upload_task, bucket, s3_key, gz_bytes))
-                print(f"  queued [{mode_str}] s3://{bucket}/{s3_key} ({len(gz_bytes):,} bytes, {n:,} rows)", flush=True)
+                num_chunks = min(max(1, gen_workers), math.ceil(rows_remaining / batch_size))
+                specs = []
+                rem_loop = rows_remaining
+                for idx in range(num_chunks):
+                    take = min(batch_size, rem_loop)
+                    if take <= 0:
+                        break
+                    specs.append((take, start_ms, end_ms, scenario, seed + file_idx + idx + 1, compression, None))
+                    rem_loop -= take
 
-            total_rows_emitted += n
-            rows_remaining -= n
-            file_idx += 1
-            _sleep_for_rate(n, target_rps, b_t0)
+            if gen_pool is not None and len(specs) > 1:
+                gen_futures = [gen_pool.submit(_build_fos_chunk_worker, *sp) for sp in specs]
+                results = [fut.result() for fut in gen_futures]
+            else:
+                results = [_build_fos_chunk_worker(*sp) for sp in specs]
+
+            step_rows = 0
+            step_bytes = 0
+            for sp, (payload, n_chunk, ext, content_type) in zip(specs, results, strict=True):
+                pop_label = sp[6] or "EDGE"
+                s3_key = f"{base_dir}{ts_slug}-{service_id}-{pop_label}-{file_idx:05d}.log.{ext}"
+                _enqueue_upload(s3_key, payload, content_type, n_chunk, mode_str)
+                step_rows += n_chunk
+                step_bytes += len(payload)
+                file_idx += 1
+
+            if rum_ratio > 0.0 and step_rows > 0:
+                rum_rows = max(1, int(round(step_rows * rum_ratio)))
+                rum_payload, rum_n, rum_ext, rum_ct = _build_fos_rum_chunk_worker(
+                    service_id,
+                    rum_rows,
+                    now_utc.isoformat(),
+                    seed + 1_000_000 + wave_idx,
+                    compression,
+                )
+                rum_min_prefix = rum_minute_list_prefix(now_utc)
+                rum_base_dir = f"{prefix}/{rum_min_prefix}" if prefix else rum_min_prefix
+                rum_key = f"{rum_base_dir}{ts_slug}-{service_id}-rum-{wave_idx:05d}.log.{rum_ext}"
+                _enqueue_upload(rum_key, rum_payload, rum_ct, rum_n, f"{mode_str}/RUM")
+                total_rum_rows_emitted += rum_n
+                step_bytes += len(rum_payload)
+
+            total_rows_emitted += step_rows
+            rows_remaining -= step_rows
+            wave_idx += 1
+            elapsed_so_far = max(time.monotonic() - t0, 0.001)
+            eff_rps = total_rows_emitted / elapsed_so_far
+            print(
+                f"  wave {wave_idx:03d} [{mode_str}] files={len(specs)} rows={step_rows:,} "
+                f"bytes={step_bytes:,} | total={total_rows_emitted:,}/{rows:,} ({eff_rps:,.0f} rows/s)",
+                flush=True,
+            )
+            _sleep_for_rate(step_rows, target_rps, b_t0)
 
         if upload_pool and pending_uploads:
             print(f"Waiting for {len(pending_uploads)} pending S3 uploads to complete...")
@@ -287,13 +491,16 @@ def run_target_fos(
             for fut in done:
                 total_bytes_uploaded += fut.result()
     finally:
+        if gen_pool:
+            gen_pool.shutdown(wait=True)
         if upload_pool:
             upload_pool.shutdown(wait=True)
 
     elapsed = time.monotonic() - t0
     rate = total_rows_emitted / max(elapsed, 0.001)
+    rum_suffix = f" (+ {total_rum_rows_emitted:,} RUM beacons)" if total_rum_rows_emitted else ""
     print(
-        f"\nSUCCESS: Finished FOS upload of {total_rows_emitted:,} rows "
+        f"\nSUCCESS: Finished FOS upload of {total_rows_emitted:,} rows{rum_suffix} "
         f"({total_bytes_uploaded / (1024 * 1024):.2f} MB compressed) in {elapsed:.2f}s ({rate:,.0f} rows/s)."
     )
     return 0
@@ -448,6 +655,12 @@ def main() -> int:
     parser.add_argument("--burst-duration", type=int, default=30, help="Duration of each burst in seconds (default: 30s).")
     parser.add_argument("--burst-interval", type=int, default=120, help="Interval between bursts in seconds (default: 120s).")
     parser.add_argument("--upload-workers", type=int, default=8, help="Concurrent S3 upload worker threads for --target fos (default: 8).")
+    parser.add_argument("--gen-workers", type=int, default=1, help="Parallel generation worker processes for --target fos (default: 1).")
+    parser.add_argument("--compression", choices=["zstd", "gzip"], default="zstd", help="Compression format for --target fos: 'zstd' (.log.zst, default) or 'gzip' (.log.gz).")
+    parser.add_argument("--simulate-pops", action="store_true", help="Simulate Fastly edge POP-wave log batching across --pop-count POPs every --log-period seconds.")
+    parser.add_argument("--pop-count", type=int, default=20, help="Number of simulated edge POPs when --simulate-pops is enabled (default: 20).")
+    parser.add_argument("--log-period", type=int, default=10, help="Fastly edge log flush period in seconds when --simulate-pops is enabled (default: 10s).")
+    parser.add_argument("--rum-ratio", type=float, default=0.0, help="Optional fraction of RUM beacon events to emit alongside request logs for --target fos (0.0 to 1.0).")
     parser.add_argument("--clean", action="store_true", help="Purge existing buffer files before generating.")
     parser.add_argument("--dry-run", action="store_true", help="Preview generation without writing files or uploading.")
 
@@ -457,6 +670,12 @@ def main() -> int:
             rows=args.rows,
             batch_size=args.batch_size,
             file_rows=args.file_rows if args.target == "local" else None,
+            compression=args.compression,
+            pop_count=args.pop_count,
+            log_period=args.log_period,
+            gen_workers=args.gen_workers,
+            upload_workers=args.upload_workers,
+            rum_ratio=args.rum_ratio,
         )
     except ValueError as exc:
         parser.error(str(exc))
@@ -497,7 +716,9 @@ def main() -> int:
             src=src, scenario=args.scenario, rows=args.rows, start_dt=start_dt, end_dt=end_dt,
             batch_size=args.batch_size, seed=args.seed, dry_run=args.dry_run, rate_rps=args.rate_rps,
             burst_rps=args.burst_rps, burst_duration=args.burst_duration, burst_interval=args.burst_interval,
-            upload_workers=args.upload_workers,
+            upload_workers=args.upload_workers, compression=args.compression, gen_workers=args.gen_workers,
+            simulate_pops=args.simulate_pops, pop_count=args.pop_count, log_period=args.log_period,
+            rum_ratio=args.rum_ratio,
         )
     elif args.target == "clickhouse":
         res = run_target_clickhouse(

@@ -2584,3 +2584,102 @@ def test_generate_synthetic_traffic_rejects_nonpositive_arguments(
     with pytest.raises(SystemExit) as exc_info:
         generate_synthetic_traffic.main()
     assert exc_info.value.code == 2
+
+
+def test_generate_synthetic_traffic_fos_zstd_and_pop_wave_simulation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify .zst/.gz chunk encoding, POP-wave allocation, RUM ratio, and High-Scale decoder parity."""
+    from datetime import timedelta
+    from typing import Any
+
+    from backend.high_scale.archive import ArchiveSourceObject
+    from backend.high_scale.query import decode_source_object
+    from scripts.lib.log_factory import build_pop_wave_weights
+    from scripts.load_test import generate_synthetic_traffic
+
+    pops, weights = build_pop_wave_weights(20)
+    assert len(pops) == 20
+    assert pops[0] == "IAD"
+    assert abs(sum(weights) - 1.0) < 1e-9
+    assert weights[0] > weights[-1]
+
+    chunks = generate_synthetic_traffic._allocate_pop_wave_chunks(total_rows=1000, pop_count=10, max_chunk_rows=120)
+    assert sum(c for _, c in chunks) == 1000
+    assert all(0 < c <= 120 for _, c in chunks)
+
+    now = datetime(2026, 8, 5, 12, 0, 0, tzinfo=UTC)
+    start_dt = now - timedelta(minutes=10)
+    start_ms, end_ms = int(start_dt.timestamp() * 1000), int(now.timestamp() * 1000)
+
+    zst_bytes, n_zst, ext_zst, ct_zst = generate_synthetic_traffic._build_fos_chunk_worker(
+        25, start_ms, end_ms, "diurnal", 42, "zstd", "LHR"
+    )
+    assert n_zst == 25
+    assert ext_zst == "zst"
+    assert ct_zst == "application/zstd"
+    assert zst_bytes.startswith(b"\x28\xb5\x2f\xfd")
+
+    decoded = decode_source_object(
+        ArchiveSourceObject(
+            service_id="svc-hs",
+            domain="request",
+            object_key="raw/request/year=2026/month=08/day=05/hour=12/minute=00/2026-08-05T12:00:00.000-svc-hs-LHR-00000.log.zst",
+            checksum="etag1",
+            size_bytes=len(zst_bytes),
+            version="v1",
+        ),
+        zst_bytes,
+        transform_version="v1",
+    )
+    assert len(decoded.events) == 25
+    assert decoded.dead_letters == ()
+    assert all(r["pop"] == "LHR" for r in decoded.events)
+
+    gz_bytes, n_gz, ext_gz, ct_gz = generate_synthetic_traffic._build_fos_chunk_worker(
+        10, start_ms, end_ms, "diurnal", 42, "gzip", "NRT"
+    )
+    assert n_gz == 10
+    assert ext_gz == "gz"
+    assert ct_gz == "application/gzip"
+    assert gz_bytes.startswith(b"\x1f\x8b")
+
+    uploaded: list[dict[str, Any]] = []
+
+    class _FakeS3:
+        def put_object(self, **kwargs: Any) -> None:
+            uploaded.append(kwargs)
+
+    import boto3
+
+    monkeypatch.setattr(boto3, "client", lambda *a, **kw: _FakeS3())
+    rc = generate_synthetic_traffic.run_target_fos(
+        src={
+            "service_id": "svc-hs",
+            "s3_bucket": "test-bucket",
+            "s3_endpoint": "https://us-east.object.fastlystorage.app",
+            "s3_access_key": "k",
+            "s3_secret_key": "s",
+        },
+        scenario="diurnal",
+        rows=200,
+        start_dt=start_dt,
+        end_dt=now,
+        batch_size=50,
+        seed=42,
+        dry_run=False,
+        upload_workers=2,
+        compression="zstd",
+        gen_workers=1,
+        simulate_pops=True,
+        pop_count=5,
+        log_period=10,
+        rum_ratio=0.1,
+    )
+    assert rc == 0
+    req_uploads = [u for u in uploaded if "/raw/request/" in f"/{u['Key']}"]
+    rum_uploads = [u for u in uploaded if "/raw/rum/" in f"/{u['Key']}"]
+    assert len(req_uploads) >= 5
+    assert len(rum_uploads) >= 1
+    assert all(u["Key"].endswith(".log.zst") for u in uploaded)
+    assert all(u["ContentType"] == "application/zstd" for u in uploaded)
